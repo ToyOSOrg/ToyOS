@@ -222,7 +222,7 @@ impl U {
         self.base = Counter::ALL.iter().map(|&c| (c, self.udp.counters().get(c))).collect();
         self.ip_base = toyos_net_ip::Counter::ALL.iter().map(|&c| (c, self.ip.counters().get(c))).collect();
         self.ip.drain_events().for_each(drop);
-        self.udp.drain_events().for_each(drop);
+        self.udp.drain_refusals().for_each(drop);
         self.events.clear();
     }
 

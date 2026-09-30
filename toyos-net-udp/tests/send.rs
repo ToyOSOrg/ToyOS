@@ -5,7 +5,7 @@ mod common;
 use std::net::Ipv4Addr;
 
 use common::*;
-use toyos_net_udp::{limits, Binding, Counter, Error, Event, Refusal, SocketError, Verdict};
+use toyos_net_udp::{limits, Binding, Counter, Error, Refusal, SocketError, Verdict};
 use toyos_net_wire::ethernet::MacAddr;
 use toyos_net_wire::ipv4::Ttl;
 
@@ -137,8 +137,8 @@ fn s_udp_us_020_what_send_refuses() {
     ] {
         assert_eq!(u.udp.send_to(&mut u.ip, id, destination, p, b"x"), refused(rule), "{destination}:{p}");
     }
-    let logged: Vec<Event> = u.udp.drain_events().collect();
-    assert_eq!(logged, [Event::Refused(Refusal { rule: Counter::SendUnspecifiedDestination, local: (ANY, port(50_001)), peer: (ANY, 53) })]);
+    let logged: Vec<Refusal> = u.udp.drain_refusals().collect();
+    assert_eq!(logged, [Refusal { rule: Counter::SendUnspecifiedDestination, local: (ANY, port(50_001)), peer: (ANY, 53) }]);
     assert!(u.out().is_empty());
 }
 
@@ -149,7 +149,7 @@ fn s_udp_us_021_broadcast_needs_permission() {
     for destination in [LIMITED, ip4(192, 0, 2, 255)] {
         assert_eq!(u.udp.send_to(&mut u.ip, id, destination, 5_001, b"hi"), refused(Counter::BroadcastNotPermitted));
     }
-    assert_eq!(u.udp.drain_events().count(), 2, "each refusal is logged");
+    assert_eq!(u.udp.drain_refusals().count(), 2, "each refusal is logged");
     u.udp.set_broadcast(id, true).unwrap();
     for destination in [LIMITED, ip4(192, 0, 2, 255)] {
         u.udp.send_to(&mut u.ip, id, destination, 5_001, b"hi").unwrap();

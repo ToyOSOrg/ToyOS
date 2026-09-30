@@ -37,8 +37,8 @@ extern crate alloc;
 
 mod acd;
 mod addr;
-mod config;
 mod arp;
+mod config;
 mod counters;
 mod draw;
 mod egress;
@@ -70,7 +70,7 @@ pub use counters::{Counter, Counters, RefusalLog};
 pub use egress::{Sent, UdpOut, FRAME};
 pub use igmp::IgmpMode;
 pub use limiter::Limiter;
-pub use nud::{Failed, Incomplete, Linked, Nud, Probing, Reachable, Unreachable};
+pub use nud::{Incomplete, Linked, Nud, Probing, Reachable, Unreachable};
 pub use route::{NextHop, Route, Source};
 pub use toyos_net_wire::Instant;
 
@@ -316,7 +316,6 @@ pub struct Ip {
     generation: u64,
 }
 
-
 impl Ip {
     pub fn new(now: Instant, secret: Key) -> Self {
         let draws = draw::Draws::new(secret);
@@ -374,10 +373,6 @@ impl Ip {
     /// Bumped by every change that can alter a route lookup (§3.6).
     pub const fn generation(&self) -> u64 {
         self.generation
-    }
-
-    pub fn mac(&self, iface: IfIndex) -> Option<IndividualMac> {
-        self.ifaces.get(iface.0).map(|i| i.mac)
     }
 
     pub fn neighbour(&self, iface: IfIndex, addr: Ipv4Addr) -> Option<&Nud> {
@@ -440,7 +435,7 @@ mod compile_fail {
     ///     match n {
     ///         Nud::Incomplete(i) => i.queued(),
     ///         Nud::Reachable(r) => usize::from(r.mac().0[0]),
-    ///         Nud::Failed(_) => 0,
+    ///         Nud::Failed => 0,
     ///         _ => 1,
     ///     }
     /// }

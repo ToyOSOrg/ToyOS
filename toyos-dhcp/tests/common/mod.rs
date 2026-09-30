@@ -6,7 +6,7 @@
 use std::collections::VecDeque;
 use std::net::Ipv4Addr;
 
-use toyos_dhcp::{AddressRequest, Client, Config, Counter, Event, HostName, Lease, Output, Phase, Transmission};
+use toyos_dhcp::{AddressRequest, Client, Config, Counter, HostName, Lease, Output, Phase, Refusal, Transmission};
 use toyos_net_wire::ethernet::{IndividualMac, MacAddr};
 use toyos_net_wire::Instant;
 
@@ -103,7 +103,7 @@ pub struct D {
     pub client: Client,
     pub draws: VecDeque<u32>,
     pub now: u64,
-    pub events: Vec<Event>,
+    pub refusals: Vec<Refusal>,
 }
 
 impl D {
@@ -116,7 +116,7 @@ impl D {
     pub fn named(draws: &[u32], host: Option<HostName>) -> (Self, Output) {
         let mut draws: VecDeque<u32> = draws.iter().copied().collect();
         let (client, out) = Client::start(at(0), IndividualMac::new(MAC_A).unwrap(), host, || draws.pop_front().unwrap_or(1_000));
-        (Self { client, draws, now: 0, events: Vec::new() }, out)
+        (Self { client, draws, now: 0, refusals: Vec::new() }, out)
     }
 
     /// Fixture DB: bound to 192.0.2.1/24 through 192.0.2.254, base 10, verified at 5,020.
@@ -127,7 +127,7 @@ impl D {
         let out = d.verified(5_020);
         assert!(matches!(out.config, Some(Config::Configured(_))));
         assert_eq!(d.client.phase(), Phase::Bound);
-        d.client.drain_events().for_each(drop);
+        d.client.drain_refusals().for_each(drop);
         d
     }
 
@@ -197,7 +197,7 @@ impl D {
     }
 
     fn collect(&mut self) {
-        self.events.extend(self.client.drain_events());
+        self.refusals.extend(self.client.drain_refusals());
     }
 
     pub fn count(&self, counter: Counter) -> u64 {
@@ -205,7 +205,7 @@ impl D {
     }
 
     pub fn logged(&self, rule: Counter) -> usize {
-        self.events.iter().filter(|Event::Refused { rule: r, .. }| *r == rule).count()
+        self.refusals.iter().filter(|r| r.rule == rule).count()
     }
 
     pub fn deadline(&self) -> Option<u64> {

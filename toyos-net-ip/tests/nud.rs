@@ -43,7 +43,7 @@ fn s_ip_nud_002_three_requests_then_failed() {
     let times: Vec<u64> = out.iter().filter(|o| o.requests(B)).map(|o| o.at).collect();
     assert_eq!(times, [0, 1_000, 2_000]);
     assert_eq!(out.len(), 3);
-    assert!(matches!(h.state(B), Some(Nud::Failed(_))));
+    assert!(matches!(h.state(B), Some(Nud::Failed)));
     assert_eq!(h.count(Counter::NbFailed), 1);
     assert_eq!(h.count(Counter::NbPendingDropped), 1);
     assert!(h.events.contains(&Event::Unreachable(flow_to(B))));
@@ -220,7 +220,7 @@ fn s_ip_nud_014_failed_is_held_down() {
     assert_eq!(h.count(Counter::NbFailedRefused), 1);
     assert!(h.out().is_empty());
     assert!(h.run(22_999).is_empty());
-    assert!(matches!(h.state(B), Some(Nud::Failed(_))));
+    assert!(matches!(h.state(B), Some(Nud::Failed)));
     h.run(23_000);
     assert!(h.state(B).is_none());
     h.at(23_001);
@@ -286,7 +286,7 @@ fn s_ip_nud_018_negative_advice_leaves_probe_incomplete_and_failed() {
     h.run(3_000);
     h.at(3_500);
     h.ip.advise(h.clock(), B, Advice::Reverify);
-    assert!(matches!(h.state(B), Some(Nud::Failed(_))));
+    assert!(matches!(h.state(B), Some(Nud::Failed)));
     assert!(h.out().is_empty());
 }
 
@@ -299,7 +299,7 @@ fn s_ip_nud_019_positive_advice_needs_a_mac() {
     assert!(matches!(h.state(B), Some(Nud::Incomplete(_))));
     h.run(3_000);
     h.ip.advise(h.clock(), B, Advice::Confirmed);
-    assert!(matches!(h.state(B), Some(Nud::Failed(_))));
+    assert!(matches!(h.state(B), Some(Nud::Failed)));
     let (mut h, t0) = unreachable_r();
     h.at(t0 + 10);
     h.ip.advise(h.clock(), REMOTE, Advice::Confirmed);
@@ -360,7 +360,7 @@ fn s_ip_nud_022_a_full_table_evicts_failed_first() {
     let _ = h.ip.resolve(h.clock(), h.if0, failed);
     h.out();
     h.run(3_000);
-    assert!(matches!(h.state(failed), Some(Nud::Failed(_))));
+    assert!(matches!(h.state(failed), Some(Nud::Failed)));
     for n in 1..limits::nud::TABLE_MAX as u32 {
         reach_wide(&mut h, neighbour(n));
     }

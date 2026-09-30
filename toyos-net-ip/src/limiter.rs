@@ -61,7 +61,7 @@ impl Limiter {
     }
 
     /// The global bucket's burst during the second `now` falls in.
-    pub fn global_burst(&self, now: Instant) -> u64 {
+    fn global_burst(&self, now: Instant) -> u64 {
         let [a, b, c, d, e, f, g, h] = (now.nanos() / SECOND).to_le_bytes();
         let span = GLOBAL_BURST_MAX.saturating_sub(GLOBAL_BURST_MIN).saturating_add(1);
         let draw = siphash24(&self.key, &[2, a, b, c, d, e, f, g, h]).checked_rem(span).unwrap_or(0);

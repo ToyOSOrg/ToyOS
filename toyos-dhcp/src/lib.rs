@@ -10,7 +10,7 @@
 //! only thing keeping an off-link host from forging replies to this client.
 //!
 //! **Modern only.** A BOOTP reply, an unauthenticated FORCERENEW and a lease without a subnet
-//! mask are refused, counted and named in an [`Event`]; DHCPINFORM and DHCPRELEASE are never sent.
+//! mask are refused, counted and named in a [`Refusal`]; DHCPINFORM and DHCPRELEASE are never sent.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
@@ -92,19 +92,16 @@ pub mod limits {
 
     pub const FIRST_WAIT: Duration = Duration::from_secs(4);
     pub const MAX_WAIT: Duration = Duration::from_secs(64);
-    /// A wait is moved by up to this either way (RFC 2131 §4.1).
-    pub const JITTER: Duration = Duration::from_secs(1);
     pub const REQUEST_TRANSMISSIONS: u32 = 4;
     pub const RENEW_FLOOR: Duration = Duration::from_secs(60);
     pub const DECLINE_BACKOFF: Duration = Duration::from_secs(10);
-    pub const NAK_BACKOFF_MAX: Duration = Duration::from_secs(64);
     pub const MAX_DNS: usize = 3;
     /// The largest message the client accepts: a 1,500-byte datagram under either reading of
     /// RFC 2132 §9.10.
     pub const MAX_MESSAGE: u16 = 1_472;
     /// RFC 1542 §2.1's minimum; every message the client sends is padded to it.
     pub const MIN_SENT: usize = 300;
-    /// Refusal events held for the shell until it drains them.
+    /// Refusals held for the shell until it drains them.
     pub const EVENTS: usize = 1_024;
 }
 
@@ -225,8 +222,9 @@ pub enum Peer {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Event {
-    Refused { rule: Counter, peer: Peer },
+pub struct Refusal {
+    pub rule: Counter,
+    pub peer: Peer,
 }
 
 #[derive(Debug)]
@@ -293,7 +291,7 @@ pub struct Client {
     /// Consecutive NAKs since the last BOUND (§D11).
     naks: u32,
     counters: Counters,
-    events: Vec<Event>,
+    refusals: Vec<Refusal>,
 }
 
 /// Not 0.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16, 224.0.0.0/4 or 240.0.0.0/4: one host (§D4.1).
@@ -360,7 +358,7 @@ impl Client {
             state: State::BackingOff(now),
             naks: 0,
             counters: Counters::default(),
-            events: Vec::new(),
+            refusals: Vec::new(),
         };
         let out = client.begin(now, &mut draw);
         (client, out)
@@ -371,8 +369,8 @@ impl Client {
     }
 
     /// Refusals to log since the last call.
-    pub fn drain_events(&mut self) -> alloc::vec::Drain<'_, Event> {
-        self.events.drain(..)
+    pub fn drain_refusals(&mut self) -> alloc::vec::Drain<'_, Refusal> {
+        self.refusals.drain(..)
     }
 
     pub fn phase(&self) -> Phase {
@@ -426,10 +424,10 @@ impl Client {
         if !rule.logged() {
             return;
         }
-        if self.events.len() >= limits::EVENTS {
+        if self.refusals.len() >= limits::EVENTS {
             self.counters.add(Counter::EventOverflow, 1);
         } else {
-            self.events.push(Event::Refused { rule, peer });
+            self.refusals.push(Refusal { rule, peer });
         }
     }
 
@@ -473,11 +471,10 @@ impl Client {
     }
 
     /// A RENEWING (unicast to the server) or REBINDING (broadcast) request with a fresh xid.
-    fn renew(&mut self, now: Instant, lease: Lease, started: Instant, rebind: bool, draw: &mut impl FnMut() -> u32) -> Output {
+    fn renew(&mut self, now: Instant, lease: Lease, timers: Timers, started: Instant, rebind: bool, draw: &mut impl FnMut() -> u32) -> Output {
         let xid = draw();
         let payload = self.message(Kind::Request, xid, secs(now.since(started)), lease.address, None, None);
         self.counters.add(Counter::TxRequest, 1);
-        let Some(timers) = lease.timers else { return Output::default() };
         let (destination, deadline) = if rebind {
             (Ipv4Addr::BROADCAST, halfway(now, timers.expiry))
         } else {
@@ -505,10 +502,10 @@ impl Client {
             return self.expire(now, lease.address, draw);
         }
         if now >= timers.t2 {
-            return self.renew(now, lease, started.unwrap_or(now), true, draw);
+            return self.renew(now, lease, timers, started.unwrap_or(now), true, draw);
         }
         if now >= timers.t1 {
-            return self.renew(now, lease, started.unwrap_or(now), false, draw);
+            return self.renew(now, lease, timers, started.unwrap_or(now), false, draw);
         }
         self.state = State::Bound(lease);
         Output::default()
@@ -787,25 +784,25 @@ impl Client {
                 Output { transmit: Some(transmit), ..Output::default() }
             }
             (State::Selecting(s), _) => {
-                let lease = offered.lease_from(s.start, peer, self);
+                let lease = self.lease_of(offered, s.start, peer);
                 self.probe(lease)
             }
             (State::Requesting(r), _) if offered.server != r.server => self.keep(State::Requesting(r), Counter::AckWrongServer, peer),
             (State::Requesting(r), _) if offered.address != r.address => self.keep(State::Requesting(r), Counter::AckAddressChanged, peer),
             (State::Requesting(r), _) => {
-                let lease = offered.lease_from(r.first, peer, self);
+                let lease = self.lease_of(offered, r.first, peer);
                 self.probe(lease)
             }
             (State::Renewing(r), _) if offered.server != r.lease.server => self.keep(State::Renewing(r), Counter::AckWrongServer, peer),
             (State::Renewing(r), _) if offered.address != r.lease.address => self.keep(State::Renewing(r), Counter::AckAddressChanged, peer),
             (State::Rebinding(r), _) if offered.address != r.lease.address => self.keep(State::Rebinding(r), Counter::AckAddressChanged, peer),
             (State::Renewing(r) | State::Rebinding(r), _) => {
-                let lease = offered.lease_from(r.sent, peer, self);
+                let lease = self.lease_of(offered, r.sent, peer);
                 self.renewed(now, &r.lease, lease, draw)
             }
             (State::Rebooting(r), _) if offered.address != r.lease.address => self.keep(State::Rebooting(r), Counter::AckAddressChanged, peer),
             (State::Rebooting(r), _) => {
-                let lease = offered.lease_from(r.start, peer, self);
+                let lease = self.lease_of(offered, r.start, peer);
                 self.renewed(now, &r.lease, lease, draw)
             }
             (state @ (State::Probing(_) | State::Bound(_) | State::BackingOff(_)), _) => {
@@ -834,6 +831,58 @@ impl Client {
         let config = if same { Config::Extended(lease.clone()) } else { Config::Reconfigured(lease.clone()) };
         Output { config: Some(config), ..self.bind(now, lease, draw) }
     }
+
+    /// §D4.2 and §D7: the first usable router, at most three resolvers, and T1 and T2, the
+    /// lease running from `base`.
+    fn lease_of(&mut self, offered: Offered, base: Instant, peer: Peer) -> Lease {
+        let (address, len) = (offered.address, offered.prefix_len);
+        let mut router = None;
+        for candidate in offered.routers {
+            if host(candidate) && same_subnet(candidate, address, len) && candidate != address {
+                router = Some(candidate);
+                break;
+            }
+            self.refuse(Counter::RouterInvalid, peer);
+        }
+        let mut dns = Vec::new();
+        for server in offered.dns {
+            if !host(server) || Some(server) == broadcast(address, len) {
+                self.refuse(Counter::DnsInvalid, peer);
+            } else if dns.len() < limits::MAX_DNS {
+                dns.push(server);
+            } else {
+                self.counters.add(Counter::DnsTruncated, 1);
+            }
+        }
+        let timers = if offered.lease == u32::MAX {
+            for _ in offered.t1.iter().chain(offered.t2.iter()) {
+                self.refuse(Counter::TimerOptionInvalid, peer);
+            }
+            None
+        } else {
+            let lease = ms(offered.lease);
+            let t2 = match offered.t2 {
+                Some(t2) if t2 > 0 && t2 < offered.lease => ms(t2),
+                given => {
+                    if given.is_some() {
+                        self.refuse(Counter::TimerOptionInvalid, peer);
+                    }
+                    lease.saturating_mul(7).checked_div(8).unwrap_or(lease)
+                }
+            };
+            let t1 = match offered.t1 {
+                Some(t1) if t1 > 0 && ms(t1) < t2 => ms(t1),
+                given => {
+                    if given.is_some() {
+                        self.refuse(Counter::TimerOptionInvalid, peer);
+                    }
+                    lease.checked_div(2).unwrap_or(lease).min(t2)
+                }
+            };
+            Some(Timers { t1: base.after(t1), t2: base.after(t2), expiry: base.after(lease) })
+        };
+        Lease { address, prefix_len: len, router, dns, server: offered.server, base, timers }
+    }
 }
 
 /// What an acceptable OFFER or ACK holds, before §D4.2 degrades it into a lease.
@@ -846,58 +895,4 @@ struct Offered {
     dns: Vec<Ipv4Addr>,
     t1: Option<u32>,
     t2: Option<u32>,
-}
-
-impl Offered {
-    /// §D4.2 and §D7: the first usable router, at most three resolvers, and T1 and T2, the
-    /// lease running from `base`.
-    fn lease_from(self, base: Instant, peer: Peer, client: &mut Client) -> Lease {
-        let (address, len) = (self.address, self.prefix_len);
-        let mut router = None;
-        for candidate in self.routers {
-            if host(candidate) && same_subnet(candidate, address, len) && candidate != address {
-                router = Some(candidate);
-                break;
-            }
-            client.refuse(Counter::RouterInvalid, peer);
-        }
-        let mut dns = Vec::new();
-        for server in self.dns {
-            if !host(server) || Some(server) == broadcast(address, len) {
-                client.refuse(Counter::DnsInvalid, peer);
-            } else if dns.len() < limits::MAX_DNS {
-                dns.push(server);
-            } else {
-                client.counters.add(Counter::DnsTruncated, 1);
-            }
-        }
-        let timers = if self.lease == u32::MAX {
-            for _ in self.t1.iter().chain(self.t2.iter()) {
-                client.refuse(Counter::TimerOptionInvalid, peer);
-            }
-            None
-        } else {
-            let lease = ms(self.lease);
-            let t2 = match self.t2 {
-                Some(t2) if t2 > 0 && t2 < self.lease => ms(t2),
-                given => {
-                    if given.is_some() {
-                        client.refuse(Counter::TimerOptionInvalid, peer);
-                    }
-                    lease.saturating_mul(7).checked_div(8).unwrap_or(lease)
-                }
-            };
-            let t1 = match self.t1 {
-                Some(t1) if t1 > 0 && ms(t1) < t2 => ms(t1),
-                given => {
-                    if given.is_some() {
-                        client.refuse(Counter::TimerOptionInvalid, peer);
-                    }
-                    lease.checked_div(2).unwrap_or(lease).min(t2)
-                }
-            };
-            Some(Timers { t1: base.after(t1), t2: base.after(t2), expiry: base.after(lease) })
-        };
-        Lease { address, prefix_len: len, router, dns, server: self.server, base, timers }
-    }
 }

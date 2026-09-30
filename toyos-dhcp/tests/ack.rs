@@ -5,7 +5,7 @@ mod common;
 
 
 use common::*;
-use toyos_dhcp::{AddressRequest, Config, Counter, Event, Lease, Peer, Phase, Timers};
+use toyos_dhcp::{AddressRequest, Config, Counter, Lease, Peer, Phase, Refusal, Timers};
 
 fn requesting() -> D {
     let (mut d, _) = D::ds(&[XID, 1_000, 1_000]);
@@ -61,7 +61,7 @@ fn s_dhcp_dh_013_a_conflict_declines() {
     assert_eq!(framed(t), hex(V_DHCP_DECLINE));
     assert_eq!(out.config, None);
     assert_eq!(d.count(Counter::Declined), 1);
-    assert_eq!(d.events, [Event::Refused { rule: Counter::Declined, peer: Peer::Conflict { address: A, mac: MAC_B } }]);
+    assert_eq!(d.refusals, [Refusal { rule: Counter::Declined, peer: Peer::Conflict { address: A, mac: MAC_B } }]);
     assert_eq!(d.client.phase(), Phase::BackingOff);
     d.draws.extend([0x2222_2222, 1_000]);
     assert!(d.timer(12_999).transmit.is_none());

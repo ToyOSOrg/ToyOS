@@ -42,7 +42,7 @@ fn s_ip_clk_003_firing_more_often_changes_nothing() {
     assert_eq!(sent_every_ms, [0, 1_000, 2_000]);
     assert_eq!(sent_at_deadlines, sent_every_ms);
     for h in [&every_ms, &at_deadlines] {
-        assert!(matches!(h.state(B), Some(Nud::Failed(_))));
+        assert!(matches!(h.state(B), Some(Nud::Failed)));
         assert_eq!(h.count(Counter::NbFailed), 1);
     }
 }

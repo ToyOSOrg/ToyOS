@@ -10,7 +10,7 @@
 //! hop has left this crate and spends no credit, so a socket's next datagram is never behind it.
 //!
 //! **Refusals are values.** Every refusal is a named [`Counter`] and the [`Error`] the call
-//! returns; one of legacy or insecure input is also an [`Event`] naming the socket and the peer.
+//! returns; one of legacy or insecure input is also a [`Refusal`] naming the socket and the peer.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
@@ -87,7 +87,7 @@ pub mod limits {
     pub const EPHEMERAL_COUNT: u16 = 16_384;
     /// The interface MTU less the IPv4 and UDP headers: nothing is fragmented (DF on every datagram).
     pub const MAX_PAYLOAD: usize = toyos_net_ip::MTU.saturating_sub(28);
-    /// Refusal events held for the shell until it drains them.
+    /// Refusals held for the shell until it drains them.
     pub const EVENTS: usize = 1_024;
 }
 
@@ -156,11 +156,6 @@ pub struct Refusal {
     pub peer: (Ipv4Addr, u16),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Event {
-    Refused(Refusal),
-}
-
 #[derive(Debug)]
 struct Stored {
     payload: Vec<u8>,
@@ -216,7 +211,7 @@ pub struct Udp {
     /// Datagrams a closed socket had accepted: they still leave (§U9 (3)).
     orphans: VecDeque<(Port, Queued)>,
     counters: Counters,
-    events: Vec<Event>,
+    refusals: Vec<Refusal>,
 }
 
 /// Not a destination any datagram may name: 0.0.0.0/8 but 0.0.0.0 itself, and 240.0.0.0/4 but the
@@ -243,8 +238,8 @@ impl Udp {
     }
 
     /// Refusals to log since the last call.
-    pub fn drain_events(&mut self) -> alloc::vec::Drain<'_, Event> {
-        self.events.drain(..)
+    pub fn drain_refusals(&mut self) -> alloc::vec::Drain<'_, Refusal> {
+        self.refusals.drain(..)
     }
 
     pub fn socket_count(&self) -> usize {
@@ -258,10 +253,10 @@ impl Udp {
     fn refuse<T>(&mut self, rule: Counter, local: (Ipv4Addr, Port), peer: (Ipv4Addr, u16)) -> Result<T, Error> {
         self.count(rule);
         if rule.logged() {
-            if self.events.len() >= limits::EVENTS {
+            if self.refusals.len() >= limits::EVENTS {
                 self.count(Counter::EventOverflow);
             } else {
-                self.events.push(Event::Refused(Refusal { rule, local, peer }));
+                self.refusals.push(Refusal { rule, local, peer });
             }
         }
         Err(Error::Refused(rule))
@@ -397,11 +392,11 @@ impl Udp {
         } else {
             Self::unusable(ip, peer)
         };
-        let refusal = refusal.or((peer_port == 0).then_some(Counter::ConnectPortZero));
-        if let Some(rule) = refusal {
-            return self.refuse(rule, (local, local_port), (peer, peer_port));
-        }
-        let Some(peer_port) = Port::new(peer_port) else { return Err(Error::Refused(Counter::ConnectPortZero)) };
+        let peer_port = match (refusal, Port::new(peer_port)) {
+            (None, Some(port)) => port,
+            (Some(rule), _) => return self.refuse(rule, (local, local_port), (peer, peer_port)),
+            (None, None) => return self.refuse(Counter::ConnectPortZero, (local, local_port), (peer, peer_port)),
+        };
         let source = if from_any { Source::Any } else { Source::Bound(local) };
         let local = match ip.route(peer, source, None) {
             Ok(route) => route.source,
@@ -458,10 +453,9 @@ impl Udp {
                 return self.refuse(Counter::ConnectedDestinationMismatch, me, peer);
             }
         }
+        let Some(port) = Port::new(port) else { return self.refuse(Counter::SendPortZero, me, peer) };
         let broadcast = destination.is_broadcast() || ip.is_directed_broadcast(destination);
-        let refusal = if port == 0 {
-            Some(Counter::SendPortZero)
-        } else if destination.is_unspecified() {
+        let refusal = if destination.is_unspecified() {
             Some(Counter::SendUnspecifiedDestination)
         } else if let Some(rule) = Self::unusable(ip, destination) {
             Some(rule)
@@ -499,7 +493,6 @@ impl Udp {
         if socket.tx.len() >= limits::TX_DATAGRAMS || bytes > limits::TX_BYTES {
             return self.refuse(Counter::TxQueueFull, me, peer);
         }
-        let Some(port) = Port::new(port) else { return Err(Error::Refused(Counter::SendPortZero)) };
         let ttl = if destination.is_multicast() { multicast_ttl } else { ttl };
         socket.tx.push_back(Queued { source, destination, port, ttl, payload: payload.to_vec() });
         socket.tx_bytes = bytes;

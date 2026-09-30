@@ -34,7 +34,8 @@ pub enum Nud {
     Delay(Linked),
     Probe(Probing),
     Unreachable(Unreachable),
-    Failed(Failed),
+    /// Resolution failed; its hold-down is the entry's deadline.
+    Failed,
 }
 
 #[derive(Debug)]
@@ -76,12 +77,6 @@ pub struct Linked {
     mac: MacAddr,
 }
 
-impl Linked {
-    pub fn mac(&self) -> MacAddr {
-        self.mac
-    }
-}
-
 #[derive(Debug)]
 pub struct Probing {
     mac: MacAddr,
@@ -89,10 +84,6 @@ pub struct Probing {
 }
 
 impl Probing {
-    pub fn mac(&self) -> MacAddr {
-        self.mac
-    }
-
     pub fn requests(&self) -> u8 {
         self.requests
     }
@@ -110,28 +101,9 @@ pub struct Unreachable {
 }
 
 impl Unreachable {
-    pub fn mac(&self) -> MacAddr {
-        self.mac
-    }
-
-    pub fn requests(&self) -> u32 {
-        self.requests
-    }
-
     /// No request pending: nothing is sent until the next datagram.
     pub fn quiescent(&self) -> bool {
         !self.backoff
-    }
-}
-
-#[derive(Debug)]
-pub struct Failed {
-    since: Instant,
-}
-
-impl Failed {
-    pub fn since(&self) -> Instant {
-        self.since
     }
 }
 
@@ -142,7 +114,7 @@ impl Nud {
             Self::Stale(l) | Self::Delay(l) => Some(l.mac),
             Self::Probe(p) => Some(p.mac),
             Self::Unreachable(u) => Some(u.mac),
-            Self::Incomplete(_) | Self::Failed(_) => None,
+            Self::Incomplete(_) | Self::Failed => None,
         }
     }
 
@@ -221,7 +193,7 @@ pub(crate) fn request_left(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) {
             s.sent = false;
             backoff(s.requests)
         }
-        Nud::Reachable(_) | Nud::Stale(_) | Nud::Delay(_) | Nud::Failed(_) => return,
+        Nud::Reachable(_) | Nud::Stale(_) | Nud::Delay(_) | Nud::Failed => return,
     };
     cx.timers.arm(timer(cx, addr), now.after(wait));
 }
@@ -233,7 +205,7 @@ fn make_room(i: &mut Interface, cx: &mut Cx<'_>) -> bool {
         return true;
     }
     let class = |n: &Neighbour| match &n.state {
-        Nud::Failed(_) => Some(0),
+        Nud::Failed => Some(0),
         Nud::Unreachable(u) if u.quiescent() && !n.queued => Some(1),
         Nud::Stale(_) => Some(2),
         _ => None,
@@ -282,7 +254,7 @@ pub(crate) fn send(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr, hint: Opt
             }
             Link::Resolved(mac)
         }
-        Nud::Failed(_) => {
+        Nud::Failed => {
             cx.log.count(Counter::NbFailedRefused);
             Link::Failed(Counter::NbFailedRefused)
         }
@@ -309,7 +281,11 @@ pub(crate) fn fire(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) {
     let spaced = n.last_request.map_or(now, |at| at.after(RETRANS)).max(now);
     match &mut n.state {
         Nud::Incomplete(s) if s.requests < BROADCAST_SOLICIT => request(i, cx, addr, None),
-        Nud::Incomplete(_) => fail(i, cx, addr),
+        Nud::Incomplete(s) => {
+            let pending = core::mem::take(&mut s.pending);
+            n.state = Nud::Failed;
+            fail(i, cx, addr, pending);
+        }
         Nud::Reachable(s) => {
             let end = s.confirmed.after(reachable);
             if now < end {
@@ -338,7 +314,7 @@ pub(crate) fn fire(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) {
             s.backoff = false;
             cx.timers.arm(timer(cx, addr), now.after(IDLE_LIFETIME));
         }
-        Nud::Stale(_) | Nud::Unreachable(_) | Nud::Failed(_) => {
+        Nud::Stale(_) | Nud::Unreachable(_) | Nud::Failed => {
             i.neighbours.remove(&addr);
             route::refresh_active(i, cx);
         }
@@ -364,11 +340,9 @@ pub(crate) fn drop_held(cx: &mut Cx<'_>, held: Held) {
 }
 
 /// INCOMPLETE gave up: every held datagram is dropped.
-fn fail(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) {
+fn fail(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr, pending: VecDeque<Held>) {
     let now = cx.now;
-    let Some(n) = i.neighbours.get_mut(&addr) else { return };
-    let Nud::Incomplete(s) = core::mem::replace(&mut n.state, Nud::Failed(Failed { since: now })) else { return };
-    for held in s.pending {
+    for held in pending {
         i.held = i.held.saturating_sub(1);
         drop_held(cx, held);
     }

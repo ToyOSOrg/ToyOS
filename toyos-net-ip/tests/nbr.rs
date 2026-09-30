@@ -242,5 +242,5 @@ fn s_arp_018_invalid_sender_addresses() {
     h.frame(&request(MAC_B, ip4(0, 0, 0, 0), ip4(192, 0, 2, 7)));
     assert_eq!(h.count(Counter::ArpInvalidSenderAddress), 5, "a probe is a request from 0.0.0.0");
     assert!(h.state(ip4(0, 0, 0, 0)).is_none());
-    assert!(matches!(h.state(B), None | Some(Nud::Failed(_))));
+    assert!(matches!(h.state(B), None | Some(Nud::Failed)));
 }

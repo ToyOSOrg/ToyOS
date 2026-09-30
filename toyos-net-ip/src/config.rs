@@ -119,10 +119,6 @@ impl Ip {
         Ok(())
     }
 
-    pub fn joined(&self, iface: IfIndex, group: MulticastAddr) -> bool {
-        self.ifaces.get(iface.0).is_some_and(|i| i.igmp.joined(group))
-    }
-
     pub fn igmp_mode(&self, iface: IfIndex) -> Option<IgmpMode> {
         self.ifaces.get(iface.0).map(|i| i.igmp.mode())
     }

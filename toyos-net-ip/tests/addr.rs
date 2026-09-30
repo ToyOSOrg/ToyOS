@@ -326,7 +326,7 @@ fn fail(h: &mut H, gateway: Ipv4Addr) {
     let _ = h.ip.resolve(h.clock(), h.if0, gateway);
     h.out();
     h.run(start + 3_000);
-    assert!(matches!(h.state(gateway), Some(Nud::Failed(_))));
+    assert!(matches!(h.state(gateway), Some(Nud::Failed)));
 }
 
 #[test]
@@ -357,7 +357,7 @@ fn s_ip_rte_014_with_no_good_gateway() {
     let t = h.now;
     h.run(t + 8_000);
     assert!(matches!(h.state(other), Some(Nud::Unreachable(_))));
-    assert!(matches!(h.state(R), Some(Nud::Failed(_))));
+    assert!(matches!(h.state(R), Some(Nud::Failed)));
     assert_eq!(route(&mut h, REMOTE).map(|r| r.next_hop), Ok(NextHop::Neighbour(other)));
 }
 

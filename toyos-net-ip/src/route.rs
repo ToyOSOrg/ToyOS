@@ -103,7 +103,7 @@ fn active(i: &Interface) -> Option<Ipv4Addr> {
     let state = |g: &Ipv4Addr| i.neighbours.get(g).map(|n| &n.state);
     i.gateways
         .iter()
-        .find(|g| !matches!(state(g), Some(Nud::Failed(_) | Nud::Unreachable(_))))
+        .find(|g| !matches!(state(g), Some(Nud::Failed | Nud::Unreachable(_))))
         .or_else(|| i.gateways.iter().find(|g| matches!(state(g), Some(Nud::Unreachable(_)))))
         .or_else(|| i.gateways.first())
         .copied()
