@@ -370,6 +370,7 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     "file_mtime",
     "hierarchy_paths",
     "nvme_home_roundtrip",
+    "sched_stress",
     "std_alloc",
     "std_mmap",
     "wall_clock_now",
