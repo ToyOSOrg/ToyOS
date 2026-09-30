@@ -371,8 +371,9 @@ fn query(i: &mut Interface, cx: &mut Cx<'_>, packet: &Ipv4Packet<'_>, query: &Qu
         QueryGroup::General => return cx.timers.arm(timer(cx, Timer::General), at),
         QueryGroup::Specific(group) => group,
     };
+    // One source past the cap is enough to know the list overflows (§10.5 (5)).
     let sources: Vec<Ipv4Addr> = match &query.version {
-        QueryVersion::V3(v3) => v3.sources().collect(),
+        QueryVersion::V3(v3) => v3.sources().take(IGMP_QUERY_SOURCES.saturating_add(1)).collect(),
         QueryVersion::V1 | QueryVersion::V2 => Vec::new(),
     };
     let key = timer(cx, Timer::Response(group));
@@ -381,7 +382,14 @@ fn query(i: &mut Interface, cx: &mut Cx<'_>, packet: &Ipv4Packet<'_>, query: &Qu
         None => sources,
         Some(list) if sources.is_empty() || list.is_empty() => Vec::new(),
         Some(mut list) => {
-            list.extend(sources.into_iter().filter(|s| !list.contains(s)).collect::<Vec<_>>());
+            for source in sources {
+                if list.len() > IGMP_QUERY_SOURCES {
+                    break;
+                }
+                if !list.contains(&source) {
+                    list.push(source);
+                }
+            }
             list
         }
     };
@@ -450,7 +458,7 @@ pub(crate) fn fire(i: &mut Interface, cx: &mut Cx<'_>, t: Timer, batch: &mut Vec
 /// Builds `report` as it leaves, from the interface's source of this moment (0.0.0.0 while it
 /// has none, RFC 9776 §4.2.14); a change record overtaken by a newer change is left out.
 pub(crate) fn emit(i: &mut Interface, cx: &mut Cx<'_>, report: &Report, out: &mut [u8]) -> Option<usize> {
-    let source = Ipv4Source::new(i.usable().next().map_or(Ipv4Addr::UNSPECIFIED, |a| a.cidr.addr)).ok()?;
+    let source = Ipv4Source::new(i.usable().next().map_or(Ipv4Addr::UNSPECIFIED, |a| a.cidr.addr())).ok()?;
     let mac = i.mac;
     let current = |i: &Interface, group: MulticastAddr, seq: u32| {
         i.igmp.groups.get(&group).and_then(|g| g.change).is_some_and(|c| c.seq == seq && c.queued)

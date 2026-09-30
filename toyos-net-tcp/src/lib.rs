@@ -50,10 +50,9 @@ use toyos_net_wire::siphash;
 use toyos_net_wire::Port;
 
 pub use counters::{Counter, Counters, Refusal, RefusalLog};
-pub use toyos_net_wire::REFUSAL_LOG_INTERVAL;
 pub use seq::Seq;
 pub use stack::{ConnId, Info, ListenerId, Outgoing, Tcp};
-pub use toyos_net_wire::siphash::{siphash24, Key};
+pub use toyos_net_wire::siphash::Key;
 pub use toyos_net_wire::Instant;
 
 /// The TSval a 4-tuple with `offset` sends at `now`: one tick per millisecond (RFC 7323 §5.4).

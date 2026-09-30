@@ -327,7 +327,8 @@ impl H {
     }
 
     pub fn wire(&self, name: &str) -> u64 {
-        self.ip.wire_refusals(name) - self.wire.get(name).copied().unwrap_or(0)
+        let now = self.ip.wire_counters().find(|(n, _)| *n == name).map_or(0, |(_, v)| v);
+        now - self.wire.get(name).copied().unwrap_or(0)
     }
 
     /// A frame received on if0 at the current time.

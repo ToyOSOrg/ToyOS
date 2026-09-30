@@ -5,10 +5,11 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::net::Ipv4Addr;
 
+use toyos_net_wire::addr::{is_host, Cidr};
 use toyos_net_wire::ipv4::MulticastAddr;
 use toyos_net_wire::Instant;
 
-use crate::addr::{is_host, Address, Cidr, Phase};
+use crate::addr::{Address, Phase};
 use crate::counters::Counter;
 use crate::nud::Link;
 use crate::route::{self, NextHop, Source};
@@ -26,24 +27,17 @@ impl Ip {
     /// and keeps its state, which is how a renewal arrives (§2.2 (4)).
     pub fn add_address(&mut self, now: Instant, iface: IfIndex, addr: Ipv4Addr, prefix_len: u8) -> Result<(), Counter> {
         let now = self.clock(now);
-        let cidr = Cidr { addr, len: prefix_len };
-        let refusal = if !(1..=32).contains(&prefix_len) {
-            Some(Counter::AddrPrefixInvalid)
-        } else if !is_host(addr) || cidr.is_edge(addr) {
-            Some(Counter::AddrNotUnicast)
-        } else if self.ifaces.iter().enumerate().any(|(n, i)| n != iface.0 && i.owns(addr)) {
-            Some(Counter::AddrDuplicate)
-        } else {
-            None
+        let cidr = match Cidr::new(addr, prefix_len) {
+            None => Err(Counter::AddrPrefixInvalid),
+            Some(cidr) if !is_host(addr) || cidr.is_edge(addr) => Err(Counter::AddrNotUnicast),
+            Some(_) if self.ifaces.iter().enumerate().any(|(n, i)| n != iface.0 && i.owns(addr)) => Err(Counter::AddrDuplicate),
+            Some(cidr) => Ok(cidr),
         };
-        if let Some(refusal) = refusal {
-            self.log.count(refusal);
-            return Err(refusal);
-        }
+        let cidr = cidr.inspect_err(|&refusal| self.log.count(refusal))?;
         let Some((i, mut cx)) = self.split(now, iface) else { return Err(self.unknown()) };
-        if let Some(held) = i.addresses.iter_mut().find(|a| a.cidr.addr == addr) {
-            if held.cidr.len != prefix_len {
-                held.cidr.len = prefix_len;
+        if let Some(held) = i.addresses.iter_mut().find(|a| a.cidr.addr() == addr) {
+            if held.cidr != cidr {
+                held.cidr = cidr;
                 if held.usable() {
                     route::withdraw_off_link(i, &mut cx);
                     cx.bump();
@@ -65,7 +59,7 @@ impl Ip {
     pub fn remove_address(&mut self, now: Instant, iface: IfIndex, addr: Ipv4Addr) -> Result<(), Counter> {
         let now = self.clock(now);
         let Some((i, mut cx)) = self.split(now, iface) else { return Err(self.unknown()) };
-        let Some(index) = i.addresses.iter().position(|a| a.cidr.addr == addr) else {
+        let Some(index) = i.addresses.iter().position(|a| a.cidr.addr() == addr) else {
             cx.log.count(Counter::AddrUnknown);
             return Err(Counter::AddrUnknown);
         };

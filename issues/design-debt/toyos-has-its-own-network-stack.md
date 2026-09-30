@@ -18,13 +18,17 @@ netd runs smoltcp. Its replacement is ToyOS's own stack, built clean-room: reade
 
 The listener defects are this track's: `issues/hardware/a-handshake-nobody-finishes-holds-a-listeners-port-shut.md` and `issues/hardware/a-connect-between-two-accepts-is-reset.md`, on smoltcp until stage 5, and `issues/hardware/an-accept-that-never-reaches-netd-strands-its-listener.md`, in std's accept.
 
-Owed from the stage 3 specifications: OUT-07 by stage 4, whose scheduler chooses between a flow's segment and [ip]'s own frames; US-57 by stage 5, whose netd maps UDP's refusals onto the pipe ABI; FRA-01–20 and PMTU-01–06 by IP hardening.
+Owed from the stage 3 specifications: OUT-07 by stage 4, whose scheduler chooses between a flow's segment and [ip]'s own frames; US-57 by stage 5, whose netd maps UDP's refusals onto the pipe ABI; `dhcp.renew-unroutable` by stage 5, whose netd counts it where `toyos-net-udp` refuses the renewal `udp.no-route`; FRA-01–20 and PMTU-01–06 by IP hardening.
 
 What stage 3 departs from its specifications:
 
-- `ip.md` §5.4 drops a datagram released from a pending queue when the 64-frame control queue is full; `toyos-net-ip` never does, because its sender was told it is held, and it stays bounded by the pending queues it was held in. Exit: the specification says so, or the owner rules the drop.
-- `udp-dhcp.md` §D2 has the client count `dhcp.renew-unroutable`, but the client never learns of the refusal, which `toyos-net-udp` counts as `udp.no-route`. Exit: netd counts it where the refusal lands at stage 5, or the specification drops it.
 - US-43 expects `ip.not-for-us` for a datagram to an unjoined group in a frame to that group's MAC; the frame filter refuses it first, as `eth.not-for-us` (`wire.md` §3.3, ETH-23). Exit: the scenario names the frame filter.
+- DH-64 expects an announce request from the client on link-up with a lease held; `toyos-net-ip` announces the held address itself on link-up (IP-D6, C-4), so the client asks nothing. Exit: the scenario drops the request, or [ip] stops announcing on its own.
+- `udp-dhcp.md` §U9 (3) lets every datagram a closed socket had accepted leave; `toyos-net-udp` holds at most one socket's queue of them together and refuses the rest `udp.tx-discarded-on-close`, because architecture §3.3 holds nothing without a bound. Exit: the specification bounds them.
+
+What stage 3 does not yet meet:
+
+- Its only oracles are the readers' own: the specifications' scenarios and byte vectors, and the tests' own RFC 1071 sum. No behaviour of `toyos-net-ip`, `toyos-net-udp` or `toyos-dhcp` is checked against anything the readers did not write. Exit: exchanges captured from slirp and the T14 (ARP, DHCP, ICMP, IGMP) replay through them at stage 5 and match.
 
 What `toyos-net-wire` does not yet meet:
 

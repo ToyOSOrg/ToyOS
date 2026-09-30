@@ -3,10 +3,10 @@
 //! any other packet can confirm, assert a MAC into STALE, or be ignored, and a MAC change is
 //! always logged (§7.3).
 
+use toyos_net_wire::addr::is_host;
 use toyos_net_wire::arp::{Arp, Operation};
 use toyos_net_wire::ethernet::MacClass;
 
-use crate::addr::is_host;
 use crate::counters::Counter;
 use crate::iface::{Cx, Interface};
 use crate::{acd, egress, nud};

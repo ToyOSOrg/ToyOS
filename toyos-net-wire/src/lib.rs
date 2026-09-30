@@ -1,7 +1,7 @@
 //! Ethernet, ARP, IPv4, ICMPv4, IGMP, UDP and TCP, parsed in place and built: a parse refuses by the first rule its input breaks, a build refuses what it cannot represent.
 //!
-//! It is also what every net crate above it shares: the caller's clock, the keyed function, and
-//! the declaration of a crate's counters.
+//! It is also what every net crate above it shares: the caller's clock, the keyed function, IPv4
+//! address classes and prefixes, and the declaration of a crate's counters.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -142,6 +142,7 @@ macro_rules! counters {
     };
 }
 
+pub mod addr;
 pub mod arp;
 pub mod checksum;
 mod emit;

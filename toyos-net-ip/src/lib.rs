@@ -355,11 +355,6 @@ impl Ip {
         &self.log.counters
     }
 
-    /// How many refusals of the wire rule `name` (a `toyos_net_wire` reason's `name()`) [ip] met.
-    pub fn wire_refusals(&self, name: &str) -> u64 {
-        self.log.wire.get(name).copied().unwrap_or(0)
-    }
-
     /// Every wire refusal [ip] met, by name, for inspect.
     pub fn wire_counters(&self) -> impl Iterator<Item = (&'static str, u64)> + '_ {
         self.log.wire.iter().map(|(&name, &n)| (name, n))
@@ -380,12 +375,12 @@ impl Ip {
     }
 
     pub fn address(&self, iface: IfIndex, addr: Ipv4Addr) -> Option<AddrState> {
-        self.ifaces.get(iface.0)?.addresses.iter().find(|a| a.cidr.addr == addr).map(|a| a.state())
+        self.ifaces.get(iface.0)?.addresses.iter().find(|a| a.cidr.addr() == addr).map(|a| a.state())
     }
 
     /// The prefix length of one of the interface's addresses.
     pub fn prefix_len(&self, iface: IfIndex, addr: Ipv4Addr) -> Option<u8> {
-        self.ifaces.get(iface.0)?.addresses.iter().find(|a| a.cidr.addr == addr).map(|a| a.cidr.len)
+        self.ifaces.get(iface.0)?.addresses.iter().find(|a| a.cidr.addr() == addr).map(|a| a.cidr.prefix_len())
     }
 
     pub fn reachable_time(&self, iface: IfIndex) -> Option<Duration> {
@@ -398,12 +393,12 @@ impl Ip {
 
     /// An announcing or assigned address of any interface: one a socket may bind and send from.
     pub fn is_assigned(&self, addr: Ipv4Addr) -> bool {
-        self.ifaces.iter().any(|i| i.addresses.iter().any(|a| a.cidr.addr == addr && a.usable()))
+        self.ifaces.iter().any(|i| i.addresses.iter().any(|a| a.cidr.addr() == addr && a.usable()))
     }
 
     /// One of our addresses in any state.
     pub fn is_local(&self, addr: Ipv4Addr) -> bool {
-        self.ifaces.iter().any(|i| i.addresses.iter().any(|a| a.cidr.addr == addr))
+        self.ifaces.iter().any(|i| i.addresses.iter().any(|a| a.cidr.addr() == addr))
     }
 
     /// The directed broadcast of a usable prefix of /30 or shorter.
@@ -427,7 +422,8 @@ impl Ip {
 // Each compile_fail block sits beside one that compiles, so a typo cannot pass it.
 #[cfg(doctest)]
 mod compile_fail {
-    /// NUD-28: a MAC exists only in a state that has one, and a pending queue only in INCOMPLETE.
+    /// NUD-28: a MAC exists only in a state that has one, and only INCOMPLETE takes datagrams into a
+    /// pending queue.
     ///
     /// ```
     /// use toyos_net_ip::{Linked, Nud};
@@ -435,12 +431,13 @@ mod compile_fail {
     ///     match n {
     ///         Nud::Incomplete(i) => i.queued(),
     ///         Nud::Reachable(r) => usize::from(r.mac().0[0]),
-    ///         Nud::Stale(s) => {
+    ///         Nud::Stale(s) | Nud::Delay(s) => {
     ///             let _: &Linked = s;
     ///             2
     ///         }
+    ///         Nud::Probe(p) => usize::from(p.requests()),
+    ///         Nud::Unreachable(u) => usize::from(u.quiescent()),
     ///         Nud::Failed => 0,
-    ///         _ => 1,
     ///     }
     /// }
     /// ```
@@ -463,6 +460,16 @@ mod compile_fail {
     /// ```compile_fail
     /// use toyos_net_ip::Nud;
     /// fn f(n: &Nud) { if let Nud::Stale(s) = n { let _ = s.queued(); } }
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use toyos_net_ip::Nud;
+    /// fn f(n: &Nud) { if let Nud::Probe(p) = n { let _ = p.queued(); } }
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use toyos_net_ip::Nud;
+    /// fn f(n: &Nud) { if let Nud::Unreachable(u) = n { let _ = u.queued(); } }
     /// ```
     #[allow(non_camel_case_types)]
     pub struct s_ip_nud_028_a_state_holds_only_its_own_fields;

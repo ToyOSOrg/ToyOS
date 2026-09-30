@@ -140,6 +140,12 @@ fn s_udp_us_020_what_send_refuses() {
     let logged: Vec<Refusal> = u.udp.drain_refusals().collect();
     assert_eq!(logged, [Refusal { rule: Counter::SendUnspecifiedDestination, local: (ANY, port(50_001)), peer: (ANY, 53) }]);
     assert!(u.out().is_empty());
+
+    for _ in 0..=limits::EVENTS {
+        assert_eq!(u.udp.send_to(&mut u.ip, id, ANY, 53, b"x"), refused(Counter::SendUnspecifiedDestination));
+    }
+    assert_eq!(u.udp.drain_refusals().count(), limits::EVENTS, "an undrained shell holds a bounded list");
+    assert_eq!(u.count(Counter::EventOverflow), 1);
 }
 
 #[test]
@@ -197,6 +203,11 @@ fn s_udp_us_024_the_source_address_must_be_ours() {
     let mut u = U::bare();
     let id = u.bind(ANY, 50_001).unwrap();
     assert_eq!(u.udp.send_to(&mut u.ip, id, DNS, 53, b"x"), refused(Counter::NoSourceAddress));
+
+    let mut u = U::uf();
+    u.ip.set_gateways(u.clock(), u.if0, &[]).unwrap();
+    let id = u.bind(ANY, 50_001).unwrap();
+    assert_eq!(u.udp.send_to(&mut u.ip, id, ip4(198, 51, 100, 7), 53, b"x"), refused(Counter::NoRoute), "an address, and no gateway");
 
     let mut u = U::uf();
     let id = u.bind(A, 5_001).unwrap();

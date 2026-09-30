@@ -5,7 +5,9 @@
 //! nothing here reads a clock, draws randomness or does I/O.
 //!
 //! **Back-pressure is a refusal.** Each socket holds at most `limits::TX_DATAGRAMS` accepted
-//! datagrams: a send past it is refused and the caller keeps its datagram. A datagram leaves only
+//! datagrams: a send past it is refused and the caller keeps its datagram. What closed sockets
+//! had accepted is held to `limits::CLOSED_DATAGRAMS` together and takes one turn among the
+//! sockets, so closing never grows the stack or starves another socket. A datagram leaves only
 //! when [`Udp::transmit`] offers it to the device and is built then; one [ip] holds for its next
 //! hop has left this crate and spends no credit, so a socket's next datagram is never behind it.
 //!
@@ -33,6 +35,7 @@ use alloc::vec::Vec;
 use core::net::Ipv4Addr;
 
 use toyos_net_ip::{Arrival, Cast, ErrorClass, Flow, Ip, Source, Transport, TransportError, UdpOut};
+use toyos_net_wire::addr::is_martian;
 use toyos_net_wire::ethernet::MacClass;
 use toyos_net_wire::ipv4::Ttl;
 use toyos_net_wire::udp::{UdpBuilder, UdpChecksum, UdpDatagram};
@@ -69,6 +72,7 @@ toyos_net_wire::counters! {
     RxTruncated = "udp.rx-truncated";
     RxDroppedOnConnect = "udp.rx-dropped-on-connect";
     RxDiscardedOnClose = "udp.rx-discarded-on-close";
+    TxDiscardedOnClose = "udp.tx-discarded-on-close";
     Tx = "udp.tx";
     IcmpErrorDelivered = "udp.icmp-error-delivered";
     IcmpErrorSoft = "udp.icmp-error-soft";
@@ -82,6 +86,9 @@ pub mod limits {
     pub const RX_BYTES: usize = 65_536;
     pub const TX_DATAGRAMS: usize = 16;
     pub const TX_BYTES: usize = 65_536;
+    /// Datagrams closed sockets had accepted and that have not left: one socket's queue, whose
+    /// bytes MAX_PAYLOAD bounds.
+    pub const CLOSED_DATAGRAMS: usize = TX_DATAGRAMS;
     /// IANA's dynamic range, 49152 to 65535 (RFC 6335 §6).
     pub const EPHEMERAL_FIRST: u16 = 49_152;
     pub const EPHEMERAL_COUNT: u16 = 16_384;
@@ -202,23 +209,25 @@ struct Slot {
     socket: Option<Socket>,
 }
 
+/// Whose datagram leaves next: a socket's, or one a closed socket had accepted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Turn {
+    Socket(u32),
+    Closed,
+}
+
 #[derive(Debug, Default)]
 pub struct Udp {
     slots: Vec<Slot>,
     free: Vec<u32>,
     ports: BTreeMap<Port, u32>,
-    active: VecDeque<u32>,
-    /// Datagrams a closed socket had accepted: they still leave (§U9 (3)).
-    orphans: VecDeque<(Port, Queued)>,
+    /// One turn per socket with datagrams queued, and one for `closed` while it holds any.
+    turns: VecDeque<Turn>,
+    /// Datagrams closed sockets had accepted: they still leave (§U9 (3)), at most
+    /// `limits::CLOSED_DATAGRAMS` of them.
+    closed: VecDeque<(Port, Queued)>,
     counters: Counters,
     refusals: Vec<Refusal>,
-}
-
-/// Not a destination any datagram may name: 0.0.0.0/8 but 0.0.0.0 itself, and 240.0.0.0/4 but the
-/// limited broadcast.
-fn invalid(addr: Ipv4Addr) -> bool {
-    let [first, ..] = addr.octets();
-    (first == 0 && !addr.is_unspecified()) || (first >= 240 && !addr.is_broadcast())
 }
 
 fn route_refusal(refusal: toyos_net_ip::Counter) -> Counter {
@@ -369,7 +378,7 @@ impl Udp {
             Some(Counter::SendLoopback)
         } else if ip.is_local(addr) {
             Some(Counter::SendToSelf)
-        } else if invalid(addr) {
+        } else if is_martian(addr) {
             Some(Counter::SendInvalidDestination)
         } else {
             None
@@ -497,7 +506,7 @@ impl Udp {
         socket.tx.push_back(Queued { source, destination, port, ttl, payload: payload.to_vec() });
         socket.tx_bytes = bytes;
         if !core::mem::replace(&mut socket.active, true) {
-            self.active.push_back(id.index);
+            self.turns.push_back(Turn::Socket(id.index));
         }
         Ok(())
     }
@@ -528,7 +537,9 @@ impl Udp {
         }))
     }
 
-    /// Releases the port at once: received datagrams are discarded, accepted ones still leave.
+    /// Releases the port at once: received datagrams are discarded, and accepted ones still leave
+    /// while fewer than `limits::CLOSED_DATAGRAMS` wait; the rest are refused
+    /// `udp.tx-discarded-on-close`, since nobody is left to refuse them to.
     pub fn close(&mut self, id: SocketId) -> Result<(), Error> {
         self.socket(id)?;
         let Some(slot) = usize::try_from(id.index).ok().and_then(|i| self.slots.get_mut(i)) else { return Err(Error::NoSuchSocket) };
@@ -536,8 +547,18 @@ impl Udp {
         slot.generation = slot.generation.wrapping_add(1);
         self.free.push(id.index);
         self.ports.remove(&socket.port);
+        if socket.active {
+            self.turns.retain(|t| *t != Turn::Socket(id.index));
+        }
         self.counters.add(Counter::RxDiscardedOnClose, u64::try_from(socket.rx.len()).unwrap_or(u64::MAX));
-        self.orphans.extend(socket.tx.into_iter().map(|q| (socket.port, q)));
+        let room = limits::CLOSED_DATAGRAMS.saturating_sub(self.closed.len());
+        let discarded = socket.tx.len().saturating_sub(room);
+        self.counters.add(Counter::TxDiscardedOnClose, u64::try_from(discarded).unwrap_or(u64::MAX));
+        let turn = self.closed.is_empty();
+        self.closed.extend(socket.tx.into_iter().take(room).map(|q| (socket.port, q)));
+        if turn && !self.closed.is_empty() {
+            self.turns.push_back(Turn::Closed);
+        }
         Ok(())
     }
 
@@ -636,29 +657,37 @@ impl Udp {
         }
     }
 
-    /// A transmit opportunity with room for `credit` frames: closed sockets' datagrams first,
-    /// then one datagram per socket in turn, each built as `sink` takes it. `sink` answers whether
-    /// it spent a frame; one [ip] holds for its next hop spends none. Returns the frames spent.
+    /// A transmit opportunity with room for `credit` frames: one datagram per turn, each socket
+    /// with datagrams queued taking one and closed sockets' datagrams together one more, each built
+    /// as `sink` takes it. `sink` answers whether it spent a frame; one [ip] holds for its next hop
+    /// spends none. Returns the frames spent.
     pub fn transmit(&mut self, credit: usize, mut sink: impl FnMut(&UdpOut<'_>) -> bool) -> usize {
         let mut spent = 0usize;
         while spent < credit {
-            let (port, queued) = if let Some(orphan) = self.orphans.pop_front() {
-                orphan
-            } else {
-                let Some(index) = self.active.pop_front() else { break };
-                let Some(socket) = self.at(index) else { continue };
-                let Some(queued) = socket.tx.pop_front() else {
-                    socket.active = false;
-                    continue;
-                };
-                socket.tx_bytes = socket.tx_bytes.saturating_sub(queued.payload.len());
-                let port = socket.port;
-                if socket.tx.is_empty() {
-                    socket.active = false;
-                } else {
-                    self.active.push_back(index);
+            let Some(turn) = self.turns.pop_front() else { break };
+            let (port, queued) = match turn {
+                Turn::Closed => {
+                    let Some(closed) = self.closed.pop_front() else { continue };
+                    if !self.closed.is_empty() {
+                        self.turns.push_back(Turn::Closed);
+                    }
+                    closed
                 }
-                (port, queued)
+                Turn::Socket(index) => {
+                    let Some(socket) = self.at(index) else { continue };
+                    let Some(queued) = socket.tx.pop_front() else {
+                        socket.active = false;
+                        continue;
+                    };
+                    socket.tx_bytes = socket.tx_bytes.saturating_sub(queued.payload.len());
+                    let port = socket.port;
+                    if socket.tx.is_empty() {
+                        socket.active = false;
+                    } else {
+                        self.turns.push_back(turn);
+                    }
+                    (port, queued)
+                }
             };
             self.count(Counter::Tx);
             let out = UdpOut {

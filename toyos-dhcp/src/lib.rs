@@ -34,6 +34,7 @@ use alloc::vec::Vec;
 use core::net::Ipv4Addr;
 use core::time::Duration;
 
+use toyos_net_wire::addr::{is_host, Cidr};
 use toyos_net_wire::ethernet::{IndividualMac, MacAddr};
 use toyos_net_wire::Instant;
 
@@ -294,30 +295,10 @@ pub struct Client {
     refusals: Vec<Refusal>,
 }
 
-/// Not 0.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16, 224.0.0.0/4 or 240.0.0.0/4: one host (§D4.1).
+/// §D4.1's unicast host address: a host, and not in 169.254.0.0/16, which RFC 3927 §1.6 says a
+/// DHCP server should not hand out.
 fn host(addr: Ipv4Addr) -> bool {
-    let [a, b, ..] = addr.octets();
-    !(a == 0 || a == 127 || (a, b) == (169, 254) || a >= 224)
-}
-
-fn mask(len: u8) -> u32 {
-    u32::MAX.checked_shl(u32::from(32u8.saturating_sub(len))).unwrap_or(0)
-}
-
-/// A contiguous mask of 1 to 31 bits (H-14).
-fn prefix_len(mask_addr: Ipv4Addr) -> Option<u8> {
-    let bits = u32::from(mask_addr);
-    let len = u8::try_from(bits.leading_ones()).ok()?;
-    ((1..=31).contains(&len) && mask(len) == bits).then_some(len)
-}
-
-fn same_subnet(a: Ipv4Addr, b: Ipv4Addr, len: u8) -> bool {
-    (u32::from(a) ^ u32::from(b)) & mask(len) == 0
-}
-
-/// The directed broadcast of a prefix of /30 or shorter.
-fn broadcast(addr: Ipv4Addr, len: u8) -> Option<Ipv4Addr> {
-    (len <= 30).then(|| Ipv4Addr::from(u32::from(addr) | !mask(len)))
+    is_host(addr) && !addr.is_link_local()
 }
 
 fn secs(since: Duration) -> u16 {
@@ -714,31 +695,26 @@ impl Client {
     /// §D4.1: the address, the lease time and the mask an OFFER or ACK must carry.
     fn acceptable(&mut self, reply: &Reply, server: Ipv4Addr, peer: Peer) -> Option<Offered> {
         let yiaddr = reply.yiaddr;
-        let refusal = if !host(yiaddr) {
-            Some(Counter::YiaddrInvalid)
+        let accepted = if !host(yiaddr) {
+            Err(Counter::YiaddrInvalid)
         } else {
             match (reply.lease, reply.mask) {
-                (None, _) => Some(Counter::NoLeaseTime),
-                (Some(0), _) => Some(Counter::LeaseZero),
-                (_, None) => Some(Counter::NoSubnetMask),
-                (Some(_), Some(m)) => match prefix_len(m) {
-                    None => Some(Counter::MaskInvalid),
-                    Some(len) if len <= 30 && (yiaddr == Ipv4Addr::from(u32::from(yiaddr) & mask(len)) || Some(yiaddr) == broadcast(yiaddr, len)) => {
-                        Some(Counter::YiaddrInvalid)
-                    }
-                    Some(_) => None,
+                (None, _) => Err(Counter::NoLeaseTime),
+                (Some(0), _) => Err(Counter::LeaseZero),
+                (_, None) => Err(Counter::NoSubnetMask),
+                // A contiguous mask of 1 to 31 bits (H-14).
+                (Some(lease), Some(mask)) => match Cidr::from_mask(yiaddr, mask).filter(|c| c.prefix_len() <= 31) {
+                    None => Err(Counter::MaskInvalid),
+                    Some(cidr) if cidr.is_edge(yiaddr) => Err(Counter::YiaddrInvalid),
+                    Some(cidr) => Ok((cidr, lease)),
                 },
             }
         };
-        if let Some(rule) = refusal {
-            self.refuse(rule, peer);
-            return None;
-        }
+        let (cidr, lease) = accepted.inspect_err(|&rule| self.refuse(rule, peer)).ok()?;
         Some(Offered {
-            address: yiaddr,
-            prefix_len: reply.mask.and_then(prefix_len).unwrap_or(32),
+            cidr,
             server,
-            lease: reply.lease.unwrap_or(0),
+            lease,
             routers: reply.routers.clone(),
             dns: reply.dns.clone(),
             t1: reply.t1,
@@ -769,13 +745,13 @@ impl Client {
         let state = core::mem::replace(&mut self.state, State::BackingOff(now));
         match (state, kind) {
             (State::Selecting(s), ReplyKind::Offer) => {
-                let payload = self.message(Kind::Request, s.xid, s.secs, Ipv4Addr::UNSPECIFIED, Some(offered.server), Some(offered.address));
+                let payload = self.message(Kind::Request, s.xid, s.secs, Ipv4Addr::UNSPECIFIED, Some(offered.server), Some(offered.cidr.addr()));
                 let transmit = self.broadcast(payload, Counter::TxRequest);
                 let deadline = now.after(jittered(backoff(0), draw()));
                 self.state = State::Requesting(Requesting {
                     xid: s.xid,
                     server: offered.server,
-                    address: offered.address,
+                    address: offered.cidr.addr(),
                     secs: s.secs,
                     first: now,
                     step: 0,
@@ -788,19 +764,19 @@ impl Client {
                 self.probe(lease)
             }
             (State::Requesting(r), _) if offered.server != r.server => self.keep(State::Requesting(r), Counter::AckWrongServer, peer),
-            (State::Requesting(r), _) if offered.address != r.address => self.keep(State::Requesting(r), Counter::AckAddressChanged, peer),
+            (State::Requesting(r), _) if offered.cidr.addr() != r.address => self.keep(State::Requesting(r), Counter::AckAddressChanged, peer),
             (State::Requesting(r), _) => {
                 let lease = self.lease_of(offered, r.first, peer);
                 self.probe(lease)
             }
             (State::Renewing(r), _) if offered.server != r.lease.server => self.keep(State::Renewing(r), Counter::AckWrongServer, peer),
-            (State::Renewing(r), _) if offered.address != r.lease.address => self.keep(State::Renewing(r), Counter::AckAddressChanged, peer),
-            (State::Rebinding(r), _) if offered.address != r.lease.address => self.keep(State::Rebinding(r), Counter::AckAddressChanged, peer),
+            (State::Renewing(r), _) if offered.cidr.addr() != r.lease.address => self.keep(State::Renewing(r), Counter::AckAddressChanged, peer),
+            (State::Rebinding(r), _) if offered.cidr.addr() != r.lease.address => self.keep(State::Rebinding(r), Counter::AckAddressChanged, peer),
             (State::Renewing(r) | State::Rebinding(r), _) => {
                 let lease = self.lease_of(offered, r.sent, peer);
                 self.renewed(now, &r.lease, lease, draw)
             }
-            (State::Rebooting(r), _) if offered.address != r.lease.address => self.keep(State::Rebooting(r), Counter::AckAddressChanged, peer),
+            (State::Rebooting(r), _) if offered.cidr.addr() != r.lease.address => self.keep(State::Rebooting(r), Counter::AckAddressChanged, peer),
             (State::Rebooting(r), _) => {
                 let lease = self.lease_of(offered, r.start, peer);
                 self.renewed(now, &r.lease, lease, draw)
@@ -835,10 +811,10 @@ impl Client {
     /// §D4.2 and §D7: the first usable router, at most three resolvers, and T1 and T2, the
     /// lease running from `base`.
     fn lease_of(&mut self, offered: Offered, base: Instant, peer: Peer) -> Lease {
-        let (address, len) = (offered.address, offered.prefix_len);
+        let (cidr, address) = (offered.cidr, offered.cidr.addr());
         let mut router = None;
         for candidate in offered.routers {
-            if host(candidate) && same_subnet(candidate, address, len) && candidate != address {
+            if host(candidate) && cidr.contains(candidate) && candidate != address {
                 router = Some(candidate);
                 break;
             }
@@ -846,7 +822,7 @@ impl Client {
         }
         let mut dns = Vec::new();
         for server in offered.dns {
-            if !host(server) || Some(server) == broadcast(address, len) {
+            if !host(server) || Some(server) == cidr.broadcast() {
                 self.refuse(Counter::DnsInvalid, peer);
             } else if dns.len() < limits::MAX_DNS {
                 dns.push(server);
@@ -881,14 +857,13 @@ impl Client {
             };
             Some(Timers { t1: base.after(t1), t2: base.after(t2), expiry: base.after(lease) })
         };
-        Lease { address, prefix_len: len, router, dns, server: offered.server, base, timers }
+        Lease { address, prefix_len: cidr.prefix_len(), router, dns, server: offered.server, base, timers }
     }
 }
 
 /// What an acceptable OFFER or ACK holds, before §D4.2 degrades it into a lease.
 struct Offered {
-    address: Ipv4Addr,
-    prefix_len: u8,
+    cidr: Cidr,
     server: Ipv4Addr,
     lease: u32,
     routers: Vec<Ipv4Addr>,

@@ -345,11 +345,13 @@ fn s_ip_nud_021_stale_is_deleted_when_idle() {
     assert!(matches!(h.state(B), Some(Nud::Delay(_))));
 }
 
+const WIDE_A: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
+
 /// if0 at 10.0.0.1/16, with room for a full table of neighbours.
 fn wide() -> H {
     let mut h = H::raw();
     let if0 = h.if0;
-    h.assign(if0, Ipv4Addr::new(10, 0, 0, 1), 16, 0);
+    h.assign(if0, WIDE_A, 16, 0);
     h.settle();
     h
 }
@@ -358,40 +360,63 @@ fn neighbour(n: u32) -> Ipv4Addr {
     Ipv4Addr::from(u32::from(Ipv4Addr::new(10, 0, 1, 0)) + n)
 }
 
+fn wide_mac(addr: Ipv4Addr) -> MacAddr {
+    MacAddr([2, 1, 0, 0, (u32::from(addr) >> 8) as u8, u32::from(addr) as u8])
+}
+
 fn reach_wide(h: &mut H, addr: Ipv4Addr) {
     let now = h.clock();
     let _ = h.ip.resolve(now, h.if0, addr);
     h.out();
-    let m = MacAddr([2, 1, 0, 0, (u32::from(addr) >> 8) as u8, u32::from(addr) as u8]);
-    h.frame(&eth(MAC_A, m, 0x0806, &arp_packet(2, m, addr, MAC_A, Ipv4Addr::new(10, 0, 0, 1))));
+    h.frame(&eth(MAC_A, wide_mac(addr), 0x0806, &arp_packet(2, wide_mac(addr), addr, MAC_A, WIDE_A)));
     assert!(h.is_reachable(addr));
 }
 
+/// `addr` asks who has 10.0.0.1: learned into STALE if new, and answered once the queue drains.
+fn ask_wide(h: &mut H, addr: Ipv4Addr) {
+    h.frame(&eth(MacAddr::BROADCAST, wide_mac(addr), 0x0806, &arp_packet(1, wide_mac(addr), addr, MacAddr::ZERO, WIDE_A)));
+}
+
+/// `addr` announces itself: an assertion, which resolves it into STALE.
+fn announce_wide(h: &mut H, addr: Ipv4Addr) {
+    h.frame(&eth(MacAddr::BROADCAST, wide_mac(addr), 0x0806, &arp_packet(1, wide_mac(addr), addr, MacAddr::ZERO, addr)));
+}
+
 #[test]
-fn s_ip_nud_022_a_full_table_evicts_failed_first() {
+fn s_ip_nud_022_a_full_table_evicts_in_order() {
     let mut h = wide();
-    let failed = neighbour(0);
+    let (failed, unreachable, stale) = (neighbour(0), neighbour(1), neighbour(2));
     let _ = h.ip.resolve(h.clock(), h.if0, failed);
-    h.out();
-    h.run(3_000);
+    reach_wide(&mut h, unreachable);
+    h.ip.advise(h.clock(), unreachable, Advice::Reverify);
+    ask_wide(&mut h, stale);
+    h.run(5_000);
     assert!(matches!(h.state(failed), Some(Nud::Failed)));
-    for n in 1..limits::nud::TABLE_MAX as u32 {
+    assert!(matches!(h.state(unreachable), Some(Nud::Unreachable(u)) if u.quiescent()));
+    assert!(h.is_stale(stale));
+    for n in 3..limits::nud::TABLE_MAX as u32 {
         reach_wide(&mut h, neighbour(n));
     }
-    let new = neighbour(9_000);
-    assert_eq!(h.send(Ipv4Addr::new(10, 0, 0, 1), new, 5001, 5001, b"x"), Ok(None));
-    assert!(h.state(failed).is_none());
-    assert!(matches!(h.state(new), Some(Nud::Incomplete(_))));
+    let mut left = vec![failed, unreachable, stale];
+    for n in 0..3 {
+        let new = neighbour(9_000 + n);
+        assert_eq!(h.send(WIDE_A, new, 5001, 5001, b"x"), Ok(None));
+        assert!(matches!(h.state(new), Some(Nud::Incomplete(_))));
+        let gone = left.remove(0);
+        assert!(h.state(gone).is_none(), "§6.8's order: {gone} next");
+        assert!(left.iter().all(|a| h.state(*a).is_some()));
+    }
+    assert_eq!(h.send(WIDE_A, neighbour(9_003), 5001, 5001, b"x"), Err(Counter::NbTableFull));
 
     let mut h = wide();
     for n in 0..limits::nud::TABLE_MAX as u32 {
         reach_wide(&mut h, neighbour(n));
     }
     let new = neighbour(9_000);
-    assert_eq!(h.send(Ipv4Addr::new(10, 0, 0, 1), new, 5001, 5001, b"x"), Err(Counter::NbTableFull));
+    assert_eq!(h.send(WIDE_A, new, 5001, 5001, b"x"), Err(Counter::NbTableFull));
     assert_eq!(h.count(Counter::NbTableFull), 1);
     let asker = neighbour(9_001);
-    h.frame(&eth(MacAddr::BROADCAST, MAC_X, 0x0806, &arp_packet(1, MAC_X, asker, MacAddr::ZERO, Ipv4Addr::new(10, 0, 0, 1))));
+    h.frame(&eth(MacAddr::BROADCAST, MAC_X, 0x0806, &arp_packet(1, MAC_X, asker, MacAddr::ZERO, WIDE_A)));
     let out = h.out();
     assert_eq!(out.len(), 1);
     assert!(out[0].arp().is_some_and(|a| a.target_ip == asker));
@@ -500,4 +525,70 @@ fn s_ip_nud_027_prop_reachable_time_is_drawn_every_two_hours() {
         }
         assert!((3..=5).contains(&changes), "seed {seed}: {changes} redraws in ten hours");
     }
+}
+
+#[test]
+fn s_ip_nud_029_released_datagrams_are_evicted_last() {
+    let b = neighbour(0);
+    let flow = Flow { source: WIDE_A, source_port: Port::new(5001).unwrap(), destination: b, destination_port: Port::new(5001).unwrap() };
+    for others_reachable in [false, true] {
+        let mut h = wide();
+        for data in [b"1", b"2"] {
+            assert_eq!(h.send(WIDE_A, b, 5001, 5001, data), Ok(None));
+        }
+        h.out();
+        for n in 1..limits::nud::TABLE_MAX as u32 {
+            h.at(u64::from(n));
+            if others_reachable {
+                reach_wide(&mut h, neighbour(n));
+            } else {
+                ask_wide(&mut h, neighbour(n));
+                h.out();
+            }
+        }
+        for n in 1..=limits::CONTROL_QUEUE as u32 {
+            ask_wide(&mut h, neighbour(n));
+        }
+        announce_wide(&mut h, b);
+        assert!(h.is_stale(b));
+        let new = neighbour(9_000);
+        assert_eq!(h.send(WIDE_A, new, 5001, 5001, b"x"), Ok(None));
+        assert!(matches!(h.state(new), Some(Nud::Incomplete(_))));
+        if others_reachable {
+            assert!(h.state(b).is_none());
+            assert_eq!(h.count(Counter::NbPendingEvicted), 2);
+            assert_eq!(h.events.iter().filter(|e| **e == Event::Unreachable(flow)).count(), 2);
+            assert!(h.out().iter().all(|o| o.to() != wide_mac(b)));
+        } else {
+            assert!(h.state(neighbour(1)).is_none(), "the longest unused of the others");
+            assert!(h.is_stale(b));
+            let to_b: Vec<Vec<u8>> = h.out().iter().filter(|o| o.to() == wide_mac(b)).map(payload).collect();
+            assert_eq!(to_b, [b"1", b"2"]);
+            assert_eq!(h.count(Counter::NbPendingEvicted), 0);
+        }
+    }
+}
+
+#[test]
+fn s_ip_nud_030_released_datagrams_keep_their_entry() {
+    let mut h = H::fixture_i();
+    for data in [b"1", b"2"] {
+        assert_eq!(h.send(A, B, 5001, 5001, data), Ok(None));
+    }
+    h.out();
+    for n in 0..limits::CONTROL_QUEUE as u8 {
+        let m = MacAddr([2, 1, 0, 0, 0, n]);
+        h.frame(&eth(MacAddr::BROADCAST, m, 0x0806, &arp_packet(1, m, Ipv4Addr::new(192, 0, 2, 100 + n), MacAddr::ZERO, A)));
+    }
+    h.frame(&eth(MacAddr::BROADCAST, MAC_B, 0x0806, &arp_packet(1, MAC_B, B, MacAddr::ZERO, B)));
+    assert!(h.is_stale(B));
+    h.ip.fire(H::instant(600_000));
+    h.at(600_000);
+    assert!(h.is_stale(B), "not idle while it holds 1 and 2");
+    assert!(h.out_with(limits::CONTROL_QUEUE).iter().all(|o| o.to() != MAC_B), "the queued frames first");
+    assert!(h.is_stale(B), "1 and 2 are not out yet");
+    assert_eq!(h.out_with(1).iter().map(payload).collect::<Vec<_>>(), [b"1"]);
+    assert!(h.is_stale(B));
+    assert_eq!(h.out_with(1).iter().map(payload).collect::<Vec<_>>(), [b"2"]);
+    assert!(h.state(B).is_none(), "deleted as its queue drains");
 }

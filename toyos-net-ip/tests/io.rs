@@ -103,8 +103,14 @@ fn s_ip_in_008_fragments_before_options() {
     assert_eq!(h.count(Counter::IpSourceRoute), 0);
 }
 
+/// A SYN from B:40000 to `destination`:80.
+fn syn_to(destination: Ipv4Addr) -> Vec<u8> {
+    let tcp = [0x9c, 0x40, 0, 80, 0, 0, 0, 1, 0, 0, 0, 0, 0x50, 0x02, 0xff, 0xff, 0, 0, 0, 0];
+    ipv4(B, destination, 6, &tcp)
+}
+
 #[test]
-fn s_ip_in_009_the_delivery_carries_the_tos() {
+fn s_ip_in_009_what_a_transport_is_handed() {
     let mut h = H::fixture_i();
     let Some(Delivery::Udp(arrival, datagram)) = h.datagram(&hex(V_IP_DSCP)) else { panic!("not delivered") };
     assert_eq!(arrival.packet.traffic_class().dscp(), 46);
@@ -112,6 +118,12 @@ fn s_ip_in_009_the_delivery_carries_the_tos() {
     assert_eq!(arrival.cast, Cast::Unicast);
     assert_eq!(arrival.iface, h.if0);
     assert_eq!(datagram.destination_port().get(), 5001);
+
+    assert!(matches!(h.datagram(&syn_to(A)), Some(Delivery::Tcp(..))));
+    for (mac, destination) in [(MacAddr::BROADCAST, ip4(255, 255, 255, 255)), (MacAddr::BROADCAST, ip4(192, 0, 2, 255)), (MDNS_MAC, MDNS)] {
+        assert!(h.datagram_to(mac, &syn_to(destination)).is_none(), "tcp.md MUST-57: {destination} reached TCP");
+    }
+    assert_eq!(h.count(Counter::IpTcpNotUnicast), 3);
 }
 
 #[test]
@@ -518,25 +530,29 @@ fn s_ip_out_006_the_control_queue_is_bounded() {
     let first = h.out_with(1);
     assert!(first.len() == 1 && first[0].requests(ip4(192, 0, 2, 100)), "one credit, the oldest frame");
     assert_eq!(h.out().len(), limits::CONTROL_QUEUE - 1);
+}
 
-    // A datagram whose sender was told it is held stays bounded where it was held: a full queue
-    // of [ip]'s own frames never drops it on release.
+#[test]
+fn s_ip_out_008_released_datagrams_wait_at_the_head_of_their_queue() {
     let mut h = H::fixture_i();
-    let held = |n: u8| ip4(192, 0, 2, 10 + n);
-    for n in 0..8 {
-        for _ in 0..8 {
-            assert_eq!(h.udp_to(held(n)), Ok(None));
-        }
+    for data in [b"1", b"2"] {
+        assert_eq!(h.send(A, B, 5001, 5001, data), Ok(None));
     }
-    h.out();
-    for n in 0..limits::CONTROL_QUEUE as u8 {
+    for n in 1..limits::CONTROL_QUEUE as u8 {
         let _ = h.ip.resolve(h.clock(), h.if0, ip4(192, 0, 2, 100 + n));
     }
-    for n in 0..8 {
-        h.reply_from(held(n), MacAddr([2, 0, 0, 0, 1, n]));
-    }
-    let out = h.out();
-    assert_eq!(out.iter().filter(|o| o.ip().is_some()).count(), limits::nud::PENDING_TOTAL);
-    assert_eq!(out.len(), limits::CONTROL_QUEUE + limits::nud::PENDING_TOTAL);
-    assert_eq!(h.count(Counter::IpControlQueueFull), 0);
+    h.frame(&hex(V_ARP_REPLY));
+    assert!(h.is_reachable(B));
+    let dropped = [Counter::IpControlQueueFull, Counter::NbPendingOverflow, Counter::NbPendingDropped, Counter::NbPendingEvicted];
+    assert!(dropped.iter().all(|&c| h.count(c) == 0), "nothing dropped");
+
+    let first = h.out_with(limits::CONTROL_QUEUE + 1);
+    assert!(first[..limits::CONTROL_QUEUE].iter().all(|o| o.arp().is_some()), "the 64 queued frames first");
+    let mut data: Vec<Vec<u8>> = first[limits::CONTROL_QUEUE..].iter().map(|o| o.ip().unwrap().payload()[8..].to_vec()).collect();
+    assert_eq!(data, [b"1"]);
+    // The next opportunity: [ip]'s frames, then datagram 3 from the transport.
+    data.extend(h.out_with(1).iter().map(|o| o.ip().unwrap().payload()[8..].to_vec()));
+    data.push(ip_of(&h.send(A, B, 5001, 5001, b"3").unwrap().unwrap()).unwrap().payload()[8..].to_vec());
+    assert_eq!(data, [b"1", b"2", b"3"]);
+    assert!(dropped.iter().all(|&c| h.count(c) == 0));
 }

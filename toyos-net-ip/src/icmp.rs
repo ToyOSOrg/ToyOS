@@ -4,12 +4,12 @@
 //! not one host, and only when the destination's bucket and the global one both have a token.
 //! An inbound error is handed on only once its quote names one of our datagrams.
 
+use toyos_net_wire::addr::is_host;
 use toyos_net_wire::ethernet::MacClass;
 use toyos_net_wire::icmp::{Echo, EchoBuilder, HostUnreachable, IcmpError, IcmpMessage, IcmpPacket, Quote, UnreachableBuilder, UnreachableCode};
 use toyos_net_wire::ipv4::{Ecn, Ipv4Builder, Ipv4Packet, Ipv4Source, Protocol, TrafficClass, Ttl};
 use toyos_net_wire::{Instant, Port};
 
-use crate::addr::is_host;
 use crate::counters::Counter;
 use crate::egress::FrameKind;
 use crate::route::Source;

@@ -5,8 +5,10 @@
 //! measured from each request's hand-off; a timer fires once per `fire` and its next deadline is
 //! taken from that moment, so a jumped clock never replays missed periods.
 //!
-//! Each state carries exactly its own fields: a MAC only where one is known, a pending queue
-//! only while INCOMPLETE.
+//! Each state carries exactly its own fields: a MAC only where one is known, and a pending queue
+//! that takes datagrams only while INCOMPLETE. What resolution released into a full control
+//! queue waits at egress, which only drains it (§6.5); until it has, its entry does not idle out
+//! and is evicted only after every other candidate (§6.8).
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
@@ -199,22 +201,35 @@ pub(crate) fn request_left(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) {
 }
 
 /// Makes room for one more entry, evicting FAILED, then quiescent UNREACHABLE, then STALE, each
-/// the one unused longest (§6.8).
+/// the one unused longest, and after all of them one whose pending queue still holds released
+/// datagrams (§6.8).
 fn make_room(i: &mut Interface, cx: &mut Cx<'_>) -> bool {
     if i.neighbours.len() < TABLE_MAX {
         return true;
     }
-    let class = |n: &Neighbour| match &n.state {
-        Nud::Failed => Some(0),
-        Nud::Unreachable(u) if u.quiescent() && !n.queued => Some(1),
-        Nud::Stale(_) => Some(2),
-        _ => None,
+    let class = |addr: Ipv4Addr, n: &Neighbour| {
+        let class = match &n.state {
+            Nud::Failed => 0,
+            Nud::Unreachable(u) if u.quiescent() && !n.queued => 1,
+            Nud::Stale(_) => 2,
+            _ => return None,
+        };
+        Some(if cx.control.holds(cx.iface, addr) { 3 } else { class })
     };
-    let victim = i.neighbours.iter().filter_map(|(a, n)| class(n).map(|c| (c, n.used, *a))).min().map(|(_, _, a)| a);
+    let victim = i.neighbours.iter().filter_map(|(a, n)| class(*a, n).map(|c| (c, n.used, *a))).min().map(|(_, _, a)| a);
     let Some(victim) = victim else { return false };
-    i.neighbours.remove(&victim);
-    cx.timers.cancel(timer(cx, victim));
+    remove(i, cx, victim);
     true
+}
+
+/// Deletes `addr`'s entry, and with it the released datagrams its pending queue still holds.
+fn remove(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) {
+    i.neighbours.remove(&addr);
+    cx.timers.cancel(timer(cx, addr));
+    for held in cx.control.take(cx.iface, addr) {
+        i.held = i.held.saturating_sub(1);
+        drop_held(cx, held, Counter::NbPendingEvicted);
+    }
 }
 
 /// A datagram or a flow wants `addr` now (§6.3 "send"): creates INCOMPLETE, moves STALE to
@@ -314,10 +329,23 @@ pub(crate) fn fire(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) {
             s.backoff = false;
             cx.timers.arm(timer(cx, addr), now.after(IDLE_LIFETIME));
         }
+        // Not idle while released datagrams are its: `drained` deletes it once they have left.
+        Nud::Stale(_) | Nud::Unreachable(_) if cx.control.holds(cx.iface, addr) => {}
         Nud::Stale(_) | Nud::Unreachable(_) | Nud::Failed => {
-            i.neighbours.remove(&addr);
+            remove(i, cx, addr);
             route::refresh_active(i, cx);
         }
+    }
+}
+
+/// The last datagram released toward `addr` left. Every STALE or quiescent UNREACHABLE entry has
+/// a deadline armed but one whose idle lifetime passed while it held them, which goes now.
+pub(crate) fn drained(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) {
+    let Some(n) = i.neighbours.get(&addr) else { return };
+    let idle = matches!(n.state, Nud::Stale(_) | Nud::Unreachable(_)) && !n.queued && cx.timers.get(timer(cx, addr)).is_none();
+    if idle {
+        remove(i, cx, addr);
+        route::refresh_active(i, cx);
     }
 }
 
@@ -332,8 +360,8 @@ fn probe(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr, at: Instant) {
 }
 
 /// A held datagram that will never leave: counted, and its sender told (§6.5, §9.6).
-pub(crate) fn drop_held(cx: &mut Cx<'_>, held: Held) {
-    cx.log.count(Counter::NbPendingDropped);
+fn drop_held(cx: &mut Cx<'_>, held: Held, counter: Counter) {
+    cx.log.count(counter);
     if let Some(flow) = held.flow {
         cx.log.event(Event::Unreachable(flow));
     }
@@ -344,7 +372,7 @@ fn fail(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr, pending: VecDeque<He
     let now = cx.now;
     for held in pending {
         i.held = i.held.saturating_sub(1);
-        drop_held(cx, held);
+        drop_held(cx, held, Counter::NbPendingDropped);
     }
     cx.log.count(Counter::NbFailed);
     cx.log.event(Event::Failed { iface: cx.iface, next_hop: addr });
@@ -358,7 +386,7 @@ fn resolved(cx: &mut Cx<'_>, addr: Ipv4Addr, mac: MacAddr, pending: VecDeque<Hel
         if let Some((destination, _)) = held.frame.split_first_chunk_mut::<6>() {
             *destination = mac.0;
         }
-        cx.control.release(cx.iface, held);
+        cx.control.release(cx.iface, addr, held);
     }
     cx.log.count(Counter::NbResolved);
     cx.log.event(Event::Resolved { iface: cx.iface, next_hop: addr });
@@ -467,12 +495,12 @@ pub(crate) fn flush(i: &mut Interface, cx: &mut Cx<'_>) {
         cx.timers.cancel(timer(cx, addr));
         if let Nud::Incomplete(s) = n.state {
             for held in s.pending {
-                drop_held(cx, held);
+                drop_held(cx, held, Counter::NbPendingDropped);
             }
         }
     }
     for held in cx.control.purge(cx.iface) {
-        drop_held(cx, held);
+        drop_held(cx, held, Counter::NbPendingDropped);
     }
     i.held = 0;
 }

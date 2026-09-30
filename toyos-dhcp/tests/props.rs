@@ -22,7 +22,7 @@ impl Rng {
     }
 }
 
-/// Refusals of a whole message: a message names at most one.
+/// Refusals of a whole message: a refused message names exactly one, an accepted one none.
 const REFUSALS: [Counter; 27] = [
     Counter::Truncated,
     Counter::NotReply,
@@ -103,8 +103,10 @@ fn run(seed: u64, host: Option<HostName>) -> Seen {
             3 => (d.link_up(now), false),
             _ => {
                 let m = message(&mut rng, d.client.xid().unwrap_or(0));
+                let phase = d.client.phase();
                 let out = d.receive(now, &m);
-                assert!(refusals(&d) - before <= 1, "seed {seed}: a message names at most one refusal");
+                let refused = out == Output::default() && d.client.phase() == phase;
+                assert_eq!(refusals(&d) - before, u64::from(refused), "seed {seed}: a refused message names exactly one reason");
                 (out, false)
             }
         };

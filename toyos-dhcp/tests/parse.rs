@@ -6,19 +6,21 @@ mod common;
 use std::net::Ipv4Addr;
 
 use common::*;
-use toyos_dhcp::{Config, Counter, Output, Phase};
+use toyos_dhcp::{limits, Config, Counter, Output, Peer, Phase, Refusal};
 
 fn selecting() -> D {
     D::ds(&[XID, 1_000]).0
 }
 
-/// Delivers `message` to a selecting client: the refusal it counted and whether it logged one.
-fn refused(message: &[u8], rule: Counter) {
+/// Delivers `message` to a selecting client: refused by `rule`, and named with the server that
+/// sent it exactly when §D3.1 and §D14 log it.
+fn refused(message: &[u8], rule: Counter, logged: bool) {
     let mut d = selecting();
     let out = d.receive(10, message);
     assert_eq!(out, Output::default(), "{rule:?}");
     assert_eq!(d.count(rule), 1, "{rule:?}");
-    assert_eq!(d.logged(rule), usize::from(rule.logged()), "{rule:?}");
+    let named: &[Refusal] = if logged { &[Refusal { rule, peer: Peer::From(R) }] } else { &[] };
+    assert_eq!(d.refusals, named, "{rule:?}");
     assert_eq!(d.client.phase(), Phase::Selecting);
 }
 
@@ -42,47 +44,56 @@ fn edited(change: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
 
 #[test]
 fn s_dhcp_dh_038_truncated() {
-    refused(&offer()[..239], Counter::Truncated);
+    refused(&offer()[..239], Counter::Truncated, true);
+
+    let mut d = selecting();
+    for _ in 0..=limits::EVENTS {
+        assert_eq!(d.client.receive(at(10), &offer()[..239], R, || 1_000), Output::default());
+    }
+    assert_eq!(d.client.drain_refusals().count(), limits::EVENTS, "an undrained shell holds a bounded list");
+    assert_eq!(d.count(Counter::EventOverflow), 1);
 }
 
 #[test]
 fn s_dhcp_dh_039_not_a_reply() {
-    refused(&edited(|m| m[0] = 1), Counter::NotReply);
+    refused(&edited(|m| m[0] = 1), Counter::NotReply, true);
     refused(
         &edited(|m| {
             m[0] = 1;
             m[28..34].copy_from_slice(&MAC_B.0);
         }),
         Counter::NotReply,
+        true,
     );
 }
 
 #[test]
 fn s_dhcp_dh_040_the_hardware_type() {
-    refused(&edited(|m| m[1] = 6), Counter::HardwareType);
-    refused(&edited(|m| m[2] = 16), Counter::HardwareType);
+    refused(&edited(|m| m[1] = 6), Counter::HardwareType, true);
+    refused(&edited(|m| m[2] = 16), Counter::HardwareType, true);
 }
 
 #[test]
 fn s_dhcp_dh_041_another_clients_reply() {
-    refused(&edited(|m| m[28..34].copy_from_slice(&MAC_B.0)), Counter::ChaddrMismatch);
+    refused(&edited(|m| m[28..34].copy_from_slice(&MAC_B.0)), Counter::ChaddrMismatch, false);
     accepted(&edited(|m| m[34..44].fill(0xff)));
 }
 
 #[test]
 fn s_dhcp_dh_042_another_transaction() {
-    refused(&edited(|m| m[7] = 0xf8), Counter::XidMismatch);
+    refused(&edited(|m| m[7] = 0xf8), Counter::XidMismatch, false);
 }
 
 #[test]
 fn s_dhcp_dh_043_bootp_is_refused() {
-    refused(&edited(|m| m[236..240].fill(0)), Counter::BootpReply);
+    refused(&edited(|m| m[236..240].fill(0)), Counter::BootpReply, true);
     refused(
         &edited(|m| {
             m[236..240].fill(0);
             m[7] = 0xf8;
         }),
         Counter::BootpReply,
+        true,
     );
 }
 
@@ -104,7 +115,7 @@ fn s_dhcp_dh_045_an_option_past_its_field() {
     let n = m.len();
     m.truncate(n - 7);
     m.extend_from_slice(&[6, 5, 192, 0, 2, 0x35]);
-    refused(&m, Counter::OptionTruncated);
+    refused(&m, Counter::OptionTruncated, true);
 }
 
 #[test]
@@ -121,13 +132,13 @@ fn s_dhcp_dh_047_a_repeated_message_type() {
     let mut m = offer();
     m.pop();
     m.extend_from_slice(&[53, 1, 2, 255]);
-    refused(&m, Counter::OptionLength);
+    refused(&m, Counter::OptionLength, true);
 }
 
 #[test]
 fn s_dhcp_dh_048_option_lengths() {
     for (code, data) in [(54, vec![192, 0, 2, 254, 0]), (1, vec![255, 255, 255]), (3, vec![0; 6]), (6, vec![]), (51, vec![0, 1])] {
-        refused(&offer_with(code, Some(data)), Counter::OptionLength);
+        refused(&offer_with(code, Some(data)), Counter::OptionLength, true);
     }
 }
 
@@ -155,23 +166,23 @@ fn s_dhcp_dh_051_overload_misused() {
     let overload = hex(V_DHCP_OFFER_OVERLOAD);
     let mut value_4 = overload.clone();
     value_4[245] = 4;
-    refused(&value_4, Counter::OverloadInvalid);
+    refused(&value_4, Counter::OverloadInvalid, true);
     let n = overload.len();
     let mut length_2 = overload[..n - 1].to_vec();
     length_2[244] = 2;
     length_2.extend_from_slice(&[0, 255]);
-    refused(&length_2, Counter::OverloadInvalid);
+    refused(&length_2, Counter::OverloadInvalid, true);
     let mut nested = overload;
     nested[126..130].copy_from_slice(&[52, 1, 1, 255]);
-    refused(&nested, Counter::OverloadInvalid);
+    refused(&nested, Counter::OverloadInvalid, true);
 }
 
 #[test]
 fn s_dhcp_dh_052_message_types() {
-    refused(&offer_with(53, None), Counter::MessageTypeMissing);
-    refused(&offer_with(53, Some(vec![1])), Counter::WrongDirection);
-    refused(&offer_with(53, Some(vec![3])), Counter::WrongDirection);
-    refused(&offer_with(53, Some(vec![10])), Counter::MessageTypeUnsupported);
+    refused(&offer_with(53, None), Counter::MessageTypeMissing, true);
+    refused(&offer_with(53, Some(vec![1])), Counter::WrongDirection, true);
+    refused(&offer_with(53, Some(vec![3])), Counter::WrongDirection, true);
+    refused(&offer_with(53, Some(vec![10])), Counter::MessageTypeUnsupported, true);
     let mut d = D::db();
     d.receive(100_000, &server(0x1234_5678, A, &with(offer_options(), 53, Some(vec![9]))));
     assert_eq!((d.count(Counter::Forcerenew), d.count(Counter::XidMismatch)), (1, 0));
@@ -182,14 +193,14 @@ fn s_dhcp_dh_052_message_types() {
 fn s_dhcp_dh_053_a_foreign_client_identifier() {
     let mut id = CLIENT_ID.to_vec();
     id[14] = 0x0b;
-    refused(&offer_with(61, Some(id)), Counter::ClientIdMismatch);
+    refused(&offer_with(61, Some(id)), Counter::ClientIdMismatch, true);
 }
 
 #[test]
 fn s_dhcp_dh_054_the_server_identifier() {
-    refused(&offer_with(54, None), Counter::NoServerId);
+    refused(&offer_with(54, None), Counter::NoServerId, true);
     for bad in [Ipv4Addr::UNSPECIFIED, Ipv4Addr::BROADCAST, Ipv4Addr::new(224, 0, 0, 1), Ipv4Addr::new(127, 0, 0, 1)] {
-        refused(&offer_with(54, Some(ip(bad))), Counter::ServerIdInvalid);
+        refused(&offer_with(54, Some(ip(bad))), Counter::ServerIdInvalid, true);
     }
 }
 
@@ -204,21 +215,21 @@ fn s_dhcp_dh_055_yiaddr_must_be_a_host() {
         Ipv4Addr::new(240, 0, 0, 1),
         Ipv4Addr::BROADCAST,
     ] {
-        refused(&server(XID, bad, &offer_options()), Counter::YiaddrInvalid);
+        refused(&server(XID, bad, &offer_options()), Counter::YiaddrInvalid, true);
     }
 }
 
 #[test]
 fn s_dhcp_dh_056_the_lease_time() {
-    refused(&offer_with(51, None), Counter::NoLeaseTime);
-    refused(&offer_with(51, Some(seconds(0))), Counter::LeaseZero);
+    refused(&offer_with(51, None), Counter::NoLeaseTime, true);
+    refused(&offer_with(51, Some(seconds(0))), Counter::LeaseZero, true);
 }
 
 #[test]
 fn s_dhcp_dh_057_the_mask() {
-    refused(&offer_with(1, None), Counter::NoSubnetMask);
+    refused(&offer_with(1, None), Counter::NoSubnetMask, true);
     for bad in [[255, 0, 255, 0], [0, 0, 0, 0], [255, 255, 255, 255]] {
-        refused(&offer_with(1, Some(bad.to_vec())), Counter::MaskInvalid);
+        refused(&offer_with(1, Some(bad.to_vec())), Counter::MaskInvalid, true);
     }
     let slash_31 = with(with(offer_options(), 1, Some(vec![255, 255, 255, 254])), 3, None);
     accepted(&server(XID, Ipv4Addr::new(192, 0, 2, 0), &slash_31));
@@ -228,10 +239,10 @@ fn s_dhcp_dh_057_the_mask() {
 #[test]
 fn s_dhcp_dh_058_network_and_broadcast_yiaddr() {
     for bad in [Ipv4Addr::new(192, 0, 2, 0), Ipv4Addr::new(192, 0, 2, 255)] {
-        refused(&server(XID, bad, &offer_options()), Counter::YiaddrInvalid);
+        refused(&server(XID, bad, &offer_options()), Counter::YiaddrInvalid, true);
     }
     let slash_30 = with(offer_options(), 1, Some(vec![255, 255, 255, 252]));
-    refused(&server(XID, Ipv4Addr::new(192, 0, 2, 3), &slash_30), Counter::YiaddrInvalid);
+    refused(&server(XID, Ipv4Addr::new(192, 0, 2, 3), &slash_30), Counter::YiaddrInvalid, true);
     accepted(&server(XID, A, &slash_30));
 }
 

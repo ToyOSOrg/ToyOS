@@ -6,7 +6,8 @@ use std::collections::HashSet;
 use std::net::Ipv4Addr;
 
 use common::*;
-use toyos_net_tcp::{siphash24, Counter, Error, Instant, Tcp};
+use toyos_net_tcp::{Counter, Error, Instant, Tcp};
+use toyos_net_wire::siphash::siphash24;
 
 fn stack() -> Tcp {
     Tcp::new(config(65_535)).unwrap()

@@ -5,10 +5,10 @@
 
 use core::net::Ipv4Addr;
 
+use toyos_net_wire::addr::{is_host, is_martian, Cidr};
 use toyos_net_wire::ipv4::MulticastAddr;
 use toyos_net_wire::Instant;
 
-use crate::addr::{is_class_e, is_host};
 use crate::counters::Counter;
 use crate::iface::{Cx, Interface};
 use crate::nud::Nud;
@@ -66,8 +66,7 @@ pub(crate) fn lookup(ifaces: &[Interface], destination: Ipv4Addr, source: Source
         };
         return Ok(Route { iface: IfIndex(index), next_hop: NextHop::Broadcast, source });
     }
-    let [first, ..] = destination.octets();
-    if first == 0 || first == 127 || is_class_e(destination) {
+    if is_martian(destination) {
         return Err(Counter::RouteInvalidDestination);
     }
     if ifaces.iter().any(|i| i.owns(destination)) {
@@ -85,8 +84,8 @@ pub(crate) fn lookup(ifaces: &[Interface], destination: Ipv4Addr, source: Source
     }
     let connected = candidates()
         .flat_map(|(index, i)| i.usable().filter(|a| a.cidr.contains(destination)).map(move |a| (index, i, a.cidr)))
-        .fold(None, |best: Option<(usize, &Interface, crate::addr::Cidr)>, (index, i, cidr)| match best {
-            Some((_, _, b)) if b.len >= cidr.len => best,
+        .fold(None, |best: Option<(usize, &Interface, Cidr)>, (index, i, cidr)| match best {
+            Some((_, _, b)) if b.prefix_len() >= cidr.prefix_len() => best,
             _ => Some((index, i, cidr)),
         });
     if let Some((index, i, cidr)) = connected {
@@ -142,7 +141,7 @@ impl Ip {
     /// refused entry is refused whole and the old one kept (§3.2).
     pub fn set_gateways(&mut self, now: Instant, iface: IfIndex, gateways: &[Ipv4Addr]) -> Result<(), Counter> {
         let now = self.clock(now);
-        let local: alloc::vec::Vec<Ipv4Addr> = self.ifaces.iter().flat_map(|i| i.addresses.iter().map(|a| a.cidr.addr)).collect();
+        let local: alloc::vec::Vec<Ipv4Addr> = self.ifaces.iter().flat_map(|i| i.addresses.iter().map(|a| a.cidr.addr())).collect();
         let Some((i, mut cx)) = self.split(now, iface) else {
             self.log.count(Counter::UnknownInterface);
             return Err(Counter::UnknownInterface);

@@ -6,7 +6,7 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use common::*;
-use toyos_net_ip::limits::acd::{ANNOUNCE_INTERVAL, ANNOUNCE_WAIT, PROBE_MAX, PROBE_MIN, PROBE_WAIT, RATE_LIMIT_INTERVAL};
+use toyos_net_ip::limits::acd::{ANNOUNCE_INTERVAL, ANNOUNCE_WAIT, PROBE_MAX, PROBE_MIN, PROBE_WAIT};
 use toyos_net_ip::{AddrState, Counter, Event, Instant, Peer, Source};
 use toyos_net_wire::ethernet::MacAddr;
 
@@ -164,7 +164,7 @@ fn s_ip_acd_008_ten_conflicts_rate_limit_new_candidates() {
     let added = tenth.after(Duration::from_secs(5));
     h.ip.add_address(added, h.if0, ip4(192, 0, 2, 40), 24).unwrap();
     assert_eq!(h.count(Counter::AcdRateLimited), 1);
-    assert_eq!(h.ip.next_deadline(), Some(tenth.after(RATE_LIMIT_INTERVAL)));
+    assert_eq!(h.ip.next_deadline(), Some(tenth.after(Duration::from_millis(60_000))));
 }
 
 #[test]

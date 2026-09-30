@@ -3,6 +3,7 @@
 
 use core::net::Ipv4Addr;
 
+use toyos_net_wire::addr::{is_host, is_martian};
 use toyos_net_wire::arp::Arp;
 use toyos_net_wire::ethernet::{EtherType, Frame, MacAddr, MacClass, TagProtocol, Tags};
 use toyos_net_wire::icmp::HostUnreachable;
@@ -12,7 +13,6 @@ use toyos_net_wire::tcp::TcpSegment;
 use toyos_net_wire::udp::UdpDatagram;
 use toyos_net_wire::Instant;
 
-use crate::addr::{is_class_e, is_host};
 use crate::counters::Counter;
 use crate::iface::Interface;
 use crate::{arp, igmp, Arrival, Cast, Delivery, IfIndex, Ip, Peer};
@@ -45,10 +45,11 @@ fn dispatch(i: &Interface, frame: &Frame<'_>) -> Option<Counter> {
     }
 }
 
-/// The acquisition exception (ruling H-1): before the interface holds a usable address, a
-/// unicast datagram to UDP port 68 in a frame to our MAC is admitted for the DHCP client alone.
-fn acquisition(i: &Interface, link: MacClass, packet: &Ipv4Packet<'_>) -> bool {
-    link == MacClass::Individual
+/// The acquisition exception (C-3): before the interface holds a usable address, a datagram to
+/// UDP port 68 whose destination names one host, and so (step 3) came in a frame to our MAC, is
+/// admitted for the DHCP client alone.
+fn acquisition(i: &Interface, packet: &Ipv4Packet<'_>) -> bool {
+    is_host(packet.destination())
         && i.usable().next().is_none()
         && packet.protocol() == Protocol::Udp
         && !packet.is_fragment()
@@ -64,8 +65,7 @@ fn admit(ifaces: &[Interface], i: &Interface, link: MacClass, packet: &Ipv4Packe
         MacClass::Group if !group => return Err(Counter::IpUnicastInLinkMulticast),
         MacClass::Individual | MacClass::Broadcast | MacClass::Group => {}
     }
-    let [first, ..] = destination.octets();
-    if first == 0 || first == 127 || is_class_e(destination) {
+    if is_martian(destination) {
         return Err(Counter::IpMartianDestination);
     }
     let cast = if i.is_usable(destination) {
@@ -78,7 +78,7 @@ fn admit(ifaces: &[Interface], i: &Interface, link: MacClass, packet: &Ipv4Packe
         Cast::Multicast(g)
     } else if i.owns(destination) {
         return Err(Counter::IpTentativeDestination);
-    } else if acquisition(i, link, packet) {
+    } else if acquisition(i, packet) {
         Cast::Acquisition
     } else {
         return Err(Counter::IpNotForUs);

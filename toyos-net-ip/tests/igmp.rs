@@ -5,7 +5,7 @@ mod common;
 use std::net::Ipv4Addr;
 
 use common::*;
-use toyos_net_ip::{Counter, IgmpMode, Peer, RefusalLog};
+use toyos_net_ip::{limits, Counter, Event, IgmpMode, Peer, RefusalLog};
 use toyos_net_wire::ethernet::MacAddr;
 use toyos_net_wire::ipv4::MulticastAddr;
 
@@ -523,6 +523,14 @@ fn s_ip_mod_001_one_line_per_rule_per_10_s() {
     let times = (0..100u64).map(|n| n * 10).chain([10_001]);
     let lines: Vec<u64> = refusals.iter().zip(times).filter_map(|(r, t)| log.admit(H::instant(t), r.rule)).collect();
     assert_eq!(lines, [0, 99]);
+
+    let frame = to_a(&hex(V_IP_LSRR));
+    for _ in 0..=limits::EVENTS {
+        let _ = h.ip.receive(h.clock(), h.if0, &frame);
+    }
+    let named = h.ip.drain_events().filter(|e| matches!(e, Event::Refused(_))).count();
+    assert_eq!(named, limits::EVENTS, "an undrained shell holds a bounded list");
+    assert_eq!(h.count(Counter::IpEventOverflow), 1);
 }
 
 #[test]
@@ -533,4 +541,23 @@ fn s_ip_mod_002_ordinary_refusals_are_not_logged() {
     }
     assert_eq!(h.count(Counter::IpNotForUs), 1_000);
     assert!(h.events.iter().all(|e| !matches!(e, toyos_net_ip::Event::Refused(_))));
+
+    let mut logged: Vec<&str> = Counter::ALL.iter().filter(|c| c.logged()).map(|c| c.name()).collect();
+    logged.sort_unstable();
+    let mut section_13_2 = [
+        "ip.source-route",
+        "ip.fragment",
+        "icmp.redirect",
+        "icmp.timestamp-request",
+        "icmp.source-quench",
+        "igmp.v1-query",
+        "igmp.query-no-router-alert",
+        "igmp.general-query-destination",
+        "arp.mac-changed",
+        "arp.override-locked",
+        "acd.conflict",
+        "acd.defended",
+    ];
+    section_13_2.sort_unstable();
+    assert_eq!(logged, section_13_2, "§13.2's logged refusals, and no others");
 }

@@ -61,6 +61,7 @@ toyos_net_wire::counters! {
     NbPendingOverflow = "nb.pending-overflow";
     NbPendingFull = "nb.pending-full";
     NbPendingDropped = "nb.pending-dropped";
+    NbPendingEvicted = "nb.pending-evicted";
     NbFailedRefused = "nb.failed-refused";
     NbTableFull = "nb.table-full";
     NbResolved = "nb.resolved";

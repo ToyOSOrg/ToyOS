@@ -54,11 +54,11 @@ impl Interface {
     }
 
     pub fn is_usable(&self, addr: Ipv4Addr) -> bool {
-        self.usable().any(|a| a.cidr.addr == addr)
+        self.usable().any(|a| a.cidr.addr() == addr)
     }
 
     pub fn owns(&self, addr: Ipv4Addr) -> bool {
-        self.addresses.iter().any(|a| a.cidr.addr == addr)
+        self.addresses.iter().any(|a| a.cidr.addr() == addr)
     }
 
     /// Inside the prefix of a usable address: reachable without a gateway.
@@ -68,7 +68,7 @@ impl Interface {
 
     /// §3.5 rules 1 and 2: a usable address whose prefix holds `toward`, else the first usable one.
     pub fn source_for(&self, toward: Ipv4Addr) -> Option<Ipv4Addr> {
-        self.usable().find(|a| a.cidr.contains(toward)).or_else(|| self.usable().next()).map(|a| a.cidr.addr)
+        self.usable().find(|a| a.cidr.contains(toward)).or_else(|| self.usable().next()).map(|a| a.cidr.addr())
     }
 
     /// The directed broadcast of one of its usable prefixes.

@@ -131,7 +131,7 @@ fn s_udp_us_039_a_bad_checksum_is_malformed() {
     let mut bad = hi();
     bad[26..28].copy_from_slice(&[0xec, 0x5c]);
     assert_eq!(u.datagram(&bad), None);
-    assert_eq!(u.ip.wire_refusals("udp.checksum"), 1);
+    assert_eq!(u.ip.wire_counters().find(|(name, _)| *name == "udp.checksum"), Some(("udp.checksum", 1)));
     assert_eq!(u.udp.recv(id, &mut [0; 8]), Ok(None));
     assert!(u.out().is_empty());
 }
@@ -204,6 +204,11 @@ fn s_udp_us_044_the_acquisition_exception() {
     assert_eq!(u.udp.receive(u.clock(), &arrival, &datagram), Verdict::Delivered);
     let (payload, r) = received(&mut u, id);
     assert_eq!((payload.as_slice(), r.destination), (&offer[42..], A));
+    assert_eq!(u.ip_count(toyos_net_ip::Counter::IpAcquisitionAdmitted), 1);
+    u.ip.add_address(u.clock(), u.if0, A, 24).unwrap();
+    let elsewhere = edit(offer[14..].to_vec(), |ip| set_destination(ip, ip4(192, 0, 2, 7)));
+    assert_eq!(u.frame(&eth(MAC_A, MAC_R, 0x0800, &elsewhere)), Some(Verdict::Delivered), "a probing address is not usable");
+    assert_eq!(u.ip_count(toyos_net_ip::Counter::IpAcquisitionAdmitted), 2);
 
     let mut u = U::bare();
     u.bind(ANY, 5_000).unwrap();
@@ -212,6 +217,15 @@ fn s_udp_us_044_the_acquisition_exception() {
     fix(&mut ip);
     assert_eq!(u.frame(&eth(MAC_A, MAC_R, 0x0800, &ip)), None);
     assert_eq!(u.ip_count(toyos_net_ip::Counter::IpNotForUs), 1);
+
+    let mut u = U::bare();
+    let id = u.bind(ANY, 68).unwrap();
+    u.udp.set_acquisition(id).unwrap();
+    let group = edit(offer[14..].to_vec(), |ip| set_destination(ip, ip4(239, 9, 9, 9)));
+    assert_eq!(u.frame(&eth(MAC_A, MAC_R, 0x0800, &group)), None, "C-3 admits a unicast destination only");
+    assert_eq!(u.ip_count(toyos_net_ip::Counter::IpNotForUs), 1);
+    assert_eq!(u.ip_count(toyos_net_ip::Counter::IpAcquisitionAdmitted), 0);
+    assert_eq!(u.udp.recv(id, &mut [0; 1_500]), Ok(None));
 
     // A socket on 68 without the acquisition mark never hears it (§U5.3).
     let mut u = U::bare();
@@ -324,6 +338,58 @@ fn s_udp_us_053_accepted_datagrams_outlive_close() {
         let ip = ip_of(frame).unwrap();
         assert_eq!((ip.source(), &ip.payload()[..2], &ip.payload()[8..]), (A, &[0xc3, 0x51][..], &data[..]));
     }
+
+    // Closed sockets hold at most CLOSED_DATAGRAMS together; past it a close refuses the rest.
+    let mut u = U::uf();
+    let mut accepted = 0;
+    for n in 0..100u16 {
+        let id = u.bind(ANY, 50_001 + n).unwrap();
+        for _ in 0..limits::TX_DATAGRAMS {
+            u.udp.send_to(&mut u.ip, id, DNS, 53, &[7; 1_000]).unwrap();
+            accepted += 1;
+        }
+        u.udp.close(id).unwrap();
+    }
+    assert_eq!(accepted, 1_600);
+    assert_eq!(u.count(Counter::TxDiscardedOnClose), 1_600 - 16);
+    let out = u.out();
+    assert_eq!(out.len(), 16);
+    assert!(out.iter().all(|f| ip_of(f).unwrap().payload()[..2] == 50_001u16.to_be_bytes()), "the first close's, in order");
+
+    let mut u = U::uf();
+    let first = u.bind(ANY, 50_001).unwrap();
+    for _ in 0..10 {
+        u.udp.send_to(&mut u.ip, first, DNS, 53, b"a").unwrap();
+    }
+    u.udp.close(first).unwrap();
+    let second = u.bind(ANY, 50_002).unwrap();
+    for _ in 0..limits::TX_DATAGRAMS {
+        u.udp.send_to(&mut u.ip, second, DNS, 53, b"b").unwrap();
+    }
+    u.udp.close(second).unwrap();
+    assert_eq!(u.count(Counter::TxDiscardedOnClose), 10);
+    let order: String = u.out().iter().map(|f| char::from(ip_of(f).unwrap().payload()[8])).collect();
+    assert_eq!(order, "aaaaaaaaaabbbbbb");
+
+    // A slot a closed socket leaves takes no turn with it, and closed sockets take one turn.
+    let mut u = U::uf();
+    let x = u.bind(ANY, 50_001).unwrap();
+    u.udp.send_to(&mut u.ip, x, DNS, 53, b"x").unwrap();
+    u.udp.close(x).unwrap();
+    assert_eq!(u.out_with(1).len(), 1);
+    let y = u.bind(ANY, 50_002).unwrap();
+    let z = u.bind(ANY, 50_003).unwrap();
+    for _ in 0..2 {
+        u.udp.send_to(&mut u.ip, y, DNS, 53, b"y").unwrap();
+        u.udp.send_to(&mut u.ip, z, DNS, 53, b"z").unwrap();
+    }
+    let w = u.bind(ANY, 50_004).unwrap();
+    for _ in 0..2 {
+        u.udp.send_to(&mut u.ip, w, DNS, 53, b"w").unwrap();
+    }
+    u.udp.close(w).unwrap();
+    let order: String = u.out().iter().map(|f| char::from(ip_of(f).unwrap().payload()[8])).collect();
+    assert_eq!(order, "yzwyzw");
 }
 
 #[test]

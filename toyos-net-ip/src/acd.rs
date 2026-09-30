@@ -1,7 +1,7 @@
 //! Address conflict detection (RFC 5227, §8). A new address probes on RFC 5227's schedule scaled
 //! by the owner's ruling (`limits::acd`), is usable from its first announcement, and is then
 //! defended once per DEFEND_INTERVAL and given up on a second conflict inside it (§2.4 (b)): one
-//! forged packet cannot take an address away. Every interval starts when its frame leaves.
+//! forged packet cannot take an address away.
 
 use core::net::Ipv4Addr;
 
@@ -34,7 +34,7 @@ fn timer(cx: &Cx<'_>, addr: Ipv4Addr) -> Timer {
 }
 
 fn record(i: &mut Interface, addr: Ipv4Addr) -> Option<&mut Address> {
-    i.addresses.iter_mut().find(|a| a.cidr.addr == addr)
+    i.addresses.iter_mut().find(|a| a.cidr.addr() == addr)
 }
 
 /// Schedules a tentative address's first probe: a draw in [0, PROBE_WAIT], deferred past
@@ -122,7 +122,7 @@ pub(crate) fn announced(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr, owed
 /// Removes `addr` after a conflict, and tells the shell which kind.
 fn lose(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr, mac: MacAddr) {
     let now = cx.now;
-    let Some(index) = i.addresses.iter().position(|a| a.cidr.addr == addr) else { return };
+    let Some(index) = i.addresses.iter().position(|a| a.cidr.addr() == addr) else { return };
     let removed = i.addresses.remove(index);
     cx.timers.cancel(timer(cx, addr));
     cx.log.refuse(Counter::AcdConflict, cx.iface, Peer::Arp { ip: addr, mac });
@@ -156,7 +156,7 @@ pub(crate) fn conflict(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr, mac: 
 /// The link came up: held addresses stay usable and are announced twice, and probing starts for
 /// any address added while it was down (§8.6).
 pub(crate) fn link_up(i: &mut Interface, cx: &mut Cx<'_>) {
-    let addrs: alloc::vec::Vec<(Ipv4Addr, bool)> = i.addresses.iter().map(|a| (a.cidr.addr, a.usable())).collect();
+    let addrs: alloc::vec::Vec<(Ipv4Addr, bool)> = i.addresses.iter().map(|a| (a.cidr.addr(), a.usable())).collect();
     for (addr, usable) in addrs {
         if usable {
             if let Some(Address { phase: Phase::Usable { owed, .. }, .. }) = record(i, addr) {
@@ -173,13 +173,13 @@ pub(crate) fn link_up(i: &mut Interface, cx: &mut Cx<'_>) {
 pub(crate) fn link_down(i: &mut Interface, cx: &mut Cx<'_>) {
     let iface = cx.iface;
     for a in &mut i.addresses {
-        cx.timers.cancel(Timer::Acd(iface, a.cidr.addr));
+        cx.timers.cancel(Timer::Acd(iface, a.cidr.addr()));
         if let Phase::Usable { owed, queued, .. } = &mut a.phase {
             *owed = 0;
             *queued = false;
         }
     }
-    let tentative = i.addresses.iter().filter(|a| !a.usable()).map(|a| a.cidr.addr);
+    let tentative = i.addresses.iter().filter(|a| !a.usable()).map(|a| a.cidr.addr());
     for addr in tentative.collect::<alloc::vec::Vec<_>>() {
         cx.log.event(Event::NotVerified { iface, addr });
     }
