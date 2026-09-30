@@ -16,7 +16,7 @@ An operating system built from scratch in Rust, held to a production-grade engin
 | `.claude/agents/reviewer.md` | the review prompt the orchestrator spawns a reviewer with |
 
 There are no spec documents. Rules live where they are enforced — a gate, a
-module header, the redlist, the review prompt — and everything else is an
+module header, the review prompt — and everything else is an
 issue. Free text that merely describes the tree rots and is deleted, not
 maintained. A `CLAUDE.md` never holds a list that a manifest, a directory or a
 gate already answers; it points at that source instead.
@@ -69,7 +69,7 @@ The bar is not yet the tree: `.claude/agents/reviewer.md`, "Arrivals", says wher
 
 ## Build & test
 
-The testing rules live where they are enforced: known reds in `src/redlist.rs`, the PR gate and the nightly in `.github/workflows/`. Operationally:
+The testing rules live where they are enforced: the PR gate and the nightly in `.github/workflows/`. Operationally:
 
 - `cargo run` builds everything (toolchain, kernel, bootloader, userland, image) and launches QEMU; `--build-only` skips the launch. `cargo test` runs the QEMU harness; `cargo run -- --ci host` runs every host suite, as the PR gate's required `host` check does.
 - **Agents never run QEMU.** An agent verifies with host tests and builds the image at most; the orchestrator runs every guest test, one suite at a time.
@@ -92,7 +92,7 @@ The root `Cargo.toml`'s `[workspace]` `members` and `exclude` lists account for 
 - **Every written number comes from a command that was run.** An estimate or datasheet bound says so. Write commit messages with `git commit -F <file>`, never `-m` — a double-quoted `-m` substitutes backticks and the shell runs them.
 - **Commit freely on your branch; land through a pull request.** `main` moves only through a merged PR. `gh pr create --draft` at the first push — CI runs on PRs and nothing else; `gh pr ready` plus a written `--title`/`--body-file` when finished (never `--fill`); `gh pr merge --auto --merge` enqueues on `main`'s required merge queue, which builds each merge's exact composition and runs the required checks on it before `main` moves; `cargo run -- --sync` after it lands. Never merge into `main` by hand. The PR's title and body become the merge commit's: write them as main's record. A modify/delete conflict is resolved by accounting for every hunk of the modified side, never by checking its headings survived. A merge that deletes a document also deletes every citation to it in the same merge, checked by searching the bare name as well as the path. An ABI change lands with the work that needs it: every worktree builds the toolchain its own sources name, so branches that change the ABI run side by side and none waits on another. Every merge leaves `main`'s tip compiling. A branch lands after a review against `.claude/agents/reviewer.md`, spawned by the orchestrator with its brief and judged by it.
 - **Never rewrite history, and never touch `main`.** No `--amend`, no `rebase`, no `--force` — on your own branch as much as anywhere: a pushed hash may already be cited. `main` is protected — PR required, no force-push, no deletion, no bypass.
-- **A red test is a defect unless `src/redlist.rs` disables it with its issue (`cargo run -- --known-red <test>`); a flaky test is disabled at once, never re-run.**
+- **A red test is a defect: it is fixed, or deleted with its issue recording the commit that restores it; a flaky test is deleted at once, never re-run.**
 - **A high-risk change names its two checks.** Security boundaries, the scheduler, the ABI, filesystems, devices, memory management, concurrency primitives: the PR names the negative control or mutation that fails if the implementation is wrong, and one epistemically independent oracle — an external specification, a differential implementation, real hardware, a third-party checker, a formal model, or a recorded real failure. A second agent is not independence: five artifacts from one wrong model still agree. A mutation is a negative control only if it reverts the *whole* change onto the base the green arm was measured on — a one-line revert of a change that moved two things measures neither.
 - **Timing and audio verdicts come only from metal.** A QEMU test asserts order, completion, content and counts, never how long something took, and plays no audio; its only clock is a hang ceiling.
 - **Subagents wait in the foreground** — background notifications do not reliably re-wake them: explicit `timeout`s, and for longer work background once and block with a few long foreground waits, polling before each sleep.

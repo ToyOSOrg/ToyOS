@@ -27,7 +27,6 @@ Four fields, three required, no defaults.
 |---|---|---|
 | `status` | `open` | it is work, and nobody is holding it |
 | | `assigned` | it is work, and somebody is — the body says who or which task |
-| | `expected-red` | a test fails on this today and `src/redlist.rs` disables it |
 | | `owner` | it is the owner's to decide, and nobody else may |
 | | `none` | nothing is owed |
 | `kind` | `defect` | real, reproducible, someone should fix it |
@@ -48,7 +47,7 @@ answer that second question by themselves, so they may not contradict it:
 
 | `kind` | `status` must be |
 |---|---|
-| `defect`, `tooling`, `finding` | `open`, `assigned` or `expected-red` |
+| `defect`, `tooling`, `finding` | `open` or `assigned` |
 | `track` | `open` or `assigned` |
 | `question` | `owner` |
 | `rejected` | `none` |
@@ -137,8 +136,7 @@ bare name is invisible to a path search. Search the *tree* rather than the
 checkout (`git grep <rev>`): `rg` skips dotfile directories without `--hidden`,
 and `.github/` holds citations too. Then read where the hits are. One in a comment
 under `toyos-abi/src`, `toyos/src` or a published crate changes no identity
-(`src/identity.rs`), so it owes no version and builds no sysroot. One in
-`src/redlist.rs` is a disabled test's `issue`: the row goes with the file.
+(`src/identity.rs`), so it owes no version and builds no sysroot.
 
 ## Two area notes, carried over from the file this replaced
 
