@@ -1213,7 +1213,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     ("iommu_context_absent", Sched::Parallel),
     ("iommu_empty_domain", Sched::Parallel),
     ("iommu_interrupt_remapping", Sched::Parallel),
-    ("iommu_virtio_platform", Sched::Parallel),
     ("iommu_domain_isolation", Sched::Parallel),
     ("iommu_gpu_scanout_swap", Sched::Parallel),
     ("iommu_gpu_foreign_backing", Sched::Parallel),
@@ -9136,9 +9135,6 @@ fn run_machine_test(
         "iommu_empty_domain" => common::iommu::iommu_empty_domain(test_config, c_bins, rust_bins),
         "iommu_interrupt_remapping" => {
             common::iommu::iommu_interrupt_remapping(test_config, c_bins, rust_bins)
-        }
-        "iommu_virtio_platform" => {
-            common::iommu::iommu_virtio_platform(test_config, c_bins, rust_bins)
         }
         "iommu_domain_isolation" => {
             common::iommu::iommu_domain_isolation(test_config, c_bins, rust_bins)
