@@ -409,7 +409,7 @@ pub(crate) fn fire(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) {
             s.backoff = false;
             cx.timers.arm(timer(cx, addr), now.after(IDLE_LIFETIME));
         }
-        // Not idle while released datagrams are its: `drained` deletes it once they have left.
+        // Not idle while released datagrams are its: `leave` deletes it once they have left.
         Nud::Stale(_) | Nud::Unreachable(_) if releasing => {}
         Nud::Stale(_) | Nud::Unreachable(_) | Nud::Failed => {
             remove(i, cx, addr);
@@ -428,20 +428,12 @@ pub(crate) fn leave(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) -> Optio
     if let Some((destination, _)) = held.frame.split_first_chunk_mut::<6>() {
         *destination = mac.0;
     }
-    drained(i, cx, addr);
-    Some(held)
-}
-
-/// A datagram of `addr`'s left the control queue. Every STALE or quiescent UNREACHABLE entry has a
-/// deadline armed but one whose idle lifetime passed while its queue held datagrams, which goes
-/// with the last of them.
-fn drained(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) {
-    let Some(n) = i.neighbours.get(&addr) else { return };
     let idle = matches!(n.state, Nud::Stale(_) | Nud::Unreachable(_)) && !n.state.releasing() && cx.timers.get(timer(cx, addr)).is_none();
     if idle {
         remove(i, cx, addr);
         route::refresh_active(i, cx);
     }
+    Some(held)
 }
 
 /// PROBE's first unicast request, now or at the spacing boundary.
