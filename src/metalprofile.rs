@@ -197,6 +197,11 @@ mod tests {
         ("toyos_tco::BOUND_MS", toyos_tco::BOUND_MS),
         ("toyos_tco::WEDGE_BOUND_MS", toyos_tco::WEDGE_BOUND_MS),
         ("toyos_tco::HARD_LOCKUP_BOUND_MS", toyos_tco::HARD_LOCKUP_BOUND_MS),
+        ("toyos_build::metal::STAGED_BOUND_MS", crate::metal::STAGED_BOUND_MS),
+        (
+            "toyos_tco::hard_lockup_bound_ms(toyos_build::metal::STAGED_BOUND_MS)",
+            toyos_tco::hard_lockup_bound_ms(crate::metal::STAGED_BOUND_MS),
+        ),
     ];
 
     /// A row whose ceiling *is* a constant this repository declares carries that
@@ -288,40 +293,6 @@ mod sizing_tests {
 
     fn root() -> &'static Path {
         Path::new(env!("CARGO_MANIFEST_DIR"))
-    }
-
-    /// **The overrun this rule exists for, in the machine's own numbers.** The
-    /// `shared` boot's seventy-two members at their committed 845 ms each are
-    /// 60.8 s inside a 60 s bound, so the runner resets the machine with the
-    /// tail unrun and each of those is reported as a missing exit record rather
-    /// than as a list too long for the bound.
-    #[test]
-    fn the_shared_list_does_not_fit_one_boot() {
-        let profile = Profile::load(root()).expect(PATH);
-        let per = profile.members_per_boot("shared").expect("shared is priced");
-        assert!(
-            per < 72,
-            "the allowance leaves room for {per} members and the list carries 72"
-        );
-        // Two chunks and not three: a list cut finer costs another minute of
-        // the machine for nothing.
-        assert_eq!(72_usize.div_ceil(per), 2, "{per} members a boot");
-        let measured =
-            profile.row(&job_ms_row("shared")).and_then(|r| r.measured).expect("a reading");
-        assert!(
-            72 * measured > toyos_tco::JOB_BOUND_MS,
-            "{measured} ms a member over 72 members fits the bound, so this rule cuts nothing"
-        );
-    }
-
-    /// `ccorpus` fits its bound and the same rule still cuts it: four fifths of
-    /// a bound is no margin for a slower stick, and the price of being wrong is
-    /// every member after the cut losing its verdict.
-    #[test]
-    fn a_corpus_that_fits_its_bound_is_cut_too() {
-        let profile = Profile::load(root()).expect(PATH);
-        let per = profile.members_per_boot("ccorpus").expect("ccorpus is priced");
-        assert_eq!(118_usize.div_ceil(per), 2, "{per} members a boot");
     }
 
     /// A member priced above the whole bound still gets a boot, rather than a

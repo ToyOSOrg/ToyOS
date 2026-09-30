@@ -300,8 +300,8 @@ fn oversubscription(smp: u32) -> (u32, u32) {
 
 /// A ceiling, paid out for the host and the guest it bounds.
 ///
-/// **Every ceiling in this suite is three times the slowest the test it bounds
-/// was measured to take**, in whole-suite runs on the host [`REFERENCE_BOOT_MS`]
+/// **Every ceiling in this suite is at most three times the slowest the test it
+/// bounds was measured to take**, in whole-suite runs on the host [`REFERENCE_BOOT_MS`]
 /// describes, at the suite's default width — so a test's time already carries
 /// the guests it shares that host with. A wait is bounded by that multiple of
 /// its whole test, the one number measured; a guest still talking at twice its
@@ -559,8 +559,8 @@ pub fn ceiling_verdict(
         ));
     }
     // The backstop, for a guest that is stuck *and* chatty and so never trips
-    // the silence guard: twice the ceiling, six times the slowest this test was
-    // ever measured.
+    // the silence guard: twice the ceiling, at most six times the slowest this test
+    // was ever measured.
     let backstop = ceiling * 2;
     if elapsed > backstop {
         return Some(format!(

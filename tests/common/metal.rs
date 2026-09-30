@@ -820,7 +820,11 @@ fn build(
              field on an arm"
         ));
     }
-    let deadline = format!("{}{}", toyos_tco::DEADLINE_PARAM, toyos_tco::WEDGE_BOUND_MS);
+    let deadline = format!(
+        "{}{}",
+        toyos_tco::DEADLINE_PARAM,
+        toyos_build::metal::bound_for(&batch.params)
+    );
     let mut params: Vec<&str> = batch.params.clone();
     params.push(&deadline);
     // **A talking or swapping boot carries the key the loop will offer**,
@@ -1092,7 +1096,16 @@ pub fn run(
             eprintln!("[metal] {label}: cargo {}", words.join(" "));
             let booted = Command::new("cargo").args(&words).current_dir(&root).status();
             if let Some(swap) = beside {
-                match swap.and_then(|mut child| child.wait()) {
+                // A boot that was refused leaves no machine to dial, and the
+                // swap would wait out its whole bound for one.
+                let unbooted = !booted.as_ref().is_ok_and(|status| status.success());
+                let swap = swap.and_then(|mut child| {
+                    if unbooted {
+                        child.kill()?;
+                    }
+                    child.wait()
+                });
+                match swap {
                     Ok(status) if status.success() => {}
                     Ok(status) => {
                         refused.insert(label, format!("toyos-metal --swap exited {status}"));

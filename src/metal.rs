@@ -59,7 +59,8 @@ pub fn return_secs() -> u64 {
     longest.div_ceil(1_000) + RETURN_ALLOWANCE_SECS
 }
 
-const POLL_SECS: u64 = 5;
+/// How often the loop asks whether the machine is there.
+const POLL: std::time::Duration = std::time::Duration::from_secs(1);
 
 const PING_EVERY_SECS: u64 = 1;
 
@@ -871,8 +872,24 @@ pub const FOREIGN_RECORD_ARM: &str = "blackbox-foreign-identity";
 
 /// Whether this image is armed to stop itself, and so owes a sealed record
 /// rather than `Rebooting.`.
-pub fn stages_a_wedge(armed: &[String]) -> bool {
-    armed.iter().any(|name| WEDGE_ARMS.contains(&name.as_str()))
+pub fn stages_a_wedge(armed: &[impl AsRef<str>]) -> bool {
+    armed.iter().any(|name| WEDGE_ARMS.contains(&name.as_ref()))
+}
+
+/// The bound an image armed with one of [`WEDGE_ARMS`] carries, in
+/// milliseconds: the T14 stages its wedge 1.5 s into the kernel, so this ends
+/// the machine seconds after it rather than at the bound every other boot keeps
+/// for a wedge nobody staged. Its half is the lockup detector's bound, which
+/// still outlasts the lockup probe's own reach to its lock.
+pub const STAGED_BOUND_MS: u64 = 10_000;
+
+/// The `boot-deadline=` bound an image armed with `armed` carries.
+pub fn bound_for(armed: &[impl AsRef<str>]) -> u64 {
+    if stages_a_wedge(armed) {
+        STAGED_BOUND_MS
+    } else {
+        toyos_tco::WEDGE_BOUND_MS
+    }
 }
 
 /// Whether this image is armed so the pass after its reset clears its record
@@ -1437,15 +1454,32 @@ impl Driver {
         }
     }
 
+    /// Poll `ssh`'s port once a [`POLL`], and say how long it took to answer as
+    /// asked. **Coming back is `ssh` itself answering**: a port that accepts is
+    /// only asked whether `ssh` does, since a listener can come up before the
+    /// service behind it.
     fn wait(&self, secs: u64, what: &'static str, answering: bool) -> Result<u64, Refusal> {
         let began = std::time::Instant::now();
         while began.elapsed().as_secs() < secs {
-            std::thread::sleep(std::time::Duration::from_secs(POLL_SECS));
-            if self.ssh("probing", "true").is_ok() == answering {
+            let next = std::time::Instant::now() + POLL;
+            let listening = self.port_accepts();
+            let answered = listening && (!answering || self.ssh("probing", "true").is_ok());
+            if answered == answering {
                 return Ok(began.elapsed().as_secs());
             }
+            std::thread::sleep(next.saturating_duration_since(std::time::Instant::now()));
         }
         Err(Refusal::Silent { what, secs })
+    }
+
+    /// Whether the machine's `ssh` port accepts a connection inside one
+    /// [`POLL`]; a name that does not resolve is a machine that is not there.
+    fn port_accepts(&self) -> bool {
+        use std::net::ToSocketAddrs;
+        let Ok(mut addrs) = (self.target.host.as_str(), crate::metaltalk::SSH_PORT).to_socket_addrs() else {
+            return false;
+        };
+        addrs.any(|addr| std::net::TcpStream::connect_timeout(&addr, POLL).is_ok())
     }
 
     /// The loader's own file, and then everything `logd` wrote, in name order:
@@ -2036,19 +2070,43 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     let entry = driver.boot_entry(&image.esp)?;
 
     driver.as_root("setting bootnext", Job::BootNext, Some(&entry), None)?;
-    driver.as_root("rebooting", Job::Reboot, None, None)?;
+    let rebooted = driver.as_root("rebooting", Job::Reboot, None, None);
     if driver.dry_run {
+        rebooted?;
         driver.as_root("mounting the log partition", Job::Mount, None, None)?;
         driver.as_root("unmounting the log partition", Job::Umount, None, None)?;
         println!("dry run: nothing was written and the machine was not rebooted");
         return Ok(None);
     }
+    let judged = rebooted
+        .and_then(|_| after_the_reboot(&driver, args, &image, &armed, cable.as_ref(), wire.as_ref()));
+    // **A refusal after `reboot` can leave the machine on its way back**, and
+    // the next invocation's first `ssh` would then refuse a boot that never
+    // happened. One the machine was already waited out for is not waited again.
+    if let Err(refused) = &judged {
+        if !matches!(refused, Refusal::Silent { .. }) {
+            if let Err(silent) = driver.wait(args.wait_secs, "come back", true) {
+                println!("after that refusal, {silent}");
+            }
+        }
+    }
+    judged
+}
 
+/// Everything from the machine going down to the boot's verdict.
+fn after_the_reboot(
+    driver: &Driver,
+    args: &Args,
+    image: &Flashable,
+    armed: &[String],
+    cable: Option<&Talking>,
+    wire: Option<&Wire>,
+) -> Result<Option<u64>, Refusal> {
     // The conversation runs while the loop watches the machine come back; its
     // `reboot` is what brings it back before the boot's own hold does.
     let mut talking = None;
-    let ridden = driver.ride_the_reboot(args.wait_secs, wire.as_ref().map(|w| w.addr), || {
-        if let Some(cable) = &cable {
+    let ridden = driver.ride_the_reboot(args.wait_secs, wire.map(|w| w.addr), || {
+        if let Some(cable) = cable {
             talking = Some(cable.start(std::time::Duration::from_secs(args.wait_secs)));
         }
     });
@@ -2076,7 +2134,7 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     };
     let (back, replied) = ridden?;
     println!("the machine answered ssh again after {back} s");
-    if let Some(wire) = &wire {
+    if let Some(wire) = wire {
         match replied {
             Some(reply) => println!(
                 "{} answered a ping {} s into the window, after {PING_SILENCE_SECS} s of \
@@ -2112,10 +2170,10 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
         println!("toyos-fat32-check: the log partition's {} bytes check out", bytes.len());
     }
     if let Some(dir) = &args.readback {
-        write_readback(dir, &loader, &log, back, stick, wire.as_ref(), replied)?;
+        write_readback(dir, &loader, &log, back, stick, wire, replied)?;
         println!("readback written to {}", dir.display());
     }
-    let ms = boot_verdict(&armed, &loader, &log)?;
+    let ms = boot_verdict(armed, &loader, &log)?;
     // After the stick's own verdict, which stays the one that names a boot
     // that never reached its network.
     if let Some((heard, lines)) = &heard {
@@ -2702,6 +2760,7 @@ mod tests {
             assert_eq!(flash_ruling(arm), Some(Flash::Ok), "{arm} reaches no stick");
             assert_eq!(judge_arms(&[arm.to_string(), bound.clone()]), Ok(()), "{arm}");
             assert!(stages_a_wedge(&[arm.to_string()]), "{arm}");
+            assert_eq!(bound_for(&[arm]), STAGED_BOUND_MS, "{arm}");
             // And with no bound behind it, the sharpest refusal names it as the
             // wedge it is rather than as a plain image.
             assert_eq!(
@@ -2710,8 +2769,10 @@ mod tests {
                 "{arm}"
             );
         }
-        // The negative half: an arm that stops nothing is not judged as one.
+        // The negative half: an arm that stops nothing is not judged as one,
+        // and keeps the bound a wedge nobody staged is ended by.
         assert!(!stages_a_wedge(&["watchdog".to_string(), bound]));
+        assert_eq!(bound_for(&["watchdog"]), toyos_tco::WEDGE_BOUND_MS);
     }
 
     /// A row for a name the kernel no longer declares is a ruling about
