@@ -2010,12 +2010,7 @@ const LATENCYCASE: &[metal::Arm] = &[metal::once(
 /// Measured, like `METAL_SKIP`: the whole corpus was staged onto one
 /// metal-shaped image and booted, and this is what the guest comparator could
 /// not answer for.
-const C_METAL_SKIP: &[(&str, &str)] = &[(
-    "90_stdio_buffering",
-    "its expectation carries a `stderr line`, and the guest comparator reads one pipe. The \
-     host compares a console both streams land on in real time; two pipes here would carry \
-     the same bytes in an order nothing preserves, so this case stays where the console is",
-)];
+const C_METAL_SKIP: &[(&str, &str)] = &[];
 
 /// **One comparison rule, in two places that cannot share code.**
 ///
