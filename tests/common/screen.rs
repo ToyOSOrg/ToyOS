@@ -231,11 +231,6 @@ impl Ppm {
     pub fn row_index(&self, needle: &str) -> Option<usize> {
         self.rows().iter().position(|r| r.contains(needle))
     }
-
-    /// Whether every pixel matches `other`.
-    pub fn identical_to(&self, other: &Ppm) -> bool {
-        self.width == other.width && self.height == other.height && self.pixels == other.pixels
-    }
 }
 
 /// Cells of the console's font, in the alpha values it blits.

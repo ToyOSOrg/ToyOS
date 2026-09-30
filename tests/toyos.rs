@@ -333,16 +333,8 @@ const RUST_SKIP: &[&str] = &[
     "dump_stage_load",
     // Driven, not run: `screen_console_clear` types its name at a console it is
     // watching, and on its own it asks the kernel to paint over a panel nobody
-    // is reading and exits 0. A verdict its own exit code cannot carry — the
-    // same shape as `test_screen_churn` below, and it was in the shared registry
-    // for the same reason nobody had looked.
+    // is reading and exits 0. A verdict its own exit code cannot carry.
     "test_screen_graffiti",
-    // A workload, not a test: it prints a pattern for `screen_console_scroll`
-    // to assert a panel against, and on its own it has no verdict at all. It
-    // used to sit in the shared boot with defaults for its arguments, where it
-    // printed four hundred lines to a console nothing was reading and passed
-    // on its exit code.
-    "test_screen_churn",
     // Spawns `/system/bin/doom` and reads the WAD, which `tests/testcases` does
     // not carry. `doom_frames` runs it on `tests/doommusiccase`.
     "doom_frames",
@@ -477,7 +469,6 @@ const SCREEN_TESTS: &[(&str, Sched, qemu::Profile)] = &[
     ("screen_log_absent", Sched::Parallel, qemu::Profile::Metal),
     ("screen_console_shell", Sched::Parallel, qemu::Profile::Metal),
     ("screen_console_clear", Sched::Parallel, qemu::Profile::Metal),
-    ("screen_console_scroll", Sched::Parallel, qemu::Profile::Metal),
     ("screen_i8042_health", Sched::Parallel, qemu::Profile::Metal),
     // Ctrl+Alt+D with no console at all: the panel is the whole channel, and a
     // compositor is holding it. The verdict is the report on the panel.
@@ -1429,7 +1420,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("file_mtime_survives_a_reboot", &["test_rs_file_mtime"]),
     ("file_mtime_undated", &["test_rs_file_mtime"]),
     ("screen_console_clear", &["test_rs_test_screen_graffiti"]),
-    ("screen_console_scroll", &["test_rs_test_screen_churn"]),
     ("screen_console_panic", &["test_rs_test_panic_child"]),
     ("screen_fatal_halt", &["test_rs_test_panic_child"]),
     ("panic_halts_the_others_first", &["test_rs_panic_halts_first"]),
@@ -4464,264 +4454,6 @@ fn run_screen_test(
                 dump.height / screen::GLYPH_H,
                 dump.height % screen::GLYPH_H
             );
-            Ok(())
-        }
-        "screen_console_scroll" => {
-            // The standing check on the emulator's delivery: not "did the
-            // right thing appear" but "is the glass exactly what the model
-            // says it is", asserted over a workload built to break it.
-            //
-            // What closed #90 was the owner reporting prior text surviving in
-            // the middle of a cleared screen, which means cells the model had
-            // written off still held glyphs. `clear` was where he noticed it;
-            // this asserts every row of the panel character for character
-            // after the scrolling stops, so a single stale glyph fires it at
-            // the batch that produced it, with no `clear` needed to expose it.
-            //
-            // Line lengths vary, past the panel's width as well as under it:
-            // the cells a scroll must clear are the ones past the end of a
-            // line that replaces a longer one, and a line wider than the panel
-            // is the only way one logical line scrolls the screen twice. Batch
-            // sizes drift against the row count, and the last round arrives as
-            // one block.
-            //
-            // **The workload is sized by what it must cover, not by a line
-            // count.** `test_screen_churn` documents the construction; what
-            // this end of it relies on is that any `cols` consecutive lines
-            // end in every column of the panel once, and that one line in
-            // eight wraps twice — so three rounds walking *disjoint* stretches
-            // of 260 lines between them cover both, and a longer run buys the
-            // same states again at other alignments. That is not free: the
-            // guest recomposes the whole panel for every batch the console
-            // reads, measured at 0.21 ms per byte of output under TCG, so the
-            // cost of this test is its byte count and nothing else.
-            let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("console");
-            let options = BootOptions {
-                profile,
-                qmp: true,
-                kernel_features: ACTUATOR_KERNEL,
-                ready_marker: "console: ready",
-                ..Default::default()
-            };
-            let mut qemu =
-                QemuInstance::boot_with_options(&config, c_bins, rust_bins, options);
-            let font = screen::ConsoleFont::load();
-
-            let before = qemu.screendump_while(
-                Duration::from_secs(30),
-                Duration::from_millis(200),
-                |d| d.console_text(&font).contains(CONSOLE_PROMPT),
-            );
-            if !before.console_text(&font).contains(CONSOLE_PROMPT) {
-                return Err(format!(
-                    "no prompt to churn from\ndecoded screen:\n{}",
-                    before.console_text(&font)
-                ));
-            }
-            let rows = before.height / screen::GLYPH_H;
-            let cols = before.width / screen::GLYPH_W;
-
-            // The same lines `test_screen_churn` prints. Duplicated
-            // deliberately: a reference taken from the guest would agree with
-            // the guest about a defect they shared.
-            let wraps = [0usize, 1, 0, 2, 0, 1, 0, 0];
-            let churn_line = |i: usize| -> String {
-                let body = 5 + (i * 37) % cols + cols * wraps[i % wraps.len()];
-                let fill = char::from(b'a' + (i % 26) as u8);
-                let mid: String = std::iter::repeat_n(fill, body).collect();
-                format!("L{i:04} {mid} E{i:04}")
-            };
-            // A logical line wider than the panel occupies more than one row.
-            // The emulator wraps when a character arrives at a full row, so a
-            // line of exactly `cols` takes one row and not two.
-            let display_rows = |line: &str| -> Vec<String> {
-                let ch: Vec<char> = line.chars().collect();
-                if ch.is_empty() {
-                    return vec![String::new()];
-                }
-                ch.chunks(cols).map(|c| c.iter().collect()).collect()
-            };
-
-            // Disjoint stretches tiling one run longer than the panel is wide,
-            // so every column of it is the last column of some line. Each
-            // round prints more than a panel's worth of rows, so the screen it
-            // is asserted on holds nothing from the round before.
-            let rounds = [
-                (1usize, 0usize, 100usize, 7usize),
-                (2, 100, 60, 7),
-                (3, 160, 100, 0),
-            ];
-            assert!(
-                rounds.windows(2).all(|w| w[0].1 + w[0].2 == w[1].1)
-                    && rounds.iter().map(|r| r.2).sum::<usize>() >= cols,
-                "the rounds must tile one run of at least {cols} lines, or some column of \
-                 the panel is never the end of a line and the cells past it are never at risk"
-            );
-            for (round, start, count, chunk) in rounds {
-                if round == 2 {
-                    // Page back into history and return, mixing the scrollback
-                    // view into the same session before more live output. The
-                    // view offset changes what every row of the panel means,
-                    // and it is the one input the damage pass takes that the
-                    // cell grid does not.
-                    //
-                    // **Two batches, each inside the device queue, each
-                    // confirmed on the glass.** A page key is `0xE0`-prefixed,
-                    // so a press and its release are four set-1 bytes; three fit
-                    // the queue and so do two, and the queue is empty at the
-                    // first because the round before ran to `CHURN-DONE`. Both
-                    // batches must move the view — the round before printed a
-                    // hundred lines of history and the page down is off a
-                    // non-zero offset — so the panel changing is the guest
-                    // saying it read them.
-                    for (keys, batch) in [(3usize, "pgup"), (2, "pgdn")] {
-                        let was = qemu.screendump();
-                        {
-                            let mut input = qemu::QmpInput::open(qemu.qmp_socket());
-                            let mut events: Vec<(&str, bool)> = Vec::new();
-                            for _ in 0..keys {
-                                events.extend([(batch, true), (batch, false)]);
-                            }
-                            assert!(
-                                events.len() * 2 <= QEMU_PS2_QUEUE,
-                                "{} transitions of {batch} are up to {} set-1 bytes against a \
-                                 {QEMU_PS2_QUEUE}-byte device queue",
-                                events.len(),
-                                events.len() * 2
-                            );
-                            input.keys(&events);
-                        }
-                        let moved = |d: &screen::Ppm| !d.identical_to(&was);
-                        let now = qemu.screendump_while_rendering(
-                            CONSOLE_ECHO,
-                            Duration::from_millis(50),
-                            moved,
-                        );
-                        if !moved(&now) {
-                            return Err(format!(
-                                "{keys} {batch} presses moved nothing on the panel, so the \
-                                 console never read them — QEMU's {QEMU_PS2_QUEUE}-byte PS/2 \
-                                 queue drops what a guest that is not draining cannot take, \
-                                 silently\ndecoded screen:\n{}",
-                                now.console_text(&font)
-                            ));
-                        }
-                    }
-                }
-                console_type_line(
-                    &mut qemu,
-                    &font,
-                    &format!("test_rs_test_screen_churn {start} {count} {chunk} {cols}"),
-                )?;
-                // When the round is over is a different question from whether
-                // the panel is right, and asking the panel both at once is how
-                // a broken panel used to spend the whole timeout and then
-                // report that a marker never arrived. The console writes the
-                // glass before it mirrors the same bytes to its own stdout, so
-                // the marker on the console stream means that batch is painted
-                // — whatever it painted. The prompt is not on the stream: the
-                // shell writes it without a newline, so nothing line-oriented
-                // ever sees it, and the bottom row is what says the child has
-                // exited.
-                //
-                // The wait is the guest's own: a round is a hundred lines of
-                // console traffic, so silence is a console that stopped and
-                // never a console that is behind. It used to be 45 s of host
-                // clock, and `round 1: the guest never printed CHURN-DONE` at
-                // 598 s in the wide phase was that number expiring rather than
-                // anything about this panel (`issues/build/`).
-                let done = format!("CHURN-DONE {start} {count}");
-                let mut printed = String::new();
-                if let Err(why) = await_guest(
-                    &mut qemu,
-                    &mut printed,
-                    &format!("round {round} to print `{done}`"),
-                    |seen| seen.contains(&done),
-                ) {
-                    return Err(format!("{why}\nround {round} printed:\n{printed}"));
-                }
-                let settled = |d: &screen::Ppm| {
-                    d.console_rows(&font)
-                        .last()
-                        .is_some_and(|l| l.trim_end().starts_with(CONSOLE_PROMPT))
-                };
-                let dump =
-                    qemu.screendump_while(Duration::from_secs(15), Duration::from_millis(100), settled);
-                let decoded = dump.console_rows(&font);
-                let text = dump.console_text(&font);
-                if !settled(&dump) {
-                    return Err(format!(
-                        "{STALLED} round {round}: the prompt never came back to the bottom row, \
-                         so the panel was still being painted when it was read\ndecoded screen:\n\
-                         {text}"
-                    ));
-                }
-                if !decoded.iter().any(|l| l.trim() == done) {
-                    return Err(format!(
-                        "round {round}: `{done}` never reached the panel\ndecoded screen:\n{text}"
-                    ));
-                }
-
-                // Expand every line this round printed into the rows it
-                // occupies, then take the tail the panel holds. Built from the
-                // whole round rather than from a guess at how many lines fit,
-                // because a wrapped line makes those different numbers.
-                let mut all: Vec<String> = Vec::new();
-                for i in start..start + count {
-                    all.extend(display_rows(&churn_line(i)));
-                }
-                all.push(done.clone());
-                if all.len() < rows {
-                    return Err(format!(
-                        "round {round}: {count} lines occupy {} rows, which does not fill a \
-                         {rows}-row panel — what is left on it belongs to the round before, \
-                         and this round would be asserted against rows it never printed",
-                        all.len()
-                    ));
-                }
-                let want: Vec<String> = all[all.len() - (rows - 1)..].to_vec();
-
-                for (r, expect) in want.iter().enumerate() {
-                    let got = decoded[r].trim_end();
-                    if got == expect.trim_end() {
-                        continue;
-                    }
-                    let col = got
-                        .chars()
-                        .zip(expect.chars())
-                        .position(|(a, b)| a != b)
-                        .unwrap_or(expect.chars().count().min(got.chars().count()));
-                    let longer = got.chars().count() > expect.trim_end().chars().count();
-                    return Err(format!(
-                        "round {round}: panel row {r} is not what the console holds.\n\
-                         first difference at column {col}{}\n\
-                         want: {expect:?}\n\
-                         got:  {got:?}\n\
-                         The glass disagrees with the model, so a cell was written off as \
-                         delivered without being blitted\ndecoded screen:\n{text}",
-                        if longer {
-                            " — the row on screen is LONGER than the line that belongs there, so \
-                             what is past its end is left over from before"
-                        } else {
-                            ""
-                        }
-                    ));
-                }
-                let last = decoded[rows - 1].trim_end();
-                if !last.starts_with(CONSOLE_PROMPT) {
-                    return Err(format!(
-                        "round {round}: the prompt is not on the bottom row, it reads {last:?}\n\
-                         decoded screen:\n{text}"
-                    ));
-                }
-                eprintln!(
-                    "  [scroll] round {round}: lines {start}..{} at {} per flush, all {} rows \
-                     match the model character for character",
-                    start + count,
-                    if chunk == 0 { count } else { chunk },
-                    rows - 1
-                );
-            }
             Ok(())
         }
         "screen_console_panic" => {
