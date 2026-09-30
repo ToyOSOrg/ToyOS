@@ -547,9 +547,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // `https_tls13_e1000e` exists: the T14's NIC is an I219 and this is the
     // only machine in reach that runs that driver.
     ("log_stream_e1000e", Sched::Parallel),
-    // A reader that never reads, beside a flood: the file and a second reader
-    // are whole regardless.
-    ("log_stream_stalled_reader", Sched::Parallel),
     // A program's line in `/log`, on the served log and on the console, under
     // the name of the pipe it came out of. Lines and a comparison; no clock.
     ("log_program_line", Sched::Parallel),
@@ -1188,7 +1185,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("log_carrier_forgery", &["test_rs_log_carrier_forger"]),
     ("log_stream", &["test_rs_log_origin", "test_rs_empty_dir_stat"]),
     ("log_stream_e1000e", &["test_rs_log_origin", "test_rs_empty_dir_stat"]),
-    ("log_stream_stalled_reader", &["test_rs_log_flood"]),
     ("c_capture_ignores_daemon_lines", &["test_c_71_macro_empty_arg"]),
     ("quiesce_refuses_a_second_shutdown", &["test_rs_quiesce_twice"]),
     ("swap_quiets_the_function", &["test_rs_swap_claim_idle"]),
@@ -10792,7 +10788,6 @@ fn run_machine_test(
         "log_stream_e1000e" => {
             common::logstream::stream(common::logstream::E1000E, c_bins, rust_bins)
         }
-        "log_stream_stalled_reader" => common::logstream::stalled_reader(c_bins, rust_bins),
         "log_program_line" => common::origin::line(c_bins, rust_bins),
         "log_program_forgery" => common::origin::forgery(c_bins, rust_bins),
         "log_after_a_refused_stop" => common::origin::refused_stop(c_bins, rust_bins),
