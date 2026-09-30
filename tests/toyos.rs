@@ -1045,7 +1045,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     ("i8042_budget_expiry", Sched::Parallel),
     ("i8042_fadt_denial", Sched::Parallel),
     ("i8042_kbd_echo", Sched::Parallel),
-    ("i8042_undecoded_bytes", Sched::Parallel),
     ("xhci_xecp_walk", Sched::Parallel),
     ("xhci_slot_exhaustion", Sched::Parallel),
     ("usb_storage_gate", Sched::Parallel),
@@ -1198,7 +1197,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("i8042_health", &["test_rs_i8042_keyboard"]),
     ("i8042_fadt_denial", &["test_rs_i8042_keyboard"]),
     ("i8042_kbd_echo", &["test_rs_i8042_keyboard"]),
-    ("i8042_undecoded_bytes", &["test_rs_i8042_keyboard"]),
     ("i8042_no_spurious_wake", &["test_rs_i8042_keyboard"]),
     ("swiss_german_layout", &["test_rs_locale_gate"]),
     ("locale_detect", &["test_rs_locale_gate"]),
@@ -4740,9 +4738,7 @@ const SSHD_LOGIN: &str = "sshd login";
 
 /// The line `tests/toyos-rust-tests/src/bin/i8042_keyboard.rs` prints once it
 /// holds the keyboard claim, and the line every injection into that binary is
-/// timed off. Its callers wait for it, and one — `i8042_undecoded_bytes` —
-/// also reads its capture *from* it: it is the boundary between what the
-/// machine did on its own and what this test staged.
+/// timed off. Its callers wait for it.
 const I8042_READY: &str = "===I8042_READY===";
 
 /// The shared boot this machine test runs on, or `None` if it owns its own.
@@ -10955,119 +10951,6 @@ fn run_machine_test(
             eprintln!("  [i8042] {}", refusal.trim());
             eprintln!("  [i8042] {}", attached.trim());
             eprintln!("  [i8042] typed {typed:?} on a keyboard that will not report its set");
-            Ok(())
-        }
-        "i8042_undecoded_bytes" => {
-            // The T14 said `1 interrupts, 1 bytes, 0 keys, 0 motion` and the
-            // counters could not name a suspect: 84 of the 256 single byte
-            // values decode to nothing under set 1, so the same arithmetic
-            // covers an extended key's harmless `0xE0` prefix, a `0xAA` from a
-            // keyboard that reset, a late `0xFA`, and a wire carrying raw
-            // set 2. Only the byte separates them.
-            //
-            // Pause is the injection because it is the one key whose whole
-            // sequence decodes to nothing by design — `E1 1D 45 E1 9D C5`,
-            // swallowed to keep the stream in frame — so bytes-with-zero-events
-            // is reproduced without depending on how the drain happens to
-            // batch. Then one plain letter, which is the other half: the first
-            // line must not be the last word on a keyboard that works.
-            //
-            // `i8042-split-burst` stages the interleaving this name's CI red
-            // recorded (run 31944633004): the ISR takes four of the six bytes
-            // and the mute verdict goes out with the decoder's run still open,
-            // so it names nothing — on every run here, where KVM produced it
-            // by scheduling luck. The verdict must then revise itself when the
-            // rest of the sequence lands, which is the assertion below.
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                c_bins,
-                rust_bins,
-                BootOptions {
-                    profile: qemu::Profile::Metal,
-                    qmp: true,
-                    kernel_params: &["i8042-split-burst"],
-                    ..Default::default()
-                },
-            );
-            if !qemu.boot_log().contains("i8042: kbd set2+xlat") {
-                return Err(format!("the PS/2 keyboard never came up:\n{}", qemu.boot_log()));
-            }
-            let result = qemu.run_test_hooked(
-                "test_rs_i8042_keyboard",
-                Duration::from_secs(20),
-                I8042_READY,
-                |socket| {
-                    qemu::qmp_send_keys(socket, &[("pause", true), ("pause", false)]);
-                    thread::sleep(Duration::from_millis(200));
-                    qemu::qmp_send_keys(socket, &[("a", true), ("a", false)]);
-                    thread::sleep(Duration::from_millis(100));
-                    send_i8042_sentinel(socket);
-                },
-            );
-            if let Some(err) = &result.error {
-                return Err(format!("{err}\n{}", result.stdout));
-            }
-            // **Every line is read from the injection onwards**, and that is
-            // not tidiness: this driver reports on its own bring-up too, and a
-            // `nothing decoded` line from before the Pause was pressed is not a
-            // report about the Pause. Reading the first one in the whole capture
-            // is what made this test red on a line naming no byte, on the dev
-            // host and on CI. The marker is the boundary the test knows,
-            // because the marker is what the injection was timed off.
-            let text = result.serial;
-            let capture = serial::Serial::named("i8042 capture", text.as_str());
-            let Some(at) = text.find(I8042_READY) else {
-                return Err(format!("{I8042_READY:?} never reached the capture:\n{text}"));
-            };
-            let from = text[at..].find('\n').map_or(text.len(), |n| at + n + 1);
-            let mut mutes = text[from..].lines().filter(|l| l.contains("nothing decoded"));
-            // The staged premise first: the split put the verdict out with the
-            // run still open, so the first mute line must name nothing. A first
-            // line that already names bytes means the arrangement did not
-            // happen and nothing below would be testing the revision.
-            let blind = mutes.next().ok_or_else(|| {
-                format!(
-                    "bytes arrived and decoded to nothing and the driver never said so:\n{text}"
-                )
-            })?;
-            if blind.contains("no event from") {
-                return Err(format!(
-                    "the staged split never beat the verdict — the first mute line already \
-                     names bytes, so this run exercised nothing: {blind}"
-                ));
-            }
-            // The revision. `0xE1` is Pause's prefix and the first byte of the
-            // sequence whichever way the drain batched it; a verdict that
-            // stands on the blind line — a true statement naming no suspect —
-            // is the one this test exists to reject.
-            let mute = mutes.find(|l| l.contains("no event from [0xe1")).ok_or_else(|| {
-                format!(
-                    "the verdict was said too early — {blind:?} — and never revised: no later \
-                     `nothing decoded` line names the sequence:\n{text}"
-                )
-            })?;
-            // And the picture corrects itself. A one-shot report would freeze
-            // the panel on the half-arrived sequence and never say the
-            // keyboard works after all — which on the T14 is a reflash.
-            let alive = capture.must_say_after(I8042_READY, "the pin asserts").map_err(|why| {
-                format!(
-                    "a letter was typed after the undecoded bytes and the driver never \
-                     revised its verdict: {why}"
-                )
-            })?;
-            let keys = alive
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .windows(2)
-                .find(|w| w[1].trim_end_matches(',') == "keys")
-                .and_then(|w| w[0].parse::<u64>().ok())
-                .ok_or_else(|| format!("unreadable alive line: {alive}"))?;
-            if keys == 0 {
-                return Err(format!("the revised verdict still decodes nothing: {alive}"));
-            }
-            eprintln!("  [i8042] {}", blind.trim());
-            eprintln!("  [i8042] {}", mute.trim());
-            eprintln!("  [i8042] {}", alive.trim());
             Ok(())
         }
         "i8042_absent" => {

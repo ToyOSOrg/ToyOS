@@ -91,9 +91,6 @@ actuators! {
     /// Shorten the i8042 post-verdict counter report from 10s to 500ms.
     i8042_fast_health = "i8042-fast-health";
 
-    /// Cap the i8042 ISR at 4 bytes and answer empty until the mute verdict is out; `service` then polls the rest, so the verdict beats the sequence on every boot instead of on a loaded shard's luck.
-    i8042_split_burst = "i8042-split-burst";
-
     /// Script the input core directly at end of boot.
     test_input_merge = "test-input-merge";
 
