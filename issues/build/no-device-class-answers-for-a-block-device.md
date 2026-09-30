@@ -31,7 +31,7 @@ and none of them is a block device:
     VirtioSound = 6 => "virtio-sound",
     PciFunction = 7 => "pci",
 
-(3 and 4 are retired.) `PciFunction` is not the answer either: it names one
+`PciFunction` is not the answer either: it names one
 function by vendor and device id and hands it to a process to drive, and what
 this gate has to ask is whether a controller *the kernel* binds bound. So no
 `SYS_DEVICE_CLAIM` can answer for the stuck controller, and

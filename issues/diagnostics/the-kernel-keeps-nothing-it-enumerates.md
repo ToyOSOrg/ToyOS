@@ -44,14 +44,6 @@ On top of retention, in dependency order:
 One residual is nearly free: a log-follow tool is a manifest row and about 30
 lines, because `LogTail` already exists in the SDK.
 
-**Syscall numbers: the three this work once reserved are all taken, and the
-obvious fix is wrong too.** 97 and 98 are the device register read/write pair,
-99 is the endowments call. Re-allocating "from 128 up" breaks a compile-time
-assert, because 128 is the syscall-profile bin count and 127 is its overflow
-bucket. **The first clean numbers are 116, 117, 118** — 113 and 115 are held
-reservations, 114 is spent on log reading, and 96 and 107 are retired and never
-reused.
-
 The log half of this work landed differently and better, and the difference is
 worth knowing before anything is rebuilt on the old design: reading is
 record-shaped rather than byte-shaped, it is authority (`Rights::LOG` on a

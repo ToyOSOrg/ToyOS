@@ -10,17 +10,17 @@ use std::sync::Arc;
 #[path = "../arch/mod.rs"]
 mod arch;
 
-/// A retired syscall's number: each call is refused and is one kernel record
-/// naming it.
-const RETIRED: u64 = 26;
+/// No syscall's number: each call is refused and is one kernel record naming
+/// it.
+const UNKNOWN: u64 = u64::MAX;
 /// One per other CPU of the boot that runs this.
 const SIBLINGS: usize = 3;
 
-fn retired() {
-    // SAFETY: a retired number, which the kernel refuses without reading any
+fn unknown() {
+    // SAFETY: no syscall's number, which the kernel refuses without reading any
     // argument; nothing in this process is touched.
-    let ret = unsafe { arch::bare_syscall(RETIRED) };
-    assert_ne!(ret, 0, "syscall {RETIRED} answered as if it were live");
+    let ret = unsafe { arch::bare_syscall(UNKNOWN) };
+    assert_ne!(ret, 0, "syscall {UNKNOWN} answered as if it were live");
 }
 
 fn main() {
@@ -28,10 +28,10 @@ fn main() {
     for _ in 0..SIBLINGS {
         let started = Arc::clone(&started);
         std::thread::spawn(move || {
-            retired();
+            unknown();
             started.fetch_add(1, Ordering::Release);
             loop {
-                retired();
+                unknown();
             }
         });
     }

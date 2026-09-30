@@ -587,7 +587,7 @@ mod tests {
                 Err(Undecodable::Variant { at: 7, value: u64::from(psiv) })
             );
         }
-        // A class number no `DeviceType` carries: 3 and 4 are retired.
+        // A class number no `DeviceType` carries.
         let mut raw = Record::Claim(Claim {
             on: Claimed::Class(DeviceType::Keyboard),
             holder: Holder { pid: 1, name: name("x") },

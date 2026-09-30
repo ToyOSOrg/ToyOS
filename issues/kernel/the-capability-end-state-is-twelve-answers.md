@@ -111,8 +111,7 @@ beside it" (`toyos-abi/src/syscall.rs:1803`). Tids are process-local names:
 `SYS_THREAD_JOIN` resolves through `thread_sched(caller, tid)` and
 `collect_thread_zombie(table, tid, parent_pid)`, both keyed on the caller's own
 pid (`4a98107f^:kernel/src/arch/syscall.rs:2393`, `kernel/src/process.rs:1412`, `:848`).
-Four pid-addressed syscalls were deleted and their numbers retired rather than
-reused — 26 `SYS_WAITPID`, 33 `SYS_FIND_PID`, 37 `SYS_GRANT_SHARED`, 65
+Four pid-addressed syscalls were deleted — 26 `SYS_WAITPID`, 33 `SYS_FIND_PID`, 37 `SYS_GRANT_SHARED`, 65
 `SYS_KILL` (`4a98107f^:kernel/src/arch/syscall.rs:63`).
 
 ## 4. Can a process enumerate objects it lacks authority over? — RULED 2026-08-20, IMPLEMENTED 2026-08-22
@@ -313,9 +312,7 @@ no replace", and a narrower one is a *new* object built from an existing one
 (`4a98107f^:kernel/src/arch/syscall.rs:1861`); `SYS_NAMESPACE_BUILD` demands
 `Rights::TRANSFER` on every added connector and resolves kept names against the
 base before installing anything (`:1754`). A process with no `svc` endowment
-resolves no name at all, and there is no registry to fall back to: 85
-`SYS_LISTEN` and 87 `SYS_CONNECT` are retired numbers
-(`4a98107f^:kernel/src/arch/syscall.rs:77`, `:78`). The **filesystem** path space is the
+resolves no name at all, and there is no registry to fall back to. The **filesystem** path space is the
 other thing the word could mean, and it is ambient process state
 (`4a98107f^:kernel/src/arch/syscall.rs:1234`) — questions 2 and 5 hold that half.
 

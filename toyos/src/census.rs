@@ -5,10 +5,7 @@
 //! released is invisible behind ordinary churn in another — and six of the
 //! thirteen kinds (`File`, `Device`, `Acceptor`, `Connection`, `IoUring`,
 //! `Console`) were exercised by no census assertion at all, which is where
-//! three of this branch's defects lived. The kernel has always counted per
-//! kind; the readers that answered a total or wrote the breakdown into the
-//! kernel log, where no guest test can see one, are retired, and this is what
-//! is left.
+//! three of this branch's defects lived.
 //!
 //! Two readings and a comparison, never one reading against a constant: an
 //! object released by another process is dropped from the deferred queue on

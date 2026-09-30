@@ -496,7 +496,7 @@ const HOLD_JOB: &str = "test_rs_log_hold";
 const HOLD_LINE: &str = "log hold: said after 192 records";
 const HOLD_RECORDS: usize = 192;
 /// The kernel's record of each of those.
-const RETIRED: &str = "syscall 26 is retired";
+const UNKNOWN: &str = "syscall 18446744073709551615 is unknown";
 
 /// **A program's line lands between the records written before and after
 /// it.** `test_rs_log_hold` has the kernel write three batches of records,
@@ -518,7 +518,7 @@ pub fn after_records(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>
     let records: Vec<usize> = lines
         .iter()
         .enumerate()
-        .filter(|(_, l)| !toyos_logstream::is_program_line(l) && l.contains(RETIRED))
+        .filter(|(_, l)| !toyos_logstream::is_program_line(l) && l.contains(UNKNOWN))
         .map(|(i, _)| i)
         .collect();
     if records.len() != HOLD_RECORDS {

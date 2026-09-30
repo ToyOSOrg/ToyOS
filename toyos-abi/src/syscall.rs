@@ -1,13 +1,8 @@
 // Syscall numbers (must match kernel dispatch table)
 pub const SYS_WRITE: u64 = 0;
 pub const SYS_READ: u64 = 1;
-// Syscall numbers 2-4 are unused (formerly SYS_ALLOC/FREE/REALLOC).
 pub const SYS_THREAD_EXIT: u64 = 5;
 pub const SYS_RANDOM: u64 = 6;
-// Syscall number 7 unused (formerly SYS_SCREEN_SIZE).
-// Syscall number 8 is retired and unused: it was `SYS_CLOCK`, the monotonic
-// clock as a kernel transition. A process reads it off its clock page
-// (`crate::clock`) with no transition at all.
 pub const SYS_OPEN: u64 = 9;
 pub const SYS_CLOSE: u64 = 10;
 pub const SYS_SEEK: u64 = 13;
@@ -18,28 +13,12 @@ pub const SYS_DELETE: u64 = 18;
 pub const SYS_SHUTDOWN: u64 = 19;
 pub const SYS_CHDIR: u64 = 20;
 pub const SYS_GETCWD: u64 = 21;
-// Syscall number 23 unused (formerly SYS_SET_KEYBOARD_LAYOUT: the kernel has
-// no layout to set — it delivers key transitions and userland translates).
 pub const SYS_PIPE: u64 = 24;
 /// Start a program, endowing it exactly what the caller names. Answers a
 /// `Process` handle — see [`spawn`].
 pub const SYS_SPAWN: u64 = 25;
-// Syscall number 26 unused (formerly SYS_WAITPID: a pid is not authority over a
-// process, and pids are reissued. Waiting is SYS_PROCESS_WAIT on the handle the
-// spawn answered with).
 pub const SYS_MARK_TTY: u64 = 28;
-// Syscall numbers 29-31 unused (formerly SYS_SEND_MSG/SYS_RECV_MSG and
-// SYS_OPEN_DEVICE: first-come claiming, where whoever asked first got the
-// device. Arbitration is the manifest — init mints every claim from a `SysCap`
-// and endows it).
-// Syscall numbers 32-33 unused (formerly SYS_REGISTER_NAME/SYS_FIND_PID).
-// Syscall number 34 unused (formerly SYS_SET_SCREEN_SIZE).
 pub const SYS_GPU_PRESENT: u64 = 35;
-// Syscall numbers 36-39 unused (formerly SYS_ALLOC_SHARED, SYS_GRANT_SHARED,
-// SYS_MAP_SHARED and SYS_RELEASE_SHARED: a shared-memory token was an id
-// treated as a capability and the grant list was a pid ACL. A region is a
-// handle — SYS_SHM_CREATE and SYS_SHM_MAP — and giving one away is
-// SYS_HANDLE_SEND).
 pub const SYS_THREAD_SPAWN: u64 = 40;
 pub const SYS_THREAD_JOIN: u64 = 41;
 pub const SYS_CLOCK_REALTIME: u64 = 42;
@@ -101,9 +80,6 @@ impl SysinfoHeader {
 /// it is a secondary thread, resident memory, CPU nanoseconds, and a 28-byte
 /// name.
 pub const SYSINFO_ENTRY_SIZE: usize = 64;
-// Syscall numbers 46-48 unused (formerly SYS_NET_INFO/SYS_NET_SEND/SYS_NET_RECV:
-// an ungated frame-copy path that no program ever used — netd drives the NIC
-// through its DMA descriptor instead).
 pub const SYS_NANOSLEEP: u64 = 49;
 /// A second handle to the same object, carrying no more than the first. See
 /// [`dup`] and [`dup_narrowed`].
@@ -122,18 +98,8 @@ pub const SYS_STACK_INFO: u64 = 61;
 pub const SYS_CPU_COUNT: u64 = 62;
 pub const SYS_MMAP: u64 = 63;
 pub const SYS_MUNMAP: u64 = 64;
-// Syscall number 65 unused (formerly SYS_KILL: pid-addressed, and gated on
-// being the target's parent — a relationship the kernel happened to remember,
-// not a capability anyone was given. SYS_PROCESS_KILL takes a handle carrying
-// `Rights::MANAGE`).
 pub const SYS_READ_NONBLOCK: u64 = 66;
 pub const SYS_WRITE_NONBLOCK: u64 = 67;
-// Syscall numbers 68 and 70 unused (formerly SYS_PIPE_OPEN and SYS_PIPE_ID: a
-// pipe id was guessable, and openable by anyone its creator had ever spoken to.
-// A pipe end travels as itself, over SYS_HANDLE_SEND).
-// Syscall numbers 71 and 84 unused (formerly SYS_AUDIO_SUBMIT and
-// SYS_AUDIO_POLL: the kernel drives no sound card, so a period is published
-// into a ring the kernel built and there is nothing to submit).
 pub const SYS_EXIT: u64 = 72;
 pub const SYS_GET_ENV: u64 = 73;
 /// A second handle to the same object, at a slot the caller picks. See
@@ -142,43 +108,23 @@ pub const SYS_HANDLE_DUP_AT: u64 = 74;
 pub const SYS_CLOCK_EPOCH: u64 = 75;
 /// Join a pipe read end and a pipe write end into one duplex `Connection`.
 /// See [`connection_join`].
-///
-/// It keeps the number of `SYS_SOCKET_CREATE`, which was the same operation
-/// over two pipe *ids*: what is retired is addressing a pipe by a number anyone
-/// could guess, not making a duplex object out of two simplex ends.
 pub const SYS_CONNECTION_JOIN: u64 = 76;
 pub const SYS_PIPE_MAP: u64 = 77;
-// Syscall numbers 78-80 unused (formerly SYS_NIC_RX_POLL, SYS_NIC_RX_DONE and
-// SYS_NIC_TX: a NIC driver inside the kernel answering for its claimant. A
-// claimed PCI function's driver is the claimant, and reaches its device
-// through SYS_DEVICE_BAR_MAP, SYS_DEVICE_DMA_ALLOC and its claim handle).
 pub const SYS_SYMLINK: u64 = 81;
 pub const SYS_READLINK: u64 = 82;
 pub const SYS_GPU_SET_RESOLUTION: u64 = 83;
-// Syscall number 85 is retired and unused: it was `SYS_LISTEN`, which took a
-// service name first-come from a flat global registry. There is no registry;
-// a server is endowed an acceptor.
 /// Accept a queued connection from an [`Acceptor`] handle.
 ///
 /// [`Acceptor`]: crate::handle::RawHandle
 pub const SYS_ACCEPT: u64 = 86;
-// Syscall number 87 is retired and unused: it was `SYS_CONNECT`, which
-// resolved a name through that registry. A name resolves in a namespace a
-// process was given, through `SYS_NAMESPACE_OPEN`, or nowhere.
 /// Allocate a TLS block for a dlopen'd module on the current thread.
 /// Arg0: module_id (1-based DTV index). Returns the block's virtual address,
 /// or a `SyscallError` word — see [`tls_alloc_block`].
 pub const SYS_TLS_ALLOC_BLOCK: u64 = 88;
 /// Create an [`inbox`](crate::inbox) and map its rings. See [`inbox_setup`].
-///
-/// **A rename is not a retirement, which is why this is still 89.** The rule
-/// that a deleted syscall's number is retired and never reused is about a
-/// *deleted* call: 89 and 90 kept their arguments and their struct layouts when
-/// `SYS_IO_URING_SETUP`/`SYS_IO_URING_ENTER` became these, so no number was
-/// taken.
 pub const SYS_INBOX_SETUP: u64 = 89;
 /// Hand queued submissions to the kernel and/or wait for completions. See
-/// [`inbox_submit`]; on the number, see [`SYS_INBOX_SETUP`].
+/// [`inbox_submit`].
 pub const SYS_INBOX_SUBMIT: u64 = 90;
 pub const SYS_QUERY_MODULES: u64 = 91;
 /// Debug syscall. Arg0 selects the action:
@@ -188,9 +134,6 @@ pub const SYS_DEBUG: u64 = 92;
 pub const SYS_SCHED_INFO: u64 = 93;
 pub const SYS_PROCESS_STATS: u64 = 94;
 pub const SYS_SET_THREAD_NAME: u64 = 95;
-// Syscall number 96 unused (formerly SYS_SET_RT_PRIORITY: gated on holding a
-// sound-device claim, and a claim is not a privilege. [`SYS_RT_ENTER`] is the
-// privilege that gate was standing in for).
 /// Read one register of a claimed device. See [`device_reg_read`].
 pub const SYS_DEVICE_REG_READ: u64 = 97;
 /// Write one register of a claimed device. See [`device_reg_write`].
@@ -241,11 +184,6 @@ pub const SYS_SHM_CREATE: u64 = 105;
 /// Map a region into the caller. Idempotent: a second call answers the first
 /// call's address. See [`shm_map`].
 pub const SYS_SHM_MAP: u64 = 106;
-// Syscall number 107 is retired and unused: it took a process's mapping away
-// while it kept the handle. A region's mappings go with its last handle
-// (`ZeroHandles for SharedMemObject`), so letting the handle go is the whole of
-// letting the mapping go, and unmapping behind a handle its holder still has is
-// a second spelling of the same event that the two can disagree about.
 
 /// Wait for the process a handle names and take its exit code, gated by
 /// [`Rights::WAIT`]. See [`process_wait`].
@@ -290,7 +228,7 @@ pub const SYS_RT_ENTER: u64 = 112;
 // the one thing that would make any `serves` daemon restartable. Nothing
 // needs it yet, so nothing is built.
 //
-// 115 is likewise held, for `SYS_SLEEP_UNTIL`, which would replace the retired
+// 115 is likewise held, for `SYS_SLEEP_UNTIL`, which would replace
 // `SYS_NANOSLEEP`.
 //
 // **Both are recorded here and nowhere else**, because this file is where an
@@ -833,10 +771,6 @@ pub mod debug_action {
     /// whichever comes first.
     pub const TLB_ACK_DELAY_ARM: u64 = 12;
     pub const TLB_ACK_DELAY_DISARM: u64 = 13;
-    // Actions 14 and 15 are retired and unused: they were CENSUS_TOTAL and
-    // CENSUS_BREAKDOWN. A total hides a leak of one kind behind churn in
-    // another, and a breakdown written into the kernel log is a reading no
-    // guest test can see.
     /// How many kernel objects of one kind are alive right now. The argument is
     /// an [`OBJECT_KINDS`](super::OBJECT_KINDS) index.
     ///
@@ -1253,13 +1187,6 @@ device_classes! {
     Keyboard = 0 => "keyboard",
     Mouse = 1 => "mouse",
     Framebuffer = 2 => "framebuffer",
-    // 3 was `Nic`: a network card the kernel drove, whose holder got rx and tx
-    // tokens. Retired rather than reused for `PciFunction`, since a caller
-    // that still names 3 wants a capability of a different shape.
-    // 4 was `Audio`, a sound card the kernel drove on the claimant's behalf.
-    // Retired rather than reused for the stubs below: a claim here authorizes
-    // register writes and answers no submit, so a caller that still names 4 is
-    // refused rather than handed a capability of a different shape.
     /// An Intel HDA controller the kernel has brought up but drives no policy
     /// on.
     HdaAudio = 5 => "hda-audio",
@@ -2459,7 +2386,6 @@ mod tests {
             "pci",  // the bare class name names no function at all
             "pci:", // nor does the prefix on its own
             "pci:1af4",
-            "nic",  // the retired class the NIC used to be claimed as
             "gpu",  // a class name this table has never had
             "part", // a bare partition class names no partition
             "part:",

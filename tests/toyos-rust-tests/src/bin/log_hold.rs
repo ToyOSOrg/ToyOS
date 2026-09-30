@@ -6,9 +6,9 @@
 /// Three times what `logd` asks of the ring at once (`BATCH`, 64).
 const RECORDS: usize = 192;
 
-/// A retired syscall's number: each call is refused and is one kernel record
-/// naming it (`kernel/src/syscall/dispatch.rs`'s `retired_syscall`).
-const RETIRED: u64 = 26;
+/// No syscall's number: each call is refused and is one kernel record naming
+/// it (`kernel/src/syscall/dispatch.rs`'s unknown-number arm).
+const UNKNOWN: u64 = u64::MAX;
 
 fn main() {
     for _ in 0..RECORDS {
@@ -18,13 +18,13 @@ fn main() {
         unsafe {
             core::arch::asm!(
                 "syscall",
-                in("rdi") RETIRED,
+                in("rdi") UNKNOWN,
                 lateout("rax") ret,
                 out("rcx") _,
                 out("r11") _,
             );
         }
-        assert_ne!(ret, 0, "syscall {RETIRED} answered as if it were live");
+        assert_ne!(ret, 0, "syscall {UNKNOWN} answered as if it were live");
     }
     println!("log hold: said after {RECORDS} records");
 }

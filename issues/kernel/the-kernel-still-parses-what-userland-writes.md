@@ -19,7 +19,7 @@ and it holds the most privileged `unsafe`. No production kernel dynamic-links
 userland. The end state: the kernel maps the `PT_LOAD`s of a static-PIE image
 and jumps; everything else runs in a Ring 3 loader inside the target's own
 address space, holding only the file handles it was endowed, where a crafted
-binary can only corrupt itself. Five syscalls retire, numbers never reused, and
+binary can only corrupt itself. Five syscalls retire, and
 the crafted-ELF corpus becomes the negative gate against a kernel that no longer
 parses most of it.
 
