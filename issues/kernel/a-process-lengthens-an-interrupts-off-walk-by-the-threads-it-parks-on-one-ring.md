@@ -29,14 +29,6 @@ holder, decides how long a CPU runs with interrupts masked:
   ring's completions lock and posting that ring's watch, whose own N threads
   it notifies. Entries a post in place fired stay in the list until
   registrations sweep them four at a time.
-- **A process that exits holding an audio device** leaves every entry its
-  rings registered on `AUDIO_WATCH` there: `close_all` answers no poll, and
-  the audio handler's post frees none. Each ring's teardown withdraws its
-  polls and lets go of its page, so an entry keeps only its `Poll` and its ring's
-  `Inbox`. They stay until registrations on `AUDIO_WATCH` take them out, four
-  each, and every audio interrupt walks them under the list lock until then.
-  By reading, a registration's sweep keeps a list no longer than the most
-  live entries it has held at once, at most 1024 per ring that polled it.
 
 Nothing caps N: a thread costs its process a 128 KiB kernel stack
 (`kernel/src/process.rs`) and no count. Before #634 every one of these

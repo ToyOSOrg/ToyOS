@@ -338,7 +338,7 @@ fn poll_racing(post: fn(&World)) {
 }
 
 /// The object's end racing its readiness: the poll is answered once, as ready
-/// or as gone, and whichever answered it no longer holds it.
+/// or as gone.
 #[test]
 fn an_end_racing_a_post_answers_a_poll_once() {
     model(|| end_racing(|w| w.watch.cancel_rings(), World::post));

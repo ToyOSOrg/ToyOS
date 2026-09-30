@@ -185,8 +185,12 @@ times:
       since what it proves is that passes run. The dump still paints its
       report on the panel and holds it there, a device the pass reaches;
       whether that stays is the owner's ruling. **Exit**: `drain_irqs` and the
-      idle loop's device checks are gone, and both windows are measured
-      against stage 6's start.
+      idle loop's device checks are gone, both windows are measured against
+      stage 6's start, and the exits of
+      `issues/kernel/an-irq-watchs-freeing-cancel-compiles-in-a-handler.md`
+      and
+      `issues/kernel/nothing-fails-when-a-devices-release-or-close-stops-answering-its-polls.md`
+      are met.
 
 ## Standing
 
