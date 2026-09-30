@@ -293,11 +293,7 @@ Each stage names its exit; "measured" means a number from a run.
    `toyos_elf::RelocError::TlsDescriptor` for a library).
    **Every CPU starts, ahead of small-kernel stage 6 by the owner's word, as
    stage 4 did:** it ports no device interrupt, so nothing of the relay.
-   Owed before the exit holds:
-   `SYSTEM_RESET`, `SYSTEM_OFF` and `CPU_OFF` behind a reset and power-off
-   seam that takes x86-64's reset register and PM1a out of
-   `drivers/acpi.rs`, and the stop shown on eight CPUs ending in that
-   power-off; the TLS-descriptor resolver;
+   Owed before the exit holds: the TLS-descriptor resolver;
    `issues/kernel/the-crash-evidence-records-x86-fault-registers.md`; the
    blocked-task dump's probe of a CPU that ignored its kick
    (`sched/dump.rs`'s `probe_silent`), which reaches `irqchip::send_nmi`'s

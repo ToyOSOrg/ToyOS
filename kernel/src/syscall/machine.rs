@@ -7,7 +7,7 @@
 
 use alloc::vec::Vec;
 
-use crate::drivers::acpi;
+use crate::power;
 use crate::user_ptr::{SyscallContext, UserBytesMut};
 use crate::UserAddr;
 use crate::{log, process};
@@ -142,7 +142,7 @@ fn quiesce(last: &str) -> Result<(), SyscallError> {
     // volumes still have bytes to take and this takes the controller away from
     // them; and after everything else here,
     // because nothing may run between it and the register stop
-    // `acpi::reboot`/`acpi::shutdown` do — which every reset this kernel
+    // `power::reboot`/`power::shutdown` do — which every reset this kernel
     // performs goes through. It is bounded, and the reset follows either way.
     crate::drivers::xhci::seal_shut();
     Ok(())
@@ -170,11 +170,11 @@ pub(super) fn sys_shutdown(syscap: RawHandle) -> u64 {
     if let Err(e) = quiesce("Shutting down.") {
         return e.to_u64();
     }
-    acpi::shutdown();
+    power::shutdown();
 }
 
 /// Returns the machine to firmware; requires a `SysCap` carrying [`Rights::POWER`]. Returns only when refused.
-// The register is demanded before anything is torn down: a machine whose FADT names none is left running, not synced, stopped and still on.
+// The reset is demanded before anything is torn down: a machine without one is left running, not synced, stopped and still on.
 pub(super) fn sys_reboot(syscap: RawHandle) -> u64 {
     if let Err(e) = demand_syscap(syscap, Rights::POWER) {
         return e.refuse();
@@ -182,14 +182,14 @@ pub(super) fn sys_reboot(syscap: RawHandle) -> u64 {
     if refused_once() {
         return SyscallError::NotSupported.to_u64();
     }
-    if !acpi::can_reboot() {
-        log!("reboot: this machine's FADT names no reset register — refused");
+    if !power::can_reboot() {
+        log!("reboot: this machine has no reset this kernel performs — refused");
         return SyscallError::NotSupported.to_u64();
     }
     if let Err(e) = quiesce("Rebooting.") {
         return e.to_u64();
     }
-    acpi::reboot();
+    power::reboot();
 }
 
 /// The most live threads `SYS_SYSINFO` will describe; kept under `mm::MAX_HEAP_ALLOC` so an unbounded thread count cannot trip the allocator's fail-fast assert.

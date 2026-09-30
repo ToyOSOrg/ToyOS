@@ -3,31 +3,17 @@
 //! The decode is `toyos-acpi`, pure and host-tested against QEMU's own tables
 //! and a crafted corpus. What stays here is everything that touches the
 //! machine: the direct-map reader the crate decodes through, the log lines a
-//! machine owner reads a refusal off, the `Vec`s the crate cannot allocate, and
-//! the PM1 port writes that turn a validated FADT into a soft-off.
+//! machine owner reads a refusal off, and the `Vec`s the crate cannot allocate.
 //!
 //! All input is firmware-supplied and untrusted: no panic on any input path,
 //! every failure is a [`TableError`] and the caller decides what it means.
-//!
-//! **No reset this kernel performs leaves a USB device mid-command.**
-//! [`reset_now`] and [`shutdown`] are the only two places this kernel writes a
-//! register that ends the machine, and each stops every xHCI controller
-//! ([`stop::before_reset`]) before it does — which is what makes that a property
-//! of the reset rather than of whoever asked for one, and what a third caller
-//! gets without knowing it is owed. Resets this kernel does not perform — a TCO
-//! or firmware watchdog, a triple fault, power loss — are outside it and always
-//! will be.
 
 use alloc::vec::Vec;
 use core::mem::size_of;
 use core::ptr::{read_unaligned, read_volatile};
-use core::sync::atomic::{AtomicU16, AtomicU8, Ordering};
-use crate::drivers::xhci::stop;
 use crate::log;
 use crate::DirectMap;
-use toyos_acpi::{
-    Century, MadtEntry, Mapped, Memory, Reset, CMOS_RAM, MADT_ENTRIES, SDT_HEADER_LEN, SDT_REVISION,
-};
+use toyos_acpi::{Century, MadtEntry, Mapped, Memory, CMOS_RAM, MADT_ENTRIES, SDT_HEADER_LEN, SDT_REVISION};
 
 pub use toyos_acpi::{IoApicEntry, SourceOverride, TableError};
 
@@ -61,11 +47,7 @@ pub fn direct_phys() -> DirectPhys {
 pub struct Table(toyos_acpi::Table<DirectPhys>);
 
 impl Table {
-    pub fn open(base: u64, signature: &[u8; 4], needed: usize) -> Result<Table, TableError> {
-        toyos_acpi::Table::open(direct_phys(), base, signature, needed).map(Table)
-    }
-
-    /// The declared length, already bounded by [`Table::open`].
+    /// The declared length, already bounded by [`find_table`].
     pub fn len(&self) -> usize {
         self.0.len()
     }
@@ -132,14 +114,6 @@ pub fn inventory(rsdp_addr: u64) {
     );
 }
 
-const SLP_EN: u16 = 1 << 13;
-
-static PM1A_CNT_PORT: AtomicU16 = AtomicU16::new(0);
-static SLP_TYPA: AtomicU16 = AtomicU16::new(0);
-
-static RESET_PORT: AtomicU16 = AtomicU16::new(0);
-static RESET_VALUE: AtomicU8 = AtomicU8::new(0);
-
 /// Log a refusal with the reason, and hand the caller `None`.
 // Never a panic: a machine owner needs to see the reason, not have the kernel die on a firmware defect.
 fn refuse<T>(what: &str, error: TableError) -> Option<T> {
@@ -163,64 +137,6 @@ pub fn find_ecam_base(rsdp_addr: u64) -> Option<(u64, u16)> {
     log!("ACPI: MCFG found at {:#x}", mcfg.base());
     log!("ACPI: ECAM base address: {base:#x}");
     Some((base, segment))
-}
-
-/// Parse FADT and DSDT to prepare for ACPI shutdown.
-// A machine without them keeps booting without soft-off rather than panicking.
-// The reset register is not decoded here: it is `init_reset`, which runs before
-// the boot has anything a panic could report on.
-pub fn init_power(rsdp_addr: u64) {
-    const FADT_FOR_POWER: usize = toyos_acpi::FADT_PM1A_CNT_BLK + size_of::<u32>();
-    const FADT_FOR_X_DSDT: usize = toyos_acpi::FADT_X_DSDT + size_of::<u64>();
-
-    let fadt = match find_table(rsdp_addr, b"FACP", FADT_FOR_POWER) {
-        Ok(table) => table,
-        Err(e) => {
-            log!("ACPI: FADT unusable: {e:?} — no soft-off, shutdown will halt instead");
-            return;
-        }
-    };
-
-    let Some(pm1a) = fadt.field::<u32>(toyos_acpi::FADT_PM1A_CNT_BLK) else {
-        log!("ACPI: FADT has no PM1a control block — no soft-off");
-        return;
-    };
-    let pm1a = pm1a as u16;
-    if pm1a != 0 && !crate::arch::pio::EXISTS {
-        log!("ACPI: FADT puts PM1a control at port {pm1a:#x}, and this machine has no I/O port space — no soft-off");
-        return;
-    }
-
-    // Prefer X_DSDT over DSDT; a revision claiming 2.0 doesn't prove the field is present, so the length is checked rather than trusting the revision alone.
-    let dsdt_addr = toyos_acpi::dsdt_address(&fadt.0);
-    if dsdt_addr == 0 {
-        log!(
-            "ACPI: FADT names no DSDT (rev {:?}, needs {FADT_FOR_X_DSDT} bytes for X_DSDT) — no soft-off",
-            fadt.field::<u8>(SDT_REVISION)
-        );
-        return;
-    }
-
-    let dsdt = match Table::open(dsdt_addr, b"DSDT", SDT_HEADER_LEN) {
-        Ok(table) => table,
-        Err(TableError::Unmapped { .. }) => {
-            log!("ACPI: FADT points the DSDT at {dsdt_addr:#x}, which is not an address — no soft-off");
-            return;
-        }
-        Err(e) => {
-            log!("ACPI: DSDT at {dsdt_addr:#x} unusable: {e:?} — no soft-off");
-            return;
-        }
-    };
-
-    let Some(slp_typ) = find_s5_slp_typ(&dsdt) else {
-        log!("ACPI: no \\_S5_ package in the DSDT — no soft-off");
-        return;
-    };
-
-    PM1A_CNT_PORT.store(pm1a, Ordering::Relaxed);
-    SLP_TYPA.store(slp_typ, Ordering::Relaxed);
-    log!("ACPI: PM1a={pm1a:#x} SLP_TYPa={slp_typ}");
 }
 
 /// FADT revision and the IA-PC boot architecture flags.
@@ -254,103 +170,6 @@ pub fn rtc_century_register(rsdp_addr: u64) -> Result<Option<u8>, TableError> {
             Ok(Some(index))
         }
     }
-}
-
-/// Record the FADT's reset register, or say by name why this machine has none.
-///
-/// The one decode of it, and it runs before `percpu::init_bsp` rather than with
-/// the rest of the power tables: from the moment that function loads the IDT,
-/// every panic can be reported, and a panic that can be reported but not ended
-/// is a machine that still needs a hand. Walking these tables inside the panic
-/// handler instead is refused — a table walk on a machine that has already
-/// failed once is how a panic becomes a triple fault.
-pub fn init_reset(rsdp_addr: u64) {
-    let fadt = match find_table(rsdp_addr, b"FACP", toyos_acpi::FADT_FOR_RESET) {
-        Ok(table) => table,
-        Err(e) => {
-            log!("ACPI: FADT unusable: {e:?} — no reboot, a panic will hold the panel");
-            return;
-        }
-    };
-    match toyos_acpi::reset_register(&fadt.0) {
-        Reset::Port { port, .. } if !crate::arch::pio::EXISTS => {
-            log!("ACPI: the reset register is SystemIO {port:#x}, and this machine has no I/O port space — no reboot");
-        }
-        Reset::Port { port, value } => {
-            RESET_PORT.store(port, Ordering::Relaxed);
-            RESET_VALUE.store(value, Ordering::Relaxed);
-            log!("ACPI: reset register SystemIO {port:#x} <- {value:#04x}");
-        }
-        other => log!("ACPI: no reset register this kernel writes ({other:?}) — no reboot"),
-    }
-}
-
-pub fn can_reboot() -> bool {
-    RESET_PORT.load(Ordering::Relaxed) != 0
-}
-
-/// Return the machine to firmware through the FADT's reset register.
-// No fallback: 0xCF9, the keyboard controller and anything else are written only where a table named them.
-pub fn reboot() -> ! {
-    crate::drivers::serial::flush_final();
-    // Kernel-internal, so a bug rather than a machine quiesced and then left halted quietly.
-    assert!(
-        RESET_PORT.load(Ordering::Relaxed) != 0,
-        "reboot: no reset register, and the caller did not ask can_reboot() first"
-    );
-    reset_now()
-}
-
-/// Write the reset register and nothing else.
-///
-/// **[`reboot`] is not reachable from a wedge**, which is why this exists
-/// beside it: that path opens with `serial::flush_final`, and a `BackendGuard`
-/// masks interrupts for its whole life — so a CPU stuck inside one holds what
-/// the call would wait for, on exactly the boots `crate::deadline` exists for.
-/// This takes no lock and touches nothing but the port the FADT named.
-///
-/// A machine with no reset register halts here rather than returning: the
-/// caller has already sealed why, and holding is what such a machine has always
-/// done.
-pub fn reset_now() -> ! {
-    // **Here and not at either caller.** `stop::before_reset` is registers and
-    // nothing else — written for the panic path, so it takes no lock and
-    // allocates nothing, which is the only kind of call a wedge may make — and
-    // it *appends* its account to whatever this boot already sealed, so a
-    // `WEDGED` page carries what the reset did to USB the way a `PANIC` one
-    // does. A caller seals first and calls this second: the record is the
-    // diagnostic the seal exists for and may not be lost to a stop that does
-    // not return.
-    stop::before_reset();
-    let port = RESET_PORT.load(Ordering::Relaxed);
-    if port == 0 {
-        crate::arch::cpu::halt();
-    }
-    // SAFETY: the port is non-zero only where `init_reset` decoded an 8-bit System I/O register, and the value is that register's.
-    unsafe { crate::arch::pio::outb(port, RESET_VALUE.load(Ordering::Relaxed)) };
-
-    crate::arch::cpu::halt();
-}
-
-/// Trigger ACPI S5 (soft-off) shutdown.
-pub fn shutdown() -> ! {
-    // Last chance: nothing drains the log ring after this point.
-    crate::drivers::serial::flush_final();
-    // S5 takes VBUS with it on a machine whose ports are not always-on and
-    // takes nothing on one whose are, so the devices are handed back here for
-    // the same reason as at a reboot.
-    stop::before_reset();
-
-    let pm1a = PM1A_CNT_PORT.load(Ordering::Relaxed);
-    let slp_typ = SLP_TYPA.load(Ordering::Relaxed);
-
-    if pm1a != 0 {
-        let val = (slp_typ << 10) | SLP_EN;
-        // SAFETY: pm1a and slp_typ come only from the validated FADT parse via PM1A_CNT_PORT/SLP_TYPA, and the zero check above confirms that parse happened.
-        unsafe { crate::arch::pio::outw(pm1a, val) };
-    }
-
-    crate::arch::cpu::halt();
 }
 
 /// Given the RSDP address, parse XSDT -> HPET table -> return HPET MMIO base address.
@@ -404,37 +223,4 @@ pub fn parse_madt(rsdp_addr: u64) -> Option<MadtInfo> {
 
     log!("ACPI: MADT cpus={:?}", apic_ids);
     Some(MadtInfo { apic_ids, io_apics, source_overrides })
-}
-
-/// Scan DSDT AML bytecode for the \_S5_ package and extract SLP_TYPa.
-// Bounded by the table's declared length via [`Table::field`].
-fn find_s5_slp_typ(dsdt: &Table) -> Option<u16> {
-    let s5 = b"_S5_";
-    let len = dsdt.len();
-
-    for i in SDT_HEADER_LEN..len.saturating_sub(7) {
-        if (0..4).any(|j| dsdt.field::<u8>(i + j) != Some(s5[j])) {
-            continue;
-        }
-        if dsdt.field::<u8>(i + 4) != Some(0x12) {
-            continue;
-        }
-
-        let pkg_lead = dsdt.field::<u8>(i + 5)?;
-        let pkg_len_bytes = match (pkg_lead >> 6) & 0x03 {
-            0 => 1usize,
-            n => (n + 1) as usize,
-        };
-
-        // Skip: "_S5_"(4) + PackageOp(1) + PkgLength + NumElements(1)
-        let val_off = i + 4 + 1 + pkg_len_bytes + 1;
-        let byte = dsdt.field::<u8>(val_off)?;
-        return Some(if byte == 0x0A {
-            dsdt.field::<u8>(val_off + 1)? as u16
-        } else {
-            byte as u16
-        });
-    }
-
-    None
 }

@@ -161,7 +161,7 @@ pub unsafe fn panic_flush() {
 }
 
 /// Drains the ring before the machine powers off, so the tail of a shutdown
-/// is not lost to `acpi::shutdown()` cutting power with logs still queued.
+/// is not lost to `power::shutdown()` cutting power with logs still queued.
 ///
 /// Bounded on the wire like `panic_flush`, but never bypasses: every CPU is
 /// still live here, and reading the ring unsynchronized is only safe once

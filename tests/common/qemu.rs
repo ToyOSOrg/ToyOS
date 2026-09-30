@@ -2209,6 +2209,10 @@ pub struct BootOptions {
     /// controller start into this file: the device's own account
     /// of what reached it, which no line a driver prints can be.
     pub nvme_trace: Option<PathBuf>,
+    /// Have QEMU record every PSCI call a vCPU makes into this file, with the
+    /// calling CPU's affinity: the firmware side's own account of what the
+    /// kernel asked of it.
+    pub psci_trace: Option<PathBuf>,
 }
 
 /// Where the guest sees the host under QEMU's user-mode networking, and where
@@ -2289,6 +2293,7 @@ impl Default for BootOptions {
             wire_dump: None,
             userland_nvme: None,
             nvme_trace: None,
+            psci_trace: None,
         }
     }
 }
@@ -4362,6 +4367,14 @@ fn qemu_command(
             qemu.arg("-trace").arg(event);
         }
         qemu.arg("-D").arg(trace);
+    }
+    if let Some(trace) = &options.psci_trace {
+        assert!(
+            options.profile.arch() == Arch::Aarch64 && options.profile.accel() == Accel::Tcg,
+            "a PSCI trace is TCG's `arm_psci_call`, and this profile's PSCI is not QEMU's TCG"
+        );
+        assert!(options.nvme_trace.is_none(), "QEMU has one `-D` log, and the NVMe trace holds it");
+        qemu.arg("-trace").arg("arm_psci_call").arg("-D").arg(trace);
     }
 
     // The mass-storage devices beside the boot stick, and the only ones a test

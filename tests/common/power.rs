@@ -72,6 +72,41 @@ pub fn machine_reboot(
     Ok(())
 }
 
+/// The machine powers off when a process holding `POWER` asks it to: ACPI S5
+/// through the PM1a control block the FADT names, with the DSDT's `\_S5_`.
+pub fn machine_shutdown(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    let options = BootOptions { qmp: true, ..Default::default() };
+    let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+
+    let boot = serial::Serial::boot(&qemu);
+    boot.must_be_clean()?;
+    // q35's ICH9 power-management block, and its `\_S5_`.
+    boot.must_say("ACPI: PM1a=0x604 SLP_TYPa=0")?;
+
+    let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(WAIT));
+
+    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    let reason = stop.reason();
+    let tail = qemu.drain_serial(WAIT);
+
+    let drain = serial::Serial::named("shutdown drain", tail.as_str());
+    drain.must_be_clean()?;
+    drain.must_say("Shutting down.")?;
+    match reason.as_deref() {
+        Some("guest-shutdown") => {}
+        Some(seen) => return Err(format!("QEMU stopped this guest for {seen:?}, not a power-off\n{tail}")),
+        None => return Err(format!("QEMU never reported stopping: the guest asked to power off and stayed up\n{tail}")),
+    }
+
+    eprintln!("  [power] QEMU stopped the guest for guest-shutdown");
+    Ok(())
+}
+
 /// A boot with no host on the console runs its manifest's jobs and ends
 /// itself, and the loader's own account of it is on the stick beside `logd`'s.
 pub fn metal_job_reboot(
@@ -2357,7 +2392,7 @@ const STICK_ENUMERATED: &str = "usb-storage: 1 device(s)";
 
 /// Every way this kernel resets a machine, and the account each one leaves.
 ///
-/// `acpi::reboot` and `acpi::shutdown` are the two resets this kernel performs,
+/// `power::reboot` and `power::shutdown` are the two resets this kernel performs,
 /// and three different things reach them: a job list's last `reboot`, the test
 /// runner's own job deadline, and the panic console's bound. Each arm is a
 /// chained boot, so the pass after the reset can be read.

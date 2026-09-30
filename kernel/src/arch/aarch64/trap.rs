@@ -166,6 +166,7 @@ fn irq(from_el0: bool) {
         // Never ended: the running priority it keeps is every interrupt's
         // own, so the interface signals this CPU nothing and the halt stays.
         irqchip::SGI_HALT => cpu::halt(),
+        irqchip::SGI_OFF => super::power::cpu_off(),
         irqchip::SGI_KICK => {
             percpu::irq_took(Source::Timer);
             irqchip::end(intid);

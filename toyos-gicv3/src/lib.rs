@@ -22,6 +22,12 @@ pub const fn packed_affinity(mpidr: u64) -> u32 {
     ((mpidr & 0xFF_FFFF) | ((mpidr >> 8) & 0xFF00_0000)) as u32
 }
 
+/// [`packed_affinity`] undone: the four fields where `MPIDR_EL1` holds them,
+/// every other bit zero, which is how PSCI names a CPU.
+pub const fn unpacked_affinity(packed: u32) -> u64 {
+    (packed & 0xFF_FFFF) as u64 | ((packed >> 24) as u64) << 32
+}
+
 /// `ICC_SGI1R_EL1` raising SGI `intid` on the one CPU whose packed affinity is
 /// `target`: `Aff3`, `Aff2` and `Aff1` name its cluster, `RS` the range of
 /// sixteen `Aff0` values it falls in, and the target list its one bit there.

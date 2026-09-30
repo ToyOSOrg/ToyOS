@@ -309,19 +309,21 @@ pub fn reserved() -> Region {
 }
 
 /// What the boot learns bringing interrupts up and hands later steps: the
-/// other CPUs the MADT names, and how to start them.
+/// other CPUs the MADT names.
 pub struct Platform {
     gic: super::irqchip::Gic,
-    psci: Option<super::psci::Conduit>,
 }
 
 /// Interrupt delivery: this CPU's per-CPU block, the GIC and the timer's
 /// interrupt, and interrupts unmasked. The syscall gate is the vectors' own.
+/// Then PSCI, which starts the other CPUs and resets and powers off the
+/// machine.
 pub fn interrupts(rsdp_addr: u64) -> Platform {
     super::percpu::init_bsp();
     let gic = super::irqchip::init(rsdp_addr);
     super::cpu::enable_interrupts();
-    Platform { gic, psci: super::psci::init(rsdp_addr) }
+    super::psci::init(rsdp_addr);
+    Platform { gic }
 }
 
 /// The clock: the generic timer's count, at the rate firmware states in
@@ -349,7 +351,7 @@ pub fn platform_devices(_rsdp_addr: u64) {}
 
 /// Every other CPU, running.
 pub fn start_other_cpus(platform: &Platform, _args: &KernelArgs) {
-    super::smp::start(&platform.gic, platform.psci);
+    super::smp::start(&platform.gic);
 }
 
 /// The interrupt-controller selftests an actuator asks for.
