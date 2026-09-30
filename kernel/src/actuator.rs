@@ -298,9 +298,6 @@ actuators! {
     /// Log the monotonic time and which CPUs are alive every 250ms.
     heartbeat = "heartbeat";
 
-    /// Send this CPU an IPI mid record-copy and emit one shard generation from the handler.
-    log_nested_emit = "log-nested-emit";
-
     /// Let a handle close cancel every poll on the keyboard's watch in the machine.
     keyboard_close_cancels_every_console = "keyboard-close-cancels-every-console";
 

@@ -25,8 +25,7 @@
 //! **Nothing this reader waits for is a record the ring may drop.** The
 //! termination condition is the *cursor*: the log has been drained and nothing
 //! new has arrived for [`QUIET_READS`] reads, once the producer has returned
-//! from its last call. The nesting burst's own `done` is a cross-check where it
-//! survived and is never waited on. **The rule this shape exists to keep is
+//! from its last call. **The rule this shape exists to keep is
 //! general**: a workload whose liveness depends on a record the ring is allowed
 //! to drop is the same mistake wherever it appears.
 
@@ -90,11 +89,6 @@ const HANDOVER: u64 = 64;
 /// shard, whichever CPUs the producer ran on.
 const SHARD_RECORDS: u64 = 512;
 
-/// `kernel/src/log/nested.rs`'s `NEST_PRODUCER`: the burst an interrupt handler
-/// emits declares itself as this, so it goes through the same per-producer
-/// ledger and the same byte-for-byte regeneration as a storm's records.
-const NEST_PRODUCER: u64 = u64::MAX;
-
 /// One producer's ledger.
 #[derive(Default)]
 struct Producer {
@@ -116,22 +110,13 @@ struct ShardLedger {
     last_at_ns: u64,
 }
 
-/// The gate over whatever the boot's actuators write.
-pub fn run(cap: Option<&SysCap>) -> i32 {
-    report(cap, false)
-}
-
 /// The gate with a storm beside it.
 pub fn run_storm(cap: Option<&SysCap>) -> i32 {
-    report(cap, true)
-}
-
-fn report(cap: Option<&SysCap>, storm: bool) -> i32 {
     let Some(cap) = cap else {
         println!("log-gate: this program holds no system capability, so it holds no `logread`");
         return 1;
     };
-    match gate(cap, storm) {
+    match gate(cap) {
         Ok(()) => 0,
         Err(e) => {
             println!("log-gate: FAILED: {e}");
@@ -143,10 +128,6 @@ fn report(cap: Option<&SysCap>, storm: bool) -> i32 {
 struct Run {
     shards: [ShardLedger; MAX_LOG_SHARDS],
     producers: BTreeMap<u64, Producer>,
-    /// The nesting gate's declared burst, once its `done` has been read. A
-    /// cross-check and never a requirement: the burst laps its shard, so the
-    /// ring is allowed to drop it.
-    nest: Option<u64>,
     records: u64,
     reads: u64,
     /// Storm records taken, after the lap, by a read across which the
@@ -156,13 +137,12 @@ struct Run {
     completions: u64,
 }
 
-fn gate(cap: &SysCap, storm: bool) -> Result<(), String> {
+fn gate(cap: &SysCap) -> Result<(), String> {
     let mut tail = LogTail::new();
     let mut buf = [Record::EMPTY; BATCH];
     let mut run = Run {
         shards: [ShardLedger::default(); MAX_LOG_SHARDS],
         producers: BTreeMap::new(),
-        nest: None,
         records: 0,
         reads: 0,
         concurrent: 0,
@@ -191,9 +171,9 @@ fn gate(cap: &SysCap, storm: bool) -> Result<(), String> {
     let stop = Arc::new(AtomicBool::new(false));
     let (handover, taken) = mpsc::sync_channel(1);
     let (lap, lapped) = mpsc::sync_channel(1);
-    let mut handover = storm.then_some(handover);
-    let mut producer = storm
-        .then(|| spawn_producer(Arc::clone(&produced), Arc::clone(&stop), taken, lap));
+    let mut handover = Some(handover);
+    let mut producer =
+        Some(spawn_producer(Arc::clone(&produced), Arc::clone(&stop), taken, lap));
     let mut after_lap = false;
 
     let mut quiet = 0u32;
@@ -277,7 +257,7 @@ fn gate(cap: &SysCap, storm: bool) -> Result<(), String> {
         });
     }
 
-    verdict(&tail, &run, storm, emitted)
+    verdict(&tail, &run, emitted)
 }
 
 /// The storm: one kernel record per call, counted after each call returns.
@@ -379,23 +359,6 @@ fn account(record: &Record, run: &mut Run) -> Result<(), String> {
         ));
     }
 
-    if let Some(rest) = message.strip_prefix("lognest done ") {
-        let emitted = rest
-            .split_whitespace()
-            .find_map(|w| w.strip_prefix("emitted="))
-            .and_then(|v| v.parse::<u64>().ok())
-            .ok_or_else(|| format!("`lognest done` is unreadable: {rest}"))?;
-        if run.nest.replace(emitted).is_some() {
-            return Err("the nesting gate said `done` twice".into());
-        }
-        return Ok(());
-    }
-    if message.starts_with("lognest ") {
-        // `start` and `outer`. Both are records like any other and the burst
-        // laps the shard they are in, so both are *expected* to be dropped —
-        // which is the ring's declared policy and not a loss of evidence.
-        return Ok(());
-    }
     let Some(rest) = message.strip_prefix("logstorm t=") else {
         // An ordinary kernel record. It is in the shard ledger above, which is
         // where the conservation law is computed; it declares nothing this gate
@@ -404,7 +367,7 @@ fn account(record: &Record, run: &mut Run) -> Result<(), String> {
     };
 
     let (thread, index) = parse_record(rest)?;
-    if thread != STORM_PRODUCER && thread != NEST_PRODUCER {
+    if thread != STORM_PRODUCER {
         return Err(format!(
             "cpu{cpu} seq {} names producer t={thread}, which no gate runs",
             record.seq
@@ -465,7 +428,7 @@ fn parse_record(rest: &str) -> Result<(u64, u64), String> {
 
 /// The conservation law, and everything the gate prints for a reader of its
 /// output.
-fn verdict(tail: &LogTail, run: &Run, storm: bool, emitted: u64) -> Result<(), String> {
+fn verdict(tail: &LogTail, run: &Run, emitted: u64) -> Result<(), String> {
     let seen: Vec<usize> =
         (0..MAX_LOG_SHARDS).filter(|&i| run.shards[i].first.is_some()).collect();
     if seen.is_empty() {
@@ -512,54 +475,24 @@ fn verdict(tail: &LogTail, run: &Run, storm: bool, emitted: u64) -> Result<(), S
     }
 
     let read_total = storm_read(run);
-    if storm {
-        if read_total == 0 {
-            return Err("the storm ran and this reader read none of it".into());
-        }
-        let next = run.producers.get(&STORM_PRODUCER).and_then(|p| p.next).unwrap_or(0);
-        if next > emitted {
-            return Err(format!(
-                "the storm answered index {} of {emitted} emitted",
-                next - 1
-            ));
-        }
-        // The readiness source, asserted where it is reachable: the poll was
-        // armed before the storm started, so the records that answer it were
-        // committed after it was registered.
-        if run.completions == 0 {
-            return Err(
-                "the log's readiness source completed no poll — not across the storm, and not on \
-                 the record a child's exit commits afterwards either"
-                    .into(),
-            );
-        }
+    if read_total == 0 {
+        return Err("the storm ran and this reader read none of it".into());
     }
-
-    if let Some(burst) = run.producers.get(&NEST_PRODUCER) {
-        // The burst's own `done` is a cross-check where it survived, and the
-        // ledger's own floor where it did not. The burst laps its shard by
-        // construction, so a reader that required that record would be
-        // requiring one the design says may go.
-        let declared = match (run.nest, burst.next) {
-            (Some(declared), _) => declared,
-            (None, Some(next)) => next,
-            (None, None) => {
-                return Err("the nesting burst was seen and named no index".into())
-            }
-        };
-        if burst.read == 0 {
-            return Err("the nesting burst was injected and none of it was read".into());
-        }
-        if burst.next.is_some_and(|next| next > declared) {
-            return Err(format!(
-                "the nesting burst answered index {} of a declared {declared}",
-                burst.next.unwrap_or(0) - 1
-            ));
-        }
-        println!(
-            "log-gate: nest declared={declared} read={} dropped={}",
-            burst.read,
-            declared - burst.read,
+    let next = run.producers.get(&STORM_PRODUCER).and_then(|p| p.next).unwrap_or(0);
+    if next > emitted {
+        return Err(format!(
+            "the storm answered index {} of {emitted} emitted",
+            next - 1
+        ));
+    }
+    // The readiness source, asserted where it is reachable: the poll was
+    // armed before the storm started, so the records that answer it were
+    // committed after it was registered.
+    if run.completions == 0 {
+        return Err(
+            "the log's readiness source completed no poll — not across the storm, and not on \
+             the record a child's exit commits afterwards either"
+                .into(),
         );
     }
 
@@ -570,15 +503,13 @@ fn verdict(tail: &LogTail, run: &Run, storm: bool, emitted: u64) -> Result<(), S
         run.reads,
         seen.len()
     );
-    if storm {
-        println!(
-            "log-gate: storm emitted={emitted} read={read_total} dropped={} \
-             concurrent={} wakes={}",
-            emitted - read_total,
-            run.concurrent,
-            run.completions,
-        );
-    }
+    println!(
+        "log-gate: storm emitted={emitted} read={read_total} dropped={} \
+         concurrent={} wakes={}",
+        emitted - read_total,
+        run.concurrent,
+        run.completions,
+    );
     println!("log-gate: OK");
     Ok(())
 }

@@ -27,7 +27,6 @@ use toyos::syscap::SysCap;
 /// binary's stdin is a pipe (see the `Stdio::piped()` below), so the object the
 /// collision is about does not exist in one.
 const BUILTINS: &[(&str, fn(Option<&SysCap>) -> i32)] = &[
-    ("log-gate", log_gate::run),
     ("log-storm", log_gate::run_storm),
     ("kbd-close", kbd_close::run),
 ];

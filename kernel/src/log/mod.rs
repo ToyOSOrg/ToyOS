@@ -6,12 +6,11 @@
 #![warn(clippy::undocumented_unsafe_blocks)]
 
 pub mod console;
-pub mod nested;
 pub mod read;
 pub mod recovery;
 pub mod registry;
 pub mod shard;
-#[cfg(any(feature = "boot-actuators", feature = "test-actuators"))]
+#[cfg(feature = "test-actuators")]
 pub mod storm;
 pub mod user;
 

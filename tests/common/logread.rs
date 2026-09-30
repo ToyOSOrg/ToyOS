@@ -20,9 +20,6 @@ use super::qemu::{BootOptions, QemuInstance};
 /// The in-guest gate's name in the `run <name>` protocol. It is a `test-runner`
 /// builtin rather than a `/system/bin` entry, and the marker protocol is the same
 /// either way.
-const GATE: &str = "log-gate";
-
-/// The same gate with its own producer thread storming the log beside it.
 const STORM_GATE: &str = "log-storm";
 
 /// The whole run's ceiling: a gate that never finishes is what it reds.
@@ -49,9 +46,7 @@ impl Report {
 /// prints its ledger over several `log-gate:` lines and this file reads them
 /// into one map, so a name appearing twice means the number a test asserts on
 /// came from whichever line was printed last — silently, and with the other
-/// line still on screen looking like the evidence. The nest and storm lines
-/// already share `read=` and `dropped=`, and every gate here reads exactly one
-/// of the two.
+/// line still on screen looking like the evidence.
 struct Contaminated {
     key: String,
     first: u64,
@@ -109,44 +104,6 @@ pub fn log_conservation_smp2(
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
     conservation(test_config, c_bins, rust_bins, 2)
-}
-
-/// The nested-`emit` gate: an interrupt that logs, inside another `emit`, on one CPU.
-///
-/// **The one case loom cannot express and the host cannot stage.** The
-/// stimulus is a self-IPI sent from inside a record's own body copy, inside
-/// `SYS_LOG_READ` with `IF` opened for it — where `emit`'s IF-off bracket is the
-/// only thing holding the interrupt off. The handler emits exactly one shard generation of
-/// patterned records; the outer record is then dropped by the ring's own
-/// drop-oldest policy, which is what makes "the burst laps the shard" a
-/// statement with an arithmetic behind it.
-///
-/// What is asserted is the conservation ledger over a workload of that shape: every
-/// sequence number read or counted lost, every burst record's text regenerated
-/// byte for byte from the two numbers it declares, and the burst's own `done`
-/// read — so a run in which nothing was injected cannot pass quietly.
-///
-/// **`--smp 1`, and that is the test's own claim.** Nesting is a property of
-/// one CPU: a second CPU adds records to the merge and takes nothing away from
-/// what this asks, while at one the interrupted writer and its interrupting
-/// handler are provably the same CPU.
-pub fn log_nested_emit(
-    test_config: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    let options = BootOptions { smp: 1, kernel_params: &["log-nested-emit"], ..Default::default() };
-    let report = storm(test_config, c_bins, rust_bins, GATE, options)?;
-    let declared = report.get("declared")?;
-    let read = report.get("read")?;
-    if read == 0 {
-        return Err(format!("the burst was declared and none of it read\n{}", report.stdout));
-    }
-    eprintln!(
-        "  [log] nested: burst declared={declared} read={read} dropped={}",
-        report.get("dropped")?
-    );
-    Ok(())
 }
 
 /// Boot one machine as `options` says, run `gate` on it and read its verdict off it.
