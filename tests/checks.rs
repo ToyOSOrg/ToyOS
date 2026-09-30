@@ -343,6 +343,63 @@ mod checks {
         Ok(())
     }
 
+    /// [`mask_windows`] against captures no guest has to produce: two CPUs,
+    /// two reports, and a span staged between them.
+    #[test]
+    fn mask_windows_verdict() -> Result<(), String> {
+        let census = |cpu: u32| {
+            format!(
+                "[kernel 0.1 cpu0] irq: cpu{cpu} total=0 timer=0 xhci=0 userdev=0 sound=0 i8042=0 \
+                 dmafault=0 hda=0 tlb=0 nmi=0 spurious=0 unclaimed=0\n"
+            )
+        };
+        let windows = |cpu: u32, irqs: u64, preempt: u64| {
+            format!("[kernel 0.1 cpu0] windows: cpu{cpu} irqs_off_ns={irqs} preempt_off_ns={preempt}\n")
+        };
+        let staged = "[kernel 0.1 cpu1] windows: staged cpu1 1000000ns\n";
+        let good = [
+            census(0), windows(0, 5, 7), census(1), windows(1, 3, 4),
+            staged.to_string(),
+            census(0), windows(0, 2, 2), census(1), windows(1, 1_000_000, 1_200_000),
+        ]
+        .concat();
+        let refused = |what: &str, capture: &str, says: &str| match mask_windows(capture, 2) {
+            Ok(()) => Err(format!("{what} was accepted")),
+            Err(e) if e.contains(says) => Ok(()),
+            Err(e) => Err(format!("{what} was refused for the wrong reason: {e}")),
+        };
+
+        mask_windows(&good, 2).map_err(|e| format!("the good capture was refused: {e}"))?;
+
+        refused("no staged span", &good.replace(staged, ""), "said no span")?;
+        refused(
+            "a staged span no later report carries",
+            &good.replace("irqs_off_ns=1000000", "irqs_off_ns=999999"),
+            "spun 1000000ns",
+        )?;
+        refused(
+            "a staged span carried only by a report before it",
+            &[
+                census(0), windows(0, 5, 7), census(1), windows(1, 1_000_000, 1_200_000),
+                staged.to_string(),
+                census(0), windows(0, 2, 2), census(1), windows(1, 3, 4),
+            ]
+            .concat(),
+            "spun 1000000ns",
+        )?;
+        refused("a census without its windows", &good.replace(&windows(0, 2, 2), ""), "went out without")?;
+        refused(
+            "a CPU that closed no window",
+            &good.replace(&windows(0, 5, 7), &windows(0, 0, 7)).replace(&windows(0, 2, 2), &windows(0, 0, 2)),
+            "closed no window",
+        )?;
+        refused("one CPU of two", &[census(0), windows(0, 5, 7), staged.replace("cpu1", "cpu0"), census(0), windows(0, 1_000_000, 1_000_000)].concat(), "1 of 2")?;
+        refused("a field missing", &good.replace(" preempt_off_ns=7", ""), "fields")?;
+
+        eprintln!("  [mask_windows] the verdict refuses 7 captures and accepts one");
+        Ok(())
+    }
+
     /// What the declaration itself has to be, before any of it means anything.
     /// Which shared-boot binaries need `SYS_DEBUG`, asked of their source.
     ///
