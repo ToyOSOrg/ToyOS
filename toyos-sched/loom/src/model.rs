@@ -1,5 +1,5 @@
 //! Scaffolding shared by the loom models: the message type, the modelled
-//! preempt count, the leaf lock and the kick recorder.
+//! preempt count, the cell lock and the kick recorder.
 
 use loom::sync::atomic::{AtomicUsize, Ordering};
 use loom::sync::{Mutex, MutexGuard};
@@ -8,7 +8,7 @@ use crate::hw::{CpuId, Kicker};
 use crate::mailbox::{PreemptGuard, SchedMsg};
 use crate::sync::Arc;
 use crate::task::{TaskKey, TaskShared, WakeCause, WakeReason};
-use crate::sync::LeafLock;
+use crate::sync::CellLock;
 use crate::watch::Waiters;
 
 pub const CPU0: CpuId = CpuId(0);
@@ -113,7 +113,7 @@ pub struct RemoteGuard;
 #[allow(unsafe_code)]
 unsafe impl PreemptGuard for RemoteGuard {}
 
-/// `LeafLock` over loom's mutex, so the watch models exercise the real
+/// `CellLock` over loom's mutex, so the watch models exercise the real
 /// critical sections.
 pub struct LoomLock<T>(Mutex<T>);
 
@@ -123,7 +123,7 @@ impl<T> LoomLock<T> {
     }
 }
 
-impl<T: Send> LeafLock<T> for LoomLock<T> {
+impl<T: Send> CellLock<T> for LoomLock<T> {
     fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
         f(&mut self.0.lock().unwrap())
     }

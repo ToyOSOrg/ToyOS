@@ -1,6 +1,6 @@
 //! Vt-d fault interrupt handling: MSI-delivered, never polled.
 //!
-//! The handler is bounded, allocates nothing and takes no lock; unit and
+//! The handler is bounded, allocates nothing; unit and
 //! function state lives in fixed arrays of atomics, written once before the
 //! mask comes off. Whatever the stream, the same things happen first: Bus
 //! Master Enable cleared on the function that faulted, the first record latched
@@ -36,8 +36,7 @@ const FSTS_OVERFLOW: u32 = 1 << 0;
 // One fault recording register's F bit, in the 32-bit word that carries it.
 const RECORD_FAULT: u32 = 1 << 31;
 
-// Atomics only: the handler takes no lock; each field is written once before
-// the unit's mask comes off.
+// Atomics only: each field is written once before the unit's mask comes off.
 struct FaultUnit {
     // Physical base of the register window; 0 means this slot is unused.
     // vtd::window refuses a base of 0, so no armed unit can collide with the sentinel.

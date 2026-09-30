@@ -8,7 +8,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use toyos_sched::fair::{FairShare, ShareState};
 use toyos_sched::hw::Nanos;
 use toyos_sched::msg::Msg;
-use toyos_sched::sync::LeafLock;
+use toyos_sched::sync::CellLock;
 use toyos_sched::task::{SchedPayload, TaskAccounting, TaskShared, WaitClass};
 use toyos_sched::park::WaitTicket;
 
@@ -28,7 +28,7 @@ impl<T> KernelLock<T> {
     }
 }
 
-impl<T: Send> LeafLock<T> for KernelLock<T> {
+impl<T: Send> CellLock<T> for KernelLock<T> {
     fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
         f(&mut self.0.lock())
     }
