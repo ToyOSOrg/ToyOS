@@ -63,10 +63,10 @@ const SOURCES: &str = "SOURCES";
 
 /// What changes how a key's sources become a sysroot and is none of them: the
 /// std build's recipe below. Moving it moves every key.
-const RECIPE: &str = "bootstrap stage-0 local rebuild, profile compiler, no LLVM, \
+const RECIPE: &str = "bootstrap stage-0 local rebuild, profile compiler, no LLVM or Ninja, \
                       libtoyos_c merged, libraries from the stamp, linked by rust-lld, \
                       a C sysroot of libc's staticlib and headers per target, and its C++ runtime \
-                      built under n2 from the runtimes' sources of the compiler's LLVM; 7";
+                      built under n2 from the runtimes' sources of the compiler's LLVM; 8";
 
 /// Every sysroot on this host.
 pub fn sysroots_dir(rust_dir: &Path) -> PathBuf {
@@ -531,7 +531,9 @@ fn place_std(stamp: &Path, lib: &Path) {
 /// The linker is the compiler's own `rust-lld`, named by path so that which sysroot
 /// a stage-0 build searches for tools decides nothing; and no rpath, which bootstrap
 /// spells as a C driver's `-Wl,` arguments that a linker run directly refuses.
-/// No LLVM: std builds none, and the profile's `download-ci-llvm` fetches one.
+/// No LLVM: std builds none, and the profile's `download-ci-llvm` fetches one;
+/// and no Ninja, which bootstrap otherwise demands on `PATH` for the LLVM it does
+/// not build.
 fn std_config(compiler: &Path, cargo: &Path, build_dir: &Path, host: &str) -> String {
     let targets = GUEST_TARGETS.iter().map(|t| format!("\"{t}\"")).collect::<Vec<_>>().join(", ");
     let linker = toolchain::rust_lld(compiler);
@@ -553,6 +555,7 @@ target = [{targets}]
 
 [llvm]
 download-ci-llvm = false
+ninja = false
 
 [rust]
 lld = false
@@ -831,12 +834,13 @@ mod tests {
         assert!(kept.iter().all(|f| f.is_file()), "the same compiler's build went");
     }
 
-    /// **A std build fetches no LLVM**: it builds none, and the `compiler`
-    /// profile would download one.
+    /// **A std build fetches no LLVM and asks for no Ninja**: it builds none,
+    /// the `compiler` profile would download one, and bootstrap would refuse it
+    /// with no `ninja` on `PATH`.
     #[test]
-    fn a_std_build_downloads_no_llvm() {
+    fn a_std_build_downloads_no_llvm_and_asks_for_no_ninja() {
         let config = std_config(Path::new("/c"), Path::new("/cargo"), Path::new("/b"), "h");
-        assert!(config.contains("\n[llvm]\ndownload-ci-llvm = false\n"), "{config}");
+        assert!(config.contains("\n[llvm]\ndownload-ci-llvm = false\nninja = false\n"), "{config}");
     }
 
     /// **A switch that cannot remove the other compiler's build fails and does

@@ -82,9 +82,6 @@ exclude = [
     # The Rust compiler/std fork: its own workspaces, its own lockfiles, and a
     # submodule this repository does not resolve for.
     "rust",
-    # A third party's program the sysroot build runs, built as `src/build.rs`
-    # builds the host judges: its graph is n2's, not the build system's.
-    "toyos-n2",
     # The userland SDK. It compiles against the ToyOS sysroot and is a path
     # dependency of `rust/library/std`, so it keeps its own resolution and
     # cannot be a member. It is host-tested all the same — its `lib.rs` is

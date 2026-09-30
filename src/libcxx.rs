@@ -55,23 +55,29 @@ pub(crate) const OPTIONS: [(&str, &str); 20] = [
     ("LIBCXX_INCLUDE_TESTS", "OFF"),
 ];
 
-/// The crate that builds n2.
-const N2: &str = "toyos-n2";
+/// n2, the Rust Ninja, at the commit the host-tools table measured.
+const N2: [&str; 4] = ["--git", "https://github.com/evmar/n2", "--rev", "b1fead52ccda0c497d816696f23f4099c3e8ec1f"];
 
-/// Build n2 from the commit and lock `toyos-n2/` pins, and return it: a binary
-/// named `ninja`, the name under which it speaks the Ninja CMake asks for.
+/// Install [`N2`] under `root`'s `target/` as its README directs, with its own
+/// lock and without its default jemalloc, which is C, and return it by the name
+/// `ninja`, under which it speaks the Ninja CMake asks for.
 pub fn ninja(root: &Path) -> PathBuf {
-    let at = root.join(N2);
+    let dir = root.join("target/n2");
     let status = Command::new("cargo")
-        .args(["build", "--release", "--locked"])
-        .current_dir(&at)
-        .env_remove("RUSTUP_TOOLCHAIN")
-        .env_remove("RUSTC")
-        .env_remove("RUSTFLAGS")
+        .args(["install", "--locked", "--no-default-features"])
+        .args(N2)
+        .arg("--root")
+        .arg(&dir)
         .status()
-        .unwrap_or_else(|e| panic!("cargo failed to launch in {}: {e}", at.display()));
-    assert!(status.success(), "{N2} did not build");
-    at.join("target/release/ninja")
+        .unwrap_or_else(|e| panic!("cargo failed to launch: {e}"));
+    assert!(status.success(), "n2 did not install into {}", dir.display());
+    let ninja = dir.join("bin/ninja");
+    match std::os::unix::fs::symlink("n2", &ninja) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => panic!("symlink {} -> n2: {e}", ninja.display()),
+    }
+    ninja
 }
 
 /// Build `arch`'s C++ runtime from the runtimes' `sources` into `c`, which holds
