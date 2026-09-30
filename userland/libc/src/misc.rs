@@ -215,7 +215,9 @@ pub unsafe extern "C" fn kill(_pid: i32, _sig: i32) -> i32 {
 
 // sysconf
 
+const _SC_ARG_MAX: i32 = 0;
 const _SC_PAGESIZE: i32 = 30;
+const _SC_GETPW_R_SIZE_MAX: i32 = 70;
 const _SC_NPROCESSORS_ONLN: i32 = 84;
 const _SC_CLK_TCK: i32 = 2;
 
@@ -225,7 +227,13 @@ pub unsafe extern "C" fn sysconf(name: i32) -> i64 {
         _SC_PAGESIZE => 4096,
         _SC_NPROCESSORS_ONLN => syscall::cpu_count() as i64,
         _SC_CLK_TCK => 100,
-        _ => -1,
+        // POSIX's -1 with `errno` untouched: the function each bounds, `exec`
+        // and the `getpw*_r` lookups, is one ToyOS does not have.
+        _SC_ARG_MAX | _SC_GETPW_R_SIZE_MAX => -1,
+        _ => {
+            crate::errno::set(crate::errno::EINVAL);
+            -1
+        }
     }
 }
 

@@ -10,7 +10,9 @@
 #define SIGBUS    7
 #define SIGFPE    8
 #define SIGKILL   9
+#define SIGUSR1   10
 #define SIGSEGV   11
+#define SIGUSR2   12
 #define SIGPIPE   13
 #define SIGALRM   14
 #define SIGTERM   15
@@ -42,6 +44,9 @@ typedef struct {
 
 #define SA_SIGINFO  4
 #define SA_RESTART  0x10000000
+#define SA_ONSTACK  0x08000000
+#define SA_NODEFER  0x40000000
+#define SA_RESETHAND 0x80000000
 
 struct sigaction {
     union {

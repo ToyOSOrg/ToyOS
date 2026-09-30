@@ -1,0 +1,33 @@
+alarm: 0, ENOSYS
+execv: -1, ENOSYS
+execve: -1, ENOSYS
+setsid: -1, ENOSYS
+getsid: -1, ENOSYS
+gethostname: -1, ENOSYS
+uname: -1, ENOSYS
+link: -1, ENOSYS
+fchown: -1, ENOSYS
+chmod: -1, ENOSYS
+fchmod: -1, ENOSYS
+statvfs: -1, ENOSYS
+fstatvfs: -1, ENOSYS
+getrlimit: -1, ENOSYS
+setrlimit: -1, ENOSYS
+msync: -1, ENOSYS
+mprotect: -1, ENOSYS
+realpath: -1, ENOSYS
+fcntl F_SETLK: -1, ENOSYS
+fcntl F_SETLKW: -1, ENOSYS
+fcntl F_GETLK: -1, ENOSYS
+getpwnam_r: ENOSYS, entry null
+getpwuid_r: ENOSYS, entry null
+mmap a file: -1, ENODEV
+mmap a file shared: -1, ENODEV
+mmap executable: -1, ENOTSUP
+mmap nothing: -1, EINVAL
+sysconf _SC_ARG_MAX: -1, no errno
+sysconf _SC_GETPW_R_SIZE_MAX: -1, no errno
+sysconf 12345: -1, EINVAL
+posix_madvise WILLNEED: 0
+posix_madvise 99: EINVAL
+file: 1 bytes; second name: none

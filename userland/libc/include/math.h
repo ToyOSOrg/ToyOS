@@ -27,6 +27,8 @@ double cosh(double x);
 double tanh(double x);
 double round(double x);
 double trunc(double x);
+double modf(double x, double *iptr);
+double logb(double x);
 float floorf(float x);
 float ceilf(float x);
 float sqrtf(float x);

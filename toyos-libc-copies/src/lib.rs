@@ -2,11 +2,43 @@
 //! it has, over every length to 300 and every source and destination offset to
 //! 20, against `copy_within` and `fill`, with the two buffers overlapping both
 //! ways; and its square roots against `f64::sqrt` and `f32::sqrt`. Each host
-//! architecture checks its own module.
+//! architecture checks its own module. libc's modules that read and set nothing
+//! but what they are handed: `strnlen` and `modf` and `logb` against the host C
+//! library's, `strsignal`'s texts, the readdir answer's reader, `dladdr`'s
+//! symbol search on an image laid out here, and what the memory calls refuse.
+//! And libc's headers against its definitions (`prototypes`).
 
 #[cfg(test)]
 #[path = "../../userland/libc/src/arch/mod.rs"]
 mod arch;
+#[cfg(test)]
+#[path = "../../userland/libc/src/elfsym.rs"]
+mod elfsym;
+#[cfg(test)]
+#[path = "../../userland/libc/src/fparts.rs"]
+mod fparts;
+#[cfg(test)]
+#[path = "../../userland/libc/src/listing.rs"]
+mod listing;
+#[cfg(test)]
+#[path = "../../userland/libc/src/memreq.rs"]
+mod memreq;
+#[cfg(test)]
+#[path = "../../userland/libc/src/text.rs"]
+mod text;
+
+#[cfg(test)]
+mod dladdr_symbols;
+#[cfg(test)]
+mod fparts_differential;
+#[cfg(test)]
+mod listing_reader;
+#[cfg(test)]
+mod memory_refusals;
+#[cfg(test)]
+mod prototypes;
+#[cfg(test)]
+mod text_differential;
 
 #[cfg(test)]
 mod tests {

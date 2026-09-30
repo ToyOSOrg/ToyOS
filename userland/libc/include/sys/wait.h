@@ -11,7 +11,6 @@
 #define WIFEXITED(s)   (WTERMSIG(s) == 0)
 #define WIFSIGNALED(s) (WTERMSIG(s) != 0)
 
-pid_t wait(int *status);
 pid_t waitpid(pid_t pid, int *status, int options);
 
 #endif

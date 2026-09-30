@@ -5,17 +5,23 @@ extern crate alloc;
 
 mod arch;
 mod ctype;
+mod elfsym;
 mod errno;
+mod fparts;
 mod link;
+mod listing;
 mod math;
 mod memory;
+mod memreq;
 mod misc;
 mod posix_io;
 mod printf;
 mod pthread;
+mod refused;
 mod socket;
 mod stdio;
 mod string;
+mod text;
 mod time;
 
 // C runtime: the entry `arch::_start` calls, panic handler, and global allocator.

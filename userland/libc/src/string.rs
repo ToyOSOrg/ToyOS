@@ -13,6 +13,17 @@ pub unsafe extern "C" fn strlen(s: *const u8) -> usize {
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn strnlen(s: *const u8, max: usize) -> usize {
+    unsafe { crate::text::strnlen(s, max) }
+}
+
+/// The text is static, so no call overwrites another's.
+#[no_mangle]
+pub extern "C" fn strsignal(sig: i32) -> *const u8 {
+    crate::text::signal_text(sig).as_ptr()
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn strcpy(dst: *mut u8, src: *const u8) -> *mut u8 {
     let mut i = 0;
     loop {

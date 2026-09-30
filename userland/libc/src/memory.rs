@@ -11,6 +11,18 @@ extern "C" {
     pub fn free(p: *mut u8);
 }
 
+/// `aligned_alloc` beside std: a block std's `malloc` gives, for an alignment
+/// it gives, and C11's `EINVAL` for any other (`memreq::std_aligns`).
+#[cfg(feature = "std-runtime")]
+#[no_mangle]
+pub unsafe extern "C" fn aligned_alloc(align: usize, size: usize) -> *mut u8 {
+    if !crate::memreq::std_aligns(align) {
+        crate::errno::set(crate::errno::EINVAL);
+        return ptr::null_mut();
+    }
+    unsafe { malloc(size) }
+}
+
 #[cfg(not(feature = "std-runtime"))]
 mod backend {
     use core::alloc::Layout;

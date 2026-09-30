@@ -16,3 +16,10 @@ pub extern "C" fn __errno_location() -> *mut i32 {
 pub(crate) fn set(code: i32) {
     ERRNO.set(code);
 }
+
+pub(crate) const ENOMEM: i32 = 12;
+pub(crate) const ENODEV: i32 = 19;
+pub(crate) const EINVAL: i32 = 22;
+pub(crate) const ENOSYS: i32 = 38;
+pub(crate) const EOVERFLOW: i32 = 75;
+pub(crate) const EOPNOTSUPP: i32 = 95;

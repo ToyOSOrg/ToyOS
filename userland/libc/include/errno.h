@@ -37,6 +37,7 @@ int *__errno_location(void);
 #define ERANGE  34
 #define ENOSYS  38
 #define ELOOP   40
+#define EOVERFLOW 75
 #define ENAMETOOLONG 36
 #define ENOTEMPTY    39
 #define EWOULDBLOCK  EAGAIN
@@ -46,6 +47,8 @@ int *__errno_location(void);
 #define EMSGSIZE     90
 #define EPROTOTYPE   91
 #define ENOPROTOOPT  92
+#define EOPNOTSUPP   95
+#define ENOTSUP      EOPNOTSUPP
 #define EAFNOSUPPORT 97
 #define EADDRINUSE   98
 #define EADDRNOTAVAIL 99
