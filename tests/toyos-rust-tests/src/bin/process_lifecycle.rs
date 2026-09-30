@@ -19,6 +19,12 @@
 //! child's exit while the wait is parked on it, which used to return the wait
 //! and panic the kernel on the exit code that was not there yet.
 //!
+//! **An end is also an event**: an `OP_WATCH` on the handle completes once the
+//! exit is published, so one poller waits for any number of children beside
+//! whatever else it watches. Four arms are this paragraph's: each completion
+//! names the child that ended, a watch on one already gone completes at once, a
+//! kill completes one, and closing one handle ends no other's watch.
+//!
 //! Two roles besides the test. `held` exits with a code of the parent's
 //! choosing, but not until its stdin closes — which is what lets every arm here
 //! order the exit against the wait without a clock deciding anything. `waiter`
@@ -32,6 +38,7 @@ use std::sync::OnceLock;
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::AsHandle;
+use toyos::poller::{Poller, READABLE};
 use toyos::process::Process;
 use toyos::syscap::SysCap;
 use toyos_abi::syscall::{self, SyscallError};
@@ -64,6 +71,10 @@ fn test() {
     an_unrelated_wake_does_not_end_the_wait();
     two_handles_answer_the_same();
     a_kill_publishes_like_an_exit();
+    each_end_completes_its_own_watch();
+    a_watch_on_an_ended_child_completes_at_once();
+    a_kill_completes_a_watch();
+    closing_one_handle_ends_no_other_watch();
     a_handle_is_the_whole_of_the_right();
     a_pid_is_not_authority();
     an_undefined_wait_flag_bit_is_refused();
@@ -245,6 +256,87 @@ fn a_kill_publishes_like_an_exit() {
     syscall::process_kill(handle).expect("killing a process that has gone is not a failure");
     assert_eq!(syscall::process_wait(handle), Ok(KILLED), "the code after the second kill");
     println!("  a kill publishes {KILLED} once, and a second kill changes nothing");
+}
+
+/// Three held children in one poller, each watched under its index, let go
+/// one at a time and out of order. Before each release nothing is ready; after
+/// it the one completion names that child, and its code is there without a
+/// wait.
+fn each_end_completes_its_own_watch() {
+    const CODES: [i32; 3] = [21, 22, 23];
+    let mut held: Vec<(Child, Option<ChildStdin>)> =
+        CODES.iter().map(|&code| start(code)).map(|(child, stdin)| (child, Some(stdin))).collect();
+    let poller = Poller::new(CODES.len() as u32);
+    let mut running: Vec<usize> = (0..CODES.len()).collect();
+    for released in [1, 2, 0] {
+        for &i in &running {
+            poller.watch_raw(RawHandle(held[i].0.as_raw_handle()), READABLE, i as u64);
+        }
+        poller.wait(0, 0, |token| panic!("child {token} is held, and its watch completed"));
+        drop(held[released].1.take());
+        let mut ended = Vec::new();
+        poller.wait(1, u64::MAX, |token| ended.push(token));
+        assert_eq!(ended, [released as u64], "child {released} was let go");
+        let status = held[released].0.try_wait().expect("try_wait");
+        assert_eq!(status.and_then(|s| s.code()), Some(CODES[released]), "child {released}'s code");
+        running.retain(|&i| i != released);
+    }
+    println!("  one poller: each end completes the watch of the child that ended, and only it");
+}
+
+/// The registration finds the end already published and completes in the
+/// submit that makes it; a held child watched beside it does not.
+fn a_watch_on_an_ended_child_completes_at_once() {
+    const GONE: u64 = 0;
+    const HELD: u64 = 1;
+    let (mut gone, release) = start(13);
+    drop(release);
+    assert_eq!(gone.wait().expect("wait").code(), Some(13), "the child that ends first");
+    let (mut held, keep) = start(0);
+    let poller = Poller::new(2);
+    poller.watch_raw(RawHandle(gone.as_raw_handle()), READABLE, GONE);
+    poller.watch_raw(RawHandle(held.as_raw_handle()), READABLE, HELD);
+    let mut ready = Vec::new();
+    poller.wait(0, 0, |token| ready.push(token));
+    assert_eq!(ready, [GONE], "a non-blocking submit of both watches");
+    drop(keep);
+    assert_eq!(held.wait().expect("wait").code(), Some(0), "the held child");
+    println!("  a watch on a child already gone completes at once");
+}
+
+/// A kill ends the child without its cooperation, and its end completes a
+/// watch as an exit's does.
+fn a_kill_completes_a_watch() {
+    let (mut child, _release) = start(0);
+    let poller = Poller::new(1);
+    poller.watch_raw(RawHandle(child.as_raw_handle()), READABLE, 0);
+    poller.wait(0, 0, |token| panic!("the held child's watch completed ({token})"));
+    child.kill().expect("kill");
+    let mut ended = Vec::new();
+    poller.wait(1, u64::MAX, |token| ended.push(token));
+    assert_eq!(ended, [0], "the killed child's watch");
+    let status = child.try_wait().expect("try_wait");
+    assert_eq!(status.and_then(|s| s.code()), Some(KILLED), "the killed child's code");
+    println!("  a kill completes a watch");
+}
+
+/// A second handle closed while the first is watched: the child did not end,
+/// so nothing completes, and the watch still answers the end when it comes.
+fn closing_one_handle_ends_no_other_watch() {
+    let (mut child, release) = start(17);
+    let second = syscall::dup(RawHandle(child.as_raw_handle())).expect("a Process handle duplicates");
+    let poller = Poller::new(1);
+    poller.watch_raw(RawHandle(child.as_raw_handle()), READABLE, 0);
+    poller.wait(0, 0, |token| panic!("the held child's watch completed ({token})"));
+    syscall::close(second);
+    poller.wait(0, 0, |token| panic!("closing a second handle answered the first's watch ({token})"));
+    drop(release);
+    let mut ended = Vec::new();
+    poller.wait(1, u64::MAX, |token| ended.push(token));
+    assert_eq!(ended, [0], "the watch that outlived the close");
+    let status = child.try_wait().expect("try_wait");
+    assert_eq!(status.and_then(|s| s.code()), Some(17), "the child's code");
+    println!("  closing one handle to a child ends no other handle's watch");
 }
 
 /// **The arm the pid-keyed shape could not have.** The waiter did not spawn the

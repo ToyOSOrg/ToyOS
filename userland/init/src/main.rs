@@ -688,9 +688,7 @@ impl std::fmt::Display for StartError {
 /// Wait for one start of a service to end, and close its ports if nothing was
 /// expecting it to, or wake the loop to start it again if its row says so.
 ///
-/// **A thread, because the kernel answers a process's end to a wait and to
-/// nothing a poll can watch.** It parks in the kernel for the process's life
-/// and costs nothing until then.
+/// It parks in the kernel for the process's life and costs nothing until then.
 fn close_when_it_ends(kept: &Mutex<Kept>, generation: u64, process: toyos::RawHandle) {
     let _ = toyos_abi::syscall::process_wait(process);
     toyos_abi::syscall::close(process);

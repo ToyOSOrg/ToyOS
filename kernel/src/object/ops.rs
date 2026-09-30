@@ -272,6 +272,8 @@ pub fn read_watch(object: &KObjectRef) -> Option<WatchRef> {
         KObjectRef::PipeRead(r) => pipe::read_watch(r.id()).map(WatchRef::Shared),
         KObjectRef::Connection(c) => pipe::read_watch(c.rx()).map(WatchRef::Shared),
         KObjectRef::Acceptor(a) => Some(WatchRef::Shared(a.watch().clone())),
+        // Readable once its exit is published, the one post its watch gets.
+        KObjectRef::Process(p) => Some(WatchRef::Shared(p.watch().clone())),
         KObjectRef::Console(_) => Some(WatchRef::Static(&keyboard::WATCH)),
         KObjectRef::Device(d) => match d.class() {
             device_registry::DeviceType::Keyboard => Some(WatchRef::Static(&keyboard::WATCH)),
@@ -290,7 +292,7 @@ pub fn read_watch(object: &KObjectRef) -> Option<WatchRef> {
         KObjectRef::SysCap(_) => Some(WatchRef::Static(&crate::log::user::WATCH)),
         KObjectRef::PipeWrite(_) | KObjectRef::File(_) | KObjectRef::Inbox(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
-        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) => None,
+        | KObjectRef::SharedMem(_) => None,
     }
 }
 
@@ -311,10 +313,13 @@ pub fn write_watch(object: &KObjectRef) -> Option<WatchRef> {
 /// Whether closing one handle to this object ends what its watches watch, so
 /// every poll on them — in any ring — is answered as gone. `false` for the log
 /// and the keyboard, which the machine ends on its own and which other handles
-/// share: a console closing is not every console's keyboard going away.
+/// share: a console closing is not every console's keyboard going away. `false`
+/// for a process, which only its own end ends: closing one handle to it ends no
+/// other's watch.
 fn close_ends_polls(object: &KObjectRef) -> bool {
     match object {
         KObjectRef::SysCap(_) => crate::actuator::log_close_cancels_any_syscap(),
+        KObjectRef::Process(_) => false,
         // A keyboard *claim* closing is the stimulus, not a `SysCap`.
         KObjectRef::Console(_) => crate::actuator::keyboard_close_cancels_every_console(),
         KObjectRef::Device(d) => match d.class() {
@@ -331,7 +336,7 @@ fn close_ends_polls(object: &KObjectRef) -> bool {
         KObjectRef::PipeRead(_) | KObjectRef::PipeWrite(_) | KObjectRef::Connection(_)
         | KObjectRef::Acceptor(_) | KObjectRef::File(_) | KObjectRef::Inbox(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
-        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) => true,
+        | KObjectRef::SharedMem(_) => true,
     }
 }
 
@@ -799,6 +804,7 @@ pub fn has_data(object: &KObjectRef) -> bool {
         KObjectRef::Connection(c) => pipe::has_data(c.rx()),
         KObjectRef::Console(_) => serial::has_data(),
         KObjectRef::Acceptor(a) => a.has_pending(),
+        KObjectRef::Process(p) => p.finished(),
         KObjectRef::File(_) => true,
         KObjectRef::Device(d) => match d.class() {
             device_registry::DeviceType::Keyboard => keyboard::has_data(),
@@ -817,7 +823,7 @@ pub fn has_data(object: &KObjectRef) -> bool {
         },
         KObjectRef::PipeWrite(_) | KObjectRef::Inbox(_) | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
-        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) => false,
+        | KObjectRef::SharedMem(_) => false,
     }
 }
 
