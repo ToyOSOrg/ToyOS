@@ -544,15 +544,12 @@ pub fn kernel_log_file(
     );
     let mut boot = qemu.boot_log().to_string();
     serial::Serial::named("boot console", boot.as_str()).must_be_clean()?;
-    // Waited for past the ready marker: logd names the file once the stick is
-    // up, and a stick slower than the runner puts its line after the marker.
+    // Waited for past the ready marker, on the guest's own liveness: logd
+    // names the file once the stick is up, and a stick slower than the runner
+    // puts its line after the marker.
     let opened = "logd: this boot's kernel log is";
-    if !boot.contains(opened) {
-        boot.push_str(&qemu.drain_until(Duration::from_secs(10), |line| line.contains(opened)));
-    }
-    if !boot.contains(opened) {
-        return Err(format!("logd never opened a file:\n{}", volume_lines(&boot)));
-    }
+    qemu::await_marker(&mut qemu, &mut boot, opened, "logd naming this boot's file")
+        .map_err(|e| format!("logd never opened a file: {e}\n{}", volume_lines(&boot)))?;
 
     // Mid-run, with the guest still up and nothing shut down. Whatever is here
     // was put there by `/system/bin/logd` while the machine was running.
