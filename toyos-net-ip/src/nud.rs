@@ -308,12 +308,11 @@ fn make_room(i: &mut Interface, cx: &mut Cx<'_>) -> bool {
 }
 
 /// Deletes `addr`'s entry, and with it the released datagrams its queue still holds: their turns
-/// name an entry that is gone.
+/// name an entry that is gone, and count in `held` until they are reached.
 fn remove(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) {
     cx.timers.cancel(timer(cx, addr));
     let Some(mut n) = i.neighbours.remove(&addr) else { return };
     for held in n.state.take_released().0 {
-        i.held = i.held.saturating_sub(1);
         drop_held(cx, held, Counter::NbPendingEvicted);
     }
 }
@@ -426,9 +425,10 @@ pub(crate) fn fire(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) {
     }
 }
 
-/// The turn of entry `id`'s oldest released datagram: it leaves now, to `addr`'s MAC of this
-/// moment. `None` when that entry is gone.
+/// The turn of entry `id`'s oldest released datagram came, and is spent: the datagram leaves now,
+/// to `addr`'s MAC of this moment. `None` when that entry is gone.
 pub(crate) fn leave(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr, id: u64) -> Option<Held> {
+    i.held = i.held.saturating_sub(1);
     let n = i.neighbours.get_mut(&addr).filter(|n| n.id == id)?;
     let mac = n.state.mac()?;
     let released = n.state.released_mut()?;
@@ -437,7 +437,6 @@ pub(crate) fn leave(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr, id: u64)
     if let Some((destination, _)) = held.frame.split_first_chunk_mut::<6>() {
         *destination = mac.0;
     }
-    i.held = i.held.saturating_sub(1);
     if last {
         drained(i, cx, addr);
     }

@@ -531,7 +531,10 @@ fn s_ip_nud_027_prop_reachable_time_is_drawn_every_two_hours() {
 fn s_ip_nud_029_released_datagrams_are_evicted_last() {
     let b = neighbour(0);
     let flow = Flow { source: WIDE_A, source_port: Port::new(5001).unwrap(), destination: b, destination_port: Port::new(5001).unwrap() };
-    for others_reachable in [false, true] {
+    // The other 511 STALE; then REACHABLE, twice: for a later entry at B's address, and for the
+    // interface's bound.
+    for arm in 0..3 {
+        let others_reachable = arm > 0;
         let mut h = wide();
         for data in [b"1", b"2"] {
             assert_eq!(h.send(WIDE_A, b, 5001, 5001, data), Ok(None));
@@ -554,16 +557,25 @@ fn s_ip_nud_029_released_datagrams_are_evicted_last() {
         let new = neighbour(9_000);
         assert_eq!(h.send(WIDE_A, new, 5001, 5001, b"x"), Ok(None));
         assert!(matches!(h.state(new), Some(Nud::Incomplete(_))));
-        if others_reachable {
-            assert!(h.state(b).is_none());
-            assert_eq!(h.count(Counter::NbPendingEvicted), 2);
-            assert_eq!(h.events.iter().filter(|e| **e == Event::Unreachable(flow)).count(), 2);
-            // A later entry for B's address resolves while B's turns still wait: its datagram
-            // keeps its own turn, behind a defence queued after them.
-            for t in [1_511, 2_511, 3_511] {
-                h.ip.fire(H::instant(t));
-            }
-            assert!(matches!(h.state(new), Some(Nud::Failed)));
+        if !others_reachable {
+            assert!(h.state(neighbour(1)).is_none(), "the longest unused of the others");
+            assert!(matches!(h.state(b), Some(Nud::Stale(s)) if s.released.queued() == 2), "B keeps 1 and 2");
+            let to_b: Vec<Vec<u8>> = h.out().iter().filter(|o| o.to() == wide_mac(b)).map(payload).collect();
+            assert_eq!(to_b, [b"1", b"2"]);
+            assert!(h.is_stale(b), "its idle lifetime has not passed: it stays once they have left");
+            assert_eq!(h.count(Counter::NbPendingEvicted), 0);
+            continue;
+        }
+        assert!(h.state(b).is_none());
+        assert_eq!(h.count(Counter::NbPendingEvicted), 2);
+        assert_eq!(h.events.iter().filter(|e| **e == Event::Unreachable(flow)).count(), 2);
+        for t in [1_511, 2_511, 3_511] {
+            h.ip.fire(H::instant(t));
+        }
+        assert!(matches!(h.state(new), Some(Nud::Failed)));
+        if arm == 1 {
+            // A later entry at B's address resolves while B's turns still wait: its datagram keeps
+            // its own turn, behind a defence queued after them.
             h.at(3_511);
             h.frame(&eth(MacAddr::BROADCAST, MAC_X, 0x0806, &arp_packet(1, MAC_X, WIDE_A, MacAddr::ZERO, WIDE_A)));
             assert_eq!(h.send(WIDE_A, b, 5001, 5001, b"3"), Ok(None));
@@ -575,12 +587,18 @@ fn s_ip_nud_029_released_datagrams_are_evicted_last() {
             assert_eq!(out[limits::CONTROL_QUEUE + 1].to(), wide_mac(b));
             assert_eq!(payload(&out[limits::CONTROL_QUEUE + 1]), b"3");
         } else {
-            assert!(h.state(neighbour(1)).is_none(), "the longest unused of the others");
-            assert!(matches!(h.state(b), Some(Nud::Stale(s)) if s.released.queued() == 2), "B keeps 1 and 2");
-            let to_b: Vec<Vec<u8>> = h.out().iter().filter(|o| o.to() == wide_mac(b)).map(payload).collect();
-            assert_eq!(to_b, [b"1", b"2"]);
-            assert!(h.is_stale(b), "its idle lifetime has not passed: it stays once they have left");
-            assert_eq!(h.count(Counter::NbPendingEvicted), 0);
+            // B's two turns count against PENDING_TOTAL until the control queue reaches them. By
+            // 46,000 the FAILED entry is gone and the others are STALE, so entries can be made.
+            for t in [23_511, 46_000] {
+                h.ip.fire(H::instant(t));
+            }
+            h.at(46_000);
+            let mut accepted = 0;
+            while h.send(WIDE_A, neighbour(10_000 + accepted / 8), 5001, 5001, b"y") == Ok(None) {
+                accepted += 1;
+            }
+            assert_eq!(h.count(Counter::NbPendingFull), 1);
+            assert_eq!(accepted as usize, limits::nud::PENDING_TOTAL - 2);
         }
     }
 }
