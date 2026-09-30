@@ -344,10 +344,11 @@ fn an_end_racing_a_post_answers_a_poll_once() {
     model(|| end_racing(|w| w.watch.cancel_rings(), World::post));
 }
 
-/// The same, for the end and the post a handler may make, both in place.
+/// The same, for a thread's end racing a handler's post, which is made in
+/// place.
 #[test]
-fn an_end_in_place_racing_a_post_in_place_answers_a_poll_once() {
-    model(|| end_racing(|w| w.watch.cancel_rings_in_place(), World::post_in_place));
+fn an_end_racing_a_post_in_place_answers_a_poll_once() {
+    model(|| end_racing(|w| w.watch.cancel_rings(), World::post_in_place));
 }
 
 fn end_racing(end: fn(&World), post: fn(&World)) {

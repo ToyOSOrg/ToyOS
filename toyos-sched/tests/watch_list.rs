@@ -187,9 +187,8 @@ fn nothing_allocates_or_frees_under_the_list_lock_and_a_post_in_place_frees_noth
 
     POSTING.set(true);
     w.post_in_place(WakeCause::new(WakeReason::Woken), &env);
-    w.cancel_rings_in_place();
     POSTING.set(false);
-    clean("posting and cancelling in place");
+    clean("posting in place");
     assert!(polls.iter().all(|p| p.0.load(Acquire) == 1), "a post in place fired every entry");
 
     // Every entry is dead now, and a withdrawn one joins them: these three
@@ -285,26 +284,6 @@ fn a_re_arm_after_a_post_of_few_entries_is_one_section() {
     let w = post_live(FEW);
     let rearmed = owned(&Arc::new(AtomicU32::new(0)));
     assert_eq!(sections(|| w.add_ring(rearmed)), 1, "a re-arm after a post regrew the list");
-}
-
-/// An end in place and the sweep after it: the sweep lets go of every entry,
-/// past the [`FEW`] one section takes, and frees each with the lock let go.
-#[test]
-fn a_sweep_frees_none_under_the_lock() {
-    let w: OwnedWatch = Watch::new(Watched(Mutex::new(Waiters::new())));
-    let fired: Vec<_> = (0..=2 * FEW).map(|_| Arc::new(AtomicU32::new(0))).collect();
-    for word in &fired {
-        w.add_ring(owned(word));
-    }
-    POSTING.set(true);
-    w.cancel_rings_in_place();
-    POSTING.set(false);
-    clean("cancelling in place");
-    w.sweep();
-    clean("sweeping");
-    for (at, word) in fired.iter().enumerate() {
-        assert_eq!(Arc::strong_count(word), 1, "entry {at} of {} was not let go of", fired.len());
-    }
 }
 
 /// A registration that finds the list full sizes a bigger buffer with the lock

@@ -21,10 +21,9 @@
 //! can no longer fire out [`FEW`] at a time, grows a full list in a buffer
 //! allocated with the lock let go, and drops both with it let go.
 //! [`Watch::post`] takes every ring entry out and fires and frees them with the
-//! lock let go; [`Watch::post_in_place`] and [`Watch::cancel_rings_in_place`],
-//! for a handler, which may not free at all, fire them where they stand, and
-//! later registrations sweep the dead out, since an entry is one-shot.
-//! [`Watch::sweep`] lets go of them where no registration will come.
+//! lock let go; [`Watch::post_in_place`], for a handler, which may not free at
+//! all, fires them where they stand, and later registrations sweep the dead
+//! out, since an entry is one-shot.
 //!
 //! **Lock order.** A post in place fires its rings under the list lock, so
 //! beneath it are each ring's own lock and the watch that ring's submitters
@@ -290,29 +289,6 @@ impl<M: SchedMsg, R: Ring, L: CellLock<Waiters<M, R>>> Watch<M, R, L> {
         let ended = self.list.with(|w| core::mem::take(&mut w.rings));
         for ring in &ended {
             ring.fire(Fire::Gone);
-        }
-    }
-
-    /// [`Self::cancel_rings`] for a context that may not free: every ring
-    /// entry is fired as [`Fire::Gone`] where it stands, under the list lock,
-    /// and later registrations sweep it.
-    pub fn cancel_rings_in_place(&self) {
-        self.list.with(|w| {
-            for ring in &w.rings {
-                ring.fire(Fire::Gone);
-            }
-        });
-    }
-
-    /// Let go of every ring entry that can no longer fire, [`FEW`] a section,
-    /// each section's dropped with the list lock let go: for a thread, after
-    /// an end in place that no registration may follow.
-    pub fn sweep(&self) {
-        loop {
-            let mut dead: [Option<R>; FEW] = [const { None }; FEW];
-            if self.list.with(|w| take_dead(&mut w.rings, &mut dead)) < FEW {
-                return;
-            }
         }
     }
 
@@ -800,58 +776,31 @@ mod tests {
         w.unregister(&t);
     }
 
+    /// One entry past the [`FEW`] a post takes out on its stack, so a cancel
+    /// or a drop bounded at that many is caught.
     #[test]
     fn cancel_and_drop_answer_every_live_poll_as_gone() {
+        let polls = || -> Vec<_> { (0..=FEW).map(|_| Arc::new(Poll::default())).collect() };
         let w = watch();
-        let cancelled = Arc::new(Poll::default());
-        w.add_ring(cancelled.clone());
+        let cancelled = polls();
+        for poll in &cancelled {
+            w.add_ring(poll.clone());
+        }
         w.cancel_rings();
-        assert_eq!(cancelled.state.load(Ordering::Acquire), 2);
-
-        let dropped = Arc::new(Poll::default());
-        w.add_ring(dropped.clone());
-        drop(w);
-        assert_eq!(dropped.state.load(Ordering::Acquire), 2);
-        assert_eq!(dropped.posts.load(Ordering::Acquire), 1);
-    }
-
-    /// A cancel in place answers where each entry stands and lets go of
-    /// nothing, as a post in place does.
-    #[test]
-    fn a_cancel_in_place_answers_every_live_poll_as_gone_and_drops_nothing() {
-        let w = watch();
-        let polls: Vec<_> = (0..=FEW).map(|_| Arc::new(Poll::default())).collect();
-        for poll in &polls {
-            w.add_ring(poll.clone());
-        }
-        w.cancel_rings_in_place();
-        for (at, poll) in polls.iter().enumerate() {
+        for (at, poll) in cancelled.iter().enumerate() {
             assert_eq!(poll.state.load(Ordering::Acquire), 2, "poll {at} was not answered as gone");
-            assert_eq!(Arc::strong_count(poll), 2, "the cancel let go of poll {at}");
+            assert_eq!(Arc::strong_count(poll), 1, "the cancel kept poll {at}");
         }
-    }
 
-    /// Where no registration follows an end in place, the sweep lets go of
-    /// every entry that can no longer fire, past the [`FEW`] one section
-    /// takes, and of no live one.
-    #[test]
-    fn a_sweep_lets_go_of_every_entry_that_can_no_longer_fire() {
-        let w = watch();
-        let live = Arc::new(Poll::default());
-        w.add_ring(live.clone());
-        let dead: Vec<_> = (0..=2 * FEW).map(|_| Arc::new(Poll::default())).collect();
-        for poll in &dead {
+        let dropped = polls();
+        for poll in &dropped {
             w.add_ring(poll.clone());
         }
-        for poll in &dead {
-            poll.withdraw();
+        drop(w);
+        for (at, poll) in dropped.iter().enumerate() {
+            assert_eq!(poll.state.load(Ordering::Acquire), 2, "dropped poll {at} was not answered as gone");
+            assert_eq!(poll.posts.load(Ordering::Acquire), 1);
         }
-        w.sweep();
-        for (at, poll) in dead.iter().enumerate() {
-            assert_eq!(Arc::strong_count(poll), 1, "the sweep kept dead entry {at} of {}", dead.len());
-        }
-        assert_eq!(Arc::strong_count(&live), 2, "the sweep let go of a live entry");
-        assert_eq!(w.live_rings(), 1);
     }
 
     #[test]

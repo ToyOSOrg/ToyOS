@@ -10,10 +10,9 @@
 //!
 //! **A post allocates nothing and may be made under any lock but a poll
 //! ring's** (`crate::inbox`). A watch an interrupt handler posts is an
-//! [`IrqWatch`]: its list sits behind an [`IrqLock`], and its post and its
-//! cancel are made in place and free nothing; the thread that ends its source
-//! sweeps. Every other watch's list lock leaves interrupts open, and no
-//! handler takes it. Registration allocates, in the syscall that registers.
+//! [`IrqWatch`]: its list sits behind an [`IrqLock`], and its post is made in
+//! place and frees nothing. Every other watch's list lock leaves interrupts
+//! open, and no handler takes it. Registration allocates, in the syscall that registers.
 //!
 //! A [`Watch`] is a borrowed reference for the whole of a wait: [`Armed`]
 //! holds it, so an object cannot be freed under a thread waiting on it, and
@@ -44,9 +43,8 @@ pub struct Waitable<L: CellLock<List>>(toyos_sched::watch::Watch<KMsg, PollEntry
 pub type Watch = Waitable<KernelLock<List>>;
 
 /// A watch an interrupt handler posts, and the watch of a ring such a post
-/// completes into. It has no `post` and no `cancel_polls`, which free:
-/// [`IrqWatch::post_in_place`] and [`IrqWatch::cancel_polls_in_place`] free
-/// nothing, and [`IrqWatch::sweep`] is a thread's.
+/// completes into. It has no `post`, which frees: [`IrqWatch::post_in_place`]
+/// frees nothing.
 pub type IrqWatch = Waitable<IrqLock<List>>;
 
 /// What an interrupt handler's post takes: an [`IrqWatch`]'s list and a poll
@@ -138,11 +136,6 @@ impl Watch {
             )
         })
     }
-
-    /// Answer every poll registered here as gone: the source it watched ended.
-    pub fn cancel_polls(&self) {
-        self.0.cancel_rings();
-    }
 }
 
 impl IrqWatch {
@@ -162,24 +155,18 @@ impl IrqWatch {
             self.0.post_in_place(WakeCause::new(WakeReason::Woken), &env);
         });
     }
-
-    /// Answer every poll registered here as gone, where it stands, freeing
-    /// nothing: the source it watched ended.
-    pub fn cancel_polls_in_place(&self) {
-        self.0.cancel_rings_in_place();
-    }
-
-    /// Let go of every poll a post or a cancel in place answered. A thread's,
-    /// since it frees: where the source ended, no registration comes to.
-    pub fn sweep(&self) {
-        self.0.sweep();
-    }
 }
 
 impl<L: CellLock<List>> Waitable<L> {
     /// A poll ring's entry, from `inbox`'s registration and nowhere else.
     pub(crate) fn add_poll(&self, entry: PollEntry) {
         self.0.add_ring(entry);
+    }
+
+    /// Answer every poll registered here as gone: the source it watched ended.
+    /// A thread's, since it frees what it answered.
+    pub fn cancel_polls(&self) {
+        self.0.cancel_rings();
     }
 
     /// `handler-post`'s stand where a registration holds the list lock.

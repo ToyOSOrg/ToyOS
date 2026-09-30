@@ -260,10 +260,7 @@ impl WatchRef {
         match self {
             Self::Static(watch) => watch.cancel_polls(),
             Self::Shared(watch) => watch.cancel_polls(),
-            Self::Irq(watch) => {
-                watch.cancel_polls_in_place();
-                watch.sweep();
-            }
+            Self::Irq(watch) => watch.cancel_polls(),
         }
     }
 }
