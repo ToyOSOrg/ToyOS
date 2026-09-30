@@ -135,9 +135,7 @@ with it.
 slug as well as the path.** The slug is the identity, and a pointer written as a
 bare name is invisible to a path search. Search the *tree* rather than the
 checkout (`git grep <rev>`): `rg` skips dotfile directories without `--hidden`,
-and `.github/` holds citations too. Then read where the hits are. One in a comment
-under `toyos-abi/src`, `toyos/src` or a published crate changes no identity
-(`src/identity.rs`), so it owes no version and builds no sysroot. One in
+and `.github/` holds citations too. Then read where the hits are. One in
 `src/redlist.rs` is a disabled test's `issue`: the row goes with the file.
 
 ## Two area notes, carried over from the file this replaced

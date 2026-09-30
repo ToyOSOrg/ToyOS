@@ -18,14 +18,11 @@ use std::process::{Command, Stdio};
 use sha2::{Digest, Sha256};
 use toyos_tmpdir::TempDir;
 
-use crate::toolchain::HOSTED_ARCH;
-
 /// What the tag hashes, as `git rev-parse HEAD:<tree>` names them. The last is
 /// this file.
 fn trees() -> Vec<&'static str> {
     std::iter::once("rust")
-        .chain(crate::sysroot::SYSROOT_SOURCES)
-        .chain(crate::sysroot::SYSROOT_MANIFESTS)
+        .chain(crate::store::ABI_TREES)
         .chain([crate::clang::SOURCE, file!()])
         .collect()
 }
@@ -183,6 +180,15 @@ fn run(cmd: &mut Command) -> Result<(), String> {
     status.success().then_some(()).ok_or_else(|| format!("{cmd:?} exited {status}"))
 }
 
+/// Check `root`'s `rust/` out at the commit it pins, in a primary checkout
+/// alone: a linked worktree's `git submodule` clones the fork a second time.
+fn check_out_fork(root: &Path) -> Result<(), String> {
+    match crate::toolchain::owner(root) {
+        crate::toolchain::Owner::Us => run(Command::new("git").args(["submodule", "update", "--init", "rust"]).current_dir(root)),
+        _ => Err(format!("{} is no primary checkout, and a release is built in one", root.display())),
+    }
+}
+
 /// Whether `gh` says `tag` carries [`ASSET`].
 fn published(root: &Path, tag: &str) -> bool {
     Command::new("gh")
@@ -225,7 +231,7 @@ pub fn ensure_published(root: &Path) -> Result<String, String> {
 
 /// Bootstrap, check the glibc floor, package, publish, and wait for the asset.
 fn build(root: &Path, tag: &str, tmp: &Path) -> Result<(), String> {
-    run(Command::new("git").args(["submodule", "update", "--init", "rust"]).current_dir(root))?;
+    check_out_fork(root)?;
     // Bootstrap takes `HEAD^1` as the upstream commit whose artifacts to fetch
     // when it sees GitHub Actions; in this fork that is our own merge, which
     // rust-lang's CI never built.
@@ -239,7 +245,7 @@ fn build(root: &Path, tag: &str, tmp: &Path) -> Result<(), String> {
     // the compiler with the guest libraries and `libtoyos_c.a` this tree's
     // sources name, recorded beside the witness an installer checks it by.
     let build = root.join("rust/build");
-    let key = crate::keystore::recorded(root, crate::buildlock::Keyed::Sysroot).ok_or("the build recorded no sysroot key")?;
+    let key = crate::store::recorded(root, crate::store::Kind::Sysroot).ok_or("the build recorded no sysroot key")?;
     let sysroot = format!("sysroots/{key}");
     let stage2 = build.join(&sysroot);
     fs::write(build.join("toyos-sysroot-witness"), crate::sysroot::witness(root))
@@ -254,17 +260,13 @@ fn build(root: &Path, tag: &str, tmp: &Path) -> Result<(), String> {
     }
     fs::copy(tmp.join("TOOLCHAIN"), build.join("TOOLCHAIN")).map_err(|e| e.to_string())?;
 
-    // `lib/rustlib/<host>` and the sysroot's `bin/cargo` are links into this
-    // runner's own toolchain; `Owner::Installed` recreates both. GNU tar's
-    // `--transform` renames the sysroot to the path an installer links.
+    // GNU tar's `--transform` renames the sysroot to the path an installer links.
     let tarball = tmp.join(ASSET);
     let mut tar = Command::new("tar")
         .arg("-C")
         .arg(&build)
-        .arg(format!("--exclude={}/stage2/lib/rustlib/{HOST}", HOSTED_ARCH.userland()))
-        .arg(format!("--exclude={sysroot}/bin/cargo"))
         .arg(format!("--transform=s,^{sysroot},{HOST}/stage2,"))
-        .args(["-c", &sysroot, &format!("{}/stage2", HOSTED_ARCH.userland())])
+        .args(["-c", &sysroot])
         .args(["toyos-sysroot-witness", "TOOLCHAIN"])
         .stdout(Stdio::piped())
         .spawn()
@@ -380,10 +382,9 @@ fn notes(root: &Path, tag: &str, manifest: &str) -> Result<String, String> {
     mkdir -p toyos-toolchain
     curl -sSL {url} | tar --zstd -x -C toyos-toolchain
     rustup toolchain link toyos toyos-toolchain/{HOST}/stage2
-    ln -s \"$(rustup which cargo)\" toyos-toolchain/{HOST}/stage2/bin/cargo
     cargo +toyos build --target x86_64-unknown-toyos
 
-rustc's ToyOS target names `rust-lld` as its linker, and the toolchain carries it where rustc looks for it, so nothing goes on `PATH`. The `cargo` symlink is not shipped because its path would be the publisher's.
+rustc's ToyOS target names `rust-lld` as its linker, and the toolchain carries it where rustc looks for it, so nothing goes on `PATH`. Its `cargo` is the fork's own, built with this `rustc`.
 
 ## C
 
@@ -438,6 +439,18 @@ fn alias(root: &Path, manifest: &str, tmp: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A release is built in a primary checkout alone**: a linked worktree's
+    /// is refused, and `git submodule` never runs there.
+    #[test]
+    fn a_linked_worktree_checks_out_no_fork() {
+        let e = crate::store::tests::estate("release-linked");
+        let stub = e.same.parent().unwrap().join("stub");
+        git(&e.primary, &["worktree", "add", "-q", "-b", "stub", stub.to_str().unwrap()]);
+        let said = check_out_fork(&stub).expect_err("a linked worktree checked the fork out");
+        assert!(said.contains("is no primary checkout"), "{said}");
+        assert!(!e.primary.join(".git/worktrees/stub/modules").exists(), "git submodule ran in a linked worktree");
+    }
 
     /// The packaging is one of the trees its own tag hashes.
     #[test]

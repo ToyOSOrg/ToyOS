@@ -52,6 +52,7 @@ use std::process::Command;
 use serde_json::Value;
 
 use crate::build::Features;
+use crate::toolchain::Owner;
 
 /// What a shipped crate or file may be under. `OR` passes if any branch does,
 /// `AND` only if every part does.
@@ -1121,19 +1122,53 @@ fn metadata(
     serde_json::from_slice(&out).map_err(|e| format!("cargo metadata printed no JSON: {e}"))
 }
 
-/// The fork's `library/`, checked out at the commit this tree pins. A checkout
-/// whose `rust/` was never initialised — a CI runner's — fetches that commit
-/// alone.
+/// The fork's `library/` this tree builds std from, read with no checkout
+/// held: a primary checkout's `rust/`, whose pinned commit alone is fetched
+/// when it was never initialised, as a CI runner's is; a linked worktree's own
+/// checkout while it holds fork work; otherwise the commit a linked worktree
+/// pins, read out of the primary's fork repository beside links to its
+/// `toyos-abi` and `toyos`, which `library/std` names as `../../../`. A linked
+/// worktree never runs `git submodule`.
 fn std_library(root: &Path) -> Result<PathBuf, String> {
-    let fork = crate::sysroot::fork_checkout(root);
-    if !fork.join("library/Cargo.toml").exists() {
-        run(
-            Command::new("git")
-                .args(["submodule", "update", "--init", "--depth", "1", "rust"])
-                .current_dir(root),
-            "git submodule update --init --depth 1 rust",
-        )?;
-    }
+    let fork = match crate::toolchain::owner(root) {
+        Owner::Elsewhere(primary) => {
+            let own = root.join("rust");
+            let pinned = crate::sysroot::pinned_fork(root);
+            if own.join(".git").exists() && crate::sysroot::holds_work(&own, &pinned) {
+                own
+            } else {
+                let base = root.join("target/licence/pinned");
+                if base.exists() {
+                    std::fs::remove_dir_all(&base).map_err(|e| format!("remove {}: {e}", base.display()))?;
+                }
+                std::fs::create_dir_all(&base).map_err(|e| format!("create {}: {e}", base.display()))?;
+                let scratch = toyos_tmpdir::TempDir::new("licence-index");
+                let index = scratch.join("index");
+                let fork = base.join("rust");
+                let (tree, prefix) = (format!("{pinned}:library"), format!("--prefix={}/", fork.display()));
+                for args in [["read-tree", "--prefix=library/", tree.as_str()], ["checkout-index", "--all", prefix.as_str()]] {
+                    crate::sysroot::git(&primary.join("rust"), &args, Some(&index))?;
+                }
+                for tree in ["toyos-abi", "toyos"] {
+                    std::os::unix::fs::symlink(root.join(tree), base.join(tree))
+                        .map_err(|e| format!("link {}: {e}", base.join(tree).display()))?;
+                }
+                fork
+            }
+        }
+        Owner::Us | Owner::Installed => {
+            let fork = root.join("rust");
+            if !fork.join("library/Cargo.toml").exists() {
+                run(
+                    Command::new("git")
+                        .args(["submodule", "update", "--init", "--depth", "1", "rust"])
+                        .current_dir(root),
+                    "git submodule update --init --depth 1 rust",
+                )?;
+            }
+            fork
+        }
+    };
     Ok(fork.join("library"))
 }
 
@@ -1873,5 +1908,33 @@ prose.
                 assert!(root.join(issue).is_file(), "{:?} cites {issue}, which is no file", e.subject);
             }
         }
+    }
+
+    /// **A linked worktree's std library is read out of the primary's fork
+    /// repository, never checked out**: a stub worktree gets the `library/` of
+    /// the commit it pins, beside its own `toyos-abi`, holds no fork checkout
+    /// for it, and runs no `git submodule`; an own checkout behind its pin is
+    /// read as the pin and not moved.
+    #[test]
+    fn a_linked_worktree_reads_its_pinned_library_and_checks_nothing_out() {
+        use crate::store::tests::{estate, git};
+        let e = estate("licence-stub");
+        let stub = e.same.parent().unwrap().join("stub");
+        git(&e.primary, &["worktree", "add", "-q", "-b", "stub", stub.to_str().unwrap()]);
+        let library = std_library(&stub).expect("a stub worktree's std library");
+        assert!(library.starts_with(stub.join("target")), "{}", library.display());
+        assert_eq!(std::fs::read_to_string(library.join("std/src/lib.rs")).unwrap(), "pub fn a() {}\n");
+        let beside = std::fs::canonicalize(library.join("std/../../../toyos-abi")).unwrap();
+        assert_eq!(beside, std::fs::canonicalize(stub.join("toyos-abi")).unwrap());
+        assert!(!e.primary.join(".git/worktrees/stub/modules").exists(), "git submodule ran in a linked worktree");
+        assert!(!e.rust_dir.join(crate::sysroot::SHARED).exists(), "a read took the host's shared checkout");
+
+        let own = e.b.join("rust");
+        let pin = git(&own, &["rev-parse", "HEAD"]);
+        git(&e.b, &["update-index", "--cacheinfo", &format!("160000,{pin},rust")]);
+        git(&own, &["checkout", "-q", "--detach", "HEAD~1"]);
+        let behind = git(&own, &["rev-parse", "HEAD"]);
+        assert!(std_library(&e.b).unwrap().starts_with(e.b.join("target")), "a checkout behind its pin was read as it stands");
+        assert_eq!(git(&own, &["rev-parse", "HEAD"]), behind, "a read moved a checkout behind its pin");
     }
 }

@@ -62,14 +62,15 @@ jobs:
           fetch-depth: 0
 
       # CMake and Ninja are what bootstrap builds LLVM and clang with, pinned to
-      # the versions Ubuntu 24.04 released (src/main.rs's `ALSO_USED`).
-      - name: disk, QEMU, CMake and Ninja
+      # the versions Ubuntu 24.04 released; Perl and make build the OpenSSL of
+      # the toolchain's cargo (src/main.rs's `ALSO_USED`).
+      - name: disk, QEMU, CMake, Ninja, Perl and make
         run: |
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
                       /usr/local/share/boost /usr/local/.ghcup
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq qemu-system-x86 zstd \
-                      cmake=3.28.3-1build7 ninja-build=1.11.1-2
+                      cmake=3.28.3-1build7 ninja-build=1.11.1-2 perl make
 
       - env:
           GH_TOKEN: ${{ github.token }}

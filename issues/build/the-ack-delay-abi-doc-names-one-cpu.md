@@ -21,9 +21,6 @@ sentence userland reads to learn what action 12 does describes a selection the
 kernel does not make, omits the answer it returns, and says nothing about how
 long what it leaves behind lasts.
 
-`toyos-abi/src` is one of `toolchain::SYSROOT_SOURCES`, so the correction is a
-single-commit branch of its own.
-
 **Exit condition.** The doc names what the kernel does: each other CPU in turn,
 the smallest of those waits returned, and the arming left standing against every
 other CPU until a disarm or the end of the two-second window, whichever comes

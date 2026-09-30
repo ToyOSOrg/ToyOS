@@ -94,15 +94,9 @@ fn main() {
     }
 }
 
-/// Which of the four things on ROOT an entry is.
-///
-/// The order matters: `bin/rustc` is the toolchain's, not userland's.
+/// Which of the things on ROOT an entry is.
 fn group_of(name: &str) -> &'static str {
-    if name.starts_with("lib/") {
-        "hosted rustc lib/"
-    } else if name.starts_with("bin/rustc") {
-        "hosted rustc bin/"
-    } else if name.starts_with("bin/") {
+    if name.starts_with("bin/") {
         "userland bin/"
     } else if name.starts_with("share/") {
         "assets share/"

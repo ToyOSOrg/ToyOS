@@ -12,7 +12,7 @@ use serde::Deserialize;
 
 use crate::arch::Arch;
 use crate::assets;
-use crate::buildlock;
+use crate::dirlock::Lock;
 use crate::flags;
 use crate::hostws;
 use crate::image;
@@ -72,14 +72,12 @@ impl Drop for ArtifactBuildTimer {
 // --- Config ---
 
 #[derive(Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 struct SystemConfig {
     #[serde(default)]
     programs: BTreeMap<String, ProgramConfig>,
     #[serde(default)]
     symlinks: BTreeMap<String, String>,
-    #[serde(default)]
-    hosted_rustc: bool,
     #[serde(default)]
     assets: Vec<String>,
     /// What `/system/bin/init` starts at boot. Program *keys*, never paths — a path
@@ -277,30 +275,22 @@ fn clean(root: &Path, crate_dir: &Path, kind: Clean, fingerprint: &str) {
 /// `target/<profile>/.cargo-lock`, inside what the clean deletes. Two processes
 /// that each decided before either acted would still both clean, which is the
 /// pair of `cargo clean`s that died with ENOENT on each other's files.
-fn invalidate_stale(
-    root: &Path,
-    lock: &mut buildlock::Held,
-    toolchain: &Path,
-    targets: &[(PathBuf, Clean)],
-) {
-    lock.act_if(
-        buildlock::Scope::Worktree,
-        "clean crate targets against changed external deps",
-        || {
-            let fp = external_fingerprint(toolchain);
-            let work: Vec<(PathBuf, Clean)> = targets
-                .iter()
-                .filter(|(dir, _)| stale(root, dir, &fp))
-                .cloned()
-                .collect();
-            (!work.is_empty()).then_some((fp, work))
-        },
-        |(fp, work)| {
+fn invalidate_stale(root: &Path, lock: &mut Lock, toolchain: &Path, targets: &[(PathBuf, Clean)]) {
+    let work = || {
+        let fp = external_fingerprint(toolchain);
+        let work: Vec<(PathBuf, Clean)> = targets.iter().filter(|(dir, _)| stale(root, dir, &fp)).cloned().collect();
+        (!work.is_empty()).then_some((fp, work))
+    };
+    if work().is_none() {
+        return;
+    }
+    lock.exclusively("cleaning crate targets against changed external deps, behind the other builds in this worktree", || {
+        if let Some((fp, work)) = work() {
             for (dir, kind) in work {
                 clean(root, &dir, kind, &fp);
             }
-        },
-    );
+        }
+    });
 }
 
 /// Every target directory a config builds into, and how much of each goes when
@@ -417,9 +407,6 @@ pub const PROFILE: &str = "toyos";
 #[derive(Clone)]
 struct GuestEnv {
     toolchain: PathBuf,
-    /// Whether that sysroot's compiler is the primary's, the one the hosted
-    /// rustc is built from (`src/compiler.rs`).
-    primary_compiler: bool,
     /// The public key the loader and `/system/bin/update` embed
     /// (`signing::KEY_ENV`): every guest build carries it, so no crate that
     /// names it can be built without it.
@@ -432,7 +419,6 @@ impl GuestEnv {
     fn new(sysroot: &crate::sysroot::Sysroot) -> Self {
         Self {
             toolchain: sysroot.dir.clone(),
-            primary_compiler: sysroot.primary_compiler,
             image_key: crate::signing::key().public_hex(),
             floor_scope: crate::signing::key().floor_scope().word(),
         }
@@ -499,7 +485,7 @@ fn cargo_build(
 // userland build and root-image assembly, and only then reads the artifact back.
 // Seconds to minutes, during which another config's build overwrites it.
 //
-// So: hold [`buildlock::artifact`] across each build→stage pair, and copy the
+// So: hold [`artifact`] across each build→stage pair, and copy the
 // artifact to a name carrying what it is actually keyed by. Readers use the
 // staged name, which no other config can overwrite.
 //
@@ -539,8 +525,23 @@ fn key_hash(parts: &[&str]) -> u64 {
     h.finish()
 }
 
+/// This worktree's build lock, shared, held for a build's whole length so no
+/// clean of its crate targets ([`invalidate_stale`]) lands inside it: the
+/// worktree's own directory, which no build removes.
+fn worktree_lock(root: &Path, what: &str) -> Lock {
+    Lock::shared(root, &format!("{what}, behind a clean of this worktree's crate targets"))
+}
+
+/// The lock over the shared cargo artifact paths, held across each
+/// build→stage pair: this worktree's `target/`, which no build removes.
+fn artifact(root: &Path) -> Lock {
+    let target = root.join("target");
+    fs::create_dir_all(&target).unwrap_or_else(|e| panic!("create {}: {e}", target.display()));
+    Lock::exclusive(&target, "staging artifacts, behind another build in this worktree")
+}
+
 /// Copy a just-built artifact to a path carrying its build key, and return that
-/// path. Must be called with [`buildlock::artifact`] held, before anything else
+/// path. Must be called with [`artifact`] held, before anything else
 /// can rebuild the same crate.
 fn stage_artifact(root: &Path, built: &Path, stem: &str, key: u64) -> PathBuf {
     let staged = root.join(format!("target/{stem}-{key:016x}"));
@@ -742,22 +743,6 @@ fn build_and_assemble(
     build_programs(root, config, env, quiet, arch, &mut root_files);
     root_files.push((toyos_manifest::PATH.to_string(), render_manifest(config)));
 
-    if config.hosted_rustc {
-        assert!(
-            arch == toolchain::HOSTED_ARCH,
-            "hosted-rustc is built to run on {}, and this image is for {}",
-            toolchain::HOSTED_ARCH.name(),
-            arch.name()
-        );
-        assert!(
-            env.primary_compiler,
-            "hosted-rustc ships the primary checkout's hosted compiler, and this worktree builds with \
-             a compiler of its own (src/compiler.rs): the image would carry a rustc that is not the \
-             one its programs were built with"
-        );
-        collect_hosted_rustc(root, &env.toolchain, &mut root_files);
-    }
-
     if !config.assets.is_empty() {
         let programs: BTreeSet<&str> = config.programs.keys().map(String::as_str).collect();
         root_files.extend(assets::collect(&config.assets, &programs));
@@ -772,11 +757,7 @@ fn build_and_assemble(
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
-    let mut programs: BTreeSet<&str> = config.programs.keys().map(String::as_str).collect();
-    if config.hosted_rustc {
-        // `collect_hosted_rustc` puts it there and no row can.
-        programs.insert("rustc");
-    }
+    let programs: BTreeSet<&str> = config.programs.keys().map(String::as_str).collect();
     // Targets are inventoried beside the files: `bin/ls -> /system/bin/ghost` reaches a
     // program as surely as a file would, and the files alone walk past it.
     let targets: Vec<String> =
@@ -862,7 +843,7 @@ fn build_programs(
     // says nothing about a read between them — `ioapic_topology` died on
     // `Failed to read binary for toybox` while another worker's config was
     // relinking it, and was green the moment it was re-run alone.
-    let _artifact = buildlock::artifact(root);
+    let _artifact = artifact(root);
     if !workspace_packages.is_empty() {
         let mut extra: Vec<&str> = Vec::new();
         for pkg in &workspace_packages {
@@ -1126,20 +1107,11 @@ pub struct Shipped {
 }
 
 /// [`Shipped`], read out of the modes' configs the way [`build`] reads them.
-///
-/// **A config that ships the hosted compiler is refused**: its dependencies are
-/// the rust fork's `compiler/` workspace, which no reader of this answer walks.
 pub fn shipped(root: &Path) -> Result<Shipped, String> {
     let mut crates = BTreeSet::new();
     let mut assets = BTreeSet::new();
     for boot in [Boot::shipped(root), Boot::diag(root), Boot::console(root)] {
         let config = parse_config(&boot.config);
-        if config.hosted_rustc {
-            return Err(format!(
-                "{} sets hosted-rustc, and nothing reads the licences of the compiler it ships",
-                boot.config.display()
-            ));
-        }
         crates.extend(config_crates(root, &config).into_iter().map(|c| (c.dir, c.features)));
         assets.extend(config.assets.iter().map(|dir| root.join(dir)));
     }
@@ -1725,9 +1697,9 @@ fn assert_sched_check_matches_features(features: &str, kernel: &[u8]) {
 /// shipped uncertified. There is now one place to add an assertion, and it is
 /// the kernel of every image this build system produces that gets it. The
 /// caller has already run `cargo_build` on the kernel crate and must hold
-/// [`buildlock::artifact`], since the stage below copies the shared cargo path.
+/// [`artifact`], since the stage below copies the shared cargo path.
 /// Stage the loader `arch`'s build just wrote, under the key that names it.
-/// The caller holds [`buildlock::artifact`], as [`stage_and_certify_kernel`]'s does.
+/// The caller holds [`artifact`], as [`stage_and_certify_kernel`]'s does.
 fn stage_loader(root: &Path, arch: Arch, env: &GuestEnv) -> PathBuf {
     stage_artifact(
         root,
@@ -1838,8 +1810,8 @@ fn shipped_parts(root: &Path, boot: &Boot, plan: &Plan) -> (Vec<u8>, Vec<u8>, Ve
 
     // Held until the last staged artifact has been read back, so no clean of
     // this worktree's crate targets can land inside this build.
-    let mut lock = buildlock::shared(root, "build");
-    let sysroot = toolchain::ensure(root, &mut lock);
+    let mut lock = worktree_lock(root, "a build");
+    let sysroot = toolchain::ensure(root);
 
     let env = GuestEnv::new(&sysroot);
     let config = parse_config(&boot.config);
@@ -1851,7 +1823,7 @@ fn shipped_parts(root: &Path, boot: &Boot, plan: &Plan) -> (Vec<u8>, Vec<u8>, Ve
     // is staged and certified through the same [`stage_and_certify_kernel`] that
     // path uses, so neither can grow an assertion the other lacks.
     let (kernel_bytes, bl_art) = {
-        let _artifact = buildlock::artifact(root);
+        let _artifact = artifact(root);
         let kernel_handle = {
             let root = root.to_path_buf();
             let env = env.clone();
@@ -2073,20 +2045,20 @@ pub fn build_test_parts(
     // Held to the end of the function: the staged artifacts below are read
     // back after the userland build, and a clean landing in between is the
     // same defect as one landing mid-compile.
-    let mut lock = buildlock::shared(root, "test image");
-    let sysroot = crate::toolchain::ensure(root, &mut lock);
+    let mut lock = worktree_lock(root, "a test image");
+    let sysroot = crate::toolchain::ensure(root);
     let env = GuestEnv::new(&sysroot);
 
     invalidate_stale(root, &mut lock, &env.toolchain, &config_targets(root, &config));
 
     // Build and stage under one lock, released before `build_and_assemble`.
     // Releasing it there is deliberate and required: that build takes its own
-    // `buildlock::artifact` across its build→read window (it reads shared cargo
+    // `artifact` across its build→read window (it reads shared cargo
     // paths too), so holding this one across the long userland build would
     // deadlock the process against itself — and the staged copies below are
     // already immune to another config's rebuild.
     let (kernel_bytes, bl_bytes) = {
-        let _artifact = buildlock::artifact(root);
+        let _artifact = artifact(root);
         let kernel = KERNEL.get_or_build(kernel_key, || {
             let mut kernel_extra: Vec<&str> = Vec::new();
             if !features.is_empty() {
@@ -2162,7 +2134,7 @@ pub fn https_fetch_host(root: &Path) -> PathBuf {
 /// image carries. Read under the artifact lock, as every image build reads it.
 pub fn copy_guest_program(root: &Path, arch: Arch, name: &str, to: &Path) -> Result<(), String> {
     let from = root.join(format!("userland/target/{}/{PROFILE}/{name}", arch.userland()));
-    let _artifact = buildlock::artifact(root);
+    let _artifact = artifact(root);
     fs::copy(&from, to)
         .map(|_| ())
         .map_err(|e| format!("{} to {}: {e}", from.display(), to.display()))
@@ -2285,18 +2257,18 @@ pub fn build_toyos_bins(root: &Path, arch: Arch, crate_path: &Path, quiet: bool)
 struct TestBuild {
     target: &'static str,
     env: GuestEnv,
-    _lock: buildlock::Held,
-    _artifact: buildlock::Guard,
+    _sysroot: crate::sysroot::Sysroot,
+    _lock: Lock,
+    _artifact: Lock,
 }
 
 impl TestBuild {
     fn begin(root: &Path, arch: Arch, what: &str, stale_targets: &[(PathBuf, Clean)]) -> Self {
-        let mut lock = buildlock::shared(root, what);
-        let sysroot = crate::toolchain::ensure(root, &mut lock);
+        let mut lock = worktree_lock(root, what);
+        let sysroot = crate::toolchain::ensure(root);
         let env = GuestEnv::new(&sysroot);
         invalidate_stale(root, &mut lock, &env.toolchain, stale_targets);
-        let artifact = buildlock::artifact(root);
-        TestBuild { target: arch.userland(), env, _lock: lock, _artifact: artifact }
+        TestBuild { target: arch.userland(), env, _sysroot: sysroot, _lock: lock, _artifact: artifact(root) }
     }
 }
 
@@ -2308,69 +2280,6 @@ pub fn build_toyos_bin(root: &Path, arch: Arch, crate_path: &Path, name: &str, q
     cargo_build(crate_path, target, &["--bin", name], env, &[], quiet);
     let binary = crate_path.join(format!("target/{target}/{PROFILE}/{name}"));
     fs::read(&binary).unwrap_or_else(|e| panic!("read the test binary {}: {e}", binary.display()))
-}
-
-// --- Internal helpers ---
-
-/// The ToyOS-hosted rustc, and the target libraries it compiles against: this
-/// build's own sysroot's, so the compiler on the image links what the image's
-/// programs link. The hosted compiler itself is the primary's, read under the
-/// lock its rebuild takes.
-fn collect_hosted_rustc(root: &Path, toolchain: &Path, root_files: &mut Vec<(String, Vec<u8>)>) {
-    let _compiler = buildlock::compiler_shared(root, "reading the hosted rustc");
-    let target = toolchain::HOSTED_ARCH.userland();
-    let sysroot = toolchain::rust_dir(root).join(format!("build/{target}/stage2"));
-    assert!(
-        sysroot.exists(),
-        "Hosted rustc sysroot missing: {}",
-        sysroot.display()
-    );
-
-    let rustc = sysroot.join("bin/rustc");
-    assert!(
-        rustc.exists(),
-        "Hosted rustc binary missing: {}",
-        rustc.display()
-    );
-    root_files.push(("bin/rustc".to_string(), fs::read(&rustc).unwrap()));
-
-    if let Ok(entries) = fs::read_dir(sysroot.join("lib")) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_some_and(|e| e == "so") {
-                let name = path.file_name().unwrap().to_str().unwrap().to_string();
-                let data = fs::read(&path).unwrap();
-                root_files.push((format!("lib/{name}"), data));
-            }
-        }
-    }
-
-    let backends = sysroot.join(format!("lib/rustlib/{target}/codegen-backends"));
-    if backends.exists() {
-        for entry in fs::read_dir(&backends).into_iter().flatten().flatten() {
-            let path = entry.path();
-            if path.extension().is_some_and(|e| e == "so") {
-                let name = path.file_name().unwrap().to_str().unwrap().to_string();
-                let data = fs::read(&path).unwrap();
-                root_files.push((
-                    format!("lib/rustlib/{target}/codegen-backends/{name}"),
-                    data,
-                ));
-            }
-        }
-    }
-
-    let rlibs = toolchain.join(format!("lib/rustlib/{target}/lib"));
-    for entry in fs::read_dir(&rlibs).unwrap_or_else(|e| panic!("read {}: {e}", rlibs.display())) {
-        let path = entry.unwrap_or_else(|e| panic!("read {}: {e}", rlibs.display())).path();
-        if path.extension().is_some_and(|e| e == "rlib" || e == "rmeta") {
-            let name = path.file_name().unwrap().to_str().unwrap().to_string();
-            root_files.push((
-                format!("lib/rustlib/{target}/lib/{name}"),
-                fs::read(&path).unwrap(),
-            ));
-        }
-    }
 }
 
 #[cfg(test)]
@@ -3201,7 +3110,7 @@ mod tests {
             receives_have_providers(&load(cfg)).unwrap_or_else(|e| panic!("{cfg}: {e}"));
         }
         let bad: SystemConfig =
-            toml::from_str("init = []\n[programs.client]\nreceives = [\"ghost\"]\n").unwrap();
+            toml::from_str("[programs.client]\nreceives = [\"ghost\"]\n").unwrap();
         assert!(receives_have_providers(&bad).is_err());
     }
 
@@ -3250,13 +3159,13 @@ mod tests {
             apps_receive_a_served_name(&load(cfg)).unwrap_or_else(|e| panic!("{cfg}: {e}"));
         }
         let provided: SystemConfig = toml::from_str(
-            "init = []\n[apps]\nreceives = [\"surface\"]\n\
+            "[apps]\nreceives = [\"surface\"]\n\
              [programs.terminal]\nprovides = [\"surface\"]\n",
         )
         .unwrap();
         assert!(apps_receive_a_served_name(&provided).is_err());
         let ghost: SystemConfig =
-            toml::from_str("init = []\n[apps]\nreceives = [\"ghost\"]\n").unwrap();
+            toml::from_str("[apps]\nreceives = [\"ghost\"]\n").unwrap();
         assert!(apps_receive_a_served_name(&ghost).is_err());
     }
 
@@ -3287,7 +3196,7 @@ mod tests {
             provides_disjoint_from_serves(&load(cfg)).unwrap_or_else(|e| panic!("{cfg}: {e}"));
         }
         let bad: SystemConfig = toml::from_str(
-            "init = []\n[programs.a]\nserves = [\"x\"]\n[programs.b]\nprovides = [\"x\"]\n",
+            "[programs.a]\nserves = [\"x\"]\n[programs.b]\nprovides = [\"x\"]\n",
         )
         .unwrap();
         assert!(provides_disjoint_from_serves(&bad).is_err());
@@ -3342,7 +3251,7 @@ mod tests {
             .expect_err("the excused entry no longer collides with anything");
         assert!(staged.contains(STAGED_COLLISION.2), "{staged}");
         let bad: SystemConfig = toml::from_str(
-            "init = []\n[programs.a]\ndevices = [\"framebuffer\"]\n\
+            "[programs.a]\ndevices = [\"framebuffer\"]\n\
              [programs.b]\ndevices = [\"framebuffer\"]\n",
         )
         .unwrap();
@@ -3475,7 +3384,7 @@ mod tests {
         }
         let armed_on = |device: &str, args: &str| {
             let cfg: SystemConfig = toml::from_str(&format!(
-                "init = []\n[programs.netd]\ndevices = [\"{device}\"]\nargs = [{args}]\n"
+                "[programs.netd]\ndevices = [\"{device}\"]\nargs = [{args}]\n"
             ))
             .unwrap();
             an_armed_intel_actuator_claims_a_card_the_driver_opens(&cfg, &cards)
@@ -3553,7 +3462,7 @@ mod tests {
         claims_no_device(&load("diag/system.toml"))
             .unwrap_or_else(|e| panic!("diag/system.toml: {e}"));
         let bad: SystemConfig =
-            toml::from_str("init = []\n[programs.x]\ndevices = [\"framebuffer\"]\n").unwrap();
+            toml::from_str("[programs.x]\ndevices = [\"framebuffer\"]\n").unwrap();
         assert!(claims_no_device(&bad).is_err());
     }
 
@@ -3573,7 +3482,7 @@ mod tests {
         for cfg in ALL_CONFIGS {
             started_programs_are_declared(&load(cfg)).unwrap_or_else(|e| panic!("{cfg}: {e}"));
         }
-        let bad: SystemConfig = toml::from_str("init = []\n[boot]\nstart = [\"ghost\"]\n").unwrap();
+        let bad: SystemConfig = toml::from_str("[boot]\nstart = [\"ghost\"]\n").unwrap();
         assert!(started_programs_are_declared(&bad).is_err());
     }
 

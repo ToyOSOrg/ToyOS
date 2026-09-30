@@ -109,7 +109,7 @@ default-run = "toyos-build"
 fatfs = "0.3.6"
 fontdue = "0.9"
 gpt = "3.1.0"
-# `statvfs` for `worktree::free_bytes`, and the unprivileged ICMP datagram
+# `flock` for `src/dirlock.rs`, and the unprivileged ICMP datagram
 # socket `icmp::echo` asks a metal boot over, which is the platform call that
 # replaces a `ping` binary.
 libc = "0.2"

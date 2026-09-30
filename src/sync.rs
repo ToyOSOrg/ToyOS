@@ -55,16 +55,13 @@ fn sync(root: &Path) -> Result<String, String> {
     let behind = git(&primary, &["rev-list", "--count", "main..origin/main"])?;
     if behind.trim() == "0" {
         let at = git(&primary, &["rev-parse", "--short", "main"])?;
-        return Ok(format!(
-            "fetched origin; this host's main is current at {at}{}",
-            reclaimable(root)
-        ));
+        return Ok(format!("fetched origin; this host's main is current at {at}"));
     }
     let said = match fast_forward(&primary)? {
         Some((before, after, commits)) => format!("{before} -> {after} ({commits} commit(s))"),
         None => format!("already at {}", git(&primary, &["rev-parse", "--short", "main"])?),
     };
-    Ok(format!("fetched origin; this host's main {said}{}", reclaimable(root)))
+    Ok(format!("fetched origin; this host's main {said}"))
 }
 
 /// The move this call made, or `None` when a concurrent `--sync` had already
@@ -80,15 +77,6 @@ fn fast_forward(primary: &Path) -> Result<Option<(String, String, String)>, Stri
     let commits = git(primary, &["rev-list", "--count", &format!("{before}..{after}")])?;
     let short = |sha: &str| git(primary, &["rev-parse", "--short", sha]);
     Ok(Some((short(&before)?, short(&after)?, commits)))
-}
-
-/// What this host could give back, said where it becomes true.
-///
-/// A worktree whose branch has landed has no reason to hold its build caches,
-/// and `--sync` runs at exactly the moment that becomes true of one.
-fn reclaimable(root: &Path) -> String {
-    crate::worktree::reclaim_line(&crate::worktree::survey(root, false))
-        .map_or_else(String::new, |line| format!("\n[sync] {line}"))
 }
 
 /// This host's `main` has commits GitHub does not, so it is not a cache of

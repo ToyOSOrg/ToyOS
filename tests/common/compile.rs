@@ -17,14 +17,16 @@ pub fn testcases_dir() -> PathBuf {
 
 /// The C sysroot every C program here is built against, and the clang that
 /// builds it: the toolchain's own, for the suite's architecture. Once per
-/// process — a hundred and fifty C programs build against it.
+/// process — a hundred and fifty C programs build against it — and held in use
+/// for as long as the process lives.
 pub fn c_sysroot() -> CSysroot {
-    static C: OnceLock<CSysroot> = OnceLock::new();
+    static C: OnceLock<(toyos_build::sysroot::Sysroot, CSysroot)> = OnceLock::new();
     C.get_or_init(|| {
-        let mut lock = toyos_build::buildlock::shared(&repo_root(), "the C sysroot");
-        let sysroot = toyos_build::toolchain::ensure(&repo_root(), &mut lock);
-        CSysroot::of(&sysroot.dir, super::qemu::SUITE_ARCH)
+        let sysroot = toyos_build::toolchain::ensure(&repo_root());
+        let c = CSysroot::of(&sysroot.dir, super::qemu::SUITE_ARCH);
+        (sysroot, c)
     })
+    .1
     .clone()
 }
 

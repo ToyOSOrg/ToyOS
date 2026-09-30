@@ -2,11 +2,11 @@ pub mod arch;
 pub mod assets;
 pub mod bootlog;
 pub mod build;
-pub mod buildlock;
 pub mod ci;
 pub mod clang;
 pub mod clippy;
 pub mod compiler;
+pub mod dirlock;
 /// What the untouched-disk gate compares a device against, in `tests/`.
 pub mod fingerprint;
 pub mod firmware;
@@ -15,7 +15,6 @@ pub mod gitfixture;
 pub mod flags;
 pub mod hostws;
 pub mod icmp;
-pub mod identity;
 pub mod image;
 pub mod kernelconsole;
 pub mod signing;
@@ -23,7 +22,6 @@ pub mod signing;
 /// but its own tests.
 #[cfg(test)]
 pub mod kernelkeys;
-pub mod keystore;
 pub mod lan;
 pub mod libc;
 pub mod llvm;
@@ -42,6 +40,7 @@ pub mod soundfont;
 /// build system at all.
 #[cfg(test)]
 pub mod sourcegate;
+pub mod store;
 pub mod sync;
 pub mod sysroot;
 pub mod testargs;
@@ -49,7 +48,6 @@ pub mod tether;
 pub mod toolchain;
 pub mod userlandhost;
 pub mod wallpaper;
-pub mod worktree;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

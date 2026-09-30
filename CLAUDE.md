@@ -11,7 +11,7 @@ An operating system built from scratch in Rust, held to a production-grade engin
 | `kernel/CLAUDE.md` | the caveats that bite kernel work |
 | `userland/CLAUDE.md` | the server doctrine, and the caveats that bite userland work |
 | `tests/CLAUDE.md` | the caveats that bite the harness |
-| `src/CLAUDE.md` | boot modes, the locks, worktrees — the operational file |
+| `src/CLAUDE.md` | boot modes, the toolchain store, worktrees — the operational file |
 | `issues/README.md` | the issue tracker: one file per issue, typed by kind; `ls` is the index |
 | `.claude/agents/reviewer.md` | the review prompt the orchestrator spawns a reviewer with |
 
@@ -82,7 +82,7 @@ The root `Cargo.toml`'s `[workspace]` `members` and `exclude` lists account for 
 
 ## Workflow
 
-**One agent, one worktree, one branch.** `cargo run -- --worktree add <path>` makes one; never `git worktree add` by hand — the naive path clones the rust fork's history and takes the machine-global toolchain name from every other checkout. The primary checkout is not a workspace: it owns `rust/`, the rustup link and `main`; `cargo run -- --sync` moves it onto whatever GitHub merged.
+**One agent, one worktree, one branch.** `git worktree add --no-track -b wt/<name> <path> origin/main` makes one and `git worktree remove <path>` takes it; never `git submodule update` in one — that clones the rust fork's history again. The primary checkout is not a workspace: it owns `rust/`, the rustup link and `main`; `cargo run -- --sync` moves it onto whatever GitHub merged.
 
 - Stay on the current task. File what you find in `issues/` and do not go fix it; one file per issue, its README has the shape.
 - If something blocks, stop and report it. Don't work around it.
