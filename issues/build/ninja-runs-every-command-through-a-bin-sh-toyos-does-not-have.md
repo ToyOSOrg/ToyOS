@@ -20,4 +20,5 @@ Where the path comes from is
 `issues/isolation/every-program-sees-only-the-files-it-was-given.md`'s.
 
 **Exit**: inside ToyOS, Ninja builds a file whose commands chain with `&&`,
-redirect and quote, through `/bin/sh`.
+redirect and quote, through a `/bin/sh` that listens for a quit and relays
+nothing, as that track's stage 6 has `/system/bin/shell` do.

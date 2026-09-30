@@ -52,19 +52,21 @@ run a handler only on a thread it controls.
 - **At once, beside the program.** While one of the program's threads is
   waiting inside libc — for input, for a child, for time to pass or for a
   signal — the handler runs on that thread and cuts the wait short, as on
-  Unix: a C prompt waiting for a line comes back on Ctrl+C. While none is,
-  libc runs the handler on a thread of its own, and the program's own code
-  goes on running at the same time. Ctrl+C stops clang at once, and clang
-  deletes the file it was writing. The cost: the handler and the program's own
-  code can then work on the same thing at once and collide. GNU make's Ctrl+C
-  handler collects the compiles that have ended, which make's own code also
-  does; on Windows, the one system where make's handler already runs beside
-  its code, make stops its own code first for exactly that reason (make 4.4.1
-  `src/commands.c:508-510`). On ToyOS it collides only when Ctrl+C comes while
-  make is working rather than waiting. A handler that jumps back into the
-  program's main loop, as some C programs' do, lands on the wrong thread and
-  breaks the program; and clang can delete that file while its main code is
-  still writing into it. POSIX lets a handler run on any of a program's
+  Unix: a C prompt waiting for a line comes back on Ctrl+C. As on Unix, a
+  program can ask that a wait for input or for a child carry on after its
+  handler instead, and a wait for time or for a signal is always cut short.
+  While no thread is waiting, libc runs the handler on a thread of its own, and
+  the program's own code goes on running at the same time. Ctrl+C stops clang
+  at once, and clang deletes the file it was writing. The cost: the handler and
+  the program's own code can then work on the same thing at once and collide.
+  GNU make's Ctrl+C handler collects the compiles that have ended, which make's
+  own code also does; on Windows, the one system where make's handler already
+  runs beside its code, make stops its own code first for exactly that reason
+  (make 4.4.1 `src/commands.c:508-510`). On ToyOS it collides only when Ctrl+C
+  comes while make is working rather than waiting. A handler that jumps back
+  into the program's main loop, as some C programs' do, lands on the wrong
+  thread and breaks the program; and clang can delete that file while its main
+  code is still writing into it. POSIX lets a handler run on any of a program's
   threads that does not block the signal; this one is a thread the program
   never made.
 - **Only when the program next waits inside libc.** Nothing runs beside the
@@ -102,9 +104,10 @@ Each login, on the desktop or over SSH, has one program that is the parent of
 everything its user starts, so that logging out ends all of it.
 
 - **A program of its own that does nothing else.** init starts a small session
-  program for each login, and everything the user starts runs under it. A
-  crash of any program the user started leaves the login and the rest of its
-  programs running.
+  program for each login, and everything the user starts runs under it. It
+  listens: when the login is asked to end, its programs are asked too, and it
+  ends once they have. A crash of any program the user started leaves the
+  login and the rest of its programs running.
 - **The login's first program.** An SSH login's session is the shell sshd
   starts for it, and the desktop's is the first program the desktop starts for
   the user. When that program ends or crashes, everything the user started
@@ -131,7 +134,8 @@ or sshd, so each of them needs a right to start programs there.
 ## Q5c. Can sshd end a login it asked for? (stage 5)
 
 When an SSH connection drops, its login ends: its programs are asked to hang
-up, and what is left is killed.
+up, which reaches them because the session program listens (Q5a), and what is
+left is killed.
 
 - **Yes, only its own.** The right sshd gets for a connection's session also
   lets it ask that session to quit and kill it, so a dropped connection ends
@@ -149,14 +153,16 @@ chance to save anything. The same answer decides how init asks each service to
 finish when the machine shuts down
 (`issues/isolation/the-supervisor-is-host-tested-and-owns-the-stop.md`).
 
-- **Yes, with a reason.** A parent can ask its child to quit and say why:
-  interrupt (Ctrl+C), hang-up (a window closed, a connection dropped) or
-  terminate (shutdown, a deadline). The program hears it among its other
-  events and decides what to do: an editor saves, a compiler deletes its
-  half-written output, Ctrl+C in a shell or an editor stops what it is doing
-  and ends nothing, and a server may take a hang-up as the signal to reload
-  its settings. Whoever asked still kills if the end it wants does not come.
-  The kernel gains one call and one kind of object.
+- **Yes, with a reason.** A program allowed to end another — its parent, or
+  the terminal it runs in — can ask it to quit and say why: interrupt
+  (Ctrl+C), hang-up (a window closed, a connection dropped) or terminate
+  (shutdown, a deadline). The program hears it among its other events and
+  decides what to do: an editor saves, a compiler deletes its half-written
+  output, Ctrl+C in a shell or an editor stops what it is doing and ends
+  nothing, and a server may take a hang-up as the signal to reload its
+  settings. The shell and a login's session program listen, so the programs
+  under them are asked too. Whoever asked still kills if the end it wants does
+  not come. The kernel gains one call and one kind of object.
 - **Yes, without a reason.** A server that reloads on a hang-up and exits on
   terminate would exit when asked to reload, and no program could tell Ctrl+C
   from shutdown.
@@ -177,7 +183,8 @@ Most programs never listen: `ls`, `cat`, a Rust program that does not ask.
   first press. The cost: a program that listens still dies at once, without
   cleaning up, when the program that started it does not listen, because it
   dies with that program; on Unix only the one that does not listen would die.
-  ToyOS's own shell listens, so a compiler it runs cleans up.
+  ToyOS's own shell and each login's session program listen, so a compiler
+  run from a login cleans up.
 - **Nothing, until whoever asked gives up and kills it.** Ctrl+C does nothing
   to `cat` until a second press, and shutdown waits out its whole deadline for
   every program that never listens.
@@ -195,11 +202,13 @@ Most programs never listen: `ls`, `cat`, a Rust program that does not ask.
   compile and passes the Ctrl+C on to them itself (v1.13.1
   `src/subprocess-posix.cc:102`, `:451-457`), so here each compile is asked
   twice, and one that has not yet taken the first when Ninja's comes is
-  killed (Q7), leaving its half-written file.
+  killed (Q7), leaving its half-written file. The shell and the session
+  program pass nothing on, since the quit already reached what they run.
 - **The program alone.** Ctrl+C reaches `make` and not its compiles, and make,
   which expects its compiles to have been interrupted with it, waits for every
-  running one to finish before it stops (GNU make's `fatal_error_signal`). A
-  closing terminal reaches its shell and not what the shell started.
+  running one to finish before it stops (GNU make's `fatal_error_signal`). The
+  shell and the session program must then pass each quit on to what they run,
+  or a closing terminal reaches its shell and not what the shell started.
 
 *Recommended: the program and everything it started.*
 

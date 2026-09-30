@@ -71,8 +71,9 @@ A deleted or disabled test covers nothing.
    they are asked in forward order, and when they are asked all at once with
    storage still last. In the other, a service holding unwritten state is
    asked to finish, answers, and has its state on disk after the reboot; its
-   negative control is the same service never answering, where the stop still
-   lands at the bound and the supervisor's line names the service.
+   negative control is the same service listening for the ask and never
+   ending, where the stop still lands at the bound and the supervisor's line
+   names the service.
 4. **The stop's coverage comes back.** **Exit**: each claim below is asserted
    by a host test or a guest test, and a mutation named in the PR reds it.
    - A held thread's transition wakes the stop.
