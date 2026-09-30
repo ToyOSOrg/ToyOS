@@ -559,9 +559,12 @@ pub fn ceiling_verdict(
     }
     // The backstop, for a guest that is stuck *and* chatty and so never trips
     // the silence guard; never before a guest silent since its ceiling has been
-    // silent for [`GUEST_QUIET`], so a death is named by the arms above.
+    // silent for [`GUEST_QUIET`].
     let backstop = (ceiling * 2).max(ceiling + GUEST_QUIET);
     if elapsed > backstop {
+        if let Some(line) = dying {
+            return Some(kernel_died_here(line));
+        }
         return Some(format!(
             "{TIMED_OUT} {}s, with the guest still talking {quiet:.0?} ago ({lines} \
              console line(s) while it ran) — it was working and did not finish",

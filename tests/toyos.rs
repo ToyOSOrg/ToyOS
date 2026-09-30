@@ -258,8 +258,9 @@ const RUST_SKIP: &[&str] = &[
     "netd_refused_pipes",
     "netd_refused_accept",
     "netd_lookup_let_go",
-    // It asserts nothing at all: it holds a boot open.
-    "lan_hold",
+    // It asserts nothing at all: it holds `dump_nmi_probe`'s boot open past
+    // the `dump-deaf-cpu` window.
+    "deaf_cpu_hold",
     // The same for `tests/lantalkcase`, held until the runner's bound is near
     // unless the host's `reboot` over ssh ends it first. `lan_talk` rides it.
     "lan_talk_hold",
@@ -1723,7 +1724,7 @@ const METAL: &[(&str, metal::Metal)] = &[
                 "testcases-deaf",
                 "tests/testcases",
                 &["dump-deaf-cpu"],
-                &["test_rs_lan_hold"],
+                &["test_rs_deaf_cpu_hold"],
             )],
             judge: |b| faults::dump_nmi_probe_on_metal(&b[0].kernel()),
         },
