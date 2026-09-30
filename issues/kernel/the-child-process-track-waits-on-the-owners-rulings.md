@@ -8,140 +8,190 @@ opened: 2026-09-30
 
 Stages 2, 3, 6 and 7 of
 `issues/kernel/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`
-wait on these. Each ruling goes into the track as one line, and its entry here
-is deleted.
+wait on these, and are written there as recommended here. Each question is one
+decision. Its ruling goes into the track as one line, and its entry here is
+deleted.
 
-## Q2. How a program ended (stage 2)
+## Q2. Can a parent tell a failure from a kill or a crash? (stage 2)
 
 When a child ends, its parent reads one number. Today a child that exits with
 137 and one that is killed both read 137, and a crash reads 139 or -1, numbers
-a program can exit with too: nobody can tell a failure from a kill from a
-crash.
+a program can exit with too.
 
-Proposed: `SYS_PROCESS_WAIT` (108) keeps its number, arguments, right (`WAIT`)
-and errors, and its one answer word says what happened.
+- **Yes.** The number says whether the program ended itself or the kernel
+  ended it, and if the kernel did, why: killed, or which kind of crash. A crash
+  reads the same on x86-64 and on ARM64. A program that reads the number the
+  old way still sees a kill or a crash as a failure, never as a success.
+- **No.** A tool that retries a crashed job cannot tell it from one that
+  failed, and a program that exits with 137 on purpose reads as killed.
 
-- Bit 32 is 0 if the program exited and 1 if the kernel ended it.
-- Bits 0–31 are its exit code if it exited. If the kernel ended it they say
-  why, and are never 0: 1 killed, 2 a memory access its mappings refuse, 3 an
-  instruction it may not run, 4 an arithmetic trap, 5 a misaligned access, 6 a
-  breakpoint instruction, 7 a handle it does not hold. The kind is what the
-  program did, so the same act is the same kind on x86-64 and AArch64, whatever
-  each crash report prints.
-- Bits 33–63 stay 0, clear of the error range.
+*Recommended: yes.*
 
-A reader still decoding bits 0–31 alone reads a killed or crashed program as a
-failure, never as a success. 137, 139 and -1 go; an abort stays the program's
-own exit code, 134 from std and from libc. std's `code()` answers `None` for a
-program the kernel ended, and a ToyOS `ExitStatusExt` reads why. libc's
-`waitpid` reports it as `WIFSIGNALED`, `WTERMSIG` being `SIGKILL`, `SIGSEGV`,
-`SIGILL`, `SIGFPE`, `SIGBUS`, `SIGTRAP` or `SIGSYS` for 1 to 7.
+## Q3a. How does a C program learn that its child ended? (stage 3)
 
-*Recommended.* Rejected: the shell's numbers inside the code, which read a
-program's own `exit(137)` as a kill; and a struct written out through a
-pointer, a copy for what one word carries.
+C programs written for Unix learn it from a Unix signal, `SIGCHLD`: Ninja
+waits for one (v1.13.1 `src/subprocess-posix.cc`), and so does libuv where it
+has no kqueue (v1.53.0 `src/unix/process.c`). ToyOS has no signals, and its
+kernel never will.
 
-## Q3. `SIGCHLD`, and what a C child inherits (stage 3; no ABI change)
+- **libc imitates the signal.** libc, the C library, learns of the end from
+  ToyOS's own event and runs the program's handler for it. Ninja and libuv run
+  unchanged, and the kernel gains nothing.
+- **Each such program is changed for ToyOS.** Ninja, libuv and every other
+  program that waits for its children carries a ToyOS change of its own, as a
+  fork, for what one part of libc would serve.
 
-ToyOS has no signals, and its kernel never will: nothing is ever sent from one
-process to another as a signal. A signal exists only inside libc, imitated for
-the C programs written around them, out of ToyOS events libc sees itself.
+*Recommended: libc imitates it.*
 
-**`SIGCHLD`.** libc raises it once for each end of a child it started, which
-its own thread learns from stage 1's event. libc runs a handler for any signal
-it imitates where POSIX would: inside a blocking libc call — `ppoll` under its
-mask, or `poll` — of a thread that leaves the signal unblocked, and that call
-then answers `EINTR`; while no such thread is in one, at once on libc's own
-thread, as POSIX lets a signal sent to a process run on any thread that does
-not block it; and while every thread blocks it, it stays pending, which
-`sigpending` reports, until a call unblocks it. Once the handler has run for
-an end, that end never raises it again, even while the child is not yet waited
-for. With `SIGCHLD` set to `SIG_IGN`, or `SA_NOCLDWAIT` asked for, libc drops
-an ended child without a wait, as POSIX says, so it stops counting against how
-many children a process may have.
-`sigaction` records handlers, where today it answers `0` and records nothing.
-This is what the build tools use: Ninja blocks `SIGCHLD` except inside `ppoll`
-(v1.13.1 `src/subprocess-posix.cc`), and libuv, without kqueue, learns of a
-child from a handler that writes its own pipe (v1.53.0 `src/unix/process.c`),
-which an `EINTR` from `poll` serves.
+## Q3b. When does a C program's signal handler run? (stages 3 and 6)
 
-**What a C child inherits.** POSIX hands a child every descriptor its parent
-holds that is not marked close-on-exec, and `open` and `pipe` leave them
-unmarked by default. Proposed instead, as a stated deviation from POSIX: libc
-passes descriptors 0–2 and exactly what the spawn's file actions name. The
-reason is std's routing rule (`rust/library/std/src/sys/process/toyos.rs`,
-`Command::spawn`): a child handed a slot beyond 0–2 is spawned directly,
-holding what its parent holds, and any other is started by init from its own
-manifest row. Under POSIX's default, a C parent holding any unmarked descriptor
-above 2 would start every program the first way while a Rust parent starts it
-the second; under this rule a C and a Rust parent give one program the same
-authority. None of Ninja, LLVM or libuv hands a child a descriptor above 2
-without naming it. The cost: a C program that hands its child a descriptor by
-leaving it open, without naming it, loses it.
+On Unix a signal interrupts the program wherever it is, and the handler runs
+in its place. ToyOS never does that; the owner ruled it out as legacy. libc can
+run a handler only on a thread it controls.
 
-*Recommended, both.* Rejected: a ToyOS backend in each program that waits for
-children (libuv's kqueue shape would fit the handle's event), a fork per
-program for what one libc routine serves; and POSIX's default inheritance, for
-the split in authority above.
+- **At once, beside the program.** While none of the program's threads is
+  waiting inside libc, libc runs the handler on a thread of its own, and the
+  program's own code goes on running at the same time. Ctrl+C stops clang at
+  once, and clang deletes the file it was writing. The cost: a handler that
+  jumps back into the program's main loop, as some C programs' do, lands on
+  the wrong thread and breaks the program; and clang can delete that file
+  while its main code is still writing into it. POSIX lets a handler run on
+  any of a program's threads that does not block the signal; this one is a
+  thread the program never made.
+- **Only when the program next waits inside libc.** Nothing runs beside the
+  program. A compiler that is computing does not wait, so Ctrl+C does not stop
+  clang until it is killed, and its half-written file stays behind.
 
-## Q6. Asking a program to quit (stages 6 and 7)
+*Recommended: at once, beside the program.*
 
-Today the only end one program can cause another is a kill, which leaves it no
-chance to save, and quitting gracefully is a parent's job before it ends.
-Proposed: two operations on the one handle a parent holds — quit and kill.
+## Q3c. What does a C child start with? (stage 3)
 
-- **Quit** is a new syscall, `SYS_PROCESS_QUIT` = 124,
-  `(process: RawHandle, reason) -> ()`, needing `MANAGE` as the kill does, and
-  `Ok` for a process already ended. The reason is interrupt (Ctrl+C), hang-up
-  (a closed window, a dropped connection) or terminate (shutdown, a deadline),
-  which a program needs as much as libc: Ctrl+C in a shell or an editor stops
-  what it is doing and ends nothing. It interrupts nothing: each process is
-  started holding a quit notice, a handle under the label `quit` that is
-  `READABLE` while a reason is asked and not yet read, and the program waits
-  on it beside any other event.
-- A program that has never watched its notice is killed by a quit instead,
-  with its tree, as a Unix program with no handler dies of Ctrl+C at once.
-- Whoever asks kills when the end it wants has not come. The terminal asks
-  with interrupt on Ctrl+C and kills on a second; a closed window and a
-  dropped SSH session ask with hang-up, shutdown and a test past its deadline
-  with terminate, each killing at a deadline of its own.
-- std: `os::toyos` hands a program its notice — a blocking wait for a reason,
-  and the handle for a poller. The `ctrlc` fork `rust/Cargo.toml` patches in,
-  whose ToyOS arm parks its waiting thread forever today, waits there
-  instead, for the reasons its Unix arm maps; and rustc stops skipping its
-  handler on ToyOS (`rust/compiler/rustc_driver_impl/src/lib.rs`,
-  `install_ctrlc_handler`). An unchanged Rust program's `ctrlc` handler then
-  runs on a quit.
-- libc: from the first `sigaction` that installs a handler for `SIGINT`,
-  `SIGHUP` or `SIGTERM`, libc's own thread watches the notice, and each reason
-  runs its signal's handler by Q3's rule — interrupt `SIGINT`, hang-up
-  `SIGHUP`, terminate `SIGTERM`. A reason whose signal is ignored is dropped,
-  and one with neither handler nor ignore takes the default action, which ends
-  the process with exit code 128 plus the signal's number: `waitpid` reads it
-  as an exit, not `WIFSIGNALED`. So a quit ends clang at once: LLVM's handler
-  removes its output files, restores the default action and raises the signal
-  again (`rust/src/llvm-project/llvm/lib/Support/Unix/Signals.inc`,
-  `SignalHandler`). A handler that only sets a flag leaves the program running
-  until it acts on the flag, and a daemon's `SIGHUP` reload stays a reload.
-  `kill` with one of the three is a quit with that reason, and with `SIGKILL`
-  a kill.
+On Unix a child starts holding every file its parent has open, unless the
+parent marked the file not to be passed on.
 
-What it adds to the ABI: the syscall (124, never assigned), the notice — a
-fourteenth object kind, three reason bits, a read that takes them, and a
-watch — and its label, installed in every process the kernel starts. The kill
-is unchanged.
+- **Only what the parent names**, a stated departure from POSIX. A C child
+  starts with its input, output and error, and exactly what its parent names
+  when it starts it. A program started from C then holds what it holds when
+  started from Rust: what it is declared to hold. The cost: a C program that
+  hands its child a file by leaving it open, without naming it, loses it. None
+  of Ninja, LLVM or libuv does that.
+- **Unix's rule.** A C parent with any other file open passes it on, and every
+  program it starts runs with what that parent holds, where the same program
+  started from Rust runs with what it is declared to hold.
 
-*Recommended.* Rejected:
+*Recommended: only what the parent names.*
 
-- A quit channel std, libc and the SDK make at every spawn, a pipe whose read
-  end the child holds: no kernel change, but two handles travel wherever one
-  did, every launch carries one more, a program started any other way has
-  none, and one that never listens ends only when its asker's deadline runs
-  out.
-- A quit with no reason: a daemon that reloads on `SIGHUP` and exits on
-  `SIGTERM` would exit when asked to reload, and no program could tell Ctrl+C
+## Q6a. Can one program ask another to quit? (stage 6)
+
+Today the only way one program can end another is a kill, which leaves it no
+chance to save anything.
+
+- **Yes, with a reason.** A parent can ask its child to quit and say why:
+  interrupt (Ctrl+C), hang-up (a window closed, a connection dropped) or
+  terminate (shutdown, a deadline). The program hears it among its other
+  events and decides what to do: an editor saves, a compiler deletes its
+  half-written output, Ctrl+C in a shell or an editor stops what it is doing
+  and ends nothing, and a server may take a hang-up as the signal to reload
+  its settings. Whoever asked still kills if the end it wants does not come.
+  The kernel gains one call and one kind of object.
+- **Yes, without a reason.** A server that reloads on a hang-up and exits on
+  terminate would exit when asked to reload, and no program could tell Ctrl+C
   from shutdown.
-- Quit as a second mode of the kill (109): one number for two operations with
-  different effects.
-- A signal delivered into the program's own code, a handler that interrupts
-  whatever it was doing: the legacy the owner ruled out.
+- **No: a kill only, as today.** Nothing saves its work when its window closes
+  or the machine shuts down.
+
+*Recommended: yes, with a reason.* Rejected: a quit channel std and libc would
+make at every start, which a program started any other way would not have; and
+a handler that interrupts the program's own code wherever it is, the legacy
+the owner ruled out.
+
+## Q6b. What does a quit do to a program that never listens for one? (stage 6)
+
+Most programs never listen: `ls`, `cat`, a Rust program that does not ask.
+
+- **It is killed at once, with everything it started**, as a Unix program
+  that handles nothing dies of Ctrl+C. Ctrl+C stops such a program on the
+  first press.
+- **Nothing, until whoever asked gives up and kills it.** Ctrl+C does nothing
+  to `cat` until a second press, and shutdown waits out its whole deadline for
+  every program that never listens.
+
+*Recommended: killed at once.*
+
+## Q6c. How far does a quit reach? (stages 6 and 7)
+
+- **The program and everything it started**, as a kill does. Ctrl+C reaches
+  `make` and every compile it is running at once, as on Unix, where Ctrl+C
+  reaches every program of the job in front. A closing terminal asks its shell
+  and everything the shell started to hang up. The cost: a program cannot keep
+  a helper it started out of a Ctrl+C meant for itself, as a Unix program can
+  by putting the helper in a job of its own.
+- **The program alone.** Ctrl+C reaches `make` and not its compiles, and make,
+  which expects its compiles to have been interrupted with it, waits for every
+  running one to finish before it stops (GNU make's `fatal_error_signal`). A
+  closing terminal reaches its shell and not what the shell started.
+
+*Recommended: the program and everything it started.*
+
+## Q6d. Does a program that Ctrl+C ended read as interrupted? (stages 2 and 6)
+
+Under the answers recommended here, no child that Ctrl+C ended ever reads to
+its parent as interrupted. One that never listened reads as killed; a C
+program that lets the interrupt end it once it has cleaned up, as clang does,
+reads as having exited with 130, which is a failure.
+
+- **No.** The number keeps meaning only whether a program ended itself or the
+  kernel ended it. A build tool that tells an interrupt from a failure, as
+  Ninja does, may report a compile the user interrupted as failed; Ninja still
+  stops the build, because the Ctrl+C reached it too.
+- **Yes.** Q2's reasons gain three — interrupted, hung up, terminated — so a
+  program a quit ended reads as ended for that reason, and a C parent sees the
+  Unix signal for it. For clang to read that way, a program must be able to
+  end itself for one of those reasons, as a Unix program can by sending the
+  signal to itself, so the number no longer says only what the kernel did.
+
+*Recommended: no.*
+
+## Q6e. Does an unchanged Rust program's Ctrl+C handler run? (stage 6)
+
+Rust programs that handle Ctrl+C mostly do it through one widely used library,
+`ctrlc`; rustc is one of them.
+
+- **Yes.** Rust's standard library hands a program its quit notice, and the
+  `ctrlc` fork ToyOS already carries listens to it, so a Rust program's handler
+  runs on a quit as it does on Unix, with no change to the program. rustc
+  stops leaving its handler out on ToyOS.
+- **No.** A Rust program hears a quit only through a call written for ToyOS;
+  rustc and every other `ctrlc` user is treated as a program that never
+  listens (Q6b).
+
+*Recommended: yes.*
+
+## Q6f. Does a C program hear a quit as the Unix signal for it? (stage 6)
+
+- **Yes.** libc turns interrupt into `SIGINT`, hang-up into `SIGHUP` and
+  terminate into `SIGTERM`, so a C program written for Unix acts as it does
+  there: clang deletes the file it was writing and stops, a server reloads on
+  a hang-up, and a program that says only to ignore Ctrl+C runs on through
+  it. A C program's `kill` with one of those signals asks for a quit.
+- **No.** A C program never hears a quit, and is treated as a program that
+  never listens (Q6b): clang leaves its half-written file behind, and a server
+  asked to reload ends.
+
+*Recommended: yes.*
+
+## Q7. What does a second Ctrl+C do? (stage 7)
+
+A program that listens may stop what it is doing on Ctrl+C and carry on: a
+Python prompt goes back to its prompt, an editor cancels a command.
+
+- **It kills only a program that has not yet taken the first.** A program
+  that takes each Ctrl+C and carries on survives any number of them, as on
+  Unix; a program stuck so that it never takes the first dies on the second.
+  A program that takes a Ctrl+C and then hangs is not ended by Ctrl+C:
+  closing its window or a kill ends it, as on Unix.
+- **It always kills.** A hung program always dies on the second press, but a
+  Python prompt or an editor dies on the second Ctrl+C of its life, and loses
+  what was not saved.
+
+*Recommended: only a program that has not yet taken the first.*
