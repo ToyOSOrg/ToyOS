@@ -503,9 +503,7 @@ fn log_names(volume: &[u8]) -> Result<Vec<String>, String> {
 /// **A config and no longer a kernel parameter.** The bound moved into a
 /// userland program at L6, and the way a userland program is given a number is
 /// its manifest row — so the arming is an image this repository builds rather
-/// than a word on the kernel's command line. The other caller of that config is
-/// `usb_boot_stick_pulled`, which wants the same rotation in flight for a
-/// different reason.
+/// than a word on the kernel's command line.
 fn rotation(
     _test_config: &Path,
     c_bins: &[(String, Vec<u8>)],

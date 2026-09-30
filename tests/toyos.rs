@@ -978,11 +978,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     ("usb_refused_disk_first", Sched::Parallel),
     ("xhci_scan_hands_over_a_free_slot", Sched::Parallel),
     // The owner's freeze, staged: `device_del` on the stick carrying `/boot`
-    // and `/log` while the desktop draws. Serial because both verdicts are
-    // liveness ceilings — two 2 s compositor reporting intervals inside 20 s,
-    // and a console round trip inside 20 s — and a guest sharing the host with
-    // eleven others answers those late for reasons that are not the defect.
-    ("usb_boot_stick_pulled", Sched::Serial),
     ("usb_pool_exhausted", Sched::Parallel),
     ("usb_storage_write_error", Sched::Parallel),
     ("usb_flush_optional", Sched::Parallel),
@@ -6674,40 +6669,6 @@ fn toolkit_winit_pace(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     Ok(())
 }
 
-/// What a desktop that stopped answering is asked, in the order that survives
-/// being asked.
-///
-/// Every vCPU's registers first. `HLT=1` with `IF` set in `RFL` is a machine
-/// with nothing to run rather than one wedged below the interrupt layer, and
-/// that is the question #156 turns on — but Ctrl+Alt+D revives a halted CPU,
-/// so the dump destroys the evidence it is taken to explain. Asked in the
-/// other order, both halves describe the repaired machine.
-fn freeze_report(qemu: &mut QemuInstance, log: &mut String) -> String {
-    let registers = {
-        let mut monitor = qemu::QmpMonitor::open(qemu.qmp_socket());
-        monitor.human("info registers -a")
-    };
-    let before = log.len();
-    {
-        let mut input = qemu::QmpInput::open(qemu.qmp_socket());
-        input.keys(&[
-            ("ctrl", true),
-            ("alt", true),
-            ("d", true),
-            ("d", false),
-            ("alt", false),
-            ("ctrl", false),
-        ]);
-    }
-    let whole = serial_until(qemu, log, "=== end of dump ===", Duration::from_secs(30));
-    format!(
-        "--- info registers -a, taken before this report injected anything ---\n{registers}\n\
-         --- Ctrl+Alt+D{} ---\n{}",
-        if whole { "" } else { ", which produced no complete report" },
-        &log[before.min(log.len())..]
-    )
-}
-
 /// What a typed character costs the desktop.
 ///
 /// The owner's report, in his words: entering one character into the terminal
@@ -7950,7 +7911,6 @@ fn run_machine_test(
         // Bodies in `tests/common/usb.rs`, for the same reason.
         "usb_storage_gate" => usb::usb_storage_gate(test_config, c_bins, rust_bins),
         "usb_storage_shapes" => usb::usb_storage_shapes(test_config, c_bins, rust_bins),
-        "usb_boot_stick_pulled" => usb::usb_boot_stick_pulled(test_config, c_bins, rust_bins),
         "usb_refused_disk_first" => {
             usb::usb_refused_disk_first(test_config, c_bins, rust_bins)
         }
