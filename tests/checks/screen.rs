@@ -102,7 +102,9 @@ fn console_self_test() {
 /// against the T14's 1920x1080 panel drawn the way edk2's graphics console
 /// draws it, in the two text modes firmware has chosen there: 80x50, whose
 /// text starts 640 pixels in and which these lines scroll, and 240x56, whose
-/// text starts at the edge and which they do not.
+/// text starts at the edge and which they do not. In each, a panel that
+/// stopped before the console's last lines, as the exclusive-GOP control's
+/// does, must not read as carrying them.
 pub fn edge_self_test() -> Result<(), String> {
     let short: Vec<String> = (0..45).map(|n| format!("Kernel memory size: {n}")).collect();
     let wide = format!("Slot A: signed header {} verifies", "0123456789abcdef".repeat(9));
@@ -132,6 +134,18 @@ pub fn edge_self_test() -> Result<(), String> {
                 "a panel staged in {staged:?} with {lit} rows lit at its edge was read as {mode:?}, \
                  carrying {} where the console put {}",
                 count(&carried),
+                count(&printed)
+            ));
+        }
+        let stopped = edk2_panel(1920, 1080, staged, &lines[..short.len()]);
+        let read = stopped.firmware_text_mode()?;
+        if read != staged || stopped.edge_rows(read) == printed {
+            return Err(format!(
+                "a panel staged in {staged:?} that stopped after {} of the console's {} lines was \
+                 read as {read:?}, carrying {} where the console put {}",
+                short.len(),
+                lines.len(),
+                count(&stopped.edge_rows(read)),
                 count(&printed)
             ));
         }

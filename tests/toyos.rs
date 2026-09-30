@@ -3758,16 +3758,6 @@ fn run_screen_test(
             metal_sim_argv_check(&qemu::profile_argv(&options))?;
             let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
             let console = qemu.boot_log().to_string();
-            let dump = qemu.screendump();
-            // A row that decodes in the kernel's font is a row the kernel
-            // drew. Refused rather than counted: its rows are not the loader's.
-            if dump.rows().iter().any(|row| !row.trim().is_empty() && !row.contains(screen::UNKNOWN)) {
-                return Err(format!(
-                    "the kernel had already repainted the panel at the loader's last line, so \
-                     these are its rows and not the loader's\ndecoded screen:\n{}",
-                    dump.text()
-                ));
-            }
 
             // `ClearScreen` blanks the whole panel and puts `ESC[2J` on the
             // serial, so every line after the last one is on the panel too.
@@ -3777,29 +3767,48 @@ fn run_screen_test(
                      are on the panel\n{console}"
                 ));
             };
-            // A CSI sequence moves the cursor or sets a colour and draws nothing.
-            let drawn = |line: &str| {
-                let mut text = String::new();
-                let mut chars = line.chars();
-                while let Some(c) = chars.next() {
-                    if c == '\x1b' && chars.clone().next() == Some('[') {
-                        chars.by_ref().skip(1).find(|c| ('\x40'..='\x7e').contains(c));
-                    } else {
-                        text.push(c);
-                    }
+            let lines: Vec<&str> = shown.lines().collect();
+            if !lines.iter().any(|line| line.contains(bootlog::LOADER_GOP_LINE)) {
+                return Err(format!("the loader never printed {:?}\n{console}", bootlog::LOADER_GOP_LINE));
+            }
+
+            // The serial line can end before the panel's own line feed has
+            // scrolled it, so the panel is read until two dumps in a row carry
+            // the same rows. The ceiling is liveness alone: past the loader's
+            // last line only the kernel draws, and its repaint is refused.
+            let map = |rows: &[bool]| rows.iter().map(|&lit| if lit { '#' } else { '.' }).collect::<String>();
+            let ceiling = Instant::now() + qemu.budget(Duration::from_secs(30));
+            let mut before: Option<(screen::TextMode, Vec<bool>)> = None;
+            let (mode, carried) = loop {
+                let dump = qemu.screendump();
+                // A row that decodes in the kernel's font is a row the kernel
+                // drew. Refused rather than counted: its rows are not the loader's.
+                if dump.rows().iter().any(|row| !row.trim().is_empty() && !row.contains(screen::UNKNOWN)) {
+                    return Err(format!(
+                        "the kernel had already repainted the panel after the loader's last \
+                         line, so these are its rows and not the loader's\ndecoded screen:\n{}",
+                        dump.text()
+                    ));
                 }
-                text
+                let mode = dump.firmware_text_mode()?;
+                let now = (mode, dump.edge_rows(mode));
+                match before.replace(now.clone()) {
+                    Some(was) if was == now => break now,
+                    Some((was, rows)) if Instant::now() >= ceiling => {
+                        return Err(format!(
+                            "the panel still changed between its last two dumps when the ceiling \
+                             passed\nbefore: {was:?} {}\nafter:  {mode:?} {}\n{console}",
+                            map(&rows),
+                            map(&now.1)
+                        ));
+                    }
+                    _ => {}
+                }
             };
-            let lines: Vec<String> = shown.lines().map(drawn).collect();
-            let query = lines
-                .iter()
-                .position(|line| line.contains(bootlog::LOADER_GOP_LINE))
-                .ok_or_else(|| format!("the loader never printed {:?}\n{console}", bootlog::LOADER_GOP_LINE))?;
-            let mode = dump.firmware_text_mode()?;
-            let (carried, printed) = (dump.edge_rows(mode), mode.panel(lines.iter().map(String::as_str)));
+
+            let printed = mode.panel(lines.iter().copied());
             let count = |rows: &[bool]| rows.iter().filter(|&&lit| lit).count();
             if carried != printed {
-                let map = |rows: &[bool]| rows.iter().map(|&lit| if lit { '#' } else { '.' }).collect::<String>();
                 return Err(format!(
                     "the panel's first {} cells carry {} rows of text where the console put {} there \
                      in its {}x{} text mode, row by row\npanel:   {}\nconsole: {}\n{console}",
@@ -3814,11 +3823,10 @@ fn run_screen_test(
             }
             eprintln!(
                 "  [screen] the panel carries all {} rows the console put at its edge in its {}x{} \
-                 text mode, {} of them after the GOP query",
+                 text mode",
                 count(&printed),
                 mode.columns,
-                mode.rows,
-                count(&mode.printed(lines[query + 1..].iter().map(String::as_str)))
+                mode.rows
             );
             Ok(())
         }

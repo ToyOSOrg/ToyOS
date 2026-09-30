@@ -279,38 +279,27 @@ impl TextMode {
         modes
     }
 
-    /// The rows `lines` take in this mode, each `true` where one of its first
-    /// [`EDGE_CELLS`] characters draws. A line wraps every `columns`
-    /// characters, and one that fills its last row wraps before its own line
-    /// feed moves the cursor again, which leaves a blank row
-    /// (`GraphicsConsoleConOutOutputString`).
-    pub fn printed<'a>(self, lines: impl IntoIterator<Item = &'a str>) -> Vec<bool> {
-        let mut rows = Vec::new();
-        for line in lines {
-            let chars: Vec<char> = line.chars().collect();
-            rows.extend(
-                chars.chunks(self.columns).map(|row| row.iter().take(EDGE_CELLS).any(|c| !c.is_whitespace())),
-            );
-            if chars.len().is_multiple_of(self.columns) {
-                rows.push(false);
-            }
-        }
-        rows
-    }
-
-    /// Each of this mode's rows as [`TextMode::printed`] marks it, once `lines`
-    /// are printed onto a cleared panel: a line feed on the last row scrolls
-    /// the text up a row and blanks the last.
+    /// Each of this mode's rows once `lines` are printed onto a cleared panel,
+    /// `true` where one of its first [`EDGE_CELLS`] characters draws. A line
+    /// wraps every `columns` characters, and one that fills its last row wraps
+    /// before its own line feed moves the cursor again, which leaves a blank
+    /// row (`GraphicsConsoleConOutOutputString`); a line feed on the last row
+    /// scrolls the text up a row and blanks the last.
     pub fn panel<'a>(self, lines: impl IntoIterator<Item = &'a str>) -> Vec<bool> {
         let mut panel = vec![false; self.rows];
         let mut cursor = 0;
-        for row in self.printed(lines) {
-            panel[cursor] = row;
-            if cursor + 1 == self.rows {
-                panel.remove(0);
-                panel.push(false);
-            } else {
-                cursor += 1;
+        for line in lines {
+            let chars: Vec<char> = line.chars().collect();
+            let blank = chars.len().is_multiple_of(self.columns).then_some(false);
+            let rows = chars.chunks(self.columns).map(|row| row.iter().take(EDGE_CELLS).any(|c| !c.is_whitespace()));
+            for row in rows.chain(blank) {
+                panel[cursor] = row;
+                if cursor + 1 == self.rows {
+                    panel.remove(0);
+                    panel.push(false);
+                } else {
+                    cursor += 1;
+                }
             }
         }
         panel
