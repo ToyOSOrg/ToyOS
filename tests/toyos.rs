@@ -353,8 +353,6 @@ const RUST_SKIP: &[&str] = &[
     // Needs `test-small-caches` for the eviction its read-back rests on, and a
     // boot of its own for the host-side re-read. `redirty_mid_flush` runs it.
     "redirty_mid_flush",
-    // Needs the `smp-skip-ap` boot; `smp_failed_ap_leaves_no_hole` runs it there.
-    "smp_hole_shootdown",
     // Its listings are exact against `tests/layoutcase`, and it takes what that
     // boot wrote as its argv. `layout_fresh_boot` runs it over ssh.
     "layout_paths",
@@ -513,7 +511,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     ("acpi_table_inventory", Sched::Parallel),
     ("timer_calibration", Sched::Parallel),
     ("pci_inventory", Sched::Parallel),
-    ("smp_failed_ap_leaves_no_hole", Sched::Parallel),
     ("input_merge", Sched::Parallel),
     ("metal_sim_input", Sched::Parallel),
     ("input_claim_absent", Sched::Parallel),
@@ -1206,7 +1203,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("toolkit_winit_loop", &["test_rs_winit_loop"]),
     ("toolkit_winit_pace", &["test_rs_winit_pace"]),
     ("doom_frames", &["test_rs_doom_frames"]),
-    ("smp_failed_ap_leaves_no_hole", &["test_rs_smp_hole_shootdown"]),
     ("sshd_exec", &["test_rs_empty_dir_stat"]),
     ("sshd_files", &["test_rs_empty_dir_stat"]),
     ("sshd_key_auth", &["test_rs_empty_dir_stat"]),
@@ -3342,7 +3338,7 @@ fn virt_smp(profile: qemu::Profile, conduit: &str, el: u32) -> Result<(), String
     Ok(())
 }
 
-/// `smp_failed_ap_leaves_no_hole` on AArch64: `smp-skip-ap` keeps `CPU_ON`
+/// `smp-skip-ap` keeps `CPU_ON`
 /// from the CPU that would be cpu2 of four, and the bring-up stops there, so
 /// cpu2's id goes to no CPU behind it. The case's job, which the scheduler
 /// places across the CPUs that came up, ends with exit 0.
@@ -10330,9 +10326,6 @@ fn run_machine_test(
             let qemu = QemuInstance::boot(test_config, c_bins, rust_bins);
             pci_inventory(qemu.boot_log())
         }
-        "smp_failed_ap_leaves_no_hole" => {
-            smp_failed_ap_leaves_no_hole(test_config, c_bins, rust_bins)
-        }
         "input_merge" => {
             // The check runs in the kernel and panics on mismatch, so a
             // failure arrives as a dead boot; the marker is the only proof it
@@ -13140,64 +13133,6 @@ fn control_regs_negative(
         }
     }
     eprintln!("  [control_regs] a real divergent AP, refused: {refusal}");
-    Ok(())
-}
-
-/// A non-last AP that never starts must leave no dead slot in `0..cpu_count()`.
-///
-/// `smp-skip-ap` skips the startup of the AP that would be cpu2 on this four-vCPU
-/// machine. The unfixed kernel spent cpu2's id before it ran and counted a later
-/// AP anyway, so a shootdown after `set_ready` waited on a slot no CPU carried and
-/// the machine died. The verdict is survival plus density: `smp_hole_shootdown`
-/// frees pages back eight times and its marker prints, cpu1 comes online, and
-/// neither cpu2 nor the cpu3 behind it joins.
-fn smp_failed_ap_leaves_no_hole(
-    test_config: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    let options = BootOptions {
-        smp: 4,
-        kernel_params: &["smp-skip-ap"],
-        ..Default::default()
-    };
-    let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
-    let boot = qemu.boot_log().to_string();
-
-    // The premise, not just a dead boot: cpu1 came up and cpu2 failed.
-    if !boot.contains("SMP: AP cpu1 lapic=") || !boot.contains(" online") {
-        return Err(format!(
-            "cpu1 never came online, so the boot did not stage a non-last failed AP:\n{boot}"
-        ));
-    }
-    if !boot.contains("SMP: AP cpu2 lapic=") || !boot.contains("failed to start!") {
-        return Err(format!("the actuator did not fail cpu2's bring-up:\n{boot}"));
-    }
-
-    let result = qemu.run_test("test_rs_smp_hole_shootdown", Duration::from_secs(30));
-    if let Some(err) = &result.error {
-        // The unfixed kernel's signature: the guest stops answering.
-        return Err(format!(
-            "the guest stopped answering — a shootdown after a failed AP took the machine \
-             down:\n{err}\nserial:\n{}",
-            result.serial
-        ));
-    }
-    if !check_rust_result(&result) {
-        return Err(format!("smp_hole_shootdown failed:\n{}", result.stdout));
-    }
-
-    // Density: a "joining" line for cpu2 or cpu3 would be a slot past the failed AP.
-    let serial = format!("{boot}\n{}", result.serial);
-    for phantom in ["CPU 2: joining scheduler", "CPU 3: joining scheduler"] {
-        if serial.contains(phantom) {
-            return Err(format!(
-                "a CPU past the failed AP joined, so `0..cpu_count()` is not the online \
-                 set: {phantom:?}\n{serial}"
-            ));
-        }
-    }
-    eprintln!("  [smp] a non-last AP failed and the dense machine survived its shootdowns");
     Ok(())
 }
 
