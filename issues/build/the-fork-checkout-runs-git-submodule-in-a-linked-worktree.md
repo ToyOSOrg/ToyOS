@@ -17,4 +17,11 @@ primary checkout's `rust/`. The orchestrator measured that for
 primary's `.git/modules/rust/config` `core.worktree` to a path that does not
 exist; this arm is the same command one level down and is unmeasured.
 
-**Exit**: `fork_checkout` runs no `git submodule` in a linked worktree.
+`ensure_submodule` (`src/lib.rs`) runs `git submodule update --init
+library/backtrace` in the same fork checkout, from `sysroot::build_std` and
+`compiler::build_in_fork`, whenever that checkout's `library/backtrace` is
+empty or gone: what a first `fork_checkout` leaves when it stops after adding
+the fork's worktree and before adding `library/backtrace`.
+
+**Exit**: the build system runs no `git submodule` in a linked worktree's fork
+checkout.

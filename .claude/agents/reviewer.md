@@ -53,9 +53,9 @@ above; otherwise it is a NOTE.
 - **Instructions.** A change that removes or renames a command, flag or step an agent runs updates
   every prompt that names it — each `CLAUDE.md` and `.claude/agents/*.md` — in the same diff,
   saying what to do instead. Such an instruction is not the prose "Prose is removed, never
-  reviewed" governs, and `CLAUDE.md`'s "Stale or false prose is deleted" and "an agent edits one
-  only when briefed to" do not bar the implementer updating it: one left naming what is gone is a
-  BLOCKER.
+  reviewed" governs, and `CLAUDE.md`'s "Stale or false prose is deleted", "an agent edits one
+  only when briefed to" and "a `CLAUDE.md` never grows" do not bar the implementer updating it:
+  one left naming what is gone is a BLOCKER.
 - **Arrivals.** A host tool outside Rust and QEMU arrives by `Command::new`, `libc::system`,
   `exec`, `posix_spawn`, a build script or `cc::Build`, a `.github/` `run:` step or package
   manager, or `sh -c`, and is declared in
