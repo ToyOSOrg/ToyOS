@@ -72,12 +72,9 @@ pub mod probe;
 /// line and nothing links the two crates (`src/bootlog.rs`).
 pub const LOCKED_UP: &str = "a cpu locked up with interrupts off";
 
-/// How often an armed CPU samples itself, in nanoseconds of unhalted time.
-///
-/// A second: the bound is measured in tens of them, so a sample period this
-/// long costs one NMI per CPU per second and puts the detection within one
-/// period of the bound. It is also the period the report's ages are quoted at.
-const SAMPLE_NS: u64 = 1_000_000_000;
+/// Declared beside the bound it samples, so the host judging a lockup's
+/// lateness reads the same period.
+const SAMPLE_NS: u64 = toyos_tco::HARD_LOCKUP_SAMPLE_NS;
 
 /// The bound in TSC ticks, or 0 for a boot that armed none. Written on the BSP
 /// before any AP exists.

@@ -34,6 +34,10 @@ pub const JOB_DEADLINE_SAID: &str =
 /// it has: a wedged boot's `logd` wrote nothing.
 pub const DEADLINE_EXPIRED: &str = "the boot deadline expired";
 
+/// What the kernel logs as it arms that deadline, in `kernel/src/deadline.rs`:
+/// the record whose time the bound is counted from.
+pub const DEADLINE_ARMED: &str = "boot deadline: ";
+
 /// What the `wedge-before-reset` actuator says before it stops every CPU, in
 /// `kernel/src/deadline.rs`. The witness that a deadline ended a wedge and not
 /// a boot merely slower than its bound, which is what makes that control one.
@@ -708,6 +712,7 @@ mod tests {
             ("kernel/src/arch/x86_64/smp.rs", format!("log!(\"{AP_BRINGUP}")),
             ("kernel/src/process.rs", format!("THREAD_NAME_LEN: usize = {NAME_LEN}")),
             ("kernel/src/deadline.rs", format!("EXPIRED: &str = \"{DEADLINE_EXPIRED}\"")),
+            ("kernel/src/deadline.rs", format!("\"{DEADLINE_ARMED}{{ms}} ms")),
             ("kernel/src/deadline.rs", format!("WEDGE_STAGED: &str = \"{WEDGE_STAGED}\"")),
             ("kernel/src/deadline.rs", format!("\"{WEDGE_ARRIVED_DEAF}\"")),
             ("kernel/src/usb_gate.rs", format!("USB_WEDGE_STAGED: &str = \"{USB_WEDGE_STAGED}\"")),
