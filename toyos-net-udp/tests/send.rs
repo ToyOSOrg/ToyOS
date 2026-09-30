@@ -245,13 +245,10 @@ fn s_udp_us_026_no_head_of_line_blocking() {
     let out = u.out();
     assert_eq!(out.len(), 1);
     assert_eq!(ip_of(&out[0]).unwrap().destination(), far);
-}
 
-#[test]
-fn s_udp_us_026_a_held_datagram_spends_no_credit() {
+    // With one frame of credit: the held datagram spends none of it.
     let mut u = U::uf();
     let id = u.bind(ANY, 50_001).unwrap();
-    let far = ip4(192, 0, 2, 77);
     u.udp.send_to(&mut u.ip, id, far, 53, b"1").unwrap();
     u.udp.send_to(&mut u.ip, id, DNS, 53, b"2").unwrap();
     let out = u.out_with(1);

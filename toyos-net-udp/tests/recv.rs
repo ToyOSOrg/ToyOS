@@ -212,13 +212,11 @@ fn s_udp_us_044_the_acquisition_exception() {
     fix(&mut ip);
     assert_eq!(u.frame(&eth(MAC_A, MAC_R, 0x0800, &ip)), None);
     assert_eq!(u.ip_count(toyos_net_ip::Counter::IpNotForUs), 1);
-}
 
-#[test]
-fn s_udp_us_044_the_exception_reaches_the_acquisition_socket_alone() {
+    // A socket on 68 without the acquisition mark never hears it (§U5.3).
     let mut u = U::bare();
     let id = u.bind(ANY, 68).unwrap();
-    assert_eq!(u.frame(&hex(V_DHCP_OFFER_FRAME)), Some(Verdict::Ignored));
+    assert_eq!(u.frame(&offer), Some(Verdict::Ignored));
     assert_eq!(u.count(Counter::RxNoSocket), 1);
     assert_eq!(u.udp.recv(id, &mut [0; 1_500]), Ok(None));
 }

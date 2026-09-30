@@ -518,12 +518,9 @@ fn s_ip_out_006_the_control_queue_is_bounded() {
     let first = h.out_with(1);
     assert!(first.len() == 1 && first[0].requests(ip4(192, 0, 2, 100)), "one credit, the oldest frame");
     assert_eq!(h.out().len(), limits::CONTROL_QUEUE - 1);
-}
 
-/// The bound is on [ip]'s own frames: a datagram its sender was told is held stays bounded by
-/// the pending queues it was held in, and is never dropped on release.
-#[test]
-fn s_ip_out_006_released_datagrams_are_bounded_where_held() {
+    // A datagram whose sender was told it is held stays bounded where it was held: a full queue
+    // of [ip]'s own frames never drops it on release.
     let mut h = H::fixture_i();
     let held = |n: u8| ip4(192, 0, 2, 10 + n);
     for n in 0..8 {

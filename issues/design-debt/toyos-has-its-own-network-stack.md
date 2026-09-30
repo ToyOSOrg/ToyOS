@@ -18,7 +18,13 @@ netd runs smoltcp. Its replacement is ToyOS's own stack, built clean-room: reade
 
 The listener defects are this track's: `issues/hardware/a-handshake-nobody-finishes-holds-a-listeners-port-shut.md` and `issues/hardware/a-connect-between-two-accepts-is-reset.md`, on smoltcp until stage 5, and `issues/hardware/an-accept-that-never-reaches-netd-strands-its-listener.md`, in std's accept.
 
-Owed from the wire specification by stages 3–5: ETH-32, whose subnet broadcast needs the subnet `toyos-net-ip` holds; and those whose layer tags are `[ip]`, `[shell]` or `[udp]`: ETH-11, 12, 22–25, 33; ARP-16–18; IP-25, 26, 35; IPP-01–13; ICMP-32–46; IGMP-23–25, 29; UDP-17, 18; and the policy halves of ETH-10, 14, 19, IP-02, 20–23, 29, IPO-15, 16, ICMP-23, 24, 26 and UDP-22.
+Owed from the stage 3 specifications: OUT-07 by stage 4, whose scheduler chooses between a flow's segment and [ip]'s own frames; US-57 by stage 5, whose netd maps UDP's refusals onto the pipe ABI; FRA-01–20 and PMTU-01–06 by IP hardening.
+
+What stage 3 departs from its specifications:
+
+- `ip.md` §5.4 drops a datagram released from a pending queue when the 64-frame control queue is full; `toyos-net-ip` never does, because its sender was told it is held, and it stays bounded by the pending queues it was held in. Exit: the specification says so, or the owner rules the drop.
+- `udp-dhcp.md` §D2 has the client count `dhcp.renew-unroutable`, but the client never learns of the refusal, which `toyos-net-udp` counts as `udp.no-route`. Exit: netd counts it where the refusal lands at stage 5, or the specification drops it.
+- US-43 expects `ip.not-for-us` for a datagram to an unjoined group in a frame to that group's MAC; the frame filter refuses it first, as `eth.not-for-us` (`wire.md` §3.3, ETH-23). Exit: the scenario names the frame filter.
 
 What `toyos-net-wire` does not yet meet:
 

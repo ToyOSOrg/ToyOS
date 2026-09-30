@@ -254,10 +254,8 @@ fn s_ip_nud_016_requests_are_spaced() {
     assert_eq!(first.iter().map(|o| o.frame.clone()).collect::<Vec<_>>(), [hex(V_ARP_POLL_R)]);
     assert!(second.is_empty());
     assert_eq!(later.iter().map(|o| (o.at, o.frame.clone())).collect::<Vec<_>>(), [(1_100, hex(V_ARP_POLL_R))]);
-}
 
-#[test]
-fn s_ip_nud_016_advice_inside_the_spacing_waits_for_its_boundary() {
+    // Advice that reaches a confirmed entry within RETRANS of its last request.
     let mut h = H::fixture_i();
     let _ = h.ip.resolve(h.clock(), h.if0, R);
     assert_eq!(h.out().len(), 1, "the request at 0");
