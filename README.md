@@ -223,21 +223,21 @@ same font the kernel blits.
 - Rust, with rustup
 - QEMU
 - A C compiler on `PATH` as `cc`, and a Python 3
-- CMake and Ninja
+- CMake
 
 `rustc` links every **host** binary through `cc`, which rustup does not
 install. `rust/x`, the entry point to rustc's own bootstrap, is a shell script
 whose whole job is to find a Python to run `bootstrap.py` with — so a clean
 clone needs one, and so does every toolchain change. And that bootstrap builds
-LLVM and clang from source with CMake and Ninja, whenever the LLVM commit
-`rust/` names has not been built on the machine before.
+LLVM and clang from source with CMake, whenever the LLVM commit `rust/` names
+has not been built on the machine before; the Ninja it runs is n2, which the
+build installs with cargo.
 
 Nothing in the OS goes near any of them. `bootloader/`, `kernel/` and
 `userland/` all link with the toolchain's `rust-lld`, and no image contains a C
 toolchain or a Python. On macOS `cc` and Python arrive with the Xcode Command
-Line Tools, and CMake and Ninja come from Homebrew (`brew install cmake
-ninja`); on Debian and Ubuntu they are `build-essential`, `python3`, `cmake`
-and `ninja-build`.
+Line Tools, and CMake comes from Homebrew (`brew install cmake`); on Debian and
+Ubuntu they are `build-essential`, `python3` and `cmake`.
 
 `cargo run` names anything it needs and cannot find, before it does anything
 else.
