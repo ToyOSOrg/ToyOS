@@ -1168,7 +1168,7 @@ pub fn blackbox_done_chain(
     Ok(())
 }
 
-/// The boot the T14 takes for `usb_transport_break`, under QEMU: the break is
+/// The boot the T14 takes for `usb_stick_left`, under QEMU: the break is
 /// staged on the stick the machine booted from, and the page the next pass
 /// reads carries the transport's recovery whatever the log volume got.
 ///

@@ -22,7 +22,7 @@ use crate::log;
 use super::pci::PciDevice;
 use crate::sync::Lock;
 use toyos_untrusted::Untrusted;
-use toyos_xhci::job::{Await, Outcome, Outstanding, Stages};
+use toyos_xhci::job::{Await, Outcome, Outstanding, Stages, CC_SHORT_PACKET, CC_SUCCESS};
 use toyos_xhci::port::{self as portmachine, GaveUp, Gone, PortState, Reset, Step};
 use toyos_xhci::call::AfterBreak;
 use toyos_xhci::recovery::{self, Act, EndpointState, NeedsConfigure, Recovery};
@@ -111,10 +111,6 @@ const EVENT_TRANSFER:     u32 = 32;
 const EVENT_CMD_COMPLETE: u32 = 33;
 const EVENT_PORT_STATUS_CHANGE: u32 = 34;
 
-// CC_SHORT_PACKET is success with a residue, not an error — treating it as one is the classic mass-storage bug.
-const CC_SUCCESS: u32 = 1;
-const CC_STALL: u32 = 6;
-const CC_SHORT_PACKET: u32 = 13;
 const CC_CONTEXT_STATE_ERROR: u32 = 19;
 /// Stopped, Stopped - Length Invalid and Stopped - Short Packet (Table 6-90): the transfer events a Stop Endpoint raises for the TRB it stopped inside (§4.6.9).
 const CC_STOPPED: core::ops::RangeInclusive<u32> = 26..=28;
@@ -993,11 +989,9 @@ impl XhciController {
             (dev.ep_addr, dev.int_ep_dci, dev.port_idx, dev.block);
 
         // Disconnect wins the race: a transaction-error code from a pulled device is indistinguishable from a bad cable, only the port register tells them apart.
-        //
-        // CSC as well as CCS: a replug reads connected again but the transfer still died with the old device.
         let slot = self.slot(slot_id);
         let portsc = self.read_portsc(port_idx);
-        if !portsc.connected() || portsc.connect_changed() {
+        if !portsc.holds() {
             log!("xHCI: USB {kind} on {slot}: interrupt endpoint {ep_addr:#04x} \
                  completed with {} as its port went away; leaving it to the disconnect",
                 Completion(code));
@@ -1197,8 +1191,7 @@ impl XhciController {
         const MAX_EFFECTS: usize = 16;
         for _ in 0..MAX_EFFECTS {
             let portsc = self.read_portsc(port_idx);
-            // CCS or CSC: a replug between two looks reads connected again, but the device that was here has still gone.
-            if !portsc.connected() || portsc.connect_changed() {
+            if !portsc.holds() {
                 self.cancel_recovery_on(port_idx);
                 device::cancel_on(self, port_idx);
             }
