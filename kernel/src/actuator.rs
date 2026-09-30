@@ -66,7 +66,7 @@ actuators! {
     /// record before it and `screen_early_panel` reads a paint it can attribute.
     test_early_halt = "test-early-halt";
 
-    /// Have `iod` null SS, force a switch, and report whether it reloaded — the
+    /// Have the first syscall null SS, force a switch, and report whether it reloaded — the
     /// AMD `SYSRET` SS-attributes workaround's only guest-observable proof.
     sysret_ss_probe = "sysret-ss-probe";
 
@@ -106,32 +106,11 @@ actuators! {
     /// Read and write every USB disk carrying the gate's stamp in block 0; the stamp, not the parameter, picks the disk, since the boot stick shares the bus.
     usb_storage_gate = "usb-storage-gate";
 
-    /// Ask the NVMe disk for a block with the caller's operation budget already spent.
-    nvme_spent_budget = "nvme-spent-budget";
-
-    /// Refuse the first two FAT-1 mirror writes of a write-back drain flush; two, not one, because the retry ladder parks only at attempt 2.
-    fat_mirror_write_refuse = "fat-mirror-write-refuse";
-
-    /// Refuse the FAT-1 mirror write of a write-back drain flush as a budget expiry on the thread running the shutdown, which parks it in `block::between_attempts`; armed beside `writeback-stall`, which is what leaves a closed file's flush for that drain to find.
-    quiesce_drain_refuse = "quiesce-drain-refuse";
-
-    /// Refuse the active-FAT write of a `SYS_FSYNC` flush as a budget expiry once the machine is stopping, after its mirror is written, so the stop's second stage reaches a caller parked in `block::between_attempts` over two FATs that disagree.
-    quiesce_fsync_refuse = "quiesce-fsync-refuse";
-
     /// Hold the thread named `toyos_quiesce::LAST_THREAD` inside `SYS_NANOSLEEP`, and the shutdown until it is held there, until the stop waits on it alone: its park is then the stop's last transition.
     quiesce_last_park = "quiesce-last-park";
 
     /// The same for the last thread out of its process, between its leaving and its teardown: that teardown is then the stop's last transition.
     quiesce_last_teardown = "quiesce-last-teardown";
-
-    /// Refuse the second directory-entry write of the file `writeback_durability` stages for the retry gate — the first is that file's own seed being made durable — as a budget expiry, so a flush fails at its metadata write with its pages already written and settled.
-    fat_flush_meta_refuse = "fat-flush-meta-refuse";
-
-    /// Take the page a shrink has just read off the device, in the window between that read and the lock that spends it — one other CPU's CLOCK sweep, which needs no VFS lock and so runs there.
-    resize_evict_window = "resize-evict-window";
-
-    /// Refuse the device read a shrink makes for the page its new end falls inside, for one staged length only; the one failure on that path QEMU will not produce.
-    resize_fault_refuse = "resize-fault-refuse";
 
     /// Establish three nested `scheduler::Operation`s and report what each observed and restored; it stages nothing, touching no device.
     sched_operation_nesting = "sched-operation-nesting";
@@ -266,9 +245,6 @@ actuators! {
     /// expired.
     fsync_deadman_now = "fsync-deadman-now";
 
-    /// Skip one NVMe completion wait so a submitted command goes unanswered.
-    nvme_command_silent = "nvme-command-silent";
-
     /// Under-deliver one READ(10) data phase so the byte counts disagree.
     usb_short_read = "usb-short-read";
 
@@ -283,9 +259,6 @@ actuators! {
 
     /// Report the preempt depth and backtrace at the deepest point of a disk transfer; it stages nothing, only measures.
     io_depth_probe = "io-depth-probe";
-
-    /// Park `iod` before it drains so a closed file's write-back stays pending.
-    writeback_stall = "writeback-stall";
 
     /// Hold every thread that waits on a watch between reading its condition and
     /// parking, so a post lands in the window its commit must refuse the park over.
@@ -364,14 +337,8 @@ actuators! {
     /// a quantum, and take its interrupts with them open.
     timer_floor = "timer-floor";
 
-    /// Hold a flush of `truncate-race.bin` inside its metadata window and say whether a truncate got in.
-    ftruncate_flush_stall = "ftruncate-flush-stall";
-
     /// Deliver the i8042 vector once at arming with no byte behind it — the arming edge, staged.
     i8042_arm_edge = "i8042-arm-edge";
-
-    /// Blind init's read of CSTS.RDY, staging an NVMe controller that never answers.
-    nvme_rdy_stuck = "nvme-rdy-stuck";
 
     /// Blind init's read of the reset handshake, staging virtio devices that never answer; the console — the staged boot's capture channel — is spared.
     virtio_reset_stuck = "virtio-reset-stuck";
@@ -467,19 +434,13 @@ actuators! {
     /// Stop the boot dead in phase 3, interrupts off, before any log drain.
     pre_idle_wedge = "pre-idle-wedge";
 
-    /// Fail every re-read of a page of a file through `FatBacking`.
-    fat_backing_read_fails = "fat-backing-read-fails";
-
-    /// Fail every filesystem read of the mounted boot volume, at the `Fat32` layer rather than `FatBacking`'s page read.
-    fat_boot_reads_fail = "fat-boot-reads-fail";
-
-    /// Leave the NVMe controller out of the IOMMU's root table.
+    /// Leave the xHCI controller out of the IOMMU's root table.
     iommu_context_absent = "iommu-context-absent";
 
     /// Give it a present context entry naming an empty second-level table, distinct from an absent context: passthrough would fault identically to the row above.
     iommu_empty_domain = "iommu-empty-domain";
 
-    /// Answer a claimed function's first DMA grant with the physical bytes NVMe's admin completion queue page ends with — an address in another driver's pool, which the claimed function's own domain does not map.
+    /// Answer a claimed network function's first DMA grant with an address in another driver's pool, which its own domain does not map.
     iommu_userdev_foreign_dma = "iommu-userdev-foreign-dma";
 
     /// Point a scanout backing at that same page, which the display's own domain does not map.
@@ -514,35 +475,29 @@ actuators! {
     /// Make the century register read `0x21`.
     rtc_century_next = "rtc-century-next";
 
-    /// Run the leak-rollback controls (device mint, FAT reopen) after mount.
+    /// Run the leak-rollback controls (device mint) after mount.
     leak_rollback_selftest = "leak-rollback-selftest";
 
-    /// Run the revoked-backing controls (`/tmp` and `/home`) after mount.
+    /// Run the revoked-backing controls after mount.
     revoked_backing_selftest = "revoked-backing-selftest";
 
-    /// Wrap the metadata cache's device in a read-fault injector and run the un-index control after mount.
-    pc_unbind_selftest = "pc-unbind-selftest";
+    /// Reopen init by pid once it is spawned, and open every kernel thread's pid, the way `SYS_PROCESS_OPEN` does.
+    process_reopen_selftest = "process-reopen-selftest";
 
-    /// Refuse every read of device block 0 of each NVMe disk — its protective
-    /// MBR and GPT header — once every mount has been made, so a partition
-    /// claim meets a disk that does not answer a read of its table. Judged by
-    /// `partition_claim_gives_up`.
+    /// Refuse every read of device block 0 of each disk the kernel drives — its
+    /// protective MBR and GPT header — once the boot has read its own tables,
+    /// so a partition claim meets a disk that does not answer a read of its
+    /// table. Judged by `partition_claim_gives_up`.
     partclaim_table_unanswered = "partclaim-table-unanswered";
 
-    /// Refuse every read of device block 0 of each NVMe disk across
+    /// Refuse every read of device block 0 of each disk the kernel drives across
     /// `rootfs::hold_source` alone, so ROOT's hold finds the disk carrying it
     /// silent and withholds its GUID, and the disk answers every read after.
     /// Judged by `partition_claim_gives_up`.
     partclaim_root_withheld = "partclaim-root-withheld";
 
-    /// Reopen init by pid once it is spawned, and open every kernel thread's pid, the way `SYS_PROCESS_OPEN` does.
-    process_reopen_selftest = "process-reopen-selftest";
-
     /// Offer the block layer a second device claiming a registered `DeviceId`, and report what it did with it.
     block_duplicate_id = "block-duplicate-id";
-
-    /// Write through a page cache over a view that does not start at block 0, and say where on the device the bytes landed.
-    page_cache_partition_offset = "pc-partition-offset";
 
     /// Arm the watchdog at seconds rather than minutes, so a guest reaches the reset.
     watchdog_fast = "tco-fast";

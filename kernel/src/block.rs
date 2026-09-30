@@ -95,29 +95,6 @@ pub(crate) fn between_attempts(attempt: u32) {
     );
 }
 
-/// The running thread is inside a filesystem update whose attempts park in
-/// [`between_attempts`]: a refused attempt leaves the volume half written and
-/// only this thread's next one completes it, so the machine's stop leaves it
-/// running until the guard drops instead of banding it where it parks.
-#[must_use = "the update lasts exactly as long as this guard"]
-pub struct OpenUpdate(Option<Arc<crate::sched::payload::KShared>>);
-
-pub fn begin_update() -> OpenUpdate {
-    let shared = crate::sched::driver::current_shared();
-    if let Some(shared) = &shared {
-        shared.begin_update();
-    }
-    OpenUpdate(shared)
-}
-
-impl Drop for OpenUpdate {
-    fn drop(&mut self) {
-        if let Some(shared) = &self.0 {
-            shared.end_update();
-        }
-    }
-}
-
 /// Operations open right now on a thread the machine's stop stops, and how
 /// many such operations this boot began.
 static OPEN_OPERATIONS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
@@ -179,13 +156,11 @@ pub enum BlockError {
     BudgetExpired,
 }
 
-impl BlockError {
-    /// Combines two failures from one composed operation: `Device` always wins.
-    pub fn worse(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Device, _) | (_, Self::Device) => Self::Device,
-            _ => Self::BudgetExpired,
-        }
+/// The one conversion between the kernel's block verdict and the bcachefs
+/// crate's: a `BudgetExpired` was never attempted and stays retryable.
+impl bcachefs::TransferError for BlockError {
+    fn refused_before_attempt(&self) -> bool {
+        matches!(self, BlockError::BudgetExpired)
     }
 }
 
@@ -234,6 +209,13 @@ static DEVICES: Lock<BTreeMap<DeviceId, Handle>> = Lock::new(BTreeMap::new());
 /// cache, which a plain insert here would arrange in silence.
 #[must_use = "a refused registration leaves the device unreachable"]
 pub fn register(dev: Box<dyn BlockDevice>) -> Option<Handle> {
+    #[cfg(feature = "boot-actuators")]
+    let dev: Box<dyn BlockDevice> =
+        if crate::actuator::partclaim_table_unanswered() || crate::actuator::partclaim_root_withheld() {
+            Box::new(unanswered::Table(dev))
+        } else {
+            dev
+        };
     let id = dev.device_id();
     let blocks = dev.block_count();
     let mut devices = DEVICES.lock();
@@ -251,6 +233,60 @@ pub fn register(dev: Box<dyn BlockDevice>) -> Option<Handle> {
     devices.insert(id, handle.clone());
     log!("block: device {id} registered, {blocks} blocks");
     Some(handle)
+}
+
+#[cfg(feature = "boot-actuators")]
+pub mod unanswered {
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    use alloc::boxed::Box;
+
+    use super::{BlockDevice, BlockError, BlockResult, DeviceId};
+
+    static REFUSING: AtomicBool = AtomicBool::new(false);
+
+    pub(super) struct Table(pub(super) Box<dyn BlockDevice>);
+
+    impl BlockDevice for Table {
+        fn device_id(&self) -> DeviceId {
+            self.0.device_id()
+        }
+
+        fn block_count(&self) -> u64 {
+            self.0.block_count()
+        }
+
+        fn read_blocks(&mut self, lba: u64, count: u32, buf: &mut [u8]) -> BlockResult {
+            if lba == 0 && count > 0 && REFUSING.load(Ordering::Relaxed) {
+                return Err(BlockError::Device);
+            }
+            self.0.read_blocks(lba, count, buf)
+        }
+
+        fn write_blocks(&mut self, lba: u64, count: u32, buf: &[u8]) -> BlockResult {
+            self.0.write_blocks(lba, count, buf)
+        }
+
+        fn flush(&mut self) -> BlockResult {
+            self.0.flush()
+        }
+
+        fn losses(&self) -> u64 {
+            self.0.losses()
+        }
+    }
+
+    /// Every disk registered from here on, and before, refuses reads of its
+    /// block 0.
+    pub fn refuse() {
+        REFUSING.store(true, Ordering::Relaxed);
+        log!("block: device block 0 of every disk refuses reads from now on");
+    }
+
+    pub fn answer() {
+        REFUSING.store(false, Ordering::Relaxed);
+        log!("block: device block 0 of every disk answers reads again");
+    }
 }
 
 pub fn open(id: DeviceId) -> Option<Handle> {
@@ -346,40 +382,20 @@ impl BlockDevice for Locked<'_> {
     }
 }
 
-/// A block of one partition of one device, minted only by [`Partition::key`].
-/// `partition` is judged (`pc-partition-offset`): it puts a write where the
-/// slot was filled from. `device` is not, and no test can see it — one cache
-/// serves one partition, so two devices in one map is already unrepresentable.
-/// The field order is the sort order, so a run of one view's keys is a run on
-/// the device.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub struct BlockKey {
-    device: DeviceId,
-    partition: u64,
-    block: u64,
-}
-
-impl BlockKey {
-    /// Where the block is on the device, which is what a transfer takes.
-    pub fn device_block(self) -> u64 {
-        self.partition + self.block
-    }
-}
-
 /// Who holds a span of a device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Holder {
     /// Something in this kernel — a mount, a probe — named for the log.
     Kernel(&'static str),
-    /// A process, through a partition claim.
-    Claim,
+    /// A process, through its claim of the partition this unique GUID names.
+    Claim(toyos_gpt::Guid),
 }
 
 impl core::fmt::Display for Holder {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Kernel(what) => write!(f, "the kernel ({what})"),
-            Self::Claim => f.write_str("a process's partition claim"),
+            Self::Claim(guid) => write!(f, "a process's claim of partition {guid}"),
         }
     }
 }
@@ -466,18 +482,8 @@ impl Partition {
         self.handle.device_id()
     }
 
-    pub fn first_block(&self) -> u64 {
-        self.first_block
-    }
-
     pub fn block_count(&self) -> u64 {
         self.blocks
-    }
-
-    /// The identity of `block` in this view, or a refusal past its end.
-    pub fn key(&self, block: u64) -> Result<BlockKey, BlockError> {
-        self.locate(block, 1)?;
-        Ok(BlockKey { device: self.device_id(), partition: self.first_block, block })
     }
 
     /// Whether `count` blocks from `block` end inside the view — asked of a
@@ -590,20 +596,6 @@ pub fn duplicate_id_selftest() {
     );
 }
 
-/// Blocks the metadata cache may hold, per instance: sized from memory and
-/// never from the device, so N instances claim N times this and none evicts
-/// across them. N is the role partitions a boot caches — one today, from
-/// `page_cache::init`'s one call site — and a foreign volume adds none, since a
-/// FAT mount reads through `fat32_adapter::FatDevice` and never a `Cached`.
-/// Must stay under 14,336 or the hashbrown index crosses the 16,384-bucket bound `nvme_large_device` asserts.
-pub fn metadata_cache_blocks() -> usize {
-    if crate::actuator::test_small_caches() {
-        return 64;
-    }
-    let (total, _) = crate::mm::pmm::stats();
-    (((total / 32) / PAGE_SIZE) as usize).clamp(64, 4096)
-}
-
 /// Pages the file data cache may hold.
 pub fn file_cache_pages() -> usize {
     if crate::actuator::test_small_caches() {
@@ -652,7 +644,7 @@ pub mod census {
         &SLOTS[DEVICES - 1]
     }
 
-    /// Every command a storage driver has put to a disk, NVMe or USB, counted
+    /// Every command a storage driver has put to a disk, counted
     /// where each driver hands one to its transport: the one number that says a
     /// stretch of the boot needed no disk.
     static COMMANDS: AtomicU64 = AtomicU64::new(0);

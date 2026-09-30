@@ -8,6 +8,7 @@
 //! processes that can ever do any of them is exactly what init endowed.
 
 use toyos_abi::handle::Rights;
+use toyos_abi::inventory::{RawRecord, Record, Undecodable};
 use toyos_abi::syscall::{self, DeviceRequest, DeviceType, SyscallError};
 
 use crate::endow::FromHandle;
@@ -118,6 +119,18 @@ impl SysCap {
         syscall::device_inventory(self.0.raw(), buf)
     }
 
+    /// Every inventory record, read whole or refused whole, never a shorter
+    /// list; `buffer(n)` is `n` records to read into.
+    ///
+    /// Needs [`Rights::INVENTORY`].
+    pub fn records<B, C>(&self, buffer: impl FnMut(usize) -> B) -> Result<C, Unread>
+    where
+        B: AsMut<[RawRecord]>,
+        C: FromIterator<Record>,
+    {
+        read_whole(|buf| self.inventory(buf), buffer)
+    }
+
     /// A second handle to this capability carrying **less**.
     ///
     /// How init gives a program the RT band and nothing else: rights only
@@ -148,5 +161,164 @@ impl SysCap {
 impl AsHandle for SysCap {
     fn as_handle(&self) -> RawHandle {
         self.0.raw()
+    }
+}
+
+/// How many times [`SysCap::records`] asks again after the machine grew
+/// between counting its inventory and reading it. Policy: a device arriving on
+/// every round is a machine the reader names rather than chases.
+const INVENTORY_ROUNDS: usize = 4;
+
+/// Why [`SysCap::records`] did not read the inventory.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Unread {
+    Count(SyscallError),
+    Read(SyscallError),
+    /// The machine grew between the count and the read on every round.
+    Grew,
+    Record { index: usize, why: Undecodable },
+}
+
+impl core::fmt::Display for Unread {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Count(SyscallError::PermissionDenied) | Self::Read(SyscallError::PermissionDenied) => {
+                write!(f, "the kernel refused: this program's capability does not carry `inventory`")
+            }
+            Self::Count(e) => write!(f, "the inventory would not count: {e:?}"),
+            Self::Read(e) => write!(f, "the inventory would not read: {e:?}"),
+            Self::Grew => write!(f, "the machine changed on each of {INVENTORY_ROUNDS} reads of its inventory"),
+            Self::Record { index, why } => write!(f, "the inventory's record {index} does not decode: {why}"),
+        }
+    }
+}
+
+/// Every record `ask` answers, where `ask` is the inventory call: an empty
+/// buffer asks how many, and a buffer that long is filled or refused with
+/// `ResourceExhausted` because the machine grew since.
+fn read_whole<B, C>(
+    mut ask: impl FnMut(&mut [RawRecord]) -> Result<usize, SyscallError>,
+    mut buffer: impl FnMut(usize) -> B,
+) -> Result<C, Unread>
+where
+    B: AsMut<[RawRecord]>,
+    C: FromIterator<Record>,
+{
+    for _ in 0..INVENTORY_ROUNDS {
+        let count = ask(&mut []).map_err(Unread::Count)?;
+        // An empty buffer would ask the count again rather than read.
+        if count == 0 {
+            return Ok(core::iter::empty().collect());
+        }
+        let mut raw = buffer(count);
+        let raw = raw.as_mut();
+        assert_eq!(raw.len(), count, "`buffer({count})` answered {} records", raw.len());
+        match ask(raw) {
+            Ok(n) => {
+                return raw[..n]
+                    .iter()
+                    .enumerate()
+                    .map(|(index, r)| Record::decode(r).map_err(|why| Unread::Record { index, why }))
+                    .collect();
+            }
+            Err(SyscallError::ResourceExhausted) => continue,
+            Err(e) => return Err(Unread::Read(e)),
+        }
+    }
+    Err(Unread::Grew)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use toyos_abi::inventory::{Loaded, Role};
+
+    fn loaded(role: Role) -> Record {
+        Record::Loaded(Loaded { role, unique_guid: [7; 16] })
+    }
+
+    fn read(ask: impl FnMut(&mut [RawRecord]) -> Result<usize, SyscallError>) -> Result<Vec<Record>, Unread> {
+        read_whole(ask, |n| vec![RawRecord::EMPTY; n])
+    }
+
+    /// The kernel's answer to `buf` from a machine of `records`.
+    fn answer(records: &[RawRecord], buf: &mut [RawRecord]) -> Result<usize, SyscallError> {
+        match buf.len() {
+            0 => Ok(records.len()),
+            n if n < records.len() => Err(SyscallError::ResourceExhausted),
+            _ => {
+                buf[..records.len()].copy_from_slice(records);
+                Ok(records.len())
+            }
+        }
+    }
+
+    #[test]
+    fn every_record_is_read() {
+        let records = [loaded(Role::Root), loaded(Role::Log)];
+        let raw: Vec<RawRecord> = records.iter().map(Record::encode).collect();
+        assert_eq!(read(|buf| answer(&raw, buf)), Ok(records.to_vec()));
+    }
+
+    #[test]
+    fn a_machine_that_grew_once_is_read_grown() {
+        let before = [loaded(Role::Root)];
+        let after = [loaded(Role::Root), loaded(Role::Log)];
+        let (before_raw, after_raw): (Vec<RawRecord>, Vec<RawRecord>) =
+            (before.iter().map(Record::encode).collect(), after.iter().map(Record::encode).collect());
+        let mut counted = false;
+        let grows_after_the_first_count = |buf: &mut [RawRecord]| {
+            let machine = if counted { &after_raw } else { &before_raw };
+            counted |= buf.is_empty();
+            answer(machine, buf)
+        };
+        assert_eq!(read(grows_after_the_first_count), Ok(after.to_vec()));
+    }
+
+    #[test]
+    fn a_machine_that_grows_every_round_is_refused_by_name() {
+        let mut machine = vec![loaded(Role::Root).encode()];
+        let mut asks = 0;
+        let grows_after_every_count = |buf: &mut [RawRecord]| {
+            let answered = answer(&machine, buf);
+            if buf.is_empty() {
+                machine.push(loaded(Role::Boot).encode());
+            }
+            asks += 1;
+            answered
+        };
+        assert_eq!(read(grows_after_every_count), Err(Unread::Grew));
+        assert_eq!(asks, 2 * INVENTORY_ROUNDS, "every round counted and read once");
+    }
+
+    #[test]
+    fn an_empty_inventory_is_its_count() {
+        let mut asks = 0;
+        let empty_then_grown = |buf: &mut [RawRecord]| {
+            asks += 1;
+            answer(&vec![loaded(Role::Root).encode(); asks - 1], buf)
+        };
+        assert_eq!(read(empty_then_grown), Ok(Vec::new()));
+        assert_eq!(asks, 1, "the count was the whole answer");
+    }
+
+    #[test]
+    fn a_refused_count_is_refused_and_not_an_empty_inventory() {
+        assert_eq!(read(|_| Err(SyscallError::PermissionDenied)), Err(Unread::Count(SyscallError::PermissionDenied)));
+    }
+
+    #[test]
+    fn a_refused_read_is_refused_and_not_an_empty_inventory() {
+        let refused = |buf: &mut [RawRecord]| match buf.len() {
+            0 => Ok(1),
+            _ => Err(SyscallError::PermissionDenied),
+        };
+        assert_eq!(read(refused), Err(Unread::Read(SyscallError::PermissionDenied)));
+    }
+
+    #[test]
+    fn a_record_that_does_not_decode_is_refused_and_not_dropped() {
+        let raw = [loaded(Role::Root).encode(), RawRecord::EMPTY, loaded(Role::Boot).encode()];
+        assert_eq!(read(|buf| answer(&raw, buf)), Err(Unread::Record { index: 1, why: Undecodable::Kind(0) }));
     }
 }

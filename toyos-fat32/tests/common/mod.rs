@@ -148,13 +148,6 @@ pub struct SparseDevice {
     sectors: HashMap<u64, [u8; 512]>,
     capacity: u64,
     pub fail_reads_past: Option<u64>,
-    /// Which refusal [`fail_reads_past`](Self::fail_reads_past) and
-    /// [`flush_refuses`](Self::flush_refuses) answer with.
-    ///
-    /// `IoError` is two variants and only one of them is a fact about the
-    /// device, so a fake that could only ever say `Device` could not exercise
-    /// the other half of the mapping at all.
-    pub refusal: IoError,
     /// Whether [`BlockAccess::flush`] refuses, which is the one call
     /// `Fat32::sync` makes into the device after the FSInfo write.
     pub flush_refuses: bool,
@@ -176,7 +169,6 @@ impl SparseDevice {
             sectors: HashMap::new(),
             capacity,
             fail_reads_past: None,
-            refusal: IoError::Device,
             flush_refuses: false,
             volume_bytes: None,
             out_of_volume: 0,
@@ -242,7 +234,7 @@ impl BlockAccess for SparseDevice {
         }
         if let Some(limit) = self.fail_reads_past {
             if end > limit {
-                return Err(self.refusal);
+                return Err(IoError::Device);
             }
         }
         self.note_range(end);
@@ -262,71 +254,14 @@ impl BlockAccess for SparseDevice {
 
     fn flush(&mut self) -> Result<(), IoError> {
         if self.flush_refuses {
-            return Err(self.refusal);
+            return Err(IoError::Device);
         }
         Ok(())
     }
 }
 
-/// A device that refuses the next write touching a chosen byte range, once, and
-/// passes everything else straight through to `inner`.
-///
-/// It stages the one failure QEMU will not produce and no host option can inject
-/// (`kernel/src/block.rs`'s `OPERATION` budget note): a mirror write taken and
-/// the active-FAT write of the *same* `set_fat_entry` refused on the device's
-/// own budget after the first is durable. `set_fat_entry` writes the active FAT
-/// last for exactly this, so armed on the active FAT's region this refuses that
-/// second write and leaves the split a re-drive must heal.
-pub struct RefuseOnceInRange<D> {
-    inner: D,
-    /// `Some(lo, hi)` while armed. A write overlapping `[lo, hi)` is refused and
-    /// disarms this, so only one write is lost — the way one expired budget
-    /// refuses one operation and the next runs on a fresh one.
-    armed: Option<(u64, u64)>,
-    refusal: IoError,
-}
-
-impl<D: BlockAccess> RefuseOnceInRange<D> {
-    /// Disarmed: wrap now, arm with [`Self::arm`] once the setup writes that
-    /// must succeed (the create, any directory growth) are done.
-    pub fn new(inner: D, refusal: IoError) -> RefuseOnceInRange<D> {
-        RefuseOnceInRange { inner, armed: None, refusal }
-    }
-
-    pub fn arm(&mut self, range: (u64, u64)) {
-        self.armed = Some(range);
-    }
-}
-
-impl<D: BlockAccess> BlockAccess for RefuseOnceInRange<D> {
-    fn capacity(&self) -> u64 {
-        self.inner.capacity()
-    }
-
-    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), IoError> {
-        self.inner.read_at(offset, buf)
-    }
-
-    fn write_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), IoError> {
-        if let Some((lo, hi)) = self.armed {
-            let end = offset + buf.len() as u64;
-            if offset < hi && end > lo {
-                self.armed = None;
-                return Err(self.refusal);
-            }
-        }
-        self.inner.write_at(offset, buf)
-    }
-
-    fn flush(&mut self) -> Result<(), IoError> {
-        self.inner.flush()
-    }
-}
-
-/// `kernel/src/fat32_adapter.rs`'s `BLOCK`.
 pub const ADAPTER_BLOCK: usize = 4096;
 
-/// `kernel/src/fat32_adapter.rs`'s `RESIDENT_BLOCKS`.
 pub const ADAPTER_RESIDENT_BLOCKS: usize = 8;
 
 /// Where a refused block write got to.

@@ -174,13 +174,6 @@ const RETIRE_QUEUED: u64 = 1 << 63;
 /// task carries both, [`SafePoint`] is where that is decided.
 const STOP: u64 = 1 << 61;
 const STICKY: u64 = KILL | RETIRE_QUEUED | STOP;
-/// The task is inside an update it may park in and must finish: where it parks
-/// it has left something half made that only its own next attempt completes.
-/// [`TaskShared::stop_if_blocked`] refuses it in the exchange that reads
-/// `Blocked`, so it takes [`STOP`] at its own safe point, after the update.
-/// In the word so that read and that mark cannot come apart; set and cleared
-/// only by the task itself, while it runs.
-const MID_UPDATE: u64 = 1 << 60;
 /// A post reached this task while it was neither parked nor committing. The
 /// next [`TaskShared::begin_commit`] consumes it and refuses the park, so a post
 /// landing between a waiter's registration on a watch and its commit is a
@@ -193,7 +186,7 @@ const NOTIFIED: u64 = 1 << 59;
 /// commit, and cleared only by the task's own next registration.
 const REVOKED: u64 = 1 << 58;
 /// What every transition carries over.
-const KEPT: u64 = STICKY | MID_UPDATE | NOTIFIED | REVOKED;
+const KEPT: u64 = STICKY | NOTIFIED | REVOKED;
 
 /// What a thread standing at a Ring 3 boundary does instead of returning to
 /// userland.
@@ -436,8 +429,7 @@ impl<M> TaskShared<M> {
     /// own safe point instead, through `SchedPass::dispose_stop`. `false` here
     /// therefore means "not parked, and not this caller's to stop" — including
     /// the task a waker claimed between the read and the exchange, which is on
-    /// its way to a CPU that will dispatch it to that safe point, and the task
-    /// parked [`Self::begin_update`]d, which has an update to finish first.
+    /// its way to a CPU that will dispatch it to that safe point.
     ///
     /// Idempotent: a task already carrying the bit answers `true` without
     /// writing.
@@ -447,7 +439,7 @@ impl<M> TaskShared<M> {
             if cur & STOP != 0 {
                 return true;
             }
-            if cur & MID_UPDATE != 0 || !matches!(unpack(cur), TaskState::Blocked(_)) {
+            if !matches!(unpack(cur), TaskState::Blocked(_)) {
                 return false;
             }
             match self.state.compare_exchange_weak(
@@ -684,19 +676,6 @@ impl<M> TaskShared<M> {
     /// [`Self::stop_if_blocked`]'s CAS is not.
     pub(crate) fn mark_stop(&self) {
         self.state.fetch_or(STOP, Ordering::AcqRel);
-    }
-
-    /// The running task enters an update it may park in and must finish; until
-    /// [`Self::end_update`] no sweep stops it where it parks. Called by the
-    /// task itself, and not nested.
-    pub fn begin_update(&self) {
-        let was = self.state.fetch_or(MID_UPDATE, Ordering::AcqRel);
-        assert!(was & MID_UPDATE == 0, "a task began an update inside an update");
-    }
-
-    pub fn end_update(&self) {
-        let was = self.state.fetch_and(!MID_UPDATE, Ordering::AcqRel);
-        assert!(was & MID_UPDATE != 0, "a task ended an update it never began");
     }
 }
 
@@ -1298,21 +1277,6 @@ mod tests {
             Some(SafePoint::Stop),
             "a thread carrying both is banded, never unwound",
         );
-    }
-
-    /// The sweep that finds a task parked inside an update leaves it for its
-    /// own safe point: banded there, what it left half made stays half made.
-    #[test]
-    fn a_task_parked_mid_update_refuses_the_parked_mark() {
-        let s = running(C0);
-        s.begin_update();
-        let generation = s.begin_commit(C0).expect("nothing notified this task");
-        assert_eq!(s.commit_park(C0, generation), ParkOutcome::Parked);
-        assert_eq!(s.state(), TaskState::Blocked(C0));
-        assert!(!s.stop_if_blocked(), "the update is open across this park");
-        assert!(!s.stop_pending(), "and nothing was marked");
-        s.end_update();
-        assert!(s.stop_if_blocked(), "the same park with the update closed");
     }
 
     #[test]

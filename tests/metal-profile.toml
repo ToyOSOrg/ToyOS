@@ -617,6 +617,12 @@ ceiling = 1400
 ceiling_from = "as list.shared.job_ms — the same list, cut in two"
 
 [[number]]
+name = "list.shared-3.job_ms"
+unit = "ms"
+ceiling = 1400
+ceiling_from = "as list.shared.job_ms — the same list, cut in three"
+
+[[number]]
 name = "list.shared-debug.job_ms"
 unit = "ms"
 ceiling = 2900
@@ -753,13 +759,31 @@ ceiling = 60000
 ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
 
 [[number]]
+name = "boot.shared-3.complete_ms"
+unit = "ms"
+ceiling = 60000
+ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
+
+[[number]]
 name = "boot.shared-2.back_secs"
 unit = "s"
 ceiling = 420
 ceiling_from = "toyos_build::metal::return_secs"
 
 [[number]]
+name = "boot.shared-3.back_secs"
+unit = "s"
+ceiling = 420
+ceiling_from = "toyos_build::metal::return_secs"
+
+[[number]]
 name = "boot.shared-2.stick_secs"
+unit = "s"
+ceiling = 30
+ceiling_from = "as boot.testcases.stick_secs"
+
+[[number]]
+name = "boot.shared-3.stick_secs"
 unit = "s"
 ceiling = 30
 ceiling_from = "as boot.testcases.stick_secs"
@@ -935,6 +959,12 @@ ceiling = 16667
 ceiling_from = "as boot.testcases.panel_max_us"
 
 [[number]]
+name = "boot.shared-3.panel_max_us"
+unit = "us"
+ceiling = 16667
+ceiling_from = "as boot.testcases.panel_max_us"
+
+[[number]]
 name = "boot.shared-debug.panel_max_us"
 unit = "us"
 ceiling = 16667
@@ -1076,6 +1106,12 @@ ceiling = 100000
 ceiling_from = "as boot.testcases.panel_us"
 
 [[number]]
+name = "boot.shared-3.panel_us"
+unit = "us"
+ceiling = 100000
+ceiling_from = "as boot.testcases.panel_us"
+
+[[number]]
 name = "boot.shared-debug.panel_us"
 unit = "us"
 ceiling = 100000
@@ -1204,6 +1240,12 @@ ceiling_from = "as boot.testcases.park_open_operations"
 
 [[number]]
 name = "boot.shared-2.park_open_operations"
+unit = "operations"
+ceiling = 0
+ceiling_from = "as boot.testcases.park_open_operations"
+
+[[number]]
+name = "boot.shared-3.park_open_operations"
 unit = "operations"
 ceiling = 0
 ceiling_from = "as boot.testcases.park_open_operations"

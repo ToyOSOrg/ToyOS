@@ -176,7 +176,7 @@ pub fn cp_volume(
     let boot = qemu.boot_log().to_string();
     let boot = serial::Serial::named("boot console", boot.as_str());
     boot.must_be_clean()?;
-    boot.must_say("log-volume: partition mounted")?;
+    boot.must_say(super::volumes::LOG_SERVED)?;
     let mut log = serial::Serial::named("the three commands and the shutdown", "");
 
     // One: the copy that fits.

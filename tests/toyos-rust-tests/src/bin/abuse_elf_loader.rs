@@ -16,7 +16,9 @@ use toyos_abi::syscall::{self, SpawnArgs, SyscallError};
 /// Where the child starts: `SpawnArgs` names a working directory or the spawn is refused.
 const CWD: &str = "/";
 
-const DIR: &str = "/home/abuse_loader";
+/// Kernel-served, so a path spawn reaches the kernel's own open; every refusal
+/// is asked again with the same bytes handed over as an image.
+const DIR: &str = "/tmp/abuse_loader_exe";
 
 /// The two cases about a table larger than one kernel allocation need a file
 /// larger than one kernel allocation, because `read_file_range` clamps a
@@ -240,6 +242,8 @@ fn spawn_path(path: &str) -> Result<u64, SyscallError> {
             labels_len: 0,
             cwd_ptr: CWD.as_ptr() as u64,
             cwd_len: CWD.len() as u64,
+            image: 0,
+            image_len: 0,
         })
     }
     .map(|pid| pid.0 as u64)
@@ -261,8 +265,58 @@ fn refused(name: &str, outcome: Result<u64, SyscallError>) {
     }
 }
 
+/// `bytes` in a memory object of this process's own, as a spawn from a file
+/// server's volume reads a program into one.
+fn image_object(bytes: &[u8]) -> toyos::shm::SharedMemory {
+    let object = toyos::shm::SharedMemory::create(bytes.len().max(1)).expect("a memory object for the image");
+    // SAFETY: the region is at least `bytes.len()` long, mapped here, and this
+    // process's alone; `bytes` is not in it.
+    unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), object.as_ptr(), bytes.len()) };
+    object
+}
+
+/// The same bytes handed to the kernel by handle, as a spawn from a file
+/// server's volume hands them: the image route to the same loader.
+fn spawn_image(path: &str, bytes: &[u8]) -> Result<u64, SyscallError> {
+    let argv = format!("{path}\0");
+    let object = image_object(bytes);
+    unsafe {
+        syscall::spawn(&SpawnArgs {
+            argv_ptr: argv.as_ptr() as u64,
+            argv_len: argv.len() as u64,
+            slot_map_ptr: 0,
+            slot_map_count: 0,
+            env_ptr: 0,
+            env_len: 0,
+            endow_ptr: 0,
+            endow_count: 0,
+            labels_ptr: 0,
+            labels_len: 0,
+            cwd_ptr: CWD.as_ptr() as u64,
+            cwd_len: CWD.len() as u64,
+            image: toyos::AsHandle::as_handle(&object).0 as u64,
+            image_len: bytes.len() as u64,
+        })
+    }
+    .map(|pid| pid.0 as u64)
+}
+
+/// Refused whether the kernel opens the file or is handed its bytes.
 fn spawn_refused(name: &str, bytes: &[u8]) {
     refused(name, spawn_result(name, bytes));
+    refused(&format!("{name} as an image"), spawn_image(&format!("{DIR}/{name}"), bytes));
+}
+
+/// Refused where the kernel opens the file, whose `DT_NEEDED` library is
+/// written beside it. The image route's answer is the kernel's *first*
+/// refusal on that route: `image_expected` is `NotFound` when nothing rejects
+/// the file before `DT_NEEDED` is walked from `/system/lib` alone and finds
+/// nothing there, `InvalidArgument` when a table check upstream of that walk
+/// refuses first.
+fn spawn_refused_beside_its_library(name: &str, bytes: &[u8], image_expected: SyscallError) {
+    refused(name, spawn_result(name, bytes));
+    let image = spawn_image(&format!("{DIR}/{name}"), bytes);
+    assert_eq!(image, Err(image_expected), "{name} as an image");
 }
 
 /// Load it and throw it away. These cases are about a *walk* the loader does,
@@ -294,7 +348,7 @@ fn base_exe(size: usize) -> Elf {
 }
 
 fn main() {
-    fs::create_dir_all(DIR).expect("create /home/abuse_loader");
+    fs::create_dir_all(DIR).expect("create /tmp/abuse_loader_exe");
     fs::create_dir_all(BIG_DIR).expect("create /tmp/abuse_loader");
 
     // 1. A DT_* vaddr below every PT_LOAD. `vaddr_to_file_offset` searched for
@@ -715,7 +769,9 @@ fn values_are_bounded_by_the_image() {
             .sym(0x1418, 1, (STB_GLOBAL << 4) | STT_FUNC, 1, FAR_VALUE)
             .poke(0x1801, FAR.as_bytes())
             .poke(0x1800 + name_at as usize, dep.as_bytes());
-        spawn_refused("export_past_image", &exe.build());
+        // The export map is built after `load_needed_libs` (`kernel/src/loader/mod.rs`), so the
+        // image route never reaches it: the dependency missing from `/system/lib` answers first.
+        spawn_refused_beside_its_library("export_past_image", &exe.build(), SyscallError::NotFound);
     }
 
     dlopen_refused("so_relative_addend_past_image.so", &so_with(&[], &[(0x1400, 0, R_X86_64_RELATIVE, i64::MAX)], None));
@@ -880,7 +936,9 @@ fn tls_apply_time_refusals_are_reached() {
         .sym(0x1418, 1, (STB_GLOBAL << 4) | STT_TLS, 0, 0)
         .poke(0x1801, b"wtls\0")
         .poke(0x1806, dep.as_bytes());
-    spawn_refused("tpoff_overflow_spawn", &exe.build());
+    // `apply_tls_relocs` (`kernel/src/loader/mod.rs`) runs after `load_needed_libs`, so the image
+    // route never reaches it: the dependency missing from `/system/lib` answers first.
+    spawn_refused_beside_its_library("tpoff_overflow_spawn", &exe.build(), SyscallError::NotFound);
 
     let defs = write_file("tpoff_overflow_defs.so", &tls_defs_so(b"vtls", PAST_I64));
     let lib_defs = unsafe { libloading::Library::new(&defs) }.expect("dlopen tpoff_overflow_defs.so");
@@ -907,7 +965,9 @@ fn globdat_past_short_dynsym() {
     )
     .poke(0x1801, dep.as_bytes())
     .poke(0x3000, &gnu_hash);
-    spawn_refused("globdat_past_dynsym", &exe.build());
+    // `rela::parse` (`toyos-elf/src/rela.rs`) bounds `r_sym` against the exe's own `.dynsym`
+    // before `load_needed_libs` ever runs.
+    spawn_refused_beside_its_library("globdat_past_dynsym", &exe.build(), SyscallError::InvalidArgument);
 }
 
 /// A shared object defining its own `xtls` (`STT_TLS`, offset 8) in a 0x20-byte
