@@ -1076,7 +1076,7 @@ impl Boot {
     /// `/system/bin/console` claims the framebuffer and runs the shell on it.
     /// Claiming the screen is what stops the boot checkpoints painting, so a
     /// machine that wedges before userland is readable in this mode and in no
-    /// other. `screen_console_shell` boots this config.
+    /// other.
     pub fn console(root: &Path) -> Self {
         Self::mode(root, &root.join("console"))
     }

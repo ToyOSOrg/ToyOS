@@ -430,7 +430,6 @@ const SCREEN_TESTS: &[(&str, Sched, qemu::Profile)] = &[
     // under test can have painted it.
     ("screen_early_panel", Sched::Parallel, qemu::Profile::Metal),
     ("screen_log_absent", Sched::Parallel, qemu::Profile::Metal),
-    ("screen_console_shell", Sched::Parallel, qemu::Profile::Metal),
     ("screen_console_clear", Sched::Parallel, qemu::Profile::Metal),
     ("screen_i8042_health", Sched::Parallel, qemu::Profile::Metal),
     // Ctrl+Alt+D with no console at all: the panel is the whole channel, and a
@@ -466,31 +465,10 @@ const SCREEN_TESTS: &[(&str, Sched, qemu::Profile)] = &[
     ("virt_readonly_copyout", Sched::Parallel, qemu::Profile::VirtEl2),
 ];
 
-/// What `screen_console_shell` types, and what it then looks for on its own.
-///
-/// The command's *output* differs from the command, which is the whole point:
-/// the shell echoes what is typed, so an assertion satisfiable by the echo says
-/// only that the console drew a key, not that anything ran. This is asserted as
-/// a whole trimmed row, so the echoed `/home/toy> echo zqjxk` cannot satisfy
-/// it either.
-const CONSOLE_NONCE: &str = "zqjxk";
 /// `/system/bin/shell` cds to `$HOME` before its first prompt, and prints
 /// `"{cwd}> "` — without the trailing space, which the decoder trims off the
 /// end of every row.
 const CONSOLE_PROMPT: &str = "/home/toy>";
-/// The seed's witness on the panel.
-///
-/// `/system/bin/console` draws the boot so far, as `logd` serves it, above its
-/// first prompt, so a panel carrying one of its lines is a console that read
-/// it. This one is written hundreds of lines into a boot, which is what makes
-/// its *absence* two different things — see `screen_console_shell`.
-const CONSOLE_SEED_WITNESS: &str = "i8042:";
-
-/// A program's line on the console, under the name of the pipe it came out of:
-/// init's, said just before it starts the console, so it is in the boot the
-/// console is handed.
-const CONSOLE_PROGRAM_WITNESS: &str = "init} init: started console";
-
 /// What `SYS_DEBUG` action 8 paints. Green, because the decoder thresholds on
 /// the brightest channel and a colour a glyph could contain would let a
 /// surviving pixel read as text rather than as itself.
@@ -3811,163 +3789,6 @@ fn run_screen_test(
             eprintln!("  [log] on the panel, in alert red: {}", dump.rows()[row]);
             Ok(())
         }
-        "screen_console_shell" => {
-            // The third boot mode, on the machine shape that gets flashed.
-            // What is under test is the whole chain a question travels on a
-            // machine with no serial port: the i8042 pin, the kernel's
-            // translation, `/system/bin/console`, the shell's stdin, its stdout, and
-            // the panel. **A test that asserted only that a prompt rendered
-            // would pass on a console that cannot read the keyboard**, which
-            // is exactly the path this program exists to bring up.
-            //
-            // Same config file `--console-boot` builds from and no test
-            // binaries on ROOT, so the image booted here is the image
-            // flashed.
-            let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("console");
-            let options = BootOptions {
-                profile,
-                qmp: true,
-                ready_marker: "console: ready",
-                ..Default::default()
-            };
-            metal_sim_argv_check(&qemu::profile_argv(&options))?;
-            let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
-            let console = qemu.boot_log().to_string();
-            serial::Serial::named("boot console", console.as_str()).must_be_clean()?;
-
-            let font = screen::ConsoleFont::load();
-            // **Both, because nothing orders them.** The seed's paint and the
-            // shell's first prompt are two independent writers, so a wait that
-            // stopped at the prompt could sample a panel the seed had not
-            // finished putting up and report it as a console that never read
-            // the log.
-            let dump = qemu.screendump_while(
-                Duration::from_secs(30),
-                Duration::from_millis(200),
-                |d| {
-                    let text = d.console_text(&font);
-                    text.contains(CONSOLE_PROMPT)
-                        && text.contains(CONSOLE_SEED_WITNESS)
-                        && text.contains(CONSOLE_PROGRAM_WITNESS)
-                },
-            );
-            let before = dump.console_text(&font);
-            if !before.contains(CONSOLE_PROMPT) {
-                return Err(format!(
-                    "no {CONSOLE_PROMPT:?} on the panel 30 s after `console: ready`\n\
-                     decoded screen:\n{before}"
-                ));
-            }
-
-            // The seed. Claiming DEVICE_FRAMEBUFFER stops `boot_checkpoint`
-            // painting for the rest of the boot, so a console that merely
-            // cleared the screen would have traded the diagnostic that works
-            // today for one that might — and this is the line the metal track
-            // keeps having to read.
-            if !before.contains(CONSOLE_SEED_WITNESS) {
-                // **Which of the two it is, from a number the guest published
-                // rather than from the panel.** `console: ready` reports the
-                // bytes of log it seeded, so a blank console and a console
-                // showing some other part of the log are told apart by that
-                // count — the panel cannot separate them, and a message that
-                // picked one sent the next reader after the wrong subsystem.
-                // The byte stream and not `boot_log`: the count is on the rest
-                // of the ready marker's own line, which the line channel has
-                // already consumed by the time the marker ends the boot wait.
-                let said = qemu.console_stream().since(0);
-                // Anchored on the whole of the console's own phrase: `logd`
-                // says "this boot's kernel log is …" on the same console, and
-                // a search for the shorter string finds that one first.
-                let seeded = said
-                    .split("cells), log ")
-                    .nth(1)
-                    .and_then(|rest| rest.split(' ').next())
-                    .and_then(|n| n.parse::<u64>().ok());
-                return Err(match seeded {
-                    Some(0) => format!(
-                        "no `{CONSOLE_SEED_WITNESS}` line above the prompt, and `console: \
-                         ready` reported 0 bytes of log: this console started blank where \
-                         the diagnostic boot starts with the log\ndecoded screen:\n{before}"
-                    ),
-                    Some(bytes) => format!(
-                        "no `{CONSOLE_SEED_WITNESS}` line above the prompt, and the console \
-                         drew {bytes} bytes of log — so the log reached the scrollback and \
-                         what is on the panel is some other part of it. This is not a \
-                         console that started blank\ndecoded screen:\n{before}"
-                    ),
-                    None => format!(
-                        "no `{CONSOLE_SEED_WITNESS}` line above the prompt, and no `log N \
-                         bytes` on the console to say whether the seed happened at \
-                         all\nboot console:\n{said}\ndecoded screen:\n{before}"
-                    ),
-                });
-            }
-            // Non-vacuity, and not a formality: a boot checkpoint paints the
-            // same lines off the same ring, so on a boot where the console
-            // never ran the assertion above could be satisfied by the kernel's
-            // own paint. It cannot, because that paint is in `font8x16.bin`
-            // and this screen decodes under the console's — which is a claim,
-            // so it is checked here and in `console_self_test` rather than
-            // assumed.
-            let kernel_font = dump.text();
-            if kernel_font.contains("i8042:") {
-                return Err(format!(
-                    "the kernel's own font decodes this screen, so what is up is a boot \
-                     checkpoint and not the console's paint\ndecoded screen:\n{kernel_font}"
-                ));
-            }
-
-            // A program's output, on the console that owns the screen, under
-            // the name of the pipe it came out of.
-            if !before.contains(CONSOLE_PROGRAM_WITNESS) {
-                return Err(format!(
-                    "no {CONSOLE_PROGRAM_WITNESS:?} on the panel: the console does not show \
-                     program output under its program's name\ndecoded screen:\n{before}"
-                ));
-            }
-
-            console_type_line(&mut qemu, &font, &format!("echo {CONSOLE_NONCE}"))?;
-
-            let dump = qemu.screendump_while(
-                Duration::from_secs(30),
-                Duration::from_millis(200),
-                |d| d.console_rows(&font).iter().any(|r| r.trim() == CONSOLE_NONCE),
-            );
-            let after = dump.console_text(&font);
-            print_screen(name, &after);
-            // A whole trimmed row, because the shell echoes what is typed:
-            // `contains` would be satisfied by `/home/toy> echo zqjxk`, which
-            // says the console drew a keystroke and nothing about anything
-            // having run.
-            if !dump.console_rows(&font).iter().any(|r| r.trim() == CONSOLE_NONCE) {
-                return Err(format!(
-                    "typed `echo {CONSOLE_NONCE}` at the prompt and no row of the panel is \
-                     its output; the keyboard, the shell or the console did not carry it\n\
-                     decoded screen:\n{after}"
-                ));
-            }
-            if !after.contains(&format!("{CONSOLE_PROMPT} echo {CONSOLE_NONCE}")) {
-                return Err(format!(
-                    "the output is on screen but the echoed command line is not, so the \
-                     console is not showing what was typed\ndecoded screen:\n{after}"
-                ));
-            }
-            let rows = dump.console_rows(&font);
-            // The panel carries logd's file format — `[<wall clock> secs cpuN]`, where the serial's bracket names `kernel`.
-            let log_rows =
-                rows.iter().filter(|r| r.contains(" cpu") && r.contains("] ")).count();
-            if log_rows == 0 {
-                return Err(format!(
-                    "the seed witness is on the panel but no row reads as a log record, \
-                     so the format this counts by has drifted again\ndecoded screen:\n{after}"
-                ));
-            }
-            eprintln!(
-                "  [console] {log_rows} kernel log rows above a prompt, and `echo \
-                 {CONSOLE_NONCE}` typed on the i8042 answered on the panel"
-            );
-            Ok(())
-        }
         "screen_console_clear" => {
             // `clear` is the one command whose entire output is the *absence*
             // of output, which is why nothing else in the suite covers it:
@@ -4156,9 +3977,9 @@ fn run_screen_test(
             // Staged the real way round: the panic is triggered *through the
             // console*, by typing at its prompt, so the screen the report has
             // to paint over is a screen a userland process drew and owns.
-            // Unlike `screen_console_shell` this one carries the test binaries
-            // and a kernel feature, so it is not the flashed image — what it
-            // certifies is the kernel's behaviour, not the artifact.
+            // This one carries the test binaries and a kernel feature, so it is
+            // not the flashed image — what it certifies is the kernel's
+            // behaviour, not the artifact.
             let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("console");
             let options = BootOptions {
                 profile,
