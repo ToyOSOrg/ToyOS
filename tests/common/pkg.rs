@@ -235,7 +235,7 @@ fn window_seen(qemu: &mut QemuInstance, log: &mut String, from: usize) -> bool {
 
 /// Run one guest command that must succeed, answering its output.
 fn passed(qemu: &mut QemuInstance, log: &mut String, command: &str) -> Result<String, String> {
-    let result = qemu.run_test(command, Duration::from_secs(120));
+    let result = qemu.run_test(command, Duration::from_secs(56));
     let output = format!("{}{}", result.stdout, result.serial);
     log.push_str(&result.before);
     log.push_str(&output);
@@ -252,7 +252,7 @@ fn refused(
     command: &str,
     says: &str,
 ) -> Result<(), String> {
-    let result = qemu.run_test(command, Duration::from_secs(120));
+    let result = qemu.run_test(command, Duration::from_secs(56));
     let output = format!("{}{}", result.stdout, result.serial);
     log.push_str(&result.before);
     log.push_str(&output);

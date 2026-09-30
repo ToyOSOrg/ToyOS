@@ -68,7 +68,7 @@ const TALK_KEY: &str = "lantalk";
 
 /// A liveness guard on a rehearsal guest that never opened its stream, never a
 /// verdict.
-const TALK_CEILING: std::time::Duration = std::time::Duration::from_secs(120);
+const TALK_CEILING: std::time::Duration = std::time::Duration::from_secs(41);
 
 /// The armed boot's judge: the kernel's own records, tied to the I219's
 /// hand-over, say whether a message it raised reached a CPU — whatever the PHY

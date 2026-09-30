@@ -244,7 +244,7 @@ fn fetch_in_guest(
 }
 
 fn run_guest(guest: &mut QemuInstance, command: &str) -> Result<String, String> {
-    let result = guest.run_test(command, Duration::from_secs(120));
+    let result = guest.run_test(command, Duration::from_secs(68));
     if let Some(err) = &result.error {
         return Err(format!("{command}: {err}\n{}", result.stdout));
     }

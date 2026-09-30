@@ -54,7 +54,7 @@ pub fn line(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) -> Re
     qemu::await_marker(&mut guest, &mut console, logstream::SERVING, "logd to open its port")?;
     let reader = logstream::reader(port, "log-program-line.txt")?;
 
-    let ran = guest.run_test(ORIGIN_JOB, Duration::from_secs(60));
+    let ran = guest.run_test(ORIGIN_JOB, Duration::from_secs(38));
     if ran.exit_code != Some(0) {
         return Err(format!("{ORIGIN_JOB} exited {:?}\n{}", ran.exit_code, ran.stdout));
     }
@@ -65,12 +65,12 @@ pub fn line(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) -> Re
     if !headed {
         return Err(format!("the console never carried {NONCE:?} under {RUNNER:?}\n{}", ran.serial));
     }
-    if !reader.wait_for(NONCE, Duration::from_secs(60)) {
+    if !reader.wait_for(NONCE, Duration::from_secs(38)) {
         return Err(format!("the served log never carried {NONCE:?}"));
     }
     let file = logstream::shut_down(guest, &mut console, &staged)?;
     serial::Serial::named("the boot", console.as_str()).must_be_clean()?;
-    if !reader.wait_ended(Duration::from_secs(60)) {
+    if !reader.wait_ended(Duration::from_secs(38)) {
         return Err("the reader's connection had not ended once the guest was down".to_string());
     }
 
@@ -155,7 +155,7 @@ fn one_job_armed(
 /// netd said nothing (this boot runs no netd). A record it stamps `u64::MAX`
 /// is written before the machine stops, not parked until it does.
 pub fn forgery(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
-    let (ran, log) = one_job("tests/testcases", "log-program-forgery", FORGER, Duration::from_secs(60), c_bins, rust_bins)?;
+    let (ran, log) = one_job("tests/testcases", "log-program-forgery", FORGER, Duration::from_secs(26), c_bins, rust_bins)?;
     if ran.exit_code != Some(FORGER_CODE as i32) {
         return Err(format!("{FORGER} exited {:?}\n{}", ran.exit_code, ran.stdout));
     }
@@ -250,7 +250,7 @@ pub fn forgery(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) ->
 /// one past the program's allowance, and the three add up to every line it
 /// wrote: a line lost without a count, or one written twice, is red.
 pub fn flood(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
-    let (ran, log) = one_job("tests/testcases", "log-program-flood", FLOODER, Duration::from_secs(300), c_bins, rust_bins)?;
+    let (ran, log) = one_job("tests/testcases", "log-program-flood", FLOODER, Duration::from_secs(44), c_bins, rust_bins)?;
     if ran.exit_code != Some(0) {
         return Err(format!("{FLOODER} exited {:?}", ran.exit_code));
     }
@@ -323,7 +323,7 @@ pub fn refused_stop(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)
         "log-refused-stop",
         REFUSED_JOB,
         &["power-refused-once"],
-        Duration::from_secs(60),
+        Duration::from_secs(32),
         c_bins,
         rust_bins,
     )?;
@@ -380,7 +380,7 @@ pub fn resume_meets_its_flush(rust_bins: &[(String, Vec<u8>)]) -> Result<(), Str
             ..Default::default()
         },
     );
-    let mut stop = qemu::QmpShutdown::open(guest.qmp_socket(), guest.budget(Duration::from_secs(120)));
+    let mut stop = qemu::QmpShutdown::open(guest.qmp_socket(), guest.budget(Duration::from_secs(74)));
     let reason = stop.reason();
     let tail = guest.drain_serial(Duration::from_secs(20));
     drop(guest);
@@ -506,7 +506,7 @@ const RETIRED: &str = "syscall 26 is retired";
 /// them all in `/log` — and before the kernel's record of its exit.
 pub fn after_records(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     let (ran, log) =
-        one_job("tests/testcases", "log-hold", HOLD_JOB, Duration::from_secs(60), c_bins, rust_bins)?;
+        one_job("tests/testcases", "log-hold", HOLD_JOB, Duration::from_secs(29), c_bins, rust_bins)?;
     if ran.exit_code != Some(0) {
         return Err(format!("{HOLD_JOB} exited {:?}\n{}", ran.exit_code, ran.stdout));
     }
@@ -570,17 +570,17 @@ pub fn carrier_forgery(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u
     let mut guest = QemuInstance::boot_with_options(&config, c_bins, rust_bins, options);
     let mut console = guest.boot_log().to_string();
     qemu::await_marker(&mut guest, &mut console, logstream::SERVING, "logd to open its port")?;
-    let ran = guest.run_test(CARRIER_FORGER, Duration::from_secs(60));
+    let ran = guest.run_test(CARRIER_FORGER, Duration::from_secs(35));
     if ran.exit_code != Some(0) {
         return Err(format!("{CARRIER_FORGER} exited {:?}\n{}", ran.exit_code, ran.stdout));
     }
     let reader = logstream::reader(port, "log-carrier-forgery.txt")
         .map_err(|e| format!("a reader asking after a program printed init's word was not admitted: {e}"))?;
-    if !reader.wait_for(CARRIER_FORGED, Duration::from_secs(60)) {
+    if !reader.wait_for(CARRIER_FORGED, Duration::from_secs(35)) {
         return Err(format!("the served log never carried {CARRIER_FORGED:?}"));
     }
     let file = logstream::shut_down(guest, &mut console, &staged)?;
-    if !reader.wait_ended(Duration::from_secs(60)) {
+    if !reader.wait_ended(Duration::from_secs(35)) {
         return Err("the reader's connection had not ended once the guest was down".to_string());
     }
     let log = file.concat();

@@ -84,10 +84,7 @@ const DEFAULT_WIDTH: usize = 12;
 /// tail because at width 4 `allocator_stress` went from 1 s to past its 5 s and
 /// `demand_paging_sse` past its — but not one of those numbers is an assertion.
 /// They are liveness guards on a guest that might wedge, and the verdict in
-/// every case is the exit code and the expected stdout. [`qemu::budget`] now
-/// pays them out per guest the phase may have up, which is what
-/// `wait_for_ready`'s boot timeout has done since the phase existed, so the
-/// number each author reasoned about is still the number for one guest.
+/// every case is the exit code and the expected stdout.
 ///
 /// What that leaves is one boot's worth of tests costing about thirteen seconds
 /// between them, which is far too little to be worth a tail slot of its own:
@@ -3639,7 +3636,7 @@ fn virt_selftest(
         },
     );
     let said = format!("{param}: ");
-    let rest = qemu.drain_until(Duration::from_secs(180), |l| l.contains(&said));
+    let rest = qemu.drain_until(Duration::from_secs(23), |l| l.contains(&said));
     let serial = format!("{}\n{rest}", qemu.boot_log());
     let Some(verdict) = serial.lines().find(|l| l.contains(&said)) else {
         return Err(format!("{param} never reported\nserial:\n{serial}"));
@@ -4151,7 +4148,7 @@ fn run_screen_test(
             metal_sim_argv_check(&qemu::profile_argv(&options))?;
             let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
             let console = qemu.boot_log().to_string();
-            let dump = qemu.screendump_until(common::volumes::NO_LOG_ALERT, Duration::from_secs(30));
+            let dump = qemu.screendump_until(common::volumes::NO_LOG_ALERT, Duration::from_secs(26));
             let text = dump.text();
             print_screen(name, &text);
 
@@ -4837,7 +4834,7 @@ fn run_screen_test(
             // `console_type_line`.
             console_type_line(&mut qemu, &font, "test_rs_test_panic_child 3")?;
 
-            let dump = qemu.screendump_until(FATAL_HALT_NONCE, Duration::from_secs(40));
+            let dump = qemu.screendump_until(FATAL_HALT_NONCE, Duration::from_secs(32));
             let text = dump.text();
             print_screen(name, &text);
             if !text.contains(FATAL_HALT_NONCE) {
@@ -4955,8 +4952,8 @@ fn run_screen_test(
                 QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
             // Nothing announces the panic here — there is no console for a
             // marker to arrive on — so the screen is polled until it carries
-            // the report. 30s covers firmware plus the root filesystem read off USB.
-            let dump = qemu.screendump_until("PANIC:", Duration::from_secs(30));
+            // the report.
+            let dump = qemu.screendump_until("PANIC:", Duration::from_secs(29));
             let text = dump.text();
             print_screen(name, &text);
             // The arm line is here and nowhere else: this is the machine whose
@@ -5001,8 +4998,8 @@ fn run_screen_test(
                     ..Default::default()
                 },
             );
-            let dump = qemu.screendump_until("EARLY PANIC:", Duration::from_secs(30));
-            let rest = qemu.drain_until(Duration::from_secs(10), |l| l.contains(EARLY_PANIC_MESSAGE));
+            let dump = qemu.screendump_until("EARLY PANIC:", Duration::from_secs(8));
+            let rest = qemu.drain_until(Duration::from_secs(8), |l| l.contains(EARLY_PANIC_MESSAGE));
             let serial = format!("{}\n{rest}", qemu.boot_log());
             // What stage 3 prints before it panics: every item is a record
             // only the AArch64 side of the loader or the kernel writes.
@@ -5091,9 +5088,9 @@ fn run_screen_test(
                     ..Default::default()
                 },
             );
-            let dump = qemu.screendump_until("EARLY PANIC:", Duration::from_secs(30));
+            let dump = qemu.screendump_until("EARLY PANIC:", Duration::from_secs(5));
             const FAULT_MESSAGE: &str = "synchronous from EL1 on SP_EL1: unknown reason (an undefined instruction) at 0x";
-            let rest = qemu.drain_until(Duration::from_secs(10), |l| l.contains(FAULT_MESSAGE));
+            let rest = qemu.drain_until(Duration::from_secs(5), |l| l.contains(FAULT_MESSAGE));
             let serial = format!("{}\n{rest}", qemu.boot_log());
             for want in [
                 "KERNEL PANIC: synchronous from EL1 on SP_EL1: unknown reason (an undefined instruction)",
@@ -5129,7 +5126,7 @@ fn run_screen_test(
                 },
             );
             const SPAWNED: &str = "spawn: /system/bin/logd pid=";
-            let rest = qemu.drain_until(Duration::from_secs(180), |l| l.contains(SPAWNED));
+            let rest = qemu.drain_until(Duration::from_secs(17), |l| l.contains(SPAWNED));
             let serial = format!("{}\n{rest}", qemu.boot_log());
             for want in [
                 "paging: the direct map holds memory below",
@@ -5608,7 +5605,7 @@ fn run_screen_test(
             // holding the panel. Without this the test would prove that a
             // fatal panic paints a screen nobody had taken, which is what the
             // suite already knew.
-            let up = qemu.screendump_while(Duration::from_secs(30), Duration::from_millis(200), |d| {
+            let up = qemu.screendump_while(Duration::from_secs(95), Duration::from_millis(200), |d| {
                 d.fill() != FILL_BOOT
             });
             if up.fill() == FILL_BOOT {
@@ -6318,7 +6315,7 @@ fn metal_sim_window_drag(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> 
 
     let result = qemu.run_test_hooked(
         "test_rs_window_drag",
-        Duration::from_secs(120),
+        Duration::from_secs(53),
         "===DRAG_READY===",
         |socket| {
             let mut input = qemu::QmpInput::open(socket);
@@ -6489,7 +6486,7 @@ fn metal_sim_hostile_clipboard(rust_bins: &[(String, Vec<u8>)]) -> Result<(), St
 
     let result = qemu.run_test_paced(
         "test_rs_compositor_hostile_clipboard",
-        Duration::from_secs(240),
+        Duration::from_secs(35),
         |socket, line| {
             if line.contains(PASTE) {
                 let socket = socket.expect("this boot was made with QMP");
@@ -6814,7 +6811,7 @@ fn locale_detect(qemu: &mut QemuInstance) -> Result<(), String> {
 fn locale_detect_unrecognized(qemu: &mut QemuInstance) -> Result<(), String> {
     let result = qemu.run_test_hooked(
         "test_rs_locale_gate detect",
-        Duration::from_secs(30),
+        Duration::from_secs(2),
         "Press the key labelled",
         |socket| {
             let mut input = qemu::QmpInput::open(socket);
@@ -6836,23 +6833,6 @@ fn locale_detect_unrecognized(qemu: &mut QemuInstance) -> Result<(), String> {
         return Err(format!("the wizard applied a layout it could not identify:\n{}", result.stdout));
     }
     Ok(())
-}
-
-/// A round trip through a guest that is **demonstrably up**, corrected for how
-/// fast this host is and not for how many guests it is running.
-///
-/// [`qemu::budget`] is the ceiling on a guest that might be wedged, and it
-/// multiplies by the width because a guest with a twelfth of the machine takes
-/// longer over everything. This is the other case, and the width is wrong for
-/// it: what these callers wait on is the shell echoing a line it has not run
-/// yet, which is microseconds of guest time however little of the machine the
-/// guest has. Ten of those establishing nothing is a keystroke path that is not
-/// working, and a width-scaled ceiling turns that into four minutes of a lane —
-/// measured, on the run this was written from: 285 s of a terminal parked on a
-/// pipe it had been parked on since 1.4 s.
-fn round_trip(one_guest: Duration) -> Duration {
-    let (_, _, num, den) = qemu::host_speed();
-    one_guest * num / den
 }
 
 /// Keep collecting serial into `log` until `marker` shows up.
@@ -6934,9 +6914,7 @@ fn answer_swiss_wizard(
 ///
 /// What is being waited for is a shell echoing a line it has not run yet, which
 /// is a round trip and not work — so this is short, and it is paid only when the
-/// line did not arrive. [`shell_type_line`] widens it by the guest's own
-/// oversubscription; the two callers that retype at a surface which may not be
-/// reading yet scale it per host with [`round_trip`] instead.
+/// line did not arrive.
 const ECHO_TRY: Duration = Duration::from_secs(2);
 
 /// How long one burst of typing has to reach the panel.
@@ -7343,12 +7321,6 @@ fn shell_echoes(
     // Retyping rather than waiting longer: a keystroke injected between two of
     // the terminal's polls is dropped, and a dropped one leaves nothing to wait
     // for.
-    //
-    // **A count of attempts, not a span of host seconds.** This used to be a
-    // flat twenty, which is a fixed number of round trips on the host it was
-    // written on and a different number on any other. Ten is the number, and
-    // each gets a round trip scaled to this host — see [`round_trip`] for why
-    // that and not the phase width.
     const TRIES: usize = 10;
     let mut lost = String::new();
     for _ in 0..TRIES {
@@ -7356,12 +7328,12 @@ fn shell_echoes(
         // loop's ordinary step: the surface is up and the shell may still not
         // be reading, which is what the retype exists for.
         if let Err(said) =
-            shell_type_once(qemu, &format!("echo {nonce}"), round_trip(ECHO_TRY), ack)
+            shell_type_once(qemu, &format!("echo {nonce}"), qemu.budget(ECHO_TRY), ack)
         {
             lost = said;
             continue;
         }
-        if serial_until(qemu, log, nonce, round_trip(Duration::from_secs(2))) {
+        if serial_until(qemu, log, nonce, qemu.budget(ECHO_TRY)) {
             return Ok(());
         }
     }
@@ -7399,8 +7371,7 @@ fn shell_echoes(
 /// The ceiling is the guest's own liveness rather than a phase-scaled clock,
 /// and here that cuts both ways: #156 is a *freeze*, so the machine this
 /// retries against goes silent, and the wait ends in fifteen seconds instead of
-/// spending `qemu.budget(20 s)` — up to four minutes at width 12 — hammering
-/// GUI+Q at a desktop that has stopped. `issues/design-debt/` names that
+/// hammering GUI+Q at a desktop that has stopped. `issues/design-debt/` names that
 /// cost as a lane this test holds for a quarter of every run, which is what puts
 /// whichever desktop is dispatched beside it into a red nobody acts on.
 fn close_focused_window(qemu: &mut QemuInstance, log: &mut String, new: usize) -> bool {
@@ -7439,7 +7410,7 @@ fn doom_frames(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let config = root.join("tests/doommusiccase");
     let mut qemu = QemuInstance::boot_with_options(&config, &[], rust_bins, BootOptions::default());
-    let result = qemu.run_test("test_rs_doom_frames", Duration::from_secs(300));
+    let result = qemu.run_test("test_rs_doom_frames", Duration::from_secs(77));
     if let Some(err) = &result.error {
         return Err(format!("{err}\n{}", result.stdout));
     }
@@ -7725,7 +7696,7 @@ fn toolkit_iced() -> Result<(), String> {
     // Its exit ends the wait too: an app that dies before it has a window
     // would otherwise hold the lane for the whole budget.
     let exited = format!("exit: {app} pid=");
-    let deadline = Instant::now() + qemu.budget(Duration::from_secs(60));
+    let deadline = Instant::now() + qemu.budget(Duration::from_secs(332));
     while !log[launched..].contains("compositor: window opened") {
         if log[launched..].contains(&exited) || Instant::now() >= deadline {
             return Err(format!("{app} never got a window:\n{}", &log[launched..]));
@@ -7735,7 +7706,7 @@ fn toolkit_iced() -> Result<(), String> {
     let (client, content) = opened_window(&log[launched..])
         .ok_or_else(|| format!("the compositor's window line did not parse:\n{}", &log[launched..]))?;
 
-    let by = qemu.budget(Duration::from_secs(30));
+    let by = qemu.budget(Duration::from_secs(332));
     // Two words, so two places: "Decrement" alone carries most of
     // "Increment"'s ink in its "crement". The word matched best claims its
     // place, and the other is matched only away from it.
@@ -7791,7 +7762,7 @@ fn toolkit_iced() -> Result<(), String> {
         ));
     }
     // `stats` prints the peak last, once the app is gone and waited for.
-    let by = qemu.budget(Duration::from_secs(30));
+    let by = qemu.budget(Duration::from_secs(332));
     if !serial_until_new(&mut qemu, log, "peak mem", closing, by) {
         return Err(format!(
             "{app} did not leave when its window was closed:\n{}",
@@ -7894,7 +7865,7 @@ fn toolkit_window_wake(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
 fn toolkit_winit_loop(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     let (mut qemu, mut log, launched) = toolkit_launch(rust_bins, "winit_loop", "test_rs_winit_loop")?;
     let log = &mut log;
-    let mut live = qemu::Liveness::new(Duration::from_secs(40), Duration::from_secs(240));
+    let mut live = qemu::Liveness::new(Duration::from_secs(40), Duration::from_secs(35));
     let mut closed = false;
     while live.working(log) {
         let said = &log[launched..];
@@ -7956,7 +7927,7 @@ fn toolkit_winit_pace(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     let (mut qemu, mut log, launched) = toolkit_launch(rust_bins, "winit_pace", "test_rs_winit_pace")?;
     let log = &mut log;
     let drew = format!("WINIT-PACE drew {PACE_FRAMES} frames");
-    let mut live = qemu::Liveness::new(Duration::from_secs(30), Duration::from_secs(120));
+    let mut live = qemu::Liveness::new(Duration::from_secs(30), Duration::from_secs(53));
     while live.working(log) && !log[launched..].contains(&drew) {
         let said = &log[launched..];
         if said.contains("WINIT-PACE-FAIL") || said.contains("panicked") {
@@ -8461,7 +8432,7 @@ struct PatternServer {
 impl PatternServer {
     /// Longest a connection's read or write may stall before `finish` exists
     /// to end it: the guest's own run bound.
-    const STALL: Duration = Duration::from_secs(120);
+    const STALL: Duration = Duration::from_secs(65);
 
     const STREAM: u8 = 0;
     const HELD: u8 = 1;
@@ -8677,7 +8648,7 @@ fn netcase_against_host(
     let mut qemu = QemuInstance::boot_with_options(&config, &[], &bins, options);
     let mut console = qemu.boot_log().to_string();
     let up = await_marker(&mut qemu, &mut console, "netd: ready, at most ", "netd to come up");
-    let result = up.map(|_| qemu.run_test(&format!("test_rs_{name} {port}{args}"), Duration::from_secs(120)));
+    let result = up.map(|_| qemu.run_test(&format!("test_rs_{name} {port}{args}"), Duration::from_secs(65)));
     let sent = server.finish();
     let result = result.map_err(|e| format!("netd never came up, so nothing below means anything: {e}"))?;
     if let Some(err) = &result.error {
@@ -8789,7 +8760,7 @@ fn dns_resolve() -> Result<(), String> {
     let mut console = qemu.boot_log().to_string();
     await_marker(&mut qemu, &mut console, "netd: ready, at most ", "netd to come up")?;
 
-    let found = qemu.run_test(&format!("host {DNS_REAL_NAME}"), Duration::from_secs(60));
+    let found = qemu.run_test(&format!("host {DNS_REAL_NAME}"), Duration::from_secs(47));
     if let Some(err) = &found.error {
         return Err(format!("{err}\n{}", found.stdout));
     }
@@ -8809,7 +8780,7 @@ fn dns_resolve() -> Result<(), String> {
         ));
     }
 
-    let missing = qemu.run_test(&format!("host {DNS_NO_NAME}"), Duration::from_secs(60));
+    let missing = qemu.run_test(&format!("host {DNS_NO_NAME}"), Duration::from_secs(47));
     if let Some(err) = &missing.error {
         return Err(format!("{err}\n{}", missing.stdout));
     }
@@ -8869,7 +8840,7 @@ fn netd_lookup_let_go(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     }
     console.push_str(&primed.serial);
     qemu::QmpDevices::open(qemu.qmp_socket()).hold_outbound("net0");
-    let result = qemu.run_test(&format!("test_rs_{NAME}"), Duration::from_secs(180));
+    let result = qemu.run_test(&format!("test_rs_{NAME}"), Duration::from_secs(74));
     if let Some(err) = &result.error {
         return Err(format!("{err}\n{}", result.stdout));
     }
@@ -9557,7 +9528,7 @@ fn metal_sim_window_caps(boot: &mut Boot) -> Result<(), String> {
         return Err("the compositor derived a cap of zero windows".to_string());
     }
 
-    let result = boot.qemu.run_test("test_rs_window_caps", Duration::from_secs(120));
+    let result = boot.qemu.run_test("test_rs_window_caps", Duration::from_secs(8));
     if let Some(err) = &result.error {
         return Err(format!("{err}\n{}", result.stdout));
     }
@@ -9597,7 +9568,7 @@ fn metal_sim_window_caps(boot: &mut Boot) -> Result<(), String> {
 /// nothing.
 fn metal_sim_ipc_hostile_peer(boot: &mut Boot) -> Result<(), String> {
     let qemu = &mut boot.qemu;
-    let result = qemu.run_test("test_rs_ipc_hostile_peer", Duration::from_secs(120));
+    let result = qemu.run_test("test_rs_ipc_hostile_peer", Duration::from_secs(1));
     if let Some(err) = &result.error {
         return Err(format!("{err}\n{}", result.stdout));
     }
@@ -9642,7 +9613,7 @@ fn metal_sim_ipc_hostile_peer(boot: &mut Boot) -> Result<(), String> {
 /// its own final assertion is that the desktop is still compositing after it.
 fn metal_sim_compositor_stall(boot: &mut Boot) -> Result<(), String> {
     let qemu = &mut boot.qemu;
-    let result = qemu.run_test("test_rs_compositor_stall", Duration::from_secs(240));
+    let result = qemu.run_test("test_rs_compositor_stall", Duration::from_secs(74));
     if let Some(err) = &result.error {
         return Err(format!("{err}\n{}", result.stdout));
     }
@@ -9723,7 +9694,7 @@ fn metal_sim_compositor_stall(boot: &mut Boot) -> Result<(), String> {
 /// what it should do.
 fn metal_sim_client_death(boot: &mut Boot) -> Result<(), String> {
     let qemu = &mut boot.qemu;
-    let result = qemu.run_test("test_rs_compositor_client_death", Duration::from_secs(240));
+    let result = qemu.run_test("test_rs_compositor_client_death", Duration::from_secs(14));
     if let Some(err) = &result.error {
         return Err(format!("{err}\n{}", result.stdout));
     }
@@ -9971,7 +9942,7 @@ fn run_machine_test(
                 QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
             let boot = qemu.boot_log().to_string();
             serial::Serial::named("boot console", boot.as_str()).must_be_clean()?;
-            let result = qemu.run_test("test_rs_blocking_read_stress", Duration::from_secs(30));
+            let result = qemu.run_test("test_rs_blocking_read_stress", Duration::from_secs(179));
             if !check_rust_result(&result) {
                 return Err(format!(
                     "blocking_read_window failed:\n{}\nkernel log while it ran:\n{}{}",
@@ -11316,8 +11287,7 @@ fn run_machine_test(
             );
             serial::Serial::boot(&qemu).must_be_clean()?;
 
-            // 120 s: the `/home` arm alone is 32,769 creates on bcachefs.
-            let result = qemu.run_test("test_rs_readdir_bound", Duration::from_secs(120));
+            let result = qemu.run_test("test_rs_readdir_bound", Duration::from_secs(1328));
             if let Some(err) = &result.error {
                 return Err(format!("the guest stopped answering: {err}\nserial:\n{}", result.serial));
             }
@@ -11345,7 +11315,7 @@ fn run_machine_test(
             );
             serial::Serial::boot(&qemu).must_be_clean()?;
 
-            let result = qemu.run_test("test_rs_mkdir_cap", Duration::from_secs(60));
+            let result = qemu.run_test("test_rs_mkdir_cap", Duration::from_secs(188));
             if let Some(err) = &result.error {
                 return Err(format!("the guest stopped answering: {err}\nserial:\n{}", result.serial));
             }
@@ -11380,7 +11350,7 @@ fn run_machine_test(
             let mut qemu =
                 QemuInstance::boot_with_options(test_config, c_bins, rust_bins, one_cpu());
             serial::Serial::boot(&qemu).must_be_clean()?;
-            let result = qemu.run_test("test_rs_fpu_isolation", Duration::from_secs(120));
+            let result = qemu.run_test("test_rs_fpu_isolation", Duration::from_secs(59));
             if let Some(err) = &result.error {
                 return Err(format!(
                     "the guest stopped answering: {err}\nserial:\n{}",
@@ -11406,7 +11376,7 @@ fn run_machine_test(
                 BootOptions { kernel_features: &["fpu-save-nothing"], ..one_cpu() },
             );
             serial::Serial::boot(&blind).must_be_clean()?;
-            let negative = blind.run_test("test_rs_fpu_isolation", Duration::from_secs(120));
+            let negative = blind.run_test("test_rs_fpu_isolation", Duration::from_secs(59));
             if let Some(err) = &negative.error {
                 return Err(format!(
                     "the negative-control guest stopped answering: {err}\nserial:\n{}",
@@ -11434,7 +11404,7 @@ fn run_machine_test(
             let mut qemu =
                 QemuInstance::boot_with_options(test_config, c_bins, rust_bins, one_cpu());
             serial::Serial::boot(&qemu).must_be_clean()?;
-            let result = qemu.run_test("test_rs_gsbase_locked", Duration::from_secs(120));
+            let result = qemu.run_test("test_rs_gsbase_locked", Duration::from_secs(74));
             if let Some(err) = &result.error {
                 return Err(format!("the guest stopped answering: {err}\nserial:\n{}", result.serial));
             }
@@ -11460,7 +11430,7 @@ fn run_machine_test(
                 BootOptions { kernel_features: &["user-writable-gsbase"], ..one_cpu() },
             );
             serial::Serial::boot(&blind).must_be_clean()?;
-            let negative = blind.run_test("test_rs_gsbase_locked", Duration::from_secs(120));
+            let negative = blind.run_test("test_rs_gsbase_locked", Duration::from_secs(74));
             if let Some(err) = &negative.error {
                 return Err(format!(
                     "the negative-control guest stopped answering: {err}\nserial:\n{}",
@@ -11537,7 +11507,7 @@ fn run_machine_test(
             // assert that fires there takes the machine down before userland.
             serial::Serial::boot(&qemu).must_be_clean()?;
 
-            let result = qemu.run_test("test_rs_sched_stress", Duration::from_secs(120));
+            let result = qemu.run_test("test_rs_sched_stress", Duration::from_secs(29));
             if let Some(err) = &result.error {
                 return Err(format!(
                     "the check-build guest stopped answering, which is what a scheduler \
@@ -11945,7 +11915,7 @@ fn run_machine_test(
             let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
             serial::Serial::boot(&qemu).must_be_clean()?;
 
-            let result = qemu.run_test("test_rs_heap_ceiling", Duration::from_secs(30));
+            let result = qemu.run_test("test_rs_heap_ceiling", Duration::from_secs(26));
             if let Some(err) = &result.error {
                 return Err(format!("heap_ceiling did not finish: {err}\nserial:\n{}", result.serial));
             }
@@ -12035,7 +12005,7 @@ fn run_machine_test(
                 ));
             }
 
-            let result = qemu.run_test("test_rs_cache_eviction", Duration::from_secs(180));
+            let result = qemu.run_test("test_rs_cache_eviction", Duration::from_secs(59));
             if !check_rust_result(&result) {
                 return Err(format!(
                     "a page did not survive being evicted and re-read:\n{}\n{}",
@@ -12410,7 +12380,7 @@ fn run_machine_test(
             }
             let result = qemu.run_test_hooked(
                 "test_rs_i8042_keyboard",
-                Duration::from_secs(20),
+                Duration::from_secs(164),
                 I8042_READY,
                 |socket| {
                     qemu::qmp_send_keys(socket, &[("a", true), ("a", false)]);
@@ -13244,7 +13214,7 @@ fn run_machine_test(
 
             // A baseline first: churn against a compositor that was never
             // drawing would be a green run proving nothing.
-            let deadline = std::time::Instant::now() + qemu.budget(Duration::from_secs(20));
+            let deadline = std::time::Instant::now() + qemu.budget(Duration::from_secs(92));
             while std::time::Instant::now() < deadline && frames(&console) < 1 {
                 console.push_str(&qemu.drain_serial(Duration::from_millis(250)));
             }
@@ -13296,7 +13266,7 @@ fn run_machine_test(
             // changed is that a console behind the guest costs wall clock instead
             // of a verdict.
             let bindings = |text: &str| text.matches("merges as source").count();
-            let deadline = std::time::Instant::now() + qemu.budget(Duration::from_secs(20));
+            let deadline = std::time::Instant::now() + qemu.budget(Duration::from_secs(92));
             while std::time::Instant::now() < deadline && bindings(&console) < CYCLES {
                 console.push_str(&qemu.drain_serial(Duration::from_millis(250)));
             }
@@ -13331,7 +13301,7 @@ fn run_machine_test(
             // reporting interval is 2 s, so two of them cannot be satisfied by
             // frames the compositor produced before the first cycle.
             let mut after = String::new();
-            let deadline = std::time::Instant::now() + qemu.budget(Duration::from_secs(20));
+            let deadline = std::time::Instant::now() + qemu.budget(Duration::from_secs(92));
             while std::time::Instant::now() < deadline && frames(&after) < 2 {
                 after.push_str(&qemu.drain_serial(Duration::from_millis(250)));
             }
@@ -13787,7 +13757,7 @@ fn run_machine_test(
             let mut qemu = QemuInstance::boot_with_options(&config, &[], &bins, options);
             let mut console = qemu.boot_log().to_string();
             let _ = await_marker(&mut qemu, &mut console, "netd: ready, at most ", "netd to come up");
-            let result = qemu.run_test("test_rs_netd_listener_forgery", Duration::from_secs(60));
+            let result = qemu.run_test("test_rs_netd_listener_forgery", Duration::from_secs(35));
             if let Some(err) = &result.error {
                 return Err(format!("{err}\n{}", result.stdout));
             }
@@ -13846,7 +13816,7 @@ fn run_machine_test(
                 return Err(format!("netd never came up on a machine with a NIC:\n{console}"));
             }
 
-            let result = qemu.run_test("test_rs_netd_hostile_peer", Duration::from_secs(120));
+            let result = qemu.run_test("test_rs_netd_hostile_peer", Duration::from_secs(44));
             if let Some(err) = &result.error {
                 return Err(format!("{err}\n{}", result.stdout));
             }
@@ -13934,7 +13904,7 @@ fn run_machine_test(
             let mut console = qemu.boot_log().to_string();
             let _ = await_marker(&mut qemu, &mut console, "===READY===", "test-runner to come up");
 
-            let result = qemu.run_test("test_rs_launcher_refusals", Duration::from_secs(120));
+            let result = qemu.run_test("test_rs_launcher_refusals", Duration::from_secs(35));
             if let Some(err) = &result.error {
                 return Err(format!("{err}\n{}", result.stdout));
             }
@@ -15918,7 +15888,7 @@ fn input_events_run(
         let mut input: Option<qemu::QmpInput> = None;
         let (mut mev, mut kev) = (0usize, 0usize);
         let (mut want_mev, mut want_kev) = (0usize, 0usize);
-        qemu.run_test_paced("test_rs_input_events", Duration::from_secs(60), |socket, line| {
+        qemu.run_test_paced("test_rs_input_events", Duration::from_secs(50), |socket, line| {
             if line.contains("===INPUT_READY===") {
                 input = Some(qemu::QmpInput::open(
                     socket.expect("input_events needs BootOptions { qmp: true }"),
@@ -16022,12 +15992,13 @@ fn build_test_registry(
     let mut tests = Vec::new();
 
     for name in discover_rust_tests(rust_bins) {
-        let timeout = match name.as_str() {
-            // Writes the child's whole image through bcachefs before it can run
-            // it, which is the only thing here that is not a spawn.
-            "disk_backtrace" => Duration::from_secs(15),
-            _ => Duration::from_secs(5),
-        };
+        let timeout = Duration::from_secs(match name.as_str() {
+            "mutual_kill" => 47,
+            "poll_wake_pipe" => 17,
+            "process_stats" => 11,
+            "abuse_elf_loader" | "toybox_file_tools" => 8,
+            _ => 5,
+        });
         tests.push(TestDef {
             qemu_name: format!("test_rs_{name}"),
             check: check_for(&name),
@@ -16040,7 +16011,7 @@ fn build_test_registry(
     for name in c_names {
         tests.push(TestDef {
             qemu_name: format!("test_c_{name}"),
-            timeout: Duration::from_secs(10),
+            timeout: Duration::from_secs(2),
             check: check_c_result,
             settle: no_settle,
             name: name.clone(),
@@ -16409,7 +16380,7 @@ impl Tally {
         if let Some(fastest) = fastest {
             say(format!(
                 "host: fastest boot {fastest} ms against the reference {reference} ms — liveness \
-                 ceilings paid at {:.2}x width",
+                 ceilings paid at {:.2}x",
                 f64::from(num) / f64::from(den)
             ));
         }
@@ -16852,7 +16823,6 @@ fn run_phase(
         return Vec::new();
     }
     let width = width.clamp(1, tasks.len());
-    qemu::set_width(width as u32);
     let queue = std::sync::Mutex::new(std::collections::VecDeque::from(tasks));
     let mut all = Vec::new();
     thread::scope(|scope| {

@@ -192,46 +192,6 @@ pub fn boot_census() -> (u32, u32, Vec<String>) {
 pub const DECLARED_KERNEL_BUILDS: [&str; 5] =
     toyos_build::build::TEST_SUITE_KERNEL_BUILDS;
 
-/// How many guests the phase now running may have up at once.
-///
-/// The harness's own wall-clock margins are margins on the *host*, and they were
-/// all derived when one guest had it to itself. Four guests is a different
-/// machine, so such a margin has to be stated against the regime it runs in
-/// rather than widened outright — which is what this multiplies. A serial phase
-/// sets it back to 1 and gets the number it always had.
-static WIDTH: AtomicU32 = AtomicU32::new(1);
-
-pub fn set_width(width: u32) {
-    assert!(width >= 1, "a phase runs at least one guest");
-    WIDTH.store(width, Ordering::SeqCst);
-}
-
-/// A liveness ceiling, stated for one guest and paid out for the phase's.
-///
-/// Every timeout a test hands [`QemuInstance::run_test`] and its relatives is a
-/// guard against a wedge, never a verdict: the assertion is what the guest
-/// *said*, and a test whose pass depended on a deadline expiring would be
-/// asserting on the host's clock. So the number in the source stays the number
-/// its author reasoned about — one guest, this host — and the phase multiplies
-/// it, exactly as `wait_for_ready` has multiplied the boot timeout since the
-/// parallel phase landed.
-///
-/// The cost of getting this wrong in the generous direction is that a wedge
-/// takes longer to report. The cost in the other direction is a red run that
-/// says a guest hung when it was only sharing a machine, which is the failure
-/// mode that put the whole shared block in the serial tail.
-///
-/// This corrects for width and for how fast the host is, both host-wide facts.
-/// It does not correct for a guest being wider than the host — an `smp:8` guest
-/// on a four-core runner is oversubscribed and a mostly-serial boot never
-/// showed it — which is [`budget_smp`]'s job and [`QemuInstance::budget`]'s
-/// default. Callers that hold a guest want that one, so its ceiling reflects
-/// the vCPUs it actually asked for.
-pub fn budget(one_guest: Duration) -> Duration {
-    let (num, den) = host_scale();
-    one_guest * WIDTH.load(Ordering::SeqCst) * num / den
-}
-
 /// The fastest boot-to-ready this run has seen, in milliseconds.
 ///
 /// A boot is the one piece of guest work every test does and no test asserts on
@@ -242,13 +202,9 @@ pub fn budget(one_guest: Duration) -> Duration {
 /// is the closest this can get to the machine with nothing else on it.
 static FASTEST_BOOT_MS: AtomicU32 = AtomicU32::new(u32::MAX);
 
-/// The same measurement on the host every ceiling in this tree was written for.
-///
-/// Dev host, M4 Pro, cross-arch TCG, measured 2026-08-08: the fastest of ten
-/// boots at `--jobs 1` was 1433 ms against a 1433–2063 ms spread, and the
-/// fastest of a whole 291-test suite at width 12 was this. The smaller of the
-/// two is the one to hold, because the factor only widens and a reference set
-/// too high is a correction that does not happen.
+/// The fastest boot of the host the ceilings were measured on: at or above the
+/// fastest boot of every run a ceiling in this tree was measured in, so that
+/// host pays them at 1×.
 const REFERENCE_BOOT_MS: u32 = 1320;
 
 fn record_boot(took: Duration) {
@@ -256,21 +212,12 @@ fn record_boot(took: Duration) {
     FASTEST_BOOT_MS.fetch_min(ms, Ordering::SeqCst);
 }
 
-/// How much slower than the host these ceilings were written on this one is, as
+/// How much slower than the host these ceilings were measured on this one is, as
 /// a fraction so that a 1.4× host is not rounded to 1.
 ///
-/// [`budget`] corrects a ceiling for how many guests share the machine. It never
-/// corrected for how fast the machine *is*, and that is the other half of the
-/// same mistake: a number reasoned about on an M4 Pro is not a liveness ceiling
-/// on a four-core Azure vCPU, it is a verdict about which of the two is running
-/// the test. 307 bare timeouts were counted in one CI run and every one of
-/// them was that.
-///
-/// **Only ever upward.** On a faster host the number in the source stands,
-/// because it is the number its author reasoned about, and a ceiling that shrank
-/// would start reporting wedges that are not there. The ceiling of 8 is because
-/// one anomalous boot must not be able to disable every liveness guard in the
-/// suite at once.
+/// **Only ever upward**, since a ceiling that shrank would report wedges that
+/// are not there; and at most 8×, so one anomalous boot cannot disable every
+/// guard in the suite at once.
 fn host_scale() -> (u32, u32) {
     let fastest = FASTEST_BOOT_MS.load(Ordering::SeqCst);
     // Before the first boot there is no measurement, and the sentinel must not
@@ -351,28 +298,28 @@ fn oversubscription(smp: u32) -> (u32, u32) {
     oversub_ratio(smp, host_cores())
 }
 
-/// [`budget`] widened by a guest's own vCPU oversubscription.
+/// A ceiling, paid out for the host and the guest it bounds.
 ///
-/// The guest-agnostic [`budget`] scales by phase width and boot-derived host
-/// speed; this multiplies in `smp/cores` on top, so a wide-SMP guest that a
-/// mostly-serial boot said little about is given the extra room the derivation
-/// above says it needs. `smp <= cores` leaves it exactly [`budget`], which is
-/// every guest on the dev host.
-pub fn budget_smp(one_guest: Duration, smp: u32) -> Duration {
+/// **Every ceiling in this suite is three times the slowest the test it bounds
+/// was measured to take**, in whole-suite runs on the host [`REFERENCE_BOOT_MS`]
+/// describes, at the suite's default width — so a test's time already carries
+/// the guests it shares that host with. A wait is bounded by that multiple of
+/// its whole test, the one number measured; a guest still talking at twice its
+/// ceiling is past it ([`ceiling_verdict`]). The source states that number, and
+/// this pays it out on a slower host ([`host_scale`]) and for a guest wider than
+/// this one ([`oversubscription`]), and for nothing else.
+///
+/// A ceiling is a guard against a wedge and never a verdict: the assertion is
+/// what the guest *said*.
+pub fn budget_smp(ceiling: Duration, smp: u32) -> Duration {
+    let (num, den) = host_scale();
     let (onum, oden) = oversubscription(smp);
-    budget(one_guest) * onum / oden
+    ceiling * num / den * onum / oden
 }
 
 /// A liveness guard that watches the guest instead of the host's clock.
 ///
-/// [`budget`] corrects a ceiling for how many guests share the machine, which
-/// is the part of "how fast is the host today" the harness knows. It does not
-/// know the rest, and a retry loop bounded by elapsed time has that ceiling for
-/// a *verdict* the moment the rest moves: a guest that is merely late reports
-/// exactly what a wedged one reports.
-///
-/// The two are distinguishable and the console is what distinguishes them: a
-/// guest still printing is a guest still working. So the ceiling here is time in
+/// A guest still printing is a guest still working. So the ceiling here is time in
 /// which **nothing arrived**, and a guest that keeps talking is given as long as
 /// it needs. That is the whole idea — no number in this type is a statement
 /// about the host.
@@ -437,7 +384,7 @@ impl Liveness {
 /// second producer: a test's own ceiling is a guard of exactly this kind.
 pub const STALLED: &str = "STALLED:";
 
-/// The backstop's red: a guest still talking past [`GUEST_WEDGED`] that never
+/// The backstop's red: a guest still talking at twice its ceiling that never
 /// finished. The ceiling too, and counted with [`STALLED`]'s.
 pub const TIMED_OUT: &str = "timed out after";
 
@@ -611,13 +558,10 @@ pub fn ceiling_verdict(
             ceiling.as_secs()
         ));
     }
-    // The absolute backstop, for a guest that is stuck *and* chatty and so never
-    // trips the silence guard — a suite that never ends is worse than one that
-    // reds. Never below the per-test ceiling, so a long test whose own budget
-    // already exceeds it is not cut short; never below [`GUEST_WEDGED`], the
-    // vetted stuck-and-chatty number a talking guest is judged by everywhere
-    // else. Not itself oversubscription-scaled — `ceiling` already carries that.
-    let backstop = ceiling.max(GUEST_WEDGED);
+    // The backstop, for a guest that is stuck *and* chatty and so never trips
+    // the silence guard: twice the ceiling, six times the slowest this test was
+    // ever measured.
+    let backstop = ceiling * 2;
     if elapsed > backstop {
         return Some(format!(
             "{TIMED_OUT} {}s, with the guest still talking {quiet:.0?} ago ({lines} \
@@ -3186,12 +3130,9 @@ impl QemuInstance {
     }
 
     /// Keep collecting serial output for `dur` after a test has returned.
-    /// **Not scaled by the width**, and it is the one duration in this file that
-    /// is not. Callers use it to *pace* — "let the guest run for 400 ms and tell
-    /// me what it said" — so multiplying it does not buy a slow guest more room,
-    /// it buys the test a longer sleep. `metal_sim_pointer_churn` has
-    /// twenty-four of these; scaled, they made it an 86 s job at width 8 and the
-    /// critical path of the whole phase.
+    /// **Not a ceiling, and not paid out as one**: callers use it to *pace* —
+    /// "let the guest run for 400 ms and tell me what it said" — so scaling it
+    /// would buy a test a longer sleep and a slow guest nothing.
     pub fn drain_serial(&mut self, dur: Duration) -> String {
         self.drain_for(dur, |_| false)
     }
@@ -3273,17 +3214,9 @@ impl QemuInstance {
         self.sockets.segment.as_ref().expect("segment needs BootOptions { segment: true }").open()
     }
 
-    /// [`budget`] for a host-side wait on *this* guest, widened by the guest's
-    /// own vCPU oversubscription.
-    ///
-    /// A test that polls the framebuffer or drains serial in its own loop —
-    /// rather than through [`Self::run_test_paced`] — reaches for a deadline,
-    /// and a deadline is a claim about the host. The free [`budget`] cannot see
-    /// how wide this guest is; this can, so an `smp:8` guest's poll loop is
-    /// given the `smp/cores` extra room a mostly-serial boot never priced. On a
-    /// host with a core per vCPU it is exactly [`budget`].
-    pub fn budget(&self, one_guest: Duration) -> Duration {
-        budget_smp(one_guest, self.smp)
+    /// [`budget_smp`] for a host-side wait on *this* guest.
+    pub fn budget(&self, ceiling: Duration) -> Duration {
+        budget_smp(ceiling, self.smp)
     }
 
     pub fn run_test(&mut self, name: &str, timeout: Duration) -> TestResult {
@@ -4730,6 +4663,10 @@ fn publish_line(
     tx.send(line).is_ok()
 }
 
+/// A boot's ceiling: [`budget_smp`]'s rule over the tests that are one boot and
+/// one trivial command, the slowest of which took 10 s.
+const BOOT_CEILING: Duration = Duration::from_secs(30);
+
 /// Returns every line seen on the way to the marker — see [`QemuInstance::boot_log`].
 fn wait_for_ready(
     child: &mut Child,
@@ -4740,30 +4677,7 @@ fn wait_for_ready(
     let no_timeout = options.debug_wait;
     let ready = options.ready_marker;
     let panic_aborts = ready == DEFAULT_READY;
-    // Ten seconds per guest this phase may have up, and never fewer than two
-    // guests' worth — the tree runs 15-25 suites a day across several agents,
-    // so one guest on a quiet host stopped being
-    // the regime some time before this did. Measured on 2026-08-03 with other
-    // agents building: two boots exceeded the flat ten seconds, one of them in a
-    // phase running a single guest.
-    //
-    // A wedge costs that much longer to report and nothing else.
-    //
-    // Scaled by the host too, and the first boot of a run is the one that
-    // cannot be: nothing has been measured yet, so it gets the flat number and
-    // every boot after it gets the corrected one. Two boot timeouts in CI run
-    // `31233476555` were this — `console: ready` and `compositor: ready`, on a
-    // runner where the same boots take twice what they take here.
-    //
-    // And by this guest's own oversubscription: an `smp:8` guest brings up all
-    // eight vCPUs during boot, so on the four-core runner even the boot is
-    // `8/4` oversubscribed, which the boot-derived `host_scale` cannot fold in
-    // because it *is* what boot measured. `oversubscription` says why in terms
-    // of `vcpus/cores`; on a host with a core per vCPU it multiplies by one.
-    let (num, den) = host_scale();
-    let (onum, oden) = oversubscription(options.smp);
-    let boot_timeout =
-        Duration::from_secs(10) * WIDTH.load(Ordering::SeqCst).max(2) * num / den * onum / oden;
+    let boot_timeout = budget_smp(BOOT_CEILING, options.smp);
     let start = Instant::now();
     let mut seen = String::new();
     loop {

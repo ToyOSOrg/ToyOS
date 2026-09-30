@@ -59,7 +59,7 @@ pub fn c_hello(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     let config = root.join("tests/testcases");
     let c_tests = [("hello".to_string(), elf)];
     let mut qemu = QemuInstance::boot_with_options(&config, &c_tests, rust_bins, BootOptions::default());
-    let result = qemu.run_test("test_c_hello", Duration::from_secs(60));
+    let result = qemu.run_test("test_c_hello", Duration::from_secs(29));
     if let Some(err) = &result.error {
         return Err(format!("{err}\n{}", result.stdout));
     }

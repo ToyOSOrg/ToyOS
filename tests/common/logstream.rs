@@ -193,7 +193,7 @@ pub fn stream(
 
     // Before any reader exists.
     let job = "test_rs_log_origin";
-    let before = guest.run_test(job, Duration::from_secs(60));
+    let before = guest.run_test(job, Duration::from_secs(44));
     if before.exit_code != Some(0) {
         return Err(format!("{job} exited {:?}:\n{}", before.exit_code, before.stdout));
     }
@@ -208,7 +208,7 @@ pub fn stream(
     }
     // And after: a record written once the reader was already reading.
     let later = "test_rs_empty_dir_stat";
-    let after = guest.run_test(later, Duration::from_secs(60));
+    let after = guest.run_test(later, Duration::from_secs(44));
     if after.exit_code != Some(0) {
         return Err(format!("{later} exited {:?}:\n{}", after.exit_code, after.stdout));
     }
@@ -243,9 +243,8 @@ pub fn stream(
 /// `logd`'s readers on the network at once (`serve.rs`'s `MAX_NETWORK_READERS`).
 const NETWORK_READERS: usize = 8;
 
-/// A liveness guard on the flood reaching a reader: five megabytes through a
-/// TCG guest's netd, as long as the flood job itself is given.
-const FLOOD_CEILING: Duration = Duration::from_secs(300);
+/// A liveness guard on the flood reaching a reader.
+const FLOOD_CEILING: Duration = Duration::from_secs(131);
 
 /// What `logd` says as it lets a reader go that took no bytes it was owed.
 const LET_GO: &str = "logd: letting ";

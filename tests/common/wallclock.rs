@@ -477,7 +477,7 @@ fn mtime_boot(
     if boot.contains("are a tmpfs") {
         return Err(format!("/home fell back to tmpfs, so no file of it outlives the boot:\n{boot}"));
     }
-    let result = qemu.run_test(&format!("test_rs_file_mtime {mode} {MTIME_PATH}"), Duration::from_secs(60));
+    let result = qemu.run_test(&format!("test_rs_file_mtime {mode} {MTIME_PATH}"), Duration::from_secs(50));
     let printed = printed_mtime(&result);
     writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
     qemu.flush_stdin();
@@ -573,7 +573,7 @@ pub fn file_mtime_undated(
             clock_lines(&boot)
         ));
     }
-    let result = qemu.run_test("test_rs_file_mtime undated", Duration::from_secs(60));
+    let result = qemu.run_test("test_rs_file_mtime undated", Duration::from_secs(29));
     writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
     qemu.flush_stdin();
     let tail = qemu.drain_serial(Duration::from_secs(20));

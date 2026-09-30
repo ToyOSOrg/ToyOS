@@ -27,7 +27,7 @@ pub const JOBS: &[&str] = &["usbwrite", "usbread", "fbcheck", "fbfill", "fbread"
 pub const CONFIG: &str = "tests/metaldevicecase";
 pub const BOOT: &str = "metaldevicecase";
 
-const WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+const WAIT: std::time::Duration = std::time::Duration::from_secs(77);
 
 /// The T14's judge: every record the inventory owes, every span against its
 /// ceiling, and the shutdown's own account of what it handed back.

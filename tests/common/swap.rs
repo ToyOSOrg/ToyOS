@@ -30,7 +30,7 @@ pub const VIRTIO: Bench =
     Bench { profile: qemu::Profile::Headless, config: "tests/swapcase", device: "virtio-net" };
 
 /// A liveness guard on a guest that stopped talking, never a verdict.
-const CEILING: Duration = Duration::from_secs(120);
+const CEILING: Duration = Duration::from_secs(104);
 
 /// The swapping boot's one job on the T14: it holds the machine until the
 /// swap invocation hands it back.

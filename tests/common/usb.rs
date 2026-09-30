@@ -3091,7 +3091,7 @@ pub fn xhci_flap(
     // Each move waits for the guest to print the one before it.
     let (mut ready, mut binds, mut mev) = (false, 0usize, 0usize);
     let mut input: Option<qemu::QmpInput> = None;
-    let result = qemu.run_test_paced("test_rs_input_events", Duration::from_secs(60), |socket, line| {
+    let result = qemu.run_test_paced("test_rs_input_events", Duration::from_secs(47), |socket, line| {
         let qmp = || socket.expect("xhci_flap needs BootOptions { qmp: true }");
         if line.contains("===INPUT_READY===") {
             ready = true;

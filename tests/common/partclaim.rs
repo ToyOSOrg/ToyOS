@@ -185,7 +185,7 @@ pub fn partition_claim(
     // A guest that failed is judged off the disk all the same: what its failure
     // did to the neighbours is the half of the verdict it cannot give itself.
     let run = format!("test_rs_partition_claimant main {esp} {log} {root}");
-    let result = qemu.run_test(&run, Duration::from_secs(180));
+    let result = qemu.run_test(&run, Duration::from_secs(65));
     let tail = shut_down(qemu);
     let guest = guest_verdict(&result, &tail, REFUSALS).and_then(|kernel| main_kernel_lines(&kernel));
     no_panic("on the way down", &tail)?;
@@ -262,7 +262,7 @@ pub fn partition_claim_gives_up(
         let boot = qemu.boot_log().to_string();
         no_panic(role, &boot)?;
         let result =
-            qemu.run_test(&format!("test_rs_partition_claimant {role}"), Duration::from_secs(180));
+            qemu.run_test(&format!("test_rs_partition_claimant {role}"), Duration::from_secs(128));
         let tail = shut_down(qemu);
         let kernel = guest_verdict(&result, &tail, refusals).map_err(|e| format!("{role}: {e}"))?;
         for want in wants {
@@ -314,7 +314,7 @@ fn root_withheld(
         return Err(format!("withheld: the kernel never said {not_held:?}:\n{boot}"));
     }
     let result =
-        qemu.run_test(&format!("test_rs_partition_claimant withheld {root}"), Duration::from_secs(180));
+        qemu.run_test(&format!("test_rs_partition_claimant withheld {root}"), Duration::from_secs(128));
     let tail = shut_down(qemu);
     let kernel = guest_verdict(&result, &tail, 1).map_err(|e| format!("withheld: {e}"))?;
     let want = format!("partclaim: {root} is where ROOT was read from, and the kernel withholds it");
@@ -427,7 +427,7 @@ fn departed(
     let moved = stick;
     let result = qemu.run_test_hooked(
         &format!("test_rs_partition_claimant {role}"),
-        Duration::from_secs(240),
+        Duration::from_secs(128),
         MOVE_NOW,
         move |socket| {
             let mut devices = qemu::QmpDevices::open(socket);

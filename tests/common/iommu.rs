@@ -2094,7 +2094,7 @@ pub fn userdev_dma_fault(
     // And the machine is running. This is the assertion the whole stage is
     // for: a guest that answers here is one whose scheduler, spawn path and
     // IPC all survived a device being refused mid-flight.
-    let result = qemu.run_test("test_rs_log_origin", Duration::from_secs(60));
+    let result = qemu.run_test("test_rs_log_origin", Duration::from_secs(56));
     if let Some(err) = &result.error {
         return Err(format!(
             "the guest stopped answering after the fault: {err}\n{}\n{}",
@@ -2167,7 +2167,7 @@ pub fn userdev_residue_is_its_own(
         ..Default::default()
     };
     let mut qemu = QemuInstance::boot_with_options(test_config, &[], &bins, options);
-    let result = qemu.run_test("test_rs_userdev_residue", Duration::from_secs(60));
+    let result = qemu.run_test("test_rs_userdev_residue", Duration::from_secs(41));
     let mut log = Serial::boot(&qemu);
     log.push(&result.serial);
     if let Some(err) = &result.error {

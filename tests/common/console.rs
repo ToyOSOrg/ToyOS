@@ -18,7 +18,7 @@ use super::qemu::{BootOptions, QemuInstance};
 
 /// A liveness guard and never the verdict: it only catches a guest that
 /// stopped answering.
-const CEILING: Duration = Duration::from_secs(60);
+const CEILING: Duration = Duration::from_secs(35);
 
 /// The last of a capture, for a failure message.
 fn tail(text: &str) -> String {

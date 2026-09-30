@@ -377,7 +377,7 @@ pub fn blockd_serves_partitions(
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
     let (mut qemu, layout, disk, trace, before) = boot(c_bins, rust_bins, "blockd-serves", &[])?;
-    let claims = role(&mut qemu, "claims", Duration::from_secs(240))?;
+    let claims = role(&mut qemu, "claims", Duration::from_secs(152))?;
     for want in [
         "an absent GUID refused with NotFound",
         "the zero GUID refused with NotFound",
@@ -394,7 +394,7 @@ pub fn blockd_serves_partitions(
     if !cache.contains("present, so a flush issues Flush") {
         return Err(format!("blockd's controller reports no volatile write cache: {cache}"));
     }
-    let bench = role(&mut qemu, "bench", Duration::from_secs(600))?;
+    let bench = role(&mut qemu, "bench", Duration::from_secs(152))?;
     let numbers = said(&bench, "blockd_io: bench")?.to_string();
     let tail = partclaim::shut_down(qemu);
     partclaim::no_panic("on the way down", &tail)?;
@@ -470,7 +470,7 @@ pub fn blockd_survives_its_death(
         said(&reset, want)?;
     }
     let reset_again = said(&reset, "went out again after the reset")?.to_string();
-    let crash = role(&mut qemu, "crash", Duration::from_secs(600))?;
+    let crash = role(&mut qemu, "crash", Duration::from_secs(251))?;
     let crash_again = said(&crash, "went out again after the restart")?.to_string();
     for want in [
         "blockd: WITHHELD the device's answer to a write",
@@ -658,7 +658,7 @@ pub fn blockd_lends_within_its_bound(
         ("dma-bound", "the next refused with ResourceExhausted"),
         ("dma-churn", "the device then read block 0 into it"),
     ] {
-        let result = role(&mut qemu, name, Duration::from_secs(240))?;
+        let result = role(&mut qemu, name, Duration::from_secs(233))?;
         lines.push(said(&result, want)?.to_string());
         log.push_str(&result.before);
         log.push_str(&result.serial);

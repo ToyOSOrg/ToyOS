@@ -26,7 +26,7 @@ const GATE: &str = "log-gate";
 const STORM_GATE: &str = "log-storm";
 
 /// The whole run's ceiling: a gate that never finishes is what it reds.
-const CEILING: Duration = Duration::from_secs(60);
+const CEILING: Duration = Duration::from_secs(50);
 
 /// One boot's storm, as the guest reported it.
 struct Report {

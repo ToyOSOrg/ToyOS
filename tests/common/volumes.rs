@@ -303,7 +303,7 @@ pub fn esp_filesystem(
         ));
     }
 
-    let result = qemu.run_test("test_rs_esp_files", Duration::from_secs(60));
+    let result = qemu.run_test("test_rs_esp_files", Duration::from_secs(35));
     if let Some(err) = &result.error {
         return Err(format!("the guest stopped answering: {err}\nserial:\n{}", result.serial));
     }
@@ -540,7 +540,7 @@ pub fn kernel_log_file(
     // up, and a stick slower than the runner puts its line after the marker.
     let opened = "logd: this boot's kernel log is";
     if !boot.contains(opened) {
-        boot.push_str(&qemu.drain_until(Duration::from_secs(10), |line| line.contains(opened)));
+        boot.push_str(&qemu.drain_until(Duration::from_secs(56), |line| line.contains(opened)));
     }
     if !boot.contains(opened) {
         return Err(format!("logd never opened a file:\n{}", volume_lines(&boot)));
@@ -937,7 +937,7 @@ pub fn writeback_durability(
         ));
     }
 
-    let result = qemu.run_test("test_rs_writeback_durability", Duration::from_secs(60));
+    let result = qemu.run_test("test_rs_writeback_durability", Duration::from_secs(26));
     if let Some(err) = &result.error {
         return Err(format!("the guest stopped answering: {err}\nserial:\n{}", result.serial));
     }
@@ -1225,7 +1225,7 @@ pub fn fat_backing_revoked(
         ));
     }
 
-    let result = qemu.run_test("test_rs_fat_backing_revoked", Duration::from_secs(60));
+    let result = qemu.run_test("test_rs_fat_backing_revoked", Duration::from_secs(59));
     if let Some(err) = &result.error {
         return Err(format!("the guest stopped answering: {err}\nserial:\n{}", result.serial));
     }
@@ -1422,7 +1422,7 @@ pub fn redirty_mid_flush(
         ));
     }
 
-    let result = qemu.run_test("test_rs_redirty_mid_flush", Duration::from_secs(120));
+    let result = qemu.run_test("test_rs_redirty_mid_flush", Duration::from_secs(80));
     if let Some(err) = &result.error {
         return Err(format!("the guest stopped answering: {err}\nserial:\n{}", result.serial));
     }
@@ -1635,7 +1635,7 @@ pub fn fs_rename_durable(
         ));
     }
 
-    let result = qemu.run_test("test_rs_fs_rename_durable", Duration::from_secs(60));
+    let result = qemu.run_test("test_rs_fs_rename_durable", Duration::from_secs(56));
     if let Some(err) = &result.error {
         return Err(format!("the guest stopped answering: {err}\nserial:\n{}", result.serial));
     }
@@ -1752,7 +1752,7 @@ pub fn fs_dirs_durable(
         ));
     }
 
-    let result = qemu.run_test("test_rs_fs_dirs_durable", Duration::from_secs(60));
+    let result = qemu.run_test("test_rs_fs_dirs_durable", Duration::from_secs(56));
     if let Some(err) = &result.error {
         return Err(format!("the guest stopped answering: {err}\nserial:\n{}", result.serial));
     }

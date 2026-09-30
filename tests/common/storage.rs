@@ -478,7 +478,7 @@ pub fn home_overwrite_reads_back(
         ));
     }
 
-    let result = qemu.run_test("test_rs_home_overwrite_zero", Duration::from_secs(240));
+    let result = qemu.run_test("test_rs_home_overwrite_zero", Duration::from_secs(38));
     let log = format!("{boot}\n{}{}{}", result.before, result.stdout, result.serial);
     let said = log.lines().find(|l| l.contains("HOME-OVERWRITE")).map(str::trim).map(String::from);
     let guest_len: Option<usize> = said
@@ -579,7 +579,7 @@ pub fn apps_and_home_are_one_filesystem(
         ));
     }
 
-    let result = qemu.run_test("test_rs_hierarchy_paths", Duration::from_secs(60));
+    let result = qemu.run_test("test_rs_hierarchy_paths", Duration::from_secs(47));
     if result.exit_code != Some(0) {
         return Err(format!(
             "hierarchy_paths guest failed:\n{}\nkernel log while it ran:\n{}{}",

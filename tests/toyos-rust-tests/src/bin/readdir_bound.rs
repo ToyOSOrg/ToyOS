@@ -9,9 +9,8 @@
 //! success. A bound plus a silent truncation is a quieter version of the same
 //! defect, so both are asserted here.
 //!
-//! `/home` gets the same class third: its btree walk crossed the kernel's
-//! allocation ceiling past 32,768 entries (a panic from ordinary `create`s)
-//! and now refuses at the bound first. All below is an ordinary workload.
+//! `/home` gets the same bound third, on the btree walk bcachefs lists with.
+//! All below is an ordinary workload.
 
 use std::fs;
 use std::process::Command;
@@ -26,11 +25,12 @@ const MAX_LIST_ENTRIES: usize = 16_384;
 /// truncating kernel returns about 4,000 of them.
 const PLAIN_ENTRIES: usize = 6_000;
 
-/// One past where the unbounded `/home` walk's `Vec` doubled over the kernel's allocation ceiling.
-const HOME_ENTRIES: usize = 32_769;
+/// One past the bound: the walk is refused at the first entry over it, however
+/// many the directory holds.
+const HOME_ENTRIES: usize = MAX_LIST_ENTRIES + 1;
 
 fn main() {
-    home_tree_past_the_doubling_is_refused();
+    home_past_the_bound_is_refused();
     plain_entries_are_all_returned();
     subdirectories_at_the_limit();
     one_past_the_limit_is_refused();
@@ -40,9 +40,8 @@ fn main() {
 }
 
 /// First, while nothing else holds file-cache entries: the listing bound on
-/// `/home` at the count that was a kernel death. The files stay — this boot is
-/// the test's own.
-fn home_tree_past_the_doubling_is_refused() {
+/// `/home`. The files stay — this boot is the test's own.
+fn home_past_the_bound_is_refused() {
     for i in 0..HOME_ENTRIES {
         fs::write(format!("/home/rb{i}"), b"").expect("create on /home failed");
     }

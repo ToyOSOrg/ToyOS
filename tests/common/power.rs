@@ -1366,8 +1366,10 @@ fn silent_guest(qemu: &QemuInstance, tail: &str) -> String {
 /// here is the poll, the seal and the reset, and the bound is the one thing
 /// about the mechanism a boot may legitimately differ on. Wide enough that a
 /// `jobcase` boot reaches its shutdown syscall under TCG first, which
-/// [`bootlog::WEDGE_STAGED`] above is the assertion about.
-const WEDGE_DEADLINE: &str = "boot-deadline=15000";
+/// [`bootlog::WEDGE_STAGED`] above is the assertion about: several times the
+/// latest such a boot has said `Boot: complete` in a whole suite, with its one
+/// job after it.
+const WEDGE_DEADLINE: &str = "boot-deadline=8000";
 
 /// One CPU that has stopped taking interrupts ends the machine, from its own
 /// NMI, and the record names where it was standing.
@@ -1477,11 +1479,12 @@ pub fn hard_lockup_ends_a_deaf_cpu(
 ///
 /// **Wider than [`WEDGE_DEADLINE`] and for the opposite reason.** The staged cpu
 /// goes deaf once the machine is up, so its bound starts running seconds after
-/// the deadline's does; half of 30 s leaves it reaching its own bound with the
-/// whole of the deadline's second half still ahead, which is what makes a page
+/// the deadline's does; half of it leaves the lockup found with the deadline's
+/// second half, less that start, still ahead, which is what makes a page
 /// reading [`bootlog::LOCKED_UP`] rather than [`bootlog::DEADLINE_EXPIRED`] a
-/// fact about this detector and not a race between two of them.
-const LOCKUP_DEADLINE: &str = "boot-deadline=30000";
+/// fact about this detector and not a race between two of them. Its half is
+/// still longer than the probe's `REACH_THE_LOCK_NS`.
+const LOCKUP_DEADLINE: &str = "boot-deadline=12000";
 
 /// A boot that hung is bounded by the stick, and the third boot is free again.
 ///
