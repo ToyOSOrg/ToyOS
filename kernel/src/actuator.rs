@@ -270,9 +270,8 @@ actuators! {
     /// handler posted it there.
     handler_post = "handler-post";
 
-    /// Spin a known span inside the first process exit, where both of
-    /// `mask-windows`' windows are open, and say how long; judged by
-    /// `mask_windows`.
+    /// Mark the windows open at the first `SYS_EXIT`, whose entry opened both
+    /// of `mask-windows`' kinds, and say so; judged by `mask_windows`.
     windows_staged = "windows-staged";
 
     /// Starve the four xHCI bring-up register waits in `init_one`.

@@ -523,7 +523,7 @@ const SCREEN_TESTS: &[(&str, Sched, qemu::Profile)] = &[
     ("virt_debug_refused", Sched::Parallel, qemu::Profile::VirtEl2),
     ("virt_readonly_copyout", Sched::Parallel, qemu::Profile::VirtEl2),
     // `mask_windows`' judge over every AArch64 job: the windows each report
-    // carries and the staged span, counts and an order; no clock.
+    // carries and the stage's marked ones, counts and an order; no clock.
     ("virt_mask_windows", Sched::Parallel, qemu::Profile::VirtEl2),
     ("virt_smp", Sched::Parallel, qemu::Profile::VirtEl2),
     ("virt_el1_smp", Sched::Parallel, qemu::Profile::VirtTcg),
@@ -584,9 +584,9 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // of it.
     ("irq_census_conservation", Sched::Parallel),
     // The longest interrupts-off and preemption-off windows, beside the
-    // census, under one process's 256 threads parked on one ring: a staged
-    // span is carried by a later report, and every hook's check held. Counts
-    // and an order of reports; no clock in the verdict.
+    // census, under one process's 256 threads parked on one ring: each window
+    // the stage marked closes once in a later report, and every hook's check
+    // held. Counts and an order of reports; no clock in the verdict.
     ("mask_windows", Sched::Parallel),
     ("control_regs", Sched::Parallel),
     ("control_regs_negative", Sched::Parallel),
@@ -3598,8 +3598,8 @@ fn virt_job(profile: qemu::Profile, job: &str, said: &str) -> Result<(), String>
 }
 
 /// `mask_windows` on AArch64: every job of `tests/virtjobcase` run on a
-/// `mask-windows` kernel with a span staged in the first exit, judged once the
-/// last has ended.
+/// `mask-windows` kernel staged at the first `SYS_EXIT`, judged once the last
+/// has ended.
 fn virt_mask_windows(profile: qemu::Profile) -> Result<(), String> {
     let config = compile::repo_root().join("tests/virtjobcase/system.toml");
     let case = config.parent().expect("system.toml has a directory");
@@ -12132,9 +12132,9 @@ fn run_machine_test(
             ))
         }
         "mask_windows" => {
-            // Four CPUs, and a first process whose exit the staged span is
-            // spun inside, so the herd's exit reports it: every hook runs
-            // under the herd, and a transition none saw panics the guest.
+            // Four CPUs, and a first process whose `SYS_EXIT` the stage marks,
+            // so the herd's exit reports the marked windows closed: every hook
+            // runs under the herd, and a transition none saw panics the guest.
             let options = BootOptions {
                 smp: 4,
                 kernel_features: toyos_build::build::MASK_WINDOWS_KERNEL,
@@ -14223,30 +14223,11 @@ fn parse_xhci_binds(log: &str) -> Vec<XhciBind> {
         .collect()
 }
 
-/// Every CPU's `CR0` and `CR4`, against what a CPU running this kernel must
-/// hold.
-///
-/// **Not the same question the kernel's own self-check asks.** That one compares
-/// each CPU against the declaration, so it catches a CPU that missed it and
-/// nothing else; a declaration that is wrong satisfies it on every core. The
-/// bits below are spelled out here, away from the constants that produce them,
-/// so the two have to agree independently — and the ones that matter are the
-/// ones an AP used to arrive with: `CD`/`NW` set is caching off, `WP` clear is
-/// the kernel's own read-only mappings not binding supervisor writes, `NE`
-/// clear routes an unmasked x87 exception to a pin nothing listens on.
-///
-/// `OSXSAVE` is asserted *clear*: with it set the CPU would permit `XCR0` to
-/// name components `FXSAVE64` does not save, and this kernel saves user FP
-/// state with `FXSAVE64`.
-///
-/// Both halves, because the kernel writes both registers whole: every bit named
-/// below must hold its named value, **and a bit named nowhere below may not be
-/// set at all**. Silence about a bit is a hole rather than a permission.
 /// A `windows-staged` boot's windows: `common::irqcensus::windows`'s verdict,
-/// with the staged span said and `cpus` CPUs reporting.
+/// with a stage made and `cpus` CPUs reporting.
 fn mask_windows(capture: &str, cpus: u32) -> Result<(), String> {
     if !capture.contains(common::irqcensus::STAGED) {
-        return Err(format!("`windows-staged` said no span, so nothing was held to one:\n{capture}"));
+        return Err(format!("`windows-staged` marked nothing, so no window was held to a stage:\n{capture}"));
     }
     let longest = common::irqcensus::windows(capture)?;
     if longest.len() != cpus as usize {
@@ -14301,6 +14282,25 @@ fn windows_on_metal(boot: &metal::Readback) -> Result<(), String> {
     boot.measured("windows.windowscase.herd_preempt_off_ns", herd_preempt)
 }
 
+/// Every CPU's `CR0` and `CR4`, against what a CPU running this kernel must
+/// hold.
+///
+/// **Not the same question the kernel's own self-check asks.** That one compares
+/// each CPU against the declaration, so it catches a CPU that missed it and
+/// nothing else; a declaration that is wrong satisfies it on every core. The
+/// bits below are spelled out here, away from the constants that produce them,
+/// so the two have to agree independently — and the ones that matter are the
+/// ones an AP used to arrive with: `CD`/`NW` set is caching off, `WP` clear is
+/// the kernel's own read-only mappings not binding supervisor writes, `NE`
+/// clear routes an unmasked x87 exception to a pin nothing listens on.
+///
+/// `OSXSAVE` is asserted *clear*: with it set the CPU would permit `XCR0` to
+/// name components `FXSAVE64` does not save, and this kernel saves user FP
+/// state with `FXSAVE64`.
+///
+/// Both halves, because the kernel writes both registers whole: every bit named
+/// below must hold its named value, **and a bit named nowhere below may not be
+/// set at all**. Silence about a bit is a hole rather than a permission.
 /// The interrupt census adds up, is monotonic, and every device delivery is
 /// still cpu0's.
 ///

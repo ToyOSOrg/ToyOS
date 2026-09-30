@@ -346,7 +346,7 @@ mod checks {
     }
 
     /// [`mask_windows`] against captures no guest has to produce: two CPUs,
-    /// two reports, and a span staged between them.
+    /// three reports, and a stage on cpu1 whose marked windows close apart.
     #[test]
     fn mask_windows_verdict() -> Result<(), String> {
         let census = |cpu: u32| {
@@ -358,13 +358,16 @@ mod checks {
         let windows = |cpu: u32, irqs: u64, preempt: u64| {
             format!("[kernel 0.1 cpu0] windows: cpu{cpu} irqs_off_ns={irqs} preempt_off_ns={preempt}\n")
         };
-        let staged = "[kernel 0.1 cpu1] windows: staged cpu1 1000000ns\n";
-        let good = [
-            census(0), windows(0, 5, 7), census(1), windows(1, 3, 4),
-            staged.to_string(),
-            census(0), windows(0, 2, 2), census(1), windows(1, 1_000_000, 1_200_000),
-        ]
-        .concat();
+        let open = |cpu: u32| format!("[kernel 0.1 cpu{cpu}] windows: staged cpu{cpu} open\n");
+        let closed = |cpu: u32, irqs: bool, preempt: bool| {
+            format!("[kernel 0.1 cpu0] windows: staged cpu{cpu} closed irqs_off={irqs} preempt_off={preempt}\n")
+        };
+        let report = |cpu1_closed: &str| {
+            [census(0), windows(0, 2, 2), census(1), windows(1, 1, 1), cpu1_closed.to_string()].concat()
+        };
+        let first = [census(0), windows(0, 5, 7), census(1), windows(1, 3, 4)].concat();
+        let (irqs, preempt) = (closed(1, true, false), closed(1, false, true));
+        let good = [first.clone(), open(1), report(&irqs), report(&preempt)].concat();
         let refused = |what: &str, capture: &str, says: &str| match mask_windows(capture, 2) {
             Ok(()) => Err(format!("{what} was accepted")),
             Err(e) if e.contains(says) => Ok(()),
@@ -372,33 +375,31 @@ mod checks {
         };
 
         mask_windows(&good, 2).map_err(|e| format!("the good capture was refused: {e}"))?;
+        let together = [first.clone(), open(1), report(&closed(1, true, true))].concat();
+        mask_windows(&together, 2).map_err(|e| format!("both closes in one report were refused: {e}"))?;
 
-        refused("no staged span", &good.replace(staged, ""), "said no span")?;
-        refused(
-            "a staged span no later report carries",
-            &good.replace("irqs_off_ns=1000000", "irqs_off_ns=999999"),
-            "spun 1000000ns",
-        )?;
-        refused(
-            "a staged span carried only by a report before it",
-            &[
-                census(0), windows(0, 5, 7), census(1), windows(1, 1_000_000, 1_200_000),
-                staged.to_string(),
-                census(0), windows(0, 2, 2), census(1), windows(1, 3, 4),
-            ]
-            .concat(),
-            "spun 1000000ns",
-        )?;
-        refused("a census without its windows", &good.replace(&windows(0, 2, 2), ""), "went out without")?;
+        refused("no stage", &good.replace(&open(1), "").replace(&irqs, "").replace(&preempt, ""), "marked nothing")?;
+        refused("a stage no report says closed", &good.replace(&irqs, "").replace(&preempt, ""), "closed 0 time(s)")?;
+        refused("only the interrupts-off window closed", &good.replace(&preempt, ""), "preemption-off window 0")?;
+        refused("a marked window closed twice", &[good.clone(), report(&irqs)].concat(), "closed 2 time(s)")?;
+        refused("a close before the stage", &[first, report(&irqs), open(1), report(&preempt)].concat(), "no stage before it")?;
+        refused("a close on a CPU nobody staged", &good.replace(&irqs, &closed(0, true, false)), "cpu0 closed a window no stage")?;
+        refused("a second stage", &[good.clone(), open(0)].concat(), "a second stage")?;
+        refused("a staged span in nanoseconds", &good.replace(&open(1), "[kernel 0.1 cpu1] windows: staged cpu1 250000000ns\n"), "unreadable staged line")?;
+        refused("a census without its windows", &good.replace(&windows(0, 5, 7), ""), "went out without")?;
         refused(
             "a CPU that closed no window",
             &good.replace(&windows(0, 5, 7), &windows(0, 0, 7)).replace(&windows(0, 2, 2), &windows(0, 0, 2)),
             "closed no window",
         )?;
-        refused("one CPU of two", &[census(0), windows(0, 5, 7), staged.replace("cpu1", "cpu0"), census(0), windows(0, 1_000_000, 1_000_000)].concat(), "1 of 2")?;
+        refused(
+            "one CPU of two",
+            &[census(0), windows(0, 5, 7), open(0), census(0), windows(0, 1, 1), closed(0, true, true)].concat(),
+            "1 of 2",
+        )?;
         refused("a field missing", &good.replace(" preempt_off_ns=7", ""), "fields")?;
 
-        eprintln!("  [mask_windows] the verdict refuses 7 captures and accepts one");
+        eprintln!("  [mask_windows] the verdict refuses 12 captures and accepts two");
         Ok(())
     }
 

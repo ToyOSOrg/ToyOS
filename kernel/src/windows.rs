@@ -103,7 +103,9 @@ pub fn woken() {
     on(|w| w.woken(cpu::counter));
 }
 
-/// `cpu`'s line, taking its longest windows so the next report starts from none.
+/// `cpu`'s line, taking its longest windows so the next report starts from
+/// none, and under `boot-actuators` which of `windows-staged`'s marked windows
+/// closed since the report before.
 pub fn log_cpu(cpu: u32) {
     let Some(of) = CPUS.get(cpu as usize) else { return };
     let (irqs, preempt) = of.take();
@@ -112,17 +114,18 @@ pub fn log_cpu(cpu: u32) {
         crate::clock::nanos_of_ticks(irqs),
         crate::clock::nanos_of_ticks(preempt),
     );
+    #[cfg(feature = "boot-actuators")]
+    {
+        let (irqs_off, preempt_off) = of.take_marked();
+        if irqs_off || preempt_off {
+            crate::log!("windows: staged cpu{cpu} closed irqs_off={irqs_off} preempt_off={preempt_off}");
+        }
+    }
 }
 
-/// What `windows-staged` spins for: past any window an emulated guest closes
-/// on its own, so a report carrying it carries the spin, and far inside
-/// `time::DEAF_CPU`.
-#[cfg(feature = "boot-actuators")]
-const STAGED_NS: u64 = 250_000_000;
-
-/// `windows-staged`: at the first process exit, spin for [`STAGED_NS`] inside
-/// the exit syscall, where both windows are open, and say how long, so a later
-/// report of this CPU must carry both windows at least that long.
+/// `windows-staged`: at the first `SYS_EXIT`, whose entry masked interrupts
+/// and raised the preempt count, mark this CPU's open windows and say so; a
+/// later report of this CPU must say each marked window closed, once.
 #[cfg(feature = "boot-actuators")]
 pub fn stage_once() {
     use core::sync::atomic::AtomicBool;
@@ -130,15 +133,12 @@ pub fn stage_once() {
     if STAGED.swap(true, Relaxed) {
         return;
     }
-    let ticks = crate::clock::counter_ticks(STAGED_NS);
-    assert!(ticks > 0, "windows-staged: the clock has no period to spin by");
-    let from = cpu::counter();
-    while cpu::counter().saturating_sub(from) < ticks {
-        core::hint::spin_loop();
-    }
-    crate::log!(
-        "windows: staged cpu{} {}ns",
-        percpu::cpu_id(),
-        crate::clock::nanos_of_ticks(ticks)
+    // From the CPU, not the record: a stage moved where either window is shut
+    // is refused as that, not as a hook the record says it missed.
+    assert!(
+        !cpu::interrupts_enabled() && crate::preempt::count() > 0,
+        "windows-staged: staged with interrupts open or the preempt count at zero, where no window is open"
     );
+    on(Windows::mark);
+    crate::log!("windows: staged cpu{} open", percpu::cpu_id());
 }

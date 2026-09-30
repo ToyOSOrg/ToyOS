@@ -132,38 +132,64 @@ impl Windows {
     }
 }
 
-/// The head of the line `windows-staged` says what it spun with,
-/// `windows: staged cpuK <n>ns`.
+/// The head of `windows-staged`'s lines: `windows: staged cpuK open` where it
+/// marks cpuK's open windows, and `windows: staged cpuK closed
+/// irqs_off=<bool> preempt_off=<bool>` in a report of cpuK after a marked
+/// window closed.
 pub const STAGED: &str = "windows: staged cpu";
 
-fn staged(line: &str) -> Option<Result<(u32, u64), String>> {
-    let rest = line.split(STAGED).nth(1)?;
-    let parsed = rest
-        .trim()
-        .split_once(' ')
-        .and_then(|(cpu, ns)| Some((cpu.parse().ok()?, ns.strip_suffix("ns")?.parse().ok()?)))
-        .ok_or_else(|| format!("unreadable staged span in {rest:?}"));
-    Some(parsed)
+enum Staged {
+    Open(u32),
+    Closed { cpu: u32, irqs_off: bool, preempt_off: bool },
 }
 
-/// The judge of every `mask-windows` boot: each census line has its CPU's
-/// windows line beside it, each CPU closed both kinds of window at some point
-/// of the boot, and a span `windows-staged` spun is carried, in both windows,
-/// by a later report of the CPU it spun on. Answers each CPU's longest windows
-/// over the whole capture.
+fn staged(line: &str) -> Option<Result<Staged, String>> {
+    let rest = line.split(STAGED).nth(1)?;
+    let flag = |field: &str, name: &str| field.strip_prefix(name)?.parse::<bool>().ok();
+    let parsed = match rest.split_whitespace().collect::<Vec<_>>().as_slice() {
+        [cpu, "open"] => cpu.parse().ok().map(Staged::Open),
+        [cpu, "closed", irqs, preempt] => (|| {
+            Some(Staged::Closed {
+                cpu: cpu.parse().ok()?,
+                irqs_off: flag(irqs, "irqs_off=")?,
+                preempt_off: flag(preempt, "preempt_off=")?,
+            })
+        })(),
+        _ => None,
+    };
+    Some(parsed.ok_or_else(|| format!("unreadable staged line {rest:?}")))
+}
+
+/// The judge of every `mask-windows` boot, and it judges no duration: each
+/// census line has its CPU's windows line beside it, each CPU closed both
+/// kinds of window at some point of the boot, and a stage's CPU says each of
+/// its marked windows closed exactly once, in the reports after the stage.
+/// Answers each CPU's longest windows over the whole capture.
 pub fn windows(capture: &str) -> Result<BTreeMap<u32, Windows>, String> {
     let mut censuses: BTreeMap<u32, usize> = BTreeMap::new();
     let mut reports: Vec<Windows> = Vec::new();
-    // Where each staged span was said, as a position in `reports`.
-    let mut spun: Vec<(usize, u32, u64)> = Vec::new();
+    // The staged CPU, and how many of its marked windows of each kind closed.
+    let mut stage: Option<(u32, u32, u32)> = None;
     for line in capture.lines() {
         if let Some(census) = Census::parse(line) {
             *censuses.entry(census.map_err(|why| format!("{why}\nline: {line}"))?.cpu).or_default() += 1;
         } else if let Some(report) = Windows::parse(line) {
             reports.push(report.map_err(|why| format!("{why}\nline: {line}"))?);
         } else if let Some(said) = staged(line) {
-            let (cpu, ns) = said?;
-            spun.push((reports.len(), cpu, ns));
+            match said.map_err(|why| format!("{why}\nline: {line}"))? {
+                Staged::Open(cpu) => {
+                    if stage.replace((cpu, 0, 0)).is_some() {
+                        return Err(format!("a second stage, and the kernel stages once a boot\nline: {line}"));
+                    }
+                }
+                Staged::Closed { cpu, irqs_off, preempt_off } => match &mut stage {
+                    Some((staged, irqs, preempt)) if *staged == cpu => {
+                        *irqs += u32::from(irqs_off);
+                        *preempt += u32::from(preempt_off);
+                    }
+                    _ => return Err(format!("cpu{cpu} closed a window no stage before it marked\nline: {line}")),
+                },
+            }
         }
     }
     if censuses.is_empty() {
@@ -194,12 +220,11 @@ pub fn windows(capture: &str) -> Result<BTreeMap<u32, Windows>, String> {
             ));
         }
     }
-    for (at, cpu, ns) in spun {
-        let later: Vec<&Windows> = reports[at..].iter().filter(|r| r.cpu == cpu).collect();
-        if !later.iter().any(|r| r.irqs_off_ns >= ns) || !later.iter().any(|r| r.preempt_off_ns >= ns) {
+    if let Some((cpu, irqs, preempt)) = stage {
+        if (irqs, preempt) != (1, 1) {
             return Err(format!(
-                "cpu{cpu} spun {ns}ns with both windows open, and no later report of it carries \
-                 both that long: {later:?}"
+                "cpu{cpu}'s reports after its stage say its marked interrupts-off window closed \
+                 {irqs} time(s) and its marked preemption-off window {preempt}; each closes once"
             ));
         }
     }

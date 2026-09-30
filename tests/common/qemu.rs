@@ -190,7 +190,7 @@ pub fn boot_census() -> (u32, u32, Vec<String>) {
 /// made afresh. [`toyos_build::build::MASK_WINDOWS_KERNEL`] made it: its hooks
 /// sit on every entry and masking primitive, where a parameter would be a
 /// branch on the path they measure, and it carries the test kernel's actuators
-/// so a staged span can hold it to one. Interactive debug mode is separate: it
+/// so a stage can mark its windows. Interactive debug mode is separate: it
 /// builds [`toyos_build::build::DEBUG_KERNEL_BUILD`] and returns before the suite.
 pub const DECLARED_KERNEL_BUILDS: [&str; 6] =
     toyos_build::build::TEST_SUITE_KERNEL_BUILDS;
