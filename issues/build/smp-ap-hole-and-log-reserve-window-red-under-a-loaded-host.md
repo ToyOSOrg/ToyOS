@@ -9,9 +9,7 @@ opened: 2026-09-16
 Both `Sched::Parallel`, both first sightings, both in one `cargo test` fast-tier
 run on `wt/toyos-usbhang` sharing the host's twelve guest slots throughout with
 two other worktrees' suites (`[host-slots]` names `pid 49668` and `pid 2726`
-holding slots across the whole run). The branch's own diff at the time —
-`tests/toyos.rs`'s tier table, `src/tiers.rs`'s `RELEGATED` and
-`tests/test-durations`, all for `usb_reset_records_the_phase_it_cut` — touches
+holding slots across the whole run). The branch's own diff at the time touches
 neither SMP bring-up, `spawn_init`, nor `rootfs.rs`, so it is filed rather than
 chased. Same shape as
 `issues/build/parallel-tests-red-under-other-suites.md`, filed separately

@@ -69,7 +69,7 @@ The bar is not yet the tree: `.claude/agents/reviewer.md`, "Arrivals", says wher
 
 ## Build & test
 
-The testing rules live where they are enforced: known reds in `src/redlist.rs`, tiers in `src/tiers.rs`, the PR gate and the nightly in `.github/workflows/`. Operationally:
+The testing rules live where they are enforced: known reds in `src/redlist.rs`, the PR gate and the nightly in `.github/workflows/`. Operationally:
 
 - `cargo run` builds everything (toolchain, kernel, bootloader, userland, image) and launches QEMU; `--build-only` skips the launch. `cargo test` runs the QEMU harness; `cargo run -- --ci host` runs every host suite, as the PR gate's required `host` check does.
 - **Agents never run QEMU.** An agent verifies with host tests and builds the image at most; the orchestrator runs every guest test, one suite at a time.

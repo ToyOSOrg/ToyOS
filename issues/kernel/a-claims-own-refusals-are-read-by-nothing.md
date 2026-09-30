@@ -11,7 +11,7 @@ The refusals `kernel/src/pcidev/mod.rs` raises that are read back are
 `iommu_virtio_platform`'s no-unit arm, `Refusal::NoInterrupt` by
 `virtio_net_no_msix`, `Refusal::CapsTruncated` by `pci_claim_caps_truncated`,
 the domain by `userdev_dma_fault`, and `SYS_DEVICE_REG_READ`'s bound by netd's
-own `config_space_is_bounded`. These are reached by no test in any tier:
+own `config_space_is_bounded`. These are reached by no test:
 
 - `ClaimError::Ambiguous`, a config naming a device this machine has two of;
 - `ClaimError::KernelDriven`, a claim on a function one of this kernel's own
@@ -35,8 +35,8 @@ own `config_space_is_bounded`. These are reached by no test in any tier:
   no BAR at all, so what is unread is the hand-over that succeeds.
 
 A one-field mutation of any of them — an index bound compared `<=` rather than
-`<`, a window overlap accepted, a grant total never summed — leaves every arm in
-every tier green.
+`<`, a window overlap accepted, a grant total never summed — leaves every arm
+green.
 
 Owned by whoever next adds a boot config whose own test binary holds a claimable
 function: netd holds this machine's only claim, and a test that makes it fail

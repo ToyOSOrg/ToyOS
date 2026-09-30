@@ -63,7 +63,7 @@ pixels — which is the "reference capture" half of a pixel-identity check, with
 no new mechanism at all.
 
 **A per-client damage oracle exists and is green.** `desktop_typing_damage`
-(`tests/toyos.rs:6670`, registered at `:823`, Nightly) reads the compositor's
+(`tests/toyos.rs:6670`, registered at `:823`) reads the compositor's
 own `damage_px_max` while a client is driven and refuses a frame over 2% of the
 screen. Measured on the dev host 2026-08-31: `eight lines typed, 16
 appearances; biggest frame 9472 of 2073600 px over 2 intervals`, PASS. It bounds

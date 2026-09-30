@@ -40,9 +40,7 @@ session against an unchanged tree, not a re-classification of its `Sched`.
 
 Not the diff it was seen from: that branch's kernel change to this path is the
 deletion of an unreachable `if rflags & TF != 0` branch in
-`arch::LogCommitGuard::close`, which removes instructions and adds none, and
-`kernel_log_file` is Nightly for `Why::Cost` rather than for flakiness
-(`src/tiers.rs`).
+`arch::LogCommitGuard::close`, which removes instructions and adds none.
 
 ## Promoted 2026-08-25
 
