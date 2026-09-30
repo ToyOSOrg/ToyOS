@@ -17,7 +17,6 @@ use common::{
 };
 use toyos_build::bootlog::{self, boot_millis};
 use toyos_build::testargs::{self, Shard, SUITE};
-use toyos_build::redlist;
 
 struct TestDef {
     name: String,
@@ -16941,10 +16940,9 @@ fn build_tasks<'a>(
     (parallel, serial)
 }
 
-/// Whether a run takes `name`: its filter matches it and no redlist row
-/// disables it.
+/// Whether a run takes `name`: its filter matches it.
 fn kept(filter: Option<&str>, name: &str) -> bool {
-    filter.is_none_or(|f| name.contains(f)) && redlist::disabled(redlist::DISABLED, name).is_none()
+    filter.is_none_or(|f| name.contains(f))
 }
 
 /// The shared boot's members, the machine tests and the screen tests a run
@@ -17306,12 +17304,6 @@ fn registered(shared: &[TestDef]) -> Result<BTreeSet<&str>, String> {
     Ok(names)
 }
 
-/// `redlist::DISABLED` against every registered name, before any boot on any
-/// entry point.
-fn check_redlist(registered: &BTreeSet<&str>) -> Result<(), String> {
-    redlist::check(redlist::DISABLED, |name| registered.contains(name), &compile::repo_root())
-}
-
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
@@ -17326,11 +17318,7 @@ fn main() {
         }
     };
     let filter = parsed.filter;
-    // The one selection every entry point below takes, the metal's included: a
-    // disabled test runs nowhere, and every run names each one with its issue.
-    for row in redlist::DISABLED {
-        eprintln!("[toyos] disabled: {} — {}", row.test, row.issue);
-    }
+    // The one selection every entry point below takes, the metal's included.
     let keep = |name: &str| kept(filter, name);
 
     let debug_mode = SUITE.present(&args, &testargs::DEBUG);
@@ -17393,9 +17381,7 @@ fn main() {
         check_metal_only_unshared(&rust_bins, &c_bins);
         let c_compiled: Vec<String> = c_bins.iter().map(|(n, _)| n.clone()).collect();
         let all_tests = build_test_registry(&rust_bins, &c_compiled);
-        if let Err(refusal) = registered(&all_tests).and_then(|registered| {
-            check_redlist(&registered).map_err(|e| format!("src/redlist.rs: {e}"))
-        }) {
+        if let Err(refusal) = registered(&all_tests) {
             eprintln!("[toyos] {refusal}");
             run.exit(1);
         }
@@ -17454,10 +17440,6 @@ fn main() {
             run.exit(1);
         }
     };
-    if let Err(refusal) = check_redlist(&registered) {
-        eprintln!("[toyos] src/redlist.rs: {refusal}");
-        run.exit(1);
-    }
 
     // Every row against the catalogue before `--list` and before any boot, so a
     // name the suite did not build is refused here and not by whichever worker

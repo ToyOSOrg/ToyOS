@@ -132,13 +132,6 @@ fn main() {
         toyos_build::clippy::dispatch(&root);
         return;
     }
-    // Reads one table and prints. Here for the same reason again, and for one
-    // more: the question it answers — "is this test disabled?" — is asked
-    // while a build is broken as often as while one works.
-    if asked(&flags::KNOWN_RED) {
-        toyos_build::redlist::dispatch(&args);
-        return;
-    }
     // Writes one file outside the checkout and builds nothing.
     if asked(&flags::SIGNING_KEY_NEW) {
         match toyos_build::signing::mint_owner_key() {

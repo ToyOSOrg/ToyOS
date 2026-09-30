@@ -600,15 +600,11 @@ mod checks {
                 .collect()
         };
         let names = |of: &[&str]| -> BTreeSet<String> { of.iter().map(|n| n.to_string()).collect() };
-        let enabled = |n: &&str| redlist::disabled(redlist::DISABLED, n).is_none();
-        let every: BTreeSet<String> =
-            declared().chain(["shared_one"]).filter(enabled).map(String::from).collect();
+        let every: BTreeSet<String> = declared().chain(["shared_one"]).map(String::from).collect();
         let foreign: BTreeSet<String> = SCREEN_TESTS
             .iter()
             .filter(|(_, _, profile)| profile.arch() != toyos_build::ci::GUEST_ARCH)
-            .map(|(n, _, _)| *n)
-            .filter(enabled)
-            .map(String::from)
+            .map(|(n, _, _)| String::from(*n))
             .collect();
         if !foreign.contains("virt_el2_drop") {
             return Err(format!("the premise: virt_el2_drop is a guest no CI lane boots, and {foreign:?} lacks it"));
