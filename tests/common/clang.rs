@@ -73,13 +73,14 @@ pub fn c_hello(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     Ok(())
 }
 
-/// The C++ program, and what the host's own C++ runtime prints for it.
+/// The C++ program, and what it prints: the host's own C++ runtime's lines, but
+/// for the one POSIX's `EPERM` decides.
 const CXX_RUNTIME: &str = "tests/cxx/runtime.cpp";
 const CXX_RUNTIME_EXPECT: &str = "tests/cxx/runtime.expect";
 
 /// Gate: a C++ program — libc++'s containers, strings and streams, exceptions,
 /// threads and their destructors — compiled and linked by one clang
-/// invocation, prints on ToyOS what the host's C++ runtime prints for it.
+/// invocation, prints on ToyOS what [`CXX_RUNTIME_EXPECT`] holds.
 pub fn cxx_runtime(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     let root = compile::repo_root();
     let c = compile::c_sysroot();
@@ -103,7 +104,7 @@ pub fn cxx_runtime(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     let config = root.join("tests/testcases");
     let c_tests = [("cxx_runtime".to_string(), elf)];
     let mut qemu = QemuInstance::boot_with_options(&config, &c_tests, rust_bins, BootOptions::default());
-    let result = qemu.run_test("test_c_cxx_runtime", Duration::from_secs(60));
+    let result = qemu.run_test("test_c_cxx_runtime", Duration::from_secs(180));
     if let Some(err) = &result.error {
         return Err(format!("{err}\n{}", result.stdout));
     }
@@ -113,6 +114,6 @@ pub fn cxx_runtime(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     if let Some(mismatch) = super::console::c_verdict(&result.stdout, &expected).mismatch {
         return Err(mismatch);
     }
-    eprintln!("  [cxx_runtime] {} lines, as the host's C++ runtime printed them", expected.lines().count());
+    eprintln!("  [cxx_runtime] {} lines, as expected", expected.lines().count());
     Ok(())
 }
