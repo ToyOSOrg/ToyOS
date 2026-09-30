@@ -315,3 +315,42 @@ pub fn a_failing_shared_member_fails_its_boot() {
         ["boot.passing.complete_ms", "boot.passing.panel_max_us", "boot.passing.panel_us"]
     );
 }
+
+/// **A page the pass after the reset cleared owes no panel**: `foreignrecord`'s
+/// census went with its record, so the boot is green and records its
+/// `complete_ms` alone. The same record cleared by the pass before the handoff
+/// leaves this boot's own page owing the census, and without it the boot is red
+/// and records nothing.
+pub fn a_cleared_page_owes_no_panel() {
+    let cleared = format!(
+        "Black box: 0x8000000 {} ([3e, d4, 0b, d4, 87, ad, 6a, 47, 84, b4, af, c3, f3, 6b, f7, \
+         81], and this stick is [c1, d4, 0b, d4, 87, ad, 6a, 47, 84, b4, af, c3, f3, 6b, f7, 81]), \
+         armed at 2026-09-29-131341. It has been cleared and this pass boots its kernel\n",
+        bootlog::FOREIGN_DONE
+    );
+    let hung = format!(
+        "Boot attempts: this image has had the machine 1 time(s) without reporting; now 0\n{}\n{}\n",
+        bootlog::HUNG_WITHOUT_A_RECORD,
+        bootlog::CHAIN_ENDS_LINE
+    );
+    // `before` goes in the pass before the handoff, `page` in the pass after
+    // the reset.
+    let judged = |before: &str, page: &str| {
+        let dir = toyos_tmpdir::TempDir::new("metal-readbacks");
+        let root = toyos_tmpdir::TempDir::new("metal-records");
+        plant(&dir, "foreignrecord", page, BOOTED, None);
+        let at = metal::at(&dir, "foreignrecord").join(READBACK_LOADER);
+        let handoff = bootlog::LOADER_LAST_LINE;
+        let loader = fs::read_to_string(&at).expect("a planted loader.log");
+        fs::write(&at, loader.replacen(handoff, &format!("{before}{handoff}"), 1))
+            .expect("a planted loader.log");
+        let red = metal::judge_readbacks(&root, &read(&dir, &["foreignrecord"]), &[], &[]);
+        let record = Record::load(&root, &t14()).expect("a readable record");
+        (red, record.map(|record| record.measured.into_keys().collect::<Vec<_>>()))
+    };
+    assert_eq!(
+        judged("", &format!("{cleared}{hung}")),
+        (false, Some(vec!["boot.foreignrecord.complete_ms".to_string()]))
+    );
+    assert_eq!(judged(&cleared, &hung), (true, None));
+}

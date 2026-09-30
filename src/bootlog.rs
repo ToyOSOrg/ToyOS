@@ -120,6 +120,12 @@ pub const LOG_TAIL: &str = "log-tail: ";
 /// two registrations whose whole subject is that it stopped.
 pub const HANDED_BACK: &str = "the last boot read DONE";
 
+/// What the loader says, in `bootloader/src/blackbox.rs`, of a `DONE` record
+/// sealed under another stick's identity: the foreign-identity arm's
+/// [`HANDED_BACK`]. The kernel seals every state under that identity, so only
+/// this word says the stop finished rather than panicked or wedged.
+pub const FOREIGN_DONE: &str = "held a DONE record another image left in this memory";
+
 /// The bootloader's own file at the root of the log partition.
 pub const LOADER_LOG: &str = "loader.log";
 
@@ -321,6 +327,9 @@ pub enum Unfit {
     /// The loader pass after the reset read no `DONE`, or read one with no
     /// [`REBOOTING`] in its tail: the stop never finished.
     NotHandedBack,
+    /// The loader pass after the foreign-identity arm's reset read no
+    /// [`FOREIGN_DONE`]: the stop it staged never finished.
+    NoForeignDone,
 }
 
 impl fmt::Display for Unfit {
@@ -338,6 +347,11 @@ impl fmt::Display for Unfit {
                 "the loader's pass after the reset carries no {HANDED_BACK:?} with {REBOOTING:?} \
                  under {LOG_TAIL:?}: the stop this boot asked for never reached the reset"
             ),
+            Self::NoForeignDone => write!(
+                f,
+                "the loader's pass after the reset carries no {FOREIGN_DONE:?}: the stop this \
+                 boot asked for never sealed its record DONE"
+            ),
         }
     }
 }
@@ -352,6 +366,22 @@ pub fn handed_back(loader: &str) -> Result<(), Unfit> {
     } else {
         Err(Unfit::NotHandedBack)
     }
+}
+
+/// The loader's half of a passing foreign-identity boot, whose own chain the
+/// loader ends as a hang: the record it cleared was sealed `DONE`.
+pub fn foreign_done(loader: &str) -> Result<(), Unfit> {
+    // The pass before the handoff clears a stale foreign record the same way.
+    match after_the_reset(loader) {
+        Some(after) if after.contains(FOREIGN_DONE) => Ok(()),
+        _ => Err(Unfit::NoForeignDone),
+    }
+}
+
+/// `loader.log` from [`SEPARATOR`] on: the pass that read what this boot left,
+/// or `None` where the chain did not go round.
+pub fn after_the_reset(loader: &str) -> Option<&str> {
+    loader.find(SEPARATOR).map(|at| &loader[at..])
 }
 
 /// Init's line saying the machine stops, the last one `log` carries.
@@ -644,6 +674,13 @@ mod tests {
                 path.display()
             );
         }
+        // A format and not a constant: the loader fills its hole with the
+        // state's own word.
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("bootloader/src/blackbox.rs");
+        let source = std::fs::read_to_string(&path).expect("a loader module");
+        let format = FOREIGN_DONE.replacen(toyos_blackbox::State::Done.named(), "{}", 1);
+        assert!(source.contains(&format), "{} formats no {format:?}", path.display());
     }
 
     #[test]

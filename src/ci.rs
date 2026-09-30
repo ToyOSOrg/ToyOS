@@ -187,8 +187,8 @@ fn cargo_logged(dir: &Path, args: &[&str]) -> Result<(bool, String), String> {
 /// that takes away the one edge the model's property rests on, and the verdict
 /// lines the model must then print.
 pub(crate) struct Control {
-    /// `cargo test` arguments that select the model's crate.
-    krate: &'static [&'static str],
+    /// The model's package in the host workspace.
+    pub(crate) krate: &'static str,
     pub(crate) feature: &'static str,
     test: Option<&'static str>,
     /// `false` is a case that catches its own panic and asserts on it: its
@@ -199,15 +199,15 @@ pub(crate) struct Control {
     verdicts: &'static [&'static str],
 }
 
-const KERNEL_LOOM: &[&str] = &["--manifest-path", "kernel-loom/Cargo.toml"];
-const SCHED_LOOM: &[&str] = &["-p", "toyos-sched-loom"];
-const SCHED_SIM: &[&str] = &["-p", "toyos-sched-sim"];
-const PROCLIFE: &[&str] = &["-p", "toyos-proclife"];
-const BLOCKRING: &[&str] = &["-p", "toyos-blockring"];
-const TRANSPORT: &[&str] = &["-p", "toyos-transport"];
+const KERNEL_LOOM: &str = "kernel-loom";
+const SCHED_LOOM: &str = "toyos-sched-loom";
+const SCHED_SIM: &str = "toyos-sched-sim";
+const PROCLIFE: &str = "toyos-proclife";
+const BLOCKRING: &str = "toyos-blockring";
+const TRANSPORT: &str = "toyos-transport";
 
 const fn red(
-    krate: &'static [&'static str],
+    krate: &'static str,
     feature: &'static str,
     test: Option<&'static str>,
     verdicts: &'static [&'static str],
@@ -394,8 +394,7 @@ fn judge_control(control: &Control, exited_green: bool, log: &str) -> Result<Str
 }
 
 fn run_control(root: &Path, control: &Control) -> Result<String, String> {
-    let mut args = vec!["test"];
-    args.extend(control.krate);
+    let mut args = vec!["test", "-p", control.krate];
     args.extend(["--features", control.feature]);
     if let Some(test) = control.test {
         args.extend(["--test", test]);
@@ -815,9 +814,9 @@ mod tests {
         let short = toyos_tmpdir::TempDir::new("left-behind-short");
         std::fs::write(tmp.join(toyos_tmpdir::GLOBAL), b"").unwrap();
         assert!(left_behind(&tmp, &short, &[]).is_ok());
-        std::fs::create_dir(tmp.join("forkcheck-1-current")).unwrap();
+        std::fs::create_dir(tmp.join("stale-1-current")).unwrap();
         let refusal = left_behind(&tmp, &short, &[]).expect_err("a directory left behind is a red");
-        assert!(refusal.contains("forkcheck-1-current"), "{refusal}");
+        assert!(refusal.contains("stale-1-current"), "{refusal}");
     }
 
     /// A short root whose process died while the steps ran is named; one already

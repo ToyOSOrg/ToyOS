@@ -16,7 +16,7 @@ compiler build ToyOS runs relies on it (`src/llvm.rs`).
 It is a configuration change, which upstream records in
 `src/bootstrap/src/utils/change_tracker.rs` under the number of the pull
 request that makes it. No such pull request exists, because none is sent for
-now, so the fork carries no entry (`src/forkcheck.rs`).
+now, so the fork carries no entry.
 
 Exit: an upstream pull request carries the change with its `change_tracker`
 entry, and the fork takes it from there.

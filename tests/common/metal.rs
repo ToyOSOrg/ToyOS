@@ -210,6 +210,31 @@ pub struct Readback {
 }
 
 impl Readback {
+    /// One boot's readback out of the three files the loop wrote for it:
+    /// `loader.log`, the `logd` files as one text, and the boot file.
+    pub fn new(label: &str, home: PathBuf, loader: String, log: String, boot: &str) -> Result<Self, String> {
+        let kernel = bootlog::kernel_records(&log);
+        let back_secs = toyos_build::metal::back_secs(boot)
+            .ok_or_else(|| format!("{label}'s boot file names no `back_secs`: {boot:?}"))?;
+        let stick_secs = toyos_build::metal::stick_secs(boot)
+            .ok_or_else(|| format!("{label}'s boot file names no `stick_secs`: {boot:?}"))?;
+        let cable = toyos_build::metal::cable(boot).map_err(|why| format!("{label}: {why}"))?;
+        Ok(Readback {
+            label: label.to_string(),
+            home,
+            boot_ms: bootlog::boot_millis(&kernel),
+            loader,
+            kernel,
+            log,
+            back_secs,
+            stick_secs,
+            cable,
+            machine: toyos_build::metal::machine(boot)
+                .map_err(|why| format!("{label}'s boot file {why}")),
+            numbers: RefCell::new(BTreeMap::new()),
+        })
+    }
+
     /// What the loop heard over the boot's own cable, and the log the machine
     /// served it — or why a boot that was to be talked to has neither.
     ///
@@ -263,6 +288,8 @@ impl Readback {
 
     /// Every `logd` file this boot wrote, as one text, less every program's
     /// line ([`bootlog::kernel_records`]): no program's line is read as the kernel's.
+    /// It ends where init had `logd` make it whole, so what the kernel writes
+    /// inside the stop or a wedge is only on the page ([`Self::after_the_reset`]).
     pub fn kernel(&self) -> Serial {
         Serial::named(&format!("{}'s kernel log", self.label), self.kernel.as_str())
     }
@@ -392,17 +419,14 @@ impl Readback {
     /// report is. `None` where the chain did not go round — which for a boot
     /// that ended itself is a finding, not an absence.
     pub fn after_the_reset(&self) -> Result<Serial, String> {
-        let at = self.loader.find(bootlog::SEPARATOR).ok_or_else(|| {
+        let after = bootlog::after_the_reset(&self.loader).ok_or_else(|| {
             format!(
                 "{}'s loader.log carries no pass after the reset: the loader did not point \
                  `BootNext` at itself, or the machine went back to the boot manager\n{}",
                 self.label, self.loader
             )
         })?;
-        Ok(Serial::named(
-            &format!("{}'s loader pass after the reset", self.label),
-            &self.loader[at..],
-        ))
+        Ok(Serial::named(&format!("{}'s loader pass after the reset", self.label), after))
     }
 
     /// What the kernel recorded about the process the *runner* spawned as
@@ -627,6 +651,35 @@ fn batches(
     Ok(out)
 }
 
+/// What `reachable`, a batch's text, names beside its `jobs`: every binary it
+/// spells `test_rs_<name>` that is not one of them, and every shared library.
+pub fn reached(
+    reachable: &str,
+    jobs: &[String],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Vec<(String, Vec<u8>)> {
+    // Whole: a longer name that opens with this one is another binary's.
+    let names = |staged: &str| {
+        reachable.match_indices(staged).any(|(at, _)| {
+            !reachable[at + staged.len()..]
+                .starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        })
+    };
+    let mut out = Vec::new();
+    for (name, data) in rust_bins {
+        let staged = format!("test_rs_{name}");
+        // The shared libraries go on whole: a `dlopen` names a path and never a
+        // `test_rs_` literal, so no text could find one — and all of them
+        // together are a fraction of one helper binary.
+        if name.ends_with(".so") {
+            out.push((format!("lib/{name}"), data.clone()));
+        } else if !jobs.contains(&staged) && names(&staged) {
+            out.push((format!("bin/{staged}"), data.clone()));
+        }
+    }
+    out
+}
+
 /// Build one batch's image, and answer where it landed.
 fn build(
     root: &Path,
@@ -634,7 +687,6 @@ fn build(
     label: &str,
     batch: &Batch,
     rust_bins: &[(String, Vec<u8>)],
-    helpers: &[&str],
     quiet: bool,
 ) -> Result<PathBuf, String> {
     let home = at(dir, label);
@@ -672,13 +724,13 @@ fn build(
     // and `fault_gates` each panicked on `entity not found`
     // looking for a child nothing had staged.
     //
-    // **Which helper, though, is read rather than assumed.** Staging all of them
+    // **Which binary, though, is read rather than assumed.** Staging all of them
     // on every image cost 150 MB a boot, and a stick is written over `ssh`. A
     // driver reaches a binary as the literal `test_rs_<name>` — the same
     // spelling `suite_split` reads the harness for — so the text a boot could
     // possibly name it in is its job list, its symlink targets, and the source
-    // of every Rust job on it. A helper named nowhere in that is a helper this
-    // boot cannot reach.
+    // of every Rust job on it. A binary named nowhere in that is one this boot
+    // cannot reach.
     if !batch.jobs.is_empty() {
         let bin = root.join("tests/toyos-rust-tests/src/bin");
         let mut reachable = batch.jobs.join(" ");
@@ -695,18 +747,7 @@ fn build(
                 reachable.push_str(&source);
             }
         }
-        for (name, data) in rust_bins {
-            // The shared libraries go on whole: a `dlopen` names a path and
-            // never a `test_rs_` literal, so nothing above could find one — and
-            // all of them together are a fraction of one helper binary.
-            if name.ends_with(".so") {
-                extra.push((format!("lib/{name}"), data.clone()));
-            } else if helpers.contains(&name.as_str())
-                && reachable.contains(&format!("test_rs_{name}"))
-            {
-                extra.push((format!("bin/test_rs_{name}"), data.clone()));
-            }
-        }
+        extra.extend(reached(&reachable, &batch.jobs, rust_bins));
     }
 
     // The build a boot asked for, or — where it asked for none — the one its
@@ -833,27 +874,8 @@ pub fn read_readback(dir: &Path, label: &str) -> Result<Readback, String> {
         .map_err(|why| format!("toyos-metal refused {label}: {why}"))?;
     let loader = read(toyos_build::metal::READBACK_LOADER)?;
     let log = read(toyos_build::metal::READBACK_KERNEL)?;
-    let kernel = bootlog::kernel_records(&log);
     let boot = read(toyos_build::metal::READBACK_BOOT)?;
-    let back_secs = toyos_build::metal::back_secs(&boot)
-        .ok_or_else(|| format!("{label}'s boot file names no `back_secs`: {boot:?}"))?;
-    let stick_secs = toyos_build::metal::stick_secs(&boot)
-        .ok_or_else(|| format!("{label}'s boot file names no `stick_secs`: {boot:?}"))?;
-    let cable = toyos_build::metal::cable(&boot).map_err(|why| format!("{label}: {why}"))?;
-    Ok(Readback {
-        label: label.to_string(),
-        home,
-        boot_ms: bootlog::boot_millis(&kernel),
-        loader,
-        kernel,
-        log,
-        back_secs,
-        stick_secs,
-        cable,
-        machine: toyos_build::metal::machine(&boot)
-            .map_err(|why| format!("{label}'s boot file {why}")),
-        numbers: RefCell::new(BTreeMap::new()),
-    })
+    Readback::new(label, home, loader, log, &boot)
 }
 
 /// The machine every boot that came back names, or why there is not one.
@@ -895,10 +917,6 @@ pub fn run(
     tests: &[(&str, &'static Metal)],
     shared: &[SharedBoot],
     rust_bins: &[(String, Vec<u8>)],
-    // Binaries a job spawns that are not jobs themselves: the shared block's
-    // helper children, which discovery leaves out and which nothing else would
-    // then put on the image.
-    helpers: &[&str],
     quiet: bool,
 ) -> Verdict {
     let root = super::compile::repo_root();
@@ -964,7 +982,7 @@ pub fn run(
             toyos_build::build::build_host_judges(&root, quiet);
         }
         for (label, batch) in &batches {
-            match build(&root, dir, label, batch, rust_bins, helpers, quiet) {
+            match build(&root, dir, label, batch, rust_bins, quiet) {
                 Ok(image) => {
                     eprintln!(
                         "[metal] {label}: {} job(s), armed with {:?} — {}",
@@ -1108,15 +1126,19 @@ pub fn judge_readbacks(
             );
         }
         let mut findings: Vec<String> = Vec::new();
-        for (field, value) in [
-            ("complete_ms", back.boot_ms),
-            ("panel_max_us", panel.map(|panel| panel.max_micros)),
-            ("panel_us", panel.map(|panel| panel.micros)),
+        // The census crosses only on the page, and a page the pass after the
+        // reset cleared as another image's carries none.
+        let owes_a_panel = bootlog::foreign_done(&back.loader).is_err();
+        for (field, value, owed) in [
+            ("complete_ms", back.boot_ms, true),
+            ("panel_max_us", panel.map(|panel| panel.max_micros), owes_a_panel),
+            ("panel_us", panel.map(|panel| panel.micros), owes_a_panel),
         ] {
             let name = format!("boot.{label}.{field}");
             match value {
                 Some(value) => findings.extend(back.measured(&name, value).err()),
-                None => findings.push(format!("{name}: this boot recorded none")),
+                None if owed => findings.push(format!("{name}: this boot recorded none")),
+                None => {}
             }
         }
         // **Every boot, and before any verdict is read out of its log.** A

@@ -264,16 +264,11 @@ fn test_memory_stats() {
     let total = u64::from_le_bytes(buf[0..8].try_into().unwrap());
     let used = u64::from_le_bytes(buf[8..16].try_into().unwrap());
 
-    // QEMU is configured with 8GB (test harness uses 4GB)
-    // Total should be in a reasonable range (2-9 GB)
-    let total_gb = total / (1024 * 1024 * 1024);
-    assert!(total_gb >= 2 && total_gb <= 9, "mem_total={total} ({total_gb} GB) out of range");
-
-    // Used should be less than total and non-zero
+    // Bounded by each other and by no machine's size: the T14 runs this too.
     assert!(used > 0, "mem_used=0 — allocator not tracking");
     assert!(used < total, "mem_used={used} >= mem_total={total}");
 
-    println!("  memory stats: ok (total={total_gb}GB, used={}MB)", used / (1024 * 1024));
+    println!("  memory stats: ok (total={}MB, used={}MB)", total / (1024 * 1024), used / (1024 * 1024));
 }
 
 /// Verify that OOM returns an error instead of crashing the kernel.
