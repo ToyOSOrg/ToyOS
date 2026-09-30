@@ -82,12 +82,11 @@ fn pinned_fork(root: &Path) -> String {
 /// Where, in the primary's `rust/`, the host builds the toolchain of every
 /// linked worktree whose `rust/` is the stub: one git worktree of the primary's
 /// fork repository, sharing its objects, at `rust/`, and `toyos-abi` and
-/// `toyos` beside it as links to the trees of the build that holds it.
+/// `toyos` beside it as links to the trees of the build that holds it. Its
+/// submodules are clones in its own git directory and never checkouts of the
+/// primary's: bootstrap moves a submodule with `git submodule update`, which
+/// over a checkout of another clone rewrites that clone's `core.worktree`.
 pub const SHARED: &str = "build/fork";
-
-/// The submodules a toolchain build needs, taken from the primary's own clone
-/// of each where it holds the commit, so no build fetches what the host has.
-const SUBMODULES: [&str; 2] = ["library/backtrace", "src/tools/cargo"];
 
 /// The rust fork a checkout's toolchain is built from.
 pub enum Fork {
@@ -205,32 +204,10 @@ fn shared(rust_dir: &Path, root: &Path, commit: &str) -> Checkout {
     }
     git_out(&dir, &["checkout", "--detach", "--force", "-q", commit]);
     git_out(&dir, &["clean", "-d", "--force", "-q"]);
-    for path in SUBMODULES {
-        share_submodule(rust_dir, &dir, path);
-    }
     for tree in ["toyos-abi", "toyos"] {
         toolchain::swap_link(&root.join(tree), &base.join(tree));
     }
     Checkout { dir, _held: held }
-}
-
-/// Check out `fork`'s submodule `path` at the commit its gitlink names from the
-/// primary's clone of it at `rust_dir`, sharing its objects, when that clone
-/// holds the commit; bootstrap fetches it otherwise.
-fn share_submodule(rust_dir: &Path, fork: &Path, path: &str) {
-    let listed = git_out(fork, &["ls-tree", "HEAD", path]);
-    let commit = listed.split_whitespace().nth(2).unwrap_or_else(|| panic!("{} pins no {path}: {listed:?}", fork.display()));
-    let holds = |dir: &Path| git(dir, &["cat-file", "-e", &format!("{commit}^{{commit}}")], None).is_ok();
-    let at = fork.join(path);
-    let theirs = rust_dir.join(path);
-    if at.join(".git").exists() {
-        if holds(&at) {
-            git_out(&at, &["checkout", "--detach", "-q", commit]);
-        }
-    } else if theirs.join(".git").exists() && holds(&theirs) {
-        remove(&at);
-        git_out(&theirs, &["worktree", "add", "--detach", path_str(&at), commit]);
-    }
 }
 
 /// The sysroot this worktree's sources name, made if nobody has made it, and
@@ -642,7 +619,8 @@ mod tests {
         assert_eq!(checkout.dir, e.rust_dir.join(SHARED).join("rust"));
         assert_eq!(git(&checkout.dir, &["rev-parse", "HEAD"]), pinned);
         assert_eq!(beside(&checkout.dir, "toyos-abi"), fs::canonicalize(linked.join("toyos-abi")).unwrap());
-        assert!(checkout.dir.join("library/backtrace/lib.rs").is_file(), "backtrace was not taken from the primary's clone");
+        let backtrace = fs::read_dir(checkout.dir.join("library/backtrace")).unwrap().count();
+        assert_eq!(backtrace, 0, "a submodule was checked out of the primary's clone, which its update would take over");
         assert!(Lock::try_exclusive(&e.rust_dir.join(SHARED)).is_none(), "the shared checkout is not held");
         assert_eq!(git(&e.rust_dir, &["rev-parse", "HEAD"]), before, "the primary's fork moved");
         write(&checkout.dir.join("library/std/src/lib.rs"), "left by a killed build");

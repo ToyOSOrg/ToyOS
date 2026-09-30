@@ -1125,8 +1125,9 @@ fn metadata(
 
 /// The fork's `library/`, checked out at the commit this tree pins, and the
 /// hold on that checkout while it is read when it is the host's shared one. A
-/// checkout whose `rust/` was never initialised — a CI runner's — fetches that
-/// commit alone.
+/// primary checkout whose `rust/` was never initialised — a CI runner's —
+/// fetches that commit alone; a linked worktree never runs `git submodule`,
+/// which would take the primary's fork repository over.
 fn std_library(root: &Path) -> Result<(PathBuf, Option<Checkout>), String> {
     let fork = match crate::toolchain::owner(root) {
         Owner::Elsewhere(_) => match Fork::of(root) {
@@ -1136,16 +1137,19 @@ fn std_library(root: &Path) -> Result<(PathBuf, Option<Checkout>), String> {
                 return Ok((checkout.dir.join("library"), Some(checkout)));
             }
         },
-        Owner::Us | Owner::Installed => root.join("rust"),
+        Owner::Us | Owner::Installed => {
+            let fork = root.join("rust");
+            if !fork.join("library/Cargo.toml").exists() {
+                run(
+                    Command::new("git")
+                        .args(["submodule", "update", "--init", "--depth", "1", "rust"])
+                        .current_dir(root),
+                    "git submodule update --init --depth 1 rust",
+                )?;
+            }
+            fork
+        }
     };
-    if !fork.join("library/Cargo.toml").exists() {
-        run(
-            Command::new("git")
-                .args(["submodule", "update", "--init", "--depth", "1", "rust"])
-                .current_dir(root),
-            "git submodule update --init --depth 1 rust",
-        )?;
-    }
     Ok((fork.join("library"), None))
 }
 
