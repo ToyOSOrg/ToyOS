@@ -221,9 +221,11 @@ pub fn log_cpu(cpu: u32) {
     crate::log!("windows: cpu{cpu} irqs_off_ns={irqs} preempt_off_ns={preempt}");
 }
 
-/// What `windows-staged` spins for.
+/// What `windows-staged` spins for: past any window an emulated guest closes
+/// on its own, so a report carrying it carries the spin, and far inside
+/// `time::DEAF_CPU`.
 #[cfg(feature = "boot-actuators")]
-const STAGED_NS: u64 = 1_000_000;
+const STAGED_NS: u64 = 250_000_000;
 
 /// `windows-staged`: at the first process exit, spin for [`STAGED_NS`] inside
 /// the exit syscall, where both windows are open, and say how long, so a later
