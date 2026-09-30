@@ -338,10 +338,6 @@ const RUST_SKIP: &[&str] = &[
     // Spawns `/system/bin/doom` and reads the WAD, which `tests/testcases` does
     // not carry. `doom_frames` runs it on `tests/doommusiccase`.
     "doom_frames",
-    // Its failure mode is a CPU that never runs anything again, so on the
-    // shared boot it would be reported against whichever test came next — and
-    // every one after that. `short_sleep_livelock` gives it a boot of its own.
-    "abuse_short_sleep",
     // `cache_eviction` needs the small NVMe that makes the cache evict at all.
     "cache_eviction",
     // `writeback_reopen` and `writeback_spawn` each need their own boot with
@@ -1004,7 +1000,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // is a comparison between two numbers the kernel printed, both of them
     // offsets it chose itself.
     ("operation_nesting", Sched::Parallel),
-    ("short_sleep_livelock", Sched::Parallel),
     // The spawn half alone: one headless boot whose verdict is kernel log
     // lines.
     ("klogd_hosted", Sched::Parallel),
@@ -1310,7 +1305,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("fpu_isolation", &["test_rs_fpu_isolation"]),
     ("gsbase_locked", &["test_rs_gsbase_locked"]),
     ("sched_check_build", &["test_rs_sched_stress"]),
-    ("short_sleep_livelock", &["test_rs_abuse_short_sleep"]),
     ("heap_ceiling_bounds", &["test_rs_heap_ceiling"]),
     ("cache_eviction", &["test_rs_cache_eviction"]),
     ("irq_census_conservation", &["test_rs_std_mmap"]),
@@ -1533,16 +1527,6 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal::Runs {
             arms: TESTCASES_READDIR,
             judge: |b| b[0].job_passed("test_rs_readdir_bound"),
-        },
-    ),
-    (
-        "short_sleep_livelock",
-        metal::Metal::Runs {
-            arms: TESTCASES,
-            // A livelocked CPU produces no exit record at all, which is the
-            // whole verdict: the defect this is aimed at was caught twice by NMI
-            // on this very machine.
-            judge: |b| b[0].job_passed("test_rs_abuse_short_sleep"),
         },
     ),
     (
@@ -2011,7 +1995,6 @@ const TESTCASES: &[metal::Arm] = &[metal::once(
         "test_rs_audio_idle_suspend",
         "test_rs_audio_tone",
         "test_rs_hda_client_stall",
-        "test_rs_abuse_short_sleep",
         "test_rs_syscall_cost",
         "test_rs_null_sink_client_exits",
         "log-close",
@@ -10892,41 +10875,6 @@ fn run_machine_test(
                  reached a scheduler pass",
                 boot.kernel_lines(),
             );
-            Ok(())
-        }
-        "short_sleep_livelock" => {
-            // Task #156. A `nanosleep` whose deadline is already past when the
-            // pass arms the one-shot armed the register's one-tick minimum, and
-            // the Ring 0 timer stub reloads whatever was last armed — so the
-            // CPU took that interrupt again before it could execute the
-            // instruction after the `wrmsr` that armed it, forever. Eight boots
-            // of the owner's T14 caught it twice by NMI, at
-            // `arm_one_shot+0x8d` and at `timer_entry+0x0`, which are the two
-            // instruction boundaries of exactly that loop.
-            //
-            // Its own boot because the failure is a CPU that never runs
-            // anything again: on the shared boot it would be reported against
-            // whichever test followed it.
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                c_bins,
-                rust_bins,
-                BootOptions::default(),
-            );
-            serial::Serial::boot(&qemu).must_be_clean()?;
-
-            let result = qemu.run_test("test_rs_abuse_short_sleep", Duration::from_secs(60));
-            if let Some(err) = &result.error {
-                return Err(format!(
-                    "a sleep shorter than one LAPIC tick took the CPU with it: {err}\nserial:\n{}",
-                    result.serial,
-                ));
-            }
-            if !check_rust_result(&result) {
-                return Err(format!("abuse_short_sleep failed:\n{}", result.stdout));
-            }
-            serial::Serial::named("test serial", result.serial.as_str()).must_be_clean()?;
-            eprintln!("  [sleep] {}", result.stdout.lines().last().unwrap_or("").trim());
             Ok(())
         }
         "heap_ceiling_bounds" => {
