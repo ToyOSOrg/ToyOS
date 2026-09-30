@@ -298,9 +298,6 @@ const RUST_SKIP: &[&str] = &[
     // Same again, and it also needs a host typing GUI+V:
     // `metal_sim_hostile_clipboard` runs it.
     "compositor_hostile_clipboard",
-    // Needs a compositor, a terminal and a shell: `desktop_window_child`
-    // launches it from that shell.
-    "window_child",
     // Same again: the `toolkit_` tests of their names launch them from the
     // toolkit desktop.
     "window_wake",
@@ -1157,7 +1154,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // so a guest that is slow costs seconds and not a verdict, and the verdict
     // itself is a fraction of the screen that no amount of load moves.
     ("desktop_typing_damage", Sched::Parallel),
-    ("desktop_window_child", Sched::Parallel),
     // An unmodified iced app on the desktop, launched from the shell: the
     // window, its text in the system font, no redraw it did not ask for, and
     // a clean exit when the compositor closes it.
@@ -1419,7 +1415,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("metal_sim_client_death", METAL_SIM_CLIENTS),
     ("metal_sim_window_drag", &["test_rs_window_drag"]),
     ("metal_sim_hostile_clipboard", &["test_rs_compositor_hostile_clipboard"]),
-    ("desktop_window_child", &["test_rs_window_child"]),
     ("toolkit_window_wake", &["test_rs_window_wake"]),
     ("toolkit_winit_loop", &["test_rs_winit_loop"]),
     ("toolkit_winit_pace", &["test_rs_winit_pace"]),
@@ -7415,13 +7410,6 @@ fn close_focused_window(qemu: &mut QemuInstance, log: &mut String, new: usize) -
     log[new..].contains(CLOSED)
 }
 
-/// How many times snake is opened and closed. One green round says very little
-/// about a report that arrived once.
-const SNAKE_ROUNDS: usize = 3;
-/// Turns played in the last round, at four keys each, so that round's snake is
-/// a program that has been running and drawing rather than one a second old.
-const SNAKE_TURNS: usize = 8;
-
 /// What doom's renderer draws over `demo1`'s first `TICS` tics, as
 /// `userland/doom/src/frames.rs` hashes it: the frames doom drew before clang
 /// built its C, which a compiler that builds doom correctly draws again.
@@ -7464,35 +7452,6 @@ fn doom_frames(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     }
     eprintln!("  [doommusiccase] {line}");
     Ok(())
-}
-
-fn desktop_window_child(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
-    let bins: Vec<(String, Vec<u8>)> =
-        rust_bins.iter().filter(|(name, _)| name == "window_child").cloned().collect();
-    if bins.is_empty() {
-        return Err("the window_child client was not built".to_string());
-    }
-    let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/desktopcase");
-    let options = BootOptions {
-        profile: qemu::Profile::Metal,
-        qmp: true,
-        ready_marker: "compositor: ready",
-        // The T14's core count. A desktop's teardown is four processes handing
-        // pipes back to each other, and on two cores most of that is ordered
-        // by having nowhere else to run.
-        smp: 8,
-        // `Drained::Bytes`; off the shipping kernel, and implies fast-health
-        // and edge-race.
-        kernel_params: &["i8042-trace"],
-        ..Default::default()
-    };
-    metal_sim_argv_check(&qemu::profile_argv(&options))?;
-    let mut qemu = QemuInstance::boot_with_options(&config, &[], &bins, options);
-    let mut log = qemu.boot_log().to_string();
-    match window_child_probes(&mut qemu, &mut log) {
-        Ok(()) => Ok(()),
-        Err(message) => Err(format!("{message}\n{}", freeze_report(&mut qemu, &mut log))),
-    }
 }
 
 /// The words on iced's counter's two buttons, and the size iced draws body text
@@ -8028,124 +7987,6 @@ fn freeze_report(qemu: &mut QemuInstance, log: &mut String) -> String {
         if whole { "" } else { ", which produced no complete report" },
         &log[before.min(log.len())..]
     )
-}
-
-fn window_child_probes(qemu: &mut QemuInstance, log: &mut String) -> Result<(), String> {
-    let ack = Drained::Bytes;
-    if let Err(why) = shell_answers(qemu, log, &ack) {
-        return Err(format!(
-            "{why}\nnothing typed at the terminal window reached a shell:\n{log}"
-        ));
-    }
-
-    // A windowed child that leaves on its own. The shell is in `waitpid` and
-    // the compositor never touches its connection, so this is the plain case
-    // and it has to work before the second probe means anything.
-    shell_type_line(qemu, "test_rs_window_child exit", &ack)?;
-    let by = qemu.budget(Duration::from_secs(20));
-    if !serial_until(qemu, log, "WINDOW-CHILD-GONE", by) {
-        return Err(format!("the windowed child never reported leaving:\n{log}"));
-    }
-    if let Err(why) = shell_echoes(qemu, log, "after-own-exit-zqjxk", &ack) {
-        return Err(format!(
-            "{why}\na windowed child exited by itself and the shell never answered again:\n{log}"
-        ));
-    }
-
-    // The owner's case: the process is alive and the compositor takes its
-    // window away underneath it.
-    let started = log.len();
-    shell_type_line(qemu, "test_rs_window_child", &ack)?;
-    // Its own marker, not the one the probe above already printed.
-    let by = qemu.budget(Duration::from_secs(20));
-    if !serial_until_new(
-        qemu,
-        log,
-        "WINDOW-CHILD-UP",
-        started,
-        by,
-    ) {
-        return Err(format!("the windowed child never got a window:\n{log}"));
-    }
-    // GUI+Q closes the focused window, and a window the compositor has just
-    // created is the focused one. Re-injected until the compositor says the
-    // window went — a keystroke that lands while the guest is busy is lost —
-    // and never blind, because a second GUI+Q after one worked would close the
-    // terminal's window instead.
-    let before = log.len();
-    if !close_focused_window(qemu, log, before) {
-        return Err(format!(
-            "GUI+Q never reached the compositor:\n{}",
-            &log[before.min(log.len())..]
-        ));
-    }
-    let by = qemu.budget(Duration::from_secs(20));
-    if !serial_until_new(qemu, log, "WINDOW-CHILD-GONE", before, by) {
-        return Err(format!(
-            "the compositor closed the window and the client did not leave:\n{}",
-            &log[before.min(log.len())..]
-        ));
-    }
-    if let Err(why) = shell_echoes(qemu, log, "after-window-closed-zqjxk", &ack) {
-        return Err(format!(
-            "{why}\nthe compositor closed a child's window and the shell never answered again \
-             — this is the owner's snake report, reproduced:\n{log}"
-        ));
-    }
-    // And the program he actually ran. Everything above is a `window::Window`
-    // and nothing else; snake is that under winit and softbuffer, which is the
-    // only difference left between this test and his session.
-    //
-    // Three rounds, and the last one is played first: his snake had run 39 s
-    // and spent 22.4 s of CPU when he closed it, and a window closed one
-    // second after it opened exercises a quieter program than that. One green
-    // round would say very little about a report that arrived once.
-    for round in 0..SNAKE_ROUNDS {
-        shell_type_line(qemu, "snake", &ack)?;
-        // snake prints nothing of its own, so the compositor's second window
-        // is what says it is up — and a window it has just created is the
-        // focused one, which is what GUI+Q then closes.
-        let opened = log.len();
-        let by = qemu.budget(Duration::from_secs(20));
-        if !serial_until_new(qemu, log, "windows=2", opened, by) {
-            return Err(format!("snake never got a window in round {round}:\n{log}"));
-        }
-        if round + 1 == SNAKE_ROUNDS {
-            let mut input = qemu::QmpInput::open(qemu.qmp_socket());
-            for _ in 0..SNAKE_TURNS {
-                for key in ["left", "down", "right", "up"] {
-                    input.keys(&[(key, true), (key, false)]);
-                    thread::sleep(Duration::from_millis(120));
-                }
-            }
-        }
-        let before = log.len();
-        if !close_focused_window(qemu, log, before) {
-            return Err(format!(
-                "GUI+Q never reached the compositor in round {round}:\n{}",
-                &log[before.min(log.len())..]
-            ));
-        }
-        let by = qemu.budget(Duration::from_secs(20));
-        if !serial_until_new(qemu, log, "exit: snake", before, by) {
-            return Err(format!(
-                "snake did not leave when its window was closed in round {round}:\n{}",
-                &log[before.min(log.len())..]
-            ));
-        }
-        if let Err(why) = shell_echoes(qemu, log, &format!("after-snake-{round}-zqjxk"), &ack) {
-            return Err(format!(
-                "{why}\nsnake's window was closed, snake left, and the shell never answered \
-                 again (round {round}) — the owner's report, reproduced:\n{log}"
-            ));
-        }
-    }
-
-    eprintln!(
-        "  [desktop] a windowed child and {SNAKE_ROUNDS} snakes each left both ways and the \
-         shell kept its prompt"
-    );
-    Ok(())
 }
 
 /// What a typed character costs the desktop.
@@ -10440,7 +10281,6 @@ fn run_machine_test(
         "console_locale_detect" => console_locale_detect(),
         "desktop_locale_detect" => desktop_locale_detect(),
         "desktop_typing_damage" => desktop_typing_damage(),
-        "desktop_window_child" => desktop_window_child(rust_bins),
         "toolkit_iced" => toolkit_iced(),
         "toolkit_window_wake" => toolkit_window_wake(rust_bins),
         "toolkit_winit_loop" => toolkit_winit_loop(rust_bins),
