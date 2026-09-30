@@ -24,4 +24,4 @@ hypothesis, and one red at 18x its price is not a rate.
 Exit: a rate — the same suite run repeatedly with and without a second
 worktree's build on the host — that says whether this is contention the harness
 should schedule around or a defect in the guest's own boot, and the name is
-either re-tiered or fixed at the cause.
+fixed at the cause.

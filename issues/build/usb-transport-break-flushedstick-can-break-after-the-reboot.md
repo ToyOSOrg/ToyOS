@@ -27,5 +27,5 @@ re-run. The logd branch, its tree as committed at `ebf2f76a`, measured the same 
 
 The case's premise is arranged rather than raced: a write after a verified
 flush is made to go out before the job ends the boot (or the case waits on the
-break before it starts the job), and ten consecutive `--nightly
-usb_transport_break` runs are green.
+break before it starts the job), and ten consecutive
+`usb_transport_break` runs are green.
