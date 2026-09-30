@@ -642,7 +642,7 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // and one boot to run it.
     ("c_hello", Sched::Parallel),
     // One C++ program through the same clang and the C++ runtime its sysroot
-    // carries, and one boot; its lines are the host's C++ runtime's.
+    // carries, and one boot.
     ("cxx_runtime", Sched::Parallel),
     // One boot and one number, with no clock in the verdict: the frames are
     // counted in game tics, whatever the host's speed.
