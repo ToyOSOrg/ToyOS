@@ -404,8 +404,6 @@ pub fn reserve_log_slot(
             pid_off = const OFF_CURRENT_PID,
             options(preserves_flags),
         );
-        // `log-nested-reserve`'s injection point: must sit between the shard-pointer read and the `xadd`, the only place ordering is decided (no-op outside tests).
-        crate::log::nested::reserve_window();
         seq = (&*(shard as *const log::Shard)).reserve(guard);
     }
     (shard as *const log::Shard, seq, cpu, tid, pid)

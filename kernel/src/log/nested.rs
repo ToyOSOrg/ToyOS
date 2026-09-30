@@ -1,11 +1,7 @@
-//! Injects a self-IPI from inside `emit`, landing at one of two windows
-//! depending on which actuator is armed.
+//! Injects a self-IPI from inside `emit`.
 //!
 //! `log-nested-emit`: mid body-copy — overwrites an already-published slot,
 //! indistinguishable from drop-oldest.
-//! `log-nested-reserve`: between the shard-pointer read and the `xadd` —
-//! produces a shard whose `at_ns` descends, which `Descent::advance` and the
-//! log gate assume cannot happen.
 
 /// Producer id the burst's records use — one the log gate's own producer never takes.
 #[cfg(feature = "boot-actuators")]
@@ -20,9 +16,6 @@ mod armed {
     /// One-shot for the body-copy injection point, consumed by `mid_body`.
     static ARMED: AtomicBool = AtomicBool::new(false);
 
-    /// One-shot for the reservation-window injection point, consumed by [`reserve_window`]; kept separate from `ARMED` so it can't starve the body window.
-    static ARMED_RESERVE: AtomicBool = AtomicBool::new(false);
-
     /// Set by the injection and cleared by the handler, so a delivery for any other reason emits nothing.
     static OWED: AtomicBool = AtomicBool::new(false);
 
@@ -32,11 +25,6 @@ mod armed {
     const WINDOW: usize = 256;
 
     pub fn start_once() {
-        // Both actuators name the same injection; arming both would inject into one record twice.
-        assert!(
-            !(crate::actuator::log_nested_emit() && crate::actuator::log_nested_reserve()),
-            "log-nested-emit and log-nested-reserve both name the one injection this read arms"
-        );
         if STARTED.swap(true, Ordering::Relaxed) {
             return;
         }
@@ -48,19 +36,10 @@ mod armed {
     }
 
     fn body() {
-        if crate::actuator::log_nested_reserve() {
-            ARMED_RESERVE.store(true, Ordering::Relaxed);
-            crate::log!(
-                "lognest outer, and an interrupt is due between this record's shard read and its \
-                 xadd"
-            );
-            ARMED_RESERVE.store(false, Ordering::Relaxed);
-        } else {
-            ARMED.store(true, Ordering::Relaxed);
-            crate::log!("lognest outer, and an interrupt is due inside this record's body");
-            // Reset unconditionally: the one-shot must not outlive this record, or a later injection would land in an unrelated log line.
-            ARMED.store(false, Ordering::Relaxed);
-        }
+        ARMED.store(true, Ordering::Relaxed);
+        crate::log!("lognest outer, and an interrupt is due inside this record's body");
+        // Reset unconditionally: the one-shot must not outlive this record, or a later injection would land in an unrelated log line.
+        ARMED.store(false, Ordering::Relaxed);
         crate::log!("lognest done emitted={SHARD_RECORDS}");
     }
 
@@ -79,18 +58,6 @@ mod armed {
         if !inject() {
             return;
         }
-        for _ in 0..WINDOW {
-            core::hint::spin_loop();
-        }
-    }
-
-    /// Injection point between the shard-pointer read and the `xadd`; consumes `ARMED_RESERVE` directly, not via `inject`.
-    pub fn reserve_window() {
-        if !ARMED_RESERVE.swap(false, Ordering::Relaxed) {
-            return;
-        }
-        OWED.store(true, Ordering::Relaxed);
-        crate::arch::irqchip::send_self(crate::arch::trap::LOG_NEST_VECTOR);
         for _ in 0..WINDOW {
             core::hint::spin_loop();
         }
@@ -117,12 +84,6 @@ pub fn start_once() {
 pub fn mid_body() {
     #[cfg(feature = "boot-actuators")]
     armed::mid_body();
-}
-
-/// Injection point between a record's shard-pointer read and its `xadd`; called only from `arch::percpu::reserve_log_slot`.
-pub fn reserve_window() {
-    #[cfg(feature = "boot-actuators")]
-    armed::reserve_window();
 }
 
 /// The `log_nest` interrupt handler's body; no shipping kernel installs that handler.

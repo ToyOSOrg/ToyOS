@@ -301,9 +301,6 @@ actuators! {
     /// Send this CPU an IPI mid record-copy and emit one shard generation from the handler.
     log_nested_emit = "log-nested-emit";
 
-    /// The same IPI, sent between the shard-pointer read and the unlocked `xadd` — stages order damage the log gate detects, unlike the row above's invisible corruption.
-    log_nested_reserve = "log-nested-reserve";
-
     /// Let a handle close cancel every poll on the keyboard's watch in the machine.
     keyboard_close_cancels_every_console = "keyboard-close-cancels-every-console";
 

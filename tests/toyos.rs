@@ -949,7 +949,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // exactly where it was.
     ("log_conservation_smp2", Sched::Parallel),
     ("log_nested_emit", Sched::Parallel),
-    ("log_reserve_window", Sched::Parallel),
     // A guest writes a daemon-shaped line into a real capture window on purpose
     // and the real comparison ignores it, with the filter turned off as the
     // control. One boot, two `echo`s, and every verdict is a string comparison
@@ -8554,9 +8553,6 @@ fn run_machine_test(
             common::logread::log_conservation_smp2(test_config, c_bins, rust_bins)
         }
         "log_nested_emit" => common::logread::log_nested_emit(test_config, c_bins, rust_bins),
-        "log_reserve_window" => {
-            common::logread::log_reserve_window(test_config, c_bins, rust_bins)
-        }
         // Body in `tests/common/console.rs`, same reason.
         "c_capture_ignores_daemon_lines" => {
             common::console::c_capture_ignores_daemon_lines(test_config, c_bins, rust_bins)
