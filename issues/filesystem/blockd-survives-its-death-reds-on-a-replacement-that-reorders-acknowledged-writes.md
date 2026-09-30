@@ -6,7 +6,7 @@ opened: 2026-09-27
 
 # `blockd_survives_its_death` reds on a replacement that rewrites acknowledged writes out of order
 
-The nightly-tier test kills blockd with writes in flight and judges QEMU's
+The test kills blockd with writes in flight and judges QEMU's
 block trace. It has gone red on one signature, the same sectors each time:
 
 ```

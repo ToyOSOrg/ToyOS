@@ -18,7 +18,6 @@ use common::{
 use toyos_build::bootlog::{self, boot_millis};
 use toyos_build::testargs::{self, Shard, SUITE};
 use toyos_build::redlist;
-use toyos_build::tiers::{Reach, Schedule, Tier};
 
 struct TestDef {
     name: String,
@@ -75,11 +74,6 @@ enum Sched {
 /// width-scaled and
 /// `metal_sim_pointer_churn`'s twenty-four paced drains *were* the phase.
 const DEFAULT_WIDTH: usize = 12;
-
-/// Which tier the shared boot's discovered members are in: one boot, so one
-/// tier. Declared beside [`SHARED_BLOCK`] rather than assumed, for the same
-/// reason that is declared.
-const SHARED_TIER: Tier = Tier::Fast;
 
 /// The one boot that carries every Rust and C test.
 ///
@@ -490,61 +484,60 @@ const EARLY_PANIC_MESSAGE: &str = "test-early-panic: on-screen console check";
 /// the thrash. There are two kernels now and nothing to thrash; the order is
 /// kept because these are read the way they are
 /// written.
-const SCREEN_TESTS: &[(&str, Sched, Tier)] = &[
+const SCREEN_TESTS: &[(&str, Sched, qemu::Profile)] = &[
     // Two boots, each ended at a loader line rather than at the kernel's ready
     // marker. Every verdict is a count of rows against a count of lines off the
     // same boot's console; no clock is in either.
-    ("screen_loader_lines", Sched::Parallel, Tier::Nightly),
-    ("screen_gop_firmware_mode", Sched::Parallel, Tier::Weekly),
+    ("screen_loader_lines", Sched::Parallel, qemu::Profile::Metal),
+    ("screen_gop_firmware_mode", Sched::Parallel, qemu::Profile::Gop),
     // The log is still on the panel once every program the image starts has
     // run: an event, and no clock in it.
-    ("screen_diag_boot", Sched::Parallel, Tier::Nightly),
+    ("screen_diag_boot", Sched::Parallel, qemu::Profile::Metal),
     // A guest halted in the window, so the panel is read where only the repaint
     // under test can have painted it.
-    ("screen_early_panel", Sched::Parallel, Tier::Nightly),
-    ("screen_log_absent", Sched::Parallel, Tier::Fast),
-    ("screen_console_shell", Sched::Parallel, Tier::Fast),
-    ("screen_console_clear", Sched::Parallel, Tier::Fast),
-    ("screen_console_scroll", Sched::Parallel, Tier::Fast),
-    ("screen_i8042_health", Sched::Parallel, Tier::Weekly),
+    ("screen_early_panel", Sched::Parallel, qemu::Profile::Metal),
+    ("screen_log_absent", Sched::Parallel, qemu::Profile::Metal),
+    ("screen_console_shell", Sched::Parallel, qemu::Profile::Metal),
+    ("screen_console_clear", Sched::Parallel, qemu::Profile::Metal),
+    ("screen_console_scroll", Sched::Parallel, qemu::Profile::Metal),
+    ("screen_i8042_health", Sched::Parallel, qemu::Profile::Metal),
     // Ctrl+Alt+D with no console at all: the panel is the whole channel, and a
     // compositor is holding it. The verdict is the report on the panel.
-    ("screen_blocked_dump", Sched::Parallel, Tier::Nightly),
-    ("screen_late_panic", Sched::Parallel, Tier::Fast),
-    ("screen_paged_scrollback", Sched::Parallel, Tier::Weekly),
-    ("screen_panic_muted", Sched::Parallel, Tier::Weekly),
-    ("screen_console_panic", Sched::Parallel, Tier::Fast),
-    ("screen_fatal_halt", Sched::Parallel, Tier::Fast),
+    ("screen_blocked_dump", Sched::Parallel, qemu::Profile::Metal),
+    ("screen_late_panic", Sched::Parallel, qemu::Profile::Gop),
+    ("screen_paged_scrollback", Sched::Parallel, qemu::Profile::Gop),
+    ("screen_panic_muted", Sched::Parallel, qemu::Profile::Metal),
+    ("screen_console_panic", Sched::Parallel, qemu::Profile::Metal),
+    ("screen_fatal_halt", Sched::Parallel, qemu::Profile::Gop),
     // The same fatal path from inside Ctrl+Alt+D's report painter, holding the
     // panel's latch it will never give back: the report has to take the screen
     // anyway, and its CPU has to go on to watch the reset bound.
-    ("screen_fatal_behind_a_painter", Sched::Parallel, Tier::Nightly),
+    ("screen_fatal_behind_a_painter", Sched::Parallel, qemu::Profile::Gop),
     // The same fatal path with a compositor holding the panel, which is the
     // only configuration the owner's laptop is ever in and the one no screen
     // test covered: `screen_fatal_halt` boots a config with no compositor, and
     // `screen_blocked_dump` has one but paints through `paint_report` rather
     // than through `halt_all_cpus`.
-    ("screen_fatal_halt_composited", Sched::Parallel, Tier::Nightly),
+    ("screen_fatal_halt_composited", Sched::Parallel, qemu::Profile::Metal),
     // Every PageUp moves the page one back, which the unattended deadline
     // never does: order, and no clock in it.
-    ("screen_pager_keys", Sched::Parallel, Tier::Nightly),
-    // AArch64 guests on QEMU `virt`: local, because no CI runner boots one yet.
-    ("virt_early_panic", Sched::Parallel, Tier::Local),
-    ("virt_early_fault", Sched::Parallel, Tier::Local),
-    ("virt_el2_drop", Sched::Parallel, Tier::Local),
-    ("virt_user_mode", Sched::Parallel, Tier::Local),
-    ("virt_timer_preempts", Sched::Parallel, Tier::Local),
-    ("virt_irq_storm", Sched::Parallel, Tier::Local),
-    ("virt_timer_floor", Sched::Parallel, Tier::Local),
-    ("virt_fp_isolation", Sched::Parallel, Tier::Local),
-    ("virt_first_entry", Sched::Parallel, Tier::Local),
-    ("virt_unmap_touch", Sched::Parallel, Tier::Local),
-    ("virt_debug_refused", Sched::Parallel, Tier::Local),
-    ("virt_readonly_copyout", Sched::Parallel, Tier::Local),
-    ("virt_smp", Sched::Parallel, Tier::Local),
-    ("virt_el1_smp", Sched::Parallel, Tier::Local),
-    ("virt_failed_ap_leaves_no_hole", Sched::Parallel, Tier::Local),
-    ("virt_fatal_halts_the_others_first", Sched::Parallel, Tier::Local),
+    ("screen_pager_keys", Sched::Parallel, qemu::Profile::Metal),
+    ("virt_early_panic", Sched::Parallel, qemu::Profile::Virt),
+    ("virt_early_fault", Sched::Parallel, qemu::Profile::Virt),
+    ("virt_el2_drop", Sched::Parallel, qemu::Profile::VirtEl2),
+    ("virt_user_mode", Sched::Parallel, qemu::Profile::VirtEl2),
+    ("virt_timer_preempts", Sched::Parallel, qemu::Profile::VirtEl2),
+    ("virt_irq_storm", Sched::Parallel, qemu::Profile::VirtEl2),
+    ("virt_timer_floor", Sched::Parallel, qemu::Profile::VirtEl2),
+    ("virt_fp_isolation", Sched::Parallel, qemu::Profile::VirtEl2),
+    ("virt_first_entry", Sched::Parallel, qemu::Profile::VirtEl2),
+    ("virt_unmap_touch", Sched::Parallel, qemu::Profile::VirtEl2),
+    ("virt_debug_refused", Sched::Parallel, qemu::Profile::VirtEl2),
+    ("virt_readonly_copyout", Sched::Parallel, qemu::Profile::VirtEl2),
+    ("virt_smp", Sched::Parallel, qemu::Profile::VirtEl2),
+    ("virt_el1_smp", Sched::Parallel, qemu::Profile::VirtTcg),
+    ("virt_failed_ap_leaves_no_hole", Sched::Parallel, qemu::Profile::VirtEl2),
+    ("virt_fatal_halts_the_others_first", Sched::Parallel, qemu::Profile::VirtEl2),
 ];
 
 /// What `screen_console_shell` types, and what it then looks for on its own.
@@ -587,9 +580,9 @@ const GRAFFITI: [u8; 3] = [0x00, 0xC0, 0x00];
 /// A few adjacent runs of names share *one* boot between them — see
 /// [`group_boot`], which is what makes adjacency here load-bearing rather than
 /// tidy.
-const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
-    ("ioapic_topology", Sched::Parallel, Tier::Fast),
-    ("guest_dies_with_its_harness", Sched::Parallel, Tier::Fast),
+const MACHINE_TESTS: &[(&str, Sched)] = &[
+    ("ioapic_topology", Sched::Parallel),
+    ("guest_dies_with_its_harness", Sched::Parallel),
     // The interrupt census adds up, and every device interrupt is still cpu0's.
     // **The second half is what makes this the track's instrument rather than a
     // tidiness check**: it states the present-state fact
@@ -598,9 +591,9 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // and the first number against a number. Parallel: every verdict is
     // arithmetic over counters the guest printed, and there is no clock in any
     // of it.
-    ("irq_census_conservation", Sched::Parallel, Tier::Weekly),
-    ("control_regs", Sched::Parallel, Tier::Fast),
-    ("control_regs_negative", Sched::Parallel, Tier::Fast),
+    ("irq_census_conservation", Sched::Parallel),
+    ("control_regs", Sched::Parallel),
+    ("control_regs_negative", Sched::Parallel),
     // The boot facts the metal suite reads off a machine's own records: every
     // CPU the firmware named came up and none of their timestamp counters
     // trails the BSP's; the physical memory manager's accounting against the
@@ -610,48 +603,48 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // machine-wide TLB shootdown's cost is a distribution rather than one
     // boot's average. Every verdict is arithmetic over records, with no clock
     // in the judging, so all six are Parallel.
-    ("smp_roster_and_tsc_trail", Sched::Parallel, Tier::Nightly),
-    ("pmm_accounting", Sched::Parallel, Tier::Nightly),
+    ("smp_roster_and_tsc_trail", Sched::Parallel),
+    ("pmm_accounting", Sched::Parallel),
     // ROOT is the loader's image in memory: the kernel says it mounted it
     // from memory, and that init was spawned with no storage command issued;
     // and a loader that hands no image is a boot refused by name, never one
     // that goes to a disk for ROOT. Both are records of one boot each, with no
     // clock in the verdict.
-    ("root_from_memory", Sched::Parallel, Tier::Nightly),
-    ("root_withheld_refused", Sched::Parallel, Tier::Nightly),
+    ("root_from_memory", Sched::Parallel),
+    ("root_withheld_refused", Sched::Parallel),
     // A loader built to another `KernelArgs` layout is refused by name before
     // the kernel reads a field the layout could have moved.
-    ("kernel_args_layout_refused", Sched::Parallel, Tier::Nightly),
+    ("kernel_args_layout_refused", Sched::Parallel),
     // The boot from power-on, as the kernel converts the loader's TSC readings:
     // judged against the loader's raw counts and the kernel's own rate.
-    ("boot_from_power_on", Sched::Parallel, Tier::Nightly),
-    ("acpi_table_inventory", Sched::Parallel, Tier::Nightly),
-    ("timer_calibration", Sched::Parallel, Tier::Nightly),
-    ("pci_inventory", Sched::Parallel, Tier::Nightly),
-    ("smp_failed_ap_leaves_no_hole", Sched::Parallel, Tier::Weekly),
-    ("input_merge", Sched::Parallel, Tier::Weekly),
-    ("metal_sim_input", Sched::Parallel, Tier::Weekly),
-    ("input_claim_absent", Sched::Parallel, Tier::Weekly),
+    ("boot_from_power_on", Sched::Parallel),
+    ("acpi_table_inventory", Sched::Parallel),
+    ("timer_calibration", Sched::Parallel),
+    ("pci_inventory", Sched::Parallel),
+    ("smp_failed_ap_leaves_no_hole", Sched::Parallel),
+    ("input_merge", Sched::Parallel),
+    ("metal_sim_input", Sched::Parallel),
+    ("input_claim_absent", Sched::Parallel),
     // One boot; every verdict is a PPM header field or a console line, and no
     // clock is in any of them.
-    ("gpu_set_resolution", Sched::Parallel, Tier::Fast),
+    ("gpu_set_resolution", Sched::Parallel),
     // One boot from here to `metal_sim_compositor_stall` (`METAL_SIM_DESKTOP`).
-    ("metal_sim_compositor", Sched::Parallel, Tier::Nightly),
+    ("metal_sim_compositor", Sched::Parallel),
     // Reads the boot log this group already has, after the member above has
     // drained it. Text only, no clock in the verdict.
-    ("metal_sim_scanout_wc", Sched::Parallel, Tier::Nightly),
-    ("metal_sim_window_caps", Sched::Parallel, Tier::Nightly),
-    ("metal_sim_ipc_hostile_peer", Sched::Parallel, Tier::Nightly),
-    ("metal_sim_compositor_stall", Sched::Parallel, Tier::Nightly),
+    ("metal_sim_scanout_wc", Sched::Parallel),
+    ("metal_sim_window_caps", Sched::Parallel),
+    ("metal_sim_ipc_hostile_peer", Sched::Parallel),
+    ("metal_sim_compositor_stall", Sched::Parallel),
     // Last of the group: it drops clients on purpose and its verdict is that
     // the desktop outlived every one of them.
-    ("metal_sim_client_death", Sched::Parallel, Tier::Nightly),
+    ("metal_sim_client_death", Sched::Parallel),
     // A thousand pointer packets paced from the host, and not one assertion on
     // when any of them arrived: the settles are 400 ms against a driver that
     // acts in microseconds, both liveness loops run to 20 s, and the three
     // verdicts are a count of bound sources, a frame batch above the taskbar's
     // two, and a desktop still painting afterwards.
-    ("metal_sim_pointer_churn", Sched::Parallel, Tier::Nightly),
+    ("metal_sim_pointer_churn", Sched::Parallel),
     // A window dragged by injected pointer packets, and the exact opposite of
     // the churn above on the one question that decides this: here each packet's
     // effect has to be on screen before the next is sent. The press that starts
@@ -661,84 +654,83 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // verdict rather than a slower one. Watched to happen, on a compositor made
     // slow on purpose. Its own boot too: it leaves the pointer somewhere else
     // and the window in a different place than it found them.
-    ("metal_sim_window_drag", Sched::Serial, Tier::Weekly),
+    ("metal_sim_window_drag", Sched::Serial),
     // Its own boot: the compositor it abuses has to be one nothing else has
     // touched.
-    ("metal_sim_hostile_clipboard", Sched::Parallel, Tier::Fast),
+    ("metal_sim_hostile_clipboard", Sched::Parallel),
     // One C program through the toolchain's clang, read by the loader's decoder,
     // and one boot to run it.
-    ("c_hello", Sched::Parallel, Tier::Fast),
+    ("c_hello", Sched::Parallel),
     // One boot and one number, with no clock in the verdict: the frames are
-    // counted in game tics, whatever the host's speed. Fast, because it is the
-    // gate on what the C compiler makes of doom.
-    ("doom_frames", Sched::Parallel, Tier::Fast),
+    // counted in game tics, whatever the host's speed.
+    ("doom_frames", Sched::Parallel),
     // ureq and rustls from crates.io, fetching over TLS 1.3 from a host this
     // test mints a CA for. Every verdict is a printed line or a digest; the
     // only clock is `run_test`'s ceiling.
-    ("https_tls13", Sched::Parallel, Tier::Weekly),
+    ("https_tls13", Sched::Parallel),
     // The same judge over netd's Intel driver instead of the virtio one: the
     // 82574L QEMU models has the register file the T14's I219 has, so this is
     // where that driver moves real frames before the laptop does.
-    ("https_tls13_e1000e", Sched::Parallel, Tier::Fast),
+    ("https_tls13_e1000e", Sched::Parallel),
     // The log `logd` serves: a reader that connects after a job has ended is
     // handed the boot from its first line, and every line it is handed is the
     // line the guest's own `/log` holds, in its order. The verdicts are lines'
     // arrival and a line-for-line comparison; the clocks in it are liveness
     // guards on a guest that stopped talking.
-    ("log_stream", Sched::Parallel, Tier::Nightly),
+    ("log_stream", Sched::Parallel),
     // The same log over netd's Intel driver, for the same reason
     // `https_tls13_e1000e` exists: the T14's NIC is an I219 and this is the
     // only machine in reach that runs that driver.
-    ("log_stream_e1000e", Sched::Parallel, Tier::Nightly),
+    ("log_stream_e1000e", Sched::Parallel),
     // A reader that never reads, beside a flood: the file and a second reader
     // are whole regardless.
-    ("log_stream_stalled_reader", Sched::Parallel, Tier::Nightly),
+    ("log_stream_stalled_reader", Sched::Parallel),
     // A program's line in `/log`, on the served log and on the console, under
     // the name of the pipe it came out of. Lines and a comparison; no clock.
-    ("log_program_line", Sched::Parallel, Tier::Nightly),
+    ("log_program_line", Sched::Parallel),
     // A program writing the kernel's words and another program's head: every
     // judge of `/log` reads the truth. Lines, and the exit judge; no clock.
-    ("log_program_forgery", Sched::Parallel, Tier::Nightly),
+    ("log_program_forgery", Sched::Parallel),
     // A stop the kernel refuses after logd flushed for it: a line said after
     // it is in `/log`. Lines; no clock.
-    ("log_after_a_refused_stop", Sched::Parallel, Tier::Nightly),
+    ("log_after_a_refused_stop", Sched::Parallel),
     // The same stop with logd's flush held until init resumes it: logd runs
     // the flush, then the resume, and lives. Lines; init's flush bound.
-    ("log_resume_meets_its_flush", Sched::Parallel, Tier::Nightly),
+    ("log_resume_meets_its_flush", Sched::Parallel),
     // A child flooding its parent's log ring while logd reads none of it: the
     // parent's next line is in `/log`. Lines; its clock is a guard.
-    ("log_ring_keeps_the_owners_slots", Sched::Parallel, Tier::Nightly),
+    ("log_ring_keeps_the_owners_slots", Sched::Parallel),
     // A program's line said after three batches of records, read before them:
     // `/log` carries it after every one. Lines and positions; no clock.
-    ("log_program_line_after_its_records", Sched::Parallel, Tier::Nightly),
+    ("log_program_line_after_its_records", Sched::Parallel),
     // A program printing init's word accepting a swap of netd: logd turns
     // nobody away, and a reader after it is admitted. Lines; no clock.
-    ("log_carrier_forgery", Sched::Parallel, Tier::Nightly),
+    ("log_carrier_forgery", Sched::Parallel),
     // A flood many times its ring: every line in `/log` in order or counted.
-    ("log_program_flood", Sched::Parallel, Tier::Nightly),
+    ("log_program_flood", Sched::Parallel),
     // netd taking this machine's address from the network instead of carrying
     // one written down. The DHCP server it is judged against is QEMU's own, an
     // implementation of RFC 2131 this repository did not write, and its lease
     // is known field by field. The verdicts are records and a lease's fields;
     // no clock in it.
-    ("lan_dhcp_lease", Sched::Parallel, Tier::Nightly),
+    ("lan_dhcp_lease", Sched::Parallel),
     // The lease probe on the same part: netd serves its window, exits with the
     // lease's verdict, and the report it leaves on the log volume names the
     // backend's lease with frames counted both ways and the lease kept across
     // a link flap. Records and a file; its clocks are the flap's hold and the
     // drain that outlasts netd's window, and a slower machine moves neither.
-    ("lan_lease_report", Sched::Parallel, Tier::Weekly),
+    ("lan_lease_report", Sched::Parallel),
     // The T14's talking boot rehearsed on the same part: the log the guest
     // serves, read from its first line through a forward, one command over ssh
     // answered byte for byte, and `reboot` over ssh ending the guest. Lines,
     // bytes and a reset; its clocks are liveness guards on a guest that
     // stopped talking.
-    ("lan_talk", Sched::Parallel, Tier::Nightly),
+    ("lan_talk", Sched::Parallel),
     // netd answering for its name: a resolver's query through a forward onto
     // the guest's multicast DNS port is answered with the lease's address, and
     // one for another name is not answered. Bytes; its clocks are a guard on
     // the answer and the window the unanswered query is given.
-    ("lan_mdns_answer", Sched::Parallel, Tier::Nightly),
+    ("lan_mdns_answer", Sched::Parallel),
     // A running service's binary replaced with no reboot: netd swapped for its
     // rebuild over ssh while the stream runs, on virtio-net and on the 82574
     // the T14's I219 shares a register file with; a wrong digest and a
@@ -746,7 +738,7 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // once answered by the old binary running again. Records, bytes and the
     // guest's own `/log`; every clock is a liveness guard on a guest that
     // stopped talking, and probation is init's.
-    ("swap_netd", Sched::Parallel, Tier::Nightly),
+    ("swap_netd", Sched::Parallel),
     // The machine updates itself: an image over `ssh … update` is written to
     // the idle slot and is the kernel the next boot runs; every slot the loader
     // must refuse is refused by name and the other boots; and a slot whose
@@ -754,235 +746,234 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // The same machine's floor, grant and hang: a floor is its key's and its
     // image's, init grants nothing the slot table names but an idle slot's
     // partition, and a hang of an unproven image is a death.
-    ("update_boots_the_new_kernel", Sched::Parallel, Tier::Weekly),
-    ("update_refusals_boot_the_other_slot", Sched::Parallel, Tier::Weekly),
-    ("update_falls_back_from_a_dying_kernel", Sched::Parallel, Tier::Weekly),
-    ("update_hang_kills_an_unproven_image", Sched::Parallel, Tier::Nightly),
-    ("update_grant_refuses_a_stray_partition", Sched::Parallel, Tier::Nightly),
-    ("update_floor_is_the_images_own", Sched::Parallel, Tier::Weekly),
-    ("update_refused_pass_credits_no_image", Sched::Parallel, Tier::Nightly),
-    ("lan_swap", Sched::Parallel, Tier::Nightly),
-    ("swap_refusals", Sched::Parallel, Tier::Nightly),
-    ("swap_crash_rolls_back", Sched::Parallel, Tier::Nightly),
+    ("update_boots_the_new_kernel", Sched::Parallel),
+    ("update_refusals_boot_the_other_slot", Sched::Parallel),
+    ("update_falls_back_from_a_dying_kernel", Sched::Parallel),
+    ("update_hang_kills_an_unproven_image", Sched::Parallel),
+    ("update_grant_refuses_a_stray_partition", Sched::Parallel),
+    ("update_floor_is_the_images_own", Sched::Parallel),
+    ("update_refused_pass_credits_no_image", Sched::Parallel),
+    ("lan_swap", Sched::Parallel),
+    ("swap_refusals", Sched::Parallel),
+    ("swap_crash_rolls_back", Sched::Parallel),
     // The 82574 swapped to a holder that stops it and masters it while the
     // host sends it frames. The verdict is the kernel's console; its clocks
     // are liveness guards.
-    ("swap_quiets_the_function", Sched::Parallel, Tier::Nightly),
+    ("swap_quiets_the_function", Sched::Parallel),
     // The same part released as though nothing could reset it, the way the
     // T14's I219 is, and swapped to a holder that masters it with its receive
     // unit still on. The verdict is the kernel's console; its clocks are
     // liveness guards.
-    ("swap_keeps_what_nothing_reset", Sched::Parallel, Tier::Nightly),
+    ("swap_keeps_what_nothing_reset", Sched::Parallel),
     // The same part swapped to a holder that aims it outside its grant and
     // waits on its claim. The verdict is the holder's own word on what the
     // faulted claim answered; its clocks are liveness guards.
-    ("swap_fault_tells_its_holder", Sched::Parallel, Tier::Nightly),
+    ("swap_fault_tells_its_holder", Sched::Parallel),
     // An `igb` netd held, released by an Express function level reset and
     // claimed again by netd's replacement, which reads it through the window
     // its claim maps. The verdict is what the function answers there.
-    ("swap_resets_the_function", Sched::Parallel, Tier::Nightly),
+    ("swap_resets_the_function", Sched::Parallel),
     // The same `igb`, its window left where its reset put it: the replacement
     // is refused it, and the verdict is init failing the swap by the
     // device's name rather than putting netd in service without it.
-    ("swap_refused_device_fails", Sched::Parallel, Tier::Fast),
+    ("swap_refused_device_fails", Sched::Parallel),
     // The same, its window moved inside the cut rather than lost: the kernel
     // reads the address the register holds, not only that it holds one.
-    ("swap_moved_device_fails", Sched::Parallel, Tier::Nightly),
+    ("swap_moved_device_fails", Sched::Parallel),
     // A program sshd runs undeclared asks for the swap port. The verdict is
     // the program's own exit: the port is not in the namespace it inherited.
-    ("swap_not_inherited", Sched::Parallel, Tier::Nightly),
+    ("swap_not_inherited", Sched::Parallel),
     // The same client on a wire with no server: it says it has no address and
     // announces itself anyway. Its verdict waits out netd's own lease bound, so
     // a slower machine moves it.
-    ("lan_no_lease", Sched::Parallel, Tier::Weekly),
-    ("netd_connection_caps", Sched::Parallel, Tier::Nightly),
+    ("lan_no_lease", Sched::Parallel),
+    ("netd_connection_caps", Sched::Parallel),
     // `inspect` against the four owners on the one boot that runs them all,
     // with the negative control's binary run on it too. Every verdict is the
     // set of lines a selector printed; no clock in any.
-    ("inspect_reads_its_owners", Sched::Parallel, Tier::Nightly),
+    ("inspect_reads_its_owners", Sched::Parallel),
     // The netcase boot again: netd must not abort a listener on a ring flag its
     // own client forged. Its verdict is a kernel-reported EOF or its absence;
     // no clock in it.
-    ("netd_listener_forgery", Sched::Parallel, Tier::Weekly),
+    ("netd_listener_forgery", Sched::Parallel),
     // The netcase boot again: a receiver that stops reading until its pipe
     // is full still gets every byte of a stream past it. The verdict is the
     // guest's byte-for-byte comparison; its clocks are liveness guards.
-    ("netd_slow_reader", Sched::Parallel, Tier::Nightly),
+    ("netd_slow_reader", Sched::Parallel),
     // The netcase boot again: client pipes netd cannot use, or loses under
     // it, cost that client its connection and never netd. The verdict is a
     // round trip after each case, a named line per refusal and a clean
     // console; its clocks are liveness guards.
-    ("netd_refused_pipes", Sched::Parallel, Tier::Nightly),
+    ("netd_refused_pipes", Sched::Parallel),
     // The netcase boot again: an accept netd refuses for room leaves its owner
     // a wake for the connection it left, once room returns. The verdict
     // is the guest's wake or its absence.
-    ("netd_refused_accept", Sched::Parallel, Tier::Fast),
+    ("netd_refused_accept", Sched::Parallel),
     // The netcase boot again: bytes held back past a full pipe move on the
     // pipe's room alone, the peer holding the connection open and silent. The
     // verdict is the guest's byte-for-byte comparison; its clocks are
     // liveness guards.
-    ("netd_held_open", Sched::Parallel, Tier::Nightly),
+    ("netd_held_open", Sched::Parallel),
     // The netcase boot again, beside a host UDP echo: a datagram the client's
     // pipe will not take whole ends that socket by name and no other. The
     // verdict is each socket's answer; its clocks are liveness guards.
-    ("netd_udp_refused", Sched::Parallel, Tier::Nightly),
+    ("netd_udp_refused", Sched::Parallel),
     // The netcase boot again, beside a host UDP echo: a socket bound through
     // std to 0.0.0.0 receives the echo's unicast reply. The verdict is the
     // reply's bytes; its clock is a liveness guard.
-    ("netd_udp_any_address", Sched::Parallel, Tier::Nightly),
+    ("netd_udp_any_address", Sched::Parallel),
     // The netcase boot, whose user network forwards 10.0.2.3 to this host's
     // resolver: `host` resolves a real name to the addresses this host's
     // resolver gives it, and a `.invalid` name to none. The verdict is the
     // two answers; its clocks are liveness guards.
-    ("dns_resolve", Sched::Parallel, Tier::Nightly),
+    ("dns_resolve", Sched::Parallel),
     // The netcase boot, every frame it sends held once it has its lease:
     // lookups whose clients hung up or spoke again are let go at once, and
     // one nobody answers ends when its schedule does. The verdict is netd's
     // answers.
-    ("netd_lookup_let_go", Sched::Parallel, Tier::Nightly),
+    ("netd_lookup_let_go", Sched::Parallel),
     // Two netcase boots, each frame put on the wire kept: the first DHCP
     // transaction ID of each differs, because netd seeds smoltcp's random
     // source from the kernel's. The verdict is two numbers off the wire.
-    ("netd_seeds_its_stack", Sched::Parallel, Tier::Nightly),
+    ("netd_seeds_its_stack", Sched::Parallel),
     // The netcase boot with two programs naming one PCI function: the verdict
     // is which of them the kernel let have it. Console lines only, no clock.
-    ("pci_function_is_exclusive", Sched::Parallel, Tier::Nightly),
+    ("pci_function_is_exclusive", Sched::Parallel),
     // The same boot again, read for what the kernel asked the machine before it
     // moved that function's BAR. Its own boot rather than a second assertion in
     // the row above, because that one's subject is exclusivity and a test that
     // reds tells a reader which of the two it is about. It waits out a drain for
     // the message record, so its price carries a fixed span of host wall clock.
-    ("bar_placement_is_proven", Sched::Parallel, Tier::Nightly),
+    ("bar_placement_is_proven", Sched::Parallel),
     // Its own boot with a blank DATA volume, asked over ssh where everything
     // it wrote went. Every verdict is a listing or a line; no clock in any.
-    ("layout_fresh_boot", Sched::Parallel, Tier::Nightly),
+    ("layout_fresh_boot", Sched::Parallel),
     // One `SSHD_LOGIN` boot for the three, driven by `tests/ssh-client-host`.
-    // Adjacent because `group_of` makes adjacency load-bearing, and one tier
-    // because one boot cannot be in two. Every verdict is bytes or an exit
+    // Adjacent because `group_of` makes adjacency load-bearing. Every verdict is bytes or an exit
     // status; the client's own ceiling is a liveness guard and no assertion
     // reads a clock.
-    ("sshd_exec", Sched::Parallel, Tier::Nightly),
-    ("sshd_files", Sched::Parallel, Tier::Nightly),
-    ("sshd_key_auth", Sched::Parallel, Tier::Nightly),
-    ("netd_hostile_peer", Sched::Parallel, Tier::Weekly),
-    ("launcher_refusals", Sched::Parallel, Tier::Weekly),
+    ("sshd_exec", Sched::Parallel),
+    ("sshd_files", Sched::Parallel),
+    ("sshd_key_auth", Sched::Parallel),
+    ("netd_hostile_peer", Sched::Parallel),
+    ("launcher_refusals", Sched::Parallel),
     // Paths a child prints and the kernel's refusals by name; no clock in any of them.
-    ("spawn_cwd", Sched::Parallel, Tier::Nightly),
-    ("foreign_disk_untouched", Sched::Parallel, Tier::Weekly),
-    ("volume_from_another_disk", Sched::Parallel, Tier::Weekly),
-    ("broken_data_volume_is_absent", Sched::Parallel, Tier::Nightly),
-    ("data_candidate_with_bad_geometry_is_absent", Sched::Parallel, Tier::Nightly),
+    ("spawn_cwd", Sched::Parallel),
+    ("foreign_disk_untouched", Sched::Parallel),
+    ("volume_from_another_disk", Sched::Parallel),
+    ("broken_data_volume_is_absent", Sched::Parallel),
+    ("data_candidate_with_bad_geometry_is_absent", Sched::Parallel),
     // Four kernel lines and a file read off the image once the guest is gone; no clock in any of them.
-    ("internal_disk_boot", Sched::Parallel, Tier::Weekly),
+    ("internal_disk_boot", Sched::Parallel),
     // One boot each, kernel lines and image bytes for verdicts, no clock in either.
-    ("block_duplicate_id", Sched::Parallel, Tier::Weekly),
-    ("page_cache_partition_offset", Sched::Parallel, Tier::Weekly),
+    ("block_duplicate_id", Sched::Parallel),
+    ("page_cache_partition_offset", Sched::Parallel),
     // A partition claimed as a device: one boot, every refusal in the guest,
     // the neighbours and the target judged off the image. Body in
     // `tests/common/partclaim.rs`, as are the two below.
-    ("partition_claim", Sched::Parallel, Tier::Fast),
+    ("partition_claim", Sched::Parallel),
     // Three boots: a disk that does not answer a read of its table, every
     // attempt refused until the deadman, and ROOT's source withheld from every
     // claim once its disk did not answer the boot's hold.
-    ("partition_claim_gives_up", Sched::Parallel, Tier::Nightly),
+    ("partition_claim_gives_up", Sched::Parallel),
     // Three boots, a USB stick's device leaving owing one claim's write and
     // coming back on another port each time: each partition's fsync answers
     // for its own writes, across a close, after another's flush, and at the
     // shutdown when nobody asked.
-    ("partition_claim_departure", Sched::Parallel, Tier::Nightly),
+    ("partition_claim_departure", Sched::Parallel),
     // A same-length overwrite on /home, the guest's read held against the image. Body in `tests/common/storage.rs`.
-    ("home_overwrite_reads_back", Sched::Parallel, Tier::Weekly),
+    ("home_overwrite_reads_back", Sched::Parallel),
     // One filesystem under two paths: the guest writes under each of /apps and
     // /home, the host finds both in one volume on the image. Body in
     // `tests/common/storage.rs`.
-    ("apps_and_home_are_one_filesystem", Sched::Parallel, Tier::Weekly),
+    ("apps_and_home_are_one_filesystem", Sched::Parallel),
     // `pkg install <file>` from a local archive and gbae's first run: the whole
     // package path in one boot, judged off the DATA volume once the guest is
     // gone. Body in `tests/common/pkg.rs`.
-    ("pkg_install_gbae", Sched::Parallel, Tier::Nightly),
-    ("boot_partition_identity", Sched::Parallel, Tier::Nightly),
+    ("pkg_install_gbae", Sched::Parallel),
+    ("boot_partition_identity", Sched::Parallel),
     // One boot of its own, because it ends the machine. Every verdict is a
     // kernel line or the stop reason QEMU reported; no clock is in either.
-    ("machine_reboot", Sched::Parallel, Tier::Weekly),
+    ("machine_reboot", Sched::Parallel),
     // Its own boot: every verdict is a console line, QEMU's stop reason or a record off the image.
-    ("metal_job_reboot", Sched::Parallel, Tier::Fast),
+    ("metal_job_reboot", Sched::Parallel),
     // Its own boot, and the one whose numbers are the T14's: what it judges
     // here is the plumbing, since every span on an emulated device is a fact
     // about TCG.
-    ("metal_device_probe", Sched::Parallel, Tier::Nightly),
+    ("metal_device_probe", Sched::Parallel),
     // Its verdict waits out a staged window.
-    ("job_deadline_reboots", Sched::Parallel, Tier::Nightly),
+    ("job_deadline_reboots", Sched::Parallel),
     // Its own boot, and its verdict waits out the same staged window.
-    ("quiesce_stops_the_machine", Sched::Parallel, Tier::Fast),
+    ("quiesce_stops_the_machine", Sched::Parallel),
     // Its own boot: it ends the machine, and its verdict is the order of
     // kernel lines.
-    ("quiesce_refuses_a_second_shutdown", Sched::Parallel, Tier::Nightly),
+    ("quiesce_refuses_a_second_shutdown", Sched::Parallel),
     // Its own boot: it ends the machine, and its verdict is the volume that
     // boot leaves.
-    ("quiesce_leaves_the_volume_whole", Sched::Parallel, Tier::Nightly),
+    ("quiesce_leaves_the_volume_whole", Sched::Parallel),
     // Its own boot each: it ends the machine, and its verdict is the stop
     // record that boot writes.
-    ("quiesce_wakes_on_the_last_park", Sched::Parallel, Tier::Nightly),
-    ("quiesce_wakes_on_the_last_teardown", Sched::Parallel, Tier::Nightly),
+    ("quiesce_wakes_on_the_last_park", Sched::Parallel),
+    ("quiesce_wakes_on_the_last_teardown", Sched::Parallel),
     // Two reads of `TCO_RLD` straddling a real-time stall, so a slower machine
     // changes the verdict.
-    ("loader_watchdog_arms", Sched::Parallel, Tier::Nightly),
+    ("loader_watchdog_arms", Sched::Parallel),
     // Its own boot, and the verdict is QEMU's stop reason inside the bound.
-    ("watchdog_resets", Sched::Parallel, Tier::Nightly),
+    ("watchdog_resets", Sched::Parallel),
     // The panicked kernel's own bound, which is what ends a boot on a machine
     // whose chipset timer does not count. The verdict is QEMU's stop reason and
     // the line saying the bound ran out.
-    ("panic_reboots", Sched::Parallel, Tier::Nightly),
+    ("panic_reboots", Sched::Parallel),
     // The same verdict from inside `percpu::init_bsp`: the earliest point a
     // panic is reportable, and the window the owner's T14 stops in.
-    ("panic_before_peripherals_reboots", Sched::Parallel, Tier::Nightly),
+    ("panic_before_peripherals_reboots", Sched::Parallel),
     // The boot chain's three answers. The two chain names each watch a guest
     // take its own reset and read the pass after it, so both are anchored to
     // the bound the first boot counts down.
-    ("blackbox_panic_chain", Sched::Parallel, Tier::Nightly),
-    ("blackbox_done_chain", Sched::Parallel, Tier::Nightly),
+    ("blackbox_panic_chain", Sched::Parallel),
+    ("blackbox_done_chain", Sched::Parallel),
     // The one bound in this tree that ends a machine nothing else can: a boot
     // whose every CPU has stopped taking scheduler passes. Its verdict is a
     // bound counted down in the guest.
-    ("boot_deadline_ends_a_wedge", Sched::Parallel, Tier::Nightly),
+    ("boot_deadline_ends_a_wedge", Sched::Parallel),
     // The same bound ending the same machine with a device in its hands.
-    ("usb_reset_records_the_phase_it_cut", Sched::Parallel, Tier::Weekly),
+    ("usb_reset_records_the_phase_it_cut", Sched::Parallel),
     // The other half of that same parameter, and the state its poll cannot
     // reach: one CPU with interrupts off, which no running CPU can see. Two
     // bounds counted down in the guest, so it belongs beside the row above.
-    ("hard_lockup_ends_a_deaf_cpu", Sched::Parallel, Tier::Nightly),
+    ("hard_lockup_ends_a_deaf_cpu", Sched::Parallel),
     // The control on both of those bounds standing down: a panic whose panel is
     // still up when the deadline expires must cross the reset as a panic report
     // and never as a `WEDGED` page.
-    ("panic_outlives_the_deadline", Sched::Parallel, Tier::Nightly),
+    ("panic_outlives_the_deadline", Sched::Parallel),
     // Four chained boots, one per way this kernel reaches a reset, each
     // anchored to the bound its own first boot counts down.
-    ("usb_reset_hands_devices_back", Sched::Parallel, Tier::Weekly),
+    ("usb_reset_hands_devices_back", Sched::Parallel),
     // The control on the chain: a record another image left in the same memory
     // is cleared and its pass boots a kernel, where a real predecessor's ends
     // the chain. One boot, one actuator.
-    ("blackbox_foreign_record", Sched::Parallel, Tier::Fast),
+    ("blackbox_foreign_record", Sched::Parallel),
     // Three launches of one image file, and the third is the one that makes it
     // a bound: a hang costs the machine one boot and never traps it.
-    ("hang_bounded_by_the_stick", Sched::Parallel, Tier::Nightly),
+    ("hang_bounded_by_the_stick", Sched::Parallel),
     // Its own boot, and every verdict is a line: no host clock in any of it.
-    ("blackbox_unclaimed_page", Sched::Parallel, Tier::Nightly),
+    ("blackbox_unclaimed_page", Sched::Parallel),
     // The seal read off the page's own bytes by QEMU, after a panic earlier than
     // anything the kernel used to learn the page's address from. Its own boot,
     // and no clock in the verdict.
-    ("blackbox_early_panic_sealed", Sched::Parallel, Tier::Nightly),
+    ("blackbox_early_panic_sealed", Sched::Parallel),
     // The same crash on the owner's machine's own shape — no serial port at all
     // — where the panel and the page are the only two channels there are.
-    ("blackbox_early_panic_sealed_muted", Sched::Parallel, Tier::Nightly),
+    ("blackbox_early_panic_sealed_muted", Sched::Parallel),
     // The exception entry's own seal, off the page's bytes on an ordinary boot.
-    ("blackbox_fault_sealed", Sched::Parallel, Tier::Nightly),
-    ("double_fault_stack", Sched::Parallel, Tier::Nightly),
+    ("blackbox_fault_sealed", Sched::Parallel),
+    ("double_fault_stack", Sched::Parallel),
     // One boot of its own, ten seconds of Ring 3 spinning, and every verdict is
     // a count the kernel printed or a line it printed: how many NMIs landed at
     // CPL 0 with a user `rsp`, against how many landed in Ring 3, both off the
     // same storm. No host clock is in any of it — the ten seconds are how long
     // the victim spins, not a margin anything is measured against — so Parallel.
-    ("syscall_window_nmi", Sched::Parallel, Tier::Weekly),
+    ("syscall_window_nmi", Sched::Parallel),
     // The two controls on the name above: the kernel with vector 2's IST index
     // taken off, which must double fault at the entry on the NMI aimed at the
     // CPU the storm holds inside it, with `cr2 = rsp - 8` at the held `rsp`, and
@@ -990,112 +981,112 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // path. Both boots end in a halted machine that has to be drained past its
     // own report, which is where the price is. Nothing in either verdict is a
     // duration.
-    ("syscall_window_nmi_controls", Sched::Parallel, Tier::Weekly),
+    ("syscall_window_nmi_controls", Sched::Parallel),
     // Its own boot, its own feature, and it drives the guest only through
     // stdin — nothing it touches is shared with another test.
-    ("idle_stack_guard", Sched::Parallel, Tier::Weekly),
+    ("idle_stack_guard", Sched::Parallel),
     // The same dump asked for inside the passes that may not serve it, on one
     // CPU. Parallel: every verdict is a line the guest prints or a count the guest
     // keeps, and no duration is in any of them.
-    ("dump_left_pending_is_owed", Sched::Parallel, Tier::Nightly),
-    ("diskless_boot", Sched::Parallel, Tier::Nightly),
+    ("dump_left_pending_is_owed", Sched::Parallel),
+    ("diskless_boot", Sched::Parallel),
     // Every verdict is a line of text or a device property, and no clock is in
     // any of them.
-    ("virtio_net_no_msix", Sched::Parallel, Tier::Fast),
+    ("virtio_net_no_msix", Sched::Parallel),
     // One boot of the NIC config with a staged capability list, and every
     // verdict a console line. No clock in any of them.
-    ("pci_claim_caps_truncated", Sched::Parallel, Tier::Nightly),
+    ("pci_claim_caps_truncated", Sched::Parallel),
     // One boot, and its verdict is a line the kernel printed before any device
     // was brought up. No clock and no device in it.
-    ("virtio_used_ring", Sched::Parallel, Tier::Weekly),
+    ("virtio_used_ring", Sched::Parallel),
     // A fatal path with other CPUs running userland that makes kernel records:
     // none of theirs follows the fatal path's own line after the stop beyond
     // the one each may have had in flight. Order, and no clock in it.
-    ("panic_halts_the_others_first", Sched::Parallel, Tier::Nightly),
+    ("panic_halts_the_others_first", Sched::Parallel),
     // A kernel log line from PCI enumeration; no clock and no real device in it.
-    ("pci_capability_walk", Sched::Parallel, Tier::Weekly),
+    ("pci_capability_walk", Sched::Parallel),
     // What QEMU was told to create against what the guest enumerated: two
     // accounts of one bus from two independent readers. One boot, every
     // verdict a set comparison.
-    ("query_pci_agreement", Sched::Parallel, Tier::Weekly),
+    ("query_pci_agreement", Sched::Parallel),
     // The root `system.toml`, booted rather than read: the shipped init list
     // and program namespaces have no other gate a harness run can reach.
     // Every verdict is a console line.
-    ("shipped_config_boots", Sched::Parallel, Tier::Fast),
+    ("shipped_config_boots", Sched::Parallel),
     // One boot whose verdict is three lines of kernel log and a census column.
     // The two waits inside the guest are bounded and report rather than hang, so
     // no host clock decides anything.
-    ("lapic_spurious_vector", Sched::Parallel, Tier::Weekly),
+    ("lapic_spurious_vector", Sched::Parallel),
     // One boot with both stuck-device actuators armed.
-    ("driver_wait_refused", Sched::Parallel, Tier::Weekly),
+    ("driver_wait_refused", Sched::Parallel),
     // One boot; the leak-rollback controls' two verdict lines.
-    ("leak_rollback_selftest", Sched::Parallel, Tier::Weekly),
+    ("leak_rollback_selftest", Sched::Parallel),
     // One boot; the reopen control's one verdict line.
-    ("process_reopen_selftest", Sched::Parallel, Tier::Weekly),
+    ("process_reopen_selftest", Sched::Parallel),
     // One boot; three read-fault control verdicts.
-    ("read_fault_selftests", Sched::Parallel, Tier::Weekly),
-    ("xhci_many_devices", Sched::Parallel, Tier::Weekly),
+    ("read_fault_selftests", Sched::Parallel),
+    ("xhci_many_devices", Sched::Parallel),
     // Its whole assertion is that a keystroke injected from the host crossed a
     // USB keyboard on the *second* controller, and `input_events_run` sends
     // each one only after the guest has printed the last — so a key the host
     // never got to send is a stall it names, and never a key the driver lost.
-    ("xhci_second_controller", Sched::Parallel, Tier::Weekly),
-    ("xhci_two_controllers", Sched::Parallel, Tier::Weekly),
+    ("xhci_second_controller", Sched::Parallel),
+    ("xhci_two_controllers", Sched::Parallel),
     // **Returned 2026-08-17**, on the same `input_events_run` the two names
     // above it run: it had `xhci_second_controller`'s sequence written out again
     // on fixed sleeps, and nothing sent the right-button release
     // `test_rs_input_events` exits on — so 30 s of its 35.2 s CI price was a
     // client waiting out a fallback deadline with every assertion already
     // satisfied.
-    ("xhci_msi_only", Sched::Parallel, Tier::Weekly),
-    ("xhci_no_interrupt", Sched::Parallel, Tier::Weekly),
-    ("nvme_large_device", Sched::Parallel, Tier::Nightly),
-    ("nvme_wide_sector", Sched::Parallel, Tier::Weekly),
-    ("iommu_discovery", Sched::Parallel, Tier::Weekly),
-    ("readdir_bound", Sched::Parallel, Tier::Weekly),
+    ("xhci_msi_only", Sched::Parallel),
+    ("xhci_no_interrupt", Sched::Parallel),
+    ("nvme_large_device", Sched::Parallel),
+    ("nvme_wide_sector", Sched::Parallel),
+    ("iommu_discovery", Sched::Parallel),
+    ("readdir_bound", Sched::Parallel),
     // Its own boot: it fills the VFS `created_dirs` cap and leaves it there.
-    ("mkdir_cap", Sched::Parallel, Tier::Weekly),
+    ("mkdir_cap", Sched::Parallel),
     // Two boots, and the verdict is that they answer differently. Nothing in it
     // is timed: every arm is a process exit code or a byte comparison.
-    ("fpu_isolation", Sched::Parallel, Tier::Nightly),
+    ("fpu_isolation", Sched::Parallel),
     // Two boots, exit codes only (no clock, Parallel).
-    ("gsbase_locked", Sched::Parallel, Tier::Weekly),
+    ("gsbase_locked", Sched::Parallel),
     // The fourth declared kernel build, booted so that the scheduler core's
     // `feature = "check"` instruments are compiled and executed by a CI run at
     // all.
-    ("sched_check_build", Sched::Parallel, Tier::Fast),
+    ("sched_check_build", Sched::Parallel),
     // What nesting a `scheduler::Operation` may and may not do, which is a law
     // with no host-side reader: the type reaches `percpu::cpu_id` and
     // `driver::current_handle`, so nothing outside a booted machine can
     // construct one. Parallel, and nothing in it is a duration — every verdict
     // is a comparison between two numbers the kernel printed, both of them
     // offsets it chose itself.
-    ("operation_nesting", Sched::Parallel, Tier::Weekly),
-    ("short_sleep_livelock", Sched::Parallel, Tier::Fast),
+    ("operation_nesting", Sched::Parallel),
+    ("short_sleep_livelock", Sched::Parallel),
     // The spawn half alone: one headless boot whose verdict is kernel log
     // lines.
-    ("klogd_hosted", Sched::Parallel, Tier::Weekly),
-    ("klogd_fault_halts", Sched::Parallel, Tier::Nightly),
-    ("syscall_panic_halts", Sched::Parallel, Tier::Nightly),
-    ("syscall_fault_halts", Sched::Parallel, Tier::Nightly),
-    ("lock_across_switch_halts", Sched::Parallel, Tier::Nightly),
-    ("heap_over_ceiling_halts", Sched::Parallel, Tier::Nightly),
+    ("klogd_hosted", Sched::Parallel),
+    ("klogd_fault_halts", Sched::Parallel),
+    ("syscall_panic_halts", Sched::Parallel),
+    ("syscall_fault_halts", Sched::Parallel),
+    ("lock_across_switch_halts", Sched::Parallel),
+    ("heap_over_ceiling_halts", Sched::Parallel),
     // The two dead ends of the panic path, each staged on purpose and read for
     // what the machine manages to say on its way out. Each boot dies inside the
     // boot phases at the marker the harness waits for, so neither pays for a
     // userland. Parallel:
     // every verdict is a substring of a report the guest wrote, and there is no
     // clock in any of it.
-    ("reentry_names_the_first_panic", Sched::Parallel, Tier::Weekly),
+    ("reentry_names_the_first_panic", Sched::Parallel),
     // The kernel hasher's boot-order obligation, in the row above's shape and
     // for its reasons.
-    ("hash_seed_precedes_every_map", Sched::Parallel, Tier::Weekly),
-    ("double_panic_names_the_fault", Sched::Parallel, Tier::Weekly),
+    ("hash_seed_precedes_every_map", Sched::Parallel),
+    ("double_panic_names_the_fault", Sched::Parallel),
     // The third shape: a `#PF` inside a panic, which is the one
     // `fatal_exception`'s recursive short-circuit exists for and the one it
     // never classified. Same boot shape as its two neighbours — dies inside the
     // boot phases at the marker, no userland — so Parallel.
-    ("nested_fault_is_recursive", Sched::Parallel, Tier::Weekly),
+    ("nested_fault_is_recursive", Sched::Parallel),
     // The conservation law across `SYS_LOG_READ`, and the nesting gate at one
     // CPU. Parallel: every verdict is a ledger the
     // guest computes over its own records — every sequence number read or
@@ -1103,44 +1094,44 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // them reads a clock. A loaded host makes the producers outrun the reader
     // further, which moves records from `read` into `lost` and leaves the law
     // exactly where it was.
-    ("log_conservation_smp2", Sched::Parallel, Tier::Weekly),
-    ("log_nested_emit", Sched::Parallel, Tier::Weekly),
+    ("log_conservation_smp2", Sched::Parallel),
+    ("log_nested_emit", Sched::Parallel),
     // The same interrupt one window earlier — between a record's shard-pointer
     // read and its `xadd` — and its negative control, which is the only reader
     // `log-unbracketed-reserve` has ever had. Parallel for
     // `log_nested_emit`'s reasons: both verdicts are the guest's ledger over its
     // own records, one saying the shard kept a single order and the other that
     // it lost it by name, and no clock is in either.
-    ("log_reserve_window", Sched::Parallel, Tier::Weekly),
-    ("log_reserve_window_negative", Sched::Parallel, Tier::Weekly),
+    ("log_reserve_window", Sched::Parallel),
+    ("log_reserve_window_negative", Sched::Parallel),
     // A guest writes a daemon-shaped line into a real capture window on purpose
     // and the real comparison ignores it, with the filter turned off as the
     // control. One boot, two `echo`s, and every verdict is a string comparison
     // the host makes over a capture — no clock in it.
-    ("c_capture_ignores_daemon_lines", Sched::Parallel, Tier::Weekly),
+    ("c_capture_ignores_daemon_lines", Sched::Parallel),
     // A poll on the machine's log against a *handle* going away. Parallel: both
     // halves are verdicts the guest computes — a completion count
     // immediately after a close, retried against a record arriving in the same
     // microseconds, and a completion afterwards bounded far above the two
     // scheduler passes it needs.
-    ("log_poll_outlives_a_close", Sched::Parallel, Tier::Weekly),
+    ("log_poll_outlives_a_close", Sched::Parallel),
     // The same question asked of the keyboard, where two *kinds* of object name
     // one source: a poll on stdin against the keyboard claim going away, a poll
     // on the mouse claim against its own, and an injected keystroke to show the
     // first was still armed. Parallel: two of the three verdicts are
     // counts the guest takes immediately after a close on its own thread, and
     // the third is bounded far above the one interrupt it waits for.
-    ("keyboard_claim_close_spares_stdin", Sched::Parallel, Tier::Fast),
+    ("keyboard_claim_close_spares_stdin", Sched::Parallel),
     // One boot that stops dead in phase 3, read for what it managed to say.
-    ("pre_idle_wedge_speaks", Sched::Parallel, Tier::Weekly),
-    ("i8042_health", Sched::Parallel, Tier::Nightly),
+    ("pre_idle_wedge_speaks", Sched::Parallel),
+    ("i8042_health", Sched::Parallel),
     // And one from here to `i8042_mouse` (`I8042_TRACE`). Neither measures a
     // rate: nothing goes out until the guest has reported what the injection
     // before it produced — `i8042_mouse` within [`MOUSE_LEAD`], the keyboard one
     // a group at a time — so a guest with less of the host is a longer run and
     // not a smaller count.
-    ("i8042_no_spurious_wake", Sched::Parallel, Tier::Nightly),
-    ("i8042_mouse", Sched::Parallel, Tier::Nightly),
+    ("i8042_no_spurious_wake", Sched::Parallel),
+    ("i8042_mouse", Sched::Parallel),
     // A boot each, and deliberately not a group: every one of them changes
     // the machine's layout, and a wizard that exits the instant it has its
     // answer leaves the guest with nothing to run — so a later member reads a console the previous one is
@@ -1155,123 +1146,123 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // against a marker with a twenty-second ceiling, so a slower guest is a
     // slower test and not a different verdict — which is the same argument
     // `i8042_kbd_echo` has run on at width 4 since the phase landed.
-    ("swiss_german_layout", Sched::Parallel, Tier::Nightly),
+    ("swiss_german_layout", Sched::Parallel),
     // One `LOCALE_WIZARD` boot for the pair since the drainer was made
     // runnable at commit — the boot-apiece and the injected drain keys it took
     // to share one were both the closed log-ring lag. Adjacent because
     // `group_of` makes adjacency load-bearing.
-    ("locale_detect", Sched::Parallel, Tier::Nightly),
-    ("locale_detect_unrecognized", Sched::Parallel, Tier::Nightly),
+    ("locale_detect", Sched::Parallel),
+    ("locale_detect_unrecognized", Sched::Parallel),
     // The wizard on the two surfaces the machine actually has, rather than on
     // the stand-in `locale_gate` is. Each costs a boot of a different image.
-    ("console_locale_detect", Sched::Parallel, Tier::Fast),
-    ("desktop_locale_detect", Sched::Parallel, Tier::Fast),
+    ("console_locale_detect", Sched::Parallel),
+    ("desktop_locale_detect", Sched::Parallel),
     // Typing at the same desktop, measured rather than transcribed: it waits
     // for its eight echoes instead of asserting how many arrived in a window,
     // so a guest that is slow costs seconds and not a verdict, and the verdict
     // itself is a fraction of the screen that no amount of load moves.
-    ("desktop_typing_damage", Sched::Parallel, Tier::Nightly),
-    ("desktop_window_child", Sched::Parallel, Tier::Nightly),
+    ("desktop_typing_damage", Sched::Parallel),
+    ("desktop_window_child", Sched::Parallel),
     // An unmodified iced app on the desktop, launched from the shell: the
     // window, its text in the system font, no redraw it did not ask for, and
     // a clean exit when the compositor closes it.
-    ("toolkit_iced", Sched::Parallel, Tier::Weekly),
+    ("toolkit_iced", Sched::Parallel),
     // The wait every winit loop blocks in, the loop itself through winit's
     // API, and an animation held to the compositor's frame events.
-    ("toolkit_window_wake", Sched::Parallel, Tier::Nightly),
-    ("toolkit_winit_loop", Sched::Parallel, Tier::Nightly),
-    ("toolkit_winit_pace", Sched::Parallel, Tier::Nightly),
+    ("toolkit_window_wake", Sched::Parallel),
+    ("toolkit_winit_loop", Sched::Parallel),
+    ("toolkit_winit_pace", Sched::Parallel),
     // Ctrl+Alt+D on the same machine. Parallel: it waits for a marker and its
     // verdicts are counts the report has to agree with itself about, not a
     // wall-clock margin — the one duration in it is the dump's own 250 ms
     // ceiling, which the guest spends and the host never measures.
-    ("blocked_dump", Sched::Parallel, Tier::Nightly),
-    ("i8042_absent", Sched::Parallel, Tier::Nightly),
+    ("blocked_dump", Sched::Parallel),
+    ("i8042_absent", Sched::Parallel),
     // The fault quarantines (masks) the controller's GSI: the line and its
     // count are the verdict, and no program runs.
-    ("i8042_quarantine", Sched::Parallel, Tier::Nightly),
-    ("i8042_budget_expiry", Sched::Parallel, Tier::Nightly),
-    ("i8042_fadt_denial", Sched::Parallel, Tier::Weekly),
-    ("i8042_kbd_echo", Sched::Parallel, Tier::Nightly),
-    ("i8042_undecoded_bytes", Sched::Parallel, Tier::Fast),
-    ("xhci_xecp_walk", Sched::Parallel, Tier::Weekly),
-    ("xhci_slot_exhaustion", Sched::Parallel, Tier::Weekly),
-    ("usb_storage_gate", Sched::Parallel, Tier::Weekly),
-    ("usb_storage_shapes", Sched::Parallel, Tier::Weekly),
-    ("usb_refused_disk_first", Sched::Parallel, Tier::Weekly),
-    ("xhci_scan_hands_over_a_free_slot", Sched::Parallel, Tier::Nightly),
+    ("i8042_quarantine", Sched::Parallel),
+    ("i8042_budget_expiry", Sched::Parallel),
+    ("i8042_fadt_denial", Sched::Parallel),
+    ("i8042_kbd_echo", Sched::Parallel),
+    ("i8042_undecoded_bytes", Sched::Parallel),
+    ("xhci_xecp_walk", Sched::Parallel),
+    ("xhci_slot_exhaustion", Sched::Parallel),
+    ("usb_storage_gate", Sched::Parallel),
+    ("usb_storage_shapes", Sched::Parallel),
+    ("usb_refused_disk_first", Sched::Parallel),
+    ("xhci_scan_hands_over_a_free_slot", Sched::Parallel),
     // The owner's freeze, staged: `device_del` on the stick carrying `/boot`
     // and `/log` while the desktop draws. Serial because both verdicts are
     // liveness ceilings — two 2 s compositor reporting intervals inside 20 s,
     // and a console round trip inside 20 s — and a guest sharing the host with
     // eleven others answers those late for reasons that are not the defect.
-    ("usb_boot_stick_pulled", Sched::Serial, Tier::Nightly),
-    ("usb_pool_exhausted", Sched::Parallel, Tier::Weekly),
-    ("usb_short_read", Sched::Parallel, Tier::Weekly),
-    ("usb_storage_write_error", Sched::Parallel, Tier::Weekly),
-    ("usb_flush_optional", Sched::Parallel, Tier::Nightly),
-    ("xhci_deaf_registers", Sched::Parallel, Tier::Weekly),
-    ("xhci_slow_connect", Sched::Parallel, Tier::Nightly),
-    ("xhci_portsc_rw1c", Sched::Parallel, Tier::Weekly),
+    ("usb_boot_stick_pulled", Sched::Serial),
+    ("usb_pool_exhausted", Sched::Parallel),
+    ("usb_short_read", Sched::Parallel),
+    ("usb_storage_write_error", Sched::Parallel),
+    ("usb_flush_optional", Sched::Parallel),
+    ("xhci_deaf_registers", Sched::Parallel),
+    ("xhci_slow_connect", Sched::Parallel),
+    ("xhci_portsc_rw1c", Sched::Parallel),
     // One staged break and no other, which puts the driver's recovery finishing
     // on its first try in the verdict: a retried command that reaches an
     // endpoint still halted from the staged break logs a second `transport
     // broke`, and how many tries it takes is how much of the host the guest
     // had — its own doc says one break under KVM and two under TCG off the
     // same tree, which is the race timer-anchored, not a margin, describes.
-    ("usb_transport_break", Sched::Serial, Tier::Nightly),
-    ("xhci_full_speed_device", Sched::Parallel, Tier::Weekly),
-    ("xhci_superspeed_ports", Sched::Parallel, Tier::Weekly),
+    ("usb_transport_break", Sched::Serial),
+    ("xhci_full_speed_device", Sched::Parallel),
+    ("xhci_superspeed_ports", Sched::Parallel),
     // `xhci_flap` is the one that genuinely races the host against the guest:
     // its two QMP writes have to land inside *one* 100 ms debounce or the state
     // under test never happens, and it says so — `no replug collapsed inside a
     // debounce, so this run never staged the race`. A host that delays the
     // second write past 100 ms turns a green machine red with that sentence,
     // which is indistinguishable from the driver defect it hunts.
-    ("xhci_flap", Sched::Serial, Tier::Nightly),
-    ("xhci_descriptor_walk", Sched::Parallel, Tier::Weekly),
-    ("esp_filesystem", Sched::Parallel, Tier::Nightly),
+    ("xhci_flap", Sched::Serial),
+    ("xhci_descriptor_walk", Sched::Parallel),
+    ("esp_filesystem", Sched::Parallel),
     // Three boots: a budget-refused flush retried and kept, the deadman's
     // declared death, and a hung device's failed reset escalation — the three
     // exits of `object/ops.rs`'s fsync loop. Every verdict is line presence
     // and host-side bytes, never a wall-clock margin.
-    ("log_flush_retry", Sched::Parallel, Tier::Nightly),
-    ("toybox_cp_volume", Sched::Parallel, Tier::Weekly),
-    ("kernel_log_file", Sched::Parallel, Tier::Nightly),
-    ("kernel_heartbeat", Sched::Parallel, Tier::Nightly),
+    ("log_flush_retry", Sched::Parallel),
+    ("toybox_cp_volume", Sched::Parallel),
+    ("kernel_log_file", Sched::Parallel),
+    ("kernel_heartbeat", Sched::Parallel),
     // The five RTC/firmware shapes, one kernel build and one boot each. Five
     // registrations because the artifact memo builds one kernel per feature
     // set anyway, so the split costs nothing and the parallel phase gets five
     // jobs it can place instead of one serial five-boot job it cannot.
-    ("wall_clock_rtc_dead", Sched::Parallel, Tier::Weekly),
-    ("wall_clock_rtc_unstable", Sched::Parallel, Tier::Weekly),
-    ("wall_clock_no_century", Sched::Parallel, Tier::Weekly),
-    ("wall_clock_century_register", Sched::Parallel, Tier::Weekly),
-    ("wall_clock_utc", Sched::Parallel, Tier::Weekly),
-    ("file_mtime_survives_a_reboot", Sched::Parallel, Tier::Nightly),
-    ("file_mtime_undated", Sched::Parallel, Tier::Nightly),
+    ("wall_clock_rtc_dead", Sched::Parallel),
+    ("wall_clock_rtc_unstable", Sched::Parallel),
+    ("wall_clock_no_century", Sched::Parallel),
+    ("wall_clock_century_register", Sched::Parallel),
+    ("wall_clock_utc", Sched::Parallel),
+    ("file_mtime_survives_a_reboot", Sched::Parallel),
+    ("file_mtime_undated", Sched::Parallel),
     // `xhci_slow_connect`'s shape against the disk's port, but its actuator
     // masks the port until `BOOT_SCAN_DONE` — a kernel event, not a duration —
     // so what it stages is an ordering with no wall-clock margin on either
     // side: nothing here needs the serial tail.
-    ("late_storage_connect", Sched::Parallel, Tier::Weekly),
-    ("log_backing_read_error", Sched::Parallel, Tier::Weekly),
-    ("boot_volume_metadata_error", Sched::Parallel, Tier::Weekly),
-    ("log_partition_layout", Sched::Parallel, Tier::Weekly),
+    ("late_storage_connect", Sched::Parallel),
+    ("log_backing_read_error", Sched::Parallel),
+    ("boot_volume_metadata_error", Sched::Parallel),
+    ("log_partition_layout", Sched::Parallel),
     // What the loader does with a slot's ROOT: bytes its signature does not
     // cover, a parameter naming another, an overlapping partition and an
     // unreadable chunk refused by name, and a twin on the boot disk or on
     // another disk never read. Serial, not by association: each stages a whole
     // boot image, one a second 32 GiB stick beside it.
-    ("root_candidate_malformed", Sched::Serial, Tier::Weekly),
-    ("root_named_but_absent", Sched::Serial, Tier::Weekly),
-    ("root_chunk_refused", Sched::Serial, Tier::Nightly),
-    ("root_chunk_refused_on_a_usb_stick", Sched::Serial, Tier::Fast),
-    ("root_candidate_overlaps", Sched::Serial, Tier::Nightly),
-    ("root_named_twice_on_the_boot_disk", Sched::Serial, Tier::Nightly),
-    ("root_named_twice", Sched::Serial, Tier::Weekly),
-    ("log_partition_identity", Sched::Parallel, Tier::Weekly),
-    ("cache_eviction", Sched::Parallel, Tier::Nightly),
+    ("root_candidate_malformed", Sched::Serial),
+    ("root_named_but_absent", Sched::Serial),
+    ("root_chunk_refused", Sched::Serial),
+    ("root_chunk_refused_on_a_usb_stick", Sched::Serial),
+    ("root_candidate_overlaps", Sched::Serial),
+    ("root_named_twice_on_the_boot_disk", Sched::Serial),
+    ("root_named_twice", Sched::Serial),
+    ("log_partition_identity", Sched::Parallel),
+    ("cache_eviction", Sched::Parallel),
     // The write-back queue's three negative controls (wall 4 of
     // `issues/kernel/every-wait-in-this-kernel-is-a-spin.md`). `writeback_reopen`
     // and `writeback_spawn` arm `writeback-stall`, so each needs its own actuator
@@ -1282,73 +1273,73 @@ const MACHINE_TESTS: &[(&str, Sched, Tier)] = &[
     // The watch's lost-wake window, staged: `watch-window` holds every pipe
     // waiter between reading its condition and parking, so the peer's post lands where
     // only the notified bit carries it to the commit.
-    ("blocking_read_window", Sched::Parallel, Tier::Nightly),
+    ("blocking_read_window", Sched::Parallel),
     // A sibling's munmap and mmap staged between a typed copy's translation
     // and its store (`copy-meets-a-remap`): the store never reaches the region
     // mapped after it.
-    ("user_copy_races_munmap", Sched::Parallel, Tier::Nightly),
+    ("user_copy_races_munmap", Sched::Parallel),
     // A sibling's store staged between a thread's TLS block being placed and
     // its rebase (`tls-rebase-window`): the block is never reachable there.
-    ("tls_rebase_window", Sched::Parallel, Tier::Nightly),
-    ("writeback_reopen", Sched::Parallel, Tier::Weekly),
-    ("writeback_spawn", Sched::Parallel, Tier::Weekly),
-    ("writeback_durability", Sched::Parallel, Tier::Fast),
+    ("tls_rebase_window", Sched::Parallel),
+    ("writeback_reopen", Sched::Parallel),
+    ("writeback_spawn", Sched::Parallel),
+    ("writeback_durability", Sched::Parallel),
     // `KernelHw::switch`'s SS reload (AMD `X86_BUG_SYSRET_SS_ATTRS`) observed the
     // one way a guest can, since its `SYSRET` does not reproduce the erratum. Reds
     // the day that `mov ss` leaves the switch.
-    ("sysret_ss_reload", Sched::Parallel, Tier::Weekly),
+    ("sysret_ss_reload", Sched::Parallel),
     // The FAT32 read side's revocation gate, and a host-side volume oracle for
     // the same reason `writeback_durability` is one: whether the clusters the
     // unlink freed were really reissued, and whether the cycle left a volume, are
     // both questions the guest that staged them cannot answer about itself.
-    ("fat_backing_revoked", Sched::Parallel, Tier::Weekly),
+    ("fat_backing_revoked", Sched::Parallel),
     // F5 and F6's negative controls: an fsync that must keep refusing while the
     // device refuses its cache flush, and a mid-flush redirty raced for real and
     // re-read off the image. Both bodies in `tests/common/volumes.rs`.
-    ("fsync_failed_commit", Sched::Parallel, Tier::Weekly),
-    ("redirty_mid_flush", Sched::Parallel, Tier::Weekly),
+    ("fsync_failed_commit", Sched::Parallel),
+    ("redirty_mid_flush", Sched::Parallel),
     // A truncate staged inside a flush's metadata window, re-read off the image.
-    ("ftruncate_flush_race", Sched::Parallel, Tier::Weekly),
+    ("ftruncate_flush_race", Sched::Parallel),
     // The rename gate's FAT arm, a host-side volume oracle like `fat_backing_revoked`.
-    ("fs_rename_durable", Sched::Parallel, Tier::Weekly),
+    ("fs_rename_durable", Sched::Parallel),
     // The directory work's FAT arm, `fs_rename_durable`'s oracle shape.
-    ("fs_dirs_durable", Sched::Parallel, Tier::Weekly),
-    ("va_exhaustion", Sched::Parallel, Tier::Weekly),
-    ("heap_ceiling_bounds", Sched::Parallel, Tier::Nightly),
-    ("iommu_context_absent", Sched::Parallel, Tier::Weekly),
-    ("iommu_empty_domain", Sched::Parallel, Tier::Weekly),
-    ("iommu_interrupt_remapping", Sched::Parallel, Tier::Weekly),
-    ("iommu_virtio_platform", Sched::Parallel, Tier::Nightly),
-    ("iommu_domain_isolation", Sched::Parallel, Tier::Weekly),
-    ("iommu_gpu_scanout_swap", Sched::Parallel, Tier::Nightly),
-    ("iommu_gpu_foreign_backing", Sched::Parallel, Tier::Weekly),
-    ("iommu_hda_foreign_bdl", Sched::Parallel, Tier::Weekly),
-    ("iommu_sound_foreign_dma", Sched::Parallel, Tier::Weekly),
+    ("fs_dirs_durable", Sched::Parallel),
+    ("va_exhaustion", Sched::Parallel),
+    ("heap_ceiling_bounds", Sched::Parallel),
+    ("iommu_context_absent", Sched::Parallel),
+    ("iommu_empty_domain", Sched::Parallel),
+    ("iommu_interrupt_remapping", Sched::Parallel),
+    ("iommu_virtio_platform", Sched::Parallel),
+    ("iommu_domain_isolation", Sched::Parallel),
+    ("iommu_gpu_scanout_swap", Sched::Parallel),
+    ("iommu_gpu_foreign_backing", Sched::Parallel),
+    ("iommu_hda_foreign_bdl", Sched::Parallel),
+    ("iommu_sound_foreign_dma", Sched::Parallel),
     // The one arm of that family whose device is driven by a *process*, and
     // the only one whose verdict is that the machine is still running.
-    ("userdev_dma_fault", Sched::Parallel, Tier::Nightly),
+    ("userdev_dma_fault", Sched::Parallel),
     // Two claims of a function nothing resets, the first closed with its grant
     // still mapped: the verdict is the first holder's own grant, read in the
     // guest after the second holder wrote its own.
-    ("userdev_residue_is_its_own", Sched::Parallel, Tier::Nightly),
+    ("userdev_residue_is_its_own", Sched::Parallel),
     // blockd, the NVMe driver in userland, on a second controller beside the
     // kernel's: partitions served and timed against the kernel's driver; a
     // controller reset and its own death, each survived by the client and
     // judged off the image by the host's readers; and a transfer outside what
     // its function was lent, which is a fault record. Each boot runs several
     // blockd lifetimes and one waits out a ten-second silence.
-    ("blockd_serves_partitions", Sched::Parallel, Tier::Weekly),
-    ("blockd_survives_its_death", Sched::Parallel, Tier::Weekly),
-    ("blockd_dma_outside_the_lent", Sched::Parallel, Tier::Weekly),
+    ("blockd_serves_partitions", Sched::Parallel),
+    ("blockd_survives_its_death", Sched::Parallel),
+    ("blockd_dma_outside_the_lent", Sched::Parallel),
     // What a claim may lend: a kernel driver's pool refused, the claim's bound
     // refusing the next region at the count it leaves room for, and lending and
     // taking back ten narrowed domains' worth of addresses with the kernel
     // standing; then, on a second boot, a function no release resets is never
     // lent where it was left aimed.
-    ("blockd_lends_within_its_bound", Sched::Parallel, Tier::Weekly),
+    ("blockd_lends_within_its_bound", Sched::Parallel),
     // Two live HDA links, refused by name: the negative control on the kernel's
     // bind path. No sample is played; lines are the verdict.
-    ("hda_two_live_refused", Sched::Parallel, Tier::Weekly),
+    ("hda_two_live_refused", Sched::Parallel),
 ];
 
 /// The test binaries a [`MACHINE_TESTS`] or [`SCREEN_TESTS`] entry runs, which
@@ -3580,19 +3571,26 @@ fn check_no_stale_cells(dump: &screen::Ppm, console: &str) -> Result<(), String>
 /// `test_rs_abuse_readonly_copyout`.
 const VIRT_COPYOUT: &str = "abuse_readonly_copyout";
 
-/// Boot `tests/virtjobcase` on one CPU under the EL2 profile and judge its job
-/// `job`: it ends with exit 0, having said `said`. One CPU because `preempt`
-/// and `fp_isolation` see a sibling run only when it took theirs. The kernel
-/// carries `SYS_DEBUG` for `debug_refused`, and every job runs in every boot
-/// of the case.
-fn virt_job(job: &str, said: &str) -> Result<(), String> {
+fn virt_copyout(arch: toyos_build::arch::Arch) -> &'static [u8] {
+    use toyos_build::arch::Arch;
+    static X86_64: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    static AARCH64: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    let built = match arch {
+        Arch::X86_64 => &X86_64,
+        Arch::Aarch64 => &AARCH64,
+    };
+    built.get_or_init(|| {
+        qemu::build_toyos_bin(arch, &compile::repo_root().join("tests/toyos-rust-tests"), VIRT_COPYOUT)
+    })
+}
+
+/// Boot `tests/virtjobcase` on one CPU and judge its job `job`: it ends with
+/// exit 0, having said `said`. One CPU because `preempt` and `fp_isolation`
+/// see a sibling run only when it took theirs. The kernel carries `SYS_DEBUG`
+/// for `debug_refused`, and every job runs in every boot of the case.
+fn virt_job(profile: qemu::Profile, job: &str, said: &str) -> Result<(), String> {
     let config = compile::repo_root().join("tests/virtjobcase/system.toml");
     let case = config.parent().expect("system.toml has a directory");
-    let profile = qemu::Profile::VirtEl2;
-    static COPYOUT: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
-    let copyout = COPYOUT.get_or_init(|| {
-        qemu::build_toyos_bin(profile.arch(), &compile::repo_root().join("tests/toyos-rust-tests"), VIRT_COPYOUT)
-    });
     let qemu = QemuInstance::boot_with_options(
         case,
         &[],
@@ -3602,7 +3600,7 @@ fn virt_job(job: &str, said: &str) -> Result<(), String> {
             smp: 1,
             kernel_features: toyos_build::build::TEST_KERNEL,
             ready_marker: "control registers: SCTLR_EL1=",
-            extra_root_files: vec![(format!("bin/test_rs_{VIRT_COPYOUT}"), copyout.clone())],
+            extra_root_files: vec![(format!("bin/test_rs_{VIRT_COPYOUT}"), virt_copyout(profile.arch()).to_vec())],
             ..Default::default()
         },
     );
@@ -3697,9 +3695,9 @@ fn virt_smp(profile: qemu::Profile, conduit: &str, el: u32) -> Result<(), String
 /// from the CPU that would be cpu2 of four, and the bring-up stops there, so
 /// cpu2's id goes to no CPU behind it. The case's job, which the scheduler
 /// places across the CPUs that came up, ends with exit 0.
-fn virt_failed_ap_leaves_no_hole() -> Result<(), String> {
+fn virt_failed_ap_leaves_no_hole(profile: qemu::Profile) -> Result<(), String> {
     const CPUS: u32 = 4;
-    let qemu = boot_virt_smp(qemu::Profile::VirtEl2, CPUS, &["smp-skip-ap"]);
+    let qemu = boot_virt_smp(profile, CPUS, &["smp-skip-ap"]);
     let serial = judge_virt_job(qemu, "unmap_touch", UNMAP_TOUCH_SAID)?;
     // The premise, not just a small machine: cpu1 came up and cpu2 did not.
     for premise in ["SMP: cpu1 mpidr=0x1 online", "SMP: cpu2 mpidr=0x2 did not echo within"] {
@@ -3723,12 +3721,11 @@ fn virt_failed_ap_leaves_no_hole() -> Result<(), String> {
 }
 
 /// [`panic_halts_the_others_first`] on AArch64: `tests/virtpaniccase` runs
-/// `test_rs_panic_halts_first` as its one job on [`STOP_CPUS`] CPUs under the
-/// EL2 profile, and the halt SGI stops every CPU but the one going fatal.
-fn virt_fatal_halts_the_others_first() -> Result<(), String> {
+/// `test_rs_panic_halts_first` as its one job on [`STOP_CPUS`] CPUs, and the
+/// halt SGI stops every CPU but the one going fatal.
+fn virt_fatal_halts_the_others_first(profile: qemu::Profile) -> Result<(), String> {
     let config = compile::repo_root().join("tests/virtpaniccase/system.toml");
     let case = config.parent().expect("system.toml has a directory");
-    let profile = qemu::Profile::VirtEl2;
     let fatal = qemu::build_toyos_bin(profile.arch(), &compile::repo_root().join("tests/toyos-rust-tests"), "panic_halts_first");
     let qemu = QemuInstance::boot_with_options(
         case,
@@ -3747,16 +3744,20 @@ fn virt_fatal_halts_the_others_first() -> Result<(), String> {
     the_others_halt_first(qemu, profile.arch())
 }
 
-/// Boot `test_config` under the EL2 profile with the kernel selftest `armed`
+/// Boot `test_config` with the kernel selftest `armed`
 /// names, and judge its one line: `<param>: PASS`.
-fn virt_selftest(test_config: &Path, armed: &'static [&'static str; 1]) -> Result<(), String> {
+fn virt_selftest(
+    profile: qemu::Profile,
+    test_config: &Path,
+    armed: &'static [&'static str; 1],
+) -> Result<(), String> {
     let [param] = armed;
     let mut qemu = QemuInstance::boot_with_options(
         test_config,
         &[],
         &[],
         BootOptions {
-            profile: qemu::Profile::VirtEl2,
+            profile,
             kernel_params: armed,
             ready_marker: "control registers: SCTLR_EL1=",
             ..Default::default()
@@ -3780,6 +3781,7 @@ fn virt_selftest(test_config: &Path, armed: &'static [&'static str; 1]) -> Resul
 /// grid is the only readable form of that.
 fn run_screen_test(
     name: &str,
+    profile: qemu::Profile,
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
@@ -3791,7 +3793,7 @@ fn run_screen_test(
             // GOP query and every later loader line is on serial alone.
             let dump_at = |marker: &'static str| -> Result<(usize, String), String> {
                 let options = BootOptions {
-                    profile: qemu::Profile::Metal,
+                    profile,
                     qmp: true,
                     ready_marker: marker,
                     ..Default::default()
@@ -3946,15 +3948,15 @@ fn run_screen_test(
                 }
                 Ok(kernel)
             };
-            let boot = |profile, _: qemu::LaneFree| {
+            let boot = |machine, _: qemu::LaneFree| {
                 QemuInstance::boot_with_options(
                     test_config,
                     c_bins,
                     rust_bins,
-                    BootOptions { profile, qmp: true, ..Default::default() },
+                    BootOptions { profile: machine, qmp: true, ..Default::default() },
                 )
             };
-            let mut qemu = boot(qemu::Profile::Gop, qemu::LaneFree::no_guest_yet());
+            let mut qemu = boot(profile, qemu::LaneFree::no_guest_yet());
             let gop = mode_of(&mut qemu, "Gop")?;
             let free = qemu.shutdown();
             let mut qemu = boot(qemu::Profile::Metal, free);
@@ -3967,11 +3969,11 @@ fn run_screen_test(
             // `PixelBlueGreenRedReserved8BitPerColor`, which `query_gop`
             // encodes as 1.
             const BGR: u32 = 1;
-            for (profile, label, mode) in [
-                (qemu::Profile::Gop, "Gop", gop),
+            for (machine, label, mode) in [
+                (profile, "Gop", gop),
                 (qemu::Profile::Metal, "metal-sim", metal),
             ] {
-                let panel = profile.panel().expect("both machines have a VGA adapter");
+                let panel = machine.panel().expect("both machines have a VGA adapter");
                 if (mode.0, mode.1) != panel {
                     return Err(format!(
                         "{label} advertises a {panel:?} panel and booted into {:?}{} — an \
@@ -4025,7 +4027,7 @@ fn run_screen_test(
             // on ROOT, so the image booted here is the image flashed.
             let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("diag");
             let options = BootOptions {
-                profile: qemu::Profile::Metal,
+                profile,
                 qmp: true,
                 // No test-runner in this image, so the kernel's own last phase
                 // line is the marker. It says the ring drained, not that the
@@ -4174,14 +4176,14 @@ fn run_screen_test(
                 ["panic console: armed", "serial: 16550 loopback read"];
             const AFTER_PARAMS: &str = "actuators:";
 
-            let panel = qemu::Profile::Metal.panel().expect("metal-sim advertises a panel");
+            let panel = profile.panel().expect("metal-sim advertises a panel");
             let halted_panel = |params: &'static [&'static str]| -> Result<String, String> {
                 let mut qemu = QemuInstance::boot_with_options(
                     test_config,
                     c_bins,
                     rust_bins,
                     BootOptions {
-                        profile: qemu::Profile::Metal,
+                        profile,
                         qmp: true,
                         kernel_params: params,
                         ready_marker: LAST,
@@ -4265,7 +4267,7 @@ fn run_screen_test(
                 &[],
             )?;
             let options = BootOptions {
-                profile: qemu::Profile::Metal,
+                profile,
                 qmp: true,
                 boot_image: Some(qemu::Staged::Written(image_path.clone())),
                 ready_marker: "Boot: complete",
@@ -4331,7 +4333,7 @@ fn run_screen_test(
             // flashed — the property `screen_diag_boot` has for its mode.
             let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("console");
             let options = BootOptions {
-                profile: qemu::Profile::Metal,
+                profile,
                 qmp: true,
                 ready_marker: "console: ready",
                 ..Default::default()
@@ -4485,7 +4487,7 @@ fn run_screen_test(
             // window to read from.
             let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("console");
             let options = BootOptions {
-                profile: qemu::Profile::Metal,
+                profile,
                 qmp: true,
                 kernel_features: ACTUATOR_KERNEL,
                 ready_marker: "console: ready",
@@ -4683,7 +4685,7 @@ fn run_screen_test(
             // cost of this test is its byte count and nothing else.
             let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("console");
             let options = BootOptions {
-                profile: qemu::Profile::Metal,
+                profile,
                 qmp: true,
                 kernel_features: ACTUATOR_KERNEL,
                 ready_marker: "console: ready",
@@ -4927,7 +4929,7 @@ fn run_screen_test(
             // certifies is the kernel's behaviour, not the artifact.
             let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("console");
             let options = BootOptions {
-                profile: qemu::Profile::Metal,
+                profile,
                 qmp: true,
                 kernel_features: ACTUATOR_KERNEL,
                 ready_marker: "console: ready",
@@ -5001,7 +5003,7 @@ fn run_screen_test(
             // is under test here is a *successful* boot repainting to say
             // something the last boot checkpoint could not have known yet.
             let options = BootOptions {
-                profile: qemu::Profile::Metal,
+                profile,
                 qmp: true,
                 mute: true,
                 ..Default::default()
@@ -5058,7 +5060,7 @@ fn run_screen_test(
             // boot and no rebuild — and it is the one place the absent-UART
             // branches run at all.
             let options = BootOptions {
-                profile: qemu::Profile::Metal,
+                profile,
                 qmp: true,
                 mute: true,
                 kernel_params: &["test-late-panic"],
@@ -5117,7 +5119,7 @@ fn run_screen_test(
                 &[],
                 &[],
                 BootOptions {
-                    profile: qemu::Profile::Virt,
+                    profile,
                     qmp: true,
                     kernel_params: &["test-early-panic"],
                     ready_marker: "EARLY PANIC:",
@@ -5173,7 +5175,7 @@ fn run_screen_test(
                 &[],
                 &[],
                 BootOptions {
-                    profile: qemu::Profile::VirtEl2,
+                    profile,
                     kernel_params: &["test-early-panic"],
                     ready_marker: "EARLY PANIC:",
                     ..Default::default()
@@ -5207,7 +5209,7 @@ fn run_screen_test(
                 &[],
                 &[],
                 BootOptions {
-                    profile: qemu::Profile::Virt,
+                    profile,
                     qmp: true,
                     kernel_params: &["test-early-fault"],
                     ready_marker: "EARLY PANIC:",
@@ -5246,7 +5248,7 @@ fn run_screen_test(
                 &[],
                 &[],
                 BootOptions {
-                    profile: qemu::Profile::VirtEl2,
+                    profile,
                     ready_marker: "control registers: SCTLR_EL1=",
                     ..Default::default()
                 },
@@ -5270,32 +5272,33 @@ fn run_screen_test(
         }
         "virt_timer_preempts" => {
             // Spelled in `userland/toybox/src/preempt.rs`.
-            virt_job("preempt", "preempt: the counting thread was preempted twice")
+            virt_job(profile, "preempt", "preempt: the counting thread was preempted twice")
         }
-        "virt_fp_isolation" => virt_job("fp_isolation", "fp_isolation: v0-v31, FPCR and FPSR survived"),
-        "virt_first_entry" => virt_job("first_entry", "first_entry: x1-x30 were zero"),
-        "virt_unmap_touch" => virt_job("unmap_touch", UNMAP_TOUCH_SAID),
+        "virt_fp_isolation" => virt_job(profile, "fp_isolation", "fp_isolation: v0-v31, FPCR and FPSR survived"),
+        "virt_first_entry" => virt_job(profile, "first_entry", "first_entry: x1-x30 were zero"),
+        "virt_unmap_touch" => virt_job(profile, "unmap_touch", UNMAP_TOUCH_SAID),
         "virt_debug_refused" => virt_job(
+            profile,
             "debug_refused",
             "debug_refused: SYS_DEBUG's double fault and TLB acknowledgement delay were refused",
         ),
         "virt_readonly_copyout" => {
-            virt_job(&format!("test_rs_{VIRT_COPYOUT}"), "a syscall writes only where its caller could store")
+            virt_job(profile, &format!("test_rs_{VIRT_COPYOUT}"), "a syscall writes only where its caller could store")
         }
         "virt_irq_storm" => {
             // The CPU floods itself with SGIs until the timer has fired a
             // thousand times through the flood, then waits for every SGI it
             // sent. A tick lost or never re-armed, or an SGI lost, leaves the
             // storm running and the verdict unsaid.
-            virt_selftest(test_config, &["irq-storm"])
+            virt_selftest(profile, test_config, &["irq-storm"])
         }
-        "virt_timer_floor" => virt_selftest(test_config, &["timer-floor"]),
-        "virt_smp" => virt_smp(qemu::Profile::VirtEl2, "SMC", 2),
+        "virt_timer_floor" => virt_selftest(profile, test_config, &["timer-floor"]),
+        "virt_smp" => virt_smp(profile, "SMC", 2),
         // The EL1 entry's own arm, which fetches at a physical address under
         // the bring-up root, and PSCI through `HVC`: the path HVF takes.
-        "virt_el1_smp" => virt_smp(qemu::Profile::VirtTcg, "HVC", 1),
-        "virt_failed_ap_leaves_no_hole" => virt_failed_ap_leaves_no_hole(),
-        "virt_fatal_halts_the_others_first" => virt_fatal_halts_the_others_first(),
+        "virt_el1_smp" => virt_smp(profile, "HVC", 1),
+        "virt_failed_ap_leaves_no_hole" => virt_failed_ap_leaves_no_hole(profile),
+        "virt_fatal_halts_the_others_first" => virt_fatal_halts_the_others_first(profile),
         "screen_late_panic" => {
             // The ordinary fatal panic, which no userland process can produce:
             // crash_report, capture, panic_flush, halt_all_cpus, render. The
@@ -5306,7 +5309,7 @@ fn run_screen_test(
                 c_bins,
                 rust_bins,
                 BootOptions {
-                    profile: qemu::Profile::Gop,
+                    profile,
                     qmp: true,
                     kernel_params: &["test-late-panic"],
                     ready_marker: "PANIC:",
@@ -5366,7 +5369,7 @@ fn run_screen_test(
                 c_bins,
                 rust_bins,
                 BootOptions {
-                    profile: qemu::Profile::Gop,
+                    profile,
                     qmp: true,
                     kernel_params: &["test-late-panic"],
                     ready_marker: "PANIC:",
@@ -5470,16 +5473,12 @@ fn run_screen_test(
             // the decode is `toyos-ps2`'s and host-tested, but that a keystroke
             // reaches a machine which has stopped scheduling is a fact about
             // the controller and the poll, not about the table.
-            //
-            // `Profile::Metal` because QEMU routes injected keys to one handler
-            // per device class: every profile with a `usb-kbd` sends them there
-            // instead, and this is the only GOP machine without one.
             let mut qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,
                 rust_bins,
                 BootOptions {
-                    profile: qemu::Profile::Metal,
+                    profile,
                     qmp: true,
                     kernel_params: &["test-late-panic"],
                     ready_marker: "PANIC:",
@@ -5600,7 +5599,7 @@ fn run_screen_test(
                 c_bins,
                 rust_bins,
                 BootOptions {
-                    profile: qemu::Profile::Gop,
+                    profile,
                     qmp: true,
                     kernel_features: ACTUATOR_KERNEL,
                     ..Default::default()
@@ -5663,7 +5662,7 @@ fn run_screen_test(
                 c_bins,
                 rust_bins,
                 BootOptions {
-                    profile: qemu::Profile::Gop,
+                    profile,
                     qmp: true,
                     kernel_params: &["panel-painter-stalls"],
                     ..Default::default()
@@ -5721,7 +5720,7 @@ fn run_screen_test(
             // path his image does not contain.
             let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/metalcase");
             let options = BootOptions {
-                profile: qemu::Profile::Metal,
+                profile,
                 smp: 8,
                 qmp: true,
                 // The T14's literal shape: no console, so the panel and the
@@ -5835,7 +5834,7 @@ fn run_screen_test(
             //
             let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/desktopaudiocase");
             let options = BootOptions {
-                profile: qemu::Profile::Metal,
+                profile,
                 smp: 8,
                 qmp: true,
                 mute: true,
@@ -16289,7 +16288,7 @@ enum Task<'a> {
     /// the shipping binary's own coverage.
     Shared(Vec<&'a TestDef>, &'static [&'static str]),
     Machine(Vec<&'static str>),
-    Screen(&'static str),
+    Screen(&'static str, qemu::Profile),
 }
 
 /// What the suite has to say about one test once it has finished.
@@ -16496,32 +16495,11 @@ struct Tally {
     /// assertion failed, by name. Red like any other, and named apart.
     stalls: Vec<String>,
     invalid: Vec<(String, Duration)>,
-    /// What each tier held back, under the flag that runs it. Not a verdict and
-    /// never red — it is the one thing a reader of the last line cannot infer
-    /// from anything else in it, because a run that skipped a third of its cost
-    /// looks exactly like a run that had nothing to do.
-    relegated: Vec<(&'static str, Vec<String>)>,
 }
 
 impl Tally {
     fn new() -> Self {
-        Tally {
-            passed: 0,
-            failures: Vec::new(),
-            stalls: Vec::new(),
-            invalid: Vec::new(),
-            relegated: Vec::new(),
-        }
-    }
-
-    /// The names this run's tier filter took out, for the summary to say so.
-    fn holding_back(mut self, held: Vec<(Tier, Vec<String>)>) -> Self {
-        self.relegated = held
-            .into_iter()
-            .filter(|(_, names)| !names.is_empty())
-            .map(|(tier, names)| (tier.flag().expect("only a flag's tier is held back"), names))
-            .collect();
-        self
+        Tally { passed: 0, failures: Vec::new(), stalls: Vec::new(), invalid: Vec::new() }
     }
 
     fn record(&mut self, outcome: Outcome) {
@@ -16613,27 +16591,10 @@ impl Tally {
             say(String::new());
         }
 
-        // Above the result line and not below it, so the pointer is the last
-        // thing before the verdict rather than an afterthought under it.
-        for (flag, names) in &self.relegated {
-            say(format!("not run without {flag}:"));
-            say(format!("    {}", names.join(", ")));
-            say(format!("    `cargo test --test toyos-build -- {flag}` runs them."));
-            say(String::new());
-        }
-
-        // **In the result line, because that is the line a shard's job summary
-        // extracts and the line anybody reads.** A count of what ran means
-        // something different depending on how much was not attempted.
-        let held: String = self
-            .relegated
-            .iter()
-            .map(|(flag, names)| format!(", {} held back for {flag}", names.len()))
-            .collect();
         match self.exit_code() {
             1 => say(format!(
                 "test result: FAILED. {} passed, {} failed, {} invalidated, \
-                 {total} total ({elapsed:.1?}){held}",
+                 {total} total ({elapsed:.1?})",
                 self.passed,
                 self.failures.len(),
                 self.invalid.len(),
@@ -16641,7 +16602,7 @@ impl Tally {
             2 => {
                 say(format!(
                     "test result: INVALID. {} passed, {} invalidated by a \
-                     host suspend of {suspended:.0?}, {total} total ({elapsed:.1?}){held}",
+                     host suspend of {suspended:.0?}, {total} total ({elapsed:.1?})",
                     self.passed,
                     self.invalid.len(),
                 ));
@@ -16652,7 +16613,7 @@ impl Tally {
                 );
             }
             _ => say(format!(
-                "test result: ok. {} passed, {total} total ({elapsed:.1?}){held}",
+                "test result: ok. {} passed, {total} total ({elapsed:.1?})",
                 self.passed
             )),
         }
@@ -16861,11 +16822,11 @@ fn run_task(task: Task<'_>, bins: &Bins<'_>, report: &std::sync::mpsc::Sender<Ou
                 send(name.to_string(), outcome.err(), start);
             }
         }
-        Task::Screen(name) => {
+        Task::Screen(name, profile) => {
             let carried = carried_by(&[name], bins);
             let start = common::clock::mark();
             let outcome =
-                catching(|| run_screen_test(name, bins.test_config, &carried.c, &carried.rust));
+                catching(|| run_screen_test(name, profile, bins.test_config, &carried.c, &carried.rust));
             send(name.to_string(), outcome.err(), start);
         }
     }
@@ -16877,7 +16838,7 @@ impl Task<'_> {
         match self {
             Task::Shared(tests, _) => tests.iter().map(|t| t.name.as_str()).collect(),
             Task::Machine(names) => names.to_vec(),
-            Task::Screen(name) => vec![name],
+            Task::Screen(name, _) => vec![name],
         }
     }
 }
@@ -17082,7 +17043,7 @@ fn machine_tasks(selected: &[(&'static str, Sched)]) -> Vec<(Sched, Vec<&'static
 fn build_tasks<'a>(
     tests_to_run: &[&'a TestDef],
     machine_to_run: &[(&'static str, Sched)],
-    screen_to_run: &[(&'static str, Sched)],
+    screen_to_run: &[(&'static str, Sched, qemu::Profile)],
 ) -> (Vec<Task<'a>>, Vec<Task<'a>>) {
     let mut parallel: Vec<Task> = Vec::new();
     let mut serial: Vec<Task> = Vec::new();
@@ -17108,14 +17069,59 @@ fn build_tasks<'a>(
             Sched::Serial => serial.push(task),
         }
     }
-    for &(name, sched) in screen_to_run {
-        let task = Task::Screen(name);
+    for &(name, sched, profile) in screen_to_run {
+        let task = Task::Screen(name, profile);
         match sched {
             Sched::Parallel => parallel.push(task),
             Sched::Serial => serial.push(task),
         }
     }
     (parallel, serial)
+}
+
+/// Whether a run takes `name`: its filter matches it and no redlist row
+/// disables it.
+fn kept(filter: Option<&str>, name: &str) -> bool {
+    filter.is_none_or(|f| name.contains(f)) && redlist::disabled(redlist::DISABLED, name).is_none()
+}
+
+/// The shared boot's members, the machine tests and the screen tests a run
+/// boots.
+type Selection<'a> =
+    (Vec<&'a TestDef>, Vec<(&'static str, Sched)>, Vec<(&'static str, Sched, qemu::Profile)>);
+
+/// Every registered test a run [`kept`], but on a shard only the screen rows
+/// whose profile is of [`toyos_build::ci::GUEST_ARCH`].
+fn select<'a>(shared: &'a [TestDef], filter: Option<&str>, sharded: bool) -> Selection<'a> {
+    (
+        shared.iter().filter(|t| kept(filter, &t.name)).collect(),
+        MACHINE_TESTS.iter().filter(|(n, _)| kept(filter, n)).copied().collect(),
+        SCREEN_TESTS
+            .iter()
+            .filter(|(n, _, profile)| {
+                kept(filter, n) && (!sharded || profile.arch() == toyos_build::ci::GUEST_ARCH)
+            })
+            .copied()
+            .collect(),
+    )
+}
+
+fn arch_drop_line(shared: &[TestDef], filter: Option<&str>) -> Option<String> {
+    let (_, _, whole) = select(shared, filter, false);
+    let (_, _, shard) = select(shared, filter, true);
+    let dropped: Vec<&str> = whole
+        .iter()
+        .map(|(name, _, _)| *name)
+        .filter(|name| !shard.iter().any(|(kept, _, _)| kept == name))
+        .collect();
+    (!dropped.is_empty()).then(|| {
+        format!(
+            "{} test(s) NOT run, because a shard boots no guest but {}: {}",
+            dropped.len(),
+            toyos_build::ci::GUEST_ARCH.name(),
+            dropped.join(", ")
+        )
+    })
 }
 
 /// **The property every merged CI run depends on, checked before any of the
@@ -17134,59 +17140,43 @@ fn build_tasks<'a>(
 /// the width CI actually runs.
 fn check_shard_partition(all_tests: &[TestDef]) {
     let pricing = shard_pricing();
-    for reach in [Reach::Fast, Reach::Nightly, Reach::Weekly] {
-        // Sharded, because every run this partition is for is one.
-        let in_tier = |tier: Tier| tier.selected(reach, true);
-        let tests_to_run: Vec<&TestDef> =
-            all_tests.iter().filter(|_| in_tier(SHARED_TIER)).collect();
-        let machine_to_run: Vec<(&str, Sched)> = MACHINE_TESTS
-            .iter()
-            .filter(|(_, _, tier)| in_tier(*tier))
-            .map(|(n, s, _)| (*n, *s))
-            .collect();
-        let screen_to_run: Vec<(&str, Sched)> = SCREEN_TESTS
-            .iter()
-            .filter(|(_, _, tier)| in_tier(*tier))
-            .map(|(n, s, _)| (*n, *s))
-            .collect();
+    let (tests_to_run, machine_to_run, screen_to_run) = select(all_tests, None, true);
+    let (parallel, serial) = build_tasks(&tests_to_run, &machine_to_run, &screen_to_run);
+    // Owned, not borrowed: each shard below clones `parallel`/`serial` into
+    // a scratch `Vec` that does not outlive its own loop iteration, so what
+    // accumulates across iterations cannot hold a reference into it.
+    let want: BTreeSet<String> =
+        parallel.iter().chain(&serial).flat_map(Task::names).map(str::to_string).collect();
 
-        let (parallel, serial) = build_tasks(&tests_to_run, &machine_to_run, &screen_to_run);
-        // Owned, not borrowed: each shard below clones `parallel`/`serial` into
-        // a scratch `Vec` that does not outlive its own loop iteration, so what
-        // accumulates across iterations cannot hold a reference into it.
-        let want: BTreeSet<String> =
-            parallel.iter().chain(&serial).flat_map(Task::names).map(str::to_string).collect();
-
-        const COUNT: usize = 12;
-        let cost = |task: &Task<'_>| -> Option<Duration> {
-            task.names().iter().try_fold(Duration::ZERO, |a, n| Some(a + *pricing.get(*n)?))
-        };
-        let mut seen: BTreeSet<String> = BTreeSet::new();
-        for index in 1..=COUNT {
-            let shard = Shard { index, count: COUNT };
-            let mut mine_p = parallel.clone();
-            let mut mine_s = serial.clone();
-            // One accumulator across the two pools, in the order `main` takes
-            // them: the partition a shard gets is a function of both calls, so a
-            // check that took them apart would be checking something else.
-            let mut load = shard.bins();
-            shard.keep(&mut mine_p, &mut load, cost);
-            shard.keep(&mut mine_s, &mut load, cost);
-            for name in mine_p.iter().chain(&mine_s).flat_map(Task::names) {
-                assert!(
-                    seen.insert(name.to_string()),
-                    "{reach:?}: {name} lands in shard {index}/{COUNT} and at least \
-                     one earlier shard too — every execution label must belong to exactly one"
-                );
-            }
+    const COUNT: usize = 12;
+    let cost = |task: &Task<'_>| -> Option<Duration> {
+        task.names().iter().try_fold(Duration::ZERO, |a, n| Some(a + *pricing.get(*n)?))
+    };
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    for index in 1..=COUNT {
+        let shard = Shard { index, count: COUNT };
+        let mut mine_p = parallel.clone();
+        let mut mine_s = serial.clone();
+        // One accumulator across the two pools, in the order `main` takes
+        // them: the partition a shard gets is a function of both calls, so a
+        // check that took them apart would be checking something else.
+        let mut load = shard.bins();
+        shard.keep(&mut mine_p, &mut load, cost);
+        shard.keep(&mut mine_s, &mut load, cost);
+        for name in mine_p.iter().chain(&mine_s).flat_map(Task::names) {
+            assert!(
+                seen.insert(name.to_string()),
+                "{name} lands in shard {index}/{COUNT} and at least one earlier shard too — \
+                 every execution label must belong to exactly one"
+            );
         }
-        assert_eq!(
-            seen, want,
-            "{reach:?}: the twelve shards together do not equal the full selection — \
-             {:?} present in the selection and missing from every shard",
-            want.difference(&seen).collect::<Vec<_>>()
-        );
     }
+    assert_eq!(
+        seen, want,
+        "the twelve shards together do not equal the full selection — {:?} present in the \
+         selection and missing from every shard",
+        want.difference(&seen).collect::<Vec<_>>()
+    );
 }
 
 /// Every claim the three explicit registration lists make about themselves,
@@ -17218,11 +17208,7 @@ fn check_metal_registration() {
     if let Err(why) = the_metal_gates_refuse_what_they_name() {
         panic!("{why}");
     }
-    let registered: BTreeSet<&str> = MACHINE_TESTS
-        .iter()
-        .chain(SCREEN_TESTS)
-        .map(|(n, _, _)| *n)
-        .collect();
+    let registered: BTreeSet<&str> = declared().collect();
     if let Err(why) = metal_rows_are_registered(&registered, METAL, METAL_ONLY) {
         panic!("{why}");
     }
@@ -17412,12 +17398,12 @@ fn check_registration() {
     for (test, _) in CARRIES {
         assert!(rows.insert(test), "CARRIES has two rows for {test}");
         assert!(
-            MACHINE_TESTS.iter().chain(SCREEN_TESTS).any(|(name, _, _)| name == test),
+            declared().any(|name| name == *test),
             "CARRIES has a row for {test}, which no MACHINE_TESTS or SCREEN_TESTS entry registers"
         );
     }
     let mut groups: BTreeMap<&str, (usize, usize, usize)> = BTreeMap::new();
-    for (i, (name, _, _)) in MACHINE_TESTS.iter().enumerate() {
+    for (i, (name, _)) in MACHINE_TESTS.iter().enumerate() {
         let Some(group) = group_of(name) else { continue };
         let span = groups.entry(group).or_insert((i, i, 0));
         span.1 = i;
@@ -17433,38 +17419,35 @@ fn check_registration() {
             MACHINE_TESTS[first..=last].windows(2).all(|w| w[0].1 == w[1].1),
             "{group} shares one boot, so its members must share one scheduling answer"
         );
-        // **One boot cannot be in two tiers.** A group whose members disagreed
-        // would put the boot in the fast tier for whichever member ran first
-        // and charge the fast tier the whole group's cost.
-        assert!(
-            MACHINE_TESTS[first..=last].windows(2).all(|w| w[0].2 == w[1].2),
-            "{group} shares one boot, so its members must share one tier"
-        );
     }
 }
 
-/// Every name this suite can produce a verdict for, at its one tier: the shared
-/// boot's discovered binaries and the two declared registries, so a name two
-/// of them give is refused before anything boots.
-fn schedule(shared: &[TestDef]) -> Schedule<'_> {
-    Schedule::new(
-        shared
-            .iter()
-            .map(|t| (t.name.as_str(), SHARED_TIER))
-            .chain(SCREEN_TESTS.iter().chain(MACHINE_TESTS).map(|(n, _, tier)| (*n, *tier))),
-    )
-    .unwrap_or_else(|refusal| {
-        panic!(
-            "{refusal}. A binary a machine test drives goes on RUST_SKIP with the reason its own \
-             test exists, or one of the two is renamed."
-        )
-    })
+/// Every name the two declared registries give.
+fn declared<'a>() -> impl Iterator<Item = &'a str> {
+    MACHINE_TESTS.iter().map(|(n, _)| *n).chain(SCREEN_TESTS.iter().map(|(n, _, _)| *n))
 }
 
-/// `redlist::DISABLED` against every name the schedule holds, before any boot
-/// on any entry point.
-fn check_redlist(schedule: &Schedule<'_>) -> Result<(), String> {
-    redlist::check(redlist::DISABLED, |name| schedule.contains(name), &compile::repo_root())
+/// Every name this suite can produce a verdict for: the shared boot's
+/// discovered binaries and the two declared registries, so a name two of them
+/// give is refused before anything boots.
+fn registered(shared: &[TestDef]) -> Result<BTreeSet<&str>, String> {
+    let mut names = BTreeSet::new();
+    for name in shared.iter().map(|t| t.name.as_str()).chain(declared()) {
+        if !names.insert(name) {
+            return Err(format!(
+                "{name} is registered twice, and two rows are two verdicts under one name. A \
+                 binary a machine test drives goes on RUST_SKIP with the reason its own test \
+                 exists, or one of the two is renamed."
+            ));
+        }
+    }
+    Ok(names)
+}
+
+/// `redlist::DISABLED` against every registered name, before any boot on any
+/// entry point.
+fn check_redlist(registered: &BTreeSet<&str>) -> Result<(), String> {
+    redlist::check(redlist::DISABLED, |name| registered.contains(name), &compile::repo_root())
 }
 
 fn main() {
@@ -17486,16 +17469,10 @@ fn main() {
     for row in redlist::DISABLED {
         eprintln!("[toyos] disabled: {} — {}", row.test, row.issue);
     }
-    let keep = |name: &str| {
-        filter.is_none_or(|f| name.contains(f)) && redlist::disabled(redlist::DISABLED, name).is_none()
-    };
+    let keep = |name: &str| kept(filter, name);
 
     let debug_mode = SUITE.present(&args, &testargs::DEBUG);
     let list_mode = SUITE.present(&args, &testargs::LIST);
-    // How far down the tiers this run reaches. Flags and not an env var: an env
-    // var is invisible in the command line and easy to leave set, and the whole
-    // point of the split is that a run says what it ran.
-    let reach = Reach::of(&args);
     let nocapture = SUITE.present(&args, &testargs::NOCAPTURE);
 
     // How many guests the parallel phase runs at once. The serial tail ignores
@@ -17537,9 +17514,9 @@ fn main() {
     }
 
     // **The metal profile, before the C corpus.** It boots the T14 and not a
-    // guest, so none of the C compile, the HTTPS judge's hosts or the tier
-    // arithmetic below is any of its business; running it here is what keeps a
-    // `--metal` invocation costing a kernel and a userland and nothing else.
+    // guest, so none of the C compile or the HTTPS judge's hosts is any of its
+    // business; running it here is what keeps a `--metal` invocation costing a
+    // kernel and a userland and nothing else.
     if let Some(mode) = parsed.metal {
         let rust_tests_dir =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/toyos-rust-tests");
@@ -17553,8 +17530,11 @@ fn main() {
         let c_bins = compile_c_tests(&c_names);
         check_metal_only_unshared(&rust_bins, &c_bins);
         let c_compiled: Vec<String> = c_bins.iter().map(|(n, _)| n.clone()).collect();
-        if let Err(refusal) = check_redlist(&schedule(&build_test_registry(&rust_bins, &c_compiled))) {
-            eprintln!("[toyos] src/redlist.rs: {refusal}");
+        let all_tests = build_test_registry(&rust_bins, &c_compiled);
+        if let Err(refusal) = registered(&all_tests).and_then(|registered| {
+            check_redlist(&registered).map_err(|e| format!("src/redlist.rs: {e}"))
+        }) {
+            eprintln!("[toyos] {refusal}");
             run.exit(1);
         }
         let selected: Vec<(&str, &'static metal::Metal)> = METAL
@@ -17605,8 +17585,14 @@ fn main() {
     // Every name this process could produce a verdict for, before `--list`
     // and `--debug` can return without ever reaching it.
     let all_tests = build_test_registry(&rust_bins, &c_compiled);
-    let schedule = schedule(&all_tests);
-    if let Err(refusal) = check_redlist(&schedule) {
+    let registered = match registered(&all_tests) {
+        Ok(registered) => registered,
+        Err(refusal) => {
+            eprintln!("[toyos] {refusal}");
+            run.exit(1);
+        }
+    };
+    if let Err(refusal) = check_redlist(&registered) {
         eprintln!("[toyos] src/redlist.rs: {refusal}");
         run.exit(1);
     }
@@ -17618,10 +17604,9 @@ fn main() {
         qemu::carrying(&c_bins, &rust_bins, names.iter().copied());
     }
 
-    // --list: every test at its tier, and exit
     if list_mode {
-        for (name, tier) in schedule.iter() {
-            println!("{tier:?} {name}");
+        for name in &registered {
+            println!("{name}");
         }
         return;
     }
@@ -17634,55 +17619,12 @@ fn main() {
     check_metal_only_unshared(&rust_bins, &c_bins);
     check_shard_partition(&all_tests);
 
-    // A name filter reaches every tier; a shard still excludes `Tier::Local`.
-    let in_tier = |tier: Tier| tier.selected(reach.for_filter(filter.is_some()), shard.is_some());
-    let tests_to_run: Vec<&TestDef> = all_tests
-        .iter()
-        .filter(|t| keep(t.name.as_str()) && in_tier(SHARED_TIER))
-        .collect();
-    let screen_to_run: Vec<(&str, Sched)> = SCREEN_TESTS
-        .iter()
-        .filter(|(n, _, tier)| keep(n) && in_tier(*tier))
-        .map(|(n, s, _)| (*n, *s))
-        .collect();
-    let machine_to_run: Vec<(&str, Sched)> = MACHINE_TESTS
-        .iter()
-        .filter(|(n, _, tier)| keep(n) && in_tier(*tier))
-        .map(|(n, s, _)| (*n, *s))
-        .collect();
+    let (tests_to_run, machine_to_run, screen_to_run) = select(&all_tests, filter, shard.is_some());
 
-    // **What this run is not doing, said before it does anything.** A run that
-    // quietly does less than the last one is the failure mode the tier
-    // introduces, so the names are printed rather than counted, and the line
-    // carries both the command that runs them and the record that says what each
-    // one guarded.
-    let held = |which: Tier| -> Vec<String> {
-        schedule
-            .iter()
-            .filter(|(n, tier)| keep(n) && *tier == which && !in_tier(*tier))
-            .map(|(n, _)| n.to_string())
-            .collect()
-    };
-    let held_local = held(Tier::Local);
-    if !held_local.is_empty() {
-        eprintln!(
-            "[toyos] local tier: {} test(s) NOT run, because a sharded run is CI's and no CI \
-             runner boots their architecture yet. An unsharded `cargo test` runs them.",
-            held_local.len(),
-        );
-        eprintln!("[toyos]   {}", held_local.join(", "));
-    }
-    let held_back: Vec<(Tier, Vec<String>)> =
-        [Tier::Nightly, Tier::Weekly].into_iter().map(|tier| (tier, held(tier))).collect();
-    for (tier, names) in held_back.iter().filter(|(_, names)| !names.is_empty()) {
-        let flag = tier.flag().expect("a held tier is a reach's");
-        eprintln!(
-            "[toyos] {} test(s) NOT run without {flag}, which \
-             `cargo test --test toyos-build -- {flag}` and .github/workflows/nightly.yml's \
-             schedule for it run.",
-            names.len(),
-        );
-        eprintln!("[toyos]   {}", names.join(", "));
+    if shard.is_some() {
+        if let Some(line) = arch_drop_line(&all_tests, filter) {
+            eprintln!("[toyos] {line}");
+        }
     }
 
     if tests_to_run.is_empty()
@@ -17694,7 +17636,7 @@ fn main() {
     }
 
     let test_config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testcases");
-    let mut tally = Tally::new().holding_back(held_back);
+    let mut tally = Tally::new();
 
     let suite_start = common::clock::mark();
 
