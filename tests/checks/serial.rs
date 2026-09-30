@@ -23,6 +23,15 @@ pub fn self_check() -> Result<(), String> {
     // capture looks like when it is not simply empty, and the case a
     // `text.is_empty()` guard would wave through.
     let mute = Serial::named("test capture", "hello from userland\n");
+    // A readback of `/log`, whose kernel records open with a date.
+    let readback = Serial::named(
+        "test capture",
+        "[2026-09-29 11:11:20 0.000 cpu0 boot] panic console: armed 1920x1080 stride=1920 \
+         format=1 at 0x4000000000, write-combining\n\
+         {2026-09-29 11:11:21 1.170 init} init: started logd\n",
+    );
+    let readback_mute =
+        Serial::named("test capture", "{2026-09-29 11:11:21 1.170 init} init: started logd\n");
     let panicking = Serial::named(
         "test capture",
         "[kernel 0.001 cpu0] NVMe: found\n[kernel 0.002 cpu0] PANIC: nope\n",
@@ -42,6 +51,11 @@ pub fn self_check() -> Result<(), String> {
         // The dead gate itself, from both directions.
         ("must_not_say on an empty capture", false, &|| dead.must_not_say("anything")),
         ("must_not_say with no kernel output", false, &|| mute.must_not_say("anything")),
+        ("must_not_say on a /log readback", true, &|| readback.must_not_say("no such line")),
+        ("must_be_clean on a /log readback", true, &|| readback.must_be_clean()),
+        ("must_not_say on a /log readback of programs only", false, &|| {
+            readback_mute.must_not_say("anything")
+        }),
         // must_be_clean
         ("must_be_clean on a clean boot", true, &|| live.must_be_clean()),
         ("must_be_clean on a panic", false, &|| panicking.must_be_clean()),
@@ -173,6 +187,9 @@ pub fn self_check() -> Result<(), String> {
         ("libc panic: panicked at src/main.rs:9:1:", Some(Died::Panicked)),
         // The one the naive fix cannot tell from the kernel's, and must.
         ("PANIC: printed by a program that felt like printing it", Some(Died::Panicked)),
+        // A `/log` readback's heads: the kernel's panic, and a program's.
+        ("[2026-09-29 11:11:22 2.000 cpu1] PANIC: nope", Some(Died::Kernel)),
+        ("{2026-09-29 11:11:22 2.000 init} PANIC: printed by init", Some(Died::Panicked)),
         // Nothing died.
         ("[kernel 0.377 cpu0] NVMe: found", None),
         ("hello from userland", None),
