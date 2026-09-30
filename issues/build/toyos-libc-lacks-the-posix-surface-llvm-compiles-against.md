@@ -23,14 +23,14 @@ libraries were not built.
 **Headers the C sysroot does not have:** `sys/resource.h`, `sys/utsname.h`,
 `sys/statvfs.h`, `sys/un.h`, `pwd.h`, `sysexits.h`, and `endian.h`, which
 `bit.h` includes once ToyOS joins its list
-(`issues/build/llvm-and-rustcs-build-have-no-arm-for-a-toyos-host.md`). The
+(`issues/build/bootstrap-cannot-build-llvm-clang-and-lld-for-a-toyos-host.md`). The
 scratch headers carried `machine/endian.h` and `MNT_LOCAL`, BSD names LLVM
 reads only on a system it does not list; that issue's two LLVM arms answer
 them, not libc.
 
 **Names its headers do not declare:**
-- `signal.h`: `pthread_sigmask`, `SIGUSR2`, `SA_ONSTACK`, `SA_RESETHAND`,
-  `SA_NODEFER`.
+- `signal.h`: `pthread_sigmask`, `SIGUSR1`, `SIGUSR2`, `SA_ONSTACK`,
+  `SA_RESETHAND`, `SA_NODEFER`.
 - `unistd.h`: `gethostname`, `getsid`, `setsid`, `execv`, `execve`,
   `readlink`, `symlink`, `link`, `fchown`, `_SC_ARG_MAX`, `_SC_PAGE_SIZE`,
   `_SC_GETPW_R_SIZE_MAX`.
@@ -53,12 +53,16 @@ strsignal symlink uname`. LLVM reaches `execv`, `execve` and `setsid` only
 after libc's `fork`, which answers `ENOSYS`
 (`llvm/lib/Support/Unix/Program.inc`, `Execute`).
 
+**A function it has and does not do.** `sigprocmask`
+(`userland/libc/src/misc.rs`), which LLVM calls
+(`llvm/lib/Support/Unix/Signals.inc`), answers 0 and neither sets nor reports
+a mask.
+
 **Left to other issues.** `wait`, `wait4`, `sigemptyset`, `sigfillset` and
 `sigaddset` are stage 3 of
 `issues/kernel/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`,
 with the `posix_spawn` LLVM starts a child through once libc has one.
-`SIGUSR1`, and `dirent.h`, `ftruncate` and `fchmod`, which libc defines and
-declares nowhere, are
+`dirent.h`, `ftruncate` and `fchmod`, which libc defines and declares nowhere, are
 `issues/build/libc-headers-are-written-by-hand-and-drift-from-its-definitions.md`'s.
 `alarm` is `issues/build/libc-has-no-alarm.md`'s, and `aligned_alloc`
 `issues/build/a-rust-std-program-defines-no-aligned-alloc.md`'s.
@@ -69,5 +73,8 @@ POSIX does not specify, what its Linux manual page does — or refuses as POSIX
 has it report an error, with `ENOSYS` where ToyOS has no such call: `setsid`
 and `getsid`, the child-process track ruling out a POSIX session, and `execv`
 and `execve`, no call replacing a process's image. A guest C case per function
-asserts its answer, each refusal among them, and a host test compiles and
-links, with the toolchain's clang against the C sysroot, one C probe per name.
+asserts its answer, each refusal among them, and reads back the effect of each
+that has one: the old set a second `pthread_sigmask` or `sigprocmask` answers,
+`getrlimit` after `setrlimit`, `readlink` of what `symlink` made, and the file
+read through the name `link` made. A host test compiles and links, with the
+toolchain's clang against the C sysroot, one C probe per name.

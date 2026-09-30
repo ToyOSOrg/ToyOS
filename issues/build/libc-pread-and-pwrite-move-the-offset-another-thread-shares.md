@@ -18,5 +18,9 @@ so LLVM's configure finds none; once it does, LLVM reads every file slice
 through it (`llvm/lib/Support/Unix/Path.inc`, `readNativeFileSlice`).
 
 **Exit**: `pread` and `pwrite` never move the descriptor's offset, which a
-guest C case shows: while one thread `read`s a file through, another `pread`s
-it at one offset, and each reads only the bytes at its own offset.
+guest C case shows over a file whose every 8-byte word holds its own offset.
+While one thread `read`s the file through, another `pread`s it at one offset,
+and every word either reads holds the offset it was read from. While one
+thread `write`s such words through a second file, another `pwrite`s one at its
+offset, and every word of that file then holds its own offset. Today's `pread`
+and `pwrite` are the negative control: the case is measured red against them.

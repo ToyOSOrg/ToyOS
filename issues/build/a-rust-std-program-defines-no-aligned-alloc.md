@@ -16,6 +16,15 @@ and in its fallback allocator: the link
 leaves it undefined, referenced from `libc++.a`'s `stdlib_new_delete.cpp` and
 `fallback_malloc.cpp`.
 
-**Exit**: a Rust std program's C code allocates through `aligned_alloc` from
-std's allocator and frees through `free`, and a guest case does it at an
-alignment above 16.
+Std's `free` and `realloc` release every block at alignment 16, the one its
+`malloc` allocates at. The allocator under them, dlmalloc
+(`rust/library/std/src/sys/alloc/toyos.rs`), checks a released block's size and
+ignores its alignment, so a block allocated at a larger one and released at 16
+is a layout mismatch nothing reports.
+
+**Exit**: std's C allocator defines `aligned_alloc`, whose block's address is a
+multiple of the requested alignment, and `free` and `realloc` release each
+block at the layout it was allocated with, the block's header carrying its
+alignment as libc's own allocator's does. A guest case in a Rust std program
+allocates through `aligned_alloc` at alignments 64 and 4096, asserts each
+address a multiple of its alignment, and frees each.

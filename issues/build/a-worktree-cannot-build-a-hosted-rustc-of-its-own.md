@@ -16,13 +16,8 @@ another tree's recipe built.
 
 So no branch can put the hosted rustc it changes into a guest before it lands.
 Carrying LLVM instead of Cranelift changes `write_config`'s hosted target and
-the fork's `compiler/rustc_llvm` and `src/bootstrap`, and its guest test could
-run only after the merge.
-
-#629 deletes this build and files `the-hosted-rustc-is-not-built.md`, whose
-exit, a store product keyed on a compiler building the hosted rustc and an
-image carrying it, covers this one: whichever of the two lands second folds
-this issue into that one.
+the fork's `compiler/rustc_llvm`, and its guest test could run only after the
+merge.
 
 **Exit**: a worktree whose `write_config`, or whose fork's `compiler/` or
 `src/bootstrap`, differs from the primary's builds a hosted rustc of its own,
