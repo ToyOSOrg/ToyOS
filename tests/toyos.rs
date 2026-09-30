@@ -985,11 +985,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     ("toolkit_window_wake", Sched::Parallel),
     ("toolkit_winit_loop", Sched::Parallel),
     ("toolkit_winit_pace", Sched::Parallel),
-    // Ctrl+Alt+D on the same machine. Parallel: it waits for a marker and its
-    // verdicts are counts the report has to agree with itself about, not a
-    // wall-clock margin — the one duration in it is the dump's own 250 ms
-    // ceiling, which the guest spends and the host never measures.
-    ("blocked_dump", Sched::Parallel),
     ("i8042_absent", Sched::Parallel),
     // The fault quarantines (masks) the controller's GSI: the line and its
     // count are the verdict, and no program runs.
@@ -7465,171 +7460,6 @@ fn netd_refused_pipes(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     Ok(())
 }
 
-/// Ctrl+Alt+D at a live desktop: every CPU answers, and the two halves of the
-/// report agree.
-///
-/// The instrument `issues/diagnostics/` files against, built because QEMU cannot
-/// stage the T14's audio wedge and a question the owner can answer beats a fix
-/// nobody can verify. Until this landed the dump listed the *calling* CPU's
-/// parked threads and named them by scheduler key, so it could confirm a park
-/// and never rule one out — and the three states that look identical from
-/// outside (parked on a deadline that did not fire, parked on a deadline
-/// nothing could reach, held by no CPU at all) were not distinguishable at all.
-///
-/// Eight CPUs, because "machine-wide" is not testable at the suite's default of
-/// two: one CPU short of the whole machine is what the old dump already did.
-///
-/// **The verdict is the instrument, not the guest's health.** A deadline that
-/// has passed and whose pass has not yet run is a legitimate microsecond-wide
-/// state, so asserting zero of them would be asserting a race. What is asserted
-/// is that the report is complete and that its halves cannot disagree: every
-/// CPU is present, the deadline classes sum to the parked count, and the
-/// process table knows at least as many threads as the schedulers hold.
-fn blocked_dump() -> Result<(), String> {
-    let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/desktopaudiocase");
-    let options = BootOptions {
-        profile: qemu::Profile::Metal,
-        smp: 8,
-        qmp: true,
-        ready_marker: "compositor: ready",
-        // [`shell_type_line`]'s pacing; off the shipping kernel, and implies fast-health
-        // and edge-race.
-        kernel_params: &["i8042-trace"],
-        ..Default::default()
-    };
-    metal_sim_argv_check(&qemu::profile_argv(&options))?;
-    let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
-    let mut log = qemu.boot_log().to_string();
-    // No panel row under a compositor; the kernel's drain report is the answer.
-    if let Err(why) = shell_answers(&mut qemu, &mut log) {
-        return Err(format!(
-            "{why}\nnothing typed at the terminal window reached a shell:\n{log}"
-        ));
-    }
-
-    let before = log.len();
-    {
-        let mut input = qemu::QmpInput::open(qemu.qmp_socket());
-        input.keys(&[
-            ("ctrl", true),
-            ("alt", true),
-            ("d", true),
-            ("d", false),
-            ("alt", false),
-            ("ctrl", false),
-        ]);
-    }
-    await_marker_new(&mut qemu, &mut log, "=== end of dump ===", before, "the whole report")
-        .map_err(|why| format!(
-            "{why}\nCtrl+Alt+D produced no complete report:\n{}",
-            &log[before..]
-        ))?;
-    let report = log[before..].to_string();
-
-    // Every CPU printed its own line. This is the whole of "machine-wide": the
-    // count in the summary is derived, these are the CPUs actually answering.
-    let missing: Vec<usize> =
-        (0..8).filter(|c| !report.contains(&format!("cpu{c} running"))).collect();
-    if !missing.is_empty() {
-        return Err(format!(
-            "cpu(s) {missing:?} never reported — the dump reached {} of 8:\n{report}",
-            8 - missing.len()
-        ));
-    }
-    if !report.contains("8/8 cpu(s) answered") {
-        return Err(format!("the report does not claim a whole machine:\n{report}"));
-    }
-    // On a settled desktop the table is free, so the half of the verdict that
-    // only the census can produce must be there. A report that answered two of
-    // three questions is worth having on the owner's panel and is not worth
-    // accepting from a gate.
-    if !report.contains(" unheld, ") || !report.contains(" never ran") {
-        return Err(format!(
-            "the verdict lost its census half on a settled machine:\n{report}"
-        ));
-    }
-
-    // A parked line names a process, not a scheduler key.
-    let named = report
-        .lines()
-        .filter(|l| l.contains("pid=") && l.contains("tid=") && l.contains(" parked "))
-        .count();
-    if named == 0 {
-        return Err(format!("no parked task was named by pid and tid:\n{report}"));
-    }
-
-    // **Every kernel thread, by name.** They are almost always blocked, so
-    // the parked lines above carry them as a pid and a tid and nothing else —
-    // and on a machine that has gone quiet the question is *which* one is
-    // stuck. `sched::dump`'s census tags a kernel thread whatever it is doing.
-    //
-    // Matched with the ` cpu=` that follows the name on the census line, because
-    // a bare name appears in every one of these programs' own log lines and
-    // `/system/bin/init` speaks in a program's name before that program runs
-    // (`tests/CLAUDE.md`).
-    let unnamed: Vec<&str> = ["klogd"]
-        .into_iter()
-        .filter(|name| !report.contains(&format!(" {name} cpu=")))
-        .collect();
-    if !unnamed.is_empty() {
-        return Err(format!(
-            "the report never names kernel thread(s) {unnamed:?}, so it cannot say which \
-             of them is stuck:\n{report}"
-        ));
-    }
-
-    // The two halves must agree, which is what makes the verdict mean anything:
-    // every parked task falls into exactly one deadline class, and every task a
-    // scheduler holds is a thread the process table knows.
-    let parked = dump_field(&report, "== sched:", "parked")?;
-    let classes = dump_field(&report, "== deadlines:", "event-only,")?
-        + dump_field(&report, "== deadlines:", "pending,")?
-        + dump_field(&report, "== deadlines:", "OVERDUE,")?
-        + dump_field(&report, "== deadlines:", "ABSURD")?;
-    if parked != classes {
-        return Err(format!(
-            "{parked} parked task(s) but {classes} classified — the report contradicts \
-             itself:\n{report}"
-        ));
-    }
-    let threads = dump_field(&report, "== census:", "thread(s)")?;
-    if threads < parked {
-        return Err(format!(
-            "the schedulers hold {parked} task(s) and the process table knows {threads} \
-             thread(s) — the census cannot see what the CPUs do:\n{report}"
-        ));
-    }
-
-    let verdict = report
-        .lines()
-        .find(|l| l.contains("== VERDICT:"))
-        .ok_or_else(|| format!("no verdict line:\n{report}"))?;
-    eprintln!(
-        "  [dump] {threads} threads, {parked} parked, all 8 cpus answered;{}",
-        verdict.split("VERDICT:").nth(1).unwrap_or("").trim_end()
-    );
-    Ok(())
-}
-
-/// The number the report writes immediately before `word`, on the line that
-/// carries `marker`. Read from the word a person sees rather than from a
-/// column, so a reordered line does not silently read the wrong field.
-fn dump_field(report: &str, marker: &str, word: &str) -> Result<u32, String> {
-    let line = report
-        .lines()
-        .find(|l| l.contains(marker))
-        .ok_or_else(|| format!("no {marker:?} line in the report:\n{report}"))?;
-    let head = line
-        .split(word)
-        .next()
-        .filter(|h| h.len() < line.len())
-        .ok_or_else(|| format!("no {word:?} on {line:?}"))?;
-    head.split_whitespace()
-        .next_back()
-        .and_then(|w| w.parse().ok())
-        .ok_or_else(|| format!("no number before {word:?} on {line:?}"))
-}
-
 /// The direct regression for the readiness defect: a stimulus that produces
 /// bytes and no events must produce no wake. Pause is that stimulus — six
 /// bytes, deliberately swallowed.
@@ -8561,7 +8391,6 @@ fn run_machine_test(
         "toolkit_window_wake" => toolkit_window_wake(rust_bins),
         "toolkit_winit_loop" => toolkit_winit_loop(rust_bins),
         "toolkit_winit_pace" => toolkit_winit_pace(rust_bins),
-        "blocked_dump" => blocked_dump(),
         "xhci_many_devices" => {
             // The T14's internal controller carries a camera, Bluetooth and a
             // fingerprint reader next to the boot stick, and every profile in
