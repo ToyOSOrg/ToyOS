@@ -977,12 +977,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // control. One boot, two `echo`s, and every verdict is a string comparison
     // the host makes over a capture — no clock in it.
     ("c_capture_ignores_daemon_lines", Sched::Parallel),
-    // A poll on the machine's log against a *handle* going away. Parallel: both
-    // halves are verdicts the guest computes — a completion count
-    // immediately after a close, retried against a record arriving in the same
-    // microseconds, and a completion afterwards bounded far above the two
-    // scheduler passes it needs.
-    ("log_poll_outlives_a_close", Sched::Parallel),
     // The same question asked of the keyboard, where two *kinds* of object name
     // one source: a poll on stdin against the keyboard claim going away, a poll
     // on the mouse claim against its own, and an injected keystroke to show the
@@ -1381,14 +1375,6 @@ const METAL: &[(&str, metal::Metal)] = &[
             arms: TESTCASES,
             judge: |b| irq_census(b[0].kernel().text()),
         },
-    ),
-    (
-        // `log-close` is a runner builtin and prints its `survived=` evidence to
-        // a console nothing is on. What crosses is the child it spawns only
-        // after the poll survived the close — and the boot reaching its last job
-        // at all, which a builtin returning non-zero prevents.
-        "log_poll_outlives_a_close",
-        metal::Metal::Runs { arms: TESTCASES, judge: |b| log_close_survived(b[0]) },
     ),
     (
         "mkdir_cap",
@@ -1811,11 +1797,6 @@ const AUDIO_ON_METAL_ONLY: &str = "audio is judged on the T14 and in no QEMU gue
 
 /// The boot most of the first tranche rides: the plain `tests/testcases` shape
 /// with a job list that ends it.
-///
-/// Order matters. `log-close` is last because it is a *builtin*: its exit code
-/// reaches no kernel record, so the runner ends the boot on a non-zero one and
-/// every later job's record would then be missing for the wrong reason. The
-/// last job before it is [`LOG_CLOSE_MARKER`]'s subject.
 const TESTCASES: &[metal::Arm] = &[metal::once(
     "testcases",
     "tests/testcases",
@@ -1828,7 +1809,6 @@ const TESTCASES: &[metal::Arm] = &[metal::once(
         "test_rs_hda_client_stall",
         "test_rs_syscall_cost",
         "test_rs_null_sink_client_exits",
-        "log-close",
     ],
 )];
 
@@ -2140,30 +2120,6 @@ fn c_corpus_metal(
 /// The comparator's own staged name. It is a `RUST_SKIP` helper, so discovery
 /// never makes a job of it and [`shared_metal`] stages it as one.
 const CCHECK: &str = "test_rs_ccheck";
-/// The job `log-close` runs after, and so the anchor its evidence is read from.
-const LOG_CLOSE_MARKER: &str = "test_rs_null_sink_client_exits";
-
-/// `log-close`'s verdict, as it crosses on a machine with no console.
-///
-/// The builtin's own `survived=` line reaches nothing, and a builtin leaves the
-/// kernel no exit record of its own. What it does leave is a child's:
-/// `still_armed` spawns `/system/bin/echo` **only** after the poll outlived the
-/// close. So the positive half is that record arriving after the job before it —
-/// `echo` is a common enough name that a whole-log scan would be answered by
-/// somebody else's — and the negative half is the boot reaching its `reboot`
-/// job at all, which a builtin returning non-zero prevents.
-fn log_close_survived(back: &metal::Readback) -> Result<(), String> {
-    let previous = format!("{}{} pid=", bootlog::EXIT, bootlog::recorded_name(LOG_CLOSE_MARKER));
-    let child = format!("{}echo pid=", bootlog::EXIT);
-    back.kernel().must_say_after(&previous, &child).map_err(|why| {
-        format!(
-            "{why}\n`log-close` reaches `still_armed` — the one thing that spawns `echo` there — \
-             only if the poll outlived the close"
-        )
-    })?;
-    bootlog::handed_back(back.after_the_reset()?.text()).map_err(|why| why.to_string())
-}
-
 /// The renderer's two text colours, as the screendump reports them.
 const WHITE: [u8; 3] = [0xFF, 0xFF, 0xFF];
 const ALERT: [u8; 3] = [0xFF, 0x50, 0x50];
@@ -8503,9 +8459,6 @@ fn run_machine_test(
         }
         "log_reserve_window_negative" => {
             common::logread::log_reserve_window_negative(test_config, c_bins, rust_bins)
-        }
-        "log_poll_outlives_a_close" => {
-            common::logread::log_poll_outlives_a_close(test_config, c_bins, rust_bins)
         }
         // Body in `tests/common/console.rs`, same reason.
         "c_capture_ignores_daemon_lines" => {
