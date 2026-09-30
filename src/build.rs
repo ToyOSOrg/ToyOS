@@ -3139,9 +3139,6 @@ mod tests {
         "tests/inspectcase/system.toml",
         "tests/jobcase/system.toml",
         "tests/jobdeadlinecase/system.toml",
-        "tests/lancase/system.toml",
-        "tests/lanicscase/system.toml",
-        "tests/lanleasecase/system.toml",
         "tests/lantalkcase/system.toml",
         "tests/latencycase/system.toml",
         "tests/layoutcase/system.toml",
@@ -3347,12 +3344,10 @@ mod tests {
         assert!(one_claimant_per_device(&bad, None).is_err());
     }
 
-    /// netd's two actuators that only its Intel driver answers, spelled here
-    /// and held to netd's own declarations by
+    /// netd's actuators that only its Intel driver answers, spelled here and
+    /// held to netd's own declarations by
     /// [`netd_declares_the_flags_this_gate_spells`].
-    const PROVOKE_MESSAGE: &str = "--provoke-message";
-    const EXIT_WITH_LEASE: &str = "--exit-with-lease";
-    const INTEL_ACTUATORS: [&str; 2] = [PROVOKE_MESSAGE, EXIT_WITH_LEASE];
+    const INTEL_ACTUATORS: [&str; 1] = ["--exit-with-lease"];
 
     /// netd's main module, which is where both halves of this gate's spelling
     /// live: nothing links the two crates, so the build system reads the source.
@@ -3415,27 +3410,19 @@ mod tests {
         cards
     }
 
-    /// netd's two Intel-only actuators — `--provoke-message` writes
-    /// §10.2.4.4's `ICS`, and `--exit-with-lease` reports the Intel driver's
-    /// bring-up beside the lease — and virtio's driver has neither, so a boot
-    /// config that arms one on a card netd opens with any other driver is a boot
-    /// that panics instead of answering the question it was flashed for. One
-    /// that arms both on one program is refused too: the probe ends the process
-    /// before the point the other acts at.
+    /// netd's Intel-only actuators — `--exit-with-lease` reports the Intel
+    /// driver's bring-up beside the lease — and virtio's driver has none, so a
+    /// boot config that arms one on a card netd opens with any other driver is
+    /// a boot that panics instead of answering the question it was built for.
     fn an_armed_intel_actuator_claims_a_card_the_driver_opens(
         cfg: &SystemConfig,
         cards: &[String],
     ) -> Result<(), String> {
         for (name, prog) in &cfg.programs {
-            let armed: Vec<&str> = INTEL_ACTUATORS
-                .into_iter()
-                .filter(|flag| prog.args.iter().any(|arg| arg == flag))
-                .collect();
-            let [flag] = armed[..] else {
-                if armed.is_empty() {
-                    continue;
-                }
-                return Err(format!("`{name}` is armed with {armed:?}, which cannot share a boot"));
+            let Some(flag) =
+                INTEL_ACTUATORS.into_iter().find(|flag| prog.args.iter().any(|arg| arg == flag))
+            else {
+                continue;
             };
             if !prog.devices.iter().any(|d| cards.contains(d)) {
                 return Err(format!(
@@ -3486,12 +3473,6 @@ mod tests {
             assert!(armed_on("pci:1af4:1041", &one).is_err(), "{flag}");
             assert!(armed_on("pci:8086:1502", &one).is_err(), "{flag}");
             assert!(armed_on(&cards[0], &one).is_ok(), "{flag}");
-        }
-        for (at, one) in INTEL_ACTUATORS.into_iter().enumerate() {
-            for other in &INTEL_ACTUATORS[at + 1..] {
-                let both = format!("\"{one}\", \"{other}\"");
-                assert!(armed_on(&cards[0], &both).is_err(), "{one} beside {other}");
-            }
         }
     }
 

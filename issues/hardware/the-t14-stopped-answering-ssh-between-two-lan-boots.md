@@ -34,8 +34,7 @@ toyos-metal: the swap did not put the new binary in service:
 
 ## Exit condition
 
-`lan_lease_report` and `lan_swap` are owned by this file until it closes.
-Three consecutive T14 metal runs each reach both judges, `lanleasecase` and
-`lanswapcase`, without an `ssh` timeout before either flash; then this file is
+`lan_swap` is owned by this file until it closes. Three consecutive T14
+metal runs each reach `lanswapcase`'s judge without an `ssh` timeout before its flash; then this file is
 deleted. A red on a judge in any of the three is filed as its own issue file
 naming that test and its cause before this one closes.

@@ -298,24 +298,6 @@ impl Readback {
         Ok((swapped, stream.split_inclusive('\n').map(str::to_string).collect()))
     }
 
-    /// One file off the log volume that is neither the loader's nor `logd`'s,
-    /// read out of the partition's own bytes; `None` where the volume has no
-    /// such file.
-    ///
-    /// **The loop copies two kinds of file off the mount and this is neither**,
-    /// so it comes out of `metal::READBACK_VOLUME` — which the loop keeps on
-    /// every boot that came back, because the outside judge runs on every one.
-    pub fn log_volume_file(&self, name: &str) -> Result<Option<String>, String> {
-        let at = self.home.join(toyos_build::metal::READBACK_VOLUME);
-        let volume = std::fs::read(&at).map_err(|e| format!("{}: {e}", at.display()))?;
-        let found = super::volumes::read_files(&volume, &[name])?.pop().flatten();
-        found
-            .map(|bytes| {
-                String::from_utf8(bytes).map_err(|e| format!("{}'s {name}: {e}", self.label))
-            })
-            .transpose()
-    }
-
     /// Every `logd` file this boot wrote, as one text, less every program's
     /// line ([`bootlog::kernel_records`]): no program's line is read as the kernel's.
     /// It ends where init had `logd` make it whole, so what the kernel writes

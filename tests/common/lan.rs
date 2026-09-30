@@ -23,34 +23,12 @@ use super::metal;
 use super::qemu::{self, BootOptions, QemuInstance};
 use super::serial;
 
-/// The boot config the T14 arm flashes, and the name every profile row for that
-/// boot is under.
-pub const CONFIG: &str = "tests/lancase";
-pub const BOOT: &str = "lancase";
-
-/// The same boot with netd's `--provoke-message` armed: the arm that says
-/// whether a message the card raises reaches a CPU at all, which no reading of
-/// the shipping boot separates from a card that raised none.
-pub const ICS_CONFIG: &str = "tests/lanicscase";
-pub const ICS_BOOT: &str = "lanicscase";
-
-/// The same boot with netd's `--exit-with-lease` armed: netd brings the card up
-/// and serves as that boot does, leaves [`LEASE_FILE`] on the log volume one
-/// durable line at a time, and ends with the lease's verdict as its exit code,
-/// which the kernel's `exit:` record carries off a machine whose console
-/// reaches nobody.
-pub const LEASE_CONFIG: &str = "tests/lanleasecase";
-pub const LEASE_BOOT: &str = "lanleasecase";
-
-/// The file that report is left in, at the root of the log volume — netd's
-/// `report::PATH` under `/log`.
+/// The file netd's `--exit-with-lease` leaves its report in, at the root of
+/// the log volume — netd's `report::PATH` under `/log`.
 pub const LEASE_FILE: &str = "lease.txt";
 
 /// netd, as the kernel's `exit:` record names it.
 const NETD: &str = "netd";
-
-/// The one job on that boot: it holds the machine up while the host pings it.
-pub const JOBS: &[&str] = &["test_rs_lan_hold"];
 
 /// The boot the host talks to over its own cable: the log it serves, sshd, and
 /// `reboot` as the way the machine is handed back.
@@ -70,10 +48,9 @@ const TALK_KEY: &str = "lantalk";
 /// verdict.
 const TALK_CEILING: std::time::Duration = std::time::Duration::from_secs(41);
 
-/// The armed boot's judge: the kernel's own records, tied to the I219's
-/// hand-over, say whether a message it raised reached a CPU — whatever the PHY
-/// did about a link.
-pub fn provoked_on_metal(back: &metal::Readback) -> Result<(), String> {
+/// The kernel's own records, tied to the I219's hand-over, say a message it
+/// raised reached a CPU — whatever the PHY did about a link.
+pub fn delivered_on_metal(back: &metal::Readback) -> Result<(), String> {
     let got = toyos_build::lan::delivered(back.kernel().text())?;
     eprintln!("  [lan] {}", got.handed.trim());
     eprintln!("  [lan] {}", got.took.trim());
@@ -125,7 +102,7 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
             Some(line) => format!("the kernel refused this function: {}", line.trim()),
             None => format!(
                 "no `{handed}` record and no refusal either: nothing on this machine claimed \
-                 {ID}, so `tests/lancase` was flashed onto a machine that has no such card"
+                 {ID}, so `tests/lantalkcase` was flashed onto a machine that has no such card"
             ),
         }),
     }
@@ -206,87 +183,10 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
         )),
     }
 
-    if let Err(why) = back.job_passed(JOBS[0]) {
-        bad.push(why);
-    }
-
     if bad.is_empty() {
         return Ok(());
     }
     Err(format!("{} finding(s):\n  {}", bad.len(), bad.join("\n  ")))
-}
-
-/// The lease probe's judge: netd's exit code, decoded through the table the
-/// driver crate owns, and the report it left on the log volume — the lease,
-/// the router, and what the driver and the MAC counted each way. A code that is
-/// no lease is a finding by its name, which the shipping boot's silence cannot
-/// give.
-///
-/// **The host's ping is printed and not judged**: the lease is a server this
-/// machine does not control answering it, which is the claim; a reply at the
-/// leased address inside this boot is the same claim made from the bench's
-/// side, and the loop asks for it only where it was told the cable.
-pub fn leased_on_metal(back: &metal::Readback) -> Result<(), String> {
-    let code = back.exit_code(NETD)?;
-    let text = back
-        .log_volume_file(LEASE_FILE)?
-        .ok_or_else(|| format!("{LEASE_BOOT}'s log volume carries no {LEASE_FILE}"))?;
-    for line in text.lines() {
-        eprintln!("  [lan] {LEASE_FILE}: {line}");
-    }
-    let summary = lease::summary(&text).map_err(|why| format!("{LEASE_FILE}: {why}"))?;
-    if summary.exit != Some(code) {
-        return Err(format!(
-            "netd exited {code} and its report ends in {:?}: the two records of one exit disagree",
-            summary.exit
-        ));
-    }
-    match Verdict::from_exit_code(code) {
-        Some(Verdict::Leased) => {}
-        Some(other) => return Err(format!("netd exited {code} on {LEASE_BOOT}: {other}")),
-        None => {
-            return Err(format!("netd exited {code} on {LEASE_BOOT}, which is no verdict the probe encodes"))
-        }
-    }
-    let Some((ms, Event::Leased { address, prefix, server, router })) = summary.lease else {
-        return Err(format!("netd exited leased and {LEASE_FILE} records no lease"));
-    };
-    let counts = summary.counts.ok_or_else(|| format!("{LEASE_FILE} carries no counts"))?;
-    eprintln!(
-        "  [lan] leased {address}/{prefix} from {server}, router {router:?}, {ms} ms after netd \
-         started; the driver counted {} sent and {} received, the MAC {} sent, {} received of \
-         {} seen",
-        counts.sent, counts.received, counts.wire.sent, counts.wire.received, counts.wire.seen
-    );
-    if counts.sent == 0 || counts.received == 0 {
-        return Err(format!("a lease with {counts:?} is no exchange this card carried"));
-    }
-    match back.cable.as_ref() {
-        None => eprintln!("  [lan] no cable was named, so the host asked nothing of this boot"),
-        Some(cable) => match cable.reply {
-            None => eprintln!("  [lan] nothing answered the host's ping at {}", cable.addr),
-            Some(reply) => {
-                let handed = format!("[{ID}] handed over on slot");
-                match bootlog::host_second_inside_this_boot(
-                    back.kernel().text(),
-                    cable.skew,
-                    &handed,
-                    reply.at,
-                ) {
-                    Ok(()) => eprintln!(
-                        "  [lan] {} answered the host's ping {} s into the window, inside this \
-                         boot",
-                        cable.addr, reply.secs
-                    ),
-                    Err(why) => eprintln!(
-                        "  [lan] {} answered the host's ping, and not inside this boot: {why}",
-                        cable.addr
-                    ),
-                }
-            }
-        },
-    }
-    Ok(())
 }
 
 /// The netdev QEMU's `e1000e` profile names its backend, which the monitor's

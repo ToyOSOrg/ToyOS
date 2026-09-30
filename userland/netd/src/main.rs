@@ -27,22 +27,11 @@ mod virtio_net;
 /// at `00:1f.6`; `8086:10d3` is the 82574L, which QEMU's `e1000e` models. One
 /// driver takes both, and each row names which part it is because below the
 /// register file they are not one.
-const CARDS: [(PciId, fn(toyos::PciDev, bool) -> Card); 3] = [
-    (PciId { vendor: 0x8086, device: 0x15fc }, |c, p| Card::intel(c, Part::I219, p)),
-    (PciId { vendor: 0x8086, device: 0x10d3 }, |c, p| Card::intel(c, Part::E82574, p)),
+const CARDS: [(PciId, fn(toyos::PciDev) -> Card); 3] = [
+    (PciId { vendor: 0x8086, device: 0x15fc }, |c| Card::intel(c, Part::I219)),
+    (PciId { vendor: 0x8086, device: 0x10d3 }, |c| Card::intel(c, Part::E82574)),
     (PciId { vendor: 0x1af4, device: 0x1041 }, Card::virtio),
 ];
-
-/// The actuator that makes the card raise one interrupt on purpose, so a boot
-/// whose only reading of the interrupt path is a count of messages can tell a
-/// part nothing made speak from a message that reached no CPU.
-///
-/// **Nothing a shipped machine runs arms it**: the argument comes from the
-/// `[programs.netd] args` row of a boot config, and the one config that carries
-/// it is `tests/lanicscase`. A boot that always raised a message would make the
-/// kernel's first-message record read the same on a working card and a dead
-/// one.
-const PROVOKE_MESSAGE: &str = "--provoke-message";
 
 /// The probe under which this process brings the card up and serves exactly as
 /// it always does for [`LEASE_WINDOW`], leaves what happened on the log volume
@@ -51,24 +40,15 @@ const PROVOKE_MESSAGE: &str = "--provoke-message";
 /// the window ends, and where none is, what the bring-up and the link said.
 ///
 /// **A lease is a frame out and a frame in, answered by a server this machine
-/// does not control**, which is the claim the probe is flashed for; the lines
-/// beside it say what the driver and the MAC counted each way, and so which
-/// half went missing on a boot that got none. Armed the same way as
-/// [`PROVOKE_MESSAGE`] and never beside it.
+/// does not control**; the lines beside it say what the driver and the MAC
+/// counted each way, and so which half went missing on a boot that got none.
+/// The argument comes from the `[programs.netd] args` row of a boot config,
+/// and nothing a shipped machine runs carries it.
 const EXIT_WITH_LEASE: &str = "--exit-with-lease";
 
 /// How long [`EXIT_WITH_LEASE`] serves before it ends, counted from this
 /// process's start.
-///
-/// **It ends inside the job that holds its boot open**: `test_rs_lan_hold`
-/// sleeps `toyos_tco::LEASE_BOUND_MS` from a start after this process's, so
-/// the exit record and the report's last line land before the runner reboots,
-/// with two seconds to spare. Every moment of it after the lease is a moment
-/// the machine answers the host's ping at the leased address.
 const LEASE_WINDOW: Duration = Duration::from_millis(toyos_tco::LEASE_BOUND_MS - 2_000);
-
-/// The two, which cannot share a boot.
-const ACTUATORS: [&str; 2] = [PROVOKE_MESSAGE, EXIT_WITH_LEASE];
 
 fn armed(actuator: &str) -> bool {
     std::env::args().any(|arg| arg == actuator)
@@ -111,25 +91,14 @@ impl Card {
         panic!("netd: the NIC this program was given is not one it can drive — {why}")
     }
 
-    /// `provoke` is [`PROVOKE_MESSAGE`], carried out once the card is up.
-    fn intel(claim: toyos::PciDev, part: Part, provoke: bool) -> Self {
+    fn intel(claim: toyos::PciDev, part: Part) -> Self {
         match i219::Nic::open(claim, part) {
-            Ok(nic) => {
-                if provoke {
-                    nic.provoke_message();
-                }
-                Self::Intel(nic)
-            }
+            Ok(nic) => Self::Intel(nic),
             Err(why) => Self::undrivable(why),
         }
     }
 
-    /// [`PROVOKE_MESSAGE`] is the Intel driver's: armed here it is refused, not
-    /// skipped, before `open` touches the card.
-    fn virtio(claim: toyos::PciDev, provoke: bool) -> Self {
-        if provoke {
-            panic!("netd: {PROVOKE_MESSAGE} is the Intel driver's and this card is virtio");
-        }
+    fn virtio(claim: toyos::PciDev) -> Self {
         match VirtioNet::open(claim) {
             Ok(nic) => Self::Virtio(nic),
             Err(why) => Self::undrivable(why),
@@ -1610,16 +1579,7 @@ fn main() {
     };
     let acceptor = endow::acceptor("netd")
         .expect("the manifest declares this program serves `netd`");
-    // Before the card is opened, so a boot config that arms both is refused
-    // before either acts.
-    let asked_for: Vec<&str> = ACTUATORS.into_iter().filter(|actuator| armed(actuator)).collect();
-    if asked_for.len() > 1 {
-        panic!(
-            "netd: {asked_for:?} cannot share a boot: a probe ends this process before the \
-             point another of them acts at"
-        );
-    }
-    let nic = open(claim, armed(PROVOKE_MESSAGE));
+    let nic = open(claim);
     let report = armed(EXIT_WITH_LEASE).then(|| {
         let report = report::Report::open(started);
         let intel = nic.intel_driver();

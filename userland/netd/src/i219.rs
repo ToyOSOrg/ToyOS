@@ -277,11 +277,6 @@ impl Nic {
         &self.claim
     }
 
-    /// `crate::PROVOKE_MESSAGE`: raise one enabled cause on purpose.
-    pub fn provoke_message(&self) {
-        self.driver.borrow().provoke_message();
-    }
-
     /// Pass frames sent to the multicast address `group`.
     pub fn accept_multicast(&self, group: [u8; 6]) {
         self.driver.borrow().accept_multicast(group);

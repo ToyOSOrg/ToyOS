@@ -700,7 +700,7 @@ ceiling_from = "as list.testcases.job_ms"
 name = "list.testcases-deaf.job_ms"
 unit = "ms"
 ceiling = 22000
-ceiling_from = "as list.lancase.job_ms — the same one job"
+ceiling_from = "toyos_tco::LEASE_BOUND_MS, which is lan_hold's whole sleep, plus two seconds for the spawn and the exit record around it"
 
 [[number]]
 name = "list.testcases-window.job_ms"
@@ -760,80 +760,26 @@ ceiling_from = "as boot.testcases.stick_secs"
 
 # --- the cable: the boot that runs netd in front of the T14's own I219 ---
 
-[[number]]
-name = "boot.lancase.complete_ms"
-unit = "ms"
-ceiling = 60000
-ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
-measured = 1208
-
-[[number]]
-name = "boot.lancase.back_secs"
-unit = "s"
-ceiling = 420
-ceiling_from = "toyos_build::metal::return_secs"
-measured = 82
-
-[[number]]
-name = "boot.lancase.stick_secs"
-unit = "s"
-ceiling = 30
-ceiling_from = "as boot.testcases.stick_secs"
-measured = 0
-
 # No `measured`: the one ping this row has been offered was answered by the
 # operating system on the other side of the reset, which the judge refuses, so
 # no boot has yet given this number a reading.
 [[number]]
-name = "boot.lancase.ping_secs"
+name = "boot.lantalkcase.ping_secs"
 unit = "s"
 ceiling = 420
 ceiling_from = "toyos_build::metal::return_secs — the loop's own wait for the machine to answer ssh again, which bounds the window a reply can fall in"
 
 [[number]]
-name = "list.lancase.job_ms"
-unit = "ms"
-ceiling = 22000
-ceiling_from = "toyos_tco::LEASE_BOUND_MS, which is lan_hold's whole sleep, plus two seconds for the spawn and the exit record around it"
-
-[[number]]
-name = "lan.lancase.link_up_ms"
+name = "lan.lantalkcase.link_up_ms"
 unit = "ms"
 ceiling = 20000
-ceiling_from = "toyos_tco::LEASE_BOUND_MS: a link that comes up later than lan_hold sleeps is a link this boot never had, because the machine has already handed itself back"
+ceiling_from = "toyos_tco::LEASE_BOUND_MS: a link later than netd's own dhcp::LEASE_BOUND is a boot whose log has already said it holds no lease"
 
 [[number]]
-name = "lan.lancase.lease_ms"
+name = "lan.lantalkcase.lease_ms"
 unit = "ms"
 ceiling = 20000
-ceiling_from = "as lan.lancase.link_up_ms, which is netd's own dhcp::LEASE_BOUND: a boot with no lease by then has already said so in its log"
-
-# `lanicscase` is `lancase` with one argument added to netd's manifest row, so
-# every bound it is under is that boot's.
-
-[[number]]
-name = "boot.lanicscase.complete_ms"
-unit = "ms"
-ceiling = 60000
-ceiling_from = "as boot.lancase.complete_ms — the same boot config with one netd argument added"
-
-[[number]]
-name = "boot.lanicscase.back_secs"
-unit = "s"
-ceiling = 420
-ceiling_from = "toyos_build::metal::return_secs"
-
-[[number]]
-name = "boot.lanicscase.stick_secs"
-unit = "s"
-ceiling = 30
-ceiling_from = "as boot.lancase.stick_secs"
-
-[[number]]
-name = "list.lanicscase.job_ms"
-unit = "ms"
-ceiling = 22000
-ceiling_from = "as list.lancase.job_ms — the same one job"
+ceiling_from = "as lan.lantalkcase.link_up_ms, which is netd's own dhcp::LEASE_BOUND: a boot with no lease by then has already said so in its log"
 
 # --- what the on-screen panel cost each boot ---
 # **The one window a person has into a machine that stopped.** Two numbers,
@@ -962,18 +908,6 @@ measured = 3890
 
 [[number]]
 name = "boot.usbbreak.panel_max_us"
-unit = "us"
-ceiling = 16667
-ceiling_from = "as boot.testcases.panel_max_us"
-
-[[number]]
-name = "boot.lancase.panel_max_us"
-unit = "us"
-ceiling = 16667
-ceiling_from = "as boot.testcases.panel_max_us"
-
-[[number]]
-name = "boot.lanicscase.panel_max_us"
 unit = "us"
 ceiling = 16667
 ceiling_from = "as boot.testcases.panel_max_us"
@@ -1215,24 +1149,6 @@ ceiling = 0
 ceiling_from = "as boot.testcases.park_open_operations"
 
 [[number]]
-name = "boot.lancase.park_open_operations"
-unit = "operations"
-ceiling = 0
-ceiling_from = "as boot.testcases.park_open_operations"
-
-[[number]]
-name = "boot.lanicscase.park_open_operations"
-unit = "operations"
-ceiling = 0
-ceiling_from = "as boot.testcases.park_open_operations"
-
-[[number]]
-name = "boot.lanleasecase.park_open_operations"
-unit = "operations"
-ceiling = 0
-ceiling_from = "as boot.testcases.park_open_operations"
-
-[[number]]
 name = "boot.lantalkcase.park_open_operations"
 unit = "operations"
 ceiling = 0
@@ -1244,55 +1160,7 @@ unit = "us"
 ceiling = 100000
 ceiling_from = "as boot.testcases.panel_us"
 
-[[number]]
-name = "boot.lancase.panel_us"
-unit = "us"
-ceiling = 100000
-ceiling_from = "as boot.testcases.panel_us"
-
-[[number]]
-name = "boot.lanicscase.panel_us"
-unit = "us"
-ceiling = 100000
-ceiling_from = "as boot.testcases.panel_us"
-
-[[number]]
-name = "boot.lanleasecase.complete_ms"
-unit = "ms"
-ceiling = 60000
-ceiling_from = "as boot.lancase.complete_ms — the same boot config with one netd argument added"
-
-[[number]]
-name = "boot.lanleasecase.back_secs"
-unit = "s"
-ceiling = 420
-ceiling_from = "toyos_build::metal::return_secs"
-
-[[number]]
-name = "boot.lanleasecase.stick_secs"
-unit = "s"
-ceiling = 30
-ceiling_from = "as boot.lancase.stick_secs"
-
-[[number]]
-name = "list.lanleasecase.job_ms"
-unit = "ms"
-ceiling = 22000
-ceiling_from = "as list.lancase.job_ms — the same one job"
-
-[[number]]
-name = "boot.lanleasecase.panel_max_us"
-unit = "us"
-ceiling = 16667
-ceiling_from = "as boot.testcases.panel_max_us"
-
-[[number]]
-name = "boot.lanleasecase.panel_us"
-unit = "us"
-ceiling = 100000
-ceiling_from = "as boot.testcases.panel_us"
-
-# `lantalkcase` is `lancase` with sshd and its log served, talked to from the
+# `lantalkcase` is the cable's boot with sshd and its log served, talked to from the
 # host until it is told to reboot. Its one job holds the machine only as the
 # fallback for a host that never says so.
 
@@ -1300,7 +1168,7 @@ ceiling_from = "as boot.testcases.panel_us"
 name = "boot.lantalkcase.complete_ms"
 unit = "ms"
 ceiling = 60000
-ceiling_from = "as boot.lancase.complete_ms"
+ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
 
 [[number]]
 name = "boot.lantalkcase.back_secs"
@@ -1312,7 +1180,7 @@ ceiling_from = "toyos_build::metal::return_secs"
 name = "boot.lantalkcase.stick_secs"
 unit = "s"
 ceiling = 30
-ceiling_from = "as boot.lancase.stick_secs"
+ceiling_from = "as boot.testcases.stick_secs"
 
 [[number]]
 name = "list.lantalkcase.job_ms"
@@ -1339,7 +1207,7 @@ ceiling_from = "as boot.testcases.panel_us"
 name = "boot.lanswapcase.complete_ms"
 unit = "ms"
 ceiling = 60000
-ceiling_from = "as boot.lancase.complete_ms"
+ceiling_from = "toyos_tco::JOB_BOUND_MS — as boot.testcases.complete_ms"
 
 [[number]]
 name = "boot.lanswapcase.back_secs"
@@ -1351,7 +1219,7 @@ ceiling_from = "toyos_build::metal::return_secs"
 name = "boot.lanswapcase.stick_secs"
 unit = "s"
 ceiling = 30
-ceiling_from = "as boot.lancase.stick_secs"
+ceiling_from = "as boot.testcases.stick_secs"
 
 [[number]]
 name = "list.lanswapcase.job_ms"
