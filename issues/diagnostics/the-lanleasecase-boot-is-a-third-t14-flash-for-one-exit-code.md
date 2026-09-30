@@ -17,8 +17,7 @@ reaches no file
 (`issues/diagnostics/the-cable-judge-reads-three-netd-records-that-cannot-arrive-on-the-t14.md`):
 the kernel's `exit: netd pid=N code=N` record and a file netd writes itself are
 the two words of a process that cross. It is the `lan_lease_report` metal row,
-a third image flashed to the stick, a third boot of the machine and six rows of
-`tests/metal-profile.toml`.
+a third image flashed to the stick and a third boot of the machine.
 
 ## Owner
 
@@ -32,7 +31,7 @@ which the shipping `lancase` arm carries netd's own lines about the lease and
 the probe answers a question already answered. Then the arm is:
 `tests/lanleasecase/system.toml`, its row in `src/build.rs`'s `ALL_CONFIGS`,
 the `lan_lease_report` metal row in `tests/toyos.rs` with `LANLEASECASE` and
-`lan::leased_on_metal`, the six `tests/metal-profile.toml` rows,
+`lan::leased_on_metal`,
 `userland/netd/src/report.rs` and `toyos-i219/src/lease.rs`'s report lines —
 and netd's `--exit-with-lease` with `tests/e1000leasecase` and the
 `lan_lease_report` QEMU registration, the arm that proves the channel.

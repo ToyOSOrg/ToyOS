@@ -10,9 +10,6 @@
 use std::thread::sleep;
 use std::time::Duration;
 
-/// Milliseconds of boot time this hold ends at: the runner's bound less the
-/// tenth `toyos_build::metalprofile::AROUND_THE_LIST_MS` keeps for the boot
-/// around the list, so the runner's own `reboot` still runs inside its bound.
 const UNTIL_MS: u64 = toyos_tco::JOB_BOUND_MS - toyos_tco::JOB_BOUND_MS / 10;
 
 fn main() {
