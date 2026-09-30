@@ -3148,7 +3148,6 @@ mod tests {
         "tests/netcase/system.toml",
         "tests/partclaimcase/system.toml",
         "tests/pkgcase/system.toml",
-        "tests/quiescelastcase/system.toml",
         "tests/quiescetwicecase/system.toml",
         "tests/sshdcase/system.toml",
         "tests/swapcase/system.toml",

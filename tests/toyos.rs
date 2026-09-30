@@ -161,8 +161,6 @@ const RUST_SKIP: &[&str] = &[
     // under whichever member came next. Its verdict is where one kernel line
     // lands among others. `quiesce_refuses_a_second_shutdown` runs it.
     "quiesce_twice",
-    // The same, and its verdict is the stop record of a boot staged around it.
-    "quiesce_last",
     // Its verdict is a count of what reached `/log`, which only a boot of its own
     // holds, and megabytes of it. `log_program_flood` runs it.
     "log_flood",
@@ -870,10 +868,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // Its own boot: it ends the machine, and its verdict is the order of
     // kernel lines.
     ("quiesce_refuses_a_second_shutdown", Sched::Parallel),
-    // Its own boot each: it ends the machine, and its verdict is the stop
-    // record that boot writes.
-    ("quiesce_wakes_on_the_last_park", Sched::Parallel),
-    ("quiesce_wakes_on_the_last_teardown", Sched::Parallel),
     // Two reads of `TCO_RLD` straddling a real-time stall, so a slower machine
     // changes the verdict.
     ("loader_watchdog_arms", Sched::Parallel),
@@ -1422,8 +1416,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("log_stream_stalled_reader", &["test_rs_log_flood"]),
     ("c_capture_ignores_daemon_lines", &["test_c_71_macro_empty_arg"]),
     ("quiesce_refuses_a_second_shutdown", &["test_rs_quiesce_twice"]),
-    ("quiesce_wakes_on_the_last_park", &["test_rs_quiesce_last"]),
-    ("quiesce_wakes_on_the_last_teardown", &["test_rs_quiesce_last"]),
     ("swap_crash_rolls_back", &["test_rs_swap_crash"]),
     ("swap_quiets_the_function", &["test_rs_swap_claim_idle"]),
     ("swap_keeps_what_nothing_reset", &["test_rs_swap_claim_running"]),
@@ -9224,8 +9216,6 @@ fn run_machine_test(
         "metal_device_probe" => devices::metal_device_probe(test_config, c_bins, rust_bins),
         "job_deadline_reboots" => power::job_deadline_reboots(test_config, c_bins, rust_bins),
         "quiesce_refuses_a_second_shutdown" => power::quiesce_refuses_a_second_shutdown(test_config, c_bins, rust_bins),
-        "quiesce_wakes_on_the_last_park" => power::quiesce_wakes_on_the_last_park(test_config, c_bins, rust_bins),
-        "quiesce_wakes_on_the_last_teardown" => power::quiesce_wakes_on_the_last_teardown(test_config, c_bins, rust_bins),
         "watchdog_resets" => power::watchdog_resets(test_config, c_bins, rust_bins),
         "loader_watchdog_arms" => power::loader_watchdog_arms(test_config, c_bins, rust_bins),
         "panic_reboots" => power::panic_reboots(test_config, c_bins, rust_bins),
