@@ -63,9 +63,7 @@
 //!
 //! **A round's lines are written and the volume made durable before the next
 //! round**, and again when init asks before the machine stops
-//! ([`toyos_logstream::FLUSH`]). A sync the kernel declined to start is owed
-//! and asked again each round until it is made. The kernel waits on none of
-//! it: a panicking kernel's report is in its black box, and so are the stop's
+//! ([`toyos_logstream::FLUSH`]). The kernel waits on none of it: a panicking kernel's report is in its black box, and so are the stop's
 //! own last records.
 //! **A line after that flush reaches the console and is held back from the
 //! file**, to a bound ([`STOPPING_BYTES`]): the stop syncs no file still open,
@@ -73,14 +71,6 @@
 //! served log is handed what the file holds and no more. A stop the kernel
 //! refused is init's [`toyos_logstream::RESUME`], and what was held is written
 //! then.
-//!
-//! `SYS_FSYNC` reaches the device's own cache flush. **A flush that would block
-//! is not a flush that failed**: `io::ErrorKind::WouldBlock` from `sync_all` is
-//! `kernel/src/block.rs`'s `BlockError::BudgetExpired`, which means the kernel
-//! declined to *start* the operation on the caller's own clock — nothing was
-//! issued, the device is untouched, and the bytes are still in the file waiting
-//! for the next flush. `policy::fate` is the whole decision, and `policy`'s own
-//! header is the argument.
 
 mod inspect;
 mod origin;
@@ -107,7 +97,7 @@ use toyos_logstream::{
 use toyos_wallclock::Civil;
 
 use origin::{Origin, Said};
-use policy::{fate, Fate, Step, LOG_WRITE_BUDGET};
+use policy::{Step, LOG_WRITE_BUDGET};
 use store::{Volume, DIR, MAX_LOG_BYTES, MAX_LOG_FILES, ROTATE_FAST_BYTES};
 
 /// Records asked of `SYS_LOG_READ` at once: above `MAX_LOG_SHARDS`, which the
@@ -178,7 +168,7 @@ fn main() {
     }
 
     let hub = Arc::new(serve::Hub::start(REPLAY_BYTES, boot_secs));
-    let published = Arc::new(inspect::Published::new(hub.network()));
+    let published = Arc::new(inspect::Published::new());
     if let Some(acceptor) = endow::acceptor(SERVICE) {
         inspect::serve(acceptor, Arc::clone(&published), Arc::clone(&hub));
     }
@@ -196,8 +186,6 @@ fn main() {
         lost: 0,
         waiting: Vec::new(),
         volume,
-        owed: false,
-        retrying_since: None,
         degraded: false,
         boot_secs,
         hub,
@@ -225,10 +213,6 @@ struct Log {
     /// round merges.
     waiting: Vec<Line>,
     volume: Option<Volume>,
-    /// Lines the volume took and has not made durable: its sync was declined.
-    owed: bool,
-    /// When the current run of consecutive refused rounds began.
-    retrying_since: Option<Instant>,
     /// Whether the volume answers, slower than `LOG_WRITE_BUDGET` a round.
     degraded: bool,
     boot_secs: Option<u64>,
@@ -271,11 +255,10 @@ impl Log {
         // Programs whose end a watch reported, until a round has swept them.
         let mut ended: Vec<usize> = Vec::new();
         loop {
-            let state = match (&self.volume, self.retrying_since, self.degraded) {
-                (None, _, _) => inspect::State::ConsoleOnly,
-                (Some(_), Some(_), _) => inspect::State::Retrying,
-                (Some(_), None, true) => inspect::State::Degraded,
-                (Some(_), None, false) => inspect::State::Writing,
+            let state = match (&self.volume, self.degraded) {
+                (None, _) => inspect::State::ConsoleOnly,
+                (Some(_), true) => inspect::State::Degraded,
+                (Some(_), false) => inspect::State::Writing,
             };
             published.publish(self.volume.as_ref(), state, self.tail.lost());
 
@@ -311,7 +294,6 @@ impl Log {
                 self.flushed();
                 read_any = true;
             }
-            self.sync_owed();
             self.feed_console();
 
             cadence = if read_any { POLL_QUICK } else { (cadence * 2).min(POLL_SLOW) };
@@ -319,8 +301,7 @@ impl Log {
                 continue;
             }
             // Nothing new: park until the kernel posts, init speaks, a program
-            // ends, the console has room, or the cadence comes round, which is
-            // also when an owed sync is asked again.
+            // ends, the console has room, or the cadence comes round.
             poller.wait(1, cadence.as_nanos() as u64, |token| {
                 if token >= ORIGIN_BASE {
                     ended.push((token - ORIGIN_BASE) as usize);
@@ -355,17 +336,9 @@ impl Log {
                     // SAFETY: the kernel moved this handle into this table with
                     // the frame that names it, and nothing else answers for it.
                     let alive = unsafe { Pipe::from_raw(alive) };
-                    if self.origins.len() >= MAX_ORIGINS {
-                        toyos::warn!(
-                            "logd: refusing {name}'s ring: {MAX_ORIGINS} programs' rings are \
-                             already read"
-                        );
-                        toyos_abi::syscall::close(ring);
-                        continue;
-                    }
-                    match Origin::open(registration.tag, registration.pid, ring, alive) {
-                        Ok(origin) => self.origins.push(origin),
-                        Err(why) => toyos::error!("logd: refusing a ring init sent: {why}"),
+                    match &mut self.stall {
+                        Some(stall) if stall.origin == name => stall.held.push((registration.pid, ring, alive)),
+                        _ => self.take(registration.tag, registration.pid, ring, alive),
                     }
                 }
                 RxStep::Frame { msg_type: SWAP, payload_len } => {
@@ -393,6 +366,22 @@ impl Log {
         }
     }
 
+    /// A ring init registered, read from the next round on.
+    fn take(&mut self, tag: Tag<'_>, pid: u32, ring: toyos::RawHandle, alive: Pipe) {
+        if self.origins.len() >= MAX_ORIGINS {
+            toyos::warn!(
+                "logd: refusing {}'s ring: {MAX_ORIGINS} programs' rings are already read",
+                tag.as_str()
+            );
+            toyos_abi::syscall::close(ring);
+            return;
+        }
+        match Origin::open(tag, pid, ring, alive) {
+            Ok(origin) => self.origins.push(origin),
+            Err(why) => toyos::error!("logd: refusing a ring init sent: {why}"),
+        }
+    }
+
     /// One round: every ring, then the kernel's records, then everything
     /// stamped before the round began written in stamp order — every line
     /// held, whatever its stamp, where `all` asks it for a flush. A program
@@ -403,9 +392,6 @@ impl Log {
         let mut read: Vec<Said> = Vec::new();
         let mut notes: Vec<String> = Vec::new();
         for (i, origin) in self.origins.iter_mut().enumerate() {
-            if self.stall.as_ref().is_some_and(|s| s.origin == origin.tag) {
-                continue;
-            }
             let counted = origin.read(i, cut, &mut read);
             // The machine stops after a flush: a line begun is said as far as it got.
             if all {
@@ -631,45 +617,28 @@ impl Log {
     fn to_volume(&mut self, text: &[u8], sync: bool) {
         let Some(v) = self.volume.as_mut() else { return };
         let began = Instant::now();
-        let mut refused = v.write(text).err().map(|e| (Step::Append, e.kind(), e.to_string()));
-        if refused.is_none() {
-            self.owed = true;
-            if sync {
-                refused = self.sync().err();
-            }
+        let mut refused = v.write(text).err().map(|e| (Step::Append, e.to_string()));
+        if refused.is_none() && sync {
+            refused = self.sync().err();
         }
         // A volume that answered, and took longer than a log is worth doing it.
         if refused.is_none() && began.elapsed() > LOG_WRITE_BUDGET {
-            refused =
-                Some((Step::TooSlow, std::io::ErrorKind::Other, format!("it took {:?}", began.elapsed())));
+            refused = Some((Step::TooSlow, format!("it took {:?}", began.elapsed())));
         }
-        self.answered(began, refused);
-    }
-
-    /// Ask again for a sync the volume declined, whether or not this round
-    /// wrote anything.
-    fn sync_owed(&mut self) {
-        if self.owed {
-            let began = Instant::now();
-            let refused = self.sync().err();
-            self.answered(began, refused);
-        }
+        self.answered(refused);
     }
 
     /// Make the volume durable now.
-    fn sync(&mut self) -> Result<(), (Step, std::io::ErrorKind, String)> {
+    fn sync(&mut self) -> Result<(), (Step, String)> {
         let Some(v) = self.volume.as_mut() else { return Ok(()) };
-        v.sync().map_err(|e| (Step::Flush, e.kind(), e.to_string()))?;
-        self.owed = false;
-        Ok(())
+        v.sync().map_err(|e| (Step::Flush, e.to_string()))
     }
 
     /// What a round's write came to: rotation after a clean one, and the
     /// give-up policy after a refused one.
-    fn answered(&mut self, began: Instant, refused: Option<(Step, std::io::ErrorKind, String)>) {
+    fn answered(&mut self, refused: Option<(Step, String)>) {
         let Some(path) = self.volume.as_ref().map(Volume::path) else { return };
-        let Some((step, kind, why)) = refused else {
-            self.retrying_since = None;
+        let Some((step, why)) = refused else {
             if self.degraded {
                 self.degraded = false;
                 say!("logd: {DIR} answers at pace again - {path}");
@@ -677,13 +646,9 @@ impl Log {
             self.rotate_if_full();
             return;
         };
-        // The run of consecutive retries, which is what `LOG_WRITE_BUDGET`
-        // bounds, from when its first round began.
-        let first = self.retrying_since.is_none();
-        let since = *self.retrying_since.get_or_insert(began);
-        match fate(step, kind, since.elapsed()) {
+        match step {
             // Stop feeding the volume, say so once, and keep running.
-            Fate::GiveUp => {
+            Step::Append | Step::Flush => {
                 toyos::error!(
                     "logd: {DIR} has not answered ({}: {why}) - this boot's log is on the console \
                      only from {path}",
@@ -691,21 +656,8 @@ impl Log {
                 );
                 self.volume = None;
             }
-            // Nothing is durable, so the next round's flush covers these bytes
-            // as well as its own; one line per run.
-            Fate::Retry => {
-                if first {
-                    toyos::warn!(
-                        "logd: {DIR} would not start ({}: {why}) - nothing was lost, so {path} is \
-                         still this boot's log and the next round is a retry",
-                        step.as_str()
-                    );
-                }
-            }
             // Every call answered, slowly: the round is durable.
-            Fate::Degraded => {
-                self.retrying_since = None;
-                self.owed = false;
+            Step::TooSlow => {
                 if !self.degraded {
                     self.degraded = true;
                     toyos::warn!(
@@ -734,7 +686,7 @@ impl Log {
     /// written by now, so the volume is made durable, and init is told.
     fn flushed(&mut self) {
         let refused = self.sync().err();
-        self.answered(Instant::now(), refused);
+        self.answered(refused);
         self.stopping = Some(Stopping { text: String::new(), unwritten: 0 });
         self.feed_console();
         if let Err(e) = self.from_init.signal(FLUSHED) {
@@ -774,20 +726,19 @@ impl Log {
 
     /// End a `--stall` once any program has said its `--stall-until` line.
     fn release_stall(&mut self, read: &[Said]) {
-        let Some(stall) = &self.stall else { return };
-        if read.iter().any(|r| r.text == stall.until.as_bytes()) {
-            let origin = stall.origin.clone();
-            self.stall = None;
-            let (waiting, slots) = self
-                .origins
-                .iter()
-                .find(|o| o.tag == origin)
-                .map_or((0, 0), |o| o.waiting());
-            say!(
-                "logd: reading {origin} again, as `--stall-until` asked, with {waiting} of its \
-                 ring's {slots} records waiting"
-            );
+        let Some(stall) = self.stall.take_if(|s| read.iter().any(|r| r.text == s.until.as_bytes())) else {
+            return;
+        };
+        let origin = stall.origin;
+        for (pid, ring, alive) in stall.held {
+            self.take(Tag::new(&origin).expect("a name init registered is a tag"), pid, ring, alive);
         }
+        let (waiting, slots) =
+            self.origins.iter().find(|o| o.tag == origin).map_or((0, 0), |o| o.waiting());
+        say!(
+            "logd: reading {origin} again, as `--stall-until` asked, with {waiting} of its \
+             ring's {slots} records waiting"
+        );
     }
 }
 
@@ -806,13 +757,16 @@ fn ahead_note(ahead: u64, tag: &str) -> String {
 struct Stall {
     origin: String,
     until: String,
+    /// Its rings as init registered them, taken only once the stall ends, so
+    /// nothing a ring's writers are kept to rests on this program's reading.
+    held: Vec<(u32, toyos::RawHandle, Pipe)>,
 }
 
 impl Stall {
     fn from_args() -> Option<Stall> {
         let arg = |key: &str| std::env::args().find_map(|a| a.strip_prefix(key).map(str::to_string));
         match (arg("--stall="), arg("--stall-until=")) {
-            (Some(origin), Some(until)) => Some(Stall { origin, until }),
+            (Some(origin), Some(until)) => Some(Stall { origin, until, held: Vec::new() }),
             (None, None) => None,
             (origin, until) => panic!(
                 "logd: `--stall` and `--stall-until` are armed together or not at all, and this \

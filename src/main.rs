@@ -36,7 +36,7 @@ const REQUIRED: &[Tool] = &[
 /// `rust/src/llvm-project` with, under CMake, which it does only when this
 /// host has not built that LLVM. Both are host tools like `cc`, and never in a
 /// guest: on macOS from Homebrew, on CI's toolchain runner at the versions
-/// `.github/workflows` pins. They go when the build no longer needs a host.
+/// `.github/workflows` pins.
 const ALSO_USED: &[Tool] = &[
     Tool {
         any: &["python3", "python", "py", "python2", "uv"],

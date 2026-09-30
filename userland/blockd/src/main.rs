@@ -23,9 +23,17 @@
 //! A partition whose range is not whole 4 KiB blocks, or whose GUID the table
 //! carries twice, is listed and refused by name.
 //!
-//! **What this process does not know** is which of its partitions the machine
-//! is running from, so it refuses none of them for that
-//! (`issues/filesystem/blockd-serves-the-slot-the-machine-runs-from.md`).
+//! **A controller its row names that is on the machine and whose claim the
+//! kernel refused is not an absent one**: its starter names it
+//! (`--claim-refused <name>`), and a listing and every open are refused
+//! `ClaimRefused`, so a file server says so rather than finding no disk.
+//!
+//! **The partition the machine runs from is refused to every session**: its
+//! starter names it (`--running <guid>`, the ROOT the loader read), because a
+//! writer there changes the image under the kernel that booted from it.
+//!
+//! **A client may ask what is served** ([`wire::MSG_LIST`]) before it opens
+//! anything, which is how a file server finds its role's partition by type.
 //!
 //! **A server never blocks on a client.** Accept and the open frame are two
 //! events, the open is buffered until whole, every answer is one `try_send`,
@@ -71,6 +79,14 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 /// always answers.
 const SILENCE_WRITE: &str = "--silence-write";
 
+/// Argv, followed by a unique GUID: the partition the machine runs from, which
+/// no session opens.
+const RUNNING: &str = "--running";
+
+/// Argv, followed by a device name of this service's row: on this machine, and
+/// its claim refused.
+const CLAIM_REFUSED: &str = "--claim-refused";
+
 const TOKEN_IRQ: u64 = 0;
 const TOKEN_ACCEPT: u64 = 1;
 const TOKEN_PENDING: u64 = 0x1_0000;
@@ -79,6 +95,7 @@ const TOKEN_SESSION: u64 = 0x2_0000;
 /// One partition of the table, in 4 KiB blocks of the device.
 struct Part {
     unique: [u8; 16],
+    kind: [u8; 16],
     /// Where it starts and how long it is, or why it cannot be served.
     span: Result<(u64, u64), String>,
 }
@@ -135,11 +152,12 @@ fn read_table(ctrl: &mut Controller) -> Vec<Part> {
             Ok(listed) => listed,
             Err(unplaced) => {
                 let span = Err(format!("its blocks are no partition on this disk: {unplaced:?}"));
-                parts.push(Part { unique: unplaced.unique_guid.0, span });
+                parts.push(Part { unique: unplaced.unique_guid.0, kind: unplaced.type_guid.0, span });
                 continue;
             }
         };
         let unique = listed.unique_guid().0;
+        let kind = listed.type_guid().0;
         let span = match toyos_gpt::locate(&mut sectors, listed.unique_guid()) {
             Err(why) => Err(format!("its own table refuses it: {why:?}")),
             Ok(located) => {
@@ -155,7 +173,7 @@ fn read_table(ctrl: &mut Controller) -> Vec<Part> {
                 }
             }
         };
-        parts.push(Part { unique, span });
+        parts.push(Part { unique, kind, span });
     }
     parts
 }
@@ -182,14 +200,54 @@ struct Served {
     posted: bool,
 }
 
+/// The controller this service drives and the partitions its table names, or
+/// why it drives none. Without one no partition is listed and no session
+/// opened, and a connection says one frame and is answered, or is let go.
+enum Drive {
+    Up(Controller, Vec<Part>),
+    /// No controller this row names is on this machine: a listing is empty
+    /// and an open `NotFound`.
+    Absent,
+    /// A controller this service cannot use: a listing and an open are
+    /// refused `Unusable`, so a file server says the disk failed rather than
+    /// that there is none.
+    Unusable,
+    /// A controller this row names is on this machine and its claim was
+    /// refused: a listing and an open are refused `ClaimRefused`.
+    ClaimRefused,
+}
+
+impl Drive {
+    /// The controller a session is on: a service without one has no partition
+    /// to open.
+    fn up(&mut self) -> &mut Controller {
+        match self {
+            Drive::Up(ctrl, _) => ctrl,
+            Drive::Absent | Drive::Unusable | Drive::ClaimRefused => {
+                unreachable!("blockd: a session with no controller")
+            }
+        }
+    }
+
+    fn oldest(&self) -> Option<Instant> {
+        match self {
+            Drive::Up(ctrl, _) => ctrl.oldest(),
+            Drive::Absent | Drive::Unusable | Drive::ClaimRefused => None,
+        }
+    }
+}
+
 struct Service {
-    ctrl: Controller,
-    parts: Vec<Part>,
+    ctrl: Drive,
     holds: Holds<u64>,
     /// The device's loss count: every reset may have dropped its cache.
     losses: u64,
     sessions: BTreeMap<u64, Served>,
     next_id: u64,
+    /// The partition the machine is running from, as the loader named it:
+    /// refused to every session, since a writer there changes the image
+    /// under the kernel that booted from it.
+    running: Option<[u8; 16]>,
 }
 
 /// A session decided on and not yet told to its client.
@@ -202,30 +260,61 @@ struct Opening {
 }
 
 impl Service {
-    /// What an open answers: a session to admit, or its refusal. `region` is
-    /// the client's and is consumed either way.
-    fn open(&mut self, guid: [u8; 16], region: toyos::RawHandle) -> Result<Opening, Refusal> {
-        let region = Region::adopt(region).map_err(|_| Refusal::Malformed)?;
-        let part = self.parts.iter().find(|p| p.unique == guid && guid != [0; 16]);
+    fn new(ctrl: Drive, running: Option<[u8; 16]>) -> Self {
+        Self { ctrl, holds: Holds::new(), losses: 0, sessions: BTreeMap::new(), next_id: 0, running }
+    }
+
+    /// What a listing answers: every partition the table names.
+    fn listing(&self) -> Result<Vec<u8>, Refusal> {
+        match &self.ctrl {
+            Drive::Up(_, parts) => {
+                Ok(parts.iter().flat_map(|p| wire::Listed { unique: p.unique, kind: p.kind }.encode()).collect())
+            }
+            Drive::Absent => Ok(Vec::new()),
+            Drive::Unusable => Err(Refusal::Unusable),
+            Drive::ClaimRefused => Err(Refusal::ClaimRefused),
+        }
+    }
+
+    /// The span an open of `guid` is served on, held for it; or its refusal.
+    fn place(&mut self, guid: [u8; 16]) -> Result<(u64, u64), Refusal> {
+        let parts = match &self.ctrl {
+            Drive::Up(_, parts) => parts,
+            Drive::Absent => return Err(Refusal::NotFound),
+            Drive::Unusable => return Err(Refusal::Unusable),
+            Drive::ClaimRefused => return Err(Refusal::ClaimRefused),
+        };
+        let part = parts.iter().find(|p| p.unique == guid && guid != [0; 16]);
         let (first, blocks) = match part.map(|p| &p.span) {
             None => return Err(Refusal::NotFound),
             Some(Err(_)) => return Err(Refusal::Unusable),
             Some(Ok(span)) => *span,
         };
+        if self.running == Some(guid) {
+            return Err(Refusal::Held);
+        }
         if self.sessions.len() >= MAX_SESSIONS {
             return Err(Refusal::Exhausted);
         }
         if self.holds.hold(first, first + blocks, self.next_id).is_err() {
             return Err(Refusal::Held);
         }
-        match self.ctrl.claim().dma_map(region.handle()) {
+        Ok((first, blocks))
+    }
+
+    /// What an open answers: a session to admit, or its refusal. `region` is
+    /// the client's and is consumed either way.
+    fn open(&mut self, guid: [u8; 16], region: toyos::RawHandle) -> Result<Opening, Refusal> {
+        let region = Region::adopt(region).map_err(|_| Refusal::Malformed)?;
+        let (first, blocks) = self.place(guid)?;
+        match self.ctrl.up().claim().dma_map(region.handle()) {
             Ok(mapping) if mapping.bytes == SESSION_BYTES as u64 => {
                 Ok(Opening { region, device_addr: mapping.device_addr, first, blocks, unique: guid })
             }
             // A region longer than a session would spend the claim's bound on
             // the kernel's side for every other client: refused whole.
             Ok(mapping) => {
-                if let Err(why) = self.ctrl.claim().dma_unmap(mapping.device_addr) {
+                if let Err(why) = self.ctrl.up().claim().dma_unmap(mapping.device_addr) {
                     panic!("blockd: the kernel would not take an oversized region back: {why:?}");
                 }
                 self.holds.release(first);
@@ -266,7 +355,7 @@ impl Service {
     /// The client went before it heard: nothing of the session reached the
     /// device, and what was taken for it goes back.
     fn abandon(&mut self, opening: Opening) {
-        if let Err(why) = self.ctrl.claim().dma_unmap(opening.device_addr) {
+        if let Err(why) = self.ctrl.up().claim().dma_unmap(opening.device_addr) {
             panic!("blockd: the kernel would not take an abandoned session's region back: {why:?}");
         }
         self.holds.release(opening.first);
@@ -318,7 +407,7 @@ impl Service {
                 break;
             };
             let unread = (DEPTH - space) as usize;
-            if s.state.inflight().len() + unread >= DEPTH as usize || !self.ctrl.has_room() {
+            if s.state.inflight().len() + unread >= DEPTH as usize || !self.ctrl.up().has_room() {
                 break;
             }
             let words = match s.rings.0.pop(page) {
@@ -339,9 +428,9 @@ impl Service {
                         Op::Read { run, lba } | Op::Write { run, lba } => {
                             let at = s.device_addr + run.span().offset as u64;
                             let block = s.state.first() + lba;
-                            self.ctrl.submit_io(write, block, run.count(), at, owner);
+                            self.ctrl.up().submit_io(write, block, run.count(), at, owner);
                         }
-                        Op::Flush if self.ctrl.vwc => self.ctrl.submit_flush(owner),
+                        Op::Flush if self.ctrl.up().vwc => self.ctrl.up().submit_flush(owner),
                         // No volatile cache: every write answered is on the
                         // medium already.
                         Op::Flush => {
@@ -382,7 +471,8 @@ impl Service {
             .collect();
         for id in done {
             let s = self.sessions.remove(&id).expect("just listed");
-            if let Err(why) = self.ctrl.claim().dma_unmap(s.device_addr) {
+            let ctrl = self.ctrl.up();
+            if let Err(why) = ctrl.claim().dma_unmap(s.device_addr) {
                 panic!("blockd: the kernel would not take session {id}'s region back: {why:?}");
             }
             self.holds.release(s.state.first());
@@ -391,8 +481,8 @@ impl Service {
                  commands at once, issued per queue {}",
                 guid_text(s.unique),
                 s.requests,
-                self.ctrl.peak,
-                self.ctrl.spread()
+                ctrl.peak,
+                ctrl.spread()
             );
         }
     }
@@ -405,6 +495,7 @@ impl Service {
         let mut done = Vec::new();
         let aborted = self
             .ctrl
+            .up()
             .reset(&mut done)
             .unwrap_or_else(|why| panic!("blockd: the controller did not come back from its reset: {why}"));
         for d in done {
@@ -427,13 +518,13 @@ impl Service {
     }
 }
 
-fn claim() -> toyos::PciDev {
+/// The PCI function this process was endowed.
+fn claim() -> Option<toyos::PciDev> {
     let label = Endowments::get()
         .labels()
         .find(|l| l.starts_with(DEV_PREFIX) && l[DEV_PREFIX.len()..].starts_with("pci:"))
-        .map(str::to_string)
-        .unwrap_or_else(|| panic!("blockd: started holding no PCI function"));
-    Endowments::get().take(&label).expect("blockd: the claim its label names")
+        .map(str::to_string)?;
+    Some(Endowments::get().take(&label).expect("blockd: the claim its label names"))
 }
 
 fn main() {
@@ -444,9 +535,34 @@ fn main() {
             .filter(|n| *n > 0)
             .unwrap_or_else(|| panic!("blockd: {SILENCE_WRITE} takes the write whose answer to withhold, from 1"))
     });
-    let dev = claim();
+    let running = args.iter().position(|a| a == RUNNING).map(|at| {
+        args.get(at + 1)
+            .and_then(|text| PartGuid::parse(text))
+            .map(|guid| guid.0)
+            .unwrap_or_else(|| panic!("blockd: {RUNNING} takes the running ROOT's unique GUID"))
+    });
+    let refused = args.iter().position(|a| a == CLAIM_REFUSED).map(|at| {
+        args.get(at + 1).unwrap_or_else(|| panic!("blockd: {CLAIM_REFUSED} takes the device its claim was refused on"))
+    });
     let acceptor = endow::acceptor(PORT).unwrap_or_else(|| panic!("blockd: started serving no `{PORT}` port"));
-    let mut ctrl = Controller::open(dev, silence).unwrap_or_else(|why| panic!("blockd: NOT SERVING — {why}"));
+    if let Some(name) = refused {
+        println!(
+            "blockd: NOT SERVING — {name} is on this machine and the kernel refused this service its \
+             claim; every partition on it is refused"
+        );
+        serve(&mut Service::new(Drive::ClaimRefused, running), &acceptor);
+    }
+    let Some(dev) = claim() else {
+        println!("blockd: no NVMe controller this row names is on this machine; serving no partition");
+        serve(&mut Service::new(Drive::Absent, running), &acceptor);
+    };
+    let mut ctrl = match Controller::open(dev, silence) {
+        Ok(ctrl) => ctrl,
+        Err(why) => {
+            println!("blockd: NOT SERVING — {why}; serving no partition");
+            serve(&mut Service::new(Drive::Unusable, running), &acceptor);
+        }
+    };
     println!(
         "blockd: NVMe up: {} I/O queues of {} commands, volatile write cache {}, {}-byte sectors, \
          {} sectors",
@@ -459,14 +575,17 @@ fn main() {
     let parts = read_table(&mut ctrl);
     for part in &parts {
         match &part.span {
+            Ok(_) if running == Some(part.unique) => println!(
+                "blockd: partition {} is the ROOT this machine runs from; refusing every session to it",
+                guid_text(part.unique)
+            ),
             Ok((first, blocks)) => {
                 println!("blockd: partition {} at block {first}, {blocks} blocks", guid_text(part.unique))
             }
             Err(why) => println!("blockd: partition {} is not served: {why}", guid_text(part.unique)),
         }
     }
-    let mut service = Service { ctrl, parts, holds: Holds::new(), losses: 0, sessions: BTreeMap::new(), next_id: 0 };
-    serve(&mut service, &acceptor);
+    serve(&mut Service::new(Drive::Up(ctrl, parts), running), &acceptor);
 }
 
 fn serve(service: &mut Service, acceptor: &toyos::port::Acceptor) -> ! {
@@ -475,7 +594,9 @@ fn serve(service: &mut Service, acceptor: &toyos::port::Acceptor) -> ! {
     let mut ready: Vec<u64> = Vec::new();
     let mut done: Vec<Done> = Vec::new();
     loop {
-        poller.watch(service.ctrl.claim(), READABLE, TOKEN_IRQ);
+        if let Drive::Up(ctrl, _) = &service.ctrl {
+            poller.watch(ctrl.claim(), READABLE, TOKEN_IRQ);
+        }
         if pending.len() < MAX_PENDING {
             poller.watch(acceptor, READABLE, TOKEN_ACCEPT);
         }
@@ -497,13 +618,15 @@ fn serve(service: &mut Service, acceptor: &toyos::port::Acceptor) -> ! {
         ready.clear();
         poller.wait(1, timeout, |token| ready.push(token));
 
-        if let Err(why) = service.ctrl.take_interrupt() {
-            panic!(
-                "blockd: the claim refused its interrupt read ({why:?}): the unit refused this \
-                 controller an access, and the claim answers nothing now"
-            );
+        if let Drive::Up(ctrl, _) = &mut service.ctrl {
+            if let Err(why) = ctrl.take_interrupt() {
+                panic!(
+                    "blockd: the claim refused its interrupt read ({why:?}): the unit refused this \
+                     controller an access, and the claim answers nothing now"
+                );
+            }
+            ctrl.reap(&mut done);
         }
-        service.ctrl.reap(&mut done);
         for d in done.drain(..) {
             service.deliver(d);
         }
@@ -570,11 +693,24 @@ fn doorbells(conn: &Connection) -> bool {
     }
 }
 
-/// Answer one connection's first frame: an open, and nothing else.
+/// Answer one connection's first frame: a listing, or an open.
 fn handshake(service: &mut Service, p: Pending, msg_type: u32, payload_len: usize) {
     let refuse = |conn: &Connection, why: Refusal| {
         let _ = conn.try_send_bytes(wire::MSG_REFUSED, &why.encode());
     };
+    if msg_type == wire::MSG_LIST && payload_len == 0 {
+        match service.listing() {
+            Err(why) => refuse(&p.conn, why),
+            // One frame, and the connection is done with: a table larger than
+            // a frame is one this service lists no part of rather than half of.
+            Ok(listing) => {
+                if p.conn.try_send_bytes(wire::MSG_LISTED, &listing).is_err() {
+                    refuse(&p.conn, Refusal::Exhausted);
+                }
+            }
+        }
+        return;
+    }
     let guid = wire::guid(p.rx.payload(payload_len));
     let handles = p.conn.recv_handles_exact::<1>();
     let (Some(guid), Some([region]), wire::MSG_OPEN) = (guid, handles, msg_type) else {
@@ -598,5 +734,28 @@ fn handshake(service: &mut Service, p: Pending, msg_type: u32, payload_len: usiz
             let id = service.admit(opening, p.conn);
             println!("blockd: session {id} opened {} ({} blocks)", guid_text(guid), opened.blocks);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A controller this service cannot use, or one whose claim was refused,
+    /// is a disk there and never a machine without one: its listing and its
+    /// open are refused by that word, where an absent controller's listing is
+    /// empty and its open `NotFound`.
+    #[test]
+    fn an_unusable_or_unclaimed_controller_is_refused_and_an_absent_one_lists_nothing() {
+        let guid = [7; 16];
+        let mut unusable = Service::new(Drive::Unusable, None);
+        assert_eq!(unusable.listing(), Err(Refusal::Unusable));
+        assert_eq!(unusable.place(guid), Err(Refusal::Unusable));
+        let mut unclaimed = Service::new(Drive::ClaimRefused, None);
+        assert_eq!(unclaimed.listing(), Err(Refusal::ClaimRefused));
+        assert_eq!(unclaimed.place(guid), Err(Refusal::ClaimRefused));
+        let mut absent = Service::new(Drive::Absent, None);
+        assert_eq!(absent.listing(), Ok(Vec::new()));
+        assert_eq!(absent.place(guid), Err(Refusal::NotFound));
     }
 }

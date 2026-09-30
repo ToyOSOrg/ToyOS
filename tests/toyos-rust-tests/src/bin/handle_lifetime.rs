@@ -39,7 +39,7 @@ const SELF_PATH: &str = "/system/bin/test_rs_handle_lifetime";
 /// this process and its children, which is the whole of what a namespace is.
 const SERVICE: &str = "handle-lifetime-service";
 const PATH: &[u8] = b"/tmp/handle-lifetime.txt";
-const KILLED_PATH: &[u8] = b"/home/handle-lifetime-killed.txt";
+const KILLED_PATH: &[u8] = b"/tmp/handle-lifetime-killed.txt";
 const PAYLOAD: &[u8] = b"a file outlives the handle that was closed first";
 const KILLED_PAYLOAD: &[u8] = b"written by a process that was killed before it could close";
 /// `process::HANDLE_FAULT_EXIT_CODE`.

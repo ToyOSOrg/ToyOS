@@ -10,7 +10,6 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::process::Command;
 
 const PAGE: usize = 4096;
 
@@ -192,8 +191,6 @@ fn shrink_unflushed_then_regrow_reads_zeros(dir: &str, seed_len: usize) {
         f.sync_all().expect("fsync the pair");
     }
 
-    // The read below is the device's answer rather than the pages that were just in it.
-    drained();
 
     let back = fs::read(&path).unwrap_or_else(|e| panic!("reread {path}: {e}"));
     assert_eq!(back.len(), seed_len, "{dir}: the regrown length did not survive the close");
@@ -214,7 +211,6 @@ fn shrink_a_reopened_file_reads_zeros(dir: &str, seed_len: usize) {
         f.write_all(&seed).expect("write the seed");
         f.sync_all().expect("fsync the seed");
     }
-    drained();
 
     let mut f = OpenOptions::new()
         .read(true).write(true)
@@ -230,7 +226,6 @@ fn shrink_a_reopened_file_reads_zeros(dir: &str, seed_len: usize) {
 
     f.sync_all().expect("fsync the pair");
     drop(f);
-    drained();
 
     let back = fs::read(&path).unwrap_or_else(|e| panic!("reread {path}: {e}"));
     assert_eq!(back.len(), seed_len, "{dir}: the regrown length did not survive the close");
@@ -253,7 +248,6 @@ fn shrink_then_write_above_the_mark(dir: &str, seed_len: usize) {
         f.write_all(&seed).expect("write the seed");
         f.sync_all().expect("fsync the seed");
     }
-    drained();
 
     let mut f = OpenOptions::new()
         .read(true).write(true)
@@ -265,7 +259,6 @@ fn shrink_then_write_above_the_mark(dir: &str, seed_len: usize) {
     f.write_all(&payload).expect("write a page above the mark");
     f.sync_all().expect("fsync the shrink and the page above it");
     drop(f);
-    drained();
 
     let back = fs::read(&path).unwrap_or_else(|e| panic!("reread {path}: {e}"));
     assert_eq!(back.len(), seed_len, "{dir}: the regrown length did not survive the close");
@@ -278,12 +271,6 @@ fn shrink_then_write_above_the_mark(dir: &str, seed_len: usize) {
     }
     fs::remove_file(&path).expect("cleanup");
     println!("{dir}: the hole under a page written above a shrink is zeros on the device");
-}
-
-/// A spawn settles the write-back queue, so a just-closed file has left the cache.
-fn drained() {
-    let echo = Command::new("/system/bin/echo").arg("drained").output().expect("run echo");
-    assert!(echo.status.success());
 }
 
 fn check_hole(dir: &str, got: &[u8], seed: &[u8], cut: usize) {

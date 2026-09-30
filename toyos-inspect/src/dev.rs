@@ -34,7 +34,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 
 use toyos_abi::inventory::{
-    Claimed, Driven, Holder, PartState, PciAddr, Record, UsbFunction, UsbSpeed,
+    Claimed, Driven, Holder, PartState, PciAddr, Record, Role, UsbFunction, UsbSpeed,
 };
 use toyos_abi::part::{PartGuid, GUID_TEXT_LEN};
 use toyos_abi::syscall::SYSINFO_HEADER_SIZE;
@@ -170,6 +170,14 @@ pub fn render(machine: &Machine, records: &[Record]) -> Result<BTreeMap<String, 
                 parts.entry((p.device, p.unique_guid)).or_insert(at);
             }
             Record::Claim(_) => {}
+            Record::Loaded(l) => {
+                let role = match l.role {
+                    Role::Root => "root",
+                    Role::Boot => "boot",
+                    Role::Log => "log",
+                };
+                out.put(format!("loaded.{role}"), guid(l.unique_guid).into())?;
+            }
         }
     }
 

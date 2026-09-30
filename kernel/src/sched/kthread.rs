@@ -18,8 +18,8 @@ use crate::sync::Lock;
 
 use super::payload::ThreadSched;
 
-/// `klogd` and `iod`.
-const MAX_KERNEL_TASKS: usize = 2;
+/// `klogd`.
+const MAX_KERNEL_TASKS: usize = 1;
 
 /// Collides with no packed id: neither id map issues `u32::MAX`.
 const NO_TASK: u64 = u64::MAX;

@@ -694,7 +694,8 @@ const SECOND_LEVEL: &[&str] = &["read-permission", "write-permission", "paging-e
 /// passthrough, the controller below would go on working and this test would
 /// wait for a fault that never comes.
 ///
-/// [`Profile::Metal`] because it has an NVMe controller and no virtio device.
+/// [`Profile::Metal`] because it has an xHCI controller the kernel drives
+/// from boot, and no virtio device.
 /// The distinction matters: QEMU gives a virtio device the bypassing address
 /// space unless it is created with `iommu_platform=on`, so a virtio-only
 /// machine could not tell a translating unit from an absent one however the
@@ -704,32 +705,34 @@ pub fn iommu_context_absent(
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    let (log, blocked) =
-        fault_boot(test_config, c_bins, rust_bins, &["iommu-context-absent", "panic-reboot-fast"])?;
+    let (log, blocked, ()) =
+        fault_boot(test_config, c_bins, rust_bins, &["iommu-context-absent", "panic-reboot-fast"], |_, _| {
+            Ok(())
+        })?;
 
     // Which function the actuator left out is decided in the guest by class
     // code; which function that *is* on this machine is read here from the PCI
     // walk's own lines. Neither half is told the other's answer, so a fault
     // naming some other device — or the actuator skipping a device the walk
     // never saw — is a failure rather than a tautology.
-    let nvme = class_function(&log, "0108").ok_or_else(|| {
-        format!("this machine enumerated no NVMe controller to leave out\n{}", log.text())
+    let xhci = class_function(&log, "0c03").ok_or_else(|| {
+        format!("this machine enumerated no xHCI controller to leave out\n{}", log.text())
     })?;
-    if blocked.stream != nvme {
+    if blocked.stream != xhci {
         return Err(format!(
-            "the unit blocked {} but the controller left out of the root table is {nvme}",
+            "the unit blocked {} but the controller left out of the root table is {xhci}",
             blocked.stream
         ));
     }
     if blocked.reason != "context-entry-not-present" {
         return Err(format!(
-            "the unit blocked {nvme} for {:?}, and a function with no context entry should be \
+            "the unit blocked {xhci} for {:?}, and a function with no context entry should be \
              blocked for having none",
             blocked.reason
         ));
     }
     eprintln!(
-        "  [iommu] {nvme} left out of the root table: blocked at {} on a {} for {}",
+        "  [iommu] {xhci} left out of the root table: blocked at {} on a {} for {}",
         blocked.address, blocked.access, blocked.reason
     );
     Ok(())
@@ -758,54 +761,60 @@ pub fn iommu_empty_domain(
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    let (log, blocked) =
-        fault_boot(test_config, c_bins, rust_bins, &["iommu-empty-domain", "panic-reboot-fast"])?;
-
-    let nvme = class_function(&log, "0108").ok_or_else(|| {
-        format!("this machine enumerated no NVMe controller to strand\n{}", log.text())
-    })?;
-    if blocked.stream != nvme {
+    // The pool the driver's own `DCBAAP` begins, read out of the controller's
+    // registers, because that is where its descriptors are: a fault somewhere
+    // else would be a different machine's bug wearing this one's clothes.
+    let (_, blocked, (xhci, pool)) = fault_boot(
+        test_config,
+        c_bins,
+        rust_bins,
+        &["iommu-empty-domain", "panic-reboot-fast"],
+        |socket, log| {
+            let xhci = class_function(log, "0c03").ok_or_else(|| {
+                format!("this machine enumerated no xHCI controller to strand\n{}", log.text())
+            })?;
+            let pool = dcbaa(socket, log, &xhci)?;
+            Ok((xhci, pool))
+        },
+    )?;
+    if blocked.stream != xhci {
         return Err(format!(
-            "the unit blocked {} but the controller given an empty domain is {nvme}",
+            "the unit blocked {} but the controller given an empty domain is {xhci}",
             blocked.stream
         ));
     }
     if !SECOND_LEVEL.contains(&blocked.reason.as_str()) {
         return Err(format!(
-            "the unit blocked {nvme} for {:?}, which is not something a second-level page table \
+            "the unit blocked {xhci} for {:?}, which is not something a second-level page table \
              walk decides. A present context entry over an empty domain has to be refused by the \
              walk itself — any other reason means the unit stopped before it, and a context entry \
              naming passthrough would not have walked at all",
             blocked.reason
         ));
     }
-    // Inside the memory the identity domain covers, because that is where the
-    // driver's descriptors are: a fault somewhere else would be a different
-    // machine's bug wearing this one's clothes.
-    let covered = identity_extent(&log)?;
     let at = u64::from_str_radix(blocked.address.trim_start_matches("0x"), 16)
         .map_err(|_| format!("unreadable faulting address {:?}", blocked.address))?;
-    if at == 0 || at >= covered {
+    if pool == 0 || !(pool..pool + XHCI_POOL).contains(&at) {
         return Err(format!(
-            "the unit blocked an access to {}, and the driver's descriptors are inside \
-             0x0..{covered:#x}",
+            "the unit blocked an access to {}, and the driver's descriptors are in the \
+             {XHCI_POOL:#x} bytes from its DCBAAP, {pool:#x}",
             blocked.address
         ));
     }
     eprintln!(
-        "  [iommu] {nvme} given an empty domain: blocked at {} on a {} for {}",
+        "  [iommu] {xhci} given an empty domain: blocked at {} on a {} for {}",
         blocked.address, blocked.access, blocked.reason
     );
     Ok(())
 }
 
-/// One device aimed at the physical bytes NVMe's admin completion queue page
-/// ends with — a page in another driver's pool, which the aimed device's own
-/// domain does not map. Three things then hold at once and no two come from
-/// the same place: the unit blocks it and names the device and that address;
-/// the address is the one NVMe's own `ACQ` holds, resolved through the tables
-/// the unit walks; and the function's bus mastering is gone. A write also
-/// leaves bytes to check; a read leaves none.
+/// One device aimed at the physical bytes the xHCI's device context base
+/// address array page ends with — a page in another driver's pool, which the
+/// aimed device's own domain does not map. Three things then hold at once and
+/// no two come from the same place: the unit blocks it and names the device
+/// and that address; the address is the one the xHCI's own `DCBAAP` holds,
+/// resolved through the tables the unit walks; and the function's bus
+/// mastering is gone. A write also leaves bytes to check; a read leaves none.
 struct ForeignArm {
     profile: Profile,
     params: &'static [&'static str],
@@ -904,7 +913,7 @@ pub fn iommu_domain_isolation(
     Ok(())
 }
 
-/// A scanout backing in NVMe's pool, by its physical address. The device maps a
+/// A scanout backing in the xHCI's pool, by its physical address. The device maps a
 /// backing when it is attached (`hw/display/virtio-gpu.c:918-931` at v11.1.1:
 /// `dma_memory_map` answers NULL for a translation the unit refused, and the
 /// command is answered `VIRTIO_GPU_RESP_ERR_UNSPEC` at `:1010-1014`), so the
@@ -992,8 +1001,8 @@ fn foreign_fault(
     let aimed = class_function(&log, arm.class).ok_or_else(|| {
         format!("this machine enumerated no class {} function to aim\n{}", arm.class, log.text())
     })?;
-    let nvme = class_function(&log, "0108")
-        .ok_or_else(|| format!("this machine enumerated no NVMe controller\n{}", log.text()))?;
+    let xhci = class_function(&log, "0c03")
+        .ok_or_else(|| format!("this machine enumerated no xHCI controller\n{}", log.text()))?;
     if blocked.stream != aimed {
         return Err(format!(
             "the unit blocked {} and the device aimed at another driver's pool is {aimed}",
@@ -1015,8 +1024,7 @@ fn foreign_fault(
     }
 
     let window = register_window(socket, &log, arm.name)?;
-    let acq = over_qmp(socket, nvme_bar(socket, &log, &nvme)? + NVME_ACQ, 1, 'g')?[0];
-    let victim = translate(socket, window, &nvme, acq)?;
+    let victim = translate(socket, window, &xhci, dcbaa(socket, &log, &xhci)?)?;
     let at = u64::from_str_radix(blocked.address.trim_start_matches("0x"), 16)
         .map_err(|_| format!("unreadable faulting address {:?}", blocked.address))?;
     // The window and not the page, for the arm that aims a whole grant: the
@@ -1027,7 +1035,7 @@ fn foreign_fault(
     if !(aimed_at..aimed_at + arm.blocked_within).contains(&at) {
         return Err(format!(
             "the unit blocked an access to {}, and what the actuator aimed {aimed} at is \
-             {:#x}..{:#x} — the page NVMe's ACQ names, through the tables the unit walks. The \
+             {:#x}..{:#x} — the page the xHCI's DCBAAP names, through the tables the unit walks. The \
              kernel is not reporting the address the device was aimed at",
             blocked.address,
             aimed_at,
@@ -1042,7 +1050,7 @@ fn foreign_fault(
         if let Some((i, word)) = words.iter().enumerate().find(|(_, w)| **w != 0) {
             return Err(format!(
                 "the unit reported blocking {aimed} at {}, and the {} bytes at {probe:#x} inside \
-                 NVMe's pool hold {word:#018x} at word {i} rather than the zero the NVMe driver \
+                 the xHCI's pool hold {word:#018x} at word {i} rather than the zero the xHCI driver \
                  left. The write landed anyway",
                 blocked.address,
                 PROBE_WORDS * 8
@@ -1072,7 +1080,7 @@ fn foreign_fault(
         }
     }
     eprintln!(
-        "  [iommu] {aimed} aimed at {}, inside {nvme}'s pool: blocked on a {} for {}{bytes}, and \
+        "  [iommu] {aimed} aimed at {}, inside {xhci}'s pool: blocked on a {} for {}{bytes}, and \
          its COMMAND reads {command:#06x} — bus mastering gone",
         blocked.address, blocked.access, blocked.reason,
     );
@@ -1089,11 +1097,10 @@ fn clean_walk(clean: &QemuInstance, name: &str) -> Result<BTreeSet<String>, Stri
     log.must_say("init: started netd")?;
     let socket = clean.qmp_socket();
     let window = register_window(socket, &log, name)?;
-    let nvme = class_function(&log, "0108")
-        .ok_or_else(|| format!("{name}: this machine enumerated no NVMe controller\n{}", log.text()))?;
-    let acq = over_qmp(socket, nvme_bar(socket, &log, &nvme)? + NVME_ACQ, 1, 'g')?[0];
-    let owned = translate(socket, window, &nvme, acq)?;
-    domains_are_disjoint(socket, &log, window, owned, &nvme)?
+    let xhci = class_function(&log, "0c03")
+        .ok_or_else(|| format!("{name}: this machine enumerated no xHCI controller\n{}", log.text()))?;
+    let owned = translate(socket, window, &xhci, dcbaa(socket, &log, &xhci)?)?;
+    domains_are_disjoint(socket, &log, window, owned, &xhci)?
         .keys()
         .map(|bdf| class_of(&log, bdf))
         .collect()
@@ -1433,12 +1440,17 @@ fn config_space(log: &Serial, bdf: &str) -> Result<u64, String> {
     Ok(ecam + (u64::from(bus) << 20) + (u64::from(dev) << 15) + (u64::from(func) << 12))
 }
 
-/// The untouched half of NVMe's admin completion queue page: a frame is 1526
+/// The untouched half of the xHCI's DCBAA page: a frame is 1526
 /// bytes at most, so this covers the whole of one landing there.
 const PROBE_WORDS: usize = 256;
 
-/// `REG_ACQ`, NVMe 2.0 Figure 41.
-const NVME_ACQ: u64 = 0x30;
+/// The xHCI driver's DMA pool, which its DCBAA begins: the `dma 2048 KiB` its
+/// bring-up line states.
+const XHCI_POOL: u64 = 2 << 20;
+
+/// `DCBAAP`'s offset in the operational registers, xHCI 1.2 Table 5-18; those
+/// begin `CAPLENGTH` bytes into BAR 0, §5.3.1.
+const XHCI_DCBAAP: u64 = 0x30;
 
 /// Where QEMU puts an `intel-iommu` on q35, which every profile here is: a
 /// constant on the host side, not a number the guest supplies.
@@ -1504,8 +1516,16 @@ fn register_window(socket: &Path, log: &Serial, name: &str) -> Result<u64, Strin
     Ok(UNIT_WINDOW)
 }
 
+/// The address the xHCI at `bdf` holds in `DCBAAP`, out of its registers: the
+/// first page of its driver's pool.
+fn dcbaa(socket: &Path, log: &Serial, bdf: &str) -> Result<u64, String> {
+    let bar = bar0(socket, log, bdf)?;
+    let caplength = over_qmp(socket, bar, 1, 'w')?[0] & 0xFF;
+    Ok(over_qmp(socket, bar + caplength + XHCI_DCBAAP, 1, 'g')?[0] & !0x3F)
+}
+
 /// A function's memory BAR 0, out of ECAM rather than off a console line.
-fn nvme_bar(socket: &Path, log: &Serial, bdf: &str) -> Result<u64, String> {
+fn bar0(socket: &Path, log: &Serial, bdf: &str) -> Result<u64, String> {
     let config = config_space(log, bdf)?;
     // A window that decodes at all: an ECAM base the kernel invented would read
     // back all ones here, which is no vendor id.
@@ -1574,13 +1594,16 @@ struct Blocked {
 ///
 /// The fault line is the ready marker, so a boot that never produces one fails
 /// as a boot timeout — which is exactly what a unit that is not translating
-/// would do, and is why neither gate can pass vacuously.
-fn fault_boot(
+/// would do, and is why neither gate can pass vacuously. `holding` reads the
+/// machine over QMP while the fatal path holds its panel, before the
+/// `panic-reboot-fast` reset ends QEMU.
+fn fault_boot<T>(
     test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
     params: &'static [&'static str],
-) -> Result<(Serial, Blocked), String> {
+    holding: impl FnOnce(&Path, &Serial) -> Result<T, String>,
+) -> Result<(Serial, Blocked, T), String> {
     let mut qemu = QemuInstance::boot_with_options(
         test_config,
         c_bins,
@@ -1589,10 +1612,12 @@ fn fault_boot(
             profile: Profile::Metal,
             kernel_params: params,
             ready_marker: FAULT,
+            qmp: true,
             ..Default::default()
         },
     );
     let mut log = Serial::boot(&qemu);
+    let held = holding(qemu.qmp_socket(), &log)?;
     // Past the fault, because the claim is that the machine stopped there: the
     // handler takes the fatal path, and the capture is judged once its reset
     // has ended QEMU.
@@ -1608,7 +1633,7 @@ fn fault_boot(
     log.must_not_say(qemu::DEFAULT_READY)?;
 
     let blocked = blocked_on(log.must_say(FAULT)?)?;
-    Ok((log, blocked))
+    Ok((log, blocked, held))
 }
 
 /// The fault line's fields; a reason the kernel has no name for is refused.
@@ -1628,17 +1653,6 @@ fn blocked_on(line: &str) -> Result<Blocked, String> {
         ));
     }
     Ok(Blocked { stream: field("stream")?, address: field("addr")?, access: field("access")?, reason })
-}
-
-/// How far up the identity domain reaches, off the line that built it.
-fn identity_extent(log: &Serial) -> Result<u64, String> {
-    let line = log.must_say("iommu: identity domain")?;
-    let range = line
-        .split_whitespace()
-        .find(|w| w.starts_with("0x0.."))
-        .ok_or_else(|| format!("no extent on {line:?}"))?;
-    let top = range.trim_start_matches("0x0..0x");
-    u64::from_str_radix(top, 16).map_err(|_| format!("unreadable extent on {line:?}"))
 }
 
 /// The one function `pci::enumerate` printed with this class, or none.
@@ -1837,7 +1851,7 @@ fn argv_check(profile: Profile, argv: &[String]) -> Result<(), String> {
 /// second, and one that ignored the fault would fail the first.
 ///
 /// The stimulus is `iommu-userdev-foreign-dma`: the kernel answers netd's first
-/// DMA grant with an address inside NVMe's pool, which the NIC's own domain
+/// DMA grant with an address inside the xHCI's pool, which the NIC's own domain
 /// does not map. netd is unmodified and does with that address exactly what it
 /// does with a correct one, so what the device is pointed at is a real
 /// descriptor holding a wrong address rather than a driver written to misbehave.
@@ -1864,10 +1878,10 @@ pub fn userdev_dma_fault(
 
     // The fault was handed to the process that drives the stream, and the line
     // says so: `owner=kernel` here would be a machine that halted, or was about
-    // to. `slot0` is the first `pcidev` slot, which is netd's — the only claim
-    // this config mints.
+    // to.
     let handled = log.must_say(FAULT)?;
-    if !handled.contains("owner=slot0") {
+    let slot = slot_of(log.text(), "[1af4:1041]")?;
+    if !handled.contains(&format!("owner=slot{slot} ")) {
         return Err(format!(
             "the unit's fault was recorded against {handled:?}, and the function that faulted \
              is one a process drives. A fault the kernel takes as its own is one it halts for"
@@ -1969,12 +1983,25 @@ pub fn userdev_residue_is_its_own(
     if result.exit_code != Some(0) {
         return Err(format!("userdev_residue: exit {:?}\n{}\n{}", result.exit_code, result.stdout, log.text()));
     }
-    let released = log.must_say("[8086:10d3] released from slot 0; reset by")?;
+    let slot = slot_of(log.text(), "[8086:10d3]")?;
+    let released = log.must_say(&format!("[8086:10d3] released from slot {slot}; reset by"))?;
     if !released.contains("reset by nothing") {
         return Err(format!("the premise: the 82574 was not released by nothing — {released}"));
     }
-    let kept = log.must_say("pcidev: slot 0 holds 1 range(s)")?.to_string();
+    let kept = log.must_say(&format!("pcidev: slot {slot} holds 1 range(s)"))?.to_string();
     log.must_be_clean()?;
     eprintln!("  [iommu] {}; {}", kept.trim_end(), result.stdout.trim_end());
     Ok(())
+}
+
+/// The `pcidev` slot the function with PCI ids `ids` (`[vvvv:dddd]`) was handed
+/// over on: a boot's claims are minted in init's order, and the block service's
+/// comes first on a machine with an NVMe controller its row names.
+pub(crate) fn slot_of(text: &str, ids: &str) -> Result<u32, String> {
+    text.lines()
+        .find_map(|l| {
+            let rest = l.split(&format!("{ids} handed over on slot ")).nth(1)?;
+            rest.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()
+        })
+        .ok_or_else(|| format!("no function {ids} was handed over on any slot"))
 }

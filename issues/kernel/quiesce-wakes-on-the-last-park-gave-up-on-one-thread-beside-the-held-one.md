@@ -36,16 +36,6 @@ the `stop:` record carries only counts.
 thread queued on that CPU then runs only if `dispose_yield`
 (`toyos-sched/src/cpu.rs`) re-inserts the spinner behind it.
 
-**Hypothesis B, untested.** `tests/quiescelastcase/system.toml` starts `logd`,
-which fsyncs `/log`. `begin_update`'s only caller is `SYS_FSYNC`
-(`kernel/src/object/ops.rs:626`), and that update spans every retry, including
-the park in `between_attempts`. A thread parked there is `Blocked` with
-`MID_UPDATE`; `stop_if_blocked` refuses it (`toyos-sched/src/task.rs:450`), the
-sweep counts it running, and it adds 0 to `in_flight` — so `logd` parked
-between refused fsync attempts past the 2010 ms budget is a candidate the
-records cannot exclude, and it sits on the same `/log` fsync path the writers
-issue owns.
-
 **What no enabled guest test checks while this is disabled.**
 
 - that a band, a park or an exit wakes the stop, rather than its deadline;

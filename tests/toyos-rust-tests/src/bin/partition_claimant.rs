@@ -1,6 +1,7 @@
-//! A GPT partition claimed as a device: its one holder reads and writes its
-//! blocks and nobody else's, nothing the kernel holds can be claimed, and a
-//! claim's fsync answers for its own writes.
+//! A GPT partition on a disk the kernel drives, claimed as a device: its one
+//! holder reads and writes its blocks and nobody else's, nothing the kernel
+//! or a file server holds can be claimed, and a claim's fsync answers for its
+//! own writes.
 //!
 //! The disks are crafted and judged by `tests/common/partclaim.rs` on the
 //! host: this binary's account of what it wrote is exactly what is in
@@ -44,15 +45,13 @@ const GRANTED: &str = "A94F0E6D-3B2C-4E1A-8C7D-6E5F4A3B2C1D";
 const MISALIGNED: &str = "3E8A1C5F-7D2B-4F60-9A1E-5C4B3D2E1F07";
 /// Mirrored: a partition of whole 4 KiB blocks that begins inside one.
 const MISSTART: &str = "5A7C9E1B-3D5F-4B71-8C2E-4F6A8B0C2D35";
-/// Mirrored: a unique GUID the NVMe disk and the USB stick both carry.
-const TWIN: &str = "6D2F9B41-8C3E-4A57-B1D0-2E4F6A8C0B13";
-/// Mirrored: DATA, which the kernel mounts at `/home`.
+/// Mirrored: DATA, which fsd serves `/home` from through its claim.
 const DATA: &str = "E3A7C5D9-1B2F-4E6A-8D0C-9F7B5A3E1C24";
 
 /// Mirrored: the target's length in blocks.
 const TARGET_BLOCKS: u64 = 2048;
-/// Mirrored: the `/home` file written between the target's transfers, so the
-/// kernel's own writes to the same disk are interleaved with the claim's.
+/// Mirrored: the `/home` file written between the target's transfers, so
+/// fsd's writes to the same disk are interleaved with the claim's.
 const HOME_FILE: &str = "/home/partclaim-interleaved.bin";
 const HOME_CHUNK: usize = 32 * 1024;
 
@@ -111,25 +110,17 @@ fn test(cap: &SysCap, boot_stick: &[String]) {
     let [esp, log, root] = boot_stick else {
         panic!("main takes the boot stick's ESP, log and ROOT GUIDs, got {boot_stick:?}");
     };
-    for (what, name) in [("the ESP", esp.as_str()), ("the log partition", log), ("ROOT", root), ("DATA", DATA)]
-    {
-        refused(
-            cap,
-            &format!("{what}, which the kernel has mounted,"),
-            guid(name),
-            SyscallError::PermissionDenied,
-        );
+    refused(cap, "ROOT, which the kernel holds,", guid(root), SyscallError::PermissionDenied);
+    // init minted these for the file servers of their roles.
+    for (what, name) in [("the ESP", esp.as_str()), ("DATA", DATA)] {
+        refused(cap, &format!("{what}, which a file server holds,"), guid(name), SyscallError::AlreadyExists);
     }
 
     // init minted this one for test-runner from the manifest's `part:` row.
     refused(cap, "the partition init granted test-runner", guid(GRANTED), SyscallError::AlreadyExists);
 
-    refused(
-        cap,
-        "a unique GUID two disks carry",
-        guid(TWIN),
-        SyscallError::InvalidArgument,
-    );
+    // The crafted disk carries a copy of the log partition's unique GUID.
+    refused(cap, "the log partition, whose unique GUID two disks carry,", guid(log), SyscallError::InvalidArgument);
     refused(
         cap,
         "a partition that is not whole 4 KiB blocks",
@@ -165,8 +156,8 @@ fn test(cap: &SysCap, boot_stick: &[String]) {
 
     past_the_end(&target, info.blocks);
 
-    // The whole partition, first block to last, with the kernel's own writes
-    // to `/home` — the same NVMe disk — between the runs.
+    // The whole partition, first block to last, with fsd's writes to `/home`
+    // — the same disk — between the runs.
     let mut home = std::fs::File::create(HOME_FILE).expect("create the /home file");
     let runs = info.blocks.div_ceil(MAX_BLOCKS_PER_CALL as u64);
     for run in 0..runs {

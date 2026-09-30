@@ -8,7 +8,6 @@ pub mod serial;
 pub mod serial_lock;
 pub mod acpi;
 pub mod pci;
-pub mod nvme;
 pub mod xhci;
 pub mod usb_storage;
 pub mod virtio;

@@ -1,0 +1,36 @@
+# The boot `fsd_claim_held` judges: DATA is on a USB stick the kernel drives,
+# so its file server holds the partition's claim; `--let-go-at-read` lets it
+# go at the guest's first read of `home/fsd_let_go`, the guest takes the
+# claim, and the server's end then finds it held when init starts the role
+# again.
+
+[boot]
+start = ["logd", "blockd", "fsd", "test-runner"]
+
+[programs.logd]
+service = true
+syscap = ["logread"]
+
+# `device` because the guest mints DATA's claim, and `power` because
+# `run shutdown` asks init through the `power` connector.
+[programs.test-runner]
+receives = ["power"]
+syscap = ["device", "dup", "logread", "power"]
+
+[programs.toybox]
+receives = ["power"]
+
+[symlinks]
+"bin/shutdown" = "/system/bin/toybox"
+
+[programs.blockd]
+service = true
+restart = true
+serves = ["block"]
+devices = ["pci:1b36:0010"]
+
+[programs.fsd]
+restart = true
+roles = ["data", "log", "boot"]
+receives = ["block"]
+args = ["--let-go-at-read", "home/fsd_let_go"]

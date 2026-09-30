@@ -34,7 +34,7 @@ const WAIT: std::time::Duration = std::time::Duration::from_secs(120);
 pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
     let root = super::compile::repo_root();
     let profile = Profile::load(&root).map_err(|why| why.to_string())?;
-    let mut bad = metaldevices::unmet(back.loader().text(), back.kernel().text());
+    let mut bad = metaldevices::unmet(back.loader().text(), back.log().text());
 
     for job in JOBS {
         let code = match back.exit_code(job) {
@@ -59,7 +59,7 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
     // ceiling or writes an inventory row next has to read, and they exist only
     // in a log that came off the machine.
     eprintln!("  [devices] what {} answered:", back.label);
-    for line in metaldevices::inventory(back.kernel().text()) {
+    for line in metaldevices::inventory(back.log().text()) {
         eprintln!("    {line}");
     }
 
@@ -83,9 +83,9 @@ fn measurement(job: &str, code: i32) -> Result<u64, String> {
 /// Every device here is emulated and every one of them is faster or slower than
 /// the laptop by an amount nobody has measured, so **no span is judged**. What
 /// is judged is that the boot ran its whole job list, that each job answered
-/// with a measurement rather than a refusal, that the NVMe census counted no
-/// write, and that the shutdown emptied a cache and halted a controller before
-/// it let the reset go — which is a control for the sequence and not for its
+/// with a measurement rather than a refusal, that blockd served this guest's
+/// NVMe and fsd its DATA, and that the shutdown emptied a cache and halted a
+/// controller before it let the reset go — which is a control for the sequence and not for its
 /// timing.
 pub fn metal_device_probe(
     _test_config: &Path,
@@ -122,41 +122,29 @@ pub fn metal_device_probe(
     }
 
     // **The positive control for the safety instrument**, and this machine is
-    // the only one that can give it. On the T14 the internal disk reads
-    // `Foreign` (`kernel/src/bcachefs_adapter.rs`: "Never written to, under any
-    // circumstances") and the metal judge asserts `write=0`; a counter that
-    // was stuck at zero would pass that and say nothing. Here the guest is
-    // given an NVMe carrying a ToyOS volume of its own, mounts it, and writes
-    // it — so the census has to *move*, and the mount record is what accounts
-    // for the writes by name.
-    // Either arm of `Storage`'s two writable ones, because which the guest
-    // finds depends on whether an earlier boot in this lane already formatted
-    // the disk — and both of them write it.
+    // the only one that can give it. On the T14 the metal judge asserts that
+    // blockd drives no NVMe there (`metaldevices::NVME_UNDRIVEN`) and serves no
+    // partition; a judge whose needles could never appear would pass that and
+    // say nothing. Here blockd's row names this guest's controller, so the
+    // lines the T14 must never carry have to appear: blockd serves the disk's
+    // partitions, and fsd mounts or formats the DATA volume on one of them —
+    // either, because which it finds depends on whether an earlier boot in
+    // this lane already formatted the disk, and both of them write it.
+    if text.contains(metaldevices::NVME_UNDRIVEN) || !text.contains("blockd: partition ") {
+        return Err(format!(
+            "blockd served no partition of this guest's NVMe, so the needles the T14's judge \
+             refuses are ones this machine never showed it can print:\n{text}"
+        ));
+    }
     const OWNED: &[&str] = &[
-        "storage: mounted the ToyOS volume at block 0",
-        "storage: block 0 designates this device for ToyOS",
+        "fsd: mounted the DATA volume",
+        "fsd: block 0 designates this partition for ToyOS; formatting it",
     ];
     if !OWNED.iter().any(|said| text.contains(said)) {
         return Err(format!(
-            "this guest's NVMe read as neither of {OWNED:?}, so it owns no volume there and the              control below would be asserting the wrong thing"
+            "this guest's DATA read as neither of {OWNED:?}, so it owns no volume there and the \
+             control would be asserting the wrong thing:\n{text}"
         ));
-    }
-    let census = text
-        .lines()
-        .find(|l| l.contains(metaldevices::NVME_CENSUS))
-        .ok_or_else(|| format!("no {:?} record", metaldevices::NVME_CENSUS))?;
-    for field in ["read=", "write="] {
-        let counted: u64 = census
-            .split(field)
-            .nth(1)
-            .and_then(|rest| rest.split_whitespace().next())
-            .and_then(|v| v.parse().ok())
-            .ok_or_else(|| format!("the census names no {field}: {census:?}"))?;
-        if counted == 0 {
-            return Err(format!(
-                "this guest owns the NVMe volume and mounted it, so the census owes a non-zero                  {field} — a counter that cannot move would pass the T14's `write=0` and mean                  nothing: {census:?}"
-            ));
-        }
     }
     // And the shutdown, in the order a device needs it: the cache is emptied
     // while the volume is still there, and the boot's own last word is still

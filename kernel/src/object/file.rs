@@ -1,27 +1,22 @@
 //! An open file: two handles to one `FileObject` share the cursor; an independent cursor opens the path again.
-//! `SYS_CLOSE` does not report write-back errors — a durability claim must go through `SYS_FSYNC`.
 
-use alloc::string::String;
 use alloc::sync::Arc;
 
-use crate::file_cache::{self, FileId, Release};
+use crate::file_cache::{self, FileId};
 use crate::sync::Lock;
 
 use super::{KObjectVariant, ObjectCore};
 
 pub struct OpenFileState {
-    pub path: String,
     pub file_id: FileId,
     pub position: usize,
     pub mtime: u64,
 }
 
-// Drop runs under `Lock<ProcessData>` and cannot take a sleep lock or wait on a device, so it enqueues to writeback instead of flushing.
+// Drop runs under `Lock<ProcessData>`, so it takes the file cache's lock and no other.
 impl Drop for OpenFileState {
     fn drop(&mut self) {
-        if let Release::TeardownOwed = file_cache::release_to_writeback(self.file_id) {
-            crate::writeback::enqueue(self.file_id, core::mem::take(&mut self.path), self.mtime);
-        }
+        file_cache::release(self.file_id);
     }
 }
 
