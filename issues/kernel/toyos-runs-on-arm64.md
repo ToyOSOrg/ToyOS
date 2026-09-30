@@ -53,9 +53,6 @@ Every x86 guest on this host runs under TCG emulation instead — there is no
   under QEMU/HVF, behind one `sys_random` source.
 - **TLS**: each architecture uses its ABI's variant (x86-64 keeps variant II;
   AArch64 uses variant I with TLSDESC), and the loader handles both.
-- **The CI runner for the aarch64 tier** is decided at stage 8, after
-  measuring whether hosted `ubuntu-24.04-arm` exposes `/dev/kvm` and whether
-  HVF is usable inside a hosted `macos-latest` runner's VM.
 
 ## Measured, on `main` at `03b1b4db`
 
@@ -314,15 +311,11 @@ Each stage names its exit; "measured" means a number from a run.
    works from the host; `/log` survives a reboot; the same `system.toml`
    drives both arches.
 
-8. **An aarch64 tier in the harness.** `tests/common/qemu.rs` takes an
+8. **The harness boots aarch64.** `tests/common/qemu.rs` takes an
    `Arch`: `virt`, edk2-aarch64, HVF on Apple hosts (TCG otherwise).
-   `src/tiers.rs` gains the arch axis.
-   The CI runner is picked here, after measuring hosted `macos-latest`
-   (whether HVF is usable inside the runner VM) and hosted
-   `ubuntu-24.04-arm` (whether `/dev/kvm` exists there). **Exit**: the fast
-   tier runs on aarch64 locally on the M4 host; the nightly runs the aarch64
-   tier on whatever runner that measurement picks; a test red on only one
-   arch is a named known-red, not a skip.
+   **Exit**: once the track's stages are done, the whole suite is run on
+   aarch64 on the M4 host by hand, once; a test red on only one arch is a
+   named known-red, not a skip.
 
 ## Exit
 

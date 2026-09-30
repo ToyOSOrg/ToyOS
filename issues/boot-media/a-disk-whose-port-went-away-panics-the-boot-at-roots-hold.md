@@ -6,7 +6,7 @@ opened: 2026-09-27
 
 # A disk whose port went away panics the boot at ROOT's hold
 
-`usb_transport_break` (nightly tier) fails its boot with:
+`usb_transport_break` fails its boot with:
 
     PANIC: panicked at src/rootfs.rs:177:19:
     boot: the partition ROOT was read from, <guid>, cannot be held: Unusable

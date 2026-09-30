@@ -7,9 +7,9 @@ opened: 2026-08-15
 # The shard split prices a task's boot and not the image it builds first
 
 `Shard::keep` partitions the twelve shards by `tests/test-durations`, and that
-profile records what a *test* took — the number the ten-second Fast ceiling is
-also read against. A machine test that boots a config the shared image does not
-cover builds that image first, and nothing prices that build at all.
+profile records what a *test* took. A machine test that boots a config the
+shared image does not cover builds that image first, and nothing prices that
+build at all.
 
 **Measured on run `31896922288`** (`main` at `e064a96`, twelve KVM shards, the
 Fast tier), reading each shard's job log for the wall clock between one `PASS`
@@ -68,11 +68,8 @@ where it landed.
 
 Two directions, and they are not exclusive:
 
-- **Price a task by build + boot.** The profile cannot simply absorb it: the
-  same file is what the `durations` verdict reads against the 10,000 ms Fast
-  ceiling, so a task priced at 203 s would red the tier gate it has nothing to
-  do with. It wants a second profile — per *config*, not per test — that only
-  `Shard::keep` reads.
+- **Price a task by build + boot.** It wants a second profile — per *config*,
+  not per test — that only `Shard::keep` reads.
 - **Make the second image cheap.** 145 s to add `netd` and `sshd` to an image
   is a full recompile of those programs, not a relink.
 
@@ -93,9 +90,7 @@ the number this entry says nothing prices is measured on every run, deliberately
 removed from the price, and then dropped on the floor. What is missing is two
 smaller things: nothing attributes that duration to the *config* that caused it
 rather than to the worker thread that happened to ask first, and nothing writes
-it anywhere. `tests/test-durations` cannot be where it goes — the same file is
-read against `FAST_CEILING_MS` (`src/tiers.rs:84`, 10,000 ms), which is this
-entry's own reason for wanting a second profile.
+it anywhere.
 
 **What no work on this host can supply is the seed and the verdict.** The cost
 being priced is a *cold-checkout* rebuild on a hosted shard: `actions/checkout`
