@@ -49,5 +49,7 @@ pub mod task;
 pub mod timer;
 #[path = "../../src/watch.rs"]
 pub mod watch;
+#[path = "../../src/windows.rs"]
+pub mod windows;
 
 pub mod model;
