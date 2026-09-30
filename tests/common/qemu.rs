@@ -2543,10 +2543,7 @@ pub fn build_boot_image_carrying(
 /// guest boots the kernel that image ships, armed with the actuators it was
 /// built with, and until this refused, a test that set `kernel_params` beside a
 /// `boot_image` built without them got an unarmed guest, a pass, and a summary
-/// line counting the arm as taken. Measured 2026-08-22: `usb-flush-fails` armed
-/// through `kernel_params` alone on `esp_filesystem` passed with no injected
-/// sense anywhere in the log, while the same actuator baked into the image
-/// failed the same assertion.
+/// line counting the arm as taken.
 ///
 /// A green run with an inert arm is the worst kind of harness defect, because
 /// every negative control staged through one proves nothing.

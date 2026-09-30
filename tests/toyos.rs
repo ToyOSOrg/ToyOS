@@ -300,9 +300,6 @@ const RUST_SKIP: &[&str] = &[
     // Needs a launcher to tell its two roads apart, and a declared shell and
     // toybox to take it: `spawn_cwd` runs it on tests/netcase.
     "spawn_cwd",
-    // Needs a boot image the harness staged a file into before the machine
-    // started, which only `esp_filesystem` builds.
-    "esp_files",
     // Two modes, each waiting to be typed at through QMP; on its own nothing
     // ever answers it. `swiss_german_layout`, `locale_detect` and
     // `locale_detect_unrecognized` drive it.
@@ -1029,7 +1026,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // which is indistinguishable from the driver defect it hunts.
     ("xhci_flap", Sched::Serial),
     ("xhci_descriptor_walk", Sched::Parallel),
-    ("esp_filesystem", Sched::Parallel),
     ("toybox_cp_volume", Sched::Parallel),
     ("kernel_log_file", Sched::Parallel),
     ("kernel_heartbeat", Sched::Parallel),
@@ -1200,7 +1196,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("home_overwrite_reads_back", &["test_rs_home_overwrite_zero"]),
     ("fsd_restart", &["test_rs_fs_client_bound", "test_rs_fs_restart"]),
     ("fsd_claim_held", &["test_rs_fs_claim_held"]),
-    ("esp_filesystem", &["test_rs_esp_files"]),
     ("fsync_failed_commit", &["test_rs_fsync_flush_failed"]),
     ("double_fault_stack", &["test_rs_test_panic_child"]),
     ("idle_stack_guard", &["test_rs_test_panic_child"]),
@@ -8233,8 +8228,6 @@ fn run_machine_test(
             usb::xhci_scan_hands_over_a_free_slot(test_config, c_bins, rust_bins)
         }
         "usb_pool_exhausted" => usb::usb_pool_exhausted(test_config, c_bins, rust_bins),
-        // Body in `tests/common/volumes.rs`, same reason.
-        "esp_filesystem" => common::volumes::esp_filesystem(test_config, c_bins, rust_bins),
         // Body in `tests/common/toybox.rs`, same reason.
         "toybox_cp_volume" => common::toybox::cp_volume(test_config, c_bins, rust_bins),
         "kernel_log_file" => common::volumes::kernel_log_file(test_config, c_bins, rust_bins),
