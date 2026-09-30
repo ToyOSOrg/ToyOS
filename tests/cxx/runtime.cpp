@@ -1,9 +1,7 @@
 // What `cxx_runtime` compiles with the toolchain's clang and runs on ToyOS:
 // libc++'s containers, strings and streams, exceptions through frames with
 // destructors, threads with their thread_local and static destructors, and
-// libc's threads, keys, mutexes, condition variables and exit handlers. Every
-// line it prints is the same on any host but the one that names `EPERM`,
-// which is POSIX's answer and not every host's.
+// libc's threads, keys, mutexes, condition variables and exit handlers.
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -55,8 +53,6 @@ int thrower(int depth) {
     return thrower(depth - 1) + static_cast<int>(held.size());
 }
 
-// A thread whose handle reaches a third thread before its creator's
-// `pthread_create` has returned, and the third thread's join of it.
 std::mutex hand_m;
 std::condition_variable hand_cv;
 bool handed = false;
@@ -255,7 +251,7 @@ int main() {
     }
     hand_cv.notify_all();
     pthread_join(joiner, nullptr);
-    std::cout << "a thread joined by a third before its creator returned gave " << joined << "\n";
+    std::cout << "a thread joined by a third on its own pthread_self, before or after its creator returned, gave " << joined << "\n";
 
     pthread_t exiting;
     void* exited = nullptr;

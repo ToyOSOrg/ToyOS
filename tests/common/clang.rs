@@ -73,8 +73,6 @@ pub fn c_hello(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     Ok(())
 }
 
-/// The C++ program, and what it prints: the host's own C++ runtime's lines, but
-/// for the one POSIX's `EPERM` decides.
 const CXX_RUNTIME: &str = "tests/cxx/runtime.cpp";
 const CXX_RUNTIME_EXPECT: &str = "tests/cxx/runtime.expect";
 
@@ -104,7 +102,7 @@ pub fn cxx_runtime(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     let config = root.join("tests/testcases");
     let c_tests = [("cxx_runtime".to_string(), elf)];
     let mut qemu = QemuInstance::boot_with_options(&config, &c_tests, rust_bins, BootOptions::default());
-    let result = qemu.run_test("test_c_cxx_runtime", Duration::from_secs(180));
+    let result = qemu.run_test("test_c_cxx_runtime", Duration::from_secs(60));
     if let Some(err) = &result.error {
         return Err(format!("{err}\n{}", result.stdout));
     }

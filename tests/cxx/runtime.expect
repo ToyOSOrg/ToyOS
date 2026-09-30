@@ -10,7 +10,7 @@ thread_local destructors ran 4
 condition variable handshake done
 rethrew from a thread
 a key set in main reads null in another thread and set in main; thread ids differ
-a thread joined by a third before its creator returned gave 42
+a thread joined by a third on its own pthread_self, before or after its creator returned, gave 42
 pthread_exit handed its join 42
 threads with 64 MiB stacks: 64 joined, 64 detached, the last create answering 0
 a recursive mutex takes a second lock: yes; an error-checking one answers EDEADLK
