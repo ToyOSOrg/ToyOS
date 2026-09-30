@@ -18,9 +18,7 @@
 //! **A key stays while a registered worktree records it, [`CURRENT`] names it,
 //! or somebody holds it; everything else goes** — every other key, and whatever
 //! a dead maker or a stopped collection left. [`collect`] runs after every
-//! placement, and decides under the kind's store held exclusively, which a
-//! [`record`] holds shared: a key recorded is seen by every collection that
-//! decides after it.
+//! placement, and decides under the kind's store held exclusively.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -148,31 +146,43 @@ pub enum Relocked {
 /// The git hash of each of `paths` in the checkout `repo` as it stands:
 /// committed, staged or neither, untracked files included and ignored ones not.
 /// A submodule is the commit its gitlink names, which is what bootstrap checks
-/// out, and never the one its checkout happens to be at. Hashed through a copy
-/// of the checkout's index, so the checkout's own is never written.
+/// out, and never the one its checkout happens to be at; a checkout of one
+/// holding changes no commit does is refused, since bootstrap builds them and
+/// the gitlink does not name them. Hashed through a copy of the checkout's
+/// index, so the checkout's own is never written.
 pub fn trees(repo: &Path, paths: &[&str], lockfiles: Relocked) -> Vec<String> {
     let scratch = TempDir::new("store-index");
     let index = scratch.join("index");
-    let run = |args: &[&str], index: Option<&Path>| {
-        let out = git(repo, args, index).unwrap_or_else(|e| panic!("{e}"));
+    let run = |dir: &Path, args: &[&str], index: Option<&Path>| {
+        let out = git(dir, args, index).unwrap_or_else(|e| panic!("{e}"));
         String::from_utf8(out).unwrap_or_else(|e| panic!("git {args:?} printed no UTF-8: {e}"))
     };
-    let real = run(&["rev-parse", "--path-format=absolute", "--git-path", "index"], None);
+    let real = run(repo, &["rev-parse", "--path-format=absolute", "--git-path", "index"], None);
     fs::copy(real.trim(), &index).unwrap_or_else(|e| panic!("copy {}: {e}", real.trim()));
     let listed: Vec<&str> = ["ls-files", "--stage", "--"].iter().chain(paths).copied().collect();
-    let staged = run(&listed, Some(&index));
-    let gitlinks = staged.lines().filter(|l| l.starts_with("160000 ")).filter_map(|l| l.split_once('\t'));
-    let mut excluded: Vec<String> = gitlinks.map(|(_, path)| format!(":(exclude){path}")).collect();
+    let staged = run(repo, &listed, Some(&index));
+    let gitlinks: Vec<&str> = staged.lines().filter(|l| l.starts_with("160000 ")).filter_map(|l| l.split_once('\t')).map(|(_, path)| path).collect();
+    for checkout in gitlinks.iter().map(|path| repo.join(path)).filter(|checkout| checkout.join(".git").exists()) {
+        let changes = run(&checkout, &["--no-optional-locks", "status", "--porcelain"], None);
+        assert!(
+            changes.is_empty(),
+            "{} holds changes no commit does, and a submodule is keyed on the commit its gitlink names: \
+             commit them there and record that commit in {}\n{changes}",
+            checkout.display(),
+            repo.display(),
+        );
+    }
+    let mut excluded: Vec<String> = gitlinks.iter().map(|path| format!(":(exclude){path}")).collect();
     if lockfiles == Relocked::Yes {
         excluded.push(":(exclude,glob)**/Cargo.lock".to_string());
     }
     let added = paths.iter().filter(|p| lockfiles == Relocked::No || !p.ends_with("Cargo.lock")).copied();
     let add: Vec<&str> = ["add", "-A", "--"].into_iter().chain(added).chain(excluded.iter().map(String::as_str)).collect();
-    run(&add, Some(&index));
-    let tree = run(&["write-tree"], Some(&index));
+    run(repo, &add, Some(&index));
+    let tree = run(repo, &["write-tree"], Some(&index));
     let spec: Vec<String> = paths.iter().map(|p| format!("{}:{p}", tree.trim())).collect();
     let spec: Vec<&str> = std::iter::once("rev-parse").chain(spec.iter().map(String::as_str)).collect();
-    run(&spec, None).lines().map(str::to_string).collect()
+    run(repo, &spec, None).lines().map(str::to_string).collect()
 }
 
 /// A product in use: shared, so any number of builds use it at once and
@@ -186,19 +196,19 @@ pub struct Held {
 /// made it. `make` fills the directory it is given with the whole product or
 /// panics; `root` records the key before anything is looked at.
 pub fn get(root: &Path, rust_dir: &Path, kind: Kind, key: &str, mut make: impl FnMut(&Path)) -> Held {
-    record(root, rust_dir, kind, key);
+    record(root, kind, key);
     let store = kind.dir(rust_dir);
     let dir = store.join(key);
     loop {
         if let Some(held) = in_use(&dir, kind, key) {
             return held;
         }
-        match claim(&store, key) {
-            Claim::Mine(making, _lock) if dir.is_dir() => remove(&making),
+        match claim(&store, key, &Lock::try_exclusive) {
+            Claim::Mine(making, lock) if dir.is_dir() => remove(&take_away(&lock, &making, &claims(&store), key)),
             Claim::Mine(making, lock) => {
                 eprintln!("Making {} {key}", kind.name());
                 make(&making);
-                let placed = publish(&making, &dir);
+                let placed = publish(&making, &lock, &dir);
                 // Its waiters take the key now, not behind the collection.
                 drop(lock);
                 if placed {
@@ -217,16 +227,24 @@ pub fn get(root: &Path, rust_dir: &Path, kind: Kind, key: &str, mut make: impl F
 
 /// `dir`, held in use, if it is there.
 fn in_use(dir: &Path, kind: Kind, key: &str) -> Option<Held> {
-    named(dir, Lock::shared_if_there(dir, &format!("{} {key} is being removed", kind.name()))?)
+    let lock = named(dir, Lock::shared_if_there(dir, &format!("{} {key} is being removed", kind.name()))?)?;
+    Some(Held { dir: dir.to_path_buf(), _lock: lock })
 }
 
-/// `dir`, held by `lock`, if `lock` holds the directory `dir` still names:
-/// [`collect`] renames a key away before it removes it, and a lock taken on
-/// what was opened before that holds what is being removed.
-fn named(dir: &Path, lock: Lock) -> Option<Held> {
+/// `lock`, if it holds the directory `dir` still names: a key or a claim is
+/// renamed away before it is removed, and a lock taken on what was opened
+/// before that holds what is being removed.
+fn named(dir: &Path, lock: Lock) -> Option<Lock> {
     let named = fs::metadata(dir).ok()?.ino();
     let held = lock.file().metadata().unwrap_or_else(|e| panic!("stat {}: {e}", dir.display())).ino();
-    (named == held).then(|| Held { dir: dir.to_path_buf(), _lock: lock })
+    (named == held).then_some(lock)
+}
+
+/// `path` exclusively, taken by `take` as [`Lock::try_exclusive`] takes it, if
+/// nobody holds it and `path` still names what was taken: the only lock under
+/// which a key or a claim is renamed away.
+fn unheld(path: &Path, take: &impl Fn(&Path) -> Option<Lock>) -> Option<Lock> {
+    named(path, take(path)?)
 }
 
 /// Who makes a key: this process, holding its claim, or the process that does.
@@ -243,9 +261,10 @@ static MADE: AtomicU64 = AtomicU64::new(0);
 /// Claim the making of `key` in `store`. The claim is a directory made and held
 /// under a name of its own and renamed to `<key>` among the claims, which a rename never
 /// replaces once it holds anything: so exactly one process holds the name, and
-/// it held it before anybody could see it. One whose holder is dead is taken
-/// away, and claimed afresh.
-fn claim(store: &Path, key: &str) -> Claim {
+/// it held it before anybody could see it. One whose holder is dead, which
+/// `take` takes as [`Lock::try_exclusive`] does, is taken away, and claimed
+/// afresh.
+fn claim(store: &Path, key: &str, take: &impl Fn(&Path) -> Option<Lock>) -> Claim {
     let claims = claims(store);
     fs::create_dir_all(&claims).unwrap_or_else(|e| panic!("create {}: {e}", claims.display()));
     let making = claims.join(key);
@@ -261,23 +280,18 @@ fn claim(store: &Path, key: &str) -> Claim {
             Err(e) => panic!("rename {} -> {}: {e}", mine.display(), making.display()),
         }
         drop(lock);
-        let Some(dead) = Lock::try_exclusive(&making) else { return Claim::Theirs(making) };
-        let away = claims.join(format!("{key}.{}-{n}.gone", std::process::id()));
-        match fs::rename(&making, &away) {
-            Ok(()) => {
-                drop(dead);
-                remove(&away);
-            }
-            Err(e) if e.kind() == ErrorKind::NotFound => {}
-            Err(e) => panic!("rename {} -> {}: {e}", making.display(), away.display()),
-        }
+        let Some(dead) = unheld(&making, take) else { return Claim::Theirs(making) };
+        let away = take_away(&dead, &making, &claims, key);
+        drop(dead);
+        remove(&away);
     }
 }
 
-/// Place what was made at `made` as the key `dir`, read-only; `false`, and
-/// `made` removed, if another maker placed it first. One holding a link that
-/// leaves it is refused: its bytes would name whoever made it.
-pub(crate) fn publish(made: &Path, dir: &Path) -> bool {
+/// Place what was made at `made`, which `held` holds, as the key `dir`,
+/// read-only; `false`, and `made` taken away and removed, if another maker
+/// placed it first. One holding a link that leaves it is refused: its bytes
+/// would name whoever made it.
+pub(crate) fn publish(made: &Path, held: &Lock, dir: &Path) -> bool {
     let _ = fs::remove_file(made.join(MAKER));
     let out = links_out(made, made);
     assert!(out.is_empty(), "{} holds links that leave it, and a key is only what it names: {out:?}", made.display());
@@ -292,7 +306,8 @@ pub(crate) fn publish(made: &Path, dir: &Path) -> bool {
             true
         }
         Err(e) if placed_before(&e, dir) => {
-            remove(made);
+            let key = dir.file_name().and_then(|k| k.to_str()).expect("a key is a name");
+            remove(&take_away(held, made, made.parent().expect("what was made is beside its store"), key));
             false
         }
         Err(e) => panic!("rename {} -> {}: {e}", made.display(), dir.display()),
@@ -344,10 +359,10 @@ fn links_out(product: &Path, dir: &Path) -> Vec<PathBuf> {
 }
 
 /// Record that `root`'s builds use `kind`'s `key`: whole or not at all, so
-/// [`collect`] never reads a record half-written, and under `kind`'s store held
-/// shared, so none decides without it.
-pub fn record(root: &Path, rust_dir: &Path, kind: Kind, key: &str) {
-    let _deciding = Lock::shared(&store(rust_dir, kind), &format!("the {} store, behind a collection deciding what goes", kind.name()));
+/// [`collect`] never reads a record half-written. A name that is no key is
+/// refused, so the store never locks or removes one.
+pub fn record(root: &Path, kind: Kind, key: &str) {
+    assert!(is_key(key), "{key:?} is no key: a key is 16 hex digits");
     let path = kind.record(root);
     let dir = path.parent().expect("a record is under target/");
     fs::create_dir_all(dir).unwrap_or_else(|e| panic!("create {}: {e}", dir.display()));
@@ -376,12 +391,14 @@ pub fn recorded(root: &Path, kind: Kind) -> Option<String> {
 /// Remove from the store everything no registered worktree of `root` records,
 /// [`CURRENT`] does not name, and nobody holds. Returns what went.
 pub fn collect(root: &Path, rust_dir: &Path) -> Vec<PathBuf> {
-    collect_by(root, rust_dir, remove)
+    collect_by(root, rust_dir, &Lock::try_exclusive, remove)
 }
 
-/// [`collect`], removing with `remove`, so a test can stop it or act in the
-/// gap before it.
-fn collect_by(root: &Path, rust_dir: &Path, remove: impl Fn(&Path)) -> Vec<PathBuf> {
+/// [`collect`], taking what may go with `take` and removing with `remove`, so
+/// a test can stop it or act in the gap before either. It acts on the store's
+/// own names alone, a key or a name among the claims ([`claimed`]), and leaves
+/// every other name where it is.
+fn collect_by(root: &Path, rust_dir: &Path, take: &impl Fn(&Path) -> Option<Lock>, remove: impl Fn(&Path)) -> Vec<PathBuf> {
     let listed = git(root, &["worktree", "list", "--porcelain"], None).unwrap_or_else(|e| panic!("{e}"));
     let worktrees: Vec<PathBuf> =
         String::from_utf8_lossy(&listed).lines().filter_map(|l| l.strip_prefix("worktree ")).map(PathBuf::from).collect();
@@ -399,10 +416,9 @@ fn collect_by(root: &Path, rust_dir: &Path, remove: impl Fn(&Path)) -> Vec<PathB
                     kept.extend(link.file_name().map(|k| k.to_string_lossy().into_owned()));
                 }
             }
-            // A name with a dot is none of this store's: a key is hex.
-            for key in entries(&store).into_iter().filter(|name| !name.contains('.') && !kept.contains(name)) {
+            for key in entries(&store).into_iter().filter(|name| is_key(name) && !kept.contains(name)) {
                 let path = store.join(&key);
-                let Some(held) = Lock::try_exclusive(&path) else { continue };
+                let Some(held) = unheld(&path, take) else { continue };
                 set_writable(&path, true);
                 away.push((take_away(&held, &path, &claims, &key), path));
             }
@@ -412,14 +428,14 @@ fn collect_by(root: &Path, rust_dir: &Path, remove: impl Fn(&Path)) -> Vec<PathB
             removed.push(path);
         }
         for name in entries(&claims) {
-            let path = claims.join(&name);
+            let Some((key, maker)) = claimed(&name) else { continue };
             // A claim is held from before its name exists; a partial or a
             // removal, only once its maker holds it.
-            if name.contains('.') && maker_alive(&name) {
+            if maker.is_some_and(alive) {
                 continue;
             }
-            let Some(held) = Lock::try_exclusive(&path) else { continue };
-            let key = name.split('.').next().expect("a name has a first part");
+            let path = claims.join(&name);
+            let Some(held) = unheld(&path, take) else { continue };
             let gone = take_away(&held, &path, &claims, key);
             drop(held);
             remove(&gone);
@@ -446,7 +462,8 @@ fn claims(store: &Path) -> PathBuf {
     store.with_extension("making")
 }
 
-/// The names in `store`, none when there is no `store`.
+/// The UTF-8 names in `store`, none when there is no `store`: no other name is
+/// the store's.
 fn entries(store: &Path) -> Vec<String> {
     let listing = match fs::read_dir(store) {
         Ok(listing) => listing,
@@ -455,19 +472,34 @@ fn entries(store: &Path) -> Vec<String> {
     };
     let mut names: Vec<String> = listing
         .map(|e| e.unwrap_or_else(|e| panic!("read {}: {e}", store.display())).file_name())
-        .map(|n| n.into_string().unwrap_or_else(|n| panic!("{} holds {n:?}, which names no key", store.display())))
+        .filter_map(|n| n.into_string().ok())
         .collect();
     names.sort();
     names
 }
 
-/// Whether the process a partial's name carries is running: a maker between
-/// creating its partial and holding it is not yet told apart from a dead one
-/// by the lock alone. A name carrying none is a dead maker's.
-fn maker_alive(name: &str) -> bool {
-    let Some(pid) = name.split('.').nth(1).and_then(|p| p.split('-').next()).and_then(|p| p.parse::<i32>().ok()) else {
-        return false;
-    };
+/// Whether `name` is a key: what [`key`] makes, 16 lowercase hex digits.
+fn is_key(name: &str) -> bool {
+    name.len() == 16 && name.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// The key a name among the claims is of, and the pid a partial's or a
+/// removal's name carries: `<key>`, `<key>.<pid>-<n>.partial` or
+/// `<key>.<pid>-<n>.gone`, as [`claim`] and [`take_away`] name them. `None`
+/// for every other name.
+fn claimed(name: &str) -> Option<(&str, Option<i32>)> {
+    let mut parts = name.split('.');
+    let key = parts.next().filter(|key| is_key(key))?;
+    let Some(made) = parts.next() else { return Some((key, None)) };
+    let (pid, n) = made.split_once('-')?;
+    let pid = pid.parse::<i32>().ok().filter(|pid| *pid > 0)?;
+    n.parse::<u64>().ok()?;
+    (matches!(parts.next(), Some("partial" | "gone")) && parts.next().is_none()).then_some((key, Some(pid)))
+}
+
+/// Whether the process `pid` is running: a maker between creating its partial
+/// and holding it is not yet told apart from a dead one by the lock alone.
+fn alive(pid: i32) -> bool {
     // SAFETY: signal 0 runs the existence and permission checks and delivers nothing.
     unsafe { libc::kill(pid, 0) == 0 || std::io::Error::last_os_error().kind() == ErrorKind::PermissionDenied }
 }
@@ -644,12 +676,20 @@ pub(crate) mod tests {
         refused.downcast_ref::<String>().cloned().unwrap_or_default()
     }
 
+    /// The key most tests make, use or collect.
+    const K: &str = "0123456789abcdef";
+
+    /// A key of its own for `what`.
+    fn key_for(what: &str) -> String {
+        key(what, &[])
+    }
+
     /// Make a stand-in product, one file saying who made it, and publish it as
     /// `key` in `store`.
     fn placed(store: &Path, key: &str, by: &str) -> bool {
         let made = store.join(format!("{by}.made"));
         write(&made.join("made-by"), by);
-        publish(&made, &store.join(key))
+        publish(&made, &Lock::exclusive(&made, "its maker"), &store.join(key))
     }
 
     /// **Concurrent makers of one key make it once**: every other one waits for
@@ -662,7 +702,7 @@ pub(crate) mod tests {
             let handles: Vec<_> = (0..6)
                 .map(|_| {
                     s.spawn(|| {
-                        let held = get(&e.same, &e.rust_dir, Kind::Sysroot, "k", |dir| {
+                        let held = get(&e.same, &e.rust_dir, Kind::Sysroot, K, |dir| {
                             makes.fetch_add(1, Ordering::SeqCst);
                             std::thread::sleep(std::time::Duration::from_millis(200));
                             write(&dir.join("made-by"), "a maker");
@@ -674,8 +714,8 @@ pub(crate) mod tests {
             handles.into_iter().map(|h| h.join().unwrap()).collect()
         });
         assert_eq!(makes.load(Ordering::SeqCst), 1, "one key was made more than once");
-        assert!(dirs.iter().all(|d| *d == Kind::Sysroot.dir(&e.rust_dir).join("k")));
-        assert_eq!(entries(&Kind::Sysroot.dir(&e.rust_dir)), ["k"]);
+        assert!(dirs.iter().all(|d| *d == Kind::Sysroot.dir(&e.rust_dir).join(K)));
+        assert_eq!(entries(&Kind::Sysroot.dir(&e.rust_dir)), [K]);
         assert!(entries(&claims(&Kind::Sysroot.dir(&e.rust_dir))).is_empty(), "a claim outlived its placement");
     }
 
@@ -685,13 +725,13 @@ pub(crate) mod tests {
     fn the_loser_of_a_placement_discards_its_copy() {
         let e = estate("store-loser");
         let store = Kind::Sysroot.dir(&e.rust_dir);
-        assert!(placed(&store, "k", "the first"));
-        assert!(!placed(&store, "k", "the second"), "a second placement of one key won");
-        assert_eq!(fs::read_to_string(store.join("k/made-by")).unwrap(), "the first");
-        assert_eq!(entries(&store), ["k"], "the loser's copy stayed");
-        let written = fs::OpenOptions::new().write(true).open(store.join("k/made-by"));
+        assert!(placed(&store, K, "the first"));
+        assert!(!placed(&store, K, "the second"), "a second placement of one key won");
+        assert_eq!(fs::read_to_string(store.join(K).join("made-by")).unwrap(), "the first");
+        assert_eq!(entries(&store), [K], "the loser's copy stayed");
+        let written = fs::OpenOptions::new().write(true).open(store.join(K).join("made-by"));
         assert_eq!(written.map_err(|e| e.kind()).err(), Some(ErrorKind::PermissionDenied), "a placed product can be written");
-        let added = fs::write(store.join("k/new"), "x");
+        let added = fs::write(store.join(K).join("new"), "x");
         assert_eq!(added.map_err(|e| e.kind()).err(), Some(ErrorKind::PermissionDenied), "a placed key's own directory can be written");
     }
 
@@ -705,13 +745,13 @@ pub(crate) mod tests {
         write(&made.join("lib/rustlib/bin/rust-lld"), "lld");
         std::os::unix::fs::symlink("rust-lld", made.join("lib/rustlib/bin/ld.lld")).unwrap();
         std::os::unix::fs::symlink("../bin", made.join("lib/rustlib/up")).unwrap();
-        assert!(publish(&made, &store.join("inside")));
+        assert!(publish(&made, &Lock::exclusive(&made, "its maker"), &store.join("inside")));
         for (name, target) in [("absolute", e.primary.join("rust")), ("escaping", PathBuf::from("../../../elsewhere"))] {
             let made = store.join(format!("{name}.made"));
             write(&made.join("lib/rustlib/x"), "x");
             std::os::unix::fs::symlink(&target, made.join("lib/rustlib/src")).unwrap();
             let said = refusal("a product linking out of itself was placed", || {
-                publish(&made, &store.join(name));
+                publish(&made, &Lock::exclusive(&made, "its maker"), &store.join(name));
             });
             assert!(said.contains("links that leave it"), "{said}");
             assert!(!store.join(name).exists());
@@ -726,7 +766,7 @@ pub(crate) mod tests {
     fn a_maker_that_never_finishes() {
         let root = PathBuf::from(std::env::var(ROOT).unwrap_or_else(|_| panic!("run without {ROOT}; it is not a test")));
         let rust_dir = PathBuf::from(std::env::var(RUST_DIR).unwrap());
-        get(&root, &rust_dir, Kind::Compiler, "k", |dir| {
+        get(&root, &rust_dir, Kind::Compiler, K, |dir| {
             write(&dir.join("half"), "half of it");
             held_until_killed();
         });
@@ -741,20 +781,20 @@ pub(crate) mod tests {
         let store = Kind::Compiler.dir(&e.rust_dir);
         let env = [(ROOT, e.same.as_os_str()), (RUST_DIR, e.rust_dir.as_os_str())];
         let maker = Elsewhere::hold("store::tests::a_maker_that_never_finishes", &env);
-        assert!(!store.join("k").exists(), "a product was visible under its key before it was whole");
-        assert!(Lock::try_exclusive(&claims(&store).join("k")).is_none(), "a key being made is not held");
+        assert!(!store.join(K).exists(), "a product was visible under its key before it was whole");
+        assert!(Lock::try_exclusive(&claims(&store).join(K)).is_none(), "a key being made is not held");
         maker.kill();
-        assert!(!store.join("k").exists(), "a killed maker left its half under the key");
-        assert!(Lock::try_exclusive(&claims(&store).join("k")).is_some(), "a dead maker's claim is still held");
+        assert!(!store.join(K).exists(), "a killed maker left its half under the key");
+        assert!(Lock::try_exclusive(&claims(&store).join(K)).is_some(), "a dead maker's claim is still held");
 
         let made = Cell::new(0);
-        let held = get(&e.same, &e.rust_dir, Kind::Compiler, "k", |dir| {
+        let held = get(&e.same, &e.rust_dir, Kind::Compiler, K, |dir| {
             made.set(made.get() + 1);
             write(&dir.join("whole"), "all of it");
         });
         assert_eq!(made.get(), 1);
         assert!(held.dir.join("whole").is_file() && !held.dir.join("half").exists());
-        assert_eq!(entries(&store), ["k"]);
+        assert_eq!(entries(&store), [K]);
         assert!(entries(&claims(&store)).is_empty(), "a dead maker's claim outlived the key's making");
     }
 
@@ -765,39 +805,87 @@ pub(crate) mod tests {
     fn a_collection_keeps_what_is_named_held_or_current() {
         let e = estate("store-collect");
         let store = Kind::Sysroot.dir(&e.rust_dir);
-        for key in ["named-primary", "named-linked", "held", "current", "orphan"] {
+        let [named_primary, named_linked, held, pointed, orphan] = ["named-primary", "named-linked", "held", "current", "orphan"].map(key_for);
+        for key in [&named_primary, &named_linked, &held, &pointed, &orphan] {
             placed(&store, key, key);
         }
         let claims = claims(&store);
-        for leftover in ["j", "k.2000000000-0.partial", "orphan.2000000000-1.gone"] {
+        let leftovers = [key_for("j"), format!("{K}.2000000000-0.partial"), format!("{orphan}.2000000000-1.gone")];
+        for leftover in &leftovers {
             write(&claims.join(leftover).join("x"), "left");
         }
         // A maker that is running, between making its partial and holding it.
-        let making = format!("k.{}-9.partial", std::process::id());
+        let making = format!("{K}.{}-9.partial", std::process::id());
         write(&claims.join(&making).join("x"), "being made");
-        write(&store.join("k.partial").join("x"), "none of the store's");
-        record(&e.primary, &e.rust_dir, Kind::Sysroot, "named-primary");
-        record(&e.a, &e.rust_dir, Kind::Sysroot, "named-linked");
-        std::os::unix::fs::symlink("sysroots/current", current(&e.rust_dir)).unwrap();
-        let held = Lock::shared(&store.join("held"), "a build using it");
+        record(&e.primary, Kind::Sysroot, &named_primary);
+        record(&e.a, Kind::Sysroot, &named_linked);
+        std::os::unix::fs::symlink(format!("sysroots/{pointed}"), current(&e.rust_dir)).unwrap();
+        let holding = Lock::shared(&store.join(&held), "a build using it");
 
         let mut removed = collect(&e.primary, &e.rust_dir);
         removed.sort();
-        let mut gone = vec![store.join("orphan")];
-        gone.extend(["j", "k.2000000000-0.partial", "orphan.2000000000-1.gone"].map(|n| claims.join(n)));
+        let mut gone = vec![store.join(&orphan)];
+        gone.extend(leftovers.iter().map(|n| claims.join(n)));
         gone.sort();
         assert_eq!(removed, gone);
-        assert_eq!(entries(&store), ["current", "held", "k.partial", "named-linked", "named-primary"]);
+        let mut kept = vec![named_primary, named_linked.clone(), held.clone(), pointed];
+        kept.sort();
+        assert_eq!(entries(&store), kept);
         assert_eq!(entries(&claims), [making], "a running maker's partial was taken");
-        drop(held);
-        assert_eq!(collect(&e.primary, &e.rust_dir), [store.join("held")], "a key nobody names or holds stayed");
+        drop(holding);
+        assert_eq!(collect(&e.primary, &e.rust_dir), [store.join(&held)], "a key nobody names or holds stayed");
 
         fs::remove_file(Kind::Sysroot.record(&e.a)).unwrap();
         fs::create_dir(Kind::Sysroot.record(&e.a)).unwrap();
         refusal("an unreadable record was read as naming nothing", || {
             collect(&e.primary, &e.rust_dir);
         });
-        assert!(store.join("named-linked").is_dir(), "an unreadable record's key was taken");
+        assert!(store.join(&named_linked).is_dir(), "an unreadable record's key was taken");
+    }
+
+    /// **A collection acts on the store's own names alone**: a file Finder
+    /// leaves, or any name that is no key, claim, partial or removal, stays
+    /// where it is, in the store or among its claims, and no collection stops
+    /// at it.
+    #[test]
+    fn a_collection_leaves_every_name_not_the_store_s() {
+        let e = estate("store-strays");
+        let store = Kind::Sysroot.dir(&e.rust_dir);
+        placed(&store, K, "a key nobody names");
+        let claims = claims(&store);
+        let strays = [
+            store.join(".DS_Store"),
+            store.join("notes"),
+            store.join(format!("{K}.partial")),
+            claims.join(".DS_Store"),
+            claims.join("k"),
+            claims.join(format!("{K}.notes")),
+            claims.join(format!("{K}.2000000000-0.partial.old")),
+        ];
+        for stray in &strays {
+            write(stray, "none of the store's");
+        }
+        assert_eq!(collect(&e.primary, &e.rust_dir), [store.join(K)]);
+        assert_eq!(collect(&e.primary, &e.rust_dir), Vec::<PathBuf>::new());
+        let left: Vec<&PathBuf> = strays.iter().filter(|s| !s.is_file()).collect();
+        assert!(left.is_empty(), "a collection took {left:?}");
+    }
+
+    /// **A name that is no key is refused before the store is touched**: an
+    /// empty one would name the store itself.
+    #[test]
+    fn a_name_that_is_no_key_is_refused() {
+        let e = estate("store-no-key");
+        let store = Kind::Sysroot.dir(&e.rust_dir);
+        placed(&store, K, "a key");
+        for name in ["", "../compilers", "0123456789ABCDEF", "0123456789abcdef0"] {
+            let said = refusal("a name that is no key was used as one", || {
+                get(&e.same, &e.rust_dir, Kind::Sysroot, name, |_| panic!("made {name:?}"));
+            });
+            assert!(said.contains("is no key"), "{said}");
+        }
+        assert_eq!(recorded(&e.same, Kind::Sysroot), None, "a name that is no key was recorded");
+        assert!(Lock::try_exclusive(&store).is_some(), "the store is held");
     }
 
     /// **A lock granted on a key a collection renamed away holds nothing**: a
@@ -808,15 +896,15 @@ pub(crate) mod tests {
     fn a_lock_on_a_key_renamed_away_is_not_the_key() {
         let e = estate("store-renamed");
         let store = Kind::Sysroot.dir(&e.rust_dir);
-        placed(&store, "k", "the first");
-        let dir = store.join("k");
+        placed(&store, K, "the first");
+        let dir = store.join(K);
         let opened_before = Lock::shared(&dir, "a build using it");
         set_writable(&dir, true);
-        fs::rename(&dir, store.join("k.away")).unwrap();
-        placed(&store, "k", "the second");
+        fs::rename(&dir, store.join(format!("{K}.away"))).unwrap();
+        placed(&store, K, "the second");
         assert!(named(&dir, opened_before).is_none(), "a lock on the key renamed away was taken for the key");
-        let now = named(&dir, Lock::shared(&dir, "a build using it")).expect("the key placed since");
-        assert_eq!(fs::read_to_string(now.dir.join("made-by")).unwrap(), "the second");
+        named(&dir, Lock::shared(&dir, "a build using it")).expect("the key placed since");
+        assert_eq!(fs::read_to_string(dir.join("made-by")).unwrap(), "the second");
     }
 
     /// **A collection that is stopped leaves nothing at a key's name**: what it
@@ -825,10 +913,12 @@ pub(crate) mod tests {
     fn a_stopped_collection_leaves_nothing_at_its_name() {
         let e = estate("store-stopped");
         let store = Kind::Sysroot.dir(&e.rust_dir);
-        placed(&store, "orphan", "a key nobody names");
-        let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| collect_by(&e.primary, &e.rust_dir, |_| panic!("stopped"))));
+        placed(&store, K, "a key nobody names");
+        let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            collect_by(&e.primary, &e.rust_dir, &Lock::try_exclusive, |_| panic!("stopped"))
+        }));
         assert!(stopped.is_err(), "the stand-in removal was never asked");
-        assert!(!store.join("orphan").exists(), "a stopped collection left the key it was removing at its name");
+        assert!(!store.join(K).exists(), "a stopped collection left the key it was removing at its name");
         assert!(entries(&store).is_empty());
     }
 
@@ -839,20 +929,62 @@ pub(crate) mod tests {
     fn a_claim_taken_back_before_a_removal_survives_it() {
         let e = estate("store-gap");
         let store = Kind::Compiler.dir(&e.rust_dir);
-        write(&claims(&store).join("k").join(MAKER), "a maker that died");
+        write(&claims(&store).join(K).join(MAKER), "a maker that died");
         let taken = RefCell::new(Vec::new());
-        collect_by(&e.primary, &e.rust_dir, |gone| {
+        collect_by(&e.primary, &e.rust_dir, &Lock::try_exclusive, |gone| {
             // Another build, in the gap: it takes the dead claim away and
             // claims the key afresh.
             if taken.borrow().is_empty() {
-                taken.borrow_mut().push(claim(&store, "k"));
+                taken.borrow_mut().push(claim(&store, K, &Lock::try_exclusive));
             }
             remove(gone);
         });
         let claim = taken.into_inner().pop().expect("the removal was never asked");
         assert!(matches!(claim, Claim::Mine(..)), "the fresh maker did not get the claim");
-        assert!(claims(&store).join("k").is_dir(), "the collection removed the claim a live maker took back");
-        assert!(Lock::try_exclusive(&claims(&store).join("k")).is_none(), "the claim at the key's name is not the live maker's");
+        assert!(claims(&store).join(K).is_dir(), "the collection removed the claim a live maker took back");
+        assert!(Lock::try_exclusive(&claims(&store).join(K)).is_none(), "the claim at the key's name is not the live maker's");
+    }
+
+    /// Take `path` as [`Lock::try_exclusive`] does, and let another build claim
+    /// `K` afresh between the open and the lock: it takes the dead claim
+    /// `path` names away first. What that build got is left in `taken`.
+    fn claimed_between(path: &Path, store: &Path, taken: &RefCell<Option<Claim>>) -> Option<Lock> {
+        let opened = fs::File::open(path).unwrap();
+        taken.replace(Some(claim(store, K, &Lock::try_exclusive)));
+        crate::dirlock::tests::try_exclusive_opened(opened)
+    }
+
+    /// Whether the claim at `K`'s name in `store` is the one `taken` holds.
+    fn still_held(store: &Path, taken: RefCell<Option<Claim>>) -> bool {
+        let live = taken.into_inner().expect("the lock was never taken");
+        matches!(live, Claim::Mine(..)) && claims(store).join(K).is_dir() && Lock::try_exclusive(&claims(store).join(K)).is_none()
+    }
+
+    /// **A collection takes a claim only through the name it renames**: one
+    /// that opened a dead claim, and was granted its lock after another build
+    /// took that claim away and claimed the key afresh, holds nothing at the
+    /// name and leaves the live claim there.
+    #[test]
+    fn a_collection_locked_after_a_claim_was_taken_back_leaves_it() {
+        let e = estate("store-open-lock");
+        let store = Kind::Compiler.dir(&e.rust_dir);
+        write(&claims(&store).join(K).join(MAKER), "a maker that died");
+        let taken = RefCell::new(None);
+        collect_by(&e.primary, &e.rust_dir, &|path: &Path| claimed_between(path, &store, &taken), remove);
+        assert!(still_held(&store, taken), "the collection took the claim a live maker holds");
+    }
+
+    /// **A claim takes a dead claim only through the name it renames**, as a
+    /// collection does, and waits for the live one it finds there instead.
+    #[test]
+    fn a_claim_locked_after_a_claim_was_taken_back_leaves_it() {
+        let e = estate("store-open-claim");
+        let store = Kind::Compiler.dir(&e.rust_dir);
+        write(&claims(&store).join(K).join(MAKER), "a maker that died");
+        let taken = RefCell::new(None);
+        let mine = claim(&store, K, &|path: &Path| claimed_between(path, &store, &taken));
+        assert!(matches!(mine, Claim::Theirs(_)), "a claim took the name another build holds");
+        assert!(still_held(&store, taken), "a claim took the claim a live maker holds");
     }
 
     /// **A key recorded while a collection runs is kept by every decision made
@@ -861,13 +993,14 @@ pub(crate) mod tests {
     #[test]
     fn a_key_recorded_while_a_collection_runs_is_kept() {
         let e = estate("store-late");
-        placed(&Kind::Llvm.dir(&e.rust_dir), "first", "an LLVM nobody names");
-        placed(&Kind::Compiler.dir(&e.rust_dir), "late", "a compiler recorded while the collection runs");
-        collect_by(&e.primary, &e.rust_dir, |gone| {
-            record(&e.same, &e.rust_dir, Kind::Compiler, "late");
+        let late = key_for("late");
+        placed(&Kind::Llvm.dir(&e.rust_dir), &key_for("first"), "an LLVM nobody names");
+        placed(&Kind::Compiler.dir(&e.rust_dir), &late, "a compiler recorded while the collection runs");
+        collect_by(&e.primary, &e.rust_dir, &Lock::try_exclusive, |gone| {
+            record(&e.same, Kind::Compiler, &late);
             remove(gone);
         });
-        assert!(Kind::Compiler.dir(&e.rust_dir).join("late").is_dir(), "a key recorded before its kind was decided was taken");
+        assert!(Kind::Compiler.dir(&e.rust_dir).join(&late).is_dir(), "a key recorded before its kind was decided was taken");
     }
 
     /// **A key is the recipe and the trees, byte for byte, as they stand**: a
@@ -919,17 +1052,42 @@ pub(crate) mod tests {
         assert_eq!(llvm(), LLVM_B, "a staged gitlink is not what bootstrap checks out");
     }
 
+    /// **A submodule checked out holding changes no commit does is refused**,
+    /// an edit or an untracked file: bootstrap builds them, and the gitlink the
+    /// key names does not name them.
+    #[test]
+    fn a_submodule_holding_uncommitted_changes_is_refused() {
+        let e = estate("store-submodule-edit");
+        let library = || Sources::of(&e.primary, &e.rust_dir).get("library").to_string();
+        let clean = library();
+        let backtrace = e.rust_dir.join("library/backtrace");
+        for (file, text) in [("lib.rs", "pub fn trace() { edited() }\n"), ("new.rs", "pub fn new() {}\n")] {
+            let before = fs::read_to_string(backtrace.join(file)).ok();
+            write(&backtrace.join(file), text);
+            let said = refusal("a change in a checked-out submodule was keyed as its gitlink", || {
+                library();
+            });
+            let named = format!("{} holds changes no commit does", backtrace.display());
+            assert!(said.contains(&named) && said.contains(file), "{said}");
+            match before {
+                Some(text) => write(&backtrace.join(file), &text),
+                None => fs::remove_file(backtrace.join(file)).unwrap(),
+            }
+        }
+        assert_eq!(library(), clean);
+    }
+
     /// **A maker lets go of the key it placed before it collects**: a build
     /// waiting for that key takes it while the collection that follows is held
-    /// back, here by a record of another kind in progress.
+    /// back.
     #[test]
     fn a_placed_key_is_free_while_its_maker_collects() {
         use std::time::{Duration, Instant};
         let e = estate("store-free");
-        let key = Kind::Sysroot.dir(&e.rust_dir).join("k");
-        let recording = Lock::shared(&store(&e.rust_dir, Kind::Llvm), "a record, holding the collection back");
+        let key = Kind::Sysroot.dir(&e.rust_dir).join(K);
+        let deciding = Lock::shared(&store(&e.rust_dir, Kind::Llvm), "holding the collection back");
         let free = std::thread::scope(|s| {
-            let maker = s.spawn(|| get(&e.same, &e.rust_dir, Kind::Sysroot, "k", |dir| write(&dir.join("made-by"), "the maker")));
+            let maker = s.spawn(|| get(&e.same, &e.rust_dir, Kind::Sysroot, K, |dir| write(&dir.join("made-by"), "the maker")));
             let deadline = Instant::now() + Duration::from_secs(20);
             let free = loop {
                 if Lock::try_exclusive(&key).is_some() {
@@ -940,7 +1098,7 @@ pub(crate) mod tests {
                 }
                 std::thread::sleep(Duration::from_millis(5));
             };
-            drop(recording);
+            drop(deciding);
             maker.join().unwrap();
             free
         });

@@ -57,7 +57,7 @@ pub fn resolve(root: &Path, rust_dir: &Path, fork: &Fork, sources: &Sources) -> 
 /// test can stand in for bootstrap: `build` compiles the fork checkout it is
 /// given and returns the `stage2` it left there.
 fn choose(root: &Path, rust_dir: &Path, fork: &Fork, sources: &Sources, build: impl Fn(&Path) -> PathBuf) -> Compiler {
-    store::record(root, rust_dir, Kind::Llvm, &llvm::key(sources));
+    store::record(root, Kind::Llvm, &llvm::key(sources));
     let key = key(sources);
     let held = store::get(root, rust_dir, Kind::Compiler, &key, |partial| {
         let checkout = fork.checkout(root);
@@ -124,9 +124,7 @@ fn build_in_fork(root: &Path, rust_dir: &Path, fork: &Path, sources: &Sources) -
 
 /// Bootstrap's configuration for a compiler: for the host alone, since every
 /// guest target's libraries are the sysroot's to build, linking the LLVM at
-/// `llvm`. Its cargo carries its own OpenSSL, curl, libgit2 and zlib
-/// (`cargo-native-static`): linked dynamically it names the host's, which a
-/// store entry cannot carry.
+/// `llvm`.
 fn config_text(build_dir: &Path, host: &str, llvm: &Path) -> String {
     format!(
         r#"change-id = "ignore"

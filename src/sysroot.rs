@@ -70,7 +70,7 @@ pub fn key(compiler: &str, sources: &Sources) -> String {
 
 /// The commit this checkout's tree pins the std fork at: the index's, so a
 /// staged gitlink counts as the tree's.
-fn pinned_fork(root: &Path) -> String {
+pub(crate) fn pinned_fork(root: &Path) -> String {
     let entry = git_out(root, &["ls-files", "-s", "--", "rust"]);
     let mut words = entry.split_whitespace();
     match (words.next(), words.next()) {
@@ -111,11 +111,10 @@ impl Fork {
     pub fn of(root: &Path) -> Fork {
         let pinned = pinned_fork(root);
         let own = root.join("rust");
-        let head = || git_out(&own, &["rev-parse", "HEAD"]).trim().to_string();
         let primary = match toolchain::owner(root) {
             Owner::Installed => panic!("an installed toolchain has no fork to build from"),
             Owner::Us => {
-                let head = head();
+                let head = head(&own);
                 assert!(
                     at_or_ahead(&own, &pinned, &head),
                     "{} is at {head}, and this tree pins the fork at {pinned}, which that is not at or \
@@ -132,12 +131,11 @@ impl Fork {
         if !own.join(".git").exists() {
             return shared;
         }
-        let edits = || git_out(&own, &["status", "--porcelain", "--ignore-submodules=none"]);
-        if !at_or_ahead(&own, &pinned, &head()) {
+        if !at_or_ahead(&own, &pinned, &head(&own)) {
             let _held = Lock::exclusive(&own, &format!("{}, behind a build in it", own.display()));
-            let was = head();
+            let was = head(&own);
             if !at_or_ahead(&own, &pinned, &was) {
-                let edits = edits();
+                let edits = work(&own);
                 assert!(
                     edits.is_empty(),
                     "{} is at {was} with uncommitted work, and this tree pins the fork at {pinned}, which \
@@ -149,10 +147,10 @@ impl Fork {
                 eprintln!("{} was at {was}, not at or ahead of this tree's pin {pinned}: checked it out", own.display());
             }
         }
-        if head() == pinned && edits().is_empty() {
-            shared
-        } else {
+        if holds_work(&own, &pinned) {
             Fork::Checkout(own)
+        } else {
+            shared
         }
     }
 
@@ -166,14 +164,34 @@ impl Fork {
 
     /// A checkout to build `root`'s toolchain in, held for it alone for as
     /// long as the returned value lives: each build there empties the build
-    /// directory the one before it built in.
+    /// directory the one before it built in. One a submodule of which is a git
+    /// worktree of another clone is refused: bootstrap moves every submodule
+    /// checked out to its gitlink with `git submodule update`, which over such
+    /// a worktree rewrites that clone's `core.worktree`.
     pub fn checkout(&self, root: &Path) -> Checkout {
-        match self {
+        let checkout = match self {
             Fork::Checkout(dir) => {
                 Checkout { _held: Lock::exclusive(dir, &format!("a toolchain build in {}", dir.display())), dir: dir.clone() }
             }
             Fork::Pinned { rust_dir, commit } => shared(rust_dir, root, commit),
+        };
+        let staged = git_out(&checkout.dir, &["ls-files", "--stage"]);
+        let gitlinks = staged.lines().filter(|l| l.starts_with("160000 ")).filter_map(|l| l.split_once('\t'));
+        for submodule in gitlinks.map(|(_, path)| checkout.dir.join(path)).filter(|s| s.join(".git").exists()) {
+            let dirs = git_out(&submodule, &["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"]);
+            let (own, common) = dirs.trim().split_once('\n').expect("git names two directories");
+            assert!(
+                own == common,
+                "{} is a git worktree of {common}, another clone, and bootstrap moves a submodule with \
+                 `git submodule update`, which over it rewrites that clone's `core.worktree`; nothing was \
+                 built. `git -C {common} worktree remove --force {}` takes it, and the next build clones \
+                 the submodule into {}'s own git directory",
+                submodule.display(),
+                submodule.display(),
+                checkout.dir.display(),
+            );
         }
+        checkout
     }
 }
 
@@ -183,9 +201,30 @@ pub struct Checkout {
     _held: Lock,
 }
 
+/// The commit the fork checkout `dir` is at.
+fn head(dir: &Path) -> String {
+    git_out(dir, &["rev-parse", "HEAD"]).trim().to_string()
+}
+
 /// Whether `head`, in the fork checkout `dir`, is `commit` or ahead of it.
 fn at_or_ahead(dir: &Path, commit: &str, head: &str) -> bool {
     git(dir, &["merge-base", "--is-ancestor", commit, head], None).is_ok()
+}
+
+/// Whether the fork checkout `own` holds work the commit `pinned` does not:
+/// commits ahead of it, or [`work`].
+pub(crate) fn holds_work(own: &Path, pinned: &str) -> bool {
+    let head = head(own);
+    at_or_ahead(own, pinned, &head) && (head != pinned || !work(own).is_empty())
+}
+
+/// What `git status` says the fork checkout `own` holds that its commit does
+/// not, less a submodule checked out at another commit than its gitlink and
+/// no more: bootstrap moves that one to its gitlink, so the checkout builds as
+/// its commit.
+fn work(own: &Path) -> String {
+    let status = git_out(own, &["--no-optional-locks", "status", "--porcelain=v2", "--ignore-submodules=none"]);
+    status.lines().filter(|l| !l.starts_with("1 .M SC.. ")).map(|l| format!("{l}\n")).collect()
 }
 
 /// [`SHARED`] in the fork repository at `rust_dir`, held for `root`, at
@@ -673,6 +712,46 @@ mod tests {
             Fork::of(&e.primary);
         });
         assert!(said.contains("is not at or ahead of"), "{said}");
+    }
+
+    /// **A clean checkout moved to a pin that moves a submodule's gitlink is
+    /// the pin**: `git checkout` leaves the submodule at the old gitlink, which
+    /// is no work of anybody's.
+    #[test]
+    fn a_submodule_left_at_the_old_gitlink_is_no_work() {
+        let e = estate("fork-old-gitlink");
+        let fork = e.same.join("rust");
+        let backtrace = fork.join("library/backtrace");
+        git(&fork, &["submodule", "update", "-q", "--init", "library/backtrace"]);
+        let old = git(&backtrace, &["rev-parse", "HEAD"]);
+        write(&backtrace.join("lib.rs"), "pub fn trace() { moved() }\n");
+        git(&backtrace, &["commit", "-qam", "a newer backtrace"]);
+        git(&fork, &["commit", "-qam", "moves backtrace's gitlink"]);
+        let pin = git(&fork, &["rev-parse", "HEAD"]);
+        git(&fork, &["checkout", "-q", "--detach", "HEAD~1"]);
+        git(&backtrace, &["checkout", "-q", &old]);
+        git(&e.same, &["update-index", "--cacheinfo", &format!("160000,{pin},rust")]);
+
+        let moved = Fork::of(&e.same);
+        assert_eq!(git(&fork, &["rev-parse", "HEAD"]), pin, "a clean checkout behind its pin was not moved to it");
+        assert!(matches!(moved, Fork::Pinned { commit, .. } if commit == pin), "a submodule at the old gitlink was built in place");
+    }
+
+    /// **A fork checkout whose submodule is a git worktree of another clone is
+    /// refused before anything is built in it**, as main made them, and one
+    /// whose submodules are its own is not.
+    #[test]
+    fn a_submodule_of_another_clone_is_refused_before_a_build() {
+        let e = estate("fork-borrowed");
+        let primarys = e.rust_dir.join("library/backtrace");
+        drop(Fork::of(&e.primary).checkout(&e.primary));
+        let backtrace = e.a.join("rust/library/backtrace");
+        fs::remove_dir(&backtrace).unwrap();
+        git(&primarys, &["worktree", "add", "-q", "--detach", backtrace.to_str().unwrap(), "HEAD"]);
+        let said = refusal("a checkout whose submodule is another clone's worktree was built in", || {
+            Fork::of(&e.a).checkout(&e.a);
+        });
+        assert!(said.contains(&format!("{} is a git worktree of", backtrace.display())) && said.contains("nothing was built"), "{said}");
     }
 
     /// **A sysroot that is not whole is refused**: a compiler without clang

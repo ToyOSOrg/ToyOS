@@ -187,17 +187,6 @@ fn defect(dir: &Path) -> Option<String> {
 /// Build the LLVM `key` names from `fork` into `partial`.
 fn fill(root: &Path, fork: &Path, key: &str, partial: &Path, build: &impl Fn(&Path) -> PathBuf) {
     let checkout = fork.join(LLVM);
-    if checkout.join(".git").exists() {
-        let status = ["-c", "core.untrackedCache=true", "status", "--porcelain", "--untracked-files=normal"];
-        let edited = git_out(&checkout, &status);
-        assert!(
-            edited.is_empty(),
-            "{} holds changes no commit does, and an LLVM is keyed on the commit its gitlink names: \
-             commit them there and record that commit in {}\n{edited}",
-            checkout.display(),
-            fork.display(),
-        );
-    }
     eprintln!("Building LLVM {key} in {}: nobody on this host has", fork.display());
     let built = build(fork);
     let host = host_triple();

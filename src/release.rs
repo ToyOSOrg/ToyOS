@@ -180,6 +180,15 @@ fn run(cmd: &mut Command) -> Result<(), String> {
     status.success().then_some(()).ok_or_else(|| format!("{cmd:?} exited {status}"))
 }
 
+/// Check `root`'s `rust/` out at the commit it pins, in a primary checkout
+/// alone: a linked worktree's `git submodule` clones the fork a second time.
+fn check_out_fork(root: &Path) -> Result<(), String> {
+    match crate::toolchain::owner(root) {
+        crate::toolchain::Owner::Us => run(Command::new("git").args(["submodule", "update", "--init", "rust"]).current_dir(root)),
+        _ => Err(format!("{} is no primary checkout, and a release is built in one", root.display())),
+    }
+}
+
 /// Whether `gh` says `tag` carries [`ASSET`].
 fn published(root: &Path, tag: &str) -> bool {
     Command::new("gh")
@@ -222,7 +231,7 @@ pub fn ensure_published(root: &Path) -> Result<String, String> {
 
 /// Bootstrap, check the glibc floor, package, publish, and wait for the asset.
 fn build(root: &Path, tag: &str, tmp: &Path) -> Result<(), String> {
-    run(Command::new("git").args(["submodule", "update", "--init", "rust"]).current_dir(root))?;
+    check_out_fork(root)?;
     // Bootstrap takes `HEAD^1` as the upstream commit whose artifacts to fetch
     // when it sees GitHub Actions; in this fork that is our own merge, which
     // rust-lang's CI never built.
@@ -430,6 +439,18 @@ fn alias(root: &Path, manifest: &str, tmp: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A release is built in a primary checkout alone**: a linked worktree's
+    /// is refused, and `git submodule` never runs there.
+    #[test]
+    fn a_linked_worktree_checks_out_no_fork() {
+        let e = crate::store::tests::estate("release-linked");
+        let stub = e.same.parent().unwrap().join("stub");
+        git(&e.primary, &["worktree", "add", "-q", "-b", "stub", stub.to_str().unwrap()]);
+        let said = check_out_fork(&stub).expect_err("a linked worktree checked the fork out");
+        assert!(said.contains("is no primary checkout"), "{said}");
+        assert!(!e.primary.join(".git/worktrees/stub/modules").exists(), "git submodule ran in a linked worktree");
+    }
 
     /// The packaging is one of the trees its own tag hashes.
     #[test]

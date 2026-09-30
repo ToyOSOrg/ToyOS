@@ -1,5 +1,4 @@
-//! A lock is `flock(2)` on an open directory that no build removes, so there is
-//! no lock file to be cleaned out from under a waiter. The kernel releases it
+//! A lock is `flock(2)` on an open directory. The kernel releases it
 //! when the holder's descriptor closes, so a killed holder strands nothing, and
 //! the descriptor is close-on-exec, so no child a holder spawns keeps it held.
 
@@ -168,6 +167,12 @@ pub(crate) mod tests {
             let _ = self.child.kill();
             let _ = self.child.wait();
         }
+    }
+
+    /// `file`, a directory opened earlier, exclusively if nobody holds it: a
+    /// lock granted after whatever named it may have moved on.
+    pub(crate) fn try_exclusive_opened(file: File) -> Option<Lock> {
+        attempt(&file, libc::LOCK_EX | libc::LOCK_NB).then_some(Lock { file })
     }
 
     /// The holder's half of [`Elsewhere`]: say it holds, and hold until it is
