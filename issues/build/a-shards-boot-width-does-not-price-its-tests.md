@@ -11,8 +11,7 @@ reference and multiplies every liveness ceiling by the result; every shard print
 it (`host: fastest boot N ms against the reference 1320 ms — liveness ceilings
 paid at Wx width`). The proposal was to spend the same factor on the *duration
 profile*: divide each shard's measured prices by its width in
-`35383398^:src/durations.rs`'s merge, so `src/tiers.rs`'s ceiling compares like with like
-across shards of different speed, with timer-anchored names exempt because a
+`35383398^:src/durations.rs`'s merge, with timer-anchored names exempt because a
 fixed wait does not shrink on a fast host.
 
 **Measured over six hosted twelve-shard runs and refused.** Dividing by the
@@ -60,7 +59,7 @@ reverse regression is 1.248 with `var(ln width)` 7.86x `var(factor)`: even read
 charitably, ln(width) is the shared cause buried under eight times its own
 variance of noise, and dividing by it adds that noise to every price.
 
-**Within-name slope of ln(price) on ln(width), by `src/tiers.rs` relegation
+**Within-name slope of ln(price) on ln(width), by
 class** — the prediction was ~1 for ordinary and `Why::Cost` names and ~0 for
 `Why::TimerAnchored`:
 

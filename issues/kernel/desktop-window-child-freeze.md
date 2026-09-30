@@ -134,10 +134,7 @@ machine that is still running passes somewhere. Judge the next occurrence by the
 signature exactly as before; a green run of this test proves what it always
 proved, which is nothing.
 
-Two things a reader looking for the next sighting needs. The test is
-`Tier::Nightly` (`src/tiers.rs`), so a plain `cargo test` does not run it at all
-— `cargo test --test toyos-build -- --nightly desktop_window_child` does. And
-the one instrument that could name what a stopped CPU is doing has still never
+The one instrument that could name what a stopped CPU is doing has still never
 been fired at one: `sched::dump`'s NMI probe separates a CPU spinning with `IF`
 clear from one halted with its kick undelivered from one wedged below the
 interrupt layer. Take `info registers -a` over QMP before pressing Ctrl+Alt+D,

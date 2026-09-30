@@ -983,12 +983,6 @@ ceiling = 16667
 ceiling_from = "as boot.testcases.panel_max_us"
 
 [[number]]
-name = "boot.foreignrecord.panel_max_us"
-unit = "us"
-ceiling = 16667
-ceiling_from = "as boot.testcases.panel_max_us"
-
-[[number]]
 name = "boot.logstallcase.panel_max_us"
 unit = "us"
 ceiling = 16667
@@ -1136,12 +1130,6 @@ ceiling = 100000
 ceiling_from = "as boot.testcases.panel_us"
 
 [[number]]
-name = "boot.foreignrecord.panel_us"
-unit = "us"
-ceiling = 100000
-ceiling_from = "as boot.testcases.panel_us"
-
-[[number]]
 name = "boot.logstallcase.panel_us"
 unit = "us"
 ceiling = 100000
@@ -1276,12 +1264,6 @@ ceiling_from = "as boot.testcases.park_open_operations"
 
 [[number]]
 name = "boot.ccorpus-2.park_open_operations"
-unit = "operations"
-ceiling = 0
-ceiling_from = "as boot.testcases.park_open_operations"
-
-[[number]]
-name = "boot.foreignrecord.park_open_operations"
 unit = "operations"
 ceiling = 0
 ceiling_from = "as boot.testcases.park_open_operations"

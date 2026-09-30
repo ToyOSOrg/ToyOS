@@ -17,6 +17,6 @@ of 6 green off the one red.
 No layer (QEMU input, i8042/USB, translator, console) has been measured yet.
 
 **Exit condition.** The layer that drops the characters is identified and
-fixed, and the test then passes 10 of 10 consecutive runs of the Fast tier
+fixed, and the test then passes 10 of 10 consecutive runs
 under the host load of the original failure (other suites running in
 parallel); then the redlist row goes.

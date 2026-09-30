@@ -64,9 +64,7 @@ changes.
   `qemu::budget(20 s)`, the phase's. Still `Sched::Parallel`. **The duration
   profile's share of this is closed**: nothing is retyped against a clock any
   more — `/system/bin/terminal` prints `terminal: ready` and `shell_echoes` waits on
-  that (`tests/toyos.rs`'s `SURFACE_UP`) — and the four-minute lane holder that
-  the profile used to seat a second desktop beside, `desktop_window_child`, is
-  `Tier::Nightly` and so never in a pull request's parallel phase.
+  that (`tests/toyos.rs`'s `SURFACE_UP`).
 - **`desktop_locale_detect`** — retired 2026-09-04, green 5 of 5 beside a full
   fast tier.
 - **`netd_connection_caps`** — retired 2026-09-04, green 5 of 5 beside a full
@@ -486,6 +484,6 @@ mechanism for it.
   driver nor this test, and the test was green in its previous fast-tier run.
 
   Owner: the i8042 tally. **Exit condition**: the verdict revising itself in a
-  parallel run — a loaded full fast tier in which `i8042_undecoded_bytes`'
+  parallel run — a loaded full suite in which `i8042_undecoded_bytes`'
   first mute line names nothing and its second names the sequence, or the
   retirement's clause narrowed to the conditions under which it holds.
