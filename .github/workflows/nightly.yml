@@ -176,9 +176,8 @@ jobs:
           key: guest-${{ github.run_id }}
       - *serial
 
-  # "Only Rust and QEMU", run rather than argued: `cargo run -- --build-only`
-  # from a fresh machine. `sid` as it stands, image and archive both, and no
-  # cache — a fresh machine is the premise.
+  # `cargo run -- --build-only` from a fresh machine. `sid` as it stands,
+  # image and archive both, and no cache — a fresh machine is the premise.
   portability-linux:
     runs-on: ubuntu-24.04
     timeout-minutes: 350

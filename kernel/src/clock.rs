@@ -161,7 +161,7 @@ pub fn utc_secs() -> Option<u64> {
     utc_nanos().map(|nanos| nanos / NANOS_PER_SEC)
 }
 
-pub const NANOS_PER_SEC: u64 = 1_000_000_000;
+const NANOS_PER_SEC: u64 = 1_000_000_000;
 
 /// Nanoseconds since the Unix epoch, UTC: the RTC's whole-second reading carried
 /// on by the counter, so its resolution is the counter's and its accuracy the

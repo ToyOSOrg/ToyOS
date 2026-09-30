@@ -26,7 +26,7 @@
 #
 # The other program it starts prints the cwd and exits.
 [boot]
-start = ["logd", "toybox"]
+start = ["logd", "fsd", "toybox"]
 
 # **Every image that carries a `TOYOS-LOG` partition runs this**, and every
 # image does. The kernel keeps the record ring and the console and writes no
@@ -41,3 +41,10 @@ syscap = ["logread"]
 
 [programs.toybox]
 args = ["pwd"]
+
+# `/log`'s file server, and only it: the log partition is the kernel's
+# partition claim on the boot stick, so this row declares no `devices`, and
+# DATA's block service would be one.
+[programs.fsd]
+restart = true
+roles = ["log"]
