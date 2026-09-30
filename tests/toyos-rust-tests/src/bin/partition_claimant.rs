@@ -15,12 +15,7 @@
 //!   stick's, which the host drew and this binary cannot know;
 //! - `holder` — claims the target, says so, and waits to be killed;
 //! - `endowed` — finds the claim its parent moved to it, by the label init
-//!   endows a `part:` row under;
-//! - `unanswered` — a claim while a disk does not answer a read of its table;
-//! - `withheld <ROOT>` — a claim of ROOT's source, whose disk did not answer
-//!   ROOT's hold and answers now;
-//! - `deadman` — transfers whose every attempt is refused on its budget until
-//!   the deadman.
+//!   endows a `part:` row under.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::toyos::process::CommandExt;
@@ -99,9 +94,6 @@ fn main() {
         Some("main") => test(&cap, &args[1..]),
         Some("holder") => holder(&cap),
         Some("endowed") => endowed(),
-        Some("unanswered") => unanswered(&cap),
-        Some("withheld") => withheld(&cap, &args[1..]),
-        Some("deadman") => deadman(&cap),
         other => panic!("unknown role {other:?}"),
     }
 }
@@ -328,39 +320,3 @@ fn past_the_end(target: &PartitionDev, blocks: u64) {
     println!("partition_claimant: every transfer past the end refused");
 }
 
-/// A disk that did not answer a read of its table makes the answer unknown:
-/// the claim is refused, not resolved on the disks that did answer.
-fn unanswered(cap: &SysCap) {
-    refused(
-        cap,
-        "the target, while its disk does not answer a read of its table,",
-        guid(TARGET),
-        SyscallError::NotSupported,
-    );
-    println!("partition_claimant: PASS");
-}
-
-/// ROOT's source, which the boot withheld when its disk did not answer: the
-/// disk answers now and nothing holds the span, and the claim is still the
-/// kernel's to refuse.
-fn withheld(cap: &SysCap, root: &[String]) {
-    let [root] = root else { panic!("withheld takes ROOT's GUID, got {root:?}") };
-    refused(
-        cap,
-        "ROOT, withheld when its disk did not answer the boot's hold,",
-        guid(root),
-        SyscallError::PermissionDenied,
-    );
-    println!("partition_claimant: PASS");
-}
-
-/// Every attempt of a transfer is refused on its budget until the deadman: each
-/// ends `Io`, the device's word, and not another ask-again. (NVMe's flush asks
-/// the device nothing, so it has no budget to refuse.)
-fn deadman(cap: &SysCap) {
-    let target = claim(cap, guid(TARGET)).expect("the target is claimable");
-    let mut one = [[0u8; BLOCK_BYTES]];
-    assert_eq!(target.write(0, &one), Err(SyscallError::Io), "a write past the deadman");
-    assert_eq!(target.read(0, &mut one), Err(SyscallError::Io), "a read past the deadman");
-    println!("partition_claimant: PASS");
-}

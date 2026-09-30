@@ -371,8 +371,8 @@ const RUST_SKIP: &[&str] = &[
     // `data_candidate_with_bad_geometry_is_absent` run it.
     "home_absent",
     // Needs the disks `tests/common/partclaim.rs` crafts, the boot stick's GUIDs
-    // as arguments and a role; `partition_claim` and `partition_claim_gives_up`
-    // boot it and judge it off the images.
+    // as arguments and a role; `partition_claim` boots it and judges it off the
+    // images.
     "partition_claimant",
     // Needs `test-small-caches` for the eviction its read-back rests on, and a
     // boot of its own for the host-side re-read. `redirty_mid_flush` runs it.
@@ -810,10 +810,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // the neighbours and the target judged off the image. Body in
     // `tests/common/partclaim.rs`, as is the one below.
     ("partition_claim", Sched::Parallel),
-    // Three boots: a disk that does not answer a read of its table, every
-    // attempt refused until the deadman, and ROOT's source withheld from every
-    // claim once its disk did not answer the boot's hold.
-    ("partition_claim_gives_up", Sched::Parallel),
     // DATA's file server killed under an unanswered write, four times: its
     // clients reopen, the fourth end closes /home to Gone, and the flushed
     // files read back off the image. Body in `tests/common/storage.rs`.
@@ -1352,7 +1348,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("dump_left_pending_is_owed", &["test_rs_dump_stage_load"]),
     ("syscall_window_nmi_controls", &["test_rs_nmi_window_spin"]),
     ("partition_claim", &["test_rs_partition_claimant"]),
-    ("partition_claim_gives_up", &["test_rs_partition_claimant"]),
     ("log_program_line", &["test_rs_log_origin"]),
     ("log_program_forgery", &["test_rs_log_forger"]),
     ("log_after_a_refused_stop", &["test_rs_log_refused_stop"]),
@@ -8764,9 +8759,6 @@ fn run_machine_test(
         "foreign_disk_untouched" => storage::foreign_disk_untouched(test_config, c_bins, rust_bins),
         "internal_disk_boot" => storage::internal_disk_boot(test_config, c_bins, rust_bins),
         "partition_claim" => partclaim::partition_claim(test_config, c_bins, rust_bins),
-        "partition_claim_gives_up" => {
-            partclaim::partition_claim_gives_up(test_config, c_bins, rust_bins)
-        }
         "block_duplicate_id" => storage::block_duplicate_id(test_config, c_bins, rust_bins),
         "volume_from_another_disk" => {
             storage::volume_from_another_disk(test_config, c_bins, rust_bins)

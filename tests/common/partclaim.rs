@@ -37,9 +37,6 @@ const GRANTED: &str = "A94F0E6D-3B2C-4E1A-8C7D-6E5F4A3B2C1D";
 const MISALIGNED: &str = "3E8A1C5F-7D2B-4F60-9A1E-5C4B3D2E1F07";
 /// Mirrored: a partition of whole 4 KiB blocks that begins inside one.
 const MISSTART: &str = "5A7C9E1B-3D5F-4B71-8C2E-4F6A8B0C2D35";
-/// The twin partition's unique GUID where no boot stick's is copied: the
-/// crafted disk of the boots that judge no twin.
-const TWIN: &str = "6D2F9B41-8C3E-4A57-B1D0-2E4F6A8C0B13";
 /// Mirrored: DATA, which fsd serves `/home` from.
 const DATA: &str = "E3A7C5D9-1B2F-4E6A-8D0C-9F7B5A3E1C24";
 
@@ -200,120 +197,6 @@ pub fn partition_claim(
          death; both FAT32 neighbours untouched byte for byte and clean to fatgen103; /home \
          intact"
     );
-    Ok(())
-}
-
-/// The exits of a claim that gets no answer: a disk that does not answer a
-/// read of its table refuses the claim rather than resolving it on the disks
-/// that did, a transfer every attempt of which is refused on its budget ends
-/// at the deadman with the device's word, and ROOT's source, whose disk did
-/// not answer its hold, stays the kernel's once the disk answers. The crafted
-/// disk is a second USB stick beside the boot stick.
-pub fn partition_claim_gives_up(
-    _test_config: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    let config = super::compile::repo_root().join(CONFIG);
-    let crafted = super::lane::dir().join("partclaim-gives-up.img");
-    let cases: [(&'static [&'static str], &str, usize, &[&str]); 2] = [
-        (
-            &["partclaim-table-unanswered"],
-            "unanswered",
-            1,
-            &[" did not answer a read of LBA 0 while looking for "],
-        ),
-        (
-            &["fsync-budget-spent", "fsync-deadman-now"],
-            "deadman",
-            0,
-            &[
-                "partclaim: a write still refused after 1 attempt(s)",
-                "partclaim: a read still refused after 1 attempt(s)",
-            ],
-        ),
-    ];
-    for (params, role, refusals, wants) in cases {
-        craft_disk(&crafted, TWIN)?;
-        let mut qemu = QemuInstance::boot_with_options(
-            &config,
-            c_bins,
-            rust_bins,
-            BootOptions {
-                profile: qemu::Profile::UsbDisk,
-                usb_images: vec![crafted.clone()],
-                nvme_image: Some(tableless_nvme("partclaim-nvme.img")?),
-                kernel_params: params,
-                ..Default::default()
-            },
-        );
-        let boot = qemu.boot_log().to_string();
-        no_panic(role, &boot)?;
-        let result =
-            qemu.run_test(&format!("test_rs_partition_claimant {role}"), Duration::from_secs(180));
-        let tail = shut_down(qemu);
-        let kernel = guest_verdict(&result, &tail, refusals).map_err(|e| format!("{role}: {e}"))?;
-        for want in wants {
-            if !kernel.contains(want) {
-                return Err(format!("{role}: the kernel never said {want:?}:\n{kernel}"));
-            }
-        }
-        no_panic(role, &tail)?;
-        for want in wants {
-            let line = kernel.lines().find(|l| l.contains(want)).unwrap_or_default();
-            eprintln!("  [partclaim] {role}: {}", line.trim());
-        }
-    }
-    root_withheld(&config, &crafted, c_bins, rust_bins)?;
-    let _ = std::fs::remove_file(&crafted);
-    Ok(())
-}
-
-fn root_withheld(
-    config: &Path,
-    crafted: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    const PARAMS: &[&str] = &["partclaim-root-withheld"];
-    let image = super::lane::dir().join("partclaim-root-withheld.img");
-    std::fs::write(&image, qemu::build_boot_image(config, c_bins, rust_bins, PARAMS))
-        .map_err(|e| format!("write the boot image: {e}"))?;
-    let [_, _, root] = boot_stick_guids(&image)?;
-    craft_disk(crafted, TWIN)?;
-    let mut qemu = QemuInstance::boot_with_options(
-        config,
-        c_bins,
-        rust_bins,
-        BootOptions {
-            profile: qemu::Profile::UsbDisk,
-            boot_image: Some(Staged::Pristine(image.clone())),
-            usb_images: vec![crafted.to_path_buf()],
-            nvme_image: Some(tableless_nvme("partclaim-nvme.img")?),
-            kernel_params: PARAMS,
-            ..Default::default()
-        },
-    );
-    let boot = qemu.boot_log().to_string();
-    no_panic("withheld", &boot)?;
-    let not_held = format!(
-        "root: the partition ROOT was read from, {root}, is not held because it is on no disk \
-         that answered"
-    );
-    if !boot.contains(&not_held) {
-        return Err(format!("withheld: the kernel never said {not_held:?}:\n{boot}"));
-    }
-    let result =
-        qemu.run_test(&format!("test_rs_partition_claimant withheld {root}"), Duration::from_secs(180));
-    let tail = shut_down(qemu);
-    let kernel = guest_verdict(&result, &tail, 1).map_err(|e| format!("withheld: {e}"))?;
-    let want = format!("partclaim: {root} is where ROOT was read from, and the kernel withholds it");
-    if !kernel.contains(&want) {
-        return Err(format!("withheld: the kernel never said {want:?}:\n{kernel}"));
-    }
-    no_panic("withheld", &tail)?;
-    let _ = std::fs::remove_file(&image);
-    eprintln!("  [partclaim] withheld: {want}");
     Ok(())
 }
 

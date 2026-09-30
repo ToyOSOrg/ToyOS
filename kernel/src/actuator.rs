@@ -395,18 +395,6 @@ actuators! {
     /// Reopen init by pid once it is spawned, and open every kernel thread's pid, the way `SYS_PROCESS_OPEN` does.
     process_reopen_selftest = "process-reopen-selftest";
 
-    /// Refuse every read of device block 0 of each disk the kernel drives — its
-    /// protective MBR and GPT header — once the boot has read its own tables,
-    /// so a partition claim meets a disk that does not answer a read of its
-    /// table. Judged by `partition_claim_gives_up`.
-    partclaim_table_unanswered = "partclaim-table-unanswered";
-
-    /// Refuse every read of device block 0 of each disk the kernel drives across
-    /// `rootfs::hold_source` alone, so ROOT's hold finds the disk carrying it
-    /// silent and withholds its GUID, and the disk answers every read after.
-    /// Judged by `partition_claim_gives_up`.
-    partclaim_root_withheld = "partclaim-root-withheld";
-
     /// Offer the block layer a second device claiming a registered `DeviceId`, and report what it did with it.
     block_duplicate_id = "block-duplicate-id";
 

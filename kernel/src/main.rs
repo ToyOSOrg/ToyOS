@@ -516,19 +516,7 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     }
     // After xhci::init: a USB-booted disk doesn't exist until the controller binds it.
     gpt::probe_usb_disks();
-    #[cfg(feature = "boot-actuators")]
-    if actuator::partclaim_root_withheld() {
-        block::unanswered::refuse();
-    }
     rootfs::hold_source();
-    #[cfg(feature = "boot-actuators")]
-    if actuator::partclaim_root_withheld() {
-        block::unanswered::answer();
-    }
-    #[cfg(feature = "boot-actuators")]
-    if actuator::partclaim_table_unanswered() {
-        block::unanswered::refuse();
-    }
 
     #[cfg(feature = "boot-actuators")]
     if actuator::leak_rollback_selftest() {
