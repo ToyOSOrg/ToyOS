@@ -26,7 +26,7 @@ Loads when you read a file under `src/` — the root cargo project, package name
 
 ## Worktrees
 
-- `git worktree add --no-track -b wt/<name> <path> origin/main` makes one and `git worktree remove <path>` takes it. A worktree holding a fork checkout of its own in `rust/` is refused by git until that checkout goes first: `git -C <primary>/rust worktree remove <path>/rust`. Never `git submodule update` in a linked worktree: that is a second 913 MiB clone of the fork.
+- `git worktree add --no-track -b wt/<name> <path> origin/main` makes one and `git worktree remove <path>` takes it. A worktree holding a fork checkout of its own in `rust/` is refused by git until that checkout goes first. Never `git submodule update` in a linked worktree: that is a second 913 MiB clone of the fork.
 - Everything under a worktree — targets, images, its fork checkout — is its own; the object stores, the store and the rustup link are the primary checkout's, and ownership is derived from `git rev-parse --git-common-dir`, never recorded.
 - **A linked worktree's `main` ref is only as current as the primary's last `--sync`: anything asking "does this branch differ from main" diffs against `origin/main`.**
 - **Type-checking a std edit without building a sysroot**: point `__CARGO_TESTS_ONLY_SRC_ROOT` at a tree holding an APFS clone of `rust/library` (`cp -Rc`), a workspace `Cargo.toml` naming `library/std`, and symlinks to `toyos-abi`/`toyos`; then `CARGO_TARGET_DIR=<scratch> cargo +toyos build -Z build-std=std,panic_abort --target x86_64-unknown-toyos --offline`. Delete `<scratch>/**/.fingerprint/std-*` between runs — cargo does not re-fingerprint std under `-Zbuild-std`.

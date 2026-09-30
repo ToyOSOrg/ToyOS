@@ -1122,14 +1122,13 @@ fn metadata(
     serde_json::from_slice(&out).map_err(|e| format!("cargo metadata printed no JSON: {e}"))
 }
 
-/// The fork's `library/` this tree builds std from, read with no checkout held
-/// and nothing written outside `root`'s `target/`: a primary checkout's
-/// `rust/`, whose pinned commit alone is fetched when it was never
-/// initialised, as a CI runner's is; a linked worktree's own checkout while it
-/// holds fork work; otherwise the commit a linked worktree pins, read out of
-/// the primary's fork repository beside links to its `toyos-abi` and `toyos`,
-/// which `library/std` names as `../../../`. A linked worktree never runs
-/// `git submodule`.
+/// The fork's `library/` this tree builds std from, read with no checkout
+/// held: a primary checkout's `rust/`, whose pinned commit alone is fetched
+/// when it was never initialised, as a CI runner's is; a linked worktree's own
+/// checkout while it holds fork work; otherwise the commit a linked worktree
+/// pins, read out of the primary's fork repository beside links to its
+/// `toyos-abi` and `toyos`, which `library/std` names as `../../../`. A linked
+/// worktree never runs `git submodule`.
 fn std_library(root: &Path) -> Result<PathBuf, String> {
     let fork = match crate::toolchain::owner(root) {
         Owner::Elsewhere(primary) => {

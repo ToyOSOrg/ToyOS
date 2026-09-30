@@ -167,7 +167,9 @@ impl Fork {
     /// directory the one before it built in. One a submodule of which is a git
     /// worktree of another clone is refused: bootstrap moves every submodule
     /// checked out to its gitlink with `git submodule update`, which over such
-    /// a worktree rewrites that clone's `core.worktree`.
+    /// a worktree rewrites that clone's `core.worktree`. In the host's shared
+    /// checkout, each submodule checked out is reset to its commit, with
+    /// nothing untracked.
     pub fn checkout(&self, root: &Path) -> Checkout {
         let checkout = match self {
             Fork::Checkout(dir) => {
@@ -175,9 +177,8 @@ impl Fork {
             }
             Fork::Pinned { rust_dir, commit } => shared(rust_dir, root, commit),
         };
-        let staged = git_out(&checkout.dir, &["ls-files", "--stage"]);
-        let gitlinks = staged.lines().filter(|l| l.starts_with("160000 ")).filter_map(|l| l.split_once('\t'));
-        for submodule in gitlinks.map(|(_, path)| checkout.dir.join(path)).filter(|s| s.join(".git").exists()) {
+        let gitlinks = store::gitlinks(&checkout.dir, &[], None);
+        for submodule in gitlinks.into_iter().map(|(path, _)| checkout.dir.join(path)).filter(|s| s.join(".git").exists()) {
             let dirs = git_out(&submodule, &["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"]);
             let (own, common) = dirs.trim().split_once('\n').expect("git names two directories");
             assert!(
@@ -190,6 +191,10 @@ impl Fork {
                 submodule.display(),
                 checkout.dir.display(),
             );
+            if let Fork::Pinned { .. } = self {
+                git_out(&submodule, &["reset", "-q", "--hard"]);
+                git_out(&submodule, &["clean", "-dffxq"]);
+            }
         }
         checkout
     }
@@ -228,8 +233,7 @@ fn work(own: &Path) -> String {
 }
 
 /// [`SHARED`] in the fork repository at `rust_dir`, held for `root`, at
-/// `commit`, beside links to `root`'s ABI trees. Nothing edits it, so whatever
-/// a build killed in it left goes.
+/// `commit`, beside links to `root`'s ABI trees.
 fn shared(rust_dir: &Path, root: &Path, commit: &str) -> Checkout {
     let base = rust_dir.join(SHARED);
     fs::create_dir_all(&base).unwrap_or_else(|e| panic!("create {}: {e}", base.display()));
@@ -258,7 +262,7 @@ pub fn ensure(root: &Path, rust_dir: &Path) -> Sysroot {
     let key = key(&compiler.key, &sources);
     let held = store::get(root, rust_dir, Kind::Sysroot, &key, |partial| {
         let checkout = fork.checkout(root);
-        assemble(&compiler.stage2, partial, |partial| build(root, &compiler, &checkout.dir, partial));
+        assemble(&compiler.stage2, &checkout.dir, partial, |partial| build(root, &compiler, &checkout.dir, partial));
         let again = self::key(&compiler.key, &Sources::of(root, &checkout.dir));
         assert!(
             again == key,
@@ -273,10 +277,13 @@ pub fn ensure(root: &Path, rust_dir: &Path) -> Sysroot {
 }
 
 /// Put in `partial` a whole toolchain: the compiler's files at `stage2` and
-/// what `fill` adds to them. One that is not whole is refused.
-fn assemble(stage2: &Path, partial: &Path, fill: impl FnOnce(&Path)) {
+/// what `fill` builds from the fork checkout `fork` and adds to them. One that
+/// is not whole, or built from a submodule its gitlink does not name, is
+/// refused.
+fn assemble(stage2: &Path, fork: &Path, partial: &Path, fill: impl FnOnce(&Path)) {
     clone_tree(stage2, partial);
     fill(partial);
+    store::assert_built_at_gitlinks(fork, &["library"], "a sysroot");
     if let Some(defect) = toolchain::toolchain_defect(partial) {
         panic!("a sysroot was made from {}, and is not whole: {defect}", stage2.display());
     }
@@ -535,7 +542,7 @@ pub(crate) fn tracked_files(dir: &Path, pathspecs: &[&str]) -> Result<Vec<String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::tests::{estate, git, refusal, write};
+    use crate::store::tests::{backtrace_behind_a_staged_gitlink, estate, git, refusal, write};
     use toyos_tmpdir::TempDir;
 
     /// **The key is the compiler's and the trees std and libc are built
@@ -664,6 +671,9 @@ mod tests {
         assert_eq!(git(&e.rust_dir, &["rev-parse", "HEAD"]), before, "the primary's fork moved");
         write(&checkout.dir.join("library/std/src/lib.rs"), "left by a killed build");
         write(&checkout.dir.join("left.rs"), "left by a killed build");
+        git(&checkout.dir, &["submodule", "update", "-q", "--init", "library/backtrace"]);
+        write(&checkout.dir.join("library/backtrace/lib.rs"), "left by a killed build");
+        write(&checkout.dir.join("library/backtrace/left.rs"), "left by a killed build");
         drop(checkout);
 
         let other = stub("other");
@@ -671,7 +681,8 @@ mod tests {
         git(&other, &["update-index", "--cacheinfo", &format!("160000,{moved},rust")]);
         let checkout = Fork::of(&other).checkout(&other);
         assert_eq!(git(&checkout.dir, &["rev-parse", "HEAD"]), moved, "a moved pin kept the old checkout");
-        assert_eq!(git(&checkout.dir, &["status", "--porcelain"]), "", "what a killed build left stayed");
+        let left = git(&checkout.dir, &["status", "--porcelain", "--ignore-submodules=none"]);
+        assert_eq!(left, "", "what a killed build left stayed");
         assert_eq!(beside(&checkout.dir, "toyos"), fs::canonicalize(other.join("toyos")).unwrap(), "the links name the last build's trees");
         drop(checkout);
 
@@ -712,6 +723,26 @@ mod tests {
             Fork::of(&e.primary);
         });
         assert!(said.contains("is not at or ahead of"), "{said}");
+    }
+
+    /// **A submodule holding an edit or an untracked file is work**: a linked
+    /// worktree's own checkout at its pin, clean but for either, is built where
+    /// it is, and never as the pin, which holds neither.
+    #[test]
+    fn a_submodule_holding_changes_is_work() {
+        let e = estate("fork-submodule-work");
+        let fork = e.a.join("rust");
+        let backtrace = fork.join("library/backtrace");
+        git(&e.a, &["add", "rust"]);
+        git(&e.a, &["commit", "-qm", "pins a"]);
+        git(&fork, &["submodule", "update", "-q", "--init", "library/backtrace"]);
+        assert!(matches!(Fork::of(&e.a), Fork::Pinned { .. }), "a clean checkout at its pin was built where it is");
+        let where_it_is = |f: Fork| matches!(f, Fork::Checkout(dir) if dir == fork);
+        write(&backtrace.join("lib.rs"), "pub fn trace() { edited() }\n");
+        assert!(where_it_is(Fork::of(&e.a)), "an edit in a submodule was built as the pin");
+        git(&backtrace, &["checkout", "-q", "--", "lib.rs"]);
+        write(&backtrace.join("new.rs"), "pub fn new() {}\n");
+        assert!(where_it_is(Fork::of(&e.a)), "an untracked file in a submodule was built as the pin");
     }
 
     /// **A clean checkout moved to a pin that moves a submodule's gitlink is
@@ -758,6 +789,7 @@ mod tests {
     /// makes one without it.
     #[test]
     fn a_sysroot_that_is_not_whole_is_refused() {
+        let e = estate("sysroot-whole");
         let base = TempDir::new("sysroot-whole");
         let stage2 = base.join("stage2");
         let lld = toolchain::rust_lld(&stage2);
@@ -766,9 +798,26 @@ mod tests {
         write(&lld.with_file_name("llvm-ar"), "llvm-ar");
         write(&stage2.join("bin/cargo"), "cargo");
         let said = refusal("a sysroot without clang was taken for whole", || {
-            assemble(&stage2, &base.join("partial"), |partial| write(&partial.join("lib/rustlib/x/lib/libstd.rlib"), "std"));
+            assemble(&stage2, &e.same.join("rust"), &base.join("partial"), |partial| write(&partial.join("lib/rustlib/x/lib/libstd.rlib"), "std"));
         });
         assert!(said.contains("is not whole") && said.contains("clang"), "{said}");
+    }
+
+    /// **A sysroot built from a submodule at another commit than its gitlink
+    /// is refused**: bootstrap leaves `library/backtrace` at `HEAD`'s gitlink
+    /// under a staged one, and builds it.
+    #[test]
+    fn a_sysroot_built_off_a_submodule_s_gitlink_is_refused() {
+        let e = estate("sysroot-gitlink");
+        let fork = e.a.join("rust");
+        let (head, staged) = backtrace_behind_a_staged_gitlink(&fork);
+        let base = TempDir::new("sysroot-gitlink");
+        write(&base.join("stage2/bin/rustc"), "rustc");
+        let said = refusal("a sysroot built from a submodule its gitlink does not name was taken", || {
+            assemble(&base.join("stage2"), &fork, &base.join("partial"), |_| {});
+        });
+        let named = format!("{} is at {head}, and its gitlink names {staged}", fork.join("library/backtrace").display());
+        assert!(said.contains(&named), "{said}");
     }
 
     /// **What a stage-0 std build made is what its stamp names**: its

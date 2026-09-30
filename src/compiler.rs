@@ -24,6 +24,9 @@ const RECIPE: &str = "bootstrap stage 2 of compiler/rustc, library and src/tools
 /// a product of the store does not carry (`store::publish`).
 const SOURCE_LINKS: [&str; 2] = ["lib/rustlib/src", "lib/rustlib/rustc-src"];
 
+/// What bootstrap compiles for a compiler, as it names them.
+const BUILT: [&str; 3] = ["compiler/rustc", "library", "src/tools/cargo"];
+
 /// Where a fork checkout builds its compiler, kept between builds so the next
 /// one is incremental.
 const BUILD_DIR: &str = "build/toyos-rustc";
@@ -82,6 +85,7 @@ fn fill(root: &Path, fork: &Path, key: &str, partial: &Path, build: &impl Fn(&Pa
         "the fork's compiler sources moved while compiler {key} was being built (they are now \
          {again}); nothing was kept, and the next build makes the one they name"
     );
+    store::assert_built_at_gitlinks(fork, &BUILT, &format!("compiler {key}"));
     if let Some(defect) = toolchain::toolchain_defect(&partial.join("stage2")) {
         panic!("compiler {key} was made, and is not whole: {defect}");
     }
@@ -99,7 +103,7 @@ fn build_in_fork(root: &Path, rust_dir: &Path, fork: &Path, sources: &Sources) -
     let config = build_dir.join("bootstrap.toml");
     fs::write(&config, config_text(&build_dir, &host, &llvm.dir)).unwrap_or_else(|e| panic!("write {}: {e}", config.display()));
     let config = config.to_str().unwrap_or_else(|| panic!("{} is not UTF-8", config.display()));
-    let args = ["build", "--stage", "2", "--config", config, "--warnings", "warn", "compiler/rustc", "library", "src/tools/cargo"];
+    let args: Vec<&str> = ["build", "--stage", "2", "--config", config, "--warnings", "warn"].into_iter().chain(BUILT).collect();
     let (ok, log) = toolchain::x_build(fork, &args, "the compiler");
     toolchain::refuse_on_compile_error(&log, "the compiler");
     assert!(ok, "the compiler build in {} failed, and nothing in its output was a compile error", fork.display());
@@ -159,7 +163,7 @@ mod tests {
     use std::cell::Cell;
 
     use super::*;
-    use crate::store::tests::{estate, git, refusal, write, LLVM_B};
+    use crate::store::tests::{backtrace_behind_a_staged_gitlink, estate, git, refusal, write, LLVM_B};
 
     /// Bootstrap's stand-in: a `stage2` that says which target spec it knows,
     /// with what every toolchain directory carries.
@@ -260,6 +264,23 @@ mod tests {
             choose(&e.a, &e.rust_dir, &Fork::Checkout(fork.clone()), &sources(&e.a), moving);
         });
         assert!(said.contains("moved while compiler"), "{said}");
+        let placed: Vec<_> = fs::read_dir(Kind::Compiler.dir(&e.rust_dir)).into_iter().flatten().flatten().map(|e| e.file_name()).collect();
+        assert!(placed.is_empty(), "placed: {placed:?}");
+    }
+
+    /// **A compiler built from a submodule at another commit than its gitlink
+    /// is never placed**: bootstrap leaves `library/backtrace` at `HEAD`'s
+    /// gitlink under a staged one, and builds it.
+    #[test]
+    fn a_compiler_built_off_a_submodule_s_gitlink_is_never_placed() {
+        let e = estate("compiler-gitlink");
+        let fork = e.a.join("rust");
+        let backtrace = fork.join("library/backtrace");
+        let (head, staged) = backtrace_behind_a_staged_gitlink(&fork);
+        let said = refusal("a compiler built from a submodule its gitlink does not name was placed", || {
+            choose(&e.a, &e.rust_dir, &Fork::Checkout(fork.clone()), &sources(&e.a), fake_build);
+        });
+        assert!(said.contains(&format!("{} is at {head}, and its gitlink names {staged}", backtrace.display())), "{said}");
         let placed: Vec<_> = fs::read_dir(Kind::Compiler.dir(&e.rust_dir)).into_iter().flatten().flatten().map(|e| e.file_name()).collect();
         assert!(placed.is_empty(), "placed: {placed:?}");
     }

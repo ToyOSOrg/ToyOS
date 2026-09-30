@@ -145,11 +145,11 @@ pub enum Relocked {
 
 /// The git hash of each of `paths` in the checkout `repo` as it stands:
 /// committed, staged or neither, untracked files included and ignored ones not.
-/// A submodule is the commit its gitlink names, which is what bootstrap checks
-/// out, and never the one its checkout happens to be at; a checkout of one
-/// holding changes no commit does is refused, since bootstrap builds them and
-/// the gitlink does not name them. Hashed through a copy of the checkout's
-/// index, so the checkout's own is never written.
+/// A submodule is the commit its gitlink names, and never the one its checkout
+/// happens to be at; a checkout of one holding changes no commit does is
+/// refused, since bootstrap builds them and the gitlink does not name them.
+/// Hashed through a copy of the checkout's index, so the checkout's own is
+/// never written.
 pub fn trees(repo: &Path, paths: &[&str], lockfiles: Relocked) -> Vec<String> {
     let scratch = TempDir::new("store-index");
     let index = scratch.join("index");
@@ -159,9 +159,7 @@ pub fn trees(repo: &Path, paths: &[&str], lockfiles: Relocked) -> Vec<String> {
     };
     let real = run(repo, &["rev-parse", "--path-format=absolute", "--git-path", "index"], None);
     fs::copy(real.trim(), &index).unwrap_or_else(|e| panic!("copy {}: {e}", real.trim()));
-    let listed: Vec<&str> = ["ls-files", "--stage", "--"].iter().chain(paths).copied().collect();
-    let staged = run(repo, &listed, Some(&index));
-    let gitlinks: Vec<&str> = staged.lines().filter(|l| l.starts_with("160000 ")).filter_map(|l| l.split_once('\t')).map(|(_, path)| path).collect();
+    let gitlinks: Vec<String> = gitlinks(repo, paths, Some(&index)).into_iter().map(|(path, _)| path).collect();
     for checkout in gitlinks.iter().map(|path| repo.join(path)).filter(|checkout| checkout.join(".git").exists()) {
         let changes = run(&checkout, &["--no-optional-locks", "status", "--porcelain"], None);
         assert!(
@@ -183,6 +181,60 @@ pub fn trees(repo: &Path, paths: &[&str], lockfiles: Relocked) -> Vec<String> {
     let spec: Vec<String> = paths.iter().map(|p| format!("{}:{p}", tree.trim())).collect();
     let spec: Vec<&str> = std::iter::once("rev-parse").chain(spec.iter().map(String::as_str)).collect();
     run(repo, &spec, None).lines().map(str::to_string).collect()
+}
+
+/// Each submodule under `paths` in the checkout `repo`, every one when there
+/// are none, with the commit its gitlink in the index names; in `index`, if
+/// given, rather than the checkout's own.
+pub(crate) fn gitlinks(repo: &Path, paths: &[&str], index: Option<&Path>) -> Vec<(String, String)> {
+    let args: Vec<&str> = ["ls-files", "--stage", "--"].into_iter().chain(paths.iter().copied()).collect();
+    let listed = git(repo, &args, index).unwrap_or_else(|e| panic!("{e}"));
+    let listed = String::from_utf8(listed).unwrap_or_else(|e| panic!("git {args:?} printed no UTF-8: {e}"));
+    listed
+        .lines()
+        .filter_map(|line| {
+            let (entry, path) = line.split_once('\t')?;
+            let mut words = entry.split(' ');
+            (words.next() == Some("160000")).then(|| (path.to_string(), words.next().expect("a gitlink names a commit").to_string()))
+        })
+        .collect()
+}
+
+/// Refuse `what`, which bootstrap just built in the fork checkout `fork` from
+/// `built`, the paths it compiles, unless every submodule under them is
+/// checked out at the commit its gitlink in the index names. Bootstrap leaves
+/// a submodule that is at `HEAD`'s gitlink where it is, under a staged one too,
+/// and one it fails to move; it builds whatever is there, and from an empty one
+/// nothing.
+pub fn assert_built_at_gitlinks(fork: &Path, built: &[&str], what: &str) {
+    for (path, gitlink) in gitlinks(fork, built, None) {
+        let checkout = fork.join(path);
+        if !checkout.join(".git").exists() {
+            let empty = match fs::read_dir(&checkout) {
+                Ok(mut entries) => entries.next().is_none(),
+                Err(e) if e.kind() == ErrorKind::NotFound => true,
+                Err(e) => panic!("read {}: {e}", checkout.display()),
+            };
+            assert!(
+                empty,
+                "{} holds files and is no checkout of its gitlink {gitlink}, and bootstrap built {what} from \
+                 them; nothing was kept",
+                checkout.display(),
+            );
+            continue;
+        }
+        let at = git(&checkout, &["rev-parse", "HEAD"], None).unwrap_or_else(|e| panic!("{e}"));
+        let at = String::from_utf8_lossy(&at);
+        assert!(
+            at.trim() == gitlink,
+            "{} is at {}, and its gitlink names {gitlink}: bootstrap built {what} from the commit checked \
+             out there, which its sources do not name; nothing was kept. `git -C {} checkout --detach \
+             {gitlink}` checks the gitlink's commit out",
+            checkout.display(),
+            at.trim(),
+            checkout.display(),
+        );
+    }
 }
 
 /// A product in use: shared, so any number of builds use it at once and
@@ -208,7 +260,7 @@ pub fn get(root: &Path, rust_dir: &Path, kind: Kind, key: &str, mut make: impl F
             Claim::Mine(making, lock) => {
                 eprintln!("Making {} {key}", kind.name());
                 make(&making);
-                let placed = publish(&making, &lock, &dir);
+                let placed = publish(&making, &lock, &dir, remove);
                 // Its waiters take the key now, not behind the collection.
                 drop(lock);
                 if placed {
@@ -241,8 +293,7 @@ fn named(dir: &Path, lock: Lock) -> Option<Lock> {
 }
 
 /// `path` exclusively, taken by `take` as [`Lock::try_exclusive`] takes it, if
-/// nobody holds it and `path` still names what was taken: the only lock under
-/// which a key or a claim is renamed away.
+/// nobody holds it and `path` still names what was taken.
 fn unheld(path: &Path, take: &impl Fn(&Path) -> Option<Lock>) -> Option<Lock> {
     named(path, take(path)?)
 }
@@ -288,10 +339,10 @@ fn claim(store: &Path, key: &str, take: &impl Fn(&Path) -> Option<Lock>) -> Clai
 }
 
 /// Place what was made at `made`, which `held` holds, as the key `dir`,
-/// read-only; `false`, and `made` taken away and removed, if another maker
-/// placed it first. One holding a link that leaves it is refused: its bytes
-/// would name whoever made it.
-pub(crate) fn publish(made: &Path, held: &Lock, dir: &Path) -> bool {
+/// read-only; `false`, and `made` taken away and removed with `remove`, which a
+/// test acts in the gap before, if another maker placed it first. One holding
+/// a link that leaves it is refused: its bytes would name whoever made it.
+pub(crate) fn publish(made: &Path, held: &Lock, dir: &Path, remove: impl Fn(&Path)) -> bool {
     let _ = fs::remove_file(made.join(MAKER));
     let out = links_out(made, made);
     assert!(out.is_empty(), "{} holds links that leave it, and a key is only what it names: {out:?}", made.display());
@@ -670,6 +721,22 @@ pub(crate) mod tests {
         Estate { primary, rust_dir, same, a, b, scratch }
     }
 
+    /// Check `fork`'s `library/backtrace` out at its gitlink, stage a newer
+    /// commit of it, and leave the checkout where it was: a staged bump, under
+    /// which bootstrap leaves the submodule at `HEAD`'s gitlink. Returns the
+    /// commit checked out and the one staged.
+    pub(crate) fn backtrace_behind_a_staged_gitlink(fork: &Path) -> (String, String) {
+        let backtrace = fork.join("library/backtrace");
+        git(fork, &["submodule", "update", "-q", "--init", "library/backtrace"]);
+        let head = git(&backtrace, &["rev-parse", "HEAD"]);
+        write(&backtrace.join("lib.rs"), "pub fn trace() { newer() }\n");
+        git(&backtrace, &["commit", "-qam", "a newer backtrace"]);
+        let staged = git(&backtrace, &["rev-parse", "HEAD"]);
+        git(fork, &["add", "library/backtrace"]);
+        git(&backtrace, &["checkout", "-q", "--detach", &head]);
+        (head, staged)
+    }
+
     /// What `f` panicked with; `expect` if it returned.
     pub(crate) fn refusal(expect: &str, f: impl FnOnce()) -> String {
         let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).expect_err(expect);
@@ -689,7 +756,7 @@ pub(crate) mod tests {
     fn placed(store: &Path, key: &str, by: &str) -> bool {
         let made = store.join(format!("{by}.made"));
         write(&made.join("made-by"), by);
-        publish(&made, &Lock::exclusive(&made, "its maker"), &store.join(key))
+        publish(&made, &Lock::exclusive(&made, "its maker"), &store.join(key), remove)
     }
 
     /// **Concurrent makers of one key make it once**: every other one waits for
@@ -735,6 +802,26 @@ pub(crate) mod tests {
         assert_eq!(added.map_err(|e| e.kind()).err(), Some(ErrorKind::PermissionDenied), "a placed key's own directory can be written");
     }
 
+    /// **The loser of a placement takes its claim away before removing it**: a
+    /// build that claims the key in the gap gets the name, and never a claim
+    /// that is being removed under it.
+    #[test]
+    fn a_losing_claim_is_taken_away_before_it_is_removed() {
+        let e = estate("store-lost");
+        let store = Kind::Sysroot.dir(&e.rust_dir);
+        assert!(placed(&store, K, "the first"));
+        let Claim::Mine(making, lock) = claim(&store, K, &Lock::try_exclusive) else { panic!("a free claim was not taken") };
+        write(&making.join("made-by"), "the second");
+        let taken = RefCell::new(None);
+        let won = publish(&making, &lock, &store.join(K), |gone| {
+            taken.replace(Some(claim(&store, K, &Lock::try_exclusive)));
+            remove(gone);
+        });
+        assert!(!won, "a second placement of one key won");
+        let taken = taken.into_inner().expect("the removal was never asked");
+        assert!(matches!(taken, Claim::Mine(..)), "a build claiming the key while the loser's claim went did not get it");
+    }
+
     /// **A product holding a link out of itself is never placed**, and one whose
     /// links stay inside it is.
     #[test]
@@ -745,13 +832,13 @@ pub(crate) mod tests {
         write(&made.join("lib/rustlib/bin/rust-lld"), "lld");
         std::os::unix::fs::symlink("rust-lld", made.join("lib/rustlib/bin/ld.lld")).unwrap();
         std::os::unix::fs::symlink("../bin", made.join("lib/rustlib/up")).unwrap();
-        assert!(publish(&made, &Lock::exclusive(&made, "its maker"), &store.join("inside")));
+        assert!(publish(&made, &Lock::exclusive(&made, "its maker"), &store.join("inside"), remove));
         for (name, target) in [("absolute", e.primary.join("rust")), ("escaping", PathBuf::from("../../../elsewhere"))] {
             let made = store.join(format!("{name}.made"));
             write(&made.join("lib/rustlib/x"), "x");
             std::os::unix::fs::symlink(&target, made.join("lib/rustlib/src")).unwrap();
             let said = refusal("a product linking out of itself was placed", || {
-                publish(&made, &Lock::exclusive(&made, "its maker"), &store.join(name));
+                publish(&made, &Lock::exclusive(&made, "its maker"), &store.join(name), remove);
             });
             assert!(said.contains("links that leave it"), "{said}");
             assert!(!store.join(name).exists());

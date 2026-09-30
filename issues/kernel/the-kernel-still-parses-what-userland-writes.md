@@ -29,7 +29,7 @@ seven of the loader's twelve bounds are over quantities a workload sets and two
 have no bound at all; and two of those ceilings are *already* exceeded by
 artifacts this tree builds.
 
-**It has a deadline.** Nothing shipped is dynamically linked today, so the move
+Nothing shipped is dynamically linked today, so the move
 is pure deletion. Do it after the completion architecture lands. Independent of everything else; may run as soon as a slot frees.
 
 **Move 2 — filesystem daemons**, sequenced after the completion architecture. A

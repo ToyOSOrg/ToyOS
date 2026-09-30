@@ -21,7 +21,7 @@ use std::process::Command;
 use std::sync::OnceLock;
 
 use crate::store::{self, Kind, Sources};
-use crate::sysroot::{clone_tree, git_out};
+use crate::sysroot::clone_tree;
 use crate::toolchain::{self, host_triple};
 
 /// What changes how a key's sources become an LLVM and is none of the other
@@ -186,7 +186,6 @@ fn defect(dir: &Path) -> Option<String> {
 
 /// Build the LLVM `key` names from `fork` into `partial`.
 fn fill(root: &Path, fork: &Path, key: &str, partial: &Path, build: &impl Fn(&Path) -> PathBuf) {
-    let checkout = fork.join(LLVM);
     eprintln!("Building LLVM {key} in {}: nobody on this host has", fork.display());
     let built = build(fork);
     let host = host_triple();
@@ -196,26 +195,13 @@ fn fill(root: &Path, fork: &Path, key: &str, partial: &Path, build: &impl Fn(&Pa
     let lld = built.join(&host).join("lld/bin/lld");
     fs::copy(&lld, partial.join("bin/lld"))
         .unwrap_or_else(|e| panic!("copy {} -> {}: {e}", lld.display(), partial.join("bin/lld").display()));
-    let now = Sources::of(root, fork);
-    let again = self::key(&now);
+    let again = self::key(&Sources::of(root, fork));
     assert!(
         again == key,
         "the fork's LLVM sources moved while LLVM {key} was being built (they now name {again}); \
          nothing was kept, and the next build makes the one they name"
     );
-    // Bootstrap checks the gitlink's commit out before it builds, so a checkout
-    // that is anywhere else was built from what the key does not name.
-    let built_from = git_out(&checkout, &["rev-parse", "HEAD"]);
-    assert!(
-        built_from.trim() == now.get(LLVM),
-        "{} is checked out at {}, and its gitlink names {}: bootstrap built the commit checked out, \
-         which is not LLVM {key}'s; nothing was kept. `git -C {} submodule update {LLVM}` checks the \
-         gitlink's commit out",
-        checkout.display(),
-        built_from.trim(),
-        now.get(LLVM),
-        fork.display(),
-    );
+    store::assert_built_at_gitlinks(fork, &[LLVM], &format!("LLVM {key}"));
     if let Some(defect) = defect(partial) {
         panic!("LLVM {key} was made, and is not whole: {defect}");
     }
@@ -562,7 +548,7 @@ mod tests {
         let said = refusal("an LLVM checkout other than the gitlink's was placed", || {
             choose(&e.a, &e.rust_dir, &fork, &sources(&e.a), lagging);
         });
-        assert!(said.contains("is checked out at") && said.contains("submodule update src/llvm-project"), "{said}");
+        assert!(said.contains(&format!("{} is at", fork.join(LLVM).display())) && said.contains("its gitlink names"), "{said}");
 
         let step = fork.join("src/bootstrap/src/core/build_steps/llvm.rs");
         let moving = |fork: &Path| {
