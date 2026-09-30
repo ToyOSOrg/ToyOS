@@ -28,6 +28,7 @@ A subdirectory `CLAUDE.md` loads when a file in that subtree is `Read`, and not 
 - **Zero legacy.** No backwards compatibility, no fallbacks, no workarounds, no BIOS, no 32-bit. Research state-of-the-art OS design instead of replicating older OSes.
 - **Zero silent debt.** Dead code is deleted; every abstraction earns its place. A discovered compromise has exactly two legal outcomes: remove it, or record it with ownership, evidence and an exit condition — and it stays a present-state weakness until removed.
 - **Fail fast, trust nothing.** Panics over silent degradation; exhaustive matches; the unimplemented dies loudly. Input that crossed a trust boundary is never trusted and never panics the kernel — it is refused.
+- **Nothing ships for tests alone.** The shipped system carries no mechanism whose only user is a test; tests exercise what ships, driven from outside by the harness. A test build's fault injection is compiled out of what ships.
 - **The kernel never crashes from userland.** A kernel bug crashes loudly; a userland bug never reaches it.
 - **No kernel threads.** The kernel creates no thread but the per-CPU idle loop: kernel work runs, bounded, on the thread or interrupt that caused it and is charged to it; long-running work with no owner is a userland server's.
 - **Rust is first class.** Not POSIX, not C. Unrepresentable is best: prefer compile-time safety over runtime checks over tests.

@@ -38,6 +38,8 @@ fix round sent. When the permission check refuses an agent, ask the owner and ne
 A brief is the fence: what to build, where it may touch, the worktree and branch, the scratchpad
 for its logs, and the two checks expected of high-risk code. The role files carry the standing
 rules, so a brief carries only the task.
+A brief asks for the agent's own attribution lines, never pastes the orchestrator's: a subagent's
+model differs from its caller's.
 
 The cost is Claude tokens and the owner's time; CI minutes are free. An agent's tokens grow with how
 long it runs, far more than with what it writes, so a brief is sized to finish and no agent idles in
