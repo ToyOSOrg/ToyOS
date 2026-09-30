@@ -16,11 +16,12 @@ archives rustc links, `libc++.a` and the Rust sysroot's archives with `ld.lld
 - **Two unwinders.** `libc++.a` carries LLVM's libunwind
   (`LIBCXXABI_ENABLE_STATIC_UNWINDER`) and std carries the `unwinding` crate,
   and both define the Itanium `_Unwind_*` interface: 17 duplicate symbols,
-  `_Unwind_Resume` among them, at libunwind's `UnwindLevel1.c` and at
-  `unwinding`'s `src/unwinder/mod.rs:346`.
+  `_Unwind_Resume` among them.
 - **Local-exec thread-locals.** libc++abi's `eh_globals` is reached through
   `R_X86_64_TPOFF32`, twice `cannot be used with -shared`: the runtime is
   compiled as position-independent executable code, not for a shared object.
+
+Both are in #637's artifact, and #637's follow-up closes this.
 
 **Exit**: a Rust std shared object and a Rust std executable each link the C++
 runtime with one unwinder and no relocation error, and a guest case runs a Rust

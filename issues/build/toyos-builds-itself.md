@@ -62,5 +62,27 @@ by the ToyOS-hosted rustc
 goes when lld runs in the guest: the row, the crate and its host tests go together, the hosted rustc names `rust-lld`, and
 the published crates.io crate is yanked.
 
-**What M3's rustc half is blocked on** is measured in
-`issues/build/the-hosted-rustc-carries-cranelift-because-llvm-does-not-build-for-toyos.md`.
+**What stops LLVM building for a ToyOS host**, in the order each blocks the
+next. M2's clang and lld wait on it first, and M3's rustc after them.
+- Configure: `issues/build/the-c-sysroot-has-no-libm-so-llvms-configure-fails.md`,
+  and bootstrap's CMake system in
+  `issues/build/llvm-and-rustcs-build-have-no-arm-for-a-toyos-host.md`.
+- Compile: `issues/build/toyos-libc-lacks-the-posix-surface-llvm-compiles-against.md`,
+  with the names it leaves to
+  `issues/build/libc-headers-are-written-by-hand-and-drift-from-its-definitions.md`,
+  and the LLVM arms of the build issue.
+- Link: the POSIX issue's functions, with those it leaves to the child-process
+  track's stage 3 and to `issues/build/libc-has-no-alarm.md`. M3's rustc
+  alone: `issues/build/a-rust-std-binary-cannot-link-the-cxx-runtime.md`,
+  `issues/build/a-rust-std-program-defines-no-aligned-alloc.md`, and the build
+  issue's `clang-tblgen` and `rustc_llvm`.
+- Run: `issues/build/libc-mmap-ignores-the-file-it-is-asked-to-map.md`,
+  `issues/build/libc-fcntl-and-fchmod-answer-0-and-do-nothing.md`,
+  `issues/build/libc-pread-and-pwrite-move-the-offset-another-thread-shares.md`
+  and `issues/build/libc-readdir-calls-every-entry-a-regular-file.md`.
+- Test, for M3: `issues/build/a-worktree-cannot-build-a-hosted-rustc-of-its-own.md`.
+
+M3's exit then waits on a linker in the guest
+(`issues/build/the-hosted-rustc-names-a-linker-toyos-does-not-have.md`), which
+toyos-ld is not: it refuses every executable with thread-local storage, so
+every std program.
