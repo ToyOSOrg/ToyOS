@@ -613,8 +613,6 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                     None => SyscallError::InvalidArgument.to_u64(),
                 }
             }
-            DA::IDLE_STACK_HIGH_WATER => crate::arch::percpu::idle_stack_high_water() as u64,
-            DA::IDLE_STACK_SIZE => crate::arch::percpu::idle_stack_size() as u64,
             // Armed, not #[cfg]'d, so it doesn't ship in every kernel this suite boots:
             // the real bound is unreachable (no guest makes 65,536 threads).
             DA::LOWER_SYSINFO_BOUND => {

@@ -433,18 +433,6 @@ fn alloc_idle_stack(percpu: &mut PerCpu) {
     percpu.idle_stack_top = crate::sched::idle_stack::alloc();
 }
 
-/// How big one idle stack is; read by `SYS_DEBUG` for scale.
-#[cfg(feature = "test-actuators")]
-pub fn idle_stack_size() -> usize {
-    crate::sched::idle_stack::SIZE
-}
-
-/// The deepest any CPU's idle stack has ever been, in bytes.
-#[cfg(feature = "test-actuators")]
-pub fn idle_stack_high_water() -> usize {
-    crate::sched::idle_stack::high_water()
-}
-
 /// One stack per [`IST_STACKS`] row; an `ist[n-1]` left zero faults to address 0 unchecked.
 fn alloc_ist_stacks(percpu: &mut PerCpu) {
     let total = IST_GUARD_SIZE + IST_STACK_SIZE;

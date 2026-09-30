@@ -27,12 +27,10 @@ pub const FILL_WORD: u64 = u64::from_ne_bytes([FILL; 8]);
 /// One idle stack and the guard page under it.
 const SLOT: usize = GUARD + SIZE;
 
-static ARENA: Lock<Arena> = Lock::new(Arena { pages: Vec::new(), stacks: Vec::new(), next: 0, left: 0 });
+static ARENA: Lock<Arena> = Lock::new(Arena { pages: Vec::new(), next: 0, left: 0 });
 
 struct Arena {
     pages: Vec<crate::mm::pmm::PhysPage>,
-    /// The bottom of every idle stack, so the deepest any CPU has gone reads from one.
-    stacks: Vec<u64>,
     /// Direct-map address of the next free slot.
     next: u64,
     left: usize,
@@ -51,32 +49,14 @@ fn alloc_slot() -> u64 {
     let base = arena.next;
     arena.next += SLOT as u64;
     arena.left -= SLOT;
-    arena.stacks.push(base + GUARD as u64);
     base
 }
 
-/// A fresh idle stack, filled, over its unmapped guard page: its top.
+/// A fresh idle stack over its unmapped guard page: its top.
 pub fn alloc() -> u64 {
     let base = alloc_slot();
     crate::mm::paging::kernel().lock().guard_4k(DirectMap::phys_of(base as *const u8));
-    // SAFETY: exactly `SIZE` bytes above the unmapped guard, within the slot
-    // `alloc_slot` returned — filled, not zeroed, so zero can't mark
-    // "untouched" for [`high_water`].
-    unsafe { core::ptr::write_bytes((base + GUARD as u64) as *mut u8, FILL, SIZE) };
     base + SLOT as u64
-}
-
-/// The deepest any CPU's idle stack has ever been, in bytes, read from the
-/// bottom up: nothing legitimate writes [`FILL`], so a touched byte stays changed.
-#[cfg(feature = "test-actuators")]
-pub fn high_water() -> usize {
-    let arena = ARENA.lock();
-    arena
-        .stacks
-        .iter()
-        .map(|&bottom| SIZE - words(bottom, SIZE).take_while(|&w| w == FILL_WORD).count() * 8)
-        .max()
-        .unwrap_or(0)
 }
 
 /// Sequential u64s from `base`; every address is inside the caller's
