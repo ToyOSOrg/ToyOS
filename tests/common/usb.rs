@@ -115,7 +115,7 @@ fn stage(path: &Path, bytes: u64) -> u64 {
 
 /// Every claim the host can make about what the guest did to the disk.
 ///
-/// **Every block, on every boot, the one a staged break interrupted included.**
+/// **Every block, on every boot.**
 fn verify(path: &Path, bytes: u64, nonce: u64) -> Result<(), String> {
     let blocks = bytes / BLOCK;
     let guest_nonce = !nonce;

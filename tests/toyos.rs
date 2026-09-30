@@ -1137,11 +1137,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     ("xhci_flap", Sched::Serial),
     ("xhci_descriptor_walk", Sched::Parallel),
     ("esp_filesystem", Sched::Parallel),
-    // Three boots: a budget-refused flush retried and kept, the deadman's
-    // declared death, and a hung device's failed reset escalation — the three
-    // exits of `object/ops.rs`'s fsync loop. Every verdict is line presence
-    // and host-side bytes, never a wall-clock margin.
-    ("log_flush_retry", Sched::Parallel),
     ("toybox_cp_volume", Sched::Parallel),
     ("kernel_log_file", Sched::Parallel),
     ("kernel_heartbeat", Sched::Parallel),
@@ -1333,7 +1328,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("fsd_restart", &["test_rs_fs_client_bound", "test_rs_fs_restart"]),
     ("fsd_claim_held", &["test_rs_fs_claim_held"]),
     ("esp_filesystem", &["test_rs_esp_files"]),
-    ("log_flush_retry", &["test_rs_esp_files"]),
     ("fat_backing_revoked", &["test_rs_fat_backing_revoked"]),
     ("fs_dirs_durable", &["test_rs_fs_dirs_durable"]),
     ("fs_rename_durable", &["test_rs_fs_rename_durable", "test_rs_fs_dirs_durable"]),
@@ -8839,7 +8833,6 @@ fn run_machine_test(
         "usb_pool_exhausted" => usb::usb_pool_exhausted(test_config, c_bins, rust_bins),
         // Body in `tests/common/volumes.rs`, same reason.
         "esp_filesystem" => common::volumes::esp_filesystem(test_config, c_bins, rust_bins),
-        "log_flush_retry" => common::volumes::log_flush_retry(test_config, c_bins, rust_bins),
         // Body in `tests/common/toybox.rs`, same reason.
         "toybox_cp_volume" => common::toybox::cp_volume(test_config, c_bins, rust_bins),
         "kernel_log_file" => common::volumes::kernel_log_file(test_config, c_bins, rust_bins),

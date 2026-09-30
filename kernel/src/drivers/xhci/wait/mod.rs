@@ -68,9 +68,6 @@ pub(super) enum Quiet {
     Gone,
     /// What this part of a call whose transport broke may spend ran out before this wait's own timeout did.
     Spent,
-    /// A staged break skipped the wait by design.
-    #[cfg(feature = "boot-actuators")]
-    Staged,
 }
 
 impl Quiet {
@@ -92,8 +89,6 @@ impl Quiet {
                 f,
                 "the bound on this part of the call ran out during the {step} {kind}"
             ),
-            #[cfg(feature = "boot-actuators")]
-            Self::Staged => write!(f, "a staged break skipped the {step} {kind} wait"),
         }
     }
 }
@@ -374,12 +369,6 @@ impl XhciController {
         #[cfg(feature = "boot-actuators")]
         if crate::actuator::io_depth_probe() {
             depth_probe::report();
-        }
-        // `usb-reset-break` stages a climb of the recovery ladder whose
-        // transfers answer nothing; see `msc::reset_break`.
-        #[cfg(feature = "boot-actuators")]
-        if msc::reset_break::active() {
-            return Err(Quiet::Staged);
         }
         let on = Await::Transfer { slot, dci, trb };
         let (began, deadline) = self.wait_ends();

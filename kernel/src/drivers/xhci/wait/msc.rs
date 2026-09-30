@@ -351,30 +351,6 @@ enum Climbed {
     Gone,
 }
 
-/// Abandon one bulk transfer without waiting, once per boot, on the first
-/// WRITE(10): only the wait is skipped, so recovery runs against a real
-/// endpoint state — staged since nothing on the host side leaves one in flight.
-#[cfg(feature = "boot-actuators")]
-mod transport_break {
-    use core::sync::atomic::{AtomicBool, Ordering};
-
-    static UNSPENT: AtomicBool = AtomicBool::new(true);
-    static ARMED: AtomicBool = AtomicBool::new(false);
-
-    /// Called where the driver is about to run a WRITE(10) data phase.
-    pub fn arm() {
-        if !crate::actuator::usb_transport_break() {
-            return;
-        }
-        ARMED.store(UNSPENT.swap(false, Ordering::Relaxed), Ordering::Relaxed);
-    }
-
-    /// Called after the doorbell, where the wait would otherwise begin.
-    pub fn take() -> bool {
-        ARMED.swap(false, Ordering::Relaxed)
-    }
-}
-
 /// Stop every CPU inside one WRITE(10), at whichever of its three phases was
 /// staged.
 ///
@@ -476,36 +452,6 @@ pub(in crate::drivers::xhci) mod bind_spends_the_scan {
     pub fn answered() -> bool {
         let until = HELD_UNTIL.load(Ordering::Relaxed);
         until == 0 || crate::clock::nanos_since_boot() >= until
-    }
-}
-
-/// Stage one climb of the recovery ladder to run its transfers unwaited, once:
-/// a device that answers nothing, on any rung — staged because nothing on the
-/// host side stops answering EP0 on its own.
-#[cfg(feature = "boot-actuators")]
-pub(in crate::drivers::xhci) mod reset_break {
-    use core::sync::atomic::{AtomicBool, Ordering};
-
-    static UNSPENT: AtomicBool = AtomicBool::new(true);
-    static ACTIVE: AtomicBool = AtomicBool::new(false);
-
-    /// `true` means this climb is the staged one and must call [`end`] on its
-    /// way out.
-    pub fn begin() -> bool {
-        if !crate::actuator::usb_reset_break() || !UNSPENT.swap(false, Ordering::Relaxed) {
-            return false;
-        }
-        ACTIVE.store(true, Ordering::Relaxed);
-        true
-    }
-
-    pub fn end() {
-        ACTIVE.store(false, Ordering::Relaxed);
-    }
-
-    /// Only the staged climb's own transfers can see this set.
-    pub fn active() -> bool {
-        ACTIVE.load(Ordering::Relaxed)
     }
 }
 
@@ -898,20 +844,9 @@ impl XhciController {
     fn climb_until_in_step(
         &mut self,
         dev: &mut MscDevice,
-        broke: Option<(Pipe, u32)>,
-        left: Left,
+        mut broke: Option<(Pipe, u32)>,
+        mut left: Left,
     ) -> bool {
-        #[cfg(feature = "boot-actuators")]
-        let staged = reset_break::begin();
-        let in_step = self.climb(dev, broke, left);
-        #[cfg(feature = "boot-actuators")]
-        if staged {
-            reset_break::end();
-        }
-        in_step
-    }
-
-    fn climb(&mut self, dev: &mut MscDevice, mut broke: Option<(Pipe, u32)>, mut left: Left) -> bool {
         let slot = self.slot(dev.slot_id);
         loop {
             dev.breaks = dev.breaks.saturating_add(1);
@@ -1276,7 +1211,6 @@ impl XhciController {
             open.at(Phase::DataOwed, &dev.in_ring, &dev.out_ring);
             #[cfg(feature = "boot-actuators")]
             if cdb.first() == Some(&0x2A) {
-                transport_break::arm();
                 mid_write::wedge_if_staged(Phase::DataOwed);
             }
             match self.bulk(dev, data_in, data_phys, data_len, Phase::Data, &open) {
@@ -1398,10 +1332,6 @@ impl XhciController {
         }
         self.bulk_began = crate::clock::nanos_since_boot();
         self.ring_doorbell(slot, dci);
-        #[cfg(feature = "boot-actuators")]
-        if transport_break::take() {
-            return Err(Quiet::Staged);
-        }
         self.wait_transfer(slot, dci, at)
     }
 

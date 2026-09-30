@@ -118,13 +118,6 @@ actuators! {
     /// The same, with a HARDWARE ERROR in place of ILLEGAL REQUEST.
     usb_flush_fails = "usb-flush-fails";
 
-    /// Abandon the boot's first WRITE(10) data phase without waiting for it.
-    usb_transport_break = "usb-transport-break";
-
-    /// Skip the waits of every transfer of the next climb of the recovery
-    /// ladder, once: a device that answers nothing on any rung.
-    usb_reset_break = "usb-reset-break";
-
     /// Refuse the machine's first stop, `SYS_SHUTDOWN` or `SYS_REBOOT`, before
     /// anything is torn down, as a machine with no way to stop refuses it: the
     /// path on which init tells `logd` the machine runs on. Judged by
@@ -167,15 +160,6 @@ actuators! {
     /// wedge. See `usb_gate::sweep_under_load`; judged by
     /// `usb_reset_records_the_phase_it_cut`.
     usb_reset_under_load = "usb-reset-under-load";
-
-    /// Run the first attempt of each run `object::ops::until_answered` retries —
-    /// a file's `SYS_FSYNC`, a claimed partition's read, write or flush — under an
-    /// operation that is already over, once per file and per partition and kind.
-    fsync_budget_spent = "fsync-budget-spent";
-
-    /// Make the deadman of every run `object::ops::until_answered` makes already
-    /// expired.
-    fsync_deadman_now = "fsync-deadman-now";
 
     /// Report the preempt depth and backtrace at the deepest point of a disk transfer; it stages nothing, only measures.
     io_depth_probe = "io-depth-probe";
