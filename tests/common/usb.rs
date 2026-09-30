@@ -816,9 +816,9 @@ fn optional_flush_keeps_the_log(
 
     // Mid-run and polled, exactly as `kernel_log_file` does it: the claim is that
     // the sink is still running, and the only place that is visible is the
-    // device while the machine is up. The ceiling is the harness's: a stick
-    // with no write cache that cost the machine its log is a hang here.
-    let give_up = std::time::Instant::now() + qemu.budget(qemu::GUEST_WEDGED);
+    // device while the machine is up. A stick with no write cache that cost
+    // the machine its log is a hang here.
+    let give_up = std::time::Instant::now() + qemu.budget(Duration::from_secs(99));
     loop {
         let on_device = String::from_utf8_lossy(
             &super::volumes::newest_log(&image_path, start, len)?.1,

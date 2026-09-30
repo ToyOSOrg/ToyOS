@@ -152,7 +152,7 @@ mod checks {
         // gate asserting against a string nothing produces any more.
         let real = format!("{STALLED} waiting for the long tone to start — it went quiet");
         let under_a_sentence = format!("the compositor stopped painting\n{real}");
-        let ceiling = Duration::from_secs(5);
+        let ceiling = Duration::from_secs(30);
         let past = ceiling * 2 + Duration::from_secs(1);
         let backstop = qemu::ceiling_verdict(None, past, ceiling, Duration::from_secs(1), 900)
             .ok_or("a guest talking past the backstop was given no verdict")?;

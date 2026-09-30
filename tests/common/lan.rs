@@ -400,12 +400,11 @@ pub fn lan_no_lease(
     let mut console = guest.boot_log().to_string();
     // Drained until netd's `ready` after its give-up, and not awaited: the
     // guest says nothing at all until netd gives up on its own clock, which
-    // every wait in this harness reads as a machine that stopped. The ceiling
-    // is the harness's.
+    // every wait in this harness reads as a machine that stopped.
     let gave_up = format!("{NO_LEASE}{HOSTNAME} in ");
     let given_up = std::cell::Cell::new(false);
     let served = std::cell::Cell::new(false);
-    console.push_str(&guest.drain_until(qemu::GUEST_WEDGED, |line| {
+    console.push_str(&guest.drain_until(std::time::Duration::from_secs(99), |line| {
         given_up.set(given_up.get() || line.contains(&gave_up));
         served.set(given_up.get() && line.contains(READY));
         served.get()

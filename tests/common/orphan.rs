@@ -36,10 +36,10 @@ pub fn guest_dies_with_its_harness(test_config: &Path) -> Result<(), String> {
     let mut owner = Owner::spawn(owner)?;
     let owner_pid = owner.pid();
     let verdict = (|| {
-        // The owner builds nothing, so its one wait is its boot, whose own
-        // ceiling ends it well inside the backstop on any wait on a guest.
+        let within =
+            qemu::budget_smp(std::time::Duration::from_secs(24), BootOptions::default().smp);
         let pid: u32 =
-            owner.said(HELD, qemu::GUEST_WEDGED)?.parse().map_err(|e| format!("the owner's QEMU pid: {e}"))?;
+            owner.said(HELD, within)?.parse().map_err(|e| format!("the owner's QEMU pid: {e}"))?;
         owner.killed(&[pid]).map(|()| pid)
     })();
     short.adopt(Path::new(toyos_tmpdir::SHORT_BASE), owner_pid);

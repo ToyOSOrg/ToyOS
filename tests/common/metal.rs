@@ -1033,11 +1033,15 @@ pub fn run(
             eprintln!("[metal] {label}: cargo {}", words.join(" "));
             let booted = Command::new("cargo").args(&words).current_dir(&root).status();
             if let Some(swap) = beside {
-                // A boot that was refused leaves no machine to dial, and the
-                // swap would wait out its whole bound for one.
-                let unbooted = !booted.as_ref().is_ok_and(|status| status.success());
+                // Exit 1 is a boot that ran and was judged, whose swap finishes
+                // on its own. Any other failure is the loop refusing, which
+                // before the reboot leaves no machine to dial and the swap
+                // waiting out its whole bound for one.
+                let loop_refused = !booted
+                    .as_ref()
+                    .is_ok_and(|status| status.success() || status.code() == Some(1));
                 let swap = swap.and_then(|mut child| {
-                    if unbooted {
+                    if loop_refused {
                         child.kill()?;
                     }
                     child.wait()

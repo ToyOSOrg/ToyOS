@@ -258,8 +258,7 @@ const RUST_SKIP: &[&str] = &[
     "netd_refused_pipes",
     "netd_refused_accept",
     "netd_lookup_let_go",
-    // It asserts nothing at all: it holds a boot open for twenty seconds. On a
-    // shared boot it would be twenty seconds of nothing.
+    // It asserts nothing at all: it holds a boot open.
     "lan_hold",
     // The same for `tests/lantalkcase`, held until the runner's bound is near
     // unless the host's `reboot` over ssh ends it first. `lan_talk` rides it.
@@ -7925,9 +7924,9 @@ fn toolkit_window_wake(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
 fn toolkit_winit_loop(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     let (mut qemu, mut log, launched) = toolkit_launch(rust_bins, "winit_loop", "test_rs_winit_loop")?;
     let log = &mut log;
-    let mut live = qemu::Liveness::new(Duration::from_secs(40), Duration::from_secs(35));
+    let give_up = Instant::now() + qemu.budget(Duration::from_secs(35));
     let mut closed = false;
-    while live.working(log) {
+    while Instant::now() < give_up {
         let said = &log[launched..];
         if said.contains("WINIT-LOOP-OK") {
             // Up to the kept window's close: a window the app still held is
@@ -11257,7 +11256,7 @@ fn run_machine_test(
             );
             serial::Serial::boot(&qemu).must_be_clean()?;
 
-            let result = qemu.run_test("test_rs_readdir_bound", Duration::from_secs(545));
+            let result = qemu.run_test("test_rs_readdir_bound", Duration::from_secs(147));
             if let Some(err) = &result.error {
                 return Err(format!("the guest stopped answering: {err}\nserial:\n{}", result.serial));
             }

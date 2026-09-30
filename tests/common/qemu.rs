@@ -304,8 +304,7 @@ fn oversubscription(smp: u32) -> (u32, u32) {
 /// bounds was measured to take**, in whole-suite runs on the host [`REFERENCE_BOOT_MS`]
 /// describes, at the suite's default width — so a test's time already carries
 /// the guests it shares that host with. A wait is bounded by that multiple of
-/// its whole test, the one number measured; a guest still talking at twice its
-/// ceiling is past it ([`ceiling_verdict`]). The source states that number, and
+/// its whole test, the one number measured. The source states that number, and
 /// this pays it out on a slower host ([`host_scale`]) and for a guest wider than
 /// this one ([`oversubscription`]), and for nothing else.
 ///
@@ -384,8 +383,8 @@ impl Liveness {
 /// second producer: a test's own ceiling is a guard of exactly this kind.
 pub const STALLED: &str = "STALLED:";
 
-/// The backstop's red: a guest still talking at twice its ceiling that never
-/// finished. The ceiling too, and counted with [`STALLED`]'s.
+/// The backstop's red: a guest still talking that never finished. The ceiling
+/// too, and counted with [`STALLED`]'s.
 pub const TIMED_OUT: &str = "timed out after";
 
 /// How long a guest may say nothing before a wait on it is a stall.
@@ -559,9 +558,9 @@ pub fn ceiling_verdict(
         ));
     }
     // The backstop, for a guest that is stuck *and* chatty and so never trips
-    // the silence guard: twice the ceiling, at most six times the slowest this test
-    // was ever measured.
-    let backstop = ceiling * 2;
+    // the silence guard; never before a guest silent since its ceiling has been
+    // silent for [`GUEST_QUIET`], so a death is named by the arms above.
+    let backstop = (ceiling * 2).max(ceiling + GUEST_QUIET);
     if elapsed > backstop {
         return Some(format!(
             "{TIMED_OUT} {}s, with the guest still talking {quiet:.0?} ago ({lines} \
@@ -4698,7 +4697,7 @@ fn publish_line(
 }
 
 /// A boot's ceiling: [`budget_smp`]'s rule over the tests that are one boot and
-/// one trivial command, the slowest of which took 10 s.
+/// one trivial command.
 const BOOT_CEILING: Duration = Duration::from_secs(30);
 
 /// Returns every line seen on the way to the marker — see [`QemuInstance::boot_log`].

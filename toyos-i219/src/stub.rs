@@ -1039,9 +1039,8 @@ impl Model {
                 }
                 value
             }
-            // §10.2.4.6 and §10.2.4.4: write-only, and a read of one answers
-            // nothing.
-            regs::IMC | regs::ICS => 0,
+            // §10.2.4.6: write-only, and a read answers nothing.
+            regs::IMC => 0,
             // The statistics the driver reads: each read takes the count and
             // clears it.
             regs::GPTC | regs::GPRC | regs::TPR | regs::MPC | regs::CRCERRS => {
@@ -1161,8 +1160,6 @@ impl Model {
                 let held = self.get(regs::IMS);
                 self.set(regs::IMS, held & !value);
             }
-            // §10.2.4.4: set a cause, as if the event had happened.
-            regs::ICS => self.raise(value),
             // §10.2.4.1: "Writing a 1b to any bit in the register also clears
             // that bit. Writing a 0b to any bit has no effect on that bit."
             // `INT_ASSERTED` is not writable and clears with its causes.

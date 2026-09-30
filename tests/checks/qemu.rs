@@ -198,6 +198,26 @@ pub fn ceiling_self_check() -> Result<(), String> {
              would red healthy",
         ));
     }
+    // (e) A ceiling under [`GUEST_QUIET`]: a kernel that died is given its
+    //     silence to be named before the backstop calls its guest slow.
+    const SHORT: Duration = Duration::from_secs(5);
+    if let Some(cut) =
+        ceiling_verdict(Some(KERNEL), Duration::from_secs(11), SHORT, Duration::from_secs(10), 40)
+    {
+        return Err(format!(
+            "a kernel death under a {SHORT:?} ceiling was ended before its silence could name it: \
+             {cut}"
+        ));
+    }
+    match ceiling_verdict(Some(KERNEL), Duration::from_secs(21), SHORT, GUEST_QUIET, 40) {
+        Some(named) if named.contains("kernel panic") => {}
+        other => {
+            return Err(format!(
+                "a kernel death under a {SHORT:?} ceiling, silent for {GUEST_QUIET:?}, was not \
+                 named: {other:?}"
+            ));
+        }
+    }
 
     // 4. **What the verdict carries, which is the half that was missing.** Every
     //    arm above names a death in one sentence; until 2026-08-18 that sentence

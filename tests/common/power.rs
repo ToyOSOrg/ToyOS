@@ -1068,7 +1068,7 @@ fn after_the_reset(qemu: &mut QemuInstance, until: &str) -> serial::Serial {
 /// What the boot after a reset has to arrive inside: the bound the first boot
 /// counts down, plus firmware and a loader. Scaled by `drain_until`, and the
 /// predicate is what ends the drain. The ceiling rule's number over the tests
-/// that are one chain, the slowest of which took 37 s.
+/// that are one chain.
 const CHAIN_WAIT: Duration = Duration::from_secs(113);
 
 /// The chain closes on a panic: the kernel seals what the panel rendered, the

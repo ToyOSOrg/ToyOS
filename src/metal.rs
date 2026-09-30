@@ -866,17 +866,10 @@ pub fn stages_a_wedge(armed: &[impl AsRef<str>]) -> bool {
     armed.iter().any(|name| WEDGE_ARMS.contains(&name.as_ref()))
 }
 
-/// The bound an image armed with one of [`WEDGE_ARMS`] carries, in
-/// milliseconds: the T14 stages its wedge 1.5 s into the kernel, so this ends
-/// the machine seconds after it rather than at the bound every other boot keeps
-/// for a wedge nobody staged. Its half is the lockup detector's bound, which
-/// still outlasts the lockup probe's own reach to its lock.
-pub const STAGED_BOUND_MS: u64 = 10_000;
-
 /// The `boot-deadline=` bound an image armed with `armed` carries.
 pub fn bound_for(armed: &[impl AsRef<str>]) -> u64 {
     if stages_a_wedge(armed) {
-        STAGED_BOUND_MS
+        toyos_tco::STAGED_BOUND_MS
     } else {
         toyos_tco::WEDGE_BOUND_MS
     }
@@ -1443,32 +1436,16 @@ impl Driver {
         }
     }
 
-    /// Poll `ssh`'s port once a [`POLL`], and say how long it took to answer as
-    /// asked. **Coming back is `ssh` itself answering**: a port that accepts is
-    /// only asked whether `ssh` does, since a listener can come up before the
-    /// service behind it.
+    /// [`wait_on`] the machine's `ssh`.
     fn wait(&self, secs: u64, what: &'static str, answering: bool) -> Result<u64, Refusal> {
-        let began = std::time::Instant::now();
-        while began.elapsed().as_secs() < secs {
-            let next = std::time::Instant::now() + POLL;
-            let listening = self.port_accepts();
-            let answered = listening && (!answering || self.ssh("probing", "true").is_ok());
-            if answered == answering {
-                return Ok(began.elapsed().as_secs());
-            }
-            std::thread::sleep(next.saturating_duration_since(std::time::Instant::now()));
-        }
-        Err(Refusal::Silent { what, secs })
-    }
-
-    /// Whether the machine's `ssh` port accepts a connection inside one
-    /// [`POLL`]; a name that does not resolve is a machine that is not there.
-    fn port_accepts(&self) -> bool {
-        use std::net::ToSocketAddrs;
-        let Ok(mut addrs) = (self.target.host.as_str(), crate::metaltalk::SSH_PORT).to_socket_addrs() else {
-            return false;
-        };
-        addrs.any(|addr| std::net::TcpStream::connect_timeout(&addr, POLL).is_ok())
+        let host = self.target.host.as_str();
+        wait_on(
+            secs,
+            what,
+            answering,
+            || port_accepts(host, crate::metaltalk::SSH_PORT),
+            || self.ssh("probing", "true").is_ok(),
+        )
     }
 
     /// The loader's own file, and then everything `logd` wrote, in name order:
@@ -1545,6 +1522,40 @@ impl Driver {
         let file = shell_word(&format!("{}/{name}", self.target.mount));
         self.ssh("reading a log file", &format!("cat {file}"))
     }
+}
+
+/// Poll once a [`POLL`] whether a port `accepts`, and say how long the machine
+/// took to answer as asked. **Coming back is `ssh` itself answering**: a port
+/// that accepts is only asked whether `ssh` `answers`, since a listener can come
+/// up before the service behind it.
+fn wait_on(
+    secs: u64,
+    what: &'static str,
+    answering: bool,
+    mut accepts: impl FnMut() -> bool,
+    mut answers: impl FnMut() -> bool,
+) -> Result<u64, Refusal> {
+    let began = std::time::Instant::now();
+    while began.elapsed().as_secs() < secs {
+        let next = std::time::Instant::now() + POLL;
+        let listening = accepts();
+        let answered = listening && (!answering || answers());
+        if answered == answering {
+            return Ok(began.elapsed().as_secs());
+        }
+        std::thread::sleep(next.saturating_duration_since(std::time::Instant::now()));
+    }
+    Err(Refusal::Silent { what, secs })
+}
+
+/// Whether `host`'s `port` accepts a connection inside one [`POLL`]; a name
+/// that does not resolve is a machine that is not there.
+fn port_accepts(host: &str, port: u16) -> bool {
+    use std::net::ToSocketAddrs;
+    let Ok(mut addrs) = (host, port).to_socket_addrs() else {
+        return false;
+    };
+    addrs.any(|addr| std::net::TcpStream::connect_timeout(&addr, POLL).is_ok())
 }
 
 fn unstarted(what: &str, e: &std::io::Error) -> Refusal {
@@ -2653,6 +2664,28 @@ mod tests {
         }
     }
 
+    /// **A port that accepts is not a machine that came back**, and a machine
+    /// going down is its port closing. Staged through [`port_accepts`] on a
+    /// listener of this host's own, which accepts and never speaks `ssh`.
+    #[test]
+    fn coming_back_is_ssh_answering_and_not_its_port() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback listener");
+        let port = listener.local_addr().expect("its address").port();
+        let accepts = || port_accepts("127.0.0.1", port);
+        let mut asked = 0;
+        let back = wait_on(1, "come back", true, accepts, || {
+            asked += 1;
+            false
+        });
+        assert_eq!(back, Err(Refusal::Silent { what: "come back", secs: 1 }));
+        assert!(asked > 0, "`ssh` was never asked of a port that accepts");
+        assert_eq!(wait_on(1, "come back", true, accepts, || true), Ok(0));
+        let up = wait_on(1, "go down", false, accepts, || unreachable!("`ssh` asked of one going down"));
+        assert_eq!(up, Err(Refusal::Silent { what: "go down", secs: 1 }));
+        drop(listener);
+        assert_eq!(wait_on(1, "go down", false, accepts, || unreachable!()), Ok(0));
+    }
+
     /// **An image with no bound on its own boot never reaches the stick.**
     ///
     /// The case, measured twice: a kernel that hung after its job list, and a
@@ -2854,7 +2887,7 @@ mod tests {
             assert_eq!(flash_ruling(arm), Some(Flash::Ok), "{arm} reaches no stick");
             assert_eq!(judge_arms(&[arm.to_string(), bound.clone()]), Ok(()), "{arm}");
             assert!(stages_a_wedge(&[arm.to_string()]), "{arm}");
-            assert_eq!(bound_for(&[arm]), STAGED_BOUND_MS, "{arm}");
+            assert_eq!(bound_for(&[arm]), toyos_tco::STAGED_BOUND_MS, "{arm}");
             // And with no bound behind it, the sharpest refusal names it as the
             // wedge it is rather than as a plain image.
             assert_eq!(

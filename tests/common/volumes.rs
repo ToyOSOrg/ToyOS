@@ -557,10 +557,9 @@ pub fn kernel_log_file(
     // Mid-run, with the guest still up and nothing shut down. Whatever is here
     // was put there by `/system/bin/logd` while the machine was running.
     //
-    // Polled until logd has written through `Boot: complete`, with the
-    // harness's ceiling and no deadline of this test's own: when logd writes
+    // Polled until logd has written through `Boot: complete`: when logd writes
     // is its own business, and one that never does is a hang.
-    let give_up = std::time::Instant::now() + qemu.budget(qemu::GUEST_WEDGED);
+    let give_up = std::time::Instant::now() + qemu.budget(Duration::from_secs(54));
     let mut running;
     let mut running_text;
     let mut running_name;

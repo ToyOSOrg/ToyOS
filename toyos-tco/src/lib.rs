@@ -141,6 +141,13 @@ pub const WEDGE_BOUND_MS: u64 = JOB_BOUND_MS * 2;
 /// test is a reset where it should have been a verdict.
 const _: () = assert!(WEDGE_BOUND_MS > JOB_BOUND_MS);
 
+/// The bound a boot that stages its own wedge carries instead of
+/// [`WEDGE_BOUND_MS`], in milliseconds: it ends the machine seconds after the
+/// wedge rather than at the bound every other boot keeps for a wedge nobody
+/// staged. Its half is the lockup detector's bound, which still outlasts the
+/// lockup probe's own reach to its lock.
+pub const STAGED_BOUND_MS: u64 = 10_000;
+
 /// The bound one *CPU* gets to take no interrupt at all while it is burning
 /// cycles, in milliseconds, before that CPU ends the machine from its own NMI.
 ///
