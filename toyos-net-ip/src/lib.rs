@@ -430,11 +430,15 @@ mod compile_fail {
     /// NUD-28: a MAC exists only in a state that has one, and a pending queue only in INCOMPLETE.
     ///
     /// ```
-    /// use toyos_net_ip::Nud;
+    /// use toyos_net_ip::{Linked, Nud};
     /// fn f(n: &Nud) -> usize {
     ///     match n {
     ///         Nud::Incomplete(i) => i.queued(),
     ///         Nud::Reachable(r) => usize::from(r.mac().0[0]),
+    ///         Nud::Stale(s) => {
+    ///             let _: &Linked = s;
+    ///             2
+    ///         }
     ///         Nud::Failed => 0,
     ///         _ => 1,
     ///     }
@@ -448,7 +452,7 @@ mod compile_fail {
     ///
     /// ```compile_fail
     /// use toyos_net_ip::Nud;
-    /// fn f(n: &Nud) { if let Nud::Failed(i) = n { let _ = i.mac(); } }
+    /// fn f(n: &Nud) { if let Nud::Failed(_) = n {} }
     /// ```
     ///
     /// ```compile_fail

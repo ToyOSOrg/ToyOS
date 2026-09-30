@@ -514,7 +514,10 @@ fn s_ip_out_006_the_control_queue_is_bounded() {
         let _ = h.ip.resolve(h.clock(), h.if0, ip4(192, 0, 2, 100 + n));
     }
     assert_eq!(h.count(Counter::IpControlQueueFull), 1);
-    assert_eq!(h.out().len(), limits::CONTROL_QUEUE);
+    assert!(h.out_with(0).is_empty(), "no credit, nothing leaves");
+    let first = h.out_with(1);
+    assert!(first.len() == 1 && first[0].requests(ip4(192, 0, 2, 100)), "one credit, the oldest frame");
+    assert_eq!(h.out().len(), limits::CONTROL_QUEUE - 1);
 }
 
 /// The bound is on [ip]'s own frames: a datagram its sender was told is held stays bounded by

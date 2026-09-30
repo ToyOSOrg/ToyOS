@@ -257,6 +257,22 @@ fn s_ip_nud_016_requests_are_spaced() {
 }
 
 #[test]
+fn s_ip_nud_016_advice_inside_the_spacing_waits_for_its_boundary() {
+    let mut h = H::fixture_i();
+    let _ = h.ip.resolve(h.clock(), h.if0, R);
+    assert_eq!(h.out().len(), 1, "the request at 0");
+    h.at(5);
+    h.reply_from(R, MAC_R);
+    assert!(h.is_reachable(R));
+    h.at(100);
+    h.ip.advise(h.clock(), R, Advice::Reverify);
+    assert!(matches!(h.state(R), Some(Nud::Probe(_))));
+    assert!(h.out().is_empty(), "100 ms after the last request");
+    let later = h.run(1_000);
+    assert_eq!(later.iter().map(|o| (o.at, o.frame.clone())).collect::<Vec<_>>(), [(1_000, hex(V_ARP_POLL_R))]);
+}
+
+#[test]
 fn s_ip_nud_017_negative_advice_probes() {
     let mut h = H::fixture_i_with(R, MAC_R);
     h.at(100);

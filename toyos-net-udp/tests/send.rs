@@ -248,6 +248,19 @@ fn s_udp_us_026_no_head_of_line_blocking() {
 }
 
 #[test]
+fn s_udp_us_026_a_held_datagram_spends_no_credit() {
+    let mut u = U::uf();
+    let id = u.bind(ANY, 50_001).unwrap();
+    let far = ip4(192, 0, 2, 77);
+    u.udp.send_to(&mut u.ip, id, far, 53, b"1").unwrap();
+    u.udp.send_to(&mut u.ip, id, DNS, 53, b"2").unwrap();
+    let out = u.out_with(1);
+    assert_eq!(out.len(), 1);
+    assert!(ip_of(&out[0]).is_some_and(|ip| ip.destination() == DNS));
+    assert!(is_arp_request_for(&u.out_with(1)[0], far));
+}
+
+#[test]
 fn s_udp_us_027_a_failed_next_hop_is_reported_once() {
     let mut u = U::uf();
     let id = u.bind(ANY, 50_001).unwrap();
