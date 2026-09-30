@@ -3,6 +3,10 @@
 
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define PROT_NONE  0x0
 #define PROT_READ  0x1
 #define PROT_WRITE 0x2
@@ -31,5 +35,9 @@ int munmap(void *addr, size_t length);
 int msync(void *addr, size_t len, int flags);
 int posix_madvise(void *addr, size_t len, int advice);
 int mprotect(void *addr, size_t len, int prot);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

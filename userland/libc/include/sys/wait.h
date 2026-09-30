@@ -3,6 +3,10 @@
 
 #include <sys/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define WNOHANG   1
 #define WUNTRACED 2
 
@@ -12,5 +16,9 @@
 #define WIFSIGNALED(s) (WTERMSIG(s) != 0)
 
 pid_t waitpid(pid_t pid, int *status, int options);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

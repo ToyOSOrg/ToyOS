@@ -1,12 +1,18 @@
-//! libc's architecture module on the host, differentially: every copy and fill
-//! it has, over every length to 300 and every source and destination offset to
-//! 20, against `copy_within` and `fill`, with the two buffers overlapping both
-//! ways; and its square roots against `f64::sqrt` and `f32::sqrt`. Each host
-//! architecture checks its own module. libc's modules that read and set nothing
-//! but what they are handed: `strnlen` and `modf` and `logb` against the host C
-//! library's, `strsignal`'s texts, the readdir answer's reader, `dladdr`'s
-//! symbol search on an image laid out here, and what the memory calls refuse.
-//! And libc's headers against its definitions (`prototypes`).
+//! libc's modules that read and set nothing but what they are handed, on the
+//! host, differentially. The architecture module: every copy and fill it has,
+//! over every length to 300 and every source and destination offset to 20,
+//! against `copy_within` and `fill`, with the two buffers overlapping both ways;
+//! and its square roots against `f64::sqrt` and `f32::sqrt`. Each host
+//! architecture checks its own module. The UTF-8 reader against
+//! `core::str::from_utf8`, the number reader against the host C library's,
+//! AArch64's `long double` widening against compiler-builtins', and the errno
+//! codes against `include/errno.h`. `strnlen`, `modf` and `logb` against the
+//! host C library's, `strsignal`'s texts, the readdir answer's reader,
+//! `dladdr`'s symbol search on an image laid out here, and what the memory
+//! calls refuse. And libc's headers against its definitions (`prototypes`).
+
+#[cfg(test)]
+extern crate alloc;
 
 #[cfg(test)]
 #[path = "../../userland/libc/src/arch/mod.rs"]
@@ -24,21 +30,35 @@ mod listing;
 #[path = "../../userland/libc/src/memreq.rs"]
 mod memreq;
 #[cfg(test)]
+#[path = "../../userland/libc/src/strtonum.rs"]
+mod strtonum;
+#[cfg(test)]
 #[path = "../../userland/libc/src/text.rs"]
 mod text;
+#[cfg(test)]
+#[path = "../../userland/libc/src/utf8.rs"]
+mod utf8;
 
 #[cfg(test)]
 mod dladdr_symbols;
 #[cfg(test)]
+mod errno_codes;
+#[cfg(test)]
 mod fparts_differential;
 #[cfg(test)]
 mod listing_reader;
+#[cfg(all(test, target_arch = "aarch64"))]
+mod long_double;
 #[cfg(test)]
 mod memory_refusals;
 #[cfg(test)]
 mod prototypes;
 #[cfg(test)]
+mod strtonum_differential;
+#[cfg(test)]
 mod text_differential;
+#[cfg(test)]
+mod utf8_differential;
 
 #[cfg(test)]
 mod tests {

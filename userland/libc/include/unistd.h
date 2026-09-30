@@ -4,6 +4,10 @@
 #include <stddef.h>
 #include <sys/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define STDIN_FILENO  0
 #define STDOUT_FILENO 1
 #define STDERR_FILENO 2
@@ -60,5 +64,9 @@ long sysconf(int name);
 #define R_OK 4
 #define W_OK 2
 #define X_OK 1
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

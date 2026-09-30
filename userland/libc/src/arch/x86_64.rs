@@ -74,3 +74,51 @@ pub(crate) fn sqrt_f32(x: f32) -> f32 {
     unsafe { core::arch::asm!("sqrtss {0}, {0}", inout(xmm_reg) x => result, options(pure, nomem, nostack)) };
     result
 }
+
+/// `wchar_t`, which is `int` here.
+pub(crate) type WChar = i32;
+
+// What the `long double` readers below widen, named as C names them, since
+// this module is also compiled on its own (`toyos-libc-copies`).
+unsafe extern "C" {
+    fn strtod(s: *const u8, endptr: *mut *mut u8) -> f64;
+    fn wcstod(s: *const WChar, endptr: *mut *mut WChar) -> f64;
+}
+
+/// `strtod`'s number as `long double`, x87 extended precision in `st0`: read
+/// to `double`'s precision and widened, which is exact.
+#[unsafe(no_mangle)]
+#[unsafe(naked)]
+unsafe extern "C" fn strtold() {
+    core::arch::naked_asm!(
+        "sub rsp, 8",
+        "call {strtod}",
+        "movsd qword ptr [rsp], xmm0",
+        "fld qword ptr [rsp]",
+        "add rsp, 8",
+        "ret",
+        strtod = sym strtod,
+    );
+}
+
+/// `strtold`, in the one locale there is.
+#[unsafe(no_mangle)]
+#[unsafe(naked)]
+unsafe extern "C" fn strtold_l() {
+    core::arch::naked_asm!("jmp {strtold}", strtold = sym strtold);
+}
+
+/// `wcstod`'s number as `long double`, as [`strtold`] widens `strtod`'s.
+#[unsafe(no_mangle)]
+#[unsafe(naked)]
+unsafe extern "C" fn wcstold() {
+    core::arch::naked_asm!(
+        "sub rsp, 8",
+        "call {wcstod}",
+        "movsd qword ptr [rsp], xmm0",
+        "fld qword ptr [rsp]",
+        "add rsp, 8",
+        "ret",
+        wcstod = sym wcstod,
+    );
+}

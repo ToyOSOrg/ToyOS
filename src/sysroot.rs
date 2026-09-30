@@ -27,7 +27,8 @@
 //! compiler is a worktree's own; the sysroot key's (`buildlock::keyed_*`), with
 //! this worktree's build lock put down; then, to build, this worktree's
 //! exclusively (its fork build directory is written); then, if the compiler is
-//! the primary's, the global one shared, because it is read.
+//! the primary's, the global one shared, because it is read; then the key of the
+//! compiler's LLVM, held in use while the C++ runtime is built from its sources.
 //!
 //! A sysroot no worktree names any more is removed by `keystore::sweep`, which
 //! `--worktree remove` runs: each build records the key it used in its
@@ -62,10 +63,11 @@ const SOURCES: &str = "SOURCES";
 
 /// What changes how a key's sources become a sysroot and is none of them: the
 /// std build's recipe below. Moving it moves every key.
-const RECIPE: &str = "bootstrap stage-0 local rebuild, profile compiler, no LLVM, \
+const RECIPE: &str = "bootstrap stage-0 local rebuild, profile compiler, no LLVM or Ninja, \
                       libtoyos_c merged, libraries from the stamp, linked by rust-lld, \
                       a C sysroot of libc's staticlib, the empty libraries beside it, and headers \
-                      per target; 6";
+                      per target, and its C++ runtime built under n2 from the runtimes' sources \
+                      of the compiler's LLVM; 9";
 
 /// Every sysroot on this host.
 pub fn sysroots_dir(rust_dir: &Path) -> PathBuf {
@@ -190,7 +192,11 @@ fn source_files(checkout: &Path, paths: &[&str], out: &mut Vec<PathBuf>) {
 /// compiled by `compiler`.
 pub fn key(root: &Path, compiler: &Compiler, fork: &Path) -> String {
     let parts = [
-        format!("{RECIPE}; cargo {STAGE0_CARGO}; targets {}", GUEST_TARGETS.join(" ")),
+        format!(
+            "{RECIPE}; cargo {STAGE0_CARGO}; targets {}; C++ runtime {:?}",
+            GUEST_TARGETS.join(" "),
+            crate::libcxx::OPTIONS
+        ),
         witness(root),
         tree_identity(fork, &["library", "src/bootstrap"]),
         compiler.identity(),
@@ -319,13 +325,13 @@ pub fn ensure(root: &Path, rust_dir: &Path, lock: &mut Held) -> Sysroot {
     let dir = sysroots_dir(rust_dir).join(&key);
     crate::keystore::record(root, Keyed::Sysroot, &key);
 
-    let using = lock.without_shared(|| held(root, &key, &dir, || build(root, &compiler, &fork, &key, &dir)));
+    let using = lock.without_shared(|| held(root, &key, &dir, || build(root, rust_dir, &compiler, &fork, &key, &dir)));
     Sysroot { dir, primary_compiler: compiler.primary, _using: Some(using) }
 }
 
 /// Make the sysroot `key` names at `dir`, from `root`'s sources and the std fork
 /// at `fork`, with `compiler`. The caller holds the key's lock.
-fn build(root: &Path, compiler: &Compiler, fork: &Path, key: &str, dir: &Path) {
+fn build(root: &Path, rust_dir: &Path, compiler: &Compiler, fork: &Path, key: &str, dir: &Path) {
     let what = format!("building sysroot {key}");
     let _worktree = buildlock::worktree_exclusive(root, &what);
     // Only the primary's compiler is rebuilt in place; one of a worktree's own
@@ -344,6 +350,13 @@ fn build(root: &Path, compiler: &Compiler, fork: &Path, key: &str, dir: &Path) {
             crate::libc::build_c(root, partial, &libc_target, arch);
         }
         let _ = fs::remove_dir_all(&libc_target);
+        let llvm = crate::llvm::held(root, rust_dir, fork);
+        let ninja = crate::libcxx::ninja(root);
+        for arch in Arch::ALL {
+            let scratch = dir.with_extension(format!("libcxx-{}", arch.name()));
+            let c = crate::clang::CSysroot::of(partial, arch);
+            crate::libcxx::build(&c, arch, &llvm.dir.join("src"), &ninja, &scratch);
+        }
 
         // The sources the key named are the ones built, or this is not that key's.
         let again = self::key(root, compiler, fork);
@@ -519,7 +532,9 @@ fn place_std(stamp: &Path, lib: &Path) {
 /// The linker is the compiler's own `rust-lld`, named by path so that which sysroot
 /// a stage-0 build searches for tools decides nothing; and no rpath, which bootstrap
 /// spells as a C driver's `-Wl,` arguments that a linker run directly refuses.
-/// No LLVM: std builds none, and the profile's `download-ci-llvm` fetches one.
+/// No LLVM: std builds none, and the profile's `download-ci-llvm` fetches one;
+/// and no Ninja, which bootstrap otherwise demands on `PATH` for the LLVM it does
+/// not build.
 fn std_config(compiler: &Path, cargo: &Path, build_dir: &Path, host: &str) -> String {
     let targets = GUEST_TARGETS.iter().map(|t| format!("\"{t}\"")).collect::<Vec<_>>().join(", ");
     let linker = toolchain::rust_lld(compiler);
@@ -541,6 +556,7 @@ target = [{targets}]
 
 [llvm]
 download-ci-llvm = false
+ninja = false
 
 [rust]
 lld = false
@@ -819,12 +835,13 @@ mod tests {
         assert!(kept.iter().all(|f| f.is_file()), "the same compiler's build went");
     }
 
-    /// **A std build fetches no LLVM**: it builds none, and the `compiler`
-    /// profile would download one.
+    /// **A std build fetches no LLVM and asks for no Ninja**: it builds none,
+    /// the `compiler` profile would download one, and bootstrap would refuse it
+    /// with no `ninja` on `PATH`.
     #[test]
-    fn a_std_build_downloads_no_llvm() {
+    fn a_std_build_downloads_no_llvm_and_asks_for_no_ninja() {
         let config = std_config(Path::new("/c"), Path::new("/cargo"), Path::new("/b"), "h");
-        assert!(config.contains("\n[llvm]\ndownload-ci-llvm = false\n"), "{config}");
+        assert!(config.contains("\n[llvm]\ndownload-ci-llvm = false\nninja = false\n"), "{config}");
     }
 
     /// **A switch that cannot remove the other compiler's build fails and does

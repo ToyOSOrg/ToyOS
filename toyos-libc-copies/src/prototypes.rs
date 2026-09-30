@@ -19,6 +19,8 @@ const UNDECLARED: &[(&str, &str)] = &[
     ("_start", "the entry the loader starts a C program at"),
     ("rust_eh_personality", "the personality `core`'s unwind tables name"),
     ("_Unwind_Resume", "what the precompiled `alloc`'s landing pads name"),
+    ("__cxa_atexit", "the C++ ABI's, which `cxxabi.h` declares"),
+    ("__cxa_thread_atexit_impl", "what libc++abi's `__cxa_thread_atexit` calls, which it declares"),
     ("close_socket", "`close`'s arm for a socket, which `close` never calls: issues/build/libc-close-of-a-socket-ends-the-process.md"),
 ];
 

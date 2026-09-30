@@ -1,5 +1,6 @@
 #![no_std]
 #![feature(thread_local)]
+#![cfg_attr(not(feature = "std-runtime"), feature(linkage))]
 
 extern crate alloc;
 
@@ -10,6 +11,7 @@ mod errno;
 mod fparts;
 mod link;
 mod listing;
+mod locale;
 mod math;
 mod memory;
 mod memreq;
@@ -21,8 +23,11 @@ mod refused;
 mod socket;
 mod stdio;
 mod string;
+mod strtonum;
 mod text;
 mod time;
+mod utf8;
+mod wchar;
 
 // C runtime: the entry `arch::_start` calls, panic handler, and global allocator.
 // Only for pure C programs (no Rust std). When linked into a Rust program
@@ -94,14 +99,25 @@ mod runtime {
         toyos_abi::syscall::exit(134) // SIGABRT-like
     }
 
-    // Unwinding stubs — core references these symbols via .eh_frame, but with
-    // panic=abort the unwinding path is never taken. Provide no-op/abort stubs
-    // to satisfy the linker.
+    /// The personality `core`'s unwind tables name. This library unwinds
+    /// nothing of its own, and an exception that reaches one of its Rust
+    /// frames ends the program here, loudly.
     #[unsafe(no_mangle)]
-    extern "C" fn rust_eh_personality() {}
+    extern "C" fn rust_eh_personality() -> ! {
+        use core::fmt::Write;
+        let _ = write!(Stderr, "libc: an exception unwound into Rust code, which cannot catch it\n");
+        toyos_abi::syscall::exit(134)
+    }
 
+    /// What the precompiled `alloc`'s landing pads name, so a program with no
+    /// unwinder links. Weak: libunwind's `UnwindLevel1.o` defines it strongly
+    /// beside `_Unwind_RaiseException`, the only way an unwind starts, so this
+    /// one stays the program's only while nothing can unwind.
     #[unsafe(no_mangle)]
+    #[linkage = "weak"]
     extern "C" fn _Unwind_Resume() -> ! {
+        use core::fmt::Write;
+        let _ = write!(Stderr, "libc: _Unwind_Resume with no unwinder linked\n");
         toyos_abi::syscall::exit(134)
     }
 
