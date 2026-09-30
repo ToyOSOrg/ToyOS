@@ -13,8 +13,7 @@
 //!   two processes;
 //! - `holder <expect>` — the second process: opens the slot and says what it
 //!   was answered;
-//! - `bench` — the same bytes through the kernel's driver (a partition claim on
-//!   the first controller) and through blockd, timed;
+//! - `bench` — the same bytes through blockd, one request at a time and many;
 //! - `hostile-head` — a client that, with a write on the device, moves its
 //!   completion ring's head a ring behind blockd's tail: the session is
 //!   ended, and blockd serves the next one;
@@ -31,6 +30,8 @@
 //!   back until ten domains' worth of addresses went by;
 //! - `dma-residue` — on a boot where no release resets the function, three
 //!   claims in turn, and none lends where the first one did.
+//! - `nothing` — blockd started holding no claim: each first frame, malformed
+//!   and well-formed, answered as `serve` answers it.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::toyos::process::{ChildExt, CommandExt};
@@ -49,7 +50,7 @@ use toyos::shm::SharedMemory;
 use toyos::syscap::SysCap;
 use toyos::AsHandle;
 use toyos_abi::part::PartGuid;
-use toyos_abi::syscall::{DeviceType, PciId, SyscallError, DEV_PREFIX, SERVE_PREFIX, SYSCAP_LABEL};
+use toyos_abi::syscall::{self, DeviceType, PciId, SpawnArgs, SyscallError, DEV_PREFIX, SERVE_PREFIX, SYSCAP_LABEL};
 use toyos_blockring::layout::{ARENA, CQ_HEAD, CQ_TAIL, DEPTH, SQ_BASE, SQ_TAIL};
 use toyos_blockring::wire::{self, Refusal};
 use toyos_blockring::{Op, Request, BLOCK_BYTES, MAX_REQUEST_BLOCKS, PORT};
@@ -66,8 +67,6 @@ const BENCH: &str = "C3E5A7B9-2D4F-4B68-8C1E-F3A5B7D9F1B2";
 const MISALIGNED: &str = "E5A7C9DB-4F6B-4D8A-8E30-B5C7D9FB13D4";
 const MISSTART: &str = "F6B8DAEC-5A7C-4E9B-9F41-C6D8EA0C24E5";
 const ABSENT: &str = "0A1B2C3D-4E5F-4A6B-8C7D-9E0F1A2B3C4D";
-/// Mirrored: the kernel's disk, on the first controller.
-const KBENCH: &str = "D4F6B8CA-3E5A-4C79-9D2F-A4B6C8EA02C3";
 /// Mirrored: the idle slot's length in blocks, and what each block holds.
 const TARGET_BLOCKS: u64 = 2048;
 /// Mirrored: what the bench moves each way, each side.
@@ -109,11 +108,12 @@ fn fail(what: String) -> ! {
     std::process::exit(1)
 }
 
-/// blockd, held by this process: its claim minted here, the port's acceptor
-/// kept here, so a blockd can end and another take its place on the same
-/// name. What blockd says goes to this process's stdout, a line at a time.
+/// blockd, held by this process: its claim minted here, from `syscap` when
+/// there is one, the port's acceptor kept here, so a blockd can end and
+/// another take its place on the same name. What blockd says goes to this
+/// process's stdout, a line at a time.
 struct Blockd {
-    syscap: SysCap,
+    syscap: Option<SysCap>,
     acceptor: Acceptor,
     connector: Connector,
     child: Option<Child>,
@@ -123,10 +123,10 @@ struct Blockd {
 
 impl Blockd {
     fn start(args: &[&str]) -> Self {
-        Self::with(capability(), args)
+        Self::with(Some(capability()), args)
     }
 
-    fn with(syscap: SysCap, args: &[&str]) -> Self {
+    fn with(syscap: Option<SysCap>, args: &[&str]) -> Self {
         let (acceptor, connector) = port::create().unwrap_or_else(|e| fail(format!("no port: {e:?}")));
         let mut blockd = Self { syscap, acceptor, connector, child: None, said: None };
         blockd.spawn(args, false);
@@ -143,13 +143,15 @@ impl Blockd {
     /// write's answer: the write is done on the device, and its session never
     /// hears.
     fn spawn(&mut self, args: &[&str], kill_on_withheld: bool) {
-        let claim: toyos::Device = claim_when_free(&self.syscap);
+        let mut command = Command::new("/system/bin/blockd");
+        if let Some(syscap) = &self.syscap {
+            let claim: toyos::Device = claim_when_free(syscap);
+            command.endow(&format!("{DEV_PREFIX}pci:8086:5845"), claim.into_raw().0);
+        }
         let acceptor = toyos_abi::syscall::dup(self.acceptor.as_handle())
             .unwrap_or_else(|e| fail(format!("the acceptor would not duplicate: {e:?}")));
-        let mut command = Command::new("/system/bin/blockd");
         command.args(args);
         command.stdout(Stdio::piped());
-        command.endow(&format!("{DEV_PREFIX}pci:8086:5845"), claim.into_raw().0);
         command.endow(&format!("{SERVE_PREFIX}{PORT}"), acceptor.0);
         let mut child = command.spawn().unwrap_or_else(|e| fail(format!("blockd did not start: {e}")));
         let out = child.stdout.take().expect("piped");
@@ -398,36 +400,10 @@ fn holder_role(expect: &str) {
     println!("blockd_io: a second client of the slot refused with {got}, as expected");
 }
 
-/// The same bytes through the kernel's driver and through blockd, one request
-/// at a time and then as many as the arena holds.
+/// The same bytes through blockd, one request at a time and then as many as
+/// the arena holds.
 fn bench() {
-    // The kernel's driver, through a partition claim on the first controller:
-    // one request at a time, as it moves them.
-    let syscap = capability();
-    let part: toyos::PartitionDev = syscap
-        .claim_partition(PartGuid(guid(KBENCH)))
-        .unwrap_or_else(|e| fail(format!("the kernel's bench partition was refused: {e:?}")));
-    let written = chunks(BENCH_BLOCKS, 0x3C);
-    let blocks: Vec<Vec<[u8; BLOCK_BYTES]>> = written
-        .iter()
-        .map(|c| c.chunks(BLOCK_BYTES).map(|b| b.try_into().expect("a block")).collect())
-        .collect();
-    let mut lba = 0u64;
-    for chunk in &blocks {
-        part.write(lba, chunk).unwrap_or_else(|e| fail(format!("a kernel write: {e:?}")));
-        lba += chunk.len() as u64;
-    }
-    part.sync().unwrap_or_else(|e| fail(format!("the kernel's fsync: {e:?}")));
-    let mut read = vec![[0u8; BLOCK_BYTES]; BENCH_BLOCKS as usize];
-    let per = toyos_abi::part::MAX_BLOCKS_PER_CALL;
-    for (i, chunk) in read.chunks_mut(per).enumerate() {
-        part.read((i * per) as u64, chunk).unwrap_or_else(|e| fail(format!("a kernel read: {e:?}")));
-    }
-    holds(&read.concat(), &written, "the kernel's bench partition");
-    drop(part);
-
-    // blockd, one request at a time and then as many as the arena holds.
-    let blockd = Blockd::with(syscap, &[]);
+    let blockd = Blockd::start(&[]);
     let mut s = open(blockd.names(), BENCH);
     let mut runs = Vec::new();
     for (salt, in_flight) in [(0x3D, 1usize), (0x3C, 15)] {
@@ -438,8 +414,7 @@ fn bench() {
         runs.push(format!("{in_flight} in flight with {flushes} Flushes"));
     }
     println!(
-        "blockd_io: bench {} MiB each way through the kernel driver and through blockd {}; at \
-         most {} requests on the wire",
+        "blockd_io: bench {} MiB each way through blockd {}; at most {} requests on the wire",
         BENCH_BLOCKS * BLOCK_BYTES as u64 / (1024 * 1024),
         runs.join("; "),
         s.peak_on_the_wire()
@@ -697,6 +672,30 @@ fn aim() -> (Controller, SharedMemory) {
     (ctrl, region)
 }
 
+/// A spawn from `image`'s first `len` bytes, with an argv no process can read.
+fn spawn_unreadable_argv(image: toyos::RawHandle, len: u64) -> Result<toyos::RawHandle, SyscallError> {
+    // SAFETY: argv names the null page, which the kernel refuses to read, and
+    // every other pointer is null with a zero length.
+    unsafe {
+        syscall::spawn(&SpawnArgs {
+            argv_ptr: 8,
+            argv_len: 8,
+            slot_map_ptr: 0,
+            slot_map_count: 0,
+            env_ptr: 0,
+            env_len: 0,
+            endow_ptr: 0,
+            endow_count: 0,
+            labels_ptr: 0,
+            labels_len: 0,
+            cwd_ptr: 0,
+            cwd_len: 0,
+            image: image.0 as u64,
+            image_len: len,
+        })
+    }
+}
+
 /// Device block 0, the disk's protective MBR, ends 0x55 0xAA.
 fn is_block_zero(bytes: &[u8]) -> bool {
     bytes[510] == 0x55 && bytes[511] == 0xAA
@@ -729,6 +728,18 @@ fn dma(role: &str) {
                 other => fail(format!("lending the region a second time was answered {other:?}")),
             }
             println!("blockd_io: a register window, and a region already lent, are refused with InvalidArgument");
+            // Nor is a register window a program: the spawn refuses it before
+            // it reads anything else, where a region's is taken and the spawn
+            // goes on to refuse the argv.
+            match spawn_unreadable_argv(bar.as_handle(), 4096) {
+                Err(SyscallError::InvalidArgument) => {}
+                other => fail(format!("a spawn from the register window was answered {other:?}")),
+            }
+            match spawn_unreadable_argv(region.as_handle(), 4096) {
+                Err(SyscallError::BadAddress) => {}
+                other => fail(format!("a spawn from the region with an unreadable argv was answered {other:?}")),
+            }
+            println!("blockd_io: a spawn from a register window is refused with InvalidArgument, and one from a region reaches its argv");
         }
         "dma-outside" => {
             let past = mapping.device_addr + mapping.bytes;
@@ -975,9 +986,44 @@ fn dma_residue() {
     println!("blockd_io: PASS dma-residue");
 }
 
+/// blockd started holding no controller answers a connection's first frame as
+/// it answers every other: the malformed refused as such, a listing empty and
+/// an open `NotFound`.
+fn nothing() {
+    let blockd = Blockd::with(None, &[]);
+    let names = blockd.names();
+    let region = || {
+        let region = SharedMemory::create(REGION).unwrap_or_else(|e| fail(format!("a region: {e:?}")));
+        vec![region.share().unwrap_or_else(|e| fail(format!("a second handle: {e:?}")))]
+    };
+    let absent = guid(ABSENT);
+    let malformed = Some(Refusal::Malformed);
+    for (what, msg_type, payload, handles, answered, refusal) in [
+        ("a listing that carries a payload", wire::MSG_LIST, &[0u8; 4][..], vec![], wire::MSG_REFUSED, malformed),
+        ("an open with no region", wire::MSG_OPEN, &absent[..], vec![], wire::MSG_REFUSED, malformed),
+        ("an open whose GUID is short", wire::MSG_OPEN, &absent[..8], region(), wire::MSG_REFUSED, malformed),
+        ("a listing", wire::MSG_LIST, &[][..], vec![], wire::MSG_LISTED, None),
+        ("an open", wire::MSG_OPEN, &absent[..], region(), wire::MSG_REFUSED, Some(Refusal::NotFound)),
+    ] {
+        let conn = names.open(PORT).unwrap_or_else(|e| fail(format!("the port: {e:?}")));
+        conn.send_bytes_with_handles(&handles, msg_type, payload).unwrap_or_else(|e| fail(format!("{what}: {e:?}")));
+        let header = conn.recv_header().unwrap_or_else(|e| fail(format!("{what}'s answer: {e:?}")));
+        let mut answer = [0u8; 64];
+        let len = conn.recv_bytes(&header, &mut answer).unwrap_or_else(|e| fail(format!("{what}'s answer: {e:?}")));
+        let got = Refusal::decode(&answer[..len]);
+        if header.msg_type != answered || got != refusal || (refusal.is_none() && len != 0) {
+            fail(format!("{what} was answered {} {got:?} in {len} bytes, not {answered} {refusal:?}", header.msg_type));
+        }
+        println!("blockd_io: with no controller, {what} was answered {answered} {refusal:?}");
+    }
+    drop(blockd);
+    println!("blockd_io: PASS nothing");
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
+        Some("nothing") => nothing(),
         Some("claims") => claims(),
         Some("holder") => holder_role(args.get(2).map_or("", String::as_str)),
         Some("bench") => bench(),

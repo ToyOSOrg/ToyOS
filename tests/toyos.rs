@@ -172,9 +172,6 @@ const RUST_SKIP: &[&str] = &[
     "quiesce_twice",
     // The same, and its verdict is the stop record of a boot staged around it.
     "quiesce_last",
-    // The same, and its verdict is the log volume the stop leaves.
-    // `quiesce_leaves_the_volume_whole` runs it.
-    "quiesce_fsync",
     // Its verdict is a count of what reached `/log`, which only a boot of its own
     // holds, and megabytes of it. `log_program_flood` runs it.
     "log_flood",
@@ -332,12 +329,6 @@ const RUST_SKIP: &[&str] = &[
     // Needs a boot image the harness staged a file into before the machine
     // started, which only `esp_filesystem` builds.
     "esp_files",
-    // Every question it asks has the *right* answer on an ordinary kernel, so
-    // on the shared boot it prints three successes and passes on its exit code
-    // — a second test of the same name whose verdict is vacuous.
-    // `boot_volume_metadata_error` runs it on the kernel that refuses the
-    // reads, which is the only build it says anything about.
-    "boot_volume_metadata_error",
     // Two modes, each waiting to be typed at through QMP; on its own nothing
     // ever answers it. `swiss_german_layout`, `locale_detect` and
     // `locale_detect_unrecognized` drive it.
@@ -369,20 +360,11 @@ const RUST_SKIP: &[&str] = &[
     // shared boot it would be reported against whichever test came next — and
     // every one after that. `short_sleep_livelock` gives it a boot of its own.
     "abuse_short_sleep",
-    // `cache_eviction` needs the small NVMe that makes the cache evict at all.
-    "cache_eviction",
-    // `writeback_reopen` and `writeback_spawn` each need their own boot with
-    // `writeback-stall` armed; `writeback_durability` writes `/log` and is judged
-    // host-side off the image after a shutdown. All three run as `MACHINE_TESTS`,
-    // not on the shared boot.
-    "writeback_reopen",
-    "writeback_spawn",
-    "writeback_durability",
-    // Same shape as `writeback_durability`: what it stages on `/log` — a file
+    // What it stages on `/log` — a file
     // unlinked out from under a held descriptor, its clusters handed to the next
     // writer — is only half the claim, and the other half is the volume read
-    // back off the image after a shutdown by a FAT implementation that is not
-    // the kernel's. `fat_backing_revoked` runs it.
+    // back off the image after a shutdown by a FAT implementation.
+    // `fat_backing_revoked` runs it.
     "fat_backing_revoked",
     // Stages a rename with an absent source on `/log` and leaves the
     // destination for `fs_rename_durable` to read back off the image.
@@ -398,16 +380,21 @@ const RUST_SKIP: &[&str] = &[
     "audio_idle_suspend",
     "null_sink_client_exits",
     "soundd_log_stall",
-    // Its whole subject is a page of a file the host wrote onto the volume
-    // before the machine existed; the shared boot stages nothing, so it prints
-    // `did not open` and passes on its exit code. `log_backing_read_error`
-    // stages the file and reads the verdict.
-    "log_volume_reread",
     // Needs `usb-flush-fails` armed: on the shared boot the device flush
     // succeeds and its two must-refuse assertions red for an honest reason.
     // `fsync_failed_commit` boots it with the arm.
     "fsync_flush_failed",
-    // Needs the NVMe `/home` and a boot of its own for the readback it is judged against; `home_overwrite_reads_back` runs it.
+    // Needs a boot whose file servers are armed to end under its write, and
+    // ends DATA's for the rest of the boot. `fsd_restart` runs it.
+    "fs_restart",
+    // Holds every DATA client slot while it runs, so no other program may
+    // need DATA on its boot. `fsd_restart` runs it.
+    "fs_client_bound",
+    // Needs DATA on a stick the kernel drives and a server armed with
+    // `--let-go-at-read`, which only `tests/fsdclaimcase` boots.
+    // `fsd_claim_held` runs it there.
+    "fs_claim_held",
+    // Needs a boot of its own for the readback it is judged against; `home_overwrite_reads_back` runs it.
     "home_overwrite_zero",
     // Needs a boot where the DATA volume is ours and absent; on the shared
     // boot `/apps` and `/home` are ordinarily mounted, so every refusal it
@@ -421,9 +408,6 @@ const RUST_SKIP: &[&str] = &[
     // Needs `test-small-caches` for the eviction its read-back rests on, and a
     // boot of its own for the host-side re-read. `redirty_mid_flush` runs it.
     "redirty_mid_flush",
-    // Needs `ftruncate-flush-stall` and a boot of its own for the host-side
-    // re-read. `ftruncate_flush_race` runs it.
-    "ftruncate_flush_race",
     // Needs the `smp-skip-ap` boot; `smp_failed_ap_leaves_no_hole` runs it there.
     "smp_hole_shootdown",
     // Its listings are exact against `tests/layoutcase`, and it takes what that
@@ -863,7 +847,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     ("internal_disk_boot", Sched::Parallel),
     // One boot each, kernel lines and image bytes for verdicts, no clock in either.
     ("block_duplicate_id", Sched::Parallel),
-    ("page_cache_partition_offset", Sched::Parallel),
     // A partition claimed as a device: one boot, every refusal in the guest,
     // the neighbours and the target judged off the image. Body in
     // `tests/common/partclaim.rs`, as are the two below.
@@ -877,7 +860,23 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // for its own writes, across a close, after another's flush, and at the
     // shutdown when nobody asked.
     ("partition_claim_departure", Sched::Parallel),
-    // A same-length overwrite on /home, the guest's read held against the image. Body in `tests/common/storage.rs`.
+    // DATA's file server killed under an unanswered write, four times: its
+    // clients reopen, the fourth end closes /home to Gone, and the flushed
+    // files read back off the image. Body in `tests/common/storage.rs`.
+    ("fsd_restart", Sched::Parallel),
+    // DATA's first file server ended before it accepts init's own waiting call:
+    // init starts it again and the boot reaches ready with the session home.
+    // Body in `tests/common/storage.rs`.
+    ("fsd_end_at_mount", Sched::Parallel),
+    // DATA's partition claim held by the guest across its server's restart:
+    // init refuses the restart by name and /home answers Gone. Body in
+    // `tests/common/storage.rs`.
+    ("fsd_claim_held", Sched::Parallel),
+    // DATA on a stick and on NVMe, one partition per source: fsd refuses both
+    // by name, serves DATA absent, and the stick is untouched. Body in
+    // `tests/common/storage.rs`.
+    ("fsd_two_data", Sched::Parallel),
+    // A same-length overwrite on /home, the guest's read held against the image, and the only guest control on init's stop sync. Body in `tests/common/storage.rs`.
     ("home_overwrite_reads_back", Sched::Parallel),
     // One filesystem under two paths: the guest writes under each of /apps and
     // /home, the host finds both in one volume on the image. Body in
@@ -904,9 +903,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // Its own boot: it ends the machine, and its verdict is the order of
     // kernel lines.
     ("quiesce_refuses_a_second_shutdown", Sched::Parallel),
-    // Its own boot: it ends the machine, and its verdict is the volume that
-    // boot leaves.
-    ("quiesce_leaves_the_volume_whole", Sched::Parallel),
     // Its own boot each: it ends the machine, and its verdict is the stop
     // record that boot writes.
     ("quiesce_wakes_on_the_last_park", Sched::Parallel),
@@ -1242,8 +1238,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // so what it stages is an ordering with no wall-clock margin on either
     // side: nothing here needs the serial tail.
     ("late_storage_connect", Sched::Parallel),
-    ("log_backing_read_error", Sched::Parallel),
-    ("boot_volume_metadata_error", Sched::Parallel),
     ("log_partition_layout", Sched::Parallel),
     // What the loader does with a slot's ROOT: bytes its signature does not
     // cover, a parameter naming another, an overlapping partition and an
@@ -1258,14 +1252,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     ("root_named_twice_on_the_boot_disk", Sched::Serial),
     ("root_named_twice", Sched::Serial),
     ("log_partition_identity", Sched::Parallel),
-    ("cache_eviction", Sched::Parallel),
-    // The write-back queue's three negative controls (wall 4 of
-    // `issues/kernel/every-wait-in-this-kernel-is-a-spin.md`). `writeback_reopen`
-    // and `writeback_spawn` arm `writeback-stall`, so each needs its own actuator
-    // boot: one holds the queue open across a *handle* re-open, which the file
-    // cache answers, and the other across a *spawn*, which is a device view and
-    // does not. `writeback_durability` is a host-side volume oracle that shuts the
-    // guest down and reads `/log` back with `toyos-fat32-check`.
     // The watch's lost-wake window, staged: `watch-window` holds every pipe
     // waiter between reading its condition and parking, so the peer's post lands where
     // only the notified bit carries it to the commit.
@@ -1277,15 +1263,11 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // A sibling's store staged between a thread's TLS block being placed and
     // its rebase (`tls-rebase-window`): the block is never reachable there.
     ("tls_rebase_window", Sched::Parallel),
-    ("writeback_reopen", Sched::Parallel),
-    ("writeback_spawn", Sched::Parallel),
-    ("writeback_durability", Sched::Parallel),
     // `KernelHw::switch`'s SS reload (AMD `X86_BUG_SYSRET_SS_ATTRS`) observed the
     // one way a guest can, since its `SYSRET` does not reproduce the erratum. Reds
     // the day that `mov ss` leaves the switch.
     ("sysret_ss_reload", Sched::Parallel),
-    // The FAT32 read side's revocation gate, and a host-side volume oracle for
-    // the same reason `writeback_durability` is one: whether the clusters the
+    // The FAT32 read side's revocation gate, and a host-side volume oracle: whether the clusters the
     // unlink freed were really reissued, and whether the cycle left a volume, are
     // both questions the guest that staged them cannot answer about itself.
     ("fat_backing_revoked", Sched::Parallel),
@@ -1294,8 +1276,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // re-read off the image. Both bodies in `tests/common/volumes.rs`.
     ("fsync_failed_commit", Sched::Parallel),
     ("redirty_mid_flush", Sched::Parallel),
-    // A truncate staged inside a flush's metadata window, re-read off the image.
-    ("ftruncate_flush_race", Sched::Parallel),
     // The rename gate's FAT arm, a host-side volume oracle like `fat_backing_revoked`.
     ("fs_rename_durable", Sched::Parallel),
     // The directory work's FAT arm, `fs_rename_durable`'s oracle shape.
@@ -1318,9 +1298,8 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // still mapped: the verdict is the first holder's own grant, read in the
     // guest after the second holder wrote its own.
     ("userdev_residue_is_its_own", Sched::Parallel),
-    // blockd, the NVMe driver in userland, on a second controller beside the
-    // kernel's: partitions served and timed against the kernel's driver; a
-    // controller reset and its own death, each survived by the client and
+    // blockd, the NVMe driver in userland, on a second controller: partitions
+    // served; a controller reset and its own death, each survived by the client and
     // judged off the image by the host's readers; and a transfer outside what
     // its function was lent, which is a fault record. Each boot runs several
     // blockd lifetimes and one waits out a ten-second silence.
@@ -1333,6 +1312,9 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // standing; then, on a second boot, a function no release resets is never
     // lent where it was left aimed.
     ("blockd_lends_within_its_bound", Sched::Parallel),
+    // blockd holding no controller: each first frame answered on the loop and
+    // the handshake a controller is served on, the malformed refused as such.
+    ("blockd_serves_nothing", Sched::Parallel),
     // Two live HDA links, refused by name: the negative control on the kernel's
     // bind path. No sample is played; lines are the verdict.
     ("hda_two_live_refused", Sched::Parallel),
@@ -1361,8 +1343,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("blocking_read_window", &["test_rs_blocking_read_stress"]),
     ("user_copy_races_munmap", &["test_rs_copy_out_races_munmap"]),
     ("tls_rebase_window", &["test_rs_tls_dtv_race"]),
-    ("writeback_reopen", &["test_rs_writeback_reopen"]),
-    ("writeback_spawn", &["test_rs_writeback_spawn"]),
     ("xhci_second_controller", &["test_rs_input_events"]),
     ("xhci_msi_only", &["test_rs_input_events"]),
     ("metal_sim_input", &["test_rs_input_events"]),
@@ -1376,7 +1356,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("sched_check_build", &["test_rs_sched_stress"]),
     ("short_sleep_livelock", &["test_rs_abuse_short_sleep"]),
     ("heap_ceiling_bounds", &["test_rs_heap_ceiling"]),
-    ("cache_eviction", &["test_rs_cache_eviction"]),
     ("irq_census_conservation", &["test_rs_std_mmap"]),
     ("i8042_health", &["test_rs_i8042_keyboard"]),
     ("i8042_fadt_denial", &["test_rs_i8042_keyboard"]),
@@ -1408,6 +1387,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("blockd_survives_its_death", &["test_rs_blockd_io"]),
     ("blockd_dma_outside_the_lent", &["test_rs_blockd_io"]),
     ("blockd_lends_within_its_bound", &["test_rs_blockd_io"]),
+    ("blockd_serves_nothing", &["test_rs_blockd_io"]),
     (
         "inspect_reads_its_owners",
         &["test_rs_inspect_denied", "test_rs_inventory_bounds"],
@@ -1437,18 +1417,15 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("broken_data_volume_is_absent", &["test_rs_home_absent"]),
     ("data_candidate_with_bad_geometry_is_absent", &["test_rs_home_absent"]),
     ("home_overwrite_reads_back", &["test_rs_home_overwrite_zero"]),
-    ("boot_volume_metadata_error", &["test_rs_boot_volume_metadata_error"]),
+    ("fsd_restart", &["test_rs_fs_client_bound", "test_rs_fs_restart"]),
+    ("fsd_claim_held", &["test_rs_fs_claim_held"]),
     ("esp_filesystem", &["test_rs_esp_files"]),
     ("log_flush_retry", &["test_rs_esp_files"]),
     ("fat_backing_revoked", &["test_rs_fat_backing_revoked"]),
     ("fs_dirs_durable", &["test_rs_fs_dirs_durable"]),
     ("fs_rename_durable", &["test_rs_fs_rename_durable", "test_rs_fs_dirs_durable"]),
     ("fsync_failed_commit", &["test_rs_fsync_flush_failed"]),
-    ("ftruncate_flush_race", &["test_rs_ftruncate_flush_race", "test_rs_fs_rename_durable"]),
-    ("log_backing_read_error", &["test_rs_log_volume_reread"]),
     ("redirty_mid_flush", &["test_rs_redirty_mid_flush"]),
-    ("writeback_durability", &["test_rs_writeback_durability"]),
-    ("kernel_log_file", &["test_rs_writeback_durability"]),
     ("double_fault_stack", &["test_rs_test_panic_child"]),
     ("idle_stack_guard", &["test_rs_test_panic_child"]),
     ("syscall_panic_halts", &["test_rs_test_panic_child"]),
@@ -1477,7 +1454,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("quiesce_refuses_a_second_shutdown", &["test_rs_quiesce_twice"]),
     ("quiesce_wakes_on_the_last_park", &["test_rs_quiesce_last"]),
     ("quiesce_wakes_on_the_last_teardown", &["test_rs_quiesce_last"]),
-    ("quiesce_leaves_the_volume_whole", &["test_rs_quiesce_fsync"]),
     ("swap_crash_rolls_back", &["test_rs_swap_crash"]),
     ("swap_quiets_the_function", &["test_rs_swap_claim_idle"]),
     ("swap_keeps_what_nothing_reset", &["test_rs_swap_claim_running"]),
@@ -1959,20 +1935,8 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal::Runs { arms: SELFTESTS, judge: |b| process_reopen(b[0].kernel().text()) },
     ),
     (
-        // **Two of its three probes pass here and the third cannot run.**
-        // Measured on a metal-shaped guest: the two `revoke-selftest` probes
-        // both PASS, and `pc-unbind-selftest` prints `FAIL (this boot has no
-        // metadata page cache)` — the slot it needs is one the virtio machine's
-        // NVMe home has and the T14's USB-only volumes do not. Judging the two
-        // that do run would be a different test under the same name, so the
-        // whole registration stays where it can answer for all three.
         "read_fault_selftests",
-        metal::Metal::QemuOnly(
-            "`pc-unbind-selftest` reports `FAIL (this boot has no metadata page cache)` on a \
-             machine whose volumes are all on the boot stick; the two `revoke-selftest` probes \
-             beside it pass, and splitting them into a name of their own is what would put that \
-             half on the machine",
-        ),
+        metal::Metal::Runs { arms: SELFTESTS, judge: |b| read_fault_probes(b[0].kernel().text()) },
     ),
     (
         "leak_rollback_selftest",
@@ -2180,10 +2144,7 @@ const SELFTESTS: &[metal::Arm] = &[metal::once(
     &[
         "pci-cap-selftest",
         "process-reopen-selftest",
-        // `revoked-backing-selftest` and `pc-unbind-selftest` are deliberately
-        // absent: `read_fault_selftests` is the only rider they had and it is
-        // declared QEMU-only above, so arming them here would put a `FAIL` line
-        // on the stick that no verdict claims.
+        "revoked-backing-selftest",
         "leak-rollback-selftest",
         "lapic-spurious-selftest",
         "unclaimed-vector-selftest",
@@ -4155,14 +4116,14 @@ fn run_screen_test(
             let text = dump.text();
             print_screen(name, &text);
 
-            // Non-vacuity, and it is the half that matters: a boot whose log
-            // partition mounted would paint the ordinary line, and a screen
+            // Non-vacuity, and it is the half that matters: a boot whose loader
+            // named a log partition would paint the ordinary line, and a screen
             // asserted on without this would pass on a kernel that always says
             // the alarming thing.
-            if !console.contains("log-volume: not mounted") {
+            if !console.contains(common::volumes::NO_LOG_ALERT) {
                 return Err(format!(
-                    "the kernel mounted a log volume it was never given, so nothing here is \
-                     about a missing /log:\n{console}"
+                    "the kernel was handed a log partition it was never given, so nothing here \
+                     is about a missing /log:\n{console}"
                 ));
             }
             if console.contains("logd: this boot's kernel log is") {
@@ -9069,7 +9030,7 @@ fn blocked_dump() -> Result<(), String> {
     // a bare name appears in every one of these programs' own log lines and
     // `/system/bin/init` speaks in a program's name before that program runs
     // (`tests/CLAUDE.md`).
-    let unnamed: Vec<&str> = ["klogd", "iod"]
+    let unnamed: Vec<&str> = ["klogd"]
         .into_iter()
         .filter(|name| !report.contains(&format!(" {name} cpu=")))
         .collect();
@@ -9809,6 +9770,7 @@ fn metal_sim_client_death(boot: &mut Boot) -> Result<(), String> {
     Ok(())
 }
 
+
 /// Run one machine-shape test. Like `run_screen_test`, each of these owns its
 /// QEMU — the machine shape *is* the test — except for the runs of adjacent
 /// names that share one through `held` (see [`group_boot`]).
@@ -9842,9 +9804,6 @@ fn run_machine_test(
             partclaim::partition_claim_departure(test_config, c_bins, rust_bins)
         }
         "block_duplicate_id" => storage::block_duplicate_id(test_config, c_bins, rust_bins),
-        "page_cache_partition_offset" => {
-            storage::page_cache_partition_offset(test_config, c_bins, rust_bins)
-        }
         "volume_from_another_disk" => {
             storage::volume_from_another_disk(test_config, c_bins, rust_bins)
         }
@@ -9854,6 +9813,10 @@ fn run_machine_test(
         "data_candidate_with_bad_geometry_is_absent" => {
             storage::data_candidate_with_bad_geometry_is_absent(test_config, c_bins, rust_bins)
         }
+        "fsd_restart" => storage::fsd_restart(test_config, c_bins, rust_bins),
+        "fsd_end_at_mount" => storage::fsd_end_at_mount(test_config, c_bins, rust_bins),
+        "fsd_claim_held" => storage::fsd_claim_held(test_config, c_bins, rust_bins),
+        "fsd_two_data" => storage::fsd_two_data(test_config, c_bins, rust_bins),
         "home_overwrite_reads_back" => {
             storage::home_overwrite_reads_back(test_config, c_bins, rust_bins)
         }
@@ -9930,34 +9893,24 @@ fn run_machine_test(
         "kernel_log_file" => common::volumes::kernel_log_file(test_config, c_bins, rust_bins),
         // Body in `tests/common/volumes.rs`, same reason: the host-side oracle
         // shuts the guest down and reads `/log` back with `toyos-fat32-check`.
-        "writeback_durability" => common::volumes::writeback_durability(test_config, c_bins, rust_bins),
         // Same again: the FAT32 read side's revocation, judged off the volume the
         // guest's unlink-and-reallocate cycle left behind.
         "fat_backing_revoked" => common::volumes::fat_backing_revoked(test_config, c_bins, rust_bins),
-        // `sysret-ss-probe` has iod null SS, force a switch, and log whether the
+        // `sysret-ss-probe` has the first syscall null SS, force a switch, and log whether the
         // switch reloaded it; a missing `mov ss` turns `reloaded` into `NOT`.
         "sysret_ss_reload" => {
             let options = BootOptions {
                 kernel_params: &["sysret-ss-probe"],
                 ..Default::default()
             };
-            let mut qemu =
-                QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
-            // iod's probe reports on either side of the ready marker and the
-            // drain reads only lines after it, so the boot log is asked first;
-            // the drain's ceiling is a liveness bound on a report still owed.
-            let mut log = qemu.boot_log().to_string();
-            if !log.lines().any(sysret_ss_reported) {
-                log += &qemu.drain_until(Duration::from_secs(10), sysret_ss_reported);
-            }
-            sysret_ss(&log)
+            // The first syscall is init's, so the probe's line precedes the ready marker.
+            let qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
+            sysret_ss(qemu.boot_log())
         }
         "fsync_failed_commit" => common::volumes::fsync_failed_commit(test_config, c_bins, rust_bins),
         "redirty_mid_flush" => common::volumes::redirty_mid_flush(test_config, c_bins, rust_bins),
-        "ftruncate_flush_race" => common::volumes::ftruncate_flush_race(test_config, c_bins, rust_bins),
         "fs_rename_durable" => common::volumes::fs_rename_durable(test_config, c_bins, rust_bins),
         "fs_dirs_durable" => common::volumes::fs_dirs_durable(test_config, c_bins, rust_bins),
-        "quiesce_leaves_the_volume_whole" => common::volumes::quiesce_leaves_the_volume_whole(test_config, c_bins, rust_bins),
         // The lost-wake canary with the window it guards held open: every pipe
         // wait reads its condition, waits for a post to land, then parks, so
         // the ping-pong's posts land between the two. A commit that ignored the
@@ -10017,50 +9970,6 @@ fn run_machine_test(
                     "tls_rebase_window failed: {unreachable} of {TLS_RACE_WATCHED} watched blocks \
                      unreachable before their rebase:\n{}\nkernel log while it ran:\n{log}",
                     result.stdout
-                ));
-            }
-            Ok(())
-        }
-        // The write-back queue's re-open control: `writeback-stall` parks `iod`
-        // before it drains, so the guest can prove a re-open before the flush
-        // reads the pinned pages and not the NVMe `/home` device.
-        "writeback_reopen" => {
-            let options = BootOptions {
-                kernel_params: &["writeback-stall"],
-                ..Default::default()
-            };
-            let mut qemu =
-                QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
-            let boot = qemu.boot_log().to_string();
-            serial::Serial::named("boot console", boot.as_str()).must_be_clean()?;
-            let result = qemu.run_test("test_rs_writeback_reopen", Duration::from_secs(30));
-            if !check_rust_result(&result) {
-                return Err(format!(
-                    "writeback_reopen failed:\n{}\nkernel log while it ran:\n{}{}",
-                    result.stdout, result.before, result.serial
-                ));
-            }
-            Ok(())
-        }
-        // The other half of the same stall, on the path the file cache does not
-        // answer: a spawn reads a *device* view (`Vfs::open_backing`), so a
-        // binary written and closed with the write-back still owed used to load
-        // as `ELF: fewer bytes than a file header`. Same actuator, and the same
-        // reason it needs its own boot.
-        "writeback_spawn" => {
-            let options = BootOptions {
-                kernel_params: &["writeback-stall"],
-                ..Default::default()
-            };
-            let mut qemu =
-                QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
-            let boot = qemu.boot_log().to_string();
-            serial::Serial::named("boot console", boot.as_str()).must_be_clean()?;
-            let result = qemu.run_test("test_rs_writeback_spawn", Duration::from_secs(30));
-            if !check_rust_result(&result) {
-                return Err(format!(
-                    "writeback_spawn failed:\n{}\nkernel log while it ran:\n{}{}",
-                    result.stdout, result.before, result.serial
                 ));
             }
             Ok(())
@@ -10275,12 +10184,6 @@ fn run_machine_test(
         "log_partition_identity" => {
             common::volumes::log_partition_identity(test_config, c_bins, rust_bins)
         }
-        "log_backing_read_error" => {
-            common::volumes::log_backing_read_error(test_config, c_bins, rust_bins)
-        }
-        "boot_volume_metadata_error" => {
-            common::volumes::boot_volume_metadata_error(test_config, c_bins, rust_bins)
-        }
         "usb_storage_write_error" => usb::usb_storage_write_error(test_config, c_bins, rust_bins),
         "usb_flush_optional" => usb::usb_flush_optional(test_config, c_bins, rust_bins),
         "xhci_deaf_registers" => usb::xhci_deaf_registers(test_config, c_bins, rust_bins),
@@ -10357,6 +10260,7 @@ fn run_machine_test(
         "blockd_lends_within_its_bound" => {
             common::blockd::blockd_lends_within_its_bound(test_config, c_bins, rust_bins)
         }
+        "blockd_serves_nothing" => common::blockd::blockd_serves_nothing(test_config, c_bins, rust_bins),
         "double_fault_stack" => faults::double_fault_stack(test_config, c_bins, rust_bins),
         "syscall_window_nmi" => faults::syscall_window_nmi(test_config, c_bins, rust_bins),
         "syscall_window_nmi_controls" => {
@@ -11080,11 +10984,10 @@ fn run_machine_test(
         }
         "nvme_large_device" => {
             // Device *size* is a shape dimension, and it is the one nobody had
-            // varied: every test image was small enough that an index sized
-            // per device block fit under the object allocator's 2 MiB ceiling,
-            // so the first boot on the laptop was the first time anything
-            // asked for a device-sized allocation — and it died in
-            // page_cache::init before it mounted anything.
+            // varied: the first boot on the laptop was the first time anything
+            // asked for a device-sized allocation. blockd drives the device
+            // and fsd serves DATA off it, and both have to come up on the
+            // T14's geometry.
             let options = BootOptions {
                 profile: qemu::Profile::MetalDisk,
                 ..Default::default()
@@ -11096,34 +10999,12 @@ fn run_machine_test(
             // nothing until the guest's own driver says it enumerated a big
             // namespace. This is the number the T14 printed.
             let Some(blocks) = parse_nvme_blocks(&log) else {
-                return Err(format!("the NVMe driver printed no block count:\n{log}"));
+                return Err(format!("blockd printed no namespace size:\n{log}"));
             };
             if blocks != qemu::NVME_T14_BLOCKS {
                 return Err(format!(
                     "the guest enumerated {blocks} blocks, not the T14's {}",
                     qemu::NVME_T14_BLOCKS
-                ));
-            }
-
-            // And the cache did not size its index by that number.
-            //
-            // The bound has to sit *below* the allocator's 2 MiB ceiling to be
-            // able to fire at all, which is a narrower window than it looks:
-            // a hashbrown index costs 17 B per bucket and its capacities are
-            // 7/8 of a power of two, so the last one that fits under the
-            // ceiling is 114,688 and the next is unreachable. 16,384 leaves
-            // room for a fixed reserve mirroring `slot_to_block`'s 4096 (which
-            // rounds up to 7168) and rejects every device-proportional reserve
-            // down to one entry per 4 MiB of disk. Measured red at 57,344,
-            // which is what `block_count / 1024` asks for and the allocator
-            // lets through.
-            let Some(index) = parse_page_cache_index(&log) else {
-                return Err(format!("the page cache printed no index size:\n{log}"));
-            };
-            if index > 16_384 {
-                return Err(format!(
-                    "the block index is sized for {index} blocks on a {blocks}-block device — \
-                     that is proportional to the device again:\n{log}"
                 ));
             }
 
@@ -11137,10 +11018,9 @@ fn run_machine_test(
                 ));
             }
 
-            // Then shut down, which is the only thing that runs the page
-            // cache's write-back over every dirty slot the format left —
-            // ~1900 of them on a device this size against 8 on the small one,
-            // so the coalescing loop is only ever exercised at scale here.
+            // Then shut down, which has init ask fsd to sync every dirty block
+            // the format left — ~1900 of them on a device this size against 8
+            // on the small one.
             //
             // The kernel's own shutdown lines are observable now: the ring
             // is drained in `acpi::shutdown()` before it cuts the power.
@@ -11152,8 +11032,9 @@ fn run_machine_test(
             qemu.flush_stdin();
             let tail = qemu.drain_serial(Duration::from_secs(20));
 
-            for line in ["Syncing filesystems...", "Shutting down."] {
-                if !tail.contains(line) {
+            let recorded = tail.lines().any(|line| toyos_quiesce::Record::parse(line).is_some());
+            for (line, said) in [("the stop's record", recorded), ("Shutting down.", tail.contains("Shutting down."))] {
+                if !said {
                     return Err(format!(
                         "{line:?} never reached the host — the ring was still \
                          holding it when the power was cut:\n{tail}"
@@ -11172,7 +11053,7 @@ fn run_machine_test(
             // Ground truth at the hardware boundary: the backing file is what
             // the *device* received, so this is the one place a storage claim
             // does not rest on the guest's account of itself. The clean flag
-            // reaches the platter only through `PageCache::sync`, and the
+            // reaches the platter only through fsd's sync, and the
             // backup superblock only through a write at the far end of DATA on
             // a 244 GB device. Where DATA is comes out of the table, never out
             // of an offset this side computed.
@@ -11190,10 +11071,7 @@ fn run_machine_test(
                     ));
                 }
                 if !sb.is_clean() {
-                    return Err(format!(
-                        "the {name} superblock is not marked clean — the write-back at \
-                         shutdown did not reach the device"
-                    ));
+                    return Err(format!("the {name} superblock is not marked clean"));
                 }
             }
 
@@ -11210,8 +11088,8 @@ fn run_machine_test(
                 ));
             }
             eprintln!(
-                "  [nvme] {blocks} blocks, index sized for {index}; both superblocks clean; \
-                 image {} MiB on disk of {} GB apparent",
+                "  [nvme] {blocks} blocks; both superblocks clean; image {} MiB on disk of {} GB \
+                 apparent",
                 allocated / (1024 * 1024),
                 apparent / 1_000_000_000
             );
@@ -11219,33 +11097,20 @@ fn run_machine_test(
         }
         "nvme_wide_sector" => {
             // The other half of "a device's size is a shape dimension": not how
-            // many sectors, but how big one is. `lba_ds` is an 8-bit
-            // device-reported shift that reached `1 << lba_ds` and then
-            // `4096 / sector_size`, so an 8 KiB-format namespace divided by
-            // zero at 0.068 s — before storage, before a console, and on a
-            // machine whose only channel out is the one that does not exist
-            // yet. Every profile in this tree took QEMU's implicit 512-byte
-            // namespace, so nothing could ask.
-            //
-            // The guest is expected to die here, which is what makes
-            // `ready_marker` the driver's own refusal: anything but
-            // DEFAULT_READY tells the harness a panic is the outcome under
-            // test rather than a boot failure.
-            const REFUSAL: &str = "NVMe: namespace reports";
-            let options = BootOptions {
-                profile: qemu::Profile::NvmeWideSector,
-                ready_marker: REFUSAL,
-                ..Default::default()
-            };
+            // many sectors, but how big one is. The sector size is an 8-bit
+            // device-reported shift, and a driver that divided a 4 KiB block
+            // by it divided by zero on an 8 KiB-format namespace. Every profile
+            // in this tree took QEMU's implicit 512-byte namespace, so nothing
+            // could ask. blockd refuses the controller by name and serves
+            // nothing; the machine boots on without the disk.
+            let options = BootOptions { profile: qemu::Profile::NvmeWideSector, ..Default::default() };
             let qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
-            // This profile has no virtio-serial, so stdio *is* the 16550 and
-            // `boot_log` is the whole record. It ends at the refusal, which is
-            // the driver's `assert!`: nothing downstream of it can run.
             let log = serial::Serial::boot(&qemu);
 
             // Named, not just refused: the value the device reported is the
             // whole diagnostic on a machine that will not boot again without
             // it. A bare "refused" line would pass with the number wrong.
+            log.must_say("blockd: NOT SERVING — ")?;
             log.must_say("2^13-byte sectors")?;
             // And it refused rather than dividing: the pre-fix failure was
             // `attempt to divide by zero`, which is also a panic and would
@@ -11253,10 +11118,16 @@ fn run_machine_test(
             // are absence claims, so both go through `must_not_say`, which
             // fails rather than passing if the capture came back empty.
             log.must_not_say("divide by zero")?;
-            // Nothing downstream ran. `block device id=` is the line
-            // `NvmeBlockDevice::new` logs, and it is the call that divided.
-            log.must_not_say("NVMe: block device id=")?;
-            eprintln!("  [nvme] 8 KiB-format namespace refused by name, before storage came up");
+            // Nothing downstream ran: no queue was made over the namespace.
+            log.must_not_say("blockd: NVMe up")?;
+            // A refused controller is a disk that failed: DATA is absent, and
+            // never served from memory as on a machine with no disk.
+            log.must_say(
+                "fsd: the block service would not list its partitions (Refused(Unusable)); DATA is absent this boot",
+            )?;
+            log.must_not_say("this machine has no DATA partition")?;
+            log.must_say("Boot: complete")?;
+            eprintln!("  [nvme] 8 KiB-format namespace refused by name, and the boot went on");
             Ok(())
         }
         "va_exhaustion" => {
@@ -11954,182 +11825,6 @@ fn run_machine_test(
             }
             Ok(())
         }
-        "cache_eviction" => {
-            // Both disk caches grew for the life of the boot: nothing ever
-            // removed a block-cache slot, and the file cache's budget was
-            // `usize::MAX` because the one function that would have set it had
-            // no callers. This drives the bounds that replaced that.
-            //
-            // `test-small-caches` is the actuator for the same reason
-            // `xhci-one-slot` is: the shipped bounds are 16 MiB and 64 MiB on
-            // this guest, and filling them by doing real I/O is minutes of
-            // NVMe traffic to observe a policy that 256 KiB observes in a
-            // second. The eviction code is the shipped code — only the number
-            // moves, and the boot line below is what proves which number is in
-            // force.
-            // The T14's namespace, because the two caches are filled by
-            // different things. File pages come from the guest program below;
-            // metadata blocks come from the *device*, whose allocator bitmap
-            // is one bit per block — 1900 blocks of it on a 244 GB namespace
-            // against 8 on the 128 MiB one, which is the difference between
-            // overflowing a 64-slot cache during the format and never
-            // reaching it. Measured: 0 block-cache evictions on Headless.
-            //
-            // And it has to be an *unformatted* namespace, which the harness
-            // gives every boot that names no image: a mount of one an earlier
-            // boot formatted reads a handful of metadata blocks and evicts
-            // nothing, and the turnover assertion below goes red on that
-            // rather than vacuously green.
-
-            // `nvme-spent-budget` and `nvme-command-silent` ride this boot
-            // rather than buying registered names of their own: each needs the
-            // test kernel and a real NVMe namespace, which is what this test
-            // already boots. The first costs one refused read before anything
-            // mounts the device — no command issued, no cache slot taken; the
-            // second costs one abandoned read and the controller reset that
-            // reclaims it, all before the mount, so the eviction series below
-            // runs on the freshly rebuilt queues — which is itself half the
-            // point: a reset that left them out of step reds the series.
-            let options = BootOptions {
-                profile: qemu::Profile::MetalDisk,
-                kernel_params: &["test-small-caches", "nvme-spent-budget", "nvme-command-silent"],
-                ..Default::default()
-            };
-            let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
-            let boot = qemu.boot_log().to_string();
-
-            // The NVMe half of `block::OPERATION`. `usb-storage-gate` asserts
-            // the same refusal on the USB path; this is the one taken with both
-            // page-cache locks held, which is what made a missing deadline a
-            // wedged CPU rather than a slow read.
-            //
-            // Both lines, and the second is the one easy to leave out: a driver
-            // that refused by abandoning a command in flight would pass the
-            // first and fail here, because the queue would still be owed a
-            // completion and the DMA window still owed a write.
-            let console = serial::Serial::named("boot console", boot.as_str());
-            console.must_say("nvme-gate: read with a spent budget refused=true budget=true")?;
-            console.must_say("nvme-gate: the same block read afterwards ok=true")?;
-
-            // The reset escalation, NVMe 2.0 §3.7.2: a command whose completion
-            // wait was skipped is a live controller owing an answer, and until
-            // 2026-08-23 that single silence was a disk declared dead. Now it
-            // must be one reset, the silence answered as a budget word rather
-            // than a device fact, and the same block readable through the
-            // rebuilt queues.
-            console.must_say("nvme-gate: the silent command's read refused=true budget=true")?;
-            console.must_say("NVMe: controller reset complete")?;
-            console.must_say("nvme-gate: the same block read after the reset ok=true")?;
-
-            let Some(file_budget) = parse_cache_budget(&boot, "file cache: budget ") else {
-                return Err(format!("the file cache printed no budget:\n{boot}"));
-            };
-            let Some(block_budget) = parse_cache_budget(&boot, "cached blocks, cap ") else {
-                return Err(format!("the block cache printed no slot cap:\n{boot}"));
-            };
-            if file_budget != 64 || block_budget != 64 {
-                return Err(format!(
-                    "budgets are {file_budget} file pages and {block_budget} block slots, \
-                     not the 64 each the feature asks for — the bound under test is not the \
-                     one the workload was sized against:\n{boot}"
-                ));
-            }
-
-            let result = qemu.run_test("test_rs_cache_eviction", Duration::from_secs(180));
-            if !check_rust_result(&result) {
-                return Err(format!(
-                    "a page did not survive being evicted and re-read:\n{}\n{}",
-                    result.stdout, result.serial
-                ));
-            }
-
-            // The whole point, and the half a compile cannot fake: residency
-            // is flat while the eviction count climbs. Boot and test output
-            // both, since the block cache starts evicting during the format.
-            let log = format!("{boot}\n{}", result.serial);
-            let file_series = parse_file_cache_series(&log);
-            let block_series = parse_cache_series(&log, "page cache: ", "slots resident");
-
-            // One turnover line means one eviction happened and nothing
-            // more; the workload is 8x the budget in each cache, so a
-            // series this short means eviction is not keeping up with the
-            // pressure — or is not running at all.
-            if file_series.len() < 4 {
-                return Err(format!(
-                    "file cache: {} turnover lines, want at least 4 — {file_series:?}\n{log}",
-                    file_series.len()
-                ));
-            }
-            if block_series.len() < 4 {
-                return Err(format!(
-                    "block cache: {} turnover lines, want at least 4 — {block_series:?}\n{log}",
-                    block_series.len()
-                ));
-            }
-            // The file cache's bound is the derivation, not an absolute:
-            // eviction never takes a dirty page and gives up only when
-            // everything resident is dirty, so an over-budget sample is
-            // lawful exactly when its own line says dirty == resident — a
-            // clean overage still reds. The guest stages the overage on
-            // every run, and every episode must close with a sample back
-            // within the bound (the kernel prints the close unconditionally).
-            let mut over_samples = 0usize;
-            for &(evictions, resident, dirty) in &file_series {
-                if resident > file_budget {
-                    over_samples += 1;
-                    if dirty != resident {
-                        return Err(format!(
-                            "file cache: {resident} entries resident against a {file_budget} \
-                             bound after {evictions} evictions with only {dirty} dirty — the \
-                             overage is not the un-flushed working set, so eviction failed to \
-                             take a clean page it was allowed to:\n{log}"
-                        ));
-                    }
-                }
-            }
-            if over_samples == 0 {
-                return Err(format!(
-                    "the staged all-dirty overage never printed an over-budget sample, so the \
-                     budget's one declared escape ran unobserved:\n{log}"
-                ));
-            }
-            let last_over = file_series
-                .iter()
-                .rposition(|&(_, resident, _)| resident > file_budget)
-                .expect("over_samples > 0 was checked above");
-            if !file_series[last_over + 1..].iter().any(|&(_, r, _)| r <= file_budget) {
-                return Err(format!(
-                    "file cache: the last over-budget sample is never followed by one back \
-                     within the bound, after every writer flushed — the overage outlived its \
-                     excuse:\n{log}"
-                ));
-            }
-            for &(evictions, resident) in &block_series {
-                if resident > block_budget {
-                    return Err(format!(
-                        "block cache: {resident} entries resident against a {block_budget} bound \
-                         after {evictions} evictions — the bound does not hold:\n{log}"
-                    ));
-                }
-            }
-            if file_series[file_series.len() - 1].0 <= file_series[0].0 {
-                return Err(format!("file cache: eviction count never advanced: {file_series:?}"));
-            }
-            if block_series[block_series.len() - 1].0 <= block_series[0].0 {
-                return Err(format!("block cache: eviction count never advanced: {block_series:?}"));
-            }
-
-            eprintln!(
-                "  [cache] file {} evictions over {} turnovers ({over_samples} lawful all-dirty \
-                 over-budget sample(s)), block {} evictions over {}; clean residency never above \
-                 {file_budget}/{block_budget}",
-                file_series[file_series.len() - 1].0,
-                file_series.len(),
-                block_series[block_series.len() - 1].0,
-                block_series.len()
-            );
-            Ok(())
-        }
         "xhci_slot_exhaustion" => {
             // A device count is untrusted input: more devices than the driver
             // has room for must cost those devices and nothing else. QEMU
@@ -12495,10 +12190,10 @@ fn run_machine_test(
             // Nothing host-side can read it: the type reaches `percpu::cpu_id`
             // and `driver::current_handle`, and `kernel/` is excluded from the
             // host workspace, so a `Operation` cannot be constructed off a
-            // booted machine. The other gates that drive an establishment —
-            // `cache_eviction`'s `nvme-spent-budget`, `usb_storage_gate`'s —
-            // prove a narrowing happened by the refusal it produces and read
-            // none of the values, and all of them establish from a boot phase,
+            // booted machine. The other gate that drives an establishment —
+            // `usb_storage_gate`'s — proves a narrowing happened by the refusal
+            // it produces and reads none of the values, and establishes from a
+            // boot phase,
             // which is the *task-less* slot. `kernel/src/sched_gate.rs` runs
             // three nested establishments with known deadlines in both homes
             // and prints what every level saw.
@@ -12519,9 +12214,9 @@ fn run_machine_test(
             operation_nesting_log(qemu.boot_log())
         }
         "leak_rollback_selftest" => {
-            // Two "acquire before a fallible step" controls run in the kernel at
-            // boot: each prints PASS only when the in-tree count returned to its
-            // baseline after a refused call; reverting either fix prints FAIL.
+            // An "acquire before a fallible step" control runs in the kernel at
+            // boot: it prints PASS only when the in-tree count returned to its
+            // baseline after a refused call; reverting the fix prints FAIL.
             let qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,
@@ -12549,25 +12244,19 @@ fn run_machine_test(
             process_reopen(qemu.boot_log())
         }
         "driver_wait_refused" => {
-            // The actuators blind CSTS.RDY and DEVICE_STATUS, staging a
-            // controller that never answers; the boot must come up naming the
-            // refused register — on the unbounded shape it never reaches ready.
+            // The actuator blinds DEVICE_STATUS, staging a controller that
+            // never answers; the boot must come up naming the refused register
+            // — on the unbounded shape it never reaches ready.
             let qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,
                 rust_bins,
                 BootOptions {
-                    kernel_params: &["nvme-rdy-stuck", "virtio-reset-stuck"],
+                    kernel_params: &["virtio-reset-stuck"],
                     ..Default::default()
                 },
             );
             let log = qemu.boot_log().to_string();
-            let Some(nvme) = log.lines().find(|l| l.contains("NVMe: NOT INITIALISED")) else {
-                return Err(format!("the stuck NVMe was never refused by name:\n{log}"));
-            };
-            if !nvme.contains("CSTS.RDY would not set in") {
-                return Err(format!("the NVMe refusal does not name the register: {nvme}"));
-            }
             let virtio = log
                 .lines()
                 .filter(|l| l.contains("did not zero DEVICE_STATUS for its reset"))
@@ -12575,7 +12264,6 @@ fn run_machine_test(
             if virtio == 0 {
                 return Err(format!("no stuck virtio device was refused by name:\n{log}"));
             }
-            eprintln!("  [waits] {}", nvme.trim());
             eprintln!(
                 "  [waits] {virtio} virtio device(s) refused on the reset budget; the boot \
                  came up without them"
@@ -12583,15 +12271,14 @@ fn run_machine_test(
             Ok(())
         }
         "read_fault_selftests" => {
-            // Three kernel-boot controls: a backing read after deletion is
-            // refused on both writable mounts, and a page-cache slot whose fill
-            // the device refused is unbound. Reverting either prints FAIL.
+            // A kernel-boot control: a backing read after deletion is refused
+            // on `/tmp`. Reverting it prints FAIL.
             let qemu = QemuInstance::boot_with_options(
                 test_config,
                 c_bins,
                 rust_bins,
                 BootOptions {
-                    kernel_params: &["revoked-backing-selftest", "pc-unbind-selftest"],
+                    kernel_params: &["revoked-backing-selftest"],
                     ..Default::default()
                 },
             );
@@ -14267,76 +13954,11 @@ fn parse_mouse_events(stdout: &str) -> Vec<MouseLine> {
 /// The block count the NVMe driver derived, out of
 /// `NVMe: block device id=1 blocks=62514774 (244198MB)`.
 fn parse_nvme_blocks(log: &str) -> Option<u64> {
-    log.lines()
-        .find_map(|l| l.split("NVMe: block device id=").nth(1))?
-        .split("blocks=")
-        .nth(1)?
-        .split_whitespace()
-        .next()?
-        .parse()
-        .ok()
-}
-
-/// The first number after `marker`, which both caches print their ceiling as
-/// exactly once at boot.
-fn parse_cache_budget(log: &str, marker: &str) -> Option<u64> {
-    log.lines()
-        .find_map(|l| l.split(marker).nth(1))?
-        .split_whitespace()
-        .next()?
-        .parse()
-        .ok()
-}
-
-/// Every `<prefix>N evictions, R/M <unit>` line, as (evictions, resident).
-///
-/// The kernel emits one per full turnover of the cache, so the series is the
-/// shape of the answer: a cache that evicts has a climbing first column and a
-/// flat second, and a cache that only grows has no lines at all.
-fn parse_cache_series(log: &str, prefix: &str, unit: &str) -> Vec<(u64, u64)> {
-    log.lines()
-        .filter_map(|l| {
-            let tail = l.split(prefix).nth(1)?;
-            if !tail.contains(unit) {
-                return None;
-            }
-            let evictions = tail.split(" evictions,").next()?.trim().parse().ok()?;
-            let resident = tail.split("evictions, ").nth(1)?.split('/').next()?.parse().ok()?;
-            Some((evictions, resident))
-        })
-        .collect()
-}
-
-/// `file cache: E evictions, R/M pages resident, D dirty` as (E, R, D).
-///
-/// The dirty count is required, not optional: it is the only lawful reading
-/// of a sample over budget, so a kernel line that stops carrying it drops
-/// out of the series and fails the length assertion rather than passing as
-/// a bound nobody checked.
-fn parse_file_cache_series(log: &str) -> Vec<(u64, u64, u64)> {
-    log.lines()
-        .filter_map(|l| {
-            let tail = l.split("file cache: ").nth(1)?;
-            if !tail.contains("pages resident") {
-                return None;
-            }
-            let evictions = tail.split(" evictions,").next()?.trim().parse().ok()?;
-            let resident = tail.split("evictions, ").nth(1)?.split('/').next()?.parse().ok()?;
-            let dirty = tail.split("resident, ").nth(1)?.split(" dirty").next()?.parse().ok()?;
-            Some((evictions, resident, dirty))
-        })
-        .collect()
-}
-
-/// How many blocks the page cache's index has room for, out of
-/// `page cache: … index sized for C cached blocks, cap S slots, B index bytes`.
-fn parse_page_cache_index(log: &str) -> Option<u64> {
-    log.lines()
-        .find_map(|l| l.split("index sized for ").nth(1))?
-        .split_whitespace()
-        .next()?
-        .parse()
-        .ok()
+    let up = log.lines().find_map(|l| l.split("blockd: NVMe up: ").nth(1))?;
+    let (sector, rest) = up.split_once("-byte sectors, ")?;
+    let bytes: u64 = sector.rsplit(' ').next()?.parse().ok()?;
+    let sectors: u64 = rest.split_whitespace().next()?.parse().ok()?;
+    Some(sectors * bytes / 4096)
 }
 
 /// Decode one bcachefs superblock straight out of a disk image, with the
@@ -14615,36 +14237,30 @@ fn process_reopen(log: &str) -> Result<(), String> {
 /// Text in, a verdict out: every line it reads is a kernel record, so the
 /// T14's readback and a QEMU boot log are judged by this one predicate.
 fn read_fault_probes(log: &str) -> Result<(), String> {
-        for probe in [
-            "revoke-selftest: /tmp/revoke_probe",
-            "revoke-selftest: /home/revoke_probe",
-            "pc-unbind-selftest:",
-        ] {
-            let Some(verdict) = log.lines().find(|l| l.contains(probe)) else {
-                return Err(format!("{probe} never ran:\n{log}"));
-            };
-            if !verdict.contains("PASS") {
-                return Err(format!("{}\n{log}", verdict.trim()));
-            }
-            eprintln!("  [read-fault] {}", verdict.trim());
+        let probe = "revoke-selftest: /tmp/revoke_probe";
+        let Some(verdict) = log.lines().find(|l| l.contains(probe)) else {
+            return Err(format!("{probe} never ran:\n{log}"));
+        };
+        if !verdict.contains("PASS") {
+            return Err(format!("{}\n{log}", verdict.trim()));
         }
+        eprintln!("  [read-fault] {}", verdict.trim());
         Ok(())
 }
 
-/// Two "acquire before a fallible step" controls: each count returned to its baseline after a refused call.
+/// An "acquire before a fallible step" control: the count returned to its baseline after a refused call.
 ///
 /// Text in, a verdict out: every line it reads is a kernel record, so the
 /// T14's readback and a QEMU boot log are judged by this one predicate.
 fn leak_rollback(log: &str) -> Result<(), String> {
-        for probe in ["leak-selftest: device-mint", "leak-selftest: fat-reopen"] {
-            let Some(verdict) = log.lines().find(|l| l.contains(probe)) else {
-                return Err(format!("{probe} never ran:\n{log}"));
-            };
-            if !verdict.contains("PASS") {
-                return Err(format!("{}\n{log}", verdict.trim()));
-            }
-            eprintln!("  [leak] {}", verdict.trim());
+        let probe = "leak-selftest: device-mint";
+        let Some(verdict) = log.lines().find(|l| l.contains(probe)) else {
+            return Err(format!("{probe} never ran:\n{log}"));
+        };
+        if !verdict.contains("PASS") {
+            return Err(format!("{}\n{log}", verdict.trim()));
         }
+        eprintln!("  [leak] {}", verdict.trim());
         Ok(())
 }
 
@@ -14834,13 +14450,6 @@ const SYSRET_SS_RELOADED: &str = "sysret-ss: reloaded";
 /// The probe, when SS stayed null across a switch.
 const SYSRET_SS_NOT_RELOADED: &str = "sysret-ss: NOT reloaded";
 
-/// Whether `line` is the probe's last word: each of its three outcomes.
-fn sysret_ss_reported(line: &str) -> bool {
-    [SYSRET_SS_RELOADED, SYSRET_SS_NOT_RELOADED, SYSRET_SS_UNARMED]
-        .iter()
-        .any(|end| line.contains(end))
-}
-
 /// The context switch reloads SS from null before a `sysretq` can see it.
 ///
 /// Text in, a verdict out: every line it reads is a kernel record, so the
@@ -14857,7 +14466,7 @@ fn sysret_ss(log: &str) -> Result<(), String> {
         }
         if !log.contains(SYSRET_SS_RELOADED) {
             return Err(format!(
-                "the SS-reload probe never reported — iod may not have run it:\n{log}"
+                "the SS-reload probe never reported — the first syscall may not have run it:\n{log}"
             ));
         }
         eprintln!("  [sysret-ss] the switch reloads SS from null before a sysretq can see it");
@@ -14898,7 +14507,7 @@ fn operation_nesting_log(log: &str) -> Result<(), String> {
         // with no task uses one slot per CPU, and the two are reached by
         // different arms of `operation_slot` — so a gate that ran in one
         // place would leave the other arm unexecuted by any test at all.
-        for site in ["boot", "iod"] {
+        for site in ["boot", "syscall"] {
             let say = |what: &str| -> Result<String, String> {
                 let needle = format!("sched-op: {site} {what}");
                 log.lines()
@@ -14986,16 +14595,14 @@ fn operation_nesting_log(log: &str) -> Result<(), String> {
         Ok(())
 }
 
-/// The machine's kernel threads are hosted.
+/// The machine's kernel thread is hosted.
 ///
-/// Text in, a verdict out: every line is a `log!` record, so the T14's
+/// Text in, a verdict out: its line is a `log!` record, so the T14's
 /// readback and a QEMU boot log are judged by this one predicate.
 fn klogd_hosted(boot: &serial::Serial) -> Result<(), String> {
     boot.must_be_clean()?;
-    for name in ["klogd", "iod"] {
-        let line = boot.must_say(&format!("kthread: {name}"))?;
-        eprintln!("  [kthread] {}", line.trim());
-    }
+    let line = boot.must_say("kthread: klogd")?;
+    eprintln!("  [kthread] {}", line.trim());
     Ok(())
 }
 

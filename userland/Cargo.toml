@@ -10,6 +10,7 @@ members = [
     "filepicker",
     "filepicker-api",
     "files",
+    "fsd",
     "host",
     "init",
     "input-test",

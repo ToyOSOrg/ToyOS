@@ -248,6 +248,19 @@ const _: () = assert!(
     "decode_leaf_value reads 1 as a file and 2 as a symlink",
 );
 
+/// The length of a leaf value naming `name` and `extents` runs.
+fn leaf_value_len(name: &str, extents: usize) -> usize {
+    // 1 (entry_type) + 2 (name_len) + 8 (size) + 8 (mtime) + name + extents
+    1 + 2 + 8 + 8 + name.len() + extents * EXTENT_SIZE
+}
+
+/// Whether the one entry that holds a file named `name` can name `extents`:
+/// a writer that grows the list refuses the write this answers `false` for,
+/// before anything the entry would have to record is accepted.
+pub fn file_entry_fits(name: &str, extents: &[Extent]) -> bool {
+    btree::value_fits(leaf_value_len(name, extents.len()))
+}
+
 /// Encode a file/symlink leaf value.
 fn encode_leaf_value(
     entry_type: KeyType,
@@ -258,10 +271,7 @@ fn encode_leaf_value(
 ) -> Vec<u8> {
     let name_bytes = name.as_bytes();
     let name_len = name_bytes.len();
-    // 1 (entry_type) + 2 (name_len) + 8 (size) + 8 (mtime) + name + extents
-    let extent_bytes = extents.len() * EXTENT_SIZE;
-    let total = 1 + 2 + 8 + 8 + name_len + extent_bytes;
-    let mut val = vec![0u8; total];
+    let mut val = vec![0u8; leaf_value_len(name, extents.len())];
 
     val[0] = entry_type as u8;
     val[1..3].copy_from_slice(&(name_len as u16).to_le_bytes());
@@ -420,7 +430,7 @@ fn write_data(
     let mut data_offset = 0usize;
 
     while remaining > 0 {
-        let run = match alloc.alloc_up_to(io, remaining) {
+        let run = match alloc.alloc_up_to(io, alloc.next_alloc, remaining) {
             Ok(run) => run,
             Err(err) => return Err(give_back(io, alloc, &extents, err)),
         };
@@ -1041,7 +1051,13 @@ impl<IO: BlockIO> Mounted<IO, ReadWrite> {
         let hole = covered;
         while covered <= target {
             let want = (target - covered + 1).min(u32::MAX as u64) as u32;
-            let run = self.alloc.alloc_up_to(&self.io, want)?;
+            let total = self.alloc.total_blocks;
+            let from = match extents.last().and_then(|e| e.start_block.checked_add(e.block_count as u64)) {
+                None => self.alloc.next_alloc,
+                Some(next) if next < total && self.alloc.is_free(&self.io, BlockNum::new(next))? => next,
+                Some(next) => next % total + SPREAD,
+            };
+            let run = self.alloc.alloc_up_to(&self.io, from, want)?;
             push_extent(extents, run.start.raw(), run.len);
             covered += run.len as u64;
         }
@@ -1058,6 +1074,12 @@ impl<IO: BlockIO> Mounted<IO, ReadWrite> {
         block_for(extents, page_idx).ok_or(FsError::NotFound)
     }
 }
+
+/// How far past a file's last block its next run is looked for when another
+/// file has taken that block. Two files that grow in turn then each extend
+/// runs this long rather than alternate blocks, so the runs one entry can name
+/// ([`file_entry_fits`]) last this many times longer.
+const SPREAD: u64 = 256;
 
 /// The block holding `page_idx`, if the extents already reach that far.
 ///

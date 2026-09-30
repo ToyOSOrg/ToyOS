@@ -22,6 +22,8 @@
 //! syscap <right>            a right on the SysCap dup init endows
 //! slots                     the idle slot's partitions and the slot table, claimed by init
 //! service                   a system service: its `HOME` is `/state/<name>`, not the session's
+//! role <role>               a file server for `<role>`: one process of it per role
+//! restart                   init starts it again when it ends
 //! init-serve <name>         a name init serves itself
 //! start <name>              init starts this program at boot
 //! app-receive <name>        a connector every program launched from /apps holds
@@ -56,6 +58,25 @@ pub fn session_home() -> String {
 /// Where each system service keeps its own persistent data, one directory per
 /// program key.
 pub const STATE: &str = "/state";
+
+/// The file-server roles, and the directories each serves: one capability per
+/// directory, named `fs:` and the directory.
+pub const ROLES: [(&str, &[&str]); 3] = [
+    ("data", &["/apps", "/config", "/home", "/state"]),
+    ("log", &["/log"]),
+    ("boot", &["/boot"]),
+];
+
+/// The directories `role` serves, or `None` for a name that is no role.
+pub fn role_dirs(role: &str) -> Option<&'static [&'static str]> {
+    ROLES.iter().find(|(name, _)| *name == role).map(|(_, dirs)| *dirs)
+}
+
+/// How often a `restart` row is started again before init gives up on it: at
+/// most this many ends inside [`RESTART_WINDOW_SECS`]. Past it the row's ports
+/// close, and a client's next connection is answered `Gone`.
+pub const RESTARTS: u32 = 3;
+pub const RESTART_WINDOW_SECS: u64 = 10;
 
 pub use toyos_abi::handle::Rights;
 pub use toyos_abi::syscall::{DeviceRequest, DeviceType};
@@ -147,6 +168,13 @@ pub struct Program {
     /// than the session user's home, so what it keeps is machine state and no
     /// user's.
     pub service: bool,
+    /// The file-server roles this row serves, one process each: init starts
+    /// the binary once per role, with the role as its argument and the
+    /// acceptors of the role's directories ([`role_dirs`]).
+    pub roles: Vec<String>,
+    /// init starts it again when it ends, on the same ports, for as long as
+    /// it does not end faster than [`RESTARTS`] allows.
+    pub restart: bool,
 }
 
 impl Program {
@@ -226,6 +254,8 @@ pub enum RenderError {
     /// init would start it in the session user's home. A service that serves
     /// nothing (`sshd`) cannot be told from its row, and is marked by hand.
     ServesWithoutService(String),
+    /// A `roles` entry naming no file-server role.
+    NoSuchRole { program: String, role: String },
 }
 
 pub fn render(manifest: &Manifest) -> Result<Vec<u8>, RenderError> {
@@ -268,6 +298,15 @@ pub fn render(manifest: &Manifest) -> Result<Vec<u8>, RenderError> {
         }
         if program.service {
             out.push_str("service\n");
+        }
+        for role in &program.roles {
+            if role_dirs(role).is_none() {
+                return Err(RenderError::NoSuchRole { program: program.name.clone(), role: role.clone() });
+            }
+            out.push_str(&format!("role {role}\n"));
+        }
+        if program.restart {
+            out.push_str("restart\n");
         }
     }
     for name in &manifest.init_serves {
@@ -353,6 +392,8 @@ pub fn parse(text: &str) -> Manifest {
                     "syscap" => program.syscap.push(rest.to_string()),
                     "slots" if rest.is_empty() => program.slots = true,
                     "service" => program.service = true,
+                    "role" => program.roles.push(rest.to_string()),
+                    "restart" if rest.is_empty() => program.restart = true,
                     other => panic!("manifest: unknown record `{other}`"),
                 }
             }
@@ -390,6 +431,14 @@ mod tests {
                     name: "update".into(),
                     path: "/system/bin/update".into(),
                     slots: true,
+                    ..Program::default()
+                },
+                Program {
+                    name: "fsd".into(),
+                    path: "/system/bin/fsd".into(),
+                    receives: vec!["block".into()],
+                    roles: vec!["data".into(), "log".into()],
+                    restart: true,
                     ..Program::default()
                 },
                 Program {
@@ -538,8 +587,26 @@ mod tests {
         assert!(syscap_rights(&["sysinfo".into()]).is_err());
     }
 
-    /// A class name reaches init through this file, so a `devices` entry the
-    /// ABI does not know is a config that renders and cannot boot.
+    /// A file server's roles reach init as records, and a name that is no
+    /// role is refused where it is written: init would start a server for
+    /// directories nobody named.
+    #[test]
+    fn a_role_is_one_of_the_three_and_its_directories_are_fixed() {
+        let m = sample();
+        let fsd = m.program("fsd").unwrap();
+        assert_eq!(fsd.roles, ["data", "log"]);
+        assert!(fsd.restart);
+        assert_eq!(role_dirs("data"), Some(&["/apps", "/config", "/home", "/state"][..]));
+        assert_eq!(role_dirs("boot"), Some(&["/boot"][..]));
+        assert_eq!(role_dirs("tmp"), None);
+        let mut bad = sample();
+        bad.programs[3].roles = vec!["tmp".into()];
+        assert_eq!(
+            render(&bad),
+            Err(RenderError::NoSuchRole { program: "fsd".into(), role: "tmp".into() })
+        );
+    }
+
     #[test]
     fn a_device_class_name_is_the_abi_s() {
         assert_eq!(DeviceType::from_class_name("hda-audio"), Some(DeviceType::HdaAudio));

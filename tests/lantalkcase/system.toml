@@ -9,7 +9,7 @@
 # row, and the only device any program claims is the PCI function below.
 
 [boot]
-start = ["logd", "netd", "sshd", "test-runner"]
+start = ["logd", "blockd", "fsd", "netd", "sshd", "test-runner"]
 
 [programs.logd]
 service = true
@@ -43,3 +43,20 @@ receives = ["power"]
 [symlinks]
 "bin/echo" = "/system/bin/toybox"
 "bin/reboot" = "/system/bin/toybox"
+
+# The block service: the NVMe controller this machine's DATA is on, driven
+# from userland through its claim. Started again when it ends; the claim goes
+# back with the process and is minted again for the next.
+[programs.blockd]
+service = true
+restart = true
+serves = ["block"]
+devices = ["pci:1b36:0010"]
+
+# The file servers: DATA, the log and the running slot's volume, one process
+# each, serving every program the directories of its role. Started again when
+# one ends, on the same ports.
+[programs.fsd]
+restart = true
+roles = ["data", "log", "boot"]
+receives = ["block"]

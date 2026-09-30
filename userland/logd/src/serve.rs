@@ -27,7 +27,7 @@
 
 use std::io::Write;
 use std::os::fd::AsRawFd;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -84,6 +84,8 @@ struct Shared {
     grew: Condvar,
     network: AtomicUsize,
     local: AtomicUsize,
+    /// The network server bound [`PORT`]: this program's namespace holds netd.
+    serving: AtomicBool,
     /// The wall clock the boot started at, for a line a reader is owed.
     boot_secs: Option<u64>,
 }
@@ -98,11 +100,13 @@ impl Hub {
             grew: Condvar::new(),
             network: AtomicUsize::new(0),
             local: AtomicUsize::new(0),
+            serving: AtomicBool::new(false),
             boot_secs,
         });
-        // A row with no `receives` gives this program no namespace, so no netd,
-        // and no thread to learn so on: its exit would be a kernel record at a
-        // time nothing orders, after a shutdown's last word included.
+        // A row with no namespace has no netd, and no thread to learn so on:
+        // its exit would be a kernel record at a time nothing orders, after a
+        // shutdown's last word included. One with a namespace learns it at
+        // its first bind, at boot.
         let mut carrier = None;
         if toyos::endow::namespace().is_some() {
             let network = Arc::clone(&shared);
@@ -116,9 +120,10 @@ impl Hub {
         Self { shared, carrier }
     }
 
-    /// Whether this boot's log is served on the network at all.
+    /// Whether this boot's log is served on the network at all: the network
+    /// server found netd and bound its port.
     pub fn network(&self) -> bool {
-        self.carrier.is_some()
+        self.shared.serving.load(Ordering::Relaxed)
     }
 
     /// A reader on this machine that asked for the log: it gets the read end
@@ -171,6 +176,7 @@ fn serve_network(shared: &Arc<Shared>, told: &Pipe) {
     const TOLD: u64 = 0;
     const READY: u64 = 1;
     let Some(first) = bind_port() else { return };
+    shared.serving.store(true, Ordering::Relaxed);
     let mut listener = Some(first);
     let poller = Poller::new(2);
     loop {

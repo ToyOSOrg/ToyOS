@@ -26,7 +26,7 @@ pub mod upstream;
 pub use block_io::{BlockIO, BlockBuf, BlockNum, DeviceError, TransferError};
 #[cfg(feature = "std")]
 pub use block_io::VecBlockIO;
-pub use fs::{Formatted, Mounted, ReadOnly, ReadWrite, FsError, Extent};
+pub use fs::{file_entry_fits, Formatted, Mounted, ReadOnly, ReadWrite, FsError, Extent};
 pub use superblock::{DESIGNATION_BLOCKS_OFFSET, DESIGNATION_MAGIC, FsUuid, Superblock};
 
 /// Records the largest single allocation each test thread makes, so a test can

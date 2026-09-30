@@ -170,8 +170,10 @@ pub fn quiesce_stops_the_machine(
     const WRITERS: u32 = 6;
     // The threads the stop names besides the writers: the job's own main
     // thread, parked on init's answer; `test-runner`'s main and deadline
-    // threads; and `logd`'s. `init` asked for the stop and is its caller.
-    const OTHERS: u32 = 4;
+    // threads; `logd`'s; `blockd`'s; one per file server, three roles; and
+    // `init`'s waiter on each of those four services, and its file worker.
+    // `init`'s main thread asked for the stop and is its caller.
+    const OTHERS: u32 = 1 + 2 + 1 + 1 + 3 + 4 + 1;
     /// Mirrored in `kernel/src/syscall/machine.rs`, which queues it.
     const QUEUED: &str = "console: a holder's line, queued once the stop had stopped every holder";
     let (whole, record) = stopped_boot(
@@ -216,7 +218,7 @@ pub fn quiesce_stops_the_machine(
     if record.sweep.total() != WRITERS + OTHERS {
         return Err(format!(
             "this boot's stop named {} userland thread(s); {WRITERS} writers plus the {OTHERS} \
-             of the job, test-runner and logd make {}, so this is not the machine the writers \
+             of the job, test-runner, logd, the storage services, init's waiters and its file worker make {}, so this is not the machine the writers \
              were on:\n  {record}\n{whole}",
             record.sweep.total(),
             WRITERS + OTHERS,
@@ -353,10 +355,11 @@ fn woken_by_the_held_thread(
         toyos_quiesce::LAST_THREAD,
     );
     let at = |needle: &str| whole.lines().position(|line| line.contains(needle));
-    let (Some(held_at), Some(synced_at)) = (at(&held), at("Syncing filesystems...")) else {
+    let stopped_at = whole.lines().position(|line| toyos_quiesce::Record::parse(line).is_some());
+    let (Some(held_at), Some(stopped_at)) = (at(&held), stopped_at) else {
         return Err(format!("the kernel never held the thread it names ({held:?})\n{whole}"));
     };
-    if held_at > synced_at {
+    if held_at > stopped_at {
         return Err(format!("the thread was held after the stop was over\n{whole}"));
     }
     // **The claim**: a sweep counted the held thread, and it alone, as
@@ -391,31 +394,22 @@ fn woken_by_the_held_thread(
 /// other thread still runs. The job reads the kernel's word that the stop
 /// waits there and makes the second call — `SYS_SHUTDOWN` against the first's
 /// `SYS_REBOOT`, so the claim is judged on both syscalls — and starts the
-/// thread the stop waits for only once refused by name. The same boot has the
-/// stop's own drain refused in its retry ladder over a flush the job left
-/// owed, the first call's work after the window.
+/// thread the stop waits for only once refused by name.
 pub fn quiesce_refuses_a_second_shutdown(
     _test_config: &Path,
     _c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    // The kernel's `mirror_refuse::SHUTDOWN_REFUSALS`, spelt here because the
-    // harness cannot link the kernel.
-    const REFUSALS: usize = 8;
-    const REFUSED: &str = "quiesce-drain-refuse: refusing the shutdown drain's";
     const WAITS: &str = "quiesce-last-park: the stop waits for";
     const SECOND_CALLER: &str = "power: this machine is already stopping";
-    const SYNCING: &str = "Syncing filesystems...";
     let held = format!(
         "quiesce-last-park: {} is held until the stop waits on it alone",
         toyos_quiesce::LAST_THREAD
     );
-    // `writeback-stall` parks `iod`, so the closed file's flush is the stop's
-    // own drain's to find and no other drainer's to hold.
     let (whole, _record) = stopped_boot(
         "tests/quiescetwicecase/system.toml",
         "quiesce_twice",
-        &["writeback-stall", "quiesce-drain-refuse", "quiesce-last-park", LATE_WORD],
+        &["quiesce-last-park", LATE_WORD],
         rust_bins,
     )?;
     let lines: Vec<&str> = whole.lines().collect();
@@ -424,12 +418,17 @@ pub fn quiesce_refuses_a_second_shutdown(
     };
 
     // **The harm, first**: a second caller let in runs a second stop over the
-    // first, and either way this line is written twice.
-    let syncs = at(SYNCING);
-    if syncs.len() != 1 {
+    // first, and either way the stop's record is written twice.
+    let records: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| toyos_quiesce::Record::parse(l).is_some())
+        .map(|(i, _)| i)
+        .collect();
+    if records.len() != 1 {
         return Err(format!(
             "this boot ran {} shutdowns, not one: the second caller was let in\n{whole}",
-            syncs.len()
+            records.len()
         ));
     }
     let once = |needle: &str| -> Result<usize, String> {
@@ -442,22 +441,12 @@ pub fn quiesce_refuses_a_second_shutdown(
     // it waits, before the thread it waits for was held — which the job starts
     // only on reading `AlreadyExists`, so the held line is the refusal having
     // reached Ring 3 as that word.
-    let (waits, second, held, synced) = (once(WAITS)?, once(SECOND_CALLER)?, once(&held)?, syncs[0]);
-    if !(waits < second && second < held && held < synced) {
+    let (waits, second, held, recorded) = (once(WAITS)?, once(SECOND_CALLER)?, once(&held)?, records[0]);
+    if !(waits < second && second < held && held < recorded) {
         return Err(format!(
-            "the first call's wait, the second call's refusal, the held thread and the sync are \
-             at console lines {waits}, {second}, {held} and {synced}: the refusal was not made \
-             in the window the first call held\n{whole}"
-        ));
-    }
-    // And the first call's own drain met its ladder, after the window.
-    let refusals = at(REFUSED);
-    if refusals.len() != REFUSALS || refusals[0] < synced {
-        return Err(format!(
-            "the quiesce-drain-refuse actuator refused the stop's drain {} time(s), not the \
-             {REFUSALS} the kernel declares after its sync, so the first call's drain was not \
-             parked where this boot says it was\n{whole}",
-            refusals.len(),
+            "the first call's wait, the second call's refusal, the held thread and the stop's \
+             record are at console lines {waits}, {second}, {held} and {recorded}: the refusal was \
+             not made in the window the first call held\n{whole}"
         ));
     }
     eprintln!(

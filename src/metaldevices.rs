@@ -93,7 +93,8 @@ use Presence::{NeverSays, Says};
 
 /// The device inventory, asserted on every boot.
 ///
-/// **Every needle is a prefix of a record the shipping kernel writes**, so
+/// **Every needle is a prefix of a record the shipping kernel writes**, read
+/// out of the kernel's records and never a program's line, so
 /// nothing here needs an actuator and nothing here is about a number. The
 /// counts and identities that *are* about this machine — how many controllers,
 /// which silicon, which mode — are read out and reported by [`inventory`], and
@@ -111,19 +112,28 @@ pub const RECORDS: &[Record] = &[
     Record { about: "i8042", needle: "i8042: ok selftest=0x55", presence: Says },
     Record { about: "i8042-quarantine", needle: "i8042: quarantined", presence: NeverSays },
     Record { about: "i8042-lost-edge", needle: "i8042: bytes with no IRQ record", presence: NeverSays },
-    // The internal disk: identified, and — the whole safety argument for
-    // running on this machine at all — never written.
-    Record { about: "nvme", needle: "NVMe: NS1 size=", presence: Says },
-    Record { about: "nvme-refused", needle: "NVMe: NOT INITIALISED", presence: NeverSays },
-    Record { about: "nvme-offline", needle: "NVMe: this controller is offline", presence: NeverSays },
     // The boot ended the way the loop's verdict needs it to.
     Record { about: "boot", needle: "Boot: complete (", presence: Says },
 ];
 
-/// The one census field a boot may not have moved: a write to a disk this
-/// project never writes.
-pub const NVME_CENSUS: &str = "nvme: commands ";
-pub const NVME_NO_WRITES: &[&str] = &["write=0", "io-other=0"];
+/// The name init starts the block service under, which is the tag `logd`
+/// heads each of its lines with.
+pub const BLOCKD: &str = "blockd";
+
+/// What [`BLOCKD`]'s own lines must carry, read out of those and nothing else.
+///
+/// The internal disk — the whole safety argument for running on this machine
+/// at all — is never written: the kernel drives no NVMe, and the one process
+/// that may drives none here, since its row names only the emulated
+/// controller.
+pub const BLOCKD_RECORDS: &[Record] = &[
+    Record { about: "nvme", needle: NVME_UNDRIVEN, presence: Says },
+    Record { about: "nvme-served", needle: "blockd: partition ", presence: NeverSays },
+];
+
+/// blockd's word that no NVMe controller its row names is on the machine, so
+/// nothing reads or writes the internal disk.
+pub const NVME_UNDRIVEN: &str = "blockd: no NVMe controller this row names is on this machine";
 
 /// What `loader.log` must carry, which is a different file and a different
 /// reader.
@@ -134,9 +144,8 @@ pub const NVME_NO_WRITES: &[&str] = &["write=0", "io-other=0"];
 /// that pass's `|` prefix.
 pub const LOADER_RECORDS: &[Record] = &[
     Record { about: "chain", needle: "the last boot read DONE", presence: Says },
-    // The stop's census and every disk's write cache emptied before anything
-    // was taken down: records of the stop, sealed in its tail.
-    Record { about: "nvme-census", needle: NVME_CENSUS, presence: Says },
+    // Every disk's write cache emptied before anything was taken down: a
+    // record of the stop, sealed in its tail.
     Record { about: "usb-flush", needle: "usb-quiesce: disk ", presence: Says },
     Record { about: "usb-quiesce", needle: QUIESCE_HEAD, presence: Says },
     // What the stop did about the command a device was inside when it ran. On
@@ -306,8 +315,7 @@ pub fn inventory(log: &str) -> Vec<String> {
         "usb-storage: ",
         "i8042: ",
         "hda: ",
-        "NVMe: ",
-        "nvme: commands ",
+        "blockd: ",
         "GOP: ",
         "PAT: ",
     ] {
@@ -322,13 +330,19 @@ pub fn inventory(log: &str) -> Vec<String> {
 }
 
 /// Every record that had to be there and was not, and every one that had to be
-/// absent and was not — the loader's file and `logd`'s judged by their own
-/// tables, plus the two whose *content* is the assertion. Each line opens with
-/// the `about` it failed, so a caller can name them without reading the prose.
+/// absent and was not — the loader's file, and `logd`'s whole, programs' lines
+/// included, each table judged against its own writer's part of it. Each line
+/// opens with the `about` it failed, so a caller can name them without reading
+/// the prose.
 pub fn unmet(loader: &str, log: &str) -> Vec<String> {
     let mut out = Vec::new();
-    for (record, text) in
-        RECORDS.iter().map(|r| (r, log)).chain(LOADER_RECORDS.iter().map(|r| (r, loader)))
+    let kernel = crate::bootlog::kernel_records(log);
+    let blockd = crate::bootlog::lines_of(log, BLOCKD);
+    for (record, text) in RECORDS
+        .iter()
+        .map(|r| (r, kernel.as_str()))
+        .chain(BLOCKD_RECORDS.iter().map(|r| (r, blockd.as_str())))
+        .chain(LOADER_RECORDS.iter().map(|r| (r, loader)))
     {
         match (record.presence, text.contains(record.needle)) {
             (Says, false) => {
@@ -341,13 +355,6 @@ pub fn unmet(loader: &str, log: &str) -> Vec<String> {
                 quoted(text, record.needle)
             )),
             _ => {}
-        }
-    }
-    if let Some(census) = loader.lines().find(|l| l.contains(NVME_CENSUS)) {
-        for want in NVME_NO_WRITES {
-            if !census.contains(want) {
-                out.push(format!("nvme-census: {census:?}, and this boot owed {want}"));
-            }
         }
     }
     match quiesced(loader) {
@@ -386,7 +393,9 @@ mod tests {
             line("0.090", "xHCI: max_slots=32 max_ports=16 ctx_size=64 pagesize=0x1"),
             line("0.140", "usb-storage: 1 device(s)"),
             line("0.150", "i8042: ok selftest=0x55 cfg=0x45->0x44 port1=ok port2=ok"),
-            line("0.200", "NVMe: NS1 size=1000215216 sectors, sector_size=512"),
+            "{2026-09-29 08:43:12 1.162 blockd} blockd: no NVMe controller this row names is on \
+             this machine; serving no partition\n"
+                .to_string(),
             line("0.319", "GOP: scanout memory type WC (MTRR WB, PAT entry 4)"),
             line("0.368", "Boot: complete (368ms)"),
             line("1.100", "exit: usbwrite pid=6 code=402000 cpu=140ms"),
@@ -405,8 +414,6 @@ mod tests {
          | log: this boot's newest records follow, newest first (16)\n\
          | log-tail: [kernel 3.960 cpu0] Rebooting.\n\
          | log-tail: [kernel 3.955 cpu0] usb-quiesce: disk 0 SYNCHRONIZE CACHE ok\n\
-         | log-tail: [kernel 3.950 cpu0] nvme: commands identify=2 admin-other=2 read=1 write=0 \
-         io-other=0\n\
          | usb-quiesce: no Bulk-Only command was open, so this reset cuts none\n\
          | usb-quiesce: xHCI 00:14.0 halted=true USBSTS=0x00000009\n\
          | usb-quiesce: 2/2 disk cache(s) flushed, 1 with no cache to flush, \
@@ -491,9 +498,24 @@ mod tests {
         // The scanout mapped as something other than write-combining.
         let uncached = a_good_boot().replace("memory type WC ", "memory type UC ");
         assert_eq!(about(unmet(&a_good_loader(), &uncached)), ["scanout"]);
-        // One write to the disk this project never writes.
-        let wrote = a_good_loader().replace("write=0 io-other=0", "write=1 io-other=0");
-        assert_eq!(about(unmet(&wrote, &a_good_boot())), ["nvme-census"]);
+        // A partition of the internal disk served, which is where a write to
+        // it would come from.
+        let served = format!(
+            "{}{{2026-09-29 08:43:12 1.300 blockd}} blockd: partition 0000 at block 256\n",
+            a_good_boot()
+        );
+        assert_eq!(about(unmet(&a_good_loader(), &served)), ["nvme-served"]);
+        // blockd's word in any other writer's mouth is not blockd's, and a
+        // kernel record in a program's is not the kernel's.
+        for writer in ["[2026-09-29 08:43:12 1.162 cpu0]", "{2026-09-29 08:43:12 1.162 init}"] {
+            let forged = a_good_boot().replace("{2026-09-29 08:43:12 1.162 blockd}", writer);
+            assert_eq!(about(unmet(&a_good_loader(), &forged)), ["nvme"], "{writer}");
+        }
+        let unbooted = a_good_boot().replace(
+            &line("0.368", "Boot: complete (368ms)"),
+            "{2026-09-29 08:43:12 0.368 init} Boot: complete (368ms)\n",
+        );
+        assert_eq!(about(unmet(&a_good_loader(), &unbooted)), ["boot"]);
         // A shutdown that never emptied a cache.
         let unflushed = a_good_loader()
             .lines()
@@ -577,6 +599,19 @@ mod tests {
         let source = std::fs::read_to_string(&at).expect("the reset path");
         let written = code_of(&source);
         for needle in [QUIESCE_HEAD, QUIESCE_COMMAND, QUIESCE_ENDPOINT] {
+            assert!(written.contains(needle), "{} does not write {needle:?}", at.display());
+        }
+    }
+
+    /// blockd's table is held to blockd's own source, since a needle it never
+    /// writes passes a `NeverSays` and fails every `Says`.
+    #[test]
+    fn blockd_writes_the_lines_its_table_reads() {
+        let at = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("userland/blockd/src/main.rs");
+        let written = code_of(&std::fs::read_to_string(&at).expect("blockd's own source"));
+        for record in BLOCKD_RECORDS {
+            let needle = record.needle;
             assert!(written.contains(needle), "{} does not write {needle:?}", at.display());
         }
     }

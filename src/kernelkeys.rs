@@ -44,16 +44,6 @@ pub struct Declared {
 /// Every hashed container in `kernel/src`, with the origin of its keys.
 pub const DECLARED: &[Declared] = &[
     Declared {
-        file: "kernel/src/bcachefs_adapter.rs",
-        ty: "HashMap<FileId, OpenFileInfo>",
-        keys: "`file_cache::FileId`, minted by the file cache",
-    },
-    Declared {
-        file: "kernel/src/fat32_adapter.rs",
-        ty: "HashMap<FileId, OpenFile>",
-        keys: "`file_cache::FileId`, minted by the file cache",
-    },
-    Declared {
         file: "kernel/src/id_map.rs",
         ty: "HashMap<K, V>",
         keys: "`IdKey`, which no integer implements: every key is an id this kernel issued",
@@ -62,11 +52,6 @@ pub const DECLARED: &[Declared] = &[
         file: "kernel/src/arch/x86_64/paging.rs",
         ty: "HashMap<u64, crate::mm::pmm::PhysPage>",
         keys: "a physical address the page allocator returned",
-    },
-    Declared {
-        file: "kernel/src/page_cache.rs",
-        ty: "HashMap<BlockKey, u32>",
-        keys: "`block::BlockKey`, minted only by a `Partition` this kernel opened and bounded by that view",
     },
     Declared {
         file: "kernel/src/scheduler.rs",

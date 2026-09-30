@@ -6,8 +6,9 @@
 //! matches too much is a path in the answer this file did not name, and one
 //! that matches too little is a named path missing from it. Values are judged
 //! where the machine fixes them — QEMU's user network leases `10.0.2.15/24`,
-//! nothing plays audio, and the USB stick this file crafts has one partition
-//! free and one init grants — and read only for shape elsewhere.
+//! nothing plays audio, the boot stick carries one partition the kernel holds
+//! and two file servers hold, and the USB stick this file crafts has one
+//! partition free and one init grants — and read only for shape elsewhere.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -311,9 +312,9 @@ fn partition<'a>(line: &str, got: &'a BTreeMap<String, String>, unique: &str) ->
 /// `inspect dev.*`: the kernel's inventory, judged where QEMU fixes it. The
 /// virtio NIC is `1af4:1041` and netd holds it; the virtio sound card and the
 /// framebuffer are classes soundd and the compositor hold; the Gop profile's
-/// USB keyboard is on the xHCI; the boot stick carries partitions this kernel
-/// mounted; and of the crafted disk's two, one is free and test-runner holds
-/// the other.
+/// USB keyboard is on the xHCI; the boot stick carries ROOT, which this kernel
+/// holds, and the ESP and the log partition, which file servers hold; and of
+/// the crafted stick's two, one is free and test-runner holds the other.
 fn inventory(qemu: &mut QemuInstance) -> Result<(), String> {
     let line = "inspect dev.*";
     let got = answer(&job(qemu, line, 0)?);
@@ -354,6 +355,12 @@ fn inventory(qemu: &mut QemuInstance) -> Result<(), String> {
     if !got.iter().any(|(p, v)| p.starts_with("dev.disk.") && p.ends_with(".state") && v == "kernel") {
         return Err(format!("`{line}`: no partition is held by the kernel"));
     }
+    let parts: Vec<&str> = got
+        .keys()
+        .filter(|p| p.starts_with("dev.disk.") && p.ends_with(".state"))
+        .map(|p| p.trim_end_matches(".state"))
+        .collect();
+    let state = |part: &str| got.get(&format!("{part}.state")).map(String::as_str);
     let free = partition(line, &got, FREE)?;
     expect(line, &got, &format!("{free}.state"), "free")?;
     if !holders(&got, free).is_empty() {
@@ -363,6 +370,10 @@ fn inventory(qemu: &mut QemuInstance) -> Result<(), String> {
     expect(line, &got, &format!("{granted}.state"), "claimed")?;
     if holders(&got, granted) != ["test-runner"] {
         return Err(format!("`{line}`: {granted} is held by {:?}, not test-runner", holders(&got, granted)));
+    }
+    let by_fsd = parts.iter().filter(|p| state(p) == Some("claimed") && holders(&got, p) == ["fsd"]).count();
+    if by_fsd != 2 {
+        return Err(format!("`{line}`: {by_fsd} partitions are claimed by fsd, not the ESP and the log partition"));
     }
     if got.values().any(|v| *v == BACKWARDS.to_ascii_lowercase()) {
         return Err(format!("`{line}` lists {BACKWARDS}, whose first block is after its last"));
