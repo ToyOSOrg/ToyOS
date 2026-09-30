@@ -138,12 +138,6 @@ impl Bound {
         Self { limit, cite }
     }
 
-    /// A bound a device register publishes; `cite` names the register. Not
-    /// `const`: the number is read off the hardware at the call site.
-    pub fn from_register(limit: Duration, cite: &'static str) -> Self {
-        Self { limit, cite }
-    }
-
     pub const fn duration(self) -> Duration {
         self.limit
     }

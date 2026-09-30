@@ -15,10 +15,7 @@ and `gettimeofday` (`userland/libc/src/time.rs`) all round down to the second.
 
 So a file written a moment ago reads as up to a second in the future against
 the program's own "now", which a tool comparing at nanoseconds — GNU make's
-"modification time in the future" check — reports as clock skew. And a file
-server in userland can stamp only what it can read — a stamp it takes off
-`SYS_CLOCK_EPOCH` is a whole second, so two writes inside one second carry one
-mtime, which a build tool reads as "not newer".
+"modification time in the future" check — reports as clock skew.
 
 **Exit condition.** Userland reads the wall clock at the resolution the kernel
 stamps at — the boot's UTC anchor published where a process reads the

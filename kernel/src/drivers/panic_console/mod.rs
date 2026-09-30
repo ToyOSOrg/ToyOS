@@ -1129,7 +1129,7 @@ impl core::fmt::Display for Census {
     }
 }
 
-/// The panel's own row in the shutdown census, beside `irq:` and `nvme:`.
+/// The panel's own row in the shutdown census, beside `irq:`.
 pub fn log_census() {
     log!("{Census}");
 }

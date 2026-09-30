@@ -6,16 +6,18 @@
 //! the claim in question — so the verdict is read here, after the guest has
 //! gone, off the images:
 //!
-//! - every byte of the NVMe disk outside the target and DATA is the byte this
+//! - every byte of the crafted disk outside the target and DATA is the byte this
 //!   file wrote: the primary and backup tables, both neighbours, the granted,
-//!   two misaligned and the twin partitions, and the gaps;
+//!   two misaligned partitions and the twin of the stick's log partition, and
+//!   the gaps;
 //! - both neighbours are FAT32 volumes `toyos-fat32-check` (fatgen103's rules)
 //!   has nothing to say about — the neighbour after the target begins at the
 //!   block after its last, so a write one past the end lands in its boot
 //!   sector;
 //! - every block of the target is the pattern the guest wrote there;
-//! - the `/home` file written between the target's transfers reads back
-//!   through the host's own bcachefs reader;
+//! - the `/home` file fsd wrote between the target's transfers, through its
+//!   own claim on the same disk, reads back through the host's own bcachefs
+//!   reader;
 //! - after a departure, the stick holds what the guest wrote again.
 //!
 //! The partition ranges are UEFI 2.10 §5.3.3's, as the `gpt` crate — not the
@@ -23,7 +25,7 @@
 //! here, where the table and the `system.toml` naming it are both written.
 
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::qemu::{self, BootOptions, QemuInstance, Staged};
@@ -36,9 +38,10 @@ const GRANTED: &str = "A94F0E6D-3B2C-4E1A-8C7D-6E5F4A3B2C1D";
 const MISALIGNED: &str = "3E8A1C5F-7D2B-4F60-9A1E-5C4B3D2E1F07";
 /// Mirrored: a partition of whole 4 KiB blocks that begins inside one.
 const MISSTART: &str = "5A7C9E1B-3D5F-4B71-8C2E-4F6A8B0C2D35";
-/// Mirrored: the unique GUID the NVMe disk and the USB stick both carry.
+/// The twin partition's unique GUID where no boot stick's is copied: the
+/// crafted disk of the boots that judge no twin.
 const TWIN: &str = "6D2F9B41-8C3E-4A57-B1D0-2E4F6A8C0B13";
-/// Mirrored: DATA, which the kernel mounts at `/home`.
+/// Mirrored: DATA, which fsd serves `/home` from.
 const DATA: &str = "E3A7C5D9-1B2F-4E6A-8D0C-9F7B5A3E1C24";
 /// Mirrored: the partitions of the stick whose device leaves.
 const DEPARTING: &str = "1F3E5D7C-9B2A-4C6E-8F01-A3B5C7D9E2F4";
@@ -56,14 +59,13 @@ const GRANTED_BLOCKS: u64 = 256;
 const HOME_FILE: &str = "home/partclaim-interleaved.bin";
 const HOME_CHUNK: usize = 32 * 1024;
 const PAST_END: &[u8; 16] = b"TOYOS-PAST-END\0\0";
-/// The claims the guest expects refused: four mounted partitions, the one init
-/// granted test-runner, a twin, one whose length and one whose start is not whole
-/// blocks, an absent GUID, the zero GUID, three
-/// claims carrying selector words their class does not read, the target a
-/// second time, and the target while a child holds it.
-const REFUSALS: usize = 15;
-/// The ESP, the log partition, ROOT and DATA.
-const MOUNTED: usize = 4;
+/// The claims the guest expects refused: ROOT, the two partitions init minted
+/// for file servers, the one init granted test-runner, the log partition two
+/// disks carry, one whose length and one whose start is not whole blocks, an
+/// absent GUID, the zero GUID, three claims carrying selector words their
+/// class does not read, the target a second time, and the target while a
+/// child holds it.
+const REFUSALS: usize = 14;
 const BLOCK: u64 = 4096;
 const MIB: u64 = 1024 * 1024;
 
@@ -114,8 +116,11 @@ struct Layout {
     data: Span,
 }
 
-/// The claims, refusals, idle ROOT slot, releases and neighbours, on the
-/// machine this suite flashes plus a second USB stick for the twin GUID.
+/// The claims, refusals, idle ROOT slot, releases and neighbours, on a
+/// machine booting off its USB stick with the crafted disk beside it on the
+/// bus. The crafted disk carries a copy of the stick's log partition's unique
+/// GUID, so two disks the kernel drives name one partition: that claim is
+/// refused, and no file server is handed the log.
 pub fn partition_claim(
     _test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
@@ -126,11 +131,8 @@ pub fn partition_claim(
     std::fs::write(&boot_image, qemu::build_boot_image(&config, c_bins, rust_bins, &[]))
         .map_err(|e| format!("write the boot image: {e}"))?;
     let [esp, log, root] = boot_stick_guids(&boot_image)?;
-    let nvme = super::lane::dir().join("partclaim-disk.img");
-    let layout = craft_nvme(&nvme)?;
-    let stick = super::lane::dir().join("partclaim-stick.img");
-    let (stick_bytes, _) = qemu::Profile::UsbDisk.usb_disk().expect("UsbDisk declares a disk");
-    let twin_on_stick = craft_stick(&stick, stick_bytes, &[("twin", MIB, TWIN)])?[0];
+    let crafted = super::lane::dir().join("partclaim-disk.img");
+    let layout = craft_disk(&crafted, &log)?;
 
     // The premises, checked rather than assumed: a neighbour that did not
     // begin where the target ends would let a write past the end land in a
@@ -146,7 +148,7 @@ pub fn partition_claim(
     if layout.target.len != TARGET_BLOCKS * BLOCK {
         return Err(format!("the target is {} bytes, not {TARGET_BLOCKS} blocks", layout.target.len));
     }
-    let before = std::fs::read(&nvme).map_err(|e| format!("read the crafted disk: {e}"))?;
+    let before = std::fs::read(&crafted).map_err(|e| format!("read the crafted disk: {e}"))?;
     for (what, span) in [("first", layout.before), ("second", layout.after)] {
         let complaints = toyos_fat32_check::check(span.of(&before));
         if !complaints.is_empty() {
@@ -156,7 +158,6 @@ pub fn partition_claim(
             ));
         }
     }
-    let twin_before = read_span(&stick, twin_on_stick)?;
 
     let mut qemu = QemuInstance::boot_with_options(
         &config,
@@ -165,15 +166,17 @@ pub fn partition_claim(
         BootOptions {
             profile: qemu::Profile::UsbDisk,
             boot_image: Some(Staged::Pristine(boot_image.clone())),
-            nvme_image: Some(nvme.clone()),
-            usb_images: vec![stick.clone()],
+            usb_images: vec![crafted.clone()],
+            nvme_image: Some(tableless_nvme("partclaim-nvme.img")?),
             ..Default::default()
         },
     );
     let boot = qemu.boot_log().to_string();
     no_panic("booting the claim disks", &boot)?;
-    if boot.contains("are a tmpfs") {
-        return Err(format!("/home fell back to tmpfs, so nothing shares the disk:\n{boot}"));
+    // Formatted, on a first boot of the crafted disk: its DATA carries the
+    // designation, and the readback below is what says it was this disk's.
+    if !boot.contains("fsd: block 0 designates this partition for ToyOS; formatting it") {
+        return Err(format!("fsd never formatted DATA off the crafted disk, so nothing shares it:\n{boot}"));
     }
     // init names what it could not mint; a grant it refused would make the
     // guest's endowment about nothing.
@@ -187,10 +190,10 @@ pub fn partition_claim(
     let run = format!("test_rs_partition_claimant main {esp} {log} {root}");
     let result = qemu.run_test(&run, Duration::from_secs(65));
     let tail = shut_down(qemu);
-    let guest = guest_verdict(&result, &tail, REFUSALS).and_then(|kernel| main_kernel_lines(&kernel));
+    let guest = guest_verdict(&result, &tail, REFUSALS).and_then(|kernel| main_kernel_lines(&kernel, &log));
     no_panic("on the way down", &tail)?;
 
-    let after = std::fs::read(&nvme).map_err(|e| format!("read the disk back: {e}"))?;
+    let after = std::fs::read(&crafted).map_err(|e| format!("read the disk back: {e}"))?;
     let neighbours = neighbours_untouched(&layout, &before, &after);
     if guest.is_err() || !neighbours.is_empty() {
         return Err(format!(
@@ -199,13 +202,10 @@ pub fn partition_claim(
             if neighbours.is_empty() { "untouched".to_string() } else { neighbours.join("\n") }
         ));
     }
-    if read_span(&stick, twin_on_stick)? != twin_before {
-        return Err("the twin partition on the stick changed, and nothing may write it".into());
-    }
     target_holds_the_pattern(&layout, &after)?;
-    home_file_reads_back(&nvme)?;
+    home_file_reads_back(&crafted)?;
 
-    for path in [&nvme, &stick, &boot_image] {
+    for path in [&crafted, &boot_image] {
         let _ = std::fs::remove_file(path);
     }
     eprintln!(
@@ -221,14 +221,15 @@ pub fn partition_claim(
 /// read of its table refuses the claim rather than resolving it on the disks
 /// that did, a transfer every attempt of which is refused on its budget ends
 /// at the deadman with the device's word, and ROOT's source, whose disk did
-/// not answer its hold, stays the kernel's once the disk answers.
+/// not answer its hold, stays the kernel's once the disk answers. The crafted
+/// disk is a second USB stick beside the boot stick.
 pub fn partition_claim_gives_up(
-    test_config: &Path,
+    _test_config: &Path,
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
     let config = super::compile::repo_root().join(CONFIG);
-    let nvme = super::lane::dir().join("partclaim-gives-up.img");
+    let crafted = super::lane::dir().join("partclaim-gives-up.img");
     let cases: [(&'static [&'static str], &str, usize, &[&str]); 2] = [
         (
             &["partclaim-table-unanswered"],
@@ -247,14 +248,15 @@ pub fn partition_claim_gives_up(
         ),
     ];
     for (params, role, refusals, wants) in cases {
-        craft_nvme(&nvme)?;
+        craft_disk(&crafted, TWIN)?;
         let mut qemu = QemuInstance::boot_with_options(
             &config,
             c_bins,
             rust_bins,
             BootOptions {
-                profile: qemu::Profile::Metal,
-                nvme_image: Some(nvme.clone()),
+                profile: qemu::Profile::UsbDisk,
+                usb_images: vec![crafted.clone()],
+                nvme_image: Some(tableless_nvme("partclaim-nvme.img")?),
                 kernel_params: params,
                 ..Default::default()
             },
@@ -276,30 +278,32 @@ pub fn partition_claim_gives_up(
             eprintln!("  [partclaim] {role}: {}", line.trim());
         }
     }
-    let _ = std::fs::remove_file(&nvme);
-    root_withheld(test_config, c_bins, rust_bins)
+    root_withheld(&config, &crafted, c_bins, rust_bins)?;
+    let _ = std::fs::remove_file(&crafted);
+    Ok(())
 }
 
-/// ROOT's source on the one disk, which did not answer ROOT's hold and answers
-/// every read after it: its GUID is withheld, so the claim that now finds its
-/// span on a disk that answers, and unheld, is refused as the kernel's.
 fn root_withheld(
-    test_config: &Path,
+    config: &Path,
+    crafted: &Path,
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
     const PARAMS: &[&str] = &["partclaim-root-withheld"];
     let image = super::lane::dir().join("partclaim-root-withheld.img");
-    std::fs::write(&image, qemu::build_boot_image(test_config, c_bins, rust_bins, PARAMS))
+    std::fs::write(&image, qemu::build_boot_image(config, c_bins, rust_bins, PARAMS))
         .map_err(|e| format!("write the boot image: {e}"))?;
     let [_, _, root] = boot_stick_guids(&image)?;
+    craft_disk(crafted, TWIN)?;
     let mut qemu = QemuInstance::boot_with_options(
-        test_config,
+        config,
         c_bins,
         rust_bins,
         BootOptions {
-            profile: qemu::Profile::InternalDisk,
+            profile: qemu::Profile::UsbDisk,
             boot_image: Some(Staged::Pristine(image.clone())),
+            usb_images: vec![crafted.to_path_buf()],
+            nvme_image: Some(tableless_nvme("partclaim-nvme.img")?),
             kernel_params: PARAMS,
             ..Default::default()
         },
@@ -346,15 +350,19 @@ pub fn partition_claim_departure(
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
-    const TOLD: &str = "writes a process's partition claim made before its disk came back owing \
-        a flush may not have survived";
+    const TOLD: &str = "writes a process's claim of partition ";
     const FLUSHED: &str = "usb-quiesce: disk 0 SYNCHRONIZE CACHE ok";
     const UNTOLD: &str = "no writer's flush has said so; the disk is not counted flushed";
+    let departing = format!(
+        "{TOLD}{DEPARTING} made before its disk came back owing a flush may not have survived"
+    );
     for (role, told) in [("departure", 1), ("silent", 1), ("untold", 0)] {
         let (kernel, tail, spans) = departed(test_config, c_bins, rust_bins, role, told)?;
         let count = kernel.matches(TOLD).count();
-        if count != told {
-            return Err(format!("{role}: {count} flushes were told of the loss, not {told}:\n{kernel}"));
+        if count != told || kernel.matches(departing.as_str()).count() != told {
+            return Err(format!(
+                "{role}: {count} flushes were told of the loss, not {told}, each {DEPARTING}'s:\n{kernel}"
+            ));
         }
         // The untold line begins as the flushed one does, so a flushed disk is
         // a flushed line without it.
@@ -476,19 +484,17 @@ fn guest_verdict(result: &qemu::TestResult, tail: &str, refusals: usize) -> Resu
     Ok(kernel)
 }
 
-/// The kernel's own account of the main run: its hold named once for each
-/// mounted partition refused, the twin and both misaligned partitions refused
-/// by name, and not one line for a transfer refused past the end — a caller
-/// can ask at syscall rate.
-fn main_kernel_lines(kernel: &str) -> Result<(), String> {
+/// The kernel's own account of the main run: its hold on ROOT named once, the
+/// log partition's twin and both misaligned partitions refused by name, and
+/// not one line for a transfer refused past the end — a caller can ask at
+/// syscall rate.
+fn main_kernel_lines(kernel: &str, twin: &str) -> Result<(), String> {
     let held = kernel.matches("is held by the kernel").count();
-    if held != MOUNTED {
-        return Err(format!(
-            "the kernel named its own hold {held} times for {MOUNTED} mounted partitions:\n{kernel}"
-        ));
+    if held != 1 {
+        return Err(format!("the kernel named its own hold {held} times for ROOT alone:\n{kernel}"));
     }
     for want in [
-        format!("partclaim: {TWIN} is on device "),
+        format!("partclaim: {twin} is on device "),
         format!("partclaim: {MISALIGNED} is at "),
         format!("partclaim: {MISSTART} is at "),
     ] {
@@ -638,7 +644,7 @@ pub(super) fn read_span(path: &Path, span: Span) -> Result<Vec<u8>, String> {
 
 /// One partition a crafted table carries: its name, length in bytes, type,
 /// unique GUID, and the boundary it begins on in 512-byte LBAs.
-pub(super) type Part = (&'static str, u64, &'static str, &'static str, u64);
+pub(super) type Part<'a> = (&'static str, u64, &'static str, &'a str, u64);
 
 /// Where every partition but one begins.
 pub(super) const ALIGNED: u64 = MIB / 512;
@@ -693,10 +699,11 @@ pub(super) fn table(path: &Path, bytes: u64, parts: &[Part]) -> Result<(Box<dyn 
     Ok((device, spans))
 }
 
-/// The NVMe disk: a FAT32 neighbour, the idle ROOT slot, a FAT32 neighbour
+/// The crafted disk: a FAT32 neighbour, the idle ROOT slot, a FAT32 neighbour
 /// touching it, the partition init grants, a partition that is not whole
-/// blocks, one that begins inside a block, the twin, and a DATA the kernel formats and mounts at `/home`.
-fn craft_nvme(path: &Path) -> Result<Layout, String> {
+/// blocks, one that begins inside a block, a partition carrying `twin` as its
+/// unique GUID, and a DATA fsd formats and serves `/home` from.
+fn craft_disk(path: &Path, twin: &str) -> Result<Layout, String> {
     const FAT_BYTES: u64 = 34 * MIB;
     const DATA_BYTES: u64 = 96 * MIB;
     let parts: [Part; 8] = [
@@ -708,7 +715,7 @@ fn craft_nvme(path: &Path) -> Result<Layout, String> {
         // Right after the one above, at the first LBA past its odd length: whole
         // blocks long, and beginning 512 bytes into one.
         ("misaligned start", MIB, PLAIN_TYPE, MISSTART, 1),
-        ("twin", MIB, PLAIN_TYPE, TWIN, ALIGNED),
+        ("twin", MIB, PLAIN_TYPE, twin, ALIGNED),
         ("ToyOS data", DATA_BYTES, toyos_gpt::Guid::TOYOS_DATA_TEXT, DATA, ALIGNED),
     ];
     let total = MIB + parts.iter().map(|p| p.1.next_multiple_of(MIB)).sum::<u64>() + 2 * MIB;
@@ -730,32 +737,25 @@ fn craft_nvme(path: &Path) -> Result<Layout, String> {
     Ok(layout)
 }
 
-/// The designation on `data`: the kernel formats a DATA only on this consent.
-fn designate(device: &mut dyn gpt::DiskDevice, data: Span) -> Result<(), String> {
+/// An NVMe disk with no partition table, named `name` in the lane: beside a
+/// stick carrying DATA, the machine's one DATA partition is the stick's, where
+/// the lane's blank NVMe image would carry a second and DATA be refused.
+pub(super) fn tableless_nvme(name: &str) -> Result<PathBuf, String> {
+    let path = super::lane::dir().join(name);
+    std::fs::File::create(&path)
+        .and_then(|file| file.set_len(qemu::NVME_SMALL))
+        .map_err(|e| format!("make {}: {e}", path.display()))?;
+    Ok(path)
+}
+
+/// The designation on `data`: fsd formats a DATA only on this consent.
+pub(super) fn designate(device: &mut dyn gpt::DiskDevice, data: Span) -> Result<(), String> {
     let mut stamp = [0u8; BLOCK as usize];
     stamp[..bcachefs::DESIGNATION_MAGIC.len()].copy_from_slice(&bcachefs::DESIGNATION_MAGIC);
     let at = bcachefs::DESIGNATION_BLOCKS_OFFSET;
     stamp[at..at + 8].copy_from_slice(&(data.len / BLOCK).to_le_bytes());
     device.seek(SeekFrom::Start(data.start)).map_err(|e| format!("seek: {e}"))?;
     device.write_all(&stamp).map_err(|e| format!("stamp DATA: {e}"))
-}
-
-/// A disk at `path` carrying `parts` — each a name, a length in bytes and its
-/// unique GUID, on its own MiB boundary — and after them a DATA of
-/// `data_bytes` the kernel may format, so `/home` mounts from this disk.
-pub(super) fn craft_plain_disk(
-    path: &Path,
-    parts: &[(&'static str, u64, &'static str)],
-    data_bytes: u64,
-) -> Result<(), String> {
-    const DATA_GUID: &str = "C1A2B3D4-E5F6-4718-9A0B-1C2D3E4F5A6B";
-    let mut all: Vec<Part> =
-        parts.iter().map(|&(name, len, unique)| (name, len, PLAIN_TYPE, unique, ALIGNED)).collect();
-    all.push(("ToyOS data", data_bytes, toyos_gpt::Guid::TOYOS_DATA_TEXT, DATA_GUID, ALIGNED));
-    let total = MIB + all.iter().map(|p| p.1.next_multiple_of(MIB)).sum::<u64>() + 2 * MIB;
-    let (mut device, spans) = table(path, total, &all)?;
-    designate(&mut *device, *spans.last().expect("DATA was just added"))?;
-    device.flush().map_err(|e| format!("flush the disk: {e}"))
 }
 
 /// A USB stick of `bytes` carrying `parts`, each a name, a length and its

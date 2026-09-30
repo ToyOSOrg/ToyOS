@@ -1,14 +1,15 @@
-//! The boot stick's two partitions, mounted and written from inside ToyOS.
+//! The boot stick's two partitions, served and written from inside ToyOS.
 //!
 //! The ESP holds what firmware and the bootloader read. The log partition
 //! beside it holds the kernel's own log and exists for one reason: it is typed
 //! so that a desktop OS mounts it on plug-in, which an EFI-typed partition is
-//! not. Both are FAT32 and neither is found by being FAT32 — the kernel is
-//! handed both by unique GUID, and `log_partition_identity` is the gate that
-//! says so by moving the name and watching the mount disappear.
+//! not. Both are FAT32 and neither is found by being FAT32 — the loader names
+//! both by unique GUID, fsd serves each off the partition that name finds,
+//! and `log_partition_identity` is the gate that says so by moving the name
+//! and watching `/log` go absent.
 //!
 //! Ground truth is the disk image the *device* received, read on the host by
-//! implementations that are not the kernel's: the `fatfs` crate and
+//! implementations that are not fsd's: the `fatfs` crate and
 //! `toyos-fat32-check`. The guest's account of a write it made is exactly what
 //! is in question, so it cannot also be the evidence; `esp_files` asserts what
 //! only a process inside the machine can see, and everything it claims about
@@ -41,6 +42,13 @@ use gpt::partition_types;
 
 use super::qemu::{self, BootOptions, QemuInstance};
 use super::serial;
+
+/// fsd's word for `/log` served off the log partition.
+pub(crate) const LOG_SERVED: &str = "fsd: Log serving /log — FAT32,";
+/// fsd's word for `/boot` served off the running slot's volume.
+pub(crate) const BOOT_SERVED: &str = "fsd: Boot serving /boot — FAT32 read-only,";
+/// fsd's word for a `/log` it has no volume behind.
+pub(crate) const LOG_ABSENT: &str = "fsd: Log serving /log — absent:";
 
 /// Mirrored in `tests/toyos-rust-tests/src/bin/esp_files.rs`. Two halves of one
 /// fixture; a change to either alone fails loudly rather than passing quietly.
@@ -296,7 +304,7 @@ pub fn esp_filesystem(
     );
     let boot = qemu.boot_log().to_string();
     serial::Serial::named("boot console", boot.as_str()).must_be_clean()?;
-    if !boot.contains("boot-volume: partition mounted") {
+    if !boot.contains(BOOT_SERVED) {
         return Err(format!(
             "the kernel did not mount the boot partition:\n{}",
             volume_lines(&boot)
@@ -313,7 +321,7 @@ pub fn esp_filesystem(
         // `flush_meta`, the FSInfo write, the device cache flush — reaches
         // userland as one `SyscallError::Io`, which `std` flattens to
         // `Kind(Other)`; *which* layer refused is in a `log!` line and nowhere
-        // else (`fat32_adapter::refused`, `usb_storage`'s three trait methods,
+        // else (`usb_storage`'s three trait methods,
         // `xhci::wait::msc`'s `log_refusal` and its budget line). Reporting
         // `stdout` alone left `fsync the blob: Kind(Other)` as the whole of the
         // evidence for a real 2026-08-21 sighting, and the next author with no
@@ -451,9 +459,9 @@ pub fn esp_filesystem(
 fn volume_lines(log: &str) -> String {
     let lines: Vec<&str> = log
         .lines()
-        .filter(|l| l.contains("-volume:") || l.contains("logd:") || l.contains("gpt:")
+        .filter(|l| l.contains("fsd:") || l.contains("blockd:") || l.contains("logd:") || l.contains("gpt:")
             || l.contains("shutdown") || l.contains("Shutting down") || l.contains("Syncing")
-            || l.contains("usb-storage:"))
+            || l.contains("usb-storage:") || l.contains("partclaim:"))
         .collect();
     if lines.is_empty() {
         return format!("the guest said nothing about its volumes at all\n{log}");
@@ -840,321 +848,6 @@ fn rotation(
     Ok(())
 }
 
-/// A file closed **without** an fsync still reaches the volume — by the
-/// write-back queue and the shutdown drain — and leaves the volume parsable.
-///
-/// `OpenFileState::drop` no longer flushes on the closing thread; it pins the
-/// file and hands it to `iod`, and `SYS_SHUTDOWN` drains that queue before it
-/// commits the devices' write caches (`kernel::writeback`). The guest
-/// (`test_rs_writeback_durability`) writes a blob to `/log`, drops the handle
-/// with no sync, and reads it back after `iod` drains — the in-guest half of the
-/// no-loss claim. This is the **independent oracle**: after `run shutdown` the
-/// `/log` volume is read off the image by the `fatfs` crate and checked by
-/// `toyos-fat32-check`, neither the kernel's own cache logic, so both the bytes
-/// on the device and the structure around them are judged by something that is
-/// not the code under test.
-pub fn writeback_durability(
-    test_config: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    /// Mirrored in `tests/toyos-rust-tests/src/bin/writeback_durability.rs`.
-    const BLOB_NAME: &str = "wb-durable.bin";
-    const BLOB_LEN: usize = 5 * 4096 + 91;
-    fn blob() -> Vec<u8> {
-        (0..BLOB_LEN).map(|i| (i.wrapping_mul(97) ^ 0x5A) as u8).collect()
-    }
-    /// The same mirroring, for the file the guest shrank and regrew.
-    const SHRUNK_NAME: &str = "wb-shrunk.bin";
-    const SHRUNK_LEN: usize = 3 * 4096;
-    const CUT: usize = 100;
-    fn seed() -> Vec<u8> {
-        (0..SHRUNK_LEN).map(|i| (i.wrapping_mul(31).wrapping_add(7)) as u8 | 1).collect()
-    }
-    /// And for the bytes a read got back from a file shrunk only once cold.
-    const SERVED_NAME: &str = "wb-served.bin";
-    /// And for the file whose straddled read is refused, which leaves it whole.
-    const REFUSED_NAME: &str = "wb-refused.bin";
-    /// And for the file whose flush is refused at its directory-entry write.
-    const RETRY_NAME: &str = "wb-retry.bin";
-    const RETRY_AT: usize = 2 * 4096;
-    fn kept() -> Vec<u8> {
-        (0..4096usize).map(|i| (i.wrapping_mul(53) ^ 0xC3) as u8).collect()
-    }
-
-    // Stage the one failure QEMU will not produce: a budget expiry on the FAT-1
-    // mirror write of the blob's cluster allocation, on the write-back drain path
-    // (`fat-mirror-write-refuse`). Without the drain's retry and
-    // `set_fat_entry`'s active-last order the volume is left with the FATs split;
-    // with them the drain re-drives the flush and heals it, and the checker below
-    // is the independent judge either way. The image is built with the parameter
-    // so the guest boots the test kernel that carries the actuator.
-    // The second refuses one file's second directory-entry write, so a flush
-    // fails at its metadata write with its pages already written and settled.
-    // Different file, different site: neither stands in for the other.
-    // The third is the sweep any other CPU can run in the window between that
-    // read and the lock that spends it, holding no VFS lock of its own.
-    const PARAMS: &[&str] = &[
-        "fat-mirror-write-refuse",
-        "fat-flush-meta-refuse",
-        "resize-evict-window",
-        "resize-fault-refuse",
-    ];
-
-    let image_path = test_dir().join("writeback-durability.img");
-    let image = qemu::build_boot_image(test_config, c_bins, rust_bins, PARAMS);
-    std::fs::write(&image_path, &image).map_err(|e| format!("write the boot image: {e}"))?;
-    let (start, len) = log_extent(&image, &image_path)?;
-
-    // Born clean, asserted rather than assumed, so a complaint after the run is
-    // the guest's and not one it inherited.
-    let complaints_before = check(&image[start..start + len]);
-    if !complaints_before.is_empty() {
-        return Err(format!(
-            "the log partition was not born clean, so this gate cannot tell a complaint the \
-             guest caused from one it inherited:\n{}",
-            describe(&complaints_before)
-        ));
-    }
-
-    let mut qemu = QemuInstance::boot_with_options(
-        test_config,
-        c_bins,
-        rust_bins,
-        BootOptions {
-            profile: qemu::Profile::Metal,
-            boot_image: Some(qemu::Staged::Written(image_path.clone())),
-            kernel_params: PARAMS,
-            ..Default::default()
-        },
-    );
-    let boot = qemu.boot_log().to_string();
-    serial::Serial::named("boot console", boot.as_str()).must_be_clean()?;
-    if !boot.contains("log-volume: partition mounted") {
-        return Err(format!(
-            "the log partition did not mount, so the guest had nowhere to write:\n{}",
-            volume_lines(&boot)
-        ));
-    }
-
-    let result = qemu.run_test("test_rs_writeback_durability", Duration::from_secs(26));
-    if let Some(err) = &result.error {
-        return Err(format!("the guest stopped answering: {err}\nserial:\n{}", result.serial));
-    }
-    if result.exit_code != Some(0) {
-        // The kernel's own lines too: a refused write on the log path reaches
-        // userland as one `Io`, and which layer refused is only in a `log!`.
-        return Err(format!(
-            "writeback_durability guest failed:\n{}\nkernel log while it ran:\n{}{}",
-            result.stdout, result.before, result.serial
-        ));
-    }
-    serial::Serial::named("test serial", result.serial.as_str()).must_be_clean()?;
-
-    // The shutdown drains the write-back queue and then commits the device's own
-    // write cache: it is what makes the host's view of the backing file the
-    // device's view of it.
-    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
-    qemu.flush_stdin();
-    let tail = qemu.drain_serial(Duration::from_secs(20));
-    drop(qemu);
-    for bad in ["PANIC:", "panicked at"] {
-        if tail.contains(bad) {
-            return Err(format!("{bad:?} on the way down\n{tail}"));
-        }
-    }
-
-    // The actuator must have fired **twice**, or this gate proves nothing: a
-    // green run with an inert arm is the worst harness defect
-    // (`tests/common/qemu.rs`'s `refuse_a_staged_image_this_boot_did_not_ask_for`).
-    // Two refusals are what drive the drain's retry ladder to attempt 2 — the
-    // first depth that *parks* between attempts, where `iod`'s standing `WORK`
-    // arm made `between_attempts` a double-arm and panicked the machine. One
-    // refusal reaches only attempt 1 (a yield), which is why the machine passed
-    // the single-refusal control while broken. So this gate proves both halves of
-    // the durability fix: `set_fat_entry`'s active-last order heals the mirror
-    // (checker silent, below), and `drain_all_iod`'s arm-reusing backoff survives
-    // the attempt-2 park (`must_be_clean` above and the `PANIC` scan of the
-    // shutdown tail catch the double-arm). It fires on `iod`'s drain during the
-    // run, or on the shutdown drain if `iod` was late, so the whole capture is
-    // searched.
-    const FIRED: &str = "fat-mirror-write-refuse: refusing the FAT-1 mirror write";
-    let fired = [result.before.as_str(), result.serial.as_str(), tail.as_str()]
-        .iter()
-        .map(|cap| cap.matches(FIRED).count())
-        .sum::<usize>();
-    if fired < 2 {
-        return Err(format!(
-            "the fat-mirror-write-refuse actuator fired {fired} time(s), not the 2 that drive the \
-             drain's retry ladder to the attempt that parks — the gate never reached the path \
-             that panicked, so it proves nothing\nkernel log:\n{}{}\nshutdown:\n{}",
-            result.before, result.serial, tail
-        ));
-    }
-
-    let after = std::fs::read(&image_path).map_err(|e| format!("read the image back: {e}"))?;
-    if after.len() != image.len() {
-        return Err(format!("the image is {} bytes, was {}", after.len(), image.len()));
-    }
-    let volume = &after[start..start + len];
-
-    // The strongest claim first: the volume is still a volume. A driver that
-    // wrote the right bytes into a broken FAT would pass the byte comparison
-    // below and leave a stick that cannot boot.
-    let complaints_after = check(volume);
-    if !complaints_after.is_empty() {
-        return Err(format!(
-            "the write-back left the log volume breaking the format:\n{}",
-            describe(&complaints_after)
-        ));
-    }
-
-    // Ground truth: the bytes on the device, against the bytes the guest wrote,
-    // read by the host's own FAT implementation and never by the kernel.
-    let mut files =
-        read_files(volume, &[BLOB_NAME, SHRUNK_NAME, SERVED_NAME, RETRY_NAME, REFUSED_NAME])?;
-    let refused = need(files.pop().flatten(), REFUSED_NAME)?;
-    let retried = need(files.pop().flatten(), RETRY_NAME)?;
-    let served = need(files.pop().flatten(), SERVED_NAME)?;
-    let shrunk = need(files.pop().flatten(), SHRUNK_NAME)?;
-    let got = need(files.pop().flatten(), BLOB_NAME)?;
-    if got.len() != BLOB_LEN {
-        return Err(format!(
-            "{BLOB_NAME} is {} bytes on the volume; the guest wrote {BLOB_LEN} and never fsynced — \
-             a write-back closed but not drained is a lost write",
-            got.len()
-        ));
-    }
-    if let Some(at) = got.iter().zip(blob()).position(|(a, b)| *a != b) {
-        return Err(format!("{BLOB_NAME} differs on the volume from what the guest wrote at byte {at}"));
-    }
-
-    // The shrink the drain's one `update_metadata` could not see. The volume is
-    // valid either way — a file naming its own old clusters breaks no rule the
-    // checker knows — so the bytes are the only place this shows.
-    if shrunk.len() != SHRUNK_LEN {
-        return Err(format!(
-            "{SHRUNK_NAME} is {} bytes on the volume; the guest regrew it to {SHRUNK_LEN}",
-            shrunk.len()
-        ));
-    }
-    if shrunk[..CUT] != seed()[..CUT] {
-        return Err(format!("{SHRUNK_NAME}'s surviving head changed across the shrink and regrow"));
-    }
-    if let Some(at) = shrunk[CUT..].iter().position(|&b| b != 0) {
-        return Err(format!(
-            "{SHRUNK_NAME} byte {} on the volume is {:#04x}, not zero — the shrink gave no clusters \
-             back and the regrow served the discarded tail",
-            CUT + at,
-            shrunk[CUT + at],
-        ));
-    }
-
-    // The same shrink over a page the cache did not hold, judged through the
-    // bytes a read got back: `Fat32::set_len` zero-fills on every grow, so the
-    // volume's own bytes are right whatever the cache answered.
-    // The refused fault. The actuator must have fired, or the truncate was
-    // never refused; then the file has to be untouched on the volume.
-    const FAULT_REFUSED: &str = "resize-fault-refuse: refusing the straddled read";
-    let fault_refused = [result.before.as_str(), result.serial.as_str(), tail.as_str()]
-        .iter()
-        .map(|cap| cap.matches(FAULT_REFUSED).count())
-        .sum::<usize>();
-    if fault_refused != 1 {
-        return Err(format!(
-            "the resize-fault-refuse actuator fired {fault_refused} time(s), not the 1 the staged \
-             shrink asks for — the refused error path this gate covers never ran\nkernel log:\n{}{}\nshutdown:\n{}",
-            result.before, result.serial, tail
-        ));
-    }
-    if refused.len() != SHRUNK_LEN || refused[..] != seed()[..] {
-        return Err(format!(
-            "{REFUSED_NAME} is {} bytes on the volume and not the {SHRUNK_LEN} bytes the guest \
-             seeded it with — a truncate whose straddled read was refused changed the file",
-            refused.len()
-        ));
-    }
-
-    // The sweep must have run in the window, or the eviction this arm is about
-    // never happened and the bytes below prove only the ordinary cold shrink.
-    const SWEPT: &str = "resize-evict-window swept page";
-    let swept = [result.before.as_str(), result.serial.as_str(), tail.as_str()]
-        .iter()
-        .map(|cap| cap.matches(SWEPT).count())
-        .sum::<usize>();
-    if swept != 1 {
-        return Err(format!(
-            "the resize-evict-window actuator swept {swept} time(s), not the 1 the cold shrink \
-             stages — nothing ran in the window this arm exists for\nkernel log:\n{}{}\nshutdown:\n{}",
-            result.before, result.serial, tail
-        ));
-    }
-    if served.len() != SHRUNK_LEN {
-        return Err(format!(
-            "{SERVED_NAME} is {} bytes; the guest read back a file it had regrown to {SHRUNK_LEN}",
-            served.len()
-        ));
-    }
-    if served[..CUT] != seed()[..CUT] {
-        return Err(format!("{SERVED_NAME}'s surviving head changed across the shrink and regrow"));
-    }
-    if let Some(at) = served[CUT..].iter().position(|&b| b != 0) {
-        return Err(format!(
-            "{SERVED_NAME} byte {} is {:#04x}, not zero — a read of a file shrunk after it left \
-             the cache was served the discarded tail",
-            CUT + at,
-            served[CUT + at],
-        ));
-    }
-
-    // The retry gate. The actuator must have fired, or the flush never failed
-    // and this proves nothing; then the page written above the mark has to be
-    // on the volume, which a second trim would have freed.
-    const META_REFUSED: &str = "fat-flush-meta-refuse: refusing the directory-entry write";
-    let meta_fired = [result.before.as_str(), result.serial.as_str(), tail.as_str()]
-        .iter()
-        .map(|cap| cap.matches(META_REFUSED).count())
-        .sum::<usize>();
-    if meta_fired != 1 {
-        return Err(format!(
-            "the fat-flush-meta-refuse actuator fired {meta_fired} time(s), not the 1 that makes \
-             the flush fail at its metadata write — the retry this gate is about never \
-             happened\nkernel log:\n{}{}\nshutdown:\n{}",
-            result.before, result.serial, tail
-        ));
-    }
-    if retried.len() != SHRUNK_LEN {
-        return Err(format!(
-            "{RETRY_NAME} is {} bytes on the volume; the guest regrew it to {SHRUNK_LEN}",
-            retried.len()
-        ));
-    }
-    if retried[RETRY_AT..] != kept()[..] {
-        let at = retried[RETRY_AT..].iter().zip(kept()).position(|(a, b)| *a != b);
-        return Err(format!(
-            "{RETRY_NAME} byte {:?} of the page written above the shrink is not what the guest \
-             wrote — the flush's retry trimmed a second time and freed it",
-            at.map(|i| RETRY_AT + i),
-        ));
-    }
-    if let Some(at) = retried[CUT..RETRY_AT].iter().position(|&b| b != 0) {
-        return Err(format!(
-            "{RETRY_NAME} byte {} between the shrink and the rewritten page is {:#04x}, not zero",
-            CUT + at,
-            retried[CUT + at],
-        ));
-    }
-
-    let _ = std::fs::remove_file(&image_path);
-    eprintln!(
-        "  [wb] {BLOB_LEN} bytes closed without fsync reached the log volume through the \
-         write-back queue and the shutdown drain; {SHRUNK_NAME}'s regrown tail is zeros and so \
-         is what a cold shrink served into {SERVED_NAME}; {RETRY_NAME} kept the page it wrote \
-         through a refused metadata write; the checker is silent"
-    );
-    Ok(())
-}
-
 /// A `FatBacking` handed out before an unlink reads nothing after it, and the
 /// delete-and-reallocate cycle leaves the volume a volume.
 ///
@@ -1218,7 +911,7 @@ pub fn fat_backing_revoked(
     );
     let boot = qemu.boot_log().to_string();
     serial::Serial::named("boot console", boot.as_str()).must_be_clean()?;
-    if !boot.contains("log-volume: partition mounted") {
+    if !boot.contains(LOG_SERVED) {
         return Err(format!(
             "the log partition did not mount, so the guest had nowhere to stage the unlink:\n{}",
             volume_lines(&boot)
@@ -1332,7 +1025,7 @@ pub fn fsync_failed_commit(
         },
     );
     let mut log = qemu.boot_log().to_string();
-    if !log.contains("log-volume: partition mounted") {
+    if !log.contains(LOG_SERVED) {
         return Err(format!(
             "the log partition did not mount, so nothing below asks the device to flush:\n{}",
             volume_lines(&log)
@@ -1415,7 +1108,7 @@ pub fn redirty_mid_flush(
     );
     let boot = qemu.boot_log().to_string();
     serial::Serial::named("boot console", boot.as_str()).must_be_clean()?;
-    if !boot.contains("log-volume: partition mounted") {
+    if !boot.contains(LOG_SERVED) {
         return Err(format!(
             "the log partition did not mount, so the race had nowhere to run:\n{}",
             volume_lines(&boot)
@@ -1477,108 +1170,6 @@ pub fn redirty_mid_flush(
     Ok(())
 }
 
-/// A truncate staged inside a flush's `update_metadata` window
-/// (`ftruncate-flush-stall`), which `SYS_FTRUNCATE`'s lockless resize once
-/// landed in. The guest makes the race and the kernel says whether a truncate
-/// landed inside the window; the shut-down volume is re-judged by the FAT reader and the fatgen103
-/// checker — `fs_rename_durable`'s oracle.
-pub fn ftruncate_flush_race(
-    test_config: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    const PARAMS: &[&str] = &["ftruncate-flush-stall"];
-    /// Mirrored in `tests/toyos-rust-tests/src/bin/ftruncate_flush_race.rs`.
-    const TARGET: &str = "truncate-race.bin";
-    const SHORT: usize = 5000;
-
-    let image_path = test_dir().join("ftruncate-flush-race.img");
-    let image = qemu::build_boot_image(test_config, c_bins, rust_bins, PARAMS);
-    std::fs::write(&image_path, &image).map_err(|e| format!("write the boot image: {e}"))?;
-    let (start, len) = log_extent(&image, &image_path)?;
-
-    let mut qemu = QemuInstance::boot_with_options(
-        test_config,
-        c_bins,
-        rust_bins,
-        BootOptions {
-            profile: qemu::Profile::Metal,
-            boot_image: Some(qemu::Staged::Written(image_path.clone())),
-            kernel_params: PARAMS,
-            ..Default::default()
-        },
-    );
-    let boot = qemu.boot_log().to_string();
-    if !boot.contains("log-volume: partition mounted") {
-        return Err(format!(
-            "the log partition did not mount, so the race had nowhere to run:\n{}",
-            volume_lines(&boot)
-        ));
-    }
-
-    let result = qemu.run_test("test_rs_ftruncate_flush_race", Duration::from_secs(120));
-    if let Some(err) = &result.error {
-        return Err(format!("the guest stopped answering: {err}\nserial:\n{}", result.serial));
-    }
-    if result.exit_code != Some(0) {
-        return Err(format!(
-            "ftruncate_flush_race guest failed:\n{}\nkernel log while it ran:\n{}{}",
-            result.stdout, result.before, result.serial
-        ));
-    }
-    let kernel_log = format!("{}{}", result.before, result.serial);
-    if kernel_log.contains("STALLED WINDOW BROKEN") {
-        return Err(format!(
-            "a truncate landed inside the flush's metadata pair — the resize is not under \
-             the VFS lock:\n{kernel_log}"
-        ));
-    }
-    if !kernel_log.contains("STALLED WINDOW HELD") {
-        return Err(format!(
-            "the stalled window never reported, so nothing was staged and this gate judged \
-             nothing:\n{kernel_log}"
-        ));
-    }
-
-    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
-    qemu.flush_stdin();
-    let tail = qemu.drain_serial(Duration::from_secs(20));
-    drop(qemu);
-    for bad in ["PANIC:", "panicked at"] {
-        if tail.contains(bad) {
-            return Err(format!("{bad:?} on the way down\n{tail}"));
-        }
-    }
-
-    let after = std::fs::read(&image_path).map_err(|e| format!("read the image back: {e}"))?;
-    let volume = &after[start..start + len];
-    let complaints = check(volume);
-    if !complaints.is_empty() {
-        return Err(format!(
-            "the staged race left the log volume breaking the format:\n{}",
-            describe(&complaints)
-        ));
-    }
-    let got = need(read_files(volume, &[TARGET])?.pop().flatten(), TARGET)?;
-    if got.len() != SHORT {
-        return Err(format!(
-            "{TARGET} is {} bytes on the device, not the {SHORT} the truncate settled — \
-             the flush's metadata pair recorded a size the file no longer has",
-            got.len()
-        ));
-    }
-    if let Some(at) = got.iter().position(|&b| b != 0xB6) {
-        return Err(format!("{TARGET} byte {at} is {:#04x}, not the 0xB6 the guest wrote", got[at]));
-    }
-
-    let _ = std::fs::remove_file(&image_path);
-    eprintln!(
-        "  [ftruncate] the stalled window held; {SHORT} bytes on the device by the host's own \
-         reader, checker silent"
-    );
-    Ok(())
-}
-
 /// A rename whose source is absent leaves the destination on the FAT `/log`
 /// volume, and `rename(p, p)` leaves the file — the **independent oracle** for
 /// the same reason `fat_backing_revoked` is one. The guest
@@ -1628,7 +1219,7 @@ pub fn fs_rename_durable(
     );
     let boot = qemu.boot_log().to_string();
     serial::Serial::named("boot console", boot.as_str()).must_be_clean()?;
-    if !boot.contains("log-volume: partition mounted") {
+    if !boot.contains(LOG_SERVED) {
         return Err(format!(
             "the log partition did not mount, so the guest had nowhere to stage the rename:\n{}",
             volume_lines(&boot)
@@ -1745,7 +1336,7 @@ pub fn fs_dirs_durable(
     );
     let boot = qemu.boot_log().to_string();
     serial::Serial::named("boot console", boot.as_str()).must_be_clean()?;
-    if !boot.contains("log-volume: partition mounted") {
+    if !boot.contains(LOG_SERVED) {
         return Err(format!(
             "the log partition did not mount, so the guest had nowhere to stage directories:\n{}",
             volume_lines(&boot)
@@ -1830,140 +1421,6 @@ pub fn fs_dirs_durable(
     Ok(())
 }
 
-/// **The machine's stop leaves no filesystem update half made**, and
-/// `toyos-fat32-check` is who says so.
-///
-/// `quiesce-fsync-refuse` refuses one staged file's flush: each attempt writes
-/// a new cluster's entry into the mirror FAT and is refused the active one, and
-/// the caller parks in `block::between_attempts`. The job asks init for the
-/// shutdown once the attempt that parks is refused, so the stop meets a thread
-/// parked over two FATs that disagree. A stop that bands the thread where it is
-/// parked leaves that volume at the reset; one that lets the update close
-/// leaves it whole, and the kernel's own `fsync:` line says which attempt
-/// closed it — inside the stop, by the stop record's own clock.
-pub fn quiesce_leaves_the_volume_whole(
-    test_config: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    // The kernel's `mirror_refuse::FSYNC_REFUSALS`, spelt here because the
-    // harness cannot link the kernel.
-    const REFUSALS: usize = 8;
-    const REFUSED: &str = "quiesce-fsync-refuse: refusing a SYS_FSYNC flush's active-FAT write";
-    const CLOSED: &str = "fsync: /log/quiesce-fsync.bin durable on attempt 9";
-    const SYNCING: &str = "Syncing filesystems...";
-    const PARAMS: &[&str] = &["quiesce-fsync-refuse"];
-
-    let image_path = test_dir().join("quiesce-volume-whole.img");
-    let image = qemu::build_boot_image(test_config, c_bins, rust_bins, PARAMS);
-    std::fs::write(&image_path, &image).map_err(|e| format!("write the boot image: {e}"))?;
-    let (start, len) = log_extent(&image, &image_path)?;
-
-    let complaints_before = check(&image[start..start + len]);
-    if !complaints_before.is_empty() {
-        return Err(format!(
-            "the log partition was not born clean, so this gate cannot tell a complaint the \
-             stop caused from one it inherited:\n{}",
-            describe(&complaints_before)
-        ));
-    }
-
-    let mut qemu = QemuInstance::boot_with_options(
-        test_config,
-        c_bins,
-        rust_bins,
-        BootOptions {
-            profile: qemu::Profile::Metal,
-            boot_image: Some(qemu::Staged::Written(image_path.clone())),
-            kernel_params: PARAMS,
-            ..Default::default()
-        },
-    );
-    let boot = qemu.boot_log().to_string();
-    serial::Serial::named("boot console", boot.as_str()).must_be_clean()?;
-    if !boot.contains("log-volume: partition mounted") {
-        return Err(format!(
-            "the log partition did not mount, so this boot has no volume to leave whole:\n{}",
-            volume_lines(&boot)
-        ));
-    }
-
-    writeln!(qemu.stdin_mut(), "run test_rs_quiesce_fsync").expect("write to QEMU stdin");
-    qemu.flush_stdin();
-    let tail = qemu.drain_serial(Duration::from_secs(20));
-    drop(qemu);
-    for bad in ["PANIC:", "panicked at"] {
-        if tail.contains(bad) {
-            return Err(format!("{bad:?} on the way down\n{tail}"));
-        }
-    }
-    // The drain ends when QEMU exits; a guest still up at its bound is a
-    // shutdown that never reached its last word, and nothing below is about it.
-    if !tail.contains("Shutting down.") {
-        return Err(format!("the guest did not shut down within the drain's 20 s\n{tail}"));
-    }
-
-    let after = std::fs::read(&image_path).map_err(|e| format!("read the image back: {e}"))?;
-    if after.len() != image.len() {
-        return Err(format!("the image is {} bytes, was {}", after.len(), image.len()));
-    }
-
-    // **The harm, first.**
-    let complaints_after = check(&after[start..start + len]);
-    if !complaints_after.is_empty() {
-        return Err(format!(
-            "the machine's stop left the log volume breaking the format:\n{}\n{tail}",
-            describe(&complaints_after)
-        ));
-    }
-
-    // The arm fired as many times as the kernel declares, or the silence above
-    // is about a stop that met nobody parked.
-    let lines: Vec<&str> = tail.lines().collect();
-    let refusals: Vec<&str> = lines.iter().copied().filter(|l| l.contains(REFUSED)).collect();
-    if refusals.len() != REFUSALS {
-        return Err(format!(
-            "the quiesce-fsync-refuse actuator refused {} attempt(s), not the {REFUSALS} the \
-             kernel declares, so no thread was parked where this boot says one was\n{tail}",
-            refusals.len()
-        ));
-    }
-    // **Where the stop began, by its own record**: it says how long it took,
-    // and says so after the sync line it writes the moment it is over.
-    let ms = |line: &str| {
-        bootlog::record_millis(line).ok_or_else(|| format!("{line:?} carries no kernel time"))
-    };
-    let synced = lines.iter().position(|l| l.contains(SYNCING));
-    let closed = lines.iter().position(|l| l.contains(CLOSED));
-    let record = lines.iter().find_map(|l| toyos_quiesce::Record::parse(l));
-    let (Some(synced), Some(closed), Some(record)) = (synced, closed, record) else {
-        return Err(format!(
-            "the volume is whole, but this boot does not say the stop met the parked flush and \
-             let it close: the sync is at {synced:?}, the kernel's `{CLOSED}` at {closed:?}, and \
-             the stop record {}\n{tail}",
-            if record.is_some() { "is there" } else { "is missing" },
-        ));
-    };
-    let began = ms(lines[synced])?.saturating_sub(record.elapsed_ms);
-    let first_refusal = ms(refusals[0])?;
-    let closed_at = ms(lines[closed])?;
-    if !(first_refusal < began && began <= closed_at && closed < synced) {
-        return Err(format!(
-            "the first refusal at {first_refusal} ms, the stop's start at {began} ms and the \
-             flush's close at {closed_at} ms (console line {closed}, the sync at {synced}): the \
-             stop did not begin while the flush was parked, or did not wait for it to close\n{tail}"
-        ));
-    }
-
-    let _ = std::fs::remove_file(&image_path);
-    eprintln!(
-        "  [fat] the stop began at {began} ms over a flush parked on split FATs and let it close \
-         at {closed_at} ms; the checker is silent:\n    {}",
-        lines[closed],
-    );
-    Ok(())
-}
-
 
 /// The boot disk arrives *after* the port scan, and both mounts still happen.
 ///
@@ -2034,11 +1491,14 @@ pub fn late_storage_connect(
         ));
     }
 
-    for want in [
-        "boot-volume: partition mounted",
-        "log-volume: partition mounted",
-        "logd: this boot's kernel log is",
-    ] {
+    // logd opens its file once its file server answers, which need not be
+    // before the runner's ready line: read on until it says so.
+    const LOG_OPENED: &str = "logd: this boot's kernel log is";
+    let mut boot = boot;
+    if !boot.contains(LOG_OPENED) {
+        boot.push_str(&qemu.drain_until(Duration::from_secs(20), |l| l.contains(LOG_OPENED)));
+    }
+    for want in [BOOT_SERVED, LOG_SERVED, LOG_OPENED] {
         if !boot.contains(want) {
             return Err(format!(
                 "the disk arrived after the port scan and {want:?} never happened — the probe \
@@ -2090,308 +1550,6 @@ pub fn log_on_device(
     }
     let mut found = read_files(&image[start..start + len], &[name])?;
     need(found.pop().flatten(), name)
-}
-
-/// A page of a `/log` file that the device will not give back, and the partial
-/// write that used to merge into the hole and persist it.
-///
-/// `file_cache::write_page` re-reads a page it is about to partially overwrite,
-/// through the file's backing, and merges the new bytes into what comes back.
-/// `FatBacking::read_page` returned `()`, so a failed read was indistinguishable
-/// from a page of zeros: the new bytes went into those zeros and `flush_file`
-/// wrote the result back over data that was already on the stick.
-///
-/// Three separate claims, and none of them is the others:
-///
-/// - the failure is **reported** (`serving zeros`, the marker triage greps for,
-///   which this path could not emit at all);
-/// - the failure **propagates** to the caller — `FatBacking` →
-///   `file_cache::write_page` → `ops::try_write` → the process, every one of which
-///   returned `()` or swallowed on some link of the chain;
-/// - the file on the device is **not corrupted**, checked on the host against
-///   the bytes the host itself wrote. This is the claim the other two exist to
-///   serve, and the one that stays meaningful if the log lines are reworded.
-///
-/// **What stages it is a host-written file, and that is the deterministic form
-/// rather than the only one.** The log's own writer reaches the same hazard:
-/// `/system/bin/logd` is an ordinary process appending to an ordinary file and
-/// `fsync`s every batch, which clears the dirty bit and leaves its tail page an
-/// ordinary eviction candidate — so a boot that loses that page re-fetches it
-/// on the next append, exactly as this does. Staging it from the guest's own
-/// log would make the trigger a matter of which page happened to be evicted;
-/// a file the host wrote before the machine existed can have no resident page
-/// at all.
-pub fn log_backing_read_error(
-    test_config: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    // `test-small-caches` is what makes the page actually get evicted: at the
-    // shipped ceiling the log's few pages stay resident for the whole boot and
-    // the re-read the injection targets never happens. The eviction code is the
-    // shipped code; only the bound moves.
-    const PARAMS: &[&str] = &["fat-backing-read-fails"];
-    const SERVING_ZEROS: &str = "failed; serving zeros";
-    /// Mirrored in `tests/toyos-rust-tests/src/bin/log_volume_reread.rs`.
-    const STAGED: &str = "staged-reread.txt";
-    /// Printable and longer than the offset the guest writes at, so the page is
-    /// fetched rather than extended, and so a merge into zeros shows up as a
-    /// run of NULs in a file that is otherwise entirely text.
-    const STAGED_TEXT: &[u8] = b"written by the host onto the log volume before this machine \
-                                 started, and not to be changed by it\n";
-
-    let image_path = test_dir().join("fat-backing-read-fails.img");
-    let mut image = qemu::build_boot_image(test_config, c_bins, rust_bins, PARAMS);
-    // Written before the extent is asked for: `log_extent` parses the GPT off
-    // the file, not the buffer.
-    std::fs::write(&image_path, &image).map_err(|e| format!("write the boot image: {e}"))?;
-    let (start, len) = log_extent(&image, &image_path)?;
-    // The host's half of the fixture, on the device before there is a guest.
-    // This is what makes the trigger deterministic rather than a matter of
-    // whether some page happened to be evicted: none of this file's pages can
-    // be resident, because the machine has never seen it.
-    stage_files(
-        &mut image[start..start + len],
-        &[(STAGED.to_string(), STAGED_TEXT.to_vec())],
-    )?;
-    std::fs::write(&image_path, &image).map_err(|e| format!("write the boot image: {e}"))?;
-
-    let mut qemu = QemuInstance::boot_with_options(
-        test_config,
-        c_bins,
-        rust_bins,
-        BootOptions {
-            profile: qemu::Profile::Metal,
-            boot_image: Some(qemu::Staged::Written(image_path.clone())),
-            kernel_params: PARAMS,
-            ..Default::default()
-        },
-    );
-    let mut log = qemu.boot_log().to_string();
-    let attempt = qemu.run_test("test_rs_log_volume_reread", Duration::from_secs(30));
-    // Both streams: the kernel's own line about the refused read is on the
-    // serial console, and the process's account of what it was told is on
-    // stdout. The claims below need one of each.
-    log.push_str(&attempt.stdout);
-    log.push_str(&attempt.serial);
-    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
-    qemu.flush_stdin();
-    log.push_str(&qemu.drain_serial(Duration::from_secs(20)));
-    drop(qemu);
-    for bad in ["PANIC:", "panicked at"] {
-        if log.contains(bad) {
-            return Err(format!("{bad:?} on the boot\n{log}"));
-        }
-    }
-
-    // 1. The injection reached the code, and the code said so. Before this
-    //    landed there was no string here to find: the two sibling backings
-    //    print `serving zeros` and this one returned in silence.
-    let reported = log.matches(SERVING_ZEROS).count();
-    if reported == 0 {
-        return Err(format!(
-            "no {SERVING_ZEROS:?} line — either the injection never reached a page re-read (so \
-             this boot proves nothing) or the FAT backing is still failing silently\n{log}"
-        ));
-    }
-
-    // 2. It propagated the whole way, to the one caller that can be asked. A
-    //    write reported as succeeding is the defect: the process has no way to
-    //    know its bytes went into a page invented out of a failed read.
-    if !log.contains("reread: the write failed") {
-        return Err(format!(
-            "the process was not told: a refused page has to reach `ops::try_write` as an error \
-             instead of being merged into zeros\n{log}"
-        ));
-    }
-
-    // 2b. The read of the same page, which is the sharper half and was the
-    //     later fix: `file_cache::read_page` returned `()`, so the process got
-    //     the page zeroed and a success. Nothing above it — not this test, not
-    //     a `cat`, not the ELF loader — can tell that from a file that really
-    //     is zeros there, which is why the count is in the guest's line and
-    //     why this refuses the success rather than checking the bytes.
-    if !log.contains("reread: the read failed") {
-        let said = log
-            .lines()
-            .map(str::trim)
-            .find(|l| l.starts_with("reread: the read"))
-            .unwrap_or("(the guest never reported its read)");
-        return Err(format!(
-            "a page the device would not give back reached the process as data: {said}\n\
-             A failed read has to be distinguishable from a hole.\n{log}"
-        ));
-    }
-
-    // 3. And the machine is fine. A refusal that costs the boot is not a fix.
-    if !log.contains("Boot: complete") {
-        return Err(format!("the boot did not finish\n{log}"));
-    }
-    if !log.contains("Shutting down.") {
-        return Err(format!("the guest did not shut down cleanly\n{log}"));
-    }
-
-    // 4. Ground truth: the file on the device, against the bytes the host put
-    //    there. A page merged into a failed re-fetch is zeros where the text
-    //    was, so this catches the corruption whether or not anything was said
-    //    about it — the console being exactly what the guest would be wrong
-    //    about.
-    let after = std::fs::read(&image_path).map_err(|e| format!("read the image back: {e}"))?;
-    let on_device = need(read_files(&after[start..start + len], &[STAGED])?.pop().flatten(), STAGED)?;
-    if on_device != STAGED_TEXT {
-        let at = on_device.iter().zip(STAGED_TEXT).position(|(a, b)| a != b);
-        return Err(format!(
-            "the guest changed {STAGED} on the device: {} bytes became {}, first differing at \
-             {at:?} — a partial write was merged into a page the device would not give back, and \
-             flushed",
-            STAGED_TEXT.len(),
-            on_device.len()
-        ));
-    }
-
-    let _ = std::fs::remove_file(&image_path);
-    eprintln!(
-        "  [log] {reported} page re-read(s) refused by the device: reported, propagated to the \
-         process that asked, and the {} bytes the host staged are intact",
-        STAGED_TEXT.len()
-    );
-    Ok(())
-}
-
-/// A mounted volume that stops answering, and the questions `vfs::FileSystem`
-/// used to fold into "no such file".
-///
-/// `open` and `read_dir` reached filesystem methods returning an `Option`, a
-/// `bool` and a bare `u64`, so a device that refused a transfer was reported to
-/// userland as a name that is not there. Nothing downstream can act on that: it
-/// creates a file over one that exists, reports a program missing off a stick
-/// that is merely unhappy, and unlinks a name it believes is already gone.
-///
-/// `fat-boot-reads-fail` is the actuator and its sibling
-/// `fat-backing-read-fails` is not: that one injects at
-/// `FatBacking::read_page`, which is the page-fault path and reaches no
-/// directory entry, so with it armed every question below still succeeds. This
-/// one is under `Fat32` itself. Neither can be staged from the host — both
-/// partitions live on the disk the guest is running from, so `readonly=on` is
-/// writes only and `rerror` takes the whole drive.
-///
-/// **The mount line is a load-bearing assertion and not decoration.** A `/boot`
-/// that failed to mount is not a mount at all: `Vfs::resolve_fs` falls through
-/// to the root filesystem, ROOT has no `boot/` in it, and every question
-/// below would then answer `NotFound` for an honest reason — which is precisely
-/// the string this test exists to refuse.
-pub fn boot_volume_metadata_error(
-    test_config: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    const PARAMS: &[&str] = &["fat-boot-reads-fail"];
-    /// What the injection prints from under `Fat32`, once per refused read.
-    const REFUSED: &str = "boot-volume: read of";
-
-    let image_path = test_dir().join("fat-boot-reads-fail.img");
-    let image = qemu::build_boot_image(test_config, c_bins, rust_bins, PARAMS);
-    std::fs::write(&image_path, &image).map_err(|e| format!("write the boot image: {e}"))?;
-
-    let mut qemu = QemuInstance::boot_with_options(
-        test_config,
-        c_bins,
-        rust_bins,
-        BootOptions {
-            profile: qemu::Profile::Metal,
-            boot_image: Some(qemu::Staged::Written(image_path.clone())),
-            kernel_params: PARAMS,
-            ..Default::default()
-        },
-    );
-    let mut log = qemu.boot_log().to_string();
-    if !log.contains("boot-volume: partition mounted") {
-        return Err(format!(
-            "the boot partition did not mount, so every question below would answer NotFound \
-             for an honest reason and this boot proves nothing:\n{}",
-            volume_lines(&log)
-        ));
-    }
-
-    let attempt = qemu.run_test("test_rs_boot_volume_metadata_error", Duration::from_secs(30));
-    log.push_str(&attempt.stdout);
-    log.push_str(&attempt.serial);
-    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
-    qemu.flush_stdin();
-    log.push_str(&qemu.drain_serial(Duration::from_secs(20)));
-    drop(qemu);
-    for bad in ["PANIC:", "panicked at"] {
-        if log.contains(bad) {
-            return Err(format!("{bad:?} on the boot\n{log}"));
-        }
-    }
-
-    // 1. The injection reached the device layer under the filesystem, so what
-    //    follows is a volume that was asked and would not answer, rather than a
-    //    code path that never ran.
-    let refused = log.matches(REFUSED).count();
-    if refused == 0 {
-        return Err(format!(
-            "no {REFUSED:?} line — nothing read the boot volume after it was mounted, so this \
-             boot exercises none of the metadata path\n{log}"
-        ));
-    }
-
-    // 2. and 3. The two questions, each judged on the word it came back with.
-    //    `NotFound` is named explicitly because it is the *old* answer and the
-    //    whole defect: a check for "an error" alone would have passed before the
-    //    change, since a missing file is an error too.
-    for (what, prefix) in [("open", "boot-io: open"), ("read_dir", "boot-io: read_dir")] {
-        let Some(said) = log.lines().map(str::trim).find(|l| l.starts_with(prefix)) else {
-            return Err(format!("the guest never reported its {what}\n{log}"));
-        };
-        if said.contains("succeeded") {
-            return Err(format!(
-                "{what} of a volume that refused every read succeeded: {said}\n{log}"
-            ));
-        }
-        if said.contains("kind=NotFound") {
-            return Err(format!(
-                "{what} reported a device that would not answer as a missing file: {said}\n\
-                 That is the conflation this gate exists for — `vfs::FileSystem` folding a \
-                 refused read into NotFound.\n{log}"
-            ));
-        }
-        // The class and not merely "not NotFound": a refused read is
-        // `IoError::Device`, then `SyscallError::Io`, then `ErrorKind::Other`.
-        if !said.contains("kind=Other") {
-            return Err(format!(
-                "{what} of a volume that refused every read answered {said}\n\
-                 A device that would not answer has to reach the caller as the I/O class \
-                 (`SyscallError::Io`, `ErrorKind::Other`). That spelling is owed a change and \
-                 this site moves with it — the record is\n\
-issues/design-debt/std-maps-a-device-error-to-other-not-uncategorized.md\n{log}"
-            ));
-        }
-    }
-
-    // 4. And it is this volume's refusal and not the machine's. The other FAT
-    //    mount is the same adapter over the same driver, so a break that
-    //    reached both would look identical in the two lines above.
-    if !log.contains("boot-io: /log still lists") {
-        return Err(format!(
-            "/log stopped answering too, so the refusal above is not the boot volume's\n{log}"
-        ));
-    }
-
-    if !log.contains("Boot: complete") {
-        return Err(format!("the boot did not finish\n{log}"));
-    }
-    if !log.contains("Shutting down.") {
-        return Err(format!("the guest did not shut down cleanly\n{log}"));
-    }
-
-    let _ = std::fs::remove_file(&image_path);
-    eprintln!(
-        "  [boot] {refused} filesystem read(s) refused by the mounted boot volume: open and \
-         read_dir both reported the device rather than a missing file, and /log kept answering"
-    );
-    Ok(())
 }
 
 /// The image side of the whole exercise, with nothing mounted and nothing
@@ -2749,15 +1907,12 @@ pub fn log_partition_identity(
             volume_lines(&log)
         ));
     }
-    let refused = format!("nothing with the log partition's GUID {FORGED_TEXT}");
+    let refused = format!("{LOG_ABSENT} the Log partition {FORGED_TEXT} is on no disk this server reaches");
     if !log.contains(&refused) {
         return Err(format!(
-            "the kernel did not refuse the log partition by name.\nwanted: {refused}\n{}",
+            "fsd did not serve /log absent for the named partition.\nwanted: {refused}\n{}",
             volume_lines(&log)
         ));
-    }
-    if !log.contains("log-volume: not mounted") {
-        return Err(format!("the kernel mounted a log volume it was never given:\n{}", volume_lines(&log)));
     }
     if log.contains("logd: this boot's kernel log is") {
         return Err(format!(
@@ -2775,7 +1930,7 @@ pub fn log_partition_identity(
 
     // And nothing else was lost. The stick is a working stick with one file
     // changed on it.
-    if !log.contains("boot-volume: partition mounted") {
+    if !log.contains(BOOT_SERVED) {
         return Err(format!("a missing log partition cost the machine /boot:\n{}", volume_lines(&log)));
     }
     if !log.contains("Boot: complete") {
@@ -2818,11 +1973,7 @@ pub fn log_partition_identity(
 /// one volume:
 ///
 /// 1. **Retry keeps the volume, and a refused attempt discarded nothing.**
-///    `fsync-budget-spent` runs each file's first `SYS_FSYNC` attempt under an
-///    already-spent operation — the state a loaded dev host reproduced 1 in
-///    73 full 12-wide suites (2026-08-22, this test's own blob fsync on
-///    `/log`) — so each file's first flush is refused once at the shipped site
-///    and retried on a fresh budget. The guest's own
+///    The guest's own
 ///    fsync must succeed, logd must never give its volume up, and the blob is
 ///    then read off the *image* by the host: the safety invariant is that the
 ///    refused attempt left every un-flushed page dirty, so the retry delivered
@@ -2831,10 +1982,11 @@ pub fn log_partition_identity(
 ///    `toyos-fat32-check`'s silence over the volume is the outside judge that
 ///    the retry also left a consistent filesystem.
 /// 2. **The deadman is the third failure evidence.** `fsync-deadman-now`
-///    expires it at once, so the first refused attempt is the last: the kernel
-///    declares the volume failed with `SyscallError::Io`, and logd — which
-///    keeps a volume across any number of `WouldBlock`s — ends it on what is
-///    now a device word, exactly as it would for an error status.
+///    expires it at once, so every claim transfer's first refused attempt is
+///    the last: the kernel answers fsd's reads of the log partition
+///    `SyscallError::Io`, fsd serves `/log` absent, and logd — which keeps a
+///    volume across any number of `WouldBlock`s — has none, on what is a
+///    device word, exactly as it would be for an error status.
 /// 3. **A failed reset escalation is the second.** `usb-transport-break`
 ///    abandons the first WRITE(10)'s data phase and `usb-reset-break` makes
 ///    the recovery ladder meet a device that answers nothing on EP0 — a truly
@@ -2903,13 +2055,20 @@ pub fn log_flush_retry(
             volume_lines(&log)
         ));
     }
+    // `/log` is flushed through fsd's claim of the log partition, whose retry
+    // says so by that partition's name.
+    let log_guid = {
+        let mut file =
+            std::fs::File::open(&image_path).map_err(|e| format!("{}: {e}", image_path.display()))?;
+        toyos_gpt::Guid(toyos_build::image::unique_guid_of(&mut file, toyos_gpt::Guid::MICROSOFT_BASIC)?)
+    };
+    let log_retry = format!("partclaim: a flush of {log_guid} durable on attempt");
     let retried = log
         .lines()
-        .find(|l| l.contains("fsync: ") && l.contains("durable on attempt"))
+        .find(|l| l.contains(&log_retry))
         .ok_or_else(|| {
             format!(
-                "no `fsync: … durable on attempt` line, so the operation-level retry never \
-                 ran:\n{}",
+                "no `{log_retry}` line, so the operation-level retry never ran:\n{}",
                 volume_lines(&log)
             )
         })?
@@ -2921,7 +2080,6 @@ pub fn log_flush_retry(
             volume_lines(&log)
         ));
     }
-
     // The device's view, after a clean shutdown: what the retried flushes left.
     writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
     qemu.flush_stdin();
@@ -2931,6 +2089,24 @@ pub fn log_flush_retry(
         if tail.contains(bad) {
             return Err(format!("{bad:?} on the way down\n{tail}"));
         }
+    }
+    // init has logd flush before it asks for the stop, so a flush of the log
+    // partition follows the guest's; every record before the stop's own is on
+    // the wire ahead of it, so a retry of that flush would be here too.
+    let whole = format!("{log}\n{tail}");
+    let stop = whole
+        .lines()
+        .position(|l| toyos_quiesce::Record::parse(l).is_some())
+        .ok_or_else(|| format!("the shutdown wrote no stop record:\n{tail}"))?;
+    let retries: Vec<&str> = whole.lines().take(stop).filter(|l| l.contains(&log_retry)).collect();
+    if retries.len() != 1 {
+        return Err(format!(
+            "{} flush(es) of the log partition retried before the stop, and the refused one is \
+             the first alone: every flush is being refused, and each refusal's records are the \
+             next flush\n{}",
+            retries.len(),
+            retries.join("\n")
+        ));
     }
     let after = std::fs::read(&image_path).map_err(|e| format!("read the image back: {e}"))?;
     let (log_start, log_len) = log_extent(&after, &image_path)?;
@@ -2991,14 +2167,22 @@ pub fn log_flush_retry(
     }
     drop(qemu);
     serial::Serial::named("deadman boot console", log.as_str()).must_be_clean()?;
+    // Every claim transfer's first attempt is the last here, fsd's reads of
+    // the log partition among them, so the death is declared at the mount.
     let declared = log
         .lines()
-        .find(|l| l.contains("fsync: ") && l.contains("is not durable after"))
+        .find(|l| l.contains("partclaim: ") && l.contains("still refused after 1 attempt(s)"))
         .ok_or_else(|| {
-            format!("the deadman never declared the volume failed:\n{}", volume_lines(&log))
+            format!("the deadman never declared a claim's transfer failed:\n{}", volume_lines(&log))
         })?
         .trim()
         .to_string();
+    if !log.contains(&format!("{LOG_ABSENT} no FAT32 here: device I/O failed")) {
+        return Err(format!(
+            "fsd served /log off a partition the deadman had declared failed:\n{}",
+            volume_lines(&log)
+        ));
+    }
     let gave_up = log
         .lines()
         .find(|l| l.contains("logd:") && l.contains("on the console only"))

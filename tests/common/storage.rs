@@ -16,6 +16,26 @@ use toyos_build::fingerprint::{first_difference, whole_device};
 
 use super::qemu::{self, BootOptions, QemuInstance};
 
+/// fsd's word for a DATA partition that holds neither a volume of ours nor a
+/// designation stamp: nothing is written to it.
+const FOREIGN: &str = "fsd: no volume of ours and no designation stamp";
+/// fsd's word for a volume of ours that mounted.
+const MOUNTED: &str = "fsd: mounted the DATA volume";
+/// fsd's word for a volume of ours that did not, followed by the reason.
+const UNMOUNTABLE: &str = "fsd: the DATA volume is ours and does not mount (";
+/// fsd's word for DATA's directories served from memory.
+pub(super) const IN_MEMORY: &str = "are in memory and will not survive a reboot";
+
+/// Whether fsd said it serves DATA's directories as absent: every name under
+/// them refused, and never a volume in memory under the paths an owner's data
+/// lives at.
+fn data_absent(log: &str) -> Result<(), String> {
+    if log.lines().any(|l| l.contains("fsd: Data serving") && l.contains(" — absent: ")) {
+        return Ok(());
+    }
+    Err(format!("fsd never said it serves DATA's directories absent\n{log}"))
+}
+
 /// Boot the guest against a disk that belongs to somebody else, and prove it
 /// comes back untouched.
 ///
@@ -60,11 +80,10 @@ pub fn foreign_disk_untouched(
             return Err(format!("{bad:?}: refusing a disk must not be fatal\n{log}"));
         }
     }
-    // The refusal is stated, not inferred. A kernel that never reached the
-    // storage phase would also leave the image untouched.
-    const REFUSED: &str = "this disk is not ours";
-    if !log.contains(REFUSED) {
-        return Err(format!("the kernel never said {REFUSED:?} — did it reach storage?\n{log}"));
+    // The refusal is stated, not inferred. A file server that never reached
+    // the partition would also leave the image untouched.
+    if !log.contains(FOREIGN) {
+        return Err(format!("fsd never said {FOREIGN:?} — did it reach the partition?\n{log}"));
     }
     // And the machine still came up, because a refusal that costs the boot is
     // a refusal nobody will leave switched on.
@@ -76,12 +95,12 @@ pub fn foreign_disk_untouched(
     // format that is still sitting in the page cache has already destroyed the
     // disk as far as the next sync is concerned.
     if log.contains("formatting it") {
-        return Err(format!("the kernel decided to format a disk it was not given\n{log}"));
+        return Err(format!("fsd decided to format a disk it was not given\n{log}"));
     }
 
-    // Shut down rather than kill: `PageCache::sync` at shutdown is the only
-    // thing that moves a format from the cache to the device, so a killed QEMU
-    // fingerprints an image a formatting kernel would also have left untouched.
+    // Shut down rather than kill: the shutdown's sync of every file server is
+    // what moves a format from fsd's cache to the device, so a killed QEMU
+    // fingerprints an image a formatting server would also have left untouched.
     writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
     qemu.flush_stdin();
     let tail = qemu.drain_serial(Duration::from_secs(20));
@@ -164,28 +183,26 @@ pub fn volume_from_another_disk(
             return Err(format!("{bad:?}: refusing a copied volume must not be fatal\n{log}"));
         }
     }
-    const MOUNTED: &str = "mounted the ToyOS volume at block 0";
     if log.contains(MOUNTED) {
         return Err(format!(
-            "the kernel mounted a volume that did not come from this disk: it said \
-             {MOUNTED:?}\n{log}"
+            "fsd mounted a volume that did not come from this disk: it said {MOUNTED:?}\n{log}"
         ));
     }
     // A superblock of ours that does not describe this device is a volume of
     // ours that did not mount, not another's disk.
-    const REFUSED: &str = "does not mount, and nothing says it is another's: BadSuperblock";
-    if !log.contains(REFUSED) {
-        return Err(format!("the kernel never said {REFUSED:?} — did it reach storage?\n{log}"));
+    let refused = format!("{UNMOUNTABLE}BadSuperblock");
+    if !log.contains(&refused) {
+        return Err(format!("fsd never said {refused:?} — did it reach the partition?\n{log}"));
     }
     if log.contains("formatting it") {
-        return Err(format!("the kernel decided to format a disk it was not given\n{log}"));
+        return Err(format!("fsd decided to format a disk it was not given\n{log}"));
     }
     if !log.contains("Boot: complete") {
         return Err(format!("the boot did not complete on a volume it refused\n{log}"));
     }
 
-    // Down through `PageCache::sync`, the only thing that moves a write out of
-    // the cache and onto the device.
+    // Down through the shutdown's sync of every file server, the only thing
+    // that moves a write out of fsd's cache and onto the device.
     writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
     qemu.flush_stdin();
     let tail = qemu.drain_serial(Duration::from_secs(20));
@@ -275,24 +292,15 @@ pub fn broken_data_volume_is_absent(
             return Err(format!("{bad:?}: a broken volume must not be fatal\n{log}"));
         }
     }
-    for said in [
-        "storage: the DATA volume does not mount, and nothing says it is another's: \
-         ChecksumMismatch",
-        "storage: /apps, /config, /home and /state are absent this boot",
-        "Boot: complete",
-    ] {
+    for said in [&format!("{UNMOUNTABLE}ChecksumMismatch"), "Boot: complete"] {
         if !log.contains(said) {
-            return Err(format!("the kernel never said {said:?}\n{log}"));
+            return Err(format!("the boot never said {said:?}\n{log}"));
         }
     }
-    for unsaid in [
-        "are a tmpfs",
-        "mounted the ToyOS volume",
-        "formatting it",
-        "this disk is not ours",
-    ] {
+    data_absent(&log)?;
+    for unsaid in [IN_MEMORY, MOUNTED, "formatting it", FOREIGN] {
         if log.contains(unsaid) {
-            return Err(format!("the kernel said {unsaid:?} of a volume of ours that broke\n{log}"));
+            return Err(format!("fsd said {unsaid:?} of a volume of ours that broke\n{log}"));
         }
     }
 
@@ -328,8 +336,8 @@ pub fn broken_data_volume_is_absent(
     Ok(())
 }
 
-/// A TOYOS-DATA partition the GPT type names ours, but whose start `page_cache`
-/// refuses before it ever opens a view: the owner's ruling is that this is
+/// A TOYOS-DATA partition the GPT type names ours, but whose start blockd
+/// refuses to serve: the owner's ruling is that this is
 /// `Absent`, the same as a volume of ours that did not mount, and never
 /// `Volatile` — a tmpfs is for a machine that carries no data volume at all,
 /// not for one whose candidate is ours and unreadable by geometry.
@@ -363,24 +371,23 @@ pub fn data_candidate_with_bad_geometry_is_absent(
             return Err(format!("{bad:?}: a misaligned candidate must not be fatal\n{log}"));
         }
     }
-    for said in ["not whole", "storage: /apps, /config, /home and /state are absent this boot", "Boot: complete"] {
+    for said in ["is not served: LBA", "not whole", "Boot: complete"] {
         if !log.contains(said) {
-            return Err(format!("the kernel never said {said:?}\n{log}"));
+            return Err(format!("the boot never said {said:?}\n{log}"));
         }
     }
-    for unsaid in ["are a tmpfs", "mounted the ToyOS volume", "formatting it"] {
+    data_absent(&log)?;
+    for unsaid in [IN_MEMORY, MOUNTED, "formatting it"] {
         if log.contains(unsaid) {
-            return Err(format!(
-                "the kernel said {unsaid:?} of a candidate its own GPT type names ours\n{log}"
-            ));
+            return Err(format!("fsd said {unsaid:?} of a partition its own GPT type names ours\n{log}"));
         }
     }
 
     let result = qemu.run_test("test_rs_home_absent", Duration::from_secs(20));
     if result.exit_code != Some(0) {
         return Err(format!(
-            "home_absent guest failed on a candidate `over_candidate` refused:\n{}\nkernel log \
-             while it ran:\n{}{}",
+            "home_absent guest failed on a partition blockd refused:\n{}\nkernel log while it \
+             ran:\n{}{}",
             result.stdout, result.before, result.serial
         ));
     }
@@ -472,9 +479,9 @@ pub fn home_overwrite_reads_back(
         BootOptions { profile: qemu::Profile::MetalDisk, ..Default::default() },
     );
     let boot = qemu.boot_log().to_string();
-    if boot.contains("are a tmpfs") {
+    if boot.contains(IN_MEMORY) {
         return Err(format!(
-            "/apps and /home fell back to tmpfs, so nothing below touches the NVMe path:\n{boot}"
+            "/apps and /home fell back to memory, so nothing below touches the NVMe path:\n{boot}"
         ));
     }
 
@@ -545,6 +552,269 @@ pub fn home_overwrite_reads_back(
     Ok(())
 }
 
+/// A file server killed with a write done and unanswered loses nothing a
+/// client was told was flushed, and its clients go on; ended past init's
+/// budget, its directories answer `Gone`. Judged off the device.
+///
+/// `tests/fsdrestartcase` arms every file server to end under a write to
+/// `/home/fsd_end` (`--end-on`) and at the first read of an installed
+/// package's manifest and binary (`--end-at-read`), and `test_rs_fs_restart`
+/// ends DATA's four times, the first two under init's own resolution of a
+/// launch and its read of the image: the guest asserts what a client sees,
+/// init's and fsd's own lines say who ended and who started again, and with
+/// the machine down the DATA partition is read by this crate's own build of
+/// the `bcachefs` reader over a plain seek-and-read of the image — nothing the
+/// guest executed. The flushed file holds its bytes there.
+///
+/// `test_rs_fs_client_bound` runs first on the same boot, which nothing else
+/// needs DATA on while it holds every client slot.
+pub fn fsd_restart(
+    _test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    /// Mirrored in `tests/toyos-rust-tests/src/bin/fs_restart.rs`, without the
+    /// mount point.
+    const KEPT: &str = "home/fs_restart/kept";
+    const ACROSS: &str = "home/fs_restart/across";
+    const KEPT_LEN: usize = 64 * 1024 + 13;
+    const ACROSS_BYTES: &[u8] = b"renamed over the file a handle held across the end";
+    let kept: Vec<u8> = (0..KEPT_LEN).map(|i| (i.wrapping_mul(37) ^ 0xC3) as u8).collect();
+
+    let config = super::compile::repo_root().join("tests/fsdrestartcase");
+    let mut qemu = QemuInstance::boot_with_options(
+        &config,
+        c_bins,
+        rust_bins,
+        BootOptions { profile: qemu::Profile::Metal, ..Default::default() },
+    );
+    let boot = qemu.boot_log().to_string();
+    if !boot.contains(MOUNTED) && !boot.contains("formatting it") {
+        return Err(format!("fsd served DATA from no partition, so nothing here reaches a device:\n{boot}"));
+    }
+    let bound = qemu.run_test("test_rs_fs_client_bound", Duration::from_secs(35));
+    if bound.exit_code != Some(0) || !bound.stdout.contains("fs_client_bound: PASS") {
+        return Err(format!("fs_client_bound guest failed:\n{}\nconsole:\n{}{}", bound.stdout, bound.before, bound.serial));
+    }
+    let result = qemu.run_test("test_rs_fs_restart", Duration::from_secs(35));
+    let image = qemu.nvme_image().to_path_buf();
+    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    let tail = qemu.drain_serial(Duration::from_secs(20));
+    drop(qemu);
+    // The console once: `stdout` is the same lines again, unprefixed.
+    let log = format!("{boot}\n{}{}{}{}{tail}", bound.before, bound.serial, result.before, result.serial);
+    if result.exit_code != Some(0) || !result.stdout.contains("fs_restart: PASS") {
+        return Err(format!("fs_restart guest failed:\n{}\nconsole:\n{log}", result.stdout));
+    }
+    let console = super::serial::Serial::named("fsd_restart", log.as_str());
+    let ended = log.matches("fsd: --end-on: ending with a write done and unanswered").count();
+    if ended != 2 {
+        return Err(format!("fsd said it ended under a write {ended} times, not the guest's 2:\n{log}"));
+    }
+    for read in ["apps/fs_restart/manifest.toml", "apps/fs_restart/fs_restart"] {
+        let said = format!("fsd: --end-at-read: ending before the first read of {read} is answered");
+        let at_read = log.matches(&said).count();
+        if at_read != 1 {
+            return Err(format!("fsd said {said:?} {at_read} times, not the launch's 1:\n{log}"));
+        }
+    }
+    let restarted = log.lines().filter(|l| l.contains("init: fsd data (pid ") && l.contains("ended; started again")).count();
+    if restarted != 3 {
+        return Err(format!("init started DATA's server again {restarted} times, not 3:\n{log}"));
+    }
+    console.must_say("init: fsd data ended 4 times in 10 s; its ports are closed")?;
+    console.must_be_clean()?;
+
+    let io = FileBlocks::open(&image)?;
+    let fs = bcachefs::Mounted::<_, bcachefs::ReadOnly>::open(io)
+        .map_err(|e| format!("the DATA partition does not mount on the host: {e:?}"))?;
+    for (name, want) in [(KEPT, &kept[..]), (ACROSS, ACROSS_BYTES)] {
+        let got = fs.read_file(name).map_err(|e| format!("reading {name} off the image: {e:?}"))?;
+        if got != want {
+            let at = got.iter().zip(want).position(|(a, b)| a != b);
+            return Err(format!(
+                "{name} on the device is {} bytes, first differing at {at:?}: a write the guest \
+                 was told was flushed is not what the device holds",
+                got.len()
+            ));
+        }
+    }
+    eprintln!(
+        "  [fsd] DATA's server ended four times, the first two under init's resolution and image \
+         read of a launch that was answered; started again three, every handle held across an \
+         end answered Gone, new opens answered, the fourth closed /home to Gone; {KEPT} and \
+         {ACROSS} read back off the image by the host's own bcachefs reader"
+    );
+    Ok(())
+}
+
+/// DATA's first file server ending before it accepts a connection that init's
+/// own file worker is waiting on costs init nothing: it starts the server
+/// again, the waiting call goes on to it, and the boot reaches the ready
+/// marker with the session home made. `tests/fsdmountcase` arms the end
+/// (`--end-at-mount data`); the home is judged off the image by the host's own
+/// bcachefs reader once the machine is down.
+pub fn fsd_end_at_mount(
+    _test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    const ENDED: &str = "fsd: --end-at-mount: ending with a connection waiting and unaccepted";
+    let config = super::compile::repo_root().join("tests/fsdmountcase");
+    let mut qemu = QemuInstance::boot_with_options(
+        &config,
+        c_bins,
+        rust_bins,
+        BootOptions { profile: qemu::Profile::Metal, ..Default::default() },
+    );
+    let boot = qemu.boot_log().to_string();
+    let image = qemu.nvme_image().to_path_buf();
+    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    let tail = qemu.drain_serial(Duration::from_secs(20));
+    drop(qemu);
+    let log = format!("{boot}\n{tail}");
+    let ended = log.matches(ENDED).count();
+    if ended != 1 {
+        return Err(format!("fsd said {ENDED:?} {ended} times, not once:\n{log}"));
+    }
+    let restarted = log.lines().filter(|l| l.contains("init: fsd data (pid ") && l.contains("ended; started again")).count();
+    if restarted != 1 {
+        return Err(format!("init started DATA's server again {restarted} times, not once:\n{log}"));
+    }
+    let console = super::serial::Serial::named("fsd_end_at_mount", log.as_str());
+    console.must_not_say("session home")?;
+    console.must_be_clean()?;
+
+    let home = toyos_manifest::session_home();
+    let home = home.trim_start_matches('/');
+    let fs = bcachefs::Mounted::<_, bcachefs::ReadOnly>::open(FileBlocks::open(&image)?)
+        .map_err(|e| format!("the DATA partition does not mount on the host: {e:?}"))?;
+    if !fs.is_dir(home).map_err(|e| format!("asking the image for {home}: {e:?}"))? {
+        return Err(format!("{home} is not on the DATA volume: init made no session home\n{log}"));
+    }
+    eprintln!("  [fsd] DATA's first server ended under init's waiting call; init started it again and {home} is on the image");
+    Ok(())
+}
+
+/// A partition claim held elsewhere refuses its file server's restart by name,
+/// and the role's paths are then Gone: no server answers them.
+///
+/// DATA is on a USB stick the kernel drives, so its server holds the
+/// partition's claim, and the NVMe disk carries no table, so the stick's is
+/// the machine's one DATA. `tests/fsdclaimcase` arms `--let-go-at-read`, and
+/// `test_rs_fs_claim_held` takes the claim the server let go, ends the server,
+/// and holds the claim until init has answered the role's restart.
+pub fn fsd_claim_held(
+    _test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    /// Mirrored in `tests/toyos-rust-tests/src/bin/fs_claim_held.rs`.
+    const DATA: &str = "7E2B4C6D-8F1A-4B3C-9D5E-6F7A8B9C0D1E";
+    const MIB: u64 = 1024 * 1024;
+    const LET_GO: &str = "fsd: --let-go-at-read: home/fsd_let_go: the partition is let go";
+    const ENDED: &str = "fsd: --let-go-at-read: ending at its client's next request";
+    const REFUSED: &str = "init: fsd data ended and would not start again (";
+    const HELD: &str = "is already claimed); its ports are closed";
+
+    let stick = super::lane::dir().join("fsd-claim-held.img");
+    let data = ("ToyOS data", 96 * MIB, toyos_gpt::Guid::TOYOS_DATA_TEXT, DATA, super::partclaim::ALIGNED);
+    let (mut device, spans) = super::partclaim::table(&stick, 100 * MIB, &[data])?;
+    super::partclaim::designate(&mut *device, spans[0])?;
+    device.flush().map_err(|e| format!("flush the stick: {e}"))?;
+    drop(device);
+
+    let config = super::compile::repo_root().join("tests/fsdclaimcase");
+    let mut qemu = QemuInstance::boot_with_options(
+        &config,
+        c_bins,
+        rust_bins,
+        BootOptions {
+            profile: qemu::Profile::UsbDisk,
+            usb_images: vec![stick.clone()],
+            nvme_image: Some(super::partclaim::tableless_nvme("fsd-claim-held-nvme.img")?),
+            ..Default::default()
+        },
+    );
+    let boot = qemu.boot_log().to_string();
+    // The premise: DATA's first server holds the stick's partition.
+    if !boot.contains("fsd: block 0 designates this partition for ToyOS; formatting it") {
+        return Err(format!("fsd never formatted DATA off the stick, so no server held its claim:\n{boot}"));
+    }
+    let result = qemu.run_test("test_rs_fs_claim_held", Duration::from_secs(59));
+    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    let tail = qemu.drain_serial(Duration::from_secs(20));
+    drop(qemu);
+    let log = format!("{boot}\n{}{}{tail}", result.before, result.serial);
+    if result.exit_code != Some(0) || !result.stdout.contains("fs_claim_held: PASS") {
+        return Err(format!("fs_claim_held guest failed:\n{}\nconsole:\n{log}", result.stdout));
+    }
+    let console = super::serial::Serial::named("fsd_claim_held", log.as_str());
+    console.must_say(LET_GO)?;
+    console.must_say(ENDED)?;
+    let Some(refused) = log.lines().find(|l| l.contains(REFUSED) && l.contains(HELD)) else {
+        return Err(format!("init never said DATA's restart was refused for the held claim:\n{log}"));
+    };
+    console.must_be_clean()?;
+    let _ = std::fs::remove_file(&stick);
+    eprintln!("  [fsd] {}", refused.trim());
+    Ok(())
+}
+
+/// Two DATA partitions, one on a stick the kernel drives and one on the NVMe
+/// disk blockd serves, are refused by name and never guessed between: DATA is
+/// absent, nothing stands in from memory, and neither is formatted — the
+/// stick is held byte for byte against what it carried before the boot.
+pub fn fsd_two_data(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    const DATA: &str = "5A1C0E2B-3D4F-4A6B-8C9D-0E1F2A3B4C5D";
+    const MIB: u64 = 1024 * 1024;
+    const REFUSED: &str = "fsd: this machine has 2 DATA partitions, 1 on the kernel's disks and 1 the block \
+                           service serves, and a volume is one; DATA is absent this boot";
+
+    let stick = super::lane::dir().join("fsd-two-data.img");
+    let data = ("ToyOS data", 96 * MIB, toyos_gpt::Guid::TOYOS_DATA_TEXT, DATA, super::partclaim::ALIGNED);
+    let (mut device, spans) = super::partclaim::table(&stick, 100 * MIB, &[data])?;
+    super::partclaim::designate(&mut *device, spans[0])?;
+    device.flush().map_err(|e| format!("flush the stick: {e}"))?;
+    drop(device);
+    let before = whole_device(&stick);
+
+    // The lane's blank NVMe image is the second: a designated DATA partition.
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions { profile: qemu::Profile::UsbDisk, usb_images: vec![stick.clone()], ..Default::default() },
+    );
+    let boot = qemu.boot_log().to_string();
+    // Shut down rather than kill: a format sitting in a server's cache reaches
+    // the device at the stop's sync, and the stick is judged after it.
+    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    let tail = qemu.drain_serial(Duration::from_secs(20));
+    drop(qemu);
+    let log = format!("{boot}\n{tail}");
+    let console = super::serial::Serial::named("fsd_two_data", log.as_str());
+    console.must_say(REFUSED)?;
+    data_absent(&log)?;
+    console.must_not_say(IN_MEMORY)?;
+    console.must_not_say("formatting it")?;
+    console.must_be_clean()?;
+    if let Some(diff) = first_difference(&before, &whole_device(&stick)) {
+        return Err(format!("a DATA partition of two was written: {diff}\n{log}"));
+    }
+    let _ = std::fs::remove_file(&stick);
+    eprintln!("  [fsd] two DATA partitions, one per source, refused by name; the stick untouched");
+    Ok(())
+}
+
 /// `/apps` and `/home` are two paths into one filesystem, judged off the device.
 ///
 /// The guest writes one file under each and shuts down; the host then finds
@@ -572,9 +842,9 @@ pub fn apps_and_home_are_one_filesystem(
         BootOptions { profile: qemu::Profile::MetalDisk, ..Default::default() },
     );
     let boot = qemu.boot_log().to_string();
-    if boot.contains("are a tmpfs") {
+    if boot.contains(IN_MEMORY) {
         return Err(format!(
-            "/apps and /home fell back to tmpfs, so the readback below would judge no device:\n\
+            "/apps and /home fell back to memory, so the readback below would judge no device:\n\
              {boot}"
         ));
     }
@@ -637,9 +907,10 @@ pub fn apps_and_home_are_one_filesystem(
     Ok(())
 }
 
-/// `/boot` and `/log` off the same NVMe device the page cache serves.
+/// `/boot` and `/log` off the same NVMe device the machine booted from, both
+/// served by fsd through blockd, which refuses ROOT to every session.
 ///
-/// The oracle is outside the guest and outside the kernel's FAT32: `logd`'s
+/// The oracle is outside the guest and outside fsd's FAT32: `logd`'s
 /// file is read off the image by `fatfs` and the volume judged against
 /// fatgen103 by `toyos-fat32-check`, with the guest already halted.
 pub fn internal_disk_boot(
@@ -662,7 +933,7 @@ pub fn internal_disk_boot(
     }
     let controllers: Vec<&String> =
         argv.iter().filter(|a| a.starts_with("nvme,serial=")).collect();
-    if controllers != ["nvme,serial=bootdisk,id=nvmebootctl,bootindex=0"] {
+    if controllers != ["nvme,serial=bootdisk,id=nvmebootctl,bootindex=0,msix-exclusive-bar=on"] {
         return Err(format!(
             "the machine's NVMe controllers are {controllers:?} — this profile's whole shape is \
              one controller, carrying the boot image"
@@ -689,26 +960,17 @@ pub fn internal_disk_boot(
         }
     }
 
-    // `1` is NVMe's fixed `DeviceId` and the USB range starts at 16, so naming
-    // it is also the assertion that no stick served either mount.
-    for said in [
-        "gpt: device 1 carries the boot partition",
-        "gpt: device 1 carries the log partition",
-        "boot-volume: partition mounted",
-        "log-volume: partition mounted",
-    ] {
+    // This machine has no USB, so a volume fsd serves came through blockd.
+    for said in [super::volumes::BOOT_SERVED, super::volumes::LOG_SERVED] {
         if !boot.contains(said) {
             return Err(format!(
-                "the kernel never said {said:?} — a machine booting off its internal disk got \
+                "the boot never said {said:?} — a machine booting off its internal disk got \
                  no /boot and no /log\n{boot}"
             ));
         }
     }
-    if boot.contains("no driver here can open it") {
-        return Err(format!(
-            "the kernel found the partition and had no second handle to the device carrying \
-             it\n{boot}"
-        ));
+    if !boot.contains("this machine runs from; refusing every session to it") {
+        return Err(format!("blockd never said it refuses ROOT, which the machine runs from\n{boot}"));
     }
 
     // Down, not killed: the file logd wrote reaches the device on the way out.
@@ -748,102 +1010,10 @@ pub fn internal_disk_boot(
 
     let _ = std::fs::remove_file(&image);
     eprintln!(
-        "  [internal-disk] /boot and /log both off NVMe device 1, and /log/{name} came back \
+        "  [internal-disk] /boot and /log both off the boot NVMe through blockd, and /log/{name} came back \
          {} bytes through fatfs on a volume fatgen103 has nothing to say about",
         on_device.len()
     );
-    Ok(())
-}
-
-/// A write through a page cache whose view does not begin at block 0 lands at
-/// the device's block, not the view's.
-///
-/// The oracle is the NVMe image after the guest has gone: the mark at
-/// `(FIRST + AT) * 4096` and absent at `AT * 4096` is the partition offset in
-/// `BlockKey` and nothing else. A foreign disk, so the kernel refuses to format
-/// it and the probe's one block is the only byte this boot writes to it.
-pub fn page_cache_partition_offset(
-    test_config: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    /// Mirrored in `kernel/src/page_cache.rs::offset_probe`.
-    const FIRST: u64 = 3000;
-    const AT: u64 = 7;
-    const MARK: &[u8] = b"TOYOS-PARTITION-OFFSET";
-    const BYTES: u64 = 128 * 1024 * 1024;
-
-    let dir = super::lane::dir();
-    let image = dir.join("partition-offset.img");
-    foreign_disk_image(&image, BYTES);
-
-    let mut qemu = QemuInstance::boot_with_options(
-        test_config,
-        c_bins,
-        rust_bins,
-        BootOptions {
-            profile: qemu::Profile::Metal,
-            kernel_params: &["pc-partition-offset"],
-            nvme_image: Some(image.clone()),
-            ..Default::default()
-        },
-    );
-    let boot = qemu.boot_log().to_string();
-    for bad in ["PANIC:", "panicked at"] {
-        if boot.contains(bad) {
-            return Err(format!("{bad:?} with the offset probe armed\n{boot}"));
-        }
-    }
-    let verdict = boot
-        .lines()
-        .find(|l| l.contains("pc-partition-offset: "))
-        .ok_or_else(|| format!("the kernel never ran the offset probe:\n{boot}"))?
-        .trim()
-        .to_string();
-    for want in [
-        format!("landed_at_{}=true", FIRST + AT),
-        format!("at_block_{AT}=false"),
-    ] {
-        if !verdict.contains(&want) {
-            return Err(format!(
-                "a cache over a view at +{FIRST} did not write where the view says — {want:?} is \
-                 missing from: {verdict}"
-            ));
-        }
-    }
-
-    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
-    qemu.flush_stdin();
-    let tail = qemu.drain_serial(Duration::from_secs(20));
-    for bad in ["PANIC:", "panicked at"] {
-        if tail.contains(bad) {
-            return Err(format!("{bad:?} on the way down\n{tail}"));
-        }
-    }
-    drop(qemu);
-
-    let after = std::fs::read(&image).map_err(|e| format!("read the image back: {e}"))?;
-    let at = |block: u64| {
-        let start = (block * 4096) as usize;
-        after[start..start + MARK.len()].to_vec()
-    };
-    if at(FIRST + AT) != MARK {
-        return Err(format!(
-            "device block {} holds {:?} on the image, not the mark — the offset never reached \
-             the write",
-            FIRST + AT,
-            String::from_utf8_lossy(&at(FIRST + AT))
-        ));
-    }
-    if at(AT) == MARK {
-        return Err(format!(
-            "the mark is at device block {AT} on the image — the view's own block number went to \
-             the device unchanged"
-        ));
-    }
-
-    let _ = std::fs::remove_file(&image);
-    eprintln!("  [offset] {verdict}, and the image agrees off the device");
     Ok(())
 }
 

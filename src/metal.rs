@@ -758,14 +758,13 @@ pub const FLASHABLE: &[(&str, Flash)] = &[
     ("pci-cap-selftest", Flash::Ok),
     ("process-reopen-selftest", Flash::Ok),
     ("revoked-backing-selftest", Flash::Ok),
-    ("pc-unbind-selftest", Flash::Ok),
     ("leak-rollback-selftest", Flash::Ok),
     ("lapic-spurious-selftest", Flash::Ok),
     ("unclaimed-vector-selftest", Flash::Ok),
     ("xhci-xecp-selftest", Flash::Ok),
     ("xhci-descriptor-selftest", Flash::Ok),
     // Two probes rather than staged inputs, and both are reads: the SS-reload
-    // one runs inside `iod`'s own context switch, and the input-core one merges
+    // one runs inside the first syscall's own context switch, and the input-core one merges
     // events it made up itself.
     ("sysret-ss-probe", Flash::Ok),
     ("test-input-merge", Flash::Ok),
@@ -818,20 +817,6 @@ pub const FLASHABLE: &[(&str, Flash)] = &[
         Flash::Never(
             "it holds the shutdown open after the boot's last word, which is the one window a \
              metal verdict is read across — an image armed with it stages its own red",
-        ),
-    ),
-    (
-        "quiesce-drain-refuse",
-        Flash::Never(
-            "it refuses the shutdown's own drain of a closed file's flush, so an image armed \
-             with it stages a stall inside the one sync a metal verdict rests on",
-        ),
-    ),
-    (
-        "quiesce-fsync-refuse",
-        Flash::Never(
-            "it refuses `/system/bin/logd`'s own flush for longer than the shutdown waits for \
-             it, so an image armed with it never makes its last word durable",
         ),
     ),
     (
