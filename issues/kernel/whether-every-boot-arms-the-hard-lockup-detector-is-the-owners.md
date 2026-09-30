@@ -28,9 +28,7 @@ a freeze into a reset with a record. It changes no ABI.
 
 A session image of
 `issues/hardware/the-t14-reboots-through-ubuntu-for-every-test.md` names no
-`boot-deadline=`, so without this it has no detector: a CPU that locks up there
-still ends in the chipset's reset once the host stops renewing, but with no
-record naming it. No stage waits on it.
+`boot-deadline=`, so without this it has no detector. No stage waits on it.
 
 *Recommended: yes.*
 

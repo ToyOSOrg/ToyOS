@@ -41,53 +41,48 @@ another in a ToyOS that stays booted: no reboot per test, and no Ubuntu.
   its test and gives the next one a fresh session. A test whose premise is a
   fresh boot, as `audio_idle_suspend`'s is, says so in its row and runs first
   in a fresh session.
-- **The bound is the chipset's TCO watchdog, fed from userland while the host
-  renews a lease (owner ruling).** The T14 has no BMC or AMT (its i5-1135G7
-  has no vPro) and a battery no power switch cuts, so the TCO is its one reset
-  that needs nothing of the kernel. It becomes a device class of its own, held
-  by a `watchdogd` service that reaches its registers through a claim's
-  allow-list (`kernel/src/syscall/device.rs:55-77`), with no new syscall. The
-  kernel feeds it from the scheduler pass (`kernel/src/sched/driver.rs:512`)
-  until the claim is minted; then only the service does, from the real-time
-  band, which no job's load starves, and only while its lease is live. The
-  lease starts at `WEDGE_BOUND_MS`, `run_one` renews it for as long on a port
-  no job's namespace carries, and `quit` retires it by halting the timer. A
-  frozen kernel, a dead service, a dead runner or a silent host stops the
-  feeding, the chipset resets the machine within `toyos_tco::BOUND_MS`
-  (9.6 s), and the next boot says so
-  (`kernel/src/arch/x86_64/watchdog.rs:92-99`). Only a machine that powers
-  itself off, or firmware that does not come back, waits for a hand; the host
-  declares it lost when nothing answers within the lease, `BOUND_MS` and a
-  POST allowance, derived as `return_secs` is.
+- **A session runs under the production watchdog as it ships**
+  (`issues/hardware/a-frozen-toyos-waits-for-a-hand-on-the-power-button.md`),
+  and nothing in the kernel is added for tests. A stuck test is killed over
+  the session: past its bound the host has the runner end it, and it reds by
+  name. A frozen ToyOS is reset by the watchdog. A ToyOS that still runs but
+  that the host cannot reach keeps its watchdog fed, so the run stops there
+  and waits for a hand, as it does for a machine that powers itself off or
+  firmware that does not come back; the host says so once nothing has
+  answered within the watchdog's bound and a POST allowance, derived as
+  `return_secs` is.
 
 ## Stages
 
 1. **One session on today's rig.**
-   - First, the measurement the bound rests on: a T14 boot armed with
-     `watchdog` and `tco-starve` (which `src/metal.rs`' `FLASHABLE` must first
-     admit) is reset by the chipset within `toyos_tco::BOUND_MS` of its last
-     feed, and the boot after it reads `TCO_SECOND_TO_STS`: the exit of
-     `issues/hardware/an-armed-tco-has-never-reset-the-t14.md`. If it is not
-     reset, the stage stops and the bound goes back to the owner with that
-     run's registers: nothing else resets this machine without the kernel,
-     and renewing the kernel's own deadline is the syscall this ruling
-     declined.
-   - The build grants the TCO's class to `watchdogd`'s row alone and its lease
-     port to test-runner's alone, as it does `swap`. A session image carries
-     the `watchdog` parameter and a `watchdogd` row but no `boot-deadline=`,
-     whose whole-boot bound would end the session, so `judge_arms`
-     (`src/metal.rs:897-908`) takes that row as its bound, and `hardlockup`
-     runs only if every boot arms it
+   - First, and next to build: the `testcases` arm's members in one session,
+     under the `boot-deadline=` every metal image already carries
+     (`tests/common/metal.rs:805-823`). It builds `run_one`'s kernel records;
+     a `tests/ssh-client-host` mode that relays one exec channel's input and
+     output as they arrive, which the metal loop opens as `test-runner` during
+     the boot, writing `run <name>` for each member in the arm's order and
+     keeping each window in the readback; and the session image,
+     `tests/testcases` with `tests/lantalkcase`'s netd, sshd and streaming
+     `logd` rows, in which that exec, not `[boot] start`, starts
+     `test-runner`. The loop hands the machine back with `reboot` and reads
+     the stick as today. Its exit: every registration that rides `testcases`
+     gives, off the stick, the verdict the per-boot arm gives at the same
+     head, the host's judgement of each member's window agrees with it, and a
+     member patched to fault reds on its window by the kernel's record of the
+     fault.
+   - A session outlives that bound once stage 2 of
+     `issues/hardware/a-frozen-toyos-waits-for-a-hand-on-the-power-button.md`
+     ships `watchdogd`. A session image then starts it as the shipped image
+     does and names no `boot-deadline=`, whose whole-boot bound would end the
+     session, so `judge_arms` (`src/metal.rs:909-936`) takes `watchdogd`'s row
+     as its bound, and `hardlockup` runs only if every boot arms it
      (`issues/kernel/whether-every-boot-arms-the-hard-lockup-detector-is-the-owners.md`).
    - QEMU's shared block runs the same `run_one`; its runner's stdout is a log
      ring, so the console carries the kernel's records and it writes none.
-   - The host flashes one session image, `tests/testcases` with the talking
-     boot's netd, sshd and streaming `logd`, runs every member, hands the
-     machine back with `reboot`, and reads the stick as today. It folds the
-     base boots: the C corpus, the shared block (without `shared-debug`),
-     `testcases` with its `mkdir` and `readdir` boots, and the talking and
-     swapping boots; `mkdir_cap` and `readdir_bound` clean up after themselves
-     or red.
+   - One session image then folds the base boots: the C corpus, the shared
+     block (without `shared-debug`), `testcases` with its `mkdir` and
+     `readdir` boots, and the talking and swapping boots; `mkdir_cap` and
+     `readdir_bound` clean up after themselves or red.
    - A member that claims a device waits on
      `issues/kernel/deferred-release-outlives-its-syscall.md` (fixed under
      `issues/kernel/every-wait-in-this-kernel-is-a-spin.md`), because a claim
@@ -99,13 +94,10 @@ another in a ToyOS that stays booted: no reboot per test, and no Ubuntu.
    second session in reverse order gives the same verdicts. Each of these reds
    only the test that staged it: a child left alive, a claim left held, a file
    left in `/tmp`, the home, `/state` or `/log`, and a `NEVER_CLEAN` line. A
-   job that spins past its bound is killed and red by name; a job finds no
-   lease port in its namespace, and its claim of the TCO is refused. Stopped
-   renewals, a dropped host connection and a kernel wedged by
-   `wedge-before-reset` each end in the chipset's reset within the lease and
-   `BOUND_MS`, and the next boot says the TCO did it. In QEMU, a `watchdogd`
-   that exits without halting the timer resets the machine, and an e1000e
-   guest runs the same session end to end.
+   job that spins past its bound is killed over the session and red by name,
+   and the next member runs. In QEMU, an e1000e guest runs the same session
+   end to end, and one whose link is cut under a session stops the run and
+   says it waits for a hand.
 
 2. **Ubuntu leaves the loop**, which is the loader track's stages 6 and 7.
    - First, the measurement its shape rests on: `ssh t14 update < image` timed
@@ -147,8 +139,7 @@ another in a ToyOS that stays booted: no reboot per test, and no Ubuntu.
      pass costs a third POST) and from `/log` after it.
    - An image is good only once the host has reached it: the host's first exec
      on it is `update --good`, and a session image names no `[boot] up`, so
-     init never marks it good. An image the host cannot reach lapses, spends
-     its tries and falls back.
+     init never marks it good.
    - Every test row names its place, a session's image, a `--once` image or
      QEMU, so `METAL_ONLY`, `QemuOnly` and the name-keyed dispatch go.
    - The loader keeps the pass before it as `loader-previous.log`, by a rename
@@ -171,9 +162,9 @@ another in a ToyOS that stays booted: no reboot per test, and no Ubuntu.
    `BootNext` set. A `--once` image that panics returns the machine to its
    session, and its record is judged. A slot with a flipped byte, no signature
    or a lower security version is refused and the other slot boots. A slot
-   that dies falls back on its own, and so does one whose `sshd` does not
-   authorize the host's key. A loader sent over ssh boots once, and one that
-   brings no slot to good leaves the old one booting.
+   that dies falls back on its own, and one whose `sshd` does not authorize
+   the host's key is never marked good. A loader sent over ssh boots once, and
+   one that brings no slot to good leaves the old one booting.
 
 3. **Sessions merge.** A run holds one session per kernel build, parameter
    line and config that some test needs: actuators that leave the machine as
