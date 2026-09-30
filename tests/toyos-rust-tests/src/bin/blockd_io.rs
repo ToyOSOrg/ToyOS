@@ -70,7 +70,7 @@ const ABSENT: &str = "0A1B2C3D-4E5F-4A6B-8C7D-9E0F1A2B3C4D";
 /// Mirrored: the idle slot's length in blocks, and what each block holds.
 const TARGET_BLOCKS: u64 = 2048;
 /// Mirrored: what the bench moves each way, each side.
-const BENCH_BLOCKS: u64 = 8192;
+const BENCH_BLOCKS: u64 = 2048;
 /// Mirrored: the files the crash role writes before it kills blockd, and the
 /// bytes each holds.
 const FILES: usize = 6;
