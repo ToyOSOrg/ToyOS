@@ -34,6 +34,8 @@ impl Unit for u8 {
 }
 
 impl Unit for crate::arch::WChar {
+    // `WChar` is `i32` on x86-64 and `u32` on AArch64.
+    #[allow(clippy::unnecessary_cast)]
     fn code(self) -> u32 {
         self as u32
     }
@@ -120,7 +122,7 @@ pub(crate) unsafe fn signed<U: Unit>(s: *const U, base: i32) -> Read<i64> {
         return Read { value: 0, end: 0, refused: Some(Refusal::Base) };
     };
     let (value, refused) = match (n.magnitude, n.negative) {
-        (Some(m), false) if m <= i64::MAX as u64 => (m as i64, None),
+        (Some(m), false) if i64::try_from(m).is_ok() => (m as i64, None),
         (Some(m), true) if m <= i64::MIN.unsigned_abs() => ((m as i64).wrapping_neg(), None),
         (_, negative) => (if negative { i64::MIN } else { i64::MAX }, Some(Refusal::Range)),
     };
