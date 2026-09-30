@@ -8,7 +8,8 @@
 //! refused), the bootstrap configuration below, [`RECIPE`], and the tools the
 //! host builds it with ([`host_tools`]). `rust/build/llvm/<key>/` in the primary
 //! is bootstrap's install of that LLVM and its clang, with its LLD in `bin/`
-//! beside `llvm-config`, made by whichever build first needs it ([`resolve`]),
+//! beside `llvm-config` and in `src/` the runtimes' sources the C++ runtime is
+//! built from (`src/libcxx.rs`), made by whichever build first needs it ([`resolve`]),
 //! and stored only when it was built from what the key names. Once its
 //! [`SOURCE`] file exists it is read-only, its directories as well as its files.
 //! Every compiler build, the primary's and a worktree's own, names it as the
@@ -47,7 +48,7 @@ use crate::toolchain::{self, host_triple};
 /// What changes how a key's sources become an LLVM and is none of the other
 /// parts: the build's targets and what is kept of it. Moving it moves every key.
 const RECIPE: &str = "bootstrap build of src/llvm-project/llvm and src/llvm-project/lld; the install's bin, \
-                      include and lib, and lld in bin, read-only; 2";
+                      include and lib, and lld in bin, and the runtimes' sources in src, read-only; 3";
 
 /// What of the caller's environment the LLVM build, and every tool its key
 /// asks, sees:
@@ -132,7 +133,7 @@ fn key_of(fork: &Path, recipe: &str, config: &str, tools: &str) -> String {
 }
 
 /// Give `command` nothing of this process's environment but [`ENVIRONMENT`].
-fn clear(command: &mut Command) {
+pub(crate) fn clear(command: &mut Command) {
     command.env_clear();
     for name in ENVIRONMENT {
         if let Some(value) = std::env::var_os(name) {
@@ -213,9 +214,9 @@ fn defect(dir: &Path) -> Option<String> {
     if !dir.join(SOURCE).is_file() {
         return Some(format!("{} carries no {SOURCE}", dir.display()));
     }
-    let kept = KEPT.iter().map(|k| dir.join(k)).filter(|p| !p.is_dir());
+    let kept = KEPT.iter().map(|k| dir.join(k)).chain(crate::libcxx::SOURCES.iter().map(|s| dir.join("src").join(s)));
     let tools = TOOLS.iter().map(|t| dir.join(t)).filter(|p| !p.is_file());
-    let gone: Vec<String> = kept.chain(tools).map(|p| p.display().to_string()).collect();
+    let gone: Vec<String> = kept.filter(|p| !p.is_dir()).chain(tools).map(|p| p.display().to_string()).collect();
     (!gone.is_empty()).then(|| format!("{} carries no {}", dir.display(), gone.join(", ")))
 }
 
@@ -248,16 +249,20 @@ fn place(fork: &Path, key: &str, dir: &Path, build: &impl Fn(&Path) -> PathBuf) 
     let lld = built.join(&host).join("lld/bin/lld");
     fs::copy(&lld, partial.join("bin/lld"))
         .unwrap_or_else(|e| panic!("copy {} -> {}: {e}", lld.display(), partial.join("bin/lld").display()));
-    // What was built is what the key names, or it is not that key's: the key
-    // refuses a bootstrap the build left holding what no commit does.
+    let checkout = fork.join(LLVM);
+    assert!(checkout.join(".git").exists(), "the LLVM build left no checkout at {}", checkout.display());
+    for source in crate::libcxx::SOURCES {
+        clone_tree(&checkout.join(source), &partial.join("src").join(source));
+    }
+    // What was built and copied is what the key names, or it is not that key's:
+    // the key refuses a bootstrap, and an LLVM checkout, the build left holding
+    // what no commit does.
     let again = self::key(fork);
     assert!(
         again == key,
         "the fork's LLVM sources moved while LLVM {key} was being built (they now name {again}); \
          nothing was kept, and the next build makes the one they name"
     );
-    let checkout = fork.join(LLVM);
-    assert!(checkout.join(".git").exists(), "the LLVM build left no checkout at {}", checkout.display());
     let (built_from, commit) = (git_out(&checkout, &["rev-parse", "HEAD"]), llvm_commit(fork));
     // Bootstrap's `Llvm` step checks the gitlink's commit out before it builds,
     // so a checkout behind it, the key never reads, is moved first.
@@ -431,6 +436,9 @@ mod tests {
             git(&checkout, &["init", "-q"]);
         }
         write(&checkout.join("llvm/CMakeLists.txt"), content);
+        for source in crate::libcxx::SOURCES {
+            write(&checkout.join(source).join("CMakeLists.txt"), &format!("the {source} of {content}"));
+        }
         git(&checkout, &["add", "-A"]);
         let tree = git(&checkout, &["write-tree"]);
         let out = Command::new("git")
@@ -490,6 +498,7 @@ mod tests {
         assert_eq!(fs::read_to_string(la.dir.join("bin/lld")).unwrap(), "the lld");
         assert_eq!(fs::read_link(la.dir.join("bin/clang")).unwrap(), Path::new("clang-22"));
         assert!(la.dir.join("lib/clang/22/include/stddef.h").is_file());
+        assert_eq!(fs::read_to_string(la.dir.join("src/libcxx/CMakeLists.txt")).unwrap(), "the libcxx of A", "the runtimes' sources are not the commit's");
         assert!(!la.dir.join("build").exists(), "CMake's tree was kept");
         assert!(!a.join("rust/build/toyos-llvm").exists(), "the build directory outlived the placement");
 
@@ -536,7 +545,7 @@ mod tests {
             fake_build(fork)
         };
         let dir = choose(&a, &rust_dir, &a.join("rust"), counted).dir;
-        for (lost, made) in [("bin/lld", 2), ("lib", 3)] {
+        for (lost, made) in [("bin/lld", 2), ("lib", 3), ("src/libcxxabi", 4)] {
             keystore::writable(&dir);
             let lost = dir.join(lost);
             if lost.is_dir() {

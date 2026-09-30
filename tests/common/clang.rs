@@ -1,6 +1,6 @@
-//! A C program compiled and linked by the toolchain's clang — the ToyOS driver
-//! `ToyOSOrg/llvm-project` carries — judged as the loader sees the file, and
-//! then run on ToyOS.
+//! A C program and a C++ program compiled and linked by the toolchain's clang —
+//! the ToyOS driver `ToyOSOrg/llvm-project` carries — judged as the loader sees
+//! the file, and then run on ToyOS.
 
 use std::fs;
 use std::process::Command;
@@ -70,5 +70,49 @@ pub fn c_hello(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
         return Err(format!("hello did not say {SAYS:?}:\n{}", result.stdout));
     }
     eprintln!("  [c_hello] {SAYS}");
+    Ok(())
+}
+
+/// The C++ program, and what the host's own C++ runtime prints for it.
+const CXX_RUNTIME: &str = "tests/cxx/runtime.cpp";
+const CXX_RUNTIME_EXPECT: &str = "tests/cxx/runtime.expect";
+
+/// Gate: a C++ program — libc++'s containers, strings and streams, exceptions,
+/// threads and their destructors — compiled and linked by one clang
+/// invocation, prints on ToyOS what the host's C++ runtime prints for it.
+pub fn cxx_runtime(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
+    let root = compile::repo_root();
+    let c = compile::c_sysroot();
+    let out = super::lane::dir().join("cxx-runtime");
+    let built = Command::new(&c.clang)
+        .arg("--driver-mode=g++")
+        .args(c.args())
+        .args(["-std=c++17", "-O2"])
+        .arg(root.join(CXX_RUNTIME))
+        .arg("-o")
+        .arg(&out)
+        .output()
+        .map_err(|e| format!("run {}: {e}", c.clang.display()))?;
+    if !built.status.success() {
+        return Err(format!("clang could not build {CXX_RUNTIME}:\n{}", String::from_utf8_lossy(&built.stderr)));
+    }
+    let elf = fs::read(&out).map_err(|e| format!("{}: {e}", out.display()))?;
+    judge_elf(&elf)?;
+    let expected = fs::read_to_string(root.join(CXX_RUNTIME_EXPECT)).map_err(|e| format!("{CXX_RUNTIME_EXPECT}: {e}"))?;
+
+    let config = root.join("tests/testcases");
+    let c_tests = [("cxx_runtime".to_string(), elf)];
+    let mut qemu = QemuInstance::boot_with_options(&config, &c_tests, rust_bins, BootOptions::default());
+    let result = qemu.run_test("test_c_cxx_runtime", Duration::from_secs(60));
+    if let Some(err) = &result.error {
+        return Err(format!("{err}\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("{CXX_RUNTIME} exited {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    if let Some(mismatch) = super::console::c_verdict(&result.stdout, &expected).mismatch {
+        return Err(mismatch);
+    }
+    eprintln!("  [cxx_runtime] {} lines, as the host's C++ runtime printed them", expected.lines().count());
     Ok(())
 }

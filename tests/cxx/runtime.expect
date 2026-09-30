@@ -1,0 +1,17 @@
+vector sum 55, back 10, string hello, ToyOS (12)
+caught thrown from depth 0
+caught int 42, rethrowing
+caught rethrown int 42
+caught out_of_range from at
+caught invalid_argument from stoi
+caught out_of_range from stoi
+threads summed 499500
+thread_local destructors ran 4
+condition variable handshake done
+rethrew from a thread
+a key set in main reads null in another thread and set in main; thread ids differ
+stream 10 -17 18446744073709551615
+wide length 8, last 3
+map a=2 b=1
+done
+static destructor ran

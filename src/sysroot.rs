@@ -27,7 +27,8 @@
 //! compiler is a worktree's own; the sysroot key's (`buildlock::keyed_*`), with
 //! this worktree's build lock put down; then, to build, this worktree's
 //! exclusively (its fork build directory is written); then, if the compiler is
-//! the primary's, the global one shared, because it is read.
+//! the primary's, the global one shared, because it is read; then the key of the
+//! compiler's LLVM, held in use while the C++ runtime is built from its sources.
 //!
 //! A sysroot no worktree names any more is removed by `keystore::sweep`, which
 //! `--worktree remove` runs: each build records the key it used in its
@@ -64,7 +65,8 @@ const SOURCES: &str = "SOURCES";
 /// std build's recipe below. Moving it moves every key.
 const RECIPE: &str = "bootstrap stage-0 local rebuild, profile compiler, no LLVM, \
                       libtoyos_c merged, libraries from the stamp, linked by rust-lld, \
-                      a C sysroot of libc's staticlib and headers per target; 5";
+                      a C sysroot of libc's staticlib and headers per target, and its C++ runtime \
+                      built from the runtimes' sources of the compiler's LLVM; 6";
 
 /// Every sysroot on this host.
 pub fn sysroots_dir(rust_dir: &Path) -> PathBuf {
@@ -189,7 +191,11 @@ fn source_files(checkout: &Path, paths: &[&str], out: &mut Vec<PathBuf>) {
 /// compiled by `compiler`.
 pub fn key(root: &Path, compiler: &Compiler, fork: &Path) -> String {
     let parts = [
-        format!("{RECIPE}; cargo {STAGE0_CARGO}; targets {}", GUEST_TARGETS.join(" ")),
+        format!(
+            "{RECIPE}; cargo {STAGE0_CARGO}; targets {}; C++ runtime {:?}",
+            GUEST_TARGETS.join(" "),
+            crate::libcxx::OPTIONS
+        ),
         witness(root),
         tree_identity(fork, &["library", "src/bootstrap"]),
         compiler.identity(),
@@ -318,13 +324,13 @@ pub fn ensure(root: &Path, rust_dir: &Path, lock: &mut Held) -> Sysroot {
     let dir = sysroots_dir(rust_dir).join(&key);
     crate::keystore::record(root, Keyed::Sysroot, &key);
 
-    let using = lock.without_shared(|| held(root, &key, &dir, || build(root, &compiler, &fork, &key, &dir)));
+    let using = lock.without_shared(|| held(root, &key, &dir, || build(root, rust_dir, &compiler, &fork, &key, &dir)));
     Sysroot { dir, primary_compiler: compiler.primary, _using: Some(using) }
 }
 
 /// Make the sysroot `key` names at `dir`, from `root`'s sources and the std fork
 /// at `fork`, with `compiler`. The caller holds the key's lock.
-fn build(root: &Path, compiler: &Compiler, fork: &Path, key: &str, dir: &Path) {
+fn build(root: &Path, rust_dir: &Path, compiler: &Compiler, fork: &Path, key: &str, dir: &Path) {
     let what = format!("building sysroot {key}");
     let _worktree = buildlock::worktree_exclusive(root, &what);
     // Only the primary's compiler is rebuilt in place; one of a worktree's own
@@ -343,6 +349,11 @@ fn build(root: &Path, compiler: &Compiler, fork: &Path, key: &str, dir: &Path) {
             crate::libc::build_c(root, partial, &libc_target, arch);
         }
         let _ = fs::remove_dir_all(&libc_target);
+        let llvm = crate::llvm::resolve(root, rust_dir, fork);
+        for arch in Arch::ALL {
+            let scratch = dir.with_extension(format!("libcxx-{}", arch.name()));
+            crate::libcxx::build(&crate::clang::CSysroot::of(partial, arch), arch, &llvm.dir.join("src"), &scratch);
+        }
 
         // The sources the key named are the ones built, or this is not that key's.
         let again = self::key(root, compiler, fork);

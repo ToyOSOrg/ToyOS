@@ -26,6 +26,7 @@ pub mod kernelkeys;
 pub mod keystore;
 pub mod lan;
 pub mod libc;
+pub mod libcxx;
 pub mod llvm;
 pub mod licence;
 pub mod metal;

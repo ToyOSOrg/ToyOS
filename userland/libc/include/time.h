@@ -2,10 +2,16 @@
 #define _TIME_H
 
 #include <stddef.h>
+#include <bits/types/locale_t.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 typedef long time_t;
 typedef long clock_t;
 typedef long suseconds_t;
+typedef int clockid_t;
 
 struct tm {
     int tm_sec;
@@ -31,7 +37,7 @@ struct timespec {
 
 time_t time(time_t *t);
 clock_t clock(void);
-int clock_gettime(int clk_id, struct timespec *tp);
+int clock_gettime(clockid_t clk_id, struct timespec *tp);
 int nanosleep(const struct timespec *req, struct timespec *rem);
 
 struct tm *localtime(const time_t *timer);
@@ -41,8 +47,13 @@ struct tm *gmtime_r(const time_t *timer, struct tm *result);
 time_t mktime(struct tm *tm);
 double difftime(time_t t1, time_t t0);
 size_t strftime(char *s, size_t max, const char *fmt, const struct tm *tm);
+size_t strftime_l(char *s, size_t max, const char *fmt, const struct tm *tm, locale_t loc);
 
 unsigned int sleep(unsigned int seconds);
 int usleep(unsigned int usec);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
