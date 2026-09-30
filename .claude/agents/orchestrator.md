@@ -71,6 +71,7 @@ A mutation loop, guest or metal, starts on a clean worktree at the head under re
 clean: `git apply --check`, `git apply`, the tests by name, `git apply -R`. None runs while an
 agent edits that worktree. A queue script passes only flags `src/testargs.rs` declares: any other
 word becomes the run's filter, and a one-test run reports as a pass.
+A run is the whole suite, or a positional filter that reaches any enabled test.
 
 ## The bench
 

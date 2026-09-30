@@ -6,7 +6,7 @@ opened: 2026-09-27
 
 # `screen_diag_boot` finds no `i8042:` line on the panel
 
-`screen_diag_boot` (nightly tier) fails with `"i8042:" is not on screen five
+`screen_diag_boot` fails with `"i8042:" is not on screen five
 seconds after the boot finished`. The decoded panel ends at `Boot: complete`,
 and no i8042 line is painted in the five seconds after it. The i8042 health
 line (`report_health`, `to_screen`) never reaches the panel on the diag image.

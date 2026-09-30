@@ -6,7 +6,7 @@ opened: 2026-09-27
 
 # `home_budget_refusal_retried` is red on every nightly
 
-`home_budget_refusal_retried` (nightly tier) is red, and red alone, on the
+`home_budget_refusal_retried` is red, and red alone, on the
 nightlies of three trees, each time with the same two shapes:
 - main at e8d7c9c0 (run 36228604597);
 - PR #524's branch at 8c5be843 (run 36273557690);
