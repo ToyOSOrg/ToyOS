@@ -22,4 +22,4 @@ the listener's first accept, bounded by a ceiling that fails loudly, and only
 then pace the offers into the closed connection.
 
 **Exit condition**: the test waits for the accept event instead of for a fixed
-span, and stays green under a loaded fast tier.
+span, and stays green under a loaded suite.

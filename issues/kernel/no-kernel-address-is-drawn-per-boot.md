@@ -14,7 +14,7 @@ with `RANDOMIZE_BASE` and `RANDOMIZE_MEMORY`
 (`debian.master/config/annotations:10674,10677`): at most 9 bits of text slot,
 and a direct map placed at PUD granularity.
 
-**Exit**: on every proving machine, over 64 boots in a `Tier::Weekly` test,
+**Exit**: on every proving machine, over 64 boots in a test,
 each claimed bit is set 12 to 52 times, the guard of
 `issues/kernel/the-kernel-has-no-stack-protector.md` and the first spawn's
 bases included. **Mutation**: a fixed base. **Oracle**: Linux's bits.

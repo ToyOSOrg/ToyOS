@@ -1,6 +1,6 @@
 # Tests
 
-The mechanics live where the work is: profiles and shapes in `tests/common/`, registration and tiers in `tests/toyos.rs` — read those, not this file, for how the harness works.
+The mechanics live where the work is: profiles and shapes in `tests/common/`, registration in `tests/toyos.rs` — read those, not this file, for how the harness works.
 
 ## Caveats that bite every agent
 
