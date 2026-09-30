@@ -1369,6 +1369,22 @@ fn declared_kernel_features(root: &Path) -> Vec<String> {
 /// so.
 pub const TEST_KERNEL: &[&str] = &["boot-actuators", "test-actuators"];
 
+/// Whether a kernel built with `features` answers every actuator: it carries
+/// [`TEST_KERNEL`], alone or under an instrument built beside it. The harness's
+/// choice of kernel and [`build_test_parts`]' refusal both ask this.
+pub fn carries_the_actuators<S: AsRef<str>>(features: &[S]) -> bool {
+    TEST_KERNEL.iter().all(|t| features.iter().any(|f| f.as_ref() == *t))
+}
+
+/// Refuse a boot arming a parameter its kernel cannot answer: one outside the
+/// kernel's `own` and the valued ones needs [`carries_the_actuators`].
+fn refuse_an_unarmable_boot(own: &[String], features: &[String], params: &[String]) -> Result<(), String> {
+    if params.iter().all(|p| own.contains(p) || is_valued_param(p)) || carries_the_actuators(features) {
+        return Ok(());
+    }
+    Err(format!("a boot asking for {params:?} must boot a kernel carrying {TEST_KERNEL:?}, not {features:?}"))
+}
+
 /// Kernel builds the ordinary test suite is allowed to make.
 pub const TEST_SUITE_KERNEL_BUILDS: [&str; 6] = [
     "",
@@ -2052,12 +2068,9 @@ pub fn build_test_parts(
     // parameter picks which actuator the one test kernel arms, so 45 builds
     // became two; keying the image on it is what keeps two boots asking for
     // different actuators from sharing one disk.
-    let own = declared_params(root);
-    assert!(
-        kernel_params.iter().all(|p| own.contains(p) || is_valued_param(p))
-            || kernel_features.iter().eq(TEST_KERNEL.iter().copied()),
-        "a boot asking for {kernel_params:?} must boot the test kernel, not {kernel_features:?}"
-    );
+    if let Err(why) = refuse_an_unarmable_boot(&declared_params(root), kernel_features, kernel_params) {
+        panic!("{why}");
+    }
     let arch = plan.arch;
     let kernel_key = kernel_key(arch, &features);
     // The loader and ROOT (whose `/system/bin/update` embeds it) are each a
@@ -2530,6 +2543,18 @@ mod tests {
             assert!(harness_kernel_build_is_declared(suite_build, false));
             assert!(!harness_kernel_build_is_declared(suite_build, true));
         }
+    }
+
+    /// `mask_windows` arms `windows-staged` on the windows' kernel, which
+    /// carries every actuator; the scheduler's check kernel carries none.
+    #[test]
+    fn a_named_build_over_the_test_kernel_arms_an_actuator() {
+        let own = declared_params(Path::new(env!("CARGO_MANIFEST_DIR")));
+        let owned = |list: &[&str]| list.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+        let staged = owned(&["windows-staged"]);
+        assert_eq!(refuse_an_unarmable_boot(&own, &owned(MASK_WINDOWS_KERNEL), &staged), Ok(()));
+        assert_eq!(refuse_an_unarmable_boot(&own, &owned(TEST_KERNEL), &staged), Ok(()));
+        assert!(refuse_an_unarmable_boot(&own, &owned(SCHED_CHECK_KERNEL), &staged).is_err());
     }
 
     /// **The two lists of valued parameters are one list.** A prefix

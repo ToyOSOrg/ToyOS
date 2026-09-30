@@ -2635,11 +2635,12 @@ fn kernel_of(options: &BootOptions) -> Vec<&'static str> {
         return toyos_build::build::TEST_KERNEL.to_vec();
     }
     assert!(
-        options.kernel_features.contains(&"boot-actuators"),
-        "a boot asking to arm {:?} asks for the kernel build {:?}, which carries no actuator; \
+        toyos_build::build::carries_the_actuators(options.kernel_features),
+        "a boot asking to arm {:?} asks for the kernel build {:?}, which does not carry {:?}; \
          an actuator is a parameter and the test kernel carries all of them",
         options.kernel_params,
         options.kernel_features,
+        toyos_build::build::TEST_KERNEL,
     );
     options.kernel_features.to_vec()
 }
