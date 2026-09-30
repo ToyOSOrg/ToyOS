@@ -1017,8 +1017,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     ("driver_wait_refused", Sched::Parallel),
     // One boot; the leak-rollback controls' two verdict lines.
     ("leak_rollback_selftest", Sched::Parallel),
-    // One boot; the reopen control's one verdict line.
-    ("process_reopen_selftest", Sched::Parallel),
     // One boot; three read-fault control verdicts.
     ("read_fault_selftests", Sched::Parallel),
     ("xhci_many_devices", Sched::Parallel),
@@ -1928,7 +1926,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         "metal_sim_scanout_wc",
         metal::Metal::Runs { arms: METALCASE, judge: |b| scanout_wc(b[0].kernel().text()) },
     ),
-    // ---- one image, eleven actuators, ten tests ----
+    // ---- one image ----
     // The cheapest cluster there is: every one of these arms a check that runs
     // at init, logs its verdict and does nothing else, so they cost one flash
     // between them. **Nothing had to be promoted into `kernel/src/params.rs`**
@@ -1938,10 +1936,6 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         "pci_capability_walk",
         metal::Metal::Runs { arms: SELFTESTS, judge: |b| pci_cap_selftest(b[0].kernel().text()) },
-    ),
-    (
-        "process_reopen_selftest",
-        metal::Metal::Runs { arms: SELFTESTS, judge: |b| process_reopen(b[0].kernel().text()) },
     ),
     (
         "read_fault_selftests",
@@ -2139,11 +2133,11 @@ const LANSWAPCASE: &[metal::Arm] = &[metal::Arm {
 /// One boot for every in-kernel self-test that logs its verdict at init and
 /// does nothing else.
 ///
-/// **Eleven actuators in one image.** They cost the machine one flash between
-/// them because none of them changes what the machine *is*: each stages inputs
-/// the hardware cannot produce — a crafted capability list, a malformed
-/// descriptor, a vector nothing claims — runs a check over them and prints a
-/// count. The three that do change the machine are not here:
+/// They cost the machine one flash between them because none of them changes
+/// what the machine *is*: each stages inputs the hardware cannot produce — a
+/// crafted capability list, a malformed descriptor, a vector nothing claims —
+/// runs a check over them and prints a count. The three that do change the
+/// machine are not here:
 /// `no-ap-control-regs` leaves an AP without them, `smp-skip-ap` leaves one
 /// out and `test-tiny-va` shrinks the address space, and each would be
 /// answering for the boot every other row on it read.
@@ -2152,7 +2146,6 @@ const SELFTESTS: &[metal::Arm] = &[metal::once(
     "tests/testcases",
     &[
         "pci-cap-selftest",
-        "process-reopen-selftest",
         "revoked-backing-selftest",
         "leak-rollback-selftest",
         "lapic-spurious-selftest",
@@ -3166,6 +3159,7 @@ fn check_for(name: &str) -> fn(&TestResult) -> bool {
         "dlopen_dedup" => check_dlopen_dedup,
         "abuse_elf_loader" => check_abuse_elf_loader,
         "exit_wait_storm" => check_exit_wait_storm,
+        "process_lifecycle" => check_process_lifecycle,
         _ => check_rust_result,
     }
 }
@@ -3224,6 +3218,28 @@ fn check_dlopen_dedup(result: &TestResult) -> bool {
             "FAIL rs::dlopen_dedup: {FALLBACK_MISCACHED:?} — the library was cached under the \
              directory the loader searched and did not find it in, so a later dlopen of its own \
              path mapped it a second time{}",
+            kernel_account(result)
+        );
+        return false;
+    }
+    true
+}
+
+/// The kernel's record of `process_lifecycle`'s call of the number
+/// `SYS_PROCESS_OPEN` had (`kernel/src/syscall/dispatch.rs`'s `retired_syscalls!`).
+const PROCESS_OPEN_RETIRED: &str = "syscall 110 is retired (formerly SYS_PROCESS_OPEN)";
+
+/// `process_lifecycle` plus the half no guest can see: the kernel refused 110
+/// as retired, not as a number it never had.
+fn check_process_lifecycle(result: &TestResult) -> bool {
+    if !check_rust_result(result) {
+        return false;
+    }
+    let log = format!("{}{}", result.before, result.serial);
+    if !log.lines().any(|l| l.contains(PROCESS_OPEN_RETIRED)) {
+        eprintln!(
+            "FAIL rs::process_lifecycle: no {PROCESS_OPEN_RETIRED:?} record, so the kernel did not \
+             refuse 110 as a retired number{}",
             kernel_account(result)
         );
         return false;
@@ -12374,21 +12390,6 @@ fn run_machine_test(
             );
             leak_rollback(qemu.boot_log())
         }
-        "process_reopen_selftest" => {
-            // The kernel reopens init by pid after the only handle to it has gone; on
-            // the `sealed` row that install took the boot down, so a guest that never
-            // reaches the verdict line is the red.
-            let qemu = QemuInstance::boot_with_options(
-                test_config,
-                c_bins,
-                rust_bins,
-                BootOptions {
-                    kernel_params: &["process-reopen-selftest"],
-                    ..Default::default()
-                },
-            );
-            process_reopen(qemu.boot_log())
-        }
         "driver_wait_refused" => {
             // The actuator blinds DEVICE_STATUS, staging a controller that
             // never answers; the boot must come up naming the refused register
@@ -14357,24 +14358,6 @@ fn pci_cap_selftest(log: &str) -> Result<(), String> {
             return Err(format!("PCI enumeration did not complete on this boot\n{log}"));
         }
         eprintln!("  [pci] {}", verdict.trim());
-        Ok(())
-}
-
-/// The kernel reopens init by pid after the last handle to it has gone, and
-/// no kernel thread's pid opens.
-///
-/// Text in, a verdict out: every line it reads is a kernel record, so the
-/// T14's readback and a QEMU boot log are judged by this one predicate.
-fn process_reopen(log: &str) -> Result<(), String> {
-        for control in ["process-reopen:", "process-open-kthread:"] {
-            let Some(verdict) = log.lines().find(|l| l.contains(control)) else {
-                return Err(format!("{control} never ran:\n{log}"));
-            };
-            if !verdict.contains("PASS") {
-                return Err(format!("{}\n{log}", verdict.trim()));
-            }
-            eprintln!("  [process] {}", verdict.trim());
-        }
         Ok(())
 }
 

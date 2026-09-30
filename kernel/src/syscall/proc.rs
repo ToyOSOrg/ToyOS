@@ -1,7 +1,6 @@
 //! Process and thread syscalls: spawn, wait, exit, and self-ops on a thread.
 //!
-//! A handle is the authority over a process; a pid alone is not. Only
-//! `sys_process_open` mints a handle from a pid, gated on a `SysCap`.
+//! A handle is the authority over a process; a pid alone is not.
 //!
 //! The parking calls clone what they wait on out of the table before
 //! blocking, so no guard is held across a park.
@@ -19,7 +18,7 @@ use toyos_abi::syscall::*;
 use toyos_sched::task::WaitClass;
 
 use super::cancelled;
-use super::handles::{demand_syscap, handle_result};
+use super::handles::demand_syscap;
 
 pub(super) fn sys_thread_exit(code: i32) -> u64 {
     process::thread_exit(code);
@@ -91,19 +90,6 @@ pub(super) fn sys_process_wait(h: RawHandle, flags: u64) -> u64 {
         // Reachable from userland (WNOHANG raced the exit), so this refuses rather than asserts.
         None => SyscallError::WouldBlock.to_u64(),
     }
-}
-
-/// Mint a `Process` handle for a pid, gated on a `SysCap` carrying [`Rights::MANAGE`].
-pub(super) fn sys_process_open(syscap: RawHandle, pid: process::Pid) -> u64 {
-    if let Err(e) = demand_syscap(syscap, Rights::MANAGE) {
-        return e.refuse();
-    }
-    let Some(object) = process::process_object(pid) else {
-        return SyscallError::NotFound.to_u64();
-    };
-    process::with_process_data(|data| {
-        handle_result(ops::install(&mut data.handles, KObjectRef::Process(object)))
-    })
 }
 
 /// Enter the real-time band, gated on a `SysCap` carrying [`Rights::RT`].

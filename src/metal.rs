@@ -760,7 +760,6 @@ pub const FLASHABLE: &[(&str, Flash)] = &[
     // the boot goes on to userland and ends the way an unarmed one does; what
     // an armed image leaves behind is a longer log.
     ("pci-cap-selftest", Flash::Ok),
-    ("process-reopen-selftest", Flash::Ok),
     ("revoked-backing-selftest", Flash::Ok),
     ("leak-rollback-selftest", Flash::Ok),
     ("lapic-spurious-selftest", Flash::Ok),

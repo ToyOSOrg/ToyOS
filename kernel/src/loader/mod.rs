@@ -874,7 +874,6 @@ pub fn spawn_init() -> Pid {
         .union(Rights::TRANSFER)
         .union(Rights::DEVICE)
         .union(Rights::RT)
-        .union(Rights::MANAGE)
         .union(Rights::LOG)
         .union(Rights::WAIT)
         .union(Rights::POWER)

@@ -292,7 +292,6 @@ poller_capacity 36
 port_poll_churn 84
 pre_idle_wedge_speaks 3688
 process_lifecycle 225
-process_reopen_selftest 5800
 process_stats 221
 query_modules_size 12
 query_pci_agreement 7182

@@ -83,7 +83,7 @@ fn an_undefined_wait_flag_bit_is_refused() {
     assert_eq!(child.wait().expect("wait").code(), Some(5), "the child did not exit");
     let handle = RawHandle(child.as_raw_handle());
 
-    let refused = wait_raw(handle, syscall::WNOHANG | UNDEFINED);
+    let refused = raw(syscall::SYS_PROCESS_WAIT, handle.0 as u64, syscall::WNOHANG | UNDEFINED);
     assert_eq!(
         SyscallError::from_u64(refused),
         Some(SyscallError::InvalidArgument),
@@ -93,18 +93,18 @@ fn an_undefined_wait_flag_bit_is_refused() {
     println!("  an undefined WNOHANG-word bit is InvalidArgument, and without it the code comes back");
 }
 
-/// The typed wrapper cannot spell a flag word the ABI does not define, so the
-/// argument under test only exists at the raw boundary.
-fn wait_raw(handle: RawHandle, flags: u64) -> u64 {
+/// Syscall `num` on two arguments, past every typed wrapper: none spells a flag
+/// word the ABI does not define, or a retired number.
+fn raw(num: u64, a1: u64, a2: u64) -> u64 {
     let ret: u64;
     // SAFETY: a register-to-register `syscall`; neither argument is a pointer
-    // this call dereferences.
+    // either call dereferences.
     unsafe {
         core::arch::asm!(
             "syscall",
-            in("rdi") syscall::SYS_PROCESS_WAIT,
-            in("rsi") handle.0 as u64,
-            in("rdx") flags,
+            in("rdi") num,
+            in("rsi") a1,
+            in("rdx") a2,
             in("r8") 0u64,
             in("r9") 0u64,
             lateout("rax") ret,
@@ -211,8 +211,7 @@ fn a_thread_of_mine_has_exited() -> bool {
 /// The estate's system capability, taken once.
 ///
 /// **Once, because taking is a swap**: a second `take` of the same label finds
-/// `HANDLE_INVALID` and answers `None`, and two arms here want the same cap —
-/// one for the `MANAGE` refusal, one for the roster below.
+/// `HANDLE_INVALID` and answers `None`, and two arms here want the same cap.
 fn cap() -> &'static SysCap {
     static CAP: OnceLock<SysCap> = OnceLock::new();
     CAP.get_or_init(|| {
@@ -272,18 +271,20 @@ fn a_handle_is_the_whole_of_the_right() {
     println!("  a process that did not start the child waited for it, and so did the one that did");
 }
 
-/// A pid is a name everybody can say, and saying it is not a key. The one call
-/// that turns one into a handle needs a capability carrying `MANAGE`, and the
-/// kernel mints exactly one — `/system/bin/init`'s. The test estate's carries `DEVICE`
-/// and `DUP`, which is what makes this refusal non-vacuous: the handle resolves,
-/// and it is the right that is missing.
+/// A pid is a name everybody can say, and no call takes one. 110 was the call
+/// that turned a pid into a handle; it is asked here with the arguments it
+/// took, this process's capability and its own pid, so a kernel that still
+/// served it answers what it would have. `check_process_lifecycle` reads the
+/// kernel's record of the refusal.
 fn a_pid_is_not_authority() {
+    const PROCESS_OPEN: u64 = 110;
+    let answer = raw(PROCESS_OPEN, cap().as_handle().0 as u64, syscall::getpid().0 as u64);
     assert_eq!(
-        syscall::process_open(cap().as_handle(), syscall::getpid()),
-        Err(SyscallError::PermissionDenied),
-        "a capability without MANAGE opened a process by pid",
+        SyscallError::from_u64(answer),
+        Some(SyscallError::NotSupported),
+        "syscall {PROCESS_OPEN}, retired, answered {answer:#x}",
     );
-    println!("  a pid does not become a handle without MANAGE");
+    println!("  syscall {PROCESS_OPEN} is retired: a pid becomes no handle");
 }
 
 /// A child that exits with `code` when this process says so, and the write end

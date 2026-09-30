@@ -40,20 +40,6 @@ directory is `issues/isolation/every-program-sees-only-the-files-it-was-given.md
 
 ## Stages
 
-0. **`SYS_PROCESS_OPEN` goes** (ruled). Deleted: `sys_process_open` and every
-   name only it reaches — `process_open`, `SysCap::open_process`, `MANAGE` in
-   init's `SysCap`, the `reopenable` column, `process::process_object`,
-   `reopen_selftest` and `sched::kthread::open_selftest` with their actuator,
-   guest test, judge and rows — and
-   `process_lifecycle`'s pid-open arm, its only caller; 110 enters
-   `retired_syscalls!`. `issues/kernel/the-capability-end-state-is-twelve-answers.md`
-   and `issues/diagnostics/the-kernel-keeps-nothing-it-enumerates.md`, which
-   argue from it, change in the same landing. *Exit*: a call of 110 answers
-   `NotSupported` and the log names it retired; `git grep` finds no deleted
-   name outside `toyos-symbols/tests/fixtures/input-test.bin`, a frozen binary
-   whose symbols are test data. Negative control: the stage reverted whole,
-   where `sys_process_open` answers 110. Oracle: rustc's name resolution,
-   which fails the build of any caller left.
 1. **An end is an event** (ruled). `read_watch` and `has_data` answer for a
    `Process`, whose watch becomes an `Arc` as an `Acceptor`'s is, and
    `close_ends_polls` answers `false` for one; init's waiter threads go.

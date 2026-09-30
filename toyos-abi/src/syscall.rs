@@ -263,15 +263,10 @@ pub const SYS_PROCESS_WAIT: u64 = 108;
 ///
 /// [`Rights::MANAGE`]: crate::handle::Rights::MANAGE
 pub const SYS_PROCESS_KILL: u64 = 109;
-/// A `Process` handle for a pid, gated by [`Rights::MANAGE`] on a `SysCap`.
-/// See [`process_open`].
-///
-/// The one place a pid becomes authority, and only `init` holds a cap that
-/// carries the right — so the set of processes that can reach a process they
-/// did not start is exactly what init endowed.
-///
-/// [`Rights::MANAGE`]: crate::handle::Rights::MANAGE
-pub const SYS_PROCESS_OPEN: u64 = 110;
+// Syscall number 110 is retired and unused: it was `SYS_PROCESS_OPEN`, which
+// turned a pid into a `Process` handle on a `SysCap` carrying
+// `Rights::MANAGE`. A process is reached only through the handle its spawn
+// answered, or one a holder of that handle moved.
 
 /// Mint a device claim for a class, gated by [`Rights::DEVICE`] on a `SysCap`.
 /// Only `init` holds such a cap, so the set of processes that can ever
@@ -970,13 +965,6 @@ pub fn process_wait_nonblock(proc: RawHandle) -> Result<i32, SyscallError> {
 /// caller asked for it to be gone and it is.
 pub fn process_kill(proc: RawHandle) -> Result<(), SyscallError> {
     check_unit(syscall(SYS_PROCESS_KILL, proc.0 as u64, 0, 0, 0))
-}
-
-/// A `Process` handle for `pid`, presenting a `SysCap` that carries
-/// `Rights::MANAGE`.
-pub fn process_open(syscap: RawHandle, pid: Pid) -> Result<RawHandle, SyscallError> {
-    check(syscall(SYS_PROCESS_OPEN, syscap.0 as u64, pid.0 as u64, 0, 0))
-        .map(|h| RawHandle(h as u32))
 }
 
 /// Copy records into `out`, oldest first and merged by `at_ns`, advancing
@@ -2312,10 +2300,9 @@ pub struct ProcessStats {
     pub fault_zero_count: u32,
     pub fault_ns: u64,
     pub io_read_ops: u32,
-    /// The process's own pid. Not authority — nothing takes a pid but
-    /// [`SYS_PROCESS_OPEN`], which takes a `SysCap` beside it — but it is the
-    /// name a diagnostic prints, and this is where a holder of a handle reads
-    /// it.
+    /// The process's own pid. Not authority — no syscall takes a pid — but it
+    /// is the name a diagnostic prints, and this is where a holder of a handle
+    /// reads it.
     pub pid: u32,
     pub io_read_bytes: u64,
     pub blocked_io_ns: u64,

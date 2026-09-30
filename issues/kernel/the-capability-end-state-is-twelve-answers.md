@@ -32,13 +32,10 @@ taken, not a queue waiting on anybody.
 
 Four of the rulings are enforced in code, each at a site that demands a right
 where none was demanded before: `SYS_SHUTDOWN` takes a `SysCap` carrying
-`Rights::POWER` (`kernel/src/syscall/machine.rs:46-48`); `SYS_SYSINFO`'s
+`Rights::POWER` (`kernel/src/syscall/machine.rs:46-48`), and `SYS_SYSINFO`'s
 roster takes `Rights::ROSTER`, demanded only once the buffer has room for an
 entry (`kernel/src/syscall/machine.rs:84`, `:94`), spelled `roster` in
-`toyos-manifest/src/lib.rs:80`; and `SYS_PROCESS_OPEN` takes `Rights::MANAGE`
-(`kernel/src/syscall/proc.rs:89-91`), which is what makes question 3's
-"a pid is not authority" checkable — the ABI says so at the field
-(`toyos-abi/src/syscall.rs:1882-1884`).
+`toyos-manifest/src/lib.rs:80`.
 
 **Every `4a98107f^:kernel/src/arch/syscall.rs` citation below points into
 history**: that one-file syscall layer is what `4a98107f` split, and the
@@ -100,20 +97,17 @@ closed.
 
 ## 3. Are PIDs and TIDs identity-only, or can naming one confer authority? — COMMITTED
 
-Identity-only, with one named exception that is itself gated. Every arm taking a
-pid: `SYS_GETPID` answers the caller's own
-(`4a98107f^:kernel/src/arch/syscall.rs:490`), and `SYS_PROCESS_OPEN` turns a pid into a
-`Process` handle only when the caller also presents a `SysCap` carrying
-`Rights::MANAGE` (`:1602`), which the kernel mints once, for `/system/bin/init`
-(`kernel/src/loader/mod.rs:938`). `ProcessStats.pid` says so at the field: "Not
-authority — nothing takes a pid but `SYS_PROCESS_OPEN`, which takes a `SysCap`
-beside it" (`toyos-abi/src/syscall.rs:1803`). Tids are process-local names:
+Identity-only. No arm takes a pid, and `SYS_GETPID` answers the caller's own
+(`4a98107f^:kernel/src/arch/syscall.rs:490`). `ProcessStats.pid` says so at the
+field: "Not authority — no syscall takes a pid" (`toyos-abi/src/syscall.rs`'s
+`ProcessStats`). Tids are process-local names:
 `SYS_THREAD_JOIN` resolves through `thread_sched(caller, tid)` and
 `collect_thread_zombie(table, tid, parent_pid)`, both keyed on the caller's own
 pid (`4a98107f^:kernel/src/arch/syscall.rs:2393`, `kernel/src/process.rs:1412`, `:848`).
-Four pid-addressed syscalls were deleted and their numbers retired rather than
+Five pid-addressed syscalls were deleted and their numbers retired rather than
 reused — 26 `SYS_WAITPID`, 33 `SYS_FIND_PID`, 37 `SYS_GRANT_SHARED`, 65
-`SYS_KILL` (`4a98107f^:kernel/src/arch/syscall.rs:63`).
+`SYS_KILL` (`4a98107f^:kernel/src/arch/syscall.rs:63`), and 110
+`SYS_PROCESS_OPEN` (`kernel/src/syscall/dispatch.rs`'s `retired_syscalls!`).
 
 ## 4. Can a process enumerate objects it lacks authority over? — RULED 2026-08-20, IMPLEMENTED 2026-08-22
 
@@ -291,11 +285,10 @@ provably no longer holds it (`kernel/src/object/ops.rs:47`). Every
 device-driving syscall then presents that handle and the kernel checks the
 *class*, not merely the type: "a process holding the NIC has no more business
 setting the resolution than one holding nothing"
-(`4a98107f^:kernel/src/arch/syscall.rs:895`). `SYS_RT_ENTER` and `SYS_PROCESS_OPEN` are
-the same shape on `Rights::RT` and `Rights::MANAGE` (`:1655`, `:1602`), narrowed
-per program by `toyos_manifest::syscap_rights`
-(`toyos-manifest/src/lib.rs:73`) — `system.toml` grants exactly two, `logread`
-to `logd` and `rt` to `soundd`.
+(`4a98107f^:kernel/src/arch/syscall.rs:895`). `SYS_RT_ENTER` is the same shape
+on `Rights::RT` (`:1655`), narrowed per program by
+`toyos_manifest::syscap_rights` (`toyos-manifest/src/lib.rs:73`) — `system.toml`
+grants exactly two, `logread` to `logd` and `rt` to `soundd`.
 
 One inconsistency, known and unobservable: three arms demand three different
 rights on the same claim handle — `Rights::WRITE`

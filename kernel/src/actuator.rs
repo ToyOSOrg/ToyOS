@@ -477,9 +477,6 @@ actuators! {
     /// Run the revoked-backing controls after mount.
     revoked_backing_selftest = "revoked-backing-selftest";
 
-    /// Reopen init by pid once it is spawned, and open every kernel thread's pid, the way `SYS_PROCESS_OPEN` does.
-    process_reopen_selftest = "process-reopen-selftest";
-
     /// Refuse every read of device block 0 of each disk the kernel drives — its
     /// protective MBR and GPT header — once the boot has read its own tables,
     /// so a partition claim meets a disk that does not answer a read of its
