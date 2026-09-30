@@ -51,8 +51,7 @@ breaking the format:
 1 cluster(s) from 137 are marked allocated and no directory entry reaches them
 ```
 
-Alone on the same tree minutes later: green, 5 s. `cargo run -- --known-red
-fat_backing_revoked` answered `NOT ON THE LIST`. Two lost chains, each one
+Alone on the same tree minutes later: green, 5 s. Two lost chains, each one
 cluster long, each from a different start — so the observation is one red beside
 eleven other guests and still no rate.
 

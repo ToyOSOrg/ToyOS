@@ -2294,8 +2294,7 @@ const T14_COLS: usize = 1920 / 8;
 
 /// The line `SYS_DEBUG` action 3 logs immediately before halting every CPU.
 /// It exists only on a `test-actuators` kernel — every other action costs the
-/// caller its own process, this one costs the machine. Kept in sync with
-/// `kernel/src/syscall/debug.rs` by this comment.
+/// caller its own process, this one costs the machine.
 const FATAL_HALT_NONCE: &str = "SYS_DEBUG: fatal halt 4b1d9e2c";
 
 /// How far a corpus case gets before it stops, and what it says when it does.
@@ -15807,7 +15806,7 @@ fn main() {
         && screen_to_run.is_empty()
         && machine_to_run.is_empty()
     {
-        eprintln!("No enabled test matches filter {filter:?}");
+        eprintln!("No test matches filter {filter:?}");
         run.exit(1);
     }
 

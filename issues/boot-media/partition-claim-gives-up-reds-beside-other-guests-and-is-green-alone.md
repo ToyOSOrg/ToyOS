@@ -29,8 +29,6 @@ Not the diff it was seen from: that branch touches `bcachefs/`,
 binary — nothing under `tests/common/partclaim.rs` or the kernel's `partclaim`
 module.
 
-Owed to whoever next runs a session free to measure it.
-
 **A rate, from `wt/toyos-inspect` (PR #501, round-2 review fixes), same day,
 different diff.** `cargo test --test toyos-build -- partition_claim_gives_up`
 alone, 7 back-to-back runs on one dev host: 6 green, 1 red (the deadman case,

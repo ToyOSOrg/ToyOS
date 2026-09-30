@@ -23,9 +23,6 @@ host: fastest boot 2050 ms against the reference 1320 ms — liveness ceilings
 paid at 1.55x width
 ```
 
-`cargo run -- --known-red kernel_log_file` answered `NOT ON THE LIST` when this
-was filed. What is owed is unchanged and is the rate.
-
 **The company is recorded, because the runner is the instrument.** A second
 agent's `cargo test --workspace` was running in `toyos-banner` on the same
 laptop for the red run. Three re-runs immediately after, at load averages 3.12,

@@ -40,7 +40,6 @@ and `toolchain-ready` is what gates the matrix in the first place.
 
 Nor does it help the shards that pay *more* than the floor: shipping
 `metalcase`'s and `sshdcase`'s images too would put 198 s and 145 s of build
-(`issues/build/the-shard-split-prices-a-boot-and-not-the-image-behind-it.md`)
 in series inside one job, past 500 s, against the 347 s widest shard it was
 meant to shorten.
 

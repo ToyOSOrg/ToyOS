@@ -148,9 +148,7 @@ changes.
   `cargo test` runs on `wt/toyos-panicstall`, whose whole delta is the harness's
   panic vocabulary, with a second worktree's suite holding guest slots
   throughout — `toyos-i8042fix` names this very test in that run's
-  `[host-slots]` lines. `the close probe exited Some(1)`, `ALONE … GREEN`, and
-  `cargo run -- --known-red log_poll_outlives_a_close` answers `NOT ON THE
-  LIST`, so this is its first recorded sighting. Not investigated.
+  `[host-slots]` lines. `the close probe exited Some(1)`, `ALONE … GREEN`. Not investigated.
 - **`metal_sim_input`** — added 2026-08-18, **1 of 4** runs on
   `wt/toyos-lifecycle` (kernel delta: `process_poll_add`'s refusal split and
   `Source::ended_by_its_last_handle`, neither of them on a boot path), inside a
@@ -159,7 +157,6 @@ changes.
   DOUBLE PANIC … after 0 of the sequence`, so it died **before the first
   injection**, which is the boot and not the test. `ALONE … GREEN` in 2 s
   against 20 s under load, then green 3 of 3 more alone.
-  `cargo run -- --known-red metal_sim_input` answers `NOT ON THE LIST`.
 
   **Its mechanism is not this file's census race and it is filed here for want
   of a better register.** A kernel panic during a loaded boot was a filed class
@@ -176,8 +173,7 @@ changes.
   roughly one boot in a hundred.
 - **`xhci_full_speed_device`** — added 2026-08-19, **1 of 2** full `cargo test`
   runs on `wt/toyos-clippygate`. `"PANIC:" during the USB gate boot`,
-  `ALONE … GREEN`, and `cargo run -- --known-red xhci_full_speed_device`
-  answers `NOT ON THE LIST`. The two runs are the measurement: the red one was
+  `ALONE … GREEN`. The two runs are the measurement: the red one was
   the branch's *first* suite after a full rebuild and its parallel phase took
   103.9 s, the green one minutes later on a warm tree took 32.0 s — so the phase
   that failed was carrying this worktree's own twelve kernel builds. The branch's
@@ -221,9 +217,7 @@ changes.
   throughout and named in that run's own `[host-slots]` lines. The other two
   runs were 270/270 on a tree differing from the red one by two doc comments and
   one removed `#[track_caller]`; the branch's kernel delta touches no TLB, no
-  shootdown and no `munmap` path. `ALONE … GREEN` in 145 ms, and
-  `cargo run -- --known-red tlb_shootdown_waits` answered `NOT ON THE LIST`, so
-  this is its first recorded sighting. `screen_early_panic` failed in the same
+  shootdown and no `munmap` path. `ALONE … GREEN` in 145 ms. `screen_early_panic` failed in the same
   run and is already this file's and the redlist's, `ALONE … GREEN` there too.
 
   The assertion that went red is the test's own disarmed control: `munmap still
@@ -239,8 +233,7 @@ changes.
   there`, `ALONE … GREEN` on the harness's own re-run. Same shape as
   `desktop_locale_detect` above — a wizard waiting for a key it was never
   handed — but against `/system/bin/console` rather than `/system/bin/terminal`, so it is not
-  provably the same boot race and is filed separately. `cargo run --
-  --known-red console_locale_detect` answered `NOT ON THE LIST`.
+  provably the same boot race and is filed separately.
 
   **Investigated 2026-08-29, and it was never a boot race**: the job's own
   capture shows the shell echoing `/home/root> locale dct` and running it
@@ -262,8 +255,7 @@ changes.
   which is what the guest's own message says when the storm line has not arrived
   yet. `ALONE … GREEN` in **5 s** in the same session, reporting the storm in
   full: `3000 sent, 3000 taken, 43 in the window, 140 in Ring 3, 663 syscalls
-  made under the storm`. `cargo run -- --known-red syscall_window_nmi` answered
-  `NOT ON THE LIST` when it was filed.
+  made under the storm`.
 
   **Not the branch it was found on**: that branch changed the syscall entry's
   displacement *spelling* — `const` operands for the same immediates,
@@ -294,9 +286,7 @@ changes.
   investigated further; filed so a fourth sighting is not re-derived.
 
 - **`screen_loader_lines`** — added 2026-09-06 on `t14-reset-early`, one of two
-  full `cargo test` runs, `ALONE … GREEN`, and `cargo run -- --known-red
-  screen_loader_lines` answered `NOT ON THE LIST`, so this is its first recorded
-  sighting. `the panel carries 0 band(s) of lit scanlines, too few to take a row
+  full `cargo test` runs, `ALONE … GREEN`. `the panel carries 0 band(s) of lit scanlines, too few to take a row
   pitch from` — **zero** bands rather than a wrong count, so the panel was blank
   when it was decoded and not carrying the wrong thing, which is this file's
   liveness shape and not a content one. Worth stating because that branch does
@@ -321,8 +311,7 @@ changes.
 - **`quiesce_dump_holds_the_stopped`**, first sighting — 2026-09-25 on
   `wt/toyos-ramroot` (PR #506, head `696f46cb`), one full fast tier: `QEMU never
   reported stopping: the guest asked for a reboot and stayed up`, after 262 s,
-  then `ALONE … GREEN`. `cargo run -- --known-red quiesce_dump_holds_the_stopped`
-  answered `NO, not quarantined`. That branch makes every guest hold its whole
+  then `ALONE … GREEN`. That branch makes every guest hold its whole
   ROOT in RAM, so it was A/B'd: `cargo test` alternating between `origin/main`
   at `b0adc600` and the branch at `69f783f4`, three arms each in one session.
   The test passed in all six. The arms' reds, every one `ALONE … GREEN` and
