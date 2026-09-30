@@ -7,12 +7,6 @@
 //! and nothing here touches a machine. `tests/metaldevicecase` is the boot that
 //! produces them: `userland/metalprobe`'s jobs measure, exit with their spans,
 //! and the kernel's own `exit:` record carries each one off the machine.
-//!
-//! **What a number may be is not here, and there is one place it is.** Every
-//! measurement the suite takes is priced by name in `tests/metal-profile.toml`
-//! and judged by [`crate::metalprofile`], which refuses a name with no row;
-//! what this holds is the *shape* both ends have to agree about, so a host and
-//! a guest cannot come to different answers about a word.
 
 #![forbid(unsafe_code)]
 
@@ -340,10 +334,6 @@ pub fn inventory(log: &str) -> Vec<String> {
 /// included, each table judged against its own writer's part of it. Each line
 /// opens with the `about` it failed, so a caller can name them without reading
 /// the prose.
-///
-/// A `Vec` of failures and not a `Vec<Verdict>`: the device suite's numbers are
-/// priced in `tests/metal-profile.toml` and judged there, so what is left here
-/// is the half that is about records.
 pub fn unmet(loader: &str, log: &str) -> Vec<String> {
     let mut out = Vec::new();
     let kernel = crate::bootlog::kernel_records(log);

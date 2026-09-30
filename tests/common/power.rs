@@ -1739,10 +1739,10 @@ const WEDGE_PHASES: &[(&[&str], Phase)] = &[
 ///
 /// **What an emulator can prove here and what it cannot.** Whether a device
 /// survives being cut is the T14's own stick to answer and nothing here can ask
-/// it; `boot.usbload.stick_secs` is where it is asked. What this arm judges is
-/// that the machine really stopped inside a command and that the reset's
-/// account names which one — the only evidence a reset leaves about what it
-/// found. [`Profile::Metal`](qemu::Profile::Metal) carries the boot stick on
+/// it. What this arm judges is that the machine really stopped inside a
+/// command and that the reset's account names which one — the only evidence a
+/// reset leaves about what it found.
+/// [`Profile::Metal`](qemu::Profile::Metal) carries the boot stick on
 /// its xHCI, which is why the wedge has a device to be inside at all.
 pub fn usb_reset_records_the_phase_it_cut(
     _test_config: &Path,
@@ -1772,8 +1772,7 @@ pub fn usb_reset_records_the_phase_it_cut(
 /// **This machine's disk is the image, and no guest here has the gibibyte the
 /// sweep demands.** What a guest can establish is that the arm says so by name
 /// and lets the boot end, rather than silently staging nothing and reading back
-/// as a wedge that never happened. That it streams at all, and what a reset
-/// landing on it does to a device, is `boot.usbload.stick_secs` on the T14.
+/// as a wedge that never happened.
 fn the_load_refuses_a_disk_with_no_room() -> Result<(), String> {
     let config = super::compile::repo_root().join("tests/jobcase/system.toml");
     let case = config.parent().expect("system.toml has a directory");
@@ -2353,8 +2352,7 @@ fn sealed_state(qemu: &mut QemuInstance, within: Duration) -> Result<(State, Vec
 /// **The re-enumeration, taken off the boot after the reset.** Under QEMU it is
 /// weak on purpose: an emulated stick cannot be wedged, so this arm judges that
 /// the account is produced and that the machine still comes up on the same
-/// device. The T14 is the judge of the device itself, and `tests/metal-profile`
-/// carries its row.
+/// device.
 const STICK_ENUMERATED: &str = "usb-storage: 1 device(s)";
 
 /// Every way this kernel resets a machine, and the account each one leaves.
@@ -2540,12 +2538,9 @@ fn one_reset_path(case: &Path, arm: &ResetPath) -> Result<(), String> {
 /// The T14's judge for [`usb_reset_hands_devices_back`].
 ///
 /// **The machine is the judge of the device, and nothing else is.** QEMU cannot
-/// wedge a stick, and what says the boot before this one left the bench's own
-/// device enumerable is the driver's `boot.<boot>.stick_secs` row — recorded
-/// before the mount, so it is a number and not the reason a mount happened to
-/// work. What is left for this to read is the reset's own account, which on this
-/// machine is in `loader.log`'s pass after the reset rather than in any file the
-/// kernel wrote.
+/// wedge a stick. What is left for this to read is the reset's own account,
+/// which on this machine is in `loader.log`'s pass after the reset rather than
+/// in any file the kernel wrote.
 ///
 /// Both arms are orderly reboots, so both owe the barrier. The panic path's
 /// account is judged under QEMU only: on this machine a kernel that panics
