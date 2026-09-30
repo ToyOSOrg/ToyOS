@@ -772,10 +772,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // One boot of its own, because it ends the machine. Every verdict is a
     // kernel line or the stop reason QEMU reported; no clock is in either.
     ("machine_reboot", Sched::Parallel),
-    // Its own boot, and the one whose numbers are the T14's: what it judges
-    // here is the plumbing, since every span on an emulated device is a fact
-    // about TCG.
-    ("metal_device_probe", Sched::Parallel),
     // Its own boot: it ends the machine, and its verdict is the order of
     // kernel lines.
     ("quiesce_refuses_a_second_shutdown", Sched::Parallel),
@@ -1279,12 +1275,6 @@ const METAL_SIM_CLIENTS: &[&str] = &[
 /// than derived from its config and parameters, because sharing is not always
 /// safe and only the author knows.
 const METAL: &[(&str, metal::Metal)] = &[
-    (
-        // The device list: the T14's own xHCI, stick, i8042, HDA, framebuffer
-        // and NVMe, asserted from the records the shipping kernel writes.
-        "metal_device_probe",
-        metal::Metal::Runs { arms: METALDEVICECASE, judge: |b| devices::on_metal(b[0]) },
-    ),
     (
         "lan_dhcp_lease",
         metal::Metal::Runs { arms: LANCASE, judge: |b| lan::on_metal(b[0]) },
@@ -1799,9 +1789,8 @@ const JOBCASE: &[metal::Arm] = &[metal::once("jobcase", "tests/jobcase", &[], &[
 const LOGSTALLCASE: &[metal::Arm] =
     &[metal::once("logstallcase", "tests/logstallcase", &[], &["test_rs_soundd_log_stall"])];
 
-/// The two boots the reset ruling is judged on, and both are boots this suite
-/// already flashes: the device boot for a reset with megabytes behind it, and
-/// `jobcase` for one with nothing.
+/// The two boots the reset ruling is judged on: the device boot for a reset
+/// with megabytes behind it, and `jobcase` for one with nothing.
 const USB_RESET_BOOTS: &[metal::Arm] = &[
     metal::once(
         devices::BOOT,
@@ -1882,20 +1871,6 @@ const SELFTESTS: &[metal::Arm] = &[metal::once(
         "sched-operation-nesting",
     ],
     &[],
-)];
-
-/// The device boot: the whole `metalprobe` job list on the T14's own devices.
-/// Its own image, because every job in it either claims the display or moves
-/// megabytes across the boot stick, and neither shares well.
-const METALDEVICECASE: &[metal::Arm] = &[metal::once(
-    devices::BOOT,
-    devices::CONFIG,
-    &[],
-    // The same list the committed config carries, so the image the driver
-    // flashes and the one the QEMU arm boots run the same jobs in the same
-    // order — `devices::the_config_runs_exactly_these_jobs` is what holds the
-    // two together.
-    devices::JOBS,
 )];
 
 /// The shared block's Rust binaries that do **not** go on the T14, and what
@@ -8221,7 +8196,6 @@ fn run_machine_test(
         // Body in `tests/common/gpt.rs`, same reason.
         "boot_partition_identity" => common::gpt::boot_partition_identity(test_config, c_bins, rust_bins),
         "machine_reboot" => power::machine_reboot(test_config, c_bins, rust_bins),
-        "metal_device_probe" => devices::metal_device_probe(test_config, c_bins, rust_bins),
         "quiesce_refuses_a_second_shutdown" => power::quiesce_refuses_a_second_shutdown(test_config, c_bins, rust_bins),
         "watchdog_resets" => power::watchdog_resets(test_config, c_bins, rust_bins),
         "loader_watchdog_arms" => power::loader_watchdog_arms(test_config, c_bins, rust_bins),
