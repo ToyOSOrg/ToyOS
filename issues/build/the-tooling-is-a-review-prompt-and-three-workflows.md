@@ -10,7 +10,7 @@ The rules a prompt can read off a branch move into `.claude/agents/reviewer.md`,
 and the gates that held them go.
 
 - A test is green and fast or it is deleted in the same pull request and filed;
-  then `src/redlist.rs`, `src/tiers.rs`, `35383398^:src/durations.rs` and
+  then `src/redlist.rs`, `35383398^:src/durations.rs` and
   `tests/test-durations` have no subject and go.
 - A shared cargo `target-dir` is safe only under `-Z checksum-freshness`;
   stable cargo ignores it silently.

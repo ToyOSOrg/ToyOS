@@ -12,6 +12,4 @@ p10-p90 shard spread that explains ordinary variance. `dump_nmi_probe` grew
 +29% over the same window (6,284 -> 8,098 ms). Either the boots these ride got
 genuinely slower — a real kernel-cost regression nobody measured on purpose —
 or the shard fleet's pricing shifted; the two hypotheses separate on a bisect
-of the boot's own timestamps across the window's landings. Noticed while
-relegating the straddler batch; the relegation hides the symptom from the
-per-PR gate, which is exactly why the growth is recorded here.
+of the boot's own timestamps across the window's landings.

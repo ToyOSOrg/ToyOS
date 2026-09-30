@@ -51,4 +51,4 @@ stdio console.
 The console chardev the harness reads cannot refuse a write — for example a
 file chardev the harness follows, or a `virtserialport`, which QEMU throttles
 instead of dropping. Shown by `log_stream_stalled_reader` green in 20 of 20
-runs beside a full nightly.
+runs beside a full suite.
