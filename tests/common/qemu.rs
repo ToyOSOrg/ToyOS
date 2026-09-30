@@ -3163,9 +3163,7 @@ impl QemuInstance {
     /// **Not scaled by the width**, and it is the one duration in this file that
     /// is not. Callers use it to *pace* — "let the guest run for 400 ms and tell
     /// me what it said" — so multiplying it does not buy a slow guest more room,
-    /// it buys the test a longer sleep. `metal_sim_pointer_churn` has
-    /// twenty-four of these; scaled, they made it an 86 s job at width 8 and the
-    /// critical path of the whole phase.
+    /// it buys the test a longer sleep.
     pub fn drain_serial(&mut self, dur: Duration) -> String {
         self.drain_for(dur, |_| false)
     }
