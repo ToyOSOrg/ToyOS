@@ -10,7 +10,7 @@ opened: 2026-09-30
 C sysroot after libc, so every change the sysroot key sees, an edit to
 `toyos-abi/src`, `toyos/src` or libc's `src/` among them, configures and
 builds both targets' runtimes again. On the development host one target's
-configure took 5.9 s and its build 6.3 s (`cmake` and `ninja install`, x86_64,
+configure took 4.4 s and its build 6.0 s (`cmake`, and n2's `install`, x86_64,
 LLVM `1425e623e612b348`).
 
 The runtime is a function of the LLVM key, libc's `include/` and
