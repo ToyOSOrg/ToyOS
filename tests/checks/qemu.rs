@@ -198,25 +198,23 @@ pub fn ceiling_self_check() -> Result<(), String> {
              would red healthy",
         ));
     }
-    // (e) A ceiling under [`GUEST_QUIET`], walked a second at a time: a guest
-    //     silent from any point in its budget is a stall, and a kernel that died
-    //     at any point, before or after its ceiling, is named.
     const SHORT: Duration = Duration::from_secs(5);
-    let first = |dying: Option<&str>, from: u64| {
-        (0..).map(Duration::from_secs).find_map(|quiet| {
-            ceiling_verdict(dying, Duration::from_secs(from) + quiet, SHORT, quiet, 40)
-        })
+    // What the read loop polls a silent guest at.
+    const STEP: Duration = Duration::from_millis(100);
+    let every = || (0..).map(|n| STEP * n);
+    let first = |dying: Option<&str>, from: Duration| {
+        every().find_map(|quiet| ceiling_verdict(dying, from + quiet, SHORT, quiet, 40))
     };
-    for since in 0..=SHORT.as_secs() {
+    for since in every().take_while(|&t| t <= SHORT) {
         let got = first(None, since);
         if !got.as_deref().is_some_and(|v| v.starts_with(STALLED)) {
-            return Err(format!("silent from {since}s under a {SHORT:?} ceiling: {got:?}"));
+            return Err(format!("silent from {since:?} under a {SHORT:?} ceiling: {got:?}"));
         }
     }
-    for died in 0..=4 * SHORT.as_secs() {
+    for died in every().take_while(|&t| t <= SHORT * 4) {
         let got = first(Some(KERNEL), died);
         if !got.as_deref().is_some_and(|v| v.contains("kernel panic")) {
-            return Err(format!("a kernel death at {died}s under a {SHORT:?} ceiling: {got:?}"));
+            return Err(format!("a kernel death at {died:?} under a {SHORT:?} ceiling: {got:?}"));
         }
     }
 

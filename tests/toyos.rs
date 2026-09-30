@@ -12120,7 +12120,7 @@ fn run_machine_test(
             );
             let mut log = qemu.boot_log().to_string();
             if !log.lines().any(handler_post_said) {
-                log += &qemu.drain_until(Duration::from_secs(30), handler_post_said);
+                log += &qemu.drain_until(Duration::from_secs(12), handler_post_said);
             }
             handler_post(&log)
         }
