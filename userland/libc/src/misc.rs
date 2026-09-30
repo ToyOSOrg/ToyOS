@@ -6,10 +6,8 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use toyos_abi::syscall;
 
+use crate::errno::{ECHILD, ENOSYS};
 use crate::strtonum;
-
-const ENOSYS: i32 = 38;
-const ECHILD: i32 = 10;
 
 // Environment variables
 
@@ -315,12 +313,19 @@ pub unsafe extern "C" fn bsearch(
 
 // String-to-number conversions: the grammar and the rounding are `strtonum`'s.
 
-/// Where `s` ends after `end` code units, or `s` itself when there was no
-/// number: what C's `endptr` is told.
-pub(crate) unsafe fn set_end<U>(s: *const U, end: usize, endptr: *mut *mut U) {
-    if !endptr.is_null() {
-        unsafe { *endptr = s.add(end).cast_mut() };
+/// What C is told of `read`, a number read from `s`: its value, returned;
+/// where it ends in `endptr`, or `s` itself when there was none; and a
+/// refusal in `errno`.
+pub(crate) unsafe fn answer<U, T>(s: *const U, read: strtonum::Read<T>, endptr: *mut *mut U) -> T {
+    match read.refused {
+        Some(strtonum::Refusal::Base) => crate::errno::set(crate::errno::EINVAL),
+        Some(strtonum::Refusal::Range) => crate::errno::set(crate::errno::ERANGE),
+        None => {}
     }
+    if !endptr.is_null() {
+        unsafe { *endptr = s.add(read.end).cast_mut() };
+    }
+    read.value
 }
 
 #[no_mangle]
@@ -340,16 +345,12 @@ pub unsafe extern "C" fn atoll(s: *const u8) -> i64 {
 
 #[no_mangle]
 pub unsafe extern "C" fn strtol(s: *const u8, endptr: *mut *mut u8, base: i32) -> i64 {
-    let (value, end) = unsafe { strtonum::signed(s, base) };
-    unsafe { set_end(s, end, endptr) };
-    value
+    unsafe { answer(s, strtonum::signed(s, base), endptr) }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn strtoul(s: *const u8, endptr: *mut *mut u8, base: i32) -> u64 {
-    let (value, end) = unsafe { strtonum::unsigned(s, base) };
-    unsafe { set_end(s, end, endptr) };
-    value
+    unsafe { answer(s, strtonum::unsigned(s, base), endptr) }
 }
 
 #[no_mangle]
@@ -374,16 +375,12 @@ pub unsafe extern "C" fn strtoumax(s: *const u8, endptr: *mut *mut u8, base: i32
 
 #[no_mangle]
 pub unsafe extern "C" fn strtod(s: *const u8, endptr: *mut *mut u8) -> f64 {
-    let (value, end) = unsafe { strtonum::float::<u8, f64>(s) };
-    unsafe { set_end(s, end, endptr) };
-    value
+    unsafe { answer(s, strtonum::float::<u8, f64>(s), endptr) }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn strtof(s: *const u8, endptr: *mut *mut u8) -> f32 {
-    let (value, end) = unsafe { strtonum::float::<u8, f32>(s) };
-    unsafe { set_end(s, end, endptr) };
-    value
+    unsafe { answer(s, strtonum::float::<u8, f32>(s), endptr) }
 }
 
 // abs and div
@@ -499,6 +496,10 @@ pub unsafe extern "C" fn getentropy(buffer: *mut u8, length: usize) -> i32 {
     if length > 256 {
         crate::errno::set(crate::errno::EINVAL);
         return -1;
+    }
+    // Before the slice: `buffer` may be null when there is nothing to fill.
+    if length == 0 {
+        return 0;
     }
     let buf = unsafe { core::slice::from_raw_parts_mut(buffer, length) };
     match syscall::random(buf) {

@@ -459,23 +459,33 @@ unsafe fn do_printf(buf: *mut u8, n: usize, fmt: *const u8, ap: &mut VaList<'_>)
     w.pos as i32
 }
 
-/// Format into a buffer on the stack, or on the heap for an output it cannot
-/// hold, and write all of it to `f`.
-unsafe fn print_to(f: *mut super::stdio::FILE, fmt: *const u8, ap: VaList<'_>) -> i32 {
-    let mut buf = [0u8; 4096];
-    let n = do_printf(buf.as_mut_ptr(), buf.len(), fmt, &mut ap.clone());
+/// Hand `take` the whole of what `fmt` formats to, NUL-terminated, formatted
+/// into a buffer on the stack, and again on the heap for an output that
+/// buffer cannot hold: its length, or -1 when the format or `take` refuses.
+unsafe fn formatted(fmt: *const u8, ap: VaList<'_>, take: impl FnOnce(&[u8]) -> bool) -> i32 {
+    let mut stack = [0u8; 4096];
+    let n = do_printf(stack.as_mut_ptr(), stack.len(), fmt, &mut ap.clone());
     if n < 0 {
         return n;
     }
-    if (n as usize) < buf.len() {
-        super::stdio::fwrite(buf.as_ptr(), 1, n as usize, f);
-        return n;
-    }
-    let mut whole = vec![0u8; n as usize + 1];
-    let mut ap = ap;
-    do_printf(whole.as_mut_ptr(), whole.len(), fmt, &mut ap);
-    super::stdio::fwrite(whole.as_ptr(), 1, n as usize, f);
-    n
+    let len = n as usize;
+    let taken = if len < stack.len() {
+        take(&stack[..=len])
+    } else {
+        let mut whole = vec![0u8; len + 1];
+        let mut ap = ap;
+        do_printf(whole.as_mut_ptr(), whole.len(), fmt, &mut ap);
+        take(&whole)
+    };
+    if taken { n } else { -1 }
+}
+
+/// Write the whole of what `fmt` formats to to `f`.
+unsafe fn print_to(f: *mut super::stdio::FILE, fmt: *const u8, ap: VaList<'_>) -> i32 {
+    formatted(fmt, ap, |bytes| {
+        super::stdio::fwrite(bytes.as_ptr(), 1, bytes.len() - 1, f);
+        true
+    })
 }
 
 #[no_mangle]
@@ -583,18 +593,14 @@ fn write_padded_bytes(w: &mut BufWriter, bytes: &[u8], width: usize, left: bool)
 
 #[no_mangle]
 pub unsafe extern "C" fn vasprintf(out: *mut *mut u8, fmt: *const u8, ap: VaList<'_>) -> i32 {
-    let len = do_printf(core::ptr::null_mut(), 0, fmt, &mut ap.clone());
-    if len < 0 {
-        return -1;
-    }
-    let buf = super::memory::malloc(len as usize + 1);
-    if buf.is_null() {
-        return -1;
-    }
-    let mut ap = ap;
-    do_printf(buf, len as usize + 1, fmt, &mut ap);
-    *out = buf;
-    len
+    formatted(fmt, ap, |bytes| {
+        let buf = super::memory::malloc(bytes.len());
+        if !buf.is_null() {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, bytes.len());
+            *out = buf;
+        }
+        !buf.is_null()
+    })
 }
 
 #[no_mangle]

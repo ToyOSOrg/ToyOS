@@ -5,8 +5,10 @@
 //! thread this library did not start (the main thread, or one Rust's std
 //! spawned) is named by the address of its own [`MARKER`] with [`FOREIGN`]
 //! set, which no block's address has, and cannot be joined or detached.
-//! Keys, their values and the `thread_local` destructors are the calling
-//! thread's own, in the TLS block the kernel lays out for every thread.
+//!
+//! **No `pthread_t` exists before its thread's tid is recorded**: the new
+//! thread waits for its creator to publish the tid before it runs anything,
+//! so every holder of a handle can join it.
 //!
 //! A thread that ends detached hands its block to [`REAPED`], and the next
 //! `pthread_create` joins it and frees its stack, which no thread can free
@@ -37,8 +39,7 @@ const ATTR_DETACHED: u64 = 1;
 /// One thread `pthread_create` started.
 struct Thread {
     tid: AtomicU64,
-    /// Nonzero once `tid` is written: a thread that ends before its creator
-    /// has recorded its tid is reaped only after.
+    /// Nonzero once `tid` is written; the thread waits for it before it runs.
     published: AtomicU32,
     state: AtomicU32,
     stack: *mut u8,
@@ -127,24 +128,27 @@ fn stack_layout(size: usize) -> Layout {
     Layout::from_size_align(size, STACK_ALIGN).expect("a thread stack's size is a multiple of its alignment")
 }
 
-/// Wait for `thread` to be gone, and free its stack and block.
-unsafe fn reap(thread: *mut Thread) {
+/// Wait for `thread` to be gone, free its stack and block, and answer what it
+/// returned.
+unsafe fn reap(thread: *mut Thread) -> *mut u8 {
+    let t = unsafe { &*thread };
+    syscall::thread_join(t.tid.load(Ordering::Relaxed));
+    let result = t.result.load(Ordering::Acquire);
+    unsafe {
+        heap_dealloc(t.stack, stack_layout(t.stack_size));
+        drop(Box::from_raw(thread));
+    }
+    result
+}
+
+unsafe extern "C" fn thread_entry(arg: u64) {
+    let thread = arg as *mut Thread;
     let t = unsafe { &*thread };
     while t.published.load(Ordering::Acquire) == 0 {
         // SAFETY: `published` is a live, aligned u32.
         unsafe { syscall::futex_wait(t.published.as_ptr(), 0, None) };
     }
-    syscall::thread_join(t.tid.load(Ordering::Relaxed));
-    unsafe {
-        heap_dealloc(t.stack, stack_layout(t.stack_size));
-        drop(Box::from_raw(thread));
-    }
-}
-
-unsafe extern "C" fn thread_entry(arg: u64) {
-    let thread = arg as *mut Thread;
     SELF.set(thread);
-    let t = unsafe { &*thread };
     let result = unsafe { (t.start)(t.arg) };
     unsafe { exit_thread(result) }
 }
@@ -206,11 +210,16 @@ pub unsafe extern "C" fn pthread_create(
         }
         return EAGAIN;
     }
-    let t = unsafe { &*block };
-    t.tid.store(tid, Ordering::Relaxed);
-    t.published.store(1, Ordering::Release);
-    // SAFETY: `published` is a live, aligned u32.
-    unsafe { syscall::futex_wake(t.published.as_ptr(), u32::MAX) };
+    // Taken before the store: once `published` is set the thread may run, end
+    // detached and be reaped, so nothing after it reads the block.
+    let published = unsafe { (*block).published.as_ptr() };
+    unsafe {
+        (*block).tid.store(tid, Ordering::Relaxed);
+        (*block).published.store(1, Ordering::Release);
+    }
+    // At a freed block's address this is a spurious wake, which every futex
+    // waiter here re-checks its word against.
+    unsafe { syscall::futex_wake(published, u32::MAX) };
     if !thread.is_null() {
         unsafe { *thread = block as PthreadT };
     }
@@ -226,17 +235,12 @@ pub unsafe extern "C" fn pthread_join(thread: PthreadT, retval: *mut *mut u8) ->
         return ESRCH;
     }
     let block = thread as *mut Thread;
-    let t = unsafe { &*block };
-    if t.state.load(Ordering::Acquire) == DETACHED {
+    if unsafe { &*block }.state.load(Ordering::Acquire) == DETACHED {
         return EINVAL;
     }
-    syscall::thread_join(t.tid.load(Ordering::Relaxed));
+    let result = unsafe { reap(block) };
     if !retval.is_null() {
-        unsafe { *retval = t.result.load(Ordering::Acquire) };
-    }
-    unsafe {
-        heap_dealloc(t.stack, stack_layout(t.stack_size));
-        drop(Box::from_raw(block));
+        unsafe { *retval = result };
     }
     0
 }
@@ -399,25 +403,28 @@ pub unsafe extern "C" fn pthread_cond_init(cond: *mut PthreadCondT, _attr: *cons
 }
 
 /// Release `mutex`, sleep until `cond` is signalled or `timeout` nanoseconds
-/// pass, and take `mutex` again, as many times as it was held: whether the
-/// wait timed out.
-unsafe fn cond_wait(cond: *mut PthreadCondT, mutex: *mut PthreadMutexT, timeout: Option<u64>) -> bool {
+/// pass, and take `mutex` again, as many times as it was held: 0, or
+/// `ETIMEDOUT`, or `EPERM` for a recursive or error-checking mutex the caller
+/// does not hold, as POSIX says.
+unsafe fn cond_wait(cond: *mut PthreadCondT, mutex: *mut PthreadMutexT, timeout: Option<u64>) -> i32 {
+    let m = unsafe { &*mutex };
+    if m.kind != MUTEX_NORMAL && m.owner.load(Ordering::Relaxed) != pthread_self() {
+        return EPERM;
+    }
     let seq = unsafe { &(*cond).seq };
     let at = seq.load(Ordering::Relaxed);
-    let m = unsafe { &*mutex };
     let held = m.count.swap(1, Ordering::Relaxed);
     unsafe { pthread_mutex_unlock(mutex) };
     // SAFETY: `seq` is a live, aligned u32.
     let timed_out = unsafe { syscall::futex_wait(seq.as_ptr(), at, timeout) } == 1;
     unsafe { pthread_mutex_lock(mutex) };
     m.count.store(held, Ordering::Relaxed);
-    timed_out
+    if timed_out { ETIMEDOUT } else { 0 }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn pthread_cond_wait(cond: *mut PthreadCondT, mutex: *mut PthreadMutexT) -> i32 {
-    unsafe { cond_wait(cond, mutex, None) };
-    0
+    unsafe { cond_wait(cond, mutex, None) }
 }
 
 #[no_mangle]
@@ -438,7 +445,7 @@ pub unsafe extern "C" fn pthread_cond_timedwait(
         return ETIMEDOUT;
     }
     let left = u64::try_from(left).unwrap_or(u64::MAX - 1);
-    if unsafe { cond_wait(cond, mutex, Some(left)) } { ETIMEDOUT } else { 0 }
+    unsafe { cond_wait(cond, mutex, Some(left)) }
 }
 
 #[no_mangle]
@@ -662,8 +669,11 @@ pub unsafe extern "C" fn pthread_attr_setstacksize(attr: *mut u64, size: usize) 
     if size < STACK_MIN {
         return EINVAL;
     }
-    let size = size.next_multiple_of(STACK_ALIGN) as u64;
-    unsafe { *attr = size | (*attr & ATTR_DETACHED) };
+    // A size no allocation can have is refused here, not in `pthread_create`.
+    let Some(size) = size.checked_next_multiple_of(STACK_ALIGN).filter(|&s| s <= isize::MAX as usize) else {
+        return EINVAL;
+    };
+    unsafe { *attr = size as u64 | (*attr & ATTR_DETACHED) };
     0
 }
 

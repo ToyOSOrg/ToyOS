@@ -20,6 +20,7 @@ mod stdio;
 mod string;
 mod strtonum;
 mod time;
+mod utf8;
 mod wchar;
 
 // C runtime: the entry `arch::_start` calls, panic handler, and global allocator.

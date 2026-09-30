@@ -1,10 +1,26 @@
 //! The one reader of numbers out of C strings, narrow and wide: the grammar of
 //! `strtol` and `strtod`, their `endptr`, and their `ERANGE`. A decimal
-//! floating-point number is rounded by `core`'s parser, correctly.
+//! floating-point number is rounded by `core`'s parser, correctly. It reads
+//! and sets nothing but what it is handed, so the host tests it
+//! (`toyos-libc-copies`).
 
 use alloc::vec::Vec;
 
-use crate::errno::{self, EINVAL, ERANGE};
+/// A number read out of a C string.
+pub(crate) struct Read<T> {
+    pub(crate) value: T,
+    /// How many code units it spans: 0 when there is no number.
+    pub(crate) end: usize,
+    pub(crate) refused: Option<Refusal>,
+}
+
+/// What C's readers tell `errno`.
+pub(crate) enum Refusal {
+    /// A base C does not define: `EINVAL`.
+    Base,
+    /// A value outside the type: `ERANGE`.
+    Range,
+}
 
 /// A code unit of a C string: `char` or `wchar_t`.
 pub(crate) trait Unit: Copy {
@@ -98,38 +114,31 @@ pub(crate) unsafe fn int<U: Unit>(s: *const U, base: i32) -> Option<Int> {
     Some(Int { negative, magnitude, end })
 }
 
-/// `strtol`'s answer, with `errno` and the end index.
-pub(crate) unsafe fn signed<U: Unit>(s: *const U, base: i32) -> (i64, usize) {
+/// `strtol`'s answer.
+pub(crate) unsafe fn signed<U: Unit>(s: *const U, base: i32) -> Read<i64> {
     let Some(n) = (unsafe { int(s, base) }) else {
-        errno::set(EINVAL);
-        return (0, 0);
+        return Read { value: 0, end: 0, refused: Some(Refusal::Base) };
     };
-    let value = match (n.magnitude, n.negative) {
-        (Some(m), false) if m <= i64::MAX as u64 => m as i64,
-        (Some(m), true) if m <= i64::MIN.unsigned_abs() => (m as i64).wrapping_neg(),
-        (_, negative) => {
-            errno::set(ERANGE);
-            if negative { i64::MIN } else { i64::MAX }
-        }
+    let (value, refused) = match (n.magnitude, n.negative) {
+        (Some(m), false) if m <= i64::MAX as u64 => (m as i64, None),
+        (Some(m), true) if m <= i64::MIN.unsigned_abs() => ((m as i64).wrapping_neg(), None),
+        (_, negative) => (if negative { i64::MIN } else { i64::MAX }, Some(Refusal::Range)),
     };
-    (value, n.end)
+    Read { value, end: n.end, refused }
 }
 
-/// `strtoul`'s answer, with `errno` and the end index: a negative number is
-/// negated in the unsigned type, as C says.
-pub(crate) unsafe fn unsigned<U: Unit>(s: *const U, base: i32) -> (u64, usize) {
+/// `strtoul`'s answer: a negative number is negated in the unsigned type, as
+/// C says.
+pub(crate) unsafe fn unsigned<U: Unit>(s: *const U, base: i32) -> Read<u64> {
     let Some(n) = (unsafe { int(s, base) }) else {
-        errno::set(EINVAL);
-        return (0, 0);
+        return Read { value: 0, end: 0, refused: Some(Refusal::Base) };
     };
-    match n.magnitude {
-        Some(m) if n.negative => (m.wrapping_neg(), n.end),
-        Some(m) => (m, n.end),
-        None => {
-            errno::set(ERANGE);
-            (u64::MAX, n.end)
-        }
-    }
+    let (value, refused) = match n.magnitude {
+        Some(m) if n.negative => (m.wrapping_neg(), None),
+        Some(m) => (m, None),
+        None => (u64::MAX, Some(Refusal::Range)),
+    };
+    Read { value, end: n.end, refused }
 }
 
 /// The IEEE formats `strtof` and `strtod` round to.
@@ -179,16 +188,16 @@ impl Float for f32 {
     }
 }
 
-/// Read a floating-point number from `s` as `strtod` does, rounded to `F`,
-/// with `errno` and the end index (0 when there is no number).
-pub(crate) unsafe fn float<U: Unit, F: Float>(s: *const U) -> (F, usize) {
+/// Read a floating-point number from `s` as `strtod` does, rounded to `F`.
+pub(crate) unsafe fn float<U: Unit, F: Float>(s: *const U) -> Read<F> {
     let (i, negative) = unsafe { lead(s) };
     let sign = |x: F| if negative { -x } else { x };
+    let read = |value: F, end: usize| Read { value, end, refused: None };
     if unsafe { starts(s, i, b"infinity") } {
-        return (sign(F::INFINITY), i + 8);
+        return read(sign(F::INFINITY), i + 8);
     }
     if unsafe { starts(s, i, b"inf") } {
-        return (sign(F::INFINITY), i + 3);
+        return read(sign(F::INFINITY), i + 3);
     }
     if unsafe { starts(s, i, b"nan") } {
         let mut end = i + 3;
@@ -201,7 +210,7 @@ pub(crate) unsafe fn float<U: Unit, F: Float>(s: *const U) -> (F, usize) {
                 end = k + 1;
             }
         }
-        return (sign(F::NAN), end);
+        return read(sign(F::NAN), end);
     }
     let hex = unsafe {
         at(s, i) == 0x30
@@ -211,12 +220,10 @@ pub(crate) unsafe fn float<U: Unit, F: Float>(s: *const U) -> (F, usize) {
     };
     let (value, end, nonzero) = if hex { unsafe { hex_float::<U, F>(s, i + 2) } } else { unsafe { decimal::<U, F>(s, i) } };
     if end == 0 {
-        return (F::from_parts(0, 0), 0);
+        return read(F::from_parts(0, 0), 0);
     }
-    if value.is_infinite() || (nonzero && value.is_zero_or_subnormal()) {
-        errno::set(ERANGE);
-    }
-    (sign(value), end)
+    let range = value.is_infinite() || (nonzero && value.is_zero_or_subnormal());
+    Read { value: sign(value), end, refused: range.then_some(Refusal::Range) }
 }
 
 /// A decimal number at `s + i`: its value, its end (0 if none), and whether

@@ -1,8 +1,8 @@
 //! Wide characters, and the UTF-8 the one locale (`locale.rs`) encodes them
 //! in. A multibyte conversion refuses what is not UTF-8 (`EILSEQ`): an
-//! overlong form, a surrogate, a code point above U+10FFFF. Only reading UTF-8
-//! has a state; writing it has none. The character classes are the C
-//! locale's, which are ASCII's.
+//! overlong form, a surrogate, a code point above U+10FFFF (`utf8.rs`). Only
+//! reading UTF-8 has a state; writing it has none. The character classes are
+//! the C locale's, which are ASCII's.
 
 use core::ffi::VaList;
 use core::ptr;
@@ -11,6 +11,7 @@ use crate::arch::WChar;
 use crate::errno::{self, EILSEQ};
 use crate::locale::Locale;
 use crate::strtonum;
+use crate::utf8::{Byte, MbState};
 
 type WInt = i32;
 const WEOF: WInt = -1;
@@ -20,18 +21,6 @@ const EOF: i32 = -1;
 const INVALID: usize = usize::MAX;
 /// `(size_t)-2`: a character cut short, its bytes so far in the state.
 const INCOMPLETE: usize = usize::MAX - 1;
-
-/// `mbstate_t`: the bits of a code point so far, the continuation bytes it
-/// still needs in the low byte of `needed`, and its whole length above it.
-#[repr(C)]
-pub struct MbState {
-    bits: u32,
-    needed: u32,
-}
-
-impl MbState {
-    const INITIAL: MbState = MbState { bits: 0, needed: 0 };
-}
 
 /// The state a caller that passes none uses, one per function as C says.
 struct Internal(core::cell::UnsafeCell<MbState>);
@@ -45,68 +34,30 @@ fn state_or(ps: *mut MbState, internal: &'static Internal) -> *mut MbState {
     if ps.is_null() { internal.0.get() } else { ps }
 }
 
-/// The smallest code point a sequence of `len` bytes may encode.
-fn shortest(len: u32) -> u32 {
-    match len {
-        2 => 0x80,
-        3 => 0x800,
-        _ => 0x10000,
-    }
-}
-
 #[no_mangle]
 pub unsafe extern "C" fn mbrtowc(pwc: *mut WChar, s: *const u8, n: usize, ps: *mut MbState) -> usize {
     let st = unsafe { &mut *state_or(ps, &MBRTOWC_STATE) };
     if s.is_null() {
-        if st.needed != 0 {
+        if st.is_partial() {
             *st = MbState::INITIAL;
             errno::set(EILSEQ);
             return INVALID;
         }
         return 0;
     }
-    let mut i = 0;
-    while i < n {
-        let b = u32::from(unsafe { *s.add(i) });
-        i += 1;
-        if st.needed & 0xff == 0 {
-            let (bits, len) = match b {
-                0x00..=0x7f => (b, 1),
-                0xc2..=0xdf => (b & 0x1f, 2),
-                0xe0..=0xef => (b & 0x0f, 3),
-                0xf0..=0xf4 => (b & 0x07, 4),
-                _ => {
-                    errno::set(EILSEQ);
-                    return INVALID;
-                }
-            };
-            if len == 1 {
-                if !pwc.is_null() {
-                    unsafe { *pwc = b as WChar };
-                }
-                return if b == 0 { 0 } else { 1 };
-            }
-            *st = MbState { bits, needed: len << 8 | (len - 1) };
-            continue;
-        }
-        if b & 0xc0 != 0x80 {
-            *st = MbState::INITIAL;
-            errno::set(EILSEQ);
-            return INVALID;
-        }
-        st.bits = st.bits << 6 | (b & 0x3f);
-        st.needed -= 1;
-        if st.needed & 0xff == 0 {
-            let (cp, len) = (st.bits, st.needed >> 8);
-            *st = MbState::INITIAL;
-            if char::from_u32(cp).is_none() || cp < shortest(len) {
+    for i in 0..n {
+        match st.feed(unsafe { *s.add(i) }) {
+            Byte::Continues => {}
+            Byte::Refused => {
                 errno::set(EILSEQ);
                 return INVALID;
             }
-            if !pwc.is_null() {
-                unsafe { *pwc = cp as WChar };
+            Byte::Ends(cp) => {
+                if !pwc.is_null() {
+                    unsafe { *pwc = cp as WChar };
+                }
+                return if cp == 0 { 0 } else { i + 1 };
             }
-            return i;
         }
     }
     INCOMPLETE
@@ -139,7 +90,7 @@ pub unsafe extern "C" fn mbrlen(s: *const u8, n: usize, ps: *mut MbState) -> usi
 
 #[no_mangle]
 pub unsafe extern "C" fn mbsinit(ps: *const MbState) -> i32 {
-    (ps.is_null() || unsafe { (*ps).needed } == 0) as i32
+    (ps.is_null() || !unsafe { &*ps }.is_partial()) as i32
 }
 
 #[no_mangle]
@@ -523,16 +474,12 @@ pub unsafe extern "C" fn wmemset(dst: *mut WChar, c: WChar, n: usize) -> *mut WC
 
 #[no_mangle]
 pub unsafe extern "C" fn wcstol(s: *const WChar, endptr: *mut *mut WChar, base: i32) -> i64 {
-    let (value, end) = unsafe { strtonum::signed(s, base) };
-    unsafe { crate::misc::set_end(s, end, endptr) };
-    value
+    unsafe { crate::misc::answer(s, strtonum::signed(s, base), endptr) }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn wcstoul(s: *const WChar, endptr: *mut *mut WChar, base: i32) -> u64 {
-    let (value, end) = unsafe { strtonum::unsigned(s, base) };
-    unsafe { crate::misc::set_end(s, end, endptr) };
-    value
+    unsafe { crate::misc::answer(s, strtonum::unsigned(s, base), endptr) }
 }
 
 #[no_mangle]
@@ -557,16 +504,12 @@ pub unsafe extern "C" fn wcstoumax(s: *const WChar, endptr: *mut *mut WChar, bas
 
 #[no_mangle]
 pub unsafe extern "C" fn wcstod(s: *const WChar, endptr: *mut *mut WChar) -> f64 {
-    let (value, end) = unsafe { strtonum::float::<WChar, f64>(s) };
-    unsafe { crate::misc::set_end(s, end, endptr) };
-    value
+    unsafe { crate::misc::answer(s, strtonum::float::<WChar, f64>(s), endptr) }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn wcstof(s: *const WChar, endptr: *mut *mut WChar) -> f32 {
-    let (value, end) = unsafe { strtonum::float::<WChar, f32>(s) };
-    unsafe { crate::misc::set_end(s, end, endptr) };
-    value
+    unsafe { crate::misc::answer(s, strtonum::float::<WChar, f32>(s), endptr) }
 }
 
 // Formatted output: the narrow engine's, read back as UTF-8.
@@ -746,7 +689,7 @@ pub unsafe extern "C" fn fgetwc(f: *mut FILE) -> WInt {
     loop {
         let c = unsafe { crate::stdio::fgetc(f) };
         if c == EOF {
-            if st.needed != 0 {
+            if st.is_partial() {
                 errno::set(EILSEQ);
             }
             return WEOF;
