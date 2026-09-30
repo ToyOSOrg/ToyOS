@@ -150,23 +150,28 @@ times:
    list in `drain_irqs` and the idle loop's device checks are gone by step 5.
    Each step measures the kernel's lines, and from step 2 the longest
    interrupts-off and preemption-off windows, against stage 6's first commit.
-   1. **Interrupts post.** A post is legal in a handler: a watch's list and a
-      poll ring's completions sit behind interrupts-off leaf locks nothing
-      allocates or frees under. A claimed function's vector, the
+   Steps 3 and 4 do not land alone: they land with #592's i8042 stage and
+   with usbd. Stage 6 stays open past step 5 until the owner rules on the
+   panel the dump paints.
+   1. **Interrupts post.** A post is legal in a handler: the watches a handler
+      posts, and the completions of a ring they complete into, sit behind
+      interrupts-off locks nothing allocates or frees under, and every other
+      watch's lock leaves interrupts open. A claimed function's vector, the
       IOMMU's refusal and both audio backends post from the handler, and
       `irq_ring`'s `UserDev` and `Audio` and their arms in `drain_irqs` go.
       The thread is the holder's: netd's, blockd's, soundd's mix thread, and
       the `isa` claim's when #592 lands. **Exit**: `handler_post_without_a_pass`,
-      a vector taken inside a post of its own watch on a CPU holding
-      preemption off posting once the outer post lets go and before any pass,
-      red on the base; the watch's loom models over the new post.
+      a vector taken on a CPU holding preemption off, inside a post of its own
+      watch or inside a completion into a ring polling it, posting once that
+      section lets go and before any pass, red on the base; the watch's loom
+      models over the new post.
    2. **The windows, measured**: the longest interrupts-off and preemption-off
       windows per CPU, reported beside the IRQ census and fed by each
       architecture's masking primitives and entries, the number the ARM
-      track's stage 4 owes as well. After step 1 because the ARM track is
-      reshaping those primitives now; applied to stage 6's first commit for
-      the baseline. **Exit**: both windows read off the T14 at stage 6's start
-      and at step 1's head.
+      track's stage 4 owes as well. Applied to stage 6's first commit for
+      the baseline. **Exit**: both windows read on the T14, which is x86
+      metal, at stage 6's start and at step 1's head, and neither is longer
+      at step 1's head than at the start.
    3. **The i8042's thread is ps2server's** (#592's i8042 stage): `irq_ring`'s
       `I8042`, `keyboard_controller::service` and the idle loop's
       `verdict_due` go with the kernel's driver. **Exit**: that stage's.
