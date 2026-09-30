@@ -558,4 +558,22 @@ fn s_ip_out_008_released_datagrams_wait_at_the_head_of_their_queue() {
     assert_eq!(data, [b"1", b"2", b"3"]);
     assert!(h.out().is_empty());
     assert!(dropped.iter().all(|&c| h.count(c) == 0));
+
+    // B's request, queued in INCOMPLETE and still queued in PROBE, leaves as PROBE's: to MAC B.
+    let mut h = H::fixture_i();
+    assert_eq!(h.udp_to(B), Ok(None));
+    h.frame(&eth(MacAddr::BROADCAST, MAC_B, 0x0806, &arp_packet(1, MAC_B, B, MacAddr::ZERO, B)));
+    assert!(h.is_stale(B));
+    assert!(h.udp_to(B).unwrap().is_some_and(|frame| destination_of(&frame) == MAC_B));
+    assert!(matches!(h.state(B), Some(Nud::Delay(_))));
+    h.ip.fire(H::instant(5_000));
+    h.at(5_000);
+    assert!(matches!(h.state(B), Some(Nud::Probe(_))));
+    let mut poll = hex(V_ARP_REQ);
+    poll[..6].copy_from_slice(&MAC_B.0);
+    let out = h.out();
+    assert_eq!(out.len(), 2, "one request, then the datagram released to B");
+    assert_eq!(out[0].frame, poll);
+    assert_eq!(out[1].to(), MAC_B);
+    assert_eq!(out[1].ip().unwrap().payload()[8..], *b"hi");
 }

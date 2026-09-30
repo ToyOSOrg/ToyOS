@@ -342,7 +342,6 @@ impl Ip {
             gateways: Vec::new(),
             active: None,
             neighbours: BTreeMap::new(),
-            entries: 0,
             held: 0,
             reachable,
             reachable_drawn: now,

@@ -5,8 +5,7 @@
 //! counted, and its producer moves on as if it had left. Three kinds are never dropped: a
 //! released datagram's turn, an ACD probe and an ACD announcement. One that finds the FIFO full
 //! waits behind it and enters as room appears, ahead of any frame queued later (§5.4, RFC 5227
-//! §2.1). A turn holds no datagram: it names the entry whose queue does, and a turn whose entry
-//! was evicted leaves nothing and spends no credit.
+//! §2.1). A turn holds no datagram: it names the entry whose queue does, and goes with that entry.
 //!
 //! Every datagram is atomic: DF set, identification 0 (`toyos-net-wire`'s one IPv4 form).
 
@@ -63,13 +62,12 @@ impl Item {
     }
 }
 
-/// A released datagram's place in the FIFO: the oldest of entry `id`'s released datagrams leaves
+/// A released datagram's place in the FIFO: the oldest of `next_hop`'s released datagrams leaves
 /// when it comes (§6.5).
 #[derive(Debug)]
 pub(crate) struct Turn {
     pub iface: IfIndex,
     pub next_hop: Ipv4Addr,
-    pub id: u64,
 }
 
 #[derive(Debug, Default)]
@@ -131,6 +129,22 @@ impl Control {
             let Some(item) = self.waiting.pop_front() else { return };
             self.items.push_back(item);
         }
+    }
+
+    /// Drops the turns of `next_hop`'s entry on `iface`, which is gone; returns how many.
+    pub fn drop_turns(&mut self, iface: IfIndex, next_hop: Ipv4Addr) -> usize {
+        let mut dropped = 0usize;
+        let mut keep = |item: &Item| {
+            let theirs = matches!(item, Item::Turn(t) if t.iface == iface && t.next_hop == next_hop);
+            if theirs {
+                dropped = dropped.saturating_add(1);
+            }
+            !theirs
+        };
+        self.items.retain(&mut keep);
+        self.waiting.retain(&mut keep);
+        self.refill();
+        dropped
     }
 
     /// Drops everything waiting for `iface`, whose link went down.
@@ -258,8 +272,8 @@ impl Ip {
                 sent(&mut cx, kind);
                 true
             }
-            Item::Turn(Turn { next_hop, id, .. }) => {
-                let Some(held) = nud::leave(i, &mut cx, next_hop, id) else { return false };
+            Item::Turn(Turn { next_hop, .. }) => {
+                let Some(held) = nud::leave(i, &mut cx, next_hop) else { return false };
                 sink(iface, &held.frame);
                 sent(&mut cx, held.kind);
                 true

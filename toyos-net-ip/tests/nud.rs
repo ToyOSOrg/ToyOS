@@ -574,8 +574,8 @@ fn s_ip_nud_029_released_datagrams_are_evicted_last() {
         }
         assert!(matches!(h.state(new), Some(Nud::Failed)));
         if arm == 1 {
-            // A later entry at B's address resolves while B's turns still wait: its datagram keeps
-            // its own turn, behind a defence queued after them.
+            // A later entry at B's address resolves: B's turns went with B, so its datagram waits
+            // for its own, behind a defence queued first.
             h.at(3_511);
             h.frame(&eth(MacAddr::BROADCAST, MAC_X, 0x0806, &arp_packet(1, MAC_X, WIDE_A, MacAddr::ZERO, WIDE_A)));
             assert_eq!(h.send(WIDE_A, b, 5001, 5001, b"3"), Ok(None));
@@ -587,8 +587,9 @@ fn s_ip_nud_029_released_datagrams_are_evicted_last() {
             assert_eq!(out[limits::CONTROL_QUEUE + 1].to(), wide_mac(b));
             assert_eq!(payload(&out[limits::CONTROL_QUEUE + 1]), b"3");
         } else {
-            // B's two turns count against PENDING_TOTAL until the control queue reaches them. By
-            // 46,000 the FAILED entry is gone and the others are STALE, so entries can be made.
+            // B's two datagrams left the count with B, though the control queue has reached
+            // nothing since. By 46,000 the FAILED entry is gone and the others are STALE, so
+            // entries can be made.
             for t in [23_511, 46_000] {
                 h.ip.fire(H::instant(t));
             }
@@ -598,7 +599,7 @@ fn s_ip_nud_029_released_datagrams_are_evicted_last() {
                 accepted += 1;
             }
             assert_eq!(h.count(Counter::NbPendingFull), 1);
-            assert_eq!(accepted as usize, limits::nud::PENDING_TOTAL - 2);
+            assert_eq!(accepted as usize, limits::nud::PENDING_TOTAL);
         }
     }
 }
@@ -644,4 +645,24 @@ fn s_ip_nud_030_released_datagrams_keep_their_entry() {
         assert_eq!(h.out_with(1).iter().map(payload).collect::<Vec<_>>(), [b"2"]);
         assert!(h.state(B).is_none(), "deleted as its queue drains");
     }
+
+    // B STALE at MAC X since 1,000 holds 1 and 2, with a request queued behind them by the advice
+    // before: its idle lifetime passes, and it goes when that request is taken out.
+    let mut h = H::fixture_i();
+    for data in [b"1", b"2"] {
+        assert_eq!(h.send(A, B, 5001, 5001, data), Ok(None));
+    }
+    h.out();
+    h.at(5);
+    h.frame(&hex(V_ARP_REPLY));
+    h.at(1_000);
+    h.ip.advise(h.clock(), B, Advice::Reverify);
+    assert!(matches!(h.state(B), Some(Nud::Probe(_))));
+    h.frame(&eth(MacAddr::BROADCAST, MAC_X, 0x0806, &arp_packet(1, MAC_X, B, MacAddr::ZERO, B)));
+    h.ip.fire(H::instant(601_000));
+    h.at(601_000);
+    assert!(matches!(h.state(B), Some(Nud::Stale(s)) if s.released.queued() == 2), "not idle while it holds 1 and 2");
+    let out: Vec<(MacAddr, Vec<u8>)> = h.out().iter().map(|o| (o.to(), payload(o))).collect();
+    assert_eq!(out, [(MAC_X, b"1".to_vec()), (MAC_X, b"2".to_vec())], "the request is not sent");
+    assert!(h.state(B).is_none(), "deleted as the request behind 1 and 2 is taken out");
 }

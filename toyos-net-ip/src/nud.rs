@@ -166,17 +166,6 @@ impl Nud {
         matches!(self, Self::Incomplete(_) | Self::Probe(_) | Self::Unreachable(_))
     }
 
-    fn released(&self) -> Option<&Released> {
-        match self {
-            Self::Reachable(Reachable { released, .. })
-            | Self::Stale(Linked { released, .. })
-            | Self::Delay(Linked { released, .. })
-            | Self::Probe(Probing { released, .. })
-            | Self::Unreachable(Unreachable { released, .. }) => Some(released),
-            Self::Incomplete(_) | Self::Failed => None,
-        }
-    }
-
     fn released_mut(&mut self) -> Option<&mut Released> {
         match self {
             Self::Reachable(Reachable { released, .. })
@@ -190,7 +179,14 @@ impl Nud {
 
     /// Released datagrams have yet to leave.
     fn releasing(&self) -> bool {
-        self.released().is_some_and(|r| !r.0.is_empty())
+        match self {
+            Self::Reachable(Reachable { released, .. })
+            | Self::Stale(Linked { released, .. })
+            | Self::Delay(Linked { released, .. })
+            | Self::Probe(Probing { released, .. })
+            | Self::Unreachable(Unreachable { released, .. }) => !released.0.is_empty(),
+            Self::Incomplete(_) | Self::Failed => false,
+        }
     }
 
     /// A resolved state's released datagrams, taken for the state that follows it.
@@ -202,9 +198,6 @@ impl Nud {
 #[derive(Debug)]
 pub(crate) struct Neighbour {
     pub state: Nud,
-    /// Names this entry apart from any earlier one for the same address: a turn of an evicted
-    /// entry must not hand a later one's datagram its place.
-    pub id: u64,
     pub last_request: Option<Instant>,
     /// A request waits in the control queue.
     pub queued: bool,
@@ -250,6 +243,7 @@ pub(crate) fn request_leaves(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr)
         Nud::Probe(p) => p.mac,
         Nud::Reachable(_) | Nud::Stale(_) | Nud::Delay(_) | Nud::Failed => {
             n.queued = false;
+            drained(i, cx, addr);
             return None;
         }
     };
@@ -307,20 +301,20 @@ fn make_room(i: &mut Interface, cx: &mut Cx<'_>) -> bool {
     true
 }
 
-/// Deletes `addr`'s entry, and with it the released datagrams its queue still holds: their turns
-/// name an entry that is gone, and count in `held` until they are reached.
+/// Deletes `addr`'s entry, and with it the released datagrams its queue still holds and their
+/// turns: no turn outlives its entry.
 fn remove(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) {
     cx.timers.cancel(timer(cx, addr));
     let Some(mut n) = i.neighbours.remove(&addr) else { return };
+    let turns = cx.control.drop_turns(cx.iface, addr);
+    i.held = i.held.saturating_sub(turns);
     for held in n.state.take_released().0 {
         drop_held(cx, held, Counter::NbPendingEvicted);
     }
 }
 
 fn insert(i: &mut Interface, addr: Ipv4Addr, state: Nud, now: Instant, hint: Option<Ipv4Addr>) {
-    let id = i.entries;
-    i.entries = i.entries.wrapping_add(1);
-    i.neighbours.insert(addr, Neighbour { state, id, last_request: None, queued: false, used: now, hint });
+    i.neighbours.insert(addr, Neighbour { state, last_request: None, queued: false, used: now, hint });
 }
 
 /// A datagram or a flow wants `addr` now (§6.3 "send"): creates INCOMPLETE, moves STALE to
@@ -425,29 +419,27 @@ pub(crate) fn fire(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) {
     }
 }
 
-/// The turn of entry `id`'s oldest released datagram came, and is spent: the datagram leaves now,
-/// to `addr`'s MAC of this moment. `None` when that entry is gone.
-pub(crate) fn leave(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr, id: u64) -> Option<Held> {
+/// The turn of `addr`'s oldest released datagram came, and is spent: the datagram leaves now, to
+/// the MAC of this moment.
+pub(crate) fn leave(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) -> Option<Held> {
     i.held = i.held.saturating_sub(1);
-    let n = i.neighbours.get_mut(&addr).filter(|n| n.id == id)?;
+    let n = i.neighbours.get_mut(&addr)?;
     let mac = n.state.mac()?;
-    let released = n.state.released_mut()?;
-    let mut held = released.pop()?;
-    let last = released.0.is_empty();
+    let mut held = n.state.released_mut()?.pop()?;
     if let Some((destination, _)) = held.frame.split_first_chunk_mut::<6>() {
         *destination = mac.0;
     }
-    if last {
-        drained(i, cx, addr);
-    }
+    drained(i, cx, addr);
     Some(held)
 }
 
-/// The last datagram released toward `addr` left. Every STALE or quiescent UNREACHABLE entry has
-/// a deadline armed but one whose idle lifetime passed while it held them, which goes now.
+/// A datagram or a request of `addr`'s left the control queue. Every STALE or quiescent
+/// UNREACHABLE entry has a deadline armed but one whose idle lifetime passed while its queue held
+/// datagrams, which goes once nothing of it waits there.
 fn drained(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) {
     let Some(n) = i.neighbours.get(&addr) else { return };
-    let idle = matches!(n.state, Nud::Stale(_) | Nud::Unreachable(_)) && !n.queued && cx.timers.get(timer(cx, addr)).is_none();
+    let waits = n.state.releasing() || n.queued;
+    let idle = matches!(n.state, Nud::Stale(_) | Nud::Unreachable(_)) && !waits && cx.timers.get(timer(cx, addr)).is_none();
     if idle {
         remove(i, cx, addr);
         route::refresh_active(i, cx);
@@ -495,7 +487,7 @@ fn inherit(cx: &mut Cx<'_>, addr: Ipv4Addr, n: &mut Neighbour, mac: MacAddr) -> 
     };
     let pending = core::mem::take(&mut s.pending).0;
     for _ in &pending {
-        cx.control.hold(Item::Turn(Turn { iface: cx.iface, next_hop: addr, id: n.id }));
+        cx.control.hold(Item::Turn(Turn { iface: cx.iface, next_hop: addr }));
     }
     cx.log.count(Counter::NbResolved);
     cx.log.event(Event::Resolved { iface: cx.iface, next_hop: addr });

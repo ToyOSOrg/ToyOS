@@ -23,10 +23,8 @@ pub(crate) struct Interface {
     pub gateways: Vec<Ipv4Addr>,
     pub active: Option<Ipv4Addr>,
     pub neighbours: BTreeMap<Ipv4Addr, nud::Neighbour>,
-    /// Neighbour entries created so far: the next one's id.
-    pub entries: u64,
-    /// Datagrams held for resolution, and the turns in the control queue not yet reached, an
-    /// evicted entry's included: PENDING_TOTAL bounds them together.
+    /// Datagrams its entries queue, held for resolution or released and not yet left:
+    /// PENDING_TOTAL bounds them (§6.5).
     pub held: usize,
     pub reachable: Duration,
     pub reachable_drawn: Instant,
