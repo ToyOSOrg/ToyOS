@@ -1,7 +1,7 @@
 //! Claims both input devices and prints every event either one produces.
 //!
-//! Driven by `metal_sim_input` and `xhci_second_controller`, which inject
-//! through QMP one step at a time and wait for these lines between steps — so
+//! Driven by `xhci_second_controller`, which injects
+//! through QMP one step at a time and waits for these lines between steps — so
 //! the host never has more in flight than the guest has taken. Not a standalone
 //! test: on its own it would report nothing, which is why it is in RUST_SKIP.
 

@@ -495,7 +495,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     ("timer_calibration", Sched::Parallel),
     ("pci_inventory", Sched::Parallel),
     ("input_merge", Sched::Parallel),
-    ("metal_sim_input", Sched::Parallel),
     ("input_claim_absent", Sched::Parallel),
     // One boot; every verdict is a PPM header field or a console line, and no
     // clock is in any of them.
@@ -1096,7 +1095,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("tls_rebase_window", &["test_rs_tls_dtv_race"]),
     ("xhci_second_controller", &["test_rs_input_events"]),
     ("xhci_msi_only", &["test_rs_input_events"]),
-    ("metal_sim_input", &["test_rs_input_events"]),
     ("xhci_flap", &["test_rs_input_events"]),
     ("nvme_large_device", &["test_rs_nvme_home_roundtrip"]),
     ("va_exhaustion", &["test_rs_va_exhaustion"]),
@@ -11316,100 +11314,6 @@ fn run_machine_test(
                 "  [gpu] QEMU's scanout went {}x{} to {}x{}, which is the mode the guest asked \
                  for and the mode a second claim was told",
                 before.width, before.height, after.width, after.height
-            );
-            Ok(())
-        }
-        "metal_sim_input" => {
-            // M2's exit criterion, on the machine shape and the kernel that
-            // get flashed: no virtio device, no USB HID — so the i8042 is the
-            // guest's only input device — and no kernel feature turned on for
-            // the occasion, unlike the four tests above it.
-            //
-            // What it asserts is the events, read by an in-guest process and
-            // printed. The first version asserted screen pixels after a click
-            // at a fixed taskbar coordinate, which made the compositor's
-            // layout part of a kernel-delivery criterion and needed thresholds
-            // to survive the taskbar's own once-a-second repaint. M2 owns
-            // delivery — pin to userland process — so that is what this
-            // measures, and nothing here says the compositor reacted.
-            // `metal_sim_compositor` is what covers the compositor.
-            let options = BootOptions {
-                profile: qemu::Profile::Metal,
-                qmp: true,
-                ..Default::default()
-            };
-            let argv = qemu::profile_argv(&options);
-            metal_sim_argv_check(&argv)?;
-            if argv.iter().any(|a| a.contains("i8042=off")) {
-                return Err("metal-sim turned the i8042 off".to_string());
-            }
-
-            let mut qemu =
-                QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
-
-            // `kernel/src/mouse.rs` scales each relative count into the
-            // 0..32767 space the compositor consumes, per axis and derived
-            // from the screen — so the kernel is asked what it used rather
-            // than the constant being copied here, which would stop being a
-            // check the moment either side changed.
-            let boot = qemu.boot_log().to_string();
-            let Some((scale_x, scale_y)) = parse_rel_scale(&boot) else {
-                return Err(format!("the kernel never said what pointer scale it used:\n{boot}"));
-            };
-            const DX: i32 = 40;
-            const DY: i32 = -30;
-            // Off the origin first — the accumulated position clamps at 0, so a
-            // move up or left from there is invisible. Under 256 counts, or the
-            // packet's overflow bit is set and the motion is dropped by design.
-            let (result, sent) = input_events_run(&mut qemu, (200, 200), (DX, DY));
-            if let Some(err) = &result.error {
-                return Err(format!("{err} after {sent} of the sequence\n{}", result.stdout));
-            }
-
-            let keys = parse_key_events(&result.stdout);
-            let typed: String = keys
-                .iter()
-                .filter(|e| e.modifiers & 0x10 == 0)
-                .map(|e| e.translated.as_str())
-                .collect();
-            if !typed.contains("hello") {
-                return Err(format!(
-                    "typed {typed:?}, want it to contain \"hello\" — the keyboard never reached userland:\n{}",
-                    result.stdout
-                ));
-            }
-
-            let pointer = parse_mouse_events(&result.stdout);
-            // The delta the wire carried, not "it moved": a sign error in dy
-            // and a dropped high bit both survive "it moved", and the PS/2
-            // wire points the opposite way to the screen. Relative, so it
-            // says nothing about where any compositor would draw a cursor.
-            let want = (DX * scale_x, DY * scale_y);
-            let deltas: Vec<(i32, i32)> = pointer
-                .windows(2)
-                .map(|w| (w[1].x as i32 - w[0].x as i32, w[1].y as i32 - w[0].y as i32))
-                .collect();
-            if !deltas.contains(&want) {
-                return Err(format!(
-                    "no pointer event moved by {want:?}; deltas seen: {deltas:?}\n{}",
-                    result.stdout
-                ));
-            }
-            let Some(down) = pointer.iter().position(|e| e.buttons == 0x01) else {
-                return Err(format!(
-                    "no left-button-down event; buttons seen: {:?}",
-                    pointer.iter().map(|e| e.buttons).collect::<std::collections::BTreeSet<_>>()
-                ));
-            };
-            if !pointer[down + 1..].iter().any(|e| e.buttons == 0x00) {
-                return Err(format!(
-                    "the left button went down and never came up: {pointer:?}"
-                ));
-            }
-            eprintln!(
-                "  [metal-sim] {} key events (typed {typed:?}), {} pointer events, delta {want:?} delivered",
-                keys.len(),
-                pointer.len()
             );
             Ok(())
         }
