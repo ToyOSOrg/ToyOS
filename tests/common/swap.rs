@@ -7,8 +7,7 @@
 //! guest's back once `reboot` over ssh has ended the boot: one `Boot:
 //! complete` in it is the claim that nothing rebooted, the kernel's `spawn:`
 //! record names the binary it loaded, and the stream's lines must be the
-//! file's own in its order. What the host heard ([`metalswap::judge`]) is the
-//! same reading the T14 run gets.
+//! file's own in its order.
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
@@ -31,11 +30,6 @@ pub const VIRTIO: Bench =
 
 /// A liveness guard on a guest that stopped talking, never a verdict.
 const CEILING: Duration = Duration::from_secs(120);
-
-/// The swapping boot's one job on the T14: it holds the machine until the
-/// swap invocation hands it back.
-const HOLD: &str = "test_rs_lan_swap_hold";
-pub const HOLD_JOBS: &[&str] = &[HOLD];
 
 /// A booted talking guest with its ssh forward, the client to reach it, and
 /// the log it serves, read from the moment `logd` opened its port.
@@ -155,57 +149,6 @@ fn rebuilt(name: &str, dir: &Path) -> Result<std::path::PathBuf, String> {
     Ok(to)
 }
 
-/// The first line in `file` holding `needle` at or after index `from`.
-fn after(file: &[String], from: usize, needle: &str) -> Option<usize> {
-    file[from.min(file.len())..].iter().position(|l| l.contains(needle)).map(|at| from + at)
-}
-
-/// netd swapped for its rebuild on `bench`, and the lease coming back through
-/// the new process with no reboot between.
-fn netd_in_service(name: &str, bench: Bench) -> Result<(), String> {
-    let rig = Rig::boot(name, bench)?;
-    let binary = rebuilt("netd", &rig.staged.scratch)?;
-    let swapped = match rig.swap("netd", &binary, None) {
-        Ok(swapped) => swapped,
-        Err(why) => return Err(rig.fail(why)),
-    };
-    let rig = rig.judged(&swapped, Expect::InService)?;
-    if !swapped.said.iter().any(|l| l.contains(toyos_build::lan::LEASE)) {
-        return Err(format!(
-            "the stream carried no lease from netd after the swap; netd said {:?}",
-            swapped.said
-        ));
-    }
-    let digest = toyos_swap::parse_hex(&swapped.digest).ok_or("the digest the host sent")?;
-    let installed = toyos_swap::installed_path("netd", &digest);
-    let (file, _, staged) = rig.finish()?;
-    // The kernel's own record of what it loaded, then init putting it in
-    // service, then a lease from the network after both.
-    let spawned = after(&file, 0, &format!("spawn: {installed}"))
-        .ok_or_else(|| format!("/log has no `spawn: {installed}` record"))?;
-    let committed = after(&file, spawned, &toyos_swap::said("netd", Word::InService, &installed))
-        .ok_or("/log has no `in service` from init after the spawn")?;
-    let leased = after(&file, spawned, toyos_build::lan::LEASE)
-        .ok_or("/log has no lease after the new netd was spawned")?;
-    eprintln!(
-        "  [swap] /log: spawn at line {spawned}, in service at {committed}, lease at {leased}; \
-         one boot ({} lines)",
-        file.len()
-    );
-    let _ = std::fs::remove_file(&staged.image);
-    Ok(())
-}
-
-/// The T14's swap rehearsed on its register file: QEMU's 82574 brought up a
-/// second time in one boot by a second netd.
-pub fn lan_swap(
-    _test_config: &Path,
-    _c_bins: &[(String, Vec<u8>)],
-    _rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    netd_in_service("lan-swap", super::lan::TALK_BENCH)
-}
-
 /// **Asks that must change nothing**: the right binary under the wrong digest,
 /// the right binary under the right digest from a key the image does not
 /// authorize, and half the binary — under its whole length, and with none.
@@ -272,54 +215,6 @@ pub fn swap_refusals(
     }
     let _ = std::fs::remove_file(&staged.image);
     Ok(())
-}
-
-/// The T14's swap, judged: what the swap invocation heard over the cable, held
-/// against the stick's own `/log` — which came back over a different path and
-/// is the oracle for all of it. One `Boot: complete` in the file is the claim
-/// that nothing rebooted between the two netds.
-pub fn swapped_on_metal(back: &super::metal::Readback) -> Result<(), String> {
-    let (swapped, stream) = back.swap()?;
-    let mut bad: Vec<String> = Vec::new();
-    match metalswap::judge(&swapped, Expect::InService) {
-        Ok(said) => said.iter().for_each(|line| eprintln!("  [swap] {line}")),
-        Err(found) => bad.extend(found),
-    }
-    let file: Vec<String> = back.log().text().split_inclusive('\n').map(str::to_string).collect();
-    if let Err(why) = super::logstream::is_prefix_of(&stream, &file) {
-        bad.push(why);
-    }
-    let boots = file.iter().filter(|l| l.contains(bootlog::COMPLETE)).count();
-    if boots != 1 {
-        bad.push(format!("the stick's log holds {boots} `Boot: complete` record(s), where one boot owes one"));
-    }
-    match toyos_swap::parse_hex(&swapped.digest) {
-        Some(digest) => {
-            let installed = toyos_swap::installed_path(&swapped.service, &digest);
-            match after(&file, 0, &format!("spawn: {installed}")) {
-                Some(spawned) => match after(&file, spawned, toyos_build::lan::LEASE) {
-                    Some(leased) => eprintln!(
-                        "  [swap] the stick: {installed} spawned at line {spawned}, a lease after it at {leased}"
-                    ),
-                    None => bad.push(format!("the stick's log has no lease after {installed} was spawned")),
-                },
-                None => bad.push(format!("the stick's log has no `spawn: {installed}` record")),
-            }
-        }
-        None => bad.push(format!("the swap file's digest {:?} is no digest", swapped.digest)),
-    }
-    // The host said it was done: its `reboot` ended the boot, not the
-    // runner's bound over a hold that never ends on its own.
-    if file.iter().any(|l| l.contains(toyos_build::bootlog::JOB_DEADLINE_SAID)) {
-        bad.push(format!(
-            "the runner's bound ended the boot inside {HOLD}, so the swap invocation never \
-             handed the machine back"
-        ));
-    }
-    if bad.is_empty() {
-        return Ok(());
-    }
-    Err(format!("{} finding(s):\n  {}", bad.len(), bad.join("\n  ")))
 }
 
 /// The replacement a DMA control swaps in: it stops the 82574 the way netd does

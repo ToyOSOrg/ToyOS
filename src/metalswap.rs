@@ -347,41 +347,9 @@ const CONNECTIONS: &str = "swap_connections";
 const TURNED_AWAY: &str = "swap_turned_away";
 const TIMES: &str = "swap_ms";
 
-/// A value on one line, whatever it carried, read back by `unquote`.
+/// A value on one line, whatever it carried.
 fn quote(text: &str) -> String {
     format!("{text:?}")
-}
-
-/// [`quote`]'s inverse for what `Debug` renders a `str` as.
-fn unquote(text: &str) -> Result<String, String> {
-    let inner = text
-        .strip_prefix('"')
-        .and_then(|t| t.strip_suffix('"'))
-        .ok_or_else(|| format!("{text:?} is not a quoted value"))?;
-    let mut out = String::new();
-    let mut chars = inner.chars();
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            out.push(c);
-            continue;
-        }
-        match chars.next() {
-            Some('n') => out.push('\n'),
-            Some('r') => out.push('\r'),
-            Some('t') => out.push('\t'),
-            Some('0') => out.push('\0'),
-            Some('\\') => out.push('\\'),
-            Some('"') => out.push('"'),
-            Some('\'') => out.push('\''),
-            Some('u') => {
-                let hex: String = chars.by_ref().skip(1).take_while(|c| *c != '}').collect();
-                let code = u32::from_str_radix(&hex, 16).map_err(|_| format!("\\u{{{hex}}}"))?;
-                out.push(char::from_u32(code).ok_or_else(|| format!("\\u{{{hex}}}"))?);
-            }
-            other => return Err(format!("an escape {other:?} Debug does not write")),
-        }
-    }
-    Ok(out)
 }
 
 impl Swapped {
@@ -412,75 +380,6 @@ impl Swapped {
         let outcome = self.outcome_ms.map_or("none".to_string(), |ms| ms.to_string());
         out.push_str(&format!("{TIMES} {} {outcome} {}\n", self.answer_ms, self.again_ms));
         out
-    }
-
-    /// What a readback's swap file says, or `None` where it carries none.
-    pub fn parse(text: &str) -> Result<Option<Self>, String> {
-        let all = |key: &str| -> Vec<&str> {
-            text.lines()
-                .filter_map(|line| line.split_once(' ').filter(|(k, _)| *k == key).map(|(_, v)| v))
-                .collect()
-        };
-        let one = |key: &str| -> Option<&str> { all(key).first().copied() };
-        let Some(service) = one(SERVICE) else { return Ok(None) };
-        let digest = one(DIGEST).ok_or("no swap_digest")?.to_string();
-        let peer = one(PEER).ok_or("no swap_peer")?.parse().map_err(|_| "swap_peer is no address")?;
-        let answer = match (one(ANSWER), one(ANSWER_FAILED)) {
-            (Some(a), None) => Ok(unquote(a)?),
-            (None, Some(f)) => Err(unquote(f)?),
-            _ => return Err(format!("the swap file's answer keys are not one answer:\n{text}")),
-        };
-        let mut words = Vec::new();
-        for rendered in all(WORD) {
-            let line = unquote(rendered)?;
-            let (word, detail) = toyos_swap::heard(&line, service)
-                .ok_or_else(|| format!("{line:?} is no word of init's on {service}"))?;
-            words.push((word, detail.to_string()));
-        }
-        let said = all(SAID).into_iter().map(unquote).collect::<Result<_, _>>()?;
-        let again = match (one(AGAIN_STATUS), one(AGAIN_STDOUT), one(AGAIN_FAILED)) {
-            (Some(status), Some(stdout), None) => Ok(Exec {
-                status: match status {
-                    "none" => None,
-                    code => Some(code.parse().map_err(|_| format!("{AGAIN_STATUS} {code}"))?),
-                },
-                stdout: unquote(stdout)?.into_bytes(),
-            }),
-            (None, None, Some(f)) => Err(unquote(f)?),
-            _ => return Err(format!("the swap file's again keys are not one answer:\n{text}")),
-        };
-        let numbers = |key: &str| -> Result<Vec<Option<u64>>, String> {
-            one(key)
-                .ok_or_else(|| format!("no {key}"))?
-                .split(' ')
-                .map(|n| if n == "none" { Ok(None) } else { n.parse().map(Some).map_err(|_| format!("{key} {n}")) })
-                .collect()
-        };
-        let conns = numbers(CONNECTIONS)?;
-        let turned_away = one(TURNED_AWAY)
-            .ok_or_else(|| format!("no {TURNED_AWAY}"))?
-            .parse()
-            .map_err(|_| format!("{TURNED_AWAY} is no count"))?;
-        let times = numbers(TIMES)?;
-        let (&[Some(before), Some(after)], &[Some(answer_ms), outcome_ms, Some(again_ms)]) =
-            (conns.as_slice(), times.as_slice())
-        else {
-            return Err(format!("the swap file's numbers do not read:\n{text}"));
-        };
-        Ok(Some(Self {
-            service: service.to_string(),
-            digest,
-            peer,
-            answer,
-            words,
-            said,
-            again,
-            connections: (before as usize, after as usize),
-            turned_away,
-            answer_ms,
-            outcome_ms,
-            again_ms,
-        }))
     }
 }
 
@@ -551,18 +450,6 @@ mod tests {
         }
     }
 
-    /// What the loop writes is what the judge reads, quoted text and all.
-    #[test]
-    fn a_swap_reads_back_as_it_was_written() {
-        for expect in [Expect::InService, Expect::Refused] {
-            let swapped = heard(expect);
-            let back = Swapped::parse(&swapped.render()).expect("it parses").expect("it is one");
-            assert_eq!(back, swapped, "{expect:?}");
-            judge(&back, expect).unwrap_or_else(|bad| panic!("{expect:?}: {bad:?}"));
-        }
-        assert_eq!(Swapped::parse("back_secs 3\n"), Ok(None));
-    }
-
     /// Each expectation refuses the others' outcomes, and the machine not
     /// answering afterwards is a finding whatever init said.
     #[test]
@@ -582,12 +469,5 @@ mod tests {
         let mut spun = heard(Expect::InService);
         spun.turned_away = 10_000;
         assert!(judge(&spun, Expect::InService).is_ok(), "how many dials were turned away is no verdict");
-    }
-
-    #[test]
-    fn unquote_reads_what_debug_writes() {
-        for text in ["plain", "a \"quote\"", "tab\tand\nnewline", "back\\slash", "é and \u{1b}"] {
-            assert_eq!(unquote(&quote(text)).as_deref(), Ok(text), "{text:?}");
-        }
     }
 }

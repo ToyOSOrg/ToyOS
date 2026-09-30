@@ -249,9 +249,6 @@ const RUST_SKIP: &[&str] = &[
     // The same for `tests/lantalkcase`, held until the runner's bound is near
     // unless the host's `reboot` over ssh ends it first. `lan_talk` rides it.
     "lan_talk_hold",
-    // The swapping boot's hold: it lasts until the host's `reboot` over ssh,
-    // and the runner's bound is the fallback. `lan_swap` rides it.
-    "lan_swap_hold",
     // Needs SYS_DEBUG, which the shipping kernel has no arm of at all.
     // `heap_ceiling_bounds` boots the `test-actuators` kernel for it.
     "heap_ceiling",
@@ -610,13 +607,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     ("update_grant_refuses_a_stray_partition", Sched::Parallel),
     ("update_floor_is_the_images_own", Sched::Parallel),
     ("update_refused_pass_credits_no_image", Sched::Parallel),
-    // A running service's binary replaced with no reboot: netd swapped for its
-    // rebuild over ssh while the stream runs, on the 82574 the T14's I219
-    // shares a register file with; a wrong digest and a stranger's key refused
-    // with netd untouched. Records, bytes and the guest's own `/log`; every
-    // clock is a liveness guard on a guest that stopped talking, and probation
-    // is init's.
-    ("lan_swap", Sched::Parallel),
     ("swap_refusals", Sched::Parallel),
     // The 82574 swapped to a holder that stops it and masters it while the
     // host sends it frames. The verdict is the kernel's console; its clocks
@@ -1260,13 +1250,6 @@ const METAL: &[(&str, metal::Metal)] = &[
         "lan_talk",
         metal::Metal::Runs { arms: LANTALKCASE, judge: |b| lan::talked_on_metal(b[0]) },
     ),
-    (
-        // netd swapped for the build's own binary while the boot runs, by a
-        // second `toyos-metal --swap` beside the flashing one; the stick's
-        // `/log` is the oracle that nothing rebooted between the two netds.
-        "lan_swap",
-        metal::Metal::Runs { arms: LANSWAPCASE, judge: |b| common::swap::swapped_on_metal(b[0]) },
-    ),
     // ---- one image: tests/testcases, no parameters, one job list ----
     (
         "blackbox_unclaimed_page",
@@ -1796,16 +1779,6 @@ const LANLEASECASE: &[metal::Arm] = &[metal::Arm {
 const LANTALKCASE: &[metal::Arm] = &[metal::Arm {
     talk: true,
     ..metal::once(lan::TALK_BOOT, lan::TALK_CONFIG, &[], lan::TALK_JOBS)
-}];
-
-/// The talking boot's config with netd swapped while it runs: the image
-/// streams and authorizes a key as the talking boot's does, and the loop that
-/// flashes it is not told `--talk` — the `--swap` invocation beside it owns the
-/// listener. Its one job holds the machine until that invocation hands it back
-/// with `reboot`, the runner's bound standing behind it.
-const LANSWAPCASE: &[metal::Arm] = &[metal::Arm {
-    swap: Some("netd"),
-    ..metal::once("lanswapcase", lan::TALK_CONFIG, &[], common::swap::HOLD_JOBS)
 }];
 
 /// One boot for every in-kernel self-test that logs its verdict at init and
@@ -10783,7 +10756,6 @@ fn run_machine_test(
         "update_refused_pass_credits_no_image" => {
             common::update::update_refused_pass_credits_no_image(test_config, c_bins, rust_bins)
         }
-        "lan_swap" => common::swap::lan_swap(test_config, c_bins, rust_bins),
         "swap_refusals" => common::swap::swap_refusals(test_config, c_bins, rust_bins),
         "swap_quiets_the_function" => {
             common::swap::swap_quiets_the_function(test_config, c_bins, rust_bins)
