@@ -121,6 +121,13 @@ pub(crate) fn sqrt_f32(x: f32) -> f32 {
 /// `wchar_t`, which is `unsigned int` here.
 pub(crate) type WChar = u32;
 
+// What the `long double` readers below widen, named as C names them, since
+// this module is also compiled on its own (`toyos-libc-copies`).
+unsafe extern "C" {
+    fn strtod(s: *const u8, endptr: *mut *mut u8) -> f64;
+    fn wcstod(s: *const WChar, endptr: *mut *mut WChar) -> f64;
+}
+
 /// An IEEE binary128's bits, returned in `x0` and `x1`.
 #[repr(C)]
 struct Quad {
@@ -161,7 +168,7 @@ unsafe extern "C" fn strtold() {
         "mov v0.d[1], x1",
         "ldp x29, x30, [sp], #16",
         "ret",
-        strtod = sym crate::misc::strtod,
+        strtod = sym strtod,
         quad = sym quad,
     );
 }
@@ -186,7 +193,7 @@ unsafe extern "C" fn wcstold() {
         "mov v0.d[1], x1",
         "ldp x29, x30, [sp], #16",
         "ret",
-        wcstod = sym crate::wchar::wcstod,
+        wcstod = sym wcstod,
         quad = sym quad,
     );
 }

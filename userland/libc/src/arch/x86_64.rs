@@ -78,6 +78,13 @@ pub(crate) fn sqrt_f32(x: f32) -> f32 {
 /// `wchar_t`, which is `int` here.
 pub(crate) type WChar = i32;
 
+// What the `long double` readers below widen, named as C names them, since
+// this module is also compiled on its own (`toyos-libc-copies`).
+unsafe extern "C" {
+    fn strtod(s: *const u8, endptr: *mut *mut u8) -> f64;
+    fn wcstod(s: *const WChar, endptr: *mut *mut WChar) -> f64;
+}
+
 /// `strtod`'s number as `long double`, x87 extended precision in `st0`: read
 /// to `double`'s precision and widened, which is exact.
 #[unsafe(no_mangle)]
@@ -90,7 +97,7 @@ unsafe extern "C" fn strtold() {
         "fld qword ptr [rsp]",
         "add rsp, 8",
         "ret",
-        strtod = sym crate::misc::strtod,
+        strtod = sym strtod,
     );
 }
 
@@ -112,6 +119,6 @@ unsafe extern "C" fn wcstold() {
         "fld qword ptr [rsp]",
         "add rsp, 8",
         "ret",
-        wcstod = sym crate::wchar::wcstod,
+        wcstod = sym wcstod,
     );
 }
