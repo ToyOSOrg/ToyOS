@@ -36,7 +36,7 @@ AArch64 one step behind, on `issues/kernel/toyos-runs-on-arm64.md`'s track.
   the host build of the same commit.
 - **M5 — ToyOS rebuilds its own compilers to a fixed point; the host is no
   longer needed.** The guest's toolchain builds the next toolchain, its LLVM
-  with Python, CMake and Ninja built for ToyOS, and that one builds itself
+  with Python and CMake built for ToyOS, and that one builds itself
   again to the same bytes.
   *Exit*: the fixed point, reached with no host in the loop.
 
