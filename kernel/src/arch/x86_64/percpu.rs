@@ -102,7 +102,6 @@ pub struct PerCpu {
     log_shard: u64,
     /// Non-zero inside this CPU's NMI handler, written only by `arch::idt::nmi`'s entry; IST2 isn't re-entrant, so this proves no second NMI lands on it.
     nmi_active: u32,
-    /// The token of the attempt that booted this AP; the AP echoes it into `AP_STARTED` so a stale AP cannot answer for a later attempt. Zero on the BSP.
     ap_token: u32,
     /// `nmi_gate::hold`'s word: the storm asks in it from another CPU, and `arch::syscall`'s entry acknowledges and spins on it inside its window, through [`OFF_NMI_HOLD`].
     #[cfg(feature = "boot-actuators")]
@@ -356,7 +355,7 @@ fn alloc_percpu(cpu_id: u32) -> *mut PerCpu {
                 fault_state: CpuFaultState::Normal as u8,
                 _pad_after_fault_state: [0; 3],
                 last_armed_ticks: AtomicU32::new(0),
-                log_shard: alloc_log_shard(cpu_id),
+                log_shard: log::shard_for(cpu_id) as *const log::Shard as u64,
                 nmi_active: 0,
                 ap_token: 0,
                 #[cfg(feature = "boot-actuators")]
@@ -375,23 +374,6 @@ fn alloc_percpu(cpu_id: u32) -> *mut PerCpu {
     #[cfg(feature = "boot-actuators")]
     crate::arch::nmi_gate::publish(cpu_id, &raw const percpu.nmi_hold, &raw const percpu.user_rsp);
     ptr
-}
-
-/// This CPU's log shard: cpu0's is the boot shard, every other fresh; allocated here rather than in [`init_ap`], which already logs.
-fn alloc_log_shard(cpu_id: u32) -> u64 {
-    if cpu_id == 0 {
-        return &raw const log::BOOT_SHARD as u64;
-    }
-    let layout = Layout::from_size_align(size_of::<log::Shard>(), 64).unwrap();
-    // SAFETY: `alloc_percpu`'s argument — non-zero size, power-of-two alignment, never freed.
-    let ptr = unsafe { alloc_zeroed(layout) } as *mut log::Shard;
-    assert!(!ptr.is_null(), "percpu: log shard alloc failed for cpu{cpu_id}");
-    // SAFETY: fresh, zeroed, 64-byte-aligned, and not yet published.
-    unsafe { log::Shard::initialize_zeroed(ptr) };
-    // Published before the CPU executes an instruction: a reader can't find it through `gs:` otherwise.
-    // SAFETY: the allocation is live for the machine's life and initialised.
-    unsafe { log::publish_ap_shard(cpu_id, ptr) };
-    ptr as u64
 }
 
 /// This CPU's shard, its identity, and one sequence number out of that shard.

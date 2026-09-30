@@ -11,10 +11,7 @@
 //! process name in the record is the symlink it was invoked under. The host
 //! reads both out of the log the stick came back with.
 //!
-//! **Every command's number is a span in microseconds**, and never a rate. The
-//! profile that prices them (`tests/metal-profile.toml`) holds a ceiling per
-//! number, and a ceiling is what a duration has: a rate would have to be judged
-//! from below, against a floor nothing in that file can express. What each span
+//! **Every command's number is a span in microseconds**, and never a rate. What each span
 //! covers is its own module's to say, and the byte count it covers is a
 //! constant there.
 //!
@@ -62,8 +59,7 @@ impl Refusal {
 /// there is none.
 pub type Measured = Result<i32, Refusal>;
 
-/// Every command by the name its symlink gives it. The name is what the
-/// kernel's `exit:` record carries, so it is also the name the profile prices.
+/// Every command by the name its symlink gives it.
 macro_rules! commands {
     ($($name:literal => $run:path),+ $(,)?) => {
         const COMMANDS: &[(&str, fn() -> Measured)] = &[$(($name, $run)),+];
@@ -101,9 +97,7 @@ fn main() {
 /// A span in whole microseconds, saturated at [`i32::MAX`] so a span too long
 /// for the channel is still a number and not a wrap.
 ///
-/// A span the clock could not tell from zero is refused rather than reported:
-/// the profile would price it against a ceiling it can never reach, and a
-/// measurement that cannot fail is what that file exists to refuse.
+/// A span the clock could not tell from zero is refused rather than reported.
 pub fn span(nanos: u128) -> Measured {
     let micros = nanos / 1_000;
     if micros == 0 {

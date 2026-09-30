@@ -291,7 +291,7 @@ fn hold_one(me: usize, cpus: usize) -> bool {
 pub fn storm() {
     static FIRED: AtomicBool = AtomicBool::new(false);
 
-    let cpus = (crate::arch::smp::cpu_count() as usize).min(MAX_CPUS);
+    let cpus = (crate::smp::cpu_count() as usize).min(MAX_CPUS);
     let me = percpu::cpu_id() as usize;
     if cpus < 2 {
         return;

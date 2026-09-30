@@ -7,8 +7,8 @@ use common::Machine;
 use toyos_abi::boot::RootBridgeWindow;
 use toyos_acpi::{
     century_of, dsdt_address, ecam_base, find_table, hpet_base, iapc_boot_arch, madt_entries,
-    memory_windows, reset_register, rtc_century, Century, IoApicEntry, MadtEntry, Reset,
-    SourceOverride, TableError, FADT_PM1A_CNT_BLK, MADT_ENTRIES,
+    memory_windows, psci, reset_register, rtc_century, Century, IoApicEntry, MadtEntry, Psci,
+    Reset, SourceOverride, TableError, FADT_PM1A_CNT_BLK, MADT_ENTRIES,
 };
 
 /// Where each table sat in that guest's physical memory. The XSDT's entries
@@ -116,6 +116,14 @@ fn the_fadt_names_the_power_block_and_the_dsdt() {
 fn the_fadt_names_the_reset_register_qemu_acts_on() {
     let fadt = find_table(machine(), RSDP, b"FACP", 36).expect("FADT");
     assert_eq!(reset_register(&fadt), Reset::Port { port: 0xcf9, value: 0x0f });
+}
+
+/// Revision 3, so bytes 129-131 are the reserved ones QEMU 11.1.1 writes zero:
+/// the table says nothing about PSCI.
+#[test]
+fn the_q35_fadt_predates_arm_boot_arch() {
+    let fadt = find_table(machine(), RSDP, b"FACP", 36).expect("FADT");
+    assert_eq!(psci(&fadt), Psci::Undefined { revision: 3, minor: 0 });
 }
 
 #[test]

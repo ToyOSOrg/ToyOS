@@ -15,6 +15,7 @@ pub use mm::{UserAddr, DirectMap, PHYS_OFFSET};
 mod invalidation;
 mod shootdown;
 mod sleeplock;
+mod smp;
 mod smp_roster;
 mod sync;
 mod hasher;
@@ -107,7 +108,7 @@ mod late_panic {
 
 use crate::mm::policy::MmioPolicy;
 use alloc::boxed::Box;
-use arch::{cpu, percpu, smp};
+use arch::{cpu, percpu};
 use drivers::{acpi, gop, pci, serial, virtio_console, virtio_gpu, virtio_sound, xhci};
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
 use toyos_rootimage::handoff::{held, Descriptor};

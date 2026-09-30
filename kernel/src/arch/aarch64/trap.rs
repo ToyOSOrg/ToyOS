@@ -129,7 +129,7 @@ fn exception(frame: &Frame, entry: u64) -> ! {
     panic!("{entry}: {} at {:#x}", class_name(frame.esr), frame.elr);
 }
 
-/// One interrupt: acknowledged, handled, ended. From EL0 a tick or a kick
+/// One interrupt. From EL0 a tick or a kick
 /// preempts here, where the interrupted context holds nothing; from EL1 it
 /// only asks for the pass the context will run when it may.
 fn irq(from_el0: bool) {
@@ -163,6 +163,9 @@ fn irq(from_el0: bool) {
         return;
     }
     match intid {
+        // Never ended: the running priority it keeps is every interrupt's
+        // own, so the interface signals this CPU nothing and the halt stays.
+        irqchip::SGI_HALT => cpu::halt(),
         irqchip::SGI_KICK => {
             percpu::irq_took(Source::Timer);
             irqchip::end(intid);

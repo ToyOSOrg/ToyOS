@@ -5,13 +5,11 @@
 //! devices are emulated and every span is a fact about TCG, so what is judged
 //! there is the plumbing: each job ran, each returned a measurement rather than
 //! one of `metaldevices::Refused`'s codes, and the shutdown took the devices
-//! down in order. On the T14 the same log is judged against
-//! `tests/metal-profile.toml`, where the spans have ceilings.
+//! down in order.
 
 use std::path::Path;
 
 use toyos_build::metaldevices;
-use toyos_build::metalprofile::Profile;
 
 use super::metal;
 use super::qemu::{self, BootOptions, QemuInstance};
@@ -23,17 +21,12 @@ use super::serial;
 /// Held to the committed config by [`the_config_runs_exactly_these_jobs`].
 pub const JOBS: &[&str] = &["usbwrite", "usbread", "fbcheck", "fbfill", "fbread"];
 
-/// The boot config, and the name every profile row for this boot is under.
 pub const CONFIG: &str = "tests/metaldevicecase";
 pub const BOOT: &str = "metaldevicecase";
 
 const WAIT: std::time::Duration = std::time::Duration::from_secs(120);
 
-/// The T14's judge: every record the inventory owes, every span against its
-/// ceiling, and the shutdown's own account of what it handed back.
 pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
-    let root = super::compile::repo_root();
-    let profile = Profile::load(&root).map_err(|why| why.to_string())?;
     let mut bad = metaldevices::unmet(back.loader().text(), back.log().text());
 
     for job in JOBS {
@@ -47,17 +40,11 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
         match measurement(job, code) {
             Err(why) => bad.push(why),
             Ok(span) => {
-                let name = format!("{job}.{}.span_us", back.label);
-                if let Err(why) = profile.judge(&name, span) {
-                    bad.push(why.to_string());
-                }
+                bad.extend(back.measured(&format!("{job}.{}.span_us", back.label), span).err());
             }
         }
     }
 
-    // Printed whatever the verdict: these are the lines whoever tightens a
-    // ceiling or writes an inventory row next has to read, and they exist only
-    // in a log that came off the machine.
     eprintln!("  [devices] what {} answered:", back.label);
     for line in metaldevices::inventory(back.log().text()) {
         eprintln!("    {line}");
