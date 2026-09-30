@@ -312,13 +312,17 @@ fn poll_racing(post: fn(&World)) {
             }
         })
     };
-    let producer = loom::thread::spawn(move || {
-        ready.store(true, Ordering::Relaxed);
-        post(&world);
-    });
+    let producer = {
+        let world = world.clone();
+        loom::thread::spawn(move || {
+            ready.store(true, Ordering::Relaxed);
+            post(&world);
+        })
+    };
     registrant.join().unwrap();
     producer.join().unwrap();
 
+    // While `world` lives: its watch's drop answers a live entry as gone.
     assert_eq!(poll.posts(), 1, "a poll over a ready object completes once");
 }
 
