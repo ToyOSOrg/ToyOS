@@ -152,8 +152,7 @@ times:
    interrupts-off and preemption-off windows, against stage 6's first commit.
    1. **Interrupts post.** A post is legal in a handler: a watch's list and a
       poll ring's completions sit behind interrupts-off leaf locks nothing
-      allocates or frees under, and a post frees nothing, since the next
-      registration sweeps what it fired. A claimed function's vector, the
+      allocates or frees under. A claimed function's vector, the
       IOMMU's refusal and both audio backends post from the handler, and
       `irq_ring`'s `UserDev` and `Audio` and their arms in `drain_irqs` go.
       The thread is the holder's: netd's, blockd's, soundd's mix thread, and
