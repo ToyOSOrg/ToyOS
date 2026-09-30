@@ -174,9 +174,11 @@ times:
       and `port_work_pending` go with the kernel's driver, and `irq_ring` with
       them. **Exit**: step 10's.
    5. **The pass is the scheduler's.** `drain_irqs` goes: the blocked-task
-      dump with its panel hold, and the heartbeat, become `pass`'s own, and
-      the TCO feed stays, since what it proves is that passes run. **Exit**:
-      `pass` and the idle loop call no driver, and both windows are measured
+      dump and the heartbeat become `pass`'s own, and the TCO feed stays,
+      since what it proves is that passes run. The dump still paints its
+      report on the panel and holds it there, a device the pass reaches;
+      whether that stays is the owner's ruling. **Exit**: `drain_irqs` and the
+      idle loop's device checks are gone, and both windows are measured
       against stage 6's start.
 
 ## Standing
