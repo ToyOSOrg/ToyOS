@@ -1,22 +1,27 @@
 //! cpal's ToyOS host, dropped while its stream's server never lets go of it.
 //!
 //! This binary is the stream's server: it answers the open as soundd does, and
-//! then holds the signal pipe open and never writes it — a soundd whose mix
-//! loop has stopped. Its child, the same binary with `client`, reaches it as
-//! `soundd`, builds a stream through cpal and drops it unplayed. The stream
-//! thread sends the close and waits on the pipe; `Drop` has to come back with
-//! the refusal by name through the error callback rather than wait for good.
+//! then holds the signal pipe open without writing it until the client's
+//! `Drop` has come back — a soundd whose mix loop has stopped. Its child, the
+//! same binary with `client`, reaches it as `soundd`, builds a stream through
+//! cpal and drops it unplayed. The stream thread sends the close and waits on
+//! the pipe; `Drop` has to come back with the refusal by name through the error
+//! callback rather than wait for good. One signal then has to end the stream
+//! thread while its process lives, so the stream's connection closes as it
+//! would for soundd.
 //!
 //! No sound is played and soundd is not involved.
 
+use std::io::{BufRead, BufReader, Read};
 use std::os::toyos::process::CommandExt;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::mpsc;
 
 use cpal::traits::{DeviceTrait, HostTrait};
 use toyos::audio::{
     StreamOpenRequest, StreamOpenResponse, MSG_STREAM_CLOSE, MSG_STREAM_OPEN, MSG_STREAM_OPENED,
 };
+use toyos::ipc::IpcError;
 use toyos::shm::SharedMemory;
 use toyos::{namespace, port};
 use toyos_abi::audio::AudioSlotHeader;
@@ -54,6 +59,8 @@ fn serve() {
     let mut child = Command::new(SELF)
         .arg("client")
         .endow(SVC_LABEL, names.into_raw().0)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
         .spawn()
         .expect("spawn the client");
 
@@ -76,11 +83,33 @@ fn serve() {
     assert_eq!(close.msg_type, MSG_STREAM_CLOSE, "the dropped stream did not close");
 
     // The write end is held until the client has gone, so nothing but its
-    // own deadline can end its wait.
+    // own deadline can end its wait. The client says the refusal once `Drop`
+    // has returned with it.
+    let mut said = String::new();
+    BufReader::new(child.stdout.take().expect("the client's stdout"))
+        .read_line(&mut said)
+        .expect("the client's line");
+    assert!(said.starts_with("client: "), "the client said {said:?} before its drop came back");
+    print!("{said}");
+
+    signal_write.write(&[1]).expect("a signal to the stream thread");
+    match conn.recv_header() {
+        Err(IpcError::Disconnected) => {}
+        other => panic!(
+            "the stream's connection gave {:?} after its close, not its end",
+            other.map(|h| h.msg_type)
+        ),
+    }
+    // The client exits once its stdin closes, so the connection's end above
+    // was the stream thread's.
+    drop(child.stdin.take());
     let status = child.wait().expect("wait for the client");
     drop(signal_write);
     assert!(status.success(), "the client exited {status:?}");
-    println!("cpal's drop came back while its server held the signal pipe");
+    println!(
+        "cpal's drop came back while its server held the signal pipe, and the next signal \
+         ended its stream thread"
+    );
 }
 
 fn client() {
@@ -111,4 +140,7 @@ fn client() {
         "the drop came back with {errors:?}, not the refusal"
     );
     println!("client: {}", errors[0]);
+
+    let mut rest = Vec::new();
+    std::io::stdin().read_to_end(&mut rest).expect("the server's end of stdin");
 }
