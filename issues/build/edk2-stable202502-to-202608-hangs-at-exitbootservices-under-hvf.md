@@ -1,10 +1,14 @@
 ---
-status: open
+status: assigned
 kind: tooling
 opened: 2026-10-01
 ---
 
 # edk2 stable202502 to stable202608 hangs at ExitBootServices under HVF
+
+When a host's QEMU installation ships an edk2 from stable202502 to
+stable202608, `virt` guests under HVF never return from `ExitBootServices`.
+Homebrew's QEMU 11.1.1 ships stable202408 today. Owner: the orchestrator.
 
 Under QEMU 11.1.1's HVF a `virt` guest reads `ID_AA64PFR0_EL1.GIC` as 0,
 though its GICv3's system registers answer. `hvf_arch_init_vcpu`
@@ -35,16 +39,9 @@ The 64 words dumped from 0x80 below the PC occur once in that build's
 `kernel-irqchip=off` (QEMU's own GICv3) the loop is the same. Every TCG `virt`
 guest boots that build green.
 
-So `src/firmware.rs` chooses `virt`'s firmware by accelerator: Debian's
-2026.05-2 under TCG and KVM, and under HVF 2024.11-5, whose `ArmGicDxe` reads
-no `ID_AA64PFR0_EL1` and takes the GIC's revision from the DT. The cost is
-that HVF guests boot an older edk2 than every other guest. Owner: the
-orchestrator.
-
 ## Exit condition
 
-Once `virt`'s TCG pin carries edk2's `aefdbf91f4` and `377a890d80`, where the
-DT chooses between split GICv2 and GICv3 drivers again, or once QEMU's HVF sets
-`ID_AA64PFR0_EL1.GIC` for an attached GICv3, HVF boots that pin and the
-accelerator leaves `src/firmware.rs`'s key. It is shown by `virt_early_panic`
-and `virt_early_fault` green under HVF on that pin.
+An edk2 release carrying `aefdbf91f4` and `377a890d80`, where the DT chooses
+between split GICv2 and GICv3 drivers again, or a QEMU whose HVF sets
+`ID_AA64PFR0_EL1.GIC` for an attached GICv3. It is shown by `virt_early_panic`
+and `virt_early_fault` green under HVF on that firmware or that QEMU.

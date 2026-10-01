@@ -1,78 +1,43 @@
-//! The UEFI firmware a guest boots: the Debian edk2 build [`pinned`] for its
-//! machine and accelerator, committed under `qemu-firmware/` and recorded in
-//! `NOTICE`. It is the half of the instrument `.github/qemu-version` does not
-//! declare, so the dev host and CI boot the same bytes, and no guest boots what
-//! the host's QEMU installation carries.
+//! The UEFI firmware a guest boots: whichever the host's QEMU installation
+//! declares, never a file this tree carries or a path read off one machine.
 //!
-//! Each pin, a build here or `.github/qemu-version`, moves only on a
-//! measurement under every accelerator it serves. Firmware reads the CPU the
-//! accelerator presents, and QEMU's HVF presents `virt`'s with
-//! `ID_AA64PFR0_EL1.GIC` 0 where TCG presents 1.
+//! Found the way QEMU's interop spec (`docs/interop/firmware.json`) tells
+//! management software to: the `firmware/*.json` descriptors under the user's
+//! override directory, then the system's, then every data directory QEMU
+//! reports (`-L help`), taken in that order, a name in an earlier directory
+//! hiding the same name in a later one, and the first that fits the machine
+//! wins. Nothing fits, and the boot is refused by name.
 
-use std::fs;
-use std::io::Write;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::OnceLock;
 
-use crate::arch::{Accel, Arch};
+use serde::Deserialize;
 
-/// One committed build: where it is under the repository's root, its code and
-/// variable-store images, its `Firmware::flash`, and its images as a guest is
-/// handed them, staged once per process.
-struct Pin {
-    dir: &'static str,
-    code: &'static str,
-    vars: &'static str,
-    flash: Option<u64>,
-    staged: OnceLock<Result<Firmware, String>>,
-}
+use crate::arch::Arch;
 
-impl Pin {
-    const fn new(dir: &'static str, code: &'static str, vars: &'static str, flash: Option<u64>) -> Pin {
-        Pin { dir, code, vars, flash, staged: OnceLock::new() }
-    }
-}
-
-static Q35: Pin = Pin::new("qemu-firmware/debian-2026.05-2", "OVMF_CODE_4M.fd", "OVMF_VARS_4M.fd", None);
-static VIRT: Pin = Pin::new("qemu-firmware/debian-2026.05-2", "QEMU_EFI.fd", "QEMU_VARS.fd", Some(VIRT_FLASH));
-static VIRT_HVF: Pin = Pin::new("qemu-firmware/debian-2024.11-5", "QEMU_EFI.fd", "QEMU_VARS.fd", Some(VIRT_FLASH));
-
-/// The build a guest of `arch` boots under `accel`.
-fn pinned(arch: Arch, accel: Accel) -> &'static Pin {
-    match (arch, accel) {
-        (Arch::X86_64, Accel::Kvm | Accel::Hvf | Accel::Tcg) => &Q35,
-        (Arch::Aarch64, Accel::Kvm | Accel::Tcg) => &VIRT,
-        // From edk2-stable202502 to stable202608 ArmVirtQemu never returns from
-        // `ExitBootServices` under HVF
-        // (`issues/build/edk2-stable202502-to-202608-hangs-at-exitbootservices-under-hvf.md`).
-        (Arch::Aarch64, Accel::Hvf) => &VIRT_HVF,
-    }
-}
-
-/// What each of `virt`'s two flash devices holds: QEMU's `VIRT_FLASH` window,
-/// 128 MiB, halved. A file of any other size is refused, so Debian pads its
-/// own copies of both images to this with zeros, and so does this module.
-const VIRT_FLASH: u64 = 64 << 20;
-
-/// One machine's firmware.
-#[derive(Debug, PartialEq, Eq)]
+/// One installation's firmware for one machine.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Firmware {
     /// The code image, which a guest only ever reads.
     pub code: PathBuf,
     /// The variable-store template, which no guest is handed: each boot writes
     /// a copy of its own ([`Firmware::fresh_vars`]).
-    vars: PathBuf,
-    /// The size of the flash device each image fills, where the machine fixes
-    /// one; q35 sizes its devices by the images.
-    flash: Option<u64>,
+    pub vars: PathBuf,
 }
 
 impl Firmware {
     /// A fresh variable store at `to`, from the template.
     pub fn fresh_vars(&self, to: &Path) -> Result<(), String> {
-        let template = fs::read(&self.vars)
-            .map_err(|e| format!("read the firmware's variable store {}: {e}", self.vars.display()))?;
-        write_padded(to, &template, self.flash)
+        std::fs::copy(&self.vars, to)
+            .map_err(|e| format!("copy the firmware's variable store {} to {}: {e}", self.vars.display(), to.display()))?;
+        // `fs::copy` carries the template's mode. A read-only template (a 0444
+        // store, as on Nix) would leave the boot's own copy unwritable to QEMU
+        // and the next boot's copy over it failing the same way.
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(to, std::fs::Permissions::from_mode(0o644))
+            .map_err(|e| format!("make the firmware variable store copy {} writable: {e}", to.display()))
     }
 
     /// The two `-drive` values that give a guest this firmware, with `vars` as
@@ -85,113 +50,302 @@ impl Firmware {
     }
 }
 
-/// The firmware a guest of `arch` boots under `accel`.
-pub fn of(arch: Arch, accel: Accel) -> Result<&'static Firmware, String> {
-    let pin = pinned(arch, accel);
-    pin.staged.get_or_init(|| stage(Path::new(env!("CARGO_MANIFEST_DIR")), pin)).as_ref().map_err(Clone::clone)
+/// The firmware the host's QEMU declares for `arch`'s machine, asked once per
+/// process.
+pub fn of(arch: Arch) -> Result<&'static Firmware, String> {
+    static FOUND: [OnceLock<Result<Firmware, String>>; 2] = [OnceLock::new(), OnceLock::new()];
+    let slot = &FOUND[Arch::ALL.iter().position(|a| *a == arch).expect("every Arch is in ALL")];
+    slot.get_or_init(|| find(arch)).as_ref().map_err(Clone::clone)
 }
 
-/// `pin`'s committed images, and for a machine whose flash is fixed, the code
-/// image padded to it under `root`'s `target/`: written beside the last copy
-/// and renamed over it, so a guest that opened that one reads it whole.
-fn stage(root: &Path, pin: &Pin) -> Result<Firmware, String> {
-    let Pin { dir, code, vars, flash, .. } = *pin;
-    let committed = root.join(dir);
-    let code = match flash {
-        None => committed.join(code),
-        Some(_) => {
-            let bytes = fs::read(committed.join(code))
-                .map_err(|e| format!("read the firmware {}: {e}", committed.join(code).display()))?;
-            let dir = root.join("target").join(dir);
-            fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-            let (part, to) = (dir.join(format!("{code}.{}", std::process::id())), dir.join(code));
-            write_padded(&part, &bytes, flash)?;
-            fs::rename(&part, &to).map_err(|e| format!("rename {} to {}: {e}", part.display(), to.display()))?;
-            to
-        }
-    };
-    Ok(Firmware { code, vars: committed.join(vars), flash })
-}
-
-/// `bytes` at `to`, then zeros to `flash`'s size where the machine fixes one.
-fn write_padded(to: &Path, bytes: &[u8], flash: Option<u64>) -> Result<(), String> {
-    let len = bytes.len() as u64;
-    let size = flash.unwrap_or(len);
-    if len > size {
-        return Err(format!("{}: {len} bytes of firmware for a {size}-byte flash device", to.display()));
+fn find(arch: Arch) -> Result<Firmware, String> {
+    let version = crate::ci::qemu_version(arch)?;
+    let out = Command::new(arch.qemu())
+        .args(["-L", "help"])
+        .output()
+        .map_err(|e| format!("{} -L help: {e}", arch.qemu()))?;
+    if !out.status.success() {
+        return Err(format!("{} -L help: {}: {}", arch.qemu(), out.status, String::from_utf8_lossy(&out.stderr)));
     }
-    let mut file = fs::File::create(to).map_err(|e| format!("create {}: {e}", to.display()))?;
-    file.write_all(bytes).map_err(|e| format!("write {}: {e}", to.display()))?;
-    file.set_len(size).map_err(|e| format!("pad {} to {size} bytes: {e}", to.display()))
+    let datadirs = String::from_utf8_lossy(&out.stdout).lines().filter(|l| !l.is_empty()).map(|l| Path::new(l).join("firmware")).collect();
+    let dirs = search_dirs(
+        std::env::var_os("XDG_CONFIG_HOME").as_deref().map(Path::new),
+        std::env::var_os("HOME").as_deref().map(Path::new),
+        datadirs,
+    );
+    select(arch, &machine_type(arch, &version), &descriptors(&dirs)?).map_err(|why| {
+        let searched: Vec<String> = dirs.iter().map(|d| d.display().to_string()).collect();
+        format!("{why}; searched {} (QEMU {version}'s data directories among them)", searched.join(", "))
+    })
+}
+
+/// The directories `descriptors` reads, in the precedence
+/// `docs/interop/firmware.json` gives: the user's override
+/// (`$XDG_CONFIG_HOME`, else `$HOME/.config`), then the system's, then every
+/// data directory QEMU itself reports (`-L help`, `datadirs`).
+fn search_dirs(xdg_config_home: Option<&Path>, home: Option<&Path>, datadirs: Vec<PathBuf>) -> Vec<PathBuf> {
+    let user_config = xdg_config_home.map(Path::to_path_buf).or_else(|| home.map(|h| h.join(".config")));
+    let mut dirs: Vec<PathBuf> = user_config.map(|c| c.join("qemu/firmware")).into_iter().collect();
+    dirs.push(PathBuf::from("/etc/qemu/firmware"));
+    dirs.extend(datadirs);
+    dirs
+}
+
+/// Every `*.json` under `dirs`, read, in file-name order, a name in an earlier
+/// directory hiding the same name in a later one. A directory that does not
+/// exist holds none.
+fn descriptors(dirs: &[PathBuf]) -> Result<Vec<(PathBuf, Vec<u8>)>, String> {
+    let mut named: BTreeMap<String, PathBuf> = BTreeMap::new();
+    for dir in dirs {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(format!("{}: {e}", dir.display())),
+        };
+        for entry in entries {
+            let path = entry.map_err(|e| format!("{}: {e}", dir.display()))?.path();
+            if path.extension().is_some_and(|x| x == "json") {
+                let name = path.file_name().expect("a listed file has a name").to_string_lossy().into_owned();
+                named.entry(name).or_insert(path);
+            }
+        }
+    }
+    named
+        .into_values()
+        .map(|path| std::fs::read(&path).map(|bytes| (path.clone(), bytes)).map_err(|e| format!("{}: {e}", path.display())))
+        .collect()
+}
+
+/// The versioned machine type `arch`'s machine resolves to under QEMU
+/// `version`: what a descriptor's `machines` globs are matched against.
+/// x86_64's PC lineage versions its type under a `pc-` prefix the `q35` alias
+/// itself does not carry; aarch64's `virt` carries none.
+fn machine_type(arch: Arch, version: &str) -> String {
+    let release: Vec<&str> = version.split('.').take(2).collect();
+    let prefix = match arch {
+        Arch::X86_64 => "pc-",
+        Arch::Aarch64 => "",
+    };
+    format!("{prefix}{}-{}", arch.machine(), release.join("."))
+}
+
+/// The first of `descriptors`, in the order given, that declares UEFI firmware
+/// for `machine` on `arch` as a raw code image beside a raw variable-store
+/// template, with neither secure boot nor SMM, which no guest here is set up
+/// for. An empty file is one the spec says hides its name, and one that does
+/// not parse is refused.
+fn select(arch: Arch, machine: &str, descriptors: &[(PathBuf, Vec<u8>)]) -> Result<Firmware, String> {
+    for (path, bytes) in descriptors {
+        if bytes.is_empty() {
+            continue;
+        }
+        let d: Descriptor = serde_json::from_slice(bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+        let Mapping::Flash(flash) = d.mapping else { continue };
+        let targets = d.targets.iter().filter(|t| t.architecture == arch.name());
+        let fits_machine = targets.flat_map(|t| &t.machines).map(|g| glob(g, machine)).collect::<Result<Vec<bool>, _>>();
+        let fits = d.interface_types.iter().any(|i| i == "uefi")
+            && flash.mode.as_deref().is_none_or(|m| m == "split")
+            && flash.executable.format == "raw"
+            && flash.nvram_template.as_ref().is_some_and(|t| t.format == "raw")
+            && !d.features.iter().any(|f| f == "secure-boot" || f == "requires-smm")
+            && fits_machine.map_err(|why| format!("{}: {why}", path.display()))?.contains(&true);
+        if fits {
+            return Ok(Firmware {
+                code: flash.executable.filename,
+                vars: flash.nvram_template.expect("a fitting descriptor names its template").filename,
+            });
+        }
+    }
+    let read: Vec<String> = descriptors.iter().map(|(p, _)| p.display().to_string()).collect();
+    Err(format!(
+        "no firmware descriptor declares UEFI flash firmware without secure boot for {} `{machine}`; read [{}]",
+        arch.name(),
+        read.join(", ")
+    ))
+}
+
+/// Whether `pattern` matches `name`. Anything else — a non-trailing `*`, or
+/// another fnmatch metacharacter — is refused by name rather than misread.
+fn glob(pattern: &str, name: &str) -> Result<bool, String> {
+    match pattern.strip_suffix('*') {
+        Some(prefix) if !prefix.contains(['*', '?', '[', '\\']) => Ok(name.starts_with(prefix)),
+        None if !pattern.contains(['?', '[', '\\']) => Ok(pattern == name),
+        _ => Err(format!("the machine glob {pattern:?} is not a prefix with at most one trailing `*`, which this reader does not match")),
+    }
+}
+
+/// The fields of `docs/interop/firmware.json`'s `Firmware` this reader decides by.
+#[derive(Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct Descriptor {
+    interface_types: Vec<String>,
+    mapping: Mapping,
+    targets: Vec<Target>,
+    features: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "device", rename_all = "kebab-case")]
+enum Mapping {
+    Flash(Flash),
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct Flash {
+    mode: Option<String>,
+    executable: File,
+    nvram_template: Option<File>,
+}
+
+#[derive(Deserialize)]
+struct File {
+    filename: PathBuf,
+    format: String,
+}
+
+#[derive(Deserialize)]
+struct Target {
+    architecture: String,
+    machines: Vec<String>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A root holding `pin`'s build directory with each image named by its own
-    /// name, `len` bytes.
-    fn root_with(pin: &Pin, images: &[(&str, usize)]) -> toyos_tmpdir::TempDir {
-        let tmp = toyos_tmpdir::TempDir::new("firmware");
-        let dir = tmp.path().join(pin.dir);
-        fs::create_dir_all(&dir).unwrap();
-        for (name, len) in images {
-            fs::write(dir.join(name), name.bytes().cycle().take(*len).collect::<Vec<u8>>()).unwrap();
-        }
-        tmp
+    fn descriptor(arch: &str, machines: &str, features: &str, code: &str) -> Vec<u8> {
+        format!(
+            r#"{{"description":"t","interface-types":["uefi"],
+               "mapping":{{"device":"flash","executable":{{"filename":"{code}","format":"raw"}},
+                           "nvram-template":{{"filename":"{code}.vars","format":"raw"}}}},
+               "targets":[{{"architecture":"{arch}","machines":[{machines}]}}],
+               "features":[{features}],"tags":[]}}"#
+        )
+        .into_bytes()
+    }
+
+    fn named(files: &[(&str, Vec<u8>)]) -> Vec<(PathBuf, Vec<u8>)> {
+        files.iter().map(|(n, b)| (PathBuf::from(*n), b.clone())).collect()
     }
 
     #[test]
-    fn every_machine_and_accelerator_names_images_the_tree_commits() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        for arch in Arch::ALL {
-            for accel in [Accel::Kvm, Accel::Hvf, Accel::Tcg] {
-                let Pin { dir, code, vars, .. } = *pinned(arch, accel);
-                for name in [code, vars] {
-                    let at = root.join(dir).join(name);
-                    assert!(at.is_file(), "{arch:?} under {accel:?}: {dir}/{name} is not committed");
-                }
+    fn the_first_non_secure_uefi_flash_descriptor_for_the_machine_wins() {
+        let files = named(&[
+            ("40-memory.json", br#"{"interface-types":["uefi"],"mapping":{"device":"memory","filename":"/sev.fd"},"targets":[{"architecture":"x86_64","machines":["pc-q35-*"]}],"features":["amd-sev"]}"#.to_vec()),
+            ("50-secure.json", descriptor("x86_64", r#""pc-q35-*""#, r#""requires-smm","secure-boot""#, "/secure.fd")),
+            ("55-i440fx.json", descriptor("x86_64", r#""pc-i440fx-*""#, "", "/i440fx.fd")),
+            ("56-arm.json", descriptor("aarch64", r#""virt-*""#, "", "/arm.fd")),
+            ("58-hidden.json", Vec::new()),
+            // Fedora-style non-secure descriptors ahead of the raw ones: each
+            // fits every rule but the one it is named for, and must stay
+            // refused by that rule alone.
+            (
+                "58a-qcow2.json",
+                br#"{"interface-types":["uefi"],"mapping":{"device":"flash","executable":{"filename":"/qcow2.fd","format":"qcow2"},"nvram-template":{"filename":"/qcow2.fd.vars","format":"raw"}},"targets":[{"architecture":"x86_64","machines":["pc-q35-*"]}],"features":[]}"#.to_vec(),
+            ),
+            (
+                "58b-smm.json",
+                descriptor("x86_64", r#""pc-q35-*""#, r#""requires-smm""#, "/smm.fd"),
+            ),
+            (
+                "59-combined.json",
+                br#"{"interface-types":["uefi"],"mapping":{"device":"flash","mode":"combined","executable":{"filename":"/combined.fd","format":"raw"},"nvram-template":{"filename":"/combined.fd.vars","format":"raw"}},"targets":[{"architecture":"x86_64","machines":["pc-q35-*"]}],"features":[]}"#.to_vec(),
+            ),
+            ("60-plain.json", descriptor("x86_64", r#""pc-i440fx-*","pc-q35-*""#, r#""acpi-s3","amd-sev""#, "/plain.fd")),
+            ("70-later.json", descriptor("x86_64", r#""pc-q35-*""#, "", "/later.fd")),
+        ]);
+        assert_eq!(
+            select(Arch::X86_64, "pc-q35-11.1", &files),
+            Ok(Firmware {
+                code: PathBuf::from("/plain.fd"),
+                vars: PathBuf::from("/plain.fd.vars"),
+            })
+        );
+        assert_eq!(select(Arch::Aarch64, "virt-11.1", &files).map(|f| f.code), Ok(PathBuf::from("/arm.fd")));
+    }
+
+    #[test]
+    fn nothing_fitting_is_refused_naming_what_was_read() {
+        let files = named(&[("50-secure.json", descriptor("x86_64", r#""pc-q35-*""#, r#""secure-boot""#, "/s.fd"))]);
+        let why = select(Arch::X86_64, "pc-q35-11.1", &files).unwrap_err();
+        assert!(why.contains("x86_64 `pc-q35-11.1`") && why.contains("50-secure.json"), "{why}");
+        assert!(select(Arch::X86_64, "pc-q35-11.1", &[]).is_err());
+    }
+
+    #[test]
+    fn a_descriptor_that_does_not_parse_is_refused_by_name() {
+        let files = named(&[("10-broken.json", b"{".to_vec()), ("60-plain.json", descriptor("x86_64", r#""pc-q35-*""#, "", "/p.fd"))]);
+        let why = select(Arch::X86_64, "pc-q35-11.1", &files).unwrap_err();
+        assert!(why.starts_with("10-broken.json: "), "{why}");
+    }
+
+    #[test]
+    fn an_earlier_directory_hides_a_later_ones_name_and_a_missing_one_holds_nothing() {
+        let tmp = toyos_tmpdir::TempDir::new("firmware-descriptors");
+        let [first, second] = ["first", "second"].map(|d| tmp.path().join(d));
+        for (dir, files) in [(&first, &["60-b.json"][..]), (&second, &["60-b.json", "50-a.json", "README"][..])] {
+            std::fs::create_dir(dir).unwrap();
+            for file in files {
+                std::fs::write(dir.join(file), dir.display().to_string()).unwrap();
             }
         }
+        let read = descriptors(&[tmp.path().join("absent"), first.clone(), second.clone()]).unwrap();
+        assert_eq!(
+            read,
+            vec![
+                (second.join("50-a.json"), second.display().to_string().into_bytes()),
+                (first.join("60-b.json"), first.display().to_string().into_bytes()),
+            ]
+        );
     }
 
     #[test]
-    fn virts_images_are_the_committed_bytes_then_zeros_to_the_flash() {
-        let dir = VIRT.dir;
-        let tmp = root_with(&VIRT, &[("QEMU_EFI.fd", 3 << 20), ("QEMU_VARS.fd", 768 << 10)]);
-        let firmware = stage(tmp.path(), &VIRT).unwrap();
-        assert_eq!(firmware.code, tmp.path().join("target").join(dir).join("QEMU_EFI.fd"));
-        let code = fs::read(&firmware.code).unwrap();
-        assert_eq!(code.len() as u64, VIRT_FLASH);
-        assert_eq!(code[..3 << 20], fs::read(tmp.path().join(dir).join("QEMU_EFI.fd")).unwrap()[..]);
-        assert!(code[3 << 20..].iter().all(|b| *b == 0));
-
-        let vars = tmp.path().join("vars.fd");
-        firmware.fresh_vars(&vars).unwrap();
-        let store = fs::read(&vars).unwrap();
-        assert_eq!(store.len() as u64, VIRT_FLASH);
-        assert_eq!(store[..768 << 10], fs::read(tmp.path().join(dir).join("QEMU_VARS.fd")).unwrap()[..]);
-        assert!(store[768 << 10..].iter().all(|b| *b == 0));
-        let staged: Vec<_> = fs::read_dir(tmp.path().join("target").join(dir)).unwrap().map(|e| e.unwrap().file_name()).collect();
-        assert_eq!(staged, ["QEMU_EFI.fd"], "the staging copy was renamed, not left beside it");
+    fn the_machine_is_the_versioned_type_its_alias_resolves_to() {
+        assert_eq!(machine_type(Arch::X86_64, "11.1.1"), "pc-q35-11.1");
+        assert_eq!(machine_type(Arch::Aarch64, "11.1.1"), "virt-11.1");
     }
 
     #[test]
-    fn q35s_images_are_the_committed_files_as_they_are() {
-        let dir = Q35.dir;
-        let tmp = root_with(&Q35, &[("OVMF_CODE_4M.fd", 4096), ("OVMF_VARS_4M.fd", 512)]);
-        let firmware = stage(tmp.path(), &Q35).unwrap();
-        assert_eq!(firmware.code, tmp.path().join(dir).join("OVMF_CODE_4M.fd"));
-        let vars = tmp.path().join("vars.fd");
-        firmware.fresh_vars(&vars).unwrap();
-        assert_eq!(fs::read(&vars).unwrap(), fs::read(tmp.path().join(dir).join("OVMF_VARS_4M.fd")).unwrap());
-        assert!(!tmp.path().join("target").exists(), "nothing is staged for a machine that sizes its flash by the image");
+    fn a_glob_matches_a_trailing_star_as_a_prefix_and_refuses_anything_else() {
+        assert_eq!(glob("pc-q35-*", "pc-q35-11.1"), Ok(true));
+        assert_eq!(glob("pc-q35-*", "pc-i440fx-11.1"), Ok(false));
+        assert_eq!(glob("pc-q35-11.0", "pc-q35-11.1"), Ok(false));
+        assert_eq!(glob("pc-q35-11.1", "pc-q35-11.1"), Ok(true));
+        assert_eq!(glob("*", "virt-11.1"), Ok(true));
+        assert!(glob("pc-*-11.*", "pc-q35-11.1").is_err());
+        assert!(glob("pc-q35-1?.*", "pc-q35-11.1").is_err());
     }
 
     #[test]
-    fn an_image_larger_than_its_flash_is_refused() {
-        let tmp = toyos_tmpdir::TempDir::new("firmware");
-        let why = write_padded(&tmp.path().join("image.fd"), &[1, 2, 3], Some(2)).unwrap_err();
-        assert!(why.ends_with("3 bytes of firmware for a 2-byte flash device"), "{why}");
+    fn the_users_and_the_systems_directories_come_before_qemus_own() {
+        let dirs = search_dirs(Some(Path::new("/x/cfg")), Some(Path::new("/x/home")), vec![PathBuf::from("/data/firmware")]);
+        assert_eq!(
+            dirs,
+            vec![PathBuf::from("/x/cfg/qemu/firmware"), PathBuf::from("/etc/qemu/firmware"), PathBuf::from("/data/firmware")]
+        );
+        let dirs = search_dirs(None, Some(Path::new("/x/home")), vec![]);
+        assert_eq!(dirs[0], PathBuf::from("/x/home/.config/qemu/firmware"));
+        let dirs = search_dirs(None, None, vec![PathBuf::from("/data/firmware")]);
+        assert_eq!(dirs, vec![PathBuf::from("/etc/qemu/firmware"), PathBuf::from("/data/firmware")]);
+    }
+
+    #[test]
+    fn a_read_only_templates_copy_is_still_writable() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = toyos_tmpdir::TempDir::new("firmware-vars");
+        let template = tmp.path().join("template.fd");
+        std::fs::write(&template, b"vars").unwrap();
+        std::fs::set_permissions(&template, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let firmware = Firmware { code: PathBuf::new(), vars: template };
+        let to = tmp.path().join("copy.fd");
+        firmware.fresh_vars(&to).unwrap();
+        let mode = std::fs::metadata(&to).unwrap().permissions().mode() & 0o777;
+        assert_ne!(mode & 0o200, 0, "the copy must be owner-writable: {mode:04o}");
+        // A second boot copies over the same file: still possible only because
+        // the first copy did not inherit the template's read-only mode.
+        firmware.fresh_vars(&to).unwrap();
     }
 }

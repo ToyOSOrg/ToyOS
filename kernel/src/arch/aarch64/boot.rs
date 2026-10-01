@@ -110,7 +110,10 @@ pub(super) unsafe extern "C" fn ap_start() -> ! {
 /// its physical address, and never returns.
 /// # Safety
 /// Only [`_start`] and [`ap_start`] branch here, with `x3` a root that maps the
-/// kernel image at both its physical and its link address.
+/// kernel image at both its physical and its link address. The EL1 arm's
+/// translation registers and the EL2 arm's `HCR_EL2` change under no walk only
+/// because the level entered at has its MMU off; an entry with it on halts in
+/// [`refused_mmu_on_at_entry`].
 #[unsafe(naked)]
 unsafe extern "C" fn apply_declaration() -> ! {
     core::arch::naked_asm!(
@@ -127,7 +130,9 @@ unsafe extern "C" fn apply_declaration() -> ! {
         "b.eq 2f",
         "cmp x21, #1",
         "b.ne 9f",
-        // EL1: the declaration, then translation on.
+        // EL1: refused with its MMU on; else the declaration, then translation on.
+        "mrs x1, sctlr_el1",
+        "tbnz x1, #0, {refuse_mmu}",
         "msr mair_el1, x4",
         "msr tcr_el1, x2",
         "msr ttbr0_el1, x3",
@@ -142,11 +147,14 @@ unsafe extern "C" fn apply_declaration() -> ! {
         "msr sctlr_el1, x5",
         "isb",
         "br x22",
-        // EL2: `HCR_EL2` first, since with `E2H` set every `_el1` name
-        // below is an EL2 register; refused unless it reads back as declared.
-        // EL2's own MMU is off, so the regime `E2H` chooses changes under no
-        // walk. Then EL1's registers with the MMU on, EL2's others, and the drop.
+        // EL2: refused with its own MMU on, so the regime `E2H` chooses
+        // changes under no walk. Then `HCR_EL2`, since with `E2H` set every
+        // `_el1` name below is an EL2 register; refused unless it reads back
+        // as declared. Then EL1's registers with the MMU on, EL2's others, and
+        // the drop.
         "2:",
+        "mrs x1, sctlr_el2",
+        "tbnz x1, #0, {refuse_mmu}",
         "ldr x1, ={hcr}",
         "msr hcr_el2, x1",
         "isb",
@@ -195,6 +203,7 @@ unsafe extern "C" fn apply_declaration() -> ! {
         mair = const regs::MAIR,
         sctlr = const regs::SCTLR,
         hcr = const regs::HCR_EL2,
+        refuse_mmu = sym refused_mmu_on_at_entry,
         refuse_hcr = sym refused_hcr_el2_readback,
         cnthctl = const regs::CNTHCTL_EL2,
         cptr = const regs::CPTR_EL2,
@@ -203,6 +212,17 @@ unsafe extern "C" fn apply_declaration() -> ! {
         icc_sre_el2 = const regs::ICC_SRE_EL2,
         spsr = const regs::SPSR_EL2_TO_EL1,
     );
+}
+
+/// Where a CPU halts that reaches [`apply_declaration`] with `SCTLR_ELx.M` set
+/// at the level it runs at, as one a loader hands over under firmware's tables
+/// does: the declaration's translation registers and `HCR_EL2` would change
+/// under a live walk. Nothing can report yet, so the refusal is this symbol,
+/// which the halted PC names.
+#[unsafe(naked)]
+#[no_mangle]
+unsafe extern "C" fn refused_mmu_on_at_entry() -> ! {
+    core::arch::naked_asm!("1:", "wfe", "b 1b")
 }
 
 /// Where a CPU entered at EL2 halts when `HCR_EL2` reads back anything but the

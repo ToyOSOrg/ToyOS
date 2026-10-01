@@ -740,6 +740,11 @@ pub enum Profile {
     /// firmware then hands the loader the CPU at EL2, and the kernel's entry
     /// has to drop from it. HVF gives a guest EL1 only.
     VirtEl2,
+    /// [`Profile::VirtEl2`] on `-cpu cortex-a72`, which has no FEAT_VHE: any
+    /// firmware hands the loader EL2 with `HCR_EL2.E2H` clear, where an `_el1`
+    /// register name is EL1's own, so the loader's EL2 arm alone turns EL2's
+    /// MMU off.
+    VirtEl2NoVhe,
     /// [`Profile::Virt`] emulated on `-cpu max` whatever the host: firmware
     /// hands the loader the CPU at EL1, as HVF does, and QEMU's FADT names
     /// PSCI's conduit `HVC`; unlike HVF's, the CPU has RNDR for the kernel's
@@ -751,7 +756,7 @@ impl Profile {
     /// The architecture this machine is.
     pub fn arch(self) -> Arch {
         match self {
-            Self::Virt | Self::VirtEl2 | Self::VirtTcg => Arch::Aarch64,
+            Self::Virt | Self::VirtEl2 | Self::VirtEl2NoVhe | Self::VirtTcg => Arch::Aarch64,
             Self::Headless
             | Self::HeadlessNoIommu
             | Self::Gop
@@ -762,8 +767,16 @@ impl Profile {
     /// How this host provides the machine.
     pub fn accel(self) -> Accel {
         match self {
-            Self::VirtEl2 | Self::VirtTcg => Accel::Tcg,
+            Self::VirtEl2 | Self::VirtEl2NoVhe | Self::VirtTcg => Accel::Tcg,
             _ => self.arch().accel(),
+        }
+    }
+
+    /// The CPU this machine has.
+    fn cpu(self) -> &'static str {
+        match self {
+            Self::VirtEl2NoVhe => "cortex-a72",
+            _ => self.arch().cpu(self.accel()),
         }
     }
 }
@@ -884,7 +897,7 @@ pub const NVME_SMALL: u64 = 128 * 1024 * 1024;
 impl Profile {
     fn shape(self) -> Shape {
         match self {
-            Self::VirtEl2 | Self::VirtTcg => Self::Virt.shape(),
+            Self::VirtEl2 | Self::VirtEl2NoVhe | Self::VirtTcg => Self::Virt.shape(),
             Self::Virt => Shape {
                 vga: "std",
                 panel: None,
@@ -1283,7 +1296,7 @@ impl QemuInstance {
         let _ = fs::remove_file(&uart_log);
 
         let vars = test_dir.join(format!("vars-{seq}.fd"));
-        toyos_build::firmware::of(options.profile.arch(), options.profile.accel())
+        toyos_build::firmware::of(options.profile.arch())
             .and_then(|firmware| firmware.fresh_vars(&vars))
             .unwrap_or_else(|why| panic!("[qemu] {why}"));
 
@@ -1911,8 +1924,8 @@ fn qemu_command(
         "mute removes the only console a virtio profile has"
     );
 
-    let (arch, accel) = (options.profile.arch(), options.profile.accel());
-    let [firmware_code, firmware_vars] = toyos_build::firmware::of(arch, accel)
+    let arch = options.profile.arch();
+    let [firmware_code, firmware_vars] = toyos_build::firmware::of(arch)
         .unwrap_or_else(|why| panic!("[qemu] {why}"))
         .drives(firmware_vars);
 
@@ -1921,6 +1934,7 @@ fn qemu_command(
         qemu.arg("-boot").arg(boot);
     }
 
+    let accel = options.profile.accel();
     if accel.is_hardware() {
         qemu.arg("-accel").arg(accel.name());
     }
@@ -1944,7 +1958,9 @@ fn qemu_command(
             // The unit a profile declares is VT-d, which `virt` has none of.
             assert!(shape.iommu.is_none(), "`virt` has no VT-d");
             match options.profile {
-                Profile::VirtEl2 => format!("{},gic-version=3,virtualization=on", arch.machine()),
+                Profile::VirtEl2 | Profile::VirtEl2NoVhe => {
+                    format!("{},gic-version=3,virtualization=on", arch.machine())
+                }
                 _ => format!("{},gic-version=3", arch.machine()),
             }
         }
@@ -1963,7 +1979,7 @@ fn qemu_command(
     qemu.arg("-machine")
         .arg(&machine)
         .arg("-cpu")
-        .arg(arch.cpu(accel))
+        .arg(options.profile.cpu())
         .arg("-smp")
         .arg(options.smp.to_string())
         .arg("-m")
