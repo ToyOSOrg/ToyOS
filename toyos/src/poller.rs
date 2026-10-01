@@ -928,6 +928,19 @@ mod tests {
         assert_eq!(submits, 1);
     }
 
+    /// A registration that answered holds no place, so a poller that watches
+    /// one handle after another for its whole life never reaches its bound.
+    #[test]
+    fn a_registration_that_answered_holds_no_place() {
+        let (mut kernel, poller) = pair(1);
+        for handle in 1..=3 {
+            poller.watch_raw(RawHandle(handle), READABLE, u64::from(handle));
+            kernel.submit();
+            kernel.arrive(RawHandle(handle));
+            assert_eq!(drained(&poller), [u64::from(handle)]);
+        }
+    }
+
     /// Past the handles it declared and as many again closed and unreported,
     /// a registration is refused by name.
     #[test]
