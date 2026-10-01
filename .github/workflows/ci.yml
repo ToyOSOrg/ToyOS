@@ -15,11 +15,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # macOS, because `toyos-fat32`'s fixtures are formatted with `newfs_msdos`
-  # and `hdiutil`.
   host:
     if: github.event_name == 'merge_group' || github.event.pull_request.draft == false
-    runs-on: macos-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -37,8 +35,8 @@ jobs:
             toyos/target
             kernel/target
             bootloader/target
-          key: host-${{ github.run_id }}
-          restore-keys: host-
+          key: host-linux-${{ github.run_id }}
+          restore-keys: host-linux-
 
       - run: cargo run -- --ci host
 
