@@ -25,7 +25,7 @@
 //! This is the text channel. The framebuffer is `screen.rs`, deliberately the
 //! only thing in the suite that reads pixels.
 
-use super::qemu::{is_kernel_line, QemuInstance};
+use super::qemu::is_kernel_line;
 
 /// Whose death a console line reports.
 ///
@@ -206,24 +206,10 @@ pub struct Serial {
 }
 
 impl Serial {
-    /// Everything the guest said on the way to its ready marker.
-    pub fn boot(qemu: &QemuInstance) -> Self {
-        Self { text: qemu.boot_log().to_string(), source: String::from("boot console") }
-    }
-
-    /// For text a test collected itself — a `drain_serial` window, a
-    /// `TestResult::serial`, the 16550 file of a guest that died early.
+    /// For text a test collected itself — a `drain_serial` window, the 16550
+    /// file of a guest that died early.
     pub fn named(source: &str, text: impl Into<String>) -> Self {
         Self { text: text.into(), source: source.to_string() }
-    }
-
-    /// Append a later window — `drain_serial`, a test's own serial. Keeps one
-    /// object to assert against instead of a `format!` of two.
-    pub fn push(&mut self, more: &str) {
-        self.text.push_str(more);
-        if !more.ends_with('\n') {
-            self.text.push('\n');
-        }
     }
 
     pub fn text(&self) -> &str {
@@ -347,37 +333,6 @@ impl Serial {
         }
         for bad in NEVER_CLEAN {
             self.must_not_say(bad)?;
-        }
-        Ok(())
-    }
-
-    /// [`Self::must_be_clean`] for the one test that staged one of
-    /// [`NEVER_CLEAN`]'s lines on purpose.
-    ///
-    /// `allowed` may appear exactly `times` and no other never-clean line may
-    /// appear at all, so a boot that produced a *second* one — or a different
-    /// one — still reds. Named rather than a flag, because the whole value of
-    /// `NEVER_CLEAN` is that a test cannot pass one by without saying so.
-    pub fn must_be_clean_apart_from(&self, allowed: &str, times: usize) -> Result<(), String> {
-        for (bad, by_kernel, _) in DEATHS {
-            if *by_kernel != Died::Kernel {
-                continue;
-            }
-            self.must_not_say(bad)?;
-        }
-        for bad in NEVER_CLEAN {
-            if *bad == allowed {
-                continue;
-            }
-            self.must_not_say(bad)?;
-        }
-        let seen = self.text().matches(allowed).count();
-        if seen != times {
-            return Err(format!(
-                "{allowed:?} appears {seen} time(s) on a {} and this test staged {times}:\n{}",
-                self.source,
-                self.text
-            ));
         }
         Ok(())
     }

@@ -133,8 +133,6 @@ jobs:
             userland/target
             tests/target
             tests/toyos-rust-tests/*/target
-            tests/https-fetch-host/target
-            tests/https-server-host/target
           key: guest-${{ github.run_id }}
           restore-keys: guest-
 

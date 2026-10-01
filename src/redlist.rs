@@ -25,73 +25,16 @@ pub struct Disabled {
 
 /// Every disabled test.
 pub const DISABLED: &[Disabled] = &[
-    Disabled {
-        test: "console_locale_detect",
-        issue: "issues/build/the-console-input-path-can-stop-after-a-ps2-overflow.md",
-    },
-    Disabled { test: "desktop_window_child", issue: "issues/kernel/desktop-window-child-freeze.md" },
     Disabled { test: "handle_basic", issue: "issues/kernel/deferred-release-outlives-its-syscall.md" },
     Disabled {
         test: "handle_kill_policy",
         issue: "issues/kernel/handle-kill-policy-census-grew-one-sharedmem-on-two-nightlies.md",
     },
     Disabled { test: "handle_transfer", issue: "issues/kernel/deferred-release-outlives-its-syscall.md" },
-    Disabled {
-        test: "i8042_mouse",
-        issue: "issues/hardware/i8042-mouse-ends-four-packets-short-with-a-clean-exit.md",
-    },
     Disabled { test: "kill_while_blocked", issue: "issues/kernel/deferred-release-outlives-its-syscall.md" },
-    Disabled {
-        test: "log_ring_keeps_the_owners_slots",
-        issue: "issues/kernel/a-log-rings-owner-is-named-only-when-logd-reads-its-registration.md",
-    },
-    Disabled {
-        test: "netd_refused_accept",
-        issue: "issues/hardware/netd-refused-accept-hung-waiting-for-a-wake-that-never-came.md",
-    },
-    Disabled {
-        test: "partition_claim_departure",
-        issue: "issues/boot-media/partition-claim-departure-exits-clean-with-none-of-its-refusals-said.md",
-    },
-    Disabled {
-        test: "quiesce_stops_the_machine",
-        issue: "issues/kernel/a-quiesce-writers-first-pass-outlasts-the-jobs-five-second-spin-up.md",
-    },
-    Disabled {
-        test: "quiesce_wakes_on_the_last_park",
-        issue: "issues/kernel/quiesce-wakes-on-the-last-park-gave-up-on-one-thread-beside-the-held-one.md",
-    },
-    Disabled {
-        test: "quiesce_wakes_on_the_last_teardown",
-        issue: "issues/kernel/quiesce-wakes-on-the-last-park-gave-up-on-one-thread-beside-the-held-one.md",
-    },
-    Disabled {
-        test: "root_chunk_refused_on_a_usb_stick",
-        issue: "issues/boot-media/an-unreadable-sector-on-a-usb-boot-stick-hangs-the-loader-past-the-firmware-watchdog.md",
-    },
-    Disabled {
-        test: "screen_console_scroll",
-        issue: "issues/build/the-console-loses-typed-keystrokes-under-host-load.md",
-    },
-    Disabled {
-        test: "screen_fatal_halt",
-        issue: "issues/boot-media/screen-fatal-halt-reds-on-ci-with-a-usb-storage-transport-break-during-boot.md",
-    },
     Disabled {
         test: "short_sleep_livelock",
         issue: "issues/kernel/short-sleep-livelock-stalls-on-ci-with-one-sleeper-never-returning.md",
-    },
-    Disabled {
-        test: "syscall_window_nmi",
-        issue: "issues/kernel/syscall-window-nmi-shortfalls-on-a-contended-host.md",
-    },
-    Disabled {
-        test: "usb_transport_break",
-        issue: "issues/kernel/a-held-disk-waits-for-a-pass-no-cpu-takes-when-every-cpu-is-in-a-call-on-it.md",
-    },
-    Disabled {
-        test: "user_copy_races_munmap",
-        issue: "issues/kernel/copy-meets-a-remap-holds-a-cpu-the-thread-it-waits-on-may-be-queued-behind.md",
     },
 ];
 

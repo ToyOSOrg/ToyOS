@@ -248,30 +248,6 @@ pub struct Exit {
     pub cpu_ms: u64,
 }
 
-/// The `exit: <name> pid=N code=N cpu=Nms` record for `name`, or `None` where
-/// the boot has none — which is a job that never ran, never returned, or was
-/// still running when the machine reset.
-///
-/// The **last** such record, because a name could in principle run twice and
-/// the boot's answer is the one it ended with. The record's whole message and
-/// not a substring of a line, so a program's line — which opens with the head
-/// `logd` gives it, never a kernel record's bracket — is never one.
-pub fn exit_of(log: &str, name: &str) -> Option<Exit> {
-    let head = format!("{}{name} pid=", crate::bootlog::EXIT);
-    log.lines().rev().find_map(|line| {
-        let rest = crate::bootlog::message(line)?.strip_prefix(&head)?;
-        let code = field(rest, "code=")?.parse().ok()?;
-        let cpu = field(rest, "cpu=")?;
-        let cpu_ms = cpu.strip_suffix("ms")?.parse().ok()?;
-        Some(Exit { code, cpu_ms })
-    })
-}
-
-/// The word after `key` in `rest`, up to the next space.
-fn field<'a>(rest: &'a str, key: &str) -> Option<&'a str> {
-    rest.split(key).nth(1)?.split_whitespace().next()
-}
-
 /// One line of a boot's own report about itself, in the order a reader wants
 /// them: what the devices said, then what each job measured.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -421,26 +397,6 @@ mod tests {
          12/16 port(s) unpowered\n\
          Loader log: the last boot is accounted for, so this pass resets the machine\n"
             .to_string()
-    }
-
-    #[test]
-    fn an_exit_record_is_read_as_its_number() {
-        let log = a_good_boot();
-        assert_eq!(exit_of(&log, "usbwrite"), Some(Exit { code: 402_000, cpu_ms: 140 }));
-        assert_eq!(exit_of(&log, "never_ran"), None);
-        // A name that is a prefix of another's is not that other one.
-        assert_eq!(exit_of(&log, "usb"), None);
-        // The last of two, because that is the answer the boot ended with.
-        let twice = format!("{log}{}", line("4.0", "exit: usbread pid=11 code=99 cpu=1ms"));
-        assert_eq!(exit_of(&twice, "usbread"), Some(Exit { code: 99, cpu_ms: 1 }));
-        // A program writing the record's words, and a whole record's line,
-        // after it.
-        let forged = format!(
-            "{twice}{{2026-09-08 16:08:23 5.000 evil}} exit: usbread pid=11 code=0 cpu=0ms\n\
-             {{2026-09-08 16:08:23 5.100 evil}} {}",
-            line("5.1", "exit: usbread pid=11 code=0 cpu=0ms"),
-        );
-        assert_eq!(exit_of(&forged, "usbread"), Some(Exit { code: 99, cpu_ms: 1 }));
     }
 
     #[test]

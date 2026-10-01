@@ -1,5 +1,5 @@
 ---
-status: expected-red
+status: open
 kind: tooling
 opened: 2026-08-23
 ---

@@ -157,19 +157,19 @@ fn unqualified(b: &[&Readback]) -> Result<(), String> {
 }
 
 static PASSING: Metal =
-    Metal::Runs { arms: &[metal::once("passing", "tests/jobcase", &[], &[])], judge: span };
-static FAILING: Metal = Metal::Runs {
+    Metal { arms: &[metal::once("passing", "tests/jobcase", &[], &[])], judge: span };
+static FAILING: Metal = Metal {
     arms: &[metal::once("failing", "tests/jobcase", &[], &[])],
     judge: span_and_fail,
 };
 static REFUSED: Metal =
-    Metal::Runs { arms: &[metal::once("refused", "tests/jobcase", &[], &[])], judge: span };
+    Metal { arms: &[metal::once("refused", "tests/jobcase", &[], &[])], judge: span };
 static LATE: Metal =
-    Metal::Runs { arms: &[metal::once("late", "tests/jobcase", &[], &[])], judge: span };
+    Metal { arms: &[metal::once("late", "tests/jobcase", &[], &[])], judge: span };
 static ONE: Metal =
-    Metal::Runs { arms: &[metal::once("one", "tests/jobcase", &[], &[])], judge: unqualified };
+    Metal { arms: &[metal::once("one", "tests/jobcase", &[], &[])], judge: unqualified };
 static TWO: Metal =
-    Metal::Runs { arms: &[metal::once("two", "tests/jobcase", &[], &[])], judge: unqualified };
+    Metal { arms: &[metal::once("two", "tests/jobcase", &[], &[])], judge: unqualified };
 
 /// **The record is one function of the readbacks.** A boot the loop refused, a
 /// boot a riding test failed and a boot whose own check failed are each

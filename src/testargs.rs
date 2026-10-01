@@ -159,9 +159,6 @@ declare_flags!(pub SUITE = {
     /// machine is not touched**: the run builds the images and writes down what
     /// to run on them, or judges readbacks a driver already left there.
     pub METAL_READBACK = "--metal-readback", Next;
-    /// The owner `guest_dies_with_its_harness` kills: the image it names,
-    /// booted and held until stdin ends. Alone on its line.
-    pub HOLD = "--hold", Next;
 });
 
 /// The run's filter and `--metal`'s mode, both decided by [`parse`]: an unknown
@@ -189,7 +186,6 @@ pub fn parse(args: &[String]) -> Result<Parsed<'_>, String> {
     if let Some(refusal) = line.malformed() {
         return Err(refusal);
     }
-    let flags = line.seen.len();
 
     let mut filter: Option<&str> = None;
     for word in line.positionals {
@@ -254,13 +250,6 @@ pub fn parse(args: &[String]) -> Result<Parsed<'_>, String> {
                     .to_string(),
             );
         }
-    }
-    if has(&HOLD) && (flags != 1 || filter.is_some()) {
-        return Err(
-            "--hold boots the image it names and holds it, and reads nothing else on the line; \
-             every other word would be dropped in silence"
-                .to_string(),
-        );
     }
 
     let metal = has(&METAL).then(|| {
@@ -532,8 +521,6 @@ mod tests {
             vec!["--debug"],
             vec!["--metal"],
             vec!["--metal", "--metal-readback", "target/metal"],
-            vec!["--hold", "boot.img"],
-            vec!["--hold=boot.img"],
         ] {
             assert!(parse_owned(&argv).is_ok(), "{argv:?}");
         }
@@ -615,18 +602,5 @@ mod tests {
     fn an_unknown_flag_is_refused_before_metal_decides_a_mode() {
         let refusal = parse_owned(&["--metal", "--bogus", "--list"]).unwrap_err();
         assert!(refusal.contains("--bogus"), "{refusal}");
-    }
-
-    #[test]
-    fn hold_is_alone_on_its_line() {
-        for argv in [
-            &["--hold", "boot.img", "boot"][..],
-            &["--hold", "boot.img", "--list"],
-            &["-j", "2", "--hold", "boot.img"],
-            &["--hold"],
-        ] {
-            let refusal = parse_owned(argv).unwrap_err();
-            assert!(refusal.contains("--hold"), "{argv:?}: {refusal}");
-        }
     }
 }
