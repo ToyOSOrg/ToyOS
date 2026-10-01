@@ -788,7 +788,7 @@ mod tests {
         moves("src/n2.rs", n2.replace(pin, &"0".repeat(pin.len())));
         moves("userland/libc/include/placeholder", "y".to_string());
         for builder in BUILDERS {
-            let text = fs::read_to_string(repo.join(builder)).unwrap();
+            let text = fs::read_to_string(here.join(builder)).unwrap();
             moves(builder, format!("{text}\nconst MOVED: () = ();\n"));
         }
     }
