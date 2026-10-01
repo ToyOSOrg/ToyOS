@@ -13,11 +13,9 @@
 //!
 //! **A package with a file changed, added or removed has every file dated
 //! now.** Cargo is told only what a build read; a file rustc probed for and did
-//! not find (`src/x/mod.rs` beside `src/x.rs`), or one a build script read
-//! without naming it, is still its package's. What a build reads outside its
-//! own package without telling cargo, a warm run trusts as cargo's own
-//! incremental build does:
-//! `issues/build/a-warm-host-run-trusts-cargo-for-what-a-build-reads-outside-its-package.md`.
+//! not find (`src/x/mod.rs` beside `src/x.rs`) is still its package's. **So
+//! has every package with a build script or a proc macro, on every read**:
+//! what code run at build time reads, cargo knows only if that code says so.
 //!
 //! **An entry built on another runner image is deleted, and the run is cold**:
 //! the image's linker and C compiler made its units, and cargo's fingerprint
@@ -44,7 +42,6 @@ use sha2::{Digest, Sha256};
 
 pub const MANIFEST: &str = "target/ci-sources";
 pub const DRIVER: &str = "target/ci-driver";
-/// A sealed entry's key is this, `${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}`.
 pub const SEALED: &str = "host-sealed-";
 
 /// 2001-09-09T01:46:40Z: older than any build, so a file dated so is never
@@ -83,12 +80,16 @@ pub fn read(root: &Path) -> Result<(Start, String), String> {
             exe.display()
         ));
     }
-    let runner = ["RUNNER_OS", "RUNNER_ARCH", "ImageOS", "ImageVersion"]
+    open(root, &runner(|name| std::env::var(name).ok())?, SystemTime::now())
+}
+
+/// The runner, as the variables a hosted runner sets name it: its OS, its
+/// architecture and its image.
+fn runner(var: impl Fn(&str) -> Option<String>) -> Result<String, String> {
+    let values = ["RUNNER_OS", "RUNNER_ARCH", "ImageOS", "ImageVersion"]
         .iter()
-        .map(|name| std::env::var(name).map_err(|_| format!("{name} is unset: a hosted runner sets it")))
-        .collect::<Result<Vec<_>, _>>()?
-        .join(" ");
-    open(root, &runner, SystemTime::now())
+        .map(|name| var(name).ok_or_else(|| format!("{name} is unset: a hosted runner sets it")));
+    Ok(values.collect::<Result<Vec<_>, _>>()?.join(" "))
 }
 
 fn open(root: &Path, runner: &str, now: SystemTime) -> Result<(Start, String), String> {
@@ -120,13 +121,21 @@ fn open(root: &Path, runner: &str, now: SystemTime) -> Result<(Start, String), S
     if now <= built() {
         return Err(format!("this runner's clock reads {now:?}, which no change dated now is newer than"));
     }
-    let dirty: BTreeSet<Option<String>> = current
+    let mut dirty: BTreeSet<Option<String>> = current
         .iter()
         .filter(|(path, hash)| entry.get(*path) != Some(*hash))
         .map(|(path, _)| path)
         .chain(entry.keys().filter(|path| !current.contains_key(*path)))
         .map(|path| package(path, &current))
         .collect();
+    let packages = dirty.len();
+    let mut build_time = 0;
+    for manifest in current.keys().filter(|path| Path::new(path).ends_with("Cargo.toml")) {
+        if runs_at_build(root, manifest, &current)? {
+            build_time += 1;
+            dirty.insert(Some(manifest.clone()));
+        }
+    }
     let mut same = 0;
     for (path, hash) in &current {
         let fresh = entry.get(path) == Some(hash) && !dirty.contains(&package(path, &current));
@@ -140,9 +149,9 @@ fn open(root: &Path, runner: &str, now: SystemTime) -> Result<(Start, String), S
         Start::Warm,
         format!(
             "built from {commit}: {same} of {} sources dated as built; {changed} changed, {added} \
-             added, {removed} removed, in {} packages",
+             added, {removed} removed, in {packages} packages; {build_time} packages run code at \
+             build time",
             current.len(),
-            dirty.len()
         ),
     ))
 }
@@ -199,6 +208,23 @@ fn parse(text: &str) -> Result<(String, String, Sources), String> {
         })
         .collect::<Result<_, _>>()?;
     Ok((commit.to_string(), runner.to_string(), entry))
+}
+
+/// Whether the package of `manifest` has a build script or is a proc macro, in
+/// every spelling cargo accepts.
+fn runs_at_build(root: &Path, manifest: &str, current: &Sources) -> Result<bool, String> {
+    let text = fs::read_to_string(root.join(manifest)).map_err(|e| format!("read {manifest}: {e}"))?;
+    let doc: toml::Value = text.parse().map_err(|e| format!("{manifest}: {e}"))?;
+    let lib = |key: &str, alias: &str| doc.get("lib").and_then(|lib| lib.get(key).or_else(|| lib.get(alias)));
+    let script = match doc.get("package").and_then(|package| package.get("build")) {
+        None => current.contains_key(&*Path::new(manifest).with_file_name("build.rs").to_string_lossy()),
+        Some(build) => build.as_bool() != Some(false),
+    };
+    let proc_macro = lib("proc-macro", "proc_macro").and_then(toml::Value::as_bool) == Some(true)
+        || lib("crate-type", "crate_type")
+            .and_then(toml::Value::as_array)
+            .is_some_and(|types| types.iter().any(|t| t.as_str() == Some("proc-macro")));
+    Ok(script || proc_macro)
 }
 
 /// The `Cargo.toml` of the package `path` is in: the nearest one above it.
@@ -381,8 +407,8 @@ mod tests {
     /// The oracle is cargo and the program it builds: an entry serves what
     /// a cold build of the reader's tree would, recompiling exactly what
     /// changed and what depends on it — a changed source the checkout dated
-    /// older than the entry's build included, and a build script whose package
-    /// lost a file it never named.
+    /// older than the entry's build included, a build script whose package
+    /// lost a file it never named, and a package that lost a file nothing read.
     #[test]
     fn an_entry_serves_exactly_the_sources_it_was_built_from() {
         let tmp = TempDir::new("cicache-entry");
@@ -395,7 +421,7 @@ mod tests {
         let source = tmp.join("origin");
         origin(&source, &[
             (".gitignore", "target/\n"),
-            ("Cargo.toml", "[workspace]\nmembers = [\"app\", \"leaf\", \"count\", \"idle\"]\nresolver = \"2\"\n"),
+            ("Cargo.toml", "[workspace]\nmembers = [\"app\", \"leaf\", \"count\", \"idle\", \"gone\"]\nresolver = \"2\"\n"),
             ("leaf/Cargo.toml", &crate_toml("leaf", "")),
             ("leaf/src/lib.rs", "pub fn word() -> &'static str { \"one\" }\n"),
             ("count/Cargo.toml", &crate_toml("count", "")),
@@ -404,6 +430,9 @@ mod tests {
             ("count/src/spare.txt", "read by nothing but the count\n"),
             ("idle/Cargo.toml", &crate_toml("idle", "")),
             ("idle/src/lib.rs", "pub fn idle() {}\n"),
+            ("gone/Cargo.toml", &crate_toml("gone", "")),
+            ("gone/src/lib.rs", "pub fn gone() {}\n"),
+            ("gone/notes.txt", "read by nothing\n"),
             ("app/Cargo.toml", &crate_toml("app", deps)),
             ("app/src/main.rs", "fn main() { print!(\"{} {}\", leaf::word(), count::FILES); }\n"),
         ]);
@@ -412,7 +441,7 @@ mod tests {
         assert_eq!(run(&writer), "one 2");
 
         write(&source, "leaf/src/lib.rs", "pub fn word() -> &'static str { \"two\" }\n");
-        sh(&source, &["rm", "-q", "count/src/spare.txt"]);
+        sh(&source, &["rm", "-q", "count/src/spare.txt", "gone/notes.txt"]);
         sh(&source, &["commit", "-qam", "read"]);
         let reader = tmp.join("reader");
         restore(&source, &writer, &reader);
@@ -425,7 +454,7 @@ mod tests {
         assert!(!reader.join(MANIFEST).exists(), "a warm tree keeps no manifest");
         let fresh = build(&reader);
         assert_eq!(run(&reader), "two 1");
-        let expected = [("app", false), ("count", false), ("idle", true), ("leaf", false)];
+        let expected = [("app", false), ("count", false), ("gone", false), ("idle", true), ("leaf", false)];
         assert_eq!(fresh, expected.into_iter().map(|(k, v)| (k.to_string(), v)).collect());
     }
 
@@ -456,14 +485,83 @@ mod tests {
         assert!(!out.status.success() && said.contains("E0761"), "{said}");
     }
 
-    /// One commit of `a.rs`, read cold.
-    fn cold_repo(tmp: &Path) -> Cold {
+    /// A build script and a proc macro that read another package's file and
+    /// never say so are run again on a read, as a cold build runs them: `app`'s
+    /// script reads `word.txt`, and so does `mac`, expanded in `said`.
+    #[test]
+    fn code_run_at_build_time_runs_again_on_every_read() {
+        let tmp = TempDir::new("cicache-buildtime");
+        let script = "fn main() {
+    let word = std::fs::read_to_string(\"../word.txt\").unwrap();
+    println!(\"cargo:rustc-env=WORD={}\", word.trim());
+}
+";
+        let mac = r#"#[proc_macro]
+pub fn word(_: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let word = std::fs::read_to_string(format!("{dir}/../word.txt")).unwrap();
+    format!("{:?}", word.trim()).parse().unwrap()
+}
+"#;
+        let source = tmp.join("origin");
+        origin(&source, &[
+            (".gitignore", "target/\n"),
+            ("Cargo.toml", "[workspace]\nmembers = [\"app\", \"mac\", \"said\"]\nresolver = \"2\"\n"),
+            ("word.txt", "one\n"),
+            ("mac/Cargo.toml", &format!("{}\n[lib]\nproc-macro = true\n", crate_toml("mac", ""))),
+            ("mac/src/lib.rs", mac),
+            ("said/Cargo.toml", &crate_toml("said", "mac = { path = \"../mac\" }\n")),
+            ("said/src/lib.rs", "pub const WORD: &str = mac::word!();\n"),
+            ("app/Cargo.toml", &crate_toml("app", "said = { path = \"../said\" }\n")),
+            ("app/build.rs", script),
+            ("app/src/main.rs", "fn main() { print!(\"{} {}\", env!(\"WORD\"), said::WORD); }\n"),
+        ]);
+        let writer = tmp.join("writer");
+        entry(&source, &writer);
+        assert_eq!(run(&writer), "one one");
+
+        write(&source, "word.txt", "two\n");
+        sh(&source, &["commit", "-qam", "word"]);
+        let reader = tmp.join("reader");
+        restore(&source, &writer, &reader);
+        assert!(matches!(open(&reader, RUNNER, SystemTime::now()).unwrap().0, Start::Warm));
+        build(&reader);
+        assert_eq!(run(&reader), "two two");
+    }
+
+    /// Each way a manifest can declare a build script or a proc macro.
+    #[test]
+    fn every_spelling_of_code_run_at_build_time_is_found() {
+        let tmp = TempDir::new("cicache-spellings");
+        let cases = [
+            ("", false, false),
+            ("", true, true),
+            ("build = false\n", true, false),
+            ("build = \"gen.rs\"\n", false, true),
+            ("[lib]\nproc-macro = true\n", false, true),
+            ("[lib]\nproc_macro = true\n", false, true),
+            ("[lib]\ncrate-type = [\"proc-macro\"]\n", false, true),
+            ("[lib]\ncrate_type = [\"proc-macro\"]\n", false, true),
+            ("[lib]\ncrate-type = [\"rlib\"]\n", false, false),
+        ];
+        for (keys, script, expected) in cases {
+            write(&tmp, "Cargo.toml", &format!("[package]\nname = \"p\"\n{keys}"));
+            let mut current = Sources::from([("Cargo.toml".to_string(), String::new())]);
+            if script {
+                current.insert("build.rs".into(), String::new());
+            }
+            assert_eq!(runs_at_build(&tmp, "Cargo.toml", &current), Ok(expected), "{keys:?}, build.rs: {script}");
+        }
+    }
+
+    /// One commit of `a.rs`, read cold on `runner`.
+    fn cold_repo(tmp: &Path, runner: &str) -> Cold {
         sh(tmp, &["init", "-q"]);
         configure(tmp);
         write(tmp, "a.rs", "a\n");
         sh(tmp, &["add", "-A"]);
         sh(tmp, &["commit", "-qm", "a"]);
-        let Start::Cold(cold) = open(tmp, RUNNER, SystemTime::now()).unwrap().0 else { panic!("cold") };
+        let Start::Cold(cold) = open(tmp, runner, SystemTime::now()).unwrap().0 else { panic!("cold") };
         cold
     }
 
@@ -472,7 +570,7 @@ mod tests {
     #[test]
     fn targets_restored_without_a_manifest_are_refused() {
         let tmp = TempDir::new("cicache-foreign");
-        cold_repo(&tmp);
+        cold_repo(&tmp, RUNNER);
         fs::create_dir_all(tmp.join(DRIVER)).unwrap();
         assert!(matches!(open(&tmp, RUNNER, SystemTime::now()).unwrap().0, Start::Cold(_)));
         for target in ["kernel/target", "target/debug"] {
@@ -489,7 +587,7 @@ mod tests {
     #[test]
     fn a_seal_dates_every_target_and_refuses_a_written_source() {
         let tmp = TempDir::new("cicache-seal");
-        let cold = cold_repo(&tmp);
+        let cold = cold_repo(&tmp, RUNNER);
         write(&tmp, "target/debug/deps/x", "x");
         write(&tmp, "userland/target/y", "y");
         seal(&tmp, &cold).unwrap();
@@ -504,17 +602,37 @@ mod tests {
         }
     }
 
-    /// Another image's entry is no entry: its targets go and the run is cold.
+    /// The runner [`read`] names in an environment holding `vars`.
+    fn runner_in(vars: &BTreeMap<&str, &str>) -> Result<String, String> {
+        runner(|name| vars.get(name).map(|value| value.to_string()))
+    }
+
+    /// Another runner's entry is no entry: its targets go and the run is cold,
+    /// whichever variable that names a runner differs, and a runner without
+    /// one of them names none.
     #[test]
     fn an_entry_built_on_another_runner_is_deleted() {
-        let tmp = TempDir::new("cicache-image");
-        let cold = cold_repo(&tmp);
-        write(&tmp, "target/debug/x", "x");
-        write(&tmp, "kernel/target/y", "y");
-        seal(&tmp, &cold).unwrap();
-        let (start, said) = open(&tmp, "macOS ARM64 macos15 20261005.1", SystemTime::now()).unwrap();
-        assert!(matches!(start, Start::Cold(_)), "{said}");
-        assert!(!tmp.join("target/debug").exists() && !tmp.join("kernel/target").exists(), "{said}");
+        let image = BTreeMap::from([
+            ("RUNNER_OS", "macOS"),
+            ("RUNNER_ARCH", "ARM64"),
+            ("ImageOS", "macos15"),
+            ("ImageVersion", "20260928.1"),
+        ]);
+        for name in image.keys() {
+            let tmp = TempDir::new("cicache-image");
+            let cold = cold_repo(&tmp, &runner_in(&image).unwrap());
+            write(&tmp, "target/debug/x", "x");
+            write(&tmp, "kernel/target/y", "y");
+            seal(&tmp, &cold).unwrap();
+            let mut other = image.clone();
+            other.insert(name, "another");
+            let (start, said) = open(&tmp, &runner_in(&other).unwrap(), SystemTime::now()).unwrap();
+            assert!(matches!(start, Start::Cold(_)), "{name}: {said}");
+            assert!(!tmp.join("target/debug").exists() && !tmp.join("kernel/target").exists(), "{name}: {said}");
+            other.remove(name);
+            let refusal = runner_in(&other).expect_err("a runner without a variable");
+            assert!(refusal.contains(name), "{refusal}");
+        }
     }
 
     /// A source dated now is newer than the entry only on a clock that reads
@@ -522,7 +640,7 @@ mod tests {
     #[test]
     fn a_reader_whose_clock_is_not_after_the_entry_is_refused() {
         let tmp = TempDir::new("cicache-clock");
-        let cold = cold_repo(&tmp);
+        let cold = cold_repo(&tmp, RUNNER);
         write(&tmp, "target/debug/x", "x");
         seal(&tmp, &cold).unwrap();
         let refusal = open(&tmp, RUNNER, built()).err().expect("a clock at the entry's date");
