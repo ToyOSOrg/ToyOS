@@ -18,6 +18,10 @@ jobs:
     if: github.event_name == 'merge_group' || github.event.pull_request.draft == false
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    # The driver's own target, and no step's: it says this job carries the
+    # host cache (src/cicache.rs).
+    env:
+      CARGO_TARGET_DIR: target/ci-driver
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -37,4 +41,4 @@ jobs:
           key: host-sealed-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}
           restore-keys: host-sealed-${{ runner.os }}-${{ runner.arch }}-
 
-      - run: cargo run --target-dir target/ci-driver -- --ci host
+      - run: cargo run -- --ci host

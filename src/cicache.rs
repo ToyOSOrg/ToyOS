@@ -28,9 +28,11 @@
 //! the manifest it reads, so a warm tree carries none and is never saved, and
 //! targets restored without one are refused.
 //!
-//! **The driver is built in [`DRIVER`]**: cargo builds it before this runs, so
-//! its path crates are compiled again every time, and in the steps' target that
-//! would make every crate depending on them stale.
+//! **A job carries the cache when its workflow builds the driver in
+//! [`DRIVER`]** ([`carried`]): cargo builds the driver before this runs, so its
+//! path crates are compiled again every time, and in the steps' target that
+//! would make every crate depending on them stale. A job that builds it
+//! anywhere else runs as a developer's tree does.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -40,7 +42,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
-pub const MANIFEST: &str = "target/ci-sources";
+const MANIFEST: &str = "target/ci-sources";
 pub const DRIVER: &str = "target/ci-driver";
 pub const SEALED: &str = "host-sealed-";
 
@@ -67,19 +69,20 @@ pub struct Cold {
     sources: Sources,
 }
 
-/// Before the first step: the entry restored here, read by content.
-pub fn read(root: &Path) -> Result<(Start, String), String> {
-    let exe = std::env::current_exe()
-        .and_then(fs::canonicalize)
-        .map_err(|e| format!("the driver's own path: {e}"))?;
-    let driver = fs::canonicalize(root.join(DRIVER)).map_err(|e| format!("{DRIVER}: {e}"))?;
-    if !exe.starts_with(&driver) {
-        return Err(format!(
-            "the driver runs from {}: a workflow builds it with `cargo run --target-dir {DRIVER} \
-             -- --ci <job>`",
-            exe.display()
-        ));
+/// Whether the driver at `exe` was built in [`DRIVER`], which is how a
+/// workflow says its job carries the cache.
+pub fn carried(root: &Path, exe: &Path) -> bool {
+    let exe = fs::canonicalize(exe).unwrap_or_else(|e| panic!("{}: {e}", exe.display()));
+    match fs::canonicalize(root.join(DRIVER)) {
+        Ok(driver) => exe.starts_with(driver),
+        Err(e) if e.kind() == ErrorKind::NotFound => false,
+        Err(e) => panic!("{DRIVER}: {e}"),
     }
+}
+
+/// Before the first step of a job that carries the cache: the entry restored
+/// here, read by content.
+pub fn read(root: &Path) -> Result<(Start, String), String> {
     open(root, &runner(|name| std::env::var(name).ok())?, SystemTime::now())
 }
 
@@ -190,7 +193,12 @@ pub fn seal(root: &Path, cold: &Cold) -> Result<String, String> {
         text.push_str(&format!("{hash} {path}\n"));
     }
     fs::write(root.join(MANIFEST), text).map_err(|e| format!("write {MANIFEST}: {e}"))?;
-    Ok(format!("{} sources; {files} files, {} MiB, dated as built", cold.sources.len(), bytes >> 20))
+    Ok(format!(
+        "{} sources, built on {}; {files} files, {} MiB, dated as built",
+        cold.sources.len(),
+        cold.runner,
+        bytes >> 20
+    ))
 }
 
 /// The commit an entry was built from, the runner, and its sources.
@@ -648,10 +656,13 @@ pub fn word(_: proc_macro::TokenStream) -> proc_macro::TokenStream {
     }
 
     #[test]
-    fn a_driver_built_in_any_other_target_is_refused() {
+    fn only_a_driver_built_in_its_own_target_carries_the_cache() {
         let tmp = TempDir::new("cicache-driver");
-        fs::create_dir_all(tmp.join(DRIVER)).unwrap();
-        let refusal = read(&tmp).err().expect("a test binary is no driver");
-        assert!(refusal.contains("the driver runs from"), "{refusal}");
+        let (ours, other) = (format!("{DRIVER}/debug/toyos-build"), "target/debug/toyos-build");
+        write(&tmp, other, "");
+        assert!(!carried(&tmp, &tmp.join(other)), "a tree with no {DRIVER}");
+        write(&tmp, &ours, "");
+        assert!(carried(&tmp, &tmp.join(&ours)), "{ours}");
+        assert!(!carried(&tmp, &tmp.join(other)), "{other}");
     }
 }

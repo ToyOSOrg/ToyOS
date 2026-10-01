@@ -466,9 +466,9 @@ fn run_control(root: &Path, control: &Control) -> Result<String, String> {
 /// clippy shape (`src/clippy.rs`). Userland and the SDK are tested against the
 /// host triple for the same reason.
 ///
-/// On a runner the restored cache entry is read before any step and a run that
-/// starts cold seals its tree after the last ([`cicache`]); a developer's tree
-/// keeps the dates its edits gave it.
+/// In a job that carries the cache ([`cicache::carried`]) the restored entry is
+/// read before any step and a run that starts cold seals its tree after the
+/// last; a developer's tree keeps the dates its edits gave it.
 fn host(root: &Path) -> Vec<Step> {
     let tmp = toyos_tmpdir::TempDir::new("ci-host");
     let short = Path::new(toyos_tmpdir::SHORT_BASE);
@@ -479,7 +479,10 @@ fn host(root: &Path) -> Vec<Step> {
     let host_triple = crate::toolchain::host_triple();
     let mut steps = Vec::new();
     let mut cold = None;
-    if on_runner() {
+    if cicache::carried(root, &std::env::current_exe().expect("the driver's own path")) {
+        // The job's `CARGO_TARGET_DIR` names the driver's target, and no step
+        // builds there.
+        std::env::remove_var("CARGO_TARGET_DIR");
         // No incremental state in an entry: it is most of an entry's bytes,
         // and after a read by content it helps only a crate whose bytes
         // changed.
@@ -993,32 +996,55 @@ mod tests {
         assert_eq!(seen, 3, "ci.yml, nightly.yml and publish.yml");
     }
 
+    /// Each job of a workflow: its name and its lines.
+    fn jobs(text: &str) -> Vec<(&str, Vec<&str>)> {
+        let mut jobs: Vec<(&str, Vec<&str>)> = Vec::new();
+        for line in text.split_once("\njobs:\n").map_or("", |(_, jobs)| jobs).lines() {
+            match line.strip_prefix("  ").and_then(|l| l.strip_suffix(':')) {
+                Some(name) if !name.starts_with([' ', '#']) => jobs.push((name, Vec::new())),
+                _ => jobs.last_mut().into_iter().for_each(|(_, lines)| lines.push(line)),
+            }
+        }
+        jobs
+    }
+
     /// Exactly one job writes each cache, on the nightly, so what a pull request
-    /// restores is one run's tree and never a race between two writers. The
-    /// host cache's saves only a sealed tree, the one that holds a manifest
-    /// ([`cicache`]).
+    /// restores is one run's tree and never a race between two writers. A job
+    /// that restores or saves the host cache builds the driver in
+    /// [`cicache::DRIVER`], so it carries the cache, and the one that saves it
+    /// restores nothing: its run is cold, and a cold run is green only once its
+    /// tree is sealed ([`cicache`]).
     #[test]
     fn each_cache_has_one_writer() {
         let dir = repo_root().join(".github/workflows");
+        let carries = format!("      CARGO_TARGET_DIR: {}", cicache::DRIVER);
         let mut writers = Vec::new();
         for entry in std::fs::read_dir(&dir).expect(".github/workflows is readable").flatten() {
             let text = std::fs::read_to_string(entry.path()).expect("a readable workflow");
             let name = entry.file_name().to_string_lossy().into_owned();
             assert!(!text.contains("actions/cache@"), "{name}: the combined action saves too");
-            let lines: Vec<&str> = text.lines().collect();
-            for (at, line) in lines.iter().enumerate() {
-                if line.contains("actions/cache/save@") {
-                    let key = lines[at..]
-                        .iter()
-                        .find_map(|l| l.trim_start().strip_prefix("key: "))
-                        .expect("a save names its key");
-                    let prefix = key.split('$').next().unwrap_or("").to_string();
+            for (job, lines) in jobs(&text) {
+                let caches: Vec<(bool, String)> = lines
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, l)| l.contains("actions/cache/restore@") || l.contains("actions/cache/save@"))
+                    .map(|(at, l)| {
+                        let key = lines[at..]
+                            .iter()
+                            .find_map(|l| l.trim_start().strip_prefix("key: "))
+                            .expect("a cache step names its key");
+                        (l.contains("actions/cache/save@"), key.split('$').next().unwrap_or("").to_string())
+                    })
+                    .collect();
+                for (save, prefix) in &caches {
                     if prefix.starts_with("host-") {
-                        assert_eq!(prefix, cicache::SEALED, "{name}");
-                        let manifest = format!("hashFiles('{}') != ''", cicache::MANIFEST);
-                        assert!(lines[at - 1].contains(&manifest), "{name}: a host save without `{manifest}`");
+                        assert_eq!(prefix, cicache::SEALED, "{name} {job}");
+                        assert!(lines.contains(&carries.as_str()), "{name} {job}: the host cache without `{}`", carries.trim());
+                        assert!(!save || caches.iter().all(|(s, _)| *s), "{name} {job}: the host cache's writer restores");
                     }
-                    writers.push((name.clone(), prefix));
+                    if *save {
+                        writers.push((name.clone(), prefix.clone()));
+                    }
                 }
             }
         }
