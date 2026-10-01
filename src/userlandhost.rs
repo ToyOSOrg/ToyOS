@@ -14,7 +14,7 @@
 //! ```
 //!
 //! An app that does not build for a host yet names the host, and the open issue
-//! that records it and names the app. The gate does not check it there:
+//! that records it and names the app. The gate does not attempt it there:
 //!
 //! ```toml
 //! [package.metadata.toyos.host]
@@ -22,10 +22,11 @@
 //! issue = "issues/build/<slug>.md"
 //! ```
 //!
-//! A host's verdict is `cargo check --target` its triple ([`Os::triple`]), the
-//! same on whichever host runs it. A check links nothing, and runs the build
-//! scripts on the host that checks
-//! (`issues/build/no-app-is-built-for-a-host-each-is-only-checked.md`). An app
+//! A host's apps are built where the gate runs on its triple ([`Os::triple`]),
+//! and checked against that triple elsewhere. A check links nothing and runs
+//! build scripts on the host that checks, and a declared failure is attempted on
+//! no host, so one that outlives its fix goes unseen
+//! (`issues/build/a-hosts-apps-are-judged-on-other-hosts-runners.md`). An app
 //! whose work a `cfg` compiles out of a host checks green there: only review
 //! holds that (`.claude/agents/reviewer.md`, Hosts).
 //!
@@ -158,7 +159,7 @@ impl Os {
         }
     }
 
-    /// The triple every host checks this one's apps against.
+    /// The triple the gate judges this host's apps for.
     pub fn triple(self) -> &'static str {
         match self {
             Os::Linux => "x86_64-unknown-linux-gnu",

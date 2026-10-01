@@ -533,7 +533,7 @@ fn host(root: &Path) -> Vec<Step> {
         Ok(programs) => {
             for os in Os::ALL {
                 steps.push(step(&format!("the apps for {}", os.name()), || {
-                    apps_for(root, &programs, os)
+                    apps_for(root, &programs, os, &host_triple)
                 }));
             }
         }
@@ -548,13 +548,17 @@ fn host(root: &Path) -> Vec<Step> {
     steps
 }
 
-/// Every app the images ship, checked against `os`'s triple with the features
-/// its image builds it with, on whichever host this is, but where its manifest
-/// declares it fails ([`crate::userlandhost`]).
+/// Every app the images ship, judged for `os` with the features its image
+/// builds it with ([`crate::userlandhost`]).
 ///
 /// One cargo per app: features unify across the packages of one invocation, and
 /// an app that builds only beside another's features is what this gate is for.
-fn apps_for(root: &Path, programs: &[Program], os: Os) -> Result<String, String> {
+fn apps_for(
+    root: &Path,
+    programs: &[Program],
+    os: Os,
+    host_triple: &str,
+) -> Result<String, String> {
     let triple = os.triple();
     let status = Command::new("rustup")
         .args(["target", "add", triple])
@@ -563,35 +567,54 @@ fn apps_for(root: &Path, programs: &[Program], os: Os) -> Result<String, String>
     if !status.success() {
         return Err(format!("rustup target add {triple} exited {status}"));
     }
-    let (mut checked, mut declared, mut red) = (0, Vec::new(), Vec::new());
-    for program in programs {
-        let Host::App(fails) = &program.host else { continue };
-        if fails.contains(&os) {
-            declared.push(program.dir.as_str());
-            continue;
-        }
+    let verb = verb(os, host_triple);
+    let (attempted, declared) = attempted(programs, os);
+    let mut red = Vec::new();
+    for program in &attempted {
         let manifest = format!("{}/Cargo.toml", program.dir);
-        let mut args = vec!["check", "--manifest-path", manifest.as_str(), "--target", triple];
+        let mut args = vec![verb, "--manifest-path", manifest.as_str(), "--target", triple];
         args.extend(program.features.args());
-        match cargo(root, &args) {
-            Ok(_) => checked += 1,
-            Err(exit) => red.push(format!(
-                "{} does not compile for {} and declares neither `fails` there nor `exempt`: \
-                 {exit}",
+        if let Err(exit) = cargo(root, &args) {
+            red.push(format!(
+                "{} fails for {} and declares neither `fails` there nor `exempt`: {exit}",
                 program.dir,
                 os.name()
-            )),
+            ));
         }
     }
     if !red.is_empty() {
         return Err(red.join("; "));
     }
-    let said = format!("{checked} app(s) pass `cargo check --target {triple}`");
+    let said = format!("{} app(s) pass `cargo {verb} --target {triple}`", attempted.len());
     if declared.is_empty() {
         Ok(said)
     } else {
         Ok(format!("{said}; {} not attempted, as their manifests declare", declared.join(", ")))
     }
+}
+
+/// `build` where the gate runs on `os`'s own triple, and `check` elsewhere.
+fn verb(os: Os, host_triple: &str) -> &'static str {
+    if os.triple() == host_triple {
+        "build"
+    } else {
+        "check"
+    }
+}
+
+/// The apps judged for `os`, and those whose manifests declare they fail there;
+/// an exempt program is in neither.
+fn attempted(programs: &[Program], os: Os) -> (Vec<&Program>, Vec<&str>) {
+    let (mut attempted, mut declared) = (Vec::new(), Vec::new());
+    for program in programs {
+        let Host::App(fails) = &program.host else { continue };
+        if fails.contains(&os) {
+            declared.push(program.dir.as_str());
+        } else {
+            attempted.push(program);
+        }
+    }
+    (attempted, declared)
 }
 
 /// What `tmp` holds but the lock `toyos_tmpdir` keeps in it, and every root
@@ -907,6 +930,31 @@ mod tests {
 
     fn words(line: &str) -> Vec<String> {
         line.split_whitespace().map(String::from).collect()
+    }
+
+    /// **An app is judged for every host its `fails` does not name**, built
+    /// where the gate runs on that host and checked elsewhere; an exempt
+    /// program is judged for none.
+    #[test]
+    fn an_app_is_judged_for_every_host_its_fails_does_not_name() {
+        let program = |dir: &str, host| Program {
+            dir: dir.into(),
+            features: crate::build::Features::Default,
+            host,
+        };
+        let programs = [
+            program("calc", Host::App(Vec::new())),
+            program("doom", Host::App(vec![Os::Windows])),
+            program("init", Host::Exempt),
+        ];
+        let judged = |os| {
+            let (attempted, declared) = attempted(&programs, os);
+            (attempted.iter().map(|p| p.dir.as_str()).collect::<Vec<_>>(), declared)
+        };
+        assert_eq!(judged(Os::Linux), (vec!["calc", "doom"], vec![]));
+        assert_eq!(judged(Os::Macos), (vec!["calc", "doom"], vec![]));
+        assert_eq!(judged(Os::Windows), (vec!["calc"], vec!["doom"]));
+        assert_eq!(Os::ALL.map(|os| verb(os, Os::Linux.triple())), ["build", "check", "check"]);
     }
 
     #[test]

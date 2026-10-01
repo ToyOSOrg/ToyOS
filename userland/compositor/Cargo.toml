@@ -15,4 +15,4 @@ toyos-manifest = { path = "../../toyos-manifest" }
 toyos-window = { path = "../toyos-window" }
 
 [package.metadata.toyos.host]
-exempt.owns = "ToyOS's framebuffer, keyboard and mouse, claimed from the kernel, and the `compositor` port it serves"
+exempt.owns = "ToyOS's framebuffer, keyboard and mouse, claimed from the kernel"

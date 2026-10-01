@@ -12,4 +12,4 @@ toyos-inspect = { path = "../../toyos-inspect" }
 rubato = "0.16"
 
 [package.metadata.toyos.host]
-exempt.owns = "ToyOS's audio devices, claimed from the kernel, and the `soundd` port it serves"
+exempt.owns = "ToyOS's audio devices, claimed from the kernel"

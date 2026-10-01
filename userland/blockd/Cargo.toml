@@ -22,4 +22,4 @@ toyos-blockhold = { path = "../../toyos-blockhold" }
 toyos-gpt = { path = "../../toyos-gpt" }
 
 [package.metadata.toyos.host]
-exempt.owns = "the NVMe controller ToyOS claims for it, whose partitions it serves on the `block` port"
+exempt.owns = "the NVMe controller ToyOS claims for it"

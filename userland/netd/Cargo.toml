@@ -28,4 +28,4 @@ features = [
 ]
 
 [package.metadata.toyos.host]
-exempt.owns = "the NIC ToyOS claims for it, and the `netd` port it serves"
+exempt.owns = "the NIC ToyOS claims for it"
