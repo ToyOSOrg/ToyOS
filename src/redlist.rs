@@ -26,6 +26,10 @@ pub struct Disabled {
 /// Every disabled test.
 pub const DISABLED: &[Disabled] = &[
     Disabled {
+        test: "blockd_serves_partitions",
+        issue: "issues/kernel/a-job-that-exited-was-never-reported-ended.md",
+    },
+    Disabled {
         test: "console_locale_detect",
         issue: "issues/build/the-console-input-path-can-stop-after-a-ps2-overflow.md",
     },
