@@ -135,16 +135,23 @@ fn std_toyos_sources(dep_info: &Path) -> Vec<String> {
     found
 }
 
+/// The text of every dep-info file under `dir`, none if there is no `dir`; one
+/// that cannot be read is refused, since its paths would go undecided.
 fn collect_dep_info(dir: &Path, out: &mut Vec<String>) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
-    for entry in entries.filter_map(Result::ok) {
-        let path = entry.path();
+    match fs::metadata(dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => panic!("read {}: {e}", dir.display()),
+        Ok(_) => dep_info_under(dir, out),
+    }
+}
+
+fn dep_info_under(dir: &Path, out: &mut Vec<String>) {
+    for entry in fs::read_dir(dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display())) {
+        let path = entry.unwrap_or_else(|e| panic!("read {}: {e}", dir.display())).path();
         if path.is_dir() {
-            collect_dep_info(&path, out);
+            dep_info_under(&path, out);
         } else if path.extension().is_some_and(|e| e == "d") {
-            if let Ok(text) = fs::read_to_string(&path) {
-                out.push(text);
-            }
+            out.push(fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display())));
         }
     }
 }
@@ -1351,11 +1358,46 @@ mod tests {
             let said = naming(&spelt);
             assert!(said.contains(&system), "{spelt}: {said}");
         }
+        std::os::unix::fs::symlink(&system, fork.join("library/core/src/linked.rs")).unwrap();
+        let said = naming("library/core/src/linked.rs");
+        assert!(said.contains(&system), "{said}");
         let said = naming("library/core/src/gone.rs");
         assert!(said.starts_with(&format!("resolve {}/library/core/src/gone.rs", fork.display())), "{said}");
 
         let said = refusal(&built.join("none"), "a target directory without dep-info");
         assert!(said.contains("name no source of the fork"), "{said}");
+    }
+
+    /// **Dep-info that cannot be read is refused, never skipped**, since the
+    /// paths in it would go undecided; only a directory that is not there
+    /// holds none.
+    #[test]
+    fn dep_info_that_cannot_be_read_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = TempDir::new("dep-info-unread");
+        let mut none = Vec::new();
+        collect_dep_info(&temp.join("none"), &mut none);
+        assert!(none.is_empty(), "{none:?}");
+
+        let built = temp.join("x86_64-unknown-none");
+        let dist = built.join("dist");
+        fs::create_dir_all(&dist).unwrap();
+        let collect = || std::panic::catch_unwind(|| collect_dep_info(&built, &mut Vec::new()));
+        let said = |refused: std::thread::Result<()>, what: &str| {
+            *refused.err().unwrap_or_else(|| panic!("{what} was skipped")).downcast::<String>().expect("a formatted refusal")
+        };
+        let d = dist.join("core.d");
+        fs::write(&d, b"libcore.rlib: library/core/src/lib.rs \xff\n").unwrap();
+        let refused = said(collect(), "dep-info that is not UTF-8");
+        assert!(refused.starts_with(&format!("read {}", d.display())), "{refused}");
+        fs::remove_file(&d).unwrap();
+
+        let mode = |bits| fs::set_permissions(&dist, fs::Permissions::from_mode(bits)).unwrap();
+        mode(0o000);
+        let unread = collect();
+        mode(0o755);
+        let refused = said(unread, "a directory that cannot be read");
+        assert!(refused.starts_with(&format!("read {}", dist.display())), "{refused}");
     }
 
     /// Verbatim from run `31370078581`, the run this check exists because of:

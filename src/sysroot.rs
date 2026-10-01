@@ -13,8 +13,7 @@
 //! and main and every branch matching it share one copy.
 //!
 //! **The kernel's and the loader's libraries compile none of those trees**, so
-//! they are a key of their own ([`freestanding_key`]): the fork, the compiler,
-//! and the manifests std's lockfile resolves. They are built once per that key
+//! they are a key of their own ([`freestanding_key`]). They are built once per that key
 //! into `rust/build/freestanding/<key>/` and cloned into every sysroot naming
 //! it, and a crate built against a sysroot learns which targets' libraries
 //! moved ([`Identity`]). Each build refuses dep-info that says otherwise.
@@ -58,6 +57,7 @@ use crate::identity;
 use crate::keystore::Key;
 use crate::toolchain::{self, host_triple, GuestTarget, Owner, Role, GUEST_TARGETS};
 use crate::worktree::remove_tree;
+use whole_toolchain::{whole, Whole};
 
 /// The per-worktree sources that end up inside a sysroot: std links `toyos-abi`
 /// and `toyos`, and `libtoyos_c.a` is `userland/libc`.
@@ -288,9 +288,9 @@ fn manifest_line(root: &Path, manifest: &str) -> String {
 /// covers, into every submodule checked out there — never what a build or the
 /// desktop leaves beside them (bootstrap's `__pycache__`, Finder's
 /// `.DS_Store`), which would make a key that moves while it is being built.
-pub(crate) fn tree_identity(base: &Path, paths: &[&str]) -> String {
+pub(crate) fn tree_identity(base: &Path, paths: &[&str], links: Links) -> String {
     let mut files = Vec::new();
-    source_files(base, paths, &mut files);
+    source_files(base, paths, links, &mut files);
     files.sort();
     let mut hasher = Sha256::new();
     for path in files {
@@ -303,7 +303,17 @@ pub(crate) fn tree_identity(base: &Path, paths: &[&str]) -> String {
     hex(&hasher.finalize())[..16].to_string()
 }
 
-fn source_files(checkout: &Path, paths: &[&str], out: &mut Vec<PathBuf>) {
+/// What [`tree_identity`] makes of a symbolic link, which git keeps as the path
+/// it names and a build reads through.
+#[derive(Clone, Copy)]
+pub(crate) enum Links {
+    /// Refused by name.
+    Refused,
+    /// Left out of the identity (`issues/build/a-compiler-key-reads-no-symbolic-link.md`).
+    Skipped,
+}
+
+fn source_files(checkout: &Path, paths: &[&str], links: Links, out: &mut Vec<PathBuf>) {
     let mut args = vec!["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--"];
     args.extend(paths);
     let listed = git_bytes(checkout, &args);
@@ -313,9 +323,20 @@ fn source_files(checkout: &Path, paths: &[&str], out: &mut Vec<PathBuf>) {
         if !seen.insert(path.clone()) {
             continue;
         }
-        if path.join(".git").exists() {
-            source_files(&path, &["."], out);
-        } else if fs::symlink_metadata(&path).is_ok_and(|m| m.is_file()) {
+        let Ok(meta) = fs::symlink_metadata(&path) else { continue };
+        if meta.is_symlink() {
+            match links {
+                Links::Refused => panic!(
+                    "{} is a symbolic link, and a key of {} reads none: git keeps the path it names, \
+                     and a build reads what is there",
+                    path.display(),
+                    checkout.display()
+                ),
+                Links::Skipped => {}
+            }
+        } else if path.join(".git").exists() {
+            source_files(&path, &["."], links, out);
+        } else if meta.is_file() {
             out.push(path);
         }
     }
@@ -362,7 +383,7 @@ fn freestanding_key_of(root: &Path, compiler: &Compiler, fork: &Path, recipe: &s
         format!("{recipe}; cargo {STAGE0_CARGO}; targets {}", Libraries::Freestanding.targets().join(" ")),
         config.to_string(),
         STD_MANIFESTS.map(|manifest| manifest_line(root, manifest)).join("\n"),
-        tree_identity(fork, &["library", "src/bootstrap"]),
+        tree_identity(fork, &["library", "src/bootstrap"], Links::Refused),
         compiler.identity(),
     ];
     Key::of(parts.join("\n\0\n").as_bytes())
@@ -510,23 +531,37 @@ pub fn ensure(root: &Path, rust_dir: &Path, lock: &mut Held) -> Sysroot {
     Sysroot { dir, primary_compiler: compiler.primary, identity: keys.identity, _using: Some(using) }
 }
 
-/// A compiler [`whole`] found to be a whole toolchain: what a sysroot is made
-/// from.
-struct Whole<'a>(&'a Compiler);
+/// Only [`whole`] makes a [`Whole`].
+mod whole_toolchain {
+    use std::path::Path;
 
-/// `compiler`, refused unless it is a whole toolchain: no sysroot is made from
-/// one that is not, and no std is built for one.
-fn whole(compiler: &Compiler) -> Whole<'_> {
-    if let Some(defect) = toolchain::toolchain_defect(&compiler.stage2) {
-        let fix = if compiler.primary {
-            "\nA bootstrap in the primary checkout was stopped before it finished: \
-             `cargo run -- --build-only` there completes it."
-        } else {
-            ""
-        };
-        panic!("no sysroot is made from {}, and no std was built for one: {defect}{fix}", compiler.stage2.display());
+    use crate::compiler::Compiler;
+    use crate::toolchain;
+
+    /// A compiler [`whole`] found to be a whole toolchain: what a sysroot is
+    /// made from.
+    pub(super) struct Whole<'a>(&'a Compiler);
+
+    impl Whole<'_> {
+        pub(super) fn stage2(&self) -> &Path {
+            &self.0.stage2
+        }
     }
-    Whole(compiler)
+
+    /// `compiler`, refused unless it is a whole toolchain: no sysroot is made
+    /// from one that is not, and no std is built for one.
+    pub(super) fn whole(compiler: &Compiler) -> Whole<'_> {
+        if let Some(defect) = toolchain::toolchain_defect(&compiler.stage2) {
+            let fix = if compiler.primary {
+                "\nA bootstrap in the primary checkout was stopped before it finished: \
+                 `cargo run -- --build-only` there completes it."
+            } else {
+                ""
+            };
+            panic!("no sysroot is made from {}, and no std was built for one: {defect}{fix}", compiler.stage2.display());
+        }
+        Whole(compiler)
+    }
 }
 
 /// Make the sysroot `keys` names at `dir`, from `root`'s sources and the std
@@ -624,7 +659,7 @@ fn build_freestanding(root: &Path, compiler: &Compiler, fork: &Path, key: &Key, 
 /// adds to them.
 fn publish_toolchain(compiler: Whole, dir: &Path, fill: impl FnOnce(&Path) -> String) {
     publish(dir, |partial| {
-        clone_tree(&compiler.0.stage2, partial);
+        clone_tree(compiler.stage2(), partial);
         fill(partial)
     });
 }
@@ -967,7 +1002,8 @@ mod tests {
     /// freestanding libraries; a line of the fork's code, a manifest std's
     /// lockfile resolves, the recipe, std's configuration or another compiler
     /// moves both. A crate built against the old ones is stale in the targets
-    /// whose libraries moved, and in all of it when the compiler did.
+    /// whose libraries moved, and in all of it when the compiler did. A
+    /// symbolic link in the fork, whose target no key would read, is refused.
     #[test]
     fn a_comment_is_the_same_sysroot_and_a_signature_is_another() {
         let base = TempDir::new("key");
@@ -1036,6 +1072,13 @@ mod tests {
         fs::remove_file(fork.join("library/std/src/new.rs")).unwrap();
         same("the fork without it");
 
+        let link = fork.join("library/std/src/linked.rs");
+        std::os::unix::fs::symlink("lib.rs", &link).unwrap();
+        let said = refusal(|| drop(k()));
+        assert!(said.starts_with(&format!("{} is a symbolic link", link.display())), "{said}");
+        fs::remove_file(&link).unwrap();
+        same("the fork without the link");
+
         for manifest in STD_MANIFESTS {
             write(&root.join(manifest), "[package]\nversion = \"0.2.0\"\n");
             both(manifest);
@@ -1046,6 +1089,8 @@ mod tests {
         let compiler = Compiler::primary(&rust_dir);
         let config = keyed_std_config();
         assert_eq!(freestanding_key_of(&root, &compiler, &fork, RECIPE, &config), was.freestanding);
+        assert_ne!(freestanding_key_of(&root, &compiler, &fork, RECIPE, ""), was.freestanding,
+                   "the freestanding key reads no std configuration");
         for (what, moved) in [
             ("the recipe", freestanding_key_of(&root, &compiler, &fork, "another recipe", &config)),
             ("std's configuration", freestanding_key_of(&root, &compiler, &fork, RECIPE, &format!("{config}\n[rust]\n"))),
