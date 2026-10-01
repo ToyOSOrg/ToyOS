@@ -149,7 +149,8 @@ impl Probing {
 #[derive(Clone, Copy, Debug)]
 enum Solicit {
     Quiescent(Lifetime),
-    /// A request waits in the control queue; its backoff starts as it leaves.
+    /// A request waits in the control queue: `request` sets this with `Neighbour::queued`, and its
+    /// backoff starts as it leaves.
     Queued,
     /// A request left and its backoff runs; `sent`: a datagram went to the MAC since.
     Backoff { sent: bool },
@@ -211,15 +212,6 @@ impl Nud {
         }
     }
 
-    /// Its idle lifetime passed without a send while it held released datagrams (§6.3).
-    fn idle(&self) -> bool {
-        matches!(
-            self,
-            Self::Stale(Stale { lifetime: Lifetime::Passed, .. })
-                | Self::Unreachable(Unreachable { solicit: Solicit::Quiescent(Lifetime::Passed), .. })
-        )
-    }
-
     /// A resolved state's released datagrams, taken for the state that follows it.
     fn take_released(&mut self) -> Released {
         self.released_mut().map(core::mem::take).unwrap_or_default()
@@ -259,6 +251,9 @@ fn timer(cx: &Cx<'_>, addr: Ipv4Addr) -> Timer {
 fn request(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) {
     let Some(n) = i.neighbours.get_mut(&addr) else { return };
     n.queued = true;
+    if let Nud::Unreachable(u) = &mut n.state {
+        u.solicit = Solicit::Queued;
+    }
     if !cx.control.push(Item::Request { iface: cx.iface, target: addr }, cx.log) {
         request_left(i, cx, addr);
     }
@@ -375,10 +370,7 @@ pub(crate) fn send(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr, hint: Opt
         Nud::Unreachable(u) => {
             let mac = u.mac;
             match u.solicit {
-                Solicit::Quiescent(_) => {
-                    u.solicit = Solicit::Queued;
-                    request(i, cx, addr);
-                }
+                Solicit::Quiescent(_) => request(i, cx, addr),
                 Solicit::Queued => {}
                 Solicit::Backoff { .. } => u.solicit = Solicit::Backoff { sent: true },
             }
@@ -436,10 +428,7 @@ pub(crate) fn fire(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) {
             cx.timers.arm(timer(cx, addr), now.after(IDLE_LIFETIME));
             route::refresh_active(i, cx);
         }
-        Nud::Unreachable(Unreachable { solicit: solicit @ Solicit::Backoff { sent: true }, .. }) => {
-            *solicit = Solicit::Queued;
-            request(i, cx, addr);
-        }
+        Nud::Unreachable(Unreachable { solicit: Solicit::Backoff { sent: true }, .. }) => request(i, cx, addr),
         Nud::Unreachable(Unreachable { solicit: solicit @ Solicit::Backoff { sent: false }, .. }) => {
             *solicit = Solicit::Quiescent(Lifetime::Runs);
             cx.timers.arm(timer(cx, addr), now.after(IDLE_LIFETIME));
@@ -467,7 +456,11 @@ pub(crate) fn leave(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) -> Optio
     if let Some((destination, _)) = held.frame.split_first_chunk_mut::<6>() {
         *destination = mac.0;
     }
-    if n.state.idle() && !n.state.releasing() {
+    let idle = matches!(
+        n.state,
+        Nud::Stale(Stale { lifetime: Lifetime::Passed, .. }) | Nud::Unreachable(Unreachable { solicit: Solicit::Quiescent(Lifetime::Passed), .. })
+    );
+    if idle && !n.state.releasing() {
         remove(i, cx, addr);
         route::refresh_active(i, cx);
     }

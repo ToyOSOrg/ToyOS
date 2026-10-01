@@ -321,6 +321,18 @@ impl H {
         self.frame(&eth(MAC_A, m, 0x0806, &arp_packet(2, m, addr, MAC_A, A)));
     }
 
+    /// 64 hosts on `ours`'s /24, from .100 up, ask `iface` for `ours` at `at`: their replies fill
+    /// the control queue every interface shares.
+    pub fn fill_control_queue(&mut self, iface: IfIndex, at: Instant, ours: Ipv4Addr) {
+        let [a, b, c, _] = ours.octets();
+        for n in 0..toyos_net_ip::limits::CONTROL_QUEUE as u8 {
+            let m = MacAddr([2, 1, 0, 0, 0, n]);
+            let request = arp_packet(1, m, Ipv4Addr::new(a, b, c, 100 + n), MacAddr::ZERO, ours);
+            let _ = self.ip.receive(at, iface, &eth(MacAddr::BROADCAST, m, 0x0806, &request));
+        }
+        self.collect();
+    }
+
     pub fn count(&self, counter: Counter) -> u64 {
         let base = self.counters.iter().find(|(c, _)| *c == counter).map_or(0, |(_, n)| *n);
         self.ip.counters().get(counter) - base

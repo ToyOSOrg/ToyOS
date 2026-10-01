@@ -659,10 +659,7 @@ fn b_holds_two_behind_a_full_queue() -> H {
         assert_eq!(h.send(A, B, 5001, 5001, data), Ok(None));
     }
     h.out();
-    for n in 0..limits::CONTROL_QUEUE as u8 {
-        let m = MacAddr([2, 1, 0, 0, 0, n]);
-        h.frame(&eth(MacAddr::BROADCAST, m, 0x0806, &arp_packet(1, m, Ipv4Addr::new(192, 0, 2, 100 + n), MacAddr::ZERO, A)));
-    }
+    h.fill_control_queue(h.if0, h.clock(), A);
     h
 }
 
@@ -734,14 +731,43 @@ fn s_ip_nud_030_released_datagrams_keep_their_entry() {
     assert!(out[1].requests(B));
 }
 
-/// NUD-31's start, NUD-30's UNREACHABLE run: no credit, the control queue full, B quiescent
+/// NUD-30's UNREACHABLE run, counted from here: no credit, the control queue full, B quiescent
 /// UNREACHABLE since 4,000 holding 1 and 2, their turns waiting.
-fn nud_031() -> H {
+fn b_quiescent_behind_a_full_queue() -> H {
     let mut h = b_holds_two_behind_a_full_queue();
     unreachable_b(&mut h);
     assert!(matches!(h.state(B), Some(Nud::Unreachable(u)) if u.quiescent() && u.released.queued() == 2));
     h.rebase();
     h
+}
+
+#[test]
+fn s_ip_nud_030_an_entry_whose_lifetime_runs_stays_as_it_drains() {
+    // 1 and 2 leave before B's idle lifetime passes. B quiescent UNREACHABLE since 4,000, or since
+    // 7,000 as the backoff of a request lost at 4,000 ends with nothing sent.
+    for backoff in [false, true] {
+        let mut h = b_quiescent_behind_a_full_queue();
+        if backoff {
+            h.at(4_000);
+            assert!(matches!(h.udp_to(B), Ok(Some(f)) if destination_of(&f) == MAC_B));
+            h.ip.fire(H::instant(7_000));
+            h.at(7_000);
+        } else {
+            h.at(5_000);
+        }
+        let to_b: Vec<Vec<u8>> = h.out().iter().filter(|o| o.to() == MAC_B).map(payload).collect();
+        assert_eq!(to_b, [b"1", b"2"]);
+        assert!(matches!(h.state(B), Some(Nud::Unreachable(u)) if u.quiescent()), "its lifetime runs: B stays as 2 leaves");
+    }
+
+    // B STALE since 45,000, as REACHABLE from V-ARP-REPLY at 0 ends.
+    let mut h = b_holds_two_behind_a_full_queue();
+    h.frame(&hex(V_ARP_REPLY));
+    h.ip.fire(H::instant(45_000));
+    h.at(45_000);
+    let to_b: Vec<Vec<u8>> = h.out().iter().filter(|o| o.to() == MAC_B).map(payload).collect();
+    assert_eq!(to_b, [b"1", b"2"]);
+    assert!(h.is_stale(B), "its lifetime runs: B stays as 2 leaves");
 }
 
 /// With credit one frame at a time: 1 and 2 leave to MAC B, B still UNREACHABLE after each, then
@@ -757,7 +783,7 @@ fn drain_before_the_request(h: &mut H) {
 
 #[test]
 fn s_ip_nud_031_a_request_queued_at_the_backoff_deadline_is_not_idle() {
-    let mut h = nud_031();
+    let mut h = b_quiescent_behind_a_full_queue();
     h.at(4_000);
     assert!(matches!(h.udp_to(B), Ok(Some(f)) if destination_of(&f) == MAC_B));
     assert_eq!(h.count(Counter::IpControlQueueFull), 1, "its request is lost to the full queue");
@@ -775,7 +801,7 @@ fn s_ip_nud_031_a_request_queued_at_the_backoff_deadline_is_not_idle() {
 
 #[test]
 fn s_ip_nud_031_a_request_queued_after_the_lifetime_is_not_idle() {
-    let mut h = nud_031();
+    let mut h = b_quiescent_behind_a_full_queue();
     h.ip.fire(H::instant(604_000));
     h.at(604_000);
     assert!(matches!(h.state(B), Some(Nud::Unreachable(u)) if u.released.queued() == 2), "not idle while it holds 1 and 2");
@@ -797,8 +823,7 @@ fn s_ip_nud_031_a_request_queued_before_the_lifetime_is_not_idle() {
     assert!(matches!(h.udp_to(REMOTE), Ok(Some(f)) if destination_of(&f) == MAC_R));
     h.ip.fire(H::instant(end));
     h.at(end);
-    assert!(matches!(h.state(R), Some(Nud::Unreachable(_))), "a request is pending: R is not idle");
-    assert!(matches!(h.state(R), Some(Nud::Unreachable(u)) if !u.quiescent()));
+    assert!(matches!(h.state(R), Some(Nud::Unreachable(u)) if !u.quiescent()), "a request is pending: R is not idle");
     assert_eq!(h.out_with(1).iter().map(|o| o.frame.clone()).collect::<Vec<_>>(), [hex(V_ARP_REQ_R)]);
     assert_eq!(h.ip.next_deadline(), Some(H::instant(end + 3_000)), "3 s after the hand-off");
 }
