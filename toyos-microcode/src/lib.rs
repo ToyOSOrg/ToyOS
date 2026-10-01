@@ -11,17 +11,32 @@
 //! interpreted.
 //!
 //! Pure: no I/O, no allocation, no `unsafe`. The caller reads the CPU.
+//!
+//! The file is untrusted, so nothing here may panic on it. The lints below
+//! refuse indexing, slicing, unchecked arithmetic, `unwrap`, `expect` and the
+//! panicking macros; a std method that panics on a length, such as
+//! `split_at`, no lint sees, so a length is taken only by a checked split
+//! whose failure is a [`Refusal`].
 
 #![no_std]
 #![forbid(unsafe_code)]
+#![deny(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::panic_in_result_fn,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented
+)]
 
 #[cfg(test)]
 mod tests;
 
 /// The header's length, and so the offset of the update data (Table 12-7).
 const HEADER: usize = 48;
-/// The update data's length when the header's Data Size is 0 (Table 12-7).
-const DEFAULT_DATA: usize = 2000;
 /// The extended signature table's header: count, checksum, 12 reserved bytes
 /// (Table 12-9).
 const EXT_HEADER: usize = 20;
@@ -74,31 +89,34 @@ pub struct Cpu {
 /// One update out of a file, validated.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Update<'a> {
-    /// Header, data and extended signature table: Total Size bytes.
-    bytes: &'a [u8],
-    data: usize,
+    revision: Revision,
+    signature: u32,
+    flags: u32,
+    data: &'a [u8],
+    extended: &'a [[u8; EXT_SIGNATURE]],
 }
 
 impl<'a> Update<'a> {
     pub fn revision(&self) -> Revision {
-        Revision(dword(self.bytes, 4) as i32)
+        self.revision
     }
 
     /// The update data. `IA32_BIOS_UPDT_TRIG` is written its linear address,
     /// which must be 16-byte aligned and mapped present (§12.11.6).
     pub fn data(&self) -> &'a [u8] {
-        &self.bytes[HEADER..HEADER + self.data]
+        self.data
     }
 
     /// The header's signature and flags, then each extended signature's
     /// (Examples 12-5 and 12-6).
     fn names(&self, cpu: &Cpu) -> bool {
-        let primary = (dword(self.bytes, 12), dword(self.bytes, 24));
-        let table = self.bytes.get(HEADER + self.data + EXT_HEADER..).unwrap_or(&[]);
-        let extended = table.as_chunks::<EXT_SIGNATURE>().0.iter().map(|s| (dword(s, 0), dword(s, 4)));
-        core::iter::once(primary)
+        let extended = self.extended.iter().map(|entry| {
+            let [signature, flags, _] = dwords(entry);
+            (signature, flags)
+        });
+        core::iter::once((self.signature, self.flags))
             .chain(extended)
-            .any(|(sig, flags)| sig == cpu.signature.0 && flags & cpu.platform.flag() != 0)
+            .any(|(signature, flags)| signature == cpu.signature.0 && flags & cpu.platform.flag() != 0)
     }
 }
 
@@ -130,6 +148,9 @@ pub enum Refusal {
     HeaderVersion(u32),
     /// Loader Revision is not 1, the only loader §12.11.6 describes.
     LoaderRevision(u32),
+    /// Data Size is 0, which Table 12-7 reads as 2000 bytes: the form of
+    /// updates for CPUs older than any ToyOS runs on.
+    ZeroDataSize,
     /// Data Size is not a multiple of a dword.
     DataSize(usize),
     /// Total Size is not a multiple of 1024.
@@ -148,82 +169,106 @@ pub enum Refusal {
     ExtendedSignatureChecksum { index: usize },
 }
 
-/// The update in `file` to load on `cpu`, or why there is none.
+/// The update in `file` to load on `cpu`, or why there is none. A file holds
+/// at least one update.
 pub fn select<'a>(file: &'a [u8], cpu: &Cpu) -> Result<Choice<'a>, Refused> {
     let mut newest: Option<Update<'a>> = None;
-    let mut at = 0;
-    while at < file.len() {
-        let update = parse(&file[at..]).map_err(|why| Refused { at, why })?;
-        at += update.bytes.len();
-        if update.names(cpu) && newest.is_none_or(|n| update.revision() > n.revision()) {
+    let mut rest = file;
+    loop {
+        // `rest` is a suffix of `file`.
+        let at = file.len().wrapping_sub(rest.len());
+        let (update, after) = parse(rest).map_err(|why| Refused { at, why })?;
+        if update.names(cpu) && newest.is_none_or(|n| update.revision > n.revision) {
             newest = Some(update);
         }
+        if after.is_empty() {
+            break;
+        }
+        rest = after;
     }
     Ok(match newest {
         None => Choice::NoMatch,
-        Some(update) if update.revision() > cpu.revision => Choice::Load(update),
-        Some(update) => Choice::Current(update.revision()),
+        Some(update) if update.revision > cpu.revision => Choice::Load(update),
+        Some(update) => Choice::Current(update.revision),
     })
 }
 
-/// The update `bytes` starts with.
-fn parse(bytes: &[u8]) -> Result<Update<'_>, Refusal> {
+/// The update `bytes` starts with, and the bytes after it.
+fn parse(bytes: &[u8]) -> Result<(Update<'_>, &[u8]), Refusal> {
     let have = bytes.len();
-    let header = bytes.get(..HEADER).ok_or(Refusal::Truncated { need: HEADER, have })?;
-    match dword(header, 0) {
-        1 => {}
-        version => return Err(Refusal::HeaderVersion(version)),
+    let (header, rest) =
+        bytes.split_first_chunk::<HEADER>().ok_or(Refusal::Truncated { need: HEADER, have })?;
+    let [version, revision, _, signature, checksum, loader, flags, data, total, ..]: [u32; 12] =
+        dwords(header);
+    if version != 1 {
+        return Err(Refusal::HeaderVersion(version));
     }
-    match dword(header, 20) {
-        1 => {}
-        loader => return Err(Refusal::LoaderRevision(loader)),
+    if loader != 1 {
+        return Err(Refusal::LoaderRevision(loader));
     }
-    let (data, total) = match dword(header, 28) {
-        0 => (DEFAULT_DATA, HEADER + DEFAULT_DATA),
-        size => (size as usize, dword(header, 32) as usize),
-    };
-    if data % 4 != 0 {
+    let (data, total) = (data as usize, total as usize);
+    if data == 0 {
+        return Err(Refusal::ZeroDataSize);
+    }
+    if !data.is_multiple_of(4) {
         return Err(Refusal::DataSize(data));
     }
-    if total % GRANULE != 0 {
+    if !total.is_multiple_of(GRANULE) {
         return Err(Refusal::TotalSize(total));
     }
-    let table_len = total
-        .checked_sub(HEADER + data)
+    let table = HEADER
+        .checked_add(data)
+        .and_then(|signed| total.checked_sub(signed))
         .ok_or(Refusal::TotalBelowData { total, data })?;
-    let bytes = bytes.get(..total).ok_or(Refusal::Truncated { need: total, have })?;
+    let truncated = Refusal::Truncated { need: total, have };
+    let (data, rest) = rest.split_at_checked(data).ok_or(truncated)?;
+    let (table, rest) = rest.split_at_checked(table).ok_or(truncated)?;
 
-    match sum(&bytes[..HEADER + data]) {
+    match sum(header).wrapping_add(sum(data)) {
         0 => {}
         sum => return Err(Refusal::Checksum(sum)),
     }
-    if table_len != 0 {
-        let table = &bytes[HEADER + data..];
-        let count = table.get(..EXT_HEADER).map(|h| dword(h, 0) as usize);
-        if count.is_none_or(|n| table_len != EXT_HEADER + n * EXT_SIGNATURE) {
-            return Err(Refusal::ExtendedTableSize { len: table_len });
-        }
-        match sum(table) {
-            0 => {}
-            sum => return Err(Refusal::ExtendedTableChecksum(sum)),
-        }
-        // An extended signature, flags and checksum replace the header's
-        // three in the update it stands for, so the two triples sum alike.
-        let header = dword(bytes, 12).wrapping_add(dword(bytes, 16)).wrapping_add(dword(bytes, 24));
-        for (index, s) in table[EXT_HEADER..].as_chunks::<EXT_SIGNATURE>().0.iter().enumerate() {
-            if dword(s, 0).wrapping_add(dword(s, 4)).wrapping_add(dword(s, 8)) != header {
-                return Err(Refusal::ExtendedSignatureChecksum { index });
-            }
-        }
-    }
-    Ok(Update { bytes, data })
+    let extended = match table {
+        [] => &[],
+        table => extended(table, signature.wrapping_add(checksum).wrapping_add(flags))?,
+    };
+    let update = Update { revision: Revision(revision as i32), signature, flags, data, extended };
+    Ok((update, rest))
 }
 
-/// The little-endian dword at `at`.
-fn dword(bytes: &[u8], at: usize) -> u32 {
-    let mut word = [0; 4];
-    word.copy_from_slice(&bytes[at..at + 4]);
-    u32::from_le_bytes(word)
+/// The entries of an extended signature table whose update's header
+/// signature, checksum and flags sum to `primary`.
+fn extended(table: &[u8], primary: u32) -> Result<&[[u8; EXT_SIGNATURE]], Refusal> {
+    let size = Refusal::ExtendedTableSize { len: table.len() };
+    let (header, entries) = table.split_first_chunk::<EXT_HEADER>().ok_or(size)?;
+    let [count, ..]: [u32; 5] = dwords(header);
+    if (count as usize).checked_mul(EXT_SIGNATURE) != Some(entries.len()) {
+        return Err(size);
+    }
+    match sum(table) {
+        0 => {}
+        sum => return Err(Refusal::ExtendedTableChecksum(sum)),
+    }
+    let (entries, _) = entries.as_chunks::<EXT_SIGNATURE>();
+    // An extended signature, flags and checksum replace the header's three in
+    // the update it stands for, so the two triples sum alike.
+    for (index, entry) in entries.iter().enumerate() {
+        let [signature, flags, checksum] = dwords(entry);
+        if signature.wrapping_add(flags).wrapping_add(checksum) != primary {
+            return Err(Refusal::ExtendedSignatureChecksum { index });
+        }
+    }
+    Ok(entries)
+}
+
+/// `bytes` as little-endian dwords; a `LEN` that is not `4 * N` does not build.
+fn dwords<const LEN: usize, const N: usize>(bytes: &[u8; LEN]) -> [u32; N] {
+    const { assert!(LEN == 4 * N) };
+    let mut dwords = [0; N];
+    for (dword, bytes) in dwords.iter_mut().zip(bytes.as_chunks::<4>().0) {
+        *dword = u32::from_le_bytes(*bytes);
+    }
+    dwords
 }
 
 /// Every dword of `bytes` summed, unsigned, with wrap (§12.11.5).

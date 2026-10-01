@@ -1,5 +1,14 @@
-//! The T14's own update as Intel publishes it, and updates built here to the
-//! SDM's layout for every refusal and every arm the real file does not reach.
+//! Intel's updates as Intel publishes them, and updates built here to the
+//! SDM's layout for every refusal and every arm the real files do not reach.
+
+#![allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "a test fails by panicking"
+)]
 
 extern crate std;
 
@@ -11,6 +20,11 @@ use super::*;
 /// `intel-ucode/06-8c-01`, pinned by its digest in `NOTICE`.
 const T14_FILE: &[u8] = include_bytes!("../intel-ucode/06-8c-01");
 
+/// `intel-ucode/06-cc-02`, pinned by its digest in `NOTICE`: one update,
+/// revision 0x11c, Data Size 0x2878c, flags 0x94, and an extended signature
+/// table whose last entry is 0xe0652 with flags 0x94.
+const CC02_FILE: &[u8] = include_bytes!("../intel-ucode/06-cc-02");
+
 /// The T14's i5-1135G7 at the revision its firmware loads. Its platform is
 /// the one platform the file's flags name.
 const T14: Cpu = Cpu {
@@ -18,6 +32,10 @@ const T14: Cpu = Cpu {
     platform: PlatformId(7),
     revision: Revision(0xbe),
 };
+
+fn get(bytes: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
+}
 
 fn put(bytes: &mut [u8], at: usize, value: u32) {
     bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
@@ -46,7 +64,7 @@ fn build(signature: u32, flags: u32, revision: u32, extended: &[(u32, u32)]) -> 
     put(&mut update, 32, 2048);
     reseal(&mut update, data);
     if table != 0 {
-        let header = dword(&update, 12).wrapping_add(dword(&update, 16)).wrapping_add(dword(&update, 24));
+        let header = get(&update, 12).wrapping_add(get(&update, 16)).wrapping_add(get(&update, 24));
         let at = HEADER + data;
         put(&mut update, at, extended.len() as u32);
         for (i, &(sig, flags)) in extended.iter().enumerate() {
@@ -88,6 +106,17 @@ fn another_platform_or_stepping_is_not_named() {
 }
 
 #[test]
+fn an_extended_signature_in_intels_file_names_its_cpu() {
+    let below = Cpu { signature: Signature(0x000e_0652), platform: PlatformId(7), revision: Revision(0x11b) };
+    let Ok(Choice::Load(update)) = select(CC02_FILE, &below) else { panic!("0x11c is newer than 0x11b") };
+    assert_eq!(update.revision(), Revision(0x11c));
+    assert!(update.data() == &CC02_FILE[HEADER..HEADER + 0x2878c], "the data is not the file's");
+    let current = Cpu { revision: Revision(0x11c), ..below };
+    assert_eq!(select(CC02_FILE, &current), Ok(Choice::Current(Revision(0x11c))));
+    assert_eq!(select(CC02_FILE, &Cpu { platform: PlatformId(0), ..below }), Ok(Choice::NoMatch));
+}
+
+#[test]
 fn the_msrs_are_read_where_the_sdm_puts_them() {
     assert_eq!(PlatformId::from_msr(7 << 50), PlatformId(7));
     assert_eq!(PlatformId::from_msr(!(7 << 50)), PlatformId(0));
@@ -108,12 +137,16 @@ fn a_flipped_bit_anywhere_in_header_or_data_is_refused() {
 
 #[test]
 fn a_file_cut_short_is_refused() {
-    let len = T14_FILE.len();
-    assert_eq!(
-        refusal(&T14_FILE[..len - 4]).why,
-        Refusal::Truncated { need: len, have: len - 4 }
-    );
+    for file in [T14_FILE, CC02_FILE] {
+        let len = file.len();
+        assert_eq!(refusal(&file[..len - 4]).why, Refusal::Truncated { need: len, have: len - 4 });
+    }
     assert_eq!(refusal(&T14_FILE[..HEADER - 1]).why, Refusal::Truncated { need: HEADER, have: HEADER - 1 });
+}
+
+#[test]
+fn an_empty_file_is_refused() {
+    assert_eq!(refusal(&[]), Refused { at: 0, why: Refusal::Truncated { need: HEADER, have: 0 } });
 }
 
 #[test]
@@ -134,10 +167,12 @@ fn a_header_or_loader_version_other_than_1_is_refused() {
 }
 
 #[test]
-fn sizes_off_their_granule_or_inside_out_are_refused() {
-    let cases: [(u32, u32, Refusal); 3] = [
+fn a_size_zero_off_its_granule_or_inside_out_is_refused() {
+    let cases: [(u32, u32, Refusal); 5] = [
+        (0, 0, Refusal::ZeroDataSize),
         (1998, 2048, Refusal::DataSize(1998)),
         (2000, 2047, Refusal::TotalSize(2047)),
+        (2000, 2560, Refusal::TotalSize(2560)),
         (3024, 2048, Refusal::TotalBelowData { total: 2048, data: 3024 }),
     ];
     for (data, total, why) in cases {
@@ -149,20 +184,24 @@ fn sizes_off_their_granule_or_inside_out_are_refused() {
 }
 
 #[test]
-fn a_zero_data_size_is_2000_bytes_of_data() {
+fn any_multiple_of_1024_is_a_total_size() {
     let mut update = build(T14.signature.0, 0x80, 0xc0, &[]);
-    put(&mut update, 28, 0);
-    put(&mut update, 32, 0);
-    reseal(&mut update, 2000);
-    let Ok(Choice::Load(loaded)) = select(&update, &T14) else { panic!("0xc0 is newer than 0xbe") };
-    assert_eq!(loaded.data().len(), 2000);
+    update.resize(3072, 0);
+    put(&mut update, 28, 3072 - HEADER as u32);
+    put(&mut update, 32, 3072);
+    reseal(&mut update, 3072 - HEADER);
+    assert!(matches!(select(&update, &T14), Ok(Choice::Load(_))));
 }
 
 #[test]
 fn an_extended_signature_names_a_cpu_the_header_does_not() {
-    let update = build(0x0009_06a3, 0x80, 0xc0, &[(0x0008_06c2, 0x01), (T14.signature.0, 0x80)]);
-    let Ok(Choice::Load(loaded)) = select(&update, &T14) else { panic!("the second entry names the T14") };
-    assert_eq!(loaded.data().len(), 2048 - HEADER - EXT_HEADER - 2 * EXT_SIGNATURE);
+    let other = (0x0008_06c2, 0x01);
+    let t14 = (T14.signature.0, 0x80);
+    for extended in [[other, t14], [t14, other]] {
+        let update = build(0x0009_06a3, 0x80, 0xc0, &extended);
+        let Ok(Choice::Load(loaded)) = select(&update, &T14) else { panic!("an entry names the T14") };
+        assert_eq!(loaded.data().len(), 2048 - HEADER - EXT_HEADER - 2 * EXT_SIGNATURE);
+    }
     let wrong_platform = build(0x0009_06a3, 0x80, 0xc0, &[(T14.signature.0, 0x01)]);
     assert_eq!(select(&wrong_platform, &T14), Ok(Choice::NoMatch));
 }
@@ -174,7 +213,7 @@ fn a_damaged_extended_table_is_refused() {
 
     let mut entry = good.clone();
     let signature = at + EXT_HEADER + EXT_SIGNATURE;
-    let (sig, sum) = (dword(&entry, signature), dword(&entry, at + 4));
+    let (sig, sum) = (get(&entry, signature), get(&entry, at + 4));
     put(&mut entry, signature, sig + 1);
     put(&mut entry, at + 4, sum.wrapping_sub(1));
     assert_eq!(refusal(&entry).why, Refusal::ExtendedSignatureChecksum { index: 1 });
@@ -183,10 +222,18 @@ fn a_damaged_extended_table_is_refused() {
     table[at + 8] ^= 1;
     assert_eq!(refusal(&table).why, Refusal::ExtendedTableChecksum(1));
 
-    let mut count = good;
-    put(&mut count, at, 3);
-    let len = EXT_HEADER + 2 * EXT_SIGNATURE;
-    assert_eq!(refusal(&count).why, Refusal::ExtendedTableSize { len });
+    for count in [1, 3] {
+        let mut wrong = good.clone();
+        put(&mut wrong, at, count);
+        let len = EXT_HEADER + 2 * EXT_SIGNATURE;
+        assert_eq!(refusal(&wrong).why, Refusal::ExtendedTableSize { len }, "count {count}");
+    }
+
+    let mut short = build(T14.signature.0, 0x80, 0xc0, &[]);
+    put(&mut short, 28, 1984);
+    short[2032..].fill(0);
+    reseal(&mut short, 1984);
+    assert_eq!(refusal(&short).why, Refusal::ExtendedTableSize { len: 16 });
 }
 
 #[test]
@@ -204,9 +251,4 @@ fn a_revision_is_signed() {
     let negative = build(T14.signature.0, 0x80, 0x8000_0000, &[]);
     let cpu = Cpu { revision: Revision(0x7fff_ffff), ..T14 };
     assert_eq!(select(&negative, &cpu), Ok(Choice::Current(Revision(i32::MIN))));
-}
-
-#[test]
-fn an_empty_file_names_nobody() {
-    assert_eq!(select(&[], &T14), Ok(Choice::NoMatch));
 }

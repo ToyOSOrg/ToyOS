@@ -11,8 +11,6 @@ version and hash the way vendor device firmware is (owner, 2026-09-30). It
 loads none, so a CPU whose BIOS ships stale microcode stays below Linux at
 `Ubuntu-6.8.0-142.142` on every line that rests on microcode.
 
-Root `CLAUDE.md`'s firmware rule admits this microcode once PR #636 lands.
-
 **Exit**: the kernel loads current microcode early on every CPU, at least as
 current as Linux's.
 
@@ -55,8 +53,7 @@ nothing.
 
 **Licence.** `LicenseRef-Intel-Microcode` is in no `ALLOWED` row of
 `src/licence.rs`, so the commit that embeds the file reds the licence gate
-until an exception scoped to CPU microcode admits it. Intel's first condition
-puts the notice `NOTICE` quotes into that image.
+until an exception scoped to CPU microcode admits it.
 
 Each step's exit, in the testing ladder's order:
 
