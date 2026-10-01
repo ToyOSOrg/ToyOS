@@ -42,7 +42,8 @@ above; otherwise it is a NOTE.
 - **Fit.** Does the tree already do this? Is each new thing where it belongs: a pure decision in a
   pure crate, the user/kernel boundary in `toyos-userbound`, a device claim in a userland server?
   One declaration read by every reader, refusal by name, authority moved in by the parent. Zero
-  legacy: no shim, no workaround, no silent default. No new
+  legacy: no shim, no workaround, no silent default. A BLOCKER each: a kernel addition that
+  userland could own; a design made worse to spare the ABI. No new
   dependency or fetch. Nothing outside the brief's fence.
   Assembly, a naked function and a `core::arch` or `std::arch` path live only in an
   architecture's own module; `target_arch` only there, in its selector, in `src/arch.rs` and in
@@ -68,12 +69,9 @@ above; otherwise it is a NOTE.
   A file added to or deleted from `tests/testcases/tinycc/` moves the count
   `tests/testcases/LICENSE` states in the same diff, and `46_grep.c` never comes back. Nothing
   else is tracked under `tests/testcases/` but that `LICENSE` and `system.toml`.
-- **What no gate reads.** A BLOCKER each: a diff that declares a retired ABI name or reuses a
-  retired syscall, `SYS_DEBUG` action or inbox op number (the retired numbers are
-  `kernel/src/syscall/dispatch.rs`'s `retired_syscalls!` and the "formerly …" and "retired and
-  unused" entries in `toyos-abi/src/syscall.rs` and `toyos-abi/src/inbox.rs`; the retired names
-  include `SharedToken` and `services::connect`); a workspace member's `Cargo.toml` declaring `[profile]` or `[patch]`, which
-  cargo ignores with only a warning; a new package without a `description` saying what it is.
+- **What no gate reads.** A BLOCKER each: a workspace member's `Cargo.toml` declaring `[profile]`
+  or `[patch]`, which cargo ignores with only a warning; a new package without a `description`
+  saying what it is.
   A new cargo feature or `cfg` arm of one, and every arm a changed `src/clippy.rs` shape stops building, is shown linted in the pull request body: a `mem::forget` planted in that arm turns `cargo run -- --clippy` red.
 - **Growth.** Every line is a responsibility, not an asset. State the branch's net lines
   (`git diff --shortstat origin/main...HEAD`), production and tests apart. Production code that grows
