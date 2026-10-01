@@ -16,6 +16,7 @@ use crate::buildlock;
 use crate::flags;
 use crate::hostws;
 use crate::image;
+use crate::sysroot::{Identity, Stale};
 use crate::toolchain;
 
 thread_local! {
@@ -173,21 +174,6 @@ fn parse_config(path: &Path) -> SystemConfig {
 
 // --- Freshness checking ---
 
-/// What of a crate's target directory a sysroot's identity
-/// (`sysroot::Sysroot::identity`) leaves stale against the one its
-/// `.deps-stamp` records. Cargo keys nothing it reuses on the sysroot — every
-/// ToyOS compiler prints one `rustc -vV` — so this is where a moved compiler or
-/// library reaches a crate.
-#[derive(Debug, PartialEq)]
-enum Stale {
-    /// The compiler moved, or nothing records which one built it: all the guest
-    /// build wrote, its host half too.
-    All,
-    /// Only these guest targets' libraries moved: what was made for them,
-    /// `target/<target>/`, and nothing the compiler made for the host.
-    Targets(Vec<String>),
-}
-
 /// How much of a crate's target directory goes when the compiler moves.
 #[derive(Clone, Copy)]
 enum Clean {
@@ -202,21 +188,12 @@ enum Clean {
     ToyosOnly,
 }
 
-fn stale(root: &Path, crate_dir: &Path, identity: &str) -> Option<Stale> {
+fn stale(root: &Path, crate_dir: &Path, identity: &Identity) -> Option<Stale> {
     let stamp = hostws::target_dir(root, crate_dir).join(".deps-stamp");
-    let Ok(stored) = fs::read_to_string(&stamp) else { return Some(Stale::All) };
-    let parts = |text: &str| -> BTreeMap<String, String> {
-        text.lines().filter_map(|l| l.split_once(' ')).map(|(part, id)| (part.into(), id.into())).collect()
-    };
-    let (was, now) = (parts(&stored), parts(identity));
-    if was.get("compiler") != now.get("compiler") {
-        return Some(Stale::All);
-    }
-    let moved: Vec<String> = now.iter().filter(|(part, id)| was.get(*part) != Some(*id)).map(|(part, _)| part.clone()).collect();
-    (!moved.is_empty()).then_some(Stale::Targets(moved))
+    identity.stale(fs::read_to_string(&stamp).ok().as_deref())
 }
 
-fn clean(root: &Path, crate_dir: &Path, kind: Clean, stale: &Stale, identity: &str) {
+fn clean(root: &Path, crate_dir: &Path, kind: Clean, stale: &Stale, identity: &Identity) {
     // Where cargo actually wrote it. `toyos-ld` is a member of the host
     // workspace, so its guest build lands in the root's `target/`.
     let target = hostws::target_dir(root, crate_dir);
@@ -254,7 +231,7 @@ fn clean(root: &Path, crate_dir: &Path, kind: Clean, stale: &Stale, identity: &s
 
     fs::create_dir_all(&target).unwrap_or_else(|e| panic!("create {}: {e}", target.display()));
     let stamp = target.join(".deps-stamp");
-    fs::write(&stamp, identity).unwrap_or_else(|e| panic!("write {}: {e}", stamp.display()));
+    fs::write(&stamp, identity.to_string()).unwrap_or_else(|e| panic!("write {}: {e}", stamp.display()));
 }
 
 /// Drop what in the target directories the sysroot's moved parts invalidated.
@@ -268,7 +245,7 @@ fn clean(root: &Path, crate_dir: &Path, kind: Clean, stale: &Stale, identity: &s
 fn invalidate_stale(
     root: &Path,
     lock: &mut buildlock::Held,
-    identity: &str,
+    identity: &Identity,
     targets: &[(PathBuf, Clean)],
 ) {
     lock.act_if(
@@ -407,8 +384,8 @@ struct GuestEnv {
     /// rustc is built from (`src/compiler.rs`).
     primary_compiler: bool,
     /// What its crates compile against beside their sources
-    /// (`sysroot::Sysroot::identity`).
-    identity: String,
+    /// (`sysroot::Identity`).
+    identity: Identity,
     /// The public key the loader and `/system/bin/update` embed
     /// (`signing::KEY_ENV`): every guest build carries it, so no crate that
     /// names it can be built without it.
@@ -422,7 +399,7 @@ impl GuestEnv {
         Self {
             toolchain: sysroot.dir.clone(),
             primary_compiler: sysroot.primary_compiler,
-            identity: sysroot.identity(),
+            identity: sysroot.identity.clone(),
             image_key: crate::signing::key().public_hex(),
             floor_scope: crate::signing::key().floor_scope().word(),
         }
@@ -2404,23 +2381,25 @@ mod tests {
             Arch::ALL.iter().map(|arch| file(&format!("target/{}/{PROFILE}/ld", arch.userland()))).collect();
         guest.push(file(&format!("target/{PROFILE}/deps/libsyn-1.rlib")));
         let host = file("target/debug/toyos-build");
+        let identity = Identity::of_parts("compiler", "freestanding", "toyos");
 
-        clean(&root, &root.join("ld"), Clean::ToyosOnly, &Stale::All, "fingerprint");
+        clean(&root, &root.join("ld"), Clean::ToyosOnly, &Stale::All, &identity);
         for gone in &guest {
             assert!(!gone.exists(), "{} survived a clean of what the guest build wrote", gone.display());
         }
         assert!(host.is_file(), "the host workspace's own build went");
-        assert_eq!(fs::read_to_string(root.join("target/.deps-stamp")).unwrap(), "fingerprint");
+        assert_eq!(fs::read_to_string(root.join("target/.deps-stamp")).unwrap(), identity.to_string());
     }
 
-    /// **An ABI edit takes only what was built for ToyOS**: its sysroot moves
-    /// the userland targets' libraries and nothing else, so the kernel's target
-    /// directory stays whole, and of userland's only `target/<userland triple>`
-    /// goes — the host half the same compiler built stays. A moved compiler,
-    /// or a stamp that names none, is all of it.
+    /// **Moved libraries take what was built for their targets, and nothing
+    /// else**: an ABI edit moves the userland targets' libraries, so the
+    /// kernel's and the loader's target directories stay whole and of
+    /// userland's only `target/<userland triple>` goes; a fork edit moves every
+    /// target's, so the kernel's and the loader's builds go too. The host half
+    /// the same compiler built stays either way. A moved compiler, or a stamp
+    /// that names none, is all of it.
     #[test]
     fn moved_libraries_take_what_was_built_for_them_and_a_moved_compiler_all() {
-        use crate::sysroot::Sysroot;
         let root = toyos_tmpdir::TempDir::new("moved-libraries");
         fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
         let file = |path: PathBuf| {
@@ -2428,38 +2407,52 @@ mod tests {
             fs::write(&path, "built").unwrap();
             path
         };
-        let (kernel, userland) = (root.join("kernel"), root.join("userland"));
+        let (kernel, loader, userland) = (root.join("kernel"), root.join("bootloader"), root.join("userland"));
+        let crates = [&kernel, &loader, &userland];
         let kernels = Arch::ALL.map(|arch| file(kernel.join(format!("target/{}/{PROFILE}/kernel", arch.kernel()))));
-        let kernel_host = file(kernel.join(format!("target/{PROFILE}/deps/libproc-1.dylib")));
+        let loaders = Arch::ALL.map(|arch| file(loader.join(format!("target/{}/{PROFILE}/loader.efi", arch.loader()))));
         let programs = Arch::ALL.map(|arch| file(userland.join(format!("target/{}/{PROFILE}/init", arch.userland()))));
-        let userland_host = file(userland.join(format!("target/{PROFILE}/deps/libsyn-1.rlib")));
+        let hosts = crates.map(|dir| file(dir.join(format!("target/{PROFILE}/deps/libproc-1.dylib"))));
 
-        let before = Sysroot::of_parts("compiler", "freestanding", "toyos").identity();
-        for dir in [&kernel, &userland] {
-            fs::write(dir.join("target/.deps-stamp"), &before).unwrap();
+        let before = Identity::of_parts("compiler", "freestanding", "toyos");
+        for dir in crates {
+            fs::write(dir.join("target/.deps-stamp"), before.to_string()).unwrap();
             assert_eq!(stale(&root, dir, &before), None, "{} was stale against its own stamp", dir.display());
         }
+        let moved = |identity: &Identity, want: Vec<&'static str>| {
+            for dir in crates {
+                let found = stale(&root, dir, identity);
+                assert_eq!(found, Some(Stale::Targets(want.clone())), "{}", dir.display());
+                clean(&root, dir, Clean::All, &found.unwrap(), identity);
+                assert_eq!(stale(&root, dir, identity), None, "{} was not stamped", dir.display());
+            }
+        };
 
-        let abi_edit = Sysroot::of_parts("compiler", "freestanding", "toyos, edited").identity();
-        let mut toyos: Vec<String> = Arch::ALL.map(|arch| arch.userland().to_string()).into();
+        let mut toyos: Vec<&'static str> = Arch::ALL.map(Arch::userland).into();
         toyos.sort();
-        for dir in [&kernel, &userland] {
-            let found = stale(&root, dir, &abi_edit);
-            assert_eq!(found, Some(Stale::Targets(toyos.clone())), "{}", dir.display());
-            clean(&root, dir, Clean::All, &found.unwrap(), &abi_edit);
-            assert_eq!(stale(&root, dir, &abi_edit), None, "{} was not stamped", dir.display());
-        }
-        for kept in kernels.iter().chain([&kernel_host, &userland_host]) {
+        moved(&Identity::of_parts("compiler", "freestanding", "toyos, edited"), toyos);
+        for kept in kernels.iter().chain(&loaders).chain(&hosts) {
             assert!(kept.is_file(), "{} went, and nothing it was built from moved", kept.display());
         }
         for gone in &programs {
             assert!(!gone.exists(), "{} survived its target's libraries moving", gone.display());
         }
 
-        let compiler = Sysroot::of_parts("another compiler", "freestanding", "toyos, edited").identity();
+        let mut all: Vec<&'static str> = Arch::ALL.into_iter().flat_map(|arch| [arch.userland(), arch.kernel(), arch.loader()]).collect();
+        all.sort();
+        let fork_edit = Identity::of_parts("compiler", "freestanding, edited", "toyos on the edited fork");
+        moved(&fork_edit, all);
+        for gone in kernels.iter().chain(&loaders) {
+            assert!(!gone.exists(), "{} survived its target's libraries moving", gone.display());
+        }
+        for kept in &hosts {
+            assert!(kept.is_file(), "{} went, and the compiler that built it did not move", kept.display());
+        }
+
+        let compiler = Identity::of_parts("another compiler", "freestanding, edited", "toyos on the edited fork");
         assert_eq!(stale(&root, &kernel, &compiler), Some(Stale::All), "a moved compiler kept the host half");
         fs::write(userland.join("target/.deps-stamp"), "sysroot:/a/stamp/naming/no/compiler").unwrap();
-        assert_eq!(stale(&root, &userland, &abi_edit), Some(Stale::All), "a stamp naming no compiler was trusted");
+        assert_eq!(stale(&root, &userland, &fork_edit), Some(Stale::All), "a stamp naming no compiler was trusted");
     }
 
     /// **A stamp that cannot be written stops the build**: one left behind would
@@ -2472,8 +2465,9 @@ mod tests {
         let target = root.join("kernel/target");
         fs::create_dir_all(&target).unwrap();
         fs::set_permissions(&target, fs::Permissions::from_mode(0o555)).unwrap();
+        let identity = Identity::of_parts("compiler", "freestanding", "toyos");
         let failed = std::panic::catch_unwind(|| {
-            clean(&root, &root.join("kernel"), Clean::All, &Stale::Targets(vec![]), "identity")
+            clean(&root, &root.join("kernel"), Clean::All, &Stale::Targets(vec![]), &identity)
         });
         fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
         let refusal = failed.expect_err("a stamp that was not written was taken for written");
@@ -2492,7 +2486,8 @@ mod tests {
         fs::create_dir_all(kernel.join("target")).unwrap();
         fs::write(kernel.join("Cargo.toml"), "[package\n").unwrap();
 
-        let failed = std::panic::catch_unwind(|| clean(&root, &kernel, Clean::All, &Stale::All, "fingerprint"));
+        let identity = Identity::of_parts("compiler", "freestanding", "toyos");
+        let failed = std::panic::catch_unwind(|| clean(&root, &kernel, Clean::All, &Stale::All, &identity));
         let refusal = failed.expect_err("a cargo clean that failed was taken for one that ran");
         let refusal = refusal.downcast_ref::<String>().expect("a formatted panic");
         assert!(refusal.starts_with(&format!("cargo clean in {} exited", kernel.display())), "{refusal}");
