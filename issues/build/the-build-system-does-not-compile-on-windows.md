@@ -49,4 +49,4 @@ eventually run inside ToyOS. `symlink` is the question in miniature: either
 ToyOS grows symbolic links, or the two `toolchain.rs` sites need a shape that
 does not need one — a copy, a directory junction, or a sysroot layout that does
 not require aliasing a directory at all. Deciding that is worth more than a
-`#[cfg]` pair, and it decides two of the errors.
+`#[cfg]` pair.
