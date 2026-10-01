@@ -3715,7 +3715,7 @@ dependencies = [
 [[package]]
 name = "socket2"
 version = "0.6.3"
-source = "git+https://github.com/ToyOSOrg/socket2?branch=toyos#2b67e7bd68e0688de1586ba3eb90cfc5d485c6b1"
+source = "git+https://github.com/ToyOSOrg/socket2?branch=toyos#48d15f5965852c07b639f72e6261d5810ae70c76"
 dependencies = [
  "libc",
  "toyos",
