@@ -22,7 +22,7 @@ jobs:
   # pull request.
   host:
     if: github.ref == 'refs/heads/main'
-    runs-on: macos-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -206,3 +206,5 @@ jobs:
           sh "$RUNNER_TEMP/rustup-init.sh" -y --profile minimal --default-toolchain stable
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - run: env -u GITHUB_ACTIONS -u CI cargo run -- --build-only
+      # The host suite's macOS arms run here alone: `ci.yml`'s `host` is Linux.
+      - run: cargo run -- --ci host

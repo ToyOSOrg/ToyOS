@@ -620,11 +620,16 @@ mod tests {
         let config = config_text(Path::new(KEYED_BUILD_DIR), &host_triple(), tools);
         let base = key(&fork);
         assert_eq!(key_of(&fork, RECIPE, &config, &tools.identity), base);
-        let linux = config_text(Path::new(KEYED_BUILD_DIR), "x86_64-unknown-linux-gnu", tools);
+        let elsewhere = if host_triple() == "x86_64-unknown-linux-gnu" {
+            "aarch64-unknown-linux-gnu"
+        } else {
+            "x86_64-unknown-linux-gnu"
+        };
+        let elsewhere = config_text(Path::new(KEYED_BUILD_DIR), elsewhere, tools);
         for (what, other) in [
             ("the recipe", key_of(&fork, "another recipe", &config, &tools.identity)),
             ("the [llvm]", key_of(&fork, RECIPE, &config.replace("X86", "RISCV;X86"), &tools.identity)),
-            ("the host", key_of(&fork, RECIPE, &linux, &tools.identity)),
+            ("the host", key_of(&fork, RECIPE, &elsewhere, &tools.identity)),
             ("the host's tools", key_of(&fork, RECIPE, &config, "/usr/bin/gcc\ngcc 14\n")),
         ] {
             assert_ne!(other, base, "{what} did not move the key");
@@ -658,7 +663,7 @@ mod tests {
         for tool in [&tools.cc, &tools.cxx] {
             assert!(tool.is_absolute() && tool.is_file(), "{} is no compiler", tool.display());
             let at = lines.iter().position(|l| Path::new(l) == tool.as_path()).unwrap_or_else(|| panic!("{}", tools.identity));
-            assert!(lines[at + 1].contains("version"), "{} said no version: {}", tool.display(), tools.identity);
+            assert!(lines[at + 1].chars().any(|c| c.is_ascii_digit()), "{} said no version: {}", tool.display(), tools.identity);
         }
         assert!(lines.iter().any(|l| l.starts_with("cmake version")), "{}", tools.identity);
         if host_triple().ends_with("apple-darwin") {
