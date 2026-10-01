@@ -1,6 +1,6 @@
 [package]
 name = "toyos-libc-copies"
-description = "A host differential test of userland libc's self-contained modules: its copies, fills and square roots against core's, its UTF-8 reader against core's, and its number reader and long double widening against the host C library and compiler-builtins."
+description = "A host differential test of userland libc's self-contained modules: its copies, fills and square roots against core's, its UTF-8 reader against core's, its number reader against the host C library and exact IEEE 754 rounding, and its long double widening against compiler-builtins."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
