@@ -318,7 +318,7 @@ mod tests {
             write(path, "a desktop's");
         }
         fs::create_dir_all(orphan.join("sub")).unwrap();
-        assert_eq!(sweep(&root, Keyed::Sysroot, &dir), [orphan.clone()]);
+        assert_eq!(sweep(&root, Keyed::Sysroot, &dir), std::slice::from_ref(&orphan));
         for path in &hidden {
             assert!(path.is_file(), "{} was swept", path.display());
         }
