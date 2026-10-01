@@ -135,7 +135,7 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("screen_fatal_halt_composited", qemu::Profile::Metal),
     ("virt_early_panic", qemu::Profile::Virt),
     ("virt_early_fault", qemu::Profile::Virt),
-    ("virt_el2_drop", qemu::Profile::VirtEl2),
+    ("virt_el2_drop", qemu::Profile::VirtEl2NoVhe),
     ("virt_user_mode", qemu::Profile::VirtEl2),
     ("virt_timer_preempts", qemu::Profile::VirtEl2),
     ("virt_irq_storm", qemu::Profile::VirtEl2),
@@ -1606,7 +1606,9 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
         "virt_el2_drop" => {
             // The entry's drop from EL2, which HVF never exercises: `virt` with
             // EL2 under TCG, where firmware hands the loader the CPU at EL2. A
-            // loader that refuses the CPU says so and stops; a drop that leaves
+            // loader that refuses the CPU says so and stops; a handover with
+            // EL2's MMU on halts in a named refusal, or faults first where
+            // firmware maps the image execute-never; a drop that leaves
             // `HCR_EL2` other than declared halts in a named refusal and says
             // nothing; one that lands anywhere but EL1 on `SP_EL1` panics in the
             // declaration's read-back. Each way the line this waits for never
@@ -1625,7 +1627,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
             let rest = qemu.drain_until(Duration::from_secs(10), |l| l.contains(EARLY_PANIC_MESSAGE));
             let serial = format!("{}\n{rest}", qemu.boot_log());
             for want in [
-                "CPU: entered at EL2, HCR_EL2.E2H ",
+                "CPU: entered at EL2, HCR_EL2.E2H 0,",
                 "ID_AA64MMFR4_EL1.E2H0 0x0: the kernel's entry writes E2H clear",
                 "as declared; entered at EL2, HCR_EL2 read back as declared",
                 "EARLY PANIC: panicked at",
