@@ -27,6 +27,8 @@ still keeps them:
   `issues/kernel/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`,
   `issues/kernel/the-kernel-still-parses-what-userland-writes.md`,
   `issues/kernel/the-capability-end-state-is-twelve-answers.md`,
+  `issues/kernel/sys-debug-actions-and-two-loader-words-that-nothing-calls.md`,
+  `issues/kernel/the-kernel-is-small-interrupts-post-and-threads-wait.md`,
   `issues/diagnostics/the-kernel-keeps-nothing-it-enumerates.md`,
   `issues/diagnostics/no-cyclictest.md`, and
   `issues/isolation/the-supervisor-is-host-tested-and-owns-the-stop.md`, whose

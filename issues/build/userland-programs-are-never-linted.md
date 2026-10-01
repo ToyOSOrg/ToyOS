@@ -14,6 +14,7 @@ aarch64-apple-darwin --all-targets -- -D warnings` exits 101 with 8 findings
 in soundd and 10 in netd. The compositor stops on 1 finding in its dependency
 `userland/toyos-window`.
 
-**Exit:** `--ci host` lints every crate the survey gates, on the host target,
-with warnings denied, and those findings are fixed. A clippy finding planted in
-a gated userland crate reds the step.
+**Exit:** a shape in `src/clippy.rs`, which `--clippy` and `--ci host` both
+run, lints every crate the survey gates, on the host target, with warnings
+denied, and those findings are fixed. A clippy finding planted in a gated
+userland crate reds `--clippy`.

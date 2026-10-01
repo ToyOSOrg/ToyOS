@@ -595,8 +595,7 @@ fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
 ///
 /// [`PROFILE`] states them and `--release` is gone from this build system, so
 /// the way they can still be lost is somebody editing `[profile.toyos]`. This
-/// asks the artifact rather than the manifest, which is the only question worth
-/// asking.
+/// asks the artifact rather than the manifest.
 fn assert_overflow_checked(what: &str, image: &[u8]) {
     let found = contains_subslice(image, OVERFLOW_CHECK_MARKER);
     assert!(

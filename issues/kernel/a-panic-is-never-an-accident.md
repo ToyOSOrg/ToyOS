@@ -9,7 +9,7 @@ opened: 2026-10-01
 | Tier | Rule |
 |---|---|
 | 1. Input boundaries | No panic at all: the set below is forbidden. Where the build allows, each parser's entry point also carries a link-time no-panic proof. |
-| 2. The kernel | No implicit panic: the set is denied. A deliberate stop for a broken internal invariant stays, as an `#[expect(…, reason = "…")]` whose reason names the invariant. |
+| 2. The kernel | No implicit panic: the set is denied. A deliberate stop for a broken internal invariant stays, spelled out at its site as an `#[expect(…, reason = "…")]` whose reason names the invariant. |
 | 3. System services | The same rule as the kernel. |
 | 4. Apps, ports, test code and build tooling | Normal Rust. |
 
@@ -40,6 +40,13 @@ lossy casts and 205 `disallowed_macros`.
 - The set does not see a shift by a variable amount, `pow` or `abs`, though
   each panics under `overflow-checks`; nor a standard function it does not
   name, nor a panic inside a callee.
+- `arithmetic_side_effects` reports an expression once, however many
+  operators it nests: `x * x + y * y - 1` is one finding, so one `#[expect]`
+  covers its four overflows.
+- `disallowed_macros` naming `core::assert` fires on `const _: () = assert!(…)`
+  and `const { assert!(…) }` too, which cannot panic at run time: `kernel/src`
+  holds 41 and `toyos-transport` one. `clippy::panic` passes a `panic!` in a
+  const item or block, so a compile-time check is `if !… { panic!(…) }` there.
 - `clippy::allow_attributes` checks outer attributes alone: an inner
   `#![allow(…, reason = "…")]` passes it and `allow_attributes_without_reason`.
 - Cargo's `[lints]` reaches a crate's `#[cfg(test)]` code, and its `forbid`
@@ -52,8 +59,6 @@ lossy casts and 205 `disallowed_macros`.
   in code built with `panic = "abort"`". Both kernel targets print
   `"panic-strategy": "abort"` from `rustc -Z unstable-options --print
   target-spec-json`, so the proof has to come from a host build.
-- `--clippy` lints no userland program, because the `toyos` toolchain ships no
-  clippy (`src/clippy.rs:7-8`).
 
 **Stages, in order.**
 1. Tier 1, one crate at a time; an input boundary inside the kernel is moved
@@ -70,10 +75,16 @@ lossy casts and 205 `disallowed_macros`.
    and every crate of this tree `kernel/Cargo.toml` links, unless stage 1
    already forbids the set in it, deny the set and forbid
    `clippy::allow_attributes` and `clippy::allow_attributes_without_reason`
-   under `--clippy`, and a step of `--ci host` refuses an inner `#![allow]`,
-   and an `#[expect]` of the set on a `mod`, on an `impl` or as an inner
-   `#![expect]`, any of which passes every finding beneath it: then every
-   exception is an `#[expect(…, reason = "…")]`, and a bare `#[allow]` fails
-   the gate.
-4. The system services. The first exit is a userland shape in `src/clippy.rs`;
-   a service's exit is its crate root under stage 3's attributes.
+   under `--clippy`, and a step of `--ci host` refuses an inner `#![allow]`
+   and an `#[expect]` of the set over more than one finding. The step lints a
+   copy in which each `#[expect]` of the set is a `#[deny]` whose reason is its
+   own file and line: rustc attaches that reason to every finding the
+   attribute governs, so one reason on two findings is one `#[expect]` over two
+   sites. It also refuses a copy with fewer findings than `--force-warn` of the
+   set, which reports those under an `#[expect]` too: the copy missed an
+   `#[expect]`, as one inside a `cfg_attr`. Then every exception is an
+   `#[expect(…, reason = "…")]` of its own, and a bare `#[allow]` fails the
+   gate.
+4. The system services, once `issues/build/userland-programs-are-never-linted.md`
+   has put userland in `src/clippy.rs`: a service's exit is its crate root
+   under stage 3's attributes.

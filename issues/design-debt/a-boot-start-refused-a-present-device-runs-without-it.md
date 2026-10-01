@@ -13,9 +13,9 @@ required, so every boot start refused a device the machine has —
 `NotSupported`, `AlreadyExists`, `ResourceExhausted` — runs without it:
 `/system/bin/init`'s `start` says the refusal in the kernel's own word
 (`init: netd: pci:8086:10c9 is on this machine and could not be handed over`)
-and starts the program. `refused_claim` (`tests/common/faults.rs`) and
-`pci_function_is_exclusive` assert that behaviour today.
+and starts the program.
 
-**Exit**: a `[programs]` row can mark a device required, and guest tests show
-a boot start refused a required device is fatal, and one refused a device its
-row does not mark logs it loudly and starts the program without it.
+**Exit**: a `[programs]` row can mark a device required, a host test holds the
+mark and init's choice between a fatal refusal and a logged one, and a metal
+row or, where none can, a guest test shows a boot start refused a required
+device is fatal.
