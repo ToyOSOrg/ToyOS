@@ -5221,9 +5221,9 @@ fn run_screen_test(
             Ok(())
         }
         "virt_boot_from_power_on" => {
-            // `boot_from_power_on` where the loader's counter is the generic
-            // timer's, read at EL2 before the kernel's entry writes its offset.
-            // The loader and the kernel both speak on the PL011.
+            // `boot_from_power_on` on the generic timer, entered at EL2: the
+            // loader reads the physical count, the kernel the virtual one once
+            // its entry writes the offset zero. Both speak on the PL011.
             let mut qemu = QemuInstance::boot_with_options(
                 test_config,
                 &[],
