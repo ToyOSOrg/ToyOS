@@ -33,8 +33,8 @@ use crate::{route, Event, Flow, Peer};
 pub enum Nud {
     Incomplete(Incomplete),
     Reachable(Reachable),
-    Stale(Linked),
-    Delay(Linked),
+    Stale(Stale),
+    Delay(Delaying),
     Probe(Probing),
     Unreachable(Unreachable),
     /// Resolution failed; its hold-down is the entry's deadline.
@@ -111,9 +111,23 @@ impl Reachable {
     }
 }
 
-/// STALE or DELAY: a MAC and its released datagrams.
+/// STALE or quiescent UNREACHABLE's IDLE_LIFETIME. It passes without deleting the entry only
+/// while released datagrams are queued, and the entry then goes as the last leaves (§6.3).
+#[derive(Clone, Copy, Debug)]
+enum Lifetime {
+    Runs,
+    Passed,
+}
+
 #[derive(Debug)]
-pub struct Linked {
+pub struct Stale {
+    mac: MacAddr,
+    lifetime: Lifetime,
+    pub released: Released,
+}
+
+#[derive(Debug)]
+pub struct Delaying {
     mac: MacAddr,
     pub released: Released,
 }
@@ -131,22 +145,29 @@ impl Probing {
     }
 }
 
+/// UNREACHABLE's request (RFC 7048 §3): only an entry with none pending has an idle lifetime.
+#[derive(Clone, Copy, Debug)]
+enum Solicit {
+    Quiescent(Lifetime),
+    /// A request waits in the control queue; its backoff starts as it leaves.
+    Queued,
+    /// A request left and its backoff runs; `sent`: a datagram went to the MAC since.
+    Backoff { sent: bool },
+}
+
 #[derive(Debug)]
 pub struct Unreachable {
     mac: MacAddr,
     /// Broadcast requests this episode (RFC 7048 §4's k).
     requests: u32,
-    /// A request left and its backoff runs.
-    backoff: bool,
-    /// A datagram went to the MAC since that request.
-    sent: bool,
+    solicit: Solicit,
     pub released: Released,
 }
 
 impl Unreachable {
     /// No request pending: nothing is sent until the next datagram.
     pub fn quiescent(&self) -> bool {
-        !self.backoff
+        matches!(self.solicit, Solicit::Quiescent(_))
     }
 }
 
@@ -154,7 +175,8 @@ impl Nud {
     pub fn mac(&self) -> Option<MacAddr> {
         match self {
             Self::Reachable(r) => Some(r.mac),
-            Self::Stale(l) | Self::Delay(l) => Some(l.mac),
+            Self::Stale(s) => Some(s.mac),
+            Self::Delay(d) => Some(d.mac),
             Self::Probe(p) => Some(p.mac),
             Self::Unreachable(u) => Some(u.mac),
             Self::Incomplete(_) | Self::Failed => None,
@@ -169,8 +191,8 @@ impl Nud {
     fn released_mut(&mut self) -> Option<&mut Released> {
         match self {
             Self::Reachable(Reachable { released, .. })
-            | Self::Stale(Linked { released, .. })
-            | Self::Delay(Linked { released, .. })
+            | Self::Stale(Stale { released, .. })
+            | Self::Delay(Delaying { released, .. })
             | Self::Probe(Probing { released, .. })
             | Self::Unreachable(Unreachable { released, .. }) => Some(released),
             Self::Incomplete(_) | Self::Failed => None,
@@ -181,12 +203,21 @@ impl Nud {
     fn releasing(&self) -> bool {
         match self {
             Self::Reachable(Reachable { released, .. })
-            | Self::Stale(Linked { released, .. })
-            | Self::Delay(Linked { released, .. })
+            | Self::Stale(Stale { released, .. })
+            | Self::Delay(Delaying { released, .. })
             | Self::Probe(Probing { released, .. })
             | Self::Unreachable(Unreachable { released, .. }) => !released.0.is_empty(),
             Self::Incomplete(_) | Self::Failed => false,
         }
+    }
+
+    /// Its idle lifetime passed without a send while it held released datagrams (§6.3).
+    fn idle(&self) -> bool {
+        matches!(
+            self,
+            Self::Stale(Stale { lifetime: Lifetime::Passed, .. })
+                | Self::Unreachable(Unreachable { solicit: Solicit::Quiescent(Lifetime::Passed), .. })
+        )
     }
 
     /// A resolved state's released datagrams, taken for the state that follows it.
@@ -269,8 +300,7 @@ fn request_left(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) {
         }
         Nud::Unreachable(s) => {
             s.requests = s.requests.saturating_add(1);
-            s.backoff = true;
-            s.sent = false;
+            s.solicit = Solicit::Backoff { sent: false };
             backoff(s.requests)
         }
         Nud::Reachable(_) | Nud::Stale(_) | Nud::Delay(_) | Nud::Failed => return,
@@ -288,7 +318,7 @@ fn make_room(i: &mut Interface, cx: &mut Cx<'_>) -> bool {
     let class = |n: &Neighbour| {
         let class = match &n.state {
             Nud::Failed => 0,
-            Nud::Unreachable(u) if u.quiescent() && !n.queued => 1,
+            Nud::Unreachable(u) if u.quiescent() => 1,
             Nud::Stale(_) => 2,
             _ => return None,
         };
@@ -333,22 +363,24 @@ pub(crate) fn send(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr, hint: Opt
     if hint.is_some() {
         n.hint = hint;
     }
-    let queued = n.queued;
     match &mut n.state {
         Nud::Incomplete(_) => Link::Pending,
-        Nud::Reachable(Reachable { mac, .. }) | Nud::Delay(Linked { mac, .. }) | Nud::Probe(Probing { mac, .. }) => Link::Resolved(*mac),
-        Nud::Stale(Linked { mac, released }) => {
+        Nud::Reachable(Reachable { mac, .. }) | Nud::Delay(Delaying { mac, .. }) | Nud::Probe(Probing { mac, .. }) => Link::Resolved(*mac),
+        Nud::Stale(Stale { mac, released, .. }) => {
             let mac = *mac;
-            n.state = Nud::Delay(Linked { mac, released: core::mem::take(released) });
+            n.state = Nud::Delay(Delaying { mac, released: core::mem::take(released) });
             cx.timers.arm(timer(cx, addr), now.after(DELAY_FIRST_PROBE));
             Link::Resolved(mac)
         }
         Nud::Unreachable(u) => {
             let mac = u.mac;
-            if u.backoff {
-                u.sent = true;
-            } else if !queued {
-                request(i, cx, addr);
+            match u.solicit {
+                Solicit::Quiescent(_) => {
+                    u.solicit = Solicit::Queued;
+                    request(i, cx, addr);
+                }
+                Solicit::Queued => {}
+                Solicit::Backoff { .. } => u.solicit = Solicit::Backoff { sent: true },
             }
             Link::Resolved(mac)
         }
@@ -388,7 +420,7 @@ pub(crate) fn fire(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) {
             if now < end {
                 cx.timers.arm(timer(cx, addr), end);
             } else {
-                n.state = Nud::Stale(Linked { mac: s.mac, released: core::mem::take(&mut s.released) });
+                n.state = Nud::Stale(Stale { mac: s.mac, lifetime: Lifetime::Runs, released: core::mem::take(&mut s.released) });
                 cx.timers.arm(timer(cx, addr), now.after(IDLE_LIFETIME));
             }
         }
@@ -399,18 +431,25 @@ pub(crate) fn fire(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) {
         Nud::Probe(s) if s.requests < UNICAST_SOLICIT => request(i, cx, addr),
         Nud::Probe(s) => {
             let released = core::mem::take(&mut s.released);
-            n.state = Nud::Unreachable(Unreachable { mac: s.mac, requests: 0, backoff: false, sent: false, released });
+            n.state = Nud::Unreachable(Unreachable { mac: s.mac, requests: 0, solicit: Solicit::Quiescent(Lifetime::Runs), released });
             cx.log.count(Counter::NbUnreachable);
             cx.timers.arm(timer(cx, addr), now.after(IDLE_LIFETIME));
             route::refresh_active(i, cx);
         }
-        Nud::Unreachable(s) if s.backoff && s.sent => request(i, cx, addr),
-        Nud::Unreachable(s) if s.backoff => {
-            s.backoff = false;
+        Nud::Unreachable(Unreachable { solicit: solicit @ Solicit::Backoff { sent: true }, .. }) => {
+            *solicit = Solicit::Queued;
+            request(i, cx, addr);
+        }
+        Nud::Unreachable(Unreachable { solicit: solicit @ Solicit::Backoff { sent: false }, .. }) => {
+            *solicit = Solicit::Quiescent(Lifetime::Runs);
             cx.timers.arm(timer(cx, addr), now.after(IDLE_LIFETIME));
         }
+        // A request is pending, so it is not idle: its next deadline starts as the request leaves.
+        Nud::Unreachable(Unreachable { solicit: Solicit::Queued, .. }) => {}
         // Not idle while released datagrams are its: `leave` deletes it once they have left.
-        Nud::Stale(_) | Nud::Unreachable(_) if releasing => {}
+        Nud::Stale(Stale { lifetime, .. }) | Nud::Unreachable(Unreachable { solicit: Solicit::Quiescent(lifetime), .. }) if releasing => {
+            *lifetime = Lifetime::Passed;
+        }
         Nud::Stale(_) | Nud::Unreachable(_) | Nud::Failed => {
             remove(i, cx, addr);
             route::refresh_active(i, cx);
@@ -428,8 +467,7 @@ pub(crate) fn leave(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) -> Optio
     if let Some((destination, _)) = held.frame.split_first_chunk_mut::<6>() {
         *destination = mac.0;
     }
-    let idle = matches!(n.state, Nud::Stale(_) | Nud::Unreachable(_)) && !n.state.releasing() && cx.timers.get(timer(cx, addr)).is_none();
-    if idle {
+    if n.state.idle() && !n.state.releasing() {
         remove(i, cx, addr);
         route::refresh_active(i, cx);
     }
@@ -504,7 +542,7 @@ fn stale(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr, mac: MacAddr) {
     let now = cx.now;
     let Some(n) = i.neighbours.get_mut(&addr) else { return };
     let released = inherit(cx, addr, n, mac);
-    n.state = Nud::Stale(Linked { mac, released });
+    n.state = Nud::Stale(Stale { mac, lifetime: Lifetime::Runs, released });
     cx.timers.arm(timer(cx, addr), now.after(IDLE_LIFETIME));
     route::refresh_active(i, cx);
 }
@@ -541,7 +579,7 @@ pub(crate) fn learn(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr, mac: Mac
         return;
     }
     let now = cx.now;
-    insert(i, addr, Nud::Stale(Linked { mac, released: Released::default() }), now, None);
+    insert(i, addr, Nud::Stale(Stale { mac, lifetime: Lifetime::Runs, released: Released::default() }), now, None);
     cx.timers.arm(timer(cx, addr), now.after(IDLE_LIFETIME));
 }
 
