@@ -19,5 +19,7 @@ Of the proc macros in the lockfiles of the five workspaces the host job builds,
 `wayland-scanner` alone reads a file it does not name, and no tracked source
 names it.
 
+Owner: the host cache (`src/cicache.rs`).
+
 Done when a warm read serves what a cold build serves for a path crate that
 expands a registry proc macro reading another package's file, with a test.

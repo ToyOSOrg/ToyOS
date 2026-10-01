@@ -15,5 +15,7 @@ outside the package that links with it and changes alone, a warm `host` run
 No flag the host job passes names a file: the tracked `.cargo/config.toml`
 files pass none, and its steps set no `RUSTFLAGS`.
 
+Owner: the host cache (`src/cicache.rs`).
+
 Done when a warm read refuses a flag that names a tracked file, or dates whole
 the package that links with it, with a test.
