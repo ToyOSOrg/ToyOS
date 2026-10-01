@@ -1,6 +1,6 @@
 # ToyOS
 
-An operating system built from scratch in Rust, held to a production-grade engineering bar — the bar is the changes, not yet the product. Modern x86-64 hardware (2020+), UEFI only; ARM64 planned — keep the architecture portable. The quality bar is shipping software: correct, efficient, minimal, zero silent debt. A tracked weakness is still a weakness: the honest answer about current state is "known, tracked, still true" — never "we have an issue for that."
+A general-purpose operating system built from scratch in Rust, held to a production-grade engineering bar — the bar is the changes, not yet the product. Modern x86-64 hardware (2020+), UEFI only; ARM64 planned — keep the architecture portable. Its test machines decide its feature set, never its design. The quality bar is shipping software: correct, efficient, minimal, zero silent debt. A tracked weakness is still a weakness: the honest answer about current state is "known, tracked, still true" — never "we have an issue for that."
 
 ## Where the rest of this lives
 
@@ -38,13 +38,13 @@ A subdirectory `CLAUDE.md` loads when a file in that subtree is `Read`, and not 
 
 > A snapshot, deliberately shallow — always read the code.
 
-**Kernel** — minimal; new additions are discussed and justified. Resource management, scheduling, process lifecycle, filesystem, device arbitration. 2 MB pages, demand paging, PIE binaries, full SMP.
+**Kernel** — takes on only what userland cannot. 2 MB pages, demand paging, PIE binaries, full SMP.
 
 **Userspace daemons** — compositor, netd, soundd, sshd, logd. Each claims a device or capability from the kernel and serves its function; crash one and the kernel is fine.
 
 **The log is a userland file.** `/system/bin/logd` reads records on a cursor and owns `/log`; the kernel keeps the record ring, the console and the panel, and writes no file. `SYS_FSYNC` reaches the device's cache flush because logd's durability claim rests on it.
 
-**Syscall ABI** — `toyos-abi/`: struct layouts, syscall numbers, typed wrappers; completely unstable, read the code. Never add or change a syscall without discussion; a deleted syscall's number is retired, never reused. `toyos/` builds on it with typed handles, IPC framing, ports, namespaces and `surface` — userland uses `toyos`, the kernel uses `toyos-abi` only.
+**Syscall ABI** — `toyos-abi/`: struct layouts, syscall numbers, typed wrappers; completely unstable. The cleanest, most sustainable ABI beats convenience; a removed number is free. `toyos/` builds on it with typed handles, IPC framing, ports, namespaces and `surface` — userland uses `toyos`, the kernel uses `toyos-abi` only.
 
 **Capabilities** — a process holds exactly what its parent moved into it, and among kernel objects there is nothing it can name to get more. No registry, no connect-by-name, no pid-as-authority: `/system/bin/init` builds every program's namespace and device claims from `system.toml` before spawning it, and a handle a process does not hold is a bug in that process — the kernel ends it rather than answering a word it can ignore. **Isolation is non-negotiable, and the filesystem is inside it**: a process names only the paths in the view its parent built for it, the unit of isolation is the program, and a user is the part of the tree a session was handed. Not yet true of files: the kernel still resolves every path against one machine-wide tree until the storage track's per-program views land.
 
@@ -60,7 +60,7 @@ A subdirectory `CLAUDE.md` loads when a file in that subtree is `Read`, and not 
 
 **Rust** and **QEMU** for development, on any host OS and architecture — the development machine is nothing special. Beside them, where no Rust tool does the job, only C or C++ tools ToyOS can one day build and run (Python, Perl, CMake, make), each declared. No binary for one host OS alone: a macOS binary is a hard no, and "only for tests" does not soften it. ToyOS's own code is Rust; it writes no Python, Perl or shell of its own. Only general and widely used crates — one that does *our* job we write ourselves, and a driver crate never; third-party crates are used as published, and a fork carries a change written to upstream quality and goes when upstream has it. No upstream pull requests are sent for now: ToyOS needs more attention and more contributors before upstream projects take it seriously, and upstreams tend to refuse AI-first projects and their contributions. A third-party source ToyOS cannot build without changing it is carried as an unmodified-source packaging mirror with a byte-identity gate, not as a fork. The north star is **self-hosting**: nothing — build, test, or verification — rests on a host binary. Ask of anything new: could this ever run inside ToyOS? Self-hosting means ToyOS rebuilds itself on ToyOS and reproduces the host's bytes; a bootstrap from source with no binary seed is out of scope.
 
-Vendor firmware a device verifies by its maker's signature may be shipped: pinned by version and hash, redistributable unmodified, recorded in `NOTICE`, and loaded only by that device's own driver through its IOMMU domain; it never executes on the CPU.
+Vendor firmware a device or CPU verifies by its maker's signature may be shipped: pinned by version and hash, redistributable unmodified, recorded in `NOTICE`. A device's is loaded only by its own driver through its IOMMU domain and never executes on the CPU; CPU microcode is loaded by the kernel.
 
 The bar is not yet the tree: `.claude/agents/reviewer.md`, "Arrivals", says where every host tool and every standing failure is declared. `NOTICE` names every committed third-party file with its hash, upstream and licence; an image carrying `DOOM1.WAD` may not be sold.
 
@@ -74,7 +74,7 @@ The testing rules live where they are enforced: the PR gate and the nightly in `
 - `cargo run` builds everything (toolchain, kernel, bootloader, userland, image) and launches QEMU; `--build-only` skips the launch. `cargo test` runs the QEMU harness; `cargo run -- --ci host` runs every host suite, as the PR gate's required `host` check does.
 - **Agents never run QEMU.** An agent verifies with host tests and builds the image at most; the orchestrator runs every guest test, one suite at a time.
 - **Both produce large output**: run them in the background and read the output file — `[N characters truncated]` means data was lost. A full boot is under a second; incremental builds finish in seconds.
-- **Leave the machine as you found it.** The development machine is shared: every agent stops what it started, removes the worktrees and scratch build output it no longer needs, and never leaves an emulator, a build or a watcher running.
+- **Leave the machine as you found it.** The development machine is shared: every agent stops what it started, killing only by PID and waiting out a build that holds the global lock, and removes the worktrees and scratch build output it no longer needs.
 
 ## Repository layout
 

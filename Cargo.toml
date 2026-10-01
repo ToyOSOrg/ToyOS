@@ -198,8 +198,7 @@ opt-level = 2
 # `opt-level = 0`. Nothing fail-fast is traded for it — `opt-level` does not
 # touch `debug-assertions`, which cargo still passes as `on` (checked with
 # `cargo build -p toyos-fat32 -v`), and rustc derives `overflow-checks` from
-# that. The pure crates' hostile-input tests keep both knobs that *found* the
-# two crafted-ELF kernel panics in `issues/`.
+# that.
 #
 # **One member depends on this line for correctness rather than for speed, and
 # its own manifest says so at length — this is the other half of that
@@ -218,10 +217,8 @@ opt-level = 3
 
 # The one profile every guest binary is built with. Optimised, because an
 # unoptimised guest mismeasures everything under TCG;
-# debug-assertions and overflow-checks on, because fail-fast beats speed here
-# and both crafted-ELF kernel panics in `issues/` were *found* by
-# an overflow check. `--release` would turn the last two off silently, so this
-# build system no longer has the flag.
+# debug-assertions and overflow-checks on, because fail-fast beats speed here.
+# `--release` would turn the last two off silently.
 #
 # It is declared here rather than in `toyos-ld/Cargo.toml` because cargo
 # ignores `[profile]` in a workspace member and that is one now. It is the only
