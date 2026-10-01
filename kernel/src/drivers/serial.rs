@@ -6,13 +6,13 @@
 //! burst: what the UART's transmitter takes at once; the publish of a
 //! transmit buffer to virtio-console, and each look for its completion, which
 //! the host takes at its own pace; a byte read. The panic path takes the
-//! registers alone, and bypasses them once they stay held. Nothing that holds
-//! a kernel lock formats here.
+//! registers alone, as a [`PanicUart`], and bypasses them once they stay held.
+//! Nothing that holds a kernel lock formats here.
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use crate::arch::IrqGuard;
 use crate::log;
-use super::serial_lock::{BackendLock, Held};
+use super::serial_lock::{self, BackendLock, Held, Seized};
 use crate::scheduler::Parkable;
 use crate::sleeplock::{SleepGuard, SleepLock};
 
@@ -80,13 +80,6 @@ impl BackendGuard {
         Self { _held: BACKEND.lock(), _irq: irq }
     }
 
-    /// Non-blocking acquire: `None` if another CPU already holds the backend.
-    pub fn try_lock() -> Option<Self> {
-        let irq = IrqGuard::close();
-        let held = BACKEND.try_lock()?;
-        Some(Self { _held: held, _irq: irq })
-    }
-
     /// Writes raw bytes with no escape stripping.
     pub fn write_raw(&mut self, bytes: &[u8]) {
         match backend() {
@@ -128,23 +121,85 @@ pub fn try_read_byte() -> Option<u8> {
 /// ~1s of spin, long enough for a live guard holder to release and short enough not to hang panic.
 const PANIC_LOCK_SPIN_LIMIT: u64 = 100_000_000;
 
-/// The registers for the panic path: a live burst holder is waited for, and
-/// one that never releases them is bypassed, which is `None`.
-pub fn panic_registers() -> Option<BackendGuard> {
-    for _ in 0..PANIC_LOCK_SPIN_LIMIT {
-        if let Some(g) = BackendGuard::try_lock() {
-            return Some(g);
+/// The console UART on a fatal path, and the one way a fatal path writes it.
+/// Never held across a `log!`: before `klogd` runs, a record drains inline,
+/// on this CPU, through these registers.
+pub struct PanicUart(Hold);
+
+enum Hold {
+    /// Taken from nobody, or from a holder that let go inside the bound.
+    Held(BackendGuard),
+    /// This CPU's own fatal path holds the registers, underneath this one.
+    Reentered { _irq: IrqGuard },
+    /// Another holder kept them through the whole bound, which was said.
+    Expired { _irq: IrqGuard },
+}
+
+/// What a fatal path that waited out another holder writes first.
+const WRITTEN_OVER: &[u8] =
+    b"\n[serial] the console registers stayed held through the bound; written over their holder\n";
+
+/// What a flush that found its own CPU's fatal path holding the registers writes first.
+const DRAINED_RAW: &[u8] =
+    b"\n[serial] this cpu's own fatal path held the console registers; drained raw\n";
+
+/// The registers for a fatal path: waited for while another holder may still
+/// let them go, and had at once where this CPU's fatal path holds them.
+pub fn panic_registers() -> PanicUart {
+    let irq = IrqGuard::close();
+    PanicUart(match BACKEND.seize(crate::arch::cpu::hardware_id(), PANIC_LOCK_SPIN_LIMIT) {
+        Seized::Taken(held) => Hold::Held(BackendGuard { _held: held, _irq: irq }),
+        Seized::Reentered => Hold::Reentered { _irq: irq },
+        Seized::Expired => {
+            uart_write_bytes(WRITTEN_OVER);
+            Hold::Expired { _irq: irq }
         }
-        core::hint::spin_loop();
+    })
+}
+
+impl PanicUart {
+    /// Straight to the UART, never virtio-console: no allocation, bounded per byte.
+    pub fn write(&mut self, bytes: &[u8]) {
+        uart_write_bytes(bytes);
     }
-    None
+
+    /// An address, formatted as `{:#018x}` to match the rest of the crash report.
+    pub fn hex(&mut self, v: u64) {
+        let mut out = [b'0'; 18];
+        out[1] = b'x';
+        for (i, byte) in out[2..].iter_mut().enumerate() {
+            let nibble = (v >> (60 - 4 * i)) as u8 & 0xF;
+            *byte = if nibble < 10 { b'0' + nibble } else { b'a' + nibble - 10 };
+        }
+        uart_write_bytes(&out);
+    }
+
+    /// A number, since the callers cannot format one.
+    pub fn dec(&mut self, mut v: u64) {
+        let mut digits = [0u8; 20];
+        let mut n = 0;
+        loop {
+            digits[n] = b'0' + (v % 10) as u8;
+            n += 1;
+            v /= 10;
+            if v == 0 || n == digits.len() {
+                break;
+            }
+        }
+        let mut out = [0u8; 20];
+        for i in 0..n {
+            out[i] = digits[n - 1 - i];
+        }
+        uart_write_bytes(&out[..n]);
+    }
 }
 
 /// Flushes pending logs on the panic path.
 ///
 /// Waits for a live guard holder to release before bypassing it — bypassing
 /// immediately would race its live ring/virtqueue mutation — and only
-/// bypasses a holder that never releases.
+/// bypasses a holder that never releases, or its own CPU's fatal path, which
+/// may have stopped inside a virtqueue publish.
 ///
 /// # Safety
 /// Panic context only: the bypass reads the drain position with no lock held.
@@ -154,9 +209,13 @@ pub unsafe fn panic_flush() {
     if !has_console() {
         return;
     }
-    if let Some(mut g) = panic_registers() {
-        crate::log::console::drain_locked(&mut g);
+    let mut uart = panic_registers();
+    if let Hold::Held(registers) = &mut uart.0 {
+        crate::log::console::drain_locked(registers);
         return;
+    }
+    if matches!(uart.0, Hold::Reentered { .. }) {
+        uart.write(DRAINED_RAW);
     }
     // Disables virtio-console first: a half-submitted TX queue would panic
     // recursively if a bypassing write reached it.
@@ -164,9 +223,10 @@ pub unsafe fn panic_flush() {
         return;
     }
     super::virtio_console::disable();
-    // SAFETY: the bounded wait above found no clean handoff; the holder is
-    // wedged and will not publish, so reading its position unlocked is safe.
-    unsafe { crate::log::console::drain_bypassed() };
+    // SAFETY: the registers are a wedged holder's or a fatal path's beneath
+    // this one, neither of which runs again to publish, so reading the
+    // position unlocked is safe.
+    unsafe { crate::log::console::drain_bypassed(&mut uart) };
 }
 
 /// Drains the ring before the machine powers off, so the tail of a shutdown
@@ -177,12 +237,9 @@ pub unsafe fn panic_flush() {
 /// nothing else runs. Losing the tail is better than not powering off, and
 /// the black box says it was lost, since the console cannot.
 pub fn flush_final() {
-    for _ in 0..PANIC_LOCK_SPIN_LIMIT {
-        if let Some(wire) = try_wire() {
-            crate::log::console::drain_all(&wire);
-            return;
-        }
-        core::hint::spin_loop();
+    if let Some(wire) = serial_lock::within(PANIC_LOCK_SPIN_LIMIT, try_wire) {
+        crate::log::console::drain_all(&wire);
+        return;
     }
     crate::blackbox::append(|lines| {
         let _ = writeln!(
@@ -386,39 +443,4 @@ fn uart_write_bytes(bytes: &[u8]) {
         }
         uart::write_byte(b);
     }
-}
-
-/// Writes straight to the UART, bypassing the ring, the lock and virtio-console: no allocation, bounded per byte.
-pub fn panic_raw(bytes: &[u8]) {
-    uart_write_bytes(bytes);
-}
-
-/// `panic_raw` for an address, formatted as `{:#018x}` to match the rest of the crash report.
-pub fn panic_raw_hex(v: u64) {
-    let mut out = [b'0'; 18];
-    out[1] = b'x';
-    for (i, byte) in out[2..].iter_mut().enumerate() {
-        let nibble = (v >> (60 - 4 * i)) as u8 & 0xF;
-        *byte = if nibble < 10 { b'0' + nibble } else { b'a' + nibble - 10 };
-    }
-    uart_write_bytes(&out);
-}
-
-/// `panic_raw` for a number, since the callers cannot format one.
-pub fn panic_raw_dec(mut v: u64) {
-    let mut digits = [0u8; 20];
-    let mut n = 0;
-    loop {
-        digits[n] = b'0' + (v % 10) as u8;
-        n += 1;
-        v /= 10;
-        if v == 0 || n == digits.len() {
-            break;
-        }
-    }
-    let mut out = [0u8; 20];
-    for i in 0..n {
-        out[i] = digits[n - 1 - i];
-    }
-    uart_write_bytes(&out[..n]);
 }

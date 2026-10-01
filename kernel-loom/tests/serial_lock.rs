@@ -1,4 +1,6 @@
-//! Loom: a lost `try_lock` on the console backend leaves its holder holding.
+//! Loom: a lost `try_lock` on the console backend leaves its holder holding,
+//! and a fatal path's `seize` gives up on a holder that never lets go but not
+//! on its own CPU's.
 //!
 //! The console drain takes the backend with `try_lock` from every CPU that
 //! logs, so a losing attempt is the common case beside another CPU's write.
@@ -7,7 +9,7 @@
 //! this file.
 #![cfg(feature = "loom")]
 
-use kernel_loom::serial_lock::BackendLock;
+use kernel_loom::serial_lock::{BackendLock, Seized};
 use loom::cell::UnsafeCell;
 use loom::sync::Arc;
 use loom::thread;
@@ -47,5 +49,56 @@ fn two_writers_never_overlap() {
         let other = thread::spawn(writer(lock.clone(), line.clone()));
         writer(lock, line)();
         other.join().unwrap();
+    });
+}
+
+/// Nothing on a fatal path waits for ever, and a holder that never lets go is
+/// what it would wait for.
+#[test]
+fn a_seize_gives_up_on_a_holder_that_never_lets_go() {
+    loom::model(|| {
+        let lock = BackendLock::new();
+        let _burst = lock.try_lock().expect("an unheld lock refused its first taker");
+        assert!(matches!(lock.seize(0, 3), Seized::Expired), "a seize took a lock its holder kept");
+    });
+}
+
+/// A fatal path entered on top of its own CPU's has the lock at once, and
+/// another CPU's still waits the holder out.
+#[test]
+fn a_seize_reenters_its_own_cpus_hold() {
+    loom::model(|| {
+        let lock = BackendLock::new();
+        let Seized::Taken(held) = lock.seize(1, 1) else { panic!("a free lock refused a seize") };
+        assert!(matches!(lock.seize(1, 1), Seized::Reentered), "a fatal path waited out its own CPU's hold");
+        assert!(matches!(lock.seize(2, 1), Seized::Expired), "a fatal path took another CPU's hold");
+        assert!(lock.try_lock().is_none(), "a burst took a fatal path's hold");
+        drop(held);
+        assert!(matches!(lock.seize(2, 1), Seized::Taken(_)), "a released lock stayed held");
+    });
+}
+
+/// A fatal path and a burst on two CPUs: whoever gets in writes alone.
+#[test]
+fn a_seize_and_a_burst_never_overlap() {
+    loom::model(|| {
+        let lock = Arc::new(BackendLock::new());
+        let line = Arc::new(UnsafeCell::new(0u32));
+        let burst = {
+            let (lock, line) = (lock.clone(), line.clone());
+            thread::spawn(move || {
+                if let Some(held) = lock.try_lock() {
+                    // SAFETY: the backend is held, so no other writer is in here.
+                    line.with_mut(|n| unsafe { *n += 1 });
+                    drop(held);
+                }
+            })
+        };
+        if let Seized::Taken(held) = lock.seize(0, 2) {
+            // SAFETY: as above.
+            line.with_mut(|n| unsafe { *n += 1 });
+            drop(held);
+        }
+        burst.join().unwrap();
     });
 }

@@ -3,9 +3,20 @@ use std::path::Path;
 use super::qemu::{self, BootOptions, QemuInstance};
 use super::serial::Serial;
 
-/// The last line of the report `nested_nmi` writes to the UART, and this boot's
-/// ready marker: the machine halts on it.
+/// The first and the last line of the report `nested_nmi` writes to the UART.
+const NESTED: &str = "[nmi] NESTED NMI on cpu ";
 const STOPS: &str = "[nmi]   the outer handler's frame is gone; the machine stops here.";
+
+/// The halt's flush ends on the reboot's arm line, which is this boot's ready
+/// marker.
+const ARMED: &str = "panic: rebooting in";
+
+/// What `kernel/src/drivers/serial.rs` writes when the report or the halt's
+/// flush could not have the console registers clean.
+pub const UNCLEAN: [&str; 2] = [
+    "[serial] the console registers stayed held through the bound",
+    "[serial] this cpu's own fatal path held the console registers",
+];
 
 pub fn nested_nmi_is_loud(test_config: &Path) -> Result<(), String> {
     let qemu = QemuInstance::boot_with_options(
@@ -19,28 +30,37 @@ pub fn nested_nmi_is_loud(test_config: &Path) -> Result<(), String> {
             // (`arch::idt::nmi`) — so on any other profile it lands on a UART
             // nothing here is reading.
             profile: qemu::Profile::Metal,
-            ready_marker: STOPS,
+            ready_marker: ARMED,
             ..Default::default()
         },
     );
     let serial = Serial::boot(&qemu);
-    let lines: Vec<&str> = serial.text().lines().collect();
-    // The capture ends at the marker.
-    let report = &lines[lines.len().saturating_sub(3)..];
-    if !whole(report) {
-        return Err(format!("the nested-NMI report reached the console spliced:\n{}", serial.text()));
-    }
-    eprintln!("  [nmi] nested: {}", report[0]);
+    let first = report(serial.text())?;
+    eprintln!("  [nmi] nested: {first}");
     Ok(())
 }
 
-/// `nested_nmi`'s three lines back to back, each exactly as it writes them: a
-/// burst another CPU put on the 16550 inside the report splits one.
+/// `nested_nmi`'s first line, once its three are whole and back to back and
+/// nothing in `capture` says the registers were not clean.
+pub fn report(capture: &str) -> Result<&str, String> {
+    let lines: Vec<&str> = capture.lines().collect();
+    let at = lines.iter().position(|l| l.starts_with(NESTED));
+    let Some(report) = at.and_then(|at| lines.get(at..at + 3)).filter(|r| whole(r)) else {
+        return Err(format!("the nested-NMI report reached the console spliced:\n{capture}"));
+    };
+    if let Some(unclean) = lines.iter().find(|l| UNCLEAN.iter().any(|said| l.contains(said))) {
+        return Err(format!("the report's registers were not clean: {unclean}\n{capture}"));
+    }
+    Ok(report[0])
+}
+
+/// `nested_nmi`'s three lines, each exactly as it writes them: a burst another
+/// CPU put on the 16550 inside the report splits one.
 fn whole(report: &[&str]) -> bool {
     let [first, registers, last] = report else { return false };
     let hex = |v: &str| v.len() == 18 && v.starts_with("0x") && v[2..].bytes().all(|b| b.is_ascii_hexdigit());
     first
-        .strip_prefix("[nmi] NESTED NMI on cpu ")
+        .strip_prefix(NESTED)
         .and_then(|rest| rest.strip_suffix(": a second NMI entered while IST2 was still in use."))
         .is_some_and(|cpu| cpu.parse::<u32>().is_ok())
         && registers
