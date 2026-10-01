@@ -24,9 +24,13 @@
 //! reds on a disagreement, and on a `/dev/kvm` that is present and does not
 //! open; `cargo run` only notes one, because a build must not stop for brew.
 
-use std::io::{BufRead, BufReader, Write};
+use std::ffi::OsString;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, ExitStatus, Stdio};
+use std::sync::mpsc::{Receiver, Sender};
+use std::sync::Mutex;
+use std::time::Instant;
 
 use crate::arch::Arch;
 use crate::{flags, release, sdkversion, sync};
@@ -184,14 +188,45 @@ pub(crate) struct Control {
     /// The model's package in the host workspace.
     pub(crate) krate: &'static str,
     pub(crate) feature: &'static str,
+    /// The test target the verdicts' tests are in; `None` is the library's own.
     test: Option<&'static str>,
     /// `false` is a case that catches its own panic and asserts on it: its
     /// teeth are a green run.
     must_red: bool,
     /// Every one must be in the output. An exit code alone would read a compile
     /// error as the model having teeth.
-    verdicts: &'static [&'static str],
+    verdicts: &'static [Verdict],
 }
+
+/// A line a control's run must print, and the test that prints it: the run is
+/// the tests its verdicts name and no other, so nothing it runs goes unread.
+#[derive(Clone, Copy)]
+enum Verdict {
+    /// The harness's own `<test> ... FAILED`.
+    Fails(&'static str),
+    /// The harness's own `<test> ... ok`.
+    Passes(&'static str),
+    /// A message the test prints itself.
+    Says { test: &'static str, message: &'static str },
+}
+
+impl Verdict {
+    fn test(self) -> &'static str {
+        match self {
+            Fails(test) | Passes(test) | Says { test, .. } => test,
+        }
+    }
+
+    fn line(self) -> String {
+        match self {
+            Fails(test) => format!("{test} ... FAILED"),
+            Passes(test) => format!("{test} ... ok"),
+            Says { message, .. } => message.to_string(),
+        }
+    }
+}
+
+use Verdict::{Fails, Passes, Says};
 
 const KERNEL_LOOM: &str = "kernel-loom";
 const SCHED_LOOM: &str = "toyos-sched-loom";
@@ -204,7 +239,7 @@ const fn red(
     krate: &'static str,
     feature: &'static str,
     test: Option<&'static str>,
-    verdicts: &'static [&'static str],
+    verdicts: &'static [Verdict],
 ) -> Control {
     Control { krate, feature, test, must_red: true, verdicts }
 }
@@ -213,106 +248,122 @@ const fn red(
 /// `every_model_control_is_run` holds this against the manifests.
 pub(crate) const CONTROLS: &[Control] = &[
     red(KERNEL_LOOM, "wake-fence-off", Some("log_wake"), &[
-        "a_commit_and_an_arm_cannot_both_miss ... FAILED",
+        Fails("a_commit_and_an_arm_cannot_both_miss"),
     ]),
     red(KERNEL_LOOM, "lock-acquire-off", Some("ticket_lock"), &[
-        "try_lock_observes_the_previous_owners_writes ... FAILED",
+        Fails("try_lock_observes_the_previous_owners_writes"),
     ]),
     red(KERNEL_LOOM, "seqlock-writer-fence-off", Some("panic_console_publish"), &[
-        "a_snapshot_is_one_publication_whole ... FAILED",
+        Fails("a_snapshot_is_one_publication_whole"),
     ]),
     red(KERNEL_LOOM, "serial-try-lock-then-some", Some("serial_lock"), &[
-        "a_lost_try_lock_leaves_the_lock_held ... FAILED",
-        "two_writers_never_overlap ... FAILED",
+        Fails("a_lost_try_lock_leaves_the_lock_held"),
+        Fails("two_writers_never_overlap"),
     ]),
     red(KERNEL_LOOM, "reap-raise-relaxed", Some("reap_gate"), &[
-        "a_claim_sees_the_enrolled_work ... FAILED",
+        Fails("a_claim_sees_the_enrolled_work"),
     ]),
     red(KERNEL_LOOM, "shootdown-serve-relaxed", Some("tlb_shootdown"), &[
-        "an_acknowledged_flush_postdates_the_page_table_write ... FAILED",
-        "one_serve_answers_two_concurrent_shootdowns ... FAILED",
+        Fails("an_acknowledged_flush_postdates_the_page_table_write"),
+        Fails("one_serve_answers_two_concurrent_shootdowns"),
     ]),
     red(KERNEL_LOOM, "roster-commit-relaxed", Some("smp_bringup"), &[
-        "a_committed_count_never_outruns_its_slot ... FAILED",
+        Fails("a_committed_count_never_outruns_its_slot"),
     ]),
     red(KERNEL_LOOM, "smp-ready-split", Some("smp_bringup"), &[
-        "a_released_machine_is_answering ... FAILED",
+        Fails("a_released_machine_is_answering"),
     ]),
     red(KERNEL_LOOM, "log-commit-release-off", Some("log_record"), &[
-        "a_committed_record_is_whole_or_absent ... FAILED",
-        "a_key_and_the_record_it_names_come_from_one_generation ... FAILED",
+        Fails("a_committed_record_is_whole_or_absent"),
+        Fails("a_key_and_the_record_it_names_come_from_one_generation"),
     ]),
     red(KERNEL_LOOM, "shard-publish-relaxed", Some("log_publish"), &[
-        "a_reader_that_finds_a_shard_finds_it_built ... FAILED",
+        Fails("a_reader_that_finds_a_shard_finds_it_built"),
     ]),
     red(KERNEL_LOOM, "log-ring-publish-relaxed", Some("log_ring"), &[
-        "a_published_record_is_whole_and_read_once ... FAILED",
-        "a_slot_is_reused_only_after_its_record_was_read ... FAILED",
-        "a_lane_publishes_whole_and_reuses_only_after_a_read ... FAILED",
+        Fails("a_published_record_is_whole_and_read_once"),
+        Fails("a_slot_is_reused_only_after_its_record_was_read"),
+        Fails("a_lane_publishes_whole_and_reuses_only_after_a_read"),
     ]),
     red(KERNEL_LOOM, "log-ring-tail-relaxed", Some("log_ring"), &[
-        "a_published_record_is_whole_and_read_once ... FAILED",
-        "a_slot_is_reused_only_after_its_record_was_read ... FAILED",
-        "a_lane_publishes_whole_and_reuses_only_after_a_read ... FAILED",
+        Fails("a_published_record_is_whole_and_read_once"),
+        Fails("a_slot_is_reused_only_after_its_record_was_read"),
+        Fails("a_lane_publishes_whole_and_reuses_only_after_a_read"),
     ]),
     red(KERNEL_LOOM, "log-ring-loads-swapped", Some("log_ring"), &[
-        "a_published_record_is_whole_and_read_once ... FAILED",
+        Fails("a_published_record_is_whole_and_read_once"),
     ]),
     red(KERNEL_LOOM, "poll-fire-load-store", Some("poll_once"), &[
-        "a_post_and_a_recheck_answer_a_poll_once ... FAILED",
-        "a_withdrawal_and_a_post_never_both_take_a_poll ... FAILED",
+        Fails("a_post_and_a_recheck_answer_a_poll_once"),
+        Fails("a_withdrawal_and_a_post_never_both_take_a_poll"),
     ]),
     red(KERNEL_LOOM, "sleeplock-acquire-off", Some("sleep_lock"), &[
-        "a_parking_contender_observes_the_holders_writes ... FAILED",
-        "two_holders_never_overlap ... FAILED",
+        Fails("a_parking_contender_observes_the_holders_writes"),
+        Fails("two_holders_never_overlap"),
     ]),
     red(KERNEL_LOOM, "device-irq-lossy", Some("device_irq"), &[
-        "every_message_is_counted_once ... FAILED",
+        Fails("every_message_is_counted_once"),
     ]),
     red(KERNEL_LOOM, "dump-report-relaxed", Some("dump_request"), &[
-        "a_request_filed_during_a_report_is_reported ... FAILED",
+        Fails("a_request_filed_during_a_report_is_reported"),
     ]),
     Control {
         krate: SCHED_LOOM,
         feature: "no-preempt-guard",
         test: Some("loom_mailbox"),
         must_red: false,
-        verdicts: &["preempted_producer_strands_suffix ... ok"],
+        verdicts: &[Passes("preempted_producer_strands_suffix")],
     },
     // A double panic aborts before the harness prints a `FAILED` line, so the
     // verdict is the first panic's own message.
-    red(SCHED_LOOM, "doorbell-kick-relaxed", Some("loom_sleep"), &[
-        "halted with 2 of 2 messages queued and no IPI in flight",
-    ]),
-    red(SCHED_LOOM, "push-fence-relaxed", Some("loom_push"), &["published and no push behind it"]),
+    red(SCHED_LOOM, "doorbell-kick-relaxed", Some("loom_sleep"), &[Says {
+        test: "a_halted_cpu_with_queued_work_was_kicked",
+        message: "halted with 2 of 2 messages queued and no IPI in flight",
+    }]),
+    red(SCHED_LOOM, "push-fence-relaxed", Some("loom_push"), &[Says {
+        test: "a_cpu_that_halts_without_seeing_the_surplus_was_pushed",
+        message: "published and no push behind it",
+    }]),
     // The watch's lost wake, staged: the waiter parks over a post it was flagged
-    // with. A double panic, so the verdict is the first one's message.
+    // with.
     red(SCHED_LOOM, "commit-ignores-notify", Some("loom_watch"), &[
-        "parked with the condition true and no wake owed: the post was lost",
-        "parked with both completions written and no wake owed: a ring's post was lost",
+        Says {
+            test: "a_post_racing_a_registration_leaves_nobody_parked",
+            message: "parked with the condition true and no wake owed: the post was lost",
+        },
+        Says {
+            test: "two_posts_through_one_rings_lock_lose_no_wake",
+            message: "parked with both completions written and no wake owed: a ring's post was \
+                      lost",
+        },
     ]),
     // The notify's flagged arm answering off a load: a second post reads the
     // word from before the waiter consumed the first flag.
-    red(SCHED_LOOM, "notify-flag-load-only", Some("loom_watch"), &[
-        "parked with both conditions true and no wake owed: a post answered off a load",
-    ]),
+    red(SCHED_LOOM, "notify-flag-load-only", Some("loom_watch"), &[Says {
+        test: "a_second_post_is_not_lost_to_a_flag_the_waiter_consumed",
+        message: "parked with both conditions true and no wake owed: a post answered off a load",
+    }]),
     // The stop's store-buffering pair with the gate's fences gone.
-    red(SCHED_LOOM, "gate-fence-off", Some("loom_watch"), &[
-        "the stop parked over a thread that had parked, and nothing posted it",
-    ]),
+    red(SCHED_LOOM, "gate-fence-off", Some("loom_watch"), &[Says {
+        test: "a_transition_racing_an_opening_gate_is_never_missed",
+        message: "the stop parked over a thread that had parked, and nothing posted it",
+    }]),
     // `kernel-loom`'s control, over the kernel's `Once` as the watch models'
     // ring entry.
     red(SCHED_LOOM, "poll-fire-load-store", Some("loom_watch"), &[
-        "a_poll_registered_racing_a_post_completes_exactly_once ... FAILED",
-        "a_poll_registered_racing_a_post_in_place_completes_exactly_once ... FAILED",
-        "a_poll_on_two_watches_racing_both_posts_completes_exactly_once ... FAILED",
+        Fails("a_poll_registered_racing_a_post_completes_exactly_once"),
+        Fails("a_poll_registered_racing_a_post_in_place_completes_exactly_once"),
+        Fails("a_poll_on_two_watches_racing_both_posts_completes_exactly_once"),
     ]),
     // The ring models' lost-completion half: the producer posts before it
     // stores the readiness its registrant rechecks.
     red(SCHED_LOOM, "fault-posted-before-it-is-set", Some("loom_watch"), &[
-        "a poll over a ready object was completed by neither",
-        "a_poll_registered_racing_a_post_completes_exactly_once ... FAILED",
-        "a_poll_registered_racing_a_post_in_place_completes_exactly_once ... FAILED",
+        Says {
+            test: "a_poll_registered_racing_a_post_completes_exactly_once",
+            message: "a poll over a ready object was completed by neither",
+        },
+        Fails("a_poll_registered_racing_a_post_completes_exactly_once"),
+        Fails("a_poll_registered_racing_a_post_in_place_completes_exactly_once"),
     ]),
     // Reproduces an open defect
     // (`issues/kernel/steal-probe-node-dies-with-its-victim.md`) rather than
@@ -322,51 +373,55 @@ pub(crate) const CONTROLS: &[Control] = &[
         feature: "victim-retires-mid-probe",
         test: Some("loom_mailbox"),
         must_red: false,
-        verdicts: &[
-            "caught the verdict: the victim retired with a probe still linked in its queue",
-        ],
+        verdicts: &[Says {
+            test: "a_probe_outstanding_when_its_victim_retires_is_never_reclaimed",
+            message: "caught the verdict: the victim retired with a probe still linked in its \
+                      queue",
+        }],
     },
     red(PROCLIFE, "mutate-spawn-skips-the-insert-recheck", None, &[
-        "a_published_exit_leaves_no_unretired_thread ... FAILED",
-        "a_kill_racing_a_spawn_leaves_no_unretired_thread ... FAILED",
+        Fails("interleave::tests::a_published_exit_leaves_no_unretired_thread"),
+        Fails("interleave::tests::a_kill_racing_a_spawn_leaves_no_unretired_thread"),
     ]),
     red(PROCLIFE, "mutate-claim-teardown-always-wins", None, &[
-        "an_exit_and_a_kill_never_both_tear_a_process_down ... FAILED",
+        Fails("interleave::tests::an_exit_and_a_kill_never_both_tear_a_process_down"),
     ]),
     red(PROCLIFE, "mutate-kill-waits-for-its-victims", None, &[
-        "two_processes_killing_each_other_both_end ... FAILED",
-        "a_kill_chain_of_three_ends ... FAILED",
+        Fails("interleave::tests::two_processes_killing_each_other_both_end"),
+        Fails("interleave::tests::a_kill_chain_of_three_ends"),
     ]),
     red(PROCLIFE, "mutate-first-out-tears-down", None, &[
-        "an_exit_and_a_kill_never_both_tear_a_process_down ... FAILED",
+        Fails("interleave::tests::an_exit_and_a_kill_never_both_tear_a_process_down"),
     ]),
     red(PROCLIFE, "mutate-join-collects-in-a-teardown", None, &[
-        "a_join_racing_the_kill_that_takes_its_target ... FAILED",
+        Fails("interleave::tests::a_join_racing_the_kill_that_takes_its_target"),
     ]),
     red(PROCLIFE, "mutate-last-out-leaves-before-its-teardown", None, &[
-        "the_last_one_out_is_in_its_process_until_its_teardown_is_done ... FAILED",
-        "only_the_thread_that_empties_a_claimed_process_tears_it_down ... FAILED",
+        Fails("interleave::tests::the_last_one_out_is_in_its_process_until_its_teardown_is_done"),
+        Fails("teardown::tests::only_the_thread_that_empties_a_claimed_process_tears_it_down"),
     ]),
     red(SCHED_SIM, "placement-ignores-staleness", Some("policy"), &[
-        "a_stopped_cpu_stops_taking_work ... FAILED",
+        Fails("a_stopped_cpu_stops_taking_work"),
     ]),
     // The block protocol's three: a completion lost to a session's end, a
     // completion given twice after a reset, and a loss nothing is written
     // again after.
     red(BLOCKRING, "mutate-session-end-forgets", None, &[
-        "every_request_is_answered_exactly_once ... FAILED",
+        Fails("model::tests::every_request_is_answered_exactly_once"),
     ]),
     red(BLOCKRING, "mutate-abort-keeps-inflight", None, &[
-        "every_request_is_answered_exactly_once ... FAILED",
+        Fails("model::tests::every_request_is_answered_exactly_once"),
     ]),
     red(BLOCKRING, "mutate-no-reissue-after-loss", None, &[
-        "what_a_flush_calls_durable_is_on_the_medium ... FAILED",
+        Fails("model::tests::what_a_flush_calls_durable_is_on_the_medium"),
     ]),
-    red(TRANSPORT, "publish-relaxed", Some("loom"), &["a_published_entry_is_read_whole ... FAILED"]),
-    red(TRANSPORT, "no-clamp", Some("loom"), &["a_hostile_producer_yields_entries_or_a_violation ... FAILED"]),
-    red(TRANSPORT, "end-keeps-inflight", None, &[
-        "an_end_answers_every_tag_once_and_a_late_completion_nothing ... FAILED",
-    ]),
+    red(TRANSPORT, "publish-relaxed", Some("loom"), &[Fails("a_published_entry_is_read_whole")]),
+    red(TRANSPORT, "no-clamp", Some("loom"), &[Fails(
+        "a_hostile_producer_yields_entries_or_a_violation",
+    )]),
+    red(TRANSPORT, "end-keeps-inflight", None, &[Fails(
+        "inflight::tests::an_end_answers_every_tag_once_and_a_late_completion_nothing",
+    )]),
 ];
 
 /// Whether a control's run showed its teeth.
@@ -380,8 +435,8 @@ fn judge_control(control: &Control, exited_green: bool, log: &str) -> Result<Str
             control.feature
         ));
     }
-    let missing: Vec<&str> =
-        control.verdicts.iter().copied().filter(|v| !log.contains(v)).collect();
+    let missing: Vec<String> =
+        control.verdicts.iter().map(|v| v.line()).filter(|v| !log.contains(v.as_str())).collect();
     if !missing.is_empty() {
         return Err(format!(
             "no verdict {missing:?}: this proved nothing, and whatever stopped the model is \
@@ -392,17 +447,168 @@ fn judge_control(control: &Control, exited_green: bool, log: &str) -> Result<Str
 }
 
 fn run_control(root: &Path, control: &Control) -> Result<String, String> {
-    let mut args = vec!["test", "-p", control.krate];
-    args.extend(["--features", control.feature]);
-    if let Some(test) = control.test {
-        args.extend(["--test", test]);
+    let mut args = vec!["test", "-p", control.krate, "--features", control.feature];
+    match control.test {
+        Some(test) => args.extend(["--test", test]),
+        None => args.push("--lib"),
     }
+    args.extend(["--", "--exact"]);
+    args.extend(control.verdicts.iter().map(|v| v.test()));
     if !control.must_red {
-        args.extend(["--", "--nocapture"]);
+        args.push("--nocapture");
     }
     let (green, log) = cargo_logged(root, &args)?;
     judge_control(control, green, &log)
 }
+
+/// The build system's own tests, the harness's checks and every host workspace
+/// member's, as many test executables at once as this host has CPUs, each from
+/// the moment cargo has linked it: cargo's own `test` runs one executable at a
+/// time, and the next build waits for the last of them.
+///
+/// The build system's two targets build after the workspace and with each
+/// other, in one invocation, so the workspace's tests run beside that build.
+/// The doctests are cargo's own pass, last, because it takes the build lock.
+fn host_tests(root: &Path) -> Result<String, String> {
+    let (send, receive) = std::sync::mpsc::channel();
+    let receive = Mutex::new(receive);
+    let failed = Mutex::new(Vec::new());
+    let width = std::thread::available_parallelism().expect("this host's CPU count").get();
+    let mut built = 0;
+    std::thread::scope(|s| {
+        for _ in 0..width {
+            s.spawn(|| run_tests(&receive, &failed));
+        }
+        let workspace = ["--workspace", "--exclude", "toyos-build"];
+        for args in [&workspace[..], &["--lib", "--test", "toyos-checks"]] {
+            match build_tests(root, args, &send) {
+                Ok(n) => built += n,
+                Err(why) => failed.lock().expect("no runner panics holding it").push(why),
+            }
+        }
+        let mut doctests = Command::new("cargo");
+        doctests
+            .args(["test", "--doc", "--workspace", "--exclude", "toyos-build"])
+            .current_dir(root);
+        send.send(TestRun { label: "the doctests".into(), command: doctests })
+            .expect("a runner holds the receiver until the sender is dropped");
+        drop(send);
+    });
+    let failed = failed.into_inner().expect("no runner panics holding it");
+    if failed.is_empty() {
+        Ok(format!("{built} test executables and the doctests, {width} at once, all green"))
+    } else {
+        Err(failed.join("; "))
+    }
+}
+
+/// A test executable, or cargo's doctest pass, and what the log calls it.
+struct TestRun {
+    label: String,
+    command: Command,
+}
+
+/// `cargo test --no-run <args>`, sending each test executable on to `runs` as
+/// cargo links it; how many it sent.
+///
+/// An executable runs where cargo would run it, in its package's directory, and
+/// `CARGO_MANIFEST_DIR` and `CARGO_MANIFEST_PATH` are its package's. The
+/// `CARGO_PKG_*` `cargo run` gave this driver are toyos-build's, so they are
+/// taken away rather than handed to another package's tests.
+fn build_tests(root: &Path, args: &[&str], runs: &Sender<TestRun>) -> Result<usize, String> {
+    let line = format!("cargo test --no-run {}", args.join(" "));
+    let mut cargo = Command::new("cargo")
+        .args(["test", "--no-run", "--message-format=json-render-diagnostics"])
+        .args(args)
+        .current_dir(root)
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("{line}: {e}"))?;
+    let inherited: Vec<OsString> = std::env::vars_os()
+        .map(|(key, _)| key)
+        .filter(|key| key.to_str().is_some_and(|k| k.starts_with("CARGO_PKG_")))
+        .collect();
+    let mut sent = 0;
+    let messages = BufReader::new(cargo.stdout.take().expect("piped above"));
+    for message in messages.lines() {
+        let message = message.map_err(|e| format!("{line}: {e}"))?;
+        let artifact: serde_json::Value = serde_json::from_str(&message)
+            .map_err(|e| format!("{line} printed {message:?}, not a message: {e}"))?;
+        if artifact["reason"] != "compiler-artifact" || artifact["profile"]["test"] != true {
+            continue;
+        }
+        let (Some(executable), Some(manifest), Some(source)) = (
+            artifact["executable"].as_str(),
+            artifact["manifest_path"].as_str(),
+            artifact["target"]["src_path"].as_str(),
+        ) else {
+            return Err(format!(
+                "{line}: a test artifact names no executable, manifest or source: {message}"
+            ));
+        };
+        let dir = Path::new(manifest).parent().expect("a manifest is a file in a directory");
+        let mut command = Command::new(executable);
+        command
+            .current_dir(dir)
+            .env("CARGO_MANIFEST_DIR", dir)
+            .env("CARGO_MANIFEST_PATH", manifest);
+        for key in &inherited {
+            command.env_remove(key);
+        }
+        let source = Path::new(source);
+        let label = source.strip_prefix(root).unwrap_or(source).display().to_string();
+        runs.send(TestRun { label, command })
+            .expect("a runner holds the receiver until the sender is dropped");
+        sent += 1;
+    }
+    let status = cargo.wait().map_err(|e| format!("{line}: {e}"))?;
+    if status.success() {
+        Ok(sent)
+    } else {
+        Err(format!("{line} exited {status}"))
+    }
+}
+
+/// Take runs off `runs` until it is closed, run each to its end, and print its
+/// output whole; a run that exits other than green goes in `failed`.
+fn run_tests(runs: &Mutex<Receiver<TestRun>>, failed: &Mutex<Vec<String>>) {
+    loop {
+        // Its own statement, so the lock is let go before the run, not after.
+        let next = runs.lock().expect("no runner panics holding it").recv();
+        let Ok(run) = next else { return };
+        let started = Instant::now();
+        let refusal = match run_whole(run.command) {
+            Ok((status, output)) => {
+                let took = started.elapsed().as_secs_f64();
+                let mut out = std::io::stdout().lock();
+                let _ = writeln!(out, "--- {}: {status} in {took:.1} s", run.label);
+                let _ = out.write_all(&output);
+                if status.success() {
+                    continue;
+                }
+                format!("{} exited {status}", run.label)
+            }
+            Err(why) => format!("{}: {why}", run.label),
+        };
+        failed.lock().expect("no runner panics holding it").push(refusal);
+    }
+}
+
+/// `command` to its end, both of its streams in one pipe, in the order it wrote
+/// them.
+fn run_whole(mut command: Command) -> Result<(ExitStatus, Vec<u8>), String> {
+    let (mut reader, writer) = std::io::pipe().map_err(|e| format!("pipe: {e}"))?;
+    command.stdout(writer.try_clone().map_err(|e| format!("pipe: {e}"))?).stderr(writer);
+    let mut child = command.spawn().map_err(|e| e.to_string())?;
+    // The command holds this process's ends of the pipe; the read below ends
+    // only once every writer has gone.
+    drop(command);
+    let mut output = Vec::new();
+    reader.read_to_end(&mut output).map_err(|e| format!("reading its output: {e}"))?;
+    let status = child.wait().map_err(|e| e.to_string())?;
+    Ok((status, output))
+}
+
 
 /// The merge queue's whole gate, and the nightly's host lane: every test that
 /// runs on the host and boots no guest. The build system's own tests, every
@@ -430,10 +636,8 @@ fn host(root: &Path) -> Vec<Step> {
     std::env::set_var("TMPDIR", tmp.path());
     let host_triple = crate::toolchain::host_triple();
     let mut steps = vec![
-        step("the build system", || cargo(root, &["test", "--lib"])),
-        step("the harness's own checks", || cargo(root, &["test", "--test", "toyos-checks"])),
-        step("the host workspace", || {
-            cargo(root, &["test", "--workspace", "--exclude", "toyos-build"])
+        step("the build system, the harness's own checks and the host workspace", || {
+            host_tests(root)
         }),
         step("the licences of what ships", || crate::licence::judge(root)),
     ];
@@ -821,16 +1025,17 @@ mod tests {
     #[test]
     fn a_control_is_judged_by_its_verdict_and_not_its_exit_alone() {
         let must_red = &CONTROLS[0];
-        let verdict = must_red.verdicts[0];
+        let verdict = must_red.verdicts[0].line();
         assert!(judge_control(must_red, false, &format!("test {verdict}\n")).is_ok());
-        assert!(judge_control(must_red, true, verdict).unwrap_err().contains("no teeth"));
+        assert!(judge_control(must_red, true, &verdict).unwrap_err().contains("no teeth"));
         assert!(judge_control(must_red, false, "error[E0425]: cannot find value")
             .unwrap_err()
             .contains("proved nothing"));
 
         let catches = CONTROLS.iter().find(|c| !c.must_red).expect("a self-catching case");
-        assert!(judge_control(catches, true, catches.verdicts[0]).is_ok());
-        assert!(judge_control(catches, false, catches.verdicts[0]).is_err());
+        let verdict = catches.verdicts[0].line();
+        assert!(judge_control(catches, true, &verdict).is_ok());
+        assert!(judge_control(catches, false, &verdict).is_err());
         assert!(judge_control(catches, true, "").is_err());
     }
 
