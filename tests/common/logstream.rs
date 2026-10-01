@@ -70,10 +70,25 @@ pub fn stage_armed(
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<Staged, String> {
     let config = compile::repo_root().join(config);
-    let bytes = qemu::build_boot_image(&config, c_bins, rust_bins, params);
+    write_staged(name, &qemu::build_boot_image(&config, c_bins, rust_bins, params))
+}
+
+/// [`stage`] on the test kernel with nothing armed
+/// ([`qemu::build_test_kernel_image`]).
+pub fn stage_on_test_kernel(
+    config: &str,
+    name: &str,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<Staged, String> {
+    let config = compile::repo_root().join(config);
+    write_staged(name, &qemu::build_test_kernel_image(&config, c_bins, rust_bins))
+}
+
+fn write_staged(name: &str, bytes: &[u8]) -> Result<Staged, String> {
     let image = super::lane::dir().join(format!("{name}.img"));
-    std::fs::write(&image, &bytes).map_err(|e| format!("write {}: {e}", image.display()))?;
-    let (start, len) = volumes::log_extent(&bytes, &image)?;
+    std::fs::write(&image, bytes).map_err(|e| format!("write {}: {e}", image.display()))?;
+    let (start, len) = volumes::log_extent(bytes, &image)?;
     Ok(Staged { image, start, len })
 }
 

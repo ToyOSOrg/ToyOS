@@ -621,10 +621,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         },
         SYS_DEVICE_REG_READ => sys_device_reg(RawHandle(a1 as u32), a2, a3, None),
         SYS_DEVICE_REG_WRITE => sys_device_reg(RawHandle(a1 as u32), a2, a3, Some(a4)),
-        _ => {
-            crate::log!("syscall {num} is unknown");
-            SyscallError::InvalidArgument.to_u64()
-        }
+        _ => SyscallError::InvalidArgument.to_u64(),
     } })();
 
     // The first of the object layer's three drain sites. Here, not at the drop that

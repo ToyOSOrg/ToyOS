@@ -3,28 +3,15 @@
 //! program's ring before the kernel's records, so only the stamps order them.
 //! `log_program_line_after_its_records` runs it.
 
-/// Three times what `logd` asks of the ring at once (`BATCH`, 64).
-const RECORDS: usize = 192;
+use toyos_abi::syscall::debug_action::LOG_PATTERNED;
 
-/// No syscall's number: each call is refused and is one kernel record naming
-/// it (`kernel/src/syscall/dispatch.rs`'s unknown-number arm).
-const UNKNOWN: u64 = u64::MAX;
+/// Three times what `logd` asks of the ring at once (`BATCH`, 64).
+const RECORDS: u64 = 192;
 
 fn main() {
-    for _ in 0..RECORDS {
-        let ret: u64;
-        // SAFETY: a register-only `syscall` whose number the kernel refuses
-        // without reading any argument; nothing in this process is touched.
-        unsafe {
-            core::arch::asm!(
-                "syscall",
-                in("rdi") UNKNOWN,
-                lateout("rax") ret,
-                out("rcx") _,
-                out("r11") _,
-            );
-        }
-        assert_ne!(ret, 0, "syscall {UNKNOWN} answered as if it were live");
+    for index in 0..RECORDS {
+        let answer = toyos_abi::syscall::debug_with(LOG_PATTERNED, index);
+        assert_eq!(answer, 0, "SYS_DEBUG LOG_PATTERNED answered {answer:#x} at index {index}");
     }
     println!("log hold: said after {RECORDS} records");
 }

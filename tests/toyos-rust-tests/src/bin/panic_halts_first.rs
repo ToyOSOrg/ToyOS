@@ -7,20 +7,15 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-#[path = "../arch/mod.rs"]
-mod arch;
+use toyos_abi::syscall::debug_action::{FATAL_HALT, LOG_PATTERNED};
 
-/// No syscall's number: each call is refused and is one kernel record naming
-/// it.
-const UNKNOWN: u64 = u64::MAX;
 /// One per other CPU of the boot that runs this.
 const SIBLINGS: usize = 3;
 
-fn unknown() {
-    // SAFETY: no syscall's number, which the kernel refuses without reading any
-    // argument; nothing in this process is touched.
-    let ret = unsafe { arch::bare_syscall(UNKNOWN) };
-    assert_ne!(ret, 0, "syscall {UNKNOWN} answered as if it were live");
+/// One kernel record, `logstorm t=0 i=0 …`.
+fn record() {
+    let answer = toyos_abi::syscall::debug_with(LOG_PATTERNED, 0);
+    assert_eq!(answer, 0, "SYS_DEBUG LOG_PATTERNED answered {answer:#x}");
 }
 
 fn main() {
@@ -28,10 +23,10 @@ fn main() {
     for _ in 0..SIBLINGS {
         let started = Arc::clone(&started);
         std::thread::spawn(move || {
-            unknown();
+            record();
             started.fetch_add(1, Ordering::Release);
             loop {
-                unknown();
+                record();
             }
         });
     }
@@ -40,7 +35,7 @@ fn main() {
     while started.load(Ordering::Acquire) < SIBLINGS {
         std::hint::spin_loop();
     }
-    let rc = toyos_abi::syscall::debug(toyos_abi::syscall::debug_action::FATAL_HALT);
+    let rc = toyos_abi::syscall::debug(FATAL_HALT);
     eprintln!("ERROR: SYS_DEBUG FATAL_HALT returned {rc:#x}");
     std::process::exit(1);
 }

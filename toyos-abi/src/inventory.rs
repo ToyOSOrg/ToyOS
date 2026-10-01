@@ -593,7 +593,8 @@ mod tests {
             holder: Holder { pid: 1, name: name("x") },
         })
         .encode();
-        for class in [3u64, 4, 1 << 40] {
+        let past_the_last = DeviceType::ALL.iter().map(|&class| class as u64).max().expect("a class") + 1;
+        for class in [past_the_last, 1 << 40] {
             raw.0[4..12].copy_from_slice(&class.to_le_bytes());
             assert_eq!(Record::decode(&raw), Err(Undecodable::Variant { at: 4, value: class }));
         }

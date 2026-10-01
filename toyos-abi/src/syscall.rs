@@ -223,18 +223,6 @@ pub const SYS_DEVICE_CLAIM: u64 = 111;
 /// [`Rights::RT`]: crate::handle::Rights::RT
 pub const SYS_RT_ENTER: u64 = 112;
 
-// Number 113 is **reserved, not free**: it is held for `SYS_PORT_REARM`,
-// which would mint a fresh `Acceptor` for a port whose server died and is
-// the one thing that would make any `serves` daemon restartable. Nothing
-// needs it yet, so nothing is built.
-//
-// 115 is likewise held, for `SYS_SLEEP_UNTIL`, which would replace
-// `SYS_NANOSLEEP`.
-//
-// **Both are recorded here and nowhere else**, because this file is where an
-// agent allocating a number looks and a reservation nobody reads is not a
-// reservation.
-
 /// Copy kernel log records into a caller's buffer, advancing a cursor the
 /// caller owns. Gated by [`Rights::LOG`] on a `SysCap`. See [`log_read`] and
 /// [`crate::log`].

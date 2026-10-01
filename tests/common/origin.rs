@@ -117,7 +117,8 @@ fn one_job(
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(qemu::TestResult, String), String> {
-    one_job_armed(config, name, job, &[], timeout, c_bins, rust_bins)
+    let staged = logstream::stage(config, name, c_bins, rust_bins)?;
+    staged_job(config, &staged, &[], job, timeout, c_bins, rust_bins)
 }
 
 /// [`one_job`], its kernel armed with `params`.
@@ -131,6 +132,19 @@ fn one_job_armed(
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(qemu::TestResult, String), String> {
     let staged = logstream::stage_armed(config, name, params, c_bins, rust_bins)?;
+    staged_job(config, &staged, params, job, timeout, c_bins, rust_bins)
+}
+
+/// [`one_job`] on `staged`, armed with the `params` it was built with.
+fn staged_job(
+    config: &str,
+    staged: &logstream::Staged,
+    params: &'static [&'static str],
+    job: &str,
+    timeout: Duration,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(qemu::TestResult, String), String> {
     let options = BootOptions {
         boot_image: Some(qemu::Staged::Written(staged.image.clone())),
         kernel_params: params,
@@ -140,7 +154,7 @@ fn one_job_armed(
     let mut guest = QemuInstance::boot_with_options(&config, c_bins, rust_bins, options);
     let mut console = guest.boot_log().to_string();
     let ran = guest.run_test(job, timeout);
-    let file = logstream::shut_down(guest, &mut console, &staged)?;
+    let file = logstream::shut_down(guest, &mut console, staged)?;
     let _ = std::fs::remove_file(&staged.image);
     Ok((ran, file.concat()))
 }
@@ -495,8 +509,9 @@ pub fn keeps_the_owners_slots(rust_bins: &[(String, Vec<u8>)]) -> Result<(), Str
 const HOLD_JOB: &str = "test_rs_log_hold";
 const HOLD_LINE: &str = "log hold: said after 192 records";
 const HOLD_RECORDS: usize = 192;
-/// The kernel's record of each of those.
-const UNKNOWN: &str = "syscall 18446744073709551615 is unknown";
+/// The kernel's record of each of those, `logstorm t=0 i=<index> …` for index
+/// 0 up to [`HOLD_RECORDS`].
+const PATTERNED: &str = "logstorm t=0 i=";
 
 /// **A program's line lands between the records written before and after
 /// it.** `test_rs_log_hold` has the kernel write three batches of records,
@@ -505,8 +520,10 @@ const UNKNOWN: &str = "syscall 18446744073709551615 is unknown";
 /// last of them are, and only the stamp each was written with puts it after
 /// them all in `/log` — and before the kernel's record of its exit.
 pub fn after_records(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
-    let (ran, log) =
-        one_job("tests/testcases", "log-hold", HOLD_JOB, Duration::from_secs(60), c_bins, rust_bins)?;
+    const CONFIG: &str = "tests/testcases";
+    // The test kernel: the job's records are `SYS_DEBUG`'s.
+    let staged = logstream::stage_on_test_kernel(CONFIG, "log-hold", c_bins, rust_bins)?;
+    let (ran, log) = staged_job(CONFIG, &staged, &[], HOLD_JOB, Duration::from_secs(60), c_bins, rust_bins)?;
     if ran.exit_code != Some(0) {
         return Err(format!("{HOLD_JOB} exited {:?}\n{}", ran.exit_code, ran.stdout));
     }
@@ -515,16 +532,23 @@ pub fn after_records(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>
         .iter()
         .position(|l| toyos_logstream::program_line(l).is_some_and(|s| s.tag == RUNNER && s.text == HOLD_LINE))
         .ok_or_else(|| format!("/log carries no {HOLD_LINE:?} under {RUNNER:?}"))?;
-    let records: Vec<usize> = lines
+    // Each record's line in /log, and the index it carries.
+    let records: Vec<(usize, &str)> = lines
         .iter()
         .enumerate()
-        .filter(|(_, l)| !toyos_logstream::is_program_line(l) && l.contains(UNKNOWN))
-        .map(|(i, _)| i)
+        .filter(|(_, l)| !toyos_logstream::is_program_line(l))
+        .filter_map(|(at, l)| Some((at, l.split_once(PATTERNED)?.1.split(' ').next()?)))
         .collect();
     if records.len() != HOLD_RECORDS {
-        return Err(format!("/log carries {} of the job's {HOLD_RECORDS} records", records.len()));
+        return Err(format!("/log carries {} records for the job's {HOLD_RECORDS}", records.len()));
     }
-    let after = records.iter().filter(|&&i| i > said).count();
+    for index in (0..HOLD_RECORDS).map(|i| i.to_string()) {
+        let times = records.iter().filter(|(_, i)| *i == index).count();
+        if times != 1 {
+            return Err(format!("/log carries the record {PATTERNED}{index} {times} times"));
+        }
+    }
+    let after = records.iter().filter(|&&(at, _)| at > said).count();
     if after > 0 {
         return Err(format!(
             "{after} of the {HOLD_RECORDS} records written before {HOLD_LINE:?} are after it in \

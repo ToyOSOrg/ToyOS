@@ -2559,6 +2559,17 @@ pub fn build_boot_image_carrying(
     build_boot_image_with(SUITE_ARCH, test_crate, c_tests, rust_tests, staged, kernel, kernel_params, false)
 }
 
+/// [`build_boot_image`] on [`toyos_build::build::TEST_KERNEL`] with nothing
+/// armed: for a staged boot whose program calls `SYS_DEBUG`, which no
+/// parameter asks for.
+pub fn build_test_kernel_image(
+    test_crate: &Path,
+    c_tests: &[(String, Vec<u8>)],
+    rust_tests: &[(String, Vec<u8>)],
+) -> Vec<u8> {
+    build_boot_image_with(SUITE_ARCH, test_crate, c_tests, rust_tests, &[], toyos_build::build::TEST_KERNEL, &[], false)
+}
+
 /// Refuse a staged [`BootOptions::boot_image`] that is not the image this
 /// boot's other options describe.
 ///

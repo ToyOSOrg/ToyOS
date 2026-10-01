@@ -1,12 +1,5 @@
 //! The kernel's live-object count, per kind.
 //!
-//! **A total hides a leak.** Every leak assertion in the test estate used to be
-//! against one machine-wide number, where an object of one kind that is never
-//! released is invisible behind ordinary churn in another — and six of the
-//! thirteen kinds (`File`, `Device`, `Acceptor`, `Connection`, `IoUring`,
-//! `Console`) were exercised by no census assertion at all, which is where
-//! three of this branch's defects lived.
-//!
 //! Two readings and a comparison, never one reading against a constant: an
 //! object released by another process is dropped from the deferred queue on
 //! whichever CPU drains next, so a single sample can be high by whatever has
