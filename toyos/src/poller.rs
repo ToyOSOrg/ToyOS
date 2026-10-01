@@ -808,12 +808,12 @@ mod tests {
         let (mut kernel, poller) = pair(1);
         poller.watch_raw(H, READABLE, 7);
         kernel.submit();
-        assert!(drained(&poller).is_empty());
+        assert_eq!(drained(&poller), [0u64; 0]);
         kernel.arrive(H);
         kernel.take(H);
         poller.watch_raw(H, READABLE, 7);
         kernel.submit();
-        assert!(drained(&poller).is_empty());
+        assert_eq!(drained(&poller), [0u64; 0]);
         kernel.arrive(H);
         assert_eq!(drained(&poller), [7]);
     }
@@ -856,7 +856,7 @@ mod tests {
         poller.watch_raw(H, READABLE, 3);
         poller.watch_raw(G, READABLE, 4);
         kernel.submit();
-        assert!(drained(&poller).is_empty());
+        assert_eq!(drained(&poller), [0u64; 0]);
         poller.watch_raw(G, READABLE, 4);
         kernel.submit();
         kernel.arrive(H);
