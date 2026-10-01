@@ -14,7 +14,9 @@
 //! answers.
 //!
 //! **The other arms.** A `MANAGE`-only handle is no place, and init refuses a
-//! launch whose place is a pipe and answers the launches after it. init starts a
+//! launch whose place is a pipe and answers the launches after it. A launch
+//! carries a copy of its place, so std refuses one under a place this process
+//! cannot duplicate, rather than spawning it directly. init starts a
 //! child only by a launch, so std refuses `under_init` for a program no row
 //! declares and for a command carrying an extra slot. A chain alternating spawn
 //! and launch — each link launches a shell, and the shell spawns the next link
@@ -93,6 +95,7 @@ fn test() {
     }
     a_manage_only_handle_is_no_place();
     a_pipe_is_no_place();
+    a_place_without_dup_is_refused();
     init_is_asked_only_by_a_launch();
     a_chain_stops_at_max_depth_and_dies_whole();
     a_detached_program_outlives_its_shell();
@@ -272,6 +275,24 @@ fn a_pipe_is_no_place() {
         Err(_) => panic!("the launcher did not answer a launch whose place is a pipe"),
     }
     println!("  a pipe is no place: init refused the launch");
+}
+
+/// This process's `self` narrowed to `WRITE`: a place the kernel takes and a
+/// launch cannot carry. The duplicate's refusal is the spawn's, and nothing
+/// starts in place of the launch.
+fn a_place_without_dup_is_refused() {
+    let place = syscall::dup_narrowed(endow::this_process().as_handle(), Rights::WRITE)
+        .expect("a WRITE-only copy of this process's self");
+    match Command::new(HELD).under(place.0).stdin(Stdio::null()).spawn() {
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {}
+        Err(e) => panic!("a launch under a place without DUP was refused as {e:?}, not PermissionDenied"),
+        Ok(mut child) => {
+            let _ = child.kill();
+            panic!("a launch under a place without DUP started its child directly");
+        }
+    }
+    syscall::close(place);
+    println!("  a place without DUP: the launch is refused, and nothing starts");
 }
 
 /// init is reached only by a launch: std refuses `under_init` for what the
