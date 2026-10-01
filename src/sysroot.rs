@@ -351,7 +351,7 @@ fn build(root: &Path, rust_dir: &Path, compiler: &Compiler, fork: &Path, key: &s
         }
         let _ = fs::remove_dir_all(&libc_target);
         let llvm = crate::llvm::held(root, rust_dir, fork);
-        let ninja = crate::libcxx::ninja(root);
+        let ninja = crate::n2::ninja(root);
         for arch in Arch::ALL {
             let scratch = dir.with_extension(format!("libcxx-{}", arch.name()));
             let c = crate::clang::CSysroot::of(partial, arch);
