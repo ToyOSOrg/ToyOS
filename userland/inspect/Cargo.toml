@@ -8,3 +8,6 @@ license = "MIT OR Apache-2.0"
 toyos = { path = "../../toyos" }
 toyos-abi = { path = "../../toyos-abi" }
 toyos-inspect = { path = "../../toyos-inspect" }
+
+[package.metadata.toyos.host]
+exempt.manages = "ToyOS's machine inventory: what every owner's port and the kernel's `inventory` SysCap report"
