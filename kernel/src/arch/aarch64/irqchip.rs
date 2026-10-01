@@ -41,7 +41,7 @@ pub(super) enum Intid {
     /// Stops a CPU for good: [`stop_other_cpus`]'s.
     Halt,
     /// What `irq-storm` floods this CPU with.
-    Storm = 3,
+    Storm,
     Hda,
     VirtioSound,
 }
