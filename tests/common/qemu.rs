@@ -153,25 +153,11 @@ pub fn boot_census() -> (u32, u32, Vec<String>) {
 /// list.
 ///
 /// `""` is what an image ships. [`toyos_build::build::TEST_KERNEL`] is every
-/// actuator compiled in, armed by boot parameter. `fpu-save-nothing` is the one
-/// actuator that could not become a parameter — it takes the `fxsave64` out of
-/// `arch::entry`'s `naked_asm!` bracket, which is the path its own gate is
-/// about.
-///
-/// [`toyos_build::build::SCHED_CHECK_KERNEL`] is the fourth, and it is the one
-/// this list's own warning was written about: an entry here is a decision to pay
-/// a kernel build per suite run forever, made in the shared declaration rather
-/// than by adding a `kernel_features` to a `BootOptions`. It was made because
-/// the alternative had already been paid for and delivered nothing —
-/// `kernel/Cargo.toml` has forwarded `sched-check = ["toyos-sched/check"]` since
-/// the check build was written, and nothing in `src/` or `tests/` ever asked for
-/// it, so `cpu::MAX_PASS_NS`, the pass-cost recorder and `invariants::check_cpu`
-/// were compiled by no CI run at all. `sched_check_build` is the test that asks.
-///
-/// A fifth entry is that decision again, and it gets this paragraph's argument
-/// made afresh. Interactive debug mode is separate: it builds
-/// [`toyos_build::build::DEBUG_KERNEL_BUILD`] and returns before the suite.
-pub const DECLARED_KERNEL_BUILDS: [&str; 5] =
+/// actuator compiled in, armed by boot parameter. An entry here is a decision
+/// to pay a kernel build per suite run forever. Interactive debug mode is
+/// separate: it builds [`toyos_build::build::DEBUG_KERNEL_BUILD`] and returns
+/// before the suite.
+pub const DECLARED_KERNEL_BUILDS: [&str; 2] =
     toyos_build::build::TEST_SUITE_KERNEL_BUILDS;
 
 /// How many guests the phase now running may have up at once.
@@ -958,21 +944,12 @@ pub struct BootOptions {
     /// because screen tests boot their own QEMU and several may exist at once.
     pub qmp: bool,
     /// Which of [`DECLARED_KERNEL_BUILDS`] this boot wants, and empty for the
-    /// kernel an image ships. Only a test whose subject *is* a build sets it —
-    /// `fpu-save-nothing`, and the `SYS_DEBUG` boot; everything else names an
-    /// actuator in [`BootOptions::kernel_params`] instead.
-    ///
-    /// It decides what this call *builds*, so it may not be set beside a
-    /// [`BootOptions::boot_image`], which is what the guest boots instead —
-    /// see [`refuse_a_staged_image_this_boot_did_not_ask_for`].
+    /// kernel an image ships. Only a test whose subject *is* a build sets it;
+    /// everything else names an actuator in [`BootOptions::kernel_params`]
+    /// instead.
     pub kernel_features: &'static [&'static str],
     /// The actuators this boot arms, by the names `kernel/src/actuator.rs`
     /// declares. Non-empty selects the test kernel, which carries all of them.
-    ///
-    /// **The arming is in the image, not in this field.** The names are written
-    /// onto the ESP the build produces, so a boot that also supplies a
-    /// [`BootOptions::boot_image`] arms whatever *that* image was built with:
-    /// the two must agree and are refused when they do not.
     pub kernel_params: &'static [&'static str],
     /// Take the 16550 away, leaving the framebuffer as the guest's only
     /// channel out. Only [`Profile::Metal`] may set it -- the others carry

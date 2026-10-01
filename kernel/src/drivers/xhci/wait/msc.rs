@@ -115,12 +115,6 @@ pub struct MscDevice {
 }
 
 impl MscDevice {
-    /// Whether the driver will still speak to this device — distinct from
-    /// `blocks > 0`, which survives a failure.
-    #[cfg(feature = "boot-actuators")]
-    pub fn online(&self) -> bool {
-        !self.failed
-    }
 
     /// Whether this device has answered SYNCHRONIZE CACHE with INVALID COMMAND
     /// OPERATION CODE, which is what makes a flush's `Ok(())` mean "there was
@@ -167,8 +161,6 @@ impl MscDevice {
     fn wrote(&mut self, write: bool) {
         if write {
             self.debt.wrote();
-            #[cfg(feature = "boot-actuators")]
-            transport_break::wrote();
         }
     }
 
@@ -302,45 +294,12 @@ mod transport_break {
 
     static UNSPENT: AtomicBool = AtomicBool::new(true);
     static ARMED: AtomicBool = AtomicBool::new(false);
-    /// A write was reported complete, and then a SYNCHRONIZE CACHE succeeded
-    /// with none since: kept here and not read off the driver's own debt, so
-    /// `usb-transport-break-flushed` stages what it says whatever that debt
-    /// holds.
-    static WROTE: AtomicBool = AtomicBool::new(false);
-    static FLUSHED: AtomicBool = AtomicBool::new(false);
 
-    /// What the break `usb-transport-break-flushed` stages says before it.
-    pub const AFTER_A_FLUSH: &str = "breaks next (usb-transport-break-flushed): a write was \
-        reported complete and a SYNCHRONIZE CACHE succeeded after it, with no write since";
-
-    /// A write was reported complete.
-    pub fn wrote() {
-        WROTE.store(true, Ordering::Relaxed);
-        FLUSHED.store(false, Ordering::Relaxed);
-    }
-
-    /// A SYNCHRONIZE CACHE succeeded.
-    pub fn flushed() {
-        FLUSHED.store(WROTE.load(Ordering::Relaxed), Ordering::Relaxed);
-    }
-
-    /// Called where the driver is about to run a WRITE(10) data phase; `owed`
-    /// is whether its device owes a flush (`MscDevice::owes_a_flush`), which
-    /// `usb-transport-break-owed` waits for.
-    pub fn arm(owed: bool) {
-        let after_a_flush =
-            crate::actuator::usb_transport_break_flushed() && FLUSHED.load(Ordering::Relaxed);
-        let wanted = crate::actuator::usb_transport_break()
-            || (crate::actuator::usb_transport_break_owed() && owed)
-            || after_a_flush;
-        if !wanted {
-            return;
+    /// Called where the driver is about to run a WRITE(10) data phase.
+    pub fn arm() {
+        if crate::actuator::usb_transport_break() {
+            ARMED.store(UNSPENT.swap(false, Ordering::Relaxed), Ordering::Relaxed);
         }
-        let armed = UNSPENT.swap(false, Ordering::Relaxed);
-        if armed && after_a_flush {
-            crate::log!("usb-storage: the WRITE(10) going out {AFTER_A_FLUSH}");
-        }
-        ARMED.store(armed, Ordering::Relaxed);
     }
 
     /// Called after the doorbell, where the wait would otherwise begin.
@@ -349,269 +308,8 @@ mod transport_break {
     }
 }
 
-/// Stop every CPU inside one WRITE(10), at whichever of its three phases was
-/// staged.
-///
-/// **The state a boot that hangs during stick I/O leaves the device in**, and
-/// the one thing no ordinary boot reaches: a machine wedged here is ended by
-/// the boot deadline alone, and what the reset then does to a device holding
-/// half a command is what `stop::settle_commands` exists to decide.
-///
-/// **Which phase is the whole question, so the caller names one.** The device
-/// sees three different things — a CBW with no data coming, a data phase queued
-/// and not rung for, and data it has taken with nothing asking for its CSW —
-/// and only the machine can say which of them it does not come back from.
-///
-/// Staged rather than waited for, because a shutdown reaches its sync with
-/// nothing dirty on most boots: the write this is taken inside is one
-/// `usb_gate::wedge_inside_a_write` issues for it.
-#[cfg(feature = "boot-actuators")]
-pub(in crate::drivers::xhci) mod mid_write {
-    use core::sync::atomic::{AtomicU8, Ordering};
-
-    use toyos_xhci::bot::Phase;
-
-    /// [`Phase::code`] of the phase to stop at, or `Phase::Closed`'s — which no
-    /// call site passes — for a boot that staged none.
-    static AT: AtomicU8 = AtomicU8::new(0);
-
-    /// Called immediately before the write this wedge is taken inside.
-    pub fn arm(at: Phase) {
-        AT.store(at.code(), Ordering::Relaxed);
-    }
-
-    /// Called at each of the three phases, each passing its own.
-    ///
-    /// Compare-and-take, not a test and a clear: every command walks all three
-    /// call sites, so a phase that takes the staging away from the phase it was
-    /// staged for is a boot that wedges nowhere.
-    pub fn wedge_if_staged(here: Phase) {
-        let taken = AT.compare_exchange(
-            here.code(),
-            Phase::Closed.code(),
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        );
-        if taken.is_ok() {
-            crate::deadline::stage_a_wedge()
-        }
-    }
-}
-
-/// Have every transfer of the operation sent again on a device that came back
-/// answer nothing, once, each waited for to the end of what the call lets it
-/// spend: a returning device that stops answering, which spends the whole of
-/// what the held call has left — staged because nothing on the host side stops
-/// a device answering.
-#[cfg(feature = "boot-actuators")]
-pub(in crate::drivers::xhci) mod return_silent {
-    use core::sync::atomic::{AtomicBool, Ordering};
-
-    static UNSPENT: AtomicBool = AtomicBool::new(true);
-    static ACTIVE: AtomicBool = AtomicBool::new(false);
-
-    /// What the staged operation's disk says before it goes out again.
-    pub const SILENT: &str =
-        "answers nothing on the operation sent again on it (usb-return-silent)";
-
-    /// `true` means the operation disk `index` is about to send again is the
-    /// staged one, and must call [`end`] once it has.
-    pub fn begin(index: usize) -> bool {
-        if !crate::actuator::usb_return_silent() || !UNSPENT.swap(false, Ordering::Relaxed) {
-            return false;
-        }
-        crate::log!("usb-storage: disk {index} {SILENT}");
-        ACTIVE.store(true, Ordering::Relaxed);
-        true
-    }
-
-    pub fn end() {
-        ACTIVE.store(false, Ordering::Relaxed);
-    }
-
-    /// Only the staged operation's own transfers can see this set: it holds
-    /// the controller lock throughout.
-    pub fn active() -> bool {
-        ACTIVE.load(Ordering::Relaxed)
-    }
-}
-
-/// Stage the boot's first bind to spend the scan's whole silence bound and then
-/// refuse, once: T14 run 103's stick, whose first command went unanswered, whose
-/// recovery ladder then ran on bounds of its own, and whose refusal at the end
-/// of all that submitted a Disable Slot into a scan that had already stopped
-/// listening. Staged because no QEMU device stops answering its first command.
-///
-/// The spending and the refusal are staged and the ladder is not: what the
-/// defect needs is a submit later than the scan's bound, and which rungs ran
-/// decides nothing about that.
-///
-/// **The held answer is the second half and not decoration.** QEMU posts a
-/// Command Completion Event inside the vCPU's write to the doorbell, so the very
-/// next read of the event ring already has it and the scan's silence bound is
-/// re-armed before it can be spent — on a machine whose controller takes
-/// microseconds to answer it is not. [`hold_answers`] is that latency, and
-/// without it no QEMU boot reaches the state this stages.
-#[cfg(feature = "boot-actuators")]
-pub(in crate::drivers::xhci) mod bind_spends_the_scan {
-    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-
-    /// Past the scan's bound, which is `USB_TIMEOUT_NS`: the refusal has to
-    /// land after the scan has stopped re-arming it, and a bind that spent
-    /// exactly the bound would race it.
-    pub const SPEND: u64 = super::super::super::USB_TIMEOUT_NS + 200_000_000;
-
-    /// How long the controller's answer to what the refusal submits is held
-    /// back. It has only to outlast the one loop iteration that follows the
-    /// submit; the width above that is so a scan that waits can be seen to.
-    const HOLD: u64 = 50_000_000;
-
-    pub const WHY: &str = "answers nothing for the boot scan's whole bound \
-        (usb-bind-spends-the-scan) and is then refused";
-
-    static UNSPENT: AtomicBool = AtomicBool::new(true);
-    static HELD_UNTIL: AtomicU64 = AtomicU64::new(0);
-
-    /// Whether this bind is the staged one.
-    pub fn take() -> bool {
-        crate::actuator::usb_bind_spends_the_scan() && UNSPENT.swap(false, Ordering::Relaxed)
-    }
-
-    /// Hold the controller's answers back, from the staged bind's way out — so
-    /// the window covers what its refusal submits and nothing before it.
-    pub fn hold_answers() {
-        HELD_UNTIL.store(crate::clock::nanos_since_boot() + HOLD, Ordering::Relaxed);
-    }
-
-    /// Whether the event ring may be read yet. Zero is the unarmed state, so an
-    /// unstaged boot pays one relaxed load per event and no clock read.
-    pub fn answered() -> bool {
-        let until = HELD_UNTIL.load(Ordering::Relaxed);
-        until == 0 || crate::clock::nanos_since_boot() >= until
-    }
-}
-
-/// Stage one climb of the recovery ladder to run its transfers unwaited, once:
-/// a device that answers nothing, on any rung — staged because nothing on the
-/// host side stops answering EP0 on its own.
-#[cfg(feature = "boot-actuators")]
-pub(in crate::drivers::xhci) mod reset_break {
-    use core::sync::atomic::{AtomicBool, Ordering};
-
-    static UNSPENT: AtomicBool = AtomicBool::new(true);
-    static ACTIVE: AtomicBool = AtomicBool::new(false);
-
-    /// `true` means this climb is the staged one and must call [`end`] on its
-    /// way out.
-    pub fn begin() -> bool {
-        if !crate::actuator::usb_reset_break() || !UNSPENT.swap(false, Ordering::Relaxed) {
-            return false;
-        }
-        ACTIVE.store(true, Ordering::Relaxed);
-        true
-    }
-
-    pub fn end() {
-        ACTIVE.store(false, Ordering::Relaxed);
-    }
-
-    /// Only the staged climb's own transfers can see this set.
-    pub fn active() -> bool {
-        ACTIVE.load(Ordering::Relaxed)
-    }
-}
-
 /// What the port rung's reset is made for, in its line.
 const RECOVERING: &str = "recovering";
-
-/// Hold the port rung, once, until its port reads empty: QEMU cannot move a
-/// device off its port on a reset, so the host takes it off. `usb-reset-moves`
-/// holds before the reset's completion is read, so the rung reads the port empty;
-/// `usb-reset-moves-after` once it has been read with the device on the port,
-/// as a USB2 port reads a device that leaves under its reset;
-/// `usb-reset-moves-configured` once the rung has configured the device again,
-/// so its TEST UNIT READY meets an empty port.
-#[cfg(feature = "boot-actuators")]
-pub(in crate::drivers::xhci) mod reset_moves {
-    use core::sync::atomic::{AtomicBool, Ordering};
-
-    static UNSPENT: AtomicBool = AtomicBool::new(true);
-
-    /// What each hold says, which the host acts on.
-    pub const HELD: &str = "is held empty for the host to move its device (usb-reset-moves)";
-    pub const HELD_AFTER: &str =
-        "is held, reset with its device on it, for the host to move the device (usb-reset-moves-after)";
-    pub const HELD_CONFIGURED: &str = "is held, configured again, for the host to move the device \
-        (usb-reset-moves-configured)";
-
-    /// The cue the host moves the device on, written to the console directly:
-    /// the record above reaches it only when `klogd` runs, which it may not
-    /// while this CPU spins in the rung, and a cue that arrives after the
-    /// rung's bound stages a device that left too late.
-    const MOVE_NOW: &[u8] = b"usb-reset-moves: move the device now\n";
-
-    /// Whether the hold `staged` arms is taken here: one hold per boot.
-    pub fn take(staged: bool) -> bool {
-        staged && UNSPENT.swap(false, Ordering::Relaxed)
-    }
-
-    pub fn cue() {
-        crate::drivers::serial::BackendGuard::lock().write_raw(MOVE_NOW);
-    }
-}
-
-/// Make the controller's transfer account and the device's CSW residue
-/// disagree by [`SHORT_BY`] bytes, once — only the residue is the injection's.
-#[cfg(feature = "boot-actuators")]
-pub(in crate::drivers::xhci) mod short_read {
-    use core::sync::atomic::{AtomicBool, Ordering};
-
-    use super::Quiet;
-    use crate::mm::Dma;
-
-    /// Bytes held back at the buffer tail: one 512-byte sector of the
-    /// 4096-byte block a read asks for.
-    pub const SHORT_BY: u32 = 512;
-
-    static ARMED: AtomicBool = AtomicBool::new(false);
-
-    pub fn arm() {
-        if !crate::actuator::usb_short_read() {
-            return;
-        }
-        ARMED.store(true, Ordering::Relaxed);
-    }
-
-    /// The tail of a data buffer, held out of the way of the transfer about to
-    /// run over it.
-    pub struct Held {
-        at: usize,
-        bytes: [u8; SHORT_BY as usize],
-    }
-
-    /// Copy the last [`SHORT_BY`] bytes out, if this is the transfer asked for.
-    pub fn hold(dma: Dma<'static>, at: usize, len: u32, eligible: bool) -> Option<Held> {
-        if !eligible || len < SHORT_BY || !ARMED.swap(false, Ordering::Relaxed) {
-            return None;
-        }
-        let at = at + (len - SHORT_BY) as usize;
-        let mut bytes = [0u8; SHORT_BY as usize];
-        dma.copy_to(at, &mut bytes);
-        Some(Held { at, bytes })
-    }
-
-    /// Put it back, and add the bytes it covers to the controller's residue.
-    pub fn release(
-        dma: Dma<'static>,
-        held: Option<Held>,
-        completion: Result<(u32, u32), Quiet>,
-    ) -> Result<(u32, u32), Quiet> {
-        let Some(held) = held else { return completion };
-        let (code, residue) = completion?;
-        dma.copy_from(held.at, &held.bytes);
-        Ok((code, residue + SHORT_BY))
-    }
-}
 
 /// Faults staged on the next few commands, from `usb_gate` immediately before
 /// the operation they are taken inside, so each lands on a known disk and a
@@ -670,10 +368,6 @@ pub(in crate::drivers::xhci) mod staged {
     static NEXT_BIND: AtomicU8 = AtomicU8::new(0);
     pub const INQUIRY: u8 = 0x12;
 
-    pub fn on_a_later_bind(n: u8) {
-        NEXT_BIND.store(n, Ordering::Relaxed);
-    }
-
     /// Called by a bind before its first command: how many faults it staged.
     pub fn bind_begins() -> u8 {
         let n = NEXT_BIND.swap(0, Ordering::Relaxed);
@@ -688,20 +382,8 @@ pub(in crate::drivers::xhci) mod staged {
     /// began, inside the same operation.
     static PROBES: AtomicU8 = AtomicU8::new(0);
 
-    pub fn arm_probes(n: u8) {
-        PROBES.store(n, Ordering::Relaxed);
-    }
-
-    /// As [`disarm`], for the probes.
-    pub fn disarm_probes() -> u8 {
-        PROBES.swap(0, Ordering::Relaxed)
-    }
-
     /// The fault the TEST UNIT READY `rung` is about to end on was staged with.
     pub fn take_probe(rung: super::Rung) -> Option<Fault> {
-        if crate::actuator::usb_transport_offline() {
-            return Some(Fault::Unanswered);
-        }
         if rung != super::Rung::ClassReset {
             return None;
         }
@@ -750,9 +432,7 @@ fn log_refusal(cdb: &Cdb, sense: Sense) {
 /// on a shipped kernel. ILLEGAL REQUEST/INVALID COMMAND OPERATION CODE must
 /// not fail the caller; HARDWARE ERROR/INTERNAL TARGET FAILURE must.
 fn flush_sense() -> Option<Sense> {
-    if crate::actuator::usb_flush_unimplemented() {
-        Some(Sense { key: 0x05, asc: 0x20, ascq: 0x00 })
-    } else if crate::actuator::usb_flush_fails() {
+    if crate::actuator::usb_flush_fails() {
         Some(Sense { key: 0x04, asc: 0x44, ascq: 0x00 })
     } else {
         None
@@ -896,8 +576,6 @@ impl XhciController {
                 }
                 Flushed::Emptied => {
                     dev.debt.flushed();
-                    #[cfg(feature = "boot-actuators")]
-                    transport_break::flushed();
                     Ok(())
                 }
                 Flushed::Refused(sense) => {
@@ -1068,14 +746,7 @@ impl XhciController {
         broke: Option<(Pipe, u32)>,
         left: Left,
     ) -> bool {
-        #[cfg(feature = "boot-actuators")]
-        let staged = reset_break::begin();
-        let in_step = self.climb(dev, broke, left);
-        #[cfg(feature = "boot-actuators")]
-        if staged {
-            reset_break::end();
-        }
-        in_step
+        self.climb(dev, broke, left)
     }
 
     fn climb(&mut self, dev: &mut MscDevice, mut broke: Option<(Pipe, u32)>, left: Left) -> bool {
@@ -1207,10 +878,6 @@ impl XhciController {
             dev.reset_at = Some(crate::clock::nanos_since_boot());
             self.settles_within_call(|| self.read_portsc(port_idx).reset_finished())
         };
-        #[cfg(feature = "boot-actuators")]
-        if finished && why == RECOVERING && reset_moves::take(crate::actuator::usb_reset_moves()) {
-            self.hold_for_the_move(dev, reset_moves::HELD);
-        }
         let after = self.read_portsc(port_idx);
         if finished {
             self.write_portsc(port_idx, port::enumeration_ack(Some(kind), after));
@@ -1241,24 +908,7 @@ impl XhciController {
             after.link_state(),
             after.speed(),
         );
-        #[cfg(feature = "boot-actuators")]
-        if left == AfterReset::Enumerate
-            && why == RECOVERING
-            && reset_moves::take(crate::actuator::usb_reset_moves_after())
-        {
-            self.hold_for_the_move(dev, reset_moves::HELD_AFTER);
-        }
         left
-    }
-
-    /// Say `held`, cue the host, and hold the rung until the device's port
-    /// reads empty (`reset_moves`).
-    #[cfg(feature = "boot-actuators")]
-    fn hold_for_the_move(&self, dev: &MscDevice, held: &str) {
-        let port_idx = dev.port_idx;
-        log!("xHCI: {} port {} {held}", self.slot(dev.slot_id), u32::from(port_idx) + 1);
-        reset_moves::cue();
-        let _ = self.settles_within_call(|| !self.read_portsc(port_idx).connected());
     }
 
     /// The ladder's second rung: the port reset, and the enumeration a reset
@@ -1313,10 +963,6 @@ impl XhciController {
             if !took && ladder::ends_the_rung(step) {
                 return Err(Unverified::Failed);
             }
-        }
-        #[cfg(feature = "boot-actuators")]
-        if reset_moves::take(crate::actuator::usb_reset_moves_configured()) {
-            self.hold_for_the_move(dev, reset_moves::HELD_CONFIGURED);
         }
         match self.bot(dev, &Cdb::TEST_UNIT_READY, None, Asks::Verification(Rung::PortReset)) {
             Ok(answer) => {
@@ -1444,27 +1090,12 @@ impl XhciController {
                     open.at(Phase::DataOwed, &dev.in_ring, &dev.out_ring);
                     #[cfg(feature = "boot-actuators")]
                     if write {
-                        transport_break::arm(dev.owes_a_flush());
-                        mid_write::wedge_if_staged(Phase::DataOwed);
+                        transport_break::arm();
                     }
-                    #[cfg(feature = "boot-actuators")]
-                    let held = short_read::hold(
-                        dma,
-                        (data_phys - dma.device_addr()) as usize,
-                        data_len,
-                        data_in && cdb.opcode() == scsi::READ_10,
-                    );
-                    let completion = self.bulk(dev, pipe == Pipe::In, data_phys, data_len, Phase::Data, &open);
-                    #[cfg(feature = "boot-actuators")]
-                    let completion = short_read::release(dma, held, completion);
-                    completed(completion)
+                    completed(self.bulk(dev, pipe == Pipe::In, data_phys, data_len, Phase::Data, &open))
                 }
                 bot::Act::Status => {
                     open.at(Phase::StatusOwed, &dev.in_ring, &dev.out_ring);
-                    #[cfg(feature = "boot-actuators")]
-                    if data_len > 0 && write {
-                        mid_write::wedge_if_staged(Phase::StatusOwed);
-                    }
                     super::super::zero_dma(dma, dev.block + MSC_CSW, CSW_LEN);
                     let csw_phys = dma.device_addr() + (dev.block + MSC_CSW) as u64;
                     completed(self.bulk(dev, true, csw_phys, CSW_LEN as u32, Phase::Status, &open))
@@ -1523,10 +1154,6 @@ impl XhciController {
         // Before the doorbell, so no transfer is visible to the controller
         // without a reset being able to see the ring it went on.
         open.at(phase, &dev.in_ring, &dev.out_ring);
-        #[cfg(feature = "boot-actuators")]
-        if phase == Phase::Data && !in_dir {
-            mid_write::wedge_if_staged(Phase::Data);
-        }
         self.bulk_began = crate::clock::nanos_since_boot();
         self.ring_doorbell(slot, dci);
         #[cfg(feature = "boot-actuators")]
@@ -1912,13 +1539,6 @@ pub(in crate::drivers::xhci) fn bind(
     enumerated: Enumerated,
     described: (UsbId, u8),
 ) -> Bind {
-    #[cfg(feature = "boot-actuators")]
-    if bind_spends_the_scan::take() {
-        log!("usb-storage: slot {slot_id} {}", bind_spends_the_scan::WHY);
-        let _ = crate::clock::settles(bind_spends_the_scan::SPEND, || false);
-        bind_spends_the_scan::hold_answers();
-        return Bind::Refused(SlotGoes::Back);
-    }
     let MscRings { at, block, in_ring, out_ring, port_idx } = rings;
     let (usb, serial_index) = described;
     let mut dev = MscDevice {
@@ -1949,12 +1569,6 @@ pub(in crate::drivers::xhci) fn bind(
         left: false,
     };
 
-    #[cfg(feature = "boot-actuators")]
-    if let Some((why, stall_ns)) = slow_return::staged().filter(|_| ctrl.awaits_a_device()) {
-        log!("usb-storage: slot {slot_id} {why} {} ms before its first command",
-            stall_ns / 1_000_000);
-        let _ = crate::clock::settles(stall_ns, || false);
-    }
     #[cfg(feature = "boot-actuators")]
     let staged = staged::bind_begins();
     let up = bring_up(ctrl, &mut dev);
@@ -2003,28 +1617,6 @@ pub(in crate::drivers::xhci) fn bind(
 /// What the adopting line adds for a disk whose device came back owing a flush.
 const OWED_A_FLUSH: &str = ", and it left owing a flush of writes it had reported complete, so \
     the flush of each writer whose writes they were fails";
-
-/// A bind stalled while another disk is held for its device: what it says it
-/// is doing, and for how long.
-#[cfg(feature = "boot-actuators")]
-pub(in crate::drivers::xhci) mod slow_return {
-    pub const STALLED: &str = "answers slowly (usb-slow-return): its bind is stalled";
-
-    /// `usb-return-silent`'s: late enough that the operation sent again on a
-    /// bound of its own would run past the call's, and early enough that the
-    /// held call still sees the device back.
-    pub const LATE: &str = "comes back late (usb-return-silent): its bind is stalled";
-
-    pub fn staged() -> Option<(&'static str, u64)> {
-        if crate::actuator::usb_slow_return() {
-            Some((STALLED, 2_500_000_000))
-        } else if crate::actuator::usb_return_silent() {
-            Some((LATE, 1_500_000_000))
-        } else {
-            None
-        }
-    }
-}
 
 /// What came of a bind.
 pub(in crate::drivers::xhci) enum Bind {
@@ -2173,9 +1765,6 @@ fn read_serial(ctrl: &mut XhciController, dev: &mut MscDevice, index: u8) -> Ser
     let phys = dma.device_addr() + (dev.block + MSC_DATA) as u64;
     let mut get = |ctrl: &mut XhciController, index: u8, language: u16| -> Option<([u8; 255], usize)> {
         dma.subview(dev.block + MSC_DATA, 255).zero();
-        #[cfg(feature = "boot-actuators")]
-        let asks = if index != 0 && crate::actuator::usb_serial_short() { 8 } else { 255 };
-        #[cfg(not(feature = "boot-actuators"))]
         let asks = 255;
         let asked = ctrl.control_transfer(
             dev.slot_id, dev.dev_block, &mut dev.ep0_ring, 0x80, 0x06,
@@ -2273,13 +1862,7 @@ fn served(
     loop {
         let ran = with_disk_by(index, hold_ends, |ctrl, at| {
             ctrl.after_break = call;
-            #[cfg(feature = "boot-actuators")]
-            let silent = back && return_silent::begin(index);
             let done = op(ctrl, at);
-            #[cfg(feature = "boot-actuators")]
-            if silent {
-                return_silent::end();
-            }
             call = core::mem::replace(&mut ctrl.after_break, AfterBreak::CLOSED);
             if let Some(disk) = &ctrl.msc[at].disk {
                 *losses = disk.dev.debt.losses();

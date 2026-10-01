@@ -166,9 +166,6 @@ pub(super) fn sys_mmap(req_addr: u64, size: u64, prot: MmapProt, flags: MmapFlag
         });
         match vaddr {
             Ok(v) => {
-                if crate::actuator::copy_meets_a_remap() {
-                    crate::user_ptr::remap_race::mapped();
-                }
                 v.raw()
             }
             Err(()) => SyscallError::ResourceExhausted.to_u64(),

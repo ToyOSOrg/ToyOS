@@ -59,8 +59,6 @@ mod tmpfs;
 mod file_backing;
 mod bcachefs_adapter;
 mod fs_rename;
-#[cfg(feature = "boot-actuators")]
-mod heartbeat;
 mod vfs;
 mod elf;
 mod symbols;
@@ -298,10 +296,6 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     let root_image = rootfs::init(cmdline, &kernel_args, maps);
 
     // Armed here so the next record — the architecture's first — reaches the console and the panel keeps the one before it.
-    #[cfg(feature = "boot-actuators")]
-    if actuator::test_early_halt() {
-        log::halt_before_the_next_repaint();
-    }
 
     arch::boot::after_console(&kernel_args, maps);
 
@@ -408,10 +402,6 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     // The last point before the first hash container (`mm::init`'s address
     // space), and not earlier: seeding fails only by panicking, and a panic
     // before the boot's own log lines reaches no channel at all.
-    #[cfg(feature = "boot-actuators")]
-    if actuator::test_hash_before_seed() {
-        hasher::probe_before_seed();
-    }
     hasher::seed();
 
     mm::init(maps, &reserved);
@@ -511,25 +501,9 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     let t_storage = clock::nanos_since_boot();
 
     xhci::init(&pci_devices);
-    #[cfg(feature = "boot-actuators")]
-    if actuator::usb_storage_gate() {
-        usb_gate::run();
-    }
     // After xhci::init: a USB-booted disk doesn't exist until the controller binds it.
     gpt::probe_usb_disks();
-    #[cfg(feature = "boot-actuators")]
-    if actuator::partclaim_root_withheld() {
-        block::unanswered::refuse();
-    }
     rootfs::hold_source();
-    #[cfg(feature = "boot-actuators")]
-    if actuator::partclaim_root_withheld() {
-        block::unanswered::answer();
-    }
-    #[cfg(feature = "boot-actuators")]
-    if actuator::partclaim_table_unanswered() {
-        block::unanswered::refuse();
-    }
 
     #[cfg(feature = "boot-actuators")]
     if actuator::leak_rollback_selftest() {
@@ -540,10 +514,6 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
         revoke_selftest::run();
     }
     // After every driver has registered: the number under test is one a real device holds.
-    #[cfg(feature = "boot-actuators")]
-    if actuator::block_duplicate_id() {
-        block::duplicate_id_selftest();
-    }
 
     boot_phase!("storage ready", t_storage);
 
@@ -554,11 +524,6 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     arch::boot::platform_devices(kernel_args.rsdp_addr);
 
     // Runs once for the machine: it touches no device, so per-driver repetition would say the same thing four times.
-    #[cfg(feature = "boot-actuators")]
-    if actuator::virtio_used_selftest() {
-        drivers::virtio::used_selftest();
-        drivers::virtio::wait_selftest();
-    }
 
     #[cfg(feature = "boot-actuators")]
     arch::boot::interrupt_selftests();
@@ -599,10 +564,6 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     }
 
     // Under Drain::Inline every record above is already on the wire, so this gate reads the whole boot and then silence.
-    #[cfg(feature = "boot-actuators")]
-    if actuator::pre_idle_wedge() {
-        pre_idle_wedge();
-    }
 
     report_log_destination();
     let complete_tsc = cpu::counter();
@@ -614,10 +575,6 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
         late_panic::Nest::<late_panic::Nest<late_panic::Nest<late_panic::Nest<
             late_panic::Nest<late_panic::Nest<late_panic::Nest<late_panic::Nest<
             late_panic::Nest<late_panic::Nest<()>>>>>>>>>>::on_screen_console_check();
-    }
-
-    if actuator::test_kernel_fault() {
-        cpu::undefined_instruction();
     }
 
     // Last thing before enter_idle_loop: nothing can run before it, and a klogd spawned earlier would idle through phases 5-7 with no drainer.
@@ -640,15 +597,5 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     }
 
     crate::scheduler::enter_idle_loop();
-}
-
-/// Wedges the machine: interrupts off then spin, with no timer, scheduler, or klogd left to drain anything logged after this.
-#[cfg(feature = "boot-actuators")]
-fn pre_idle_wedge() -> ! {
-    log!("pre-idle-wedge: the boot stops here, and this line is the last thing this machine says");
-    cpu::disable_interrupts();
-    loop {
-        core::hint::spin_loop();
-    }
 }
 

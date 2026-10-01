@@ -56,12 +56,7 @@ const USBCMD_HCRST: u32 = 1 << 1;
 const USBSTS_HCH: u32 = 1 << 0;
 const USBSTS_CNR: u32 = 1 << 11;
 
-// Raw bits for the two paths that work on a word, not a decoded register: read_portsc's actuator injections and init_one's pre-controller port power. Every decision on these bits goes through `Portsc`, never the raw consts, outside these two paths.
-const PORTSC_CCS: u32 = 1 << 0;
-const PORTSC_PED: u32 = 1 << 1;
-const PORTSC_PR:  u32 = 1 << 4;
 const PORTSC_PP:  u32 = 1 << 9;
-const PORTSC_SPEED: u32 = 0xF << 10;
 
 /// HCCPARAMS1 bit 3: Port Power Control, which decides PORTSC's PP after reset.
 const HCC_PPC: u32 = 1 << 3;
@@ -331,41 +326,11 @@ fn deadline() -> u64 {
     crate::clock::nanos_since_boot() + USB_TIMEOUT_NS
 }
 
-/// Let a test starve one of those waits on a controller that otherwise answers perfectly; a kernel feature because QEMU cannot stage a register bit that never settles.
-fn controller_answers() -> bool {
-    !crate::actuator::xhci_deaf_controller()
-}
-
-fn port_answers() -> bool {
-    !crate::actuator::xhci_deaf_port()
-}
-
 /// The boot-time connect settle reads the same interval the per-port machine uses.
 use portmachine::DEBOUNCE_NS as PORT_DEBOUNCE_NS;
 
-/// How long the slow-connect injection reports an empty root hub after this
-/// controller powered its ports.
-///
-/// A kernel feature since QEMU cannot stage a port that connects late, and it
-/// replaces the register rather than a verdict: the port reads exactly as
-/// unpopulated during the window.
-use portmachine::SLOW_CONNECT_NS;
-
-/// Report *one* root-hub port empty while every other port reads normally.
-///
-/// The window closes on the boot scan, not the clock: what it stages is an ordering, not a duration.
-const SLOW_STORAGE_PORT: u8 = 0;
-
-/// Whether the boot port scan has run; until it has, [`SLOW_STORAGE_PORT`] reads unpopulated.
-pub(super) static BOOT_SCAN_DONE: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
-
 /// One bit per root-hub port; four words cover every MaxPorts a byte can express.
 type PortMask = [u64; 4];
-
-fn port_bit(mask: &PortMask, port_idx: u8) -> bool {
-    mask[port_idx as usize / 64] & (1 << (port_idx % 64)) != 0
-}
 
 /// When some controller's port state machine must be stepped again, or 0 for none; neither reader may take [`XHCI`].
 ///
@@ -540,15 +505,6 @@ const MSC_MAX_BLOCKS: u32 = (MSC_DATA_LEN / 4096) as u32;
 /// Device blocks to size the pool for before the controller's slot count is consulted; without this floor a scratchpad demand near a 2 MiB boundary can leave zero room for devices.
 const MIN_DEVICE_BLOCKS: usize = 8;
 
-/// Cap the driver at one device block, so a test can drive the slot-pool-full path; QEMU's `slots=N` cannot stage it since Enable Slot ignores MaxSlotsEn.
-fn device_ceiling() -> usize {
-    if crate::actuator::xhci_one_slot() {
-        1
-    } else {
-        usize::MAX
-    }
-}
-
 /// Where each structure sits in the pool, derived from what the controller reported.
 #[derive(Clone, Copy)]
 struct Layout {
@@ -576,8 +532,7 @@ impl Layout {
         // DmaPool hands out whole 2 MiB pages; the floor decides how many pages, the slack decides how many device blocks.
         let pool_size = crate::mm::align_2m(dev_base + MIN_DEVICE_BLOCKS * DEV_STRIDE);
         let dev_blocks = ((pool_size - dev_base) / DEV_STRIDE)
-            .min(max_slots as usize)
-            .min(device_ceiling());
+            .min(max_slots as usize);
 
         Self {
             scratch_array,
@@ -767,10 +722,6 @@ pub struct XhciController {
     /// Submitted and left, not spun on: a scheduler pass may not block to [`USB_TIMEOUT_NS`] against a device with nothing to answer.
     outstanding: Outstanding<What>,
 
-    /// Ports this driver has written PED=1 to; a kernel feature since QEMU's PED write is a no-op and cannot be staged otherwise.
-    ///
-    /// Replaces the register, not a verdict: the port reads PED clear for every reader until reset (§4.19.1.1.3).
-    software_disabled: PortMask,
 
     /// What the disk call now inside this controller may still spend, once its transport has broken; closed between calls.
     after_break: AfterBreak,
@@ -803,46 +754,14 @@ impl XhciController {
 
     fn read_portsc_raw(&self, port_idx: u8) -> u32 {
         let raw = self.op_base.read_u32(OP_PORT_BASE + port_idx as u64 * PORT_REG_SIZE);
-        if crate::actuator::xhci_slow_connect()
-            && crate::clock::nanos_since_boot().saturating_sub(self.powered_at) < SLOW_CONNECT_NS
-        {
-            return raw & !(PORTSC_CCS | PORTSC_PED | PORTSC_SPEED);
-        }
-        if crate::actuator::xhci_slow_storage_connect()
-            && port_idx == SLOW_STORAGE_PORT
-            && !BOOT_SCAN_DONE.load(core::sync::atomic::Ordering::Relaxed)
-        {
-            return raw & !(PORTSC_CCS | PORTSC_PED | PORTSC_SPEED);
-        }
-        if crate::actuator::xhci_portsc_rw1c() && port_bit(&self.software_disabled, port_idx) {
-            return raw & !PORTSC_PED;
-        }
         // Also masks PED: QEMU's SuperSpeed port reads Enabled instantly, so without this the actuator stages nothing.
-        if crate::actuator::xhci_deaf_port() {
-            return raw & !PORTSC_PED;
-        }
         raw
     }
 
     /// Every write of a port register; takes a typed [`toyos_xhci::portsc::Write`], which offers no way to set PED, so disabling a port the driver is enabling is unreachable rather than asserted against.
     fn write_portsc(&mut self, port_idx: u8, write: toyos_xhci::portsc::Write) {
         let value = write.raw();
-        if crate::actuator::xhci_portsc_rw1c() {
-            let word = port_idx as usize / 64;
-            let bit = 1u64 << (port_idx % 64);
-            if value & PORTSC_PED != 0 {
-                self.software_disabled[word] |= bit;
-            }
-            if value & PORTSC_PR != 0 {
-                self.software_disabled[word] &= !bit;
-            }
-        }
         self.op_base.write_u32(OP_PORT_BASE + port_idx as u64 * PORT_REG_SIZE, value);
-    }
-
-    /// How many ports the driver has written PED=1 to.
-    fn software_disabled_ports(&self) -> u32 {
-        self.software_disabled.iter().map(|w| w.count_ones()).sum()
     }
 
     /// The port a slot's device is on, or `None` for a slot mid-enumeration — `device::finish` is what gives a port its slot.
@@ -895,12 +814,6 @@ impl XhciController {
         }
         barrier::dma_rmb();
         let event: Trb = self.event_ring.read(at);
-        // A controller that has not answered yet, which QEMU cannot be: it
-        // posts a command's completion inside the write to the doorbell.
-        #[cfg(feature = "boot-actuators")]
-        if !msc::bind_spends_the_scan::answered() {
-            return None;
-        }
         self.advance_event_ring();
         Some(event)
     }
@@ -1824,68 +1737,3 @@ fn on_disk<R>(
 pub fn storage_geometry(index: usize) -> Option<StorageGeometry> {
     with_disk(index, |ctrl, at| Some(ctrl.msc[at].disk?.dev.geometry())).flatten()
 }
-
-/// Whether the machine's `index`-th disk is still being spoken to; `Some(false)` and not `None` for an unplugged one, since the caller already holds a handle.
-#[cfg(feature = "boot-actuators")]
-pub fn storage_online(index: usize) -> Option<bool> {
-    (index < storage_count()).then(|| {
-        with_disk(index, |ctrl, at| ctrl.msc[at].disk.is_some_and(|d| d.dev.online()))
-            .unwrap_or(false)
-    })
-}
-
-/// Under-deliver the next READ(10) on the disk the gate is driving. See [`msc::short_read`].
-#[cfg(feature = "boot-actuators")]
-pub fn arm_short_read() {
-    msc::short_read::arm();
-}
-
-/// Stop this machine inside the next WRITE(10), at `at`. See [`msc::mid_write`].
-#[cfg(feature = "boot-actuators")]
-pub fn arm_mid_write_wedge(at: toyos_xhci::bot::Phase) {
-    msc::mid_write::arm(at);
-}
-
-#[cfg(feature = "boot-actuators")]
-pub use msc::staged::Fault as StagedFault;
-
-/// Stage `n` faults on the next commands. See [`msc::staged`].
-#[cfg(feature = "boot-actuators")]
-pub fn stage_transport_faults(n: u8, fault: StagedFault) {
-    msc::staged::arm(n, fault, None);
-}
-
-/// Have the next `n` class resets' TEST UNIT READY refused. See
-/// [`msc::staged::arm_probes`].
-#[cfg(feature = "boot-actuators")]
-pub fn stage_probe_faults(n: u8) {
-    msc::staged::arm_probes(n);
-}
-
-/// Take back the staged probe faults no recovery took, and say how many.
-#[cfg(feature = "boot-actuators")]
-pub fn disarm_probe_faults() -> u8 {
-    msc::staged::disarm_probes()
-}
-
-/// Have the next disk to bind refuse its INQUIRY `n` times. See
-/// [`msc::staged::on_a_later_bind`].
-#[cfg(feature = "boot-actuators")]
-pub fn stage_bind_faults(n: u8) {
-    msc::staged::on_a_later_bind(n);
-}
-
-/// Take back the staged faults no command took, and say how many. See
-/// [`msc::staged::disarm`].
-#[cfg(feature = "boot-actuators")]
-pub fn disarm_transport_faults() -> u8 {
-    msc::staged::disarm()
-}
-
-/// The breaks in a row a transport gets, for a gate that stages exactly that
-/// many.
-#[cfg(feature = "boot-actuators")]
-pub fn max_transport_breaks() -> u8 {
-    msc::MAX_TRANSPORT_BREAKS
-}
-

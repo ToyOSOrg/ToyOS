@@ -92,6 +92,11 @@ above; otherwise it is a NOTE.
   held across a user copy or a device wait. Arithmetic on a value the caller chooses. A short
   read, an exit status nobody reads. An `at_most(<int>::MAX)` or `index(usize::MAX)` on an
   `Untrusted` is an unwrap wearing a check's name.
+- **Guest tests.** A behaviour is tested on the cheapest tier that reaches it: a type that makes
+  the bug unrepresentable, then a host test, then a metal row on the T14, and a QEMU guest test
+  last. A new or changed guest test whose pull request body does not say why a type, a host
+  test and a metal row cannot reach its behaviour is a BLOCKER, and so is one whose reason a
+  cheaper tier answers.
 - **Waits.** A flat wait — sleep, then assume it happened — is a BLOCKER, in code and in tests,
   unless a hardware document mandates that time and offers no notification, cited at the site.
   Wait on the event itself, bounded by a timeout that fails loudly. Defensive code that hides a

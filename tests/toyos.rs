@@ -4014,10 +4014,13 @@ fn run_debug_mode(c_tests: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]
     eprintln!("[debug] Shutting down QEMU...");
 }
 
-/// The binaries the shared boots carry: every Rust test binary, and the C
-/// corpus, compiled once its declared cases have been attempted to their
-/// stages.
-fn build_shared_bins() -> (Vec<(String, Vec<u8>)>, Vec<(String, Vec<u8>)>) {
+/// Built test binaries, each by the name `run` takes.
+type Binaries = Vec<(String, Vec<u8>)>;
+
+/// The binaries the shared boots carry, C and Rust: every Rust test binary,
+/// and the C corpus, compiled once its declared cases have been attempted to
+/// their stages.
+fn build_shared_bins() -> (Binaries, Binaries) {
     let rust_tests_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/toyos-rust-tests");
     eprintln!("[toyos] Building Rust tests...");
     let rust_bins = qemu::build_toyos_bins(&rust_tests_dir);

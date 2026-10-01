@@ -1370,8 +1370,8 @@ fn declared_kernel_features(root: &Path) -> Vec<String> {
 pub const TEST_KERNEL: &[&str] = &["boot-actuators", "test-actuators"];
 
 /// Kernel builds the ordinary test suite is allowed to make.
-pub const TEST_SUITE_KERNEL_BUILDS: [&str; 5] =
-    ["", "boot-actuators,test-actuators", "fpu-save-nothing", "sched-check", "user-writable-gsbase"];
+pub const TEST_SUITE_KERNEL_BUILDS: [&str; 2] =
+    ["", "boot-actuators,test-actuators"];
 
 /// The scheduler core's own asserts, compiled in: `toyos-sched/check`.
 ///
@@ -2445,7 +2445,7 @@ mod tests {
         assert!(harness_kernel_build_is_declared(&debug, true));
         assert!(!harness_kernel_build_is_declared(&debug, false));
         assert!(!harness_kernel_build_is_declared(
-            "fpu-save-nothing,debug-wait",
+            "boot-actuators,test-actuators,debug-wait",
             true
         ));
         for suite_build in TEST_SUITE_KERNEL_BUILDS {
@@ -2599,11 +2599,10 @@ mod tests {
                 // instruction gone and `DF` back out of the `SYSCALL` mask, so a
                 // build carrying it inherits a set direction flag from whatever
                 // it interrupted. The negative control for that fix, and its own
-                // build for `fpu-save-nothing`'s reason — the defect is in a
-                // `naked_asm!` body on every ring transition, where a boot
-                // parameter would have to be a branch.
+                // build because the defect is in a `naked_asm!` body on every
+                // ring transition, where a boot parameter would have to be a
+                // branch.
                 "entry-df-unclean",
-                "fpu-save-nothing",
                 // The two band shapes that separate the two readings
                 // `heap-tripwire`'s own result left standing — the bands absorb
                 // a bounded overrun, or they displace every allocation and the
@@ -2703,8 +2702,6 @@ mod tests {
                 "switch-witness-mutate-frame",
                 "switch-witness-mutate-rsp",
                 "test-actuators",
-                // `FSGSBASE` back in `CR4`: `gsbase_locked`'s negative control.
-                "user-writable-gsbase",
                 // Costs no kernel build at all, for `loom`'s reason: declared
                 // so `cfg` checking knows the name, and turned on only by
                 // `kernel-loom` — to remove the log wake path's two `SeqCst`

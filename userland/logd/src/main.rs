@@ -191,7 +191,6 @@ fn main() {
         hub,
         stall: Stall::from_args(),
         stopping: None,
-        hold_flush: std::env::args().any(|a| a == "--hold-flush"),
     };
     log.run(&published);
 }
@@ -221,8 +220,6 @@ struct Log {
     /// init's flush was answered and the machine stops: the file's text held
     /// back since, which a refused stop writes, to [`STOPPING_BYTES`].
     stopping: Option<Stopping>,
-    /// `--hold-flush`, until the first flush has spent it.
-    hold_flush: bool,
 }
 
 /// The file's text held back after a flush, and the lines past the bound.
@@ -352,12 +349,7 @@ impl Log {
                 // **The flush runs before the next frame is read**: init sends
                 // RESUME when the stop it flushed for was refused, which can be
                 // before this program got to the flush, and RESUME answers it.
-                RxStep::Frame { msg_type: FLUSH, .. } => {
-                    if std::mem::take(&mut self.hold_flush) {
-                        self.hold_until_init_speaks();
-                    }
-                    return true;
-                }
+                RxStep::Frame { msg_type: FLUSH, .. } => return true,
                 RxStep::Frame { msg_type: RESUME, .. } => self.resume(),
                 RxStep::Frame { msg_type, .. } => {
                     panic!("logd: init sent frame type {msg_type} on the origins connection")
@@ -710,18 +702,6 @@ impl Log {
         }
         self.to_volume(held.text.as_bytes(), true);
         self.hub.append(held.text.as_bytes());
-    }
-
-    /// `--hold-flush`: the first flush waits until init sends another frame,
-    /// as a round held past init's bound by a slow volume does — a test's
-    /// actuator, armed by nothing but a boot config's `args`.
-    fn hold_until_init_speaks(&self) {
-        const BOUND: Duration = Duration::from_secs(60);
-        let poller = Poller::new(1);
-        poller.watch(&self.from_init, READABLE, 0);
-        let mut spoke = false;
-        poller.wait(1, BOUND.as_nanos() as u64, |_| spoke = true);
-        assert!(spoke, "logd: --hold-flush: init sent nothing after its flush in {BOUND:?}");
     }
 
     /// End a `--stall` once any program has said its `--stall-until` line.

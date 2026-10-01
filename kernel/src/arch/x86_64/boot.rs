@@ -57,7 +57,7 @@ pub fn after_console(_args: &KernelArgs, _maps: &[MemoryMapEntry]) {
     // this call reads. `pat::init` restored the `CR0` it found, so a firmware
     // `CD` — which would make every mapping uncacheable whatever the PAT
     // says — ends here.
-    control_regs::init_cr0(0);
+    control_regs::init_cr0();
 
     // The read-back `pat::init` owes, on a boot that now has three channels to
     // carry a refusal.

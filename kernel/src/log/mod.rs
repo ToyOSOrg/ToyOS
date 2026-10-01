@@ -6,12 +6,11 @@
 #![warn(clippy::undocumented_unsafe_blocks)]
 
 pub mod console;
-pub mod nested;
 pub mod read;
 pub mod recovery;
 pub mod registry;
 pub mod shard;
-#[cfg(any(feature = "boot-actuators", feature = "test-actuators"))]
+#[cfg(feature = "test-actuators")]
 pub mod storm;
 pub mod user;
 
@@ -194,14 +193,6 @@ pub fn emit(severity: Severity, args: core::fmt::Arguments) {
     record.len = message.len as u16;
     record.elided = message.elided.min(u16::MAX as usize) as u16;
 
-    // `log-unbracketed-reserve` stages a reservation made with interrupts open.
-    #[cfg(feature = "boot-actuators")]
-    let guard = if crate::actuator::log_unbracketed_reserve() {
-        crate::arch::IrqGuard::unclosed()
-    } else {
-        crate::arch::IrqGuard::close()
-    };
-    #[cfg(not(feature = "boot-actuators"))]
     let guard = crate::arch::IrqGuard::close();
     // Stamped inside the bracket: outside it, ordering by seq and by at_ns
     // could disagree. The NMI handler never logs and #MC halts rather than
@@ -250,11 +241,6 @@ pub fn emit(severity: Severity, args: core::fmt::Arguments) {
 /// the boot to stop.
 #[cfg(feature = "boot-actuators")]
 static HALT_BEFORE_REPAINT: AtomicBool = AtomicBool::new(false);
-
-#[cfg(feature = "boot-actuators")]
-pub fn halt_before_the_next_repaint() {
-    HALT_BEFORE_REPAINT.store(true, Ordering::Relaxed);
-}
 
 /// A line of ordinary kernel log.
 #[macro_export]

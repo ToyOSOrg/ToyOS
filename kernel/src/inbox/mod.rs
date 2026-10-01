@@ -405,53 +405,6 @@ pub fn create(depth: u32) -> Result<(InboxRef, u64), SyscallError> {
     Ok((InboxRef(inbox), shm_vaddr))
 }
 
-/// `handler-post`'s ring: the kernel's own, mapped into no process and
-/// submitted to by nobody, which polls a watch and completes as a submission
-/// does.
-#[cfg(feature = "boot-actuators")]
-pub(crate) struct Staged(Arc<Inbox>);
-
-#[cfg(feature = "boot-actuators")]
-impl Staged {
-    pub(crate) fn new() -> Self {
-        let depth = 2 * toyos_sched::watch::handler_post::HOLDS;
-        let shm = SharedMemObject::create(crate::mm::PAGE_2M).expect("handler-post: a ring's page");
-        let page = shm.phys_before_mapping();
-        write_ring_page(page, depth, depth * 2);
-        Self(Arc::new(Inbox {
-            state: Lock::new(None),
-            completions: IrqLock::new(Some(Completions {
-                shm,
-                page,
-                completion_size: depth * 2,
-                completion_tail: 0,
-            })),
-            watch: IrqWatch::new(),
-        }))
-    }
-
-    /// A poll of this ring on `watch`, which that watch's next post completes.
-    pub(crate) fn poll(&self, watch: &IrqWatch) {
-        let poll = Arc::new(Poll {
-            inbox: self.0.clone(),
-            user_data: 0,
-            handle: RawHandle(0),
-            state: Once::new(),
-        });
-        watch.add_poll(PollEntry { poll, direction: Readiness { readable: true, writable: false } });
-    }
-
-    pub(crate) fn complete(&self) {
-        self.0.complete(0, 0);
-    }
-
-    /// Run `f` holding this ring's own watch's list lock, as a registration
-    /// in `submit` holds it.
-    pub(crate) fn holding_its_watch(&self, f: impl FnOnce()) {
-        self.0.watch.holding(f);
-    }
-}
-
 /// Processes submissions and waits for completions; called from the syscall handler.
 pub fn submit(
     inbox: &Arc<Inbox>,

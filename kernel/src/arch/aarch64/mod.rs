@@ -32,7 +32,6 @@ pub mod psci;
 pub mod rtc;
 pub mod smp;
 pub mod switch;
-pub mod syscall;
 pub mod tlb;
 pub mod trap;
 pub mod watchdog;

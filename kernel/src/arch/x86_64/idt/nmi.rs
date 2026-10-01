@@ -90,21 +90,14 @@ pub(super) extern "sysv64" fn nmi_entry() {
     );
 }
 
-/// Loads all four words in both builds so the observer and shipping handler share one frame layout.
-extern "sysv64" fn note(rip: u64, cs: u64, rsp: u64, rflags: u64) {
+extern "sysv64" fn note(rip: u64, _cs: u64, rsp: u64, rflags: u64) {
     crate::arch::percpu::irq_took!(Nmi);
-    #[cfg(not(feature = "boot-actuators"))]
-    let _ = cs;
-    #[cfg(feature = "boot-actuators")]
-    crate::arch::nmi_gate::observe(rip, cs, rsp);
     crate::sched::dump::note_nmi(rip);
     // After the probe's store and before the nested-NMI staging: a hard lockup
     // ends the machine from here, so the sibling asking where this CPU is still
     // gets its answer, and nothing stages a second NMI onto a frame that is
     // sealing a record.
     crate::hardlockup::sample(rip, rsp, rflags);
-    #[cfg(feature = "boot-actuators")]
-    crate::arch::nmi_gate::stage_nested_if_armed();
 }
 
 /// A second NMI on a stack the first is still standing on.

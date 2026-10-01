@@ -658,10 +658,6 @@ fn execute(action: Action<KernelPayload>) {
 
 /// Consume this CPU's `irq_ring` records into wakes, before the mailbox drain, so a wake posted here reaches this pass's pick.
 fn drain_irqs(entered: super::dump::Entered) {
-    // First in the function, so the stamp means "this CPU reached a
-    // pass" and not "this CPU got all the way through one".
-    #[cfg(feature = "boot-actuators")]
-    crate::heartbeat::note_pass();
     crate::drivers::xhci::poll_if_pending();
     crate::arch::keyboard_controller::service();
     // Here, not at the keystroke: the keystroke's decoding driver's guard is done by this point.
@@ -693,28 +689,15 @@ extern "C" fn idle_loop() -> ! {
         if crate::actuator::dump_deaf_cpu() {
             super::dump::deaf_window();
         }
-        // From the other side: the storming CPU has nothing to run,
-        // while the one under observation spins on `syscall` from Ring 3.
-        #[cfg(feature = "boot-actuators")]
-        if crate::actuator::syscall_window_nmi() {
-            crate::arch::syscall::window_storm();
-        }
         #[cfg(feature = "boot-actuators")]
         if crate::drivers::panic_console::probe_due() {
             panic!("metal-panic-probe: a fatal report over a desktop that owns the screen");
-        }
-        #[cfg(feature = "boot-actuators")]
-        if crate::actuator::handler_post() {
-            crate::watch::handler_post::run();
         }
         crate::scheduler::log_health();
         crate::scheduler::reap_finished();
         // `pass` below covers this too; here as well so a CPU that
         // halts immediately has still run every hook first.
         crate::object::drain_zero_handles();
-        // A heartbeat is a record like any other; the idle loop touches no filesystem itself.
-        #[cfg(feature = "boot-actuators")]
-        crate::heartbeat::poll();
         pass(Dispose::None);
     }
 }

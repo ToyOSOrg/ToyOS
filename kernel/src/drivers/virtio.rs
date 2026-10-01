@@ -165,30 +165,6 @@ const RESET: crate::time::Budget = crate::time::Budget::of(
     "the device is refused, never waited on",
 );
 
-/// The reset handshake's answer; the actuator blinds it to stage a device that
-/// never answers, sparing the console — the staged boot's own capture channel.
-fn reset_acknowledged(common: &Mmio, pci_dev: &PciDevice) -> bool {
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::virtio_reset_stuck() && pci_dev.device_id() != 0x1043 {
-        return false;
-    }
-    #[cfg(not(feature = "boot-actuators"))]
-    let _ = pci_dev;
-    common.read_u32(COMMON_DEVICE_STATUS) == 0
-}
-
-/// Every driver's accepted set carries [`VIRTIO_F_ACCESS_PLATFORM`]; the actuator
-/// withholds it to stage a function no unit sees, sparing the console.
-fn platform_addressing(pci_dev: &PciDevice) -> u64 {
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::virtio_no_access_platform() && pci_dev.device_id() != 0x1043 {
-        return 0;
-    }
-    #[cfg(not(feature = "boot-actuators"))]
-    let _ = pci_dev;
-    VIRTIO_F_ACCESS_PLATFORM
-}
-
 /// The config sub-window a virtio PCI capability names, or why it names none:
 /// the device's index, offset and length checked before a subregion is taken.
 fn cap_subwindow(
@@ -641,30 +617,6 @@ impl<'pool> Virtqueue<'pool> {
         Ok((DescSlot(id), written as u32))
     }
 
-    /// How many used-ring elements this queue has refused, for [`used_selftest`]
-    /// alone: every case it stages would pass against a `poll_used` that
-    /// refused right and counted nothing.
-    ///
-    /// Only the actuator kernel has a reader. A shipping kernel's drivers each
-    /// report their own refusals where they can log — the counter is here, and
-    /// what is done about it is theirs.
-    #[cfg(feature = "boot-actuators")]
-    pub fn refused(&self) -> u32 {
-        self.refused
-    }
-
-    /// Write one used-ring element as a device would; the only writer of a used ring in this kernel, for [`used_selftest`] alone.
-    /// Compiled only into the actuator kernel, so the shipping kernel never gains a way to write its own used ring.
-    #[cfg(feature = "boot-actuators")]
-    fn write_used_as_a_device_would(&self, at: u16, id: u32, len: u32) {
-        let slot = at % self.size;
-        self.used.write(self.used_elem_at(slot), id);
-        self.used.write(self.used_elem_at(slot) + 4, len);
-        // As a device does: the element before the idx.
-        barrier::dma_wmb();
-        self.used.write::<u16>(USED_IDX_OFF, at.wrapping_add(1));
-    }
-
     /// Submit a descriptor chain and block until the device completes it, returning the recovered `DescSlot`.
     pub fn submit_and_wait(
         &mut self,
@@ -735,104 +687,6 @@ fn wait_until<T>(at: u64, mut now: impl FnMut() -> u64, mut look: impl FnMut() -
             }
         }
     }
-}
-
-/// [`wait_until`] on a clock that has already passed its bound, as a waiter
-/// that was off its CPU for all of it finds it: a completion the next look
-/// finds is taken, and one that never comes is `None`.
-#[cfg(feature = "boot-actuators")]
-pub fn wait_selftest() {
-    const CASES: usize = 2;
-    let mut passed = 0usize;
-    let mut looks = 0u32;
-    let late = wait_until(0, || u64::MAX, || {
-        looks += 1;
-        (looks > LOOKS_PER_CHECK).then_some(())
-    });
-    if late.is_some() {
-        passed += 1;
-    } else {
-        log!("virtio: wait selftest FAILED on a completion found after the bound: the wait gave up on it");
-    }
-    if wait_until(0, || u64::MAX, || None::<()>).is_none() {
-        passed += 1;
-    } else {
-        log!("virtio: wait selftest FAILED on a device that never answers");
-    }
-    log!("virtio: wait selftest {passed}/{CASES}");
-}
-
-/// Run [`Virtqueue::poll_used`] over eleven crafted used-ring elements no real device would ever send.
-/// Exercises the shipped `poll_used` over a real [`Virtqueue`] and DMA page; only the writer of the ring is not a device.
-#[cfg(feature = "boot-actuators")]
-pub fn used_selftest() {
-    use super::DmaPool;
-
-    const SIZE: u16 = 16;
-    /// The chain the self-test publishes at descriptor 3, in bytes.
-    const CHAIN: u32 = 256;
-    /// A descriptor inside the queue that no chain was ever built at.
-    const UNBUILT: u32 = 5;
-    const CASES: usize = 11;
-
-    // Not leaked: the pool's pages go back when this returns, and `Dma<'_>`'s borrow keeps the queue from outliving them.
-    let pool = DmaPool::alloc_in(0x1000, crate::iommu::DeviceSpace::Untranslated);
-    let dma = pool.view();
-    let mut q = Virtqueue::new(dma.subview(0, 0x1000), SIZE);
-    q.write_chain(3, &[(dma.device_addr(), CHAIN, BufDir::Writable)]);
-
-    // `at` is what the queue's own `last_used_idx` will be when this element is read.
-    let publish = Virtqueue::write_used_as_a_device_would;
-
-    /// One table row: name, head id, completion length, and what `poll_used` must answer (`None` = must refuse).
-    type Case = (&'static str, u32, u32, Option<(u16, u32)>);
-
-    /// One element, and what `poll_used` must answer for it.
-    const TABLE: [Case; 9] = [
-        ("a chain the device filled", 3, CHAIN, Some((3, CHAIN))),
-        ("a chain the device part-filled", 3, 1, Some((3, 1))),
-        // A readable-only chain: the device wrote nothing into it and says so.
-        ("a chain the device wrote nothing into", 3, 0, Some((3, 0))),
-        ("a head past the queue", SIZE as u32, 0, None),
-        // 0x1_0003 narrows to 3 under `as u16`; a driver that truncated before comparing would accept this.
-        ("a head whose low 16 bits are in range", 0x1_0003, CHAIN, None),
-        ("a head of every bit", u32::MAX, 0, None),
-        ("one byte more than the chain", 3, CHAIN + 1, None),
-        ("a length of every bit", 3, u32::MAX, None),
-        ("a completion for a chain never published", UNBUILT, 0, None),
-    ];
-
-    let mut passed = 0usize;
-    let mut at = 0u16;
-    for (name, id, len, want) in TABLE {
-        publish(&q, at, id, len);
-        at = at.wrapping_add(1);
-        let got = q.poll_used().map(|(slot, len)| (slot.id(), len));
-        if got == want {
-            passed += 1;
-        } else {
-            log!("virtio: used-ring selftest FAILED on {name}: got {got:?}, want {want:?}");
-        }
-    }
-
-    // A completion behind a refused element is still delivered: forging one element must not hide the rest.
-    publish(&q, at, u32::MAX, u32::MAX);
-    publish(&q, at.wrapping_add(1), 3, CHAIN);
-    let got = q.poll_used().map(|(slot, len)| (slot.id(), len));
-    if got == Some((3, CHAIN)) {
-        passed += 1;
-    } else {
-        log!("virtio: used-ring selftest FAILED on a chain behind a refused element: got {got:?}");
-    }
-
-    // The count is checked too: every case above would pass against a `poll_used` that refused right but counted nothing.
-    let refused = q.refused();
-    if refused != 7 {
-        log!("virtio: used-ring selftest FAILED on the count: refused {refused}, want 7");
-    } else {
-        passed += 1;
-    }
-    log!("virtio: used-ring selftest {passed}/{CASES}");
 }
 
 /// Drive the real walk, window check and parse over config space no device produces: a cyclic
@@ -1027,7 +881,7 @@ impl VirtioDevice {
 
         // Order fixed by virtio 1.2 §3.1.1: reset, ACKNOWLEDGE, DRIVER, negotiate features, FEATURES_OK, verify.
         common.write_u32(COMMON_DEVICE_STATUS, 0);
-        if !crate::clock::settles(RESET.nanos(), || reset_acknowledged(&common, pci_dev)) {
+        if !crate::clock::settles(RESET.nanos(), || common.read_u32(COMMON_DEVICE_STATUS) == 0) {
             pci_dev.disable_bus_master();
             return Err(InitRefusal::ResetUnanswered);
         }
@@ -1043,7 +897,7 @@ impl VirtioDevice {
         let device_features_hi = common.read_u32(COMMON_DEVICE_FEATURE);
         let device_features = (device_features_hi as u64) << 32 | device_features_lo as u64;
 
-        let features = device_features & (accepted_features | platform_addressing(pci_dev));
+        let features = device_features & (accepted_features | VIRTIO_F_ACCESS_PLATFORM);
         log!(
             "VirtIO: PCI {:02x}:{:02x}.{} features device={device_features:#x} \
              negotiated={features:#x} access_platform={}",

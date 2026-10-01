@@ -98,8 +98,6 @@ macro_rules! asm_label_addr {
         addr as *const u8
     }};
 }
-#[cfg(feature = "boot-actuators")]
-pub(crate) use asm_label_addr;
 
 /// Copies the trampoline blob to physical page 0x8000 via the direct map; there is no identity map this early.
 fn copy_trampoline() {
@@ -275,7 +273,7 @@ extern "C" fn ap_entry() -> ! {
     AP_TSC.store(cpu::rdtsc(), Ordering::Release);
 
     // Must run before `pat::init`, which restores the CR0 this call sets.
-    crate::arch::control_regs::init_cr0(percpu::cpu_id());
+    crate::arch::control_regs::init_cr0();
 
     // Must run before this CPU touches the framebuffer, which needs write-combining mapped first.
     crate::arch::pat::init();

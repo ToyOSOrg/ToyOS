@@ -103,9 +103,6 @@ pub struct PerCpu {
     /// Non-zero inside this CPU's NMI handler, written only by `arch::idt::nmi`'s entry; IST2 isn't re-entrant, so this proves no second NMI lands on it.
     nmi_active: u32,
     ap_token: u32,
-    /// `nmi_gate::hold`'s word: the storm asks in it from another CPU, and `arch::syscall`'s entry acknowledges and spins on it inside its window, through [`OFF_NMI_HOLD`].
-    #[cfg(feature = "boot-actuators")]
-    nmi_hold: AtomicU64,
     /// Interrupt deliveries, one counter per `irq_census::Source`; written only by `irq_census::irq_took!`, kept last so growing `SLOTS` moves nothing else.
     pub irq_counts: [AtomicU64; crate::irq_census::SLOTS],
 }
@@ -202,9 +199,6 @@ pub(crate) const OFF_FAULT_STATE: u32 = offset_of!(PerCpu, fault_state) as u32;
 pub(crate) const OFF_NMI_ACTIVE: u32 = offset_of!(PerCpu, nmi_active) as u32;
 /// The AP's bring-up token, read by `ap_entry` to answer for its own attempt.
 const OFF_AP_TOKEN: u32 = offset_of!(PerCpu, ap_token) as u32;
-/// Spun on by `arch::syscall`'s entry from inside its window, with nothing pushed.
-#[cfg(feature = "boot-actuators")]
-pub(crate) const OFF_NMI_HOLD: u32 = offset_of!(PerCpu, nmi_hold) as u32;
 /// Where this CPU's interrupt counters start; `irq_census::slot_offset` derives every handler's offset from it.
 pub const OFF_IRQ_COUNTS: u32 = offset_of!(PerCpu, irq_counts) as u32;
 
@@ -358,8 +352,6 @@ fn alloc_percpu(cpu_id: u32) -> *mut PerCpu {
                 log_shard: log::shard_for(cpu_id) as *const log::Shard as u64,
                 nmi_active: 0,
                 ap_token: 0,
-                #[cfg(feature = "boot-actuators")]
-                nmi_hold: AtomicU64::new(0),
                 irq_counts: [const { AtomicU64::new(0) }; crate::irq_census::SLOTS],
             },
         );
@@ -371,8 +363,6 @@ fn alloc_percpu(cpu_id: u32) -> *mut PerCpu {
     percpu.init_tss_descriptor();
     // Published before the CPU it belongs to runs an instruction — no window where the census misses it.
     crate::irq_census::publish(cpu_id, percpu.irq_counts.as_ptr());
-    #[cfg(feature = "boot-actuators")]
-    crate::arch::nmi_gate::publish(cpu_id, &raw const percpu.nmi_hold, &raw const percpu.user_rsp);
     ptr
 }
 
@@ -404,8 +394,6 @@ pub fn reserve_log_slot(
             pid_off = const OFF_CURRENT_PID,
             options(preserves_flags),
         );
-        // `log-nested-reserve`'s injection point: must sit between the shard-pointer read and the `xadd`, the only place ordering is decided (no-op outside tests).
-        crate::log::nested::reserve_window();
         seq = (&*(shard as *const log::Shard)).reserve(guard);
     }
     (shard as *const log::Shard, seq, cpu, tid, pid)
@@ -519,13 +507,6 @@ pub fn init_bsp(lapic_id: u32) {
     // handlers report on no channel of this kernel's — so a fault in `fpu`
     // below would stop the machine with the panel holding the record before it.
     super::idt::init();
-
-    // The first instruction at which a panic is reportable at all, which is why
-    // it is where this fires: what it judges is that the reset register was
-    // already decoded, so a panic here can end the machine and not just describe it.
-    if crate::actuator::test_panic_after_idt() {
-        panic!("test-panic-after-idt: the IDT is loaded and nothing else is up");
-    }
 
     super::fpu::init(0);
     // Between `fpu::init` and this function's own line: the facts `fpu::init`

@@ -409,20 +409,10 @@ impl RecordSink for Raw {
 /// Whether `klogd` leaves the queue to the stop: `console-queue-at-the-stop`'s
 /// `klogd`, behind a stop that has been claimed.
 fn left_to_the_stop() -> bool {
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::console_queue_at_the_stop() {
-        return crate::quiesce::claimed();
-    }
     false
 }
 
 extern "C" fn body(_arg: u64) -> ! {
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::klogd_fault() {
-        // SAFETY: unsound by design — a staged Ring 0 null read, only on this actuator's boot.
-        // Volatile: a plain read could be optimized to unreachable, leaving nothing to fault.
-        unsafe { core::ptr::read_volatile(core::ptr::null::<u64>()) };
-    }
 
     let parkable = scheduler::Parkable::at_entry();
     let handle = crate::sched::driver::current_handle().expect("klogd runs as a task");
