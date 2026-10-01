@@ -6,7 +6,7 @@
 //! claims its word if it is parked or committing and flags it otherwise, so its
 //! own next commit rechecks instead of parking. A **ring** entry is one poll a
 //! process submitted and is *posted*: a post hands it to [`Ring::fire`], once,
-//! and the environment writes that poll's completion into the ring it names.
+//! and the environment owes the ring it names a look at that poll's object.
 //!
 //! **A lost wake has no expression here.** A thread registers before it reads
 //! its condition, under the list lock a post also takes, so a post either
@@ -54,14 +54,14 @@ pub enum Fire {
 
 /// One poll a ring is waiting on, as the watch holds it.
 pub trait Ring {
-    /// Post this poll's completion. One-shot across every watch the poll is
+    /// Fire this poll for its ring. One-shot across every watch the poll is
     /// registered on: an entry that already fired, or whose poll was withdrawn,
-    /// posts nothing. Called with at most the posting watch's list lock held,
+    /// does nothing. Called with at most the posting watch's list lock held,
     /// and from an interrupt handler by a post in place: may take only its
     /// ring's own lock and post only the watch its ring's submitters park on,
     /// and allocates and frees nothing.
     fn fire(&self, how: Fire);
-    /// Whether a fire would still post anything. `false` is permanent.
+    /// Whether a fire would still do anything. `false` is permanent.
     fn live(&self) -> bool;
 }
 

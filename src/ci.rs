@@ -258,6 +258,11 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(KERNEL_LOOM, "log-ring-loads-swapped", Some("log_ring"), &[
         "a_published_record_is_whole_and_read_once ... FAILED",
     ]),
+    red(KERNEL_LOOM, "post-is-an-answer", Some("inbox_answer"), &[
+        "a_post_with_nothing_to_read_answers_nothing ... FAILED",
+        "a_post_that_lands_after_its_bytes_were_read_answers_nothing ... FAILED",
+        "a_poll_armed_again_does_not_end_the_look ... FAILED",
+    ]),
     red(KERNEL_LOOM, "poll-fire-load-store", Some("poll_once"), &[
         "a_post_and_a_recheck_answer_a_poll_once ... FAILED",
         "a_withdrawal_and_a_post_never_both_take_a_poll ... FAILED",

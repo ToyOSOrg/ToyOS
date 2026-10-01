@@ -1,9 +1,8 @@
 //! Event-driven I/O polling on an [inbox](toyos_abi::inbox).
 
-use core::cell::RefCell;
 use core::sync::atomic::{AtomicU32, Ordering};
 use toyos_abi::RawHandle;
-use toyos_abi::{clock, syscall};
+use toyos_abi::syscall;
 use toyos_abi::inbox::{
     Submission, Completion, RingHeader, RingLayout,
     OP_WATCH, SUBMISSION_RING_OFF, COMPLETION_RING_OFF, SUBMISSIONS_OFF,
@@ -167,77 +166,6 @@ impl Rings {
     }
 }
 
-/// The registrations that can still answer, at most one per handle.
-///
-/// **What the kernel hands back is the registration's number, never the
-/// caller's token.** Watching a handle again replaces its registration — the
-/// key `process_watch` withdraws an armed poll by — but an answer the replaced
-/// one has posted stays in the ring, and so does one it posts after a
-/// replacement that answered at once. Under the caller's token either reads as
-/// news about the handle, of bytes already read or already announced. Under a
-/// number, an answer that is not its handle's latest registration's names
-/// nothing here and is dropped.
-struct Registry {
-    live: [Registration; MAX_LIVE],
-    len: usize,
-    /// Twice the poller's capacity. After a wait a live registration is on a
-    /// handle still open — a close answers the poll on it, and the wait handed
-    /// that out, unless `ops::close_ends_polls` says the close ends nothing —
-    /// so at most the declared set; a round adds at most the declared set again.
-    limit: usize,
-    next: u64,
-}
-
-#[derive(Clone, Copy)]
-struct Registration {
-    handle: RawHandle,
-    token: u64,
-    number: u64,
-}
-
-const VACANT: Registration = Registration { handle: RawHandle(0), token: 0, number: 0 };
-
-/// The widest registry, for a poller of [`Poller::MAX_HANDLES`].
-const MAX_LIVE: usize = 2 * Poller::MAX_HANDLES as usize;
-
-impl Registry {
-    fn new(limit: usize) -> Self {
-        Self { live: [VACANT; MAX_LIVE], len: 0, limit, next: 0 }
-    }
-
-    /// The number a registration of `handle` is submitted under; whatever the
-    /// handle's earlier registration posts answers nothing from here on.
-    fn register(&mut self, handle: RawHandle, token: u64) -> u64 {
-        let registration = Registration { handle, token, number: self.next };
-        self.next += 1;
-        match self.live[..self.len].iter_mut().find(|r| r.handle == handle) {
-            Some(replaced) => *replaced = registration,
-            None => {
-                assert!(
-                    self.len < self.limit,
-                    "Poller: {} handles hold a registration that has not answered, the most \
-                     a poller of capacity {} keeps: it watches past its declared set",
-                    self.len,
-                    self.limit / 2,
-                );
-                self.live[self.len] = registration;
-                self.len += 1;
-            }
-        }
-        registration.number
-    }
-
-    /// The caller's token for the answer posted under `number`, which ends its
-    /// registration, or `None` for one a later registration replaced.
-    fn answer(&mut self, number: u64) -> Option<u64> {
-        let at = self.live[..self.len].iter().position(|r| r.number == number)?;
-        let token = self.live[at].token;
-        self.len -= 1;
-        self.live[at] = self.live[self.len];
-        Some(token)
-    }
-}
-
 /// An inbox, for watching handles for readiness.
 ///
 /// Owns the inbox handle and shared memory mapping. Submissions are batched
@@ -251,9 +179,7 @@ impl Registry {
 /// and sizes both rings from it: the submission ring holds them all, so no
 /// batch is ever flushed mid-registration, and the kernel's completion ring —
 /// always twice the submission ring — holds the most completions that can exist
-/// between two [`wait`](Self::wait) calls, which is two per watched handle (a
-/// registration left over from the previous round firing, and this round's
-/// registration finding the handle ready).
+/// between two [`wait`](Self::wait) calls.
 ///
 /// Going past the capacity is a contract violation and panics, because it is
 /// the caller's own bug and the alternative is the failure this replaced: the
@@ -265,28 +191,16 @@ impl Registry {
 /// [`wait`](Self::wait) reads the kernel's drop counter on every call — an
 /// assert that should be unreachable, kept because that is the shape a
 /// fail-fast check is supposed to have.
-///
-/// **A token [`wait`](Self::wait) hands out is the answer of its handle's
-/// latest registration, and a registration answers once.** Watching a handle
-/// replaces its earlier registration, and whatever that one posts, before the
-/// replacement or after it, is dropped (`Registry`). So a caller that watches
-/// a handle before every wait is never told twice of one arrival, nor of bytes
-/// it read before that watch: what it is told of is there to read. A
-/// registration left standing across waits answers whenever its handle turns
-/// ready, so a caller that reads such a handle untold watches it again before
-/// it waits.
 pub struct Poller {
     inbox: RawHandle,
     rings: Rings,
     capacity: u32,
-    registry: RefCell<Registry>,
 }
 
 // Safety: the base pointer is process-local shared memory mapped from the
 // kernel. It is only ever reached through `Rings`, which takes no reference
 // over it: atomics for the shared words, whole-value volatile copies for
-// everything else. Not `Sync`: a watch moves the submission tail in two steps,
-// and the registry is a `RefCell`.
+// everything else. Not `Sync`: a watch moves the submission tail in two steps.
 unsafe impl Send for Poller {}
 
 impl Poller {
@@ -328,12 +242,7 @@ impl Poller {
             rings.submission_ring_size,
             rings.completion_ring_size,
         );
-        Self::over(inbox, rings, capacity)
-    }
-
-    fn over(inbox: RawHandle, rings: Rings, capacity: u32) -> Self {
-        let registry = RefCell::new(Registry::new(2 * capacity as usize));
-        Self { inbox, rings, capacity, registry }
+        Self { inbox, rings, capacity }
     }
 
     /// Watch the given handle for readiness.
@@ -360,7 +269,6 @@ impl Poller {
             self.pending(),
             self.capacity,
         );
-        let number = self.registry.borrow_mut().register(handle, token);
         let tail = self.rings.submission_tail().load(Ordering::Acquire);
         let idx = tail & (self.rings.submission_ring_size - 1);
         self.rings.write_submission(
@@ -369,7 +277,7 @@ impl Poller {
                 op: OP_WATCH,
                 handle,
                 op_flags: flags,
-                token: number,
+                token,
                 ..Submission::default()
             },
         );
@@ -393,59 +301,21 @@ impl Poller {
             .expect("Poller::submit: inbox_submit rejected the batch");
     }
 
-    /// Submit pending entries and hand `f` the token of every answer, until at
-    /// least `min_complete` have been handed out or `timeout_nanos` has passed
-    /// — `0` looks once, `u64::MAX` never passes.
-    pub fn wait(&self, min_complete: u32, timeout_nanos: u64, mut f: impl FnMut(u64)) {
-        self.wait_on(
-            min_complete,
-            timeout_nanos,
-            &mut f,
-            |min, nanos| self.submit(min, nanos),
-            clock::nanos_since_boot,
-        );
-    }
-
-    /// [`wait`](Self::wait) over the kernel's half and a clock it is handed,
-    /// so a host test can hand it fakes.
+    /// Submit pending entries and wait for completions.
     ///
-    /// The kernel counts a dropped answer towards `min_complete` and returns
-    /// for it, so the wait goes on, for what is left of its time, until the
-    /// answers handed out make up the count.
-    fn wait_on(
-        &self,
-        min_complete: u32,
-        timeout_nanos: u64,
-        f: &mut impl FnMut(u64),
-        mut submit: impl FnMut(u32, u64),
-        now: impl Fn() -> u64,
-    ) {
-        let deadline = now().saturating_add(timeout_nanos);
-        let mut nanos = timeout_nanos;
-        let mut handed = 0;
-        loop {
-            submit(min_complete - handed, nanos);
-            handed += self.drain(f);
-            if handed >= min_complete {
-                return;
-            }
-            nanos = match timeout_nanos {
-                0 => return,
-                u64::MAX => u64::MAX,
-                _ => match deadline.checked_sub(now()) {
-                    Some(left) if left > 0 => left,
-                    _ => return,
-                },
-            };
-        }
+    /// Blocks until at least `min_complete` completions are ready or `timeout_nanos`
+    /// elapses. Calls `f` for each completed token: a handle that was ready when
+    /// the kernel looked, inside this wait ([`OP_WATCH`]).
+    pub fn wait(&self, min_complete: u32, timeout_nanos: u64, mut f: impl FnMut(u64)) {
+        self.submit(min_complete, timeout_nanos);
+        self.drain(&mut f);
     }
 
-    /// Read every completion the kernel has published, oldest first, and hand
-    /// `f` the token of each that answers a live registration; how many did.
+    /// Read every completion the kernel has published, oldest first.
     ///
     /// Split from [`wait`](Self::wait) because it is the half that is a pure
     /// function of the page: a host test can hand it a fake one.
-    fn drain(&self, f: &mut impl FnMut(u64)) -> u32 {
+    fn drain(&self, f: &mut impl FnMut(u64)) {
         // Unreachable, and kept for that reason: `capacity` bounds the
         // registrations and the rings are sized from `capacity`, so nothing a
         // conforming caller does can make the kernel drop a completion here.
@@ -460,16 +330,14 @@ impl Poller {
             self.capacity, self.rings.submission_ring_size, self.rings.completion_ring_size,
         );
 
-        let mut handed = 0;
         loop {
             let head = self.rings.completion_head().load(Ordering::Acquire);
             let tail = self.rings.completion_tail().load(Ordering::Acquire);
             if head == tail {
-                return handed;
+                break;
             }
             let idx = head & (self.rings.completion_ring_size - 1);
             let completion = self.rings.completion_at(idx);
-            self.rings.completion_head().store(head.wrapping_add(1), Ordering::Release);
             // Do not filter on `completion.result`. A negative result is the
             // kernel saying the registration is over and will never fire
             // (a watched handle's close answers every poll on a watch it ends
@@ -477,11 +345,8 @@ impl Poller {
             // to that exactly as to readiness — by looking at the handle again.
             // A zero result is meaningful too: `OP_ACCEPT` reports handle 0
             // that way.
-            let Some(token) = self.registry.borrow_mut().answer(completion.token) else {
-                continue;
-            };
-            f(token);
-            handed += 1;
+            f(completion.token);
+            self.rings.completion_head().store(head.wrapping_add(1), Ordering::Release);
         }
     }
 }
@@ -495,8 +360,6 @@ impl Drop for Poller {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core::cell::Cell;
-    use core::mem::ManuallyDrop;
     use toyos_abi::inbox::{
         RING_DROPPED_OFF, RING_HEAD_OFF, RING_SIZE_OFF, RING_TAIL_OFF,
     };
@@ -569,109 +432,6 @@ mod tests {
                     .write(entry);
             }
         }
-
-        /// The submission in slot `index`, copied out as `submission_at` does.
-        fn submission(&mut self, index: u32) -> Submission {
-            let base = self.base();
-            // SAFETY: `index` is under the submission ring size, so the slot
-            // is inside `PAGE_BYTES`; `SUBMISSIONS_OFF` is page-aligned and
-            // `Submission` is 40 bytes, 8-aligned.
-            unsafe {
-                (base.add(SUBMISSIONS_OFF as usize + index as usize * core::mem::size_of::<Submission>())
-                    as *const Submission)
-                    .read_volatile()
-            }
-        }
-    }
-
-    /// The kernel's half of a watch, as `process_watch` and an object's post
-    /// do it, over a [`FakePage`]: a submission on a handle already ready is
-    /// answered at once and leaves any earlier poll on it armed; one on a
-    /// handle not ready withdraws the earlier poll and arms; a post answers
-    /// every poll armed on its handle. Every answer carries its submission's
-    /// token, as the kernel's do.
-    struct FakeKernel {
-        page: FakePage,
-        ready: Vec<RawHandle>,
-        armed: Vec<(RawHandle, u64)>,
-    }
-
-    /// A poller of `capacity` and the kernel behind its page. The poller is
-    /// never dropped: its `Drop` is a syscall.
-    fn pair(capacity: u32) -> (FakeKernel, ManuallyDrop<Poller>) {
-        let entries = capacity.next_power_of_two();
-        let mut page = FakePage::new(entries, 2 * entries);
-        let poller = ManuallyDrop::new(Poller::over(RawHandle(0), rings(&mut page), capacity));
-        (FakeKernel { page, ready: Vec::new(), armed: Vec::new() }, poller)
-    }
-
-    impl FakeKernel {
-        /// `inbox_submit`'s first half: every queued submission, registered.
-        fn submit(&mut self) {
-            let head_at = SUBMISSION_RING_OFF as usize + RING_HEAD_OFF;
-            let size = self.page.get(SUBMISSION_RING_OFF as usize + RING_SIZE_OFF);
-            loop {
-                let head = self.page.get(head_at);
-                if head == self.page.get(SUBMISSION_RING_OFF as usize + RING_TAIL_OFF) {
-                    return;
-                }
-                let s = self.page.submission(head & (size - 1));
-                self.page.put(head_at, head.wrapping_add(1));
-                if self.ready.contains(&s.handle) {
-                    self.answer(s.token);
-                } else {
-                    self.armed.retain(|&(h, _)| h != s.handle);
-                    self.armed.push((s.handle, s.token));
-                }
-            }
-        }
-
-        /// Bytes reach `handle`, and its post has not run yet.
-        fn fill(&mut self, handle: RawHandle) {
-            self.ready.push(handle);
-        }
-
-        /// `handle`'s post: every poll armed on it answers.
-        fn post(&mut self, handle: RawHandle) {
-            let (fired, armed): (Vec<_>, Vec<_>) =
-                core::mem::take(&mut self.armed).into_iter().partition(|&(h, _)| h == handle);
-            self.armed = armed;
-            for (_, token) in fired {
-                self.answer(token);
-            }
-        }
-
-        /// Bytes reach `handle` and its post runs.
-        fn arrive(&mut self, handle: RawHandle) {
-            self.fill(handle);
-            self.post(handle);
-        }
-
-        /// `handle`'s bytes are read by a call that did not ask the poller.
-        fn take(&mut self, handle: RawHandle) {
-            self.ready.retain(|&h| h != handle);
-        }
-
-        /// Answers posted and not yet drained.
-        fn posted(&mut self) -> u32 {
-            let head = self.page.get(COMPLETION_RING_OFF as usize + RING_HEAD_OFF);
-            self.page.get(COMPLETION_RING_OFF as usize + RING_TAIL_OFF).wrapping_sub(head)
-        }
-
-        fn answer(&mut self, token: u64) {
-            let tail_at = COMPLETION_RING_OFF as usize + RING_TAIL_OFF;
-            let tail = self.page.get(tail_at);
-            let size = self.page.get(COMPLETION_RING_OFF as usize + RING_SIZE_OFF);
-            self.page.post(tail & (size - 1), Completion { token, result: READABLE as i32, flags: 0 });
-            self.page.put(tail_at, tail.wrapping_add(1));
-        }
-    }
-
-    /// Every token one drain hands out.
-    fn drained(poller: &Poller) -> Vec<u64> {
-        let mut seen = Vec::new();
-        poller.drain(&mut |token| seen.push(token));
-        seen
     }
 
     fn rings(page: &mut FakePage) -> Rings {
@@ -796,161 +556,5 @@ mod tests {
         page.put(SUBMISSION_RING_OFF as usize + RING_TAIL_OFF, 1);
         let r = rings(&mut page);
         assert_eq!(r.pending(), 3);
-    }
-
-    const H: RawHandle = RawHandle(5);
-    const G: RawHandle = RawHandle(6);
-
-    /// A registration a wait did not see answer, answered by bytes a call that
-    /// did not ask the poller read; the next watch finds the handle empty. The
-    /// answer still in the ring announces bytes that are gone, and a reader
-    /// that took it for news would block in its read.
-    #[test]
-    fn an_answer_for_bytes_already_read_is_not_handed_out() {
-        let (mut kernel, poller) = pair(1);
-        poller.watch_raw(H, READABLE, 7);
-        kernel.submit();
-        assert_eq!(drained(&poller), [0u64; 0]);
-        kernel.arrive(H);
-        kernel.take(H);
-        poller.watch_raw(H, READABLE, 7);
-        kernel.submit();
-        assert_eq!(drained(&poller), [0u64; 0]);
-        kernel.arrive(H);
-        assert_eq!(drained(&poller), [7]);
-    }
-
-    /// A watch that finds its handle ready is answered at once and leaves the
-    /// poll it replaced armed, which answers again when the post that made the
-    /// handle ready runs.
-    #[test]
-    fn an_answer_the_replaced_registration_posts_late_is_not_handed_out() {
-        let (mut kernel, poller) = pair(1);
-        poller.watch_raw(H, READABLE, 1);
-        kernel.submit();
-        kernel.fill(H);
-        poller.watch_raw(H, READABLE, 2);
-        kernel.submit();
-        kernel.post(H);
-        assert_eq!(drained(&poller), [2]);
-    }
-
-    /// epoll(7): "Does an operation on a file descriptor affect the already
-    /// collected but not yet reported events? … Modify will reread available
-    /// I/O." An answer collected before its handle is watched again is
-    /// reported once, under the new watch's token.
-    #[test]
-    fn a_handle_watched_again_is_answered_once_under_its_new_token() {
-        let (mut kernel, poller) = pair(1);
-        poller.watch_raw(H, READABLE, 1);
-        kernel.submit();
-        kernel.arrive(H);
-        poller.watch_raw(H, READABLE, 2);
-        kernel.submit();
-        assert_eq!(drained(&poller), [2]);
-    }
-
-    /// A registration the caller does not renew is not replaced: it answers in
-    /// whichever later wait its handle turns ready.
-    #[test]
-    fn a_registration_left_standing_still_answers() {
-        let (mut kernel, poller) = pair(2);
-        poller.watch_raw(H, READABLE, 3);
-        poller.watch_raw(G, READABLE, 4);
-        kernel.submit();
-        assert_eq!(drained(&poller), [0u64; 0]);
-        poller.watch_raw(G, READABLE, 4);
-        kernel.submit();
-        kernel.arrive(H);
-        assert_eq!(drained(&poller), [3]);
-    }
-
-    /// The kernel leaves a wait for an answer the poller then drops, as
-    /// `an_answer_for_bytes_already_read_is_not_handed_out` sets up, and the
-    /// wait goes on to the live one rather than returning with none.
-    #[test]
-    fn a_wait_sleeps_past_a_dropped_answer_to_the_live_one() {
-        let (mut kernel, poller) = pair(1);
-        poller.watch_raw(H, READABLE, 7);
-        kernel.submit();
-        kernel.arrive(H);
-        kernel.take(H);
-        poller.watch_raw(H, READABLE, 7);
-        let mut submits = 0;
-        let mut seen = Vec::new();
-        let submit = |_, _| {
-            kernel.submit();
-            submits += 1;
-            if submits == 2 {
-                kernel.arrive(H);
-            }
-        };
-        poller.wait_on(1, u64::MAX, &mut |token| seen.push(token), submit, || 0);
-        assert_eq!((seen, submits), (vec![7], 2));
-    }
-
-    /// A wait woken only by answers it drops ends at its deadline, and sleeps
-    /// only what is left of it.
-    #[test]
-    fn a_wait_woken_only_by_dropped_answers_ends_at_its_deadline() {
-        let (mut kernel, poller) = pair(1);
-        poller.watch_raw(H, READABLE, 7);
-        kernel.submit();
-        kernel.arrive(H);
-        kernel.take(H);
-        poller.watch_raw(H, READABLE, 7);
-        let clock = Cell::new(100);
-        let mut slept = Vec::new();
-        let mut seen = Vec::new();
-        let submit = |min, nanos| {
-            kernel.submit();
-            slept.push(nanos);
-            // Back 300 ns later for what is posted, and at its deadline for nothing.
-            clock.set(clock.get() + if kernel.posted() >= min { 300 } else { nanos });
-        };
-        poller.wait_on(1, 1_000, &mut |token| seen.push(token), submit, || clock.get());
-        assert_eq!((seen, slept), (vec![], vec![1_000, 700]));
-    }
-
-    /// A wait of zero looks once, whatever it drops.
-    #[test]
-    fn a_wait_of_zero_looks_once() {
-        let (mut kernel, poller) = pair(1);
-        poller.watch_raw(H, READABLE, 7);
-        kernel.submit();
-        kernel.arrive(H);
-        kernel.take(H);
-        poller.watch_raw(H, READABLE, 7);
-        let mut submits = 0;
-        let submit = |_, _| {
-            kernel.submit();
-            submits += 1;
-        };
-        poller.wait_on(1, 0, &mut |token| panic!("handed out {token}"), submit, || 0);
-        assert_eq!(submits, 1);
-    }
-
-    /// A registration that answered holds no place, so a poller that watches
-    /// one handle after another for its whole life never reaches its bound.
-    #[test]
-    fn a_registration_that_answered_holds_no_place() {
-        let (mut kernel, poller) = pair(1);
-        for handle in 1..=3 {
-            poller.watch_raw(RawHandle(handle), READABLE, u64::from(handle));
-            kernel.submit();
-            kernel.arrive(RawHandle(handle));
-            assert_eq!(drained(&poller), [u64::from(handle)]);
-        }
-    }
-
-    /// Past twice the declared set, a registration is refused by name.
-    #[test]
-    #[should_panic(expected = "watches past its declared set")]
-    fn a_registration_past_twice_the_capacity_panics() {
-        let (mut kernel, poller) = pair(1);
-        for handle in 1..=3 {
-            poller.watch_raw(RawHandle(handle), READABLE, 0);
-            kernel.submit();
-        }
     }
 }

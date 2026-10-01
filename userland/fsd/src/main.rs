@@ -515,8 +515,6 @@ impl Server {
         }
     }
 
-    /// Take the connection `cap`'s port answered ready for: this process is
-    /// the port's one acceptor, so it is still queued.
     fn accept(&mut self, cap: usize) {
         let conn = match self.caps[cap].acceptor.accept() {
             Ok(conn) => conn,
