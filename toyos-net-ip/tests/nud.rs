@@ -745,19 +745,17 @@ fn b_quiescent_behind_a_full_queue() -> H {
 fn s_ip_nud_030_an_entry_whose_lifetime_runs_stays_as_it_drains() {
     // 1 and 2 leave before B's idle lifetime passes. B quiescent UNREACHABLE since 4,000, or since
     // 7,000 as the backoff of a request lost at 4,000 ends with nothing sent.
-    for backoff in [false, true] {
+    for since in [4_000, 7_000] {
         let mut h = b_quiescent_behind_a_full_queue();
-        if backoff {
+        if since == 7_000 {
             h.at(4_000);
             assert!(matches!(h.udp_to(B), Ok(Some(f)) if destination_of(&f) == MAC_B));
             h.ip.fire(H::instant(7_000));
-            h.at(7_000);
-        } else {
-            h.at(5_000);
         }
+        h.at(since + 1_000);
         let to_b: Vec<Vec<u8>> = h.out().iter().filter(|o| o.to() == MAC_B).map(payload).collect();
         assert_eq!(to_b, [b"1", b"2"]);
-        assert!(matches!(h.state(B), Some(Nud::Unreachable(u)) if u.quiescent()), "its lifetime runs: B stays as 2 leaves");
+        assert!(matches!(h.state(B), Some(Nud::Unreachable(u)) if u.quiescent()), "quiescent since {since}, its lifetime runs: B stays as 2 leaves");
     }
 
     // B STALE since 45,000, as REACHABLE from V-ARP-REPLY at 0 ends.
@@ -767,7 +765,7 @@ fn s_ip_nud_030_an_entry_whose_lifetime_runs_stays_as_it_drains() {
     h.at(45_000);
     let to_b: Vec<Vec<u8>> = h.out().iter().filter(|o| o.to() == MAC_B).map(payload).collect();
     assert_eq!(to_b, [b"1", b"2"]);
-    assert!(h.is_stale(B), "its lifetime runs: B stays as 2 leaves");
+    assert!(h.is_stale(B), "STALE since 45,000, its lifetime runs: B stays as 2 leaves");
 }
 
 /// With credit one frame at a time: 1 and 2 leave to MAC B, B still UNREACHABLE after each, then
