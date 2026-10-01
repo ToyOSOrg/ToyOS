@@ -309,3 +309,88 @@ the tool, not the bytes a user's own data becomes when the tool writes it: the
 layout is a published on-disk format, not a copyrightable work of the program,
 and the file contents are ours. The tool is not distributed with this repository
 in any form.
+
+
+toyos-fat32/tests/fixtures/ — volumes macOS's FAT tools wrote
+--------------------------------------------------------------
+
+    blank-512.runs     3,672 bytes, of a  67,108,864-byte raw volume
+      sha256 4f1686152769fb4b064a78b0a2287c8b54bff3ec1e279b35c8f337d538a45f78
+      raw    51dfc22ac6ab939a28f8cf113da48cbb75eb0b4f5a4d2b79c9f09522a58fe052
+    blank-4k.runs      3,672 bytes, of a 314,572,800-byte raw volume
+      sha256 14e98fc505450882f4d284fb712d32b4f9e4d50c1bfc86702ace8f0adee745e0
+      raw    788974e418ac37cb43f65057f609bd4234b4f5fffb10e8be7563a608b423e137
+    read-512.runs    336,152 bytes, of a  67,108,864-byte raw volume
+      sha256 6bef14efca36070830f5a4a2b1dc9b69a0e2627679cc5c9ed542acaa4ece416c
+      raw    911903c9338144f65df86a6f98d87c375725806a709db3bb48d772fe3b719fbb
+    read-4k.runs      55,032 bytes, of a 314,572,800-byte raw volume
+      sha256 cab78e1ea6c46b0a04a0de32a24f1a6ac90a2017dd7188745de2d603c5ab121b
+      raw    cb4cefe9a9b2b17371ec20fa8a49b16475f2434ff5ed5d9277c99bef3cdd592c
+    hostile.runs      36,536 bytes, of a  67,108,864-byte raw volume
+      sha256 c570b3c6944f47d2cd1498da14f12c4a98dc85683f782624181917eba68f9066
+      raw    1750198122459dee8f1b4d54ac460d9689279189d6ff59f6072d57d00dbbd68e
+    empty-file.runs    6,264 bytes, of a  67,108,864-byte raw volume
+      sha256 68a6abf1626e4bdf6b3586d3f52b2d7051390e4e18beb31258dd0021bb3e96b9
+      raw    ff0e162a36ccf76d1aa5cb36ce47c0d728442bf926d59af498d0d55820bcfd85
+    Boot stub: Copyright (c) 1998 Robert Nordier
+    Licence text: licenses/BSD-2-Clause-newfs_msdos.txt
+    SPDX-License-Identifier: (MIT OR Apache-2.0) AND BSD-2-Clause
+
+`toyos-fat32`'s host tests read these volumes, and write into the two blank
+ones. The only honest judge of a FAT reader is bytes a FAT implementation that
+is not ours wrote, and these are those bytes. Each is committed as its runs of
+nonzero 512-byte sectors, which `Image::fixture` in
+`toyos-fat32/tests/common/mod.rs` expands into a sparse file; the raw digest is
+of that expansion, and equals the digest of what the tools wrote.
+
+They were made once, on macOS 27.0.1 (build 26A434), with Apple's `msdosfs`
+project at SourceVersion 845000003000001 (`/sbin/newfs_msdos`, sha256
+29b3d7daa299583015c823ea6ebce643c030a79c8bc26b9bf9c23deb4c6d1a73) and
+`/usr/bin/hdiutil`, by a throwaway program making the invocations
+`toyos-fat32/tests/common/mod.rs` made at fa134154c with a fixed label. Per
+volume, on a sparse file of the raw size:
+
+    hdiutil attach -imagekey diskimage-class=CRawDiskImage -nobrowse -nomount <file>
+    newfs_msdos -F 32 -S 512 -c <c> -v <label> /dev/disk4
+    hdiutil detach /dev/disk4
+    hdiutil attach -imagekey diskimage-class=CRawDiskImage -nobrowse <file>
+    # the files below written under /Volumes/<label> with std::fs, parents
+    # created, in order; then every `._*` sidecar macOS left there deleted
+    hdiutil detach /dev/disk4
+
+    volume      -c  label        files
+    blank-512    1  TFBLANK      none
+    blank-4k     8  TFBLANK4K    none
+    read-512     1  TFREAD       the ten `populated` lists in tests/host_read.rs
+    read-4k      8  TFREAD4K     the three `a_four_kib_cluster_volume_reads_the_same` lists
+    hostile      1  TFHOSTILE    sub/deeper/ (mkdir -p first), plain.txt "a short file",
+                                 "A Long Name For Entries.bin" pattern(20000, 5),
+                                 sub/inner.dat pattern(4000, 6), sub/deeper/leaf.txt "leaf"
+    empty-file   1  TFEMPTYFILE  empty.txt "", full.txt "twelve bytes"
+
+`pattern` is the one in `toyos-fat32/tests/common/mod.rs`. Nothing in this
+repository runs either tool: the suite reads only what is committed here.
+
+**What in them is not ours.** The names and contents of the files are this
+repository's test bytes, and the layout — boot sector, FSInfo, FATs, directory
+entries — is the published on-disk format, data the tools computed rather than
+a work of theirs. Two things the tools wrote are not:
+
+- Every boot sector, sector 0 and its backup at sector 6, carries at offset
+  0x5A the 84 bytes of `newfs_msdos`'s `bootcode[]`: 39 bytes of x86 that print
+  a message through the BIOS, wait for a key and reboot, then "Non-system disk"
+  and "Press any key to reboot". They are byte for byte that array in FreeBSD's
+  `sbin/newfs_msdos/mkfs_msdos.c`, Robert Nordier's under BSD-2-Clause, and in
+  Apple's `msdosfs` at tag `msdosfs-788.100.31`
+  (`lib_newfs_msdos/newfs_data_types.h`, taken from
+  `newfs_msdos.tproj/newfs_msdos.c`, which carries Nordier's notice under
+  Apple's). The volumes are declared as carrying it under BSD-2-Clause, whose
+  one condition on redistribution in binary form is reproducing the notice,
+  which the licence text above does verbatim.
+- The freed clusters still hold the AppleDouble sidecars macOS wrote beside
+  every file and the generation then deleted: Apple's AppleDouble header with
+  its `Mac OS X` filler, an eleven-byte `com.apple.provenance` attribute, and
+  the stock phrase "This resource fork intentionally left blank". That is
+  machine-written metadata and a short phrase, and no licence is claimed for
+  it. It stays because the deleted entries and their long-name runs in front
+  of them are input a reader has to skip.

@@ -4,9 +4,10 @@
 //! against `copy_within` and `fill`, with the two buffers overlapping both ways;
 //! and its square roots against `f64::sqrt` and `f32::sqrt`. Each host
 //! architecture checks its own module. The UTF-8 reader against
-//! `core::str::from_utf8`, the number reader against the host C library's,
-//! AArch64's `long double` widening against compiler-builtins', and the errno
-//! codes against `include/errno.h`.
+//! `core::str::from_utf8`, the number reader against the host C library's and
+//! IEEE 754's rounding of hexadecimal input computed exactly, AArch64's
+//! `long double` widening against compiler-builtins', and the errno codes
+//! against `include/errno.h`.
 
 #[cfg(test)]
 extern crate alloc;
@@ -23,6 +24,8 @@ mod utf8;
 
 #[cfg(test)]
 mod errno_codes;
+#[cfg(test)]
+mod exact_hex;
 #[cfg(all(test, target_arch = "aarch64"))]
 mod long_double;
 #[cfg(test)]
