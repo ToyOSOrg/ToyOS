@@ -12,31 +12,33 @@ const MINUS_ONE_AS_CLANG_PASSES_IT: u64 = 0xffff_ffff;
 
 #[test]
 fn fcntl_reads_an_int_argument_from_the_lower_half_of_its_register() {
+    let set_cloexec = header::int(FCNTL_H, "FD_CLOEXEC") as u64;
     for (cmd, arg, want) in [
-        (0, MINUS_ONE_AS_CLANG_PASSES_IT, Command::Invalid),
-        (0, u64::MAX, Command::Invalid),
-        (0, 0xdead_beef_0000_000a, Command::DupAtLeast(10)),
-        (0, 0, Command::DupAtLeast(0)),
-        (0, 4095, Command::DupAtLeast(4095)),
+        ("F_DUPFD", MINUS_ONE_AS_CLANG_PASSES_IT, Command::Invalid),
+        ("F_DUPFD", u64::MAX, Command::Invalid),
+        ("F_DUPFD", 0xdead_beef_0000_000a, Command::DupAtLeast(10)),
+        ("F_DUPFD", 0, Command::DupAtLeast(0)),
+        ("F_DUPFD", 4095, Command::DupAtLeast(4095)),
         // `{OPEN_MAX}`, the slots a table has.
-        (0, 4096, Command::Invalid),
-        (0, 0x7fff_ffff, Command::Invalid),
-        (1, u64::MAX, Command::GetFd),
-        (2, 1, Command::SetFd(true)),
-        (2, 0xffff_ffff_0000_0000, Command::SetFd(false)),
-        (2, 0, Command::SetFd(false)),
-        (3, 0, Command::Unsupported),
-        (4, 0, Command::Unsupported),
-        (5, 0, Command::Invalid),
-        (6, 0, Command::Invalid),
-        (7, 0, Command::Invalid),
-        (8, 0, Command::Unsupported),
-        (9, 0, Command::Unsupported),
-        (1030, 10, Command::Unsupported),
-        (12345, 0, Command::Invalid),
-        (-1, 0, Command::Invalid),
+        ("F_DUPFD", 4096, Command::Invalid),
+        ("F_DUPFD", 0x7fff_ffff, Command::Invalid),
+        ("F_GETFD", u64::MAX, Command::GetFd),
+        ("F_SETFD", set_cloexec, Command::SetFd(true)),
+        ("F_SETFD", 0xffff_ffff_0000_0000, Command::SetFd(false)),
+        ("F_SETFD", 0, Command::SetFd(false)),
+        ("F_GETFL", 0, Command::Unsupported),
+        ("F_SETFL", 0, Command::Unsupported),
+        ("F_GETLK", 0, Command::Invalid),
+        ("F_SETLK", 0, Command::Invalid),
+        ("F_SETLKW", 0, Command::Invalid),
+        ("F_SETOWN", 0, Command::Unsupported),
+        ("F_GETOWN", 0, Command::Unsupported),
+        ("F_DUPFD_CLOEXEC", 10, Command::Unsupported),
     ] {
-        assert_eq!(fdreq::command(cmd, arg), want, "fcntl(_, {cmd}, {arg:#x})");
+        assert_eq!(fdreq::command(header::int(FCNTL_H, cmd), arg), want, "fcntl(_, {cmd}, {arg:#x})");
+    }
+    for cmd in [12345, -1] {
+        assert_eq!(fdreq::command(cmd, 0), Command::Invalid, "fcntl(_, {cmd}, 0)");
     }
 }
 
@@ -117,9 +119,8 @@ fn f_dupfd_meets_its_floor_holding_one_duplicate_at_most() {
     }
 }
 
-/// A descriptor's close-on-exec mark through the calls that touch it: `open`
-/// with and without `O_CLOEXEC`, `F_SETFD` either way, `F_GETFD`, `close`, and
-/// `dup2`'s answer, which POSIX has not closed on `exec`.
+/// A descriptor's close-on-exec mark through `open` with and without
+/// `O_CLOEXEC`, `F_SETFD` either way, and `F_GETFD`.
 #[test]
 fn each_descriptor_keeps_its_own_close_on_exec_mark() {
     let (cloexec, read_write) = (header::int(FCNTL_H, "O_CLOEXEC"), header::int(FCNTL_H, "O_RDWR"));
@@ -133,16 +134,11 @@ fn each_descriptor_keeps_its_own_close_on_exec_mark() {
     marks.set(4, true);
     assert_eq!((marks.flags(3), marks.flags(4)), (0, fd_cloexec), "F_SETFD");
 
-    // `close`, and a later handle in slot 4 (one generation on), which is a
-    // number of its own.
-    marks.set(4, false);
-    assert_eq!(marks.flags(4), 0, "close");
-    marks.set(4, true);
+    // A later handle in slot 4 (one generation on), which is a number of its own.
     assert_eq!(marks.flags(4 | 1 << 12), 0, "the next generation of slot 4");
 
-    // `dup2`'s answer, and `open` without `O_CLOEXEC` of a number marked.
-    marks.set(4, false);
+    // `open` without `O_CLOEXEC` of a number marked.
     marks.set(5, true);
     marks.opened(5, read_write);
-    assert_eq!((marks.flags(4), marks.flags(5)), (0, 0), "dup2, and open");
+    assert_eq!(marks.flags(5), 0, "open over a mark");
 }

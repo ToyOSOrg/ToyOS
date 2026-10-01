@@ -3,7 +3,7 @@
 
 pub(crate) const ERRNO_H: &str = include_str!("../../userland/libc/include/errno.h");
 pub(crate) const FCNTL_H: &str = include_str!("../../userland/libc/include/fcntl.h");
-const SIGNAL_H: &str = include_str!("../../userland/libc/include/signal.h");
+pub(crate) const SIGNAL_H: &str = include_str!("../../userland/libc/include/signal.h");
 
 /// Each integer `#define` in `header`, in its order.
 fn defines(header: &str) -> impl Iterator<Item = (&str, i64)> {

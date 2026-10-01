@@ -4,8 +4,8 @@
 //! it; any other `how` refused. A set as `sigaddset` and `sigfillset` make one,
 //! against POSIX's words for each.
 
-use crate::header;
-use crate::sigmask::{self, SIG_BLOCK, SIG_SETMASK, SIG_UNBLOCK};
+use crate::header::{self, SIGNAL_H};
+use crate::sigmask;
 
 /// Signal `n`'s bit.
 fn bit(n: i32) -> u64 {
@@ -14,15 +14,16 @@ fn bit(n: i32) -> u64 {
 
 #[test]
 fn each_how_changes_the_mask_as_posix_says() {
-    let (hup, int, usr1) = (bit(1), bit(2), bit(10));
-    let (kill, stop) = (bit(9), bit(19));
-    assert_eq!(sigmask::changed(hup, SIG_BLOCK, usr1), Some(hup | usr1));
-    assert_eq!(sigmask::changed(hup | usr1, SIG_UNBLOCK, usr1 | int), Some(hup));
-    assert_eq!(sigmask::changed(hup, SIG_SETMASK, int), Some(int));
-    assert_eq!(sigmask::changed(hup, SIG_SETMASK, 0), Some(0));
+    let named = |name| header::int(SIGNAL_H, name);
+    let (block, unblock, set_mask) = (named("SIG_BLOCK"), named("SIG_UNBLOCK"), named("SIG_SETMASK"));
+    let [hup, int, usr1, kill, stop] = ["SIGHUP", "SIGINT", "SIGUSR1", "SIGKILL", "SIGSTOP"].map(|s| bit(named(s)));
+    assert_eq!(sigmask::changed(hup, block, usr1), Some(hup | usr1));
+    assert_eq!(sigmask::changed(hup | usr1, unblock, usr1 | int), Some(hup));
+    assert_eq!(sigmask::changed(hup, set_mask, int), Some(int));
+    assert_eq!(sigmask::changed(hup, set_mask, 0), Some(0));
     // Asked for, and dropped without an error.
-    assert_eq!(sigmask::changed(0, SIG_BLOCK, kill | stop | usr1), Some(usr1));
-    assert_eq!(sigmask::changed(0, SIG_SETMASK, u64::MAX), Some(!(kill | stop)));
+    assert_eq!(sigmask::changed(0, block, kill | stop | usr1), Some(usr1));
+    assert_eq!(sigmask::changed(0, set_mask, u64::MAX), Some(!(kill | stop)));
     for how in [-1, 3, 99] {
         assert_eq!(sigmask::changed(hup, how, usr1), None, "how {how}");
     }

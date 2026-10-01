@@ -110,17 +110,44 @@ pub fn build_c(root: &Path, toolchain: &Path, target_dir: &Path, arch: Arch) {
         "toyos-libc's staticlib for {target} did not build:\n{}",
         String::from_utf8_lossy(&output.stderr),
     );
-    let c = crate::clang::CSysroot::of(toolchain, arch).dir;
-    let lib = c.join("lib");
+    let c = crate::clang::CSysroot::of(toolchain, arch);
+    let lib = c.dir.join("lib");
     fs::create_dir_all(&lib).unwrap_or_else(|e| panic!("create {}: {e}", lib.display()));
     let archive = target_dir.join(format!("{target}/release/libtoyos_libc.a"));
     fs::copy(&archive, lib.join("libtoyos_c.a"))
         .unwrap_or_else(|e| panic!("copy {} into {}: {e}", archive.display(), lib.display()));
     empty_libraries(&lib);
-    crate::sysroot::clone_tree(&root.join(CRATE).join("include"), &c.join("include"));
+    crate::sysroot::clone_tree(&root.join(CRATE).join("include"), &c.dir.join("include"));
+    links_naming_every_library(&c, target_dir);
 }
 
 const EMPTY_LIBRARIES: [&str; 5] = ["c", "m", "pthread", "dl", "rt"];
+
+/// Refuse the C sysroot `c` unless its clang links a C program against it
+/// naming each of [`EMPTY_LIBRARIES`], as LLVM's configure links every probe
+/// with `-lm` (`llvm/cmake/config-ix.cmake`). The program and its binary are
+/// written in `scratch`.
+fn links_naming_every_library(c: &crate::clang::CSysroot, scratch: &Path) {
+    let source = scratch.join(format!("probe-{}.c", c.target));
+    fs::write(&source, "int main(void) { return 0; }\n")
+        .unwrap_or_else(|e| panic!("write {}: {e}", source.display()));
+    let names = EMPTY_LIBRARIES.map(|name| format!("-l{name}"));
+    let output = Command::new(&c.clang)
+        .args(c.args())
+        .arg(&source)
+        .args(&names)
+        .arg("-o")
+        .arg(source.with_extension(""))
+        .output()
+        .unwrap_or_else(|e| panic!("run {}: {e}", c.clang.display()));
+    assert!(
+        output.status.success(),
+        "the C sysroot at {} links no program naming {}:\n{}",
+        c.dir.display(),
+        names.join(" "),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
 
 /// Put each of [`EMPTY_LIBRARIES`] in `lib` as an archive of no members: a
 /// link that names one finds it and takes nothing from it.

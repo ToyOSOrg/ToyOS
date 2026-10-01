@@ -67,8 +67,9 @@ const SOURCES: &str = "SOURCES";
 const RECIPE: &str = "bootstrap stage-0 local rebuild, profile compiler, no LLVM or Ninja, \
                       libtoyos_c merged, libraries from the stamp, linked by rust-lld, \
                       a C sysroot of libc's staticlib, the empty libraries beside it, and headers \
-                      per target, and its C++ runtime built under n2 from the runtimes' sources \
-                      of the compiler's LLVM; 10";
+                      per target, refused unless a C program naming each library links against \
+                      it, and its C++ runtime built under n2 from the runtimes' sources of the \
+                      compiler's LLVM; 11";
 
 /// Every sysroot on this host.
 pub fn sysroots_dir(rust_dir: &Path) -> PathBuf {

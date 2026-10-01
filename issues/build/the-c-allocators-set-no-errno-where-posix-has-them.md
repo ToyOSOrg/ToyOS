@@ -26,4 +26,4 @@ freed and allocates afresh, so null with `p` kept leaks it there.
 
 **Exit**: each of the four sets `errno` where POSIX has it in a Rust program,
 and a C call there reads `ENOMEM` and `EINVAL` back; `realloc(p, 0)` gives
-one of POSIX's two answers in both allocators.
+POSIX's second answer in both allocators: a pointer, with `p` freed.
