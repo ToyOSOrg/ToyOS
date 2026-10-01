@@ -54,7 +54,7 @@ pub const CR0: u64 = cr0::PE | cr0::MP | cr0::ET | cr0::NE | cr0::WP | cr0::PG;
 /// `CR4` bits every CPU must have. `DE` is zero legacy, not need — this kernel
 /// touches no debug register. `FSGSBASE` is [`CR4_FORBIDDEN`], not here.
 const CR4_REQUIRED: u64 =
-    cr4::DE | cr4::PAE | cr4::MCE | cr4::OSFXSR | cr4::OSXMMEXCPT | FSGSBASE_RESTORED;
+    cr4::DE | cr4::PAE | cr4::MCE | cr4::OSFXSR | cr4::OSXMMEXCPT;
 
 /// `CR4` bits this kernel takes when the CPU offers them (checked against CPUID first: an undefined bit is `#GP`).
 const CR4_OPTIONAL: u64 = cr4::SMEP | cr4::SMAP | cr4::PCIDE | cr4::UMIP;

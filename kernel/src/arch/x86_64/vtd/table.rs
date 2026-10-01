@@ -236,8 +236,7 @@ impl Domain {
 
     /// Where this domain's addresses end: what this unit will translate, not
     /// what the tables can express — past `MGAW` the hardware faults before the
-    /// walk it has entries for. `iommu-domain-narrow` brings it down to
-    /// [`NARROW_BYTES`] above the floor, so running out is a short loop.
+    /// walk it has entries for.
     pub fn ceiling(&self) -> u64 {
         1u64 << self.translatable
     }

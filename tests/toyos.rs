@@ -831,10 +831,7 @@ const LANSWAPCASE: &[metal::Arm] = &[metal::Arm {
 /// them because none of them changes what the machine *is*: each stages inputs
 /// the hardware cannot produce — a crafted capability list, a malformed
 /// descriptor, a vector nothing claims — runs a check over them and prints a
-/// count. The three that do change the machine are not here:
-/// `no-ap-control-regs` leaves an AP without them, `smp-skip-ap` leaves one
-/// out and `test-tiny-va` shrinks the address space, and each would be
-/// answering for the boot every other row on it read.
+/// count.
 const SELFTESTS: &[metal::Arm] = &[metal::once(
     "selftests",
     "tests/testcases",

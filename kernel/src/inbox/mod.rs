@@ -314,10 +314,6 @@ impl Inbox {
     /// torn down takes nothing and wakes nobody.
     fn complete(&self, user_data: u64, result: i32) {
         let posted = self.completions.with(|c| {
-            // Inside the section whatever lock it is, so `handler-post` reds
-            // on one that leaves interrupts open.
-            #[cfg(feature = "boot-actuators")]
-            crate::watch::handler_post::raise_if_staged();
             c.as_mut().map(|c| c.post_completion(user_data, result, 0))
         });
         if posted.is_some() {

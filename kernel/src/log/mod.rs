@@ -226,21 +226,9 @@ pub fn emit(severity: Severity, args: core::fmt::Arguments) {
         }
     }
 
-    // Between the drain and the repaint, so the record this call just put on the
-    // console is the one the panel does not have.
-    #[cfg(feature = "boot-actuators")]
-    if HALT_BEFORE_REPAINT.load(Ordering::Relaxed) {
-        crate::arch::cpu::halt();
-    }
-
     // After the commit, so the record this call made is the one on the panel.
     crate::drivers::panic_console::early_checkpoint();
 }
-
-/// Armed by the `test-early-halt` actuator one record ahead of where it wants
-/// the boot to stop.
-#[cfg(feature = "boot-actuators")]
-static HALT_BEFORE_REPAINT: AtomicBool = AtomicBool::new(false);
 
 /// A line of ordinary kernel log.
 #[macro_export]

@@ -1,7 +1,5 @@
-//! `usb-storage-gate`: in-guest half of the USB mass-storage gate.
-//!
-//! Verifies blocks the host wrote and writes blocks the host can check, so
-//! neither half of the driver certifies itself.
+//! `usb-reset-under-load`: the stick written continuously, so a reset lands on
+//! a controller that is moving bytes.
 
 use alloc::vec;
 

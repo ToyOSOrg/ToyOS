@@ -406,12 +406,6 @@ impl RecordSink for Raw {
     }
 }
 
-/// Whether `klogd` leaves the queue to the stop: `console-queue-at-the-stop`'s
-/// `klogd`, behind a stop that has been claimed.
-fn left_to_the_stop() -> bool {
-    false
-}
-
 extern "C" fn body(_arg: u64) -> ! {
 
     let parkable = scheduler::Parkable::at_entry();
@@ -421,7 +415,7 @@ extern "C" fn body(_arg: u64) -> ! {
             // A chunk of each per hold, with interrupts on throughout.
             let wire = serial::wire(&parkable);
             drain_records(&wire, CHUNK);
-            !left_to_the_stop() && drain_queue(&wire, CHUNK as usize)
+            drain_queue(&wire, CHUNK as usize)
         } else {
             discard_pending();
             discard_queue()
@@ -450,7 +444,7 @@ extern "C" fn body(_arg: u64) -> ! {
         // Safe with no backend because `discard_pending` still advances the position each pass.
         if shard::arm_waiter(shard::log_waiter(), || {
             // Under the lock `queue` stores under, ahead of the fence its wake takes.
-            DRAINED.any_pending() || (!left_to_the_stop() && QUEUE.lock().len > 0)
+            DRAINED.any_pending() || QUEUE.lock().len > 0
         }) {
             continue;
         }

@@ -14,7 +14,7 @@ pub fn payload_byte(checksum: u64, offset: usize) -> u8 {
     b'a' + (checksum.wrapping_add(offset as u64) % 26) as u8
 }
 
-/// One patterned record for `thread`/`index`; called by `SYS_DEBUG`'s `LOG_PATTERNED` and by `log-nested-reserve` from an interrupt handler.
+/// One patterned record for `thread`/`index`; called by `SYS_DEBUG`'s `LOG_PATTERNED`.
 /// The reader regenerates this text independently from `t=`/`i=`, so the format here must stay in sync with it.
 pub fn emit_patterned(thread: u64, index: u64) {
     let checksum = checksum(thread, index);

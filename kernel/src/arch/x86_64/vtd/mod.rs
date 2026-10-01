@@ -542,18 +542,6 @@ fn enable(
     );
 }
 
-/// The requester id `iommu-context-absent` or `iommu-empty-domain` staged, so
-/// its driver's move to a domain of its own leaves the staging in place;
-/// `u32::MAX`, which no requester id is, when neither is armed.
-#[cfg(feature = "boot-actuators")]
-static STAGED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(u32::MAX);
-
-/// Whether `stream` is the one an actuator left without a working context.
-#[cfg(feature = "boot-actuators")]
-pub(super) fn staged(stream: StreamId) -> bool {
-    STAGED.load(core::sync::atomic::Ordering::Relaxed) == u32::from(stream.requester())
-}
-
 
 /// Slot of the per-width domain cache; exhaustive match so a new `AddressWidth` fails to compile here.
 fn domain_slot(width: AddressWidth) -> usize {

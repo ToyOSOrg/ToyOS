@@ -384,16 +384,6 @@ pub(super) fn deaf_window() {
     serve(&UnderNothing(()));
 }
 
-/// `dump-in-blocking-pass`: on one CPU, files a request inside each kind of pass that may not serve it and
-/// inside a report, one at a time, and says what each request met.
-#[cfg(feature = "boot-actuators")]
-pub mod staged {
-
-
-
-
-}
-
 /// Where this CPU was, for the NMI probe. Called only from `arch/x86_64/idt/nmi.rs`.
 /// Stores unconditionally: reading the flag first would race the requester that owns it.
 pub fn note_nmi(rip: u64) {

@@ -108,7 +108,7 @@ boot-actuators = []
 # than assumed, because that claim is what makes the split below sound.
 #
 # **Separate from `boot-actuators` on purpose.** A diagnostic image the owner
-# flashes wants `heartbeat` and `diag-tick`; it must not also gain a debug
+# flashes wants `diag-tick`; it must not also gain a debug
 # syscall, which is what folding the two into one name would give it.
 test-actuators = []
 # The debugger's spin gate, and the one thing `--debug` compiles in. Not a boot

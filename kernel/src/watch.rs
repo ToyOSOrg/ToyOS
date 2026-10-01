@@ -65,8 +65,6 @@ impl<T: Send> CellLock<T> for IrqLock<T> {
         preempt_off(|_| {
             let irq = crate::arch::IrqGuard::close();
             let mut held = self.0.lock(&irq);
-            #[cfg(feature = "boot-actuators")]
-            handler_post::raise_if_staged();
             f(&mut held)
         })
     }
@@ -148,8 +146,6 @@ impl IrqWatch {
     /// with its CPU's preempt count raised, as `device_irq_entry` holds it, so
     /// this post's own never reaches zero, and a pass, inside the interrupt.
     pub fn post_in_place(&self) {
-        #[cfg(feature = "boot-actuators")]
-        handler_post::note_post(self);
         preempt_off(|p| {
             let env = Poster { cpus: cpus(), kicker: &HW, preempt: p };
             self.0.post_in_place(WakeCause::new(WakeReason::Woken), &env);
@@ -328,56 +324,6 @@ mod window {
                 return;
             }
             core::hint::spin_loop();
-        }
-    }
-}
-
-/// `handler-post`: the last claim slot's vector, which no claim holds, raised
-/// on this CPU while it holds preemption off, posts that slot's watch from the
-/// handler before any pass can run. Raised inside a post of the watch itself,
-/// the handler's post follows once the outer one lets go; raised inside a
-/// completion written into a ring that polls the watch, or inside that ring's
-/// own watch's list lock, the handler's post completes that poll once the
-/// section lets go. A hold counts the posts of the watch made on its CPU, and
-/// no other watch's, and lapses at its budget. One run of [`HOLDS`] holds per
-/// arm, on whichever idle loop reaches it first with interrupts open; its
-/// verdict is one [`Verdict`] line.
-#[cfg(feature = "boot-actuators")]
-pub mod handler_post {
-    use core::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
-
-
-    use crate::pcidev::{MAX_FUNCTIONS, VECTORS};
-
-    const SLOT: usize = MAX_FUNCTIONS - 1;
-
-    const NOBODY: u32 = u32::MAX;
-    /// The CPU whose next interrupts-off section raises the vector inside itself.
-    static RAISE_INSIDE: AtomicU32 = AtomicU32::new(NOBODY);
-    static HOLDING: AtomicU32 = AtomicU32::new(NOBODY);
-    static POSTS: AtomicU64 = AtomicU64::new(0);
-
-    fn raise() {
-        crate::arch::irqchip::send_self(VECTORS[SLOT]);
-    }
-
-    /// From inside an interrupts-off section: the staged CPU's next one raises
-    /// the vector while it holds.
-    pub fn raise_if_staged() {
-        let staged = RAISE_INSIDE.load(Relaxed);
-        if staged != NOBODY && staged == crate::arch::percpu::cpu_id() {
-            RAISE_INSIDE.store(NOBODY, Relaxed);
-            raise();
-        }
-    }
-
-    pub fn note_post(watch: &super::IrqWatch) {
-        let holding = HOLDING.load(Relaxed);
-        if holding != NOBODY
-            && holding == crate::arch::percpu::cpu_id()
-            && core::ptr::eq(watch, crate::pcidev::watch(SLOT))
-        {
-            POSTS.fetch_add(1, Relaxed);
         }
     }
 }

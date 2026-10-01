@@ -956,10 +956,7 @@ fn aux_reenable() {
     log!("i8042: aux re-enable failed {failures} times — pointer written off, line masked");
 }
 
-/// What firmware claims about the 8042 — never what decides. Under
-/// `i8042-fadt-denial`, substitutes a real laptop's own FADT (8042 clear)
-/// for QEMU's, whose flag and hardware always agree — the only way to test
-/// that a denial doesn't stop the probe.
+/// What firmware claims about the 8042 — never what decides.
 fn firmware_claim(rsdp_addr: u64) -> Result<(u8, u16), crate::drivers::acpi::TableError> {
     crate::drivers::acpi::iapc_boot_arch(rsdp_addr)
 }
