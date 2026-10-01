@@ -167,13 +167,9 @@ pub enum Stale {
 }
 
 impl Identity {
-    /// The identity of a sysroot whose compiler is `compiler`, whose
+    /// The identity of a sysroot whose compiler's key is `compiler`, whose
     /// freestanding targets' libraries are `freestanding`'s, and whose others
     /// are `key`'s.
-    fn of(compiler: &Compiler, freestanding: &Key, key: &Key) -> Self {
-        Self::new(Key::of(compiler.identity().as_bytes()), freestanding, key)
-    }
-
     fn new(compiler: Key, freestanding: &Key, key: &Key) -> Self {
         let libraries = GUEST_TARGETS.map(|target| match Libraries::of(target) {
             Libraries::Worktree => (target.triple(), key.clone()),
@@ -325,14 +321,46 @@ fn source_files(checkout: &Path, paths: &[&str], out: &mut Vec<PathBuf>) {
     }
 }
 
+/// What a build of a worktree compiles against, by key.
+#[derive(Debug, PartialEq)]
+struct Keys {
+    /// Its freestanding targets' libraries' ([`freestanding_key`]).
+    freestanding: Key,
+    /// Its sysroot's ([`key`]).
+    sysroot: Key,
+    /// What a crate compiled against that sysroot records.
+    identity: Identity,
+}
+
+impl Keys {
+    /// The keys of what `root` builds against with its std fork at `fork`,
+    /// compiled by `compiler`.
+    fn of(root: &Path, compiler: &Compiler, fork: &Path) -> Self {
+        let freestanding = freestanding_key(root, compiler, fork);
+        let sysroot = key(root, &freestanding);
+        let identity = Identity::new(Key::of(compiler.identity().as_bytes()), &freestanding, &sysroot);
+        Self { freestanding, sysroot, identity }
+    }
+}
+
 /// The key of the freestanding targets' libraries `root` builds against with
 /// its std fork at `fork`, compiled by `compiler`: none of
 /// [`SYSROOT_SOURCES`], and of `root` only [`STD_MANIFESTS`].
-pub fn freestanding_key(root: &Path, compiler: &Compiler, fork: &Path) -> Key {
+fn freestanding_key(root: &Path, compiler: &Compiler, fork: &Path) -> Key {
+    freestanding_key_of(root, compiler, fork, RECIPE, &keyed_std_config())
+}
+
+/// [`std_config`] with no path of this host in it, as a key reads it.
+fn keyed_std_config() -> String {
     let placeholder = Path::new("<placeholder>");
+    std_config(placeholder, placeholder, placeholder, "<host>")
+}
+
+/// [`freestanding_key`], with the recipe and std's configuration it reads.
+fn freestanding_key_of(root: &Path, compiler: &Compiler, fork: &Path, recipe: &str, config: &str) -> Key {
     let parts = [
-        format!("{RECIPE}; cargo {STAGE0_CARGO}; targets {}", Libraries::Freestanding.targets().join(" ")),
-        std_config(placeholder, placeholder, placeholder, "<host>"),
+        format!("{recipe}; cargo {STAGE0_CARGO}; targets {}", Libraries::Freestanding.targets().join(" ")),
+        config.to_string(),
         STD_MANIFESTS.map(|manifest| manifest_line(root, manifest)).join("\n"),
         tree_identity(fork, &["library", "src/bootstrap"]),
         compiler.identity(),
@@ -343,7 +371,7 @@ pub fn freestanding_key(root: &Path, compiler: &Compiler, fork: &Path) -> Key {
 /// The key of the sysroot `root` builds against, whose freestanding libraries
 /// are `freestanding`'s ([`freestanding_key`], which names the recipe, std's
 /// configuration, the fork and the compiler the rest is built with too).
-pub fn key(root: &Path, freestanding: &Key) -> Key {
+fn key(root: &Path, freestanding: &Key) -> Key {
     let parts = [
         format!("targets {}; C++ runtime {:?}", Libraries::Worktree.targets().join(" "), crate::libcxx::OPTIONS),
         witness(root),
@@ -472,22 +500,23 @@ fn held(root: &Path, key: &Key, dir: &Path, make: impl FnMut()) -> Guard {
 pub fn ensure(root: &Path, rust_dir: &Path, lock: &mut Held) -> Sysroot {
     let fork = fork_checkout(root);
     let compiler = compiler::resolve(root, rust_dir, &fork, lock);
-    let freestanding = freestanding_key(root, &compiler, &fork);
-    let key = key(root, &freestanding);
-    let dir = sysroots_dir(rust_dir).join(&key);
-    crate::keystore::record(root, Keyed::Sysroot, &key);
-    crate::keystore::record(root, Keyed::Freestanding, &freestanding);
+    let keys = Keys::of(root, &compiler, &fork);
+    let dir = sysroots_dir(rust_dir).join(&keys.sysroot);
+    crate::keystore::record(root, Keyed::Sysroot, &keys.sysroot);
+    crate::keystore::record(root, Keyed::Freestanding, &keys.freestanding);
 
-    let using = lock.without_shared(|| {
-        held(root, &key, &dir, || build(root, rust_dir, &compiler, &fork, &key, &freestanding, &dir))
-    });
-    let identity = Identity::of(&compiler, &freestanding, &key);
-    Sysroot { dir, primary_compiler: compiler.primary, identity, _using: Some(using) }
+    let using =
+        lock.without_shared(|| held(root, &keys.sysroot, &dir, || build(root, rust_dir, &compiler, &fork, &keys, &dir)));
+    Sysroot { dir, primary_compiler: compiler.primary, identity: keys.identity, _using: Some(using) }
 }
 
-/// Refuse `compiler` unless it is a whole toolchain: no sysroot is made from
+/// A compiler [`whole`] found to be a whole toolchain: what a sysroot is made
+/// from.
+struct Whole<'a>(&'a Compiler);
+
+/// `compiler`, refused unless it is a whole toolchain: no sysroot is made from
 /// one that is not, and no std is built for one.
-fn whole(compiler: &Compiler) {
+fn whole(compiler: &Compiler) -> Whole<'_> {
     if let Some(defect) = toolchain::toolchain_defect(&compiler.stage2) {
         let fix = if compiler.primary {
             "\nA bootstrap in the primary checkout was stopped before it finished: \
@@ -497,34 +526,36 @@ fn whole(compiler: &Compiler) {
         };
         panic!("no sysroot is made from {}, and no std was built for one: {defect}{fix}", compiler.stage2.display());
     }
+    Whole(compiler)
 }
 
-/// Make the sysroot `key` names at `dir`, from `root`'s sources and the std fork
-/// at `fork`, with `compiler`, and the libraries the freestanding key
-/// `freestanding` names. The caller holds the sysroot key's lock.
-fn build(root: &Path, rust_dir: &Path, compiler: &Compiler, fork: &Path, key: &Key, freestanding: &Key, dir: &Path) {
-    whole(compiler);
-    let store = freestanding_dir(rust_dir).join(freestanding);
+/// Make the sysroot `keys` names at `dir`, from `root`'s sources and the std
+/// fork at `fork`, with `compiler`, and the freestanding libraries `keys`
+/// names. The caller holds the sysroot key's lock.
+fn build(root: &Path, rust_dir: &Path, compiler: &Compiler, fork: &Path, keys: &Keys, dir: &Path) {
+    let made_from = whole(compiler);
+    let store = freestanding_dir(rust_dir).join(&keys.freestanding);
     let _freestanding = buildlock::keyed_made(
         root,
         Keyed::Freestanding,
-        freestanding,
+        &keys.freestanding,
         || unpublished(&store),
-        || build_freestanding(root, compiler, fork, freestanding, &store),
+        || build_freestanding(root, compiler, fork, &keys.freestanding, &store),
     );
-    let what = format!("building sysroot {key}");
+    let what = format!("building sysroot {}", keys.sysroot);
     let _worktree = buildlock::worktree_exclusive(root, &what);
     // Only the primary's compiler is rebuilt in place; one of a worktree's own
     // is written once and held in use by `compiler`.
     let _compiler = compiler.primary.then(|| buildlock::compiler_shared(root, &what));
     eprintln!(
-        "Building sysroot {key}: ToyOS's std from {}, the compiler {}, the freestanding libraries {freestanding}",
+        "Building sysroot {}: ToyOS's std from {}, the compiler {}, the freestanding libraries {}",
+        keys.sysroot,
         fork.display(),
-        compiler.stage2.display()
+        compiler.stage2.display(),
+        keys.freestanding
     );
 
-    publish(dir, |partial| {
-        clone_tree(&compiler.stage2, partial);
+    publish_toolchain(made_from, dir, |partial| {
         let built = build_std(root, compiler, fork, Libraries::Worktree);
         for target in GUEST_TARGETS {
             let triple = target.triple();
@@ -552,7 +583,7 @@ fn build(root: &Path, rust_dir: &Path, compiler: &Compiler, fork: &Path, key: &K
         }
 
         // The sources the key named are the ones built, or this is not that key's.
-        let again = self::key(root, &freestanding_key(root, compiler, fork));
+        let (key, again) = (&keys.sysroot, Keys::of(root, compiler, fork).sysroot);
         assert!(
             again == *key,
             "the sources moved while sysroot {key} was being built (they are now {again}); \
@@ -586,6 +617,15 @@ fn build_freestanding(root: &Path, compiler: &Compiler, fork: &Path, key: &Key, 
              now {again}); nothing was kept, and the next build makes the ones they name"
         );
         format!("{key}\nfork {}\n", fork.display())
+    });
+}
+
+/// [`publish`] at `dir` a toolchain: `compiler`'s files, then what `fill`
+/// adds to them.
+fn publish_toolchain(compiler: Whole, dir: &Path, fill: impl FnOnce(&Path) -> String) {
+    publish(dir, |partial| {
+        clone_tree(&compiler.0.stage2, partial);
+        fill(partial)
     });
 }
 
@@ -925,27 +965,32 @@ mod tests {
     /// comment in any tree they read moves neither; an edit to a tree only
     /// ToyOS's std or the C sysroot compiles moves the sysroot and keeps its
     /// freestanding libraries; a line of the fork's code, a manifest std's
-    /// lockfile resolves or another compiler moves both.
+    /// lockfile resolves, the recipe, std's configuration or another compiler
+    /// moves both. A crate built against the old ones is stale in the targets
+    /// whose libraries moved, and in all of it when the compiler did.
     #[test]
     fn a_comment_is_the_same_sysroot_and_a_signature_is_another() {
         let base = TempDir::new("key");
         let (root, rust_dir, fork) = keyed(&base);
-        let k = || {
-            let freestanding = freestanding_key(&root, &Compiler::primary(&rust_dir), &fork);
-            (key(&root, &freestanding), freestanding)
-        };
-        let (sysroot, freestanding) = k();
-        assert_eq!((sysroot.as_str().len(), freestanding.as_str().len()), (16, 16), "{sysroot} {freestanding}");
-        let same = |what: &str| assert_eq!(k(), (sysroot.clone(), freestanding.clone()), "{what} moved a key");
+        let k = || Keys::of(&root, &Compiler::primary(&rust_dir), &fork);
+        let was = k();
+        assert_eq!((was.sysroot.as_str().len(), was.freestanding.as_str().len()), (16, 16), "{was:?}");
+        let stamp = was.identity.to_string();
+        let toyos = vec!["aarch64-unknown-toyos", "x86_64-unknown-toyos"];
+        let mut all = GUEST_TARGETS.map(GuestTarget::triple).to_vec();
+        all.sort();
+        let same = |what: &str| assert_eq!(k(), was, "{what} moved a key");
         let sysroot_only = |what: &str| {
-            let (s, f) = k();
-            assert_ne!(s, sysroot, "{what} kept the old sysroot");
-            assert_eq!(f, freestanding, "{what} moved the freestanding libraries");
+            let now = k();
+            assert_ne!(now.sysroot, was.sysroot, "{what} kept the old sysroot");
+            assert_eq!(now.freestanding, was.freestanding, "{what} moved the freestanding libraries");
+            assert_eq!(now.identity.stale(Some(&stamp)), Some(Stale::Targets(toyos.clone())), "{what}");
         };
         let both = |what: &str| {
-            let (s, f) = k();
-            assert_ne!(s, sysroot, "{what} kept the old sysroot");
-            assert_ne!(f, freestanding, "{what} kept the old freestanding libraries");
+            let now = k();
+            assert_ne!(now.sysroot, was.sysroot, "{what} kept the old sysroot");
+            assert_ne!(now.freestanding, was.freestanding, "{what} kept the old freestanding libraries");
+            assert_eq!(now.identity.stale(Some(&stamp)), Some(Stale::Targets(all.clone())), "{what}");
         };
 
         let abi = root.join("toyos-abi/src/lib.rs");
@@ -998,8 +1043,20 @@ mod tests {
             same(manifest);
         }
 
+        let compiler = Compiler::primary(&rust_dir);
+        let config = keyed_std_config();
+        assert_eq!(freestanding_key_of(&root, &compiler, &fork, RECIPE, &config), was.freestanding);
+        for (what, moved) in [
+            ("the recipe", freestanding_key_of(&root, &compiler, &fork, "another recipe", &config)),
+            ("std's configuration", freestanding_key_of(&root, &compiler, &fork, RECIPE, &format!("{config}\n[rust]\n"))),
+        ] {
+            assert_ne!(moved, was.freestanding, "{what} kept the old freestanding libraries");
+        }
+
         write(&rust_dir.join("build/toyos-compiler"), "tree-2");
-        both("another compiler");
+        let now = k();
+        assert!(now.sysroot != was.sysroot && now.freestanding != was.freestanding, "another compiler kept a key: {now:?}");
+        assert_eq!(now.identity.stale(Some(&stamp)), Some(Stale::All), "another compiler kept a crate's host half");
     }
 
     /// **A crate's compiler is the one that built it, rebuilt in place or
@@ -1008,9 +1065,8 @@ mod tests {
     #[test]
     fn a_compiler_rebuilt_in_place_leaves_all_of_a_crate_stale() {
         let base = TempDir::new("identity-compiler");
-        let (_root, rust_dir, _fork) = keyed(&base);
-        let (freestanding, key) = (Key::of(b"freestanding"), Key::of(b"key"));
-        let identity = || Identity::of(&Compiler::primary(&rust_dir), &freestanding, &key);
+        let (root, rust_dir, fork) = keyed(&base);
+        let identity = || Keys::of(&root, &Compiler::primary(&rust_dir), &fork).identity;
         let stamp = identity().to_string();
         assert_eq!(identity().stale(Some(&stamp)), None, "a crate was stale against the compiler that built it");
         write(&toolchain::stage2(&rust_dir).join("lib/librustc_driver-1.dylib"), "a driver, rebuilt in place");
@@ -1252,9 +1308,7 @@ mod tests {
         let make = |dir: &Path, most: usize| {
             made.set(made.get() + 1);
             assert!(made.get() <= most, "a sysroot that was not whole was made again: make {}", made.get());
-            whole(&compiler);
-            publish(dir, |partial| {
-                clone_tree(&compiler.stage2, partial);
+            publish_toolchain(whole(&compiler), dir, |partial| {
                 write(&partial.join("lib/rustlib/x86_64-unknown-toyos/lib/libstd.rlib"), "std");
                 "found\n".to_string()
             })
@@ -1303,8 +1357,7 @@ mod tests {
         let said = refusal(|| {
             drop(held(&base, &key, &dir, || {
                 once();
-                whole(&compiler);
-                publish(&dir, |_| {
+                publish_toolchain(whole(&compiler), &dir, |_| {
                     filled.set(true);
                     "cloned\n".to_string()
                 })

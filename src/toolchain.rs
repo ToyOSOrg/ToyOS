@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -77,13 +78,6 @@ const STD_SOURCES: [&str; 2] = ["toyos-abi/src", "toyos/src"];
 
 /// Every target a guest artifact is built for: ToyOS userland, the kernel's
 /// bare-metal target, and the UEFI bootloader.
-///
-/// One home for the list, because it is read four ways that must agree — the
-/// `stage1-std` cleans in [`full_bootstrap`], [`write_config`]'s bootstrap
-/// `target` set, the libraries `src/sysroot.rs` builds and places, and the
-/// identity it gives a crate's target directory. A fifth spelling would
-/// silently leave one of them building or fingerprinting a different set of
-/// targets than the others.
 pub const GUEST_TARGETS: [GuestTarget; 6] = [
     GuestTarget { arch: Arch::X86_64, role: Role::Userland },
     GuestTarget { arch: Arch::X86_64, role: Role::Kernel },
@@ -200,30 +194,43 @@ pub(crate) fn assert_std_built_from(root: &Path, dep_info: &Path) {
 }
 
 /// Refuse a freestanding target's libraries whose dep-info under `dep_info`
-/// names any file of the worktree `root` outside its std fork `fork`: their key
-/// reads nothing else of it but the manifests std's lockfile resolves
-/// (`src/sysroot.rs`), so a sysroot of another worktree would carry them unchanged.
+/// names no source of the std fork `fork`, or any file of the worktree `root`
+/// outside it: their key reads nothing else of it but the manifests std's
+/// lockfile resolves (`src/sysroot.rs`), so a sysroot of another worktree would
+/// carry them unchanged. Every path is decided as the filesystem resolves it,
+/// `..` and symlinks followed, and one that resolves to nothing is refused.
 pub(crate) fn assert_std_reads_no_worktree(root: &Path, fork: &Path, dep_info: &Path) {
-    let real = |path: &Path| fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let (root, fork) = (real(root), real(fork));
+    let resolve = |path: &Path| {
+        fs::canonicalize(path)
+            .unwrap_or_else(|e| panic!("resolve {}, checking the std build under {}: {e}", path.display(), dep_info.display()))
+    };
+    let (root, fork) = (resolve(root), resolve(fork));
     let mut deps = Vec::new();
     collect_dep_info(dep_info, &mut deps);
-    let mut read: Vec<&str> = deps
-        .iter()
-        .flat_map(|text| paths_in_dep_info(text))
-        .filter(|path| Path::new(path).starts_with(&root) && !Path::new(path).starts_with(&fork))
-        .collect();
-    read.sort_unstable();
-    read.dedup();
+    // Bootstrap's cargo runs rustc in the fork, so a relative path is the fork's.
+    let read: BTreeSet<PathBuf> =
+        deps.iter().flat_map(|text| paths_in_dep_info(text)).map(|path| resolve(&fork.join(path))).collect();
     assert!(
-        read.is_empty(),
+        read.iter().any(|path| path.starts_with(fork.join("library"))),
+        "the freestanding libraries under {} name no source of the fork {} at all, so the check that \
+         they read nothing else of the worktree cannot answer. Cargo's dep-info moved.",
+        dep_info.display(),
+        fork.display(),
+    );
+    let worktree: Vec<String> = read
+        .iter()
+        .filter(|path| path.starts_with(&root) && !path.starts_with(&fork))
+        .map(|path| path.display().to_string())
+        .collect();
+    assert!(
+        worktree.is_empty(),
         "the freestanding libraries under {} read {} files of the worktree {} outside its fork {}, \
          and their key reads none of its sources:\n  {}",
         dep_info.display(),
-        read.len(),
+        worktree.len(),
         root.display(),
         fork.display(),
-        read.join("\n  "),
+        worktree.join("\n  "),
     );
 }
 
@@ -1298,31 +1305,57 @@ mod tests {
     }
 
     /// **Freestanding libraries whose dep-info names the worktree outside its
-    /// fork are refused**: their key reads none of it, so a sysroot of another
-    /// worktree would carry them. The fork's files and what lies outside the
-    /// worktree are what they are built from.
+    /// fork are refused, however the path is spelt**: their key reads none of
+    /// it, so a sysroot of another worktree would carry them. The fork's files
+    /// and what lies outside the worktree are what they are built from.
+    /// Dep-info that names no source of the fork, or a file that is not there,
+    /// cannot be checked and is refused too.
     #[test]
     fn freestanding_libraries_that_read_the_worktree_are_refused() {
-        let base = TempDir::new("freestanding-dep-info");
-        let root = fs::canonicalize(&*base).unwrap();
+        let temp = TempDir::new("freestanding-dep-info");
+        let base = fs::canonicalize(&*temp).unwrap();
+        let (root, registry) = (base.join("worktree"), base.join("registry/compiler_builtins/src/lib.rs"));
         let fork = root.join("rust");
         let built = fork.join("build/toyos-std/host/stage0-std/x86_64-unknown-none");
-        let deps = built.join("dist/build/core/1");
-        fs::create_dir_all(&deps).unwrap();
-        let core = fork.join("library/core/src/lib.rs").display().to_string();
-        let rlib = deps.join("libcore.rlib").display().to_string();
-        let text = format!("{rlib}: {core} /registry/compiler_builtins/src/lib.rs\n\n{core}:\n# env-dep:CARGO_PKG_NAME=core\n");
-        fs::write(deps.join("core.d"), text).unwrap();
+        let out = built.join("dist/build/core/1/out");
+        let file = |path: &Path| {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "read").unwrap();
+            path.display().to_string()
+        };
+        file(&fork.join("library/core/src/lib.rs"));
+        file(&fork.join("library/stdarch/crates/core_arch/src/mod.rs"));
+        let (registry, rlib, raw) = (file(&registry), file(&built.join("dist/libcore.rlib")), file(&out.join("libcore-1.rlib")));
+        // Cargo's dep-info names a file whole; rustc's, a fork source by its path in the fork.
+        let arch = "library/core/src/../../stdarch/crates/core_arch/src/mod.rs";
+        fs::write(built.join("dist/libcore.d"), format!("{rlib}: {}/{arch} {registry}\n", fork.display())).unwrap();
+        let rustc = format!("{raw}: library/core/src/lib.rs {arch}\n\nlibrary/core/src/lib.rs:\n# env-dep:CARGO_PKG_NAME=core\n");
+        fs::write(out.join("core-1.d"), rustc).unwrap();
         assert_std_reads_no_worktree(&root, &fork, &built);
 
-        for read in ["toyos-abi/src/lib.rs", "userland/libc/src/lib.rs", "system.toml"] {
-            let read = root.join(read).display().to_string();
-            fs::write(deps.join("other.d"), format!("{rlib}: {read}\n")).unwrap();
-            let refused = std::panic::catch_unwind(|| assert_std_reads_no_worktree(&root, &fork, &built))
-                .expect_err("freestanding libraries that read the worktree were taken");
-            let said = refused.downcast_ref::<String>().expect("a formatted refusal");
+        let refusal = |dep_info: &Path| {
+            let refused = std::panic::catch_unwind(|| assert_std_reads_no_worktree(&root, &fork, dep_info));
+            *refused.expect_err("unchecked dep-info was taken").downcast::<String>().expect("a formatted refusal")
+        };
+        let naming = |named: &str| {
+            fs::write(built.join("dist/other.d"), format!("{rlib}: {named}\n")).unwrap();
+            refusal(&built)
+        };
+        let system = file(&root.join("system.toml"));
+        for read in [file(&root.join("toyos-abi/src/lib.rs")), file(&root.join("userland/libc/src/lib.rs")), system.clone()] {
+            let said = naming(&read);
             assert!(said.contains(&read), "{said}");
         }
+        let dotted = "library/core/src/../../../../system.toml";
+        for spelt in [format!("{}/{dotted}", fork.display()), dotted.to_string()] {
+            let said = naming(&spelt);
+            assert!(said.contains(&system), "{spelt}: {said}");
+        }
+        let said = naming("library/core/src/gone.rs");
+        assert!(said.starts_with(&format!("resolve {}/library/core/src/gone.rs", fork.display())), "{said}");
+
+        let said = refusal(&built.join("none"));
+        assert!(said.contains("name no source of the fork"), "{said}");
     }
 
     /// Verbatim from run `31370078581`, the run this check exists because of:
