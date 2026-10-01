@@ -43,7 +43,7 @@ const USER_AGENT: &str = "toyos-build (https://github.com/ToyOSOrg/ToyOS)";
 
 /// The stores a toolchain is, in the order a build makes them, each under the
 /// name its cache entry and its job's outputs carry.
-pub(crate) const LAYERS: [(Keyed, &str); 4] = [
+const LAYERS: [(Keyed, &str); 4] = [
     (Keyed::Llvm, "llvm"),
     (Keyed::Compiler, "compiler"),
     (Keyed::Freestanding, "freestanding"),
