@@ -14,7 +14,7 @@
 //! an order sorts what it collected, and the two that do
 //! ([`crate::teardown::retire_set`] and [`crate::reap::finished_pids`]) say so.
 
-use crate::{Pid, ThreadLocation, Tid};
+use crate::{Node, Pid, ThreadLocation, Tid};
 
 /// One process's lifecycle state: the whole of what a spawn, an exit, a kill, a
 /// join or a reap reads or writes about it.
@@ -50,6 +50,11 @@ pub trait Lifecycle {
 
     /// Every thread of this process, in whatever order the container has.
     fn each_thread(&self, f: &mut dyn FnMut(Tid, ThreadLocation));
+
+    /// Where this process stands in the tree. Read and written by
+    /// [`crate::tree`] alone.
+    fn node(&self) -> &Node;
+    fn node_mut(&mut self) -> &mut Node;
 }
 
 /// The lifecycle face of the process table.

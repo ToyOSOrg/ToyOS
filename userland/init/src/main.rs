@@ -46,6 +46,11 @@
 //! before it runs, and everything else the session user's home, made at boot.
 //! A launch of a program no row names is answered with the session's, which
 //! the caller's direct spawn carries in place of its own.
+//!
+//! **A launched program is spawned under the place its request names** — a
+//! copy of the caller's `self` — so the caller's end takes it down; a request
+//! that asks for init is the one way to outlive the caller, and one naming
+//! neither is refused.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
@@ -61,7 +66,7 @@ use toyos_manifest::{Manifest, Program};
 use toyos::endow::Endowments;
 use toyos::fs::CAPABILITY_PREFIX;
 use toyos::ipc::{self, Connection, RxStep};
-use toyos::launch::{self, Request};
+use toyos::launch::{self, Parent, Request};
 use toyos::namespace::{self, Namespace};
 use toyos::poller::{Poller, READABLE};
 use toyos::port::{self, Acceptor, Connector};
@@ -1426,22 +1431,22 @@ impl Init<'_> {
         // will actually be paired with a handle. A frame whose two counts
         // disagree would otherwise leave the unpaired handles behind.
         let names: Vec<&str> = request.extra_names().collect();
-        if received != request.slot_count() + request.extra_count
-            || names.len() != request.extra_count
-        {
+        if received != request.handle_count() || names.len() != request.extra_count {
             say!(
                 "init: launcher: a frame promising {} handles under {} names carried {received}",
-                request.slot_count() + request.extra_count,
+                request.handle_count(),
                 names.len(),
             );
             return;
         }
 
         // Past every refusal that does not know which handle is which, so ownership
-        // can be split. Both halves still release on every path below.
+        // can be split. Every part still releases on every path below.
         let all = held.take();
-        let (slot_handles, extra_handles) = all.split_at(request.slot_count());
+        let (slot_handles, rest) = all.split_at(request.slot_count());
+        let (extra_handles, place_handle) = rest.split_at(request.extra_count);
         let slots = Moved(slot_handles.to_vec());
+        let place = Moved(place_handle.to_vec());
         // Owned, so they close when this call returns: `SYS_NAMESPACE_BUILD` copies
         // a connector into the namespace and leaves the caller's handle, and init's
         // copy of a client's connector has no life beyond this launch.
@@ -1463,6 +1468,19 @@ impl Init<'_> {
             return;
         }
 
+        // **A launch names its parent**: the place it carries, spawned under, or
+        // init. One that names neither is refused rather than given to init,
+        // which would let it outlive a caller that never asked it to.
+        let under = match request.parent() {
+            Some(Parent::Place(())) => Some(place.0[0]),
+            Some(Parent::Init) => None,
+            None => {
+                say!("init: launcher: refused a launch that names no parent");
+                let _ = conn.try_signal(launch::MSG_REFUSED);
+                return;
+            }
+        };
+
         // **The caller's path, not the row's, and `argv[0]` is why.** `declared`
         // has already established that the two name one binary, so this grants
         // nothing extra — and `/system/bin/echo` spawned as `/system/bin/toybox` is a toybox that
@@ -1481,6 +1499,9 @@ impl Init<'_> {
             }
         }
         command.current_dir(request.cwd);
+        if let Some(place) = under {
+            command.under(place.0);
+        }
         for arg in request.argv.split(|&b| b == 0).skip(1).filter(|a| !a.is_empty()) {
             if let Ok(arg) = std::str::from_utf8(arg) {
                 command.arg(arg);
@@ -1574,6 +1595,12 @@ impl Init<'_> {
                     Err(_) => toyos_abi::syscall::close(handle),
                 }
             }
+            // std's word for the kernel's `Gone`, which a spawn answers only for
+            // its place.
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe && under.is_some() => {
+                say!("init: launcher: {} was not started: the place it names is ending", program.name);
+                let _ = conn.try_signal(launch::MSG_GONE);
+            }
             Err(e) => {
                 say!("init: launcher: cannot start {}: {e}", program.name);
                 let _ = conn.try_signal(launch::MSG_REFUSED);
@@ -1584,8 +1611,8 @@ impl Init<'_> {
 
 /// Handles a launch moved into init, released on every path out of it.
 ///
-/// A `Drop` and not a close at each `return`: there are seven ways out of
-/// `serve_launch` and a client picks which one by what it sends.
+/// A `Drop` and not a close at each `return`: a client picks which way out of
+/// `serve_launch` it takes by what it sends.
 struct Moved(Vec<toyos::RawHandle>);
 
 impl Moved {

@@ -47,7 +47,7 @@ use super::machine::{
 #[cfg(feature = "test-actuators")]
 use super::machine::lower_sysinfo_bound;
 use super::proc::{
-    sys_endowments, sys_exit, sys_nanosleep, sys_process_open, sys_process_stats,
+    spawn_place, sys_endowments, sys_exit, sys_nanosleep, sys_process_open, sys_process_stats,
     sys_process_wait, sys_rt_enter, sys_spawn, sys_thread_exit, sys_thread_join, sys_thread_spawn,
 };
 use super::vm::{shared_image, sys_dlopen, sys_dlsym, sys_mmap, sys_munmap, sys_query_modules, sys_tls_alloc_block};
@@ -216,13 +216,19 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                     Err(refused) => return refused,
                 },
             };
+            // Before an endowment can move the handle that names it.
+            let parent = match spawn_place(args.place) {
+                Ok(parent) => parent,
+                Err(refused) => return refused,
+            };
             let text = match ctx.user_str(UserAddr::new(args.argv_ptr), args.argv_len) { Ok(s) => s, Err(e) => return e.to_u64() };
             let cwd = match ctx.user_str(UserAddr::new(args.cwd_ptr), args.cwd_len).and_then(|p| spawn_cwd(&p)) {
                 Ok(cwd) => cwd,
                 Err(e) => return e.to_u64(),
             };
-            if args.endow_count as usize > toyos_abi::syscall::MAX_ENDOWMENTS
-                || args.labels_len > toyos_abi::syscall::MAX_LABELS_LEN as u64
+            // One fewer, and its label's bytes fewer, than a table holds: the kernel adds `self`.
+            if args.endow_count as usize >= toyos_abi::syscall::MAX_ENDOWMENTS
+                || args.labels_len > (toyos_abi::syscall::MAX_LABELS_LEN - SELF_LABEL.len()) as u64
             {
                 return SyscallError::InvalidArgument.to_u64();
             }
@@ -262,7 +268,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 alloc::vec::Vec::new()
             };
             let argv: alloc::vec::Vec<&str> = text.split('\0').filter(|s| !s.is_empty()).collect();
-            sys_spawn(&argv, pending, cwd, env, image)
+            sys_spawn(&argv, pending, cwd, env, image, parent)
         }
         SYS_PROCESS_WAIT => sys_process_wait(RawHandle(a1 as u32), a2),
         SYS_PROCESS_KILL => {

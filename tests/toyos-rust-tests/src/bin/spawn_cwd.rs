@@ -141,6 +141,7 @@ fn spawn_in(cwd: &str) -> Result<i32, SyscallError> {
         cwd_len: cwd.len() as u64,
         image: 0,
         image_len: 0,
+        place: u64::from(toyos_abi::HANDLE_INVALID.0),
     };
     // SAFETY: every pointer names a live local for the length beside it.
     let child = unsafe { syscall::spawn(&args) }?;

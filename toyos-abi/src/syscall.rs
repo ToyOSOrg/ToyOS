@@ -404,9 +404,19 @@ pub struct SpawnArgs {
     /// `/system/lib` alone.
     pub image: u64,
     pub image_len: u64,
+    /// The process the child is placed under, whose end takes it down: a
+    /// handle carrying [`Rights::WRITE`] to it — a copy of that process's
+    /// [`SELF_LABEL`] — or [`HANDLE_INVALID`] for the caller itself.
+    /// `PermissionDenied` for a handle without `WRITE` and `InvalidArgument`
+    /// for one to no process, since a place is a handle a peer sent;
+    /// `Gone` for a process being torn down, and `ResourceExhausted` for a
+    /// child more than `toyos_proclife::MAX_DEPTH` below init.
+    ///
+    /// [`Rights::WRITE`]: crate::handle::Rights::WRITE
+    pub place: u64,
 }
 
-const _: () = assert!(core::mem::size_of::<SpawnArgs>() == 112);
+const _: () = assert!(core::mem::size_of::<SpawnArgs>() == 120);
 
 /// One `(label, handle)` pair of a process's endowment table.
 ///
@@ -434,6 +444,10 @@ const _: () = assert!(core::mem::size_of::<EndowEntry>() == 16);
 pub const SYSCAP_LABEL: &str = "syscap";
 /// The label for a program's namespace — what its manifest `receives` becomes.
 pub const SVC_LABEL: &str = "svc";
+/// The label every process starts holding a handle to itself under, carrying
+/// `WRITE`, `DUP` and `TRANSFER`: what it hands on for a child to be placed
+/// under it ([`SpawnArgs::place`]). The kernel puts it in every table.
+pub const SELF_LABEL: &str = "self";
 /// `serve:<name>`: the acceptor of a machine-wide port this program serves.
 pub const SERVE_PREFIX: &str = "serve:";
 /// `dev:<class>`: the claim for a device class this program was given.
@@ -449,7 +463,8 @@ pub const DEV_PREFIX: &str = "dev:";
 /// everything else it gets.
 pub const PROVIDE_PREFIX: &str = "provide:";
 
-/// Endowed `(label, handle)` pairs one spawn may carry. Policy on the
+/// `(label, handle)` pairs one endowment table holds, the kernel's own
+/// [`SELF_LABEL`] among them, so a spawn carries one fewer. Policy on the
 /// primitive, refused by name, never truncated — the widest manifest row plus
 /// stdio.
 pub const MAX_ENDOWMENTS: usize = 32;
@@ -462,7 +477,7 @@ pub const MAX_ENDOWMENTS: usize = 32;
 /// pair is a `duplicate_entry` under the parent's own lock — enough of them to
 /// pass `MAX_HEAP_ALLOC`, where the allocator's refusal is a kernel panic.
 pub const MAX_SLOT_MAP: usize = RawHandle::MAX_SLOTS;
-/// Bytes of label blob one endowment table may carry.
+/// Bytes of label blob one endowment table holds, [`SELF_LABEL`]'s among them.
 pub const MAX_LABELS_LEN: usize = 4096;
 
 use crate::handle::Rights;

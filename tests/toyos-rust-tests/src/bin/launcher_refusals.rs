@@ -34,12 +34,18 @@
 //! holder of the connector — the compositor, every terminal, every shell, sshd
 //! — parked the machine's only way to start a process for ever, with init alive
 //! and looking healthy.
+//!
+//! **A launch names its parent**, and two more shapes are about that: a frame
+//! naming neither a place nor init, which init must refuse rather than take as
+//! asking for it — the program would outlive a caller that never asked — and a
+//! place that is a pipe, a peer's claim the kernel answers with a word, since
+//! init is the spawn's caller and a wrong type that ended it would end init.
 
 use std::process::Command;
 
 use toyos::census::Census;
 use toyos::ipc::{Connection, FrameRx, RxStep};
-use toyos::launch::{self, Launch};
+use toyos::launch::{self, Launch, Parent};
 use toyos::poller::{Poller, READABLE};
 use toyos::{namespace, port, AsHandle};
 use toyos_abi::handle::Rights;
@@ -67,6 +73,8 @@ fn main() {
     a_quiet_client_does_not_wedge_the_launcher();
     not_a_connector();
     a_connector_it_cannot_duplicate();
+    a_launch_naming_no_parent();
+    a_place_that_is_a_pipe();
     a_working_directory_that_is_not_absolute();
 
     let before = churn();
@@ -131,6 +139,7 @@ fn a_quiet_client_does_not_wedge_the_launcher() {
         cwd: "/",
         extras: &[],
         slots: &[],
+        parent: Parent::Init,
     };
     let len = request.encode(&mut buf).expect("encode a launch");
     conn.send_bytes_with_handles(&[], launch::MSG_LAUNCH, &buf[..len])
@@ -159,8 +168,15 @@ fn a_frame_that_lies() {
     let second = syscall::dup(write.as_handle()).expect("a second duplicate to send");
 
     let mut buf = [0u8; 512];
-    let request =
-        Launch { program: DECLARED, argv: b"", env: b"", cwd: "/", extras: &[], slots: &[] };
+    let request = Launch {
+        program: DECLARED,
+        argv: b"",
+        env: b"",
+        cwd: "/",
+        extras: &[],
+        slots: &[],
+        parent: Parent::Init,
+    };
     let len = request.encode(&mut buf).expect("encode a launch");
 
     let conn = launcher();
@@ -220,7 +236,8 @@ fn refused_with(extras: &[(&str, RawHandle)]) -> u32 {
 /// Send one launch from `cwd` carrying `extras`, and answer init's reply.
 fn answer_to(cwd: &str, extras: &[(&str, RawHandle)]) -> u32 {
     let mut buf = [0u8; 512];
-    let request = Launch { program: DECLARED, argv: b"", env: b"", cwd, extras, slots: &[] };
+    let request =
+        Launch { program: DECLARED, argv: b"", env: b"", cwd, extras, slots: &[], parent: Parent::Init };
     let (handles, count) = request.handles();
     let len = request.encode(&mut buf).expect("encode a launch");
 
@@ -253,11 +270,10 @@ fn the_launcher_still_works() {
 /// **The half of it that is the kernel's**, asserted from a process that can
 /// afford to die so that init does not have to.
 ///
-/// `SYS_NAMESPACE_BUILD`'s added connector is the one handle argument in the
-/// ABI that routinely crossed a trust boundary — a `provides` name is exactly
-/// a connector somebody else made — so a wrong type there answers a word. Every
-/// other `WrongType` in the table still ends the caller, and if this one goes
-/// back to doing that, this arm never returns and the test reds on exit 139.
+/// `SYS_NAMESPACE_BUILD`'s added connector routinely crosses a trust boundary —
+/// a `provides` name is exactly a connector somebody else made — so a wrong
+/// type there answers a word, and if it goes back to ending the caller, this
+/// arm never returns and the test reds on exit 139.
 fn the_kernel_answers_rather_than_faults() {
     let (_read, write) = toyos::pipe_pair().expect("a pipe of our own");
     // SAFETY: it is not a connector, which is the point — the call must answer
@@ -266,4 +282,57 @@ fn the_kernel_answers_rather_than_faults() {
     let refused = namespace::build().add("surface", &pretend).finish();
     let _ = pretend.into_raw();
     assert_eq!(refused.err(), Some(SyscallError::InvalidArgument));
+}
+
+/// The frame `toyos::launch` encodes for a launch under init, with its header's
+/// last word — the parent — cleared: no SDK call can spell a launch that names
+/// neither. Refused, and nothing starts: a grant would answer `MSG_LAUNCHED`.
+fn a_launch_naming_no_parent() {
+    let mut buf = [0u8; 512];
+    let request = Launch {
+        program: DECLARED,
+        argv: b"",
+        env: b"",
+        cwd: "/",
+        extras: &[],
+        slots: &[],
+        parent: Parent::Init,
+    };
+    let len = request.encode(&mut buf).expect("encode a launch");
+    // Nine little-endian words, the parent last.
+    buf[32..36].copy_from_slice(&0u32.to_le_bytes());
+    let conn = launcher();
+    conn.send_bytes_with_handles(&[], launch::MSG_LAUNCH, &buf[..len])
+        .expect("the launcher took the frame");
+    assert_eq!(
+        answer(&conn),
+        Ok(launch::MSG_REFUSED),
+        "a launch naming no parent was not refused: init chose one for it",
+    );
+    println!("  a launch naming no parent: refused, and nothing started");
+}
+
+/// A place that is a pipe's write end, which carries `WRITE`, so the kernel
+/// reaches the type it is not. The arms after this one are init answering the
+/// next launch.
+fn a_place_that_is_a_pipe() {
+    let (_read, write) = toyos::pipe_pair().expect("a pipe of our own");
+    let place = syscall::dup(write.as_handle()).expect("a duplicate to send");
+    let mut buf = [0u8; 512];
+    let request = Launch {
+        program: DECLARED,
+        argv: b"",
+        env: b"",
+        cwd: "/",
+        extras: &[],
+        slots: &[],
+        parent: Parent::Place(place),
+    };
+    let (handles, count) = request.handles();
+    let len = request.encode(&mut buf).expect("encode a launch");
+    let conn = launcher();
+    conn.send_bytes_with_handles(&handles[..count], launch::MSG_LAUNCH, &buf[..len])
+        .expect("the launcher took the frame");
+    assert_eq!(answer(&conn), Ok(launch::MSG_REFUSED), "a pipe named as a launch's place was not refused");
+    println!("  a place that is a pipe: refused, and init is still here");
 }

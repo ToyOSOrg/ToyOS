@@ -73,6 +73,7 @@ fn main() {
             cwd_len: CWD.len() as u64,
             image: 0,
             image_len: 0,
+            place: u64::from(toyos_abi::HANDLE_INVALID.0),
         };
         unsafe { syscall::spawn(&args) }
     };

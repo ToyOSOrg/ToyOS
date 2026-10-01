@@ -217,6 +217,7 @@ fn spawn_with_slot_map(handle: toyos_abi::RawHandle) -> Result<toyos_abi::RawHan
             cwd_len: CWD.len() as u64,
             image: 0,
             image_len: 0,
+            place: u64::from(toyos_abi::HANDLE_INVALID.0),
         })
     };
     unsafe { syscall::munmap(region, REGION) }.expect("munmap");

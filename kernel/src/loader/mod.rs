@@ -29,7 +29,7 @@ use crate::object::{ops, HandleTable, KObjectRef};
 use crate::mm::policy::{CachePolicy, Prot};
 use crate::mm::{PAGE_2M, PAGE_BYTES};
 use crate::process::{
-    ElfInfo, Endowments, OwnedAlloc, PageAlloc, PageFaultTrace, PageTables, Pid,
+    Admission, ElfInfo, OwnedAlloc, PageAlloc, PageFaultTrace, PageTables, Parent, Pid,
     ProcessAccounting, ProcessData, ProcessEntry, ThreadData, ThreadEntry, UserStack,
     PROCESS_TABLE,
 };
@@ -343,11 +343,8 @@ fn rela_dyn_from_sections(
     }
 }
 
-/// Load a program and place its main thread, answering the object a handle to
-/// the new process names.
-///
-/// No parent argument: a process has no parent, and the only thing the caller
-/// contributes beyond its endowment is the working directory it passes in.
+/// Load a program and place its main thread under `parent`, answering the object
+/// a handle to the new process names.
 ///
 /// `image` is the program's bytes when the caller read them itself, and then
 /// `argv[0]` is only its name: nothing opens it, and its libraries come from
@@ -363,11 +360,14 @@ pub fn spawn(
     cwd: String,
     env: Vec<u8>,
     image: Option<Arc<dyn crate::file_backing::FileBacking>>,
+    parent: Parent,
 ) -> Result<Arc<crate::object::process::ProcessObject>, crate::object::Refusal> {
     // An argv of only separators survives sys_spawn's split as an empty slice.
     let Some(&path) = argv.first() else {
         return Err(SyscallError::InvalidArgument.into());
     };
+    // Before anything is built; dropped on every way out below but the insert.
+    let admission = Admission::ask(parent)?;
     let t0 = crate::clock::nanos_since_boot();
 
     let from_image = image.is_some();
@@ -594,10 +594,15 @@ pub fn spawn(
 
 
     let NeededLibs { libs: loaded_libs, paths: lib_paths } = loaded_libs;
+    let pid = admission.pid();
+    let object = crate::object::process::ProcessObject::new(pid);
     // The point of no return: every failure above answers the caller with its
     // table untouched. `commit`'s own `?` is different — reachable only if the
-    // caller raced its own spawn, and fatal to it, not a refusal.
-    let (handles, endowments) = pending.commit()?;
+    // caller raced its own spawn, and fatal to it, not a refusal — and so is a
+    // parent claimed while this was built, whose refused insert takes the
+    // endowments with a child that never ran, as its walk would have taken
+    // them with one that had.
+    let (handles, endowments) = pending.commit(KObjectRef::Process(Arc::clone(&object)))?;
     let proc_data = Arc::new(Lock::new(ProcessData {
         handles,
         cwd,
@@ -646,15 +651,25 @@ pub fn spawn(
 
     let mut guard = PROCESS_TABLE.lock();
     let table = guard.as_mut().unwrap();
-    let pid = table.insert_with(|pid| ProcessEntry::new(
-        pid,
+    let node = match admission.land(table) {
+        Ok(node) => node,
+        // Everything built is dropped on the way out, with no lock held.
+        Err(refused) => {
+            drop(guard);
+            refused.publish();
+            log!("spawn: {}: its parent ended while it was built", path);
+            return Err(SyscallError::Gone.into());
+        }
+    };
+    table.fill(pid, ProcessEntry::new(
+        Arc::clone(&object),
         start::make_name(path),
         proc_data,
         Arc::clone(&syms),
         ThreadEntry::new(thread_data),
+        node,
     ));
     let tid = table.get(pid).unwrap().main_tid();
-    let object = Arc::clone(table.get(pid).unwrap().object());
 
     // Placed while still holding the table lock: kill_process claims teardown
     // under it, so a retire sweep can never see the pid before its thread is scheduled.
@@ -884,16 +899,17 @@ pub fn spawn_init() -> Pid {
         .install(crate::object::HandleEntry::new(cap, rights))
         .expect("spawn_init: an empty table refused the system capability");
     let label = toyos_abi::syscall::SYSCAP_LABEL;
-    let endowments = Endowments::new(
-        alloc::vec![toyos_abi::syscall::EndowEntry {
+    let pending = PendingHandles::Ready {
+        table: handles,
+        entries: alloc::vec![toyos_abi::syscall::EndowEntry {
             label_off: 0,
             label_len: label.len() as u32,
             handle: cap_handle,
             _pad: 0,
         }],
-        label.as_bytes().to_vec(),
-    );
-    match spawn(&[INIT_PATH], PendingHandles::Ready(handles, endowments), String::from("/"), Vec::new(), None) {
+        labels: label.as_bytes().to_vec(),
+    };
+    match spawn(&[INIT_PATH], pending, String::from("/"), Vec::new(), None, Parent::Root) {
         Ok(object) => object.pid(),
         Err(crate::object::Refusal::Error(e)) => panic!("spawn_init: failed to spawn: {e:?}"),
         Err(crate::object::Refusal::Handle(e)) => panic!("spawn_init: {e}"),

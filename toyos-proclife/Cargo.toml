@@ -63,6 +63,24 @@ mutate-last-out-leaves-before-its-teardown = []
 # `interleave::tests::a_join_racing_the_kill_that_takes_its_target` must red
 # under this.
 mutate-join-collects-in-a-teardown = []
+# `tree::insert_child` stops re-reading its place's claim, so a spawn admitted
+# before a kill lands under the place after the walk read its children.
+# `interleave::tests::a_spawn_racing_its_places_kill_lands_nothing_under_it_and_publishes_it`
+# must red under this.
+mutate-place-skips-the-insert-recheck = []
+# `tree::refuse_child` keeps the refused spawn's hold on its place, which then
+# waits for a child that will never be and is never published. The same test
+# must red under this.
+mutate-refused-insert-keeps-the-count = []
+# `tree::teardown_done` publishes an end with its own teardown, whatever is
+# still unpublished below it. `interleave::tests::an_exit_publishes_after_every_end_below_it`
+# must red under this.
+mutate-publish-before-the-children = []
+# The model's walk claims everything it owes in one lock section, as a kernel
+# that held `PROCESS_TABLE` across its walk would.
+# `interleave::tests::a_spawn_under_an_unrelated_process_lands_between_two_claims_of_one_walk`
+# must red under this.
+mutate-walk-in-one-hold = []
 
 [dependencies]
 toyos-abi = { path = "../toyos-abi" }

@@ -192,13 +192,9 @@ pub(super) fn sys_namespace_build(ctx: &SyscallContext, args: &NamespaceBuild) -
                 return SyscallError::InvalidArgument.to_u64();
             };
             let connector = match process::with_process_data(|data| {
-                data.handles.get::<port::Connector>(handle, Rights::TRANSFER)
+                data.handles.get_sent::<port::Connector>(handle, Rights::TRANSFER)
             }) {
                 Ok(c) => c,
-                // WrongType returns InvalidArgument here instead of ending the caller: an added connector is often one a peer transferred, not proof of a caller bug.
-                Err(crate::object::HandleError::WrongType { .. }) => {
-                    return SyscallError::InvalidArgument.to_u64()
-                }
                 Err(e) => return e.refuse(),
             };
             entries.push((name, connector));

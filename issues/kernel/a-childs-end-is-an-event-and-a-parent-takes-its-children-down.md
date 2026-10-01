@@ -117,57 +117,6 @@ directory is `issues/isolation/every-program-sees-only-the-files-it-was-given.md
    the pipe answering (passed to the kernel, which ends the caller). Negative
    control: today's libc, against which the corpus does not link. Oracle:
    POSIX's `posix_spawn`, `waitpid`, `poll` and `SA_RESTART`, and signal(7).
-4. **A parent takes its children down** (ruled). A spawn's parent is its
-   spawner. A launch names its parent in its request, by one of two words: the
-   caller, whose place is a copy of the handle to itself every process starts
-   holding under the label `self` (`WRITE`, `DUP`, `TRANSFER`), carried as one
-   of the batch's five extras (`toyos/src/launch.rs`); or init, the one way to
-   outlive a starter, which std's ToyOS `CommandExt` asks for and the shell
-   gains a way to use; std answers a request for init it cannot launch
-   `PermissionDenied`, as it answers a `provide` with no launcher, and spawns
-   nothing. init spawns under the place, which `SpawnArgs` gains (112 bytes to
-   120). The place and `SYS_NAMESPACE_BUILD`'s connector are each a handle a
-   peer sent, and one lookup resolves both, answering a wrong type
-   `InvalidArgument` rather than ending the caller: `HandleError::WrongType`
-   declares that exception once, for that lookup, and the connector's own match
-   in `kernel/src/syscall/ipc.rs` goes. The kernel keeps each process's parent,
-   children and depth on its table entry, answered by no syscall. A spawn that
-   would put a process more than `toyos_proclife::MAX_DEPTH` (64) below init,
-   counted from the place, is refused `ResourceExhausted`, and the kernel logs
-   a depth refusal naming that depth. Every end — exit, kill, CPU fault,
-   handle fault — closes admission at its top and claims its subtree on the
-   ending or killing thread, one process per table-lock hold, calling
-   `scheduler::yield_now` between two claims, with nothing held, whenever a
-   reschedule is owed. An end is published once its teardown is done and every
-   child's end is, by a count admission raises and a child's publication or
-   refused insert lowers, so the climb from the last teardown, run with
-   preemption off, is at most `MAX_DEPTH` publications. Decided in
-   `toyos-proclife`; init's part goes where launch resolution is by then
-   (`issues/isolation/the-supervisor-is-host-tested-and-owns-the-stop.md` stage
-   2). *Exit*: host — `toyos-proclife`'s interleavings of a spawn racing its
-   place's kill land nothing under it, end all under it and publish it in every
-   one; a spawn under an unrelated process lands between two claims of one
-   walk; a chain is refused at `MAX_DEPTH` + 1 below init. Guest — A starts B,
-   B starts C and launches D: killing B ends all three, read as killed, and A's
-   watch on B completes after C's and D's; so do B's exit, a CPU fault and a
-   handle fault in B; a spawn or launch under B after its kill answers `Gone`;
-   a chain alternating spawn and launch, each process starting the next, stops
-   where the kernel's depth refusal names `MAX_DEPTH` + 1, and dies whole with
-   its first; a launch that neither carries a place nor asks for init is
-   refused and nothing starts, and so is a request for init to start an
-   undeclared program or carrying an extra slot; a launch whose place is a
-   pipe is refused and init answers the next; a `MANAGE`-only place answers
-   `PermissionDenied`; sshd launched from a shell dies with it, and with init
-   as its parent outlives it. Negative control: the stage reverted whole, where
-   C and D outlive B. Mutations: a walk that skips a launched child (D); a
-   publication before the children's (A's watch); a walk from `sys_exit` alone
-   (the faults); the walk in one lock hold (the interleaved spawn); the count
-   kept on a refused insert (B unpublished); the place looked up as any handle
-   (init ends); no depth check, and a depth counted from the spawner rather
-   than the place (the chain, which no depth refusal stops); a launch with no
-   place spawned under init (it starts); std's `NotDeclared` fallback, or its
-   early return for an endowment or extra slot, kept for init (it starts).
-   Oracle: cgroup v2's `cgroup.kill` and `cgroup.max.depth`.
 5. **A login is a session under init** (ruled; Q5a–Q5c). init starts a session
    process per login — the desktop's at boot, one per SSH connection at sshd's
    request — and the compositor and sshd start a login's programs under it. Its
@@ -180,7 +129,7 @@ directory is `issues/isolation/every-program-sees-only-the-files-it-was-given.md
    process of a login.
 6. **A program is asked to quit** (Q3b, Q6a–Q6f). `SYS_PROCESS_QUIT` (124,
    never assigned), `(process, reason)`, needs `MANAGE` as the kill does and
-   reaches the process's subtree by stage 4's walk; the reason is interrupt,
+   reaches the process's subtree as an end does; the reason is interrupt,
    hang-up or terminate. Each process is started holding its notice, a new
    object kind under the label `quit`, `READABLE` while a reason is asked and
    not yet read, whose read takes it. A quit kills a process that has never

@@ -629,6 +629,7 @@ fn execute_simple(cmd: &SimpleCommand, piped_stdin: Option<std::process::ChildSt
             return true;
         }
         "help" => { print_help(); set_status_code(0); return true; }
+        "detach" => return detach(cmd),
         _ => {}
     }
 
@@ -704,6 +705,33 @@ fn provided() -> &'static [(&'static str, Connector)] {
         let n = toyos::endow::provided(&mut slots);
         slots.into_iter().take(n).flatten().collect()
     })
+}
+
+/// `detach <program> [args...]`: start it with init as its parent — the one way
+/// for a program to outlive this shell — and do not wait for it. Nothing this
+/// shell was provided goes with it: that belongs to the session it outlives.
+fn detach(cmd: &SimpleCommand) -> bool {
+    let Some(program) = cmd.args.get(1) else {
+        println!("detach: which program?");
+        set_status_code(2);
+        return false;
+    };
+    let cwd =
+        env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| String::from("/"));
+    let mut command = Command::new(toyos_manifest::package::launch_path(program, &cwd));
+    command.args(&cmd.args[2..]).under_init();
+    apply_redirect(&mut command, cmd);
+    match command.spawn() {
+        Ok(_) => {
+            set_status_code(0);
+            true
+        }
+        Err(e) => {
+            println!("detach: {program}: {e}");
+            set_status_code(126);
+            false
+        }
+    }
 }
 
 fn build_command(cmd: &SimpleCommand) -> Option<Command> {
@@ -785,7 +813,8 @@ fn set_status_code(code: i32) {
 }
 
 fn print_help() {
-    println!("Builtins: cd, clear, exit, export, help");
+    println!("Builtins: cd, clear, detach, exit, export, help");
+    println!("detach <program>: start it under init, so it outlives this shell");
     println!("Operators: | (pipe), && (and), || (or), ; (sequence)");
     println!("Redirects: > (truncate), >> (append)");
     println!("Variables: $VAR, ${{VAR}}, $? (exit status)");

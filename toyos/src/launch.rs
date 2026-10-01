@@ -13,6 +13,11 @@
 //! same bound `SYS_SPAWN` has. What it *adds* is that the child's namespace is
 //! its own manifest row rather than a narrowing of its parent's.
 //!
+//! **A launch names its parent**, by one of two words: a place, which is a
+//! handle to a process carrying `WRITE` — the caller's own `self`, duplicated —
+//! that init spawns the program under, so the caller's end takes it down; or
+//! init, the one way for a program to outlive whoever started it.
+//!
 //! The wire is a single frame plus one handle batch, and this module is both
 //! halves of it — std's `Command` encodes and `init` decodes.
 
@@ -34,8 +39,12 @@ pub const MSG_NOT_DECLARED: u32 = 3;
 /// endowment. The reason is in init's log, not in this frame — a caller can do
 /// nothing differently about any of them.
 pub const MSG_REFUSED: u32 = 4;
+/// The place it named is a process whose end has begun: nothing started, and
+/// nothing will under it.
+pub const MSG_GONE: u32 = 5;
 
-/// Connectors one launch may carry from its caller.
+/// Handles beyond stdio one launch may carry from its caller: the connectors
+/// it transfers, and the place it names.
 ///
 /// Policy on the primitive, refused by name. Five and not more because the
 /// batch also carries the three stdio handles and
@@ -48,7 +57,22 @@ pub const MAX_LAUNCH_EXTRAS: usize = 5;
 /// caller that wants anything else in a child's table spawns it directly.
 pub const MAX_LAUNCH_SLOTS: usize = 3;
 
-const HEADER: usize = 32;
+const HEADER: usize = 36;
+
+/// The header's last word for a launch that names a place.
+const PARENT_PLACE: u32 = 1;
+/// The header's last word for a launch that asks init to be the parent.
+const PARENT_INIT: u32 = 2;
+
+/// Whom a launch asks init to place the program under.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Parent<H = RawHandle> {
+    /// The process a handle carrying `WRITE` names, moved as the batch's last
+    /// handle.
+    Place(H),
+    /// init itself.
+    Init,
+}
 
 /// What a caller asks init to start.
 ///
@@ -79,6 +103,9 @@ pub struct Launch<'a> {
     /// first — which is the same rule `SpawnArgs`'s two vectors state, with the
     /// duplication moved to the caller because a launch has only the one verb.
     pub slots: &'a [(u32, RawHandle)],
+    /// Whom the program is placed under. A place is **moved** with the batch,
+    /// and counts against [`MAX_LAUNCH_EXTRAS`].
+    pub parent: Parent,
 }
 
 /// Why a request would not go on the wire.
@@ -91,15 +118,17 @@ pub enum EncodeError {
 }
 
 impl Launch<'_> {
-    /// The handles this launch moves, slots first.
+    /// The handles this launch moves: slots, then extras, then the place.
     pub fn handles(&self) -> ([RawHandle; MAX_LAUNCH_EXTRAS + MAX_LAUNCH_SLOTS], usize) {
         let mut out = [RawHandle(0); MAX_LAUNCH_EXTRAS + MAX_LAUNCH_SLOTS];
         let mut n = 0;
-        for (_, handle) in self.slots {
-            out[n] = *handle;
-            n += 1;
-        }
-        for (_, handle) in self.extras {
+        let place = match self.parent {
+            Parent::Place(place) => Some(place),
+            Parent::Init => None,
+        };
+        let slots = self.slots.iter().map(|(_, h)| h);
+        let extras = self.extras.iter().map(|(_, h)| h);
+        for handle in slots.chain(extras).chain(&place) {
             out[n] = *handle;
             n += 1;
         }
@@ -108,7 +137,11 @@ impl Launch<'_> {
 
     /// Write the request blob into `buf`, answering its length.
     pub fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
-        if self.extras.len() > MAX_LAUNCH_EXTRAS || self.slots.len() > MAX_LAUNCH_SLOTS {
+        let (place, word) = match self.parent {
+            Parent::Place(_) => (1, PARENT_PLACE),
+            Parent::Init => (0, PARENT_INIT),
+        };
+        if self.extras.len() + place > MAX_LAUNCH_EXTRAS || self.slots.len() > MAX_LAUNCH_SLOTS {
             return Err(EncodeError::TooMany);
         }
         let names_len: usize = self.extras.iter().map(|(n, _)| n.len() + 1).sum();
@@ -132,6 +165,7 @@ impl Launch<'_> {
             self.env.len() as u32,
             self.cwd.len() as u32,
             names_len as u32,
+            word,
         ];
         for (i, v) in lens.iter().enumerate() {
             buf[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
@@ -169,6 +203,7 @@ pub struct Request<'a> {
     pub extra_count: usize,
     slots: &'a [u8],
     names: &'a [u8],
+    parent: u32,
 }
 
 impl<'a> Request<'a> {
@@ -183,7 +218,8 @@ impl<'a> Request<'a> {
         let (slot_count, extra_count) = (field(0), field(1));
         let (slots_len, program_len, argv_len, env_len, cwd_len, names_len) =
             (field(2), field(3), field(4), field(5), field(6), field(7));
-        if extra_count > MAX_LAUNCH_EXTRAS
+        let parent = field(8) as u32;
+        if extra_count + usize::from(parent == PARENT_PLACE) > MAX_LAUNCH_EXTRAS
             || slot_count > MAX_LAUNCH_SLOTS
             || slots_len != slot_count * 4
         {
@@ -214,7 +250,22 @@ impl<'a> Request<'a> {
         if names.iter().filter(|&&b| b == 0).count() != extra_count {
             return None;
         }
-        Some(Self { program, argv, env, cwd, extra_count, slots, names })
+        Some(Self { program, argv, env, cwd, extra_count, slots, names, parent })
+    }
+
+    /// Whom the request names as the parent: `None` for neither word, which
+    /// is a launch init refuses.
+    pub fn parent(&self) -> Option<Parent<()>> {
+        match self.parent {
+            PARENT_PLACE => Some(Parent::Place(())),
+            PARENT_INIT => Some(Parent::Init),
+            _ => None,
+        }
+    }
+
+    /// The handles the batch carries: the slots, the extras, then the place.
+    pub fn handle_count(&self) -> usize {
+        self.slot_count() + self.extra_count + usize::from(self.parent == PARENT_PLACE)
     }
 
     /// The child slots the first handles of the batch are for, in order.
@@ -259,6 +310,8 @@ pub enum Outcome<'a> {
     NotDeclared { home: &'a str },
     /// Declared, and it did not start.
     Refused,
+    /// The place it named has begun to end.
+    Gone,
 }
 
 /// Send one launch and read its answer, a `HOME` in `answer`.
@@ -295,6 +348,7 @@ pub fn launch<'a>(
             Ok(Outcome::NotDeclared { home })
         }
         MSG_REFUSED => Ok(Outcome::Refused),
+        MSG_GONE => Ok(Outcome::Gone),
         _ => Err(LaunchError::Sent(IpcError::Malformed)),
     }
 }

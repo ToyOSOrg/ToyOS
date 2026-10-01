@@ -47,6 +47,11 @@ const RELAY_GO: RawHandle = RawHandle(4);
 /// `timeout_nanos` for a wait with no clock (`syscall::inbox_submit`).
 const FOREVER: u64 = u64::MAX;
 
+/// The label the creator finds a copy of the root's own `self` under: the
+/// place it starts the process that finishes its request, which a creator's
+/// end would otherwise take down with it.
+const ROOT_LABEL: &str = "root";
+
 fn main() {
     match std::env::args().nth(1).as_deref() {
         Some("connect") => connect_and_go(),
@@ -65,12 +70,16 @@ fn run() {
     // Racing a dying creator against the compositor's own dispatch is what
     // this used to do, and under a loaded host the compositor won all eight
     // heats and the run proved nothing. Instead the request is *completed by a
-    // third process*: the creator hands its socket to a grandchild and exits,
-    // this process reaps it — which is what takes the pid out of the process
-    // table — and only then closes the pipe that releases the grandchild to
+    // third process*: the creator hands its socket to a relay it places under
+    // this process, so that its own end does not take the relay down, and
+    // exits; this process reaps it — which is what takes the pid out of the
+    // process table — and only then closes the pipe that releases the relay to
     // send the frame. Every step waits on the one before it.
+    let root = endow::this_process().expect("every process holds itself");
+    let place = syscall::dup(root.as_handle()).expect("a copy of the root's self for the creator");
     let mut creator = Command::new(SELF_PATH)
         .arg("connect")
+        .endow(ROOT_LABEL, place.0)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -84,7 +93,7 @@ fn run() {
         fail(&format!("[a reaped creator] the creator said {said:?}"));
     }
     creator.wait().expect("reap the creator");
-    // The reap is what makes the pid unknown; this is what tells the grandchild
+    // The reap is what makes the pid unknown; this is what tells the relay
     // the reap has happened.
     drop(go);
     probe("a creator reaped before its window");
@@ -158,19 +167,22 @@ fn run() {
     println!("compositor client death: 6 deaths survived, compositor still serving");
 }
 
-/// The creator: connect, hand the connection to a process that will outlive
-/// this one, and go.
+/// The creator: connect, hand the connection to a process placed under the
+/// root, which this one's end does not take down, and go.
 ///
 /// Nothing is sent here. The compositor's record of who this connection
 /// belongs to is made at `connect`, and that is the only thing this role has
 /// to establish before dying.
 fn connect_and_go() {
     let conn = endow::service("compositor").expect("the compositor is not serving");
+    let root: toyos::process::Process =
+        endow::Endowments::get().take(ROOT_LABEL).expect("the root endowed its own self");
     // The kernel clones the handle into the child's table
     // (`loader::build_child_handles`), so the socket — and the pipes under it —
     // outlive this process.
     Command::new(SELF_PATH)
         .arg("finish")
+        .under(root.as_handle().0)
         .inherit_handle(RELAY_SOCKET.0, conn.as_handle().0)
         .inherit_handle(RELAY_GO.0, 0)
         .spawn()
@@ -178,7 +190,7 @@ fn connect_and_go() {
     println!("connected");
 }
 
-/// The grandchild: send the request its creator never sent, once that creator
+/// The relay: send the request its creator never sent, once that creator
 /// has been reaped.
 fn finish() {
     let mut byte = [0u8; 1];

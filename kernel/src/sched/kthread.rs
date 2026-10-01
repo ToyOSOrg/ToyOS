@@ -114,11 +114,12 @@ pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64) -> ThreadSched
     let table = guard.as_mut().expect("kthread: spawned before process::init");
     let pid = table.insert_with(|pid| {
         ProcessEntry::new(
-            pid,
+            crate::object::process::ProcessObject::new(pid),
             short,
             Arc::new(Lock::new(kernel_process_data(name))),
             Arc::clone(&syms),
             ThreadEntry::new(Arc::new(Lock::new(kernel_thread_data()))),
+            toyos_proclife::Node::root(),
         )
     });
     let tid = table.get(pid).expect("kthread: the entry just inserted is gone").main_tid();

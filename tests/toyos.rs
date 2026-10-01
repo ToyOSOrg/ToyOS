@@ -326,6 +326,9 @@ const RUST_SKIP: &[&str] = &[
     // Needs a launcher to tell its two roads apart, and a declared shell and
     // toybox to take it: `spawn_cwd` runs it on tests/netcase.
     "spawn_cwd",
+    // Needs a launcher, a declared `cat` and shell, and sshd with a NIC under it:
+    // `process_tree` runs it on tests/proctreecase.
+    "process_tree",
     // Needs a boot image the harness staged a file into before the machine
     // started, which only `esp_filesystem` builds.
     "esp_files",
@@ -846,6 +849,8 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     ("launcher_refusals", Sched::Parallel),
     // Paths a child prints and the kernel's refusals by name; no clock in any of them.
     ("spawn_cwd", Sched::Parallel),
+    // Exit codes, publication order and a kernel line; no clock in any of them.
+    ("process_tree", Sched::Parallel),
     ("foreign_disk_untouched", Sched::Parallel),
     ("volume_from_another_disk", Sched::Parallel),
     ("broken_data_volume_is_absent", Sched::Parallel),
@@ -1393,6 +1398,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("netd_hostile_peer", &["test_rs_netd_hostile_peer"]),
     ("launcher_refusals", &["test_rs_launcher_refusals"]),
     ("spawn_cwd", &["test_rs_spawn_cwd"]),
+    ("process_tree", &["test_rs_process_tree"]),
     ("input_claim_absent", &["test_rs_input_absent"]),
     ("gpu_set_resolution", &["test_rs_gpu_set_resolution"]),
     ("iommu_gpu_scanout_swap", &["test_rs_gpu_scanout_swap"]),
@@ -13814,6 +13820,63 @@ fn run_machine_test(
             console.push_str(&result.serial);
             serial::Serial::named("boot console", console.as_str()).must_be_clean()?;
             eprintln!("  [netcase] every child started in the directory its spawn named");
+            Ok(())
+        }
+        "process_tree" => {
+            // A parent's end takes its children down, on `tests/proctreecase`:
+            // a launcher, a declared `cat` and shell, and sshd with a NIC under
+            // it and a key staged so it runs. The guest carries every verdict
+            // but two the kernel and sshd speak: the depth refusal names
+            // `MAX_DEPTH` + 1, and both of the guest's sshds bound their port —
+            // the one killed with its shell and the one that outlived its own.
+            let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/proctreecase");
+            let bins: Vec<(String, Vec<u8>)> =
+                rust_bins.iter().filter(|(name, _)| name == "process_tree").cloned().collect();
+            if bins.is_empty() {
+                return Err("process_tree was not built".to_string());
+            }
+            let identity = common::ssh::Identity::mint("proctreecase")?;
+            let mut qemu = QemuInstance::boot_with_options(
+                &config,
+                &[],
+                &bins,
+                BootOptions {
+                    profile: qemu::Profile::Headless,
+                    extra_root_files: vec![(
+                        common::ssh::KEYS_ON_ROOT.to_string(),
+                        identity.authorized_line().into_bytes(),
+                    )],
+                    ..Default::default()
+                },
+            );
+            let mut console = qemu.boot_log().to_string();
+            let _ = await_marker(&mut qemu, &mut console, "===READY===", "test-runner to come up");
+
+            let result = qemu.run_test("test_rs_process_tree", Duration::from_secs(600));
+            if let Some(err) = &result.error {
+                return Err(format!("{err}\n{}{}", result.stdout, result.serial));
+            }
+            console.push_str(&result.serial);
+            if result.exit_code != Some(0) || !result.stdout.contains("process_tree: PASS") {
+                return Err(format!(
+                    "process_tree exited {:?}:\n{}\nconsole:\n{console}",
+                    result.exit_code, result.stdout
+                ));
+            }
+            let refused = console.lines().filter(|l| l.contains("spawn: refused under pid ")).collect::<Vec<_>>();
+            if refused.len() != 1 || !refused[0].contains("at depth 65, more than 64 below init") {
+                return Err(format!(
+                    "the kernel's depth refusals were {refused:?}, not one naming depth 65:\n{console}"
+                ));
+            }
+            let listening = console.matches("sshd: listening on port 22").count();
+            if listening != 2 || console.contains("sshd: cannot bind") {
+                return Err(format!(
+                    "sshd said it was listening {listening} times, not once per sshd the guest \
+                     started — an arm about one that never ran asserts nothing:\n{console}"
+                ));
+            }
+            eprintln!("  [proctreecase] every end took its subtree, and the chain stopped at depth 65");
             Ok(())
         }
         "input_claim_absent" => {

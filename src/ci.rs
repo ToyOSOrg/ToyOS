@@ -347,6 +347,18 @@ pub(crate) const CONTROLS: &[Control] = &[
         "the_last_one_out_is_in_its_process_until_its_teardown_is_done ... FAILED",
         "only_the_thread_that_empties_a_claimed_process_tears_it_down ... FAILED",
     ]),
+    red(PROCLIFE, "mutate-place-skips-the-insert-recheck", None, &[
+        "a_spawn_racing_its_places_kill_lands_nothing_under_it_and_publishes_it ... FAILED",
+    ]),
+    red(PROCLIFE, "mutate-refused-insert-keeps-the-count", None, &[
+        "a_spawn_racing_its_places_kill_lands_nothing_under_it_and_publishes_it ... FAILED",
+    ]),
+    red(PROCLIFE, "mutate-publish-before-the-children", None, &[
+        "an_exit_publishes_after_every_end_below_it ... FAILED",
+    ]),
+    red(PROCLIFE, "mutate-walk-in-one-hold", None, &[
+        "a_spawn_under_an_unrelated_process_lands_between_two_claims_of_one_walk ... FAILED",
+    ]),
     red(SCHED_SIM, "placement-ignores-staleness", Some("policy"), &[
         "a_stopped_cpu_stops_taking_work ... FAILED",
     ]),

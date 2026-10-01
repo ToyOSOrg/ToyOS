@@ -1,0 +1,59 @@
+# The boot `process_tree` runs on: a parent's end takes its children down.
+#
+# A `launcher`, because the subtree under test has children init launches; a
+# declared `cat`, which runs until its input ends; a declared shell, which a
+# depth chain launches and which starts and detaches sshd; and sshd, with netd
+# and a NIC under it and a key the harness stages, so that it runs.
+
+[boot]
+start = ["logd", "blockd", "fsd", "netd", "test-runner"]
+
+# `every_boot_config_runs_logd` is what refuses a boot config without it: the
+# kernel keeps the record ring and writes no file, so such a boot's `/log` is
+# empty. It claims no device and serves no port.
+[programs.logd]
+service = true
+syscap = ["logread"]
+
+# netd holds the NIC's PCI function and drives it: the virtqueues, the register
+# window and the interrupt are its own, and the kernel keeps only the claim.
+[programs.netd]
+service = true
+serves = ["netd"]
+devices = ["pci:1af4:1041"]
+
+# Started by the guest from a shell, never at boot.
+[programs.sshd]
+service = true
+receives = ["netd", "launcher"]
+
+# `roster` because the guest asks which of its tree still runs, and `dup`
+# because test-runner hands each binary a duplicate of its capability.
+[programs.test-runner]
+receives = ["launcher"]
+syscap = ["dup", "roster"]
+
+[programs.toybox]
+
+[programs.shell]
+receives = ["launcher"]
+
+[symlinks]
+"bin/cat" = "/system/bin/toybox"
+
+# The block service: the NVMe controller this machine's DATA is on, driven
+# from userland through its claim. Started again when it ends; the claim goes
+# back with the process and is minted again for the next.
+[programs.blockd]
+service = true
+restart = true
+serves = ["block"]
+devices = ["pci:1b36:0010"]
+
+# The file servers: DATA, the log and the running slot's volume, one process
+# each, serving every program the directories of its role. Started again when
+# one ends, on the same ports.
+[programs.fsd]
+restart = true
+roles = ["data", "log", "boot"]
+receives = ["block"]
