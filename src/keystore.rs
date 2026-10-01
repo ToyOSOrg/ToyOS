@@ -303,10 +303,7 @@ mod tests {
     }
 
     /// **A hidden name is a desktop's, and any other name no key owns refuses
-    /// the sweep**: Finder writes `.DS_Store` into whatever directory it shows,
-    /// a store included, and it is neither swept nor taken for a key; a name
-    /// no build writes is something else writing there, and nothing is swept
-    /// while it is.
+    /// the sweep.**
     #[test]
     fn a_sweep_leaves_hidden_names_and_refuses_names_no_key_owns() {
         let root = TempDir::new("strangers");
@@ -323,7 +320,7 @@ mod tests {
             assert!(path.is_file(), "{} was swept", path.display());
         }
 
-        for stranger in ["notes", "0123456789abcde", "0123456789abcdeg", "0123456789abcdef0"] {
+        for stranger in ["notes", "0123456789abcde", "0123456789abcdeg", "0123456789abcdef0", "0123456789abcdef copy"] {
             fs::create_dir_all(&orphan).unwrap();
             fs::create_dir(dir.join(stranger)).unwrap();
             let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sweep(&root, Keyed::Sysroot, &dir)));

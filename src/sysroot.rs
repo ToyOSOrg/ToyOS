@@ -1002,22 +1002,24 @@ mod tests {
             })
         };
 
-        let fresh = sysroots_dir(&base.join("rust")).join("fresh");
-        let said = refusal(|| drop(held(&base, &Key::of(b"fresh"), &fresh, || make(&fresh, 1))));
+        let key = Key::of(b"fresh");
+        let fresh = sysroots_dir(&base.join("rust")).join(&key);
+        let said = refusal(|| drop(held(&base, &key, &fresh, || make(&fresh, 1))));
         assert!(said.contains("is missing cargo") && said.contains("`cargo run -- --build-only`"), "{said}");
         assert!(!fresh.exists() && !fresh.with_extension("partial").exists(), "a sysroot was published from a stage2 without cargo");
         assert_eq!(made.get(), 1);
 
-        let dir = sysroots_dir(&base.join("rust")).join("found");
+        let key = Key::of(b"found");
+        let dir = sysroots_dir(&base.join("rust")).join(&key);
         clone_tree(&compiler.stage2, &dir);
         write(&dir.join(SOURCES), "found\n");
         toolchain::provision_toolchain_cargo(&compiler.stage2);
-        let using = held(&base, &Key::of(b"found"), &dir, || make(&dir, 2));
+        let using = held(&base, &key, &dir, || make(&dir, 2));
         assert_eq!(made.get(), 2, "a sysroot without its cargo was trusted because it has SOURCES");
         assert_eq!(toolchain::toolchain_defect(&dir), None);
         assert!(dir.join("lib/rustlib/x86_64-unknown-toyos/lib/libstd.rlib").is_file());
         drop(using);
-        drop(held(&base, &Key::of(b"found"), &dir, || make(&dir, 2)));
+        drop(held(&base, &key, &dir, || make(&dir, 2)));
         assert_eq!(made.get(), 2, "a whole sysroot was made again");
     }
 
@@ -1037,10 +1039,11 @@ mod tests {
             assert_eq!(made.get(), 1, "a sysroot that was not whole was made again");
         };
 
-        let dir = sysroots_dir(&base.join("rust")).join("cloned");
+        let key = Key::of(b"cloned");
+        let dir = sysroots_dir(&base.join("rust")).join(&key);
         let filled = std::cell::Cell::new(false);
         let said = refusal(|| {
-            drop(held(&base, &Key::of(b"cloned"), &dir, || {
+            drop(held(&base, &key, &dir, || {
                 once();
                 publish(&compiler, &dir, |_| {
                     filled.set(true);
@@ -1055,7 +1058,8 @@ mod tests {
         assert_eq!(made.get(), 1);
 
         made.set(0);
-        let (key, dir) = (Key::of(b"made"), sysroots_dir(&base.join("rust")).join("made"));
+        let key = Key::of(b"made");
+        let dir = sysroots_dir(&base.join("rust")).join(&key);
         let said = refusal(|| {
             drop(held(&base, &key, &dir, || {
                 once();
