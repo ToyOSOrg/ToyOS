@@ -519,7 +519,6 @@ pub fn remap() {
 /// framebuffer is armed. Freezes the report at the instant of the panic —
 /// [`live_tail`] re-reads a ring siblings may still be writing to, and a sibling
 /// logging between panic and paint would push the report off its window.
-/// `screen_late_panic` writes such a record and reads the panel for its absence.
 pub fn capture() {
     capture_into(false);
 }

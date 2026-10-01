@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{fs, thread};
 
@@ -116,24 +115,6 @@ pub fn nvme_conflict(held: &std::collections::BTreeSet<PathBuf>, want: &Path) ->
     })
 }
 
-/// Proof that no guest is holding a lane's images.
-///
-/// There are two ways to have one and there is no third: a lane that has not
-/// booted anything yet ([`LaneFree::no_guest_yet`]), and a guest that has been
-/// ended ([`QemuInstance::shutdown`], which takes `self`). A boot that takes
-/// this by value therefore *cannot be written* before the guest it replaces is
-/// gone — which is the mistake `qemu = boot()` makes, because Rust evaluates
-/// the right-hand side first.
-#[must_use]
-pub struct LaneFree(());
-
-impl LaneFree {
-    /// Before a lane's first boot, where there is no guest to end.
-    pub fn no_guest_yet() -> Self {
-        Self(())
-    }
-}
-
 /// Guests this run has started, how many of them were not the shipping kernel,
 /// and every distinct kernel build it asked cargo for.
 ///
@@ -171,44 +152,38 @@ pub fn boot_census() -> (u32, u32, Vec<String>) {
 /// list.
 ///
 /// `""` is what an image ships. [`toyos_build::build::TEST_KERNEL`] is every
-/// actuator compiled in, armed by boot parameter. `fpu-save-nothing` is the one
-/// actuator that could not become a parameter — it takes the `fxsave64` out of
-/// `arch::entry`'s `naked_asm!` bracket, which is the path its own gate is
-/// about.
-///
-/// Interactive debug mode is separate: it builds
-/// [`toyos_build::build::DEBUG_KERNEL_BUILD`] and returns before the suite.
-pub const DECLARED_KERNEL_BUILDS: [&str; 4] =
+/// actuator compiled in, armed by boot parameter. An entry here is a decision
+/// to pay a kernel build per suite run forever. Interactive debug mode is
+/// separate: it builds [`toyos_build::build::DEBUG_KERNEL_BUILD`] and returns
+/// before the suite.
+pub const DECLARED_KERNEL_BUILDS: [&str; 2] =
     toyos_build::build::TEST_SUITE_KERNEL_BUILDS;
 
-/// How many guests the phase now running may have up at once.
+/// How many guests the run may have up at once.
 ///
 /// The harness's own wall-clock margins are margins on the *host*, and they were
 /// all derived when one guest had it to itself. Four guests is a different
 /// machine, so such a margin has to be stated against the regime it runs in
-/// rather than widened outright — which is what this multiplies. A serial phase
-/// sets it back to 1 and gets the number it always had.
+/// rather than widened outright — which is what this multiplies.
 static WIDTH: AtomicU32 = AtomicU32::new(1);
 
 pub fn set_width(width: u32) {
-    assert!(width >= 1, "a phase runs at least one guest");
+    assert!(width >= 1, "a run boots at least one guest");
     WIDTH.store(width, Ordering::SeqCst);
 }
 
-/// A liveness ceiling, stated for one guest and paid out for the phase's.
+/// A liveness ceiling, stated for one guest and paid out for the run's width.
 ///
 /// Every timeout a test hands [`QemuInstance::run_test`] and its relatives is a
 /// guard against a wedge, never a verdict: the assertion is what the guest
 /// *said*, and a test whose pass depended on a deadline expiring would be
 /// asserting on the host's clock. So the number in the source stays the number
-/// its author reasoned about — one guest, this host — and the phase multiplies
-/// it, exactly as `wait_for_ready` has multiplied the boot timeout since the
-/// parallel phase landed.
+/// its author reasoned about — one guest, this host — and the width multiplies
+/// it, as `wait_for_ready` multiplies the boot timeout.
 ///
 /// The cost of getting this wrong in the generous direction is that a wedge
 /// takes longer to report. The cost in the other direction is a red run that
-/// says a guest hung when it was only sharing a machine, which is the failure
-/// mode that put the whole shared block in the serial tail.
+/// says a guest hung when it was only sharing a machine.
 ///
 /// This corrects for width and for how fast the host is, both host-wide facts.
 /// It does not correct for a guest being wider than the host — an `smp:8` guest
@@ -227,7 +202,7 @@ pub fn budget(one_guest: Duration) -> Duration {
 /// — `wait_for_ready`'s own comment names the two exceptions, and both read the
 /// guest's stamps rather than this clock — so it is a measurement of the host
 /// that costs nothing to take. The *fastest* rather than the mean because a boot
-/// taken with three other guests up measures the phase; the minimum over a run
+/// taken with three other guests up measures the others; the minimum over a run
 /// is the closest this can get to the machine with nothing else on it.
 static FASTEST_BOOT_MS: AtomicU32 = AtomicU32::new(u32::MAX);
 
@@ -342,7 +317,7 @@ fn oversubscription(smp: u32) -> (u32, u32) {
 
 /// [`budget`] widened by a guest's own vCPU oversubscription.
 ///
-/// The guest-agnostic [`budget`] scales by phase width and boot-derived host
+/// The guest-agnostic [`budget`] scales by the run's width and boot-derived host
 /// speed; this multiplies in `smp/cores` on top, so a wide-SMP guest that a
 /// mostly-serial boot said little about is given the extra room the derivation
 /// above says it needs. `smp <= cores` leaves it exactly [`budget`], which is
@@ -412,10 +387,7 @@ impl Liveness {
 ///
 /// A test that ran out of time has not found the guest doing the wrong thing;
 /// it has found nothing at all, and the two readings send an agent to opposite
-/// places. `screen_pager_keys` reporting `0 page moves over 30 keystrokes`
-/// after 0.3 s was bisected as a kernel regression twice in one day by two
-/// agents, and the fact it was hiding is that the whole run had collapsed
-/// before the guest could answer once.
+/// places.
 ///
 /// Still red. A guest that stopped answering may have stopped for a reason this
 /// tree owns, and a status that is not a failure is a status nobody reads. What
@@ -510,10 +482,8 @@ pub struct WaitVerdict(String);
 impl WaitVerdict {
     /// The sentence a wait reached, and the capture it reached it on.
     ///
-    /// `capture` is the window in the order the guest wrote it — for a test,
-    /// [`TestResult::before`] and then [`TestResult::serial`], which is where
-    /// the two halves of one window live — because the first kernel death in it
-    /// is the one this verdict is about. An empty slice is a claim that there
+    /// `capture` is the window in the order the guest wrote it, because the
+    /// first kernel death in it is the one this verdict is about. An empty slice is a claim that there
     /// was no capture at all, and it is a visible one rather than an omission.
     pub fn new(sentence: String, capture: &[&str]) -> Self {
         let Some(report) = capture.iter().find_map(|c| super::serial::death_report(c)) else {
@@ -524,12 +494,10 @@ impl WaitVerdict {
 
     /// The same, for a test that may never have announced itself.
     ///
-    /// **A test whose `===TEST_START` never arrived has an empty
-    /// [`TestResult::serial`] by construction**, so an arm that formats
-    /// `serial` prints nothing at all and [`TestResult::before`] is the only
-    /// record the boot left. [`Self::new`]'s silence on a capture nothing died
-    /// in holds everywhere else: a started test's window is in `serial`, where
-    /// its arm already looks.
+    /// **A test whose `===TEST_START` never arrived has an empty `serial` by
+    /// construction**, so `before` is the only record the boot left.
+    /// [`Self::new`]'s silence on a capture nothing died in holds everywhere
+    /// else.
     pub fn for_test(sentence: String, before: &str, serial: &str, started: bool) -> Self {
         let verdict = Self::new(sentence, &[before, serial]);
         if started || verdict.0.contains(DIED_SAYING) || before.trim().is_empty() {
@@ -565,9 +533,7 @@ impl std::fmt::Display for WaitVerdict {
 /// budgeted wall clock (`budget_smp`-scaled, so it already carries #256's
 /// `vcpus/cores` oversubscription widening), and until this it ended the wait
 /// the instant it passed — so a merely-slow guest reported exactly what a wedged
-/// one did. `launcher_refusals` was killed at `192s "still talking 1s ago"` on a
-/// loaded `smp:2` runner its `vcpus/cores` factor clamps to 1, a guest making
-/// steady progress called wedged by a clock.
+/// one did.
 ///
 /// **`elapsed > ceiling` stays a necessary condition, and that is what keeps
 /// this safe.** Silence alone is not a wedge on this suite's boots: a healthy
@@ -739,55 +705,6 @@ fn words(monitor: &mut QmpMonitor, at: u64) -> Vec<u32> {
     words.split_whitespace().filter_map(|word| u32::from_str_radix(word.strip_prefix("0x")?, 16).ok()).collect()
 }
 
-/// The fatal path's last line, which `panic_reboot::reboot_now` writes to the
-/// 16550 raw just before it resets the machine.
-pub const PANIC_REBOOTING: &str = "panic: no key inside the bound, so nobody is here";
-
-/// Drain the console into `log` until QEMU exits on the fatal path's reset, or
-/// the console says one of `refused`: a line this guest must never write ends
-/// the wait at once, and the exit closes a capture that is then whole.
-///
-/// **The reset and not a halt**: the CPU that went fatal never halts. It holds
-/// its panel under `panic_reboot`'s bound, and the bound's reset is the path's
-/// last act, which `-no-reboot` turns into QEMU's exit. So the boot passes
-/// `panic-reboot-fast`: its five seconds of silence sit inside [`GUEST_QUIET`],
-/// and the shipped minute does not.
-pub fn await_reset(
-    qemu: &mut QemuInstance,
-    log: &mut String,
-    doing: &str,
-    refused: &[&str],
-) -> Result<(), String> {
-    let from = log.len();
-    let mut live = guest_liveness();
-    loop {
-        if refused.iter().any(|line| log[from..].contains(line)) {
-            return Ok(());
-        }
-        match qemu.rx.recv_timeout(Duration::from_millis(200)) {
-            Ok(line) => {
-                log.push_str(&line);
-                log.push('\n');
-            }
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => break,
-        }
-        if !live.working(log) {
-            return Err(format!("{STALLED} waiting for {doing} — {}", live.why()));
-        }
-    }
-    let status = qemu.child.wait().map_err(|e| format!("QEMU could not be waited for: {e}"))?;
-    // On a machine with a console the line is only in the 16550's own log.
-    let said = format!("{}{}", &log[from..], qemu.uart_log());
-    if !status.success() || !said.contains(PANIC_REBOOTING) {
-        return Err(format!(
-            "QEMU exited {status} waiting for {doing}, and not on the fatal path's reset: no \
-             {PANIC_REBOOTING:?}\n{said}"
-        ));
-    }
-    Ok(())
-}
-
 /// The hardware shape QEMU presents to the guest.
 ///
 /// Not a display setting: each variant is a whole machine. `Headless` is the
@@ -805,38 +722,7 @@ pub enum Profile {
     /// `iommu_platform=on`, and the harness sets that only where a unit exists,
     /// so the guest's own negotiation comes out the other way here.
     HeadlessNoIommu,
-    /// [`Profile::Headless`] with the NIC's MSI-X capability taken away.
-    ///
-    /// The one configuration in this suite where a device the kernel has
-    /// already reset and negotiated features with turns out to have no way of
-    /// raising an interrupt. Every virtio function QEMU builds and every one
-    /// that ships has the capability, so nothing else could ask what the
-    /// driver does without it — and what it used to do was panic the kernel,
-    /// on a machine whose other devices were all fine.
-    VirtioNetNoMsix,
-    /// [`Profile::Headless`] with an Intel `e1000e` in place of the virtio
-    /// NIC, and everything else — console, sound, disks — unchanged. The only
-    /// machine in reach on which netd's Intel driver runs at all.
-    E1000e,
-    /// [`Profile::E1000e`] with its cable plugged into nothing.
-    ///
-    /// The one machine in this suite on which a DHCP client gets no answer:
-    /// the user-mode backend serves a lease whatever else it is told to
-    /// restrict, so no profile that has one can ask what a boot does on a
-    /// network that never replies.
-    E1000eNoServer,
-    /// [`Profile::E1000e`] with QEMU's `igb` beside the 82574: a claimable
-    /// function that performs an Express function level reset, which neither
-    /// the 82574 nor any virtio function does.
-    E1000eBesideIgb,
     Gop,
-    /// [`Profile::Gop`] with a second USB stick beside the boot stick, whose
-    /// table the test writes: the bus a stick of somebody else's arrives on.
-    GopUsbDisk,
-    /// A virtio-gpu function and no VGA: the owner's own desktop, and the one
-    /// machine where a mode change can succeed rather than answering
-    /// `NotSupported` ahead of everything a resize does.
-    VirtioGpu,
     /// M1 metal-sim: GOP, NVMe, xHCI with the boot stick on it, i8042 from
     /// q35, and nothing else -- no virtio device and no USB HID. This is the
     /// machine shape that gets flashed, so it is the one the input tests run
@@ -845,217 +731,6 @@ pub enum Profile {
     /// ===TEST_START=== protocol like any other. [`BootOptions::mute`] takes
     /// it away for the one test that certifies the T14's literal shape.
     Metal,
-    /// No USB at all — no xHCI, so no boot stick — and no i8042 once the boot
-    /// passes `i8042: false`: the one bootable shape on which no input source
-    /// can ever exist. The boot volume rides a second NVMe controller, which
-    /// works because userland runs off that same disk's ROOT partition.
-    MetalNoUsb,
-    /// The machine whose only disk is the internal one, with the boot image on
-    /// it: no xHCI and so no boot stick, and no second namespace either. Every
-    /// other profile takes `/boot` and `/log` off USB, so none of them can ask
-    /// what happens when the boot medium is the device storage already holds.
-    InternalDisk,
-    /// metal-sim with the T14's internal xHCI actually populated: the boot
-    /// stick plus five more devices, two of them keyboards. The laptop's
-    /// controller carries a camera, Bluetooth and a fingerprint reader
-    /// alongside whatever is plugged in, and a profile with one USB device
-    /// cannot see any defect that needs a fourth.
-    MetalUsb,
-    /// metal-sim with the T14's actual NVMe capacity instead of a token
-    /// image. Device *size* is a shape dimension and it was the one nobody
-    /// had varied: every test disk was small enough that a per-device-block
-    /// index fit under the object allocator's 2 MiB ceiling, so the first
-    /// boot on the laptop was the first time anything asked for a
-    /// device-sized allocation.
-    MetalDisk,
-    /// metal-sim with no NVMe controller at all.
-    ///
-    /// Device *presence* is the shape dimension underneath size and sector
-    /// size, and it was the one nobody had varied for storage: every profile
-    /// gave the guest a disk, so nothing asked what the kernel does without
-    /// one. The answer was `.expect("NVMe: no controller found")` at 0.08 s.
-    /// ROOT is on the USB stick here, so a machine really can boot ToyOS with
-    /// no NVMe -- and a controller hidden behind a firmware setting looks
-    /// exactly the same.
-    Diskless,
-    /// metal-sim with a namespace formatted in 8 KiB logical blocks.
-    ///
-    /// Sector size is a shape dimension, and it was one the harness could
-    /// not express: every profile got QEMU's implicit 512-byte namespace, so
-    /// nothing asked the driver what it does with a device it cannot address.
-    /// The answer was `4096 / sector_size == 0` and then a divide by zero, at
-    /// 0.068 s, before storage is up and before there is a console to report
-    /// it on.
-    ///
-    /// 8192 rather than something absurd because it is real: 8 KiB-format
-    /// namespaces ship, and this driver's whole stack above the sector layer
-    /// is written in 4096-byte blocks. The guest is expected to refuse the
-    /// device by name, so this profile boots no userland at all.
-    NvmeWideSector,
-    /// metal-sim with a second USB stick beside the boot stick.
-    ///
-    /// The boot stick is on the bus in every profile and is the one device the
-    /// guest must never write to, so a storage test needs a *second* disk —
-    /// one the harness stages on the host, stamps as writable, and reads back
-    /// afterwards. Presence of that disk is the shape dimension; every other
-    /// profile is its absence.
-    UsbDisk,
-    /// [`Profile::UsbDisk`] with the second stick formatted in 4 KiB logical
-    /// blocks. Sector size is a shape dimension for USB exactly as it is for
-    /// NVMe, and it is the one that produced a divide-by-zero there.
-    UsbDisk4k,
-    /// [`Profile::UsbDisk`] with a 3 TB external disk instead of a stick.
-    ///
-    /// Past 2 TiB a 512-byte-sector device has more sectors than a READ(10)
-    /// command can address, and READ CAPACITY(10) stops being able to report
-    /// the size at all — so this is the profile where the 16-byte form runs
-    /// and where the driver has to refuse a device rather than serve the first
-    /// 2 TiB of it. Sparse, so the host pays for the blocks the guest touches.
-    UsbDiskHuge,
-    /// [`Profile::UsbDisk`] with the second stick's backing opened read-only.
-    ///
-    /// The only configuration in this suite where a *device* refuses an I/O
-    /// the driver was right to issue: QEMU answers WRITE(10) on a write-
-    /// protected LUN with a CHECK CONDITION, which is a CSW status of 1 and
-    /// the REQUEST SENSE path behind it. Reads on the same disk still work, so
-    /// one boot shows the error channel carrying a failure and not carrying a
-    /// success.
-    UsbDiskReadOnly,
-    /// [`Profile::UsbDiskHuge`] with the 3 TB disk attached *ahead* of the boot
-    /// stick, so the controller enumerates the disk the driver refuses first.
-    ///
-    /// Order is the whole shape. `bind` configures a device's two bulk
-    /// endpoints into a pool block and only then asks the disk how big it is,
-    /// so a disk refused for its size has already pointed the controller's
-    /// endpoint contexts at that block. Every other USB profile puts the boot
-    /// stick on port 1, where it binds successfully and the question never
-    /// arises; here the refusal comes first, and what the *next* disk is given
-    /// is the assertion. QEMU assigns ports in device-creation order, measured
-    /// against the kernel's own `port N connected` lines.
-    UsbDiskRefusedFirst,
-    /// More USB disks on one controller than its DMA pool has blocks for.
-    ///
-    /// `MSC_BLOCKS` is 2 and the boot stick takes one of them, so the second
-    /// data disk here is the first one past the ceiling. Every other profile
-    /// declares one disk, which is why nothing could ask what a caller sees when
-    /// the bound is hit — and the bound is policy, so that answer is the whole
-    /// question. Both disks are stamped: the one that binds is written, and the
-    /// one the pool had no room for has to come back byte-identical, which is
-    /// the claim a log line cannot make.
-    ///
-    /// Two and not three, though the pool would refuse either way.
-    /// `nec-usb-xhci` offers four SuperSpeed ports and QEMU puts the fifth
-    /// device behind an auto-created hub, which this driver walks past — so a
-    /// third data disk is not one the guest refuses, it is one the guest never
-    /// sees, and a count that included it would be measuring QEMU's port
-    /// allocation. Measured: `class=0x9 vendor=0409 product=55aa` on port 8 at
-    /// full speed, with `no HID boot interface found, skipping`.
-    UsbDiskCrowd,
-    /// Two xHCI controllers, with every device on the *second* one.
-    ///
-    /// The T14 Gen 2's literal shape, and the one that had never been staged:
-    /// Tiger Lake puts a USB4 xHCI in the Thunderbolt block at 00:0d.0 and the
-    /// PCH's at 00:14.0 — same class, same subclass, same prog_if — and the
-    /// laptop's own ports hang off the second. Nothing is attached to the
-    /// first here, exactly as nothing is plugged into the laptop's Thunderbolt
-    /// ports, so a kernel that stops at the first PCI match sees a machine
-    /// with no USB at all. The i8042 is off, which is what stops a PS/2
-    /// keyboard delivering the keystroke this profile means to route over USB.
-    MetalXhciSecond,
-    /// Two xHCI controllers with HID devices on both.
-    ///
-    /// One held-set and one button merge for the whole machine is a claim
-    /// about devices on *different controllers* as much as about two on one
-    /// bus, and it is a claim nothing could test: with one controller, an
-    /// xHCI slot id was a machine-wide name for a device. It is not — the
-    /// device lists here are shaped so both pointers land on the same slot id
-    /// of their own controller — with a *bound* device, because a refused one
-    /// gives its slot back the moment it is refused and shifts nothing after
-    /// it. The hub on the second controller is still there and is still walked
-    /// past; what balances the boot stick on the first is the second keyboard
-    /// beside it.
-    MetalXhciBoth,
-    /// The HID controller has no MSI-X, and nothing else can drain its ring.
-    ///
-    /// The T14's Thunderbolt xHCI has no MSI-X capability — the laptop's own
-    /// boot log says so — and every controller in this suite had one, so the
-    /// branch that handles its absence had never executed. It logged "using
-    /// polled mode" and returned, and there is no polled mode: the driver
-    /// reads an event ring only when vector 0x21 has fired. This profile is
-    /// the machine where the driver has to fall through to MSI and where an
-    /// injected keystroke is the only thing that can prove it did — which
-    /// takes a machine with no USB storage on it at all, for the reason the
-    /// shape below states.
-    MetalXhciMsi,
-    /// Two controllers, the second with neither MSI-X nor MSI.
-    ///
-    /// A function offering neither is not a machine that ships — QEMU is the
-    /// only place it can be built — but "this driver cannot drive this
-    /// controller" is a state the code has to be able to reach and say, and
-    /// nothing else can stage it. The first controller is ordinary and carries
-    /// the boot stick, so the refusal is visibly *per controller*: the machine
-    /// boots, and the HID on the crippled one is refused by name rather than
-    /// enumerated and left mute.
-    MetalXhciNoIrq,
-    /// One controller carrying HID alone, the boot volume on its own NVMe: the
-    /// machine a deafened controller or port costs no filesystem, where the
-    /// keyboard is what a port that never resets has to fail to bind.
-    MetalXhciDeaf,
-    /// Two controllers, and every input device arrives *after* the boot.
-    ///
-    /// The T14's shape for the one thing no profile stages: its Thunderbolt
-    /// xHCI at 00:0d.0 has five ports and has never had a device on them, so
-    /// the controller a user plugs
-    /// into is the one that enumerated nothing at boot. Here the second
-    /// controller is that one and the boot stick is on the first.
-    ///
-    /// The boot-time device list is one `usb-tablet`, and every part of that is
-    /// load-bearing. It is a pointer, so a late-bound one has to compose with a
-    /// source that already exists rather than being the first. It is
-    /// *absolute*, so QEMU has no relative handler until a `usb-mouse` is
-    /// plugged in — which makes an injected `rel` event ground truth that the
-    /// late device is the one delivering, not the boot-time one. And it is not
-    /// a keyboard: with `i8042=off` this machine has no keyboard at all until
-    /// one is hot-plugged, so a keystroke that arrives can only have come
-    /// through the device that was added after the boot.
-    MetalHotplug,
-    /// metal-sim with no IOMMU at all, so firmware publishes no `DMAR`.
-    ///
-    /// Presence of the unit is the shape dimension, and it is the one QEMU
-    /// gives for free that no real machine gives at all: on hardware, "no
-    /// DMAR" and "VT-d disabled in firmware setup" are the same observation.
-    /// This is the machine where the kernel has
-    /// to say which of the two it cannot tell apart.
-    NoIommu,
-    /// metal-sim whose unit advertises a 39-bit address width instead of 48.
-    ///
-    /// `CAP.SAGAW` is a register the guest decodes into a page-table depth,
-    /// and a suite with one value of it cannot tell a decode from a constant.
-    /// Both widths are real: 39-bit units ship, and the IOVA base every domain
-    /// gets is derived from this number.
-    IommuNarrow,
-    /// metal-sim whose unit cannot remap interrupts.
-    ///
-    /// Two registers move together — the DMAR's own `INTR_REMAP` flag and the
-    /// unit's `ECAP.IR` — and the kernel gives them separate
-    /// refusals, because a platform that declares it cannot remap and a unit
-    /// that cannot are different facts a user can act on differently.
-    IommuNoIntremap,
-    /// metal-sim whose unit advertises Extended Interrupt Mode — the only
-    /// machine here that does, and so the only boot that writes the guest's
-    /// 32-bit-destination entry format rather than the 8-bit one.
-    IommuEim,
-    /// [`Profile::Headless`] with its virtio sound card replaced by an Intel
-    /// HDA controller and one codec — the machine soundd drives itself, and
-    /// the class-0403 function the IOMMU tests aim.
-    Hda,
-    /// [`Profile::Hda`] with a second controller that also has a codec.
-    ///
-    /// Two live links, which the kernel refuses by name rather than binding
-    /// the first: choosing between them means walking their codec graphs, and
-    /// that is the driver's work. The negative control on the whole bind path
-    /// — a first-match kernel would go green on every other HDA test.
-    HdaTwoLive,
     /// QEMU `virt` on AArch64 (GICv3, AAVMF): a GOP from `ramfb`, the boot
     /// stick on an xHCI, the PL011, and nothing else — no virtio, NIC, NVMe or
     /// IOMMU. The machine the AArch64 port reaches its console on, and the only
@@ -1079,38 +754,8 @@ impl Profile {
             Self::Virt | Self::VirtEl2 | Self::VirtTcg => Arch::Aarch64,
             Self::Headless
             | Self::HeadlessNoIommu
-            | Self::VirtioNetNoMsix
-            | Self::E1000e
-            | Self::E1000eNoServer
-            | Self::E1000eBesideIgb
             | Self::Gop
-            | Self::GopUsbDisk
-            | Self::VirtioGpu
-            | Self::Metal
-            | Self::MetalNoUsb
-            | Self::InternalDisk
-            | Self::MetalUsb
-            | Self::MetalDisk
-            | Self::Diskless
-            | Self::NvmeWideSector
-            | Self::UsbDisk
-            | Self::UsbDisk4k
-            | Self::UsbDiskHuge
-            | Self::UsbDiskReadOnly
-            | Self::UsbDiskRefusedFirst
-            | Self::UsbDiskCrowd
-            | Self::MetalXhciSecond
-            | Self::MetalXhciBoth
-            | Self::MetalXhciMsi
-            | Self::MetalXhciNoIrq
-            | Self::MetalXhciDeaf
-            | Self::MetalHotplug
-            | Self::NoIommu
-            | Self::IommuNarrow
-            | Self::IommuNoIntremap
-            | Self::IommuEim
-            | Self::Hda
-            | Self::HdaTwoLive => Arch::X86_64,
+            | Self::Metal => Arch::X86_64,
         }
     }
 
@@ -1157,51 +802,6 @@ pub const IOMMU_DEFAULT: Iommu = Iommu { aw_bits: 48, intremap: true, eim: false
 /// of them — so the default `p2=4,p3=4` takes **four** devices, two short of the
 /// crowded set rather than one.
 const XHCI_DEFAULT: &str = "nec-usb-xhci,id=xhci";
-/// Eight attachable ports, which is `MAX(p2=8, p3=4)`, over twelve port
-/// registers: 1-4 the SuperSpeed view, 5-12 the USB2 view. Measured on QEMU
-/// 11.0.2 against the kernel's own lines — `max_ports=12`, and the six devices
-/// landing on registers 1 and 6-10. The boot stick is a `usb-storage` with a
-/// SuperSpeed descriptor, so it takes the SuperSpeed view of the first port and
-/// is enumerated *before* every HID; the five devices below are full or high
-/// speed and take the USB2 view of ports 2-6. Six of eight used, two spare.
-///
-/// `slots=` would have been the natural way to stage slot exhaustion, and it
-/// is not: on QEMU 11.0.2 `nec-usb-xhci,slots=N` reads back as N through
-/// `qom-get` and HCSPARAMS1 still reports 64, `qemu-xhci` has no such property
-/// at all, and Enable Slot ignores the MaxSlotsEn the driver writes to CONFIG.
-/// The kernel's own `xhci-one-slot` feature is what drives that path.
-const XHCI_WIDE: &str = "nec-usb-xhci,id=xhci,p2=8";
-/// A second controller, for the profiles that stage a machine with two. Only
-/// the id differs — the point is precisely that the two are indistinguishable
-/// by class, subclass and prog_if, which is why taking the first PCI match
-/// looked right for as long as it did.
-const XHCI_SECOND: &str = "nec-usb-xhci,id=xhci1";
-/// A controller with no MSI-X table, which leaves `msi=auto` to give it MSI —
-/// the shape of the T14's Thunderbolt xHCI and of Intel PCH parts generally.
-const XHCI_MSI_ONLY: &str = "nec-usb-xhci,id=xhci1,msix=off";
-/// A controller with no message-signalled interrupts at all, in each of the
-/// two bus positions a profile puts one in. Nothing on a PCIe bus is really
-/// built this way; it is how the harness reaches the branch where the driver
-/// has to refuse a controller instead of driving it blind — and, in the first
-/// position, how it takes USB storage off a machine entirely.
-const XHCI_NO_IRQ_FIRST: &str = "nec-usb-xhci,id=xhci,msix=off,msi=off";
-const XHCI_NO_IRQ_SECOND: &str = "nec-usb-xhci,id=xhci1,msix=off,msi=off";
-
-/// One controller with one codec. `hda-output` because it is a playback-only codec — the driver
-/// configures no input path and a duplex codec would only add widgets nothing
-/// walks.
-const HDA_ONE: &[&str] = &["intel-hda,id=hda0", "hda-output,bus=hda0.0,cad=0,audiodev=hdaaud"];
-
-/// Two controllers, each with a codec that answers.
-///
-/// The state the kernel refuses: it can tell which links are alive and cannot
-/// tell which one a human is wired to, so binding either would be a guess.
-const HDA_TWO_LIVE: &[&str] = &[
-    "intel-hda,id=hda0",
-    "hda-output,bus=hda0.0,cad=0,audiodev=hdaaud",
-    "intel-hda,id=hda1",
-    "hda-output,bus=hda1.0,cad=0,audiodev=hdaaud",
-];
 
 /// Whether a machine has the virtio console and sound block. Which NIC it has
 /// is [`Nic`].
@@ -1209,13 +809,6 @@ const HDA_TWO_LIVE: &[&str] = &[
 enum Virtio {
     Absent,
     Present,
-    /// The block **without virtio-sound**, so the machine's only audio device
-    /// is the one in `hda`.
-    ///
-    /// Not a lesser [`Virtio::Present`]: soundd claims a kernel-driven card
-    /// before it looks for a controller to drive itself, so a machine carrying
-    /// both would exercise the virtio path and nothing else.
-    WithoutSound,
 }
 
 impl Virtio {
@@ -1236,26 +829,6 @@ impl Virtio {
 enum Nic {
     Absent,
     Virtio,
-    /// The virtio NIC with its MSI-X capability removed, virtio-sound's and
-    /// virtio-serial's left alone — so the console still carries the refusal
-    /// and audio still works while networking does not.
-    ///
-    /// A device that publishes no MSI-X capability is a device, not an absence:
-    /// the driver reaches it, resets it, negotiates features with it and only
-    /// then finds it has no way to be told a packet arrived. `vectors=0` is the
-    /// actuator, and the only one — QEMU builds a virtio-pci function's MSI-X
-    /// table only for a non-zero vector count, and every emulated and every
-    /// real virtio function has the capability.
-    VirtioWithoutMsix,
-    /// QEMU's `e1000e`, which is the 82574L at `8086:10d3`: the same register
-    /// file the ThinkPad T14's onboard I219 has.
-    E1000e,
-    /// The same card on a hub nothing else is plugged into: a link the guest
-    /// brings up and puts frames onto, with no host, router or server at the
-    /// other end.
-    E1000eNoServer,
-    /// [`Nic::E1000e`], and an `igb` (`8086:10c9`) on no network at all.
-    E1000eBesideIgb,
 }
 
 /// Everything a profile decides about the machine, in one table. A new
@@ -1271,11 +844,6 @@ struct Shape {
     /// *size* is a shape dimension exactly as a disk's is, and the tests that
     /// read pixels were all blind to the remainder until one profile had one.
     panel: Option<(u32, u32)>,
-    /// A display adapter of its own, beside `vga`. `None` is firmware's GOP,
-    /// which cannot change mode once boot services have exited — so there
-    /// `SYS_GPU_SET_RESOLUTION` answers `NotSupported` and everything past the
-    /// refusal is unexecuted.
-    gpu: Option<&'static str>,
     /// virtio-sound and the console on virtio-serial.
     virtio: Virtio,
     nic: Nic,
@@ -1283,13 +851,6 @@ struct Shape {
     /// included. A list because a machine can have more than one and the T14
     /// does — its keyboard is on the second.
     xhci: &'static [&'static str],
-    /// The bus the boot stick and the second USB disk attach to. Named rather
-    /// than assumed, because which controller carries the storage is a shape
-    /// dimension once there is more than one: the index the block layer holds
-    /// has to name the same disk either way. An actuator that refuses a
-    /// controller wholesale may not run on a profile whose boot volume rides
-    /// it: ROOT is read through the block layer, so the refusal costs the mount.
-    storage_bus: &'static str,
     /// Every USB device besides the boot stick, each naming its own bus.
     /// Absence is what makes an i8042 test measure anything: QEMU activates
     /// one input handler per device class, so with a usb-kbd present every
@@ -1300,101 +861,14 @@ struct Shape {
     /// structure sized per device block is bounded by this number and by
     /// nothing else.
     nvme_bytes: u64,
-    /// The namespace's logical block size. Stated per profile for the same
-    /// reason `nvme_bytes` is: it is a dimension of the device, the driver
-    /// turns it into a shift and a divisor, and QEMU's implicit namespace only
-    /// ever produced one value of it.
-    nvme_lba_bytes: u32,
-    /// Every `usb-storage` device besides the boot stick, in the order QEMU
-    /// creates them.
-    ///
-    /// A list and not one device's dimensions. **How many disks are on the bus
-    /// is a shape dimension in its own right**: the driver's DMA pool holds
-    /// `MSC_BLOCKS` of them and refuses the rest by name, and every profile
-    /// that could have asked what happens at that ceiling declared exactly one.
-    /// The order is the second half of the same field — QEMU hands out
-    /// root-hub ports in device-creation order, so where the boot stick falls
-    /// in this list is what decides which disk the controller enumerates first.
-    usb_disks: &'static [UsbDisk],
-    /// Every Intel HDA controller on the machine and the codecs behind each,
-    /// as `-device` arguments in the order QEMU is to create them. Empty is
-    /// what every profile but [`Profile::Hda`] and [`Profile::HdaTwoLive`]
-    /// declares, and it is the machine this kernel has always booted: audio
-    /// through virtio-sound or through nothing at all.
-    ///
-    /// Presence of a class-0403 *function* is the shape dimension, and it is
-    /// separate from whether anything answers on the link behind it — which is
-    /// H0's question (b), and what the codec
-    /// arguments in this list decide per controller.
-    hda: &'static [&'static str],
     /// The unit that decodes this machine's DMA, or its absence. Stated per
     /// profile because absence is a shape and because the unit's own
     /// capabilities are what the kernel reads at boot.
     iommu: Option<Iommu>,
 }
 
-/// One `usb-storage` device beside the boot stick.
-#[derive(Clone, Copy)]
-pub struct UsbDisk {
-    /// Its size. Stated for the same reason the namespace's is — the driver
-    /// turns it into an LBA, and whether that LBA fits the command it is sent
-    /// in is a property of this number. The backing is sparse, so a realistic
-    /// one is nearly free.
-    pub bytes: u64,
-    /// Its logical block size. `usb-storage` takes any power of two from 512 B
-    /// up, so unlike the boot stick this is something a profile can choose.
-    pub lba_bytes: u32,
-    /// Open its backing read-only, so the guest's writes are refused by the
-    /// device rather than by the driver. Nothing else in this suite can make a
-    /// real device say no to an I/O the driver was right to issue.
-    readonly: bool,
-    /// Attach it *ahead* of the boot stick. Which disk comes first is a shape
-    /// dimension the moment one of them can be refused: a driver that hands the
-    /// pool block of a failed bind to the next disk is only observable when the
-    /// failure is first.
-    before_boot_stick: bool,
-    /// The bus it is on, where that is not [`Shape::storage_bus`]: a machine
-    /// that boots off NVMe has no storage bus.
-    bus: Option<&'static str>,
-    /// Its serial number string, where QEMU's default — built from the port it
-    /// is on — would make the same stick another unit on another port.
-    pub serial: Option<&'static str>,
-}
-
-impl UsbDisk {
-    /// The nominal 32 GiB stick this suite's storage tests are staged on, and
-    /// what a profile carries when it just needs a disk it may write to.
-    const DATA: Self = Self {
-        bytes: USB_STICK_BYTES,
-        lba_bytes: 512,
-        readonly: false,
-        before_boot_stick: false,
-        bus: None,
-        serial: None,
-    };
-    /// A 3 TB external disk, which this driver has to refuse by name rather
-    /// than serve the first 2 TiB of.
-    const HUGE: Self = Self { bytes: USB_HUGE_BYTES, ..Self::DATA };
-}
-
-/// QEMU's name for the `i`-th data disk's backing, and for the device in front
-/// of it. Derived from the position rather than declared, so a profile cannot
-/// give two disks one name.
-fn usb_drive_id(i: usize) -> String {
-    format!("usbdisk{i}")
-}
-
-/// The device id, which is what `device_del` names.
-pub fn usb_device_id(i: usize) -> String {
-    format!("usbdev{i}")
-}
-
-/// The boot stick's device id.
-///
-/// The data disks have carried one since a test first had to unplug one; the
-/// stick the machine booted from had none, so the one device whose removal
-/// takes `/boot` and `/log` with it was the one the host could not name — which
-/// is the removal the owner's machine dies on.
+/// The boot stick's device id: the removal the owner's machine dies on is the
+/// one device whose removal takes `/boot` and `/log` with it.
 pub const BOOT_STICK_ID: &str = "bootstick";
 
 /// The boot stick's serial number string. Stated rather than left to QEMU,
@@ -1403,35 +877,9 @@ pub const BOOT_STICK_ID: &str = "bootstick";
 /// what a test moving it has to be able to say is not so.
 pub const BOOT_STICK_SERIAL: &str = "TOYOS0BOOTSTICK1";
 
-/// What every profile but [`Profile::MetalDisk`] gives the guest. Large
-/// enough for a filesystem, small enough that a boot formats it quickly.
+/// What every x86-64 profile gives the guest. Large enough for a filesystem,
+/// small enough that a boot formats it quickly.
 pub const NVME_SMALL: u64 = 128 * 1024 * 1024;
-
-/// What every namespace but [`Profile::NvmeWideSector`]'s reports — QEMU's
-/// implicit default, and the T14's.
-const NVME_LBA_DEFAULT: u32 = 512;
-
-/// The data stick every USB storage profile but [`Profile::UsbDiskHuge`]
-/// carries: a nominal 32 GiB stick, the size of the class of device this
-/// project boots from. Chosen rather than measured off one part — but not a
-/// token number either, because the last 4 KiB block on it sits at sector
-/// 67,108,856, which needs 27 bits of LBA. A 128 MiB scratch image needs 18
-/// and could not tell a truncated LBA field from a correct one.
-pub const USB_STICK_BYTES: u64 = 32 * 1024 * 1024 * 1024;
-
-/// A 3 TB external USB disk: a device that exists, and one this driver cannot
-/// address. At 512-byte sectors it has 6,442,450,944 of them, so READ(10)'s
-/// 32-bit LBA is a bit short and READ CAPACITY(10) cannot report the size —
-/// which is the only configuration in which the 16-byte form runs.
-pub const USB_HUGE_BYTES: u64 = 3 * 1024 * 1024 * 1024 * 1024;
-
-/// The T14 Gen 2's namespace, to the byte: 500,118,192 sectors of 512 B.
-/// Taken from the laptop's own boot line rather than rounded from "244 GB",
-/// so a test that asserts on the block count is asserting against the machine
-/// that gets flashed.
-pub const NVME_T14_BYTES: u64 = 500_118_192 * 512;
-/// The same device as the kernel counts it: 62,514,774 blocks of 4 KiB.
-pub const NVME_T14_BLOCKS: u64 = NVME_T14_BYTES / 4096;
 
 impl Profile {
     fn shape(self) -> Shape {
@@ -1440,100 +888,31 @@ impl Profile {
             Self::Virt => Shape {
                 vga: "std",
                 panel: None,
-                gpu: None,
                 virtio: Virtio::Absent,
                 nic: Nic::Absent,
                 xhci: &[XHCI_DEFAULT],
-                storage_bus: "xhci.0",
                 usb: &[],
                 nvme_bytes: 0,
-                nvme_lba_bytes: NVME_LBA_DEFAULT,
-                usb_disks: &[],
-                hda: &[],
                 iommu: None,
             },
             Self::Headless => Shape {
                 vga: "none",
                 panel: None,
-                gpu: None,
                 virtio: Virtio::Present,
                 nic: Nic::Virtio,
                 xhci: &[XHCI_DEFAULT],
-                storage_bus: "xhci.0",
                 usb: &["usb-kbd,bus=xhci.0"],
                 nvme_bytes: NVME_SMALL,
-                nvme_lba_bytes: NVME_LBA_DEFAULT,
-                usb_disks: &[],
-                hda: &[],
-                iommu: Some(IOMMU_DEFAULT),
-            },
-            Self::HeadlessNoIommu => Shape { iommu: None, ..Self::Headless.shape() },
-            Self::E1000e => Shape { nic: Nic::E1000e, ..Self::Headless.shape() },
-            Self::E1000eNoServer => Shape { nic: Nic::E1000eNoServer, ..Self::Headless.shape() },
-            Self::E1000eBesideIgb => Shape { nic: Nic::E1000eBesideIgb, ..Self::Headless.shape() },
-            Self::VirtioNetNoMsix => Shape {
-                vga: "none",
-                panel: None,
-                gpu: None,
-                virtio: Virtio::Present,
-                nic: Nic::VirtioWithoutMsix,
-                xhci: &[XHCI_DEFAULT],
-                storage_bus: "xhci.0",
-                usb: &["usb-kbd,bus=xhci.0"],
-                nvme_bytes: NVME_SMALL,
-                nvme_lba_bytes: NVME_LBA_DEFAULT,
-                usb_disks: &[],
-                hda: &[],
                 iommu: Some(IOMMU_DEFAULT),
             },
             Self::Gop => Shape {
                 vga: "std",
                 panel: None,
-                gpu: None,
                 virtio: Virtio::Present,
                 nic: Nic::Virtio,
                 xhci: &[XHCI_DEFAULT],
-                storage_bus: "xhci.0",
                 usb: &["usb-kbd,bus=xhci.0"],
                 nvme_bytes: NVME_SMALL,
-                nvme_lba_bytes: NVME_LBA_DEFAULT,
-                usb_disks: &[],
-                hda: &[],
-                iommu: Some(IOMMU_DEFAULT),
-            },
-            Self::GopUsbDisk => Shape { usb_disks: &[UsbDisk::DATA], ..Self::Gop.shape() },
-            Self::VirtioGpu => Shape {
-                // No VGA at all: firmware then publishes no GOP, and the one
-                // display the guest has is the one whose mode it can set.
-                vga: "none",
-                panel: None,
-                gpu: Some("virtio-gpu-pci"),
-                virtio: Virtio::Present,
-                nic: Nic::Virtio,
-                xhci: &[XHCI_DEFAULT],
-                storage_bus: "xhci.0",
-                usb: &["usb-kbd,bus=xhci.0"],
-                nvme_bytes: NVME_SMALL,
-                nvme_lba_bytes: NVME_LBA_DEFAULT,
-                usb_disks: &[],
-                hda: &[],
-                iommu: Some(IOMMU_DEFAULT),
-            },
-            Self::Diskless => Shape {
-                vga: "std",
-                panel: None,
-                gpu: None,
-                virtio: Virtio::Absent,
-                nic: Nic::Absent,
-                xhci: &[XHCI_DEFAULT],
-                storage_bus: "xhci.0",
-                usb: &[],
-                // Zero is the absence, not a zero-length disk: `nvme_args`
-                // emits no controller, no namespace and no backing file.
-                nvme_bytes: 0,
-                nvme_lba_bytes: NVME_LBA_DEFAULT,
-                usb_disks: &[],
-                hda: &[],
                 iommu: Some(IOMMU_DEFAULT),
             },
             Self::Metal => Shape {
@@ -1543,449 +922,20 @@ impl Profile {
                 // geometry the machine actually has and the one no default
                 // expresses.
                 panel: Some((1920, 1080)),
-                gpu: None,
                 virtio: Virtio::Absent,
                 nic: Nic::Absent,
                 xhci: &[XHCI_DEFAULT],
-                storage_bus: "xhci.0",
                 usb: &[],
                 nvme_bytes: NVME_SMALL,
-                nvme_lba_bytes: NVME_LBA_DEFAULT,
-                usb_disks: &[],
-                hda: &[],
                 iommu: Some(IOMMU_DEFAULT),
             },
-            Self::MetalNoUsb => Shape {
-                vga: "none",
-                panel: None,
-                gpu: None,
-                virtio: Virtio::Absent,
-                nic: Nic::Absent,
-                xhci: &[],
-                storage_bus: "",
-                usb: &[],
-                nvme_bytes: NVME_SMALL,
-                nvme_lba_bytes: NVME_LBA_DEFAULT,
-                usb_disks: &[],
-                hda: &[],
-                iommu: Some(IOMMU_DEFAULT),
-            },
-            // Zero `nvme_bytes` beside an empty `xhci` is the absence of a second disk, not an empty one.
-            Self::InternalDisk => Shape {
-                vga: "std",
-                panel: None,
-                gpu: None,
-                virtio: Virtio::Absent,
-                nic: Nic::Absent,
-                xhci: &[],
-                storage_bus: "",
-                usb: &[],
-                nvme_bytes: 0,
-                nvme_lba_bytes: NVME_LBA_DEFAULT,
-                usb_disks: &[],
-                hda: &[],
-                iommu: Some(IOMMU_DEFAULT),
-            },
-            // Two keyboards and two pointers, because the collision this
-            // stages is between devices of the same HID class; a hub for a
-            // second non-HID device, since it needs no backing file and the
-            // driver has to walk past it exactly as it walks past the stick.
-            Self::MetalUsb => Shape {
-                vga: "std",
-                panel: None,
-                gpu: None,
-                virtio: Virtio::Absent,
-                nic: Nic::Absent,
-                xhci: &[XHCI_WIDE],
-                storage_bus: "xhci.0",
-                usb: &[
-                    "usb-kbd,bus=xhci.0",
-                    "usb-kbd,bus=xhci.0",
-                    "usb-mouse,bus=xhci.0",
-                    "usb-tablet,bus=xhci.0",
-                    "usb-hub,bus=xhci.0",
-                ],
-                nvme_bytes: NVME_SMALL,
-                nvme_lba_bytes: NVME_LBA_DEFAULT,
-                usb_disks: &[],
-                hda: &[],
-                iommu: Some(IOMMU_DEFAULT),
-            },
-            Self::MetalDisk => Shape {
-                vga: "std",
-                panel: None,
-                gpu: None,
-                virtio: Virtio::Absent,
-                nic: Nic::Absent,
-                xhci: &[XHCI_DEFAULT],
-                storage_bus: "xhci.0",
-                usb: &[],
-                nvme_bytes: NVME_T14_BYTES,
-                nvme_lba_bytes: NVME_LBA_DEFAULT,
-                usb_disks: &[],
-                hda: &[],
-                iommu: Some(IOMMU_DEFAULT),
-            },
-            Self::NvmeWideSector => Shape {
-                vga: "std",
-                panel: None,
-                gpu: None,
-                virtio: Virtio::Absent,
-                nic: Nic::Absent,
-                xhci: &[XHCI_DEFAULT],
-                storage_bus: "xhci.0",
-                usb: &[],
-                nvme_bytes: NVME_SMALL,
-                nvme_lba_bytes: 8192,
-                usb_disks: &[],
-                hda: &[],
-                iommu: Some(IOMMU_DEFAULT),
-            },
-            Self::UsbDisk => Shape {
-                vga: "std",
-                panel: None,
-                gpu: None,
-                virtio: Virtio::Absent,
-                nic: Nic::Absent,
-                xhci: &[XHCI_DEFAULT],
-                storage_bus: "xhci.0",
-                usb: &[],
-                nvme_bytes: NVME_SMALL,
-                nvme_lba_bytes: NVME_LBA_DEFAULT,
-                usb_disks: &[UsbDisk::DATA],
-                hda: &[],
-                iommu: Some(IOMMU_DEFAULT),
-            },
-            Self::UsbDisk4k => Shape {
-                vga: "std",
-                panel: None,
-                gpu: None,
-                virtio: Virtio::Absent,
-                nic: Nic::Absent,
-                xhci: &[XHCI_DEFAULT],
-                storage_bus: "xhci.0",
-                usb: &[],
-                nvme_bytes: NVME_SMALL,
-                nvme_lba_bytes: NVME_LBA_DEFAULT,
-                usb_disks: &[UsbDisk { lba_bytes: 4096, ..UsbDisk::DATA }],
-                hda: &[],
-                iommu: Some(IOMMU_DEFAULT),
-            },
-            Self::UsbDiskHuge => Shape {
-                vga: "std",
-                panel: None,
-                gpu: None,
-                virtio: Virtio::Absent,
-                nic: Nic::Absent,
-                xhci: &[XHCI_DEFAULT],
-                storage_bus: "xhci.0",
-                usb: &[],
-                nvme_bytes: NVME_SMALL,
-                nvme_lba_bytes: NVME_LBA_DEFAULT,
-                usb_disks: &[UsbDisk::HUGE],
-                hda: &[],
-                iommu: Some(IOMMU_DEFAULT),
-            },
-            Self::UsbDiskRefusedFirst => Shape {
-                vga: "std",
-                panel: None,
-                gpu: None,
-                virtio: Virtio::Absent,
-                nic: Nic::Absent,
-                xhci: &[XHCI_DEFAULT],
-                storage_bus: "xhci.0",
-                usb: &[],
-                nvme_bytes: NVME_SMALL,
-                nvme_lba_bytes: NVME_LBA_DEFAULT,
-                usb_disks: &[UsbDisk { before_boot_stick: true, ..UsbDisk::HUGE }],
-                hda: &[],
-                iommu: Some(IOMMU_DEFAULT),
-            },
-            Self::UsbDiskReadOnly => Shape {
-                vga: "std",
-                panel: None,
-                gpu: None,
-                virtio: Virtio::Absent,
-                nic: Nic::Absent,
-                xhci: &[XHCI_DEFAULT],
-                storage_bus: "xhci.0",
-                usb: &[],
-                nvme_bytes: NVME_SMALL,
-                nvme_lba_bytes: NVME_LBA_DEFAULT,
-                usb_disks: &[UsbDisk { readonly: true, ..UsbDisk::DATA }],
-                hda: &[],
-                iommu: Some(IOMMU_DEFAULT),
-            },
-            Self::UsbDiskCrowd => Shape {
-                vga: "std",
-                panel: None,
-                gpu: None,
-                virtio: Virtio::Absent,
-                nic: Nic::Absent,
-                xhci: &[XHCI_DEFAULT],
-                storage_bus: "xhci.0",
-                usb: &[],
-                nvme_bytes: NVME_SMALL,
-                nvme_lba_bytes: NVME_LBA_DEFAULT,
-                usb_disks: &[UsbDisk::DATA, UsbDisk::DATA],
-                hda: &[],
-                iommu: Some(IOMMU_DEFAULT),
-            },
-            // The first controller carries nothing at all — not even the boot
-            // stick, which is on the second with the HID. That is the laptop
-            // exactly: a USB-A port is a PCH port, and the Thunderbolt block's
-            // controller is empty until something is plugged into it. It also
-            // means the disk index the block layer holds names a device on a
-            // controller that is not the first, which nothing else stages.
-            Self::MetalXhciSecond => Shape {
-                vga: "std",
-                panel: None,
-                gpu: None,
-                virtio: Virtio::Absent,
-                nic: Nic::Absent,
-                xhci: &[XHCI_DEFAULT, XHCI_SECOND],
-                storage_bus: "xhci1.0",
-                usb: &["usb-kbd,bus=xhci1.0", "usb-mouse,bus=xhci1.0"],
-                nvme_bytes: NVME_SMALL,
-                nvme_lba_bytes: NVME_LBA_DEFAULT,
-                usb_disks: &[],
-                hda: &[],
-                iommu: Some(IOMMU_DEFAULT),
-            },
-            // A hub ahead of the second controller's HID, so that controller's
-            // devices take the same slot ids as the first's: the boot stick is
-            // SuperSpeed and enumerates ahead of every USB2 device, and the hub
-            // stands in for it. Both mice therefore land on one slot id, which
-            // is the collision a slot-derived pointer source turns into a
-            // single button-merge entry.
-            Self::MetalXhciBoth => Shape {
-                vga: "std",
-                panel: None,
-                gpu: None,
-                virtio: Virtio::Absent,
-                nic: Nic::Absent,
-                xhci: &[XHCI_DEFAULT, XHCI_SECOND],
-                storage_bus: "xhci.0",
-                usb: &[
-                    "usb-kbd,bus=xhci.0",
-                    "usb-mouse,bus=xhci.0",
-                    "usb-hub,bus=xhci1.0",
-                    "usb-kbd,bus=xhci1.0",
-                    "usb-kbd,bus=xhci1.0",
-                    "usb-mouse,bus=xhci1.0",
-                ],
-                nvme_bytes: NVME_SMALL,
-                nvme_lba_bytes: NVME_LBA_DEFAULT,
-                usb_disks: &[],
-                hda: &[],
-                iommu: Some(IOMMU_DEFAULT),
-            },
-            // The machine does no USB storage I/O whatsoever: an empty
-            // `storage_bus` puts the boot volume on NVMe, and the first
-            // controller has no interrupt mechanism, so the driver refuses it
-            // and never polls it. That is load-bearing, not decoration:
-            // `wait_transfer` drains the *whole* event ring and dispatches
-            // every HID report in it, so a keyboard on any polled controller
-            // delivers on the back of somebody else's transfer whether or not
-            // its own interrupt works. Measured — the first version of this
-            // profile put storage and HID on one controller and passed with
-            // MSI deliberately left disabled.
-            Self::MetalXhciMsi => Shape {
-                vga: "std",
-                panel: None,
-                gpu: None,
-                virtio: Virtio::Absent,
-                nic: Nic::Absent,
-                xhci: &[XHCI_NO_IRQ_FIRST, XHCI_MSI_ONLY],
-                storage_bus: "",
-                usb: &["usb-kbd,bus=xhci1.0", "usb-mouse,bus=xhci1.0"],
-                nvme_bytes: NVME_SMALL,
-                nvme_lba_bytes: NVME_LBA_DEFAULT,
-                usb_disks: &[],
-                hda: &[],
-                iommu: Some(IOMMU_DEFAULT),
-            },
-            // Boot stick on the good controller, HID on the crippled one. A
-            // keyboard is what makes the absence assertion mean something:
-            // the driver has a device it would otherwise bind and announce.
-            Self::MetalXhciNoIrq => Shape {
-                vga: "std",
-                panel: None,
-                gpu: None,
-                virtio: Virtio::Absent,
-                nic: Nic::Absent,
-                xhci: &[XHCI_DEFAULT, XHCI_NO_IRQ_SECOND],
-                storage_bus: "xhci.0",
-                usb: &["usb-kbd,bus=xhci1.0", "usb-mouse,bus=xhci1.0"],
-                nvme_bytes: NVME_SMALL,
-                nvme_lba_bytes: NVME_LBA_DEFAULT,
-                usb_disks: &[],
-                hda: &[],
-                iommu: Some(IOMMU_DEFAULT),
-            },
-            Self::MetalXhciDeaf => Shape {
-                vga: "std",
-                panel: None,
-                gpu: None,
-                virtio: Virtio::Absent,
-                nic: Nic::Absent,
-                xhci: &[XHCI_DEFAULT],
-                storage_bus: "",
-                usb: &["usb-kbd,bus=xhci.0"],
-                nvme_bytes: NVME_SMALL,
-                nvme_lba_bytes: NVME_LBA_DEFAULT,
-                usb_disks: &[],
-                hda: &[],
-                iommu: Some(IOMMU_DEFAULT),
-            },
-            Self::MetalHotplug => Shape {
-                vga: "std",
-                panel: None,
-                gpu: None,
-                virtio: Virtio::Absent,
-                nic: Nic::Absent,
-                xhci: &[XHCI_DEFAULT, XHCI_SECOND],
-                storage_bus: "xhci.0",
-                usb: &["usb-tablet,bus=xhci.0"],
-                nvme_bytes: NVME_SMALL,
-                nvme_lba_bytes: NVME_LBA_DEFAULT,
-                usb_disks: &[],
-                hda: &[],
-                iommu: Some(IOMMU_DEFAULT),
-            },
-            // The three below are metal-sim with one field of the unit moved,
-            // so what differs between their boot logs and Metal's is the unit
-            // and nothing else on the machine.
-            Self::NoIommu => Shape {
-                vga: "std",
-                panel: None,
-                gpu: None,
-                virtio: Virtio::Absent,
-                nic: Nic::Absent,
-                xhci: &[XHCI_DEFAULT],
-                storage_bus: "xhci.0",
-                usb: &[],
-                nvme_bytes: NVME_SMALL,
-                nvme_lba_bytes: NVME_LBA_DEFAULT,
-                usb_disks: &[],
-                hda: &[],
-                iommu: None,
-            },
-            Self::IommuNarrow => Shape {
-                vga: "std",
-                panel: None,
-                gpu: None,
-                virtio: Virtio::Absent,
-                nic: Nic::Absent,
-                xhci: &[XHCI_DEFAULT],
-                storage_bus: "xhci.0",
-                usb: &[],
-                nvme_bytes: NVME_SMALL,
-                nvme_lba_bytes: NVME_LBA_DEFAULT,
-                usb_disks: &[],
-                hda: &[],
-                iommu: Some(Iommu { aw_bits: 39, ..IOMMU_DEFAULT }),
-            },
-            Self::IommuNoIntremap => Shape {
-                vga: "std",
-                panel: None,
-                gpu: None,
-                virtio: Virtio::Absent,
-                nic: Nic::Absent,
-                xhci: &[XHCI_DEFAULT],
-                storage_bus: "xhci.0",
-                usb: &[],
-                nvme_bytes: NVME_SMALL,
-                nvme_lba_bytes: NVME_LBA_DEFAULT,
-                usb_disks: &[],
-                hda: &[],
-                iommu: Some(Iommu { intremap: false, ..IOMMU_DEFAULT }),
-            },
-            Self::IommuEim => Shape {
-                iommu: Some(Iommu { eim: true, ..IOMMU_DEFAULT }),
-                ..Self::Metal.shape()
-            },
-            Self::Hda => Shape {
-                virtio: Virtio::WithoutSound,
-                nic: Nic::Virtio,
-                hda: HDA_ONE,
-                ..Self::Headless.shape()
-            },
-            Self::HdaTwoLive => Shape {
-                virtio: Virtio::WithoutSound,
-                nic: Nic::Virtio,
-                hda: HDA_TWO_LIVE,
-                ..Self::Headless.shape()
-            },
+            Self::HeadlessNoIommu => Shape { iommu: None, ..Self::Headless.shape() },
         }
     }
 
-    /// The unit this profile puts on the machine, or `None`. A test asserting
-    /// on what the guest decoded reads the expectation from here rather than
-    /// restating it, exactly as [`Profile::usb_disk`] does for the data stick.
+    /// The unit this profile puts on the machine, or `None`.
     pub fn iommu(self) -> Option<Iommu> {
         self.shape().iommu
-    }
-
-    /// Every `usb-storage` device this profile puts on the bus besides the
-    /// boot stick, in creation order. A test asserting on a size or a sector
-    /// size has to read it from here rather than restate it.
-    pub fn usb_disks(self) -> &'static [UsbDisk] {
-        self.shape().usb_disks
-    }
-
-    /// The first of them, for the tests that stage exactly one.
-    pub fn usb_disk(self) -> Option<(u64, u32)> {
-        self.usb_disks().first().map(|d| (d.bytes, d.lba_bytes))
-    }
-
-    /// The panel this machine's firmware sets, and therefore the geometry the
-    /// kernel is handed; `None` where the machine has no VGA adapter at all.
-    /// A test reading pixels asks the machine here rather than the guest.
-    pub fn panel(self) -> Option<(u32, u32)> {
-        let shape = self.shape();
-        (shape.vga == "std").then(|| shape.panel.unwrap_or(DEFAULT_PANEL))
-    }
-}
-
-/// What QEMU's stdvga advertises with no `xres`/`yres` of its own — measured
-/// off a boot, not read off a default.
-pub const DEFAULT_PANEL: (u32, u32) = (1280, 800);
-
-/// The image a boot is handed instead of the one it would build, and what
-/// becomes of what the guest writes to it.
-///
-/// **A guest writes to its own boot disk, and one of these has to be chosen.**
-/// The loader counts this image's attempts into a file on the log partition
-/// before every handoff (`bootloader/src/attempt.rs`), so a second launch of one
-/// file is a *retry* and boots no kernel at all: `boot_partition_identity`
-/// booted one crafted image twice and its second boot never reached a kernel.
-/// There is no default, because the author is the only one who knows whether the
-/// bytes the guest leaves behind are the verdict or the contamination.
-pub enum Staged {
-    /// **Boot this file under a throwaway overlay; what the guest writes dies
-    /// with the guest.** The named file is never written, so a test may boot it
-    /// as many times as it likes and each boot starts where the one before it
-    /// did.
-    Pristine(PathBuf),
-    /// **Boot this file itself, because what the guest wrote to it is what the
-    /// test reads back.** One boot per file: nothing here clears what the last
-    /// one left, which is the point.
-    Written(PathBuf),
-    /// **One file across several boots of one test, built by the harness under
-    /// this name in this lane.** For the test whose subject *is* what one image
-    /// carries from a boot to the next; the first boot naming it builds it with
-    /// this call's own options and every later one boots what that left.
-    Carried(&'static str),
-}
-
-impl Staged {
-    /// The file a test staged, or `None` for one the harness builds itself.
-    fn authored(&self) -> Option<&Path> {
-        match self {
-            Self::Pristine(path) | Self::Written(path) => Some(path),
-            Self::Carried(_) => None,
-        }
     }
 }
 
@@ -1998,166 +948,31 @@ pub struct BootOptions {
     /// because screen tests boot their own QEMU and several may exist at once.
     pub qmp: bool,
     /// Which of [`DECLARED_KERNEL_BUILDS`] this boot wants, and empty for the
-    /// kernel an image ships. Only a test whose subject *is* a build sets it —
-    /// `fpu-save-nothing`, and the `SYS_DEBUG` boot; everything else names an
-    /// actuator in [`BootOptions::kernel_params`] instead.
-    ///
-    /// It decides what this call *builds*, so it may not be set beside a
-    /// [`BootOptions::boot_image`], which is what the guest boots instead —
-    /// see [`refuse_a_staged_image_this_boot_did_not_ask_for`].
+    /// kernel an image ships. Only a test whose subject *is* a build sets it;
+    /// everything else names an actuator in [`BootOptions::kernel_params`]
+    /// instead.
     pub kernel_features: &'static [&'static str],
     /// The actuators this boot arms, by the names `kernel/src/actuator.rs`
     /// declares. Non-empty selects the test kernel, which carries all of them.
-    ///
-    /// **The arming is in the image, not in this field.** The names are written
-    /// onto the ESP the build produces, so a boot that also supplies a
-    /// [`BootOptions::boot_image`] arms whatever *that* image was built with:
-    /// the two must agree and are refused when they do not.
     pub kernel_params: &'static [&'static str],
-    /// Give the machine an i8042 at all. `-machine q35,i8042=off` is the one
-    /// absence scenario QEMU can stage.
-    pub i8042: bool,
     /// Take the 16550 away, leaving the framebuffer as the guest's only
     /// channel out. Only [`Profile::Metal`] may set it -- the others carry
     /// their console on it or on virtio-serial. A muted guest has no marker
     /// to wait for and no `run_test` to drive, so it is observed with
     /// [`QemuInstance::screendump_while`] and nothing else.
     pub mute: bool,
-    /// Let this machine take a guest reset instead of exiting on one.
-    ///
-    /// **`-no-reboot` is the default and stays it**: it is what turns a triple
-    /// fault, a reset-register write and a power-off alike into a QEMU exit
-    /// whose `SHUTDOWN` reason a test can read, and every power test judges by
-    /// that reason. This is for the one claim that cannot be made that way —
-    /// that the boot *after* a reset is this loader again, reading what the boot
-    /// before it left — and a guest with it set runs until the harness kills it.
-    pub takes_the_reset: bool,
-    /// Keep the firmware's variables in this file, writable, instead of the
-    /// boot's own fresh copy of the template: a copy the test made, so what one
-    /// boot's loader writes — the anti-rollback floor, `BootNext` — is what the
-    /// next boot of the same machine reads. `None` is every other boot, whose
-    /// copy dies with the guest.
-    pub firmware_vars: Option<PathBuf>,
     /// The console line that means the boot reached the state under test.
     /// Anything other than [`DEFAULT_READY`] also declares that a panic is the
     /// expected outcome rather than a boot failure -- the early-panic screen
     /// test never reaches userland at all. Ignored when [`BootOptions::mute`]
     /// is set, which leaves no console for a marker to arrive on.
     pub ready_marker: &'static str,
-    /// Boot against this disk image instead of the shared scratch one.
-    ///
-    /// The shared image is created by `create_sparse`, which designates it --
-    /// so every ordinary test boots a disk the kernel is allowed to format,
-    /// and none of them can observe what it does with one it is not. This is
-    /// how a test hands the guest somebody else's disk.
-    pub nvme_image: Option<PathBuf>,
-    /// Boot this disk image instead of the one this call would build, and say
-    /// what becomes of what the guest writes to it — see [`Staged`].
-    ///
-    /// The built image is written fresh every boot and its GPT gets a fresh
-    /// random partition GUID with it, so a test that has to know what is on
-    /// the boot disk *before* the machine starts cannot use it — and asserting
-    /// on the partition table firmware read is exactly that. Such a test
-    /// builds the image itself, reads it, and hands it over here.
-    ///
-    /// **It replaces the image, so it replaces everything in it**: this call
-    /// builds nothing when one is set, and every field that would have decided
-    /// what went into that image has to agree with what is already in this one
-    /// — [`refuse_a_staged_image_this_boot_did_not_ask_for`].
-    pub boot_image: Option<Staged>,
-    /// Back the profile's data disks with these files instead of blank ones,
-    /// in the order the profile declares them. The USB gate stages a file
-    /// *before* the boot -- the bytes the guest is meant to find are written
-    /// there -- and reads it afterwards, so it has to name the file rather
-    /// than discover it. Short lists are allowed: the disks past the end get
-    /// the blank image their size would have given them anyway.
-    pub usb_images: Vec<PathBuf>,
-    /// Have QEMU write every packet the first data disk is sent to this file
-    /// (`usb-storage`'s `pcap=`, usbmon's format): the bus's own record of what
-    /// a driver put on it, which no line the guest prints can be. Refused by
-    /// name on a profile with no data disk, where it would record nothing.
-    pub usb_pcap: Option<PathBuf>,
-    /// Fail with EIO every read of the boot disk that covers this 512-byte
-    /// sector, through QEMU's `blkdebug` under the boot image's raw format, on
-    /// whichever bus the profile puts that disk: a disk error at a place the
-    /// test chose, which no well-formed image can stage.
-    pub boot_read_error: Option<u64>,
-    /// What the emulated RTC reads when the machine starts, as
-    /// `YYYY-MM-DDTHH:MM:SS`.
-    ///
-    /// The wall clock is a device the host can set, which is what makes the
-    /// kernel's reading of it checkable from outside the guest: with this
-    /// given, the name and the timestamp of the file the guest writes are both
-    /// predictable before the machine exists. `None` leaves QEMU's default,
-    /// which is the host's own clock in UTC — and leaves the argument off the
-    /// command line entirely, so every existing profile assertion sees the argv
-    /// it always saw.
-    pub rtc_base: Option<&'static str>,
     /// Files put on ROOT beside the image's own, each named by its
     /// ROOT-relative path — `share/pkg/x` is `/system/share/pkg/x` in the
     /// guest. A fixture the guest reads and no program in the image produces;
     /// the image is memoized on their names and bytes, so two boots staging
     /// different fixtures do not share one.
     pub extra_root_files: Vec<(String, Vec<u8>)>,
-    /// Forward this host port to the guest's TCP [`toyos_logstream::PORT`],
-    /// where `logd` serves the boot's log.
-    pub log_port: Option<u16>,
-    /// Put the host on the guest's own segment (`super::segment`): frames
-    /// it writes reach the NIC as if off the cable, and it sees every frame the
-    /// guest sends, through [`QemuInstance::segment`]. Refused by name on a
-    /// profile with no NIC.
-    pub segment: bool,
-    /// Forward this host port to the guest's TCP 22. **slirp is one-way
-    /// without it**: nothing on the host can open a connection into the guest
-    /// unless QEMU is told which port to translate. A profile with no NIC
-    /// carries no `-netdev` for it to reach.
-    pub ssh_port: Option<u16>,
-    /// Write every frame this machine's NIC sends or receives to this file, in
-    /// pcap. **The only way to read what the guest asked for**: a request the
-    /// server ignores reaches no log on either side.
-    pub wire_dump: Option<PathBuf>,
-    /// A second NVMe controller, for a driver in userland, backed by this file.
-    ///
-    /// QEMU's NVMe under Intel's ids (`use-intel-id`, `8086:5845`), so a claim
-    /// names it; its MSI-X table in a BAR
-    /// of its own (`msix-exclusive-bar`), because a claim never maps the BAR
-    /// holding the table and NVMe keeps its registers in BAR 0; and its
-    /// namespace's write cache on, so the controller has a volatile cache a
-    /// flush has to issue Flush for.
-    pub userland_nvme: Option<PathBuf>,
-    /// Have QEMU record every NVMe command it is sent, every completion it
-    /// posts, every write with its sectors, every flush it runs and every
-    /// controller start into this file: the device's own account
-    /// of what reached it, which no line a driver prints can be.
-    pub nvme_trace: Option<PathBuf>,
-}
-
-/// Where the guest sees the host under QEMU's user-mode networking, and where
-/// the host sees the same servers.
-pub const GUEST_VIEW_OF_HOST: &str = "10.0.2.2";
-
-/// The loopback address the forwarded port is bound on. Loopback and not `*`:
-/// a CI runner is on somebody's network and a test guest's sshd is not a
-/// service anyone else may reach.
-pub const SSH_FORWARD_HOST: &str = "127.0.0.1";
-
-/// The `hostfwd` clause [`BootOptions::ssh_port`] adds to the `-netdev`
-/// argument, spelled once so the boot and the assertion read the same string.
-pub fn ssh_forward_argv(port: u16) -> String {
-    format!(",hostfwd=tcp:{SSH_FORWARD_HOST}:{port}-:22")
-}
-
-/// A host port nothing is listening on, taken by binding and letting go. The
-/// window between the two is unavoidable — QEMU opens its own listener — and a
-/// boot that loses that race fails to connect rather than reaching another
-/// socket, because the port is on loopback and every connection through it is
-/// authenticated.
-pub fn free_host_port() -> u16 {
-    std::net::TcpListener::bind((SSH_FORWARD_HOST, 0))
-        .expect("a loopback port for the ssh forward")
-        .local_addr()
-        .expect("a bound listener has an address")
-        .port()
 }
 
 impl BootOptions {
@@ -2191,24 +1006,9 @@ impl Default for BootOptions {
             qmp: false,
             kernel_features: &[],
             kernel_params: &[],
-            i8042: true,
             mute: false,
-            takes_the_reset: false,
-            firmware_vars: None,
             ready_marker: DEFAULT_READY,
-            nvme_image: None,
-            boot_image: None,
-            usb_images: Vec::new(),
-            usb_pcap: None,
-            boot_read_error: None,
-            rtc_base: None,
             extra_root_files: Vec::new(),
-            log_port: None,
-            segment: false,
-            ssh_port: None,
-            wire_dump: None,
-            userland_nvme: None,
-            nvme_trace: None,
         }
     }
 }
@@ -2218,29 +1018,6 @@ pub struct TestResult {
     pub name: String,
     pub exit_code: Option<i32>,
     pub stdout: String,
-    pub serial: String,
-    /// Every console line that arrived **before** this test announced itself.
-    ///
-    /// **It used to be dropped on the floor, and that is a hole in the capture
-    /// rather than a tidiness.** A boot's capture is `boot_log()` up to the
-    /// ready marker and then this function's `stdout`/`serial` from
-    /// `===TEST_START===` onwards; between those two points the reader thread
-    /// goes on delivering lines and nothing kept them. The window is not
-    /// hypothetical and it is not narrow — measured on `wall_clock_file`,
-    /// 2026-08-15: one run in three carried five real lines in it, including
-    /// `soundd: null sink idle` and the kernel's `spawn: /system/bin/test-runner`
-    /// record, so the ready marker fires before the runner is even loaded and
-    /// every daemon still finishing its startup writes into a hole.
-    ///
-    /// That is how a `logd:` line went missing from a `wall_clock_file` capture
-    /// while the *next* line logd writes was present: the two are either side of
-    /// a file creation on the log volume, which is milliseconds, and the window
-    /// closed between them.
-    ///
-    /// A caller that reads a daemon's startup out of a boot appends this to its
-    /// capture. It is separate from `serial` because `serial` means "while this
-    /// test ran".
-    pub before: String,
     /// Why the run did not finish, when it did not.
     ///
     /// A [`WaitVerdict`] and not a `String`, so that the sentence and the
@@ -2248,60 +1025,6 @@ pub struct TestResult {
     /// Every arm that formats this gets the report for free, and there are
     /// fifty-two of them that were never going to be edited one at a time.
     pub error: Option<WaitVerdict>,
-    /// Whether the guest ever announced *this* test.
-    ///
-    /// The in-guest runner reads one command, prints `===TEST_START <name>` and
-    /// spawns; so a test that never started is a guest that never got as far as
-    /// reading its command, which is a different thing from a test that ran and
-    /// hung. On a shared boot the two want different answers — the first is
-    /// about the boot, the second about the test.
-    pub started: bool,
-}
-
-impl TestResult {
-    /// The guest is not answering any more: this test's turn came, its whole
-    /// ceiling passed, and it was never even announced.
-    pub fn boot_stopped_answering(&self) -> bool {
-        !self.started && self.error.is_some()
-    }
-}
-
-/// Every byte the guest's console has produced, the unfinished last line
-/// included — **a view, not a queue: reading it takes nothing from anyone.**
-///
-/// The line channel is a `Receiver`, so a wait on it consumes: a helper that
-/// drained lines looking for its own evidence would take the marker its caller's
-/// assertion is waiting for. That is the whole reason this exists, and it is why
-/// `shell_type_line` in `tests/toyos.rs` reads the guest's echo of a typed line
-/// from here.
-///
-/// It also carries what the line channel structurally cannot. A surface owner
-/// mirrors the shell's bytes to its own stdout and std buffers that by line, so
-/// a prompt — `"{cwd}> "`, no newline — reaches a host reading bytes and no host
-/// reading lines.
-#[derive(Clone)]
-pub struct ConsoleStream(Arc<Mutex<Vec<u8>>>);
-
-impl ConsoleStream {
-    fn new() -> Self {
-        Self(Arc::new(Mutex::new(Vec::new())))
-    }
-
-    /// How much the guest has said so far: the mark a caller takes before it
-    /// injects, so that what it reads back afterwards is its own doing.
-    pub fn mark(&self) -> usize {
-        self.0.lock().expect("the console stream lock is never held across a panic").len()
-    }
-
-    /// Everything the guest has said since byte `at`.
-    ///
-    /// Lossy, and it has to be: `at` is a byte offset a caller took between two
-    /// writes and the tail is whatever has arrived since, so both ends can fall
-    /// inside a multi-byte character that is not finished yet.
-    pub fn since(&self, at: usize) -> String {
-        let buf = self.0.lock().expect("the console stream lock is never held across a panic");
-        String::from_utf8_lossy(&buf[at.min(buf.len())..]).into_owned()
-    }
 }
 
 pub struct QemuInstance {
@@ -2310,226 +1033,24 @@ pub struct QemuInstance {
     _tether: Tether,
     stdin: BufWriter<ChildStdin>,
     rx: Receiver<String>,
-    console: ConsoleStream,
     _reader_thread: thread::JoinHandle<String>,
-    uart_log: PathBuf,
-    nvme: NvmeClaim,
+    /// Held for the claim: one live guest per NVMe image.
+    _nvme: NvmeClaim,
     sockets: Sockets,
     screendump: PathBuf,
-    /// The image this boot built for itself, which is the only one it may
-    /// delete: a [`BootOptions::boot_image`] belongs to the test that staged it
-    /// and is often read back after the guest is gone.
-    own_boot_image: Option<PathBuf>,
-    /// The variable store this boot copied for itself, on the same terms as
-    /// `own_boot_image`: a [`BootOptions::firmware_vars`] is the test's.
-    own_vars: Option<PathBuf>,
+    /// The image this boot built for itself.
+    boot_image: PathBuf,
+    /// The variable store this boot copied for itself.
+    vars: PathBuf,
     boot_log: String,
-    /// Whether this boot armed `i8042-trace`, which is the only channel a
-    /// windowed shell has for saying it took a burst out of the device.
-    /// Kept so a caller that paces on it refuses a boot that cannot answer,
-    /// rather than waiting out a ceiling against a guest that was never asked
-    /// to speak.
-    i8042_trace: bool,
     /// This guest's vCPU count, kept so its liveness ceilings can be widened by
     /// its own oversubscription on a host with fewer cores than vCPUs — see
     /// [`oversubscription`] and [`QemuInstance::budget`]. Boot-derived
     /// [`host_scale`] cannot see this: a boot is a mostly-serial workload and a
     /// wide-SMP guest pays lock-holder preemption a boot never does.
     smp: u32,
-    /// The host port [`BootOptions::ssh_port`] forwarded into this guest, kept
-    /// so a boot several tests share can tell each of them which port it took.
-    ssh_port: Option<u16>,
-    /// The test binaries this boot put on ROOT, by the name `run` takes; `None`
-    /// for a staged image, whose contents its builder chose.
-    carried: Option<BTreeSet<String>>,
-}
-
-/// The test binaries one boot carries onto ROOT, out of the suite's catalogue.
-pub struct Carried {
-    pub c: Vec<(String, Vec<u8>)>,
-    pub rust: Vec<(String, Vec<u8>)>,
-}
-
-impl Carried {
-    /// Each binary's size, by the name [`carrying`] takes.
-    pub fn sizes(&self) -> std::collections::BTreeMap<String, usize> {
-        let c = self.c.iter().map(|(name, data)| (format!("test_c_{name}"), data.len()));
-        let rust = self.rust.iter().map(|(name, data)| {
-            let key = if name.ends_with(".so") { name.clone() } else { format!("test_rs_{name}") };
-            (key, data.len())
-        });
-        c.chain(rust).collect()
-    }
-
-    pub fn bytes(&self) -> usize {
-        self.c.iter().chain(&self.rust).map(|(_, data)| data.len()).sum()
-    }
-}
-
-/// What a boot that runs `names` (`test_rs_<bin>`, `test_c_<case>`) carries.
-///
-/// **ROOT is held whole in the guest's memory, so a binary on it costs the
-/// guest whether it runs or not.** The closure is over what the named binaries
-/// name in turn: a child a binary spawns and a library it links or `dlopen`s
-/// appear in its bytes by file name, so every catalogue name found there is
-/// carried too. A name the catalogue does not hold panics.
-pub fn carrying<'n>(
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-    names: impl IntoIterator<Item = &'n str>,
-) -> Carried {
-    let mut catalogue: std::collections::BTreeMap<String, (bool, &(String, Vec<u8>))> =
-        std::collections::BTreeMap::new();
-    for bin in c_bins {
-        catalogue.insert(format!("test_c_{}", bin.0), (true, bin));
-    }
-    for bin in rust_bins {
-        let key =
-            if bin.0.ends_with(".so") { bin.0.clone() } else { format!("test_rs_{}", bin.0) };
-        catalogue.insert(key, (false, bin));
-    }
-    let mut todo: Vec<String> = Vec::new();
-    for name in names {
-        assert!(
-            catalogue.contains_key(name),
-            "[qemu] a boot names {name:?} and the suite built no such binary"
-        );
-        todo.push(name.to_string());
-    }
-    let mut taken: BTreeSet<String> = BTreeSet::new();
-    while let Some(name) = todo.pop() {
-        if taken.insert(name.clone()) {
-            todo.extend(named_in(&catalogue[&name].1 .1, &catalogue));
-        }
-    }
-    let mut carried = Carried { c: Vec::new(), rust: Vec::new() };
-    for name in &taken {
-        let (is_c, bin) = catalogue[name];
-        if is_c { carried.c.push(bin.clone()) } else { carried.rust.push(bin.clone()) }
-    }
-    carried
-}
-
-/// Every catalogue name that starts somewhere in `bytes`, the longest where
-/// two do: string literals sit end to end in `.rodata`, so what follows a name
-/// is as often the next literal's first byte as a terminator.
-fn named_in<V>(bytes: &[u8], catalogue: &std::collections::BTreeMap<String, V>) -> Vec<String> {
-    let word = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'.';
-    let widest = catalogue.keys().map(String::len).max().unwrap_or(0);
-    let mut found = Vec::new();
-    let mut at = 0;
-    while at < bytes.len() {
-        let rest = &bytes[at..];
-        if !(rest.starts_with(b"test_rs_") || rest.starts_with(b"test_c_") || rest.starts_with(b"lib"))
-        {
-            at += 1;
-            continue;
-        }
-        let run = rest.iter().take(widest).position(|&b| !word(b)).unwrap_or(widest.min(rest.len()));
-        let longest = (1..=run)
-            .rev()
-            .filter_map(|end| std::str::from_utf8(&rest[..end]).ok())
-            .find(|candidate| catalogue.contains_key(*candidate));
-        match longest {
-            Some(name) => {
-                at += name.len();
-                found.push(name.to_string());
-            }
-            None => at += 1,
-        }
-    }
-    found
-}
-
-/// The bootable disk image a boot with these arguments would use.
-///
-/// Public because a test that has to know what is on the boot disk *before*
-/// the machine starts — or has to put something there — cannot let
-/// `boot_with_options` build it: the image is written fresh every boot and its
-/// GPT gets a new random partition GUID with it. Such a test builds the image
-/// here, works on it, and hands it back through [`BootOptions::boot_image`].
-pub fn build_boot_image(
-    test_crate: &Path,
-    c_tests: &[(String, Vec<u8>)],
-    rust_tests: &[(String, Vec<u8>)],
-    kernel_params: &[&str],
-) -> Vec<u8> {
-    build_boot_image_carrying(test_crate, c_tests, rust_tests, &[], kernel_params)
-}
-
-/// [`build_boot_image`] with files put on ROOT beside the image's own, each
-/// named by its ROOT-relative path: what [`BootOptions::extra_root_files`] does
-/// for an image the boot builds, which a staged image has to carry itself.
-pub fn build_boot_image_carrying(
-    test_crate: &Path,
-    c_tests: &[(String, Vec<u8>)],
-    rust_tests: &[(String, Vec<u8>)],
-    staged: &[(String, Vec<u8>)],
-    kernel_params: &[&str],
-) -> Vec<u8> {
-    // A parameter carrying a value is one the *shipping* kernel answers to, so
-    // it selects no kernel: an image built with no actuator must be the image a
-    // flashed stick would be.
-    let kernel: &[&str] =
-        if kernel_params.iter().all(|p| toyos_build::build::is_valued_param(p)) {
-            &[]
-        } else {
-            toyos_build::build::TEST_KERNEL
-        };
-    build_boot_image_with(SUITE_ARCH, test_crate, c_tests, rust_tests, staged, kernel, kernel_params, false)
-}
-
-/// Refuse a staged [`BootOptions::boot_image`] that is not the image this
-/// boot's other options describe.
-///
-/// **A staged image replaces the image this call would have built, so every
-/// option that decides what goes *into* an image decides nothing here.** The
-/// guest boots the kernel that image ships, armed with the actuators it was
-/// built with, and until this refused, a test that set `kernel_params` beside a
-/// `boot_image` built without them got an unarmed guest, a pass, and a summary
-/// line counting the arm as taken.
-///
-/// A green run with an inert arm is the worst kind of harness defect, because
-/// every negative control staged through one proves nothing.
-///
-/// The image was built by this same process moments earlier and carries its own
-/// list on its own ESP, so the question is asked of the image rather than of
-/// whoever built it — a name is a name on this side of the wire too, and the
-/// guest need not be started to know which kind it is.
-fn refuse_a_staged_image_this_boot_did_not_ask_for(image: &Path, options: &BootOptions) {
-    assert!(
-        options.kernel_features.is_empty(),
-        "[qemu] this boot asks for the kernel build {:?} and hands the guest {}; a staged image \
-         ships the kernel it was built with and this call builds nothing, so the request would \
-         be inert",
-        options.kernel_features,
-        image.display(),
-    );
-    assert!(
-        !options.debug_wait,
-        "[qemu] this boot asks for the {:?} build and hands the guest {}; a staged image ships \
-         the kernel it was built with and this call builds nothing, so the request would be \
-         inert",
-        toyos_build::build::DEBUG_KERNEL_BUILD,
-        image.display(),
-    );
-    assert!(
-        options.extra_root_files.is_empty(),
-        "[qemu] this boot stages {} file(s) onto ROOT and hands the guest {}; a staged image \
-         carries the files it was built with and this call builds nothing, so the fixture would \
-         never reach the guest",
-        options.extra_root_files.len(),
-        image.display(),
-    );
-    let params = options.params();
-    let asked: Vec<&str> = params.iter().map(String::as_str).collect();
-    if let Some(why) = toyos_build::image::param_conflict(image, &asked) {
-        panic!(
-            "[qemu] {why}. `BootOptions::boot_image` replaces the image this call would have \
-             built, so `kernel_params` cannot arm a guest booting one: build the staged image \
-             with the same list — `qemu::build_boot_image` takes it — or drop the field"
-        );
-    }
+    /// The test binaries this boot put on ROOT, by the name `run` takes.
+    carried: BTreeSet<String>,
 }
 
 /// Which of [`DECLARED_KERNEL_BUILDS`] this boot wants.
@@ -2537,10 +1058,6 @@ fn refuse_a_staged_image_this_boot_did_not_ask_for(image: &Path, options: &BootO
 /// **A parameter never decides a build.** Every actuator lives in the one test
 /// kernel, so asking for one selects that kernel and nothing more; the third
 /// build is asked for by name and by one test.
-///
-/// A boot handed a [`BootOptions::boot_image`] builds nothing at all, and this
-/// then answers what that image already carries: the two agree or the boot was
-/// refused before it got here.
 fn kernel_of(options: &BootOptions) -> Vec<&'static str> {
     if options.kernel_params.is_empty() {
         return options.kernel_features.to_vec();
@@ -2685,25 +1202,12 @@ fn push_user_half(line: &str, stdout: &mut String) {
 const END_MARKER: &str = "===TEST_END ";
 
 impl QemuInstance {
-    /// Build everything and boot QEMU with test binaries on ROOT.
-    /// `test_crate` is the path to the test crate (must contain a `system.toml`).
-    pub fn boot(
-        test_crate: &Path,
-        c_tests: &[(String, Vec<u8>)],
-        rust_tests: &[(String, Vec<u8>)],
-    ) -> Self {
-        Self::boot_with_options(test_crate, c_tests, rust_tests, BootOptions::default())
-    }
-
     pub fn boot_with_options(
         test_crate: &Path,
         c_tests: &[(String, Vec<u8>)],
         rust_tests: &[(String, Vec<u8>)],
         options: BootOptions,
     ) -> Self {
-        if let Some(staged) = options.boot_image.as_ref().and_then(Staged::authored) {
-            refuse_a_staged_image_this_boot_did_not_ask_for(staged, &options);
-        }
         let mut features: Vec<&str> = kernel_of(&options);
         if options.debug_wait {
             features.push(toyos_build::build::DEBUG_KERNEL_BUILD);
@@ -2720,113 +1224,54 @@ impl QemuInstance {
         // image file is not a slow test, it is a guest reading bytes another
         // boot is in the middle of writing — and the lane directory alone would
         // not settle it, since one test may hold two instances at once.
-        //
-        // **A staged image builds nothing.** What this call would have built is
-        // the image the guest does not boot, and building it anyway cost a
-        // kernel build the run then reported as one it had made — see
-        // [`refuse_a_staged_image_this_boot_did_not_ask_for`] for what that
-        // report was worth.
-        //
-        // The second half of each arm is what this guest may delete when it
-        // goes: a file the test staged is often read back after the guest is
-        // gone, and a carried one belongs to the boots after this.
-        let build_here = || {
-            let params = options.params();
-            let params: Vec<&str> = params.iter().map(String::as_str).collect();
-            build_boot_image_with(
-                options.profile.arch(),
-                test_crate,
-                c_tests,
-                rust_tests,
-                &options.extra_root_files,
-                &features,
-                &params,
-                options.debug_wait,
-            )
-        };
-        let carried = match &options.boot_image {
-            Some(Staged::Written(_) | Staged::Pristine(_)) => None,
-            Some(Staged::Carried(_)) | None => Some(
-                c_tests
+        let boot_image = test_dir.join(format!("boot-{seq}.img"));
+        let params = options.params();
+        let params: Vec<&str> = params.iter().map(String::as_str).collect();
+        let image = build_boot_image_with(
+            options.profile.arch(),
+            test_crate,
+            c_tests,
+            rust_tests,
+            &options.extra_root_files,
+            &features,
+            &params,
+            options.debug_wait,
+        );
+        fs::write(&boot_image, image).expect("Failed to write test boot image");
+        let carried = c_tests
+            .iter()
+            .map(|(name, _)| format!("test_c_{name}"))
+            .chain(
+                rust_tests
                     .iter()
-                    .map(|(name, _)| format!("test_c_{name}"))
-                    .chain(
-                        rust_tests
-                            .iter()
-                            .filter(|(name, _)| !name.ends_with(".so"))
-                            .map(|(name, _)| format!("test_rs_{name}")),
-                    )
-                    .collect(),
-            ),
-        };
-        let (boot_image, own_boot_image) = match &options.boot_image {
-            // Both boot the file the test staged; what tells them apart is the
-            // `snapshot=on` `qemu_command` puts on the drive for a `Pristine`
-            // one, which is where that guest's writes go and die.
-            Some(Staged::Written(staged) | Staged::Pristine(staged)) => (staged.clone(), None),
-            Some(Staged::Carried(name)) => {
-                let path = test_dir.join(format!("carried-{name}.img"));
-                if !path.exists() {
-                    fs::write(&path, build_here()).expect("Failed to write test boot image");
-                }
-                (path, None)
-            }
-            None => {
-                let path = test_dir.join(format!("boot-{seq}.img"));
-                fs::write(&path, build_here()).expect("Failed to write test boot image");
-                (path.clone(), Some(path))
-            }
-        };
+                    .filter(|(name, _)| !name.ends_with(".so"))
+                    .map(|(name, _)| format!("test_rs_{name}")),
+            )
+            .collect();
 
-        // **Every boot that names no image gets a blank DATA volume**, so what
-        // one boot leaves under `/home` — sshd's host identity, a package, a
-        // cache — is never the premise of whatever test the lane runs next. A
-        // boot that reads what an earlier one wrote passes that image as
-        // `nvme_image`. The lane's one file is remade rather than a file per
-        // boot, so a test can still read the device after its guest is gone.
+        // **Every boot gets a blank DATA volume**, so what one boot leaves under
+        // `/home` — sshd's host identity, a package, a cache — is never the
+        // premise of whatever test the lane runs next. The lane's one file is
+        // remade rather than a file per boot.
         //
         // One live guest per image, claimed here rather than discovered from
         // QEMU's stderr after the second process has already exited — see
         // [`NvmeClaim`] — and claimed before the remaking, which truncates.
         let nvme_bytes = options.profile.shape().nvme_bytes;
-        let (nvme_image, blank) = match &options.nvme_image {
-            Some(path) => (path.clone(), false),
+        let nvme_image = if nvme_bytes == 0 {
             // A profile with no controller gets no backing file either; the
             // path is never passed to QEMU.
-            None if nvme_bytes == 0 => (test_dir.join("no-nvme"), false),
-            None => (test_dir.join(format!("test-nvme-{nvme_bytes}.img")), true),
+            test_dir.join("no-nvme")
+        } else {
+            test_dir.join(format!("test-nvme-{nvme_bytes}.img"))
         };
         let nvme = if nvme_bytes == 0 {
             NvmeClaim::unattached(&nvme_image)
         } else {
-            NvmeClaim::take(&nvme_image).unwrap_or_else(|why| panic!("[qemu] {why}"))
+            let claim = NvmeClaim::take(&nvme_image).unwrap_or_else(|why| panic!("[qemu] {why}"));
+            toyos_build::build::create_sparse(claim.path(), nvme_bytes);
+            claim
         };
-        if blank {
-            toyos_build::build::create_sparse(nvme.path(), nvme_bytes);
-        }
-
-        // Named by size and block size for the same reason the namespace is:
-        // a stamped image is stamped for one geometry, and handing it to a
-        // profile that declares another is the mistake the stamp exists to
-        // catch rather than one to make here.
-        let usb_images: Vec<PathBuf> = options
-            .profile
-            .usb_disks()
-            .iter()
-            .enumerate()
-            .map(|(i, disk)| match options.usb_images.get(i) {
-                Some(path) => path.clone(),
-                None => {
-                    let path =
-                        test_dir.join(format!("test-usb-{}-{}.img", disk.bytes, disk.lba_bytes));
-                    if !path.exists() {
-                        let file = fs::File::create(&path).expect("create the USB disk image");
-                        file.set_len(disk.bytes).expect("size the USB disk image");
-                    }
-                    path
-                }
-            })
-            .collect();
 
         let sockets = Sockets::new(&options);
         let screendump = test_dir.join(format!("screen-{seq}.ppm"));
@@ -2837,26 +1282,12 @@ impl QemuInstance {
         let uart_log = test_dir.join(format!("uart-{seq}.log"));
         let _ = fs::remove_file(&uart_log);
 
-        let (firmware_vars, own_vars) = match &options.firmware_vars {
-            Some(vars) => (vars.clone(), None),
-            None => {
-                let vars = test_dir.join(format!("vars-{seq}.fd"));
-                toyos_build::firmware::of(options.profile.arch())
-                    .and_then(|firmware| firmware.fresh_vars(&vars))
-                    .unwrap_or_else(|why| panic!("[qemu] {why}"));
-                (vars.clone(), Some(vars))
-            }
-        };
+        let vars = test_dir.join(format!("vars-{seq}.fd"));
+        toyos_build::firmware::of(options.profile.arch())
+            .and_then(|firmware| firmware.fresh_vars(&vars))
+            .unwrap_or_else(|why| panic!("[qemu] {why}"));
 
-        let qemu = qemu_command(
-            &boot_image,
-            nvme.path(),
-            &usb_images,
-            &uart_log,
-            &sockets.dir,
-            &firmware_vars,
-            &options,
-        );
+        let qemu = qemu_command(&boot_image, nvme.path(), &uart_log, &sockets.dir, &vars, &options);
         spawn_and_wait_ready(
             qemu,
             &options,
@@ -2866,8 +1297,8 @@ impl QemuInstance {
                 nvme,
                 sockets,
                 screendump,
-                own_boot_image,
-                own_vars,
+                boot_image,
+                vars,
                 carried,
             },
         )
@@ -2972,70 +1403,6 @@ impl QemuInstance {
         }
     }
 
-    /// [`Self::screendump_while`], but a guest still *painting* is still working.
-    ///
-    /// The screen-channel form of what [`ceiling_verdict`] does for
-    /// [`Self::run_test_paced`] on serial: past the budgeted deadline the wait
-    /// does not give up while the framebuffer keeps *changing*. A console
-    /// rendering slowly under a loaded `smp:2` runner is making progress, which
-    /// is the case whose paint "never arrived in the window" while the guest was
-    /// alive — the budget-scaled deadline undercounts a later moment in the run
-    /// exactly as the serial ceiling did. Only a screen *frozen* for
-    /// [`GUEST_QUIET`] past the deadline ends the wait; `done` firing ends it at
-    /// once, so a passing caller is untouched
-    /// and a real bug (the paint that should not be there, and stays) still fires
-    /// its assertion, a frozen-screen `GUEST_QUIET` later.
-    ///
-    /// **Only for a config whose screen freezes when idle** — no compositor;
-    /// `/system/bin/console` repaints on I/O alone. A compositor's cursor blink and its
-    /// once-a-second taskbar clock never let the screen freeze, so such a caller
-    /// would wait the whole backstop when its `done` never comes and keeps the
-    /// plain [`Self::screendump_while`] (which is also why the `screen_blocked_dump`
-    /// retry loop, whose timeout is a deliberate re-send signal, must not use
-    /// this).
-    ///
-    /// Reuses the one classifier so the two channels cannot drift: `dying` is the
-    /// serial path's alone, and a halted kernel freezes the screen and is caught
-    /// by the freeze here.
-    pub fn screendump_while_rendering(
-        &mut self,
-        timeout: Duration,
-        interval: Duration,
-        done: impl Fn(&super::screen::Ppm) -> bool,
-    ) -> super::screen::Ppm {
-        let ceiling = budget_smp(timeout, self.smp);
-        let start = Instant::now();
-        let mut last_change = start;
-        let mut prev: Option<Vec<[u8; 3]>> = None;
-        loop {
-            let dump = self.screendump();
-            if done(&dump) {
-                return dump;
-            }
-            let now = Instant::now();
-            if prev.as_deref() != Some(dump.pixels.as_slice()) {
-                last_change = now;
-                prev = Some(dump.pixels.clone());
-            }
-            if ceiling_verdict(
-                None,
-                now.duration_since(start),
-                ceiling,
-                now.duration_since(last_change),
-                0,
-            )
-            .is_some()
-            {
-                return dump;
-            }
-            thread::sleep(interval);
-        }
-    }
-
-    pub fn pid(&self) -> u32 {
-        self.child.id()
-    }
-
     /// Every console line the guest printed before the ready marker.
     ///
     /// The kernel's own boot lines sit in the log ring until the scheduler
@@ -3046,81 +1413,6 @@ impl QemuInstance {
     /// empty when [`BootOptions::mute`] takes it away.
     pub fn boot_log(&self) -> &str {
         &self.boot_log
-    }
-
-    /// The host port this boot forwarded into the guest's TCP 22. Panics
-    /// rather than returning an option: a `None` here would become a connection
-    /// refused several layers away from the option that was not set.
-    pub fn ssh_port(&self) -> u16 {
-        self.ssh_port.expect("this guest was booted without BootOptions { ssh_port }")
-    }
-
-    /// Everything the guest put on the 16550 before it switched to the
-    /// virtio-console — the only record a guest that died early leaves.
-    pub fn uart_log(&self) -> String {
-        fs::read_to_string(&self.uart_log).unwrap_or_default()
-    }
-
-    /// The guest's console byte for byte, unfinished last line included — see
-    /// [`ConsoleStream`].
-    pub fn console_stream(&self) -> &ConsoleStream {
-        &self.console
-    }
-
-    /// Whether the kernel will report every i8042 drain on this boot.
-    pub fn i8042_trace_armed(&self) -> bool {
-        self.i8042_trace
-    }
-
-    /// Wait for QEMU to exit within `by`: its console closing is the event, and
-    /// the process is reaped after it. Answers what the guest said on the way.
-    /// A file QEMU finishes only at its exit is whole once this answers, and is
-    /// still there until this instance is dropped.
-    pub fn await_exit(&mut self, by: Duration) -> Result<String, String> {
-        let deadline = Instant::now() + by;
-        let mut said = String::new();
-        loop {
-            let left = deadline.checked_duration_since(Instant::now()).unwrap_or_default();
-            match self.rx.recv_timeout(left) {
-                Ok(line) => {
-                    said.push_str(&line);
-                    said.push('\n');
-                }
-                Err(RecvTimeoutError::Disconnected) => break,
-                Err(RecvTimeoutError::Timeout) => {
-                    return Err(format!("QEMU had not exited {} s after it was asked to\n{said}", by.as_secs()))
-                }
-            }
-        }
-        let status = self.child.wait().map_err(|e| format!("QEMU could not be waited for: {e}"))?;
-        if !status.success() {
-            return Err(format!("QEMU exited {status}\n{said}"));
-        }
-        Ok(said)
-    }
-
-    /// The NVMe backing file. It is what the *device* received, so it is the
-    /// only place a storage assertion can stand outside the guest's own
-    /// account of itself.
-    pub fn nvme_image(&self) -> &Path {
-        self.nvme.path()
-    }
-
-    /// End this guest and hand back the proof its lane is free.
-    ///
-    /// **This is the only way to boot a replacement**, because [`LaneFree`] is
-    /// the only thing a replacement can be built from and this is the only
-    /// thing that makes one out of a guest. Taking `self` is the whole of it:
-    /// `qemu = boot()` launched the new QEMU while the old instance still held
-    /// the lane's `test-nvme-*.img` open for write, the new one exited 1 on
-    /// QEMU's own lock, and `wait_for_ready`'s panic escaped the shared block —
-    /// 129 of one run's 131 reds carried that one sentence on 2026-08-17.
-    /// Deterministic, not a race in the sense of a window: the old guest is
-    /// always still alive at that point, so every shared-boot reboot since the
-    /// mechanism landed on 2026-08-08 died this way.
-    pub fn shutdown(self) -> LaneFree {
-        drop(self);
-        LaneFree(())
     }
 
     pub fn stdin_mut(&mut self) -> &mut BufWriter<ChildStdin> {
@@ -3147,8 +1439,7 @@ impl QemuInstance {
     /// moment QEMU exits and the reader disconnects, so the ceiling there costs
     /// nothing. A guest the fatal path has halted does not exit — every CPU is
     /// stopped and the process stays up — so the drain pays the whole ceiling
-    /// waiting for a machine that will never speak again. `double_fault_stack`
-    /// spent twenty seconds of every run that way, which was 80% of it.
+    /// waiting for a machine that will never speak again.
     ///
     /// Here the duration *is* a liveness ceiling — the marker is what ends
     /// it — so it scales.
@@ -3181,24 +1472,6 @@ impl QemuInstance {
     /// `BootOptions { qmp: true }`.
     pub fn qmp_socket(&self) -> &Path {
         self.sockets.qmp.as_deref().expect("qmp_socket needs BootOptions { qmp: true }")
-    }
-
-    /// Stand on this guest's segment; it needs `BootOptions { segment: true }`.
-    pub fn segment(&self) -> Result<super::segment::Segment, String> {
-        self.sockets.segment.as_ref().expect("segment needs BootOptions { segment: true }").open()
-    }
-
-    /// [`budget`] for a host-side wait on *this* guest, widened by the guest's
-    /// own vCPU oversubscription.
-    ///
-    /// A test that polls the framebuffer or drains serial in its own loop —
-    /// rather than through [`Self::run_test_paced`] — reaches for a deadline,
-    /// and a deadline is a claim about the host. The free [`budget`] cannot see
-    /// how wide this guest is; this can, so an `smp:8` guest's poll loop is
-    /// given the `smp/cores` extra room a mostly-serial boot never priced. On a
-    /// host with a core per vCPU it is exactly [`budget`].
-    pub fn budget(&self, one_guest: Duration) -> Duration {
-        budget_smp(one_guest, self.smp)
     }
 
     pub fn run_test(&mut self, name: &str, timeout: Duration) -> TestResult {
@@ -3247,22 +1520,20 @@ impl QemuInstance {
 
         // `run <name> [args...]`, and the markers carry only the binary name.
         let want = name.split_whitespace().next().unwrap_or(name);
-        if let Some(carried) = &self.carried {
-            let harness = want.starts_with("test_rs_") || want.starts_with("test_c_");
-            assert!(
-                !harness || carried.contains(want),
-                "[qemu] `run {want}` on a boot whose ROOT does not carry it: a boot carries the \
-                 test binaries its task names (`CARRIES` in tests/toyos.rs), and this one \
-                 carries {carried:?}"
-            );
-        }
+        let harness = want.starts_with("test_rs_") || want.starts_with("test_c_");
+        assert!(
+            !harness || self.carried.contains(want),
+            "[qemu] `run {want}` on a boot whose ROOT does not carry it: a boot carries the test \
+             binaries its caller handed it, and this one carries {:?}",
+            self.carried
+        );
 
         let timeout = budget_smp(timeout, self.smp);
         let start = Instant::now();
         let mut stdout = String::new();
         let mut serial = String::new();
         // Every line seen before this test announced itself. Kept, never
-        // dropped — `TestResult::before` is the argument.
+        // dropped.
         let mut before = String::new();
         let mut in_test = false;
         // **Which of the two things the ceiling caught**: a guest that has said
@@ -3296,10 +1567,7 @@ impl QemuInstance {
                     name: name.to_string(),
                     exit_code: None,
                     stdout,
-                    serial,
-                    before,
                     error: Some(error),
-                    started: in_test,
                 };
             }
 
@@ -3377,14 +1645,12 @@ impl QemuInstance {
                             name: name.to_string(),
                             exit_code,
                             stdout,
-                            serial,
-                            before,
                             error,
-                            started: in_test,
                         };
                     } else if !in_test {
                         // **The window between two tests, kept rather than
-                        // dropped.** See [`TestResult::before`].
+                        // dropped**: a daemon still finishing its startup writes
+                        // into it, and a death report carries it.
                         before.push_str(&line);
                         before.push('\n');
                     } else if in_test {
@@ -3408,10 +1674,7 @@ impl QemuInstance {
                         name: name.to_string(),
                         exit_code: None,
                         stdout,
-                        serial,
-                        before,
                         error: Some(error),
-                        started: in_test,
                     };
                 }
             }
@@ -3442,7 +1705,7 @@ impl Drop for QemuInstance {
         let _ = fs::remove_file(&self.screendump);
         // A per-boot image is hundreds of megabytes and a full run makes ~76 of
         // them; the shared name used to make that one file.
-        for own in [&self.own_boot_image, &self.own_vars].into_iter().flatten() {
+        for own in [&self.boot_image, &self.vars] {
             let _ = fs::remove_file(own);
         }
         // `sockets` goes with the fields, after QEMU is reaped.
@@ -3565,146 +1828,6 @@ impl Qmp {
     }
 }
 
-/// QEMU's own account of why a guest stopped, off the `SHUTDOWN` event. Held
-/// open across the stop: the event is emitted once and QEMU exits behind it, so
-/// a connection opened afterwards finds nothing.
-pub struct QmpShutdown(Qmp);
-
-impl QmpShutdown {
-    /// `budget` bounds the wait and is set here, while the peer is still there
-    /// to accept it: macOS refuses a `setsockopt` on a socket already closed.
-    pub fn open(socket: &Path, budget: Duration) -> Self {
-        let qmp = Qmp::connect(socket);
-        qmp.stream.set_read_timeout(Some(budget)).expect("qmp: the shutdown-event budget");
-        Self(qmp)
-    }
-
-    /// The `reason` the `SHUTDOWN` event names — `guest-reset`,
-    /// `guest-shutdown`, `host-signal` — or `None` if the guest never stopped.
-    pub fn reason(&mut self) -> Option<String> {
-        use std::io::Read;
-        let qmp = &mut self.0;
-        loop {
-            if let Some(reason) = shutdown_reason(&qmp.pending) {
-                return Some(reason);
-            }
-            let mut buf = [0u8; 4096];
-            match qmp.stream.read(&mut buf) {
-                // Budget spent, or the socket ended: what it had is in `pending`.
-                Ok(0) | Err(_) => return shutdown_reason(&qmp.pending),
-                Ok(n) => qmp.pending.extend_from_slice(&buf[..n]),
-            }
-        }
-    }
-}
-
-/// Counts the guest resets QEMU reports, for a machine that takes its own
-/// rather than exiting on the first (`BootOptions::takes_the_reset`).
-///
-/// **`SHUTDOWN` is not available to such a guest.** `-no-reboot` is what turns a
-/// reset into one, and every other power test judges by its reason; a guest that
-/// keeps going emits `RESET` instead, and the *count* is what a chain is read
-/// by — one is a kernel that reset itself, two is a loader pass that ended the
-/// chain by resetting rather than returning to the boot manager.
-pub struct QmpResets(Qmp);
-
-impl QmpResets {
-    /// `budget` bounds every wait and is set here, while the peer is still there
-    /// to accept it — as [`QmpShutdown::open`], and for the same reason.
-    pub fn open(socket: &Path, budget: Duration) -> Self {
-        let qmp = Qmp::connect(socket);
-        qmp.stream.set_read_timeout(Some(budget)).expect("qmp: the reset-event budget");
-        Self(qmp)
-    }
-
-    /// How many guest resets have arrived, waiting for up to `want` of them.
-    ///
-    /// Events queue on the socket from the moment it is connected, so a caller
-    /// that opened this before the guest reset reads them here whenever it asks.
-    pub fn seen(&mut self, want: usize) -> usize {
-        use std::io::Read;
-        let qmp = &mut self.0;
-        loop {
-            let seen = guest_resets(&qmp.pending);
-            if seen >= want {
-                return seen;
-            }
-            let mut buf = [0u8; 4096];
-            match qmp.stream.read(&mut buf) {
-                // Budget spent, or the socket ended: what it had is in `pending`.
-                Ok(0) | Err(_) => return guest_resets(&qmp.pending),
-                Ok(n) => qmp.pending.extend_from_slice(&buf[..n]),
-            }
-        }
-    }
-}
-
-/// A machine that takes its own resets, held at the next one: the guest's
-/// reset pauses it with its memory — the black box — as the reset left it, so
-/// a test can change what the next pass reads off the disk after the kernel's
-/// last write and before the loader's first read, and then let it go.
-pub struct QmpHold(Qmp);
-
-impl QmpHold {
-    /// The guest's next reset pauses the machine instead.
-    pub fn arm(socket: &Path) -> Self {
-        let mut qmp = Qmp::connect(socket);
-        qmp.execute("{\"execute\":\"set-action\",\"arguments\":{\"reboot\":\"shutdown\",\"shutdown\":\"pause\"}}");
-        Self(qmp)
-    }
-
-    /// Wait up to `budget` for the machine to stop at its reset.
-    pub fn held(&mut self, budget: Duration) -> Result<(), String> {
-        use std::io::Read;
-        let qmp = &mut self.0;
-        qmp.stream.set_read_timeout(Some(budget)).map_err(|e| format!("qmp: the hold's budget: {e}"))?;
-        let began = Instant::now();
-        loop {
-            if qmp.pending.windows(6).any(|w| w == b"\"STOP\"") {
-                return Ok(());
-            }
-            let mut buf = [0u8; 4096];
-            match qmp.stream.read(&mut buf) {
-                Ok(n) if n > 0 && began.elapsed() < budget => qmp.pending.extend_from_slice(&buf[..n]),
-                _ => {
-                    return Err(format!(
-                        "the machine did not stop at a reset within {} s: {}",
-                        budget.as_secs(),
-                        String::from_utf8_lossy(&qmp.pending)
-                    ))
-                }
-            }
-        }
-    }
-
-    /// Take the held reset and run on, taking every later reset as before.
-    pub fn release(mut self) {
-        self.0.execute("{\"execute\":\"set-action\",\"arguments\":{\"reboot\":\"reset\",\"shutdown\":\"poweroff\"}}");
-        self.0.execute("{\"execute\":\"system_reset\"}");
-        self.0.execute("{\"execute\":\"cont\"}");
-    }
-}
-
-/// `RESET` events the *guest* caused, scanned rather than parsed like
-/// [`shutdown_reason`]. QEMU raises one for its own power-on reset too, which
-/// carries `"guest": false` and is not a claim about anything the guest did.
-fn guest_resets(bytes: &[u8]) -> usize {
-    String::from_utf8_lossy(bytes)
-        .lines()
-        .filter(|line| line.contains("\"RESET\"") && line.contains("\"guest\": true"))
-        .count()
-}
-
-/// The `reason` field of a `SHUTDOWN` event in `bytes`, scanned rather than parsed: [`Qmp`] carries no JSON dependency.
-fn shutdown_reason(bytes: &[u8]) -> Option<String> {
-    let text = String::from_utf8_lossy(bytes);
-    let line = text.lines().find(|l| l.contains("\"SHUTDOWN\""))?;
-    let (_, after) = line.split_once("\"reason\"")?;
-    let (_, value) = after.split_once('"')?;
-    let (value, _) = value.split_once('"')?;
-    Some(value.to_string())
-}
-
 /// An open QMP connection to QEMU's human monitor, for the questions QMP has
 /// no command of its own for.
 pub struct QmpMonitor(Qmp);
@@ -3759,154 +1882,6 @@ impl QmpInput {
             .collect();
         self.send(&body);
     }
-
-    /// Type `text` as one batch of transitions, with no wait anywhere in it.
-    ///
-    /// **The caller owns the bound, and there is no version of this that does
-    /// not need one.** QEMU's PS/2 keyboard queue holds `QEMU_PS2_QUEUE` set-1
-    /// bytes and drops what does not fit silently, one byte at a time, so a
-    /// batch wider than that queue is a hole in the middle of a word whatever
-    /// the guest is doing. Use [`scancode_bytes`] to measure a batch, and send
-    /// the next one only once the guest has shown it consumed this one —
-    /// `console_type_line` and `shell_type_line` in `tests/toyos.rs` are the
-    /// two patterns, one reading the panel and one reading [`ConsoleStream`].
-    ///
-    /// **There is no wall-clock form of this and there must not be one.** A gap
-    /// between characters is the same bound bet on the guest being scheduled,
-    /// and a guest whose vCPU the host has not run for a couple of hundred
-    /// milliseconds drains none of them — at which point the queue starts
-    /// dropping, silently and one byte at a time, and the guest receives the
-    /// line with a hole in it. Both times `screen_console_panic` has ever gone
-    /// red that is what happened, and neither side of the wire says a word
-    /// about it.
-    pub fn type_burst(&mut self, text: &str) {
-        let mut events: Vec<(&str, bool)> = Vec::new();
-        for ch in text.chars() {
-            let (qcode, shift) = qcode(ch);
-            if shift {
-                events.extend([("shift", true), (qcode, true), (qcode, false), ("shift", false)]);
-            } else {
-                events.extend([(qcode, true), (qcode, false)]);
-            }
-        }
-        self.keys(&events);
-    }
-
-    /// One pointer packet: relative motion and/or a button transition.
-    pub fn mouse(&mut self, dx: i32, dy: i32, button: Option<(&str, bool)>) {
-        let mut body: Vec<String> = Vec::new();
-        if let Some((name, down)) = button {
-            body.push(format!(
-                "{{\"type\":\"btn\",\"data\":{{\"down\":{down},\"button\":\"{name}\"}}}}"
-            ));
-        }
-        for (axis, value) in [("x", dx), ("y", dy)] {
-            if value != 0 {
-                body.push(format!(
-                    "{{\"type\":\"rel\",\"data\":{{\"axis\":\"{axis}\",\"value\":{value}}}}}"
-                ));
-            }
-        }
-        self.send(&body);
-    }
-}
-
-/// What one character costs on the wire, in set-1 bytes.
-///
-/// Every qcode [`qcode`] maps is a one-byte make and its break, and none of
-/// them is `0xE0`-prefixed; a shifted one carries the modifier's pair around
-/// it. This exists because a caller that has to bound what it puts in flight
-/// against QEMU's PS/2 queue cannot do it without knowing what a character
-/// weighs — an unmapped character panics in `qcode` rather than being counted
-/// as anything, which is the same refusal typing one would get.
-pub fn scancode_bytes(ch: char) -> usize {
-    if qcode(ch).1 { 4 } else { 2 }
-}
-
-/// The QEMU qcode for `ch`, and whether Shift is held to produce it.
-///
-/// A US layout, because that is what `kernel/src/keyboard.rs` boots with. Only
-/// the characters a console test types: an unmapped one panics rather than
-/// being dropped, since a command missing a character is a test asserting on
-/// output nothing was ever asked to produce.
-fn qcode(ch: char) -> (&'static str, bool) {
-    const LOWER: [&str; 26] = [
-        "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r",
-        "s", "t", "u", "v", "w", "x", "y", "z",
-    ];
-    const DIGIT: [&str; 10] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
-    match ch {
-        'a'..='z' => (LOWER[ch as usize - 'a' as usize], false),
-        'A'..='Z' => (LOWER[ch as usize - 'A' as usize], true),
-        '0'..='9' => (DIGIT[ch as usize - '0' as usize], false),
-        ' ' => ("spc", false),
-        '\n' => ("ret", false),
-        '-' => ("minus", false),
-        '_' => ("minus", true),
-        '.' => ("dot", false),
-        '/' => ("slash", false),
-        '&' => ("7", true),
-        _ => panic!("no qcode for {ch:?}; add it rather than typing something else"),
-    }
-}
-
-pub fn qmp_send_keys(socket: &Path, events: &[(&str, bool)]) {
-    QmpInput::open(socket).keys(events);
-}
-
-/// An open QMP connection for attaching and detaching devices while the guest
-/// runs — QEMU's own `device_add`/`device_del`, which is what a person
-/// plugging something in looks like from the host side.
-///
-/// Its own type rather than more methods on [`QmpInput`], and never open at the
-/// same time as one: a `-qmp unix:…,server` socket serves one monitor, so a
-/// caller that needs both alternates. A type called `QmpInput` with
-/// `device_add` on it would also be describing the wrong thing.
-pub struct QmpDevices(Qmp);
-
-impl QmpDevices {
-    pub fn open(socket: &Path) -> Self {
-        Self(Qmp::connect(socket))
-    }
-
-    /// Attach `driver` on `bus` as `id`, with `extra` naming any further
-    /// properties. Every value is a bare JSON string, which is what every
-    /// property these tests set happens to be.
-    pub fn add(&mut self, driver: &str, bus: &str, id: &str, extra: &[(&str, &str)]) {
-        let mut args = format!("\"driver\":\"{driver}\",\"bus\":\"{bus}\",\"id\":\"{id}\"");
-        for (key, value) in extra {
-            args.push_str(&format!(",\"{key}\":\"{value}\""));
-        }
-        self.0.execute(&format!("{{\"execute\":\"device_add\",\"arguments\":{{{args}}}}}"));
-    }
-
-    pub fn del(&mut self, id: &str) {
-        self.0
-            .execute(&format!("{{\"execute\":\"device_del\",\"arguments\":{{\"id\":\"{id}\"}}}}"));
-    }
-
-    /// Hold every frame the guest sends on `netdev` from here on, unseen by
-    /// it: its link stays up, and nothing it sends reaches anything. QEMU's
-    /// `filter-buffer` lets its frames go once per `interval` microseconds,
-    /// which is set past any test's life.
-    pub fn hold_outbound(&mut self, netdev: &str) {
-        self.0.execute(&format!(
-            "{{\"execute\":\"object-add\",\"arguments\":{{\"qom-type\":\"filter-buffer\",\
-             \"id\":\"held-{netdev}\",\"netdev\":\"{netdev}\",\"queue\":\"rx\",\
-             \"interval\":4000000000}}}}"
-        ));
-    }
-
-    /// Give QEMU an image to back a device that is not on the machine yet, so
-    /// a hot-plugged disk needs nothing in argv. A disk declared at boot is a
-    /// disk the guest could have enumerated at boot.
-    pub fn blockdev_add(&mut self, node: &str, image: &Path) {
-        self.0.execute(&format!(
-            "{{\"execute\":\"blockdev-add\",\"arguments\":{{\"node-name\":\"{node}\",\
-             \"driver\":\"raw\",\"file\":{{\"driver\":\"file\",\"filename\":\"{}\"}}}}}}",
-            image.display()
-        ));
-    }
 }
 
 /// The argv `options` would launch QEMU with, built against placeholder
@@ -3915,37 +1890,21 @@ impl QmpDevices {
 /// unused — so this is what a profile assertion has to read.
 pub fn profile_argv(options: &BootOptions) -> Vec<String> {
     let p = Path::new("/nonexistent");
-    let usb: Vec<PathBuf> = options.profile.usb_disks().iter().map(|_| p.to_path_buf()).collect();
-    qemu_command(p, p, &usb, p, p, p, options)
+    qemu_command(p, p, p, p, p, options)
         .get_args()
         .map(|a| a.to_string_lossy().into_owned())
         .collect()
 }
 
-/// The boot stick's backing, as `-drive` keys: the raw image, or the raw image
-/// over `blkdebug` failing every read that covers `read_error` with EIO.
-fn stick_file(image: &Path, read_error: Option<u64>) -> String {
-    match read_error {
-        None => format!("format=raw,file={}", image.display()),
-        Some(sector) => format!(
-            "driver=raw,file.driver=blkdebug,file.inject-error.0.event=read_aio,\
-             file.inject-error.0.sector={sector},file.inject-error.0.errno=5,\
-             file.inject-error.0.once=off,file.image.driver=file,file.image.filename={}",
-            image.display()
-        ),
-    }
-}
-
 fn qemu_command(
     boot_image: &Path,
     nvme_image: &Path,
-    usb_images: &[PathBuf],
     uart_log: &Path,
     socket_dir: &Path,
     firmware_vars: &Path,
     options: &BootOptions,
 ) -> Command {
-    let (qmp_socket, segment) = socket_names(socket_dir, options);
+    let qmp_socket = qmp_socket(socket_dir, options);
     let shape = options.profile.shape();
     assert!(
         !options.mute || !shape.virtio.present(),
@@ -3983,24 +1942,16 @@ fn qemu_command(
     let mut machine = match arch {
         Arch::X86_64 => arch.machine().to_string(),
         Arch::Aarch64 => {
-            // `virt` has no i8042 to take away, and the unit a profile declares
-            // is VT-d, which it has none of either.
-            assert!(options.i8042 && shape.iommu.is_none(), "`virt` has neither an i8042 nor VT-d");
+            // The unit a profile declares is VT-d, which `virt` has none of.
+            assert!(shape.iommu.is_none(), "`virt` has no VT-d");
             match options.profile {
                 Profile::VirtEl2 => format!("{},gic-version=3,virtualization=on", arch.machine()),
                 _ => format!("{},gic-version=3", arch.machine()),
             }
         }
     };
-    if !options.i8042 {
-        machine.push_str(",i8042=off");
-    }
     if shape.iommu.is_some() {
         machine.push_str(",kernel-irqchip=split");
-    }
-
-    if let Some(base) = options.rtc_base {
-        qemu.arg("-rtc").arg(format!("base={base}"));
     }
 
     // `virt` puts RAM at 1 GiB and AAVMF allocates from its top, so with 4 GiB
@@ -4023,29 +1974,8 @@ fn qemu_command(
         .arg("-drive")
         .arg(firmware_vars)
         .arg("-drive")
-        .arg(format!(
-            "if=none,id=stick,{}{}",
-            stick_file(boot_image, options.boot_read_error),
-            // **What a `Staged::Pristine` boot is made of.** QEMU keeps this
-            // drive's writes in a temporary file and drops it when the guest
-            // exits, so the staged image is never written and the boot after it
-            // starts where this one did. A copy of the image would do the same
-            // and costs 180 MB of disk per boot; this costs nothing.
-            match &options.boot_image {
-                Some(Staged::Pristine(_)) => ",snapshot=on",
-                _ => "",
-            }
-        ));
-    assert!(
-        !shape.xhci.is_empty() || (shape.usb.is_empty() && shape.usb_disks.is_empty()),
-        "a USB device needs a controller"
-    );
-    // A data stick declared onto no bus is emitted with an empty `bus=`, which
-    // QEMU puts on whichever controller it likes.
-    assert!(
-        shape.usb_disks.iter().all(|disk| !disk.bus.unwrap_or(shape.storage_bus).is_empty()),
-        "a USB disk needs a bus to be on"
-    );
+        .arg(format!("if=none,id=stick,format=raw,file={}", boot_image.display()));
+    assert!(!shape.xhci.is_empty() || shape.usb.is_empty(), "a USB device needs a controller");
 
     // Ahead of every other `-device`: QEMU gives a PCI function the bypassing
     // address space unless the unit exists when the function is created, so a
@@ -4068,73 +1998,9 @@ fn qemu_command(
         qemu.arg("-device").arg(*controller);
     }
 
-    // The data disks' own arguments, emitted either side of the boot stick's
-    // `-device`. QEMU hands out ports in the order devices are created, so this
-    // is the only thing that decides which disk the guest enumerates first.
-    // Each carries a device id as well as a drive id, because a test that
-    // unplugs one over QMP has to be able to name it.
-    assert!(
-        options.usb_pcap.is_none() || !shape.usb_disks.is_empty(),
-        "usb_pcap records the first data disk's traffic and this profile has no data disk"
-    );
-    let data_sticks: Vec<Vec<String>> = shape
-        .usb_disks
-        .iter()
-        .enumerate()
-        .map(|(i, disk)| {
-            let pcap = match &options.usb_pcap {
-                Some(path) if i == 0 => format!(",pcap={}", path.display()),
-                _ => String::new(),
-            };
-            vec![
-                "-drive".to_string(),
-                format!(
-                    "if=none,id={},format=raw,file={}{}",
-                    usb_drive_id(i),
-                    usb_images[i].display(),
-                    if disk.readonly { ",readonly=on" } else { "" }
-                ),
-                "-device".to_string(),
-                format!(
-                    "usb-storage,bus={1},drive={2},id={3},logical_block_size={0},\
-                     physical_block_size={0}{pcap}{serial}",
-                    disk.lba_bytes,
-                    disk.bus.unwrap_or(shape.storage_bus),
-                    usb_drive_id(i),
-                    usb_device_id(i),
-                    serial = disk.serial.map(|s| format!(",serial={s}")).unwrap_or_default(),
-                ),
-            ]
-        })
-        .collect();
-    for (disk, args) in shape.usb_disks.iter().zip(&data_sticks) {
-        if disk.before_boot_stick {
-            qemu.args(args);
-        }
-    }
-
-    // An empty `storage_bus` declares that storage is not USB here: the boot
-    // volume rides its own NVMe controller and every xHCI carries HID alone.
-    if shape.storage_bus.is_empty() {
-        qemu.arg("-device")
-            .arg("nvme,serial=bootdisk,id=nvmebootctl,bootindex=0,msix-exclusive-bar=on")
-            .arg("-device")
-            .arg("nvme-ns,drive=stick,bus=nvmebootctl,logical_block_size=512,\
-                  physical_block_size=512");
-    } else {
-        qemu.arg("-device").arg(format!(
-            "usb-storage,bus={},drive=stick,id={BOOT_STICK_ID},serial={BOOT_STICK_SERIAL},\
-             bootindex=0",
-            shape.storage_bus
-        ));
-    }
-    if let Some(gpu) = shape.gpu {
-        assert_eq!(
-            shape.vga, "none",
-            "a declared adapter beside a `-vga` one gives the guest two displays"
-        );
-        qemu.arg("-device").arg(format!("{gpu}{platform}"));
-    }
+    qemu.arg("-device").arg(format!(
+        "usb-storage,bus=xhci.0,drive=stick,id={BOOT_STICK_ID},serial={BOOT_STICK_SERIAL},bootindex=0"
+    ));
     match (arch, shape.vga) {
         (Arch::X86_64, vga) => {
             qemu.arg("-vga").arg(vga);
@@ -4147,10 +2013,7 @@ fn qemu_command(
         (Arch::Aarch64, "none") => {}
         (Arch::Aarch64, other) => panic!("`virt` has no `-vga {other}`"),
     }
-    qemu.arg("-display").arg("none");
-    if !options.takes_the_reset {
-        qemu.arg("-no-reboot");
-    }
+    qemu.arg("-display").arg("none").arg("-no-reboot");
     if let Some((w, h)) = shape.panel {
         assert_eq!(arch, Arch::X86_64, "a panel is declared through VGA's EDID, and `virt` has no VGA");
         // A panel on a machine with no VGA adapter is a declaration nothing
@@ -4179,137 +2042,28 @@ fn qemu_command(
     // controller alone and this one is nobody's, as the kernel's first-by-class
     // probe left it.
     if shape.nvme_bytes != 0 {
-        let ids = if shape.storage_bus.is_empty() { ",use-intel-id=on" } else { "" };
         qemu.arg("-drive")
-            .arg(format!(
-                "if=none,id=nvme0,format=raw,file={}",
-                nvme_image.display()
-            ))
+            .arg(format!("if=none,id=nvme0,format=raw,file={}", nvme_image.display()))
             .arg("-device")
-            .arg(format!("nvme,serial=deadbeef,id=nvme0ctl,msix-exclusive-bar=on{ids}"))
+            .arg("nvme,serial=deadbeef,id=nvme0ctl,msix-exclusive-bar=on")
             .arg("-device")
-            .arg(format!(
-                "nvme-ns,drive=nvme0,bus=nvme0ctl,logical_block_size={0},physical_block_size={0}",
-                shape.nvme_lba_bytes
-            ));
+            .arg("nvme-ns,drive=nvme0,bus=nvme0ctl,logical_block_size=512,physical_block_size=512");
     }
-    if let Some(image) = &options.userland_nvme {
-        qemu.arg("-drive")
-            .arg(format!("if=none,id=nvme1,format=raw,file={}", image.display()))
-            .arg("-device")
-            .arg("nvme,serial=userland,id=nvme1ctl,use-intel-id=on,msix-exclusive-bar=on")
-            .arg("-device")
-            .arg(
-                "nvme-ns,drive=nvme1,bus=nvme1ctl,logical_block_size=512,physical_block_size=512,\
-                 write-cache=on",
-            );
-    }
-    if let Some(trace) = &options.nvme_trace {
-        for event in [
-            "pci_nvme_io_cmd",
-            "pci_nvme_enqueue_req_completion",
-            "pci_nvme_flush_ns",
-            "pci_nvme_write",
-            "pci_nvme_mmio_start_success",
-        ] {
-            qemu.arg("-trace").arg(event);
-        }
-        qemu.arg("-D").arg(trace);
-    }
-
-    // The mass-storage devices beside the boot stick, and the only ones a test
-    // may write to: the boot stick is on the same bus and carries the image the
-    // guest is running from. Their logical block sizes are stated rather than
-    // left to the default for the same reason the namespace's is.
-    for (disk, args) in shape.usb_disks.iter().zip(&data_sticks) {
-        if !disk.before_boot_stick {
-            qemu.args(args);
-        }
-    }
-
     for dev in shape.usb {
         qemu.arg("-device").arg(*dev);
     }
 
-    if !shape.hda.is_empty() {
-        // No guest test plays audio: the device is here as a DMA master and a
-        // claim, so its audio goes nowhere.
-        qemu.arg("-audiodev").arg("none,id=hdaaud");
-        for dev in shape.hda {
-            qemu.arg("-device").arg(*dev);
-        }
-    }
-
     // The NIC before the virtio block, so a profile that has one and not the
     // other still creates it after the unit and before everything else.
-    // `iommu_platform` is virtio's own way of asking to be decoded; an e1000e
-    // is decoded by the unit whatever it says, so it carries none.
-    // The one clause that makes slirp two-way, on whichever card this profile
-    // has.
-    let forward = [
-        options.ssh_port.map(ssh_forward_argv),
-        options.log_port.map(|port| {
-            format!(",hostfwd=tcp:{SSH_FORWARD_HOST}:{port}-:{}", toyos_logstream::PORT)
-        }),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<String>();
+    // `iommu_platform` is virtio's own way of asking to be decoded.
     match shape.nic {
         Nic::Absent => {}
         Nic::Virtio => {
-            qemu.arg("-netdev").arg(format!("user,id=net0{forward}")).arg("-device").arg(format!(
+            qemu.arg("-netdev").arg("user,id=net0").arg("-device").arg(format!(
                 "virtio-net-pci-non-transitional,netdev=net0{platform}"
             ));
         }
-        Nic::VirtioWithoutMsix => {
-            qemu.arg("-netdev").arg(format!("user,id=net0{forward}")).arg("-device").arg(format!(
-                "virtio-net-pci-non-transitional,netdev=net0,vectors=0{platform}"
-            ));
-        }
-        Nic::E1000e => {
-            qemu.arg("-netdev")
-                .arg(format!("user,id=net0{forward}"))
-                .arg("-device")
-                .arg("e1000e,netdev=net0");
-        }
-        Nic::E1000eBesideIgb => {
-            qemu.arg("-netdev")
-                .arg(format!("user,id=net0{forward}"))
-                .arg("-device")
-                .arg("e1000e,netdev=net0")
-                .arg("-device")
-                .arg("igb");
-        }
-        Nic::E1000eNoServer => {
-            // The hub is not slirp and takes no `hostfwd`, so a boot asking for
-            // one here is refused rather than booted without a forward.
-            assert!(
-                forward.is_empty(),
-                "this profile's cable is plugged into nothing, so no host port reaches the guest"
-            );
-            qemu.arg("-netdev")
-                .arg("hubport,id=net0,hubid=0")
-                .arg("-device")
-                .arg("e1000e,netdev=net0");
-        }
     }
-    if let Some(at) = &options.wire_dump {
-        assert!(
-            !matches!(shape.nic, Nic::Absent),
-            "this profile carries no NIC, so there is no `net0` to dump frames off"
-        );
-        qemu.arg("-object")
-            .arg(format!("filter-dump,id=wire,netdev=net0,file={}", at.display()));
-    }
-    if let Some(tap) = &segment {
-        assert!(
-            !matches!(shape.nic, Nic::Absent),
-            "this profile carries no NIC, so there is no `net0` segment to stand on"
-        );
-        qemu.args(tap.argv());
-    }
-
     if shape.virtio.present() {
         if shape.virtio.sound() {
             // No guest test plays audio: the device is here as a DMA master and
@@ -4363,24 +2117,19 @@ fn qemu_command(
 struct Sockets {
     dir: TempDir,
     qmp: Option<PathBuf>,
-    segment: Option<super::segment::Tap>,
 }
 
 impl Sockets {
     fn new(options: &BootOptions) -> Sockets {
         let dir = TempDir::short("boot");
-        let (qmp, segment) = socket_names(&dir, options);
-        Sockets { dir, qmp, segment }
+        let qmp = qmp_socket(&dir, options);
+        Sockets { dir, qmp }
     }
 }
 
-/// The QMP and segment sockets `options` asks for, named in `dir`.
-fn socket_names(
-    dir: &Path,
-    options: &BootOptions,
-) -> (Option<PathBuf>, Option<super::segment::Tap>) {
-    let qmp = options.qmp.then(|| dir.join("qmp.sock"));
-    (qmp, options.segment.then(|| super::segment::Tap::in_dir(dir)))
+/// The QMP socket `options` asks for, named in `dir`.
+fn qmp_socket(dir: &Path, options: &BootOptions) -> Option<PathBuf> {
+    options.qmp.then(|| dir.join("qmp.sock"))
 }
 
 /// Every file one boot owns, so that adding another does not lengthen a
@@ -4391,22 +2140,13 @@ struct Files {
     nvme: NvmeClaim,
     sockets: Sockets,
     screendump: PathBuf,
-    own_boot_image: Option<PathBuf>,
-    own_vars: Option<PathBuf>,
-    carried: Option<BTreeSet<String>>,
+    boot_image: PathBuf,
+    vars: PathBuf,
+    carried: BTreeSet<String>,
 }
 
 fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) -> QemuInstance {
-    let Files {
-        seq,
-        uart_log,
-        nvme,
-        sockets,
-        screendump,
-        own_boot_image,
-        own_vars,
-        carried,
-    } = files;
+    let Files { seq, uart_log, nvme, sockets, screendump, boot_image, vars, carried } = files;
 
     // Inherited: `orphan` reads QEMU's exit as the end of its harness's stderr.
     qemu.stdin(Stdio::piped())
@@ -4422,8 +2162,6 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
     let stdout = child.stdout.take().unwrap();
 
     let (tx, rx) = mpsc::channel::<String>();
-    let console = ConsoleStream::new();
-    let reader_console = console.clone();
     // The virtio port starts at the kernel's first record; a 16550 on stdio has
     // no other file, so it is read whole.
     let mut kernel_console = options
@@ -4436,9 +2174,7 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
         let mut reader = BufReader::new(stdout);
         let mut full_log = String::new();
         // Read bytes and split them, rather than `BufRead::lines`: every
-        // consumer below still gets whole lines and nothing else, and
-        // [`ConsoleStream`] gets the tail that is not a line yet, which is
-        // where a prompt lives.
+        // consumer below still gets whole lines and nothing else.
         let mut pending: Vec<u8> = Vec::new();
         let mut chunk = [0u8; 4096];
         loop {
@@ -4455,11 +2191,6 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
                 Some(console) => console.pass(&chunk[..read]),
                 None => std::borrow::Cow::Borrowed(&chunk[..read]),
             };
-            reader_console
-                .0
-                .lock()
-                .expect("the console stream lock is never held across a panic")
-                .extend_from_slice(&read);
             pending.extend_from_slice(&read);
             while let Some(at) = pending.iter().position(|&b| b == b'\n') {
                 let mut line: Vec<u8> = pending.drain(..=at).collect();
@@ -4488,17 +2219,13 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
         stdin,
         rx,
         _reader_thread: reader_thread,
-        uart_log,
-        nvme,
+        _nvme: nvme,
         sockets,
         screendump,
-        own_boot_image,
-        own_vars,
+        boot_image,
+        vars,
         boot_log,
-        console,
-        i8042_trace: options.kernel_params.contains(&"i8042-trace"),
         smp: options.smp,
-        ssh_port: options.ssh_port,
         carried,
     }
 }
@@ -4543,12 +2270,12 @@ fn wait_for_ready(
     let no_timeout = options.debug_wait;
     let ready = options.ready_marker;
     let panic_aborts = ready == DEFAULT_READY;
-    // Ten seconds per guest this phase may have up, and never fewer than two
+    // Ten seconds per guest this run may have up, and never fewer than two
     // guests' worth — the tree runs 15-25 suites a day across several agents,
     // so one guest on a quiet host stopped being
     // the regime some time before this did. Measured on 2026-08-03 with other
     // agents building: two boots exceeded the flat ten seconds, one of them in a
-    // phase running a single guest.
+    // run of a single guest.
     //
     // A wedge costs that much longer to report and nothing else.
     //

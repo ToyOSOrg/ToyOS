@@ -276,11 +276,9 @@ mod checks {
 
     /// [`control_regs`] against machines this host cannot boot, with no guest.
     ///
-    /// [`control_regs_negative`] runs the real defective machine and is the link
-    /// between this verdict and a kernel; what is here is the states no actuator
-    /// reaches — a CPU that differs from three others, a bit set uniformly on all
-    /// four, an AP that never printed. Every value is one this tree has printed or
-    /// one bit away from it.
+    /// What is here is the states no actuator reaches — a CPU that differs from
+    /// three others, a bit set uniformly on all four, an AP that never printed.
+    /// Every value is one this tree has printed or one bit away from it.
     #[test]
     fn control_regs_verdict() -> Result<(), String> {
         const AP_BEFORE: (u64, u64) = (0xe000_0011, 0x0031_0620);
@@ -578,97 +576,58 @@ mod checks {
         Ok(())
     }
 
-    fn shared_row(name: &str) -> TestDef {
-        TestDef {
-            name: name.to_string(),
-            qemu_name: format!("test_rs_{name}"),
-            timeout: Duration::from_secs(1),
-            check: |_| true,
-            settle: no_settle,
-        }
-    }
-
-    /// A run takes every registered test its filter matches, and a shard drops
-    /// exactly the screen rows whose profile is not of [`toyos_build::ci::GUEST_ARCH`],
-    /// saying which.
+    /// A run takes every declared test its filter matches, of either
+    /// architecture.
     #[test]
-    fn a_run_selects_by_filter_and_shard() -> Result<(), String> {
-        let shared = [shared_row("shared_one")];
-        let taken = |filter: Option<&str>, sharded: bool| -> BTreeSet<String> {
-            let (tests, machine, screen) = select(&shared, filter, sharded);
-            tests
+    fn a_run_selects_by_filter() -> Result<(), String> {
+        let taken = |filter: Option<&str>| -> BTreeSet<String> {
+            let (machine, screen) = select(filter);
+            machine
                 .iter()
-                .map(|t| t.name.clone())
-                .chain(machine.iter().map(|(n, _)| n.to_string()))
-                .chain(screen.iter().map(|(n, _, _)| n.to_string()))
+                .map(|n| n.to_string())
+                .chain(screen.iter().map(|(n, _)| n.to_string()))
                 .collect()
         };
         let names = |of: &[&str]| -> BTreeSet<String> { of.iter().map(|n| n.to_string()).collect() };
-        let every: BTreeSet<String> = declared().chain(["shared_one"]).map(String::from).collect();
-        let foreign: BTreeSet<String> = SCREEN_TESTS
-            .iter()
-            .filter(|(_, _, profile)| profile.arch() != toyos_build::ci::GUEST_ARCH)
-            .map(|(n, _, _)| String::from(*n))
-            .collect();
-        if !foreign.contains("virt_el2_drop") {
-            return Err(format!("the premise: virt_el2_drop is a guest no CI lane boots, and {foreign:?} lacks it"));
-        }
+        let every: BTreeSet<String> = declared().map(String::from).collect();
         let cases = [
-            (None, false, every.clone()),
-            (None, true, every.difference(&foreign).cloned().collect()),
-            (Some("virt_el2"), false, names(&["virt_el2_drop"])),
-            (Some("el2_drop"), false, names(&["virt_el2_drop"])),
-            (Some("virt_el2"), true, BTreeSet::new()),
-            (Some("sshd_"), true, names(&["sshd_exec", "sshd_files", "sshd_key_auth"])),
-            (Some("shared_one"), true, names(&["shared_one"])),
+            (None, every),
+            (Some("virt_el2"), names(&["virt_el2_drop"])),
+            (Some("el2_drop"), names(&["virt_el2_drop"])),
+            (Some("nested_nmi"), names(&["nested_nmi_is_loud"])),
+            (Some("no_such_test"), BTreeSet::new()),
         ];
-        for (filter, sharded, want) in cases {
-            let got = taken(filter, sharded);
+        for (filter, want) in cases {
+            let got = taken(filter);
             if got != want {
                 return Err(format!(
-                    "filter {filter:?}, sharded {sharded}: took {:?} it should not and left out {:?}",
+                    "filter {filter:?}: took {:?} it should not and left out {:?}",
                     got.difference(&want).collect::<Vec<_>>(),
                     want.difference(&got).collect::<Vec<_>>()
                 ));
             }
         }
-        let named = |filter: Option<&str>| -> Option<(String, BTreeSet<String>)> {
-            let line = arch_drop_line(&shared, filter)?;
-            let (_, rows) = line.rsplit_once(": ").expect("the line names its rows after a colon");
-            let rows = rows.split(", ").map(String::from).collect();
-            Some((line, rows))
-        };
-        let (line, rows) =
-            named(None).ok_or("a shard that drops the rows of another architecture said nothing")?;
-        if rows != foreign || !line.starts_with(&format!("{} test(s)", foreign.len())) {
-            return Err(format!("a shard dropping {foreign:?} said {line:?}"));
-        }
-        let named_el2 = named(Some("el2_drop")).map(|(_, rows)| rows);
-        if named_el2 != Some(names(&["virt_el2_drop"])) {
-            return Err(format!("filter el2_drop: a shard said {named_el2:?}"));
-        }
-        if let Some((line, _)) = named(Some("sshd_")) {
-            return Err(format!("a filter matching no foreign row still had a shard say {line:?}"));
-        }
         Ok(())
     }
 
-    /// Two rows under one name are refused, whether both are shared-boot rows
-    /// or one is a declared registry's.
+    /// Two rows under one name are refused, whether both are shared-boot names
+    /// or one is a declared registry's or the metal table's.
     #[test]
     fn a_name_registered_twice_is_refused() -> Result<(), String> {
-        let apart = [shared_row("shared_one"), shared_row("shared_two")];
+        let shared = |of: &[&str]| -> Vec<String> { of.iter().map(|n| n.to_string()).collect() };
+        let apart = shared(&["shared_one", "shared_two"]);
         let names = registered(&apart)?;
-        for name in ["shared_one", "shared_two", "virt_el2_drop"] {
+        for name in ["shared_one", "shared_two", "virt_el2_drop", "control_regs"] {
             if !names.contains(name) {
                 return Err(format!("{name} is not among the {} registered names", names.len()));
             }
         }
         for twice in [
-            [shared_row("shared_one"), shared_row("shared_one")],
-            [shared_row("shared_one"), shared_row("virt_el2_drop")],
+            shared(&["shared_one", "shared_one"]),
+            shared(&["shared_one", "virt_el2_drop"]),
+            shared(&["shared_one", "control_regs"]),
         ] {
-            let twice_name = &twice[1].name;
+            let twice_name = &twice[1];
             match registered(&twice) {
                 Err(refusal) if refusal.contains(&format!("{twice_name} is registered twice")) => {}
                 other => {
@@ -764,8 +723,8 @@ mod checks {
     /// The judge a metal registration runs.
     fn metal_judge(name: &str) -> fn(&[&metal::Readback]) -> Result<(), String> {
         match METAL.iter().find(|(row, _)| *row == name) {
-            Some((_, metal::Metal::Runs { judge, .. })) => *judge,
-            _ => panic!("{name} runs no metal judge"),
+            Some((_, metal::Metal { judge, .. })) => *judge,
+            None => panic!("{name} runs no metal judge"),
         }
     }
 

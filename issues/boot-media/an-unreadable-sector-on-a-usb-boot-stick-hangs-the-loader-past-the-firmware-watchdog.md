@@ -58,4 +58,4 @@ this file is deleted.
 `bootloader/src/main.rs`; unheld.
 
 **Its test is deleted**: `86e606616` took `root_chunk_refused_on_a_usb_stick`
-out, and `git revert 86e606616` brings it back.
+out.

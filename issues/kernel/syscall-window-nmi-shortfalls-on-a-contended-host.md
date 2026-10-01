@@ -48,6 +48,4 @@ two read.
 `syscall-window-nmi` actuator, `nmi_gate`'s aiming and counting, the syscall
 count on every dispatch, and the Ring 3 spinner. The nested arm stayed, as
 `nested_nmi_is_loud`, with one NMI sent from the idle loop, and `866532c62`
-deleted the doc it had carried over. `git revert 866532c62 2a4893921 539977050
-4600f6754` brings all three back, with that doc and the two other lines
-`866532c62` deleted.
+deleted the doc it had carried over.

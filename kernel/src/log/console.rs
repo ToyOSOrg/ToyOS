@@ -43,7 +43,7 @@ pub enum Drain {
     /// Nothing else runs yet: no thread exists before `klogd`'s spawn, and no CPU takes a scheduler pass this early.
     Inline,
     /// `klogd`, woken at the commit of the record it will drain.
-    /// Only a commit or a queued line wakes it — no idle loop, no timer — and `i8042_no_spurious_wake` depends on that.
+    /// Only a commit or a queued line wakes it — no idle loop, no timer.
     Thread,
 }
 
@@ -407,12 +407,6 @@ impl RecordSink for Raw {
 }
 
 extern "C" fn body(_arg: u64) -> ! {
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::klogd_fault() {
-        // SAFETY: unsound by design — a staged Ring 0 null read, only on this actuator's boot.
-        // Volatile: a plain read could be optimized to unreachable, leaving nothing to fault.
-        unsafe { core::ptr::read_volatile(core::ptr::null::<u64>()) };
-    }
 
     let parkable = scheduler::Parkable::at_entry();
     let handle = crate::sched::driver::current_handle().expect("klogd runs as a task");
