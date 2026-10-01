@@ -300,12 +300,14 @@ mod checks {
         if faults::report(SPLICED).is_ok() {
             return Err("the recorded splice was read as a whole report".into());
         }
-        // Cut at the middle, which on the first line is behind the prefix the
-        // report is found by, so each cut is judged by the line's own shape.
+        // A burst of another CPU's line with no line end of its own, cut into
+        // the middle of each report line in turn (on the first, behind the
+        // prefix the report is found by): no line moves, so only the cut
+        // line's own shape can refuse it.
         let lines: Vec<&str> = WHOLE.lines().collect();
         for at in 1..=3 {
             let (head, tail) = lines[at].split_at(lines[at].len() / 2);
-            let cut = format!("{head}[kernel 0.386 cpu1] CPU 1: joining scheduler\n{tail}");
+            let cut = format!("{head}[kernel 0.386 cp{tail}");
             let mut spliced = lines.clone();
             spliced[at] = &cut;
             if faults::report(&spliced.join("\n")).is_ok() {
