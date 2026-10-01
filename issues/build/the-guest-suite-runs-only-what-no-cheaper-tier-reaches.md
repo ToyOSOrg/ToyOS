@@ -148,8 +148,10 @@ Host: `toyos-xhci` and its sim. Metal: the T14's controller and stick. Exit: as 
   UNIT READY), ends the run as the stick leaving: never `Rung::Offline`, no second break counted,
   no Reset Device or Address Device sent to a port the reset or the TEST UNIT READY read empty,
   and its slot disabled. Its row arms only `usb-transport-break`, and the T14 cannot pull its own
-  stick. Exit: a `toyos-xhci` sim test per point, red when an empty port climbs the ladder to
-  `Offline` or counts as a break.
+  stick. Exit: a `toyos-xhci` sim test per point, red on each fact alone: when the empty port
+  climbs the ladder to `Offline`, when it counts a second break, when the sim's port is sent a
+  Reset Device or Address Device after it read empty, and when the stick's slot is never
+  disabled.
 - metal `usb_reset_records_the_phase_it_cut`: a machine stopped inside a Bulk-Only command at
   each of `DataOwed`, `Data` and `StatusOwed` resets itself, and the account the next pass reads
   names that phase. Its row arms only `usb-reset-under-load` and reads whichever phase the sweep
@@ -257,7 +259,7 @@ Metal: the stick's `/log`. Exit: as stage A.
 
 ## Stage J: devices, PCI and DMA isolation
 
-Metal: the T14's VT-d. Host: `toyos-pci`, `toyos-pcid`, `toyos-hda`. Exit: as stage A.
+Metal: the T14's VT-d. Host: `toyos-pci`, `toyos-hda`. Exit: as stage A.
 
 - metal `iommu_discovery`, `iommu_context_absent`, `iommu_empty_domain`,
   `iommu_interrupt_remapping`, `iommu_domain_isolation`: the unit is found, and every DMA and
@@ -277,7 +279,7 @@ Metal: the T14's VT-d. Host: `toyos-pci`, `toyos-pcid`, `toyos-hda`. Exit: as st
   refused as `Refusal::NoInterrupt`, by name, before any BAR moves, and the other functions keep
   their vectors. It was `NoInterrupt`'s one reader
   (`issues/kernel/a-claims-own-refusals-are-read-by-nothing.md`). Exit: a host test over
-  `bring_up`'s arming lifted into `toyos-pcid`, red when either arm answers anything else.
+  `bring_up`'s arming, red when either arm answers anything else.
 - host `swap_refused_device_fails`, `swap_moved_device_fails`: a function whose window was lost or
   moved fails the swap by name.
 - host `hda_two_live_refused`: two live HDA links are refused by name.

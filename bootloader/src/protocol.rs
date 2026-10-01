@@ -1,10 +1,10 @@
-//! Every protocol the loader opens, opened here: `clippy.toml` refuses both
-//! `BootServices` openers anywhere else, because the attribute decides whose
-//! driver is stopped. EXCLUSIVE calls `Stop` on every driver holding the
-//! protocol BY_DRIVER (UEFI 2.11 §7.3.9, `OpenProtocol()`), and on
-//! `GraphicsOutput` that is the firmware's graphics console, whose screen the
-//! loader's own lines are on. [`get`] opens GET_PROTOCOL, which stops nothing;
-//! [`exclusive`] opens only a protocol no firmware console drives.
+//! `clippy.toml` refuses both `BootServices` openers anywhere else, because
+//! the attribute decides whose driver is stopped. EXCLUSIVE calls `Stop` on
+//! every driver holding the protocol BY_DRIVER (UEFI 2.11 §7.3.9,
+//! `OpenProtocol()`), and on `GraphicsOutput` that is the firmware's graphics
+//! console, whose screen the loader's own lines are on. [`get`] opens
+//! GET_PROTOCOL, which stops nothing; [`exclusive`] opens only a protocol no
+//! firmware console drives.
 
 use uefi::proto::device_path::DevicePath;
 use uefi::proto::loaded_image::LoadedImage;
