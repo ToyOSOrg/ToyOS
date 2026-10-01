@@ -1,5 +1,5 @@
 ---
-status: open
+status: expected-red
 kind: defect
 opened: 2026-09-06
 ---
@@ -23,3 +23,19 @@ Exit: a rate — the same suite run repeatedly with and without a second
 worktree's build on the host — that says whether this is contention the harness
 should schedule around or a defect the guest has, and the name is
 fixed at the cause.
+
+**2026-10-01: two more, each with its assertion.** `640r3-loaderlines-r3-whole.log`
+(`wt/toyos-loaderlines` `6e0d7da82`, "fastest boot 480 ms … ceilings paid at
+1.00x") at `process_stats.rs:280`: "a child that parked writing a full
+connection charged 0 ns to ipc and 0 ns to pipe". `648-648-whole.log`
+(`wt/toyos-proclife1` `60ec86df3`, load average 84) at `process_stats.rs:263`:
+"a child that parked reading a connection charged 0 ns to ipc and 0 ns to
+pipe". Neither branch touches the test, `WaitClass` or the charge. The
+premise both arms read is `roster::await_true` seeing the child's main thread
+`BLOCKED`, and nothing ties that park to the connection: a park on anything
+else before the child reaches its `read` or `write` satisfies it, the parent
+releases, and the connection's wait never parks. The assertion prints two of
+the five classes, so which park was charged is not on record.
+
+Exit: the arm waits for a park it can name as the connection's, or the
+assertion prints every class and a red names the park; then the row goes.

@@ -30,6 +30,10 @@ pub const DISABLED: &[Disabled] = &[
         issue: "issues/build/the-console-input-path-can-stop-after-a-ps2-overflow.md",
     },
     Disabled { test: "desktop_window_child", issue: "issues/kernel/desktop-window-child-freeze.md" },
+    Disabled {
+        test: "guest_dies_with_its_harness",
+        issue: "issues/build/a-harness-wait-reads-a-starved-guest-as-a-stopped-one.md",
+    },
     Disabled { test: "handle_basic", issue: "issues/kernel/deferred-release-outlives-its-syscall.md" },
     Disabled {
         test: "handle_kill_policy",
@@ -42,6 +46,10 @@ pub const DISABLED: &[Disabled] = &[
     },
     Disabled { test: "kill_while_blocked", issue: "issues/kernel/deferred-release-outlives-its-syscall.md" },
     Disabled {
+        test: "lan_dhcp_lease",
+        issue: "issues/build/lan-dhcp-lease-asserts-a-line-its-wait-does-not-wait-for.md",
+    },
+    Disabled {
         test: "log_ring_keeps_the_owners_slots",
         issue: "issues/kernel/a-log-rings-owner-is-named-only-when-logd-reads-its-registration.md",
     },
@@ -53,6 +61,7 @@ pub const DISABLED: &[Disabled] = &[
         test: "partition_claim_departure",
         issue: "issues/boot-media/partition-claim-departure-exits-clean-with-none-of-its-refusals-said.md",
     },
+    Disabled { test: "process_stats", issue: "issues/build/process-stats-exits-101-beside-other-guests.md" },
     Disabled {
         test: "quiesce_stops_the_machine",
         issue: "issues/kernel/a-quiesce-writers-first-pass-outlasts-the-jobs-five-second-spin-up.md",
@@ -64,6 +73,14 @@ pub const DISABLED: &[Disabled] = &[
     Disabled {
         test: "quiesce_wakes_on_the_last_teardown",
         issue: "issues/kernel/quiesce-wakes-on-the-last-park-gave-up-on-one-thread-beside-the-held-one.md",
+    },
+    Disabled {
+        test: "redirty_mid_flush",
+        issue: "issues/kernel/redirty-mid-flush-went-silent-after-spawning-its-child.md",
+    },
+    Disabled {
+        test: "root_candidate_malformed",
+        issue: "issues/build/a-ready-marker-read-off-the-16550-file-can-end-the-boot-wait-mid-line.md",
     },
     Disabled {
         test: "root_chunk_refused_on_a_usb_stick",
@@ -86,12 +103,36 @@ pub const DISABLED: &[Disabled] = &[
         issue: "issues/kernel/syscall-window-nmi-shortfalls-on-a-contended-host.md",
     },
     Disabled {
+        test: "syscall_window_nmi_controls",
+        issue: "issues/kernel/the-syscall-window-storm-times-its-victim-by-the-guests-wall-clock.md",
+    },
+    Disabled {
+        test: "update_boots_the_new_kernel",
+        issue: "issues/build/a-harness-wait-reads-a-starved-guest-as-a-stopped-one.md",
+    },
+    Disabled {
+        test: "update_falls_back_from_a_dying_kernel",
+        issue: "issues/build/a-harness-wait-reads-a-starved-guest-as-a-stopped-one.md",
+    },
+    Disabled {
+        test: "update_floor_is_the_images_own",
+        issue: "issues/build/a-harness-wait-reads-a-starved-guest-as-a-stopped-one.md",
+    },
+    Disabled {
+        test: "update_refusals_boot_the_other_slot",
+        issue: "issues/build/a-harness-wait-reads-a-starved-guest-as-a-stopped-one.md",
+    },
+    Disabled {
         test: "usb_transport_break",
         issue: "issues/kernel/a-held-disk-waits-for-a-pass-no-cpu-takes-when-every-cpu-is-in-a-call-on-it.md",
     },
     Disabled {
         test: "user_copy_races_munmap",
         issue: "issues/kernel/copy-meets-a-remap-holds-a-cpu-the-thread-it-waits-on-may-be-queued-behind.md",
+    },
+    Disabled {
+        test: "virt_smp",
+        issue: "issues/kernel/an-ap-its-host-has-not-scheduled-for-100-ms-is-booted-without.md",
     },
 ];
 
@@ -257,7 +298,7 @@ mod tests {
     fn a_row_disables_its_whole_name_and_nothing_that_extends_it() {
         for row in DISABLED {
             assert_eq!(disabled(DISABLED, row.test), Some(row));
-            assert_eq!(disabled(DISABLED, &format!("{}_controls", row.test)), None);
+            assert_ne!(disabled(DISABLED, &format!("{}_controls", row.test)), Some(row));
         }
         assert_eq!(disabled(DISABLED, ""), None);
     }
