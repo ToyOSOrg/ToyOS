@@ -2,20 +2,22 @@
 //! to, and what `kernel_main` asks of this architecture at the points where
 //! one differs from another.
 //!
-//! **The entries.** The loader leaves the boot CPU as firmware ran it — at EL2
-//! or EL1, on firmware's identity tables — cleans the kernel image and its own
-//! tables to the point of coherency, and jumps to [`_start`]'s physical
-//! address with `x0 = &KernelArgs`. PSCI starts every other CPU at
-//! [`ap_start`]'s physical address, MMU off, at the level firmware gives an
-//! operating system, with `x0` its [`ApStart`]'s physical address. Each names
-//! a root table and branches to [`apply_declaration`], which writes the
-//! [`control_regs`](super::control_regs) declaration whole: at EL2 it writes
-//! `HCR_EL2` first, halts in a named refusal unless it reads back as declared,
-//! then programs EL1's registers with the MMU already on and drops with
-//! `ERET`; at EL1 it turns the MMU off first, so no translation register
-//! changes under a live walk. Either way the entry resumes at its link address
-//! in the view at `PHYS_OFFSET`, installs the vectors on its own stack, and
-//! calls `kernel_main` or `smp::ap_entry`.
+//! **The entries.** Every CPU arrives at its physical address with the MMU of
+//! the level it runs at off, so nothing firmware left in a translation regime —
+//! its tables, their execute-never attributes, the regime `HCR_EL2.E2H` chose —
+//! is walked under either entry. The loader hands the boot CPU over at the
+//! level firmware ran it, EL2 or EL1, with the kernel image and [`KernelArgs`]
+//! cleaned to the point of coherency, and jumps to [`_start`] with
+//! `x0 = &KernelArgs`. PSCI starts every other CPU at [`ap_start`], at the
+//! level firmware gives an operating system, with `x0` its [`ApStart`]'s
+//! physical address. Each names a root table and branches to
+//! [`apply_declaration`], which writes the [`control_regs`](super::control_regs)
+//! declaration whole: at EL2 it writes `HCR_EL2` first, halts in a named
+//! refusal unless it reads back as declared, then programs EL1's registers with
+//! the MMU already on and drops with `ERET`; at EL1 it programs them and turns
+//! the MMU on. Either way the entry resumes at its link address in the view at
+//! `PHYS_OFFSET`, installs the vectors on its own stack, and calls
+//! `kernel_main` or `smp::ap_entry`.
 
 use core::mem::offset_of;
 
@@ -28,8 +30,8 @@ use crate::drivers::acpi::direct_phys;
 use crate::log;
 use crate::mm::Region;
 
-/// Entry point: the loader jumps here at its physical address, MMU on under
-/// firmware's identity map, with `x0 = &KernelArgs`.
+/// Entry point: the loader jumps here at its physical address with this
+/// level's MMU off, and `x0 = &KernelArgs`.
 /// # Safety
 /// Only the loader may call this, fresh from firmware, with `x0` holding a live [`KernelArgs`].
 #[unsafe(naked)]
@@ -125,10 +127,7 @@ unsafe extern "C" fn apply_declaration() -> ! {
         "b.eq 2f",
         "cmp x21, #1",
         "b.ne 9f",
-        // EL1: translation off, then the declaration, then translation on.
-        "ldr x1, ={sctlr_off}",
-        "msr sctlr_el1, x1",
-        "isb",
+        // EL1: the declaration, then translation on.
         "msr mair_el1, x4",
         "msr tcr_el1, x2",
         "msr ttbr0_el1, x3",
@@ -145,7 +144,8 @@ unsafe extern "C" fn apply_declaration() -> ! {
         "br x22",
         // EL2: `HCR_EL2` first, since with `E2H` set every `_el1` name
         // below is an EL2 register; refused unless it reads back as declared.
-        // Then EL1's registers with the MMU on, EL2's others, and the drop.
+        // EL2's own MMU is off, so the regime `E2H` chooses changes under no
+        // walk. Then EL1's registers with the MMU on, EL2's others, and the drop.
         "2:",
         "ldr x1, ={hcr}",
         "msr hcr_el2, x1",
@@ -194,7 +194,6 @@ unsafe extern "C" fn apply_declaration() -> ! {
         ips = const regs::TCR_IPS_SHIFT,
         mair = const regs::MAIR,
         sctlr = const regs::SCTLR,
-        sctlr_off = const regs::SCTLR_MMU_OFF,
         hcr = const regs::HCR_EL2,
         refuse_hcr = sym refused_hcr_el2_readback,
         cnthctl = const regs::CNTHCTL_EL2,
