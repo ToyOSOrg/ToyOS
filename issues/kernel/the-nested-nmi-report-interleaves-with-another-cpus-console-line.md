@@ -21,7 +21,8 @@ waiting for it, and the machine halts with its report unreadable.
 - PR #671's `guest` check, on its merge onto `59052827f`, run 36863809437, job
   110375742604.
 
-It is green on the dev host under TCG, in a whole-suite run of #670's branch.
+It is green under TCG: on the dev host in a whole-suite run of #670's branch,
+and on a runner in main's nightly `tcg` lane at `06788146b` (job 110374194382).
 
 **Exit:** `nested_nmi_is_loud` is green in CI's KVM `guest` check, and a report
 written while another CPU is writing a record reads whole.
