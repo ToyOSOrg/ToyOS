@@ -25,8 +25,7 @@ const T14_FILE: &[u8] = include_bytes!("../intel-ucode/06-8c-01");
 /// table whose last entry is 0xe0652 with flags 0x94.
 const CC02_FILE: &[u8] = include_bytes!("../intel-ucode/06-cc-02");
 
-/// The T14's i5-1135G7 at the revision its firmware loads. Its platform is
-/// the one platform the file's flags name.
+/// The T14's i5-1135G7 at the revision its firmware loads.
 const T14: Cpu = Cpu {
     signature: Signature(0x0008_06c1),
     platform: PlatformId(7),
@@ -118,7 +117,8 @@ fn an_extended_signature_in_intels_file_names_its_cpu() {
 
 #[test]
 fn the_msrs_are_read_where_the_sdm_puts_them() {
-    assert_eq!(PlatformId::from_msr(7 << 50), PlatformId(7));
+    // `IA32_PLATFORM_ID` as all eight of the T14's CPUs read it.
+    assert_eq!(PlatformId::from_msr(0x001c_0000_0000_0000), PlatformId(7));
     assert_eq!(PlatformId::from_msr(!(7 << 50)), PlatformId(0));
     assert_eq!(Revision::from_sign_id(0xbe << 32 | 0xffff_ffff), Revision(0xbe));
 }
@@ -154,6 +154,10 @@ fn a_malformed_update_after_a_good_one_refuses_the_file() {
     let mut file = T14_FILE.to_vec();
     file.extend_from_slice(&[0; HEADER]);
     assert_eq!(refusal(&file), Refused { at: T14_FILE.len(), why: Refusal::HeaderVersion(0) });
+    for have in 1..HEADER {
+        let why = Refusal::Truncated { need: HEADER, have };
+        assert_eq!(refusal(&file[..T14_FILE.len() + have]), Refused { at: T14_FILE.len(), why });
+    }
 }
 
 #[test]

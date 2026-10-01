@@ -13,10 +13,11 @@
 //! Pure: no I/O, no allocation, no `unsafe`. The caller reads the CPU.
 //!
 //! The file is untrusted, so nothing here may panic on it. The lints below
-//! refuse indexing, slicing, unchecked arithmetic, `unwrap`, `expect` and the
-//! panicking macros; a std method that panics on a length, such as
-//! `split_at`, no lint sees, so a length is taken only by a checked split
-//! whose failure is a [`Refusal`].
+//! refuse indexing, slicing, unchecked arithmetic, `unwrap`, `expect`,
+//! `panic!`, `unreachable!`, `todo!` and `unimplemented!`. No lint sees
+//! `assert!`, a shift, or a std method that panics on a length, such as
+//! `split_at`: a length is taken only by a checked split whose failure is a
+//! [`Refusal`], and no `assert!` or shift takes an operand from the file.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -61,6 +62,7 @@ impl PlatformId {
     }
 
     const fn flag(self) -> u32 {
+        // `self.0` < 8: the field is private and `from_msr` masks it.
         1 << self.0
     }
 }

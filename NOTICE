@@ -382,17 +382,3 @@ toyos-microcode/intel-ucode/* — Intel microcode, redistributable unmodified
     Licence text: licenses/Intel-microcode-license.txt (upstream's `license`,
     sha256 03efb1491c7e899feb2665fa299363e64035e5444c1b8bc1f6ebed30de964e12)
     SPDX-License-Identifier: LicenseRef-Intel-Microcode
-
-Intel's terms permit redistribution in binary form without modification, on
-three conditions, quoted:
-
-> 1.  Redistributions must reproduce the above copyright notice and the
->     following disclaimer in the documentation and/or other materials provided
->     with the distribution.
->
-> 2.  Neither the name of Intel Corporation nor the names of its suppliers may
->     be used to endorse or promote products derived from this software without
->     specific prior written permission.
->
-> 3.  No reverse engineering, decompilation, or disassembly of this software
->     is permitted.

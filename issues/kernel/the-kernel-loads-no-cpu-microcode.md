@@ -17,8 +17,6 @@ current as Linux's.
 `toyos-microcode` validates an Intel update file and picks the update for one
 CPU; nothing calls it. The T14's eight CPUs run 0xbe from its firmware, which
 is Intel's newest for them at `microcode-20260925`, so a load there is a no-op.
-Its `IA32_PLATFORM_ID` is uncaptured: platform 7 is inferred from the one
-platform that file names.
 
 **Where.** The kernel, on every CPU, from a file it embeds per CPU ToyOS
 supports on metal. Not the loader: it runs on the BSP alone, reaching the APs
@@ -38,7 +36,11 @@ it (§12.11.6.1).
 **Verified.** After the trigger the CPU writes 0 to `IA32_BIOS_SIGN_ID`, runs
 CPUID.01H, and panics unless it reads back the update's revision (Example
 12-10). After `boot_aps`, CPUs that report different revisions panic the boot.
-Each CPU logs its platform, the revision it found and the one it runs.
+Each CPU logs its platform, the revision it found and the one it runs. It
+stops rather than run the firmware's revision behind a log line: the file is
+pinned and chosen by the CPU's own signature, platform and revision, so a CPU
+that does not take it means one of those is wrong, a ToyOS defect, and a boot
+that went on would run below the revision its image claims with nothing red.
 
 **AMD.** linux-firmware's `amd-ucode/microcode_amd_fam{17,19,1a}h.bin` is a
 container (magic 0x00414d44): an equivalence table from CPUID.01H:EAX to a
