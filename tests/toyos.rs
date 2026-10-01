@@ -645,6 +645,9 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // One C program through the toolchain's clang, read by the loader's decoder,
     // and one boot to run it.
     ("c_hello", Sched::Parallel),
+    // One C++ program through the same clang and the C++ runtime its sysroot
+    // carries, and one boot.
+    ("cxx_runtime", Sched::Parallel),
     // One boot and one number, with no clock in the verdict: the frames are
     // counted in game tics, whatever the host's speed.
     ("doom_frames", Sched::Parallel),
@@ -1207,6 +1210,9 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // had — its own doc says one break under KVM and two under TCG off the
     // same tree, which is the race timer-anchored, not a margin, describes.
     ("usb_transport_break", Sched::Serial),
+    // The host's unplug has to land inside the port rung's bound, which the
+    // hold spends waiting for it.
+    ("usb_stick_left", Sched::Serial),
     ("xhci_full_speed_device", Sched::Parallel),
     ("xhci_superspeed_ports", Sched::Parallel),
     // `xhci_flap` is the one that genuinely races the host against the guest:
@@ -1861,12 +1867,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
-        // Its own boot: the first WRITE(10) the boot stick takes is abandoned
-        // mid-flight, and what is judged is the one thing QEMU's `usb-storage`
-        // cannot answer — whether a device holding a toggle, a sequence number
-        // and half a command comes back from the class's Reset Recovery on the
-        // machine's own controller.
-        "usb_transport_break",
+        "usb_stick_left",
         metal::Metal::Runs {
             arms: &[metal::once("usbbreak", "tests/jobcase", &["usb-transport-break"], &[])],
             judge: |b| usb::transport_break_on_metal(&b[0].kernel(), &b[0].after_the_reset()?),
@@ -2505,11 +2506,6 @@ const NOT_RUN: &[NotRun] = &[
         why: Why::Declined("AArch64's argument-passing corners, run here on x86-64: its `long double` lines print 0.0, for libc's reason in 22_floating_point"),
     },
     NotRun {
-        case: "83_utf8_in_identifiers",
-        stage: Stage::Built,
-        why: Why::Declined("its identifiers are UTF-8 and so is its `printf` format, and libc's `printf` writes each byte of a format as a character of its own (issues/build/libc-printf-re-encodes-every-non-ascii-byte-of-its-format.md): `привет` arrives as `Ð¿Ñ\u{80}Ð¸Ð²ÐµÑ\u{82}`"),
-    },
-    NotRun {
         case: "95_bitfields",
         stage: Stage::Built,
         why: Why::Declined("its expected layouts are TinyCC's, and TinyCC packs a `#pragma pack(1)` bitfield struct otherwise than GCC and clang do: `TEST 2 - PACKED` is 12 bytes there and 11 here, and every packed test after it differs the same way"),
@@ -2595,24 +2591,14 @@ const NOT_RUN: &[NotRun] = &[
         why: Why::Declined("it gives a symbol a definition and an alias at once, which TinyCC allows and clang refuses"),
     },
     NotRun {
-        case: "124_atomic_counter",
-        stage: Stage::Refused("unknown type name 'uint_least16_t'"),
-        why: Why::Declined("C11 atomics: clang's `stdatomic.h` needs the `least` types `stdint.h` does not define"),
-    },
-    NotRun {
         case: "125_atomic_misc",
-        stage: Stage::Refused("unknown type name 'uint_least16_t'"),
-        why: Why::Declined("C11 atomics, as 124_atomic_counter"),
+        stage: Stage::NoLink("main"),
+        why: Why::Declined("each of its `main`s is behind a `test_*` -D the harness does not pass, so the file preprocesses to no `main`"),
     },
     NotRun {
         case: "128_run_atexit",
         stage: Stage::NoLink("on_exit"),
         why: Why::Declined("`on_exit`, a glibc extension libc does not define, and a -D per configuration to have a main at all"),
-    },
-    NotRun {
-        case: "136_atomic_gcc_style",
-        stage: Stage::Refused("unknown type name 'uint_least16_t'"),
-        why: Why::Declined("C11 atomics, as 124_atomic_counter"),
     },
 ];
 
@@ -10323,6 +10309,7 @@ fn run_machine_test(
         "xhci_slow_connect" => usb::xhci_slow_connect(test_config, c_bins, rust_bins),
         "xhci_portsc_rw1c" => usb::xhci_portsc_rw1c(test_config, c_bins, rust_bins),
         "usb_transport_break" => usb::usb_transport_break(test_config, c_bins, rust_bins),
+        "usb_stick_left" => usb::usb_stick_left(test_config, c_bins, rust_bins),
         "xhci_full_speed_device" => {
             usb::xhci_full_speed_device(test_config, c_bins, rust_bins)
         }
@@ -10408,6 +10395,7 @@ fn run_machine_test(
         "pci_claim_caps_truncated" => faults::claim_caps_truncated(),
         // Body in `tests/common/clang.rs`.
         "c_hello" => common::clang::c_hello(rust_bins),
+        "cxx_runtime" => common::clang::cxx_runtime(rust_bins),
         "doom_frames" => doom_frames(rust_bins),
         "metal_sim_compositor" => {
             metal_sim_compositor(group_boot(held, METAL_SIM_DESKTOP, || {

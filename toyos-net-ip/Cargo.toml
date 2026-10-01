@@ -1,0 +1,10 @@
+[package]
+name = "toyos-net-ip"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "ToyOS's IPv4 host layer, pure: addressing, routing, ARP under one reachability machine, conflict detection, ICMP and the IGMP host."
+publish = false
+
+[dependencies]
+toyos-net-wire = { path = "../toyos-net-wire" }

@@ -1,6 +1,5 @@
 //! SipHash-2-4 (Aumasson and Bernstein, "SipHash: a fast short-input PRF"): the keyed function
-//! behind initial sequence numbers, timestamp offsets and port choice (RFC 6528 §3, RFC 6056
-//! §3.3.4), each with its own key.
+//! behind every value a net crate keeps unpredictable, each purpose with its own key.
 
 pub type Key = [u8; 16];
 
@@ -42,7 +41,6 @@ pub fn siphash24(key: &Key, data: &[u8]) -> u64 {
     v[0] ^ v[1] ^ v[2] ^ v[3]
 }
 
-/// The low 32 bits, which every use here takes.
 pub fn low32(key: &Key, data: &[u8]) -> u32 {
     let [a, b, c, d, ..] = siphash24(key, data).to_le_bytes();
     u32::from_le_bytes([a, b, c, d])

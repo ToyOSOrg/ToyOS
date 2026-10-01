@@ -23,8 +23,14 @@ const REQUIRED: &[Tool] = &[
     Tool { any: &["cc"], why: "rustc links every host binary through it; no guest binary" },
     Tool {
         any: &["cmake"],
-        why: "every build keys the host's LLVM on its `--version`, and rustc's bootstrap \
-              configures LLVM and clang with it; `brew install cmake` on macOS",
+        why: "every build keys the host's LLVM on its `--version`, rustc's bootstrap \
+              configures LLVM and clang with it, and every sysroot build the C++ runtime; \
+              `brew install cmake` on macOS",
+    },
+    Tool {
+        any: &["python3", "python"],
+        why: "rust/x runs rustc's bootstrap, which is Python, and the C++ runtime's CMake \
+              requires a Python 3 and runs it in every sysroot build",
     },
 ];
 
@@ -37,25 +43,16 @@ const REQUIRED: &[Tool] = &[
 /// host has not built that LLVM. Both are host tools like `cc`, and never in a
 /// guest: on macOS from Homebrew, on CI's toolchain runner at the versions
 /// `.github/workflows` pins.
-const ALSO_USED: &[Tool] = &[
-    Tool {
-        any: &["python3", "python", "py", "python2", "uv"],
-        why: "rust/x runs rustc's bootstrap, which is Python — a clean clone and \
-              every toolchain change need one",
-    },
-    Tool {
-        any: &["ninja"],
-        why: "rustc's bootstrap builds LLVM and clang with it, under CMake; `brew install \
-              ninja` on macOS",
-    },
-];
+const ALSO_USED: &[Tool] = &[Tool {
+    any: &["ninja"],
+    why: "rustc's bootstrap builds LLVM and clang with it, under CMake; `brew install \
+          ninja` on macOS",
+}];
 
 /// Where the OS would find `name`, if anywhere.
 ///
 /// A `PATH` scan and not a `--version` run: it is what `Command::new` does
-/// anyway, and one name above must not be executed — asking macOS for `py`
-/// opens the Command Line Tools installer, which is why `rust/x` searches
-/// `python3` ahead of it.
+/// anyway.
 fn executable_on_path(name: &str) -> bool {
     use std::os::unix::fs::PermissionsExt;
     let Some(path) = env::var_os("PATH") else {

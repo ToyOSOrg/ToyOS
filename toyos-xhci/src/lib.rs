@@ -25,6 +25,7 @@ pub mod recovery;
 pub mod reset_recovery;
 pub mod ring;
 pub mod scan;
+pub mod scsi;
 
 pub use job::{Await, Outcome, Outstanding};
 pub use port::{Effect, Gone, Nanos, PortState, Step};

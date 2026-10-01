@@ -2,8 +2,8 @@ pub mod audio;
 /// blockd: the NVMe driver in userland, judged off its disk and the device's
 /// own trace.
 pub mod blockd;
-/// The C toolchain, end to end: a program the toolchain's clang built, judged
-/// as the loader reads it and then run.
+/// The C and C++ toolchain, end to end: a program the toolchain's clang built,
+/// judged as the loader reads it and then run.
 pub mod clang;
 pub mod clock;
 pub mod lane;

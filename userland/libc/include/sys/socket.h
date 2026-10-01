@@ -4,6 +4,10 @@
 #include <stddef.h>
 #include <sys/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef unsigned int socklen_t;
 
 #define AF_UNSPEC 0
@@ -54,5 +58,9 @@ int setsockopt(int fd, int level, int optname, const void *optval, socklen_t opt
 int getsockopt(int fd, int level, int optname, void *optval, socklen_t *optlen);
 int getpeername(int fd, struct sockaddr *addr, socklen_t *addrlen);
 int getsockname(int fd, struct sockaddr *addr, socklen_t *addrlen);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

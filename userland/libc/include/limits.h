@@ -20,6 +20,9 @@
 #define LLONG_MAX  LONG_MAX
 #define ULLONG_MAX ULONG_MAX
 
+/* UTF-8, the encoding of the one locale there is. */
+#define MB_LEN_MAX 4
+
 #define PATH_MAX   4096
 #define NAME_MAX   255
 

@@ -18,7 +18,17 @@ netd runs smoltcp. Its replacement is ToyOS's own stack, built clean-room: reade
 
 The listener defects are this track's: `issues/hardware/a-handshake-nobody-finishes-holds-a-listeners-port-shut.md` and `issues/hardware/a-connect-between-two-accepts-is-reset.md`, on smoltcp until stage 5, and `issues/hardware/an-accept-that-never-reaches-netd-strands-its-listener.md`, in std's accept.
 
-Owed from the wire specification by stages 3–5: ETH-32, whose subnet broadcast needs the subnet `toyos-net-ip` holds; and those whose layer tags are `[ip]`, `[shell]` or `[udp]`: ETH-11, 12, 22–25, 33; ARP-16–18; IP-25, 26, 35; IPP-01–13; ICMP-32–46; IGMP-23–25, 29; UDP-17, 18; and the policy halves of ETH-10, 14, 19, IP-02, 20–23, 29, IPO-15, 16, ICMP-23, 24, 26 and UDP-22.
+Owed from the stage 3 specifications: OUT-07 by stage 4, whose scheduler chooses between a flow's segment and [ip]'s own frames; US-57 by stage 5, whose netd maps UDP's refusals onto the pipe ABI; `dhcp.renew-unroutable` by stage 5, whose netd counts it where `toyos-net-udp` refuses the renewal `udp.no-route`; FRA-01–20 and PMTU-01–06 by IP hardening.
+
+What stage 3 departs from its specifications:
+
+- US-43 expects `ip.not-for-us` for a datagram to an unjoined group in a frame to that group's MAC; the frame filter refuses it first, as `eth.not-for-us` (`wire.md` §3.3, ETH-23). Exit: the scenario names the frame filter.
+- DH-64 expects an announce request from the client on link-up with a lease held; `toyos-net-ip` announces the held address itself on link-up (IP-D6, C-4), so the client asks nothing. Exit: the scenario drops the request, or [ip] stops announcing on its own.
+- `udp-dhcp.md` §U9 (3) lets every datagram a closed socket had accepted leave; `toyos-net-udp` holds at most one socket's queue of them together and refuses the rest `udp.tx-discarded-on-close`, because architecture §3.3 holds nothing without a bound. Exit: the specification bounds them.
+
+What stage 3 does not yet meet:
+
+- Its only oracles are the readers' own: the specifications' scenarios and byte vectors, and the tests' own RFC 1071 sum. No behaviour of `toyos-net-ip`, `toyos-net-udp` or `toyos-dhcp` is checked against anything the readers did not write. Exit: exchanges captured from slirp and the T14 (ARP, DHCP, ICMP, IGMP) replay through them at stage 5 and match.
 
 What `toyos-net-wire` does not yet meet:
 
