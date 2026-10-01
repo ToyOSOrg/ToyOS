@@ -31,3 +31,7 @@ toyos-wallclock = { path = "../toyos-wallclock" }
 toyos-fat32-check = { path = "../toyos-fat32-check" }
 # Test scratch that is gone on every way out; `--ci host` reds on any left behind.
 toyos-tmpdir = { path = "../toyos-tmpdir" }
+# The reader this crate's output is read back by: a third party's FAT
+# implementation, sharing no code with this crate. Already in the lockfile,
+# where the build formats the ESP with it.
+fatfs = "0.3.6"

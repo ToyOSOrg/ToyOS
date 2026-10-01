@@ -1059,6 +1059,7 @@ version = "0.1.0"
 name = "toyos-fat32"
 version = "0.1.0"
 dependencies = [
+ "fatfs",
  "toyos-fat32-check",
  "toyos-tmpdir",
  "toyos-wallclock",

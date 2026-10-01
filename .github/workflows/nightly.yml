@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   host:
-    runs-on: macos-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -35,8 +35,8 @@ jobs:
             toyos/target
             kernel/target
             bootloader/target
-          key: host-${{ github.run_id }}
-          restore-keys: host-
+          key: host-linux-${{ github.run_id }}
+          restore-keys: host-linux-
 
       - run: cargo run -- --ci host
 
@@ -46,7 +46,7 @@ jobs:
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: *host-paths
-          key: host-${{ github.run_id }}
+          key: host-linux-${{ github.run_id }}
 
   # Publishes this tree's toolchain if nobody has, and on main moves the SDK
   # alias onto it. Bare `ubuntu-24.04`, not a container: its glibc is the
