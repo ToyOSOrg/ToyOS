@@ -13,7 +13,6 @@ concurrency:
 # No job here writes: a toolchain release is main's publisher's alone.
 permissions:
   contents: read
-  actions: read
 
 jobs:
   host:
@@ -46,10 +45,12 @@ jobs:
     uses: ./.github/workflows/toolchain.yml
 
   # A required check that is skipped reads as green, so this runs whatever
-  # `toolchain` concluded: a tree no build answers for reds the install.
+  # `toolchain` concluded.
   guest:
     needs: toolchain
     if: ${{ !cancelled() && (github.event_name == 'merge_group' || github.event.pull_request.draft == false) }}
     uses: ./.github/workflows/guest.yml
     with:
       kvm: true
+      sysroot-key: ${{ needs.toolchain.outputs.sysroot-key }}
+      sysroot-path: ${{ needs.toolchain.outputs.sysroot-path }}

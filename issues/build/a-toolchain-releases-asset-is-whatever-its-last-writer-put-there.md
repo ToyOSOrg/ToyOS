@@ -6,11 +6,9 @@ opened: 2026-10-01
 
 # A toolchain release's asset is whatever its last writer put there
 
-CI installs no release. It installs a build whose bytes hash to the digest
-GitHub recorded at upload, made by main's publisher or by a run of a commit its
-tree vouches for (`src/release.rs`). The release that main's publisher puts up
-is what a consumer outside CI installs, and so is the SDK alias that names it.
-The release notes' install steps take the asset as it is served.
+The release that main's publisher puts up is what a consumer outside CI
+installs, and so is the SDK alias that names it. The release notes' install
+steps take the asset as it is served.
 
 A branch's workflows decide their own token's permissions. A workflow on any
 branch of this repository can ask for `contents: write` and then replace that
@@ -21,12 +19,11 @@ their branches' toolchains under the nightly's write token:
 `wt/toyos-castore` published `toolchain-linux-x86_64-688e609acf5a65c4` (run
 36709239346), and `wt/toyos-notiers` published
 `toolchain-linux-x86_64-92f146618d6687d8` (run 36600425263). Every toolchain release is mutable (`immutable:
-false`). `publish.yml` puts main's build back only on main's next push.
+false`).
 
 Owner: the release module (`src/release.rs`).
 
 **Exit**: a consumer outside CI installs only the bytes main's publisher
 recorded, and its install refuses any other bytes by name. That holds when a
 published release can no longer change (with the SDK alias made a new release
-per move, never one moved), or when the release notes' install checks the
-digest that main's publisher's artifact carries.
+per move, never one moved).

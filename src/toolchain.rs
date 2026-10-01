@@ -10,7 +10,7 @@ use crate::buildlock::Scope;
 use crate::sysroot::{self, Sysroot, SYSROOT_SOURCES};
 
 /// Whether the primary's compiler needs a bootstrap. `invalidate_hosted`
-/// separates "the compiler changed" from "the rustup link is missing": only the
+/// separates "the compiler changed" from "its `rustc` does not run": only the
 /// first makes the ToyOS-hosted rustc stale, and rebuilding that one costs
 /// minutes.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -266,10 +266,15 @@ pub(crate) fn assert_std_reads_no_worktree(root: &Path, fork: &Path, dep_info: &
     );
 }
 
-/// What an installed toolchain's sysroot was built from, as its publisher
+/// What an installed toolchain's sysroot was built from, as its install
 /// recorded it (`src/release.rs`).
-fn witness_path(rust_dir: &Path) -> PathBuf {
+pub(crate) fn witness_path(rust_dir: &Path) -> PathBuf {
     rust_dir.join("build/toyos-sysroot-witness")
+}
+
+/// The `TOOLCHAIN` an installed toolchain was installed with (`src/release.rs`).
+pub(crate) fn manifest_path(rust_dir: &Path) -> PathBuf {
+    rust_dir.join("build/TOOLCHAIN")
 }
 
 
@@ -379,11 +384,11 @@ fn cargo_link_stale(stage2: &Path) -> bool {
 /// Put a `cargo` beside the toolchain's `rustc`.
 ///
 /// **A symlink, and what survives the artifact round-trip is this step rather
-/// than the link.** `src/release.rs` excludes it from the tarball for the reason
-/// it excludes `lib/rustlib/<host>`: it names a path only the publishing runner
-/// has, and a copy would put a 32 MB host binary into a 401 MiB artifact to
-/// stand in for a file the consumer can make in a microsecond. `Owner::Installed`
-/// makes it, exactly as it makes the host target.
+/// than the link.** `src/release.rs` excludes it from the tarball: it names a
+/// path only the publishing runner has, and a copy would put a 32 MB host
+/// binary into a 401 MiB artifact to stand in for a file the consumer can make
+/// in a microsecond. `Owner::Installed` makes it, exactly as it makes the host
+/// target.
 pub(crate) fn provision_toolchain_cargo(stage2: &Path) {
     let at = stage2.join("bin/cargo");
     let _ = fs::remove_file(&at);
@@ -482,14 +487,25 @@ fn rebuild_compiler(rust_dir: &Path, llvm: &Path, bootstrap: impl FnOnce()) {
 }
 
 /// What the primary bootstraps: a new compiler when `stage2` is not the one its
-/// `compiler/` names, and the same one again when rustup has no `toyos`
-/// toolchain to run.
-fn bootstrap(current: bool, toolchain_exists: bool) -> Option<Bootstrap> {
+/// fork checkout names, and the same one again when its `rustc` does not run.
+/// A `stage2` that runs and has no rustup link, as one a runner restored, is
+/// linked, not rebuilt.
+fn bootstrap(current: bool, runs: bool) -> Option<Bootstrap> {
     if !current {
         Some(Bootstrap { invalidate_hosted: true })
     } else {
-        (!toolchain_exists).then_some(Bootstrap { invalidate_hosted: false })
+        (!runs).then_some(Bootstrap { invalidate_hosted: false })
     }
+}
+
+/// Whether the `rustc` in `stage2` runs.
+fn runs(stage2: &Path) -> bool {
+    Command::new(stage2.join("bin/rustc"))
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 /// Ensure the toolchain is up to date, and return the sysroot this checkout's
@@ -537,9 +553,9 @@ pub fn ensure(root: &Path, lock: &mut buildlock::Held, hosted_rustc: bool) -> Sy
         }
         Owner::Installed => {
             check_installed_toolchain(root, &rust_dir);
-            let release = rust_dir.join("build/TOOLCHAIN");
+            let release = manifest_path(&rust_dir);
             let release = fs::read_to_string(&release).unwrap_or_else(|e| {
-                panic!("{}: {e}; an installed toolchain carries the TOOLCHAIN it was published with", release.display())
+                panic!("{}: {e}; an installed toolchain carries the TOOLCHAIN it was installed with", release.display())
             });
             return Sysroot::installed(stage2(&rust_dir), &release);
         }
@@ -550,17 +566,7 @@ pub fn ensure(root: &Path, lock: &mut buildlock::Held, hosted_rustc: bool) -> Sy
     lock.act_if(
         Scope::Global,
         "build the rust toolchain",
-        || {
-            let current = crate::compiler::primary_is_current(&rust_dir);
-            let toolchain_exists = Command::new("rustup")
-                .args(["run", "toyos", "rustc", "--version"])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
-            bootstrap(current, toolchain_exists)
-        },
+        || bootstrap(crate::compiler::primary_is_current(&rust_dir), runs(&stage2(&rust_dir))),
         |kind| {
             eprintln!("Building full toolchain (this takes a while on first run)...");
             let llvm = crate::llvm::resolve(root, &rust_dir, &rust_dir);
@@ -611,11 +617,6 @@ pub fn ensure(root: &Path, lock: &mut buildlock::Held, hosted_rustc: bool) -> Sy
 
 /// Everything a checkout may do with a toolchain it did not build: check that
 /// it is the one this tree needs, and say what to do when it is not.
-///
-/// No amount of source here can rebuild a sysroot without `rust/`, so there is
-/// nothing to decide and the answer is always the toolchain built from these
-/// sources: the one the release tag names, which hashes every source and every
-/// module it is built from (`src/release.rs`).
 fn check_installed_toolchain(root: &Path, rust_dir: &Path) {
     let stage2 = stage2(rust_dir);
     let linked = rustup_link();
@@ -648,8 +649,8 @@ fn check_installed_toolchain(root: &Path, rust_dir: &Path) {
         recorded.as_deref() == Some(want.as_str()),
         "this checkout and the installed toolchain at {} disagree about {}, so a build \
          here would link its kernel against another tree's struct layouts.\n\
-         Install the build this tree's release tag names; if that is the one installed, \
-         the tag hashes less than the toolchain is built from (`src/release.rs`).",
+         A runner installs the sysroot its job restored by this tree's key; if that is the one \
+         installed, the key reads less than the sysroot is built from (`src/sysroot.rs`).",
         stage2.display(),
         differing_trees(recorded.as_deref(), &want),
     );
@@ -718,7 +719,9 @@ pub(crate) fn x_build_compiler(rust_dir: &Path, args: &[&str], what: &str, llvm:
 }
 
 /// [`x_build`], with bootstrap's environment what `environment` makes of this
-/// process's.
+/// process's, less GitHub Actions' `GITHUB_ACTIONS` and `CI`: bootstrap takes
+/// `HEAD^1` as the upstream commit whose artifacts to fetch when it sees them,
+/// and in this fork that is our own merge, which rust-lang's CI never built.
 pub(crate) fn x_build_with(
     rust_dir: &Path,
     args: &[&str],
@@ -735,6 +738,7 @@ pub(crate) fn x_build_with(
     let x = if rust_dir.join("x").exists() { "./x" } else { "./x.py" };
     let mut command = Command::new(x);
     environment(&mut command);
+    command.env_remove("GITHUB_ACTIONS").env_remove("CI");
     let mut child = command
         .args(args)
         .env("BOOTSTRAP_SKIP_TARGET_SANITY", "1")
@@ -906,7 +910,8 @@ fn build_hosted_rustc(rust_dir: &Path, llvm: &Path) {
     }
 }
 
-/// `bootstrap.toml` for the host-only toolchain, or with the ToyOS-hosted rustc.
+/// `bootstrap.toml` for the host-only toolchain, every compiler's
+/// (`compiler::config_text`), or with the ToyOS-hosted rustc.
 ///
 /// `lld = true` is what puts `rust-lld` in every stage's sysroot, where rustc
 /// finds the linker every guest target names. The hosted rustc's build cannot
@@ -926,27 +931,18 @@ fn build_hosted_rustc(rust_dir: &Path, llvm: &Path) {
 /// The host-only toolchain builds no guest target's libraries: every sysroot
 /// builds its own (`src/sysroot.rs`).
 fn write_config(rust_dir: &Path, host: &str, with_hosted_rustc: bool, llvm: &Path) {
-    let host_line = if with_hosted_rustc {
-        format!("host = [\"{host}\", \"{}\"]", HOSTED_ARCH.userland())
-    } else {
-        format!("host = [\"{host}\"]")
-    };
-    let (guests, userland) = if with_hosted_rustc {
-        (GUEST_TARGETS.map(GuestTarget::triple).to_vec(), hosted_targets(llvm))
-    } else {
-        (Vec::new(), String::new())
-    };
-    let targets = std::iter::once(host)
-        .chain(guests)
-        .map(|t| format!("\"{t}\""))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let config = format!(
-        r#"change-id = "ignore"
+    let config = if with_hosted_rustc {
+        let targets = std::iter::once(host)
+            .chain(GUEST_TARGETS.map(GuestTarget::triple))
+            .map(|t| format!("\"{t}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            r#"change-id = "ignore"
 profile = "compiler"
 
 [build]
-{host_line}
+host = ["{host}", "{hosted}"]
 target = [{targets}]
 
 [llvm]
@@ -954,7 +950,7 @@ target = [{targets}]
 
 [rust]
 incremental = true
-lld = {lld}
+lld = false
 {LEAN}
 
 [target.{host}]
@@ -962,10 +958,14 @@ lld = {lld}
 {external}
 
 {userland}"#,
-        llvm = crate::clang::LLVM_CONFIG,
-        external = crate::llvm::host_lines(llvm),
-        lld = !with_hosted_rustc,
-    );
+            hosted = HOSTED_ARCH.userland(),
+            llvm = crate::clang::LLVM_CONFIG,
+            external = crate::llvm::host_lines(llvm),
+            userland = hosted_targets(llvm),
+        )
+    } else {
+        crate::compiler::config_text(&rust_dir.join("build"), host, llvm)
+    };
     fs::write(rust_dir.join("bootstrap.toml"), config).unwrap();
 }
 
@@ -1242,7 +1242,39 @@ mod tests {
                 llvm.display()
             );
             assert!(config.contains(&host), "{config}");
+            if !hosted {
+                let keyed = crate::compiler::config_text(&rust_dir.join("build"), "h", &llvm);
+                assert_eq!(config, keyed, "the primary's compiler is built under a configuration its key does not read");
+            }
         }
+    }
+
+    /// **Bootstrap never sees GitHub Actions' variables**, whatever its
+    /// caller's environment: it takes `HEAD^1`'s artifacts when it does. `./x`
+    /// here is this test binary, running [`a_fake_bootstrap_that_reads_ci`].
+    #[test]
+    fn a_bootstrap_run_sees_no_ci_variables() {
+        let fork = TempDir::new("x-build-ci");
+        fs::create_dir_all(fork.join("library")).unwrap();
+        for lock in ["Cargo.lock", "library/Cargo.lock"] {
+            fs::write(fork.join(lock), "# as committed\n").unwrap();
+        }
+        fs::write(fork.join(FAKE), "").unwrap();
+        std::os::unix::fs::symlink(std::env::current_exe().unwrap(), fork.join("x")).unwrap();
+        let args = ["--exact", "toolchain::tests::a_fake_bootstrap_that_reads_ci", "--include-ignored", "--nocapture"];
+        let (ok, log) = x_build_with(&fork, &args, "a fake bootstrap", |command| {
+            command.env("GITHUB_ACTIONS", "true").env("CI", "true");
+        });
+        assert!(ok, "the fake bootstrap did not run: {log:?}");
+        assert!(log.iter().any(|l| l == "GITHUB_ACTIONS none, CI none"), "{log:?}");
+    }
+
+    #[test]
+    #[ignore = "the bootstrap `a_bootstrap_run_sees_no_ci_variables` runs; never runs on its own"]
+    fn a_fake_bootstrap_that_reads_ci() {
+        assert!(Path::new(FAKE).is_file(), "a_fake_bootstrap_that_reads_ci ran outside a fake fork checkout; it is not a test");
+        let read = |name| std::env::var(name).unwrap_or_else(|_| "none".to_string());
+        println!("GITHUB_ACTIONS {}, CI {}", read("GITHUB_ACTIONS"), read("CI"));
     }
 
     /// **A bootstrap leaves the primary nothing that waits on another
@@ -1398,17 +1430,30 @@ mod tests {
     fn the_primary_bootstraps_when_stale_or_missing() {
         let new = Some(Bootstrap { invalidate_hosted: true });
         let again = Some(Bootstrap { invalidate_hosted: false });
-        for (current, toolchain_exists, want) in [
+        for (current, runs, want) in [
             (true, true, None),
             (true, false, again),
             (false, true, new),
             (false, false, new),
         ] {
-            assert_eq!(
-                bootstrap(current, toolchain_exists),
-                want,
-                "current {current}, toolchain_exists {toolchain_exists}"
-            );
+            assert_eq!(bootstrap(current, runs), want, "current {current}, runs {runs}");
+        }
+    }
+
+    /// **What decides a rebuild of a current `stage2` is whether its `rustc`
+    /// runs**, not whether rustup names it: one a runner restored has no
+    /// rustup link and is linked, not built again.
+    #[test]
+    fn a_compiler_s_rustc_runs_or_it_is_built_again() {
+        let stage2 = TempDir::new("runs");
+        let rustc = stage2.join("bin/rustc");
+        assert!(!runs(&stage2), "a stage2 with no rustc ran");
+        fs::create_dir_all(rustc.parent().unwrap()).unwrap();
+        // This test binary refuses `--version`; the host's rustc answers it.
+        for (what, ran) in [(std::env::current_exe().unwrap(), false), (host_sysroot().join("bin/rustc"), true)] {
+            let _ = fs::remove_file(&rustc);
+            std::os::unix::fs::symlink(&what, &rustc).unwrap();
+            assert_eq!(runs(&stage2), ran, "{}", what.display());
         }
     }
 

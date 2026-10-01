@@ -44,7 +44,7 @@ const TOOLS: [&str; 3] = ["llvm-ar", "clang", "ld.lld"];
 const APPLE_STRIP: &str = "rust-objcopy";
 
 /// [`TOOLS`], and on an Apple host [`APPLE_STRIP`].
-fn tools() -> impl Iterator<Item = &'static str> {
+pub(crate) fn tools() -> impl Iterator<Item = &'static str> {
     TOOLS.into_iter().chain(host_triple().ends_with("apple-darwin").then_some(APPLE_STRIP))
 }
 

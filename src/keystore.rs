@@ -3,6 +3,13 @@
 //! that removes a key no registered worktree records and nobody is making or
 //! using.
 //!
+//! **A key hashes exactly what its product's build reads**: its sources, the
+//! configuration its build is given, the tools that run that build and the keys
+//! of the products it reads; and it is known before the product is. So a
+//! product found under its key, made here or restored by a CI runner from
+//! another run's cache, is the one this tree's build would make. An input a
+//! build reads and its key does not is a defect of the key.
+//!
 //! A product lives at `<store>/<key>/`, whole once its maker renamed it there;
 //! any other name beginning `<key>.` is one half-made or half-removed. A whole
 //! one is renamed out of the way before anything in it is removed ([`retire`]),

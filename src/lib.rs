@@ -115,6 +115,21 @@ pub fn ensure_submodules(repo_dir: &Path) {
     }
 }
 
+/// `rust/` at the commit this tree pins and with no history, where a CI
+/// runner's checkout has none: what reading the fork's sources and building
+/// the toolchain from them need.
+pub fn ensure_shallow_fork(root: &Path) -> Result<(), String> {
+    if root.join("rust/x.py").exists() {
+        return Ok(());
+    }
+    let status = Command::new("git")
+        .args(["submodule", "update", "--init", "--depth", "1", "rust"])
+        .current_dir(root)
+        .status()
+        .map_err(|e| format!("git submodule update --init --depth 1 rust: {e}"))?;
+    status.success().then_some(()).ok_or_else(|| format!("git submodule update --init --depth 1 rust exited {status}"))
+}
+
 /// Ensure a single git submodule is checked out.
 pub fn ensure_submodule(repo_dir: &Path, path: &str) {
     let dir = repo_dir.join(path);

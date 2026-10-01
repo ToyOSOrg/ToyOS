@@ -2,17 +2,17 @@
 //! primary's, or one of its own, content-addressed.
 //!
 //! **Every worktree builds with the compiler its own fork checkout names.** The
-//! primary's `stage2` is built from what the primary's `rust/compiler/` holds,
-//! and [`record`] writes which that is. A linked worktree whose fork checkout
-//! holds the same `compiler/` ([`source`]) compiles with that one. One whose
-//! `compiler/` differs — a new target spec, a codegen change — gets its own:
-//! built by bootstrap in its own fork checkout, under that checkout's
+//! primary's `stage2` is built from what the primary's fork checkout holds, and
+//! [`record`] writes which that is ([`source`]). A linked worktree whose fork
+//! checkout names the same compiler compiles with that one. One whose compiler
+//! sources differ — a new target spec, a codegen change — gets its own: built
+//! by bootstrap in its own fork checkout, under that checkout's
 //! `build/toyos-compiler/`, and placed at `rust/build/compilers/<key>/`, where
 //! the key ([`key`]) is the identity (`src/identity.rs`) of the checkout's
-//! `compiler/`, `src/tools/`, `src/stage0` and `Cargo.lock`, the key of the
-//! LLVM it links, which names `src/bootstrap`, and [`RECIPE`]. Nothing writes
-//! that directory after its [`SOURCE`] file exists, and two worktrees naming
-//! the same compiler share one copy.
+//! [`KEYED`] sources, the key of the LLVM it links, which names
+//! `src/bootstrap`, and the build itself ([`build_text`]). Nothing writes that
+//! directory after its [`SOURCE`] file exists, and two worktrees naming the
+//! same compiler share one copy.
 //!
 //! **LLVM is the host's, built from `src/llvm-project`** (`src/llvm.rs`), and
 //! linked through its `llvm-config`. [`source`] names that LLVM's key, so
@@ -51,12 +51,22 @@ use crate::keystore::{self, Key};
 use crate::sysroot::{clone_tree, git_bytes, git_out, short, tree_identity, Links};
 use crate::toolchain::{self, host_triple};
 
-/// What changes how a key's sources become a compiler and is none of them: the
-/// build below. Moving it moves every key.
+/// What changes how a key's sources become a compiler and is neither them nor
+/// [`config_text`]: the build below. Moving it moves every key.
 const RECIPE: &str = "bootstrap stage 2 of compiler/rustc and library, profile compiler, host only, with rust-lld, host linker pinned, LLVM, clang and LLD from the host's LLVM, no LLVM tool copied, rustc without debuginfo; 6";
 
 /// What a compiler's key is the identity of, in its fork checkout.
 const KEYED: [&str; 4] = ["compiler", "src/tools", "src/stage0", "Cargo.lock"];
+
+/// What a compiler build is beyond its sources, as every key and record of one
+/// reads it: [`RECIPE`], the configuration bootstrap is given ([`config_text`])
+/// with no path of this host in it, and the tools `clang::provision` puts beside
+/// the compiler.
+fn build_text() -> String {
+    let config = config_text(Path::new("<build-dir>"), &host_triple(), Path::new("<llvm>"));
+    let provisioned: Vec<&str> = crate::clang::tools().collect();
+    format!("{RECIPE}\n{config}provisioned {}", provisioned.join(" "))
+}
 
 /// The submodule a compiler is built against by commit: its LLVM, which
 /// bootstrap builds from that commit, so its content is never read.
@@ -112,6 +122,20 @@ impl Compiler {
             .map_or(0, |d| d.as_nanos());
         format!("{} {} {} {mtime}", source.trim(), driver.file_name().to_string_lossy(), meta.len())
     }
+
+    /// What a store built with this compiler is keyed by: its record, which
+    /// names what builds it and is known before it is built ([`primary_key`]).
+    pub fn key(&self) -> Key {
+        Key::of(&fs::read(&self.record).unwrap_or_else(|e| {
+            panic!("{} cannot be read ({e}), so nothing says which compiler a store is built with", self.record.display())
+        }))
+    }
+}
+
+/// [`Compiler::key`] of the primary's compiler `rust_dir`'s sources name,
+/// whether or not it is built.
+pub(crate) fn primary_key(rust_dir: &Path) -> Key {
+    Key::of(source(rust_dir).as_bytes())
 }
 
 /// The primary's record of which `compiler/` its `stage2` was built from.
@@ -124,23 +148,25 @@ pub fn compilers_dir(rust_dir: &Path) -> PathBuf {
     rust_dir.join("build/compilers")
 }
 
-/// [`compiler_source`] and the key of the LLVM it links.
+/// What `checkout`'s compiler is built from, as the primary records it: the
+/// build ([`build_text`]), [`compiler_source`], and the key of the LLVM it links.
 pub fn source(checkout: &Path) -> String {
     source_with(checkout, &crate::llvm::key(checkout))
 }
 
 /// [`source`], with the key of the LLVM `checkout` names.
 fn source_with(checkout: &Path, llvm: &Key) -> String {
-    format!("{} llvm {llvm}", compiler_source(checkout))
+    format!("{}\n{} llvm {llvm}", build_text(), compiler_source(checkout))
 }
 
-/// What `checkout`'s `compiler/` is: its commit's tree, and whatever the working
-/// tree changes in it — an edit, or a file git does not track yet, which is
-/// what a new target spec is before its commit.
+/// What `checkout`'s [`KEYED`] sources are: each one's entry at its commit, and
+/// whatever the working tree changes in them — an edit, or a file git does not
+/// track yet, which is what a new target spec is before its commit.
 fn compiler_source(checkout: &Path) -> String {
-    let tree = git_out(checkout, &["rev-parse", "HEAD:compiler"]);
-    let mut local = git_bytes(checkout, &["diff", "HEAD", "--", "compiler"]);
-    let untracked = git_bytes(checkout, &["ls-files", "-z", "--others", "--exclude-standard", "--", "compiler"]);
+    let in_keyed = |args: &[&'static str]| [args, &KEYED[..]].concat();
+    let tree = git_out(checkout, &in_keyed(&["ls-tree", "HEAD", "--"]));
+    let mut local = git_bytes(checkout, &in_keyed(&["diff", "HEAD", "--"]));
+    let untracked = git_bytes(checkout, &in_keyed(&["ls-files", "-z", "--others", "--exclude-standard", "--"]));
     for name in untracked.split(|b| *b == 0).filter(|n| !n.is_empty()) {
         let path = checkout.join(String::from_utf8_lossy(name).as_ref());
         local.extend_from_slice(name);
@@ -175,8 +201,8 @@ pub fn forget(rust_dir: &Path) {
     }
 }
 
-/// Whether the primary's `stage2` is the compiler `checkout`'s `compiler/`
-/// names — `Err` when nothing records which compiler that is.
+/// Whether the primary's `stage2` is the compiler `checkout` names — `Err` when
+/// nothing records which compiler that is.
 ///
 /// **The source's content, never its files' times**: a checkout that rewrites a
 /// file with the bytes it had is no new compiler.
@@ -185,8 +211,8 @@ fn primary_is(rust_dir: &Path, checkout: &Path, llvm: &Key) -> Result<bool, std:
     Ok(fs::read_to_string(primary_record(rust_dir))?.trim() == names)
 }
 
-/// Whether the primary's `stage2` is built from what its own `rust/compiler/`
-/// holds: false until a bootstrap has finished and [`record`]ed it.
+/// Whether the primary's `stage2` is the compiler its own fork checkout names:
+/// false until a bootstrap has finished and [`record`]ed it.
 pub fn primary_is_current(rust_dir: &Path) -> bool {
     match primary_is(rust_dir, rust_dir, &crate::llvm::key(rust_dir)) {
         Ok(current) => current,
@@ -195,14 +221,19 @@ pub fn primary_is_current(rust_dir: &Path) -> bool {
     }
 }
 
-/// The key of the compiler `fork`'s sources name: their content.
+/// The key of the compiler `fork`'s sources name: their content, and the build.
 pub fn key(fork: &Path) -> Key {
     key_with(fork, &crate::llvm::key(fork))
 }
 
 /// [`key`], with the key of the LLVM `fork` names.
 fn key_with(fork: &Path, llvm: &Key) -> Key {
-    let parts = [RECIPE, &tree_identity(fork, &KEYED, Links::Skipped), llvm.as_str()];
+    key_of(fork, &build_text(), llvm)
+}
+
+/// [`key`], with the build it reads.
+fn key_of(fork: &Path, build: &str, llvm: &Key) -> Key {
+    let parts = [build, &tree_identity(fork, &KEYED, Links::Skipped), llvm.as_str()];
     Key::of(parts.join("\n\0\n").as_bytes())
 }
 
@@ -341,10 +372,10 @@ fn build_in_fork(root: &Path, rust_dir: &Path, fork: &Path) -> PathBuf {
     stage2
 }
 
-/// Bootstrap's configuration for a compiler of a worktree's own: the primary's
-/// `profile` and options, for the host alone, since every guest target's
-/// libraries are the sysroot's to build, linking the LLVM at `llvm`.
-fn config_text(build_dir: &Path, host: &str, llvm: &Path) -> String {
+/// Bootstrap's configuration for every compiler, the primary's and a
+/// worktree's own, built in `build_dir`: for the host alone, since every guest
+/// target's libraries are the sysroot's to build, linking the LLVM at `llvm`.
+pub(crate) fn config_text(build_dir: &Path, host: &str, llvm: &Path) -> String {
     format!(
         r#"change-id = "ignore"
 profile = "compiler"
@@ -770,6 +801,46 @@ pub(crate) mod tests {
         assert!(said.contains("stages"), "{said}");
         git(&fork, &["commit", "-qm", "another LLVM"]);
         assert_ne!(key(&fork), tools, "another LLVM commit did not move the key");
+    }
+
+    /// **The primary's record and every compiler's key read the whole build**:
+    /// the configuration bootstrap is given and the tools put beside the
+    /// compiler are in both, and another configuration is another key; the
+    /// record names every source of [`KEYED`], as the key does. What
+    /// [`record`] writes is the key a store is filed under before the
+    /// compiler is built ([`primary_key`]).
+    #[test]
+    fn a_compiler_is_keyed_and_recorded_by_its_whole_build() {
+        let scratch = TempDir::new("compiler-build");
+        let (_primary, rust_dir, [same, _, _]) = estate(&scratch);
+        let fork = same.join("rust");
+        let llvm = crate::llvm::key(&fork);
+        assert_eq!(key_of(&fork, &build_text(), &llvm), key(&fork));
+        let config = config_text(Path::new("<build-dir>"), &host_triple(), Path::new("<llvm>"));
+        let tools: Vec<&str> = crate::clang::tools().collect();
+        for part in [config.as_str(), toolchain::LEAN, toolchain::HOST_LINKER_PIN, &tools.join(" ")] {
+            assert!(build_text().contains(part), "a compiler's key reads no {part:?}");
+            assert!(source(&fork).contains(part), "the primary's record names no {part:?}");
+        }
+        let more = build_text().replace("debuginfo-level-rustc = 0", "debuginfo-level-rustc = 1");
+        assert_ne!(key_of(&fork, &more, &llvm), key(&fork), "another configuration kept the key");
+
+        let sources = [
+            ("src/tools/lld-wrapper/src/main.rs", "fn main() {}\n"),
+            ("src/stage0", "compiler_version=nightly\n"),
+            ("Cargo.lock", "# relocked\n"),
+        ];
+        for (file, text) in sources {
+            let before = source(&fork);
+            write(&fork.join(file), text);
+            assert_ne!(source(&fork), before, "{file} kept the primary's record");
+            git(&fork, &["add", "-A"]);
+            git(&fork, &["commit", "-qm", file]);
+            assert_ne!(source(&fork), before, "{file}, committed, kept the primary's record");
+        }
+
+        record(&rust_dir);
+        assert_eq!(Compiler::primary(&rust_dir).key(), primary_key(&rust_dir));
     }
 
     /// **A compiler of a worktree's own is built as the primary's is**: for

@@ -158,7 +158,8 @@ struct HostTools {
     cc: PathBuf,
     cxx: PathBuf,
     /// The C and C++ compilers and CMake, each by its resolved path and all its
-    /// `--version` says, and on macOS the SDK path and version `xcrun` resolves.
+    /// `--version` says, n2 by the pin it is installed from, and on macOS the
+    /// SDK path and version `xcrun` resolves.
     identity: String,
 }
 
@@ -176,6 +177,7 @@ fn tools_with(xcrun: impl Fn(&str) -> String) -> HostTools {
         let mut version = Command::new(tool);
         identity += &format!("{}\n{}", tool.display(), asked(version.arg("--version")));
     }
+    identity += &format!("n2 {}\n", crate::n2::N2.join(" "));
     if host_triple().ends_with("apple-darwin") {
         for question in ["--show-sdk-path", "--show-sdk-version"] {
             identity += &xcrun(question);
@@ -240,7 +242,7 @@ fn tools() -> impl Iterator<Item = &'static str> {
 }
 
 /// Why `dir` is not a finished LLVM, if it is not.
-fn defect(dir: &Path) -> Option<String> {
+pub(crate) fn defect(dir: &Path) -> Option<String> {
     if !dir.join(SOURCE).is_file() {
         return Some(format!("{} carries no {SOURCE}", dir.display()));
     }
@@ -758,7 +760,7 @@ mod tests {
 
     /// **The tools the key names are the host's**: the C and C++ compilers the
     /// configuration names by path, and CMake, each by the file it resolves to
-    /// and what its `--version` says; on macOS, the SDK.
+    /// and what its `--version` says; n2 by its pin; on macOS, the SDK.
     #[test]
     fn the_key_names_the_host_s_tools() {
         let tools = host_tools();
@@ -769,6 +771,7 @@ mod tests {
             assert!(lines[at + 1].chars().any(|c| c.is_ascii_digit()), "{} said no version: {}", tool.display(), tools.identity);
         }
         assert!(lines.iter().any(|l| l.starts_with("cmake version")), "{}", tools.identity);
+        assert!(lines.contains(&format!("n2 {}", crate::n2::N2.join(" ")).as_str()), "no n2: {}", tools.identity);
         if host_triple().ends_with("apple-darwin") {
             assert!(lines.iter().any(|l| l.ends_with(".sdk") && Path::new(l).is_dir()), "no SDK: {}", tools.identity);
         }

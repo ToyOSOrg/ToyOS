@@ -8,14 +8,12 @@ on:
     - cron: '0 3 * * *'
   workflow_dispatch:
 
-# Never cancelled: `toolchain` may be an hour into a bootstrap.
 concurrency:
   group: nightly-${{ github.ref }}
   cancel-in-progress: false
 
 permissions:
   contents: read
-  actions: read
 
 jobs:
   host:
@@ -53,13 +51,33 @@ jobs:
   toolchain:
     uses: ./.github/workflows/toolchain.yml
 
+  release:
+    needs: toolchain
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ needs.toolchain.outputs.sysroot-path }}
+          key: ${{ needs.toolchain.outputs.sysroot-key }}
+          fail-on-cache-miss: true
+
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: cargo run -- --ci release
+
   tcg:
     needs: toolchain
     if: ${{ !cancelled() }}
     uses: ./.github/workflows/guest.yml
     with:
       kvm: false
-      save-cache: ${{ github.ref == 'refs/heads/main' }}
+      sysroot-key: ${{ needs.toolchain.outputs.sysroot-key }}
+      sysroot-path: ${{ needs.toolchain.outputs.sysroot-path }}
 
   # `cargo run -- --build-only` from a fresh machine. `sid` as it stands,
   # image and archive both, and no cache — a fresh machine is the premise.
