@@ -16,8 +16,7 @@ reads whether the cleaner child wrote `cleaner-done` within a flat 700 ms
   the lock held only if an unheld clean would have finished in 700 ms, which
   this run does not measure.
 
-Not seen red. Found in the review of PR #668, whose concurrent test runner
-would have run it beside other test executables; that runner did not land.
+Not seen red.
 
 **Exit condition**: the unlocked arm waits on `cleaner-done` under a ceiling
 that fails loudly, and the locked arm reads an order of events (the clean

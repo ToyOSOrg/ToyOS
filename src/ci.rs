@@ -297,8 +297,6 @@ pub(crate) const CONTROLS: &[Control] = &[
         must_red: false,
         verdicts: &[Passes("preempted_producer_strands_suffix")],
     },
-    // A double panic aborts before the harness prints a `FAILED` line, so the
-    // verdict is the first panic's own message.
     red(SCHED_LOOM, "doorbell-kick-relaxed", Some("loom_sleep"), &[Says {
         test: "a_halted_cpu_with_queued_work_was_kicked",
         message: "halted with 2 of 2 messages queued and no IPI in flight",
@@ -409,6 +407,11 @@ pub(crate) const CONTROLS: &[Control] = &[
 
 /// Whether a control's run showed its teeth.
 fn judge_control(control: &Control, exited_green: bool, log: &str) -> Result<String, String> {
+    if log.lines().any(|l| l == "running 0 tests") {
+        return Err("the run selected no test: no name its verdicts give is a test of its target, \
+                    so `CONTROLS` drifted from the model"
+            .into());
+    }
     if control.must_red && exited_green {
         return Err(format!("passed with `{}`: the model has no teeth", control.feature));
     }
@@ -470,10 +473,8 @@ fn host(root: &Path) -> Vec<Step> {
     std::env::set_var("TMPDIR", tmp.path());
     let host_triple = crate::toolchain::host_triple();
     let mut steps = vec![
-        // `--no-fail-fast`: a red in the build system's tests leaves the checks run.
-        step("the build system and the harness's own checks", || {
-            cargo(root, &["test", "--no-fail-fast", "--lib", "--test", "toyos-checks"])
-        }),
+        step("the build system", || cargo(root, &["test", "--lib"])),
+        step("the harness's own checks", || cargo(root, &["test", "--test", "toyos-checks"])),
         step("the host workspace", || {
             cargo(root, &["test", "--workspace", "--exclude", "toyos-build"])
         }),
@@ -862,24 +863,51 @@ mod tests {
         assert!(parse(&[]).is_err());
     }
 
-    /// Teeth for the controls' judge: a green negative control, a control that
-    /// never reached its verdict, and a self-catching case that failed are all
-    /// red.
+    /// Teeth for the controls' judge, on libtest's text as a control's run
+    /// prints it: a green negative control, a verdict line absent or saying the
+    /// opposite, a filter that selected nothing, and a self-catching case that
+    /// failed are all red.
     #[test]
     fn a_control_is_judged_by_its_verdict_and_not_its_exit_alone() {
-        let must_red = &CONTROLS[0];
-        let verdict = must_red.verdicts[0].line();
-        assert!(judge_control(must_red, false, &format!("test {verdict}\n")).is_ok());
-        assert!(judge_control(must_red, true, &verdict).unwrap_err().contains("no teeth"));
-        assert!(judge_control(must_red, false, "error[E0425]: cannot find value")
-            .unwrap_err()
-            .contains("proved nothing"));
+        let control =
+            |feature: &str| CONTROLS.iter().find(|c| c.feature == feature).expect(feature);
 
-        let catches = CONTROLS.iter().find(|c| !c.must_red).expect("a self-catching case");
-        let verdict = catches.verdicts[0].line();
-        assert!(judge_control(catches, true, &verdict).is_ok());
-        assert!(judge_control(catches, false, &verdict).is_err());
+        let two = control("serial-try-lock-then-some");
+        let both = "running 2 tests\n\
+                    test a_lost_try_lock_leaves_the_lock_held ... FAILED\n\
+                    test two_writers_never_overlap ... FAILED\n";
+        assert!(judge_control(two, false, both).is_ok());
+        assert!(judge_control(two, true, both).unwrap_err().contains("no teeth"));
+        let one = "running 2 tests\n\
+                   test a_lost_try_lock_leaves_the_lock_held ... FAILED\n\
+                   test two_writers_never_overlap ... ok\n";
+        assert!(judge_control(two, false, one).unwrap_err().contains("proved nothing"));
+        let none = "running 0 tests\n\n\
+                    test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; \
+                    finished in 0.00s\n";
+        assert!(judge_control(two, true, none).unwrap_err().contains("selected no test"));
+
+        let says = control("doorbell-kick-relaxed");
+        let panicked = "running 1 test\n\n\
+                        thread 'a_halted_cpu_with_queued_work_was_kicked' (77012) panicked at \
+                        toyos-sched/loom/tests/loom_sleep.rs:102:13:\n\
+                        halted with 2 of 2 messages queued and no IPI in flight — a sleep-through\n";
+        assert!(judge_control(says, false, panicked).is_ok());
+
+        let catches = control("no-preempt-guard");
+        let caught = "running 1 test\ntest preempted_producer_strands_suffix ... ok\n";
+        assert!(judge_control(catches, true, caught).is_ok());
+        assert!(judge_control(catches, false, caught).is_err());
         assert!(judge_control(catches, true, "").is_err());
+
+        for c in CONTROLS {
+            let judged = judge_control(c, !c.must_red, "error[E0425]: cannot find value");
+            assert!(
+                matches!(&judged, Err(why) if why.contains("proved nothing")),
+                "{}: {judged:?}",
+                c.feature
+            );
+        }
     }
 
     #[test]
