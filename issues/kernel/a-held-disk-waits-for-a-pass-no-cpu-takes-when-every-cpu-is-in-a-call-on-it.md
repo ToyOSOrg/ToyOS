@@ -84,11 +84,7 @@ also that change's.
 before #536, `log_flush_retry` with them; `git show 84471bc58:tests/common/usb.rs`
 holds #536's adaptation of the test.
 
-**#588 does not hold this.** It keeps the test red, rewrites
-`kernel/src/drivers/xhci/wait/msc.rs`, which these actuators reach, and adds
-`usb-reset-moves-after` and `usb-reset-moves-configured`, which only this test
-arms. Whichever of #588 and #639 lands second resolves `tests/common/usb.rs` as
-the deletion, accounts for every hunk of the other side in its merge message,
-deletes the actuators only this test arms, #588's two among them, and records
-here the commit whose tree holds #588's version of the test: the second parent
-of that merge where #588 landed first, the first where #639 did.
+**`4f2bea143` holds #588's version of the test**, the second parent of #639's
+merge of `main` after #588 landed: `git show 4f2bea143:tests/common/usb.rs`.
+`usb_stick_left` arms `usb-transport-break`, `usb-reset-moves`,
+`usb-reset-moves-after` and `usb-reset-moves-configured`, so they stay.

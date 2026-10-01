@@ -1,6 +1,10 @@
 #ifndef _SIGNAL_H
 #define _SIGNAL_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define SIGHUP    1
 #define SIGINT    2
 #define SIGQUIT   3
@@ -89,5 +93,9 @@ int kill(int pid, int sig);
 #define REG_RCX     14
 #define REG_RSP     15
 #define REG_RIP     16
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

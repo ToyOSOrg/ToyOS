@@ -10,6 +10,7 @@ use alloc::vec::Vec;
 use core::net::Ipv4Addr;
 use core::time::Duration;
 
+use toyos_net_wire::addr::is_host;
 use toyos_net_wire::icmp::UnreachableCode;
 use toyos_net_wire::tcp::{Control, EstablishedOptions, RawWindow, TcpBuilder, TcpSegment};
 use toyos_net_wire::Port;
@@ -169,10 +170,6 @@ pub struct Tcp {
     port_table: [u16; 16],
     log: Log,
     scratch: Vec<u8>,
-}
-
-fn unicast(addr: Ipv4Addr) -> bool {
-    !(addr.is_unspecified() || addr.is_broadcast() || addr.is_multicast() || addr.octets()[0] >= 240)
 }
 
 fn slot<T>(slots: &mut [Slot<T>], index: u32, generation: u32) -> Option<&mut T> {
@@ -557,7 +554,7 @@ impl Tcp {
 
     /// An active open from `local` (chosen by [ip]'s route lookup), from `port` or an ephemeral one.
     pub fn connect(&mut self, now: Instant, local: Ipv4Addr, port: Option<Port>, remote: Endpoint) -> Result<ConnId, Error> {
-        if !unicast(remote.addr) {
+        if !is_host(remote.addr) {
             return Err(Error::InvalidRemote);
         }
         let port = match port {

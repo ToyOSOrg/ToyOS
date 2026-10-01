@@ -526,6 +526,9 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // One C program through the toolchain's clang, read by the loader's decoder,
     // and one boot to run it.
     ("c_hello", Sched::Parallel),
+    // One C++ program through the same clang and the C++ runtime its sysroot
+    // carries, and one boot.
+    ("cxx_runtime", Sched::Parallel),
     // One boot and one number, with no clock in the verdict: the frames are
     // counted in game tics, whatever the host's speed.
     ("doom_frames", Sched::Parallel),
@@ -984,6 +987,9 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     ("xhci_deaf_registers", Sched::Parallel),
     ("xhci_slow_connect", Sched::Parallel),
     ("xhci_portsc_rw1c", Sched::Parallel),
+    // The host's unplug has to land inside the port rung's bound, which the
+    // hold spends waiting for it.
+    ("usb_stick_left", Sched::Serial),
     ("xhci_superspeed_ports", Sched::Parallel),
     // `xhci_flap` is the one that genuinely races the host against the guest:
     // its two QMP writes have to land inside *one* 100 ms debounce or the state
@@ -1024,6 +1030,11 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     ("root_named_twice_on_the_boot_disk", Sched::Serial),
     ("root_named_twice", Sched::Serial),
     ("log_partition_identity", Sched::Parallel),
+    // A claim slot's vector posts its watch from the handler: raised on a CPU
+    // holding preemption off, inside a post of that watch, inside a completion
+    // into a ring polling it or inside that ring's own watch, it posts once
+    // that section lets go and before any pass. One boot; the verdict is counts.
+    ("handler_post_without_a_pass", Sched::Parallel),
     // A sibling's store staged between a thread's TLS block being placed and
     // its rebase (`tls-rebase-window`): the block is never reachable there.
     ("tls_rebase_window", Sched::Parallel),
@@ -1522,6 +1533,13 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal::Runs {
             arms: &[metal::once("usbload", "tests/jobcase", &["usb-reset-under-load"], &[])],
             judge: |b| power::usb_load_chain(&b[0].after_the_reset()?),
+        },
+    ),
+    (
+        "usb_stick_left",
+        metal::Metal::Runs {
+            arms: &[metal::once("usbbreak", "tests/jobcase", &["usb-transport-break"], &[])],
+            judge: |b| usb::transport_break_on_metal(&b[0].kernel(), &b[0].after_the_reset()?),
         },
     ),
     (
@@ -2086,11 +2104,6 @@ const NOT_RUN: &[NotRun] = &[
         why: Why::Declined("AArch64's argument-passing corners, run here on x86-64: its `long double` lines print 0.0, for libc's reason in 22_floating_point"),
     },
     NotRun {
-        case: "83_utf8_in_identifiers",
-        stage: Stage::Built,
-        why: Why::Declined("its identifiers are UTF-8 and so is its `printf` format, and libc's `printf` writes each byte of a format as a character of its own (issues/build/libc-printf-re-encodes-every-non-ascii-byte-of-its-format.md): `привет` arrives as `Ð¿Ñ\u{80}Ð¸Ð²ÐµÑ\u{82}`"),
-    },
-    NotRun {
         case: "95_bitfields",
         stage: Stage::Built,
         why: Why::Declined("its expected layouts are TinyCC's, and TinyCC packs a `#pragma pack(1)` bitfield struct otherwise than GCC and clang do: `TEST 2 - PACKED` is 12 bytes there and 11 here, and every packed test after it differs the same way"),
@@ -2176,24 +2189,14 @@ const NOT_RUN: &[NotRun] = &[
         why: Why::Declined("it gives a symbol a definition and an alias at once, which TinyCC allows and clang refuses"),
     },
     NotRun {
-        case: "124_atomic_counter",
-        stage: Stage::Refused("unknown type name 'uint_least16_t'"),
-        why: Why::Declined("C11 atomics: clang's `stdatomic.h` needs the `least` types `stdint.h` does not define"),
-    },
-    NotRun {
         case: "125_atomic_misc",
-        stage: Stage::Refused("unknown type name 'uint_least16_t'"),
-        why: Why::Declined("C11 atomics, as 124_atomic_counter"),
+        stage: Stage::NoLink("main"),
+        why: Why::Declined("each of its `main`s is behind a `test_*` -D the harness does not pass, so the file preprocesses to no `main`"),
     },
     NotRun {
         case: "128_run_atexit",
         stage: Stage::NoLink("on_exit"),
         why: Why::Declined("`on_exit`, a glibc extension libc does not define, and a -D per configuration to have a main at all"),
-    },
-    NotRun {
-        case: "136_atomic_gcc_style",
-        stage: Stage::Refused("unknown type name 'uint_least16_t'"),
-        why: Why::Declined("C11 atomics, as 124_atomic_counter"),
     },
 ];
 
@@ -8167,6 +8170,7 @@ fn run_machine_test(
         "xhci_deaf_registers" => usb::xhci_deaf_registers(test_config, c_bins, rust_bins),
         "xhci_slow_connect" => usb::xhci_slow_connect(test_config, c_bins, rust_bins),
         "xhci_portsc_rw1c" => usb::xhci_portsc_rw1c(test_config, c_bins, rust_bins),
+        "usb_stick_left" => usb::usb_stick_left(test_config, c_bins, rust_bins),
         "xhci_superspeed_ports" => usb::xhci_superspeed_ports(test_config, c_bins, rust_bins),
         "xhci_flap" => usb::xhci_flap(test_config, c_bins, rust_bins),
         // Body in `tests/common/iommu.rs`, same reason.
@@ -8236,6 +8240,7 @@ fn run_machine_test(
         "pci_claim_caps_truncated" => faults::claim_caps_truncated(),
         // Body in `tests/common/clang.rs`.
         "c_hello" => common::clang::c_hello(rust_bins),
+        "cxx_runtime" => common::clang::cxx_runtime(rust_bins),
         "doom_frames" => doom_frames(rust_bins),
         "metal_sim_compositor" => {
             metal_sim_compositor(group_boot(held, METAL_SIM_DESKTOP, || {
@@ -9865,6 +9870,19 @@ fn run_machine_test(
         "pci_inventory" => {
             let qemu = QemuInstance::boot(test_config, c_bins, rust_bins);
             pci_inventory(qemu.boot_log())
+        }
+        "handler_post_without_a_pass" => {
+            let mut qemu = QemuInstance::boot_with_options(
+                test_config,
+                c_bins,
+                rust_bins,
+                BootOptions { kernel_params: &["handler-post"], ..Default::default() },
+            );
+            let mut log = qemu.boot_log().to_string();
+            if !log.lines().any(handler_post_said) {
+                log += &qemu.drain_until(Duration::from_secs(30), handler_post_said);
+            }
+            handler_post(&log)
         }
         "input_merge" => {
             // The check runs in the kernel and panics on mismatch, so a
@@ -11845,6 +11863,26 @@ fn sysret_ss(log: &str) -> Result<(), String> {
         }
         eprintln!("  [sysret-ss] the switch reloads SS from null before a sysretq can see it");
         Ok(())
+}
+
+use toyos_sched::watch::handler_post::{Verdict as HandlerPost, SAID as HANDLER_POST_SAID};
+
+fn handler_post_said(line: &str) -> bool {
+    line.contains(HANDLER_POST_SAID)
+}
+
+/// Every hold was posted into by the handler of the vector raised inside it.
+fn handler_post(log: &str) -> Result<(), String> {
+    let Some(said) = log.lines().find(|line| handler_post_said(line)) else {
+        return Err(format!("`handler-post` never said its verdict:\n{log}"));
+    };
+    if !said.contains(&HandlerPost::GREEN.to_string()) {
+        return Err(format!(
+            "a hold lapsed with no handler's post in it — the wake waited for a pass:\n{said}\n{log}"
+        ));
+    }
+    eprintln!("  [handler-post] {}", said.trim());
+    Ok(())
 }
 
 /// The input core merged what it was handed.

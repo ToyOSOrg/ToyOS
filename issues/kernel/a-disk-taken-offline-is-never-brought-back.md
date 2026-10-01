@@ -21,7 +21,7 @@ Two ways a disk that could still be served is lost today:
   training SuperSpeed on the other half, so it left port 1 and arrived on port
   13. `toyos_xhci::identity` now holds such a disk for `RETURN_WINDOW` and
   gives its number back to a device that proves the same identity; QEMU
-  judges it (`usb_transport_break`'s moved boots), the T14 has not yet.
+  judges it (`usb_transport_break`'s moved boots).
 - **Offline is for the connection's life.** Nothing asks an offline device
   again, however long it stays plugged in.
 

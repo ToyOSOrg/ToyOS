@@ -3,8 +3,11 @@
 
 #include <stddef.h>
 #include <stdarg.h>
+#include <bits/types/FILE.h>
 
-typedef struct _FILE FILE;
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 extern FILE *stdin;
 extern FILE *stdout;
@@ -26,6 +29,8 @@ int vprintf(const char *fmt, va_list ap);
 int vfprintf(FILE *stream, const char *fmt, va_list ap);
 int vsprintf(char *str, const char *fmt, va_list ap);
 int vsnprintf(char *str, size_t size, const char *fmt, va_list ap);
+int asprintf(char **strp, const char *fmt, ...);
+int vasprintf(char **strp, const char *fmt, va_list ap);
 int sscanf(const char *str, const char *fmt, ...);
 
 FILE *fopen(const char *path, const char *mode);
@@ -58,5 +63,9 @@ int rename(const char *oldpath, const char *newpath);
 FILE *tmpfile(void);
 
 void perror(const char *s);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

@@ -13,7 +13,7 @@ use crate::fair::{FairShare, ShareState, QUANTUM_NS};
 use crate::hw::{CpuId, Nanos};
 use crate::mailbox::MailboxNode;
 use crate::msg::Msg;
-use crate::sync::{Arc, AtomicBool, AtomicU64, LeafLock, Ordering};
+use crate::sync::{Arc, AtomicBool, AtomicU64, CellLock, Ordering};
 use crate::park::CommittedTicket;
 
 /// Monotonic, never reused. Stale messages keyed by `TaskKey` are provably
@@ -31,8 +31,8 @@ pub trait SchedPayload: Sized + Send + 'static {
 
     /// The cell the per-process [`FairShare`] lives in. Supplied by the
     /// environment because the core crate may not implement a lock itself
-    /// (see [`LeafLock`]).
-    type ShareLock: LeafLock<ShareState> + Send;
+    /// (see [`CellLock`]).
+    type ShareLock: CellLock<ShareState> + Send;
 }
 
 /// Shorthand for the share type a payload implies.

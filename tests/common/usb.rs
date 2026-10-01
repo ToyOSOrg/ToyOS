@@ -1173,6 +1173,218 @@ const INHERITED: &str =
     "link already trained before this kernel ran; warm resetting it before its device is asked \
      anything";
 
+/// Where `reset_moves` holds the port rung for the host to unplug the stick.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Held {
+    /// `usb-reset-moves`, before the reset's completion is read: the reset
+    /// reads the port empty.
+    BeforeItsCompletion,
+    /// `usb-reset-moves-after`, once the completion has been read with the
+    /// stick on the port, as a USB2 port reads a device that leaves under its
+    /// reset: the rung's next step fails on the empty port.
+    AfterItsCompletion,
+    /// `usb-reset-moves-configured`, once the rung has configured the stick
+    /// again: its TEST UNIT READY breaks on the empty port.
+    BeforeItsTestUnitReady,
+}
+
+/// The gate's data stick, owed a WRITE's data by the staged break, leaves its
+/// port inside the port rung the break entered and is not plugged back: the
+/// rung ends as the stick leaving. No rung takes it offline, no second break is
+/// counted, and its port's teardown gives the slot back.
+///
+/// **QEMU cannot take a device off its port on a reset**, so `reset_moves`
+/// holds the rung once, at the place [`Held`] names, until the port reads
+/// empty, and the host unplugs the stick on the cue the hold writes.
+pub fn usb_stick_left(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Result<(), String> {
+    for held in [Held::BeforeItsCompletion, Held::AfterItsCompletion, Held::BeforeItsTestUnitReady] {
+        a_stick_that_left_under_its_rung(test_config, c_bins, rust_bins, held)?;
+    }
+    Ok(())
+}
+
+fn a_stick_that_left_under_its_rung(
+    test_config: &Path,
+    c_bins: &[(String, Vec<u8>)],
+    rust_bins: &[(String, Vec<u8>)],
+    held: Held,
+) -> Result<(), String> {
+    const MOVE_NOW: &str = "usb-reset-moves: move the device now";
+    let (params, hold, ended): (&'static [&'static str], &str, &str) = match held {
+        Held::BeforeItsCompletion => (
+            &["usb-storage-gate", "usb-transport-break", "usb-reset-moves"],
+            "is held empty for the host to move its device (usb-reset-moves)",
+            "the port reset was not answered",
+        ),
+        Held::AfterItsCompletion => (
+            &["usb-storage-gate", "usb-transport-break", "usb-reset-moves-after"],
+            "is held, reset with its device on it, for the host to move the device \
+             (usb-reset-moves-after)",
+            "the port reset was not answered",
+        ),
+        Held::BeforeItsTestUnitReady => (
+            &["usb-storage-gate", "usb-transport-break", "usb-reset-moves-configured"],
+            "is held, configured again, for the host to move the device \
+             (usb-reset-moves-configured)",
+            "transport broke on the port reset's TEST UNIT READY: the port disconnected during \
+             the command phase",
+        ),
+    };
+    let (bytes, _) = Profile::UsbDisk.usb_disk().expect("UsbDisk declares a disk");
+    let image = test_dir().join(format!("usb-stick-left-{held:?}.img"));
+    stage(&image, bytes);
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        c_bins,
+        rust_bins,
+        BootOptions {
+            profile: Profile::UsbDisk,
+            qmp: true,
+            kernel_params: params,
+            usb_images: vec![image.clone()],
+            // The hold is inside the boot's USB gate, before any ready marker.
+            ready_marker: toyos_build::bootlog::LOADER_LAST_LINE,
+            ..Default::default()
+        },
+    );
+    let mut log = qemu.boot_log().to_string();
+    // On the cue the staging writes to the console itself: the record above it
+    // waits for `klogd`, which may not run while the rung holds its CPU.
+    log.push_str(&qemu.drain_until(Duration::from_secs(60), |l| l.contains(MOVE_NOW)));
+    if !log.contains(MOVE_NOW) {
+        return Err(format!("{held:?}: the port rung was never held for the host\n{log}"));
+    }
+    let mut devices = qemu::QmpDevices::open(qemu.qmp_socket());
+    devices.del(&qemu::usb_device_id(0));
+    drop(devices);
+    // Whichever way the rung ended, a slot goes back after the hold: the
+    // teardown's, or the last rung's.
+    qemu::await_guest(&mut qemu, &mut log, "the boot to complete and a slot to go back", |c| {
+        c.contains("Boot: complete")
+            && c.split_once(hold).is_some_and(|(_, after)| {
+                after.lines().any(|l| l.contains("xHCI: slot ") && l.ends_with(" disabled"))
+            })
+    })
+    .map_err(|why| format!("{held:?}: {why}\n{log}"))?;
+    drop(qemu);
+    let _ = std::fs::remove_file(&image);
+
+    let kernel = serial::Serial::named(&format!("{held:?} boot console"), log.as_str());
+    let staged = kernel.must_say(
+        "transport broke on SCSI 0x2a: a staged break skipped the data phase wait; break 1 of ",
+    )?;
+    let under_test = broke_on(staged)?;
+    let entered = kernel.must_say_after(
+        staged,
+        &format!("usb-storage: {under_test} is owed the data of the command that broke"),
+    )?;
+    let held_there = kernel.must_say_after(entered, hold)?;
+    let port = held_there
+        .split_once(&format!("xHCI: {under_test} port "))
+        .and_then(|(_, rest)| rest.split_once(' '))
+        .map(|(port, _)| port)
+        .ok_or_else(|| format!("{held:?}: {held_there:?} holds no port of {under_test}\n{log}"))?;
+    let left = kernel.must_say_after(
+        held_there,
+        &format!(
+            "usb-storage: {under_test} {ended}, and port {port} no longer holds the device (PORTSC "
+        ),
+    )?;
+    // Nothing is sent to the empty port once the reset is read: the reset
+    // that read it so ends the rung, and so does the TEST UNIT READY that
+    // met it.
+    if held != Held::AfterItsCompletion {
+        let (_, from_the_hold) = log.split_once(held_there).expect("the line came from this text");
+        let (between, _) = from_the_hold.split_once(left).expect("the leave follows the hold");
+        for sent in ["Reset Device failed", "Address Device (after the port reset)"] {
+            if let Some(line) = between.lines().find(|l| l.contains(sent)) {
+                return Err(format!("{held:?}: {line:?} between the hold and the leave\n{log}"));
+            }
+        }
+    }
+    let slot = under_test.rsplit(' ').next().expect("a slot id ends the name");
+    let gone_back = kernel.must_say_after(left, &format!("xHCI: slot {slot} disabled"))?;
+    kernel.must_not_say(&format!("usb-storage: {under_test} is offline"))?;
+    if let Some(line) = log
+        .lines()
+        .find(|l| l.contains(&format!("usb-storage: {under_test} ")) && l.contains(" break 2 of "))
+    {
+        return Err(format!("{held:?}: {line:?}: the stick leaving was counted as a break\n{log}"));
+    }
+    kernel.must_be_clean()?;
+    eprintln!("  [usb] {held:?}: {left}");
+    eprintln!("  [usb] {held:?}: {gone_back}");
+    Ok(())
+}
+
+/// The staged break on a real stick: the transfer abandoned on the boot stick's
+/// first WRITE(10) is recovered, the write completes, the disk keeps its
+/// number, and the boot goes on to the deliberate reboot that ends its chain.
+pub fn transport_break_on_metal(
+    kernel: &serial::Serial,
+    after: &serial::Serial,
+) -> Result<(), String> {
+    transport_break_recovered(kernel)?;
+    super::power::done_chain(after)
+}
+
+/// The kernel log's half of [`transport_break_on_metal`].
+///
+/// **The ladder enters at the port reset**: the break leaves the stick owed a
+/// WRITE's data, across which no class reset may be asked. The stick decides
+/// the rest. It answers the rung's TEST UNIT READY on its port, and the write
+/// goes out again there; or it leaves its port under the reset — a SuperSpeed
+/// stick enumerated on the USB2 half of its receptacle trains on the USB3 half
+/// — is held, comes back as the same device, and the write goes out again on
+/// it. **Either way no rung takes it offline.**
+pub fn transport_break_recovered(kernel: &serial::Serial) -> Result<(), String> {
+    let staged = kernel.must_say(
+        "transport broke on SCSI 0x2a: a staged break skipped the data phase wait; break 1 of ",
+    )?;
+    let under_test = broke_on(staged)?;
+    let entered = kernel.must_say_after(
+        staged,
+        &format!("usb-storage: {under_test} is owed the data of the command that broke"),
+    )?;
+    kernel.must_not_say(&format!("usb-storage: {under_test} is offline"))?;
+    if let Ok(left) = kernel.must_say_after(entered, " after this driver reset it; it is held ") {
+        let back = kernel.must_say_after(left, " as the same device (USB ")?;
+        kernel.must_say_after(
+            back,
+            "is back, and the operation it was asked went out again on it: it completed",
+        )?;
+        eprintln!("  [usb] {left}");
+        eprintln!("  [usb] {back}");
+        return Ok(());
+    }
+    let took = kernel.must_say_after(entered, &format!("usb-storage: {under_test} the port reset took"))?;
+    kernel.must_say_after(took, &format!("usb-storage: {under_test} SCSI 0x2a completed after "))?;
+    eprintln!("  [usb] {took}");
+    Ok(())
+}
+
+/// Which device a `usb-storage: <bdf> slot <n> transport broke …` line is about.
+///
+/// **Refused rather than widened if the line stops naming one.** A count of
+/// broken transports is evidence about a disk, and a machine that boots off USB
+/// always has at least two: the answer to "how many times did *this* disk's
+/// transport break" is not recoverable from a line that does not say which disk
+/// it was, and matching every disk's line instead is how this test came to red
+/// on a boot stick's own clean recovery.
+fn broke_on(line: &str) -> Result<&str, String> {
+    line.split_once("usb-storage: ")
+        .and_then(|(_, rest)| rest.split_once(" transport broke"))
+        .map(|(who, _)| who)
+        .ok_or_else(|| {
+            format!("{line:?} does not name the device whose transport broke, so nothing can \
+                    count that device's breaks apart from another's")
+        })
+}
+
 /// A SuperSpeed port is not reset into existence, and the driver knows which
 /// ports are which because it read the controller's own description of itself.
 ///

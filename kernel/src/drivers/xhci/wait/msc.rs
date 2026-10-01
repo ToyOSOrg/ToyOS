@@ -5,10 +5,7 @@
 //! Everything here comes off the wire and is checked, never trusted; refusal
 //! is by name, never a panic.
 
-//! CBW/CSW use [`crate::mm::Unaligned`] (USB BOT §5.1/§5.2 raw bytes) with no
-//! concurrent access to race.
-
-use crate::mm::{Dma, Unaligned};
+use crate::mm::Dma;
 
 use crate::block::{BlockError, BlockResult};
 use crate::log;
@@ -18,29 +15,33 @@ use super::{Control, Quiet, Restart};
 use super::super::{log_unrecoverable, Completion, Disk, StorageGeometry, Trb};
 use super::super::{look_for, ports_wanted, with_disk_by, Whereabouts};
 use super::super::{TrbRing, XhciController, PAGE, TRB_ADDRESS_DEVICE, TRB_CONFIGURE_EP, TRB_RESET_DEVICE};
-use super::super::{stop, CC_SUCCESS, CC_STALL, CC_SHORT_PACKET, TRB_NORMAL, OFF_INPUT_CTX};
+use super::super::{stop, TRB_NORMAL, OFF_INPUT_CTX};
 use super::super::{AFTER_BREAK, CC_CONTEXT_STATE_ERROR, EP0_DCI};
 use super::super::{MSC_IN_RING, MSC_OUT_RING, MSC_CBW, MSC_CSW, MSC_SCRATCH, MSC_SCRATCH_LEN};
 use super::super::MSC_INPUT_CTX;
 use super::super::{MSC_DATA, MSC_DATA_LEN, MSC_MAX_BLOCKS, MSC_STRIDE};
 use super::super::device::Endpoint;
-use toyos_xhci::bot::Phase;
+use toyos_xhci::bot::{self, Bot, Phase, RoundTrip, CBW_LEN, CSW_LEN};
 use toyos_xhci::call::{AfterBreak, NotIssued};
 use toyos_xhci::configure::{self, BulkEndpoint};
 use toyos_xhci::flush::Debt;
 use toyos_xhci::identity::{self, Identity, Serial, UsbId};
-use toyos_xhci::ladder::{self, AfterReset, Left, PortStep, Rung};
+use toyos_xhci::job::CC_SUCCESS;
+use toyos_xhci::ladder::{self, AfterReset, AfterRung, Left, PortStep, Run, Rung};
 use toyos_xhci::port;
 use toyos_xhci::reset_recovery::{self, Answered, GaveUp, Look, Pipe, Quiescing, SlotGoes, Step};
+use toyos_xhci::scsi::{self, BringUp, Cdb, Fail, Flushed, Geometry, Heard, Moved, Printable, Reply};
+use toyos_xhci::scsi::{Refusal, Sense, Transfer, HOST_BLOCK};
 
 /// A region, not an address: the CBW's length is the region's own size, so
 /// no command can name a length its destination lacks.
 type DataPhase = Option<Dma<'static>>;
 
+/// Why a round trip broke, with this driver's reason for a silence.
+type Broke = bot::Broke<Quiet>;
 
-/// The block size everything above this driver is written in; a device
-/// whose sizes don't divide it is unimplemented, not approximated.
-const HOST_BLOCK: u32 = 4096;
+/// How a rung ended when it did not verify; a rung that did is `Ok(())`.
+type Unverified = ladder::Unverified<Quiet>;
 
 /// Wall-clock budget on bring-up's ready attempts: bounds when [`bring_up`]
 /// stops *starting* attempts, not the one already running.
@@ -51,17 +52,7 @@ const READY_BUDGET: Budget = Budget::of(
 
 /// The most breaks a device's transport gets in a row before the device is
 /// offline: one per rung of `toyos_xhci::ladder`.
-///
-/// **Per device, not per command**: the run it bounds is the device's, however
-/// many callers and operations it is spread over, and only a completed round
-/// trip ends it.
 pub(in crate::drivers::xhci) const MAX_TRANSPORT_BREAKS: u8 = ladder::MOST_BREAKS;
-
-const CBW_SIGNATURE: u32 = 0x4342_5355;
-const CSW_SIGNATURE: u32 = 0x5342_5355;
-const CBW_LEN: u32 = 31;
-const CSW_LEN: u32 = 13;
-const TEST_UNIT_READY: [u8; 6] = [0x00; 6];
 
 /// What the configuration descriptor said about a mass-storage interface;
 /// both endpoints, always, each valid because `Endpoint` only comes from
@@ -99,13 +90,9 @@ pub struct MscDevice {
     in_ring: TrbRing,
     out_ring: TrbRing,
     tag: u32,
-    logical_block_bytes: u32,
-    sectors_per_block: u32,
-    blocks: u64,
-    /// Transport breaks in a row, each answered with one rung of the ladder,
-    /// and the highest rung among them; a completed round trip clears both.
-    breaks: u8,
-    climbed: Option<Rung>,
+    /// Zero until bring-up reads the disk's size.
+    geometry: Geometry,
+    run: Run,
     /// Set once the device was taken offline; the device is not spoken to again.
     failed: bool,
     /// Where [`XhciController::take_offline`] said the slot goes, until
@@ -195,8 +182,8 @@ impl MscDevice {
 
     pub fn geometry(&self) -> StorageGeometry {
         StorageGeometry {
-            logical_block_bytes: self.logical_block_bytes,
-            blocks: self.blocks,
+            logical_block_bytes: self.geometry.sector_bytes(),
+            blocks: self.geometry.blocks(),
         }
     }
 
@@ -238,16 +225,6 @@ impl MscDevice {
     }
 }
 
-/// How one Bulk-Only round trip ended; `delivered` never exceeds the
-/// transfer it describes.
-enum Bot {
-    /// CSW status 0; `delivered` is the smaller of what the controller moved
-    /// and the device says it didn't — else stale data from an earlier LBA leaks.
-    Done { delivered: u32 },
-    /// CSW status 1: the device understood and refused. Sense data says why.
-    Failed,
-}
-
 /// What [`MscDevice::enumerated`] holds.
 #[derive(Clone, Copy)]
 pub(in crate::drivers::xhci) struct Enumerated {
@@ -259,96 +236,74 @@ pub(in crate::drivers::xhci) struct Enumerated {
     pub configuration: u8,
 }
 
-/// Why a Bulk-Only round trip could not be completed; what happened decides
-/// which recovery command is legal.
-enum Broke {
-    /// The controller reported this completion code for the named phase, on
-    /// this pipe.
-    Code { phase: &'static str, code: u32, pipe: Pipe },
-    /// Nothing came back for the named phase, for [`Quiet`]'s reason.
-    Silence { phase: &'static str, why: Quiet },
-    /// The phase moved the wrong byte count; CBW/CSW are fixed length, so
-    /// short is not a short transfer.
-    Short { phase: &'static str, moved: u32, wanted: u32 },
-    /// The endpoint stalled and the reset did not take.
-    Stall { phase: &'static str },
-    /// CSW status 2: a phase error, which leaves both endpoints Running, so
-    /// an unconditional Reset Endpoint is illegal here.
-    PhaseError,
-    /// The CSW arrived and named somebody else's transfer. The status and
-    /// residue are the rest of what the device said, and tell a status the
-    /// device made for an abandoned command from one it made for nothing.
-    Csw { what: &'static str, got: u32, want: u32, status: u8, residue: u32 },
-    /// More bytes claimed unmoved than the transfer had; believing it would
-    /// underflow the byte count every caller uses.
-    Residue { unmoved: u32, of: u32 },
-}
+/// A break as its line says it.
+struct Told<'a>(&'a Broke);
 
-impl Broke {
-    /// Where the break left the device (`toyos_xhci::ladder::left`);
-    /// `data_out` is whether the command that broke sends data.
-    fn left(&self, data_out: bool) -> Left {
-        let phase = match self {
-            Self::Code { phase, .. }
-            | Self::Silence { phase, .. }
-            | Self::Stall { phase }
-            | Self::Short { phase, .. } => {
-                [Phase::Command, Phase::Data].into_iter().find(|p| p.named() == *phase).unwrap_or(Phase::Status)
-            }
-            Self::PhaseError | Self::Csw { .. } | Self::Residue { .. } => Phase::Status,
-        };
-        ladder::left(phase, data_out)
-    }
-
-    /// The transfer event that ended the round trip, where one did: what the
-    /// quiesce takes ahead of the pipe's Endpoint State field.
-    fn event(&self) -> Option<(Pipe, u32)> {
-        match self {
-            Self::Code { code, pipe, .. } => Some((*pipe, *code)),
-            _ => None,
-        }
-    }
-}
-
-impl core::fmt::Display for Broke {
+impl core::fmt::Display for Told<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Code { phase, code, .. } => {
+        match self.0 {
+            Broke::Code { phase, code, .. } => {
                 write!(f, "{phase} phase completion {}", Completion(*code))
             }
-            Self::Silence { phase, why } => why.about(phase, "phase", f),
-            Self::Short { phase, moved, wanted } => {
+            Broke::Silence { phase, why } => why.about(phase.named(), "phase", f),
+            Broke::Gone { phase } => Quiet::Gone.about(phase.named(), "phase", f),
+            Broke::Short { phase, moved, wanted } => {
                 write!(f, "{phase} phase moved {moved} of {wanted} B")
             }
-            Self::Stall { phase } => {
+            Broke::Stall { phase } => {
                 write!(f, "the {phase} phase stalled and the endpoint reset did not clear it")
             }
-            Self::PhaseError => f.write_str("the device reported a phase error"),
-            Self::Csw { what, got, want, status, residue } => write!(
+            Broke::PhaseError => f.write_str("the device reported a phase error"),
+            Broke::Reserved { status } => {
+                write!(f, "the CSW carries status {status:#04x}, which the class reserves")
+            }
+            Broke::Csw { what, got, want, status, residue } => write!(
                 f,
                 "CSW {what} {got:#x}, not {want:#x} (status {status}, {residue} B unmoved)"
             ),
-            Self::Residue { unmoved, of } => {
+            Broke::Residue { unmoved, of } => {
                 write!(f, "CSW claims {unmoved} B unmoved of {of}")
             }
         }
     }
 }
 
-/// How one rung of the ladder ended.
-enum Climbed {
-    /// The device answered the rung's TEST UNIT READY under that command's own
-    /// tag.
-    InStep,
-    /// Everything before the TEST UNIT READY was answered, and it broke this
-    /// way: a break like the one recovered from, and counted as one.
-    OutOfStep(Broke),
-    /// A step before the TEST UNIT READY was not answered, and said so; the
-    /// device was asked nothing after it.
-    Failed,
-    /// The port reads empty: the device is no longer on the bus, and its
-    /// port's teardown owns what it held.
-    Gone,
+/// A rung that did not bring its device back in step, as its line says it.
+struct Ended<'a>(Rung, &'a Unverified);
+
+impl core::fmt::Display for Ended<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.1 {
+            Unverified::OutOfStep(why) => {
+                write!(f, "transport broke on the {}'s TEST UNIT READY: {}", self.0.named(), Told(why))
+            }
+            Unverified::Failed => write!(f, "the {} was not answered", self.0.named()),
+        }
+    }
+}
+
+/// Abandon one bulk transfer without waiting, once per boot, on the first
+/// WRITE(10): only the wait is skipped, so recovery runs against a real
+/// endpoint state — staged since nothing on the host side leaves one in flight.
+#[cfg(feature = "boot-actuators")]
+mod transport_break {
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    static UNSPENT: AtomicBool = AtomicBool::new(true);
+    static ARMED: AtomicBool = AtomicBool::new(false);
+
+    /// Called where the driver is about to run a WRITE(10) data phase.
+    pub fn arm() {
+        if !crate::actuator::usb_transport_break() {
+            return;
+        }
+        ARMED.store(UNSPENT.swap(false, Ordering::Relaxed), Ordering::Relaxed);
+    }
+
+    /// Called after the doorbell, where the wait would otherwise begin.
+    pub fn take() -> bool {
+        ARMED.swap(false, Ordering::Relaxed)
+    }
 }
 
 /// Stop every CPU inside one WRITE(10), at whichever of its three phases was
@@ -455,57 +410,78 @@ pub(in crate::drivers::xhci) mod bind_spends_the_scan {
     }
 }
 
-/// The completion of one SCSI command, after the transport's own recovery.
-enum Scsi {
-    Ok { delivered: u32 },
-    /// Understood and declined, carrying the sense key/ASC/ASCQ: an optional
-    /// command's caller must tell "I will not" from "I cannot".
-    Refused { key: u8, asc: u8, ascq: u8 },
-    /// The transport broke, or the device contradicted itself; nothing about
-    /// the buffer is known.
-    Broken,
-    /// Not issued: the caller's [`crate::block::OPERATION`] budget had
-    /// already expired. Distinct from [`Self::Broken`] because it is not a
-    /// fact about the disk — [`MscDevice::failed`] stays clear.
-    Budget,
-}
+/// What the port rung's reset is made for, in its line.
+const RECOVERING: &str = "recovering";
 
-impl Scsi {
-    /// SBC's ILLEGAL REQUEST/INVALID COMMAND OPERATION CODE: an answer, not
-    /// a failure, for a command SBC makes optional.
-    fn unimplemented(&self) -> bool {
-        matches!(self, Self::Refused { key: 0x05, asc: 0x20, ascq: 0x00 })
+/// Hold the port rung, once, until its port reads empty: QEMU cannot move a
+/// device off its port on a reset, so the host takes it off. `usb-reset-moves`
+/// holds before the reset's completion is read, so the rung reads the port empty;
+/// `usb-reset-moves-after` once it has been read with the device on the port,
+/// as a USB2 port reads a device that leaves under its reset;
+/// `usb-reset-moves-configured` once the rung has configured the device again,
+/// so its TEST UNIT READY meets an empty port.
+#[cfg(feature = "boot-actuators")]
+pub(in crate::drivers::xhci) mod reset_moves {
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    static UNSPENT: AtomicBool = AtomicBool::new(true);
+
+    /// What each hold says, which the host acts on.
+    pub const HELD: &str = "is held empty for the host to move its device (usb-reset-moves)";
+    pub const HELD_AFTER: &str =
+        "is held, reset with its device on it, for the host to move the device (usb-reset-moves-after)";
+    pub const HELD_CONFIGURED: &str = "is held, configured again, for the host to move the device \
+        (usb-reset-moves-configured)";
+
+    /// The cue the host moves the device on, written to the console directly:
+    /// the record above reaches it only when `klogd` runs, which it may not
+    /// while this CPU spins in the rung, and a cue that arrives after the
+    /// rung's bound stages a device that left too late.
+    const MOVE_NOW: &[u8] = b"usb-reset-moves: move the device now\n";
+
+    /// Whether the hold `staged` arms is taken here: one hold per boot.
+    pub fn take(staged: bool) -> bool {
+        staged && UNSPENT.swap(false, Ordering::Relaxed)
     }
 
-    /// `Ok` never reaches here — each of the three callers has its own idea
-    /// of what a complete transfer is.
-    fn as_block_error(&self) -> BlockError {
-        match self {
-            Self::Budget => BlockError::BudgetExpired,
-            _ => BlockError::Device,
-        }
+    pub fn cue() {
+        crate::drivers::serial::BackendGuard::lock().write_raw(MOVE_NOW);
     }
 }
 
 /// The one line a device's refusal produces, wherever it is noticed — one
 /// function so per-caller wording never obscures what the device said.
-fn log_refusal(cdb: &[u8], key: u8, asc: u8, ascq: u8) {
-    log!(
-        "usb-storage: SCSI {:#04x} failed, sense {key:#04x}/{asc:#04x}/{ascq:#04x}",
-        cdb.first().copied().unwrap_or(0)
-    );
+fn log_refusal(cdb: &Cdb, sense: Sense) {
+    log!("usb-storage: SCSI {:#04x} failed, sense {sense}", cdb.opcode());
 }
 
 /// The sense a test actuator makes SYNCHRONIZE CACHE answer with, or `None`
 /// on a shipped kernel. ILLEGAL REQUEST/INVALID COMMAND OPERATION CODE must
 /// not fail the caller; HARDWARE ERROR/INTERNAL TARGET FAILURE must.
-fn flush_sense() -> Option<(u8, u8, u8)> {
+fn flush_sense() -> Option<Sense> {
     if crate::actuator::usb_flush_unimplemented() {
-        Some((0x05, 0x20, 0x00))
+        Some(Sense { key: 0x05, asc: 0x20, ascq: 0x00 })
     } else if crate::actuator::usb_flush_fails() {
-        Some((0x04, 0x44, 0x00))
+        Some(Sense { key: 0x04, asc: 0x44, ascq: 0x00 })
     } else {
         None
+    }
+}
+
+/// A bulk transfer's completion, as the round trip hears it.
+fn completed(completion: Result<(u32, u32), Quiet>) -> bot::Answer<Quiet> {
+    match completion {
+        Ok((code, residue)) => bot::Answer::Moved { code, residue },
+        Err(Quiet::Gone) => bot::Answer::Gone,
+        Err(why) => bot::Answer::Silent(why),
+    }
+}
+
+/// What a caller above the disk is told.
+fn block_error(fail: Fail) -> BlockError {
+    match fail {
+        Fail::Device => BlockError::Device,
+        Fail::Budget => BlockError::BudgetExpired,
     }
 }
 
@@ -617,36 +593,27 @@ impl XhciController {
             if dev.no_write_cache {
                 return Ok(());
             }
-            // LBA 0, count 0: the whole medium — all a block-device flush can mean.
-            let cdb = [0x35u8, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-            let issued = ctrl.scsi(dev, &cdb, 10, None, false, until);
-            let outcome = match flush_sense() {
-                Some((key, asc, ascq)) => Scsi::Refused { key, asc, ascq },
-                None => issued,
-            };
-            // No write cache means nothing here could have been made durable,
-            // so reporting a failure would report the wrong thing.
-            if outcome.unimplemented() {
-                if !dev.no_write_cache {
+            let cdb = Cdb::SYNCHRONIZE_CACHE;
+            let issued = ctrl.scsi(dev, &cdb, None, until);
+            let reply = flush_sense().map_or(issued, Reply::Refused);
+            match scsi::flushed(reply) {
+                Flushed::NoCache => {
                     dev.no_write_cache = true;
                     log!("usb-storage: disk {number} does not implement SYNCHRONIZE CACHE \
                          (sense 0x05/0x20/0x00); its writes are durable once they complete");
+                    Ok(())
                 }
-                return Ok(());
-            }
-            match outcome {
-                Scsi::Ok { .. } => {
+                Flushed::Emptied => {
                     dev.debt.flushed();
                     Ok(())
                 }
-                Scsi::Refused { key, asc, ascq } => {
-                    log_refusal(&cdb, key, asc, ascq);
+                Flushed::Refused(sense) => {
+                    log_refusal(&cdb, sense);
                     Err(BlockError::Device)
                 }
-                Scsi::Broken => Err(BlockError::Device),
-                // Unlogged: `scsi` already named the budget, and a line here
+                // Unlogged: `scsi` already named a budget, and a line here
                 // would itself be the next flush.
-                Scsi::Budget => Err(BlockError::BudgetExpired),
+                Flushed::Ended(fail) => Err(block_error(fail)),
             }
         })
         .unwrap_or(Err(BlockError::Device))
@@ -669,72 +636,41 @@ impl XhciController {
         if dev.failed {
             return Err(BlockError::Device);
         }
-        if count == 0 {
-            return Ok(());
-        }
-        match lba.checked_add(count as u64) {
-            Some(end) if end <= dev.blocks => {}
-            _ => {
-                log!("usb-storage: {lba}+{count} is past the {} blocks this disk has", dev.blocks);
+        let mut transfer = match Transfer::new(lba, count, write, &dev.geometry, MSC_MAX_BLOCKS) {
+            Ok(transfer) => transfer,
+            Err(past) => {
+                log!("usb-storage: {lba}+{count} is past the {} blocks this disk has", past.blocks);
                 return Err(BlockError::Device);
             }
-        }
+        };
 
         let dma = self.dma();
         let data = dma.subview(dev.block + MSC_DATA, MSC_DATA_LEN);
-        let mut done = 0u32;
-        while done < count {
-            let batch = (count - done).min(MSC_MAX_BLOCKS);
-            let bytes = batch as usize * HOST_BLOCK as usize;
-            let offset = done as usize * HOST_BLOCK as usize;
-            let sector_lba = (lba + done as u64) * dev.sectors_per_block as u64;
-            let sectors = batch * dev.sectors_per_block;
-
-            // `bring_up` refused any disk whose last sector doesn't fit 32
-            // bits, so READ/WRITE(10) can address every block reported.
-            let lba32 = sector_lba as u32;
-            let cdb = [
-                if write { 0x2Au8 } else { 0x28 },
-                0,
-                (lba32 >> 24) as u8,
-                (lba32 >> 16) as u8,
-                (lba32 >> 8) as u8,
-                lba32 as u8,
-                0,
-                (sectors >> 8) as u8,
-                sectors as u8,
-                0,
-            ];
-
+        while let Some(batch) = transfer.next() {
+            let (bytes, offset) = (batch.bytes, batch.offset);
             if let Host::From(src) = &host {
                 dma.copy_from(dev.block + MSC_DATA, &src[offset..offset + bytes]);
             }
-
-            match self.scsi(dev, &cdb, 10, Some(data.subview(0, bytes)), !write, until) {
-                Scsi::Ok { delivered } if delivered as usize == bytes => dev.wrote(write),
-                // Short of what was asked: nothing above can say which
-                // blocks arrived, so a partial transfer is a failed one.
-                Scsi::Ok { delivered } => {
-                    dev.wrote(write);
-                    log!("usb-storage: {delivered} of {bytes} B at block {}", lba + done as u64);
-                    return Err(BlockError::Device);
-                }
-                Scsi::Refused { key, asc, ascq } => {
-                    log_refusal(&cdb, key, asc, ascq);
-                    return Err(BlockError::Device);
-                }
-                // `done > 0` means blocks already moved are on the device
-                // with no way to resume; only the first batch may answer "ask
-                // again".
-                other @ (Scsi::Broken | Scsi::Budget) => {
-                    return Err(if done == 0 { other.as_block_error() } else { BlockError::Device });
-                }
+            let reply = self.scsi(dev, &batch.cdb, Some(data.subview(0, bytes)), until);
+            let moved = transfer.answered(&batch, reply);
+            if moved.reported() {
+                dev.wrote(write);
             }
-
+            match moved {
+                Moved::Whole => {}
+                Moved::Short { delivered } => {
+                    log!("usb-storage: {delivered} of {bytes} B at block {}", batch.block);
+                    return Err(BlockError::Device);
+                }
+                Moved::Refused(sense) => {
+                    log_refusal(&batch.cdb, sense);
+                    return Err(BlockError::Device);
+                }
+                Moved::Ended(fail) => return Err(block_error(fail)),
+            }
             if let Host::Into(dst) = &mut host {
                 dma.copy_to(dev.block + MSC_DATA, &mut dst[offset..offset + bytes]);
             }
-            done += batch;
         }
         Ok(())
     }
@@ -758,18 +694,9 @@ impl XhciController {
     /// by whoever the call is — [`served`] for a block operation, the bind for
     /// each of its commands — so a later command of the same operation spends
     /// what the break left it, and no call inherits another's.
-    #[allow(clippy::too_many_arguments)]
-    fn scsi(
-        &mut self,
-        dev: &mut MscDevice,
-        cdb: &[u8],
-        cdb_len: u8,
-        data: DataPhase,
-        data_in: bool,
-        until: Deadline,
-    ) -> Scsi {
-        let opcode = cdb.first().copied().unwrap_or(0);
-        let data_out = data.is_some() && !data_in;
+    fn scsi(&mut self, dev: &mut MscDevice, cdb: &Cdb, data: DataPhase, until: Deadline) -> Reply {
+        let opcode = cdb.opcode();
+        let data_out = data.is_some() && !cdb.data_in();
         // Named per line so a multi-disk boot's retry log attributes to the
         // right disk.
         let slot = self.slot(dev.slot_id);
@@ -783,31 +710,31 @@ impl XhciController {
                 Err(NotIssued::Operation) => {
                     log!("usb-storage: {slot} SCSI {opcode:#04x} not issued: {}",
                         crate::block::OPERATION);
-                    return Scsi::Budget;
+                    return Reply::Budget;
                 }
                 // A command re-issued with nothing left would have every wait
                 // cut at once, and count against the device a break that was
                 // the budget's.
                 Err(NotIssued::Call(why)) => {
                     log!("usb-storage: {slot} SCSI {opcode:#04x} not issued again: {why}");
-                    return Scsi::Budget;
+                    return Reply::Budget;
                 }
             }
-            match self.bot(dev, cdb, cdb_len, data, data_in) {
+            match self.bot(dev, cdb, data) {
                 Ok(Bot::Done { delivered }) => {
                     self.transport_came_back(dev, opcode);
-                    return Scsi::Ok { delivered };
+                    return Reply::Ok { delivered };
                 }
                 Ok(Bot::Failed) => {
                     self.transport_came_back(dev, opcode);
-                    let (key, asc, ascq) = self.request_sense(dev);
-                    return Scsi::Refused { key, asc, ascq };
+                    return Reply::Refused(self.request_sense(dev));
                 }
                 // Not a transport that broke: a device that is no longer on
                 // the bus. Its port's own teardown gives the slot and the pool
                 // block back, and a recovery or a reset aimed at an empty port
                 // would only spend their bounds.
-                Err(broke @ Broke::Silence { why: Quiet::Gone, .. }) => {
+                Err(gone @ Broke::Gone { .. }) => {
+                    let broke = Told(&gone);
                     log!("usb-storage: {slot} transport broke on SCSI {opcode:#04x}: {broke}; \
                          its port's teardown takes it from here");
                     dev.failed = true;
@@ -815,14 +742,15 @@ impl XhciController {
                     // A hold for its device is part of this call, from the
                     // wait that saw it go.
                     self.after_break.open(self.bulk_began, AFTER_BREAK);
-                    return Scsi::Broken;
+                    return Reply::Broken;
                 }
-                Err(broke) => {
+                Err(why) => {
                     self.after_break.open(self.bulk_began, AFTER_BREAK);
+                    let broke = Told(&why);
                     log!("usb-storage: {slot} transport broke on SCSI {opcode:#04x}: {broke}; \
-                         break {} of {MAX_TRANSPORT_BREAKS} running", dev.breaks.saturating_add(1));
-                    if !self.climb_until_in_step(dev, broke.event(), broke.left(data_out)) {
-                        return Scsi::Broken;
+                         break {} of {MAX_TRANSPORT_BREAKS} running", dev.run.breaks().saturating_add(1));
+                    if !self.climb_until_in_step(dev, why.event(), why.left(data_out)) {
+                        return Reply::Broken;
                     }
                 }
             }
@@ -845,65 +773,60 @@ impl XhciController {
         &mut self,
         dev: &mut MscDevice,
         mut broke: Option<(Pipe, u32)>,
-        mut left: Left,
+        left: Left,
     ) -> bool {
         let slot = self.slot(dev.slot_id);
+        let mut climb = dev.run.broke(left);
         loop {
-            dev.breaks = dev.breaks.saturating_add(1);
-            let rung = ladder::next(dev.climbed, left);
-            if dev.climbed.is_none() && rung != Rung::ClassReset {
+            let ladder::Climb { rung, skips_class_reset } = climb;
+            if skips_class_reset {
                 log!("usb-storage: {slot} is owed the data of the command that broke, so nothing \
                      can be asked of it on the Bulk-Out: its port is reset with no class reset \
                      before it");
             }
-            dev.climbed = Some(rung);
             self.after_break.enter(rung, crate::clock::nanos_since_boot());
             let climbed = match rung {
                 Rung::ClassReset => self.reset_recovery(dev, broke),
                 Rung::PortReset => self.port_reset_recovery(dev, broke),
                 Rung::Offline => {
                     log!("usb-storage: {slot} broke {} times running; its port reset did not \
-                         bring the transport back", dev.breaks);
+                         bring the transport back", dev.run.breaks());
                     self.take_offline(dev, broke);
                     return false;
                 }
             };
-            match climbed {
-                Climbed::InStep => {
-                    self.after_break.took(rung);
-                    return true;
-                }
-                Climbed::OutOfStep(why) => {
-                    log!("usb-storage: {slot} transport broke on the {}'s TEST UNIT READY: {why}; \
-                         break {} of {MAX_TRANSPORT_BREAKS} running",
-                        rung.named(), dev.breaks.saturating_add(1));
-                    broke = why.event();
-                }
-                // As a round trip whose port read disconnected mid-wait: a
-                // reset aimed at an empty port would only spend its bound.
-                Climbed::Gone => {
+            let Err(unverified) = climbed else {
+                self.after_break.took(rung);
+                return true;
+            };
+            // Asked of the port once the rung has ended, since a USB2 port
+            // detects no disconnect while it drives a reset (xHCI 1.2
+            // §4.19.1.1.2, note 57) and reads Enabled once the reset ends
+            // (§4.19.1.1.4).
+            let port = self.read_portsc(dev.port_idx);
+            let ended = Ended(rung, &unverified);
+            match dev.run.unverified(&unverified, port.holds()) {
+                AfterRung::Left => {
+                    log!("usb-storage: {slot} {ended}, and port {} no longer holds the device \
+                         (PORTSC {:#010x}): its port's teardown takes it from here",
+                        u32::from(dev.port_idx) + 1, port.raw());
                     dev.failed = true;
                     dev.left = true;
                     return false;
                 }
-                Climbed::Failed => {
-                    log!("usb-storage: {slot} the {} was not answered; break {} of \
-                         {MAX_TRANSPORT_BREAKS} running", rung.named(), dev.breaks.saturating_add(1));
-                    // The event is spent: the rung has commanded the pair
-                    // since, and only the fields speak for it now.
-                    broke = None;
+                AfterRung::Climbs { climb: next, broke: event } => {
+                    log!("usb-storage: {slot} {ended}; break {} of {MAX_TRANSPORT_BREAKS} running",
+                        dev.run.breaks());
+                    (climb, broke) = (next, event);
                 }
             }
-            // A rung's own TEST UNIT READY has no data phase to be left in.
-            left = Left::Elsewhere;
         }
     }
 
     /// A round trip completed: the run of breaks is over, and the log says so
     /// where there was one.
     fn transport_came_back(&mut self, dev: &mut MscDevice, opcode: u8) {
-        let breaks = core::mem::take(&mut dev.breaks);
-        dev.climbed = None;
+        let breaks = dev.run.over();
         if breaks > 0 {
             log!("usb-storage: {} SCSI {opcode:#04x} completed after {breaks} break(s) running; \
                  the transport came back and the count is cleared", self.slot(dev.slot_id));
@@ -974,14 +897,16 @@ impl XhciController {
         let before = self.read_portsc(port_idx);
         let protocol = self.protocols.of(port_idx);
         let kind = port::offline_reset(protocol);
-        // A port that reads empty, or connected across a gap, no longer holds
-        // the device this is about: its teardown owns what is left.
-        let here = before.connected() && !before.connect_changed();
+        let here = before.holds();
         let finished = here && {
             self.write_portsc(port_idx, port::reset_write(kind, before));
             dev.reset_at = Some(crate::clock::nanos_since_boot());
             self.settles_within_call(|| self.read_portsc(port_idx).reset_finished())
         };
+        #[cfg(feature = "boot-actuators")]
+        if finished && why == RECOVERING && reset_moves::take(crate::actuator::usb_reset_moves()) {
+            self.hold_for_the_move(dev, reset_moves::HELD);
+        }
         let after = self.read_portsc(port_idx);
         if finished {
             self.write_portsc(port_idx, port::enumeration_ack(Some(kind), after));
@@ -1012,7 +937,24 @@ impl XhciController {
             after.link_state(),
             after.speed(),
         );
+        #[cfg(feature = "boot-actuators")]
+        if left == AfterReset::Enumerate
+            && why == RECOVERING
+            && reset_moves::take(crate::actuator::usb_reset_moves_after())
+        {
+            self.hold_for_the_move(dev, reset_moves::HELD_AFTER);
+        }
         left
+    }
+
+    /// Say `held`, cue the host, and hold the rung until the device's port
+    /// reads empty (`reset_moves`).
+    #[cfg(feature = "boot-actuators")]
+    fn hold_for_the_move(&self, dev: &MscDevice, held: &str) {
+        let port_idx = dev.port_idx;
+        log!("xHCI: {} port {} {held}", self.slot(dev.slot_id), u32::from(port_idx) + 1);
+        reset_moves::cue();
+        let _ = self.settles_within_call(|| !self.read_portsc(port_idx).connected());
     }
 
     /// The ladder's second rung: the port reset, and the enumeration a reset
@@ -1021,21 +963,15 @@ impl XhciController {
     /// their order are `ladder::PORT_RESET`'s; this takes them, one blocking
     /// command or control transfer at a time, and ends on the device's answer
     /// to TEST UNIT READY.
-    fn port_reset_recovery(&mut self, dev: &mut MscDevice, broke: Option<(Pipe, u32)>) -> Climbed {
+    fn port_reset_recovery(&mut self, dev: &mut MscDevice, broke: Option<(Pipe, u32)>) -> Result<(), Unverified> {
         let slot = self.slot(dev.slot_id);
         for step in ladder::PORT_RESET {
             let took = match step {
                 PortStep::Quiesce => {
                     self.quiesce_bulk_pair(dev, broke, "stopping it before its port is reset")
                 }
-                PortStep::Reset => match self.reset_port(dev, "recovering") {
-                    AfterReset::Enumerate => true,
-                    AfterReset::Left => return Climbed::Gone,
-                    // `reset_port` has said which.
-                    AfterReset::NeverFinished
-                    | AfterReset::NotEnabled
-                    | AfterReset::SpeedChanged { .. } => false,
-                },
+                // `reset_port` has said which way it did not.
+                PortStep::Reset => self.reset_port(dev, RECOVERING).goes_on(),
                 PortStep::Settle => {
                     let _ = crate::clock::settles(
                         self.after_break
@@ -1071,17 +1007,21 @@ impl XhciController {
                 ),
             };
             if !took && ladder::ends_the_rung(step) {
-                return Climbed::Failed;
+                return Err(Unverified::Failed);
             }
         }
-        match self.bot(dev, &TEST_UNIT_READY, 6, None, false) {
+        #[cfg(feature = "boot-actuators")]
+        if reset_moves::take(crate::actuator::usb_reset_moves_configured()) {
+            self.hold_for_the_move(dev, reset_moves::HELD_CONFIGURED);
+        }
+        match self.bot(dev, &Cdb::TEST_UNIT_READY, None) {
             Ok(answer) => {
                 log!("usb-storage: {slot} the port reset took: addressed and configured again, the \
                      device answered TEST UNIT READY under its own tag {:#x}", dev.tag);
                 self.take_held_sense(dev, answer);
-                Climbed::InStep
+                Ok(())
             }
-            Err(why) => Climbed::OutOfStep(why),
+            Err(why) => Err(Unverified::OutOfStep(why)),
         }
     }
 
@@ -1089,71 +1029,33 @@ impl XhciController {
     /// whoever asks next, which would otherwise be the command the rung is for.
     fn take_held_sense(&mut self, dev: &mut MscDevice, answer: Bot) {
         if matches!(answer, Bot::Failed) {
-            let (key, asc, ascq) = self.request_sense(dev);
-            log!("usb-storage: {} held sense {key:#04x}/{asc:#04x}/{ascq:#04x} after its recovery",
-                self.slot(dev.slot_id));
+            let sense = self.request_sense(dev);
+            log!("usb-storage: {} held sense {sense} after its recovery", self.slot(dev.slot_id));
         }
     }
 
-    /// REQUEST SENSE as (key, ASC, ASCQ), zeroed if the device would not
-    /// say — zero is the failing side of every decision made from it.
-    fn request_sense(&mut self, dev: &mut MscDevice) -> (u8, u8, u8) {
+    /// REQUEST SENSE through `bot` directly, so it cannot recurse into asking
+    /// for sense about itself.
+    fn request_sense(&mut self, dev: &mut MscDevice) -> Sense {
         let dma = self.dma();
         let scratch = dma.subview(dev.block + MSC_SCRATCH, MSC_SCRATCH_LEN);
         scratch.zero();
-        let cdb = [0x03u8, 0, 0, 0, 18, 0];
-        // Goes through `bot` directly, so it cannot recurse into asking for
-        // sense about itself. ASCQ is byte 13, so 14 bytes must arrive or all
-        // three stay zero, which is what `Scsi::unimplemented` tests for.
-        match self.bot(dev, &cdb, 6, Some(scratch.subview(0, 18)), true) {
-            Ok(Bot::Done { delivered }) if delivered >= 14 => {
-                let mut resp = [0u8; 18];
-                dma.copy_to(dev.block + MSC_SCRATCH, &mut resp);
-                (resp[2] & 0x0F, resp[12], resp[13])
+        let region = scratch.subview(0, scsi::SENSE_BYTES);
+        match self.bot(dev, &Cdb::REQUEST_SENSE, Some(region)) {
+            Ok(Bot::Done { delivered }) => {
+                let mut response = [0u8; scsi::SENSE_BYTES];
+                dma.copy_to(dev.block + MSC_SCRATCH, &mut response);
+                Sense::of(&response, delivered)
             }
-            _ => (0, 0, 0),
+            _ => Sense::NONE,
         }
     }
 
-    /// One fixed-length leg of the round trip (command or status block),
-    /// which the device must take or give in full.
-    fn framed_phase(
-        &mut self,
-        dev: &mut MscDevice,
-        in_dir: bool,
-        phys: u64,
-        len: u32,
-        phase: Phase,
-        open: &stop::OpenCommand,
-    ) -> Result<(), Broke> {
-        let what = phase.named();
-        match self.bulk(dev, in_dir, phys, len, phase, open) {
-            // Short Packet is how the xHC reports a sub-maximum-packet
-            // transfer (a 13-byte CSW on a 512-byte endpoint); zero residue
-            // means it all arrived.
-            Ok((CC_SUCCESS | CC_SHORT_PACKET, 0)) => Ok(()),
-            Ok((CC_SUCCESS | CC_SHORT_PACKET, residue)) => Err(Broke::Short {
-                phase: what,
-                moved: len.saturating_sub(residue),
-                wanted: len,
-            }),
-            Ok((code, _)) => Err(Broke::Code { phase: what, code, pipe: Pipe::of(in_dir) }),
-            Err(why) => Err(Broke::Silence { phase: what, why }),
-        }
-    }
-
-    /// The Bulk-Only Transport round trip: command block out, data, status in.
-    fn bot(
-        &mut self,
-        dev: &mut MscDevice,
-        cdb: &[u8],
-        cdb_len: u8,
-        data: DataPhase,
-        data_in: bool,
-    ) -> Result<Bot, Broke> {
-        // The CDBs are this file's own, so their shape is a kernel invariant.
-        assert!(cdb_len as usize <= cdb.len() && cdb_len <= 16);
+    /// One Bulk-Only round trip, as `toyos_xhci::bot::RoundTrip` asks for it:
+    /// each transfer queued and waited for in place.
+    fn bot(&mut self, dev: &mut MscDevice, cdb: &Cdb, data: DataPhase) -> Result<Bot, Broke> {
         crate::block::census::command_issued();
+        let data_in = cdb.data_in();
         // The length the device is told to move is the region's own, so the
         // only bound left to state is this driver's largest transfer.
         let (data_phys, data_len) = match data {
@@ -1172,17 +1074,7 @@ impl XhciController {
         let tag = dev.next_tag();
         #[cfg(feature = "stack-witness")]
         let entered_with = block_witness(dev);
-        // Unaligned per the file header; bounded by CBW_LEN (15+cdb_len <=
-        // 31) and exclusive — not yet enqueued.
-        let cbw: Dma<'static, Unaligned> =
-            super::super::zero_dma(dma, dev.block + MSC_CBW, CBW_LEN as usize).unaligned();
-        cbw.write::<u32>(0, CBW_SIGNATURE.to_le());
-        cbw.write::<u32>(4, tag.to_le());
-        cbw.write::<u32>(8, data_len.to_le());
-        cbw.write::<u8>(12, if data_in { 0x80 } else { 0x00 });
-        cbw.write::<u8>(13, 0); // LUN 0: this driver binds one logical unit
-        cbw.write::<u8>(14, cdb_len);
-        cbw.copy_from(15, &cdb[..cdb_len as usize]);
+        dma.copy_from(dev.block + MSC_CBW, &bot::cbw(tag, data_len, cdb));
 
         // **From here the device is one this kernel has spoken a command to**,
         // and stays one until the CSW below is in hand: a reset between any two
@@ -1198,102 +1090,57 @@ impl XhciController {
             ctx_size: self.context_size as u32,
             data_in,
         });
-
-        let cbw_phys = dma.device_addr() + (dev.block + MSC_CBW) as u64;
-        self.framed_phase(dev, false, cbw_phys, CBW_LEN, Phase::Command, &open)?;
-
-        // What the controller says reached the buffer; checked against the
-        // CSW's residue below.
-        let mut moved = 0u32;
-        if data_len > 0 {
-            // The gap the class leaves open: the device has the CBW and this
-            // kernel has queued nothing for it.
-            open.at(Phase::DataOwed, &dev.in_ring, &dev.out_ring);
-            #[cfg(feature = "boot-actuators")]
-            if cdb.first() == Some(&0x2A) {
-                mid_write::wedge_if_staged(Phase::DataOwed);
-            }
-            match self.bulk(dev, data_in, data_phys, data_len, Phase::Data, &open) {
-                Ok((CC_SUCCESS | CC_SHORT_PACKET, unmoved)) => {
-                    moved = data_len.saturating_sub(unmoved);
-                }
-                // A stalled data phase is ordinary (unsupported command,
-                // read past the end); recovering it and reading the status
-                // turns it into a clean refusal.
-                Ok((CC_STALL, unmoved)) => {
-                    if !self.restart_bulk(dev, data_in) {
-                        return Err(Broke::Stall { phase: "data" });
-                    }
-                    // The recovery rebuilt the ring this phase was on, so the
-                    // point the account reads is republished before anything
-                    // else reaches the controller.
-                    open.at(Phase::Data, &dev.in_ring, &dev.out_ring);
-                    moved = data_len.saturating_sub(unmoved);
-                }
-                Ok((code, _)) => {
-                    return Err(Broke::Code { phase: "data", code, pipe: Pipe::of(data_in) })
-                }
-                Err(why) => return Err(Broke::Silence { phase: "data", why }),
-            }
-        }
-
-        // The second gap: the data phase is done, or there was none, and the
-        // device is holding a CSW nothing has asked for.
-        open.at(Phase::StatusOwed, &dev.in_ring, &dev.out_ring);
         #[cfg(feature = "boot-actuators")]
-        if data_len > 0 && cdb.first() == Some(&0x2A) {
-            mid_write::wedge_if_staged(Phase::StatusOwed);
-        }
-        let csw_phys = dma.device_addr() + (dev.block + MSC_CSW) as u64;
-        super::super::zero_dma(dma, dev.block + MSC_CSW, CSW_LEN as usize);
-        let mut got = self.framed_phase(dev, true, csw_phys, CSW_LEN, Phase::Status, &open);
-        if let Err(Broke::Code { code: CC_STALL, .. }) = got {
-            // The spec's one legal retry: the device may stall the status
-            // phase once.
-            if !self.restart_bulk(dev, true) {
-                return Err(Broke::Stall { phase: "status" });
-            }
-            open.at(Phase::StatusOwed, &dev.in_ring, &dev.out_ring);
-            super::super::zero_dma(dma, dev.block + MSC_CSW, CSW_LEN as usize);
-            got = self.framed_phase(dev, true, csw_phys, CSW_LEN, Phase::Status, &open);
-        }
-        got?;
+        let write = cdb.opcode() == scsi::WRITE_10;
 
-        #[cfg(feature = "stack-witness")]
-        block_witness_holds(dev, entered_with);
-        // Unaligned again; bounded by the CSW_LEN subview, exclusive because
-        // `framed_phase` returned `Ok`. Every field is checked below, never
-        // believed.
-        let csw = dma.subview(dev.block + MSC_CSW, CSW_LEN as usize).unaligned();
-        let (signature, csw_tag, residue, status) = (
-            u32::from_le(csw.read::<u32>(0)),
-            u32::from_le(csw.read::<u32>(4)),
-            u32::from_le(csw.read::<u32>(8)),
-            csw.read::<u8>(12),
-        );
-        if signature != CSW_SIGNATURE {
-            return Err(Broke::Csw {
-                what: "signature",
-                got: signature,
-                want: CSW_SIGNATURE,
-                status,
-                residue,
-            });
-        }
-        // Accepting a mismatched tag would attribute one command's status
-        // to another — a write reporting the read before it as success.
-        if csw_tag != tag {
-            return Err(Broke::Csw { what: "tag", got: csw_tag, want: tag, status, residue });
-        }
-        if residue > data_len {
-            return Err(Broke::Residue { unmoved: residue, of: data_len });
-        }
-        match status {
-            // Neither account is trusted alone: a caller may read only what
-            // both the device and the controller say arrived.
-            0 => Ok(Bot::Done { delivered: moved.min(data_len - residue) }),
-            1 => Ok(Bot::Failed),
-            _ => Err(Broke::PhaseError),
+        let (mut trip, mut act) = RoundTrip::begin(tag, data_len, cdb);
+        loop {
+            let answer = match act {
+                bot::Act::Command => {
+                    let cbw_phys = dma.device_addr() + (dev.block + MSC_CBW) as u64;
+                    completed(self.bulk(dev, false, cbw_phys, CBW_LEN as u32, Phase::Command, &open))
+                }
+                bot::Act::Data(pipe) => {
+                    open.at(Phase::DataOwed, &dev.in_ring, &dev.out_ring);
+                    #[cfg(feature = "boot-actuators")]
+                    if write {
+                        transport_break::arm();
+                        mid_write::wedge_if_staged(Phase::DataOwed);
+                    }
+                    completed(self.bulk(dev, pipe == Pipe::In, data_phys, data_len, Phase::Data, &open))
+                }
+                bot::Act::Status => {
+                    open.at(Phase::StatusOwed, &dev.in_ring, &dev.out_ring);
+                    #[cfg(feature = "boot-actuators")]
+                    if data_len > 0 && write {
+                        mid_write::wedge_if_staged(Phase::StatusOwed);
+                    }
+                    super::super::zero_dma(dma, dev.block + MSC_CSW, CSW_LEN);
+                    let csw_phys = dma.device_addr() + (dev.block + MSC_CSW) as u64;
+                    completed(self.bulk(dev, true, csw_phys, CSW_LEN as u32, Phase::Status, &open))
+                }
+                bot::Act::Restart { pipe, then } => {
+                    let took = self.restart_bulk(dev, pipe == Pipe::In);
+                    // The recovery rebuilt the ring, so the point the account
+                    // reads is republished before anything else reaches the
+                    // controller.
+                    if took {
+                        open.at(then, &dev.in_ring, &dev.out_ring);
+                    }
+                    bot::Answer::Restarted(took)
+                }
+            };
+            match trip.answered(answer) {
+                bot::Next::Act(next, then) => (trip, act) = (next, then),
+                bot::Next::Csw(due) => {
+                    #[cfg(feature = "stack-witness")]
+                    block_witness_holds(dev, entered_with);
+                    let mut csw = [0u8; CSW_LEN];
+                    dma.copy_to(dev.block + MSC_CSW, &mut csw);
+                    return due.judge(&csw);
+                }
+                bot::Next::Broke(broke) => return Err(broke),
+            }
         }
     }
 
@@ -1332,6 +1179,10 @@ impl XhciController {
         }
         self.bulk_began = crate::clock::nanos_since_boot();
         self.ring_doorbell(slot, dci);
+        #[cfg(feature = "boot-actuators")]
+        if transport_break::take() {
+            return Err(Quiet::Staged);
+        }
         self.wait_transfer(slot, dci, at)
     }
 
@@ -1366,15 +1217,15 @@ impl XhciController {
     /// A command that did not take ends it, since the requests after it assume
     /// both endpoints are off their transfers; a request that did not is
     /// followed by the rest, so the device is left with both pipes cleared
-    /// whatever the next rung then does with it. Either is [`Climbed::Failed`].
+    /// whatever the next rung then does with it. Either is [`ladder::Unverified::Failed`].
     ///
     /// **Then the device is asked, and only its answer says the recovery
     /// took**: TEST UNIT READY, whose status must carry that command's own tag.
     ///
     /// `broke` is the transfer event that ended the round trip, where one did.
-    fn reset_recovery(&mut self, dev: &mut MscDevice, broke: Option<(Pipe, u32)>) -> Climbed {
+    fn reset_recovery(&mut self, dev: &mut MscDevice, broke: Option<(Pipe, u32)>) -> Result<(), Unverified> {
         if !self.quiesce_bulk_pair(dev, broke, "recovering") {
-            return Climbed::Failed;
+            return Err(Unverified::Failed);
         }
         let slot = self.slot(dev.slot_id);
         let mut recovered = true;
@@ -1404,16 +1255,16 @@ impl XhciController {
             }
         }
         if !recovered {
-            return Climbed::Failed;
+            return Err(Unverified::Failed);
         }
-        match self.bot(dev, &TEST_UNIT_READY, 6, None, false) {
+        match self.bot(dev, &Cdb::TEST_UNIT_READY, None) {
             Ok(answer) => {
                 log!("usb-storage: {slot} Reset Recovery took: the device answered TEST UNIT \
                      READY under its own tag {:#x}", dev.tag);
                 self.take_held_sense(dev, answer);
-                Climbed::InStep
+                Ok(())
             }
-            Err(why) => Climbed::OutOfStep(why),
+            Err(why) => Err(Unverified::OutOfStep(why)),
         }
     }
 
@@ -1731,11 +1582,8 @@ pub(in crate::drivers::xhci) fn bind(
         in_ring,
         out_ring,
         tag: 0,
-        logical_block_bytes: 0,
-        sectors_per_block: 0,
-        blocks: 0,
-        breaks: 0,
-        climbed: None,
+        geometry: Geometry::NONE,
+        run: Run::NONE,
         failed: false,
         slot_goes: None,
         no_write_cache: false,
@@ -1769,8 +1617,8 @@ pub(in crate::drivers::xhci) fn bind(
         log!("usb-storage: disk {index} came back on port {} slot {slot_id} as the same device \
              (USB {:04x}:{:04x}, serial number {}, {} blocks of {} B), msc_block +{:#x}; its \
              volume carries on{}",
-            u32::from(port_idx) + 1, usb.vendor, usb.product, dev.identity.serial, dev.blocks,
-            dev.logical_block_bytes, block,
+            u32::from(port_idx) + 1, usb.vendor, usb.product, dev.identity.serial, dev.geometry.blocks(),
+            dev.geometry.sector_bytes(), block,
             if owed { OWED_A_FLUSH } else { "" });
         ctrl.msc[at].disk = Some(Disk { index, dev });
         return Bind::Bound;
@@ -1779,9 +1627,9 @@ pub(in crate::drivers::xhci) fn bind(
     log!(
         "usb-storage: disk {index} ready on slot {slot_id}, {} blocks of {} B \
          ({} MiB), msc_block +{:#x}",
-        dev.blocks,
-        dev.logical_block_bytes,
-        dev.blocks * HOST_BLOCK as u64 / (1024 * 1024),
+        dev.geometry.blocks(),
+        dev.geometry.sector_bytes(),
+        dev.geometry.blocks() * u64::from(HOST_BLOCK) / (1024 * 1024),
         block
     );
     ctrl.msc[at].disk = Some(Disk { index, dev });
@@ -1815,148 +1663,114 @@ enum Up {
     Refused,
 }
 
-/// TEST UNIT READY, INQUIRY and READ CAPACITY: everything between a configured
-/// interface and a disk with a size.
+/// Everything between a configured interface and a disk with a size, as
+/// `toyos_xhci::scsi::BringUp` asks for it.
 fn bring_up(ctrl: &mut XhciController, dev: &mut MscDevice) -> Up {
-    // Drives the transport directly, not `scsi`: NOT READY is expected, not
-    // an error, so it must not log per attempt, and fetching sense also
-    // clears the condition on a device still spinning up.
-    let give_up = crate::clock::nanos_since_boot() + READY_BUDGET.nanos();
-    let mut sense = (0u8, 0u8, 0u8);
-    let mut ready = false;
-    loop {
-        match ctrl.bot(dev, &TEST_UNIT_READY, 6, None, false) {
-            Ok(Bot::Done { .. }) => {
-                ready = true;
-                break;
-            }
-            Ok(Bot::Failed) => sense = ctrl.request_sense(dev),
-            Err(broke) => {
-                log!("usb-storage: slot {} broke on TEST UNIT READY: {broke}", dev.slot_id);
-                ctrl.after_break.open(ctrl.bulk_began, AFTER_BREAK);
-                // A rung ends on this same command answered, so the run of
-                // breaks it counted is over when it says the device is in step.
-                if ctrl.climb_until_in_step(dev, broke.event(), Left::Elsewhere) {
-                    dev.breaks = 0;
-                    dev.climbed = None;
-                }
-                ctrl.after_break = AfterBreak::CLOSED;
-            }
-        }
-        if dev.failed || crate::clock::nanos_since_boot() >= give_up {
-            break;
-        }
-    }
-    if !ready {
-        log!("usb-storage: slot {} never became ready, sense {:#04x}/{:#04x}/{:#04x}",
-            dev.slot_id, sense.0, sense.1, sense.2);
-        return if dev.failed { Up::Refused } else { Up::NotReady };
-    }
-
+    let slot = dev.slot_id;
     let dma = ctrl.dma();
     let scratch = dma.subview(dev.block + MSC_SCRATCH, MSC_SCRATCH_LEN);
     // No caller budget here: bring-up isn't an operation with a
     // `BlockDevice` handle to answer — it answers only to `READY_BUDGET` and
     // `USB_TIMEOUT_NS`.
     let until = Deadline::never();
-    let read_scratch = |ctrl: &mut XhciController,
-                        dev: &mut MscDevice,
-                        cdb: &[u8],
-                        cdb_len: u8,
-                        want: u32,
-                        out: &mut [u8]| {
-        scratch.zero();
-        // `subview` refuses a command asking for more than the scratch
-        // buffer holds. Each command of a bind is a call of its own.
-        let answer = ctrl.scsi(dev, cdb, cdb_len, Some(scratch.subview(0, want as usize)), true, until);
-        ctrl.after_break = AfterBreak::CLOSED;
-        match answer {
-            Scsi::Ok { delivered } if delivered as usize >= out.len() => {
-                dma.copy_to(dev.block + MSC_SCRATCH, out);
-                true
+    let mut pending = None;
+    let mut read = [0u8; MSC_SCRATCH_LEN];
+    let (mut up, mut ask) = BringUp::begin(crate::clock::nanos_since_boot() + READY_BUDGET.nanos());
+    loop {
+        let heard = match ask {
+            scsi::Ask::TestUnitReady => match ctrl.bot(dev, &Cdb::TEST_UNIT_READY, None) {
+                Ok(Bot::Done { .. }) => Heard::Good,
+                Ok(Bot::Failed) => Heard::CheckCondition,
+                Err(why) => {
+                    let broke = Told(&why);
+                    log!("usb-storage: slot {} broke on TEST UNIT READY: {broke}", dev.slot_id);
+                    pending = Some(why);
+                    Heard::Broke
+                }
+            },
+            scsi::Ask::RequestSense => Heard::Sense(ctrl.request_sense(dev)),
+            scsi::Ask::Recover => {
+                let why = pending.take().expect("a recovery is asked for only after a break");
+                ctrl.after_break.open(ctrl.bulk_began, AFTER_BREAK);
+                // A rung ends on this same command answered, so the run of
+                // breaks it counted is over when it says the device is in step.
+                if ctrl.climb_until_in_step(dev, why.event(), Left::Elsewhere) {
+                    dev.run.over();
+                }
+                ctrl.after_break = AfterBreak::CLOSED;
+                Heard::Recovered { offline: dev.failed }
             }
-            Scsi::Refused { key, asc, ascq } => {
-                log_refusal(cdb, key, asc, ascq);
-                false
+            scsi::Ask::Read(query) => {
+                let (cdb, len) = (query.cdb(), query.allocation());
+                scratch.zero();
+                // `subview` refuses a command asking for more than the scratch
+                // buffer holds. Each command of a bind is a call of its own.
+                let reply = ctrl.scsi(dev, &cdb, Some(scratch.subview(0, len)), until);
+                ctrl.after_break = AfterBreak::CLOSED;
+                match reply {
+                    Reply::Ok { delivered } => {
+                        dma.copy_to(dev.block + MSC_SCRATCH, &mut read[..len]);
+                        Heard::Data { bytes: &read[..len], delivered }
+                    }
+                    Reply::Refused(sense) => {
+                        log_refusal(&cdb, sense);
+                        Heard::Unanswered
+                    }
+                    Reply::Broken | Reply::Budget => Heard::Unanswered,
+                }
             }
-            _ => false,
-        }
-    };
-
-    let mut inquiry = [0u8; 36];
-    if !read_scratch(ctrl, dev, &[0x12u8, 0, 0, 0, 36, 0], 6, 36, &mut inquiry) {
-        log!("usb-storage: slot {} would not answer INQUIRY", dev.slot_id);
-        return Up::Refused;
+        };
+        let end = match up.heard(heard, crate::clock::nanos_since_boot()) {
+            scsi::Next::Ask(next, then) => {
+                (up, ask) = (next, then);
+                continue;
+            }
+            scsi::Next::Disk(next, inquiry, then) => {
+                log!("usb-storage: slot {slot} vendor {} product {}",
+                    Printable(inquiry.vendor()), Printable(inquiry.product()));
+                dev.identity.inquiry = inquiry.0;
+                (up, ask) = (next, then);
+                continue;
+            }
+            scsi::Next::Up(end) => end,
+        };
+        return match end {
+            scsi::Up::Ready(geometry) => {
+                dev.geometry = geometry;
+                dev.identity.sectors = geometry.sectors();
+                dev.identity.sector_bytes = geometry.sector_bytes();
+                Up::Ready
+            }
+            scsi::Up::Unready { sense, offline } => {
+                log!("usb-storage: slot {slot} never became ready, sense {sense}");
+                if offline { Up::Refused } else { Up::NotReady }
+            }
+            scsi::Up::Refused(why) => {
+                match why {
+                    Refusal::Unanswered(query) => {
+                        log!("usb-storage: slot {slot} would not answer {}", query.named());
+                    }
+                    Refusal::NotADisk(peripheral) => {
+                        log!("usb-storage: slot {slot} is SCSI peripheral type {peripheral:#04x}, \
+                             not a disk");
+                    }
+                    Refusal::SectorSize(bytes) => {
+                        log!("usb-storage: slot {slot} reports {bytes}-byte blocks; this driver \
+                             serves 4096-byte blocks and needs 512..=4096");
+                    }
+                    Refusal::PastRead10 { last_lba } => {
+                        log!("usb-storage: slot {slot} has {} sectors; this driver issues READ(10) \
+                             and addresses 2^32", u128::from(last_lba) + 1);
+                    }
+                    Refusal::LessThanABlock { sectors, sector_bytes } => {
+                        log!("usb-storage: slot {slot} holds {sectors} sectors of {sector_bytes} B, \
+                             less than one 4096-byte block");
+                    }
+                }
+                Up::Refused
+            }
+        };
     }
-    let peripheral = inquiry[0] & 0x1F;
-    if peripheral != 0 {
-        log!("usb-storage: slot {} is SCSI peripheral type {peripheral:#04x}, not a disk",
-            dev.slot_id);
-        return Up::Refused;
-    }
-    log!("usb-storage: slot {} vendor {} product {}", dev.slot_id,
-        Printable(&inquiry[8..16]), Printable(&inquiry[16..32]));
-    dev.identity.inquiry.copy_from_slice(&inquiry[8..36]);
-
-    // READ CAPACITY(10) reports an all-ones last LBA when the disk needs the
-    // 16-byte form to describe its size.
-    let mut cap10 = [0u8; 8];
-    if !read_scratch(ctrl, dev, &[0x25u8, 0, 0, 0, 0, 0, 0, 0, 0, 0], 10, 8, &mut cap10) {
-        log!("usb-storage: slot {} would not answer READ CAPACITY(10)", dev.slot_id);
-        return Up::Refused;
-    }
-    let (last_lba, block_bytes) = if u32::from_be_bytes([cap10[0], cap10[1], cap10[2], cap10[3]])
-        == u32::MAX
-    {
-        let mut cap16 = [0u8; 12];
-        let cdb = [0x9Eu8, 0x10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 32, 0, 0];
-        if !read_scratch(ctrl, dev, &cdb, 16, 32, &mut cap16) {
-            log!("usb-storage: slot {} would not answer READ CAPACITY(16)", dev.slot_id);
-            return Up::Refused;
-        }
-        (
-            u64::from_be_bytes([
-                cap16[0], cap16[1], cap16[2], cap16[3], cap16[4], cap16[5], cap16[6], cap16[7],
-            ]),
-            u32::from_be_bytes([cap16[8], cap16[9], cap16[10], cap16[11]]),
-        )
-    } else {
-        (
-            u32::from_be_bytes([cap10[0], cap10[1], cap10[2], cap10[3]]) as u64,
-            u32::from_be_bytes([cap10[4], cap10[5], cap10[6], cap10[7]]),
-        )
-    };
-
-    // A zero or >4096 block size divides by zero below (`4096 /
-    // block_bytes`); the allowed set is which sizes divide the 4 KiB host
-    // block.
-    if !matches!(block_bytes, 512 | 1024 | 2048 | 4096) {
-        log!("usb-storage: slot {} reports {block_bytes}-byte blocks; this driver \
-             serves 4096-byte blocks and needs 512..=4096", dev.slot_id);
-        return Up::Refused;
-    }
-    // READ/WRITE(10) carry a 32-bit LBA; serving the first 2 TiB of a
-    // bigger disk would silently truncate it.
-    if last_lba > u32::MAX as u64 {
-        log!("usb-storage: slot {} has {} sectors; this driver issues READ(10) and \
-             addresses 2^32", dev.slot_id, last_lba as u128 + 1);
-        return Up::Refused;
-    }
-    let sectors = last_lba + 1;
-    let sectors_per_block = HOST_BLOCK / block_bytes;
-    let blocks = sectors / sectors_per_block as u64;
-    if blocks == 0 {
-        log!("usb-storage: slot {} holds {sectors} sectors of {block_bytes} B, less \
-             than one 4096-byte block", dev.slot_id);
-        return Up::Refused;
-    }
-
-    dev.logical_block_bytes = block_bytes;
-    dev.sectors_per_block = sectors_per_block;
-    dev.blocks = blocks;
-    dev.identity.sectors = sectors;
-    dev.identity.sector_bytes = block_bytes;
-    Up::Ready
 }
 
 /// The serial number string a device's iSerialNumber names (USB 2.0 §9.6.1),
@@ -1988,32 +1802,13 @@ fn read_serial(ctrl: &mut XhciController, dev: &mut MscDevice, index: u8) -> Ser
         Some((arrived, delivered))
     };
     let Some((languages, delivered)) = get(ctrl, 0, 0) else { return Serial::Unread };
-    // Descriptor zero's first LANGID; a device offering none names no string.
-    if delivered < 4 || languages[0] < 4 || languages[1] != 3 {
-        return Serial::Unread;
-    }
-    let language = u16::from_le_bytes([languages[2], languages[3]]);
+    let Some(language) = identity::first_language(&languages[..delivered]) else { return Serial::Unread };
     match get(ctrl, index, language) {
         Some((arrived, delivered)) => Serial::from_descriptor(&arrived[..delivered]),
         None => Serial::Unread,
     }
 }
 
-/// A device-supplied ASCII field, rendered without letting it choose what the
-/// log looks like.
-struct Printable<'a>(&'a [u8]);
-
-impl core::fmt::Display for Printable<'_> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("\"")?;
-        let mut utf8 = [0u8; 4];
-        for &b in self.0 {
-            let c = if (0x20..0x7F).contains(&b) && b != b'"' { b as char } else { '.' };
-            f.write_str(c.encode_utf8(&mut utf8))?;
-        }
-        f.write_str("\"")
-    }
-}
 /// Read `count` 4 KiB blocks at `lba`. On `Err` the transfer did not happen
 /// and `buf` holds nothing the caller may believe.
 /// The caller must be inside a block-device operation

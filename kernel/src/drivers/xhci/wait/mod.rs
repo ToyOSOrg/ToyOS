@@ -39,9 +39,8 @@ mod depth_probe {
 use crate::log;
 use super::{deadline, enqueue_control, log_unrecoverable, Completion, Trb, TrbRing};
 use super::{XhciController, EVENT_TRANSFER, EVENT_CMD_COMPLETE, USB_TIMEOUT_NS};
-use super::{CC_SUCCESS, CC_SHORT_PACKET};
 use toyos_xhci::call::NotTaken;
-use toyos_xhci::job::Await;
+use toyos_xhci::job::{Await, CC_SHORT_PACKET, CC_STALL, CC_SUCCESS};
 use toyos_xhci::recovery::{Act, NeedsConfigure, Recovery};
 use toyos_xhci::scan;
 
@@ -68,6 +67,9 @@ pub(super) enum Quiet {
     Gone,
     /// What this part of a call whose transport broke may spend ran out before this wait's own timeout did.
     Spent,
+    /// A staged break skipped the wait by design.
+    #[cfg(feature = "boot-actuators")]
+    Staged,
 }
 
 impl Quiet {
@@ -89,6 +91,8 @@ impl Quiet {
                 f,
                 "the bound on this part of the call ran out during the {step} {kind}"
             ),
+            #[cfg(feature = "boot-actuators")]
+            Self::Staged => write!(f, "a staged break skipped the {step} {kind} wait"),
         }
     }
 }
@@ -464,7 +468,7 @@ impl XhciController {
     /// Take EP0 back out of Halted where `code` says the device stalled the
     /// transfer, before the failure reaches a caller likely to send another one.
     fn recover_after(&mut self, slot: u8, ctx_block: usize, ring: &mut TrbRing, code: u32) {
-        if code != super::CC_STALL {
+        if code != CC_STALL {
             return;
         }
         if !self.restart_control_endpoint(slot, ctx_block, ring) {

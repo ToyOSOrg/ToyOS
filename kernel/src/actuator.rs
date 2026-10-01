@@ -115,6 +115,24 @@ actuators! {
     /// The same, with a HARDWARE ERROR in place of ILLEGAL REQUEST.
     usb_flush_fails = "usb-flush-fails";
 
+    /// Abandon the boot's first WRITE(10) data phase without waiting for it.
+    usb_transport_break = "usb-transport-break";
+
+    /// Hold the port rung's first reset, once, until the port reads empty. See
+    /// `xhci::msc::reset_moves`; judged by `usb_stick_left`.
+    usb_reset_moves = "usb-reset-moves";
+
+    /// The same hold, once the reset's completion has been read with the
+    /// device on the port: a device that leaves under a USB2 port's reset.
+    /// See `xhci::msc::reset_moves`; judged by `usb_stick_left`.
+    usb_reset_moves_after = "usb-reset-moves-after";
+
+    /// The same hold, once the port rung has configured the device again and
+    /// before its TEST UNIT READY: a device that leaves after every step of
+    /// the rung was answered. See `xhci::msc::reset_moves`; judged by
+    /// `usb_stick_left`.
+    usb_reset_moves_configured = "usb-reset-moves-configured";
+
     /// Refuse the machine's first stop, `SYS_SHUTDOWN` or `SYS_REBOOT`, before
     /// anything is torn down, as a machine with no way to stop refuses it: the
     /// path on which init tells `logd` the machine runs on. Judged by
@@ -160,6 +178,12 @@ actuators! {
 
     /// Report the preempt depth and backtrace at the deepest point of a disk transfer; it stages nothing, only measures.
     io_depth_probe = "io-depth-probe";
+
+    /// Raise an unheld claim slot's vector inside a post of its own watch,
+    /// inside a completion into a ring polling it, and inside that ring's own
+    /// watch, while the CPU holds preemption off, and count whether the
+    /// handler posted it there.
+    handler_post = "handler-post";
 
     /// Starve the four xHCI bring-up register waits in `init_one`.
     xhci_deaf_controller = "xhci-deaf-controller";

@@ -4,7 +4,8 @@
 mod common;
 
 use common::*;
-use toyos_net_tcp::{isn, siphash24, ts_offset, Instant, Tcp, Tuple};
+use toyos_net_tcp::{isn, ts_offset, Instant, Tcp, Tuple};
+use toyos_net_wire::siphash::siphash24;
 
 fn tuple(local_port: u16, remote_port: u16) -> Tuple {
     Tuple { local: ep(A, local_port), remote: ep(B, remote_port) }

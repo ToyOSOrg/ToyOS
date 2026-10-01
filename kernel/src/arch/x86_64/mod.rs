@@ -50,10 +50,8 @@ pub const ELF_MACHINE: toyos_elf::Machine = toyos_elf::Machine::X86_64;
 
 /// Interrupts masked on this CPU for as long as the guard lives, and then put
 /// back as they were — restored, not enabled — so a guard nests inside a region
-/// that is already masked. The one way this kernel masks and restores: the
-/// scheduler's pass, a log record's reservation and publication, and the
-/// console backend each hold one. `TF` is always clear in Ring 0, so the guard
-/// leaves it alone.
+/// that is already masked. The one way this kernel masks and restores. `TF` is
+/// always clear in Ring 0, so the guard leaves it alone.
 ///
 /// Both edges are compiler barriers (no `nomem`): a memory access written
 /// inside the region is emitted inside it.

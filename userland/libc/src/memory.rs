@@ -14,41 +14,66 @@ extern "C" {
 #[cfg(not(feature = "std-runtime"))]
 mod backend {
     use core::alloc::Layout;
+    use core::ptr;
 
-    const HEADER: usize = 16; // 16 for alignment
-    const ALIGN: usize = 16;
+    /// The alignment every block has at least, and the size of the two words
+    /// in front of it: its size and its alignment.
+    const MIN_ALIGN: usize = 16;
 
-    pub unsafe fn alloc(size: usize) -> *mut u8 {
-        let total = HEADER + size;
-        let layout = unsafe { Layout::from_size_align_unchecked(total, ALIGN) };
+    fn layout(size: usize, align: usize) -> Option<Layout> {
+        Layout::from_size_align(align.checked_add(size)?, align).ok()
+    }
+
+    unsafe fn header(ptr: *mut u8) -> (usize, usize) {
+        unsafe { (*(ptr.sub(16) as *const usize), *(ptr.sub(8) as *const usize)) }
+    }
+
+    /// `size` bytes aligned to `align`, a power of two.
+    pub unsafe fn alloc(size: usize, align: usize) -> *mut u8 {
+        let align = align.max(MIN_ALIGN);
+        let Some(layout) = layout(size, align) else { return ptr::null_mut() };
         let raw = unsafe { alloc::alloc::alloc(layout) };
         if raw.is_null() {
             return raw;
         }
-        unsafe { *(raw as *mut usize) = size; }
-        unsafe { raw.add(HEADER) }
+        unsafe {
+            let ptr = raw.add(align);
+            *(ptr.sub(16) as *mut usize) = size;
+            *(ptr.sub(8) as *mut usize) = align;
+            ptr
+        }
     }
 
     pub unsafe fn dealloc(ptr: *mut u8) {
-        let raw = unsafe { ptr.sub(HEADER) };
-        let size = unsafe { *(raw as *const usize) };
-        let total = HEADER + size;
-        let layout = unsafe { Layout::from_size_align_unchecked(total, ALIGN) };
-        unsafe { alloc::alloc::dealloc(raw, layout) };
+        let (size, align) = unsafe { header(ptr) };
+        let layout = layout(size, align).expect("a block's header is the layout it was allocated with");
+        unsafe { alloc::alloc::dealloc(ptr.sub(align), layout) };
     }
 
     pub unsafe fn realloc(ptr: *mut u8, new_size: usize) -> *mut u8 {
-        let raw = unsafe { ptr.sub(HEADER) };
-        let old_size = unsafe { *(raw as *const usize) };
-        let old_total = HEADER + old_size;
-        let new_total = HEADER + new_size;
-        let layout = unsafe { Layout::from_size_align_unchecked(old_total, ALIGN) };
-        let new_raw = unsafe { alloc::alloc::realloc(raw, layout, new_total) };
-        if new_raw.is_null() {
-            return new_raw;
+        let (size, align) = unsafe { header(ptr) };
+        if align > MIN_ALIGN {
+            let new = unsafe { alloc(new_size, align) };
+            if !new.is_null() {
+                unsafe {
+                    ptr::copy_nonoverlapping(ptr, new, size.min(new_size));
+                    dealloc(ptr);
+                }
+            }
+            return new;
         }
-        unsafe { *(new_raw as *mut usize) = new_size; }
-        unsafe { new_raw.add(HEADER) }
+        let Some(new_total) = MIN_ALIGN.checked_add(new_size) else { return ptr::null_mut() };
+        let layout = layout(size, MIN_ALIGN).expect("a block's header is the layout it was allocated with");
+        let raw = unsafe { alloc::alloc::realloc(ptr.sub(MIN_ALIGN), layout, new_total) };
+        if raw.is_null() {
+            return raw;
+        }
+        unsafe {
+            let ptr = raw.add(MIN_ALIGN);
+            *(ptr.sub(16) as *mut usize) = new_size;
+            *(ptr.sub(8) as *mut usize) = MIN_ALIGN;
+            ptr
+        }
     }
 }
 
@@ -60,7 +85,35 @@ pub unsafe extern "C" fn malloc(size: usize) -> *mut u8 {
     if size == 0 {
         return ptr::null_mut();
     }
-    unsafe { backend::alloc(size) }
+    unsafe { backend::alloc(size, 16) }
+}
+
+#[cfg(not(feature = "std-runtime"))]
+#[no_mangle]
+pub unsafe extern "C" fn aligned_alloc(align: usize, size: usize) -> *mut u8 {
+    if !align.is_power_of_two() {
+        crate::errno::set(crate::errno::EINVAL);
+        return ptr::null_mut();
+    }
+    let p = unsafe { backend::alloc(size, align) };
+    if p.is_null() {
+        crate::errno::set(crate::errno::ENOMEM);
+    }
+    p
+}
+
+#[cfg(not(feature = "std-runtime"))]
+#[no_mangle]
+pub unsafe extern "C" fn posix_memalign(out: *mut *mut u8, align: usize, size: usize) -> i32 {
+    if !align.is_power_of_two() || align % core::mem::size_of::<usize>() != 0 {
+        return crate::errno::EINVAL;
+    }
+    let p = unsafe { backend::alloc(size, align) };
+    if p.is_null() {
+        return crate::errno::ENOMEM;
+    }
+    unsafe { *out = p };
+    0
 }
 
 #[cfg(not(feature = "std-runtime"))]
