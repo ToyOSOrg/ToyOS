@@ -6,7 +6,7 @@
 //! instead of the bytes, which is what `locale detect` needs and what a
 //! terminal writing only translated bytes into a pipe could never give it.
 
-use std::io::{Read, Write};
+use std::io::Write;
 use std::os::fd::AsRawFd;
 use std::os::toyos::process;
 use std::os::toyos::process::CommandExt;
@@ -16,7 +16,8 @@ use terminal::Console;
 use toyos::poller::{Poller, READABLE};
 use toyos::port;
 use toyos::surface::{self, Delivery, Host, Notice};
-use toyos::RawHandle;
+use toyos::{Pipe, RawHandle};
+use toyos_abi::syscall::SyscallError;
 use window::Window;
 
 const TOKEN_STDOUT: u64 = 0;
@@ -44,6 +45,29 @@ fn copy(text: &str) {
     }
 }
 
+/// One of the shell's output pipes, as std spawned it, made a [`Pipe`] this
+/// process can read without waiting.
+fn pipe_end(end: impl AsRawFd) -> Pipe {
+    let raw = RawHandle(end.as_raw_fd() as u32);
+    // std's end is that handle and nothing more, and ToyOS's std gives a
+    // child's pipe no `IntoRawFd`: forgetting it hands the handle on unclosed.
+    std::mem::forget(end);
+    // SAFETY: a live pipe end this process holds, whose one other owner was
+    // just forgotten.
+    unsafe { Pipe::from_raw(raw) }
+}
+
+/// What a readiness answer on one of the shell's pipes leads to: `None` where
+/// the bytes it announced were already read, and an error read as the end, as
+/// a blocking read's was.
+fn read_ready(pipe: &Pipe, buf: &mut [u8]) -> Option<usize> {
+    match pipe.read_nonblock(buf) {
+        Ok(n) => Some(n),
+        Err(SyscallError::WouldBlock) => None,
+        Err(_) => Some(0),
+    }
+}
+
 fn main() {
     // **This terminal's surface is a port it makes, not a name it registers.**
     // One per instance: the connector goes into the namespace of the shell it
@@ -67,8 +91,8 @@ fn main() {
     let mut console = Console::new(window.screen(), font);
 
     let mut shell_stdin = child.stdin.take().unwrap();
-    let mut shell_stdout = child.stdout.take().unwrap();
-    let mut shell_stderr = child.stderr.take().unwrap();
+    let shell_stdout = pipe_end(child.stdout.take().unwrap());
+    let shell_stderr = pipe_end(child.stderr.take().unwrap());
     let poller = Poller::new(3 + Host::POLL_HANDLES);
 
     // The window exists and the shell's stdin is a pipe this process owns, so
@@ -81,8 +105,8 @@ fn main() {
     eprintln!("terminal: ready");
 
     loop {
-        poller.watch_raw(RawHandle(shell_stdout.as_raw_fd() as u32), READABLE, TOKEN_STDOUT);
-        poller.watch_raw(RawHandle(shell_stderr.as_raw_fd() as u32), READABLE, TOKEN_STDERR);
+        poller.watch(&shell_stdout, READABLE, TOKEN_STDOUT);
+        poller.watch(&shell_stderr, READABLE, TOKEN_STDERR);
         poller.watch_raw(window.handle(), READABLE, TOKEN_WINDOW);
         poller.watch_raw(host.acceptor_handle(), READABLE, TOKEN_LISTEN);
         for client in host.client_handles() {
@@ -96,28 +120,30 @@ fn main() {
 
         if ready[TOKEN_STDOUT as usize] {
             let mut buf = [0u8; 4096];
-            let n = shell_stdout.read(&mut buf).unwrap_or(0);
-            if n == 0 {
-                // The child closes every fd together, so a last line it wrote
-                // to stderr right before exiting is already sitting in that
-                // pipe — drained here or it is lost with the loop.
-                let n = shell_stderr.read(&mut buf).unwrap_or(0);
-                if n > 0 {
+            match read_ready(&shell_stdout, &mut buf) {
+                None => {}
+                Some(0) => {
+                    // The child closes every fd together, so a last line it wrote
+                    // to stderr right before exiting is already sitting in that
+                    // pipe — drained here or it is lost with the loop.
+                    if let Some(n @ 1..) = read_ready(&shell_stderr, &mut buf) {
+                        console.write_bytes(&buf[..n]);
+                        std::io::stdout().lock().write_all(&buf[..n]).ok();
+                        present(&console, &window);
+                    }
+                    break;
+                }
+                Some(n) => {
                     console.write_bytes(&buf[..n]);
                     std::io::stdout().lock().write_all(&buf[..n]).ok();
                     present(&console, &window);
                 }
-                break;
             }
-            console.write_bytes(&buf[..n]);
-            std::io::stdout().lock().write_all(&buf[..n]).ok();
-            present(&console, &window);
         }
 
         if ready[TOKEN_STDERR as usize] {
             let mut buf = [0u8; 4096];
-            let n = shell_stderr.read(&mut buf).unwrap_or(0);
-            if n > 0 {
+            if let Some(n @ 1..) = read_ready(&shell_stderr, &mut buf) {
                 console.write_bytes(&buf[..n]);
                 std::io::stdout().lock().write_all(&buf[..n]).ok();
                 present(&console, &window);
@@ -146,8 +172,9 @@ fn main() {
             }
         }
 
-        if ready[TOKEN_WINDOW as usize] {
-            match window.recv_event() {
+        let event = if ready[TOKEN_WINDOW as usize] { window.try_event() } else { None };
+        if let Some(event) = event {
+            match event {
                 // A client holding the grab takes the transition whole, and
                 // the translator is not advanced — see `Window::text`.
                 window::Event::KeyInput(key) if host.deliver(key.into()) == Delivery::Sent => {}

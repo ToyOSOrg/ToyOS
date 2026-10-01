@@ -8,7 +8,9 @@ pub use wait::{Waiter, Waker, Woke};
 pub use toyos_abi::RawHandle;
 use toyos_abi::syscall::SyscallError;
 
-use toyos::ipc;
+use std::time::{Duration, Instant};
+
+use toyos::ipc::{self, FrameRx, RxStep};
 use toyos::AsHandle;
 use toyos::poller::{Poller, READABLE};
 use toyos::endow::{self, EndowError};
@@ -468,6 +470,9 @@ fn copy(bytes: &[u8]) -> Result<(), CreateError> {
 
 pub struct Window {
     conn: Connection,
+    /// Every event is read through this, so none is read with a call that
+    /// waits: see [`Window::try_event`].
+    rx: FrameRx<MAX_INLINE_PAYLOAD>,
     poller: Poller,
     shm: SharedMemory,
     width: u32,
@@ -544,6 +549,7 @@ impl Window {
         let poller = Poller::new(1);
         Ok(Self {
             conn,
+            rx: FrameRx::new(),
             poller,
             shm,
             width: info.width,
@@ -579,11 +585,37 @@ impl Window {
         let _ = self.conn.signal(MSG_LAYOUT_CHANGED);
     }
 
+    /// The next event, waiting for as long as that takes.
     pub fn recv_event(&mut self) -> Event {
-        let Ok(header) = self.conn.recv_header() else {
-            return Event::Close;
-        };
-        self.decode_event(&header)
+        loop {
+            if let Some(event) = self.try_event() {
+                return event;
+            }
+            self.wait_readable(u64::MAX);
+        }
+    }
+
+    /// The next event if a whole one has arrived, and `None` at once if not.
+    ///
+    /// **The read for a loop that waits on [`Window::handle`] itself, because
+    /// a readiness answer is a cue to look and not a frame.** A poll left armed
+    /// by an earlier wait can answer for a frame a later read already took, and
+    /// a read that waits on that answer waits for the compositor's next
+    /// message — which a window that has stopped presenting is never sent.
+    pub fn try_event(&mut self) -> Option<Event> {
+        match self.rx.pump(&self.conn) {
+            RxStep::Idle => None,
+            RxStep::Eof | RxStep::Malformed => Some(Event::Close),
+            RxStep::Frame { msg_type, payload_len } => Some(self.decode_event(msg_type, payload_len)),
+        }
+    }
+
+    /// Whether the connection read ready before `timeout_nanos` passed.
+    fn wait_readable(&self, timeout_nanos: u64) -> bool {
+        self.poller.watch(&self.conn, READABLE, 0);
+        let mut ready = false;
+        self.poller.wait(1, timeout_nanos, |_| ready = true);
+        ready
     }
 
     /// The next event, or `None` when `timeout_nanos` passes — and `None`
@@ -603,23 +635,37 @@ impl Window {
         if self.closed {
             return None;
         }
-        self.poller.watch(&self.conn, READABLE, 0);
-        let mut ready = false;
-        self.poller.wait(1, timeout_nanos, |_| ready = true);
-        if !ready {
-            return None;
+        // `u64::MAX` is the poller's "forever", and so is a timeout no
+        // `Instant` reaches.
+        let deadline = (timeout_nanos != u64::MAX)
+            .then(|| Instant::now().checked_add(Duration::from_nanos(timeout_nanos)))
+            .flatten();
+        loop {
+            if let Some(event) = self.try_event() {
+                self.closed = matches!(&event, Event::Close);
+                return Some(event);
+            }
+            let wait = match deadline {
+                None => u64::MAX,
+                Some(at) => match at.checked_duration_since(Instant::now()) {
+                    Some(left) if !left.is_zero() => {
+                        u64::try_from(left.as_nanos()).map_or(u64::MAX - 1, |n| n.min(u64::MAX - 1))
+                    }
+                    _ => return None,
+                },
+            };
+            if !self.wait_readable(wait) {
+                return None;
+            }
         }
-        let event = self.recv_event();
-        self.closed = matches!(&event, Event::Close);
-        Some(event)
     }
 
     /// A message the compositor cannot have meant closes the window rather
     /// than killing the client: this side is a library inside somebody else's
     /// program, and it has a way to say "the session is over".
-    fn decode_event(&mut self, header: &ipc::IpcHeader) -> Event {
-        match header.msg_type {
-            MSG_KEY_INPUT => match self.conn.recv_payload::<KeyEvent>(header) {
+    fn decode_event(&mut self, msg_type: u32, len: usize) -> Event {
+        match msg_type {
+            MSG_KEY_INPUT => match ipc::decode_payload::<KeyEvent>(self.rx.payload(len)) {
                 Ok(key) => Event::KeyInput(key),
                 Err(_) => Event::Close,
             },
@@ -627,12 +673,12 @@ impl Window {
                 load_layout(&mut self.translator);
                 Event::LayoutChanged
             }
-            MSG_MOUSE_INPUT => match self.conn.recv_payload(header) {
+            MSG_MOUSE_INPUT => match ipc::decode_payload(self.rx.payload(len)) {
                 Ok(ev) => Event::MouseInput(ev),
                 Err(_) => Event::Close,
             },
             MSG_WINDOW_RESIZED => {
-                let Ok(info) = self.conn.recv_payload::<ResizeInfo>(header) else {
+                let Ok(info) = ipc::decode_payload::<ResizeInfo>(self.rx.payload(len)) else {
                     return Event::Close;
                 };
                 let buf_size = info.stride as usize * info.height as usize * 4;
@@ -651,15 +697,9 @@ impl Window {
                 self.pixel_format = info.pixel_format;
                 Event::Resized
             }
-            MSG_CLIPBOARD_PASTE => {
-                let mut buf = [0u8; MAX_INLINE_PAYLOAD];
-                let Ok(n) = self.conn.recv_bytes(header, &mut buf) else {
-                    return Event::Close;
-                };
-                Event::ClipboardPaste(buf[..n].to_vec())
-            }
+            MSG_CLIPBOARD_PASTE => Event::ClipboardPaste(self.rx.payload(len).to_vec()),
             MSG_CLIPBOARD_PASTE_SHM => {
-                let Ok(info) = self.conn.recv_payload::<ClipboardShmMsg>(header) else {
+                let Ok(info) = ipc::decode_payload::<ClipboardShmMsg>(self.rx.payload(len)) else {
                     return Event::Close;
                 };
                 let Some([buffer]) = self.conn.recv_handles_exact::<1>() else {
