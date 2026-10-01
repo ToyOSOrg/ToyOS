@@ -61,8 +61,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      # CMake is what bootstrap configures LLVM and clang with, pinned to the
-      # version Ubuntu 24.04 released.
       - name: disk, QEMU and CMake
         run: |
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
@@ -209,7 +207,6 @@ jobs:
     steps:
       - *checkout
       # Homebrew keeps one QEMU; `cargo run` notes it if it is not the declared one.
-      # CMake configures LLVM and clang, from Homebrew as on the dev host.
       - run: |
           brew install qemu cmake
       - run: |

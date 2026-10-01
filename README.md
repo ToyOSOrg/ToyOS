@@ -229,9 +229,8 @@ same font the kernel blits.
 install. `rust/x`, the entry point to rustc's own bootstrap, is a shell script
 whose whole job is to find a Python to run `bootstrap.py` with — so a clean
 clone needs one, and so does every toolchain change. And that bootstrap builds
-LLVM and clang from source with CMake, whenever the LLVM commit `rust/` names
-has not been built on the machine before; the Ninja it runs is n2, which the
-build installs with cargo.
+LLVM and clang from source with CMake, whenever the LLVM commit
+`rust/` names has not been built on the machine before.
 
 Nothing in the OS goes near any of them. `bootloader/`, `kernel/` and
 `userland/` all link with the toolchain's `rust-lld`, and no image contains a C

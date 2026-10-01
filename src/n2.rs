@@ -1,6 +1,6 @@
 //! n2, the Rust Ninja, and the only Ninja the build runs: under the name
 //! `ninja`, which is how CMake's Ninja generator and rustc's bootstrap ask for
-//! one, for the LLVM (`src/llvm.rs`) and for the C++ runtime (`src/libcxx.rs`).
+//! one.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -26,12 +26,13 @@ fn installed(root: &Path) -> PathBuf {
     root.join("target/n2").join(crate::sysroot::short(N2.join("\0").as_bytes()))
 }
 
-/// [`N2`], installed under `root` unless it is there, by the name `ninja`, under
-/// which it speaks the Ninja CMake asks for. The directory holding it holds
-/// nothing else but n2.
-pub fn ninja(root: &Path) -> PathBuf {
+/// The directory [`N2`] installs n2 in under `root`, installing it unless it is
+/// there. It holds n2 and nothing else but a link to it named `ninja`, the name
+/// under which n2 speaks the Ninja CMake asks for.
+pub fn bin(root: &Path) -> PathBuf {
     let dir = installed(root);
-    let ninja = dir.join("bin/ninja");
+    let bin = dir.join("bin");
+    let ninja = bin.join("ninja");
     // The link is made only once cargo has installed what it names.
     if !ninja.is_file() {
         let status = Command::new("cargo")
@@ -45,7 +46,12 @@ pub fn ninja(root: &Path) -> PathBuf {
         std::os::unix::fs::symlink("n2", &ninja).unwrap_or_else(|e| panic!("symlink {} -> n2: {e}", ninja.display()));
         assert!(ninja.is_file(), "n2 installed into {}, and {} names no file", dir.display(), ninja.display());
     }
-    ninja
+    bin
+}
+
+/// n2 by the name `ninja`, in [`bin`].
+pub fn ninja(root: &Path) -> PathBuf {
+    bin(root).join("ninja")
 }
 
 #[cfg(test)]
@@ -55,7 +61,7 @@ pub(crate) mod tests {
     use super::*;
     use toyos_tmpdir::TempDir;
 
-    /// What [`ninja`] leaves under `root`, with an empty `n2`: its `bin`.
+    /// What [`bin`] leaves under `root`, with an empty `n2`.
     pub(crate) fn installed_stand_in(root: &Path) -> PathBuf {
         let bin = installed(root).join("bin");
         fs::create_dir_all(&bin).unwrap();
@@ -69,9 +75,10 @@ pub(crate) mod tests {
     #[test]
     fn an_installed_n2_is_not_installed_again() {
         let root = TempDir::new("n2");
-        let bin = installed_stand_in(&root);
+        let stand_in = installed_stand_in(&root);
 
-        assert_eq!(ninja(&root), bin.join("ninja"));
-        assert!(fs::read(bin.join("n2")).unwrap().is_empty(), "the installed n2 was replaced");
+        assert_eq!(bin(&root), stand_in);
+        assert_eq!(ninja(&root), stand_in.join("ninja"));
+        assert!(fs::read(stand_in.join("n2")).unwrap().is_empty(), "the installed n2 was replaced");
     }
 }

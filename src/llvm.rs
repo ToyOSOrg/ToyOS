@@ -373,12 +373,11 @@ pub fn retire_in_tree(build: &Path) {
 /// Bootstrap's build of LLVM, clang and LLD in `fork`, into its own build
 /// directory, which it returns, under the n2 installed under `root`.
 fn build_in_fork(root: &Path, fork: &Path) -> PathBuf {
-    let ninja = crate::n2::ninja(root);
+    let n2 = crate::n2::bin(root);
     // Bootstrap refuses to build with no `ninja` on `PATH`, and CMake's Ninja
-    // generator runs the first one there; the directory holds nothing but n2.
-    let n2 = ninja.parent().unwrap_or_else(|| panic!("{} is in no directory", ninja.display()));
-    let rest: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
-    let path = std::env::join_paths(std::iter::once(n2.to_path_buf()).chain(rest))
+    // generator runs the first one there; n2's directory holds nothing but n2.
+    let caller = std::env::var_os("PATH").unwrap_or_else(|| panic!("PATH is unset, and the LLVM build finds its tools on it"));
+    let path = std::env::join_paths(std::iter::once(n2.clone()).chain(std::env::split_paths(&caller)))
         .unwrap_or_else(|e| panic!("{} cannot lead PATH: {e}", n2.display()));
     let host = host_triple();
     let build_dir = fork.join("build/toyos-llvm");
