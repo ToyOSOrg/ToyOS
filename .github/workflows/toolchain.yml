@@ -1,0 +1,44 @@
+name: toolchain
+
+# A tree's toolchain, bootstrapped only where no build answers for its tag, and
+# kept as this run's artifact (src/release.rs). Nothing here publishes, and the
+# job holds only the token its caller gives it.
+
+on:
+  workflow_call:
+
+jobs:
+  build:
+    # Bare, not a container: its glibc is a build's floor.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      # The whole history: which builds answer for this tree is read off it.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - id: find
+        run: cargo run -- --ci toolchain
+
+      # What a bootstrap needs, and only when there is one to do.
+      - name: disk, QEMU and CMake
+        if: steps.find.outputs.bootstrap == 'true'
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                      /usr/local/share/boost /usr/local/.ghcup
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq qemu-system-x86 zstd \
+                      cmake=3.28.3-1build7
+
+      - run: cargo run -- --ci bootstrap
+
+      # Whole, not zipped: GitHub's digest of the artifact is then the
+      # tarball's own, which an install holds its download to.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          path: target/toolchain/*.tar.zst
+          archive: false
+          if-no-files-found: ignore

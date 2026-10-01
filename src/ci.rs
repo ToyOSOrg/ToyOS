@@ -2,15 +2,6 @@
 //! checkout, a cache and one line, and this host runs the same job to the same
 //! verdict.
 //!
-//! `.github/workflows/` is three files. `ci.yml` runs on a pull request and in
-//! the merge queue: [`Job::Host`] as `host`, [`Job::Toolchain`] as
-//! `toolchain`, and [`Job::Guest`] as `guest`, its x86-64 guests on KVM. Every
-//! test that boots no guest is in [`Job::Host`] and every guest test in
-//! [`Job::Guest`], so a merge is gated on all of them. `nightly.yml` runs the
-//! guest suite again under TCG, the toolchain again to move the SDK alias on
-//! main, `host` again to write the cache the merge queue restores, and
-//! portability. `publish.yml` puts a landing's crates on crates.io.
-//!
 //! A host job runs every step and reds if any failed; a guest job stops at the
 //! first failure among the instrument, the toolchain and the suite, because
 //! what follows a wrong instrument or a missing toolchain measures nothing —
@@ -36,15 +27,19 @@ const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
   host              every host test: the build system, the harness's own checks,
                     the host workspace, the licences of what ships, clippy, the
                     model controls, userland and the SDK (ci.yml, nightly)
-  toolchain         publish this tree's toolchain if nobody has (ci.yml, nightly)
-  guest             the guest suite (ci.yml, nightly)
+  toolchain         whether a build of this tree's toolchain answers for it
+  bootstrap         build this tree's toolchain, unless a build answers for it
+  guest             the guest suite, on the build that answers for this tree
+  release           put main's build up as its toolchain release: main's publisher alone
   publish           put main's SDK crates on crates.io (publish.yml)";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Job {
     Host,
     Toolchain,
+    Bootstrap,
     Guest,
+    Release,
     Publish,
 }
 
@@ -52,7 +47,9 @@ fn parse(words: &[String]) -> Result<Job, String> {
     let job = match words.first().map(String::as_str) {
         Some("host") => Job::Host,
         Some("toolchain") => Job::Toolchain,
+        Some("bootstrap") => Job::Bootstrap,
         Some("guest") => Job::Guest,
+        Some("release") => Job::Release,
         Some("publish") => Job::Publish,
         Some(other) => return Err(format!("no CI job is called {other:?}")),
         None => return Err("which job?".to_string()),
@@ -70,8 +67,10 @@ pub fn dispatch(root: &Path, args: &[String]) {
     });
     let steps = match &job {
         Job::Host => host(root),
-        Job::Toolchain => vec![step("the toolchain release", || release::ensure_published(root))],
+        Job::Toolchain => vec![step("a build of this tree's toolchain", || release::toolchain(root))],
+        Job::Bootstrap => vec![step("this tree's toolchain", || release::bootstrap(root))],
         Job::Guest => guest(root, &suite_args(&["--jobs", "1"])),
+        Job::Release => vec![step("main's toolchain release", || release::release(root))],
         Job::Publish => vec![step("the SDK crates on crates.io", || publish(root))],
     };
     let failed: Vec<&Step> = steps.iter().filter(|s| s.verdict.is_err()).collect();
@@ -857,6 +856,7 @@ mod tests {
     fn a_job_is_named_and_takes_nothing_after_it() {
         assert_eq!(parse(&words("host")), Ok(Job::Host));
         assert_eq!(parse(&words("guest")), Ok(Job::Guest));
+        assert_eq!(parse(&words("release")), Ok(Job::Release));
         assert!(parse(&words("guest 3/12")).is_err());
         assert!(parse(&words("tcg")).is_err());
         assert!(parse(&words("host extra")).is_err());
@@ -948,38 +948,69 @@ mod tests {
             .collect()
     }
 
-    /// `host` and `guest` are the required checks. A skipped job reads as green
-    /// to one, so `guest` runs whatever `toolchain` concluded.
-    #[test]
-    fn the_required_checks_are_jobs_on_every_pull_request() {
-        let text = workflow("ci.yml");
-        assert!(text.contains("\n  pull_request:\n") && text.contains("\n  merge_group:"));
-        assert!(!job(&text, "host").is_empty(), "ci.yml runs no job `host`");
-        let guest = job(&text, "guest").join("\n");
-        assert!(guest.contains("needs: toolchain") && guest.contains("!cancelled()"), "{guest}");
+    /// The value of a job's own `<key>:` line.
+    fn field(job: &[&str], key: &str) -> Option<String> {
+        let line = format!("    {key}: ");
+        job.iter().find_map(|l| l.strip_prefix(&line)).map(str::to_string)
     }
 
-    /// ci.yml's `guest` and the nightly's `tcg` boot one instrument and share
-    /// one cache: the image's digest pins QEMU and its firmware, and a restore
-    /// whose paths are not its writer's restores nothing, in silence.
+    /// A skipped job reads as green to a required check, so `guest` runs on
+    /// every pull request and in the merge queue whatever `toolchain`
+    /// concluded: its condition is `host`'s and `!cancelled()`, and nothing
+    /// more. The nightly's `tcg` runs the same way.
     #[test]
-    fn the_guest_lanes_share_an_instrument_and_a_cache() {
-        let lane = |file: &str, name: &str| {
-            let text = workflow(file);
-            let lines = job(&text, name);
-            let image = lines.iter().find_map(|l| l.trim_start().strip_prefix("image: "));
-            let paths: Vec<&str> = lines
-                .iter()
-                .skip_while(|l| !l.trim_start().starts_with("path:"))
-                .skip(1)
-                .take_while(|l| !l.trim_start().starts_with("key:"))
-                .map(|l| l.trim())
-                .collect();
-            (image.map(str::to_string), paths.join("\n"))
+    fn the_guest_lanes_run_whatever_the_toolchain_concluded() {
+        let ci = workflow("ci.yml");
+        assert!(ci.contains("\n  pull_request:\n") && ci.contains("\n  merge_group:"));
+        let host = field(&job(&ci, "host"), "if").expect("ci.yml's `host` has a condition");
+        let guest = job(&ci, "guest");
+        assert_eq!(field(&guest, "if"), Some(format!("${{{{ !cancelled() && ({host}) }}}}")));
+        assert_eq!(field(&guest, "needs").as_deref(), Some("toolchain"));
+        assert_eq!(field(&guest, "uses").as_deref(), Some("./.github/workflows/guest.yml"));
+        assert_eq!(field(&job(&ci, "toolchain"), "uses").as_deref(), Some("./.github/workflows/toolchain.yml"));
+        let nightly = workflow("nightly.yml");
+        let tcg = job(&nightly, "tcg");
+        assert_eq!(field(&tcg, "if").as_deref(), Some("${{ !cancelled() }}"));
+        assert_eq!(field(&tcg, "needs").as_deref(), Some("toolchain"));
+        assert_eq!(field(&tcg, "uses").as_deref(), Some("./.github/workflows/guest.yml"));
+    }
+
+    /// No job a pull request, the merge queue or the nightly runs holds a token
+    /// that writes this repository: `ci.yml` and `nightly.yml` give their jobs
+    /// read alone, the workflows they call ask for nothing of their own, and
+    /// the one `contents: write` is `publish.yml`'s `release`, which main alone
+    /// triggers and which alone runs `--ci release`.
+    #[test]
+    fn only_mains_publisher_holds_a_write_token() {
+        let writes = |text: &str| -> Vec<String> {
+            let grants = |l: &&str| l.trim_end().ends_with(": write") || l.contains("write-all");
+            text.lines().filter(grants).map(|l| l.trim().to_string()).collect()
         };
-        let (pr, nightly) = (lane("ci.yml", "guest"), lane("nightly.yml", "tcg"));
-        assert!(pr.0.as_deref().is_some_and(|i| i.contains("@sha256:")) && !pr.1.is_empty(), "{pr:?}");
-        assert_eq!(pr, nightly);
+        for name in ["ci.yml", "nightly.yml"] {
+            let text = workflow(name);
+            assert!(text.contains("\npermissions:\n  contents: read\n  actions: read\n\n"), "{name}");
+            assert!(writes(&text).is_empty() && !text.contains("--ci release"), "{name}: {:?}", writes(&text));
+        }
+        for name in ["guest.yml", "toolchain.yml"] {
+            let text = workflow(name);
+            assert!(!text.contains("permissions:") && !text.contains("--ci release"), "{name}");
+        }
+        let publish = workflow("publish.yml");
+        assert!(publish.contains("\non:\n  push:\n    branches: [main]\n  workflow_dispatch: {}\n"), "{publish}");
+        assert_eq!(writes(&publish), ["id-token: write", "contents: write"]);
+        let release = job(&publish, "release");
+        assert!(release.contains(&"      contents: write"), "{release:?}");
+        assert!(release.contains(&"        run: cargo run -- --ci release"), "{release:?}");
+        assert_eq!(publish.matches("--ci release").count(), 1);
+    }
+
+    /// `toolchain.yml` uploads whole what `--ci bootstrap` leaves: a path that
+    /// missed it would upload nothing, and say nothing.
+    #[test]
+    fn the_toolchain_job_uploads_what_bootstrap_keeps() {
+        let text = workflow("toolchain.yml");
+        let upload = format!("          path: {}/*.tar.zst\n          archive: false\n", release::KEPT);
+        assert!(text.contains(&upload), "{text}");
     }
 
     /// Every workflow's `pull_request:` trigger names `main` alone, and none
@@ -1004,11 +1035,12 @@ mod tests {
                 );
             }
         }
-        assert_eq!(seen, 3, "ci.yml, nightly.yml and publish.yml");
+        assert_eq!(seen, 5, "ci.yml, nightly.yml and publish.yml, and guest.yml and toolchain.yml");
     }
 
     /// Exactly one job writes each cache, on the nightly, so what a pull request
     /// restores is one run's tree and never a race between two writers.
+    /// `guest.yml` saves only when its caller asks, and only the nightly asks.
     #[test]
     fn each_cache_has_one_writer() {
         let dir = repo_root().join(".github/workflows");
@@ -1017,6 +1049,7 @@ mod tests {
             let text = std::fs::read_to_string(entry.path()).expect("a readable workflow");
             let name = entry.file_name().to_string_lossy().into_owned();
             assert!(!text.contains("actions/cache@"), "{name}: the combined action saves too");
+            assert!(name == "nightly.yml" || name == "guest.yml" || !text.contains("save-cache"), "{name}");
             let lines: Vec<&str> = text.lines().collect();
             for (at, line) in lines.iter().enumerate() {
                 if line.contains("actions/cache/save@") {
@@ -1024,16 +1057,20 @@ mod tests {
                         .iter()
                         .find_map(|l| l.trim_start().strip_prefix("key: "))
                         .expect("a save names its key");
-                    writers.push((name.clone(), key.split('$').next().unwrap_or("").to_string()));
+                    let asked = lines[at - 1].trim() == "- if: inputs.save-cache";
+                    writers.push((name.clone(), key.split('$').next().unwrap_or("").to_string(), asked));
                 }
             }
         }
         assert!(!writers.is_empty(), "no job writes a cache, so every restore is cold");
         writers.sort();
-        let mut prefixes: Vec<&String> = writers.iter().map(|(_, p)| p).collect();
+        let mut prefixes: Vec<&String> = writers.iter().map(|(_, p, _)| p).collect();
         prefixes.dedup();
         assert_eq!(prefixes.len(), writers.len(), "a cache with two writers: {writers:?}");
-        assert!(writers.iter().all(|(f, _)| f == "nightly.yml"), "{writers:?}");
+        assert!(
+            writers.iter().all(|(f, _, asked)| f == "nightly.yml" || (f == "guest.yml" && *asked)),
+            "{writers:?}"
+        );
     }
 
     #[test]

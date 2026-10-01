@@ -26,9 +26,6 @@ use crate::arch::Arch;
 use crate::sysroot::clone_tree;
 use crate::toolchain::host_triple;
 
-/// This file, which the release tag hashes.
-pub(crate) const SOURCE: &str = file!();
-
 /// The LLVM every host compiler links, in every `bootstrap.toml` that builds
 /// one: built from `src/llvm-project` — the fork that knows the ToyOS target —
 /// with clang beside it, for the host and the two architectures ToyOS runs on.

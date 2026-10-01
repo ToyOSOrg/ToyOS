@@ -66,11 +66,11 @@ static RUN: OnceLock<PathBuf> = OnceLock::new();
 /// it, and it is gone when the run is, green or red (`toyos_tmpdir` is the
 /// policy, and what reclaims the directory of a run that was killed).
 ///
-/// A red run's serial logs are the parts of it read afterwards, as CI's
-/// artifact, so they are copied to a directory of their own under
-/// [`RED_RUN_SERIAL`] first: megabytes, where the images are gigabytes. Named for this run's own root — unique across every process a
-/// shared `$TMPDIR` ever holds — so two red runs of one worktree never share,
-/// and neither overwrites, a destination.
+/// A red run's serial logs are the parts of it read afterwards, so they are
+/// copied to a directory of their own under [`RED_RUN_SERIAL`] first:
+/// megabytes, where the images are gigabytes. Named for this run's own root —
+/// unique across every process a shared `$TMPDIR` ever holds — so two red runs
+/// of one worktree never share, and neither overwrites, a destination.
 ///
 /// [`Run::exit`] is the one way out of the suite with a status; returning from
 /// `main` drops this as green, and unwinding out of it as red.

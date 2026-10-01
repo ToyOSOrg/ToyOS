@@ -586,9 +586,9 @@ pub fn ensure(root: &Path, lock: &mut buildlock::Held) -> Sysroot {
 /// it is the one this tree needs, and say what to do when it is not.
 ///
 /// No amount of source here can rebuild a sysroot without `rust/`, so there is
-/// nothing to decide and the answer is always to publish a toolchain built from
-/// these sources. Its std fork is pinned by the release tag, which is a function
-/// of `rust` (`src/release.rs`).
+/// nothing to decide and the answer is always the toolchain built from these
+/// sources: the one the release tag names, which hashes every source and every
+/// module it is built from (`src/release.rs`).
 fn check_installed_toolchain(root: &Path, rust_dir: &Path) {
     let stage2 = stage2(rust_dir);
     let linked = rustup_link();
@@ -621,7 +621,8 @@ fn check_installed_toolchain(root: &Path, rust_dir: &Path) {
         recorded.as_deref() == Some(want.as_str()),
         "this checkout and the installed toolchain at {} disagree about {}, so a build \
          here would link its kernel against another tree's struct layouts.\n\
-         Publish a toolchain built from these sources and install that one instead.",
+         Install the build this tree's release tag names; if that is the one installed, \
+         the tag hashes less than the toolchain is built from (`src/release.rs`).",
         stage2.display(),
         differing_trees(recorded.as_deref(), &want),
     );

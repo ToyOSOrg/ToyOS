@@ -33,8 +33,8 @@ scaffolding, deleted once its question is answered.
 Every task gets a fresh agent with an explicit model matched to the judgment in it: the strongest
 for drivers, security boundaries and reviews of them, and a mid tier for mechanical fixes from an
 exact list. A resumed agent only ever finishes its own interrupted task. A finished agent's report
-is acted on before the next agent is dispatched: its review spawned, or its fix round sent. When
-the permission check refuses an agent, ask the owner and never route around it.
+is acted on before the next agent is dispatched: its guest runs queued, its review spawned, or its
+fix round sent. When the permission check refuses an agent, ask the owner and never route around it.
 A brief is the fence: what to build, where it may touch, the worktree and branch, the scratchpad
 for its logs, and the two checks expected of high-risk code. The role files carry the standing
 rules, so a brief carries only the task.
@@ -68,7 +68,7 @@ its script path under the job directory, and revert any mutation a killed run le
 left mid-flash or mid-boot is power-cycled by the owner and comes back to Ubuntu: BootNext is
 one-shot.
 
-A metal mutation loop starts on a clean worktree at the head under review and leaves it
+A mutation loop, guest or metal, starts on a clean worktree at the head under review and leaves it
 clean: `git apply --check`, `git apply`, the tests by name, `git apply -R`. None runs while an
 agent edits that worktree. A queue script passes only flags `src/testargs.rs` declares: any other
 word becomes the run's filter, and a one-test run reports as a pass.

@@ -8,8 +8,8 @@ opened: 2026-09-29
 
 Parity with Linux at `Ubuntu-6.8.0-142.142`, pinned by the first issue below,
 is the floor on every CPU ToyOS supports, and the kernel also takes every
-security feature such a CPU offers. The proving machines are the T14 and the
-nightly's AMD EPYC KVM guests; the PR gate's TCG model proves wiring only. A
+security feature such a CPU offers. The proving machines are the T14 and
+AMD EPYC KVM guests; the PR gate's TCG model proves wiring only. A
 probe is a `boot-actuators` arm or a `test-actuators` `SYS_DEBUG` action.
 
 **Exit**: every issue below is closed, in the order listed.
