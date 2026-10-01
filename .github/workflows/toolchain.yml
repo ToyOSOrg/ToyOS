@@ -13,6 +13,10 @@ jobs:
     # Bare, not a container: its glibc is a build's floor.
     runs-on: ubuntu-24.04
     timeout-minutes: 350
+    # Main's two callers build one key once, one after the other.
+    concurrency:
+      group: toolchain-${{ github.ref }}
+      cancel-in-progress: false
     outputs:
       sysroot-key: ${{ steps.keys.outputs.sysroot-key }}
       sysroot-path: ${{ steps.keys.outputs.sysroot-path }}
@@ -45,19 +49,21 @@ jobs:
       - id: build
         run: cargo run -- --ci bootstrap
 
-      - if: steps.build.outputs.llvm == 'built'
+      # A merge group's scope is read only by its own guest job, which restores
+      # the sysroot alone.
+      - if: steps.build.outputs.llvm == 'built' && github.event_name != 'merge_group'
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ steps.keys.outputs.llvm-path }}
           key: ${{ steps.keys.outputs.llvm-key }}
 
-      - if: steps.build.outputs.compiler == 'built'
+      - if: steps.build.outputs.compiler == 'built' && github.event_name != 'merge_group'
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ steps.keys.outputs.compiler-path }}
           key: ${{ steps.keys.outputs.compiler-key }}
 
-      - if: steps.build.outputs.freestanding == 'built'
+      - if: steps.build.outputs.freestanding == 'built' && github.event_name != 'merge_group'
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ steps.keys.outputs.freestanding-path }}

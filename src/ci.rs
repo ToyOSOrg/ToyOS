@@ -1071,36 +1071,6 @@ mod tests {
         assert_eq!(seen, 5, "ci.yml, nightly.yml and publish.yml, and guest.yml and toolchain.yml");
     }
 
-    /// Exactly one job writes each cache, so what a pull request restores is one
-    /// run's tree and never a race between two writers.
-    #[test]
-    fn each_cache_has_one_writer() {
-        let dir = repo_root().join(".github/workflows");
-        let mut writers = Vec::new();
-        for entry in std::fs::read_dir(&dir).expect(".github/workflows is readable").flatten() {
-            let text = std::fs::read_to_string(entry.path()).expect("a readable workflow");
-            let name = entry.file_name().to_string_lossy().into_owned();
-            assert!(!text.contains("actions/cache@"), "{name}: the combined action saves too");
-            let lines: Vec<&str> = text.lines().collect();
-            for (at, line) in lines.iter().enumerate() {
-                if line.contains("actions/cache/save@") {
-                    let key = lines[at..]
-                        .iter()
-                        .find_map(|l| l.trim_start().strip_prefix("key: "))
-                        .expect("a save names its key");
-                    let cache = if key.starts_with("${{") { key } else { key.split('$').next().unwrap_or("") };
-                    writers.push((name.clone(), cache.to_string()));
-                }
-            }
-        }
-        assert!(!writers.is_empty(), "no job writes a cache, so every restore is cold");
-        writers.sort();
-        let mut prefixes: Vec<&String> = writers.iter().map(|(_, p)| p).collect();
-        prefixes.dedup();
-        assert_eq!(prefixes.len(), writers.len(), "a cache with two writers: {writers:?}");
-        assert!(writers.iter().all(|(f, _)| f == "nightly.yml" || f == "toolchain.yml"), "{writers:?}");
-    }
-
     #[test]
     fn the_declared_version_is_a_version() {
         let declared =

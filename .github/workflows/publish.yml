@@ -37,9 +37,6 @@ jobs:
         run: cargo run -- --ci publish
 
   toolchain:
-    concurrency:
-      group: publish-toolchain
-      cancel-in-progress: false
     permissions:
       contents: read
     uses: ./.github/workflows/toolchain.yml

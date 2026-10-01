@@ -105,7 +105,7 @@ jobs:
       - &checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - run: env -u GITHUB_ACTIONS -u CI cargo run -- --build-only
+      - run: cargo run -- --build-only
 
   portability-macos:
     runs-on: macos-latest
@@ -119,6 +119,6 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf -o "$RUNNER_TEMP/rustup-init.sh" https://sh.rustup.rs
           sh "$RUNNER_TEMP/rustup-init.sh" -y --profile minimal --default-toolchain stable
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - run: env -u GITHUB_ACTIONS -u CI cargo run -- --build-only
+      - run: cargo run -- --build-only
       # The host suite's macOS arms run here alone: `ci.yml`'s `host` is Linux.
       - run: cargo run -- --ci host

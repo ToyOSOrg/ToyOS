@@ -80,8 +80,9 @@ above; otherwise it is a NOTE.
   or `[patch]`, which cargo ignores with only a warning; a new package without a `description`
   saying what it is.
   A new cargo feature or `cfg` arm of one, and every arm a changed `src/clippy.rs` shape stops building, is shown linted in the pull request body: a `mem::forget` planted in that arm turns `cargo run -- --clippy` red.
-- **Workflows.** GitHub's cache scoping is the provenance of every cache entry, so a BLOCKER each:
-  - Only main's runs save a cache entry other refs restore.
+- **Workflows.** A BLOCKER each:
+  - Only main's runs save a cache entry other refs restore: GitHub's cache scoping is every entry's provenance.
+  - `nightly.yml`'s `release` is the only job granted `contents: write`.
   - No workflow runs on `pull_request_target`, `workflow_run`, `issue_comment` or any other trigger that runs code other than main's on main's ref.
   - No workflow or job declares `cache-mode: write` or `write-only`.
   - `guest / suite` has no job-level `if:`, and a job that calls it runs whatever `toolchain` concluded: a skipped required check reads as green.
