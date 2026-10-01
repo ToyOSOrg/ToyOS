@@ -36,7 +36,8 @@ pub fn echo(token: u32) {
 
 /// Commit the AP that echoed `at` under `hardware_id`, the id its roster slot
 /// and every IPI name it by, which must be the one it reads as its own: its
-/// fatal paths and the console lock name it by that read.
+/// fatal paths and the console lock name it by that read. Refused here, on the
+/// boot CPU, because before the release an AP's own panic stops no other CPU.
 pub fn commit(at: Attempt, hardware_id: u32) {
     // Ordered by the echo, whose acquire `Roster::await_echo` took.
     let read = ECHOED_ID.load(Ordering::Relaxed);
