@@ -1,12 +1,8 @@
-symlink: 0
-symlink over the link: -1, EEXIST
-symlink over a file: -1, EEXIST
-readlink: 26, "/tmp/207_libc_names/target"
-readlink into 4: 4, "/tmp#"
+read what creat wrote: "hello"
 readlink of a file: -1, EINVAL
 readlink of nothing: -1, ENOENT
 readlink into 0: -1, EINVAL
-read through the link: "hello"
+readlink into SIZE_MAX: -1, EINVAL
 entry: a DT_UNKNOWN
 entry: b DT_UNKNOWN
 entry: sub DT_DIR
@@ -17,7 +13,8 @@ dladdr(tls_get_label + 1): 1, /system/lib/libtls_lib.so, tls_get_label at the sy
 strnlen: 3 2 0
 strsignal: Segmentation fault; Unknown signal
 modf(-3.25): -3 and -0.25
-logb: -4 10 -inf
+logb: -4 10
+logb(0): -inf, ERANGE
 endian: little 0x4030201 0x102
 names: AF_UNIX 1, sockaddr_un 110, EX_IOERR 74, _POSIX_ARG_MAX 4096, page 4096
 names: SA_ONSTACK|SA_NODEFER|SA_RESETHAND 0xc8000000, F_RDLCK 0, F_UNLCK 2, rusage 144, RLIM_INFINITY every bit

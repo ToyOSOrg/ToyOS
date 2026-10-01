@@ -67,6 +67,7 @@ int main(void) {
     said("gethostname", gethostname(buf, sizeof buf));
     said("uname", uname(&uts));
     said("link", link(FILE_PATH, FILE_PATH ".link"));
+    said("symlink", symlink(FILE_PATH, FILE_PATH ".symlink"));
     said("fchown", fchown(fd, 0, 0));
     said("chmod", chmod(FILE_PATH, 0600));
     said("fchmod", fchmod(fd, 0600));
@@ -80,17 +81,27 @@ int main(void) {
     said("fcntl F_SETLK", fcntl(fd, F_SETLK, &lock));
     said("fcntl F_SETLKW", fcntl(fd, F_SETLKW, &lock));
     said("fcntl F_GETLK", fcntl(fd, F_GETLK, &lock));
-    said("fcntl F_DUPFD -1", fcntl(fd, F_DUPFD, -1));
-    said("fcntl F_DUPFD_CLOEXEC", fcntl(fd, F_DUPFD_CLOEXEC, 10));
-    /* F_DUPFD itself duplicates: its answer is at or above its argument, and
-       fstat reads the file's one byte through it. */
+    /* Close-on-exec is kept per descriptor. F_DUPFD, the first call to
+       duplicate anything, answers at or above its argument a descriptor
+       fstat reads the file's one byte through, and not closed on exec. */
+    printf("fcntl F_GETFD: %d\n", fcntl(fd, F_GETFD));
+    int set = fcntl(fd, F_SETFD, FD_CLOEXEC);
+    printf("fcntl F_SETFD FD_CLOEXEC: %d; F_GETFD: %d\n", set, fcntl(fd, F_GETFD));
     int duplicate = fcntl(fd, F_DUPFD, 10);
     struct stat through;
     int read_back = duplicate >= 0 && fstat(duplicate, &through) == 0 && through.st_size == 1;
-    printf("fcntl F_DUPFD 10: %s; fstat of it: %s\n", duplicate >= 10 ? "10 or above" : "below 10",
-           read_back ? "the file's one byte" : "not the file");
+    printf("fcntl F_DUPFD 10: %s; fstat of it: %s; F_GETFD of it: %d\n", duplicate >= 10 ? "10 or above" : "below 10",
+           read_back ? "the file's one byte" : "not the file", fcntl(duplicate, F_GETFD));
     if (duplicate >= 0)
         close(duplicate);
+    set = fcntl(fd, F_SETFD, 0);
+    printf("fcntl F_SETFD 0: %d; F_GETFD: %d\n", set, fcntl(fd, F_GETFD));
+    int cloexec = open(FILE_PATH, O_RDONLY | O_CLOEXEC);
+    printf("open O_CLOEXEC; F_GETFD: %d\n", fcntl(cloexec, F_GETFD));
+    close(cloexec);
+    said("fcntl F_DUPFD -1", fcntl(fd, F_DUPFD, -1));
+    said("fcntl F_DUPFD 4096", fcntl(fd, F_DUPFD, 4096));
+    said("fcntl F_DUPFD_CLOEXEC", fcntl(fd, F_DUPFD_CLOEXEC, 10));
     said("fcntl F_GETFL", fcntl(fd, F_GETFL));
     said("fcntl F_SETFL", fcntl(fd, F_SETFL, O_NONBLOCK));
     said("fcntl 12345", fcntl(fd, 12345));
@@ -137,7 +148,7 @@ int main(void) {
     int named = stat(FILE_PATH, &by_name) == 0;
     printf("file: %ld bytes; mode %s through fstat, %s through stat; second name: %s\n", size,
            st.st_mode == mode ? "as it was" : "changed", named && by_name.st_mode == mode ? "as it was" : "changed",
-           access(FILE_PATH ".link", F_OK) == 0 ? "made" : "none");
+           access(FILE_PATH ".link", F_OK) == 0 || access(FILE_PATH ".symlink", F_OK) == 0 ? "made" : "none");
     page[0] = 'y';
     printf("page after mprotect: %c\n", page[0]);
     printf("limit after getrlimit: %lu %lu\n", (unsigned long)limit.rlim_cur, (unsigned long)limit.rlim_max);

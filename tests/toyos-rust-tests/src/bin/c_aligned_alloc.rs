@@ -31,7 +31,8 @@ unsafe fn holds(block: *const u8, len: usize) -> bool {
 
 fn main() {
     let mut blocks = Vec::new();
-    for align in [64usize, 4096] {
+    // Below the 16 bytes in front of a block that hold its layout, and above.
+    for align in [1usize, 8, 64, 4096] {
         // SAFETY: C11's aligned_alloc, with a power-of-two alignment.
         let block = unsafe { aligned_alloc(align, 100) };
         assert!(!block.is_null(), "aligned_alloc({align}, 100) answered null");
@@ -42,8 +43,6 @@ fn main() {
         blocks.push((align, block));
     }
 
-    // Grown past the arena its first allocation came from, so dlmalloc moves
-    // it: the old block is released at the layout its header names.
     let (align, block) = blocks.pop().expect("the 4096 block");
     // SAFETY: a block aligned_alloc answered, not yet released.
     let grown = unsafe { realloc(block, MIB) };

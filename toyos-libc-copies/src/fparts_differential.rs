@@ -63,10 +63,16 @@ fn modf_is_the_host_libraries() {
 }
 
 #[test]
-fn logb_is_the_host_libraries() {
+fn logb_is_the_host_libraries_and_a_zero_its_pole() {
     for x in inputs() {
         // SAFETY: a pure function of its argument.
         let host = unsafe { host_logb(x) };
-        assert!(same(fparts::logb(x), host), "logb({x:e} = {:#x}): {}, the host {host}", x.to_bits(), fparts::logb(x));
+        let ours = fparts::logb(x);
+        let agrees = match ours {
+            Ok(exponent) => x != 0.0 && same(exponent, host),
+            // The pole's value is the one the host answers.
+            Err(fparts::Pole) => x == 0.0 && host == f64::NEG_INFINITY,
+        };
+        assert!(agrees, "logb({x:e} = {:#x}): {ours:?}, the host {host}", x.to_bits());
     }
 }

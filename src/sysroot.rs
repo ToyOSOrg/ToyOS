@@ -3,7 +3,7 @@
 //!
 //! **A sysroot is a function of its key.** The key ([`key`]) is the identity
 //! (`src/identity.rs`, so a comment is no change) of everything a sysroot is
-//! built from: the three trees std and `libtoyos_c.a` compile
+//! built from: the trees std and `libtoyos_c.a` compile
 //! ([`SYSROOT_SOURCES`]), the std fork's `library/` and `src/bootstrap/` in the
 //! checkout that builds it, and the compiler that builds it. `rust/build/
 //! sysroots/<key>/` is a whole toolchain — the compiler's files cloned from its
@@ -49,13 +49,13 @@ use crate::identity;
 use crate::toolchain::{self, host_triple, Owner, GUEST_TARGETS};
 
 /// The per-worktree sources that end up inside a sysroot: std links `toyos-abi`
-/// and `toyos`, and `libtoyos_c.a` is `userland/libc`.
-pub const SYSROOT_SOURCES: [&str; 4] =
-    ["toyos-abi/src", "toyos/src", "userland/libc/src", "userland/libc/include"];
+/// and `toyos`, and `libtoyos_c.a` is `userland/libc` with `toyos-elf`.
+pub const SYSROOT_SOURCES: [&str; 5] =
+    ["toyos-abi/src", "toyos/src", "toyos-elf/src", "userland/libc/src", "userland/libc/include"];
 
 /// Their manifests, whose features and versions decide the same build.
-pub(crate) const SYSROOT_MANIFESTS: [&str; 3] =
-    ["toyos-abi/Cargo.toml", "toyos/Cargo.toml", "userland/libc/Cargo.toml"];
+pub(crate) const SYSROOT_MANIFESTS: [&str; 4] =
+    ["toyos-abi/Cargo.toml", "toyos/Cargo.toml", "toyos-elf/Cargo.toml", "userland/libc/Cargo.toml"];
 
 /// The file a finished sysroot carries last, naming what it was built from.
 /// A directory without it is a build that did not finish.
@@ -689,7 +689,7 @@ mod tests {
         fs::write(path, text).unwrap();
     }
 
-    /// A worktree's three trees, a fork checkout and a compiler, laid out the
+    /// A worktree's trees, a fork checkout and a compiler, laid out the
     /// way the key reads them.
     fn keyed(base: &Path) -> (PathBuf, PathBuf, PathBuf) {
         let root = base.join("root");

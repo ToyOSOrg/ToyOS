@@ -57,7 +57,7 @@ pub(super) fn sys_readdir(path: &str, out: &mut UserBytesMut) -> u64 {
     for (name, size) in &entries {
         let is_dir = name.ends_with('/');
         let clean_name = if is_dir { &name[..name.len() - 1] } else { name.as_str() };
-        out.write_at(pos, &[if is_dir { 2 } else { 1 }]);
+        out.write_at(pos, &[if is_dir { DIRENT_DIR } else { DIRENT_FILE }]);
         pos += 1;
         out.write_at(pos, clean_name.as_bytes());
         pos += clean_name.len();

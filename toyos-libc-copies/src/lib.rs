@@ -6,11 +6,7 @@
 //! architecture checks its own module. The UTF-8 reader against
 //! `core::str::from_utf8`, the number reader against the host C library's,
 //! AArch64's `long double` widening against compiler-builtins', and the errno
-//! codes against `include/errno.h`. `strnlen`, `modf` and `logb` against the
-//! host C library's, `strsignal`'s texts, a signal mask's changes, the readdir
-//! answer's reader, `dladdr`'s symbol search on an image laid out here, and
-//! what the memory calls refuse. And libc's headers against its definitions
-//! (`prototypes`).
+//! codes against `include/errno.h`.
 
 #[cfg(test)]
 extern crate alloc;
@@ -21,6 +17,9 @@ mod arch;
 #[cfg(test)]
 #[path = "../../userland/libc/src/elfsym.rs"]
 mod elfsym;
+#[cfg(test)]
+#[path = "../../userland/libc/src/fdreq.rs"]
+mod fdreq;
 #[cfg(test)]
 #[path = "../../userland/libc/src/fparts.rs"]
 mod fparts;
@@ -43,6 +42,8 @@ mod text;
 #[path = "../../userland/libc/src/utf8.rs"]
 mod utf8;
 
+#[cfg(test)]
+mod descriptor_requests;
 #[cfg(test)]
 mod dladdr_symbols;
 #[cfg(test)]

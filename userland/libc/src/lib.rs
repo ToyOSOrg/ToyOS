@@ -8,6 +8,7 @@ mod arch;
 mod ctype;
 mod elfsym;
 mod errno;
+mod fdreq;
 mod fparts;
 mod link;
 mod listing;

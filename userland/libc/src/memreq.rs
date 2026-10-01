@@ -5,16 +5,19 @@
 pub(crate) const PROT_READ: i32 = 0x1;
 pub(crate) const PROT_WRITE: i32 = 0x2;
 pub(crate) const PROT_EXEC: i32 = 0x4;
+pub(crate) const MAP_SHARED: i32 = 0x01;
+pub(crate) const MAP_PRIVATE: i32 = 0x02;
 pub(crate) const MAP_FIXED: i32 = 0x10;
 pub(crate) const MAP_ANONYMOUS: i32 = 0x20;
 
 /// The page `sysconf(_SC_PAGESIZE)` answers.
-const PAGE: usize = 4096;
+pub(crate) const PAGE: usize = 4096;
 
 /// Why `mmap` cannot give what it was asked.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum MapRefusal {
-    /// No bytes, or a fixed place off a page boundary: `EINVAL`.
+    /// No bytes, a fixed place off a page boundary, or not exactly one of
+    /// `MAP_SHARED` and `MAP_PRIVATE`: `EINVAL`.
     Invalid,
     /// A file's bytes, which the kernel maps for no process: `ENODEV`.
     File,
@@ -26,7 +29,11 @@ pub(crate) enum MapRefusal {
 /// it is. An anonymous `MAP_SHARED` is not: with no `fork`, no other process
 /// can map it, so a private mapping is all that sharing it could mean.
 pub(crate) fn mmap_refusal(addr: usize, len: usize, prot: i32, flags: i32) -> Option<MapRefusal> {
-    if len == 0 || (flags & MAP_FIXED != 0 && !addr.is_multiple_of(PAGE)) {
+    let disposition = flags & (MAP_SHARED | MAP_PRIVATE);
+    if len == 0
+        || (flags & MAP_FIXED != 0 && !addr.is_multiple_of(PAGE))
+        || !(disposition == MAP_SHARED || disposition == MAP_PRIVATE)
+    {
         return Some(MapRefusal::Invalid);
     }
     if flags & MAP_ANONYMOUS == 0 {

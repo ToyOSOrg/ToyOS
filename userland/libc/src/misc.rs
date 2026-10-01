@@ -245,7 +245,7 @@ const _SC_CLK_TCK: i32 = 2;
 #[no_mangle]
 pub unsafe extern "C" fn sysconf(name: i32) -> i64 {
     match name {
-        _SC_PAGESIZE => 4096,
+        _SC_PAGESIZE => crate::memreq::PAGE as i64,
         _SC_NPROCESSORS_ONLN => syscall::cpu_count() as i64,
         _SC_CLK_TCK => 100,
         // POSIX's -1 with `errno` untouched: the function each bounds, `exec`

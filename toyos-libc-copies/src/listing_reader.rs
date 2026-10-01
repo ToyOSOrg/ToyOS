@@ -1,56 +1,49 @@
-//! The readdir answer's reader against answers encoded as the kernel's
-//! `sys_readdir` encodes them (`kernel/src/syscall/fs.rs`): a kind byte, the
-//! name, a NUL and eight bytes of size, for each entry.
+//! What `opendir`, `readdir` and `dladdr` make of the kernel's answers: a
+//! whole answer however often it grows between two asks, and a name `d_name`
+//! holds or `readdir` refuses.
 
 use crate::listing;
 
-/// An answer for `entries`, each a name, whether it is a directory, and a size.
-fn answer(entries: &[(&str, bool, u64)]) -> Vec<u8> {
-    let mut out = Vec::new();
-    for (name, is_dir, size) in entries {
-        out.push(if *is_dir { 2 } else { 1 });
-        out.extend_from_slice(name.as_bytes());
-        out.push(0);
-        out.extend_from_slice(&size.to_le_bytes());
+/// A call answering `sizes` in turn, each the length its answer then needs,
+/// writing it only into a buffer that holds it.
+fn growing(sizes: &[usize]) -> impl FnMut(&mut [u8]) -> Result<usize, ()> + '_ {
+    let mut asked = 0;
+    move |buf| {
+        let need = sizes[asked.min(sizes.len() - 1)];
+        asked += 1;
+        if need <= buf.len() {
+            buf[..need].iter_mut().enumerate().for_each(|(i, b)| *b = i as u8);
+        }
+        Ok(need)
     }
-    out
 }
 
-fn read(bytes: &[u8]) -> Vec<(String, bool)> {
-    let mut pos = 0;
-    let mut out = Vec::new();
-    while let Some(entry) = listing::next(bytes, &mut pos) {
-        out.push((String::from_utf8(entry.name.to_vec()).unwrap(), entry.is_dir));
+#[test]
+fn an_answer_is_asked_again_until_it_fits() {
+    // The first ask is of an empty buffer; each growth is met at the next.
+    for (sizes, want) in [
+        (&[0][..], 0),
+        (&[5], 5),
+        (&[5, 9], 9),
+        (&[5, 9, 4000, 70_000], 70_000),
+        (&[70_000, 3], 3),
+    ] {
+        let whole = listing::whole(growing(sizes)).unwrap();
+        assert_eq!(whole.len(), want, "{sizes:?}");
+        assert!(whole.iter().enumerate().all(|(i, &b)| b == i as u8), "{sizes:?}");
     }
-    assert_eq!(pos, bytes.len(), "the reader stopped short of the answer's end");
-    out
+    assert_eq!(listing::whole(|_| Err::<usize, _>(7)), Err(7));
 }
 
 #[test]
-fn every_entry_is_read_back_whatever_its_size_holds() {
-    // Sizes whose bytes are NULs, kind bytes and letters: a reader that does
-    // not step over all eight takes them for names.
-    let entries = [
-        ("a", false, 0),
-        ("dir", true, 0x0201_0000_0000_0000),
-        ("b.txt", false, 0x6162_6300_0102_0304),
-        ("", false, u64::MAX),
-        ("last", true, 17),
-    ];
-    let got = read(&answer(&entries));
-    let want: Vec<(String, bool)> = entries.iter().map(|(n, d, _)| ((*n).to_string(), *d)).collect();
-    assert_eq!(got, want);
-    assert!(read(&[]).is_empty());
-}
-
-#[test]
-#[should_panic(expected = "of kind 3")]
-fn an_unknown_kind_is_a_broken_kernel() {
-    read(&[3, b'x', 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-}
-
-#[test]
-#[should_panic(expected = "no size")]
-fn a_short_entry_is_a_broken_kernel() {
-    read(&[1, b'x', 0, 0, 0]);
+fn a_name_fits_d_name_with_its_nul_or_is_refused() {
+    for len in [0, 1, 254, 255] {
+        let name = vec![b'n'; len];
+        let held = listing::d_name(&name).unwrap_or_else(|| panic!("a {len}-byte name was refused"));
+        assert_eq!(&held[..len], &name[..]);
+        assert!(held[len..].iter().all(|&b| b == 0), "a {len}-byte name is not NUL-terminated");
+    }
+    for len in [256, 257, 765] {
+        assert!(listing::d_name(&vec![b'n'; len]).is_none(), "a {len}-byte name was held");
+    }
 }

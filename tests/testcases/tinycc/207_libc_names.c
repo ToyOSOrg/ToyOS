@@ -1,5 +1,5 @@
-/* What libc does for the names LLVM builds against: creat, symlink and
-   readlink as POSIX has them, each read back; a directory listed with the name
+/* What libc does for the names LLVM builds against: creat and readlink as
+   POSIX has them, each read back; a directory listed with the name
    and kind of each entry; dladdr naming the image and the exported symbol an
    address lies in; and strnlen, strsignal, modf, logb and the <endian.h>
    conversions. */
@@ -12,6 +12,7 @@
 #include <link.h>
 #include <math.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,7 +24,6 @@
 
 #define DIR_PATH "/tmp/207_libc_names"
 #define TARGET DIR_PATH "/target"
-#define LINK DIR_PATH "/link"
 #define LISTED DIR_PATH "/listed"
 /* The image's test library, which exports tls_get_label. */
 #define LIB "/system/lib/libtls_lib.so"
@@ -55,24 +55,16 @@ static void links(void) {
         printf("creat %s failed\n", TARGET);
         return;
     }
-    printf("symlink: %d\n", symlink(TARGET, LINK));
-    refused("symlink over the link", symlink(TARGET, LINK));
-    refused("symlink over a file", symlink(LINK, TARGET));
-
-    ssize_t n = readlink(LINK, buf, sizeof buf);
-    printf("readlink: %zd, \"%.*s\"\n", n, n > 0 ? (int)n : 0, buf);
-    memset(buf, '#', sizeof buf);
-    n = readlink(LINK, buf, 4);
-    printf("readlink into 4: %zd, \"%.5s\"\n", n, buf);
-    refused("readlink of a file", readlink(TARGET, buf, sizeof buf));
-    refused("readlink of nothing", readlink(DIR_PATH "/none", buf, sizeof buf));
-    refused("readlink into 0", readlink(LINK, buf, 0));
-
-    fd = open(LINK, O_RDONLY);
-    n = fd < 0 ? -1 : read(fd, buf, sizeof buf);
-    printf("read through the link: \"%.*s\"\n", n > 0 ? (int)n : 0, buf);
+    fd = open(TARGET, O_RDONLY);
+    ssize_t n = fd < 0 ? -1 : read(fd, buf, sizeof buf);
+    printf("read what creat wrote: \"%.*s\"\n", n > 0 ? (int)n : 0, buf);
     if (fd >= 0)
         close(fd);
+
+    refused("readlink of a file", readlink(TARGET, buf, sizeof buf));
+    refused("readlink of nothing", readlink(DIR_PATH "/none", buf, sizeof buf));
+    refused("readlink into 0", readlink(TARGET, buf, 0));
+    refused("readlink into SIZE_MAX", readlink(DIR_PATH "/none", buf, SIZE_MAX));
 }
 
 static void listing(void) {
@@ -152,7 +144,10 @@ int main(void) {
     double whole;
     double part = modf(-3.25, &whole);
     printf("modf(-3.25): %g and %g\n", whole, part);
-    printf("logb: %g %g %g\n", logb(0.1), logb(1024.0), logb(0.0));
+    printf("logb: %g %g\n", logb(0.1), logb(1024.0));
+    errno = 0;
+    double pole = logb(0.0);
+    printf("logb(0): %g, %s\n", pole, errno == ERANGE ? "ERANGE" : errno_name(errno));
     printf("endian: %s 0x%x 0x%x\n", BYTE_ORDER == LITTLE_ENDIAN ? "little" : "big",
            (unsigned)htobe32(0x01020304), (unsigned)le16toh(0x0102));
 

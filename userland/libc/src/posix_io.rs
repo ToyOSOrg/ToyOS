@@ -2,12 +2,16 @@
 
 #![allow(non_camel_case_types)]
 
+use alloc::boxed::Box;
+use alloc::collections::BTreeSet;
+use alloc::vec::Vec;
 use core::ptr;
 
 use toyos_abi::RawHandle;
 use toyos_abi::syscall::{self, OpenFlags, SeekFrom};
 
 use crate::errno::{EACCES, EAGAIN, EEXIST, EINVAL, EIO, ENOENT, EPIPE};
+use crate::pthread::Lock;
 use crate::time::Timespec;
 
 // Constants (matching POSIX / Linux values)
@@ -18,6 +22,7 @@ const O_RDWR: i32 = 2;
 const O_CREAT: i32 = 0x40;
 const O_TRUNC: i32 = 0x200;
 const O_APPEND: i32 = 0x400;
+const O_CLOEXEC: i32 = 0x80000;
 
 const SEEK_SET: i32 = 0;
 const SEEK_CUR: i32 = 1;
@@ -85,7 +90,12 @@ pub unsafe extern "C" fn open(path: *const u8, flags: i32, _mode: u32) -> i32 {
     if flags & O_APPEND != 0 { oflags |= OpenFlags::APPEND; }
 
     match syscall::open(path_bytes, oflags) {
-        Ok(f) => f.0 as i32,
+        Ok(f) => {
+            if flags & O_CLOEXEC != 0 {
+                mark_cloexec(f.0 as i32, true);
+            }
+            f.0 as i32
+        }
         Err(e) => set_errno(e),
     }
 }
@@ -97,6 +107,7 @@ pub unsafe extern "C" fn creat(path: *const u8, mode: u32) -> i32 {
 
 #[no_mangle]
 pub unsafe extern "C" fn close(raw_fd: i32) -> i32 {
+    mark_cloexec(raw_fd, false);
     syscall::close(fd(raw_fd));
     0
 }
@@ -199,6 +210,8 @@ pub unsafe extern "C" fn dup2(old_fd: i32, new_fd: i32) -> i32 {
     };
     match syscall::dup2(fd(old_fd), slot) {
         Ok(f) => {
+            // POSIX's: the descriptor `dup2` answers is not closed on `exec`.
+            mark_cloexec(f.0 as i32, false);
             // The slot holds something else now, so the stream is asked again.
             match slot {
                 1 => toyos::log::stdio::forget(toyos::log::stdio::Stream::Out),
@@ -312,27 +325,12 @@ pub unsafe extern "C" fn lstat(path: *const u8, buf: *mut Stat) -> i32 {
     stat_impl(path, buf)
 }
 
-/// `SYS_SYMLINK` displaces whatever `link` names, and POSIX refuses a name
-/// that exists: asked first, so only a name another process makes in between
-/// is still displaced.
-#[no_mangle]
-pub unsafe extern "C" fn symlink(target: *const u8, link: *const u8) -> i32 {
-    let is_link = syscall::readlink(c_str_to_bytes(link), &mut [0u8; 1]).is_ok();
-    if is_link || unsafe { stat_impl(link, ptr::null_mut()) } == 0 {
-        crate::errno::set(EEXIST);
-        return -1;
-    }
-    match syscall::symlink(c_str_to_bytes(target), c_str_to_bytes(link)) {
-        Ok(()) => 0,
-        Err(e) => set_errno(e),
-    }
-}
-
 /// `SYS_READLINK` answers `NotFound` for a path that is no link as for one
 /// that names nothing, and POSIX tells them apart: `EINVAL` for the first.
 #[no_mangle]
 pub unsafe extern "C" fn readlink(path: *const u8, buf: *mut u8, size: usize) -> isize {
-    if size == 0 {
+    // No slice is longer than `isize::MAX`, and the answer is an `isize`.
+    if size == 0 || isize::try_from(size).is_err() {
         crate::errno::set(EINVAL);
         return -1;
     }
@@ -392,68 +390,62 @@ pub unsafe extern "C" fn umask(mask: u32) -> u32 {
     old
 }
 
-const F_DUPFD: i32 = 0;
-const F_GETFD: i32 = 1;
-const F_SETFD: i32 = 2;
-const F_GETFL: i32 = 3;
-const F_SETFL: i32 = 4;
-const F_GETLK: i32 = 5;
-const F_SETLK: i32 = 6;
-const F_SETLKW: i32 = 7;
-const F_SETOWN: i32 = 8;
-const F_GETOWN: i32 = 9;
-const F_DUPFD_CLOEXEC: i32 = 1030;
+/// The descriptors marked close-on-exec, by number: kept for stage 3 of
+/// `issues/kernel/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`,
+/// whose spawn reads them. A number is a slot at one generation, so a handle
+/// made later in the slot is never taken for one marked here.
+static CLOEXEC: Lock<BTreeSet<i32>> = Lock::new(BTreeSet::new());
 
+fn mark_cloexec(raw_fd: i32, cloexec: bool) {
+    let mut marked = CLOEXEC.lock();
+    if cloexec {
+        marked.insert(raw_fd);
+    } else {
+        marked.remove(&raw_fd);
+    }
+}
+
+/// `arg` is the register C's variadic third argument arrives in (`fdreq`).
 #[no_mangle]
-pub unsafe extern "C" fn fcntl(fd: i32, cmd: i32, arg: i64) -> i32 {
-    let refused = match cmd {
-        F_DUPFD if arg >= 0 => return unsafe { dup_at_least(fd, arg) },
-        // Close-on-exec is the descriptor table's of stage 3 of
-        // issues/kernel/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md.
-        F_GETFD | F_SETFD => return 0,
-        // POSIX's answer for a file that supports no locking, which none here does.
-        F_GETLK | F_SETLK | F_SETLKW => EINVAL,
-        // A descriptor's status flags, its close-on-exec and its owner are
-        // nothing this library keeps.
-        F_DUPFD_CLOEXEC | F_GETFL | F_SETFL | F_GETOWN | F_SETOWN => crate::errno::ENOSYS,
-        _ => EINVAL,
+pub unsafe extern "C" fn fcntl(raw_fd: i32, cmd: i32, arg: u64) -> i32 {
+    use crate::fdreq::Command;
+    let refused = match crate::fdreq::command(cmd, arg) {
+        Command::DupAtLeast(floor) => {
+            let duplicate = crate::fdreq::dup_at_least(
+                floor,
+                || syscall::dup(fd(raw_fd)).map(|h| h.0),
+                |below| syscall::close(RawHandle(below)),
+            );
+            return match duplicate {
+                Ok(n) => n as i32,
+                Err(e) => set_errno(e),
+            };
+        }
+        Command::GetFd => return i32::from(CLOEXEC.lock().contains(&raw_fd)),
+        Command::SetFd(cloexec) => {
+            mark_cloexec(raw_fd, cloexec);
+            return 0;
+        }
+        Command::Invalid => EINVAL,
+        Command::Unsupported => crate::errno::ENOSYS,
     };
     crate::errno::set(refused);
     -1
 }
 
-/// A duplicate of `raw_fd` numbered `floor` or above. The kernel picks each
-/// number `dup` answers, so this is the first such answer and not the lowest
-/// free number, and every lower one taken on the way is closed again.
-unsafe fn dup_at_least(raw_fd: i32, floor: i64) -> i32 {
-    let mut below = alloc::vec::Vec::new();
-    let answer = loop {
-        let duplicate = unsafe { dup(raw_fd) };
-        if duplicate < 0 || i64::from(duplicate) >= floor {
-            break duplicate;
-        }
-        below.push(duplicate);
-    };
-    for lower in below {
-        unsafe { close(lower) };
-    }
-    answer
-}
-
 // Directory operations
 
-#[repr(C)]
+/// An open directory: its whole listing, and where the next `readdir` starts.
 pub struct DIR {
-    buf: *mut u8,
-    len: usize,
-    pos: usize,
+    listing: Vec<u8>,
+    at: usize,
 }
 
 #[repr(C)]
 pub struct dirent {
     pub d_ino: u64,
     pub d_type: u8,
-    pub d_name: [u8; 256],
+    pub d_name: [u8; crate::listing::D_NAME],
 }
 
 /// `d_type`s: the listing tells a directory from everything else, and no more.
@@ -463,67 +455,38 @@ const DT_DIR: u8 = 4;
 #[no_mangle]
 pub unsafe extern "C" fn opendir(path: *const u8) -> *mut DIR {
     let path_bytes = c_str_to_bytes(path);
-    let mut buf_size = 65536;
-    let mut buf = super::memory::malloc(buf_size);
-    if buf.is_null() { return ptr::null_mut(); }
-
-    // `readdir` returns the size the listing *needs* and writes nothing when
-    // it does not fit, so taking the return as a length without checking it
-    // would hand `DIR` a `len` past the end of its own buffer. One retry at
-    // the reported size; the kernel bounds the listing, so it cannot run away.
-    let mut n = match syscall::readdir(path_bytes, core::slice::from_raw_parts_mut(buf, buf_size)) {
-        Ok(n) => n,
-        Err(e) => { super::memory::free(buf); set_errno(e); return ptr::null_mut(); }
-    };
-    if n > buf_size {
-        super::memory::free(buf);
-        buf_size = n;
-        buf = super::memory::malloc(buf_size);
-        if buf.is_null() { return ptr::null_mut(); }
-        n = match syscall::readdir(path_bytes, core::slice::from_raw_parts_mut(buf, buf_size)) {
-            Ok(n) if n <= buf_size => n,
-            Ok(_) => { super::memory::free(buf); crate::errno::set(EAGAIN); return ptr::null_mut(); }
-            Err(e) => { super::memory::free(buf); set_errno(e); return ptr::null_mut(); }
-        };
+    match crate::listing::whole(|buf| syscall::readdir(path_bytes, buf)) {
+        Ok(listing) => Box::into_raw(Box::new(DIR { listing, at: 0 })),
+        Err(e) => {
+            set_errno(e);
+            ptr::null_mut()
+        }
     }
-
-    let dir = super::memory::malloc(core::mem::size_of::<DIR>()) as *mut DIR;
-    if dir.is_null() {
-        super::memory::free(buf);
-        return ptr::null_mut();
-    }
-    ptr::write(dir, DIR { buf, len: n, pos: 0 });
-    dir
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn readdir(dir: *mut DIR) -> *mut dirent {
     if dir.is_null() { return ptr::null_mut(); }
     let d = &mut *dir;
-    let start = d.pos;
-    let listing = core::slice::from_raw_parts(d.buf, d.len);
-    let Some(entry) = crate::listing::next(listing, &mut d.pos) else { return ptr::null_mut() };
-
-    // Use a static buffer for the dirent (not thread-safe, matching POSIX convention)
-    static mut DIRENT_BUF: dirent = dirent { d_ino: 0, d_type: 0, d_name: [0; 256] };
-    let ent = &raw mut DIRENT_BUF;
-    if entry.name.len() >= (*ent).d_name.len() {
+    let start = d.at;
+    let Some(entry) = syscall::dirent(&d.listing, &mut d.at) else { return ptr::null_mut() };
+    let Some(d_name) = crate::listing::d_name(entry.name) else {
         crate::errno::set(crate::errno::EOVERFLOW);
         return ptr::null_mut();
-    }
-    (*ent).d_ino = (start + 1) as u64;
-    (*ent).d_type = if entry.is_dir { DT_DIR } else { DT_UNKNOWN };
-    ptr::copy_nonoverlapping(entry.name.as_ptr(), (*ent).d_name.as_mut_ptr(), entry.name.len());
-    (*ent).d_name[entry.name.len()] = 0;
+    };
+
+    // Use a static buffer for the dirent (not thread-safe, matching POSIX convention)
+    static mut DIRENT_BUF: dirent = dirent { d_ino: 0, d_type: 0, d_name: [0; crate::listing::D_NAME] };
+    let ent = &raw mut DIRENT_BUF;
+    ent.write(dirent { d_ino: (start + 1) as u64, d_type: if entry.is_dir { DT_DIR } else { DT_UNKNOWN }, d_name });
     ent
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn closedir(dir: *mut DIR) -> i32 {
     if dir.is_null() { return -1; }
-    let d = &*dir;
-    super::memory::free(d.buf);
-    super::memory::free(dir as *mut u8);
+    // SAFETY: a `DIR` `opendir` answered, closed once.
+    drop(unsafe { Box::from_raw(dir) });
     0
 }
 

@@ -40,7 +40,7 @@ use toyos_abi::syscall::SyscallError;
 use toyos_elf::section::SectionTable;
 use toyos_elf::sym::{self, SymTab};
 use toyos_elf::rela::{FillLattice, Rules, FILL_GRANULE};
-use toyos_elf::{GnuHash, Layout, RelocError, TlsSegment};
+use toyos_elf::{Layout, RelocError, TlsSegment};
 
 const USER_STACK_SIZE: usize = 4 * PAGE_2M as usize; // 8 MB
 
@@ -295,32 +295,25 @@ fn read_exe_tables(
     Ok(ExeTables { needed, dynstr, dynsym, relas })
 }
 
-/// `.dynsym`'s entry count, from `.gnu.hash` if present, else the `DT_SYMTAB`–`DT_STRTAB` gap.
+/// `.dynsym`'s entry count, by the rule `Dynamic::sym_count` states.
 fn exe_sym_count(
     backing: &dyn crate::file_backing::FileBacking,
     layout: &Layout,
     dyn_info: &toyos_elf::Dynamic,
     path: &str,
 ) -> Result<usize, SyscallError> {
-    if let Some(vaddr) = dyn_info.gnu_hash {
-        let off = file_off(layout, path, "DT_GNU_HASH", vaddr)?;
-        let len = layout
-            .file_bytes_from(vaddr)
-            .unwrap_or(0)
-            .min(MAX_GNU_HASH_BYTES) as usize;
-        let data = read_file_range(backing, off, len);
-        if let Some(count) = GnuHash::parse(&data).and_then(|h| h.sym_count()) {
-            return Ok(count);
+    let gnu_hash = match dyn_info.gnu_hash {
+        Some(vaddr) => {
+            let off = file_off(layout, path, "DT_GNU_HASH", vaddr)?;
+            let len = layout.file_bytes_from(vaddr).unwrap_or(0).min(MAX_GNU_HASH_BYTES) as usize;
+            Some(read_file_range(backing, off, len))
         }
-        log!("spawn: {}: .gnu.hash does not describe a symbol count in {} bytes", path, len);
-    }
-    // Adjacent in every linker-produced layout, so the gap between them is the table size.
-    match (dyn_info.symtab, dyn_info.strtab) {
-        (Some(symtab), Some(strtab)) if strtab > symtab => {
-            Ok(((strtab - symtab) / sym::ENTRY_SIZE as u64) as usize)
-        }
-        _ => Ok(0),
-    }
+        None => None,
+    };
+    Ok(dyn_info.sym_count(gnu_hash.as_deref()).unwrap_or_else(|gap| {
+        log!("spawn: {}: .gnu.hash does not describe a symbol count in its {} bytes", path, gnu_hash.as_ref().map_or(0, |t| t.len()));
+        gap
+    }))
 }
 
 /// `.rela.dyn` located through section headers, for a file with no `PT_DYNAMIC`.
