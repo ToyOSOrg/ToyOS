@@ -24,6 +24,14 @@ is slow reads as one that stopped, and the host's load decides the verdict:
   for ===READY===; the console carried: nothing at all". The owner process has
   measured no boot, so its `wait_for_ready` ceiling is the unscaled 20 s, and
   its 16550 had reached "ROOT: read into memory" — a guest still working.
+- `650-libcllvm-whole.log` (`wt/toyos-libcllvm`, libc only, load average
+  66–74, image builds in the same run): `update_refusals_boot_the_other_slot`
+  and `update_boots_the_new_kernel` STALLED as above, and `loader_watchdog_arms`
+  timed out its boot at 132 s of wall clock — 10 s × 12 wide × `host_scale` —
+  with the console at "BdsDxe: starting Boot0001". Its 50-odd other runs in
+  the kept logs passed in 6–34 s. Whether that guest was starved or the loader
+  stalled before its first line is what a wait on the guest's own time
+  separates.
 
 The opposite error has the same cause. `budget` multiplies a test's ceiling by
 the phase width and by `host_scale`, two stand-ins for the host's load, so a
