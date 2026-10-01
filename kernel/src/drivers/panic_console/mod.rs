@@ -1365,22 +1365,6 @@ fn row_base(fb: &Fb, y: usize, len: usize) -> Option<*mut u32> {
     (end <= fb.bytes).then(|| unsafe { fb.ptr.add(start as usize) as *mut u32 })
 }
 
-/// Paint the whole panel a colour no glyph contains, over whatever is
-/// there. The actuator for "something drew over the console's back": no
-/// other painter can stage this, since `render` (the one that ignores the
-/// userland claim) halts the machine on its way out.
-#[cfg(feature = "test-actuators")]
-pub fn graffiti() {
-    let Some(fb) = snapshot() else { return };
-    if !mapped(&fb) {
-        return;
-    }
-    log!("SYS_DEBUG: painting over the screen a userland process owns");
-    forget_the_glass();
-    let _ = fill_screen(&fb, rgb(&fb, 0x00, 0xC0, 0x00), &|| false);
-    flush_stores();
-}
-
 /// Erases whatever the compositor left behind, so nothing on screen is
 /// ambiguous about which boot it came from. Proves the clamp once per row,
 /// not once per pixel: a boot checkpoint repaints several times over a

@@ -72,162 +72,6 @@ pub fn machine_reboot(
     Ok(())
 }
 
-/// A boot with no host on the console runs its manifest's jobs and ends
-/// itself, and the loader's own account of it is on the stick beside `logd`'s.
-pub fn metal_job_reboot(
-    _test_config: &Path,
-    _c_bins: &[(String, Vec<u8>)],
-    _rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    let config = super::compile::repo_root().join("tests/jobcase/system.toml");
-    let case = config.parent().expect("system.toml has a directory");
-
-    // A file under the loader's name that the last boot could have left: a
-    // loader that opens without truncating ends in this one's tail.
-    let stale = (bootlog::LOADER_LOG.to_string(), vec![b'x'; 64 * 1024]);
-    let kept = Kept::build(case, &[], "jobcase-boot.img", &[stale])?;
-    let (image_path, start, len) = (kept.image.clone(), kept.start, kept.len);
-
-    let mut qemu = QemuInstance::boot_with_options(
-        case,
-        &[],
-        &[],
-        BootOptions {
-            profile: qemu::Profile::Metal,
-            qmp: true,
-            boot_image: kept.boots(),
-            ..Default::default()
-        },
-    );
-    serial::Serial::boot(&qemu).must_be_clean()?;
-    let console = qemu.boot_log().to_string();
-
-    let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(WAIT));
-    let reason = stop.reason();
-    let tail = qemu.drain_serial(WAIT);
-
-    let drain = serial::Serial::named("job drain", tail.as_str());
-    drain.must_be_clean()?;
-    drain.must_say("===TEST_START reboot===")?;
-    // The control for `job_deadline_reboots`: a list that finishes inside the
-    // bound is ended by its own last job and never by the deadline.
-    drain.must_not_say(bootlog::JOB_DEADLINE_SAID)?;
-    drain.must_say(REBOOTING)?;
-    returned_to_firmware(reason, ASKED_AND_STAYED_UP, &tail)?;
-    drop(qemu);
-
-    let (name, log) = super::volumes::newest_log(&image_path, start, len)?;
-    let text = String::from_utf8_lossy(&log);
-    // The volume is born clean in an image built moments ago, so every record in it is this boot's.
-    // Judged by `bootlog`, because a T14 run judges the same volume by it.
-    let boot_ms = bootlog::verdict(&text).map_err(|unfit| {
-        format!(
-            "{name}: {unfit}. A machine with no console would have no account of this \
-             boot\n{text}"
-        )
-    })?;
-    let printed = loader_window(&console)?;
-    let written = super::volumes::loader_log_lines(&image_path, start, len)?;
-    // Compared byte for byte against a console the firmware rendered: a
-    // character it has no glyph for is a line the two channels disagree about
-    // on one machine and not on the next.
-    if let Some(line) = written.iter().find(|line| !line.is_ascii()) {
-        return Err(format!("the loader wrote {line:?}, which is not ASCII"));
-    }
-    if written != printed {
-        return Err(format!(
-            "{} carries {} line(s) and the loader printed {}\n--- on the stick\n{}\n--- on the \
-             console\n{}",
-            bootlog::LOADER_LOG,
-            written.len(),
-            printed.len(),
-            written.join("\n"),
-            printed.join("\n"),
-        ));
-    }
-
-    kept.remove();
-    eprintln!(
-        "  [power] {name} carries Boot: complete ({boot_ms}ms) and init's stop; {} carries the \
-         loader's {} lines beside it",
-        bootlog::LOADER_LOG,
-        written.len()
-    );
-    Ok(())
-}
-
-/// **`Rebooting.` is the last record, and it is last by construction.**
-pub fn quiesce_stops_the_machine(
-    _test_config: &Path,
-    _c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    // The one binary this config's job list names: every other one staged
-    // beside it is image the boot pays to write and never reads.
-    const JOB: &str = "quiesce_writers";
-    // How many threads that binary puts to work. Spelt here because a guest
-    // binary cannot be linked from the harness.
-    const WRITERS: u32 = 6;
-    // The threads the stop names besides the writers: the job's own main
-    // thread, parked on init's answer; `test-runner`'s main and deadline
-    // threads; `logd`'s; `blockd`'s; one per file server, three roles; and
-    // `init`'s waiter on each of those four services, and its file worker.
-    // `init`'s main thread asked for the stop and is its caller.
-    const OTHERS: u32 = 1 + 2 + 1 + 1 + 3 + 4 + 1;
-    /// Mirrored in `kernel/src/syscall/machine.rs`, which queues it.
-    const QUEUED: &str = "console: a holder's line, queued once the stop had stopped every holder";
-    let (whole, record) = stopped_boot(
-        "tests/quiescecase/system.toml",
-        JOB,
-        &[LATE_WORD, "console-queue-at-the-stop"],
-        rust_bins,
-    )?;
-    // **A holder's line still queued at the stop is the stop's to put on the
-    // wire**, above the last word: `klogd` is kept off the queue from the
-    // stop's claim on, so without that drain the line is never written.
-    let lines: Vec<&str> = whole.lines().collect();
-    let queued = lines.iter().position(|l| l.contains(QUEUED));
-    let last = lines.iter().position(|l| l.contains(REBOOTING));
-    match (queued, last) {
-        (Some(queued), Some(last)) if queued < last => {}
-        _ => {
-            return Err(format!(
-                "the line queued at the stop is at {queued:?} and the last word at {last:?}: \
-                 a holder's line the stop left in the queue is lost at the reset\n{whole}"
-            ));
-        }
-    }
-    if record.in_flight != 0 {
-        return Err(format!(
-            "the block layer still had {} operation(s) open on a thread this stop had stopped, so \
-             the machine was not stopped before the sync claimed it was:\n  {record}",
-            record.in_flight,
-        ));
-    }
-    if record.begun == 0 {
-        return Err(format!(
-            "this boot began no block-device operation on a stoppable thread, so the zero above \
-             is a counter that never counted rather than a machine that stopped:\n  {record}"
-        ));
-    }
-    // **The workload, counted by the kernel rather than by the guest, and
-    // counted exactly.** A boot whose writers never ran, or ran fewer than the
-    // harness is told, or lost one to an I/O error before the reset, has fewer
-    // threads to stop and would pass every judge above over a machine that was
-    // not the one described.
-    if record.sweep.total() != WRITERS + OTHERS {
-        return Err(format!(
-            "this boot's stop named {} userland thread(s); {WRITERS} writers plus the {OTHERS} \
-             of the job, test-runner, logd, the storage services, init's waiters and its file worker make {}, so this is not the machine the writers \
-             were on:\n  {record}\n{whole}",
-            record.sweep.total(),
-            WRITERS + OTHERS,
-        ));
-    }
-    eprintln!("  [power] the machine stopped before it claimed anything: {record}");
-    Ok(())
-}
-
 /// Every [`stopped_boot`] arms it, for the reason `usb_reset_hands_devices_back`'s
 /// deadline arm does: QEMU has no window between the boot's last word and the
 /// reset and hardware does, so without it the last-word judge is green whether
@@ -307,87 +151,6 @@ fn stopped_boot(
     Ok((whole, record))
 }
 
-/// `quiesce-last-park` holds a thread inside `SYS_NANOSLEEP` until the stop's
-/// latest sweep counts it as the one thread still running, so the park it then
-/// makes is the stop's last transition.
-pub fn quiesce_wakes_on_the_last_park(
-    _test_config: &Path,
-    _c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    woken_by_the_held_thread(&["quiesce-last-park", LATE_WORD], None, rust_bins)
-}
-
-/// **A process teardown that is the stop's last transition is waited for.**
-/// The same, with `quiesce-last-teardown` holding the last thread out of a
-/// process between its leaving and its teardown.
-pub fn quiesce_wakes_on_the_last_teardown(
-    _test_config: &Path,
-    _c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    woken_by_the_held_thread(
-        &["quiesce-last-teardown", LATE_WORD],
-        Some("test_rs_quiesce_last"),
-        rust_bins,
-    )
-}
-
-/// One of the `quiesce-last-*` boots: its actuator first, the late word beside it;
-/// `torn_down` names the process whose teardown the held thread runs.
-fn woken_by_the_held_thread(
-    armed: &'static [&'static str; 2],
-    torn_down: Option<&str>,
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    let actuator = armed[0];
-    let (whole, record) = stopped_boot(
-        "tests/quiescelastcase/system.toml",
-        "quiesce_last",
-        armed,
-        rust_bins,
-    )?;
-    // **The premise, by the kernel's own word**: the thread was held, and
-    // held before the stop claimed anything. Without it the boot below is
-    // one whose last transition was anything at all.
-    let held = format!(
-        "{actuator}: {} is held until the stop waits on it alone",
-        toyos_quiesce::LAST_THREAD,
-    );
-    let at = |needle: &str| whole.lines().position(|line| line.contains(needle));
-    let stopped_at = whole.lines().position(|line| toyos_quiesce::Record::parse(line).is_some());
-    let (Some(held_at), Some(stopped_at)) = (at(&held), stopped_at) else {
-        return Err(format!("the kernel never held the thread it names ({held:?})\n{whole}"));
-    };
-    if held_at > stopped_at {
-        return Err(format!("the thread was held after the stop was over\n{whole}"));
-    }
-    // **The claim**: a sweep counted the held thread, and it alone, as
-    // running before the stop wrote its record, so what the held thread did
-    // next is what the stop waited for.
-    let alone = format!("{actuator}: the stop counts {} alone", toyos_quiesce::LAST_THREAD);
-    let stopped_at = at(toyos_quiesce::STOPPED)
-        .ok_or_else(|| format!("the kernel wrote no stop record\n{whole}"))?;
-    let Some(alone_at) = at(&alone).filter(|&line| line < stopped_at) else {
-        return Err(format!(
-            "no {alone:?} line before the stop's record, so no transition of the held thread \
-             was waited for:\n  {record}\n{whole}"
-        ));
-    };
-    if let Some(process) = torn_down {
-        let exit = format!("exit: {process} pid=");
-        let mut torn = whole.lines().skip(alone_at).take(stopped_at - alone_at);
-        if !torn.any(|line| line.contains(&exit) && line.contains(" code=0 ")) {
-            return Err(format!(
-                "no `{exit}… code=0` record between {alone:?} and the stop's record, so the \
-                 stop did not wait for that teardown\n{whole}"
-            ));
-        }
-    }
-    eprintln!("  [power] {actuator}: the stop waited on the held thread's transition: {record}");
-    Ok(())
-}
-
 /// **The machine has one shutdown, and the second caller is refused while the
 /// first holds it.** init makes the first call; `quiesce-last-park` holds it
 /// after it has claimed the stop and before it stops anything, while every
@@ -454,62 +217,6 @@ pub fn quiesce_refuses_a_second_shutdown(
         lines[waits], lines[second],
     );
     Ok(())
-}
-
-/// A job list that never finishes ends the boot anyway, on the runner's own
-/// deadline: the kernel is alive and its scheduler passes keep feeding the
-/// chipset, so no watchdog is what fires here.
-pub fn job_deadline_reboots(
-    _test_config: &Path,
-    _c_bins: &[(String, Vec<u8>)],
-    _rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    let config = super::compile::repo_root().join("tests/jobdeadlinecase/system.toml");
-    let case = config.parent().expect("system.toml has a directory");
-
-    let mut qemu = QemuInstance::boot_with_options(
-        case,
-        &[],
-        &[],
-        BootOptions { profile: qemu::Profile::Metal, qmp: true, ..Default::default() },
-    );
-    serial::Serial::boot(&qemu).must_be_clean()?;
-
-    let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(WAIT));
-    let reason = stop.reason();
-    let tail = qemu.drain_serial(WAIT);
-
-    let drain = serial::Serial::named("deadline drain", tail.as_str());
-    drain.must_be_clean()?;
-    drain.must_say("===TEST_START spin===")?;
-    // A deadline that fired without naming the job it was inside answers
-    // nothing to whoever reads the console afterwards.
-    drain.must_say(&format!("{} spin", bootlog::JOB_DEADLINE_SAID))?;
-    drain.must_say(REBOOTING)?;
-    returned_to_firmware(reason, ASKED_AND_STAYED_UP, &tail)?;
-
-    eprintln!("  [power] the job list did not finish and the runner ended the boot itself");
-    Ok(())
-}
-
-/// Everything the loader printed on the console, its first line to its last.
-fn loader_window(console: &str) -> Result<Vec<String>, String> {
-    let lines: Vec<&str> = console.lines().collect();
-    let at = |line: &str| {
-        lines
-            .iter()
-            .position(|seen| seen.contains(line))
-            .ok_or_else(|| format!("the loader never printed {line:?} on the console"))
-    };
-    let (first, last) = (at(bootlog::LOADER_FIRST_LINE)?, at(bootlog::LOADER_LAST_LINE)?);
-    if last < first {
-        return Err(format!(
-            "the console carries {:?} before {:?}, so there is no window between them",
-            bootlog::LOADER_LAST_LINE,
-            bootlog::LOADER_FIRST_LINE
-        ));
-    }
-    Ok(lines[first..=last].iter().map(|line| (*line).to_string()).collect())
 }
 
 /// The chipset resets a machine whose kernel stops feeding its watchdog.
@@ -1168,52 +875,6 @@ pub fn blackbox_done_chain(
     Ok(())
 }
 
-/// The boot the T14 takes for `usb_stick_left`, under QEMU: the break is
-/// staged on the stick the machine booted from, and the page the next pass
-/// reads carries the transport's recovery whatever the log volume got.
-///
-/// **The page and not the file, because on the machine this is for the file is
-/// what goes missing.** The first WRITE(10) a boot issues is `logd` creating
-/// its file, so the staged break lands inside the one program that would have
-/// written the break down.
-pub fn transport_break_chain() -> Result<(), String> {
-    let config = super::compile::repo_root().join("tests/jobcase/system.toml");
-    let case = config.parent().expect("system.toml has a directory");
-    let mut qemu =
-        QemuInstance::boot_with_options(case, &[], &[], chained(&["usb-transport-break"]));
-    let first = serial::Serial::boot(&qemu);
-    let mut resets = qemu::QmpResets::open(qemu.qmp_socket(), qemu.budget(CHAIN_WAIT));
-    first.must_say(&armed_line())?;
-
-    // One capture from the first boot's handoff on, so it is the kernel's
-    // console and the pass after the reset both.
-    let second = after_the_reset(&mut qemu, bootlog::CHAIN_ENDS_LINE);
-    super::usb::transport_break_on_metal(&second, &second)?;
-    ended_in_a_reset(&mut resets)?;
-    drop(qemu);
-
-    // Off the page: the loader's margin, the section's own head, then the
-    // record as the kernel rendered it.
-    let on_the_page = format!("| {}[", toyos_blackbox::RECOVERY_OPENS_WITH);
-    let carried = |said: &str| {
-        second
-            .text()
-            .lines()
-            .find(|line| line.starts_with(&on_the_page) && line.contains(said))
-            .ok_or_else(|| {
-                format!(
-                    "no line of the page's recovery section says {said:?}\n{}",
-                    second.text()
-                )
-            })
-    };
-    let broke = carried("transport broke on SCSI 0x2a: a staged break skipped the data phase wait")?;
-    carried("the port reset took")?;
-    carried("SCSI 0x2a completed after ")?;
-    eprintln!("  [power] the boot stick's own break crossed the reset on the page: {}", broke.trim());
-    Ok(())
-}
-
 /// The boot deadline ends a machine nothing else in this tree can, and the next
 /// pass says what it ended.
 ///
@@ -1429,7 +1090,8 @@ pub fn hard_lockup_ends_a_deaf_cpu(
     // every CPU deaf has nothing else to say, and the site that took it — the
     // control's own witness, carried by the mechanism rather than by a log line
     // the sealed page may have no room for.
-    second.must_say_after(bootlog::PREVIOUS_PANIC, "spinning on the lock at 0x")?;
+    let stuck = second.must_say_after(bootlog::PREVIOUS_PANIC, "spinning on the lock at 0x")?;
+    sp_is_a_kernel_stack(stuck)?;
     second.must_say_after(bootlog::PREVIOUS_PANIC, "taken at src/hardlockup/probe.rs")?;
     // A line for every cpu, so the holder of what the stuck one wanted is in
     // the record too. cpu0 is the one this boot is certain of.
@@ -1975,7 +1637,8 @@ pub fn hard_lockup_chain(
 
     after.must_say(bootlog::PREVIOUS_PANIC)?;
     let said = after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::LOCKED_UP)?.to_string();
-    after.must_say_after(bootlog::PREVIOUS_PANIC, "spinning on the lock at 0x")?;
+    let stuck = after.must_say_after(bootlog::PREVIOUS_PANIC, "spinning on the lock at 0x")?;
+    sp_is_a_kernel_stack(stuck)?;
     // The staged control's own witness, carried by the mechanism rather than by
     // a log line that may not survive: the lock the stuck cpu is inside was
     // taken at the control's own source line, which no other boot can say.
@@ -1998,6 +1661,16 @@ pub fn hard_lockup_chain(
     // having booted no kernel is what this asserts instead.
     says_nothing_of(after, bootlog::LOADER_LAST_LINE)?;
     eprintln!("  [power] {}", said.trim());
+    Ok(())
+}
+
+/// The NMI entry routed the frame's `rsp` to the sample: a kernel stack is above
+/// `mm::PHYS_OFFSET`, and the `rflags` a swapped load would put there is below
+/// `0x400000`.
+fn sp_is_a_kernel_stack(stuck: &str) -> Result<(), String> {
+    if !stuck.contains("sp=0xffff") {
+        return Err(format!("the stuck cpu's sp is no kernel stack: {stuck}"));
+    }
     Ok(())
 }
 

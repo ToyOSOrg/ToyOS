@@ -71,3 +71,5 @@ under QEMU; not cosmetic against the T14's 240-column wrap, which decides whethe
 a line is one display row or two and therefore whether it is on the page the
 checkpoint paints. The cheap fix is to render the sequence as a single `-`; the
 honest one is to keep non-ASCII out of `log!`.
+
+`screen_diag_boot` is deleted; `issues/boot-media/screen-diag-boot-leaves-no-i8042-line-on-the-panel.md` records the commit that restores it.

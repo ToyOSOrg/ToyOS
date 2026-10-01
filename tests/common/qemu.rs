@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
@@ -176,20 +176,9 @@ pub fn boot_census() -> (u32, u32, Vec<String>) {
 /// `arch::entry`'s `naked_asm!` bracket, which is the path its own gate is
 /// about.
 ///
-/// [`toyos_build::build::SCHED_CHECK_KERNEL`] is the fourth, and it is the one
-/// this list's own warning was written about: an entry here is a decision to pay
-/// a kernel build per suite run forever, made in the shared declaration rather
-/// than by adding a `kernel_features` to a `BootOptions`. It was made because
-/// the alternative had already been paid for and delivered nothing —
-/// `kernel/Cargo.toml` has forwarded `sched-check = ["toyos-sched/check"]` since
-/// the check build was written, and nothing in `src/` or `tests/` ever asked for
-/// it, so `cpu::MAX_PASS_NS`, the pass-cost recorder and `invariants::check_cpu`
-/// were compiled by no CI run at all. `sched_check_build` is the test that asks.
-///
-/// A fifth entry is that decision again, and it gets this paragraph's argument
-/// made afresh. Interactive debug mode is separate: it builds
+/// Interactive debug mode is separate: it builds
 /// [`toyos_build::build::DEBUG_KERNEL_BUILD`] and returns before the suite.
-pub const DECLARED_KERNEL_BUILDS: [&str; 5] =
+pub const DECLARED_KERNEL_BUILDS: [&str; 4] =
     toyos_build::build::TEST_SUITE_KERNEL_BUILDS;
 
 /// How many guests the phase now running may have up at once.
@@ -932,16 +921,6 @@ pub enum Profile {
     /// one boot shows the error channel carrying a failure and not carrying a
     /// success.
     UsbDiskReadOnly,
-    /// The boot volume on NVMe, as [`Profile::MetalNoUsb`] has it, and one USB
-    /// stick on an xHCI beside it with a serial number of its own.
-    ///
-    /// The one machine on which a USB disk's only writer is the guest: every
-    /// other USB profile boots off the stick, so `/log` is on the bus and
-    /// logd's first batch is the first write `usb-transport-break-owed` can
-    /// break. Here the guest decides which write its device leaves under, and
-    /// the stated serial number is what lets the host move it to another port
-    /// and have it taken back as itself.
-    NvmeBootUsbDisk,
     /// [`Profile::UsbDiskHuge`] with the 3 TB disk attached *ahead* of the boot
     /// stick, so the controller enumerates the disk the driver refuses first.
     ///
@@ -972,28 +951,6 @@ pub enum Profile {
     /// allocation. Measured: `class=0x9 vendor=0409 product=55aa` on port 8 at
     /// full speed, with `no HID boot interface found, skipping`.
     UsbDiskCrowd,
-    /// metal-sim with a device that attaches at **full speed**.
-    ///
-    /// Speed is a shape dimension and it was one no profile varied: every USB
-    /// device in this suite is high or SuperSpeed, and those two are the speeds
-    /// whose EP0 max packet size is fixed by the specification. Full speed is
-    /// the one where it is not — 8, 16, 32 or 64, and unknown until the first
-    /// eight bytes of the device descriptor have been read over the very
-    /// endpoint being sized. A T14 port answered a USB Transaction Error to a
-    /// driver that assumed 64 and read 18 bytes in one go, and no test here
-    /// could have seen it.
-    ///
-    /// Two of them, because `bMaxPacketSize0` is the dimension under test and a
-    /// profile with one value of it cannot tell "the driver read the device's
-    /// answer" from "the driver's guess happened to match": the tablet answers
-    /// **8** and the smartcard reader answers **64**, so one boot carries both
-    /// the correction and its absence. Both are full-speed only — QEMU gives
-    /// each a `.full` descriptor set and no `.high` one, so `usb_desc_attach`
-    /// has no faster speed to pick — and neither needs a chardev, drive or
-    /// audiodev to enumerate. Measured with `info usb` on QEMU 11.0.2: both
-    /// report 12 Mb/s, and `usb-kbd`, which every other profile uses, reports
-    /// 480.
-    MetalFullSpeed,
     /// Two xHCI controllers, with every device on the *second* one.
     ///
     /// The T14 Gen 2's literal shape, and the one that had never been staged:
@@ -1140,10 +1097,8 @@ impl Profile {
             | Self::UsbDisk4k
             | Self::UsbDiskHuge
             | Self::UsbDiskReadOnly
-            | Self::NvmeBootUsbDisk
             | Self::UsbDiskRefusedFirst
             | Self::UsbDiskCrowd
-            | Self::MetalFullSpeed
             | Self::MetalXhciSecond
             | Self::MetalXhciBoth
             | Self::MetalXhciMsi
@@ -1448,10 +1403,6 @@ pub const BOOT_STICK_ID: &str = "bootstick";
 /// what a test moving it has to be able to say is not so.
 pub const BOOT_STICK_SERIAL: &str = "TOYOS0BOOTSTICK1";
 
-/// The serial number of [`Profile::NvmeBootUsbDisk`]'s stick, for the same
-/// reason the boot stick states one.
-pub const DATA_STICK_SERIAL: &str = "TOYOS0DATASTICK1";
-
 /// What every profile but [`Profile::MetalDisk`] gives the guest. Large
 /// enough for a filesystem, small enough that a boot formats it quickly.
 pub const NVME_SMALL: u64 = 128 * 1024 * 1024;
@@ -1750,15 +1701,6 @@ impl Profile {
                 hda: &[],
                 iommu: Some(IOMMU_DEFAULT),
             },
-            Self::NvmeBootUsbDisk => Shape {
-                xhci: &[XHCI_DEFAULT],
-                usb_disks: &[UsbDisk {
-                    bus: Some("xhci.0"),
-                    serial: Some(DATA_STICK_SERIAL),
-                    ..UsbDisk::DATA
-                }],
-                ..Self::MetalNoUsb.shape()
-            },
             Self::UsbDiskReadOnly => Shape {
                 vga: "std",
                 panel: None,
@@ -1795,21 +1737,6 @@ impl Profile {
             // controller is empty until something is plugged into it. It also
             // means the disk index the block layer holds names a device on a
             // controller that is not the first, which nothing else stages.
-            Self::MetalFullSpeed => Shape {
-                vga: "std",
-                panel: None,
-                gpu: None,
-                virtio: Virtio::Absent,
-                nic: Nic::Absent,
-                xhci: &[XHCI_DEFAULT],
-                storage_bus: "xhci.0",
-                usb: &["usb-wacom-tablet,bus=xhci.0", "usb-ccid,bus=xhci.0"],
-                nvme_bytes: NVME_SMALL,
-                nvme_lba_bytes: NVME_LBA_DEFAULT,
-                usb_disks: &[],
-                hda: &[],
-                iommu: Some(IOMMU_DEFAULT),
-            },
             Self::MetalXhciSecond => Shape {
                 vga: "std",
                 panel: None,
@@ -2175,12 +2102,6 @@ pub struct BootOptions {
     /// Forward this host port to the guest's TCP [`toyos_logstream::PORT`],
     /// where `logd` serves the boot's log.
     pub log_port: Option<u16>,
-    /// The virtio console's output into a regular file the harness follows,
-    /// and its input through a FIFO, instead of QEMU's stdio. QEMU's
-    /// `virtconsole` drops what a full non-blocking stdout refuses, and a
-    /// regular file refuses no write: for a test whose verdict is a line after
-    /// megabytes of console (`issues/build/qemu-drops-console-output-the-harness-is-slow-to-read.md`).
-    pub console_file: bool,
     /// Put the host on the guest's own segment (`super::segment`): frames
     /// it writes reach the NIC as if off the cable, and it sees every frame the
     /// guest sends, through [`QemuInstance::segment`]. Refused by name on a
@@ -2283,7 +2204,6 @@ impl Default for BootOptions {
             rtc_base: None,
             extra_root_files: Vec::new(),
             log_port: None,
-            console_file: false,
             segment: false,
             ssh_port: None,
             wire_dump: None,
@@ -2388,7 +2308,7 @@ pub struct QemuInstance {
     child: Child,
     /// What ends QEMU when this process dies without dropping this.
     _tether: Tether,
-    stdin: BufWriter<Box<dyn Write + Send>>,
+    stdin: BufWriter<ChildStdin>,
     rx: Receiver<String>,
     console: ConsoleStream,
     _reader_thread: thread::JoinHandle<String>,
@@ -2567,10 +2487,7 @@ pub fn build_boot_image_carrying(
 /// guest boots the kernel that image ships, armed with the actuators it was
 /// built with, and until this refused, a test that set `kernel_params` beside a
 /// `boot_image` built without them got an unarmed guest, a pass, and a summary
-/// line counting the arm as taken. Measured 2026-08-22: `usb-flush-fails` armed
-/// through `kernel_params` alone on `esp_filesystem` passed with no injected
-/// sense anywhere in the log, while the same actuator baked into the image
-/// failed the same assertion.
+/// line counting the arm as taken.
 ///
 /// A green run with an inert arm is the worst kind of harness defect, because
 /// every negative control staged through one proves nothing.
@@ -2919,7 +2836,6 @@ impl QemuInstance {
         // boot.
         let uart_log = test_dir.join(format!("uart-{seq}.log"));
         let _ = fs::remove_file(&uart_log);
-        let console_file = options.console_file.then(|| ConsoleFile::of(&uart_log).made());
 
         let (firmware_vars, own_vars) = match &options.firmware_vars {
             Some(vars) => (vars.clone(), None),
@@ -2953,7 +2869,6 @@ impl QemuInstance {
                 own_boot_image,
                 own_vars,
                 carried,
-                console_file,
             },
         )
     }
@@ -3208,7 +3123,7 @@ impl QemuInstance {
         LaneFree(())
     }
 
-    pub fn stdin_mut(&mut self) -> &mut BufWriter<Box<dyn Write + Send>> {
+    pub fn stdin_mut(&mut self) -> &mut BufWriter<ChildStdin> {
         &mut self.stdin
     }
 
@@ -3220,9 +3135,7 @@ impl QemuInstance {
     /// **Not scaled by the width**, and it is the one duration in this file that
     /// is not. Callers use it to *pace* — "let the guest run for 400 ms and tell
     /// me what it said" — so multiplying it does not buy a slow guest more room,
-    /// it buys the test a longer sleep. `metal_sim_pointer_churn` has
-    /// twenty-four of these; scaled, they made it an 86 s job at width 8 and the
-    /// critical path of the whole phase.
+    /// it buys the test a longer sleep.
     pub fn drain_serial(&mut self, dur: Duration) -> String {
         self.drain_for(dur, |_| false)
     }
@@ -3262,35 +3175,6 @@ impl QemuInstance {
                 Err(RecvTimeoutError::Disconnected) => return out,
             }
         }
-    }
-
-    /// Wait for `marker` on the console, or the timeout.
-    ///
-    /// A console is a stream and this consumes it: every line up to and
-    /// including the marker is taken from whatever reads next.
-    pub fn wait_for_console(&mut self, marker: &str, timeout: Duration) -> bool {
-        let deadline = Instant::now() + budget_smp(timeout, self.smp);
-        loop {
-            let Some(left) = deadline.checked_duration_since(Instant::now()) else {
-                return false;
-            };
-            match self.rx.recv_timeout(left) {
-                Ok(line) if line.contains(marker) => return true,
-                Ok(_) => continue,
-                Err(_) => return false,
-            }
-        }
-    }
-
-    /// Send `command` and wait for `marker` on the console.
-    ///
-    /// For a guest that will never report `===TEST_END`, which is any guest
-    /// the fatal path has run through: every CPU is halted by the time the
-    /// marker arrives.
-    pub fn command_until(&mut self, command: &str, marker: &str, timeout: Duration) -> bool {
-        writeln!(self.stdin, "{command}").expect("Failed to write to QEMU stdin");
-        self.stdin.flush().expect("Failed to flush QEMU stdin");
-        self.wait_for_console(marker, timeout)
     }
 
     /// The QMP socket this instance opened. Injection needs it, and it needs
@@ -3908,19 +3792,6 @@ impl QmpInput {
         self.keys(&events);
     }
 
-    /// `times` relative moves of `dx`, all in one command.
-    ///
-    /// QEMU syncs its input once per command and its PS/2 device *accumulates*
-    /// motion between syncs, so this is one packet carrying the sum however
-    /// many moves it names — the deterministic form of what a host holding more
-    /// packets outstanding than that device's queue meets by accident.
-    pub fn mouse_merged(&mut self, dx: i32, times: usize) {
-        let body: Vec<String> = (0..times)
-            .map(|_| format!("{{\"type\":\"rel\",\"data\":{{\"axis\":\"x\",\"value\":{dx}}}}}"))
-            .collect();
-        self.send(&body);
-    }
-
     /// One pointer packet: relative motion and/or a button transition.
     pub fn mouse(&mut self, dx: i32, dy: i32, button: Option<(&str, bool)>) {
         let mut body: Vec<String> = Vec::new();
@@ -4026,19 +3897,6 @@ impl QmpDevices {
         ));
     }
 
-    /// [`Self::blockdev_add`] for a file a drive may still hold open: the
-    /// unplugged device's own, which QEMU may not have let go of yet. Taken
-    /// without the image lock that would refuse it; both read and write the one
-    /// file, so what the first wrote is what the second reads.
-    pub fn blockdev_add_again(&mut self, node: &str, image: &Path) {
-        self.0.execute(&format!(
-            "{{\"execute\":\"blockdev-add\",\"arguments\":{{\"node-name\":\"{node}\",\
-             \"driver\":\"raw\",\"file\":{{\"driver\":\"file\",\"locking\":\"off\",\
-             \"filename\":\"{}\"}}}}}}",
-            image.display()
-        ));
-    }
-
     /// Give QEMU an image to back a device that is not on the machine yet, so
     /// a hot-plugged disk needs nothing in argv. A disk declared at boot is a
     /// disk the guest could have enumerated at boot.
@@ -4089,14 +3947,9 @@ fn qemu_command(
 ) -> Command {
     let (qmp_socket, segment) = socket_names(socket_dir, options);
     let shape = options.profile.shape();
-    let console_file = options.console_file.then(|| ConsoleFile::of(uart_log));
     assert!(
         !options.mute || !shape.virtio.present(),
         "mute removes the only console a virtio profile has"
-    );
-    assert!(
-        console_file.is_none() || shape.virtio.present(),
-        "console_file is the virtio console's, and this profile has none"
     );
 
     let arch = options.profile.arch();
@@ -4473,10 +4326,7 @@ fn qemu_command(
             .arg("-serial")
             .arg(format!("file:{}", uart_log.display()))
             .arg("-chardev")
-            .arg(match &console_file {
-                Some(file) => format!("file,id=cs0,path={},input-path={}", file.out.display(), file.input.display()),
-                None => "stdio,id=cs0,signal=off".to_string(),
-            })
+            .arg("stdio,id=cs0,signal=off")
             .arg("-device")
             .arg(format!(
                 "virtio-serial-pci-non-transitional,id=virtio-serial0,max_ports=1{platform}"
@@ -4544,67 +4394,6 @@ struct Files {
     own_boot_image: Option<PathBuf>,
     own_vars: Option<PathBuf>,
     carried: Option<BTreeSet<String>>,
-    console_file: Option<ConsoleFile>,
-}
-
-/// [`BootOptions::console_file`]'s two paths, beside the boot's UART log: the
-/// file QEMU writes the console into, and the FIFO it reads its input from.
-struct ConsoleFile {
-    out: PathBuf,
-    input: PathBuf,
-}
-
-impl ConsoleFile {
-    fn of(uart_log: &Path) -> Self {
-        Self { out: uart_log.with_extension("console"), input: uart_log.with_extension("in") }
-    }
-
-    /// The two made: the file, so the follower can open it before QEMU does,
-    /// and the FIFO.
-    fn made(self) -> Self {
-        fs::File::create(&self.out).unwrap_or_else(|e| panic!("create {}: {e}", self.out.display()));
-        let _ = fs::remove_file(&self.input);
-        let c = std::ffi::CString::new(self.input.as_os_str().as_encoded_bytes()).expect("a path holds no NUL");
-        // SAFETY: a NUL-terminated path this call owns.
-        if unsafe { libc::mkfifo(c.as_ptr(), 0o600) } != 0 {
-            panic!("mkfifo {}: {}", self.input.display(), std::io::Error::last_os_error());
-        }
-        self
-    }
-}
-
-/// The console file read as a stream. At its end a read waits for more on the
-/// one event QEMU gives: its stdout, which it never writes with a file
-/// console, ending when it exits. A regular file has no readiness of its own
-/// on either host, so between those the file is asked again every
-/// [`Self::PERIOD_MS`].
-struct Followed {
-    file: fs::File,
-    exit: std::process::ChildStdout,
-    gone: bool,
-}
-
-impl Followed {
-    const PERIOD_MS: i32 = 2;
-}
-
-impl Read for Followed {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        use std::os::fd::AsRawFd;
-        loop {
-            let n = self.file.read(buf)?;
-            if n > 0 || self.gone {
-                return Ok(n);
-            }
-            let mut fd = libc::pollfd { fd: self.exit.as_raw_fd(), events: libc::POLLIN, revents: 0 };
-            // SAFETY: one `pollfd` this call owns, for the one entry it holds.
-            if unsafe { libc::poll(&mut fd, 1, Self::PERIOD_MS) } > 0 {
-                let mut stray = [0u8; 256];
-                // Its end, after which the file is read once more for what QEMU wrote last.
-                self.gone = self.exit.read(&mut stray)? == 0;
-            }
-        }
-    }
 }
 
 fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) -> QemuInstance {
@@ -4617,7 +4406,6 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
         own_boot_image,
         own_vars,
         carried,
-        console_file,
     } = files;
 
     // Inherited: `orphan` reads QEMU's exit as the end of its harness's stderr.
@@ -4625,32 +4413,13 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
 
-    // Read and write, so QEMU's read-only open finds a writer and does not block.
-    let input = console_file.as_ref().map(|f| {
-        fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&f.input)
-            .unwrap_or_else(|e| panic!("open {}: {e}", f.input.display()))
-    });
     if VERBOSE.load(Ordering::Relaxed) {
         eprintln!("[qemu {seq}] Launching QEMU...");
     }
     let (mut child, tether) = toyos_build::tether::spawn(qemu).expect("Failed to launch QEMU");
 
-    let stdin: Box<dyn Write + Send> = match input {
-        Some(fifo) => Box::new(fifo),
-        None => Box::new(child.stdin.take().unwrap()),
-    };
-    let stdin = BufWriter::new(stdin);
-    let stdout: Box<dyn Read + Send> = match &console_file {
-        Some(f) => Box::new(Followed {
-            file: fs::File::open(&f.out).unwrap_or_else(|e| panic!("open {}: {e}", f.out.display())),
-            exit: child.stdout.take().unwrap(),
-            gone: false,
-        }),
-        None => Box::new(child.stdout.take().unwrap()),
-    };
+    let stdin = BufWriter::new(child.stdin.take().unwrap());
+    let stdout = child.stdout.take().unwrap();
 
     let (tx, rx) = mpsc::channel::<String>();
     let console = ConsoleStream::new();
