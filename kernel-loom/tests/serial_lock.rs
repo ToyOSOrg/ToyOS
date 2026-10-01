@@ -1,7 +1,8 @@
 //! Loom: a lost `try_lock` on the console backend leaves its holder holding;
-//! a fatal path's `seize` waits for a holder that lets go, gives up on one
-//! that never does, and has its own CPU's hold at once; and a burst beneath
-//! its own CPU's fatal path is refused rather than spun on.
+//! `within` asks an attempt exactly the tries it was given; a fatal path's
+//! `seize` waits for a holder that lets go, gives up on one that never does,
+//! and has its own CPU's hold at once; and a burst beneath its own CPU's fatal
+//! path is refused rather than spun on.
 //!
 //! A loss that released the lock let a third writer in under the holder. The
 //! negative control is the `serial-try-lock-then-some` feature, which must red
@@ -9,7 +10,7 @@
 #![cfg(feature = "loom")]
 
 use kernel_loom::arch::cpu::become_cpu;
-use kernel_loom::serial_lock::{BackendLock, Seized};
+use kernel_loom::serial_lock::{within, BackendLock, Seized};
 use loom::cell::UnsafeCell;
 use loom::sync::Arc;
 use loom::thread;
@@ -50,6 +51,23 @@ fn two_writers_never_overlap() {
         writer(lock, line)();
         other.join().unwrap();
     });
+}
+
+/// The bound is the count asked for: an attempt that never answers is asked
+/// exactly `tries` times. In a model only because the pause is loom's.
+#[test]
+fn within_asks_a_silent_attempt_exactly_its_tries() {
+    for tries in [0, 1, 100] {
+        loom::model(move || {
+            let mut asked = 0;
+            let answer = within(tries, || {
+                asked += 1;
+                None::<()>
+            });
+            assert!(answer.is_none(), "an attempt that never answered was answered");
+            assert_eq!(asked, tries, "a wait bounded at {tries} tries asked {asked} times");
+        });
+    }
 }
 
 loom::lazy_static! {

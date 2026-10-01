@@ -25,7 +25,10 @@ static UART_PRESENT: AtomicBool = AtomicBool::new(false);
 /// Find and program the console UART, off the firmware tables at `rsdp_addr`
 /// where the architecture places it by them.
 pub fn init(rsdp_addr: u64) {
-    UART_PRESENT.store(uart::init(rsdp_addr), Ordering::Relaxed);
+    // What the architecture logs under the lock is not drained under it:
+    // `has_console` is false until the store below.
+    let present = uart::init(&mut BackendGuard::lock().registers, rsdp_addr);
+    UART_PRESENT.store(present, Ordering::Relaxed);
     console_changed();
 }
 
@@ -66,9 +69,9 @@ pub fn backend() -> Backend {
 
 static BACKEND: BackendLock = BackendLock::new();
 
-/// The console UART's registers, asked for: what `arch::console_uart` moves a
-/// byte with. Only this file builds one, for a [`BackendGuard`] and a
-/// [`PanicUart`].
+/// The console UART's registers, asked for: what every `arch::console_uart`
+/// function that touches the UART takes. Only this file builds one, for a
+/// [`BackendGuard`] and a [`PanicUart`].
 pub struct Registers(());
 
 /// Exclusive access to the serial backend; interrupts are off for as long as the guard lives.
@@ -95,18 +98,18 @@ impl BackendGuard {
         }
     }
 
-    pub fn has_data(&self) -> bool {
+    pub fn has_data(&mut self) -> bool {
         if super::virtio_console::is_ready() {
             super::virtio_console::has_data_locked(self)
         } else {
-            uart_present() && uart::rx_ready()
+            uart_present() && uart::rx_ready(&mut self.registers)
         }
     }
 
     pub fn try_read_byte(&mut self) -> Option<u8> {
         if super::virtio_console::is_ready() {
             super::virtio_console::try_read_byte_locked(self)
-        } else if uart_present() && uart::rx_ready() {
+        } else if uart_present() && uart::rx_ready(&mut self.registers) {
             Some(uart::read_byte(&mut self.registers))
         } else {
             None
@@ -115,7 +118,7 @@ impl BackendGuard {
 }
 
 pub fn has_data() -> bool {
-    let g = BackendGuard::lock();
+    let mut g = BackendGuard::lock();
     g.has_data()
 }
 
@@ -318,7 +321,7 @@ fn uart_write_fifo(bytes: &[u8]) {
         let mut asked = 0;
         loop {
             let mut burst = BackendGuard::lock();
-            if uart::tx_ready() {
+            if uart::tx_ready(&mut burst.registers) {
                 // A chunk is no more than the transmitter takes once ready.
                 for &b in chunk {
                     uart::write_byte(&mut burst.registers, b);
@@ -457,7 +460,7 @@ fn uart_write_bytes(registers: &mut Registers, bytes: &[u8]) {
     }
     for &b in bytes {
         for _ in 0..THRE_SPIN_LIMIT {
-            if uart::tx_ready() {
+            if uart::tx_ready(registers) {
                 break;
             }
             core::hint::spin_loop();

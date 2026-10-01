@@ -67,7 +67,7 @@ pub fn start(gic: &irqchip::Gic, psci: Option<psci::Conduit>) {
             log!("SMP: cpu{} mpidr={:#x} did not echo within {AP_START}; the rest stay off", attempt.id(), gicc.mpidr);
             break;
         }
-        ROSTER.commit(attempt, packed_affinity(gicc.mpidr));
+        smp::commit(attempt, packed_affinity(gicc.mpidr));
         log!("SMP: cpu{} mpidr={:#x} online", attempt.id(), gicc.mpidr);
     }
     log!("SMP: {} of {} MADT CPUs online", smp::cpu_count(), gic.cpus.len());
@@ -82,6 +82,6 @@ pub(super) extern "C" fn ap_entry(start: &'static ApStart, el: u64) -> ! {
     paging::check_joined();
     control_regs::check(el);
     irqchip::init_cpu(start.redistributor);
-    ROSTER.echo(start.token);
+    smp::echo(start.token);
     crate::process::ap_idle();
 }

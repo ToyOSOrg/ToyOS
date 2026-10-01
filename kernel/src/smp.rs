@@ -3,10 +3,11 @@
 //! and what starting an AP takes on either architecture.
 
 use core::mem::size_of;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use alloc::boxed::Box;
 
-use crate::smp_roster::{Roster, MAX_CPUS};
+use crate::smp_roster::{Attempt, Roster, MAX_CPUS};
 
 pub static ROSTER: Roster = Roster::new();
 
@@ -21,6 +22,31 @@ pub fn cpu_count() -> u32 {
 pub fn hardware_id(cpu: u32) -> u32 {
     assert!(cpu < cpu_count(), "smp: cpu{cpu} is not online");
     ROSTER.hardware_id(cpu)
+}
+
+/// The hardware id the AP being started reads as its own, said with its echo.
+static ECHOED_ID: AtomicU32 = AtomicU32::new(0);
+
+/// The started AP's half of the handshake: the hardware id it reads as its
+/// own, then [`Roster::echo`].
+pub fn echo(token: u32) {
+    ECHOED_ID.store(crate::arch::cpu::hardware_id(), Ordering::Relaxed);
+    ROSTER.echo(token);
+}
+
+/// Commit the AP that echoed `at` under `hardware_id`, the id its roster slot
+/// and every IPI name it by, which must be the one it reads as its own: its
+/// fatal paths and the console lock name it by that read.
+pub fn commit(at: Attempt, hardware_id: u32) {
+    // Ordered by the echo, whose acquire `Roster::await_echo` took.
+    let read = ECHOED_ID.load(Ordering::Relaxed);
+    assert_eq!(
+        read,
+        hardware_id,
+        "smp: cpu{} reads its own hardware id as {read:#x}, and its roster slot and every IPI name it {hardware_id:#x}",
+        at.id()
+    );
+    ROSTER.commit(at, hardware_id);
 }
 
 /// True once a shootdown must wait for siblings; the word the APs are released by.

@@ -104,14 +104,10 @@ pub mod arch {
     /// Which CPU a model thread is, which the console lock's fatal word names.
     /// The model says, through [`become_cpu`]; the kernel asks the CPU. Per
     /// model thread for `scheduler`'s reason: loom's threads share an OS one.
+    #[cfg(feature = "loom")]
     pub mod cpu {
-        #[cfg(feature = "loom")]
         loom::thread_local! {
             static CPU: core::cell::Cell<Option<u32>> = core::cell::Cell::new(None);
-        }
-        #[cfg(not(feature = "loom"))]
-        std::thread_local! {
-            static CPU: core::cell::Cell<Option<u32>> = const { core::cell::Cell::new(None) };
         }
 
         /// Say which CPU the current model thread is. No kernel counterpart.
@@ -375,6 +371,8 @@ pub mod log_ring;
 #[path = "../../kernel/src/drivers/panic_console/published.rs"]
 pub mod panic_console_published;
 
-/// The console backend's lock, driven by `tests/serial_lock.rs`.
+/// The console backend's lock, driven by `tests/serial_lock.rs`; under `loom`
+/// alone, as is the [`arch::cpu`] shim it names.
+#[cfg(feature = "loom")]
 #[path = "../../kernel/src/drivers/serial_lock.rs"]
 pub mod serial_lock;

@@ -24,10 +24,11 @@ pub const TX_BURST: usize = 16;
 // Every register is `PORT + n`; the identity op keeps that pattern uniform
 // across all eight lines instead of special-casing the data register.
 #[allow(clippy::identity_op)]
-pub fn init(_rsdp_addr: u64) -> bool {
+pub fn init(_: &mut Registers, _rsdp_addr: u64) -> bool {
     // SAFETY: `outb`/`inb` require the caller to own the port and the byte;
-    // every port here is `PORT + n` for `n` in 0..=4, inside COM1's own
-    // register block, and the writes are the 16550's documented init sequence.
+    // the caller holds the registers, every port here is `PORT + n` for `n`
+    // in 0..=4, inside COM1's own register block, and the writes are the
+    // 16550's documented init sequence.
     // Order matters: DLAB must precede the divisor writes and loopback mode
     // must precede the probe, or the sequence misprograms the chip.
     let loopback = unsafe {
@@ -55,7 +56,7 @@ pub fn init(_rsdp_addr: u64) -> bool {
 }
 
 /// Whether a received byte waits.
-pub fn rx_ready() -> bool {
+pub fn rx_ready(_: &mut Registers) -> bool {
     inb(LSR) & LSR_DATA_READY != 0
 }
 
@@ -65,13 +66,14 @@ pub fn read_byte(_: &mut Registers) -> u8 {
 }
 
 /// Whether the transmitter will take a byte.
-pub fn tx_ready() -> bool {
+pub fn tx_ready(_: &mut Registers) -> bool {
     inb(LSR) & LSR_THR_EMPTY != 0
 }
 
 /// Put one byte in the transmitter; only after [`tx_ready`], or the byte may be lost.
 pub fn write_byte(_: &mut Registers, byte: u8) {
-    // SAFETY: `outb` requires ownership of the port and the byte; `PORT` is
-    // COM1's own data register, and the byte is console output only.
+    // SAFETY: `outb` requires ownership of the port and the byte; the caller
+    // holds the registers, `PORT` is COM1's own data register, and the byte is
+    // console output only.
     unsafe { outb(PORT, byte) };
 }
