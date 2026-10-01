@@ -70,11 +70,11 @@ fn a_seize_takes_a_burst_let_go_inside_the_bound() {
             become_cpu(0);
             let burst = LOCK.try_lock().expect("an unheld lock refused its first taker");
             let holder = thread::spawn(move || drop(burst));
-            assert!(
-                matches!(LOCK.seize(u64::from(preemptions) + 2), Seized::Taken(_)),
-                "a fatal path gave up on a burst that let go inside the bound"
-            );
+            let taken = matches!(LOCK.seize(u64::from(preemptions) + 2), Seized::Taken(_));
+            // Joined first: a holder never run still owns the burst, whose
+            // drop outside the model would abort the binary rather than fail.
             holder.join().unwrap();
+            assert!(taken, "a fatal path gave up on a burst that let go inside the bound");
         });
     }
 }
