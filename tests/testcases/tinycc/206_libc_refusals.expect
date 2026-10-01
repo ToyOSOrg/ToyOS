@@ -27,7 +27,9 @@ fcntl 12345: -1, EINVAL
 getpwnam_r: ENOSYS, entry null
 getpwuid_r: ENOSYS, entry null
 mmap a file: -1, ENODEV
+mmap a file at a page: -1, ENODEV
 mmap a file shared: -1, ENODEV
+mmap a file shared at a page: -1, ENODEV
 mmap executable: -1, ENOTSUP
 mmap nothing: -1, EINVAL
 sysconf _SC_ARG_MAX: -1, no errno
@@ -35,6 +37,11 @@ sysconf _SC_GETPW_R_SIZE_MAX: -1, no errno
 sysconf 12345: -1, EINVAL
 posix_madvise WILLNEED: 0
 posix_madvise 99: EINVAL
-file: 1 bytes; mode as it was; second name: none
+madvise WILLNEED: 0, no errno
+madvise DONTNEED: -1, ENOSYS
+madvise off a page: -1, EINVAL
+madvise 99: -1, EINVAL
+page after madvise: x
+file: 1 bytes; mode as it was through fstat, as it was through stat; second name: none
 page after mprotect: y
 limit after getrlimit: 0 0

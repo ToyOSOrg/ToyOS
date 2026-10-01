@@ -38,7 +38,30 @@ pub(crate) fn mmap_refusal(addr: usize, len: usize, prot: i32, flags: i32) -> Op
     None
 }
 
-/// Whether `advice` is one of `posix_madvise`'s five.
+/// Whether `advice` is one of `posix_madvise`'s five, which `madvise` numbers alike.
 pub(crate) fn is_advice(advice: i32) -> bool {
     (0..=4).contains(&advice)
+}
+
+/// `MADV_DONTNEED`, which Linux's `madvise` answers by discarding the range,
+/// so that it reads back as the file or as zeros.
+const MADV_DONTNEED: i32 = 4;
+
+/// Why `madvise` refuses `advice` at `addr`.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum AdviceRefusal {
+    /// An address off a page, or advice other than the five `posix_madvise`
+    /// shares with it: `EINVAL`.
+    Invalid,
+    /// `MADV_DONTNEED`'s discard, which nothing here can do: `ENOSYS`.
+    Discard,
+}
+
+/// Why Linux's `madvise` of `advice` at `addr` is refused, if it is. Its four
+/// hints are taken, as its manual lets a kernel ignore each.
+pub(crate) fn madvise_refusal(addr: usize, advice: i32) -> Option<AdviceRefusal> {
+    if !addr.is_multiple_of(PAGE) || !is_advice(advice) {
+        return Some(AdviceRefusal::Invalid);
+    }
+    (advice == MADV_DONTNEED).then_some(AdviceRefusal::Discard)
 }

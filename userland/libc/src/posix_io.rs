@@ -592,6 +592,22 @@ pub unsafe extern "C" fn posix_madvise(_addr: *mut u8, _len: usize, advice: i32)
     if crate::memreq::is_advice(advice) { 0 } else { EINVAL }
 }
 
+/// Linux's `madvise` (`memreq::madvise_refusal`).
+#[no_mangle]
+pub unsafe extern "C" fn madvise(addr: *mut u8, _len: usize, advice: i32) -> i32 {
+    use crate::memreq::AdviceRefusal;
+    match crate::memreq::madvise_refusal(addr.addr(), advice) {
+        None => 0,
+        Some(refusal) => {
+            crate::errno::set(match refusal {
+                AdviceRefusal::Invalid => EINVAL,
+                AdviceRefusal::Discard => crate::errno::ENOSYS,
+            });
+            -1
+        }
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn munmap(addr: *mut u8, len: usize) -> i32 {
     // SAFETY: caller is responsible for addr/len matching a previous mmap

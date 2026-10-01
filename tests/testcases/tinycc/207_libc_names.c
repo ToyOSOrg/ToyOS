@@ -8,13 +8,17 @@
 #include <endian.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <link.h>
 #include <math.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/un.h>
+#include <sysexits.h>
 #include <unistd.h>
 
 #define DIR_PATH "/tmp/207_libc_names"
@@ -151,5 +155,13 @@ int main(void) {
     printf("logb: %g %g %g\n", logb(0.1), logb(1024.0), logb(0.0));
     printf("endian: %s 0x%x 0x%x\n", BYTE_ORDER == LITTLE_ENDIAN ? "little" : "big",
            (unsigned)htobe32(0x01020304), (unsigned)le16toh(0x0102));
+
+    /* The rest of what LLVM reads of these headers, by value and by size. */
+    struct sockaddr_un local = { AF_UNIX, "" };
+    printf("names: AF_UNIX %d, sockaddr_un %zu, EX_IOERR %d, _POSIX_ARG_MAX %d, page %ld\n", local.sun_family,
+           sizeof local, EX_IOERR, _POSIX_ARG_MAX, sysconf(_SC_PAGE_SIZE));
+    printf("names: SA_ONSTACK|SA_NODEFER|SA_RESETHAND 0x%lx, F_RDLCK %d, F_UNLCK %d, rusage %zu, RLIM_INFINITY %s\n",
+           (unsigned long)(SA_ONSTACK | SA_NODEFER | SA_RESETHAND), F_RDLCK, F_UNLCK, sizeof(struct rusage),
+           RLIM_INFINITY == ~0UL ? "every bit" : "not every bit");
     return 0;
 }

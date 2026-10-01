@@ -120,12 +120,12 @@ pub fn build_c(root: &Path, toolchain: &Path, target_dir: &Path, arch: Arch) {
     crate::sysroot::clone_tree(&root.join(CRATE).join("include"), &c.join("include"));
 }
 
-/// The libraries a POSIX link names beside the C library, `-lm` first, whose
+/// The libraries POSIX has a C compiler take, `-lc` and `-lm` among them, whose
 /// functions are all `libtoyos_c.a`'s.
-const EMPTY_LIBRARIES: [&str; 4] = ["m", "pthread", "dl", "rt"];
+const EMPTY_LIBRARIES: [&str; 5] = ["c", "m", "pthread", "dl", "rt"];
 
-/// Put each of [`EMPTY_LIBRARIES`] in `lib` as an archive of no members, as
-/// musl ships them: a link that names one finds it and takes nothing from it.
+/// Put each of [`EMPTY_LIBRARIES`] in `lib` as an archive of no members: a
+/// link that names one finds it and takes nothing from it.
 fn empty_libraries(lib: &Path) {
     for name in EMPTY_LIBRARIES {
         let path = lib.join(format!("lib{name}.a"));
@@ -295,13 +295,13 @@ mod tests {
     use super::*;
     use toyos_tmpdir::TempDir;
 
-    /// **`-lm` finds a library in the C sysroot**, and so do POSIX's other
-    /// three: each an `ar` archive of no members.
+    /// **`-lc` and `-lm` find a library in the C sysroot**, and so do POSIX's
+    /// other three: each an `ar` archive of no members.
     #[test]
     fn the_c_sysroot_names_the_posix_libraries() {
         let lib = TempDir::new("libc-empty");
         empty_libraries(&lib);
-        for name in ["m", "pthread", "dl", "rt"] {
+        for name in ["c", "m", "pthread", "dl", "rt"] {
             let path = lib.join(format!("lib{name}.a"));
             assert_eq!(fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())), b"!<arch>\n");
         }

@@ -102,9 +102,12 @@ int main(void) {
     answer = getpwuid_r(0, &pw, buf, sizeof buf, &found);
     printf("getpwuid_r: %s, entry %s\n", errno_name(answer), found ? "set" : "null");
 
-    /* mmap: no file, no executable page, no empty mapping. */
+    /* mmap: no file, private or shared, at its start or a later page; no
+       executable page; no empty mapping. */
     said("mmap a file", mmap(NULL, 4096, PROT_READ, MAP_PRIVATE, fd, 0) == MAP_FAILED ? -1 : 0);
-    said("mmap a file shared", mmap(NULL, 4096, PROT_READ, MAP_SHARED, fd, 4096) == MAP_FAILED ? -1 : 0);
+    said("mmap a file at a page", mmap(NULL, 4096, PROT_READ, MAP_PRIVATE, fd, 4096) == MAP_FAILED ? -1 : 0);
+    said("mmap a file shared", mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) == MAP_FAILED ? -1 : 0);
+    said("mmap a file shared at a page", mmap(NULL, 4096, PROT_READ, MAP_SHARED, fd, 4096) == MAP_FAILED ? -1 : 0);
     said("mmap executable", mmap(NULL, 4096, PROT_READ | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) == MAP_FAILED ? -1 : 0);
     said("mmap nothing", mmap(NULL, 0, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) == MAP_FAILED ? -1 : 0);
 
@@ -114,14 +117,26 @@ int main(void) {
     said("sysconf _SC_GETPW_R_SIZE_MAX", sysconf(_SC_GETPW_R_SIZE_MAX));
     said("sysconf 12345", sysconf(12345));
 
-    /* posix_madvise takes every advice and answers an error number. */
+    /* posix_madvise takes every advice and answers an error number; madvise
+       takes Linux's hints and refuses its discard, which would have zeroed
+       the page. */
+    page[0] = 'x';
     printf("posix_madvise WILLNEED: %d\n", posix_madvise(page, 4096, POSIX_MADV_WILLNEED));
     printf("posix_madvise 99: %s\n", errno_name(posix_madvise(page, 4096, 99)));
+    said("madvise WILLNEED", madvise(page, 4096, MADV_WILLNEED));
+    said("madvise DONTNEED", madvise(page, 4096, MADV_DONTNEED));
+    said("madvise off a page", madvise(page + 1, 4096, MADV_WILLNEED));
+    said("madvise 99", madvise(page, 4096, 99));
+    printf("page after madvise: %c\n", page[0]);
 
-    /* Nothing refused was done: the file has its one byte, its mode and no
-       second name; the page is still writable; the limit is as it was. */
+    /* Nothing refused was done: the file has its one byte, its mode through
+       its name and its descriptor, and no second name; the page is still
+       writable; the limit is as it was. */
+    struct stat by_name;
     long size = fstat(fd, &st) == 0 ? (long)st.st_size : -1L;
-    printf("file: %ld bytes; mode %s; second name: %s\n", size, st.st_mode == mode ? "as it was" : "changed",
+    int named = stat(FILE_PATH, &by_name) == 0;
+    printf("file: %ld bytes; mode %s through fstat, %s through stat; second name: %s\n", size,
+           st.st_mode == mode ? "as it was" : "changed", named && by_name.st_mode == mode ? "as it was" : "changed",
            access(FILE_PATH ".link", F_OK) == 0 ? "made" : "none");
     page[0] = 'y';
     printf("page after mprotect: %c\n", page[0]);
