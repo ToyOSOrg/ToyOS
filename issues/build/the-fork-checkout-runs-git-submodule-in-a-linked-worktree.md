@@ -10,7 +10,7 @@ opened: 2026-09-30
 primary's `rust` (`git worktree add --detach`). When the primary's
 `library/backtrace` lacks the commit the fork pins, it runs
 `git submodule update --init library/backtrace` inside that linked worktree,
-which `.claude/agents/implementer.md` forbids: `git submodule` in a linked
+which root `CLAUDE.md` forbids: `git submodule` in a linked
 worktree writes `core.worktree` into shared config and breaks git in the
 primary checkout's `rust/`. The orchestrator measured that for
 `git submodule update rust` in a linked worktree of the monorepo, which set the

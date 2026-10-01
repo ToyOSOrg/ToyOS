@@ -34,7 +34,7 @@
 //! directory is written; then the LLVM key's, held shared while it is linked.
 //!
 //! A compiler no worktree names any more is removed by `keystore::sweep`, which
-//! `--worktree remove` and every placement run: each build records the key it used in its
+//! every placement runs: each build records the key it used in its
 //! worktree's `target/`, and a key no registered worktree records, that nobody
 //! is making or using, goes.
 //!
