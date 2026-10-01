@@ -242,9 +242,11 @@ impl fmt::Display for Budget {
     }
 }
 
-/// How long the boot CPU waits for an AP it started to echo its token.
+/// How long the boot CPU waits for an AP it started to echo its token:
+/// [`DEAF_CPU`]'s span, because a vCPU its host has not run yet is slow and not
+/// dead.
 pub const AP_START: Budget = Budget::of(
-    Duration::from_millis(100),
+    Duration::from_nanos(DEAF_CPU.nanos()),
     "the machine boots with the CPUs that came up before the first that did not",
 );
 
