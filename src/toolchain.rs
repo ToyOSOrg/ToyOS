@@ -1333,13 +1333,13 @@ mod tests {
         fs::write(out.join("core-1.d"), rustc).unwrap();
         assert_std_reads_no_worktree(&root, &fork, &built);
 
-        let refusal = |dep_info: &Path| {
+        let refusal = |dep_info: &Path, what: &str| {
             let refused = std::panic::catch_unwind(|| assert_std_reads_no_worktree(&root, &fork, dep_info));
-            *refused.expect_err("unchecked dep-info was taken").downcast::<String>().expect("a formatted refusal")
+            *refused.err().unwrap_or_else(|| panic!("{what} was taken")).downcast::<String>().expect("a formatted refusal")
         };
         let naming = |named: &str| {
             fs::write(built.join("dist/other.d"), format!("{rlib}: {named}\n")).unwrap();
-            refusal(&built)
+            refusal(&built, &format!("dep-info naming {named}"))
         };
         let system = file(&root.join("system.toml"));
         for read in [file(&root.join("toyos-abi/src/lib.rs")), file(&root.join("userland/libc/src/lib.rs")), system.clone()] {
@@ -1354,7 +1354,7 @@ mod tests {
         let said = naming("library/core/src/gone.rs");
         assert!(said.starts_with(&format!("resolve {}/library/core/src/gone.rs", fork.display())), "{said}");
 
-        let said = refusal(&built.join("none"));
+        let said = refusal(&built.join("none"), "a target directory without dep-info");
         assert!(said.contains("name no source of the fork"), "{said}");
     }
 
