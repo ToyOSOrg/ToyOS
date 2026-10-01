@@ -641,7 +641,6 @@ pub fn init(devices: &[PciDevice]) -> Option<(Box<dyn Gpu>, GpuInfo)> {
     gpu.width = width;
     gpu.height = height;
 
-
     let info = gpu.build_gpu_info();
 
     Some((Box::new(gpu), info))

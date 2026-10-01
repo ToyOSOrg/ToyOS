@@ -1,34 +1,3 @@
-//! The boot stick's two partitions, served and written from inside ToyOS.
-//!
-//! The ESP holds what firmware and the bootloader read. The log partition
-//! beside it holds the kernel's own log and exists for one reason: it is typed
-//! so that a desktop OS mounts it on plug-in, which an EFI-typed partition is
-//! not. Both are FAT32 and neither is found by being FAT32 — the loader names
-//! both by unique GUID, fsd serves each off the partition that name finds,
-//! and `log_partition_identity` is the gate that says so by moving the name
-//! and watching `/log` go absent.
-//!
-//! Ground truth is the disk image the *device* received, read on the host by
-//! implementations that are not fsd's: the `fatfs` crate and
-//! `toyos-fat32-check`. The guest's account of a write it made is exactly what
-//! is in question, so it cannot also be the evidence; `esp_files` asserts what
-//! only a process inside the machine can see, and everything it claims about
-//! bytes is checked again here.
-//!
-//! **Where this stops.** `log_partition_layout` pins the image: type GUID,
-//! attribute bits, labels, alignment, and that our own GPT parser finds the
-//! partition the ESP names. It does not assert that any operating system
-//! *mounts* it. Whether macOS attaches a Basic Data partition is
-//! `diskarbitrationd`'s policy, not our contract — it moves between macOS
-//! versions and host settings, it would put a volume on the owner's desktop
-//! every test run, and it would race concurrent runs. That end of the contract
-//! was verified once by hand, on 2026-08-02, and is re-verified when a stick is
-//! flashed.
-//!
-//! The image is built and modified before the boot rather than after, because
-//! the host-writes-guest-reads direction has no other staging point: a file the
-//! guest itself created and read back would pass with the read path broken.
-
 use std::io::{Cursor, Read};
 
 use fatfs::FsOptions;

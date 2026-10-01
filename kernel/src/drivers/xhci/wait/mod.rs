@@ -15,7 +15,6 @@ pub mod msc;
 #[cfg(feature = "boot-actuators")]
 mod depth_probe {
 
-
 }
 
 use crate::log;

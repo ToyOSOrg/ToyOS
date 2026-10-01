@@ -1028,9 +1028,7 @@ pub struct TestResult {
 ///
 /// The line channel is a `Receiver`, so a wait on it consumes: a helper that
 /// drained lines looking for its own evidence would take the marker its caller's
-/// assertion is waiting for. That is the whole reason this exists, and it is why
-/// `shell_type_line` in `tests/toyos.rs` reads the guest's echo of a typed line
-/// from here.
+/// assertion is waiting for. That is the whole reason this exists.
 ///
 /// It also carries what the line channel structurally cannot. A surface owner
 /// mirrors the shell's bytes to its own stdout and std buffers that by line, so
@@ -1044,14 +1042,13 @@ impl ConsoleStream {
         Self(Arc::new(Mutex::new(Vec::new())))
     }
 
-    /// Everything the guest has said since byte `at`.
+    /// Everything the guest has said so far.
     ///
-    /// Lossy, and it has to be: `at` is a byte offset a caller took between two
-    /// writes and the tail is whatever has arrived since, so both ends can fall
+    /// Lossy, and it has to be: the tail is whatever has arrived, so it can end
     /// inside a multi-byte character that is not finished yet.
-    pub fn since(&self, at: usize) -> String {
+    pub fn text(&self) -> String {
         let buf = self.0.lock().expect("the console stream lock is never held across a panic");
-        String::from_utf8_lossy(&buf[at.min(buf.len())..]).into_owned()
+        String::from_utf8_lossy(&buf).into_owned()
     }
 }
 
@@ -1450,9 +1447,7 @@ impl QemuInstance {
     /// `/system/bin/console` repaints on I/O alone. A compositor's cursor blink and its
     /// once-a-second taskbar clock never let the screen freeze, so such a caller
     /// would wait the whole backstop when its `done` never comes and keeps the
-    /// plain [`Self::screendump_while`] (which is also why the `screen_blocked_dump`
-    /// retry loop, whose timeout is a deliberate re-send signal, must not use
-    /// this).
+    /// plain [`Self::screendump_while`].
     ///
     /// Reuses the one classifier so the two channels cannot drift: `dying` is the
     /// serial path's alone, and a halted kernel freezes the screen and is caught
@@ -1522,9 +1517,7 @@ impl QemuInstance {
     /// **Not scaled by the width**, and it is the one duration in this file that
     /// is not. Callers use it to *pace* — "let the guest run for 400 ms and tell
     /// me what it said" — so multiplying it does not buy a slow guest more room,
-    /// it buys the test a longer sleep. `metal_sim_pointer_churn` has
-    /// twenty-four of these; scaled, they made it an 86 s job at width 8 and the
-    /// critical path of the whole phase.
+    /// it buys the test a longer sleep.
     pub fn drain_serial(&mut self, dur: Duration) -> String {
         self.drain_for(dur, |_| false)
     }
@@ -1989,8 +1982,7 @@ impl QmpInput {
     /// batch wider than that queue is a hole in the middle of a word whatever
     /// the guest is doing. Use [`scancode_bytes`] to measure a batch, and send
     /// the next one only once the guest has shown it consumed this one —
-    /// `console_type_line` and `shell_type_line` in `tests/toyos.rs` are the
-    /// two patterns, one reading the panel and one reading [`ConsoleStream`].
+    /// `console_type_line` in `tests/toyos.rs` reads the panel for it.
     ///
     /// **There is no wall-clock form of this and there must not be one.** A gap
     /// between characters is the same bound bet on the guest being scheduled,

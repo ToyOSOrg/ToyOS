@@ -1,14 +1,3 @@
-//! The two ways the machine stops, told apart by QEMU rather than by the guest:
-//! a reset, a power-off and a triple fault all end a `-no-reboot` QEMU with
-//! status 0, so what is asserted is the cause its `SHUTDOWN` event names, and a
-//! reboot implemented as a power-off reds on `guest-shutdown`.
-//!
-//! Two names here judge the boot *after* a reset instead, and pay for it:
-//! `blackbox_panic_chain` and `blackbox_done_chain` set
-//! `BootOptions::takes_the_reset`, which gives up the stop reason every other
-//! test in this file judges by, because a page crossing a reset cannot be
-//! observed from a QEMU that exits on one.
-
 use toyos_blackbox::{PHYS, State};
 use toyos_build::bootlog::{self, REBOOTING};
 

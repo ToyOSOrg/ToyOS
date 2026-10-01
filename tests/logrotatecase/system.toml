@@ -8,17 +8,13 @@
 # cmdline the kernel parses into a config the image is built from, which is a
 # capability-shaped answer rather than a global one.
 #
-# What it buys is unchanged, and two tests want it: filling a mebibyte by
-# logging would take a boot far longer than a test should wait, and the code
-# the small bound drives is the shipped code. `kernel_log_file`'s second arm
-# reads the continuations and the retention sweep off the volume;
 # `usb_boot_stick_pulled` wants the FAT allocation and directory writes that a
 # rotation puts *in flight* at the moment the stick is pulled, which a machine
 # that is only ever appending never reaches.
 #
-# It is metalcase's program set and not a smaller one on purpose: both callers
-# are about what the T14's shape does, and a config that dropped the daemons
-# would be measuring a different machine.
+# It is metalcase's program set and not a smaller one on purpose: the test is
+# about what the T14's shape does, and a config that dropped the daemons would
+# be measuring a different machine.
 
 assets = ["assets"]
 
@@ -61,21 +57,9 @@ service = true
 receives = ["netd", "launcher"]
 
 # The union its guest binaries need on this machine shape.
-# `power` is the connector `run shutdown` below asks init through.
 [programs.test-runner]
-receives = ["compositor", "soundd", "netd", "power"]
+receives = ["compositor", "soundd", "netd"]
 syscap = ["logread"]
-
-# `run shutdown` is what closes `kernel_log_file`'s second arm, and it spawns
-# `/system/bin/shutdown`. metalcase carries no toybox and therefore no such name, so
-# this config adds the one applet the gate uses — a boot that could not shut
-# down would run the rotation path and then fail on a tail that was never
-# written, which is what it did the first time this config existed.
-[programs.toybox]
-receives = ["soundd"]
-
-[symlinks]
-"bin/shutdown" = "/system/bin/toybox"
 
 # The block service: the NVMe controller this machine's DATA is on, driven
 # from userland through its claim. Started again when it ends; the claim goes

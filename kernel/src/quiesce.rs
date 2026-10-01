@@ -216,4 +216,3 @@ fn sweep(caller: ThreadId) -> Sweep {
     }
     out
 }
-

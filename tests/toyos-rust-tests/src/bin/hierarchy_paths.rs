@@ -5,9 +5,6 @@
 //! because some volume happens to carry a directory by that name; `/` is no
 //! filesystem either, so every syscall that would change what is at it is
 //! refused the way a read-only mount refuses one, and the machine survives it.
-//!
-//! The two files this writes are the other half of
-//! `apps_and_home_are_one_filesystem` in `tests/common/storage.rs`.
 
 use std::fs;
 use std::io::Write;

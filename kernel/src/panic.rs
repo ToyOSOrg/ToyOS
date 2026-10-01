@@ -357,9 +357,7 @@ pub fn halt_all_cpus() -> ! {
     crate::arch::irqchip::stop_other_cpus();
     let bound = crate::panic_reboot::arm(true);
     // Folded into the still-unpainted capture only where the panel is this
-    // boot's only account of itself: a refresh re-freezes the ring, and
-    // `screen_late_panic` reads the panel for a record written *after*
-    // `capture()` to prove the paint comes from the frozen snapshot. A machine
+    // boot's only account of itself: a refresh re-freezes the ring. A machine
     // with a console gets the arm line on it.
     if !serial::has_console() {
         crate::drivers::panic_console::refresh_capture();

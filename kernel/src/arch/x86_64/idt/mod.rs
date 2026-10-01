@@ -39,7 +39,6 @@ pub const HDA_VECTOR: u8 = Vector::Hda as u8;
 /// The vector the virtio-sound device's MSI-X entry carries.
 pub const VIRTIO_SOUND_VECTOR: u8 = Vector::VirtioSound as u8;
 
-
 const PF_PRESENT: u64 = 1 << 0;
 const PF_WRITE: u64 = 1 << 1;
 const PF_INSTRUCTION_FETCH: u64 = 1 << 4;

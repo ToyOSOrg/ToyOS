@@ -87,13 +87,9 @@ mod user_ptr;
 mod vma;
 mod syscall;
 
-/// Nested generic forces a demangled symbol wider than the console grid,
-/// proving `screen_late_panic`'s renderer really wraps.
+/// Nested generic forces a demangled symbol wider than the console grid.
 #[cfg(feature = "boot-actuators")]
 mod late_panic {
-    /// The record the panic path writes after `capture()`, for `screen_late_panic`.
-    pub const AFTER_CAPTURE: &str = "test-late-panic: after the capture";
-
     pub struct Nest<T>(core::marker::PhantomData<T>);
 
     impl<T> Nest<T> {
@@ -160,12 +156,6 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     arch::trap::report_panic(info, cpu::frame_pointer());
 
     drivers::panic_console::capture();
-    // One record after the snapshot and before the paint: what tells a frozen
-    // report from a live re-read of a ring siblings are still writing to.
-    #[cfg(feature = "boot-actuators")]
-    if actuator::test_late_panic() {
-        log!("{}", late_panic::AFTER_CAPTURE);
-    }
     // SAFETY: IF is clear on this CPU and every other one halts before anything else can write the port.
     unsafe { drivers::serial::panic_flush(); }
 

@@ -288,4 +288,3 @@ fn opt(value: u64, bit: u64, name: &'static str) -> &'static str {
     if value & bit != 0 { name } else { "" }
 }
 
-

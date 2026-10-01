@@ -1599,7 +1599,7 @@ fn assert_entry_window_matches_features(features: &str, kernel: &[u8]) {
 /// Every one of these is a `#[cfg(feature = "check")]` site in `toyos-sched`.
 /// Two are asserts from `invariants::check_cpu` — invariant T's armed-timer
 /// bound and the container-versus-state-word agreement. The third is the
-/// pass-cost report (`cpu::PassCostReport::PREFIX`), which is a *measurement*
+/// pass-cost report, which is a *measurement*
 /// and not an assert: a pass's elapsed time includes any interval a hypervisor
 /// took the CPU away, so it is recorded rather than panicked over. Their format
 /// strings are the only part of the check build with a literal the linker keeps,
@@ -1632,8 +1632,7 @@ fn assert_sched_check_matches_features(features: &str, kernel: &[u8]) {
         &SCHED_CHECK_LITERALS,
         "scheduler check instruments",
         "`sched-check` forwards to `toyos-sched/check`, so a build that carries the feature and \
-         not the instruments is a check build in name only — which is what a green \
-         `sched_check_build` would then be certifying.",
+         not the instruments is a check build in name only.",
     );
 }
 
@@ -1909,8 +1908,7 @@ fn root_image_key(plan: &Plan, image_key: &str, extra_files: &[(String, Vec<u8>)
 ///
 /// The image itself is never memoized, only the three parts it is made of:
 /// [`image::create_boot_image`] mints a fresh partition GUID per call and writes
-/// it into both the GPT and the ESP, and a boot that did not get its own is a
-/// boot `log_partition_identity` is entitled to catch.
+/// it into both the GPT and the ESP.
 pub fn build_test_image(
     root: &Path,
     plan: &Plan,

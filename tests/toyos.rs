@@ -1068,8 +1068,7 @@ const T14_COLS: usize = 1920 / 8;
 /// The line `SYS_DEBUG` action 3 logs immediately before halting every CPU.
 /// It exists only on a `test-actuators` kernel — every other action costs the
 /// caller its own process, this one costs the machine. Kept in sync with
-/// `kernel/src/syscall/debug.rs` by this comment and by screen_fatal_halt
-/// failing loudly if it drifts.
+/// `kernel/src/syscall/debug.rs` by this comment.
 const FATAL_HALT_NONCE: &str = "SYS_DEBUG: fatal halt 4b1d9e2c";
 
 /// How far a corpus case gets before it stops, and what it says when it does.
@@ -1653,10 +1652,10 @@ fn virt_smp(profile: qemu::Profile, conduit: &str, el: u32) -> Result<(), String
     Ok(())
 }
 
-/// `smp_failed_ap_leaves_no_hole` on AArch64: `smp-skip-ap` keeps `CPU_ON`
-/// from the CPU that would be cpu2 of four, and the bring-up stops there, so
-/// cpu2's id goes to no CPU behind it. The case's job, which the scheduler
-/// places across the CPUs that came up, ends with exit 0.
+/// `smp-skip-ap` keeps `CPU_ON` from the CPU that would be cpu2 of four, and
+/// the bring-up stops there, so cpu2's id goes to no CPU behind it. The case's
+/// job, which the scheduler places across the CPUs that came up, ends with
+/// exit 0.
 fn virt_failed_ap_leaves_no_hole(profile: qemu::Profile) -> Result<(), String> {
     const CPUS: u32 = 4;
     let qemu = boot_virt_smp(profile, CPUS, &["smp-skip-ap"]);
@@ -1682,9 +1681,9 @@ fn virt_failed_ap_leaves_no_hole(profile: qemu::Profile) -> Result<(), String> {
     Ok(())
 }
 
-/// [`panic_halts_the_others_first`] on AArch64: `tests/virtpaniccase` runs
-/// `test_rs_panic_halts_first` as its one job on [`STOP_CPUS`] CPUs, and the
-/// halt SGI stops every CPU but the one going fatal.
+/// `tests/virtpaniccase` runs `test_rs_panic_halts_first` as its one job on
+/// [`STOP_CPUS`] CPUs, and the halt SGI stops every CPU but the one going
+/// fatal.
 fn virt_fatal_halts_the_others_first(profile: qemu::Profile) -> Result<(), String> {
     let config = compile::repo_root().join("tests/virtpaniccase/system.toml");
     let case = config.parent().expect("system.toml has a directory");
@@ -1745,13 +1744,12 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
     match name {
         "screen_diag_boot" => {
             // The diagnostic boot mode, on the machine shape it exists for.
-            // What is under test is not that the console renders —
-            // `screen_late_panic` has that — but that a *successful* boot
-            // leaves its log on the glass. `boot_checkpoint` is the only
-            // painter on this path and it returns immediately once anything
-            // claims DEVICE_FRAMEBUFFER, so on the flashed image the answer
-            // to "why is the keyboard dead" was up for about a tenth of a
-            // second. This image contains no process that can claim it.
+            // What is under test is not that the console renders but that a
+            // *successful* boot leaves its log on the glass. `boot_checkpoint`
+            // is the only painter on this path and it returns immediately once
+            // anything claims DEVICE_FRAMEBUFFER, so on the flashed image the
+            // answer to "why is the keyboard dead" was up for about a tenth of
+            // a second. This image contains no process that can claim it.
             //
             // Same config file `--diag-boot` builds from, and no test binaries
             // on ROOT, so the image booted here is the image flashed.
@@ -1799,10 +1797,9 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
                     ));
                 }
             }
-            // `screen_log_absent`'s control. This machine's log partition
-            // mounted, so nothing here may be wearing the alert marker — a
-            // kernel that painted it unconditionally would satisfy that gate
-            // and mean nothing.
+            // This machine's log partition mounted, so nothing here may be
+            // wearing the alert marker — a kernel that painted it
+            // unconditionally would satisfy that gate and mean nothing.
             if let Some(row) = (0..dump.rows().len()).find(|&i| dump.row_fg(i) == Some(ALERT)) {
                 return Err(format!(
                     "an alert row on a boot where everything worked: {:?}\n\
@@ -1956,7 +1953,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
                 // The byte stream and not `boot_log`: the count is on the rest
                 // of the ready marker's own line, which the line channel has
                 // already consumed by the time the marker ends the boot wait.
-                let said = qemu.console_stream().since(0);
+                let said = qemu.console_stream().text();
                 // Anchored on the whole of the console's own phrase: `logd`
                 // says "this boot's kernel log is …" on the same console, and
                 // a search for the shorter string finds that one first.
@@ -2054,10 +2051,8 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
             // The machine the whole M0/M1 line exists for: metal-sim with the
             // 16550 taken away, so `uart_present()` is false, `panic_flush`
             // returns without draining anywhere, and the rendered screen is
-            // the only channel the report can possibly reach. Same kernel
-            // feature and same image as `screen_late_panic`, so this costs a
-            // boot and no rebuild — and it is the one place the absent-UART
-            // branches run at all.
+            // the only channel the report can possibly reach. It is the one
+            // place the absent-UART branches run at all.
             let options = BootOptions {
                 profile,
                 qmp: true,
@@ -2299,7 +2294,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
         "virt_failed_ap_leaves_no_hole" => virt_failed_ap_leaves_no_hole(profile),
         "virt_fatal_halts_the_others_first" => virt_fatal_halts_the_others_first(profile),
         "screen_fatal_behind_a_painter" => {
-            // `screen_fatal_halt` with a painter holding the panel's latch and
+            // The fatal halt with a painter holding the panel's latch and
             // never giving it back — which is what a painter is when the halt
             // IPI lands mid-paint. The actuator has Ctrl+Alt+D's report painter
             // go fatal once it holds the latch, so the fatal path meets a
@@ -2355,12 +2350,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
         "screen_fatal_halt_composited" => {
             // **Can a fatal panic reach the panel once a compositor owns the
             // scanout?** Three investigations into the T14 have rested on the
-            // answer being yes and nothing has ever asked it. `screen_fatal_halt`
-            // boots a config with no compositor, so the screen it paints is one
-            // nothing else had claimed; `screen_blocked_dump` does have a
-            // compositor, but Ctrl+Alt+D paints through `paint_report`, and
-            // `halt_all_cpus` paints through `render` with a different fill and
-            // a different source. The owner pulled his stick, waited a minute,
+            // answer being yes. The owner pulled his stick, waited a minute,
             // and saw the desktop unchanged — which is what this test is for:
             // if the fatal path cannot paint over a claimed framebuffer, every
             // "nothing appeared on the panel" observation to date says nothing
@@ -2384,20 +2374,15 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
             let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
 
             // The compositor has the screen *before* anything panics. Asserted
-            // on the fill, exactly as `screen_blocked_dump` does: every kernel
-            // paint fills with `FILL_BOOT`, so anything else is userland
-            // holding the panel. Without this the test would prove that a
-            // fatal panic paints a screen nobody had taken, which is what the
-            // suite already knew.
+            // on the fill: every kernel paint fills with `FILL_BOOT`, so
+            // anything else is userland holding the panel. Without this the
+            // test would prove that a fatal panic paints a screen nobody had
+            // taken.
             let up = qemu.screendump_while(Duration::from_secs(30), Duration::from_millis(200), |d| {
                 d.fill() != FILL_BOOT
             });
             if up.fill() == FILL_BOOT {
-                return Err(
-                    "the compositor never took the screen, so this would have retested \
-                     screen_fatal_halt on a different config"
-                        .to_string(),
-                );
+                return Err("the compositor never took the screen".to_string());
             }
 
             // The probe fires 5 s after the claim; the poll is for that plus
@@ -2516,7 +2501,7 @@ fn metal_sim_argv_check(argv: &[String]) -> Result<(), String> {
     // isa-parallel that nothing declared — and the NIC is enough to make netd
     // claim a device on the machine whose whole point is that it has none.
     // None of them appears in argv, so this flag is the only observable form
-    // of their absence here; `query_pci_agreement` is the direct one.
+    // of their absence here.
     if !argv.iter().any(|a| a == "-nodefaults") {
         return Err("metal-sim did not pass -nodefaults; QEMU's default-device pass is back".to_string());
     }
@@ -2696,12 +2681,6 @@ fn ps2_bursts(line: &str) -> Vec<String> {
 ///
 /// The Enter is separate and unconfirmed on purpose: what it produces is the
 /// caller's assertion, and a prompt that has scrolled is not an echo to match.
-///
-/// The echo is matched as a **prefix** of the input row, which is what lets the
-/// one command in this suite that is typed onto a panel somebody painted over
-/// use this: `screen_console_clear` types `clear` at a prompt whose row is green
-/// from the cell after the cursor to the edge, and a whole-row comparison would
-/// read that paint as a lost keystroke.
 fn console_type_line(
     qemu: &mut QemuInstance,
     font: &screen::ConsoleFont,
@@ -4951,4 +4930,3 @@ fn main() {
     eprint!("{}", tally.summary(total, suite_start.elapsed(), suite_start.suspended()));
     run.exit(tally.exit_code());
 }
-

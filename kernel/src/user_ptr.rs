@@ -399,4 +399,3 @@ fn pinned<R: AsRef<[Segment]>>(
     drop(guard);
     Some(pins)
 }
-

@@ -542,7 +542,6 @@ fn enable(
     );
 }
 
-
 /// Slot of the per-width domain cache; exhaustive match so a new `AddressWidth` fails to compile here.
 fn domain_slot(width: AddressWidth) -> usize {
     match width {

@@ -344,7 +344,6 @@ pub fn init(devices: &[PciDevice]) {
     device.enable_queue(abi::TX_QUEUE);
     device.activate();
 
-
     // DmaPool allocations are whole 2 MiB pages; ABI offsets are relative to that page.
     let dma_region = Region {
         phys: crate::DirectMap::from_phys(shared.host_phys()),

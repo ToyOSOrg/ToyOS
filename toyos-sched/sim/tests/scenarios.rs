@@ -60,10 +60,8 @@
 //! cargo run --release -p toyos-sched-sim -- fuzz-sweep 10000000
 //! ```
 //!
-//! The on-target half is `sched_check_build` (`tests/toyos.rs`), which boots a
-//! kernel carrying the same `feature = "check"` asserts. `overlong_pass` proves
-//! the pass budget's assert compiles and fires against a *modelled* cost; only
-//! a booted kernel reads a TSC.
+//! `overlong_pass` proves the pass budget's assert compiles and fires against a
+//! *modelled* cost; only a booted kernel reads a TSC.
 
 use std::collections::BTreeMap;
 

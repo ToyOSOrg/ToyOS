@@ -70,4 +70,3 @@ pub fn swapped_on_metal(back: &super::metal::Readback) -> Result<(), String> {
     }
     Err(format!("{} finding(s):\n  {}", bad.len(), bad.join("\n  ")))
 }
-

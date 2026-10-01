@@ -43,7 +43,7 @@ pub enum Drain {
     /// Nothing else runs yet: no thread exists before `klogd`'s spawn, and no CPU takes a scheduler pass this early.
     Inline,
     /// `klogd`, woken at the commit of the record it will drain.
-    /// Only a commit or a queued line wakes it — no idle loop, no timer — and `i8042_no_spurious_wake` depends on that.
+    /// Only a commit or a queued line wakes it — no idle loop, no timer.
     Thread,
 }
 

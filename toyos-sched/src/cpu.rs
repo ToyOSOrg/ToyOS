@@ -1246,8 +1246,7 @@ fn home_of(state: TaskState) -> Option<CpuId> {
 
 /// How long one scheduler pass is modelled to take on the machine it runs on,
 /// which is also how long preemption is off for. **Measured by a
-/// `feature = "check"` build and gated in the harness against the measurement;
-/// asserted by nothing.**
+/// `feature = "check"` build; asserted by nothing.**
 ///
 /// The number is the simulator's own modelling error made explicit. The sim
 /// charges a pass **zero** time — every step it takes is either a workload op
@@ -1329,7 +1328,7 @@ pub fn pass_cost_bucket(ns: u64) -> usize {
 /// The exclusive upper bound of bucket `b`, and `u64::MAX` for the saturating
 /// top one. A quantile is reported as one of these: "this fraction of passes
 /// cost *less than* this many nanoseconds" is the strongest true statement a
-/// histogram supports, and it is the statement the harness gates.
+/// histogram supports.
 #[cfg(feature = "check")]
 pub fn pass_cost_bucket_end(bucket: usize) -> u64 {
     if bucket >= PASS_COST_BUCKETS - 1 {
@@ -1339,8 +1338,7 @@ pub fn pass_cost_bucket_end(bucket: usize) -> u64 {
     }
 }
 
-/// One CPU's pass-cost distribution, as a value: the wire form between the
-/// kernel that measures and the harness that judges.
+/// One CPU's pass-cost distribution, as a value.
 ///
 /// `over` is exact and the histogram is not, which is deliberate: rounding it
 /// to a power of two would lose the one number a reader compares against
@@ -1374,7 +1372,7 @@ impl PassCostReport {
     /// The smallest bucket end below which `num/den` of all passes fall.
     ///
     /// Zero samples answer 0: a caller that gates on this must check
-    /// [`Self::count`] first, and the harness does.
+    /// [`Self::count`] first.
     pub fn quantile_upper_ns(&self, num: u64, den: u64) -> u64 {
         assert!(den > 0 && num <= den, "a quantile is num/den with num <= den");
         if self.count == 0 {
@@ -1394,8 +1392,6 @@ impl PassCostReport {
     }
 }
 
-/// The wire form. Parsed back by [`PassCostReport::parse`], and the two are
-/// held together by a round-trip test rather than by care.
 #[cfg(feature = "check")]
 impl core::fmt::Display for PassCostReport {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -1419,39 +1415,6 @@ impl core::fmt::Display for PassCostReport {
             write!(f, "-")?;
         }
         Ok(())
-    }
-}
-
-#[cfg(feature = "check")]
-impl PassCostReport {
-    /// The prefix a capture is searched for. One contiguous literal, because
-    /// the build's artifact gate looks for exactly these bytes in the kernel
-    /// image to prove the check build carries the instrument at all.
-    pub const PREFIX: &'static str = "sched-check pass-costs cpu=";
-
-    /// Read one report out of a console line. `None` for a line that is not
-    /// one, or one whose fields do not parse — a malformed report is not a
-    /// zeroed report, and a caller that treats it as one gates on nothing.
-    pub fn parse(line: &str) -> Option<Self> {
-        let body = &line[line.find(Self::PREFIX)? + Self::PREFIX.len()..];
-        let mut fields = body.split_whitespace();
-        let cpu: u32 = fields.next()?.parse().ok()?;
-        let mut report = Self::empty(CpuId(cpu));
-        report.count = fields.next()?.strip_prefix("n=")?.parse().ok()?;
-        report.max_ns = fields.next()?.strip_prefix("max=")?.parse().ok()?;
-        report.over = fields.next()?.strip_prefix("over=")?.parse().ok()?;
-        let hist = fields.next()?.strip_prefix("b=")?;
-        if hist != "-" {
-            for pair in hist.split(',') {
-                let (bucket, n) = pair.split_once(':')?;
-                let bucket: usize = bucket.parse().ok()?;
-                let n: u64 = n.parse().ok()?;
-                *report.buckets.get_mut(bucket)? = n;
-            }
-        }
-        // A histogram that does not add up to `n` is a truncated line or a
-        // changed format, and either way the numbers below it mean nothing.
-        (report.buckets.iter().sum::<u64>() == report.count).then_some(report)
     }
 }
 
@@ -3819,47 +3782,6 @@ mod tests {
 #[cfg(all(test, feature = "check"))]
 mod pass_cost_tests {
     use super::*;
-    use alloc::format;
-
-    /// The two halves of the wire form are one format, and this is what says
-    /// so: a `Display` that gains a field and a `parse` that does not is a
-    /// harness reading zeros out of a live machine and calling it green.
-    #[test]
-    fn a_report_survives_the_wire() {
-        let mut report = PassCostReport::empty(CpuId(3));
-        report.buckets[pass_cost_bucket(4_000)] = 900;
-        report.buckets[pass_cost_bucket(1_684_167)] = 1;
-        report.count = 901;
-        report.max_ns = 1_684_167;
-        report.over = 1;
-        let line = format!("[kernel 1.234 cpu3] {report}");
-        assert_eq!(PassCostReport::parse(&line), Some(report));
-    }
-
-    /// An empty histogram still round-trips, because a CPU that has taken no
-    /// pass is a state the harness must be able to read rather than one it
-    /// mistakes for a truncated line.
-    #[test]
-    fn an_empty_report_survives_the_wire() {
-        let report = PassCostReport::empty(CpuId(0));
-        assert_eq!(PassCostReport::parse(&format!("{report}")), Some(report));
-    }
-
-    /// A line whose histogram does not add up to its `n` is refused. The
-    /// console splices lines under load, and a half-read report parsed as a
-    /// whole one gates on a distribution that never existed.
-    #[test]
-    fn a_truncated_report_is_refused() {
-        let mut report = PassCostReport::empty(CpuId(1));
-        report.buckets[10] = 5;
-        report.count = 900;
-        assert_eq!(PassCostReport::parse(&format!("{report}")), None);
-        assert_eq!(PassCostReport::parse("[kernel 1.0 cpu0] xhci: reset"), None);
-        assert_eq!(
-            PassCostReport::parse("sched-check pass-costs cpu=0 n=1 max=2 over=0"),
-            None,
-        );
-    }
 
     /// Bucket `b` holds `[2^(b-1), 2^b)`, and the quantile reads back the
     /// bucket's *end*. Both directions of the boundary, because an off-by-one
@@ -3878,9 +3800,8 @@ mod pass_cost_tests {
         assert_eq!(pass_cost_bucket_end(PASS_COST_BUCKETS - 1), u64::MAX);
     }
 
-    /// The quantile is the whole of what the harness gates, so it is asked the
-    /// question the harness asks: a bulk of cheap passes with one enormous
-    /// sample must answer *cheap*, and a bulk of expensive ones must not.
+    /// A bulk of cheap passes with one enormous sample must answer *cheap*, and
+    /// a bulk of expensive ones must not.
     #[test]
     fn a_quantile_follows_the_mass_and_not_the_tail() {
         let mut sparse = PassCostReport::empty(CpuId(0));

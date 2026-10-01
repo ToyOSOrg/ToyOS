@@ -722,7 +722,6 @@ pub struct XhciController {
     /// Submitted and left, not spun on: a scheduler pass may not block to [`USB_TIMEOUT_NS`] against a device with nothing to answer.
     outstanding: Outstanding<What>,
 
-
     /// What the disk call now inside this controller may still spend, once its transport has broken; closed between calls.
     after_break: AfterBreak,
 

@@ -67,7 +67,7 @@ above; otherwise it is a NOTE.
   with its tag in a trailing comment or names a local path that resolves.
   A file added to or deleted from `tests/testcases/tinycc/` moves the count
   `tests/testcases/LICENSE` states in the same diff, and `46_grep.c` never comes back. Nothing
-  else is tracked under `tests/testcases/` but that `LICENSE`, `system.toml` and `hello.c`.
+  else is tracked under `tests/testcases/` but that `LICENSE` and `system.toml`.
 - **What no gate reads.** A BLOCKER each: a diff that declares a retired ABI name or reuses a
   retired syscall, `SYS_DEBUG` action or inbox op number (the retired numbers are
   `kernel/src/syscall/dispatch.rs`'s `retired_syscalls!` and the "formerly …" and "retired and

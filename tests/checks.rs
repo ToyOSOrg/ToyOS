@@ -276,11 +276,9 @@ mod checks {
 
     /// [`control_regs`] against machines this host cannot boot, with no guest.
     ///
-    /// [`control_regs_negative`] runs the real defective machine and is the link
-    /// between this verdict and a kernel; what is here is the states no actuator
-    /// reaches — a CPU that differs from three others, a bit set uniformly on all
-    /// four, an AP that never printed. Every value is one this tree has printed or
-    /// one bit away from it.
+    /// What is here is the states no actuator reaches — a CPU that differs from
+    /// three others, a bit set uniformly on all four, an AP that never printed.
+    /// Every value is one this tree has printed or one bit away from it.
     #[test]
     fn control_regs_verdict() -> Result<(), String> {
         const AP_BEFORE: (u64, u64) = (0xe000_0011, 0x0031_0620);

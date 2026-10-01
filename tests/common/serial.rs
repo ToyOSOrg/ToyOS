@@ -349,7 +349,6 @@ const NEVER_CLEAN: &[&str] = &[
     // address its own domain does not map. The machine goes on and the claim
     // refuses every later call, so this is not a death; it is a driver whose
     // descriptors are wrong, and a netd that did it on every boot would
-    // otherwise pass everywhere. `userdev_dma_fault` stages exactly one on
-    // purpose and reads it with `must_say`.
+    // otherwise pass everywhere.
     "iommu: DMA FAULT owner=slot",
 ];

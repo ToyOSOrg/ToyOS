@@ -6,9 +6,7 @@ use alloc::vec;
 use crate::block::BlockDevice;
 use crate::drivers::usb_storage;
 
-
 const BLOCK: usize = crate::mm::PAGE_SIZE as usize;
-
 
 /// Blocks per read-and-write-back pair — eight of this driver's largest SCSI
 /// command, so each pair is several commands and not one.

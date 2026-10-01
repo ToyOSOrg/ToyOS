@@ -293,20 +293,20 @@ Metal, and `userland/libc`'s host tests. Exit: each judge reads on the T14 what 
   attribution, the loader's refusal reason, the wait accounting.
 - host `90_stdio_buffering`: stdout and stderr interleave as the case expects.
 
-## Stage M: the harness's own guard
+## Stage L: the harness's own guard
 
 Host. Exit: a host test fails when the harness's death leaves its QEMU running.
 
 - host `guest_dies_with_its_harness`: a `SIGKILL`ed harness takes its QEMU with it.
 
-## Stage N: the instrumentation that survives
+## Stage M: the instrumentation that survives
 
-After the cut, not before. The shared machinery and its size: `tests/common/qemu.rs` 3,353 lines
-(profiles, boot options, the console reader, waits, QMP), `tests/common/metal.rs` 1,273, the
-metal tables and judges in `tests/toyos.rs` 4,971, `src/metal.rs` 3,637, `src/metaltalk.rs`
-1,718, `src/metaldevices.rs`, `src/metalswap.rs` and `src/metaltimings.rs` 1,700 between them,
-`src/bootlog.rs` 900 and `src/testargs.rs` 600; and the 30 actuators and the `SYS_DEBUG`
-actions the kept tests and the metal rows still arm. A simpler design: one registration table
-for guest and metal rows; a guest harness of a boot, a console wait and a screendump, with no
-phases, shards or durations for 22 tests; metal judges that read records `bootlog` declares, and
-no harness-side copy of a kernel string.
+After the cut, not before. The shared machinery and its size, by `wc -l`: `tests/common/qemu.rs`
+2,600 (profiles, boot options, the console reader, waits, QMP), `tests/common/metal.rs` 1,273,
+the rest of `tests/common/` 2,927, `tests/toyos.rs` 4,935 (the metal tables and judges with the
+22 guest tests), `src/metal.rs` 3,637, `src/metaltalk.rs` 1,718, `src/metaldevices.rs`,
+`src/metalswap.rs` and `src/metaltimings.rs` 1,699 between them, `src/bootlog.rs` 858 and
+`src/testargs.rs` 606; and the kernel's 33 actuators and 20 `SYS_DEBUG` actions. A simpler design:
+one registration table for guest and metal rows; a guest harness of a boot, a console wait and a
+screendump, with no phases, shards or durations for 22 tests; metal judges that read records
+`bootlog` declares, and no harness-side copy of a kernel string.
