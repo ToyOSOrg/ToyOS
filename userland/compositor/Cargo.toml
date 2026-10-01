@@ -13,3 +13,6 @@ toyos-inspect = { path = "../../toyos-inspect" }
 toyos-font = { path = "../toyos-font" }
 toyos-manifest = { path = "../../toyos-manifest" }
 toyos-window = { path = "../toyos-window" }
+
+[package.metadata.toyos.host]
+exempt = "it claims ToyOS's framebuffer, keyboard and mouse, and serves the `compositor` port"

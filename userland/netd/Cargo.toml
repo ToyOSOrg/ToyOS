@@ -26,3 +26,6 @@ features = [
     "multicast",
     "alloc",
 ]
+
+[package.metadata.toyos.host]
+exempt = "it drives the NIC ToyOS claims for it, and serves the `netd` port"

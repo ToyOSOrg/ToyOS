@@ -13,3 +13,6 @@ toyos-update = { path = "../../toyos-update" }
 toyos-fat32 = { path = "../../toyos-fat32" }
 # ROOT is hashed as it streams onto its partition, never held whole.
 sha2 = { version = "0.10", default-features = false }
+
+[package.metadata.toyos.host]
+exempt = "it writes ToyOS's idle boot slot, onto the partitions init claims for it"

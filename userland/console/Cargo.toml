@@ -11,3 +11,6 @@ toyos-abi = { path = "../../toyos-abi" }
 toyos-font = { path = "../toyos-font" }
 toyos-window = { path = "../toyos-window" }
 toyos-logstream = { path = "../../toyos-logstream" }
+
+[package.metadata.toyos.host]
+exempt = "it claims ToyOS's framebuffer, and draws the log ToyOS's logd keeps"

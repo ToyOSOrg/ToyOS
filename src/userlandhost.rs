@@ -1,5 +1,29 @@
-//! Which userland crates `cargo run -- --ci host` tests, and every userland test
-//! it would run nowhere.
+//! Which userland crates `cargo run -- --ci host` tests, every userland test it
+//! would run nowhere, and which userland packages it builds on every host.
+//!
+//! **An app builds on Linux, macOS and Windows from the source it builds on
+//! ToyOS from.** [`packages`] reads every member of the userland workspace and
+//! what its own manifest declares; a member that declares nothing is an app.
+//! One that by its nature cannot run anywhere but ToyOS, because it owns ToyOS
+//! devices or kernel objects, says why, and only its tests run on a host:
+//!
+//! ```toml
+//! [package.metadata.toyos.host]
+//! exempt = "it drives the NVMe controller ToyOS claims for it"
+//! ```
+//!
+//! An app that does not build on a host yet names that host and the issue that
+//! records it, which names the app:
+//!
+//! ```toml
+//! [package.metadata.toyos.host]
+//! fails = ["windows"]
+//! issue = "issues/build/<slug>.md"
+//! ```
+//!
+//! `host` builds every app for its own host and checks it against the other two
+//! hosts' triples ([`Os::triple`]), and [`judge`] reds where a build and its
+//! manifest disagree, both ways: so a declared failure goes when the app builds.
 //!
 //! `userland/` is a workspace of its own that cross-compiles by default
 //! (`userland/.cargo/config.toml`), so none of its crates can be a member of the
@@ -107,6 +131,163 @@ pub fn survey(userland: &Path) -> Result<Survey, String> {
         }
     }
     Ok(Survey { gated: gated.into_iter().collect(), escapes: escapes.into_iter().collect() })
+}
+
+/// A host the userland apps build on, as `std::env::consts::OS` and a manifest
+/// spell it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Os {
+    Linux,
+    Macos,
+    Windows,
+}
+
+impl Os {
+    pub const ALL: [Os; 3] = [Os::Linux, Os::Macos, Os::Windows];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Os::Linux => "linux",
+            Os::Macos => "macos",
+            Os::Windows => "windows",
+        }
+    }
+
+    /// The triple another host checks this one's build against.
+    pub fn triple(self) -> &'static str {
+        match self {
+            Os::Linux => "x86_64-unknown-linux-gnu",
+            Os::Macos => "aarch64-apple-darwin",
+            Os::Windows => "x86_64-pc-windows-msvc",
+        }
+    }
+
+    fn named(name: &str) -> Option<Os> {
+        Os::ALL.into_iter().find(|os| os.name() == name)
+    }
+
+    /// The host this build system runs on.
+    pub fn this() -> Result<Os, String> {
+        Os::named(std::env::consts::OS)
+            .ok_or_else(|| format!("{} is none of the hosts an app builds on", std::env::consts::OS))
+    }
+}
+
+/// What a userland package's manifest declares about the hosts.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Host {
+    /// Builds on every host, or on every host but the ones it fails on.
+    App(Option<Fails>),
+    /// Runs on ToyOS alone, and why.
+    Exempt(String),
+}
+
+/// The hosts an app does not build on yet, and the issue that records them.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Fails {
+    pub on: Vec<Os>,
+    pub issue: String,
+}
+
+/// Every member of the userland workspace by its path under `userland`, and
+/// what its manifest declares about the hosts.
+pub fn packages(userland: &Path) -> Result<Vec<(String, Host)>, String> {
+    let read = |path: PathBuf| -> Result<toml::Value, String> {
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        text.parse().map_err(|e| format!("{}: not TOML: {e}", path.display()))
+    };
+    let root = userland.parent().ok_or("userland has no parent")?;
+    let workspace = read(userland.join("Cargo.toml"))?;
+    let members = workspace
+        .get("workspace")
+        .and_then(|w| w.get("members"))
+        .and_then(toml::Value::as_array)
+        .ok_or("userland/Cargo.toml lists no [workspace] members")?;
+    let mut found = Vec::new();
+    for member in members {
+        let dir = member.as_str().ok_or_else(|| format!("a member that is not a path: {member}"))?;
+        let manifest = read(userland.join(dir).join("Cargo.toml"))?;
+        let host = declared(&manifest, root, dir)
+            .map_err(|why| format!("userland/{dir}/Cargo.toml: {why}"))?;
+        found.push((dir.to_string(), host));
+    }
+    Ok(found)
+}
+
+/// `[package.metadata.toyos.host]`, read whole: anything it does not know is
+/// refused, because a misspelt key would make an exempt program an app or a
+/// failing one quiet.
+fn declared(manifest: &toml::Value, root: &Path, dir: &str) -> Result<Host, String> {
+    let Some(host) = manifest
+        .get("package")
+        .and_then(|p| p.get("metadata"))
+        .and_then(|m| m.get("toyos"))
+        .and_then(|t| t.get("host"))
+    else {
+        return Ok(Host::App(None));
+    };
+    let host = host.as_table().ok_or("[package.metadata.toyos.host] is not a table")?;
+    let string = |key: &str| match host.get(key) {
+        Some(v) => v
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| Some(s.to_string()))
+            .ok_or_else(|| format!("`{key}` is not a sentence")),
+        None => Ok(None),
+    };
+    if let Some(key) = host.keys().find(|k| !["exempt", "fails", "issue"].contains(&k.as_str())) {
+        return Err(format!("[package.metadata.toyos.host] declares `{key}`, which nothing reads"));
+    }
+    match (string("exempt")?, host.get("fails"), string("issue")?) {
+        (Some(why), None, None) => Ok(Host::Exempt(why)),
+        (None, Some(fails), Some(issue)) => {
+            let mut on = Vec::new();
+            for name in fails.as_array().into_iter().flatten() {
+                let os = name.as_str().and_then(Os::named).ok_or_else(|| {
+                    format!("`fails` names {name}, which is none of linux, macos and windows")
+                })?;
+                if on.contains(&os) {
+                    return Err(format!("`fails` names {} twice", os.name()));
+                }
+                on.push(os);
+            }
+            if on.is_empty() {
+                return Err("`fails` names no host".into());
+            }
+            if !issue.starts_with("issues/") {
+                return Err(format!("`issue` is {issue:?}, which is no path under issues/"));
+            }
+            let text = std::fs::read_to_string(root.join(&issue))
+                .map_err(|e| format!("`issue` is {issue}, which does not open: {e}"))?;
+            if !text.contains(&format!("`{dir}`")) {
+                return Err(format!("{issue} does not name `{dir}`, so the set it records is short"));
+            }
+            Ok(Host::App(Some(Fails { on, issue })))
+        }
+        _ => Err("[package.metadata.toyos.host] declares `exempt` alone, or `fails` with its \
+                  `issue`"
+            .into()),
+    }
+}
+
+/// One app's build for `os` against what it declares: `Ok(true)` it built,
+/// `Ok(false)` it failed where its manifest says it fails, and `Err` when the
+/// two disagree.
+pub fn judge(dir: &str, fails: Option<&Fails>, os: Os, built: bool) -> Result<bool, String> {
+    let declared = fails.filter(|f| f.on.contains(&os)).map(|f| &f.issue);
+    match (built, declared) {
+        (true, None) | (false, Some(_)) => Ok(built),
+        (false, None) => Err(format!(
+            "userland/{dir} does not build for {}, and its manifest says neither that it fails \
+             there nor that it is exempt",
+            os.name()
+        )),
+        (true, Some(issue)) => Err(format!(
+            "userland/{dir} builds for {}, which its `fails` still names: the name goes, and its \
+             row in {issue}",
+            os.name()
+        )),
+    }
 }
 
 /// `path` under `base`, with forward slashes.
@@ -339,6 +520,63 @@ mod tests {
                 ],
             })
         );
+    }
+
+    /// **Every userland package is an app or says why it is not.**
+    #[test]
+    fn every_userland_package_declares_what_it_is_to_a_host() {
+        let packages = packages(&repo_root().join("userland")).expect("every declaration reads");
+        assert!(packages.iter().any(|(_, h)| matches!(h, Host::App(_))), "no app: {packages:?}");
+        assert!(packages.iter().any(|(_, h)| matches!(h, Host::Exempt(_))), "no exemption");
+    }
+
+    #[test]
+    fn a_host_declaration_is_read_whole_and_refused_by_name() {
+        let dir = toyos_tmpdir::TempDir::new("userlandhost-declared");
+        fs::create_dir_all(dir.join("issues/build")).expect("make the fixture tree");
+        fs::write(dir.join("issues/build/x.md"), "| `calc` | 101 |\n").expect("write the issue");
+        let read = |host: &str| {
+            let manifest = format!("[package]\nname = \"calc\"\n{host}");
+            declared(&manifest.parse().expect("TOML"), &dir, "calc")
+        };
+        let table = "[package.metadata.toyos.host]\n";
+        let issue = "issue = \"issues/build/x.md\"\n";
+        assert_eq!(read(""), Ok(Host::App(None)));
+        assert_eq!(read("[package.metadata.toyos]\nother = 1\n"), Ok(Host::App(None)));
+        assert_eq!(read(&format!("{table}exempt = \"it owns a panel\"\n")), Ok(Host::Exempt("it owns a panel".into())));
+        assert_eq!(
+            read(&format!("{table}fails = [\"windows\", \"linux\"]\n{issue}")),
+            Ok(Host::App(Some(Fails { on: vec![Os::Windows, Os::Linux], issue: "issues/build/x.md".into() })))
+        );
+        for refused in [
+            format!("{table}exempt = \" \"\n"),
+            format!("{table}exempt = \"why\"\nfails = [\"linux\"]\n{issue}"),
+            format!("{table}fails = [\"linux\"]\n"),
+            format!("{table}{issue}"),
+            format!("{table}fails = []\n{issue}"),
+            format!("{table}fails = [\"freebsd\"]\n{issue}"),
+            format!("{table}fails = [\"linux\", \"linux\"]\n{issue}"),
+            format!("{table}fails = \"linux\"\n{issue}"),
+            format!("{table}fails = [\"linux\"]\nissue = \"README.md\"\n"),
+            format!("{table}fails = [\"linux\"]\nissue = \"issues/build/gone.md\"\n"),
+            format!("{table}exmept = \"why\"\n"),
+            "[package.metadata.toyos]\nhost = \"exempt\"\n".to_string(),
+        ] {
+            assert!(read(&refused).is_err(), "read {refused:?}");
+        }
+        let unnamed = format!("[package]\nname = \"snake\"\n{table}fails = [\"linux\"]\n{issue}");
+        let refusal = declared(&unnamed.parse().expect("TOML"), &dir, "snake").unwrap_err();
+        assert!(refusal.contains("does not name `snake`"), "{refusal}");
+    }
+
+    #[test]
+    fn a_build_and_its_declaration_disagreeing_is_red_both_ways() {
+        let fails = Fails { on: vec![Os::Windows], issue: "issues/build/x.md".into() };
+        assert_eq!(judge("calc", None, Os::Linux, true), Ok(true));
+        assert!(judge("calc", None, Os::Linux, false).unwrap_err().contains("neither"));
+        assert_eq!(judge("calc", Some(&fails), Os::Windows, false), Ok(false));
+        assert!(judge("calc", Some(&fails), Os::Windows, true).unwrap_err().contains("goes"));
+        assert!(judge("calc", Some(&fails), Os::Linux, false).is_err(), "it fails on Windows alone");
     }
 
     #[test]

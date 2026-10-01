@@ -9,3 +9,6 @@ filepicker-api = { path = "../filepicker-api" }
 toyos = { path = "../../toyos" }
 toyos-font = { path = "../toyos-font" }
 toyos-window = { path = "../toyos-window" }
+
+[package.metadata.toyos.host]
+exempt = "init starts it at boot to serve ToyOS's machine-wide `filepicker` port"

@@ -8,3 +8,6 @@ license = "MIT OR Apache-2.0"
 toyos = { path = "../../toyos" }
 toyos-abi = { path = "../../toyos-abi" }
 toyos-inspect = { path = "../../toyos-inspect" }
+
+[package.metadata.toyos.host]
+exempt = "it reads what ToyOS's servers and kernel say of themselves, through their ports and the `inventory` SysCap"

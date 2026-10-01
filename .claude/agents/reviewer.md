@@ -42,8 +42,13 @@ above; otherwise it is a NOTE.
 - **Fit.** Does the tree already do this? Is each new thing where it belongs: a pure decision in a
   pure crate, the user/kernel boundary in `toyos-userbound`, a device claim in a userland server?
   One declaration read by every reader, refusal by name, authority moved in by the parent. Zero
-  legacy: no shim, no workaround, no silent default. No new
-  dependency or fetch. Nothing outside the brief's fence.
+  legacy: no shim, no workaround, no silent default. A new dependency only where it is the
+  cleanest path, a general and widely used crate the pull request says why it takes; no new
+  fetch. Nothing outside the brief's fence.
+- **Hosts.** A BLOCKER: a change that makes an app build on fewer of Linux, macOS and Windows,
+  or answers a host build failure by making the app ToyOS-only, by a split, a `cfg` that compiles
+  what it does out of a host or an `exempt` in its manifest, instead of fixing it in the app or
+  its dependencies. `exempt` is for a system server that owns ToyOS devices or kernel objects.
   Assembly, a naked function and a `core::arch` or `std::arch` path live only in an
   architecture's own module; `target_arch` only there, in its selector, in `src/arch.rs` and in
   `src/licence.rs`, which evaluates a dependency's `cfg` as data; `arch::x86_64` and
