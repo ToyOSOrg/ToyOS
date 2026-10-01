@@ -82,7 +82,7 @@ pub fn dispatch(root: &Path, args: &[String]) {
         Job::Host => host(root),
         Job::Toolchain => vec![step("the toolchain release", || release::ensure_published(root))],
         Job::Guest(shard) => guest(root, &suite_args(&["--shard", shard, "--jobs", "1"])),
-        Job::Tcg => guest(root, &suite_args(&["--jobs", "1", "process_stats"])),
+        Job::Tcg => guest(root, &suite_args(&["--jobs", "1", "empty_dir_stat"])),
         Job::Publish => vec![step("the SDK crates on crates.io", || publish(root))],
     };
     let failed: Vec<&Step> = steps.iter().filter(|s| s.verdict.is_err()).collect();

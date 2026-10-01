@@ -21,8 +21,7 @@ FAIL blockd_survives_its_death: QEMU's trace, after the reset: Ok([411648]); aft
 
 It passed in main's nightly at `fd62f567` (run 36278449733) and in #532's
 nightly at `e4317d3f` (run 36281465192), whose guest binaries are the ones
-`a55d62c6` booted. So it is a rate, it predates the rust-lld switch, and
-`cargo run -- --known-red` answers NO. Whether the defect is blockd's replay
+`a55d62c6` booted. So it is a rate, and it predates the rust-lld switch. Whether the defect is blockd's replay
 order or the test's reading of the trace is not measured.
 
 Exit: the ordering the verdict names cannot happen, or the verdict is shown

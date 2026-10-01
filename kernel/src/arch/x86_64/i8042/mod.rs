@@ -465,18 +465,6 @@ fn has_bytes() -> bool {
 /// genuinely broken controller.
 static FAULT: AtomicBool = AtomicBool::new(false);
 
-/// Under `i8042-split-burst`: past [`SPLIT_CAP`] taken bytes the ISR answers
-/// empty until [`SPLIT_RESCUED`] — the verdict-beats-the-sequence interleaving, staged.
-static SPLIT_TAKEN: AtomicU32 = AtomicU32::new(0);
-static SPLIT_RESCUED: AtomicBool = AtomicBool::new(false);
-const SPLIT_CAP: u32 = 4;
-
-fn split_hidden() -> bool {
-    crate::actuator::i8042_split_burst()
-        && !SPLIT_RESCUED.load(Ordering::Relaxed)
-        && SPLIT_TAKEN.load(Ordering::Relaxed) >= SPLIT_CAP
-}
-
 #[inline]
 fn buffer_full(status: u8) -> bool {
     if crate::actuator::i8042_fault() && FAULT.load(Ordering::Relaxed) {
@@ -499,15 +487,12 @@ pub extern "sysv64" fn handler() {
     let mut n = 0;
     while n < ISR_BURST {
         let status = inb(STATUS);
-        if !buffer_full(status) || split_hidden() {
+        if !buffer_full(status) {
             break;
         }
         // Timestamped per byte, not once for the burst: the mouse framer
         // resyncs on the gap between adjacent bytes, and a burst would flatten it.
         push_isr(inb(DATA), status & AUXB != 0, crate::clock::nanos_since_boot());
-        if crate::actuator::i8042_split_burst() {
-            SPLIT_TAKEN.fetch_add(1, Ordering::Relaxed);
-        }
         n += 1;
     }
     if n == ISR_BURST && buffer_full(inb(STATUS)) {
@@ -599,17 +584,6 @@ pub fn service() {
         aux_reenable();
     }
     widen_edge_window();
-    // The staged split's second half: once the mute verdict is out, the hidden
-    // bytes are polled in — interrupts off, `handler_poll` shares `push_isr`'s producer seat.
-    if crate::actuator::i8042_split_burst()
-        && !SPLIT_RESCUED.load(Ordering::Relaxed)
-        && HEALTH.load(Ordering::Relaxed) >= HEALTH_MUTE_SAID
-        && is_irq_cpu()
-    {
-        SPLIT_RESCUED.store(true, Ordering::Relaxed);
-        let _irq = crate::arch::IrqGuard::close();
-        handler_poll();
-    }
     if has_bytes() {
         // Asked again with bytes in hand: a record read absent may belong
         // to an interrupt that arrived just after that read.

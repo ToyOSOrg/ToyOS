@@ -86,14 +86,11 @@ fn speaker_of<'a>(line: &str, speakers: &'a BTreeSet<String>) -> Option<&'a str>
 /// line is appended to it by the splitter, not by the kernel. Measured on this
 /// tree, 2026-08-15: `17init: started test-runner` in one captured line, with
 /// `17` expected. The same shape joins the two halves of a line longer than
-/// `MAX_CONSOLE_LINE`, which the kernel does emit in pieces:
-/// `90_stdio_buffering` prints a 10,000-byte line against that 1024-byte bound
-/// and is the only case in the corpus that does.
+/// `MAX_CONSOLE_LINE`, which the kernel does emit in pieces.
 ///
 /// So a daemon's unit is `<speaker>: …` up to the newline that ended it, and it
 /// can start anywhere in a captured line. Found by walking the colons rather
-/// than every offset, because `90_stdio_buffering`'s ten thousand `x`s hold
-/// none and a per-offset search would read them ten thousand times.
+/// than every offset.
 fn speaker_at(line: &str, speakers: &BTreeSet<String>) -> Option<usize> {
     for (colon, _) in line.match_indices(':') {
         for name in speakers {
@@ -408,10 +405,6 @@ pub fn c_capture_ignores_daemon_lines(
         // its `17` reaches the wire with no terminator and init's next whole
         // line is appended to it by the splitter.
         ("17init: started test-runner\n", "17", "the program's unterminated tail"),
-        // The other joiner, and the only case in the corpus that reaches it:
-        // `90_stdio_buffering` prints a line ten times `MAX_CONSOLE_LINE`, so
-        // the kernel does emit it in pieces and a daemon's line lands between
-        // two of them. The two halves have to come back as one line.
         ("aaasoundd: suspended\nbbb\n", "aaabbb", "a line the kernel emitted in pieces"),
         // And the ordinary case still has to work the ordinary way.
         ("one\nsoundd: suspended\ntwo\n", "one\ntwo", "a daemon's line between two of the program's"),

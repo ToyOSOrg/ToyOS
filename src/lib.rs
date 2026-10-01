@@ -36,7 +36,6 @@ pub mod metalswap;
 pub mod metaltalk;
 pub mod metaltimings;
 pub mod n2;
-pub mod redlist;
 pub mod release;
 pub mod sdkversion;
 pub mod soundfont;

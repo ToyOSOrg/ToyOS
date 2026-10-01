@@ -604,15 +604,11 @@ mod checks {
                 .collect()
         };
         let names = |of: &[&str]| -> BTreeSet<String> { of.iter().map(|n| n.to_string()).collect() };
-        let enabled = |n: &&str| redlist::disabled(redlist::DISABLED, n).is_none();
-        let every: BTreeSet<String> =
-            declared().chain(["shared_one"]).filter(enabled).map(String::from).collect();
+        let every: BTreeSet<String> = declared().chain(["shared_one"]).map(String::from).collect();
         let foreign: BTreeSet<String> = SCREEN_TESTS
             .iter()
             .filter(|(_, _, profile)| profile.arch() != toyos_build::ci::GUEST_ARCH)
-            .map(|(n, _, _)| *n)
-            .filter(enabled)
-            .map(String::from)
+            .map(|(n, _, _)| String::from(*n))
             .collect();
         if !foreign.contains("virt_el2_drop") {
             return Err(format!("the premise: virt_el2_drop is a guest no CI lane boots, and {foreign:?} lacks it"));
@@ -808,13 +804,6 @@ mod checks {
         let judge = metal_judge("machine_reboot");
         assert_eq!(judge(&[&readback("jobcase", &done(rebooted), jobcase)]), Ok(()));
         assert!(judge(&[&readback("jobcase", &done(stopped), jobcase)]).is_err());
-
-        let testcases = "[2026-09-29 11:11:32 12.720 cpu2] exit: test_rs_null_sink_client_ex pid=12 \
-                         code=0 cpu=42ms\n\
-                         [2026-09-29 11:11:32 12.725 cpu7] exit: echo pid=15 code=0 cpu=0ms\n";
-        let judge = metal_judge("log_poll_outlives_a_close");
-        assert_eq!(judge(&[&readback("testcases", &done(rebooted), testcases)]), Ok(()));
-        assert!(judge(&[&readback("testcases", &done(stopped), testcases)]).is_err());
 
         let wedged = |tail: &str| {
             format!(

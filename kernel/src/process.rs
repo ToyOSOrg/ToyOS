@@ -1058,11 +1058,7 @@ pub fn leave(chosen: Option<i32>) {
     match out {
         // The table says zombie now, which a sweep counts as nothing left to stop.
         proclife::Leave::NotLast => crate::quiesce::note_progress(),
-        proclife::Leave::Last { code, mark } => {
-            #[cfg(feature = "boot-actuators")]
-            crate::quiesce::last::hold(crate::quiesce::last::Last::Teardown);
-            teardown(pid, tid, code, mark, &process_data);
-        }
+        proclife::Leave::Last { code, mark } => teardown(pid, tid, code, mark, &process_data),
     }
 }
 

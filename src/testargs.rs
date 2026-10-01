@@ -7,7 +7,6 @@
 
 use crate::flags::declare_flags;
 use std::path::PathBuf;
-use std::time::Duration;
 
 /// One machine's slice of the suite.
 ///
@@ -23,77 +22,25 @@ pub struct Shard {
 }
 
 impl Shard {
-    /// The empty accumulator [`keep`](Self::keep) fills, one bin per shard.
+    /// Drop everything another shard owns out of `pools`, keeping the order of
+    /// what is left: the items are dealt in turn, so the `n`th of the pools'
+    /// concatenation, counting from zero, is shard `n % count + 1`'s.
     ///
-    /// The only way to make one, so a caller cannot hand `keep` a vector of the
-    /// wrong width; what it *can* still do is make a second one, which is the
-    /// defect the doc on `keep` names.
-    pub fn bins(self) -> Vec<Duration> {
-        vec![Duration::ZERO; self.count]
-    }
-
-    /// Drop everything another shard owns, keeping the order of what is left.
-    ///
-    /// Longest-processing-time on the measured duration profile the suite
-    /// already orders its queue by, because a shard's wall clock is its bin's
-    /// total and the run's is the fullest bin. `items` is read in the order
-    /// given, so a list already sorted descending gets LPT's bound and one that
-    /// is not still gets a complete, deterministic partition — **every item
-    /// lands in exactly one shard whatever the profile says**, which is the
-    /// property a verdict depends on and the one the gates below hold.
-    ///
-    /// **`load` is the run's one accumulator, not this call's.** A suite that
-    /// partitions several pools — the parallel tasks and the serial tail — is one
-    /// machine's wall clock either way, so the second pool has
-    /// to fill the bins the first left light. Starting each call from
-    /// [`bins`](Self::bins) makes each partition good and their sum bad, and
-    /// the imbalances add: measured over run `31377439504`'s twelve shards it
-    /// was a widest shard of 466.1 s against an even split of 369.1 s, where
-    /// one accumulator over the same items put the widest bin at 363.9 s.
-    /// Thread one through the calls, heaviest pool first.
-    ///
-    /// Every process partitioning one run must therefore make the same calls in
-    /// the same order over the same items: the bins each call leaves are the
-    /// next call's input, so a shard that skipped a pool would price every later
-    /// one differently and the twelve would stop being a partition.
-    ///
-    /// `None` is an item the profile has never seen, and it is priced at the
-    /// longest that was measured *in its own pool* — the same conservatism
-    /// `longest_first` expresses by sorting unknowns first, in a form that can
-    /// be added up. Where *nothing* was measured, every item prices the same and
-    /// LPT degenerates to round-robin, which is the best a machine with no
-    /// profile can do and is what every runner's first run gets.
-    pub fn keep<T>(
-        self,
-        items: &mut Vec<T>,
-        load: &mut [Duration],
-        cost: impl Fn(&T) -> Option<Duration>,
-    ) {
-        assert_eq!(
-            load.len(),
-            self.count,
-            "a {}-way shard reads {} bins, and a partition over the wrong number of them \
-             would not be one",
-            self.count,
-            load.len()
-        );
-        let unmeasured = items
-            .iter()
-            .filter_map(&cost)
-            .max()
-            .unwrap_or(Duration::from_secs(1));
-        let mut owner = Vec::with_capacity(items.len());
-        for item in items.iter() {
-            let bin = (0..self.count).min_by_key(|&b| load[b]).expect("count >= 1");
-            load[bin] += cost(item).unwrap_or(unmeasured);
-            owner.push(bin);
+    /// **A rule over positions and nothing else**, so every process that builds
+    /// the same lists takes the same partition of them, and every item lands in
+    /// exactly one shard, which is the property a verdict depends on. One count
+    /// runs across the pools, so a later pool's first item goes to the shard
+    /// after the one the earlier pool's last went to and the counts stay within
+    /// one of each other.
+    pub fn keep<T>(self, pools: &mut [&mut Vec<T>]) {
+        let mut dealt = 0;
+        for pool in pools.iter_mut() {
+            pool.retain(|_| {
+                let mine = dealt % self.count == self.index - 1;
+                dealt += 1;
+                mine
+            });
         }
-        let mut i = 0;
-        items.retain(|_| {
-            let mine = owner[i] == self.index - 1;
-            i += 1;
-            mine
-        });
     }
 }
 
@@ -379,109 +326,43 @@ mod tests {
     /// test may be dropped by all of them, and none may be run by two.
     #[test]
     fn every_item_lands_in_exactly_one_shard() {
-        let items: Vec<u64> = (0..97).map(|i| (i * 37) % 23).collect();
+        let (first, second): (Vec<u32>, Vec<u32>) = ((0..97).collect(), (97..105).collect());
         for count in 1..=8 {
-            let mut seen: Vec<u64> = Vec::new();
+            let mut seen: Vec<u32> = Vec::new();
+            let mut sizes = Vec::new();
             for index in 1..=count {
-                let shard = Shard { index, count };
-                let mut mine = items.clone();
-                shard.keep(&mut mine, &mut shard.bins(), |&c| Some(Duration::from_secs(c)));
-                seen.extend(mine);
+                let (mut a, mut b) = (first.clone(), second.clone());
+                Shard { index, count }.keep(&mut [&mut a, &mut b]);
+                sizes.push(a.len() + b.len());
+                seen.extend(a.into_iter().chain(b));
             }
             seen.sort_unstable();
-            let mut want = items.clone();
-            want.sort_unstable();
-            assert_eq!(seen, want, "count {count}");
+            assert_eq!(seen, (0..105).collect::<Vec<u32>>(), "count {count}");
+            let (fewest, most) = (sizes.iter().min(), sizes.iter().max());
+            assert!(most.zip(fewest).is_some_and(|(m, f)| m - f <= 1), "count {count}: {sizes:?}");
         }
     }
 
-    /// A shard's wall clock is its bin's total, so the split has to be by cost
-    /// and not by position. Descending input is what the suite hands it.
+    /// **One deal across the pools.** Two pools of `[0, 1, 2]` and `[3, 4]` over
+    /// two shards: the deal goes on from where the first pool stopped, so the
+    /// second pool's first item is shard 2's, where a deal restarted per pool
+    /// would hand shard 1 both pools' first items.
     #[test]
-    fn the_split_is_by_cost_and_not_by_position() {
-        let items: Vec<u64> = vec![100, 90, 80, 70, 60, 50, 40, 30];
-        let totals: Vec<u64> = (1..=4)
-            .map(|index| {
-                let shard = Shard { index, count: 4 };
-                let mut mine = items.clone();
-                shard.keep(&mut mine, &mut shard.bins(), |&c| Some(Duration::from_secs(c)));
-                mine.iter().sum()
-            })
-            .collect();
-        assert_eq!(totals, vec![130, 130, 130, 130], "{totals:?}");
-    }
-
-    /// **One run is one accumulator.** The suite partitions two pools — the
-    /// parallel tasks and the serial tail — and a shard runs both, so the second
-    /// call has to fill the bins the first left light. Two
-    /// pools of `[3 s, 1 s]` across two shards is the smallest case that tells
-    /// the two apart: threaded, both shards take 4 s; from a fresh accumulator
-    /// each time, the heavy item lands on shard 1 twice and the widest bin is
-    /// 6 s against an even split of 4 s.
-    #[test]
-    fn a_second_pool_fills_the_bins_the_first_left_light() {
-        let cost = |&c: &u64| Some(Duration::from_secs(c));
-        let (mut threaded, mut apart) = (Vec::new(), Vec::new());
-        let (mut kept, mut kept_apart) = (Vec::new(), Vec::new());
-        for index in 1..=2 {
-            let shard = Shard { index, count: 2 };
-
-            let (mut first, mut second) = (vec![3u64, 1], vec![3u64, 1]);
-            let mut load = shard.bins();
-            shard.keep(&mut first, &mut load, cost);
-            shard.keep(&mut second, &mut load, cost);
-            threaded.push(first.iter().chain(&second).sum::<u64>());
-            kept.extend(first.iter().chain(&second).copied());
-
-            // The defect, spelled out with the same function: a second
-            // accumulator knows nothing about what the first one placed.
-            let (mut first, mut second) = (vec![3u64, 1], vec![3u64, 1]);
-            shard.keep(&mut first, &mut shard.bins(), cost);
-            shard.keep(&mut second, &mut shard.bins(), cost);
-            apart.push(first.iter().chain(&second).sum::<u64>());
-            kept_apart.extend(first.iter().chain(&second).copied());
-        }
-        assert_eq!(apart, vec![6, 2], "the defect's own numbers: {apart:?}");
-        assert_eq!(threaded, vec![4, 4], "one accumulator splits it evenly: {threaded:?}");
-        assert!(
-            threaded.iter().max() < apart.iter().max(),
-            "widest bin threaded {threaded:?} against apart {apart:?}"
-        );
-
-        // And it is still a partition: threading changes which shard owns an
-        // item, never how many own it.
-        for mut got in [kept, kept_apart] {
-            got.sort_unstable();
-            assert_eq!(got, vec![1, 1, 3, 3], "every item exactly once");
-        }
-    }
-
-    /// A test the profile has never seen costs `Duration::MAX` so that it sorts
-    /// first, and a machine with no recorded profile at all — every runner's
-    /// first run — has a whole suite of them. Plain addition panicked on the
-    /// second item, which is what the first sharded CI run found.
-    #[test]
-    fn a_suite_with_no_measured_profile_still_splits_evenly() {
-        let items: Vec<usize> = (0..10).collect();
-        let mut seen: Vec<usize> = Vec::new();
-        let mut sizes = Vec::new();
-        for index in 1..=3 {
-            let shard = Shard { index, count: 3 };
-            let mut mine = items.clone();
-            shard.keep(&mut mine, &mut shard.bins(), |_| None);
-            sizes.push(mine.len());
-            seen.extend(mine);
-        }
-        seen.sort_unstable();
-        assert_eq!(seen, items);
-        assert_eq!(sizes, vec![4, 3, 3], "{sizes:?}");
+    fn a_later_pool_is_dealt_on_from_where_the_earlier_stopped() {
+        let taken = |index| {
+            let (mut a, mut b) = (vec![0, 1, 2], vec![3, 4]);
+            Shard { index, count: 2 }.keep(&mut [&mut a, &mut b]);
+            (a, b)
+        };
+        assert_eq!(taken(1), (vec![0, 2], vec![4]));
+        assert_eq!(taken(2), (vec![1], vec![3]));
     }
 
     /// Every `None` here is a default the run then takes in silence: `--jobs`
     /// the built-in width.
     #[test]
     fn a_flag_left_without_its_value_is_refused_by_name() {
-        for flag in SUITE.0.iter().filter(|f| !matches!(f.value, Value::None | Value::Optional)) {
+        for flag in SUITE.0.iter().filter(|f| f.value != Value::None) {
             for word in [flag.name.to_string(), format!("{}=", flag.name)] {
                 let refusal = parse_owned(&[word.as_str()]).unwrap_err();
                 assert!(refusal.contains(flag.name), "{word}: {refusal}");
