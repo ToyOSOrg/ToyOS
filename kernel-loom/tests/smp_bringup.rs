@@ -11,6 +11,7 @@
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
 
+use kernel_loom::arch::cpu::become_cpu;
 use kernel_loom::smp_roster::Roster;
 use loom::sync::Arc;
 
@@ -34,7 +35,8 @@ fn a_committed_count_never_outruns_its_slot() {
         let r = Arc::new(Roster::new());
         let attempt = r.begin_attempt().expect("a slot is free");
         assert_eq!(attempt.id(), 1, "cpu1 is the first AP");
-        r.echo(attempt.token(), HARDWARE_ID);
+        become_cpu(HARDWARE_ID);
+        r.echo(attempt.token());
 
         let committer = {
             let r = r.clone();
@@ -111,7 +113,10 @@ fn an_ap_that_reads_another_id_is_refused() {
 
         let ap = {
             let r = r.clone();
-            loom::thread::spawn(move || r.echo(attempt.token(), MISREAD))
+            loom::thread::spawn(move || {
+                become_cpu(MISREAD);
+                r.echo(attempt.token());
+            })
         };
 
         let polls = Cell::new(0);

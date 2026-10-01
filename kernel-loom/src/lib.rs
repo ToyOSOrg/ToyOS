@@ -101,7 +101,8 @@ pub mod arch {
         pub fn poll() {}
     }
 
-    /// Which CPU a model thread is, which the console lock's fatal word names.
+    /// Which CPU a model thread is, which the console lock's fatal word and the
+    /// roster's echo name.
     /// The model says, through [`become_cpu`]; the kernel asks the CPU. Per
     /// model thread for `scheduler`'s reason: loom's threads share an OS one.
     #[cfg(feature = "loom")]
@@ -167,7 +168,9 @@ pub mod sync;
 #[path = "../../kernel/src/shootdown.rs"]
 pub mod shootdown;
 
-/// The CPU roster and the release/answer word, driven by `tests/smp_bringup.rs`.
+/// The CPU roster and the release/answer word, driven by `tests/smp_bringup.rs`;
+/// under `loom` alone, as is the [`arch::cpu`] shim it names.
+#[cfg(feature = "loom")]
 #[path = "../../kernel/src/smp_roster.rs"]
 pub mod smp_roster;
 

@@ -1,7 +1,8 @@
 //! The CPU roster and the one release/answer word, two invariants held as a type:
 //! an id commits only after its AP's handshake and `commit` publishes the slot
 //! before the count, so `0..count()` has no dead slot; and the word `release` sets
-//! is the word `answering` reads. Compiled into `kernel-loom/`, so no `crate::`.
+//! is the word `answering` reads. Of the kernel it names only
+//! `crate::arch::cpu::hardware_id`, which `kernel-loom` supplies to compile this file.
 
 #[cfg(not(feature = "loom"))]
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -102,10 +103,11 @@ impl Roster {
         Some(Attempt { id, token })
     }
 
-    /// The AP's half of the handshake, once it can take its first interrupt:
-    /// the token of the attempt that started it, and its `read` of its own
-    /// hardware id.
-    pub fn echo(&self, token: u32, read: u32) {
+    /// The AP's half of the handshake, run on that AP once it can take its
+    /// first interrupt: the token of the attempt that started it, and the
+    /// hardware id this CPU reads as its own.
+    pub fn echo(&self, token: u32) {
+        let read = crate::arch::cpu::hardware_id();
         self.echoed.store((u64::from(token) << 32) | u64::from(read), Ordering::Release);
     }
 

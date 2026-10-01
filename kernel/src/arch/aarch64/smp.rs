@@ -82,6 +82,6 @@ pub(super) extern "C" fn ap_entry(start: &'static ApStart, el: u64) -> ! {
     paging::check_joined();
     control_regs::check(el);
     irqchip::init_cpu(start.redistributor);
-    ROSTER.echo(start.token, cpu::hardware_id());
+    ROSTER.echo(start.token);
     crate::process::ap_idle();
 }

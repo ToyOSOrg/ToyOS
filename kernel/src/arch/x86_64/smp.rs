@@ -294,7 +294,7 @@ extern "C" fn ap_entry() -> ! {
     apic::init_ap();
 
     // Echo this attempt's token, so the BSP counts this AP for its own attempt.
-    ROSTER.echo(percpu::ap_token(), cpu::hardware_id());
+    ROSTER.echo(percpu::ap_token());
 
     process::ap_idle();
 }
