@@ -18,7 +18,7 @@ netd runs smoltcp. Its replacement is ToyOS's own stack, built clean-room: reade
 
 The listener defects are this track's: `issues/hardware/a-handshake-nobody-finishes-holds-a-listeners-port-shut.md` and `issues/hardware/a-connect-between-two-accepts-is-reset.md`, on smoltcp until stage 5, and `issues/hardware/an-accept-that-never-reaches-netd-strands-its-listener.md`, in std's accept.
 
-Owed from the stage 3 specifications: OUT-07 by stage 4, whose scheduler chooses between a flow's segment and [ip]'s own frames; US-57 by stage 5, whose netd maps UDP's refusals onto the pipe ABI; `dhcp.renew-unroutable` by stage 5, whose netd counts it where `toyos-net-udp` refuses the renewal `udp.no-route`; FRA-01–20 and PMTU-01–06 by IP hardening.
+Owed from the stage 3 specifications: US-57 by stage 5, whose netd maps UDP's refusals onto the pipe ABI; `dhcp.renew-unroutable` by stage 5, whose netd counts it where `toyos-net-udp` refuses the renewal `udp.no-route`; FRA-01–20 and PMTU-01–06 by IP hardening.
 
 What stage 3 departs from its specifications:
 
@@ -29,6 +29,8 @@ What stage 3 departs from its specifications:
 What stage 3 does not yet meet:
 
 - Its only oracles are the readers' own: the specifications' scenarios and byte vectors, and the tests' own RFC 1071 sum. No behaviour of `toyos-net-ip`, `toyos-net-udp` or `toyos-dhcp` is checked against anything the readers did not write. Exit: exchanges captured from slirp and the T14 (ARP, DHCP, ICMP, IGMP) replay through them at stage 5 and match.
+
+What stage 4 has not yet built: `toyos-net-shard` composes one interface's [ip], [tcp] and [udp] with `receive`, `transmit` (pull, [ip]'s frames first, TCP and UDP taking turns), `next_deadline` and `fire`, and `toyos-net-testnet` runs N shards on one moved clock with impairment and a pcap capture; neither has the timing wheel (deadlines stay in [tcp]'s and [ip]'s ordered sets), deficit round-robin across flows, flow steering, inter-shard mailboxes and their loom models, readiness events, inspect keys, the segment-script runner, the `mutate-*` `CONTROLS` rows, the resets owed when an address is lost (`ip.md` §8.4), or the [net] scenarios beyond NET-01, NET-03, NET-04, NET-06 and PL-11 at frame level. Exit: each lands, or the specification moves it to a later stage.
 
 What `toyos-net-wire` does not yet meet:
 

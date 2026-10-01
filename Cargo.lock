@@ -1146,9 +1146,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "toyos-net-shard"
+version = "0.1.0"
+dependencies = [
+ "toyos-net-ip",
+ "toyos-net-tcp",
+ "toyos-net-testnet",
+ "toyos-net-udp",
+ "toyos-net-wire",
+]
+
+[[package]]
 name = "toyos-net-tcp"
 version = "0.1.0"
 dependencies = [
+ "toyos-net-wire",
+]
+
+[[package]]
+name = "toyos-net-testnet"
+version = "0.1.0"
+dependencies = [
+ "toyos-net-shard",
+ "toyos-net-tcp",
  "toyos-net-wire",
 ]
 

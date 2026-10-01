@@ -1,0 +1,12 @@
+[package]
+name = "toyos-net-testnet"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "A fake Ethernet for toyos-net-shard's host tests: N shards on one segment, a moved clock, links with deterministic impairment, and a pcap capture of the wire."
+publish = false
+
+[dependencies]
+toyos-net-shard = { path = "../toyos-net-shard" }
+toyos-net-tcp = { path = "../toyos-net-tcp" }
+toyos-net-wire = { path = "../toyos-net-wire" }
