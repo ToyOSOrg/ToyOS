@@ -79,7 +79,3 @@ M3's exit then waits on a linker in the guest
 (`issues/build/the-hosted-rustc-names-a-linker-toyos-does-not-have.md`), which
 toyos-ld is not: it refuses every executable with thread-local storage, so
 every std program.
-
-**M4 also waits on the host building one LLVM key to one set of bytes**, since
-the guest's `libstd` and C++ runtime carry the origin of the checkout the LLVM
-was built from: `issues/build/two-builds-of-one-llvm-key-differ-in-their-bytes.md`.

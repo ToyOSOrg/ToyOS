@@ -7,9 +7,8 @@ opened: 2026-09-30
 # Two builds of one LLVM key differ in their bytes
 
 `src/llvm.rs` holds that an LLVM is a function of its key. Two builds of one
-key by `build_in_fork`, one in a worktree and one under n2 in place of Ninja
-from a fork checkout whose `src/llvm-project` shares the primary's repository,
-differed in three things the key does not name:
+key by `build_in_fork`, in two fork checkouts, differed in three things the key
+does not name:
 
 - **The LLVM checkout's `origin`.** LLVM's CMake writes it into
   `VCSRevision.h` as `LLVM_REPOSITORY` (`get_source_info` in
@@ -21,15 +20,22 @@ differed in three things the key does not name:
   `.gitmodules`, `ToyOSOrg`, when it moves the checkout to the gitlink's commit,
   and leaves it when the checkout holds that commit already. A worktree's
   checkout is cloned from the URL the fork's shared config names, `ToyOSOrg`.
-  The primary's `rust/src/llvm-project` names `rust-lang`, and so does a git
-  worktree of its repository.
 - **The build directory.** `lld`'s `LC_RPATH` and `llvm-config`'s object and
   source roots name the `build/toyos-llvm` of the checkout that built it.
 - **Archive dates.** The members of every static archive carry the time they
   were built (`ar tv`).
 
-**Exit**: a nightly check builds one key in two fork checkouts at different
-paths whose `src/llvm-project` origins name different repositories, and every
-file of the two installs is byte-identical. Until it is, every pair of
-checkouts builds one key to different bytes: the primary's and a worktree's,
-two worktrees', and one made by hand and any other.
+This is not `issues/build/two-checkouts-of-one-tree-build-different-guest-bytes.md`,
+which holds the LLVM fixed and varies rustc's inputs: every checkout on a host
+links the one LLVM its key names, so that gate sees no origin, and a comparison
+of two LLVM installs sees no panic path rustc writes.
+
+**Exit**: `config_text` sets `LLVM_FORCE_VC_REPOSITORY` and
+`LLVM_FORCE_VC_REVISION`, since the repository alone drops the revision, and a
+host test that runs `llvm/cmake/modules/GenerateVersionFromVCS.cmake` with
+`config_text`'s defines on two checkouts of one commit whose `origin`s differ
+writes one header from both, where today each names its own origin. What only
+a configure or a build writes, the build directory and the archive dates, a
+nightly check sees: it builds one key in two fork checkouts at different paths
+whose origins differ, checks after each build that they still do, and finds
+every file of the two installs byte-identical.
