@@ -871,4 +871,3 @@ struct Offered {
     t1: Option<u32>,
     t2: Option<u32>,
 }
-
