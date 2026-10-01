@@ -454,3 +454,48 @@ fn s_ka_003_probes_that_cannot_leave_still_give_up() {
     assert_eq!((status.state, status.failure), (State::Closed, Some(Failure::TimedOut)), "as nine unanswered probes would");
     assert_eq!((h.count(Counter::KeepaliveProbe), h.count(Counter::NextHopFailed)), (0, 2), "the probe, then the reset");
 }
+
+#[test]
+fn s_ka_002_a_segment_cancels_a_probe_still_owed() {
+    let mut h = fixture_e();
+    let options = Options { keepalive: Some(Keepalive { idle: Duration::from_secs(10), ..Keepalive::default() }), ..Options::default() };
+    h.call(0, |tcp, now, id| tcp.set_options(now, id, options)).0.unwrap();
+    h.hop = hop_b(|t| if (10_000..11_000).contains(&t) { Hop::Pending } else { Hop::Ready(()) });
+    nothing(&h.at(10_000));
+    nothing(&h.input(10_500, seg(5001).ack(1001)));
+    nothing(&woken(&mut h, 11_000));
+    nothing(&h.at(20_499));
+    expect(&h.at(20_500), &["SEQ=1000 ACK=5001 CTL=ACK"]);
+}
+
+#[test]
+fn s_pl_012_a_connection_freed_while_waiting_leaves_no_turn_behind() {
+    let (mut h, second) = with_second();
+    h.hop = hop_b(|_| Hop::Pending);
+    let now = h.now();
+    let waiting = h.tcp.connect(now, A, Some(port(49154)), ep(B, 81)).unwrap();
+    nothing(&h.transmit());
+    h.tcp.abort(now, waiting).unwrap();
+    // A connection to 192.0.2.3 takes the freed slot, and sends beside the second in turn.
+    let third = h.tcp.connect(now, A, Some(port(49155)), ep(C, 81)).unwrap();
+    h.transmit();
+    h.deliver(seg(9000).ack(1001).syn().wnd(65_535).mss(1460).from(C, 81).to(A, 49155));
+    h.credit = Some(0);
+    h.tcp.send(now, second, &[7; 3 * 1460]).unwrap();
+    h.tcp.send(now, third, &[7; 3 * 1460]).unwrap();
+    h.tcp.wake(B);
+    h.credit = Some(3);
+    let ports: Vec<u16> = h.transmit().iter().map(|o| o.src.1).collect();
+    assert_eq!(ports, [49153, 49155, 49153], "one turn each");
+}
+
+#[test]
+fn s_pl_015_resets_waiting_for_their_next_hop_stay_bounded() {
+    let mut h = H::new(65_535);
+    h.hop = hop_b(|t| if t < 50 { Hop::Pending } else { Hop::Ready(()) });
+    for p in 0..70u16 {
+        nothing(&h.input(0, seg(5000).syn().from(B, 40_000 + p).to(A, 81)));
+    }
+    assert_eq!(h.count(Counter::ClosedRstLimited), 6, "64 answers held");
+    assert_eq!(woken(&mut h, 50).len(), 64);
+}

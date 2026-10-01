@@ -445,7 +445,6 @@ impl Tcp {
         let Some(conn) = value(&mut self.conns, index) else { return };
         match conn.user {
             User::Held => {
-                let remote = conn.tuple.remote.addr;
                 if let Some(at) = conn.deadline.take() {
                     self.deadlines.remove(&(at, index));
                 }
@@ -453,7 +452,6 @@ impl Tcp {
                     self.demux.remove(&conn.tuple);
                 }
                 conn.state = Tcb::Ended(Ended { failure, rx });
-                self.unpark(index, remote);
             }
             User::Orphan => self.free(index),
             User::Child { .. } => {
@@ -1316,7 +1314,7 @@ impl Tcp {
         self.parked.entry(remote).or_default().conns.push(index);
     }
 
-    /// A connection that ends waits for nothing.
+    /// A freed connection waits for nothing: its index may name another one next.
     fn unpark(&mut self, index: u32, remote: Ipv4Addr) {
         if let Some(parked) = self.parked.get_mut(&remote) {
             parked.conns.retain(|&i| i != index);

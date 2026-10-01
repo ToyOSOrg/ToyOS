@@ -432,3 +432,23 @@ fn s_ip_nud_022_shard_a_flow_refused_by_a_full_table_asks_again_as_entries_age()
     assert_eq!(net.nodes[b].shard.recv(now, from_a, &mut buf), Ok(toyos_net_tcp::Received::Data(100)));
     assert_eq!(net.nodes[a].shard.status(to_b).unwrap().soft_error, None);
 }
+
+#[test]
+fn s_ip_nud_024_shard_a_segments_request_prefers_its_source() {
+    let (mut net, a, _) = segment();
+    let (second, peer) = (Ipv4Addr::new(198, 51, 100, 1), Ipv4Addr::new(198, 51, 100, 9));
+    let now = net.now();
+    net.nodes[a].shard.add_address(now, second, 24).unwrap();
+    assert!(net.run_until(Duration::from_secs(1), |net| net.nodes[a].events.contains(&toyos_net_shard::Event::Verified(second))));
+    net.nodes[a].shard.listen(A, Some(port(80)), || 0).unwrap();
+    let start = net.wire().len();
+    let mut syn = from_b(&segment_bytes((peer, 40_000), (A, 80), 5_000, 0x02));
+    syn[6..12].copy_from_slice(&[0x02, 0, 0, 0, 0, 0x99]);
+    let now = net.now();
+    net.nodes[a].shard.receive(now, &syn);
+    net.advance(Duration::from_millis(1));
+    let request = net.wire()[start..].iter().find(|c| c.from == a && name(&c.frame) == format!("ARP request {peer}")).expect("a request");
+    let frame = toyos_net_wire::ethernet::Frame::parse(&request.frame).unwrap();
+    let arp = toyos_net_wire::arp::Arp::parse(frame.body()).unwrap();
+    assert_eq!(arp.sender_ip, A, "the SYN-ACK's source, not {second}, which the prefix would pick");
+}
