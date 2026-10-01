@@ -30,7 +30,8 @@ branch (`test result: ok. 21 passed`). That host ran QEMU 11.1.1 from
 Homebrew, under the same TCG `-cpu max` for `VirtEl2`. Two parts of the
 instrument differ:
 - The firmware: the dev host runs QEMU's bundled `edk2-stable202408-prebuilt.qemu.org`.
-- The toolchain: the dev host builds its own, and CI installs the published release.
+- The toolchain: the dev host builds its own, and CI restores the sysroot its
+  toolchain job built.
 
 `.github/qemu-version` pins neither of the two.
 
