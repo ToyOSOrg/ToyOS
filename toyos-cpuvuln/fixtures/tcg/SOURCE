@@ -1,0 +1,17 @@
+The same Linux on the TCG model, booted on the development host by
+`toyos-t14linux/tcg.sh` at commit 44eb3c2e (pull request #601) at 06:50 UTC on
+2026-09-29, the time console.txt's RTC lines read, under QEMU 11.1.1
+(qemu-version.txt) as
+
+  qemu-system-x86_64 -nodefaults -machine q35
+    -cpu qemu64,+rdrand,+smap,+fsgsbase,+x2apic,+smep -smp 2 -m 4G
+    -kernel vmlinuz-6.8.0-142-generic -initrd s0.cpio
+    -append "console=ttyS0 panic=-1" -serial stdio -display none -no-reboot
+
+The kernel is the T14's /boot/vmlinuz-6.8.0-142-generic, and s0.cpio is the
+T14's busybox with an init that mounts sysfs and proc, prints /proc/version and
+`grep .` over /sys/devices/system/cpu/vulnerabilities/*, and powers off. Both
+came off the T14 in the run that took ../t14/, and neither is committed.
+
+  console.txt   the serial port, CRLF as it arrived; ../tcg.txt is its
+                vulnerability lines without the CRs
