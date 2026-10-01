@@ -47,7 +47,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::buildlock::{self, Guard, Held, Keyed};
-use crate::keystore;
+use crate::keystore::{self, Key};
 use crate::sysroot::{clone_tree, git_bytes, git_out, short, tree_identity};
 use crate::toolchain::{self, host_triple};
 
@@ -130,7 +130,7 @@ pub fn source(checkout: &Path) -> String {
 }
 
 /// [`source`], with the key of the LLVM `checkout` names.
-fn source_with(checkout: &Path, llvm: &str) -> String {
+fn source_with(checkout: &Path, llvm: &Key) -> String {
     format!("{} llvm {llvm}", compiler_source(checkout))
 }
 
@@ -180,7 +180,7 @@ pub fn forget(rust_dir: &Path) {
 ///
 /// **The source's content, never its files' times**: a checkout that rewrites a
 /// file with the bytes it had is no new compiler.
-fn primary_is(rust_dir: &Path, checkout: &Path, llvm: &str) -> Result<bool, std::io::Error> {
+fn primary_is(rust_dir: &Path, checkout: &Path, llvm: &Key) -> Result<bool, std::io::Error> {
     let names = source_with(checkout, llvm);
     Ok(fs::read_to_string(primary_record(rust_dir))?.trim() == names)
 }
@@ -196,14 +196,14 @@ pub fn primary_is_current(rust_dir: &Path) -> bool {
 }
 
 /// The key of the compiler `fork`'s sources name: their content.
-pub fn key(fork: &Path) -> String {
+pub fn key(fork: &Path) -> Key {
     key_with(fork, &crate::llvm::key(fork))
 }
 
 /// [`key`], with the key of the LLVM `fork` names.
-fn key_with(fork: &Path, llvm: &str) -> String {
-    let parts = [RECIPE, &tree_identity(fork, &KEYED), llvm];
-    short(parts.join("\n\0\n").as_bytes())
+fn key_with(fork: &Path, llvm: &Key) -> Key {
+    let parts = [RECIPE, &tree_identity(fork, &KEYED), llvm.as_str()];
+    Key::of(parts.join("\n\0\n").as_bytes())
 }
 
 /// The LLVM commit `fork` builds against: the one its `HEAD` records, refused
@@ -294,7 +294,7 @@ fn choose(root: &Path, rust_dir: &Path, fork: &Path, build: impl Fn(&Path) -> Pa
 
 /// Build the compiler `key` names from `fork` and put it at `dir`. The caller
 /// holds the key's lock.
-fn place(root: &Path, fork: &Path, key: &str, dir: &Path, build: &impl Fn(&Path) -> PathBuf) {
+fn place(root: &Path, fork: &Path, key: &Key, dir: &Path, build: &impl Fn(&Path) -> PathBuf) {
     let what = format!("building compiler {key}");
     let _worktree = buildlock::worktree_exclusive(root, &what);
     eprintln!("Building compiler {key} in {}: its compiler/ is not the one the primary's was built from", fork.display());
@@ -308,7 +308,7 @@ fn place(root: &Path, fork: &Path, key: &str, dir: &Path, build: &impl Fn(&Path)
     // The sources the key named are the ones built, or this is not that key's.
     let again = self::key(fork);
     assert!(
-        again == key,
+        again == *key,
         "the fork's compiler sources moved while compiler {key} was being built (they are now \
          {again}); nothing was kept, and the next build makes the one they name"
     );
@@ -789,7 +789,7 @@ pub(crate) mod tests {
         let record = primary_record(&rust_dir);
         let recorded = fs::read_to_string(&record).unwrap();
         let (compiler, llvm) = recorded.rsplit_once(" llvm ").expect("the record names its LLVM");
-        assert_eq!(llvm, crate::llvm::key(&rust_dir));
+        assert_eq!(llvm, crate::llvm::key(&rust_dir).as_str());
         fs::write(&record, compiler).unwrap();
         assert!(!choose(&same, &rust_dir, &fork, fake).primary, "a record naming no LLVM was taken for this one");
         assert_eq!(builds.get(), 1);
