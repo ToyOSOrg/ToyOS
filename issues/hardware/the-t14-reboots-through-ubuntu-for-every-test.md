@@ -69,13 +69,12 @@ a session image comes by `update`, a row that boots on its own by
 **Last: sessions outlive the boot deadline**, once
 `issues/hardware/a-frozen-toyos-waits-for-a-hand-on-the-power-button.md` has
 armed the hard-lockup detector on every boot and shipped `watchdogd`. An image
-names no `boot-deadline=`, `judge_arms` (`src/metal.rs:899-926`) takes
-`watchdogd`'s row as its bound, and `pipe` bounds each window rather than its
-whole run (`tests/ssh-client-host/src/main.rs:64`). A ToyOS the host cannot
-reach keeps its watchdog fed, so the run says it waits for a hand once nothing
-has answered within the watchdog's bound and a POST allowance. A swap then
-leaves a boot's bound
-(`issues/hardware/a-swap-on-the-t14-lives-inside-a-metal-boots-bound.md`).
+names no `boot-deadline=`, `metal::judge_arms` takes `watchdogd`'s row as its
+bound, and `pipe` bounds each window rather than its whole run
+(`tests/ssh-client-host/src/main.rs:64`). A ToyOS the host cannot reach keeps
+its watchdog fed, so the run says it waits for a hand once nothing has answered
+within the watchdog's bound and a POST allowance. A swap then leaves a boot's
+bound (`issues/hardware/a-swap-on-the-t14-lives-inside-a-metal-boots-bound.md`).
 
 **Exit**: the host's plan names every reset in a run by what forces it, and a
 host test whose transport goes quiet under a session finds the run stopped,

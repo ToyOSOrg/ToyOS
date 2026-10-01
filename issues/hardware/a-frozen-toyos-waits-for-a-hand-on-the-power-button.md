@@ -30,7 +30,7 @@ the detector is armed on every boot; nothing ships for tests alone.
   `issues/kernel/cpu-time-is-a-band-and-not-a-reservation.md` gives it a
   reservation.
 - **A panic's panel holds as it does today** and feeds the watchdog while it
-  holds, after a key too (`kernel/src/drivers/panic_console/mod.rs:710-725`).
+  holds, after a key too (`panic_console::hold_the_panel`).
 - **Every guest runs with `-action watchdog=none`.** q35's TCO counts
   `QEMU_CLOCK_VIRTUAL`, which a loaded host advances while it starves a guest,
   and its second expiry does what `-action watchdog=` says (QEMU 11.1.1,
