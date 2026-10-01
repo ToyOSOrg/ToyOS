@@ -3,7 +3,7 @@
 //! that removes a key no registered worktree records and nobody is making or
 //! using.
 //!
-//! **A key hashes exactly what its product's build reads**: its sources, the
+//! **A key hashes what its product's build reads**: its sources, the
 //! configuration its build is given, the tools that run that build and the keys
 //! of the products it reads; and it is known before the product is. So a
 //! product found under its key, made here or restored by a CI runner from
