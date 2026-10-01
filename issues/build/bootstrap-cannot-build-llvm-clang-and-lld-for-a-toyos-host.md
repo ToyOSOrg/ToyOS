@@ -30,9 +30,8 @@ The last three are ToyOS arms at existing dispatch sites, written as upstream
 would take them. ToyOS joins `bit.h`'s `<endian.h>` list, so libc carries
 POSIX's `endian.h` (`userland/libc/include/endian.h`) and no BSD name. With
 those two arms on `849da7d62` and CMake told the system by hand, the 71
-libraries rustc links compile against the C sysroot but for five objects of
-`LLVMSupport`, which stop on `alarm` and on stage 3's `wait`, `wait4` and
-signal-set calls; without them, every object that includes `bit.h` stops.
+libraries rustc links compile against the C sysroot but for objects of
+`LLVMSupport`; without them, every object that includes `bit.h` stops.
 Bootstrap's arm names the system `ToyOS`, which LLVM's configure refuses,
 `Unable to determine platform`, until CMake knows ToyOS and sets `UNIX`
 (`issues/build/the-cxx-runtime-names-toyos-to-cmake-as-unix.md`).

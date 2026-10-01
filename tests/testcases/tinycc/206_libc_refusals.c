@@ -1,9 +1,11 @@
 /* What libc refuses: each call answers failure in its own POSIX form, errno
    says why, and nothing is done: ENOSYS where ToyOS lacks the function, and
-   the errno POSIX names for a lock or a mapping it cannot take. */
+   the errno POSIX names for a lock or a mapping it cannot take, or memory it
+   cannot give. */
 #include <errno.h>
 #include <fcntl.h>
 #include <pwd.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/mman.h>
@@ -22,6 +24,7 @@ static const char *errno_name(int e) {
     case EINVAL: return "EINVAL";
     case ENODEV: return "ENODEV";
     case ENOTSUP: return "ENOTSUP";
+    case ENOMEM: return "ENOMEM";
     default: return "another errno";
     }
 }
@@ -121,6 +124,17 @@ int main(void) {
     said("mmap a file shared at a page", mmap(NULL, 4096, PROT_READ, MAP_SHARED, fd, 4096) == MAP_FAILED ? -1 : 0);
     said("mmap executable", mmap(NULL, 4096, PROT_READ | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) == MAP_FAILED ? -1 : 0);
     said("mmap nothing", mmap(NULL, 0, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) == MAP_FAILED ? -1 : 0);
+
+    /* The allocators: null and ENOMEM for a size no block has. Each answer is
+       stored, so the compiler cannot fold an unused allocation to non-null. */
+    void *volatile got = malloc(SIZE_MAX);
+    said("malloc SIZE_MAX", got == NULL ? -1 : 0);
+    got = calloc(SIZE_MAX, 2);
+    said("calloc SIZE_MAX 2", got == NULL ? -1 : 0);
+    char *block = malloc(16);
+    got = realloc(block, SIZE_MAX);
+    said("realloc SIZE_MAX", got == NULL ? -1 : 0);
+    free(block);
 
     /* sysconf: -1 with errno untouched for a limit on what ToyOS lacks, and
        EINVAL for a name it does not know. */

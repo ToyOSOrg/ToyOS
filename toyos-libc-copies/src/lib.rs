@@ -24,6 +24,9 @@ mod fdreq;
 #[path = "../../userland/libc/src/fparts.rs"]
 mod fparts;
 #[cfg(test)]
+#[path = "../../userland/libc/src/linkreq.rs"]
+mod linkreq;
+#[cfg(test)]
 #[path = "../../userland/libc/src/listing.rs"]
 mod listing;
 #[cfg(test)]
@@ -50,6 +53,8 @@ mod dladdr_symbols;
 mod errno_codes;
 #[cfg(test)]
 mod fparts_differential;
+#[cfg(test)]
+mod link_requests;
 #[cfg(test)]
 mod listing_reader;
 #[cfg(all(test, target_arch = "aarch64"))]

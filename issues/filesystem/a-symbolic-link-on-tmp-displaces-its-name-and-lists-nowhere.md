@@ -17,4 +17,7 @@ under the lock that makes the link, and a listing of `/tmp` names each link it
 holds, each asserted by a guest case. libc's `symlink` calls it with nothing
 asked first and answers that refusal `EEXIST`, which is how LLVM's
 `LockFileManager` takes its lock (`create_link`, `::symlink` in
-`llvm/lib/Support/Unix/Path.inc`).
+`llvm/lib/Support/Unix/Path.inc`). An LLVM build on ToyOS reaches it too:
+`LLVM_USE_SYMLINKS` is on for a UNIX host, so `add_llvm_tool_symlink`
+(`llvm/cmake/modules/AddLLVM.cmake`) makes each tool's aliases with CMake's
+`create_symlink`.

@@ -8,3 +8,8 @@ how 99: EINVAL, the mask as it was
 sigprocmask how 99: -1, EINVAL
 how 99 with no set: 0, old the mask
 set none: 0, old 0x1, now 0x0
+sigemptyset: 0, 0x0
+sigaddset USR1: 0, 0x200
+sigaddset 0: -1, EINVAL, 0x200
+sigaddset 65: -1, EINVAL, 0x200
+sigfillset: 0, 0xffffffffffffffff

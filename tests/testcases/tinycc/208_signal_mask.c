@@ -1,7 +1,9 @@
 /* A thread's signal mask, as pthread_sigmask and sigprocmask keep it: each
    change read back by the next call, SIGKILL and SIGSTOP never in it, a how
    that is none of POSIX's three refused, and a new thread starting with its
-   creator's mask. Signal n is bit n - 1 of a sigset_t. */
+   creator's mask; and a set as sigemptyset, sigaddset and sigfillset make
+   one, a number no signal has refused. Signal n is bit n - 1 of a
+   sigset_t. */
 #include <errno.h>
 #include <pthread.h>
 #include <signal.h>
@@ -68,5 +70,19 @@ int main(void) {
     old = 0xdead;
     answer = sigprocmask(SIG_SETMASK, &none, &old);
     changed("set none", answer, old == everything ? 1 : 0);
+
+    sigset_t made = 0xdead;
+    answer = sigemptyset(&made);
+    printf("sigemptyset: %d, 0x%lx\n", answer, made);
+    answer = sigaddset(&made, SIGUSR1);
+    printf("sigaddset USR1: %d, 0x%lx\n", answer, made);
+    errno = 0;
+    answer = sigaddset(&made, 0);
+    printf("sigaddset 0: %d, %s, 0x%lx\n", answer, errno == EINVAL ? "EINVAL" : "another errno", made);
+    errno = 0;
+    answer = sigaddset(&made, 65);
+    printf("sigaddset 65: %d, %s, 0x%lx\n", answer, errno == EINVAL ? "EINVAL" : "another errno", made);
+    answer = sigfillset(&made);
+    printf("sigfillset: %d, 0x%lx\n", answer, made);
     return 0;
 }

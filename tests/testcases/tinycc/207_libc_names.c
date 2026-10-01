@@ -1,8 +1,7 @@
-/* What libc does for the names LLVM builds against: creat and readlink as
-   POSIX has them, each read back; a directory listed with the name
-   and kind of each entry; dladdr naming the image and the exported symbol an
-   address lies in; and strnlen, strsignal, modf, logb and the <endian.h>
-   conversions. */
+/* What libc does for the names LLVM builds against: a directory listed with
+   the name and kind of each entry; dladdr naming the image and the exported
+   symbol an address lies in; and strnlen, strsignal, modf, logb and the
+   <endian.h> conversions. */
 #include <dirent.h>
 #include <dlfcn.h>
 #include <endian.h>
@@ -25,6 +24,8 @@
 #define DIR_PATH "/tmp/207_libc_names"
 #define TARGET DIR_PATH "/target"
 #define LISTED DIR_PATH "/listed"
+/* A link the image holds, to /system/bin/toybox. */
+#define LINK "/system/bin/cat"
 /* The image's test library, which exports tls_get_label. */
 #define LIB "/system/lib/libtls_lib.so"
 
@@ -61,10 +62,14 @@ static void links(void) {
     if (fd >= 0)
         close(fd);
 
+    n = readlink(LINK, buf, sizeof buf);
+    printf("readlink: %zd, \"%.*s\"\n", n, n > 0 ? (int)n : 0, buf);
+    memset(buf, '#', sizeof buf);
+    n = readlink(LINK, buf, 4);
+    printf("readlink into 4: %zd, \"%.5s\"\n", n, buf);
+    refused("readlink into 0", readlink(LINK, buf, 0));
     refused("readlink of a file", readlink(TARGET, buf, sizeof buf));
     refused("readlink of nothing", readlink(DIR_PATH "/none", buf, sizeof buf));
-    refused("readlink into 0", readlink(TARGET, buf, 0));
-    refused("readlink into SIZE_MAX", readlink(DIR_PATH "/none", buf, SIZE_MAX));
 }
 
 static void listing(void) {

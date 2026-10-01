@@ -3,7 +3,6 @@
 #![allow(non_camel_case_types)]
 
 use alloc::boxed::Box;
-use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 use core::ptr;
 
@@ -11,6 +10,7 @@ use toyos_abi::RawHandle;
 use toyos_abi::syscall::{self, OpenFlags, SeekFrom};
 
 use crate::errno::{EACCES, EAGAIN, EEXIST, EINVAL, EIO, ENOENT, EPIPE};
+use crate::fdreq::CloseOnExec;
 use crate::pthread::Lock;
 use crate::time::Timespec;
 
@@ -22,7 +22,6 @@ const O_RDWR: i32 = 2;
 const O_CREAT: i32 = 0x40;
 const O_TRUNC: i32 = 0x200;
 const O_APPEND: i32 = 0x400;
-const O_CLOEXEC: i32 = 0x80000;
 
 const SEEK_SET: i32 = 0;
 const SEEK_CUR: i32 = 1;
@@ -91,9 +90,7 @@ pub unsafe extern "C" fn open(path: *const u8, flags: i32, _mode: u32) -> i32 {
 
     match syscall::open(path_bytes, oflags) {
         Ok(f) => {
-            if flags & O_CLOEXEC != 0 {
-                mark_cloexec(f.0 as i32, true);
-            }
+            CLOEXEC.lock().opened(f.0 as i32, flags);
             f.0 as i32
         }
         Err(e) => set_errno(e),
@@ -107,7 +104,7 @@ pub unsafe extern "C" fn creat(path: *const u8, mode: u32) -> i32 {
 
 #[no_mangle]
 pub unsafe extern "C" fn close(raw_fd: i32) -> i32 {
-    mark_cloexec(raw_fd, false);
+    CLOEXEC.lock().cleared(raw_fd);
     syscall::close(fd(raw_fd));
     0
 }
@@ -210,8 +207,7 @@ pub unsafe extern "C" fn dup2(old_fd: i32, new_fd: i32) -> i32 {
     };
     match syscall::dup2(fd(old_fd), slot) {
         Ok(f) => {
-            // POSIX's: the descriptor `dup2` answers is not closed on `exec`.
-            mark_cloexec(f.0 as i32, false);
+            CLOEXEC.lock().cleared(f.0 as i32);
             // The slot holds something else now, so the stream is asked again.
             match slot {
                 1 => toyos::log::stdio::forget(toyos::log::stdio::Stream::Out),
@@ -329,12 +325,12 @@ pub unsafe extern "C" fn lstat(path: *const u8, buf: *mut Stat) -> i32 {
 /// that names nothing, and POSIX tells them apart: `EINVAL` for the first.
 #[no_mangle]
 pub unsafe extern "C" fn readlink(path: *const u8, buf: *mut u8, size: usize) -> isize {
-    // No slice is longer than `isize::MAX`, and the answer is an `isize`.
-    if size == 0 || isize::try_from(size).is_err() {
+    let Some(len) = crate::linkreq::target_len(size) else {
         crate::errno::set(EINVAL);
         return -1;
-    }
-    let target = unsafe { core::slice::from_raw_parts_mut(buf, size) };
+    };
+    // SAFETY: C's caller hands `size` bytes at `buf`.
+    let target = unsafe { core::slice::from_raw_parts_mut(buf, len) };
     match syscall::readlink(c_str_to_bytes(path), target) {
         Ok(n) => n as isize,
         Err(syscall::SyscallError::NotFound) => {
@@ -390,20 +386,7 @@ pub unsafe extern "C" fn umask(mask: u32) -> u32 {
     old
 }
 
-/// The descriptors marked close-on-exec, by number: kept for stage 3 of
-/// `issues/kernel/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`,
-/// whose spawn reads them. A number is a slot at one generation, so a handle
-/// made later in the slot is never taken for one marked here.
-static CLOEXEC: Lock<BTreeSet<i32>> = Lock::new(BTreeSet::new());
-
-fn mark_cloexec(raw_fd: i32, cloexec: bool) {
-    let mut marked = CLOEXEC.lock();
-    if cloexec {
-        marked.insert(raw_fd);
-    } else {
-        marked.remove(&raw_fd);
-    }
-}
+static CLOEXEC: Lock<CloseOnExec> = Lock::new(CloseOnExec::new());
 
 /// `arg` is the register C's variadic third argument arrives in (`fdreq`).
 #[no_mangle]
@@ -421,9 +404,9 @@ pub unsafe extern "C" fn fcntl(raw_fd: i32, cmd: i32, arg: u64) -> i32 {
                 Err(e) => set_errno(e),
             };
         }
-        Command::GetFd => return i32::from(CLOEXEC.lock().contains(&raw_fd)),
+        Command::GetFd => return CLOEXEC.lock().flags(raw_fd),
         Command::SetFd(cloexec) => {
-            mark_cloexec(raw_fd, cloexec);
+            CLOEXEC.lock().set(raw_fd, cloexec);
             return 0;
         }
         Command::Invalid => EINVAL,

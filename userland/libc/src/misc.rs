@@ -225,6 +225,32 @@ pub unsafe extern "C" fn sigprocmask(how: i32, set: *const u64, oldset: *mut u64
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn sigemptyset(set: *mut u64) -> i32 {
+    unsafe { *set = 0 };
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sigfillset(set: *mut u64) -> i32 {
+    unsafe { *set = crate::sigmask::FULL };
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sigaddset(set: *mut u64, signo: i32) -> i32 {
+    match crate::sigmask::with(unsafe { *set }, signo) {
+        Some(next) => {
+            unsafe { *set = next };
+            0
+        }
+        None => {
+            crate::errno::set(crate::errno::EINVAL);
+            -1
+        }
+    }
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn raise(_sig: i32) -> i32 {
     0
 }

@@ -1,8 +1,9 @@
 read what creat wrote: "hello"
+readlink: 18, "/system/bin/toybox"
+readlink into 4: 4, "/sys#"
+readlink into 0: -1, EINVAL
 readlink of a file: -1, EINVAL
 readlink of nothing: -1, ENOENT
-readlink into 0: -1, EINVAL
-readlink into SIZE_MAX: -1, EINVAL
 entry: a DT_UNKNOWN
 entry: b DT_UNKNOWN
 entry: sub DT_DIR

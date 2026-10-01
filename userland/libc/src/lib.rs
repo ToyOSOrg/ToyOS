@@ -11,6 +11,7 @@ mod errno;
 mod fdreq;
 mod fparts;
 mod link;
+mod linkreq;
 mod listing;
 mod locale;
 mod math;

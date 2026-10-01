@@ -1,7 +1,12 @@
-//! What `fcntl` decides before the kernel is asked. It reads nothing but what
+//! What `fcntl` decides before the kernel is asked, and the close-on-exec
+//! marks `open`, `fcntl`, `close` and `dup2` keep. It reads nothing but what
 //! it is handed, so the host tests it (`toyos-libc-copies`).
 
+use alloc::collections::BTreeSet;
+
 use toyos_abi::RawHandle;
+
+const O_CLOEXEC: i32 = 0x80000;
 
 const F_DUPFD: i32 = 0;
 const F_GETFD: i32 = 1;
@@ -69,5 +74,41 @@ pub(crate) fn dup_at_least<E>(
             return Ok(duplicate);
         }
         close(duplicate);
+    }
+}
+
+/// The descriptors marked close-on-exec, by number: kept for stage 3 of
+/// `issues/kernel/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`,
+/// whose spawn reads them. A number is a slot at one generation, so a handle
+/// made later in the slot is never taken for one marked here.
+pub(crate) struct CloseOnExec(BTreeSet<i32>);
+
+impl CloseOnExec {
+    pub(crate) const fn new() -> CloseOnExec {
+        CloseOnExec(BTreeSet::new())
+    }
+
+    /// `fd` as `open` answered it for `flags`: marked if they hold `O_CLOEXEC`.
+    pub(crate) fn opened(&mut self, fd: i32, flags: i32) {
+        self.set(fd, flags & O_CLOEXEC != 0);
+    }
+
+    /// `F_SETFD`'s.
+    pub(crate) fn set(&mut self, fd: i32, cloexec: bool) {
+        if cloexec {
+            self.0.insert(fd);
+        } else {
+            self.0.remove(&fd);
+        }
+    }
+
+    /// `F_GETFD`'s answer.
+    pub(crate) fn flags(&self, fd: i32) -> i32 {
+        if self.0.contains(&fd) { FD_CLOEXEC } else { 0 }
+    }
+
+    /// `fd` closed, or answered by `dup2`, which POSIX has not closed on `exec`.
+    pub(crate) fn cleared(&mut self, fd: i32) {
+        self.0.remove(&fd);
     }
 }

@@ -38,6 +38,9 @@ mmap a file shared: -1, ENODEV
 mmap a file shared at a page: -1, ENODEV
 mmap executable: -1, ENOTSUP
 mmap nothing: -1, EINVAL
+malloc SIZE_MAX: -1, ENOMEM
+calloc SIZE_MAX 2: -1, ENOMEM
+realloc SIZE_MAX: -1, ENOMEM
 sysconf _SC_ARG_MAX: -1, no errno
 sysconf _SC_GETPW_R_SIZE_MAX: -1, no errno
 sysconf 12345: -1, EINVAL
