@@ -26,7 +26,7 @@ fn trees() -> Vec<&'static str> {
     std::iter::once("rust")
         .chain(crate::sysroot::SYSROOT_SOURCES)
         .chain(crate::sysroot::SYSROOT_MANIFESTS)
-        .chain([crate::clang::SOURCE, crate::libcxx::SOURCE, file!()])
+        .chain([crate::clang::SOURCE, crate::libcxx::SOURCE, crate::n2::SOURCE, file!()])
         .collect()
 }
 
@@ -463,7 +463,8 @@ mod tests {
         assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
     }
 
-    /// A commit to the C and C++ toolchain's declarations or headers moves the tag.
+    /// A commit to the C and C++ toolchain's declarations or headers, or to the
+    /// n2 it is built under, moves the tag.
     #[test]
     fn the_tag_moves_with_the_c_toolchain() {
         let repo = TempDir::new("release-tag");
@@ -496,10 +497,14 @@ mod tests {
         let cxx = fs::read_to_string(here.join(crate::libcxx::SOURCE)).unwrap();
         let (no_fs, fs_on) = (r#"("LIBCXX_ENABLE_FILESYSTEM", "OFF")"#, r#"("LIBCXX_ENABLE_FILESYSTEM", "ON")"#);
         assert!(cxx.contains(no_fs), "src/libcxx.rs no longer declares what this mutates");
+        let n2 = fs::read_to_string(here.join(crate::n2::SOURCE)).unwrap();
+        let pin = crate::n2::N2[crate::n2::N2.len() - 1];
+        assert!(n2.contains(pin), "src/n2.rs no longer declares what this mutates");
         let mutations = [
             (crate::clang::SOURCE, with_objdump.clone()),
             (crate::clang::SOURCE, with_objdump.replace(targets, riscv)),
             (crate::libcxx::SOURCE, cxx.replace(no_fs, fs_on)),
+            (crate::n2::SOURCE, n2.replace(pin, &"0".repeat(pin.len()))),
             ("userland/libc/include/placeholder", "y".to_string()),
         ];
         for (path, text) in mutations {
