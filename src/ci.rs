@@ -429,6 +429,10 @@ fn host(root: &Path) -> Vec<Step> {
     let mut steps = Vec::new();
     let mut cold = None;
     if on_runner() {
+        // No incremental state in an entry: it is most of an entry's bytes,
+        // and after a read by content it helps only a crate whose bytes
+        // changed.
+        std::env::set_var("CARGO_INCREMENTAL", "0");
         let mut start = None;
         steps.push(step("the cache entry, read by content", || {
             let (found, said) = cicache::read(root)?;
