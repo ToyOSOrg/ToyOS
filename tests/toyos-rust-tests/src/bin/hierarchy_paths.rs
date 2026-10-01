@@ -16,8 +16,6 @@ use toyos_abi::syscall::{self, OpenFlags, SyscallError};
 const ROOT_ENTRIES: [&str; 9] =
     ["apps", "boot", "config", "home", "log", "media", "state", "system", "tmp"];
 
-/// Mirrored in `tests/common/storage.rs`, whose reader sees them without the
-/// mount point, inside the one volume.
 const IN_HOME: &str = "/home/hierarchy-home.bin";
 const IN_APPS: &str = "/apps/hierarchy-apps.bin";
 const LEN: usize = 2 * 4096 + 61;

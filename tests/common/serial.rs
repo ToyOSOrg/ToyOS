@@ -267,13 +267,9 @@ impl Serial {
     /// A whole-capture scan answers with the earliest line of that shape,
     /// whoever wrote it and whenever — and for a test that *stages* the event it
     /// is looking for, the earliest line is the wrong one whenever anything else
-    /// on the machine can produce the same shape. `i8042_undecoded_bytes`
-    /// injects an undecodable key once the guest prints `===I8042_READY===` and
-    /// then read the first `nothing decoded` line in its capture as the answer;
-    /// the driver's own bring-up can produce one before that marker, and on a
-    /// laptop a real spurious interrupt can too.
+    /// on the machine can produce the same shape.
     ///
-    /// The marker is what the injection was timed off, so it is the boundary the
+    /// The marker is what the staging was timed off, so it is the boundary the
     /// test actually knows — no host clock is involved, and a stranger line
     /// before it can no longer be read as the test's own. A missing marker is a
     /// failure rather than a fallback to the whole capture: the anchor going

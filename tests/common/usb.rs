@@ -134,8 +134,7 @@ fn broke_on(line: &str) -> Result<&str, String> {
 /// data disk carries neither `/boot` nor `/log` nor the mount the log sink
 /// writes through. That difference is the whole scenario.
 ///
-/// The liveness signal is `compositor: frames=`, for the reason
-/// `metal_sim_pointer_churn` picked it: it comes from a composited frame, so
+/// The liveness signal is `compositor: frames=`: it comes from a composited frame, so
 /// its absence is a desktop that stopped drawing rather than an instrument that
 /// stopped counting — which is exactly what the owner reports, a clock that
 /// stops advancing. The second probe is the serial console, which reaches

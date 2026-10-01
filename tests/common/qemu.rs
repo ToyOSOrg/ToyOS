@@ -391,10 +391,7 @@ impl Liveness {
 ///
 /// A test that ran out of time has not found the guest doing the wrong thing;
 /// it has found nothing at all, and the two readings send an agent to opposite
-/// places. `screen_pager_keys` reporting `0 page moves over 30 keystrokes`
-/// after 0.3 s was bisected as a kernel regression twice in one day by two
-/// agents, and the fact it was hiding is that the whole run had collapsed
-/// before the guest could answer once.
+/// places.
 ///
 /// Still red. A guest that stopped answering may have stopped for a reason this
 /// tree owns, and a status that is not a failure is a status nobody reads. What
@@ -540,9 +537,7 @@ impl std::fmt::Display for WaitVerdict {
 /// budgeted wall clock (`budget_smp`-scaled, so it already carries #256's
 /// `vcpus/cores` oversubscription widening), and until this it ended the wait
 /// the instant it passed — so a merely-slow guest reported exactly what a wedged
-/// one did. `launcher_refusals` was killed at `192s "still talking 1s ago"` on a
-/// loaded `smp:2` runner its `vcpus/cores` factor clamps to 1, a guest making
-/// steady progress called wedged by a clock.
+/// one did.
 ///
 /// **`elapsed > ceiling` stays a necessary condition, and that is what keeps
 /// this safe.** Silence alone is not a wedge on this suite's boots: a healthy
@@ -1529,8 +1524,7 @@ impl QemuInstance {
     /// moment QEMU exits and the reader disconnects, so the ceiling there costs
     /// nothing. A guest the fatal path has halted does not exit — every CPU is
     /// stopped and the process stays up — so the drain pays the whole ceiling
-    /// waiting for a machine that will never speak again. `double_fault_stack`
-    /// spent twenty seconds of every run that way, which was 80% of it.
+    /// waiting for a machine that will never speak again.
     ///
     /// Here the duration *is* a liveness ceiling — the marker is what ends
     /// it — so it scales.
@@ -1989,9 +1983,8 @@ impl QmpInput {
     /// and a guest whose vCPU the host has not run for a couple of hundred
     /// milliseconds drains none of them — at which point the queue starts
     /// dropping, silently and one byte at a time, and the guest receives the
-    /// line with a hole in it. Both times `screen_console_panic` has ever gone
-    /// red that is what happened, and neither side of the wire says a word
-    /// about it.
+    /// line with a hole in it, and neither side of the wire says a word about
+    /// it.
     pub fn type_burst(&mut self, text: &str) {
         let mut events: Vec<(&str, bool)> = Vec::new();
         for ch in text.chars() {

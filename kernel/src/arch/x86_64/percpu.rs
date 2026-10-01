@@ -308,7 +308,7 @@ pub(crate) mod gs {
 /// that can arrive with `rsp` not a kernel stack (SDM Vol. 3A §6.14.5); `ist[n-1]` is IST*n*.
 pub(crate) const IST_STACKS: usize = 3;
 
-/// One size for every IST stack, for [`crate::sched::idle_stack::SIZE`]'s reason; must leave room to double the measured high water, which `double_fault_stack` asserts.
+/// One size for every IST stack, for [`crate::sched::idle_stack::SIZE`]'s reason; must leave room to double the measured high water.
 const IST_STACK_SIZE: usize = 16384;
 
 /// Filled with [`STACK_FILL`], not unmapped: a fault already on IST1 is a triple fault, so detecting after the fact beats trapping it.

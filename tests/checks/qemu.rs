@@ -153,9 +153,7 @@ pub fn ceiling_self_check() -> Result<(), String> {
     const TIGHT: Duration = Duration::from_secs(153);
     let bstop = TIGHT.max(GUEST_WEDGED);
     assert!(TIGHT < bstop, "the case needs a ceiling below the backstop");
-    // (a) The flake itself: `launcher_refusals` at `192s "still talking 1s ago"`
-    //     on a loaded smp:2 runner. Past its 153 s budget, but talking — no
-    //     verdict, it runs on.
+    // (a) Past its 153 s budget, but talking — no verdict, it runs on.
     if ceiling_verdict(None, Duration::from_secs(192), TIGHT, Duration::from_secs(1), 500).is_some()
     {
         return Err(String::from(
@@ -261,8 +259,7 @@ pub fn ceiling_self_check() -> Result<(), String> {
 
     // 5. **The pre-marker death, the other half of that omission.** A test that
     //    never announced itself has an empty `serial`, so the arm formatting
-    //    `serial` prints nothing and `before` is the only record there is —
-    //    `sched_check_build`'s empty `serial:` block in run `31890991692`. Both
+    //    `serial` prints nothing and `before` is the only record there is. Both
     //    directions, because a started test's window is already where its arm
     //    looks.
     let never = WaitVerdict::for_test(slow.clone(), window_before, "", false);
