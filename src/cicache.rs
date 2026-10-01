@@ -34,11 +34,11 @@
 //! would make every crate depending on them stale. A job that builds it
 //! anywhere else runs as a developer's tree does.
 //!
-//! **Every run that carries the cache refuses, after its last step, a tree
-//! whose [`PATHS`] hold more than [`LIMIT`]**, `~` being `HOME` ([`close`]): a
-//! cold one before it seals, so the save, which follows only a green run,
-//! never stores it, and a warm one so that a pull request whose tree holds
-//! more reds on its own run.
+//! **A seal refuses a tree whose [`PATHS`] hold more than [`LIMIT`]**, `~`
+//! being `HOME`, so the save, which follows only a green run, never stores
+//! one. A warm tree is not bounded: it keeps each unit its build wrote under a
+//! new name beside the one it replaced, so it sums more than a cold build of
+//! its sources seals.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -192,21 +192,32 @@ fn cold(root: &Path, runner: &str, sources: Sources, why: String) -> Result<(Sta
     Ok((Start::Cold(Cold { runner: runner.to_string(), sources }), said))
 }
 
-/// After the last step of a job that carries the cache: what its save would
-/// store, refused above [`LIMIT`], and a tree that started cold sealed.
-pub fn close(root: &Path, start: &Start) -> Result<String, String> {
+/// After the last step of a run that started [`Start::Cold`]: the tree refused
+/// if its [`PATHS`] hold more than [`LIMIT`], `~` being `HOME`, and otherwise
+/// every file under every target dated [`built`], then the manifest.
+pub fn seal(root: &Path, cold: &Cold) -> Result<String, String> {
     let home = std::env::var_os("HOME").ok_or("HOME is unset, and the cache's paths name it as `~`")?;
-    close_at(root, Path::new(&home), start)
+    seal_at(root, Path::new(&home), cold)
 }
 
-fn close_at(root: &Path, home: &Path, start: &Start) -> Result<String, String> {
+fn seal_at(root: &Path, home: &Path, cold: &Cold) -> Result<String, String> {
     let (mut files, mut bytes) = (0u64, 0u64);
     for path in PATHS {
         let dir = match path.strip_prefix("~/") {
             Some(under) => home.join(under),
             None => root.join(path),
         };
-        size(&dir, &mut files, &mut bytes)?;
+        // A path the save finds nothing at stores nothing.
+        if !dir.try_exists().map_err(|e| format!("{}: {e}", dir.display()))? {
+            continue;
+        }
+        each_under(&dir, &mut |_, meta| {
+            if meta.is_file() {
+                files += 1;
+                bytes += meta.len();
+            }
+            Ok(())
+        })?;
     }
     if bytes > LIMIT {
         return Err(format!(
@@ -214,17 +225,6 @@ fn close_at(root: &Path, home: &Path, start: &Start) -> Result<String, String> {
              hold: saved, it could evict the guest entry or the next host one"
         ));
     }
-    let stored = format!("{files} files, {bytes} B of the {LIMIT} B an entry may hold");
-    match start {
-        Start::Warm => Ok(format!("{stored}; started warm, so not sealed")),
-        Start::Cold(cold) => Ok(format!("{stored}; {}", seal(root, cold)?)),
-    }
-}
-
-/// After the last step of a run that started [`Start::Cold`], once [`close`]
-/// has bounded its tree: every file under every target dated [`built`], then
-/// the manifest.
-fn seal(root: &Path, cold: &Cold) -> Result<String, String> {
     let now = sources(root)?;
     let moved: Vec<&String> = cold
         .sources
@@ -239,7 +239,8 @@ fn seal(root: &Path, cold: &Cold) -> Result<String, String> {
         return Err(format!("a step wrote tracked sources, which no entry can describe: {moved:?}"));
     }
     for target in targets(root)? {
-        age(&target)?;
+        each_under(&target, &mut |path, _| date(path, built()))?;
+        date(&target, built())?;
     }
     let head = crate::sync::git(root, &["rev-parse", "HEAD"])?;
     let mut text = format!("{head}\n{}\n", cold.runner);
@@ -247,7 +248,12 @@ fn seal(root: &Path, cold: &Cold) -> Result<String, String> {
         text.push_str(&format!("{hash} {path}\n"));
     }
     fs::write(root.join(MANIFEST), text).map_err(|e| format!("write {MANIFEST}: {e}"))?;
-    Ok(format!("sealed: {} sources, built on {}, every target dated as built", cold.sources.len(), cold.runner))
+    Ok(format!(
+        "{files} files, {bytes} B of the {LIMIT} B an entry may hold; sealed: {} sources, built on {}, \
+         every target dated as built",
+        cold.sources.len(),
+        cold.runner
+    ))
 }
 
 /// The commit an entry was built from, the runner, and its sources.
@@ -351,37 +357,18 @@ fn restored(root: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(found)
 }
 
-/// Date everything under `dir`, and `dir`, as [`built`]. A symbolic link is
-/// left alone: dating one dates whatever it names.
-fn age(dir: &Path) -> Result<(), String> {
+/// Hands `visit` every file and directory under `dir`, with its metadata. A
+/// symbolic link is neither followed nor visited: dating one dates whatever it
+/// names.
+fn each_under(dir: &Path, visit: &mut impl FnMut(&Path, &fs::Metadata) -> Result<(), String>) -> Result<(), String> {
     for entry in fs::read_dir(dir).map_err(|e| format!("read {}: {e}", dir.display()))? {
         let entry = entry.map_err(|e| format!("read {}: {e}", dir.display()))?;
         let meta = entry.metadata().map_err(|e| format!("{}: {e}", entry.path().display()))?;
         if meta.is_dir() {
-            age(&entry.path())?;
-        } else if meta.is_file() {
-            date(&entry.path(), built())?;
+            each_under(&entry.path(), visit)?;
         }
-    }
-    date(dir, built())
-}
-
-/// Count the files under `dir` and their bytes as an archive of it holds them:
-/// a symbolic link is stored as a link, and a path that does not exist as
-/// nothing.
-fn size(dir: &Path, files: &mut u64, bytes: &mut u64) -> Result<(), String> {
-    let entries = match fs::read_dir(dir) {
-        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
-        entries => entries.map_err(|e| format!("read {}: {e}", dir.display()))?,
-    };
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("read {}: {e}", dir.display()))?;
-        let meta = entry.metadata().map_err(|e| format!("{}: {e}", entry.path().display()))?;
-        if meta.is_dir() {
-            size(&entry.path(), files, bytes)?;
-        } else if meta.is_file() {
-            *files += 1;
-            *bytes += meta.len();
+        if meta.is_dir() || meta.is_file() {
+            visit(&entry.path(), &meta)?;
         }
     }
     Ok(())
@@ -472,7 +459,7 @@ mod tests {
             panic!("a tree with no target is cold")
         };
         build(writer);
-        seal(writer, &cold).unwrap();
+        seal_at(writer, &writer.join("home"), &cold).unwrap();
     }
 
     /// The entry at `writer`, restored under a fresh checkout of `origin`.
@@ -635,29 +622,24 @@ pub fn word(_: proc_macro::TokenStream) -> proc_macro::TokenStream {
 
     /// What a save would store is the files under [`PATHS`], `~` being the
     /// home: one byte above the bound, between a target and the home's
-    /// registry, is refused whether the run started warm or cold, and a cold
-    /// tree refused gets no manifest; at the bound both close, and a target no
-    /// save stores is not counted. The bound's bytes are a hole `set_len`
-    /// made, so no test writes them.
+    /// registry, is refused and gets no manifest; at the bound the tree is
+    /// sealed, and a target no save stores is not counted. The bound's bytes
+    /// are a hole `set_len` made, so no test writes them.
     #[test]
-    fn what_a_save_would_store_is_refused_above_the_bound_warm_or_cold() {
+    fn a_seal_refuses_what_its_save_would_store_above_the_bound() {
         let tmp = TempDir::new("cicache-bound");
         let home = tmp.join("home");
-        let cold = Start::Cold(cold_repo(&tmp, RUNNER));
+        let cold = cold_repo(&tmp, RUNNER);
         write(&home, ".cargo/registry/cache/one", "1");
         write(&tmp, "tests/target/unsaved", "1");
         let big = tmp.join("target/debug/big");
         fs::create_dir_all(big.parent().unwrap()).unwrap();
         fs::File::create(&big).unwrap().set_len(LIMIT).unwrap();
-        for start in [&Start::Warm, &cold] {
-            let refusal = close_at(&tmp, &home, start).expect_err("one byte above the bound");
-            assert!(refusal.starts_with(&format!("{} B", LIMIT + 1)), "{refusal}");
-        }
+        let refusal = seal_at(&tmp, &home, &cold).expect_err("one byte above the bound");
+        assert!(refusal.starts_with(&format!("{} B", LIMIT + 1)), "{refusal}");
         assert!(!tmp.join(MANIFEST).exists(), "a refused tree carries a manifest");
         fs::remove_file(home.join(".cargo/registry/cache/one")).unwrap();
-        for start in [&Start::Warm, &cold] {
-            close_at(&tmp, &home, start).expect("at the bound");
-        }
+        seal_at(&tmp, &home, &cold).expect("at the bound");
         assert!(tmp.join(MANIFEST).exists(), "a tree at the bound is sealed");
     }
 
@@ -697,14 +679,14 @@ pub fn word(_: proc_macro::TokenStream) -> proc_macro::TokenStream {
         let cold = cold_repo(&tmp, RUNNER);
         write(&tmp, "target/debug/deps/x", "x");
         write(&tmp, "userland/target/y", "y");
-        seal(&tmp, &cold).unwrap();
+        seal_at(&tmp, &tmp.join("home"), &cold).unwrap();
         for file in ["target/debug/deps/x", "target/debug", "userland/target/y"] {
             assert_eq!(modified(&tmp.join(file)).unwrap(), built(), "{file}");
         }
         fs::remove_file(tmp.join(MANIFEST)).unwrap();
         for bytes in ["b\n", "a\n"] {
             write(&tmp, "a.rs", bytes);
-            let refusal = seal(&tmp, &cold).unwrap_err();
+            let refusal = seal_at(&tmp, &tmp.join("home"), &cold).unwrap_err();
             assert!(refusal.contains("a.rs"), "{bytes:?}: {refusal}");
         }
     }
@@ -730,7 +712,7 @@ pub fn word(_: proc_macro::TokenStream) -> proc_macro::TokenStream {
             let cold = cold_repo(&tmp, &runner_in(&image).unwrap());
             write(&tmp, "target/debug/x", "x");
             write(&tmp, "kernel/target/y", "y");
-            seal(&tmp, &cold).unwrap();
+            seal_at(&tmp, &tmp.join("home"), &cold).unwrap();
             let mut other = image.clone();
             other.insert(name, "another");
             let (start, said) = open(&tmp, &runner_in(&other).unwrap(), SystemTime::now()).unwrap();
@@ -749,7 +731,7 @@ pub fn word(_: proc_macro::TokenStream) -> proc_macro::TokenStream {
         let tmp = TempDir::new("cicache-clock");
         let cold = cold_repo(&tmp, RUNNER);
         write(&tmp, "target/debug/x", "x");
-        seal(&tmp, &cold).unwrap();
+        seal_at(&tmp, &tmp.join("home"), &cold).unwrap();
         let refusal = open(&tmp, RUNNER, built()).err().expect("a clock at the entry's date");
         assert!(refusal.contains("clock"), "{refusal}");
     }

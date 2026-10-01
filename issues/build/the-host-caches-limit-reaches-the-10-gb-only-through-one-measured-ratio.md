@@ -20,13 +20,22 @@ guest entry's 3,281,375,938 B (run 36696295750's `tcg`), 2H + G is
 before 2H + G reaches 10 GB. The lowest measured is 3.08: run 36844536500
 sealed 9553 MiB on macOS and saved 3,250,736,567 B.
 
-No gate reads a stored size, and the tree no longer runs that `tar` or
-`zstdmt`. If the targets compress worse, H moves toward the floor and nothing
-reds.
+No gate reads a stored size. If the targets compress worse, H moves toward the
+floor and nothing reds.
+
+`LIMIT` is checked only where a tree is sealed, by a cold run. A pull
+request's run is warm whenever an entry its runner can use exists, and a warm
+tree is not bounded: it keeps each unit rebuilt under a new name beside the
+one it replaced, so its sum could red a pull request whose cold tree fits. So
+a landing that takes the cold tree past `LIMIT` is first refused by the next
+nightly's seal, loudly: that run is red and saves nothing. Until an entry is
+sealed again, every pull request restores the last sealed one.
 
 Owner: the host cache (`src/cicache.rs`).
 
-**Exit condition.** A gate reds on the stored size itself: after nightly's
-`host` saves, a step reads that entry's stored bytes and the newest guest
-entry's from the repository's cache list, and fails when 2H + G or H + 2G
-passes 10 GB.
+**Exit condition.** Two gates that red:
+- after nightly's `host` saves, a step reads that entry's stored bytes and the
+  newest guest entry's from the repository's cache list, and fails when
+  2H + G or H + 2G passes 10 GB;
+- the merge queue's `host` reds a landing whose cold tree passes `LIMIT`,
+  before `main` moves.

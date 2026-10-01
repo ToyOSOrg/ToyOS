@@ -468,8 +468,7 @@ fn run_control(root: &Path, control: &Control) -> Result<String, String> {
 /// host triple for the same reason.
 ///
 /// In a job that carries the cache ([`cicache::carried`]) the restored entry is
-/// read before any step, and after the last what its save would store is
-/// refused above its bound, warm or cold, and a tree that started cold is
+/// read before any step, and after the last a tree that started cold is
 /// sealed; a developer's tree keeps the dates its edits gave it.
 fn host(root: &Path) -> Vec<Step> {
     let tmp = toyos_tmpdir::TempDir::new("ci-host");
@@ -565,8 +564,8 @@ fn host(root: &Path) -> Vec<Step> {
         cargo(root, &["test", "--manifest-path", "toyos/Cargo.toml", "--target", &host_triple])
     }));
     steps.push(step("nothing left in $TMPDIR or /tmp", || left_behind(&tmp, short, &before)));
-    if let Some(start) = start {
-        steps.push(step("the tree, bounded as a cache entry", || cicache::close(root, &start)));
+    if let Some(cicache::Start::Cold(cold)) = &start {
+        steps.push(step("the tree, bounded as a cache entry", || cicache::seal(root, cold)));
     }
     steps
 }
@@ -1164,15 +1163,41 @@ mod tests {
         jobs
     }
 
+    /// Refuses a job's line unless it is a comment, a path of `path: |`, or a
+    /// plain key: so no alias, anchor, quoted key or folded line hides a step
+    /// from this reader. Every `run:` is the driver, and no step has an `if:`
+    /// of its own, a `shell:` or `continue-on-error`.
+    fn the_driver_alone(name: &str, job: &str, lines: &[&str]) {
+        let mut paths = None;
+        for line in lines {
+            let indent = line.len() - line.trim_start().len();
+            let text = line.trim_start();
+            if text.is_empty() || text.starts_with('#') || paths.is_some_and(|at| indent > at) {
+                continue;
+            }
+            let entry = text.strip_prefix("- ").unwrap_or(text);
+            let column = indent + text.len() - entry.len();
+            let (key, value) = entry.split_once(": ").or(entry.strip_suffix(':').map(|key| (key, ""))).unwrap_or_default();
+            let plain = !key.is_empty() && key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+            assert!(plain, "{name} {job}: a line this reader cannot judge: {line:?}");
+            paths = (key == "path" && value == "|").then_some(column);
+            match key {
+                "run" => assert_eq!(value, "cargo run -- --ci host", "{name} {job}"),
+                "if" => assert_eq!(column, 4, "{name} {job}: a step's own `if:`: {line:?}"),
+                "shell" | "continue-on-error" => panic!("{name} {job}: {line:?}"),
+                _ => {}
+            }
+        }
+    }
+
     /// Exactly one job writes each cache, on the nightly, so what a pull request
     /// restores is one run's tree and never a race between two writers. A job
     /// that restores or saves the host cache builds the driver in
-    /// [`cicache::DRIVER`], so it carries the cache, names [`cicache::PATHS`],
-    /// and takes no step by an alias or lends one, which this reader cannot
-    /// follow; and the one that saves it restores nothing: its run is cold, and
-    /// a cold run is green only once its tree is sealed ([`cicache`]). No line
-    /// of that job names a status function that runs a step past a red one, or
-    /// `continue-on-error`, so its save follows only a green run.
+    /// [`cicache::DRIVER`], so it carries the cache, and names
+    /// [`cicache::PATHS`]; the one that saves it restores nothing: its run is
+    /// cold, and a cold run is green only once its tree is sealed
+    /// ([`cicache`]). Such a job's verdict is the driver's
+    /// ([`the_driver_alone`]), so its save follows only a green run.
     #[test]
     fn each_cache_has_one_writer() {
         let dir = repo_root().join(".github/workflows");
@@ -1208,11 +1233,8 @@ mod tests {
                         assert_eq!(paths, &cicache::PATHS, "{name} {job}: the host cache's paths");
                         assert!(lines.contains(&carries.as_str()), "{name} {job}: the host cache without `{}`", carries.trim());
                         assert!(!save || caches.iter().all(|(s, ..)| *s), "{name} {job}: the host cache's writer restores");
-                        let past_a_red = ["always()", "cancelled()", "failure()", "continue-on-error"];
-                        let past = lines.iter().find(|l| past_a_red.iter().any(|word| l.contains(word)));
-                        assert!(!save || past.is_none(), "{name} {job}: the host cache saved past a red step: {past:?}");
-                        let named = |l: &&str| ["- *", "- &"].iter().any(|by| l.trim_start().starts_with(by));
-                        assert!(!lines.iter().any(named), "{name} {job}: a step by an alias, or lent to one");
+                        assert!(!text.contains("defaults"), "{name}: a shell or directory for every step");
+                        the_driver_alone(&name, job, &lines);
                     }
                     if *save {
                         writers.push((name.clone(), prefix.clone()));
