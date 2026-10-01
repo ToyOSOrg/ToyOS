@@ -364,3 +364,54 @@ the tool, not the bytes a user's own data becomes when the tool writes it: the
 layout is a published on-disk format, not a copyrightable work of the program,
 and the file contents are ours. The tool is not distributed with this repository
 in any form.
+
+
+toyos-microcode/intel-ucode/06-8c-01 — Intel microcode, redistributable unmodified
+----------------------------------------------------------------------------------
+
+    112,640 bytes, update revision 0xbe for processor signature 0x806c1,
+    processor flags 0x80 (Tiger Lake B0/B1, the T14's i5-1135G7)
+    sha256 efe83e312b90f7fe4b8f75260087edf03e048d2f4f80caef2ef631c842714bb3
+    Upstream: https://github.com/intel/Intel-Linux-Processor-Microcode-Data-Files,
+    `intel-ucode/06-8c-01` at tag microcode-20260925
+    (commit bdc92abe5c499c3fd7988b76a128d05c9120a520), byte for byte
+    Licence text: licenses/Intel-microcode-license.txt (upstream's `license`,
+    sha256 03efb1491c7e899feb2665fa299363e64035e5444c1b8bc1f6ebed30de964e12)
+    SPDX-License-Identifier: LicenseRef-Intel-Microcode
+
+Intel's terms permit redistribution in binary form without modification, on
+three conditions, quoted:
+
+> 1.  Redistributions must reproduce the above copyright notice and the
+>     following disclaimer in the documentation and/or other materials provided
+>     with the distribution.
+>
+> 2.  Neither the name of Intel Corporation nor the names of its suppliers may
+>     be used to endorse or promote products derived from this software without
+>     specific prior written permission.
+>
+> 3.  No reverse engineering, decompilation, or disassembly of this software
+>     is permitted.
+
+The copyright notice and disclaimer the first condition names:
+
+    Copyright (c) 2018-2021 Intel Corporation.
+    All rights reserved.
+
+    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+    AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+    IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+    ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+    LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+    CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+    SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+    INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+    CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+    ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+    POSSIBILITY OF SUCH DAMAGE.
+
+`toyos-microcode` reads only what the SDM documents — the 48-byte header, the
+checksums and the extended signature table (Vol. 3A §12.11) — and hands the
+update data on whole; nothing here decodes, decompiles or disassembles it. No
+image ships this file yet: when one does, the first condition puts the notice
+above in the image beside it.

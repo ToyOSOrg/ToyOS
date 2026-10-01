@@ -430,6 +430,14 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         "ours: a ToyOS binary this build produced (toyos-symbols/tests/real.rs)",
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
+    // Intel's microcode update for the T14's CPU, unmodified; `NOTICE` carries
+    // the licence, its upstream tag and the digest.
+    (
+        "toyos-microcode/intel-ucode/06-8c-01",
+        "efe83e312b90f7fe4b8f75260087edf03e048d2f4f80caef2ef631c842714bb3",
+        "NOTICE",
+        Terms::Spdx("LicenseRef-Intel-Microcode"),
+    ),
 ];
 
 /// `NOTICE` sections that name no files, and why.

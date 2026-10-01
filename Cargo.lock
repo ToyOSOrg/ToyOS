@@ -1126,6 +1126,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "toyos-microcode"
+version = "0.1.0"
+
+[[package]]
 name = "toyos-mixer"
 version = "0.1.0"
 
