@@ -34,21 +34,6 @@ const REQUIRED: &[Tool] = &[
     },
 ];
 
-/// Named, because a list that stops at what is fatal reads as the whole list.
-/// Each of these costs one thing when absent rather than the build, so none of
-/// them exits.
-///
-/// Ninja is what rustc's bootstrap builds LLVM and clang from
-/// `rust/src/llvm-project` with, under CMake, which it does only when this
-/// host has not built that LLVM. Both are host tools like `cc`, and never in a
-/// guest: on macOS from Homebrew, on CI's toolchain runner at the versions
-/// `.github/workflows` pins.
-const ALSO_USED: &[Tool] = &[Tool {
-    any: &["ninja"],
-    why: "rustc's bootstrap builds LLVM and clang with it, under CMake; `brew install \
-          ninja` on macOS",
-}];
-
 /// Where the OS would find `name`, if anywhere.
 ///
 /// A `PATH` scan and not a `--version` run: it is what `Command::new` does
@@ -65,16 +50,11 @@ fn executable_on_path(name: &str) -> bool {
 }
 
 fn check_prerequisites(root: &Path, arch: Arch) {
-    fn absent(tools: &'static [Tool]) -> Vec<&'static Tool> {
-        tools.iter().filter(|t| !t.any.iter().any(|n| executable_on_path(n))).collect()
-    }
-
-    for tool in absent(ALSO_USED) {
-        eprintln!("Note: no {} — {}", tool.any.join(" or "), tool.why);
-    }
-
-    let mut missing: Vec<String> =
-        absent(REQUIRED).iter().map(|t| format!("{} ({})", t.any.join(" or "), t.why)).collect();
+    let mut missing: Vec<String> = REQUIRED
+        .iter()
+        .filter(|t| !t.any.iter().any(|n| executable_on_path(n)))
+        .map(|t| format!("{} ({})", t.any.join(" or "), t.why))
+        .collect();
     if !executable_on_path(arch.qemu()) {
         missing.push(format!("{} (every {} boot — install QEMU)", arch.qemu(), arch.name()));
     }
