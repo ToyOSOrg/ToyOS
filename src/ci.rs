@@ -467,8 +467,9 @@ fn run_control(root: &Path, control: &Control) -> Result<String, String> {
 /// host triple for the same reason.
 ///
 /// In a job that carries the cache ([`cicache::carried`]) the restored entry is
-/// read before any step and a run that starts cold seals its tree after the
-/// last; a developer's tree keeps the dates its edits gave it.
+/// read before any step, and a run that starts cold seals its tree after the
+/// last and refuses an entry above its bound; a developer's tree keeps the
+/// dates its edits gave it.
 fn host(root: &Path) -> Vec<Step> {
     let tmp = toyos_tmpdir::TempDir::new("ci-host");
     let short = Path::new(toyos_tmpdir::SHORT_BASE);
@@ -480,13 +481,7 @@ fn host(root: &Path) -> Vec<Step> {
     let mut steps = Vec::new();
     let mut cold = None;
     if cicache::carried(root, &std::env::current_exe().expect("the driver's own path")) {
-        // The job's `CARGO_TARGET_DIR` names the driver's target, and no step
-        // builds there.
-        std::env::remove_var("CARGO_TARGET_DIR");
-        // No incremental state in an entry: it is most of an entry's bytes,
-        // and after a read by content it helps only a crate whose bytes
-        // changed.
-        std::env::set_var("CARGO_INCREMENTAL", "0");
+        carry();
         let mut start = None;
         steps.push(step("the cache entry, read by content", || {
             let (found, said) = cicache::read(root)?;
@@ -564,8 +559,24 @@ fn host(root: &Path) -> Vec<Step> {
     steps.push(step("nothing left in $TMPDIR or /tmp", || left_behind(&tmp, short, &before)));
     if let Some(cold) = cold {
         steps.push(step("the tree, sealed as a cache entry", || cicache::seal(root, &cold)));
+        steps.push(step("the entry, as actions/cache will store it", || cicache::bound(root)));
     }
     steps
+}
+
+/// What every step of a job that carries the cache inherits, set before any
+/// thread as `host`'s `TMPDIR` is.
+fn carry() {
+    // The job's `CARGO_TARGET_DIR` names the driver's target, and no step
+    // builds there.
+    std::env::remove_var("CARGO_TARGET_DIR");
+    // No incremental state in an entry: it is most of an entry's bytes, and
+    // after a read by content it helps only a crate whose bytes changed.
+    std::env::set_var("CARGO_INCREMENTAL", "0");
+    // Line tables alone: a backtrace in a step's log reads them, and nothing
+    // reads the rest of the debuginfo, of which a Linux link copies every
+    // dependency's into each test binary.
+    std::env::set_var("CARGO_PROFILE_DEV_DEBUG", "line-tables-only");
 }
 
 /// What `tmp` holds but the lock `toyos_tmpdir` keeps in it, and every root
@@ -875,6 +886,50 @@ mod tests {
         assert!(refusal.contains(&died) && !refusal.contains(&earlier), "{refusal}");
     }
 
+    /// The crate [`a_carried_jobs_step`] builds; unset, it is not a test.
+    const FIXTURE: &str = "TOYOS_CI_TEST_FIXTURE";
+
+    /// What a job that carries the cache hands its driver reaches no step: each
+    /// builds in its own workspace's target, with no incremental state and line
+    /// tables alone. The driver is a process of its own, because `carry`
+    /// writes the environment, which no other thread may read meanwhile.
+    #[test]
+    fn a_step_of_a_job_that_carries_the_cache_builds_in_its_own_target() {
+        let fixture = toyos_tmpdir::TempDir::new("ci-carried");
+        std::fs::create_dir(fixture.join("src")).unwrap();
+        let manifest = "[package]\nname = \"one\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n";
+        std::fs::write(fixture.join("Cargo.toml"), manifest).unwrap();
+        std::fs::write(fixture.join("src/lib.rs"), "pub fn one() -> u8 {\n    1\n}\n").unwrap();
+        let out = crate::buildlock::tests::rerun("ci::tests::a_carried_jobs_step")
+            .env(FIXTURE, fixture.path())
+            .env("CARGO_TARGET_DIR", cicache::DRIVER)
+            .env_remove("CARGO_INCREMENTAL")
+            .env_remove("CARGO_PROFILE_DEV_DEBUG")
+            .output()
+            .expect("run the driver");
+        let said = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success() && said.contains("test result: ok. 1 passed"), "{said}");
+    }
+
+    #[test]
+    #[ignore = "the driver of the test above; never runs on its own"]
+    fn a_carried_jobs_step() {
+        let fixture = PathBuf::from(std::env::var_os(FIXTURE).unwrap_or_else(|| panic!("run without {FIXTURE}")));
+        carry();
+        let cargo = |args: &[&str]| {
+            let out = Command::new("cargo").args(args).current_dir(&fixture).output().expect("run cargo");
+            assert!(out.status.success(), "cargo {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            out
+        };
+        let metadata = cargo(&["metadata", "--format-version", "1", "--no-deps", "--offline"]);
+        let metadata: serde_json::Value = serde_json::from_slice(&metadata.stdout).unwrap();
+        let ours = std::fs::canonicalize(&fixture).unwrap().join("target");
+        assert_eq!(metadata["target_directory"].as_str().map(Path::new), Some(ours.as_path()));
+        let build = String::from_utf8(cargo(&["build", "-v", "--offline"]).stderr).unwrap();
+        let rustc = build.lines().find(|l| l.contains("--crate-name one")).unwrap_or_else(|| panic!("{build}"));
+        assert!(!rustc.contains("-C incremental") && rustc.contains("-C debuginfo=line-tables-only"), "{rustc}");
+    }
+
     fn repo_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
     }
@@ -1011,9 +1066,11 @@ mod tests {
     /// Exactly one job writes each cache, on the nightly, so what a pull request
     /// restores is one run's tree and never a race between two writers. A job
     /// that restores or saves the host cache builds the driver in
-    /// [`cicache::DRIVER`], so it carries the cache, and the one that saves it
-    /// restores nothing: its run is cold, and a cold run is green only once its
-    /// tree is sealed ([`cicache`]).
+    /// [`cicache::DRIVER`], so it carries the cache, names
+    /// [`cicache::PATHS`], which its bound measures, and takes no step by an
+    /// alias or lends one, which this reader cannot follow; and the one that
+    /// saves it restores nothing: its run is cold, and a cold run is green only
+    /// once its tree is sealed ([`cicache`]).
     #[test]
     fn each_cache_has_one_writer() {
         let dir = repo_root().join(".github/workflows");
@@ -1024,7 +1081,7 @@ mod tests {
             let name = entry.file_name().to_string_lossy().into_owned();
             assert!(!text.contains("actions/cache@"), "{name}: the combined action saves too");
             for (job, lines) in jobs(&text) {
-                let caches: Vec<(bool, String)> = lines
+                let caches: Vec<(bool, String, Vec<&str>)> = lines
                     .iter()
                     .enumerate()
                     .filter(|(_, l)| l.contains("actions/cache/restore@") || l.contains("actions/cache/save@"))
@@ -1033,14 +1090,24 @@ mod tests {
                             .iter()
                             .find_map(|l| l.trim_start().strip_prefix("key: "))
                             .expect("a cache step names its key");
-                        (l.contains("actions/cache/save@"), key.split('$').next().unwrap_or("").to_string())
+                        let paths = lines[at..]
+                            .iter()
+                            .skip_while(|l| l.trim() != "path: |")
+                            .skip(1)
+                            .take_while(|l| l.starts_with("            "))
+                            .map(|l| l.trim())
+                            .collect();
+                        (l.contains("actions/cache/save@"), key.split('$').next().unwrap_or("").to_string(), paths)
                     })
                     .collect();
-                for (save, prefix) in &caches {
+                for (save, prefix, paths) in &caches {
                     if prefix.starts_with("host-") {
                         assert_eq!(prefix, cicache::SEALED, "{name} {job}");
+                        assert_eq!(paths, &cicache::PATHS, "{name} {job}: the host cache's paths");
                         assert!(lines.contains(&carries.as_str()), "{name} {job}: the host cache without `{}`", carries.trim());
-                        assert!(!save || caches.iter().all(|(s, _)| *s), "{name} {job}: the host cache's writer restores");
+                        assert!(!save || caches.iter().all(|(s, ..)| *s), "{name} {job}: the host cache's writer restores");
+                        let named = |l: &&str| ["- *", "- &"].iter().any(|by| l.trim_start().starts_with(by));
+                        assert!(!lines.iter().any(named), "{name} {job}: a step by an alias, or lent to one");
                     }
                     if *save {
                         writers.push((name.clone(), prefix.clone()));

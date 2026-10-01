@@ -33,11 +33,15 @@
 //! path crates are compiled again every time, and in the steps' target that
 //! would make every crate depending on them stale. A job that builds it
 //! anywhere else runs as a developer's tree does.
+//!
+//! **An entry that would store more than [`LIMIT`] is refused before the save**
+//! ([`bound`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
@@ -45,6 +49,25 @@ use sha2::{Digest, Sha256};
 const MANIFEST: &str = "target/ci-sources";
 pub const DRIVER: &str = "target/ci-driver";
 pub const SEALED: &str = "host-sealed-";
+
+/// What every step that names the host cache archives: the cache's version is
+/// computed from the list, so a restore whose list differs finds nothing.
+pub const PATHS: [&str; 8] = [
+    "~/.cargo/registry/index",
+    "~/.cargo/registry/cache",
+    "~/.cargo/git/db",
+    "target",
+    "userland/target",
+    "toyos/target",
+    "kernel/target",
+    "bootloader/target",
+];
+
+/// The most an entry may store. The repository's caches are evicted by last
+/// access past 10 GB, and a night whose guest jobs restore after this entry is
+/// saved holds two host entries beside a guest one, then one beside two guest
+/// ones.
+const LIMIT: u64 = 2_000_000_000;
 
 /// 2001-09-09T01:46:40Z: older than any build, so a file dated so is never
 /// newer than one.
@@ -201,6 +224,47 @@ pub fn seal(root: &Path, cold: &Cold) -> Result<String, String> {
     ))
 }
 
+/// After [`seal`]: what actions/cache will store, refused above [`LIMIT`], so
+/// the save that follows a green run never runs.
+pub fn bound(root: &Path) -> Result<String, String> {
+    within(stored(root)?)
+}
+
+fn within(stored: u64) -> Result<String, String> {
+    if stored > LIMIT {
+        return Err(format!(
+            "{stored} B, above the {LIMIT} B an entry may store: saved, it could evict the guest \
+             entry or the next host one"
+        ));
+    }
+    Ok(format!("{stored} B, within the {LIMIT} B an entry may store"))
+}
+
+/// The archive actions/cache makes of [`PATHS`], made as it makes it, with the
+/// runner's own `tar` and `zstdmt`, and counted as it streams.
+fn stored(root: &Path) -> Result<u64, String> {
+    let home = std::env::var_os("HOME").ok_or("HOME is unset, and actions/cache reads `~` from it")?;
+    let paths: Vec<PathBuf> = PATHS
+        .iter()
+        .map(|path| path.strip_prefix("~/").map_or_else(|| PathBuf::from(path), |rest| Path::new(&home).join(rest)))
+        .filter(|path| root.join(path).exists())
+        .collect();
+    let mut tar = Command::new("tar")
+        .args(["--posix", "-cf", "-", "-P", "--use-compress-program", "zstdmt", "-C"])
+        .arg(root)
+        .args(&paths)
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("tar: {e}"))?;
+    let stored = std::io::copy(&mut tar.stdout.take().expect("piped"), &mut std::io::sink())
+        .map_err(|e| format!("reading tar: {e}"))?;
+    let status = tar.wait().map_err(|e| format!("tar: {e}"))?;
+    if !status.success() {
+        return Err(format!("tar exited {status}"));
+    }
+    Ok(stored)
+}
+
 /// The commit an entry was built from, the runner, and its sources.
 fn parse(text: &str) -> Result<(String, String, Sources), String> {
     let mut lines = text.lines();
@@ -224,7 +288,8 @@ fn runs_at_build(root: &Path, manifest: &str, current: &Sources) -> Result<bool,
     let text = fs::read_to_string(root.join(manifest)).map_err(|e| format!("read {manifest}: {e}"))?;
     let doc: toml::Value = text.parse().map_err(|e| format!("{manifest}: {e}"))?;
     let lib = |key: &str, alias: &str| doc.get("lib").and_then(|lib| lib.get(key).or_else(|| lib.get(alias)));
-    let script = match doc.get("package").and_then(|package| package.get("build")) {
+    let package = doc.get("package").or_else(|| doc.get("project"));
+    let script = match package.and_then(|package| package.get("build")) {
         None => current.contains_key(&*Path::new(manifest).with_file_name("build.rs").to_string_lossy()),
         Some(build) => build.as_bool() != Some(false),
     };
@@ -542,24 +607,35 @@ pub fn word(_: proc_macro::TokenStream) -> proc_macro::TokenStream {
     fn every_spelling_of_code_run_at_build_time_is_found() {
         let tmp = TempDir::new("cicache-spellings");
         let cases = [
-            ("", false, false),
-            ("", true, true),
-            ("build = false\n", true, false),
-            ("build = \"gen.rs\"\n", false, true),
-            ("[lib]\nproc-macro = true\n", false, true),
-            ("[lib]\nproc_macro = true\n", false, true),
-            ("[lib]\ncrate-type = [\"proc-macro\"]\n", false, true),
-            ("[lib]\ncrate_type = [\"proc-macro\"]\n", false, true),
-            ("[lib]\ncrate-type = [\"rlib\"]\n", false, false),
+            ("[package]", "", false, false),
+            ("[package]", "", true, true),
+            ("[package]", "build = false\n", true, false),
+            ("[package]", "build = \"gen.rs\"\n", false, true),
+            ("[project]", "build = \"gen.rs\"\n", false, true),
+            ("[project]", "build = false\n", true, false),
+            ("[package]", "[lib]\nproc-macro = true\n", false, true),
+            ("[package]", "[lib]\nproc_macro = true\n", false, true),
+            ("[package]", "[lib]\ncrate-type = [\"proc-macro\"]\n", false, true),
+            ("[package]", "[lib]\ncrate_type = [\"proc-macro\"]\n", false, true),
+            ("[package]", "[lib]\ncrate-type = [\"rlib\"]\n", false, false),
         ];
-        for (keys, script, expected) in cases {
-            write(&tmp, "Cargo.toml", &format!("[package]\nname = \"p\"\n{keys}"));
+        for (table, keys, script, expected) in cases {
+            write(&tmp, "Cargo.toml", &format!("{table}\nname = \"p\"\n{keys}"));
             let mut current = Sources::from([("Cargo.toml".to_string(), String::new())]);
             if script {
                 current.insert("build.rs".into(), String::new());
             }
-            assert_eq!(runs_at_build(&tmp, "Cargo.toml", &current), Ok(expected), "{keys:?}, build.rs: {script}");
+            assert_eq!(runs_at_build(&tmp, "Cargo.toml", &current), Ok(expected), "{table} {keys:?}, build.rs: {script}");
         }
+    }
+
+    /// An entry above the bound is refused, so the save after it never runs;
+    /// one at the bound is kept.
+    #[test]
+    fn an_entry_above_its_bound_is_refused() {
+        assert!(within(LIMIT).is_ok());
+        let refusal = within(LIMIT + 1).expect_err("an entry above the bound");
+        assert!(refusal.starts_with(&format!("{} B", LIMIT + 1)), "{refusal}");
     }
 
     /// One commit of `a.rs`, read cold on `runner`.
