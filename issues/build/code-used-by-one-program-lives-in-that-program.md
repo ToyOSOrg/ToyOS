@@ -51,7 +51,8 @@ Every step lands green on `--ci host` and `--build-only`. Test counts are what
    this tree with exactly one consumer moves under it. Its consumers are the
    packages that name it as a dependency of any kind, under any `cfg`, as
    `cargo metadata --no-deps` reads every manifest `git ls-files '*Cargo.toml'`
-   lists, excluded packages and `tests/` included. A move under a userland
+   lists, excluded packages and `tests/` included; a crate the images ship as a
+   program of its own counts as its own consumer. A move under a userland
    program lands with `src/userlandhost.rs`'s survey gating a nested crate's
    tests, which it lists as escapes today.
    Check: `--ci host` runs every test each package lists today, and `--clippy`

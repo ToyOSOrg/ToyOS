@@ -15,9 +15,10 @@ opened: 2026-10-01
 
 Tiers 2 to 4 are programs, not crates: a tier holds every crate of this tree
 its programs link, and a crate in two tiers is held to the stricter. The loader
-is tier 2. The system services are the programs whose manifest declares
-`exempt.owns`, as `src/userlandhost.rs` reads it; every other program it reads
-is an app, `toybox` and the ones that declare `exempt.manages` too.
+is tier 2. A system service is a program any shipped mode's config marks
+`service = true`, as `build::shipped` reads the modes, or whose manifest
+declares `exempt.owns`, as `src/userlandhost.rs` reads it. Every other shipped
+program is an app, `toybox`, `terminal` and the `exempt.manages` tools included.
 
 **The set**, all `clippy::`: `indexing_slicing`, `string_slice`,
 `arithmetic_side_effects`, `unwrap_used`, `expect_used`, `panic`,
