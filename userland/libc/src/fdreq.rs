@@ -93,7 +93,6 @@ impl CloseOnExec {
         self.set(fd, flags & O_CLOEXEC != 0);
     }
 
-    /// `F_SETFD`'s.
     pub(crate) fn set(&mut self, fd: i32, cloexec: bool) {
         if cloexec {
             self.0.insert(fd);
@@ -105,10 +104,5 @@ impl CloseOnExec {
     /// `F_GETFD`'s answer.
     pub(crate) fn flags(&self, fd: i32) -> i32 {
         if self.0.contains(&fd) { FD_CLOEXEC } else { 0 }
-    }
-
-    /// `fd` closed, or answered by `dup2`, which POSIX has not closed on `exec`.
-    pub(crate) fn cleared(&mut self, fd: i32) {
-        self.0.remove(&fd);
     }
 }

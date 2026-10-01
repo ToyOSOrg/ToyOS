@@ -16,5 +16,14 @@ In a Rust program, C code allocates through std's C allocator
 and std names no libc symbol: setting it from std puts `__errno_location` in
 every Rust program's link.
 
+`realloc(p, 0)` frees `p` and answers null with `errno` untouched, in libc
+(`userland/libc/src/memory.rs`) and in std's. POSIX.1-2024 has it answer
+either null with `errno` `EINVAL`, or a pointer with `p` freed; its
+application usage frees `p` only if `errno` changed, so `EINVAL` beside the
+free invites a double free. LLVM's `safe_realloc`
+(`llvm/include/llvm/Support/MemAlloc.h`) takes a null answer to size 0 as `p`
+freed and allocates afresh, so null with `p` kept leaks it there.
+
 **Exit**: each of the four sets `errno` where POSIX has it in a Rust program,
-and a C call there reads `ENOMEM` and `EINVAL` back.
+and a C call there reads `ENOMEM` and `EINVAL` back; `realloc(p, 0)` gives
+one of POSIX's two answers in both allocators.

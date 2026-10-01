@@ -4,10 +4,11 @@
 //! it; any other `how` refused. A set as `sigaddset` and `sigfillset` make one,
 //! against POSIX's words for each.
 
+use crate::header;
 use crate::sigmask::{self, SIG_BLOCK, SIG_SETMASK, SIG_UNBLOCK};
 
 /// Signal `n`'s bit.
-fn bit(n: u32) -> u64 {
+fn bit(n: i32) -> u64 {
     1 << (n - 1)
 }
 
@@ -27,13 +28,11 @@ fn each_how_changes_the_mask_as_posix_says() {
     }
 }
 
-/// POSIX's `sigaddset`: a number no signal has is refused, `EINVAL` (`None`),
-/// and any other is added alone, however often.
 #[test]
-fn sigaddset_adds_its_signal_alone_and_refuses_a_number_no_signal_has() {
+fn sigaddset_adds_its_signal_alone() {
     for n in 1..=64 {
-        assert_eq!(sigmask::with(0, n), Some(bit(n as u32)), "signal {n}");
-        assert_eq!(sigmask::with(bit(n as u32), n), Some(bit(n as u32)), "signal {n} twice");
+        assert_eq!(sigmask::with(0, n), Some(bit(n)), "signal {n}");
+        assert_eq!(sigmask::with(bit(n), n), Some(bit(n)), "signal {n} twice");
     }
     assert_eq!(sigmask::with(bit(1), 10), Some(bit(1) | bit(10)));
     for n in [0, -1, 65, i32::MIN, i32::MAX] {
@@ -45,18 +44,10 @@ fn sigaddset_adds_its_signal_alone_and_refuses_a_number_no_signal_has() {
 /// and the full set is every signal `sigaddset` takes.
 #[test]
 fn the_full_set_holds_every_signal() {
-    let defined: Vec<u32> = include_str!("../../userland/libc/include/signal.h")
-        .lines()
-        .filter_map(|line| line.strip_prefix("#define SIG"))
-        .filter(|rest| !rest.starts_with('_'))
-        .map(|rest| {
-            let value = rest.split_whitespace().nth(1);
-            value.and_then(|n| n.parse().ok()).unwrap_or_else(|| panic!("signal.h: SIG{rest}"))
-        })
-        .collect();
+    let defined = header::signals();
     assert!(defined.len() > 15, "signal.h defines {} signals", defined.len());
-    for n in defined {
-        assert_ne!(sigmask::FULL & bit(n), 0, "signal {n}");
+    for (name, n) in defined {
+        assert_ne!(sigmask::FULL & bit(n), 0, "{name}");
     }
     assert_eq!((1..=64).fold(0, |set, n| sigmask::with(set, n).unwrap()), sigmask::FULL);
 }

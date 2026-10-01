@@ -2,8 +2,7 @@
    change read back by the next call, SIGKILL and SIGSTOP never in it, a how
    that is none of POSIX's three refused, and a new thread starting with its
    creator's mask; and a set as sigemptyset, sigaddset and sigfillset make
-   one, a number no signal has refused. Signal n is bit n - 1 of a
-   sigset_t. */
+   one. Signal n is bit n - 1 of a sigset_t. */
 #include <errno.h>
 #include <pthread.h>
 #include <signal.h>

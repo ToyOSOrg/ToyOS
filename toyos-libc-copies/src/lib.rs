@@ -54,6 +54,8 @@ mod errno_codes;
 #[cfg(test)]
 mod fparts_differential;
 #[cfg(test)]
+mod header;
+#[cfg(test)]
 mod link_requests;
 #[cfg(test)]
 mod listing_reader;

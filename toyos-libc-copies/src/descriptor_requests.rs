@@ -3,6 +3,7 @@
 //! (`kernel/src/object/handle.rs`), and each descriptor's close-on-exec mark.
 
 use crate::fdreq::{self, Command};
+use crate::header::{self, FCNTL_H};
 
 /// What clang leaves in the register of an `int` argument of -1: `movl
 /// $0xffffffff, %edx`, which zeroes the upper half (measured on
@@ -116,29 +117,16 @@ fn f_dupfd_meets_its_floor_holding_one_duplicate_at_most() {
     }
 }
 
-/// `fcntl.h`'s value for `name`, which a C program passes.
-fn fcntl_h(name: &str) -> i32 {
-    let line = include_str!("../../userland/libc/include/fcntl.h")
-        .lines()
-        .find_map(|line| line.strip_prefix("#define ")?.strip_prefix(name)?.strip_prefix(char::is_whitespace))
-        .unwrap_or_else(|| panic!("fcntl.h defines no {name}"));
-    let value = line.trim();
-    match value.strip_prefix("0x") {
-        Some(hex) => i32::from_str_radix(hex, 16),
-        None => value.parse(),
-    }
-    .unwrap_or_else(|_| panic!("fcntl.h: {name} {value}"))
-}
-
 /// A descriptor's close-on-exec mark through the calls that touch it: `open`
 /// with and without `O_CLOEXEC`, `F_SETFD` either way, `F_GETFD`, `close`, and
 /// `dup2`'s answer, which POSIX has not closed on `exec`.
 #[test]
 fn each_descriptor_keeps_its_own_close_on_exec_mark() {
-    let (cloexec, read_only, fd_cloexec) = (fcntl_h("O_CLOEXEC"), fcntl_h("O_RDONLY"), fcntl_h("FD_CLOEXEC"));
+    let (cloexec, read_write) = (header::int(FCNTL_H, "O_CLOEXEC"), header::int(FCNTL_H, "O_RDWR"));
+    let fd_cloexec = header::int(FCNTL_H, "FD_CLOEXEC");
     let mut marks = fdreq::CloseOnExec::new();
-    marks.opened(3, read_only | cloexec);
-    marks.opened(4, read_only);
+    marks.opened(3, read_write | cloexec);
+    marks.opened(4, read_write);
     assert_eq!((marks.flags(3), marks.flags(4)), (fd_cloexec, 0), "open");
 
     marks.set(3, false);
@@ -147,14 +135,14 @@ fn each_descriptor_keeps_its_own_close_on_exec_mark() {
 
     // `close`, and a later handle in slot 4 (one generation on), which is a
     // number of its own.
-    marks.cleared(4);
+    marks.set(4, false);
     assert_eq!(marks.flags(4), 0, "close");
     marks.set(4, true);
     assert_eq!(marks.flags(4 | 1 << 12), 0, "the next generation of slot 4");
 
     // `dup2`'s answer, and `open` without `O_CLOEXEC` of a number marked.
-    marks.cleared(4);
+    marks.set(4, false);
     marks.set(5, true);
-    marks.opened(5, read_only);
+    marks.opened(5, read_write);
     assert_eq!((marks.flags(4), marks.flags(5)), (0, 0), "dup2, and open");
 }

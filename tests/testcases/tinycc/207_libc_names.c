@@ -29,6 +29,19 @@
 /* The image's test library, which exports tls_get_label. */
 #define LIB "/system/lib/libtls_lib.so"
 
+/* The rest of what LLVM reads of these headers, by value and by size. */
+_Static_assert(BYTE_ORDER == LITTLE_ENDIAN, "BYTE_ORDER");
+_Static_assert(htobe32(0x01020304) == 0x04030201, "htobe32");
+_Static_assert(le16toh(0x0102) == 0x0102, "le16toh");
+_Static_assert(AF_UNIX == 1, "AF_UNIX");
+_Static_assert(sizeof(struct sockaddr_un) == 110, "sockaddr_un");
+_Static_assert(EX_IOERR == 74, "EX_IOERR");
+_Static_assert(_POSIX_ARG_MAX == 4096, "_POSIX_ARG_MAX");
+_Static_assert((SA_ONSTACK | SA_NODEFER | SA_RESETHAND) == 0xc8000000, "SA_ONSTACK|SA_NODEFER|SA_RESETHAND");
+_Static_assert(F_RDLCK == 0 && F_UNLCK == 2, "F_RDLCK, F_UNLCK");
+_Static_assert(sizeof(struct rusage) == 144, "rusage");
+_Static_assert(RLIM_INFINITY == ~0UL, "RLIM_INFINITY");
+
 int main(void);
 
 static const char *errno_name(int e) {
@@ -153,15 +166,6 @@ int main(void) {
     errno = 0;
     double pole = logb(0.0);
     printf("logb(0): %g, %s\n", pole, errno == ERANGE ? "ERANGE" : errno_name(errno));
-    printf("endian: %s 0x%x 0x%x\n", BYTE_ORDER == LITTLE_ENDIAN ? "little" : "big",
-           (unsigned)htobe32(0x01020304), (unsigned)le16toh(0x0102));
-
-    /* The rest of what LLVM reads of these headers, by value and by size. */
-    struct sockaddr_un local = { AF_UNIX, "" };
-    printf("names: AF_UNIX %d, sockaddr_un %zu, EX_IOERR %d, _POSIX_ARG_MAX %d, page %ld\n", local.sun_family,
-           sizeof local, EX_IOERR, _POSIX_ARG_MAX, sysconf(_SC_PAGE_SIZE));
-    printf("names: SA_ONSTACK|SA_NODEFER|SA_RESETHAND 0x%lx, F_RDLCK %d, F_UNLCK %d, rusage %zu, RLIM_INFINITY %s\n",
-           (unsigned long)(SA_ONSTACK | SA_NODEFER | SA_RESETHAND), F_RDLCK, F_UNLCK, sizeof(struct rusage),
-           RLIM_INFINITY == ~0UL ? "every bit" : "not every bit");
+    printf("sysconf _SC_PAGE_SIZE: %ld\n", sysconf(_SC_PAGE_SIZE));
     return 0;
 }

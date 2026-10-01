@@ -16,6 +16,4 @@ strsignal: Segmentation fault; Unknown signal
 modf(-3.25): -3 and -0.25
 logb: -4 10
 logb(0): -inf, ERANGE
-endian: little 0x4030201 0x102
-names: AF_UNIX 1, sockaddr_un 110, EX_IOERR 74, _POSIX_ARG_MAX 4096, page 4096
-names: SA_ONSTACK|SA_NODEFER|SA_RESETHAND 0xc8000000, F_RDLCK 0, F_UNLCK 2, rusage 144, RLIM_INFINITY every bit
+sysconf _SC_PAGE_SIZE: 4096

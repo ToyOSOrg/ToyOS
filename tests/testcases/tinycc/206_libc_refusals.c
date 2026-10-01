@@ -50,6 +50,9 @@ int main(void) {
         printf("could not make " FILE_PATH "\n");
         return 1;
     }
+    /* Opened before anything is closed, so its number is its slot, which is
+       what dup2 below takes. */
+    int cloexec = open(FILE_PATH, O_RDONLY | O_CLOEXEC);
     char *page = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (page == MAP_FAILED) {
         printf("could not map a page\n");
@@ -99,8 +102,10 @@ int main(void) {
         close(duplicate);
     set = fcntl(fd, F_SETFD, 0);
     printf("fcntl F_SETFD 0: %d; F_GETFD: %d\n", set, fcntl(fd, F_GETFD));
-    int cloexec = open(FILE_PATH, O_RDONLY | O_CLOEXEC);
     printf("open O_CLOEXEC; F_GETFD: %d\n", fcntl(cloexec, F_GETFD));
+    int onto = dup2(fd, cloexec);
+    printf("dup2 onto it: %s; F_GETFD: %d\n", onto == cloexec ? "answered it" : "answered another",
+           fcntl(onto, F_GETFD));
     close(cloexec);
     said("fcntl F_DUPFD -1", fcntl(fd, F_DUPFD, -1));
     said("fcntl F_DUPFD 4096", fcntl(fd, F_DUPFD, 4096));

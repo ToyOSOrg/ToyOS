@@ -104,7 +104,7 @@ pub unsafe extern "C" fn creat(path: *const u8, mode: u32) -> i32 {
 
 #[no_mangle]
 pub unsafe extern "C" fn close(raw_fd: i32) -> i32 {
-    CLOEXEC.lock().cleared(raw_fd);
+    CLOEXEC.lock().set(raw_fd, false);
     syscall::close(fd(raw_fd));
     0
 }
@@ -207,7 +207,8 @@ pub unsafe extern "C" fn dup2(old_fd: i32, new_fd: i32) -> i32 {
     };
     match syscall::dup2(fd(old_fd), slot) {
         Ok(f) => {
-            CLOEXEC.lock().cleared(f.0 as i32);
+            // POSIX: the descriptor `dup2` answers is not closed on `exec`.
+            CLOEXEC.lock().set(f.0 as i32, false);
             // The slot holds something else now, so the stream is asked again.
             match slot {
                 1 => toyos::log::stdio::forget(toyos::log::stdio::Stream::Out),
