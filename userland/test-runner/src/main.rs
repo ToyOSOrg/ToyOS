@@ -1,6 +1,4 @@
-mod kbd_close;
 mod log_close;
-mod log_gate;
 
 use std::io::{self, BufRead, Write};
 use std::os::toyos::process::{ChildExt, CommandExt};
@@ -22,17 +20,7 @@ use toyos::syscap::SysCap;
 /// capability has nowhere else to run. They answer the same
 /// `===TEST_START===`/`===TEST_END===` protocol as a binary, so the host cannot
 /// tell the difference and does not have to.
-///
-/// `kbd-close` is here for a second reason as well as that one: its subject is a
-/// pending poll on **this process's own stdin**, which is a `Console`. A spawned
-/// binary's stdin is a pipe (see the `Stdio::piped()` below), so the object the
-/// collision is about does not exist in one.
-const BUILTINS: &[(&str, fn(Option<&SysCap>) -> i32)] = &[
-    ("log-gate", log_gate::run),
-    ("log-storm", log_gate::run_storm),
-    ("log-close", log_close::run),
-    ("kbd-close", kbd_close::run),
-];
+const BUILTINS: &[(&str, fn(Option<&SysCap>) -> i32)] = &[("log-close", log_close::run)];
 
 /// The job the runner is inside, and whether the list got through: written by
 /// the loop, read by the deadline watching it.
