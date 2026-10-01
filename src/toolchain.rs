@@ -696,6 +696,27 @@ pub(crate) fn x_build(rust_dir: &Path, args: &[&str], what: &str) -> (bool, Vec<
     x_build_with(rust_dir, args, what, |_| {})
 }
 
+/// [`x_build`] of a compiler that links the LLVM at `llvm`. On an Apple host
+/// rustc strips a Darwin binary by running `rust-objcopy` (`rustc_codegen_ssa`'s
+/// `back/link.rs`), the rust workspace strips `lld-wrapper`, and the stage-1
+/// sysroot carries no `rust-objcopy` when bootstrap copies none of LLVM's tools
+/// ([`LEAN`]): the build finds that LLVM's `llvm-objcopy` by that name on `PATH`.
+pub(crate) fn x_build_compiler(rust_dir: &Path, args: &[&str], what: &str, llvm: &Path) -> (bool, Vec<String>) {
+    if !host_triple().ends_with("apple-darwin") {
+        return x_build(rust_dir, args, what);
+    }
+    let strip = toyos_tmpdir::TempDir::new("rust-objcopy");
+    let objcopy = llvm.join("bin").join(crate::llvm::APPLE_TOOL);
+    std::os::unix::fs::symlink(&objcopy, strip.join("rust-objcopy"))
+        .unwrap_or_else(|e| panic!("link {} as rust-objcopy: {e}", objcopy.display()));
+    let caller = std::env::var_os("PATH").unwrap_or_else(|| panic!("PATH is unset, and bootstrap finds its tools on it"));
+    let path = std::env::join_paths(std::iter::once(strip.to_path_buf()).chain(std::env::split_paths(&caller)))
+        .unwrap_or_else(|e| panic!("{} cannot lead PATH: {e}", strip.display()));
+    x_build_with(rust_dir, args, what, |command| {
+        command.env("PATH", path);
+    })
+}
+
 /// [`x_build`], with bootstrap's environment what `environment` makes of this
 /// process's.
 pub(crate) fn x_build_with(
@@ -835,7 +856,7 @@ fn full_bootstrap(rust_dir: &Path, llvm: &Path) {
         }
     }
 
-    let (ok, log) = x_build(rust_dir, &COMPILER_BUILD, "the toolchain");
+    let (ok, log) = x_build_compiler(rust_dir, &COMPILER_BUILD, "the toolchain", llvm);
     refuse_on_compile_error(&log, "the toolchain");
     assert!(ok, "the toolchain build failed, and nothing in its output was a compile error");
 }
@@ -846,7 +867,7 @@ fn build_hosted_rustc(rust_dir: &Path, llvm: &Path) {
     write_config(rust_dir, &host, true, llvm);
 
     let (ok, log) =
-        x_build(rust_dir, &["build", "--stage", "2", "--warnings", "warn"], "the hosted rustc");
+        x_build_compiler(rust_dir, &["build", "--stage", "2", "--warnings", "warn"], "the hosted rustc", llvm);
     refuse_on_compile_error(&log, "the hosted rustc");
 
     // rustdoc for ToyOS may fail to link; rustc and librustc_driver may not.
@@ -873,7 +894,7 @@ fn build_hosted_rustc(rust_dir: &Path, llvm: &Path) {
     // (`write_config` says why), so the host-only build runs once more to put
     // it back: everything it would compile is already built.
     write_config(rust_dir, &host, false, llvm);
-    let (ok, log) = x_build(rust_dir, &COMPILER_BUILD, "the toolchain, reassembled");
+    let (ok, log) = x_build_compiler(rust_dir, &COMPILER_BUILD, "the toolchain, reassembled", llvm);
     refuse_on_compile_error(&log, "the toolchain, reassembled");
     assert!(
         rust_lld(&stage2(rust_dir)).is_file(),
@@ -984,9 +1005,10 @@ pub(crate) const HOST_LINKER_PIN: &str = "default-linker-linux-override = \"off\
 
 /// The `[rust]` options every `bootstrap.toml` that builds a compiler shares
 /// beyond its profile's: no LLVM tool copied into the compiler's sysroot, since
-/// `clang::provision` puts there the ones a build runs; and no debuginfo in
-/// rustc, which no build reads.
-pub(crate) const LEAN: &str = "llvm-tools = false\ndebuginfo-level-rustc = 0";
+/// `clang::provision` puts there the ones a build runs; no debuginfo in rustc,
+/// which no build reads; and no codegen test, for which bootstrap demands
+/// LLVM's `FileCheck` beside `llvm-config` (`src/bootstrap/src/core/sanity.rs`).
+pub(crate) const LEAN: &str = "llvm-tools = false\ndebuginfo-level-rustc = 0\ncodegen-tests = false";
 
 /// The linker every guest target names, as the toolchain at `toolchain` carries
 /// it: `lib/rustlib/<host>/bin/rust-lld`, where rustc itself looks for it.
@@ -1100,6 +1122,39 @@ mod tests {
         panic!("re-locked both, and failed");
     }
 
+    /// **A compiler build on an Apple host finds its LLVM's `llvm-objcopy` as
+    /// the `rust-objcopy` its stage-1 rustc strips with**, first on its `PATH`;
+    /// on any other host it finds none of ours. `./x` here is this test binary,
+    /// running [`a_fake_bootstrap_that_strips`].
+    #[test]
+    fn a_compiler_build_finds_the_llvm_s_objcopy_where_rustc_strips_with_it() {
+        let fork = TempDir::new("x-build-strip");
+        fs::create_dir_all(fork.join("library")).unwrap();
+        for lock in ["Cargo.lock", "library/Cargo.lock"] {
+            fs::write(fork.join(lock), "# as committed\n").unwrap();
+        }
+        fs::write(fork.join(FAKE), "").unwrap();
+        std::os::unix::fs::symlink(std::env::current_exe().unwrap(), fork.join("x")).unwrap();
+        let llvm = fork.join("llvm");
+        fs::create_dir_all(llvm.join("bin")).unwrap();
+        fs::write(llvm.join("bin").join(crate::llvm::APPLE_TOOL), "the llvm-objcopy").unwrap();
+
+        let args = ["--exact", "toolchain::tests::a_fake_bootstrap_that_strips", "--include-ignored", "--nocapture"];
+        let (ok, log) = x_build_compiler(&fork, &args, "a fake bootstrap", &llvm);
+        assert!(ok, "the fake bootstrap did not run: {log:?}");
+        let found = if host_triple().ends_with("apple-darwin") { "the llvm-objcopy" } else { "none" };
+        assert!(log.iter().any(|l| *l == format!("rust-objcopy: {found}")), "{log:?}");
+    }
+
+    #[test]
+    #[ignore = "the bootstrap `a_compiler_build_finds_the_llvm_s_objcopy_where_rustc_strips_with_it` runs; never runs on its own"]
+    fn a_fake_bootstrap_that_strips() {
+        assert!(Path::new(FAKE).is_file(), "a_fake_bootstrap_that_strips ran outside a fake fork checkout; it is not a test");
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let first = std::env::split_paths(&path).map(|dir| dir.join("rust-objcopy")).find(|tool| tool.exists());
+        println!("rust-objcopy: {}", first.map_or("none".to_string(), |tool| fs::read_to_string(tool).unwrap()));
+    }
+
     /// **A restore that cannot write leaves the file as it found it**, and
     /// names what it could not write.
     #[test]
@@ -1174,11 +1229,11 @@ mod tests {
         let rust_dir = TempDir::new("lld-config");
         let llvm = rust_dir.join("build/llvm/k");
         let lld = format!("linker = \"{}\"", llvm.join("bin/lld").display());
-        let lean = "\n[rust]\nincremental = true\nlld = ";
+        let lean = "\nllvm-tools = false\ndebuginfo-level-rustc = 0\ncodegen-tests = false\n";
         for (hosted, lld_flag) in [(true, "false"), (false, "true")] {
             write_config(&rust_dir, "h", hosted, &llvm);
             let config = fs::read_to_string(rust_dir.join("bootstrap.toml")).unwrap();
-            assert!(config.contains(&format!("{lean}{lld_flag}\n{LEAN}\n")), "{config}");
+            assert!(config.contains(&format!("\n[rust]\nincremental = true\nlld = {lld_flag}{lean}")), "{config}");
             assert_eq!(config.contains(&lld), hosted, "{config}");
             assert!(!config.contains("\"rust-lld\""), "{config}");
             assert_eq!(config.contains("\ntarget = [\"h\"]\n"), !hosted, "{config}");
@@ -1231,8 +1286,7 @@ mod tests {
     fn bootstrapped(rust_dir: &Path) {
         let stage2 = stage2(rust_dir);
         let _ = fs::remove_dir_all(&stage2);
-        let lld = rust_lld(&stage2);
-        for file in [stage2.join("bin/rustc"), lld.clone()] {
+        for file in [stage2.join("bin/rustc"), rust_lld(&stage2)] {
             fs::create_dir_all(file.parent().unwrap()).unwrap();
             fs::write(file, b"").unwrap();
         }

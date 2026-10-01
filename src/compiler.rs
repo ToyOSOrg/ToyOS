@@ -330,7 +330,7 @@ fn build_in_fork(root: &Path, rust_dir: &Path, fork: &Path) -> PathBuf {
     fs::write(&config, config_text(&build_dir, &host, &llvm.dir)).unwrap_or_else(|e| panic!("write {}: {e}", config.display()));
     let config = config.to_str().unwrap_or_else(|| panic!("{} is not UTF-8", config.display()));
     let args = ["build", "--stage", "2", "--config", config, "--warnings", "warn", "compiler/rustc", "library"];
-    let (ok, log) = toolchain::x_build(fork, &args, "the compiler");
+    let (ok, log) = toolchain::x_build_compiler(fork, &args, "the compiler", &llvm.dir);
     toolchain::refuse_on_compile_error(&log, "the compiler");
     assert!(ok, "the compiler build in {} failed, and nothing in its output was a compile error", fork.display());
     let stage2 = build_dir.join(&host).join("stage2");
@@ -770,6 +770,17 @@ pub(crate) mod tests {
         assert!(said.contains("stages"), "{said}");
         git(&fork, &["commit", "-qm", "another LLVM"]);
         assert_ne!(key(&fork), tools, "another LLVM commit did not move the key");
+    }
+
+    /// **A compiler of a worktree's own is built as the primary's is**: for
+    /// the host alone, against the host's LLVM, copying none of its tools, with
+    /// rustc without debuginfo and no codegen test.
+    #[test]
+    fn a_worktree_compiler_is_built_lean_against_the_host_s_llvm() {
+        let config = config_text(Path::new("/b"), "h", Path::new("/llvm"));
+        let lean = "\nlld = true\nllvm-tools = false\ndebuginfo-level-rustc = 0\ncodegen-tests = false\n";
+        assert!(config.contains(lean) && config.contains("\ntarget = [\"h\"]\n"), "{config}");
+        assert!(config.contains("\nllvm-config = \"/llvm/bin/llvm-config\"\n"), "{config}");
     }
 
     /// A primary record naming another LLVM, or none, is another compiler.
