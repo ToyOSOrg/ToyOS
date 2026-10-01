@@ -10,7 +10,9 @@ Self-hosting is ToyOS rebuilding itself and reproducing the host's bytes, and
 the host does not yet reproduce its own across checkout paths. The same
 sources copied to two paths and built with the same sysroot, profile and
 linker gave three different kernels, bootloaders and `snake`s; the same path
-built twice into two target directories gave identical ones.
+built twice into two target directories gave identical ones. The LLVM is held
+fixed here: two builds of one LLVM key differing is
+`issues/build/two-builds-of-one-llvm-key-differ-in-their-bytes.md`.
 
 - The kernel and the bootloader carry each path dependency's absolute source
   path in their panic locations (55 strings in the kernel, 13 in the

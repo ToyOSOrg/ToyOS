@@ -368,10 +368,7 @@ fn config_crates(root: &Path, config: &SystemConfig) -> Vec<ConfigCrate> {
 /// it in.
 ///
 /// One name, passed to every `cargo build` here and declared by every crate
-/// root the image is made of. `--release` used to be a flag on `cargo run`, and
-/// it silently turned `debug-assertions` and `overflow-checks` off — the two
-/// knobs `issues/`'s crafted-ELF panics were *found* by. There is
-/// no longer a second profile to pick, which is why there is no longer a flag.
+/// root the image is made of.
 pub const PROFILE: &str = "toyos";
 
 /// What every guest `cargo` and `rustc` here runs with: the toolchain directory
@@ -598,10 +595,7 @@ fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
 ///
 /// [`PROFILE`] states them and `--release` is gone from this build system, so
 /// the way they can still be lost is somebody editing `[profile.toyos]`. This
-/// asks the artifact rather than the manifest, which is the only question worth
-/// asking: `issues/`'s two crafted-ELF kernel panics were both
-/// *found* by an overflow check, and one of them had no configuration in which
-/// it was an error return.
+/// asks the artifact rather than the manifest.
 fn assert_overflow_checked(what: &str, image: &[u8]) {
     let found = contains_subslice(image, OVERFLOW_CHECK_MARKER);
     assert!(
