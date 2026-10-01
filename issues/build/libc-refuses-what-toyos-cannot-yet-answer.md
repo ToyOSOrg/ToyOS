@@ -7,7 +7,7 @@ opened: 2026-10-01
 # libc refuses what ToyOS cannot yet answer
 
 These answer failure in their POSIX form and do nothing
-(`userland/libc/src/refused.rs`, `posix_io.rs`, `memory.rs`), each asserted by
+(`userland/libc/src/refused.rs`, `posix_io.rs`), each asserted by
 `tests/testcases/tinycc/206_libc_refusals.c`. A program that calls one and
 carries on without it runs; one that needs it does not. Each waits on what it
 names:
@@ -28,6 +28,8 @@ names:
   mapped, and a mapping's protection is fixed when it is made.
 - `mmap` of a file, `ENODEV`, and of executable memory, `ENOTSUP`: the kernel
   maps neither.
+- `madvise`'s `MADV_DONTNEED`, `ENOSYS`: no call discards a range's pages and
+  keeps it mapped, so it cannot read back as zeros as Linux's does.
 - `fcntl`: a record lock, `EINVAL`, POSIX's answer for a file that supports no
   locking; `F_DUPFD_CLOEXEC`, `F_GETFL`, `F_SETFL`, `F_GETOWN` and `F_SETOWN`,
   `ENOSYS`. `F_GETFD` and `F_SETFD` answer 0 and keep nothing: close-on-exec is
