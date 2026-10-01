@@ -30,8 +30,6 @@ guess. Then build, then test before anyone reviews:
 - Long commands run in the background with output to a file under the job scratchpad the brief
   names. Stay inside one turn while anything runs: sleep at most two minutes, print a line, check
   again. Ten minutes of silence kills you, and ending a turn to announce a wait strands the work.
-- In a script or non-interactive shell `rg` is always given an explicit path: without one it reads
-  stdin and waits forever.
 - Nothing a pull request's evidence rests on, mutation patches and run logs included, lives only in
   a temporary directory: `/tmp` is wiped when the CLI restarts. Post mutation patches to the pull
   request as a comment.

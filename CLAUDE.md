@@ -1,6 +1,6 @@
 # ToyOS
 
-A general-purpose operating system built from scratch in Rust for modern hardware, held to a production-grade engineering bar — the bar is the changes, not yet the product. The machines ToyOS is tested on decide its feature set, never its design. x86-64 (2020+), UEFI only; keep the architecture portable: ARM64 runs under QEMU on the development machine, for quick runs and to keep the kernel clean, and no ARM hardware is a target. The quality bar is shipping software: correct, efficient, minimal, zero silent debt. A tracked weakness is still a weakness: the honest answer about current state is "known, tracked, still true" — never "we have an issue for that."
+A general-purpose operating system built from scratch in Rust, held to a production-grade engineering bar — the bar is the changes, not yet the product. Modern x86-64 hardware (2020+), UEFI only; ARM64 planned — keep the architecture portable. Its test machines decide its feature set, never its design. The quality bar is shipping software: correct, efficient, minimal, zero silent debt. A tracked weakness is still a weakness: the honest answer about current state is "known, tracked, still true" — never "we have an issue for that."
 
 ## Where the rest of this lives
 
@@ -60,7 +60,7 @@ A subdirectory `CLAUDE.md` loads when a file in that subtree is `Read`, and not 
 
 **Rust** and **QEMU** for development, on any host OS and architecture — the development machine is nothing special. Beside them, where no Rust tool does the job, only C or C++ tools ToyOS can one day build and run (Python, Perl, CMake, make), each declared. No binary for one host OS alone: a macOS binary is a hard no, and "only for tests" does not soften it. ToyOS's own code is Rust; it writes no Python, Perl or shell of its own. Only general and widely used crates — one that does *our* job we write ourselves, and a driver crate never; third-party crates are used as published, and a fork carries a change written to upstream quality and goes when upstream has it. No upstream pull requests are sent for now: ToyOS needs more attention and more contributors before upstream projects take it seriously, and upstreams tend to refuse AI-first projects and their contributions. A third-party source ToyOS cannot build without changing it is carried as an unmodified-source packaging mirror with a byte-identity gate, not as a fork. The north star is **self-hosting**: nothing — build, test, or verification — rests on a host binary. Ask of anything new: could this ever run inside ToyOS? Self-hosting means ToyOS rebuilds itself on ToyOS and reproduces the host's bytes; a bootstrap from source with no binary seed is out of scope.
 
-Vendor firmware a device verifies by its maker's signature may be shipped: pinned by version and hash, redistributable unmodified, recorded in `NOTICE`, and loaded only by that device's own driver through its IOMMU domain; it never executes on the CPU.
+Vendor firmware a device verifies by its maker's signature may be shipped: pinned by version and hash, redistributable unmodified, recorded in `NOTICE`, and loaded only by that device's own driver through its IOMMU domain; it never executes on the CPU, save the CPU's own microcode, which the kernel loads.
 
 The bar is not yet the tree: `.claude/agents/reviewer.md`, "Arrivals", says where every host tool and every standing failure is declared. `NOTICE` names every committed third-party file with its hash, upstream and licence; an image carrying `DOOM1.WAD` may not be sold.
 
@@ -74,7 +74,7 @@ The testing rules live where they are enforced: the PR gate and the nightly in `
 - `cargo run` builds everything (toolchain, kernel, bootloader, userland, image) and launches QEMU; `--build-only` skips the launch. `cargo test` runs the QEMU harness; `cargo run -- --ci host` runs every host suite, as the PR gate's required `host` check does.
 - **Agents never run QEMU.** An agent verifies with host tests and builds the image at most; the orchestrator runs every guest test, one suite at a time.
 - **Both produce large output**: run them in the background and read the output file — `[N characters truncated]` means data was lost. A full boot is under a second; incremental builds finish in seconds.
-- **Leave the machine as you found it.** The development machine is shared: every agent stops what it started — before reporting it kills by PID anything of its own that still runs — removes the worktrees and scratch build output it no longer needs, and never leaves an emulator, a build or a watcher running.
+- **Leave the machine as you found it.** The development machine is shared: every agent kills by PID what it started, removes the worktrees and scratch build output it no longer needs, and never leaves an emulator, a build or a watcher running.
 
 ## Repository layout
 
