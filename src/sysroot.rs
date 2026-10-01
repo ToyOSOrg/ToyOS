@@ -46,6 +46,7 @@ use crate::arch::Arch;
 use crate::buildlock::{self, Guard, Held, Keyed};
 use crate::compiler::{self, Compiler};
 use crate::identity;
+use crate::keystore::Key;
 use crate::toolchain::{self, host_triple, Owner, GUEST_TARGETS};
 
 /// The per-worktree sources that end up inside a sysroot: std links `toyos-abi`
@@ -189,7 +190,7 @@ fn source_files(checkout: &Path, paths: &[&str], out: &mut Vec<PathBuf>) {
 
 /// The key of the sysroot `root` builds against with its std fork at `fork`,
 /// compiled by `compiler`.
-pub fn key(root: &Path, compiler: &Compiler, fork: &Path) -> String {
+pub fn key(root: &Path, compiler: &Compiler, fork: &Path) -> Key {
     let parts = [
         format!(
             "{RECIPE}; cargo {STAGE0_CARGO}; targets {}; C++ runtime {:?}",
@@ -200,7 +201,7 @@ pub fn key(root: &Path, compiler: &Compiler, fork: &Path) -> String {
         tree_identity(fork, &["library", "src/bootstrap"]),
         compiler.identity(),
     ];
-    short(parts.join("\n\0\n").as_bytes())
+    Key::of(parts.join("\n\0\n").as_bytes())
 }
 
 /// The commit this checkout's tree pins the std fork at: the index's, so a
@@ -311,7 +312,7 @@ fn unfinished(dir: &Path) -> Option<String> {
 
 /// The sysroot `key` names at `dir`, made by `make` if nobody has made it, and
 /// held in use for as long as the returned guard lives.
-fn held(root: &Path, key: &str, dir: &Path, make: impl FnMut()) -> Guard {
+fn held(root: &Path, key: &Key, dir: &Path, make: impl FnMut()) -> Guard {
     buildlock::keyed_made(root, Keyed::Sysroot, key, || unfinished(dir), make)
 }
 
@@ -330,7 +331,7 @@ pub fn ensure(root: &Path, rust_dir: &Path, lock: &mut Held) -> Sysroot {
 
 /// Make the sysroot `key` names at `dir`, from `root`'s sources and the std fork
 /// at `fork`, with `compiler`. The caller holds the key's lock.
-fn build(root: &Path, rust_dir: &Path, compiler: &Compiler, fork: &Path, key: &str, dir: &Path) {
+fn build(root: &Path, rust_dir: &Path, compiler: &Compiler, fork: &Path, key: &Key, dir: &Path) {
     let what = format!("building sysroot {key}");
     let _worktree = buildlock::worktree_exclusive(root, &what);
     // Only the primary's compiler is rebuilt in place; one of a worktree's own
@@ -360,7 +361,7 @@ fn build(root: &Path, rust_dir: &Path, compiler: &Compiler, fork: &Path, key: &s
         // The sources the key named are the ones built, or this is not that key's.
         let again = self::key(root, compiler, fork);
         assert!(
-            again == key,
+            again == *key,
             "the sources moved while sysroot {key} was being built (they are now {again}); \
              nothing was kept, and the next build makes the one they name"
         );
@@ -718,7 +719,7 @@ mod tests {
         let (root, rust_dir, fork) = keyed(&base);
         let k = || key(&root, &Compiler::primary(&rust_dir), &fork);
         let base = k();
-        assert_eq!(base.len(), 16, "{base}");
+        assert_eq!(base.as_str().len(), 16, "{base}");
 
         let abi = root.join("toyos-abi/src/lib.rs");
         write(&abi, "//! The crate.\n/// A, said better.\n// and a plain comment\npub struct A;\n");
@@ -1001,22 +1002,24 @@ mod tests {
             })
         };
 
-        let fresh = sysroots_dir(&base.join("rust")).join("fresh");
-        let said = refusal(|| drop(held(&base, "fresh", &fresh, || make(&fresh, 1))));
+        let key = Key::of(b"fresh");
+        let fresh = sysroots_dir(&base.join("rust")).join(&key);
+        let said = refusal(|| drop(held(&base, &key, &fresh, || make(&fresh, 1))));
         assert!(said.contains("is missing cargo") && said.contains("`cargo run -- --build-only`"), "{said}");
         assert!(!fresh.exists() && !fresh.with_extension("partial").exists(), "a sysroot was published from a stage2 without cargo");
         assert_eq!(made.get(), 1);
 
-        let dir = sysroots_dir(&base.join("rust")).join("found");
+        let key = Key::of(b"found");
+        let dir = sysroots_dir(&base.join("rust")).join(&key);
         clone_tree(&compiler.stage2, &dir);
         write(&dir.join(SOURCES), "found\n");
         toolchain::provision_toolchain_cargo(&compiler.stage2);
-        let using = held(&base, "found", &dir, || make(&dir, 2));
+        let using = held(&base, &key, &dir, || make(&dir, 2));
         assert_eq!(made.get(), 2, "a sysroot without its cargo was trusted because it has SOURCES");
         assert_eq!(toolchain::toolchain_defect(&dir), None);
         assert!(dir.join("lib/rustlib/x86_64-unknown-toyos/lib/libstd.rlib").is_file());
         drop(using);
-        drop(held(&base, "found", &dir, || make(&dir, 2)));
+        drop(held(&base, &key, &dir, || make(&dir, 2)));
         assert_eq!(made.get(), 2, "a whole sysroot was made again");
     }
 
@@ -1036,10 +1039,11 @@ mod tests {
             assert_eq!(made.get(), 1, "a sysroot that was not whole was made again");
         };
 
-        let dir = sysroots_dir(&base.join("rust")).join("cloned");
+        let key = Key::of(b"cloned");
+        let dir = sysroots_dir(&base.join("rust")).join(&key);
         let filled = std::cell::Cell::new(false);
         let said = refusal(|| {
-            drop(held(&base, "cloned", &dir, || {
+            drop(held(&base, &key, &dir, || {
                 once();
                 publish(&compiler, &dir, |_| {
                     filled.set(true);
@@ -1054,15 +1058,16 @@ mod tests {
         assert_eq!(made.get(), 1);
 
         made.set(0);
-        let dir = sysroots_dir(&base.join("rust")).join("made");
+        let key = Key::of(b"made");
+        let dir = sysroots_dir(&base.join("rust")).join(&key);
         let said = refusal(|| {
-            drop(held(&base, "made", &dir, || {
+            drop(held(&base, &key, &dir, || {
                 once();
                 clone_tree(&compiler.stage2, &dir);
                 write(&dir.join(SOURCES), "made\n");
             }))
         });
-        assert!(said.starts_with("sysroot made was made, and is not whole") && said.contains("/clang"), "{said}");
+        assert!(said.starts_with(&format!("sysroot {key} was made, and is not whole")) && said.contains("/clang"), "{said}");
         assert_eq!(made.get(), 1);
     }
 
