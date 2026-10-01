@@ -35,8 +35,6 @@ const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
   host              every host test: the build system, the harness's own checks,
                     the host workspace, the licences of what ships, clippy, the
                     model controls, userland and the SDK (ci.yml, nightly)
-  prune             delete every host cache entry but the one this run saved
-                    on main (nightly)
   toolchain         publish this tree's toolchain if nobody has (nightly)
   guest             the guest suite (nightly)
   publish           put main's SDK crates on crates.io (publish.yml)";
@@ -44,7 +42,6 @@ const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
 #[derive(Debug, PartialEq, Eq)]
 enum Job {
     Host,
-    Prune,
     Toolchain,
     Guest,
     Publish,
@@ -53,7 +50,6 @@ enum Job {
 fn parse(words: &[String]) -> Result<Job, String> {
     let job = match words.first().map(String::as_str) {
         Some("host") => Job::Host,
-        Some("prune") => Job::Prune,
         Some("toolchain") => Job::Toolchain,
         Some("guest") => Job::Guest,
         Some("publish") => Job::Publish,
@@ -73,7 +69,6 @@ pub fn dispatch(root: &Path, args: &[String]) {
     });
     let steps = match &job {
         Job::Host => host(root),
-        Job::Prune => vec![step("the host cache's other entries", || cicache::prune(root))],
         Job::Toolchain => vec![step("the toolchain release", || release::ensure_published(root))],
         Job::Guest => guest(root, &suite_args(&["--jobs", "1"])),
         Job::Publish => vec![step("the SDK crates on crates.io", || publish(root))],
@@ -116,7 +111,7 @@ fn step(label: &str, f: impl FnOnce() -> Result<String, String>) -> Step {
     Step { label: label.to_string(), verdict }
 }
 
-pub(crate) fn on_runner() -> bool {
+fn on_runner() -> bool {
     std::env::var("GITHUB_ACTIONS").is_ok_and(|v| v == "true")
 }
 
@@ -472,8 +467,8 @@ fn run_control(root: &Path, control: &Control) -> Result<String, String> {
 /// host triple for the same reason.
 ///
 /// On a runner the restored cache entry is read before any step and a run that
-/// restored none seals its tree after the last ([`cicache`]); a developer's
-/// tree keeps the dates its edits gave it.
+/// starts cold seals its tree after the last ([`cicache`]); a developer's tree
+/// keeps the dates its edits gave it.
 fn host(root: &Path) -> Vec<Step> {
     let tmp = toyos_tmpdir::TempDir::new("ci-host");
     let short = Path::new(toyos_tmpdir::SHORT_BASE);
@@ -498,7 +493,7 @@ fn host(root: &Path) -> Vec<Step> {
         match start {
             // Every step after an unreadable entry would be judged against it.
             None => return steps,
-            Some(Start::Cold(stamped)) => cold = Some(stamped),
+            Some(Start::Cold(found)) => cold = Some(found),
             Some(Start::Warm) => {}
         }
     }
@@ -564,8 +559,8 @@ fn host(root: &Path) -> Vec<Step> {
         cargo(root, &["test", "--manifest-path", "toyos/Cargo.toml", "--target", &host_triple])
     }));
     steps.push(step("nothing left in $TMPDIR or /tmp", || left_behind(&tmp, short, &before)));
-    if let Some(stamped) = cold {
-        steps.push(step("the tree, sealed as a cache entry", || cicache::seal(root, &stamped)));
+    if let Some(cold) = cold {
+        steps.push(step("the tree, sealed as a cache entry", || cicache::seal(root, &cold)));
     }
     steps
 }
@@ -888,7 +883,6 @@ mod tests {
     #[test]
     fn a_job_is_named_and_takes_nothing_after_it() {
         assert_eq!(parse(&words("host")), Ok(Job::Host));
-        assert_eq!(parse(&words("prune")), Ok(Job::Prune));
         assert_eq!(parse(&words("guest")), Ok(Job::Guest));
         assert!(parse(&words("guest 3/12")).is_err());
         assert!(parse(&words("tcg")).is_err());
@@ -999,15 +993,14 @@ mod tests {
         assert_eq!(seen, 3, "ci.yml, nightly.yml and publish.yml");
     }
 
-    /// A host entry is saved only beside its manifest, which only a sealed tree
-    /// holds ([`cicache`]); every other cache has exactly one writer, on the
-    /// nightly, so what a run restores is one run's tree and never a race
-    /// between two writers.
+    /// Exactly one job writes each cache, on the nightly, so what a pull request
+    /// restores is one run's tree and never a race between two writers. The
+    /// host cache's saves only a sealed tree, the one that holds a manifest
+    /// ([`cicache`]).
     #[test]
-    fn a_cache_is_saved_only_where_a_reader_can_trust_it() {
+    fn each_cache_has_one_writer() {
         let dir = repo_root().join(".github/workflows");
         let mut writers = Vec::new();
-        let mut host = 0;
         for entry in std::fs::read_dir(&dir).expect(".github/workflows is readable").flatten() {
             let text = std::fs::read_to_string(entry.path()).expect("a readable workflow");
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -1020,19 +1013,16 @@ mod tests {
                         .find_map(|l| l.trim_start().strip_prefix("key: "))
                         .expect("a save names its key");
                     let prefix = key.split('$').next().unwrap_or("").to_string();
-                    if !prefix.starts_with("host-") {
-                        writers.push((name.clone(), prefix));
-                        continue;
+                    if prefix.starts_with("host-") {
+                        assert_eq!(prefix, cicache::SEALED, "{name}");
+                        let manifest = format!("hashFiles('{}') != ''", cicache::MANIFEST);
+                        assert!(lines[at - 1].contains(&manifest), "{name}: a host save without `{manifest}`");
                     }
-                    host += 1;
-                    assert_eq!(prefix, cicache::SEALED, "{name}");
-                    let manifest = format!("hashFiles('{}') != ''", cicache::MANIFEST);
-                    assert!(lines[at - 1].contains(&manifest), "{name}: a host save without `{manifest}`");
+                    writers.push((name.clone(), prefix));
                 }
             }
         }
-        assert!(host > 0, "no job writes the host cache, so every host run is cold");
-        assert!(!writers.is_empty(), "no job writes the guest cache, so every guest run is cold");
+        assert!(writers.iter().any(|(_, p)| p == cicache::SEALED), "no job writes the host cache: {writers:?}");
         writers.sort();
         let mut prefixes: Vec<&String> = writers.iter().map(|(_, p)| p).collect();
         prefixes.dedup();

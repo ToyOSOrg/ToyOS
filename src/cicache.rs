@@ -4,12 +4,25 @@
 //! build that read it, and a checkout dates every source at the checkout: a
 //! restored target is stale in every path crate, and a date made up for a
 //! source from anything but its bytes could as well call a changed one fresh.
-//! An entry instead carries [`MANIFEST`], the git blob id of every source its
-//! build read, and every file under its targets is dated [`built`], before any
-//! real time. [`read`] dates each source whose blob matches the same, and every
-//! other one now: cargo calls a source stale only when it is strictly newer
-//! than the build, so a match is fresh, and a changed or new source is newer
-//! than everything in the entry, whatever any runner's clock says.
+//! An entry instead carries [`MANIFEST`], the runner it was built on and the
+//! SHA-256 of every tracked file, and every file under its targets is dated
+//! [`built`], before any real time. [`read`] dates each tracked file whose hash
+//! matches the same, and every other one now: cargo calls a source stale only
+//! when it is strictly newer than the build, so a match is fresh, and a changed
+//! or new source is newer than everything in the entry.
+//!
+//! **A package with a file changed, added or removed has every file dated
+//! now.** Cargo is told only what a build read; a file rustc probed for and did
+//! not find (`src/x/mod.rs` beside `src/x.rs`), or one a build script read
+//! without naming it, is still its package's. What a build reads outside its
+//! own package without telling cargo, a warm run trusts as cargo's own
+//! incremental build does:
+//! `issues/build/a-warm-host-run-trusts-cargo-for-what-a-build-reads-outside-its-package.md`.
+//!
+//! **An entry built on another runner image is deleted, and the run is cold**:
+//! the image's linker and C compiler made its units, and cargo's fingerprint
+//! names neither. The cache key cannot carry the image, because no workflow
+//! expression sees `ImageOS` or `ImageVersion`.
 //!
 //! **Only a run that restored nothing seals an entry** ([`Start::Cold`],
 //! [`seal`]): a warm run's targets hold units none of its steps rebuilt,
@@ -20,23 +33,18 @@
 //! **The driver is built in [`DRIVER`]**: cargo builds it before this runs, so
 //! its path crates are compiled again every time, and in the steps' target that
 //! would make every crate depending on them stale.
-//!
-//! A package that lost a file keeps its `Cargo.toml` dated now: cargo's package
-//! fingerprint, which decides a build script that names no input, is the
-//! newest of the files that remain.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{ErrorKind, Write};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use sha2::{Digest, Sha256};
 
 pub const MANIFEST: &str = "target/ci-sources";
 pub const DRIVER: &str = "target/ci-driver";
-/// Every host entry's key starts with this; [`prune`] lists by it.
-const HOST: &str = "host-";
-/// A sealed entry's key is this, `${{ runner.os }}-${{ github.run_id }}`.
+/// A sealed entry's key is this, `${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}`.
 pub const SEALED: &str = "host-sealed-";
 
 /// 2001-09-09T01:46:40Z: older than any build, so a file dated so is never
@@ -45,16 +53,21 @@ fn built() -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(1_000_000_000)
 }
 
-/// Every source as git tracks it, with the blob id of its bytes on disk.
+/// Every file git tracks, with the SHA-256 of its bytes on disk.
 type Sources = BTreeMap<String, String>;
 
 /// What a job found before its first step.
 pub enum Start {
     /// An entry, read and its manifest consumed.
     Warm,
-    /// No entry: every source is dated [`built`], and these are what [`seal`]
-    /// holds the tree to at the end.
-    Cold(Sources),
+    /// No entry this runner can use: every source is dated [`built`].
+    Cold(Cold),
+}
+
+/// What [`seal`] holds a cold run's tree to at the end.
+pub struct Cold {
+    runner: String,
+    sources: Sources,
 }
 
 /// Before the first step: the entry restored here, read by content.
@@ -70,10 +83,15 @@ pub fn read(root: &Path) -> Result<(Start, String), String> {
             exe.display()
         ));
     }
-    open(root)
+    let runner = ["RUNNER_OS", "RUNNER_ARCH", "ImageOS", "ImageVersion"]
+        .iter()
+        .map(|name| std::env::var(name).map_err(|_| format!("{name} is unset: a hosted runner sets it")))
+        .collect::<Result<Vec<_>, _>>()?
+        .join(" ");
+    open(root, &runner, SystemTime::now())
 }
 
-fn open(root: &Path) -> Result<(Start, String), String> {
+fn open(root: &Path, runner: &str, now: SystemTime) -> Result<(Start, String), String> {
     let current = sources(root)?;
     let manifest = root.join(MANIFEST);
     let text = match fs::read_to_string(&manifest) {
@@ -86,51 +104,69 @@ fn open(root: &Path) -> Result<(Start, String), String> {
                     restored.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
                 ));
             }
-            for path in current.keys() {
-                date(&root.join(path), built())?;
-            }
-            let said = format!(
-                "none restored; {} sources dated as built, and the tree is sealed last",
-                current.len()
-            );
-            return Ok((Start::Cold(current), said));
+            return cold(root, runner, current, "none restored".into());
         }
         Err(e) => return Err(format!("read {MANIFEST}: {e}")),
     };
     fs::remove_file(&manifest).map_err(|e| format!("remove {MANIFEST}: {e}"))?;
-    let (commit, entry) = parse(&text)?;
-    let lost = lost(&entry, &current);
-    let now = SystemTime::now();
+    let (commit, built_on, entry) = parse(&text)?;
+    if built_on != runner {
+        for path in restored(root)? {
+            let gone = if path.is_dir() { fs::remove_dir_all(&path) } else { fs::remove_file(&path) };
+            gone.map_err(|e| format!("remove {}: {e}", path.display()))?;
+        }
+        return cold(root, runner, current, format!("{commit}'s entry, built on {built_on}, deleted"));
+    }
+    if now <= built() {
+        return Err(format!("this runner's clock reads {now:?}, which no change dated now is newer than"));
+    }
+    let dirty: BTreeSet<Option<String>> = current
+        .iter()
+        .filter(|(path, hash)| entry.get(*path) != Some(*hash))
+        .map(|(path, _)| path)
+        .chain(entry.keys().filter(|path| !current.contains_key(*path)))
+        .map(|path| package(path, &current))
+        .collect();
     let mut same = 0;
-    for (path, blob) in &current {
-        let fresh = entry.get(path) == Some(blob) && !lost.contains(path);
+    for (path, hash) in &current {
+        let fresh = entry.get(path) == Some(hash) && !dirty.contains(&package(path, &current));
         same += usize::from(fresh);
         date(&root.join(path), if fresh { built() } else { now })?;
     }
-    let changed = current.iter().filter(|(p, b)| entry.get(*p).is_some_and(|e| e != *b)).count();
+    let changed = current.iter().filter(|(p, h)| entry.get(*p).is_some_and(|e| e != *h)).count();
     let added = current.keys().filter(|p| !entry.contains_key(*p)).count();
     let removed = entry.keys().filter(|p| !current.contains_key(*p)).count();
     Ok((
         Start::Warm,
         format!(
-            "built from {commit}: {same} of {} sources unchanged, {changed} changed, {added} added, \
-             {removed} removed",
-            current.len()
+            "built from {commit}: {same} of {} sources dated as built; {changed} changed, {added} \
+             added, {removed} removed, in {} packages",
+            current.len(),
+            dirty.len()
         ),
     ))
 }
 
+fn cold(root: &Path, runner: &str, sources: Sources, why: String) -> Result<(Start, String), String> {
+    for path in sources.keys() {
+        date(&root.join(path), built())?;
+    }
+    let said = format!("{why}; {} sources dated as built, and the tree is sealed last", sources.len());
+    Ok((Start::Cold(Cold { runner: runner.to_string(), sources }), said))
+}
+
 /// After the last step of a run that started [`Start::Cold`]: every file under
 /// every target dated [`built`], then the manifest.
-pub fn seal(root: &Path, stamped: &Sources) -> Result<String, String> {
+pub fn seal(root: &Path, cold: &Cold) -> Result<String, String> {
     let now = sources(root)?;
-    let moved: Vec<&String> = stamped
+    let moved: Vec<&String> = cold
+        .sources
         .iter()
-        .filter(|(path, blob)| {
-            now.get(*path) != Some(*blob) || modified(&root.join(path)).ok() != Some(built())
+        .filter(|(path, hash)| {
+            now.get(*path) != Some(*hash) || modified(&root.join(path)).ok() != Some(built())
         })
         .map(|(path, _)| path)
-        .chain(now.keys().filter(|path| !stamped.contains_key(*path)))
+        .chain(now.keys().filter(|path| !cold.sources.contains_key(*path)))
         .collect();
     if !moved.is_empty() {
         return Err(format!("a step wrote tracked sources, which no entry can describe: {moved:?}"));
@@ -140,155 +176,53 @@ pub fn seal(root: &Path, stamped: &Sources) -> Result<String, String> {
         age(&target, &mut files, &mut bytes)?;
     }
     let head = crate::sync::git(root, &["rev-parse", "HEAD"])?;
-    let mut text = format!("{head}\n");
-    for (path, blob) in stamped {
-        text.push_str(&format!("{blob} {path}\n"));
+    let mut text = format!("{head}\n{}\n", cold.runner);
+    for (path, hash) in &cold.sources {
+        text.push_str(&format!("{hash} {path}\n"));
     }
     fs::write(root.join(MANIFEST), text).map_err(|e| format!("write {MANIFEST}: {e}"))?;
-    Ok(format!("{} sources; {files} files, {} MiB, dated as built", stamped.len(), bytes >> 20))
+    Ok(format!("{} sources; {files} files, {} MiB, dated as built", cold.sources.len(), bytes >> 20))
 }
 
-/// Every host entry but the one this run saved, which must be on `main`:
-/// pull requests read that one, and every other only fills the repository's
-/// cache budget.
-pub fn prune(root: &Path) -> Result<String, String> {
-    let var =
-        |name: &str| std::env::var(name).map_err(|_| format!("{name} is unset: a runner prunes"));
-    let (repo, os, run) = (var("GITHUB_REPOSITORY")?, var("RUNNER_OS")?, var("GITHUB_RUN_ID")?);
-    let ours = format!("{SEALED}{os}-{run}");
-    let caches = format!("repos/{repo}/actions/caches");
-    let listing =
-        gh(root, &["api", "-X", "GET", &caches, "-f", &format!("key={HOST}"), "-F", "per_page=100"])?;
-    let doc: serde_json::Value =
-        serde_json::from_str(&listing).map_err(|e| format!("the cache listing is not JSON: {e}"))?;
-    let doomed = doomed(&doc, &ours)?;
-    for (id, _) in &doomed {
-        gh(root, &["api", "-X", "DELETE", &format!("{caches}/{id}")])?;
-    }
-    let keys: Vec<&str> = doomed.iter().map(|(_, key)| key.as_str()).collect();
-    Ok(format!("kept {ours}; deleted {}: {}", keys.len(), keys.join(", ")))
-}
-
-/// Every entry in the listing but `ours`, which must be in it on `main`.
-fn doomed(doc: &serde_json::Value, ours: &str) -> Result<Vec<(u64, String)>, String> {
-    let entries = doc["actions_caches"].as_array().ok_or("the listing holds no actions_caches")?;
-    let total = doc["total_count"].as_u64().ok_or("the listing holds no total_count")?;
-    if total != entries.len() as u64 {
-        return Err(format!(
-            "{total} host entries and a page of {}: pruning a page is no bound",
-            entries.len()
-        ));
-    }
-    let mut kept = false;
-    let mut doomed = Vec::new();
-    for entry in entries {
-        let (Some(id), Some(key), Some(scope)) =
-            (entry["id"].as_u64(), entry["key"].as_str(), entry["ref"].as_str())
-        else {
-            return Err(format!("an entry without an id, key or ref: {entry}"));
-        };
-        if key == ours && scope == "refs/heads/main" {
-            kept = true;
-        } else {
-            doomed.push((id, key.to_string()));
-        }
-    }
-    if !kept {
-        return Err(format!(
-            "{ours} is not among main's entries: the save before this wrote none, and pruning would \
-             leave pull requests nothing to read"
-        ));
-    }
-    Ok(doomed)
-}
-
-fn gh(root: &Path, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("gh")
-        .args(args)
-        .current_dir(root)
-        .output()
-        .map_err(|e| format!("gh: {e}"))?;
-    if !out.status.success() {
-        let said = String::from_utf8_lossy(&out.stderr);
-        return Err(format!("gh {} exited {}: {}", args.join(" "), out.status, said.trim()));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-}
-
-fn parse(text: &str) -> Result<(String, Sources), String> {
+/// The commit an entry was built from, the runner, and its sources.
+fn parse(text: &str) -> Result<(String, String, Sources), String> {
     let mut lines = text.lines();
-    let commit = lines.next().ok_or_else(|| format!("{MANIFEST} is empty"))?.to_string();
+    let (Some(commit), Some(runner)) = (lines.next(), lines.next()) else {
+        return Err(format!("{MANIFEST} ends before its commit and runner"));
+    };
     let entry = lines
         .map(|line| {
             line.split_once(' ')
-                .filter(|(blob, _)| !blob.is_empty() && blob.bytes().all(|b| b.is_ascii_hexdigit()))
-                .map(|(blob, path)| (path.to_string(), blob.to_string()))
+                .filter(|(hash, _)| !hash.is_empty() && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+                .map(|(hash, path)| (path.to_string(), hash.to_string()))
                 .ok_or_else(|| format!("{MANIFEST} holds {line:?}"))
         })
         .collect::<Result<_, _>>()?;
-    Ok((commit, entry))
+    Ok((commit.to_string(), runner.to_string(), entry))
 }
 
-/// The `Cargo.toml` of every package that lost a source since `entry`.
-fn lost(entry: &Sources, current: &Sources) -> BTreeSet<String> {
-    let mut lost = BTreeSet::new();
-    for gone in entry.keys().filter(|p| !current.contains_key(*p)) {
-        let manifest = Path::new(gone)
-            .ancestors()
-            .skip(1)
-            .map(|dir| dir.join("Cargo.toml").to_string_lossy().into_owned())
-            .find(|manifest| current.contains_key(manifest));
-        lost.extend(manifest);
-    }
-    lost
+/// The `Cargo.toml` of the package `path` is in: the nearest one above it.
+fn package(path: &str, current: &Sources) -> Option<String> {
+    Path::new(path)
+        .ancestors()
+        .skip(1)
+        .map(|dir| dir.join("Cargo.toml").to_string_lossy().into_owned())
+        .find(|manifest| current.contains_key(manifest))
 }
 
 fn sources(root: &Path) -> Result<Sources, String> {
-    let out = Command::new("git")
-        .args(["ls-files", "-s", "-z"])
-        .current_dir(root)
-        .output()
-        .map_err(|e| format!("git ls-files: {e}"))?;
-    if !out.status.success() {
-        return Err(format!("git ls-files: {}", String::from_utf8_lossy(&out.stderr).trim()));
-    }
-    let mut paths = Vec::new();
-    for entry in out.stdout.split(|b| *b == 0).filter(|e| !e.is_empty()) {
-        let entry = std::str::from_utf8(entry).map_err(|_| "git tracks a name that is not UTF-8")?;
-        let (meta, path) =
-            entry.split_once('\t').ok_or_else(|| format!("git ls-files -s printed {entry:?}"))?;
+    let mut sources = Sources::new();
+    for path in crate::sysroot::tracked_files(root, &[])? {
+        let file = root.join(&path);
         // A gitlink names a commit, not bytes: what is under it keeps its
         // checkout's date, which no entry is newer than.
-        if meta.starts_with("160000 ") {
+        if file.is_dir() {
             continue;
         }
-        if path.contains('\n') {
-            return Err(format!("git tracks {path:?}, which `--stdin-paths` cannot be given"));
-        }
-        paths.push(path.to_string());
+        let bytes = fs::read(&file).map_err(|e| format!("read {path}: {e}"))?;
+        sources.insert(path, format!("{:x}", Sha256::digest(bytes)));
     }
-    let mut child = Command::new("git")
-        .args(["hash-object", "--no-filters", "--stdin-paths"])
-        .current_dir(root)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("git hash-object: {e}"))?;
-    let mut stdin = child.stdin.take().expect("piped");
-    let input: String = paths.iter().map(|p| format!("{p}\n")).collect();
-    // Written beside the read: the ids fill the pipe before the paths are in.
-    let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()));
-    let out = child.wait_with_output().map_err(|e| format!("git hash-object: {e}"))?;
-    writer.join().expect("the writer").map_err(|e| format!("git hash-object's input: {e}"))?;
-    if !out.status.success() {
-        return Err(format!("git hash-object: {}", String::from_utf8_lossy(&out.stderr).trim()));
-    }
-    let blobs: Vec<String> = String::from_utf8_lossy(&out.stdout).lines().map(String::from).collect();
-    if blobs.len() != paths.len() {
-        return Err(format!("git hash-object gave {} ids for {} paths", blobs.len(), paths.len()));
-    }
-    Ok(paths.into_iter().zip(blobs).collect())
+    Ok(sources)
 }
 
 /// Every `target` directory under `root`, none inside another.
@@ -364,7 +298,10 @@ fn modified(path: &Path) -> std::io::Result<SystemTime> {
 mod tests {
     use super::*;
     use crate::gitfixture::{configure, sh};
+    use std::process::{Command, Output};
     use toyos_tmpdir::TempDir;
+
+    const RUNNER: &str = "macOS ARM64 macos15 20260928.1";
 
     fn write(root: &Path, path: &str, text: &str) {
         let path = root.join(path);
@@ -372,15 +309,35 @@ mod tests {
         fs::write(path, text).unwrap();
     }
 
-    /// `cargo build` in `root`, and each workspace crate with whether cargo
-    /// called it fresh.
-    fn build(root: &Path) -> BTreeMap<String, bool> {
-        let out = Command::new("cargo")
+    /// `files` committed to a new repository at `dir`.
+    fn origin(dir: &Path, files: &[(&str, &str)]) {
+        fs::create_dir_all(dir).unwrap();
+        sh(dir, &["init", "-q", "-b", "main"]);
+        configure(dir);
+        for (path, text) in files {
+            write(dir, path, text);
+        }
+        sh(dir, &["add", "-A"]);
+        sh(dir, &["commit", "-qm", "files"]);
+    }
+
+    fn crate_toml(name: &str, deps: &str) -> String {
+        format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n{deps}")
+    }
+
+    fn cargo_build(root: &Path) -> Output {
+        Command::new("cargo")
             .args(["build", "--offline", "--message-format=json"])
             .current_dir(root)
             .env_remove("CARGO_TARGET_DIR")
             .output()
-            .expect("run cargo");
+            .expect("run cargo")
+    }
+
+    /// `cargo build` in `root`, and each workspace crate with whether cargo
+    /// called it fresh.
+    fn build(root: &Path) -> BTreeMap<String, bool> {
+        let out = cargo_build(root);
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         let mut fresh = BTreeMap::new();
         for line in String::from_utf8_lossy(&out.stdout).lines() {
@@ -405,6 +362,22 @@ mod tests {
         configure(dir);
     }
 
+    /// An entry at `writer`: a checkout of `origin` built cold and sealed.
+    fn entry(origin: &Path, writer: &Path) {
+        checkout(origin, writer);
+        let Start::Cold(cold) = open(writer, RUNNER, SystemTime::now()).unwrap().0 else {
+            panic!("a tree with no target is cold")
+        };
+        build(writer);
+        seal(writer, &cold).unwrap();
+    }
+
+    /// The entry at `writer`, restored under a fresh checkout of `origin`.
+    fn restore(origin: &Path, writer: &Path, reader: &Path) {
+        checkout(origin, reader);
+        fs::rename(writer.join("target"), reader.join("target")).unwrap();
+    }
+
     /// The oracle is cargo and the program it builds: an entry serves what
     /// a cold build of the reader's tree would, recompiling exactly what
     /// changed and what depends on it — a changed source the checkout dated
@@ -413,57 +386,41 @@ mod tests {
     #[test]
     fn an_entry_serves_exactly_the_sources_it_was_built_from() {
         let tmp = TempDir::new("cicache-entry");
-        let origin = tmp.join("origin");
-        fs::create_dir(&origin).unwrap();
-        sh(&origin, &["init", "-q", "-b", "main"]);
-        configure(&origin);
-        write(&origin, ".gitignore", "target/\n");
-        let members = "[workspace]\nmembers = [\"app\", \"leaf\", \"count\", \"idle\"]\nresolver = \"2\"\n";
-        write(&origin, "Cargo.toml", members);
-        let package = |name: &str, deps: &str| {
-            let head = format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n");
-            format!("{head}\n[dependencies]\n{deps}")
-        };
-        write(&origin, "leaf/Cargo.toml", &package("leaf", ""));
-        write(&origin, "leaf/src/lib.rs", "pub fn word() -> &'static str { \"one\" }\n");
-        write(&origin, "count/Cargo.toml", &package("count", ""));
         let script = r#"fn main() {
     let files = std::fs::read_dir("src").unwrap().count();
     println!("cargo:rustc-env=FILES={files}");
 }
 "#;
-        write(&origin, "count/build.rs", script);
-        write(&origin, "count/src/lib.rs", "pub const FILES: &str = env!(\"FILES\");\n");
-        write(&origin, "count/src/spare.txt", "read by nothing but the count\n");
-        write(&origin, "idle/Cargo.toml", &package("idle", ""));
-        write(&origin, "idle/src/lib.rs", "pub fn idle() {}\n");
         let deps = "leaf = { path = \"../leaf\" }\ncount = { path = \"../count\" }\n";
-        write(&origin, "app/Cargo.toml", &package("app", deps));
-        let main = "fn main() { print!(\"{} {}\", leaf::word(), count::FILES); }\n";
-        write(&origin, "app/src/main.rs", main);
-        sh(&origin, &["add", "-A"]);
-        sh(&origin, &["commit", "-qm", "built"]);
-
+        let source = tmp.join("origin");
+        origin(&source, &[
+            (".gitignore", "target/\n"),
+            ("Cargo.toml", "[workspace]\nmembers = [\"app\", \"leaf\", \"count\", \"idle\"]\nresolver = \"2\"\n"),
+            ("leaf/Cargo.toml", &crate_toml("leaf", "")),
+            ("leaf/src/lib.rs", "pub fn word() -> &'static str { \"one\" }\n"),
+            ("count/Cargo.toml", &crate_toml("count", "")),
+            ("count/build.rs", script),
+            ("count/src/lib.rs", "pub const FILES: &str = env!(\"FILES\");\n"),
+            ("count/src/spare.txt", "read by nothing but the count\n"),
+            ("idle/Cargo.toml", &crate_toml("idle", "")),
+            ("idle/src/lib.rs", "pub fn idle() {}\n"),
+            ("app/Cargo.toml", &crate_toml("app", deps)),
+            ("app/src/main.rs", "fn main() { print!(\"{} {}\", leaf::word(), count::FILES); }\n"),
+        ]);
         let writer = tmp.join("writer");
-        checkout(&origin, &writer);
-        let Start::Cold(stamped) = open(&writer).unwrap().0 else {
-            panic!("a tree with no target is cold")
-        };
-        build(&writer);
+        entry(&source, &writer);
         assert_eq!(run(&writer), "one 2");
-        seal(&writer, &stamped).unwrap();
 
-        write(&origin, "leaf/src/lib.rs", "pub fn word() -> &'static str { \"two\" }\n");
-        sh(&origin, &["rm", "-q", "count/src/spare.txt"]);
-        sh(&origin, &["commit", "-qam", "read"]);
+        write(&source, "leaf/src/lib.rs", "pub fn word() -> &'static str { \"two\" }\n");
+        sh(&source, &["rm", "-q", "count/src/spare.txt"]);
+        sh(&source, &["commit", "-qam", "read"]);
         let reader = tmp.join("reader");
-        checkout(&origin, &reader);
-        fs::rename(writer.join("target"), reader.join("target")).unwrap();
+        restore(&source, &writer, &reader);
         // What an mtime made up from history would say of a file committed
         // before the entry was built.
         date(&reader.join("leaf/src/lib.rs"), UNIX_EPOCH + Duration::from_secs(1)).unwrap();
 
-        let said = open(&reader).unwrap();
+        let said = open(&reader, RUNNER, SystemTime::now()).unwrap();
         assert!(matches!(said.0, Start::Warm), "{}", said.1);
         assert!(!reader.join(MANIFEST).exists(), "a warm tree keeps no manifest");
         let fresh = build(&reader);
@@ -472,69 +429,111 @@ mod tests {
         assert_eq!(fresh, expected.into_iter().map(|(k, v)| (k.to_string(), v)).collect());
     }
 
+    /// A file no dep-info names still decides a build: beside `src/x.rs`, a
+    /// new `src/x/mod.rs` is E0761 to a cold build, and so to a warm one.
+    #[test]
+    fn a_file_cargo_was_never_told_about_rebuilds_its_package() {
+        let tmp = TempDir::new("cicache-probe");
+        let source = tmp.join("origin");
+        origin(&source, &[
+            (".gitignore", "target/\n"),
+            ("Cargo.toml", "[workspace]\nmembers = [\"probed\"]\nresolver = \"2\"\n"),
+            ("probed/Cargo.toml", &crate_toml("probed", "")),
+            ("probed/src/lib.rs", "mod x;\npub fn f() -> u8 { x::X }\n"),
+            ("probed/src/x.rs", "pub const X: u8 = 1;\n"),
+        ]);
+        let writer = tmp.join("writer");
+        entry(&source, &writer);
+
+        write(&source, "probed/src/x/mod.rs", "pub const X: u8 = 2;\n");
+        sh(&source, &["add", "-A"]);
+        sh(&source, &["commit", "-qm", "probed"]);
+        let reader = tmp.join("reader");
+        restore(&source, &writer, &reader);
+        assert!(matches!(open(&reader, RUNNER, SystemTime::now()).unwrap().0, Start::Warm));
+        let out = cargo_build(&reader);
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(!out.status.success() && said.contains("E0761"), "{said}");
+    }
+
+    /// One commit of `a.rs`, read cold.
+    fn cold_repo(tmp: &Path) -> Cold {
+        sh(tmp, &["init", "-q"]);
+        configure(tmp);
+        write(tmp, "a.rs", "a\n");
+        sh(tmp, &["add", "-A"]);
+        sh(tmp, &["commit", "-qm", "a"]);
+        let Start::Cold(cold) = open(tmp, RUNNER, SystemTime::now()).unwrap().0 else { panic!("cold") };
+        cold
+    }
+
     /// Targets with no manifest beside them were built from nothing anyone can
     /// name; the driver's own is this job's.
     #[test]
     fn targets_restored_without_a_manifest_are_refused() {
         let tmp = TempDir::new("cicache-foreign");
-        sh(&tmp, &["init", "-q"]);
-        configure(&tmp);
-        write(&tmp, "kernel/src/lib.rs", "");
-        sh(&tmp, &["add", "-A"]);
+        cold_repo(&tmp);
         fs::create_dir_all(tmp.join(DRIVER)).unwrap();
-        assert!(matches!(open(&tmp).unwrap().0, Start::Cold(_)));
-        fs::create_dir_all(tmp.join("kernel/target/debug")).unwrap();
-        let refusal = open(&tmp).err().expect("a restored target with no manifest");
-        assert!(refusal.contains("kernel/target"), "{refusal}");
+        assert!(matches!(open(&tmp, RUNNER, SystemTime::now()).unwrap().0, Start::Cold(_)));
+        for target in ["kernel/target", "target/debug"] {
+            fs::create_dir_all(tmp.join(target)).unwrap();
+            let refusal = open(&tmp, RUNNER, SystemTime::now()).err().expect("a target with no manifest");
+            assert!(refusal.contains(target), "{refusal}");
+            fs::remove_dir(tmp.join(target)).unwrap();
+        }
     }
 
     /// A sealed tree is dated as built throughout, and a step that wrote a
-    /// tracked source is refused: the manifest would name bytes no build read.
+    /// tracked source is refused, even one that wrote its bytes back: the
+    /// manifest would name bytes no build read.
     #[test]
     fn a_seal_dates_every_target_and_refuses_a_written_source() {
         let tmp = TempDir::new("cicache-seal");
-        sh(&tmp, &["init", "-q"]);
-        configure(&tmp);
-        write(&tmp, "a.rs", "a\n");
-        sh(&tmp, &["add", "-A"]);
-        sh(&tmp, &["commit", "-qm", "a"]);
-        let Start::Cold(stamped) = open(&tmp).unwrap().0 else { panic!("cold") };
+        let cold = cold_repo(&tmp);
         write(&tmp, "target/debug/deps/x", "x");
         write(&tmp, "userland/target/y", "y");
-        seal(&tmp, &stamped).unwrap();
+        seal(&tmp, &cold).unwrap();
         for file in ["target/debug/deps/x", "target/debug", "userland/target/y"] {
             assert_eq!(modified(&tmp.join(file)).unwrap(), built(), "{file}");
         }
         fs::remove_file(tmp.join(MANIFEST)).unwrap();
-        write(&tmp, "a.rs", "b\n");
-        let refusal = seal(&tmp, &stamped).unwrap_err();
-        assert!(refusal.contains("a.rs"), "{refusal}");
+        for bytes in ["b\n", "a\n"] {
+            write(&tmp, "a.rs", bytes);
+            let refusal = seal(&tmp, &cold).unwrap_err();
+            assert!(refusal.contains("a.rs"), "{bytes:?}: {refusal}");
+        }
+    }
+
+    /// Another image's entry is no entry: its targets go and the run is cold.
+    #[test]
+    fn an_entry_built_on_another_runner_is_deleted() {
+        let tmp = TempDir::new("cicache-image");
+        let cold = cold_repo(&tmp);
+        write(&tmp, "target/debug/x", "x");
+        write(&tmp, "kernel/target/y", "y");
+        seal(&tmp, &cold).unwrap();
+        let (start, said) = open(&tmp, "macOS ARM64 macos15 20261005.1", SystemTime::now()).unwrap();
+        assert!(matches!(start, Start::Cold(_)), "{said}");
+        assert!(!tmp.join("target/debug").exists() && !tmp.join("kernel/target").exists(), "{said}");
+    }
+
+    /// A source dated now is newer than the entry only on a clock that reads
+    /// after [`built`].
+    #[test]
+    fn a_reader_whose_clock_is_not_after_the_entry_is_refused() {
+        let tmp = TempDir::new("cicache-clock");
+        let cold = cold_repo(&tmp);
+        write(&tmp, "target/debug/x", "x");
+        seal(&tmp, &cold).unwrap();
+        let refusal = open(&tmp, RUNNER, built()).err().expect("a clock at the entry's date");
+        assert!(refusal.contains("clock"), "{refusal}");
     }
 
     #[test]
-    fn a_prune_keeps_this_runs_entry_on_main_and_nothing_else() {
-        let entry =
-            |id: u64, key: &str, scope: &str| serde_json::json!({"id": id, "key": key, "ref": scope});
-        let ours = "host-sealed-Linux-7";
-        let listing = |entries: Vec<serde_json::Value>| {
-            serde_json::json!({"total_count": entries.len(), "actions_caches": entries})
-        };
-        let doc = listing(vec![
-            entry(1, ours, "refs/heads/main"),
-            entry(2, "host-sealed-Linux-6", "refs/heads/main"),
-            entry(3, "host-sealed-Linux-5", "refs/pull/9/merge"),
-            entry(4, "host-36696295750", "refs/heads/main"),
-        ]);
-        let ids: Vec<u64> = doomed(&doc, ours).unwrap().into_iter().map(|(id, _)| id).collect();
-        assert_eq!(ids, [2, 3, 4]);
-
-        let unsaved = listing(vec![
-            entry(1, ours, "refs/pull/9/merge"),
-            entry(2, "host-sealed-Linux-6", "refs/heads/main"),
-        ]);
-        assert!(doomed(&unsaved, ours).unwrap_err().contains("not among main's"));
-        let page = [entry(1, ours, "refs/heads/main")];
-        let paged = serde_json::json!({"total_count": 101, "actions_caches": page});
-        assert!(doomed(&paged, ours).is_err());
+    fn a_driver_built_in_any_other_target_is_refused() {
+        let tmp = TempDir::new("cicache-driver");
+        fs::create_dir_all(tmp.join(DRIVER)).unwrap();
+        let refusal = read(&tmp).err().expect("a test binary is no driver");
+        assert!(refusal.contains("the driver runs from"), "{refusal}");
     }
 }

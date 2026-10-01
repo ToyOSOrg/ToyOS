@@ -24,9 +24,6 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: macos-latest
     timeout-minutes: 90
-    permissions:
-      actions: write
-      contents: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -46,11 +43,7 @@ jobs:
             toyos/target
             kernel/target
             bootloader/target
-          key: host-sealed-${{ runner.os }}-${{ github.run_id }}
-
-      - env:
-          GH_TOKEN: ${{ github.token }}
-        run: cargo run --target-dir target/ci-driver -- --ci prune
+          key: host-sealed-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}
 
   # Publishes this tree's toolchain if nobody has, and on main moves the SDK
   # alias onto it. Bare `ubuntu-24.04`, not a container: its glibc is the

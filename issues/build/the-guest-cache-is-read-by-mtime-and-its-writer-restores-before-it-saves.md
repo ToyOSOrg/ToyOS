@@ -14,7 +14,7 @@ under a checkout that dated every source at the checkout, so cargo calls every
 path crate in them stale.
 
 The host cache stopped both (`src/cicache.rs`): an entry is sealed only by a
-run that restored nothing, carries the blob of every source its build read,
-and its reader dates sources by content.
+run that restored nothing, carries the hash of every tracked file, and its
+reader dates sources by content.
 
 Done when the guest entry is written cold, read by content, and bounded.
