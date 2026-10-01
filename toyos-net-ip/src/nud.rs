@@ -83,11 +83,11 @@ impl Released {
     }
 }
 
+/// Entered only by a new entry, and its deadline armed only as its request leaves: a request that
+/// finds INCOMPLETE is its one waiting request, so it carries no flag.
 #[derive(Debug)]
 pub struct Incomplete {
     requests: u8,
-    /// A request waits in the control queue.
-    queued: bool,
     pub pending: Pending,
 }
 
@@ -253,7 +253,8 @@ fn timer(cx: &Cx<'_>, addr: Ipv4Addr) -> Timer {
 fn request(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) {
     let Some(n) = i.neighbours.get_mut(&addr) else { return };
     match &mut n.state {
-        Nud::Incomplete(Incomplete { queued, .. }) | Nud::Probe(Probing { queued, .. }) => *queued = true,
+        Nud::Incomplete(_) => {}
+        Nud::Probe(Probing { queued, .. }) => *queued = true,
         Nud::Unreachable(u) => u.solicit = Solicit::Queued,
         Nud::Reachable(_) | Nud::Stale(_) | Nud::Delay(_) | Nud::Failed => return,
     }
@@ -267,9 +268,9 @@ fn request(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) {
 /// in every other state none at all, since they send no request (§6.3). It waits no longer.
 pub(crate) fn request_leaves(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) -> Option<MacAddr> {
     let to = match &i.neighbours.get(&addr)?.state {
-        Nud::Incomplete(Incomplete { queued: true, .. }) | Nud::Unreachable(Unreachable { solicit: Solicit::Queued, .. }) => MacAddr::BROADCAST,
+        Nud::Incomplete(_) | Nud::Unreachable(Unreachable { solicit: Solicit::Queued, .. }) => MacAddr::BROADCAST,
         Nud::Probe(Probing { queued: true, mac, .. }) => *mac,
-        Nud::Incomplete(_) | Nud::Probe(_) | Nud::Unreachable(_) | Nud::Reachable(_) | Nud::Stale(_) | Nud::Delay(_) | Nud::Failed => return None,
+        Nud::Probe(_) | Nud::Unreachable(_) | Nud::Reachable(_) | Nud::Stale(_) | Nud::Delay(_) | Nud::Failed => return None,
     };
     request_left(i, cx, addr);
     Some(to)
@@ -280,7 +281,11 @@ fn request_left(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) {
     let now = cx.now;
     let Some(n) = i.neighbours.get_mut(&addr) else { return };
     let wait = match &mut n.state {
-        Nud::Incomplete(Incomplete { requests, queued: queued @ true, .. }) | Nud::Probe(Probing { requests, queued: queued @ true, .. }) => {
+        Nud::Incomplete(Incomplete { requests, .. }) => {
+            *requests = requests.saturating_add(1);
+            RETRANS
+        }
+        Nud::Probe(Probing { requests, queued: queued @ true, .. }) => {
             *queued = false;
             *requests = requests.saturating_add(1);
             RETRANS
@@ -290,7 +295,7 @@ fn request_left(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) {
             s.solicit = Solicit::Backoff { sent: false };
             backoff(s.requests)
         }
-        Nud::Incomplete(_) | Nud::Probe(_) | Nud::Unreachable(_) | Nud::Reachable(_) | Nud::Stale(_) | Nud::Delay(_) | Nud::Failed => return,
+        Nud::Probe(_) | Nud::Unreachable(_) | Nud::Reachable(_) | Nud::Stale(_) | Nud::Delay(_) | Nud::Failed => return,
     };
     n.last_request = Some(now);
     cx.timers.arm(timer(cx, addr), now.after(wait));
@@ -343,7 +348,7 @@ pub(crate) fn send(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr, hint: Opt
             cx.log.count(Counter::NbTableFull);
             return Link::Failed(Counter::NbTableFull);
         }
-        insert(i, addr, Nud::Incomplete(Incomplete { requests: 0, queued: false, pending: Pending::default() }), now, hint);
+        insert(i, addr, Nud::Incomplete(Incomplete { requests: 0, pending: Pending::default() }), now, hint);
         request(i, cx, addr);
         return Link::Pending;
     };
