@@ -311,13 +311,14 @@ Each stage lands on its own, in this order.
    - It opens with a timed `ssh t14 update < image` of a session image of
      `issues/hardware/the-t14-reboots-through-ubuntu-for-every-test.md`, since
      an image switch costs that write and a reset: ToyOS has written this
-     stick at 0.2 s to 9.5 s per MiB, 11 s to 8.4 min for a 53 MiB ROOT.
+     stick at 0.2 s to 9.5 s per MiB.
    - It is built from #539's pieces that stage 6 takes above, and the bench
      path of `src/metal.rs`. `--via-ubuntu` stays as the old path.
    - Every T14 image is signed with the bench key the T14 trusts, and a loader
      reaches the T14 as an image does: ToyOS receives it over ssh and writes it
      to the stick, and the running loader tries it once and keeps the old one
-     as the fallback (owner rulings).
+     as the fallback (owner rulings). A stick that boots neither loader costs
+     a hand and `diag/flash.sh`.
    - The host's first exec on an image is `update --good`, and a session image
      names no `[boot] up`. A death goes by `update --once`, the kept slot boots
      after it, and the host fetches the record over `sftp`.
@@ -344,19 +345,26 @@ Each stage lands on its own, in this order.
      as far as it is true of what lands.
 
    **Exit**: `bench_loop_drives_a_toyos_machine` passes in QEMU. On the T14,
-   with Ubuntu never started: a run of sessions gives the verdicts a per-boot
-   run gave at the commit this stage branches from; a kernel change boots; a
-   slot with a flipped byte, no signature or a lower security version is
-   refused and the other boots; a slot that dies falls back on its own, and
-   one whose `sshd` refuses the host's key is never marked good; a `--once`
-   image that panics returns the machine to its session with its record
-   judged; and a loader sent over ssh that brings no slot to good leaves the
+   with Ubuntu never started: a whole run, its sessions and every boot that
+   goes by `--once` (`deadlinewedge`, `hardlockup`, `usbload` and
+   `foreignrecord` among them), gives the verdicts a per-boot run gave at the
+   commit this stage branches from; a kernel change boots; a slot with a
+   flipped byte, no signature or a lower security version is refused and the
+   other boots; a slot that dies falls back on its own, and one whose `sshd`
+   refuses the host's key is never marked good; a `--once` image that panics
+   returns the machine to its session with its record judged; and a loader
+   sent over ssh boots once, and one that brings no slot to good leaves the
    old one booting.
 
 7. **Ubuntu leaves the loop.** Delete `toyos-metal`'s `--via-ubuntu` path,
    `--metal-via-ubuntu`, `bootloader/src/bootnext.rs` and test-runner's
    job-list mode. After a reset the firmware comes back to the loader because
    ToyOS's entry is first (stage 5).
+   - `issues/build/a-hung-boots-log-partition-is-wiped-by-the-next-runs-flash.md`,
+     `issues/build/the-sudoers-rendering-has-no-host-side-judge.md`,
+     `issues/build/the-metal-loop-writes-the-readback-volume-into-a-directory-it-has-not-made.md`
+     and `issues/hardware/the-t14-stopped-answering-ssh-between-two-lan-boots.md`
+     close here, each only as far as it is true of what lands.
 
    **Exit**: no path in `src/metal*.rs` reaches Ubuntu. On the T14, a panic's
    reset reaches the loader with no `BootNext` set.
