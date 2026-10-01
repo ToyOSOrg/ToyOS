@@ -1,33 +1,35 @@
 ---
 status: open
-kind: tooling
+kind: defect
 opened: 2026-09-30
 ---
 
 # Two builds of one LLVM key differ in their bytes
 
-`src/llvm.rs` holds that an LLVM is a function of its key. Key
-`64453b64c91c17c2` built twice by `build_in_fork` — the stored one, made in the
-linked worktree `toyos-mtime`, and one made under n2 in place of Ninja from a
-fork checkout whose `src/llvm-project` shares the primary's repository — gave
-the same 3841 paths, 181 of them different, each for a reason the key does not
-name and none of them the build tool:
+`src/llvm.rs` holds that an LLVM is a function of its key. Two builds of one
+key by `build_in_fork`, one in a worktree and one under n2 in place of Ninja
+from a fork checkout whose `src/llvm-project` shares the primary's repository,
+differed in three things the key does not name:
 
 - **The LLVM checkout's `origin`.** LLVM's CMake writes it into
-  `VCSRevision.h` as `LLVM_REPOSITORY`, and every `--version` prints it: the
-  stored `lld` names `ToyOSOrg/llvm-project`, the other
-  `rust-lang/llvm-project`. The primary's `rust/src/llvm-project` has origin
-  `rust-lang`; the fork's `.gitmodules` names `ToyOSOrg`. 19 files: the header,
-  `libclangBasic.a` (its `Version.cpp.o`), `libclang.dylib`,
-  `libclang-cpp.dylib`, and fifteen executables, `clang-22` and `lld` among
-  them.
+  `VCSRevision.h` as `LLVM_REPOSITORY` (`get_source_info` in
+  `llvm/cmake/modules/VersionFromVCS.cmake`), and clang and LLD put it in their
+  version (`clang/lib/Basic/Version.cpp`, `lld/Common/Version.cpp`), so in the
+  guest's bytes: LLD writes it into the `.comment` of the `libstd` a sysroot
+  links, and clang into that of each C and C++ object of its `c/lib/libc++.a`.
+  Bootstrap's `update_submodule` sets a checkout's origin from the fork's
+  `.gitmodules`, `ToyOSOrg`, when it moves the checkout to the gitlink's commit,
+  and leaves it when the checkout holds that commit already. A worktree's
+  checkout is cloned from the URL the fork's shared config names, `ToyOSOrg`.
+  The primary's `rust/src/llvm-project` names `rust-lang`, and so does a git
+  worktree of its repository.
 - **The build directory.** `lld`'s `LC_RPATH` and `llvm-config`'s object and
-  source roots name the `build/toyos-llvm` of the worktree that built it, which
-  `place` removes: the stored ones name `toyos-mtime`, which no longer exists.
-- **Archive dates.** 161 of the 162 static archives differ only in their
-  members' dates (`ar tv`); every member is byte-identical.
+  source roots name the `build/toyos-llvm` of the checkout that built it.
+- **Archive dates.** The members of every static archive carry the time they
+  were built (`ar tv`).
 
-Every other file, `llvm-ar`, `llc`, `opt` and `llvm-tblgen` among them, is
-byte-identical.
-
-**Exit**: two builds of one key, made in two worktrees, are byte-identical.
+**Exit**: a nightly check builds one key in two fork checkouts at different
+paths whose `src/llvm-project` origins name different repositories, and every
+file of the two installs is byte-identical. Until it is, every pair of
+checkouts builds one key to different bytes: the primary's and a worktree's,
+two worktrees', and one made by hand and any other.
