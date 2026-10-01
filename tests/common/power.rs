@@ -774,7 +774,7 @@ pub fn panic_reboots(
 /// emitted before its client connected.
 fn watch_the_bound(qemu: &QemuInstance) -> (qemu::QmpShutdown, Duration) {
     let budget = qemu.budget(Duration::from_secs(PANIC_FAST_SECS) + RESET_ALLOWANCE);
-    (qemu::QmpShutdown::open(&qemu, budget), budget)
+    (qemu::QmpShutdown::open(qemu, budget), budget)
 }
 
 /// QEMU's own `guest-reset` on `watch`, and the serial the guest wrote after
