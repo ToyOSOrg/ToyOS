@@ -15,7 +15,7 @@ use common::net::{End, Fate, Impair, Net};
 use common::{datagram, parse_out, seg, Opt, O, FIN, RST, SYN, URG};
 
 use crate::seq::Seq;
-use crate::{Counter, Event, Failure, Hop, Instant, Tcp, Tuple};
+use crate::{Counter, Endpoint, Event, Failure, Hop, Instant, Tcp, Tuple};
 
 #[derive(Clone)]
 struct Rng(u64);
@@ -88,6 +88,8 @@ struct Checker {
     rng: Rng,
     shape: Shape,
     edges: HashMap<(usize, Tuple), Seq>,
+    /// The end of the highest sequence space each connection's segments carried out.
+    left: HashMap<(usize, Tuple), Seq>,
     expiries: [u64; 2],
     /// The oldest unacknowledged sequence number at each node's last expiry, until it leaves again.
     expired: [Option<Seq>; 2],
@@ -127,6 +129,9 @@ impl Checker {
             }
             let tx = &sync.tx;
             assert!(tx.una.at_or_before(tx.nxt), "PROP-01: SND.UNA past SND.NXT");
+            if let Some(&left) = self.left.get(&(node, tuple)) {
+                assert!(tx.nxt.at_or_before(left), "§11.3: SND.NXT {:?} past what left, {left:?}", tx.nxt);
+            }
             let edge = sync.rx.edge();
             if let Some(previous) = self.edges.insert((node, tuple), edge) {
                 assert!(previous.at_or_before(edge), "PROP-04: the right edge retreated");
@@ -162,6 +167,12 @@ impl Checker {
 
     /// MOD-04, OP-25 and PROP-04 on each segment as it leaves, and RT-17's record.
     fn segment(&mut self, node: usize, tcp: &mut Tcp, now: Instant, o: &O) {
+        if o.flags & RST == 0 {
+            let endpoint = |(addr, port): (std::net::Ipv4Addr, u16)| Endpoint { addr, port: toyos_net_wire::Port::new(port).unwrap() };
+            let end = Seq::new(o.seq).add(o.len());
+            let left = self.left.entry((node, Tuple { local: endpoint(o.src), remote: endpoint(o.dst) })).or_insert(end);
+            *left = left.later(end);
+        }
         assert_eq!(o.flags & URG, 0, "MOD-04: URG set");
         assert_eq!(o.urg, 0, "MOD-04: an urgent pointer");
         let Some((_, sync)) = tcp.each_sync().next() else { return };
@@ -222,6 +233,7 @@ impl Run {
             rng: Rng::new(seed ^ 0x5555),
             shape: s,
             edges: HashMap::new(),
+            left: HashMap::new(),
             expiries: [0, 0],
             expired: [None, None],
             sends: Vec::new(),
