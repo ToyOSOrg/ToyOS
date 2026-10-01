@@ -20,7 +20,7 @@ use std::fmt;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use toyos_net_tcp::{Config, ConnId, Counter, Endpoint, Event, Info, Instant, ListenerId, Outgoing, Secrets, Status, Tcp, Tuple};
+use toyos_net_tcp::{Config, ConnId, Counter, Endpoint, Event, Hop, Info, Instant, ListenerId, Outgoing, Secrets, Status, Tcp, Tuple};
 use toyos_net_wire::ipv4::{Ipv4Builder, Ipv4Packet, Ipv4Source, TrafficClass, Ttl};
 use toyos_net_wire::tcp::TcpSegment;
 use toyos_net_wire::Port;
@@ -534,7 +534,7 @@ impl H {
         let credit = self.credit.unwrap_or(usize::MAX);
         let mut raw = Vec::new();
         let now = self.now();
-        self.tcp.transmit(now, credit, |out| raw.push(datagram(out)));
+        self.tcp.transmit(now, credit, |_| Hop::Ready(()), |out, ()| raw.push(datagram(out)));
         if let Some(c) = self.credit.as_mut() {
             *c = c.saturating_sub(raw.len());
         }

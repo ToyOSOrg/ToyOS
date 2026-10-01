@@ -20,7 +20,7 @@ use crate::counters::{Counter, Counters, Log};
 use crate::open::{negotiate, refuse_syn_extras, Local, Origin, Rcvd, Sent, SynRcvd, SynSent};
 use crate::rx::Rx;
 use crate::seq::{Seq, Stamp};
-use crate::{isn, limits, reuse_iss, siphash, ts_offset, Config, ConfigError, Endpoint, Error, Event, Failure, IcmpError, IcmpKind, Instant, Options, Received, SoftError, State, Status, Tuple};
+use crate::{isn, limits, reuse_iss, siphash, ts_offset, Config, ConfigError, Endpoint, Error, Event, Failure, Hop, IcmpError, IcmpKind, Instant, Options, Received, SoftError, State, Status, Tuple};
 
 const EPHEMERAL_FIRST: u16 = 49_152;
 const EPHEMERAL_COUNT: u16 = 16_384;
@@ -149,6 +149,31 @@ enum Entry {
 struct Answer {
     tuple: Tuple,
     rst: Rst,
+}
+
+/// What a transmit opportunity found waiting for its next hop: it goes back where it was, ahead
+/// of anything queued since.
+#[derive(Default)]
+struct Waiting {
+    stubs: Vec<Tuple>,
+    answers: Vec<Answer>,
+    time_waits: Vec<Tuple>,
+    conns: Vec<u32>,
+}
+
+impl Waiting {
+    fn restore(self, tcp: &mut Tcp) {
+        for tuple in self.stubs.into_iter().rev() {
+            tcp.stubs.push_front(tuple);
+        }
+        for answer in self.answers.into_iter().rev() {
+            tcp.answers.push_front(answer);
+        }
+        tcp.tw_owed.extend(self.time_waits);
+        for index in self.conns.into_iter().rev() {
+            tcp.active.push_front(index);
+        }
+    }
 }
 
 pub struct Tcp {
@@ -1126,15 +1151,41 @@ impl Tcp {
     // ---- egress ----
 
     /// A transmit opportunity with room for `credit` frames: resets first, then each connection
-    /// in turn one segment at a time. Each segment is built now and handed to `sink`, and only
-    /// then counts as sent. Returns how many left.
-    pub fn transmit(&mut self, now: Instant, credit: usize, mut sink: impl FnMut(&Outgoing<'_>)) -> usize {
+    /// in turn one segment at a time. `hop` is asked before anything for a 4-tuple is built
+    /// (`ip.md` §6.7): what waits for its next hop keeps its place and spends nothing, and the
+    /// rest is built now and handed to `sink` with what `hop` answered, and only then counts as
+    /// sent. A failed next hop drops an owed reset or ACK, fails a connect, and is the soft error
+    /// of any other connection (`ip.md` §9.6). Returns how many left.
+    pub fn transmit<T>(
+        &mut self,
+        now: Instant,
+        credit: usize,
+        mut hop: impl FnMut(&Tuple) -> Hop<T>,
+        mut sink: impl FnMut(&Outgoing<'_>, T),
+    ) -> usize {
         let mut sent = 0usize;
+        let mut waiting = Waiting::default();
         while sent < credit {
             if let Some(tuple) = self.stubs.pop_front() {
+                if !matches!(self.demux.get(&tuple), Some(Entry::Stub(..))) {
+                    continue;
+                }
+                let via = match hop(&tuple) {
+                    Hop::Ready(via) => Some(via),
+                    Hop::Pending => {
+                        waiting.stubs.push(tuple);
+                        continue;
+                    }
+                    Hop::Unreachable => None,
+                };
                 if let Some(Entry::Stub(rst, resume)) = self.demux.remove(&tuple) {
-                    sink(&builder(&Out::rst(&rst), &tuple, &[]));
-                    sent = sent.saturating_add(1);
+                    match via {
+                        Some(via) => {
+                            sink(&builder(&Out::rst(&rst), &tuple, &[]), via);
+                            sent = sent.saturating_add(1);
+                        }
+                        None => self.log.count(Counter::NextHopFailed),
+                    }
                     if let Some(tw) = resume {
                         self.enter_time_wait(tuple, tw, false);
                     }
@@ -1142,19 +1193,53 @@ impl Tcp {
                 continue;
             }
             if let Some(answer) = self.answers.pop_front() {
-                sink(&builder(&Out::rst(&answer.rst), &answer.tuple, &[]));
-                sent = sent.saturating_add(1);
+                match hop(&answer.tuple) {
+                    Hop::Ready(via) => {
+                        sink(&builder(&Out::rst(&answer.rst), &answer.tuple, &[]), via);
+                        sent = sent.saturating_add(1);
+                    }
+                    Hop::Pending => waiting.answers.push(answer),
+                    Hop::Unreachable => self.log.count(Counter::NextHopFailed),
+                }
                 continue;
             }
             if let Some(tuple) = self.tw_owed.pop_first() {
                 if let Some(Entry::TimeWait(tw)) = self.demux.get(&tuple) {
-                    sink(&builder(&tw.ack(now), &tuple, &[]));
-                    sent = sent.saturating_add(1);
+                    match hop(&tuple) {
+                        Hop::Ready(via) => {
+                            sink(&builder(&tw.ack(now), &tuple, &[]), via);
+                            sent = sent.saturating_add(1);
+                        }
+                        Hop::Pending => waiting.time_waits.push(tuple),
+                        Hop::Unreachable => self.log.count(Counter::NextHopFailed),
+                    }
                 }
                 continue;
             }
             let Some(index) = self.active.pop_front() else { break };
             let Some(conn) = value(&mut self.conns, index) else { continue };
+            if matches!(conn.state, Tcb::Ended(_)) {
+                conn.queued = false;
+                self.settle_deadline(index, now);
+                continue;
+            }
+            let via = match hop(&conn.tuple) {
+                Hop::Ready(via) => via,
+                Hop::Pending => {
+                    waiting.conns.push(index);
+                    continue;
+                }
+                Hop::Unreachable if matches!(conn.state, Tcb::SynSent(_)) => {
+                    self.log.count(Counter::NextHopFailed);
+                    self.end(index, Some(Failure::Unreachable(SoftError::Unreachable(UnreachableCode::Host))), None);
+                    continue;
+                }
+                Hop::Unreachable => {
+                    conn.soft = Some(SoftError::Unreachable(UnreachableCode::Host));
+                    waiting.conns.push(index);
+                    continue;
+                }
+            };
             let mut ctx = conn.ctx(now, &mut self.log);
             let out = match &mut conn.state {
                 Tcb::SynSent(s) => s.next_segment(&conn.local, now),
@@ -1181,11 +1266,12 @@ impl Tcp {
                 }
                 _ => &[],
             };
-            sink(&builder(&out, &conn.tuple, payload));
+            sink(&builder(&out, &conn.tuple, payload), via);
             sent = sent.saturating_add(1);
             self.active.push_back(index);
             self.settle_deadline(index, now);
         }
+        waiting.restore(self);
         sent
     }
 

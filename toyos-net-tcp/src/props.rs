@@ -15,7 +15,7 @@ use common::net::{End, Fate, Impair, Net};
 use common::{datagram, parse_out, seg, Opt, O, FIN, RST, SYN, URG};
 
 use crate::seq::Seq;
-use crate::{Counter, Event, Failure, Instant, Tcp, Tuple};
+use crate::{Counter, Event, Failure, Hop, Instant, Tcp, Tuple};
 
 #[derive(Clone)]
 struct Rng(u64);
@@ -424,7 +424,7 @@ fn s_op_025_prop_timestamps_on_every_segment() {
         let tcp = &mut run.net.nodes[node].tcp;
         tcp.abort(now, id).unwrap();
         let mut out = Vec::new();
-        tcp.transmit(now, usize::MAX, |o| out.push(parse_out(&datagram(o), 0)));
+        tcp.transmit(now, usize::MAX, |_| Hop::Ready(()), |o, ()| out.push(parse_out(&datagram(o), 0)));
         if let Some(rst) = out.iter().find(|o| o.flags & RST != 0) {
             assert_eq!(rst.ts, Some((ts.value, ts.echo)), "OP-25: the abort's RST");
         }

@@ -5,7 +5,7 @@
 
 use std::net::Ipv4Addr;
 
-use toyos_net_tcp::{ConnId, Counter, Error, Failure, Instant, ListenerId, Options, Received, Tcp, Tuple};
+use toyos_net_tcp::{ConnId, Counter, Error, Failure, Hop, Instant, ListenerId, Options, Received, Tcp, Tuple};
 use toyos_net_wire::ipv4::Ipv4Packet;
 use toyos_net_wire::tcp::TcpSegment;
 
@@ -321,7 +321,7 @@ impl Net {
             }
         };
         let mut out = Vec::new();
-        let sent = n.tcp.transmit(now, credit, |o| out.push(datagram(o)));
+        let sent = n.tcp.transmit(now, credit, |_| Hop::Ready(()), |o, ()| out.push(datagram(o)));
         if n.credit_per_ms.is_some() {
             n.credit -= sent;
         }

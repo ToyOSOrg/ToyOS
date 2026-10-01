@@ -260,6 +260,15 @@ pub enum IcmpKind {
     ParameterProblem,
 }
 
+/// Whether a segment for a 4-tuple can be built now (`ip.md` §6.7): its next hop's link address
+/// is known, and `T` is what the caller needs to use it; resolution is under way; or it failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hop<T> {
+    Ready(T),
+    Pending,
+    Unreachable,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
     Refused(Refusal),

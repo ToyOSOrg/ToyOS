@@ -3,7 +3,7 @@
 mod common;
 
 use common::*;
-use toyos_net_tcp::{limits, ConfigError, Counter, Failure, State, Tcp};
+use toyos_net_tcp::{limits, ConfigError, Counter, Failure, Hop, State, Tcp};
 
 fn hex(text: &str) -> Vec<u8> {
     text.split_whitespace().map(|b| u8::from_str_radix(b, 16).unwrap()).collect()
@@ -100,7 +100,7 @@ fn s_op_008_timestamps_take_twelve_bytes() {
     let mut sizes = Vec::new();
     let (_, _) = again.call(1, |tcp, now, id| {
         tcp.send(now, id, &data).unwrap();
-        tcp.transmit(now, usize::MAX, |o| sizes.push(datagram(o).len()));
+        tcp.transmit(now, usize::MAX, |_| Hop::Ready(()), |o, ()| sizes.push(datagram(o).len()));
     });
     assert_eq!(sizes, [1500, 1500], "20 + 32 + 1448");
 }
