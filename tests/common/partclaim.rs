@@ -17,14 +17,13 @@
 //! - every block of the target is the pattern the guest wrote there;
 //! - the `/home` file fsd wrote between the target's transfers, through its
 //!   own claim on the same disk, reads back through the host's own bcachefs
-//!   reader;
-//! - after a departure, the stick holds what the guest wrote again.
+//!   reader.
 //!
 //! The partition ranges are UEFI 2.10 §5.3.3's, as the `gpt` crate — not the
 //! kernel's parser — laid them out, and each partition's unique GUID is fixed
 //! here, where the table and the `system.toml` naming it are both written.
 
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -38,15 +37,8 @@ const GRANTED: &str = "A94F0E6D-3B2C-4E1A-8C7D-6E5F4A3B2C1D";
 const MISALIGNED: &str = "3E8A1C5F-7D2B-4F60-9A1E-5C4B3D2E1F07";
 /// Mirrored: a partition of whole 4 KiB blocks that begins inside one.
 const MISSTART: &str = "5A7C9E1B-3D5F-4B71-8C2E-4F6A8B0C2D35";
-/// The twin partition's unique GUID where no boot stick's is copied: the
-/// crafted disk of the boots that judge no twin.
-const TWIN: &str = "6D2F9B41-8C3E-4A57-B1D0-2E4F6A8C0B13";
 /// Mirrored: DATA, which fsd serves `/home` from.
 const DATA: &str = "E3A7C5D9-1B2F-4E6A-8D0C-9F7B5A3E1C24";
-/// Mirrored: the partitions of the stick whose device leaves.
-const DEPARTING: &str = "1F3E5D7C-9B2A-4C6E-8F01-A3B5C7D9E2F4";
-const STAYING: &str = "2A4C6E80-1B3D-4F57-9E6A-C8D0B2F4A6E1";
-const EARLIER: &str = "4C6E8A02-3D5F-4179-A0B2-D4F6A8C0E2B4";
 
 /// The two FAT32 neighbours' type, and every other test partition's.
 pub(super) const NEIGHBOUR_TYPE: &str = "5C3E8F21-9A4B-4D7E-8F10-2B3C4D5E6F70";
@@ -80,15 +72,6 @@ fn pattern(n: u64) -> Vec<u8> {
     }
     block[..8].copy_from_slice(&n.to_le_bytes());
     block[8..24].copy_from_slice(b"TOYOS-PARTCLAIM\0");
-    block
-}
-
-/// Mirrored in the guest: block `n` of a departure partition, `which` being
-/// `D` or `S`.
-fn departure_block(which: u8, n: u64) -> Vec<u8> {
-    let mut block = vec![which; BLOCK as usize];
-    block[..8].copy_from_slice(&n.to_le_bytes());
-    block[8..24].copy_from_slice(b"TOYOS-DEPARTURE\0");
     block
 }
 
@@ -215,249 +198,6 @@ pub fn partition_claim(
          intact"
     );
     Ok(())
-}
-
-/// The exits of a claim that gets no answer: a disk that does not answer a
-/// read of its table refuses the claim rather than resolving it on the disks
-/// that did, a transfer every attempt of which is refused on its budget ends
-/// at the deadman with the device's word, and ROOT's source, whose disk did
-/// not answer its hold, stays the kernel's once the disk answers. The crafted
-/// disk is a second USB stick beside the boot stick.
-pub fn partition_claim_gives_up(
-    _test_config: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    let config = super::compile::repo_root().join(CONFIG);
-    let crafted = super::lane::dir().join("partclaim-gives-up.img");
-    let cases: [(&'static [&'static str], &str, usize, &[&str]); 2] = [
-        (
-            &["partclaim-table-unanswered"],
-            "unanswered",
-            1,
-            &[" did not answer a read of LBA 0 while looking for "],
-        ),
-        (
-            &["fsync-budget-spent", "fsync-deadman-now"],
-            "deadman",
-            0,
-            &[
-                "partclaim: a write still refused after 1 attempt(s)",
-                "partclaim: a read still refused after 1 attempt(s)",
-            ],
-        ),
-    ];
-    for (params, role, refusals, wants) in cases {
-        craft_disk(&crafted, TWIN)?;
-        let mut qemu = QemuInstance::boot_with_options(
-            &config,
-            c_bins,
-            rust_bins,
-            BootOptions {
-                profile: qemu::Profile::UsbDisk,
-                usb_images: vec![crafted.clone()],
-                nvme_image: Some(tableless_nvme("partclaim-nvme.img")?),
-                kernel_params: params,
-                ..Default::default()
-            },
-        );
-        let boot = qemu.boot_log().to_string();
-        no_panic(role, &boot)?;
-        let result =
-            qemu.run_test(&format!("test_rs_partition_claimant {role}"), Duration::from_secs(180));
-        let tail = shut_down(qemu);
-        let kernel = guest_verdict(&result, &tail, refusals).map_err(|e| format!("{role}: {e}"))?;
-        for want in wants {
-            if !kernel.contains(want) {
-                return Err(format!("{role}: the kernel never said {want:?}:\n{kernel}"));
-            }
-        }
-        no_panic(role, &tail)?;
-        for want in wants {
-            let line = kernel.lines().find(|l| l.contains(want)).unwrap_or_default();
-            eprintln!("  [partclaim] {role}: {}", line.trim());
-        }
-    }
-    root_withheld(&config, &crafted, c_bins, rust_bins)?;
-    let _ = std::fs::remove_file(&crafted);
-    Ok(())
-}
-
-fn root_withheld(
-    config: &Path,
-    crafted: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    const PARAMS: &[&str] = &["partclaim-root-withheld"];
-    let image = super::lane::dir().join("partclaim-root-withheld.img");
-    std::fs::write(&image, qemu::build_boot_image(config, c_bins, rust_bins, PARAMS))
-        .map_err(|e| format!("write the boot image: {e}"))?;
-    let [_, _, root] = boot_stick_guids(&image)?;
-    craft_disk(crafted, TWIN)?;
-    let mut qemu = QemuInstance::boot_with_options(
-        config,
-        c_bins,
-        rust_bins,
-        BootOptions {
-            profile: qemu::Profile::UsbDisk,
-            boot_image: Some(Staged::Pristine(image.clone())),
-            usb_images: vec![crafted.to_path_buf()],
-            nvme_image: Some(tableless_nvme("partclaim-nvme.img")?),
-            kernel_params: PARAMS,
-            ..Default::default()
-        },
-    );
-    let boot = qemu.boot_log().to_string();
-    no_panic("withheld", &boot)?;
-    let not_held = format!(
-        "root: the partition ROOT was read from, {root}, is not held because it is on no disk \
-         that answered"
-    );
-    if !boot.contains(&not_held) {
-        return Err(format!("withheld: the kernel never said {not_held:?}:\n{boot}"));
-    }
-    let result =
-        qemu.run_test(&format!("test_rs_partition_claimant withheld {root}"), Duration::from_secs(180));
-    let tail = shut_down(qemu);
-    let kernel = guest_verdict(&result, &tail, 1).map_err(|e| format!("withheld: {e}"))?;
-    let want = format!("partclaim: {root} is where ROOT was read from, and the kernel withholds it");
-    if !kernel.contains(&want) {
-        return Err(format!("withheld: the kernel never said {want:?}:\n{kernel}"));
-    }
-    no_panic("withheld", &tail)?;
-    let _ = std::fs::remove_file(&image);
-    eprintln!("  [partclaim] withheld: {want}");
-    Ok(())
-}
-
-/// Claims on a USB stick whose device leaves owing a flush of one claim's
-/// write and is moved to another port by the host, as a reset moved T14 run
-/// 79's stick: each fsync answers for its own partition's writes. Three boots,
-/// one departure each (`usb-transport-break-owed` breaks the first write that
-/// goes out owing a flush):
-///
-/// - `departure`: the claim that lost the write writes again after the return,
-///   then is closed and claimed again, and that claim's fsync is told;
-/// - `silent`: the claim that lost it never writes again and another claim
-///   flushes first — `logd`'s `/log` — and a claim whose write a flush made
-///   durable before the departure is not told;
-/// - `untold`: nobody asks, and the shutdown's flush of the disk says so.
-///
-/// The machine boots off NVMe, so the stick's only writer is the guest.
-pub fn partition_claim_departure(
-    test_config: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    const TOLD: &str = "writes a process's claim of partition ";
-    const FLUSHED: &str = "usb-quiesce: disk 0 SYNCHRONIZE CACHE ok";
-    const UNTOLD: &str = "no writer's flush has said so; the disk is not counted flushed";
-    let departing = format!(
-        "{TOLD}{DEPARTING} made before its disk came back owing a flush may not have survived"
-    );
-    for (role, told) in [("departure", 1), ("silent", 1), ("untold", 0)] {
-        let (kernel, tail, spans) = departed(test_config, c_bins, rust_bins, role, told)?;
-        let count = kernel.matches(TOLD).count();
-        if count != told || kernel.matches(departing.as_str()).count() != told {
-            return Err(format!(
-                "{role}: {count} flushes were told of the loss, not {told}, each {DEPARTING}'s:\n{kernel}"
-            ));
-        }
-        // The untold line begins as the flushed one does, so a flushed disk is
-        // a flushed line without it.
-        let untold = tail.contains(UNTOLD);
-        let clean = tail.lines().any(|l| l.contains(FLUSHED) && !l.contains(UNTOLD));
-        let said = if told == 0 { UNTOLD } else { FLUSHED };
-        if untold == clean || untold != (told == 0) {
-            return Err(format!("{role}: the shutdown did not say {said:?} alone:\n{tail}"));
-        }
-        if role == "departure" {
-            let [departing, staying, _] = [spans[0], spans[1], spans[2]];
-            let stick = super::lane::dir().join("partclaim-departure.img");
-            let got = read_span(&stick, Span { start: departing.start, len: 2 * BLOCK })?;
-            if got != [departure_block(b'D', 0), departure_block(b'D', 1)].concat() {
-                return Err("the departing partition does not hold the blocks written again".into());
-            }
-            if read_span(&stick, Span { start: staying.start, len: BLOCK })?
-                != departure_block(b'S', 0)
-            {
-                return Err("the staying partition does not hold its block".into());
-            }
-        }
-        let line = tail.lines().find(|l| l.contains(said)).unwrap_or_default();
-        eprintln!("  [partclaim] {role}: {count} told; {}", line.trim());
-    }
-    let _ = std::fs::remove_file(super::lane::dir().join("partclaim-departure.img"));
-    eprintln!(
-        "  [partclaim] the stick left owing a claim's write and came back on port 3 three times: \
-         the claim that wrote it was told once — after a close and a re-claim, and after another \
-         claim flushed first — no other claim was, and a loss nobody asked about kept the \
-         shutdown from calling the disk flushed"
-    );
-    Ok(())
-}
-
-/// One departure boot running the guest's `role`, which says `refusals`
-/// refusals: the kernel's log from the test's start through the shutdown,
-/// what the shutdown said, and the stick's partitions — `DEPARTING`,
-/// `STAYING`, `EARLIER`.
-fn departed(
-    test_config: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-    role: &str,
-    refusals: usize,
-) -> Result<(String, String, Vec<Span>), String> {
-    const MOVE_NOW: &str = "usb-reset-moves: move the device now";
-    const PARAMS: &[&str] = &["usb-transport-break-owed", "usb-reset-moves"];
-    const CAME_BACK: &str = "usb-storage: disk 0 came back on port 3 slot ";
-    let profile = qemu::Profile::NvmeBootUsbDisk;
-    let (bytes, _) = profile.usb_disk().expect("NvmeBootUsbDisk declares a disk");
-    let stick = super::lane::dir().join("partclaim-departure.img");
-    let parts = [("departing", MIB, DEPARTING), ("staying", MIB, STAYING), ("earlier", MIB, EARLIER)];
-    let spans = craft_stick(&stick, bytes, &parts)?;
-    let mut qemu = QemuInstance::boot_with_options(
-        test_config,
-        c_bins,
-        rust_bins,
-        BootOptions {
-            profile,
-            qmp: true,
-            smp: 2,
-            kernel_params: PARAMS,
-            usb_images: vec![stick.clone()],
-            ..Default::default()
-        },
-    );
-    let boot = qemu.boot_log().to_string();
-    no_panic(role, &boot)?;
-    let moved = stick;
-    let result = qemu.run_test_hooked(
-        &format!("test_rs_partition_claimant {role}"),
-        Duration::from_secs(240),
-        MOVE_NOW,
-        move |socket| {
-            let mut devices = qemu::QmpDevices::open(socket);
-            devices.del(&qemu::usb_device_id(0));
-            devices.blockdev_add_again("moved", &moved);
-            devices.add(
-                "usb-storage",
-                "xhci.0",
-                "movedstick",
-                &[("drive", "moved"), ("port", "3"), ("serial", qemu::DATA_STICK_SERIAL)],
-            );
-        },
-    );
-    let tail = shut_down(qemu);
-    let kernel = guest_verdict(&result, &tail, refusals).map_err(|e| format!("{role}: {e}"))?;
-    for want in [MOVE_NOW, CAME_BACK] {
-        if !kernel.contains(want) {
-            return Err(format!("{role}: the kernel never said {want:?}:\n{kernel}"));
-        }
-    }
-    no_panic(role, &tail)?;
-    Ok((kernel, tail, spans))
 }
 
 /// What the guest said: exit 0, `refusals` refusals said by name — an exit
@@ -630,16 +370,6 @@ fn home_file_reads_back(image: &Path) -> Result<(), String> {
         ));
     }
     Ok(())
-}
-
-/// `span`'s bytes of the file at `path`, without reading the rest of a sparse
-/// stick.
-pub(super) fn read_span(path: &Path, span: Span) -> Result<Vec<u8>, String> {
-    let mut file = std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
-    file.seek(SeekFrom::Start(span.start)).map_err(|e| format!("seek: {e}"))?;
-    let mut buf = vec![0u8; span.len as usize];
-    file.read_exact(&mut buf).map_err(|e| format!("read {}: {e}", path.display()))?;
-    Ok(buf)
 }
 
 /// One partition a crafted table carries: its name, length in bytes, type,

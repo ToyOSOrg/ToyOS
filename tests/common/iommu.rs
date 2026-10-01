@@ -684,9 +684,21 @@ pub fn iommu_virtio_platform(
         }
 
         // `netcase`: the NIC's driver is a process, and this is the one config
-        // that runs it.
-        let qemu = QemuInstance::boot_with_options(&netcase(), &[], &[], options);
-        let log = Serial::boot(&qemu);
+        // that runs it. A daemon's line is waited for on the stream: the boot
+        // log ends at test-runner's `===READY===`, its first act, and nothing
+        // orders that against what the programs init started before it print.
+        let mut qemu = QemuInstance::boot_with_options(&netcase(), &[], &[], options);
+        let said: &[&str] = if behind_unit {
+            &[CLAIM_BOUNDED, NETD_NEGOTIATED]
+        } else {
+            &[BLOCKD_REFUSED, FSD_WITHOUT_DATA]
+        };
+        let mut text = qemu.boot_log().to_string();
+        qemu::await_guest(&mut qemu, &mut text, &format!("{name}: {said:?}"), |t| {
+            said.iter().all(|line| t.contains(line))
+        })
+        .map_err(|e| format!("{e}\n{text}"))?;
+        let log = Serial::named("boot console", text);
         log.must_be_clean()?;
         log.must_say("Boot: complete")?;
         log.must_say("init: started netd")?;
@@ -705,10 +717,7 @@ pub fn iommu_virtio_platform(
             // netd asks the kernel for a read past the end, one straddling it
             // and one misaligned, and refuses to drive a claim that answers any
             // of them.
-            log.must_say(
-                "netd: this claim answers 4096 bytes of configuration space and refuses every \
-                 access outside them",
-            )?;
+            log.must_say(CLAIM_BOUNDED)?;
             // The two things a hand-over spends, on the same function and the
             // same machine the arm below requires to be unspent. Without this
             // pair those `must_not_say`s would pass against a kernel that had
@@ -773,6 +782,17 @@ pub fn iommu_virtio_platform(
     declining_is_not_free(test_config, c_bins, rust_bins)
 }
 
+/// netd's, once its claim answers nothing outside its own function.
+const CLAIM_BOUNDED: &str =
+    "netd: this claim answers 4096 bytes of configuration space and refuses every access \
+     outside them";
+/// netd's feature line, the kernel's shape under netd's name.
+const NETD_NEGOTIATED: &str = "netd: VirtIO: PCI ";
+const BLOCKD_REFUSED: &str =
+    "blockd: NOT SERVING — pci:1b36:0010 is on this machine and the kernel refused this service its claim";
+const FSD_WITHOUT_DATA: &str =
+    "fsd: the block service would not list its partitions (Refused(ClaimRefused)); DATA is absent this boot";
+
 /// The slot QEMU's `-device` order puts `tests/netcase`'s NVMe controller on,
 /// the one its blockd row claims.
 const NVME_AT: &str = "00:02.0";
@@ -793,17 +813,12 @@ fn no_unit_is_no_claim(log: &Serial) -> Result<(), String> {
     const NO_DOMAIN: &str = "it would have no address space of its own";
     // The same judge the two arms in `faults` read, so a refusal that spent
     // something is red wherever it is reached. netd's own exit is the third
-    // saying, and is not read here: it speaks after the ready marker this
-    // capture ends at.
+    // saying, and is not read here.
     super::faults::refused_claim(log, super::https::VIRTIO.claims, NO_DOMAIN, &[NVME_AT])?;
     log.must_say(&format!("pcidev: PCI {NVME_AT} NOT HANDED OVER — {NO_DOMAIN}"))?;
     log.must_say("init: blockd: pci:1b36:0010 is on this machine and could not be handed over")?;
-    log.must_say(
-        "blockd: NOT SERVING — pci:1b36:0010 is on this machine and the kernel refused this service its claim",
-    )?;
-    log.must_say(
-        "fsd: the block service would not list its partitions (Refused(ClaimRefused)); DATA is absent this boot",
-    )?;
+    log.must_say(BLOCKD_REFUSED)?;
+    log.must_say(FSD_WITHOUT_DATA)?;
     log.must_not_say(super::storage::IN_MEMORY)?;
     // And this machine handed *nothing* over, which is more than the claim's
     // own refusal says: with no unit there is no function any process could be

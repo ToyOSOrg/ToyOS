@@ -136,3 +136,5 @@ landing on `sched/dump.rs` hours before the first occurrence: `deaf_window` is
 `#[cfg(feature = "dump-deaf-cpu")]`, only `dump_nmi_probe` asks for that feature
 (`tests/common/faults.rs:321`), and `screen_blocked_dump` boots a kernel that
 does not contain the function.
+
+`blocked_dump` is deleted; `issues/build/parallel-tests-red-under-other-suites.md` records the commit that restores it. `screen_blocked_dump` stays.

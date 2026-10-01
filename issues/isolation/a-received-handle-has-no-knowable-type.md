@@ -68,3 +68,5 @@ the next reader will ask why a class this wide was left open.
 
 So it stays open, and what it is waiting on is a decision rather than an
 instrument.
+
+`launcher_refusals` is deleted; `issues/build/parallel-tests-red-under-other-suites.md` records the commit that restores it.

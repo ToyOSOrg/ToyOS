@@ -314,7 +314,7 @@ pub fn write_watch(object: &KObjectRef) -> Option<WatchRef> {
 /// share: a console closing is not every console's keyboard going away.
 fn close_ends_polls(object: &KObjectRef) -> bool {
     match object {
-        KObjectRef::SysCap(_) => crate::actuator::log_close_cancels_any_syscap(),
+        KObjectRef::SysCap(_) => false,
         // A keyboard *claim* closing is the stimulus, not a `SysCap`.
         KObjectRef::Console(_) => crate::actuator::keyboard_close_cancels_every_console(),
         KObjectRef::Device(d) => match d.class() {
@@ -651,60 +651,20 @@ pub(crate) enum Answered {
     Deadman { attempts: u32, took: crate::time::Duration },
 }
 
-/// Whose run of attempts [`until_answered`] makes: what `fsync-budget-spent`
-/// refuses the first attempt of, once.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-#[cfg_attr(not(feature = "boot-actuators"), allow(dead_code))]
-pub(crate) enum Run {
-    /// One kind of transfer on one claimed partition; `None` for a claim
-    /// whose partition is already let go, whose every attempt answers `Gone`.
-    Claim(Option<(crate::block::DeviceId, [u8; 16])>, ClaimOp),
-}
-
-/// A partition claim's kinds of transfer, each refused once on its own.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum ClaimOp {
-    Read,
-    Write,
-    Flush,
-}
-
-/// Whether `run`'s first attempt goes under an operation already over: once
-/// per run, so a writer whose every flush leaves records to flush (`logd`)
-/// is refused once and not on every flush it will ever make.
-#[cfg(feature = "boot-actuators")]
-fn staged_spent(run: impl Fn() -> Run) -> bool {
-    static REFUSED: crate::sync::Lock<alloc::collections::BTreeSet<Run>> =
-        crate::sync::Lock::new(alloc::collections::BTreeSet::new());
-    crate::actuator::fsync_budget_spent() && REFUSED.lock().insert(run())
-}
-
 /// `attempt` run until it answers anything but `WouldBlock` — a budget that
 /// expired on a live device, never a device fact — each time on a fresh
 /// budget, parked between two (`block::between_attempts`), and given up once
 /// [`crate::block::DEADMAN`] is spent. The one loop in this kernel that asks a
 /// block device again, for a caller holding no spinlock: nothing it holds can
 /// be held across the wait, so no disk wait here is under one.
-#[cfg_attr(not(feature = "boot-actuators"), allow(unused_variables))]
-pub(crate) fn until_answered(
-    run: impl Fn() -> Run,
-    mut attempt: impl FnMut() -> Result<(), SyscallError>,
-) -> Answered {
+pub(crate) fn until_answered(mut attempt: impl FnMut() -> Result<(), SyscallError>) -> Answered {
     let began = crate::clock::now();
     // Bounds the run of attempts, never a single attempt's elapsed time.
     let deadman = Deadline::at(began + crate::block::DEADMAN.duration());
-    #[cfg(feature = "boot-actuators")]
-    let deadman = if crate::actuator::fsync_deadman_now() { Deadline::passed() } else { deadman };
     let mut attempts = 0u32;
     loop {
         attempts += 1;
-        let answer = {
-            // Stages a first attempt with its budget already spent, exercising the shipped refusal itself.
-            #[cfg(feature = "boot-actuators")]
-            let _spent = (attempts == 1 && staged_spent(&run))
-                .then(|| crate::scheduler::Operation::begin(Deadline::passed()));
-            attempt()
-        };
+        let answer = attempt();
         if answer != Err(SyscallError::WouldBlock) {
             return Answered::Answer { answer, attempts, took: crate::clock::now() - began };
         }
@@ -744,8 +704,7 @@ fn partition_fsync(claim: &DeviceClaim) -> u64 {
             return SyscallError::PermissionDenied.to_u64();
         }
     }
-    let whose = || Run::Claim(claim.partition_on(), ClaimOp::Flush);
-    let run = until_answered(whose, || match claim.partition_view() {
+    let run = until_answered(|| match claim.partition_view() {
         Some(view) => view.flush().map_err(block_word),
         None => Err(SyscallError::Gone),
     });

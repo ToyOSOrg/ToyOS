@@ -9,7 +9,7 @@ pub mod clock;
 pub mod lane;
 pub mod compile;
 pub mod console;
-/// The device boot: what `tests/metaldevicecase` measures, and its two judges.
+/// The device boot: what `tests/metaldevicecase` measures.
 pub mod devices;
 pub mod faults;
 pub mod fwvars;
@@ -36,7 +36,6 @@ pub mod serial;
 pub mod ssh;
 pub mod storage;
 pub mod swap;
-pub mod toybox;
 pub mod update;
 pub mod usb;
 pub mod volumes;

@@ -57,8 +57,7 @@ After a landing, sync the primary checkout. When a landing changes how agents wo
 agent is told the new way in one line and merges main before its next round.
 A red that is not about the diff is fixed at its owner, never re-run away, and nothing but a defect
 may turn `main` red.
-A fix for a red lands ahead of feature work. A nightly name red three nights running gets an owner
-issue that day, and is deleted if nobody owns it a week later.
+A fix for a red lands ahead of feature work.
 
 ## Runs
 

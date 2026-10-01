@@ -1834,58 +1834,8 @@ pub fn storage_online(index: usize) -> Option<bool> {
     })
 }
 
-/// Under-deliver the next READ(10) on the disk the gate is driving. See [`msc::short_read`].
-#[cfg(feature = "boot-actuators")]
-pub fn arm_short_read() {
-    msc::short_read::arm();
-}
-
 /// Stop this machine inside the next WRITE(10), at `at`. See [`msc::mid_write`].
 #[cfg(feature = "boot-actuators")]
 pub fn arm_mid_write_wedge(at: toyos_xhci::bot::Phase) {
     msc::mid_write::arm(at);
 }
-
-#[cfg(feature = "boot-actuators")]
-pub use msc::staged::Fault as StagedFault;
-
-/// Stage `n` faults on the next commands. See [`msc::staged`].
-#[cfg(feature = "boot-actuators")]
-pub fn stage_transport_faults(n: u8, fault: StagedFault) {
-    msc::staged::arm(n, fault, None);
-}
-
-/// Have the next `n` class resets' TEST UNIT READY refused. See
-/// [`msc::staged::arm_probes`].
-#[cfg(feature = "boot-actuators")]
-pub fn stage_probe_faults(n: u8) {
-    msc::staged::arm_probes(n);
-}
-
-/// Take back the staged probe faults no recovery took, and say how many.
-#[cfg(feature = "boot-actuators")]
-pub fn disarm_probe_faults() -> u8 {
-    msc::staged::disarm_probes()
-}
-
-/// Have the next disk to bind refuse its INQUIRY `n` times. See
-/// [`msc::staged::on_a_later_bind`].
-#[cfg(feature = "boot-actuators")]
-pub fn stage_bind_faults(n: u8) {
-    msc::staged::on_a_later_bind(n);
-}
-
-/// Take back the staged faults no command took, and say how many. See
-/// [`msc::staged::disarm`].
-#[cfg(feature = "boot-actuators")]
-pub fn disarm_transport_faults() -> u8 {
-    msc::staged::disarm()
-}
-
-/// The breaks in a row a transport gets, for a gate that stages exactly that
-/// many.
-#[cfg(feature = "boot-actuators")]
-pub fn max_transport_breaks() -> u8 {
-    msc::MAX_TRANSPORT_BREAKS
-}
-

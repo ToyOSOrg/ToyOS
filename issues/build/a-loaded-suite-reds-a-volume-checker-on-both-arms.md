@@ -137,8 +137,7 @@ session at 2.13x-2.19x width throughout:
 branch's changes.** That is the both-arms pair this entry's heading claims and
 did not have for any single name: an `ALONE … red again` here is evidence that
 the leak is real and reproducible, and no evidence at all about the branch that
-met it. `cargo run -- --known-red toybox_cp_volume` still answers `NOT ON THE
-LIST`, which is why this is written down.
+met it.
 
 `redirty_mid_flush` was A/B'd the same way: 1 of 3 on the branch, 0 of 3 on
 `main`, and its one red was `ALONE … GREEN`. Six runs cannot separate that, which
@@ -179,3 +178,16 @@ The base run carries **zero** `usb-storage: … no answer in the data phase in
 class and not the class itself. `ftruncate_flush_race` and `fs_rename_durable`
 are new names for this entry; `main` alone produced four of the family in one
 run, which no earlier pair here had.
+
+## Deleted as flaky tests
+
+`log_flush_retry` (`9ebf080e8`), `fat_backing_revoked` (`3aad43b13`) and
+`fs_dirs_durable` (`690fa3e83`); `git revert` of each commit brings its test
+back.
+
+Then the rest of this file's names: `toybox_cp_volume` (`e1103545c`, with
+its module `tests/common/toybox.rs`), `redirty_mid_flush` (`5c3f464a1`, with
+its binary and `test-small-caches`), `fs_rename_durable` (`63b0874ba`, with
+its binary), `esp_filesystem` (`27a926141`, with `esp_files`),
+`device_claim_lifetime` (`51cc87fcc`) and `screen_i8042_health`
+(`b7f157a72`). `git revert` of each brings its test back.

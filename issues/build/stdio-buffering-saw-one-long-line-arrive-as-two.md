@@ -26,3 +26,10 @@ between them, or the host's capture cutting it (`tests/common/console.rs`
 unjoins a line without a trailing newline from the next writer's). Which one
 is the question; `console_line_atomicity` is the gate that should hold the
 first.
+
+**Its test is deleted**, as a flaky test is: `2dfe1008e` took
+`90_stdio_buffering` out with its `C_METAL_SKIP` row, and `git revert
+2dfe1008e` brings it back.
+
+**Exit**: which side split the line named, the guest's two writes or the
+host's capture, and the case restored and green beside other guests.

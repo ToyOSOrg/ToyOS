@@ -110,12 +110,6 @@ pub fn claim_the_shutdown() -> bool {
 
 static CLAIMED: AtomicBool = AtomicBool::new(false);
 
-/// Whether a stop has been claimed, for `console-queue-at-the-stop`'s `klogd`.
-#[cfg(feature = "boot-actuators")]
-pub fn claimed() -> bool {
-    CLAIMED.load(core::sync::atomic::Ordering::Acquire)
-}
-
 /// What the stop's caller parks on between two sweeps.
 static PROGRESS: Watch = Watch::new();
 
@@ -231,12 +225,10 @@ fn sweep(caller: ThreadId) -> Sweep {
     out
 }
 
-/// `quiesce-last-park` and `quiesce-last-teardown`: one thread, named
-/// [`toyos_quiesce::LAST_THREAD`], held inside its `SYS_NANOSLEEP` or between
-/// leaving its process and tearing it down, until the stop's latest sweep
-/// counts it as the one thread still running, so the park or the process
-/// teardown it makes next is the last transition the stop sees. Without them no
-/// boot can tell whether that transition's post is what wakes the stop.
+/// `quiesce-last-park`: one thread, named [`toyos_quiesce::LAST_THREAD`], held
+/// inside its `SYS_NANOSLEEP` until the stop's latest sweep counts it as the
+/// one thread still running, so the park it makes next is the last transition
+/// the stop sees.
 #[cfg(feature = "boot-actuators")]
 pub mod last {
     use core::sync::atomic::{
@@ -248,30 +240,6 @@ pub mod last {
 
     use crate::watch::{self, Watch};
     use crate::time::{Budget, Deadline, Duration};
-
-    /// The transition the held thread makes once it is released.
-    #[derive(Clone, Copy)]
-    pub enum Last {
-        Park,
-        /// The last thread out of its process, between its leaving and its teardown.
-        Teardown,
-    }
-
-    impl Last {
-        fn armed(self) -> bool {
-            match self {
-                Last::Park => crate::actuator::quiesce_last_park(),
-                Last::Teardown => crate::actuator::quiesce_last_teardown(),
-            }
-        }
-
-        fn name(self) -> &'static str {
-            match self {
-                Last::Park => "quiesce-last-park",
-                Last::Teardown => "quiesce-last-teardown",
-            }
-        }
-    }
 
     /// How long either side waits for the other before the boot dies by name:
     /// the thread is held before init takes the stop request, so its wait is
@@ -306,36 +274,17 @@ pub mod last {
         ALONE.store(swept.running == 1 && held_running, Release);
     }
 
-    fn armed() -> Option<Last> {
-        [Last::Park, Last::Teardown].into_iter().find(|last| last.armed())
-    }
-
-    /// Hold the running thread here if it is the one `last` stages.
-    pub fn hold(last: Last) {
-        if !last.armed() {
+    /// Hold the running thread here if it is the one this boot stages.
+    pub fn hold() {
+        if !crate::actuator::quiesce_last_park() {
             return;
         }
         let Some(thread) = the_named_thread() else { return };
         if HELD.compare_exchange(NOBODY, word(thread), AcqRel, Acquire).is_err() {
             return;
         }
-        if !crate::scheduler::may_yield() {
-            // A thread killed in Ring 3 leaves at its exit boundary, at a depth
-            // where a yield asserts: refused there, and the stop goes on unheld.
-            // The slot this thread claimed above is freed, or the thread the
-            // boot stages could never take it.
-            HELD.store(NOBODY, Release);
-            crate::log!(
-                "{}: {} left outside a syscall and is not held",
-                last.name(),
-                toyos_quiesce::LAST_THREAD,
-            );
-            ARRIVED.post();
-            return;
-        }
         crate::log!(
-            "{}: {} is held until the stop waits on it alone",
-            last.name(),
+            "quiesce-last-park: {} is held until the stop waits on it alone",
             toyos_quiesce::LAST_THREAD,
         );
         ARRIVED.post();
@@ -345,22 +294,22 @@ pub mod last {
         while !ALONE.load(Acquire) {
             assert!(
                 !deadline.reached(crate::clock::now()),
-                "{}: the stop never came down to this thread alone in {} ms",
-                last.name(),
+                "quiesce-last-park: the stop never came down to this thread alone in {} ms",
                 STAGED.nanos() / 1_000_000,
             );
             crate::scheduler::yield_now();
         }
-        crate::log!("{}: the stop counts {} alone", last.name(), toyos_quiesce::LAST_THREAD);
+        crate::log!("quiesce-last-park: the stop counts {} alone", toyos_quiesce::LAST_THREAD);
     }
 
     /// Called by the shutdown before it stops anything: the stop is staged
     /// only once the thread it is staged around is inside its syscall.
     pub fn await_the_held_thread() {
-        let Some(last) = armed() else { return };
+        if !crate::actuator::quiesce_last_park() {
+            return;
+        }
         crate::log!(
-            "{}: the stop waits for {} to reach its syscall",
-            last.name(),
+            "quiesce-last-park: the stop waits for {} to reach its syscall",
             toyos_quiesce::LAST_THREAD,
         );
         let deadline = Deadline::at(crate::clock::now() + STAGED.duration());
@@ -375,8 +324,7 @@ pub mod last {
         );
         assert!(
             HELD.load(Acquire) != NOBODY,
-            "{}: no thread named {} reached its syscall in {} ms",
-            last.name(),
+            "quiesce-last-park: no thread named {} reached its syscall in {} ms",
             toyos_quiesce::LAST_THREAD,
             STAGED.nanos() / 1_000_000,
         );

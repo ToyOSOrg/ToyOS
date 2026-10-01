@@ -693,11 +693,13 @@ extern "C" fn idle_loop() -> ! {
         if crate::actuator::dump_deaf_cpu() {
             super::dump::deaf_window();
         }
-        // From the other side: the storming CPU has nothing to run,
-        // while the one under observation spins on `syscall` from Ring 3.
+        // The first NMI; its handler stages the nested one.
         #[cfg(feature = "boot-actuators")]
-        if crate::actuator::syscall_window_nmi() {
-            crate::arch::syscall::window_storm();
+        if crate::actuator::nmi_nested() {
+            static SENT: AtomicBool = AtomicBool::new(false);
+            if !SENT.swap(true, Ordering::Relaxed) {
+                crate::arch::irqchip::send_nmi(percpu::cpu_id());
+            }
         }
         #[cfg(feature = "boot-actuators")]
         if crate::drivers::panic_console::probe_due() {
