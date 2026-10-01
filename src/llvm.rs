@@ -2,7 +2,7 @@
 //! one per key on this host, shared by every compiler build that names it.
 //!
 //! **An LLVM is a function of its key** ([`key`]): the `src/llvm-project` commit
-//! the fork checkout's gitlink names (`compiler::llvm_commit`, which refuses a
+//! the fork checkout's gitlink names (`sysroot::gitlink`, which refuses a
 //! checkout holding what no commit does and a gitlink staged and not committed),
 //! the committed tree of its `src/bootstrap` (one holding what no commit does is
 //! refused), the bootstrap configuration below, [`RECIPE`], and the tools the
@@ -41,9 +41,9 @@ use std::process::Command;
 use std::sync::OnceLock;
 
 use crate::buildlock::{Guard, Keyed};
-use crate::compiler::{llvm_commit, LLVM};
+use crate::compiler::LLVM;
 use crate::keystore::{self, Key};
-use crate::sysroot::{clone_tree, git_bytes, git_out};
+use crate::sysroot::{clone_tree, git_bytes, git_out, gitlink};
 use crate::toolchain::{self, host_triple};
 
 /// What changes how a key's sources become an LLVM and is none of the other
@@ -139,7 +139,7 @@ pub fn key(fork: &Path) -> Key {
 fn key_of(fork: &Path, recipe: &str, config: &str, tools: &str) -> Key {
     refuse_uncommitted_bootstrap(fork);
     let bootstrap = git_out(fork, &["rev-parse", &format!("HEAD:{BOOTSTRAP}")]);
-    Key::of([recipe, config, &llvm_commit(fork), bootstrap.trim(), tools].join("\n\0\n").as_bytes())
+    Key::of([recipe, config, &gitlink(fork, LLVM), bootstrap.trim(), tools].join("\n\0\n").as_bytes())
 }
 
 /// Give `command` nothing of this process's environment but [`ENVIRONMENT`].
@@ -293,7 +293,7 @@ fn place(fork: &Path, key: &Key, dir: &Path, build: &impl Fn(&Path) -> PathBuf) 
     );
     let checkout = fork.join(LLVM);
     assert!(checkout.join(".git").exists(), "the LLVM build left no checkout at {}", checkout.display());
-    let (built_from, commit) = (git_out(&checkout, &["rev-parse", "HEAD"]), llvm_commit(fork));
+    let (built_from, commit) = (git_out(&checkout, &["rev-parse", "HEAD"]), gitlink(fork, LLVM));
     // Bootstrap's `Llvm` step checks the gitlink's commit out before it builds,
     // so a checkout behind it, the key never reads, is moved first.
     assert!(

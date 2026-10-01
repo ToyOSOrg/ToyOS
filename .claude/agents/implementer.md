@@ -24,8 +24,7 @@ Where hardware or anything uncertain is involved, take the cheap measurement bef
 guess. Then build, then test before anyone reviews:
 
 - Host tests only: `cargo run -- --ci host`, and `cargo run -- --build-only` at most for the
-  image. Never a guest test or any other `cargo run`: the plain suite runs in CI's `guest` check,
-  and the orchestrator runs every guest mutation.
+  image. Never a guest test or any other `cargo run`: the orchestrator runs every guest test.
 - A result is the command's own exit code: `<cmd> > <file> 2>&1; echo EXIT=$?`. A grepped
   `test result` line is not one, and a gate you did not run is a gate you do not claim.
 - Long commands run in the background with output to a file under the job scratchpad the brief

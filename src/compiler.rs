@@ -237,42 +237,6 @@ fn key_of(fork: &Path, build: &str, llvm: &Key) -> Key {
     Key::of(parts.join("\n\0\n").as_bytes())
 }
 
-/// The LLVM commit `fork` builds against: the one its `HEAD` records, refused
-/// when its index stages another, because bootstrap checks out the index's. An
-/// LLVM change is a commit there and a gitlink here, so a checkout holding
-/// anything no commit does is refused rather than named by its commit.
-pub(crate) fn llvm_commit(fork: &Path) -> String {
-    let checkout = fork.join(LLVM);
-    // Exactly what bootstrap's LLVM stamp hashes beyond the commit; the untracked
-    // cache spares each call a walk of the whole tree.
-    let status = ["-c", "core.untrackedCache=true", "status", "--porcelain", "--untracked-files=normal"];
-    let edited = checkout.join(".git").exists() && !git_bytes(&checkout, &status).is_empty();
-    assert!(
-        !edited,
-        "{} holds changes no commit does, and a compiler is keyed on the commit its gitlink \
-         names: commit them there and record that commit in {}",
-        checkout.display(),
-        fork.display(),
-    );
-    let recorded = git_out(fork, &["ls-tree", "HEAD", LLVM]);
-    let committed = match recorded.split_whitespace().collect::<Vec<_>>().as_slice() {
-        ["160000", "commit", sha, _] => sha.to_string(),
-        _ => panic!("{} records no {LLVM} gitlink: `git ls-tree HEAD {LLVM}` said {recorded:?}", fork.display()),
-    };
-    let indexed = git_out(fork, &["ls-files", "--stage", LLVM]);
-    let staged = match indexed.split_whitespace().collect::<Vec<_>>().as_slice() {
-        ["160000", sha, "0", _] => sha.to_string(),
-        _ => panic!("{} indexes no {LLVM} gitlink: `git ls-files --stage {LLVM}` said {indexed:?}", fork.display()),
-    };
-    assert!(
-        staged == committed,
-        "{} stages {LLVM} at {staged}, and its HEAD records {committed}: bootstrap builds the one \
-         staged, and nothing is keyed on what no commit holds; commit the gitlink, or unstage it",
-        fork.display(),
-    );
-    committed
-}
-
 /// The compiler `root`'s fork checkout at `fork` names: the primary's where its
 /// `compiler/` is the one the primary's was built from, and otherwise its own,
 /// built if nobody has built it, held in use for as long as the returned value
@@ -720,7 +684,7 @@ pub(crate) mod tests {
     /// Write the primary's record as it was written before its compiler linked
     /// the host's LLVM: its `compiler/` and its LLVM commit.
     pub(crate) fn record_before_the_store(rust_dir: &Path) {
-        fs::write(primary_record(rust_dir), format!("{} llvm {}", compiler_source(rust_dir), llvm_commit(rust_dir))).unwrap();
+        fs::write(primary_record(rust_dir), format!("{} llvm {}", compiler_source(rust_dir), crate::sysroot::gitlink(rust_dir, LLVM))).unwrap();
     }
 
     /// `fork`'s LLVM checked out at a commit of its own.

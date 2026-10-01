@@ -292,22 +292,63 @@ fn manifest_line(root: &Path, manifest: &str) -> String {
 /// as one hash.
 ///
 /// **Source as git sees it**: tracked files and untracked ones no ignore rule
-/// covers, into every submodule checked out there — never what a build or the
-/// desktop leaves beside them (bootstrap's `__pycache__`, Finder's
-/// `.DS_Store`), which would make a key that moves while it is being built.
+/// covers, and each submodule as the commit its gitlink records ([`gitlink`]),
+/// checked out or not — never what a build or the desktop leaves beside them
+/// (bootstrap's `__pycache__`, Finder's `.DS_Store`), which would make a key
+/// that moves while it is being built.
 pub(crate) fn tree_identity(base: &Path, paths: &[&str], links: Links) -> String {
-    let mut files = Vec::new();
-    source_files(base, paths, links, &mut files);
-    files.sort();
+    let mut sources = Vec::new();
+    source_files(base, paths, links, &mut sources);
+    sources.sort();
     let mut hasher = Sha256::new();
-    for path in files {
-        let data = fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    for (path, commit) in sources {
         hasher.update(path.strip_prefix(base).unwrap_or(&path).to_string_lossy().as_bytes());
         hasher.update([0]);
-        hasher.update(&*identity::of(&path, &data));
+        match commit {
+            Some(commit) => hasher.update(commit.as_bytes()),
+            None => {
+                let data = fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+                hasher.update(&*identity::of(&path, &data));
+            }
+        }
         hasher.update([0]);
     }
     hex(&hasher.finalize())[..16].to_string()
+}
+
+/// The commit `checkout`'s `HEAD` records for its submodule at `path`, which is
+/// the one a build checks out there; refused when the submodule's checkout
+/// holds what no commit does, or the index stages another commit, because a
+/// key names it by that commit.
+pub(crate) fn gitlink(checkout: &Path, path: &str) -> String {
+    let submodule = checkout.join(path);
+    // The untracked cache spares each call a walk of a whole tree.
+    let status = ["-c", "core.untrackedCache=true", "status", "--porcelain", "--untracked-files=normal"];
+    let edited = submodule.join(".git").exists() && !git_bytes(&submodule, &status).is_empty();
+    assert!(
+        !edited,
+        "{} holds changes no commit does, and a key names it by the commit its gitlink records: \
+         commit them there and record that commit in {}",
+        submodule.display(),
+        checkout.display(),
+    );
+    let recorded = git_out(checkout, &["ls-tree", "HEAD", path]);
+    let committed = match recorded.split_whitespace().collect::<Vec<_>>().as_slice() {
+        ["160000", "commit", sha, _] => sha.to_string(),
+        _ => panic!("{} records no {path} gitlink: `git ls-tree HEAD {path}` said {recorded:?}", checkout.display()),
+    };
+    let indexed = git_out(checkout, &["ls-files", "--stage", path]);
+    let staged = match indexed.split_whitespace().collect::<Vec<_>>().as_slice() {
+        ["160000", sha, "0", _] => sha.to_string(),
+        _ => panic!("{} indexes no {path} gitlink: `git ls-files --stage {path}` said {indexed:?}", checkout.display()),
+    };
+    assert!(
+        staged == committed,
+        "{} stages {path} at {staged}, and its HEAD records {committed}: a build checks out the one \
+         staged, and nothing is keyed on what no commit holds; commit the gitlink, or unstage it",
+        checkout.display(),
+    );
+    committed
 }
 
 /// What [`tree_identity`] makes of a symbolic link, which git keeps as the path
@@ -320,14 +361,27 @@ pub(crate) enum Links {
     Skipped,
 }
 
-fn source_files(checkout: &Path, paths: &[&str], links: Links, out: &mut Vec<PathBuf>) {
-    let mut args = vec!["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--"];
-    args.extend(paths);
-    let listed = git_bytes(checkout, &args);
+/// Each source under `paths` of `checkout`, with the commit of each that is a
+/// submodule ([`gitlink`]).
+fn source_files(checkout: &Path, paths: &[&str], links: Links, out: &mut Vec<(PathBuf, Option<String>)>) {
+    let listed = |how: &[&str]| git_bytes(checkout, &[&["ls-files", "-z"][..], how, &["--"][..], paths].concat());
+    let cached = listed(&["--stage"]);
+    let others = listed(&["--others", "--exclude-standard"]);
+    // `<mode> <object> <stage>\t<path>`, and a gitlink's mode is 160000.
+    let cached = cached.split(|b| *b == 0).filter(|e| !e.is_empty()).map(|entry| {
+        let at = entry.iter().position(|b| *b == b'\t').unwrap_or_else(|| panic!("git ls-files --stage said {entry:?}"));
+        (&entry[at + 1..], entry.starts_with(b"160000 "))
+    });
+    let others = others.split(|b| *b == 0).filter(|e| !e.is_empty()).map(|entry| (entry, false));
     let mut seen = BTreeSet::new();
-    for entry in listed.split(|b| *b == 0).filter(|e| !e.is_empty()) {
-        let path = checkout.join(String::from_utf8_lossy(entry).as_ref());
+    for (entry, submodule) in cached.chain(others) {
+        let name = String::from_utf8_lossy(entry);
+        let path = checkout.join(name.as_ref());
         if !seen.insert(path.clone()) {
+            continue;
+        }
+        if submodule {
+            out.push((path, Some(gitlink(checkout, &name))));
             continue;
         }
         let Ok(meta) = fs::symlink_metadata(&path) else { continue };
@@ -344,7 +398,7 @@ fn source_files(checkout: &Path, paths: &[&str], links: Links, out: &mut Vec<Pat
         } else if path.join(".git").exists() {
             source_files(&path, &["."], links, out);
         } else if meta.is_file() {
-            out.push(path);
+            out.push((path, None));
         }
     }
 }
@@ -1145,6 +1199,48 @@ mod tests {
         let now = k();
         assert!(now.sysroot != was.sysroot && now.freestanding != was.freestanding, "another compiler kept a key: {now:?}");
         assert_eq!(now.identity.stale(Some(&stamp)), Some(Stale::All), "another compiler kept a crate's host half");
+    }
+
+    /// **A submodule is the commit its gitlink records, checked out or not**:
+    /// a fork whose `library/backtrace` is not checked out yet, as a runner's
+    /// is when it keys the stores its build then makes, keys its freestanding
+    /// libraries as it does once the build has checked it out. Another commit
+    /// moves the key; an edit there, or a gitlink staged and not committed, is
+    /// refused.
+    #[test]
+    fn a_submodule_is_the_commit_its_gitlink_records_checked_out_or_not() {
+        let base = TempDir::new("key-submodule");
+        let (root, rust_dir, _) = keyed(&base);
+        let backtrace = base.join("backtrace-src");
+        write(&backtrace.join("src/lib.rs"), "pub fn trace() {}\n");
+        git(&backtrace, &["init", "-q"]);
+        git(&backtrace, &["add", "-A"]);
+        git(&backtrace, &["commit", "-qm", "backtrace"]);
+        let fork = base.join("fork-src");
+        write(&fork.join("library/std/src/lib.rs"), "pub fn exit() {}\n");
+        write(&fork.join("src/bootstrap/src/lib.rs"), "fn main() {}\n");
+        git(&fork, &["init", "-q"]);
+        git(&fork, &["submodule", "add", "-q", backtrace.to_str().unwrap(), "library/backtrace"]);
+        git(&fork, &["add", "-A"]);
+        git(&fork, &["commit", "-qm", "the fork"]);
+        let clone = base.join("clone");
+        git(&base, &["clone", "-q", fork.to_str().unwrap(), clone.to_str().unwrap()]);
+
+        let k = || freestanding_key(&root, &Compiler::primary(&rust_dir).key(), &clone);
+        assert!(fs::read_dir(clone.join("library/backtrace")).unwrap().next().is_none(), "the clone checked its submodule out");
+        let unchecked = k();
+        git(&clone, &["submodule", "update", "-q", "--init", "library/backtrace"]);
+        assert_eq!(k(), unchecked, "checking the submodule out moved the key");
+
+        write(&clone.join("library/backtrace/src/lib.rs"), "pub fn trace() { loop {} }\n");
+        let said = refusal(|| drop(k()));
+        assert!(said.contains("library/backtrace holds changes no commit does"), "{said}");
+        git(&clone.join("library/backtrace"), &["commit", "-qam", "another backtrace"]);
+        git(&clone, &["add", "library/backtrace"]);
+        let said = refusal(|| drop(k()));
+        assert!(said.contains("stages library/backtrace"), "{said}");
+        git(&clone, &["commit", "-qm", "another backtrace"]);
+        assert_ne!(k(), unchecked, "another backtrace commit kept the key");
     }
 
     /// **A sysroot's recorded witness is the one its build wrote**, read back
