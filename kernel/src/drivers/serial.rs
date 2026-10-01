@@ -66,32 +66,38 @@ pub fn backend() -> Backend {
 
 static BACKEND: BackendLock = BackendLock::new();
 
+/// The console UART's registers, asked for: what `arch::console_uart` moves a
+/// byte with. Only this file builds one, for a [`BackendGuard`] and a
+/// [`PanicUart`].
+pub struct Registers(());
+
 /// Exclusive access to the serial backend; interrupts are off for as long as the guard lives.
 /// Same-CPU re-entry from an IRQ handler deadlocks the spin.
 pub struct BackendGuard {
     // Fields drop in order: the backend is released before interrupts reopen.
     _held: Held<'static>,
     _irq: IrqGuard,
+    registers: Registers,
 }
 
 impl BackendGuard {
     pub fn lock() -> Self {
         let irq = IrqGuard::close();
-        Self { _held: BACKEND.lock(), _irq: irq }
+        Self { _held: BACKEND.lock(), _irq: irq, registers: Registers(()) }
     }
 
     /// Writes raw bytes with no escape stripping.
     pub fn write_raw(&mut self, bytes: &[u8]) {
         match backend() {
-            Backend::Virtio => super::virtio_console::write_bytes_locked(bytes),
-            Backend::Uart => uart_write_bytes(bytes),
+            Backend::Virtio => super::virtio_console::write_bytes_locked(self, bytes),
+            Backend::Uart => uart_write_bytes(&mut self.registers, bytes),
             Backend::None => {}
         }
     }
 
     pub fn has_data(&self) -> bool {
         if super::virtio_console::is_ready() {
-            super::virtio_console::has_data_locked()
+            super::virtio_console::has_data_locked(self)
         } else {
             uart_present() && uart::rx_ready()
         }
@@ -99,9 +105,9 @@ impl BackendGuard {
 
     pub fn try_read_byte(&mut self) -> Option<u8> {
         if super::virtio_console::is_ready() {
-            super::virtio_console::try_read_byte_locked()
+            super::virtio_console::try_read_byte_locked(self)
         } else if uart_present() && uart::rx_ready() {
-            Some(uart::read_byte())
+            Some(uart::read_byte(&mut self.registers))
         } else {
             None
         }
@@ -121,18 +127,25 @@ pub fn try_read_byte() -> Option<u8> {
 /// ~1s of spin, long enough for a live guard holder to release and short enough not to hang panic.
 const PANIC_LOCK_SPIN_LIMIT: u64 = 100_000_000;
 
-/// The console UART on a fatal path, and the one way a fatal path writes it.
-/// Never held across a `log!`: before `klogd` runs, a record drains inline,
-/// on this CPU, through these registers.
+/// The console UART's registers for a fatal path, from [`panic_registers`].
+/// A `log!` under one before `klogd` runs may drain inline on this CPU, as a
+/// burst that `BackendLock::lock` refuses while this CPU's fatal path holds
+/// the registers.
 pub struct PanicUart(Hold);
 
 enum Hold {
     /// Taken from nobody, or from a holder that let go inside the bound.
     Held(BackendGuard),
     /// This CPU's own fatal path holds the registers, underneath this one.
-    Reentered { _irq: IrqGuard },
+    Reentered(Over),
     /// Another holder kept them through the whole bound, which was said.
-    Expired { _irq: IrqGuard },
+    Expired(Over),
+}
+
+/// The registers, written over whoever holds them.
+struct Over {
+    registers: Registers,
+    _irq: IrqGuard,
 }
 
 /// What a fatal path that waited out another holder writes first.
@@ -147,20 +160,28 @@ const DRAINED_RAW: &[u8] =
 /// let them go, and had at once where this CPU's fatal path holds them.
 pub fn panic_registers() -> PanicUart {
     let irq = IrqGuard::close();
-    PanicUart(match BACKEND.seize(crate::arch::cpu::hardware_id(), PANIC_LOCK_SPIN_LIMIT) {
-        Seized::Taken(held) => Hold::Held(BackendGuard { _held: held, _irq: irq }),
-        Seized::Reentered => Hold::Reentered { _irq: irq },
+    PanicUart(match BACKEND.seize(PANIC_LOCK_SPIN_LIMIT) {
+        Seized::Taken(held) => Hold::Held(BackendGuard { _held: held, _irq: irq, registers: Registers(()) }),
+        Seized::Reentered => Hold::Reentered(Over { registers: Registers(()), _irq: irq }),
         Seized::Expired => {
-            uart_write_bytes(WRITTEN_OVER);
-            Hold::Expired { _irq: irq }
+            let mut over = Over { registers: Registers(()), _irq: irq };
+            uart_write_bytes(&mut over.registers, WRITTEN_OVER);
+            Hold::Expired(over)
         }
     })
 }
 
 impl PanicUart {
+    fn registers(&mut self) -> &mut Registers {
+        match &mut self.0 {
+            Hold::Held(guard) => &mut guard.registers,
+            Hold::Reentered(over) | Hold::Expired(over) => &mut over.registers,
+        }
+    }
+
     /// Straight to the UART, never virtio-console: no allocation, bounded per byte.
     pub fn write(&mut self, bytes: &[u8]) {
-        uart_write_bytes(bytes);
+        uart_write_bytes(self.registers(), bytes);
     }
 
     /// An address, formatted as `{:#018x}` to match the rest of the crash report.
@@ -171,7 +192,7 @@ impl PanicUart {
             let nibble = (v >> (60 - 4 * i)) as u8 & 0xF;
             *byte = if nibble < 10 { b'0' + nibble } else { b'a' + nibble - 10 };
         }
-        uart_write_bytes(&out);
+        uart_write_bytes(self.registers(), &out);
     }
 
     /// A number, since the callers cannot format one.
@@ -190,7 +211,7 @@ impl PanicUart {
         for i in 0..n {
             out[i] = digits[n - 1 - i];
         }
-        uart_write_bytes(&out[..n]);
+        uart_write_bytes(self.registers(), &out[..n]);
     }
 }
 
@@ -210,11 +231,11 @@ pub unsafe fn panic_flush() {
         return;
     }
     let mut uart = panic_registers();
-    if let Hold::Held(registers) = &mut uart.0 {
-        crate::log::console::drain_locked(registers);
+    if let Hold::Held(guard) = &mut uart.0 {
+        crate::log::console::drain_locked(guard);
         return;
     }
-    if matches!(uart.0, Hold::Reentered { .. }) {
+    if matches!(uart.0, Hold::Reentered(_)) {
         uart.write(DRAINED_RAW);
     }
     // Disables virtio-console first: a half-submitted TX queue would panic
@@ -296,11 +317,11 @@ fn uart_write_fifo(bytes: &[u8]) {
     for chunk in bytes.chunks(uart::TX_BURST) {
         let mut asked = 0;
         loop {
-            let burst = BackendGuard::lock();
+            let mut burst = BackendGuard::lock();
             if uart::tx_ready() {
                 // A chunk is no more than the transmitter takes once ready.
                 for &b in chunk {
-                    uart::write_byte(b);
+                    uart::write_byte(&mut burst.registers, b);
                 }
                 break;
             }
@@ -430,7 +451,7 @@ pub const MAX_CONSOLE_LINE: usize = 1024;
 /// forever here, on `panic_flush`'s bypass path where nothing else can help.
 const THRE_SPIN_LIMIT: u32 = 100_000;
 
-fn uart_write_bytes(bytes: &[u8]) {
+fn uart_write_bytes(registers: &mut Registers, bytes: &[u8]) {
     if !uart_present() {
         return;
     }
@@ -441,6 +462,6 @@ fn uart_write_bytes(bytes: &[u8]) {
             }
             core::hint::spin_loop();
         }
-        uart::write_byte(b);
+        uart::write_byte(registers, b);
     }
 }

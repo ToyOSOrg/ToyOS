@@ -1,14 +1,14 @@
-//! Loom: a lost `try_lock` on the console backend leaves its holder holding,
-//! and a fatal path's `seize` gives up on a holder that never lets go but not
-//! on its own CPU's.
+//! Loom: a lost `try_lock` on the console backend leaves its holder holding;
+//! a fatal path's `seize` waits for a holder that lets go, gives up on one
+//! that never does, and has its own CPU's hold at once; and a burst beneath
+//! its own CPU's fatal path is refused rather than spun on.
 //!
-//! The console drain takes the backend with `try_lock` from every CPU that
-//! logs, so a losing attempt is the common case beside another CPU's write.
 //! A loss that released the lock let a third writer in under the holder. The
 //! negative control is the `serial-try-lock-then-some` feature, which must red
 //! this file.
 #![cfg(feature = "loom")]
 
+use kernel_loom::arch::cpu::become_cpu;
 use kernel_loom::serial_lock::{BackendLock, Seized};
 use loom::cell::UnsafeCell;
 use loom::sync::Arc;
@@ -52,14 +52,42 @@ fn two_writers_never_overlap() {
     });
 }
 
+loom::lazy_static! {
+    /// A lock whose burst can be handed to another thread: [`Held`] borrows it.
+    static ref LOCK: BackendLock = BackendLock::new();
+}
+
+/// The wait inside the bound: a burst held when a seize begins, and let go on
+/// another CPU, is taken. Each time the seize runs again before the holder has
+/// let go, which loom counts as a preemption of the holder, costs it a try, so
+/// `k` of them leave `k + 2` tries enough; unbounded, no count would be.
+#[test]
+fn a_seize_takes_a_burst_let_go_inside_the_bound() {
+    for preemptions in 0..=2u8 {
+        let mut model = loom::model::Builder::new();
+        model.preemption_bound = Some(usize::from(preemptions));
+        model.check(move || {
+            become_cpu(0);
+            let burst = LOCK.try_lock().expect("an unheld lock refused its first taker");
+            let holder = thread::spawn(move || drop(burst));
+            assert!(
+                matches!(LOCK.seize(u64::from(preemptions) + 2), Seized::Taken(_)),
+                "a fatal path gave up on a burst that let go inside the bound"
+            );
+            holder.join().unwrap();
+        });
+    }
+}
+
 /// Nothing on a fatal path waits for ever, and a holder that never lets go is
 /// what it would wait for.
 #[test]
 fn a_seize_gives_up_on_a_holder_that_never_lets_go() {
     loom::model(|| {
+        become_cpu(0);
         let lock = BackendLock::new();
         let _burst = lock.try_lock().expect("an unheld lock refused its first taker");
-        assert!(matches!(lock.seize(0, 3), Seized::Expired), "a seize took a lock its holder kept");
+        assert!(matches!(lock.seize(3), Seized::Expired), "a seize took a lock its holder kept");
     });
 }
 
@@ -68,13 +96,21 @@ fn a_seize_gives_up_on_a_holder_that_never_lets_go() {
 #[test]
 fn a_seize_reenters_its_own_cpus_hold() {
     loom::model(|| {
-        let lock = BackendLock::new();
-        let Seized::Taken(held) = lock.seize(1, 1) else { panic!("a free lock refused a seize") };
-        assert!(matches!(lock.seize(1, 1), Seized::Reentered), "a fatal path waited out its own CPU's hold");
-        assert!(matches!(lock.seize(2, 1), Seized::Expired), "a fatal path took another CPU's hold");
+        let lock = Arc::new(BackendLock::new());
+        become_cpu(1);
+        let Seized::Taken(held) = lock.seize(1) else { panic!("a free lock refused a seize") };
+        assert!(matches!(lock.seize(1), Seized::Reentered), "a fatal path waited out its own CPU's hold");
         assert!(lock.try_lock().is_none(), "a burst took a fatal path's hold");
+        let other = {
+            let lock = lock.clone();
+            thread::spawn(move || {
+                become_cpu(2);
+                matches!(lock.seize(1), Seized::Expired)
+            })
+        };
+        assert!(other.join().unwrap(), "a fatal path took another CPU's hold");
         drop(held);
-        assert!(matches!(lock.seize(2, 1), Seized::Taken(_)), "a released lock stayed held");
+        assert!(matches!(lock.seize(1), Seized::Taken(_)), "a released lock stayed held");
     });
 }
 
@@ -94,11 +130,45 @@ fn a_seize_and_a_burst_never_overlap() {
                 }
             })
         };
-        if let Seized::Taken(held) = lock.seize(0, 2) {
+        become_cpu(0);
+        if let Seized::Taken(held) = lock.seize(2) {
             // SAFETY: as above.
             line.with_mut(|n| unsafe { *n += 1 });
             drop(held);
         }
+        burst.join().unwrap();
+    });
+}
+
+/// A burst on the CPU whose fatal path holds the registers would wait for a
+/// frame beneath it: it is refused, loudly.
+#[test]
+#[should_panic(expected = "serial: a burst asked for the console registers this cpu's own fatal path holds")]
+fn a_burst_beneath_its_own_cpus_fatal_path_is_refused() {
+    loom::model(|| {
+        become_cpu(1);
+        let lock = BackendLock::new();
+        let _fatal = lock.seize(1);
+        drop(lock.lock());
+    });
+}
+
+/// A burst on another CPU waits a fatal path's hold out, and has the lock
+/// once it is let go.
+#[test]
+fn a_burst_waits_out_another_cpus_fatal_path() {
+    loom::model(|| {
+        let lock = Arc::new(BackendLock::new());
+        become_cpu(1);
+        let Seized::Taken(fatal) = lock.seize(1) else { panic!("a free lock refused a seize") };
+        let burst = {
+            let lock = lock.clone();
+            thread::spawn(move || {
+                become_cpu(2);
+                drop(lock.lock());
+            })
+        };
+        drop(fatal);
         burst.join().unwrap();
     });
 }

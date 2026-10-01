@@ -275,9 +275,10 @@ mod checks {
     }
 
     /// `nested_nmi_is_loud`'s verdict on a whole report, on the splice CI's KVM
-    /// lane recorded before the report held the console registers, and on each
-    /// line the kernel writes when they were not clean — held to the kernel's
-    /// own words, which nothing links this crate to.
+    /// lane recorded before the report held the console registers, on another
+    /// CPU's burst inside each of the report's three lines, and on each line
+    /// the kernel writes when they were not clean — held to the kernel's own
+    /// words, which nothing links this crate to.
     #[test]
     fn nested_nmi_verdict() -> Result<(), String> {
         const WHOLE: &str = "[kernel 0.385 cpu1] CPU 1: jo\n\
@@ -298,6 +299,18 @@ mod checks {
         }
         if faults::report(SPLICED).is_ok() {
             return Err("the recorded splice was read as a whole report".into());
+        }
+        // Cut at the middle, which on the first line is behind the prefix the
+        // report is found by, so each cut is judged by the line's own shape.
+        let lines: Vec<&str> = WHOLE.lines().collect();
+        for at in 1..=3 {
+            let (head, tail) = lines[at].split_at(lines[at].len() / 2);
+            let cut = format!("{head}[kernel 0.386 cpu1] CPU 1: joining scheduler\n{tail}");
+            let mut spliced = lines.clone();
+            spliced[at] = &cut;
+            if faults::report(&spliced.join("\n")).is_ok() {
+                return Err(format!("a burst inside the report's line {at} was read as a whole report"));
+            }
         }
         let serial = Path::new(env!("CARGO_MANIFEST_DIR")).join("kernel/src/drivers/serial.rs");
         let source = std::fs::read_to_string(&serial).map_err(|e| format!("{}: {e}", serial.display()))?;

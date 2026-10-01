@@ -268,7 +268,8 @@ pub fn last_words(
     };
     let second_message = second.message().as_str().unwrap_or(NOT_CAPTURED);
 
-    // Let go of before the record below.
+    // Let go of before the record below: before `klogd` runs, its drain may be
+    // a burst on this CPU, which this hold would refuse.
     {
         let mut uart = serial::panic_registers();
         uart.write(b"\n!!! ");

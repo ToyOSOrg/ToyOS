@@ -101,6 +101,29 @@ pub mod arch {
         pub fn poll() {}
     }
 
+    /// Which CPU a model thread is, which the console lock's fatal word names.
+    /// The model says, through [`become_cpu`]; the kernel asks the CPU. Per
+    /// model thread for `scheduler`'s reason: loom's threads share an OS one.
+    pub mod cpu {
+        #[cfg(feature = "loom")]
+        loom::thread_local! {
+            static CPU: core::cell::Cell<Option<u32>> = core::cell::Cell::new(None);
+        }
+        #[cfg(not(feature = "loom"))]
+        std::thread_local! {
+            static CPU: core::cell::Cell<Option<u32>> = const { core::cell::Cell::new(None) };
+        }
+
+        /// Say which CPU the current model thread is. No kernel counterpart.
+        pub fn become_cpu(id: u32) {
+            CPU.with(|cpu| cpu.set(Some(id)));
+        }
+
+        pub fn hardware_id() -> u32 {
+            CPU.with(|cpu| cpu.get()).expect("a model thread asked which cpu it is before saying")
+        }
+    }
+
     /// **A strictly stronger model than the instruction, and the direction is
     /// the whole argument.**
     ///

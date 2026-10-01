@@ -2,6 +2,7 @@
 //! kernel boots puts one if it has one.
 
 use super::cpu::{inb, outb};
+use crate::drivers::serial::Registers;
 use crate::log;
 
 const PORT: u16 = 0x3f8; // COM1
@@ -59,7 +60,7 @@ pub fn rx_ready() -> bool {
 }
 
 /// The received byte; only after [`rx_ready`] said one waits.
-pub fn read_byte() -> u8 {
+pub fn read_byte(_: &mut Registers) -> u8 {
     inb(PORT)
 }
 
@@ -69,7 +70,7 @@ pub fn tx_ready() -> bool {
 }
 
 /// Put one byte in the transmitter; only after [`tx_ready`], or the byte may be lost.
-pub fn write_byte(byte: u8) {
+pub fn write_byte(_: &mut Registers, byte: u8) {
     // SAFETY: `outb` requires ownership of the port and the byte; `PORT` is
     // COM1's own data register, and the byte is console output only.
     unsafe { outb(PORT, byte) };

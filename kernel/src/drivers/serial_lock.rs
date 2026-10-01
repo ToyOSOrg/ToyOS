@@ -3,14 +3,15 @@
 //! [`Held`], so it can never release the lock another CPU holds.
 //! A fatal path's hold names its CPU ([`BackendLock::seize`]): a fatal path
 //! that CPU enters on top of it finds the lock its own, where waiting would
-//! wait for a frame that never runs again.
-//! No `crate::` references: `kernel-loom` compiles this file directly under `feature = "loom"`.
+//! wait for a frame that never runs again, and a burst it enters is refused.
+//! Of the kernel it names only `crate::arch::cpu::hardware_id`, which
+//! `kernel-loom` supplies to compile this file.
 
 #[cfg(not(feature = "loom"))]
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::{hint::spin_loop, sync::atomic::{AtomicU64, Ordering}};
 
 #[cfg(feature = "loom")]
-use loom::sync::atomic::{AtomicU64, Ordering};
+use loom::{hint::spin_loop, sync::atomic::{AtomicU64, Ordering}};
 
 pub struct BackendLock {
     /// [`FREE`], [`LIVE`], or [`FATAL`] plus the CPU whose fatal path holds it.
@@ -21,6 +22,11 @@ const FREE: u64 = 0;
 /// A holder that lets go once its burst, look or read is done.
 const LIVE: u64 = 1;
 const FATAL: u64 = 2;
+
+/// The word this CPU's fatal path holds the lock as.
+fn fatal_here() -> u64 {
+    FATAL + u64::from(crate::arch::cpu::hardware_id())
+}
 
 /// The lock, held for as long as this lives.
 pub struct Held<'a> {
@@ -50,13 +56,21 @@ impl BackendLock {
         Self { word: AtomicU64::new(FREE) }
     }
 
+    /// The lock for a burst; refused on a CPU whose own fatal path holds it,
+    /// since that holder is beneath this caller and cannot let go while it waits.
     pub fn lock(&self) -> Held<'_> {
         loop {
             if let Some(held) = self.try_lock() {
                 return held;
             }
-            while self.word.load(Ordering::Relaxed) != FREE {
-                core::hint::spin_loop();
+            let mut word = self.word.load(Ordering::Relaxed);
+            while word != FREE {
+                assert!(
+                    word == LIVE || word != fatal_here(),
+                    "serial: a burst asked for the console registers this cpu's own fatal path holds"
+                );
+                spin_loop();
+                word = self.word.load(Ordering::Relaxed);
             }
         }
     }
@@ -77,10 +91,10 @@ impl BackendLock {
         }
     }
 
-    /// The lock for the fatal path running on `cpu`, asked for at most `tries`
-    /// times: nothing on that path may wait for ever.
-    pub fn seize(&self, cpu: u32, tries: u64) -> Seized<'_> {
-        let mine = FATAL + u64::from(cpu);
+    /// The lock for the fatal path running on this CPU, asked for at most
+    /// `tries` times: nothing on that path may wait for ever.
+    pub fn seize(&self, tries: u64) -> Seized<'_> {
+        let mine = fatal_here();
         within(tries, || match self.word.compare_exchange(FREE, mine, Ordering::Acquire, Ordering::Relaxed) {
             Ok(_) => Some(Seized::Taken(Held { lock: self })),
             // Only this CPU stores `mine`, so seeing it needs no edge.
@@ -91,13 +105,14 @@ impl BackendLock {
     }
 }
 
-/// `attempt` until it answers, or `tries` times: the console's one bounded wait.
+/// `attempt` until it answers, or `tries` times: the one bounded wait for a
+/// console lock.
 pub fn within<T>(tries: u64, mut attempt: impl FnMut() -> Option<T>) -> Option<T> {
     for _ in 0..tries {
         if let Some(answer) = attempt() {
             return Some(answer);
         }
-        core::hint::spin_loop();
+        spin_loop();
     }
     None
 }
