@@ -23,6 +23,7 @@ use crate::sysroot::git_out;
 fn record_path(root: &Path, kind: Keyed) -> PathBuf {
     root.join(match kind {
         Keyed::Sysroot => "target/toyos-sysroot-key",
+        Keyed::Freestanding => "target/toyos-freestanding-key",
         Keyed::Compiler => "target/toyos-compiler-key",
         Keyed::Llvm => "target/toyos-llvm-key",
     })

@@ -395,6 +395,7 @@ pub(crate) fn remove(root: &Path, path: &str) {
     let rust_dir = crate::toolchain::rust_dir(root);
     for (kind, store, what) in [
         (Keyed::Sysroot, crate::sysroot::sysroots_dir(&rust_dir), "sysroot"),
+        (Keyed::Freestanding, crate::sysroot::freestanding_dir(&rust_dir), "freestanding libraries"),
         (Keyed::Compiler, crate::compiler::compilers_dir(&rust_dir), "compiler"),
         (Keyed::Llvm, crate::llvm::store(&rust_dir), "LLVM"),
     ] {
@@ -457,7 +458,7 @@ fn remove_fork_checkout(root: &Path, at: &Path) {
 /// stops halfway — the `Directory not empty` git itself dies on. The removal
 /// runs again over what is left, at most [`PASSES`] times; a tree still refusing
 /// after that has a writer this cannot outrun, and the panic says so.
-fn remove_tree(dir: &Path) {
+pub(crate) fn remove_tree(dir: &Path) {
     for pass in 1..=PASSES {
         match fs::remove_dir_all(dir) {
             Ok(()) => return,

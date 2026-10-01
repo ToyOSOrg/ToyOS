@@ -80,10 +80,10 @@ const STD_SOURCES: [&str; 2] = ["toyos-abi/src", "toyos/src"];
 ///
 /// One home for the list, because it is read four ways that must agree — the
 /// `stage1-std` cleans in [`full_bootstrap`], [`write_config`]'s bootstrap
-/// `target` set, the libraries `src/sysroot.rs` builds and places, and
-/// `src/build.rs`'s external fingerprint. A fifth spelling would silently leave
-/// one of them building or fingerprinting a different set of targets than the
-/// others.
+/// `target` set, the libraries `src/sysroot.rs` builds and places, and the
+/// identity it gives a crate's target directory. A fifth spelling would
+/// silently leave one of them building or fingerprinting a different set of
+/// targets than the others.
 pub const GUEST_TARGETS: [&str; 6] = [
     Arch::X86_64.userland(),
     Arch::X86_64.kernel(),
@@ -170,6 +170,21 @@ pub(crate) fn assert_std_built_from(root: &Path, dep_info: &Path) {
          this worktree's own.",
         foreign.len(),
         foreign.iter().map(|p| p.as_str()).collect::<Vec<_>>().join("\n  "),
+    );
+}
+
+/// Refuse a freestanding target's libraries whose dep-info under `dep_info`
+/// names any `toyos-abi` or `toyos` source: their key names neither
+/// (`src/sysroot.rs`), so a sysroot of another ABI would carry them unchanged.
+pub(crate) fn assert_std_reads_no_worktree(dep_info: &Path) {
+    let sources = std_toyos_sources(dep_info);
+    assert!(
+        sources.is_empty(),
+        "the freestanding libraries under {} compiled {} toyos-abi or toyos sources, which their \
+         key does not name:\n  {}",
+        dep_info.display(),
+        sources.len(),
+        sources.join("\n  "),
     );
 }
 
@@ -442,7 +457,11 @@ pub fn ensure(root: &Path, lock: &mut buildlock::Held) -> Sysroot {
         }
         Owner::Installed => {
             check_installed_toolchain(root, &rust_dir);
-            return Sysroot::installed(stage2(&rust_dir));
+            let release = rust_dir.join("build/TOOLCHAIN");
+            let release = fs::read_to_string(&release).unwrap_or_else(|e| {
+                panic!("{}: {e}; an installed toolchain carries the TOOLCHAIN it was published with", release.display())
+            });
+            return Sysroot::installed(stage2(&rust_dir), &release);
         }
         Owner::Us => {}
     }
@@ -1237,6 +1256,23 @@ mod tests {
         assert!(
             toyos_sources_in_dep_info("/x/rust/library/std/src/sys/pal/toyos/mod.rs").is_empty()
         );
+    }
+
+    /// **Freestanding libraries whose dep-info names the ABI are refused**: their
+    /// key does not name it, so a sysroot of another ABI would carry them.
+    #[test]
+    fn freestanding_libraries_that_read_the_abi_are_refused() {
+        let built = TempDir::new("freestanding-dep-info");
+        let d = built.join("dist/build/core/1/core.d");
+        fs::create_dir_all(d.parent().unwrap()).unwrap();
+        fs::write(&d, "/x/rust/library/core/src/lib.rs: /x/rust/library/core/src/lib.rs\n").unwrap();
+        assert_std_reads_no_worktree(&built);
+
+        fs::write(built.join("dist/build/core/1/std.d"), "/x/toyos-abi/src/lib.rs:\n").unwrap();
+        let refused = std::panic::catch_unwind(|| assert_std_reads_no_worktree(&built))
+            .expect_err("freestanding libraries that compiled toyos-abi were taken");
+        let said = refused.downcast_ref::<String>().expect("a formatted refusal");
+        assert!(said.contains("/x/toyos-abi/src/lib.rs"), "{said}");
     }
 
     /// Verbatim from run `31370078581`, the run this check exists because of:

@@ -32,9 +32,10 @@
 //! primary's (`src/compiler.rs`) is locked the same way under its own key, and
 //! neither it nor a sysroot built from it takes the global lock.
 //!
-//! key's lock → a sysroot key's lock → the worktree build lock → the global one
-//! → an LLVM key's lock → artifact. A compiler's or a sysroot's key lock is
-//! taken with the worktree lock put down ([`Held::without_shared`]), because the
+//! A compiler key's lock → a sysroot key's lock → a freestanding key's lock → the
+//! worktree build lock → the global one → an LLVM key's lock → artifact. A
+//! compiler's, a sysroot's or a freestanding key lock is taken with the
+//! worktree lock put down ([`Held::without_shared`]), because the
 //! key's builder takes the worktree lock exclusively; an LLVM key's is taken
 //! inside the worktree or global lock covering the fork build directory its
 //! builder writes.
@@ -215,12 +216,14 @@ pub fn artifact(root: &Path) -> Guard {
     exclusive(&root.join(LOCK_DIR).join("artifact"), "artifact lock", "artifact staging")
 }
 
-/// A content-addressed product of the host, locked per key: a sysroot, a
-/// compiler a worktree's fork checkout names (`src/compiler.rs`), or the LLVM
-/// a compiler links (`src/llvm.rs`).
+/// A content-addressed product of the host, locked per key: a sysroot, the
+/// freestanding targets' libraries it carries (`src/sysroot.rs`), a compiler
+/// a worktree's fork checkout names (`src/compiler.rs`), or the LLVM a
+/// compiler links (`src/llvm.rs`).
 #[derive(Clone, Copy)]
 pub enum Keyed {
     Sysroot,
+    Freestanding,
     Compiler,
     Llvm,
 }
@@ -229,6 +232,7 @@ impl Keyed {
     fn dir(self) -> &'static str {
         match self {
             Keyed::Sysroot => "sysroots",
+            Keyed::Freestanding => "freestanding",
             Keyed::Compiler => "compilers",
             Keyed::Llvm => "llvm",
         }
@@ -237,6 +241,7 @@ impl Keyed {
     pub(crate) fn name(self) -> &'static str {
         match self {
             Keyed::Sysroot => "sysroot",
+            Keyed::Freestanding => "freestanding libraries",
             Keyed::Compiler => "compiler",
             Keyed::Llvm => "LLVM",
         }
