@@ -114,7 +114,7 @@ pub fn arm(on_the_record: bool) -> Bound {
                     source.named()
                 );
             } else {
-                serial::panic_raw(b"panic: rebooting unless a key is pressed\n");
+                serial::panic_registers().write(b"panic: rebooting unless a key is pressed\n");
             }
             Bound::At(cycles)
         }
@@ -126,7 +126,7 @@ pub fn arm(on_the_record: bool) -> Bound {
                     source.named()
                 );
             } else {
-                serial::panic_raw(b"panic: holding this panel: no reset register\n");
+                serial::panic_registers().write(b"panic: holding this panel: no reset register\n");
             }
             Bound::Held
         }
@@ -137,7 +137,7 @@ pub fn arm(on_the_record: bool) -> Bound {
                      nothing here can time a wait"
                 );
             } else {
-                serial::panic_raw(b"panic: holding this panel: no clock\n");
+                serial::panic_registers().write(b"panic: holding this panel: no clock\n");
             }
             Bound::Held
         }
@@ -147,7 +147,7 @@ pub fn arm(on_the_record: bool) -> Bound {
 /// Return the machine to firmware. The second of this path's two lines, and it
 /// goes out raw: the log has already been flushed and drained by here.
 pub fn reboot_now() -> ! {
-    serial::panic_raw(
+    serial::panic_registers().write(
         b"\npanic: no key inside the bound, so nobody is here: returning this machine to \
           firmware\n",
     );
