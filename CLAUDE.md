@@ -1,46 +1,43 @@
 # ToyOS
 
-A general-purpose operating system built from scratch in Rust, held to a production-grade engineering bar — the bar is the changes, not yet the product. Modern x86-64 hardware (2020+), UEFI only; ARM64 planned — keep the architecture portable. Its test machines decide its feature set, never its design. The quality bar is shipping software: correct, efficient, minimal, zero silent debt. A tracked weakness is still a weakness: the honest answer about current state is "known, tracked, still true" — never "we have an issue for that."
+A general-purpose operating system built from scratch in Rust, held to a production-grade engineering bar — the bar is the changes, not yet the product. Modern x86-64 hardware (2020+) and AArch64 under QEMU `virt`, UEFI only; keep the architecture portable. Its test machines decide its feature set, never its design. The quality bar is shipping software: correct, efficient, minimal. A tracked weakness is still a weakness: the honest answer about current state is "known, tracked, still true" — never "we have an issue for that."
 
 ## Where the rest of this lives
 
-**This file is what every agent needs before it knows which subsystem it is in.** Detail lives below it and loads when you go there:
+This file is what every agent needs before it knows which subsystem it is in. A subdirectory `CLAUDE.md` loads when a file in that subtree is `Read`, and not from `Bash`.
 
 | | |
 |---|---|
 | `kernel/CLAUDE.md` | the caveats that bite kernel work |
 | `userland/CLAUDE.md` | the server doctrine, and the caveats that bite userland work |
 | `tests/CLAUDE.md` | the caveats that bite the harness |
-| `src/CLAUDE.md` | boot modes, the locks, worktrees — the operational file |
+| `src/CLAUDE.md` | the caveats that bite build-system work |
 | `issues/README.md` | the issue tracker: one file per issue, typed by kind; `ls` is the index |
-| `.claude/agents/reviewer.md` | the review prompt the orchestrator spawns a reviewer with |
+| `.claude/agents/` | each role's prompt; `reviewer.md` is the bar a branch lands against |
 
-There are no spec documents. A rule a reader can check lives in an agent's
-prompt or at its site; code enforces only what reading cannot see — runtime
-behaviour, bytes, measurements — and everything else is an issue. Free text that merely describes the tree rots and is deleted, not
-maintained. A `CLAUDE.md` never holds a list that a manifest, a directory or a
-gate already answers; it points at that source instead.
-
-A subdirectory `CLAUDE.md` loads when a file in that subtree is `Read`, and not from `Bash`. A rule whose violation is unrecoverable or invisible stays here; everything else lives where the work is.
+There are no spec documents. A rule a reader can check lives in an agent's prompt or at its site; code enforces only what reading cannot see — runtime behaviour, bytes, measurements — and everything else is an issue. A `CLAUDE.md` never holds a list that a manifest, a directory or a gate already answers; it points at that source instead.
 
 ## Principles
 
 - **Zero legacy.** No backwards compatibility, no fallbacks, no workarounds, no BIOS, no 32-bit. Research state-of-the-art OS design instead of replicating older OSes.
 - **Zero silent debt.** Dead code is deleted; every abstraction earns its place. A discovered compromise has exactly two legal outcomes: remove it, or record it with ownership, evidence and an exit condition — and it stays a present-state weakness until removed.
-- **Fail fast, trust nothing.** Panics over silent degradation; exhaustive matches; the unimplemented dies loudly. Input that crossed a trust boundary is never trusted and never panics the kernel — it is refused.
+- **Code is liability.** If code can be deleted, it is; code that does not earn its keep is deleted or simplified, and not knowing whether it is needed is no reason to keep it. Tooling is code too: a gate, lock, check or test is added only for what reading cannot see.
+- **Fail fast, trust nothing.** Panics over silent degradation; exhaustive matches; the unimplemented dies loudly; no defensive code. Input that crossed a trust boundary is never trusted and never panics the kernel — it is refused. Never a flat wait, in code or in a test: wait on the event, bounded by a timeout that fails loudly; a fixed delay only where a hardware document mandates it and offers no notification, cited at the site.
 - **The kernel never crashes from userland.** A kernel bug crashes loudly; a userland bug never reaches it.
+- **Userland first.** The kernel takes on only what userland cannot.
 - **No kernel threads.** The kernel creates no thread but the per-CPU idle loop: kernel work runs, bounded, on the thread or interrupt that caused it and is charged to it; long-running work with no owner is a userland server's.
-- **Rust is first class.** Not POSIX, not C. Unrepresentable is best: prefer compile-time safety over runtime checks over tests, and nothing a type refuses is tested.
-- **Existing Rust just works.** A program that builds for other operating systems builds and runs on ToyOS unchanged; the ecosystem gains ToyOS support through forks carried upstream, never through ToyOS-specific replacement crates.
-- **Development ergonomics above all.** Iteration speed beats feature count; tooling comes first.
+- **Rust is first class.** Not POSIX, not C. Unrepresentable is best: compile-time safety over runtime checks over tests, and nothing a type refuses is tested.
+- **Existing Rust just works.** A program that builds for other operating systems builds and runs on ToyOS unchanged; the ecosystem gains ToyOS support through forks, never through ToyOS-specific replacement crates.
+- **Apps are portable.** An app builds and runs on Linux under Wayland (never X11, which is legacy), macOS and Windows from the same source as on ToyOS; a host build that fails is fixed in the app or its dependencies, never by making the app ToyOS-only. A program is ToyOS-only only when its job exists only on ToyOS — it owns ToyOS devices or kernel objects, or manages ToyOS itself — and its manifest's `exempt` says which, and why (`src/userlandhost.rs`).
+- **Development ergonomics above all.** Iteration speed beats feature count.
 
 ## Architecture
 
 > A snapshot, deliberately shallow — always read the code.
 
-**Kernel** — takes on only what userland cannot. 2 MB pages, demand paging, PIE binaries, full SMP.
+**Kernel** — 2 MB pages, demand paging, PIE binaries, full SMP.
 
-**Userspace daemons** — compositor, netd, soundd, sshd, logd. Each claims a device or capability from the kernel and serves its function; crash one and the kernel is fine.
+**Userspace servers** — `system.toml` names them. Each claims a device or capability from the kernel and serves its function; crash one and the kernel is fine.
 
 **The log is a userland file.** `/system/bin/logd` reads records on a cursor and owns `/log`; the kernel keeps the record ring, the console and the panel, and writes no file. `SYS_FSYNC` reaches the device's cache flush because logd's durability claim rests on it.
 
@@ -58,49 +55,44 @@ A subdirectory `CLAUDE.md` loads when a file in that subtree is `Read`, and not 
 
 ## Dependencies
 
-**Rust** and **QEMU** for development, on any host OS and architecture — the development machine is nothing special. Beside them, where no Rust tool does the job, only C or C++ tools ToyOS can one day build and run (Python, Perl, CMake, make), each declared. No binary for one host OS alone: a macOS binary is a hard no, and "only for tests" does not soften it. ToyOS's own code is Rust; it writes no Python, Perl or shell of its own. Only general and widely used crates — one that does *our* job we write ourselves, and a driver crate never; third-party crates are used as published, and a fork carries a change written to upstream quality and goes when upstream has it. No upstream pull requests are sent for now: ToyOS needs more attention and more contributors before upstream projects take it seriously, and upstreams tend to refuse AI-first projects and their contributions. A third-party source ToyOS cannot build without changing it is carried as an unmodified-source packaging mirror with a byte-identity gate, not as a fork. The north star is **self-hosting**: nothing — build, test, or verification — rests on a host binary. Ask of anything new: could this ever run inside ToyOS? Self-hosting means ToyOS rebuilds itself on ToyOS and reproduces the host's bytes; a bootstrap from source with no binary seed is out of scope.
+**Rust** and **QEMU** for development, on any host OS and architecture — the development machine is nothing special. Beside them, where no Rust tool does the job, only C or C++ tools ToyOS can one day build and run (Python, Perl, CMake, make), each declared where `reviewer.md`'s Arrivals says. No binary for one host OS alone: a macOS binary is a hard no, and "only for tests" does not soften it. ToyOS's own code is Rust; it writes no Python, Perl or shell of its own. Only general and widely used crates — one that does *our* job we write ourselves, and a driver crate never; third-party crates are used as published, and a fork carries a change written to upstream quality and goes when upstream has it. No upstream pull request is sent for now. A third-party source ToyOS cannot build without changing it is carried as an unmodified-source packaging mirror with a byte-identity gate, not as a fork. The north star is **self-hosting**: ToyOS rebuilds itself on ToyOS and reproduces the host's bytes, and nothing — build, test, or verification — rests on a host binary; a bootstrap from source with no binary seed is out of scope. Ask of anything new: could this ever run inside ToyOS?
 
-Vendor firmware a device or CPU verifies by its maker's signature may be shipped: pinned by version and hash, redistributable unmodified, recorded in `NOTICE`. A device's is loaded only by its own driver through its IOMMU domain and never executes on the CPU; CPU microcode is loaded by the kernel.
-
-The bar is not yet the tree: `.claude/agents/reviewer.md`, "Arrivals", says where every host tool and every standing failure is declared. `NOTICE` names every committed third-party file with its hash, upstream and licence; an image carrying `DOOM1.WAD` may not be sold.
+Vendor firmware a device or CPU verifies by its maker's signature may be shipped: pinned by version and hash, redistributable unmodified, recorded in `NOTICE`. A device's is loaded only by its own driver through its IOMMU domain and never executes on the CPU; CPU microcode is loaded by the kernel. `NOTICE` names every committed third-party file with its hash, upstream and licence.
 
 - **toyos-ld** — frozen: everything links with rust-lld, and toyos-ld stays only as the linker inside ToyOS until lld runs there, then goes.
 - **rust/** — Rust compiler/std fork with ToyOS platform support (submodule). Auto-bootstraps; kept current with upstream. Its rules: `.claude/agents/implementer.md`, "A fork".
 
 ## Build & test
 
-- `cargo run` builds everything (toolchain, kernel, bootloader, userland, image) and launches QEMU; `--build-only` skips the launch. `cargo test` runs the QEMU harness; `cargo run -- --ci host` runs every host suite, as the PR gate's required `host` check does.
-- **Agents run their own guest tests**, the whole suite or a filter; only the T14 (`--metal`) is the orchestrator's.
-- **Both produce large output**: run them in the background and read the output file — `[N characters truncated]` means data was lost.
-- **Leave the machine as you found it.** The development machine is shared: every agent stops what it started, killing only by PID and waiting out a build that holds the global lock, and removes the worktrees and scratch build output it no longer needs.
+- `cargo run` builds everything (toolchain, kernel, bootloader, userland, image) and launches QEMU; `--build-only` skips the launch. `cargo test` runs the QEMU harness, and `cargo test -- --metal` the T14's. `cargo run -- --ci host` runs every host suite: it is the `host` check a ready pull request and the merge queue run. Guests run nightly.
+- **A behaviour is tested on the cheapest tier that reaches it**: a type that makes the bug unrepresentable, then a host test, then a metal row on the T14, and a QEMU guest test last.
+- **Agents run their own guest tests**, the whole suite or a filter, side by side. **`--metal`, the T14, is the orchestrator's alone; no other agent runs it.**
+- **Timing and audio verdicts come only from metal.** A QEMU test asserts order, completion, content and counts, never how long something took, and plays no audio; its only clock is a hang ceiling.
+- **A red test is a defect**: it is fixed, or deleted with its issue recording the commit that restores it; a flaky test is deleted at once, never re-run. A red seen only under load is no flake: it is a defect, recorded with the host's load.
+- **A high-risk change names its checks.** Security boundaries, the scheduler, the ABI, filesystems, devices, memory management, concurrency primitives: a negative control where a defect would otherwise land unseen — the *whole* change reverted onto the base the green arm was measured on — and an independent oracle where one exists: an external specification, a differential implementation, real hardware, a third-party checker, a formal model, or a recorded real failure. A second agent is not independence.
+- **Never truncate command output.** No `| head`, `| tail`, `| grep` to reduce it: long output runs in the background and is read from its file — `[N characters truncated]` means data was lost.
+- **Leave the machine as you found it.** The development machine is shared: every agent stops what it started and never another's process, killing only by PID and waiting out a build that holds the global lock, and removes the scratch output it made once it no longer needs it.
 
 ## Repository layout
 
 The root `Cargo.toml`'s `[workspace]` `members` and `exclude` lists account for every crate in the tree, and `src/hostws.rs` reds on one in neither; every package they name says what it is in its `description`.
 
-## Workflow
+## Working here
 
-**One agent, one worktree, one branch**, made and removed in the primary checkout, which owns `rust/`, the rustup link and `main` and is no workspace: `git fetch origin && git worktree add -b wt/<name> ../<name> origin/main` (`git worktree add ../<name> wt/<name>` resumes a branch). Never `git clone` one or run `git submodule` in one: either fetches the fork's history again, and a clone builds a toolchain that takes the rustup link. Once `git -C ../<name> status --porcelain --ignore-submodules=none` prints nothing and its fork commits are pushed, `rm -rf ../<name> && git worktree prune && git -C rust worktree prune && git -C rust/library/backtrace worktree prune && git branch -d wt/<name>` removes it.
+- **Stay on the task.** What you find off it is filed in `issues/`, one file per issue, and not fixed on the way. If something blocks, stop and report it; never work around it. What ToyOS cannot do yet is filed, and work on it starts only on the owner's go.
+- **Never degrade audible or visual quality** — even temporarily, even for a big win elsewhere — without the owner's explicit sign-off.
+- **Always be empirical.** Read actual output; run the code; investigate root causes instead of guessing. Every written number comes from a command that was run; an estimate or datasheet bound says so.
+- **Never put the owner's email or any other personal data in a network request or its headers**; any `User-Agent` is `toyos-build (https://github.com/ToyOSOrg/ToyOS)`.
+- **One agent, one worktree, one branch.** The primary checkout owns `rust/`, the rustup link and `main`, and is no workspace; `.claude/agents/implementer.md` makes a worktree and `orchestrator.md` removes it. Never make one with `git clone`, and never run `git submodule` in one: either fetches the fork's history again, a clone builds a toolchain that takes the rustup link, and `git submodule` writes `core.worktree` into the fork's shared config, which breaks git in the primary's `rust/`.
+- **Commit freely on your branch; never rewrite history.** `git commit -F <file>`, never `-m`. No `--amend`, no `rebase`, no `--force` — merge `origin/main` instead: a pushed hash may already be cited.
+- **Never touch `main`.** It moves only through a merged pull request, by its required merge queue, and is protected — no push, force-push, deletion or bypass. A pull request's title and body become the merge commit's: write them as `main`'s record. A branch lands after a review against `.claude/agents/reviewer.md`. A modify/delete conflict is resolved by accounting for every hunk of the modified side, never by checking its headings survived. A merge that deletes a document also deletes every citation to it in the same merge, found by searching the bare name as well as the path. An ABI change lands with the work that needs it: every worktree builds the toolchain its own sources name, so branches that change the ABI run side by side. Every merge leaves `main`'s tip compiling.
 
-- Stay on the current task. File what you find in `issues/` and do not go fix it; one file per issue, its README has the shape.
-- If something blocks, stop and report it. Don't work around it.
-- Never degrade audible or visual quality — even temporarily, even for a big win elsewhere — without the owner's explicit sign-off.
-- **Never truncate command output.** No `| head`, `| tail`, `| grep` to reduce it; long output runs in the background and is read from the file.
-- **Always be empirical.** Read actual output; run the code; investigate root causes instead of guessing.
-- **Every written number comes from a command that was run.** An estimate or datasheet bound says so. Write commit messages with `git commit -F <file>`, never `-m`.
-- **Commit freely on your branch; land through a pull request.** `main` moves only through a merged PR. `gh pr create --draft` at the first push — CI runs on PRs and nothing else; `gh pr ready` plus a written `--title`/`--body-file` when finished (never `--fill`); `gh pr merge --auto --merge` enqueues on `main`'s required merge queue; `git pull --ff-only origin main` in the primary after it lands. Never merge into `main` by hand. The PR's title and body become the merge commit's: write them as main's record. A modify/delete conflict is resolved by accounting for every hunk of the modified side, never by checking its headings survived. A merge that deletes a document also deletes every citation to it in the same merge, checked by searching the bare name as well as the path. An ABI change lands with the work that needs it: every worktree builds the toolchain its own sources name, so branches that change the ABI run side by side and none waits on another. Every merge leaves `main`'s tip compiling. A branch lands after a review against `.claude/agents/reviewer.md`, spawned by the orchestrator with its brief and judged by it.
-- **Never rewrite history, and never touch `main`.** No `--amend`, no `rebase`, no `--force` — on your own branch as much as anywhere: a pushed hash may already be cited. `main` is protected — PR required, no force-push, no deletion, no bypass.
-- **A red test is a defect: it is fixed, or deleted with its issue recording the commit that restores it; a flaky test is deleted at once, never re-run.**
-- **A high-risk change names its checks.** Security boundaries, the scheduler, the ABI, filesystems, devices, memory management, concurrency primitives: a negative control only where a defect would otherwise land unseen, and an independent oracle where one exists — an external specification, a differential implementation, real hardware, a third-party checker, a formal model, or a recorded real failure. A second agent is not independence. A negative control reverts the *whole* change onto the base the green arm was measured on.
-- **Timing and audio verdicts come only from metal.** A QEMU test asserts order, completion, content and counts, never how long something took, and plays no audio; its only clock is a hang ceiling.
-- **Subagents wait in the foreground** — background notifications do not reliably re-wake them: explicit `timeout`s, and for longer work background once and block with a few long foreground waits, polling before each sleep.
-- **An agent never waits on CI.** It arms auto-merge, reports, and exits. Sequencing across landings belongs to the orchestrator, done in passes on its own wake-ups; several finished branches land as one batch PR rather than as one agent babysitting N cycles.
-- **Subagents get an explicit model, the one the owner names.** The orchestrator dispatches, lands and keeps the owner informed; it edits only trivial text. Never encode a temporary usage circumstance as a rule.
-- **An agent is spawned fresh for every task, never resumed into the next one.** Once it has reported it is done; a question back to it is fine, a new assignment is not.
-- **Durable facts go in the module header at the site — never in private agent memory, and almost never in a `CLAUDE.md`.** A `CLAUDE.md` is pointers and caveats of the most general kind — it never cites an individual issue file; **an agent edits one only when briefed to.** A rule that truly has no better home and whose violation is invisible or unrecoverable is *proposed as one sentence in the final report*, and the orchestrator declines it or briefs an agent to place it. The story of a change goes in its commit message; after each task, audit the module header that owns what you changed. A comment never restates a count that somebody else's landing moves.
-- **Code is the product, not prose.** Prose exists only where it is load-bearing — where the code needs it to be read correctly. Stale or false prose is deleted, never corrected or rewritten, and the reviewer cuts every line that is not load-bearing.
-- **Code is liability.** If code can be deleted, it is; code that does not earn its keep is deleted or simplified. Tooling is code too: a gate, lock, check or test is added only for what a sentence in a prompt cannot do. Keeping code "just in case" or for want of knowing whether it is needed is not a reason — it is deleted. We are confident, and the reviewer enforces it.
-- **A comment is one of three kinds or it goes** — the one-clause invariant at the edit site, the boundary contract, or the refusal-reason at a surprising decision, over a module doc that is the contract and nothing else. Chronology, measurements' provenance, past implementations, investigation stories and narration of the obvious live in commit messages and the tracker, never in source — a date in a source comment is the tell, and a `CLAUDE.md` carries none either. Moving a durable fact to the site means moving the invariant, never the investigation. `.claude/agents/reviewer.md` holds this; a `CLAUDE.md` never grows.
+## Prose
+
+- **Code is the product, not prose.** Prose exists only where it is load-bearing — where the code or the record needs it to be read correctly. Stale or false prose in source and docs is deleted, never corrected or rewritten; a record — a pull request's body, an issue, a prompt — is kept true of what it describes.
+- **Durable facts go in the module header at the site** — never in private agent memory, and almost never in a `CLAUDE.md`. A `CLAUDE.md` never grows: it holds pointers and caveats of the most general kind, and never cites an individual issue file. The story of a change goes in its commit message. A comment never restates a count that somebody else's landing moves.
+- **An agent edits a `CLAUDE.md` or a role prompt only when briefed to**, or to update a command, flag or step its own change removes or renames. A rule that truly has no better home and whose violation is invisible or unrecoverable is proposed as one sentence in the agent's final report.
+- **A comment is one of three kinds or it goes** — the one-clause invariant at the edit site, the boundary contract, or the refusal-reason at a surprising decision, over a module doc that is the contract and nothing else. Chronology, measurements' provenance, past implementations, investigation stories and narration of the obvious live in commit messages and the tracker, never in source — a date in a source comment is the tell, and a `CLAUDE.md` carries none either.
 
 ## Planned work
 

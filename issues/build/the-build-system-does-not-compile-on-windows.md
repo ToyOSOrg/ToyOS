@@ -6,8 +6,6 @@ opened: 2026-08-19
 
 # The build system does not compile on Windows, and it is three subsystems rather than one call
 
-Five errors, in `buildlock` and `toolchain`. Measured 2026-09-01:
-
 ```
 error[E0433]: cannot find `unix` in `os`   src/buildlock.rs:59:14   (AsRawFd)
 error[E0433]: cannot find `unix` in `os`   src/toolchain.rs:927:14  (symlink)
@@ -22,7 +20,7 @@ Every other crate in the graph, first-party and third-party, checked
 clean. The `#[cfg(unix)]` at `src/ci.rs:489` is still the only conditional
 compilation in the build system.
 
-`src/tether.rs` is a third: `std::os::unix` and a pseudo-terminal per child, behind a Linux and macOS `cfg` pair with no Windows arm.
+`src/tether.rs`: `std::os::unix` and a pseudo-terminal per child, behind a Linux and macOS `cfg` pair with no Windows arm.
 
 ## The judge, and it needs no Windows host and no download
 
@@ -44,8 +42,8 @@ and `library/windows_link`, so a Windows `std` builds from the tree — a plain
 
 ## Compiling is not working, and that is why the cheap half is refused
 
-Each of the two wants a Windows call whose semantics differ in kind from the
-Unix one it replaces, and neither can be run by anybody here:
+Each wants a Windows call whose semantics differ in kind from the
+Unix one it replaces, and none can be run by anybody here:
 
 - `std::os::windows::fs::symlink_dir` needs the privilege or developer mode
   Windows does not grant by default, so `link_host_target` and
@@ -65,4 +63,4 @@ eventually run inside ToyOS. `symlink` is the question in miniature: either
 ToyOS grows symbolic links, or the two `toolchain.rs` sites need a shape that
 does not need one — a copy, a directory junction, or a sysroot layout that does
 not require aliasing a directory at all. Deciding that is worth more than a
-`#[cfg]` pair, and it decides two of the five errors.
+`#[cfg]` pair, and it decides two of the errors.
