@@ -559,7 +559,6 @@ fn host(root: &Path) -> Vec<Step> {
     steps.push(step("nothing left in $TMPDIR or /tmp", || left_behind(&tmp, short, &before)));
     if let Some(cold) = cold {
         steps.push(step("the tree, sealed as a cache entry", || cicache::seal(root, &cold)));
-        steps.push(step("the entry, as actions/cache will store it", || cicache::bound(root)));
     }
     steps
 }
@@ -1066,11 +1065,10 @@ mod tests {
     /// Exactly one job writes each cache, on the nightly, so what a pull request
     /// restores is one run's tree and never a race between two writers. A job
     /// that restores or saves the host cache builds the driver in
-    /// [`cicache::DRIVER`], so it carries the cache, names
-    /// [`cicache::PATHS`], which its bound measures, and takes no step by an
-    /// alias or lends one, which this reader cannot follow; and the one that
-    /// saves it restores nothing: its run is cold, and a cold run is green only
-    /// once its tree is sealed ([`cicache`]).
+    /// [`cicache::DRIVER`], so it carries the cache, names [`cicache::PATHS`],
+    /// and takes no step by an alias or lends one, which this reader cannot
+    /// follow; and the one that saves it restores nothing: its run is cold, and
+    /// a cold run is green only once its tree is sealed ([`cicache`]).
     #[test]
     fn each_cache_has_one_writer() {
         let dir = repo_root().join(".github/workflows");

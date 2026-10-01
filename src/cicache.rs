@@ -34,14 +34,13 @@
 //! would make every crate depending on them stale. A job that builds it
 //! anywhere else runs as a developer's tree does.
 //!
-//! **An entry that would store more than [`LIMIT`] is refused before the save**
-//! ([`bound`]).
+//! **A tree whose targets hold more than [`LIMIT`] is refused at the seal**, so
+//! the save, which follows only a green run, never stores it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
@@ -63,11 +62,11 @@ pub const PATHS: [&str; 8] = [
     "bootloader/target",
 ];
 
-/// The most an entry may store. The repository's caches are evicted by last
-/// access past 10 GB, and a night whose guest jobs restore after this entry is
-/// saved holds two host entries beside a guest one, then one beside two guest
-/// ones.
-const LIMIT: u64 = 2_000_000_000;
+/// The most an entry's targets may hold, uncompressed. The repository's caches
+/// are evicted by last access past 10 GB, and a night whose guest jobs restore
+/// after this entry is saved holds two host entries beside a guest one, then
+/// one beside two guest ones.
+const LIMIT: u64 = 8_000_000_000;
 
 /// 2001-09-09T01:46:40Z: older than any build, so a file dated so is never
 /// newer than one.
@@ -191,7 +190,8 @@ fn cold(root: &Path, runner: &str, sources: Sources, why: String) -> Result<(Sta
 }
 
 /// After the last step of a run that started [`Start::Cold`]: every file under
-/// every target dated [`built`], then the manifest.
+/// every target dated [`built`], then the manifest, which a tree holding more
+/// than [`LIMIT`] never gets.
 pub fn seal(root: &Path, cold: &Cold) -> Result<String, String> {
     let now = sources(root)?;
     let moved: Vec<&String> = cold
@@ -210,6 +210,12 @@ pub fn seal(root: &Path, cold: &Cold) -> Result<String, String> {
     for target in targets(root)? {
         age(&target, &mut files, &mut bytes)?;
     }
+    if bytes > LIMIT {
+        return Err(format!(
+            "{bytes} B in {files} files under the targets, above the {LIMIT} B an entry may hold: \
+             saved, it could evict the guest entry or the next host one"
+        ));
+    }
     let head = crate::sync::git(root, &["rev-parse", "HEAD"])?;
     let mut text = format!("{head}\n{}\n", cold.runner);
     for (path, hash) in &cold.sources {
@@ -217,52 +223,11 @@ pub fn seal(root: &Path, cold: &Cold) -> Result<String, String> {
     }
     fs::write(root.join(MANIFEST), text).map_err(|e| format!("write {MANIFEST}: {e}"))?;
     Ok(format!(
-        "{} sources, built on {}; {files} files, {} MiB, dated as built",
+        "{} sources, built on {}; {files} files, {bytes} B of the {LIMIT} B an entry may hold, \
+         dated as built",
         cold.sources.len(),
         cold.runner,
-        bytes >> 20
     ))
-}
-
-/// After [`seal`]: what actions/cache will store, refused above [`LIMIT`], so
-/// the save that follows a green run never runs.
-pub fn bound(root: &Path) -> Result<String, String> {
-    within(stored(root)?)
-}
-
-fn within(stored: u64) -> Result<String, String> {
-    if stored > LIMIT {
-        return Err(format!(
-            "{stored} B, above the {LIMIT} B an entry may store: saved, it could evict the guest \
-             entry or the next host one"
-        ));
-    }
-    Ok(format!("{stored} B, within the {LIMIT} B an entry may store"))
-}
-
-/// The archive actions/cache makes of [`PATHS`], made as it makes it, with the
-/// runner's own `tar` and `zstdmt`, and counted as it streams.
-fn stored(root: &Path) -> Result<u64, String> {
-    let home = std::env::var_os("HOME").ok_or("HOME is unset, and actions/cache reads `~` from it")?;
-    let paths: Vec<PathBuf> = PATHS
-        .iter()
-        .map(|path| path.strip_prefix("~/").map_or_else(|| PathBuf::from(path), |rest| Path::new(&home).join(rest)))
-        .filter(|path| root.join(path).exists())
-        .collect();
-    let mut tar = Command::new("tar")
-        .args(["--posix", "-cf", "-", "-P", "--use-compress-program", "zstdmt", "-C"])
-        .arg(root)
-        .args(&paths)
-        .stdout(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("tar: {e}"))?;
-    let stored = std::io::copy(&mut tar.stdout.take().expect("piped"), &mut std::io::sink())
-        .map_err(|e| format!("reading tar: {e}"))?;
-    let status = tar.wait().map_err(|e| format!("tar: {e}"))?;
-    if !status.success() {
-        return Err(format!("tar exited {status}"));
-    }
-    Ok(stored)
 }
 
 /// The commit an entry was built from, the runner, and its sources.
@@ -629,13 +594,22 @@ pub fn word(_: proc_macro::TokenStream) -> proc_macro::TokenStream {
         }
     }
 
-    /// An entry above the bound is refused, so the save after it never runs;
-    /// one at the bound is kept.
+    /// Targets holding one byte more than the bound between them are refused
+    /// at the seal, and get no manifest; at the bound they are sealed. The
+    /// bound's bytes are a hole `set_len` made, so no test writes them.
     #[test]
     fn an_entry_above_its_bound_is_refused() {
-        assert!(within(LIMIT).is_ok());
-        let refusal = within(LIMIT + 1).expect_err("an entry above the bound");
+        let tmp = TempDir::new("cicache-bound");
+        let cold = cold_repo(&tmp, RUNNER);
+        write(&tmp, "kernel/target/one", "1");
+        let big = tmp.join("target/debug/big");
+        fs::create_dir_all(big.parent().unwrap()).unwrap();
+        fs::File::create(&big).unwrap().set_len(LIMIT).unwrap();
+        let refusal = seal(&tmp, &cold).expect_err("targets one byte above the bound");
         assert!(refusal.starts_with(&format!("{} B", LIMIT + 1)), "{refusal}");
+        assert!(!tmp.join(MANIFEST).exists(), "a refused tree carries a manifest");
+        fs::remove_file(tmp.join("kernel/target/one")).unwrap();
+        seal(&tmp, &cold).expect("targets at the bound");
     }
 
     /// One commit of `a.rs`, read cold on `runner`.
