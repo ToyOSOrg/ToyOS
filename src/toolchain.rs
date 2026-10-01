@@ -385,10 +385,8 @@ fn cargo_link_stale(stage2: &Path) -> bool {
 ///
 /// **A symlink, and what survives the artifact round-trip is this step rather
 /// than the link.** `src/release.rs` excludes it from the tarball: it names a
-/// path only the publishing runner has, and a copy would put a 32 MB host
-/// binary into a 401 MiB artifact to stand in for a file the consumer can make
-/// in a microsecond. `Owner::Installed` makes it, exactly as it makes the host
-/// target.
+/// path only the publishing runner has. `Owner::Installed` makes it, exactly as
+/// it makes the host target.
 pub(crate) fn provision_toolchain_cargo(stage2: &Path) {
     let at = stage2.join("bin/cargo");
     let _ = fs::remove_file(&at);
@@ -631,10 +629,7 @@ fn check_installed_toolchain(root: &Path, rust_dir: &Path) {
 
     // Recreated rather than shipped: both of these point into whatever stable
     // toolchain this machine has, which is not a path any artifact can know.
-    // This is CI's whole share of the cargo provisioning — it links its
-    // toolchain fresh from the published artifact on every run, so nothing
-    // upstream of the download can have put one there. Its clang is the
-    // artifact's own, so this is not `complete`.
+    // Its clang is the artifact's own, so this is not `complete`.
     if host_target_missing(rust_dir) {
         link_host_target(rust_dir);
     }

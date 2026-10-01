@@ -13,13 +13,13 @@ line was `[kernel 0.385 cpu1] CPU 1: joining scheduler`, and the 16550 carried:
 
     [[kenrnmel i0.38]5  cpNu1E] CSPUT 1E: Djo inNiMngI s choednule r
 
-`NESTED NMI` was never whole on the console, so `nested_nmi_is_loud` timed out
-waiting for it, and the machine halted with its report unreadable.
+`NESTED NMI` was never whole on the console, and the machine halted with its
+report unreadable.
 
 #675 (`bc68e5d78`) writes the report under the console's registers
 (`serial::panic_registers`).
 
-**Evidence:** red under KVM in two runs, with byte-identical interleaving:
+**Evidence:** red under KVM in two runs:
 - Main's nightly `guest` lane at `06788146b`, run 36843762360, job 110374194368.
 - PR #671's `guest` check, on its merge onto `59052827f`, run 36863809437, job
   110375742604.
