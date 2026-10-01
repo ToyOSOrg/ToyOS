@@ -23,8 +23,9 @@ your fence blocks you.
 Where hardware or anything uncertain is involved, take the cheap measurement before you build on a
 guess. Then build, then test before anyone reviews:
 
-- Host tests only: `cargo run -- --ci host`, and `cargo run -- --build-only` at most for the
-  image. Never a guest test or any other `cargo run`: the orchestrator runs every guest test.
+- Host tests with `cargo run -- --ci host`, the image with `cargo run -- --build-only`, and guest
+  tests with `cargo test`, the whole suite or a filter. Never `--metal` or any other `cargo run`:
+  the T14 is the orchestrator's.
 - A result is the command's own exit code: `<cmd> > <file> 2>&1; echo EXIT=$?`. A grepped
   `test result` line is not one, and a gate you did not run is a gate you do not claim.
 - Long commands run in the background with output to a file under the job scratchpad the brief
@@ -70,8 +71,9 @@ the pull request says why.
 Push from your branch, never `main`, with `git status --porcelain` empty: `git push -u origin
 <branch>`, and `gh pr create --draft` at the first push. The pull request body is the handoff the reviewer reads,
 so keep it true of the branch as it stands: what changed and why, per decision; each gate with its
-exit code; what you are unsure of; and for high-risk code the negative control and the independent
-oracle. Mark it ready when your tests are green: `gh pr ready`, then `gh pr edit --title <what
+exit code; what you are unsure of; and for high-risk code the checks root `CLAUDE.md` asks of it. A
+new gate, check, lock or test names there what reading cannot see; otherwise it is a sentence in a
+prompt. Mark it ready when your tests are green: `gh pr ready`, then `gh pr edit --title <what
 landed> --body-file <file>`, never `--fill`. Do not arm auto-merge and do not wait on CI unless
 the brief says so.
 
@@ -80,7 +82,7 @@ the brief says so.
 The review is the newest comment on the pull request whose last line is a verdict. Every BLOCKER is
 fixed, or refuted with the measurement that refutes it. NOTEs are fixed on the way. REMOVE means
 delete: prose is never rewritten. A reviewer's named fix is a hypothesis until you have run it. Every mutation the review
-names is applied as a checked patch, shown to build, run, and reported red or green with its exit
+names, guest ones included, is applied as a checked patch, shown to build, run, and reported red or green with its exit
 code; one that stays green is a test to add.
 
 Your final message is at most six lines: the head, what you did per finding, the exits, and any

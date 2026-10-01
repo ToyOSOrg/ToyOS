@@ -351,7 +351,7 @@ fn glibc_named(bytes: &[u8]) -> (u32, u32) {
 /// `TOOLCHAIN`: the pin a consumer writes down, and what it gets. Inside the
 /// tarball, and the alias release's own asset.
 fn manifest(root: &Path, tag: &str) -> Result<String, String> {
-    let head = |rev: &str| crate::sync::git(root, &["rev-parse", rev]);
+    let head = |rev: &str| crate::git(root, &["rev-parse", rev]);
     let toyos = std::env::var("GITHUB_SHA").or_else(|_| head("HEAD"))?;
     Ok(format!(
         "toolchain {tag}\ntoyos {toyos}\nrust {}\nhost {HOST}\nglibc {}.{}\n",

@@ -41,17 +41,31 @@ pub mod soundfont;
 /// build system at all.
 #[cfg(test)]
 pub mod sourcegate;
-pub mod sync;
 pub mod sysroot;
 pub mod testargs;
 pub mod tether;
 pub mod toolchain;
 pub mod userlandhost;
 pub mod wallpaper;
-pub mod worktree;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// `Err` carries what git printed, both streams, because a refusal that hides
+/// git's own message makes the agent run the command again by hand to see it.
+pub(crate) fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap_or_else(|e| panic!("run git in {}: {e}", dir.display()));
+    let stdout = String::from_utf8_lossy(&out.stdout).trim_end().to_string();
+    if out.status.success() {
+        return Ok(stdout);
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr).trim_end().to_string();
+    Err(format!("git {} (in {})\n{stdout}\n{stderr}", args.join(" "), dir.display()))
+}
 
 /// The `.git` directory every worktree of this repository shares.
 ///

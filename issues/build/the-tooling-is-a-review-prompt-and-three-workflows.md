@@ -11,8 +11,8 @@ and the gates that held them go.
 
 - A test is green and fast or it is deleted in the same pull request and filed.
 - The toolchain is content-addressed by the four trees that produce it, one
-  directory per hash, never mutated; then the sysroot claim, `src/buildlock.rs`
-  and `src/worktree.rs` go.
+  directory per hash, never mutated; then the sysroot claim and `src/buildlock.rs`
+  go.
   The toolchain builds cargo from the Rust fork's submodule and ships it: one
   cargo matching rustc.
   - A shared cargo `target-dir` is safe only under `-Z checksum-freshness`;

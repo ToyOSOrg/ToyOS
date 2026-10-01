@@ -200,7 +200,7 @@ fn clean(root: &Path, crate_dir: &Path, kind: Clean, stale: &Stale, identity: &I
     let remove = |dirs: &mut dyn Iterator<Item = PathBuf>| {
         for dir in dirs.filter(|dir| dir.exists()) {
             eprintln!("external deps changed: cleaning {}", dir.display());
-            crate::worktree::remove_tree(&dir);
+            crate::sysroot::remove_tree(&dir);
         }
     };
     match (stale, kind) {

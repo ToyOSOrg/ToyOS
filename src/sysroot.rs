@@ -38,7 +38,7 @@
 //! held in use while the C++ runtime is built from its sources.
 //!
 //! A sysroot or freestanding libraries no worktree names any more are removed
-//! by `keystore::sweep`, which `--worktree remove` runs: each build records the
+//! by `keystore::sweep`, which every placement runs: each build records the
 //! keys it used in its worktree's `target/`, and a key no registered worktree
 //! records, that nobody is making or using, goes.
 
@@ -54,9 +54,8 @@ use crate::arch::Arch;
 use crate::buildlock::{self, Guard, Held, Keyed};
 use crate::compiler::{self, Compiler};
 use crate::identity;
-use crate::keystore::Key;
+use crate::keystore::{self, Key};
 use crate::toolchain::{self, host_triple, GuestTarget, Owner, Role, GUEST_TARGETS};
-use crate::worktree::remove_tree;
 use whole_toolchain::{whole, Whole};
 
 /// The per-worktree sources that end up inside a sysroot: std links `toyos-abi`
@@ -510,10 +509,11 @@ fn unfinished(dir: &Path) -> Option<String> {
     unpublished(dir).or_else(|| toolchain::toolchain_defect(dir))
 }
 
-/// The sysroot `key` names at `dir`, made by `make` if nobody has made it, and
-/// held in use for as long as the returned guard lives.
+/// The sysroot `key` names at `dir`, recorded as `root`'s, made by `make` if
+/// nobody has made it, and held in use for as long as the returned guard lives.
 fn held(root: &Path, key: &Key, dir: &Path, make: impl FnMut()) -> Guard {
-    buildlock::keyed_made(root, Keyed::Sysroot, key, || unfinished(dir), make)
+    let store = dir.parent().expect("a sysroot is a directory of its store");
+    keystore::made(root, Keyed::Sysroot, store, key, || unfinished(dir), make)
 }
 
 /// The sysroot this worktree's sources name, made if nobody has made it, and
@@ -523,8 +523,7 @@ pub fn ensure(root: &Path, rust_dir: &Path, lock: &mut Held) -> Sysroot {
     let compiler = compiler::resolve(root, rust_dir, &fork, lock);
     let keys = Keys::of(root, &compiler, &fork);
     let dir = sysroots_dir(rust_dir).join(&keys.sysroot);
-    crate::keystore::record(root, Keyed::Sysroot, &keys.sysroot);
-    crate::keystore::record(root, Keyed::Freestanding, &keys.freestanding);
+    keystore::record(root, Keyed::Freestanding, &keys.freestanding);
 
     let using =
         lock.without_shared(|| held(root, &keys.sysroot, &dir, || build(root, rust_dir, &compiler, &fork, &keys, &dir)));
@@ -570,9 +569,10 @@ mod whole_toolchain {
 fn build(root: &Path, rust_dir: &Path, compiler: &Compiler, fork: &Path, keys: &Keys, dir: &Path) {
     let made_from = whole(compiler);
     let store = freestanding_dir(rust_dir).join(&keys.freestanding);
-    let _freestanding = buildlock::keyed_made(
+    let _freestanding = keystore::made(
         root,
         Keyed::Freestanding,
+        &freestanding_dir(rust_dir),
         &keys.freestanding,
         || unpublished(&store),
         || build_freestanding(root, compiler, fork, &keys.freestanding, &store),
@@ -899,6 +899,29 @@ pub(crate) fn clone_tree(from: &Path, to: &Path) {
         }
     }
 }
+
+/// Remove `dir` and everything in it, including what appears while it goes.
+///
+/// A writer on this host — the leftovers are `.DS_Store` files — can put a file
+/// into a directory while it is being emptied, so a plain recursive delete finds a directory it has just emptied not empty and
+/// stops halfway. The removal runs again over what is left, at most [`PASSES`]
+/// times; a tree still refusing after that has a writer this cannot outrun, and
+/// the panic says so.
+pub(crate) fn remove_tree(dir: &Path) {
+    for pass in 1..=PASSES {
+        match fs::remove_dir_all(dir) {
+            Ok(()) => return,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(e) if e.kind() == std::io::ErrorKind::DirectoryNotEmpty && pass < PASSES => {
+                eprintln!("{} gained files while it was removed ({e}); removing again", dir.display());
+            }
+            Err(e) => panic!("remove {}: {e}, after {pass} pass(es)", dir.display()),
+        }
+    }
+}
+
+/// How many times [`remove_tree`] runs over a tree that keeps refusing.
+const PASSES: usize = 10;
 
 fn path_str(path: &Path) -> &str {
     path.to_str().unwrap_or_else(|| panic!("{} is not UTF-8", path.display()))
@@ -1342,7 +1365,8 @@ mod tests {
     /// **A sysroot is whole, or it is made again**: a `stage2` without cargo —
     /// what bootstrap leaves until the primary completes it — is refused by
     /// name and nothing is published, and one found with its `SOURCES` and
-    /// without its cargo is rebuilt rather than trusted, once.
+    /// without its cargo is rebuilt rather than trusted, once. Placing one
+    /// removes a sysroot no worktree names.
     #[test]
     fn a_sysroot_is_whole_or_it_is_made_again() {
         let base = TempDir::new("whole");
@@ -1371,8 +1395,11 @@ mod tests {
         clone_tree(&compiler.stage2, &dir);
         write(&dir.join(SOURCES), "found\n");
         toolchain::provision_toolchain_cargo(&compiler.stage2);
+        let orphan = sysroots_dir(&base.join("rust")).join(Key::of(b"named by no worktree"));
+        fs::create_dir_all(&orphan).unwrap();
         let using = held(&base, &key, &dir, || make(&dir, 2));
         assert_eq!(made.get(), 2, "a sysroot without its cargo was trusted because it has SOURCES");
+        assert!(!orphan.exists(), "placing a sysroot left one no worktree names");
         assert_eq!(toolchain::toolchain_defect(&dir), None);
         assert!(dir.join("lib/rustlib/x86_64-unknown-toyos/lib/libstd.rlib").is_file());
         drop(using);
@@ -1453,29 +1480,5 @@ mod tests {
         write(&built.join(".libstd-stamp"), &format!("h{}\0", built.join("out/libstd-new.rlib").display()));
         let refused = std::panic::catch_unwind(|| place_std(&built.join(".libstd-stamp"), &lib));
         assert!(refused.is_err(), "a host library was placed in a guest target");
-    }
-
-    /// `--worktree remove` takes the worktree's fork checkout with it — git will
-    /// not remove a worktree around one — unless that checkout holds the only
-    /// copy of something.
-    #[test]
-    fn a_removed_worktree_takes_its_fork_checkout_and_refuses_to_lose_fork_work() {
-        let base = TempDir::new("fork-remove");
-        let (primary, linked, _c1, _c2) = two_pins(&base);
-        let fork = fork_checkout(&linked);
-        write(&fork.join("library/std/src/lib.rs"), "pub fn unsaved() {}\n");
-        let refused = std::panic::catch_unwind(|| crate::worktree::remove(&primary, linked.to_str().unwrap()));
-        assert!(refused.is_err(), "a fork checkout with uncommitted work was removed");
-        assert!(fork.join("library/std/src/lib.rs").is_file());
-
-        git(&fork, &["commit", "-qam", "committed, and on no ref"]);
-        let refused = std::panic::catch_unwind(|| crate::worktree::remove(&primary, linked.to_str().unwrap()));
-        assert!(refused.is_err(), "a fork commit no ref reaches was thrown away");
-
-        git(&fork, &["branch", "kept"]);
-        crate::worktree::remove(&primary, linked.to_str().unwrap());
-        assert!(!linked.exists(), "{} is still on disk", linked.display());
-        let listed = git(&primary.join("rust"), &["worktree", "list", "--porcelain"]);
-        assert_eq!(listed.lines().filter(|l| l.starts_with("worktree ")).count(), 1, "{listed}");
     }
 }

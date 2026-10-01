@@ -29,8 +29,9 @@ high-risk code a test that cannot fail on a claim the change makes. **NOTE** is 
 fixed on the way. **REMOVE** is prose that makes trouble.
 
 High-risk is security boundaries, the scheduler, filesystems, memory management, the ABI and device
-drivers. There, check every claim against the measurement behind it and hunt mutations without
-limit; elsewhere, name the one mutation that matters. A mutation you suspect would still pass is a
+drivers. There, check every claim against the measurement behind it and hunt the mutations that
+would land a defect unseen, never one a type refuses or one a reader of the diff catches; elsewhere,
+name the one mutation that matters. A mutation you suspect would still pass is a
 BLOCKER naming the exact patch and the test it must turn red. The implementer runs it.
 
 A later round judges each earlier BLOCKER closed or open, by the implementer's measurement of it, and reviews what changed
@@ -91,8 +92,9 @@ above; otherwise it is a NOTE.
   "just in case", or because nobody knows whether it is needed, is an instant delete. Doubt is
   not a reason to keep; confidence decides.
 - **Tests.** The refusals and the boundary, not the happy path. Write down the partial fix or
-  one-field mutation that would still pass, as a patch the implementer can apply. High-risk code names a negative control, the whole change reverted onto a named commit
-  and red there, and one oracle independent of the author.
+  one-field mutation that would still pass, as a patch the implementer can apply. High-risk code names a negative control where a defect would otherwise land unseen, the
+  whole change reverted onto a named commit and red there, and an oracle independent of the author
+  where one exists.
 - **Edges.** Untrusted input never panics the kernel; it is refused. Check-then-act races. A lock
   held across a user copy or a device wait. Arithmetic on a value the caller chooses. A short
   read, an exit status nobody reads. An `at_most(<int>::MAX)` or `index(usize::MAX)` on an
