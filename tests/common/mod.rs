@@ -16,5 +16,6 @@ pub mod qemu;
 pub mod screen;
 pub mod serial;
 pub mod ssh;
+pub mod steal;
 pub mod usb;
 pub mod volumes;

@@ -5,7 +5,7 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use common::qemu::{
     self, await_guest, await_marker, BootOptions, QemuInstance,
@@ -3232,7 +3232,8 @@ fn the_others_halt_first(mut qemu: QemuInstance, arch: toyos_build::arch::Arch) 
     let mut monitor = qemu::QmpMonitor::open(qemu.qmp_socket());
     // A guard and never a verdict: a vCPU the host has not run yet has not
     // taken the stop, and this is how long it is waited for.
-    let give_up = Instant::now() + qemu::GUEST_QUIET;
+    let clock = qemu.clock();
+    let began = clock.now();
     loop {
         let stopped = qemu::stopped_cpus(&mut monitor, arch);
         // QEMU's CPU#n is the kernel's cpun: its MADT lists them in that order,
@@ -3240,7 +3241,7 @@ fn the_others_halt_first(mut qemu: QemuInstance, arch: toyos_build::arch::Arch) 
         if stopped.len() == cpus && stopped.iter().enumerate().all(|(cpu, &halted)| halted || cpu == fatal as usize) {
             break;
         }
-        if Instant::now() >= give_up {
+        if clock.since(began) >= qemu::GUEST_QUIET {
             return Err(format!(
                 "{STALLED} waiting for the other CPUs to halt after the fatal path on cpu{fatal} \
                  stopped them — QEMU shows each vCPU halted with interrupts masked as {stopped:?}\n{console}"
@@ -3339,8 +3340,17 @@ impl Tally {
         if let Some(fastest) = fastest {
             say(format!(
                 "host: fastest boot {fastest} ms against the reference {reference} ms — liveness \
-                 ceilings paid at {:.2}x width",
+                 ceilings paid at {:.2}x",
                 f64::from(num) / f64::from(den)
+            ));
+        }
+        // How loaded the host was where the guests' waits fell, which the
+        // fastest boot, taken at the run's quietest moment, cannot say.
+        if let Some((wall, had)) = common::steal::run_share() {
+            say(format!(
+                "host: the guests had {:.0}% of the {wall:.0?} their waits read across; the rest \
+                 was the host's load, which no ceiling counted",
+                had.as_secs_f64() * 100.0 / wall.as_secs_f64()
             ));
         }
         // The other half of the liveness correction is per guest, not host-wide:
@@ -3470,7 +3480,6 @@ fn run_tasks(tasks: Vec<Task>, width: usize, test_config: &Path) -> Vec<Outcome>
         return Vec::new();
     }
     let width = width.clamp(1, tasks.len());
-    qemu::set_width(width as u32);
     let queue = std::sync::Mutex::new(std::collections::VecDeque::from(tasks));
     let mut all = Vec::new();
     thread::scope(|scope| {
