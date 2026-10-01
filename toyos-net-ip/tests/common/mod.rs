@@ -321,7 +321,7 @@ impl H {
         self.frame(&eth(MAC_A, m, 0x0806, &arp_packet(2, m, addr, MAC_A, A)));
     }
 
-    /// 64 hosts on `ours`'s /24, from .100 up, ask `iface` for `ours` at `at`: their replies fill
+    /// Hosts on `ours`'s /24, from .100 up, ask `iface` for `ours` at `at`: their replies fill
     /// the control queue every interface shares.
     pub fn fill_control_queue(&mut self, iface: IfIndex, at: Instant, ours: Ipv4Addr) {
         let [a, b, c, _] = ours.octets();
