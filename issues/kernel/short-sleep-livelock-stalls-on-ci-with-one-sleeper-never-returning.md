@@ -1,5 +1,5 @@
 ---
-status: expected-red
+status: assigned
 kind: defect
 opened: 2026-09-06
 ---
@@ -32,3 +32,6 @@ test's write-up (`tests/toyos.rs`, `short_sleep_livelock`) names.
 **Exit condition.** The fifth sleeper's stall is fixed in the sleep path, and
 `short_sleep_livelock` green on CI's KVM `guest` shards.
 Owner: the sleep path, `kernel/src/sched`; held by the orchestrator.
+
+**Its test is deleted**: `1962baa5d` took `short_sleep_livelock` out, QEMU and
+T14 arms both, and `git revert 1962baa5d` brings it back.

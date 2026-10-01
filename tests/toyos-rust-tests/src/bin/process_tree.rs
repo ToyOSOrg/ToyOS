@@ -13,7 +13,8 @@
 //! hold on B goes with it, or B is never published and the arm's wait never
 //! answers.
 //!
-//! **The other arms.** A `MANAGE`-only handle is no place. init starts a
+//! **The other arms.** A `MANAGE`-only handle is no place, and init refuses a
+//! launch whose place is a pipe and answers the launches after it. init starts a
 //! child only by a launch, so std refuses `under_init` for a program no row
 //! declares and for a command carrying an extra slot. A chain alternating spawn
 //! and launch — each link launches a shell, and the shell spawns the next link
@@ -91,6 +92,7 @@ fn test() {
         an_end_takes_its_subtree(end);
     }
     a_manage_only_handle_is_no_place();
+    a_pipe_is_no_place();
     init_is_asked_only_by_a_launch();
     a_chain_stops_at_max_depth_and_dies_whole();
     a_detached_program_outlives_its_shell();
@@ -244,6 +246,32 @@ fn a_manage_only_handle_is_no_place() {
     child.kill().expect("kill the C");
     assert_eq!(child.wait().expect("wait the C").code(), Some(KILLED));
     println!("  a MANAGE-only handle is no place: PermissionDenied");
+}
+
+/// A pipe's write end carries `WRITE`, so the kernel reaches the type it is
+/// not: init answers the launch refused, and the arms after this one are init
+/// answering the next.
+fn a_pipe_is_no_place() {
+    let (_read, write) = toyos::pipe_pair().expect("a pipe of our own");
+    let place = syscall::dup(write.as_handle()).expect("a duplicate to send");
+    let conn = endow::service("launcher").expect("this process holds a launcher connector");
+    let request = Launch {
+        program: HELD,
+        argv: b"/system/bin/cat",
+        env: b"",
+        cwd: "/",
+        extras: &[],
+        slots: &[],
+        parent: Parent::Place(place),
+    };
+    let mut home = [0u8; 256];
+    match launch::launch(&conn, &request, &mut home) {
+        Ok(Outcome::Refused) => {}
+        Ok(Outcome::Started(child)) => panic!("a launch whose place is a pipe started {child:?}"),
+        Ok(_) => panic!("a launch whose place is a pipe was answered as something other than refused"),
+        Err(_) => panic!("the launcher did not answer a launch whose place is a pipe"),
+    }
+    println!("  a pipe is no place: init refused the launch");
 }
 
 /// init is reached only by a launch: std refuses `under_init` for what the

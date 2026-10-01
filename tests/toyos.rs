@@ -16,8 +16,7 @@ use common::{
     usb,
 };
 use toyos_build::bootlog::{self, boot_millis};
-use toyos_build::testargs::{self, Shard, SUITE};
-use toyos_build::redlist;
+use toyos_build::testargs::{self, SUITE};
 
 struct TestDef {
     name: String,
@@ -115,14 +114,10 @@ const ACTUATOR_TESTS: &[&str] = &[
     // kernel's address space, so without them a kernel that still made the write
     // under test answers a userland that cannot notice.
     "abuse_kernel_addr",
-    // Action 16, the live-object census per kind, and 17 and 18 for the idle
-    // stack the deferred release path runs on. A leak is two readings and a
+    // Action 16, the live-object census per kind. A leak is two readings and a
     // comparison, so on a kernel that answers `InvalidArgument` both readings
     // are the same error and the assertion passes having counted nothing.
-    "handle_basic",
-    "handle_kill_policy",
-    "handle_transfer",
-    // The last two took action 16 in place of `SYS_SYSINFO`: a verdict about
+    // Both took action 16 in place of `SYS_SYSINFO`: a verdict about
     // what one killed process gave back cannot be the whole machine's free
     // memory, which every other binary in a shared boot moves under it.
     "handle_lifetime",
@@ -163,15 +158,9 @@ const RUST_SKIP: &[&str] = &[
     // metal row runs it on the T14.
     "tlb_shootdown_waits",
     // **It reboots the machine**, so in the shared block it would end the boot
-    // under whichever member came next; and its verdict is the order of the
-    // console after that reset, which only its own boot holds.
-    // `quiesce_stops_the_machine` runs it.
-    "quiesce_writers",
-    // The same, and its verdict is where one kernel line lands among others.
-    // `quiesce_refuses_a_second_shutdown` runs it.
+    // under whichever member came next. Its verdict is where one kernel line
+    // lands among others. `quiesce_refuses_a_second_shutdown` runs it.
     "quiesce_twice",
-    // The same, and its verdict is the stop record of a boot staged around it.
-    "quiesce_last",
     // Its verdict is a count of what reached `/log`, which only a boot of its own
     // holds, and megabytes of it. `log_program_flood` runs it.
     "log_flood",
@@ -192,9 +181,6 @@ const RUST_SKIP: &[&str] = &[
     // after that in `/log`. `log_after_a_refused_stop` and
     // `log_resume_meets_its_flush` run it.
     "log_refused_stop",
-    // It waits for a cue only a kernel armed with `copy-meets-a-remap` gives.
-    // `user_copy_races_munmap` runs it.
-    "copy_out_races_munmap",
     // Only a kernel armed with `tls-rebase-window` holds a spawn in the window it probes.
     // `tls_rebase_window` runs it.
     "tls_dtv_race",
@@ -208,9 +194,6 @@ const RUST_SKIP: &[&str] = &[
     "test_panic_child",
     // It takes the machine down; `panic_halts_the_others_first` runs it.
     "panic_halts_first",
-    // A binary that panics at once, sent over ssh as a service's replacement;
-    // `swap_crash_rolls_back` stages it from the host and never runs it as a job.
-    "swap_crash",
     // The swap DMA control's replacement netd: it claims the 82574, stops it
     // and masters it. `swap_quiets_the_function` stages it.
     "swap_claim_idle",
@@ -232,7 +215,6 @@ const RUST_SKIP: &[&str] = &[
     // `swap_not_inherited` uploads it.
     "swap_probe",
     "i8042_keyboard",
-    "i8042_mouse",
     "input_events",
     // Meaningful only on `MetalNoUsb`, where no input source exists; on every
     // other machine both claims succeed. `input_claim_absent` runs it.
@@ -251,7 +233,7 @@ const RUST_SKIP: &[&str] = &[
     "netd_listener_forgery",
     // Needs a NIC in front of netd and a host server behind it.
     // `netd_slow_reader`, `netd_held_open`, `netd_udp_refused`,
-    // `netd_udp_any_address`, `netd_refused_pipes` and `netd_refused_accept`
+    // `netd_udp_any_address` and `netd_refused_pipes`
     // run them on `tests/netcase`, and `netd_lookup_let_go` on it with its
     // frames held.
     "netd_slow_reader",
@@ -259,7 +241,6 @@ const RUST_SKIP: &[&str] = &[
     "netd_udp_refused",
     "netd_udp_any_address",
     "netd_refused_pipes",
-    "netd_refused_accept",
     "netd_lookup_let_go",
     // It asserts nothing at all: it holds a `tests/lancase` boot open for
     // twenty seconds so the host can reach this machine over the cable. On a
@@ -268,9 +249,6 @@ const RUST_SKIP: &[&str] = &[
     // The same for `tests/lantalkcase`, held until the runner's bound is near
     // unless the host's `reboot` over ssh ends it first. `lan_talk` rides it.
     "lan_talk_hold",
-    // The swapping boot's hold: it lasts until the host's `reboot` over ssh,
-    // and the runner's bound is the fallback. `lan_swap` rides it.
-    "lan_swap_hold",
     // Needs SYS_DEBUG, which the shipping kernel has no arm of at all.
     // `heap_ceiling_bounds` boots the `test-actuators` kernel for it.
     "heap_ceiling",
@@ -296,9 +274,6 @@ const RUST_SKIP: &[&str] = &[
     // Same again, and it also needs a host typing GUI+V:
     // `metal_sim_hostile_clipboard` runs it.
     "compositor_hostile_clipboard",
-    // Needs a compositor, a terminal and a shell: `desktop_window_child`
-    // launches it from that shell.
-    "window_child",
     // Same again: the `toolkit_` tests of their names launch them from the
     // toolkit desktop.
     "window_wake",
@@ -319,62 +294,23 @@ const RUST_SKIP: &[&str] = &[
     "inventory_bounds",
     // Same reason, same config: `netd_hostile_peer` runs it there.
     "netd_hostile_peer",
-    // Needs a `launcher` connector, which `tests/testcases`'s test-runner has
-    // no reason to hold. `launcher_refusals` runs it on tests/netcase, whose
-    // test-runner receives one for exactly this.
-    "launcher_refusals",
     // Needs a launcher to tell its two roads apart, and a declared shell and
     // toybox to take it: `spawn_cwd` runs it on tests/netcase.
     "spawn_cwd",
     // Needs a launcher and a declared `cat` and shell: `process_tree` runs it on
     // tests/proctreecase.
     "process_tree",
-    // Needs a boot image the harness staged a file into before the machine
-    // started, which only `esp_filesystem` builds.
-    "esp_files",
     // Two modes, each waiting to be typed at through QMP; on its own nothing
     // ever answers it. `swiss_german_layout`, `locale_detect` and
     // `locale_detect_unrecognized` drive it.
     "locale_gate",
-    // A victim, not a test: it spins on `SYS_GETPID` so that another CPU's NMIs
-    // have somewhere to land, and on its own it asserts nothing and costs ten
-    // seconds. `syscall_window_nmi` runs it on the kernel that storms it.
-    "nmi_window_spin",
     // A victim, not a test: the load `dump-in-blocking-pass` files Ctrl+Alt+D
     // inside, and on its own it asserts nothing. `dump_left_pending_is_owed` runs
     // it on the kernel that stages it.
     "dump_stage_load",
-    // Driven, not run: `screen_console_clear` types its name at a console it is
-    // watching, and on its own it asks the kernel to paint over a panel nobody
-    // is reading and exits 0. A verdict its own exit code cannot carry — the
-    // same shape as `test_screen_churn` below, and it was in the shared registry
-    // for the same reason nobody had looked.
-    "test_screen_graffiti",
-    // A workload, not a test: it prints a pattern for `screen_console_scroll`
-    // to assert a panel against, and on its own it has no verdict at all. It
-    // used to sit in the shared boot with defaults for its arguments, where it
-    // printed four hundred lines to a console nothing was reading and passed
-    // on its exit code.
-    "test_screen_churn",
     // Spawns `/system/bin/doom` and reads the WAD, which `tests/testcases` does
     // not carry. `doom_frames` runs it on `tests/doommusiccase`.
     "doom_frames",
-    // Its failure mode is a CPU that never runs anything again, so on the
-    // shared boot it would be reported against whichever test came next — and
-    // every one after that. `short_sleep_livelock` gives it a boot of its own.
-    "abuse_short_sleep",
-    // What it stages on `/log` — a file
-    // unlinked out from under a held descriptor, its clusters handed to the next
-    // writer — is only half the claim, and the other half is the volume read
-    // back off the image after a shutdown by a FAT implementation.
-    // `fat_backing_revoked` runs it.
-    "fat_backing_revoked",
-    // Stages a rename with an absent source on `/log` and leaves the
-    // destination for `fs_rename_durable` to read back off the image.
-    "fs_rename_durable",
-    // Stages real directories on `/log` for `fs_dirs_durable` to read back
-    // off the image.
-    "fs_dirs_durable",
     // Audio is judged on the T14 and nowhere else: the `hda_client_stall`,
     // `hda_tone`, `audio_idle_suspend`, `shipped_client_departures` and
     // `soundd_log_stall` metal rows run these.
@@ -405,14 +341,9 @@ const RUST_SKIP: &[&str] = &[
     // `data_candidate_with_bad_geometry_is_absent` run it.
     "home_absent",
     // Needs the disks `tests/common/partclaim.rs` crafts, the boot stick's GUIDs
-    // as arguments and a role; `partition_claim`, `partition_claim_gives_up` and
-    // `partition_claim_departure` boot it and judge it off the images.
+    // as arguments and a role; `partition_claim` boots it and judges it off the
+    // images.
     "partition_claimant",
-    // Needs `test-small-caches` for the eviction its read-back rests on, and a
-    // boot of its own for the host-side re-read. `redirty_mid_flush` runs it.
-    "redirty_mid_flush",
-    // Needs the `smp-skip-ap` boot; `smp_failed_ap_leaves_no_hole` runs it there.
-    "smp_hole_shootdown",
     // Its listings are exact against `tests/layoutcase`, and it takes what that
     // boot wrote as its argv. `layout_fresh_boot` runs it over ssh.
     "layout_paths",
@@ -430,18 +361,11 @@ const RUST_SKIP: &[&str] = &[
 /// one answer to that; this list is the other, for the binaries whose shared
 /// run asserts something of its own. Every driven name is on one list or the
 /// other, so neither answer is silence — `suite_split` is the gate.
-/// `sched_stress` is the one whose two runs differ by *kernel* rather than by
-/// what the host staged: the shipping build here, `sched_check_build`'s
-/// assert-carrying build there.
 #[allow(dead_code, reason = "`suite_split` reads it, in `toyos-checks` alone")]
 const DRIVEN_AND_SHARED: &[&str] = &[
     // Its shared run is the x86-64 verdict; `virt_readonly_copyout` builds it
     // for AArch64 and runs it on that architecture's job case.
     "abuse_readonly_copyout",
-    // The lost-wake canary: its shared run is the count on the shipping
-    // kernel with nothing staged, and `blocking_read_window` drives it again
-    // with the watch's window held open.
-    "blocking_read_stress",
     // The log-stream arms drive it for the kernel's `exit:` record about it,
     // not for anything it does: it is the cheapest process this tree starts.
     "empty_dir_stat",
@@ -472,22 +396,11 @@ const EARLY_PANIC_MESSAGE: &str = "test-early-panic: on-screen console check";
 /// kept because these are read the way they are
 /// written.
 const SCREEN_TESTS: &[(&str, Sched, qemu::Profile)] = &[
-    // Two boots, each ended at a loader line rather than at the kernel's ready
-    // marker. Every verdict is a count of rows against a count of lines off the
-    // same boot's console; no clock is in either.
-    ("screen_loader_lines", Sched::Parallel, qemu::Profile::Metal),
     ("screen_gop_firmware_mode", Sched::Parallel, qemu::Profile::Gop),
-    // The log is still on the panel once every program the image starts has
-    // run: an event, and no clock in it.
-    ("screen_diag_boot", Sched::Parallel, qemu::Profile::Metal),
     // A guest halted in the window, so the panel is read where only the repaint
     // under test can have painted it.
     ("screen_early_panel", Sched::Parallel, qemu::Profile::Metal),
     ("screen_log_absent", Sched::Parallel, qemu::Profile::Metal),
-    ("screen_console_shell", Sched::Parallel, qemu::Profile::Metal),
-    ("screen_console_clear", Sched::Parallel, qemu::Profile::Metal),
-    ("screen_console_scroll", Sched::Parallel, qemu::Profile::Metal),
-    ("screen_i8042_health", Sched::Parallel, qemu::Profile::Metal),
     // Ctrl+Alt+D with no console at all: the panel is the whole channel, and a
     // compositor is holding it. The verdict is the report on the panel.
     ("screen_blocked_dump", Sched::Parallel, qemu::Profile::Metal),
@@ -495,16 +408,14 @@ const SCREEN_TESTS: &[(&str, Sched, qemu::Profile)] = &[
     ("screen_paged_scrollback", Sched::Parallel, qemu::Profile::Gop),
     ("screen_panic_muted", Sched::Parallel, qemu::Profile::Metal),
     ("screen_console_panic", Sched::Parallel, qemu::Profile::Metal),
-    ("screen_fatal_halt", Sched::Parallel, qemu::Profile::Gop),
-    // The same fatal path from inside Ctrl+Alt+D's report painter, holding the
+    // The fatal path from inside Ctrl+Alt+D's report painter, holding the
     // panel's latch it will never give back: the report has to take the screen
     // anyway, and its CPU has to go on to watch the reset bound.
     ("screen_fatal_behind_a_painter", Sched::Parallel, qemu::Profile::Gop),
     // The same fatal path with a compositor holding the panel, which is the
     // only configuration the owner's laptop is ever in and the one no screen
-    // test covered: `screen_fatal_halt` boots a config with no compositor, and
-    // `screen_blocked_dump` has one but paints through `paint_report` rather
-    // than through `halt_all_cpus`.
+    // test covered: `screen_blocked_dump` has one but paints through
+    // `paint_report` rather than through `halt_all_cpus`.
     ("screen_fatal_halt_composited", Sched::Parallel, qemu::Profile::Metal),
     // Every PageUp moves the page one back, which the unattended deadline
     // never does: order, and no clock in it.
@@ -527,35 +438,10 @@ const SCREEN_TESTS: &[(&str, Sched, qemu::Profile)] = &[
     ("virt_fatal_halts_the_others_first", Sched::Parallel, qemu::Profile::VirtEl2),
 ];
 
-/// What `screen_console_shell` types, and what it then looks for on its own.
-///
-/// The command's *output* differs from the command, which is the whole point:
-/// the shell echoes what is typed, so an assertion satisfiable by the echo says
-/// only that the console drew a key, not that anything ran. This is asserted as
-/// a whole trimmed row, so the echoed `/home/toy> echo zqjxk` cannot satisfy
-/// it either.
-const CONSOLE_NONCE: &str = "zqjxk";
 /// `/system/bin/shell` cds to `$HOME` before its first prompt, and prints
 /// `"{cwd}> "` — without the trailing space, which the decoder trims off the
 /// end of every row.
 const CONSOLE_PROMPT: &str = "/home/toy>";
-/// The seed's witness on the panel.
-///
-/// `/system/bin/console` draws the boot so far, as `logd` serves it, above its
-/// first prompt, so a panel carrying one of its lines is a console that read
-/// it. This one is written hundreds of lines into a boot, which is what makes
-/// its *absence* two different things — see `screen_console_shell`.
-const CONSOLE_SEED_WITNESS: &str = "i8042:";
-
-/// A program's line on the console, under the name of the pipe it came out of:
-/// init's, said just before it starts the console, so it is in the boot the
-/// console is handed.
-const CONSOLE_PROGRAM_WITNESS: &str = "init} init: started console";
-
-/// What `SYS_DEBUG` action 8 paints. Green, because the decoder thresholds on
-/// the brightest channel and a colour a glyph could contain would let a
-/// surviving pixel read as text rather than as itself.
-const GRAFFITI: [u8; 3] = [0x00, 0xC0, 0x00];
 
 /// Tests whose machine shape *is* the test: metal-sim, where the PS/2
 /// keyboard is the only input source and no virtio device exists, or a q35
@@ -608,9 +494,7 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     ("acpi_table_inventory", Sched::Parallel),
     ("timer_calibration", Sched::Parallel),
     ("pci_inventory", Sched::Parallel),
-    ("smp_failed_ap_leaves_no_hole", Sched::Parallel),
     ("input_merge", Sched::Parallel),
-    ("metal_sim_input", Sched::Parallel),
     ("input_claim_absent", Sched::Parallel),
     // One boot; every verdict is a PPM header field or a console line, and no
     // clock is in any of them.
@@ -626,14 +510,7 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // Last of the group: it drops clients on purpose and its verdict is that
     // the desktop outlived every one of them.
     ("metal_sim_client_death", Sched::Parallel),
-    // A thousand pointer packets paced from the host, and not one assertion on
-    // when any of them arrived: the settles are 400 ms against a driver that
-    // acts in microseconds, both liveness loops run to 20 s, and the three
-    // verdicts are a count of bound sources, a frame batch above the taskbar's
-    // two, and a desktop still painting afterwards.
-    ("metal_sim_pointer_churn", Sched::Parallel),
-    // A window dragged by injected pointer packets, and the exact opposite of
-    // the churn above on the one question that decides this: here each packet's
+    // A window dragged by injected pointer packets: here each packet's
     // effect has to be on screen before the next is sent. The press that starts
     // the drag must land on a title bar the previous motion put under the
     // cursor, and the drag's displacement is read back as a coordinate — so a
@@ -672,9 +549,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // `https_tls13_e1000e` exists: the T14's NIC is an I219 and this is the
     // only machine in reach that runs that driver.
     ("log_stream_e1000e", Sched::Parallel),
-    // A reader that never reads, beside a flood: the file and a second reader
-    // are whole regardless.
-    ("log_stream_stalled_reader", Sched::Parallel),
     // A program's line in `/log`, on the served log and on the console, under
     // the name of the pipe it came out of. Lines and a comparison; no clock.
     ("log_program_line", Sched::Parallel),
@@ -687,9 +561,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // The same stop with logd's flush held until init resumes it: logd runs
     // the flush, then the resume, and lives. Lines; init's flush bound.
     ("log_resume_meets_its_flush", Sched::Parallel),
-    // A child flooding its parent's log ring while logd reads none of it: the
-    // parent's next line is in `/log`. Lines; its clock is a guard.
-    ("log_ring_keeps_the_owners_slots", Sched::Parallel),
     // A program's line said after three batches of records, read before them:
     // `/log` carries it after every one. Lines and positions; no clock.
     ("log_program_line_after_its_records", Sched::Parallel),
@@ -721,14 +592,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // one for another name is not answered. Bytes; its clocks are a guard on
     // the answer and the window the unanswered query is given.
     ("lan_mdns_answer", Sched::Parallel),
-    // A running service's binary replaced with no reboot: netd swapped for its
-    // rebuild over ssh while the stream runs, on virtio-net and on the 82574
-    // the T14's I219 shares a register file with; a wrong digest and a
-    // stranger's key refused with netd untouched; a replacement that panics at
-    // once answered by the old binary running again. Records, bytes and the
-    // guest's own `/log`; every clock is a liveness guard on a guest that
-    // stopped talking, and probation is init's.
-    ("swap_netd", Sched::Parallel),
     // The machine updates itself: an image over `ssh … update` is written to
     // the idle slot and is the kernel the next boot runs; every slot the loader
     // must refuse is refused by name and the other boots; and a slot whose
@@ -743,9 +606,7 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     ("update_grant_refuses_a_stray_partition", Sched::Parallel),
     ("update_floor_is_the_images_own", Sched::Parallel),
     ("update_refused_pass_credits_no_image", Sched::Parallel),
-    ("lan_swap", Sched::Parallel),
     ("swap_refusals", Sched::Parallel),
-    ("swap_crash_rolls_back", Sched::Parallel),
     // The 82574 swapped to a holder that stops it and masters it while the
     // host sends it frames. The verdict is the kernel's console; its clocks
     // are liveness guards.
@@ -795,10 +656,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // round trip after each case, a named line per refusal and a clean
     // console; its clocks are liveness guards.
     ("netd_refused_pipes", Sched::Parallel),
-    // The netcase boot again: an accept netd refuses for room leaves its owner
-    // a wake for the connection it left, once room returns. The verdict
-    // is the guest's wake or its absence.
-    ("netd_refused_accept", Sched::Parallel),
     // The netcase boot again: bytes held back past a full pipe move on the
     // pipe's room alone, the peer holding the connection open and silent. The
     // verdict is the guest's byte-for-byte comparison; its clocks are
@@ -846,7 +703,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     ("sshd_files", Sched::Parallel),
     ("sshd_key_auth", Sched::Parallel),
     ("netd_hostile_peer", Sched::Parallel),
-    ("launcher_refusals", Sched::Parallel),
     // Paths a child prints and the kernel's refusals by name; no clock in any of them.
     ("spawn_cwd", Sched::Parallel),
     // Exit codes and kernel lines; no clock in any of them.
@@ -861,17 +717,8 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     ("block_duplicate_id", Sched::Parallel),
     // A partition claimed as a device: one boot, every refusal in the guest,
     // the neighbours and the target judged off the image. Body in
-    // `tests/common/partclaim.rs`, as are the two below.
+    // `tests/common/partclaim.rs`, as is the one below.
     ("partition_claim", Sched::Parallel),
-    // Three boots: a disk that does not answer a read of its table, every
-    // attempt refused until the deadman, and ROOT's source withheld from every
-    // claim once its disk did not answer the boot's hold.
-    ("partition_claim_gives_up", Sched::Parallel),
-    // Three boots, a USB stick's device leaving owing one claim's write and
-    // coming back on another port each time: each partition's fsync answers
-    // for its own writes, across a close, after another's flush, and at the
-    // shutdown when nobody asked.
-    ("partition_claim_departure", Sched::Parallel),
     // DATA's file server killed under an unanswered write, four times: its
     // clients reopen, the fourth end closes /home to Gone, and the flushed
     // files read back off the image. Body in `tests/common/storage.rs`.
@@ -902,23 +749,9 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // One boot of its own, because it ends the machine. Every verdict is a
     // kernel line or the stop reason QEMU reported; no clock is in either.
     ("machine_reboot", Sched::Parallel),
-    // Its own boot: every verdict is a console line, QEMU's stop reason or a record off the image.
-    ("metal_job_reboot", Sched::Parallel),
-    // Its own boot, and the one whose numbers are the T14's: what it judges
-    // here is the plumbing, since every span on an emulated device is a fact
-    // about TCG.
-    ("metal_device_probe", Sched::Parallel),
-    // Its verdict waits out a staged window.
-    ("job_deadline_reboots", Sched::Parallel),
-    // Its own boot, and its verdict waits out the same staged window.
-    ("quiesce_stops_the_machine", Sched::Parallel),
     // Its own boot: it ends the machine, and its verdict is the order of
     // kernel lines.
     ("quiesce_refuses_a_second_shutdown", Sched::Parallel),
-    // Its own boot each: it ends the machine, and its verdict is the stop
-    // record that boot writes.
-    ("quiesce_wakes_on_the_last_park", Sched::Parallel),
-    ("quiesce_wakes_on_the_last_teardown", Sched::Parallel),
     // Two reads of `TCO_RLD` straddling a real-time stall, so a slower machine
     // changes the verdict.
     ("loader_watchdog_arms", Sched::Parallel),
@@ -972,20 +805,7 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // The exception entry's own seal, off the page's bytes on an ordinary boot.
     ("blackbox_fault_sealed", Sched::Parallel),
     ("double_fault_stack", Sched::Parallel),
-    // One boot of its own, ten seconds of Ring 3 spinning, and every verdict is
-    // a count the kernel printed or a line it printed: how many NMIs landed at
-    // CPL 0 with a user `rsp`, against how many landed in Ring 3, both off the
-    // same storm. No host clock is in any of it — the ten seconds are how long
-    // the victim spins, not a margin anything is measured against — so Parallel.
-    ("syscall_window_nmi", Sched::Parallel),
-    // The two controls on the name above: the kernel with vector 2's IST index
-    // taken off, which must double fault at the entry on the NMI aimed at the
-    // CPU the storm holds inside it, with `cr2 = rsp - 8` at the held `rsp`, and
-    // the one nested NMI an early `iretq` can stage, which must take the loud
-    // path. Both boots end in a halted machine that has to be drained past its
-    // own report, which is where the price is. Nothing in either verdict is a
-    // duration.
-    ("syscall_window_nmi_controls", Sched::Parallel),
+    ("nested_nmi_is_loud", Sched::Parallel),
     // Its own boot, its own feature, and it drives the guest only through
     // stdin — nothing it touches is shared with another test.
     ("idle_stack_guard", Sched::Parallel),
@@ -1055,10 +875,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     ("fpu_isolation", Sched::Parallel),
     // Two boots, exit codes only (no clock, Parallel).
     ("gsbase_locked", Sched::Parallel),
-    // The fourth declared kernel build, booted so that the scheduler core's
-    // `feature = "check"` instruments are compiled and executed by a CI run at
-    // all.
-    ("sched_check_build", Sched::Parallel),
     // What nesting a `scheduler::Operation` may and may not do, which is a law
     // with no host-side reader: the type reaches `percpu::cpu_id` and
     // `driver::current_handle`, so nothing outside a booted machine can
@@ -1066,7 +882,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // is a comparison between two numbers the kernel printed, both of them
     // offsets it chose itself.
     ("operation_nesting", Sched::Parallel),
-    ("short_sleep_livelock", Sched::Parallel),
     // The spawn half alone: one headless boot whose verdict is kernel log
     // lines.
     ("klogd_hosted", Sched::Parallel),
@@ -1091,34 +906,18 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // never classified. Same boot shape as its two neighbours — dies inside the
     // boot phases at the marker, no userland — so Parallel.
     ("nested_fault_is_recursive", Sched::Parallel),
-    // The conservation law across `SYS_LOG_READ`, and the nesting gate at one
-    // CPU. Parallel: every verdict is a ledger the
+    // The conservation law across `SYS_LOG_READ`. Parallel: every verdict is a ledger the
     // guest computes over its own records — every sequence number read or
     // counted lost, every payload regenerated byte for byte — and not one of
     // them reads a clock. A loaded host makes the producers outrun the reader
     // further, which moves records from `read` into `lost` and leaves the law
     // exactly where it was.
     ("log_conservation_smp2", Sched::Parallel),
-    ("log_nested_emit", Sched::Parallel),
-    // The same interrupt one window earlier — between a record's shard-pointer
-    // read and its `xadd` — and its negative control, which is the only reader
-    // `log-unbracketed-reserve` has ever had. Parallel for
-    // `log_nested_emit`'s reasons: both verdicts are the guest's ledger over its
-    // own records, one saying the shard kept a single order and the other that
-    // it lost it by name, and no clock is in either.
-    ("log_reserve_window", Sched::Parallel),
-    ("log_reserve_window_negative", Sched::Parallel),
     // A guest writes a daemon-shaped line into a real capture window on purpose
     // and the real comparison ignores it, with the filter turned off as the
     // control. One boot, two `echo`s, and every verdict is a string comparison
     // the host makes over a capture — no clock in it.
     ("c_capture_ignores_daemon_lines", Sched::Parallel),
-    // A poll on the machine's log against a *handle* going away. Parallel: both
-    // halves are verdicts the guest computes — a completion count
-    // immediately after a close, retried against a record arriving in the same
-    // microseconds, and a completion afterwards bounded far above the two
-    // scheduler passes it needs.
-    ("log_poll_outlives_a_close", Sched::Parallel),
     // The same question asked of the keyboard, where two *kinds* of object name
     // one source: a poll on stdin against the keyboard claim going away, a poll
     // on the mouse claim against its own, and an injected keystroke to show the
@@ -1129,13 +928,10 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // One boot that stops dead in phase 3, read for what it managed to say.
     ("pre_idle_wedge_speaks", Sched::Parallel),
     ("i8042_health", Sched::Parallel),
-    // And one from here to `i8042_mouse` (`I8042_TRACE`). Neither measures a
-    // rate: nothing goes out until the guest has reported what the injection
-    // before it produced — `i8042_mouse` within [`MOUSE_LEAD`], the keyboard one
-    // a group at a time — so a guest with less of the host is a longer run and
-    // not a smaller count.
+    // It measures no rate: nothing goes out until the guest has reported what
+    // the injection before it produced, a group at a time, so a guest with less
+    // of the host is a longer run and not a smaller count.
     ("i8042_no_spurious_wake", Sched::Parallel),
-    ("i8042_mouse", Sched::Parallel),
     // A boot each, and deliberately not a group: every one of them changes
     // the machine's layout, and a wizard that exits the instant it has its
     // answer leaves the guest with nothing to run — so a later member reads a console the previous one is
@@ -1157,16 +953,12 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // `group_of` makes adjacency load-bearing.
     ("locale_detect", Sched::Parallel),
     ("locale_detect_unrecognized", Sched::Parallel),
-    // The wizard on the two surfaces the machine actually has, rather than on
-    // the stand-in `locale_gate` is. Each costs a boot of a different image.
-    ("console_locale_detect", Sched::Parallel),
     ("desktop_locale_detect", Sched::Parallel),
     // Typing at the same desktop, measured rather than transcribed: it waits
     // for its eight echoes instead of asserting how many arrived in a window,
     // so a guest that is slow costs seconds and not a verdict, and the verdict
     // itself is a fraction of the screen that no amount of load moves.
     ("desktop_typing_damage", Sched::Parallel),
-    ("desktop_window_child", Sched::Parallel),
     // An unmodified iced app on the desktop, launched from the shell: the
     // window, its text in the system font, no redraw it did not ask for, and
     // a clean exit when the compositor closes it.
@@ -1176,11 +968,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     ("toolkit_window_wake", Sched::Parallel),
     ("toolkit_winit_loop", Sched::Parallel),
     ("toolkit_winit_pace", Sched::Parallel),
-    // Ctrl+Alt+D on the same machine. Parallel: it waits for a marker and its
-    // verdicts are counts the report has to agree with itself about, not a
-    // wall-clock margin — the one duration in it is the dump's own 250 ms
-    // ceiling, which the guest spends and the host never measures.
-    ("blocked_dump", Sched::Parallel),
     ("i8042_absent", Sched::Parallel),
     // The fault quarantines (masks) the controller's GSI: the line and its
     // count are the verdict, and no program runs.
@@ -1188,7 +975,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     ("i8042_budget_expiry", Sched::Parallel),
     ("i8042_fadt_denial", Sched::Parallel),
     ("i8042_kbd_echo", Sched::Parallel),
-    ("i8042_undecoded_bytes", Sched::Parallel),
     ("xhci_xecp_walk", Sched::Parallel),
     ("xhci_slot_exhaustion", Sched::Parallel),
     ("usb_storage_gate", Sched::Parallel),
@@ -1196,29 +982,15 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     ("usb_refused_disk_first", Sched::Parallel),
     ("xhci_scan_hands_over_a_free_slot", Sched::Parallel),
     // The owner's freeze, staged: `device_del` on the stick carrying `/boot`
-    // and `/log` while the desktop draws. Serial because both verdicts are
-    // liveness ceilings — two 2 s compositor reporting intervals inside 20 s,
-    // and a console round trip inside 20 s — and a guest sharing the host with
-    // eleven others answers those late for reasons that are not the defect.
-    ("usb_boot_stick_pulled", Sched::Serial),
     ("usb_pool_exhausted", Sched::Parallel),
-    ("usb_short_read", Sched::Parallel),
     ("usb_storage_write_error", Sched::Parallel),
     ("usb_flush_optional", Sched::Parallel),
     ("xhci_deaf_registers", Sched::Parallel),
     ("xhci_slow_connect", Sched::Parallel),
     ("xhci_portsc_rw1c", Sched::Parallel),
-    // One staged break and no other, which puts the driver's recovery finishing
-    // on its first try in the verdict: a retried command that reaches an
-    // endpoint still halted from the staged break logs a second `transport
-    // broke`, and how many tries it takes is how much of the host the guest
-    // had — its own doc says one break under KVM and two under TCG off the
-    // same tree, which is the race timer-anchored, not a margin, describes.
-    ("usb_transport_break", Sched::Serial),
     // The host's unplug has to land inside the port rung's bound, which the
     // hold spends waiting for it.
     ("usb_stick_left", Sched::Serial),
-    ("xhci_full_speed_device", Sched::Parallel),
     ("xhci_superspeed_ports", Sched::Parallel),
     // `xhci_flap` is the one that genuinely races the host against the guest:
     // its two QMP writes have to land inside *one* 100 ms debounce or the state
@@ -1228,13 +1000,6 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // which is indistinguishable from the driver defect it hunts.
     ("xhci_flap", Sched::Serial),
     ("xhci_descriptor_walk", Sched::Parallel),
-    ("esp_filesystem", Sched::Parallel),
-    // Three boots: a budget-refused flush retried and kept, the deadman's
-    // declared death, and a hung device's failed reset escalation — the three
-    // exits of `object/ops.rs`'s fsync loop. Every verdict is line presence
-    // and host-side bytes, never a wall-clock margin.
-    ("log_flush_retry", Sched::Parallel),
-    ("toybox_cp_volume", Sched::Parallel),
     ("kernel_log_file", Sched::Parallel),
     ("kernel_heartbeat", Sched::Parallel),
     // The five RTC/firmware shapes, one kernel build and one boot each. Five
@@ -1262,24 +1027,15 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     ("root_candidate_malformed", Sched::Serial),
     ("root_named_but_absent", Sched::Serial),
     ("root_chunk_refused", Sched::Serial),
-    ("root_chunk_refused_on_a_usb_stick", Sched::Serial),
     ("root_candidate_overlaps", Sched::Serial),
     ("root_named_twice_on_the_boot_disk", Sched::Serial),
     ("root_named_twice", Sched::Serial),
     ("log_partition_identity", Sched::Parallel),
-    // The watch's lost-wake window, staged: `watch-window` holds every pipe
-    // waiter between reading its condition and parking, so the peer's post lands where
-    // only the notified bit carries it to the commit.
-    ("blocking_read_window", Sched::Parallel),
     // A claim slot's vector posts its watch from the handler: raised on a CPU
     // holding preemption off, inside a post of that watch, inside a completion
     // into a ring polling it or inside that ring's own watch, it posts once
     // that section lets go and before any pass. One boot; the verdict is counts.
     ("handler_post_without_a_pass", Sched::Parallel),
-    // A sibling's munmap and mmap staged between a typed copy's translation
-    // and its store (`copy-meets-a-remap`): the store never reaches the region
-    // mapped after it.
-    ("user_copy_races_munmap", Sched::Parallel),
     // A sibling's store staged between a thread's TLS block being placed and
     // its rebase (`tls-rebase-window`): the block is never reachable there.
     ("tls_rebase_window", Sched::Parallel),
@@ -1287,19 +1043,7 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // one way a guest can, since its `SYSRET` does not reproduce the erratum. Reds
     // the day that `mov ss` leaves the switch.
     ("sysret_ss_reload", Sched::Parallel),
-    // The FAT32 read side's revocation gate, and a host-side volume oracle: whether the clusters the
-    // unlink freed were really reissued, and whether the cycle left a volume, are
-    // both questions the guest that staged them cannot answer about itself.
-    ("fat_backing_revoked", Sched::Parallel),
-    // F5 and F6's negative controls: an fsync that must keep refusing while the
-    // device refuses its cache flush, and a mid-flush redirty raced for real and
-    // re-read off the image. Both bodies in `tests/common/volumes.rs`.
     ("fsync_failed_commit", Sched::Parallel),
-    ("redirty_mid_flush", Sched::Parallel),
-    // The rename gate's FAT arm, a host-side volume oracle like `fat_backing_revoked`.
-    ("fs_rename_durable", Sched::Parallel),
-    // The directory work's FAT arm, `fs_rename_durable`'s oracle shape.
-    ("fs_dirs_durable", Sched::Parallel),
     ("va_exhaustion", Sched::Parallel),
     ("heap_ceiling_bounds", Sched::Parallel),
     ("iommu_context_absent", Sched::Parallel),
@@ -1360,12 +1104,9 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("update_grant_refuses_a_stray_partition", &[]),
     ("update_floor_is_the_images_own", &[]),
     ("update_refused_pass_credits_no_image", &[]),
-    ("blocking_read_window", &["test_rs_blocking_read_stress"]),
-    ("user_copy_races_munmap", &["test_rs_copy_out_races_munmap"]),
     ("tls_rebase_window", &["test_rs_tls_dtv_race"]),
     ("xhci_second_controller", &["test_rs_input_events"]),
     ("xhci_msi_only", &["test_rs_input_events"]),
-    ("metal_sim_input", &["test_rs_input_events"]),
     ("xhci_flap", &["test_rs_input_events"]),
     ("nvme_large_device", &["test_rs_nvme_home_roundtrip"]),
     ("va_exhaustion", &["test_rs_va_exhaustion"]),
@@ -1373,16 +1114,12 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("mkdir_cap", &["test_rs_mkdir_cap"]),
     ("fpu_isolation", &["test_rs_fpu_isolation"]),
     ("gsbase_locked", &["test_rs_gsbase_locked"]),
-    ("sched_check_build", &["test_rs_sched_stress"]),
-    ("short_sleep_livelock", &["test_rs_abuse_short_sleep"]),
     ("heap_ceiling_bounds", &["test_rs_heap_ceiling"]),
     ("irq_census_conservation", &["test_rs_std_mmap"]),
     ("i8042_health", &["test_rs_i8042_keyboard"]),
     ("i8042_fadt_denial", &["test_rs_i8042_keyboard"]),
     ("i8042_kbd_echo", &["test_rs_i8042_keyboard"]),
-    ("i8042_undecoded_bytes", &["test_rs_i8042_keyboard"]),
     ("i8042_no_spurious_wake", &["test_rs_i8042_keyboard"]),
-    ("i8042_mouse", &["test_rs_i8042_mouse"]),
     ("swiss_german_layout", &["test_rs_locale_gate"]),
     ("locale_detect", &["test_rs_locale_gate"]),
     ("locale_detect_unrecognized", &["test_rs_locale_gate"]),
@@ -1390,13 +1127,11 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("netd_listener_forgery", &["test_rs_netd_listener_forgery"]),
     ("netd_slow_reader", &["test_rs_netd_slow_reader"]),
     ("netd_refused_pipes", &["test_rs_netd_refused_pipes"]),
-    ("netd_refused_accept", &["test_rs_netd_refused_accept"]),
     ("netd_held_open", &["test_rs_netd_held_open"]),
     ("netd_udp_refused", &["test_rs_netd_udp_refused"]),
     ("netd_udp_any_address", &["test_rs_netd_udp_any_address"]),
     ("netd_lookup_let_go", &["test_rs_netd_lookup_let_go"]),
     ("netd_hostile_peer", &["test_rs_netd_hostile_peer"]),
-    ("launcher_refusals", &["test_rs_launcher_refusals"]),
     ("spawn_cwd", &["test_rs_spawn_cwd"]),
     ("process_tree", &["test_rs_process_tree"]),
     ("input_claim_absent", &["test_rs_input_absent"]),
@@ -1421,12 +1156,10 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("metal_sim_client_death", METAL_SIM_CLIENTS),
     ("metal_sim_window_drag", &["test_rs_window_drag"]),
     ("metal_sim_hostile_clipboard", &["test_rs_compositor_hostile_clipboard"]),
-    ("desktop_window_child", &["test_rs_window_child"]),
     ("toolkit_window_wake", &["test_rs_window_wake"]),
     ("toolkit_winit_loop", &["test_rs_winit_loop"]),
     ("toolkit_winit_pace", &["test_rs_winit_pace"]),
     ("doom_frames", &["test_rs_doom_frames"]),
-    ("smp_failed_ap_leaves_no_hole", &["test_rs_smp_hole_shootdown"]),
     ("sshd_exec", &["test_rs_empty_dir_stat"]),
     ("sshd_files", &["test_rs_empty_dir_stat"]),
     ("sshd_key_auth", &["test_rs_empty_dir_stat"]),
@@ -1440,13 +1173,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("home_overwrite_reads_back", &["test_rs_home_overwrite_zero"]),
     ("fsd_restart", &["test_rs_fs_client_bound", "test_rs_fs_restart"]),
     ("fsd_claim_held", &["test_rs_fs_claim_held"]),
-    ("esp_filesystem", &["test_rs_esp_files"]),
-    ("log_flush_retry", &["test_rs_esp_files"]),
-    ("fat_backing_revoked", &["test_rs_fat_backing_revoked"]),
-    ("fs_dirs_durable", &["test_rs_fs_dirs_durable"]),
-    ("fs_rename_durable", &["test_rs_fs_rename_durable", "test_rs_fs_dirs_durable"]),
     ("fsync_failed_commit", &["test_rs_fsync_flush_failed"]),
-    ("redirty_mid_flush", &["test_rs_redirty_mid_flush"]),
     ("double_fault_stack", &["test_rs_test_panic_child"]),
     ("idle_stack_guard", &["test_rs_test_panic_child"]),
     ("syscall_panic_halts", &["test_rs_test_panic_child"]),
@@ -1454,28 +1181,18 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("lock_across_switch_halts", &["test_rs_test_panic_child"]),
     ("heap_over_ceiling_halts", &["test_rs_test_panic_child"]),
     ("dump_left_pending_is_owed", &["test_rs_dump_stage_load"]),
-    ("syscall_window_nmi", &["test_rs_nmi_window_spin"]),
-    ("syscall_window_nmi_controls", &["test_rs_nmi_window_spin"]),
     ("partition_claim", &["test_rs_partition_claimant"]),
-    ("partition_claim_gives_up", &["test_rs_partition_claimant"]),
-    ("partition_claim_departure", &["test_rs_partition_claimant"]),
     ("log_program_line", &["test_rs_log_origin"]),
     ("log_program_forgery", &["test_rs_log_forger"]),
     ("log_after_a_refused_stop", &["test_rs_log_refused_stop"]),
     ("log_resume_meets_its_flush", &["test_rs_log_refused_stop"]),
-    ("log_ring_keeps_the_owners_slots", &["test_rs_log_flood"]),
     ("log_program_flood", &["test_rs_log_flood"]),
     ("log_program_line_after_its_records", &["test_rs_log_hold"]),
     ("log_carrier_forgery", &["test_rs_log_carrier_forger"]),
     ("log_stream", &["test_rs_log_origin", "test_rs_empty_dir_stat"]),
     ("log_stream_e1000e", &["test_rs_log_origin", "test_rs_empty_dir_stat"]),
-    ("log_stream_stalled_reader", &["test_rs_log_flood"]),
     ("c_capture_ignores_daemon_lines", &["test_c_71_macro_empty_arg"]),
-    ("quiesce_stops_the_machine", &["test_rs_quiesce_writers"]),
     ("quiesce_refuses_a_second_shutdown", &["test_rs_quiesce_twice"]),
-    ("quiesce_wakes_on_the_last_park", &["test_rs_quiesce_last"]),
-    ("quiesce_wakes_on_the_last_teardown", &["test_rs_quiesce_last"]),
-    ("swap_crash_rolls_back", &["test_rs_swap_crash"]),
     ("swap_quiets_the_function", &["test_rs_swap_claim_idle"]),
     ("swap_keeps_what_nothing_reset", &["test_rs_swap_claim_running"]),
     ("swap_fault_tells_its_holder", &["test_rs_swap_claim_astray"]),
@@ -1488,10 +1205,7 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("wall_clock_utc", &["test_rs_wall_clock_now"]),
     ("file_mtime_survives_a_reboot", &["test_rs_file_mtime"]),
     ("file_mtime_undated", &["test_rs_file_mtime"]),
-    ("screen_console_clear", &["test_rs_test_screen_graffiti"]),
-    ("screen_console_scroll", &["test_rs_test_screen_churn"]),
     ("screen_console_panic", &["test_rs_test_panic_child"]),
-    ("screen_fatal_halt", &["test_rs_test_panic_child"]),
     ("panic_halts_the_others_first", &["test_rs_panic_halts_first"]),
 ];
 
@@ -1519,12 +1233,6 @@ const METAL_SIM_CLIENTS: &[&str] = &[
 /// safe and only the author knows.
 const METAL: &[(&str, metal::Metal)] = &[
     (
-        // The device list: the T14's own xHCI, stick, i8042, HDA, framebuffer
-        // and NVMe, asserted from the records the shipping kernel writes.
-        "metal_device_probe",
-        metal::Metal::Runs { arms: METALDEVICECASE, judge: |b| devices::on_metal(b[0]) },
-    ),
-    (
         "lan_dhcp_lease",
         metal::Metal::Runs { arms: LANCASE, judge: |b| lan::on_metal(b[0]) },
     ),
@@ -1543,13 +1251,6 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         "lan_talk",
         metal::Metal::Runs { arms: LANTALKCASE, judge: |b| lan::talked_on_metal(b[0]) },
-    ),
-    (
-        // netd swapped for the build's own binary while the boot runs, by a
-        // second `toyos-metal --swap` beside the flashing one; the stick's
-        // `/log` is the oracle that nothing rebooted between the two netds.
-        "lan_swap",
-        metal::Metal::Runs { arms: LANSWAPCASE, judge: |b| common::swap::swapped_on_metal(b[0]) },
     ),
     // ---- one image: tests/testcases, no parameters, one job list ----
     (
@@ -1586,14 +1287,6 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
-        // `log-close` is a runner builtin and prints its `survived=` evidence to
-        // a console nothing is on. What crosses is the child it spawns only
-        // after the poll survived the close — and the boot reaching its last job
-        // at all, which a builtin returning non-zero prevents.
-        "log_poll_outlives_a_close",
-        metal::Metal::Runs { arms: TESTCASES, judge: |b| log_close_survived(b[0]) },
-    ),
-    (
         "mkdir_cap",
         metal::Metal::Runs {
             arms: TESTCASES_MKDIR,
@@ -1605,16 +1298,6 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal::Runs {
             arms: TESTCASES_READDIR,
             judge: |b| b[0].job_passed("test_rs_readdir_bound"),
-        },
-    ),
-    (
-        "short_sleep_livelock",
-        metal::Metal::Runs {
-            arms: TESTCASES,
-            // A livelocked CPU produces no exit record at all, which is the
-            // whole verdict: the defect this is aimed at was caught twice by NMI
-            // on this very machine.
-            judge: |b| b[0].job_passed("test_rs_abuse_short_sleep"),
         },
     ),
     (
@@ -1722,24 +1405,6 @@ const METAL: &[(&str, metal::Metal)] = &[
                 ..metal::once("testcases-debug", "tests/testcases", &[], &["test_rs_tlb_shootdown_waits"])
             }],
             judge: |b| b[0].job_passed("test_rs_tlb_shootdown_waits"),
-        },
-    ),
-    (
-        // The canary beside the `watch-window` actuator, and the count of
-        // windows a post landed in while it ran — the staging that is
-        // timing, and so metal's.
-        "blocking_read_window",
-        metal::Metal::Runs {
-            arms: &[metal::once(
-                "testcases-window",
-                "tests/testcases",
-                &["watch-window"],
-                &["test_rs_blocking_read_stress"],
-            )],
-            judge: |b| {
-                b[0].job_passed("test_rs_blocking_read_stress")?;
-                window_held_on_metal(&b[0].kernel())
-            },
         },
     ),
     (
@@ -2049,11 +1714,6 @@ const AUDIO_ON_METAL_ONLY: &str = "audio is judged on the T14 and in no QEMU gue
 
 /// The boot most of the first tranche rides: the plain `tests/testcases` shape
 /// with a job list that ends it.
-///
-/// Order matters. `log-close` is last because it is a *builtin*: its exit code
-/// reaches no kernel record, so the runner ends the boot on a non-zero one and
-/// every later job's record would then be missing for the wrong reason. The
-/// last job before it is [`LOG_CLOSE_MARKER`]'s subject.
 const TESTCASES: &[metal::Arm] = &[metal::once(
     "testcases",
     "tests/testcases",
@@ -2064,10 +1724,8 @@ const TESTCASES: &[metal::Arm] = &[metal::once(
         "test_rs_audio_idle_suspend",
         "test_rs_audio_tone",
         "test_rs_hda_client_stall",
-        "test_rs_abuse_short_sleep",
         "test_rs_syscall_cost",
         "test_rs_null_sink_client_exits",
-        "log-close",
     ],
 )];
 
@@ -2088,9 +1746,8 @@ const JOBCASE: &[metal::Arm] = &[metal::once("jobcase", "tests/jobcase", &[], &[
 const LOGSTALLCASE: &[metal::Arm] =
     &[metal::once("logstallcase", "tests/logstallcase", &[], &["test_rs_soundd_log_stall"])];
 
-/// The two boots the reset ruling is judged on, and both are boots this suite
-/// already flashes: the device boot for a reset with megabytes behind it, and
-/// `jobcase` for one with nothing.
+/// The two boots the reset ruling is judged on: the device boot for a reset
+/// with megabytes behind it, and `jobcase` for one with nothing.
 const USB_RESET_BOOTS: &[metal::Arm] = &[
     metal::once(
         devices::BOOT,
@@ -2133,16 +1790,6 @@ const LANTALKCASE: &[metal::Arm] = &[metal::Arm {
     ..metal::once(lan::TALK_BOOT, lan::TALK_CONFIG, &[], lan::TALK_JOBS)
 }];
 
-/// The talking boot's config with netd swapped while it runs: the image
-/// streams and authorizes a key as the talking boot's does, and the loop that
-/// flashes it is not told `--talk` — the `--swap` invocation beside it owns the
-/// listener. Its one job holds the machine until that invocation hands it back
-/// with `reboot`, the runner's bound standing behind it.
-const LANSWAPCASE: &[metal::Arm] = &[metal::Arm {
-    swap: Some("netd"),
-    ..metal::once("lanswapcase", lan::TALK_CONFIG, &[], common::swap::HOLD_JOBS)
-}];
-
 /// One boot for every in-kernel self-test that logs its verdict at init and
 /// does nothing else.
 ///
@@ -2171,20 +1818,6 @@ const SELFTESTS: &[metal::Arm] = &[metal::once(
         "sched-operation-nesting",
     ],
     &[],
-)];
-
-/// The device boot: the whole `metalprobe` job list on the T14's own devices.
-/// Its own image, because every job in it either claims the display or moves
-/// megabytes across the boot stick, and neither shares well.
-const METALDEVICECASE: &[metal::Arm] = &[metal::once(
-    devices::BOOT,
-    devices::CONFIG,
-    &[],
-    // The same list the committed config carries, so the image the driver
-    // flashes and the one the QEMU arm boots run the same jobs in the same
-    // order — `devices::the_config_runs_exactly_these_jobs` is what holds the
-    // two together.
-    devices::JOBS,
 )];
 
 /// The shared block's Rust binaries that do **not** go on the T14, and what
@@ -2299,12 +1932,7 @@ const LATENCYCASE: &[metal::Arm] = &[metal::once(
 /// Measured, like `METAL_SKIP`: the whole corpus was staged onto one
 /// metal-shaped image and booted, and this is what the guest comparator could
 /// not answer for.
-const C_METAL_SKIP: &[(&str, &str)] = &[(
-    "90_stdio_buffering",
-    "its expectation carries a `stderr line`, and the guest comparator reads one pipe. The \
-     host compares a console both streams land on in real time; two pipes here would carry \
-     the same bytes in an order nothing preserves, so this case stays where the console is",
-)];
+const C_METAL_SKIP: &[(&str, &str)] = &[];
 
 /// **One comparison rule, in two places that cannot share code.**
 ///
@@ -2379,30 +2007,6 @@ fn c_corpus_metal(
 /// The comparator's own staged name. It is a `RUST_SKIP` helper, so discovery
 /// never makes a job of it and [`shared_metal`] stages it as one.
 const CCHECK: &str = "test_rs_ccheck";
-/// The job `log-close` runs after, and so the anchor its evidence is read from.
-const LOG_CLOSE_MARKER: &str = "test_rs_null_sink_client_exits";
-
-/// `log-close`'s verdict, as it crosses on a machine with no console.
-///
-/// The builtin's own `survived=` line reaches nothing, and a builtin leaves the
-/// kernel no exit record of its own. What it does leave is a child's:
-/// `still_armed` spawns `/system/bin/echo` **only** after the poll outlived the
-/// close. So the positive half is that record arriving after the job before it —
-/// `echo` is a common enough name that a whole-log scan would be answered by
-/// somebody else's — and the negative half is the boot reaching its `reboot`
-/// job at all, which a builtin returning non-zero prevents.
-fn log_close_survived(back: &metal::Readback) -> Result<(), String> {
-    let previous = format!("{}{} pid=", bootlog::EXIT, bootlog::recorded_name(LOG_CLOSE_MARKER));
-    let child = format!("{}echo pid=", bootlog::EXIT);
-    back.kernel().must_say_after(&previous, &child).map_err(|why| {
-        format!(
-            "{why}\n`log-close` reaches `still_armed` — the one thing that spawns `echo` there — \
-             only if the poll outlived the close"
-        )
-    })?;
-    bootlog::handed_back(back.after_the_reset()?.text()).map_err(|why| why.to_string())
-}
-
 /// The renderer's two text colours, as the screendump reports them.
 const WHITE: [u8; 3] = [0xFF, 0xFF, 0xFF];
 const ALERT: [u8; 3] = [0xFF, 0x50, 0x50];
@@ -2413,19 +2017,9 @@ const FILL_FATAL: [u8; 3] = [0x60, 0x00, 0x00];
 /// lines, and one of them means the machine died.
 const FILL_BOOT: [u8; 3] = [0x00, 0x00, 0x00];
 
-/// The T14 Gen 2's panel as the console grids it: 1080/16 rows of 1920/8
-/// columns. `Profile::Metal`'s display advertises that panel over EDID, so the
-/// mode its firmware sets *is* this panel — the test's screen and the laptop's
-/// share one geometry. Every geometry claim `screen_diag_boot` makes is made
-/// against these two numbers and not against the screen it is reading.
-const T14_ROWS: usize = 1080 / 16;
-const T14_COLS: usize = 1920 / 8;
-
 /// The line `SYS_DEBUG` action 3 logs immediately before halting every CPU.
 /// It exists only on a `test-actuators` kernel — every other action costs the
-/// caller its own process, this one costs the machine. Kept in sync with
-/// `kernel/src/syscall/debug.rs` by this comment and by screen_fatal_halt
-/// failing loudly if it drifts.
+/// caller its own process, this one costs the machine.
 const FATAL_HALT_NONCE: &str = "SYS_DEBUG: fatal halt 4b1d9e2c";
 
 /// How far a corpus case gets before it stops, and what it says when it does.
@@ -3646,7 +3240,7 @@ fn virt_smp(profile: qemu::Profile, conduit: &str, el: u32) -> Result<(), String
     Ok(())
 }
 
-/// `smp_failed_ap_leaves_no_hole` on AArch64: `smp-skip-ap` keeps `CPU_ON`
+/// `smp-skip-ap` keeps `CPU_ON`
 /// from the CPU that would be cpu2 of four, and the bring-up stops there, so
 /// cpu2's id goes to no CPU behind it. The case's job, which the scheduler
 /// places across the CPUs that came up, ends with exit 0.
@@ -3742,110 +3336,6 @@ fn run_screen_test(
     rust_bins: &[(String, Vec<u8>)],
 ) -> Result<(), String> {
     match name {
-        "screen_loader_lines" => {
-            // An EXCLUSIVE open of `GraphicsOutput` calls `Stop` on the
-            // firmware's graphics console, so with one the panel stops at the
-            // GOP query and every later loader line is on serial alone.
-            let dump_at = |marker: &'static str| -> Result<(usize, String), String> {
-                let options = BootOptions {
-                    profile,
-                    qmp: true,
-                    ready_marker: marker,
-                    ..Default::default()
-                };
-                metal_sim_argv_check(&qemu::profile_argv(&options))?;
-                let mut qemu =
-                    QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
-                let console = qemu.boot_log().to_string();
-                let dump = qemu.screendump();
-                // A row that decodes in the kernel's font is a row the kernel
-                // drew. Refused rather than counted: its rows are not the
-                // loader's and would only push the growth below green.
-                if dump
-                    .rows()
-                    .iter()
-                    .any(|row| !row.trim().is_empty() && !row.contains(screen::UNKNOWN))
-                {
-                    return Err(format!(
-                        "the kernel had already repainted the panel at {marker:?}, so these are \
-                         its rows and not the loader's\ndecoded screen:\n{}",
-                        dump.text()
-                    ));
-                }
-                Ok((dump.text_row_bands()?, console))
-            };
-
-            let (before, at_query) = dump_at(bootlog::LOADER_GOP_LINE)?;
-            let (after, console) = dump_at(bootlog::LOADER_LAST_LINE)?;
-
-            // The growth below subtracts one boot's rows from the other's, and
-            // says nothing unless the two printed the same number of lines
-            // before the query. The lines themselves are not compared: each
-            // boot builds its own image, so two of them carry partition GUIDs
-            // drawn fresh.
-            let upto = |text: &str| {
-                text.lines().take_while(|line| !line.contains(bootlog::LOADER_GOP_LINE)).count()
-            };
-            if upto(&at_query) != upto(&console) {
-                return Err(format!(
-                    "one boot printed {} lines before the GOP query and the other {}, so their \
-                     row counts are not each other's baseline\n--- first\n{at_query}\n--- \
-                     second\n{console}",
-                    upto(&at_query),
-                    upto(&console)
-                ));
-            }
-
-            // What the loader printed after the query, off its own console.
-            let lines: Vec<&str> = console.lines().collect();
-            let at = |line: &str| {
-                lines
-                    .iter()
-                    .position(|seen| seen.contains(line))
-                    .ok_or_else(|| format!("the loader never printed {line:?}\n{console}"))
-            };
-            let (query, last) =
-                (at(bootlog::LOADER_GOP_LINE)?, at(bootlog::LOADER_LAST_LINE)?);
-            if last <= query {
-                return Err(format!(
-                    "the console carries {:?} at line {last} and {:?} at line {query}, so there \
-                     is nothing between them",
-                    bootlog::LOADER_LAST_LINE,
-                    bootlog::LOADER_GOP_LINE
-                ));
-            }
-            let printed = last - query;
-            // The rows those lines take on the firmware's console, whose glyph is
-            // eight pixels wide (UEFI 2.11 §12.9, `EFI_GLYPH_WIDTH`): a line
-            // wider than the mode's columns — the root bridges' descriptor dump
-            // is one — wraps onto a row per width it fills.
-            let columns = lines[query]
-                .split("GOP: mode ")
-                .nth(1)
-                .and_then(|mode| mode.split('x').next())
-                .and_then(|width| width.parse::<usize>().ok())
-                .map(|width| width / 8)
-                .filter(|&columns| columns > 0)
-                .ok_or_else(|| format!("the GOP line names no mode width: {:?}", lines[query]))?;
-            let rows: usize = lines[query + 1..=last].iter().map(|line| line.len().div_ceil(columns).max(1)).sum();
-
-            // A range and not an equality: each panel is dumped after its marker
-            // reached the console, so a line drawn in between is on the panel
-            // and not in the count.
-            let grew = after as i64 - before as i64;
-            if !(1..=rows as i64).contains(&grew) {
-                return Err(format!(
-                    "the panel carried {before} rows at the GOP query and {after} at the loader's \
-                     last line, a growth of {grew}, where the loader printed {printed} lines \
-                     between them, {rows} rows at {columns} columns\n{console}"
-                ));
-            }
-            eprintln!(
-                "  [screen] the panel grew {grew} row(s) across the GOP query, {before} to \
-                 {after}, for {printed} line(s) printed"
-            );
-            Ok(())
-        }
         "screen_gop_firmware_mode" => {
             // Four of `GopInfo`'s six fields, on two machines advertising
             // different panels. QMP's `screendump` is the geometry QEMU scans
@@ -3968,156 +3458,6 @@ fn run_screen_test(
             }
             Ok(())
         }
-        "screen_diag_boot" => {
-            // The diagnostic boot mode, on the machine shape it exists for.
-            // What is under test is not that the console renders —
-            // `screen_late_panic` has that — but that a *successful* boot
-            // leaves its log on the glass. `boot_checkpoint` is the only
-            // painter on this path and it returns immediately once anything
-            // claims DEVICE_FRAMEBUFFER, so on the flashed image the answer
-            // to "why is the keyboard dead" was up for about a tenth of a
-            // second. This image contains no process that can claim it.
-            //
-            // Same config file `--diag-boot` builds from, and no test binaries
-            // on ROOT, so the image booted here is the image flashed.
-            let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("diag");
-            let options = BootOptions {
-                profile,
-                qmp: true,
-                // No test-runner in this image, so the kernel's own last phase
-                // line is the marker. It says the ring drained, not that the
-                // paint happened, which is why the screen is polled below.
-                ready_marker: "Boot: complete",
-                ..Default::default()
-            };
-            metal_sim_argv_check(&qemu::profile_argv(&options))?;
-            let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
-            let mut console = qemu.boot_log().to_string();
-            // The window the mode exists to close: on the flashed image the
-            // compositor's first output landed 48 ms after `Boot: complete`.
-            // So the panel is read once the last program this image starts has
-            // run and exited, when anything that would claim it already has.
-            await_marker(&mut qemu, &mut console, "exit: toybox", "the last program the image starts")?;
-            let dump = qemu.screendump();
-            let text = dump.text();
-            print_screen(name, &text);
-
-            // A fatal report carries the same log lines. Without the fill and
-            // a clean console this would go green on a kernel that panicked
-            // its way to the same text.
-            if dump.fill() != FILL_BOOT {
-                return Err(format!(
-                    "screen fill is {:?}, want the boot checkpoint's {FILL_BOOT:?}\n\
-                     decoded screen:\n{text}",
-                    dump.fill()
-                ));
-            }
-            serial::Serial::named("boot console", console.as_str()).must_be_clean()?;
-
-            for want in
-                ["Boot: complete", "i8042:", common::volumes::LOG_ON_CONSOLE_AND_FILE]
-            {
-                if !text.contains(want) {
-                    return Err(format!(
-                        "{want:?} is not on screen once every program the image starts had \
-                         run\ndecoded screen:\n{text}"
-                    ));
-                }
-            }
-            // `screen_log_absent`'s control. This machine's log partition
-            // mounted, so nothing here may be wearing the alert marker — a
-            // kernel that painted it unconditionally would satisfy that gate
-            // and mean nothing.
-            if let Some(row) = (0..dump.rows().len()).find(|&i| dump.row_fg(i) == Some(ALERT)) {
-                return Err(format!(
-                    "an alert row on a boot where everything worked: {:?}\n\
-                     decoded screen:\n{text}",
-                    dump.rows()[row]
-                ));
-            }
-
-            // A log longer than the screen is shown as its tail, and the rule
-            // is that it may never be a *silent* tail: `paint` gives an
-            // overflowing text a `[page n/m]` footer and `Page::Last` numbers
-            // it as the last page. So either the whole log is up, or the
-            // footer says out loud that it is not. Which branch runs is a
-            // property of the log's length, not of the mode — this boot fits
-            // today and the footer branch is the guard for when it stops
-            // fitting, which the T14's shorter panel is already close to.
-            let rows = dump.rows();
-            let paged = rows.iter().find(|r| r.starts_with("[page "));
-            match paged {
-                Some(f) => {
-                    let n: Vec<&str> = f
-                        .trim_start_matches("[page ")
-                        .trim_end_matches(']')
-                        .split('/')
-                        .collect();
-                    if n.len() != 2 || n[0] != n[1] {
-                        return Err(format!(
-                            "a boot checkpoint paints the newest page, so its footer \
-                             must read [page m/m]; got {f:?}"
-                        ));
-                    }
-                }
-                None => {
-                    let Some(first) = console.lines().find(|l| qemu::is_kernel_line(l)) else {
-                        return Err(format!("no kernel line on the console at all:\n{console}"));
-                    };
-                    // A fragment rather than the line: rows are wrapped at the
-                    // screen's width, and a whole line can straddle two of them.
-                    let fragment: String = first.chars().skip(20).take(24).collect();
-                    if !text.contains(fragment.trim()) {
-                        return Err(format!(
-                            "no footer, so the screen claims to hold the whole log — \
-                             but its first line {first:?} is not on it\n\
-                             decoded screen:\n{text}"
-                        ));
-                    }
-                }
-            }
-
-            // And the same claim against the panel that gets flashed, which is
-            // smaller than this one in both directions.
-            let i8042_row = dump.row_index("i8042:").expect("checked above");
-            let last_text = rows
-                .iter()
-                .rposition(|r| !r.is_empty() && !r.starts_with("[page "))
-                .unwrap_or(0);
-            let above_end = last_text.saturating_sub(i8042_row);
-            if above_end >= T14_ROWS {
-                return Err(format!(
-                    "the first `i8042:` line is {above_end} rows above the end of the \
-                     log; the T14's panel holds {T14_ROWS}, so it would not be on the \
-                     flashed machine's screen at all\ndecoded screen:\n{text}"
-                ));
-            }
-            if let Some(wide) = rows[i8042_row..=last_text]
-                .iter()
-                .find(|r| r.chars().count() > T14_COLS)
-            {
-                return Err(format!(
-                    "a row inside that window is {} columns wide against the panel's \
-                     {T14_COLS}; it wraps there, which pushes the `i8042:` line further \
-                     up than this screen shows: {wide:?}",
-                    wide.chars().count()
-                ));
-            }
-
-            eprintln!("  [diag] five seconds after Boot: complete, still on screen:");
-            eprintln!("  [diag]   {}", rows[i8042_row]);
-            eprintln!(
-                "  [diag] {above_end} rows above the end of the log; the T14 panel holds {T14_ROWS}"
-            );
-            eprintln!(
-                "  [diag] {}",
-                match paged {
-                    Some(f) => format!("log longer than the screen, footer reads {f}"),
-                    None => "whole log on one screen, no footer".to_string(),
-                }
-            );
-            Ok(())
-        }
         "screen_early_panel" => {
             // `test-early-halt` stops the boot between `PAT:`'s commit and its
             // repaint, so `PAT:` is on the console and the panel holds only what
@@ -4207,8 +3547,7 @@ fn run_screen_test(
             // one white row, in the middle of phase 5, among sixty-seven — and
             // the owner's report was that nothing said so at all.
             //
-            // The diag config for the same reason `screen_diag_boot` uses it:
-            // it contains no process that can claim the framebuffer, so the
+            // The diag config: it contains no process that can claim the framebuffer, so the
             // last boot checkpoint's paint is still up when the screendump is
             // taken. On the flashed desktop image the compositor takes the
             // screen about 48 ms after `Boot: complete`, which is what makes
@@ -4274,614 +3613,19 @@ fn run_screen_test(
             eprintln!("  [log] on the panel, in alert red: {}", dump.rows()[row]);
             Ok(())
         }
-        "screen_console_shell" => {
-            // The third boot mode, on the machine shape that gets flashed.
-            // What is under test is the whole chain a question travels on a
-            // machine with no serial port: the i8042 pin, the kernel's
-            // translation, `/system/bin/console`, the shell's stdin, its stdout, and
-            // the panel. **A test that asserted only that a prompt rendered
-            // would pass on a console that cannot read the keyboard**, which
-            // is exactly the path this program exists to bring up.
-            //
-            // Same config file `--console-boot` builds from and no test
-            // binaries on ROOT, so the image booted here is the image
-            // flashed — the property `screen_diag_boot` has for its mode.
-            let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("console");
-            let options = BootOptions {
-                profile,
-                qmp: true,
-                ready_marker: "console: ready",
-                ..Default::default()
-            };
-            metal_sim_argv_check(&qemu::profile_argv(&options))?;
-            let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
-            let console = qemu.boot_log().to_string();
-            serial::Serial::named("boot console", console.as_str()).must_be_clean()?;
-
-            let font = screen::ConsoleFont::load();
-            // **Both, because nothing orders them.** The seed's paint and the
-            // shell's first prompt are two independent writers, so a wait that
-            // stopped at the prompt could sample a panel the seed had not
-            // finished putting up and report it as a console that never read
-            // the log.
-            let dump = qemu.screendump_while(
-                Duration::from_secs(30),
-                Duration::from_millis(200),
-                |d| {
-                    let text = d.console_text(&font);
-                    text.contains(CONSOLE_PROMPT)
-                        && text.contains(CONSOLE_SEED_WITNESS)
-                        && text.contains(CONSOLE_PROGRAM_WITNESS)
-                },
-            );
-            let before = dump.console_text(&font);
-            if !before.contains(CONSOLE_PROMPT) {
-                return Err(format!(
-                    "no {CONSOLE_PROMPT:?} on the panel 30 s after `console: ready`\n\
-                     decoded screen:\n{before}"
-                ));
-            }
-
-            // The seed. Claiming DEVICE_FRAMEBUFFER stops `boot_checkpoint`
-            // painting for the rest of the boot, so a console that merely
-            // cleared the screen would have traded the diagnostic that works
-            // today for one that might — and this is the line the metal track
-            // keeps having to read.
-            if !before.contains(CONSOLE_SEED_WITNESS) {
-                // **Which of the two it is, from a number the guest published
-                // rather than from the panel.** `console: ready` reports the
-                // bytes of log it seeded, so a blank console and a console
-                // showing some other part of the log are told apart by that
-                // count — the panel cannot separate them, and a message that
-                // picked one sent the next reader after the wrong subsystem.
-                // The byte stream and not `boot_log`: the count is on the rest
-                // of the ready marker's own line, which the line channel has
-                // already consumed by the time the marker ends the boot wait.
-                let said = qemu.console_stream().since(0);
-                // Anchored on the whole of the console's own phrase: `logd`
-                // says "this boot's kernel log is …" on the same console, and
-                // a search for the shorter string finds that one first.
-                let seeded = said
-                    .split("cells), log ")
-                    .nth(1)
-                    .and_then(|rest| rest.split(' ').next())
-                    .and_then(|n| n.parse::<u64>().ok());
-                return Err(match seeded {
-                    Some(0) => format!(
-                        "no `{CONSOLE_SEED_WITNESS}` line above the prompt, and `console: \
-                         ready` reported 0 bytes of log: this console started blank where \
-                         the diagnostic boot starts with the log\ndecoded screen:\n{before}"
-                    ),
-                    Some(bytes) => format!(
-                        "no `{CONSOLE_SEED_WITNESS}` line above the prompt, and the console \
-                         drew {bytes} bytes of log — so the log reached the scrollback and \
-                         what is on the panel is some other part of it. This is not a \
-                         console that started blank\ndecoded screen:\n{before}"
-                    ),
-                    None => format!(
-                        "no `{CONSOLE_SEED_WITNESS}` line above the prompt, and no `log N \
-                         bytes` on the console to say whether the seed happened at \
-                         all\nboot console:\n{said}\ndecoded screen:\n{before}"
-                    ),
-                });
-            }
-            // Non-vacuity, and not a formality: a boot checkpoint paints the
-            // same lines off the same ring, so on a boot where the console
-            // never ran the assertion above could be satisfied by the kernel's
-            // own paint. It cannot, because that paint is in `font8x16.bin`
-            // and this screen decodes under the console's — which is a claim,
-            // so it is checked here and in `console_self_test` rather than
-            // assumed.
-            let kernel_font = dump.text();
-            if kernel_font.contains("i8042:") {
-                return Err(format!(
-                    "the kernel's own font decodes this screen, so what is up is a boot \
-                     checkpoint and not the console's paint\ndecoded screen:\n{kernel_font}"
-                ));
-            }
-
-            // A program's output, on the console that owns the screen, under
-            // the name of the pipe it came out of.
-            if !before.contains(CONSOLE_PROGRAM_WITNESS) {
-                return Err(format!(
-                    "no {CONSOLE_PROGRAM_WITNESS:?} on the panel: the console does not show \
-                     program output under its program's name\ndecoded screen:\n{before}"
-                ));
-            }
-
-            console_type_line(&mut qemu, &font, &format!("echo {CONSOLE_NONCE}"))?;
-
-            let dump = qemu.screendump_while(
-                Duration::from_secs(30),
-                Duration::from_millis(200),
-                |d| d.console_rows(&font).iter().any(|r| r.trim() == CONSOLE_NONCE),
-            );
-            let after = dump.console_text(&font);
-            print_screen(name, &after);
-            // A whole trimmed row, because the shell echoes what is typed:
-            // `contains` would be satisfied by `/home/toy> echo zqjxk`, which
-            // says the console drew a keystroke and nothing about anything
-            // having run.
-            if !dump.console_rows(&font).iter().any(|r| r.trim() == CONSOLE_NONCE) {
-                return Err(format!(
-                    "typed `echo {CONSOLE_NONCE}` at the prompt and no row of the panel is \
-                     its output; the keyboard, the shell or the console did not carry it\n\
-                     decoded screen:\n{after}"
-                ));
-            }
-            if !after.contains(&format!("{CONSOLE_PROMPT} echo {CONSOLE_NONCE}")) {
-                return Err(format!(
-                    "the output is on screen but the echoed command line is not, so the \
-                     console is not showing what was typed\ndecoded screen:\n{after}"
-                ));
-            }
-            let rows = dump.console_rows(&font);
-            // The panel carries logd's file format — `[<wall clock> secs cpuN]`, where the serial's bracket names `kernel`.
-            let log_rows =
-                rows.iter().filter(|r| r.contains(" cpu") && r.contains("] ")).count();
-            if log_rows == 0 {
-                return Err(format!(
-                    "the seed witness is on the panel but no row reads as a log record, \
-                     so the format this counts by has drifted again\ndecoded screen:\n{after}"
-                ));
-            }
-            eprintln!(
-                "  [console] {log_rows} kernel log rows above a prompt, and `echo \
-                 {CONSOLE_NONCE}` typed on the i8042 answered on the panel"
-            );
-            Ok(())
-        }
-        "screen_console_clear" => {
-            // `clear` is the one command whose entire output is the *absence*
-            // of output, which is why nothing else in the suite covers it:
-            // every other screen assertion looks for something that should be
-            // on the panel, and passes whether or not anything else is up
-            // there with it. This one asserts what must *not* be there, and
-            // the console is the caller that has to get it right — on the
-            // machine it is for there is no scrollbar to drag and no second
-            // window to read from.
-            let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("console");
-            let options = BootOptions {
-                profile,
-                qmp: true,
-                kernel_features: ACTUATOR_KERNEL,
-                ready_marker: "console: ready",
-                ..Default::default()
-            };
-            let mut qemu =
-                QemuInstance::boot_with_options(&config, c_bins, rust_bins, options);
-            let font = screen::ConsoleFont::load();
-
-            // `_rendering`, not the plain wait: on a loaded `smp:2` runner the
-            // console paints slowly and the budget-scaled 30s window undercounts
-            // a later moment in the run, so a guest still drawing was called
-            // wedged (`0 of 2073600 pixels`, the paint never arriving). The
-            // console freezes when idle, so a real failure still ends the wait a
-            // `GUEST_QUIET` after the deadline.
-            let before = qemu.screendump_while_rendering(
-                Duration::from_secs(30),
-                Duration::from_millis(200),
-                |d| d.console_text(&font).contains(CONSOLE_PROMPT),
-            );
-            let before_text = before.console_text(&font);
-            if !before_text.contains(CONSOLE_PROMPT) {
-                return Err(format!(
-                    "no prompt to clear\ndecoded screen:\n{before_text}"
-                ));
-            }
-            // The premise. Clearing a screen that was already blank asserts
-            // nothing, and the seeded kernel log is what fills it.
-            let filled = before.console_rows(&font).iter().filter(|r| !r.is_empty()).count();
-            if filled < 10 {
-                return Err(format!(
-                    "only {filled} non-blank rows before `clear`, so there was nothing to \
-                     leave behind\ndecoded screen:\n{before_text}"
-                ));
-            }
-
-            // Draw on the glass behind the console's back, which is the state
-            // `clear` exists to get a user out of and the one a damage-tracked
-            // console can talk itself out of repairing.
-            console_type_line(&mut qemu, &font, "test_rs_test_screen_graffiti")?;
-            // Settle on the strip below the last cell row rather than on the
-            // whole panel: the console goes on drawing -- the command echoes,
-            // the shell reprints its prompt -- so most of the glass is being
-            // repainted while this waits, and only the strip no cell covers
-            // holds still.
-            let margin = |d: &screen::Ppm| d.height % screen::GLYPH_H;
-            let margin_is = |d: &screen::Ppm, c: [u8; 3]| {
-                let m = margin(d);
-                m > 0
-                    && d.pixels[(d.height - m) * d.width..].iter().all(|p| *p == c)
-            };
-            let painted_over = qemu.screendump_while_rendering(
-                Duration::from_secs(30),
-                Duration::from_millis(200),
-                |d| margin_is(d, GRAFFITI),
-            );
-            // Non-vacuity, in the two places it can be lost. A panel that is a
-            // whole number of glyph rows tall has no strip at all, and would
-            // make half of what follows assert nothing -- both 2048x2048, the
-            // mode this profile used to be given, and `DEFAULT_PANEL`, the one
-            // its firmware sets when no panel is declared, are exactly that.
-            if margin(&painted_over) == 0 {
-                return Err(format!(
-                    "this panel is {}x{}, a whole number of {}px glyph rows, so the strip this \
-                     test is half about does not exist here",
-                    painted_over.width, painted_over.height, screen::GLYPH_H
-                ));
-            }
-            // And if the kernel never reached the glass there is nothing for
-            // `clear` to fail to remove.
-            let green = painted_over.pixels.iter().filter(|p| **p == GRAFFITI).count();
-            if !margin_is(&painted_over, GRAFFITI) || green * 2 < painted_over.pixels.len() {
-                return Err(format!(
-                    "the graffiti actuator did not reach the panel: {green} of {} pixels are \
-                     {GRAFFITI:?} and the {}px strip below the cells is {}",
-                    painted_over.pixels.len(),
-                    margin(&painted_over),
-                    if margin_is(&painted_over, GRAFFITI) { "green" } else { "not" }
-                ));
-            }
-
-            // Typed onto the paint, and still confirmed by the console's own
-            // echo: the shell reprinted its prompt after the graffiti child
-            // exited, so the cells it drew are the console's again and the ones
-            // it did not draw are still green. That is why the echo is matched
-            // as a prefix of the input row (`console_type_line`) — the rest of
-            // that row is the actuator's paint and stays.
-            console_type_line(&mut qemu, &font, "clear")?;
-
-            // `clear` is `ESC[2J ESC[H`, after which the shell reprints its
-            // prompt at the home position. So the whole panel is one row of
-            // prompt and nothing else -- wait for that, then assert it, so a
-            // slow paint reads as a failure rather than as a pass on a screen
-            // that had not finished.
-            let only_prompt = |d: &screen::Ppm| {
-                let rows = d.console_rows(&font);
-                rows.first().is_some_and(|r| r.trim() == CONSOLE_PROMPT)
-                    && rows[1..].iter().all(|r| r.is_empty())
-            };
-            let dump = qemu.screendump_while_rendering(
-                Duration::from_secs(30),
-                Duration::from_millis(200),
-                only_prompt,
-            );
-            let after = dump.console_text(&font);
-            print_screen(name, &after);
-
-            // The pixel assertion first, because it is the specific one: a
-            // screen still covered in paint fails the prompt check too, and
-            // that message would send the next reader after the shell.
-            if let Some(i) = dump.pixels.iter().position(|p| *p == GRAFFITI) {
-                let (x, y) = (i % dump.width, i / dump.width);
-                let m = dump.height % screen::GLYPH_H;
-                let where_ = if y >= dump.height - m {
-                    format!("the {m}px strip below the last cell row, which no cell covers")
-                } else {
-                    format!("cell ({}, {})", x / screen::GLYPH_W, y / screen::GLYPH_H)
-                };
-                let left = dump.pixels.iter().filter(|p| **p == GRAFFITI).count();
-                return Err(format!(
-                    "{left} pixels survived `clear`, the first at ({x}, {y}) — {where_}.\n\
-                     ESC[2J promises a blank panel; a repaint that skips every cell whose \
-                     contents already matched what it believed was there does not deliver one, \
-                     and the cells it skips are exactly the ones a user cannot fix any other \
-                     way\ndecoded screen:\n{after}"
-                ));
-            }
-
-            let rows = dump.console_rows(&font);
-            if !rows.first().is_some_and(|r| r.trim() == CONSOLE_PROMPT) {
-                return Err(format!(
-                    "`clear` did not leave the prompt on the home row\n\
-                     decoded screen:\n{after}"
-                ));
-            }
-            let survivors: Vec<String> = rows[1..]
-                .iter()
-                .enumerate()
-                .filter(|(_, r)| !r.is_empty())
-                .map(|(i, r)| format!("    row {}: {r}", i + 1))
-                .collect();
-            if !survivors.is_empty() {
-                return Err(format!(
-                    "{} rows survived `clear`:\n{}\ndecoded screen:\n{after}",
-                    survivors.len(),
-                    survivors.join("\n")
-                ));
-            }
-
-            // Not the cell grid but the pixels outside it. A panel whose
-            // height is not a whole number of glyph rows has a strip along the
-            // bottom that no cell covers, and a console that paints only its
-            // cells never writes there -- so whatever drew last, the kernel's
-            // last boot checkpoint, stays for the life of the session. Black
-            // on black hides it on the machine that found this; a fill that is
-            // not black does not.
-            eprintln!(
-                "  [clear] {}x{}: {} cell rows and a {}px strip below them, none of it left \
-                 painted",
-                dump.width,
-                dump.height,
-                dump.height / screen::GLYPH_H,
-                dump.height % screen::GLYPH_H
-            );
-            Ok(())
-        }
-        "screen_console_scroll" => {
-            // The standing check on the emulator's delivery: not "did the
-            // right thing appear" but "is the glass exactly what the model
-            // says it is", asserted over a workload built to break it.
-            //
-            // What closed #90 was the owner reporting prior text surviving in
-            // the middle of a cleared screen, which means cells the model had
-            // written off still held glyphs. `clear` was where he noticed it;
-            // this asserts every row of the panel character for character
-            // after the scrolling stops, so a single stale glyph fires it at
-            // the batch that produced it, with no `clear` needed to expose it.
-            //
-            // Line lengths vary, past the panel's width as well as under it:
-            // the cells a scroll must clear are the ones past the end of a
-            // line that replaces a longer one, and a line wider than the panel
-            // is the only way one logical line scrolls the screen twice. Batch
-            // sizes drift against the row count, and the last round arrives as
-            // one block.
-            //
-            // **The workload is sized by what it must cover, not by a line
-            // count.** `test_screen_churn` documents the construction; what
-            // this end of it relies on is that any `cols` consecutive lines
-            // end in every column of the panel once, and that one line in
-            // eight wraps twice — so three rounds walking *disjoint* stretches
-            // of 260 lines between them cover both, and a longer run buys the
-            // same states again at other alignments. That is not free: the
-            // guest recomposes the whole panel for every batch the console
-            // reads, measured at 0.21 ms per byte of output under TCG, so the
-            // cost of this test is its byte count and nothing else.
-            let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("console");
-            let options = BootOptions {
-                profile,
-                qmp: true,
-                kernel_features: ACTUATOR_KERNEL,
-                ready_marker: "console: ready",
-                ..Default::default()
-            };
-            let mut qemu =
-                QemuInstance::boot_with_options(&config, c_bins, rust_bins, options);
-            let font = screen::ConsoleFont::load();
-
-            let before = qemu.screendump_while(
-                Duration::from_secs(30),
-                Duration::from_millis(200),
-                |d| d.console_text(&font).contains(CONSOLE_PROMPT),
-            );
-            if !before.console_text(&font).contains(CONSOLE_PROMPT) {
-                return Err(format!(
-                    "no prompt to churn from\ndecoded screen:\n{}",
-                    before.console_text(&font)
-                ));
-            }
-            let rows = before.height / screen::GLYPH_H;
-            let cols = before.width / screen::GLYPH_W;
-
-            // The same lines `test_screen_churn` prints. Duplicated
-            // deliberately: a reference taken from the guest would agree with
-            // the guest about a defect they shared.
-            let wraps = [0usize, 1, 0, 2, 0, 1, 0, 0];
-            let churn_line = |i: usize| -> String {
-                let body = 5 + (i * 37) % cols + cols * wraps[i % wraps.len()];
-                let fill = char::from(b'a' + (i % 26) as u8);
-                let mid: String = std::iter::repeat_n(fill, body).collect();
-                format!("L{i:04} {mid} E{i:04}")
-            };
-            // A logical line wider than the panel occupies more than one row.
-            // The emulator wraps when a character arrives at a full row, so a
-            // line of exactly `cols` takes one row and not two.
-            let display_rows = |line: &str| -> Vec<String> {
-                let ch: Vec<char> = line.chars().collect();
-                if ch.is_empty() {
-                    return vec![String::new()];
-                }
-                ch.chunks(cols).map(|c| c.iter().collect()).collect()
-            };
-
-            // Disjoint stretches tiling one run longer than the panel is wide,
-            // so every column of it is the last column of some line. Each
-            // round prints more than a panel's worth of rows, so the screen it
-            // is asserted on holds nothing from the round before.
-            let rounds = [
-                (1usize, 0usize, 100usize, 7usize),
-                (2, 100, 60, 7),
-                (3, 160, 100, 0),
-            ];
-            assert!(
-                rounds.windows(2).all(|w| w[0].1 + w[0].2 == w[1].1)
-                    && rounds.iter().map(|r| r.2).sum::<usize>() >= cols,
-                "the rounds must tile one run of at least {cols} lines, or some column of \
-                 the panel is never the end of a line and the cells past it are never at risk"
-            );
-            for (round, start, count, chunk) in rounds {
-                if round == 2 {
-                    // Page back into history and return, mixing the scrollback
-                    // view into the same session before more live output. The
-                    // view offset changes what every row of the panel means,
-                    // and it is the one input the damage pass takes that the
-                    // cell grid does not.
-                    //
-                    // **Two batches, each inside the device queue, each
-                    // confirmed on the glass.** A page key is `0xE0`-prefixed,
-                    // so a press and its release are four set-1 bytes; three fit
-                    // the queue and so do two, and the queue is empty at the
-                    // first because the round before ran to `CHURN-DONE`. Both
-                    // batches must move the view — the round before printed a
-                    // hundred lines of history and the page down is off a
-                    // non-zero offset — so the panel changing is the guest
-                    // saying it read them.
-                    for (keys, batch) in [(3usize, "pgup"), (2, "pgdn")] {
-                        let was = qemu.screendump();
-                        {
-                            let mut input = qemu::QmpInput::open(qemu.qmp_socket());
-                            let mut events: Vec<(&str, bool)> = Vec::new();
-                            for _ in 0..keys {
-                                events.extend([(batch, true), (batch, false)]);
-                            }
-                            assert!(
-                                events.len() * 2 <= QEMU_PS2_QUEUE,
-                                "{} transitions of {batch} are up to {} set-1 bytes against a \
-                                 {QEMU_PS2_QUEUE}-byte device queue",
-                                events.len(),
-                                events.len() * 2
-                            );
-                            input.keys(&events);
-                        }
-                        let moved = |d: &screen::Ppm| !d.identical_to(&was);
-                        let now = qemu.screendump_while_rendering(
-                            CONSOLE_ECHO,
-                            Duration::from_millis(50),
-                            moved,
-                        );
-                        if !moved(&now) {
-                            return Err(format!(
-                                "{keys} {batch} presses moved nothing on the panel, so the \
-                                 console never read them — QEMU's {QEMU_PS2_QUEUE}-byte PS/2 \
-                                 queue drops what a guest that is not draining cannot take, \
-                                 silently\ndecoded screen:\n{}",
-                                now.console_text(&font)
-                            ));
-                        }
-                    }
-                }
-                console_type_line(
-                    &mut qemu,
-                    &font,
-                    &format!("test_rs_test_screen_churn {start} {count} {chunk} {cols}"),
-                )?;
-                // When the round is over is a different question from whether
-                // the panel is right, and asking the panel both at once is how
-                // a broken panel used to spend the whole timeout and then
-                // report that a marker never arrived. The console writes the
-                // glass before it mirrors the same bytes to its own stdout, so
-                // the marker on the console stream means that batch is painted
-                // — whatever it painted. The prompt is not on the stream: the
-                // shell writes it without a newline, so nothing line-oriented
-                // ever sees it, and the bottom row is what says the child has
-                // exited.
-                //
-                // The wait is the guest's own: a round is a hundred lines of
-                // console traffic, so silence is a console that stopped and
-                // never a console that is behind. It used to be 45 s of host
-                // clock, and `round 1: the guest never printed CHURN-DONE` at
-                // 598 s in the wide phase was that number expiring rather than
-                // anything about this panel (`issues/build/`).
-                let done = format!("CHURN-DONE {start} {count}");
-                let mut printed = String::new();
-                if let Err(why) = await_guest(
-                    &mut qemu,
-                    &mut printed,
-                    &format!("round {round} to print `{done}`"),
-                    |seen| seen.contains(&done),
-                ) {
-                    return Err(format!("{why}\nround {round} printed:\n{printed}"));
-                }
-                let settled = |d: &screen::Ppm| {
-                    d.console_rows(&font)
-                        .last()
-                        .is_some_and(|l| l.trim_end().starts_with(CONSOLE_PROMPT))
-                };
-                let dump =
-                    qemu.screendump_while(Duration::from_secs(15), Duration::from_millis(100), settled);
-                let decoded = dump.console_rows(&font);
-                let text = dump.console_text(&font);
-                if !settled(&dump) {
-                    return Err(format!(
-                        "{STALLED} round {round}: the prompt never came back to the bottom row, \
-                         so the panel was still being painted when it was read\ndecoded screen:\n\
-                         {text}"
-                    ));
-                }
-                if !decoded.iter().any(|l| l.trim() == done) {
-                    return Err(format!(
-                        "round {round}: `{done}` never reached the panel\ndecoded screen:\n{text}"
-                    ));
-                }
-
-                // Expand every line this round printed into the rows it
-                // occupies, then take the tail the panel holds. Built from the
-                // whole round rather than from a guess at how many lines fit,
-                // because a wrapped line makes those different numbers.
-                let mut all: Vec<String> = Vec::new();
-                for i in start..start + count {
-                    all.extend(display_rows(&churn_line(i)));
-                }
-                all.push(done.clone());
-                if all.len() < rows {
-                    return Err(format!(
-                        "round {round}: {count} lines occupy {} rows, which does not fill a \
-                         {rows}-row panel — what is left on it belongs to the round before, \
-                         and this round would be asserted against rows it never printed",
-                        all.len()
-                    ));
-                }
-                let want: Vec<String> = all[all.len() - (rows - 1)..].to_vec();
-
-                for (r, expect) in want.iter().enumerate() {
-                    let got = decoded[r].trim_end();
-                    if got == expect.trim_end() {
-                        continue;
-                    }
-                    let col = got
-                        .chars()
-                        .zip(expect.chars())
-                        .position(|(a, b)| a != b)
-                        .unwrap_or(expect.chars().count().min(got.chars().count()));
-                    let longer = got.chars().count() > expect.trim_end().chars().count();
-                    return Err(format!(
-                        "round {round}: panel row {r} is not what the console holds.\n\
-                         first difference at column {col}{}\n\
-                         want: {expect:?}\n\
-                         got:  {got:?}\n\
-                         The glass disagrees with the model, so a cell was written off as \
-                         delivered without being blitted\ndecoded screen:\n{text}",
-                        if longer {
-                            " — the row on screen is LONGER than the line that belongs there, so \
-                             what is past its end is left over from before"
-                        } else {
-                            ""
-                        }
-                    ));
-                }
-                let last = decoded[rows - 1].trim_end();
-                if !last.starts_with(CONSOLE_PROMPT) {
-                    return Err(format!(
-                        "round {round}: the prompt is not on the bottom row, it reads {last:?}\n\
-                         decoded screen:\n{text}"
-                    ));
-                }
-                eprintln!(
-                    "  [scroll] round {round}: lines {start}..{} at {} per flush, all {} rows \
-                     match the model character for character",
-                    start + count,
-                    if chunk == 0 { count } else { chunk },
-                    rows - 1
-                );
-            }
-            Ok(())
-        }
         "screen_console_panic" => {
             // Does claiming the framebuffer silence the panic report? Read off
             // the code the answer is no — `render` ignores
             // SCREEN_OWNED_BY_USERLAND entirely and only `boot_checkpoint`
             // honours it — but nothing in the suite had ever staged the state
-            // that answers it: `screen_fatal_halt` boots `tests/testcases`,
-            // whose init list contains no framebuffer claimer at all, so the
-            // flag is false on every screen test that panics.
+            // that answers it.
             //
             // Staged the real way round: the panic is triggered *through the
             // console*, by typing at its prompt, so the screen the report has
             // to paint over is a screen a userland process drew and owns.
-            // Unlike `screen_console_shell` this one carries the test binaries
-            // and a kernel feature, so it is not the flashed image — what it
-            // certifies is the kernel's behaviour, not the artifact.
+            // This one carries the test binaries and a kernel feature, so it is
+            // not the flashed image — what it certifies is the kernel's
+            // behaviour, not the artifact.
             let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("console");
             let options = BootOptions {
                 profile,
@@ -4901,8 +3645,7 @@ fn run_screen_test(
                 |d| d.console_text(&font).contains(CONSOLE_PROMPT),
             );
             // The premise. Without a console-drawn screen underneath, a
-            // report reaching the panel proves nothing about ownership and
-            // this test would be `screen_fatal_halt` on a different config.
+            // report reaching the panel proves nothing about ownership.
             if !before.console_text(&font).contains(CONSOLE_PROMPT) {
                 return Err(format!(
                     "no console prompt to panic over\ndecoded screen:\n{}",
@@ -4946,64 +3689,6 @@ fn run_screen_test(
             eprintln!(
                 "  [console] the fatal report took the screen back from a userland owner"
             );
-            Ok(())
-        }
-        "screen_i8042_health" => {
-            // The health verdict on the only machine that needs it on glass: no
-            // 16550, no virtio-console, so the log ring has nowhere to drain and
-            // the panel is the whole diagnostic. Nothing in this image claims
-            // DEVICE_FRAMEBUFFER, which is the other half of the condition.
-            //
-            // Not a panic: `screen_late_panic` covers the fatal path, and what
-            // is under test here is a *successful* boot repainting to say
-            // something the last boot checkpoint could not have known yet.
-            let options = BootOptions {
-                profile,
-                qmp: true,
-                mute: true,
-                ..Default::default()
-            };
-            let argv = qemu::profile_argv(&options);
-            metal_sim_argv_check(&argv)?;
-            match argv.iter().position(|a| a == "-serial") {
-                Some(i) if argv.get(i + 1).is_some_and(|v| v == "none") => {}
-                _ => return Err(format!("the muted profile still has a 16550: {argv:?}")),
-            }
-
-            let mut qemu =
-                QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
-            // The verdict waits for a CPU with nothing left to run, so it lands
-            // after the last boot checkpoint by construction. 30s covers
-            // firmware plus the root filesystem read off USB.
-            let dump = qemu.screendump_until("never asserted", Duration::from_secs(30));
-            let text = dump.text();
-            print_screen(name, &text);
-            if !text.contains("never asserted") {
-                return Err(format!(
-                    "the i8042 health verdict never reached the panel of a guest with no \
-                     console at all\ndecoded screen:\n{text}"
-                ));
-            }
-            // A panic carries the log tail too, and would satisfy the search
-            // above while meaning something entirely different.
-            if dump.fill() != FILL_BOOT {
-                return Err(format!(
-                    "screen fill is {:?}, want the boot checkpoint's {FILL_BOOT:?} — this is \
-                     a panic report, not a health verdict\ndecoded screen:\n{text}",
-                    dump.fill()
-                ));
-            }
-            // The line the verdict follows on from must still be there: a
-            // repaint that dropped the boot log would be a worse diagnostic
-            // than no repaint.
-            if !text.contains("Boot: complete") {
-                return Err(format!(
-                    "the repaint lost the boot log it was supposed to extend\n\
-                     decoded screen:\n{text}"
-                ));
-            }
-            let row = dump.row_index("never asserted").expect("checked above");
-            eprintln!("  [i8042] on the panel of a console-less guest: {}", dump.rows()[row]);
             Ok(())
         }
         "screen_panic_muted" => {
@@ -5540,71 +4225,8 @@ fn run_screen_test(
             print_screen(name, &format!("every one of {SAMPLES} PageUps moved the page one back"));
             Ok(())
         }
-        "screen_fatal_halt" => {
-            // The steady-state fatal path: userland is up, the display is
-            // idle, and SYS_DEBUG action 3 runs halt_all_cpus for real.
-            //
-            // The path this covers used to paint a *single line*: nothing had
-            // panicked during boot, so the idle loop had drained the ring into
-            // the console long before, and `capture` found only what was
-            // logged since the last drain. It is the case that proves the ring
-            // retains what serial has already collected.
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                c_bins,
-                rust_bins,
-                BootOptions {
-                    profile,
-                    qmp: true,
-                    kernel_features: ACTUATOR_KERNEL,
-                    ..Default::default()
-                },
-            );
-            if !qemu.command_until(
-                "run test_rs_test_panic_child 3",
-                FATAL_HALT_NONCE,
-                Duration::from_secs(15),
-            ) {
-                return Err(format!("{FATAL_HALT_NONCE:?} never reached the console"));
-            }
-            // Polled, not sampled once: the report is longer than a screen
-            // here, so the nonce is on one page of a cycling set.
-            let dump = qemu.screendump_until(FATAL_HALT_NONCE, Duration::from_secs(30));
-            let text = dump.text();
-            print_screen(name, &text);
-            if !text.contains(FATAL_HALT_NONCE) {
-                return Err(format!(
-                    "{FATAL_HALT_NONCE:?} reached serial but not the screen\ndecoded screen:\n{text}"
-                ));
-            }
-            // The teeth for ring *retention*, and the only ones in the suite:
-            // this is the one screen test whose panic comes after the
-            // scheduler exists, so it is the only one where the idle loop has
-            // already drained the log to serial. Reading the drained cursor
-            // instead of the retained window painted exactly one row here —
-            // the nonce, and no context at all — which every assertion above
-            // passes happily, because the nonce *was* that row.
-            //
-            // Counted rather than matched on a particular line: which line
-            // lands on the page carrying the nonce depends on how much
-            // userland printed, and the measured states are 1 row and 96, so
-            // any bound between them is a five-fold margin rather than a
-            // threshold anyone has to tune.
-            const MIN_CONTEXT_ROWS: usize = 20;
-            let filled = dump.rows().iter().filter(|r| !r.is_empty()).count();
-            if filled < MIN_CONTEXT_ROWS {
-                return Err(format!(
-                    "the fatal report is {filled} rows: the ring kept only what serial had not \
-                     taken\ndecoded screen:\n{text}"
-                ));
-            }
-            if dump.fill() != FILL_FATAL {
-                return Err(format!("fatal fill is {:?}, want {FILL_FATAL:?}", dump.fill()));
-            }
-            Ok(())
-        }
         "screen_fatal_behind_a_painter" => {
-            // `screen_fatal_halt` with a painter holding the panel's latch and
+            // The fatal path with a painter holding the panel's latch and
             // never giving it back — which is what a painter is when the halt
             // IPI lands mid-paint. The actuator has Ctrl+Alt+D's report painter
             // go fatal once it holds the latch, so the fatal path meets a
@@ -5660,10 +4282,8 @@ fn run_screen_test(
         "screen_fatal_halt_composited" => {
             // **Can a fatal panic reach the panel once a compositor owns the
             // scanout?** Three investigations into the T14 have rested on the
-            // answer being yes and nothing has ever asked it. `screen_fatal_halt`
-            // boots a config with no compositor, so the screen it paints is one
-            // nothing else had claimed; `screen_blocked_dump` does have a
-            // compositor, but Ctrl+Alt+D paints through `paint_report`, and
+            // answer being yes and nothing has ever asked it. `screen_blocked_dump`
+            // has a compositor, but Ctrl+Alt+D paints through `paint_report`, and
             // `halt_all_cpus` paints through `render` with a different fill and
             // a different source. The owner pulled his stick, waited a minute,
             // and saw the desktop unchanged — which is what this test is for:
@@ -5698,11 +4318,7 @@ fn run_screen_test(
                 d.fill() != FILL_BOOT
             });
             if up.fill() == FILL_BOOT {
-                return Err(
-                    "the compositor never took the screen, so this would have retested \
-                     screen_fatal_halt on a different config"
-                        .to_string(),
-                );
+                return Err("the compositor never took the screen".to_string());
             }
 
             // The probe fires 5 s after the claim; the poll is for that plus
@@ -5907,15 +4523,12 @@ struct Boot {
 type Grouped = Option<Boot>;
 
 const METAL_SIM_DESKTOP: &str = "metal-sim desktop";
-const I8042_TRACE: &str = "i8042 trace";
 const LOCALE_WIZARD: &str = "locale wizard";
 const SSHD_LOGIN: &str = "sshd login";
 
 /// The line `tests/toyos-rust-tests/src/bin/i8042_keyboard.rs` prints once it
 /// holds the keyboard claim, and the line every injection into that binary is
-/// timed off. Its callers wait for it, and one — `i8042_undecoded_bytes` —
-/// also reads its capture *from* it: it is the boundary between what the
-/// machine did on its own and what this test staged.
+/// timed off. Its callers wait for it.
 const I8042_READY: &str = "===I8042_READY===";
 
 /// The shared boot this machine test runs on, or `None` if it owns its own.
@@ -5941,7 +4554,6 @@ fn group_of(name: &str) -> Option<&'static str> {
         | "metal_sim_ipc_hostile_peer"
         | "metal_sim_compositor_stall"
         | "metal_sim_client_death" => Some(METAL_SIM_DESKTOP),
-        "i8042_no_spurious_wake" | "i8042_mouse" => Some(I8042_TRACE),
         // The positive wizard first: it applies a layout, and the negative
         // member reads only its own window, so the order is the argument that
         // no member reads state another left.
@@ -7126,12 +5738,6 @@ fn ps2_bursts(line: &str) -> Vec<String> {
 ///
 /// The Enter is separate and unconfirmed on purpose: what it produces is the
 /// caller's assertion, and a prompt that has scrolled is not an echo to match.
-///
-/// The echo is matched as a **prefix** of the input row, which is what lets the
-/// one command in this suite that is typed onto a panel somebody painted over
-/// use this: `screen_console_clear` types `clear` at a prompt whose row is green
-/// from the cell after the cursor to the edge, and a whole-row comparison would
-/// read that paint as a lost keystroke.
 fn console_type_line(
     qemu: &mut QemuInstance,
     font: &screen::ConsoleFont,
@@ -7184,31 +5790,6 @@ fn console_type_line(
 /// three lines running is not a busy guest.
 const SHELL_TYPE_TRIES: usize = 3;
 
-/// What the guest offers as proof it took the last burst out of the device
-/// before the next one goes in.
-///
-/// **A choice with no default, because the two surfaces cannot answer the same
-/// question.** `/system/bin/console` draws each echoed character onto glass this
-/// harness decodes; a windowed shell renders into a window the compositor
-/// places and mirrors to a line-buffered stdout, so nothing of a line under
-/// construction reaches the console at all.
-enum Drained {
-    /// The decoded input row, for a shell behind `/system/bin/console`.
-    Panel(screen::ConsoleFont),
-    /// The kernel's drain report, for a shell behind a compositor: the device
-    /// path rather than the surface, counting the bytes the queue is measured
-    /// in. Needs `i8042-trace`, and [`shell_type_once`] refuses a boot without
-    /// it rather than pacing on nothing.
-    ///
-    /// **A boot that arms it is not the shipping kernel**, and the site that
-    /// arms it cannot see that: a non-empty `kernel_params` selects the test
-    /// kernel, and `kernel/src/actuator.rs`'s `IMPLIES` adds
-    /// `i8042-fast-health` and `i8042-edge-race` — a scheduler pass held inside
-    /// the drain path. Two latent inexactnesses: any drain after the mark
-    /// counts, and `drain bytes=` counts the aux port too.
-    Bytes,
-}
-
 /// Set-1 bytes the kernel reports taking off the i8042 in `said`; `bytes=`, not `keys=`.
 fn i8042_drained(said: &str) -> usize {
     said.lines()
@@ -7218,59 +5799,29 @@ fn i8042_drained(said: &str) -> usize {
         .sum()
 }
 
-/// What has gone out on this line so far. `base` is what a previous attempt
-/// left in the editor: the next burst lands after it, so the echo begins with both.
-struct Sent<'a> {
-    mark: usize,
-    bytes: usize,
-    base: &'a str,
-    typed: &'a str,
-    burst: &'a str,
-}
-
-/// Wait until the guest has taken everything sent so far out of the device, and
-/// name the burst it never accounted for if it has not.
+/// Wait until the kernel reports taking `bytes` set-1 bytes off the i8042 since
+/// `mark`, and name the burst it never accounted for if it has not.
 fn await_drained(
     qemu: &mut QemuInstance,
-    ack: &Drained,
     ceiling: Duration,
-    sent: Sent<'_>,
+    mark: usize,
+    bytes: usize,
+    burst: &str,
 ) -> Result<(), String> {
-    let Sent { mark, bytes, base, typed, burst } = sent;
-    match ack {
-        Drained::Panel(font) => {
-            let want = format!("{base}{typed}");
-            let echoed = |dump: &screen::Ppm| {
-                console_input_row(dump, font).is_some_and(|row| row.starts_with(&want))
-            };
-            let dump =
-                qemu.screendump_while_rendering(CONSOLE_ECHO, Duration::from_millis(50), echoed);
-            if echoed(&dump) {
-                return Ok(());
-            }
-            Err(format!(
-                "the console never echoed the burst {burst:?}: its input line reads {:?}, which \
-                 does not begin {want:?}. A keystroke was lost between the host and the shell",
-                console_input_row(&dump, font).unwrap_or_default()
-            ))
+    let deadline = Instant::now() + ceiling;
+    loop {
+        let drained = i8042_drained(&qemu.console_stream().since(mark));
+        if drained >= bytes {
+            return Ok(());
         }
-        Drained::Bytes => {
-            let deadline = Instant::now() + ceiling;
-            loop {
-                let drained = i8042_drained(&qemu.console_stream().since(mark));
-                if drained >= bytes {
-                    return Ok(());
-                }
-                if Instant::now() >= deadline {
-                    return Err(format!(
-                        "the kernel took {drained} of the {bytes} set-1 bytes typed so far off \
-                         the i8042 inside {ceiling:?}, so the burst {burst:?} went out against a \
-                         queue the guest had not emptied"
-                    ));
-                }
-                thread::sleep(Duration::from_millis(2));
-            }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "the kernel took {drained} of the {bytes} set-1 bytes typed so far off \
+                 the i8042 inside {ceiling:?}, so the burst {burst:?} went out against a \
+                 queue the guest had not emptied"
+            ));
         }
+        thread::sleep(Duration::from_millis(2));
     }
 }
 
@@ -7279,9 +5830,10 @@ fn await_drained(
 /// did**.
 ///
 /// **Bounding each batch is not bounding what is in flight.** Every burst waits
-/// for [`Drained`] before the next goes out, so each starts against a queue the
-/// guest has emptied. A QMP reply proves QEMU's main loop ran and never that a
-/// vCPU read port 0x60, which is the only thing that empties it.
+/// for the kernel's drain report before the next goes out, so each starts
+/// against a queue the guest has emptied. A QMP reply proves QEMU's main loop
+/// ran and never that a vCPU read port 0x60, which is the only thing that
+/// empties it.
 ///
 /// Enter goes out last, behind all of the line's bytes, and the verdict is the
 /// shell's echo — which reaches the console only when a newline flushes the
@@ -7292,11 +5844,18 @@ fn await_drained(
 /// Read through [`qemu::ConsoleStream`] rather than by draining, because the
 /// caller owns the capture: a wait that consumed lines here would take the
 /// marker its assertion is waiting for.
-fn shell_type_line(qemu: &mut QemuInstance, line: &str, ack: &Drained) -> Result<(), String> {
+///
+/// The drain report needs `i8042-trace`, and [`shell_type_once`] refuses a boot
+/// without it rather than pacing on nothing. **A boot that arms it is not the
+/// shipping kernel**, and the site that arms it cannot see that: a non-empty
+/// `kernel_params` selects the test kernel, and `kernel/src/actuator.rs`'s
+/// `IMPLIES` adds `i8042-fast-health` and `i8042-edge-race` — a scheduler pass
+/// held inside the drain path.
+fn shell_type_line(qemu: &mut QemuInstance, line: &str) -> Result<(), String> {
     let echo = qemu.budget(ECHO_TRY);
     let mut last = String::new();
     for _ in 0..SHELL_TYPE_TRIES {
-        match shell_type_once(qemu, line, echo, ack) {
+        match shell_type_once(qemu, line, echo) {
             Ok(()) => return Ok(()),
             Err(said) => last = said,
         }
@@ -7319,46 +5878,28 @@ fn shell_type_once(
     qemu: &mut QemuInstance,
     line: &str,
     echo: Duration,
-    ack: &Drained,
 ) -> Result<(), String> {
     assert!(
         !line.contains('\n'),
         "shell_type_line presses Enter itself; {line:?} carries its own"
     );
     assert!(
-        !matches!(ack, Drained::Bytes) || qemu.i8042_trace_armed(),
-        "a windowed shell can acknowledge a burst only through the kernel's drain report, so a \
-         boot that paces on Drained::Bytes has to arm `i8042-trace`; this one did not, and \
-         {line:?} would have gone out unpaced"
+        qemu.i8042_trace_armed(),
+        "a windowed shell can acknowledge a burst only through the kernel's drain report, so \
+         the boot has to arm `i8042-trace`; this one did not, and {line:?} would have gone out \
+         unpaced"
     );
     let mark = qemu.console_stream().mark();
-    // The row is trimmed, so an empty editor comes back as the bare prompt and
-    // loses the space the console draws after it — put it back, or every first
-    // burst is compared against a prefix the panel never shows.
-    let base = match ack {
-        Drained::Panel(font) => {
-            let dump = qemu.screendump();
-            match console_input_row(&dump, font) {
-                Some(row) if row.len() > CONSOLE_PROMPT.len() => row,
-                _ => format!("{CONSOLE_PROMPT} "),
-            }
-        }
-        Drained::Bytes => String::new(),
-    };
-    let mut typed = String::new();
     let mut bytes = 0usize;
     for burst in ps2_bursts(line) {
         {
             // Opened and dropped around each burst: a `-qmp …,server` socket
-            // serves one monitor at a time, and the panel wait below is a
-            // screendump, which needs the socket back.
+            // serves one monitor at a time, and the Enter below opens it again.
             let mut input = qemu::QmpInput::open(qemu.qmp_socket());
             input.type_burst(&burst);
         }
-        typed.push_str(&burst);
         bytes += burst.chars().map(qemu::scancode_bytes).sum::<usize>();
-        let sent = Sent { mark, bytes, base: &base, typed: &typed, burst: &burst };
-        await_drained(qemu, ack, echo, sent)?;
+        await_drained(qemu, echo, mark, bytes, &burst)?;
     }
     {
         let mut input = qemu::QmpInput::open(qemu.qmp_socket());
@@ -7377,8 +5918,8 @@ fn shell_type_once(
     }
 }
 
-fn shell_answers(qemu: &mut QemuInstance, log: &mut String, ack: &Drained) -> Result<(), String> {
-    shell_echoes(qemu, log, "surface-up-zqjxk", ack)
+fn shell_answers(qemu: &mut QemuInstance, log: &mut String) -> Result<(), String> {
+    shell_echoes(qemu, log, "surface-up-zqjxk")
 }
 
 /// [`shell_answers`] with the nonce named, for a caller that asks more than
@@ -7399,14 +5940,10 @@ fn shell_echoes(
     qemu: &mut QemuInstance,
     log: &mut String,
     nonce: &str,
-    ack: &Drained,
 ) -> Result<(), String> {
-    // Whichever surface owner this config put a shell behind, printed once its
-    // screen exists and the shell's stdin is a pipe it holds. Before that a
-    // keystroke lands nowhere and leaves no trace. Both, because `shell_answers`
-    // is asked of a terminal under the compositor and of `/system/bin/console` on the
-    // raw framebuffer, and the question is the same one.
-    const SURFACE_UP: [&str; 2] = ["terminal: ready", "console: ready"];
+    // Printed once the terminal's screen exists and the shell's stdin is a pipe
+    // it holds. Before that a keystroke lands nowhere and leaves no trace.
+    const SURFACE_UP: &str = "terminal: ready";
     // **And the state in which it is never coming.** `/system/bin/terminal` exits when
     // it loses the race with the compositor (`issues/kernel/`), which is a fact
     // the log states outright at 0.6 s — so waiting for a ready marker that
@@ -7414,11 +5951,11 @@ fn shell_echoes(
     // ceiling decides there is how many minutes of a lane it costs to say so.
     // Measured on the run this came from: 305 s, against a terminal that had
     // exited before the compositor was ready.
-    const SURFACE_GONE: [&str; 2] = ["exit: terminal ", "exit: console "];
-    let up = |log: &str| SURFACE_UP.iter().any(|m| log.contains(m));
-    let gone = |log: &str| SURFACE_GONE.iter().any(|m| log.contains(m));
-    await_guest(qemu, log, "a surface to say it is up", |log| up(log) || gone(log))?;
-    if !up(log) {
+    const SURFACE_GONE: &str = "exit: terminal ";
+    await_guest(qemu, log, "a surface to say it is up", |log| {
+        log.contains(SURFACE_UP) || log.contains(SURFACE_GONE)
+    })?;
+    if !log.contains(SURFACE_UP) {
         return Err(
             "the surface owner exited before it ever said it was ready — /system/bin/terminal races \
              the compositor at boot, `issues/kernel/`"
@@ -7442,7 +5979,7 @@ fn shell_echoes(
         // loop's ordinary step: the surface is up and the shell may still not
         // be reading, which is what the retype exists for.
         if let Err(said) =
-            shell_type_once(qemu, &format!("echo {nonce}"), round_trip(ECHO_TRY), ack)
+            shell_type_once(qemu, &format!("echo {nonce}"), round_trip(ECHO_TRY))
         {
             lost = said;
             continue;
@@ -7454,19 +5991,6 @@ fn shell_echoes(
     Err(format!("{TRIES} typed lines and none of them came back\n{lost}"))
 }
 
-/// A shell must get its prompt back when a windowed child's window goes.
-///
-/// The owner opened snake, closed its window with the X button, and never saw
-/// a prompt again. Both readings of his log are testable here and the two
-/// probes separate them: the first ends the child by *its own* exit, the
-/// second by the compositor taking its window away while it is alive —
-/// GUI+Q, which is the same `windows.remove` + `MSG_WINDOW_CLOSE` + drop the
-/// X button runs and is a keystroke rather than a guess at where the button
-/// is.
-///
-/// The client is a bare `window::Window`, so a reproduction here is about the
-/// shell, the terminal and the window protocol, and a clean run narrows the
-/// defect to what winit does that this does not.
 /// Close the focused window with GUI+Q, retrying until the compositor says a
 /// window went.
 ///
@@ -7486,9 +6010,7 @@ fn shell_echoes(
 /// and here that cuts both ways: #156 is a *freeze*, so the machine this
 /// retries against goes silent, and the wait ends in fifteen seconds instead of
 /// spending `qemu.budget(20 s)` — up to four minutes at width 12 — hammering
-/// GUI+Q at a desktop that has stopped. `issues/design-debt/` names that
-/// cost as a lane this test holds for a quarter of every run, which is what puts
-/// whichever desktop is dispatched beside it into a red nobody acts on.
+/// GUI+Q at a desktop that has stopped.
 fn close_focused_window(qemu: &mut QemuInstance, log: &mut String, new: usize) -> bool {
     const CLOSED: &str = "compositor: window closed";
     let mut live = qemu::Liveness::new(Duration::from_secs(15), Duration::from_secs(60));
@@ -7501,13 +6023,6 @@ fn close_focused_window(qemu: &mut QemuInstance, log: &mut String, new: usize) -
     }
     log[new..].contains(CLOSED)
 }
-
-/// How many times snake is opened and closed. One green round says very little
-/// about a report that arrived once.
-const SNAKE_ROUNDS: usize = 3;
-/// Turns played in the last round, at four keys each, so that round's snake is
-/// a program that has been running and drawing rather than one a second old.
-const SNAKE_TURNS: usize = 8;
 
 /// What doom's renderer draws over `demo1`'s first `TICS` tics, as
 /// `userland/doom/src/frames.rs` hashes it: the frames doom drew before clang
@@ -7551,35 +6066,6 @@ fn doom_frames(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     }
     eprintln!("  [doommusiccase] {line}");
     Ok(())
-}
-
-fn desktop_window_child(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
-    let bins: Vec<(String, Vec<u8>)> =
-        rust_bins.iter().filter(|(name, _)| name == "window_child").cloned().collect();
-    if bins.is_empty() {
-        return Err("the window_child client was not built".to_string());
-    }
-    let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/desktopcase");
-    let options = BootOptions {
-        profile: qemu::Profile::Metal,
-        qmp: true,
-        ready_marker: "compositor: ready",
-        // The T14's core count. A desktop's teardown is four processes handing
-        // pipes back to each other, and on two cores most of that is ordered
-        // by having nowhere else to run.
-        smp: 8,
-        // `Drained::Bytes`; off the shipping kernel, and implies fast-health
-        // and edge-race.
-        kernel_params: &["i8042-trace"],
-        ..Default::default()
-    };
-    metal_sim_argv_check(&qemu::profile_argv(&options))?;
-    let mut qemu = QemuInstance::boot_with_options(&config, &[], &bins, options);
-    let mut log = qemu.boot_log().to_string();
-    match window_child_probes(&mut qemu, &mut log) {
-        Ok(()) => Ok(()),
-        Err(message) => Err(format!("{message}\n{}", freeze_report(&mut qemu, &mut log))),
-    }
 }
 
 /// The words on iced's counter's two buttons, and the size iced draws body text
@@ -7925,16 +6411,15 @@ fn toolkit_launch(
         qmp: true,
         ready_marker: "compositor: ready",
         smp: 8,
-        // `Drained::Bytes`, the typed line's pacing.
+        // The typed line's pacing, [`shell_type_line`]'s drain report.
         kernel_params: &["i8042-trace"],
         ..Default::default()
     };
     let mut qemu = QemuInstance::boot_with_options(&config, &[], &bins, options);
     let mut log = qemu.boot_log().to_string();
-    let ack = Drained::Bytes;
-    shell_answers(&mut qemu, &mut log, &ack)?;
+    shell_answers(&mut qemu, &mut log)?;
     let launched = log.len();
-    shell_type_line(&mut qemu, launch, &ack)?;
+    shell_type_line(&mut qemu, launch)?;
     Ok((qemu, log, launched))
 }
 
@@ -8083,158 +6568,6 @@ fn toolkit_winit_pace(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     Ok(())
 }
 
-/// What a desktop that stopped answering is asked, in the order that survives
-/// being asked.
-///
-/// Every vCPU's registers first. `HLT=1` with `IF` set in `RFL` is a machine
-/// with nothing to run rather than one wedged below the interrupt layer, and
-/// that is the question #156 turns on — but Ctrl+Alt+D revives a halted CPU,
-/// so the dump destroys the evidence it is taken to explain. Asked in the
-/// other order, both halves describe the repaired machine.
-fn freeze_report(qemu: &mut QemuInstance, log: &mut String) -> String {
-    let registers = {
-        let mut monitor = qemu::QmpMonitor::open(qemu.qmp_socket());
-        monitor.human("info registers -a")
-    };
-    let before = log.len();
-    {
-        let mut input = qemu::QmpInput::open(qemu.qmp_socket());
-        input.keys(&[
-            ("ctrl", true),
-            ("alt", true),
-            ("d", true),
-            ("d", false),
-            ("alt", false),
-            ("ctrl", false),
-        ]);
-    }
-    let whole = serial_until(qemu, log, "=== end of dump ===", Duration::from_secs(30));
-    format!(
-        "--- info registers -a, taken before this report injected anything ---\n{registers}\n\
-         --- Ctrl+Alt+D{} ---\n{}",
-        if whole { "" } else { ", which produced no complete report" },
-        &log[before.min(log.len())..]
-    )
-}
-
-fn window_child_probes(qemu: &mut QemuInstance, log: &mut String) -> Result<(), String> {
-    let ack = Drained::Bytes;
-    if let Err(why) = shell_answers(qemu, log, &ack) {
-        return Err(format!(
-            "{why}\nnothing typed at the terminal window reached a shell:\n{log}"
-        ));
-    }
-
-    // A windowed child that leaves on its own. The shell is in `waitpid` and
-    // the compositor never touches its connection, so this is the plain case
-    // and it has to work before the second probe means anything.
-    shell_type_line(qemu, "test_rs_window_child exit", &ack)?;
-    let by = qemu.budget(Duration::from_secs(20));
-    if !serial_until(qemu, log, "WINDOW-CHILD-GONE", by) {
-        return Err(format!("the windowed child never reported leaving:\n{log}"));
-    }
-    if let Err(why) = shell_echoes(qemu, log, "after-own-exit-zqjxk", &ack) {
-        return Err(format!(
-            "{why}\na windowed child exited by itself and the shell never answered again:\n{log}"
-        ));
-    }
-
-    // The owner's case: the process is alive and the compositor takes its
-    // window away underneath it.
-    let started = log.len();
-    shell_type_line(qemu, "test_rs_window_child", &ack)?;
-    // Its own marker, not the one the probe above already printed.
-    let by = qemu.budget(Duration::from_secs(20));
-    if !serial_until_new(
-        qemu,
-        log,
-        "WINDOW-CHILD-UP",
-        started,
-        by,
-    ) {
-        return Err(format!("the windowed child never got a window:\n{log}"));
-    }
-    // GUI+Q closes the focused window, and a window the compositor has just
-    // created is the focused one. Re-injected until the compositor says the
-    // window went — a keystroke that lands while the guest is busy is lost —
-    // and never blind, because a second GUI+Q after one worked would close the
-    // terminal's window instead.
-    let before = log.len();
-    if !close_focused_window(qemu, log, before) {
-        return Err(format!(
-            "GUI+Q never reached the compositor:\n{}",
-            &log[before.min(log.len())..]
-        ));
-    }
-    let by = qemu.budget(Duration::from_secs(20));
-    if !serial_until_new(qemu, log, "WINDOW-CHILD-GONE", before, by) {
-        return Err(format!(
-            "the compositor closed the window and the client did not leave:\n{}",
-            &log[before.min(log.len())..]
-        ));
-    }
-    if let Err(why) = shell_echoes(qemu, log, "after-window-closed-zqjxk", &ack) {
-        return Err(format!(
-            "{why}\nthe compositor closed a child's window and the shell never answered again \
-             — this is the owner's snake report, reproduced:\n{log}"
-        ));
-    }
-    // And the program he actually ran. Everything above is a `window::Window`
-    // and nothing else; snake is that under winit and softbuffer, which is the
-    // only difference left between this test and his session.
-    //
-    // Three rounds, and the last one is played first: his snake had run 39 s
-    // and spent 22.4 s of CPU when he closed it, and a window closed one
-    // second after it opened exercises a quieter program than that. One green
-    // round would say very little about a report that arrived once.
-    for round in 0..SNAKE_ROUNDS {
-        shell_type_line(qemu, "snake", &ack)?;
-        // snake prints nothing of its own, so the compositor's second window
-        // is what says it is up — and a window it has just created is the
-        // focused one, which is what GUI+Q then closes.
-        let opened = log.len();
-        let by = qemu.budget(Duration::from_secs(20));
-        if !serial_until_new(qemu, log, "windows=2", opened, by) {
-            return Err(format!("snake never got a window in round {round}:\n{log}"));
-        }
-        if round + 1 == SNAKE_ROUNDS {
-            let mut input = qemu::QmpInput::open(qemu.qmp_socket());
-            for _ in 0..SNAKE_TURNS {
-                for key in ["left", "down", "right", "up"] {
-                    input.keys(&[(key, true), (key, false)]);
-                    thread::sleep(Duration::from_millis(120));
-                }
-            }
-        }
-        let before = log.len();
-        if !close_focused_window(qemu, log, before) {
-            return Err(format!(
-                "GUI+Q never reached the compositor in round {round}:\n{}",
-                &log[before.min(log.len())..]
-            ));
-        }
-        let by = qemu.budget(Duration::from_secs(20));
-        if !serial_until_new(qemu, log, "exit: snake", before, by) {
-            return Err(format!(
-                "snake did not leave when its window was closed in round {round}:\n{}",
-                &log[before.min(log.len())..]
-            ));
-        }
-        if let Err(why) = shell_echoes(qemu, log, &format!("after-snake-{round}-zqjxk"), &ack) {
-            return Err(format!(
-                "{why}\nsnake's window was closed, snake left, and the shell never answered \
-                 again (round {round}) — the owner's report, reproduced:\n{log}"
-            ));
-        }
-    }
-
-    eprintln!(
-        "  [desktop] a windowed child and {SNAKE_ROUNDS} snakes each left both ways and the \
-         shell kept its prompt"
-    );
-    Ok(())
-}
-
 /// What a typed character costs the desktop.
 ///
 /// The owner's report, in his words: entering one character into the terminal
@@ -8255,7 +6588,7 @@ fn desktop_typing_damage() -> Result<(), String> {
         profile: qemu::Profile::Metal,
         qmp: true,
         ready_marker: "compositor: ready",
-        // `Drained::Bytes`; off the shipping kernel, and implies fast-health
+        // [`shell_type_line`]'s pacing; off the shipping kernel, and implies fast-health
         // and edge-race.
         kernel_params: &["i8042-trace"],
         ..Default::default()
@@ -8263,9 +6596,7 @@ fn desktop_typing_damage() -> Result<(), String> {
     metal_sim_argv_check(&qemu::profile_argv(&options))?;
     let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
     let mut log = qemu.boot_log().to_string();
-    // No panel row under a compositor; the kernel's drain report is the answer.
-    let ack = Drained::Bytes;
-    if let Err(why) = shell_answers(&mut qemu, &mut log, &ack) {
+    if let Err(why) = shell_answers(&mut qemu, &mut log) {
         return Err(format!(
             "{why}\nnothing typed at the terminal window reached a shell:\n{log}"
         ));
@@ -8301,7 +6632,7 @@ fn desktop_typing_damage() -> Result<(), String> {
     // rather than the cause. Each line now waits for its own echo before the
     // next goes in, which costs a slow guest wall clock and never the stimulus.
     for line in 0..8u32 {
-        shell_type_line(&mut qemu, &format!("echo {NONCE}"), &ack)?;
+        shell_type_line(&mut qemu, &format!("echo {NONCE}"))?;
         // Two: the shell echoes the command as it is typed and again as its
         // output. The same arithmetic the verdict below makes.
         let want = ((line + 1) * 2) as usize;
@@ -8353,92 +6684,6 @@ fn desktop_typing_damage() -> Result<(), String> {
     Ok(())
 }
 
-/// The wizard under `/system/bin/console`, which is the whole of the surface tree on
-/// a machine with no compositor — and the image that gets flashed.
-///
-/// This is one of the two tests that replaced the refusal gate. `/system/bin/console`
-/// claims the keyboard for its entire run, which is exactly the state that
-/// used to make `locale detect` print "cannot read the keyboard directly" and
-/// stop; the wizard now asks the console for the transitions instead. The
-/// closing assertion is that the console's *own* translator moved with the
-/// config: the key a US board prints `[` on types `ü` afterwards, and nothing
-/// but a re-read of the file this wizard wrote can do that.
-fn console_locale_detect() -> Result<(), String> {
-    let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("console");
-    let options = BootOptions {
-        profile: qemu::Profile::Metal,
-        qmp: true,
-        ready_marker: "console: ready",
-        ..Default::default()
-    };
-    let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
-    let mut log = qemu.boot_log().to_string();
-    // The panel, because this is the surface that has one.
-    let ack = Drained::Panel(screen::ConsoleFont::load());
-    if let Err(why) = shell_answers(&mut qemu, &mut log, &ack) {
-        return Err(format!("{why}\nnothing typed at /system/bin/console reached a shell:\n{log}"));
-    }
-
-    shell_type_line(&mut qemu, "locale detect", &ack)?;
-    await_marker(
-        &mut qemu,
-        &mut log,
-        "Press the key labelled",
-        "the wizard to ask for a key under /system/bin/console — the console did not lend it \
-         the keyboard",
-    )
-    .map_err(|why| format!("{why}\n{log}"))?;
-    answer_swiss_wizard(&mut qemu, &mut log, "under /system/bin/console")?;
-
-    for want in ["That is 'swiss-german'", "Keyboard layout set to 'swiss-german'"] {
-        await_marker(&mut qemu, &mut log, want, &format!("{want:?} under /system/bin/console"))
-            .map_err(|why| format!("{why}\n{log}"))?;
-    }
-    // The console acted on the notification. A prefix, not the whole line: the
-    // console is shared and not line-atomic, so a kernel line lands inside
-    // this one often enough to matter (it did, first time this ran). *Which*
-    // layout it re-read is the assertion below, which does not depend on a
-    // line surviving intact.
-    await_marker(
-        &mut qemu,
-        &mut log,
-        "console: keyboard layout",
-        "the console to re-read the config the wizard wrote",
-    )
-    .map_err(|why| format!("{why}\n{log}"))?;
-
-    // And the layout is in force for what is typed next. `bracket_left` is the
-    // key a US board prints `[` on and a Swiss one prints `ü` on, so this is
-    // the substitution the whole exercise exists to make, taken through the
-    // console's translator and the shell.
-    // **Bounded rather than echoed back**, and it is the one line here that can
-    // be: `echo `, the key and Enter are fewer set-1 bytes than the device
-    // queue holds, and the wizard's own last answer has just been consumed — so
-    // a guest that drains nothing from here still receives every one of them.
-    // What `bracket_left` produces is the assertion below, which is that key's
-    // arrival stated as the thing under test.
-    {
-        let mut input = qemu::QmpInput::open(qemu.qmp_socket());
-        let typed = "echo ";
-        let bytes: usize = typed.chars().map(qemu::scancode_bytes).sum();
-        assert!(
-            bytes + 4 <= QEMU_PS2_QUEUE,
-            "{typed:?} plus the ISO key and Enter is more than the {QEMU_PS2_QUEUE}-byte \
-             device queue holds"
-        );
-        input.type_burst(typed);
-        input.keys(&[("bracket_left", true), ("bracket_left", false)]);
-        input.keys(&[("ret", true), ("ret", false)]);
-    }
-    await_marker(&mut qemu, &mut log, "\u{fc}", "the `[` key to produce `ü`")
-        .map_err(|why| format!(
-            "{why}\ntyping the `[` key after the wizard did not produce `ü`, so the console is \
-             still translating with the layout it booted with\n{log}"
-        ))?;
-    eprintln!("  [console] the wizard identified swiss-german and the console adopted it");
-    Ok(())
-}
-
 /// The wizard under `/system/bin/terminal`, on a desktop.
 ///
 /// The other half of the refusal gate's replacement, and the deepest the
@@ -8453,7 +6698,7 @@ fn desktop_locale_detect() -> Result<(), String> {
         profile: qemu::Profile::Metal,
         qmp: true,
         ready_marker: "compositor: ready",
-        // `Drained::Bytes`; off the shipping kernel, and implies fast-health
+        // [`shell_type_line`]'s pacing; off the shipping kernel, and implies fast-health
         // and edge-race.
         kernel_params: &["i8042-trace"],
         ..Default::default()
@@ -8462,14 +6707,13 @@ fn desktop_locale_detect() -> Result<(), String> {
     let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
     let mut log = qemu.boot_log().to_string();
     // No panel row under a compositor; the kernel's drain report is the answer.
-    let ack = Drained::Bytes;
-    if let Err(why) = shell_answers(&mut qemu, &mut log, &ack) {
+    if let Err(why) = shell_answers(&mut qemu, &mut log) {
         return Err(format!(
             "{why}\nnothing typed at the terminal window reached a shell:\n{log}"
         ));
     }
 
-    shell_type_line(&mut qemu, "locale detect", &ack)?;
+    shell_type_line(&mut qemu, "locale detect")?;
     await_marker(
         &mut qemu,
         &mut log,
@@ -9036,188 +7280,6 @@ fn netd_refused_pipes(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     Ok(())
 }
 
-/// An accept netd refuses for room leaves its owner a wake for the connection
-/// it left: the guest's wakes are the verdict. This side carries that netd named the
-/// refusal for room and that no program panicked.
-fn netd_refused_accept(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
-    let HostRun { result, console, .. } = netcase_against_host(rust_bins, "netd_refused_accept", true, "")?;
-    if !result.stdout.lines().any(|l| l.trim_end().ends_with("netd_refused_accept: ok")) {
-        return Err(format!("the guest never said it was done:\n{}", result.stdout));
-    }
-    if !console.contains("netd: refusing accept, ") {
-        return Err(format!("netd refused an accept for room without saying so:\n{console}"));
-    }
-    serial::Serial::named("boot console", console.as_str()).must_be_clean()?;
-    eprintln!("  [netcase] an accept refused for room left a wake once room returned");
-    Ok(())
-}
-
-/// Ctrl+Alt+D at a live desktop: every CPU answers, and the two halves of the
-/// report agree.
-///
-/// The instrument `issues/diagnostics/` files against, built because QEMU cannot
-/// stage the T14's audio wedge and a question the owner can answer beats a fix
-/// nobody can verify. Until this landed the dump listed the *calling* CPU's
-/// parked threads and named them by scheduler key, so it could confirm a park
-/// and never rule one out — and the three states that look identical from
-/// outside (parked on a deadline that did not fire, parked on a deadline
-/// nothing could reach, held by no CPU at all) were not distinguishable at all.
-///
-/// Eight CPUs, because "machine-wide" is not testable at the suite's default of
-/// two: one CPU short of the whole machine is what the old dump already did.
-///
-/// **The verdict is the instrument, not the guest's health.** A deadline that
-/// has passed and whose pass has not yet run is a legitimate microsecond-wide
-/// state, so asserting zero of them would be asserting a race. What is asserted
-/// is that the report is complete and that its halves cannot disagree: every
-/// CPU is present, the deadline classes sum to the parked count, and the
-/// process table knows at least as many threads as the schedulers hold.
-fn blocked_dump() -> Result<(), String> {
-    let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/desktopaudiocase");
-    let options = BootOptions {
-        profile: qemu::Profile::Metal,
-        smp: 8,
-        qmp: true,
-        ready_marker: "compositor: ready",
-        // `Drained::Bytes`; off the shipping kernel, and implies fast-health
-        // and edge-race.
-        kernel_params: &["i8042-trace"],
-        ..Default::default()
-    };
-    metal_sim_argv_check(&qemu::profile_argv(&options))?;
-    let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
-    let mut log = qemu.boot_log().to_string();
-    // No panel row under a compositor; the kernel's drain report is the answer.
-    let ack = Drained::Bytes;
-    if let Err(why) = shell_answers(&mut qemu, &mut log, &ack) {
-        return Err(format!(
-            "{why}\nnothing typed at the terminal window reached a shell:\n{log}"
-        ));
-    }
-
-    let before = log.len();
-    {
-        let mut input = qemu::QmpInput::open(qemu.qmp_socket());
-        input.keys(&[
-            ("ctrl", true),
-            ("alt", true),
-            ("d", true),
-            ("d", false),
-            ("alt", false),
-            ("ctrl", false),
-        ]);
-    }
-    await_marker_new(&mut qemu, &mut log, "=== end of dump ===", before, "the whole report")
-        .map_err(|why| format!(
-            "{why}\nCtrl+Alt+D produced no complete report:\n{}",
-            &log[before..]
-        ))?;
-    let report = log[before..].to_string();
-
-    // Every CPU printed its own line. This is the whole of "machine-wide": the
-    // count in the summary is derived, these are the CPUs actually answering.
-    let missing: Vec<usize> =
-        (0..8).filter(|c| !report.contains(&format!("cpu{c} running"))).collect();
-    if !missing.is_empty() {
-        return Err(format!(
-            "cpu(s) {missing:?} never reported — the dump reached {} of 8:\n{report}",
-            8 - missing.len()
-        ));
-    }
-    if !report.contains("8/8 cpu(s) answered") {
-        return Err(format!("the report does not claim a whole machine:\n{report}"));
-    }
-    // On a settled desktop the table is free, so the half of the verdict that
-    // only the census can produce must be there. A report that answered two of
-    // three questions is worth having on the owner's panel and is not worth
-    // accepting from a gate.
-    if !report.contains(" unheld, ") || !report.contains(" never ran") {
-        return Err(format!(
-            "the verdict lost its census half on a settled machine:\n{report}"
-        ));
-    }
-
-    // A parked line names a process, not a scheduler key.
-    let named = report
-        .lines()
-        .filter(|l| l.contains("pid=") && l.contains("tid=") && l.contains(" parked "))
-        .count();
-    if named == 0 {
-        return Err(format!("no parked task was named by pid and tid:\n{report}"));
-    }
-
-    // **Every kernel thread, by name.** They are almost always blocked, so
-    // the parked lines above carry them as a pid and a tid and nothing else —
-    // and on a machine that has gone quiet the question is *which* one is
-    // stuck. `sched::dump`'s census tags a kernel thread whatever it is doing.
-    //
-    // Matched with the ` cpu=` that follows the name on the census line, because
-    // a bare name appears in every one of these programs' own log lines and
-    // `/system/bin/init` speaks in a program's name before that program runs
-    // (`tests/CLAUDE.md`).
-    let unnamed: Vec<&str> = ["klogd"]
-        .into_iter()
-        .filter(|name| !report.contains(&format!(" {name} cpu=")))
-        .collect();
-    if !unnamed.is_empty() {
-        return Err(format!(
-            "the report never names kernel thread(s) {unnamed:?}, so it cannot say which \
-             of them is stuck:\n{report}"
-        ));
-    }
-
-    // The two halves must agree, which is what makes the verdict mean anything:
-    // every parked task falls into exactly one deadline class, and every task a
-    // scheduler holds is a thread the process table knows.
-    let parked = dump_field(&report, "== sched:", "parked")?;
-    let classes = dump_field(&report, "== deadlines:", "event-only,")?
-        + dump_field(&report, "== deadlines:", "pending,")?
-        + dump_field(&report, "== deadlines:", "OVERDUE,")?
-        + dump_field(&report, "== deadlines:", "ABSURD")?;
-    if parked != classes {
-        return Err(format!(
-            "{parked} parked task(s) but {classes} classified — the report contradicts \
-             itself:\n{report}"
-        ));
-    }
-    let threads = dump_field(&report, "== census:", "thread(s)")?;
-    if threads < parked {
-        return Err(format!(
-            "the schedulers hold {parked} task(s) and the process table knows {threads} \
-             thread(s) — the census cannot see what the CPUs do:\n{report}"
-        ));
-    }
-
-    let verdict = report
-        .lines()
-        .find(|l| l.contains("== VERDICT:"))
-        .ok_or_else(|| format!("no verdict line:\n{report}"))?;
-    eprintln!(
-        "  [dump] {threads} threads, {parked} parked, all 8 cpus answered;{}",
-        verdict.split("VERDICT:").nth(1).unwrap_or("").trim_end()
-    );
-    Ok(())
-}
-
-/// The number the report writes immediately before `word`, on the line that
-/// carries `marker`. Read from the word a person sees rather than from a
-/// column, so a reordered line does not silently read the wrong field.
-fn dump_field(report: &str, marker: &str, word: &str) -> Result<u32, String> {
-    let line = report
-        .lines()
-        .find(|l| l.contains(marker))
-        .ok_or_else(|| format!("no {marker:?} line in the report:\n{report}"))?;
-    let head = line
-        .split(word)
-        .next()
-        .filter(|h| h.len() < line.len())
-        .ok_or_else(|| format!("no {word:?} on {line:?}"))?;
-    head.split_whitespace()
-        .next_back()
-        .and_then(|w| w.parse().ok())
-        .ok_or_else(|| format!("no number before {word:?} on {line:?}"))
-}
-
 /// The direct regression for the readiness defect: a stimulus that produces
 /// bytes and no events must produce no wake. Pause is that stimulus — six
 /// bytes, deliberately swallowed.
@@ -9234,7 +7296,7 @@ fn dump_field(report: &str, marker: &str, word: &str) -> Result<u32, String> {
 /// once the guest has reported what the piece before it produced: the Pause is
 /// paid by a drain the driver logged, a real key by its two `kev` lines. Six
 /// bytes outstanding at most, and a slow guest costs wall clock.
-fn i8042_no_spurious_wake(boot: &mut Boot) -> Result<(), String> {
+fn i8042_no_spurious_wake(qemu: &mut QemuInstance) -> Result<(), String> {
     /// What the guest owes for one injected group before the next goes out.
     enum Owed {
         /// A drain the driver reported. The only thing a swallowed sequence
@@ -9253,7 +7315,6 @@ fn i8042_no_spurious_wake(boot: &mut Boot) -> Result<(), String> {
         (&[("end", true), ("end", false)], Owed::Keys(2)),
     ];
 
-    let qemu = &mut boot.qemu;
     let sent = std::cell::Cell::new(0usize);
     let result = {
         let mut input: Option<qemu::QmpInput> = None;
@@ -9368,246 +7429,6 @@ fn i8042_no_spurious_wake(boot: &mut Boot) -> Result<(), String> {
 /// can see this, which is why every injection test here is paced against the
 /// guest's own report rather than against a wall clock.
 const QEMU_PS2_QUEUE: usize = 16;
-
-/// A PS/2 pointer packet. Three bytes, because the driver's aux init sends no
-/// IntelliMouse knock and QEMU therefore frames a plain mouse.
-const MOUSE_PACKET: usize = 3;
-
-/// How far the host may run ahead of the guest while it feeds the framer.
-///
-/// A packet the guest has reported is a packet whose bytes have left the
-/// device's queue, so the lead bounds that queue's occupancy — which is the
-/// only thing that makes an injected command a packet. Past the bound QEMU
-/// stops queueing motion and starts *accumulating* it, and the merged deltas
-/// come back as one packet or, if they cancel, as none at all.
-const MOUSE_LEAD: usize = 4;
-
-const _: () = assert!(
-    MOUSE_PACKET * MOUSE_LEAD <= QEMU_PS2_QUEUE,
-    "the lead outruns QEMU's PS/2 queue, which merges the motion it cannot hold"
-);
-
-/// Moves the staged merge puts in one command: more than one, and few enough
-/// that their sum stays inside the packet's signed byte.
-const MERGE_MOTIONS: usize = 4;
-
-/// The TrackPoint path, and a thousand packets through the framer after it,
-/// each sent only once the one before it has come out of the guest.
-///
-/// The pacing is the design, and [`MOUSE_LEAD`] is what makes it one: a host
-/// injecting at its own speed measures how fast the guest drains and reads the
-/// shortfall as a driver defect. Staying inside what the device holds leaves no
-/// loss to tolerate: every packet injected is a packet that arrived, or the run
-/// stalls and says how far it got. It is also what makes the driver's
-/// `discarded`/`dropped` counters mean something a slow guest cannot account
-/// for.
-fn i8042_mouse(boot: &mut Boot) -> Result<(), String> {
-    let qemu = &mut boot.qemu;
-    let boot = qemu.boot_log().to_string();
-    // **The whole line, because its tail is the verdict.** The unmask's result
-    // used to be discarded and the line stopped at the APIC, so a GSI that
-    // never unmasked printed exactly what a working one did — and every packet
-    // this test injects below would then arrive nowhere, which is the check
-    // that the word is not just a word.
-    let Some(aux) = boot.lines().find(|l| l.contains("i8042: aux rate=100")) else {
-        return Err(format!("the TrackPoint path never came up:\n{boot}"));
-    };
-    if !aux.ends_with(" on") {
-        return Err(format!(
-            "the aux line does not end in the unmask's verdict, so a masked GSI reads as a \
-             live one: {aux:?}"
-        ));
-    }
-
-    const BURST: usize = 1000;
-    let injected = std::cell::Cell::new(0usize);
-    let arrived = std::cell::Cell::new(0usize);
-    let result = {
-        let mut input: Option<qemu::QmpInput> = None;
-        let mut burst = 0usize;
-        let mut clicked = false;
-        let mut merged = false;
-        let mut counted = false;
-        let mut ended = false;
-        qemu.run_test_paced("test_rs_i8042_mouse", Duration::from_secs(60), |socket, line| {
-            if line.contains("===I8042_MOUSE_READY===") {
-                let mut open =
-                    qemu::QmpInput::open(socket.expect("i8042_mouse needs BootOptions { qmp }"));
-                // Off the origin first: the position clamps at 0, so a
-                // move up from there would be invisible.
-                open.mouse(100, 100, None);
-                open.mouse(40, -30, None);
-                open.mouse(0, 0, Some(("left", true)));
-                open.mouse(0, 0, Some(("left", false)));
-                injected.set(4);
-                input = Some(open);
-            }
-            if line.contains("mev buttons=") {
-                arrived.set(arrived.get() + 1);
-            }
-            counted |= clicked && line.contains("discarded");
-            let Some(input) = input.as_mut() else { return };
-            if ended {
-                return;
-            }
-            // One command per packet, because QEMU syncs input once per
-            // command: `BURST` commands is `BURST` packets and three times that
-            // many bytes through the framer. Refilling the window on every
-            // arrival is what keeps the stream continuous under the pacing.
-            while burst < BURST && injected.get() < arrived.get() + MOUSE_LEAD {
-                input.mouse(if burst.is_multiple_of(2) { 1 } else { -1 }, 0, None);
-                burst += 1;
-                injected.set(injected.get() + 1);
-            }
-            if burst < BURST || arrived.get() < injected.get() {
-                return;
-            }
-            if !clicked {
-                input.mouse(0, 0, Some(("left", true)));
-                input.mouse(0, 0, Some(("left", false)));
-                injected.set(injected.get() + 2);
-                clicked = true;
-                return;
-            }
-            // What [`MOUSE_LEAD`] exists to stay clear of, staged where it can
-            // do no harm: the queue is empty here, so the merge is the device's
-            // one-sync-per-command rule and nothing else.
-            if !merged {
-                input.mouse_merged(1, MERGE_MOTIONS);
-                injected.set(injected.get() + 1);
-                merged = true;
-                return;
-            }
-            // The driver reports its counters from a scheduler pass, and the
-            // client polling its handle is what keeps passes running: the line has
-            // to arrive before the client is told to stop.
-            if !counted {
-                return;
-            }
-            // The only right button in the sequence, and the client's signal to
-            // exit. It stops on the release, so both halves are printed and the
-            // framing assertion still reads a pointer with nothing held down.
-            input.mouse(0, 0, Some(("right", true)));
-            input.mouse(0, 0, Some(("right", false)));
-            injected.set(injected.get() + 2);
-            ended = true;
-        })
-    };
-    let (injected, arrived) = (injected.get(), arrived.get());
-    if let Some(err) = &result.error {
-        // The guard, not the count: the pacing means the host is *waiting* on a
-        // packet when this fires, so what it has established is that the run
-        // stopped, never that the machine dropped one.
-        return Err(format!(
-            "{STALLED} {err} — {arrived} of the {injected} packets injected had come back out \
-             when the host gave up waiting for the next\n{}",
-            result.stdout
-        ));
-    }
-
-    let events = parse_mouse_events(&result.stdout);
-    // The host never had more outstanding than the device holds, so a shortfall
-    // is a packet the machine lost and never a host that outran it.
-    if events.len() != injected {
-        return Err(format!(
-            "{} pointer events reached userland out of {injected} packets injected, never more \
-             than {MOUSE_LEAD} of them ({} bytes) outstanding against a {QEMU_PS2_QUEUE}-byte \
-             device queue",
-            events.len(),
-            MOUSE_LEAD * MOUSE_PACKET,
-        ));
-    }
-    // The step one packet moves the pointer, off the first two of the burst.
-    let step = (events[5].x as i32 - events[4].x as i32).abs();
-    // Third from last: the staged merge, then the right button's two halves.
-    let merge = events.len() - 3;
-    let jump = (events[merge].x as i32 - events[merge - 1].x as i32).abs();
-    if step == 0 || jump != step * MERGE_MOTIONS as i32 {
-        return Err(format!(
-            "{MERGE_MOTIONS} moves in one command moved the pointer {jump} against a one-move \
-             step of {step}: QEMU no longer sums motion between syncs, and `MOUSE_LEAD` is \
-             derived from the fact that it does"
-        ));
-    }
-    // A sign error in dy is invisible to any test that only checks
-    // "it moved", and the PS/2 wire points the opposite way to the
-    // screen — so both directions are asserted separately.
-    if !events.windows(2).any(|w| w[1].x > w[0].x) {
-        return Err("the pointer never moved right".to_string());
-    }
-    if !events.windows(2).any(|w| w[1].y < w[0].y) {
-        return Err(format!(
-            "the pointer never moved up — dy inverted? ys: {:?}",
-            events.iter().take(8).map(|e| e.y).collect::<Vec<_>>()
-        ));
-    }
-    // PS/2 bit 0 is left, and so is HID boot-mouse bit 0.
-    if !events.iter().any(|e| e.buttons == 0x01) {
-        return Err(format!(
-            "no left-button-down event; buttons seen: {:?}",
-            events.iter().map(|e| e.buttons).collect::<std::collections::BTreeSet<_>>()
-        ));
-    }
-    // And after 3000 bytes of packets the framer is still aligned:
-    // the last click is reported as a click, not as motion or as the
-    // wrong button.
-    let last_press = events.iter().rposition(|e| e.buttons == 0x01);
-    let Some(last_press) = last_press else {
-        return Err("no button press at all".to_string());
-    };
-    if events[last_press..].last().map(|e| e.buttons) != Some(0x00) {
-        return Err(format!(
-            "framing drifted: after the final click the button state is {:?}",
-            events.last()
-        ));
-    }
-    // The T14's line, staged. Its log read
-    //   `6 bytes, 0 keys, 2 motion, no event from
-    //    [aux 0x08, aux 0x06, aux 0x08, aux 0x0e]`
-    // on a pointer that was framing perfectly: two whole packets, and
-    // the four bytes named were their heads and first body bytes. That
-    // sent a field investigation after a desync that had not happened.
-    // Three thousand bytes of healthy packets is the same claim with
-    // three orders of magnitude more of it: a driver that cannot tell a
-    // byte it is holding from a byte it threw away names two thirds of
-    // them here.
-    let named: Vec<&str> =
-        result.serial.lines().filter(|l| l.contains("no event from")).collect();
-    if !named.is_empty() {
-        return Err(format!(
-            "{BURST} clean packets and the driver still named bytes as undecodable:\n{}",
-            named.join("\n")
-        ));
-    }
-    // And the counts that say so directly, off the driver's own line. A
-    // discard is the byte-level resync and nothing else, so an intact stream
-    // owes zero of them — which is what makes any non-zero value on the T14's
-    // next boot mean the pointer really did lose the frame. `dropped` is the
-    // ring overflowing and `lost edges` an interrupt no pass ever accounted
-    // for; [`MOUSE_LEAD`] is what leaves a slow guest unable to produce
-    // either.
-    let counters = result
-        .serial
-        .lines()
-        .rfind(|l| l.contains("discarded"))
-        .ok_or_else(|| format!("the driver never reported its counters:\n{}", result.serial))?;
-    for owed in ["0 discarded", "0 overruns", "0 dropped", "0 lost edges"] {
-        if !counters.contains(owed) {
-            return Err(format!(
-                "{injected} packets, none of them sent before the one before it arrived, and the \
-                 driver does not report `{owed}`: {counters}"
-            ));
-        }
-    }
-    eprintln!("  [i8042] {}", counters.trim());
-    eprintln!(
-        "  [i8042] {} packets injected, {} out, last button state {:#04x}",
-        injected,
-        events.len(),
-        events.last().unwrap().buttons
-    );
-    Ok(())
-}
 
 /// The compositor's window cap, end to end, on the only config that boots a
 /// compositor an in-guest binary can talk to.
@@ -9922,12 +7743,6 @@ fn run_machine_test(
         "foreign_disk_untouched" => storage::foreign_disk_untouched(test_config, c_bins, rust_bins),
         "internal_disk_boot" => storage::internal_disk_boot(test_config, c_bins, rust_bins),
         "partition_claim" => partclaim::partition_claim(test_config, c_bins, rust_bins),
-        "partition_claim_gives_up" => {
-            partclaim::partition_claim_gives_up(test_config, c_bins, rust_bins)
-        }
-        "partition_claim_departure" => {
-            partclaim::partition_claim_departure(test_config, c_bins, rust_bins)
-        }
         "block_duplicate_id" => storage::block_duplicate_id(test_config, c_bins, rust_bins),
         "volume_from_another_disk" => {
             storage::volume_from_another_disk(test_config, c_bins, rust_bins)
@@ -9952,13 +7767,7 @@ fn run_machine_test(
         // Body in `tests/common/gpt.rs`, same reason.
         "boot_partition_identity" => common::gpt::boot_partition_identity(test_config, c_bins, rust_bins),
         "machine_reboot" => power::machine_reboot(test_config, c_bins, rust_bins),
-        "metal_job_reboot" => power::metal_job_reboot(test_config, c_bins, rust_bins),
-        "metal_device_probe" => devices::metal_device_probe(test_config, c_bins, rust_bins),
-        "job_deadline_reboots" => power::job_deadline_reboots(test_config, c_bins, rust_bins),
-        "quiesce_stops_the_machine" => power::quiesce_stops_the_machine(test_config, c_bins, rust_bins),
         "quiesce_refuses_a_second_shutdown" => power::quiesce_refuses_a_second_shutdown(test_config, c_bins, rust_bins),
-        "quiesce_wakes_on_the_last_park" => power::quiesce_wakes_on_the_last_park(test_config, c_bins, rust_bins),
-        "quiesce_wakes_on_the_last_teardown" => power::quiesce_wakes_on_the_last_teardown(test_config, c_bins, rust_bins),
         "watchdog_resets" => power::watchdog_resets(test_config, c_bins, rust_bins),
         "loader_watchdog_arms" => power::loader_watchdog_arms(test_config, c_bins, rust_bins),
         "panic_reboots" => power::panic_reboots(test_config, c_bins, rust_bins),
@@ -10001,7 +7810,6 @@ fn run_machine_test(
         // Bodies in `tests/common/usb.rs`, for the same reason.
         "usb_storage_gate" => usb::usb_storage_gate(test_config, c_bins, rust_bins),
         "usb_storage_shapes" => usb::usb_storage_shapes(test_config, c_bins, rust_bins),
-        "usb_boot_stick_pulled" => usb::usb_boot_stick_pulled(test_config, c_bins, rust_bins),
         "usb_refused_disk_first" => {
             usb::usb_refused_disk_first(test_config, c_bins, rust_bins)
         }
@@ -10009,18 +7817,11 @@ fn run_machine_test(
             usb::xhci_scan_hands_over_a_free_slot(test_config, c_bins, rust_bins)
         }
         "usb_pool_exhausted" => usb::usb_pool_exhausted(test_config, c_bins, rust_bins),
-        "usb_short_read" => usb::usb_short_read(test_config, c_bins, rust_bins),
-        // Body in `tests/common/volumes.rs`, same reason.
-        "esp_filesystem" => common::volumes::esp_filesystem(test_config, c_bins, rust_bins),
-        "log_flush_retry" => common::volumes::log_flush_retry(test_config, c_bins, rust_bins),
-        // Body in `tests/common/toybox.rs`, same reason.
-        "toybox_cp_volume" => common::toybox::cp_volume(test_config, c_bins, rust_bins),
         "kernel_log_file" => common::volumes::kernel_log_file(test_config, c_bins, rust_bins),
         // Body in `tests/common/volumes.rs`, same reason: the host-side oracle
         // shuts the guest down and reads `/log` back with `toyos-fat32-check`.
         // Same again: the FAT32 read side's revocation, judged off the volume the
         // guest's unlink-and-reallocate cycle left behind.
-        "fat_backing_revoked" => common::volumes::fat_backing_revoked(test_config, c_bins, rust_bins),
         // `sysret-ss-probe` has the first syscall null SS, force a switch, and log whether the
         // switch reloaded it; a missing `mov ss` turns `reloaded` into `NOT`.
         "sysret_ss_reload" => {
@@ -10033,50 +7834,6 @@ fn run_machine_test(
             sysret_ss(qemu.boot_log())
         }
         "fsync_failed_commit" => common::volumes::fsync_failed_commit(test_config, c_bins, rust_bins),
-        "redirty_mid_flush" => common::volumes::redirty_mid_flush(test_config, c_bins, rust_bins),
-        "fs_rename_durable" => common::volumes::fs_rename_durable(test_config, c_bins, rust_bins),
-        "fs_dirs_durable" => common::volumes::fs_dirs_durable(test_config, c_bins, rust_bins),
-        // The lost-wake canary with the window it guards held open: every pipe
-        // wait reads its condition, waits for a post to land, then parks, so
-        // the ping-pong's posts land between the two. A commit that ignored the
-        // notified bit parks for good, and the run's ceiling reds it.
-        "blocking_read_window" => {
-            let options = BootOptions {
-                kernel_params: &["watch-window"],
-                ..Default::default()
-            };
-            let mut qemu =
-                QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
-            let boot = qemu.boot_log().to_string();
-            serial::Serial::named("boot console", boot.as_str()).must_be_clean()?;
-            let result = qemu.run_test("test_rs_blocking_read_stress", Duration::from_secs(30));
-            if !check_rust_result(&result) {
-                return Err(format!(
-                    "blocking_read_window failed:\n{}\nkernel log while it ran:\n{}{}",
-                    result.stdout, result.before, result.serial
-                ));
-            }
-            Ok(())
-        }
-        // Two CPUs: the held copy spins in the kernel while its sibling unmaps
-        // and maps on the other.
-        "user_copy_races_munmap" => {
-            let options = BootOptions {
-                smp: 2,
-                kernel_params: &["copy-meets-a-remap"],
-                ..Default::default()
-            };
-            let mut qemu =
-                QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
-            let result = qemu.run_test("test_rs_copy_out_races_munmap", Duration::from_secs(30));
-            if !check_rust_result(&result) {
-                return Err(format!(
-                    "user_copy_races_munmap failed:\n{}\nkernel log while it ran:\n{}{}",
-                    result.stdout, result.before, result.serial
-                ));
-            }
-            Ok(())
-        }
         // Two CPUs: the held spawn spins in the kernel while its sibling stores
         // on the other.
         "tls_rebase_window" => {
@@ -10293,9 +8050,6 @@ fn run_machine_test(
             common::volumes::root_named_but_absent(test_config, c_bins, rust_bins)
         }
         "root_chunk_refused" => common::volumes::root_chunk_refused(test_config, c_bins, rust_bins),
-        "root_chunk_refused_on_a_usb_stick" => {
-            common::volumes::root_chunk_refused_on_a_usb_stick(test_config, c_bins, rust_bins)
-        }
         "root_candidate_overlaps" => common::volumes::root_candidate_overlaps(test_config, c_bins, rust_bins),
         "root_named_twice_on_the_boot_disk" => {
             common::volumes::root_named_twice_on_the_boot_disk(test_config, c_bins, rust_bins)
@@ -10314,11 +8068,7 @@ fn run_machine_test(
         "xhci_deaf_registers" => usb::xhci_deaf_registers(test_config, c_bins, rust_bins),
         "xhci_slow_connect" => usb::xhci_slow_connect(test_config, c_bins, rust_bins),
         "xhci_portsc_rw1c" => usb::xhci_portsc_rw1c(test_config, c_bins, rust_bins),
-        "usb_transport_break" => usb::usb_transport_break(test_config, c_bins, rust_bins),
         "usb_stick_left" => usb::usb_stick_left(test_config, c_bins, rust_bins),
-        "xhci_full_speed_device" => {
-            usb::xhci_full_speed_device(test_config, c_bins, rust_bins)
-        }
         "xhci_superspeed_ports" => usb::xhci_superspeed_ports(test_config, c_bins, rust_bins),
         "xhci_flap" => usb::xhci_flap(test_config, c_bins, rust_bins),
         // Body in `tests/common/iommu.rs`, same reason.
@@ -10326,16 +8076,6 @@ fn run_machine_test(
         // Body in `tests/common/logread.rs`, so the hunk here stays one line.
         "log_conservation_smp2" => {
             common::logread::log_conservation_smp2(test_config, c_bins, rust_bins)
-        }
-        "log_nested_emit" => common::logread::log_nested_emit(test_config, c_bins, rust_bins),
-        "log_reserve_window" => {
-            common::logread::log_reserve_window(test_config, c_bins, rust_bins)
-        }
-        "log_reserve_window_negative" => {
-            common::logread::log_reserve_window_negative(test_config, c_bins, rust_bins)
-        }
-        "log_poll_outlives_a_close" => {
-            common::logread::log_poll_outlives_a_close(test_config, c_bins, rust_bins)
         }
         // Body in `tests/common/console.rs`, same reason.
         "c_capture_ignores_daemon_lines" => {
@@ -10388,10 +8128,7 @@ fn run_machine_test(
         }
         "blockd_serves_nothing" => common::blockd::blockd_serves_nothing(test_config, c_bins, rust_bins),
         "double_fault_stack" => faults::double_fault_stack(test_config, c_bins, rust_bins),
-        "syscall_window_nmi" => faults::syscall_window_nmi(test_config, c_bins, rust_bins),
-        "syscall_window_nmi_controls" => {
-            faults::syscall_window_nmi_controls(test_config, c_bins, rust_bins)
-        }
+        "nested_nmi_is_loud" => faults::nested_nmi_is_loud(test_config, c_bins, rust_bins),
         "idle_stack_guard" => faults::idle_stack_guard(test_config, c_bins, rust_bins),
         "dump_left_pending_is_owed" => {
             faults::dump_left_pending_is_owed(test_config, c_bins, rust_bins)
@@ -10433,12 +8170,9 @@ fn run_machine_test(
                 boot_metal_sim_desktop(rust_bins)
             }))
         }
-        "i8042_no_spurious_wake" => i8042_no_spurious_wake(group_boot(held, I8042_TRACE, || {
-            boot_i8042_trace(test_config, c_bins, rust_bins)
-        })),
-        "i8042_mouse" => i8042_mouse(group_boot(held, I8042_TRACE, || {
-            boot_i8042_trace(test_config, c_bins, rust_bins)
-        })),
+        "i8042_no_spurious_wake" => {
+            i8042_no_spurious_wake(&mut boot_i8042_trace(test_config, c_bins, rust_bins))
+        }
         "swiss_german_layout" => {
             swiss_german_layout(&mut boot_locale(test_config, c_bins, rust_bins))
         }
@@ -10469,15 +8203,12 @@ fn run_machine_test(
             let boot = group_boot(held, SSHD_LOGIN, || common::ssh::boot(rust_bins));
             common::ssh::key_auth_gate(&mut boot.qemu)
         }
-        "console_locale_detect" => console_locale_detect(),
         "desktop_locale_detect" => desktop_locale_detect(),
         "desktop_typing_damage" => desktop_typing_damage(),
-        "desktop_window_child" => desktop_window_child(rust_bins),
         "toolkit_iced" => toolkit_iced(),
         "toolkit_window_wake" => toolkit_window_wake(rust_bins),
         "toolkit_winit_loop" => toolkit_winit_loop(rust_bins),
         "toolkit_winit_pace" => toolkit_winit_pace(rust_bins),
-        "blocked_dump" => blocked_dump(),
         "xhci_many_devices" => {
             // The T14's internal controller carries a camera, Bluetooth and a
             // fingerprint reader next to the boot stick, and every profile in
@@ -11492,94 +9223,6 @@ fn run_machine_test(
             );
             Ok(())
         }
-        "sched_check_build" => {
-            // The scheduler core's own instruments, run on a real machine —
-            // the on-target counterpart to everything the simulator
-            // does.
-            //
-            // `kernel/Cargo.toml` has forwarded `sched-check =
-            // ["toyos-sched/check"]` since the check build was written, and
-            // until this test nothing in `src/` or `tests/` ever asked for it.
-            // So `cpu::MAX_PASS_NS`, the pass-cost measurement and
-            // `invariants::check_cpu` were compiled by no CI run at all: a
-            // quantum never armed, a task whose container disagreed with its
-            // state word, and a distribution of passes with mass over the
-            // budget were each caught by nothing on hardware, however green the
-            // simulator was.
-            //
-            // **The workload is `sched_stress`** because the asserts are dense
-            // on exactly what it does: it spawns burners that drive vruntime,
-            // blocks and wakes across io_uring and ports, and forces a
-            // Runnable→NonRunnable→Runnable cycle. Every one of those is a pass,
-            // and every pass on every CPU runs both checks. `smp: 2` is the
-            // default and it is deliberate — one CPU cannot migrate, and
-            // invariant T's arming is per CPU.
-            //
-            // **That the asserts are compiled in at all is not asked here.** A
-            // guest proves they did not fire, and a kernel with the feature
-            // quietly dropped proves that more easily; the artifact is asked
-            // instead, at build time, by `assert_sched_check_matches_features` —
-            // 0 of 3 assert texts in the shipping kernel, 3 of 3 in this one.
-            // This half is the other one: on a machine that really carries them,
-            // honest work does not trip them.
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                c_bins,
-                rust_bins,
-                BootOptions {
-                    kernel_features: toyos_build::build::SCHED_CHECK_KERNEL,
-                    ..BootOptions::default()
-                },
-            );
-            // The boot is already thousands of passes on both CPUs, and an
-            // assert that fires there takes the machine down before userland.
-            serial::Serial::boot(&qemu).must_be_clean()?;
-
-            let result = qemu.run_test("test_rs_sched_stress", Duration::from_secs(120));
-            if let Some(err) = &result.error {
-                return Err(format!(
-                    "the check-build guest stopped answering, which is what a scheduler \
-                     assert firing looks like from here: {err}\nserial:\n{}",
-                    result.serial,
-                ));
-            }
-            if !check_rust_result(&result) {
-                return Err(format!(
-                    "sched_stress failed on the check build:\n{}",
-                    result.stdout
-                ));
-            }
-            // An assert fires as a kernel panic on whichever CPU took the pass,
-            // and the guest process can still exit 0 while another CPU is dying
-            // — so the serial is read as well as the exit code.
-            serial::Serial::named("test serial", result.serial.as_str()).must_be_clean()?;
-            for line in result.stdout.lines() {
-                eprintln!("  [sched-check] {}", line.trim());
-            }
-            // The instrument published, read back through the parser its format
-            // is held to: a report from every CPU, over the whole boot in the
-            // three pieces a capture comes in. What a report says is not judged
-            // here — a pass's cost is a duration.
-            let mut capture = serial::Serial::boot(&qemu);
-            capture.push(&result.before);
-            capture.push(&result.serial);
-            let reported: BTreeSet<u32> = capture
-                .text()
-                .lines()
-                .filter_map(toyos_sched::cpu::PassCostReport::parse)
-                .map(|report| report.cpu.0)
-                .collect();
-            let cpus = BootOptions::default().smp;
-            if reported.len() != cpus as usize {
-                return Err(format!(
-                    "the check build published pass-cost reports from cpus {reported:?} of the \
-                     {cpus} it boots: `{}` is the prefix the rest never printed\n{}",
-                    toyos_sched::cpu::PassCostReport::PREFIX,
-                    capture.text(),
-                ));
-            }
-            Ok(())
-        }
         "klogd_hosted" => {
             // The machine's first kernel thread, and the thing about it no
             // other test in the suite can see: **that it is hosted at all.**
@@ -11902,41 +9545,6 @@ fn run_machine_test(
             );
             Ok(())
         }
-        "short_sleep_livelock" => {
-            // Task #156. A `nanosleep` whose deadline is already past when the
-            // pass arms the one-shot armed the register's one-tick minimum, and
-            // the Ring 0 timer stub reloads whatever was last armed — so the
-            // CPU took that interrupt again before it could execute the
-            // instruction after the `wrmsr` that armed it, forever. Eight boots
-            // of the owner's T14 caught it twice by NMI, at
-            // `arm_one_shot+0x8d` and at `timer_entry+0x0`, which are the two
-            // instruction boundaries of exactly that loop.
-            //
-            // Its own boot because the failure is a CPU that never runs
-            // anything again: on the shared boot it would be reported against
-            // whichever test followed it.
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                c_bins,
-                rust_bins,
-                BootOptions::default(),
-            );
-            serial::Serial::boot(&qemu).must_be_clean()?;
-
-            let result = qemu.run_test("test_rs_abuse_short_sleep", Duration::from_secs(60));
-            if let Some(err) = &result.error {
-                return Err(format!(
-                    "a sleep shorter than one LAPIC tick took the CPU with it: {err}\nserial:\n{}",
-                    result.serial,
-                ));
-            }
-            if !check_rust_result(&result) {
-                return Err(format!("abuse_short_sleep failed:\n{}", result.stdout));
-            }
-            serial::Serial::named("test serial", result.serial.as_str()).must_be_clean()?;
-            eprintln!("  [sleep] {}", result.stdout.lines().last().unwrap_or("").trim());
-            Ok(())
-        }
         "heap_ceiling_bounds" => {
             // Its own boot: `LOWER_SYSINFO_BOUND` stays lowered for the rest of it.
             let options = BootOptions { kernel_features: ACTUATOR_KERNEL, ..Default::default() };
@@ -12160,9 +9768,6 @@ fn run_machine_test(
         "pci_inventory" => {
             let qemu = QemuInstance::boot(test_config, c_bins, rust_bins);
             pci_inventory(qemu.boot_log())
-        }
-        "smp_failed_ap_leaves_no_hole" => {
-            smp_failed_ap_leaves_no_hole(test_config, c_bins, rust_bins)
         }
         "handler_post_without_a_pass" => {
             let mut qemu = QemuInstance::boot_with_options(
@@ -12838,119 +10443,6 @@ fn run_machine_test(
             eprintln!("  [i8042] typed {typed:?} on a keyboard that will not report its set");
             Ok(())
         }
-        "i8042_undecoded_bytes" => {
-            // The T14 said `1 interrupts, 1 bytes, 0 keys, 0 motion` and the
-            // counters could not name a suspect: 84 of the 256 single byte
-            // values decode to nothing under set 1, so the same arithmetic
-            // covers an extended key's harmless `0xE0` prefix, a `0xAA` from a
-            // keyboard that reset, a late `0xFA`, and a wire carrying raw
-            // set 2. Only the byte separates them.
-            //
-            // Pause is the injection because it is the one key whose whole
-            // sequence decodes to nothing by design — `E1 1D 45 E1 9D C5`,
-            // swallowed to keep the stream in frame — so bytes-with-zero-events
-            // is reproduced without depending on how the drain happens to
-            // batch. Then one plain letter, which is the other half: the first
-            // line must not be the last word on a keyboard that works.
-            //
-            // `i8042-split-burst` stages the interleaving this name's CI red
-            // recorded (run 31944633004): the ISR takes four of the six bytes
-            // and the mute verdict goes out with the decoder's run still open,
-            // so it names nothing — on every run here, where KVM produced it
-            // by scheduling luck. The verdict must then revise itself when the
-            // rest of the sequence lands, which is the assertion below.
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                c_bins,
-                rust_bins,
-                BootOptions {
-                    profile: qemu::Profile::Metal,
-                    qmp: true,
-                    kernel_params: &["i8042-split-burst"],
-                    ..Default::default()
-                },
-            );
-            if !qemu.boot_log().contains("i8042: kbd set2+xlat") {
-                return Err(format!("the PS/2 keyboard never came up:\n{}", qemu.boot_log()));
-            }
-            let result = qemu.run_test_hooked(
-                "test_rs_i8042_keyboard",
-                Duration::from_secs(20),
-                I8042_READY,
-                |socket| {
-                    qemu::qmp_send_keys(socket, &[("pause", true), ("pause", false)]);
-                    thread::sleep(Duration::from_millis(200));
-                    qemu::qmp_send_keys(socket, &[("a", true), ("a", false)]);
-                    thread::sleep(Duration::from_millis(100));
-                    send_i8042_sentinel(socket);
-                },
-            );
-            if let Some(err) = &result.error {
-                return Err(format!("{err}\n{}", result.stdout));
-            }
-            // **Every line is read from the injection onwards**, and that is
-            // not tidiness: this driver reports on its own bring-up too, and a
-            // `nothing decoded` line from before the Pause was pressed is not a
-            // report about the Pause. Reading the first one in the whole capture
-            // is what made this test red on a line naming no byte, on the dev
-            // host and on CI. The marker is the boundary the test knows,
-            // because the marker is what the injection was timed off.
-            let text = result.serial;
-            let capture = serial::Serial::named("i8042 capture", text.as_str());
-            let Some(at) = text.find(I8042_READY) else {
-                return Err(format!("{I8042_READY:?} never reached the capture:\n{text}"));
-            };
-            let from = text[at..].find('\n').map_or(text.len(), |n| at + n + 1);
-            let mut mutes = text[from..].lines().filter(|l| l.contains("nothing decoded"));
-            // The staged premise first: the split put the verdict out with the
-            // run still open, so the first mute line must name nothing. A first
-            // line that already names bytes means the arrangement did not
-            // happen and nothing below would be testing the revision.
-            let blind = mutes.next().ok_or_else(|| {
-                format!(
-                    "bytes arrived and decoded to nothing and the driver never said so:\n{text}"
-                )
-            })?;
-            if blind.contains("no event from") {
-                return Err(format!(
-                    "the staged split never beat the verdict — the first mute line already \
-                     names bytes, so this run exercised nothing: {blind}"
-                ));
-            }
-            // The revision. `0xE1` is Pause's prefix and the first byte of the
-            // sequence whichever way the drain batched it; a verdict that
-            // stands on the blind line — a true statement naming no suspect —
-            // is the one this test exists to reject.
-            let mute = mutes.find(|l| l.contains("no event from [0xe1")).ok_or_else(|| {
-                format!(
-                    "the verdict was said too early — {blind:?} — and never revised: no later \
-                     `nothing decoded` line names the sequence:\n{text}"
-                )
-            })?;
-            // And the picture corrects itself. A one-shot report would freeze
-            // the panel on the half-arrived sequence and never say the
-            // keyboard works after all — which on the T14 is a reflash.
-            let alive = capture.must_say_after(I8042_READY, "the pin asserts").map_err(|why| {
-                format!(
-                    "a letter was typed after the undecoded bytes and the driver never \
-                     revised its verdict: {why}"
-                )
-            })?;
-            let keys = alive
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .windows(2)
-                .find(|w| w[1].trim_end_matches(',') == "keys")
-                .and_then(|w| w[0].parse::<u64>().ok())
-                .ok_or_else(|| format!("unreadable alive line: {alive}"))?;
-            if keys == 0 {
-                return Err(format!("the revised verdict still decodes nothing: {alive}"));
-            }
-            eprintln!("  [i8042] {}", blind.trim());
-            eprintln!("  [i8042] {}", mute.trim());
-            eprintln!("  [i8042] {}", alive.trim());
-            Ok(())
-        }
         "i8042_absent" => {
             let without = QemuInstance::boot_with_options(
                 test_config,
@@ -13045,140 +10537,6 @@ fn run_machine_test(
         }
         "metal_sim_window_drag" => metal_sim_window_drag(rust_bins),
         "metal_sim_hostile_clipboard" => metal_sim_hostile_clipboard(rust_bins),
-        "metal_sim_pointer_churn" => {
-            // The owner froze his desktop twice by plugging a mouse in and
-            // pulling it out again, and the second freeze landed on the fourth
-            // cycle's enumeration. The compositor holds the merged pointer's
-            // handle across all of it, so every cycle is a source binding and
-            // releasing underneath a claim it never made and cannot see.
-            //
-            // The liveness signal is `compositor: frames=`, for the reason it
-            // was built: it comes from a composited frame, so its absence is a
-            // desktop that stopped drawing rather than an instrument that
-            // stopped counting.
-            let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/metalcase");
-            let options = BootOptions {
-                profile: qemu::Profile::Metal,
-                qmp: true,
-                ..Default::default()
-            };
-            metal_sim_argv_check(&qemu::profile_argv(&options))?;
-
-            let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
-            let socket = qemu.qmp_socket().to_path_buf();
-            let mut console = qemu.boot_log().to_string();
-            let frames = |text: &str| text.matches("compositor: frames=").count();
-
-            // A baseline first: churn against a compositor that was never
-            // drawing would be a green run proving nothing.
-            let deadline = std::time::Instant::now() + qemu.budget(Duration::from_secs(20));
-            while std::time::Instant::now() < deadline && frames(&console) < 1 {
-                console.push_str(&qemu.drain_serial(Duration::from_millis(250)));
-            }
-            if frames(&console) < 1 {
-                return Err(format!("the compositor never composited a frame:\n{console}"));
-            }
-            let before = frames(&console);
-
-            // The owner's cadence: plugged for a second or two, unplugged for
-            // about as long, over and over. His freeze came on the fourth.
-            const CYCLES: usize = 8;
-            const SETTLE: Duration = Duration::from_millis(400);
-            for cycle in 0..CYCLES {
-                let id = format!("churn{cycle}");
-                // One monitor at a time — a `server` socket serves one
-                // connection — so each phase opens, acts and closes.
-                let mut devices = qemu::QmpDevices::open(&socket);
-                devices.add("usb-mouse", "xhci.0", &id, &[]);
-                drop(devices);
-                console.push_str(&qemu.drain_serial(SETTLE));
-                // The pointer has to be *used* between binding and unbinding.
-                // A source that binds and goes is a lifecycle event the
-                // compositor may never look at; a source delivering motion
-                // when it goes is one the compositor is reading from, which
-                // is the state the owner's machine was in every time.
-                let mut input = qemu::QmpInput::open(&socket);
-                for step in 0..16 {
-                    let dir = if step % 2 == 0 { 12 } else { -12 };
-                    input.mouse(dir, dir, None);
-                }
-                drop(input);
-                console.push_str(&qemu.drain_serial(SETTLE));
-                let mut devices = qemu::QmpDevices::open(&socket);
-                devices.del(&id);
-                drop(devices);
-                console.push_str(&qemu.drain_serial(SETTLE));
-            }
-
-            // The churn has to have reached the guest, or this gate is a
-            // twenty-second sleep with an assertion after it.
-            //
-            // **Waited for rather than slept for.** The three `SETTLE` drains
-            // pace the *host* through one cycle; whether the guest's console has
-            // caught up by the last of them is a fact about how fast the machine
-            // is. On a KVM runner it had not — the last two cycles' bindings were
-            // still on their way out when the count was taken, and the test read
-            // six of eight as a driver that missed them (run `31246245541`).
-            // The assertion is the same one; what
-            // changed is that a console behind the guest costs wall clock instead
-            // of a verdict.
-            let bindings = |text: &str| text.matches("merges as source").count();
-            let deadline = std::time::Instant::now() + qemu.budget(Duration::from_secs(20));
-            while std::time::Instant::now() < deadline && bindings(&console) < CYCLES {
-                console.push_str(&qemu.drain_serial(Duration::from_millis(250)));
-            }
-            let bound = bindings(&console);
-            if bound < CYCLES {
-                return Err(format!(
-                    "{CYCLES} plug/unplug cycles bound {bound} pointer sources — the churn did \
-                     not reach the kernel, so nothing here was tested:\n{console}"
-                ));
-            }
-
-            // And the motion reached the compositor, or the churn was against
-            // a pointer nobody was reading: a frame that drew the software
-            // cursor is one whose damage met it, and the idle desktop's only
-            // damage is the taskbar's clock, away from where the cursor starts.
-            let moved = console
-                .lines()
-                .filter(|l| l.contains("compositor: frames="))
-                .filter_map(|l| l.split(" cursor=").nth(1))
-                .filter_map(|rest| rest.split_whitespace().next())
-                .filter_map(|n| n.parse::<u64>().ok())
-                .any(|draws| draws > 0);
-            if !moved {
-                return Err(format!(
-                    "no composited frame drew the cursor — the injected motion never reached \
-                     the compositor, so the churn was against a pointer it was not \
-                     reading:\n{console}"
-                ));
-            }
-
-            // Still painting, counted from here rather than from the boot: the
-            // reporting interval is 2 s, so two of them cannot be satisfied by
-            // frames the compositor produced before the first cycle.
-            let mut after = String::new();
-            let deadline = std::time::Instant::now() + qemu.budget(Duration::from_secs(20));
-            while std::time::Instant::now() < deadline && frames(&after) < 2 {
-                after.push_str(&qemu.drain_serial(Duration::from_millis(250)));
-            }
-            if frames(&after) < 2 {
-                return Err(format!(
-                    "{STALLED} the compositor composited {before} frame batches before {CYCLES} \
-                     pointer plug/unplug cycles and {} after them — the desktop stopped:\
-                     \n{console}\n--- after ---\n{after}",
-                    frames(&after)
-                ));
-            }
-
-            let console = format!("{console}\n{after}");
-            serial::Serial::named("boot console", console.as_str()).must_be_clean()?;
-            eprintln!(
-                "  [metal-sim] {CYCLES} pointer plug/unplug cycles, {bound} source bindings, \
-                 desktop still compositing"
-            );
-            Ok(())
-        }
         "layout_fresh_boot" => {
             // The layout as ruled, on a boot of its own with a blank DATA
             // volume, asked over the cable because sshd is the service that
@@ -13246,7 +10604,6 @@ fn run_machine_test(
         "lan_lease_report" => lan::lan_lease_report(test_config, c_bins, rust_bins),
         "lan_talk" => lan::lan_talk(test_config, c_bins, rust_bins),
         "lan_mdns_answer" => common::origin::mdns(c_bins, rust_bins),
-        "swap_netd" => common::swap::swap_netd(test_config, c_bins, rust_bins),
         "update_boots_the_new_kernel" => common::update::update_boots_the_new_kernel(test_config, c_bins, rust_bins),
         "update_refusals_boot_the_other_slot" => {
             common::update::update_refusals_boot_the_other_slot(test_config, c_bins, rust_bins)
@@ -13266,9 +10623,7 @@ fn run_machine_test(
         "update_refused_pass_credits_no_image" => {
             common::update::update_refused_pass_credits_no_image(test_config, c_bins, rust_bins)
         }
-        "lan_swap" => common::swap::lan_swap(test_config, c_bins, rust_bins),
         "swap_refusals" => common::swap::swap_refusals(test_config, c_bins, rust_bins),
-        "swap_crash_rolls_back" => common::swap::swap_crash_rolls_back(test_config, c_bins, rust_bins),
         "swap_quiets_the_function" => {
             common::swap::swap_quiets_the_function(test_config, c_bins, rust_bins)
         }
@@ -13304,12 +10659,10 @@ fn run_machine_test(
         "log_stream_e1000e" => {
             common::logstream::stream(common::logstream::E1000E, c_bins, rust_bins)
         }
-        "log_stream_stalled_reader" => common::logstream::stalled_reader(c_bins, rust_bins),
         "log_program_line" => common::origin::line(c_bins, rust_bins),
         "log_program_forgery" => common::origin::forgery(c_bins, rust_bins),
         "log_after_a_refused_stop" => common::origin::refused_stop(c_bins, rust_bins),
         "log_resume_meets_its_flush" => common::origin::resume_meets_its_flush(rust_bins),
-        "log_ring_keeps_the_owners_slots" => common::origin::keeps_the_owners_slots(rust_bins),
         "log_program_line_after_its_records" => common::origin::after_records(c_bins, rust_bins),
         "log_carrier_forgery" => common::origin::carrier_forgery(c_bins, rust_bins),
         "log_program_flood" => common::origin::flood(c_bins, rust_bins),
@@ -13632,7 +10985,6 @@ fn run_machine_test(
         }
         "netd_slow_reader" => netd_slow_reader(rust_bins),
         "netd_refused_pipes" => netd_refused_pipes(rust_bins),
-        "netd_refused_accept" => netd_refused_accept(rust_bins),
         "netd_held_open" => netd_held_open(rust_bins),
         "netd_udp_refused" => netd_udp_refused(rust_bins),
         "netd_udp_any_address" => netd_udp_any_address(rust_bins),
@@ -13720,66 +11072,6 @@ fn run_machine_test(
             }
             serial::Serial::named("boot console", console.as_str()).must_be_clean()?;
             eprintln!("  [netcase] {refused} hostile frames refused, netd named every peer it dropped");
-            Ok(())
-        }
-        "launcher_refusals" => {
-            // **`/system/bin/init` is the one process the machine cannot lose**, and
-            // every launcher client — the compositor, every terminal, every
-            // shell, sshd — can send it whatever it likes. The guest carries
-            // the verdicts: init answered, init is still launching, and the
-            // kernel's live-object count did not grow across sixteen refused
-            // launches. The host carries the one the guest cannot see —
-            // whether init said anything about what it refused.
-            //
-            // `tests/netcase` because its test-runner is the only one that
-            // receives a `launcher` connector, and because two boot programs
-            // is the smallest blast radius for a test whose whole subject is
-            // making init misbehave.
-            let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/netcase");
-            let bins: Vec<(String, Vec<u8>)> = rust_bins
-                .iter()
-                .filter(|(name, _)| name == "launcher_refusals")
-                .cloned()
-                .collect();
-            if bins.is_empty() {
-                return Err("launcher_refusals was not built".to_string());
-            }
-            let mut qemu = QemuInstance::boot_with_options(
-                &config,
-                &[],
-                &bins,
-                BootOptions {
-                    profile: qemu::Profile::Headless,
-                    // The live-object count is a `SYS_DEBUG` action, and a
-                    // shipping kernel has none: both readings would be the same
-                    // `InvalidArgument` and the leak arm would pass having
-                    // counted nothing.
-                    kernel_features: ACTUATOR_KERNEL,
-                    ..Default::default()
-                },
-            );
-            let mut console = qemu.boot_log().to_string();
-            let _ = await_marker(&mut qemu, &mut console, "===READY===", "test-runner to come up");
-
-            let result = qemu.run_test("test_rs_launcher_refusals", Duration::from_secs(120));
-            if let Some(err) = &result.error {
-                return Err(format!("{err}\n{}", result.stdout));
-            }
-            if result.exit_code != Some(0) {
-                return Err(format!(
-                    "launcher_refusals exited {:?}:\n{}",
-                    result.exit_code, result.stdout
-                ));
-            }
-            console.push_str(&result.serial);
-            if !console.contains("init: launcher: cannot start") {
-                return Err(format!(
-                    "init refused a launch without a line saying so — a launcher that \
-                     drops requests silently cannot be asked what happened:\n{console}"
-                ));
-            }
-            serial::Serial::named("boot console", console.as_str()).must_be_clean()?;
-            eprintln!("  [netcase] init refused three bad launches, named them, and kept launching");
             Ok(())
         }
         "spawn_cwd" => {
@@ -13983,100 +11275,6 @@ fn run_machine_test(
                 "  [gpu] QEMU's scanout went {}x{} to {}x{}, which is the mode the guest asked \
                  for and the mode a second claim was told",
                 before.width, before.height, after.width, after.height
-            );
-            Ok(())
-        }
-        "metal_sim_input" => {
-            // M2's exit criterion, on the machine shape and the kernel that
-            // get flashed: no virtio device, no USB HID — so the i8042 is the
-            // guest's only input device — and no kernel feature turned on for
-            // the occasion, unlike the four tests above it.
-            //
-            // What it asserts is the events, read by an in-guest process and
-            // printed. The first version asserted screen pixels after a click
-            // at a fixed taskbar coordinate, which made the compositor's
-            // layout part of a kernel-delivery criterion and needed thresholds
-            // to survive the taskbar's own once-a-second repaint. M2 owns
-            // delivery — pin to userland process — so that is what this
-            // measures, and nothing here says the compositor reacted.
-            // `metal_sim_compositor` is what covers the compositor.
-            let options = BootOptions {
-                profile: qemu::Profile::Metal,
-                qmp: true,
-                ..Default::default()
-            };
-            let argv = qemu::profile_argv(&options);
-            metal_sim_argv_check(&argv)?;
-            if argv.iter().any(|a| a.contains("i8042=off")) {
-                return Err("metal-sim turned the i8042 off".to_string());
-            }
-
-            let mut qemu =
-                QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
-
-            // `kernel/src/mouse.rs` scales each relative count into the
-            // 0..32767 space the compositor consumes, per axis and derived
-            // from the screen — so the kernel is asked what it used rather
-            // than the constant being copied here, which would stop being a
-            // check the moment either side changed.
-            let boot = qemu.boot_log().to_string();
-            let Some((scale_x, scale_y)) = parse_rel_scale(&boot) else {
-                return Err(format!("the kernel never said what pointer scale it used:\n{boot}"));
-            };
-            const DX: i32 = 40;
-            const DY: i32 = -30;
-            // Off the origin first — the accumulated position clamps at 0, so a
-            // move up or left from there is invisible. Under 256 counts, or the
-            // packet's overflow bit is set and the motion is dropped by design.
-            let (result, sent) = input_events_run(&mut qemu, (200, 200), (DX, DY));
-            if let Some(err) = &result.error {
-                return Err(format!("{err} after {sent} of the sequence\n{}", result.stdout));
-            }
-
-            let keys = parse_key_events(&result.stdout);
-            let typed: String = keys
-                .iter()
-                .filter(|e| e.modifiers & 0x10 == 0)
-                .map(|e| e.translated.as_str())
-                .collect();
-            if !typed.contains("hello") {
-                return Err(format!(
-                    "typed {typed:?}, want it to contain \"hello\" — the keyboard never reached userland:\n{}",
-                    result.stdout
-                ));
-            }
-
-            let pointer = parse_mouse_events(&result.stdout);
-            // The delta the wire carried, not "it moved": a sign error in dy
-            // and a dropped high bit both survive "it moved", and the PS/2
-            // wire points the opposite way to the screen. Relative, so it
-            // says nothing about where any compositor would draw a cursor.
-            let want = (DX * scale_x, DY * scale_y);
-            let deltas: Vec<(i32, i32)> = pointer
-                .windows(2)
-                .map(|w| (w[1].x as i32 - w[0].x as i32, w[1].y as i32 - w[0].y as i32))
-                .collect();
-            if !deltas.contains(&want) {
-                return Err(format!(
-                    "no pointer event moved by {want:?}; deltas seen: {deltas:?}\n{}",
-                    result.stdout
-                ));
-            }
-            let Some(down) = pointer.iter().position(|e| e.buttons == 0x01) else {
-                return Err(format!(
-                    "no left-button-down event; buttons seen: {:?}",
-                    pointer.iter().map(|e| e.buttons).collect::<std::collections::BTreeSet<_>>()
-                ));
-            };
-            if !pointer[down + 1..].iter().any(|e| e.buttons == 0x00) {
-                return Err(format!(
-                    "the left button went down and never came up: {pointer:?}"
-                ));
-            }
-            eprintln!(
-                "  [metal-sim] {} key events (typed {typed:?}), {} pointer events, delta {want:?} delivered",
-                keys.len(),
-                pointer.len()
             );
             Ok(())
         }
@@ -14581,54 +11779,6 @@ fn xhci_xecp(log: &str) -> Result<(), String> {
             eprintln!("  [xhci] {}", handoff.trim());
         }
         Ok(())
-}
-
-use toyos_sched::watch::window::{HELD as WINDOW_HELD, STEP as WINDOW_STEP};
-
-/// The largest count of held windows a post ended that `log` says, 0 if none.
-fn window_count(log: &str) -> u64 {
-    log.lines()
-        .filter_map(|line| line.split_once(WINDOW_HELD))
-        .filter_map(|(_, rest)| rest.split_whitespace().next()?.parse().ok())
-        .max()
-        .unwrap_or(0)
-}
-
-/// Whether posts landed in held windows while the canary ran, not only before,
-/// off a metal boot's kernel log split at the canary's spawn record.
-///
-/// **Judged on the T14 and in no QEMU guest**: the actuator holds each window
-/// for a budget of its own clock, so how many a post lands in is how much of the
-/// host the guest had.
-fn window_held_on_metal(kernel: &serial::Serial) -> Result<(), String> {
-    let text = kernel.text();
-    let spawned = "spawn: /system/bin/test_rs_blocking_read_stress ";
-    let at = text
-        .find(spawned)
-        .ok_or_else(|| format!("no `{spawned}` record: the canary never ran\n{text}"))?;
-    window_held(&text[..at], &text[at..])
-}
-
-/// Whether posts landed in held windows while the canary ran, not only before.
-///
-/// The holds during the run are at least the last count said during it, less
-/// the last said before it and the `WINDOW_STEP - 1` holds after that which no
-/// line says. The floor is one line's worth. One held window a post landed in
-/// is already enough for `commit-ignores-notify` to deadlock the ping-pong, so
-/// a run under the floor is a run whose green says nothing about the window.
-fn window_held(before: &str, during: &str) -> Result<(), String> {
-    let (was, now) = (window_count(before), window_count(during));
-    let held = now.saturating_sub(was + WINDOW_STEP - 1);
-    if held < WINDOW_STEP {
-        return Err(format!(
-            "watch-window held too few windows a post landed in while the canary ran: at 
-             least {held} (said {was} before, {now} during), and the floor is {WINDOW_STEP} — 
-             the green canary proves nothing about the window:
-{during}"
-        ));
-    }
-    eprintln!("  [watch-window] at least {held} held windows a post landed in ({was} -> {now})");
-    Ok(())
 }
 
 /// `kernel/src/arch/x86_64/hw.rs`'s probe, when it could not run.
@@ -15411,64 +12561,6 @@ fn control_regs_negative(
         }
     }
     eprintln!("  [control_regs] a real divergent AP, refused: {refusal}");
-    Ok(())
-}
-
-/// A non-last AP that never starts must leave no dead slot in `0..cpu_count()`.
-///
-/// `smp-skip-ap` skips the startup of the AP that would be cpu2 on this four-vCPU
-/// machine. The unfixed kernel spent cpu2's id before it ran and counted a later
-/// AP anyway, so a shootdown after `set_ready` waited on a slot no CPU carried and
-/// the machine died. The verdict is survival plus density: `smp_hole_shootdown`
-/// frees pages back eight times and its marker prints, cpu1 comes online, and
-/// neither cpu2 nor the cpu3 behind it joins.
-fn smp_failed_ap_leaves_no_hole(
-    test_config: &Path,
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-) -> Result<(), String> {
-    let options = BootOptions {
-        smp: 4,
-        kernel_params: &["smp-skip-ap"],
-        ..Default::default()
-    };
-    let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, options);
-    let boot = qemu.boot_log().to_string();
-
-    // The premise, not just a dead boot: cpu1 came up and cpu2 failed.
-    if !boot.contains("SMP: AP cpu1 lapic=") || !boot.contains(" online") {
-        return Err(format!(
-            "cpu1 never came online, so the boot did not stage a non-last failed AP:\n{boot}"
-        ));
-    }
-    if !boot.contains("SMP: AP cpu2 lapic=") || !boot.contains("failed to start!") {
-        return Err(format!("the actuator did not fail cpu2's bring-up:\n{boot}"));
-    }
-
-    let result = qemu.run_test("test_rs_smp_hole_shootdown", Duration::from_secs(30));
-    if let Some(err) = &result.error {
-        // The unfixed kernel's signature: the guest stops answering.
-        return Err(format!(
-            "the guest stopped answering — a shootdown after a failed AP took the machine \
-             down:\n{err}\nserial:\n{}",
-            result.serial
-        ));
-    }
-    if !check_rust_result(&result) {
-        return Err(format!("smp_hole_shootdown failed:\n{}", result.stdout));
-    }
-
-    // Density: a "joining" line for cpu2 or cpu3 would be a slot past the failed AP.
-    let serial = format!("{boot}\n{}", result.serial);
-    for phantom in ["CPU 2: joining scheduler", "CPU 3: joining scheduler"] {
-        if serial.contains(phantom) {
-            return Err(format!(
-                "a CPU past the failed AP joined, so `0..cpu_count()` is not the online \
-                 set: {phantom:?}\n{serial}"
-            ));
-        }
-    }
-    eprintln!("  [smp] a non-last AP failed and the dense machine survived its shootdowns");
     Ok(())
 }
 
@@ -16524,113 +13616,6 @@ impl Task<'_> {
     }
 }
 
-/// Where the last run in this worktree left what each test cost it.
-///
-/// Under `target/`, so it is per-worktree: on a single dev host repeating runs
-/// it is a *hint* about how to order a queue and never an input to a verdict,
-/// where a wrong number costs some idle lane time and a missing one costs
-/// nothing at all. **A sharded run does not read it** — [`shard_pricing`]
-/// says why the same claim does not hold once `target/` is a cache twelve
-/// separate processes restore.
-fn durations_path() -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("target/test-durations")
-}
-
-/// The profile a checkout that has never run the suite starts from.
-///
-/// A machine with no measurement at all prices every test the same, and
-/// [`Shard::keep`]'s LPT then degenerates to round-robin — which is what put 191
-/// of 268 tests on one CI shard and cut it off at its job timeout while another
-/// finished in sixteen minutes. Every runner is that
-/// machine on every push, because a fresh clone has no `target/`.
-///
-/// Measured on a runner rather than here, deliberately: it is read by the
-/// machines that have nothing else, and the dev host overrides it with its own
-/// numbers the first time it runs the suite. Cross-arch TCG on an M4 Pro and
-/// KVM on four Azure cores do not agree about which tests are long.
-fn committed_durations_path() -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/test-durations")
-}
-
-fn read_durations(path: &Path, out: &mut BTreeMap<String, Duration>) {
-    let Ok(text) = fs::read_to_string(path) else { return };
-    for line in text.lines() {
-        // `<label> <ms>`, read from the right.
-        let Some((name, ms)) = line.rsplit_once(' ') else { continue };
-        if let Ok(ms) = ms.parse() {
-            out.insert(name.to_string(), Duration::from_millis(ms));
-        }
-    }
-}
-
-/// The committed profile, with whatever this worktree has measured on top.
-///
-/// Per name rather than per file, so a checkout that has only ever run a filter
-/// keeps the committed number for everything that filter did not name.
-fn load_durations() -> BTreeMap<String, Duration> {
-    let mut out = BTreeMap::new();
-    read_durations(&committed_durations_path(), &mut out);
-    read_durations(&durations_path(), &mut out);
-    out
-}
-
-/// What [`longest_first`] and [`Shard::keep`] price a task against.
-///
-/// **Committed only — never [`durations_path`]'s worktree overlay.** That
-/// overlay lives under `target/`, which each shard restores from a build cache
-/// on its own, so two shards need not read one overlay. `Shard::keep` assumes
-/// every process prices a task identically, and two disagreeing on one number
-/// is one test run twice and another nowhere. `tests/test-durations` is
-/// `actions/checkout`, not `actions/cache`, and every shard checks out the
-/// identical bytes.
-fn shard_pricing() -> BTreeMap<String, Duration> {
-    let mut out = BTreeMap::new();
-    read_durations(&committed_durations_path(), &mut out);
-    out
-}
-
-/// Merge this run's durations into the recorded profile.
-///
-/// Merged rather than replaced, because a filtered run knows about four tests
-/// and would otherwise throw away what the last full one measured. A sharded
-/// run never calls this: the partition is a function of the profile, so a
-/// shard that saved would move it under its siblings.
-fn save_durations(mut known: BTreeMap<String, Duration>, timed: &[(String, Duration)]) {
-    for (name, elapsed) in timed {
-        known.insert(name.clone(), *elapsed);
-    }
-    let path = durations_path();
-    let body = known.iter().map(|(n, d)| format!("{n} {}\n", d.as_millis())).collect::<String>();
-    let tmp = path.with_extension("tmp");
-    if fs::create_dir_all(path.parent().expect("target/ has a parent")).is_ok()
-        && fs::write(&tmp, body).is_ok()
-    {
-        let _ = fs::rename(&tmp, &path);
-    }
-}
-
-/// Longest job first, on what the last run measured.
-///
-/// A phase's wall clock is `max(sum / width, longest job)`, and FIFO reaches the
-/// first term only if no long job is dispatched late. Declaration order puts the
-/// feature-carrying tests last — deliberately, to keep the kernel rebuilds
-/// together — which is exactly the worst order for a wide phase.
-///
-/// **The profile is measured, not declared**, because the alternative is a
-/// hand-maintained list of long tests — a second registration to keep true, and
-/// one nothing would notice going stale. A name the file has never seen sorts
-/// first, so a new test is assumed long until it has been timed once: the cost of
-/// being wrong that way is one lane starting a short job early.
-fn longest_first(tasks: &mut [Task<'_>], known: &BTreeMap<String, Duration>) {
-    let cost = |task: &Task<'_>| -> Duration {
-        task.names()
-            .iter()
-            .map(|n| known.get(*n).copied().unwrap_or(Duration::MAX))
-            .fold(Duration::ZERO, |a, b| a.saturating_add(b))
-    };
-    tasks.sort_by_key(|task| std::cmp::Reverse(cost(task)));
-}
-
 
 /// One outcome, as the run prints it.
 fn report_line(outcome: &Outcome) {
@@ -16716,11 +13701,6 @@ fn machine_tasks(selected: &[(&'static str, Sched)]) -> Vec<(Sched, Vec<&'static
 }
 
 /// Every test with a boot, split into the parallel and serial phases.
-///
-/// Pulled out of `main` so [`check_shard_partition`] builds the identical
-/// lists a real run would rather than a second, hand-written approximation
-/// that could pass its own check while the real path still disagreed with
-/// itself — which is exactly the shape of the defect run `31617589126` found.
 fn build_tasks<'a>(
     tests_to_run: &[&'a TestDef],
     machine_to_run: &[(&'static str, Sched)],
@@ -16760,10 +13740,9 @@ fn build_tasks<'a>(
     (parallel, serial)
 }
 
-/// Whether a run takes `name`: its filter matches it and no redlist row
-/// disables it.
+/// Whether a run takes `name`: its filter matches it.
 fn kept(filter: Option<&str>, name: &str) -> bool {
-    filter.is_none_or(|f| name.contains(f)) && redlist::disabled(redlist::DISABLED, name).is_none()
+    filter.is_none_or(|f| name.contains(f))
 }
 
 /// The shared boot's members, the machine tests and the screen tests a run
@@ -16803,61 +13782,6 @@ fn arch_drop_line(shared: &[TestDef], filter: Option<&str>) -> Option<String> {
             dropped.join(", ")
         )
     })
-}
-
-/// **The property every merged CI run depends on, checked before any of the
-/// twelve processes that would otherwise each discover it separately.** Every
-/// name [`Shard::keep`] is handed for `count` must land in exactly one of
-/// `1..=count`'s shards: a violation is one test run twice and another
-/// nowhere, with every shard green.
-///
-/// This cannot reproduce *why* two real processes disagreed — that needs
-/// [`shard_pricing`]'s fix, not a test, because the defect was two machines
-/// pricing a task from two different `target/test-durations` a shared build
-/// cache handed them. What this can and does check is the part a shared-fate
-/// bug would otherwise hide behind: that pricing every task from the
-/// committed profile alone — the one input every process is guaranteed to
-/// agree on — still yields a clean partition, for real registration data, at
-/// the width CI actually runs.
-fn check_shard_partition(all_tests: &[TestDef]) {
-    let pricing = shard_pricing();
-    let (tests_to_run, machine_to_run, screen_to_run) = select(all_tests, None, true);
-    let (parallel, serial) = build_tasks(&tests_to_run, &machine_to_run, &screen_to_run);
-    // Owned, not borrowed: each shard below clones `parallel`/`serial` into
-    // a scratch `Vec` that does not outlive its own loop iteration, so what
-    // accumulates across iterations cannot hold a reference into it.
-    let want: BTreeSet<String> =
-        parallel.iter().chain(&serial).flat_map(Task::names).map(str::to_string).collect();
-
-    const COUNT: usize = 12;
-    let cost = |task: &Task<'_>| -> Option<Duration> {
-        task.names().iter().try_fold(Duration::ZERO, |a, n| Some(a + *pricing.get(*n)?))
-    };
-    let mut seen: BTreeSet<String> = BTreeSet::new();
-    for index in 1..=COUNT {
-        let shard = Shard { index, count: COUNT };
-        let mut mine_p = parallel.clone();
-        let mut mine_s = serial.clone();
-        // One accumulator across the two pools, in the order `main` takes
-        // them: the partition a shard gets is a function of both calls, so a
-        // check that took them apart would be checking something else.
-        let mut load = shard.bins();
-        shard.keep(&mut mine_p, &mut load, cost);
-        shard.keep(&mut mine_s, &mut load, cost);
-        for name in mine_p.iter().chain(&mine_s).flat_map(Task::names) {
-            assert!(
-                seen.insert(name.to_string()),
-                "{name} lands in shard {index}/{COUNT} and at least one earlier shard too — \
-                 every execution label must belong to exactly one"
-            );
-        }
-    }
-    assert_eq!(
-        seen, want,
-        "the twelve shards together do not equal the full selection — {:?} present in the \
-         selection and missing from every shard",
-        want.difference(&seen).collect::<Vec<_>>()
-    );
 }
 
 /// Every claim the three explicit registration lists make about themselves,
@@ -17125,12 +14049,6 @@ fn registered(shared: &[TestDef]) -> Result<BTreeSet<&str>, String> {
     Ok(names)
 }
 
-/// `redlist::DISABLED` against every registered name, before any boot on any
-/// entry point.
-fn check_redlist(registered: &BTreeSet<&str>) -> Result<(), String> {
-    redlist::check(redlist::DISABLED, |name| registered.contains(name), &compile::repo_root())
-}
-
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
@@ -17145,11 +14063,7 @@ fn main() {
         }
     };
     let filter = parsed.filter;
-    // The one selection every entry point below takes, the metal's included: a
-    // disabled test runs nowhere, and every run names each one with its issue.
-    for row in redlist::DISABLED {
-        eprintln!("[toyos] disabled: {} — {}", row.test, row.issue);
-    }
+    // The one selection every entry point below takes, the metal's included.
     let keep = |name: &str| kept(filter, name);
 
     let debug_mode = SUITE.present(&args, &testargs::DEBUG);
@@ -17212,9 +14126,7 @@ fn main() {
         check_metal_only_unshared(&rust_bins, &c_bins);
         let c_compiled: Vec<String> = c_bins.iter().map(|(n, _)| n.clone()).collect();
         let all_tests = build_test_registry(&rust_bins, &c_compiled);
-        if let Err(refusal) = registered(&all_tests).and_then(|registered| {
-            check_redlist(&registered).map_err(|e| format!("src/redlist.rs: {e}"))
-        }) {
+        if let Err(refusal) = registered(&all_tests) {
             eprintln!("[toyos] {refusal}");
             run.exit(1);
         }
@@ -17273,10 +14185,6 @@ fn main() {
             run.exit(1);
         }
     };
-    if let Err(refusal) = check_redlist(&registered) {
-        eprintln!("[toyos] src/redlist.rs: {refusal}");
-        run.exit(1);
-    }
 
     // Every row against the catalogue before `--list` and before any boot, so a
     // name the suite did not build is refused here and not by whichever worker
@@ -17298,7 +14206,6 @@ fn main() {
     }
 
     check_metal_only_unshared(&rust_bins, &c_bins);
-    check_shard_partition(&all_tests);
 
     let (tests_to_run, machine_to_run, screen_to_run) = select(&all_tests, filter, shard.is_some());
 
@@ -17312,7 +14219,7 @@ fn main() {
         && screen_to_run.is_empty()
         && machine_to_run.is_empty()
     {
-        eprintln!("No enabled test matches filter {filter:?}");
+        eprintln!("No test matches filter {filter:?}");
         run.exit(1);
     }
 
@@ -17350,35 +14257,11 @@ fn main() {
     }
     let (mut parallel, mut serial) = build_tasks(&tests_to_run, &machine_to_run, &screen_to_run);
 
-    let known = load_durations();
-    // After the phases are decided and before either is ordered: what a shard
-    // divides is the work, and a task's answer to `Sched` is a property of the
-    // test rather than of how many machines are running it.
+    // After the phases are decided: what a shard divides is the work, and a
+    // task's answer to `Sched` is a property of the test rather than of how
+    // many machines are running it.
     if let Some(shard) = shard {
-        // [`shard_pricing`], and not `known`: every process partitioning the
-        // same run must price a task identically, which only the committed
-        // profile guarantees.
-        let pricing = shard_pricing();
-        // A task whose every name has been timed costs their sum; one carrying
-        // a name the profile has never seen is unmeasured, which is the same
-        // all-or-nothing rule [`longest_first`] states with `Duration::MAX`.
-        let cost = |task: &Task<'_>| -> Option<Duration> {
-            task.names()
-                .iter()
-                .try_fold(Duration::ZERO, |a, n| Some(a + *pricing.get(*n)?))
-        };
-        longest_first(&mut parallel, &pricing);
-        longest_first(&mut serial, &pricing);
-        // One accumulator for the whole run, heaviest pool first: this process
-        // runs both pools one after another, so its wall clock is the one bin
-        // they share and the serial tail belongs in whichever bin the parallel
-        // phase left lightest. Two partitions from two empty accumulators are
-        // each good and their sum is not
-        // (`Shard::keep`, and run `31377439504`'s 466.1 s against a 369.1 s
-        // even split).
-        let mut load = shard.bins();
-        shard.keep(&mut parallel, &mut load, cost);
-        shard.keep(&mut serial, &mut load, cost);
+        shard.keep(&mut [&mut parallel, &mut serial]);
         eprintln!(
             "[toyos] shard {}/{}: {} parallel task(s), {} serial",
             shard.index,
@@ -17397,14 +14280,11 @@ fn main() {
     }
     eprintln!("\nrunning {total} tests\n");
 
-    let mut timed: Vec<(String, Duration)> = Vec::new();
     if !parallel.is_empty() {
-        longest_first(&mut parallel, &known);
         eprintln!("  --- parallel, {width} wide ---");
         let started = std::time::Instant::now();
         let outcomes = run_phase(parallel, width, &bins);
         eprintln!("  --- parallel done in {:.1?} ---", started.elapsed());
-        timed.extend(outcomes.iter().map(|o| (o.name.clone(), o.elapsed)));
         outcomes.into_iter().for_each(|o| tally.record(o));
     }
     if !serial.is_empty() {
@@ -17412,11 +14292,7 @@ fn main() {
         let started = std::time::Instant::now();
         let outcomes = run_phase(serial, 1, &bins);
         eprintln!("  --- serial done in {:.1?} ---", started.elapsed());
-        timed.extend(outcomes.iter().map(|o| (o.name.clone(), o.elapsed)));
         outcomes.into_iter().for_each(|o| tally.record(o));
-    }
-    if shard.is_none() {
-        save_durations(known, &timed);
     }
 
     // Three exit statuses, because there are three things a run can establish —

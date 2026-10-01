@@ -261,8 +261,7 @@ pub fn ceiling_self_check() -> Result<(), String> {
 
     // 5. **The pre-marker death, the other half of that omission.** A test that
     //    never announced itself has an empty `serial`, so the arm formatting
-    //    `serial` prints nothing and `before` is the only record there is —
-    //    `sched_check_build`'s empty `serial:` block in run `31890991692`. Both
+    //    `serial` prints nothing and `before` is the only record there is. Both
     //    directions, because a started test's window is already where its arm
     //    looks.
     let never = WaitVerdict::for_test(slow.clone(), window_before, "", false);

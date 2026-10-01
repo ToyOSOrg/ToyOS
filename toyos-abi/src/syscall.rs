@@ -835,8 +835,7 @@ pub mod debug_action {
     pub const HEAP_AT_CEILING: u64 = 5;
     pub const HEAP_OVER_CEILING: u64 = 6;
     pub const HEAP_AT_CEILING_PAGE_ALIGNED: u64 = 7;
-    /// Draw over the screen a userland process owns.
-    pub const SCREEN_GRAFFITI: u64 = 8;
+    // Action 8 is retired and unused: it was SCREEN_GRAFFITI, and no test reads it.
     /// Read the guard page below this CPU's idle stack.
     pub const IDLE_GUARD_READ: u64 = 9;
     /// The kernel canary's address, and whether it still holds what the kernel
@@ -861,18 +860,8 @@ pub mod debug_action {
     /// **Per kind and not a total**: an object of one kind that is never
     /// released is invisible behind ordinary churn in another.
     pub const CENSUS_KIND: u64 = 16;
-    /// The deepest any CPU's idle stack has been this boot, in bytes.
-    ///
-    /// The idle loop is where `object::drain_zero_handles` releases objects
-    /// with nothing held, and a release path that reaches the filesystem is the
-    /// deepest thing this kernel does. This is how a test asserts that stack is
-    /// sized for it, rather than waiting for the guard page below it to say so
-    /// by halting the machine.
-    pub const IDLE_STACK_HIGH_WATER: u64 = 17;
-    /// How big that stack is, so the reading above is a *fraction* rather than
-    /// a number nobody can judge. The size is the kernel's choice and not the
-    /// ABI's, which is why it is asked for rather than declared here.
-    pub const IDLE_STACK_SIZE: u64 = 18;
+    // Actions 17 and 18 are retired and unused: they were IDLE_STACK_HIGH_WATER
+    // and IDLE_STACK_SIZE, and no test reads them.
     /// Put a count this guest can reach in `MAX_SYSINFO_THREADS`'s place, for
     /// the rest of the boot. `SYS_SYSINFO`'s real bound is a thread count no
     /// guest can make, so only the number can move and moving it runs the

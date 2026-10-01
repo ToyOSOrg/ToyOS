@@ -33,7 +33,7 @@ use toyos::endow;
 use toyos::ipc;
 use toyos::shm::SharedMemory;
 use toyos::{AsHandle, Connection};
-use toyos_abi::syscall;
+use toyos_abi::syscall::{self, SyscallError};
 use toyos_abi::RawHandle;
 use window::{Event, Window};
 
@@ -129,8 +129,14 @@ fn main() {
         .unwrap_or_else(|e| fail(what, &format!("no window: {e}")));
     ipc::signal(committing.handle(), COPY_COMMIT)
         .unwrap_or_else(|e| fail(what, &format!("no commit: {e:?}")));
-    ipc::signal(committing.handle(), window::MSG_GET_RESOLUTION)
-        .unwrap_or_else(|e| fail(what, &format!("no probe: {e:?}")));
+    // A compositor still serving the window answers this probe, which the
+    // hangup wait reds on. One that dropped the window before the probe went
+    // out refuses its send with `Gone`, which is that hangup; the wait still
+    // reads whatever it answered before it did.
+    match ipc::signal(committing.handle(), window::MSG_GET_RESOLUTION) {
+        Ok(()) | Err(ipc::IpcError::Syscall(SyscallError::Gone)) => {}
+        Err(e) => fail(what, &format!("no probe: {e:?}")),
+    }
     await_hangup(committing.handle(), what, "the compositor closing the window");
     probe(what);
 

@@ -1,5 +1,5 @@
 ---
-status: expected-red
+status: assigned
 kind: defect
 opened: 2026-09-27
 ---
@@ -43,3 +43,8 @@ kernel or guest code.
 returns, the fix `issues/kernel/deferred-release-outlives-its-syscall.md`
 names under "What to do", and `handle_kill_policy` green on the KVM `guest`
 shards where it went red. Owner: orchestrator.
+
+**Its test is deleted**: `6b7da4424` took `handle_kill_policy` out, and
+`git revert 6b7da4424` brings it back as it stood before #536;
+`git show 84471bc58:tests/toyos-rust-tests/src/bin/handle_kill_policy.rs` holds
+#536's adaptation.

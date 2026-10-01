@@ -58,7 +58,7 @@ pub const MAX_LOG_BYTES: u64 = 1024 * 1024;
 /// The rotate-fast bound, and it is an argument now rather than a kernel
 /// actuator.
 ///
-/// It exists for the same reason `test-small-caches` does: filling megabytes by
+/// Filling megabytes by
 /// logging would take a boot far longer than a test should wait, and the code
 /// it drives is the shipped code — only the bound moves. 256 bytes, so one
 /// boot's own log crosses it many times over and drives both the continuation

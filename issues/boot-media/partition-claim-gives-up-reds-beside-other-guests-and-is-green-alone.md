@@ -1,6 +1,6 @@
 ---
 status: open
-kind: tooling
+kind: defect
 opened: 2026-09-25
 ---
 
@@ -17,9 +17,6 @@ write still refused after 1 attempt(s)":
   so its Sched::Parallel is wrong. The run stays red on the classification.
 ```
 
-`cargo run -- --known-red partition_claim_gives_up` answers "NO, not
-quarantined — its failure fails the suite."
-
 Re-run immediately after, alone, on the same tree and in the same session:
 **green, 2 of 2**, 8-10 s each. So the observation is the same shape as
 `usb_short_read`'s and `kernel_log_file`'s: 1 red in 3 with no rate behind it,
@@ -31,9 +28,6 @@ Not the diff it was seen from: that branch touches `bcachefs/`,
 `src/image.rs`, `tests/common/storage.rs` and a new `home_absent` guest
 binary — nothing under `tests/common/partclaim.rs` or the kernel's `partclaim`
 module.
-
-Owed to whoever next runs a session free to measure it and, if it reproduces,
-to file the `src/redlist.rs` row.
 
 **A rate, from `wt/toyos-inspect` (PR #501, round-2 review fixes), same day,
 different diff.** `cargo test --test toyos-build -- partition_claim_gives_up`
@@ -96,3 +90,14 @@ branch's storage reordering and `rootfs::hold_source` touch none of
 `tests/common/partclaim.rs`, the kernel's `partclaim` module, or the fsync
 deadman path this file already names as the cause. No code change made on
 `wt/toyos-ramroot` for this.
+
+**Its test is deleted**, as a flaky test is: `fa4c31409` took
+`partition_claim_gives_up` out with `partclaim-table-unanswered` and
+`partclaim-root-withheld`, the actuators only it armed. It also armed
+`fsync-budget-spent` and `fsync-deadman-now`, which `9ebf080e8` took out with
+`log_flush_retry`, so `git revert 9ebf080e8 fa4c31409` brings it back,
+`log_flush_retry` with it.
+
+**Exit**: the fsync staging scoped to the claim it is staged for, so the
+boot's own `/log` fsync cannot meet it first, and the test restored and green
+beside other guests.

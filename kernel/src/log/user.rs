@@ -46,12 +46,6 @@ pub fn read(
     out: &mut UserBytesMut,
     capacity: usize,
 ) -> Result<usize, SyscallError> {
-    // Run once, inside the first read's own syscall; `log::nested` picks the window from whichever actuator is armed.
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::log_nested_emit() || crate::actuator::log_nested_reserve() {
-        super::nested::start_once();
-    }
-
     let shards = super::shard_count();
     // Refused, not truncated: a capacity below one record per shard cannot hold what a single call may have to merge.
     if capacity == 0 || capacity < shards as usize {
