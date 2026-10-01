@@ -87,4 +87,4 @@ lossy casts and 205 `disallowed_macros`.
    gate.
 4. The system services, once `issues/build/userland-programs-are-never-linted.md`
    has put userland in `src/clippy.rs`: a service's exit is its crate root
-   under stage 3's attributes.
+   under stage 3's attributes, and its crate in stage 3's step.
