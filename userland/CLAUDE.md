@@ -2,7 +2,7 @@
 
 The module header at the site owns its subject — surfaces, translators and the channel in `toyos/`'s surface modules, soundd whole under `userland/soundd/`, what a process holds and how it got it at `kernel/src/object/` and `/system/bin/init`. The compositor's decisions are `toyos-desktop/`, pure and host-tested; `userland/compositor/` is devices, handles, shared memory and the panel. POSIX lives in `userland/libc` — ours, not a fork; that layer may be ugly, the kernel may not.
 
-**An app builds and runs on Linux under Wayland, macOS and Windows from the same source as on ToyOS**: a host build that fails is fixed in the app or its dependencies, never by making the app ToyOS-only. Only a program that cannot by its nature, a system server that owns ToyOS devices or kernel objects like the compositor, is exempt, with its reason in its own manifest (`src/userlandhost.rs`).
+**An app builds and runs on Linux under Wayland (never X11, which is legacy), macOS and Windows from the same source as on ToyOS**: a host build that fails is fixed in the app or its dependencies, never by making the app ToyOS-only. Only a program that cannot by its nature, a system server that owns ToyOS devices or kernel objects like the compositor, is exempt, with its reason in its own manifest (`src/userlandhost.rs`).
 
 **A server never blocks on a client** — the doctrine no single site owns. Accept and the first frame are two events; a frame is buffered until whole before anything acts on it; a write is one `try_send` whose refusal drops the peer by name; a blocking read or write of a pipe the client owns is the same bug. init, the compositor, netd, soundd and every surface host use `ipc::FrameRx`. filepicker violates it today.
 

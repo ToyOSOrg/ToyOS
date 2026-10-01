@@ -1,9 +1,10 @@
 //! Which userland crates `cargo run -- --ci host` tests, every userland test it
 //! would run nowhere, and which userland packages it builds on every host.
 //!
-//! **An app builds on Linux, macOS and Windows from the same source as on
-//! ToyOS.** [`packages`] reads every member of the userland workspace and what
-//! its own manifest declares; a member that declares nothing is an app.
+//! **An app builds on Linux under Wayland, macOS and Windows from the same
+//! source as on ToyOS.** [`packages`] reads every member of the userland
+//! workspace and what its own manifest declares; a member that declares nothing
+//! is an app.
 //! One that by its nature cannot run anywhere but ToyOS, because it owns ToyOS
 //! devices or kernel objects, says why, and only its tests run on a host:
 //!
