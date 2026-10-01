@@ -17,9 +17,9 @@ concurrency:
 
 jobs:
   # The host cache's writer: only main's entries are readable from every
-  # branch. It restores nothing, so its run is cold, and a cold run is green
-  # only once src/cicache.rs has sealed its tree. On a branch it would only
-  # repeat that branch's pull request.
+  # branch. It restores nothing, and `seal` is green only once src/cicache.rs
+  # has sealed the tree the save stores. On a branch it would only repeat that
+  # branch's pull request.
   host:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
@@ -33,7 +33,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - run: cargo run -- --ci host
+      - run: cargo run -- --ci seal
 
       - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:

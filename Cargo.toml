@@ -177,6 +177,9 @@ toyos-sched = { path = "toyos-sched" }
 # The Bulk-Only phases, so the harness judging a wedge reads the word
 # `toyos_xhci::bot::Phase` declares instead of spelling it a second time.
 toyos-xhci = { path = "toyos-xhci" }
+# The workflows' YAML, parsed to events that keep every anchor, alias and tag,
+# for the gates over `.github/workflows/` (`src/workflow.rs`).
+yaml-rust2 = { version = "0.13", default-features = false }
 
 [patch.crates-io]
 loom = { git = "https://github.com/ToyOSOrg/loom", branch = "toyos" }

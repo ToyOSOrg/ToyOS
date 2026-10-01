@@ -23,13 +23,13 @@ sealed 9553 MiB on macOS and saved 3,250,736,567 B.
 No gate reads a stored size. If the targets compress worse, H moves toward the
 floor and nothing reds.
 
-`LIMIT` is checked only where a tree is sealed, by a cold run. A pull
-request's run is warm whenever an entry its runner can use exists, and a warm
-tree is not bounded: it keeps each unit rebuilt under a new name beside the
-one it replaced, so its sum could red a pull request whose cold tree fits. So
-a landing that takes the cold tree past `LIMIT` is first refused by the next
-nightly's seal, loudly: that run is red and saves nothing. Until an entry is
-sealed again, every pull request restores the last sealed one.
+`LIMIT` is checked only by nightly's `host`, the one job that saves an entry,
+before it seals its tree. A pull request's run and the merge queue's, warm or
+cold, never seal and are never refused by `LIMIT`. So a landing that takes the
+cold tree past `LIMIT` is first refused by the next nightly's seal, loudly:
+that run is red and saves nothing. Until an entry is sealed again, a pull
+request restores the last sealed one, or runs cold once the runner image has
+moved; either way its verdict is its steps'.
 
 Owner: the host cache (`src/cicache.rs`).
 

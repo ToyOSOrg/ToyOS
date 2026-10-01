@@ -19,4 +19,10 @@ every night: 4,002,930,524 B at the host's `LIMIT` (`src/cicache.rs`), or
 night's host entry unless a pull request has read the entry since the guest
 restore; every pull request then runs cold, and nothing reds.
 
-Done when the guest entry is written cold, read by content, and bounded.
+Its jobs are not held to the allow-list `src/ci.rs`'s
+`each_cache_has_one_writer` holds the host cache's jobs to: `|| true` on
+`tcg`'s run line would let its save store a red run's tree, and the gate stays
+green.
+
+Done when the guest entry is written cold, read by content, and bounded, and
+its jobs are held to that allow-list, which #671 carries.

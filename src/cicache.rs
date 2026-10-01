@@ -22,11 +22,11 @@
 //! names neither. The cache key cannot carry the image, because no workflow
 //! expression sees `ImageOS` or `ImageVersion`.
 //!
-//! **Only a run that restored nothing seals an entry** ([`Start::Cold`],
-//! [`seal`]): a warm run's targets hold units none of its steps rebuilt,
-//! compiled from sources no manifest it could write describes. [`read`] deletes
-//! the manifest it reads, so a warm tree carries none and is never saved, and
-//! targets restored without one are refused.
+//! **Only the writer seals**: the job that saves the entry restores nothing,
+//! starts [`cold`] and [`seal`]s its tree after the last step. A reader's run
+//! is never saved and never sealed. [`read`] deletes the manifest it reads,
+//! since a warm tree holds units none of its steps rebuilt, and targets
+//! restored without one are refused.
 //!
 //! **A job carries the cache when its workflow builds the driver in
 //! [`DRIVER`]** ([`carried`]): cargo builds the driver before this runs, so its
@@ -36,9 +36,7 @@
 //!
 //! **A seal refuses a tree whose [`PATHS`] hold more than [`LIMIT`]**, `~`
 //! being `HOME`, so the save, which follows only a green run, never stores
-//! one. A warm tree is not bounded: it keeps each unit its build wrote under a
-//! new name beside the one it replaced, so it sums more than a cold build of
-//! its sources seals.
+//! one.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -80,15 +78,7 @@ fn built() -> SystemTime {
 /// Every file git tracks, with the SHA-256 of its bytes on disk.
 type Sources = BTreeMap<String, String>;
 
-/// What a job found before its first step.
-pub enum Start {
-    /// An entry, read and its manifest consumed.
-    Warm,
-    /// No entry this runner can use: every source is dated [`built`].
-    Cold(Cold),
-}
-
-/// What [`seal`] holds a cold run's tree to at the end.
+/// What [`seal`] holds the writer's tree to at the end.
 pub struct Cold {
     runner: String,
     sources: Sources,
@@ -105,10 +95,17 @@ pub fn carried(root: &Path, exe: &Path) -> bool {
     }
 }
 
-/// Before the first step of a job that carries the cache: the entry restored
+/// Before the first step of a job that reads the cache: the entry restored
 /// here, read by content.
-pub fn read(root: &Path) -> Result<(Start, String), String> {
+pub fn read(root: &Path) -> Result<String, String> {
     open(root, &runner(|name| std::env::var(name).ok())?, SystemTime::now())
+}
+
+/// Before the first step of the writer's run: a tree that holds nothing but
+/// its checkout and the driver, with every source dated [`built`], so that the
+/// seal sees a step that writes one.
+pub fn cold(root: &Path) -> Result<(Cold, String), String> {
+    start(root, &runner(|name| std::env::var(name).ok())?)
 }
 
 /// The runner, as the variables a hosted runner sets name it: its OS, its
@@ -120,8 +117,7 @@ fn runner(var: impl Fn(&str) -> Option<String>) -> Result<String, String> {
     Ok(values.collect::<Result<Vec<_>, _>>()?.join(" "))
 }
 
-fn open(root: &Path, runner: &str, now: SystemTime) -> Result<(Start, String), String> {
-    let current = sources(root)?;
+fn open(root: &Path, runner: &str, now: SystemTime) -> Result<String, String> {
     let manifest = root.join(MANIFEST);
     let text = match fs::read_to_string(&manifest) {
         Ok(text) => text,
@@ -130,10 +126,10 @@ fn open(root: &Path, runner: &str, now: SystemTime) -> Result<(Start, String), S
             if !restored.is_empty() {
                 return Err(format!(
                     "{} restored without {MANIFEST}, so nothing says what they were built from",
-                    restored.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+                    listed(&restored)
                 ));
             }
-            return cold(root, runner, current, "none restored".into());
+            return Ok("none restored: the run is cold".into());
         }
         Err(e) => return Err(format!("read {MANIFEST}: {e}")),
     };
@@ -144,11 +140,12 @@ fn open(root: &Path, runner: &str, now: SystemTime) -> Result<(Start, String), S
             let gone = if path.is_dir() { fs::remove_dir_all(&path) } else { fs::remove_file(&path) };
             gone.map_err(|e| format!("remove {}: {e}", path.display()))?;
         }
-        return cold(root, runner, current, format!("{commit}'s entry, built on {built_on}, deleted"));
+        return Ok(format!("{commit}'s entry, built on {built_on}, deleted: the run is cold"));
     }
     if now <= built() {
         return Err(format!("this runner's clock reads {now:?}, which no change dated now is newer than"));
     }
+    let current = sources(root)?;
     let mut dirty: BTreeSet<Option<String>> = current
         .iter()
         .filter(|(path, hash)| entry.get(*path) != Some(*hash))
@@ -173,28 +170,33 @@ fn open(root: &Path, runner: &str, now: SystemTime) -> Result<(Start, String), S
     let changed = current.iter().filter(|(p, h)| entry.get(*p).is_some_and(|e| e != *h)).count();
     let added = current.keys().filter(|p| !entry.contains_key(*p)).count();
     let removed = entry.keys().filter(|p| !current.contains_key(*p)).count();
-    Ok((
-        Start::Warm,
-        format!(
-            "built from {commit}: {same} of {} sources dated as built; {changed} changed, {added} \
-             added, {removed} removed, in {packages} packages; {build_time} packages run code at \
-             build time",
-            current.len(),
-        ),
+    Ok(format!(
+        "built from {commit}: {same} of {} sources dated as built; {changed} changed, {added} added, \
+         {removed} removed, in {packages} packages; {build_time} packages run code at build time",
+        current.len(),
     ))
 }
 
-fn cold(root: &Path, runner: &str, sources: Sources, why: String) -> Result<(Start, String), String> {
+fn start(root: &Path, runner: &str) -> Result<(Cold, String), String> {
+    let restored = restored(root)?;
+    if !restored.is_empty() {
+        return Err(format!("{}: an entry is one cold build, and its writer restores nothing", listed(&restored)));
+    }
+    let sources = sources(root)?;
     for path in sources.keys() {
         date(&root.join(path), built())?;
     }
-    let said = format!("{why}; {} sources dated as built, and the tree is sealed last", sources.len());
-    Ok((Start::Cold(Cold { runner: runner.to_string(), sources }), said))
+    let said = format!("{} sources dated as built, and the tree is sealed last", sources.len());
+    Ok((Cold { runner: runner.to_string(), sources }, said))
 }
 
-/// After the last step of a run that started [`Start::Cold`]: the tree refused
-/// if its [`PATHS`] hold more than [`LIMIT`], `~` being `HOME`, and otherwise
-/// every file under every target dated [`built`], then the manifest.
+fn listed(paths: &[PathBuf]) -> String {
+    paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+}
+
+/// After the last step of the writer's run, which [`cold`] began: the tree
+/// refused if its [`PATHS`] hold more than [`LIMIT`], `~` being `HOME`, and
+/// otherwise every file under every target dated [`built`], then the manifest.
 pub fn seal(root: &Path, cold: &Cold) -> Result<String, String> {
     let home = std::env::var_os("HOME").ok_or("HOME is unset, and the cache's paths name it as `~`")?;
     seal_at(root, Path::new(&home), cold)
@@ -455,9 +457,7 @@ mod tests {
     /// An entry at `writer`: a checkout of `origin` built cold and sealed.
     fn entry(origin: &Path, writer: &Path) {
         checkout(origin, writer);
-        let Start::Cold(cold) = open(writer, RUNNER, SystemTime::now()).unwrap().0 else {
-            panic!("a tree with no target is cold")
-        };
+        let (cold, _) = start(writer, RUNNER).unwrap();
         build(writer);
         seal_at(writer, &writer.join("home"), &cold).unwrap();
     }
@@ -466,6 +466,13 @@ mod tests {
     fn restore(origin: &Path, writer: &Path, reader: &Path) {
         checkout(origin, reader);
         fs::rename(writer.join("target"), reader.join("target")).unwrap();
+    }
+
+    /// The entry restored at `reader`, read: a test of what a read serves holds
+    /// nothing if the read went cold.
+    fn read_warm(reader: &Path) {
+        let said = open(reader, RUNNER, SystemTime::now()).unwrap();
+        assert!(said.starts_with("built from"), "{said}");
     }
 
     /// The oracle is cargo and the program it builds: an entry serves what
@@ -513,8 +520,7 @@ mod tests {
         // before the entry was built.
         date(&reader.join("leaf/src/lib.rs"), UNIX_EPOCH + Duration::from_secs(1)).unwrap();
 
-        let said = open(&reader, RUNNER, SystemTime::now()).unwrap();
-        assert!(matches!(said.0, Start::Warm), "{}", said.1);
+        read_warm(&reader);
         assert!(!reader.join(MANIFEST).exists(), "a warm tree keeps no manifest");
         let fresh = build(&reader);
         assert_eq!(run(&reader), "two 1");
@@ -543,7 +549,7 @@ mod tests {
         sh(&source, &["commit", "-qm", "probed"]);
         let reader = tmp.join("reader");
         restore(&source, &writer, &reader);
-        assert!(matches!(open(&reader, RUNNER, SystemTime::now()).unwrap().0, Start::Warm));
+        read_warm(&reader);
         let out = cargo_build(&reader);
         let said = String::from_utf8_lossy(&out.stdout);
         assert!(!out.status.success() && said.contains("E0761"), "{said}");
@@ -588,7 +594,7 @@ pub fn word(_: proc_macro::TokenStream) -> proc_macro::TokenStream {
         sh(&source, &["commit", "-qam", "word"]);
         let reader = tmp.join("reader");
         restore(&source, &writer, &reader);
-        assert!(matches!(open(&reader, RUNNER, SystemTime::now()).unwrap().0, Start::Warm));
+        read_warm(&reader);
         build(&reader);
         assert_eq!(run(&reader), "two two");
     }
@@ -643,31 +649,36 @@ pub fn word(_: proc_macro::TokenStream) -> proc_macro::TokenStream {
         assert!(tmp.join(MANIFEST).exists(), "a tree at the bound is sealed");
     }
 
-    /// One commit of `a.rs`, read cold on `runner`.
+    /// One commit of `a.rs`, begun cold on `runner`.
     fn cold_repo(tmp: &Path, runner: &str) -> Cold {
         sh(tmp, &["init", "-q"]);
         configure(tmp);
         write(tmp, "a.rs", "a\n");
         sh(tmp, &["add", "-A"]);
         sh(tmp, &["commit", "-qm", "a"]);
-        let Start::Cold(cold) = open(tmp, runner, SystemTime::now()).unwrap().0 else { panic!("cold") };
-        cold
+        start(tmp, runner).unwrap().0
     }
 
     /// Targets with no manifest beside them were built from nothing anyone can
-    /// name; the driver's own is this job's.
+    /// name, so a reader refuses them; the writer, which builds from its
+    /// checkout alone, refuses them and an entry. The driver's own target is
+    /// this job's.
     #[test]
     fn targets_restored_without_a_manifest_are_refused() {
         let tmp = TempDir::new("cicache-foreign");
         cold_repo(&tmp, RUNNER);
         fs::create_dir_all(tmp.join(DRIVER)).unwrap();
-        assert!(matches!(open(&tmp, RUNNER, SystemTime::now()).unwrap().0, Start::Cold(_)));
+        open(&tmp, RUNNER, SystemTime::now()).expect("the driver's own target");
+        start(&tmp, RUNNER).expect("the driver's own target");
         for target in ["kernel/target", "target/debug"] {
             fs::create_dir_all(tmp.join(target)).unwrap();
-            let refusal = open(&tmp, RUNNER, SystemTime::now()).err().expect("a target with no manifest");
-            assert!(refusal.contains(target), "{refusal}");
+            let refusals = [open(&tmp, RUNNER, SystemTime::now()).err(), start(&tmp, RUNNER).err()];
+            assert!(refusals.iter().all(|r| r.as_ref().is_some_and(|r| r.contains(target))), "{refusals:?}");
             fs::remove_dir(tmp.join(target)).unwrap();
         }
+        write(&tmp, MANIFEST, "");
+        let refusal = start(&tmp, RUNNER).err().expect("an entry, for the writer");
+        assert!(refusal.contains(MANIFEST), "{refusal}");
     }
 
     /// A sealed tree is dated as built throughout, and a step that wrote a
@@ -715,8 +726,7 @@ pub fn word(_: proc_macro::TokenStream) -> proc_macro::TokenStream {
             seal_at(&tmp, &tmp.join("home"), &cold).unwrap();
             let mut other = image.clone();
             other.insert(name, "another");
-            let (start, said) = open(&tmp, &runner_in(&other).unwrap(), SystemTime::now()).unwrap();
-            assert!(matches!(start, Start::Cold(_)), "{name}: {said}");
+            let said = open(&tmp, &runner_in(&other).unwrap(), SystemTime::now()).unwrap();
             assert!(!tmp.join("target/debug").exists() && !tmp.join("kernel/target").exists(), "{name}: {said}");
             other.remove(name);
             let refusal = runner_in(&other).expect_err("a runner without a variable");
@@ -732,7 +742,7 @@ pub fn word(_: proc_macro::TokenStream) -> proc_macro::TokenStream {
         let cold = cold_repo(&tmp, RUNNER);
         write(&tmp, "target/debug/x", "x");
         seal_at(&tmp, &tmp.join("home"), &cold).unwrap();
-        let refusal = open(&tmp, RUNNER, built()).err().expect("a clock at the entry's date");
+        let refusal = open(&tmp, RUNNER, built()).expect_err("a clock at the entry's date");
         assert!(refusal.contains("clock"), "{refusal}");
     }
 
