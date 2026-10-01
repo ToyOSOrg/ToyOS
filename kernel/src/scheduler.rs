@@ -404,10 +404,6 @@ pub fn exit_to_user() {
         leave_user_if_due();
         // `do_preempt` owns clearing `need_resched`; this function never clears it itself.
         if !crate::preempt::need_resched() {
-            #[cfg(feature = "boot-actuators")]
-            if crate::actuator::dump_in_blocking_pass() {
-                crate::sched::dump::staged::note_return_to_user();
-            }
             return;
         }
         assert!(!in_schedule_self(), "exit-to-user inside a scheduler pass");

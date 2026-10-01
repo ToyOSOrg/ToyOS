@@ -77,5 +77,4 @@ was green on the five nightlies 36400924827, 36496779560, 36550208853,
 36600425263 and 36696295750.
 
 **`sched_check_build` is deleted**, as a flaky test is: `4d3e2b164` took it
-out with `sched-check` from the suite's kernel builds, and `git revert
-4d3e2b164` brings both back.
+out with `sched-check` from the suite's kernel builds.

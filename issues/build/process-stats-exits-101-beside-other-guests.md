@@ -19,13 +19,22 @@ gated goes near any of them.
 is its own entry. Nothing here investigates the mechanism: `ALONE: GREEN` is the
 harness naming a hypothesis, and one red is not a rate.
 
-Exit: a rate — the same suite run repeatedly with and without a second
-worktree's build on the host — that says whether this is contention the harness
-should schedule around or a defect the guest has, and the name is
-fixed at the cause.
+Two more, each with its assertion. `640r3-loaderlines-r3-whole.log` (`wt/toyos-loaderlines`
+`6e0d7da82`, "fastest boot 480 ms … ceilings paid at 1.00x") at `process_stats.rs:280`: "a
+child that parked writing a full connection charged 0 ns to ipc and 0 ns to pipe".
+`648-648-whole.log` (`wt/toyos-proclife1` `60ec86df3`, load average 84) at
+`process_stats.rs:263`: "a child that parked reading a connection charged 0 ns to ipc and 0 ns
+to pipe". Neither branch touches the test, `WaitClass` or the charge. The premise both arms read
+is `roster::await_true` seeing the child's main thread `BLOCKED`, and nothing ties that park to
+the connection: a park on anything else before the child reaches its `read` or `write`
+satisfies it, the parent releases, and the connection's wait never parks. The assertion prints
+two of the five classes, so which park was charged is not on record. Owner: the orchestrator.
+
+Exit: each arm waits for a park it can name as the connection's, so a park on anything else
+fails the arm by name, and `process_stats` passes on the T14's shared boot.
 
 **Its test is deleted**, as a flaky test is: `4a5b228d2` took
 `process_stats` out, and moved the nightly `tcg` job's one test to
-`empty_dir_stat`; `git revert 4a5b228d2` brings both back. `blocked_dump` is
+`empty_dir_stat`. `blocked_dump` is
 deleted too: `issues/build/parallel-tests-red-under-other-suites.md` records
 the commit.

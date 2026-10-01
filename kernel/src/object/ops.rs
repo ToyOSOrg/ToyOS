@@ -315,12 +315,9 @@ pub fn write_watch(object: &KObjectRef) -> Option<WatchRef> {
 fn close_ends_polls(object: &KObjectRef) -> bool {
     match object {
         KObjectRef::SysCap(_) => false,
-        // A keyboard *claim* closing is the stimulus, not a `SysCap`.
-        KObjectRef::Console(_) => crate::actuator::keyboard_close_cancels_every_console(),
+        KObjectRef::Console(_) => false,
         KObjectRef::Device(d) => match d.class() {
-            device_registry::DeviceType::Keyboard => {
-                crate::actuator::keyboard_close_cancels_every_console()
-            }
+            device_registry::DeviceType::Keyboard => false,
             device_registry::DeviceType::Mouse
             | device_registry::DeviceType::PciFunction
             | device_registry::DeviceType::HdaAudio

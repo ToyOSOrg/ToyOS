@@ -77,7 +77,6 @@ macro_rules! ring3_naked_asm {
 
 /// `naked_asm!` for a trampoline into Ring 3 for the first time: supplies
 /// the declared state's address from `fpu::INITIAL_IMAGE`.
-#[cfg(not(feature = "fpu-save-nothing"))]
 macro_rules! ring3_trampoline_asm {
     ($($body:tt)*) => {
         core::arch::naked_asm!(
@@ -88,7 +87,6 @@ macro_rules! ring3_trampoline_asm {
 }
 
 /// The state a task that has never been in Ring 3 starts from.
-#[cfg(not(feature = "fpu-save-nothing"))]
 macro_rules! initial_user_state {
     () => {
         "fxrstor64 [rip + {fp_initial}]\n"
@@ -97,7 +95,6 @@ macro_rules! initial_user_state {
 
 /// Park the user machine state on this kernel stack, leaving `rsp` aligned
 /// for the System V `call` that follows.
-#[cfg(not(feature = "fpu-save-nothing"))]
 macro_rules! save_user_state {
     () => {
         concat!(
@@ -114,48 +111,12 @@ macro_rules! save_user_state {
 }
 
 /// Put it back, and `rsp` with it.
-#[cfg(not(feature = "fpu-save-nothing"))]
 macro_rules! restore_user_state {
     () => {
         concat!(
             "fxrstor64 [rsp]\n",
             "mov rsp, [rsp + {fp_bytes}]\n",
         )
-    };
-}
-
-// Negative control (`fpu-save-nothing`): same reservation, alignment and
-// `rsp` bookkeeping as above, without moving the state.
-
-#[cfg(feature = "fpu-save-nothing")]
-macro_rules! ring3_trampoline_asm {
-    ($($body:tt)*) => { core::arch::naked_asm!($($body)*) };
-}
-
-#[cfg(feature = "fpu-save-nothing")]
-macro_rules! initial_user_state {
-    () => {
-        ""
-    };
-}
-
-#[cfg(feature = "fpu-save-nothing")]
-macro_rules! save_user_state {
-    () => {
-        concat!(
-            "mov r11, rsp\n",
-            "sub rsp, {fp_bytes}\n",
-            "sub rsp, {fp_align}\n",
-            "and rsp, -{fp_align}\n",
-            "mov [rsp + {fp_bytes}], r11\n",
-        )
-    };
-}
-
-#[cfg(feature = "fpu-save-nothing")]
-macro_rules! restore_user_state {
-    () => {
-        "mov rsp, [rsp + {fp_bytes}]\n"
     };
 }
 

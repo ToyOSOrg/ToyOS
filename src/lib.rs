@@ -7,8 +7,6 @@ pub mod ci;
 pub mod clang;
 pub mod clippy;
 pub mod compiler;
-/// What the untouched-disk gate compares a device against, in `tests/`.
-pub mod fingerprint;
 pub mod firmware;
 #[cfg(test)]
 pub mod gitfixture;

@@ -160,11 +160,8 @@ getrandom = "0.3"
 # disagree about which files on it are `logd`'s.
 toyos-wallclock = { path = "toyos-wallclock" }
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
-# The digest behind two readings that must not be able to agree by accident:
-# `NOTICE`'s record of every committed binary file (`src/sourcegate.rs`), and a
-# disk this system was not given, before and after a boot
-# (`src/fingerprint.rs`). Already resolved here through a dev-dependency, so
-# nothing new is fetched — but `cargo run` did not compile it before this.
+# The digest behind `NOTICE`'s record of every committed binary file
+# (`src/sourcegate.rs`).
 sha2 = "0.10"
 
 [dev-dependencies]
@@ -180,12 +177,6 @@ toyos-sched = { path = "toyos-sched" }
 # The Bulk-Only phases, so the harness judging a wedge reads the word
 # `toyos_xhci::bot::Phase` declares instead of spelling it a second time.
 toyos-xhci = { path = "toyos-xhci" }
-# The second reader `pkg_install_gbae` is judged against: what is read back off
-# the guest's volume is compared with a third party's decoding of the committed
-# archive, never with `userland/pkg`'s own. The archive itself is committed
-# under `tests/fixtures` and no test fetches anything.
-flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
-tar = "0.4"
 
 [patch.crates-io]
 loom = { git = "https://github.com/ToyOSOrg/loom", branch = "toyos" }

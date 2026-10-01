@@ -161,7 +161,6 @@ const GUEST_CODE: &[&str] = &[
     "toyos-abi/src",
     "userland",
     "tests/toyos-rust-tests",
-    "tests/iced-counter",
     "tests/testcases",
 ];
 

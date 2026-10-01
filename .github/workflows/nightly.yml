@@ -78,10 +78,6 @@ jobs:
     runs-on: ubuntu-24.04
     # A wedge guard, not a budget.
     timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     # The digest is the instrument's one pin: a dated image names the snapshot
     # archive it was built from, and `deps` installs QEMU from that archive.
     # The node ships `crw-rw---- root:kvm` and root opens it.
@@ -104,7 +100,8 @@ jobs:
           for attempt in 1 2 3; do
             apt-get -o Acquire::Check-Valid-Until=false update -qq > /tmp/apt.log 2>&1 \
               && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl ca-certificates \
-                   zstd build-essential qemu-system-x86 ovmf-generic >> /tmp/apt.log 2>&1 \
+                   zstd build-essential qemu-system-x86 ovmf-generic qemu-system-arm \
+                   qemu-efi-aarch64 >> /tmp/apt.log 2>&1 \
               && break
             [ "$attempt" = 3 ] && { cat /tmp/apt.log; exit 1; }
             sleep 20
@@ -131,12 +128,10 @@ jobs:
             userland/target
             tests/target
             tests/toyos-rust-tests/*/target
-            tests/https-fetch-host/target
-            tests/https-server-host/target
           key: guest-${{ github.run_id }}
           restore-keys: guest-
 
-      - run: cargo run -- --ci guest ${{ matrix.shard }}/12
+      - run: cargo run -- --ci guest
 
       # Every boot's 16550 log: what a guest that died early still leaves.
       - &serial
@@ -145,14 +140,14 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: serial-${{ github.job }}-${{ strategy.job-index }}
+          name: serial-${{ github.job }}
           path: target/red-run-serial/**/uart-*.log
           if-no-files-found: warn
           retention-days: 7
 
-  # The only lane with no `/dev/kvm`, so the only one that decodes the paths a
-  # KVM host's CPU never does; and the guest cache's one writer, since what it
-  # builds does not depend on the accelerator.
+  # The guest suite again with no `/dev/kvm`, so the only lane that decodes the
+  # paths a KVM host's CPU never does; and the guest cache's one writer, since
+  # what it builds does not depend on the accelerator.
   tcg:
     needs: build
     runs-on: ubuntu-24.04
@@ -165,7 +160,7 @@ jobs:
       - *deps
       - *checkout
       - *guest-cache
-      - run: cargo run -- --ci tcg
+      - run: cargo run -- --ci guest
       # After the test: what is worth keeping is a tree that built and booted.
       - if: github.ref == 'refs/heads/main'
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0

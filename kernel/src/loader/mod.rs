@@ -18,7 +18,6 @@ pub use start::{build_child_handles, PendingHandles, SLOT_PAIR_LEN};
 pub(crate) use start::alloc_kernel_stack;
 pub(crate) use crate::arch::entry::{kernel_start, process_start, thread_start};
 pub use tls::{TlsBlock, DTV_INITIAL_CAPACITY, VARIANT as TLS_VARIANT};
-pub(crate) use tls::rebase_window;
 
 use alloc::string::String;
 use alloc::sync::Arc;
