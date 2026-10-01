@@ -3,9 +3,9 @@ use std::path::Path;
 use super::qemu::{self, BootOptions, QemuInstance};
 use super::serial::Serial;
 
-/// The line `nested_nmi` writes to the UART, and this boot's ready marker: the
-/// machine halts on it.
-const NESTED: &str = "NESTED NMI";
+/// The last line of the report `nested_nmi` writes to the UART, and this boot's
+/// ready marker: the machine halts on it.
+const STOPS: &str = "[nmi]   the outer handler's frame is gone; the machine stops here.";
 
 pub fn nested_nmi_is_loud(test_config: &Path) -> Result<(), String> {
     let qemu = QemuInstance::boot_with_options(
@@ -19,13 +19,35 @@ pub fn nested_nmi_is_loud(test_config: &Path) -> Result<(), String> {
             // (`arch::idt::nmi`) — so on any other profile it lands on a UART
             // nothing here is reading.
             profile: qemu::Profile::Metal,
-            ready_marker: NESTED,
+            ready_marker: STOPS,
             ..Default::default()
         },
     );
-    let loud = Serial::boot(&qemu).must_say(NESTED)?.to_string();
-    eprintln!("  [nmi] nested: {}", loud.trim());
+    let serial = Serial::boot(&qemu);
+    let lines: Vec<&str> = serial.text().lines().collect();
+    // The capture ends at the marker.
+    let report = &lines[lines.len().saturating_sub(3)..];
+    if !whole(report) {
+        return Err(format!("the nested-NMI report reached the console spliced:\n{}", serial.text()));
+    }
+    eprintln!("  [nmi] nested: {}", report[0]);
     Ok(())
+}
+
+/// `nested_nmi`'s three lines back to back, each exactly as it writes them: a
+/// burst another CPU put on the 16550 inside the report splits one.
+fn whole(report: &[&str]) -> bool {
+    let [first, registers, last] = report else { return false };
+    let hex = |v: &str| v.len() == 18 && v.starts_with("0x") && v[2..].bytes().all(|b| b.is_ascii_hexdigit());
+    first
+        .strip_prefix("[nmi] NESTED NMI on cpu ")
+        .and_then(|rest| rest.strip_suffix(": a second NMI entered while IST2 was still in use."))
+        .is_some_and(|cpu| cpu.parse::<u32>().is_ok())
+        && registers
+            .strip_prefix("[nmi]   rip=")
+            .and_then(|rest| rest.split_once(" rsp="))
+            .is_some_and(|(rip, rsp)| hex(rip) && hex(rsp))
+        && *last == STOPS
 }
 
 /// The blocked-task dump's NMI probe: a CPU that ignores a kick is named, and

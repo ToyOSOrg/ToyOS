@@ -137,8 +137,10 @@ fn stage_nested_if_armed() {
 
 /// A second NMI on a stack the first is still standing on.
 /// Logs nothing: the interrupted context may be mid-publish of its own record, and one from here would garble the ring `halt_all_cpus` reads. `src/sourcegate.rs`'s `nmi_does_not_log` is the gate.
-/// `panic_raw` takes no lock, so it can't be blocked by whatever either context held.
 extern "sysv64" fn nested_nmi(rip: u64, rsp: u64) -> ! {
+    // Held for the whole report, so no other CPU's console burst lands inside it; bounded, so a
+    // hold the interrupted context left only delays it.
+    let registers = crate::drivers::serial::panic_registers();
     let serial = crate::drivers::serial::panic_raw;
     serial(b"\n[nmi] NESTED NMI on cpu ");
     crate::drivers::serial::panic_raw_dec(u64::from(crate::arch::percpu::cpu_id()));
@@ -147,5 +149,7 @@ extern "sysv64" fn nested_nmi(rip: u64, rsp: u64) -> ! {
     serial(b" rsp=");
     crate::drivers::serial::panic_raw_hex(rsp);
     serial(b"\n[nmi]   the outer handler's frame is gone; the machine stops here.\n");
+    // Before the halt, whose flush waits for the registers.
+    drop(registers);
     crate::panic::halt_all_cpus()
 }

@@ -128,6 +128,18 @@ pub fn try_read_byte() -> Option<u8> {
 /// ~1s of spin, long enough for a live guard holder to release and short enough not to hang panic.
 const PANIC_LOCK_SPIN_LIMIT: u64 = 100_000_000;
 
+/// The registers for the panic path: a live burst holder is waited for, and
+/// one that never releases them is bypassed, which is `None`.
+pub fn panic_registers() -> Option<BackendGuard> {
+    for _ in 0..PANIC_LOCK_SPIN_LIMIT {
+        if let Some(g) = BackendGuard::try_lock() {
+            return Some(g);
+        }
+        core::hint::spin_loop();
+    }
+    None
+}
+
 /// Flushes pending logs on the panic path.
 ///
 /// Waits for a live guard holder to release before bypassing it — bypassing
@@ -142,12 +154,9 @@ pub unsafe fn panic_flush() {
     if !has_console() {
         return;
     }
-    for _ in 0..PANIC_LOCK_SPIN_LIMIT {
-        if let Some(mut g) = BackendGuard::try_lock() {
-            crate::log::console::drain_locked(&mut g);
-            return;
-        }
-        core::hint::spin_loop();
+    if let Some(mut g) = panic_registers() {
+        crate::log::console::drain_locked(&mut g);
+        return;
     }
     // Disables virtio-console first: a half-submitted TX queue would panic
     // recursively if a bypassing write reached it.
