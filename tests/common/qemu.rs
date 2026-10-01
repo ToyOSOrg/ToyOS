@@ -8,7 +8,6 @@ use std::time::{Duration, Instant};
 use std::{fs, thread};
 
 use super::compile;
-use super::steal::{self, Moment};
 use toyos_build::arch::{Accel, Arch};
 use toyos_build::tether::Tether;
 use toyos_tmpdir::TempDir;
@@ -160,34 +159,51 @@ pub fn boot_census() -> (u32, u32, Vec<String>) {
 pub const DECLARED_KERNEL_BUILDS: [&str; 2] =
     toyos_build::build::TEST_SUITE_KERNEL_BUILDS;
 
-/// A liveness ceiling: the number one guest's author reasoned about, on the
-/// host the reasoning was done on, read on the guest's own [`steal::Clock`].
+/// How many guests the run may have up at once.
+///
+/// The harness's own wall-clock margins are margins on the *host*, and they were
+/// all derived when one guest had it to itself. Four guests is a different
+/// machine, so such a margin has to be stated against the regime it runs in
+/// rather than widened outright — which is what this multiplies.
+static WIDTH: AtomicU32 = AtomicU32::new(1);
+
+pub fn set_width(width: u32) {
+    assert!(width >= 1, "a run boots at least one guest");
+    WIDTH.store(width, Ordering::SeqCst);
+}
+
+/// A liveness ceiling, stated for one guest and paid out for the run's width.
 ///
 /// Every timeout a test hands [`QemuInstance::run_test`] and its relatives is a
 /// guard against a wedge, never a verdict: the assertion is what the guest
 /// *said*, and a test whose pass depended on a deadline expiring would be
-/// asserting on the host's clock. Sharing the host is the clock's to take out,
-/// so nothing here scales by how many guests share it.
+/// asserting on the host's clock. So the number in the source stays the number
+/// its author reasoned about — one guest, this host — and the width multiplies
+/// it, as `wait_for_ready` multiplies the boot timeout.
 ///
-/// This corrects for how fast the host is. It does not correct for a guest
-/// being wider than the host — an `smp:8` guest on a four-core runner is
-/// oversubscribed and a mostly-serial boot never showed it — which is
-/// [`budget_smp`]'s job. Callers that hold a guest want that one, so its
-/// ceiling reflects the vCPUs it actually asked for.
+/// The cost of getting this wrong in the generous direction is that a wedge
+/// takes longer to report. The cost in the other direction is a red run that
+/// says a guest hung when it was only sharing a machine.
+///
+/// This corrects for width and for how fast the host is, both host-wide facts.
+/// It does not correct for a guest being wider than the host — an `smp:8` guest
+/// on a four-core runner is oversubscribed and a mostly-serial boot never
+/// showed it — which is [`budget_smp`]'s job and [`QemuInstance::budget`]'s
+/// default. Callers that hold a guest want that one, so its ceiling reflects
+/// the vCPUs it actually asked for.
 pub fn budget(one_guest: Duration) -> Duration {
     let (num, den) = host_scale();
-    one_guest * num / den
+    one_guest * WIDTH.load(Ordering::SeqCst) * num / den
 }
 
-/// The fastest boot-to-ready this run has seen, in milliseconds of the booting
-/// guest's own clock.
+/// The fastest boot-to-ready this run has seen, in milliseconds.
 ///
 /// A boot is the one piece of guest work every test does and no test asserts on
 /// — `wait_for_ready`'s own comment names the two exceptions, and both read the
 /// guest's stamps rather than this clock — so it is a measurement of the host
-/// that costs nothing to take. The *fastest* rather than the mean because the
-/// minimum over a run is the closest this can get to the machine with nothing
-/// else on it.
+/// that costs nothing to take. The *fastest* rather than the mean because a boot
+/// taken with three other guests up measures the others; the minimum over a run
+/// is the closest this can get to the machine with nothing else on it.
 static FASTEST_BOOT_MS: AtomicU32 = AtomicU32::new(u32::MAX);
 
 /// The same measurement on the host every ceiling in this tree was written for.
@@ -207,10 +223,12 @@ fn record_boot(took: Duration) {
 /// How much slower than the host these ceilings were written on this one is, as
 /// a fraction so that a 1.4× host is not rounded to 1.
 ///
-/// A number reasoned about on an M4 Pro is not a liveness ceiling on a
-/// four-core Azure vCPU, it is a verdict about which of the two is running the
-/// test. 307 bare timeouts were counted in one CI run and every one of them was
-/// that.
+/// [`budget`] corrects a ceiling for how many guests share the machine. It never
+/// corrected for how fast the machine *is*, and that is the other half of the
+/// same mistake: a number reasoned about on an M4 Pro is not a liveness ceiling
+/// on a four-core Azure vCPU, it is a verdict about which of the two is running
+/// the test. 307 bare timeouts were counted in one CI run and every one of
+/// them was that.
 ///
 /// **Only ever upward.** On a faster host the number in the source stands,
 /// because it is the number its author reasoned about, and a ceiling that shrank
@@ -299,8 +317,8 @@ fn oversubscription(smp: u32) -> (u32, u32) {
 
 /// [`budget`] widened by a guest's own vCPU oversubscription.
 ///
-/// The guest-agnostic [`budget`] scales by boot-derived host speed; this
-/// multiplies in `smp/cores` on top, so a wide-SMP guest that a
+/// The guest-agnostic [`budget`] scales by the run's width and boot-derived host
+/// speed; this multiplies in `smp/cores` on top, so a wide-SMP guest that a
 /// mostly-serial boot said little about is given the extra room the derivation
 /// above says it needs. `smp <= cores` leaves it exactly [`budget`], which is
 /// every guest on the dev host.
@@ -311,10 +329,17 @@ pub fn budget_smp(one_guest: Duration, smp: u32) -> Duration {
 
 /// A liveness guard that watches the guest instead of the host's clock.
 ///
-/// A guest still printing is a guest still working. So the ceiling here is time
-/// in which **nothing arrived**, and a guest that keeps talking is given as long
-/// as it needs. Both spans are read on the guest's own [`steal::Clock`], so no
-/// number in this type is a statement about the host.
+/// [`budget`] corrects a ceiling for how many guests share the machine, which
+/// is the part of "how fast is the host today" the harness knows. It does not
+/// know the rest, and a retry loop bounded by elapsed time has that ceiling for
+/// a *verdict* the moment the rest moves: a guest that is merely late reports
+/// exactly what a wedged one reports.
+///
+/// The two are distinguishable and the console is what distinguishes them: a
+/// guest still printing is a guest still working. So the ceiling here is time in
+/// which **nothing arrived**, and a guest that keeps talking is given as long as
+/// it needs. That is the whole idea — no number in this type is a statement
+/// about the host.
 ///
 /// `total` is the second half, and it is a wedge guard rather than a verdict
 /// too. A guest can be stuck and chatty: the compositor prints an interval line
@@ -323,35 +348,33 @@ pub fn budget_smp(one_guest: Duration, smp: u32) -> Duration {
 ///
 /// The caller owns the capture, so progress is "did it grow" and costs nothing.
 pub struct Liveness {
-    clock: steal::Clock,
     quiet_for: Duration,
-    total: Duration,
-    began: Moment,
-    last_growth: Moment,
+    last_growth: Instant,
     seen: usize,
+    give_up: Instant,
 }
 
 impl Liveness {
-    /// `quiet_for` of silence on `clock` ends the wait, and so does `total`
-    /// however loud the guest is.
-    pub fn new(clock: steal::Clock, quiet_for: Duration, total: Duration) -> Self {
-        let now = clock.now();
-        Self { clock, quiet_for, total, began: now, last_growth: now, seen: 0 }
+    /// `quiet_for` of silence ends the wait, and so does `total` however loud
+    /// the guest is.
+    pub fn new(quiet_for: Duration, total: Duration) -> Self {
+        let now = Instant::now();
+        Self { quiet_for, last_growth: now, seen: 0, give_up: now + total }
     }
 
     /// Whether the guest may still be working, given everything it has said.
     pub fn working(&mut self, capture: &str) -> bool {
-        let now = self.clock.now();
         if capture.len() != self.seen {
             self.seen = capture.len();
-            self.last_growth = now;
+            self.last_growth = Instant::now();
         }
-        now - self.began < self.total && now - self.last_growth < self.quiet_for
+        let now = Instant::now();
+        now < self.give_up && now.duration_since(self.last_growth) < self.quiet_for
     }
 
     /// What ended the wait, for a caller putting it in a failure message.
     pub fn why(&self) -> &'static str {
-        if self.clock.since(self.began) >= self.total {
+        if Instant::now() >= self.give_up {
             "it never stopped talking and never got there"
         } else {
             "it went quiet"
@@ -400,8 +423,8 @@ pub const GUEST_QUIET: Duration = Duration::from_secs(15);
 /// worse than one that reds.
 pub const GUEST_WEDGED: Duration = Duration::from_secs(300);
 
-pub fn guest_liveness(guest: &QemuInstance) -> Liveness {
-    Liveness::new(guest.clock(), GUEST_QUIET, GUEST_WEDGED)
+pub fn guest_liveness() -> Liveness {
+    Liveness::new(GUEST_QUIET, GUEST_WEDGED)
 }
 
 /// A kernel line without its `[kernel <t> cpu<N>] ` stamp.
@@ -506,8 +529,8 @@ impl std::fmt::Display for WaitVerdict {
 /// `halt_all_cpus` stops every CPU, so the guest goes silent and the ceiling
 /// expires on a machine that has been dead since the panic.
 ///
-/// **The wall clock is not the wedge; silence is.** A test's `ceiling` is its
-/// budget on the guest's clock (`budget_smp`-scaled, so it already carries #256's
+/// **The wall clock is not the wedge; silence is.** A test's `ceiling` is the
+/// budgeted wall clock (`budget_smp`-scaled, so it already carries #256's
 /// `vcpus/cores` oversubscription widening), and until this it ended the wait
 /// the instant it passed — so a merely-slow guest reported exactly what a wedged
 /// one did.
@@ -581,7 +604,7 @@ pub fn await_guest(
 ) -> Result<(), String> {
     // Where this wait's own evidence starts.
     let from = log.len();
-    let mut live = guest_liveness(qemu);
+    let mut live = guest_liveness();
     while !done(log) && live.working(log) {
         let more = qemu.drain_serial(Duration::from_millis(200));
         log.push_str(&more);
@@ -1028,8 +1051,6 @@ pub struct QemuInstance {
     smp: u32,
     /// The test binaries this boot put on ROOT, by the name `run` takes.
     carried: BTreeSet<String>,
-    /// The time this guest has had, which every wait on it reads.
-    clock: steal::Clock,
 }
 
 /// Which of [`DECLARED_KERNEL_BUILDS`] this boot wants.
@@ -1372,10 +1393,10 @@ impl QemuInstance {
         interval: Duration,
         done: impl Fn(&super::screen::Ppm) -> bool,
     ) -> super::screen::Ppm {
-        let (began, ceiling) = (self.clock.now(), budget_smp(timeout, self.smp));
+        let deadline = Instant::now() + budget_smp(timeout, self.smp);
         loop {
             let dump = self.screendump();
-            if done(&dump) || self.clock.since(began) >= ceiling {
+            if done(&dump) || Instant::now() >= deadline {
                 return dump;
             }
             thread::sleep(interval);
@@ -1402,9 +1423,11 @@ impl QemuInstance {
         self.stdin.flush().expect("Failed to flush QEMU stdin");
     }
 
-    /// Keep collecting serial output for `dur` of the guest's time after a test
-    /// has returned. Callers use it to *pace* — "let the guest run for 400 ms
-    /// and tell me what it said" — so it is not a ceiling and does not scale.
+    /// Keep collecting serial output for `dur` after a test has returned.
+    /// **Not scaled by the width**, and it is the one duration in this file that
+    /// is not. Callers use it to *pace* — "let the guest run for 400 ms and tell
+    /// me what it said" — so multiplying it does not buy a slow guest more room,
+    /// it buys the test a longer sleep.
     pub fn drain_serial(&mut self, dur: Duration) -> String {
         self.drain_for(dur, |_| false)
     }
@@ -1425,13 +1448,12 @@ impl QemuInstance {
     }
 
     fn drain_for(&mut self, dur: Duration, line: impl Fn(&str) -> bool) -> String {
-        let began = self.clock.now();
+        let deadline = Instant::now() + dur;
         let mut out = String::new();
         loop {
-            let Some(remaining) = dur.checked_sub(self.clock.since(began)).filter(|left| !left.is_zero()) else {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
                 return out;
             };
-            // Its expiry is the wall's, and the guest's clock is asked again.
             match self.rx.recv_timeout(remaining) {
                 Ok(seen) => {
                     out.push_str(&seen);
@@ -1440,15 +1462,10 @@ impl QemuInstance {
                         return out;
                     }
                 }
-                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Timeout) => return out,
                 Err(RecvTimeoutError::Disconnected) => return out,
             }
         }
-    }
-
-    /// This guest's own clock: every wait on it reads this, never the wall.
-    pub fn clock(&self) -> steal::Clock {
-        self.clock.clone()
     }
 
     /// The QMP socket this instance opened. Injection needs it, and it needs
@@ -1512,7 +1529,7 @@ impl QemuInstance {
         );
 
         let timeout = budget_smp(timeout, self.smp);
-        let start = self.clock.now();
+        let start = Instant::now();
         let mut stdout = String::new();
         let mut serial = String::new();
         // Every line seen before this test announced itself. Kept, never
@@ -1522,7 +1539,7 @@ impl QemuInstance {
         // **Which of the two things the ceiling caught**: a guest that has said
         // nothing for [`GUEST_QUIET`] has stopped, and one still talking at the
         // ceiling has not.
-        let mut last_line = start;
+        let mut last_line = Instant::now();
         let mut lines = 0usize;
         // **The line on which the kernel said it was dying, if it ever did.**
         // The first one only: a crash report's later lines carry the spelling
@@ -1535,9 +1552,9 @@ impl QemuInstance {
         loop {
             if let Some(error) = ceiling_verdict(
                 dying.as_deref(),
-                self.clock.since(start),
+                start.elapsed(),
                 timeout,
-                self.clock.since(last_line),
+                last_line.elapsed(),
                 lines,
             ) {
                 // The window in the order the guest wrote it: `before` holds
@@ -1556,7 +1573,7 @@ impl QemuInstance {
 
             match self.rx.recv_timeout(Duration::from_millis(100)) {
                 Ok(line) => {
-                    last_line = self.clock.now();
+                    last_line = Instant::now();
                     lines += 1;
                     step(self.sockets.qmp.as_deref(), &line);
                     if dying.is_none()
@@ -2140,7 +2157,6 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
         eprintln!("[qemu {seq}] Launching QEMU...");
     }
     let (mut child, tether) = toyos_build::tether::spawn(qemu).expect("Failed to launch QEMU");
-    let clock = steal::Clock::of(child.id());
 
     let stdin = BufWriter::new(child.stdin.take().unwrap());
     let stdout = child.stdout.take().unwrap();
@@ -2194,7 +2210,7 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
     let boot_log = if options.mute {
         String::new()
     } else {
-        wait_for_ready(&mut child, &rx, options, &uart_log, &clock)
+        wait_for_ready(&mut child, &rx, options, &uart_log)
     };
 
     QemuInstance {
@@ -2211,7 +2227,6 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
         boot_log,
         smp: options.smp,
         carried,
-        clock,
     }
 }
 
@@ -2251,13 +2266,18 @@ fn wait_for_ready(
     rx: &Receiver<String>,
     options: &BootOptions,
     uart_log: &Path,
-    clock: &steal::Clock,
 ) -> String {
     let no_timeout = options.debug_wait;
     let ready = options.ready_marker;
     let panic_aborts = ready == DEFAULT_READY;
-    // Twenty seconds of the guest's own clock, which is what a run of one guest
-    // gave it: sharing the host is the clock's to take out.
+    // Ten seconds per guest this run may have up, and never fewer than two
+    // guests' worth — the tree runs 15-25 suites a day across several agents,
+    // so one guest on a quiet host stopped being
+    // the regime some time before this did. Measured on 2026-08-03 with other
+    // agents building: two boots exceeded the flat ten seconds, one of them in a
+    // run of a single guest.
+    //
+    // A wedge costs that much longer to report and nothing else.
     //
     // Scaled by the host too, and the first boot of a run is the one that
     // cannot be: nothing has been measured yet, so it gets the flat number and
@@ -2272,11 +2292,12 @@ fn wait_for_ready(
     // of `vcpus/cores`; on a host with a core per vCPU it multiplies by one.
     let (num, den) = host_scale();
     let (onum, oden) = oversubscription(options.smp);
-    let boot_timeout = Duration::from_secs(20) * num / den * onum / oden;
-    let start = clock.now();
+    let boot_timeout =
+        Duration::from_secs(10) * WIDTH.load(Ordering::SeqCst).max(2) * num / den * onum / oden;
+    let start = Instant::now();
     let mut seen = String::new();
     loop {
-        if !no_timeout && clock.since(start) > boot_timeout {
+        if !no_timeout && start.elapsed() > boot_timeout {
             let _ = child.kill();
             // With what it did say. A timeout that discards the console is the
             // one failure in this harness that arrives with no evidence at all,
@@ -2359,6 +2380,6 @@ fn wait_for_ready(
             }
         }
     }
-    record_boot(clock.since(start));
+    record_boot(start.elapsed());
     seen
 }
