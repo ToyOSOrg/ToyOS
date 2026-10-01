@@ -14,9 +14,9 @@ code needs. You read: you run no test and no build, and you change nothing in th
 
 A claim about behaviour stands only on a measurement in the pull request body at that head: its
 command, its exit code and its log, never a grepped `test result` line. Each of these is a BLOCKER
-when missing: `cargo run -- --ci host` green, the tests the branch adds green, and where the change
-targets hardware, the reading from that hardware — QEMU is not the hardware. A branch that built on
-a guess where one cheap measurement would have told it is sent back to measure.
+when missing: `cargo run -- --ci host` green, every guest test the change reaches green, and where
+the change targets hardware, the reading from that hardware — QEMU is not the hardware. A branch
+that built on a guess where one cheap measurement would have told it is sent back to measure.
 
 ## Rank every finding
 
@@ -108,13 +108,13 @@ if it meets the bar above; otherwise it is a NOTE.
   gitlink left naming a fork branch whose consumed commit the pull request changes. A search for
   callers that skipped the fork clones and `~/.cargo/git/checkouts/` searched part of the tree.
 
-## Prose is removed, never reviewed
+## Prose
 
-A wrong line number, a stale run id, a count, a date, a citation: never a send-back, never
-corrected, never checked for its own sake. Every comment, doc line, issue line and PR-body line a
-branch adds or rewrites is load-bearing — the code or the record needs it — or it is REMOVE, one
-line, and the implementer deletes it. So is a source comment that is not one of root `CLAUDE.md`'s
-three kinds, and a comment or doc line corrected instead of deleted.
+In a source comment or a doc, a wrong line number, a stale run id, a count, a date, a citation:
+never a send-back, never corrected, never checked for its own sake. Every comment, doc line, issue
+line and PR-body line a branch adds or rewrites is load-bearing — the code or the record needs it —
+or it is REMOVE, one line, and the implementer deletes it. So is a source comment that is not one
+of root `CLAUDE.md`'s three kinds, and a comment or doc line corrected instead of deleted.
 
 ## Output
 

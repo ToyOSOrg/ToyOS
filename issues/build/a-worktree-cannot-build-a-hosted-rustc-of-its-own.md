@@ -10,7 +10,7 @@ The ToyOS-hosted rustc is built by the primary checkout alone
 (`src/toolchain.rs`'s `ensure`, under `Owner::Us`), from the primary's `rust/`
 under the primary's `write_config`. A worktree's image with `hosted-rustc =
 true` carries that one: refused by name when the worktree builds a compiler of
-its own (`src/build.rs`, `env.primary_compiler`), and taken without a word when
+its own (`src/build.rs`, `env.sysroot.primary_compiler`), and taken without a word when
 only the worktree's `write_config` differs, so the image then carries a rustc
 another tree's recipe built.
 

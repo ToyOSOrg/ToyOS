@@ -15,10 +15,10 @@ and the gates that held them go.
   where a reviewer can read it, or deleted. Exit: each one's verdict is applied.
 - The toolchain is content-addressed by the four trees that produce it, one
   directory per hash, never mutated; then the sysroot claim, `src/buildlock.rs`
-  and `src/keystore.rs` go. Two agents building at once cannot be told apart by
-  prose, so the locks are made unnecessary rather than written down: every store
-  is published by an atomic rename and never rewritten, and the build system
-  `cargo clean`s no crate target, so cargo's own lock is the only one.
+  and `src/keystore.rs` go. The locks are made unnecessary rather than written
+  down: every store is published by an atomic rename and never rewritten, and
+  the build system `cargo clean`s no crate target, so cargo's own lock is the
+  only one.
   Exit: both files are gone, and two builds started together in two worktrees
   are measured green.
   The toolchain builds cargo from the Rust fork's submodule and ships it: one

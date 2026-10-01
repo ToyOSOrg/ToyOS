@@ -6,20 +6,6 @@ opened: 2026-08-19
 
 # The build system does not compile on Windows, and it is three subsystems rather than one call
 
-```
-error[E0433]: cannot find `unix` in `os`   src/buildlock.rs:59:14   (AsRawFd)
-error[E0433]: cannot find `unix` in `os`   src/toolchain.rs:927:14  (symlink)
-error[E0433]: cannot find `unix` in `os`   src/toolchain.rs:1813:14 (symlink)
-error[E0599]: no method named `as_raw_fd` found for reference `&std::fs::File`
-                                                             src/buildlock.rs:666:32
-error[E0599]: no method named `as_raw_fd` found for reference `&std::fs::File`
-                                                             src/buildlock.rs:680:32
-```
-
-Every other crate in the graph, first-party and third-party, checked
-clean. The `#[cfg(unix)]` at `src/ci.rs:489` is still the only conditional
-compilation in the build system.
-
 `src/tether.rs`: `std::os::unix` and a pseudo-terminal per child, behind a Linux and macOS `cfg` pair with no Windows arm.
 
 ## The judge, and it needs no Windows host and no download

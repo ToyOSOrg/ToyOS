@@ -23,10 +23,12 @@ fork commit you made is pushed: the orchestrator removes the worktree once its b
 Where hardware or anything uncertain is involved, take the cheap measurement before you build on a
 guess. Then build, then test on root `CLAUDE.md`'s tiers before anyone reviews:
 
-- Host tests with `cargo run -- --ci host`, the image with `cargo run -- --build-only`, and guest
-  tests with `cargo test`, the whole suite or a filter. Never `cargo test -- --metal`, and never a
-  `cargo run` that launches QEMU. For a metal row, build its image from a committed tree, write
-  the request file the brief names, and end your report with `T14 RUN REQUESTED: <image path>`.
+- Host tests with `cargo run -- --ci host`, the image with `cargo run -- --build-only`, and with
+  `cargo test` every guest test your change reaches, the whole suite or a filter. Never a `cargo
+  run` that launches QEMU, nor `--metal` without `--metal-readback`, which touches no machine. For
+  a metal row, `cargo test -- --metal --metal-readback <dir> <row>`, from a committed tree and
+  with the `<dir>` the brief names, builds its images and writes `<dir>/request.txt`; end your
+  report with `T14 RUN REQUESTED: <dir>/request.txt`.
 - A result is the command's own exit code: `<cmd> > <file> 2>&1; echo EXIT=$?`. A grepped
   `test result` line is not one, and a gate you did not run is a gate you do not claim.
 - Long commands run in the background with output to a file under the scratchpad the brief names.
@@ -61,11 +63,11 @@ Fork sources live outside this repository: a search for callers must also cover 
 ## The pull request
 
 Push from your branch, never `main`, with `git status --porcelain` empty: `git push -u origin
-<branch>`, and `gh pr create --draft` at the first push. CI capacity is limited: push once per round,
-when your tests are green. The body is `main`'s record and the reviewer's evidence, kept true of the
-branch as it stands: what changed and why, per decision; each gate with its exit code; what you are
-unsure of; and what `reviewer.md` asks a body to show — the checks of high-risk code, why a new guest
-test needs QEMU, why a new dependency is the cleanest path, what a new gate, check, lock or test sees
+<branch>`, and `gh pr create --draft` at the first push. Push once per round, when your tests are
+green. The body is `main`'s record and the reviewer's evidence, kept true of the branch as it
+stands: what changed and why, per decision; each gate with its exit code; what you are unsure of;
+and what `reviewer.md` asks a body to show — the checks of high-risk code, why a new guest test
+needs QEMU, why a new dependency is the cleanest path, what a new gate, check, lock or test sees
 that reading cannot. Set the title and body with `gh pr edit --title <what landed> --body-file
 <file>`, never `--fill`. The pull request stays a draft: do not mark it ready, arm auto-merge or wait
 on CI unless the brief says so.

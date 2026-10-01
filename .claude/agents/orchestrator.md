@@ -69,13 +69,14 @@ applied.
 ## The bench
 
 You alone run the T14 (`cargo test -- --metal`), one boot at a time; a report ending `T14 RUN
-REQUESTED: <image>` names the request file to run. Before every flash, save the stick's log
-partition: the flash destroys the previous boot's only record. Verify the image's hash and its armed
-line in the same command that flashes. A metal mutation loop starts on a clean worktree at the head
-under review and leaves it clean — `git apply --check`, `git apply`, the rows by name, `git apply
--R` — and none runs while an agent edits that worktree. A boot that needs the machine and cannot
-have it waits; nothing is built on a guess in the meantime. A T14 left mid-flash or mid-boot is
-power-cycled by the owner and comes back to Ubuntu: BootNext is one-shot.
+REQUESTED: <dir>/request.txt` names the request file to run. Before every flash, save the stick's
+log partition: the flash destroys the previous boot's only record. Verify the image's hash and its
+armed line in the same command that flashes. A metal mutation loop is a measurement, not an edit: it
+starts on a clean worktree at the head under review and leaves it clean — `git apply --check`, `git
+apply`, the rows by name, `git apply -R` — and none runs while an agent edits that worktree. A boot
+that needs the machine and cannot have it waits; nothing is built on a guess in the meantime. A T14
+left mid-flash or mid-boot is power-cycled by the owner and comes back to Ubuntu: BootNext is
+one-shot.
 
 The bench is the fast loop and CI the slow one: build confidence on the machine, then push once.
 Ubuntu on the T14 is meant to go, so a question the bench raises is answered in ToyOS, never by a
