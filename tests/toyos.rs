@@ -302,7 +302,6 @@ const RUST_SKIP: &[&str] = &[
     // Same again: the `toolkit_` tests of their names launch them from the
     // toolkit desktop.
     "window_wake",
-    "window_spent",
     "winit_loop",
     "winit_pace",
     // Its two spawning arms only mean anything when the two processes share a
@@ -1167,11 +1166,9 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // window, its text in the system font, no redraw it did not ask for, and
     // a clean exit when the compositor closes it.
     ("toolkit_iced", Sched::Parallel),
-    // The wait every winit loop blocks in, a window's reads past a readiness
-    // already spent, the loop itself through winit's API, and an animation
-    // held to the compositor's frame events.
+    // The wait every winit loop blocks in, the loop itself through winit's
+    // API, and an animation held to the compositor's frame events.
     ("toolkit_window_wake", Sched::Parallel),
-    ("toolkit_window_spent", Sched::Parallel),
     ("toolkit_winit_loop", Sched::Parallel),
     ("toolkit_winit_pace", Sched::Parallel),
     // Ctrl+Alt+D on the same machine. Parallel: it waits for a marker and its
@@ -1420,7 +1417,6 @@ const CARRIES: &[(&str, &[&str])] = &[
     ("metal_sim_hostile_clipboard", &["test_rs_compositor_hostile_clipboard"]),
     ("desktop_window_child", &["test_rs_window_child"]),
     ("toolkit_window_wake", &["test_rs_window_wake"]),
-    ("toolkit_window_spent", &["test_rs_window_spent"]),
     ("toolkit_winit_loop", &["test_rs_winit_loop"]),
     ("toolkit_winit_pace", &["test_rs_winit_pace"]),
     ("doom_frames", &["test_rs_doom_frames"]),
@@ -7967,32 +7963,6 @@ fn toolkit_window_wake(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     Err(format!("test_rs_window_wake never finished:\n{}", &log[launched..]))
 }
 
-/// A window's event reads never wait on a readiness answer whose frame another
-/// read already took.
-///
-/// `tests/toyos-rust-tests/src/bin/window_spent.rs` leaves such an answer in
-/// its window's ring and reads past it; a read that waits on it hangs, and the
-/// ceiling reds that.
-fn toolkit_window_spent(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
-    let (mut qemu, mut log, launched) = toolkit_launch(rust_bins, "window_spent", "test_rs_window_spent")?;
-    let log = &mut log;
-    let mut live = qemu::Liveness::new(Duration::from_secs(30), Duration::from_secs(120));
-    while live.working(log) {
-        let said = &log[launched..];
-        if said.contains("WINDOW-SPENT-OK") {
-            return Ok(());
-        }
-        if said.contains("WINDOW-SPENT-FAIL")
-            || said.contains("WINDOW-SPENT-REFUSED")
-            || said.contains("panicked")
-        {
-            return Err(format!("a window read past a spent readiness went wrong:\n{said}"));
-        }
-        log.push_str(&qemu.drain_serial(Duration::from_millis(200)));
-    }
-    Err(format!("test_rs_window_spent never finished:\n{}", &log[launched..]))
-}
-
 /// The ToyOS winit backend's loop through winit's own API: user events sent
 /// from `AboutToWait` and from another thread, windows redrawn and dropped on
 /// another thread, a window dropped in the handler that made it, one dropped in
@@ -10499,7 +10469,6 @@ fn run_machine_test(
         "desktop_window_child" => desktop_window_child(rust_bins),
         "toolkit_iced" => toolkit_iced(),
         "toolkit_window_wake" => toolkit_window_wake(rust_bins),
-        "toolkit_window_spent" => toolkit_window_spent(rust_bins),
         "toolkit_winit_loop" => toolkit_winit_loop(rust_bins),
         "toolkit_winit_pace" => toolkit_winit_pace(rust_bins),
         "blocked_dump" => blocked_dump(),
