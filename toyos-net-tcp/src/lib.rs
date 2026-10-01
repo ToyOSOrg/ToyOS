@@ -40,51 +40,25 @@ mod ring;
 mod rtt;
 mod rx;
 mod seq;
-mod siphash;
 mod stack;
 mod tx;
 
 use core::net::Ipv4Addr;
 use core::time::Duration;
 
+use toyos_net_wire::siphash;
 use toyos_net_wire::Port;
 
-pub use counters::{Counter, Counters, Refusal, RefusalLog, REFUSAL_LOG_INTERVAL};
+pub use counters::{Counter, Counters, Refusal, RefusalLog};
 pub use seq::Seq;
-pub use siphash::{siphash24, Key};
 pub use stack::{ConnId, Info, ListenerId, Outgoing, Tcp};
+pub use toyos_net_wire::siphash::Key;
+pub use toyos_net_wire::Instant;
 
-/// A point on the caller's monotonic clock, in nanoseconds.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Instant(u64);
-
-impl Instant {
-    pub const fn from_nanos(ns: u64) -> Self {
-        Self(ns)
-    }
-
-    pub const fn from_millis(ms: u64) -> Self {
-        Self(ms.saturating_mul(1_000_000))
-    }
-
-    pub const fn nanos(self) -> u64 {
-        self.0
-    }
-
-    pub fn after(self, d: Duration) -> Self {
-        Self(self.0.saturating_add(u64::try_from(d.as_nanos()).unwrap_or(u64::MAX)))
-    }
-
-    /// Zero when `earlier` is not earlier.
-    pub const fn since(self, earlier: Self) -> Duration {
-        Duration::from_nanos(self.0.saturating_sub(earlier.0))
-    }
-
-    /// The TSval a 4-tuple with `offset` sends now: one tick per millisecond (RFC 7323 §5.4).
-    const fn tsval(self, offset: u32) -> u32 {
-        let [a, b, c, d, ..] = (self.0 / 1_000_000).to_le_bytes();
-        u32::from_le_bytes([a, b, c, d]).wrapping_add(offset)
-    }
+/// The TSval a 4-tuple with `offset` sends at `now`: one tick per millisecond (RFC 7323 §5.4).
+const fn tsval(now: Instant, offset: u32) -> u32 {
+    let [a, b, c, d, ..] = (now.nanos() / 1_000_000).to_le_bytes();
+    u32::from_le_bytes([a, b, c, d]).wrapping_add(offset)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -246,7 +220,6 @@ pub enum Error {
     Closing,
     WouldBlock,
     AddrInUse,
-    /// The remote is not a unicast address, or names the local endpoint.
     InvalidRemote,
     Failed(Failure),
 }

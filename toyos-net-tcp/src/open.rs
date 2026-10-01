@@ -141,7 +141,7 @@ impl Retransmit {
 
 fn syn_options(local: &Local, peer: Option<&Negotiated>, now: Instant) -> SynOptions {
     let timestamps = match peer {
-        None => Some(Timestamps { value: now.tsval(local.ts_offset), echo: 0 }),
+        None => Some(Timestamps { value: crate::tsval(now, local.ts_offset), echo: 0 }),
         Some(n) => n.ts.map(|ts| ts.option(now)),
     };
     SynOptions {
@@ -237,7 +237,7 @@ impl SynSent {
         if !self.timer.owed {
             return None;
         }
-        let tsval = now.tsval(local.ts_offset);
+        let tsval = crate::tsval(now, local.ts_offset);
         self.timer.handed_off(now, tsval, true);
         Some(Out { seq: self.iss, kind: Kind::Syn(syn_options(local, None, now)), window: local.window, ts: None, sack: NO_BLOCKS, data: (0, 0) })
     }
@@ -394,7 +394,7 @@ impl SynRcvd {
         if let Some(rst) = self.answer.take() {
             return Some(Out::rst(&rst));
         }
-        let tsval = now.tsval(local.ts_offset);
+        let tsval = crate::tsval(now, local.ts_offset);
         let ts = self.negotiated.ts.map(|ts| ts.option(now));
         let dup = core::mem::replace(&mut self.dup_answer, false);
         if self.timer.owed || dup {
