@@ -73,18 +73,6 @@ that the staged break's record came less than 2 s of kernel clock after the
 record before it. That change has never run: the test's first run back is
 also that change's.
 
-**Its test is deleted, with the actuators only it armed.** `90ecefed2` took
-`usb_transport_break` out, QEMU and T14 arms both. `b5c59cbcc` took
-`usb-transport-offline`, `usb-reset-moves`, `usb-transport-break-owed`,
-`usb-transport-break-flushed`, `usb-return-silent`, `usb-slow-return`,
-`usb-serial-short`, `usb-first-wait-spent`, `usb-transport-faults` and
-`usb-port-gone`, and `9ebf080e8` took `usb-transport-break` and
-`usb-reset-break` with `log_flush_retry`, their one other arming site.
-`git revert 9ebf080e8 b5c59cbcc 90ecefed2` brings them back as they stood
-before #536, `log_flush_retry` with them; `git show 84471bc58:tests/common/usb.rs`
-holds #536's adaptation of the test.
-
-**`4f2bea143` holds #588's version of the test**, the second parent of #639's
-merge of `main` after #588 landed: `git show 4f2bea143:tests/common/usb.rs`.
+**`4f2bea143` holds #588's version of the test**: `git show 4f2bea143:tests/common/usb.rs`.
 `usb_stick_left` arms `usb-transport-break`, `usb-reset-moves`,
 `usb-reset-moves-after` and `usb-reset-moves-configured`, so they stay.

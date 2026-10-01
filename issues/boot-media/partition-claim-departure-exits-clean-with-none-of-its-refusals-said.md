@@ -69,8 +69,7 @@ deleted.
 The partition-claim code, held by the orchestrator.
 
 **Its test is deleted**: `0e19bf898` took `partition_claim_departure` out,
-host and guest halves; `b5c59cbcc` its two actuators, `usb-transport-break-owed`
-and `usb-reset-moves`; and `9ebf080e8` the `msc::transport_break` module the
-first of them lived in. `git revert 9ebf080e8 b5c59cbcc 0e19bf898` brings it
+host and guest halves; `b5c59cbcc` its actuator `usb-transport-break-owed`.
+`git revert 9ebf080e8 b5c59cbcc 0e19bf898` brings it
 back as it stood before #536, `log_flush_retry` with it; `git show 84471bc58:tests/common/partclaim.rs` holds #536's
 adaptation of it.
