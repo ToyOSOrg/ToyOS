@@ -10,9 +10,9 @@
 //! So these go through `eval` on a string, which is the only surface a person
 //! touches. An identity is a property of the whole program or it is not pinned.
 
-use calc::error::EvalError;
-use calc::num::{Angle, Num};
-use calc::parser::eval;
+use crate::error::EvalError;
+use crate::num::{Angle, Num};
+use crate::parser::eval;
 
 fn value(text: &str) -> Num {
     eval(text, Angle::Rad).unwrap_or_else(|e| panic!("{text} was refused: {}", e.message()))

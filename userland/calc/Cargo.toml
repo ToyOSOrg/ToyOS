@@ -11,8 +11,18 @@ license = "MIT OR Apache-2.0"
 [lib]
 doctest = false
 
+# The window, built for ToyOS alone: winit and softbuffer, default features off,
+# have no Linux backend. `test = false` keeps it out of `cargo test` only while
+# the package has no `tests/`, for which cargo builds every binary.
+[[bin]]
+name = "calc"
+path = "src/main.rs"
+test = false
+
 [dependencies]
 toyos-font = { path = "../toyos-font" }
+
+[target.'cfg(target_os = "toyos")'.dependencies]
 winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
 softbuffer = { version = "0.4", default-features = false }
 
