@@ -49,12 +49,18 @@ pub fn segment() -> (Net, usize, usize) {
 
 /// A's connection from 49152 to B's listener on 80, established and accepted.
 pub fn established(net: &mut Net, a: usize, b: usize) -> (ConnId, ConnId) {
-    let listener = net.nodes[b].shard.listen(B, Some(port(80)), || 0).unwrap();
+    connected(net, a, 49152, b, B)
+}
+
+/// A's connection from `from` to the listener on 80 that node `peer` at `addr` opens, established
+/// and accepted.
+pub fn connected(net: &mut Net, a: usize, from: u16, peer: usize, addr: Ipv4Addr) -> (ConnId, ConnId) {
+    let listener = net.nodes[peer].shard.listen(addr, Some(port(80)), || 0).unwrap();
     let now = net.now();
-    let id = net.nodes[a].shard.connect(now, Some(port(49152)), ep(B, 80)).unwrap();
+    let id = net.nodes[a].shard.connect(now, Some(port(from)), ep(addr, 80)).unwrap();
     let mut accepted = None;
     let done = net.run_until(Duration::from_secs(1), |net| {
-        accepted = accepted.or_else(|| net.nodes[b].shard.accept(listener).unwrap());
+        accepted = accepted.or_else(|| net.nodes[peer].shard.accept(listener).unwrap());
         accepted.is_some() && net.nodes[a].shard.status(id).unwrap().state == State::Established
     });
     assert!(done, "the handshake completes");

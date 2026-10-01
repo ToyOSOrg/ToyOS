@@ -5,13 +5,13 @@ use core::time::Duration;
 
 use toyos_net_wire::tcp::{SynOptions, Timestamps, WindowShift};
 
-use crate::conn::{screen, Ctx, In, Kind, Negotiated, Out, Params, Rst, Screened, Sync, Ts, NO_BLOCKS};
+use crate::conn::{screen, Ctx, In, Kind, Negotiated, Out, Params, Rst, Screened, Sync, Ts, NO_BLOCKS, NO_PAYLOAD};
 use crate::counters::Counter;
 use crate::ring::Ring;
 use crate::rtt::Rtt;
 use crate::seq::Seq;
 use crate::stack::TimeWait;
-use crate::{limits, Ask, Instant, NotReady};
+use crate::{limits, Exit, Instant, NotReady};
 
 /// What a SYN or SYN-ACK of ours offers, fixed for the connection's life.
 #[derive(Clone, Copy, Debug)]
@@ -86,6 +86,8 @@ fn handshake_sample(rtt: &mut Rtt, seg: &In<'_>, n: &Negotiated, once: Option<In
 pub struct Retransmit {
     pub rtt: Rtt,
     pub timer: Option<Instant>,
+    /// When the SYN (or SYN-ACK) was first owed.
+    since: Instant,
     pub first: Option<Instant>,
     pub first_tsval: u32,
     pub sent: u32,
@@ -95,8 +97,8 @@ pub struct Retransmit {
 }
 
 impl Retransmit {
-    fn new() -> Self {
-        Self { rtt: Rtt::new(), timer: None, first: None, first_tsval: 0, sent: 0, timeouts: 0, owed: true, stalled: 0 }
+    fn new(now: Instant) -> Self {
+        Self { rtt: Rtt::new(), timer: None, since: now, first: None, first_tsval: 0, sent: 0, timeouts: 0, owed: true, stalled: 0 }
     }
 
     /// When the first transmission was also the only one.
@@ -118,11 +120,20 @@ impl Retransmit {
         }
     }
 
+    /// The timer, or with none running the give-up, which runs on wall time (§11.3): `bound` from
+    /// the first transmission, or from when the first was owed if none has left.
+    fn deadline(&self, bound: Duration) -> Instant {
+        self.timer.unwrap_or_else(|| self.first.unwrap_or(self.since).after(bound))
+    }
+
     /// `true` when the handshake gives up: at the first expiry at or after `bound` since the first
-    /// transmission (RFC 9293 MUST-23 for an active open).
+    /// transmission (RFC 9293 MUST-23 for an active open), or at `bound` with nothing running.
     fn expire(&mut self, now: Instant, bound: Duration, ctx: &mut Ctx<'_>) -> bool {
-        if !self.timer.is_some_and(|at| at <= now) {
+        if self.deadline(bound) > now {
             return false;
+        }
+        if self.timer.is_none() {
+            return true;
         }
         self.timer = None;
         if self.first.is_some_and(|first| now.since(first) >= bound) {
@@ -169,8 +180,8 @@ pub enum Sent {
 }
 
 impl SynSent {
-    pub fn new(iss: Seq, local: &Local) -> Self {
-        Self { iss, timer: Retransmit::new(), answer: None, buf: Ring::new(local.send_buffer) }
+    pub fn new(iss: Seq, local: &Local, now: Instant) -> Self {
+        Self { iss, timer: Retransmit::new(now), answer: None, buf: Ring::new(local.send_buffer) }
     }
 
     pub fn receive(mut self, seg: &In<'_>, local: &Local, ctx: &mut Ctx<'_>) -> (Option<Self>, Sent) {
@@ -231,24 +242,26 @@ impl SynSent {
         (None, Sent::Established(alloc::boxed::Box::new(sync)))
     }
 
-    pub fn next_segment<T>(&mut self, local: &Local, now: Instant, ask: Ask<'_, T>) -> Result<Option<(Out, T)>, NotReady> {
+    /// Hands off what SYN-SENT owes: `true` if a segment left.
+    pub fn next_segment<T>(&mut self, local: &Local, now: Instant, exit: &mut dyn Exit<T>) -> Result<bool, NotReady> {
         if let Some(rst) = self.answer {
-            let via = ask().ready()?;
+            let via = exit.ask()?;
+            exit.send(via, &Out::rst(&rst), NO_PAYLOAD)?;
             self.answer = None;
-            return Ok(Some((Out::rst(&rst), via)));
+            return Ok(true);
         }
         if !self.timer.owed {
-            return Ok(None);
+            return Ok(false);
         }
-        let via = ask().ready()?;
-        let tsval = crate::tsval(now, local.ts_offset);
-        self.timer.handed_off(now, tsval, true);
-        let syn = Out { seq: self.iss, kind: Kind::Syn(syn_options(local, None, now)), window: local.window, ts: None, sack: NO_BLOCKS, data: (0, 0) };
-        Ok(Some((syn, via)))
+        let via = exit.ask()?;
+        let syn = Out { seq: self.iss, kind: Kind::Syn(syn_options(local, None, now)), window: local.window, ts: None, sack: NO_BLOCKS };
+        exit.send(via, &syn, NO_PAYLOAD)?;
+        self.timer.handed_off(now, crate::tsval(now, local.ts_offset), true);
+        Ok(true)
     }
 
-    pub fn deadline(&self) -> Option<Instant> {
-        self.timer.timer
+    pub fn deadline(&self) -> Instant {
+        self.timer.deadline(limits::SYN_GIVE_UP)
     }
 
     /// `true` when the active open gives up.
@@ -293,12 +306,12 @@ pub enum Rcvd {
 }
 
 impl SynRcvd {
-    pub fn passive(iss: Seq, seg: &In<'_>, negotiated: Negotiated, time_wait: Option<TimeWait>) -> Self {
+    pub fn passive(iss: Seq, seg: &In<'_>, negotiated: Negotiated, time_wait: Option<TimeWait>, now: Instant) -> Self {
         Self {
             iss,
             irs: seg.seq,
             negotiated,
-            timer: Retransmit::new(),
+            timer: Retransmit::new(now),
             dup_answer: false,
             answer: None,
             ack_owed: false,
@@ -395,45 +408,50 @@ impl SynRcvd {
         sync
     }
 
-    pub fn next_segment<T>(&mut self, local: &Local, now: Instant, ask: Ask<'_, T>) -> Result<Option<(Out, T)>, NotReady> {
+    /// Hands off what SYN-RECEIVED owes: `true` if a segment left.
+    pub fn next_segment<T>(&mut self, local: &Local, now: Instant, exit: &mut dyn Exit<T>) -> Result<bool, NotReady> {
         if let Some(rst) = self.answer {
-            let via = ask().ready()?;
+            let via = exit.ask()?;
+            exit.send(via, &Out::rst(&rst), NO_PAYLOAD)?;
             self.answer = None;
-            return Ok(Some((Out::rst(&rst), via)));
+            return Ok(true);
         }
-        let tsval = crate::tsval(now, local.ts_offset);
-        let ts = self.negotiated.ts.map(|ts| ts.option(now));
         if self.timer.owed || self.dup_answer {
-            let via = ask().ready()?;
-            self.dup_answer = false;
-            self.timer.handed_off(now, tsval, self.timer.owed);
+            let via = exit.ask()?;
             let options = syn_options(local, Some(&self.negotiated), now);
-            let syn_ack = Out {
-                seq: self.iss,
-                kind: Kind::SynAck(self.rcv_next(), options),
-                window: local.window,
-                ts: None,
-                sack: NO_BLOCKS,
-                data: (0, 0),
-            };
-            return Ok(Some((syn_ack, via)));
+            let syn_ack = Out { seq: self.iss, kind: Kind::SynAck(self.rcv_next(), options), window: local.window, ts: None, sack: NO_BLOCKS };
+            exit.send(via, &syn_ack, NO_PAYLOAD)?;
+            self.dup_answer = false;
+            self.timer.handed_off(now, crate::tsval(now, local.ts_offset), self.timer.owed);
+            return Ok(true);
         }
         if self.ack_owed {
-            let via = ask().ready()?;
-            self.ack_owed = false;
+            let via = exit.ask()?;
             let ack = Kind::Ack { ack: self.rcv_next(), push: false, fin: false };
-            return Ok(Some((Out { seq: self.iss.add(1), kind: ack, window: local.window, ts, sack: NO_BLOCKS, data: (0, 0) }, via)));
+            let ts = self.negotiated.ts.map(|ts| ts.option(now));
+            exit.send(via, &Out { seq: self.iss.add(1), kind: ack, window: local.window, ts, sack: NO_BLOCKS }, NO_PAYLOAD)?;
+            self.ack_owed = false;
+            return Ok(true);
         }
-        Ok(None)
+        Ok(false)
     }
 
-    pub fn deadline(&self) -> Option<Instant> {
-        self.timer.timer
+    /// 60 s for a passive child, 180 s for an active open.
+    fn give_up(&self) -> Duration {
+        if self.is_passive() {
+            limits::SYNACK_GIVE_UP
+        } else {
+            limits::SYN_GIVE_UP
+        }
     }
 
-    /// `true` when the handshake gives up: 60 s for a passive child, 180 s for an active open.
+    pub fn deadline(&self) -> Instant {
+        self.timer.deadline(self.give_up())
+    }
+
+    /// `true` when the handshake gives up.
     pub fn tick(&mut self, ctx: &mut Ctx<'_>) -> bool {
-        let bound = if self.is_passive() { limits::SYNACK_GIVE_UP } else { limits::SYN_GIVE_UP };
+        let bound = self.give_up();
         self.timer.expire(ctx.now, bound, ctx)
     }
 

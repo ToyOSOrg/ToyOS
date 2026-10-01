@@ -51,12 +51,15 @@ struct Shape {
     reading: u64,
     abort: bool,
     adversary: bool,
+    /// Hop questions answer at random, a frame is now and then refused, and every flow is woken
+    /// now and then.
+    hops: bool,
 }
 
 impl Shape {
     fn new(rng: &mut Rng) -> Self {
         let reading = 5 + rng.below(90);
-        Self { loss: rng.below(8), duplicate: rng.below(5), jitter: rng.below(20), only_acks: false, reading, abort: false, adversary: false }
+        Self { loss: rng.below(8), duplicate: rng.below(5), jitter: rng.below(20), only_acks: false, reading, abort: false, adversary: false, hops: false }
     }
 }
 
@@ -239,7 +242,20 @@ impl Run {
 
     /// The applications write, read and now and then abort; the device's credit comes and goes.
     fn run(&mut self, steps: usize) {
+        if self.shape.hops {
+            let mut rng = self.rng.clone();
+            self.net.hop = Some(Box::new(move |_| match rng.below(20) {
+                0 => Hop::Unreachable,
+                1..=3 => Hop::Pending,
+                _ => Hop::Ready(()),
+            }));
+            let mut rng = Rng::new(self.rng.next());
+            self.net.framed = Some(Box::new(move |_| rng.chance(95)));
+        }
         for _ in 0..steps {
+            if self.shape.hops && self.rng.chance(30) {
+                self.net.nodes.iter_mut().for_each(|n| n.tcp.wake_all());
+            }
             for app in &mut self.net.apps {
                 app.write_limit = Some(if self.rng.chance(60) { 1 + self.rng.below(8000) as usize } else { 0 });
                 app.reading = self.rng.chance(self.shape.reading);
@@ -269,6 +285,8 @@ impl Run {
 
     /// Lets the connection finish on a clean link, and checks each direction arrived whole.
     fn finish(&mut self) {
+        (self.net.hop, self.net.framed) = (None, None);
+        self.net.nodes.iter_mut().for_each(|n| n.tcp.wake_all());
         self.net.impair = link(self.rng.clone(), Shape { loss: 0, duplicate: 0, ..self.shape });
         for app in &mut self.net.apps {
             (app.write_limit, app.read_limit, app.reading) = (None, None, true);
@@ -338,6 +356,23 @@ fn runs(salt: u64, shape: impl Fn(&mut Shape)) {
 #[test]
 fn s_prop_001_snd_una_at_or_before_snd_nxt() {
     runs(0x9e37_79b9, |s| s.loss = 15);
+}
+
+/// No RTO for a segment that never left, and SND.UNA never past SND.NXT, whatever the next hop
+/// answers and whether or not the device frames each segment.
+#[test]
+fn s_prop_001_snd_una_at_or_before_snd_nxt_whatever_the_next_hop_answers() {
+    let (mut failed, mut refused) = (0, 0);
+    for seed in 0..RUNS {
+        let mut run = Run::new(0x2b99_2ddf ^ seed, |s| (s.loss, s.hops) = (5, true));
+        run.run(1500);
+        for node in &run.net.nodes {
+            failed += node.tcp.counters().get(Counter::NextHopFailed);
+            refused += node.tcp.counters().get(Counter::FrameRefused);
+        }
+        run.finish();
+    }
+    assert!(failed > 0 && refused > 0, "the runs meet both: {failed} unreachable, {refused} refused");
 }
 
 #[test]
@@ -424,7 +459,10 @@ fn s_op_025_prop_timestamps_on_every_segment() {
         let tcp = &mut run.net.nodes[node].tcp;
         tcp.abort(now, id).unwrap();
         let mut out = Vec::new();
-        tcp.transmit(now, usize::MAX, |_| Hop::Ready(()), |o, ()| out.push(parse_out(&datagram(o), 0)));
+        tcp.transmit(now, usize::MAX, |_| Hop::Ready(()), |o, ()| {
+            out.push(parse_out(&datagram(o), 0));
+            true
+        });
         if let Some(rst) = out.iter().find(|o| o.flags & RST != 0) {
             assert_eq!(rst.ts, Some((ts.value, ts.echo)), "OP-25: the abort's RST");
         }

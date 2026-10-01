@@ -85,13 +85,12 @@ impl Ip {
         if let Some(refusal) = refusal {
             return self.drop(refusal);
         }
-        let transport = if quote.protocol() == Protocol::Tcp { Transport::Tcp } else { Transport::Udp };
         let Some(&[s0, s1, d0, d1, q0, q1, q2, q3]) = quote.transport() else { return self.drop(Counter::IcmpQuoteShort) };
         let ports = Port::new(u16::from_be_bytes([s0, s1])).zip(Port::new(u16::from_be_bytes([d0, d1])));
         let Some((source_port, destination_port)) = ports else { return self.drop(Counter::IcmpQuoteNotOurs) };
         let flow = Flow { source: quote.source(), source_port, destination: quote.destination(), destination_port };
-        let sequence = (transport == Transport::Tcp).then_some(u32::from_be_bytes([q0, q1, q2, q3]));
-        Some(Delivery::Error(TransportError { iface, transport, flow, sequence, kind, reporter: packet.source() }))
+        let transport = if quote.protocol() == Protocol::Tcp { Transport::Tcp { sequence: u32::from_be_bytes([q0, q1, q2, q3]) } } else { Transport::Udp };
+        Some(Delivery::Error(TransportError { iface, transport, flow, kind, reporter: packet.source() }))
     }
 
     /// §9.2: the reply copies identifier, sequence, data and DSCP, carries no option, ECN 0.

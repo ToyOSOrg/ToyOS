@@ -257,7 +257,7 @@ fn s_ip_nud_016_requests_are_spaced() {
 
     // Advice that reaches a confirmed entry within RETRANS of its last request.
     let mut h = H::fixture_i();
-    let _ = h.ip.resolve(h.clock(), h.if0, R);
+    let _ = h.ip.resolve(h.clock(), h.if0, R, A);
     assert_eq!(h.out().len(), 1, "the request at 0");
     h.at(5);
     h.reply_from(R, MAC_R);
@@ -366,7 +366,7 @@ fn wide_mac(addr: Ipv4Addr) -> MacAddr {
 
 fn reach_wide(h: &mut H, addr: Ipv4Addr) {
     let now = h.clock();
-    let _ = h.ip.resolve(now, h.if0, addr);
+    let _ = h.ip.resolve(now, h.if0, addr, A);
     h.out();
     h.frame(&eth(MAC_A, wide_mac(addr), 0x0806, &arp_packet(2, wide_mac(addr), addr, MAC_A, WIDE_A)));
     assert!(h.is_reachable(addr));
@@ -386,7 +386,7 @@ fn announce_wide(h: &mut H, addr: Ipv4Addr) {
 fn s_ip_nud_022_a_full_table_evicts_in_order() {
     let mut h = wide();
     let (failed, unreachable, stale) = (neighbour(0), neighbour(1), neighbour(2));
-    let _ = h.ip.resolve(h.clock(), h.if0, failed);
+    let _ = h.ip.resolve(h.clock(), h.if0, failed, A);
     reach_wide(&mut h, unreachable);
     h.ip.advise(h.clock(), unreachable, Advice::Reverify);
     ask_wide(&mut h, stale);
@@ -473,28 +473,40 @@ fn s_ip_nud_024_requests_speak_from_the_prompting_source() {
 #[test]
 fn s_ip_nud_025_a_flow_waits_outside() {
     let mut h = H::fixture_i();
-    assert_eq!(h.ip.resolve(h.clock(), h.if0, B), Resolution::Pending);
+    assert_eq!(h.ip.resolve(h.clock(), h.if0, B, A), Resolution::Pending);
     assert_eq!(h.out().iter().map(|o| o.frame.clone()).collect::<Vec<_>>(), [hex(V_ARP_REQ)]);
     h.frame(&hex(V_ARP_REPLY));
     assert!(h.events.contains(&Event::Resolved { iface: h.if0, next_hop: B }));
-    assert_eq!(h.ip.resolve(h.clock(), h.if0, B), Resolution::Resolved(MAC_B));
+    assert_eq!(h.ip.resolve(h.clock(), h.if0, B, A), Resolution::Resolved(MAC_B));
     assert!(h.out().is_empty(), "no segment ever waited in [ip]");
 
     let mut h = H::fixture_i();
-    assert_eq!(h.ip.resolve(h.clock(), h.if0, B), Resolution::Pending);
+    assert_eq!(h.ip.resolve(h.clock(), h.if0, B, A), Resolution::Pending);
     h.out();
     h.run(2_999);
     assert!(!h.events.iter().any(|e| matches!(e, Event::Failed { .. })));
     h.run(3_000);
     assert!(h.events.contains(&Event::Failed { iface: h.if0, next_hop: B }));
-    assert_eq!(h.ip.resolve(h.clock(), h.if0, B), Resolution::Failed);
+    assert_eq!(h.ip.resolve(h.clock(), h.if0, B, A), Resolution::Failed);
+    // A flow told "host unreachable" learns when it may ask again: the hold-down's end, or B's
+    // own announcement.
+    h.run(22_999);
+    assert!(!h.events.iter().any(|e| matches!(e, Event::Cleared { .. })));
+    h.run(23_000);
+    assert!(h.events.contains(&Event::Cleared { iface: h.if0, next_hop: B }));
+    assert_eq!(h.ip.resolve(h.clock(), h.if0, B, A), Resolution::Pending);
+    h.run(26_000);
+    h.events.clear();
+    h.frame(&hex(V_ARP_REPLY));
+    assert_eq!(h.events, [Event::Cleared { iface: h.if0, next_hop: B }]);
+    assert!(matches!(h.state(B), Some(Nud::Stale(_))));
 }
 
 #[test]
 fn s_ip_nud_026_a_flow_moves_stale_to_delay() {
     let mut h = H::fixture_i();
     h.stale(B, MAC_B);
-    assert_eq!(h.ip.resolve(h.clock(), h.if0, B), Resolution::Resolved(MAC_B));
+    assert_eq!(h.ip.resolve(h.clock(), h.if0, B, A), Resolution::Resolved(MAC_B));
     assert!(matches!(h.state(B), Some(Nud::Delay(_))));
 }
 
@@ -511,7 +523,7 @@ fn s_ip_nud_027_prop_reachable_time_is_drawn_every_two_hours() {
             t += 1 + rng.below(1_200_000);
             h.at(t);
             let addr = Ipv4Addr::new(192, 0, 2, 2 + (t % 200) as u8);
-            let _ = h.ip.resolve(h.clock(), h.if0, addr);
+            let _ = h.ip.resolve(h.clock(), h.if0, addr, A);
             h.out();
             h.reply_from(addr, MAC_B);
             h.fire(t);
@@ -636,7 +648,7 @@ fn s_ip_nud_029_released_datagrams_are_evicted_last() {
     h.assign(if1, a1, 25, 5_000);
     h.settle();
     let x = Ipv4Addr::new(192, 0, 2, 200);
-    let _ = h.ip.resolve(h.clock(), if0, x);
+    let _ = h.ip.resolve(h.clock(), if0, x, A);
     h.run(3_000);
     assert!(matches!(h.ip.neighbour(if0, x), Some(Nud::Failed)));
     for data in [b"1", b"2"] {

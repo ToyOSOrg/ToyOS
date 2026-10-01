@@ -323,7 +323,7 @@ fn two_gateways() -> H {
 
 fn fail(h: &mut H, gateway: Ipv4Addr) {
     let start = h.now;
-    let _ = h.ip.resolve(h.clock(), h.if0, gateway);
+    let _ = h.ip.resolve(h.clock(), h.if0, gateway, A);
     h.out();
     h.run(start + 3_000);
     assert!(matches!(h.state(gateway), Some(Nud::Failed)));

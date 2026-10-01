@@ -435,6 +435,10 @@ pub struct H {
     pub listener: Option<ListenerId>,
     pub events: Vec<Event>,
     pub hop: Hops,
+    /// Hop questions asked so far.
+    pub asked: usize,
+    /// The sink refuses every frame.
+    pub unframed: bool,
 }
 
 impl H {
@@ -459,6 +463,8 @@ impl H {
             listener: None,
             events: Vec::new(),
             hop: Box::new(|_, _| Hop::Ready(())),
+            asked: 0,
+            unframed: false,
         }
     }
 
@@ -538,8 +544,17 @@ impl H {
     pub fn transmit(&mut self) -> Vec<O> {
         let credit = self.credit.unwrap_or(usize::MAX);
         let mut raw = Vec::new();
-        let (now, t, hop) = (self.now, self.t, &mut self.hop);
-        self.tcp.transmit(now, credit, |tuple| hop(t, tuple), |out, ()| raw.push(datagram(out)));
+        let (now, t, hop, asked, unframed) = (self.now, self.t, &mut self.hop, &mut self.asked, self.unframed);
+        let ask = |tuple: &Tuple| {
+            *asked += 1;
+            hop(t, tuple)
+        };
+        self.tcp.transmit(now, credit, ask, |out, ()| {
+            if !unframed {
+                raw.push(datagram(out));
+            }
+            !unframed
+        });
         if let Some(c) = self.credit.as_mut() {
             *c = c.saturating_sub(raw.len());
         }
@@ -706,6 +721,16 @@ pub fn fixture_e() -> H {
 /// Fixture EF: established, full options, A is the client.
 pub fn fixture_ef() -> H {
     client(65_535, seg(5000).ack(1001).syn().wnd(65_535).mss(1460).sackok().ts(50_000, 990).ws(7))
+}
+
+/// A listens on 80 at t = 0, for B's SYNs from 40000.
+pub fn listening() -> H {
+    let mut h = H::new(65_535);
+    h.peer = (B, 40_000);
+    h.local = (A, 80);
+    h.start(0);
+    h.listener = Some(h.tcp.listen(A, Some(port(80)), || 0).unwrap());
+    h
 }
 
 /// A listens on 80; B's SYN from 40000 at −20, its ACK at 0; the user accepts.

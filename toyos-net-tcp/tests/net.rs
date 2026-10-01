@@ -1,5 +1,4 @@
-//! Loss, reordering and wraparound on TCP's own two-node network, and a SYN flood (LS-12). Ours
-//! against ours: a consistency control, not an independent oracle.
+//! Ours against ours: a consistency control, not an independent oracle.
 
 mod common;
 

@@ -6,7 +6,8 @@
 //! credit; nothing here reads a clock, draws randomness or does I/O.
 //!
 //! **Pull egress.** A segment exists only while [`Tcp::transmit`] hands it to the caller's sink,
-//! built from the state of that moment, once the caller has answered that its next hop is known.
+//! built from the state of that moment, once the caller has answered that its next hop is known;
+//! it counts as sent only once the sink took its frame.
 //!
 //! **Refusals are values.** Legacy or insecure input is refused, counted in [`Counters`], and
 //! named by an [`Event::Refused`] the shell logs through [`RefusalLog`].
@@ -269,15 +270,21 @@ pub enum Hop<T> {
     Unreachable,
 }
 
-/// The hop question for one 4-tuple, asked once a segment is due and before anything about it
-/// is committed: an answer other than `Ready` leaves everything owed as it was.
-pub(crate) type Ask<'a, T> = &'a mut dyn FnMut() -> Hop<T>;
+/// One flow's way out of a transmit opportunity: the hop question, asked once a segment is due and
+/// before it is built (`ip.md` §6.7 (1)), then the segment's frame, built before anything about the
+/// segment is committed (§11.3). Either refusing leaves everything owed as it was.
+pub(crate) trait Exit<T> {
+    fn ask(&mut self) -> Result<T, NotReady>;
+    fn send(&mut self, via: T, segment: &conn::Out, payload: (&[u8], &[u8])) -> Result<(), NotReady>;
+}
 
-/// Why a due segment was not built.
+/// Why a due segment did not leave.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NotReady {
     Pending,
     Unreachable,
+    /// The caller could not frame it.
+    Unframed,
 }
 
 impl<T> Hop<T> {

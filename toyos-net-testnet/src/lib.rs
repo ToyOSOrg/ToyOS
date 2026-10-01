@@ -28,6 +28,8 @@ use toyos_net_wire::{Instant, Port};
 const PASSES_PER_INSTANT: usize = 1_000;
 /// What an application hands its stack per call.
 const CHUNK: u64 = 65_536;
+/// Every link's rate, in bits per second.
+const RATE: u64 = 1_000_000_000;
 
 /// What a node's device offers each pass.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,8 +57,6 @@ pub type Rule = Box<dyn FnMut(&[u8]) -> Fate>;
 /// One direction between two nodes.
 pub struct Link {
     pub delay: Duration,
-    /// Bits per second.
-    pub rate: u64,
     /// Everything sent in `[start, end)` is lost.
     pub dark: Option<(Instant, Instant)>,
     pub rule: Option<Rule>,
@@ -67,7 +67,7 @@ pub struct Link {
 
 impl Default for Link {
     fn default() -> Self {
-        Self { delay: Duration::from_micros(50), rate: 1_000_000_000, dark: None, rule: None, held: None, free: Instant::from_nanos(0) }
+        Self { delay: Duration::from_micros(50), dark: None, rule: None, held: None, free: Instant::from_nanos(0) }
     }
 }
 
@@ -75,7 +75,7 @@ impl Link {
     /// Puts `frame` on the link behind the frame before it; when its last bit arrives.
     fn serialise(&mut self, now: Instant, frame: &[u8]) -> Instant {
         let bits = u64::try_from(frame.len()).expect("a length") * 8;
-        self.free = self.free.max(now).after(Duration::from_nanos(bits * 1_000_000_000 / self.rate));
+        self.free = self.free.max(now).after(Duration::from_nanos(bits * 1_000_000_000 / RATE));
         self.free.after(self.delay)
     }
 }

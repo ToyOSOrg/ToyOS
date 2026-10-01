@@ -1,13 +1,14 @@
 //! Pull egress: segments are built at a transmit opportunity once their next hop is known, and
-//! timers start at hand-off. PL-11, the `many_up` shape, runs on `toyos-net-testnet` in
-//! `toyos-net-shard`'s tests.
+//! timers start at hand-off.
 
 mod common;
 
 use std::net::Ipv4Addr;
 
+use std::time::Duration;
+
 use common::*;
-use toyos_net_tcp::{Counter, Failure, Hop, SoftError, State};
+use toyos_net_tcp::{Counter, Failure, Hop, Keepalive, Options, SoftError, State};
 use toyos_net_wire::icmp::UnreachableCode;
 
 const C: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 3);
@@ -169,9 +170,50 @@ fn s_pl_010_give_up_before_retransmission() {
     assert_eq!(h.count(Counter::Rto), rtos, "the give-up came first; no retransmission was made due");
 }
 
+#[test]
+fn s_pl_009_a_handshake_gives_up_without_credit() {
+    let mut h = H::new(65_535);
+    h.credit = Some(0);
+    connect_at_0(&mut h);
+    nothing(&h.at(179_999));
+    assert_eq!(h.status().state, State::SynSent);
+    nothing(&h.at(180_000));
+    assert_eq!(h.status().failure, Some(Failure::TimedOut), "no SYN ever left, yet the give-up ran");
+
+    let mut h = listening();
+    h.credit = Some(0);
+    nothing(&h.input(0, seg(5000).syn().mss(1460)));
+    nothing(&h.at(59_999));
+    assert_eq!(h.count(Counter::SynAckGiveUp), 0);
+    nothing(&h.at(60_000));
+    assert_eq!(h.count(Counter::SynAckGiveUp), 1);
+    assert_eq!(h.tcp.next_deadline(), None);
+}
+
+#[test]
+fn s_pl_001_a_frame_the_sink_refuses_never_left() {
+    let mut h = fixture_e();
+    h.unframed = true;
+    nothing(&h.send(0, 1000));
+    let info = h.info();
+    assert_eq!((info.snd_nxt, info.rtx_timer), (info.snd_una, None), "nothing of it counts as sent");
+    assert_eq!(h.count(Counter::FrameRefused), 1);
+    nothing(&h.at(5_000));
+    assert_eq!(h.count(Counter::FrameRefused), 1, "it waits for a change, like a pending flow");
+    h.unframed = false;
+    expect(&woken(&mut h, 5_000), &["SEQ=1001 ACK=5001 LEN=1000"]);
+    assert_eq!(h.info().rtx_timer, Some(h.instant(5_200)), "timed from its hand-off");
+}
+
 /// B's next hop as `answer` gives it at spec time t; every other next hop is known.
 fn hop_b(answer: impl Fn(i64) -> Hop<()> + 'static) -> Hops {
     Box::new(move |t, tuple| if tuple.remote.addr == B { answer(t) } else { Hop::Ready(()) })
+}
+
+/// [ip] reported a change for B's next hop: what waits on it asks again at the opportunity at `t`.
+fn woken(h: &mut H, t: i64) -> Vec<O> {
+    h.tcp.wake(B);
+    h.at(t)
 }
 
 fn connect_at_0(h: &mut H) {
@@ -184,6 +226,16 @@ fn counters(h: &H) -> Vec<(&'static str, u64)> {
     h.tcp.counters().iter().collect()
 }
 
+/// Fixture E and a second connection, 49153 to 192.0.2.3:80, established with its hop ready.
+fn with_second() -> (H, toyos_net_tcp::ConnId) {
+    let mut h = fixture_e();
+    let now = h.now();
+    let second = h.tcp.connect(now, A, Some(port(49153)), ep(C, 80)).unwrap();
+    h.transmit();
+    h.deliver(seg(5000).ack(1001).syn().wnd(65_535).mss(1460).from(C, 80).to(A, 49153));
+    (h, second)
+}
+
 #[test]
 fn s_pl_012_a_flow_builds_nothing_while_its_next_hop_is_pending() {
     let mut h = H::new(65_535);
@@ -191,16 +243,13 @@ fn s_pl_012_a_flow_builds_nothing_while_its_next_hop_is_pending() {
     connect_at_0(&mut h);
     nothing(&h.transmit());
     nothing(&h.at(99));
-    assert_eq!(h.tcp.next_deadline(), None, "no retransmission timer armed");
+    assert_eq!(h.asked, 1, "a waiting flow is not asked again until its next hop changes");
+    assert_eq!(h.tcp.next_deadline(), Some(h.instant(180_000)), "no retransmission timer armed, only the give-up");
     assert_eq!(h.count(Counter::Rto), 0);
-    expect(&h.at(100), &["SEQ=1000 CTL=SYN WND=65535 MSS=1460 SACKOK TS=1100/0 WS=0"]);
+    expect(&woken(&mut h, 100), &["SEQ=1000 CTL=SYN WND=65535 MSS=1460 SACKOK TS=1100/0 WS=0"]);
     assert_eq!(h.tcp.next_deadline(), Some(h.instant(1_100)), "timed from 100, when it was built");
 
-    let mut h = fixture_e();
-    let now = h.now();
-    let second = h.tcp.connect(now, A, Some(port(49153)), ep(C, 80)).unwrap();
-    h.transmit();
-    h.deliver(seg(5000).ack(1001).syn().wnd(65_535).mss(1460).from(C, 80).to(A, 49153));
+    let (mut h, second) = with_second();
     h.hop = hop_b(|t| if t < 500 { Hop::Pending } else { Hop::Ready(()) });
     h.credit = Some(0);
     h.send(0, 1000);
@@ -215,7 +264,7 @@ fn s_pl_012_a_flow_builds_nothing_while_its_next_hop_is_pending() {
     assert_eq!(info.rtx_timer, None, "nothing of E's is timed");
     nothing(&h.at(499));
     h.credit = None;
-    let outs = h.at(500);
+    let outs = woken(&mut h, 500);
     expect(&outs, &["SEQ=1001 ACK=5001 LEN=1000", "SEQ=1001 LEN=1000"]);
     assert_eq!((outs[0].dst, outs[1].dst), ((B, 80), (C, 80)), "E's segment, then the second's retransmission");
     assert_eq!(h.info().rtx_timer, Some(h.instant(700)));
@@ -229,7 +278,7 @@ fn s_pl_013_a_local_host_unreachable_fails_a_connect_at_once() {
     nothing(&h.transmit());
     nothing(&h.at(2_999));
     assert_eq!(h.status().state, State::SynSent);
-    nothing(&h.at(3_000));
+    nothing(&woken(&mut h, 3_000));
     let status = h.status();
     assert_eq!((status.state, status.failure), (State::Closed, Some(HOST_UNREACHABLE)));
     h.hop = hop_b(|_| Hop::Ready(()));
@@ -247,7 +296,7 @@ fn s_pl_013_a_local_host_unreachable_fails_a_connect_at_once() {
     expect(&h.transmit(), &["CTL=SYN"]);
     nothing(&h.at(3_999));
     assert_eq!((h.status().state, h.count(Counter::Rto)), (State::SynSent, 1), "the retransmission due at 1,000 is never built");
-    nothing(&h.at(4_000));
+    nothing(&woken(&mut h, 4_000));
     assert_eq!(h.status().failure, Some(HOST_UNREACHABLE));
     assert_eq!((h.count(Counter::Rto), h.count(Counter::NextHopFailed)), (1, 1));
 }
@@ -263,24 +312,24 @@ fn s_pl_014_a_synchronized_connection_records_host_unreachable_soft() {
     nothing(&h.send(0, 100));
     nothing(&h.at(2_999));
     assert_eq!(h.status().soft_error, None);
-    nothing(&h.at(3_000));
+    nothing(&woken(&mut h, 3_000));
     let status = h.status();
     assert_eq!((status.state, status.soft_error), (State::Established, Some(SoftError::Unreachable(UnreachableCode::Host))));
     assert_eq!((h.count(Counter::Rto), h.count(Counter::NextHopFailed), h.count(Counter::IcmpSoft)), (0, 1, 0));
-    for t in [3_001, 3_002] {
-        let before = counters(&h);
+    // Ruled (Q8): one count per segment not built, never one per opportunity.
+    let (before, asked) = (counters(&h), h.asked);
+    for t in [3_001, 3_002, 29_999] {
         nothing(&h.at(t));
-        let after = counters(&h);
-        let moved: Vec<_> = before.iter().zip(&after).filter(|(b, a)| b != a).map(|(b, a)| (b.0, a.1 - b.1)).collect();
-        assert_eq!(moved, [("tcp.next-hop-failed", 1)], "an opportunity at {t} moves one counter by one");
     }
-    expect(&h.at(30_000), &["SEQ=1001 ACK=5001 LEN=100"]);
+    assert_eq!((counters(&h), h.asked), (before, asked), "later opportunities ask nothing and count nothing");
+    expect(&woken(&mut h, 30_000), &["SEQ=1001 ACK=5001 LEN=100"]);
     h.input(30_010, seg(5001).ack(1101));
     assert_eq!(h.status().soft_error, None, "forward progress clears it");
 
     let mut h = fixture_e();
     h.hop = hop_b(|t| if t < 3_000 { Hop::Pending } else { Hop::Unreachable });
     h.send(0, 100);
+    woken(&mut h, 3_000);
     nothing(&h.at(899_999));
     assert_eq!(h.status().state, State::Established);
     nothing(&h.at(900_000));
@@ -291,6 +340,22 @@ fn s_pl_014_a_synchronized_connection_records_host_unreachable_soft() {
     h.hop = hop_b(|_| Hop::Unreachable);
     nothing(&h.input(1, seg(5001).ack(1001)));
     assert_eq!((h.status().soft_error, h.count(Counter::NextHopFailed)), (None, 0));
+
+    // The shard spends one frame of credit per opportunity: E is asked at the first and at none
+    // of the three after it, while the second connection sends.
+    let (mut h, second) = with_second();
+    h.hop = hop_b(|_| Hop::Unreachable);
+    h.credit = Some(0);
+    h.send(0, 100);
+    let now = h.now();
+    h.tcp.send(now, second, &[7; 4 * 1460]).unwrap();
+    let asked = h.asked;
+    for _ in 0..4 {
+        h.credit = Some(1);
+        let outs = h.transmit();
+        assert_eq!(outs.iter().map(|o| o.dst).collect::<Vec<_>>(), [(C, 80)]);
+    }
+    assert_eq!((h.count(Counter::NextHopFailed), h.asked - asked), (1, 5), "E once, the second's four");
 }
 
 #[test]
@@ -303,7 +368,7 @@ fn s_pl_015_what_is_owed_outside_a_connection_waits_for_its_next_hop() {
         h.hop = hop_b(move |t| if t < 50 { Hop::Pending } else { then });
         nothing(&h.call(0, |tcp, now, id| tcp.abort(now, id).unwrap()).1);
         nothing(&h.at(49));
-        let outs = h.at(50);
+        let outs = woken(&mut h, 50);
         match left {
             true => expect(&outs, &["SEQ=1001 ACK=5001 CTL=RST,ACK"]),
             false => nothing(&outs),
@@ -321,7 +386,7 @@ fn s_pl_015_what_is_owed_outside_a_connection_waits_for_its_next_hop() {
         h.hop = hop_b(move |t| if t < 50 { Hop::Pending } else { then });
         nothing(&h.input(0, seg(5000).syn().from(B, 40_000).to(A, 81)));
         nothing(&h.at(49));
-        let outs = h.at(50);
+        let outs = woken(&mut h, 50);
         match left {
             true => expect(&outs, &["SEQ=0 ACK=5001 CTL=RST,ACK"]),
             false => nothing(&outs),
@@ -339,8 +404,11 @@ fn s_pl_015_what_is_owed_outside_a_connection_waits_for_its_next_hop() {
             _ => then,
         });
         nothing(&h.input(1_000, seg(5001).ack(1002).fin()));
+        let asked = h.asked;
+        nothing(&h.input(1_010, seg(5001).ack(1002).fin()));
+        assert_eq!(h.asked, asked, "the waiting ACK is owed once and asked once");
         nothing(&h.at(1_049));
-        let outs = h.at(1_050);
+        let outs = woken(&mut h, 1_050);
         match left {
             true => expect(&outs, &["SEQ=1002 ACK=5002 CTL=ACK"]),
             false => nothing(&outs),
@@ -348,4 +416,41 @@ fn s_pl_015_what_is_owed_outside_a_connection_waits_for_its_next_hop() {
         nothing(&h.at(1_051));
         assert_eq!((h.count(Counter::NextHopFailed), h.tcp.time_wait_count()), (failed, 1));
     }
+}
+
+#[test]
+fn s_hs_034_a_child_whose_synack_cannot_leave_gives_up() {
+    let mut h = listening();
+    h.hop = hop_b(|t| if t < 3_000 { Hop::Pending } else { Hop::Unreachable });
+    nothing(&h.input(0, seg(5000).syn().mss(1460)));
+    nothing(&woken(&mut h, 3_000));
+    assert_eq!(h.count(Counter::NextHopFailed), 1);
+    // The hold-down's end: the child asks again, and is told again.
+    nothing(&woken(&mut h, 23_000));
+    assert_eq!(h.count(Counter::NextHopFailed), 2);
+    nothing(&h.at(59_999));
+    assert_eq!(h.count(Counter::SynAckGiveUp), 0);
+    nothing(&h.at(60_000));
+    assert_eq!(h.count(Counter::SynAckGiveUp), 1, "60 s from the SYN, though no SYN-ACK left");
+    assert_eq!(h.tcp.next_deadline(), None);
+    // Its slot is free: B's SYN again is a new child, answered once the hop is.
+    h.hop = hop_b(|_| Hop::Ready(()));
+    expect(&h.input(61_000, seg(5000).syn().mss(1460)), &["CTL=SYN,ACK"]);
+}
+
+#[test]
+fn s_ka_003_probes_that_cannot_leave_still_give_up() {
+    let mut h = fixture_e();
+    let options = Options { keepalive: Some(Keepalive { idle: Duration::from_secs(7_200), ..Keepalive::default() }), ..Options::default() };
+    h.call(0, |tcp, now, id| tcp.set_options(now, id, options)).0.unwrap();
+    h.hop = hop_b(|t| if t < 7_200_000 { Hop::Ready(()) } else { Hop::Unreachable });
+    nothing(&h.at(7_200_000));
+    let status = h.status();
+    assert_eq!((status.state, status.soft_error), (State::Established, Some(SoftError::Unreachable(UnreachableCode::Host))));
+    nothing(&h.at(7_874_999));
+    assert_eq!(h.status().state, State::Established);
+    nothing(&h.at(7_875_000));
+    let status = h.status();
+    assert_eq!((status.state, status.failure), (State::Closed, Some(Failure::TimedOut)), "as nine unanswered probes would");
+    assert_eq!((h.count(Counter::KeepaliveProbe), h.count(Counter::NextHopFailed)), (0, 2), "the probe, then the reset");
 }

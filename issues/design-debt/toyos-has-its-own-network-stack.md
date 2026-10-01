@@ -30,7 +30,13 @@ What stage 3 does not yet meet:
 
 - Its only oracles are the readers' own: the specifications' scenarios and byte vectors, and the tests' own RFC 1071 sum. No behaviour of `toyos-net-ip`, `toyos-net-udp` or `toyos-dhcp` is checked against anything the readers did not write. Exit: exchanges captured from slirp and the T14 (ARP, DHCP, ICMP, IGMP) replay through them at stage 5 and match.
 
-What stage 4 has not yet built: `toyos-net-shard` composes one interface's [ip], [tcp] and [udp] with `receive`, `transmit` (pull, [ip]'s frames first, TCP and UDP taking turns), `next_deadline` and `fire`, and `toyos-net-testnet` runs N shards on one moved clock with impairment and a pcap capture; neither has deficit round-robin across flows (DRR-01–03; until it lands an owed RST or TIME-WAIT ACK waits for TCP's turn, behind at most one UDP datagram), flow steering, inter-shard mailboxes and their loom models, readiness events, inspect keys, the segment-script runner, the `mutate-*` `CONTROLS` rows, the resets owed when an address is lost (`ip.md` §8.4), or the remaining [net] scenarios at frame level: NET-02, NET-05 and NET-07–16 still run on `toyos-net-tcp`'s own two-node network, which goes with the last of them. Exit: each lands, or the specification moves it to a later stage.
+What stage 4 has not yet built: deficit round-robin across flows (DRR-01–03; until it lands an owed RST or TIME-WAIT ACK waits for TCP's turn, behind at most one UDP datagram), flow steering, inter-shard mailboxes and their loom models, readiness events, inspect keys, the segment-script runner, the `mutate-*` `CONTROLS` rows, the resets owed when an address is lost (`ip.md` §8.4), or the remaining [net] scenarios at frame level: NET-02, NET-05 and NET-07–16 still run on `toyos-net-tcp`'s own two-node network, which goes with the last of them. Exit: each lands, or the specification moves it to a later stage.
+
+What stage 4 departs from its specifications:
+
+- `ip.md` §6.7 (4) and PL-12 have a waiting flow ask again at every transmit opportunity. [tcp] asks it again only once `Tcp::wake` names its peer, which [shard] calls when [ip] reports a change for that next hop (`Event::Resolved`, `Failed`, `Cleared`) or for the routes, so a waiting flow costs one question per change. Exit: the specification takes the wake.
+- PL-14 counts `tcp.next-hop-failed` once per opportunity; the spec owner ruled once per segment not built, which [tcp] counts. Exit: PL-14 reads as the ruling.
+- `tcp.frame-refused` and [ip]'s `Event::Cleared` are not in the specifications. Exit: they name them.
 
 The shard keeps no timing wheel: its deadlines stay in [tcp]'s and [ip]'s ordered sets, composed through `next_deadline()` (architecture §3.2). Exit: a soak or many-flows measurement shows the ordered sets cost, and the wheel lands.
 

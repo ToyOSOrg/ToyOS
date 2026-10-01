@@ -100,7 +100,10 @@ fn s_op_008_timestamps_take_twelve_bytes() {
     let mut sizes = Vec::new();
     let (_, _) = again.call(1, |tcp, now, id| {
         tcp.send(now, id, &data).unwrap();
-        tcp.transmit(now, usize::MAX, |_| Hop::Ready(()), |o, ()| sizes.push(datagram(o).len()));
+        tcp.transmit(now, usize::MAX, |_| Hop::Ready(()), |o, ()| {
+            sizes.push(datagram(o).len());
+            true
+        });
     });
     assert_eq!(sizes, [1500, 1500], "20 + 32 + 1448");
 }

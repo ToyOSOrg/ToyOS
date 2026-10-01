@@ -14,7 +14,7 @@ use crate::rtt::{Rtt, RTO_AFTER_HANDSHAKE_LOSS, RTO_MAX};
 use crate::rx::{Placed, Rx};
 use crate::seq::{Seq, Stamp};
 use crate::tx::Tx;
-use crate::{limits, Ask, Error, Event, Instant, NotReady, Options, Received, State, Tuple};
+use crate::{limits, Error, Event, Exit, Instant, NotReady, Options, Received, State, Tuple};
 
 /// RFC 7323 §5.5: TS.Recent older than this no longer judges PAWS.
 const TS_RECENT_VALID: Duration = Duration::from_secs(24 * 24 * 3600);
@@ -186,8 +186,7 @@ pub type Blocks = ([SackBlock; 4], usize);
 
 pub const NO_BLOCKS: Blocks = ([SackBlock { left: toyos_net_wire::tcp::SeqNum::new(0), right: toyos_net_wire::tcp::SeqNum::new(0) }; 4], 0);
 
-/// A segment decided at a transmit opportunity; `data` is an offset and length into the send
-/// buffer, read before anything else changes.
+/// A segment's headers as a transmit opportunity builds them; its payload travels beside it.
 #[derive(Clone, Copy, Debug)]
 pub struct Out {
     pub seq: Seq,
@@ -195,12 +194,14 @@ pub struct Out {
     pub window: u16,
     pub ts: Option<Timestamps>,
     pub sack: Blocks,
-    pub data: (usize, usize),
 }
+
+/// The payload of a segment that carries none.
+pub const NO_PAYLOAD: (&[u8], &[u8]) = (&[], &[]);
 
 impl Out {
     pub const fn rst(rst: &Rst) -> Self {
-        Self { seq: rst.seq, kind: Kind::Rst(rst.ack), window: 0, ts: rst.ts, sack: NO_BLOCKS, data: (0, 0) }
+        Self { seq: rst.seq, kind: Kind::Rst(rst.ack), window: 0, ts: rst.ts, sack: NO_BLOCKS }
     }
 }
 
@@ -344,7 +345,8 @@ pub struct Sync {
     last_heard: Instant,
     ka_probes: u32,
     ka_last: Option<Instant>,
-    ka_due: bool,
+    /// When the owed keepalive probe became due.
+    ka_due: Option<Instant>,
     last_unsolicited: Option<Instant>,
     urgent_logged: bool,
     pub delivery_problem: bool,
@@ -408,7 +410,7 @@ impl Sync {
             last_heard: now,
             ka_probes: 0,
             ka_last: None,
-            ka_due: false,
+            ka_due: None,
             last_unsolicited: None,
             urgent_logged: false,
             delivery_problem: false,
@@ -484,6 +486,7 @@ impl Sync {
         }
         self.last_heard = now;
         self.ka_probes = 0;
+        self.ka_due = None;
         let (seq, text, fin) = self.trim(seg);
         let Some(ack) = seg.ack else {
             return Verdict::Keep;
@@ -893,11 +896,16 @@ impl Sync {
 
     // ---- timers ----
 
+    /// The next probe's time; with one owed, the give-up's, which runs on wall time whether or not
+    /// the probes leave (§11.3): the owed one and the rest at their interval, unanswered.
     fn keepalive_at(&self, ctx: &Ctx<'_>) -> Option<Instant> {
         let ka = ctx.options.keepalive?;
         let open = matches!(self.phase, Phase::Established | Phase::CloseWait | Phase::FinWait2);
-        if ctx.orphan || !open || self.tx.owes() || self.ka_due {
+        if ctx.orphan || !open || self.tx.owes() {
             return None;
+        }
+        if let Some(due) = self.ka_due {
+            return Some(due.after(ka.interval.saturating_mul(ka.probes.saturating_sub(self.ka_probes))));
         }
         Some(match self.ka_last.filter(|_| self.ka_probes > 0) {
             Some(last) => last.after(ka.interval),
@@ -947,10 +955,10 @@ impl Sync {
             }
         }
         if self.keepalive_at(ctx).is_some_and(|at| at <= now) {
-            if ctx.options.keepalive.is_some_and(|ka| self.ka_probes >= ka.probes) {
+            if self.ka_due.is_some() || ctx.options.keepalive.is_some_and(|ka| self.ka_probes >= ka.probes) {
                 return Tick::TimedOut;
             }
-            self.ka_due = true;
+            self.ka_due = Some(now);
         }
         if self.sws.is_some_and(|at| at <= now) {
             self.sws = None;
@@ -997,27 +1005,21 @@ impl Sync {
 
     // ---- transmit ----
 
-    /// The next segment this opportunity owes, after SYNs and resets.
-    pub fn next_segment<T>(&mut self, ctx: &mut Ctx<'_>, ask: Ask<'_, T>) -> Result<Option<(Out, T)>, NotReady> {
+    /// Hands off the next segment this opportunity owes, after SYNs and resets: `true` if one left.
+    pub fn next_segment<T>(&mut self, ctx: &mut Ctx<'_>, exit: &mut dyn Exit<T>) -> Result<bool, NotReady> {
         if self.rx.dup_owed > 0 {
-            let via = ask().ready()?;
+            self.emit_ack(ctx, exit, self.tx.nxt)?;
             self.rx.dup_owed = self.rx.dup_owed.saturating_sub(1);
-            return Ok(Some((self.pure(ctx.now, self.tx.nxt), via)));
+            return Ok(true);
         }
-        if let Some(built) = self.retransmission(ctx, ask)? {
-            return Ok(Some(built));
-        }
-        if let Some(built) = self.new_data(ctx, ask)? {
-            return Ok(Some(built));
-        }
-        if let Some(built) = self.probe(ctx, ask)? {
-            return Ok(Some(built));
+        if self.retransmission(ctx, exit)? || self.new_data(ctx, exit)? || self.probe(ctx, exit)? {
+            return Ok(true);
         }
         if self.rx.ack_now {
-            let via = ask().ready()?;
-            return Ok(Some((self.pure(ctx.now, self.tx.nxt), via)));
+            self.emit_ack(ctx, exit, self.tx.nxt)?;
+            return Ok(true);
         }
-        Ok(None)
+        Ok(false)
     }
 
     fn blocks(&self) -> Blocks {
@@ -1034,23 +1036,41 @@ impl Sync {
         self.smss().saturating_sub(sack).max(1)
     }
 
-    fn pure(&mut self, now: Instant, seq: Seq) -> Out {
-        let blocks = self.blocks();
-        self.finish(now, seq, 0, false, blocks)
-    }
-
-    fn finish(&mut self, now: Instant, seq: Seq, len: u32, fin: bool, sack: Blocks) -> Out {
+    /// Asks for the next hop, then hands `exit` the segment `[seq, seq + len)` (and the FIN after
+    /// it) as the state of now builds it, with its payload; nothing changes here.
+    fn frame<T>(&self, now: Instant, exit: &mut dyn Exit<T>, seq: Seq, len: u32, fin: bool, sack: Blocks) -> Result<(), NotReady> {
+        let via = exit.ask()?;
         let push = len > 0 && seq.add(len) == self.tx.data_end();
-        let window = self.rx.advertise(self.smss());
+        let window = self.rx.offer(self.smss()).1;
         let ts = self.ts.map(|ts| ts.option(now));
-        self.rx.sent_ack();
-        let data = (self.tx.offset(seq).min(self.tx.buf.len()), usize::try_from(len).unwrap_or(0));
-        Out { seq, kind: Kind::Ack { ack: self.rx.next, push, fin }, window, ts, sack, data }
+        let out = Out { seq, kind: Kind::Ack { ack: self.rx.next, push, fin }, window, ts, sack };
+        let offset = self.tx.offset(seq).min(self.tx.buf.len());
+        exit.send(via, &out, self.tx.buf.slices(offset, usize::try_from(len).unwrap_or(0)))
     }
 
-    /// Hands off `[start, start + len)` (and the FIN after it): the sequence space counts as sent
+    /// A segment without sequence space at `seq`: it discharges every owed acknowledgment.
+    fn emit_ack<T>(&mut self, ctx: &mut Ctx<'_>, exit: &mut dyn Exit<T>, seq: Seq) -> Result<(), NotReady> {
+        self.frame(ctx.now, exit, seq, 0, false, self.blocks())?;
+        self.acknowledged();
+        Ok(())
+    }
+
+    /// `[start, start + len)` and the FIN after it, framed, and only then handed off.
+    fn emit<T>(&mut self, ctx: &mut Ctx<'_>, exit: &mut dyn Exit<T>, start: Seq, len: u32, fin: bool, sack: Blocks) -> Result<(), NotReady> {
+        self.frame(ctx.now, exit, start, len, fin, sack)?;
+        self.hand_off(ctx, start, len, fin);
+        Ok(())
+    }
+
+    /// Every segment sent carries the window and the acknowledgment it was built with.
+    fn acknowledged(&mut self) {
+        self.rx.advertise(self.smss());
+        self.rx.sent_ack();
+    }
+
+    /// `[start, start + len)` (and the FIN after it) has left: the sequence space counts as sent
     /// and the timer runs from now (RFC 6298 (5.1)), never earlier.
-    fn hand_off(&mut self, ctx: &mut Ctx<'_>, start: Seq, len: u32, fin: bool, sack: Blocks) -> Out {
+    fn hand_off(&mut self, ctx: &mut Ctx<'_>, start: Seq, len: u32, fin: bool) {
         let now = ctx.now;
         let end = start.add(len).add(u32::from(fin));
         let old = self.tx.nxt;
@@ -1074,7 +1094,7 @@ impl Sync {
         }
         self.arm(now);
         self.refresh(now);
-        self.finish(now, start, len, fin, sack)
+        self.acknowledged();
     }
 
     /// Whether the FIN rides on a segment ending at `end`.
@@ -1082,9 +1102,9 @@ impl Sync {
         self.tx.fin.is_some_and(|f| f == end && (self.tx.nxt.after(f) || end.before(self.tx.right_edge())))
     }
 
-    fn retransmission<T>(&mut self, ctx: &mut Ctx<'_>, ask: Ask<'_, T>) -> Result<Option<(Out, T)>, NotReady> {
+    fn retransmission<T>(&mut self, ctx: &mut Ctx<'_>, exit: &mut dyn Exit<T>) -> Result<bool, NotReady> {
         if self.persist.is_some() {
-            return Ok(None);
+            return Ok(false);
         }
         if let Some(start) = self.urgent.map(|u| u.later(self.tx.una)).filter(|u| u.before(self.tx.nxt)) {
             let blocks = self.blocks();
@@ -1092,21 +1112,21 @@ impl Sync {
             let len = if start.before(stop) { stop.since(start) } else { 0 };
             let fin = self.tx.fin.is_some_and(|f| f == start.add(len) && self.tx.nxt.after(f));
             if len > 0 || fin {
-                let via = ask().ready()?;
+                self.emit(ctx, exit, start, len, fin, blocks)?;
                 self.urgent = None;
                 if let Recovery::Sack { high_rxt, rescue, .. } = &mut self.recovery {
                     let end = start.add(len);
                     *high_rxt = high_rxt.later(end);
                     rescue.get_or_insert(end);
                 }
-                return Ok(Some((self.hand_off(ctx, start, len, fin, blocks), via)));
+                return Ok(true);
             }
         }
         self.urgent = None;
         if matches!(self.recovery, Recovery::Sack { .. }) {
-            return self.next_seg(ctx, ask);
+            return self.next_seg(ctx, exit);
         }
-        let Some(next) = self.rtx_next else { return Ok(None) };
+        let Some(next) = self.rtx_next else { return Ok(false) };
         let mut pos = next.later(self.tx.una);
         while let Some((_, end)) = self.tx.sacked_at(pos) {
             pos = end;
@@ -1115,7 +1135,7 @@ impl Sync {
         let fin_resend = self.tx.fin.is_some_and(|f| pos == f && self.tx.nxt.after(f));
         if !pos.before(self.tx.nxt) || (!pos.before(end_of_data) && !fin_resend) {
             self.rtx_next = None;
-            return Ok(None);
+            return Ok(false);
         }
         let limit = self.tx.una.add(self.cwnd().min(self.tx.window()));
         let blocks = self.blocks();
@@ -1127,19 +1147,19 @@ impl Sync {
         let fin = self.fin_fits(pos.add(len)) && (len > 0 || fin_resend);
         if len == 0 && !fin {
             self.cc.limited = true;
-            return Ok(None);
+            return Ok(false);
         }
-        let via = ask().ready()?;
+        self.emit(ctx, exit, pos, len, fin, blocks)?;
         self.rtx_next = Some(pos.add(len).add(u32::from(fin)));
-        Ok(Some((self.hand_off(ctx, pos, len, fin, blocks), via)))
+        Ok(true)
     }
 
     /// RFC 6675 §5 step C: while cwnd − pipe ≥ SMSS, what NextSeg() names.
-    fn next_seg<T>(&mut self, ctx: &mut Ctx<'_>, ask: Ask<'_, T>) -> Result<Option<(Out, T)>, NotReady> {
-        let Recovery::Sack { high_rxt, rescue, point } = self.recovery else { return Ok(None) };
+    fn next_seg<T>(&mut self, ctx: &mut Ctx<'_>, exit: &mut dyn Exit<T>) -> Result<bool, NotReady> {
+        let Recovery::Sack { high_rxt, rescue, point } = self.recovery else { return Ok(false) };
         let smss = self.smss();
         if self.cwnd().saturating_sub(self.pipe()) < smss {
-            return Ok(None);
+            return Ok(false);
         }
         let blocks = self.blocks();
         let room = self.room(&blocks);
@@ -1151,16 +1171,16 @@ impl Sync {
                 .map(|h| (h.start.later(high_rxt), h.end))
                 .find(|(start, end)| start.before(*end))
         };
-        let retransmit = |this: &mut Self, ctx: &mut Ctx<'_>, (start, end): (Seq, Seq)| {
+        let retransmit = |this: &mut Self, ctx: &mut Ctx<'_>, exit: &mut dyn Exit<T>, (start, end): (Seq, Seq)| {
             let stop = start.add(room).earlier(end);
+            this.emit(ctx, exit, start, stop.since(start), false, blocks)?;
             if let Recovery::Sack { high_rxt, .. } = &mut this.recovery {
                 *high_rxt = high_rxt.later(stop);
             }
-            this.hand_off(ctx, start, stop.since(start), false, blocks)
+            Ok(true)
         };
         if let Some(range) = hole(true) {
-            let via = ask().ready()?;
-            return Ok(Some((retransmit(self, ctx, range), via)));
+            return retransmit(self, ctx, exit, range);
         }
         let unsent = self.tx.unsent();
         let usable = u32::try_from(self.tx.usable().max(0)).unwrap_or(u32::MAX);
@@ -1169,37 +1189,36 @@ impl Sync {
             let start = self.tx.nxt;
             let fin = self.fin_fits(start.add(len));
             if len > 0 || fin {
-                let via = ask().ready()?;
-                return Ok(Some((self.hand_off(ctx, start, len, fin, blocks), via)));
+                self.emit(ctx, exit, start, len, fin, blocks)?;
+                return Ok(true);
             }
         }
         if let Some(range) = hole(false) {
-            let via = ask().ready()?;
-            return Ok(Some((retransmit(self, ctx, range), via)));
+            return retransmit(self, ctx, exit, range);
         }
         if rescue.is_none_or(|r| self.tx.una.after(r)) {
-            let Some(top) = self.tx.holes(smss).last() else { return Ok(None) };
+            let Some(top) = self.tx.holes(smss).last() else { return Ok(false) };
             let data_top = top.end.earlier(self.tx.data_end());
             let start = top.start.later(data_top.sub(room));
             if start.before(data_top) {
-                let via = ask().ready()?;
+                self.emit(ctx, exit, start, data_top.since(start), false, blocks)?;
                 self.recovery = Recovery::Sack { high_rxt, rescue: Some(point), point };
-                return Ok(Some((self.hand_off(ctx, start, data_top.since(start), false, blocks), via)));
+                return Ok(true);
             }
         }
-        Ok(None)
+        Ok(false)
     }
 
     /// New data and the FIN (RFC 9293 §3.7.4 Nagle, §3.8.6.2.1 sender silly-window avoidance),
     /// within SND.UNA + min(cwnd, SND.WND) (RFC 5681 §2).
-    fn new_data<T>(&mut self, ctx: &mut Ctx<'_>, ask: Ask<'_, T>) -> Result<Option<(Out, T)>, NotReady> {
+    fn new_data<T>(&mut self, ctx: &mut Ctx<'_>, exit: &mut dyn Exit<T>) -> Result<bool, NotReady> {
         if self.persist.is_some() || matches!(self.recovery, Recovery::Sack { .. }) || self.tx.window() == 0 {
-            return Ok(None);
+            return Ok(false);
         }
         let now = ctx.now;
         let unsent = self.tx.unsent();
         if unsent == 0 && !self.tx.fin_unsent() {
-            return Ok(None);
+            return Ok(false);
         }
         if unsent > 0 && self.last_data_sent.is_some_and(|at| now.since(at) > self.rtt.rto()) && self.tx.flight() == 0 {
             self.cc.restart_after_idle();
@@ -1219,10 +1238,10 @@ impl Sync {
         let start = self.tx.nxt;
         if d == 0 {
             if w_rcv < 1 {
-                return Ok(None);
+                return Ok(false);
             }
-            let via = ask().ready()?;
-            return Ok(Some((self.hand_off(ctx, start, 0, true, blocks), via)));
+            self.emit(ctx, exit, start, 0, true, blocks)?;
+            return Ok(true);
         }
         let nagle = ctx.options.nodelay || self.tx.flight() == 0;
         let half = signed(self.tx.max_wnd / 2);
@@ -1238,23 +1257,24 @@ impl Sync {
             if w_rcv > 0 && rules(i64::MAX) && self.sws.is_none() && !self.sws_fired {
                 self.sws = Some(now.after(limits::SWS_OVERRIDE));
             }
-            return Ok(None);
+            return Ok(false);
         }
-        let via = ask().ready()?;
         let len = u32::try_from(usable).unwrap_or(0);
-        if limited_transmit && signed(len) > cwnd.saturating_sub(signed(self.tx.flight())) {
+        let beyond_cwnd = limited_transmit && signed(len) > cwnd.saturating_sub(signed(self.tx.flight()));
+        let fin = self.fin_fits(start.add(len)) && signed(len) < w_rcv;
+        self.emit(ctx, exit, start, len, fin, blocks)?;
+        if beyond_cwnd {
             if !self.sack_ok {
                 self.lt_budget = self.lt_budget.saturating_sub(1);
             }
             self.lt_bytes = self.lt_bytes.saturating_add(len);
             ctx.log.count(Counter::LimitedTransmit);
         }
-        let fin = self.fin_fits(start.add(len)) && signed(len) < w_rcv;
-        Ok(Some((self.hand_off(ctx, start, len, fin, blocks), via)))
+        Ok(true)
     }
 
     /// A due persist probe (RFC 9293 §3.8.6.1) or keepalive (§3.8.4).
-    fn probe<T>(&mut self, ctx: &mut Ctx<'_>, ask: Ask<'_, T>) -> Result<Option<(Out, T)>, NotReady> {
+    fn probe<T>(&mut self, ctx: &mut Ctx<'_>, exit: &mut dyn Exit<T>) -> Result<bool, NotReady> {
         let now = ctx.now;
         if let Some(persist) = self.persist.filter(|p| p.due) {
             let blocks = self.blocks();
@@ -1270,22 +1290,22 @@ impl Sync {
             } else if self.tx.fin_unsent() {
                 (self.tx.nxt, 0, true)
             } else {
-                return Ok(None);
+                return Ok(false);
             };
-            let via = ask().ready()?;
+            self.emit(ctx, exit, start, len, fin, blocks)?;
             let interval = persist.interval.saturating_mul(2).min(RTO_MAX);
             self.persist = Some(Persist { at: now.after(interval), interval, due: false, unanswered: true, ..persist });
             ctx.log.count(Counter::PersistProbe);
-            return Ok(Some((self.hand_off(ctx, start, len, fin, blocks), via)));
+            return Ok(true);
         }
-        if self.ka_due {
-            let via = ask().ready()?;
-            self.ka_due = false;
+        if self.ka_due.is_some() {
+            self.emit_ack(ctx, exit, self.tx.nxt.sub(1))?;
+            self.ka_due = None;
             self.ka_probes = self.ka_probes.saturating_add(1);
             self.ka_last = Some(now);
             ctx.log.count(Counter::KeepaliveProbe);
-            return Ok(Some((self.pure(now, self.tx.nxt.sub(1)), via)));
+            return Ok(true);
         }
-        Ok(None)
+        Ok(false)
     }
 }

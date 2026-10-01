@@ -305,6 +305,9 @@ fn make_room(i: &mut Interface, cx: &mut Cx<'_>) -> bool {
 fn remove(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) {
     cx.timers.cancel(timer(cx, addr));
     let Some(mut n) = i.neighbours.remove(&addr) else { return };
+    if matches!(n.state, Nud::Failed) {
+        cx.log.event(Event::Cleared { iface: cx.iface, next_hop: addr });
+    }
     let turns = cx.control.purge_entry(cx.iface, addr);
     i.held = i.held.saturating_sub(turns);
     for held in n.state.take_released().0 {
@@ -503,6 +506,9 @@ fn reach(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr, mac: MacAddr) {
 fn stale(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr, mac: MacAddr) {
     let now = cx.now;
     let Some(n) = i.neighbours.get_mut(&addr) else { return };
+    if matches!(n.state, Nud::Failed) {
+        cx.log.event(Event::Cleared { iface: cx.iface, next_hop: addr });
+    }
     let released = inherit(cx, addr, n, mac);
     n.state = Nud::Stale(Linked { mac, released });
     cx.timers.arm(timer(cx, addr), now.after(IDLE_LIFETIME));
