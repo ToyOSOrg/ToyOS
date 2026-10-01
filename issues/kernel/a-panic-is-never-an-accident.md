@@ -15,9 +15,9 @@ opened: 2026-10-01
 
 Tiers 2 to 4 are programs, not crates: a tier holds every crate of this tree
 its programs link, and a crate in two tiers is held to the stricter. The loader
-is tier 2. The system services are init and every program one of the three
-modes' configs starts at boot or marks `service = true`, as `build::shipped`
-reads them: every boot start counts, `console` and diag's `toybox` too.
+is tier 2. The system services are the programs whose manifest declares
+`exempt.owns`, as `src/userlandhost.rs` reads it; every other program it reads
+is an app, `toybox` and the ones that declare `exempt.manages` too.
 
 **The set**, all `clippy::`: `indexing_slicing`, `string_slice`,
 `arithmetic_side_effects`, `unwrap_used`, `expect_used`, `panic`,
@@ -34,7 +34,9 @@ amount, `pow`, `abs`, a standard function it does not name or a callee's panic.
 1. Tier 1, one crate at a time; an input boundary inside the kernel or the
    loader is moved into a crate of its own first. The first exit is one
    declaration of the set that every tier-1 crate's library is linted under in
-   place of its own copy, its tests left at tier 4. An area's exit is its crate
+   place of its own copy, its tests left at tier 4. `disallowed_methods` and
+   `disallowed_macros` read the nearest `clippy.toml` alone, and the root's
+   reaches every crate beneath it, tier 4 included. An area's exit is its crate
    forbidding the set under `cargo run -- --clippy`.
 2. The link-time proof on the parser entry points. The exit is a step of
    `cargo run -- --ci host` whose host build refuses to link an entry point
@@ -46,6 +48,9 @@ amount, `pow`, `abs`, a standard function it does not name or a callee's panic.
    `clippy::allow_attributes` and `clippy::allow_attributes_without_reason`
    under `--clippy`, and a step of `--ci host` refuses an inner `#![allow]`
    and an `#[expect]` of the set over more than one finding.
+   `arithmetic_side_effects` reports an expression once, however many
+   operators it nests: `x * x + y * y - 1` is one finding, so one `#[expect]`
+   covers its four overflows.
 4. The system services, once `issues/build/userland-programs-are-never-linted.md`
    has put userland in `src/clippy.rs`. The stage ends when every crate of this
    tree a service links by a normal edge, whatever its `cfg`, its own and

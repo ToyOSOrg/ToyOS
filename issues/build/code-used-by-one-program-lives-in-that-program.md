@@ -33,7 +33,7 @@ Every step lands green on `--ci host` and `--build-only`. Test counts are what
    `toyos-sched/sim` `kernel/sim/`. The harness dev-depends on the kernel, and
    the build system does not depend on it. The library has no `tests/`, since
    an integration test builds the binary for the host. `--ci host` tests it
-   with `sched-check`, the feature three scheduler tests need. The Fit line
+   with `sched-check`, the feature scheduler tests need. The Fit line
    states this track's rule.
    Closes `issues/build/the-pcid-negative-control-runs-nowhere.md`.
    Check: the library lists at least 135 tests, `kernel/loom` 79 and
@@ -47,13 +47,20 @@ Every step lands green on `--ci host` and `--build-only`. Test counts are what
    `tests/libc-arch/`.
    Check: `--ci host` runs there every test the package lists today, and
    `--clippy` lints them.
-4. **A crate one program uses goes under it, a crate of its own.**
-   `toyos-mixer` moves to `userland/soundd/mixer/` and `toyos-desktop` to
-   `userland/compositor/desktop/`. `toyos-ps2`, `toyos-gicv3` and `toyos-xhci`,
-   its sim with it, move to `kernel/ps2/`, `kernel/gicv3/` and `kernel/xhci/`.
-   `toyos-fat32-check`, which the build and `toyos-fat32`'s tests both use,
-   moves to `toyos-fat32/check/`, beside the one subject it judges.
+4. **A crate one package uses goes under it, a crate of its own.** A crate of
+   this tree with exactly one consumer moves under it. Its consumers are the
+   packages that name it as a dependency of any kind, under any `cfg`, as
+   `cargo metadata --no-deps` reads every manifest `git ls-files '*Cargo.toml'`
+   lists, excluded packages and `tests/` included. A move under a userland
+   program lands with `src/userlandhost.rs`'s survey gating a nested crate's
+   tests, which it lists as escapes today.
    Check: `--ci host` runs every test each package lists today, and `--clippy`
    lints them.
+5. **`toyos-fat32-check` goes under `toyos-fat32/`.** The build and
+   `toyos-fat32`'s tests both use it, and it moves to `toyos-fat32/check/`,
+   beside the one subject it judges.
+   Check: `--ci host` runs every test the package lists today, and `--clippy`
+   lints them.
 
-**Exit:** no directory this file names as moved or merged still exists.
+**Exit:** no directory this file names as moved or merged still exists, and
+step 4's count finds no crate outside its one consumer.
