@@ -1,0 +1,10 @@
+at start: 0x0
+block USR1: 0, old 0x0, now 0x200
+block USR2: 0, old 0x200, now 0xa00
+unblock USR1: 0, old 0xa00, now 0x800
+a new thread starts with: 0x800
+set all: KILL dropped, STOP dropped, the rest held
+how 99: EINVAL, the mask as it was
+sigprocmask how 99: -1, EINVAL
+how 99 with no set: 0, old the mask
+set none: 0, old 0x1, now 0x0

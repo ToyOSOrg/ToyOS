@@ -6,7 +6,11 @@
 //! architecture checks its own module. The UTF-8 reader against
 //! `core::str::from_utf8`, the number reader against the host C library's,
 //! AArch64's `long double` widening against compiler-builtins', and the errno
-//! codes against `include/errno.h`.
+//! codes against `include/errno.h`. `strnlen`, `modf` and `logb` against the
+//! host C library's, `strsignal`'s texts, a signal mask's changes, the readdir
+//! answer's reader, `dladdr`'s symbol search on an image laid out here, and
+//! what the memory calls refuse. And libc's headers against its definitions
+//! (`prototypes`).
 
 #[cfg(test)]
 extern crate alloc;
@@ -15,18 +19,50 @@ extern crate alloc;
 #[path = "../../userland/libc/src/arch/mod.rs"]
 mod arch;
 #[cfg(test)]
+#[path = "../../userland/libc/src/elfsym.rs"]
+mod elfsym;
+#[cfg(test)]
+#[path = "../../userland/libc/src/fparts.rs"]
+mod fparts;
+#[cfg(test)]
+#[path = "../../userland/libc/src/listing.rs"]
+mod listing;
+#[cfg(test)]
+#[path = "../../userland/libc/src/memreq.rs"]
+mod memreq;
+#[cfg(test)]
+#[path = "../../userland/libc/src/sigmask.rs"]
+mod sigmask;
+#[cfg(test)]
 #[path = "../../userland/libc/src/strtonum.rs"]
 mod strtonum;
+#[cfg(test)]
+#[path = "../../userland/libc/src/text.rs"]
+mod text;
 #[cfg(test)]
 #[path = "../../userland/libc/src/utf8.rs"]
 mod utf8;
 
 #[cfg(test)]
+mod dladdr_symbols;
+#[cfg(test)]
 mod errno_codes;
+#[cfg(test)]
+mod fparts_differential;
+#[cfg(test)]
+mod listing_reader;
 #[cfg(all(test, target_arch = "aarch64"))]
 mod long_double;
 #[cfg(test)]
+mod memory_refusals;
+#[cfg(test)]
+mod prototypes;
+#[cfg(test)]
+mod signal_masks;
+#[cfg(test)]
 mod strtonum_differential;
+#[cfg(test)]
+mod text_differential;
 #[cfg(test)]
 mod utf8_differential;
 

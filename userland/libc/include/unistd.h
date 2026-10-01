@@ -27,12 +27,23 @@ unsigned int sleep(unsigned int seconds);
 int usleep(unsigned int usec);
 int isatty(int fd);
 int execvp(const char *file, char *const argv[]);
+int execv(const char *path, char *const argv[]);
+int execve(const char *path, char *const argv[], char *const envp[]);
 int fork(void);
 int pipe(int pipefd[2]);
 void _exit(int status);
+int fsync(int fd);
+int ftruncate(int fd, off_t length);
+ssize_t readlink(const char *path, char *buf, size_t size);
+int symlink(const char *target, const char *linkpath);
+int link(const char *existing, const char *newpath);
+int fchown(int fd, uid_t owner, gid_t group);
+int gethostname(char *name, size_t len);
 
 pid_t getpid(void);
 pid_t getppid(void);
+pid_t getsid(pid_t pid);
+pid_t setsid(void);
 uid_t getuid(void);
 uid_t geteuid(void);
 gid_t getgid(void);
@@ -41,7 +52,10 @@ int kill(pid_t pid, int sig);
 
 long sysconf(int name);
 
+#define _SC_ARG_MAX          0
 #define _SC_PAGESIZE        30
+#define _SC_PAGE_SIZE       _SC_PAGESIZE
+#define _SC_GETPW_R_SIZE_MAX 70
 #define _SC_CLK_TCK          2
 #define _SC_NPROCESSORS_ONLN 84
 

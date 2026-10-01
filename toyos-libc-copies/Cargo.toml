@@ -1,18 +1,19 @@
 [package]
 name = "toyos-libc-copies"
-description = "A host differential test of userland libc's self-contained modules: its copies, fills and square roots against core's, its UTF-8 reader against core's, and its number reader and long double widening against the host C library and compiler-builtins."
+description = "A host test of userland libc: its self-contained modules against core's, the host C library's and compiler-builtins', and its headers against its definitions."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 publish = false
 
-# `userland/libc/src/`'s architecture module, UTF-8 reader and number reader,
-# compiled for the host this runs on and held against Rust's own and the host C
-# library's. A package of its own because libc cross-compiles and exports
-# `memcpy`: this compiles only those modules, the way `kernel-loom` compiles
-# kernel files. `std-runtime` is libc's own switch, on here so the
-# architecture module's `_start` stays out of a host binary that has an entry
-# of its own.
+# `userland/libc/src/`'s modules that read and set nothing but what they are
+# handed, compiled for the host this runs on and held against Rust's own and
+# the host C library's; and `userland/libc/include/` read against the
+# definitions in `userland/libc/src/`. A package of its own because libc
+# cross-compiles and exports `memcpy`: this compiles only those modules, the way
+# `kernel-loom` compiles kernel files. `std-runtime` is libc's own switch, on
+# here so the architecture module's `_start` stays out of a host binary that
+# has an entry of its own.
 [features]
 default = ["std-runtime"]
 std-runtime = []

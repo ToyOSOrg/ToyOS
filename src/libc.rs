@@ -116,7 +116,21 @@ pub fn build_c(root: &Path, toolchain: &Path, target_dir: &Path, arch: Arch) {
     let archive = target_dir.join(format!("{target}/release/libtoyos_libc.a"));
     fs::copy(&archive, lib.join("libtoyos_c.a"))
         .unwrap_or_else(|e| panic!("copy {} into {}: {e}", archive.display(), lib.display()));
+    empty_libraries(&lib);
     crate::sysroot::clone_tree(&root.join(CRATE).join("include"), &c.join("include"));
+}
+
+/// The libraries POSIX has a C compiler take, `-lc` and `-lm` among them, whose
+/// functions are all `libtoyos_c.a`'s.
+const EMPTY_LIBRARIES: [&str; 5] = ["c", "m", "pthread", "dl", "rt"];
+
+/// Put each of [`EMPTY_LIBRARIES`] in `lib` as an archive of no members: a
+/// link that names one finds it and takes nothing from it.
+fn empty_libraries(lib: &Path) {
+    for name in EMPTY_LIBRARIES {
+        let path = lib.join(format!("lib{name}.a"));
+        fs::write(&path, b"!<arch>\n").unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+    }
 }
 
 /// Extract .o files from rlibs and merge them into a single GNU-format ar archive.
@@ -272,6 +286,24 @@ fn extract_rlib_objects(data: &[u8], out: &mut Vec<(String, Vec<u8>)>) {
         }
         if name.ends_with(".o") {
             out.push((name, member_data.to_vec()));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use toyos_tmpdir::TempDir;
+
+    /// **`-lc` and `-lm` find a library in the C sysroot**, and so do POSIX's
+    /// other three: each an `ar` archive of no members.
+    #[test]
+    fn the_c_sysroot_names_the_posix_libraries() {
+        let lib = TempDir::new("libc-empty");
+        empty_libraries(&lib);
+        for name in ["c", "m", "pthread", "dl", "rt"] {
+            let path = lib.join(format!("lib{name}.a"));
+            assert_eq!(fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())), b"!<arch>\n");
         }
     }
 }

@@ -91,6 +91,11 @@ pub unsafe extern "C" fn open(path: *const u8, flags: i32, _mode: u32) -> i32 {
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn creat(path: *const u8, mode: u32) -> i32 {
+    unsafe { open(path, O_WRONLY | O_CREAT | O_TRUNC, mode) }
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn close(raw_fd: i32) -> i32 {
     syscall::close(fd(raw_fd));
     0
@@ -307,6 +312,44 @@ pub unsafe extern "C" fn lstat(path: *const u8, buf: *mut Stat) -> i32 {
     stat_impl(path, buf)
 }
 
+/// `SYS_SYMLINK` displaces whatever `link` names, and POSIX refuses a name
+/// that exists: asked first, so only a name another process makes in between
+/// is still displaced.
+#[no_mangle]
+pub unsafe extern "C" fn symlink(target: *const u8, link: *const u8) -> i32 {
+    let is_link = syscall::readlink(c_str_to_bytes(link), &mut [0u8; 1]).is_ok();
+    if is_link || unsafe { stat_impl(link, ptr::null_mut()) } == 0 {
+        crate::errno::set(EEXIST);
+        return -1;
+    }
+    match syscall::symlink(c_str_to_bytes(target), c_str_to_bytes(link)) {
+        Ok(()) => 0,
+        Err(e) => set_errno(e),
+    }
+}
+
+/// `SYS_READLINK` answers `NotFound` for a path that is no link as for one
+/// that names nothing, and POSIX tells them apart: `EINVAL` for the first.
+#[no_mangle]
+pub unsafe extern "C" fn readlink(path: *const u8, buf: *mut u8, size: usize) -> isize {
+    if size == 0 {
+        crate::errno::set(EINVAL);
+        return -1;
+    }
+    let target = unsafe { core::slice::from_raw_parts_mut(buf, size) };
+    match syscall::readlink(c_str_to_bytes(path), target) {
+        Ok(n) => n as isize,
+        Err(syscall::SyscallError::NotFound) => {
+            // `stat_impl` sets `errno` for a path that names nothing.
+            if unsafe { stat_impl(path, ptr::null_mut()) } == 0 {
+                crate::errno::set(EINVAL);
+            }
+            -1
+        }
+        Err(e) => set_errno(e) as isize,
+    }
+}
+
 unsafe fn stat_impl(path: *const u8, buf: *mut Stat) -> i32 {
     let path_bytes = c_str_to_bytes(path);
     // Try opening read-only
@@ -340,12 +383,6 @@ pub unsafe extern "C" fn isatty(raw_fd: i32) -> i32 {
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn chmod(_path: *const u8, _mode: u32) -> i32 { 0 }
-
-#[no_mangle]
-pub unsafe extern "C" fn fchmod(_fd: i32, _mode: u32) -> i32 { 0 }
-
 static mut UMASK_VAL: u32 = 0o022;
 
 #[no_mangle]
@@ -355,31 +392,52 @@ pub unsafe extern "C" fn umask(mask: u32) -> u32 {
     old
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn fcntl(_fd: i32, _cmd: i32, _arg: i64) -> i32 {
-    // Stub — return success for common operations
-    0
-}
-
-// pread/pwrite: emulate with seek + read/write + seek back
-#[no_mangle]
-pub unsafe extern "C" fn pread(raw_fd: i32, buf: *mut u8, count: usize, offset: i64) -> isize {
-    let old = lseek(raw_fd, 0, SEEK_CUR);
-    if old < 0 { return -1; }
-    if lseek(raw_fd, offset, SEEK_SET) < 0 { return -1; }
-    let n = read(raw_fd, buf, count);
-    lseek(raw_fd, old, SEEK_SET);
-    n
-}
+const F_DUPFD: i32 = 0;
+const F_GETFD: i32 = 1;
+const F_SETFD: i32 = 2;
+const F_GETFL: i32 = 3;
+const F_SETFL: i32 = 4;
+const F_GETLK: i32 = 5;
+const F_SETLK: i32 = 6;
+const F_SETLKW: i32 = 7;
+const F_SETOWN: i32 = 8;
+const F_GETOWN: i32 = 9;
+const F_DUPFD_CLOEXEC: i32 = 1030;
 
 #[no_mangle]
-pub unsafe extern "C" fn pwrite(raw_fd: i32, buf: *const u8, count: usize, offset: i64) -> isize {
-    let old = lseek(raw_fd, 0, SEEK_CUR);
-    if old < 0 { return -1; }
-    if lseek(raw_fd, offset, SEEK_SET) < 0 { return -1; }
-    let n = write(raw_fd, buf, count);
-    lseek(raw_fd, old, SEEK_SET);
-    n
+pub unsafe extern "C" fn fcntl(fd: i32, cmd: i32, arg: i64) -> i32 {
+    let refused = match cmd {
+        F_DUPFD if arg >= 0 => return unsafe { dup_at_least(fd, arg) },
+        // Close-on-exec is the descriptor table's of stage 3 of
+        // issues/kernel/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md.
+        F_GETFD | F_SETFD => return 0,
+        // POSIX's answer for a file that supports no locking, which none here does.
+        F_GETLK | F_SETLK | F_SETLKW => EINVAL,
+        // A descriptor's status flags, its close-on-exec and its owner are
+        // nothing this library keeps.
+        F_DUPFD_CLOEXEC | F_GETFL | F_SETFL | F_GETOWN | F_SETOWN => crate::errno::ENOSYS,
+        _ => EINVAL,
+    };
+    crate::errno::set(refused);
+    -1
+}
+
+/// A duplicate of `raw_fd` numbered `floor` or above. The kernel picks each
+/// number `dup` answers, so this is the first such answer and not the lowest
+/// free number, and every lower one taken on the way is closed again.
+unsafe fn dup_at_least(raw_fd: i32, floor: i64) -> i32 {
+    let mut below = alloc::vec::Vec::new();
+    let answer = loop {
+        let duplicate = unsafe { dup(raw_fd) };
+        if duplicate < 0 || i64::from(duplicate) >= floor {
+            break duplicate;
+        }
+        below.push(duplicate);
+    };
+    for lower in below {
+        unsafe { close(lower) };
+    }
+    answer
 }
 
 // Directory operations
@@ -398,7 +456,9 @@ pub struct dirent {
     pub d_name: [u8; 256],
 }
 
-const DT_REG: u8 = 8;
+/// `d_type`s: the listing tells a directory from everything else, and no more.
+const DT_UNKNOWN: u8 = 0;
+const DT_DIR: u8 = 4;
 
 #[no_mangle]
 pub unsafe extern "C" fn opendir(path: *const u8) -> *mut DIR {
@@ -413,7 +473,7 @@ pub unsafe extern "C" fn opendir(path: *const u8) -> *mut DIR {
     // the reported size; the kernel bounds the listing, so it cannot run away.
     let mut n = match syscall::readdir(path_bytes, core::slice::from_raw_parts_mut(buf, buf_size)) {
         Ok(n) => n,
-        Err(_) => { super::memory::free(buf); return ptr::null_mut(); }
+        Err(e) => { super::memory::free(buf); set_errno(e); return ptr::null_mut(); }
     };
     if n > buf_size {
         super::memory::free(buf);
@@ -422,7 +482,8 @@ pub unsafe extern "C" fn opendir(path: *const u8) -> *mut DIR {
         if buf.is_null() { return ptr::null_mut(); }
         n = match syscall::readdir(path_bytes, core::slice::from_raw_parts_mut(buf, buf_size)) {
             Ok(n) if n <= buf_size => n,
-            _ => { super::memory::free(buf); return ptr::null_mut(); }
+            Ok(_) => { super::memory::free(buf); crate::errno::set(EAGAIN); return ptr::null_mut(); }
+            Err(e) => { super::memory::free(buf); set_errno(e); return ptr::null_mut(); }
         };
     }
 
@@ -439,24 +500,21 @@ pub unsafe extern "C" fn opendir(path: *const u8) -> *mut DIR {
 pub unsafe extern "C" fn readdir(dir: *mut DIR) -> *mut dirent {
     if dir.is_null() { return ptr::null_mut(); }
     let d = &mut *dir;
-    if d.pos >= d.len { return ptr::null_mut(); }
-
-    // Entries are null-separated in the buffer
     let start = d.pos;
-    while d.pos < d.len && *d.buf.add(d.pos) != 0 {
-        d.pos += 1;
-    }
-    let name_len = d.pos - start;
-    if d.pos < d.len { d.pos += 1; } // skip null
+    let listing = core::slice::from_raw_parts(d.buf, d.len);
+    let Some(entry) = crate::listing::next(listing, &mut d.pos) else { return ptr::null_mut() };
 
     // Use a static buffer for the dirent (not thread-safe, matching POSIX convention)
     static mut DIRENT_BUF: dirent = dirent { d_ino: 0, d_type: 0, d_name: [0; 256] };
     let ent = &raw mut DIRENT_BUF;
+    if entry.name.len() >= (*ent).d_name.len() {
+        crate::errno::set(crate::errno::EOVERFLOW);
+        return ptr::null_mut();
+    }
     (*ent).d_ino = (start + 1) as u64;
-    (*ent).d_type = DT_REG; // We don't have type info in readdir buffer, default to file
-    let copy_len = name_len.min(255);
-    ptr::copy_nonoverlapping(d.buf.add(start), (*ent).d_name.as_mut_ptr(), copy_len);
-    (*ent).d_name[copy_len] = 0;
+    (*ent).d_type = if entry.is_dir { DT_DIR } else { DT_UNKNOWN };
+    ptr::copy_nonoverlapping(entry.name.as_ptr(), (*ent).d_name.as_mut_ptr(), entry.name.len());
+    (*ent).d_name[entry.name.len()] = 0;
     ent
 }
 
@@ -496,21 +554,57 @@ const NANOS_PER_SEC: u64 = 1_000_000_000;
 pub unsafe extern "C" fn mmap(
     addr: *mut u8, len: usize, prot: i32, flags: i32, _fd: i32, _offset: i64,
 ) -> *mut u8 {
+    use crate::memreq::{self, MapRefusal};
     use toyos_abi::syscall::{MmapProt, MmapFlags};
 
-    let mut mp = MmapProt::NONE;
-    if prot & 1 != 0 { mp = mp | MmapProt::READ; }
-    if prot & 2 != 0 { mp = mp | MmapProt::WRITE; }
+    const MAP_FAILED: *mut u8 = usize::MAX as *mut u8;
+    if let Some(refusal) = memreq::mmap_refusal(addr.addr(), len, prot, flags) {
+        crate::errno::set(match refusal {
+            MapRefusal::Invalid => EINVAL,
+            MapRefusal::File => crate::errno::ENODEV,
+            // POSIX's ENOTSUP, which is EOPNOTSUPP here.
+            MapRefusal::Exec => crate::errno::EOPNOTSUPP,
+        });
+        return MAP_FAILED;
+    }
 
-    let mut mf = MmapFlags::PRIVATE;
-    if flags & 0x20 != 0 { mf = mf | MmapFlags::ANONYMOUS; }
-    if flags & 0x10 != 0 { mf = mf | MmapFlags::FIXED; }
+    let mut mp = MmapProt::NONE;
+    if prot & memreq::PROT_READ != 0 { mp = mp | MmapProt::READ; }
+    if prot & memreq::PROT_WRITE != 0 { mp = mp | MmapProt::WRITE; }
+
+    let mut mf = MmapFlags::PRIVATE | MmapFlags::ANONYMOUS;
+    if flags & memreq::MAP_FIXED != 0 { mf = mf | MmapFlags::FIXED; }
 
     let ptr = unsafe { syscall::mmap(addr, len, mp, mf) };
     if ptr.is_null() {
-        usize::MAX as *mut u8 // MAP_FAILED
+        // The kernel's refusal does not say which it is: ENOMEM is POSIX's
+        // for a place or size the address space does not allow.
+        crate::errno::set(crate::errno::ENOMEM);
+        MAP_FAILED
     } else {
         ptr
+    }
+}
+
+/// Advice changes no access's meaning, so taking none of it is POSIX's.
+#[no_mangle]
+pub unsafe extern "C" fn posix_madvise(_addr: *mut u8, _len: usize, advice: i32) -> i32 {
+    if crate::memreq::is_advice(advice) { 0 } else { EINVAL }
+}
+
+/// Linux's `madvise` (`memreq::madvise_refusal`).
+#[no_mangle]
+pub unsafe extern "C" fn madvise(addr: *mut u8, _len: usize, advice: i32) -> i32 {
+    use crate::memreq::AdviceRefusal;
+    match crate::memreq::madvise_refusal(addr.addr(), advice) {
+        None => 0,
+        Some(refusal) => {
+            crate::errno::set(match refusal {
+                AdviceRefusal::Invalid => EINVAL,
+                AdviceRefusal::Discard => crate::errno::ENOSYS,
+            });
+            -1
+        }
     }
 }
 
