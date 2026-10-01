@@ -14,7 +14,7 @@ use crate::rtt::{Rtt, RTO_AFTER_HANDSHAKE_LOSS, RTO_MAX};
 use crate::rx::{Placed, Rx};
 use crate::seq::{Seq, Stamp};
 use crate::tx::Tx;
-use crate::{limits, Error, Event, Instant, Options, Received, State, Tuple};
+use crate::{limits, Ask, Error, Event, Instant, NotReady, Options, Received, State, Tuple};
 
 /// RFC 7323 §5.5: TS.Recent older than this no longer judges PAWS.
 const TS_RECENT_VALID: Duration = Duration::from_secs(24 * 24 * 3600);
@@ -998,24 +998,26 @@ impl Sync {
     // ---- transmit ----
 
     /// The next segment this opportunity owes, after SYNs and resets.
-    pub fn next_segment(&mut self, ctx: &mut Ctx<'_>) -> Option<Out> {
+    pub fn next_segment<T>(&mut self, ctx: &mut Ctx<'_>, ask: Ask<'_, T>) -> Result<Option<(Out, T)>, NotReady> {
         if self.rx.dup_owed > 0 {
+            let via = ask().ready()?;
             self.rx.dup_owed = self.rx.dup_owed.saturating_sub(1);
-            return Some(self.pure(ctx.now, self.tx.nxt));
+            return Ok(Some((self.pure(ctx.now, self.tx.nxt), via)));
         }
-        if let Some(out) = self.retransmission(ctx) {
-            return Some(out);
+        if let Some(built) = self.retransmission(ctx, ask)? {
+            return Ok(Some(built));
         }
-        if let Some(out) = self.new_data(ctx) {
-            return Some(out);
+        if let Some(built) = self.new_data(ctx, ask)? {
+            return Ok(Some(built));
         }
-        if let Some(out) = self.probe(ctx) {
-            return Some(out);
+        if let Some(built) = self.probe(ctx, ask)? {
+            return Ok(Some(built));
         }
         if self.rx.ack_now {
-            return Some(self.pure(ctx.now, self.tx.nxt));
+            let via = ask().ready()?;
+            return Ok(Some((self.pure(ctx.now, self.tx.nxt), via)));
         }
-        None
+        Ok(None)
     }
 
     fn blocks(&self) -> Blocks {
@@ -1080,28 +1082,32 @@ impl Sync {
         self.tx.fin.is_some_and(|f| f == end && (self.tx.nxt.after(f) || end.before(self.tx.right_edge())))
     }
 
-    fn retransmission(&mut self, ctx: &mut Ctx<'_>) -> Option<Out> {
+    fn retransmission<T>(&mut self, ctx: &mut Ctx<'_>, ask: Ask<'_, T>) -> Result<Option<(Out, T)>, NotReady> {
         if self.persist.is_some() {
-            return None;
+            return Ok(None);
         }
-        if let Some(start) = self.urgent.take().map(|u| u.later(self.tx.una)).filter(|u| u.before(self.tx.nxt)) {
+        if let Some(start) = self.urgent.map(|u| u.later(self.tx.una)).filter(|u| u.before(self.tx.nxt)) {
             let blocks = self.blocks();
             let stop = start.add(self.room(&blocks)).earlier(self.tx.data_end()).earlier(self.tx.nxt);
             let len = if start.before(stop) { stop.since(start) } else { 0 };
             let fin = self.tx.fin.is_some_and(|f| f == start.add(len) && self.tx.nxt.after(f));
             if len > 0 || fin {
+                let via = ask().ready()?;
+                self.urgent = None;
                 if let Recovery::Sack { high_rxt, rescue, .. } = &mut self.recovery {
                     let end = start.add(len);
                     *high_rxt = high_rxt.later(end);
                     rescue.get_or_insert(end);
                 }
-                return Some(self.hand_off(ctx, start, len, fin, blocks));
+                return Ok(Some((self.hand_off(ctx, start, len, fin, blocks), via)));
             }
         }
+        self.urgent = None;
         if matches!(self.recovery, Recovery::Sack { .. }) {
-            return self.next_seg(ctx);
+            return self.next_seg(ctx, ask);
         }
-        let mut pos = self.rtx_next?.later(self.tx.una);
+        let Some(next) = self.rtx_next else { return Ok(None) };
+        let mut pos = next.later(self.tx.una);
         while let Some((_, end)) = self.tx.sacked_at(pos) {
             pos = end;
         }
@@ -1109,7 +1115,7 @@ impl Sync {
         let fin_resend = self.tx.fin.is_some_and(|f| pos == f && self.tx.nxt.after(f));
         if !pos.before(self.tx.nxt) || (!pos.before(end_of_data) && !fin_resend) {
             self.rtx_next = None;
-            return None;
+            return Ok(None);
         }
         let limit = self.tx.una.add(self.cwnd().min(self.tx.window()));
         let blocks = self.blocks();
@@ -1121,18 +1127,19 @@ impl Sync {
         let fin = self.fin_fits(pos.add(len)) && (len > 0 || fin_resend);
         if len == 0 && !fin {
             self.cc.limited = true;
-            return None;
+            return Ok(None);
         }
+        let via = ask().ready()?;
         self.rtx_next = Some(pos.add(len).add(u32::from(fin)));
-        Some(self.hand_off(ctx, pos, len, fin, blocks))
+        Ok(Some((self.hand_off(ctx, pos, len, fin, blocks), via)))
     }
 
     /// RFC 6675 §5 step C: while cwnd − pipe ≥ SMSS, what NextSeg() names.
-    fn next_seg(&mut self, ctx: &mut Ctx<'_>) -> Option<Out> {
-        let Recovery::Sack { high_rxt, rescue, point } = self.recovery else { return None };
+    fn next_seg<T>(&mut self, ctx: &mut Ctx<'_>, ask: Ask<'_, T>) -> Result<Option<(Out, T)>, NotReady> {
+        let Recovery::Sack { high_rxt, rescue, point } = self.recovery else { return Ok(None) };
         let smss = self.smss();
         if self.cwnd().saturating_sub(self.pipe()) < smss {
-            return None;
+            return Ok(None);
         }
         let blocks = self.blocks();
         let room = self.room(&blocks);
@@ -1152,7 +1159,8 @@ impl Sync {
             this.hand_off(ctx, start, stop.since(start), false, blocks)
         };
         if let Some(range) = hole(true) {
-            return Some(retransmit(self, ctx, range));
+            let via = ask().ready()?;
+            return Ok(Some((retransmit(self, ctx, range), via)));
         }
         let unsent = self.tx.unsent();
         let usable = u32::try_from(self.tx.usable().max(0)).unwrap_or(u32::MAX);
@@ -1161,34 +1169,37 @@ impl Sync {
             let start = self.tx.nxt;
             let fin = self.fin_fits(start.add(len));
             if len > 0 || fin {
-                return Some(self.hand_off(ctx, start, len, fin, blocks));
+                let via = ask().ready()?;
+                return Ok(Some((self.hand_off(ctx, start, len, fin, blocks), via)));
             }
         }
         if let Some(range) = hole(false) {
-            return Some(retransmit(self, ctx, range));
+            let via = ask().ready()?;
+            return Ok(Some((retransmit(self, ctx, range), via)));
         }
         if rescue.is_none_or(|r| self.tx.una.after(r)) {
-            let top = self.tx.holes(smss).last()?;
+            let Some(top) = self.tx.holes(smss).last() else { return Ok(None) };
             let data_top = top.end.earlier(self.tx.data_end());
             let start = top.start.later(data_top.sub(room));
             if start.before(data_top) {
+                let via = ask().ready()?;
                 self.recovery = Recovery::Sack { high_rxt, rescue: Some(point), point };
-                return Some(self.hand_off(ctx, start, data_top.since(start), false, blocks));
+                return Ok(Some((self.hand_off(ctx, start, data_top.since(start), false, blocks), via)));
             }
         }
-        None
+        Ok(None)
     }
 
     /// New data and the FIN (RFC 9293 §3.7.4 Nagle, §3.8.6.2.1 sender silly-window avoidance),
     /// within SND.UNA + min(cwnd, SND.WND) (RFC 5681 §2).
-    fn new_data(&mut self, ctx: &mut Ctx<'_>) -> Option<Out> {
+    fn new_data<T>(&mut self, ctx: &mut Ctx<'_>, ask: Ask<'_, T>) -> Result<Option<(Out, T)>, NotReady> {
         if self.persist.is_some() || matches!(self.recovery, Recovery::Sack { .. }) || self.tx.window() == 0 {
-            return None;
+            return Ok(None);
         }
         let now = ctx.now;
         let unsent = self.tx.unsent();
         if unsent == 0 && !self.tx.fin_unsent() {
-            return None;
+            return Ok(None);
         }
         if unsent > 0 && self.last_data_sent.is_some_and(|at| now.since(at) > self.rtt.rto()) && self.tx.flight() == 0 {
             self.cc.restart_after_idle();
@@ -1208,9 +1219,10 @@ impl Sync {
         let start = self.tx.nxt;
         if d == 0 {
             if w_rcv < 1 {
-                return None;
+                return Ok(None);
             }
-            return Some(self.hand_off(ctx, start, 0, true, blocks));
+            let via = ask().ready()?;
+            return Ok(Some((self.hand_off(ctx, start, 0, true, blocks), via)));
         }
         let nagle = ctx.options.nodelay || self.tx.flight() == 0;
         let half = signed(self.tx.max_wnd / 2);
@@ -1226,8 +1238,9 @@ impl Sync {
             if w_rcv > 0 && rules(i64::MAX) && self.sws.is_none() && !self.sws_fired {
                 self.sws = Some(now.after(limits::SWS_OVERRIDE));
             }
-            return None;
+            return Ok(None);
         }
+        let via = ask().ready()?;
         let len = u32::try_from(usable).unwrap_or(0);
         if limited_transmit && signed(len) > cwnd.saturating_sub(signed(self.tx.flight())) {
             if !self.sack_ok {
@@ -1237,11 +1250,11 @@ impl Sync {
             ctx.log.count(Counter::LimitedTransmit);
         }
         let fin = self.fin_fits(start.add(len)) && signed(len) < w_rcv;
-        Some(self.hand_off(ctx, start, len, fin, blocks))
+        Ok(Some((self.hand_off(ctx, start, len, fin, blocks), via)))
     }
 
     /// A due persist probe (RFC 9293 §3.8.6.1) or keepalive (§3.8.4).
-    fn probe(&mut self, ctx: &mut Ctx<'_>) -> Option<Out> {
+    fn probe<T>(&mut self, ctx: &mut Ctx<'_>, ask: Ask<'_, T>) -> Result<Option<(Out, T)>, NotReady> {
         let now = ctx.now;
         if let Some(persist) = self.persist.filter(|p| p.due) {
             let blocks = self.blocks();
@@ -1257,20 +1270,22 @@ impl Sync {
             } else if self.tx.fin_unsent() {
                 (self.tx.nxt, 0, true)
             } else {
-                return None;
+                return Ok(None);
             };
+            let via = ask().ready()?;
             let interval = persist.interval.saturating_mul(2).min(RTO_MAX);
             self.persist = Some(Persist { at: now.after(interval), interval, due: false, unanswered: true, ..persist });
             ctx.log.count(Counter::PersistProbe);
-            return Some(self.hand_off(ctx, start, len, fin, blocks));
+            return Ok(Some((self.hand_off(ctx, start, len, fin, blocks), via)));
         }
         if self.ka_due {
+            let via = ask().ready()?;
             self.ka_due = false;
             self.ka_probes = self.ka_probes.saturating_add(1);
             self.ka_last = Some(now);
             ctx.log.count(Counter::KeepaliveProbe);
-            return Some(self.pure(now, self.tx.nxt.sub(1)));
+            return Ok(Some((self.pure(now, self.tx.nxt.sub(1)), via)));
         }
-        None
+        Ok(None)
     }
 }

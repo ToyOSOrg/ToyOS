@@ -6,7 +6,7 @@
 //! credit; nothing here reads a clock, draws randomness or does I/O.
 //!
 //! **Pull egress.** A segment exists only while [`Tcp::transmit`] hands it to the caller's sink,
-//! built from the state of that moment.
+//! built from the state of that moment, once the caller has answered that its next hop is known.
 //!
 //! **Refusals are values.** Legacy or insecure input is refused, counted in [`Counters`], and
 //! named by an [`Event::Refused`] the shell logs through [`RefusalLog`].
@@ -267,6 +267,27 @@ pub enum Hop<T> {
     Ready(T),
     Pending,
     Unreachable,
+}
+
+/// The hop question for one 4-tuple, asked once a segment is due and before anything about it
+/// is committed: an answer other than `Ready` leaves everything owed as it was.
+pub(crate) type Ask<'a, T> = &'a mut dyn FnMut() -> Hop<T>;
+
+/// Why a due segment was not built.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NotReady {
+    Pending,
+    Unreachable,
+}
+
+impl<T> Hop<T> {
+    pub(crate) fn ready(self) -> Result<T, NotReady> {
+        match self {
+            Self::Ready(via) => Ok(via),
+            Self::Pending => Err(NotReady::Pending),
+            Self::Unreachable => Err(NotReady::Unreachable),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

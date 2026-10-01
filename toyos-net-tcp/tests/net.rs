@@ -1,6 +1,5 @@
-//! Loss, reordering, duplication and wraparound on the test network, the
-//! `many_up` shape (PL-11) and a SYN flood (LS-12). Ours against ours: a consistency control,
-//! not an independent oracle.
+//! Loss, reordering and wraparound on TCP's own two-node network, and a SYN flood (LS-12). Ours
+//! against ours: a consistency control, not an independent oracle.
 
 mod common;
 
@@ -45,21 +44,6 @@ fn every_nth(n: usize) -> (Impair, std::rc::Rc<std::cell::RefCell<[usize; 2]>>) 
     (impair, dropped)
 }
 
-#[test]
-fn s_net_001_sack_repairs_every_50th() {
-    let mut net = bulk(10);
-    let (impair, dropped) = every_nth(50);
-    net.impair = impair;
-    finish(&mut net);
-    for node in 0..2 {
-        assert_eq!(net.count(node, Counter::Rto), 0, "node {node}");
-        assert!(net.count(node, Counter::SackRecovery) > 0);
-        let drops = dropped.borrow()[node] as u64;
-        let bound = drops * 1448 + net.count(node, Counter::SackRecovery) * 1448;
-        assert!(net.count(node, Counter::RetransmitBytes) <= bound, "node {node}: {} > {bound}", net.count(node, Counter::RetransmitBytes));
-    }
-}
-
 /// Strips Timestamps, Window Scale and SACK-permitted from node 0's SYN: node 1 sees a peer that
 /// offers none of them, and both ends run without them.
 fn bare_syn(from: usize, o: &O) -> Option<Vec<u8>> {
@@ -86,53 +70,6 @@ fn s_net_002_newreno_when_one_side_has_no_sack() {
 }
 
 #[test]
-fn s_net_003_reordering_below_the_threshold() {
-    let mut net = bulk(10);
-    let mut seen = [0usize; 2];
-    net.impair = Box::new(move |from, o| {
-        if o.payload.is_empty() {
-            return Fate::Pass;
-        }
-        seen[from] += 1;
-        if seen[from] % 20 == 10 {
-            Fate::Hold
-        } else {
-            Fate::Pass
-        }
-    });
-    finish(&mut net);
-    for node in 0..2 {
-        assert_eq!(net.count(node, Counter::RetransmitBytes), 0, "node {node}");
-    }
-}
-
-#[test]
-fn s_net_004_duplicates_are_reported_by_dsack() {
-    let mut net = bulk(10);
-    let duplicated = std::rc::Rc::new(std::cell::RefCell::new([0u64; 2]));
-    let counts = duplicated.clone();
-    net.impair = Box::new(move |from, o| {
-        if o.payload.is_empty() {
-            Fate::Pass
-        } else {
-            counts.borrow_mut()[from] += 1;
-            Fate::Duplicate
-        }
-    });
-    net.keep_wire = true;
-    finish(&mut net);
-    net.drain();
-    for node in 0..2 {
-        let duplicates = duplicated.borrow()[node];
-        let reported = net.wire.iter().filter(|(from, o)| *from != node && o.sack.first().is_some_and(|&(_, right)| Seq::new(right).at_or_before(Seq::new(o.ack.unwrap())))).count();
-        assert_eq!(reported as u64, duplicates, "node {node}'s peer sends one D-SACK per duplicate");
-        // The last can land after the sender left the synchronized states.
-        assert!(net.count(node, Counter::DsackRcvd) + 1 >= duplicates, "node {node}");
-        assert_eq!(net.count(node, Counter::RetransmitBytes), 0);
-    }
-}
-
-#[test]
 fn s_net_005_lost_acks() {
     let mut net = Net::new(10);
     net.connections(1, 80, [MIB, 0]);
@@ -148,16 +85,6 @@ fn s_net_005_lost_acks() {
     });
     finish(&mut net);
     assert_eq!(net.count(0, Counter::RetransmitBytes), 0);
-}
-
-#[test]
-fn s_net_006_a_dark_link() {
-    let mut net = bulk(10);
-    net.dark = Some((net.now + ns(50), net.now + ns(5050)));
-    finish(&mut net);
-    for node in 0..2 {
-        assert!(net.count(node, Counter::Rto) >= 3, "node {node}: {} expiries", net.count(node, Counter::Rto));
-    }
 }
 
 #[test]
@@ -354,40 +281,6 @@ fn s_net_016_a_peer_without_options() {
     net.keep_wire = true;
     finish(&mut net);
     assert!(net.wire.iter().filter(|(_, o)| o.flags & SYN == 0).all(|(_, o)| o.ts.is_none() && o.sack.is_empty()));
-}
-
-/// 100 connections on one shard each write 64 KiB at once through a device taking `frames` a
-/// millisecond. Returns expiries and retransmissions handed off.
-fn many_up(frames: usize) -> (u64, u64) {
-    let mut net = Net::new(10);
-    net.connections(100, 80, [64 * 1024, 0]);
-    net.nodes[0].credit_per_ms = Some(frames);
-    net.keep_wire = true;
-    finish(&mut net);
-    assert_eq!(net.count(0, Counter::RtoUnsent), 0, "an RTO fired for a segment that had not left");
-    let mut highest: HashMap<u16, u32> = HashMap::new();
-    let mut retransmissions = 0u64;
-    for (from, o) in &net.wire {
-        if *from != 0 || o.payload.is_empty() {
-            continue;
-        }
-        let end = o.seq.wrapping_add(o.payload.len() as u32);
-        match highest.get(&o.src.1) {
-            Some(&top) if !Seq::new(end).after(Seq::new(top)) => retransmissions += 1,
-            _ => {
-                highest.insert(o.src.1, end);
-            }
-        }
-    }
-    let expiries = net.count(0, Counter::Rto);
-    assert!(expiries <= retransmissions, "{expiries} expiries, {retransmissions} retransmissions");
-    (expiries, retransmissions)
-}
-
-#[test]
-fn s_pl_011_many_up() {
-    many_up(16);
-    many_up(4);
 }
 
 #[test]

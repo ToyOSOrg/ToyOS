@@ -11,7 +11,7 @@ use crate::ring::Ring;
 use crate::rtt::Rtt;
 use crate::seq::Seq;
 use crate::stack::TimeWait;
-use crate::{limits, Instant};
+use crate::{limits, Ask, Instant, NotReady};
 
 /// What a SYN or SYN-ACK of ours offers, fixed for the connection's life.
 #[derive(Clone, Copy, Debug)]
@@ -128,6 +128,7 @@ impl Retransmit {
         if self.first.is_some_and(|first| now.since(first) >= bound) {
             return true;
         }
+        ctx.log.count(Counter::Rto);
         self.rtt.back_off();
         self.timeouts = self.timeouts.saturating_add(1);
         self.owed = true;
@@ -230,16 +231,20 @@ impl SynSent {
         (None, Sent::Established(alloc::boxed::Box::new(sync)))
     }
 
-    pub fn next_segment(&mut self, local: &Local, now: Instant) -> Option<Out> {
-        if let Some(rst) = self.answer.take() {
-            return Some(Out::rst(&rst));
+    pub fn next_segment<T>(&mut self, local: &Local, now: Instant, ask: Ask<'_, T>) -> Result<Option<(Out, T)>, NotReady> {
+        if let Some(rst) = self.answer {
+            let via = ask().ready()?;
+            self.answer = None;
+            return Ok(Some((Out::rst(&rst), via)));
         }
         if !self.timer.owed {
-            return None;
+            return Ok(None);
         }
+        let via = ask().ready()?;
         let tsval = crate::tsval(now, local.ts_offset);
         self.timer.handed_off(now, tsval, true);
-        Some(Out { seq: self.iss, kind: Kind::Syn(syn_options(local, None, now)), window: local.window, ts: None, sack: NO_BLOCKS, data: (0, 0) })
+        let syn = Out { seq: self.iss, kind: Kind::Syn(syn_options(local, None, now)), window: local.window, ts: None, sack: NO_BLOCKS, data: (0, 0) };
+        Ok(Some((syn, via)))
     }
 
     pub fn deadline(&self) -> Option<Instant> {
@@ -390,30 +395,36 @@ impl SynRcvd {
         sync
     }
 
-    pub fn next_segment(&mut self, local: &Local, now: Instant) -> Option<Out> {
-        if let Some(rst) = self.answer.take() {
-            return Some(Out::rst(&rst));
+    pub fn next_segment<T>(&mut self, local: &Local, now: Instant, ask: Ask<'_, T>) -> Result<Option<(Out, T)>, NotReady> {
+        if let Some(rst) = self.answer {
+            let via = ask().ready()?;
+            self.answer = None;
+            return Ok(Some((Out::rst(&rst), via)));
         }
         let tsval = crate::tsval(now, local.ts_offset);
         let ts = self.negotiated.ts.map(|ts| ts.option(now));
-        let dup = core::mem::replace(&mut self.dup_answer, false);
-        if self.timer.owed || dup {
+        if self.timer.owed || self.dup_answer {
+            let via = ask().ready()?;
+            self.dup_answer = false;
             self.timer.handed_off(now, tsval, self.timer.owed);
             let options = syn_options(local, Some(&self.negotiated), now);
-            return Some(Out {
+            let syn_ack = Out {
                 seq: self.iss,
                 kind: Kind::SynAck(self.rcv_next(), options),
                 window: local.window,
                 ts: None,
                 sack: NO_BLOCKS,
                 data: (0, 0),
-            });
+            };
+            return Ok(Some((syn_ack, via)));
         }
-        if core::mem::replace(&mut self.ack_owed, false) {
+        if self.ack_owed {
+            let via = ask().ready()?;
+            self.ack_owed = false;
             let ack = Kind::Ack { ack: self.rcv_next(), push: false, fin: false };
-            return Some(Out { seq: self.iss.add(1), kind: ack, window: local.window, ts, sack: NO_BLOCKS, data: (0, 0) });
+            return Ok(Some((Out { seq: self.iss.add(1), kind: ack, window: local.window, ts, sack: NO_BLOCKS, data: (0, 0) }, via)));
         }
-        None
+        Ok(None)
     }
 
     pub fn deadline(&self) -> Option<Instant> {

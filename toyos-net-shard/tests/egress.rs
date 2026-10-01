@@ -36,7 +36,7 @@ fn s_ip_out_007_an_arp_request_goes_before_a_ready_segment() {
 }
 
 #[test]
-fn s_ip_nud_025_shard_a_connect_waits_for_its_next_hop_and_then_leaves() {
+fn s_pl_012_shard_a_connect_waits_for_its_next_hop_and_then_leaves() {
     let (mut net, a, b) = segment();
     net.nodes[b].shard.listen(B, Some(port(80)), || 0).unwrap();
     let start = net.wire().len();
@@ -60,7 +60,7 @@ fn s_ip_nud_025_shard_a_connect_waits_for_its_next_hop_and_then_leaves() {
 }
 
 #[test]
-fn s_ip_nud_025_shard_a_connect_to_no_one_fails_at_once_as_host_unreachable() {
+fn s_pl_013_shard_a_connect_to_no_one_fails_at_once_as_host_unreachable() {
     let (mut net, a, _) = segment();
     let now = net.now();
     let id = net.nodes[a].shard.connect(now, Some(port(49152)), ep(C, 80)).unwrap();
@@ -92,7 +92,7 @@ fn sent(net: &toyos_net_testnet::Net, node: usize, start: usize) -> Vec<String> 
 }
 
 #[test]
-fn s_ip_nud_025_shard_an_owed_reset_waits_for_its_next_hop() {
+fn s_pl_015_shard_an_owed_reset_waits_for_its_next_hop() {
     let (mut net, a, b) = segment();
     let (to_b, _) = established(&mut net, a, b);
     forget(&mut net, a);
@@ -107,7 +107,7 @@ fn s_ip_nud_025_shard_an_owed_reset_waits_for_its_next_hop() {
 }
 
 #[test]
-fn s_ip_nud_025_shard_a_reset_to_a_peer_that_never_answers_is_dropped() {
+fn s_pl_015_shard_a_reset_to_a_peer_that_never_answers_is_dropped() {
     let (mut net, a, b) = segment();
     let (to_b, _) = established(&mut net, a, b);
     forget(&mut net, a);
@@ -121,7 +121,7 @@ fn s_ip_nud_025_shard_a_reset_to_a_peer_that_never_answers_is_dropped() {
 }
 
 #[test]
-fn s_ip_nud_025_shard_an_established_flow_records_host_unreachable() {
+fn s_pl_014_shard_an_established_flow_records_host_unreachable() {
     let (mut net, a, b) = segment();
     let (to_b, _) = established(&mut net, a, b);
     forget(&mut net, a);
@@ -137,7 +137,7 @@ fn s_ip_nud_025_shard_an_established_flow_records_host_unreachable() {
 }
 
 #[test]
-fn s_ip_nud_025_shard_a_reset_for_no_socket_waits_for_its_next_hop() {
+fn s_pl_015_shard_a_reset_for_no_socket_waits_for_its_next_hop() {
     let (mut net, a, b) = segment();
     established(&mut net, a, b);
     forget(&mut net, a);
@@ -153,7 +153,7 @@ fn s_ip_nud_025_shard_a_reset_for_no_socket_waits_for_its_next_hop() {
 }
 
 #[test]
-fn s_ip_nud_025_shard_a_time_wait_ack_waits_for_its_next_hop() {
+fn s_pl_015_shard_a_time_wait_ack_waits_for_its_next_hop() {
     let (mut net, a, b) = segment();
     let (to_b, from_a) = established(&mut net, a, b);
     let now = net.now();
@@ -220,7 +220,8 @@ fn s_ip_nud_026_shard_a_flow_with_nothing_to_send_leaves_stale_alone() {
     assert!(matches!(state_of_b(&net, a), Some(Nud::Stale(_))), "{:?}", state_of_b(&net, a));
 }
 
-// Architecture §3.3's scheduler between flows has no scenario (QUESTIONS Q7).
+// No id: the alternation stands until architecture §3.3's deficit round-robin (DRR-01 to DRR-03)
+// replaces it.
 #[test]
 fn tcp_and_udp_take_turns_frame_by_frame() {
     let (mut net, a, b) = segment();

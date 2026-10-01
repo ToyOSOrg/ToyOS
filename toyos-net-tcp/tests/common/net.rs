@@ -123,7 +123,6 @@ pub struct Net {
     held: [Option<Vec<u8>>; 2],
     order: u64,
     pub impair: Impair,
-    pub dark: Option<(u64, u64)>,
     /// Every datagram each node handed off, parsed: `(from, segment)`.
     pub wire: Vec<(usize, O)>,
     pub keep_wire: bool,
@@ -177,7 +176,6 @@ impl Net {
             held: [None, None],
             order: 0,
             impair: Box::new(|_, _| Fate::Pass),
-            dark: None,
             wire: Vec::new(),
             keep_wire: false,
             rewrite: None,
@@ -344,9 +342,6 @@ impl Net {
             self.wire.push((from, parsed.clone()));
         }
         let fate = (self.impair)(from, &parsed);
-        if self.dark.is_some_and(|(start, end)| (start..end).contains(&self.now)) {
-            return;
-        }
         let to = 1 - from;
         let push = |net: &mut Net, bytes: Vec<u8>, late: u64| {
             net.order += 1;
@@ -523,13 +518,6 @@ impl Net {
             );
         }
         text
-    }
-}
-
-impl Net {
-    /// Runs until nothing is on the wire.
-    pub fn drain(&mut self) {
-        assert!(self.run(10_000, |n| n.in_flight.is_empty() && n.held.iter().all(Option::is_none)));
     }
 }
 

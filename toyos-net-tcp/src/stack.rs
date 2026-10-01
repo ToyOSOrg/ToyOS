@@ -20,7 +20,7 @@ use crate::counters::{Counter, Counters, Log};
 use crate::open::{negotiate, refuse_syn_extras, Local, Origin, Rcvd, Sent, SynRcvd, SynSent};
 use crate::rx::Rx;
 use crate::seq::{Seq, Stamp};
-use crate::{isn, limits, reuse_iss, siphash, ts_offset, Config, ConfigError, Endpoint, Error, Event, Failure, Hop, IcmpError, IcmpKind, Instant, Options, Received, SoftError, State, Status, Tuple};
+use crate::{isn, limits, reuse_iss, siphash, ts_offset, Config, ConfigError, Endpoint, Error, Event, Failure, Hop, IcmpError, IcmpKind, Instant, NotReady, Options, Received, SoftError, State, Status, Tuple};
 
 const EPHEMERAL_FIRST: u16 = 49_152;
 const EPHEMERAL_COUNT: u16 = 16_384;
@@ -1151,11 +1151,13 @@ impl Tcp {
     // ---- egress ----
 
     /// A transmit opportunity with room for `credit` frames: resets first, then each connection
-    /// in turn one segment at a time. `hop` is asked before anything for a 4-tuple is built
-    /// (`ip.md` §6.7): what waits for its next hop keeps its place and spends nothing, and the
-    /// rest is built now and handed to `sink` with what `hop` answered, and only then counts as
-    /// sent. A failed next hop drops an owed reset or ACK, fails a connect, and is the soft error
-    /// of any other connection (`ip.md` §9.6). Returns how many left.
+    /// in turn one segment at a time. `hop` is asked for a 4-tuple once a segment for it is due and
+    /// before anything about that segment is committed (`ip.md` §6.7), so a flow with nothing due
+    /// asks nothing. What waits for its next hop keeps its place and spends nothing; the rest is
+    /// built now and handed to `sink` with what `hop` answered, and only then counts as sent. A
+    /// failed next hop drops an owed reset or ACK, fails a connect, and is the soft error of any
+    /// other connection (`ip.md` §9.6); each segment it stops counts `tcp.next-hop-failed`.
+    /// Returns how many left.
     pub fn transmit<T>(
         &mut self,
         now: Instant,
@@ -1218,39 +1220,36 @@ impl Tcp {
             }
             let Some(index) = self.active.pop_front() else { break };
             let Some(conn) = value(&mut self.conns, index) else { continue };
-            if matches!(conn.state, Tcb::Ended(_)) {
-                conn.queued = false;
-                self.settle_deadline(index, now);
-                continue;
-            }
-            let via = match hop(&conn.tuple) {
-                Hop::Ready(via) => via,
-                Hop::Pending => {
-                    waiting.conns.push(index);
-                    continue;
-                }
-                Hop::Unreachable if matches!(conn.state, Tcb::SynSent(_)) => {
-                    self.log.count(Counter::NextHopFailed);
-                    self.end(index, Some(Failure::Unreachable(SoftError::Unreachable(UnreachableCode::Host))), None);
-                    continue;
-                }
-                Hop::Unreachable => {
-                    conn.soft = Some(SoftError::Unreachable(UnreachableCode::Host));
-                    waiting.conns.push(index);
-                    continue;
-                }
-            };
+            let tuple = conn.tuple;
+            let mut ask = || hop(&tuple);
             let mut ctx = conn.ctx(now, &mut self.log);
-            let out = match &mut conn.state {
-                Tcb::SynSent(s) => s.next_segment(&conn.local, now),
-                Tcb::SynRcvd(s) => s.next_segment(&conn.local, now),
-                Tcb::Sync(s) => s.next_segment(&mut ctx),
-                Tcb::Ended(_) => None,
+            let next = match &mut conn.state {
+                Tcb::SynSent(s) => s.next_segment(&conn.local, now, &mut ask),
+                Tcb::SynRcvd(s) => s.next_segment(&conn.local, now, &mut ask),
+                Tcb::Sync(s) => s.next_segment(&mut ctx, &mut ask),
+                Tcb::Ended(_) => Ok(None),
             };
-            let Some(out) = out else {
-                conn.queued = false;
-                self.settle_deadline(index, now);
-                continue;
+            let (out, via) = match next {
+                Ok(Some(built)) => built,
+                Ok(None) => {
+                    conn.queued = false;
+                    self.settle_deadline(index, now);
+                    continue;
+                }
+                Err(NotReady::Pending) => {
+                    waiting.conns.push(index);
+                    continue;
+                }
+                Err(NotReady::Unreachable) => {
+                    self.log.count(Counter::NextHopFailed);
+                    if matches!(conn.state, Tcb::SynSent(_)) {
+                        self.end(index, Some(Failure::Unreachable(SoftError::Unreachable(UnreachableCode::Host))), None);
+                    } else {
+                        conn.soft = Some(SoftError::Unreachable(UnreachableCode::Host));
+                        waiting.conns.push(index);
+                    }
+                    continue;
+                }
             };
             let payload: &[u8] = match &conn.state {
                 Tcb::Sync(sync) if out.data.1 > 0 => {

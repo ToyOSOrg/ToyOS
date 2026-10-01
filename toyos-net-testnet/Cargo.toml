@@ -10,3 +10,9 @@ publish = false
 toyos-net-shard = { path = "../toyos-net-shard" }
 toyos-net-tcp = { path = "../toyos-net-tcp" }
 toyos-net-wire = { path = "../toyos-net-wire" }
+
+[dev-dependencies]
+# The capture's independent oracle (architecture §5.3 (f)): a published pcap reader and a published
+# Ethernet/IPv4/TCP parser, used as black boxes.
+etherparse = "0.21.0"
+pcap-file = "2.0.0"

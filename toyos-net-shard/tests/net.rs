@@ -61,7 +61,7 @@ fn count(net: &Net, node: usize, counter: Counter) -> u64 {
 }
 
 #[test]
-fn s_net_001_shard_sack_repairs_every_50th() {
+fn s_net_001_sack_repairs_every_50th() {
     let (mut net, a, b) = bulk(10, 1, [MIB, MIB]);
     let dropped = [on_data(&mut net, a, b, Fate::Drop, |n| n % 50 == 0), on_data(&mut net, b, a, Fate::Drop, |n| n % 50 == 0)];
     finish(&mut net);
@@ -75,7 +75,7 @@ fn s_net_001_shard_sack_repairs_every_50th() {
 }
 
 #[test]
-fn s_net_003_shard_reordering_below_the_threshold() {
+fn s_net_003_reordering_below_the_threshold() {
     let (mut net, a, b) = bulk(10, 1, [MIB, MIB]);
     for (from, to) in [(a, b), (b, a)] {
         on_data(&mut net, from, to, Fate::Hold, |n| n % 20 == 10);
@@ -87,7 +87,7 @@ fn s_net_003_shard_reordering_below_the_threshold() {
 }
 
 #[test]
-fn s_net_004_shard_duplicates_are_reported_by_dsack() {
+fn s_net_004_duplicates_are_reported_by_dsack() {
     let (mut net, a, b) = bulk(10, 1, [MIB, MIB]);
     let duplicated = [on_data(&mut net, a, b, Fate::Duplicate, |_| true), on_data(&mut net, b, a, Fate::Duplicate, |_| true)];
     finish(&mut net);
@@ -102,7 +102,7 @@ fn s_net_004_shard_duplicates_are_reported_by_dsack() {
 }
 
 #[test]
-fn s_net_006_shard_a_dark_link() {
+fn s_net_006_a_dark_link() {
     let (mut net, a, b) = bulk(10, 1, [MIB, MIB]);
     let dark = (net.now().after(Duration::from_millis(50)), net.now().after(Duration::from_millis(5_050)));
     for (from, to) in [(a, b), (b, a)] {
@@ -139,7 +139,7 @@ fn many_up(frames: usize) -> (u64, u64) {
 }
 
 #[test]
-fn s_pl_011_shard_many_up() {
+fn s_pl_011_many_up() {
     many_up(16);
     many_up(4);
 }

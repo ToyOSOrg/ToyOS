@@ -412,6 +412,9 @@ struct Delta {
     ts: Option<u32>,
 }
 
+/// The answer to the hop question for a 4-tuple at spec time t (`ip.md` §6.7).
+pub type Hops = Box<dyn FnMut(i64, &Tuple) -> Hop<()>>;
+
 /// Stack A and its scripted peer.
 pub struct H {
     pub tcp: Tcp,
@@ -431,6 +434,7 @@ pub struct H {
     pub conn: Option<ConnId>,
     pub listener: Option<ListenerId>,
     pub events: Vec<Event>,
+    pub hop: Hops,
 }
 
 impl H {
@@ -454,6 +458,7 @@ impl H {
             conn: None,
             listener: None,
             events: Vec::new(),
+            hop: Box::new(|_, _| Hop::Ready(())),
         }
     }
 
@@ -533,8 +538,8 @@ impl H {
     pub fn transmit(&mut self) -> Vec<O> {
         let credit = self.credit.unwrap_or(usize::MAX);
         let mut raw = Vec::new();
-        let now = self.now();
-        self.tcp.transmit(now, credit, |_| Hop::Ready(()), |out, ()| raw.push(datagram(out)));
+        let (now, t, hop) = (self.now, self.t, &mut self.hop);
+        self.tcp.transmit(now, credit, |tuple| hop(t, tuple), |out, ()| raw.push(datagram(out)));
         if let Some(c) = self.credit.as_mut() {
             *c = c.saturating_sub(raw.len());
         }
