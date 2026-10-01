@@ -13,6 +13,12 @@ opened: 2026-10-01
 | 3. System services | The same rule as the kernel. |
 | 4. Apps, ports, test code and build tooling | Normal Rust. |
 
+Tiers 2 to 4 are processes, not crates: a tier holds every crate of this tree
+its processes link, and a crate in two tiers is held to the stricter. The
+system services are init and every program `system.toml` starts at boot or
+marks `service = true`, so tier 3 holds `toyos` and every crate of this tree
+one of them links.
+
 **The set**:
 - indexing and slicing: `clippy::indexing_slicing`, and `clippy::string_slice`,
   because the first does not fire on slicing a `str`;
@@ -86,5 +92,13 @@ lossy casts and 205 `disallowed_macros`.
    `#[expect(…, reason = "…")]` of its own, and a bare `#[allow]` fails the
    gate.
 4. The system services, once `issues/build/userland-programs-are-never-linted.md`
-   has put userland in `src/clippy.rs`: a service's exit is its crate root
-   under stage 3's attributes, and its crate in stage 3's step.
+   has put userland in `src/clippy.rs`. The stage ends when every crate of
+   this tree a service links, its own and `toyos` included, unless stage 1
+   already forbids the set in it, is linted by `--clippy` under stage 3's
+   attributes and passes stage 3's step. The step finds those crates itself:
+   it reads the services out of `system.toml` and `cargo metadata
+   --format-version 1` over userland's workspace, walks the normal edges from
+   each service's package whatever their `cfg`, as `src/licence.rs` walks them
+   from what ships, and keeps every package whose manifest lies in this
+   repository. A registry or git package is third-party and is held by
+   `CLAUDE.md`'s "Dependencies", not by this track.
