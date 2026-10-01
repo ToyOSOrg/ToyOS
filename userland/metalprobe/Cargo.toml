@@ -8,6 +8,3 @@ license = "MIT OR Apache-2.0"
 toyos = { path = "../../toyos" }
 toyos-abi = { path = "../../toyos-abi" }
 toyos-tco = { path = "../../toyos-tco" }
-
-[package.metadata.toyos.host]
-exempt = "it measures the devices of a ToyOS metal boot, each claimed from ToyOS's kernel"

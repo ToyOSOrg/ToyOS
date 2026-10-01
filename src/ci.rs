@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::arch::{Accel, Arch};
-use crate::userlandhost::{Host, Os};
+use crate::userlandhost::{Host, Os, Program};
 use crate::{flags, release, sdkversion, sync};
 
 const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
@@ -453,7 +453,7 @@ fn run_control(root: &Path, control: &Control) -> Result<String, String> {
 /// member of the host workspace, clippy with warnings denied, the concurrency
 /// models' negative controls, every userland crate with a host test
 /// ([`crate::userlandhost`], which also reds on a userland test none of them
-/// runs), every userland app on each host ([`apps_on`]), and the SDK.
+/// runs), every app the images ship for each host ([`apps_for`]), and the SDK.
 ///
 /// **Every step runs against a `$TMPDIR` of this job's own, and the last step
 /// reds on anything left in it** but the lock `toyos_tmpdir` keeps there: a test
@@ -529,15 +529,15 @@ fn host(root: &Path) -> Vec<Step> {
         }
         Err(why) => steps.push(Step { label: "the userland host crates".into(), verdict: Err(why) }),
     }
-    match crate::userlandhost::packages(&root.join("userland")) {
-        Ok(packages) => {
+    match crate::userlandhost::programs(root) {
+        Ok(programs) => {
             for os in Os::ALL {
-                steps.push(step(&format!("the userland apps on {}", os.name()), || {
-                    apps_on(root, &packages, os, &host_triple)
+                steps.push(step(&format!("the apps for {}", os.name()), || {
+                    apps_for(root, &programs, os)
                 }));
             }
         }
-        Err(why) => steps.push(Step { label: "the userland apps".into(), verdict: Err(why) }),
+        Err(why) => steps.push(Step { label: "the apps".into(), verdict: Err(why) }),
     }
     // The SDK compiles against the ToyOS sysroot everywhere but here, and this
     // build links no syscall.
@@ -548,53 +548,49 @@ fn host(root: &Path) -> Vec<Step> {
     steps
 }
 
-/// Every userland app built for `os` where this host is `os`, and checked
-/// against `os`'s triple where it is not, each judged against what its manifest
-/// declares. A Windows runner cannot run this build system
-/// (`issues/build/the-build-system-does-not-compile-on-windows.md`), so Windows
-/// is checked from the others.
+/// Every app the images ship, checked against `os`'s triple with the features
+/// its image builds it with, on whichever host this is, but where its manifest
+/// declares it fails ([`crate::userlandhost`]).
 ///
 /// One cargo per app: features unify across the packages of one invocation, and
 /// an app that builds only beside another's features is what this gate is for.
-fn apps_on(
-    root: &Path,
-    packages: &[(String, Host)],
-    os: Os,
-    host_triple: &str,
-) -> Result<String, String> {
-    let native = Os::current()? == os;
-    let (verb, triple) = if native { ("build", host_triple) } else { ("check", os.triple()) };
-    if !native {
-        let status = Command::new("rustup")
-            .args(["target", "add", triple])
-            .status()
-            .map_err(|e| format!("rustup: {e}"))?;
-        if !status.success() {
-            return Err(format!("rustup target add {triple} exited {status}"));
+fn apps_for(root: &Path, programs: &[Program], os: Os) -> Result<String, String> {
+    let triple = os.triple();
+    let status = Command::new("rustup")
+        .args(["target", "add", triple])
+        .status()
+        .map_err(|e| format!("rustup: {e}"))?;
+    if !status.success() {
+        return Err(format!("rustup target add {triple} exited {status}"));
+    }
+    let (mut checked, mut declared, mut red) = (0, Vec::new(), Vec::new());
+    for program in programs {
+        let Host::App(fails) = &program.host else { continue };
+        if fails.contains(&os) {
+            declared.push(program.dir.as_str());
+            continue;
+        }
+        let manifest = format!("{}/Cargo.toml", program.dir);
+        let mut args = vec!["check", "--manifest-path", manifest.as_str(), "--target", triple];
+        args.extend(program.features.args());
+        match cargo(root, &args) {
+            Ok(_) => checked += 1,
+            Err(exit) => red.push(format!(
+                "{} does not compile for {} and declares neither `fails` there nor `exempt`: \
+                 {exit}",
+                program.dir,
+                os.name()
+            )),
         }
     }
-    let (mut built, mut failing, mut wrong) = (0, Vec::new(), Vec::new());
-    for (dir, host) in packages {
-        let Host::App(fails) = host else { continue };
-        let manifest = format!("userland/{dir}/Cargo.toml");
-        let outcome = cargo(root, &[verb, "--manifest-path", &manifest, "--target", triple]);
-        match crate::userlandhost::judge(dir, fails.as_ref(), os, outcome.is_ok()) {
-            Ok(true) => built += 1,
-            Ok(false) => failing.push(dir.as_str()),
-            Err(why) => wrong.push(match outcome {
-                Err(exit) => format!("{why}: {exit}"),
-                Ok(_) => why,
-            }),
-        }
+    if !red.is_empty() {
+        return Err(red.join("; "));
     }
-    if !wrong.is_empty() {
-        return Err(wrong.join("; "));
-    }
-    let said = format!("{built} app(s) pass `cargo {verb} --target {triple}`");
-    if failing.is_empty() {
+    let said = format!("{checked} app(s) pass `cargo check --target {triple}`");
+    if declared.is_empty() {
         Ok(said)
     } else {
-        Ok(format!("{said}; {} fail, as their manifests declare", failing.join(", ")))
+        Ok(format!("{said}; {} not attempted, as their manifests declare", declared.join(", ")))
     }
 }
 

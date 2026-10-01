@@ -20,4 +20,4 @@ toyos-blockring = { path = "../../toyos-blockring" }
 toyos-quiesce = { path = "../../toyos-quiesce" }
 
 [package.metadata.toyos.host]
-exempt = "it is the program ToyOS's kernel starts, and holds the machine's system capability"
+exempt.owns = "the machine's system capability: the kernel starts it, and it builds every program's namespace"

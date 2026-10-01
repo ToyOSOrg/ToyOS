@@ -10,4 +10,4 @@ toyos = { path = "../../toyos" }
 toyos-swap = { path = "../../toyos-swap" }
 
 [package.metadata.toyos.host]
-exempt = "it replaces a running ToyOS service's binary through init's `swap` port, which only it holds"
+exempt.manages = "ToyOS's running services: it replaces one's binary through init's `swap` port"

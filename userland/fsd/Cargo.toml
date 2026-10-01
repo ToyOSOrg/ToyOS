@@ -24,4 +24,4 @@ bcachefs = { path = "../../bcachefs" }
 blockd = { path = "../blockd" }
 
 [package.metadata.toyos.host]
-exempt = "it serves ToyOS's storage roles from the partitions ToyOS claims for it"
+exempt.owns = "ToyOS's storage roles, served from the partitions ToyOS claims for it"

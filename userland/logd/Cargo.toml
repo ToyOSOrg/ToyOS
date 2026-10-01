@@ -14,4 +14,4 @@ toyos-inspect = { path = "../../toyos-inspect" }
 toyos-wallclock = { path = "../../toyos-wallclock" }
 
 [package.metadata.toyos.host]
-exempt = "it reads the ToyOS kernel's record ring under the `logread` SysCap, and serves the `log` port"
+exempt.owns = "the kernel's record ring, read under the `logread` SysCap, and the `log` port it serves"

@@ -54,8 +54,9 @@ above; otherwise it is a NOTE.
 - **Hosts.** A BLOCKER: a change that makes an app build on fewer of Linux under Wayland, macOS
   and Windows, or answers a host build failure by making the app ToyOS-only, by a split, a `cfg`
   that compiles what it does out of a host or an `exempt` in its manifest, instead of fixing it in
-  the app or its dependencies. `exempt` is for a system server that owns ToyOS devices or kernel
-  objects. An X11 backend is legacy, and a BLOCKER too.
+  the app or its dependencies. `exempt` is for a program whose job exists only on ToyOS: it owns
+  ToyOS devices or kernel objects, or it manages ToyOS itself. An X11 backend is legacy, and a
+  BLOCKER too.
 - **Instructions.** A change that removes or renames a command, flag or step an agent runs updates
   every prompt that names it — each `CLAUDE.md` and `.claude/agents/*.md` — in the same diff,
   saying what to do instead. Such an instruction is not the prose "Prose is removed, never
