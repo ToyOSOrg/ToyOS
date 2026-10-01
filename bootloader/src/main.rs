@@ -16,7 +16,7 @@ use uefi::{
     proto::device_path::{media::{PartitionFormat, PartitionSignature}, DevicePath, DevicePathNode, DeviceType, DeviceSubType},
     proto::loaded_image::LoadedImage,
     proto::media::file::{File, FileAttribute, FileInfo, FileMode},
-    table::{boot::{MemoryAttribute, MemoryType, OpenProtocolAttributes, OpenProtocolParams, PAGE_SIZE}, cfg::ACPI2_GUID, runtime::ResetType},
+    table::{boot::{MemoryAttribute, MemoryType, PAGE_SIZE}, cfg::ACPI2_GUID, runtime::ResetType},
     Event,
 };
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry, RootBridgeWindow, MAX_ROOT_BRIDGE_WINDOWS};
@@ -42,7 +42,7 @@ mod arch;
 mod attempt;
 mod blackbox;
 mod bootnext;
-mod exclusive;
+mod protocol;
 mod floor;
 mod gcd;
 mod loaderlog;
@@ -176,9 +176,9 @@ struct BootPartition {
 /// Every early-return below is one of those, so none of them panics.
 fn boot_partition(handle: Handle, system_table: &SystemTable<Boot>) -> Option<BootPartition> {
     let bs = system_table.boot_services();
-    let image = exclusive::open::<LoadedImage>(bs, handle).ok()?;
+    let image = protocol::exclusive::<LoadedImage>(bs, handle).ok()?;
     let device = image.device()?;
-    let path = exclusive::open::<DevicePath>(bs, device).ok()?;
+    let path = protocol::exclusive::<DevicePath>(bs, device).ok()?;
 
     let is_hard_drive = |node: &&DevicePathNode| {
         node.full_type() == (DeviceType::MEDIA, DeviceSubType::MEDIA_HARD_DRIVE)
@@ -378,22 +378,7 @@ struct GopInfo {
 fn query_gop(system_table: &SystemTable<Boot>) -> Option<GopInfo> {
     let bs = system_table.boot_services();
     let gop_handle = bs.get_handle_for_protocol::<GraphicsOutput>().ok()?;
-    // Never `open_protocol_exclusive` here: EXCLUSIVE calls `Stop` on every
-    // driver holding this protocol BY_DRIVER, and the firmware's graphics
-    // console is one.
-    //
-    // SAFETY: `open_protocol`'s obligation is that this handle and its protocol
-    // stay installed until the `ScopedProtocol` drops. Nothing between the two
-    // can uninstall either: the loader is the one image running, it registers
-    // no event callback, and it calls no boot service that connects or
-    // disconnects a controller.
-    let mut gop = unsafe {
-        bs.open_protocol::<GraphicsOutput>(
-            OpenProtocolParams { handle: gop_handle, agent: bs.image_handle(), controller: None },
-            OpenProtocolAttributes::GetProtocol,
-        )
-    }
-    .ok()?;
+    let mut gop = protocol::get::<GraphicsOutput>(bs, gop_handle).ok()?;
 
     let mode = gop.current_mode_info();
     let (width, height) = mode.resolution();
@@ -554,7 +539,7 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     // the boot map runs from: the map holds it wherever that is.
     let loader = {
         let bs = system_table.boot_services();
-        let image = exclusive::open::<LoadedImage>(bs, bs.image_handle())
+        let image = protocol::exclusive::<LoadedImage>(bs, bs.image_handle())
             .expect("firmware answers LoadedImage for the image it started");
         let (base, size) = image.info();
         (base as u64, size)
