@@ -8,7 +8,8 @@ opened: 2026-10-01
 
 The ladder is the review's (`.claude/agents/reviewer.md`, **Guest tests**). Each name below is a
 guest test the first cut deleted whose behaviour no cheaper tier holds yet, with the tier that is
-to hold it and the behaviour it guarded. Stages are independent and run in parallel; a stage's
+to hold it and the behaviour it guarded; a name that keeps a `METAL` row is listed for what its
+row does not hold. Stages are independent and run in parallel; a stage's
 pull request deletes the lines it meets, and the stage once it is empty. A row brings back from
 `main` before the cut whatever actuator, feature or harness its arm needs; an item names what is
 more than an actuator. Owner: the orchestrator, which dispatches each stage.
@@ -73,6 +74,12 @@ console's renderer. Exit: as stage A.
 - host `screen_early_panel`: the panel repaints after each committed record.
 - host `screen_log_absent`: a `/log` that did not mount is said on the panel.
 - host `screen_blocked_dump`: Ctrl+Alt+D's summary tells the three states apart.
+- host `screen_late_panic`: the fatal report is painted from the snapshot `capture()` froze, so a
+  record committed after the capture is absent from the panel; and a frame wider than the panel
+  wraps, its tail on the grid before the next frame (`check_wrap`). `screen_panic_muted` holds
+  neither: a muted boot refreshes the capture in `halt_all_cpus`. Exit: two host tests over the
+  renderer and its capture lifted out of the kernel crate, red when `capture` is a no-op and when
+  a wrapped row is clipped.
 
 ## Stage C: CPUs, memory, scheduling and the kernel log
 
@@ -136,6 +143,35 @@ Host: `toyos-xhci` and its sim. Metal: the T14's controller and stick. Exit: as 
 - host `usb_storage_shapes`, `usb_refused_disk_first`, `usb_pool_exhausted`: disk sizes, sector
   sizes and counts the driver serves or refuses.
 - host `usb_storage_write_error`, `usb_flush_optional`: a refused write and a missing cache flush.
+- host `usb_stick_left`: a stick that leaves its port while the port-reset rung holds it, at each
+  of three points (before the reset's completion is read, after it, and before the rung's TEST
+  UNIT READY), ends the run as the stick leaving: never `Rung::Offline`, no second break counted,
+  no Reset Device or Address Device sent to a port the reset or the TEST UNIT READY read empty,
+  and its slot disabled. Its row arms only `usb-transport-break`, and the T14 cannot pull its own
+  stick. Exit: a `toyos-xhci` sim test per point, red when an empty port climbs the ladder to
+  `Offline` or counts as a break.
+- metal `usb_reset_records_the_phase_it_cut`: a machine stopped inside a Bulk-Only command at
+  each of `DataOwed`, `Data` and `StatusOwed` resets itself, and the account the next pass reads
+  names that phase. Its row arms only `usb-reset-under-load` and reads whichever phase the sweep
+  cuts. Brings back `usb-wedge-data-owed`, `usb-wedge-in-data` and `usb-wedge-before-status`,
+  which meet `issues/kernel/a-deliberate-wedge-inside-a-driver-panics-every-other-cpu-that-wants-its-lock.md`
+  there. Exit: a row per phase, red when `stop::OpenCommand` publishes nothing.
+- host `usb_reset_records_the_phase_it_cut`: `usb-reset-under-load` on a disk smaller than
+  `SWEEP_FLOOR` refuses by name and sweeps nothing; the T14's stick has the room. Exit: a host
+  test over the sweep's span lifted out of `kernel/src/usb_gate.rs`, red when the floor goes.
+- metal `usb_reset_hands_devices_back`, the three resets its row does not reach, each judged on
+  the account in `loader.log` that `metaldevices::quiesced` reads. Its row judges two orderly
+  reboots.
+  - The test runner's job deadline, with `quiesce-late-word` on `tests/jobdeadlinecase`: the stop
+    took the controller lock before the log volume's flush and completed. Exit: red when
+    `stop::settle_commands` is reverted.
+  - The panic console's bound, with `test-late-panic` and `panic-reboot-fast`: no barrier taken,
+    nothing flushed, and the stop still complete. Waits on
+    `issues/build/the-metal-loop-cannot-judge-a-boot-that-panics.md`, whose loop refuses that
+    boot. Exit: as the deadline's.
+  - The negative control, a controller lock that never comes free (`xhci-lock-wedged`): the
+    machine hands itself back anyway, and the account says the lock was not free inside its
+    bound. Exit: red when the barrier's bound is removed, which leaves the machine wedged.
 - metal `usb_storage_gate`: the stick is read and written byte for byte.
 - metal `late_storage_connect`: a disk that connects after the boot scan is bound, and `/boot` and
   `/log` mount off it. Nothing is plugged: `xhci-slow-storage-connect` reports the first root-hub
@@ -188,6 +224,21 @@ Host: `toyos-net-tcp`, `toyos-dns`, `toyos-mdns`, `toyos-swap`, `toyos-inspect`,
 - host `swap_refusals`, `swap_not_inherited`: a wrong digest, a stranger's key and an undeclared
   program are refused a swap.
 - host `sshd_key_auth`: sshd refuses a key not authorized.
+- host `lan_lease_report`: a link that goes down and comes back after a lease neither gives the
+  lease up nor starts the client over. The T14 cannot flap its cable, and its row reads only a
+  lease from the bench's router. Exit: netd's link-up decision (its main loop and
+  `dhcp::restart`) lifted into a function a netd `#[test]` drives with a lease held, red when the
+  `!dhcp.leased()` guard goes.
+- metal `sshd_exec`, the arms `lan_talk`'s one command does not reach, each a step of that row's
+  exchange (`src/metaltalk.rs`) red when its arm in `userland/sshd/src/main.rs` is reverted:
+  - a program that is not there ends 127, `cannot run /system/bin/<name>` on stderr and nothing
+    on stdout;
+  - an unquotable line ends 127 before anything runs; `command::split`'s own tests already hold
+    the refusal it names;
+  - stdout and stderr stay apart: `cat` of a file and of a missing path;
+  - the channel's input is the program's stdin;
+  - an `env` request is answered with a failure, never left unanswered;
+  - a program whose connection goes is ended: no `spin` left running for the next exec to list.
 - metal `https_tls13` (and `https_tls13_e1000e`, the same fetch on the 82574): ureq and rustls
   fetch over TLS 1.3 on the I219.
 - metal `sshd_files`: sftp moves files byte for byte.
@@ -222,6 +273,11 @@ Metal: the T14's VT-d. Host: `toyos-pci`, `toyos-pcid`, `toyos-hda`. Exit: as st
   next holder.
 - host `pci_function_is_exclusive`, `bar_placement_is_proven`, `pci_claim_caps_truncated`: one
   holder per function, BARs moved only once the machine says so, a truncated capability list.
+- host `virtio_net_no_msix`: a claim on a function neither MSI-X nor MSI can be armed on is
+  refused as `Refusal::NoInterrupt`, by name, before any BAR moves, and the other functions keep
+  their vectors. It was `NoInterrupt`'s one reader
+  (`issues/kernel/a-claims-own-refusals-are-read-by-nothing.md`). Exit: a host test over
+  `bring_up`'s arming lifted into `toyos-pcid`, red when either arm answers anything else.
 - host `swap_refused_device_fails`, `swap_moved_device_fails`: a function whose window was lost or
   moved fails the swap by name.
 - host `hda_two_live_refused`: two live HDA links are refused by name.
