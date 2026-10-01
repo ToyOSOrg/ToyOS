@@ -67,7 +67,7 @@ above; otherwise it is a NOTE.
   with its tag in a trailing comment or names a local path that resolves.
   A file added to or deleted from `tests/testcases/tinycc/` moves the count
   `tests/testcases/LICENSE` states in the same diff, and `46_grep.c` never comes back. Nothing
-  else is tracked under `tests/testcases/` but that `LICENSE`, `system.toml` and `hello.c`.
+  else is tracked under `tests/testcases/` but that `LICENSE` and `system.toml`.
 - **What no gate reads.** A BLOCKER each: a diff that declares a retired ABI name or reuses a
   retired syscall, `SYS_DEBUG` action or inbox op number (the retired numbers are
   `kernel/src/syscall/dispatch.rs`'s `retired_syscalls!` and the "formerly …" and "retired and
@@ -80,7 +80,7 @@ above; otherwise it is a NOTE.
   needs a reason you accept; a branch that could delete more than it adds and does not goes back
   with the deletion named. What could be deleted, merged into what exists, or made smaller? An
   abstraction with one caller, a parameter with one value, dead code. Size is never bought with a
-  weaker check: tests are cut only when they test nothing. A compromise the branch found is removed or
+  weaker check: a test is cut only when it tests nothing, or as **Guest tests** says. A compromise the branch found is removed or
   recorded in `issues/` with an owner, evidence and an exit condition.
   Code is liability: code that does not earn its keep is deleted or simplified, and code kept
   "just in case", or because nobody knows whether it is needed, is an instant delete. Doubt is
@@ -92,6 +92,14 @@ above; otherwise it is a NOTE.
   held across a user copy or a device wait. Arithmetic on a value the caller chooses. A short
   read, an exit status nobody reads. An `at_most(<int>::MAX)` or `index(usize::MAX)` on an
   `Untrusted` is an unwrap wearing a check's name.
+- **Guest tests.** A behaviour is tested on the cheapest tier that reaches it: a type that makes
+  the bug unrepresentable, then a host test, then a metal row on the T14, and a QEMU guest test
+  last. A new guest test, or one whose behaviour changes, whose pull request body does not say
+  why a type, a host test and a metal row cannot reach its behaviour is a BLOCKER, and so is one
+  whose reason a cheaper tier answers. A guest test is cut for a cheaper tier only where that
+  tier already holds its behaviour, named in the pull request body, or where a stage of a track
+  names it, in the same diff, with the behaviour it guarded and an exit a build or test can fail;
+  any other cut is a BLOCKER.
 - **Waits.** A flat wait — sleep, then assume it happened — is a BLOCKER, in code and in tests,
   unless a hardware document mandates that time and offers no notification, cited at the site.
   Wait on the event itself, bounded by a timeout that fails loudly. Defensive code that hides a

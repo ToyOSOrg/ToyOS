@@ -15,7 +15,6 @@ path crate in them stale.
 
 The host cache stopped both (`src/cicache.rs`): an entry is sealed only by a
 run that restored nothing, carries the blob of every source its build read,
-and its reader dates sources by content. The guest lanes are being reshaped by
-the guest suite's cut, so the same discipline waits for their shape to settle.
+and its reader dates sources by content.
 
 Done when the guest entry is written cold, read by content, and bounded.

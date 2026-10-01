@@ -39,13 +39,12 @@ struct Shape {
 const INSTRUMENTS: &str = "debug-wait,sched-check,sched-tripwire,heap-tripwire,heap-sweep,\
                            pass-spin,stack-witness,switch-witness,switch-witness-mutate-frame,\
                            switch-witness-mutate-rsp,df-witness,df-witness-mutate,\
-                           entry-df-unclean,fpu-save-nothing,user-writable-gsbase";
+                           entry-df-unclean";
 
 /// [`INSTRUMENTS`] less the direction-flag three, which are x86-64's alone.
 const AARCH64_INSTRUMENTS: &str = "debug-wait,sched-check,sched-tripwire,heap-tripwire,heap-sweep,\
                                    pass-spin,stack-witness,switch-witness,\
-                                   switch-witness-mutate-frame,switch-witness-mutate-rsp,\
-                                   fpu-save-nothing,user-writable-gsbase";
+                                   switch-witness-mutate-frame,switch-witness-mutate-rsp";
 
 const UNCONTROLLED: &[&str] = &["toyos-pcid/counting-allocator", "toyos-sched/tripwire"];
 

@@ -19,8 +19,7 @@
 //!
 //! **The instrument is declared once.** `.github/qemu-version` is the QEMU
 //! every guest is measured with — the version has been measured to decide
-//! verdicts (`desktop_typing_damage` and `usb_storage_shapes` are red on 8.2.2
-//! and green on 11.0.3, same image, same commit, same accelerator). A guest job
+//! verdicts. A guest job
 //! reds on a disagreement, and on a `/dev/kvm` that is present and does not
 //! open; `cargo run` only notes one, because a build must not stop for brew.
 
@@ -28,11 +27,9 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::arch::Arch;
+use crate::arch::{Accel, Arch};
 use crate::cicache::{self, Start};
 use crate::{flags, release, sdkversion, sync};
-
-pub const GUEST_ARCH: Arch = Arch::X86_64;
 
 const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
   host              every host test: the build system, the harness's own checks,
@@ -41,8 +38,7 @@ const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
   prune             delete every host cache entry but the one this run saved
                     on main (nightly)
   toolchain         publish this tree's toolchain if nobody has (nightly)
-  guest <i>/<n>     one shard of the guest suite (nightly)
-  tcg               one test on an emulated CPU (nightly)
+  guest             the guest suite (nightly)
   publish           put main's SDK crates on crates.io (publish.yml)";
 
 #[derive(Debug, PartialEq, Eq)]
@@ -50,30 +46,22 @@ enum Job {
     Host,
     Prune,
     Toolchain,
-    Guest(String),
-    Tcg,
+    Guest,
     Publish,
 }
 
 fn parse(words: &[String]) -> Result<Job, String> {
-    let shard = |spec: Option<&String>| -> Result<String, String> {
-        let spec = spec.ok_or("that job takes a shard, <index>/<count>")?;
-        crate::testargs::parse_shard(&["--shard".to_string(), spec.clone()])?;
-        Ok(spec.clone())
-    };
     let job = match words.first().map(String::as_str) {
         Some("host") => Job::Host,
         Some("prune") => Job::Prune,
         Some("toolchain") => Job::Toolchain,
-        Some("guest") => Job::Guest(shard(words.get(1))?),
-        Some("tcg") => Job::Tcg,
+        Some("guest") => Job::Guest,
         Some("publish") => Job::Publish,
         Some(other) => return Err(format!("no CI job is called {other:?}")),
         None => return Err("which job?".to_string()),
     };
-    let takes = usize::from(matches!(job, Job::Guest(_))) + 1;
-    if words.len() > takes {
-        return Err(format!("{:?} takes nothing after it: {:?}", words[0], &words[takes..]));
+    if words.len() > 1 {
+        return Err(format!("{:?} takes nothing after it: {:?}", words[0], &words[1..]));
     }
     Ok(job)
 }
@@ -87,8 +75,7 @@ pub fn dispatch(root: &Path, args: &[String]) {
         Job::Host => host(root),
         Job::Prune => vec![step("the host cache's other entries", || cicache::prune(root))],
         Job::Toolchain => vec![step("the toolchain release", || release::ensure_published(root))],
-        Job::Guest(shard) => guest(root, &suite_args(&["--shard", shard, "--jobs", "1"])),
-        Job::Tcg => guest(root, &suite_args(&["--jobs", "1", "empty_dir_stat"])),
+        Job::Guest => guest(root, &suite_args(&["--jobs", "1"])),
         Job::Publish => vec![step("the SDK crates on crates.io", || publish(root))],
     };
     let failed: Vec<&Step> = steps.iter().filter(|s| s.verdict.is_err()).collect();
@@ -590,7 +577,10 @@ fn guest(root: &Path, suite: &[String]) -> Vec<Step> {
     // inherits this, and nothing here reads the environment concurrently with
     // the write.
     std::env::set_var("TMPDIR", tmp.path());
-    let mut steps = vec![step("the instrument", || instrument(root, GUEST_ARCH))];
+    let mut steps: Vec<Step> = Arch::ALL
+        .iter()
+        .map(|&arch| step(&format!("the {} instrument", arch.name()), || instrument(root, arch)))
+        .collect();
     if steps.iter().all(|s| s.verdict.is_ok()) {
         steps.push(step("the toolchain", || release::install(root)));
     }
@@ -634,19 +624,21 @@ fn verdicts(log: &str) -> String {
     }
 }
 
-/// The QEMU on `PATH` against `.github/qemu-version`, the firmware it declares,
-/// and whether `/dev/kvm` opens where it is present — the three things a guest
-/// verdict must be read against.
+/// The QEMU on `PATH` that boots `arch` against `.github/qemu-version`, the
+/// firmware it declares, and whether `/dev/kvm` opens where it is present and
+/// `arch` is the host's — the three things a guest verdict must be read against.
 fn instrument(root: &Path, arch: Arch) -> Result<String, String> {
     let want = declared_qemu_version(root).ok_or(".github/qemu-version declares no version")?;
     let have = qemu_version(arch)?;
     let firmware = crate::firmware::of(arch)?;
     let node = Path::new("/dev/kvm").exists();
-    let accelerated = arch.accel().is_hardware();
-    let accel = match (node, accelerated) {
-        (true, true) => "/dev/kvm opens",
-        (true, false) => "/dev/kvm is present and does not open",
-        (false, _) => "no /dev/kvm: emulated",
+    let native = Arch::HOST == Some(arch);
+    let accel = match (native, arch.accel(), node) {
+        (false, _, _) => "another architecture's machine: emulated",
+        (true, Accel::Kvm, _) => "/dev/kvm opens",
+        (true, Accel::Hvf, _) => "Hypervisor.framework",
+        (true, Accel::Tcg, true) => "/dev/kvm is present and does not open",
+        (true, Accel::Tcg, false) => "no /dev/kvm: emulated",
     };
     let cpu = std::fs::read_to_string("/proc/cpuinfo")
         .ok()
@@ -668,7 +660,7 @@ fn instrument(root: &Path, arch: Arch) -> Result<String, String> {
              instrument moved"
         ));
     }
-    if node && !accelerated {
+    if native && node && !arch.accel().is_hardware() {
         return Err(format!("{line}: every boot would fall back to emulation in silence"));
     }
     Ok(line)
@@ -834,12 +826,12 @@ mod tests {
     }
 
     #[test]
-    fn a_job_is_named_and_a_shard_is_a_shard() {
+    fn a_job_is_named_and_takes_nothing_after_it() {
         assert_eq!(parse(&words("host")), Ok(Job::Host));
         assert_eq!(parse(&words("prune")), Ok(Job::Prune));
-        assert_eq!(parse(&words("guest 3/12")), Ok(Job::Guest("3/12".into())));
-        assert!(parse(&words("guest")).is_err());
-        assert!(parse(&words("guest 13/12")).is_err());
+        assert_eq!(parse(&words("guest")), Ok(Job::Guest));
+        assert!(parse(&words("guest 3/12")).is_err());
+        assert!(parse(&words("tcg")).is_err());
         assert!(parse(&words("host extra")).is_err());
         assert!(parse(&words("smoke")).is_err());
         assert!(parse(&[]).is_err());

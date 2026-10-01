@@ -13,19 +13,11 @@ use toyos_tco::{
 
 use crate::drivers::pci::PciDevice;
 use crate::log;
-use crate::time::Duration;
 
-const FAST_BOUND: Duration = Duration::from_secs(3);
 /// Four, so the shipped 9.6 s bound is fed every 2.4 s. What makes a cadence
 /// that long sound is `kernel/CLAUDE.md`'s rule that no disk wait in this kernel
 /// can park: a CPU is always on its way back to a scheduler pass.
 const FEEDS_PER_BOUND: u64 = 4;
-
-/// The fast bound is not a value this kernel can fail to have either.
-const FAST_TIMER: u16 = match toyos_tco::timer_for(FAST_BOUND.millis()) {
-    Some(timer) => timer,
-    None => panic!("the fast bound reaches no TCO timer"),
-};
 
 /// What the read-back above the arm says. Whole clauses, because a machine
 /// owner and a test read the same line and neither may have to parse a
@@ -37,9 +29,6 @@ const FAST_TIMER: u16 = match toyos_tco::timer_for(FAST_BOUND.millis()) {
 const ARMED_ON_ARRIVAL: &str = "the bootloader had already armed the timer";
 const UNARMED_ON_ARRIVAL: &str = "nothing had armed the timer";
 
-/// When `tco-starve` starts starving: boot is long done by here, so a judge measures a reset after starvation and never a race with it.
-const STARVE_AFTER: Duration = Duration::from_secs(5);
-
 /// Written by `init` on the BSP before any AP exists, so a relaxed load is the whole of the ordering these need.
 static PORT: AtomicU16 = AtomicU16::new(0);
 static NEXT_FEED: AtomicU64 = AtomicU64::new(u64::MAX);
@@ -49,7 +38,7 @@ pub fn init(devices: &[PciDevice]) {
     if !crate::params::watchdog() {
         return;
     }
-    let timer = if crate::actuator::watchdog_fast() { FAST_TIMER } else { TIMER };
+    let timer = TIMER;
 
     let Some((pci, row)) = devices
         .iter()
@@ -134,9 +123,6 @@ pub fn feed(now: u64) {
     }
     let port = PORT.load(Ordering::Relaxed);
     if port == 0 {
-        return;
-    }
-    if crate::actuator::watchdog_starve() && now >= STARVE_AFTER.nanos() {
         return;
     }
     let next = now + FEED_EVERY_NS.load(Ordering::Relaxed);

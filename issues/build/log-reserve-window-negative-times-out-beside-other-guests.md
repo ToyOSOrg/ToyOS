@@ -30,8 +30,7 @@ fixed at the cause.
 `log_reserve_window_negative` out with `log-unbracketed-reserve`, the
 actuator only it armed. `4db54ffa5` then took `log_reserve_window` and
 `log-nested-reserve`, and `3b8102cf5` `log_nested_emit` with the nest vector
-and test-runner's `log-gate`, all of which it rode, so `git revert 3b8102cf5
-4db54ffa5 9ee7a7573` brings it back with the other two.
+and test-runner's `log-gate`, all of which it rode.
 
 `blocked_dump`, the other name this file saw red, is deleted too:
 `issues/build/parallel-tests-red-under-other-suites.md` records the commit.

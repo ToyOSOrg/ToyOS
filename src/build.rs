@@ -1335,8 +1335,8 @@ fn declared_kernel_features(root: &Path) -> Vec<String> {
 pub const TEST_KERNEL: &[&str] = &["boot-actuators", "test-actuators"];
 
 /// Kernel builds the ordinary test suite is allowed to make.
-pub const TEST_SUITE_KERNEL_BUILDS: [&str; 4] =
-    ["", "boot-actuators,test-actuators", "fpu-save-nothing", "user-writable-gsbase"];
+pub const TEST_SUITE_KERNEL_BUILDS: [&str; 2] =
+    ["", "boot-actuators,test-actuators"];
 
 /// The scheduler core's own asserts, compiled in: `toyos-sched/check`.
 ///
@@ -1354,52 +1354,6 @@ pub fn harness_kernel_build_is_declared(features: &str, debug_wait: bool) -> boo
     } else {
         TEST_SUITE_KERNEL_BUILDS.contains(&features)
     }
-}
-
-/// Every name in which a process of this boot config can speak a console line
-/// that is not the program under test's.
-///
-/// **Derived, never listed.** The point of reading it out of the config is that
-/// a daemon added to `[boot] start` tomorrow is in this set the moment it
-/// exists — a hardcoded list would let the next `netd`'s lines start deciding C
-/// tests again, which is what task #84 was (`tests/common/console.rs`).
-/// `/system/bin/init` itself is added by hand because it is the one speaker that is not a
-/// `[programs]` key: it is the parent that starts every one of them, and it
-/// speaks before any of them exists (`init: netd: no nic on this machine` is on
-/// the console before netd is loaded).
-///
-/// The union of the two lists rather than `[boot] start` alone: a program the
-/// config declares is a binary this image carries and a name init can be asked
-/// to speak in, and the whole value of deriving the set is that it is the
-/// config's answer rather than an author's.
-///
-/// **A program also speaks in the name of every device it claims, and that is
-/// measured rather than supposed.** `userland/soundd/src/virtio.rs` writes
-/// `virtio-sound: configured stream 0: 44100Hz 2ch s16le` — the driver layer
-/// says which device is talking, not which program — and a plain
-/// `tests/testcases` boot puts three such lines on the console before the test
-/// runner is ready. `devices` is where those names are declared, so it is where
-/// they are read from; `c_capture_ignores_daemon_lines` walks a real boot log
-/// and reds on any line this set cannot account for, which is what keeps this
-/// derivation honest as the tree grows.
-///
-/// `config` is the `system.toml` itself, not its directory.
-pub fn console_speakers(config: &Path) -> std::collections::BTreeSet<String> {
-    let parsed = parse_config(config);
-    let mut names = std::collections::BTreeSet::new();
-    for (program, entry) in parsed.programs {
-        names.insert(program);
-        names.extend(entry.devices);
-    }
-    names.extend(parsed.boot.start);
-    names.insert("init".to_string());
-    names
-}
-
-/// What `/system/bin/init` starts on the boot `config` describes, in the manifest's
-/// order. `config` is the `system.toml` itself, not its directory.
-pub fn boot_start(config: &Path) -> Vec<String> {
-    parse_config(config).boot.start
 }
 
 /// The manifest bytes and the symlink table `config` renders to, for a reader
@@ -1607,7 +1561,7 @@ fn assert_entry_window_matches_features(features: &str, kernel: &[u8]) {
 /// Every one of these is a `#[cfg(feature = "check")]` site in `toyos-sched`.
 /// Two are asserts from `invariants::check_cpu` — invariant T's armed-timer
 /// bound and the container-versus-state-word agreement. The third is the
-/// pass-cost report (`cpu::PassCostReport::PREFIX`), which is a *measurement*
+/// pass-cost report, which is a *measurement*
 /// and not an assert: a pass's elapsed time includes any interval a hypervisor
 /// took the CPU away, so it is recorded rather than panicked over. Their format
 /// strings are the only part of the check build with a literal the linker keeps,
@@ -1913,8 +1867,7 @@ fn root_image_key(plan: &Plan, image_key: &str, extra_files: &[(String, Vec<u8>)
 ///
 /// The image itself is never memoized, only the three parts it is made of:
 /// [`image::create_boot_image`] mints a fresh partition GUID per call and writes
-/// it into both the GPT and the ESP, and a boot that did not get its own is a
-/// boot `log_partition_identity` is entitled to catch.
+/// it into both the GPT and the ESP.
 pub fn build_test_image(
     root: &Path,
     plan: &Plan,
@@ -1930,18 +1883,6 @@ pub fn build_test_image(
         &plan.params.join(","),
         image::Signing { key: crate::signing::key(), version: plan.version },
         plan.second,
-    )
-}
-
-/// The image `ssh … update` takes, built from a plan as a test image is and
-/// signed with this process's key at the plan's version.
-pub fn build_update_image(root: &Path, plan: &Plan, quiet: bool, extra_files: &[(String, Vec<u8>)]) -> Vec<u8> {
-    let parts = build_test_parts(root, plan, quiet, extra_files);
-    image::update_image(
-        &parts.kernel,
-        &parts.root,
-        &plan.params.join(","),
-        image::Signing { key: crate::signing::key(), version: plan.version },
     )
 }
 
@@ -2068,19 +2009,9 @@ pub fn build_host_judges(root: &Path, quiet: bool) {
 /// silently repoint every accessor below.
 type Judge = (&'static str, &'static str);
 
-const HTTPS_SERVER: Judge = ("tests/https-server-host", "https_test_server");
-const HTTPS_FETCH: Judge = ("tests/https-fetch-host", "https_fetch");
 const SSH_CLIENT: Judge = ("tests/ssh-client-host", "toyos_ssh");
 
-const HOST_JUDGES: [Judge; 3] = [HTTPS_SERVER, HTTPS_FETCH, SSH_CLIENT];
-
-pub fn https_test_server(root: &Path) -> PathBuf {
-    host_judge(root, HTTPS_SERVER)
-}
-
-pub fn https_fetch_host(root: &Path) -> PathBuf {
-    host_judge(root, HTTPS_FETCH)
-}
+const HOST_JUDGES: [Judge; 1] = [SSH_CLIENT];
 
 /// Copy to `to` the binary the build leaves for userland workspace program
 /// `name`: the bytes a swap sends a running machine in place of the ones its
@@ -2524,7 +2455,7 @@ mod tests {
         assert!(harness_kernel_build_is_declared(&debug, true));
         assert!(!harness_kernel_build_is_declared(&debug, false));
         assert!(!harness_kernel_build_is_declared(
-            "fpu-save-nothing,debug-wait",
+            "boot-actuators,test-actuators,debug-wait",
             true
         ));
         for suite_build in TEST_SUITE_KERNEL_BUILDS {
@@ -2678,11 +2609,10 @@ mod tests {
                 // instruction gone and `DF` back out of the `SYSCALL` mask, so a
                 // build carrying it inherits a set direction flag from whatever
                 // it interrupted. The negative control for that fix, and its own
-                // build for `fpu-save-nothing`'s reason — the defect is in a
-                // `naked_asm!` body on every ring transition, where a boot
-                // parameter would have to be a branch.
+                // build because the defect is in a `naked_asm!` body on every
+                // ring transition, where a boot parameter would have to be a
+                // branch.
                 "entry-df-unclean",
-                "fpu-save-nothing",
                 // The two band shapes that separate the two readings
                 // `heap-tripwire`'s own result left standing — the bands absorb
                 // a bounded overrun, or they displace every allocation and the
@@ -2782,8 +2712,6 @@ mod tests {
                 "switch-witness-mutate-frame",
                 "switch-witness-mutate-rsp",
                 "test-actuators",
-                // `FSGSBASE` back in `CR4`: `gsbase_locked`'s negative control.
-                "user-writable-gsbase",
                 // Costs no kernel build at all, for `loom`'s reason: declared
                 // so `cfg` checking knows the name, and turned on only by
                 // `kernel-loom` — to remove the log wake path's two `SeqCst`
@@ -3136,42 +3064,17 @@ mod tests {
         "system.toml",
         "diag/system.toml",
         "console/system.toml",
-        "tests/blockdcase/system.toml",
-        "tests/desktopcase/system.toml",
-        "tests/desktopaudiocase/system.toml",
-        "tests/doommusiccase/system.toml",
-        "tests/e1000case/system.toml",
-        "tests/e1000leasecase/system.toml",
-        "tests/e1000talkcase/system.toml",
-        "tests/flrswapcase/system.toml",
-        "tests/fsdclaimcase/system.toml",
-        "tests/fsdmountcase/system.toml",
-        "tests/fsdrestartcase/system.toml",
-        "tests/inspectcase/system.toml",
         "tests/jobcase/system.toml",
-        "tests/jobdeadlinecase/system.toml",
         "tests/lancase/system.toml",
         "tests/lanicscase/system.toml",
         "tests/lanleasecase/system.toml",
         "tests/lantalkcase/system.toml",
         "tests/latencycase/system.toml",
-        "tests/layoutcase/system.toml",
-        "tests/logflushcase/system.toml",
-        "tests/logrotatecase/system.toml",
         "tests/logstallcase/system.toml",
-        "tests/logstreamcase/system.toml",
-        "tests/logstreame1000case/system.toml",
         "tests/metalcase/system.toml",
         "tests/metaldevicecase/system.toml",
         "tests/netcase/system.toml",
-        "tests/partclaimcase/system.toml",
-        "tests/pkgcase/system.toml",
-        "tests/quiescetwicecase/system.toml",
-        "tests/sshdcase/system.toml",
-        "tests/swapcase/system.toml",
         "tests/testcases/system.toml",
-        "tests/toolkitcase/system.toml",
-        "tests/updatecase/system.toml",
         "tests/virtjobcase/system.toml",
         "tests/virtpaniccase/system.toml",
         "tests/virtsmpcase/system.toml",
@@ -3301,33 +3204,16 @@ mod tests {
         assert!(provides_disjoint_from_serves(&bad).is_err());
     }
 
-    /// The one `devices` entry in the tree that is a deliberate second claim:
-    /// config, program, device. `pci_function_is_exclusive` boots it and reads
-    /// the kernel refusing it.
-    const STAGED_COLLISION: (&str, &str, &str) =
-        ("tests/netcase/system.toml", "test-runner", "pci:1af4:1041");
-
-    /// Init mints one claim per device, so a shipping config naming one twice
-    /// starts a program with a hole where its claim should be.
-    ///
-    /// `excused` is one `(program, device)` and never a whole config: every
-    /// other collision in the config that stages one is still refused.
-    fn one_claimant_per_device(
-        cfg: &SystemConfig,
-        excused: Option<(&str, &str)>,
-    ) -> Result<(), String> {
+    /// Init mints one claim per device, so a config naming one twice starts a
+    /// program with a hole where its claim should be.
+    fn one_claimant_per_device(cfg: &SystemConfig) -> Result<(), String> {
         let mut seen: BTreeMap<&str, &str> = BTreeMap::new();
         for (name, prog) in &cfg.programs {
             for d in &prog.devices {
-                if excused == Some((name.as_str(), d.as_str())) {
-                    continue;
-                }
                 if let Some(prev) = seen.insert(d, name) {
                     return Err(format!(
                         "device `{d}` is claimed by both `{prev}` and `{name}`; the second \
-                         claim is refused at boot, and `{}`'s `{}` is the one entry allowed \
-                         to stage that",
-                        STAGED_COLLISION.0, STAGED_COLLISION.1
+                         claim is refused at boot"
                     ));
                 }
             }
@@ -3336,25 +3222,18 @@ mod tests {
     }
 
     /// Not the capability boundary — `kernel/src/pcidev`'s slot reservation is,
-    /// and this compares `system.toml` strings. The excused entry is asserted to
-    /// still be a collision on the device it names, so the exception cannot rot
-    /// into a pass and cannot cover a second one added to the same config.
+    /// and this compares `system.toml` strings.
     #[test]
     fn every_device_class_has_at_most_one_claimant() {
         for cfg in ALL_CONFIGS {
-            let excused =
-                (*cfg == STAGED_COLLISION.0).then_some((STAGED_COLLISION.1, STAGED_COLLISION.2));
-            one_claimant_per_device(&load(cfg), excused).unwrap_or_else(|e| panic!("{cfg}: {e}"));
+            one_claimant_per_device(&load(cfg)).unwrap_or_else(|e| panic!("{cfg}: {e}"));
         }
-        let staged = one_claimant_per_device(&load(STAGED_COLLISION.0), None)
-            .expect_err("the excused entry no longer collides with anything");
-        assert!(staged.contains(STAGED_COLLISION.2), "{staged}");
         let bad: SystemConfig = toml::from_str(
             "init = []\n[programs.a]\ndevices = [\"framebuffer\"]\n\
              [programs.b]\ndevices = [\"framebuffer\"]\n",
         )
         .unwrap();
-        assert!(one_claimant_per_device(&bad, None).is_err());
+        assert!(one_claimant_per_device(&bad).is_err());
     }
 
     /// netd's two actuators that only its Intel driver answers, spelled here

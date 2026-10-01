@@ -54,7 +54,7 @@ pub const CR0: u64 = cr0::PE | cr0::MP | cr0::ET | cr0::NE | cr0::WP | cr0::PG;
 /// `CR4` bits every CPU must have. `DE` is zero legacy, not need — this kernel
 /// touches no debug register. `FSGSBASE` is [`CR4_FORBIDDEN`], not here.
 const CR4_REQUIRED: u64 =
-    cr4::DE | cr4::PAE | cr4::MCE | cr4::OSFXSR | cr4::OSXMMEXCPT | FSGSBASE_RESTORED;
+    cr4::DE | cr4::PAE | cr4::MCE | cr4::OSFXSR | cr4::OSXMMEXCPT;
 
 /// `CR4` bits this kernel takes when the CPU offers them (checked against CPUID first: an undefined bit is `#GP`).
 const CR4_OPTIONAL: u64 = cr4::SMEP | cr4::SMAP | cr4::PCIDE | cr4::UMIP;
@@ -65,14 +65,8 @@ const CR4_OPTIONAL: u64 = cr4::SMEP | cr4::SMAP | cr4::PCIDE | cr4::UMIP;
 /// The kernel's FS base uses `IA32_FS_BASE` (`cpu::write_fs_base`) instead.
 const CR4_FORBIDDEN: u64 = cr4::FSGSBASE;
 
-/// Zero but in the `user-writable-gsbase` control, which restores it.
-#[cfg(feature = "user-writable-gsbase")]
-const FSGSBASE_RESTORED: u64 = cr4::FSGSBASE;
-#[cfg(not(feature = "user-writable-gsbase"))]
-const FSGSBASE_RESTORED: u64 = 0;
-
-// Forbidden in the declaration except where restored, and never optional.
-const _: () = assert!(CR4_REQUIRED & CR4_FORBIDDEN == FSGSBASE_RESTORED);
+// Forbidden in the declaration, and never optional.
+const _: () = assert!(CR4_REQUIRED & CR4_FORBIDDEN == 0);
 const _: () = assert!(CR4_OPTIONAL & CR4_FORBIDDEN == 0);
 
 /// `IA32_EFER` on every CPU: `SCE`, `LME`, `NXE`. `SCE` is declared only

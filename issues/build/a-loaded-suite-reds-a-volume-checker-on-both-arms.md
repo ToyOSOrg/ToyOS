@@ -190,4 +190,4 @@ its module `tests/common/toybox.rs`), `redirty_mid_flush` (`5c3f464a1`, with
 its binary and `test-small-caches`), `fs_rename_durable` (`63b0874ba`, with
 its binary), `esp_filesystem` (`27a926141`, with `esp_files`),
 `device_claim_lifetime` (`51cc87fcc`) and `screen_i8042_health`
-(`b7f157a72`). `git revert` of each brings its test back.
+(`b7f157a72`).

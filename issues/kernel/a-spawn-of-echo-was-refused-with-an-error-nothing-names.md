@@ -47,6 +47,4 @@ re-run was green.
 
 **Its test is deleted**, as a flaky test is: `3b8102cf5` took
 `log_nested_emit` out with `log-nested-emit`, the nest vector on both
-architectures and test-runner's `log-gate` builtin, and `git revert
-3b8102cf5` brings them back. The spawn this file is about is
-`log_gate.rs`'s record-making child, which `log-storm` still runs.
+architectures and test-runner's `log-gate` builtin.
