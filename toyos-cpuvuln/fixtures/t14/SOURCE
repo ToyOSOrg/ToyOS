@@ -1,9 +1,6 @@
 Linux's readings of the ThinkPad T14 this repository is tested on, under that
 machine's Ubuntu, read as root on the T14 by `toyos-t14linux/capture.sh` at
-commit 44eb3c2e (pull request #601) before 06:50 UTC on 2026-09-29, when
-../tcg/ booted the kernel and initramfs the same run copied off the T14. The
-script ran only where /proc/version named 6.8.0-142-generic, both packages
-were 6.8.0-142.142 and the config's sha256 was config-sha256.txt's, and it read
+commit 44eb3c2e (pull request #601), and it read
 CPUID and the MSRs through the running kernel's /dev/cpu/*/cpuid and
 /dev/cpu/*/msr, so an MSR holds what that kernel left in it.
 
@@ -14,8 +11,3 @@ CPUID and the MSRs through the running kernel's /dev/cpu/*/cpuid and
   msr.txt               one per line: msr cpu value; 0x122 and 0x10F are absent
                         because ARCH_CAPABILITIES bit 7 and CPUID.(7,0):EDX
                         bits 11 and 13 do not enumerate them
-  config-hardening.txt  `grep -n` of the config for the options the script
-                        names, so an option it did not name is absent, not unset
-  kernel-log.txt        this boot's kernel lines from the journal that match, in
-                        any case, mitigat, vulnerab, not affected, spectre,
-                        microcode, x86/bugs or tsx, and no other

@@ -1,2 +1,0 @@
-linux-image-6.8.0-142-generic	6.8.0-142.142
-linux-modules-6.8.0-142-generic	6.8.0-142.142
