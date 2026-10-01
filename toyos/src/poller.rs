@@ -180,8 +180,10 @@ impl Rings {
 struct Registry {
     live: [Registration; MAX_LIVE],
     len: usize,
-    /// Twice the poller's capacity: the handles it watches, and as many again
-    /// closed since the last wait whose end the ring has not yet handed out.
+    /// Twice the poller's capacity. After a wait a live registration is on a
+    /// handle still open — a close answers the poll on it, and the wait handed
+    /// that out, unless `ops::close_ends_polls` says the close ends nothing —
+    /// so at most the declared set; a round adds at most the declared set again.
     limit: usize,
     next: u64,
 }
@@ -941,8 +943,7 @@ mod tests {
         }
     }
 
-    /// Past the handles it declared and as many again closed and unreported,
-    /// a registration is refused by name.
+    /// Past twice the declared set, a registration is refused by name.
     #[test]
     #[should_panic(expected = "watches past its declared set")]
     fn a_registration_past_twice_the_capacity_panics() {
