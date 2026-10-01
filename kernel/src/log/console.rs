@@ -18,7 +18,7 @@ use toyos_abi::log::LogRecord;
 use toyos_sched::task::{WaitClass, WakeCause, WakeReason};
 use toyos_sched::park::notify;
 
-use crate::drivers::serial::{self, BackendGuard, MAX_CONSOLE_LINE};
+use crate::drivers::serial::{self, BackendGuard, PanicUart, MAX_CONSOLE_LINE};
 use crate::hw::HW;
 use crate::sched::driver::{cpus, irq_off};
 use crate::sched::kthread;
@@ -152,13 +152,13 @@ fn drain_records(wire: &SleepGuard<'_, ()>, budget: u64) -> u64 {
     records
 }
 
-/// Drain with no lock at all, straight to the 16550.
+/// Drain straight to the 16550, over whoever holds its registers.
 ///
 /// # Safety
-/// Panic path only, after `serial::panic_flush`'s bounded wait for a clean handoff fails; the position is unsynchronised and a record may reach the wire twice.
-pub unsafe fn drain_bypassed() {
+/// Panic path only, once `serial::panic_flush` found no clean handoff; the position is unsynchronised and a record may reach the wire twice.
+pub unsafe fn drain_bypassed(uart: &mut PanicUart) {
     let mut cursor = DRAINED.take();
-    let mut sink = Raw;
+    let mut sink = Raw { uart };
     drain_ordered(&mut cursor, &mut sink);
     DRAINED.put(&cursor);
 }
@@ -396,12 +396,14 @@ impl RecordSink for Discard {
     }
 }
 
-/// Records straight to the 16550, for the bypass. No lock, bounded per byte.
-struct Raw;
+/// Records straight to the 16550, for the bypass. Bounded per byte.
+struct Raw<'a> {
+    uart: &'a mut PanicUart,
+}
 
-impl RecordSink for Raw {
+impl RecordSink for Raw<'_> {
     fn put(&mut self, record: &LogRecord) -> bool {
-        write_line(record, serial::panic_raw);
+        write_line(record, |bytes| self.uart.write(bytes));
         true
     }
 }
