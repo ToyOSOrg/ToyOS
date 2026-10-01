@@ -92,8 +92,7 @@ impl RootImage {
 /// image from: the one handle whose device path is the partition's without
 /// its last node, the HARDDRIVE one.
 pub fn boot_disk(handle: Handle, bs: &BootServices) -> Result<Handle, String> {
-    let image = bs
-        .open_protocol_exclusive::<LoadedImage>(handle)
+    let image = crate::exclusive::open::<LoadedImage>(bs, handle)
         .map_err(|e| alloc::format!("this image's LoadedImage: {e:?}"))?;
     let device = image.device().ok_or("firmware names no device this image was loaded from")?;
     let path = try_get_protocol::<DevicePath>(bs, device)

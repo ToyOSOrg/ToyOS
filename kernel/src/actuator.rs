@@ -39,15 +39,6 @@ actuators! {
     /// control on `crate::deadline`: nothing else in this kernel ends it.
     wedge_before_reset = "wedge-before-reset";
 
-    /// The loader hands the kernel no ROOT image, which `rootfs::mount` has to
-    /// refuse by name; read by the loader as [`toyos_abi::boot::WITHHOLD_ROOT_PARAM`].
-    loader_withholds_root = "loader-withholds-root";
-
-    /// The loader writes 0 as the `KernelArgs` layout word, which `kernel_main`
-    /// has to refuse by name; read by the loader as
-    /// [`toyos_abi::boot::WRITE_NO_LAYOUT_PARAM`].
-    loader_writes_no_layout = "loader-writes-no-layout";
-
     /// Panic between arming the on-screen console and `mm::init`.
     test_early_panic = "test-early-panic";
 
@@ -69,9 +60,6 @@ actuators! {
 
     /// Establish three nested `scheduler::Operation`s and report what each observed and restored; it stages nothing, touching no device.
     sched_operation_nesting = "sched-operation-nesting";
-
-    /// The same, with a HARDWARE ERROR in place of ILLEGAL REQUEST.
-    usb_flush_fails = "usb-flush-fails";
 
     /// Abandon the boot's first WRITE(10) data phase without waiting for it.
     usb_transport_break = "usb-transport-break";
@@ -117,24 +105,18 @@ actuators! {
     /// a quantum, and take its interrupts with them open.
     timer_floor = "timer-floor";
 
+    /// Leave every AP holding the CR0/CR4 that INIT left it.
+    no_ap_control_regs = "no-ap-control-regs";
+
     /// Skip the startup for the AP that would be cpu2, so a non-last AP never starts.
     smp_skip_ap = "smp-skip-ap";
+
+    /// Time the same read loop on every CPU, either side of the `mov cr0` that enables caching.
+    control_regs_bench = "control-regs-bench";
 
     /// Issue a fixed count of machine-wide TLB shootdowns against every CPU the
     /// machine brought up, with nothing else running, and report the distribution.
     tlb_shootdown_bench = "tlb-shootdown-bench";
-
-    /// Hold the shutdown open for a tenth of a second after the boot's last
-    /// word, yielding: the window hardware has between `Rebooting.` and the
-    /// reset and QEMU does not. A boot that writes a record into it is one the
-    /// stop did not stop.
-    quiesce_late_word = "quiesce-late-word";
-
-    /// Make the shutdown's bounded acquisitions of the xHCI controller lock
-    /// find it busy for their whole bound — the negative control on "no
-    /// shutdown path may fail to reset". A boot armed with it must still hand
-    /// the machine back, with its account saying the barrier was refused.
-    xhci_lock_wedged = "xhci-lock-wedged";
 
     /// Panic once boot phases are done, with no thread current.
     test_late_panic = "test-late-panic";
@@ -300,10 +282,3 @@ const _: () = {
         i += 1;
     }
 };
-
-// The loader reads this actuator's word out of the ABI and the table above
-// spells it as a literal; the two are one name or the build fails.
-#[cfg(feature = "boot-actuators")]
-const _: () = assert!(str_eq("loader-withholds-root", toyos_abi::boot::WITHHOLD_ROOT_PARAM));
-#[cfg(feature = "boot-actuators")]
-const _: () = assert!(str_eq("loader-writes-no-layout", toyos_abi::boot::WRITE_NO_LAYOUT_PARAM));

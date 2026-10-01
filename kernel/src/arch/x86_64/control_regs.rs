@@ -85,39 +85,45 @@ static CHECKED: AtomicU64 = AtomicU64::new(0);
 /// restores the `CR0` it finds, so a firmware `CD` survives that write and is
 /// cleared here: every AP runs this first, and the BSP runs it after, because
 /// the BSP's `pat::init` has to precede the panel it would report a refusal on.
-pub fn init_cr0() {
-    let live = cpu::read_cr0();
-    if live & (cr0::CD | cr0::NW) != 0 {
-        // SDM Vol. 3A §11.5.3's no-fill sequence: `CD` set, `NW` clear,
-        // then write-back-invalidate — required when crossing cache states.
-        // SAFETY: only `CD`/`NW` change in `write_cr0`; `wbinvd` runs inside
-        // the no-fill window the write just opened (SDM Vol. 3A §11.5.3).
-        unsafe {
-            cpu::write_cr0((live | cr0::CD) & !cr0::NW);
-            cpu::wbinvd();
+pub fn init_cr0(cpu_id: u32) {
+    let before = bench::sample();
+    if !skipped(cpu_id) {
+        let live = cpu::read_cr0();
+        if live & (cr0::CD | cr0::NW) != 0 {
+            // SDM Vol. 3A §11.5.3's no-fill sequence: `CD` set, `NW` clear,
+            // then write-back-invalidate — required when crossing cache states.
+            // SAFETY: only `CD`/`NW` change in `write_cr0`; `wbinvd` runs inside
+            // the no-fill window the write just opened (SDM Vol. 3A §11.5.3).
+            unsafe {
+                cpu::write_cr0((live | cr0::CD) & !cr0::NW);
+                cpu::wbinvd();
+            }
         }
+        // SAFETY: `CR0`'s value is this file's declaration, argued in its own
+        // doc comment.
+        unsafe { cpu::write_cr0(CR0) };
     }
-    // SAFETY: `CR0`'s value is this file's declaration, argued in its own
-    // doc comment.
-    unsafe { cpu::write_cr0(CR0) };
+    bench::report(cpu_id, before);
 }
 
 /// Puts this CPU's `CR4` and `EFER` into the declaration and checks all
 /// three against it. Must run after [`init_cr0`] and before `arch::syscall::init`, which needs `SCE` set.
 pub fn init(cpu_id: u32) {
     let declared = declaration(cpu_id);
-    // SAFETY: `write_cr4` faults only on an undefined bit, on clearing `PAE`
-    // in long mode, or on `PCIDE` with a nonzero PCID — `declaration` checked
-    // the first two and both callers use PCID 0; `wrmsr` writes [`EFER`], whose
-    // bits `declaration` has just confirmed this CPU defines.
-    unsafe {
-        cpu::write_cr4(declared);
-        cpu::wrmsr(efer::MSR, EFER);
-    }
-    if declared & cr4::SMAP != 0 {
-        // Nothing in this kernel sets `RFLAGS.AC`, so this is the only
-        // `clac` the kernel needs.
-        cpu::clac();
+    if !skipped(cpu_id) {
+        // SAFETY: `write_cr4` faults only on an undefined bit, on clearing `PAE`
+        // in long mode, or on `PCIDE` with a nonzero PCID — `declaration` checked
+        // the first two and both callers use PCID 0; `wrmsr` writes [`EFER`], whose
+        // bits `declaration` has just confirmed this CPU defines.
+        unsafe {
+            cpu::write_cr4(declared);
+            cpu::wrmsr(efer::MSR, EFER);
+        }
+        if declared & cr4::SMAP != 0 {
+            // Nothing in this kernel sets `RFLAGS.AC`, so this is the only
+            // `clac` the kernel needs.
+            cpu::clac();
+        }
     }
     self_check(cpu_id, declared);
 }
@@ -286,5 +292,61 @@ pub fn report(cpus: u32) {
 
 fn opt(value: u64, bit: u64, name: &'static str) -> &'static str {
     if value & bit != 0 { name } else { "" }
+}
+
+/// Cycles the caching probe took. Bare metal only — QEMU models no cache and
+/// KVM never holds `CD` — read via `--kernel-param control-regs-bench`.
+#[cfg(feature = "boot-actuators")]
+mod bench {
+    use super::cpu;
+    use crate::log;
+
+    /// Bigger than any L1, inside every L2 this kernel targets.
+    const LINES: usize = 4096;
+    const STRIDE: usize = 8;
+    static PROBE: [u64; LINES * STRIDE] = [0; LINES * STRIDE];
+
+    pub fn sample() -> u64 {
+        if !crate::actuator::control_regs_bench() {
+            return 0;
+        }
+        let start = cpu::rdtsc();
+        let mut acc = 0u64;
+        let mut i = 0;
+        while i < PROBE.len() {
+            // SAFETY: `i < PROBE.len()` keeps the index in bounds.
+            acc = acc.wrapping_add(unsafe { core::ptr::read_volatile(&raw const PROBE[i]) });
+            i += STRIDE;
+        }
+        let end = cpu::rdtsc();
+        core::hint::black_box(acc);
+        end.wrapping_sub(start)
+    }
+
+    pub fn report(cpu_id: u32, before: u64) {
+        if !crate::actuator::control_regs_bench() {
+            return;
+        }
+        let cold = sample();
+        let warm = sample();
+        log!(
+            "control_regs: cpu{} probe {} lines: pre={} cold={} warm={} cycles",
+            cpu_id, LINES, before, cold, warm,
+        );
+    }
+}
+
+#[cfg(not(feature = "boot-actuators"))]
+mod bench {
+    pub fn sample() -> u64 {
+        0
+    }
+    pub fn report(_cpu_id: u32, _before: u64) {}
+}
+
+/// The negative control: leaves an AP holding what `INIT` left it, since no
+/// QEMU flag can stage a divergent control register any other way.
+fn skipped(cpu_id: u32) -> bool {
+    crate::actuator::no_ap_control_regs() && cpu_id != 0
 }
 

@@ -111,8 +111,7 @@ pub fn with_volume<T>(
 ) -> Result<T, alloc::string::String> {
     let bs = system_table.boot_services();
     let handle = volume_handle(bs, guid)?;
-    let mut fs = bs
-        .open_protocol_exclusive::<SimpleFileSystem>(handle)
+    let mut fs = crate::exclusive::open::<SimpleFileSystem>(bs, handle)
         .map_err(|e| alloc::format!("the log partition would not open ({e})"))?;
     let mut root = fs
         .open_volume()
@@ -138,7 +137,7 @@ pub fn open(system_table: &SystemTable<Boot>, guid: &[u8; 16], truncate: bool) {
         Ok(handle) => handle,
         Err(why) => return refused(format_args!("{why}")),
     };
-    let mut fs = match bs.open_protocol_exclusive::<SimpleFileSystem>(handle) {
+    let mut fs = match crate::exclusive::open::<SimpleFileSystem>(bs, handle) {
         Ok(fs) => fs,
         Err(e) => return refused(format_args!("the log partition would not open ({e})")),
     };

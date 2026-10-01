@@ -273,7 +273,7 @@ extern "C" fn ap_entry() -> ! {
     AP_TSC.store(cpu::rdtsc(), Ordering::Release);
 
     // Must run before `pat::init`, which restores the CR0 this call sets.
-    crate::arch::control_regs::init_cr0();
+    crate::arch::control_regs::init_cr0(percpu::cpu_id());
 
     // Must run before this CPU touches the framebuffer, which needs write-combining mapped first.
     crate::arch::pat::init();

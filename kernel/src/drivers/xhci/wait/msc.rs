@@ -428,17 +428,6 @@ fn log_refusal(cdb: &Cdb, sense: Sense) {
     log!("usb-storage: SCSI {:#04x} failed, sense {sense}", cdb.opcode());
 }
 
-/// The sense a test actuator makes SYNCHRONIZE CACHE answer with, or `None`
-/// on a shipped kernel. ILLEGAL REQUEST/INVALID COMMAND OPERATION CODE must
-/// not fail the caller; HARDWARE ERROR/INTERNAL TARGET FAILURE must.
-fn flush_sense() -> Option<Sense> {
-    if crate::actuator::usb_flush_fails() {
-        Some(Sense { key: 0x04, asc: 0x44, ascq: 0x00 })
-    } else {
-        None
-    }
-}
-
 /// A bulk transfer's completion, as the round trip hears it.
 fn completed(completion: Result<(u32, u32), Quiet>) -> bot::Answer<Quiet> {
     match completion {
@@ -565,9 +554,7 @@ impl XhciController {
                 return Ok(());
             }
             let cdb = Cdb::SYNCHRONIZE_CACHE;
-            let issued = ctrl.scsi(dev, &cdb, None, until);
-            let reply = flush_sense().map_or(issued, Reply::Refused);
-            match scsi::flushed(reply) {
+            match scsi::flushed(ctrl.scsi(dev, &cdb, None, until)) {
                 Flushed::NoCache => {
                     dev.no_write_cache = true;
                     log!("usb-storage: disk {number} does not implement SYNCHRONIZE CACHE \

@@ -246,8 +246,7 @@ enum FileRefused {
 /// `max` bytes.
 fn read_file(bs: &BootServices, guid: &[u8; 16], path: &str, max: u64) -> Result<Vec<u8>, FileRefused> {
     let handle = crate::loaderlog::volume_handle(bs, guid).map_err(FileRefused::Other)?;
-    let mut fs = bs
-        .open_protocol_exclusive::<SimpleFileSystem>(handle)
+    let mut fs = crate::exclusive::open::<SimpleFileSystem>(bs, handle)
         .map_err(|e| FileRefused::Other(alloc::format!("would not open its volume ({e})")))?;
     let mut root = fs.open_volume().map_err(|e| FileRefused::Other(alloc::format!("has no volume ({e})")))?;
     let name = CString16::try_from(path.replace('/', "\\").as_str())

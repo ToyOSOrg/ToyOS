@@ -276,13 +276,6 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     params::init(cmdline);
     deadline::claim(cmdline);
     actuator::init(cmdline);
-    // The actuator's other half: a loader that ignored it would boot on unrefused.
-    if actuator::loader_writes_no_layout() {
-        panic!(
-            "boot: {} is armed and the loader wrote this kernel's layout anyway",
-            toyos_abi::boot::WRITE_NO_LAYOUT_PARAM
-        );
-    }
     let root_image = rootfs::init(cmdline, &kernel_args, maps);
 
     arch::boot::after_console(&kernel_args, maps);

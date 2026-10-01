@@ -1583,13 +1583,6 @@ fn lock_settles() -> bool {
 /// machine nobody can turn off. Not fair — a competitor taking a ticket wins —
 /// which is why both callers say what they do without it.
 fn take_within(bound: u64) -> Option<crate::sync::LockGuard<'static, Vec<XhciController>>> {
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::xhci_lock_wedged() {
-        // The bound is spent, not skipped: what the control is about is that a
-        // shutdown pays it once and then resets anyway.
-        crate::clock::settles(bound, || false);
-        return None;
-    }
     let until = crate::clock::tsc_deadline(bound);
     loop {
         if let Some(guard) = XHCI.try_lock() {

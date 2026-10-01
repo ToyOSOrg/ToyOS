@@ -53,10 +53,11 @@ pub fn after_console(_args: &KernelArgs, _maps: &[MemoryMapEntry]) {
     if crate::actuator::test_early_fault() {
         panic!("test-early-fault: x86-64 has no vectors of its own this early");
     }
-    // `pat::init` restored the `CR0` it found, so a firmware
+    // After actuator::init, whose table the `control-regs-bench` probe inside
+    // this call reads. `pat::init` restored the `CR0` it found, so a firmware
     // `CD` — which would make every mapping uncacheable whatever the PAT
     // says — ends here.
-    control_regs::init_cr0();
+    control_regs::init_cr0(0);
 
     // The read-back `pat::init` owes, on a boot that now has three channels to
     // carry a refusal.

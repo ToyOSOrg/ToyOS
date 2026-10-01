@@ -307,32 +307,6 @@ impl DescSlot {
     pub fn id(&self) -> u16 { self.0 }
 }
 
-/// Why a used-ring element this driver read is not one it will act on.
-/// Refused rather than clamped: there is nothing here to recover from a forged completion.
-/// Userland maps virtio-sound's control and event queues writable, so neither device-written field is trustworthy unchecked.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UsedRefusal {
-    /// The head descriptor id is not an index into this queue's table.
-    Head(Refused),
-    /// The head names a descriptor this queue has published no chain at.
-    NoChain { id: u16 },
-    /// The device claims more bytes written than the chain this head was given.
-    Written { id: u16, refused: Refused },
-}
-
-impl core::fmt::Display for UsedRefusal {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Head(refused) => write!(f, "its head descriptor {refused}"),
-            Self::NoChain { id } => {
-                write!(f, "a completion for descriptor {id}, where this queue published no chain")
-            }
-            Self::Written { id, refused } => {
-                write!(f, "chain {id} was written {refused}")
-            }
-        }
-    }
-}
 
 /// Interrupt-context, lock-free consumer of a virtqueue's used ring; an ISR can drain while another CPU submits under a lock.
 /// Lock-free because it reads only device-written memory and its own `last_used_idx`, never shared driver state.
@@ -386,14 +360,6 @@ pub struct Virtqueue<'pool> {
     used_split: bool,
     /// Bytes each chain's descriptor was given; the one bound a device-reported `len` is compared against. 0 means no chain.
     chain_bytes: alloc::vec::Vec<u32>,
-    /// Used-ring elements this queue refused, for the life of the boot.
-    ///
-    /// Counted always; the only thing that *reads it out* is
-    /// [`used_selftest`], in the actuator kernel. The drivers still on this
-    /// type — console, sound, GPU — answer a refusal where they are rather than
-    /// by reading a total, and the one that did read it took its driver to
-    /// userland with it.
-    refused: u32,
 }
 
 /// Direction of a buffer in a descriptor chain.
@@ -431,7 +397,6 @@ impl<'pool> Virtqueue<'pool> {
             notify_offset: 0,
             used_split: false,
             chain_bytes: alloc::vec![0u32; queue_size as usize],
-            refused: 0,
         }
     }
 
@@ -570,7 +535,7 @@ impl<'pool> Virtqueue<'pool> {
     }
 
     /// Non-blocking poll of the used ring: `(DescSlot, written_len)` on completion, `None` if nothing new.
-    /// A refused element is counted and skipped, never returned, so one forged element cannot hide the ones behind it.
+    /// A refused element is skipped, never returned, so one forged element cannot hide the ones behind it.
     /// Never logs: the caller may hold `serial::BackendGuard`, the lock the log backend itself takes.
     pub fn poll_used(&mut self) -> Option<(DescSlot, u32)> {
         assert!(!self.used_split, "virtqueue: used ring split off");
@@ -585,36 +550,28 @@ impl<'pool> Virtqueue<'pool> {
             let id = self.used_ring_id(slot);
             let len = self.used_ring_len(slot);
             self.last_used_idx = self.last_used_idx.wrapping_add(1);
-            match self.parse_used(id, len) {
-                Ok(elem) => return Some(elem),
-                Err(_) => {
-                    // Forfeit rather than recovered: losing a token costs throughput, believing a bad one costs memory.
-                    self.refused = self.refused.saturating_add(1);
-                    continue;
-                }
+            // Forfeit rather than recovered: losing a token costs throughput, believing a bad one costs memory.
+            if let Some(elem) = self.parse_used(id, len) {
+                return Some(elem);
             }
         }
     }
 
-    /// What a used-ring element must satisfy, separated from the volatile reads so the self-test can exercise it.
-    fn parse_used(
-        &self,
-        id: Untrusted<u32>,
-        len: Untrusted<u32>,
-    ) -> Result<(DescSlot, u32), UsedRefusal> {
+    /// What a used-ring element must satisfy: a head inside this queue's table, at a published
+    /// chain, written no further than that chain. Refused rather than clamped: there is nothing
+    /// here to recover from a forged completion, and userland maps virtio-sound's control and
+    /// event queues writable, so neither device-written field is trustworthy unchecked.
+    fn parse_used(&self, id: Untrusted<u32>, len: Untrusted<u32>) -> Option<(DescSlot, u32)> {
         // `chain_bytes` is exactly `size` long: the descriptor table's own bound, not a constant beside it.
-        let head = id.index(self.chain_bytes.len()).map_err(UsedRefusal::Head)?;
-        // Exact: `index` proved `head < size`, a `u16`.
-        let id = head as u16;
+        let head = id.index(self.chain_bytes.len()).ok()?;
         let chain = self.chain_bytes[head];
         if chain == 0 {
-            return Err(UsedRefusal::NoChain { id });
+            return None;
         }
-        let written = len
-            .at_most(chain as u64)
-            .map_err(|refused| UsedRefusal::Written { id, refused })?;
-        // Exact: `at_most` proved it is no more than `chain`, a `u32`.
-        Ok((DescSlot(id), written as u32))
+        let written = len.at_most(chain as u64).ok()?;
+        // Exact: `index` proved `head < size`, a `u16`, and `at_most` that `written` is no more
+        // than `chain`, a `u32`.
+        Some((DescSlot(head as u16), written as u32))
     }
 
     /// Submit a descriptor chain and block until the device completes it, returning the recovered `DescSlot`.

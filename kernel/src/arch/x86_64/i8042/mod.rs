@@ -562,7 +562,7 @@ fn service_bytes(recorded: bool) {
         }
     }
 
-    let Drained { keys, motion, aux_reset, .. } = drain();
+    let Drained { keys, motion, aux_reset } = drain();
 
     // Wake only when the decode queued something, or a stray wake parks the
     // next reader until the following real event.
@@ -581,7 +581,6 @@ fn service_bytes(recorded: bool) {
 }
 
 struct Drained {
-    bytes: usize,
     keys: usize,
     motion: usize,
     aux_reset: bool,
@@ -592,7 +591,7 @@ struct Drained {
 /// the reverse.
 fn drain() -> Drained {
     let mut state = PS2.lock();
-    let mut out = Drained { bytes: 0, keys: 0, motion: 0, aux_reset: false };
+    let mut out = Drained { keys: 0, motion: 0, aux_reset: false };
     let mut lost = false;
 
     let dropped = DROPPED.swap(0, Ordering::Relaxed);
@@ -610,7 +609,6 @@ fn drain() -> Drained {
     }
 
     while let Some((byte, aux, arrived)) = pop() {
-        out.bytes += 1;
         // Whether the run is over and whether it produced anything — a
         // dropped break or a zero-motion packet counts as "nothing" too.
         let explained = if aux {

@@ -4,4 +4,5 @@ disallowed-methods = [
     { path = "alloc::sync::Arc::increment_strong_count", reason = "hand-rolled refcounting is the bug class the object layer deletes" },
     { path = "alloc::sync::Arc::decrement_strong_count", reason = "hand-rolled refcounting, and the half that frees" },
     { path = "core::mem::forget", reason = "a resource nobody gives back is a leak unless its site says why" },
+    { path = "uefi::table::boot::BootServices::open_protocol_exclusive", reason = "EXCLUSIVE stops every driver holding the protocol, the firmware's graphics console among them: open through `exclusive::open`" },
 ]
