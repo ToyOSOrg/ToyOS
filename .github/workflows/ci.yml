@@ -1,8 +1,8 @@
 name: ci
 
-# A pull request and the merge queue: the host tests, and no guest. Each step
-# is `cargo run -- --ci <job>` (src/ci.rs), which runs the same on a dev host;
-# nightly.yml boots the guests.
+# A pull request and the merge queue: the host tests, and the guest suite on
+# this tree's toolchain. Each step is `cargo run -- --ci <job>` (src/ci.rs),
+# which runs the same on a dev host.
 
 on:
   pull_request:
@@ -41,3 +41,104 @@ jobs:
           restore-keys: host-
 
       - run: cargo run -- --ci host
+
+  # Publishes this tree's toolchain if nobody has: a lookup when the tree hashes
+  # what main's does (src/release.rs), a bootstrap of hours when it moved
+  # those trees. Bare `ubuntu-24.04`, not a container: its glibc is the
+  # release's floor.
+  toolchain:
+    if: github.event_name == 'merge_group' || github.event.pull_request.draft == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: disk, QEMU and CMake
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                      /usr/local/share/boost /usr/local/.ghcup
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq qemu-system-x86 zstd \
+                      cmake=3.28.3-1build7
+
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: cargo run -- --ci toolchain
+
+  # A required check that is skipped reads as green, so this runs whatever
+  # `toolchain` concluded: a toolchain it did not publish reds the install.
+  guest:
+    needs: toolchain
+    if: ${{ !cancelled() && (github.event_name == 'merge_group' || github.event.pull_request.draft == false) }}
+    runs-on: ubuntu-24.04
+    # A wedge guard, not a budget.
+    timeout-minutes: 60
+    # The digest is the instrument's one pin, and nightly.yml's `tcg` names the
+    # same: a dated image names the snapshot archive it was built from, and
+    # `deps` installs QEMU from that archive. The node ships
+    # `crw-rw---- root:kvm` and root opens it.
+    container:
+      image: debian:sid-20260918@sha256:a2aa46262453eba3f464d8b1c7a8c31db85eb15af180ae34dd400615d7208547
+      options: --device=/dev/kvm
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      # Before the checkout, which wants git. Three attempts, because the
+      # archive is fixed and the network to it is not.
+      - name: deps
+        run: |
+          snap=$(sed -n 's|^# \(http://snapshot\.debian\.org/archive/debian/[0-9]*T[0-9]*Z\)$|\1|p' \
+                   /etc/apt/sources.list.d/debian.sources)
+          test -n "$snap"
+          echo "deb $snap sid main" > /etc/apt/sources.list
+          rm /etc/apt/sources.list.d/debian.sources
+          for attempt in 1 2 3; do
+            apt-get -o Acquire::Check-Valid-Until=false update -qq > /tmp/apt.log 2>&1 \
+              && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl ca-certificates \
+                   zstd build-essential qemu-system-x86 ovmf-generic qemu-system-arm \
+                   qemu-efi-aarch64 >> /tmp/apt.log 2>&1 \
+              && break
+            [ "$attempt" = 3 ] && { cat /tmp/apt.log; exit 1; }
+            sleep 20
+          done
+          # `actions/checkout` sets this only in a config it discards.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          curl --proto '=https' --tlsv1.2 -sSf -o "$RUNNER_TEMP/rustup-init.sh" https://sh.rustup.rs
+          sh "$RUNNER_TEMP/rustup-init.sh" -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # nightly.yml's `tcg` is the one writer; the paths are the cache's
+      # version, so they are the writer's list.
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+            kernel/target
+            bootloader/target
+            userland/target
+            tests/target
+            tests/toyos-rust-tests/*/target
+          key: guest-${{ github.run_id }}
+          restore-keys: guest-
+
+      - run: cargo run -- --ci guest
+
+      # Every boot's 16550 log: what a guest that died early still leaves.
+      - name: serial logs
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: serial-${{ github.job }}
+          path: target/red-run-serial/**/uart-*.log
+          if-no-files-found: warn
+          retention-days: 7

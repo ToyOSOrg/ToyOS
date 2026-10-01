@@ -72,7 +72,7 @@ The bar is not yet the tree: `.claude/agents/reviewer.md`, "Arrivals", says wher
 The testing rules live where they are enforced: the PR gate and the nightly in `.github/workflows/`. Operationally:
 
 - `cargo run` builds everything (toolchain, kernel, bootloader, userland, image) and launches QEMU; `--build-only` skips the launch. `cargo test` runs the QEMU harness; `cargo run -- --ci host` runs every host suite, as the PR gate's required `host` check does.
-- **Agents never run QEMU.** An agent verifies with host tests and builds the image at most; the orchestrator runs every guest test, one suite at a time.
+- **Agents never run QEMU locally.** An agent verifies with host tests and builds the image at most; the guest suite runs in CI's `guest` check.
 - **Both produce large output**: run them in the background and read the output file — `[N characters truncated]` means data was lost. A full boot is under a second; incremental builds finish in seconds.
 - **Leave the machine as you found it.** The development machine is shared: every agent stops what it started, removes the worktrees and scratch build output it no longer needs, and never leaves an emulator, a build or a watcher running.
 

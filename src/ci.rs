@@ -3,11 +3,13 @@
 //! verdict.
 //!
 //! `.github/workflows/` is three files. `ci.yml` runs on a pull request and in
-//! the merge queue and boots no guest: [`Job::Host`] runs as `host`. Every
-//! test that boots no guest is in [`Job::Host`], so a merge is gated on all of
-//! them. `nightly.yml` runs everything that boots a guest, `host` again to
-//! write the cache the merge queue restores, and portability. `publish.yml`
-//! puts a landing's crates on crates.io.
+//! the merge queue: [`Job::Host`] as `host`, [`Job::Toolchain`] as
+//! `toolchain`, and [`Job::Guest`] as `guest`, its x86-64 guests on KVM. Every
+//! test that boots no guest is in [`Job::Host`] and every guest test in
+//! [`Job::Guest`], so a merge is gated on all of them. `nightly.yml` runs the
+//! guest suite again under TCG, the toolchain again to move the SDK alias on
+//! main, `host` again to write the cache the merge queue restores, and
+//! portability. `publish.yml` puts a landing's crates on crates.io.
 //!
 //! A host job runs every step and reds if any failed; a guest job stops at the
 //! first failure among the instrument, the toolchain and the suite, because
@@ -34,8 +36,8 @@ const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
   host              every host test: the build system, the harness's own checks,
                     the host workspace, the licences of what ships, clippy, the
                     model controls, userland and the SDK (ci.yml, nightly)
-  toolchain         publish this tree's toolchain if nobody has (nightly)
-  guest             the guest suite (nightly)
+  toolchain         publish this tree's toolchain if nobody has (ci.yml, nightly)
+  guest             the guest suite (ci.yml, nightly)
   publish           put main's SDK crates on crates.io (publish.yml)";
 
 #[derive(Debug, PartialEq, Eq)]
@@ -391,10 +393,9 @@ fn run_control(root: &Path, control: &Control) -> Result<String, String> {
     judge_control(control, green, &log)
 }
 
-/// The merge queue's whole gate, and the nightly's host lane: every test that
-/// runs on the host and boots no guest. The build system's own tests, every
-/// member of the host workspace, clippy with warnings denied, the concurrency
-/// models' negative controls, every userland crate with a host test
+/// Every test that runs on the host and boots no guest. The build system's own
+/// tests, every member of the host workspace, clippy with warnings denied, the
+/// concurrency models' negative controls, every userland crate with a host test
 /// ([`crate::userlandhost`], which also reds on a userland test none of them
 /// runs), and the SDK.
 ///
@@ -403,10 +404,10 @@ fn run_control(root: &Path, control: &Control) -> Result<String, String> {
 /// that writes scratch past a `toyos_tmpdir::TempDir`, or holds one past its
 /// end, is a test that fills the host's disk one run at a time.
 ///
-/// Clippy needs none of the ToyOS toolchain the nightly alone builds — the
-/// kernel and the bootloader lint against every architecture's bare targets
-/// ([`crate::clippy::BARE_TARGETS`]), which any rustup installs, and userland carries no
-/// clippy shape (`src/clippy.rs`). Userland and the SDK are tested against the
+/// Clippy needs none of the ToyOS toolchain — the kernel and the bootloader
+/// lint against every architecture's bare targets ([`crate::clippy::BARE_TARGETS`]),
+/// which any rustup installs, and userland carries no clippy shape
+/// (`src/clippy.rs`). Userland and the SDK are tested against the
 /// host triple for the same reason.
 fn host(root: &Path) -> Vec<Step> {
     let tmp = toyos_tmpdir::TempDir::new("ci-host");
@@ -848,12 +849,53 @@ mod tests {
         assert!(at_tip("", tip).is_err());
     }
 
+    fn workflow(name: &str) -> String {
+        std::fs::read_to_string(repo_root().join(".github/workflows").join(name))
+            .unwrap_or_else(|e| panic!("{name}: {e}"))
+    }
+
+    /// The lines of job `name` in `text`, empty if it has none.
+    fn job<'a>(text: &'a str, name: &str) -> Vec<&'a str> {
+        let head = format!("  {name}:");
+        text.lines()
+            .skip_while(|l| *l != head)
+            .skip(1)
+            .take_while(|l| l.is_empty() || l.starts_with("   "))
+            .collect()
+    }
+
+    /// `host` and `guest` are the required checks. A skipped job reads as green
+    /// to one, so `guest` runs whatever `toolchain` concluded.
     #[test]
-    fn the_required_check_is_a_job_on_every_pull_request() {
-        let text = std::fs::read_to_string(repo_root().join(".github/workflows/ci.yml"))
-            .expect("ci.yml is readable");
+    fn the_required_checks_are_jobs_on_every_pull_request() {
+        let text = workflow("ci.yml");
         assert!(text.contains("\n  pull_request:\n") && text.contains("\n  merge_group:"));
-        assert!(text.contains("\n  host:"), "ci.yml runs no job `host`");
+        assert!(!job(&text, "host").is_empty(), "ci.yml runs no job `host`");
+        let guest = job(&text, "guest").join("\n");
+        assert!(guest.contains("needs: toolchain") && guest.contains("!cancelled()"), "{guest}");
+    }
+
+    /// ci.yml's `guest` and the nightly's `tcg` boot one instrument and share
+    /// one cache: the image's digest pins QEMU and its firmware, and a restore
+    /// whose paths are not its writer's restores nothing, in silence.
+    #[test]
+    fn the_guest_lanes_share_an_instrument_and_a_cache() {
+        let lane = |file: &str, name: &str| {
+            let text = workflow(file);
+            let lines = job(&text, name);
+            let image = lines.iter().find_map(|l| l.trim_start().strip_prefix("image: "));
+            let paths: Vec<&str> = lines
+                .iter()
+                .skip_while(|l| !l.trim_start().starts_with("path:"))
+                .skip(1)
+                .take_while(|l| !l.trim_start().starts_with("key:"))
+                .map(|l| l.trim())
+                .collect();
+            (image.map(str::to_string), paths.join("\n"))
+        };
+        let (pr, nightly) = (lane("ci.yml", "guest"), lane("nightly.yml", "tcg"));
+        assert!(pr.0.as_deref().is_some_and(|i| i.contains("@sha256:")) && !pr.1.is_empty(), "{pr:?}");
+        assert_eq!(pr, nightly);
     }
 
     /// Every workflow's `pull_request:` trigger names `main` alone, and none

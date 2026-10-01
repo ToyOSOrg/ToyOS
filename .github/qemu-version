@@ -3,6 +3,6 @@
 # build system's prerequisite check. The version decides test outcomes — 8.2.2
 # and 11.0.3 were measured disagreeing about the same tree — so this is a
 # declaration the guest image is held to, never a fact read off it. The image
-# digest in nightly.yml is chosen to satisfy this line; changing either is a
-# deliberate act: it says the instrument moved.
+# digest ci.yml and nightly.yml share is chosen to satisfy this line; changing
+# either is a deliberate act: it says the instrument moved.
 11.1.1
