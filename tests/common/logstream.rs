@@ -12,7 +12,7 @@
 use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use toyos_build::metaltalk::{Peer, Stream};
 
@@ -279,10 +279,10 @@ pub fn stalled_reader(
     // them only on a host fast enough. When `logd` lets each one go is its own
     // clock's business and no verdict here: the ceiling is the harness's, and
     // a `logd` that never lets a reader go is a hang it reds.
-    let deadline = Instant::now() + guest.budget(FLOOD_CEILING);
+    let deadline = guest.now() + guest.budget(FLOOD_CEILING);
     let mut floods = 0usize;
     while seen(&console) < NETWORK_READERS {
-        let left = deadline.saturating_duration_since(Instant::now());
+        let left = deadline.saturating_duration_since(guest.now());
         if left.is_zero() {
             break;
         }

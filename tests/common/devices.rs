@@ -88,7 +88,7 @@ pub fn metal_device_probe(
     );
     serial::Serial::boot(&qemu).must_be_clean()?;
 
-    let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(WAIT));
+    let mut stop = qemu::QmpShutdown::open(&qemu, qemu.budget(WAIT));
     let _ = stop.reason();
     let tail = qemu.drain_serial(WAIT);
     let text = format!("{}{tail}", qemu.boot_log());

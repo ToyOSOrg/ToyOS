@@ -220,8 +220,8 @@ fn guest_probes(qemu: &mut QemuInstance, log: &mut String) -> Result<(), String>
 /// compositor's own clock rather than a span of host wall clock: the ceiling
 /// is a liveness guard and the `windows=1` field is the verdict.
 fn window_seen(qemu: &mut QemuInstance, log: &mut String, from: usize) -> bool {
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    while std::time::Instant::now() < deadline {
+    let deadline = qemu.now() + Duration::from_secs(30);
+    while qemu.now() < deadline {
         log.push_str(&qemu.drain_serial(Duration::from_millis(500)));
         if log[from.min(log.len())..]
             .lines()

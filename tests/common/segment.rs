@@ -14,9 +14,10 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::time::Instant;
 
 use toyos_build::icmp::checksum;
+
+use super::steal::{Clock, Moment};
 
 /// The two sockets QEMU serves the segment on, in the socket directory of the
 /// [`super::qemu::QemuInstance`] that booted with them.
@@ -87,13 +88,18 @@ impl Segment {
             .map_err(|e| format!("put a frame on the segment: {e}"))
     }
 
-    /// The next frame the guest sends, before `deadline`.
-    pub fn next(&self, deadline: Instant) -> Result<Vec<u8>, String> {
-        let left = deadline.saturating_duration_since(Instant::now());
-        self.frames.recv_timeout(left).map_err(|e| match e {
-            RecvTimeoutError::Timeout => "the guest sent no frame in time".to_string(),
-            RecvTimeoutError::Disconnected => "QEMU closed the segment".to_string(),
-        })
+    /// The next frame the guest sends, before `deadline` on its `clock`.
+    pub fn next(&self, clock: &Clock, deadline: Moment) -> Result<Vec<u8>, String> {
+        loop {
+            let Some(left) = deadline.checked_duration_since(clock.now()) else {
+                return Err("the guest sent no frame in time".to_string());
+            };
+            match self.frames.recv_timeout(left) {
+                Ok(frame) => return Ok(frame),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => return Err("QEMU closed the segment".to_string()),
+            }
+        }
     }
 }
 

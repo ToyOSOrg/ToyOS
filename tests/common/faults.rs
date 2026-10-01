@@ -472,10 +472,10 @@ pub fn diskless_boot(
     Ok(())
 }
 
-/// How long the guest spins. The storm arms about 190 ms after the spinner
-/// starts — a million syscalls at its measured rate — and this is what covers a
-/// slow arming plus the storm itself on a shard with company.
-const SPIN_SECS: u32 = 10;
+/// A guard on the storm and not its length: it arms about 190 ms after the
+/// spinner starts — a million syscalls at its measured rate — and the spinner
+/// runs until this boot is ended.
+const STORM_CEILING: Duration = Duration::from_secs(30);
 
 /// The kernel's own summary line, printed last so a drain that ends on it has
 /// every per-CPU line and the symbolized `rip` under it already.
@@ -670,7 +670,7 @@ pub fn syscall_window_nmi(
     // One traversal each per iteration, so the two counts are of one order.
     const SAME_ORDER: u64 = 10;
 
-    let survived = storm(test_config, c_bins, rust_bins, &["syscall-window-nmi"], SPIN_SECS, |l| {
+    let survived = storm(test_config, c_bins, rust_bins, &["syscall-window-nmi"], |l| {
         l.contains(NMI_REPORT) || l.contains(HOLD_EXPIRED)
     })?;
     if survived.contains("DOUBLE FAULT") {
@@ -925,7 +925,6 @@ pub fn syscall_window_nmi_controls(
         c_bins,
         rust_bins,
         &["syscall-window-nmi", "nmi-without-ist"],
-        SPIN_SECS,
         |l| l.contains("Scanning kernel stack") || l.contains(HOLD_EXPIRED),
     )?;
     hold_expired(&unfixed)?;
@@ -1012,7 +1011,6 @@ pub fn syscall_window_nmi_controls(
         c_bins,
         rust_bins,
         &["syscall-window-nmi", "nmi-nested"],
-        SPIN_SECS,
         |l| l.contains("NESTED NMI"),
     )?;
     let Some(loud) = nested.lines().find(|l| l.contains("NESTED NMI")) else {
@@ -1055,14 +1053,13 @@ fn storm(
     c_bins: &[(String, Vec<u8>)],
     rust_bins: &[(String, Vec<u8>)],
     params: &'static [&'static str],
-    secs: u32,
     done: impl Fn(&str) -> bool,
 ) -> Result<String, String> {
     let mut qemu =
         QemuInstance::boot_with_options(test_config, c_bins, rust_bins, storm_options(params));
-    writeln!(qemu.stdin_mut(), "run test_rs_nmi_window_spin {secs}").expect("write to QEMU stdin");
+    writeln!(qemu.stdin_mut(), "run test_rs_nmi_window_spin").expect("write to QEMU stdin");
     qemu.flush_stdin();
-    Ok(qemu.drain_until(Duration::from_secs(u64::from(secs) + 20), |line| done(line)))
+    Ok(qemu.drain_until(STORM_CEILING, |line| done(line)))
 }
 
 /// `[ist1] used N of M bytes, ...`

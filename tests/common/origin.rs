@@ -9,7 +9,7 @@
 //! every judge of the kernel's records reads through (`bootlog::kernel_records`).
 
 use std::net::{Ipv4Addr, UdpSocket};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use toyos_build::bootlog;
 use toyos_build::metaldevices::exit_of;
@@ -380,7 +380,7 @@ pub fn resume_meets_its_flush(rust_bins: &[(String, Vec<u8>)]) -> Result<(), Str
             ..Default::default()
         },
     );
-    let mut stop = qemu::QmpShutdown::open(guest.qmp_socket(), guest.budget(Duration::from_secs(120)));
+    let mut stop = qemu::QmpShutdown::open(&guest, guest.budget(Duration::from_secs(120)));
     let reason = stop.reason();
     let tail = guest.drain_serial(Duration::from_secs(20));
     drop(guest);
@@ -443,7 +443,7 @@ pub fn keeps_the_owners_slots(rust_bins: &[(String, Vec<u8>)]) -> Result<(), Str
             ..Default::default()
         },
     );
-    let mut stop = qemu::QmpShutdown::open(guest.qmp_socket(), guest.budget(Duration::from_secs(120)));
+    let mut stop = qemu::QmpShutdown::open(&guest, guest.budget(Duration::from_secs(120)));
     let reason = stop.reason();
     let tail = guest.drain_serial(Duration::from_secs(20));
     drop(guest);
@@ -629,12 +629,13 @@ pub fn mdns(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) -> Re
     let mut console = guest.boot_log().to_string();
     qemu::await_marker(&mut guest, &mut console, "netd: DHCP: lease ", "netd's lease")?;
     let mut wire = guest.segment()?;
-    let deadline = || Instant::now() + Duration::from_secs(10);
+    let clock = guest.clock();
+    let deadline = || clock.now() + Duration::from_secs(10);
 
     wire.send(&segment::arp_request(NEIGHBOUR_MAC, NEIGHBOUR, GUEST))?;
     let until = deadline();
     let guest_mac = loop {
-        let frame = wire.next(until).map_err(|e| format!("no ARP reply for {GUEST:?} in 10 s: {e}"))?;
+        let frame = wire.next(&clock, until).map_err(|e| format!("no ARP reply for {GUEST:?} in 10 s: {e}"))?;
         if let Some(mac) = segment::arp_reply_for(&frame, GUEST) {
             break mac;
         }
@@ -665,7 +666,7 @@ pub fn mdns(c_bins: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) -> Re
 
     let until = deadline();
     let (answer, to) = loop {
-        let frame = wire.next(until).map_err(|e| format!("no answer for {host}.local in 10 s: {e}"))?;
+        let frame = wire.next(&clock, until).map_err(|e| format!("no answer for {host}.local in 10 s: {e}"))?;
         let Some(udp) = segment::udp_in(&frame) else { continue };
         if udp.src != (GUEST, MDNS_PORT) || udp.payload.len() < 2 {
             continue;

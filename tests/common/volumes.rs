@@ -560,7 +560,7 @@ pub fn kernel_log_file(
     // Polled until logd has written through `Boot: complete`, with the
     // harness's ceiling and no deadline of this test's own: when logd writes
     // is its own business, and one that never does is a hang.
-    let give_up = std::time::Instant::now() + qemu.budget(qemu::GUEST_WEDGED);
+    let give_up = qemu.now() + qemu.budget(qemu::GUEST_WEDGED);
     let mut running;
     let mut running_text;
     let mut running_name;
@@ -570,7 +570,7 @@ pub fn kernel_log_file(
         if running_text.contains("Boot: complete") {
             break;
         }
-        if std::time::Instant::now() >= give_up {
+        if qemu.now() >= give_up {
             return Err(format!(
                 "{} waiting for logd to write `Boot: complete` to the device: {} bytes there, \
                  starting {:?}",

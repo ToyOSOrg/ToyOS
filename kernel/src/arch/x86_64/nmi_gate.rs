@@ -60,7 +60,7 @@ pub mod hold {
     /// One turn of the entry's spin, in the budget the word carries above the flags.
     pub const SPIN: u64 = 1 << 8;
     /// Turns an ask grants. A count and not a time, because the entry can read no clock without a register; a bound, not a measurement.
-    pub const TURNS: u64 = 1 << 25;
+    pub const TURNS: u64 = 1 << 31;
     /// What the storm stores to ask.
     pub const ASK: u64 = ASKED | (TURNS * SPIN);
 }
@@ -177,12 +177,12 @@ const ENOUGH: u64 = 64;
 /// Wait budget per NMI before the next goes out; a delivery that misses it still counts as sent.
 const DELIVERY_BUDGET_NS: u64 = 100_000;
 
-/// Asks before the spray goes out without a held arrival, and how long each waits for the entry's acknowledgement, and a released victim for its next syscall. Bounds, not measurements.
+/// Asks before the spray goes out without a held arrival, and how long each waits for the entry's acknowledgement, and a released victim for its next syscall: a bound on a dead CPU and not on one its host has not scheduled, so `DEAF_CPU`'s.
 const HOLD_ATTEMPTS: u32 = 10;
-const HOLD_ACK_NS: u64 = 100_000_000;
+const HOLD_ACK_NS: u64 = crate::time::DEAF_CPU.nanos();
 
-/// How long the held NMI is waited for: the one delivery whose landing is the premise gets a host's scheduling latency rather than [`DELIVERY_BUDGET_NS`], and the held CPU spins with `IF` clear throughout, which keeps this well under `hardlockup`'s bound. A bound, not a measurement.
-const HELD_DELIVERY_NS: u64 = 100_000_000;
+/// How long the held NMI is waited for: the one delivery whose landing is the premise gets [`HOLD_ACK_NS`]'s bound on a dead CPU rather than [`DELIVERY_BUDGET_NS`], and the held CPU spins with `IF` clear throughout, which keeps this well under `hardlockup`'s bound.
+const HELD_DELIVERY_NS: u64 = HOLD_ACK_NS;
 
 // The budget outlasts the storm's longest lawful hold wherever a turn — a `pause`, a locked subtract and a test — takes 3 ns or more, which is an estimate of hardware and not a measurement.
 const _: () = assert!(hold::TURNS * 3 >= HELD_DELIVERY_NS);

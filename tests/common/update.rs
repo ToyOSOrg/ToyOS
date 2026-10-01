@@ -19,7 +19,6 @@
 //! layout ([`fwvars`]).
 
 use std::path::{Path, PathBuf};
-use std::time::Instant;
 
 use toyos_build::bootlog;
 use toyos_build::build::{self, Plan};
@@ -187,7 +186,7 @@ impl Rig {
         marker: &str,
     ) -> Result<(usize, usize), String> {
         let (from, uart) = (console.len(), guest.uart_log().len());
-        let mut hold = qemu::QmpHold::arm(guest.qmp_socket());
+        let mut hold = qemu::QmpHold::arm(guest);
         let asked = ssh::ssh_fire(HOST, self.port, &self.identity, "reboot")?;
         eprintln!("  [update] `reboot` answered {asked:?}");
         hold.held(qemu::GUEST_WEDGED)?;
@@ -242,8 +241,9 @@ impl Rig {
 /// bounds are the harness's, [`qemu::GUEST_QUIET`] of silence on both and
 /// [`qemu::GUEST_WEDGED`] in all.
 fn await_machine(guest: &mut QemuInstance, console: &mut String, doing: &str, done: impl Fn(&str) -> bool) -> Result<(), String> {
-    let began = Instant::now();
-    let (mut heard, mut grew) = (0usize, Instant::now());
+    let clock = guest.clock();
+    let began = clock.now();
+    let (mut heard, mut grew) = (0usize, began);
     loop {
         if done(console) {
             return Ok(());
@@ -252,16 +252,16 @@ fn await_machine(guest: &mut QemuInstance, console: &mut String, doing: &str, do
         console.push_str(&more);
         let now = console.len() + guest.uart_log().len();
         if now != heard {
-            (heard, grew) = (now, Instant::now());
+            (heard, grew) = (now, clock.now());
         }
-        if grew.elapsed() >= qemu::GUEST_QUIET {
+        if clock.since(grew) >= qemu::GUEST_QUIET {
             return Err(format!(
                 "{} waiting for {doing}: the console and the 16550 both went quiet for {} s",
                 qemu::STALLED,
                 qemu::GUEST_QUIET.as_secs()
             ));
         }
-        if began.elapsed() >= qemu::GUEST_WEDGED {
+        if clock.since(began) >= qemu::GUEST_WEDGED {
             return Err(format!("{} waiting for {doing}: it never stopped talking and never got there", qemu::STALLED));
         }
     }

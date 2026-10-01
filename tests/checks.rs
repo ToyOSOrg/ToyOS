@@ -19,6 +19,8 @@ mod checks {
     mod screen_checks;
     #[path = "serial.rs"]
     mod serial_checks;
+    #[path = "steal.rs"]
+    mod steal_checks;
     #[path = "usb.rs"]
     mod usb_checks;
 
@@ -100,6 +102,15 @@ mod checks {
     #[test]
     fn suspend_detector() -> Result<(), String> {
         clock_checks::self_check()
+    }
+
+    /// A guest's clock: the arithmetic, the host's accounting it reads, and a
+    /// process that is gone.
+    #[test]
+    fn steal_clock() -> Result<(), String> {
+        steal_checks::served_self_check()?;
+        steal_checks::demand_self_check()?;
+        steal_checks::gone_self_check()
     }
 
     /// What a suspend is worth to a verdict, staged rather than reasoned about.

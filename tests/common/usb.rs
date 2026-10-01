@@ -818,7 +818,7 @@ fn optional_flush_keeps_the_log(
     // the sink is still running, and the only place that is visible is the
     // device while the machine is up. The ceiling is the harness's: a stick
     // with no write cache that cost the machine its log is a hang here.
-    let give_up = std::time::Instant::now() + qemu.budget(qemu::GUEST_WEDGED);
+    let give_up = qemu.now() + qemu.budget(qemu::GUEST_WEDGED);
     loop {
         let on_device = String::from_utf8_lossy(
             &super::volumes::newest_log(&image_path, start, len)?.1,
@@ -827,7 +827,7 @@ fn optional_flush_keeps_the_log(
         if on_device.contains("Boot: complete") {
             break;
         }
-        if std::time::Instant::now() >= give_up {
+        if qemu.now() >= give_up {
             return Err(format!(
                 "{} waiting for `Boot: complete` in the log on a stick with no write cache: {} \
                  bytes there",
@@ -1989,8 +1989,8 @@ fn abandoned_write_is_taken_offline(
     );
     let mut log = qemu.boot_log().to_string();
     // The slot goes back from the poll, which the boot log may end before.
-    let deadline = std::time::Instant::now() + Duration::from_secs(20);
-    while std::time::Instant::now() < deadline
+    let deadline = qemu.now() + Duration::from_secs(20);
+    while qemu.now() < deadline
         && !log.split_once(" is offline: ").is_some_and(|(_, after)| after.contains(" disabled"))
     {
         log.push_str(&qemu.drain_serial(Duration::from_millis(250)));
@@ -2563,18 +2563,18 @@ fn transport_gives_up(
     let boot = qemu.boot_log().to_string();
     let mut plugged = String::new();
     let wait_for = |qemu: &mut QemuInstance, plugged: &mut String, line: &str| {
-        let deadline = std::time::Instant::now() + Duration::from_secs(20);
-        while std::time::Instant::now() < deadline && !plugged.contains(line) {
+        let deadline = qemu.now() + Duration::from_secs(20);
+        while qemu.now() < deadline && !plugged.contains(line) {
             plugged.push_str(&qemu.drain_serial(Duration::from_millis(250)));
         }
     };
     // The offline disk's slot goes back from the poll, which the boot log may
     // end before: it is waited for, so the pull below is not what gave it back.
-    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let deadline = qemu.now() + Duration::from_secs(20);
     let gone_back = |text: &str| {
         text.split_once(" is offline: ").is_some_and(|(_, after)| after.contains(" disabled"))
     };
-    while std::time::Instant::now() < deadline && !gone_back(&format!("{boot}{plugged}")) {
+    while qemu.now() < deadline && !gone_back(&format!("{boot}{plugged}")) {
         plugged.push_str(&qemu.drain_serial(Duration::from_millis(250)));
     }
     // It is pulled before the next disk is plugged, so the plug's port and

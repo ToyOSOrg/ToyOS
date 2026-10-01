@@ -34,6 +34,8 @@ pub mod screen;
 pub mod segment;
 pub mod serial;
 pub mod ssh;
+/// A guest's own time: the wall clock less what the host withheld.
+pub mod steal;
 pub mod storage;
 pub mod swap;
 pub mod toybox;

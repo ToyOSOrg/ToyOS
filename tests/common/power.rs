@@ -55,7 +55,7 @@ pub fn machine_reboot(
     // 0xcf9 without reading the FADT satisfies this and the stop reason both.
     boot.must_say("ACPI: reset register SystemIO 0xcf9 <- 0x0f")?;
 
-    let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(WAIT));
+    let mut stop = qemu::QmpShutdown::open(&qemu, qemu.budget(WAIT));
 
     writeln!(qemu.stdin_mut(), "run reboot").expect("write to QEMU stdin");
     qemu.flush_stdin();
@@ -102,7 +102,7 @@ pub fn metal_job_reboot(
     serial::Serial::boot(&qemu).must_be_clean()?;
     let console = qemu.boot_log().to_string();
 
-    let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(WAIT));
+    let mut stop = qemu::QmpShutdown::open(&qemu, qemu.budget(WAIT));
     let reason = stop.reason();
     let tail = qemu.drain_serial(WAIT);
 
@@ -270,7 +270,7 @@ fn stopped_boot(
     );
     serial::Serial::boot(&qemu).must_be_clean()?;
     let booted = qemu.boot_log().to_string();
-    let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(WAIT));
+    let mut stop = qemu::QmpShutdown::open(&qemu, qemu.budget(WAIT));
     let reason = stop.reason();
     let tail = qemu.drain_serial(WAIT);
     let whole = format!("{booted}{tail}");
@@ -475,7 +475,7 @@ pub fn job_deadline_reboots(
     );
     serial::Serial::boot(&qemu).must_be_clean()?;
 
-    let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(WAIT));
+    let mut stop = qemu::QmpShutdown::open(&qemu, qemu.budget(WAIT));
     let reason = stop.reason();
     let tail = qemu.drain_serial(WAIT);
 
@@ -525,7 +525,7 @@ pub fn watchdog_resets(
     boot.must_be_clean()?;
     boot.must_say(ARMED)?;
 
-    let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(WAIT));
+    let mut stop = qemu::QmpShutdown::open(&qemu, qemu.budget(WAIT));
     let reason = stop.reason();
     let tail = qemu.drain_serial(WAIT);
 
@@ -774,7 +774,7 @@ pub fn panic_reboots(
 /// emitted before its client connected.
 fn watch_the_bound(qemu: &QemuInstance) -> (qemu::QmpShutdown, Duration) {
     let budget = qemu.budget(Duration::from_secs(PANIC_FAST_SECS) + RESET_ALLOWANCE);
-    (qemu::QmpShutdown::open(qemu.qmp_socket(), budget), budget)
+    (qemu::QmpShutdown::open(&qemu, budget), budget)
 }
 
 /// QEMU's own `guest-reset` on `watch`, and the serial the guest wrote after
@@ -1095,7 +1095,7 @@ pub fn blackbox_panic_chain(
     // `blackbox_unclaimed_page`'s to say and is not restated here.
     let first = serial::Serial::boot(&qemu);
     // Opened before either reset: events queue on the socket from here.
-    let mut resets = qemu::QmpResets::open(qemu.qmp_socket(), qemu.budget(CHAIN_WAIT));
+    let mut resets = qemu::QmpResets::open(&qemu, qemu.budget(CHAIN_WAIT));
     first.must_say(&armed_line())?;
     // Nothing was harvested on a machine whose RAM QEMU zeroed, so the pass
     // below is reading this boot's page and not a claim about every boot.
@@ -1157,7 +1157,7 @@ pub fn blackbox_done_chain(
     let case = config.parent().expect("system.toml has a directory");
     let mut qemu = QemuInstance::boot_with_options(case, &[], &[], chained(&[]));
     let first = serial::Serial::boot(&qemu);
-    let mut resets = qemu::QmpResets::open(qemu.qmp_socket(), qemu.budget(CHAIN_WAIT));
+    let mut resets = qemu::QmpResets::open(&qemu, qemu.budget(CHAIN_WAIT));
     first.must_say(&armed_line())?;
 
     let second = after_the_reset(&mut qemu, bootlog::CHAIN_ENDS_LINE);
@@ -1182,7 +1182,7 @@ pub fn transport_break_chain() -> Result<(), String> {
     let mut qemu =
         QemuInstance::boot_with_options(case, &[], &[], chained(&["usb-transport-break"]));
     let first = serial::Serial::boot(&qemu);
-    let mut resets = qemu::QmpResets::open(qemu.qmp_socket(), qemu.budget(CHAIN_WAIT));
+    let mut resets = qemu::QmpResets::open(&qemu, qemu.budget(CHAIN_WAIT));
     first.must_say(&armed_line())?;
 
     // One capture from the first boot's handoff on, so it is the kernel's
@@ -1247,7 +1247,7 @@ pub fn boot_deadline_ends_a_wedge(
     )?;
     let mut qemu = QemuInstance::boot_with_options(case, &[], &[], options);
     let first = serial::Serial::boot(&qemu);
-    let mut resets = qemu::QmpResets::open(qemu.qmp_socket(), qemu.budget(CHAIN_WAIT));
+    let mut resets = qemu::QmpResets::open(&qemu, qemu.budget(CHAIN_WAIT));
     first.must_say(&armed_line())?;
 
     // One capture from the first boot's handoff to the pass that reports it:
@@ -1408,7 +1408,7 @@ pub fn hard_lockup_ends_a_deaf_cpu(
     )?;
     let mut qemu = QemuInstance::boot_with_options(case, &[], &[], options);
     let first = serial::Serial::boot(&qemu);
-    let mut resets = qemu::QmpResets::open(qemu.qmp_socket(), qemu.budget(CHAIN_WAIT));
+    let mut resets = qemu::QmpResets::open(&qemu, qemu.budget(CHAIN_WAIT));
     first.must_say(&armed_line())?;
 
     // One capture from the first boot's handoff to the pass that reports it:
@@ -1580,7 +1580,7 @@ pub fn panic_outlives_the_deadline(
     let params: &[&str] = &["test-late-panic", "panic-reboot-fast", PANIC_OUTLIVES_DEADLINE];
     let mut qemu = QemuInstance::boot_with_options(test_config, c_bins, rust_bins, chained(params));
     let first = serial::Serial::boot(&qemu);
-    let mut resets = qemu::QmpResets::open(qemu.qmp_socket(), qemu.budget(CHAIN_WAIT));
+    let mut resets = qemu::QmpResets::open(&qemu, qemu.budget(CHAIN_WAIT));
     first.must_say(&armed_line())?;
 
     // This capture opens at the first boot's handoff, so it carries that
@@ -1783,7 +1783,7 @@ fn the_load_refuses_a_disk_with_no_room() -> Result<(), String> {
         chained(&["usb-reset-under-load", WEDGE_DEADLINE]),
     );
     let first = serial::Serial::boot(&qemu);
-    let mut resets = qemu::QmpResets::open(qemu.qmp_socket(), qemu.budget(CHAIN_WAIT));
+    let mut resets = qemu::QmpResets::open(&qemu, qemu.budget(CHAIN_WAIT));
     first.must_say(&armed_line()).map_err(|why| format!("usb-reset-under-load: {why}"))?;
 
     let second = after_the_reset(&mut qemu, bootlog::CHAIN_ENDS_LINE);
@@ -1816,7 +1816,7 @@ fn one_wedge_phase(params: &'static [&'static str], phase: Phase) -> Result<(), 
     let (options, kept) = chained_on_a_kept_image(case, params, &format!("{arm}-boot.img"))?;
     let mut qemu = QemuInstance::boot_with_options(case, &[], &[], options);
     let first = serial::Serial::boot(&qemu);
-    let mut resets = qemu::QmpResets::open(qemu.qmp_socket(), qemu.budget(CHAIN_WAIT));
+    let mut resets = qemu::QmpResets::open(&qemu, qemu.budget(CHAIN_WAIT));
     first.must_say(&armed_line()).map_err(|why| format!("{arm}: {why}"))?;
 
     // The account is the page's head, so it is on the console; the wedge's own
@@ -2321,7 +2321,7 @@ pub fn blackbox_early_panic_sealed_muted(
 /// read once. Only the panicking guest writes it, so a poll cannot observe a
 /// state some other writer put there.
 fn sealed_state(qemu: &mut QemuInstance, within: Duration) -> Result<(State, Vec<u8>), String> {
-    let deadline = std::time::Instant::now() + within;
+    let deadline = qemu.now() + within;
     let mut last = None;
     loop {
         let page = qemu.guest_memory(PHYS, toyos_blackbox::BYTES)?;
@@ -2334,7 +2334,7 @@ fn sealed_state(qemu: &mut QemuInstance, within: Duration) -> Result<(State, Vec
             Some((state, _, _, text)) => last = Some((state, text.to_vec())),
             None => {}
         }
-        if std::time::Instant::now() >= deadline {
+        if qemu.now() >= deadline {
             return match last {
                 Some(seen) => Ok(seen),
                 None => Err(format!(
@@ -2469,7 +2469,7 @@ fn one_reset_path(case: &Path, arm: &ResetPath) -> Result<(), String> {
     let (path, flushes) = (arm.what, arm.flushes);
     let mut qemu = QemuInstance::boot_with_options(case, &[], &[], chained(arm.params));
     let _ = serial::Serial::boot(&qemu);
-    let mut resets = qemu::QmpResets::open(qemu.qmp_socket(), qemu.budget(CHAIN_WAIT));
+    let mut resets = qemu::QmpResets::open(&qemu, qemu.budget(CHAIN_WAIT));
 
     let after = after_the_reset(&mut qemu, bootlog::CHAIN_ENDS_LINE);
     let head = toyos_build::metaldevices::QUIESCE_HEAD;

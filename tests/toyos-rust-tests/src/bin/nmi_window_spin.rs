@@ -7,6 +7,10 @@
 //! its `sysretq`. Nothing here asserts: the counts are the kernel's, and
 //! `tests/common/faults.rs` holds the verdict.
 //!
+//! **It never stops on its own.** The storm fires on a count of syscalls and
+//! then waits on this loop to enter its hold, and only the harness reading the
+//! kernel's report knows when the storm is over, so the harness ends the boot.
+//!
 //! **The loop is written as assembly because its instruction count is part of
 //! the derivation.** Four instructions per iteration — `mov`, `syscall`, `dec`,
 //! `jnz` — so the boundaries at which an NMI can be delivered while this program
@@ -20,29 +24,16 @@
 //! no argument and touches no state: what should dominate the iteration is the
 //! entry and the exit, which is what the window is part of.
 
-use toyos_abi::clock::nanos_since_boot as clock_nanos;
 use toyos_abi::syscall::SYS_GETPID;
 
-/// Iterations between two clock reads. Large enough that the clock's own
-/// read is a rounding error in the mix, small enough to stop promptly.
+/// Iterations of one counted loop between two returns to Rust.
 const CHUNK: u64 = 50_000;
 
 fn main() {
-    let secs: u64 = std::env::args()
-        .nth(1)
-        .and_then(|a| a.parse().ok())
-        .unwrap_or(10);
-
-    println!("nmi-window-spin: spinning on SYS_GETPID for {secs}s");
-
-    let until = clock_nanos() + secs * 1_000_000_000;
-    let mut done: u64 = 0;
-    while clock_nanos() < until {
+    println!("nmi-window-spin: spinning on SYS_GETPID until the boot ends");
+    loop {
         chunk();
-        done += CHUNK;
     }
-
-    println!("nmi-window-spin: {done} syscalls");
 }
 
 /// [`CHUNK`] iterations of exactly four instructions.

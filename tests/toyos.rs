@@ -5,7 +5,7 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use common::qemu::{
     self, await_guest, await_marker, await_marker_new, BootOptions, QemuInstance, TestResult,
@@ -84,10 +84,7 @@ const DEFAULT_WIDTH: usize = 12;
 /// tail because at width 4 `allocator_stress` went from 1 s to past its 5 s and
 /// `demand_paging_sse` past its — but not one of those numbers is an assertion.
 /// They are liveness guards on a guest that might wedge, and the verdict in
-/// every case is the exit code and the expected stdout. [`qemu::budget`] now
-/// pays them out per guest the phase may have up, which is what
-/// `wait_for_ready`'s boot timeout has done since the phase existed, so the
-/// number each author reasoned about is still the number for one guest.
+/// every case is the exit code and the expected stdout.
 ///
 /// What that leaves is one boot's worth of tests costing about thirteen seconds
 /// between them, which is far too little to be worth a tail slot of its own:
@@ -334,8 +331,8 @@ const RUST_SKIP: &[&str] = &[
     // `locale_detect_unrecognized` drive it.
     "locale_gate",
     // A victim, not a test: it spins on `SYS_GETPID` so that another CPU's NMIs
-    // have somewhere to land, and on its own it asserts nothing and costs ten
-    // seconds. `syscall_window_nmi` runs it on the kernel that storms it.
+    // have somewhere to land, and on its own it asserts nothing and never ends.
+    // `syscall_window_nmi` runs it on the kernel that storms it.
     "nmi_window_spin",
     // A victim, not a test: the load `dump-in-blocking-pass` files Ctrl+Alt+D
     // inside, and on its own it asserts nothing. `dump_left_pending_is_owed` runs
@@ -5346,8 +5343,8 @@ fn run_screen_test(
             // A liveness ceiling on a machine that is halted and paging, so
             // there is no console to read progress off and this is the case
             // `qemu::budget` exists for.
-            let deadline = Instant::now() + qemu.budget(Duration::from_secs(40));
-            while Instant::now() < deadline
+            let deadline = qemu.now() + qemu.budget(Duration::from_secs(40));
+            while qemu.now() < deadline
                 && !(head_seen && report.is_some() && judged.len() >= JUDGED_PAGES)
             {
                 let dump = qemu.screendump();
@@ -5451,12 +5448,12 @@ fn run_screen_test(
                 }
                 None
             };
-            let deadline = Instant::now() + qemu.budget(Duration::from_secs(30));
+            let deadline = qemu.now() + qemu.budget(Duration::from_secs(30));
             let mut last = loop {
                 if let Some(f) = footer(&mut qemu) {
                     break f;
                 }
-                if Instant::now() >= deadline {
+                if qemu.now() >= deadline {
                     return Err(format!(
                         "{STALLED} no `[page n/m]` footer ever appeared; nothing was paging"
                     ));
@@ -5476,7 +5473,7 @@ fn run_screen_test(
                     last = now;
                     break;
                 }
-                if Instant::now() >= deadline {
+                if qemu.now() >= deadline {
                     return Err(format!(
                         "{STALLED} the pager did not advance on its own — nothing here can say \
                          whether a keystroke stops it"
@@ -5500,7 +5497,7 @@ fn run_screen_test(
             };
             for key in 1..=SAMPLES {
                 qemu::qmp_send_keys(&socket, &[("pgup", true), ("pgup", false)]);
-                let by = Instant::now() + qemu.budget(Duration::from_secs(20));
+                let by = qemu.now() + qemu.budget(Duration::from_secs(20));
                 let now = loop {
                     let Some(now) = footer(&mut qemu) else {
                         return Err(format!(
@@ -5511,7 +5508,7 @@ fn run_screen_test(
                     if now != last {
                         break now;
                     }
-                    if Instant::now() >= by {
+                    if qemu.now() >= by {
                         return Err(format!(
                             "{STALLED} keystroke {key} of {SAMPLES} left the pager on {last:?}: a \
                              PageUp reached a halted machine and no page came of it"
@@ -6918,23 +6915,6 @@ fn locale_detect_unrecognized(qemu: &mut QemuInstance) -> Result<(), String> {
     Ok(())
 }
 
-/// A round trip through a guest that is **demonstrably up**, corrected for how
-/// fast this host is and not for how many guests it is running.
-///
-/// [`qemu::budget`] is the ceiling on a guest that might be wedged, and it
-/// multiplies by the width because a guest with a twelfth of the machine takes
-/// longer over everything. This is the other case, and the width is wrong for
-/// it: what these callers wait on is the shell echoing a line it has not run
-/// yet, which is microseconds of guest time however little of the machine the
-/// guest has. Ten of those establishing nothing is a keystroke path that is not
-/// working, and a width-scaled ceiling turns that into four minutes of a lane —
-/// measured, on the run this was written from: 285 s of a terminal parked on a
-/// pipe it had been parked on since 1.4 s.
-fn round_trip(one_guest: Duration) -> Duration {
-    let (_, _, num, den) = qemu::host_speed();
-    one_guest * num / den
-}
-
 /// Keep collecting serial into `log` until `marker` shows up.
 ///
 /// **A pace, not a guard.** The two remaining callers retype at the guest and
@@ -6947,8 +6927,8 @@ fn serial_until(
     marker: &str,
     timeout: Duration,
 ) -> bool {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
+    let deadline = qemu.now() + timeout;
+    while qemu.now() < deadline {
         log.push_str(&qemu.drain_serial(Duration::from_millis(200)));
         if log.contains(marker) {
             return true;
@@ -6970,8 +6950,8 @@ fn serial_until_new(
     from: usize,
     timeout: Duration,
 ) -> bool {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
+    let deadline = qemu.now() + timeout;
+    while qemu.now() < deadline {
         log.push_str(&qemu.drain_serial(Duration::from_millis(200)));
         if log[from.min(log.len())..].contains(marker) {
             return true;
@@ -7015,8 +6995,7 @@ fn answer_swiss_wizard(
 /// What is being waited for is a shell echoing a line it has not run yet, which
 /// is a round trip and not work — so this is short, and it is paid only when the
 /// line did not arrive. [`shell_type_line`] widens it by the guest's own
-/// oversubscription; the two callers that retype at a surface which may not be
-/// reading yet scale it per host with [`round_trip`] instead.
+/// oversubscription.
 const ECHO_TRY: Duration = Duration::from_secs(2);
 
 /// How long one burst of typing has to reach the panel.
@@ -7249,13 +7228,13 @@ fn await_drained(
             ))
         }
         Drained::Bytes => {
-            let deadline = Instant::now() + ceiling;
+            let deadline = qemu.now() + ceiling;
             loop {
                 let drained = i8042_drained(&qemu.console_stream().since(mark));
                 if drained >= bytes {
                     return Ok(());
                 }
-                if Instant::now() >= deadline {
+                if qemu.now() >= deadline {
                     return Err(format!(
                         "the kernel took {drained} of the {bytes} set-1 bytes typed so far off \
                          the i8042 inside {ceiling:?}, so the burst {burst:?} went out against a \
@@ -7358,13 +7337,13 @@ fn shell_type_once(
         let mut input = qemu::QmpInput::open(qemu.qmp_socket());
         input.keys(&[("ret", true), ("ret", false)]);
     }
-    let deadline = Instant::now() + echo;
+    let deadline = qemu.now() + echo;
     loop {
         let said = qemu.console_stream().since(mark);
         if said.contains(line) {
             return Ok(());
         }
-        if Instant::now() >= deadline {
+        if qemu.now() >= deadline {
             return Err(said);
         }
         thread::sleep(Duration::from_millis(5));
@@ -7427,8 +7406,7 @@ fn shell_echoes(
     // **A count of attempts, not a span of host seconds.** This used to be a
     // flat twenty, which is a fixed number of round trips on the host it was
     // written on and a different number on any other. Ten is the number, and
-    // each gets a round trip scaled to this host — see [`round_trip`] for why
-    // that and not the phase width.
+    // each gets a round trip scaled to this host.
     const TRIES: usize = 10;
     let mut lost = String::new();
     for _ in 0..TRIES {
@@ -7436,12 +7414,12 @@ fn shell_echoes(
         // loop's ordinary step: the surface is up and the shell may still not
         // be reading, which is what the retype exists for.
         if let Err(said) =
-            shell_type_once(qemu, &format!("echo {nonce}"), round_trip(ECHO_TRY), ack)
+            shell_type_once(qemu, &format!("echo {nonce}"), qemu::budget(ECHO_TRY), ack)
         {
             lost = said;
             continue;
         }
-        if serial_until(qemu, log, nonce, round_trip(Duration::from_secs(2))) {
+        if serial_until(qemu, log, nonce, qemu::budget(Duration::from_secs(2))) {
             return Ok(());
         }
     }
@@ -7479,13 +7457,13 @@ fn shell_echoes(
 /// The ceiling is the guest's own liveness rather than a phase-scaled clock,
 /// and here that cuts both ways: #156 is a *freeze*, so the machine this
 /// retries against goes silent, and the wait ends in fifteen seconds instead of
-/// spending `qemu.budget(20 s)` — up to four minutes at width 12 — hammering
-/// GUI+Q at a desktop that has stopped. `issues/design-debt/` names that
-/// cost as a lane this test holds for a quarter of every run, which is what puts
+/// spending `qemu.budget(20 s)` hammering GUI+Q at a desktop that has stopped.
+/// `issues/design-debt/` names that cost as a lane this test holds for a
+/// quarter of every run, which is what puts
 /// whichever desktop is dispatched beside it into a red nobody acts on.
 fn close_focused_window(qemu: &mut QemuInstance, log: &mut String, new: usize) -> bool {
     const CLOSED: &str = "compositor: window closed";
-    let mut live = qemu::Liveness::new(Duration::from_secs(15), Duration::from_secs(60));
+    let mut live = qemu::Liveness::new(qemu, Duration::from_secs(15), Duration::from_secs(60));
     while !log[new..].contains(CLOSED) && live.working(log) {
         {
             let mut input = qemu::QmpInput::open(qemu.qmp_socket());
@@ -7805,9 +7783,9 @@ fn toolkit_iced() -> Result<(), String> {
     // Its exit ends the wait too: an app that dies before it has a window
     // would otherwise hold the lane for the whole budget.
     let exited = format!("exit: {app} pid=");
-    let deadline = Instant::now() + qemu.budget(Duration::from_secs(60));
+    let deadline = qemu.now() + qemu.budget(Duration::from_secs(60));
     while !log[launched..].contains("compositor: window opened") {
-        if log[launched..].contains(&exited) || Instant::now() >= deadline {
+        if log[launched..].contains(&exited) || qemu.now() >= deadline {
             return Err(format!("{app} never got a window:\n{}", &log[launched..]));
         }
         log.push_str(&qemu.drain_serial(Duration::from_millis(200)));
@@ -7943,7 +7921,7 @@ fn toolkit_launch(
 fn toolkit_window_wake(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     let (mut qemu, mut log, launched) = toolkit_launch(rust_bins, "window_wake", "test_rs_window_wake")?;
     let log = &mut log;
-    let mut live = qemu::Liveness::new(Duration::from_secs(30), Duration::from_secs(120));
+    let mut live = qemu::Liveness::new(&qemu, Duration::from_secs(30), Duration::from_secs(120));
     while live.working(log) {
         let said = &log[launched..];
         if said.contains("WINDOW-WAKE-OK") {
@@ -7974,7 +7952,7 @@ fn toolkit_window_wake(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
 fn toolkit_winit_loop(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     let (mut qemu, mut log, launched) = toolkit_launch(rust_bins, "winit_loop", "test_rs_winit_loop")?;
     let log = &mut log;
-    let mut live = qemu::Liveness::new(Duration::from_secs(40), Duration::from_secs(240));
+    let mut live = qemu::Liveness::new(&qemu, Duration::from_secs(40), Duration::from_secs(240));
     let mut closed = false;
     while live.working(log) {
         let said = &log[launched..];
@@ -8036,7 +8014,7 @@ fn toolkit_winit_pace(rust_bins: &[(String, Vec<u8>)]) -> Result<(), String> {
     let (mut qemu, mut log, launched) = toolkit_launch(rust_bins, "winit_pace", "test_rs_winit_pace")?;
     let log = &mut log;
     let drew = format!("WINIT-PACE drew {PACE_FRAMES} frames");
-    let mut live = qemu::Liveness::new(Duration::from_secs(30), Duration::from_secs(120));
+    let mut live = qemu::Liveness::new(&qemu, Duration::from_secs(30), Duration::from_secs(120));
     while live.working(log) && !log[launched..].contains(&drew) {
         let said = &log[launched..];
         if said.contains("WINIT-PACE-FAIL") || said.contains("panicked") {
@@ -8299,7 +8277,7 @@ fn desktop_typing_damage() -> Result<(), String> {
         // Two: the shell echoes the command as it is typed and again as its
         // output. The same arithmetic the verdict below makes.
         let want = ((line + 1) * 2) as usize;
-        let mut live = qemu::Liveness::new(Duration::from_secs(15), Duration::from_secs(60));
+        let mut live = qemu::Liveness::new(&qemu, Duration::from_secs(15), Duration::from_secs(60));
         while log[before..].matches(NONCE).count() < want && live.working(&log) {
             let seen = qemu.drain_serial(Duration::from_millis(100));
             log.push_str(&seen);
@@ -13065,8 +13043,8 @@ fn run_machine_test(
 
             // A baseline first: churn against a compositor that was never
             // drawing would be a green run proving nothing.
-            let deadline = std::time::Instant::now() + qemu.budget(Duration::from_secs(20));
-            while std::time::Instant::now() < deadline && frames(&console) < 1 {
+            let deadline = qemu.now() + qemu.budget(Duration::from_secs(20));
+            while qemu.now() < deadline && frames(&console) < 1 {
                 console.push_str(&qemu.drain_serial(Duration::from_millis(250)));
             }
             if frames(&console) < 1 {
@@ -13117,8 +13095,8 @@ fn run_machine_test(
             // changed is that a console behind the guest costs wall clock instead
             // of a verdict.
             let bindings = |text: &str| text.matches("merges as source").count();
-            let deadline = std::time::Instant::now() + qemu.budget(Duration::from_secs(20));
-            while std::time::Instant::now() < deadline && bindings(&console) < CYCLES {
+            let deadline = qemu.now() + qemu.budget(Duration::from_secs(20));
+            while qemu.now() < deadline && bindings(&console) < CYCLES {
                 console.push_str(&qemu.drain_serial(Duration::from_millis(250)));
             }
             let bound = bindings(&console);
@@ -13152,8 +13130,8 @@ fn run_machine_test(
             // reporting interval is 2 s, so two of them cannot be satisfied by
             // frames the compositor produced before the first cycle.
             let mut after = String::new();
-            let deadline = std::time::Instant::now() + qemu.budget(Duration::from_secs(20));
-            while std::time::Instant::now() < deadline && frames(&after) < 2 {
+            let deadline = qemu.now() + qemu.budget(Duration::from_secs(20));
+            while qemu.now() < deadline && frames(&after) < 2 {
                 after.push_str(&qemu.drain_serial(Duration::from_millis(250)));
             }
             if frames(&after) < 2 {
@@ -16067,7 +16045,7 @@ fn the_others_halt_first(mut qemu: QemuInstance, arch: toyos_build::arch::Arch) 
     let mut monitor = qemu::QmpMonitor::open(qemu.qmp_socket());
     // A guard and never a verdict: a vCPU the host has not run yet has not
     // taken the stop, and this is how long it is waited for.
-    let give_up = Instant::now() + qemu::GUEST_QUIET;
+    let give_up = qemu.now() + qemu::GUEST_QUIET;
     loop {
         let stopped = qemu::stopped_cpus(&mut monitor, arch);
         // QEMU's CPU#n is the kernel's cpun: its MADT lists them in that order,
@@ -16075,7 +16053,7 @@ fn the_others_halt_first(mut qemu: QemuInstance, arch: toyos_build::arch::Arch) 
         if stopped.len() == cpus && stopped.iter().enumerate().all(|(cpu, &halted)| halted || cpu == fatal as usize) {
             break;
         }
-        if Instant::now() >= give_up {
+        if qemu.now() >= give_up {
             return Err(format!(
                 "{STALLED} waiting for the other CPUs to halt after the fatal path on cpu{fatal} \
                  stopped them — QEMU shows each vCPU halted with interrupts masked as {stopped:?}\n{console}"
@@ -16174,7 +16152,7 @@ impl Tally {
         if let Some(fastest) = fastest {
             say(format!(
                 "host: fastest boot {fastest} ms against the reference {reference} ms — liveness \
-                 ceilings paid at {:.2}x width",
+                 ceilings paid at {:.2}x",
                 f64::from(num) / f64::from(den)
             ));
         }
@@ -16617,7 +16595,6 @@ fn run_phase(
         return Vec::new();
     }
     let width = width.clamp(1, tasks.len());
-    qemu::set_width(width as u32);
     let queue = std::sync::Mutex::new(std::collections::VecDeque::from(tasks));
     let mut all = Vec::new();
     thread::scope(|scope| {
