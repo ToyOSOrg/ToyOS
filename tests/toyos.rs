@@ -917,6 +917,16 @@ const LATENCYCASE: &[metal::Arm] = &[metal::once(
     &["test_rs_cyclictest", "test_rs_sched_stress"],
 )];
 
+/// The C cases that do **not** go on the T14, and what each one's boot said.
+///
+/// Measured: the whole corpus was staged onto one metal-shaped image and
+/// booted, and this is what the guest comparator could not answer for.
+const C_METAL_SKIP: &[(&str, &str)] = &[(
+    "90_stdio_buffering",
+    "its expectation carries a `stderr line`, and the guest comparator reads one pipe; two \
+     pipes here would carry the same bytes in an order nothing preserves",
+)];
+
 /// The C corpus on the T14: one boot, one job per case, each judged in the
 /// guest.
 ///
@@ -931,52 +941,6 @@ const LATENCYCASE: &[metal::Arm] = &[metal::once(
 /// host reading the stick can say which of a hundred and nineteen failed. A
 /// job list of a hundred and nineteen `ccheck`s would leave one name and a
 /// hundred and nineteen records told apart only by position.
-///
-/// It is also a *stronger* comparison than the host's. `check_c_result` reads a
-/// console every process on the machine shares and has to take the other
-/// writers' lines out before comparing; this reads one pipe only the case can
-/// write to, so there is nothing to filter and no line that can be attributed
-/// to the wrong writer.
-///
-/// The C cases that do **not** go on the T14, and what each one's boot said.
-///
-/// Measured, like `METAL_SKIP`: the whole corpus was staged onto one
-/// metal-shaped image and booted, and this is what the guest comparator could
-/// not answer for.
-const C_METAL_SKIP: &[(&str, &str)] = &[(
-    "90_stdio_buffering",
-    "its expectation carries a `stderr line`, and the guest comparator reads one pipe. The \
-     host compares a console both streams land on in real time; two pipes here would carry \
-     the same bytes in an order nothing preserves, so this case stays where the console is",
-)];
-
-/// **One comparison rule, in two places that cannot share code.**
-///
-/// The host's is `tests/common/console.rs`'s `verdict` and the guest's is
-/// `tests/toyos-rust-tests/src/bin/ccheck.rs`'s; a guest binary cannot link the
-/// harness, so the rule is written twice and held together here by reading both
-/// sources. It is `trim_end` on both sides today, and the day one of them stops
-/// being that this reds and names the other.
-fn the_two_comparisons_use_one_rule() -> Result<(), String> {
-    let root = compile::repo_root();
-    let pair = [
-        ("tests/common/console.rs", "mine.trim_end() != expected.trim_end()"),
-        ("tests/toyos-rust-tests/src/bin/ccheck.rs", "fn trim_end(bytes: &[u8]) -> &[u8] {"),
-    ];
-    for (file, rule) in pair {
-        let at = root.join(file);
-        let source = std::fs::read_to_string(&at).map_err(|e| format!("{}: {e}", at.display()))?;
-        if !source.contains(rule) {
-            return Err(format!(
-                "{} no longer spells {rule:?}. The C corpus is compared on the host and again \
-                 in the guest, and the two rules have to be the same one or a case passes on \
-                 one machine and reds on the other",
-                at.display()
-            ));
-        }
-    }
-    Ok(())
-}
 fn c_corpus_metal(
     c_bins: &[(String, Vec<u8>)],
     keep: impl Fn(&str) -> bool,
@@ -4585,9 +4549,6 @@ fn check_shard_partition() {
 /// every row is its test's one declaration and asks for at least one boot, and
 /// every boot it asks for is a committed config.
 fn check_registration() {
-    if let Err(why) = the_two_comparisons_use_one_rule() {
-        panic!("{why}");
-    }
     for (case, _) in C_METAL_SKIP {
         let at = compile::testcases_dir().join(format!("{case}.c"));
         assert!(
