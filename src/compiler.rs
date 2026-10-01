@@ -48,7 +48,7 @@ use std::path::{Path, PathBuf};
 
 use crate::buildlock::{self, Guard, Held, Keyed};
 use crate::keystore::{self, Key};
-use crate::sysroot::{clone_tree, git_bytes, git_out, short, tree_identity};
+use crate::sysroot::{clone_tree, git_bytes, git_out, short, tree_identity, Links};
 use crate::toolchain::{self, host_triple};
 
 /// What changes how a key's sources become a compiler and is none of them: the
@@ -202,7 +202,7 @@ pub fn key(fork: &Path) -> Key {
 
 /// [`key`], with the key of the LLVM `fork` names.
 fn key_with(fork: &Path, llvm: &Key) -> Key {
-    let parts = [RECIPE, &tree_identity(fork, &KEYED), llvm.as_str()];
+    let parts = [RECIPE, &tree_identity(fork, &KEYED, Links::Skipped), llvm.as_str()];
     Key::of(parts.join("\n\0\n").as_bytes())
 }
 
