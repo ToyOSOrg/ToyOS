@@ -7,9 +7,9 @@
 //! An entry instead carries [`MANIFEST`], the git blob id of every source its
 //! build read, and every file under its targets is dated [`built`], before any
 //! real time. [`read`] dates each source whose blob matches the same, and every
-//! other one now: cargo's comparison is strict, so a matching source is no
-//! newer than the build, and a changed or new one is newer than everything in
-//! the entry, whatever any runner's clock says.
+//! other one now: cargo calls a source stale only when it is strictly newer
+//! than the build, so a match is fresh, and a changed or new source is newer
+//! than everything in the entry, whatever any runner's clock says.
 //!
 //! **Only a run that restored nothing seals an entry** ([`Start::Cold`],
 //! [`seal`]): a warm run's targets hold units none of its steps rebuilt,
