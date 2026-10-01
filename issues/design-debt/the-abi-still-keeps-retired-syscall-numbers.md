@@ -20,10 +20,8 @@ still keeps them:
 - `toyos-abi/src/syscall.rs`'s `device_classes!` keeps device classes 3 (`Nic`)
   and 4 (`Audio`) "retired rather than reused", and the decode test in
   `toyos-abi/src/inventory.rs` refuses them as retired.
-- `tests/toyos-rust-tests/src/bin/log_hold.rs`,
-  `tests/toyos-rust-tests/src/bin/panic_halts_first.rs`,
-  `tests/common/origin.rs` and `tests/toyos.rs` take syscall 26 as their logged
-  refusal and read `syscall 26 is retired`.
+- `tests/toyos-rust-tests/src/bin/panic_halts_first.rs` and `tests/toyos.rs`
+  take syscall 26 as their logged refusal and read `syscall 26 is retired`.
 - Plans still follow the old rule:
   `issues/kernel/sys-clock-realtime-is-now-a-format-of-sys-clock-epoch.md`,
   `issues/kernel/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`,
@@ -35,7 +33,7 @@ still keeps them:
   "ABI brief" names a gate `.claude/agents/implementer.md` no longer has.
 
 **Exit**: `retired_syscalls!` and every retirement entry are gone, a deleted
-number answers as an unassigned one does, the four test sites take their logged
+number answers as an unassigned one does, both test sites take their logged
 refusal from something live, and no issue plans by retirement.
 
 Owner: `toyos-abi` and `kernel/src/syscall/dispatch.rs`, whoever next changes

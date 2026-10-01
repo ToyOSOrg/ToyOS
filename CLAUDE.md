@@ -38,7 +38,7 @@ A subdirectory `CLAUDE.md` loads when a file in that subtree is `Read`, and not 
 
 > A snapshot, deliberately shallow — always read the code.
 
-**Kernel** — takes on only what userland cannot. Resource management, scheduling, process lifecycle, device arbitration; files: see Capabilities. 2 MB pages, demand paging, PIE binaries, full SMP.
+**Kernel** — takes on only what userland cannot. 2 MB pages, demand paging, PIE binaries, full SMP.
 
 **Userspace daemons** — compositor, netd, soundd, sshd, logd. Each claims a device or capability from the kernel and serves its function; crash one and the kernel is fine.
 
