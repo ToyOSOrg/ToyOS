@@ -226,7 +226,7 @@ pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
             if tsc_inside(attempt.id(), bracket_lo, bracket_hi) {
                 bracketed += 1;
             }
-            smp::commit(attempt, ap_id);
+            ROSTER.commit(attempt, ap_id);
             log!("SMP: AP cpu{} lapic={} online", attempt.id(), ap_id);
         } else {
             // Neither the id nor the trampoline is reused after a failure: stop here.
@@ -293,9 +293,8 @@ extern "C" fn ap_entry() -> ! {
     // Calibration is a one-time BSP measurement; nothing left for an AP to do here.
     apic::init_ap();
 
-    // Echo this attempt's token, so the BSP counts this AP for its own attempt,
-    // with the hardware id this AP reads as its own.
-    smp::echo(percpu::ap_token());
+    // Echo this attempt's token, so the BSP counts this AP for its own attempt.
+    ROSTER.echo(percpu::ap_token(), cpu::hardware_id());
 
     process::ap_idle();
 }

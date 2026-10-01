@@ -4,10 +4,10 @@
 //! is the word `answering` reads. Compiled into `kernel-loom/`, so no `crate::`.
 
 #[cfg(not(feature = "loom"))]
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 #[cfg(feature = "loom")]
-use loom::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use loom::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 /// Matches `sched::MAX_CPUS`; the roster refuses an id at or above it.
 pub const MAX_CPUS: usize = 8;
@@ -43,8 +43,9 @@ pub struct Roster {
     /// Source of per-attempt tokens; `0` is "no attempt".
     next_token: AtomicU32,
     /// The token the latest-started AP echoed, not a flag, so a stale AP cannot
-    /// be read as this one; `0` means none has.
-    echoed: AtomicU32,
+    /// be read as this one; `0` means none has. Its low half is the hardware id
+    /// that AP reads as its own, one store with the token.
+    echoed: AtomicU64,
 }
 
 impl Roster {
@@ -58,7 +59,7 @@ impl Roster {
             #[cfg(feature = "smp-ready-split")]
             answer: AtomicBool::new(false),
             next_token: AtomicU32::new(1),
-            echoed: AtomicU32::new(0),
+            echoed: AtomicU64::new(0),
         }
     }
 
@@ -72,7 +73,7 @@ impl Roster {
             #[cfg(feature = "smp-ready-split")]
             answer: AtomicBool::new(false),
             next_token: AtomicU32::new(1),
-            echoed: AtomicU32::new(0),
+            echoed: AtomicU64::new(0),
         }
     }
 
@@ -102,15 +103,16 @@ impl Roster {
     }
 
     /// The AP's half of the handshake, once it can take its first interrupt:
-    /// the token of the attempt that started it.
-    pub fn echo(&self, token: u32) {
-        self.echoed.store(token, Ordering::Release);
+    /// the token of the attempt that started it, and its `read` of its own
+    /// hardware id.
+    pub fn echo(&self, token: u32, read: u32) {
+        self.echoed.store((u64::from(token) << 32) | u64::from(read), Ordering::Release);
     }
 
     /// Whether `at`'s AP has echoed; an acquire, so what the AP did before its
     /// echo is visible after.
     pub fn echoed(&self, at: Attempt) -> bool {
-        self.echoed.load(Ordering::Acquire) == at.token
+        self.echoed.load(Ordering::Acquire) >> 32 == u64::from(at.token)
     }
 
     /// Whether `at`'s AP echoed before `spent` said the BSP's budget for it is gone.
@@ -127,9 +129,23 @@ impl Roster {
     }
 
     /// Fill a started AP's slot, then publish the count that covers it. Only the
-    /// BSP calls this, one at a time, so `at.id` is the current count.
+    /// BSP calls this, one at a time and once `at` has echoed, so `at.id` is the
+    /// current count and the echo is `at`'s.
+    ///
+    /// Refuses an AP that reads its own hardware id as other than
+    /// `hardware_id`, the id its slot and every IPI name it by: its fatal paths
+    /// and the console lock name it by its read. The BSP refuses, because before
+    /// the release an AP's own panic stops no other CPU.
     pub fn commit(&self, at: Attempt, hardware_id: u32) {
         debug_assert!(at.id == self.count.load(Ordering::Relaxed));
+        // Relaxed: the read is the echo's own word, which `await_echo` acquired.
+        let read = self.echoed.load(Ordering::Relaxed) as u32;
+        assert_eq!(
+            read,
+            hardware_id,
+            "smp: cpu{} reads its own hardware id as {read:#x}, and its roster slot and every IPI name it {hardware_id:#x}",
+            at.id
+        );
         self.hardware_ids[at.id as usize].store(hardware_id, Ordering::Relaxed);
         // Release: the slot store above lands before the count exposes it; the
         // control drops it to relaxed and the model finds the unfilled slot.

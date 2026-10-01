@@ -1,8 +1,7 @@
 //! Loom: a lost `try_lock` on the console backend leaves its holder holding;
-//! `within` asks an attempt exactly the tries it was given; a fatal path's
-//! `seize` waits for a holder that lets go, gives up on one that never does,
-//! and has its own CPU's hold at once; and a burst beneath its own CPU's fatal
-//! path is refused rather than spun on.
+//! a fatal path's `seize` waits for a holder that lets go, gives up on one that
+//! never does, and has its own CPU's hold at once; and a burst beneath its own
+//! CPU's fatal path is refused rather than spun on.
 //!
 //! A loss that released the lock let a third writer in under the holder. The
 //! negative control is the `serial-try-lock-then-some` feature, which must red
