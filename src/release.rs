@@ -405,7 +405,12 @@ fn run(cmd: &mut Command) -> Result<(), String> {
 /// publisher.
 pub fn release(root: &Path) -> Result<String, String> {
     let var = |name| std::env::var(name).ok();
-    publisher(var("GITHUB_WORKFLOW_REF").as_deref(), var("GITHUB_EVENT_NAME").as_deref(), &repo())?;
+    release_as(root, var("GITHUB_WORKFLOW_REF").as_deref(), var("GITHUB_EVENT_NAME").as_deref())
+}
+
+/// [`release`], run as the job the runner names by its workflow and event.
+fn release_as(root: &Path, workflow: Option<&str>, event: Option<&str>) -> Result<String, String> {
+    publisher(workflow, event, &repo())?;
     let tag = tag(root)?;
     let build = find(root, &tag, true)?
         .ok_or_else(|| format!("main's publisher kept no build of {tag}: this run's `toolchain` job makes it"))?;
@@ -811,27 +816,31 @@ mod tests {
 
     const REPO: &str = "ToyOSOrg/ToyOS";
 
-    /// The negative control on the publisher: a pull request's job, the merge
-    /// queue's, the nightly's, and main's publisher dispatched on a branch or
-    /// run by any other event are each refused, by name.
+    /// The negative control on the publisher: the release job run as a pull
+    /// request's job, the merge queue's, the nightly's, or main's publisher
+    /// dispatched on a branch or run by any other event is refused by name
+    /// before it reads anything, and so is another repository's publisher.
     #[test]
     fn only_mains_publisher_publishes() {
         let mains = format!("{REPO}/.github/workflows/publish.yml@refs/heads/main");
         assert!(publisher(Some(&mains), Some("push"), REPO).is_ok());
         assert!(publisher(Some(&mains), Some("workflow_dispatch"), REPO).is_ok());
+        let fork = "Fork/ToyOS/.github/workflows/publish.yml@refs/heads/main";
+        assert!(publisher(Some(fork), Some("push"), REPO).unwrap_err().contains(fork));
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repo = repo();
         let refused = [
-            (format!("{REPO}/.github/workflows/ci.yml@refs/pull/671/merge"), "pull_request"),
-            (format!("{REPO}/.github/workflows/ci.yml@refs/heads/gh-readonly-queue/main/pr-671-59052827f"), "merge_group"),
-            (format!("{REPO}/.github/workflows/nightly.yml@refs/heads/main"), "schedule"),
-            (format!("{REPO}/.github/workflows/publish.yml@refs/heads/wt/toyos-guestci"), "workflow_dispatch"),
-            (mains.clone(), "pull_request_target"),
-            ("Fork/ToyOS/.github/workflows/publish.yml@refs/heads/main".to_string(), "push"),
+            (format!("{repo}/.github/workflows/ci.yml@refs/pull/671/merge"), "pull_request"),
+            (format!("{repo}/.github/workflows/ci.yml@refs/heads/gh-readonly-queue/main/pr-671-59052827f"), "merge_group"),
+            (format!("{repo}/.github/workflows/nightly.yml@refs/heads/main"), "schedule"),
+            (format!("{repo}/.github/workflows/publish.yml@refs/heads/wt/toyos-guestci"), "workflow_dispatch"),
+            (format!("{repo}/.github/workflows/publish.yml@refs/heads/main"), "pull_request_target"),
         ];
         for (workflow, event) in refused {
-            let why = publisher(Some(&workflow), Some(event), REPO).expect_err(&workflow);
-            assert!(why.contains(&workflow) && why.contains(event), "{why}");
+            let why = release_as(root, Some(&workflow), Some(event)).expect_err(&workflow);
+            assert!(why.starts_with("only ") && why.contains(&workflow) && why.contains(event), "{why}");
         }
-        assert!(publisher(None, None, REPO).is_err());
+        assert!(release_as(root, None, None).unwrap_err().starts_with("only "));
     }
 
     fn run_json(path: &str, branch: &str, event: &str, head_repo: &str) -> Value {
