@@ -438,7 +438,6 @@ pub fn init() {
             unclaimed += 1;
         }
     }
-    // Negative control: clears only the IST byte on vector 2's gate, keeping the handler and ring intact.
 
     let ptr = IdtPointer {
         limit: (core::mem::size_of::<Idt>() - 1) as u16,

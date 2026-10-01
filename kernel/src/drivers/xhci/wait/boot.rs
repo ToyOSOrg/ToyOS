@@ -541,7 +541,5 @@ pub fn scan_ports(ctrl: &mut XhciController) {
     // Completions from an earlier port's device can arrive during a later
     // port's enumeration; without this drain a broken one goes unrecorded.
     ctrl.settle_outstanding();
-    // After acknowledge_port_changes: the connect this raises must be a change
-    // the port machine sees, not one the scan just cleared.
 }
 

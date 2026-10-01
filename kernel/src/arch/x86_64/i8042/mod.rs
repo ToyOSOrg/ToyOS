@@ -1225,8 +1225,6 @@ pub fn init(rsdp_addr: u64) {
     handler_poll();
     crate::arch::cpu::enable_interrupts();
 
-    // Stages this boot's own arming edge: the vector, first, with no byte behind it.
-
     log!(
         "i8042: kbd {} ({}) scanning on, GSI {} -> vec {:#04x} apic {} {}",
         wire,

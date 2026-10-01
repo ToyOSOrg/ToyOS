@@ -285,8 +285,6 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     }
     let root_image = rootfs::init(cmdline, &kernel_args, maps);
 
-    // Armed here so the next record — the architecture's first — reaches the console and the panel keeps the one before it.
-
     arch::boot::after_console(&kernel_args, maps);
 
     // percpu, the allocator and our own paging aren't up yet, so a fault here only reaches the early-panic branch.
@@ -503,7 +501,6 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     if actuator::revoked_backing_selftest() {
         revoke_selftest::run();
     }
-    // After every driver has registered: the number under test is one a real device holds.
 
     boot_phase!("storage ready", t_storage);
 
@@ -512,8 +509,6 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     // First in the device phase, after storage: its lines are the diagnostic
     // boot's answer for a dead keyboard, and a panel shows the log's tail.
     arch::boot::platform_devices(kernel_args.rsdp_addr);
-
-    // Runs once for the machine: it touches no device, so per-driver repetition would say the same thing four times.
 
     #[cfg(feature = "boot-actuators")]
     arch::boot::interrupt_selftests();
@@ -552,8 +547,6 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     if actuator::test_input_merge() {
         input_merge_test::run();
     }
-
-    // Under Drain::Inline every record above is already on the wire, so this gate reads the whole boot and then silence.
 
     report_log_destination();
     let complete_tsc = cpu::counter();

@@ -752,9 +752,7 @@ impl XhciController {
     }
 
     fn read_portsc_raw(&self, port_idx: u8) -> u32 {
-        let raw = self.op_base.read_u32(OP_PORT_BASE + port_idx as u64 * PORT_REG_SIZE);
-        // Also masks PED: QEMU's SuperSpeed port reads Enabled instantly, so without this the actuator stages nothing.
-        raw
+        self.op_base.read_u32(OP_PORT_BASE + port_idx as u64 * PORT_REG_SIZE)
     }
 
     /// Every write of a port register; takes a typed [`toyos_xhci::portsc::Write`], which offers no way to set PED, so disabling a port the driver is enabling is unreachable rather than asserted against.

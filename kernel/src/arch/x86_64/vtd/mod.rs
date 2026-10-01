@@ -468,11 +468,6 @@ fn enable(
         let root = tables.alloc();
         for device in devices {
             let stream = StreamId::pci(device.bus, device.dev, device.func);
-            // Unreachable from the host side, so these actuators substitute for
-            // it; both are answered on the device's first *read*, since a
-            // first-write access would cache write permission and never fault.
-            // A present context entry naming an empty domain, distinct from a
-            // missing entry: passthrough would fault identically either way.
             table::bind_identity(&mut tables, root, stream, domain, width);
         }
 

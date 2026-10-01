@@ -1,18 +1,3 @@
-//! The double fault path, which is the one that has to survive being the
-//! thing that reports on itself.
-//!
-//! #DF is the only vector with an IST, so it is the only stack in the kernel
-//! whose overflow is invisible: it is heap memory, it is written while the
-//! crash report is being produced, and the corruption lands under whatever
-//! the allocator handed out next. A test that only asserted "the report
-//! appeared" would have passed throughout -- the report *did* appear, and it
-//! scribbled on the heap on its way out.
-//!
-//! So the assertion is the kernel's own high-water measurement, taken after
-//! `panic_flush` (the deepest point) and written straight to the UART rather
-//! than through the log ring, which is one of the things an overflow may have
-//! corrupted.
-
 use super::serial::Serial;
 
 /// The blocked-task dump's NMI probe: a CPU that ignores a kick is named, and
