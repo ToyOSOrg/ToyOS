@@ -16156,6 +16156,13 @@ impl Tally {
                 f64::from(num) / f64::from(den)
             ));
         }
+        if let Some((wall, had)) = common::steal::run_share() {
+            say(format!(
+                "host: the guests had {:.0}% of the {wall:.0?} their waits read across; the rest \
+                 was the host's load, which no ceiling counted",
+                had.as_secs_f64() * 100.0 / wall.as_secs_f64()
+            ));
+        }
         // The other half of the liveness correction is per guest, not host-wide:
         // a guest with more vCPUs than the host has cores waits `vcpus/cores`
         // longer again before its ceiling calls it wedged. Reported so a reader

@@ -11,6 +11,7 @@
 //! time however loaded the host is.
 
 use std::ops::Add;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -66,6 +67,20 @@ struct Reading {
 /// console flood reads the clock once a line.
 const RESAMPLE: Duration = Duration::from_millis(5);
 
+/// Every guest's read spans this run, in nanoseconds: the wall clock, and what
+/// of it the guest had.
+static WALL_NS: AtomicU64 = AtomicU64::new(0);
+static HAD_NS: AtomicU64 = AtomicU64::new(0);
+
+/// The wall clock this run's guests' waits read across, and what of it they
+/// had: the host's load, measured where it fell, which a fastest boot taken at
+/// the run's quietest moment cannot see. `None` before any guest's clock has
+/// been read.
+pub fn run_share() -> Option<(Duration, Duration)> {
+    let wall = WALL_NS.load(Ordering::Relaxed);
+    (wall != 0).then(|| (Duration::from_nanos(wall), Duration::from_nanos(HAD_NS.load(Ordering::Relaxed))))
+}
+
 impl Clock {
     /// The clock of process `pid`, at zero now.
     pub fn of(pid: u32) -> Self {
@@ -93,6 +108,8 @@ impl Clock {
         };
         reading.wall = wall;
         reading.had += had;
+        WALL_NS.fetch_add(u64::try_from(span.as_nanos()).expect("a span fits u64 nanoseconds"), Ordering::Relaxed);
+        HAD_NS.fetch_add(u64::try_from(had.as_nanos()).expect("a span fits u64 nanoseconds"), Ordering::Relaxed);
         Moment(reading.had)
     }
 
@@ -153,6 +170,12 @@ fn mach_nanos(count: u64) -> u64 {
 #[cfg(target_os = "linux")]
 pub fn demand(pid: u32) -> Option<(Duration, Duration)> {
     use std::io::ErrorKind::NotFound;
+    // Without it every thread's file is absent and a starved guest reads as one
+    // that wanted nothing.
+    assert!(
+        std::path::Path::new("/proc/self/schedstat").is_file(),
+        "this kernel keeps no per-task schedstat (CONFIG_SCHED_INFO), which a guest's clock reads"
+    );
     let tasks = match std::fs::read_dir(format!("/proc/{pid}/task")) {
         Ok(tasks) => tasks,
         Err(e) if e.kind() == NotFound => return None,
