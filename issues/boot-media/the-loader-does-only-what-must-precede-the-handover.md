@@ -392,11 +392,13 @@ Each stage lands on its own, in this order.
      `watchdog_quiet`'s loader half. `watchdog_armed` judges the kernel's
      read-back, and `loader_watchdog_arms` becomes the kernel's row.
 
-   **Exit**: `bootloader/src` holds no TCO access. On q35, `watchdog_armed`
-   passes on the kernel's lines (counting, `no_reboot=0`, `timeout=0`), and
-   `watchdog_resets` passes. A boot that hangs right after the arm, before
-   `mm::init`, is reset by the TCO; moving the arm back after `pci::enumerate`
-   makes that test fail.
+   **Exit**: `bootloader/src` holds no TCO access. On the T14, `watchdog_armed`
+   passes on the kernel's lines (counting, `no_reboot=0`, `timeout=0`). Once
+   the reading of
+   `issues/hardware/a-frozen-toyos-waits-for-a-hand-on-the-power-button.md` has
+   seen the TCO reset the T14, a boot there that hangs right after the arm,
+   before `mm::init`, is reset by the TCO; moving the arm back after
+   `pci::enumerate` makes that row fail.
 
 9. **The crash report belongs to the kernel.** The loader hands the last
    boot's record to the kernel instead of decoding it. The kernel logs it, and
