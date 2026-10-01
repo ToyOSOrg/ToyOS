@@ -16,13 +16,13 @@ use yaml_rust2::scanner::Marker;
 /// One node of a workflow, and the line it starts on.
 #[derive(Clone, Debug)]
 pub struct Node {
-    pub value: Value,
+    value: Value,
     pub line: usize,
     marked: bool,
 }
 
 #[derive(Clone, Debug)]
-pub enum Value {
+enum Value {
     Scalar(String),
     Seq(Vec<Node>),
     Map(Vec<(String, Node)>),
@@ -70,17 +70,19 @@ impl Node {
 }
 
 /// Every workflow, by file name in name order: each `.yml` and `.yaml` file
-/// in `root`'s `.github/workflows`, the files GitHub reads.
+/// in `root`'s `.github/workflows`, in any case, a superset of the files
+/// GitHub reads.
 pub fn all(root: &Path) -> Result<Vec<(String, Node)>, String> {
     let dir = root.join(".github/workflows");
     let mut found = Vec::new();
     for entry in fs::read_dir(&dir).map_err(|e| format!("read {}: {e}", dir.display()))? {
-        let path = entry.map_err(|e| format!("read {}: {e}", dir.display()))?.path();
-        if !path.extension().is_some_and(|ext| ext == "yml" || ext == "yaml") {
+        let entry = entry.map_err(|e| format!("read {}: {e}", dir.display()))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let lower = name.to_ascii_lowercase();
+        if !(lower.ends_with(".yml") || lower.ends_with(".yaml")) {
             continue;
         }
-        let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-        let text = fs::read_to_string(&path).map_err(|e| format!("read {name}: {e}"))?;
+        let text = fs::read_to_string(entry.path()).map_err(|e| format!("read {name}: {e}"))?;
         found.push((name.clone(), parse(&text).map_err(|e| format!("{name}: {e}"))?));
     }
     found.sort_by(|(a, _), (b, _)| a.cmp(b));
@@ -88,7 +90,7 @@ pub fn all(root: &Path) -> Result<Vec<(String, Node)>, String> {
 }
 
 /// One YAML document.
-pub fn parse(text: &str) -> Result<Node, String> {
+fn parse(text: &str) -> Result<Node, String> {
     let mut tree = Tree::default();
     Parser::new_from_str(text).load(&mut tree, true).map_err(|e| e.to_string())?;
     if let Some(refusal) = tree.refusal {
@@ -135,10 +137,10 @@ impl Tree {
                 self.place(done, anchor)?;
             }
             Event::Scalar(text, _, anchor, tag) => self.place(node(Value::Scalar(text), anchor, tag.is_some()), anchor)?,
+            // The copy of a node its anchor marked, so marked too.
             Event::Alias(anchor) => {
                 let mut copy = self.anchors.get(&anchor).ok_or("an alias inside the node it names")?.clone();
                 copy.line = line;
-                copy.marked = true;
                 self.place(copy, 0)?;
             }
             Event::Nothing | Event::StreamStart | Event::StreamEnd | Event::DocumentStart | Event::DocumentEnd => {}
@@ -207,7 +209,7 @@ mod tests {
     }
 
     #[test]
-    fn what_github_would_read_two_ways_is_refused() {
+    fn a_document_the_reader_cannot_hold_is_refused() {
         for (text, refusal) in [
             ("a: 1\n\"a\": 2\n", "line 2: `a` twice in one mapping"),
             ("&k a: 1\n", "line 1: a key that is not a plain scalar"),
