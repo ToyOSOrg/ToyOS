@@ -108,7 +108,7 @@ pub(crate) const DEATHS: &[(&str, Died, Died)] = &[
     // capture can carry it twice.
     ("DOUBLE PANIC", Died::Kernel, Died::Kernel),
     // kernel/src/main.rs — the reentry guard, written straight out the UART
-    // port with no lock and therefore with no prefix. It reaches the 16550 log
+    // port with no prefix. It reaches the 16550 log
     // rather than the console, and is here so that a capture carrying it is
     // never read as anything else.
     ("PANIC REENTRY", Died::Kernel, Died::Kernel),

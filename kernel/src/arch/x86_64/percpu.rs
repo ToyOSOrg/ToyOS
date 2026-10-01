@@ -461,11 +461,12 @@ pub fn ist1_report() {
         * 8;
     let used = IST_STACK_SIZE - untouched;
 
-    crate::drivers::serial::panic_raw(b"\n[ist1] used ");
-    crate::drivers::serial::panic_raw_dec(used as u64);
-    crate::drivers::serial::panic_raw(b" of ");
-    crate::drivers::serial::panic_raw_dec(IST_STACK_SIZE as u64);
-    crate::drivers::serial::panic_raw(if intact {
+    let mut uart = crate::drivers::serial::panic_registers();
+    uart.write(b"\n[ist1] used ");
+    uart.dec(used as u64);
+    uart.write(b" of ");
+    uart.dec(IST_STACK_SIZE as u64);
+    uart.write(if intact {
         b" bytes, guard intact\n"
     } else {
         b" bytes, GUARD CORRUPTED\n"

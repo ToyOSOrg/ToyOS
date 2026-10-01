@@ -95,13 +95,19 @@ pub mod pio {
     }
 }
 
-/// Hand the CPU to the kernel as firmware left it — its exception level, its
-/// identity tables — at the image's physical entry, with `x0 = args`. The
-/// kernel's entry switches to the boot map (`args.boot_pml4_addr`) itself (`kernel/src/arch/aarch64/boot.rs`),
-/// because at EL2 only the kernel's own drop to EL1 can install it.
+/// Hand the CPU to the kernel at the exception level firmware ran it at, with
+/// that level's MMU off, at the image's physical entry with `x0 = args`.
+/// Nothing firmware left in a translation regime is walked past this point.
+/// UEFI promises an identity map of RAM and none of its attributes (2.11 §2.3.6),
+/// edk2's ArmVirtQemu maps `EfiLoaderData`, where this image is, execute-never
+/// unless built otherwise, and the kernel's entry rewrites `HCR_EL2.E2H`, which
+/// chooses the regime firmware's EL2 tables are walked in. That entry installs
+/// the boot map (`args.boot_pml4_addr`) itself (`kernel/src/arch/aarch64/boot.rs`),
+/// because at EL2 only its own drop to EL1 can.
 ///
-/// The image is cleaned to the point of coherency first: that entry fetches
-/// instructions with the MMU off for a few of them, straight from memory.
+/// What runs or is read with the MMU off — the image, `args`, and this
+/// function's own last instructions — is cleaned to the point of coherency
+/// first.
 ///
 /// # Safety
 /// `args.boot_pml4_addr` is the boot map, `image` is the relocated kernel image, `entry_offset`
@@ -109,20 +115,53 @@ pub mod pio {
 /// kernel copies it.
 pub unsafe fn enter_kernel(image: (u64, u64), entry_offset: u64, args: &KernelArgs) -> ! {
     write_back(image.0, image.1 as usize);
-    let entry = image.0 + entry_offset;
+    write_back(args as *const KernelArgs as u64, size_of::<KernelArgs>());
+    let step = line();
     // SAFETY: interrupts masked for good — the kernel's vectors are not
-    // installed yet — then every instruction cache line invalidated against
-    // the image just cleaned, and a branch to its entry with `x0 = args`, the
-    // boot protocol `toyos-abi::boot` and the kernel's `_start` define.
+    // installed yet. Every line from `2:` to `5:` is cleaned to the point of
+    // coherency, because those instructions are fetched with the MMU off, and
+    // every instruction cache line is invalidated against the image cleaned
+    // above. `SCTLR_ELx.M` is cleared at the level this runs at, which
+    // fetches the next instruction from the same address because firmware's
+    // map is the identity. Then a branch to the image's entry with
+    // `x0 = args`, the boot protocol `toyos-abi::boot` and the kernel's
+    // `_start` define. `x9` and `x10` are scratch, and nothing returns to
+    // observe them.
     unsafe {
         core::arch::asm!(
             "msr daifset, #0xf",
+            "adr x9, 2f",
+            "bic x9, x9, x3",
+            "adr x10, 5f",
+            "1:",
+            "dc civac, x9",
+            "add x9, x9, x2",
+            "cmp x9, x10",
+            "b.lo 1b",
+            "dsb sy",
             "ic iallu",
             "dsb ish",
             "isb",
-            "br {entry}",
-            entry = in(reg) entry,
+            "2:",
+            "mrs x9, CurrentEL",
+            "cmp x9, #(2 << 2)",
+            "b.ne 3f",
+            "mrs x9, sctlr_el2",
+            "bic x9, x9, #(1 << 0)",
+            "msr sctlr_el2, x9",
+            "b 4f",
+            "3:",
+            "mrs x9, sctlr_el1",
+            "bic x9, x9, #(1 << 0)",
+            "msr sctlr_el1, x9",
+            "4:",
+            "isb",
+            "br x1",
+            "5:",
             in("x0") args as *const KernelArgs,
+            in("x1") image.0 + entry_offset,
+            in("x2") step,
+            in("x3") step - 1,
             options(noreturn),
         );
     }

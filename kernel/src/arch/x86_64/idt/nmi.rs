@@ -11,8 +11,7 @@
 //! the one bound a CPU with `IF` clear is under: the frame's `rip`, `rsp` and
 //! `rflags` are what a machine whose every CPU stopped taking interrupts has
 //! left to say. That path may seal a record and reset from here and never
-//! return, and it obeys this file's discipline exactly — no lock, no
-//! allocation, nothing that logs.
+//! return.
 
 use core::arch::naked_asm;
 
@@ -137,15 +136,18 @@ fn stage_nested_if_armed() {
 
 /// A second NMI on a stack the first is still standing on.
 /// Logs nothing: the interrupted context may be mid-publish of its own record, and one from here would garble the ring `halt_all_cpus` reads. `src/sourcegate.rs`'s `nmi_does_not_log` is the gate.
-/// `panic_raw` takes no lock, so it can't be blocked by whatever either context held.
 extern "sysv64" fn nested_nmi(rip: u64, rsp: u64) -> ! {
-    let serial = crate::drivers::serial::panic_raw;
-    serial(b"\n[nmi] NESTED NMI on cpu ");
-    crate::drivers::serial::panic_raw_dec(u64::from(crate::arch::percpu::cpu_id()));
-    serial(b": a second NMI entered while IST2 was still in use.\n[nmi]   rip=");
-    crate::drivers::serial::panic_raw_hex(rip);
-    serial(b" rsp=");
-    crate::drivers::serial::panic_raw_hex(rsp);
-    serial(b"\n[nmi]   the outer handler's frame is gone; the machine stops here.\n");
+    // Let go of before the halt: its flush, finding this CPU's own fatal path
+    // holding the registers, would drain raw and leave virtio-console out.
+    {
+        let mut uart = crate::drivers::serial::panic_registers();
+        uart.write(b"\n[nmi] NESTED NMI on cpu ");
+        uart.dec(u64::from(crate::arch::percpu::cpu_id()));
+        uart.write(b": a second NMI entered while IST2 was still in use.\n[nmi]   rip=");
+        uart.hex(rip);
+        uart.write(b" rsp=");
+        uart.hex(rsp);
+        uart.write(b"\n[nmi]   the outer handler's frame is gone; the machine stops here.\n");
+    }
     crate::panic::halt_all_cpus()
 }
