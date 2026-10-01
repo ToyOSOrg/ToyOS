@@ -65,9 +65,9 @@ const SOURCES: &str = "SOURCES";
 /// std build's recipe below. Moving it moves every key.
 const RECIPE: &str = "bootstrap stage-0 local rebuild, profile compiler, no LLVM or Ninja, \
                       libtoyos_c merged, libraries from the stamp, linked by rust-lld, \
-                      a C sysroot of libc's staticlib, the empty libraries beside it, and headers \
-                      per target, and its C++ runtime built under n2 from the runtimes' sources \
-                      of the compiler's LLVM; 10";
+                      a C sysroot of libc's staticlib, the empty libraries beside it, headers and \
+                      CMake's description of ToyOS per target, and its C++ runtime built under n2 \
+                      from the runtimes' sources of the compiler's LLVM; 10";
 
 /// Every sysroot on this host.
 pub fn sysroots_dir(rust_dir: &Path) -> PathBuf {
@@ -193,9 +193,10 @@ fn source_files(checkout: &Path, paths: &[&str], out: &mut Vec<PathBuf>) {
 pub fn key(root: &Path, compiler: &Compiler, fork: &Path) -> String {
     let parts = [
         format!(
-            "{RECIPE}; cargo {STAGE0_CARGO}; targets {}; C++ runtime {:?}",
+            "{RECIPE}; cargo {STAGE0_CARGO}; targets {}; C++ runtime {:?}; CMake {:?}",
             GUEST_TARGETS.join(" "),
-            crate::libcxx::OPTIONS
+            crate::libcxx::OPTIONS,
+            crate::clang::CMAKE,
         ),
         witness(root),
         tree_identity(fork, &["library", "src/bootstrap"]),
@@ -355,7 +356,7 @@ fn build(root: &Path, rust_dir: &Path, compiler: &Compiler, fork: &Path, key: &s
         for arch in Arch::ALL {
             let scratch = dir.with_extension(format!("libcxx-{}", arch.name()));
             let c = crate::clang::CSysroot::of(partial, arch);
-            crate::libcxx::build(&c, arch, &llvm.dir.join("src"), &ninja, &scratch);
+            crate::libcxx::build(&c, &llvm.dir.join("src"), &ninja, &scratch);
         }
 
         // The sources the key named are the ones built, or this is not that key's.

@@ -110,14 +110,15 @@ pub fn build_c(root: &Path, toolchain: &Path, target_dir: &Path, arch: Arch) {
         "toyos-libc's staticlib for {target} did not build:\n{}",
         String::from_utf8_lossy(&output.stderr),
     );
-    let c = crate::clang::CSysroot::of(toolchain, arch).dir;
-    let lib = c.join("lib");
+    let c = crate::clang::CSysroot::of(toolchain, arch);
+    let lib = c.dir.join("lib");
     fs::create_dir_all(&lib).unwrap_or_else(|e| panic!("create {}: {e}", lib.display()));
     let archive = target_dir.join(format!("{target}/release/libtoyos_libc.a"));
     fs::copy(&archive, lib.join("libtoyos_c.a"))
         .unwrap_or_else(|e| panic!("copy {} into {}: {e}", archive.display(), lib.display()));
     empty_libraries(&lib);
-    crate::sysroot::clone_tree(&root.join(CRATE).join("include"), &c.join("include"));
+    crate::sysroot::clone_tree(&root.join(CRATE).join("include"), &c.dir.join("include"));
+    c.write_cmake();
 }
 
 /// The libraries POSIX has a C compiler take, `-lc` and `-lm` among them, whose
