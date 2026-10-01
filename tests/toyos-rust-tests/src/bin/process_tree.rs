@@ -57,10 +57,6 @@ const KILLED: i32 = 137;
 /// What `syscall::kill_process(-1)` publishes for a Ring 3 CPU fault.
 const CPU_FAULT: i32 = -1;
 
-/// An address no region of this process covers. Not null: this profile's
-/// debug assertions refuse a null write before it reaches the CPU.
-const UNMAPPED: usize = 8;
-
 /// `toyos_proclife::MAX_DEPTH`, which the kernel refuses a process past.
 const MAX_DEPTH: u32 = 64;
 
@@ -383,8 +379,9 @@ fn b() -> ! {
 
     let header = conn.recv_header().expect("A's word to fault");
     assert_eq!(header.msg_type, MSG_FAULT, "A said something else");
-    // SAFETY: no region of this process covers the address, so the write
-    // faults and the kernel ends this process before anything after it runs.
-    unsafe { core::ptr::without_provenance_mut::<u8>(UNMAPPED).write_volatile(1) };
-    panic!("a write to {UNMAPPED:#x} did not fault");
+    // SAFETY: a volatile write to address 0, which no region of this process
+    // covers: it faults, and the kernel ends this process before anything
+    // after it runs.
+    unsafe { core::ptr::null_mut::<u8>().write_volatile(1) };
+    panic!("a write to address 0 did not fault");
 }
