@@ -15,10 +15,11 @@ which until then puts a pure decision in a pure crate.
 An input boundary is a crate of its own, whoever uses it: the no-panic
 track (`issues/kernel/a-panic-is-never-an-accident.md`) forbids its tier 1 per
 crate, and a crate that holds a tier-2 stop cannot forbid the set. A crate is
-one when its own source decodes or refuses input from outside its trust:
-hardware registers, firmware tables, disk bytes, network bytes, or what another
-program sent, a syscall's arguments included. No step here moves or merges
-one; each stays a crate under the no-panic track.
+one when its own source decodes a word from outside its trust, or bounds it by
+its form: hardware registers, firmware tables, disk bytes, network bytes, or
+what another program sent, a syscall's arguments included. A lookup of a key a
+program named is neither. No step here merges one; each stays a crate under
+the no-panic track.
 
 Every step lands green on `--ci host` and `--build-only`. Test counts are what
 `cargo test -p <package> -- --list` lists today.
@@ -27,15 +28,15 @@ Every step lands green on `--ci host` and `--build-only`. Test counts are what
    the kernel defines; `munmap_reissues_read_window` holds the kernel to it.
    Check: `git grep toyos-userpin -- ':!issues/'` is empty.
 2. **The kernel's library.** `kernel/pure/` is the `kernel` package's lib, and
-   its bin is `test = false`. `toyos-pcid` and `toyos-sched` move in.
-   `kernel-loom` and `toyos-sched/loom` become `kernel/loom/`, and
+   its bin is `test = false`. `toyos-pcid`, `toyos-proclife` and `toyos-sched`
+   move in. `kernel-loom` and `toyos-sched/loom` become `kernel/loom/`, and
    `toyos-sched/sim` `kernel/sim/`. The harness dev-depends on the kernel, and
    the build system does not depend on it. The library has no `tests/`, since
    an integration test builds the binary for the host. `--ci host` tests it
    with `sched-check`, the feature three scheduler tests need. The Fit line
    states this track's rule.
    Closes `issues/build/the-pcid-negative-control-runs-nowhere.md`.
-   Check: the library lists at least 101 tests, `kernel/loom` 79 and
+   Check: the library lists at least 135 tests, `kernel/loom` 79 and
    `kernel/sim` 53, and `--clippy` lints the library's tests on the host.
    Every moved control, and pcid's `counting-allocator`, reds with its verdict,
    and `declared_model_controls` reads the kernel's manifest and every one in
@@ -46,5 +47,13 @@ Every step lands green on `--ci host` and `--build-only`. Test counts are what
    `tests/libc-arch/`.
    Check: `--ci host` runs there every test the package lists today, and
    `--clippy` lints them.
+4. **A crate one program uses goes under it, a crate of its own.**
+   `toyos-mixer` moves to `userland/soundd/mixer/` and `toyos-desktop` to
+   `userland/compositor/desktop/`. `toyos-ps2`, `toyos-gicv3` and `toyos-xhci`,
+   its sim with it, move to `kernel/ps2/`, `kernel/gicv3/` and `kernel/xhci/`.
+   `toyos-fat32-check`, which the build and `toyos-fat32`'s tests both use,
+   moves to `toyos-fat32/check/`, beside the one subject it judges.
+   Check: `--ci host` runs every test each package lists today, and `--clippy`
+   lints them.
 
 **Exit:** no directory this file names as moved or merged still exists.
