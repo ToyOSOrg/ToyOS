@@ -10,8 +10,8 @@ The mechanics live where the work is: profiles and shapes in `tests/common/`, re
 - **`/system/bin/init` speaks in every program's name before that program runs** — a predicate keyed on a `<program>: ` prefix is satisfied by the wrong speaker; wait for the whole line, in the constant the assertion also reads.
 - **A guest binary cannot ask what a handle it does not hold does** — the probe ends its caller with exit 139, so it runs in a child, one fault per child; `handle_kill_policy` is the pattern.
 - **A boot's capture has two pieces** — `boot_log()` ends at the ready marker, `run_test`'s capture begins at `===TEST_START===`.
-- **Every guest this host boots is TCG** — anything vendor-dependent is gated only by CI's KVM shards, and TCG prices an uncontended atomic read-modify-write unlike hardware.
-- **CI's `guest` lane is GitHub-hosted shards, never the T14** — the T14 is the orchestrator's own metal loop (`src/metal.rs`), reached by nothing in `.github/workflows/`; `tests/test-durations` is hosted, and a duration measured on the T14 does not transfer.
+- **Every guest this host boots is TCG** — anything vendor-dependent is gated only by CI's KVM lane, and TCG prices an uncontended atomic read-modify-write unlike hardware.
+- **CI's `guest` lane is GitHub-hosted, never the T14** — the T14 is the orchestrator's own metal loop (`src/metal.rs`), reached by nothing in `.github/workflows/`.
 - **The dev host's guests boot `-cpu qemu64`, which has no PCID** — every `INVPCID` path is dead locally, so a change gated on a CPUID feature is unverified by a green local suite.
 - **A liveness ceiling scales by two host facts** — boot-derived host speed *and* the guest's own `vcpus/cores` oversubscription. Widen a *liveness* guard for this, never a correctness bound.
 - **A wedge verdict needs both the budget spent and the guest gone quiet** — a healthy idle guest can be silent for minutes, and a guest still talking past its budget is slow, not stuck; only a far backstop stands behind a guest that keeps talking.

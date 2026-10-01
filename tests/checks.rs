@@ -576,13 +576,12 @@ mod checks {
         Ok(())
     }
 
-    /// A run takes every declared test its filter matches, and a shard drops
-    /// exactly the screen rows whose profile is not of [`toyos_build::ci::GUEST_ARCH`],
-    /// saying which.
+    /// A run takes every enabled declared test its filter matches, of either
+    /// architecture.
     #[test]
-    fn a_run_selects_by_filter_and_shard() -> Result<(), String> {
-        let taken = |filter: Option<&str>, sharded: bool| -> BTreeSet<String> {
-            let (machine, screen) = select(filter, sharded);
+    fn a_run_selects_by_filter() -> Result<(), String> {
+        let taken = |filter: Option<&str>| -> BTreeSet<String> {
+            let (machine, screen) = select(filter);
             machine
                 .iter()
                 .map(|(n, _)| n.to_string())
@@ -592,51 +591,22 @@ mod checks {
         let names = |of: &[&str]| -> BTreeSet<String> { of.iter().map(|n| n.to_string()).collect() };
         let enabled = |n: &&str| redlist::disabled(redlist::DISABLED, n).is_none();
         let every: BTreeSet<String> = declared().filter(enabled).map(String::from).collect();
-        let foreign: BTreeSet<String> = SCREEN_TESTS
-            .iter()
-            .filter(|(_, _, profile)| profile.arch() != toyos_build::ci::GUEST_ARCH)
-            .map(|(n, _, _)| *n)
-            .filter(enabled)
-            .map(String::from)
-            .collect();
-        if !foreign.contains("virt_el2_drop") {
-            return Err(format!("the premise: virt_el2_drop is a guest no CI lane boots, and {foreign:?} lacks it"));
-        }
         let cases = [
-            (None, false, every.clone()),
-            (None, true, every.difference(&foreign).cloned().collect()),
-            (Some("virt_el2"), false, names(&["virt_el2_drop"])),
-            (Some("el2_drop"), false, names(&["virt_el2_drop"])),
-            (Some("virt_el2"), true, BTreeSet::new()),
-            (Some("usb_boot_stick"), true, names(&["usb_boot_stick_pulled"])),
+            (None, every),
+            (Some("virt_el2"), names(&["virt_el2_drop"])),
+            (Some("el2_drop"), names(&["virt_el2_drop"])),
+            (Some("usb_boot_stick"), names(&["usb_boot_stick_pulled"])),
+            (Some("no_such_test"), BTreeSet::new()),
         ];
-        for (filter, sharded, want) in cases {
-            let got = taken(filter, sharded);
+        for (filter, want) in cases {
+            let got = taken(filter);
             if got != want {
                 return Err(format!(
-                    "filter {filter:?}, sharded {sharded}: took {:?} it should not and left out {:?}",
+                    "filter {filter:?}: took {:?} it should not and left out {:?}",
                     got.difference(&want).collect::<Vec<_>>(),
                     want.difference(&got).collect::<Vec<_>>()
                 ));
             }
-        }
-        let named = |filter: Option<&str>| -> Option<(String, BTreeSet<String>)> {
-            let line = arch_drop_line(filter)?;
-            let (_, rows) = line.rsplit_once(": ").expect("the line names its rows after a colon");
-            let rows = rows.split(", ").map(String::from).collect();
-            Some((line, rows))
-        };
-        let (line, rows) =
-            named(None).ok_or("a shard that drops the rows of another architecture said nothing")?;
-        if rows != foreign || !line.starts_with(&format!("{} test(s)", foreign.len())) {
-            return Err(format!("a shard dropping {foreign:?} said {line:?}"));
-        }
-        let named_el2 = named(Some("el2_drop")).map(|(_, rows)| rows);
-        if named_el2 != Some(names(&["virt_el2_drop"])) {
-            return Err(format!("filter el2_drop: a shard said {named_el2:?}"));
-        }
-        if let Some((line, _)) = named(Some("usb_boot_stick")) {
-            return Err(format!("a filter matching no foreign row still had a shard say {line:?}"));
         }
         Ok(())
     }

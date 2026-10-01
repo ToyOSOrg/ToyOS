@@ -13,7 +13,7 @@ use common::qemu::{
 };
 use common::{audio, compile, devices, faults, lan, metal, power, screen, serial, usb};
 use toyos_build::bootlog::{self};
-use toyos_build::testargs::{self, Shard, SUITE};
+use toyos_build::testargs::{self, SUITE};
 use toyos_build::redlist;
 
 /// Whether a test may run while other guests are up.
@@ -49,9 +49,6 @@ enum Sched {
 /// a measurement and not a division.
 ///
 /// **Twelve is the number for one suite on this host.**
-/// An earlier table said eight; it was taken while `drain_serial` was still
-/// width-scaled and
-/// `metal_sim_pointer_churn`'s twenty-four paced drains *were* the phase.
 const DEFAULT_WIDTH: usize = 12;
 
 /// The shared-boot binaries that call `SYS_DEBUG`, and so cannot run on the
@@ -2625,14 +2622,7 @@ fn ps2_bursts(line: &str) -> Vec<String> {
 /// silently, one byte at a time; nothing on either side of the wire is told. A
 /// host that keeps typing while the guest is not draining therefore hands the
 /// shell a command with a hole in it, and every assertion below that point is
-/// about a question the guest was never asked. Both recorded
-/// `screen_console_panic` failures are exactly that and nothing else: the panel
-/// carried `/home/root> test_rs_TESTpanic_child 3` on 2026-08-19 (a lost shift
-/// break, so four letters came back capitalised, and a lost make) and
-/// `/home/root> test_rspanic_child 3` on 2026-08-23 (sixteen bytes gone in one
-/// run — one queue's worth, exactly), and in both the shell answered
-/// `not found` and the test blamed the panic path for a report nothing had
-/// asked for.
+/// about a question the guest was never asked.
 ///
 /// So the line goes out in bursts no wider than that queue, and the next burst
 /// waits until the panel shows the shell echoed the last one. An echoed
@@ -4266,108 +4256,6 @@ impl Task {
     }
 }
 
-/// Where the last run in this worktree left what each test cost it.
-///
-/// Under `target/`, so it is per-worktree: on a single dev host repeating runs
-/// it is a *hint* about how to order a queue and never an input to a verdict,
-/// where a wrong number costs some idle lane time and a missing one costs
-/// nothing at all. **A sharded run does not read it** — [`shard_pricing`]
-/// says why the same claim does not hold once `target/` is a cache twelve
-/// separate processes restore.
-fn durations_path() -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("target/test-durations")
-}
-
-/// The profile a checkout that has never run the suite starts from.
-///
-/// A machine with no measurement at all prices every test the same, and
-/// [`Shard::keep`]'s LPT then degenerates to round-robin — which is what put 191
-/// of 268 tests on one CI shard and cut it off at its job timeout while another
-/// finished in sixteen minutes. Every runner is that
-/// machine on every push, because a fresh clone has no `target/`.
-///
-/// Measured on a runner rather than here, deliberately: it is read by the
-/// machines that have nothing else, and the dev host overrides it with its own
-/// numbers the first time it runs the suite. Cross-arch TCG on an M4 Pro and
-/// KVM on four Azure cores do not agree about which tests are long.
-fn committed_durations_path() -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/test-durations")
-}
-
-fn read_durations(path: &Path, out: &mut BTreeMap<String, Duration>) {
-    let Ok(text) = fs::read_to_string(path) else { return };
-    for line in text.lines() {
-        // `<label> <ms>`, read from the right.
-        let Some((name, ms)) = line.rsplit_once(' ') else { continue };
-        if let Ok(ms) = ms.parse() {
-            out.insert(name.to_string(), Duration::from_millis(ms));
-        }
-    }
-}
-
-/// The committed profile, with whatever this worktree has measured on top.
-///
-/// Per name rather than per file, so a checkout that has only ever run a filter
-/// keeps the committed number for everything that filter did not name.
-fn load_durations() -> BTreeMap<String, Duration> {
-    let mut out = BTreeMap::new();
-    read_durations(&committed_durations_path(), &mut out);
-    read_durations(&durations_path(), &mut out);
-    out
-}
-
-/// What [`longest_first`] and [`Shard::keep`] price a task against.
-///
-/// **Committed only — never [`durations_path`]'s worktree overlay.** That
-/// overlay lives under `target/`, which each shard restores from a build cache
-/// on its own, so two shards need not read one overlay. `Shard::keep` assumes
-/// every process prices a task identically, and two disagreeing on one number
-/// is one test run twice and another nowhere. `tests/test-durations` is
-/// `actions/checkout`, not `actions/cache`, and every shard checks out the
-/// identical bytes.
-fn shard_pricing() -> BTreeMap<String, Duration> {
-    let mut out = BTreeMap::new();
-    read_durations(&committed_durations_path(), &mut out);
-    out
-}
-
-/// Merge this run's durations into the recorded profile.
-///
-/// Merged rather than replaced, because a filtered run knows about four tests
-/// and would otherwise throw away what the last full one measured. A sharded
-/// run never calls this: the partition is a function of the profile, so a
-/// shard that saved would move it under its siblings.
-fn save_durations(mut known: BTreeMap<String, Duration>, timed: &[(String, Duration)]) {
-    for (name, elapsed) in timed {
-        known.insert(name.clone(), *elapsed);
-    }
-    let path = durations_path();
-    let body = known.iter().map(|(n, d)| format!("{n} {}\n", d.as_millis())).collect::<String>();
-    let tmp = path.with_extension("tmp");
-    if fs::create_dir_all(path.parent().expect("target/ has a parent")).is_ok()
-        && fs::write(&tmp, body).is_ok()
-    {
-        let _ = fs::rename(&tmp, &path);
-    }
-}
-
-/// Longest job first, on what the last run measured.
-///
-/// A phase's wall clock is `max(sum / width, longest job)`, and FIFO reaches the
-/// first term only if no long job is dispatched late. Declaration order puts the
-/// feature-carrying tests last — deliberately, to keep the kernel rebuilds
-/// together — which is exactly the worst order for a wide phase.
-///
-/// **The profile is measured, not declared**, because the alternative is a
-/// hand-maintained list of long tests — a second registration to keep true, and
-/// one nothing would notice going stale. A name the file has never seen sorts
-/// first, so a new test is assumed long until it has been timed once: the cost of
-/// being wrong that way is one lane starting a short job early.
-fn longest_first(tasks: &mut [Task], known: &BTreeMap<String, Duration>) {
-    let cost = |task: &Task| -> Duration { known.get(task.name()).copied().unwrap_or(Duration::MAX) };
-    tasks.sort_by_key(|task| std::cmp::Reverse(cost(task)));
-}
-
 /// One outcome, as the run prints it.
 fn report_line(outcome: &Outcome) {
     let reason = || outcome.reason.as_deref().unwrap_or("check failed");
@@ -4431,11 +4319,6 @@ fn run_phase(tasks: Vec<Task>, width: usize, test_config: &Path) -> Vec<Outcome>
 }
 
 /// Every test with a boot, split into the parallel and serial phases.
-///
-/// Pulled out of `main` so [`check_shard_partition`] builds the identical
-/// lists a real run would rather than a second, hand-written approximation
-/// that could pass its own check while the real path still disagreed with
-/// itself — which is exactly the shape of the defect run `31617589126` found.
 fn build_tasks(
     machine_to_run: &[(&'static str, Sched)],
     screen_to_run: &[(&'static str, Sched, qemu::Profile)],
@@ -4463,86 +4346,12 @@ fn kept(filter: Option<&str>, name: &str) -> bool {
 /// The machine tests and the screen tests a run boots.
 type Selection = (Vec<(&'static str, Sched)>, Vec<(&'static str, Sched, qemu::Profile)>);
 
-/// Every declared test a run [`kept`], but on a shard only the screen rows
-/// whose profile is of [`toyos_build::ci::GUEST_ARCH`].
-fn select(filter: Option<&str>, sharded: bool) -> Selection {
+/// Every declared test a run [`kept`].
+fn select(filter: Option<&str>) -> Selection {
     (
         MACHINE_TESTS.iter().filter(|(n, _)| kept(filter, n)).copied().collect(),
-        SCREEN_TESTS
-            .iter()
-            .filter(|(n, _, profile)| {
-                kept(filter, n) && (!sharded || profile.arch() == toyos_build::ci::GUEST_ARCH)
-            })
-            .copied()
-            .collect(),
+        SCREEN_TESTS.iter().filter(|(n, _, _)| kept(filter, n)).copied().collect(),
     )
-}
-
-fn arch_drop_line(filter: Option<&str>) -> Option<String> {
-    let (_, whole) = select(filter, false);
-    let (_, shard) = select(filter, true);
-    let dropped: Vec<&str> = whole
-        .iter()
-        .map(|(name, _, _)| *name)
-        .filter(|name| !shard.iter().any(|(kept, _, _)| kept == name))
-        .collect();
-    (!dropped.is_empty()).then(|| {
-        format!(
-            "{} test(s) NOT run, because a shard boots no guest but {}: {}",
-            dropped.len(),
-            toyos_build::ci::GUEST_ARCH.name(),
-            dropped.join(", ")
-        )
-    })
-}
-
-/// **The property every merged CI run depends on, checked before any of the
-/// twelve processes that would otherwise each discover it separately.** Every
-/// name [`Shard::keep`] is handed for `count` must land in exactly one of
-/// `1..=count`'s shards: a violation is one test run twice and another
-/// nowhere, with every shard green.
-///
-/// This cannot reproduce *why* two real processes disagreed — that needs
-/// [`shard_pricing`]'s fix, not a test, because the defect was two machines
-/// pricing a task from two different `target/test-durations` a shared build
-/// cache handed them. What this can and does check is the part a shared-fate
-/// bug would otherwise hide behind: that pricing every task from the
-/// committed profile alone — the one input every process is guaranteed to
-/// agree on — still yields a clean partition, for real registration data, at
-/// the width CI actually runs.
-fn check_shard_partition() {
-    let pricing = shard_pricing();
-    let (machine_to_run, screen_to_run) = select(None, true);
-    let (parallel, serial) = build_tasks(&machine_to_run, &screen_to_run);
-    let want: BTreeSet<&str> = parallel.iter().chain(&serial).map(Task::name).collect();
-
-    const COUNT: usize = 12;
-    let cost = |task: &Task| -> Option<Duration> { pricing.get(task.name()).copied() };
-    let mut seen: BTreeSet<&str> = BTreeSet::new();
-    for index in 1..=COUNT {
-        let shard = Shard { index, count: COUNT };
-        let mut mine_p = parallel.clone();
-        let mut mine_s = serial.clone();
-        // One accumulator across the two pools, in the order `main` takes
-        // them: the partition a shard gets is a function of both calls, so a
-        // check that took them apart would be checking something else.
-        let mut load = shard.bins();
-        shard.keep(&mut mine_p, &mut load, cost);
-        shard.keep(&mut mine_s, &mut load, cost);
-        for name in mine_p.iter().chain(&mine_s).map(Task::name) {
-            assert!(
-                seen.insert(name),
-                "{name} lands in shard {index}/{COUNT} and at least one earlier shard too — \
-                 every execution label must belong to exactly one"
-            );
-        }
-    }
-    assert_eq!(
-        seen, want,
-        "the twelve shards together do not equal the full selection — {:?} present in the \
-         selection and missing from every shard",
-        want.difference(&seen).collect::<Vec<_>>()
-    );
 }
 
 /// Every claim the metal table makes about itself, before anything boots:
@@ -4695,15 +4504,6 @@ fn main() {
             width
         });
 
-    // Which slice of the suite this machine runs. Absent is the whole of it.
-    let shard = match testargs::parse_shard(&args) {
-        Ok(shard) => shard,
-        Err(refusal) => {
-            eprintln!("[toyos] {refusal}");
-            std::process::exit(1);
-        }
-    };
-
     // Before anything boots: every exit below goes through `run`, which removes
     // this run's scratch, green or red; taking it reclaims what killed runs left.
     let run = common::lane::Run::begin();
@@ -4727,13 +4527,6 @@ fn main() {
     if let Err(refusal) = check_redlist(&registered) {
         eprintln!("[toyos] src/redlist.rs: {refusal}");
         run.exit(1);
-    }
-
-    if list_mode {
-        for name in &registered {
-            println!("{name}");
-        }
-        return;
     }
 
     if let Some(mode) = parsed.metal {
@@ -4768,21 +4561,20 @@ fn main() {
         );
     }
 
+    if list_mode {
+        for name in &registered {
+            println!("{name}");
+        }
+        return;
+    }
+
     if debug_mode {
         let (c_bins, rust_bins) = build_shared_bins();
         run_debug_mode(&c_bins, &rust_bins);
         return;
     }
 
-    check_shard_partition();
-
-    let (machine_to_run, screen_to_run) = select(filter, shard.is_some());
-
-    if shard.is_some() {
-        if let Some(line) = arch_drop_line(filter) {
-            eprintln!("[toyos] {line}");
-        }
-    }
+    let (machine_to_run, screen_to_run) = select(filter);
 
     if screen_to_run.is_empty() && machine_to_run.is_empty() {
         eprintln!("No enabled test matches filter {filter:?}");
@@ -4794,58 +4586,15 @@ fn main() {
 
     let suite_start = common::clock::mark();
 
-    let (mut parallel, mut serial) = build_tasks(&machine_to_run, &screen_to_run);
-
-    let known = load_durations();
-    // After the phases are decided and before either is ordered: what a shard
-    // divides is the work, and a task's answer to `Sched` is a property of the
-    // test rather than of how many machines are running it.
-    if let Some(shard) = shard {
-        // [`shard_pricing`], and not `known`: every process partitioning the
-        // same run must price a task identically, which only the committed
-        // profile guarantees.
-        let pricing = shard_pricing();
-        // A task the profile has never timed is unmeasured, which is the rule
-        // [`longest_first`] states with `Duration::MAX`.
-        let cost = |task: &Task| -> Option<Duration> { pricing.get(task.name()).copied() };
-        longest_first(&mut parallel, &pricing);
-        longest_first(&mut serial, &pricing);
-        // One accumulator for the whole run, heaviest pool first: this process
-        // runs both pools one after another, so its wall clock is the one bin
-        // they share and the serial tail belongs in whichever bin the parallel
-        // phase left lightest. Two partitions from two empty accumulators are
-        // each good and their sum is not
-        // (`Shard::keep`, and run `31377439504`'s 466.1 s against a 369.1 s
-        // even split).
-        let mut load = shard.bins();
-        shard.keep(&mut parallel, &mut load, cost);
-        shard.keep(&mut serial, &mut load, cost);
-        eprintln!(
-            "[toyos] shard {}/{}: {} parallel task(s), {} serial",
-            shard.index,
-            shard.count,
-            parallel.len(),
-            serial.len(),
-        );
-    }
-
-    // Counted from the task lists rather than from the filtered ones, because a
-    // shard's own total is what its summary has to add up against.
+    let (parallel, serial) = build_tasks(&machine_to_run, &screen_to_run);
     let total = parallel.len() + serial.len();
-    if let Err(refusal) = toyos_build::testargs::validate_ordinary_shard(shard, filter, total) {
-        eprintln!("[toyos] {refusal}");
-        run.exit(1);
-    }
     eprintln!("\nrunning {total} tests\n");
 
-    let mut timed: Vec<(String, Duration)> = Vec::new();
     if !parallel.is_empty() {
-        longest_first(&mut parallel, &known);
         eprintln!("  --- parallel, {width} wide ---");
         let started = std::time::Instant::now();
         let outcomes = run_phase(parallel, width, &test_config);
         eprintln!("  --- parallel done in {:.1?} ---", started.elapsed());
-        timed.extend(outcomes.iter().map(|o| (o.name.clone(), o.elapsed)));
         outcomes.into_iter().for_each(|o| tally.record(o));
     }
     if !serial.is_empty() {
@@ -4853,11 +4602,7 @@ fn main() {
         let started = std::time::Instant::now();
         let outcomes = run_phase(serial, 1, &test_config);
         eprintln!("  --- serial done in {:.1?} ---", started.elapsed());
-        timed.extend(outcomes.iter().map(|o| (o.name.clone(), o.elapsed)));
         outcomes.into_iter().for_each(|o| tally.record(o));
-    }
-    if shard.is_none() {
-        save_durations(known, &timed);
     }
 
     // Three exit statuses, because there are three things a run can establish —
@@ -4885,7 +4630,7 @@ fn main() {
     // Where this run's interrupts landed, aggregated over every guest that
     // said. `issues/kernel/every-interrupt-lands-on-the-boot-cpu.md`'s step 4:
     // the number its later change is measured against, produced by an ordinary
-    // run rather than by `--nocapture`, so a CI shard's own log carries it.
+    // run rather than by `--nocapture`, so a CI run's own log carries it.
     eprint!("{}", common::irqcensus::summary());
 
     eprint!("{}", tally.summary(total, suite_start.elapsed(), suite_start.suspended()));
