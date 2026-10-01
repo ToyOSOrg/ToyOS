@@ -14,6 +14,11 @@ One brief, one worktree, one branch. What the brief does not name you do not tou
 find off your path is filed in `issues/`, never fixed. If something blocks you, stop and say so in
 one clause; do not work around it.
 
+Before adding or keeping kernel behaviour, ask whether a userland server can own it: the kernel
+does only what only a kernel can (address spaces, scheduling, handles and capabilities, interrupts,
+device arbitration). When the clean design changes the ABI, change the ABI; never pick a lesser
+design to avoid that.
+
 ## Measure, build, test
 
 Where hardware or anything uncertain is involved, take the cheap measurement before you build on a
@@ -56,8 +61,7 @@ Fork sources live outside this repository: a search for callers must also cover 
 
 `git commit -F <file>`, never `-m`. No `--amend`, no rebase, no force: merge `origin/main`, never
 rebase onto it. Never run `git submodule` in a linked worktree: it writes `core.worktree` into the
-fork's shared config and breaks git in the primary checkout's `rust/`. Never touch `toyos-abi/src`, `toyos/src` or `userland/libc/src` unless the brief is
-an ABI brief. No new dependency.
+fork's shared config and breaks git in the primary checkout's `rust/`. No new dependency.
 
 Push from your branch, never `main`, with `git status --porcelain` empty: `git push -u origin
 <branch>`, and `gh pr create --draft` at the first push. The pull request body is the handoff the reviewer reads,
