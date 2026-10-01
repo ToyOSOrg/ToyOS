@@ -14,7 +14,7 @@
 //! an order sorts what it collected, and the two that do
 //! ([`crate::teardown::retire_set`] and [`crate::reap::finished_pids`]) say so.
 
-use crate::{Node, Pid, ThreadLocation, Tid};
+use crate::{Node, Pid, Pids, ThreadLocation, Tid};
 
 /// One process's lifecycle state: the whole of what a spawn, an exit, a kill, a
 /// join or a reap reads or writes about it.
@@ -74,4 +74,7 @@ pub trait Processes {
 
     /// Every process in the table, in whatever order the container has.
     fn each_pid(&self, f: &mut dyn FnMut(Pid));
+
+    /// The pids not yet issued.
+    fn pids(&mut self) -> &mut Pids;
 }

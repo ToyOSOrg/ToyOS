@@ -410,20 +410,22 @@ impl Lifecycle for ProcessEntry {
 impl Processes for ProcessTable {
     type Proc = ProcessEntry;
 
-    // Via `IdMap::get`, not `self.get(pid)`: the inherent method and a trait method of the same name resolve to the inherent one, so renaming this would turn it into infinite recursion.
     fn get(&self, pid: Pid) -> Option<&ProcessEntry> {
-        crate::id_map::IdMap::get(self, pid)
+        self.entries.get(&pid)
     }
     fn get_mut(&mut self, pid: Pid) -> Option<&mut ProcessEntry> {
-        crate::id_map::IdMap::get_mut(self, pid)
+        self.entries.get_mut(&pid)
     }
     fn published_exit(&self, pid: Pid) -> bool {
-        crate::id_map::IdMap::get(self, pid).is_some_and(|p| p.object.finished())
+        self.entries.get(&pid).is_some_and(|p| p.object.finished())
     }
     fn each_pid(&self, f: &mut dyn FnMut(Pid)) {
-        for (pid, _) in self.iter() {
+        for &pid in self.entries.keys() {
             f(pid);
         }
+    }
+    fn pids(&mut self) -> &mut toyos_proclife::Pids {
+        &mut self.pids
     }
 }
 
@@ -669,7 +671,39 @@ impl IdleProof {
 }
 
 
-pub type ProcessTable = crate::id_map::IdMap<Pid, ProcessEntry>;
+/// Every process by pid, and the pids not yet issued (`toyos_proclife::pids`).
+pub struct ProcessTable {
+    entries: crate::hasher::HashMap<Pid, ProcessEntry>,
+    pids: toyos_proclife::Pids,
+}
+
+impl ProcessTable {
+    fn new() -> Self {
+        Self { entries: crate::hasher::HashMap::default(), pids: toyos_proclife::Pids::default() }
+    }
+
+    pub fn get(&self, pid: Pid) -> Option<&ProcessEntry> {
+        self.entries.get(&pid)
+    }
+
+    pub fn get_mut(&mut self, pid: Pid) -> Option<&mut ProcessEntry> {
+        self.entries.get_mut(&pid)
+    }
+
+    pub fn remove(&mut self, pid: Pid) -> Option<ProcessEntry> {
+        self.entries.remove(&pid)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (Pid, &ProcessEntry)> {
+        self.entries.iter().map(|(&pid, proc)| (pid, proc))
+    }
+
+    /// `entry`, at the pid it was admitted with, which no entry has held.
+    pub fn insert(&mut self, entry: ProcessEntry) {
+        let pid = entry.pid;
+        assert!(self.entries.insert(pid, entry).is_none(), "ProcessTable::insert: pid {pid} held twice");
+    }
+}
 
 pub static PROCESS_TABLE: Lock<Option<ProcessTable>> = Lock::new(None);
 
@@ -832,59 +866,58 @@ pub enum Parent {
     Under(Pid),
 }
 
-/// A spawn admitted under its parent, and the pid its child will have.
-/// While it lives it holds the parent's publication: [`Admission::land`] hands that hold to the child, and a drop — every way a spawn's build fails — lets the parent go.
-pub struct Admission {
-    pid: Pid,
-    under: Option<tree::Admitted>,
-}
+/// A spawn admitted under its parent, holding the pid its child will have and the parent's publication: [`Admission::land`] hands both to the child, and a drop — every way a spawn's build fails — gives both back.
+pub struct Admission(Option<tree::Admitted>);
 
 impl Admission {
-    /// The question at the top of a spawn, before anything is built: `Gone` for a parent being torn down, `ResourceExhausted` for a child more than `MAX_DEPTH` below init, which the log names.
+    /// The question at the top of a spawn, before anything is built: `Gone` for a parent being torn down, and `ResourceExhausted`, which the log names, for a child more than `MAX_DEPTH` below init or no pid left to issue.
     pub fn ask(parent: Parent) -> Result<Self, SyscallError> {
-        let mut guard = PROCESS_TABLE.lock();
-        let table = guard.as_mut().unwrap();
-        let under = match parent {
+        let place = match parent {
             Parent::Root => None,
-            Parent::Under(place) => match tree::admit_child(table, place) {
-                tree::Admit::Yes(admitted) => Some(admitted),
-                tree::Admit::Gone => return Err(SyscallError::Gone),
-                tree::Admit::TooDeep { depth } => {
-                    drop(guard);
-                    log!("spawn: refused under pid {place} at depth {depth}, more than {} below init",
-                        toyos_proclife::MAX_DEPTH);
-                    return Err(SyscallError::ResourceExhausted);
-                }
-            },
+            Parent::Under(place) => Some(place),
         };
-        Ok(Self { pid: table.reserve(), under })
+        let admit = {
+            let mut guard = PROCESS_TABLE.lock();
+            tree::admit_child(guard.as_mut().unwrap(), place)
+        };
+        match admit {
+            tree::Admit::Yes(admitted) => Ok(Self(Some(admitted))),
+            tree::Admit::Gone => Err(SyscallError::Gone),
+            tree::Admit::TooDeep { depth } => {
+                log!("spawn: refused under pid {} at depth {depth}, more than {} below init",
+                    place.expect("spawn: init is admitted at depth 0"), toyos_proclife::MAX_DEPTH);
+                Err(SyscallError::ResourceExhausted)
+            }
+            tree::Admit::NoPid => {
+                log!("spawn: refused, every pid below {} is issued", Pid::MAX);
+                Err(SyscallError::ResourceExhausted)
+            }
+        }
     }
 
     pub fn pid(&self) -> Pid {
-        self.pid
+        self.0.as_ref().expect("Admission: taken only by land, which consumes it").pid()
     }
 
-    /// Land the child in the `PROCESS_TABLE` hold `insert` fills this pid and schedules its thread in. A parent claimed since the admission has walked its children, so the child is claimed in this hold too, and the retires answered are the spawner's to post with the lock given up.
+    /// Land the child in the `PROCESS_TABLE` hold `insert` puts its entry in and schedules its thread in. A parent claimed since the admission has walked its children, so the child is claimed in this hold too, and the retires answered are the spawner's to post with the lock given up.
     pub fn land<R>(
         mut self,
         table: &mut ProcessTable,
         insert: impl FnOnce(&mut ProcessTable, Node) -> R,
     ) -> (R, Vec<ThreadSched>) {
-        let Some(admitted) = self.under.take() else { return (insert(table, Node::root()), Vec::new()) };
-        match tree::land_child(table, admitted, self.pid, KILLED_EXIT_CODE, insert) {
-            (inserted, tree::Landed::Placed) => (inserted, Vec::new()),
-            (inserted, tree::Landed::Claimed) => (inserted, retires(table, self.pid, None)),
-        }
+        let admitted = self.0.take().expect("Admission: landed once");
+        let pid = admitted.pid();
+        let (inserted, retire) = tree::land_child(table, admitted, KILLED_EXIT_CODE, insert);
+        (inserted, scheds(table, pid, retire))
     }
 }
 
 impl Drop for Admission {
     fn drop(&mut self) {
-        let Some(admitted) = self.under.take() else { return };
+        let Some(admitted) = self.0.take() else { return };
         let ready = {
             let mut guard = PROCESS_TABLE.lock();
-            let table = guard.as_mut().unwrap();
-            tree::refuse_child(table, admitted)
+            tree::refuse_child(guard.as_mut().unwrap(), admitted)
         };
         publish_climb(ready);
     }
@@ -1170,17 +1203,17 @@ fn claim(pid: Pid, code: i32, caller: Option<Tid>, owed: &mut Vec<Pid>) -> Vec<T
     if !tree::claim(table, pid, code, owed) {
         return Vec::new();
     }
-    retires(table, pid, caller)
+    let proc = table.get(pid).expect("claim: a claimed process is in the table");
+    scheds(table, pid, proclife::retire_set(proc, caller))
 }
 
-/// The scheduler records of the threads a claim of `pid` retires: every one still in it but `caller`.
-fn retires(table: &ProcessTable, pid: Pid, caller: Option<Tid>) -> Vec<ThreadSched> {
-    let proc = Processes::get(table, pid).expect("retires: a claimed process is in the table");
-    proclife::retire_set(proc, caller)
-        .into_iter()
+/// The scheduler records of `pid`'s threads `tids`, which a claim of it retires.
+fn scheds(table: &ProcessTable, pid: Pid, tids: Vec<Tid>) -> Vec<ThreadSched> {
+    let proc = table.get(pid).expect("scheds: a claimed process is in the table");
+    tids.into_iter()
         .map(|tid| {
             proc.threads.get(tid).and_then(ThreadEntry::sched).cloned()
-                .expect("retires: a thread in the table has its scheduler record")
+                .expect("scheds: a thread in the table has its scheduler record")
         })
         .collect()
 }

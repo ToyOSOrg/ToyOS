@@ -9,8 +9,8 @@
 //!
 //! - **May a child be placed here?** [`admit_child`] at the top of a spawn,
 //!   before anything is built: a place being torn down takes nothing more,
-//!   and a child deeper than [`MAX_DEPTH`] below init is refused. It is the
-//!   last refusal: past it the spawn moves its caller's handles, so it lands.
+//!   and a child deeper than [`MAX_DEPTH`] below init is refused. It takes
+//!   the child's pid ([`crate::pids`]).
 //! - **Who does an end take?** [`claim`] one process at a time: its claim is
 //!   what closes admission under it, and the same hold reads its children.
 //!   A child admitted before the claim and landed after it is claimed in the
@@ -25,10 +25,10 @@
 use alloc::vec::Vec;
 
 use crate::table::{Lifecycle, Processes};
-use crate::{teardown, Pid};
+use crate::{teardown, Pid, Tid};
 
 /// How far below init a process may be. Bounds the climb one teardown can
-/// owe, which runs with preemption off.
+/// owe.
 pub const MAX_DEPTH: u32 = 64;
 
 /// One process's place in the tree.
@@ -59,7 +59,7 @@ impl Node {
 }
 
 /// A spawn's first answer.
-#[must_use = "an admitted spawn holds its place's publication until it lands or is refused"]
+#[must_use = "an admitted spawn holds its place's publication and its pid until it lands or is refused"]
 #[derive(PartialEq, Eq, Debug)]
 pub enum Admit {
     Yes(Admitted),
@@ -67,20 +67,25 @@ pub enum Admit {
     Gone,
     /// The child would be `depth` below init, past [`MAX_DEPTH`].
     TooDeep { depth: u32 },
+    /// Every pid below [`Pid::MAX`] is issued.
+    NoPid,
 }
 
-/// A spawn admitted under its place, which it keeps unpublished until
-/// [`land_child`] lands it or [`refuse_child`] lets the place go.
-#[must_use = "an admitted spawn holds its place's publication until it lands or is refused"]
+/// A spawn admitted under its place, which it keeps unpublished, and the pid
+/// it took, until [`land_child`] lands it or [`refuse_child`] gives both back.
+#[must_use = "an admitted spawn holds its place's publication and its pid until it lands or is refused"]
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Admitted {
-    place: Pid,
+    /// `None` for init, which the kernel starts under no process.
+    place: Option<Pid>,
     depth: u32,
+    pid: Pid,
 }
 
 impl Admitted {
-    pub fn place(&self) -> Pid {
-        self.place
+    /// The pid the child will have.
+    pub fn pid(&self) -> Pid {
+        self.pid
     }
 }
 
@@ -92,69 +97,81 @@ pub struct Publish {
     pub parent: Option<Pid>,
 }
 
-/// Whom a landed child's end is owed to.
-#[must_use = "a child claimed as it landed is its spawner's to end"]
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Landed {
-    /// Its place's, which is not claimed: that end's walk will take it.
-    Placed,
-    /// Its spawner's: the place was claimed since the admission and its walk
-    /// has read its children, so the child was claimed in the hold that
-    /// landed it.
-    Claimed,
+/// The question at the top of a spawn under `place`, or of init's under
+/// none, before anything is built.
+pub fn admit_child<T: Processes>(table: &mut T, place: Option<Pid>) -> Admit {
+    let depth = match place {
+        None => 0,
+        Some(place) => {
+            let Some(proc) = table.get(place) else { return Admit::Gone };
+            if proc.tearing_down() {
+                return Admit::Gone;
+            }
+            let depth = proc.node().depth + 1;
+            if depth > MAX_DEPTH {
+                return Admit::TooDeep { depth };
+            }
+            depth
+        }
+    };
+    let Some(pid) = table.pids().take() else { return Admit::NoPid };
+    if let Some(place) = place {
+        table.get_mut(place).expect("admit_child: the place read above").node_mut().holds += 1;
+    }
+    Admit::Yes(Admitted { place, depth, pid })
 }
 
-/// The question at the top of a spawn under `place`, before anything is built.
-pub fn admit_child<T: Processes>(table: &mut T, place: Pid) -> Admit {
-    let Some(proc) = table.get_mut(place) else { return Admit::Gone };
-    if proc.tearing_down() {
-        return Admit::Gone;
-    }
-    let depth = proc.node().depth + 1;
-    if depth > MAX_DEPTH {
-        return Admit::TooDeep { depth };
-    }
-    proc.node_mut().holds += 1;
-    Admit::Yes(Admitted { place, depth })
-}
-
-/// Land `child` under its admitted place, in one hold: `insert` puts its
-/// entry in the table with the node it is handed, and a child whose place was
-/// claimed since the admission is claimed for `code` before the hold ends.
+/// Land the admitted child, in one hold: `insert` puts its entry in the table
+/// at its pid with the node it is handed. A child whose place was claimed since
+/// the admission is claimed for `code` before the hold ends, and the threads
+/// answered are its, for its spawner to retire: none for any other child.
+#[must_use = "a child claimed as it landed is its spawner's to retire"]
 pub fn land_child<T: Processes, R>(
     table: &mut T,
     admitted: Admitted,
-    child: Pid,
     code: i32,
     insert: impl FnOnce(&mut T, Node) -> R,
-) -> (R, Landed) {
-    let place = table
-        .get_mut(admitted.place)
-        .expect("land_child: an admitted spawn keeps its place unpublished, so in the table");
-    // The mutation this feature stages: the child lands as if its place were
-    // live, after the walk read its children.
-    let claimed = place.tearing_down() && !cfg!(feature = "mutate-place-skips-the-insert-recheck");
-    place.node_mut().children.push(child);
-    let node = Node { parent: Some(admitted.place), depth: admitted.depth, children: Vec::new(), holds: 1 };
-    let inserted = insert(table, node);
+) -> (R, Vec<Tid>) {
+    let Admitted { place, depth, pid } = admitted;
+    let claimed = match place {
+        None => false,
+        Some(place) => {
+            let proc = table
+                .get_mut(place)
+                .expect("land_child: an admitted spawn keeps its place unpublished, so in the table");
+            proc.node_mut().children.push(pid);
+            // The mutation this feature stages: the child lands as if its
+            // place were live, after the walk read its children.
+            proc.tearing_down() && !cfg!(feature = "mutate-place-skips-the-insert-recheck")
+        }
+    };
+    let inserted = insert(table, Node { parent: place, depth, children: Vec::new(), holds: 1 });
     if !claimed {
-        return (inserted, Landed::Placed);
+        return (inserted, Vec::new());
     }
     assert!(
-        teardown::claim_teardown(table, child, code),
-        "land_child: pid {child}, inserted in this hold, was claimed by another",
+        teardown::claim_teardown(table, pid, code),
+        "land_child: pid {pid}, inserted in this hold, was claimed by another",
     );
-    (inserted, Landed::Claimed)
+    // The mutation this feature stages: the child is claimed and nobody
+    // retires it.
+    if cfg!(feature = "mutate-landed-child-retires-nothing") {
+        return (inserted, Vec::new());
+    }
+    let child = table.get(pid).expect("land_child: inserted in this hold");
+    (inserted, teardown::retire_set(child, None))
 }
 
-/// A spawn whose build failed after its admission: its hold on the place goes.
+/// A spawn refused after its admission: its pid goes back, and its hold on
+/// the place goes.
 pub fn refuse_child<T: Processes>(table: &mut T, admitted: Admitted) -> Option<Publish> {
+    table.pids().give_back(admitted.pid);
     // The mutation this feature stages: the hold stays, and the place waits
     // for a child that will never be.
     if cfg!(feature = "mutate-refused-spawn-keeps-the-count") {
         return None;
     }
-    lower(table, admitted.place)
+    lower(table, admitted.place?)
 }
 
 /// Claim `pid` for `code` and owe its children to the walk, all in this one
@@ -210,6 +227,7 @@ fn lower<T: Processes>(table: &mut T, pid: Pid) -> Option<Publish> {
 mod tests {
     use super::*;
     use crate::model::World;
+    use crate::Pids;
 
     /// A chain from init down to `MAX_DEPTH`: the last is admitted, and one
     /// more below it is refused naming the depth it would have had.
@@ -222,9 +240,9 @@ mod tests {
             at = world.spawn_child(at);
             assert_eq!(world.get(at).unwrap().node().depth(), depth);
         }
-        assert_eq!(admit_child(&mut world, at), Admit::TooDeep { depth: MAX_DEPTH + 1 });
+        assert_eq!(admit_child(&mut world, Some(at)), Admit::TooDeep { depth: MAX_DEPTH + 1 });
         let parent = world.get(at).unwrap().node().parent().unwrap();
-        let Admit::Yes(admitted) = admit_child(&mut world, parent) else {
+        let Admit::Yes(admitted) = admit_child(&mut world, Some(parent)) else {
             panic!("a child at MAX_DEPTH itself was refused");
         };
         assert_eq!(refuse_child(&mut world, admitted), None);
@@ -236,24 +254,24 @@ mod tests {
         let init = world.spawn_process();
         let place = world.spawn_child(init);
         assert!(claim(&mut world, place, 137, &mut Vec::new()));
-        assert_eq!(admit_child(&mut world, place), Admit::Gone);
-        assert_eq!(admit_child(&mut world, Pid(99)), Admit::Gone);
+        assert_eq!(admit_child(&mut world, Some(place)), Admit::Gone);
+        assert_eq!(admit_child(&mut world, Some(Pid(99))), Admit::Gone);
     }
 
     /// A child admitted before its place's claim and landed after it is
-    /// claimed in the hold that lands it, and holds the place's publication
-    /// until its own.
+    /// claimed in the hold that lands it, its spawner is answered its thread
+    /// to retire, and it holds the place's publication until its own.
     #[test]
     fn a_child_landed_under_a_place_claimed_since_its_admission_is_claimed_with_it() {
         let mut world = World::new();
         let init = world.spawn_process();
         let place = world.spawn_child(init);
-        let Admit::Yes(admitted) = admit_child(&mut world, place) else { panic!("admitted") };
+        let Admit::Yes(admitted) = admit_child(&mut world, Some(place)) else { panic!("admitted") };
         assert!(claim(&mut world, place, 137, &mut Vec::new()));
         assert_eq!(teardown_done(&mut world, place), None, "published with a child admitted under it");
-        let child = world.reserve_pid();
-        let ((), landed) = land_child(&mut world, admitted, child, 137, |world, node| world.insert(child, node));
-        assert_eq!(landed, Landed::Claimed);
+        let child = admitted.pid();
+        let ((), retire) = land_child(&mut world, admitted, 137, |world, node| world.insert(child, node));
+        assert_eq!(retire, [world.main_tid(child)], "the child's spawner was not answered its thread to retire");
         assert_eq!(world.get(child).unwrap().teardown_code(), Some(137));
         assert_eq!(teardown_done(&mut world, child), Some(Publish { pid: child, parent: Some(place) }));
         assert_eq!(published(&mut world, place, child), Some(Publish { pid: place, parent: Some(init) }));
@@ -272,5 +290,37 @@ mod tests {
         let mut owed = Vec::new();
         assert!(claim(&mut world, init, 137, &mut owed));
         assert_eq!(owed, [], "init's walk owes pid {child}, which was published");
+    }
+
+    /// Once every pid below `Pid::MAX` is issued a spawn is refused by name
+    /// and holds its place by nothing, and a refused spawn's pid is the next
+    /// one admitted: refused spawns spend none.
+    #[test]
+    fn a_spawn_past_the_last_pid_is_refused_and_a_refused_spawn_spends_none() {
+        let mut world = World::with_pids(Pids::issued_below(Pid(u32::MAX - 2)));
+        let init = world.spawn_process();
+        let Admit::Yes(admitted) = admit_child(&mut world, Some(init)) else { panic!("the last pid was refused") };
+        let last = admitted.pid();
+        assert_eq!(last, Pid(u32::MAX - 1));
+        assert_eq!(admit_child(&mut world, Some(init)), Admit::NoPid);
+        assert_eq!(refuse_child(&mut world, admitted), None);
+        for _ in 0..3 {
+            let Admit::Yes(again) = admit_child(&mut world, Some(init)) else {
+                panic!("a refused spawn spent pid {last}");
+            };
+            assert_eq!(again.pid(), last);
+            assert_eq!(refuse_child(&mut world, again), None);
+        }
+        let Admit::Yes(lands) = admit_child(&mut world, Some(init)) else { panic!("pid {last} was spent") };
+        let ((), retire) = land_child(&mut world, lands, 137, |world, node| world.insert(last, node));
+        assert_eq!(retire, []);
+        assert_eq!(admit_child(&mut world, Some(init)), Admit::NoPid);
+        assert_eq!(admit_child(&mut world, None), Admit::NoPid);
+        // init's own hold and its child's are all that hold it.
+        assert!(claim(&mut world, last, 0, &mut Vec::new()));
+        assert_eq!(teardown_done(&mut world, last), Some(Publish { pid: last, parent: Some(init) }));
+        assert!(claim(&mut world, init, 0, &mut Vec::new()));
+        assert_eq!(teardown_done(&mut world, init), None);
+        assert_eq!(published(&mut world, init, last), Some(Publish { pid: init, parent: None }));
     }
 }

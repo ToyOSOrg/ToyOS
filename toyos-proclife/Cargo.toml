@@ -72,6 +72,12 @@ mutate-place-skips-the-insert-recheck = []
 # waits for a child that will never be and is never published. The same test
 # must red under this.
 mutate-refused-spawn-keeps-the-count = []
+# `tree::land_child` claims a child landed under a place claimed since its
+# admission and answers no thread to retire, so the child runs on claimed, is
+# never torn down, and holds its place unpublished.
+# `interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it`
+# must red under this.
+mutate-landed-child-retires-nothing = []
 # `tree::teardown_done` publishes an end with its own teardown, whatever is
 # still unpublished below it. `interleave::tests::an_exit_publishes_after_every_end_below_it`
 # must red under this.

@@ -54,6 +54,7 @@ extern crate alloc;
 extern crate std;
 
 pub mod join;
+pub mod pids;
 pub mod reap;
 pub mod spawn;
 pub mod table;
@@ -65,6 +66,7 @@ mod interleave;
 #[cfg(test)]
 mod model;
 
+pub use pids::Pids;
 pub use table::{Lifecycle, Processes};
 pub use tree::{Node, MAX_DEPTH};
 

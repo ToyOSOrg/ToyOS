@@ -49,22 +49,6 @@ impl<K: IdKey, V> IdMap<K, V> {
         id
     }
 
-    /// Takes the next ID with no value yet, for a value that must name its ID
-    /// before the map holds it. The ID is never issued again; [`Self::fill`]
-    /// gives it its value, or nothing ever does.
-    pub fn reserve(&mut self) -> K {
-        let id = self.next;
-        self.next = self.next + K::ONE;
-        id
-    }
-
-    /// Gives a reserved ID its value. Panics for an ID this map has not
-    /// issued, or one that already has a value.
-    pub fn fill(&mut self, id: K, value: V) {
-        assert!(id < self.next, "IdMap::fill: an ID this map never issued");
-        assert!(self.map.insert(id, value).is_none(), "IdMap::fill: an ID filled twice");
-    }
-
     pub fn get(&self, id: K) -> Option<&V> {
         self.map.get(&id)
     }

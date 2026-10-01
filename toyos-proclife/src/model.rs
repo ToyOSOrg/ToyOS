@@ -19,7 +19,7 @@ use alloc::vec::Vec;
 use crate::table::{Lifecycle, Processes};
 use crate::teardown::{self, Leave};
 use crate::tree::{self, Admit, Publish};
-use crate::{Node, Pid, ThreadLocation, Tid, Watch};
+use crate::{Node, Pid, Pids, ThreadLocation, Tid, Watch};
 
 /// One process, as its lifecycle sees it.
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -106,7 +106,7 @@ struct Departure {
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct World {
     procs: BTreeMap<Pid, ModelProc>,
-    next_pid: Pid,
+    pids: Pids,
     /// The exit each process published, which is what `published_exit` reads —
     /// on the object in the kernel, and never on the entry.
     published: BTreeMap<Pid, i32>,
@@ -162,13 +162,21 @@ impl Processes for World {
             f(pid);
         }
     }
+    fn pids(&mut self) -> &mut Pids {
+        &mut self.pids
+    }
 }
 
 impl World {
     pub fn new() -> Self {
+        Self::with_pids(Pids::default())
+    }
+
+    /// A world whose spawns take their pids from `pids`.
+    pub fn with_pids(pids: Pids) -> Self {
         Self {
             procs: BTreeMap::new(),
-            next_pid: Pid(1),
+            pids,
             published: BTreeMap::new(),
             waiters: BTreeSet::new(),
             released: BTreeSet::new(),
@@ -206,30 +214,25 @@ impl World {
         self.tls_mapped.remove(&block);
     }
 
-    /// A root process with one thread, which is its main one — what
-    /// `ProcessEntry::new` builds for init.
+    /// A process under none with one thread, which is its main one — what
+    /// the loader builds for init.
     pub fn spawn_process(&mut self) -> Pid {
-        let pid = self.reserve_pid();
-        self.insert(pid, Node::root());
-        pid
+        self.land(None)
     }
 
     /// A process placed under `place`, admitted and inserted with nothing
     /// between: how a test builds the tree its ops start from.
     pub fn spawn_child(&mut self, place: Pid) -> Pid {
-        let Admit::Yes(admitted) = tree::admit_child(self, place) else {
-            panic!("spawn_child: pid {place} admits no child");
-        };
-        let pid = self.reserve_pid();
-        let ((), landed) = tree::land_child(self, admitted, pid, 137, |world, node| world.insert(pid, node));
-        assert_eq!(landed, tree::Landed::Placed, "spawn_child: pid {place} was claimed");
-        pid
+        self.land(Some(place))
     }
 
-    /// The pid a spawn's admission takes before it builds anything.
-    pub fn reserve_pid(&mut self) -> Pid {
-        let pid = self.next_pid;
-        self.next_pid = Pid(pid.0 + 1);
+    fn land(&mut self, place: Option<Pid>) -> Pid {
+        let Admit::Yes(admitted) = tree::admit_child(self, place) else {
+            panic!("World::land: {place:?} admits no child");
+        };
+        let pid = admitted.pid();
+        let ((), retire) = tree::land_child(self, admitted, 137, |world, node| world.insert(pid, node));
+        assert_eq!(retire, [], "World::land: {place:?} was claimed");
         pid
     }
 

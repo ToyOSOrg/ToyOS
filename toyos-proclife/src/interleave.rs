@@ -24,7 +24,7 @@ use std::collections::HashSet;
 
 use crate::model::{Climb, World};
 use crate::table::Processes;
-use crate::tree::{self, Admit, Admitted, Landed};
+use crate::tree::{self, Admit, Admitted};
 use crate::{join, reap, spawn, teardown, Pid, Tid, Watch};
 
 /// `process::KILLED_EXIT_CODE`, which a walk claims every process below an end
@@ -51,9 +51,9 @@ pub enum Op {
     Kill { pid: Pid, code: i32, pc: u32, retire: Vec<(Pid, Tid)>, owed: Vec<Pid>, by: Option<(Pid, Tid)> },
     /// `loader::spawn` under `place` by `by`'s thread: the admission, the
     /// whole of a process built with every lock given up, then the move of
-    /// the caller's handles and the landing, whose retires a child claimed as
-    /// it landed owes. A build that `fails` lets the place go instead, and
-    /// climbs when that was the place's last hold.
+    /// the caller's handles and the landing, whose retires the landing
+    /// answers. A build that `fails` lets the place go instead, and climbs
+    /// when that was the place's last hold.
     SpawnUnder {
         place: Pid,
         by: (Pid, Tid),
@@ -220,12 +220,12 @@ impl Op {
             Op::SpawnUnder { place, by, fails, pc, admitted, retire, climb } => {
                 match *pc {
                     // The admission, under the table lock and before anything is built.
-                    0 => match tree::admit_child(world, *place) {
+                    0 => match tree::admit_child(world, Some(*place)) {
                         Admit::Yes(taken) => {
                             *admitted = Some(taken);
                             *pc = 1;
                         }
-                        Admit::Gone | Admit::TooDeep { .. } => {
+                        Admit::Gone | Admit::TooDeep { .. } | Admit::NoPid => {
                             world.refuse_spawn(*by);
                             *pc = DONE;
                         }
@@ -247,20 +247,14 @@ impl Op {
                     1 => {
                         world.move_handles(*by);
                         let taken = admitted.take().expect("admitted at the first section");
-                        let child = world.reserve_pid();
-                        let ((), landed) =
-                            tree::land_child(world, taken, child, KILLED, |world, node| world.insert(child, node));
+                        let child = taken.pid();
+                        let ((), owed) =
+                            tree::land_child(world, taken, KILLED, |world, node| world.insert(child, node));
                         world.landed(*place, child);
-                        match landed {
-                            Landed::Placed => *pc = DONE,
-                            Landed::Claimed => {
-                                let proc = world.get(child).expect("just landed");
-                                *retire = teardown::retire_set(proc, None).into_iter().map(|t| (child, t)).collect();
-                                *pc = 2;
-                            }
-                        }
+                        *retire = owed.into_iter().map(|t| (child, t)).collect();
+                        *pc = 2;
                     }
-                    // With the lock given up: the retires of a child claimed as it landed.
+                    // With the lock given up: the retires the landing answered.
                     2 => {
                         for (victim, thread) in retire.drain(..) {
                             world.post_retire(victim, thread);

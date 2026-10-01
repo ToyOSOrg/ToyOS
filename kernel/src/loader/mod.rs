@@ -597,8 +597,7 @@ pub fn spawn(
     let pid = admission.pid();
     let object = crate::object::process::ProcessObject::new(pid);
     // The point of no return: every failure above answers the caller with its
-    // table untouched. `commit`'s own `?` is different — reachable only if the
-    // caller raced its own spawn, and fatal to it, not a refusal.
+    // table untouched.
     let (handles, endowments) = pending.commit(KObjectRef::Process(Arc::clone(&object)))?;
     let proc_data = Arc::new(Lock::new(ProcessData {
         handles,
@@ -648,7 +647,7 @@ pub fn spawn(
 
     let mut guard = PROCESS_TABLE.lock();
     let ((tid, dst), retire) = admission.land(guard.as_mut().unwrap(), |table, node| {
-        table.fill(pid, ProcessEntry::new(
+        table.insert(ProcessEntry::new(
             Arc::clone(&object),
             start::make_name(path),
             proc_data,

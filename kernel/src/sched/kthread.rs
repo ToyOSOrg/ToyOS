@@ -15,6 +15,7 @@ use crate::process::{
 use crate::scheduler::{self, TaskId};
 use crate::symbols::SymbolTable;
 use crate::sync::Lock;
+use toyos_proclife::Processes;
 
 use super::payload::ThreadSched;
 
@@ -101,6 +102,8 @@ pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64) -> ThreadSched
 
     // Before the table lock: a panic holding the process table hangs the machine.
     let claim = Claim::take(name);
+    let taken = PROCESS_TABLE.lock().as_mut().expect("kthread: spawned before process::init").pids().take();
+    let pid = taken.unwrap_or_else(|| panic!("kthread: {name} found every pid issued"));
 
     let mut short = [0u8; THREAD_NAME_LEN];
     let len = name.len().min(THREAD_NAME_LEN - 1);
@@ -112,16 +115,14 @@ pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64) -> ThreadSched
     // One hold across insert and place: a visible pid already has its thread scheduled.
     let mut guard = PROCESS_TABLE.lock();
     let table = guard.as_mut().expect("kthread: spawned before process::init");
-    let pid = table.insert_with(|pid| {
-        ProcessEntry::new(
-            crate::object::process::ProcessObject::new(pid),
-            short,
-            Arc::new(Lock::new(kernel_process_data(name))),
-            Arc::clone(&syms),
-            ThreadEntry::new(Arc::new(Lock::new(kernel_thread_data()))),
-            toyos_proclife::Node::root(),
-        )
-    });
+    table.insert(ProcessEntry::new(
+        crate::object::process::ProcessObject::new(pid),
+        short,
+        Arc::new(Lock::new(kernel_process_data(name))),
+        Arc::clone(&syms),
+        ThreadEntry::new(Arc::new(Lock::new(kernel_thread_data()))),
+        toyos_proclife::Node::root(),
+    ));
     let tid = table.get(pid).expect("kthread: the entry just inserted is gone").main_tid();
     claim.publish(TaskId(pid, tid));
     // The kernel address space, named so one declaration decides every task's `cr3`.
