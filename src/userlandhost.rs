@@ -1,9 +1,9 @@
 //! Which userland crates `cargo run -- --ci host` tests, every userland test it
 //! would run nowhere, and which userland packages it builds on every host.
 //!
-//! **An app builds on Linux, macOS and Windows from the source it builds on
-//! ToyOS from.** [`packages`] reads every member of the userland workspace and
-//! what its own manifest declares; a member that declares nothing is an app.
+//! **An app builds on Linux, macOS and Windows from the same source as on
+//! ToyOS.** [`packages`] reads every member of the userland workspace and what
+//! its own manifest declares; a member that declares nothing is an app.
 //! One that by its nature cannot run anywhere but ToyOS, because it owns ToyOS
 //! devices or kernel objects, says why, and only its tests run on a host:
 //!
@@ -167,7 +167,7 @@ impl Os {
     }
 
     /// The host this build system runs on.
-    pub fn this() -> Result<Os, String> {
+    pub fn current() -> Result<Os, String> {
         Os::named(std::env::consts::OS)
             .ok_or_else(|| format!("{} is none of the hosts an app builds on", std::env::consts::OS))
     }
@@ -278,13 +278,12 @@ pub fn judge(dir: &str, fails: Option<&Fails>, os: Os, built: bool) -> Result<bo
     match (built, declared) {
         (true, None) | (false, Some(_)) => Ok(built),
         (false, None) => Err(format!(
-            "userland/{dir} does not build for {}, and its manifest says neither that it fails \
-             there nor that it is exempt",
+            "userland/{dir} does not build for {} and declares neither `fails` there nor `exempt`",
             os.name()
         )),
         (true, Some(issue)) => Err(format!(
-            "userland/{dir} builds for {}, which its `fails` still names: the name goes, and its \
-             row in {issue}",
+            "userland/{dir} builds for {}, which its `fails` names: the name goes, and its row in \
+             {issue}",
             os.name()
         )),
     }
@@ -535,6 +534,7 @@ mod tests {
         let dir = toyos_tmpdir::TempDir::new("userlandhost-declared");
         fs::create_dir_all(dir.join("issues/build")).expect("make the fixture tree");
         fs::write(dir.join("issues/build/x.md"), "| `calc` | 101 |\n").expect("write the issue");
+        fs::write(dir.join("notes.md"), "| `calc` | 101 |\n").expect("write a note");
         let read = |host: &str| {
             let manifest = format!("[package]\nname = \"calc\"\n{host}");
             declared(&manifest.parse().expect("TOML"), &dir, "calc")
@@ -543,10 +543,14 @@ mod tests {
         let issue = "issue = \"issues/build/x.md\"\n";
         assert_eq!(read(""), Ok(Host::App(None)));
         assert_eq!(read("[package.metadata.toyos]\nother = 1\n"), Ok(Host::App(None)));
-        assert_eq!(read(&format!("{table}exempt = \"it owns a panel\"\n")), Ok(Host::Exempt("it owns a panel".into())));
+        assert_eq!(
+            read(&format!("{table}exempt = \"it owns a panel\"\n")),
+            Ok(Host::Exempt("it owns a panel".into()))
+        );
+        let on = vec![Os::Windows, Os::Linux];
         assert_eq!(
             read(&format!("{table}fails = [\"windows\", \"linux\"]\n{issue}")),
-            Ok(Host::App(Some(Fails { on: vec![Os::Windows, Os::Linux], issue: "issues/build/x.md".into() })))
+            Ok(Host::App(Some(Fails { on, issue: "issues/build/x.md".into() })))
         );
         for refused in [
             format!("{table}exempt = \" \"\n"),
@@ -557,9 +561,10 @@ mod tests {
             format!("{table}fails = [\"freebsd\"]\n{issue}"),
             format!("{table}fails = [\"linux\", \"linux\"]\n{issue}"),
             format!("{table}fails = \"linux\"\n{issue}"),
-            format!("{table}fails = [\"linux\"]\nissue = \"README.md\"\n"),
+            format!("{table}fails = [\"linux\"]\nissue = \"notes.md\"\n"),
             format!("{table}fails = [\"linux\"]\nissue = \"issues/build/gone.md\"\n"),
             format!("{table}exmept = \"why\"\n"),
+            format!("{table}exempt = \"why\"\nnote = \"it may grow\"\n"),
             "[package.metadata.toyos]\nhost = \"exempt\"\n".to_string(),
         ] {
             assert!(read(&refused).is_err(), "read {refused:?}");
@@ -573,7 +578,7 @@ mod tests {
     fn a_build_and_its_declaration_disagreeing_is_red_both_ways() {
         let fails = Fails { on: vec![Os::Windows], issue: "issues/build/x.md".into() };
         assert_eq!(judge("calc", None, Os::Linux, true), Ok(true));
-        assert!(judge("calc", None, Os::Linux, false).unwrap_err().contains("neither"));
+        assert!(judge("calc", None, Os::Linux, false).unwrap_err().contains("declares neither"));
         assert_eq!(judge("calc", Some(&fails), Os::Windows, false), Ok(false));
         assert!(judge("calc", Some(&fails), Os::Windows, true).unwrap_err().contains("goes"));
         assert!(judge("calc", Some(&fails), Os::Linux, false).is_err(), "it fails on Windows alone");

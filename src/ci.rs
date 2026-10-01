@@ -562,7 +562,7 @@ fn apps_on(
     os: Os,
     host_triple: &str,
 ) -> Result<String, String> {
-    let native = Os::this()? == os;
+    let native = Os::current()? == os;
     let (verb, triple) = if native { ("build", host_triple) } else { ("check", os.triple()) };
     if !native {
         let status = Command::new("rustup")
