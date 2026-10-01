@@ -28,6 +28,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::arch::{Accel, Arch};
+use crate::sysroot::git_out;
 use crate::userlandhost::{Host, Os, Program};
 use crate::{flags, release, sdkversion};
 
@@ -837,8 +838,8 @@ fn publish(root: &Path) -> Result<String, String> {
                 .into()
         );
     }
-    let tip = crate::git(root, &["ls-remote", "origin", "refs/heads/main"])?;
-    at_tip(&tip, &crate::git(root, &["rev-parse", "HEAD"])?)?;
+    let tip = git_out(root, &["ls-remote", "origin", "refs/heads/main"]);
+    at_tip(&tip, git_out(root, &["rev-parse", "HEAD"]).trim())?;
     let plan = sdkversion::plan(root)?;
     sdkversion::write_published_manifests(root, &plan)?;
     let mut said = Vec::new();

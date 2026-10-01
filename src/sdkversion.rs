@@ -46,7 +46,7 @@ pub fn plan(root: &Path) -> Result<Vec<Release>, String> {
 
 /// A crate's `HEAD` tree and its manifest.
 fn source(root: &Path, krate: &Crate) -> Result<(String, String), String> {
-    let tree = crate::git(root, &["rev-parse", &format!("HEAD:{}", krate.dir)])?;
+    let tree = crate::sysroot::git_out(root, &["rev-parse", &format!("HEAD:{}", krate.dir)]).trim().to_string();
     Ok((tree, manifest(root, krate)?))
 }
 

@@ -257,9 +257,7 @@ fn place(fork: &Path, key: &Key, dir: &Path, build: &impl Fn(&Path) -> PathBuf) 
     let built = build(fork);
     let host = host_triple();
     let partial = dir.with_extension("partial");
-    if partial.exists() {
-        keystore::remove(&partial);
-    }
+    keystore::remove(&partial);
     for part in KEPT {
         clone_tree(&built.join(&host).join("llvm").join(part), &partial.join(part));
     }

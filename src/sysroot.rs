@@ -18,8 +18,7 @@
 //! it, and a crate built against a sysroot learns which targets' libraries
 //! moved ([`Identity`]). Each build refuses dep-info that says otherwise.
 //!
-//! **Each worktree builds std in its own fork checkout, and nothing but the
-//! primary's own sync moves the primary's.** The primary builds in its `rust/`;
+//! **Each worktree builds std in its own fork checkout.** The primary builds in its `rust/`;
 //! a linked worktree in its own `rust/`, made on first need as a git worktree of
 //! the primary's fork repository at the commit this tree pins ([`fork_checkout`]).
 //! `library/std` names `toyos-abi` and `toyos` as `../../../`, so each
@@ -120,8 +119,7 @@ impl Libraries {
 
 /// A sysroot a build compiles against, held in use for as long as this lives.
 pub struct Sysroot {
-    /// A toolchain directory: `RUSTUP_TOOLCHAIN` names it.
-    pub dir: PathBuf,
+    dir: PathBuf,
     /// Whether its compiler is the primary's, which the ToyOS-hosted rustc is
     /// built from.
     pub primary_compiler: bool,
@@ -137,6 +135,12 @@ impl Sysroot {
     pub(crate) fn installed(stage2: PathBuf, release: &str) -> Self {
         let id = Key::of(release.as_bytes());
         Self { dir: stage2, primary_compiler: true, identity: Identity::new(id.clone(), &id, &id), _using: None }
+    }
+
+    /// Its toolchain directory, which `RUSTUP_TOOLCHAIN` names: lent, never
+    /// handed out, because a sweep may remove it once this is dropped.
+    pub fn dir(&self) -> &Path {
+        &self.dir
     }
 }
 
@@ -598,7 +602,7 @@ fn build(root: &Path, rust_dir: &Path, compiler: &Compiler, fork: &Path, keys: &
             match Libraries::of(target) {
                 Libraries::Worktree => place_std(&stamp(&built, triple), &lib),
                 Libraries::Freestanding => {
-                    remove_tree(&lib);
+                    keystore::remove(&lib);
                     clone_tree(&store.join(triple), &lib);
                 }
             }
@@ -669,11 +673,11 @@ fn publish_toolchain(compiler: Whole, dir: &Path, fill: impl FnOnce(&Path) -> St
 /// or worse refused, and it is replaced.
 fn publish(dir: &Path, fill: impl FnOnce(&Path) -> String) {
     let partial = dir.with_extension("partial");
-    remove_tree(&partial);
+    keystore::remove(&partial);
     let sources = fill(&partial);
     fs::write(partial.join(SOURCES), sources)
         .unwrap_or_else(|e| panic!("write {}: {e}", partial.join(SOURCES).display()));
-    remove_tree(dir);
+    keystore::remove(dir);
     fs::rename(&partial, dir)
         .unwrap_or_else(|e| panic!("rename {} -> {}: {e}", partial.display(), dir.display()));
 }
@@ -717,7 +721,7 @@ fn prepare_std_build(build_dir: &Path, host: &str, identity: &str, targets: &[&s
     // Bootstrap reuses what it built before and does not see a path dependency
     // outside the fork move, so each target's std starts from nothing.
     for target in targets {
-        remove(&build_dir.join(host).join("stage0-std").join(target));
+        keystore::remove(&build_dir.join(host).join("stage0-std").join(target));
     }
 }
 
@@ -745,25 +749,11 @@ fn forget_another_compiler(build_dir: &Path, host: &str, identity: &str) {
         for entry in entries {
             let entry = entry.unwrap_or_else(|e| panic!("read {}: {e}", dir.display()));
             if !kept.iter().any(|name| entry.file_name() == *name) {
-                remove(&entry.path());
+                keystore::remove(&entry.path());
             }
         }
     }
     fs::write(&record, identity).unwrap_or_else(|e| panic!("write {}: {e}", record.display()));
-}
-
-/// Remove `path`, a directory with all it holds or anything else; that nothing
-/// is there is not an error.
-fn remove(path: &Path) {
-    let removed = match fs::symlink_metadata(path) {
-        Ok(meta) if meta.is_dir() => fs::remove_dir_all(path),
-        Ok(_) => fs::remove_file(path),
-        Err(e) => Err(e),
-    };
-    match removed {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => panic!("remove {}: {e}", path.display()),
-        _ => {}
-    }
 }
 
 /// The stamp bootstrap wrote naming every library it built for `target` under
@@ -899,29 +889,6 @@ pub(crate) fn clone_tree(from: &Path, to: &Path) {
         }
     }
 }
-
-/// Remove `dir` and everything in it, including what appears while it goes.
-///
-/// A writer on this host — the leftovers are `.DS_Store` files — can put a file
-/// into a directory while it is being emptied, so a plain recursive delete finds a directory it has just emptied not empty and
-/// stops halfway. The removal runs again over what is left, at most [`PASSES`]
-/// times; a tree still refusing after that has a writer this cannot outrun, and
-/// the panic says so.
-pub(crate) fn remove_tree(dir: &Path) {
-    for pass in 1..=PASSES {
-        match fs::remove_dir_all(dir) {
-            Ok(()) => return,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
-            Err(e) if e.kind() == std::io::ErrorKind::DirectoryNotEmpty && pass < PASSES => {
-                eprintln!("{} gained files while it was removed ({e}); removing again", dir.display());
-            }
-            Err(e) => panic!("remove {}: {e}, after {pass} pass(es)", dir.display()),
-        }
-    }
-}
-
-/// How many times [`remove_tree`] runs over a tree that keeps refusing.
-const PASSES: usize = 10;
 
 fn path_str(path: &Path) -> &str {
     path.to_str().unwrap_or_else(|| panic!("{} is not UTF-8", path.display()))
@@ -1238,7 +1205,8 @@ mod tests {
         let deps = build.join("bootstrap/debug/deps");
         write(&deps.join("libserde-1.rlib"), "built");
         write(&rust_dir.join("build/toyos-compiler"), "tree-2");
-        let mode = |bits| fs::set_permissions(&deps, fs::Permissions::from_mode(bits)).unwrap();
+        // The parent: a removal gives back the write permission of what it removes.
+        let mode = |bits| fs::set_permissions(&build, fs::Permissions::from_mode(bits)).unwrap();
 
         mode(0o555);
         let stuck = std::panic::catch_unwind(|| forget_another_compiler(&build, "host", &identity()));
