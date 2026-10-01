@@ -13826,9 +13826,9 @@ fn run_machine_test(
             // A parent's end takes its children down, on `tests/proctreecase`:
             // a launcher, a declared `cat` and shell, and sshd with a NIC under
             // it and a key staged so it runs. The guest carries every verdict
-            // but two the kernel and sshd speak: the depth refusal names
-            // `MAX_DEPTH` + 1, and both of the guest's sshds bound their port —
-            // the one killed with its shell and the one that outlived its own.
+            // but two the kernel speaks: the depth refusal names `MAX_DEPTH` + 1,
+            // and the one sshd that ended, the one under the killed shell, was
+            // killed rather than ending by itself.
             let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/proctreecase");
             let bins: Vec<(String, Vec<u8>)> =
                 rust_bins.iter().filter(|(name, _)| name == "process_tree").cloned().collect();
@@ -13869,11 +13869,15 @@ fn run_machine_test(
                     "the kernel's depth refusals were {refused:?}, not one naming depth 65:\n{console}"
                 ));
             }
-            let listening = console.matches("sshd: listening on port 22").count();
-            if listening != 2 || console.contains("sshd: cannot bind") {
+            // The kernel names an end once its teardown is done, which is before
+            // the shell's end the guest waited on, and its line may still be on
+            // its way to the console.
+            await_marker(&mut qemu, &mut console, "exit: sshd pid=", "the kernel to name sshd's end")?;
+            let ended: Vec<_> = console.lines().filter(|l| l.contains("exit: sshd pid=")).collect();
+            if ended.len() != 1 || !ended[0].contains(" code=137 ") {
                 return Err(format!(
-                    "sshd said it was listening {listening} times, not once per sshd the guest \
-                     started — an arm about one that never ran asserts nothing:\n{console}"
+                    "the sshd ends were {ended:?}, not the one under the killed shell, killed — \
+                     an sshd that ended by itself makes its arm assert nothing:\n{console}"
                 ));
             }
             eprintln!("  [proctreecase] every end took its subtree, and the chain stopped at depth 65");
