@@ -40,6 +40,10 @@ pub const DISABLED: &[Disabled] = &[
         test: "i8042_mouse",
         issue: "issues/hardware/i8042-mouse-ends-four-packets-short-with-a-clean-exit.md",
     },
+    Disabled {
+        test: "iommu_virtio_platform",
+        issue: "issues/build/iommu-virtio-platform-reads-netds-lines-off-a-boot-log-that-ends-before-them.md",
+    },
     Disabled { test: "kill_while_blocked", issue: "issues/kernel/deferred-release-outlives-its-syscall.md" },
     Disabled {
         test: "lan_dhcp_lease",
