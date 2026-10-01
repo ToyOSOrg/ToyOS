@@ -73,8 +73,8 @@ pub fn dispatch(root: &Path, args: &[String]) {
         std::process::exit(2);
     });
     let steps = match &job {
-        Job::Host => host(root, false),
-        Job::Seal => host(root, true),
+        Job::Host => host(root),
+        Job::Seal => seal(root),
         Job::Toolchain => vec![step("the toolchain release", || release::ensure_published(root))],
         Job::Guest => guest(root, &suite_args(&["--jobs", "1"])),
         Job::Publish => vec![step("the SDK crates on crates.io", || publish(root))],
@@ -473,16 +473,9 @@ fn run_control(root: &Path, control: &Control) -> Result<String, String> {
 /// host triple for the same reason.
 ///
 /// In a job that carries the cache ([`cicache::carried`]) the restored entry is
-/// read before any step. `seal`'s job, the one that saves the entry, instead
-/// starts from a cold tree and seals it after the last step. A developer's
-/// tree keeps the dates its edits gave it.
-fn host(root: &Path, seals: bool) -> Vec<Step> {
+/// read before any step. A developer's tree keeps the dates its edits gave it.
+fn host(root: &Path) -> Vec<Step> {
     let carried = cicache::carried(root, &std::env::current_exe().expect("the driver's own path"));
-    if seals && !carried {
-        return vec![step("a cold tree, for the entry", || {
-            Err(format!("only a job whose driver is built in {} seals its tree", cicache::DRIVER))
-        })];
-    }
     let tmp = toyos_tmpdir::TempDir::new("ci-host");
     let short = Path::new(toyos_tmpdir::SHORT_BASE);
     let before = toyos_tmpdir::gone_roots(short);
@@ -491,18 +484,9 @@ fn host(root: &Path, seals: bool) -> Vec<Step> {
     std::env::set_var("TMPDIR", tmp.path());
     let host_triple = crate::toolchain::host_triple();
     let mut steps = Vec::new();
-    let mut cold = None;
     if carried {
         carry();
-        steps.push(if seals {
-            step("a cold tree, for the entry", || {
-                let (found, said) = cicache::cold(root)?;
-                cold = Some(found);
-                Ok(said)
-            })
-        } else {
-            step("the cache entry, read by content", || cicache::read(root))
-        });
+        steps.push(step("the cache entry, read by content", || cicache::read(root)));
         // Every step after an unreadable entry would be judged against it.
         if steps[0].verdict.is_err() {
             return steps;
@@ -580,9 +564,20 @@ fn host(root: &Path, seals: bool) -> Vec<Step> {
         cargo(root, &["test", "--manifest-path", "toyos/Cargo.toml", "--target", &host_triple])
     }));
     steps.push(step("nothing left in $TMPDIR or /tmp", || left_behind(&tmp, short, &before)));
-    if let Some(cold) = &cold {
-        steps.push(step("the tree, sealed as the host cache's entry", || cicache::seal(root, cold)));
-    }
+    steps
+}
+
+/// [`host`] from a cold tree, then that tree sealed as the host cache's entry.
+fn seal(root: &Path) -> Vec<Step> {
+    let mut cold = None;
+    let mut steps = vec![step("a cold tree, for the entry", || {
+        let (found, said) = cicache::cold(root)?;
+        cold = Some(found);
+        Ok(said)
+    })];
+    let Some(cold) = cold else { return steps };
+    steps.extend(host(root));
+    steps.push(step("the tree, sealed as the host cache's entry", || cicache::seal(root, &cold)));
     steps
 }
 
@@ -934,7 +929,6 @@ fn at_tip(ls_remote: &str, head: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workflow::{self, Node};
 
     /// A deterministic control on `host`'s `std::env::set_var("TMPDIR", ...)`:
     /// delete that line and every child writes to the real `$TMPDIR` instead of
@@ -1167,162 +1161,6 @@ mod tests {
             }
         }
         assert_eq!(seen, 3, "ci.yml, nightly.yml and publish.yml");
-    }
-
-    /// Each cache, by what every key and restore key of a step that names it
-    /// begins with, up to its first expression.
-    const CACHES: [&str; 2] = [cicache::SEALED, "guest-"];
-
-    /// What the host cache's key and its reader's restore key say after
-    /// [`cicache::SEALED`]: one entry per run, found by the runner's OS and
-    /// architecture.
-    const HOST_KEYS: [&str; 2] = ["${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}", "${{ runner.os }}-${{ runner.arch }}-"];
-
-    /// The jobs that name the host cache, its one reader and its one writer:
-    /// the condition each runs under, since a skipped job is a green check, and
-    /// its steps. The reader restores before its run; the writer restores
-    /// nothing and saves after its run.
-    const HOST_CACHE: [(&str, &str, &str, [&str; 3]); 2] = [
-        ("ci.yml", "host", "github.event_name == 'merge_group' || github.event.pull_request.draft == false", [
-            "actions/checkout",
-            "actions/cache/restore",
-            "run: cargo run -- --ci host",
-        ]),
-        ("nightly.yml", "host", "github.ref == 'refs/heads/main'", [
-            "actions/checkout",
-            "run: cargo run -- --ci seal",
-            "actions/cache/save",
-        ]),
-    ];
-
-    /// Every key of `node` is one of `allowed`.
-    fn keys(at: &str, node: &Node, allowed: &[&str]) {
-        for (key, value) in node.map().expect(at) {
-            assert!(allowed.contains(&key.as_str()), "{at}: line {}: `{key}`, where only {allowed:?} may be", value.line);
-        }
-    }
-
-    /// The action a step uses, without its version and in GitHub's case:
-    /// GitHub does not tell `Actions/Cache` from `actions/cache`.
-    fn action(at: &str, step: &Node) -> Option<String> {
-        let uses = step.get("uses").expect(at)?;
-        Some(uses.str().expect(at).split('@').next().unwrap_or_default().to_ascii_lowercase())
-    }
-
-    /// Each step of `job` that restores or saves a cache: the cache its keys
-    /// name, and whether it saves. A key that names no cache, a step whose
-    /// keys name two, and the action that restores and saves in one are
-    /// refused.
-    fn caches(at: &str, job: &Node) -> Vec<(&'static str, bool)> {
-        let Some(steps) = job.get("steps").expect(at) else { return Vec::new() };
-        let mut found = Vec::new();
-        for step in steps.seq().expect(at) {
-            let save = match action(at, step).as_deref() {
-                Some("actions/cache") => panic!("{at}: line {}: the combined action saves too", step.line),
-                Some("actions/cache/restore") => false,
-                Some("actions/cache/save") => true,
-                _ => continue,
-            };
-            let with = step.get("with").expect(at).unwrap_or_else(|| panic!("{at}: line {}: a cache step names no key", step.line));
-            let mut keys = vec![with.get("key").expect(at).unwrap_or_else(|| panic!("{at}: a cache step names no key"))];
-            keys.extend(with.get("restore-keys").expect(at));
-            let heads: Vec<&str> = keys
-                .iter()
-                .flat_map(|key| key.str().expect(at).lines().map(str::trim).filter(|key| !key.is_empty()))
-                .map(|key| key.split("${{").next().unwrap_or_default())
-                .collect();
-            let cache = CACHES
-                .into_iter()
-                .find(|cache| heads.iter().all(|head| head == cache))
-                .unwrap_or_else(|| panic!("{at}: line {}: keys {heads:?}, where each names one of {CACHES:?}", step.line));
-            found.push((cache, save));
-        }
-        found
-    }
-
-    /// One step of a job that names the host cache, held to the keys it may
-    /// have: its action, or `run:` and its line.
-    fn host_step(at: &str, step: &Node) -> String {
-        if let Some(run) = step.get("run").expect(at) {
-            keys(at, step, &["run"]);
-            return format!("run: {}", run.str().expect(at));
-        }
-        keys(at, step, &["uses", "with"]);
-        let action = action(at, step).unwrap_or_else(|| panic!("{at}: line {}: a step with no `run:` or `uses:`", step.line));
-        let with = step.get("with").expect(at);
-        let restore = match action.as_str() {
-            "actions/checkout" => {
-                with.into_iter().for_each(|with| keys(at, with, &["fetch-depth"]));
-                return action;
-            }
-            "actions/cache/restore" => Some(HOST_KEYS[1]),
-            "actions/cache/save" => None,
-            other => panic!("{at}: line {}: `{other}`", step.line),
-        };
-        let with = with.unwrap_or_else(|| panic!("{at}: line {}: a cache step with no `with:`", step.line));
-        keys(at, with, &["path", "key", "restore-keys"]);
-        let text = |key: &str| with.get(key).expect(at).map(|node| node.str().expect(at).to_string());
-        let paths = text("path").unwrap_or_default();
-        let paths: Vec<&str> = paths.lines().map(str::trim).filter(|path| !path.is_empty()).collect();
-        assert_eq!(paths, cicache::PATHS, "{at}: line {}: the host cache's paths", with.line);
-        let sealed = |rest: &str| Some(format!("{}{rest}", cicache::SEALED));
-        assert_eq!(text("key"), sealed(HOST_KEYS[0]), "{at}: line {}: the host cache's key", with.line);
-        assert_eq!(text("restore-keys"), restore.and_then(sealed), "{at}: line {}: its restore key", with.line);
-        action
-    }
-
-    /// What a job that names the host cache may be: one of [`HOST_CACHE`], its
-    /// keys and its workflow's in a closed allow-list, with no anchor, alias or
-    /// tag in it. No step has a condition of its own, so the writer's save has
-    /// GitHub's, `success()`, and follows only a green run; the job's verdict
-    /// is the driver's.
-    fn the_driver_alone(at: &str, workflow: &Node, job: &Node, condition: &str, steps: [&str; 3]) {
-        keys(at, workflow, &["name", "on", "concurrency", "jobs"]);
-        if let Some(line) = job.mark() {
-            panic!("{at}: line {line}: an anchor, an alias or a tag");
-        }
-        keys(at, job, &["if", "runs-on", "timeout-minutes", "env", "steps"]);
-        let condition_given = job.get("if").expect(at).map(|node| node.str().expect(at));
-        assert_eq!(condition_given, Some(condition), "{at}: the condition it runs under");
-        let env = job.get("env").expect(at).unwrap_or_else(|| panic!("{at}: no `env:`"));
-        let env: Vec<(&str, &str)> = env.map().expect(at).iter().map(|(k, v)| (k.as_str(), v.str().expect(at))).collect();
-        assert_eq!(env, [("CARGO_TARGET_DIR", cicache::DRIVER)], "{at}: the job's environment");
-        let given = job.get("steps").expect(at).unwrap_or_else(|| panic!("{at}: no `steps:`"));
-        let given: Vec<String> = given.seq().expect(at).iter().map(|step| host_step(at, step)).collect();
-        assert_eq!(given, steps, "{at}: its steps");
-    }
-
-    /// Exactly one job writes each cache, on the nightly, so what a pull request
-    /// restores is one run's tree and never a race between two writers. The
-    /// host cache is named by ci.yml's `host`, which reads it, and nightly.yml's
-    /// `host`, which writes it, and by no other job; each builds the driver in
-    /// [`cicache::DRIVER`], so it carries the cache, and runs the driver alone
-    /// ([`the_driver_alone`]). The writer restores nothing and its run is
-    /// `seal`'s, so it saves only a tree that `seal` began cold and sealed.
-    #[test]
-    fn each_cache_has_one_writer() {
-        let mut host = Vec::new();
-        let mut writers = Vec::new();
-        for (file, workflow) in workflow::all(&repo_root()).expect("the workflows") {
-            let jobs = workflow.get("jobs").expect(&file).unwrap_or_else(|| panic!("{file}: no `jobs:`"));
-            for (job, node) in jobs.map().expect(&file) {
-                let at = format!("{file} {job}");
-                let caches = caches(&at, node);
-                if caches.iter().any(|(cache, _)| *cache == cicache::SEALED) {
-                    let held = HOST_CACHE.iter().find(|(f, j, ..)| *f == file.as_str() && *j == job.as_str());
-                    let &(.., condition, steps) = held.unwrap_or_else(|| panic!("{at}: names the host cache"));
-                    the_driver_alone(&at, &workflow, node, condition, steps);
-                    host.push((file.clone(), job.clone()));
-                }
-                writers.extend(caches.into_iter().filter(|(_, save)| *save).map(|(cache, _)| (cache, at.clone())));
-            }
-        }
-        let expected: Vec<(String, String)> = HOST_CACHE.iter().map(|(f, j, ..)| (f.to_string(), j.to_string())).collect();
-        assert_eq!(host, expected, "the jobs that name the host cache");
-        for cache in CACHES {
-            let theirs: Vec<&String> = writers.iter().filter(|(c, _)| *c == cache).map(|(_, at)| at).collect();
-            assert!(theirs.len() == 1 && theirs[0].starts_with("nightly.yml "), "{cache}: written by {theirs:?}");
-        }
     }
 
     #[test]

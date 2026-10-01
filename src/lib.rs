@@ -49,9 +49,6 @@ pub mod tether;
 pub mod toolchain;
 pub mod userlandhost;
 pub mod wallpaper;
-/// Read by gates alone, so it is not compiled into the build system at all.
-#[cfg(test)]
-pub mod workflow;
 pub mod worktree;
 
 use std::path::{Path, PathBuf};

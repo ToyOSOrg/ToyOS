@@ -48,11 +48,10 @@ use sha2::{Digest, Sha256};
 
 const MANIFEST: &str = "target/ci-sources";
 pub const DRIVER: &str = "target/ci-driver";
-pub const SEALED: &str = "host-sealed-";
 
 /// What every step that names the host cache archives: the cache's version is
 /// computed from the list, so a restore whose list differs finds nothing.
-pub const PATHS: [&str; 8] = [
+const PATHS: [&str; 8] = [
     "~/.cargo/registry/index",
     "~/.cargo/registry/cache",
     "~/.cargo/git/db",
@@ -105,6 +104,9 @@ pub fn read(root: &Path) -> Result<String, String> {
 /// its checkout and the driver, with every source dated [`built`], so that the
 /// seal sees a step that writes one.
 pub fn cold(root: &Path) -> Result<(Cold, String), String> {
+    if !carried(root, &std::env::current_exe().map_err(|e| format!("the driver's own path: {e}"))?) {
+        return Err(format!("only a job whose driver is built in {DRIVER} seals its tree"));
+    }
     start(root, &runner(|name| std::env::var(name).ok())?)
 }
 

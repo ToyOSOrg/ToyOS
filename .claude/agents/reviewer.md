@@ -80,6 +80,13 @@ above; otherwise it is a NOTE.
   or `[patch]`, which cargo ignores with only a warning; a new package without a `description`
   saying what it is.
   A new cargo feature or `cfg` arm of one, and every arm a changed `src/clippy.rs` shape stops building, is shown linted in the pull request body: a `mem::forget` planted in that arm turns `cargo run -- --clippy` red.
+- **Caches.** No gate reads these; a diff that breaks one is a BLOCKER. Each cache has one
+  writer, a nightly.yml job; the host cache's is nightly's `host`, and its one reader ci.yml's
+  `host`, on the same `runs-on`, both caching `src/cicache.rs`'s `PATHS`. A job that names the
+  host cache runs `actions/checkout`, its cache step and `cargo run -- --ci <job>`, and nothing
+  else. The save's guard, `github.ref == 'refs/heads/main'`, is the only step-level `if:` in those
+  jobs, and ci.yml's `host` skips only a draft. No `continue-on-error`, `shell:`, `defaults:` or
+  cargo `runner` reaches them. nightly.yml's `on:` is one daily `schedule` and `workflow_dispatch`.
 - **Growth.** Every line is a responsibility, not an asset. State the branch's net lines
   (`git diff --shortstat origin/main...HEAD`), production and tests apart. Production code that grows
   needs a reason you accept; a branch that could delete more than it adds and does not goes back
@@ -93,6 +100,10 @@ above; otherwise it is a NOTE.
 - **Tests.** The refusals and the boundary, not the happy path. Write down the partial fix or
   one-field mutation that would still pass, as a patch the implementer can apply. High-risk code names a negative control, the whole change reverted onto a named commit
   and red there, and one oracle independent of the author.
+  A mistake a type makes unrepresentable needs no test: a change that no longer compiles is not a
+  surviving mutation, and a review asks for no test of it.
+  A rule a reviewer can check by reading the diff lives in this prompt, not in a gate; a gate is
+  code only for what reading cannot see — runtime behaviour, bytes, measurements.
 - **Edges.** Untrusted input never panics the kernel; it is refused. Check-then-act races. A lock
   held across a user copy or a device wait. Arithmetic on a value the caller chooses. A short
   read, an exit status nobody reads. An `at_most(<int>::MAX)` or `index(usize::MAX)` on an
