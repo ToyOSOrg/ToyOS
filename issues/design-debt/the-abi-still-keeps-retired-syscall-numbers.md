@@ -17,6 +17,9 @@ still keeps them:
   or "retired and unused" entry per deleted syscall, `SYS_DEBUG` action and
   inbox op, `SYS_INBOX_SETUP`'s doc states the retirement rule, and
   `kernel/src/inbox/mod.rs` names op 2 retired.
+- `toyos-abi/src/syscall.rs`'s `device_classes!` keeps device classes 3 (`Nic`)
+  and 4 (`Audio`) "retired rather than reused", and the decode test in
+  `toyos-abi/src/inventory.rs` refuses them as retired.
 - `tests/toyos-rust-tests/src/bin/log_hold.rs`,
   `tests/toyos-rust-tests/src/bin/panic_halts_first.rs`,
   `tests/common/origin.rs` and `tests/toyos.rs` take syscall 26 as their logged
@@ -34,3 +37,6 @@ still keeps them:
 **Exit**: `retired_syscalls!` and every retirement entry are gone, a deleted
 number answers as an unassigned one does, the four test sites take their logged
 refusal from something live, and no issue plans by retirement.
+
+Owner: `toyos-abi` and `kernel/src/syscall/dispatch.rs`, whoever next changes
+the ABI.

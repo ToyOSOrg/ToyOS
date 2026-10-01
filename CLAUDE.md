@@ -38,13 +38,13 @@ A subdirectory `CLAUDE.md` loads when a file in that subtree is `Read`, and not 
 
 > A snapshot, deliberately shallow — always read the code.
 
-**Kernel** — minimal; new additions are discussed and justified. Resource management, scheduling, process lifecycle, filesystem, device arbitration. 2 MB pages, demand paging, PIE binaries, full SMP.
+**Kernel** — takes on only what userland cannot. Resource management, scheduling, process lifecycle, device arbitration; files: see Capabilities. 2 MB pages, demand paging, PIE binaries, full SMP.
 
 **Userspace daemons** — compositor, netd, soundd, sshd, logd. Each claims a device or capability from the kernel and serves its function; crash one and the kernel is fine.
 
 **The log is a userland file.** `/system/bin/logd` reads records on a cursor and owns `/log`; the kernel keeps the record ring, the console and the panel, and writes no file. `SYS_FSYNC` reaches the device's cache flush because logd's durability claim rests on it.
 
-**Syscall ABI** — `toyos-abi/`: struct layouts, syscall numbers, typed wrappers; completely unstable. The cleanest, most sustainable ABI beats convenience: add, change or remove syscalls; a removed number is free. `toyos/` builds on it with typed handles, IPC framing, ports, namespaces and `surface` — userland uses `toyos`, the kernel uses `toyos-abi` only.
+**Syscall ABI** — `toyos-abi/`: struct layouts, syscall numbers, typed wrappers; completely unstable. The cleanest, most sustainable ABI beats convenience; a removed number is free. `toyos/` builds on it with typed handles, IPC framing, ports, namespaces and `surface` — userland uses `toyos`, the kernel uses `toyos-abi` only.
 
 **Capabilities** — a process holds exactly what its parent moved into it, and among kernel objects there is nothing it can name to get more. No registry, no connect-by-name, no pid-as-authority: `/system/bin/init` builds every program's namespace and device claims from `system.toml` before spawning it, and a handle a process does not hold is a bug in that process — the kernel ends it rather than answering a word it can ignore. **Isolation is non-negotiable, and the filesystem is inside it**: a process names only the paths in the view its parent built for it, the unit of isolation is the program, and a user is the part of the tree a session was handed. Not yet true of files: the kernel still resolves every path against one machine-wide tree until the storage track's per-program views land.
 

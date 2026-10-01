@@ -42,9 +42,8 @@ above; otherwise it is a NOTE.
 - **Fit.** Does the tree already do this? Is each new thing where it belongs: a pure decision in a
   pure crate, the user/kernel boundary in `toyos-userbound`, a device claim in a userland server?
   One declaration read by every reader, refusal by name, authority moved in by the parent. Zero
-  legacy: no shim, no workaround, no silent default. A BLOCKER each: a kernel addition, or a
-  kernel path the branch keeps, that a userland server could own; a design made worse to spare
-  the ABI. No new
+  legacy: no shim, no workaround, no silent default. A BLOCKER each: a kernel addition that
+  userland could own; a design made worse to spare the ABI. No new
   dependency or fetch. Nothing outside the brief's fence.
   Assembly, a naked function and a `core::arch` or `std::arch` path live only in an
   architecture's own module; `target_arch` only there, in its selector, in `src/arch.rs` and in

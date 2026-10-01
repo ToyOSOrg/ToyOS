@@ -14,10 +14,9 @@ One brief, one worktree, one branch. What the brief does not name you do not tou
 find off your path is filed in `issues/`, never fixed. If something blocks you, stop and say so in
 one clause; do not work around it.
 
-Before adding or keeping kernel behaviour, ask whether a userland server can own it: the kernel
-does only what only a kernel can (address spaces, scheduling, handles and capabilities, interrupts,
-device arbitration). When the clean design changes the ABI, change the ABI; never pick a lesser
-design to avoid that.
+Before adding kernel behaviour, ask whether userland can own it. When the clean design changes the
+ABI, change the ABI; never pick a lesser design to avoid that. A clean design that reaches past
+your fence blocks you.
 
 ## Measure, build, test
 
