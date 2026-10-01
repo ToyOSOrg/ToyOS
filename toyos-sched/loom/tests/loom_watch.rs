@@ -31,9 +31,9 @@
 //!
 //! **The ring entry is the kernel's [`Once`], compiled from
 //! `kernel/src/inbox/once.rs`**, the decision a `PollEntry` makes; what else a
-//! `PollEntry` is — the ring's page, its lock, the completion it writes — names
-//! half the kernel and cannot be compiled here, so the model's entry counts its
-//! answers instead of writing them.
+//! `PollEntry` is — the ring's page, its lock, the look it owes — names half the
+//! kernel and cannot be compiled here, so the model's entry counts its answers
+//! instead.
 //!
 //! [`TaskShared::notify`]: toyos_sched_loom::task::TaskShared::notify
 //! [`Gate`]: toyos_sched_loom::watch::Gate
@@ -64,6 +64,8 @@ mod once;
 struct Poll {
     state: once::Once,
     posts: AtomicU32,
+    /// Whether the end of its source is what took it.
+    ended: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -74,6 +76,7 @@ impl Entry {
         Self(Arc::new(Poll {
             state: once::Once::new(),
             posts: AtomicU32::new(0),
+            ended: AtomicBool::new(false),
         }))
     }
 
@@ -83,8 +86,14 @@ impl Entry {
 }
 
 impl Ring for Entry {
-    fn fire(&self, _how: Fire) {
-        if self.0.state.fire() {
+    // As the kernel's `PollEntry`: readiness fires the poll, an end ends it.
+    fn fire(&self, how: Fire) {
+        let took = match how {
+            Fire::Ready => self.0.state.fire(),
+            Fire::Gone => self.0.state.end(),
+        };
+        if took {
+            self.0.ended.store(how == Fire::Gone, Ordering::Release);
             self.0.posts.fetch_add(1, Ordering::AcqRel);
         }
     }
@@ -369,6 +378,11 @@ fn end_racing(end: fn(&World), post: fn(&World)) {
 
     assert_eq!(poll.posts(), 1);
     assert!(!poll.live());
+    assert_eq!(
+        poll.0.state.ended(),
+        poll.0.ended.load(Ordering::Acquire),
+        "the one-shot names the wrong taker"
+    );
     drop(world);
 }
 
@@ -644,8 +658,8 @@ fn a_poll_on_two_watches_racing_both_posts_completes_exactly_once() {
     });
 }
 
-/// A poll ring as the kernel's is: its completions behind a lock of its own,
-/// and a watch its submitter parks on, which holds threads and no ring.
+/// A poll ring: its completions behind a lock of its own, and a watch its
+/// submitter parks on, which holds threads and no ring.
 struct PollRing {
     cpus: CpuHandles<Msg>,
     kicks: Kicks,
@@ -664,8 +678,12 @@ struct RingEntry(Arc<RingPoll>);
 type RingWatch = Watch<Msg, RingEntry, LoomLock<Waiters<Msg, RingEntry>>>;
 
 impl Ring for RingEntry {
-    fn fire(&self, _how: Fire) {
-        if self.0.state.fire() {
+    fn fire(&self, how: Fire) {
+        let took = match how {
+            Fire::Ready => self.0.state.fire(),
+            Fire::Gone => self.0.state.end(),
+        };
+        if took {
             let ring = &self.0.ring;
             ring.written.with(|n| *n += 1);
             let env = Poster { cpus: &ring.cpus, kicker: &ring.kicks, preempt: &RemoteGuard };

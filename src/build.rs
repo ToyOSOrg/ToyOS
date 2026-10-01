@@ -2677,6 +2677,10 @@ mod tests {
                 // turned on only by `kernel-loom`, to split `inbox/once.rs`'s
                 // exchange and prove `poll_once` reds without it.
                 "poll-fire-load-store",
+                // Costs no kernel build: turned on only by `kernel-loom`, so
+                // `inbox/polls.rs` answers a fired poll without a look and
+                // `inbox_answer` reds.
+                "post-is-an-answer",
                 "reap-raise-relaxed",
                 // `smp_roster.rs`'s count relaxed; `smp_bringup.rs` reds.
                 "roster-commit-relaxed",

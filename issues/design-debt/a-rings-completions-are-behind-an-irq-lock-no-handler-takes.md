@@ -13,8 +13,10 @@ Since a post only owes the poll a look (`kernel/src/inbox/polls.rs`), every
 completion is written by the ring's own submitter or by the
 `handler-post` actuator's `Staged` ring, both in thread context, and no
 handler reaches the lock. Each completion written still masks interrupts for
-the write, and `handler-post`'s middle arm (`in_a_ring`) stages a handler
-inside a section no handler's post enters any more.
+the write; `handler-post`'s middle arm (`in_a_ring`) stages a handler inside
+a section no handler's post enters any more; and `toyos-sched/loom`'s
+`two_posts_through_one_rings_lock_lose_no_wake` models a fire that takes a
+ring's lock, which no fire does.
 
 **Exit**: the completions sit behind a lock that leaves interrupts open, and
-`handler-post` stages only sections a handler's post can reach.
+`handler-post` and the loom models stage only nestings a post can reach.

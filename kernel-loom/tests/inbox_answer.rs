@@ -24,7 +24,7 @@
 #![cfg(feature = "loom")]
 
 use std::cell::{Cell, RefCell};
-use std::rc::Rc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use kernel_loom::inbox_polls::{deliver, Look, Poll, Polls, Submitter, Wake};
@@ -44,11 +44,11 @@ const NOTHING: [(u64, i32); 0] = [];
 
 /// What a fire tells: a count, standing in for the ring's waiter.
 #[derive(Clone, Default)]
-struct Owed(Rc<Cell<u32>>);
+struct Owed(Arc<AtomicU32>);
 
 impl Wake for Owed {
     fn owe(&self) {
-        self.0.set(self.0.get() + 1);
+        self.0.fetch_add(1, Ordering::Relaxed);
     }
 }
 
