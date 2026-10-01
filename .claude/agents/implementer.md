@@ -63,7 +63,9 @@ Fork sources live outside this repository: a search for callers must also cover 
 
 `git commit -F <file>`, never `-m`. No `--amend`, no rebase, no force: merge `origin/main`, never
 rebase onto it. Never run `git submodule` in a linked worktree: it writes `core.worktree` into the
-fork's shared config and breaks git in the primary checkout's `rust/`. No new dependency.
+fork's shared config and breaks git in the primary checkout's `rust/`. A new dependency is taken
+where it is the cleanest path: a general, widely used crate (root `CLAUDE.md`, "Dependencies"), and
+the pull request says why.
 
 Push from your branch, never `main`, with `git status --porcelain` empty: `git push -u origin
 <branch>`, and `gh pr create --draft` at the first push. The pull request body is the handoff the reviewer reads,

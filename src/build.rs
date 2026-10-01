@@ -1081,6 +1081,8 @@ impl Boot {
 /// is a test image and is not here.
 pub struct Shipped {
     pub crates: BTreeSet<(PathBuf, Features)>,
+    /// `crates` but the kernel and the loader: every program an image runs.
+    pub programs: BTreeSet<(PathBuf, Features)>,
     pub assets: BTreeSet<PathBuf>,
 }
 
@@ -1090,6 +1092,7 @@ pub struct Shipped {
 /// the rust fork's `compiler/` workspace, which no reader of this answer walks.
 pub fn shipped(root: &Path) -> Result<Shipped, String> {
     let mut crates = BTreeSet::new();
+    let mut programs = BTreeSet::new();
     let mut assets = BTreeSet::new();
     for boot in [Boot::shipped(root), Boot::diag(root), Boot::console(root)] {
         let config = parse_config(&boot.config);
@@ -1099,10 +1102,15 @@ pub fn shipped(root: &Path) -> Result<Shipped, String> {
                 boot.config.display()
             ));
         }
-        crates.extend(config_crates(root, &config).into_iter().map(|c| (c.dir, c.features)));
+        for c in config_crates(root, &config) {
+            if matches!(c.built, Built::Member | Built::Standalone) {
+                programs.insert((c.dir.clone(), c.features));
+            }
+            crates.insert((c.dir, c.features));
+        }
         assets.extend(config.assets.iter().map(|dir| root.join(dir)));
     }
-    Ok(Shipped { crates, assets })
+    Ok(Shipped { crates, programs, assets })
 }
 
 /// The parameters an image built for flashing may carry: the kernel's own boot
@@ -2245,6 +2253,9 @@ mod tests {
                 shipped.crates
             );
         }
+        let (kernel, loader) = (root.join("kernel"), root.join("bootloader"));
+        let programs = shipped.crates.iter().filter(|(dir, _)| *dir != kernel && *dir != loader);
+        assert_eq!(shipped.programs, programs.cloned().collect());
     }
 
     /// **A standalone crate's clean takes all its guest build wrote — the

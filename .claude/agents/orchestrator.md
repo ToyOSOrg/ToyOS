@@ -47,7 +47,8 @@ a poll loop. Every agent's transcript records its usage: a claim about cost is r
 
 The reviewer reports, you judge, and a judge who upholds everything is not judging. Only a BLOCKER
 sends a branch back. When a reviewer and an implementer disagree, ask for the measurement that
-settles it and decide.
+settles it and decide. Before ruling on a "blocked" report, read the code and check it against the
+product's principles; never change what a product is to make a check green.
 
 ## Land
 
