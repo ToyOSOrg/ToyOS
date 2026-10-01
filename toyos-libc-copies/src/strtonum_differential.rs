@@ -22,8 +22,11 @@ const ERANGE: c_int = 34;
 const EINVAL: c_int = 22;
 
 /// What the host's reader answers for `s`: the value, where it ends, `errno`.
+///
+/// `end` starts at `s`, which is where C says a reading that converts nothing
+/// ends: glibc leaves it unwritten for a base C does not define.
 fn host<T>(s: &CString, read: impl Fn(*const u8, *mut *mut u8) -> T) -> (T, usize, c_int) {
-    let mut end = std::ptr::null_mut();
+    let mut end = s.as_ptr().cast::<u8>().cast_mut();
     // SAFETY: the host's errno slot is this thread's.
     unsafe { *errno_location() = 0 };
     let value = read(s.as_ptr().cast(), &mut end);
