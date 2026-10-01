@@ -42,8 +42,8 @@ use std::sync::OnceLock;
 
 use crate::buildlock::{Guard, Keyed};
 use crate::compiler::{llvm_commit, LLVM};
-use crate::keystore;
-use crate::sysroot::{clone_tree, git_bytes, git_out, short};
+use crate::keystore::{self, Key};
+use crate::sysroot::{clone_tree, git_bytes, git_out};
 use crate::toolchain::{self, host_triple};
 
 /// What changes how a key's sources become an LLVM and is none of the other
@@ -123,15 +123,15 @@ pub fn store(rust_dir: &Path) -> PathBuf {
 
 /// The key of the LLVM `fork` names; refused while its `src/bootstrap` holds
 /// changes no commit does.
-pub fn key(fork: &Path) -> String {
+pub fn key(fork: &Path) -> Key {
     let tools = host_tools();
     key_of(fork, RECIPE, &config_text(Path::new(KEYED_BUILD_DIR), &host_triple(), tools), &tools.identity)
 }
 
-fn key_of(fork: &Path, recipe: &str, config: &str, tools: &str) -> String {
+fn key_of(fork: &Path, recipe: &str, config: &str, tools: &str) -> Key {
     refuse_uncommitted_bootstrap(fork);
     let bootstrap = git_out(fork, &["rev-parse", &format!("HEAD:{BOOTSTRAP}")]);
-    short([recipe, config, &llvm_commit(fork), bootstrap.trim(), tools].join("\n\0\n").as_bytes())
+    Key::of([recipe, config, &llvm_commit(fork), bootstrap.trim(), tools].join("\n\0\n").as_bytes())
 }
 
 /// Give `command` nothing of this process's environment but [`ENVIRONMENT`].
@@ -252,7 +252,7 @@ fn refuse_uncommitted_bootstrap(fork: &Path) {
 
 /// Build the LLVM `key` names from `fork` and put it at `dir`. The caller holds
 /// the key's lock.
-fn place(fork: &Path, key: &str, dir: &Path, build: &impl Fn(&Path) -> PathBuf) {
+fn place(fork: &Path, key: &Key, dir: &Path, build: &impl Fn(&Path) -> PathBuf) {
     eprintln!("Building LLVM {key} in {}: nobody on this host has", fork.display());
     let built = build(fork);
     let host = host_triple();
@@ -270,7 +270,7 @@ fn place(fork: &Path, key: &str, dir: &Path, build: &impl Fn(&Path) -> PathBuf) 
     // refuses a bootstrap the build left holding what no commit does.
     let again = self::key(fork);
     assert!(
-        again == key,
+        again == *key,
         "the fork's LLVM sources moved while LLVM {key} was being built (they now name {again}); \
          nothing was kept, and the next build makes the one they name"
     );
@@ -762,7 +762,7 @@ mod tests {
         let out = rerun.env(FORK, &fork).env(ROOT, &*scratch).envs(AMBIENT).output().unwrap();
         assert!(out.status.success(), "{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         let built = fork.join("build/toyos-llvm");
-        assert_eq!(fs::read_to_string(built.join("key")).unwrap(), key(&fork), "the caller's environment moved the key");
+        assert_eq!(fs::read_to_string(built.join("key")).unwrap(), key(&fork).as_str(), "the caller's environment moved the key");
         let seen = fs::read_to_string(built.join("environment")).unwrap();
         let allowed = ["PATH", "TMPDIR", "BOOTSTRAP_SKIP_TARGET_SANITY", "PWD", "OLDPWD", "SHLVL", "_"];
         for name in seen.lines().filter_map(|l| l.split_once('=')).map(|(name, _)| name) {
@@ -784,7 +784,7 @@ mod tests {
         let root = PathBuf::from(std::env::var(ROOT).unwrap_or_else(|_| panic!("keyed_and_built ran without {ROOT}; it is not a test")));
         let key = key(&fork);
         let built = build_in_fork(&root, &fork);
-        fs::write(built.join("key"), key).unwrap();
+        fs::write(built.join("key"), key.as_str()).unwrap();
     }
 
     /// **A gitlink staged and not committed names no LLVM**: bootstrap checks
