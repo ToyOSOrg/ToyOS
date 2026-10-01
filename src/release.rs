@@ -19,6 +19,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -27,7 +28,7 @@ use toyos_tmpdir::TempDir;
 use crate::buildlock::Keyed;
 use crate::keystore::Key;
 
-const ASSET: &str = "toyos-toolchain.tar.zst";
+const ASSET: &str = "toyos-toolchain.tar.gz";
 
 /// Main's publisher: the one workflow [`release`] runs under.
 const PUBLISHER: &str = ".github/workflows/nightly.yml";
@@ -38,7 +39,7 @@ const HOST: &str = "x86_64-unknown-linux-gnu";
 /// one is refused.
 const GLIBC_FLOOR: (u32, u32) = (2, 39);
 
-/// What every request this file makes of GitHub says it comes from.
+/// What every request the build system makes says it comes from.
 const USER_AGENT: &str = "toyos-build (https://github.com/ToyOSOrg/ToyOS)";
 
 /// The stores a toolchain is, in the order a build makes them, each under the
@@ -79,8 +80,16 @@ fn on_runner() -> bool {
     std::env::var("GITHUB_ACTIONS").is_ok_and(|v| v == "true")
 }
 
-fn repo() -> String {
-    std::env::var("GITHUB_REPOSITORY").unwrap_or_else(|_| "ToyOSOrg/ToyOS".into())
+/// The HTTP client of every request the build system makes: rustls with
+/// RustCrypto's primitives and webpki's roots, so no C; a status is an answer,
+/// not an error.
+pub(crate) fn agent() -> ureq::Agent {
+    let tls = ureq::tls::TlsConfig::builder()
+        .provider(ureq::tls::TlsProvider::Rustls)
+        .root_certs(ureq::tls::RootCerts::WebPki)
+        .unversioned_rustls_crypto_provider(Arc::new(rustls_rustcrypto::provider()))
+        .build();
+    ureq::Agent::config_builder().tls_config(tls).user_agent(USER_AGENT).http_status_as_error(false).build().new_agent()
 }
 
 /// Whether this job is main's publisher — [`PUBLISHER`] on main, scheduled or
@@ -187,21 +196,17 @@ fn outputs(layers: &[Layer]) -> String {
 /// `cargo run -- --ci bootstrap`: this tree's toolchain made whole from what its
 /// job restored, and each layer told to the job's save steps as built or kept
 /// ([`built`]). A sysroot restored is all a guest job reads, so then nothing is
-/// built; and a layer restored and not whole is refused, since its key reads
-/// less than its build does.
+/// built. A layer restored and not whole is refused, since its key reads less
+/// than its build does, and so is one the build left not whole under its key.
 pub fn bootstrap(root: &Path) -> Result<String, String> {
     let file = step_outputs()?;
     let layers = layers(root);
     let restored: Vec<bool> = layers.iter().map(|layer| root.join(&layer.paths[0]).exists()).collect();
-    whole_as_restored(&layers, &restored, |layer| defect(root, layer))?;
+    whole(&layers, &restored, |layer| defect(root, layer)).map_err(|why| format!("restored, {why}"))?;
     if !restored[3] {
         let mut lock = crate::buildlock::shared(root, "the toolchain");
         drop(crate::toolchain::ensure(root, &mut lock, false));
-        for layer in &layers {
-            if let Some(why) = defect(root, layer) {
-                return Err(format!("the build left {} {} not whole: {why}", layer.name, layer.key));
-            }
-        }
+        whole(&layers, &[true; 4], |layer| defect(root, layer)).map_err(|why| format!("built, {why}"))?;
     }
     tell(&file, &built(&layers, &restored))?;
     let said: Vec<String> = layers
@@ -216,13 +221,13 @@ pub fn bootstrap(root: &Path) -> Result<String, String> {
     Ok(said.join(", "))
 }
 
-/// Refused where a layer `restored` says its job restored is not whole, as
-/// `defect` finds it: its key reads less than its build does, and a build
-/// under that key could never be saved over the entry.
-fn whole_as_restored(layers: &[Layer], restored: &[bool], defect: impl Fn(&Layer) -> Option<String>) -> Result<(), String> {
-    for (layer, _) in layers.iter().zip(restored).filter(|(_, restored)| **restored) {
+/// Refused where a layer `which` names is not whole, as `defect` finds it: its
+/// key reads less than its build does, and a build under that key could never
+/// be saved over the entry.
+fn whole(layers: &[Layer], which: &[bool], defect: impl Fn(&Layer) -> Option<String>) -> Result<(), String> {
+    for (layer, _) in layers.iter().zip(which).filter(|(_, named)| **named) {
         if let Some(why) = defect(layer) {
-            return Err(format!("{} {} was restored and is not whole: {why}", layer.name, layer.key));
+            return Err(format!("{} {} is not whole: {why}", layer.name, layer.key));
         }
     }
     Ok(())
@@ -307,12 +312,14 @@ fn run(cmd: &mut Command) -> Result<(), String> {
 /// publisher, and before anything is put up unless it runs at main's tip.
 pub fn release(root: &Path) -> Result<String, String> {
     let var = |name| std::env::var(name).ok();
-    release_as(root, var("GITHUB_WORKFLOW_REF").as_deref(), var("GITHUB_EVENT_NAME").as_deref())
+    let repo = var("GITHUB_REPOSITORY").ok_or("GITHUB_REPOSITORY is unset: only a runner publishes a toolchain")?;
+    release_as(root, &repo, var("GITHUB_WORKFLOW_REF").as_deref(), var("GITHUB_EVENT_NAME").as_deref())
 }
 
-/// [`release`], run as the job the runner names by its workflow and event.
-fn release_as(root: &Path, workflow: Option<&str>, event: Option<&str>) -> Result<String, String> {
-    publisher(workflow, event, &repo())?;
+/// [`release`] of `repo`, run as the job the runner names by its workflow and
+/// event.
+fn release_as(root: &Path, repo: &str, workflow: Option<&str>, event: Option<&str>) -> Result<String, String> {
+    publisher(workflow, event, repo)?;
     if !(cfg!(target_os = "linux") && crate::arch::Arch::HOST == Some(crate::arch::Arch::X86_64)) {
         return Err(format!("a release is {HOST}'s and this host is not one; a tarball packed here would install nowhere"));
     }
@@ -332,32 +339,32 @@ fn release_as(root: &Path, workflow: Option<&str>, event: Option<&str>) -> Resul
     let tarball = tmp.join(ASSET);
     pack(&rust_dir.join("build"), &tarball)?;
     let tag = tag(&key);
-    let notes = notes(root, &tag, &manifest(&tag))?;
-    let put = put_up(root, &tag, &notes, &tarball, &tmp)?;
-    Ok(format!("{put}; {}", alias(root, &tag, &notes, &tmp)?))
+    let notes = notes(root, repo, &tag, &manifest(&tag))?;
+    let github = Github::new(repo)?;
+    let put = put_up(&github, root, &tag, &notes, &tarball)?;
+    Ok(format!("{put}; {}", alias(&github, root, &tag, &notes, &tmp)?))
 }
 
 /// The tarball of the toolchain laid out under `build` ([`lay_out`]) at
-/// `tarball`: `<HOST>/stage2` but its `bin/cargo`, which names a path only this
-/// runner has, then its witness and `TOOLCHAIN`, in sorted order with no owner
-/// or time, so one sysroot packs to one digest.
+/// `tarball`, gzipped: `<HOST>/stage2` but its `bin/cargo`, which names a path
+/// only this runner has, then its witness and `TOOLCHAIN`, in sorted order with
+/// no owner or time, so one sysroot packs to one digest.
 fn pack(build: &Path, tarball: &Path) -> Result<(), String> {
     let stage2 = Path::new(HOST).join("stage2");
     let mut entries = vec![stage2.clone()];
     walk(&build.join(&stage2), &stage2, &mut entries)?;
     entries.retain(|entry| *entry != stage2.join("bin/cargo"));
     entries.extend(["toyos-sysroot-witness", "TOOLCHAIN"].map(PathBuf::from));
-    let mut tar = tar::Builder::new(Vec::new());
+    let file = fs::File::create(tarball).map_err(|e| format!("{}: {e}", tarball.display()))?;
+    let gzip = flate2::write::GzEncoder::new(std::io::BufWriter::new(file), flate2::Compression::default());
+    let mut tar = tar::Builder::new(gzip);
     tar.follow_symlinks(false);
     tar.mode(tar::HeaderMode::Deterministic);
     for entry in &entries {
         tar.append_path_with_name(build.join(entry), entry).map_err(|e| format!("pack {}: {e}", entry.display()))?;
     }
-    let bytes = tar.into_inner().map_err(|e| format!("pack {}: {e}", tarball.display()))?;
-    let file = fs::File::create(tarball).map_err(|e| format!("{}: {e}", tarball.display()))?;
-    let mut file = std::io::BufWriter::new(file);
-    ruzstd::encoding::compress(bytes.as_slice(), &mut file, ruzstd::encoding::CompressionLevel::Fastest);
-    file.flush().map_err(|e| format!("{}: {e}", tarball.display()))
+    let packed = tar.into_inner().and_then(|gzip| gzip.finish()).and_then(|mut file| file.flush());
+    packed.map_err(|e| format!("{}: {e}", tarball.display()))
 }
 
 /// Every path under `dir`, named as it is under `prefix`, each directory's in
@@ -400,83 +407,91 @@ fn put(release: Option<&Value>, name: &str, digest: &str) -> Result<Put, String>
 }
 
 /// `tag`'s release, made to carry `file` as its asset by its name: created with
-/// `notes` where there is none, given them where there is, and then held to the
-/// digest GitHub records.
-fn put_up(root: &Path, tag: &str, notes: &str, file: &Path, tmp: &Path) -> Result<String, String> {
+/// `notes` where there is none and given them where there is, its asset put up
+/// unless it already carries these bytes, and then held to the digest GitHub
+/// records.
+fn put_up(github: &Github, root: &Path, tag: &str, notes: &str, file: &Path) -> Result<String, String> {
     let name = file.file_name().and_then(|name| name.to_str()).ok_or_else(|| format!("{} has no name", file.display()))?;
-    let digest = format!("sha256:{}", file_sha256(file)?);
-    let at = api(&format!("repos/{}/releases/tags/{tag}", repo()));
-    let found = github("GET", &at, None)?;
-    let (release, said) = match put(found.as_ref(), name, &digest)? {
-        Put::Carried => return Ok(format!("{tag} already carries this {name}")),
-        Put::Create => {
+    let bytes = fs::read(file).map_err(|e| format!("{}: {e}", file.display()))?;
+    let digest = format!("sha256:{}", sha256_hex(&bytes));
+    let at = github.api(&format!("releases/tags/{tag}"));
+    let found = github.call("GET", &at, None)?;
+    let release = match &found {
+        None => {
             let commit = crate::sync::git(root, &["rev-parse", "HEAD"])?;
             let body = serde_json::json!({ "tag_name": tag, "name": tag, "body": notes, "target_commitish": commit.trim() });
-            (send(tmp, "POST", &api(&format!("repos/{}/releases", repo())), &body)?, "put up")
+            github.send("POST", &github.api("releases"), &body)?
         }
-        Put::Upload => (renote(tmp, found, notes)?, "given its asset"),
+        Some(release) => {
+            let id = release["id"].as_u64().ok_or("a release with no id")?;
+            github.send("PATCH", &github.api(&format!("releases/{id}")), &serde_json::json!({ "body": notes }))?
+        }
+    };
+    let said = match put(found.as_ref(), name, &digest)? {
+        Put::Carried => return Ok(format!("{tag} already carries this {name}")),
+        Put::Create => "put up",
+        Put::Upload => "given its asset",
         Put::Replace { asset } => {
-            github("DELETE", &api(&format!("repos/{}/releases/assets/{asset}", repo())), None)?;
-            (renote(tmp, found, notes)?, "had another writer's asset, now this one")
+            github.call("DELETE", &github.api(&format!("releases/assets/{asset}")), None)?;
+            "had another writer's asset, now this one"
         }
     };
     let upload = release["upload_url"].as_str().ok_or("a release with no upload URL")?;
     let upload = format!("{}?name={name}", upload.split('{').next().unwrap_or(upload));
-    github("POST", &upload, Some((file, "application/octet-stream")))?;
-    let now = github("GET", &at, None)?;
+    github.call("POST", &upload, Some((&bytes, "application/octet-stream")))?;
+    let now = github.call("GET", &at, None)?;
     if put(now.as_ref(), name, &digest)? != Put::Carried {
         return Err(format!("{tag} does not carry {digest} as its {name} after the upload"));
     }
     Ok(format!("{tag} {said}"))
 }
 
-/// The release `found` given `notes`.
-fn renote(tmp: &Path, found: Option<Value>, notes: &str) -> Result<Value, String> {
-    let id = found.as_ref().and_then(|release| release["id"].as_u64()).ok_or("a release with no id")?;
-    send(tmp, "PATCH", &api(&format!("repos/{}/releases/{id}", repo())), &serde_json::json!({ "body": notes }))
+/// GitHub's REST API for one repository, as the token its job was handed.
+struct Github {
+    agent: ureq::Agent,
+    repo: String,
+    token: String,
 }
 
-/// `body` sent to `url` by `method`, as JSON: what GitHub answered.
-fn send(tmp: &Path, method: &str, url: &str, body: &Value) -> Result<Value, String> {
-    let file = tmp.join("request.json");
-    fs::write(&file, body.to_string()).map_err(|e| format!("{}: {e}", file.display()))?;
-    github(method, url, Some((&file, "application/json")))?.ok_or_else(|| format!("{method} {url} found nothing"))
-}
-
-fn api(path: &str) -> String {
-    format!("https://api.github.com/{path}")
-}
-
-/// GitHub's answer to `method` on `url`, sent the file `body` names as its
-/// content type where there is one: the JSON it answered, null for no content,
-/// and `None` for a 404.
-fn github(method: &str, url: &str, body: Option<(&Path, &str)>) -> Result<Option<Value>, String> {
-    let token = std::env::var("GH_TOKEN").map_err(|_| "GH_TOKEN is unset".to_string())?;
-    let mut curl = Command::new("curl");
-    curl.args(["-sSL", "--retry", "3", "-X", method, "-w", "\n%{http_code}", "-A", USER_AGENT])
-        .args(["-H", &format!("Authorization: Bearer {token}"), "-H", "Accept: application/vnd.github+json"]);
-    if let Some((file, content_type)) = body {
-        curl.args(["-H", &format!("Content-Type: {content_type}"), "--data-binary"]).arg(format!("@{}", file.display()));
+impl Github {
+    fn new(repo: &str) -> Result<Self, String> {
+        let token = std::env::var("GH_TOKEN").map_err(|_| "GH_TOKEN is unset".to_string())?;
+        Ok(Self { agent: agent(), repo: repo.to_string(), token })
     }
-    let out = curl.arg(url).output().map_err(|e| format!("curl: {e}"))?;
-    if !out.status.success() {
-        return Err(format!("curl {method} {url} exited {}: {}", out.status, String::from_utf8_lossy(&out.stderr).trim()));
-    }
-    let text = String::from_utf8_lossy(&out.stdout).into_owned();
-    let (answer, status) = text.rsplit_once('\n').unwrap_or(("", text.as_str()));
-    match status {
-        "200" | "201" => serde_json::from_str(answer).map(Some).map_err(|e| format!("{method} {url} answered no JSON: {e}")),
-        "204" => Ok(Some(Value::Null)),
-        "404" => Ok(None),
-        status => Err(format!("{method} {url} answered {status}: {answer}")),
-    }
-}
 
-fn file_sha256(path: &Path) -> Result<String, String> {
-    let mut file = fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let mut hasher = Sha256::new();
-    std::io::copy(&mut file, &mut hasher).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
+    /// The URL of `path` under the repository's API.
+    fn api(&self, path: &str) -> String {
+        format!("https://api.github.com/repos/{}/{path}", self.repo)
+    }
+
+    /// GitHub's answer to `method` on `url`, sent `body` as its content type
+    /// where there is one: the JSON it answered, null for no content, and `None`
+    /// for a 404.
+    fn call(&self, method: &str, url: &str, body: Option<(&[u8], &str)>) -> Result<Option<Value>, String> {
+        let request = ureq::http::Request::builder()
+            .method(method)
+            .uri(url)
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Accept", "application/vnd.github+json");
+        let sent = match body {
+            Some((bytes, kind)) => request.header("Content-Type", kind).body(bytes).map(|request| self.agent.run(request)),
+            None => request.body(()).map(|request| self.agent.run(request)),
+        };
+        let mut answer = sent.map_err(|e| format!("{method} {url}: {e}"))?.map_err(|e| format!("{method} {url}: {e}"))?;
+        let text = answer.body_mut().read_to_string().map_err(|e| format!("{method} {url}: {e}"))?;
+        match answer.status().as_u16() {
+            200 | 201 => serde_json::from_str(&text).map(Some).map_err(|e| format!("{method} {url} answered no JSON: {e}")),
+            204 => Ok(Some(Value::Null)),
+            404 => Ok(None),
+            status => Err(format!("{method} {url} answered {status}: {text}")),
+        }
+    }
+
+    /// `body` sent to `url` by `method`, as JSON: what GitHub answered.
+    fn send(&self, method: &str, url: &str, body: &Value) -> Result<Value, String> {
+        let body = body.to_string();
+        self.call(method, url, Some((body.as_bytes(), "application/json")))?.ok_or_else(|| format!("{method} {url} found nothing"))
+    }
 }
 
 /// Every `GLIBC_x.y` the shipped host binaries and libraries name, as the
@@ -537,8 +552,8 @@ fn manifest(tag: &str) -> String {
 }
 
 /// The release notes: how to install it, what glibc it needs.
-fn notes(root: &Path, tag: &str, manifest: &str) -> Result<String, String> {
-    let url = format!("https://github.com/{}/releases/download/{tag}/{ASSET}", repo());
+fn notes(root: &Path, repo: &str, tag: &str, manifest: &str) -> Result<String, String> {
+    let url = format!("https://github.com/{repo}/releases/download/{tag}/{ASSET}");
     let (major, minor) = GLIBC_FLOOR;
     let userland = fs::read_to_string(root.join("userland/Cargo.toml")).map_err(|e| e.to_string())?;
     let rwh = userland
@@ -552,7 +567,7 @@ fn notes(root: &Path, tag: &str, manifest: &str) -> Result<String, String> {
 ## Install
 
     mkdir -p toyos-toolchain
-    curl -sSL {url} | tar --zstd -x -C toyos-toolchain
+    curl -sSL {url} | tar -xz -C toyos-toolchain
     rustup toolchain link toyos toyos-toolchain/{HOST}/stage2
     ln -s \"$(rustup which cargo)\" toyos-toolchain/{HOST}/stage2/bin/cargo
     cargo +toyos build --target x86_64-unknown-toyos
@@ -586,7 +601,7 @@ Until [rust-windowing/raw-window-handle#223](https://github.com/rust-windowing/r
 /// the name a consumer pins, moved onto `tag`. A second release carrying only a
 /// `TOOLCHAIN` naming `tag`, the commit that put it up and the SDK crates,
 /// because GitHub hangs an asset off one release id.
-fn alias(root: &Path, tag: &str, notes: &str, tmp: &Path) -> Result<String, String> {
+fn alias(github: &Github, root: &Path, tag: &str, notes: &str, tmp: &Path) -> Result<String, String> {
     let plan = crate::sdkversion::plan(root)?;
     if let Some(owed) = plan.iter().find(|r| r.publish) {
         let name = owed.krate.name;
@@ -600,7 +615,7 @@ fn alias(root: &Path, tag: &str, notes: &str, tmp: &Path) -> Result<String, Stri
     let toolchain = tmp.join("TOOLCHAIN");
     let text = format!("{}toyos {}\nrust {}\n{sdk}", manifest(tag), commit("HEAD")?, commit("HEAD:rust")?);
     fs::write(&toolchain, text).map_err(|e| format!("{}: {e}", toolchain.display()))?;
-    put_up(root, &alias, notes, &toolchain, tmp).map(|said| format!("{said}, naming {tag}"))
+    put_up(github, root, &alias, notes, &toolchain).map(|said| format!("{said}, naming {tag}"))
 }
 
 #[cfg(test)]
@@ -630,20 +645,19 @@ mod tests {
         let fork = "Fork/ToyOS/.github/workflows/nightly.yml@refs/heads/main";
         assert!(publisher(Some(fork), Some("schedule"), REPO).unwrap_err().contains(fork));
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let repo = repo();
         let refused = [
-            (format!("{repo}/.github/workflows/ci.yml@refs/pull/671/merge"), "pull_request"),
-            (format!("{repo}/.github/workflows/ci.yml@refs/heads/gh-readonly-queue/main/pr-671-59052827f"), "merge_group"),
-            (format!("{repo}/.github/workflows/publish.yml@refs/heads/main"), "push"),
-            (format!("{repo}/.github/workflows/nightly.yml@refs/heads/wt/toyos-guestci"), "workflow_dispatch"),
-            (format!("{repo}/.github/workflows/nightly.yml@refs/tags/main"), "push"),
-            (format!("{repo}/.github/workflows/nightly.yml@refs/heads/main"), "workflow_run"),
+            (format!("{REPO}/.github/workflows/ci.yml@refs/pull/671/merge"), "pull_request"),
+            (format!("{REPO}/.github/workflows/ci.yml@refs/heads/gh-readonly-queue/main/pr-671-59052827f"), "merge_group"),
+            (format!("{REPO}/.github/workflows/publish.yml@refs/heads/main"), "push"),
+            (format!("{REPO}/.github/workflows/nightly.yml@refs/heads/wt/toyos-guestci"), "workflow_dispatch"),
+            (format!("{REPO}/.github/workflows/nightly.yml@refs/tags/main"), "push"),
+            (format!("{REPO}/.github/workflows/nightly.yml@refs/heads/main"), "workflow_run"),
         ];
         for (workflow, event) in refused {
-            let why = release_as(root, Some(&workflow), Some(event)).expect_err(&workflow);
+            let why = release_as(root, REPO, Some(&workflow), Some(event)).expect_err(&workflow);
             assert!(why.starts_with("only ") && why.contains(&workflow) && why.contains(event), "{why}");
         }
-        assert!(release_as(root, None, None).unwrap_err().starts_with("only "));
+        assert!(release_as(root, REPO, None, None).unwrap_err().starts_with("only "));
     }
 
     fn release_json(assets: Value) -> Value {
@@ -689,9 +703,7 @@ mod tests {
     /// file by its bytes and mode.
     fn unpacked(path: &Path) -> Vec<(String, String)> {
         let bytes = fs::read(path).unwrap();
-        let mut tar = Vec::new();
-        ruzstd::decoding::StreamingDecoder::new(bytes.as_slice()).unwrap().read_to_end(&mut tar).unwrap();
-        let mut archive = tar::Archive::new(tar.as_slice());
+        let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes.as_slice()));
         let mut seen = Vec::new();
         for entry in archive.entries().unwrap() {
             let mut entry = entry.unwrap();
@@ -729,7 +741,7 @@ mod tests {
         for dir in [&first, &again, &other] {
             pack(&dir.join("build"), &dir.join(ASSET)).unwrap();
         }
-        let digest = |dir: &Path| file_sha256(&dir.join(ASSET)).unwrap();
+        let digest = |dir: &Path| sha256_hex(&fs::read(dir.join(ASSET)).unwrap());
         assert_eq!(digest(&first), digest(&again), "one sysroot packed to two digests");
         assert_ne!(digest(&first), digest(&other));
         let stage2 = format!("{HOST}/stage2");
@@ -823,18 +835,19 @@ mod tests {
         );
     }
 
-    /// **A layer restored and not whole is refused, never built again**: its
-    /// key reads less than its build does, and a build under that key could
-    /// never be saved. A layer not restored is the build's to make.
+    /// **A layer restored or built and not whole is refused, never built
+    /// again**: its key reads less than its build does, and a build under that
+    /// key could never be saved. A layer not restored is the build's to make.
     #[test]
-    fn a_restored_layer_that_is_not_whole_is_refused() {
+    fn a_layer_that_is_not_whole_is_refused() {
         let layers: Vec<Layer> =
             LAYERS.iter().enumerate().map(|(at, (_, name))| layer(name, &at.to_string().repeat(16), &["p"])).collect();
         let broken = |layer: &Layer| (layer.name == "compiler").then(|| "stage2 carries no clang".to_string());
-        let refused = whole_as_restored(&layers, &[true, true, false, false], broken).unwrap_err();
-        assert!(refused.starts_with("compiler 1111111111111111 was restored") && refused.contains("no clang"), "{refused}");
-        assert_eq!(whole_as_restored(&layers, &[true, false, false, false], broken), Ok(()));
-        assert_eq!(whole_as_restored(&layers, &[true; 4], |_| None), Ok(()));
+        let refused = whole(&layers, &[true, true, false, false], broken).unwrap_err();
+        assert!(refused.starts_with("compiler 1111111111111111 is not whole") && refused.contains("no clang"), "{refused}");
+        assert_eq!(whole(&layers, &[true, false, false, false], broken), Ok(()));
+        assert!(whole(&layers, &[true; 4], broken).is_err(), "a build that left a layer not whole was taken");
+        assert_eq!(whole(&layers, &[true; 4], |_| None), Ok(()));
     }
 
     /// **Each layer is the store the build system makes, where it makes it**:

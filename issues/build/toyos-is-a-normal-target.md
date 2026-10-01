@@ -34,7 +34,7 @@ Stages, in order:
    the release notes of every toolchain release carry it:
 
        mkdir -p toyos-toolchain
-       curl -sSL "$asset" | tar --zstd -x -C toyos-toolchain
+       curl -sSL "$asset" | tar -xz -C toyos-toolchain
        stage2=toyos-toolchain/x86_64-unknown-linux-gnu/stage2
        rustup toolchain link toyos "$stage2"
        ln -s "$(rustup which cargo)" "$stage2/bin/cargo"

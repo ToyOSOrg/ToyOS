@@ -164,9 +164,13 @@ image = { version = "0.25", default-features = false, features = ["jpeg"] }
 # (`src/sourcegate.rs`).
 sha2 = "0.10"
 # The toolchain release's tarball, packed in-process (`src/release.rs`): Rust's
-# own tar and zstd, where the binaries are hosts' tools.
+# own tar and gzip, where the binaries are hosts' tools.
 tar = { version = "0.4.46", default-features = false }
-ruzstd = "0.9.0"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# Every request the build system makes, GitHub's API and the crates.io index:
+# rustls over RustCrypto, where curl is a host's tool and a TLS stack in C.
+ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots"] }
+rustls-rustcrypto = "0.0.2-alpha"
 
 [dev-dependencies]
 # `USER_TOP`, so the harness judges a held `rsp` against the bound the kernel
