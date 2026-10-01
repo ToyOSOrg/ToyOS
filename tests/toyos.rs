@@ -1605,15 +1605,14 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
         }
         "virt_el2_drop" => {
             // The entry's drop from EL2, which HVF never exercises: `virt` with
-            // EL2 under TCG, where firmware hands the loader the CPU at EL2, on
-            // a CPU without FEAT_VHE, so `E2H` is clear at the handover and
-            // only the loader's EL2 arm turns EL2's MMU off. A loader that
-            // refuses the CPU says so and stops; a handover with EL2's MMU on
-            // halts in a named refusal, or faults first where firmware maps the
-            // image execute-never; a drop that leaves `HCR_EL2` other than
-            // declared halts in a named refusal and says nothing; one that lands
-            // anywhere but EL1 on `SP_EL1` panics in the declaration's
-            // read-back. Each way the line this waits for never comes.
+            // EL2 under TCG, where firmware hands the loader the CPU at EL2. A
+            // loader that refuses the CPU says so and stops; a handover with
+            // EL2's MMU on halts in a named refusal, or faults first where
+            // firmware maps the image execute-never; a drop that leaves
+            // `HCR_EL2` other than declared halts in a named refusal and says
+            // nothing; one that lands anywhere but EL1 on `SP_EL1` panics in the
+            // declaration's read-back. Each way the line this waits for never
+            // comes.
             let mut qemu = QemuInstance::boot_with_options(
                 test_config,
                 &[],

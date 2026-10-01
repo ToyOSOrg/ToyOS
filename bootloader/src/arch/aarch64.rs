@@ -96,10 +96,9 @@ pub mod pio {
 }
 
 /// Hand the CPU to the kernel at the exception level firmware ran it at, with
-/// that level's MMU and data cache off, at the image's physical entry with
-/// `x0 = args`: the state PSCI's `CPU_ON` starts every other CPU in. Nothing
-/// firmware left in a translation regime is walked past this point. UEFI
-/// promises an identity map of RAM and none of its attributes (2.11 §2.3.6),
+/// that level's MMU off, at the image's physical entry with `x0 = args`.
+/// Nothing firmware left in a translation regime is walked past this point.
+/// UEFI promises an identity map of RAM and none of its attributes (2.11 §2.3.6),
 /// edk2's ArmVirtQemu maps `EfiLoaderData`, where this image is, execute-never
 /// unless built otherwise, and the kernel's entry rewrites `HCR_EL2.E2H`, which
 /// chooses the regime firmware's EL2 tables are walked in. That entry installs
@@ -122,9 +121,9 @@ pub unsafe fn enter_kernel(image: (u64, u64), entry_offset: u64, args: &KernelAr
     // installed yet. Every line from `2:` to `5:` is cleaned to the point of
     // coherency, because those instructions are fetched with the MMU off, and
     // every instruction cache line is invalidated against the image cleaned
-    // above. `SCTLR_ELx.M` and `.C` are cleared at the level this runs at,
-    // which fetches the next instruction from the same address because
-    // firmware's map is the identity. Then a branch to the image's entry with
+    // above. `SCTLR_ELx.M` is cleared at the level this runs at, which
+    // fetches the next instruction from the same address because firmware's
+    // map is the identity. Then a branch to the image's entry with
     // `x0 = args`, the boot protocol `toyos-abi::boot` and the kernel's
     // `_start` define. `x9` and `x10` are scratch, and nothing returns to
     // observe them.
@@ -149,13 +148,11 @@ pub unsafe fn enter_kernel(image: (u64, u64), entry_offset: u64, args: &KernelAr
             "b.ne 3f",
             "mrs x9, sctlr_el2",
             "bic x9, x9, #(1 << 0)",
-            "bic x9, x9, #(1 << 2)",
             "msr sctlr_el2, x9",
             "b 4f",
             "3:",
             "mrs x9, sctlr_el1",
             "bic x9, x9, #(1 << 0)",
-            "bic x9, x9, #(1 << 2)",
             "msr sctlr_el1, x9",
             "4:",
             "isb",

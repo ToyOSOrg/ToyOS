@@ -8,14 +8,14 @@ opened: 2026-10-01
 
 When a host's QEMU installation ships an edk2 from stable202502 to
 stable202608, `virt` guests under HVF never return from `ExitBootServices`.
-Homebrew's QEMU 11.1.1 ships stable202408 today. Owner: the orchestrator.
+Owner: the orchestrator.
 
 Under QEMU 11.1.1's HVF a `virt` guest reads `ID_AA64PFR0_EL1.GIC` as 0,
 though its GICv3's system registers answer. `hvf_arch_init_vcpu`
 (`target/arm/hvf/hvf.c:1481`) writes that register once, setting `GIC` only if
 `env->gicv3state` is set, and it runs while `machvirt_init` realizes the CPUs
 (`hw/arm/virt.c:3140`), before `create_gic` (`:3158`) makes the GIC that sets
-it. QEMU master is the same. TCG computes the field on each read
+it. TCG computes the field on each read
 (`id_aa64pfr0_read`, `target/arm/helper.c`) and reads 1. The orchestrator's
 `aarch64fw-r3-d3-pfr0` read the register from the loader: `0x1101000010110011`,
 `GIC` 0, under HVF, and `0x1301001121110022` at EL1 and `0x1301001121110222`
