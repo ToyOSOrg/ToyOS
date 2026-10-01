@@ -6,15 +6,18 @@ opened: 2026-10-01
 
 # The nested-NMI report interleaves with another CPU's console line
 
-`nested_nmi` (`kernel/src/arch/x86_64/idt/nmi.rs`) writes its report through
-`serial::panic_raw`, which takes no lock. When cpu1 is writing its own record at
-the same moment, the two lines interleave byte by byte on the 16550. The cpu1
+`nested_nmi` (`kernel/src/arch/x86_64/idt/nmi.rs`) wrote its report through
+`serial::panic_raw`, which took no lock. With cpu1 writing its own record at
+the same moment, the two lines interleaved byte by byte on the 16550. The cpu1
 line was `[kernel 0.385 cpu1] CPU 1: joining scheduler`, and the 16550 carried:
 
     [[kenrnmel i0.38]5  cpNu1E] CSPUT 1E: Djo inNiMngI s choednule r
 
-`NESTED NMI` is never whole on the console, so `nested_nmi_is_loud` times out
-waiting for it, and the machine halts with its report unreadable.
+`NESTED NMI` was never whole on the console, so `nested_nmi_is_loud` timed out
+waiting for it, and the machine halted with its report unreadable.
+
+#675 (`bc68e5d78`) writes the report under the console's registers
+(`serial::panic_registers`).
 
 **Evidence:** red under KVM in two runs, with byte-identical interleaving:
 - Main's nightly `guest` lane at `06788146b`, run 36843762360, job 110374194368.
