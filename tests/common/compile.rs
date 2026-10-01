@@ -22,7 +22,7 @@ pub fn c_sysroot() -> CSysroot {
     static C: OnceLock<CSysroot> = OnceLock::new();
     C.get_or_init(|| {
         let mut lock = toyos_build::buildlock::shared(&repo_root(), "the C sysroot");
-        let sysroot = toyos_build::toolchain::ensure(&repo_root(), &mut lock);
+        let sysroot = toyos_build::toolchain::ensure(&repo_root(), &mut lock, false);
         CSysroot::of(&sysroot.dir, super::qemu::SUITE_ARCH)
     })
     .clone()

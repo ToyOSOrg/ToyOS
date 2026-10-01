@@ -7,12 +7,12 @@
 //! the committed tree of its `src/bootstrap` (one holding what no commit does is
 //! refused), the bootstrap configuration below, [`RECIPE`], and the tools the
 //! host builds it with ([`host_tools`]). `rust/build/llvm/<key>/` in the primary
-//! is bootstrap's install of that LLVM and its clang, with its LLD in `bin/`
-//! beside `llvm-config` and in `src/` the runtimes' sources the C++ runtime is
-//! built from (`src/libcxx.rs`) as its commit holds them, made by whichever
-//! build first needs it ([`resolve`]), and stored only when it was built from
-//! what the key names. Once its [`SOURCE`] file exists it is read-only, its
-//! directories as well as its files.
+//! is what builds read of bootstrap's install of that LLVM and its clang
+//! ([`keep`]), with its LLD in `bin/` beside `llvm-config` and in `src/` the
+//! runtimes' sources the C++ runtime is built from (`src/libcxx.rs`) as its
+//! commit holds them, made by whichever build first needs it ([`resolve`]), and
+//! stored only when it was built from what the key names. Once its [`SOURCE`]
+//! file exists it is read-only, its directories as well as its files.
 //! Every compiler build, the primary's and a worktree's own, names it as the
 //! host's `llvm-config` with `llvm-has-rust-patches`, so bootstrap builds no
 //! LLVM and takes LLD from beside it as `rust-lld`; `clang::provision` copies its
@@ -48,8 +48,10 @@ use crate::toolchain::{self, host_triple};
 
 /// What changes how a key's sources become an LLVM and is none of the other
 /// parts: the build's targets and what is kept of it. Moving it moves every key.
-const RECIPE: &str = "bootstrap build of src/llvm-project/llvm and src/llvm-project/lld; the install's bin, \
-                      include and lib, and lld in bin, and the runtimes' sources in src, read-only; 3";
+const RECIPE: &str = "bootstrap build of src/llvm-project/llvm and src/llvm-project/lld; of the install, \
+                      llvm-config, clang and llvm-ar in bin, and llvm-objcopy on an Apple host, LLVM's headers, \
+                      every library llvm-config names and clang's resource headers; lld in bin, and the \
+                      runtimes' sources in src, read-only; 4";
 
 /// What of the caller's environment the LLVM build, and every tool its key
 /// asks, sees:
@@ -85,12 +87,18 @@ const NO_HOST_LIBRARIES: [&str; 12] = [
     "LLVM_ENABLE_Z3_SOLVER",
 ];
 
-/// What of bootstrap's install an LLVM keeps: `build/` beside them is CMake's
-/// tree, which nothing reads once the install is made.
-const KEPT: [&str; 3] = ["bin", "include", "lib"];
+/// The tools of an LLVM's `bin` a build runs: bootstrap asks `llvm-config` how
+/// to link LLVM and takes `lld` as `rust-lld`; `clang::provision` copies `clang`
+/// and `llvm-ar`, and on an Apple host [`APPLE_TOOL`].
+const TOOLS: [&str; 4] = ["llvm-config", "lld", "clang", "llvm-ar"];
 
-/// What a compiler build and `clang::provision` read of an LLVM.
-const TOOLS: [&str; 4] = ["bin/llvm-config", "bin/lld", "bin/clang", "bin/llvm-ar"];
+/// What an Apple host's toolchain carries as `rust-objcopy`, which rustc runs to
+/// strip a Darwin binary (`compiler/rustc_codegen_ssa/src/back/link.rs`).
+pub(crate) const APPLE_TOOL: &str = "llvm-objcopy";
+
+/// LLVM's headers: the compiler's LLVM wrapper compiles against them, where
+/// `llvm-config --cxxflags` names the install's `include`.
+const HEADERS: [&str; 2] = ["include/llvm", "include/llvm-c"];
 
 /// The file a finished LLVM carries last, naming its key. A directory without
 /// it is a build that did not finish.
@@ -226,13 +234,22 @@ fn held_with(root: &Path, rust_dir: &Path, fork: &Path, build: impl Fn(&Path) ->
     Llvm { dir, _using: using }
 }
 
+/// [`TOOLS`], and on an Apple host [`APPLE_TOOL`].
+fn tools() -> impl Iterator<Item = &'static str> {
+    TOOLS.into_iter().chain(host_triple().ends_with("apple-darwin").then_some(APPLE_TOOL))
+}
+
 /// Why `dir` is not a finished LLVM, if it is not.
 fn defect(dir: &Path) -> Option<String> {
     if !dir.join(SOURCE).is_file() {
         return Some(format!("{} carries no {SOURCE}", dir.display()));
     }
-    let kept = KEPT.iter().map(|k| dir.join(k)).chain(crate::libcxx::SOURCES.iter().map(|s| dir.join("src").join(s)));
-    let tools = TOOLS.iter().map(|t| dir.join(t)).filter(|p| !p.is_file());
+    let kept = HEADERS
+        .iter()
+        .chain(&["lib/clang"])
+        .map(|k| dir.join(k))
+        .chain(crate::libcxx::SOURCES.iter().map(|s| dir.join("src").join(s)));
+    let tools = tools().map(|t| dir.join("bin").join(t)).filter(|p| !p.is_file());
     let gone: Vec<String> = kept.filter(|p| !p.is_dir()).chain(tools).map(|p| p.display().to_string()).collect();
     (!gone.is_empty()).then(|| format!("{} carries no {}", dir.display(), gone.join(", ")))
 }
@@ -260,9 +277,7 @@ fn place(fork: &Path, key: &Key, dir: &Path, build: &impl Fn(&Path) -> PathBuf) 
     if partial.exists() {
         keystore::remove(&partial);
     }
-    for part in KEPT {
-        clone_tree(&built.join(&host).join("llvm").join(part), &partial.join(part));
-    }
+    keep(&built.join(&host).join("llvm"), &partial);
     let lld = built.join(&host).join("lld/bin/lld");
     fs::copy(&lld, partial.join("bin/lld"))
         .unwrap_or_else(|e| panic!("copy {} -> {}: {e}", lld.display(), partial.join("bin/lld").display()));
@@ -295,6 +310,45 @@ fn place(fork: &Path, key: &Key, dir: &Path, build: &impl Fn(&Path) -> PathBuf) 
     keystore::retire(dir);
     fs::rename(&partial, dir).unwrap_or_else(|e| panic!("rename {} -> {}: {e}", partial.display(), dir.display()));
     fs::remove_dir_all(&built).unwrap_or_else(|e| panic!("remove {}: {e}", built.display()));
+}
+
+/// Copy into `to` what builds read of the LLVM installed at `install`: [`tools`]
+/// but `lld`, which is LLD's own build's, each a file whatever link it is
+/// installed as; [`HEADERS`]; every library its `llvm-config` names, since a
+/// compiler links LLVM through it and it refuses to name one that is absent;
+/// and clang's resource headers.
+fn keep(install: &Path, to: &Path) {
+    let bin = to.join("bin");
+    fs::create_dir_all(&bin).unwrap_or_else(|e| panic!("create {}: {e}", bin.display()));
+    for tool in tools().filter(|tool| *tool != "lld") {
+        let from = install.join("bin").join(tool);
+        fs::copy(&from, bin.join(tool)).unwrap_or_else(|e| panic!("copy {} -> {}: {e}", from.display(), bin.display()));
+    }
+    for headers in HEADERS {
+        clone_tree(&install.join(headers), &to.join(headers));
+    }
+    let lib = to.join("lib");
+    fs::create_dir_all(&lib).unwrap_or_else(|e| panic!("create {}: {e}", lib.display()));
+    for library in libraries(install) {
+        let name = library.file_name().unwrap_or_else(|| panic!("{} names no file", library.display()));
+        fs::copy(&library, lib.join(name)).unwrap_or_else(|e| panic!("copy {} -> {}: {e}", library.display(), lib.display()));
+    }
+    let resource = crate::clang::resource_version(install);
+    let version = resource.file_name().unwrap_or_else(|| panic!("{} names no version", resource.display()));
+    clone_tree(&resource.join("include"), &lib.join("clang").join(version).join("include"));
+}
+
+/// Every library the `llvm-config` of the LLVM installed at `install` names.
+fn libraries(install: &Path) -> Vec<PathBuf> {
+    let config = install.join("bin/llvm-config");
+    let mut command = Command::new(&config);
+    command.args(["--link-static", "--libfiles"]);
+    clear(&mut command);
+    let out = command.output().unwrap_or_else(|e| panic!("run {}: {e}", config.display()));
+    assert!(out.status.success(), "{command:?} failed: {}", String::from_utf8_lossy(&out.stderr));
+    let named: Vec<PathBuf> = String::from_utf8_lossy(&out.stdout).split_whitespace().map(PathBuf::from).collect();
+    assert!(!named.is_empty(), "{command:?} named no library");
+    named
 }
 
 /// Write `paths` as `commit` holds them, from the repository at `checkout`,
@@ -460,15 +514,27 @@ mod tests {
     /// Bootstrap's stand-in: what its LLVM and LLD builds leave in the build
     /// directory, CMake's tree among them.
     fn fake_build(fork: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
         let built = fork.join("build/toyos-llvm");
         let _ = fs::remove_dir_all(&built);
         let install = built.join(host_triple()).join("llvm");
-        for tool in ["llvm-config", "clang-22", "llvm-ar"] {
+        for tool in ["clang-22", "llvm-ar", "llvm-objcopy", "opt"] {
             write(&install.join("bin").join(tool), &format!("the {tool}"));
         }
         std::os::unix::fs::symlink("clang-22", install.join("bin/clang")).unwrap();
+        // What a real `llvm-config --libfiles` answers: the component libraries,
+        // never clang's, nor one no component is.
+        let named = ["libLLVMCore.a", "libLLVMSupport.a"].map(|lib| install.join("lib").join(lib).display().to_string());
+        let config = install.join("bin/llvm-config");
+        write(&config, &format!("#!/bin/sh\necho {}\n", named.join(" ")));
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o755)).unwrap();
+        for lib in ["libLLVMCore.a", "libLLVMSupport.a", "libLLVMTableGen.a", "libclangBasic.a"] {
+            write(&install.join("lib").join(lib), lib);
+        }
         write(&install.join("include/llvm/Config/llvm-config.h"), "#define LLVM_VERSION_MAJOR 22");
-        write(&install.join("lib/libLLVMCore.a"), "core");
+        write(&install.join("include/llvm-c/Core.h"), "LLVMContextRef LLVMContextCreate(void);");
+        write(&install.join("include/clang/Basic/Version.h"), "#define CLANG_VERSION 22");
+        write(&install.join("lib/cmake/llvm/LLVMConfig.cmake"), "set(LLVM_PACKAGE_VERSION 22)");
         write(&install.join("lib/clang/22/include/stddef.h"), "typedef long ptrdiff_t;");
         write(&install.join("build/CMakeCache.txt"), "the build tree");
         write(&built.join(host_triple()).join("lld/bin/lld"), "the lld");
@@ -544,7 +610,6 @@ mod tests {
         assert_eq!(makes.get(), 1);
         assert_eq!(defect(&la.dir), None);
         assert_eq!(fs::read_to_string(la.dir.join("bin/lld")).unwrap(), "the lld");
-        assert_eq!(fs::read_link(la.dir.join("bin/clang")).unwrap(), Path::new("clang-22"));
         assert!(la.dir.join("lib/clang/22/include/stddef.h").is_file());
         assert_eq!(fs::read_to_string(la.dir.join("src/libcxx/CMakeLists.txt")).unwrap(), "the libcxx of A", "the runtimes' sources are not the commit's");
         assert!(!la.dir.join("build").exists(), "CMake's tree was kept");
@@ -557,6 +622,44 @@ mod tests {
         assert_eq!(makes.get(), 1);
         assert!(lb.dir == la.dir && primary_s.dir == la.dir && same_s.dir == la.dir, "one LLVM commit named two LLVMs");
         assert_eq!(snapshot(&store(&rust_dir)), before, "an LLVM was written after it was whole");
+    }
+
+    /// **An LLVM keeps what builds read of the install and nothing else**: the
+    /// tools a build runs, `clang` as the file its link names; LLVM's headers;
+    /// every library `llvm-config` names, and no other; clang's resource
+    /// headers. No other tool, clang's headers and libraries, nor CMake's
+    /// package files.
+    #[test]
+    fn an_llvm_keeps_what_builds_read_and_nothing_else() {
+        let scratch = Scratch::new("llvm-kept");
+        let (_primary, rust_dir, [_same, a, _b]) = estate_built(&scratch);
+        let dir = choose(&a, &rust_dir, &a.join("rust"), fake_build).dir;
+        let apple = host_triple().ends_with("apple-darwin");
+        let mut files: Vec<String> = snapshot(&dir)
+            .into_iter()
+            .map(|(path, _)| path.strip_prefix(&dir).unwrap().display().to_string())
+            .filter(|path| !path.starts_with("src/"))
+            .collect();
+        files.sort();
+        let mut want = vec![
+            "SOURCE",
+            "bin/clang",
+            "bin/lld",
+            "bin/llvm-ar",
+            "bin/llvm-config",
+            "include/llvm-c/Core.h",
+            "include/llvm/Config/llvm-config.h",
+            "lib/clang/22/include/stddef.h",
+            "lib/libLLVMCore.a",
+            "lib/libLLVMSupport.a",
+        ];
+        if apple {
+            want.push("bin/llvm-objcopy");
+        }
+        want.sort();
+        assert_eq!(files, want);
+        assert_eq!(fs::read_to_string(dir.join("bin/clang")).unwrap(), "the clang-22");
+        assert!(!fs::symlink_metadata(dir.join("bin/clang")).unwrap().file_type().is_symlink(), "clang is the link, not the file");
     }
 
     /// **A placed LLVM cannot be written**, through its own path or through a

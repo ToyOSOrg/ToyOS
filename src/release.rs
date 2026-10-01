@@ -35,8 +35,6 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use toyos_tmpdir::TempDir;
 
-use crate::toolchain::HOSTED_ARCH;
-
 /// The build system's modules that build and pack the toolchain: every module
 /// `src/toolchain.rs` and this file name through `crate::`, and every module
 /// those name, so the tag moves with how the toolchain is built as well as with
@@ -497,16 +495,15 @@ fn build(root: &Path, tag: &str, tarball: &Path) -> Result<(), String> {
     }
     fs::write(build.join("TOOLCHAIN"), &manifest).map_err(|e| e.to_string())?;
 
-    // `lib/rustlib/<host>` and the sysroot's `bin/cargo` are links into this
-    // runner's own toolchain; `Owner::Installed` recreates both. GNU tar's
-    // `--transform` renames the sysroot to the path an installer links.
+    // The sysroot's `bin/cargo` is a link into this runner's own toolchain;
+    // `Owner::Installed` recreates it. GNU tar's `--transform` renames the
+    // sysroot to the path an installer links.
     let mut tar = Command::new("tar")
         .arg("-C")
         .arg(&build)
-        .arg(format!("--exclude={}/stage2/lib/rustlib/{HOST}", HOSTED_ARCH.userland()))
         .arg(format!("--exclude={sysroot}/bin/cargo"))
         .arg(format!("--transform=s,^{sysroot},{HOST}/stage2,"))
-        .args(["-c", &sysroot, &format!("{}/stage2", HOSTED_ARCH.userland())])
+        .args(["-c", &sysroot])
         .args(["toyos-sysroot-witness", "TOOLCHAIN"])
         .stdout(Stdio::piped())
         .spawn()

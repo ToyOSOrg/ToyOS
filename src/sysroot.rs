@@ -1323,9 +1323,8 @@ mod tests {
         write(&compiler.stage2.join("bin/rustc"), "rustc");
         let lld = toolchain::rust_lld(&compiler.stage2);
         write(&lld, "lld");
-        write(&lld.with_file_name("llvm-ar"), "llvm-ar");
         if clang {
-            for tool in ["clang", "ld.lld"] {
+            for tool in ["clang", "llvm-ar", "ld.lld", "rust-objcopy"] {
                 write(&lld.with_file_name(tool), tool);
             }
             write(&lld.parent().unwrap().parent().unwrap().join("lib/clang/22/include/stddef.h"), "stddef");
