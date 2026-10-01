@@ -280,7 +280,10 @@ pub const SYSCALL_PROFILE_BINS: usize = 128;
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_DEVICE_DMA_UNMAP < SYSCALL_PROFILE_OTHER as u64);
+/// The highest number this ABI issues; every number past it is refused.
+pub const HIGHEST_SYSCALL: u64 = SYS_DEVICE_DMA_UNMAP;
+
+const _: () = assert!(HIGHEST_SYSCALL < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 
@@ -2259,6 +2262,17 @@ pub fn process_stats(proc: RawHandle, stats: &mut ProcessStats) -> Result<(), Sy
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Read off this file's `pub const SYS_…: u64 = <n>;` declarations, so a
+    /// syscall numbered past [`HIGHEST_SYSCALL`] cannot land without moving it.
+    #[test]
+    fn highest_syscall_is_the_highest_number_declared() {
+        let highest = include_str!("syscall.rs")
+            .lines()
+            .filter_map(|l| l.strip_prefix("pub const SYS_")?.split_once(": u64 = ")?.1.strip_suffix(';')?.parse().ok())
+            .max();
+        assert_eq!(highest, Some(HIGHEST_SYSCALL));
+    }
 
     /// **The encoder is the wire, so the test decodes the wire.**
     ///

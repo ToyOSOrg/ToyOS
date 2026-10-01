@@ -1,14 +1,14 @@
 //! A number no syscall has is refused as `InvalidArgument`, on the kernel an
 //! image ships.
 
-use toyos_abi::syscall::SyscallError;
+use toyos_abi::syscall::{SyscallError, HIGHEST_SYSCALL};
 
 #[path = "../arch/mod.rs"]
 mod arch;
 
-/// Numbers no syscall has: one inside the table's range and the last a
+/// Numbers no syscall has: the first past the ABI's own and the last a
 /// register holds.
-const UNASSIGNED: [u64; 2] = [26, u64::MAX];
+const UNASSIGNED: [u64; 2] = [HIGHEST_SYSCALL + 1, u64::MAX];
 
 fn main() {
     // SAFETY: a number the kernel refuses without reading any argument;
