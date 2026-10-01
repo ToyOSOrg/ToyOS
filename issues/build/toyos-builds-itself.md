@@ -57,15 +57,6 @@ the published crates.io crate is yanked.
 each blocks the next, as
 `issues/build/bootstrap-cannot-build-llvm-clang-and-lld-for-a-toyos-host.md`
 measures it.
-- Configure: CMake's ToyOS,
-  `issues/build/the-cxx-runtime-names-toyos-to-cmake-as-unix.md`.
-- Compile: the signal-set calls, `wait` and `wait4` of the child-process
-  track's stage 3 with `issues/build/libc-has-no-alarm.md`,
-  `issues/build/libc-lacks-names-llvm-for-a-toyos-host-calls.md`, and
-  `issues/build/libcxx-is-built-without-std-filesystem.md`.
-- Link: the same names.
-- Build: ToyOS's build runs bootstrap for no ToyOS host; `src/llvm.rs` builds
-  the host's LLVM alone.
 - Run: what `issues/build/libc-refuses-what-toyos-cannot-yet-answer.md` lists,
   `issues/build/libc-has-no-pread-or-pwrite.md`, and
   `issues/build/libc-stat-answers-one-serial-number-for-every-file.md`.

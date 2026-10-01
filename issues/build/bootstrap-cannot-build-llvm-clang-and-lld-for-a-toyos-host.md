@@ -8,16 +8,12 @@ opened: 2026-09-30
 
 M2's clang and lld (`issues/build/toyos-builds-itself.md`) are bootstrap's
 `Llvm` step, with `clang = true`, and its `Lld` step for
-`x86_64-unknown-toyos`, with the store's LLVM (`src/llvm.rs`) as the host's
-`llvm-config`. Bootstrap and LLVM carry what is theirs: CMake is told the
-system `ToyOS`, `clang-tblgen` is the host LLVM's, LLD is built for a target
-whose LLVM bootstrap builds, and LLVM's `Support` reads POSIX's `<endian.h>`
-and calls every ToyOS file local. What stops the build is not theirs, in the
+`x86_64-unknown-toyos`, in a bootstrap build that names no `llvm-config` for
+the build triple and so builds that triple's LLVM, and its `clang-tblgen`,
+itself. CMake takes the C sysroot's `toolchain.cmake` from
+`CMAKE_TOOLCHAIN_FILE_x86_64_unknown_toyos`. What stops the build, in the
 order it stops it:
 
-- **CMake knows no ToyOS**, so `UNIX` is unset and LLVM's configure refuses,
-  `Unable to determine platform`
-  (`issues/build/the-cxx-runtime-names-toyos-to-cmake-as-unix.md`).
 - **Compile.** The first error is `sigemptyset`, undeclared in `Support`'s
   `CrashRecoveryContext.cpp`: stage 3's signal-set calls, `wait` and `wait4`
   (`issues/kernel/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`)
@@ -32,15 +28,9 @@ order it stops it:
 - **Link.** clang needs `lround`, which libc does not define
   (`issues/build/libc-lacks-names-llvm-for-a-toyos-host-calls.md`), beside
   those above. LLVM's shared libraries, `libLTO`, `libRemarks`, `libclang` and
-  `libclang-cpp`, do not link against the C sysroot, whose archives are built
-  for an executable
-  (`issues/build/a-rust-std-binary-cannot-link-the-cxx-runtime.md`); clang and
-  lld use none of them.
+  `libclang-cpp`, do not link against the C sysroot
+  (`issues/build/a-shared-object-does-not-link-against-the-c-sysroot.md`).
+  clang and lld use none of them, and ToyOS's build turns them off.
 
-With each name declared and defined to abort, libc++ built with
-`std::filesystem` against them, the four shared libraries' build options off,
-and a `Platform/ToyOS.cmake` on CMake's module path, bootstrap installs clang
-and `ld.lld` for `x86_64-unknown-toyos`.
-
-**Exit**: bootstrap, with `clang = true`, installs a clang and an `ld.lld` for
-`x86_64-unknown-toyos`.
+**Exit**: ToyOS's build, with nothing supplied by hand, has bootstrap install
+a clang and an `ld.lld` for `x86_64-unknown-toyos`.
