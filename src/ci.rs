@@ -23,13 +23,9 @@
 //! reds on a disagreement, and on a `/dev/kvm` that is present and does not
 //! open; `cargo run` only notes one, because a build must not stop for brew.
 
-use std::ffi::OsString;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
-use std::sync::mpsc::{Receiver, Sender};
-use std::sync::Mutex;
-use std::time::Instant;
+use std::process::Command;
 
 use crate::arch::{Accel, Arch};
 use crate::{flags, release, sdkversion, sync};
@@ -448,155 +444,6 @@ fn run_control(root: &Path, control: &Control) -> Result<String, String> {
     judge_control(control, green, &log)
 }
 
-/// The build system's own tests, the harness's checks and every host workspace
-/// member's, as many test executables at once as this host has CPUs, each from
-/// the moment cargo has linked it: cargo's own `test` runs one executable at a
-/// time, and the next build waits for the last of them.
-///
-/// The build system's two targets build after the workspace and with each
-/// other, in one invocation, so the workspace's tests run beside that build.
-/// The doctests are cargo's own pass, last, because it takes the build lock.
-fn host_tests(root: &Path) -> Result<String, String> {
-    let (send, receive) = std::sync::mpsc::channel();
-    let receive = Mutex::new(receive);
-    let failed = Mutex::new(Vec::new());
-    let width = std::thread::available_parallelism().expect("this host's CPU count").get();
-    let mut built = 0;
-    std::thread::scope(|s| {
-        for _ in 0..width {
-            s.spawn(|| run_tests(&receive, &failed));
-        }
-        let workspace = ["--workspace", "--exclude", "toyos-build"];
-        for args in [&workspace[..], &["--lib", "--test", "toyos-checks"]] {
-            match build_tests(root, args, &send) {
-                Ok(n) => built += n,
-                Err(why) => failed.lock().expect("no runner panics holding it").push(why),
-            }
-        }
-        let mut doctests = Command::new("cargo");
-        doctests
-            .args(["test", "--doc", "--workspace", "--exclude", "toyos-build"])
-            .current_dir(root);
-        send.send(TestRun { label: "the doctests".into(), command: doctests })
-            .expect("a runner holds the receiver until the sender is dropped");
-        drop(send);
-    });
-    let failed = failed.into_inner().expect("no runner panics holding it");
-    if failed.is_empty() {
-        Ok(format!("{built} test executables and the doctests, {width} at once, all green"))
-    } else {
-        Err(failed.join("; "))
-    }
-}
-
-/// A test executable, or cargo's doctest pass, and what the log calls it.
-struct TestRun {
-    label: String,
-    command: Command,
-}
-
-/// `cargo test --no-run <args>`, sending each test executable on to `runs` as
-/// cargo links it; how many it sent.
-///
-/// An executable runs where cargo would run it, in its package's directory, and
-/// `CARGO_MANIFEST_DIR` and `CARGO_MANIFEST_PATH` are its package's. The
-/// `CARGO_PKG_*` `cargo run` gave this driver are toyos-build's, so they are
-/// taken away rather than handed to another package's tests.
-fn build_tests(root: &Path, args: &[&str], runs: &Sender<TestRun>) -> Result<usize, String> {
-    let line = format!("cargo test --no-run {}", args.join(" "));
-    let mut cargo = Command::new("cargo")
-        .args(["test", "--no-run", "--message-format=json-render-diagnostics"])
-        .args(args)
-        .current_dir(root)
-        .stdout(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("{line}: {e}"))?;
-    let inherited: Vec<OsString> = std::env::vars_os()
-        .map(|(key, _)| key)
-        .filter(|key| key.to_str().is_some_and(|k| k.starts_with("CARGO_PKG_")))
-        .collect();
-    let mut sent = 0;
-    let messages = BufReader::new(cargo.stdout.take().expect("piped above"));
-    for message in messages.lines() {
-        let message = message.map_err(|e| format!("{line}: {e}"))?;
-        let artifact: serde_json::Value = serde_json::from_str(&message)
-            .map_err(|e| format!("{line} printed {message:?}, not a message: {e}"))?;
-        if artifact["reason"] != "compiler-artifact" || artifact["profile"]["test"] != true {
-            continue;
-        }
-        let (Some(executable), Some(manifest), Some(source)) = (
-            artifact["executable"].as_str(),
-            artifact["manifest_path"].as_str(),
-            artifact["target"]["src_path"].as_str(),
-        ) else {
-            return Err(format!(
-                "{line}: a test artifact names no executable, manifest or source: {message}"
-            ));
-        };
-        let dir = Path::new(manifest).parent().expect("a manifest is a file in a directory");
-        let mut command = Command::new(executable);
-        command
-            .current_dir(dir)
-            .env("CARGO_MANIFEST_DIR", dir)
-            .env("CARGO_MANIFEST_PATH", manifest);
-        for key in &inherited {
-            command.env_remove(key);
-        }
-        let source = Path::new(source);
-        let label = source.strip_prefix(root).unwrap_or(source).display().to_string();
-        runs.send(TestRun { label, command })
-            .expect("a runner holds the receiver until the sender is dropped");
-        sent += 1;
-    }
-    let status = cargo.wait().map_err(|e| format!("{line}: {e}"))?;
-    if status.success() {
-        Ok(sent)
-    } else {
-        Err(format!("{line} exited {status}"))
-    }
-}
-
-/// Take runs off `runs` until it is closed, run each to its end, and print its
-/// output whole; a run that exits other than green goes in `failed`.
-fn run_tests(runs: &Mutex<Receiver<TestRun>>, failed: &Mutex<Vec<String>>) {
-    loop {
-        // Its own statement, so the lock is let go before the run, not after.
-        let next = runs.lock().expect("no runner panics holding it").recv();
-        let Ok(run) = next else { return };
-        let started = Instant::now();
-        let refusal = match run_whole(run.command) {
-            Ok((status, output)) => {
-                let took = started.elapsed().as_secs_f64();
-                let mut out = std::io::stdout().lock();
-                let _ = writeln!(out, "--- {}: {status} in {took:.1} s", run.label);
-                let _ = out.write_all(&output);
-                if status.success() {
-                    continue;
-                }
-                format!("{} exited {status}", run.label)
-            }
-            Err(why) => format!("{}: {why}", run.label),
-        };
-        failed.lock().expect("no runner panics holding it").push(refusal);
-    }
-}
-
-/// `command` to its end, both of its streams in one pipe, in the order it wrote
-/// them.
-fn run_whole(mut command: Command) -> Result<(ExitStatus, Vec<u8>), String> {
-    let (mut reader, writer) = std::io::pipe().map_err(|e| format!("pipe: {e}"))?;
-    command.stdout(writer.try_clone().map_err(|e| format!("pipe: {e}"))?).stderr(writer);
-    let mut child = command.spawn().map_err(|e| e.to_string())?;
-    // The command holds this process's ends of the pipe; the read below ends
-    // only once every writer has gone.
-    drop(command);
-    let mut output = Vec::new();
-    reader.read_to_end(&mut output).map_err(|e| format!("reading its output: {e}"))?;
-    let status = child.wait().map_err(|e| e.to_string())?;
-    Ok((status, output))
-}
-
-
 /// The merge queue's whole gate, and the nightly's host lane: every test that
 /// runs on the host and boots no guest. The build system's own tests, every
 /// member of the host workspace, clippy with warnings denied, the concurrency
@@ -623,8 +470,12 @@ fn host(root: &Path) -> Vec<Step> {
     std::env::set_var("TMPDIR", tmp.path());
     let host_triple = crate::toolchain::host_triple();
     let mut steps = vec![
-        step("the build system, the harness's own checks and the host workspace", || {
-            host_tests(root)
+        // `--no-fail-fast`: a red in the build system's tests leaves the checks run.
+        step("the build system and the harness's own checks", || {
+            cargo(root, &["test", "--no-fail-fast", "--lib", "--test", "toyos-checks"])
+        }),
+        step("the host workspace", || {
+            cargo(root, &["test", "--workspace", "--exclude", "toyos-build"])
         }),
         step("the licences of what ships", || crate::licence::judge(root)),
     ];
