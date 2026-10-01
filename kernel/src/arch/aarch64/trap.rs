@@ -176,13 +176,6 @@ fn irq(from_el0: bool) {
             }
         }
         #[cfg(feature = "boot-actuators")]
-        intid if intid == u32::from(LOG_NEST_VECTOR) => {
-            percpu::preempt_count_up();
-            crate::log::nested::deliver();
-            percpu::preempt_count_down();
-            irqchip::end(intid);
-        }
-        #[cfg(feature = "boot-actuators")]
         irqchip::SGI_STORM => {
             storm::sgi();
             irqchip::end(intid);
@@ -463,7 +456,6 @@ pub fn install() {
 
 pub const HDA_VECTOR: u8 = irqchip::Intid::Hda as u8;
 pub const VIRTIO_SOUND_VECTOR: u8 = irqchip::Intid::VirtioSound as u8;
-pub const LOG_NEST_VECTOR: u8 = irqchip::Intid::LogNest as u8;
 
 /// The crash report for a panic, from the frame pointer the panic handler
 /// stood on: the backtrace, which CPU is on which stack, and what the

@@ -421,7 +421,7 @@ impl VirtioNet {
             offered & (VIRTIO_F_VERSION_1 | VIRTIO_F_ACCESS_PLATFORM | VIRTIO_NET_F_MAC);
         // The line the kernel's virtio drivers print, in the same shape:
         // `iommu_virtio_platform` reads it back for every virtio function the
-        // machine creates, and this one is no longer the kernel's to print.
+        // machine creates.
         crate::say!(
             "netd: VirtIO: PCI {:02x}:{:02x}.{} features device={offered:#x} \
              negotiated={features:#x} access_platform={}",

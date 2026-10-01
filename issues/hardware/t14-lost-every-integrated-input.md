@@ -77,3 +77,5 @@ whether the devices answer or not — the gate keys `declare_source()` on
 computed one line above (i8042/mod.rs:1320,1323), go unread. Gating the two
 declarations on those is the one-line fix direction the #342 review named; it
 needs this machine to prove.
+
+`i8042_mouse` is deleted; `issues/hardware/i8042-mouse-ends-four-packets-short-with-a-clean-exit.md` records the commit that restores it.

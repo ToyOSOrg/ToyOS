@@ -415,16 +415,14 @@ pub(super) fn sys_partition_transfer(
     match transfer {
         Transfer::Write(from) => {
             from.read_at(0, &mut bounce);
-            let whose = || ops::Run::Claim(claim.partition_on(), ops::ClaimOp::Write);
-            let run = ops::until_answered(whose, || match claim.partition_view() {
+            let run = ops::until_answered(|| match claim.partition_view() {
                 Some(view) => view.write_blocks(first, count, &bounce).map_err(ops::block_word),
                 None => Err(SyscallError::Gone),
             });
             ops::partition_word("a write", run)
         }
         Transfer::Read(into) => {
-            let whose = || ops::Run::Claim(claim.partition_on(), ops::ClaimOp::Read);
-            let run = ops::until_answered(whose, || match claim.partition_view() {
+            let run = ops::until_answered(|| match claim.partition_view() {
                 Some(view) => view.read_blocks(first, count, &mut bounce).map_err(ops::block_word),
                 None => Err(SyscallError::Gone),
             });

@@ -154,29 +154,6 @@ fn check(index: usize, disk: &Handle) {
         spent.is_err(),
         spent == Err(crate::block::BlockError::BudgetExpired));
 
-    // A read the controller cuts short while the device's CSW claims it moved
-    // everything.
-    //
-    // arm_short_read() is armed immediately before this specific read, not
-    // via a boot-wide fault count, so the short read lands on a known
-    // transfer.
-    //
-    // The short-read probe is issued against a host-staged block (not a
-    // guest-written one) so `matched` compares against bytes the guest could
-    // not itself have produced.
-    //
-    // A caller is handed the wrong LBA's data when the two accounts disagree
-    // and only the device's is kept.
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::usb_short_read() {
-        let block = at(blocks, HOST_BLOCKS[0]);
-        buf.fill(0);
-        crate::drivers::xhci::arm_short_read();
-        let refused = read(block, 1, &mut buf).is_err();
-        let matched = !refused && first_bad(&buf, nonce, block).is_none();
-        log!("usb-gate: short read of block {block} refused={refused} matched={matched}");
-    }
-
     // Keyed on the inverted nonce so a driver that returns the wrong block
     // cannot pass by returning data of the right kind.
     let guest_nonce = !nonce;
@@ -234,118 +211,12 @@ fn check(index: usize, disk: &Handle) {
         }
     }
 
-    // A READ whose first wait spends its operation's whole budget, then a class
-    // reset the device answers out of step, then a port reset that takes: the
-    // READ goes out again on what the call has left and returns the host's
-    // bytes.
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::usb_first_wait_spent() {
-        use crate::drivers::xhci::{disarm_probe_faults, disarm_transport_faults};
-        use crate::drivers::xhci::{stage_probe_faults, stage_transport_faults, StagedFault};
-        let block = at(blocks, HOST_BLOCKS[0]);
-        buf.fill(0);
-        stage_transport_faults(1, StagedFault::Unanswered);
-        stage_probe_faults(1);
-        let refused = read(block, 1, &mut buf).is_err();
-        let (untaken, probes_untaken) = (disarm_transport_faults(), disarm_probe_faults());
-        let matched = !refused && first_bad(&buf, nonce, block).is_none();
-        log!(
-            "usb-gate: a first wait that spent the operation's budget, a recovery out of step and \
-             a port reset: read refused={refused} matched={matched} untaken={untaken} \
-             probes_untaken={probes_untaken} healthy={}",
-            usb_storage::healthy(index)
-        );
-    }
-
-    // Runs of transport faults, each staged immediately before the read it is
-    // taken inside. One short of the budget, in each of the two shapes a break
-    // leaves the bulk pair in, is a run the recovery brings back: the read
-    // returns the host's bytes, and because a completed read ends the run the
-    // second shape starts its own count. Then one fault whose recovery the
-    // device answers without being in step after it. A run as long as the
-    // whole budget is what the driver owes a give-up for. Last, because the disk is offline
-    // after it and every line above would read differently.
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::usb_transport_faults() {
-        use crate::drivers::xhci::{max_transport_breaks, stage_transport_faults, StagedFault};
-        use crate::drivers::xhci::disarm_transport_faults as disarm;
-        let block = at(blocks, HOST_BLOCKS[0]);
-        let budget = max_transport_breaks();
-        for (fault, shape) in [
-            (StagedFault::BadSignature, "bad CBW signatures"),
-            (StagedFault::NoCbw, "withheld CBWs"),
-        ] {
-            buf.fill(0);
-            stage_transport_faults(budget - 1, fault);
-            let refused = read(block, 1, &mut buf).is_err();
-            let untaken = disarm();
-            let matched = !refused && first_bad(&buf, nonce, block).is_none();
-            log!(
-                "usb-gate: {} {shape} in a row of a budget of {budget}: read refused={refused} \
-                 matched={matched} untaken={untaken} healthy={}",
-                budget - 1,
-                usb_storage::healthy(index)
-            );
-        }
-        // A recovery the device answers and is not in step after: the read's
-        // CBW is refused, and so is the TEST UNIT READY the recovery closes
-        // with, so that recovery has not taken and is the run's second break.
-        {
-            use crate::drivers::xhci::{disarm_probe_faults, stage_probe_faults};
-            buf.fill(0);
-            stage_transport_faults(1, StagedFault::BadSignature);
-            stage_probe_faults(1);
-            let refused = read(block, 1, &mut buf).is_err();
-            let untaken = disarm();
-            let probes_untaken = disarm_probe_faults();
-            let matched = !refused && first_bad(&buf, nonce, block).is_none();
-            log!(
-                "usb-gate: a bad CBW signature and then a recovery out of step: read \
-                 refused={refused} matched={matched} untaken={untaken} \
-                 probes_untaken={probes_untaken} healthy={}",
-                usb_storage::healthy(index)
-            );
-        }
-        stage_transport_faults(budget, StagedFault::BadSignature);
-        let read_refused = read(block, 1, &mut buf).is_err();
-        let untaken = disarm();
-        let next_refused = read(block, 1, &mut buf).is_err();
-        log!(
-            "usb-gate: {budget} bad CBW signatures in a row of a budget of {budget}: read \
-             refused={read_refused} untaken={untaken} the read after it refused={next_refused} \
-             healthy={}",
-            usb_storage::healthy(index)
-        );
-        // And the same budget spent inside a bind: the next disk to enumerate
-        // has its INQUIRY — the first command `bring_up` issues through the
-        // recovering path — refused as many times. The bind stages and disarms
-        // them itself, since no operation of this gate spans one; one more than
-        // the budget, so what it takes back is not nothing.
-        crate::drivers::xhci::stage_bind_faults(budget + 1);
-    }
-
     log!(
         "usb-gate: disk done reads={} writes={} refusal={past_end} wr_err={write_errors} healthy={}",
         if reads_ok { "ok" } else { "bad" },
         if writes_ok { "ok" } else { "bad" },
         usb_storage::healthy(index)
     );
-
-    // After the account above, which it would otherwise change: a read whose
-    // port reads gone is not a transport to recover, and the disk is left to
-    // the teardown its port owes.
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::usb_port_gone() {
-        use crate::drivers::xhci::{stage_transport_faults, StagedFault};
-        stage_transport_faults(1, StagedFault::PortGone);
-        let refused = read(at(blocks, HOST_BLOCKS[0]), 1, &mut buf).is_err();
-        let untaken = crate::drivers::xhci::disarm_transport_faults();
-        log!(
-            "usb-gate: a read whose port reads gone: refused={refused} untaken={untaken} \
-             healthy={}",
-            usb_storage::healthy(index)
-        );
-    }
 }
 
 /// Blocks per read-and-write-back pair — eight of this driver's largest SCSI

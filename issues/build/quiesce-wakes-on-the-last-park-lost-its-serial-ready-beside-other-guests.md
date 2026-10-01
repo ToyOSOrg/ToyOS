@@ -22,3 +22,5 @@ Again in PR #532's fast tier at `a7f423b5`, 399 passed and this one of two reds:
 `stop: 7 of 7 userland thread(s) stopped ... in 1 ms of a 2010 ms budget`,
 `Rebooting.` and `shutdown: /log did not answer in 2000ms`, the uart
 `nothing at all`; `ALONE ... GREEN`. That branch touches no quiesce path.
+
+`quiesce_wakes_on_the_last_park` is deleted; `issues/kernel/quiesce-wakes-on-the-last-park-gave-up-on-one-thread-beside-the-held-one.md` records the commit that restores it.

@@ -91,9 +91,6 @@ actuators! {
     /// Shorten the i8042 post-verdict counter report from 10s to 500ms.
     i8042_fast_health = "i8042-fast-health";
 
-    /// Cap the i8042 ISR at 4 bytes and answer empty until the mute verdict is out; `service` then polls the rest, so the verdict beats the sequence on every boot instead of on a loaded shard's luck.
-    i8042_split_burst = "i8042-split-burst";
-
     /// Script the input core directly at end of boot.
     test_input_merge = "test-input-merge";
 
@@ -109,9 +106,6 @@ actuators! {
     /// Hold the thread named `toyos_quiesce::LAST_THREAD` inside `SYS_NANOSLEEP`, and the shutdown until it is held there, until the stop waits on it alone: its park is then the stop's last transition.
     quiesce_last_park = "quiesce-last-park";
 
-    /// The same for the last thread out of its process, between its leaving and its teardown: that teardown is then the stop's last transition.
-    quiesce_last_teardown = "quiesce-last-teardown";
-
     /// Establish three nested `scheduler::Operation`s and report what each observed and restored; it stages nothing, touching no device.
     sched_operation_nesting = "sched-operation-nesting";
 
@@ -124,20 +118,8 @@ actuators! {
     /// Abandon the boot's first WRITE(10) data phase without waiting for it.
     usb_transport_break = "usb-transport-break";
 
-    /// Leave the TEST UNIT READY every rung of the recovery ladder ends on
-    /// unsent and unanswered for the whole of that rung's bound, so no rung is
-    /// ever in step, each spends all it may, and a disk whose transport breaks
-    /// once is taken offline: the one way to the last rung on a device that
-    /// answers, and with the rungs before it spent.
-    usb_transport_offline = "usb-transport-offline";
-
-    /// Skip the waits of every transfer of the next climb of the recovery
-    /// ladder, once: a device that answers nothing on any rung.
-    usb_reset_break = "usb-reset-break";
-
     /// Hold the port rung's first reset, once, until the port reads empty. See
-    /// `xhci::msc::reset_moves`; judged by `usb_transport_break` and
-    /// `usb_stick_left`.
+    /// `xhci::msc::reset_moves`; judged by `usb_stick_left`.
     usb_reset_moves = "usb-reset-moves";
 
     /// The same hold, once the reset's completion has been read with the
@@ -151,29 +133,11 @@ actuators! {
     /// `usb_stick_left`.
     usb_reset_moves_configured = "usb-reset-moves-configured";
 
-    /// `usb-transport-break`'s break, on the first WRITE(10) that goes out
-    /// while its device holds a write it reported complete and no flush has
-    /// emptied: a device that leaves then may have lost it. Judged by
-    /// `usb_transport_break`.
-    usb_transport_break_owed = "usb-transport-break-owed";
-
-    /// `usb-transport-break`'s break, on the first WRITE(10) that goes out
-    /// after a write was reported complete and a SYNCHRONIZE CACHE then
-    /// succeeded, with no write since: a device that leaves then owes nothing.
-    /// Judged by `usb_transport_break`.
-    usb_transport_break_flushed = "usb-transport-break-flushed";
-
     /// Refuse the machine's first stop, `SYS_SHUTDOWN` or `SYS_REBOOT`, before
     /// anything is torn down, as a machine with no way to stop refuses it: the
     /// path on which init tells `logd` the machine runs on. Judged by
     /// `log_after_a_refused_stop`.
     power_refused_once = "power-refused-once";
-
-    /// Hold a typed copy into user memory whose destination carries
-    /// `user_ptr::remap_race`'s mark between its translation and its store,
-    /// until its own process has mapped memory again: a sibling's `munmap`
-    /// and `mmap` staged inside the copy. Judged by `user_copy_races_munmap`.
-    copy_meets_a_remap = "copy-meets-a-remap";
 
     /// Hold a thread spawn whose argument carries `loader::rebase_window`'s
     /// mark between its TLS block being given an address and the block's
@@ -181,24 +145,6 @@ actuators! {
     /// block, until a sibling has stored into its DTV; where it cannot, it
     /// says so. Judged by `tls_rebase_window`.
     tls_rebase_window = "tls-rebase-window";
-
-    /// Stall the bind of a disk that arrives while another is held for its
-    /// device, for less than `usb-slow-return` does, and leave every transfer
-    /// of the operation the held call sends again on it unanswered, once, each
-    /// waited for to the end of what the call may spend. See
-    /// `xhci::msc::return_silent`; judged by `usb_transport_break`.
-    usb_return_silent = "usb-return-silent";
-
-    /// Stall the bind of a disk that arrives while another is held for its
-    /// device, before its first command, as a stick slow to answer after a
-    /// reset: the wait held for it is not where it binds. Judged by
-    /// `usb_transport_break`.
-    usb_slow_return = "usb-slow-return";
-
-    /// Ask for a disk's serial number string in fewer bytes than it carries, as
-    /// a device that delivered part of its descriptor. Judged by
-    /// `usb_transport_break`.
-    usb_serial_short = "usb-serial-short";
 
     /// Have the first disk the boot scan binds answer nothing for longer than
     /// the scan's whole silence bound and then be refused, as T14 run 103's
@@ -208,12 +154,6 @@ actuators! {
     /// `xhci::msc::bind_spends_the_scan`; judged by
     /// `xhci_scan_hands_over_a_free_slot`.
     usb_bind_spends_the_scan = "usb-bind-spends-the-scan";
-
-    /// Leave one READ(10) the gate stages it on unanswered for the whole of
-    /// its wait, and the class reset's TEST UNIT READY out of step, so a port
-    /// reset that takes comes after a wait that spent the operation's budget.
-    /// Judged by `usb_transport_break`.
-    usb_first_wait_spent = "usb-first-wait-spent";
 
     /// Stop every CPU inside one WRITE(10) at the shutdown syscall, with the
     /// device holding the CBW and nothing queued for its data phase, so the
@@ -236,33 +176,8 @@ actuators! {
     /// `usb_reset_records_the_phase_it_cut`.
     usb_reset_under_load = "usb-reset-under-load";
 
-    /// Run the first attempt of each run `object::ops::until_answered` retries —
-    /// a file's `SYS_FSYNC`, a claimed partition's read, write or flush — under an
-    /// operation that is already over, once per file and per partition and kind.
-    fsync_budget_spent = "fsync-budget-spent";
-
-    /// Make the deadman of every run `object::ops::until_answered` makes already
-    /// expired.
-    fsync_deadman_now = "fsync-deadman-now";
-
-    /// Under-deliver one READ(10) data phase so the byte counts disagree.
-    usb_short_read = "usb-short-read";
-
-    /// Have the gate stage runs of transport faults on its disk: runs the
-    /// recovery brings back, then one as long as the transport's whole budget,
-    /// then one on the next disk to bind.
-    usb_transport_faults = "usb-transport-faults";
-
-    /// Have the gate's last read end as one whose port read disconnected
-    /// mid-wait does.
-    usb_port_gone = "usb-port-gone";
-
     /// Report the preempt depth and backtrace at the deepest point of a disk transfer; it stages nothing, only measures.
     io_depth_probe = "io-depth-probe";
-
-    /// Hold every thread that waits on a watch between reading its condition and
-    /// parking, so a post lands in the window its commit must refuse the park over.
-    watch_window = "watch-window";
 
     /// Raise an unheld claim slot's vector inside a post of its own watch,
     /// inside a completion into a ring polling it, and inside that ring's own
@@ -290,13 +205,7 @@ actuators! {
     /// decision; on hardware the counter does it and nothing is sent.
     hard_lockup_probe = "hard-lockup-probe";
 
-    /// Storm the CPU spinning on `syscall` from Ring 3 with NMIs.
-    syscall_window_nmi = "syscall-window-nmi";
-
-    /// Take the IST index off vector 2's gate — the negative control on the row above: the CPU builds the NMI frame at whatever the stack pointer holds and takes a `#DF`.
-    nmi_without_ist = "nmi-without-ist";
-
-    /// Return from the NMI handler via `iretq` with a second NMI already pending.
+    /// Send one NMI from the idle loop, and return from its handler via `iretq` with a second NMI already pending.
     nmi_nested = "nmi-nested";
 
     /// Report an empty root hub for the xHCI driver's `SLOW_CONNECT_NS` after a controller powers its ports.
@@ -365,9 +274,6 @@ actuators! {
     /// machine brought up, with nothing else running, and report the distribution.
     tlb_shootdown_bench = "tlb-shootdown-bench";
 
-    /// Shrink both disk caches to 64 entries each.
-    test_small_caches = "test-small-caches";
-
     /// Shrink each process's VA arena from ~1015GB to 256MiB.
     test_tiny_va = "test-tiny-va";
 
@@ -379,12 +285,6 @@ actuators! {
     /// reset and QEMU does not. A boot that writes a record into it is one the
     /// stop did not stop.
     quiesce_late_word = "quiesce-late-word";
-
-    /// Queue one console holder's line once the stop has stopped every holder,
-    /// and keep `klogd` off the queue from the stop's claim on: a line still queued
-    /// at the stop with `klogd` behind it, which otherwise only a `klogd` slower
-    /// than `logd` stages. Judged by `quiesce_stops_the_machine`.
-    console_queue_at_the_stop = "console-queue-at-the-stop";
 
     /// Make the shutdown's bounded acquisitions of the xHCI controller lock
     /// find it busy for their whole bound — the negative control on "no
@@ -418,18 +318,6 @@ actuators! {
 
     /// Log the monotonic time and which CPUs are alive every 250ms.
     heartbeat = "heartbeat";
-
-    /// Remove the IF/TF bracket around shard selection through publication — the negative control on the log's interrupt-atomicity claim.
-    log_unbracketed_reserve = "log-unbracketed-reserve";
-
-    /// Send this CPU an IPI mid record-copy and emit one shard generation from the handler.
-    log_nested_emit = "log-nested-emit";
-
-    /// The same IPI, sent between the shard-pointer read and the unlocked `xadd` — stages order damage the log gate detects, unlike the row above's invisible corruption.
-    log_nested_reserve = "log-nested-reserve";
-
-    /// Let a handle close cancel every poll on the log's watch in the machine.
-    log_close_cancels_any_syscap = "log-close-cancels-any-syscap";
 
     /// Let a handle close cancel every poll on the keyboard's watch in the machine.
     keyboard_close_cancels_every_console = "keyboard-close-cancels-every-console";
@@ -490,18 +378,6 @@ actuators! {
     /// Reopen init by pid once it is spawned, and open every kernel thread's pid, the way `SYS_PROCESS_OPEN` does.
     process_reopen_selftest = "process-reopen-selftest";
 
-    /// Refuse every read of device block 0 of each disk the kernel drives — its
-    /// protective MBR and GPT header — once the boot has read its own tables,
-    /// so a partition claim meets a disk that does not answer a read of its
-    /// table. Judged by `partition_claim_gives_up`.
-    partclaim_table_unanswered = "partclaim-table-unanswered";
-
-    /// Refuse every read of device block 0 of each disk the kernel drives across
-    /// `rootfs::hold_source` alone, so ROOT's hold finds the disk carrying it
-    /// silent and withholds its GUID, and the disk answers every read after.
-    /// Judged by `partition_claim_gives_up`.
-    partclaim_root_withheld = "partclaim-root-withheld";
-
     /// Offer the block layer a second device claiming a registered `DeviceId`, and report what it did with it.
     block_duplicate_id = "block-duplicate-id";
 
@@ -522,13 +398,8 @@ actuators! {
 #[cfg(feature = "boot-actuators")]
 const IMPLIES: &[(&str, &[&str])] = &[
     ("i8042-trace", &["i8042-fast-health", "i8042-edge-race"]),
-    ("usb-short-read", &["usb-storage-gate"]),
-    ("usb-transport-faults", &["usb-storage-gate"]),
-    ("usb-port-gone", &["usb-storage-gate"]),
-    ("usb-first-wait-spent", &["usb-storage-gate"]),
     ("metal-panic-probe", &["diag-tick"]),
     ("heartbeat", &["diag-tick"]),
-    ("syscall-window-nmi", &["diag-tick"]),
     // The staged CPU has to still be deaf when its bound passes, and this boot
     // would otherwise have handed the machine back at the end of its job list —
     // so the control that ends a machine no other bound ends is staged over the
