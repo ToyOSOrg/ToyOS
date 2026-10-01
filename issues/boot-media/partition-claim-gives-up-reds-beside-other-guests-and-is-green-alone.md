@@ -95,8 +95,7 @@ deadman path this file already names as the cause. No code change made on
 `partition_claim_gives_up` out with `partclaim-table-unanswered` and
 `partclaim-root-withheld`, the actuators only it armed. It also armed
 `fsync-budget-spent` and `fsync-deadman-now`, which `9ebf080e8` took out with
-`log_flush_retry`, so `git revert 9ebf080e8 fa4c31409` brings it back,
-`log_flush_retry` with it.
+`log_flush_retry`.
 
 **Exit**: the fsync staging scoped to the claim it is staged for, so the
 boot's own `/log` fsync cannot meet it first, and the test restored and green

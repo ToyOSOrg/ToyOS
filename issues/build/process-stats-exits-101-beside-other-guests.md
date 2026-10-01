@@ -35,6 +35,6 @@ fails the arm by name, and `process_stats` passes on the T14's shared boot.
 
 **Its test is deleted**, as a flaky test is: `4a5b228d2` took
 `process_stats` out, and moved the nightly `tcg` job's one test to
-`empty_dir_stat`; `git revert 4a5b228d2` brings both back. `blocked_dump` is
+`empty_dir_stat`. `blocked_dump` is
 deleted too: `issues/build/parallel-tests-red-under-other-suites.md` records
 the commit.

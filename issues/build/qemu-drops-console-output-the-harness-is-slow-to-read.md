@@ -67,6 +67,4 @@ runs beside a full suite.
 
 **`log_stream_stalled_reader` is deleted**, as a flaky test is, on the two
 reds recorded here: `96763794e` took it out, and `cc291947e` then deleted
-`BootOptions::console_file`, which only it set. `git revert cc291947e
-96763794e` brings both back, and the exit condition's twenty runs wait on that
-restore.
+`BootOptions::console_file`, which only it set.
