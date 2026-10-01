@@ -342,12 +342,6 @@ pub fn yield_now() {
     driver::pass(Dispose::Yield);
 }
 
-/// Whether [`yield_now`] may be called where the running context stands.
-#[cfg(feature = "boot-actuators")]
-pub fn may_yield() -> bool {
-    crate::preempt::count() == blocking_baseline()
-}
-
 /// Unified preempt entry: the user-mode timer path, [`exit_to_user`]
 /// and the `preempt::enable` slow path all funnel through here.
 #[track_caller]

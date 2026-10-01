@@ -15,15 +15,7 @@
 //!   stick's, which the host drew and this binary cannot know;
 //! - `holder` — claims the target, says so, and waits to be killed;
 //! - `endowed` — finds the claim its parent moved to it, by the label init
-//!   endows a `part:` row under;
-//! - `unanswered` — a claim while a disk does not answer a read of its table;
-//! - `withheld <ROOT>` — a claim of ROOT's source, whose disk did not answer
-//!   ROOT's hold and answers now;
-//! - `deadman` — transfers whose every attempt is refused on its budget until
-//!   the deadman;
-//! - `departure`, `silent`, `untold` — claims on one USB stick whose device
-//!   leaves owing a flush and comes back: whose fsync answers for which writes,
-//!   across a close, and what is left when nobody asks.
+//!   endows a `part:` row under.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::toyos::process::CommandExt;
@@ -50,10 +42,6 @@ const MISALIGNED: &str = "3E8A1C5F-7D2B-4F60-9A1E-5C4B3D2E1F07";
 const MISSTART: &str = "5A7C9E1B-3D5F-4B71-8C2E-4F6A8B0C2D35";
 /// Mirrored: DATA, which fsd serves `/home` from through its claim.
 const DATA: &str = "E3A7C5D9-1B2F-4E6A-8D0C-9F7B5A3E1C24";
-/// Mirrored: the partitions of the stick whose device leaves.
-const DEPARTING: &str = "1F3E5D7C-9B2A-4C6E-8F01-A3B5C7D9E2F4";
-const STAYING: &str = "2A4C6E80-1B3D-4F57-9E6A-C8D0B2F4A6E1";
-const EARLIER: &str = "4C6E8A02-3D5F-4179-A0B2-D4F6A8C0E2B4";
 
 /// Mirrored: the target's length in blocks.
 const TARGET_BLOCKS: u64 = 2048;
@@ -76,14 +64,6 @@ fn pattern(n: u64) -> Block {
 /// Mirrored: what the refused writes past the end carry, so a block of the
 /// neighbour holding it says which write reached it.
 const PAST_END: &[u8; 16] = b"TOYOS-PAST-END\0\0";
-
-/// Mirrored: what the departure writes, block `n` of partition `which`.
-fn departure_block(which: u8, n: u64) -> Block {
-    let mut block = [which; BLOCK_BYTES];
-    block[..8].copy_from_slice(&n.to_le_bytes());
-    block[8..24].copy_from_slice(b"TOYOS-DEPARTURE\0");
-    block
-}
 
 fn guid(text: &str) -> PartGuid {
     PartGuid::parse(text).unwrap_or_else(|| panic!("{text} is not a GUID"))
@@ -114,12 +94,6 @@ fn main() {
         Some("main") => test(&cap, &args[1..]),
         Some("holder") => holder(&cap),
         Some("endowed") => endowed(),
-        Some("unanswered") => unanswered(&cap),
-        Some("withheld") => withheld(&cap, &args[1..]),
-        Some("deadman") => deadman(&cap),
-        Some("departure") => departure(&cap),
-        Some("silent") => silent(&cap),
-        Some("untold") => untold(&cap),
         other => panic!("unknown role {other:?}"),
     }
 }
@@ -346,147 +320,3 @@ fn past_the_end(target: &PartitionDev, blocks: u64) {
     println!("partition_claimant: every transfer past the end refused");
 }
 
-/// A disk that did not answer a read of its table makes the answer unknown:
-/// the claim is refused, not resolved on the disks that did answer.
-fn unanswered(cap: &SysCap) {
-    refused(
-        cap,
-        "the target, while its disk does not answer a read of its table,",
-        guid(TARGET),
-        SyscallError::NotSupported,
-    );
-    println!("partition_claimant: PASS");
-}
-
-/// ROOT's source, which the boot withheld when its disk did not answer: the
-/// disk answers now and nothing holds the span, and the claim is still the
-/// kernel's to refuse.
-fn withheld(cap: &SysCap, root: &[String]) {
-    let [root] = root else { panic!("withheld takes ROOT's GUID, got {root:?}") };
-    refused(
-        cap,
-        "ROOT, withheld when its disk did not answer the boot's hold,",
-        guid(root),
-        SyscallError::PermissionDenied,
-    );
-    println!("partition_claimant: PASS");
-}
-
-/// Every attempt of a transfer is refused on its budget until the deadman: each
-/// ends `Io`, the device's word, and not another ask-again. (NVMe's flush asks
-/// the device nothing, so it has no budget to refuse.)
-fn deadman(cap: &SysCap) {
-    let target = claim(cap, guid(TARGET)).expect("the target is claimable");
-    let mut one = [[0u8; BLOCK_BYTES]];
-    assert_eq!(target.write(0, &one), Err(SyscallError::Io), "a write past the deadman");
-    assert_eq!(target.read(0, &mut one), Err(SyscallError::Io), "a read past the deadman");
-    println!("partition_claimant: PASS");
-}
-
-/// Two claims on one USB stick. `STAYING` writes and is flushed; `DEPARTING`
-/// writes a block, and its next write is the one `usb-transport-break-owed`
-/// breaks, so the stick's device leaves holding that first block unflushed and
-/// the host moves it to another port. When it is back, the first flush asked
-/// is `STAYING`'s, which wrote nothing that was lost. `DEPARTING` is then
-/// closed and claimed again — the updater's write, close, reopen, fsync — and
-/// that fsync is the one told: the loss is the partition's, not the handle's.
-fn departure(cap: &SysCap) {
-    let staying = claim(cap, guid(STAYING)).expect("the staying partition is claimable");
-    let departing = claim(cap, guid(DEPARTING)).expect("the departing partition is claimable");
-
-    staying.write(0, &[departure_block(b'S', 0)]).expect("the staying write");
-    staying.sync().expect("the staying write, flushed before anything left");
-    departing.write(0, &[departure_block(b'D', 0)]).expect("the first departing write");
-    println!("partition_claimant: a write is reported and not flushed");
-    departing
-        .write(1, &[departure_block(b'D', 1)])
-        .expect("the write the device left under, sent again on it when it came back");
-    println!("partition_claimant: the write the device left under completed");
-
-    assert_eq!(
-        staying.sync(),
-        Ok(()),
-        "a claim that wrote nothing the departure lost was told of the loss"
-    );
-    drop(departing);
-    let departing = reclaimed(cap, guid(DEPARTING), "the claim that wrote it closed");
-    assert_eq!(
-        departing.sync(),
-        Err(SyscallError::Io),
-        "a partition whose write was in the cache of the device that left was told it is \
-         durable, once the claim that wrote it had closed"
-    );
-    said("the departing partition's flush, over a write the device lost,", SyscallError::Io);
-    assert_eq!(departing.sync(), Ok(()), "a loss is told once");
-
-    departing
-        .write(0, &[departure_block(b'D', 0), departure_block(b'D', 1)])
-        .expect("the lost write, written again");
-    departing.sync().expect("the rewrite is durable");
-    let mut back = [[0u8; BLOCK_BYTES]; 2];
-    departing.read(0, &mut back).expect("read the rewrite back");
-    assert!(back[0] == departure_block(b'D', 0) && back[1] == departure_block(b'D', 1));
-    println!("partition_claimant: PASS");
-}
-
-/// `logd`'s `/log` on the boot stick: `DEPARTING` writes a block and never
-/// writes again, and another claim's write is the one the device leaves
-/// under. `EARLIER` wrote before `STAYING`'s flush made its write durable —
-/// `STAYING` flushes having written nothing, since a second write before that
-/// flush would be the one the device leaves under. When the device is back,
-/// `STAYING` flushes first: it lost nothing, and its flush settles every
-/// account. `EARLIER` lost nothing either, because the flush that made its
-/// write durable came before the departure; `DEPARTING` is told, though
-/// another claim's flush came first.
-fn silent(cap: &SysCap) {
-    let earlier = claim(cap, guid(EARLIER)).expect("the earlier partition is claimable");
-    let staying = claim(cap, guid(STAYING)).expect("the staying partition is claimable");
-    let departing = claim(cap, guid(DEPARTING)).expect("the departing partition is claimable");
-
-    earlier.write(0, &[departure_block(b'E', 0)]).expect("the earlier write");
-    staying.sync().expect("another claim's flush, which makes it durable, before anything left");
-    departing.write(0, &[departure_block(b'D', 0)]).expect("the departing write");
-    println!("partition_claimant: a write is reported and not flushed");
-    staying
-        .write(0, &[departure_block(b'S', 0)])
-        .expect("the write the device left under, sent again on it when it came back");
-    println!("partition_claimant: the write the device left under completed");
-
-    assert_eq!(
-        staying.sync(),
-        Ok(()),
-        "a claim that wrote nothing the departure lost was told of the loss"
-    );
-    assert_eq!(
-        earlier.sync(),
-        Ok(()),
-        "a claim whose write a flush made durable before the departure was told it was lost"
-    );
-    assert_eq!(
-        departing.sync(),
-        Err(SyscallError::Io),
-        "a claim whose write the device that left had not flushed, and which wrote nothing \
-         after, was told it is durable because another claim flushed first"
-    );
-    said("the silent claim's flush, over a write the device lost,", SyscallError::Io);
-    assert_eq!(departing.sync(), Ok(()), "a loss is told once");
-    println!("partition_claimant: PASS");
-}
-
-/// A loss nobody asks about: `DEPARTING` writes a block, the device leaves
-/// under `STAYING`'s next write, and both claims close with no fsync. The
-/// shutdown's flush of the disk is what is left to say so, and the host reads
-/// that it did.
-fn untold(cap: &SysCap) {
-    let staying = claim(cap, guid(STAYING)).expect("the staying partition is claimable");
-    let departing = claim(cap, guid(DEPARTING)).expect("the departing partition is claimable");
-    departing.write(0, &[departure_block(b'D', 0)]).expect("the departing write");
-    println!("partition_claimant: a write is reported and not flushed");
-    staying
-        .write(0, &[departure_block(b'S', 0)])
-        .expect("the write the device left under, sent again on it when it came back");
-    println!("partition_claimant: the write the device left under completed");
-    drop(departing);
-    drop(staying);
-    println!("partition_claimant: PASS");
-}

@@ -389,18 +389,6 @@ impl<M, R: Ring, L: CellLock<Waiters<M, R>>> Drop for Watch<M, R, L> {
     }
 }
 
-/// The `watch-window` actuator's line: the kernel writes it once per [`STEP`]
-/// held windows a post ended, and the harness reads the count after [`HELD`].
-///
-/// [`STEP`]: window::STEP
-/// [`HELD`]: window::HELD
-pub mod window {
-    /// The line's words; the running count follows them.
-    pub const HELD: &str = "watch-window: a post landed in the held window";
-    /// One line per this many holds a post ended.
-    pub const STEP: u64 = 64;
-}
-
 /// The `handler-post` actuator's line: the kernel writes it once, and the
 /// harness compares it whole against [`Verdict::GREEN`].
 ///

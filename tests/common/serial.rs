@@ -40,8 +40,8 @@ pub enum Died {
     Kernel,
     /// A process the kernel killed: a Ring 3 fault, reported by name in
     /// `kernel/src/arch/x86_64/idt/exceptions.rs`. The machine is fine — a test whose
-    /// whole subject is a process dying (`handle_kill_policy` and every
-    /// `faults.rs` probe) produces these deliberately. Before a boot's ready
+    /// whole subject is a process dying (every `faults.rs`
+    /// probe) produces these deliberately. Before a boot's ready
     /// marker it still ends the boot: whatever died was `init` or one of its
     /// children, and nothing left is going to reach the marker.
     Faulted,

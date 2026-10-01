@@ -8,17 +8,13 @@
 # cmdline the kernel parses into a config the image is built from, which is a
 # capability-shaped answer rather than a global one.
 #
-# What it buys is unchanged, and two tests want it: filling a mebibyte by
+# What it buys is unchanged: filling a mebibyte by
 # logging would take a boot far longer than a test should wait, and the code
 # the small bound drives is the shipped code. `kernel_log_file`'s second arm
-# reads the continuations and the retention sweep off the volume;
-# `usb_boot_stick_pulled` wants the FAT allocation and directory writes that a
-# rotation puts *in flight* at the moment the stick is pulled, which a machine
-# that is only ever appending never reaches.
+# reads the continuations and the retention sweep off the volume.
 #
-# It is metalcase's program set and not a smaller one on purpose: both callers
-# are about what the T14's shape does, and a config that dropped the daemons
-# would be measuring a different machine.
+# It is metalcase's program set and not a smaller one on purpose: a config
+# that dropped the daemons would be measuring a different machine.
 
 assets = ["assets"]
 
