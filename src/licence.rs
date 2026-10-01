@@ -285,6 +285,46 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         "NOTICE",
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
+    // FAT32 volumes macOS's `newfs_msdos` formatted and its `msdosfs`
+    // populated, as runs of nonzero sectors. Each boot sector carries
+    // `newfs_msdos`'s boot stub; `NOTICE` carries its notice, each raw digest
+    // and the commands.
+    (
+        "toyos-fat32/tests/fixtures/blank-4k.runs",
+        "14e98fc505450882f4d284fb712d32b4f9e4d50c1bfc86702ace8f0adee745e0",
+        "NOTICE",
+        Terms::Spdx("(MIT OR Apache-2.0) AND BSD-2-Clause"),
+    ),
+    (
+        "toyos-fat32/tests/fixtures/blank-512.runs",
+        "4f1686152769fb4b064a78b0a2287c8b54bff3ec1e279b35c8f337d538a45f78",
+        "NOTICE",
+        Terms::Spdx("(MIT OR Apache-2.0) AND BSD-2-Clause"),
+    ),
+    (
+        "toyos-fat32/tests/fixtures/empty-file.runs",
+        "68a6abf1626e4bdf6b3586d3f52b2d7051390e4e18beb31258dd0021bb3e96b9",
+        "NOTICE",
+        Terms::Spdx("(MIT OR Apache-2.0) AND BSD-2-Clause"),
+    ),
+    (
+        "toyos-fat32/tests/fixtures/hostile.runs",
+        "c570b3c6944f47d2cd1498da14f12c4a98dc85683f782624181917eba68f9066",
+        "NOTICE",
+        Terms::Spdx("(MIT OR Apache-2.0) AND BSD-2-Clause"),
+    ),
+    (
+        "toyos-fat32/tests/fixtures/read-4k.runs",
+        "cab78e1ea6c46b0a04a0de32a24f1a6ac90a2017dd7188745de2d603c5ab121b",
+        "NOTICE",
+        Terms::Spdx("(MIT OR Apache-2.0) AND BSD-2-Clause"),
+    ),
+    (
+        "toyos-fat32/tests/fixtures/read-512.runs",
+        "6bef14efca36070830f5a4a2b1dc9b69a0e2627679cc5c9ed542acaa4ece416c",
+        "NOTICE",
+        Terms::Spdx("(MIT OR Apache-2.0) AND BSD-2-Clause"),
+    ),
     (
         "assets/DOOM1.WAD",
         "1d7d43be501e67d927e415e0b8f3e29c3bf33075e859721816f652a526cac771",
