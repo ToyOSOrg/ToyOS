@@ -119,7 +119,7 @@ both before any lock conversion; the order is forced, not preferred.
 
 - A watch is a node the waiter lends to the object, and the subject is a
   borrowed reference, never an id. **Rejected:** a global registry, a slot
-  arena, two park channels, posting from interrupt context, multishot polls,
+  arena, two park channels, multishot polls,
   userspace-only blocking wrappers, a sleep lock that spins where it cannot
   park, poisoning, and shootdown-as-completion. A freed object cannot be named.
 - The park token proves the *context* may park and never encodes which locks are

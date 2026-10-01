@@ -2438,13 +2438,13 @@ mod tests {
     use crate::fair::{FairShare, ShareState};
     use crate::hw::{Kicker, Machine};
     use crate::mailbox::{mailbox, NoPreempt};
-    use crate::sync::LeafLock;
+    use crate::sync::CellLock;
     use crate::task::{RtState, TaskAccounting, TaskBuilder};
     use std::sync::Mutex;
 
     struct TestLock<T>(Mutex<T>);
 
-    impl<T: Send> LeafLock<T> for TestLock<T> {
+    impl<T: Send> CellLock<T> for TestLock<T> {
         fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
             f(&mut self.0.lock().expect("a test never poisons a lock"))
         }

@@ -27,6 +27,8 @@ pub fn play_tone() {
     let done = Arc::new(AtomicBool::new(false));
     let done2 = done.clone();
     let position = Arc::new(AtomicU64::new(0));
+    let failed = Arc::new(AtomicBool::new(false));
+    let failed2 = failed.clone();
 
     let stream = device
         .build_output_stream(
@@ -48,7 +50,10 @@ pub fn play_tone() {
                     done2.store(true, Ordering::Relaxed);
                 }
             },
-            |err| eprintln!("audio error: {err}"),
+            move |err| {
+                eprintln!("audio error: {err}");
+                failed2.store(true, Ordering::Relaxed);
+            },
             None,
         )
         .expect("failed to build audio stream");
@@ -61,4 +66,7 @@ pub fn play_tone() {
 
     // Let the tail of the tone drain through soundd and the device.
     std::thread::sleep(std::time::Duration::from_millis(200));
+
+    drop(stream);
+    assert!(!failed.load(Ordering::Relaxed), "the tone's stream reported an error, printed above");
 }

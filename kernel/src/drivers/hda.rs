@@ -166,7 +166,7 @@ pub fn isr_complete() {
     }
     ISR.timestamp.store(timestamp, Ordering::Relaxed);
     ISR.mask.fetch_or(mask, Ordering::Release);
-    crate::irq_ring::isr_publish(crate::irq_ring::IrqSource::Audio, timestamp);
+    super::AUDIO_WATCH.post_in_place();
     crate::preempt::set_need_resched();
 }
 

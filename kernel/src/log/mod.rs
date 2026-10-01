@@ -33,12 +33,28 @@ pub static BOOT_SHARD: Shard = Shard::new();
 // The ABI fixes how many shards a cursor can name; the kernel must not exceed it.
 const _: () = assert!(crate::sched::MAX_CPUS <= MAX_LOG_SHARDS);
 
-/// Makes an AP's shard reachable to a reader.
-/// # Safety
-/// `shard` must be a live, initialised [`Shard`] that is never freed.
-pub unsafe fn publish_ap_shard(cpu: u32, shard: *mut Shard) {
-    // SAFETY: the caller's contract is this one.
-    unsafe { registry::publish(registry::kernel_slots(), cpu, shard) };
+/// The shard `cpu` reserves in, published before that CPU runs an instruction,
+/// since a reader finds it only through the registry: the boot shard for CPU
+/// 0, and a fresh one, never freed, for every other.
+pub fn shard_for(cpu: u32) -> &'static Shard {
+    if cpu == 0 {
+        return &BOOT_SHARD;
+    }
+    assert!(
+        registry::published(registry::kernel_slots(), cpu as usize - 1).is_none(),
+        "log: cpu{cpu} already has a shard, and a second would hide every record written to the first",
+    );
+    let layout = alloc::alloc::Layout::new::<Shard>();
+    // SAFETY: a `Shard` is not zero-sized; the block is never freed.
+    let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) }.cast::<Shard>();
+    assert!(!ptr.is_null(), "log: no memory for cpu{cpu}'s shard");
+    // SAFETY: fresh, zeroed and aligned for a `Shard`, and not yet published;
+    // then live and initialised for the machine's life, as `publish` needs.
+    unsafe {
+        Shard::initialize_zeroed(ptr);
+        registry::publish(registry::kernel_slots(), cpu, ptr);
+        &*ptr
+    }
 }
 
 /// The newest records the stop's account carries whole. The page's account

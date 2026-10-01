@@ -79,7 +79,20 @@ impl Claim {
 impl Drop for Claim {
     fn drop(&mut self) {
         match self.what {
-            Claimed::Class(class) => *taken(class).lock() = false,
+            Claimed::Class(class) => {
+                // Before the flag goes: a poll the next holder registers is not this claim's to answer.
+                match class {
+                    DeviceType::HdaAudio | DeviceType::VirtioSound => {
+                        crate::drivers::AUDIO_WATCH.cancel_polls()
+                    }
+                    DeviceType::Keyboard
+                    | DeviceType::Mouse
+                    | DeviceType::Framebuffer
+                    | DeviceType::PciFunction
+                    | DeviceType::Partition => {}
+                }
+                *taken(class).lock() = false;
+            }
             // Bus mastering off, then the domain, then the pages: `release`
             // owns that order, and this is where a dying process reaches it.
             Claimed::PciFunction(slot) => crate::pcidev::release(slot),

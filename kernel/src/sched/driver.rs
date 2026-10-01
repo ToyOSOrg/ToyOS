@@ -169,7 +169,7 @@ fn next_key() -> TaskKey {
 }
 
 pub fn total_cpu_ns() -> u64 {
-    (0..crate::arch::smp::cpu_count() as usize)
+    (0..crate::smp::cpu_count() as usize)
         .map(|i| CPU_TIME_NS[i].0.load(Ordering::Relaxed))
         .sum()
 }
@@ -352,7 +352,7 @@ fn try_with_cpu<R>(f: impl FnOnce(&CpuSched<KernelPayload>) -> R) -> Option<R> {
 
 /// Build every CPU's mailbox and handle, and the BSP's `CpuSched`. Called once, before any task exists.
 pub fn init() {
-    let count = crate::arch::smp::cpu_count() as usize;
+    let count = crate::smp::cpu_count() as usize;
     assert!(count <= MAX_CPUS, "cpu count {count} exceeds MAX_CPUS");
     let mut handles = Vec::with_capacity(count);
     // A CPU number, not a walk of `SCHEDS`: `SCHEDS` is `MAX_CPUS` long whatever `count` is.
@@ -389,7 +389,7 @@ fn idle_ctx() -> KernelCtx {
 /// boot since every init program is spawned before any CPU has published a load.
 fn placement(now: Nanos) -> CpuId {
     static ROTATE: AtomicU64 = AtomicU64::new(0);
-    let count = crate::arch::smp::cpu_count() as u64;
+    let count = crate::smp::cpu_count() as u64;
     let start = CpuId((ROTATE.fetch_add(1, Ordering::Relaxed) % count) as u32);
     cpus().place(start, now)
 }
@@ -671,18 +671,6 @@ fn drain_irqs(entered: super::dump::Entered) {
     super::dump::serve_if_owed();
     // Repaints the panel if whoever owns the screen has drawn over the report.
     crate::drivers::panic_console::hold_report();
-
-    if crate::irq_ring::take(crate::irq_ring::IrqSource::UserDev).is_some() {
-        // Which claim it was is the per-slot flag `pcidev` keeps; the record
-        // here says only that a pass is owed, so one function's interrupt does
-        // not wake every user driver in the machine.
-        crate::pcidev::drain_pending();
-    }
-    if crate::irq_ring::take(crate::irq_ring::IrqSource::Audio).is_some() {
-        // Both backends share one watch, so a second would need the parking side
-        // to know which driver bound, which it doesn't.
-        crate::drivers::AUDIO_WATCH.post();
-    }
 }
 
 /// Leave the current stack for this CPU's idle stack and never come back.
@@ -714,6 +702,10 @@ extern "C" fn idle_loop() -> ! {
         #[cfg(feature = "boot-actuators")]
         if crate::drivers::panic_console::probe_due() {
             panic!("metal-panic-probe: a fatal report over a desktop that owns the screen");
+        }
+        #[cfg(feature = "boot-actuators")]
+        if crate::actuator::handler_post() {
+            crate::watch::handler_post::run();
         }
         crate::scheduler::log_health();
         crate::scheduler::reap_finished();

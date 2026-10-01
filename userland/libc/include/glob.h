@@ -3,6 +3,10 @@
 
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct {
     size_t gl_pathc;
     char **gl_pathv;
@@ -22,5 +26,9 @@ typedef struct {
 
 int glob(const char *pattern, int flags, int (*errfunc)(const char *, int), glob_t *pglob);
 void globfree(glob_t *pglob);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

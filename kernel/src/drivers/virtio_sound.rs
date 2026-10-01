@@ -108,8 +108,7 @@ pub fn isr_complete() {
         return;
     }
     isr_push_completion(mask, timestamp);
-    crate::irq_ring::isr_publish(crate::irq_ring::IrqSource::Audio, timestamp);
-    // Force a scheduler entry on IRQ return so the record becomes wakes now, not at next tick.
+    super::AUDIO_WATCH.post_in_place();
     crate::preempt::set_need_resched();
 }
 

@@ -240,8 +240,7 @@ ninja`); on Debian and Ubuntu they are `build-essential`, `python3`, `cmake`
 and `ninja-build`.
 
 `cargo run` names anything it needs and cannot find, before it does anything
-else — including the Python that only the toolchain bootstrap runs, which
-costs that bootstrap rather than the build.
+else.
 Everything this project depends on that it did not write is named
 where it is carried: `NOTICE` lists every committed third-party file with its
 hash, upstream and licence.

@@ -28,6 +28,7 @@ pub mod paging;
 pub mod percpu;
 pub mod pio;
 pub mod pmu;
+pub mod psci;
 pub mod rtc;
 pub mod smp;
 pub mod switch;

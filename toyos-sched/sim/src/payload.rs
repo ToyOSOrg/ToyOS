@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use toyos_sched::fair::ShareState;
 use toyos_sched::mailbox::PreemptGuard;
-use toyos_sched::sync::LeafLock;
+use toyos_sched::sync::CellLock;
 use toyos_sched::task::{SchedPayload, TaskKey};
 use toyos_sched::watch::{Fire, Ring, Waiters};
 
@@ -29,7 +29,7 @@ impl<T> StdLock<T> {
     }
 }
 
-impl<T: Send> LeafLock<T> for StdLock<T> {
+impl<T: Send> CellLock<T> for StdLock<T> {
     fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
         f(&mut self.0.lock().expect("the simulator never poisons a lock"))
     }

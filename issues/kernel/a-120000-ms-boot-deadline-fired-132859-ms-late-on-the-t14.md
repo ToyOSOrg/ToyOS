@@ -107,16 +107,10 @@ runner asks for no reboot; the deadline was the only bound left, and it fired
 ## The instrument that measures this already exists
 
 `src/metal.rs:1591-1597`'s `deadline_lateness_ms` computes exactly
-`reached − bound` out of the `DEADLINE_EXPIRED` line (`src/bootlog.rs:28`);
-`tests/common/metal.rs:274-275` reads it off every readback and `:895-919`
-hands it to `profile.judge` as `boot.<label>.deadline_lateness_ms`;
-`tests/metal-profile.toml:409-414` prices that row for `deadlinewedge` —
-ceiling 10000 ms, "the widest true bound before [the timer period] has been"
-measured, `measured = 61`. 132859 is 13x that ceiling, on a boot the profile
-does not name: `lancase` is not among the labels the file prices, and is not
-in this tree. The arithmetic above is the instrument's own, done by hand
-because the run was `toyos-metal` invoked directly and not the harness. No
-second instrument is owed; a cause is.
+`reached − bound` out of the `DEADLINE_EXPIRED` line (`src/bootlog.rs:28`).
+The arithmetic above is the instrument's own, done by hand because the run
+was `toyos-metal` invoked directly and not the harness. No second instrument
+is owed; a cause is.
 
 ## What is known and what is not
 
@@ -148,5 +142,4 @@ second instrument is owed; a cause is.
   than the poll's one call site.
 
 **Exit condition**: the cause of a `poll` that ran 132859 ms past its bound is
-named with evidence and either removed or priced, so that a T14 expiry's
-lateness is held to the row that already exists.
+named with evidence and either removed or priced.

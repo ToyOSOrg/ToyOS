@@ -6,7 +6,7 @@ opened: 2026-09-27
 
 # libc's C headers are written by hand, and nothing holds them to its definitions
 
-`userland/libc/include/` is 32 headers typed beside the Rust that defines what
+`userland/libc/include/` is headers typed beside the Rust that defines what
 they declare, and no build or test compares the two. clang, compiling
 doomgeneric for the first time, found two places they had already parted:
 
@@ -20,8 +20,7 @@ doomgeneric for the first time, found two places they had already parted:
 Both are fixed in the headers. The class is not: a signature changed in
 `userland/libc/src` changes no header, and the C sysroot
 ships whatever the headers say. The corpus shows the
-surface is also incomplete — `stdint.h` has no `least`/`fast` types, so clang's
-own `stdatomic.h` does not compile (`124_atomic_counter`), and `pthread.h` and
+surface is also incomplete — `pthread.h` and
 `signal.h` stop short of `PTHREAD_PROCESS_SHARED` and `SIGUSR1`.
 
 **Generating them with cbindgen was priced and not taken**: it is a new

@@ -61,7 +61,9 @@ A deleted or disabled test covers nothing.
    the crate for it, named per decision in the PR. No decision exists in two
    places.
 3. **The supervisor owns the stop.** It asks each service it started to
-   finish, in reverse dependency order, storage last, each ask bounded; only
+   finish by a quit with reason terminate
+   (`issues/kernel/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`
+   stage 6), in reverse dependency order, storage last, each ask bounded; only
    then does it call the kernel, whose part is to stop whatever is left and
    cut power.
    **Exit**: two guest tests. In one, two non-storage services with a declared
@@ -69,8 +71,9 @@ A deleted or disabled test covers nothing.
    they are asked in forward order, and when they are asked all at once with
    storage still last. In the other, a service holding unwritten state is
    asked to finish, answers, and has its state on disk after the reboot; its
-   negative control is the same service never answering, where the stop still
-   lands at the bound and the supervisor's line names the service.
+   negative control is the same service listening for the ask and never
+   ending, where the stop still lands at the bound and the supervisor's line
+   names the service.
 4. **The stop's coverage comes back.** **Exit**: each claim below is asserted
    by a host test or a guest test, and a mutation named in the PR reds it.
    - A held thread's transition wakes the stop.
@@ -81,6 +84,7 @@ A deleted or disabled test covers nothing.
 
 ## Open with the owner
 
-- Before stage 3: the ask's ABI (no syscall is proposed); whether a program
+- Before stage 3: the ask's ABI, which is Q6a of
+  `issues/kernel/the-child-process-track-waits-on-the-owners-rulings.md`; whether a program
   started through `launcher` is asked or only stopped; whether
   `SYS_SHUTDOWN`/`SYS_REBOOT` change at all.

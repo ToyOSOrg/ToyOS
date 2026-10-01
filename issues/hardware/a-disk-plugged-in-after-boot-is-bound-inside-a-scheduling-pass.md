@@ -4,22 +4,20 @@ kind: track
 opened: 2026-08-10
 ---
 
-# The BOT/SCSI machine is still hand-written in the kernel
+# A disk plugged in after boot is bound inside a scheduling pass
 
-The xHCI port, protocol, teardown, recovery and enumeration machines are pure
-crate code with a host simulator behind them, and the kernel drives them. The
-mass-storage half is not: the BOT round trip and the SCSI bring-up above it are
-still hand-written in the kernel's wait module, and that is the one call site
+The BOT round trip and the SCSI bring-up above it are pure machines,
+`toyos_xhci::bot::RoundTrip` and `toyos_xhci::scsi::BringUp`, and the kernel
+drives both blocking, in place. For the read/write entry points that is the
+caller's own time. For the bind it is not: `msc::bind` is the one call site
 where a scheduling pass can still spend its transfer budget inside xHCI — for a
 disk arriving *after* boot, which is one greppable path.
 
-**What to build**, expressed the way recovery and enumeration already are: the
-round trip (command block out, data, status in, one legal stall retry) and the
-bring-up above it (test-unit-ready on a budget, sense, inquiry, read-capacity 10
-then 16), with two drivers over the same machine — a blocking one for the
-read/write entry points and a stepped one for the bind. Blocked on nothing but
-its own size; folding it into the enumeration landing would have made that
-unreviewable.
+**What to build**: a stepped driver for the bind over the same two machines,
+one act per pass, as enumeration has. Moving the bind to a thread that may
+block — usbd, step 10 of
+`issues/kernel/the-kernel-is-small-interrupts-post-and-threads-wait.md` — ends
+this file as well.
 
 After it, the pass-duration proof costs no new code: one guest gate measuring a
 scheduling pass across a plug, plus the existing check-build's pass-cost

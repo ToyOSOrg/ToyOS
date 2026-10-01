@@ -11,7 +11,13 @@ const FADT_FLAGS: usize = 112;
 /// A Generic Address Structure (§5.2.3.2): space at +0, bit width at +1, bit offset at +2, address at +4.
 const FADT_RESET_REG: usize = 116;
 const FADT_RESET_VALUE: usize = 128;
+const FADT_ARM_BOOT_ARCH: usize = 129;
+const FADT_MINOR_VERSION: usize = 131;
 pub const FADT_X_DSDT: usize = 140;
+
+/// `ARM_BOOT_ARCH`'s two flags.
+const PSCI_COMPLIANT: u16 = 1 << 0;
+const PSCI_USE_HVC: u16 = 1 << 1;
 
 /// The bytes [`reset_register`] reads to the end of, so a caller opening the
 /// table for that decode alone asks for what it needs and nothing after it.
@@ -115,6 +121,40 @@ pub fn reset_register<P: Phys>(fadt: &Table<P>) -> Reset {
     match u16::try_from(address) {
         Ok(port) if port != 0 => Reset::Port { port, value },
         _ => Reset::Address(address),
+    }
+}
+
+/// How the FADT says the Power State Coordination Interface is reached.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Psci {
+    /// `PSCI_COMPLIANT`, through `SMC`.
+    Smc,
+    /// `PSCI_COMPLIANT` and `PSCI_USE_HVC`.
+    Hvc,
+    /// `PSCI_COMPLIANT` clear: firmware offers no PSCI.
+    Absent,
+    /// A FADT before ACPI 5.1: those bytes are reserved, so nothing is said
+    /// about PSCI at all.
+    Undefined { revision: u8, minor: u8 },
+    /// A FADT that ends before `ARM_BOOT_ARCH` and the minor version after it.
+    Short,
+}
+
+/// `ARM_BOOT_ARCH`, read only from a FADT whose version defines it: 5.1 on,
+/// the version its header's major and `FADT Minor Version`'s low nibble spell.
+pub fn psci<P: Phys>(fadt: &Table<P>) -> Psci {
+    let revision = fadt.byte(SDT_REVISION).unwrap_or(0);
+    let (Some(flags), Some(minor)) = (fadt.u16_at(FADT_ARM_BOOT_ARCH), fadt.byte(FADT_MINOR_VERSION)) else {
+        return Psci::Short;
+    };
+    let minor = minor & 0xF;
+    if revision < 5 || (revision == 5 && minor < 1) {
+        return Psci::Undefined { revision, minor };
+    }
+    match flags {
+        flags if flags & PSCI_COMPLIANT == 0 => Psci::Absent,
+        flags if flags & PSCI_USE_HVC != 0 => Psci::Hvc,
+        _ => Psci::Smc,
     }
 }
 
