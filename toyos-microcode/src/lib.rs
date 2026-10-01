@@ -14,10 +14,11 @@
 //!
 //! The file is untrusted, so nothing here may panic on it. The lints below
 //! refuse indexing, slicing, unchecked arithmetic, `unwrap`, `expect`,
-//! `panic!`, `unreachable!`, `todo!` and `unimplemented!`. No lint sees
-//! `assert!`, a shift, or a std method that panics on a length, such as
-//! `split_at`: a length is taken only by a checked split whose failure is a
-//! [`Refusal`], and no `assert!` or shift takes an operand from the file.
+//! `panic!`, `unreachable!`, `todo!` and `unimplemented!`, and any assertion
+//! in a function returning `Result`. No lint sees a shift, an `assert!`
+//! elsewhere, or a std method that panics on a length, such as `split_at`: a
+//! length is taken only by a checked split whose failure is a [`Refusal`], and
+//! no shift or `assert!` takes an operand from the file.
 
 #![no_std]
 #![forbid(unsafe_code)]
