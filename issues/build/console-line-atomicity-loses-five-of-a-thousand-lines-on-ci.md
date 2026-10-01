@@ -22,6 +22,5 @@ out the contention shape that file is about.
 
 **Exit condition.** The lost lines' cause is fixed, shown against
 `console_line_atomicity` as it stands at `1808fb8d` (its binary, the test
-runner's `CONSOLE_JOBS` stdin and its harness arm), restored and green on CI's
-`guest` shards, one guest per machine.
+runner's `CONSOLE_JOBS` stdin and its harness arm), restored and green.
 Owner: orchestrator.

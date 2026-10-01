@@ -246,9 +246,7 @@ fn absentees(dir: &Path, declared: &BTreeSet<PathBuf>) -> Vec<PathBuf> {
 ///
 /// **`assets = [..]` names a directory and sweeps it whole**, so a config that
 /// builds no reader for a file still shipped it: these two are 19.7 MB of the
-/// 20.8 MB `assets/` holds, and `console/`, both desktop cases,
-/// `tests/logrotatecase` and `tests/metalcase` each carried both into an image
-/// with no doom in it. Named here rather than per config, because which program
+/// 20.8 MB `assets/` holds. Named here rather than per config, because which program
 /// opens a file is a property of the program and not of any one image, and a
 /// list repeated in five configs is a list that goes stale in four of them.
 /// The names are ROOT's, which [`collect`] lower-cases.

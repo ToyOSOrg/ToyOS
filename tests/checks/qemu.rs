@@ -32,7 +32,7 @@ pub fn host_scale_self_check() -> Result<(), String> {
     // Finite in the worst case the suite can reach: eight vCPUs on a single
     // core is 8x, not unbounded — so a genuine hang still reports in bounded
     // time. `budget_smp` composes this with `budget`'s own capped host_scale
-    // (<=8x) and phase width, and on the `--jobs 1` runner width is 1.
+    // (<=8x) and the run's width, and on the `--jobs 1` runner width is 1.
     if oversub_ratio(8, 1) != (8, 1) {
         return Err(format!("the worst suite case must stay finite at 8x, got {:?}", oversub_ratio(8, 1)));
     }
@@ -153,9 +153,7 @@ pub fn ceiling_self_check() -> Result<(), String> {
     const TIGHT: Duration = Duration::from_secs(153);
     let bstop = TIGHT.max(GUEST_WEDGED);
     assert!(TIGHT < bstop, "the case needs a ceiling below the backstop");
-    // (a) The flake itself: `launcher_refusals` at `192s "still talking 1s ago"`
-    //     on a loaded smp:2 runner. Past its 153 s budget, but talking — no
-    //     verdict, it runs on.
+    // (a) Past its 153 s budget, but talking — no verdict, it runs on.
     if ceiling_verdict(None, Duration::from_secs(192), TIGHT, Duration::from_secs(1), 500).is_some()
     {
         return Err(String::from(

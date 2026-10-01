@@ -57,22 +57,6 @@ fn quiesce(last: &str) -> Result<(), SyscallError> {
     if crate::actuator::wedge_before_reset() {
         crate::deadline::stage_a_wedge();
     }
-    // The same shape with a device left inside a Bulk-Only command. Here too,
-    // so the wedge is a boot that ran its job list.
-    #[cfg(feature = "boot-actuators")]
-    {
-        use toyos_xhci::bot::Phase;
-        let armed = [
-            (crate::actuator::usb_wedge_data_owed(), Phase::DataOwed),
-            (crate::actuator::usb_wedge_in_data(), Phase::Data),
-            (crate::actuator::usb_wedge_before_status(), Phase::StatusOwed),
-        ]
-        .into_iter()
-        .find_map(|(on, phase)| on.then_some(phase));
-        if let Some(phase) = armed {
-            crate::usb_gate::wedge_inside_a_write(phase);
-        }
-    }
     // The same machine ended by the same bound, with the bus busy rather than
     // idle: this one never stops writing, so the reset lands on a controller
     // that is moving bytes.
@@ -84,8 +68,6 @@ fn quiesce(last: &str) -> Result<(), SyscallError> {
     crate::arch::watchdog::disarm();
     // Every userland thread stops here, the log's writer with the rest:
     // `/system/bin/init` had it flush before it asked for this stop.
-    #[cfg(feature = "boot-actuators")]
-    crate::quiesce::last::await_the_held_thread();
     let stopped = crate::quiesce::stop();
     crate::log::console::drain_for_the_stop();
     // The final census: no process runs after this to report another.
@@ -103,15 +85,6 @@ fn quiesce(last: &str) -> Result<(), SyscallError> {
     // emptied and waited for before anything is taken down.
     crate::drivers::xhci::flush_disks();
     log!("{last}");
-    // Widens the window every shutdown has here, and nothing else: see the
-    // actuator's own declaration.
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::quiesce_late_word() {
-        let until = crate::clock::nanos_since_boot().saturating_add(100_000_000);
-        while crate::clock::nanos_since_boot() < until {
-            crate::scheduler::yield_now();
-        }
-    }
     // Order is load-bearing: the console drain, the seal, then the caller's
     // non-returning call.
     crate::log::console::drain_inline();
@@ -138,24 +111,10 @@ fn quiesce(last: &str) -> Result<(), SyscallError> {
     Ok(())
 }
 
-/// `power-refused-once`: whether this is the stop it refuses.
-fn refused_once() -> bool {
-    static REFUSED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-    let refuse = crate::actuator::power_refused_once()
-        && !REFUSED.swap(true, core::sync::atomic::Ordering::Relaxed);
-    if refuse {
-        log!("power: refusing this stop, as power-refused-once asks");
-    }
-    refuse
-}
-
 /// Powers the machine off; requires a `SysCap` carrying [`Rights::POWER`]. Returns only when refused.
 pub(super) fn sys_shutdown(syscap: RawHandle) -> u64 {
     if let Err(e) = demand_syscap(syscap, Rights::POWER) {
         return e.refuse();
-    }
-    if refused_once() {
-        return SyscallError::NotSupported.to_u64();
     }
     if let Err(e) = quiesce("Shutting down.") {
         return e.to_u64();
@@ -168,9 +127,6 @@ pub(super) fn sys_shutdown(syscap: RawHandle) -> u64 {
 pub(super) fn sys_reboot(syscap: RawHandle) -> u64 {
     if let Err(e) = demand_syscap(syscap, Rights::POWER) {
         return e.refuse();
-    }
-    if refused_once() {
-        return SyscallError::NotSupported.to_u64();
     }
     if !acpi::can_reboot() {
         log!("reboot: this machine's FADT names no reset register — refused");
