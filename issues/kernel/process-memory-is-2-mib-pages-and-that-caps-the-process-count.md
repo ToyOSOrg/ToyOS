@@ -14,9 +14,7 @@ can do is a restriction, and 2 MiB-only paging caps the process count.
 **What is to be built:** process memory — stacks, thread-local blocks, heaps,
 small data and code segments, and device windows handed to a process — moves
 to 4 KiB pages. 2 MiB stays where it pays: large mappings, DMA grants, the
-IOMMU's superpages, the kernel's own mappings. One paging design serves both,
-on x86-64 and on the ARM64 the tree is kept portable for
-(`issues/kernel/toyos-runs-on-arm64.md`).
+IOMMU's superpages, the kernel's own mappings. One paging design serves both.
 
 **The constraint that makes this a track, measured on the T14** (run 29
 readback, `PMM: 100/16038MB used` at 11 s with four user processes and three
