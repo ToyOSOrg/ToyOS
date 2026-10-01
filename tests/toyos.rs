@@ -510,6 +510,7 @@ const SCREEN_TESTS: &[(&str, Sched, qemu::Profile)] = &[
     ("virt_early_fault", Sched::Parallel, qemu::Profile::Virt),
     ("virt_el2_drop", Sched::Parallel, qemu::Profile::VirtEl2),
     ("virt_user_mode", Sched::Parallel, qemu::Profile::VirtEl2),
+    ("virt_boot_from_power_on", Sched::Parallel, qemu::Profile::VirtEl2),
     ("virt_timer_preempts", Sched::Parallel, qemu::Profile::VirtEl2),
     ("virt_irq_storm", Sched::Parallel, qemu::Profile::VirtEl2),
     ("virt_timer_floor", Sched::Parallel, qemu::Profile::VirtEl2),
@@ -599,7 +600,7 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     // A loader built to another `KernelArgs` layout is refused by name before
     // the kernel reads a field the layout could have moved.
     ("kernel_args_layout_refused", Sched::Parallel),
-    // The boot from power-on, as the kernel converts the loader's TSC readings:
+    // The boot from power-on, as the kernel converts the loader's counter readings:
     // judged against the loader's raw counts and the kernel's own rate.
     ("boot_from_power_on", Sched::Parallel),
     ("acpi_table_inventory", Sched::Parallel),
@@ -5218,6 +5219,20 @@ fn run_screen_test(
                 }
             }
             Ok(())
+        }
+        "virt_boot_from_power_on" => {
+            // `boot_from_power_on` where the loader's counter is the generic
+            // timer's, read at EL2 before the kernel's entry writes its offset.
+            // The loader and the kernel both speak on the PL011.
+            let mut qemu = QemuInstance::boot_with_options(
+                test_config,
+                &[],
+                &[],
+                BootOptions { profile, ready_marker: "control registers: SCTLR_EL1=", ..Default::default() },
+            );
+            let rest =
+                qemu.drain_until(Duration::from_secs(180), |l| l.contains(POWER_ON) || l.contains(COUNTER_BACKWARDS));
+            boot_from_power_on(&format!("{}\n{rest}", qemu.boot_log()), profile.arch())
         }
         "virt_timer_preempts" => {
             // Spelled in `userland/toybox/src/preempt.rs`.
@@ -12113,7 +12128,7 @@ fn run_machine_test(
         "boot_from_power_on" => {
             let qemu = QemuInstance::boot(test_config, c_bins, rust_bins);
             // The loader speaks on the firmware's serial, the kernel on the console.
-            boot_from_power_on(&format!("{}{}", qemu.uart_log(), qemu.boot_log()))
+            boot_from_power_on(&format!("{}{}", qemu.uart_log(), qemu.boot_log()), toyos_build::arch::Arch::X86_64)
         }
         "root_withheld_refused" => {
             let qemu = QemuInstance::boot_with_options(
@@ -17440,17 +17455,28 @@ fn root_from_memory(log: &str) -> Result<(), String> {
     Ok(())
 }
 
-const LOADER_TSC: &str = "Loader TSC: ";
+/// The loader's line, followed by its counter at its entry and at its handoff.
+const LOADER_COUNTER: &str = "Loader counter: ";
 /// The kernel's line, followed by its four spans in milliseconds.
 const POWER_ON: &str = "boot: power-on to loader ";
+/// The kernel's line in place of [`POWER_ON`] when the loader's counts and its
+/// own are out of order.
+const COUNTER_BACKWARDS: &str = "boot: the counter went backwards";
 /// The kernel's `TSC:` record, followed by the period it calibrated.
 const TSC_PERIOD: &str = "MHz (period=";
+/// The kernel's `clock:` record on AArch64, followed by the rate `CNTFRQ_EL0`
+/// states.
+const GENERIC_TIMER_HZ: &str = "clock: the generic timer counts at ";
 
 /// **The boot from power-on is the loader's raw counts at the kernel's rate.**
-/// The kernel's first two spans are the loader's counts converted at the `TSC:`
-/// record's period, the ROOT read sits inside the loader's span, and
+/// The kernel's first two spans are the loader's counts converted at the period
+/// its clock record gives, the ROOT read sits inside the loader's span, and
 /// `Boot: complete`'s own count inside the kernel's.
-fn boot_from_power_on(log: &str) -> Result<(), String> {
+fn boot_from_power_on(log: &str, arch: toyos_build::arch::Arch) -> Result<(), String> {
+    use toyos_build::arch::Arch;
+    if let Some(line) = log.lines().find(|l| l.contains(COUNTER_BACKWARDS)) {
+        return Err(line.to_string());
+    }
     let after = |head: &str| -> Result<Vec<u128>, String> {
         let at = log.find(head).ok_or_else(|| format!("no {head:?} line in the boot log"))?;
         let line = log[at + head.len()..].lines().next().unwrap_or("");
@@ -17460,13 +17486,18 @@ fn boot_from_power_on(log: &str) -> Result<(), String> {
             .map(|word| word.parse().expect("a run of digits"))
             .collect())
     };
-    let (loader, spans, rate) = (after(LOADER_TSC)?, after(POWER_ON)?, after(TSC_PERIOD)?);
-    let (&[entry, handoff, ..], &[to_loader, in_loader, root_read, to_complete], &[period_fs, ..]) =
-        (&loader[..], &spans[..], &rate[..])
+    // AArch64's record is a rate, which the kernel divides into a second as this does.
+    let (rate_head, period_of): (&str, fn(u128) -> Option<u128>) = match arch {
+        Arch::X86_64 => (TSC_PERIOD, Some),
+        Arch::Aarch64 => (GENERIC_TIMER_HZ, |hz| 1_000_000_000_000_000u128.checked_div(hz)),
+    };
+    let (loader, spans, rate) = (after(LOADER_COUNTER)?, after(POWER_ON)?, after(rate_head)?);
+    let (&[entry, handoff, ..], &[to_loader, in_loader, root_read, to_complete], Some(period_fs)) =
+        (&loader[..], &spans[..], rate.first().copied().and_then(period_of))
     else {
         return Err(format!(
-            "the lines do not carry their numbers: {loader:?} after {LOADER_TSC:?}, {spans:?} after \
-             {POWER_ON:?}, {rate:?} after {TSC_PERIOD:?}"
+            "the lines do not carry their numbers: {loader:?} after {LOADER_COUNTER:?}, {spans:?} \
+             after {POWER_ON:?}, {rate:?} after {rate_head:?}"
         ));
     };
     let ms = |ticks: u128| ticks * period_fs / 1_000_000_000_000;
@@ -17488,10 +17519,16 @@ fn boot_from_power_on(log: &str) -> Result<(), String> {
              power-on line puts at {to_complete} ms"
         ));
     }
+    let origin = match arch {
+        Arch::X86_64 => format!(
+            "; IA32_TSC_ADJUST {}",
+            log.split("IA32_TSC_ADJUST ").nth(1).and_then(|rest| rest.lines().next()).unwrap_or("unsaid")
+        ),
+        Arch::Aarch64 => String::new(),
+    };
     eprintln!(
         "  [boot] power-on to loader {to_loader} ms, loader {in_loader} ms (ROOT read {root_read} \
-         ms), kernel {to_complete} ms; IA32_TSC_ADJUST {}",
-        log.split("IA32_TSC_ADJUST ").nth(1).and_then(|rest| rest.lines().next()).unwrap_or("unsaid")
+         ms), kernel {to_complete} ms{origin}"
     );
     Ok(())
 }

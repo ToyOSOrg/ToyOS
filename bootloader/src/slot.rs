@@ -145,9 +145,9 @@ fn verify(
         println!("{HEAD} {letter}: ROOT: {why}");
         Refusal::Unreadable("root")
     })?;
-    let began = crate::tsc();
+    let began = crate::arch::counter();
     let root_hash = toyos_update::sha256(root.bytes());
-    println!("{HEAD} {letter}: ROOT hashed in {} TSC cycles", crate::tsc().wrapping_sub(began));
+    println!("{HEAD} {letter}: ROOT hashed in {} counter ticks", crate::arch::counter().wrapping_sub(began));
     if root_hash != header.root().sha256 {
         root.free(bs);
         return Err(Refusal::Hash("root"));

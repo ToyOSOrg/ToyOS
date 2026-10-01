@@ -186,7 +186,7 @@ Each stage lands on its own, in this order.
    `kernel_args_last_layout_refused` boots with
    `loader-writes-the-last-layout` and finds the kernel's refusal naming both
    words before any `black box:` record. Moving `layout` after
-   `root_read_tsc` fails to build, and so does padding `KernelArgs` back to
+   `root_read_ticks` fails to build, and so does padding `KernelArgs` back to
    1272 bytes: `size_of::<KernelArgs>()` is then stage 1's size again, the
    derived `LAYOUT` collapses onto the literal `LAST_LAYOUT`
    (`0x5459_0000 | 1272`), and `assert!(LAYOUT != LAST_LAYOUT)` fails the

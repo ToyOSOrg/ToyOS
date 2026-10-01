@@ -202,7 +202,6 @@ before any aarch64 file exists, with x86 as its only user:
 Each is its own issue, owned by the stage that removes it:
 
 - `issues/kernel/msi-and-pin-routing-take-an-x86-vector-and-apic-id.md` (stage 6)
-- `issues/kernel/the-boot-timing-handoff-is-named-for-the-tsc.md` (stage 4)
 - `issues/kernel/the-crash-evidence-records-x86-fault-registers.md` (stage 5)
 - `issues/kernel/the-aarch64-kernel-builds-with-dead-code-allowed.md` (stage 7)
 
@@ -263,8 +262,7 @@ Each stage names its exit; "measured" means a number from a run.
    exposes no RNDR and the kernel's hash seed refuses there until stage 6's
    virtio-rng. Each judges an event, never a rate: no QEMU test measures time.
    Owed before the exit holds: the interrupts-off window against x86's, a
-   measurement only metal can make, with no instrument on either arch yet;
-   `issues/kernel/the-boot-timing-handoff-is-named-for-the-tsc.md`; the
+   measurement only metal can make, with no instrument on either arch yet; the
    instruction-cache maintenance before a mapping is executable
    (`cache::make_executable`), the break-before-make ordering of a live
    entry's replacement, and the TLB flush before a reclaimed ASID is issued
