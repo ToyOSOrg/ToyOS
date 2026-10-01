@@ -31,7 +31,12 @@ is slow reads as one that stopped, and the host's load decides the verdict:
   with the console at "BdsDxe: starting Boot0001". Its 50-odd other runs in
   the kept logs passed in 6–34 s. Whether that guest was starved or the loader
   stalled before its first line is what a wait on the guest's own time
-  separates.
+  separates. In the serial tail of the same run, `metal_sim_window_drag` and
+  `usb_boot_stick_pulled` timed out their boots at 21 and 22 s — the 20 s a
+  phase of one guest gets — with the loader still printing its segments. The
+  run reported "fastest boot 1331 ms against the reference 1320 ms — liveness
+  ceilings paid at 1.01x" at a load average of 66–87: the fastest boot is
+  taken at the run's quietest moment, so `host_scale` cannot see the load.
 
 The opposite error has the same cause. `budget` multiplies a test's ceiling by
 the phase width and by `host_scale`, two stand-ins for the host's load, so a

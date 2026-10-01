@@ -26,6 +26,10 @@ pub struct Disabled {
 /// Every disabled test.
 pub const DISABLED: &[Disabled] = &[
     Disabled {
+        test: "blockd_serves_partitions",
+        issue: "issues/kernel/a-job-that-exited-was-never-reported-ended.md",
+    },
+    Disabled {
         test: "console_locale_detect",
         issue: "issues/build/the-console-input-path-can-stop-after-a-ps2-overflow.md",
     },
@@ -60,6 +64,10 @@ pub const DISABLED: &[Disabled] = &[
     Disabled {
         test: "log_ring_keeps_the_owners_slots",
         issue: "issues/kernel/a-log-rings-owner-is-named-only-when-logd-reads-its-registration.md",
+    },
+    Disabled {
+        test: "metal_sim_window_drag",
+        issue: "issues/build/a-harness-wait-reads-a-starved-guest-as-a-stopped-one.md",
     },
     Disabled {
         test: "netd_refused_accept",
@@ -128,6 +136,10 @@ pub const DISABLED: &[Disabled] = &[
     },
     Disabled {
         test: "update_refusals_boot_the_other_slot",
+        issue: "issues/build/a-harness-wait-reads-a-starved-guest-as-a-stopped-one.md",
+    },
+    Disabled {
+        test: "usb_boot_stick_pulled",
         issue: "issues/build/a-harness-wait-reads-a-starved-guest-as-a-stopped-one.md",
     },
     Disabled {
