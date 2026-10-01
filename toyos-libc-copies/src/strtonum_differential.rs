@@ -1,10 +1,14 @@
 //! libc's number reader against the host C library's `strtod`, `strtof`,
-//! `strtol` and `strtoul`: the value, bit for bit, where it ends, and the
+//! `strtol` and `strtoul`: where it ends, the value, bit for bit, and the
 //! `ERANGE` and `EINVAL` C requires, over a corpus of the grammar's corners and
 //! seeded random numbers, hexadecimal ones with a rounding tie in half of them.
+//! A hexadecimal number's value is held to [`exact_hex`] instead of the host's.
+//!
+//! glibc 2.39 reads `0X1.c63b83507cf448000P-1025` as `0x38c7706a0f9e8`; IEEE 754 rounds it to `0x38c7706a0f9e9`.
 
 use std::ffi::{c_int, CString};
 
+use crate::exact_hex::{self, BINARY32, BINARY64};
 use crate::strtonum::{self, Read, Refusal};
 
 unsafe extern "C" {
@@ -64,24 +68,35 @@ fn ours<F: strtonum::Float + Copy + Into<f64>>(s: &CString) -> Read<F> {
     narrow
 }
 
-/// `s` read as a `double` and a `float`, against the host. `ERANGE` is held
-/// against the host's only for an overflow: C leaves an underflow's to each
+/// The number a reading took, `taken`, without its leading space, if it is
+/// hexadecimal.
+fn hexadecimal(taken: &str) -> Option<&str> {
+    let number = taken.trim_start_matches([' ', '\t', '\n', '\x0b', '\x0c', '\r']);
+    let unsigned = number.strip_prefix(['+', '-']).unwrap_or(number);
+    (unsigned.starts_with("0x") || unsigned.starts_with("0X")).then_some(number)
+}
+
+/// `s` read as a `double` and a `float`: where it ends against the host, and
+/// the value against the host's or, for a hexadecimal number, [`exact_hex`]'s.
+/// `ERANGE` is held only for an overflow: C leaves an underflow's to each
 /// library.
 fn judge_float(s: &str) {
     let c = CString::new(s).unwrap();
     // SAFETY: `c` is NUL-terminated.
-    let (value, end, errno) = host(&c, |s, e| unsafe { strtod(s, e) });
+    let (value, end, _) = host(&c, |s, e| unsafe { strtod(s, e) });
     let read = ours::<f64>(&c);
-    assert!(same(read.value, value), "{s:?}: {:e} ({:#x}), the host's {value:e} ({:#x})", read.value, read.value.to_bits(), value.to_bits());
     assert_eq!(read.end, end, "{s:?}: where it ends");
-    if value.is_infinite() && !s.to_ascii_lowercase().contains("inf") {
-        assert_eq!((errno_of(&read.refused), errno), (ERANGE, ERANGE), "{s:?}: an overflow");
+    let want = hexadecimal(&s[..end]).map_or(value, |n| f64::from_bits(exact_hex::round(n, BINARY64)));
+    assert!(same(read.value, want), "{s:?}: {:e} ({:#x}), the judge's {want:e} ({:#x})", read.value, read.value.to_bits(), want.to_bits());
+    if want.is_infinite() && !s.to_ascii_lowercase().contains("inf") {
+        assert_eq!(errno_of(&read.refused), ERANGE, "{s:?}: an overflow");
     }
     // SAFETY: as above.
     let (value, end, _) = host(&c, |s, e| unsafe { strtof(s, e) });
     let read = ours::<f32>(&c);
-    assert!(same(read.value.into(), value.into()), "{s:?}: float {:e}, the host's {value:e}", read.value);
     assert_eq!(read.end, end, "{s:?}: where the float ends");
+    let want = hexadecimal(&s[..end]).map_or(value, |n| f32::from_bits(exact_hex::round(n, BINARY32).try_into().unwrap()));
+    assert!(same(read.value.into(), want.into()), "{s:?}: float {:e}, the judge's {want:e}", read.value);
 }
 
 /// `s` read as `long` and `unsigned long` in `base`, against the host. Where a
@@ -103,10 +118,10 @@ fn judge_int(s: &str, base: i32) {
 }
 
 /// A seeded xorshift, so a red names the case that reproduces it.
-struct Rng(u64);
+pub(crate) struct Rng(pub(crate) u64);
 
 impl Rng {
-    fn next(&mut self) -> u64 {
+    pub(crate) fn next(&mut self) -> u64 {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 7;
         self.0 ^= self.0 << 17;
@@ -123,7 +138,7 @@ impl Rng {
 }
 
 #[test]
-fn the_grammar_s_corners_agree_with_the_host() {
+fn the_grammar_s_corners_read_as_judged() {
     for s in [
         "", " ", "+", "-", ".", "e5", "0x", "0X", "0x.", "0x.p1", "0xp1", "0x1p", "0x1p+", "0x1p-x", "1e", "1e+",
         "1e-x", ".5", "5.", "-.5e-3", " \t\n\x0b\x0c\r+1.5", "1.5xyz", "inf", "-INFINITY", "infinit", "infx", "nan",
@@ -131,7 +146,7 @@ fn the_grammar_s_corners_agree_with_the_host() {
         "-0x0p0", "0.000", "-0", "1e309", "-1e309", "1e-400", "4.9e-324", "2.4703282292062328e-324",
         "2.4703282292062327e-324", "1.7976931348623157e308", "1.7976931348623158e308", "1.7976931348623159e308",
         "0x1.fffffffffffffp1023", "0x1.fffffffffffff7p1023", "0x1.fffffffffffff8p1023", "0x1p1024", "0x1p-1074",
-        "0x1p-1075", "0x1.0000000000001p-1075", "0x1.8p-1075", "0x1p-1076", "0x0.0000000000001p-1022",
+        "0x1p-1075", "0x1.0000000000001p-1075", "0x1.8p-1075", "0x1p-1076", "0x0.0000000000001p-1022", "0X1.c63b83507cf448000P-1025",
         "0x0.00000000000008p-1022", "0x0.00000000000018p-1022", "0x1.00000000000008p0", "0x1.00000000000018p0",
         "0x1.000000000000080000000000000000001p0", "0x1.0000000000000800000p0", "0x10000000000000080p0",
         "0x10000000000000180p-4", "0x.000000000000000000000000000000000000000001p200", "0x1p-99999999999999999999",
@@ -156,7 +171,7 @@ fn the_grammar_s_corners_agree_with_the_host() {
 /// ranges and past them, and in half of them a `double`'s 53 bits followed by
 /// exactly half a unit, or half and a sticky bit, the ties to even.
 #[test]
-fn random_hexadecimal_numbers_round_as_the_host_s() {
+fn random_hexadecimal_numbers_round_as_ieee_754_rounds_them() {
     let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
     for _ in 0..200_000 {
         let mut s = String::new();
