@@ -368,10 +368,7 @@ fn config_crates(root: &Path, config: &SystemConfig) -> Vec<ConfigCrate> {
 /// it in.
 ///
 /// One name, passed to every `cargo build` here and declared by every crate
-/// root the image is made of. `--release` used to be a flag on `cargo run`, and
-/// it silently turned `debug-assertions` and `overflow-checks` off — the two
-/// knobs `issues/`'s crafted-ELF panics were *found* by. There is
-/// no longer a second profile to pick, which is why there is no longer a flag.
+/// root the image is made of.
 pub const PROFILE: &str = "toyos";
 
 /// What every guest `cargo` and `rustc` here runs with: the toolchain directory
@@ -598,10 +595,7 @@ fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
 ///
 /// [`PROFILE`] states them and `--release` is gone from this build system, so
 /// the way they can still be lost is somebody editing `[profile.toyos]`. This
-/// asks the artifact rather than the manifest, which is the only question worth
-/// asking: `issues/`'s two crafted-ELF kernel panics were both
-/// *found* by an overflow check, and one of them had no configuration in which
-/// it was an error return.
+/// asks the artifact rather than the manifest.
 fn assert_overflow_checked(what: &str, image: &[u8]) {
     let found = contains_subslice(image, OVERFLOW_CHECK_MARKER);
     assert!(
@@ -1087,6 +1081,8 @@ impl Boot {
 /// is a test image and is not here.
 pub struct Shipped {
     pub crates: BTreeSet<(PathBuf, Features)>,
+    /// `crates` but the kernel and the loader: every program an image runs.
+    pub programs: BTreeSet<(PathBuf, Features)>,
     pub assets: BTreeSet<PathBuf>,
 }
 
@@ -1096,6 +1092,7 @@ pub struct Shipped {
 /// the rust fork's `compiler/` workspace, which no reader of this answer walks.
 pub fn shipped(root: &Path) -> Result<Shipped, String> {
     let mut crates = BTreeSet::new();
+    let mut programs = BTreeSet::new();
     let mut assets = BTreeSet::new();
     for boot in [Boot::shipped(root), Boot::diag(root), Boot::console(root)] {
         let config = parse_config(&boot.config);
@@ -1105,10 +1102,15 @@ pub fn shipped(root: &Path) -> Result<Shipped, String> {
                 boot.config.display()
             ));
         }
-        crates.extend(config_crates(root, &config).into_iter().map(|c| (c.dir, c.features)));
+        for c in config_crates(root, &config) {
+            if matches!(c.built, Built::Member | Built::Standalone) {
+                programs.insert((c.dir.clone(), c.features));
+            }
+            crates.insert((c.dir, c.features));
+        }
         assets.extend(config.assets.iter().map(|dir| root.join(dir)));
     }
-    Ok(Shipped { crates, assets })
+    Ok(Shipped { crates, programs, assets })
 }
 
 /// The parameters an image built for flashing may carry: the kernel's own boot
@@ -2251,6 +2253,9 @@ mod tests {
                 shipped.crates
             );
         }
+        let (kernel, loader) = (root.join("kernel"), root.join("bootloader"));
+        let programs = shipped.crates.iter().filter(|(dir, _)| *dir != kernel && *dir != loader);
+        assert_eq!(shipped.programs, programs.cloned().collect());
     }
 
     /// **A standalone crate's clean takes all its guest build wrote — the

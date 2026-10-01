@@ -14,6 +14,10 @@ One brief, one worktree, one branch. What the brief does not name you do not tou
 find off your path is filed in `issues/`, never fixed. If something blocks you, stop and say so in
 one clause; do not work around it.
 
+Before adding kernel behaviour, ask whether userland can own it. When the clean design changes the
+ABI, change the ABI; never pick a lesser design to avoid that. A clean design that reaches past
+your fence blocks you.
+
 ## Measure, build, test
 
 Where hardware or anything uncertain is involved, take the cheap measurement before you build on a
@@ -27,6 +31,9 @@ guess. Then build, then test before anyone reviews:
 - Long commands run in the background with output to a file under the job scratchpad the brief
   names. Stay inside one turn while anything runs: sleep at most two minutes, print a line, check
   again. Ten minutes of silence kills you, and ending a turn to announce a wait strands the work.
+- Nothing a pull request's evidence rests on, mutation patches and run logs included, lives only in
+  a temporary directory: `/tmp` is wiped when the CLI restarts. Post mutation patches to the pull
+  request as a comment.
 - A mutation is a measurement only once the mutated tree is shown to build. Apply it as a checked
   patch, restore it in the same script, and leave the tree clean.
 - Never a flat wait, in code or in a test: wait on the event, bounded by a timeout that fails
@@ -57,8 +64,9 @@ Fork sources live outside this repository: a search for callers must also cover 
 
 `git commit -F <file>`, never `-m`. No `--amend`, no rebase, no force: merge `origin/main`, never
 rebase onto it. Never run `git submodule` in a linked worktree: it writes `core.worktree` into the
-fork's shared config and breaks git in the primary checkout's `rust/`. Never touch `toyos-abi/src`, `toyos/src` or `userland/libc/src` unless the brief is
-an ABI brief. No new dependency.
+fork's shared config and breaks git in the primary checkout's `rust/`. A new dependency is taken
+where it is the cleanest path: a general, widely used crate (root `CLAUDE.md`, "Dependencies"), and
+the pull request says why.
 
 Push from your branch, never `main`, with `git status --porcelain` empty: `git push -u origin
 <branch>`, and `gh pr create --draft` at the first push. The pull request body is the handoff the reviewer reads,

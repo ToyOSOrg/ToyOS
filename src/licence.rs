@@ -436,8 +436,8 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
     (
         "doom.jpg",
         "ae22f71dc732580bd4f789937c9fe564969029413fc2092f27bdae8d1ceaf8e3",
-        "a screenshot of this system running doom, in README.md; \
-         issues/build/doom-jpg-shows-ids-art-under-no-recorded-terms.md",
+        "the owner's own screenshot of this system running doom, in README.md; \
+         no licence question applies",
         Terms::Spdx("NOASSERTION"),
     ),
     (

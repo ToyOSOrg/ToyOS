@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::arch::{Accel, Arch};
+use crate::userlandhost::{Host, Os, Program};
 use crate::{flags, release, sdkversion, sync};
 
 const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
@@ -452,7 +453,7 @@ fn run_control(root: &Path, control: &Control) -> Result<String, String> {
 /// tests, every member of the host workspace, clippy with warnings denied, the
 /// concurrency models' negative controls, every userland crate with a host test
 /// ([`crate::userlandhost`], which also reds on a userland test none of them
-/// runs), and the SDK.
+/// runs), every app the images ship for each host ([`apps_for`]), and the SDK.
 ///
 /// **Every step runs against a `$TMPDIR` of this job's own, and the last step
 /// reds on anything left in it** but the lock `toyos_tmpdir` keeps there: a test
@@ -528,6 +529,16 @@ fn host(root: &Path) -> Vec<Step> {
         }
         Err(why) => steps.push(Step { label: "the userland host crates".into(), verdict: Err(why) }),
     }
+    match crate::userlandhost::programs(root) {
+        Ok(programs) => {
+            for os in Os::ALL {
+                steps.push(step(&format!("the apps for {}", os.name()), || {
+                    apps_for(root, &programs, os, &host_triple)
+                }));
+            }
+        }
+        Err(why) => steps.push(Step { label: "the apps".into(), verdict: Err(why) }),
+    }
     // The SDK compiles against the ToyOS sysroot everywhere but here, and this
     // build links no syscall.
     steps.push(step("the toyos SDK", || {
@@ -535,6 +546,75 @@ fn host(root: &Path) -> Vec<Step> {
     }));
     steps.push(step("nothing left in $TMPDIR or /tmp", || left_behind(&tmp, short, &before)));
     steps
+}
+
+/// Every app the images ship, judged for `os` with the features its image
+/// builds it with ([`crate::userlandhost`]).
+///
+/// One cargo per app: features unify across the packages of one invocation, and
+/// an app that builds only beside another's features is what this gate is for.
+fn apps_for(
+    root: &Path,
+    programs: &[Program],
+    os: Os,
+    host_triple: &str,
+) -> Result<String, String> {
+    let triple = os.triple();
+    let status = Command::new("rustup")
+        .args(["target", "add", triple])
+        .status()
+        .map_err(|e| format!("rustup: {e}"))?;
+    if !status.success() {
+        return Err(format!("rustup target add {triple} exited {status}"));
+    }
+    let verb = verb(os, host_triple);
+    let (attempted, declared) = attempted(programs, os);
+    let mut red = Vec::new();
+    for program in &attempted {
+        let manifest = format!("{}/Cargo.toml", program.dir);
+        let mut args = vec![verb, "--manifest-path", manifest.as_str(), "--target", triple];
+        args.extend(program.features.args());
+        if let Err(exit) = cargo(root, &args) {
+            red.push(format!(
+                "{} fails for {} and declares neither `fails` there nor `exempt`: {exit}",
+                program.dir,
+                os.name()
+            ));
+        }
+    }
+    if !red.is_empty() {
+        return Err(red.join("; "));
+    }
+    let said = format!("{} app(s) pass `cargo {verb} --target {triple}`", attempted.len());
+    if declared.is_empty() {
+        Ok(said)
+    } else {
+        Ok(format!("{said}; {} not attempted, as their manifests declare", declared.join(", ")))
+    }
+}
+
+/// `build` where the gate runs on `os`'s own triple, and `check` elsewhere.
+fn verb(os: Os, host_triple: &str) -> &'static str {
+    if os.triple() == host_triple {
+        "build"
+    } else {
+        "check"
+    }
+}
+
+/// The apps judged for `os`, and those whose manifests declare they fail there;
+/// an exempt program is in neither.
+fn attempted(programs: &[Program], os: Os) -> (Vec<&Program>, Vec<&str>) {
+    let (mut attempted, mut declared) = (Vec::new(), Vec::new());
+    for program in programs {
+        let Host::App(fails) = &program.host else { continue };
+        if fails.contains(&os) {
+            declared.push(program.dir.as_str());
+        } else {
+            attempted.push(program);
+        }
+    }
+    (attempted, declared)
 }
 
 /// What `tmp` holds but the lock `toyos_tmpdir` keeps in it, and every root
@@ -850,6 +930,31 @@ mod tests {
 
     fn words(line: &str) -> Vec<String> {
         line.split_whitespace().map(String::from).collect()
+    }
+
+    /// **An app is judged for every host its `fails` does not name**, built
+    /// where the gate runs on that host and checked elsewhere; an exempt
+    /// program is judged for none.
+    #[test]
+    fn an_app_is_judged_for_every_host_its_fails_does_not_name() {
+        let program = |dir: &str, host| Program {
+            dir: dir.into(),
+            features: crate::build::Features::Default,
+            host,
+        };
+        let programs = [
+            program("calc", Host::App(Vec::new())),
+            program("doom", Host::App(vec![Os::Windows])),
+            program("init", Host::Exempt),
+        ];
+        let judged = |os| {
+            let (attempted, declared) = attempted(&programs, os);
+            (attempted.iter().map(|p| p.dir.as_str()).collect::<Vec<_>>(), declared)
+        };
+        assert_eq!(judged(Os::Linux), (vec!["calc", "doom"], vec![]));
+        assert_eq!(judged(Os::Macos), (vec!["calc", "doom"], vec![]));
+        assert_eq!(judged(Os::Windows), (vec!["calc"], vec!["doom"]));
+        assert_eq!(Os::ALL.map(|os| verb(os, Os::Linux.triple())), ["build", "check", "check"]);
     }
 
     #[test]
