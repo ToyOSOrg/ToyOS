@@ -15,17 +15,7 @@ use common::{audio, compile, devices, faults, lan, metal, power, screen, serial,
 use toyos_build::bootlog::{self};
 use toyos_build::testargs::{self, SUITE};
 
-/// The width with no `--jobs`, and where it came from.
-///
-/// 14 cores and about three host threads a guest divides out to four. The suite
-/// says twelve. Alternated in one session on a quiet host, 246 tests, both
-/// green: **125.6 s wide eight against 109.1 s wide twelve**, with the parallel
-/// phase at 58.3 s against 42.1 s — the same 16 s and the same direction as the
-/// pair taken on the tree six commits earlier. A guest here is mostly
-/// *waiting* — for a marker, for a debounce, for a device — which is why this is
-/// a measurement and not a division.
-///
-/// **Twelve is the number for one suite on this host.**
+/// The width with no `--jobs`.
 const DEFAULT_WIDTH: usize = 12;
 
 /// The shared-boot binaries that call `SYS_DEBUG`, and so cannot run on the
@@ -210,9 +200,7 @@ const METAL: &[(&str, metal::Metal)] = &[
     ),
     (
         // The machine's own CPU count, off the SMP bring-up records — a source
-        // independent of the `control_regs:` lines it is then held to. The QEMU
-        // registration says four because the harness staged four; here the
-        // laptop says how many it has.
+        // independent of the `control_regs:` lines it is then held to.
         "control_regs",
         metal::Metal {
             arms: TESTCASES,
@@ -228,9 +216,6 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal { arms: TESTCASES, judge: |b| klogd_hosted(&b[0].kernel()) },
     ),
     (
-        // The stimulus a host types at a console in QEMU is this boot's own job
-        // list on the T14: every job that runs and exits is a process exit, and
-        // the census is printed at each one.
         "irq_census_conservation",
         metal::Metal {
             arms: TESTCASES,
@@ -428,9 +413,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal {
             arms: LATENCYCASE,
             // The machine's own CPU count, off the bring-up records rather than
-            // off a number the harness staged: the QEMU registration says eight
-            // because it asked for eight, and here the laptop says how many it
-            // has.
+            // off a number the harness staged.
             judge: |b| {
                 let (p50, p99) = tlb_shootdown_cost(b[0].kernel().text(), b[0].cpus()?)?;
                 b[0].measured("tlb.latencycase.p50_ns", p50)?;
@@ -555,8 +538,7 @@ const METAL: &[(&str, metal::Metal)] = &[
     // The cheapest cluster there is: every one of these arms a check that runs
     // at init, logs its verdict and does nothing else, so they cost one flash
     // between them. **Nothing had to be promoted into `kernel/src/params.rs`**
-    // — the metal profile flashes test images (the track's ruling), so an
-    // actuator is armed the way the QEMU registration arms it and the
+    // — the metal profile flashes test images (the track's ruling), and the
     // pre-flash gate is what says the machine survives each one.
     (
         "pci_capability_walk",
@@ -630,8 +612,7 @@ const TESTCASES: &[metal::Arm] = &[metal::once(
 /// **Two boots of one config, because these two cannot share one.** Each fills
 /// a machine-wide cap and leaves it filled: `mkdir_cap` fills the directory cap,
 /// and `readdir_bound`'s own `create_dir("/tmp/empty")` is then refused with
-/// `OutOfMemory` and it panics — measured on the first staged image, and the
-/// reason each has a boot of its own in QEMU too.
+/// `OutOfMemory` and it panics — measured on the first staged image.
 const TESTCASES_MKDIR: &[metal::Arm] =
     &[metal::once("testcases-mkdir", "tests/testcases", &[], &["test_rs_mkdir_cap"])];
 
@@ -1975,10 +1956,6 @@ fn metal_sim_argv_check(argv: &[String]) -> Result<(), String> {
 }
 
 /// The scanout's memory type, out of the three records that decide it.
-///
-/// Text in, a verdict out: `PAT:`, `GOP: scanout memory type` and `shm: …
-/// mapped WriteCombining into pid` are all kernel records, so the T14's
-/// readback and a QEMU console are judged by this one predicate.
 fn scanout_wc(console: &str) -> Result<(), String> {
     const PAT: &str = "PAT: IA32_PAT=";
     const SCANOUT: &str = "GOP: scanout memory type ";
@@ -2055,11 +2032,6 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
 /// set at all**. Silence about a bit is a hole rather than a permission.
 /// The interrupt census adds up, is monotonic, and every device delivery is
 /// still cpu0's.
-///
-/// Text in, a verdict out. Every line it reads is a kernel record, so the
-/// T14's readback and a QEMU capture are judged by this one predicate — and
-/// on the T14 the *stimulus* is the boot's own job list rather than two
-/// commands typed at a console.
 fn irq_census(capture: &str) -> Result<(), String> {
     use common::irqcensus::{Census, DEVICE_SOURCES};
     // Every line, in order, so a later census can be compared with an
@@ -2210,8 +2182,6 @@ fn irq_census(capture: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Text in, a verdict out: every line it reads is a kernel record, so the
-/// T14's readback and a QEMU boot log are judged by this one predicate.
 fn pci_cap_selftest(log: &str) -> Result<(), String> {
         if let Some(bad) = log.lines().find(|l| l.contains("pci cap selftest FAILED")) {
             return Err(format!("{bad}\n{log}"));
@@ -2248,9 +2218,6 @@ fn pci_cap_selftest(log: &str) -> Result<(), String> {
 
 /// The kernel reopens init by pid after the last handle to it has gone, and
 /// no kernel thread's pid opens.
-///
-/// Text in, a verdict out: every line it reads is a kernel record, so the
-/// T14's readback and a QEMU boot log are judged by this one predicate.
 fn process_reopen(log: &str) -> Result<(), String> {
         for control in ["process-reopen:", "process-open-kthread:"] {
             let Some(verdict) = log.lines().find(|l| l.contains(control)) else {
@@ -2265,9 +2232,6 @@ fn process_reopen(log: &str) -> Result<(), String> {
 }
 
 /// A backing read after deletion is refused on both writable mounts, and a page-cache slot whose fill the device refused is unbound.
-///
-/// Text in, a verdict out: every line it reads is a kernel record, so the
-/// T14's readback and a QEMU boot log are judged by this one predicate.
 fn read_fault_probes(log: &str) -> Result<(), String> {
         let probe = "revoke-selftest: /tmp/revoke_probe";
         let Some(verdict) = log.lines().find(|l| l.contains(probe)) else {
@@ -2281,9 +2245,6 @@ fn read_fault_probes(log: &str) -> Result<(), String> {
 }
 
 /// An "acquire before a fallible step" control: the count returned to its baseline after a refused call.
-///
-/// Text in, a verdict out: every line it reads is a kernel record, so the
-/// T14's readback and a QEMU boot log are judged by this one predicate.
 fn leak_rollback(log: &str) -> Result<(), String> {
         let probe = "leak-selftest: device-mint";
         let Some(verdict) = log.lines().find(|l| l.contains(probe)) else {
@@ -2297,9 +2258,6 @@ fn leak_rollback(log: &str) -> Result<(), String> {
 }
 
 /// The spurious vector and an unclaimed one are both gated rather than escalated to #DF.
-///
-/// Text in, a verdict out: every line it reads is a kernel record, so the
-/// T14's readback and a QEMU boot log are judged by this one predicate.
 fn lapic_vectors(log: &str) -> Result<(), String> {
         for kind in ["spurious", "unclaimed"] {
             if let Some(bad) =
@@ -2332,9 +2290,6 @@ fn lapic_vectors(log: &str) -> Result<(), String> {
 }
 
 /// Nine crafted USB configuration descriptors, parsed at init.
-///
-/// Text in, a verdict out: every line it reads is a kernel record, so the
-/// T14's readback and a QEMU boot log are judged by this one predicate.
 fn xhci_descriptors(log: &str) -> Result<(), String> {
         if let Some(bad) = log.lines().find(|l| l.contains("descriptor selftest FAILED")) {
             return Err(format!("{bad}\n{log}"));
@@ -2363,9 +2318,6 @@ fn xhci_descriptors(log: &str) -> Result<(), String> {
 }
 
 /// Eight malformed extended-capability lists refused, and the handoff on every controller.
-///
-/// Text in, a verdict out: every line it reads is a kernel record, so the
-/// T14's readback and a QEMU boot log are judged by this one predicate.
 fn xhci_xecp(log: &str) -> Result<(), String> {
         if let Some(bad) = log.lines().find(|l| l.contains("xecp selftest FAILED")) {
             return Err(format!("{bad}\n{log}"));
@@ -2435,9 +2387,6 @@ const SYSRET_SS_RELOADED: &str = "sysret-ss: reloaded";
 const SYSRET_SS_NOT_RELOADED: &str = "sysret-ss: NOT reloaded";
 
 /// The context switch reloads SS from null before a `sysretq` can see it.
-///
-/// Text in, a verdict out: every line it reads is a kernel record, so the
-/// T14's readback and a QEMU boot log are judged by this one predicate.
 fn sysret_ss(log: &str) -> Result<(), String> {
         if log.contains(SYSRET_SS_UNARMED) {
             return Err(format!("the SS-reload probe could not arm, so it measured nothing:\n{log}"));
@@ -2458,9 +2407,6 @@ fn sysret_ss(log: &str) -> Result<(), String> {
 }
 
 /// The input core merged what it was handed.
-///
-/// Text in, a verdict out: every line it reads is a kernel record, so the
-/// T14's readback and a QEMU boot log are judged by this one predicate.
 fn input_merge_ok(log: &str) -> Result<(), String> {
         if !log.contains("input-merge: ok") {
             return Err(format!("the input core check never reported:\n{log}"));
@@ -2469,9 +2415,6 @@ fn input_merge_ok(log: &str) -> Result<(), String> {
 }
 
 /// An inner `scheduler::Operation` may only narrow, and its drop restores what it displaced.
-///
-/// Text in, a verdict out: every line it reads is a kernel record, so the
-/// T14's readback and a QEMU boot log are judged by this one predicate.
 fn operation_nesting_log(log: &str) -> Result<(), String> {
 
         /// One `key=value` off a gate line, as a number.
@@ -2580,9 +2523,6 @@ fn operation_nesting_log(log: &str) -> Result<(), String> {
 }
 
 /// The machine's kernel thread is hosted.
-///
-/// Text in, a verdict out: its line is a `log!` record, so the T14's
-/// readback and a QEMU boot log are judged by this one predicate.
 fn klogd_hosted(boot: &serial::Serial) -> Result<(), String> {
     boot.must_be_clean()?;
     let line = boot.must_say("kthread: klogd")?;
@@ -2592,10 +2532,6 @@ fn klogd_hosted(boot: &serial::Serial) -> Result<(), String> {
 
 /// Every I/O APIC this machine has, and whether its redirection table is a
 /// chip's rather than a floating bus's.
-///
-/// Text in, a verdict out: the driver runs in Phase 2 and every line it
-/// writes is a kernel record, so the T14's readback and a QEMU boot log are
-/// judged by this one predicate.
 fn ioapic_topology(log: &str) -> Result<(), String> {
     let units: Vec<&str> = log
         .lines()

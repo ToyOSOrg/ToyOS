@@ -375,10 +375,7 @@ const TOOK_THE_LOCK: &str = "the controller lock was held from before the log vo
 /// which on this machine is in `loader.log`'s pass after the reset rather than
 /// in any file the kernel wrote.
 ///
-/// Both arms are orderly reboots, so both owe the barrier. The panic path's
-/// account is judged under QEMU only: on this machine a kernel that panics
-/// before `logd` runs writes no log file at all, and one that panics after it
-/// leaves no `Rebooting.` for the loop's own verdict.
+/// Both arms are orderly reboots, so both owe the barrier.
 pub fn usb_reset_on_metal(arms: &[&super::metal::Readback]) -> Result<(), String> {
     let mut bad = Vec::new();
     for back in arms {

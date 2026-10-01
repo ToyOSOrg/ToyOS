@@ -36,9 +36,8 @@ pub struct Arm {
     /// Named rather than derived from (config, parameters), because sharing is
     /// not always safe and only the author knows: `mkdir_cap` fills the
     /// machine-wide directory cap and leaves it there, so `readdir_bound`'s own
-    /// `create_dir` on that boot is refused with `OutOfMemory` and it panics —
-    /// which is why each has a boot of its own in QEMU too. A test that must
-    /// not share names its own; it costs a minute and it says so.
+    /// `create_dir` on that boot is refused with `OutOfMemory` and it panics. A
+    /// test that must not share names its own; it costs a minute and it says so.
     pub boot: &'static str,
     /// The boot config's directory, relative to the repository root.
     pub config: &'static str,
