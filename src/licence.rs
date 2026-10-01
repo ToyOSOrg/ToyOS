@@ -340,6 +340,18 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         Terms::Spdx("LicenseRef-Debian-edk2-2026.05-2"),
     ),
     (
+        "qemu-firmware/debian-2026.05-2/QEMU_EFI.fd",
+        "03c1f293db400194db96e02e6db858a841d58521140499046773add364e1edce",
+        "NOTICE",
+        Terms::Spdx("LicenseRef-Debian-edk2-2026.05-2"),
+    ),
+    (
+        "qemu-firmware/debian-2026.05-2/QEMU_VARS.fd",
+        "8b634c1e6bd11607850b69111f6c4dbd1583dbbd1460dac72dbacbdc1a4a130a",
+        "NOTICE",
+        Terms::Spdx("LicenseRef-Debian-edk2-2026.05-2"),
+    ),
+    (
         "qemu-firmware/debian-2024.11-5/QEMU_EFI.fd",
         "b3027bbc088090f483b6f971dab357a8a41495db48861070e70f8a50dc543387",
         "NOTICE",

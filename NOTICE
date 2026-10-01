@@ -396,39 +396,55 @@ a work of theirs. Two things the tools wrote are not:
   of them are input a reader has to skip.
 
 
-qemu-firmware/debian-2026.05-2/ — Debian's edk2 2026.05-2, q35's UEFI firmware
-------------------------------------------------------------------------------
+qemu-firmware/debian-2026.05-2/ — Debian's edk2 2026.05-2, q35's UEFI firmware and virt's under TCG and KVM
+-----------------------------------------------------------------------------------------------------------
 
     debian-2026.05-2/OVMF_CODE_4M.fd   3,653,632 bytes
       sha256 08ecc50dbde85ecd64d7948425075694b435350c56bc94d676f80a788979050f
     debian-2026.05-2/OVMF_VARS_4M.fd     540,672 bytes
       sha256 5d2ac383371b408398accee7ec27c8c09ea5b74a0de0ceea6513388b15be5d1e
+    debian-2026.05-2/QEMU_EFI.fd       3,145,728 bytes
+      sha256 03c1f293db400194db96e02e6db858a841d58521140499046773add364e1edce
+    debian-2026.05-2/QEMU_VARS.fd        786,432 bytes
+      sha256 8b634c1e6bd11607850b69111f6c4dbd1583dbbd1460dac72dbacbdc1a4a130a
     Copyright: TianoCore and contributors, and every author the terms name
     Terms: licenses/debian-edk2-2026.05-2-copyright.txt
     SPDX-License-Identifier: LicenseRef-Debian-edk2-2026.05-2
 
-The UEFI firmware every x86-64 QEMU guest boots, the dev host's and CI's alike
-(`src/firmware.rs`): part of the instrument, like QEMU, and in no image. The
-files are Debian's binaries, unmodified: the files of the same names in
-`/usr/share/OVMF/` of `ovmf-generic_2026.05-2_all.deb`. The package comes from
-snapshot.debian.org's `pool/main/e/edk2`, and is the version its archive held
-at `20260918T000000Z`, the snapshot CI's `debian:sid-20260918` image installs
-from:
+The UEFI firmware every x86-64 QEMU guest boots, and every AArch64 one but
+those under HVF, the dev host's and CI's alike (`src/firmware.rs`): part of the
+instrument, like QEMU, and in no image. The files are Debian's binaries:
+
+- `OVMF_CODE_4M.fd` and `OVMF_VARS_4M.fd` are the files of the same names in
+  `/usr/share/OVMF/` of `ovmf-generic_2026.05-2_all.deb`, unmodified.
+- `QEMU_EFI.fd` is `/usr/share/qemu-efi-aarch64/QEMU_EFI.fd` of
+  `qemu-efi-aarch64_2026.05-2_all.deb`, unmodified. It is also the first
+  3,145,728 bytes of that package's `/usr/share/AAVMF/AAVMF_CODE.no-secboot.fd`,
+  the image its `60-edk2-aarch64.json` gives QEMU, and only zeros follow them.
+- `QEMU_VARS.fd` is the first 786,432 bytes of that package's
+  `/usr/share/AAVMF/AAVMF_VARS.fd`, and only zeros follow them.
+
+Both packages come from snapshot.debian.org's `pool/main/e/edk2`, and both are
+the versions its archive held at `20260918T000000Z`, the snapshot CI's
+`debian:sid-20260918` image installs from:
 
     ovmf-generic_2026.05-2_all.deb
       sha256 0f2d4de080ebeaf0972c5e212253c28dd2d90aa641542f42f37c6d6ecd4c67eb
+    qemu-efi-aarch64_2026.05-2_all.deb
+      sha256 ec0a922bc758fcf4b57b00b81870475d97e07ef166d4160d4651931958bbbdc3
 
 edk2's own code is BSD-2-Clause-Patent, and the builds link OpenSSL, Brotli
 and other components under their own terms. Debian's `debian/copyright` says
-which file is under which, and is carried as the terms above. Its only GPL-only
-stanzas are Debian's own Python tooling and a Perl module OpenSSL's
-configuration runs, neither of which a binary here contains; every other
-licence it names, taking the permissive side of each dual licence, permits
-redistributing the binaries unmodified with those notices.
+which file is under which; it ships byte-identical in both packages and is
+carried as the terms above. Its only GPL-only stanzas are Debian's own Python
+tooling and a Perl module OpenSSL's configuration runs, neither of which a
+binary here contains; every other licence it names, taking the permissive side
+of each dual licence, permits redistributing the binaries unmodified with those
+notices.
 
 
-qemu-firmware/debian-2024.11-5/ — Debian's edk2 2024.11-5, virt's UEFI firmware
--------------------------------------------------------------------------------
+qemu-firmware/debian-2024.11-5/ — Debian's edk2 2024.11-5, virt's UEFI firmware under HVF
+-----------------------------------------------------------------------------------------
 
     debian-2024.11-5/QEMU_EFI.fd       2,097,152 bytes
       sha256 b3027bbc088090f483b6f971dab357a8a41495db48861070e70f8a50dc543387
@@ -438,8 +454,8 @@ qemu-firmware/debian-2024.11-5/ — Debian's edk2 2024.11-5, virt's UEFI firmwar
     Terms: licenses/debian-edk2-2024.11-5-copyright.txt
     SPDX-License-Identifier: LicenseRef-Debian-edk2-2024.11-5
 
-The UEFI firmware every AArch64 QEMU guest boots, the dev host's and CI's
-alike (`src/firmware.rs`): part of the instrument, like QEMU, and in no image.
+The UEFI firmware every AArch64 QEMU guest boots under HVF
+(`src/firmware.rs`): part of the instrument, like QEMU, and in no image.
 The files are Debian's binaries without the zeros Debian appends: its
 `debian/rules` copies each build's `FV/QEMU_EFI.fd` and `FV/QEMU_VARS.fd` and
 runs `truncate -s 64M` on each, because QEMU's `virt` refuses a flash image of

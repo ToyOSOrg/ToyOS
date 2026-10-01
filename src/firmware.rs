@@ -1,30 +1,51 @@
-//! The UEFI firmware a guest boots: one Debian edk2 build per machine
-//! ([`pinned`]), committed under `qemu-firmware/` and recorded in `NOTICE`. It
-//! is the half of the instrument `.github/qemu-version` does not declare, so
-//! the dev host and CI boot the same bytes, and no guest boots what the host's
-//! QEMU installation carries.
+//! The UEFI firmware a guest boots: the Debian edk2 build [`pinned`] for its
+//! machine and accelerator, committed under `qemu-firmware/` and recorded in
+//! `NOTICE`. It is the half of the instrument `.github/qemu-version` does not
+//! declare, so the dev host and CI boot the same bytes, and no guest boots what
+//! the host's QEMU installation carries.
 //!
-//! Either pin, a build here or `.github/qemu-version`, moves only on a
-//! measurement under every accelerator a profile boots on: HVF, KVM and TCG.
-//! Firmware reads the CPU the accelerator presents, and QEMU's HVF presents
-//! `virt`'s with `ID_AA64PFR0_EL1.GIC` 0 where TCG presents 1.
+//! Each pin, a build here or `.github/qemu-version`, moves only on a
+//! measurement under every accelerator it serves. Firmware reads the CPU the
+//! accelerator presents, and QEMU's HVF presents `virt`'s with
+//! `ID_AA64PFR0_EL1.GIC` 0 where TCG presents 1.
 
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use crate::arch::Arch;
+use crate::arch::{Accel, Arch};
 
-/// The build `arch` boots: where it is committed under the repository's root,
-/// its code and variable-store images, and its `Firmware::flash`.
-fn pinned(arch: Arch) -> (&'static str, &'static str, &'static str, Option<u64>) {
-    match arch {
-        Arch::X86_64 => ("qemu-firmware/debian-2026.05-2", "OVMF_CODE_4M.fd", "OVMF_VARS_4M.fd", None),
-        // Older than q35's: from edk2-stable202502 to stable202608 ArmVirtQemu
-        // never returns from `ExitBootServices` under HVF
+/// One committed build: where it is under the repository's root, its code and
+/// variable-store images, its `Firmware::flash`, and its images as a guest is
+/// handed them, staged once per process.
+struct Pin {
+    dir: &'static str,
+    code: &'static str,
+    vars: &'static str,
+    flash: Option<u64>,
+    staged: OnceLock<Result<Firmware, String>>,
+}
+
+impl Pin {
+    const fn new(dir: &'static str, code: &'static str, vars: &'static str, flash: Option<u64>) -> Pin {
+        Pin { dir, code, vars, flash, staged: OnceLock::new() }
+    }
+}
+
+static Q35: Pin = Pin::new("qemu-firmware/debian-2026.05-2", "OVMF_CODE_4M.fd", "OVMF_VARS_4M.fd", None);
+static VIRT: Pin = Pin::new("qemu-firmware/debian-2026.05-2", "QEMU_EFI.fd", "QEMU_VARS.fd", Some(VIRT_FLASH));
+static VIRT_HVF: Pin = Pin::new("qemu-firmware/debian-2024.11-5", "QEMU_EFI.fd", "QEMU_VARS.fd", Some(VIRT_FLASH));
+
+/// The build a guest of `arch` boots under `accel`.
+fn pinned(arch: Arch, accel: Accel) -> &'static Pin {
+    match (arch, accel) {
+        (Arch::X86_64, Accel::Kvm | Accel::Hvf | Accel::Tcg) => &Q35,
+        (Arch::Aarch64, Accel::Kvm | Accel::Tcg) => &VIRT,
+        // From edk2-stable202502 to stable202608 ArmVirtQemu never returns from
+        // `ExitBootServices` under HVF
         // (`issues/build/edk2-stable202502-to-202608-hangs-at-exitbootservices-under-hvf.md`).
-        Arch::Aarch64 => ("qemu-firmware/debian-2024.11-5", "QEMU_EFI.fd", "QEMU_VARS.fd", Some(VIRT_FLASH)),
+        (Arch::Aarch64, Accel::Hvf) => &VIRT_HVF,
     }
 }
 
@@ -64,18 +85,17 @@ impl Firmware {
     }
 }
 
-/// `arch`'s firmware, staged once per process.
-pub fn of(arch: Arch) -> Result<&'static Firmware, String> {
-    static STAGED: [OnceLock<Result<Firmware, String>>; 2] = [OnceLock::new(), OnceLock::new()];
-    let slot = &STAGED[Arch::ALL.iter().position(|a| *a == arch).expect("every Arch is in ALL")];
-    slot.get_or_init(|| stage(Path::new(env!("CARGO_MANIFEST_DIR")), arch)).as_ref().map_err(Clone::clone)
+/// The firmware a guest of `arch` boots under `accel`.
+pub fn of(arch: Arch, accel: Accel) -> Result<&'static Firmware, String> {
+    let pin = pinned(arch, accel);
+    pin.staged.get_or_init(|| stage(Path::new(env!("CARGO_MANIFEST_DIR")), pin)).as_ref().map_err(Clone::clone)
 }
 
-/// The committed images for `arch`, and for a machine whose flash is fixed, the
-/// code image padded to it under `root`'s `target/`: written beside the last
-/// copy and renamed over it, so a guest that opened that one reads it whole.
-fn stage(root: &Path, arch: Arch) -> Result<Firmware, String> {
-    let (dir, code, vars, flash) = pinned(arch);
+/// `pin`'s committed images, and for a machine whose flash is fixed, the code
+/// image padded to it under `root`'s `target/`: written beside the last copy
+/// and renamed over it, so a guest that opened that one reads it whole.
+fn stage(root: &Path, pin: &Pin) -> Result<Firmware, String> {
+    let Pin { dir, code, vars, flash, .. } = *pin;
     let committed = root.join(dir);
     let code = match flash {
         None => committed.join(code),
@@ -109,11 +129,11 @@ fn write_padded(to: &Path, bytes: &[u8], flash: Option<u64>) -> Result<(), Strin
 mod tests {
     use super::*;
 
-    /// A root holding `arch`'s build directory with each image named by its
-    /// own name, `len` bytes.
-    fn root_with(arch: Arch, images: &[(&str, usize)]) -> toyos_tmpdir::TempDir {
+    /// A root holding `pin`'s build directory with each image named by its own
+    /// name, `len` bytes.
+    fn root_with(pin: &Pin, images: &[(&str, usize)]) -> toyos_tmpdir::TempDir {
         let tmp = toyos_tmpdir::TempDir::new("firmware");
-        let dir = tmp.path().join(pinned(arch).0);
+        let dir = tmp.path().join(pin.dir);
         fs::create_dir_all(&dir).unwrap();
         for (name, len) in images {
             fs::write(dir.join(name), name.bytes().cycle().take(*len).collect::<Vec<u8>>()).unwrap();
@@ -122,21 +142,24 @@ mod tests {
     }
 
     #[test]
-    fn every_machine_names_images_the_tree_commits() {
+    fn every_machine_and_accelerator_names_images_the_tree_commits() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         for arch in Arch::ALL {
-            let (dir, code, vars, _) = pinned(arch);
-            for name in [code, vars] {
-                assert!(root.join(dir).join(name).is_file(), "{arch:?}: {dir}/{name} is not committed");
+            for accel in [Accel::Kvm, Accel::Hvf, Accel::Tcg] {
+                let Pin { dir, code, vars, .. } = *pinned(arch, accel);
+                for name in [code, vars] {
+                    let at = root.join(dir).join(name);
+                    assert!(at.is_file(), "{arch:?} under {accel:?}: {dir}/{name} is not committed");
+                }
             }
         }
     }
 
     #[test]
     fn virts_images_are_the_committed_bytes_then_zeros_to_the_flash() {
-        let dir = pinned(Arch::Aarch64).0;
-        let tmp = root_with(Arch::Aarch64, &[("QEMU_EFI.fd", 3 << 20), ("QEMU_VARS.fd", 768 << 10)]);
-        let firmware = stage(tmp.path(), Arch::Aarch64).unwrap();
+        let dir = VIRT.dir;
+        let tmp = root_with(&VIRT, &[("QEMU_EFI.fd", 3 << 20), ("QEMU_VARS.fd", 768 << 10)]);
+        let firmware = stage(tmp.path(), &VIRT).unwrap();
         assert_eq!(firmware.code, tmp.path().join("target").join(dir).join("QEMU_EFI.fd"));
         let code = fs::read(&firmware.code).unwrap();
         assert_eq!(code.len() as u64, VIRT_FLASH);
@@ -155,9 +178,9 @@ mod tests {
 
     #[test]
     fn q35s_images_are_the_committed_files_as_they_are() {
-        let dir = pinned(Arch::X86_64).0;
-        let tmp = root_with(Arch::X86_64, &[("OVMF_CODE_4M.fd", 4096), ("OVMF_VARS_4M.fd", 512)]);
-        let firmware = stage(tmp.path(), Arch::X86_64).unwrap();
+        let dir = Q35.dir;
+        let tmp = root_with(&Q35, &[("OVMF_CODE_4M.fd", 4096), ("OVMF_VARS_4M.fd", 512)]);
+        let firmware = stage(tmp.path(), &Q35).unwrap();
         assert_eq!(firmware.code, tmp.path().join(dir).join("OVMF_CODE_4M.fd"));
         let vars = tmp.path().join("vars.fd");
         firmware.fresh_vars(&vars).unwrap();

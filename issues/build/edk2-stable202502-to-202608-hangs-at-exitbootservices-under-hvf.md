@@ -12,7 +12,10 @@ though its GICv3's system registers answer. `hvf_arch_init_vcpu`
 `env->gicv3state` is set, and it runs while `machvirt_init` realizes the CPUs
 (`hw/arm/virt.c:3140`), before `create_gic` (`:3158`) makes the GIC that sets
 it. QEMU master is the same. TCG computes the field on each read
-(`id_aa64pfr0_read`, `target/arm/helper.c`) and reads 1.
+(`id_aa64pfr0_read`, `target/arm/helper.c`) and reads 1. The orchestrator's
+`aarch64fw-r3-d3-pfr0` read the register from the loader: `0x1101000010110011`,
+`GIC` 0, under HVF, and `0x1301001121110022` at EL1 and `0x1301001121110222`
+at EL2, `GIC` 1, under TCG.
 
 From edk2-stable202502 (`8edd5fd6d3`, `eaa60a6b10`, `e663b79f74`) to
 stable202608, ArmVirtQemu's `ArmGicDxe` runs its GICv3 driver only where that
@@ -32,17 +35,16 @@ The 64 words dumped from 0x80 below the PC occur once in that build's
 `kernel-irqchip=off` (QEMU's own GICv3) the loop is the same. Every TCG `virt`
 guest boots that build green.
 
-`virt` therefore boots Debian's 2024.11-5, whose `ArmGicDxe` reads no
-`ID_AA64PFR0_EL1` and takes the GIC's revision from the DT. That build leaves
-`EfiLoaderData` executable (`PcdDxeNxMemoryProtectionPolicy` `0x7fd1`, Debian's
-revert patch). It also runs EL2 without setting `HCR_EL2.E2H`. So neither
-reason `enter_kernel` (`bootloader/src/arch/aarch64.rs`) turns the MMU off for
-reaches any guest. Owner: the orchestrator.
+So `src/firmware.rs` chooses `virt`'s firmware by accelerator: Debian's
+2026.05-2 under TCG and KVM, and under HVF 2024.11-5, whose `ArmGicDxe` reads
+no `ID_AA64PFR0_EL1` and takes the GIC's revision from the DT. The cost is
+that HVF guests boot an older edk2 than every other guest. Owner: the
+orchestrator.
 
 ## Exit condition
 
-`virt`'s pin moves to a build that carries edk2's `aefdbf91f4` and
-`377a890d80`, where the DT chooses between split GICv2 and GICv3 drivers
-again, or to any build under a QEMU whose HVF sets `ID_AA64PFR0_EL1.GIC` for
-an attached GICv3. It is shown by `virt_early_panic` and `virt_early_fault`
-green under HVF on that pin, and `enter_kernel`'s revert red there under TCG.
+Once `virt`'s TCG pin carries edk2's `aefdbf91f4` and `377a890d80`, where the
+DT chooses between split GICv2 and GICv3 drivers again, or once QEMU's HVF sets
+`ID_AA64PFR0_EL1.GIC` for an attached GICv3, HVF boots that pin and the
+accelerator leaves `src/firmware.rs`'s key. It is shown by `virt_early_panic`
+and `virt_early_fault` green under HVF on that pin.

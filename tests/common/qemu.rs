@@ -1283,7 +1283,7 @@ impl QemuInstance {
         let _ = fs::remove_file(&uart_log);
 
         let vars = test_dir.join(format!("vars-{seq}.fd"));
-        toyos_build::firmware::of(options.profile.arch())
+        toyos_build::firmware::of(options.profile.arch(), options.profile.accel())
             .and_then(|firmware| firmware.fresh_vars(&vars))
             .unwrap_or_else(|why| panic!("[qemu] {why}"));
 
@@ -1911,8 +1911,8 @@ fn qemu_command(
         "mute removes the only console a virtio profile has"
     );
 
-    let arch = options.profile.arch();
-    let [firmware_code, firmware_vars] = toyos_build::firmware::of(arch)
+    let (arch, accel) = (options.profile.arch(), options.profile.accel());
+    let [firmware_code, firmware_vars] = toyos_build::firmware::of(arch, accel)
         .unwrap_or_else(|why| panic!("[qemu] {why}"))
         .drives(firmware_vars);
 
@@ -1921,7 +1921,6 @@ fn qemu_command(
         qemu.arg("-boot").arg(boot);
     }
 
-    let accel = options.profile.accel();
     if accel.is_hardware() {
         qemu.arg("-accel").arg(accel.name());
     }

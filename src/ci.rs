@@ -652,12 +652,13 @@ fn verdicts(log: &str) -> String {
 }
 
 /// The QEMU on `PATH` that boots `arch` against `.github/qemu-version`, the
-/// firmware the guests boot, and whether `/dev/kvm` opens where it is present
-/// and `arch` is the host's — the three things a guest verdict must be read against.
+/// firmware `arch` boots under this host's accelerator, and whether `/dev/kvm`
+/// opens where it is present and `arch` is the host's — the three things a
+/// guest verdict must be read against.
 fn instrument(root: &Path, arch: Arch) -> Result<String, String> {
     let want = declared_qemu_version(root).ok_or(".github/qemu-version declares no version")?;
     let have = qemu_version(arch)?;
-    let firmware = crate::firmware::of(arch)?;
+    let firmware = crate::firmware::of(arch, arch.accel())?;
     let node = Path::new("/dev/kvm").exists();
     let native = Arch::HOST == Some(arch);
     let accel = match (native, arch.accel(), node) {
