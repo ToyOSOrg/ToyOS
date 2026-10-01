@@ -7,7 +7,7 @@ opened: 2026-10-01
 # Apps on toyos-window, terminal, toybox and doom build or run on ToyOS alone
 
 A userland app builds and runs on macOS, Linux, Windows and ToyOS from the same
-source (owner's ruling). calc and snake do. These do not. Each row below is
+source (owner's ruling). These do not. Each row below is
 `cargo check --manifest-path userland/<app>/Cargo.toml --target x86_64-unknown-linux-gnu`,
 run on the macOS dev host:
 
