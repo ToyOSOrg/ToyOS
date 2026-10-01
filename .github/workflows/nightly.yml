@@ -209,3 +209,5 @@ jobs:
           sh "$RUNNER_TEMP/rustup-init.sh" -y --profile minimal --default-toolchain stable
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - run: env -u GITHUB_ACTIONS -u CI cargo run -- --build-only
+      # The host suite's macOS arms run here alone: `ci.yml`'s `host` is Linux.
+      - run: cargo run -- --ci host

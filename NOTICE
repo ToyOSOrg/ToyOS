@@ -369,8 +369,7 @@ volume, on a sparse file of the raw size:
     empty-file   1  TFEMPTYFILE  empty.txt "", full.txt "twelve bytes"
 
 `pattern` is the one in `toyos-fat32/tests/common/mod.rs`. Nothing in this
-repository runs either tool: the suite reads only what is committed here, so it
-runs on any host.
+repository runs either tool: the suite reads only what is committed here.
 
 **What in them is not ours.** The names and contents of the files are this
 repository's test bytes, and the layout — boot sector, FSInfo, FATs, directory
@@ -385,11 +384,9 @@ a work of theirs. Two things the tools wrote are not:
   Apple's `msdosfs` at tag `msdosfs-788.100.31`
   (`lib_newfs_msdos/newfs_data_types.h`, taken from
   `newfs_msdos.tproj/newfs_msdos.c`, which carries Nordier's notice under
-  Apple's). Whether a stub this short and this dictated by its function is
-  copyrightable at all is not decided here: the volumes are declared as
-  carrying it under BSD-2-Clause, whose one condition on redistribution in
-  binary form is reproducing the notice, which the licence text above does
-  verbatim. It is never executed: the suite reads it as bytes.
+  Apple's). The volumes are declared as carrying it under BSD-2-Clause, whose
+  one condition on redistribution in binary form is reproducing the notice,
+  which the licence text above does verbatim.
 - The freed clusters still hold the AppleDouble sidecars macOS wrote beside
   every file and the generation then deleted: Apple's AppleDouble header with
   its `Mac OS X` filler, an eleven-byte `com.apple.provenance` attribute, and

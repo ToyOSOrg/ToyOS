@@ -127,6 +127,7 @@ receives = ["compositor", "filepicker"]
 # calc opens a window and reads nothing off the disk, so a connector to the
 # compositor is the whole of its authority.
 [programs.calc]
+path = "userland/calc/window"
 receives = ["compositor"]
 
 [programs.editor]

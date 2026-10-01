@@ -3,8 +3,6 @@
 //! `ERANGE` and `EINVAL` C requires, over a corpus of the grammar's corners and
 //! seeded random numbers, hexadecimal ones with a rounding tie in half of them.
 //! A hexadecimal number's value is held to [`exact_hex`] instead of the host's.
-//!
-//! glibc 2.39 reads `0X1.c63b83507cf448000P-1025` as `0x38c7706a0f9e8`; IEEE 754 rounds it to `0x38c7706a0f9e9`.
 
 use std::ffi::{c_int, CString};
 

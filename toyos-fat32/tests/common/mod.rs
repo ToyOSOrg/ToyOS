@@ -425,6 +425,7 @@ impl Image {
         let mut at = 8;
         while at < runs.len() {
             let (offset, len) = (word(at), word(at + 8) as usize);
+            assert!(offset + len as u64 <= word(0), "{}: a run at {offset} ends past the image", source.display());
             file.write_all_at(&runs[at + 16..at + 16 + len], offset).expect("write a run");
             at += 16 + len;
         }

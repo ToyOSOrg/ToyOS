@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "blockd",
     "calc",
+    "calc/window",
     "compositor",
     "console",
     "doom",

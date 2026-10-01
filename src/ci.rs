@@ -475,9 +475,8 @@ fn host(root: &Path) -> Vec<Step> {
     let mut steps = vec![
         step("the build system", || cargo(root, &["test", "--lib"])),
         step("the harness's own checks", || cargo(root, &["test", "--test", "toyos-checks"])),
-        // Every member's tests run though one reds, so a red step names them all.
         step("the host workspace", || {
-            cargo(root, &["test", "--workspace", "--exclude", "toyos-build", "--no-fail-fast"])
+            cargo(root, &["test", "--workspace", "--exclude", "toyos-build"])
         }),
         step("the licences of what ships", || crate::licence::judge(root)),
     ];

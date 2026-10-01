@@ -1,18 +1,19 @@
 //! The window: a strip of keys under a display, laid out from whatever size the
 //! surface happens to be.
 //!
-//! winit gives it a window and its events, softbuffer gives it a wall of
-//! pixels, and everything the calculator actually decides lives in the library
-//! beside this file. **No test lives here**: this binary builds for ToyOS
-//! alone (`Cargo.toml`), so a test in it would run nowhere.
+//! Snake's shape, for the same reason snake has it — one program that runs on
+//! the development host and on ToyOS with nothing in it that knows the
+//! difference. winit gives it a window and its events, softbuffer gives it a
+//! wall of pixels, and everything the calculator actually decides lives in
+//! `calc_core`, the package around this one.
 
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
-use calc::app::{enabled, Action, Button, Calc, Mode};
-use calc::layout::{Fonts, Layout, Rect, Target, KEY_CHARS, MIN_H, MIN_W, OPEN_H, OPEN_W};
-use calc::num::APPROX;
-use calc::prog;
+use calc_core::app::{enabled, Action, Button, Calc, Mode};
+use calc_core::layout::{Fonts, Layout, Rect, Target, KEY_CHARS, MIN_H, MIN_W, OPEN_H, OPEN_W};
+use calc_core::num::APPROX;
+use calc_core::prog;
 use font::{Color, Font};
 use softbuffer::{Context, Surface};
 use winit::application::ApplicationHandler;

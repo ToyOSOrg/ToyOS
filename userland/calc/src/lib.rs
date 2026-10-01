@@ -12,7 +12,5 @@ pub mod error;
 pub mod layout;
 pub mod num;
 pub mod parser;
-#[cfg(test)]
-mod parser_identities;
 pub mod prog;
 pub mod rational;
