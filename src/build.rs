@@ -1488,27 +1488,6 @@ fn assert_actuators_match_features(root: &Path, features: &str, kernel: &[u8]) {
     );
 }
 
-/// The labels `arch::syscall` defines inside `syscall_entry` for
-/// `nmi_gate`, which the linker carries into `.strtab`.
-const ENTRY_LABELS: [&str; 3] =
-    ["syscall_entry_hold_spin", "syscall_entry_hold_end", "syscall_entry_end"];
-
-/// Refuse a test kernel whose entry lacks a label `nmi_gate` reads, and a
-/// shipping one that names any. What the shipping entry *does* is
-/// [`assert_entry_window_matches_features`]'s to judge: a label is a spelling,
-/// and a hold can be spelled without one.
-fn assert_entry_labels_match_features(features: &str, kernel: &[u8]) {
-    assert_names_match_features(
-        features,
-        kernel,
-        TEST_KERNEL,
-        &ENTRY_LABELS,
-        "labels `arch::syscall` puts inside `syscall_entry`",
-        "They bound what `nmi_gate` holds and counts, and belong to a kernel built with \
-         `boot-actuators`.",
-    );
-}
-
 /// `arch::syscall::syscall_entry`'s v0-mangled path, less the crate
 /// disambiguator that stands in front of it.
 const SYSCALL_ENTRY_SYMBOL: &str = "6kernel4arch6x86_647syscall13syscall_entry";
@@ -1586,35 +1565,24 @@ fn entry_window(entry: &[u8]) -> Result<Result<(), &[u8]>, String> {
     Ok(Err(&rest[..between]))
 }
 
-/// Refuse to write a shipping image whose `syscall_entry` does anything between
-/// saving the user's `rsp` and switching to the kernel's.
+/// Refuse to write an image whose `syscall_entry` does anything between saving
+/// the user's `rsp` and switching to the kernel's.
 ///
-/// The instructions, not their names: [`assert_entry_labels_match_features`]
-/// closes the two spellings `window_hold!` uses, and a hold respelled through
-/// local labels passes it with the whole spin in the entry. Read at the entry's
-/// own symbol, the shipping kernel's first three instructions are `cld`, the
-/// save and the switch, with nothing between. Both directions, for
-/// [`assert_names_match_features`]'s reason: the test kernel's entry has to
-/// have something between them, which is what says this can tell.
+/// The instructions, not their names: read at the entry's own symbol, the
+/// kernel's first three instructions are `cld`, the save and the switch, with
+/// nothing between. The shipping kernel and the test kernel are judged; every
+/// other feature set is an instrument this is not about.
 fn judge_entry_window(features: &str, kernel: &[u8]) -> Result<(), String> {
-    let want_hold = match features {
-        "" => false,
-        f if f == TEST_KERNEL.join(",") => true,
-        _ => return Ok(()),
-    };
-    match (entry_window(syscall_entry_bytes(kernel)?)?, want_hold) {
-        (Ok(()), false) | (Err(_), true) => Ok(()),
-        (Ok(()), true) => Err(format!(
-            "the {} kernel's `syscall_entry` switches to the kernel's `rsp` in the instruction \
-             after it saves the user's, so `nmi_gate`'s hold is not in it and every test that \
-             arranges an arrival inside the window arranges nothing.",
-            TEST_KERNEL.join(","),
-        )),
-        (Err(between), false) => Err(format!(
-            "the shipping kernel's `syscall_entry` does not switch to the kernel's `rsp` in the \
+    if !features.is_empty() && features != TEST_KERNEL.join(",") {
+        return Ok(());
+    }
+    match entry_window(syscall_entry_bytes(kernel)?)? {
+        Ok(()) => Ok(()),
+        Err(between) => Err(format!(
+            "this kernel's `syscall_entry` does not switch to the kernel's `rsp` in the \
              instruction after it saves the user's; between them stand {between:02x?}.\nEvery \
-             instruction there runs at CPL 0 on a user's stack, and an image that ships must \
-             not be able to be asked to stop there."
+             instruction there runs at CPL 0 on a user's stack, and an image must not be able \
+             to be asked to stop there."
         )),
     }
 }
@@ -1704,7 +1672,6 @@ fn stage_and_certify_kernel(root: &Path, features: &str, env: &GuestEnv, arch: A
     match arch {
         Arch::X86_64 => {
             assert_entry_window_matches_features(features, &bytes);
-            assert_entry_labels_match_features(features, &bytes);
         }
         // Taking an exception to EL1 sets `PSTATE.SP`, so its handler's first
         // instruction already runs on `SP_EL1`: no instruction runs at EL1 on a
@@ -3536,8 +3503,8 @@ mod tests {
     const ENTRY_OPENS: [u8; 10] = [0xfc, 0x65, 0x48, 0x89, 0x24, 0x25, 0x18, 0, 0, 0];
     /// `mov rsp, gs:[0x10]`.
     const SWITCH: [u8; 9] = [0x65, 0x48, 0x8b, 0x24, 0x25, 0x10, 0, 0, 0];
-    /// `window_hold!` as a shipping build with its cfgs taken off emits it: the
-    /// two global labels make each jump a near one.
+    /// A spin on a per-CPU word between the save and the switch, through two
+    /// global labels, which make each jump a near one.
     const LABELLED_HOLD: [u8; 84] = [
         0x65, 0x48, 0xf7, 0x04, 0x25, 0x18, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x0f, 0x84,
         0x41, 0x00, 0x00, 0x00, 0x65, 0xf0, 0x48, 0x83, 0x0c, 0x25, 0x18, 0x01, 0x00, 0x00, 0x02,
@@ -3621,20 +3588,20 @@ mod tests {
     }
 
     #[test]
-    fn a_clean_entry_is_the_shipping_kernels_and_not_the_test_kernels() {
+    fn a_clean_entry_is_every_judged_kernels() {
         let kernel = kernel_with_entry(&[ENTRY_NAME], &entry_with(&[]));
         assert_eq!(judge_entry_window("", &kernel), Ok(()));
-        let refusal = judge_entry_window(&TEST_KERNEL.join(","), &kernel).unwrap_err();
-        assert!(refusal.contains("`nmi_gate`'s hold is not in it"), "{refusal}");
+        assert_eq!(judge_entry_window(&TEST_KERNEL.join(","), &kernel), Ok(()));
     }
 
     #[test]
-    fn a_hold_is_refused_in_a_shipping_entry_however_its_labels_are_spelled() {
+    fn a_hold_is_refused_in_an_entry_however_its_labels_are_spelled() {
         for hold in [&LABELLED_HOLD[..], &LOCAL_LABEL_HOLD[..]] {
             let kernel = kernel_with_entry(&[ENTRY_NAME], &entry_with(hold));
-            let refusal = judge_entry_window("", &kernel).unwrap_err();
-            assert!(refusal.contains(&format!("between them stand {hold:02x?}")), "{refusal}");
-            assert_eq!(judge_entry_window(&TEST_KERNEL.join(","), &kernel), Ok(()));
+            for features in ["".to_string(), TEST_KERNEL.join(",")] {
+                let refusal = judge_entry_window(&features, &kernel).unwrap_err();
+                assert!(refusal.contains(&format!("between them stand {hold:02x?}")), "{refusal}");
+            }
         }
     }
 
