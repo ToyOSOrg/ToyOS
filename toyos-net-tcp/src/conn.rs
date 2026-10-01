@@ -221,13 +221,13 @@ impl Ts {
 
     /// What a segment sent now carries: TSval now, TSecr TS.Recent.
     pub fn option(&self, now: Instant) -> Timestamps {
-        Timestamps { value: now.tsval(self.offset), echo: self.recent }
+        Timestamps { value: crate::tsval(now, self.offset), echo: self.recent }
     }
 
     /// RFC 7323 §4.1: the round trip an echoed TSval measures, unless it is one we never sent or
     /// one from the future.
     pub fn echo_rtt(&self, echo: u32, now: Instant) -> Option<Duration> {
-        let age = Stamp(now.tsval(self.offset)).since(Stamp(echo));
+        let age = Stamp(crate::tsval(now, self.offset)).since(Stamp(echo));
         (age < 1 << 31 && Stamp(echo).at_or_after(Stamp(self.first))).then(|| Duration::from_millis(u64::from(age)))
     }
 }
