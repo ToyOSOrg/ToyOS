@@ -1,4 +1,32 @@
+use std::path::Path;
+
+use super::qemu::{self, BootOptions, QemuInstance};
 use super::serial::Serial;
+
+/// The line `nested_nmi` writes to the UART, and this boot's ready marker: the
+/// machine halts on it.
+const NESTED: &str = "NESTED NMI";
+
+pub fn nested_nmi_is_loud(test_config: &Path) -> Result<(), String> {
+    let qemu = QemuInstance::boot_with_options(
+        test_config,
+        &[],
+        &[],
+        BootOptions {
+            kernel_params: &["nmi-nested"],
+            // The profile whose 16550 is the console: the nested-NMI report is
+            // a raw write — that handler may not reach the log ring at all
+            // (`arch::idt::nmi`) — so on any other profile it lands on a UART
+            // nothing here is reading.
+            profile: qemu::Profile::Metal,
+            ready_marker: NESTED,
+            ..Default::default()
+        },
+    );
+    let loud = Serial::boot(&qemu).must_say(NESTED)?.to_string();
+    eprintln!("  [nmi] nested: {}", loud.trim());
+    Ok(())
+}
 
 /// The blocked-task dump's NMI probe: a CPU that ignores a kick is named, and
 /// then asked where it is with the one interrupt it cannot mask.

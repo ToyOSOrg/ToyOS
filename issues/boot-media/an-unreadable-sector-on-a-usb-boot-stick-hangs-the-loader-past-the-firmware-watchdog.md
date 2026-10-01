@@ -45,14 +45,17 @@ sector hangs the loader on a real machine is unmeasured.
 
 `root_chunk_refused` stages the same EIO on the `InternalDisk` profile's NVMe
 boot disk. `root_chunk_refused_on_a_usb_stick` is the same body on the
-Headless profile's stick, and `src/redlist.rs` disables it on this file.
+Headless profile's stick.
 
 ## Exit condition
 
-`root_chunk_refused_on_a_usb_stick` is green on stock edk2 and its
-`src/redlist.rs` row is lifted. Then this file is deleted.
+`root_chunk_refused_on_a_usb_stick`, restored, is green on stock edk2. Then
+this file is deleted.
 
 ## Owner
 
 `bootloader/src/rootimage.rs`'s `read_root` and the loader's watchdog in
 `bootloader/src/main.rs`; unheld.
+
+**Its test is deleted**: `86e606616` took `root_chunk_refused_on_a_usb_stick`
+out, and `git revert 86e606616` brings it back.

@@ -50,7 +50,7 @@ stdio console.
 (`wt/toyos-libcllvm`, load average 66–74) test-runner printed `blockd_io: PASS bench` at
 35.962 s and the bench's process exited `code=0` at 35.978 s, and `===TEST_END
 test_rs_blockd_io exit=0===` never reached the harness, which waited 3559 s until the run was
-ended by hand. That boot read the stdio console (`tests/common/blockd.rs`, no `console_file`).
+ended by hand. That boot read the stdio console.
 Every userland line stops at 35.962 s while the kernel's own ten-second `sched:` and `PMM:` lines
 go on, and user `mmap` held rises from 23 to 30 between 74.9 s and 3026.8 s, so a process kept
 running through the silence; the capture cannot tell a dropped marker from a `logd` that stopped
@@ -64,3 +64,9 @@ The console chardev the harness reads cannot refuse a write — for example a
 file chardev the harness follows, or a `virtserialport`, which QEMU throttles
 instead of dropping. Shown by `log_stream_stalled_reader` green in 20 of 20
 runs beside a full suite.
+
+**`log_stream_stalled_reader` is deleted**, as a flaky test is, on the two
+reds recorded here: `96763794e` took it out, and `cc291947e` then deleted
+`BootOptions::console_file`, which only it set. `git revert cc291947e
+96763794e` brings both back, and the exit condition's twenty runs wait on that
+restore.

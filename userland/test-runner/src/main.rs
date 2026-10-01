@@ -1,5 +1,3 @@
-mod log_close;
-
 use std::io::{self, BufRead, Write};
 use std::os::toyos::process::{ChildExt, CommandExt};
 use std::process::{Command, Stdio};
@@ -11,16 +9,6 @@ use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::power::Stop;
 use toyos::process::Process;
 use toyos::syscap::SysCap;
-
-/// Tests that run **inside** this process rather than in a binary it spawns.
-///
-/// **Not a shortcut: a spawned binary cannot hold what these need.** This
-/// process passes its whole namespace to every child, and a `SysCap` dup is not
-/// a namespace entry — so a gate whose subject is a right on this program's own
-/// capability has nowhere else to run. They answer the same
-/// `===TEST_START===`/`===TEST_END===` protocol as a binary, so the host cannot
-/// tell the difference and does not have to.
-const BUILTINS: &[(&str, fn(Option<&SysCap>) -> i32)] = &[("log-close", log_close::run)];
 
 /// The job the runner is inside, and whether the list got through: written by
 /// the loop, read by the deadline watching it.
@@ -106,16 +94,7 @@ fn main() {
                 Ran::No => {
                     give_the_machine_back(&format!("job {job:?} did not run"))
                 }
-                // **A builtin's exit code reaches no kernel record.** A spawned
-                // job's does — `process::exit_process` logs one — so a host
-                // reading a stick can judge it; a builtin runs inside this
-                // process and its code is only this program's own text. So a
-                // failing builtin ends the boot: the missing `Rebooting.` is
-                // the channel the kernel writes for it.
-                Ran::Builtin(code) if code != 0 => {
-                    give_the_machine_back(&format!("the builtin {job:?} exited {code}"))
-                }
-                Ran::Builtin(_) | Ran::Spawned => {}
+                Ran::Spawned => {}
             }
             if STOPPING.load(Ordering::Acquire) {
                 stand_down();
@@ -236,29 +215,18 @@ fn command(line: &str, cap: Option<&SysCap>) {
     run_one(name, &args, cap);
 }
 
-/// What became of one job. The two ways it can have run are told apart because
-/// only one of them leaves the kernel a record: a spawned binary's exit is
-/// `exit: <name> pid=… code=…`, and a builtin's is a line on this console.
 enum Ran {
     /// It never started.
     No,
     Spawned,
-    Builtin(i32),
 }
 
-/// Run `/system/bin/<name>` or that name's builtin, between the host's markers.
+/// Run `/system/bin/<name>` between the host's markers.
 fn run_one(name: &str, args: &[&str], cap: Option<&SysCap>) -> Ran {
     let path = format!("/system/bin/{name}");
 
     println!("===TEST_START {name}===");
     let _ = io::stdout().flush();
-
-    if let Some((_, builtin)) = BUILTINS.iter().find(|(n, _)| *n == name) {
-        let code = builtin(cap);
-        println!("===TEST_END {name} exit={code}===");
-        let _ = io::stdout().flush();
-        return Ran::Builtin(code);
-    }
 
     // Piped stdin so the child does not consume the serial commands.
     let mut command = Command::new(&path);

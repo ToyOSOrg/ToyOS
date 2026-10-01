@@ -1,5 +1,5 @@
 ---
-status: open
+status: assigned
 kind: tooling
 opened: 2026-09-27
 ---
@@ -29,9 +29,6 @@ own line printed —
   the harness controls differed, so it failed once and passed once. That is a
   rate and not a classification.
 ```
-
-`cargo run -- --known-red partition_claim_departure` answered NO before this
-row.
 
 ## What is known
 
@@ -64,9 +61,15 @@ missing, which that hypothesis does not by itself explain.
 `guest_verdict`'s "exited 0 having said" refusal (`tests/common/partclaim.rs`)
 carries the kernel window, as its non-zero-exit refusal already does, so the
 next sighting is not blind; the mechanism named and fixed; and a test that
-turns red on it deterministically. Then this row and its `src/redlist.rs`
-entry are deleted.
+turns red on it deterministically. Then the test is restored and this file is
+deleted.
 
 ## Owner
 
 The partition-claim code, held by the orchestrator.
+
+**Its test is deleted**: `0e19bf898` took `partition_claim_departure` out,
+host and guest halves; `b5c59cbcc` its actuator `usb-transport-break-owed`.
+`git revert 9ebf080e8 b5c59cbcc 0e19bf898` brings it
+back as it stood before #536, `log_flush_retry` with it; `git show 84471bc58:tests/common/partclaim.rs` holds #536's
+adaptation of it.

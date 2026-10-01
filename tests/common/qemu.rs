@@ -1,10 +1,9 @@
 use std::collections::BTreeSet;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{fs, thread};
 
@@ -160,34 +159,31 @@ pub fn boot_census() -> (u32, u32, Vec<String>) {
 pub const DECLARED_KERNEL_BUILDS: [&str; 2] =
     toyos_build::build::TEST_SUITE_KERNEL_BUILDS;
 
-/// How many guests the phase now running may have up at once.
+/// How many guests the run may have up at once.
 ///
 /// The harness's own wall-clock margins are margins on the *host*, and they were
 /// all derived when one guest had it to itself. Four guests is a different
 /// machine, so such a margin has to be stated against the regime it runs in
-/// rather than widened outright — which is what this multiplies. A serial phase
-/// sets it back to 1 and gets the number it always had.
+/// rather than widened outright — which is what this multiplies.
 static WIDTH: AtomicU32 = AtomicU32::new(1);
 
 pub fn set_width(width: u32) {
-    assert!(width >= 1, "a phase runs at least one guest");
+    assert!(width >= 1, "a run boots at least one guest");
     WIDTH.store(width, Ordering::SeqCst);
 }
 
-/// A liveness ceiling, stated for one guest and paid out for the phase's.
+/// A liveness ceiling, stated for one guest and paid out for the run's width.
 ///
 /// Every timeout a test hands [`QemuInstance::run_test`] and its relatives is a
 /// guard against a wedge, never a verdict: the assertion is what the guest
 /// *said*, and a test whose pass depended on a deadline expiring would be
 /// asserting on the host's clock. So the number in the source stays the number
-/// its author reasoned about — one guest, this host — and the phase multiplies
-/// it, exactly as `wait_for_ready` has multiplied the boot timeout since the
-/// parallel phase landed.
+/// its author reasoned about — one guest, this host — and the width multiplies
+/// it, as `wait_for_ready` multiplies the boot timeout.
 ///
 /// The cost of getting this wrong in the generous direction is that a wedge
 /// takes longer to report. The cost in the other direction is a red run that
-/// says a guest hung when it was only sharing a machine, which is the failure
-/// mode that put the whole shared block in the serial tail.
+/// says a guest hung when it was only sharing a machine.
 ///
 /// This corrects for width and for how fast the host is, both host-wide facts.
 /// It does not correct for a guest being wider than the host — an `smp:8` guest
@@ -206,7 +202,7 @@ pub fn budget(one_guest: Duration) -> Duration {
 /// — `wait_for_ready`'s own comment names the two exceptions, and both read the
 /// guest's stamps rather than this clock — so it is a measurement of the host
 /// that costs nothing to take. The *fastest* rather than the mean because a boot
-/// taken with three other guests up measures the phase; the minimum over a run
+/// taken with three other guests up measures the others; the minimum over a run
 /// is the closest this can get to the machine with nothing else on it.
 static FASTEST_BOOT_MS: AtomicU32 = AtomicU32::new(u32::MAX);
 
@@ -321,7 +317,7 @@ fn oversubscription(smp: u32) -> (u32, u32) {
 
 /// [`budget`] widened by a guest's own vCPU oversubscription.
 ///
-/// The guest-agnostic [`budget`] scales by phase width and boot-derived host
+/// The guest-agnostic [`budget`] scales by the run's width and boot-derived host
 /// speed; this multiplies in `smp/cores` on top, so a wide-SMP guest that a
 /// mostly-serial boot said little about is given the extra room the derivation
 /// above says it needs. `smp <= cores` leaves it exactly [`budget`], which is
@@ -720,6 +716,12 @@ fn words(monitor: &mut QmpMonitor, at: u64) -> Vec<u32> {
 #[derive(Clone, Copy, PartialEq)]
 pub enum Profile {
     Headless,
+    /// [`Profile::Headless`] with no unit at all: the negative control for
+    /// whether a virtio function is behind one. QEMU offers
+    /// `VIRTIO_F_ACCESS_PLATFORM` only for a function created with
+    /// `iommu_platform=on`, and the harness sets that only where a unit exists,
+    /// so the guest's own negotiation comes out the other way here.
+    HeadlessNoIommu,
     Gop,
     /// M1 metal-sim: GOP, NVMe, xHCI with the boot stick on it, i8042 from
     /// q35, and nothing else -- no virtio device and no USB HID. This is the
@@ -751,6 +753,7 @@ impl Profile {
         match self {
             Self::Virt | Self::VirtEl2 | Self::VirtTcg => Arch::Aarch64,
             Self::Headless
+            | Self::HeadlessNoIommu
             | Self::Gop
             | Self::Metal => Arch::X86_64,
         }
@@ -926,7 +929,13 @@ impl Profile {
                 nvme_bytes: NVME_SMALL,
                 iommu: Some(IOMMU_DEFAULT),
             },
+            Self::HeadlessNoIommu => Shape { iommu: None, ..Self::Headless.shape() },
         }
+    }
+
+    /// The unit this profile puts on the machine, or `None`.
+    pub fn iommu(self) -> Option<Iommu> {
+        self.shape().iommu
     }
 }
 
@@ -1018,42 +1027,12 @@ pub struct TestResult {
     pub error: Option<WaitVerdict>,
 }
 
-/// Every byte the guest's console has produced, the unfinished last line
-/// included — **a view, not a queue: reading it takes nothing from anyone.**
-///
-/// The line channel is a `Receiver`, so a wait on it consumes: a helper that
-/// drained lines looking for its own evidence would take the marker its caller's
-/// assertion is waiting for. That is the whole reason this exists.
-///
-/// It also carries what the line channel structurally cannot. A surface owner
-/// mirrors the shell's bytes to its own stdout and std buffers that by line, so
-/// a prompt — `"{cwd}> "`, no newline — reaches a host reading bytes and no host
-/// reading lines.
-#[derive(Clone)]
-pub struct ConsoleStream(Arc<Mutex<Vec<u8>>>);
-
-impl ConsoleStream {
-    fn new() -> Self {
-        Self(Arc::new(Mutex::new(Vec::new())))
-    }
-
-    /// Everything the guest has said so far.
-    ///
-    /// Lossy, and it has to be: the tail is whatever has arrived, so it can end
-    /// inside a multi-byte character that is not finished yet.
-    pub fn text(&self) -> String {
-        let buf = self.0.lock().expect("the console stream lock is never held across a panic");
-        String::from_utf8_lossy(&buf).into_owned()
-    }
-}
-
 pub struct QemuInstance {
     child: Child,
     /// What ends QEMU when this process dies without dropping this.
     _tether: Tether,
-    stdin: BufWriter<Box<dyn Write + Send>>,
+    stdin: BufWriter<ChildStdin>,
     rx: Receiver<String>,
-    console: ConsoleStream,
     _reader_thread: thread::JoinHandle<String>,
     /// Held for the claim: one live guest per NVMe image.
     _nvme: NvmeClaim,
@@ -1424,64 +1403,6 @@ impl QemuInstance {
         }
     }
 
-    /// [`Self::screendump_while`], but a guest still *painting* is still working.
-    ///
-    /// The screen-channel form of what [`ceiling_verdict`] does for
-    /// [`Self::run_test_paced`] on serial: past the budgeted deadline the wait
-    /// does not give up while the framebuffer keeps *changing*. A console
-    /// rendering slowly under a loaded `smp:2` runner is making progress, which
-    /// is the case whose paint "never arrived in the window" while the guest was
-    /// alive — the budget-scaled deadline undercounts a later moment in the run
-    /// exactly as the serial ceiling did. Only a screen *frozen* for
-    /// [`GUEST_QUIET`] past the deadline ends the wait; `done` firing ends it at
-    /// once, so a passing caller is untouched
-    /// and a real bug (the paint that should not be there, and stays) still fires
-    /// its assertion, a frozen-screen `GUEST_QUIET` later.
-    ///
-    /// **Only for a config whose screen freezes when idle** — no compositor;
-    /// `/system/bin/console` repaints on I/O alone. A compositor's cursor blink and its
-    /// once-a-second taskbar clock never let the screen freeze, so such a caller
-    /// would wait the whole backstop when its `done` never comes and keeps the
-    /// plain [`Self::screendump_while`].
-    ///
-    /// Reuses the one classifier so the two channels cannot drift: `dying` is the
-    /// serial path's alone, and a halted kernel freezes the screen and is caught
-    /// by the freeze here.
-    pub fn screendump_while_rendering(
-        &mut self,
-        timeout: Duration,
-        interval: Duration,
-        done: impl Fn(&super::screen::Ppm) -> bool,
-    ) -> super::screen::Ppm {
-        let ceiling = budget_smp(timeout, self.smp);
-        let start = Instant::now();
-        let mut last_change = start;
-        let mut prev: Option<Vec<[u8; 3]>> = None;
-        loop {
-            let dump = self.screendump();
-            if done(&dump) {
-                return dump;
-            }
-            let now = Instant::now();
-            if prev.as_deref() != Some(dump.pixels.as_slice()) {
-                last_change = now;
-                prev = Some(dump.pixels.clone());
-            }
-            if ceiling_verdict(
-                None,
-                now.duration_since(start),
-                ceiling,
-                now.duration_since(last_change),
-                0,
-            )
-            .is_some()
-            {
-                return dump;
-            }
-            thread::sleep(interval);
-        }
-    }
-
     /// Every console line the guest printed before the ready marker.
     ///
     /// The kernel's own boot lines sit in the log ring until the scheduler
@@ -1494,13 +1415,7 @@ impl QemuInstance {
         &self.boot_log
     }
 
-    /// The guest's console byte for byte, unfinished last line included — see
-    /// [`ConsoleStream`].
-    pub fn console_stream(&self) -> &ConsoleStream {
-        &self.console
-    }
-
-    pub fn stdin_mut(&mut self) -> &mut BufWriter<Box<dyn Write + Send>> {
+    pub fn stdin_mut(&mut self) -> &mut BufWriter<ChildStdin> {
         &mut self.stdin
     }
 
@@ -1967,118 +1882,6 @@ impl QmpInput {
             .collect();
         self.send(&body);
     }
-
-    /// Type `text` as one batch of transitions, with no wait anywhere in it.
-    ///
-    /// **The caller owns the bound, and there is no version of this that does
-    /// not need one.** QEMU's PS/2 keyboard queue holds `QEMU_PS2_QUEUE` set-1
-    /// bytes and drops what does not fit silently, one byte at a time, so a
-    /// batch wider than that queue is a hole in the middle of a word whatever
-    /// the guest is doing. Use [`scancode_bytes`] to measure a batch, and send
-    /// the next one only once the guest has shown it consumed this one —
-    /// `console_type_line` in `tests/toyos.rs` reads the panel for it.
-    ///
-    /// **There is no wall-clock form of this and there must not be one.** A gap
-    /// between characters is the same bound bet on the guest being scheduled,
-    /// and a guest whose vCPU the host has not run for a couple of hundred
-    /// milliseconds drains none of them — at which point the queue starts
-    /// dropping, silently and one byte at a time, and the guest receives the
-    /// line with a hole in it, and neither side of the wire says a word about
-    /// it.
-    pub fn type_burst(&mut self, text: &str) {
-        let mut events: Vec<(&str, bool)> = Vec::new();
-        for ch in text.chars() {
-            let (qcode, shift) = qcode(ch);
-            if shift {
-                events.extend([("shift", true), (qcode, true), (qcode, false), ("shift", false)]);
-            } else {
-                events.extend([(qcode, true), (qcode, false)]);
-            }
-        }
-        self.keys(&events);
-    }
-}
-
-/// What one character costs on the wire, in set-1 bytes.
-///
-/// Every qcode [`qcode`] maps is a one-byte make and its break, and none of
-/// them is `0xE0`-prefixed; a shifted one carries the modifier's pair around
-/// it. This exists because a caller that has to bound what it puts in flight
-/// against QEMU's PS/2 queue cannot do it without knowing what a character
-/// weighs — an unmapped character panics in `qcode` rather than being counted
-/// as anything, which is the same refusal typing one would get.
-pub fn scancode_bytes(ch: char) -> usize {
-    if qcode(ch).1 { 4 } else { 2 }
-}
-
-/// The QEMU qcode for `ch`, and whether Shift is held to produce it.
-///
-/// A US layout, because that is what `kernel/src/keyboard.rs` boots with. Only
-/// the characters a console test types: an unmapped one panics rather than
-/// being dropped, since a command missing a character is a test asserting on
-/// output nothing was ever asked to produce.
-fn qcode(ch: char) -> (&'static str, bool) {
-    const LOWER: [&str; 26] = [
-        "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r",
-        "s", "t", "u", "v", "w", "x", "y", "z",
-    ];
-    const DIGIT: [&str; 10] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
-    match ch {
-        'a'..='z' => (LOWER[ch as usize - 'a' as usize], false),
-        'A'..='Z' => (LOWER[ch as usize - 'A' as usize], true),
-        '0'..='9' => (DIGIT[ch as usize - '0' as usize], false),
-        ' ' => ("spc", false),
-        '\n' => ("ret", false),
-        '-' => ("minus", false),
-        '_' => ("minus", true),
-        '.' => ("dot", false),
-        '/' => ("slash", false),
-        '&' => ("7", true),
-        _ => panic!("no qcode for {ch:?}; add it rather than typing something else"),
-    }
-}
-
-/// An open QMP connection for attaching and detaching devices while the guest
-/// runs — QEMU's own `device_add`/`device_del`, which is what a person
-/// plugging something in looks like from the host side.
-///
-/// Its own type rather than more methods on [`QmpInput`], and never open at the
-/// same time as one: a `-qmp unix:…,server` socket serves one monitor, so a
-/// caller that needs both alternates. A type called `QmpInput` with
-/// `device_add` on it would also be describing the wrong thing.
-pub struct QmpDevices(Qmp);
-
-impl QmpDevices {
-    pub fn open(socket: &Path) -> Self {
-        Self(Qmp::connect(socket))
-    }
-
-    /// Attach `driver` on `bus` as `id`, with `extra` naming any further
-    /// properties. Every value is a bare JSON string, which is what every
-    /// property these tests set happens to be.
-    pub fn add(&mut self, driver: &str, bus: &str, id: &str, extra: &[(&str, &str)]) {
-        let mut args = format!("\"driver\":\"{driver}\",\"bus\":\"{bus}\",\"id\":\"{id}\"");
-        for (key, value) in extra {
-            args.push_str(&format!(",\"{key}\":\"{value}\""));
-        }
-        self.0.execute(&format!("{{\"execute\":\"device_add\",\"arguments\":{{{args}}}}}"));
-    }
-
-    pub fn del(&mut self, id: &str) {
-        self.0
-            .execute(&format!("{{\"execute\":\"device_del\",\"arguments\":{{\"id\":\"{id}\"}}}}"));
-    }
-
-    /// Give QEMU an image to back a device that is not on the machine yet, so
-    /// a hot-plugged disk needs nothing in argv. A disk declared at boot is a
-    /// disk the guest could have enumerated at boot.
-    pub fn blockdev_add(&mut self, node: &str, image: &Path) {
-        self.0.execute(&format!(
-            "{{\"execute\":\"blockdev-add\",\"arguments\":{{\"node-name\":\"{node}\",\
-             \"driver\":\"raw\",\"file\":{{\"driver\":\"file\",\"filename\":\"{}\"}}}}}}",
-            image.display()
-        ));
-    }
 }
 
 /// The argv `options` would launch QEMU with, built against placeholder
@@ -2355,13 +2158,10 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
     }
     let (mut child, tether) = toyos_build::tether::spawn(qemu).expect("Failed to launch QEMU");
 
-    let stdin: Box<dyn Write + Send> = Box::new(child.stdin.take().unwrap());
-    let stdin = BufWriter::new(stdin);
-    let stdout: Box<dyn Read + Send> = Box::new(child.stdout.take().unwrap());
+    let stdin = BufWriter::new(child.stdin.take().unwrap());
+    let stdout = child.stdout.take().unwrap();
 
     let (tx, rx) = mpsc::channel::<String>();
-    let console = ConsoleStream::new();
-    let reader_console = console.clone();
     // The virtio port starts at the kernel's first record; a 16550 on stdio has
     // no other file, so it is read whole.
     let mut kernel_console = options
@@ -2374,9 +2174,7 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
         let mut reader = BufReader::new(stdout);
         let mut full_log = String::new();
         // Read bytes and split them, rather than `BufRead::lines`: every
-        // consumer below still gets whole lines and nothing else, and
-        // [`ConsoleStream`] gets the tail that is not a line yet, which is
-        // where a prompt lives.
+        // consumer below still gets whole lines and nothing else.
         let mut pending: Vec<u8> = Vec::new();
         let mut chunk = [0u8; 4096];
         loop {
@@ -2393,11 +2191,6 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
                 Some(console) => console.pass(&chunk[..read]),
                 None => std::borrow::Cow::Borrowed(&chunk[..read]),
             };
-            reader_console
-                .0
-                .lock()
-                .expect("the console stream lock is never held across a panic")
-                .extend_from_slice(&read);
             pending.extend_from_slice(&read);
             while let Some(at) = pending.iter().position(|&b| b == b'\n') {
                 let mut line: Vec<u8> = pending.drain(..=at).collect();
@@ -2432,7 +2225,6 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
         boot_image,
         vars,
         boot_log,
-        console,
         smp: options.smp,
         carried,
     }
@@ -2478,12 +2270,12 @@ fn wait_for_ready(
     let no_timeout = options.debug_wait;
     let ready = options.ready_marker;
     let panic_aborts = ready == DEFAULT_READY;
-    // Ten seconds per guest this phase may have up, and never fewer than two
+    // Ten seconds per guest this run may have up, and never fewer than two
     // guests' worth — the tree runs 15-25 suites a day across several agents,
     // so one guest on a quiet host stopped being
     // the regime some time before this did. Measured on 2026-08-03 with other
     // agents building: two boots exceeded the flat ten seconds, one of them in a
-    // phase running a single guest.
+    // run of a single guest.
     //
     // A wedge costs that much longer to report and nothing else.
     //

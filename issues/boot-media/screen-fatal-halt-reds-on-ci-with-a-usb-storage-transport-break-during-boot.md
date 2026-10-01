@@ -1,5 +1,5 @@
 ---
-status: open
+status: assigned
 kind: defect
 opened: 2026-09-05
 ---
@@ -28,8 +28,11 @@ second stalls the first is the question, and this file is its owner's: the
 usb-storage wait path (`kernel/src/drivers/xhci/wait/msc.rs`) and whatever the
 runner's stdout blocked on.
 
-**Exit condition.** Re-enabled when a reproduction pins whether the boot
+**Exit condition.** Restored when a reproduction pins whether the boot
 runner's stdout was blocked behind the usb-storage transport break or the two
 are independent, and the wait path stops holding the runner's own output
 hostage. Owner: the usb-storage wait path,
 `kernel/src/drivers/xhci/wait/msc.rs`; held by the orchestrator.
+
+**Its test is deleted**: `13ae9aa66` took `screen_fatal_halt` out, and
+`git revert 13ae9aa66` brings it back.

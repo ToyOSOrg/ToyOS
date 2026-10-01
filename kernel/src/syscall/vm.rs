@@ -165,9 +165,7 @@ pub(super) fn sys_mmap(req_addr: u64, size: u64, prot: MmapProt, flags: MmapFlag
             Ok(vaddr)
         });
         match vaddr {
-            Ok(v) => {
-                v.raw()
-            }
+            Ok(v) => v.raw(),
             Err(()) => SyscallError::ResourceExhausted.to_u64(),
         }
     }

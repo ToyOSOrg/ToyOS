@@ -70,10 +70,6 @@ actuators! {
     /// `usb_reset_records_the_phase_it_cut`.
     usb_reset_under_load = "usb-reset-under-load";
 
-    /// Hold every thread that waits on a watch between reading its condition and
-    /// parking, so a post lands in the window its commit must refuse the park over.
-    watch_window = "watch-window";
-
     /// Make one CPU ignore a kick.
     dump_deaf_cpu = "dump-deaf-cpu";
 
@@ -84,6 +80,9 @@ actuators! {
     /// counter would have, which is the only way a TCG guest reaches that
     /// decision; on hardware the counter does it and nothing is sent.
     hard_lockup_probe = "hard-lockup-probe";
+
+    /// Send one NMI from the idle loop, and return from its handler via `iretq` with a second NMI already pending.
+    nmi_nested = "nmi-nested";
 
     /// Run `parse_config` over nine crafted configuration descriptors at init.
     xhci_descriptor_selftest = "xhci-descriptor-selftest";
@@ -104,6 +103,9 @@ actuators! {
     /// Make this CPU's timer due with interrupts masked, ask it to fire within
     /// a quantum, and take its interrupts with them open.
     timer_floor = "timer-floor";
+
+    /// Withhold `VIRTIO_F_ACCESS_PLATFORM` from every virtio device but the console, staging a function whose addresses the unit never translates.
+    virtio_no_access_platform = "virtio-no-access-platform";
 
     /// Leave every AP holding the CR0/CR4 that INIT left it.
     no_ap_control_regs = "no-ap-control-regs";

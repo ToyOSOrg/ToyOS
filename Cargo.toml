@@ -173,10 +173,6 @@ toyos-userbound = { path = "toyos-userbound" }
 # declaration. Pure and `no_std`, so it compiles for the host as it does for
 # the guest.
 toyos-i219 = { path = "toyos-i219" }
-# The scheduler core, for the watch window's count (`watch::window`) that
-# `blocking_read_window`'s metal row judges. `kernel/` is excluded from this
-# workspace with its own lockfile, so nothing here reaches the kernel's
-# resolution of the same crate.
 toyos-sched = { path = "toyos-sched" }
 # The Bulk-Only phases, so the harness judging a wedge reads the word
 # `toyos_xhci::bot::Phase` declares instead of spelling it a second time.

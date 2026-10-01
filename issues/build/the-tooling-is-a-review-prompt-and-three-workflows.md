@@ -9,9 +9,7 @@ opened: 2026-09-05
 The rules a prompt can read off a branch move into `.claude/agents/reviewer.md`,
 and the gates that held them go.
 
-- A test is green and fast or it is deleted in the same pull request and filed;
-  then `src/redlist.rs`, `35383398^:src/durations.rs` and
-  `tests/test-durations` have no subject and go.
+- A test is green and fast or it is deleted in the same pull request and filed.
 - The toolchain is content-addressed by the four trees that produce it, one
   directory per hash, never mutated; then the sysroot claim, `src/buildlock.rs`
   and `src/worktree.rs` go.

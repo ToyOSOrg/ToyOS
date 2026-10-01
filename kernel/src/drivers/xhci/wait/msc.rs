@@ -115,7 +115,6 @@ pub struct MscDevice {
 }
 
 impl MscDevice {
-
     /// Whether this device has answered SYNCHRONIZE CACHE with INVALID COMMAND
     /// OPERATION CODE, which is what makes a flush's `Ok(())` mean "there was
     /// nothing to make durable" rather than "a cache was emptied".
@@ -219,15 +218,6 @@ impl MscDevice {
     }
 }
 
-/// Who a round trip is for, which is whose staging it takes.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Asks {
-    /// A caller's command, or the bind's.
-    Command,
-    /// The TEST UNIT READY this rung of the ladder ends on.
-    Verification(Rung),
-}
-
 /// What [`MscDevice::enumerated`] holds.
 #[derive(Clone, Copy)]
 pub(in crate::drivers::xhci) struct Enumerated {
@@ -297,9 +287,10 @@ mod transport_break {
 
     /// Called where the driver is about to run a WRITE(10) data phase.
     pub fn arm() {
-        if crate::actuator::usb_transport_break() {
-            ARMED.store(UNSPENT.swap(false, Ordering::Relaxed), Ordering::Relaxed);
+        if !crate::actuator::usb_transport_break() {
+            return;
         }
+        ARMED.store(UNSPENT.swap(false, Ordering::Relaxed), Ordering::Relaxed);
     }
 
     /// Called after the doorbell, where the wait would otherwise begin.
@@ -310,117 +301,6 @@ mod transport_break {
 
 /// What the port rung's reset is made for, in its line.
 const RECOVERING: &str = "recovering";
-
-/// Faults staged on the next few commands, from `usb_gate` immediately before
-/// the operation they are taken inside, so each lands on a known disk and a
-/// known command.
-#[cfg(feature = "boot-actuators")]
-pub(in crate::drivers::xhci) mod staged {
-    use core::sync::atomic::{AtomicU16, AtomicU8, Ordering};
-
-    /// What a staged command does instead of going out well formed.
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    pub enum Fault {
-        /// The CBW goes out with a signature no device accepts. BOT §6.6.1 has
-        /// the device STALL the Bulk-In and either STALL the Bulk-Out or take
-        /// and discard what it is sent; QEMU's `usb-storage` STALLs the
-        /// Bulk-Out alone, so the break finds the Bulk-In Running and the
-        /// Bulk-Out Halted.
-        BadSignature = 1,
-        /// No CBW goes out, so the device is asked for bytes it holds no
-        /// command for, which QEMU's `usb-storage` answers with a STALL of the
-        /// Bulk-In: the break finds the Bulk-In Halted and the Bulk-Out Running.
-        NoCbw = 2,
-        /// Nothing is queued and the command ends as one whose port read
-        /// disconnected mid-wait does.
-        PortGone = 3,
-        /// Nothing is queued, and the command ends as one the device never
-        /// answered does: its wait runs to the end of what the call allows it.
-        /// The device is sent nothing it could mistake.
-        Unanswered = 4,
-    }
-
-    static LEFT: AtomicU8 = AtomicU8::new(0);
-    static FAULT: AtomicU8 = AtomicU8::new(0);
-    /// The one opcode the faults land on, or [`ANY`].
-    static ONLY: AtomicU16 = AtomicU16::new(ANY);
-    const ANY: u16 = u16::MAX;
-
-    /// Stage `n` faults, starting with the next command — or, with `only`, the
-    /// next command carrying that opcode, whichever disk issues it.
-    pub fn arm(n: u8, fault: Fault, only: Option<u8>) {
-        FAULT.store(fault as u8, Ordering::Relaxed);
-        ONLY.store(only.map_or(ANY, u16::from), Ordering::Relaxed);
-        // Last and `Release`: the disk that takes a fault may be on another CPU,
-        // and what it takes has to be what was staged with the count it saw.
-        LEFT.store(n, Ordering::Release);
-    }
-
-    /// Take back whatever was staged and never taken, and say how many: a
-    /// fault left armed past the operation it was staged for lands on whichever
-    /// disk issues the next command.
-    pub fn disarm() -> u8 {
-        LEFT.swap(0, Ordering::Relaxed)
-    }
-
-    /// INQUIRY faults a later bind stages on itself; a bind is no operation of
-    /// the gate's, so the gate can neither stage around one nor disarm after it.
-    static NEXT_BIND: AtomicU8 = AtomicU8::new(0);
-    pub const INQUIRY: u8 = 0x12;
-
-    /// Called by a bind before its first command: how many faults it staged.
-    pub fn bind_begins() -> u8 {
-        let n = NEXT_BIND.swap(0, Ordering::Relaxed);
-        if n > 0 {
-            arm(n, Fault::BadSignature, Some(INQUIRY));
-        }
-        n
-    }
-
-    /// Class resets whose TEST UNIT READY goes out with a bad signature, staged
-    /// apart from [`LEFT`]: the rung it lands in is one a fault of that count
-    /// began, inside the same operation.
-    static PROBES: AtomicU8 = AtomicU8::new(0);
-
-    /// The fault the TEST UNIT READY `rung` is about to end on was staged with.
-    pub fn take_probe(rung: super::Rung) -> Option<Fault> {
-        if rung != super::Rung::ClassReset {
-            return None;
-        }
-        PROBES
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |left| left.checked_sub(1))
-            .ok()
-            .map(|_| Fault::BadSignature)
-    }
-
-    /// The fault the command about to go out was staged with, if any.
-    pub fn take(opcode: u8) -> Option<Fault> {
-        // The count first and `Acquire`, pairing with `arm`'s `Release`: the
-        // opcode and the fault read after it are the ones staged with it.
-        let mut left = LEFT.load(Ordering::Acquire);
-        if left == 0 {
-            return None;
-        }
-        let only = ONLY.load(Ordering::Relaxed);
-        if only != ANY && only != u16::from(opcode) {
-            return None;
-        }
-        loop {
-            let less = left.checked_sub(1)?;
-            match LEFT.compare_exchange_weak(left, less, Ordering::Acquire, Ordering::Acquire) {
-                Ok(_) => break,
-                Err(now) => left = now,
-            }
-        }
-        match FAULT.load(Ordering::Relaxed) {
-            1 => Some(Fault::BadSignature),
-            2 => Some(Fault::NoCbw),
-            3 => Some(Fault::PortGone),
-            4 => Some(Fault::Unanswered),
-            _ => None,
-        }
-    }
-}
 
 /// The one line a device's refusal produces, wherever it is noticed — one
 /// function so per-caller wording never obscures what the device said.
@@ -678,7 +558,7 @@ impl XhciController {
                     return Reply::Budget;
                 }
             }
-            match self.bot(dev, cdb, data, Asks::Command) {
+            match self.bot(dev, cdb, data) {
                 Ok(Bot::Done { delivered }) => {
                     self.transport_came_back(dev, opcode);
                     return Reply::Ok { delivered };
@@ -730,13 +610,9 @@ impl XhciController {
     fn climb_until_in_step(
         &mut self,
         dev: &mut MscDevice,
-        broke: Option<(Pipe, u32)>,
+        mut broke: Option<(Pipe, u32)>,
         left: Left,
     ) -> bool {
-        self.climb(dev, broke, left)
-    }
-
-    fn climb(&mut self, dev: &mut MscDevice, mut broke: Option<(Pipe, u32)>, left: Left) -> bool {
         let slot = self.slot(dev.slot_id);
         let mut climb = dev.run.broke(left);
         loop {
@@ -951,7 +827,7 @@ impl XhciController {
                 return Err(Unverified::Failed);
             }
         }
-        match self.bot(dev, &Cdb::TEST_UNIT_READY, None, Asks::Verification(Rung::PortReset)) {
+        match self.bot(dev, &Cdb::TEST_UNIT_READY, None) {
             Ok(answer) => {
                 log!("usb-storage: {slot} the port reset took: addressed and configured again, the \
                      device answered TEST UNIT READY under its own tag {:#x}", dev.tag);
@@ -978,7 +854,7 @@ impl XhciController {
         let scratch = dma.subview(dev.block + MSC_SCRATCH, MSC_SCRATCH_LEN);
         scratch.zero();
         let region = scratch.subview(0, scsi::SENSE_BYTES);
-        match self.bot(dev, &Cdb::REQUEST_SENSE, Some(region), Asks::Command) {
+        match self.bot(dev, &Cdb::REQUEST_SENSE, Some(region)) {
             Ok(Bot::Done { delivered }) => {
                 let mut response = [0u8; scsi::SENSE_BYTES];
                 dma.copy_to(dev.block + MSC_SCRATCH, &mut response);
@@ -990,7 +866,7 @@ impl XhciController {
 
     /// One Bulk-Only round trip, as `toyos_xhci::bot::RoundTrip` asks for it:
     /// each transfer queued and waited for in place.
-    fn bot(&mut self, dev: &mut MscDevice, cdb: &Cdb, data: DataPhase, asks: Asks) -> Result<Bot, Broke> {
+    fn bot(&mut self, dev: &mut MscDevice, cdb: &Cdb, data: DataPhase) -> Result<Bot, Broke> {
         crate::block::census::command_issued();
         let data_in = cdb.data_in();
         // The length the device is told to move is the region's own, so the
@@ -1007,34 +883,11 @@ impl XhciController {
             None => (0, 0),
         };
 
-        #[cfg(feature = "boot-actuators")]
-        let staged = match asks {
-            Asks::Verification(rung) => staged::take_probe(rung),
-            Asks::Command => staged::take(cdb.opcode()),
-        };
-        #[cfg(not(feature = "boot-actuators"))]
-        let _ = asks;
-        #[cfg(feature = "boot-actuators")]
-        if staged == Some(staged::Fault::Unanswered) {
-            let began = crate::clock::nanos_since_boot();
-            // The staged wait is the wait a break opens the call from.
-            self.bulk_began = began;
-            let _ = self.settles_within_call(|| false);
-            let now = crate::clock::nanos_since_boot();
-            let cut = self.after_break.cut(began, now, super::super::USB_TIMEOUT_NS);
-            let why = if cut { Quiet::Spent } else { Quiet::Elapsed };
-            return Err(Broke::Silence { phase: Phase::Status, why });
-        }
-
         let dma = self.dma();
         let tag = dev.next_tag();
         #[cfg(feature = "stack-witness")]
         let entered_with = block_witness(dev);
         dma.copy_from(dev.block + MSC_CBW, &bot::cbw(tag, data_len, cdb));
-        #[cfg(feature = "boot-actuators")]
-        if staged == Some(staged::Fault::BadSignature) {
-            dma.copy_from(dev.block + MSC_CBW, &[0; 4]);
-        }
 
         // **From here the device is one this kernel has spoken a command to**,
         // and stays one until the CSW below is in hand: a reset between any two
@@ -1057,21 +910,8 @@ impl XhciController {
         loop {
             let answer = match act {
                 bot::Act::Command => {
-                    #[cfg(feature = "boot-actuators")]
-                    let staged_answer = match staged {
-                        Some(staged::Fault::NoCbw) => Some(bot::Answer::Moved { code: CC_SUCCESS, residue: 0 }),
-                        Some(staged::Fault::PortGone) => Some(completed(Err(Quiet::Gone))),
-                        _ => None,
-                    };
-                    #[cfg(not(feature = "boot-actuators"))]
-                    let staged_answer = None;
-                    match staged_answer {
-                        Some(answer) => answer,
-                        None => {
-                            let cbw_phys = dma.device_addr() + (dev.block + MSC_CBW) as u64;
-                            completed(self.bulk(dev, false, cbw_phys, CBW_LEN as u32, Phase::Command, &open))
-                        }
-                    }
+                    let cbw_phys = dma.device_addr() + (dev.block + MSC_CBW) as u64;
+                    completed(self.bulk(dev, false, cbw_phys, CBW_LEN as u32, Phase::Command, &open))
                 }
                 bot::Act::Data(pipe) => {
                     open.at(Phase::DataOwed, &dev.in_ring, &dev.out_ring);
@@ -1221,7 +1061,7 @@ impl XhciController {
         if !recovered {
             return Err(Unverified::Failed);
         }
-        match self.bot(dev, &Cdb::TEST_UNIT_READY, None, Asks::Verification(Rung::ClassReset)) {
+        match self.bot(dev, &Cdb::TEST_UNIT_READY, None) {
             Ok(answer) => {
                 log!("usb-storage: {slot} Reset Recovery took: the device answered TEST UNIT \
                      READY under its own tag {:#x}", dev.tag);
@@ -1556,15 +1396,7 @@ pub(in crate::drivers::xhci) fn bind(
         left: false,
     };
 
-    #[cfg(feature = "boot-actuators")]
-    let staged = staged::bind_begins();
-    let up = bring_up(ctrl, &mut dev);
-    #[cfg(feature = "boot-actuators")]
-    if staged > 0 {
-        log!("usb-storage: slot {slot_id} bound under {staged} staged INQUIRY fault(s): \
-             untaken={}", staged::disarm());
-    }
-    match up {
+    match bring_up(ctrl, &mut dev) {
         Up::Ready => {}
         // A bind that failed without going offline spoke to a transport that
         // answered: its pair has nothing on its rings.
@@ -1643,7 +1475,7 @@ fn bring_up(ctrl: &mut XhciController, dev: &mut MscDevice) -> Up {
     let (mut up, mut ask) = BringUp::begin(crate::clock::nanos_since_boot() + READY_BUDGET.nanos());
     loop {
         let heard = match ask {
-            scsi::Ask::TestUnitReady => match ctrl.bot(dev, &Cdb::TEST_UNIT_READY, None, Asks::Command) {
+            scsi::Ask::TestUnitReady => match ctrl.bot(dev, &Cdb::TEST_UNIT_READY, None) {
                 Ok(Bot::Done { .. }) => Heard::Good,
                 Ok(Bot::Failed) => Heard::CheckCondition,
                 Err(why) => {
@@ -1752,10 +1584,9 @@ fn read_serial(ctrl: &mut XhciController, dev: &mut MscDevice, index: u8) -> Ser
     let phys = dma.device_addr() + (dev.block + MSC_DATA) as u64;
     let mut get = |ctrl: &mut XhciController, index: u8, language: u16| -> Option<([u8; 255], usize)> {
         dma.subview(dev.block + MSC_DATA, 255).zero();
-        let asks = 255;
         let asked = ctrl.control_transfer(
             dev.slot_id, dev.dev_block, &mut dev.ep0_ring, 0x80, 0x06,
-            0x0300 | u16::from(index), language, Some(phys), asks,
+            0x0300 | u16::from(index), language, Some(phys), 255,
         );
         let Control::Done { delivered } = asked else {
             log!("usb-storage: slot {} would not give string descriptor {index}: {asked}",

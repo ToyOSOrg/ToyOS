@@ -25,7 +25,7 @@
 //! This is the text channel. The framebuffer is `screen.rs`, deliberately the
 //! only thing in the suite that reads pixels.
 
-use super::qemu::is_kernel_line;
+use super::qemu::{is_kernel_line, QemuInstance};
 
 /// Whose death a console line reports.
 ///
@@ -40,8 +40,7 @@ pub enum Died {
     Kernel,
     /// A process the kernel killed: a Ring 3 fault, reported by name in
     /// `kernel/src/arch/x86_64/idt/exceptions.rs`. The machine is fine — a test whose
-    /// whole subject is a process dying (`handle_kill_policy` and every
-    /// `faults.rs` probe) produces these deliberately. Before a boot's ready
+    /// whole subject is a process dying produces these deliberately. Before a boot's ready
     /// marker it still ends the boot: whatever died was `init` or one of its
     /// children, and nothing left is going to reach the marker.
     Faulted,
@@ -206,6 +205,11 @@ pub struct Serial {
 }
 
 impl Serial {
+    /// Everything the guest said on the way to its ready marker.
+    pub fn boot(qemu: &QemuInstance) -> Self {
+        Self { text: qemu.boot_log().to_string(), source: String::from("boot console") }
+    }
+
     /// For text a test collected itself — a `drain_serial` window, the 16550
     /// file of a guest that died early.
     pub fn named(source: &str, text: impl Into<String>) -> Self {

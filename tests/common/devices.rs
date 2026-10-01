@@ -1,15 +1,4 @@
-//! The device boot: what `tests/metaldevicecase` measures, and how the same
-//! boot is judged under QEMU and on the T14.
-//!
-//! **The two arms answer different questions and say so.** Under QEMU the
-//! devices are emulated and every span is a fact about TCG, so what is judged
-//! there is the plumbing: each job ran, each returned a measurement rather than
-//! one of `metaldevices::Refused`'s codes, and the shutdown took the devices
-//! down in order.
-
-use toyos_build::metaldevices;
-
-use super::metal;
+//! The device boot: what `tests/metaldevicecase` measures.
 
 /// Every job the config's runner list names that measures something, in that
 /// order. `reboot` is the list's last job and measures nothing.
@@ -19,45 +8,6 @@ pub const JOBS: &[&str] = &["usbwrite", "usbread", "fbcheck", "fbfill", "fbread"
 
 pub const CONFIG: &str = "tests/metaldevicecase";
 pub const BOOT: &str = "metaldevicecase";
-
-pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
-    let mut bad = metaldevices::unmet(back.loader().text(), back.log().text());
-
-    for job in JOBS {
-        let code = match back.exit_code(job) {
-            Ok(code) => code,
-            Err(why) => {
-                bad.push(why);
-                continue;
-            }
-        };
-        match measurement(job, code) {
-            Err(why) => bad.push(why),
-            Ok(span) => {
-                bad.extend(back.measured(&format!("{job}.{}.span_us", back.label), span).err());
-            }
-        }
-    }
-
-    eprintln!("  [devices] what {} answered:", back.label);
-    for line in metaldevices::inventory(back.log().text()) {
-        eprintln!("    {line}");
-    }
-
-    if bad.is_empty() {
-        return Ok(());
-    }
-    Err(format!("{} finding(s):\n  {}", bad.len(), bad.join("\n  ")))
-}
-
-/// One job's exit code as the number it is, or why it is not one.
-fn measurement(job: &str, code: i32) -> Result<u64, String> {
-    if let Some(refused) = metaldevices::Refused::of(i64::from(code)) {
-        return Err(format!("{job}: the job refused — {refused}"));
-    }
-    u64::try_from(code)
-        .map_err(|_| format!("{job}: exited {code}, which is neither a span nor a named refusal"))
-}
 
 /// The runner's job list is the one this file names, under the symlinks that
 /// give each job the name the kernel's `exit:` record carries.

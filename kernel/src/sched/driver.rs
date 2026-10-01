@@ -689,6 +689,14 @@ extern "C" fn idle_loop() -> ! {
         if crate::actuator::dump_deaf_cpu() {
             super::dump::deaf_window();
         }
+        // The first NMI; its handler stages the nested one.
+        #[cfg(feature = "boot-actuators")]
+        if crate::actuator::nmi_nested() {
+            static SENT: AtomicBool = AtomicBool::new(false);
+            if !SENT.swap(true, Ordering::Relaxed) {
+                crate::arch::irqchip::send_nmi(percpu::cpu_id());
+            }
+        }
         #[cfg(feature = "boot-actuators")]
         if crate::drivers::panic_console::probe_due() {
             panic!("metal-panic-probe: a fatal report over a desktop that owns the screen");

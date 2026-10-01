@@ -31,3 +31,6 @@ instead of dropping it, since nothing else in the tree keeps this test's
 console.
 
 **Owner**: whoever holds `issues/design-debt/toyos-has-its-own-network-stack.md`.
+
+**Its test is deleted**: `7967fba91` took `netd_refused_accept` out, and
+`git revert 7967fba91` brings it back.

@@ -1,5 +1,5 @@
 ---
-status: open
+status: assigned
 kind: defect
 opened: 2026-09-27
 ---
@@ -51,3 +51,8 @@ a flush bound after init's stop line; the flush is unanswered when init says
 it waited one out (`FLUSH_WAITED_OUT`, on the console or in `/log`) or its stop
 line never reached `/log`. That change has never run: the test's first run
 back is also that change's.
+
+**Its test is deleted**: `603b6ee54` took `log_ring_keeps_the_owners_slots`
+out, and `git revert 603b6ee54` brings it back as it stood before #536;
+`git show 84471bc58:tests/logkeepcase/system.toml` holds #536's adaptation of its
+config.

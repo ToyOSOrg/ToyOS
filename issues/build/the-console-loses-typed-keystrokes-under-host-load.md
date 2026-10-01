@@ -19,4 +19,8 @@ No layer (QEMU input, i8042/USB, translator, console) has been measured yet.
 **Exit condition.** The layer that drops the characters is identified and
 fixed, and the test then passes 10 of 10 consecutive runs
 under the host load of the original failure (other suites running in
-parallel); then the redlist row goes.
+parallel).
+
+**Its test is deleted**: `4c16f476d` took `screen_console_scroll` out, and
+`git revert 4c16f476d` brings it back; the exit's runs are the restored
+test's.

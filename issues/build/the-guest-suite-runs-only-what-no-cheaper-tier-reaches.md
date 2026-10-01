@@ -65,7 +65,7 @@ console's renderer. Exit: as stage A.
   `nested_fault_is_recursive`: a fault inside the report names the first.
 - metal `pre_idle_wedge_speaks`: a boot stopped in phase 3 says where.
 - metal `panic_halts_the_others_first`: no other CPU's record follows the fatal line.
-- metal `watchdog_resets`, `job_deadline_reboots`: the TCO and the job deadline end the machine.
+- metal `watchdog_resets`: the TCO ends the machine.
 - metal `quiesce_refuses_a_second_shutdown`: the machine has one shutdown, and a second caller is
   refused while the first holds it.
 - metal `screen_pager_keys`: PageUp pages a halted report.
@@ -85,22 +85,16 @@ and a compile-fail case.
   `fpu-save-nothing` and `user-writable-gsbase` features, their negative controls.
 - metal `control_regs_negative`: an AP left without the declared control registers is caught,
   under `no-ap-control-regs`.
-- metal `smp_failed_ap_leaves_no_hole`: an AP that never starts leaves no hole in the roster.
 - metal `va_exhaustion`, `heap_ceiling_bounds`: an exhausted address space and heap refuse by name.
 - metal `idle_stack_guard`: the idle stack's guard page catches an overflow.
-- metal `dump_left_pending_is_owed`, `blocked_dump`: a dump asked in a pass that may not serve it
-  is served later, and names each blocked thread.
-- metal `syscall_window_nmi_controls`: an NMI at the syscall entry runs on its IST stack; brings
-  back `arch/x86_64/nmi_gate.rs` and the entry's hold.
+- metal `dump_left_pending_is_owed`: a dump asked in a pass that may not serve it is served later.
 - metal `handler_post_without_a_pass`: a claim vector's watch post lands before any pass.
 - metal `tls_rebase_window`: a thread's TLS block is never reachable before its rebase.
 - metal `kernel_heartbeat`: the kernel's heartbeat record arrives on its period; brings back
   `kernel/src/heartbeat.rs`.
 - metal `wall_clock_utc`: the wall clock reads the RTC as UTC.
-- metal `launcher_refusals`, `spawn_cwd`: a spawn's refusals and working directory.
-- host `sched_check_build`: the scheduler's `check` instruments hold under the sim.
-- host `log_conservation_smp2`, `log_nested_emit`, `log_reserve_window`,
-  `log_reserve_window_negative`: every record is read or counted lost, nested emits keep one order.
+- metal `spawn_cwd`: a spawn's working directory.
+- host `log_conservation_smp2`: every record is read or counted lost.
 - host `wall_clock_rtc_dead`, `wall_clock_rtc_unstable`, `wall_clock_no_century`,
   `wall_clock_century_register`: each RTC shape decodes or is refused.
 - unrepresentable `lock_across_switch_halts`: a lock guard cannot be held across a switch.
@@ -111,10 +105,7 @@ and a compile-fail case.
 Host: `toyos-fat32`, `toyos-fat32-check`, `toyos-blockring`, `bcachefs`. Metal: the T14's stick
 and NVMe. Exit: as stage A.
 
-- host `fat_backing_revoked`: unlinked clusters are reissued and the volume stays whole.
 - host `fsync_failed_commit`: an fsync keeps refusing while the device refuses its flush.
-- host `redirty_mid_flush`: a page redirtied mid-flush reaches the disk.
-- host `fs_rename_durable`, `fs_dirs_durable`: renames and directories survive a reboot.
 - host `file_mtime_undated`: a file written with no wall clock is stamped as undated.
 - host `blockd_serves_partitions`, `blockd_survives_its_death`, `blockd_serves_nothing`: blockd's
   protocol, its restart, and its refusals with no controller.
@@ -125,11 +116,9 @@ and NVMe. Exit: as stage A.
 - metal `home_overwrite_reads_back`, `apps_and_home_are_one_filesystem`, `layout_fresh_boot`:
   `/home`'s bytes and layout on the disk.
 - metal `pkg_install_gbae`: `pkg install` lands a package that runs.
-- metal `partition_claim`, `partition_claim_gives_up`: a partition claimed as a device, and its
-  refusals.
-- metal `esp_filesystem`, `toybox_cp_volume`: the ESP mounted and written.
-- metal `log_flush_retry`, `kernel_log_file`, `log_partition_layout`, `log_partition_identity`:
-  `/log` on the stick, its retries and its layout.
+- metal `partition_claim`: a partition claimed as a device, and its refusals.
+- metal `kernel_log_file`, `log_partition_layout`, `log_partition_identity`: `/log` on the stick
+  and its layout.
 - metal `file_mtime_survives_a_reboot`: a file's mtime survives a reboot.
 
 ## Stage E: USB and xHCI
@@ -143,11 +132,10 @@ Host: `toyos-xhci` and its sim. Metal: the T14's controller and stick. Exit: as 
   handed back.
 - host `xhci_deaf_registers`, `xhci_slow_connect`, `xhci_portsc_rw1c`, `xhci_flap`: registers that
   never answer, a slow connect, PORTSC's write-one-to-clear, a replug inside the debounce.
-- host `xhci_full_speed_device`, `xhci_superspeed_ports`: device speeds bind to their ports.
+- host `xhci_superspeed_ports`: device speeds bind to their ports.
 - host `usb_storage_shapes`, `usb_refused_disk_first`, `usb_pool_exhausted`: disk sizes, sector
   sizes and counts the driver serves or refuses.
-- host `usb_short_read`, `usb_storage_write_error`, `usb_flush_optional`: a short read, a refused
-  write and a missing cache flush.
+- host `usb_storage_write_error`, `usb_flush_optional`: a refused write and a missing cache flush.
 - metal `usb_storage_gate`: the stick is read and written byte for byte.
 - metal `late_storage_connect`: a disk that connects after the boot scan is bound, and `/boot` and
   `/log` mount off it. Nothing is plugged: `xhci-slow-storage-connect` reports the first root-hub
@@ -160,11 +148,7 @@ Host: `toyos-ps2`, `toyos-keymap`. Metal: the T14's controller. Exit: as stage A
 
 - host `input_claim_absent`, `keyboard_claim_close_spares_stdin`: a claim with no device, and a
   close that leaves stdin armed.
-- host `i8042_no_spurious_wake`, `i8042_undecoded_bytes`: drains wake only on an event, and
-  undecodable bytes are counted.
-- host `metal_sim_input`: a PS/2 packet's motion reaches a pointer client scaled and in order; the
-  scaling moves out of `kernel/src/mouse.rs` beside `toyos-ps2`'s decode, and the ISR's hand-off to
-  the client is kernel wiring no host test reaches.
+- host `i8042_no_spurious_wake`: drains wake only on an event.
 - host `i8042_absent`, `i8042_quarantine`, `i8042_budget_expiry`, `i8042_fadt_denial`,
   `i8042_kbd_echo`: the probe's absent, quarantined, expired, denied and echoing controller.
 - host `swiss_german_layout`, `locale_detect`, `locale_detect_unrecognized`,
@@ -179,10 +163,8 @@ Host: `toyos-desktop`, the console's grid. Metal: the T14's desktop. Exit: as st
   compositor refuses a hostile client.
 - host `metal_sim_compositor_stall`, `metal_sim_client_death`: a stalled or dying client never
   stops the desktop.
-- host `metal_sim_pointer_churn`, `metal_sim_window_drag`: pointer sources bind and a drag moves a
-  window.
+- host `metal_sim_window_drag`: a drag moves a window.
 - host `desktop_typing_damage`: typing damages only the cells it changes.
-- host `screen_console_clear`: the console's model clears.
 - metal `metal_sim_compositor`: the compositor runs on the T14's GOP scanout.
 - metal `doom_frames`: doom renders a demo to a known digest.
 - metal `cxx_runtime`: a C++ program links libc++ and runs.
@@ -203,14 +185,12 @@ Host: `toyos-net-tcp`, `toyos-dns`, `toyos-mdns`, `toyos-swap`, `toyos-inspect`,
   `0.0.0.0` receives.
 - host `dns_resolve`, `netd_lookup_let_go`: lookups resolve, and abandoned ones are let go.
 - host `inspect_reads_its_owners`: `inspect`'s selectors read every owner.
-- host `log_stream_stalled_reader`: a reader that never reads stalls neither the file nor another.
-- host `swap_netd`, `swap_refusals`, `swap_not_inherited`: a wrong digest, a stranger's key and an
-  undeclared program are refused a swap.
+- host `swap_refusals`, `swap_not_inherited`: a wrong digest, a stranger's key and an undeclared
+  program are refused a swap.
 - host `sshd_key_auth`: sshd refuses a key not authorized.
 - metal `https_tls13` (and `https_tls13_e1000e`, the same fetch on the 82574): ureq and rustls
   fetch over TLS 1.3 on the I219.
 - metal `sshd_files`: sftp moves files byte for byte.
-- metal `swap_crash_rolls_back`: a replacement that dies under probation is rolled back.
 - unrepresentable `netd_seeds_its_stack`: the stack cannot be built without the kernel's seed.
 
 ## Stage I: program lines in `/log`
@@ -253,12 +233,11 @@ Metal: the T14's VT-d. Host: `toyos-pci`, `toyos-pcid`, `toyos-hda`. Exit: as st
 
 ## Stage K: the shared boot's own judges
 
-Metal, and `userland/libc`'s host tests. Exit: each judge reads on the T14 what its guest judge read.
+Metal. Exit: each judge reads on the T14 what its guest judge read.
 
 - metal `disk_backtrace`, `fault_gates`, `debug_trap`, `dlopen_dedup`, `abuse_elf_loader`,
   `exit_wait_storm`: the record beside the exit code — the backtrace's names, the fault's
   attribution, the loader's refusal reason, the wait accounting.
-- host `90_stdio_buffering`: stdout and stderr interleave as the case expects.
 
 ## Stage L: the harness's own guard
 

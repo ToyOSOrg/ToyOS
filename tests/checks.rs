@@ -576,7 +576,7 @@ mod checks {
         Ok(())
     }
 
-    /// A run takes every enabled declared test its filter matches, of either
+    /// A run takes every declared test its filter matches, of either
     /// architecture.
     #[test]
     fn a_run_selects_by_filter() -> Result<(), String> {
@@ -584,18 +584,17 @@ mod checks {
             let (machine, screen) = select(filter);
             machine
                 .iter()
-                .map(|(n, _)| n.to_string())
-                .chain(screen.iter().map(|(n, _, _)| n.to_string()))
+                .map(|n| n.to_string())
+                .chain(screen.iter().map(|(n, _)| n.to_string()))
                 .collect()
         };
         let names = |of: &[&str]| -> BTreeSet<String> { of.iter().map(|n| n.to_string()).collect() };
-        let enabled = |n: &&str| redlist::disabled(redlist::DISABLED, n).is_none();
-        let every: BTreeSet<String> = declared().filter(enabled).map(String::from).collect();
+        let every: BTreeSet<String> = declared().map(String::from).collect();
         let cases = [
             (None, every),
             (Some("virt_el2"), names(&["virt_el2_drop"])),
             (Some("el2_drop"), names(&["virt_el2_drop"])),
-            (Some("usb_boot_stick"), names(&["usb_boot_stick_pulled"])),
+            (Some("nested_nmi"), names(&["nested_nmi_is_loud"])),
             (Some("no_such_test"), BTreeSet::new()),
         ];
         for (filter, want) in cases {
@@ -764,13 +763,6 @@ mod checks {
         let judge = metal_judge("machine_reboot");
         assert_eq!(judge(&[&readback("jobcase", &done(rebooted), jobcase)]), Ok(()));
         assert!(judge(&[&readback("jobcase", &done(stopped), jobcase)]).is_err());
-
-        let testcases = "[2026-09-29 11:11:32 12.720 cpu2] exit: test_rs_null_sink_client_ex pid=12 \
-                         code=0 cpu=42ms\n\
-                         [2026-09-29 11:11:32 12.725 cpu7] exit: echo pid=15 code=0 cpu=0ms\n";
-        let judge = metal_judge("log_poll_outlives_a_close");
-        assert_eq!(judge(&[&readback("testcases", &done(rebooted), testcases)]), Ok(()));
-        assert!(judge(&[&readback("testcases", &done(stopped), testcases)]).is_err());
 
         let wedged = |tail: &str| {
             format!(

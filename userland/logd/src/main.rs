@@ -98,7 +98,7 @@ use toyos_wallclock::Civil;
 
 use origin::{Origin, Said};
 use policy::{Step, LOG_WRITE_BUDGET};
-use store::{Volume, DIR, MAX_LOG_BYTES, MAX_LOG_FILES, ROTATE_FAST_BYTES};
+use store::{Volume, DIR, MAX_LOG_BYTES, MAX_LOG_FILES};
 
 /// Records asked of `SYS_LOG_READ` at once: above `MAX_LOG_SHARDS`, which the
 /// call refuses below, and large enough that an ordinary boot's burst is a
@@ -144,18 +144,12 @@ fn main() {
     // init connected before it started anything, so this is already queued.
     let from_init: Connection = acceptor.accept().expect("logd: init's origins connection");
 
-    let rotate_at = if std::env::args().any(|a| a == "--rotate-fast") {
-        ROTATE_FAST_BYTES
-    } else {
-        MAX_LOG_BYTES
-    };
-
     // The wall clock, read once. The kernel reads the RTC once too, so a second
     // reading later in the boot would answer out of the same anchor and tell
     // this program nothing new.
     let (stem, boot_secs, dated) = boot_stamp();
 
-    let volume = Volume::open(stem, rotate_at, |line| say!("{line}"));
+    let volume = Volume::open(stem, MAX_LOG_BYTES, |line| say!("{line}"));
     match &volume {
         // This program's half of the startup report, in one line: the kernel
         // says whether it has a console, this program whether it has a volume

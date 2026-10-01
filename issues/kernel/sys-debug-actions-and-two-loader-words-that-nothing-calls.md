@@ -8,7 +8,7 @@ opened: 2026-10-01
 
 The guest suite's first cut
 (`issues/build/the-guest-suite-runs-only-what-no-cheaper-tier-reaches.md`) deleted the only
-callers of ten `SYS_DEBUG` actions and the loader's reading of two boot words, and left their
+callers of nine `SYS_DEBUG` actions and the loader's reading of two boot words, and left their
 names in `toyos-abi/src`, because a deletion there is an ABI change and that pull request was not
 one. Each kernel arm still answers its action. `git grep -w <name> -- tests userland toyos src`
 finds no caller of:
@@ -19,7 +19,6 @@ finds no caller of:
   `idle_stack_guard` and `lock_across_switch_halts`;
 - `HEAP_AT_CEILING` (5), `HEAP_AT_CEILING_PAGE_ALIGNED` (7) and `LOWER_SYSINFO_BOUND` (19),
   `heap_ceiling`'s, for stage C's `heap_ceiling_bounds`;
-- `SCREEN_GRAFFITI` (8), `test_screen_graffiti`'s, for stage G's `screen_console_clear`;
 - `LOG_PATTERNED` (21), test-runner's `log-gate` and `log-storm`, for stage C's
   `log_conservation_smp2`;
 - `boot::WRITE_NO_LAYOUT_PARAM` and `boot::WITHHOLD_ROOT_PARAM`, for stage A's

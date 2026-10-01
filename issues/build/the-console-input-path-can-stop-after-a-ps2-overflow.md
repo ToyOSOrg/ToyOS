@@ -1,5 +1,5 @@
 ---
-status: open
+status: assigned
 kind: defect
 opened: 2026-09-01
 ---
@@ -73,7 +73,11 @@ controller — not the console having stopped reading the kernel's queue.
 
 **Exit condition.** The input path is fixed so that no PS/2 overflow stops
 it, the staging above takes every line after the first on twenty boots, and
-`console_locale_detect` is green beside other guests. Owner: orchestrator.
+`console_locale_detect`, restored, is green beside other guests. Owner: orchestrator.
 
 Not a reason to leave `shell_type_once` unpaced: pacing keeps the harness from
 provoking this, and the tracker keeps the defect.
+
+**Its test is deleted**: `bf5a8e53f` took `console_locale_detect` out with
+the panel half of the shell-typing harness, which only it used, and
+`git revert bf5a8e53f` brings both back.

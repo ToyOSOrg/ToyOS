@@ -69,7 +69,6 @@ fn quiesce(last: &str) -> Result<(), SyscallError> {
     // Every userland thread stops here, the log's writer with the rest:
     // `/system/bin/init` had it flush before it asked for this stop.
     let stopped = crate::quiesce::stop();
-    // A line queued behind the stop, where `klogd` has not reached it.
     crate::log::console::drain_for_the_stop();
     // The final census: no process runs after this to report another.
     crate::irq_census::log_census();

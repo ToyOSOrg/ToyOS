@@ -39,3 +39,15 @@ the host reading can be excluded before the classification reading is
 investigated. Until that exists nothing can decide whether the assertion bounds
 this kernel or the dev host. Owed by whoever next runs a load sweep on this
 instrument.
+
+**Its test is deleted**: `4600f6754` took `syscall_window_nmi` out, and
+`539977050` its IST-off control in `syscall_window_nmi_controls` with
+`nmi-without-ist`, the storm's hold in the syscall entry and the report the
+two read.
+`2a4893921` then took the storm itself, which only those two arms needed: the
+`syscall-window-nmi` actuator, `nmi_gate`'s aiming and counting, the syscall
+count on every dispatch, and the Ring 3 spinner. The nested arm stayed, as
+`nested_nmi_is_loud`, with one NMI sent from the idle loop, and `866532c62`
+deleted the doc it had carried over. `git revert 866532c62 2a4893921 539977050
+4600f6754` brings all three back, with that doc and the two other lines
+`866532c62` deleted.

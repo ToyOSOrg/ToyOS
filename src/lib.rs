@@ -33,7 +33,7 @@ pub mod metalimage;
 pub mod metalswap;
 pub mod metaltalk;
 pub mod metaltimings;
-pub mod redlist;
+pub mod n2;
 pub mod release;
 pub mod sdkversion;
 pub mod soundfont;

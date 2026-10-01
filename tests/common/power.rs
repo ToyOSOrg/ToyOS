@@ -291,7 +291,8 @@ pub fn hard_lockup_chain(
 
     after.must_say(bootlog::PREVIOUS_PANIC)?;
     let said = after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::LOCKED_UP)?.to_string();
-    after.must_say_after(bootlog::PREVIOUS_PANIC, "spinning on the lock at 0x")?;
+    let stuck = after.must_say_after(bootlog::PREVIOUS_PANIC, "spinning on the lock at 0x")?;
+    sp_is_a_kernel_stack(stuck)?;
     // The staged control's own witness, carried by the mechanism rather than by
     // a log line that may not survive: the lock the stuck cpu is inside was
     // taken at the control's own source line, which no other boot can say.
@@ -314,6 +315,16 @@ pub fn hard_lockup_chain(
     // having booted no kernel is what this asserts instead.
     says_nothing_of(after, bootlog::LOADER_LAST_LINE)?;
     eprintln!("  [power] {}", said.trim());
+    Ok(())
+}
+
+/// The NMI entry routed the frame's `rsp` to the sample: a kernel stack is above
+/// `mm::PHYS_OFFSET`, and the `rflags` a swapped load would put there is below
+/// `0x400000`.
+fn sp_is_a_kernel_stack(stuck: &str) -> Result<(), String> {
+    if !stuck.contains("sp=0xffff") {
+        return Err(format!("the stuck cpu's sp is no kernel stack: {stuck}"));
+    }
     Ok(())
 }
 

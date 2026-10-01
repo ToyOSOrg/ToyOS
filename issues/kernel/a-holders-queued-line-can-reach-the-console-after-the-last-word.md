@@ -34,10 +34,7 @@ leaves a line in the queue at the stop goes red without that and green with it.
 
 The stop drains the queue on the wire right after
 `quiesce::stop()`, before `Syncing filesystems...`
-(`log::console::drain_for_the_stop`). `console-queue-at-the-stop` is the
-deterministic stimulus: it queues one line after every holder is stopped and
-keeps `klogd` off the queue from the stop's claim on.
-`quiesce_stops_the_machine` arms it and judges the line above the last word.
+(`log::console::drain_for_the_stop`).
 - The drain disabled as a checked patch: `cargo test --test toyos-build --
   --nightly quiesce_stops_the_machine` EXIT=1, `1 line(s) reached the
   console after the boot's last word: console: a holder's line, queued once
@@ -48,3 +45,5 @@ keeps `klogd` off the queue from the stop's claim on.
 What is left of "by construction" is a stop that did not stop every holder,
 which it reports at alert level. A holder that still runs after the drain
 can queue a line that follows the last word.
+
+`quiesce_stops_the_machine` is deleted; `issues/kernel/a-quiesce-writers-first-pass-outlasts-the-jobs-five-second-spin-up.md` records the commit that restores it.

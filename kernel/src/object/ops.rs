@@ -314,7 +314,8 @@ pub fn write_watch(object: &KObjectRef) -> Option<WatchRef> {
 /// share: a console closing is not every console's keyboard going away.
 fn close_ends_polls(object: &KObjectRef) -> bool {
     match object {
-        KObjectRef::SysCap(_) | KObjectRef::Console(_) => false,
+        KObjectRef::SysCap(_) => false,
+        KObjectRef::Console(_) => false,
         KObjectRef::Device(d) => match d.class() {
             device_registry::DeviceType::Keyboard => false,
             device_registry::DeviceType::Mouse

@@ -72,7 +72,6 @@ impl IrqGuard {
         }
         Self { rflags, _not_send_sync: core::marker::PhantomData }
     }
-
 }
 
 impl Drop for IrqGuard {

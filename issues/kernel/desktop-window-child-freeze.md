@@ -1,5 +1,5 @@
 ---
-status: open
+status: assigned
 kind: defect
 opened: 2026-08-06
 task: 156
@@ -167,7 +167,7 @@ calls "#156 did not fire this run, which proves nothing". What changed is that a
 red now means the desktop stopped answering, which is what the declaration was
 written about.
 
-**Exit condition and owner.** Re-enabled when #156 is fixed and a `sched::dump`
+**Exit condition and owner.** Restored when #156 is fixed and a `sched::dump`
 NMI probe taken on a reproduction confirms no CPU stopped taking scheduler
 passes during the freeze — nothing short of that instrument distinguishes this
 signature from a green run, which this entry has already shown proves nothing
@@ -175,3 +175,6 @@ either way. Owner: `toyos-sched`, the placement track that closed the
 CPU-selection half of this family (`CpuHandle::answering`,
 `toyos-sched/src/cpu.rs`) and is nearest the remaining half; held by the
 orchestrator.
+
+**Its test is deleted**: `cd685b10a` and `b20d3fd40` took `desktop_window_child`
+out, and `git revert b20d3fd40 cd685b10a` brings it back.

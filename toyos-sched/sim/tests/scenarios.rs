@@ -59,9 +59,6 @@
 //! cargo run --release -p toyos-sched-sim -- gate 10000
 //! cargo run --release -p toyos-sched-sim -- fuzz-sweep 10000000
 //! ```
-//!
-//! `overlong_pass` proves the pass budget's assert compiles and fires against a
-//! *modelled* cost; only a booted kernel reads a TSC.
 
 use std::collections::BTreeMap;
 

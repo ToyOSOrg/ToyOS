@@ -438,7 +438,6 @@ pub fn init() {
             unclaimed += 1;
         }
     }
-
     let ptr = IdtPointer {
         limit: (core::mem::size_of::<Idt>() - 1) as u16,
         base: IDT.data_ptr() as u64,

@@ -1069,8 +1069,6 @@ impl Boot {
 
     /// The config declares no `devices`, so nothing started there claims the
     /// framebuffer and the kernel's last boot checkpoint stays on screen.
-    /// `screen_diag_boot` boots this same config, so the tested image and the
-    /// flashed image are the same image.
     pub fn diag(root: &Path) -> Self {
         Self::mode(root, &root.join("diag"))
     }
@@ -1078,7 +1076,7 @@ impl Boot {
     /// `/system/bin/console` claims the framebuffer and runs the shell on it.
     /// Claiming the screen is what stops the boot checkpoints painting, so a
     /// machine that wedges before userland is readable in this mode and in no
-    /// other. `screen_console_shell` boots this config.
+    /// other.
     pub fn console(root: &Path) -> Self {
         Self::mode(root, &root.join("console"))
     }
@@ -1375,9 +1373,8 @@ pub const TEST_SUITE_KERNEL_BUILDS: [&str; 2] =
 
 /// The scheduler core's own asserts, compiled in: `toyos-sched/check`.
 ///
-/// One name, read from here by the one test that boots it, for
-/// [`TEST_KERNEL`]'s reason — a second spelling is a second kernel and nothing
-/// would say so.
+/// One name, for [`TEST_KERNEL`]'s reason — a second spelling is a second
+/// kernel and nothing would say so.
 pub const SCHED_CHECK_KERNEL: &[&str] = &["sched-check"];
 
 /// The kernel build used only by the harness's interactive debugger.
@@ -1565,24 +1562,22 @@ fn entry_window(entry: &[u8]) -> Result<Result<(), &[u8]>, String> {
     Ok(Err(&rest[..between]))
 }
 
-/// Refuse to write an image whose `syscall_entry` does anything between saving
-/// the user's `rsp` and switching to the kernel's.
+/// Refuse to write a shipping image whose `syscall_entry` does anything between
+/// saving the user's `rsp` and switching to the kernel's.
 ///
-/// The instructions, not their names: read at the entry's own symbol, the
-/// kernel's first three instructions are `cld`, the save and the switch, with
-/// nothing between. The shipping kernel and the test kernel are judged; every
-/// other feature set is an instrument this is not about.
+/// Read at the entry's own symbol, the shipping kernel's first three
+/// instructions are `cld`, the save and the switch, with nothing between.
 fn judge_entry_window(features: &str, kernel: &[u8]) -> Result<(), String> {
-    if !features.is_empty() && features != TEST_KERNEL.join(",") {
+    if !features.is_empty() {
         return Ok(());
     }
     match entry_window(syscall_entry_bytes(kernel)?)? {
         Ok(()) => Ok(()),
         Err(between) => Err(format!(
-            "this kernel's `syscall_entry` does not switch to the kernel's `rsp` in the \
+            "the shipping kernel's `syscall_entry` does not switch to the kernel's `rsp` in the \
              instruction after it saves the user's; between them stand {between:02x?}.\nEvery \
-             instruction there runs at CPL 0 on a user's stack, and an image must not be able \
-             to be asked to stop there."
+             instruction there runs at CPL 0 on a user's stack, and an image that ships must \
+             not be able to be asked to stop there."
         )),
     }
 }
@@ -1619,11 +1614,8 @@ const SCHED_CHECK_LITERALS: [&str; 3] = [
 /// about the artifact, so the artifact is what is asked, and a convention
 /// nothing enforces is not a bar.
 ///
-/// This is the half of the check-build gate that a booted guest cannot supply.
-/// A guest proves the asserts did not *fire* and the report was published; a
-/// kernel with the feature quietly dropped proves the first of those too, and
-/// rather more easily. Measured on the two binaries this build produces: 0 of 3
-/// in the shipping kernel, 3 of 3 in the `sched-check` one.
+/// Measured on the two binaries this build produces: 0 of 3 in the shipping
+/// kernel, 3 of 3 in the `sched-check` one.
 fn assert_sched_check_matches_features(features: &str, kernel: &[u8]) {
     assert_names_match_features(
         features,
@@ -3025,10 +3017,10 @@ mod tests {
         "tests/lanleasecase/system.toml",
         "tests/lantalkcase/system.toml",
         "tests/latencycase/system.toml",
-        "tests/logrotatecase/system.toml",
         "tests/logstallcase/system.toml",
         "tests/metalcase/system.toml",
         "tests/metaldevicecase/system.toml",
+        "tests/netcase/system.toml",
         "tests/testcases/system.toml",
         "tests/virtjobcase/system.toml",
         "tests/virtpaniccase/system.toml",
@@ -3501,8 +3493,6 @@ mod tests {
     const ENTRY_OPENS: [u8; 10] = [0xfc, 0x65, 0x48, 0x89, 0x24, 0x25, 0x18, 0, 0, 0];
     /// `mov rsp, gs:[0x10]`.
     const SWITCH: [u8; 9] = [0x65, 0x48, 0x8b, 0x24, 0x25, 0x10, 0, 0, 0];
-    /// A spin on a per-CPU word between the save and the switch, through two
-    /// global labels, which make each jump a near one.
     const LABELLED_HOLD: [u8; 84] = [
         0x65, 0x48, 0xf7, 0x04, 0x25, 0x18, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x0f, 0x84,
         0x41, 0x00, 0x00, 0x00, 0x65, 0xf0, 0x48, 0x83, 0x0c, 0x25, 0x18, 0x01, 0x00, 0x00, 0x02,
@@ -3586,20 +3576,17 @@ mod tests {
     }
 
     #[test]
-    fn a_clean_entry_is_every_judged_kernels() {
+    fn a_clean_entry_is_the_shipping_kernels() {
         let kernel = kernel_with_entry(&[ENTRY_NAME], &entry_with(&[]));
         assert_eq!(judge_entry_window("", &kernel), Ok(()));
-        assert_eq!(judge_entry_window(&TEST_KERNEL.join(","), &kernel), Ok(()));
     }
 
     #[test]
-    fn a_hold_is_refused_in_an_entry_however_its_labels_are_spelled() {
+    fn a_hold_is_refused_in_a_shipping_entry_however_its_labels_are_spelled() {
         for hold in [&LABELLED_HOLD[..], &LOCAL_LABEL_HOLD[..]] {
             let kernel = kernel_with_entry(&[ENTRY_NAME], &entry_with(hold));
-            for features in ["".to_string(), TEST_KERNEL.join(",")] {
-                let refusal = judge_entry_window(&features, &kernel).unwrap_err();
-                assert!(refusal.contains(&format!("between them stand {hold:02x?}")), "{refusal}");
-            }
+            let refusal = judge_entry_window("", &kernel).unwrap_err();
+            assert!(refusal.contains(&format!("between them stand {hold:02x?}")), "{refusal}");
         }
     }
 
@@ -3607,10 +3594,8 @@ mod tests {
     fn a_hold_in_front_of_the_save_is_an_entry_the_judge_refuses_to_read() {
         let entry = [&[0xfc, 0xf3, 0x90][..], &ENTRY_OPENS[1..], &SWITCH[..]].concat();
         let kernel = kernel_with_entry(&[ENTRY_NAME], &entry);
-        for features in ["".to_string(), TEST_KERNEL.join(",")] {
-            let refusal = judge_entry_window(&features, &kernel).unwrap_err();
-            assert!(refusal.contains("does not open `cld`"), "{refusal}");
-        }
+        let refusal = judge_entry_window("", &kernel).unwrap_err();
+        assert!(refusal.contains("does not open `cld`"), "{refusal}");
     }
 
     #[test]
@@ -3625,6 +3610,8 @@ mod tests {
 
     #[test]
     fn a_kernel_of_any_other_feature_set_is_not_judged() {
-        assert_eq!(judge_entry_window(&SCHED_CHECK_KERNEL.join(","), b"not an ELF"), Ok(()));
+        for features in [SCHED_CHECK_KERNEL, TEST_KERNEL] {
+            assert_eq!(judge_entry_window(&features.join(","), b"not an ELF"), Ok(()));
+        }
     }
 }

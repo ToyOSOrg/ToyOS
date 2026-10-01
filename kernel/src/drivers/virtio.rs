@@ -165,6 +165,18 @@ const RESET: crate::time::Budget = crate::time::Budget::of(
     "the device is refused, never waited on",
 );
 
+/// Every driver's accepted set carries [`VIRTIO_F_ACCESS_PLATFORM`]; the actuator
+/// withholds it to stage a function no unit sees, sparing the console.
+fn platform_addressing(pci_dev: &PciDevice) -> u64 {
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::virtio_no_access_platform() && pci_dev.device_id() != 0x1043 {
+        return 0;
+    }
+    #[cfg(not(feature = "boot-actuators"))]
+    let _ = pci_dev;
+    VIRTIO_F_ACCESS_PLATFORM
+}
+
 /// The config sub-window a virtio PCI capability names, or why it names none:
 /// the device's index, offset and length checked before a subregion is taken.
 fn cap_subwindow(
@@ -854,7 +866,7 @@ impl VirtioDevice {
         let device_features_hi = common.read_u32(COMMON_DEVICE_FEATURE);
         let device_features = (device_features_hi as u64) << 32 | device_features_lo as u64;
 
-        let features = device_features & (accepted_features | VIRTIO_F_ACCESS_PLATFORM);
+        let features = device_features & (accepted_features | platform_addressing(pci_dev));
         log!(
             "VirtIO: PCI {:02x}:{:02x}.{} features device={device_features:#x} \
              negotiated={features:#x} access_platform={}",

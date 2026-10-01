@@ -1,5 +1,5 @@
 ---
-status: open
+status: assigned
 kind: tooling
 opened: 2026-09-27
 ---
@@ -14,7 +14,7 @@ FAIL i8042_mouse: 872 pointer events reached userland out of 876 packets injecte
   FAIL  i8042_mouse  (17s)
 ```
 
-`cargo run -- --known-red i8042_mouse` answered NO. Earlier sightings of this
+Earlier sightings of this
 message are in `issues/build/parallel-tests-red-under-other-suites.md`'s
 `i8042_mouse` entry.
 
@@ -57,9 +57,12 @@ them apart:
 
 The shortfall refusal (`i8042_mouse` in `tests/toyos.rs`) carries
 `result.stdout` and `result.exit_code`, so the next sighting is not blind; the
-mechanism is named, and a deterministic test is red on it. Then this file and
-its `src/redlist.rs` row are deleted.
+mechanism is named, and a deterministic test is red on it. Then this file is
+deleted.
 
 ## Owner
 
 The i8042/input path, held by the orchestrator.
+
+**Its test is deleted**: `57ac19ada` took `i8042_mouse` out, and
+`git revert 57ac19ada` brings it back.
