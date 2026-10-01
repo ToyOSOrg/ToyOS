@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::arch::{Accel, Arch};
-use crate::cicache::{self, Start};
+use crate::cicache;
 use crate::userlandhost::{Host, Os, Program};
 use crate::{flags, release, sdkversion, sync};
 
@@ -468,9 +468,9 @@ fn run_control(root: &Path, control: &Control) -> Result<String, String> {
 /// host triple for the same reason.
 ///
 /// In a job that carries the cache ([`cicache::carried`]) the restored entry is
-/// read before any step, and a run that starts cold seals its tree after the
-/// last and refuses an entry above its bound; a developer's tree keeps the
-/// dates its edits gave it.
+/// read before any step, and after the last what its save would store is
+/// refused above its bound, warm or cold, and a tree that started cold is
+/// sealed; a developer's tree keeps the dates its edits gave it.
 fn host(root: &Path) -> Vec<Step> {
     let tmp = toyos_tmpdir::TempDir::new("ci-host");
     let short = Path::new(toyos_tmpdir::SHORT_BASE);
@@ -480,20 +480,17 @@ fn host(root: &Path) -> Vec<Step> {
     std::env::set_var("TMPDIR", tmp.path());
     let host_triple = crate::toolchain::host_triple();
     let mut steps = Vec::new();
-    let mut cold = None;
+    let mut start = None;
     if cicache::carried(root, &std::env::current_exe().expect("the driver's own path")) {
         carry();
-        let mut start = None;
         steps.push(step("the cache entry, read by content", || {
             let (found, said) = cicache::read(root)?;
             start = Some(found);
             Ok(said)
         }));
-        match start {
-            // Every step after an unreadable entry would be judged against it.
-            None => return steps,
-            Some(Start::Cold(found)) => cold = Some(found),
-            Some(Start::Warm) => {}
+        // Every step after an unreadable entry would be judged against it.
+        if start.is_none() {
+            return steps;
         }
     }
     steps.extend([
@@ -568,8 +565,8 @@ fn host(root: &Path) -> Vec<Step> {
         cargo(root, &["test", "--manifest-path", "toyos/Cargo.toml", "--target", &host_triple])
     }));
     steps.push(step("nothing left in $TMPDIR or /tmp", || left_behind(&tmp, short, &before)));
-    if let Some(cold) = cold {
-        steps.push(step("the tree, sealed as a cache entry", || cicache::seal(root, &cold)));
+    if let Some(start) = start {
+        steps.push(step("the tree, bounded as a cache entry", || cicache::close(root, &start)));
     }
     steps
 }
@@ -580,8 +577,8 @@ fn carry() {
     // The job's `CARGO_TARGET_DIR` names the driver's target, and no step
     // builds there.
     std::env::remove_var("CARGO_TARGET_DIR");
-    // No incremental state in an entry: it is most of an entry's bytes, and
-    // after a read by content it helps only a crate whose bytes changed.
+    // No incremental state: it is most of an entry's bytes, and after a read
+    // by content it helps only a crate whose bytes changed.
     std::env::set_var("CARGO_INCREMENTAL", "0");
     // Line tables alone: a backtrace in a step's log reads them, and nothing
     // reads the rest of the debuginfo, of which a Linux link copies every
@@ -1173,7 +1170,9 @@ mod tests {
     /// [`cicache::DRIVER`], so it carries the cache, names [`cicache::PATHS`],
     /// and takes no step by an alias or lends one, which this reader cannot
     /// follow; and the one that saves it restores nothing: its run is cold, and
-    /// a cold run is green only once its tree is sealed ([`cicache`]).
+    /// a cold run is green only once its tree is sealed ([`cicache`]). No line
+    /// of that job names a status function that runs a step past a red one, or
+    /// `continue-on-error`, so its save follows only a green run.
     #[test]
     fn each_cache_has_one_writer() {
         let dir = repo_root().join(".github/workflows");
@@ -1209,6 +1208,9 @@ mod tests {
                         assert_eq!(paths, &cicache::PATHS, "{name} {job}: the host cache's paths");
                         assert!(lines.contains(&carries.as_str()), "{name} {job}: the host cache without `{}`", carries.trim());
                         assert!(!save || caches.iter().all(|(s, ..)| *s), "{name} {job}: the host cache's writer restores");
+                        let past_a_red = ["always()", "cancelled()", "failure()", "continue-on-error"];
+                        let past = lines.iter().find(|l| past_a_red.iter().any(|word| l.contains(word)));
+                        assert!(!save || past.is_none(), "{name} {job}: the host cache saved past a red step: {past:?}");
                         let named = |l: &&str| ["- *", "- &"].iter().any(|by| l.trim_start().starts_with(by));
                         assert!(!lines.iter().any(named), "{name} {job}: a step by an alias, or lent to one");
                     }
