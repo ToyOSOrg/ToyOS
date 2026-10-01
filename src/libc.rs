@@ -120,8 +120,6 @@ pub fn build_c(root: &Path, toolchain: &Path, target_dir: &Path, arch: Arch) {
     crate::sysroot::clone_tree(&root.join(CRATE).join("include"), &c.join("include"));
 }
 
-/// The libraries POSIX has a C compiler take, `-lc` and `-lm` among them, whose
-/// functions are all `libtoyos_c.a`'s.
 const EMPTY_LIBRARIES: [&str; 5] = ["c", "m", "pthread", "dl", "rt"];
 
 /// Put each of [`EMPTY_LIBRARIES`] in `lib` as an archive of no members: a
@@ -295,10 +293,8 @@ mod tests {
     use super::*;
     use toyos_tmpdir::TempDir;
 
-    /// **`-lc` and `-lm` find a library in the C sysroot**, and so do POSIX's
-    /// other three: each an `ar` archive of no members.
     #[test]
-    fn the_c_sysroot_names_the_posix_libraries() {
+    fn the_c_sysroot_names_the_empty_libraries() {
         let lib = TempDir::new("libc-empty");
         empty_libraries(&lib);
         for name in ["c", "m", "pthread", "dl", "rt"] {
