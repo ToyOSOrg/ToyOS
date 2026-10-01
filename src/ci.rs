@@ -348,10 +348,10 @@ pub(crate) const CONTROLS: &[Control] = &[
         "only_the_thread_that_empties_a_claimed_process_tears_it_down ... FAILED",
     ]),
     red(PROCLIFE, "mutate-place-skips-the-insert-recheck", None, &[
-        "a_spawn_racing_its_places_kill_lands_nothing_under_it_and_publishes_it ... FAILED",
+        "a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it ... FAILED",
     ]),
-    red(PROCLIFE, "mutate-refused-insert-keeps-the-count", None, &[
-        "a_spawn_racing_its_places_kill_lands_nothing_under_it_and_publishes_it ... FAILED",
+    red(PROCLIFE, "mutate-refused-spawn-keeps-the-count", None, &[
+        "a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it ... FAILED",
     ]),
     red(PROCLIFE, "mutate-publish-before-the-children", None, &[
         "an_exit_publishes_after_every_end_below_it ... FAILED",

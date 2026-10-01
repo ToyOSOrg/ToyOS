@@ -352,3 +352,33 @@ pub fn launch<'a>(
         _ => Err(LaunchError::Sent(IpcError::Malformed)),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The header's last word names the parent: a place, init, or — any other
+    /// word — neither, which init refuses.
+    #[test]
+    fn a_request_names_its_parent_by_one_word() {
+        let mut buf = [0u8; 256];
+        let request = |parent| Launch {
+            program: "/system/bin/cat",
+            argv: b"",
+            env: b"",
+            cwd: "/",
+            extras: &[],
+            slots: &[],
+            parent,
+        };
+        for (parent, named) in [(Parent::Place(RawHandle(9)), Parent::Place(())), (Parent::Init, Parent::Init)] {
+            let len = request(parent).encode(&mut buf).expect("encode a launch");
+            assert_eq!(Request::decode(&buf[..len]).expect("decode it").parent(), Some(named));
+        }
+        let len = request(Parent::Init).encode(&mut buf).expect("encode a launch");
+        for word in [0, 3, u32::MAX] {
+            buf[HEADER - 4..HEADER].copy_from_slice(&word.to_le_bytes());
+            assert_eq!(Request::decode(&buf[..len]).expect("decode it").parent(), None, "word {word}");
+        }
+    }
+}

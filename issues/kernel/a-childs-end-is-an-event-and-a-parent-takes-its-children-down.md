@@ -128,8 +128,8 @@ directory is `issues/isolation/every-program-sees-only-the-files-it-was-given.md
    programs die with it. Oracle: systemd-logind, whose session scope ends every
    process of a login.
 6. **A program is asked to quit** (Q3b, Q6a–Q6f). `SYS_PROCESS_QUIT` (124,
-   never assigned), `(process, reason)`, needs `MANAGE` as the kill does and
-   reaches the process's subtree as an end does; the reason is interrupt,
+   never assigned), `(process, reason)`, needs `MANAGE` as the kill does; the
+   reason is interrupt,
    hang-up or terminate. Each process is started holding its notice, a new
    object kind under the label `quit`, `READABLE` while a reason is asked and
    not yet read, whose read takes it. A quit kills a process that has never

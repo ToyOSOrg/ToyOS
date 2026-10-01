@@ -147,9 +147,10 @@ pub fn namespace() -> Option<&'static Namespace> {
 /// This process's handle to itself, which it hands on for a child to be
 /// placed under it: `WRITE`, `DUP` and `TRANSFER`, from the kernel, under
 /// [`SELF_LABEL`]. Borrowed rather than taken, as the namespace is: every
-/// launch duplicates it.
-pub fn this_process() -> Option<&'static Process> {
-    THIS_PROCESS.get().as_ref()
+/// launch duplicates it. Panics for a process whose `self` was taken before
+/// this first ran: the kernel starts every process holding it.
+pub fn this_process() -> &'static Process {
+    THIS_PROCESS.get()
 }
 
 /// Make `ns` this process's namespace, for the one process no parent endows
@@ -302,7 +303,7 @@ static THIS_PROCESS: ProcessCell = ProcessCell(Once::new());
 
 struct EndowTable(Once<Endowments>);
 struct NamespaceCell(Once<Option<Namespace>>);
-struct ProcessCell(Once<Option<Process>>);
+struct ProcessCell(Once<Process>);
 
 impl EndowTable {
     fn get(&'static self) -> &'static Endowments {
@@ -317,8 +318,10 @@ impl NamespaceCell {
 }
 
 impl ProcessCell {
-    fn get(&'static self) -> &'static Option<Process> {
-        self.0.get_or_init(|| Endowments::get().take::<Process>(SELF_LABEL))
+    fn get(&'static self) -> &'static Process {
+        self.0.get_or_init(|| {
+            Endowments::get().take::<Process>(SELF_LABEL).expect("this process's `self` was taken by another")
+        })
     }
 }
 

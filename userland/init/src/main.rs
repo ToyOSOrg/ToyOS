@@ -1595,8 +1595,10 @@ impl Init<'_> {
                     Err(_) => toyos_abi::syscall::close(handle),
                 }
             }
-            // std's word for the kernel's `Gone`, which a spawn answers only for
-            // its place.
+            // std's word for the kernel's `Gone` for the place, and nothing else
+            // here answers it: the command is prepared, so its spawn calls no
+            // file server, and every refusal `start` makes before the spawn is
+            // `Other`.
             Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe && under.is_some() => {
                 say!("init: launcher: {} was not started: the place it names is ending", program.name);
                 let _ = conn.try_signal(launch::MSG_GONE);

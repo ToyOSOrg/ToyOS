@@ -226,9 +226,8 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 Ok(cwd) => cwd,
                 Err(e) => return e.to_u64(),
             };
-            // One fewer, and its label's bytes fewer, than a table holds: the kernel adds `self`.
-            if args.endow_count as usize >= toyos_abi::syscall::MAX_ENDOWMENTS
-                || args.labels_len > (toyos_abi::syscall::MAX_LABELS_LEN - SELF_LABEL.len()) as u64
+            if args.endow_count as usize > toyos_abi::syscall::MAX_SPAWN_ENDOWMENTS
+                || args.labels_len > toyos_abi::syscall::MAX_SPAWN_LABELS_LEN as u64
             {
                 return SyscallError::InvalidArgument.to_u64();
             }

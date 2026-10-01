@@ -598,10 +598,7 @@ pub fn spawn(
     let object = crate::object::process::ProcessObject::new(pid);
     // The point of no return: every failure above answers the caller with its
     // table untouched. `commit`'s own `?` is different — reachable only if the
-    // caller raced its own spawn, and fatal to it, not a refusal — and so is a
-    // parent claimed while this was built, whose refused insert takes the
-    // endowments with a child that never ran, as its walk would have taken
-    // them with one that had.
+    // caller raced its own spawn, and fatal to it, not a refusal.
     let (handles, endowments) = pending.commit(KObjectRef::Process(Arc::clone(&object)))?;
     let proc_data = Arc::new(Lock::new(ProcessData {
         handles,
@@ -650,39 +647,35 @@ pub fn spawn(
     let syms = Arc::new(syms);
 
     let mut guard = PROCESS_TABLE.lock();
-    let table = guard.as_mut().unwrap();
-    let node = match admission.land(table) {
-        Ok(node) => node,
-        // Everything built is dropped on the way out, with no lock held.
-        Err(refused) => {
-            drop(guard);
-            refused.publish();
-            log!("spawn: {}: its parent ended while it was built", path);
-            return Err(SyscallError::Gone.into());
-        }
-    };
-    table.fill(pid, ProcessEntry::new(
-        Arc::clone(&object),
-        start::make_name(path),
-        proc_data,
-        Arc::clone(&syms),
-        ThreadEntry::new(thread_data),
-        node,
-    ));
-    let tid = table.get(pid).unwrap().main_tid();
-
-    // Placed while still holding the table lock: kill_process claims teardown
-    // under it, so a retire sweep can never see the pid before its thread is scheduled.
-    let (sched, dst) = scheduler::enqueue_new(
-        scheduler::TaskId(pid, tid),
-        ks_alloc,
-        ks_sp,
-        child_pt.clone(),
-        thread_pointer,
-        syms,
-    );
-    table.get_mut(pid).unwrap().threads_mut().get_mut(tid).unwrap().set_sched(sched);
+    let ((tid, dst), retire) = admission.land(guard.as_mut().unwrap(), |table, node| {
+        table.fill(pid, ProcessEntry::new(
+            Arc::clone(&object),
+            start::make_name(path),
+            proc_data,
+            Arc::clone(&syms),
+            ThreadEntry::new(thread_data),
+            node,
+        ));
+        let tid = table.get(pid).unwrap().main_tid();
+        // Placed while still holding the table lock: kill_process claims teardown
+        // under it, so a retire sweep can never see the pid before its thread is scheduled.
+        let (sched, dst) = scheduler::enqueue_new(
+            scheduler::TaskId(pid, tid),
+            ks_alloc,
+            ks_sp,
+            child_pt.clone(),
+            thread_pointer,
+            syms,
+        );
+        table.get_mut(pid).unwrap().threads_mut().get_mut(tid).unwrap().set_sched(sched);
+        (tid, dst)
+    });
     drop(guard);
+    // Its parent was claimed while it was built, and its walk has passed: the
+    // child is ended as that walk would have ended it, and the spawn answers it.
+    for sched in &retire {
+        scheduler::post_retire(sched);
+    }
 
     let t3 = crate::clock::nanos_since_boot();
     log!("spawn: {} pid={} tid={} dst={} base={:#x} entry={:#x} root={:#x} symbols={}KiB (layout={}ms relocs={}ms deps={}ms tls={}ms total={}ms)",

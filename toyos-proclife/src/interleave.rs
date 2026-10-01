@@ -24,7 +24,7 @@ use std::collections::HashSet;
 
 use crate::model::{Climb, World};
 use crate::table::Processes;
-use crate::tree::{self, Admit, Admitted};
+use crate::tree::{self, Admit, Admitted, Landed};
 use crate::{join, reap, spawn, teardown, Pid, Tid, Watch};
 
 /// `process::KILLED_EXIT_CODE`, which a walk claims every process below an end
@@ -49,10 +49,20 @@ pub enum Op {
     /// `process::kill_process`: claim, retire every thread, walk the subtree,
     /// return. `by` is the killing thread when the model holds it.
     Kill { pid: Pid, code: i32, pc: u32, retire: Vec<(Pid, Tid)>, owed: Vec<Pid>, by: Option<(Pid, Tid)> },
-    /// `loader::spawn` under `place`: the admission, the whole of a process
-    /// built with every lock given up, then the insert — and a refused one's
-    /// climb, when it let the place's last hold go.
-    SpawnUnder { place: Pid, by: Option<(Pid, Tid)>, pc: u32, admitted: Option<Admitted>, climb: Option<Climb> },
+    /// `loader::spawn` under `place` by `by`'s thread: the admission, the
+    /// whole of a process built with every lock given up, then the move of
+    /// the caller's handles and the landing, whose retires a child claimed as
+    /// it landed owes. A build that `fails` lets the place go instead, and
+    /// climbs when that was the place's last hold.
+    SpawnUnder {
+        place: Pid,
+        by: (Pid, Tid),
+        fails: bool,
+        pc: u32,
+        admitted: Option<Admitted>,
+        retire: Vec<(Pid, Tid)>,
+        climb: Option<Climb>,
+    },
     /// `process::spawn_thread`: two lock sections with the whole of a thread
     /// built between them; `block` is the mapped TLS the build carries across.
     Spawn { pid: Pid, pc: u32, block: Option<u32> },
@@ -79,7 +89,11 @@ impl Op {
     /// A spawn under `place` by `by`'s thread, which is in the kernel until it
     /// returns.
     pub fn spawn_under(place: Pid, by: (Pid, Tid)) -> Self {
-        Op::SpawnUnder { place, by: Some(by), pc: 0, admitted: None, climb: None }
+        Op::SpawnUnder { place, by, fails: false, pc: 0, admitted: None, retire: Vec::new(), climb: None }
+    }
+    /// The same spawn, whose build fails once it is admitted.
+    pub fn spawn_under_failing(place: Pid, by: (Pid, Tid)) -> Self {
+        Op::SpawnUnder { place, by, fails: true, pc: 0, admitted: None, retire: Vec::new(), climb: None }
     }
     pub fn spawn(pid: Pid) -> Self {
         Op::Spawn { pid, pc: 0, block: None }
@@ -99,7 +113,8 @@ impl Op {
         match *self {
             Op::Exit { pid, tid, .. } | Op::ThreadExit { pid, tid, .. } => Some((pid, tid)),
             Op::Join { pid, waiter, .. } => Some((pid, waiter)),
-            Op::Kill { by, .. } | Op::SpawnUnder { by, .. } => by,
+            Op::Kill { by, .. } => by,
+            Op::SpawnUnder { by, .. } => Some(by),
             Op::Spawn { .. } | Op::IdlePass { .. } => None,
         }
     }
@@ -202,7 +217,7 @@ impl Op {
                     }
                 }
             }
-            Op::SpawnUnder { place, by, pc, admitted, climb } => {
+            Op::SpawnUnder { place, by, fails, pc, admitted, retire, climb } => {
                 match *pc {
                     // The admission, under the table lock and before anything is built.
                     0 => match tree::admit_child(world, *place) {
@@ -210,28 +225,49 @@ impl Op {
                             *admitted = Some(taken);
                             *pc = 1;
                         }
-                        Admit::Gone | Admit::TooDeep { .. } => *pc = DONE,
+                        Admit::Gone | Admit::TooDeep { .. } => {
+                            world.refuse_spawn(*by);
+                            *pc = DONE;
+                        }
                     },
-                    // The build happened with every lock given up; the insert
-                    // decides under the lock that inserts.
-                    1 => {
-                        let child = world.reserve_pid();
+                    // The build happened with every lock given up, and failed.
+                    1 if *fails => {
                         let taken = admitted.take().expect("admitted at the first section");
-                        match tree::insert_child(world, taken, child) {
-                            Ok(node) => {
-                                world.land(*place, child, node);
-                                *pc = DONE;
+                        world.refuse_spawn(*by);
+                        match tree::refuse_child(world, taken) {
+                            Some(publish) => {
+                                *climb = Some(Climb::Publish(publish));
+                                *pc = 3;
                             }
-                            Err(refused) => match refused.publish {
-                                Some(publish) => {
-                                    *climb = Some(Climb::Publish(publish));
-                                    *pc = 2;
-                                }
-                                None => *pc = DONE,
-                            },
+                            None => *pc = DONE,
                         }
                     }
-                    // The refused insert let its place's last hold go: this
+                    // The caller's handles move, and the child lands, in the
+                    // hold that inserts it.
+                    1 => {
+                        world.move_handles(*by);
+                        let taken = admitted.take().expect("admitted at the first section");
+                        let child = world.reserve_pid();
+                        let ((), landed) =
+                            tree::land_child(world, taken, child, KILLED, |world, node| world.insert(child, node));
+                        world.landed(*place, child);
+                        match landed {
+                            Landed::Placed => *pc = DONE,
+                            Landed::Claimed => {
+                                let proc = world.get(child).expect("just landed");
+                                *retire = teardown::retire_set(proc, None).into_iter().map(|t| (child, t)).collect();
+                                *pc = 2;
+                            }
+                        }
+                    }
+                    // With the lock given up: the retires of a child claimed as it landed.
+                    2 => {
+                        for (victim, thread) in retire.drain(..) {
+                            world.post_retire(victim, thread);
+                        }
+                        *pc = DONE;
+                    }
+                    // The failed build let its place's last hold go: this
                     // spawner publishes it, and climbs.
                     _ => {
                         let at = climb.take().expect("a climb is owed here");
@@ -242,9 +278,7 @@ impl Op {
                     }
                 }
                 if *pc == DONE {
-                    if let Some(by) = *by {
-                        world.leave_kernel(by);
-                    }
+                    world.leave_kernel(*by);
                 }
             }
             Op::Spawn { pid, pc, block } => match *pc {
@@ -699,17 +733,19 @@ mod tests {
     }
 
     /// **A spawn racing its place's kill**, every ordering, with the spawner a
-    /// process that holds the place's `self` — init, serving a launch. The
-    /// child lands before the claim and the walk takes it, or its insert is
-    /// refused: nothing lands under the place after its claim, everything under
-    /// it ends, and the place is published in every one.
+    /// process that holds the place's `self` — init, serving a launch — and
+    /// its build landing or failing. A child lands before the claim and the
+    /// walk takes it, or after it and is claimed as it lands; a failed build
+    /// lets the place go. Nothing runs on under the place, a refused spawn
+    /// moved none of its caller's handles, and the place is published in
+    /// every one.
     ///
     /// Reds under `mutate-place-skips-the-insert-recheck`, where a child lands
-    /// under the claimed place and outlives it, and under
-    /// `mutate-refused-insert-keeps-the-count`, where the place is never
+    /// unclaimed under the claimed place and outlives it, and under
+    /// `mutate-refused-spawn-keeps-the-count`, where the place is never
     /// published.
     #[test]
-    fn a_spawn_racing_its_places_kill_lands_nothing_under_it_and_publishes_it() {
+    fn a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it() {
         let mut world = World::new();
         let init = world.spawn_process();
         let place = world.spawn_child(init);
@@ -717,6 +753,7 @@ mod tests {
         let launcher = (init, world.main_tid(init));
         let states = holds(&world, vec![Op::kill(place, KILLED), Op::spawn_under(place, launcher)]);
         std::println!("a spawn racing its place's kill: {states} states");
+        holds(&world, vec![Op::kill(place, KILLED), Op::spawn_under_failing(place, launcher)]);
     }
 
     /// The same race with the place spawning under itself: its own thread is
@@ -730,6 +767,7 @@ mod tests {
         world.spawn_child(place);
         let own = (place, world.main_tid(place));
         holds(&world, vec![Op::kill(place, KILLED), Op::spawn_under(place, own)]);
+        holds(&world, vec![Op::kill(place, KILLED), Op::spawn_under_failing(place, own)]);
     }
 
     /// An exit takes a subtree two deep below it, and each end is published

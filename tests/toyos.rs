@@ -326,8 +326,8 @@ const RUST_SKIP: &[&str] = &[
     // Needs a launcher to tell its two roads apart, and a declared shell and
     // toybox to take it: `spawn_cwd` runs it on tests/netcase.
     "spawn_cwd",
-    // Needs a launcher, a declared `cat` and shell, and sshd with a NIC under it:
-    // `process_tree` runs it on tests/proctreecase.
+    // Needs a launcher and a declared `cat` and shell: `process_tree` runs it on
+    // tests/proctreecase.
     "process_tree",
     // Needs a boot image the harness staged a file into before the machine
     // started, which only `esp_filesystem` builds.
@@ -849,7 +849,7 @@ const MACHINE_TESTS: &[(&str, Sched)] = &[
     ("launcher_refusals", Sched::Parallel),
     // Paths a child prints and the kernel's refusals by name; no clock in any of them.
     ("spawn_cwd", Sched::Parallel),
-    // Exit codes, publication order and a kernel line; no clock in any of them.
+    // Exit codes and kernel lines; no clock in any of them.
     ("process_tree", Sched::Parallel),
     ("foreign_disk_untouched", Sched::Parallel),
     ("volume_from_another_disk", Sched::Parallel),
@@ -13823,31 +13823,21 @@ fn run_machine_test(
             Ok(())
         }
         "process_tree" => {
-            // A parent's end takes its children down, on `tests/proctreecase`:
-            // a launcher, a declared `cat` and shell, and sshd with a NIC under
-            // it and a key staged so it runs. The guest carries every verdict
-            // but two the kernel speaks: the depth refusal names `MAX_DEPTH` + 1,
-            // and the one sshd that ended, the one under the killed shell, was
-            // killed rather than ending by itself.
+            // A parent's end takes its children down, on `tests/proctreecase`: a
+            // launcher and a declared `cat` and shell. The guest carries every
+            // verdict but two the kernel speaks: each B's first spawn reached the
+            // loader under B, and the depth refusal names `MAX_DEPTH` + 1.
             let config = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/proctreecase");
             let bins: Vec<(String, Vec<u8>)> =
                 rust_bins.iter().filter(|(name, _)| name == "process_tree").cloned().collect();
             if bins.is_empty() {
                 return Err("process_tree was not built".to_string());
             }
-            let identity = common::ssh::Identity::mint("proctreecase")?;
             let mut qemu = QemuInstance::boot_with_options(
                 &config,
                 &[],
                 &bins,
-                BootOptions {
-                    profile: qemu::Profile::Headless,
-                    extra_root_files: vec![(
-                        common::ssh::KEYS_ON_ROOT.to_string(),
-                        identity.authorized_line().into_bytes(),
-                    )],
-                    ..Default::default()
-                },
+                BootOptions { profile: qemu::Profile::Headless, ..Default::default() },
             );
             let mut console = qemu.boot_log().to_string();
             let _ = await_marker(&mut qemu, &mut console, "===READY===", "test-runner to come up");
@@ -13863,21 +13853,18 @@ fn run_machine_test(
                     result.exit_code, result.stdout
                 ));
             }
+            // One per B: its first act's refusal came from the loader, past the
+            // admission that holds B, and not from std before the kernel.
+            let unloaded = console.lines().filter(|l| l.contains("spawn: /system/bin/no_such_program: ")).count();
+            if unloaded != 2 {
+                return Err(format!(
+                    "the loader refused /system/bin/no_such_program {unloaded} times, not once per B:\n{console}"
+                ));
+            }
             let refused = console.lines().filter(|l| l.contains("spawn: refused under pid ")).collect::<Vec<_>>();
             if refused.len() != 1 || !refused[0].contains("at depth 65, more than 64 below init") {
                 return Err(format!(
                     "the kernel's depth refusals were {refused:?}, not one naming depth 65:\n{console}"
-                ));
-            }
-            // The kernel names an end once its teardown is done, which is before
-            // the shell's end the guest waited on, and its line may still be on
-            // its way to the console.
-            await_marker(&mut qemu, &mut console, "exit: sshd pid=", "the kernel to name sshd's end")?;
-            let ended: Vec<_> = console.lines().filter(|l| l.contains("exit: sshd pid=")).collect();
-            if ended.len() != 1 || !ended[0].contains(" code=137 ") {
-                return Err(format!(
-                    "the sshd ends were {ended:?}, not the one under the killed shell, killed — \
-                     an sshd that ended by itself makes its arm assert nothing:\n{console}"
                 ));
             }
             eprintln!("  [proctreecase] every end took its subtree, and the chain stopped at depth 65");

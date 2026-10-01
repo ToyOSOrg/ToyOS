@@ -1,12 +1,11 @@
 # The boot `process_tree` runs on: a parent's end takes its children down.
 #
 # A `launcher`, because the subtree under test has children init launches; a
-# declared `cat`, which runs until its input ends; a declared shell, which a
-# depth chain launches and which starts and detaches sshd; and sshd, with netd
-# and a NIC under it and a key the harness stages, so that it runs.
+# declared `cat`, which runs until its input ends; and a declared shell, which a
+# depth chain launches and which detaches a `cat`.
 
 [boot]
-start = ["logd", "blockd", "fsd", "netd", "test-runner"]
+start = ["logd", "blockd", "fsd", "test-runner"]
 
 # `every_boot_config_runs_logd` is what refuses a boot config without it: the
 # kernel keeps the record ring and writes no file, so such a boot's `/log` is
@@ -14,18 +13,6 @@ start = ["logd", "blockd", "fsd", "netd", "test-runner"]
 [programs.logd]
 service = true
 syscap = ["logread"]
-
-# netd holds the NIC's PCI function and drives it: the virtqueues, the register
-# window and the interrupt are its own, and the kernel keeps only the claim.
-[programs.netd]
-service = true
-serves = ["netd"]
-devices = ["pci:1af4:1041"]
-
-# Started by the guest from a shell, never at boot.
-[programs.sshd]
-service = true
-receives = ["netd", "launcher"]
 
 # `roster` because the guest asks which of its tree still runs, and `dup`
 # because test-runner hands each binary a duplicate of its capability.

@@ -75,7 +75,7 @@ fn run() {
     // exits; this process reaps it — which is what takes the pid out of the
     // process table — and only then closes the pipe that releases the relay to
     // send the frame. Every step waits on the one before it.
-    let root = endow::this_process().expect("every process holds itself");
+    let root = endow::this_process();
     let place = syscall::dup(root.as_handle()).expect("a copy of the root's self for the creator");
     let mut creator = Command::new(SELF_PATH)
         .arg("connect")

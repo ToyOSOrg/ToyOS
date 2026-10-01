@@ -833,7 +833,7 @@ pub enum Parent {
 }
 
 /// A spawn admitted under its parent, and the pid its child will have.
-/// While it lives it holds the parent's publication: [`Admission::land`] hands that hold to the child, and a drop — every way a spawn fails between the two — lets the parent go.
+/// While it lives it holds the parent's publication: [`Admission::land`] hands that hold to the child, and a drop — every way a spawn's build fails — lets the parent go.
 pub struct Admission {
     pid: Pid,
     under: Option<tree::Admitted>,
@@ -864,10 +864,17 @@ impl Admission {
         self.pid
     }
 
-    /// The insert's question, under the `PROCESS_TABLE` hold that fills this pid with the node answered; `Err` for a parent claimed since the admission, the hold on it let go.
-    pub fn land(mut self, table: &mut ProcessTable) -> Result<Node, Refused> {
-        let Some(admitted) = self.under.take() else { return Ok(Node::root()) };
-        tree::insert_child(table, admitted, self.pid).map_err(|refused| Refused(refused.publish))
+    /// Land the child in the `PROCESS_TABLE` hold `insert` fills this pid and schedules its thread in. A parent claimed since the admission has walked its children, so the child is claimed in this hold too, and the retires answered are the spawner's to post with the lock given up.
+    pub fn land<R>(
+        mut self,
+        table: &mut ProcessTable,
+        insert: impl FnOnce(&mut ProcessTable, Node) -> R,
+    ) -> (R, Vec<ThreadSched>) {
+        let Some(admitted) = self.under.take() else { return (insert(table, Node::root()), Vec::new()) };
+        match tree::land_child(table, admitted, self.pid, KILLED_EXIT_CODE, insert) {
+            (inserted, tree::Landed::Placed) => (inserted, Vec::new()),
+            (inserted, tree::Landed::Claimed) => (inserted, retires(table, self.pid, None)),
+        }
     }
 }
 
@@ -880,16 +887,6 @@ impl Drop for Admission {
             tree::refuse_child(table, admitted)
         };
         publish_climb(ready);
-    }
-}
-
-/// An insert refused because its parent was claimed since the admission; [`Refused::publish`] publishes the parent, with the table lock given up, when this spawn held its last hold.
-#[must_use = "a refused insert may owe its parent's publication"]
-pub struct Refused(Option<tree::Publish>);
-
-impl Refused {
-    pub fn publish(self) {
-        publish_climb(self.0);
     }
 }
 
@@ -1066,27 +1063,25 @@ fn teardown_bookkeeping(table: &mut ProcessTable, process_pid: Pid, code: i32) -
     cpu_ns
 }
 
-/// Publish `first`, then every parent each publication lets go, child before parent: at most `toyos_proclife::MAX_DEPTH` + 1 publications, run with preemption off and each with the table lock given up.
+/// Publish `first`, then every parent each publication lets go, child before parent: at most `toyos_proclife::MAX_DEPTH` + 1 publications, each with the table lock given up.
 /// Once published an entry is reapable, so only its parent's entry is read after.
 fn publish_climb(first: Option<tree::Publish>) {
-    crate::sched::driver::preempt_off(|_| {
-        let mut ready = first;
-        while let Some(publish) = ready {
-            let (object, exit) = {
-                let mut guard = PROCESS_TABLE.lock();
-                let proc = guard.as_mut().unwrap().get_mut(publish.pid)
-                    .expect("publish_climb: a process is in the table until its exit is published");
-                let exit = proc.exit.take()
-                    .expect("publish_climb: a count reaches zero only after the teardown kept its exit");
-                (Arc::clone(&proc.object), exit)
-            };
-            object.publish_exit(exit);
-            ready = publish.parent.and_then(|parent| {
-                let mut guard = PROCESS_TABLE.lock();
-                tree::published(guard.as_mut().unwrap(), parent, publish.pid)
-            });
-        }
-    });
+    let mut ready = first;
+    while let Some(publish) = ready {
+        let (object, exit) = {
+            let mut guard = PROCESS_TABLE.lock();
+            let proc = guard.as_mut().unwrap().get_mut(publish.pid)
+                .expect("publish_climb: a process is in the table until its exit is published");
+            let exit = proc.exit.take()
+                .expect("publish_climb: a count reaches zero only after the teardown kept its exit");
+            (Arc::clone(&proc.object), exit)
+        };
+        object.publish_exit(exit);
+        ready = publish.parent.and_then(|parent| {
+            let mut guard = PROCESS_TABLE.lock();
+            tree::published(guard.as_mut().unwrap(), parent, publish.pid)
+        });
+    }
 }
 
 /// One `ProcessStats`, from a process's own data; written once, since `SYS_PROCESS_STATS` samples a live process through the same fields the teardown snapshots.
@@ -1179,12 +1174,17 @@ fn claim(pid: Pid, code: i32, caller: Option<Tid>, owed: &mut Vec<Pid>) -> Vec<T
     if !tree::claim(table, pid, code, owed) {
         return Vec::new();
     }
-    let proc = Processes::get(table, pid).expect("claim: the entry the claim just succeeded on");
+    retires(table, pid, caller)
+}
+
+/// The scheduler records of the threads a claim of `pid` retires: every one still in it but `caller`.
+fn retires(table: &ProcessTable, pid: Pid, caller: Option<Tid>) -> Vec<ThreadSched> {
+    let proc = Processes::get(table, pid).expect("retires: a claimed process is in the table");
     proclife::retire_set(proc, caller)
         .into_iter()
         .map(|tid| {
             proc.threads.get(tid).and_then(ThreadEntry::sched).cloned()
-                .expect("claim: a thread in the table has its scheduler record")
+                .expect("retires: a thread in the table has its scheduler record")
         })
         .collect()
 }

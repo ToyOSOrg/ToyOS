@@ -111,7 +111,6 @@ pub fn main(_args: Vec<String>) {
     };
     let window_ns = uptime_ns.saturating_sub(first_uptime);
 
-    // No PPID column: no syscall answers a process's parent.
     println!("{:>5} {:>3} {:>2} {:>8} {:>5} {:>5}  {}",
         "PID", "TID", "S", "CPU", "%CPU", "MEM", "NAME");
 

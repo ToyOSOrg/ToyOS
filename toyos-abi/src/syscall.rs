@@ -464,10 +464,11 @@ pub const DEV_PREFIX: &str = "dev:";
 pub const PROVIDE_PREFIX: &str = "provide:";
 
 /// `(label, handle)` pairs one endowment table holds, the kernel's own
-/// [`SELF_LABEL`] among them, so a spawn carries one fewer. Policy on the
-/// primitive, refused by name, never truncated — the widest manifest row plus
-/// stdio.
+/// [`SELF_LABEL`] among them. Policy on the primitive, refused by name, never
+/// truncated — the widest manifest row plus stdio.
 pub const MAX_ENDOWMENTS: usize = 32;
+/// `(label, handle)` pairs one spawn may carry: the kernel adds [`SELF_LABEL`].
+pub const MAX_SPAWN_ENDOWMENTS: usize = MAX_ENDOWMENTS - 1;
 /// `(child slot, parent handle)` pairs one spawn may carry.
 ///
 /// **Derived rather than chosen.** A slot map installs into the child's table,
@@ -479,6 +480,8 @@ pub const MAX_ENDOWMENTS: usize = 32;
 pub const MAX_SLOT_MAP: usize = RawHandle::MAX_SLOTS;
 /// Bytes of label blob one endowment table holds, [`SELF_LABEL`]'s among them.
 pub const MAX_LABELS_LEN: usize = 4096;
+/// Bytes of label blob one spawn may carry: the kernel adds [`SELF_LABEL`]'s.
+pub const MAX_SPAWN_LABELS_LEN: usize = MAX_LABELS_LEN - SELF_LABEL.len();
 
 use crate::handle::Rights;
 use crate::pci::{DmaGrant, DmaMapping};

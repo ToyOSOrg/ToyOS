@@ -133,11 +133,16 @@ pub struct World {
     /// Exits torn down and not yet published: the kernel keeps each on its
     /// entry until its count lets it go.
     stash: BTreeMap<Pid, i32>,
-    /// Processes inserted under a place whose end was already claimed.
+    /// Processes that landed unclaimed under a place whose end was already
+    /// claimed.
     landed_under_claimed: BTreeSet<Pid>,
     /// Each process a spawn op inserted, and how many processes had been
     /// claimed when it landed.
     inserted_at: Vec<(Pid, usize)>,
+    /// Spawning threads whose caller's handles a spawn moved.
+    moved: BTreeSet<(Pid, Tid)>,
+    /// Spawning threads answered a refusal after their handles moved.
+    refused_after_move: BTreeSet<(Pid, Tid)>,
 }
 
 impl Processes for World {
@@ -178,6 +183,8 @@ impl World {
             stash: BTreeMap::new(),
             landed_under_claimed: BTreeSet::new(),
             inserted_at: Vec::new(),
+            moved: BTreeSet::new(),
+            refused_after_move: BTreeSet::new(),
         }
     }
 
@@ -203,7 +210,7 @@ impl World {
     /// `ProcessEntry::new` builds for init.
     pub fn spawn_process(&mut self) -> Pid {
         let pid = self.reserve_pid();
-        self.insert_proc(pid, Node::root());
+        self.insert(pid, Node::root());
         pid
     }
 
@@ -214,8 +221,8 @@ impl World {
             panic!("spawn_child: pid {place} admits no child");
         };
         let pid = self.reserve_pid();
-        let node = tree::insert_child(self, admitted, pid).expect("spawn_child: nothing came between");
-        self.insert_proc(pid, node);
+        let ((), landed) = tree::land_child(self, admitted, pid, 137, |world, node| world.insert(pid, node));
+        assert_eq!(landed, tree::Landed::Placed, "spawn_child: pid {place} was claimed");
         pid
     }
 
@@ -226,16 +233,28 @@ impl World {
         pid
     }
 
-    /// A spawn op's insert, which `tree::insert_child` has just answered with
-    /// `node`: records a landing under a claimed place, and how many
-    /// processes had been claimed when it landed.
-    pub fn land(&mut self, place: Pid, pid: Pid, node: Node) {
-        if self.procs.get(&place).is_some_and(Lifecycle::tearing_down) {
+    /// A spawn op's landing, at the end of the hold that made it: records a
+    /// process unclaimed under a claimed place, and how many processes had
+    /// been claimed when it landed.
+    pub fn landed(&mut self, place: Pid, pid: Pid) {
+        let unclaimed = !self.procs[&pid].tearing_down();
+        if unclaimed && self.procs.get(&place).is_some_and(Lifecycle::tearing_down) {
             self.landed_under_claimed.insert(pid);
         }
         let claimed = self.claimed_count();
         self.inserted_at.push((pid, claimed));
-        self.insert_proc(pid, node);
+    }
+
+    /// A spawn by `by` taking its caller's endowed handles out of its table.
+    pub fn move_handles(&mut self, by: (Pid, Tid)) {
+        self.moved.insert(by);
+    }
+
+    /// A spawn by `by` answering a refusal.
+    pub fn refuse_spawn(&mut self, by: (Pid, Tid)) {
+        if self.moved.contains(&by) {
+            self.refused_after_move.insert(by);
+        }
     }
 
     /// Each process a spawn op inserted, and how many had been claimed then.
@@ -249,7 +268,8 @@ impl World {
         self.procs.values().filter(|p| p.claims > 0).count() + reaped
     }
 
-    fn insert_proc(&mut self, pid: Pid, node: Node) {
+    /// `pid`'s entry, with one thread, which is its main one.
+    pub fn insert(&mut self, pid: Pid, node: Node) {
         let mut threads = BTreeMap::new();
         threads.insert(Tid(0), ThreadLocation::Scheduled);
         self.procs.insert(
@@ -512,9 +532,9 @@ impl World {
                 }
             }
         }
-        // L10. Nothing lands under a place once its end is claimed.
+        // L10. Nothing lands unclaimed under a place once its end is claimed.
         for pid in &self.landed_under_claimed {
-            out.push(alloc::format!("pid {pid} landed under a place whose end was already claimed"));
+            out.push(alloc::format!("pid {pid} landed unclaimed under a place whose end was already claimed"));
         }
         out
     }
@@ -526,9 +546,13 @@ impl World {
     /// And **L5** — every TLS block a spawn mapped ends owned or released.
     /// And **L6** — every claimed process is torn down: its exit published,
     /// every killed thread gone. And **L11** — an end takes every process
-    /// below it.
+    /// below it. And **L12** — a spawn that answers a refusal moved none of
+    /// its caller's handles.
     pub fn final_faults(&self) -> Vec<String> {
         let mut out = self.faults();
+        for (pid, tid) in &self.refused_after_move {
+            out.push(alloc::format!("pid {pid} tid {tid}: a refused spawn moved its caller's handles"));
+        }
         for (&pid, proc) in &self.procs {
             if proc.claims > 0 && !self.published.contains_key(&pid) {
                 out.push(alloc::format!("pid {pid} was claimed for teardown and never published an exit"));

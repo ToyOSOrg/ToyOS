@@ -11,7 +11,9 @@ use crate::process::{
 use crate::scheduler;
 use crate::user_ptr::UserBytes;
 use toyos_abi::handle::{RawHandle, Rights};
-use toyos_abi::syscall::{EndowEntry, SyscallError, MAX_ENDOWMENTS, MAX_LABELS_LEN, MAX_SLOT_MAP, SELF_LABEL};
+use toyos_abi::syscall::{
+    EndowEntry, SyscallError, MAX_SLOT_MAP, MAX_SPAWN_ENDOWMENTS, MAX_SPAWN_LABELS_LEN, SELF_LABEL,
+};
 
 /// One `[child_slot, parent_handle]` pair of `SpawnArgs::slot_map_ptr`, in bytes.
 pub const SLOT_PAIR_LEN: usize = 8;
@@ -75,6 +77,10 @@ impl PendingHandles {
             if end > labels.len() {
                 return Err(SyscallError::InvalidArgument.into());
             }
+            // The kernel's own, which a caller's of that name would shadow in the child's lookup.
+            if &labels[label_off as usize..end] == SELF_LABEL.as_bytes() {
+                return Err(SyscallError::InvalidArgument.into());
+            }
             // Checked before any removal, so a missing `TRANSFER` refuses the spawn instead of leaving a hole.
             let rights = data.handles.rights_of(handle)?;
             if !rights.contains(Rights::TRANSFER) {
@@ -131,8 +137,7 @@ pub fn build_child_handles(
     endow: &UserBytes,
     labels: &[u8],
 ) -> Result<PendingHandles, Refusal> {
-    // One fewer than the table holds, and as many bytes fewer as its label: the kernel adds `self`.
-    if endow.len() / ENDOW_ENTRY_LEN >= MAX_ENDOWMENTS {
+    if endow.len() / ENDOW_ENTRY_LEN > MAX_SPAWN_ENDOWMENTS {
         return Err(SyscallError::InvalidArgument.into());
     }
     // Checked before the loop: `install_at`'s cap misses a repeated slot, which would duplicate
@@ -140,7 +145,7 @@ pub fn build_child_handles(
     if slot_map.len() / SLOT_PAIR_LEN > MAX_SLOT_MAP {
         return Err(SyscallError::InvalidArgument.into());
     }
-    if labels.len() + SELF_LABEL.len() > MAX_LABELS_LEN {
+    if labels.len() > MAX_SPAWN_LABELS_LEN {
         return Err(SyscallError::InvalidArgument.into());
     }
     let data_arc = process_data();

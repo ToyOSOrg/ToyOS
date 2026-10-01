@@ -8,13 +8,13 @@
 //! Three questions, each asked under `PROCESS_TABLE` and each one lock hold:
 //!
 //! - **May a child be placed here?** [`admit_child`] at the top of a spawn,
-//!   before anything is built, and [`insert_child`] under the lock that
-//!   inserts it — the second decides, because a kill can claim the place
-//!   between the two. A place being torn down takes nothing more, and a child
-//!   deeper than [`MAX_DEPTH`] below init is refused.
+//!   before anything is built: a place being torn down takes nothing more,
+//!   and a child deeper than [`MAX_DEPTH`] below init is refused. It is the
+//!   last refusal: past it the spawn moves its caller's handles, so it lands.
 //! - **Who does an end take?** [`claim`] one process at a time: its claim is
-//!   what closes admission under it, and the same hold reads its children,
-//!   so a child either landed before and is owed to the walk or is refused.
+//!   what closes admission under it, and the same hold reads its children.
+//!   A child admitted before the claim and landed after it is claimed in the
+//!   hold that lands it ([`land_child`]), and its spawner ends it.
 //! - **When is an end published?** Once its own teardown is done and every
 //!   child's end is published: a count admission raises, and a child's
 //!   publication, a refused spawn or the process's own teardown lowers
@@ -70,7 +70,7 @@ pub enum Admit {
 }
 
 /// A spawn admitted under its place, which it keeps unpublished until
-/// [`insert_child`] lands it or [`refuse_child`] lets the place go.
+/// [`land_child`] lands it or [`refuse_child`] lets the place go.
 #[must_use = "an admitted spawn holds its place's publication until it lands or is refused"]
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Admitted {
@@ -92,11 +92,16 @@ pub struct Publish {
     pub parent: Option<Pid>,
 }
 
-/// The insert's refusal: the place was claimed since the admission.
-#[must_use = "a refused insert may leave its place for this spawner to publish"]
+/// Whom a landed child's end is owed to.
+#[must_use = "a child claimed as it landed is its spawner's to end"]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Refused {
-    pub publish: Option<Publish>,
+pub enum Landed {
+    /// Its place's, which is not claimed: that end's walk will take it.
+    Placed,
+    /// Its spawner's: the place was claimed since the admission and its walk
+    /// has read its children, so the child was claimed in the hold that
+    /// landed it.
+    Claimed,
 }
 
 /// The question at the top of a spawn under `place`, before anything is built.
@@ -113,27 +118,40 @@ pub fn admit_child<T: Processes>(table: &mut T, place: Pid) -> Admit {
     Admit::Yes(Admitted { place, depth })
 }
 
-/// The same question under the lock that inserts `child`, and the one that
-/// decides. `Ok` is the child's node: the caller inserts it in this hold.
-pub fn insert_child<T: Processes>(table: &mut T, admitted: Admitted, child: Pid) -> Result<Node, Refused> {
+/// Land `child` under its admitted place, in one hold: `insert` puts its
+/// entry in the table with the node it is handed, and a child whose place was
+/// claimed since the admission is claimed for `code` before the hold ends.
+pub fn land_child<T: Processes, R>(
+    table: &mut T,
+    admitted: Admitted,
+    child: Pid,
+    code: i32,
+    insert: impl FnOnce(&mut T, Node) -> R,
+) -> (R, Landed) {
     let place = table
         .get_mut(admitted.place)
-        .expect("insert_child: an admitted spawn keeps its place unpublished, so in the table");
-    // The mutation this feature stages is the whole of the second check.
-    #[cfg(not(feature = "mutate-place-skips-the-insert-recheck"))]
-    if place.tearing_down() {
-        return Err(Refused { publish: refuse_child(table, admitted) });
-    }
+        .expect("land_child: an admitted spawn keeps its place unpublished, so in the table");
+    // The mutation this feature stages: the child lands as if its place were
+    // live, after the walk read its children.
+    let claimed = place.tearing_down() && !cfg!(feature = "mutate-place-skips-the-insert-recheck");
     place.node_mut().children.push(child);
-    Ok(Node { parent: Some(admitted.place), depth: admitted.depth, children: Vec::new(), holds: 1 })
+    let node = Node { parent: Some(admitted.place), depth: admitted.depth, children: Vec::new(), holds: 1 };
+    let inserted = insert(table, node);
+    if !claimed {
+        return (inserted, Landed::Placed);
+    }
+    assert!(
+        teardown::claim_teardown(table, child, code),
+        "land_child: pid {child}, inserted in this hold, was claimed by another",
+    );
+    (inserted, Landed::Claimed)
 }
 
-/// A spawn that will not land — its build failed or its insert was refused:
-/// its hold on the place goes.
+/// A spawn whose build failed after its admission: its hold on the place goes.
 pub fn refuse_child<T: Processes>(table: &mut T, admitted: Admitted) -> Option<Publish> {
     // The mutation this feature stages: the hold stays, and the place waits
     // for a child that will never be.
-    if cfg!(feature = "mutate-refused-insert-keeps-the-count") {
+    if cfg!(feature = "mutate-refused-spawn-keeps-the-count") {
         return None;
     }
     lower(table, admitted.place)
@@ -222,19 +240,37 @@ mod tests {
         assert_eq!(admit_child(&mut world, Pid(99)), Admit::Gone);
     }
 
-    #[cfg(not(feature = "mutate-place-skips-the-insert-recheck"))]
-    #[cfg(not(feature = "mutate-refused-insert-keeps-the-count"))]
-    #[cfg(not(feature = "mutate-publish-before-the-children"))]
+    /// A child admitted before its place's claim and landed after it is
+    /// claimed in the hold that lands it, and holds the place's publication
+    /// until its own.
     #[test]
-    fn an_insert_under_a_place_claimed_since_the_admission_is_refused_and_lets_it_go() {
+    fn a_child_landed_under_a_place_claimed_since_its_admission_is_claimed_with_it() {
         let mut world = World::new();
         let init = world.spawn_process();
         let place = world.spawn_child(init);
         let Admit::Yes(admitted) = admit_child(&mut world, place) else { panic!("admitted") };
         assert!(claim(&mut world, place, 137, &mut Vec::new()));
-        // The place's own teardown is done first: only this spawn holds it.
-        assert_eq!(teardown_done(&mut world, place), None);
-        let refused = insert_child(&mut world, admitted, Pid(50)).expect_err("a claimed place took a child");
-        assert_eq!(refused.publish, Some(Publish { pid: place, parent: Some(init) }));
+        assert_eq!(teardown_done(&mut world, place), None, "published with a child admitted under it");
+        let child = world.reserve_pid();
+        let ((), landed) = land_child(&mut world, admitted, child, 137, |world, node| world.insert(child, node));
+        assert_eq!(landed, Landed::Claimed);
+        assert_eq!(world.get(child).unwrap().teardown_code(), Some(137));
+        assert_eq!(teardown_done(&mut world, child), Some(Publish { pid: child, parent: Some(place) }));
+        assert_eq!(published(&mut world, place, child), Some(Publish { pid: place, parent: Some(init) }));
+    }
+
+    /// A published child leaves its parent's children, so a parent's walk
+    /// reads only what is still unpublished below it.
+    #[test]
+    fn a_published_child_leaves_its_parents_children() {
+        let mut world = World::new();
+        let init = world.spawn_process();
+        let child = world.spawn_child(init);
+        assert!(claim(&mut world, child, 0, &mut Vec::new()));
+        assert_eq!(teardown_done(&mut world, child), Some(Publish { pid: child, parent: Some(init) }));
+        assert_eq!(published(&mut world, init, child), None);
+        let mut owed = Vec::new();
+        assert!(claim(&mut world, init, 137, &mut owed));
+        assert_eq!(owed, [], "init's walk owes pid {child}, which was published");
     }
 }

@@ -10,7 +10,7 @@
 //!
 //! **The last thread out tears the process down.** Every thread leaves by its
 //! own hand ([`leave`]), and the one whose leaving empties a claimed process
-//! frees what the process holds and publishes its exit, on its own stack.
+//! frees what the process holds, on its own stack.
 //! Nothing a thread can still run in is freed before then, and no thread waits
 //! for another to leave. A second publish is an assertion failure in
 //! `ProcessObject::publish_exit`, by design.
@@ -57,9 +57,9 @@ pub fn retire_set<P: Lifecycle>(proc: &P, caller: Option<Tid>) -> Vec<Tid> {
 #[must_use = "the last thread out owes its process's teardown"]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Leave {
-    /// It is emptying a claimed process: it tears the process down, publishes
-    /// `code`, and stays in the process until [`torn_down`] marks it dead with
-    /// `mark`, so the machine's stop counts its teardown as running.
+    /// It is emptying a claimed process: it tears the process down, and stays
+    /// in the process until [`torn_down`] marks it dead with `mark`, so the
+    /// machine's stop counts its teardown as running.
     Last { code: i32, mark: i32 },
     /// Some thread is still in the process, or nobody has claimed it.
     NotLast,
