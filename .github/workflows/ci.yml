@@ -24,11 +24,13 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      # nightly.yml's `host` is the one writer; the paths are the cache's
-      # version, so they are the writer's list.
+      # An entry is read by content (src/cicache.rs): main's, which
+      # nightly.yml's `host` writes, or one this pull request saved when it
+      # found none. The paths are the cache's version, so they are the
+      # writer's list.
       - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
-          path: |
+          path: &host-paths |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
@@ -37,7 +39,15 @@ jobs:
             toyos/target
             kernel/target
             bootloader/target
-          key: host-${{ github.run_id }}
-          restore-keys: host-
+          key: host-sealed-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: host-sealed-${{ runner.os }}-
 
-      - run: cargo run -- --ci host
+      - run: cargo run --target-dir target/ci-driver -- --ci host
+
+      # Only a run that restored nothing leaves a manifest, and what a pull
+      # request saves only its own later runs read.
+      - if: github.event_name == 'pull_request' && hashFiles('target/ci-sources') != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: *host-paths
+          key: host-sealed-${{ runner.os }}-${{ github.run_id }}

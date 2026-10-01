@@ -4,6 +4,7 @@ pub mod bootlog;
 pub mod build;
 pub mod buildlock;
 pub mod ci;
+pub mod cicache;
 pub mod clang;
 pub mod clippy;
 pub mod compiler;

@@ -29,6 +29,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::arch::Arch;
+use crate::cicache::{self, Start};
 use crate::{flags, release, sdkversion, sync};
 
 pub const GUEST_ARCH: Arch = Arch::X86_64;
@@ -37,6 +38,8 @@ const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
   host              every host test: the build system, the harness's own checks,
                     the host workspace, the licences of what ships, clippy, the
                     model controls, userland and the SDK (ci.yml, nightly)
+  prune             delete every host cache entry but the one this run saved
+                    on main (nightly)
   toolchain         publish this tree's toolchain if nobody has (nightly)
   guest <i>/<n>     one shard of the guest suite (nightly)
   tcg               one test on an emulated CPU (nightly)
@@ -45,6 +48,7 @@ const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
 #[derive(Debug, PartialEq, Eq)]
 enum Job {
     Host,
+    Prune,
     Toolchain,
     Guest(String),
     Tcg,
@@ -59,6 +63,7 @@ fn parse(words: &[String]) -> Result<Job, String> {
     };
     let job = match words.first().map(String::as_str) {
         Some("host") => Job::Host,
+        Some("prune") => Job::Prune,
         Some("toolchain") => Job::Toolchain,
         Some("guest") => Job::Guest(shard(words.get(1))?),
         Some("tcg") => Job::Tcg,
@@ -80,6 +85,7 @@ pub fn dispatch(root: &Path, args: &[String]) {
     });
     let steps = match &job {
         Job::Host => host(root),
+        Job::Prune => vec![step("the host cache's other entries", || cicache::prune(root))],
         Job::Toolchain => vec![step("the toolchain release", || release::ensure_published(root))],
         Job::Guest(shard) => guest(root, &suite_args(&["--shard", shard, "--jobs", "1"])),
         Job::Tcg => guest(root, &suite_args(&["--jobs", "1", "empty_dir_stat"])),
@@ -123,7 +129,7 @@ fn step(label: &str, f: impl FnOnce() -> Result<String, String>) -> Step {
     Step { label: label.to_string(), verdict }
 }
 
-fn on_runner() -> bool {
+pub(crate) fn on_runner() -> bool {
     std::env::var("GITHUB_ACTIONS").is_ok_and(|v| v == "true")
 }
 
@@ -421,6 +427,10 @@ fn run_control(root: &Path, control: &Control) -> Result<String, String> {
 /// ([`crate::clippy::BARE_TARGETS`]), which any rustup installs, and userland carries no
 /// clippy shape (`src/clippy.rs`). Userland and the SDK are tested against the
 /// host triple for the same reason.
+///
+/// On a runner the restored cache entry is read before any step and a run that
+/// restored none seals its tree after the last ([`cicache`]); a developer's
+/// tree keeps the dates its edits gave it.
 fn host(root: &Path) -> Vec<Step> {
     let tmp = toyos_tmpdir::TempDir::new("ci-host");
     let short = Path::new(toyos_tmpdir::SHORT_BASE);
@@ -429,14 +439,30 @@ fn host(root: &Path) -> Vec<Step> {
     // concurrently with the write, and every child inherits it.
     std::env::set_var("TMPDIR", tmp.path());
     let host_triple = crate::toolchain::host_triple();
-    let mut steps = vec![
+    let mut steps = Vec::new();
+    let mut cold = None;
+    if on_runner() {
+        let mut start = None;
+        steps.push(step("the cache entry, read by content", || {
+            let (found, said) = cicache::read(root)?;
+            start = Some(found);
+            Ok(said)
+        }));
+        match start {
+            // Every step after an unreadable entry would be judged against it.
+            None => return steps,
+            Some(Start::Cold(stamped)) => cold = Some(stamped),
+            Some(Start::Warm) => {}
+        }
+    }
+    steps.extend([
         step("the build system", || cargo(root, &["test", "--lib"])),
         step("the harness's own checks", || cargo(root, &["test", "--test", "toyos-checks"])),
         step("the host workspace", || {
             cargo(root, &["test", "--workspace", "--exclude", "toyos-build"])
         }),
         step("the licences of what ships", || crate::licence::judge(root)),
-    ];
+    ]);
     steps.push(step("clippy and the bare targets", || {
         for args in [
             vec!["component", "add", "clippy"],
@@ -491,6 +517,9 @@ fn host(root: &Path) -> Vec<Step> {
         cargo(root, &["test", "--manifest-path", "toyos/Cargo.toml", "--target", &host_triple])
     }));
     steps.push(step("nothing left in $TMPDIR or /tmp", || left_behind(&tmp, short, &before)));
+    if let Some(stamped) = cold {
+        steps.push(step("the tree, sealed as a cache entry", || cicache::seal(root, &stamped)));
+    }
     steps
 }
 
@@ -807,6 +836,7 @@ mod tests {
     #[test]
     fn a_job_is_named_and_a_shard_is_a_shard() {
         assert_eq!(parse(&words("host")), Ok(Job::Host));
+        assert_eq!(parse(&words("prune")), Ok(Job::Prune));
         assert_eq!(parse(&words("guest 3/12")), Ok(Job::Guest("3/12".into())));
         assert!(parse(&words("guest")).is_err());
         assert!(parse(&words("guest 13/12")).is_err());
@@ -889,12 +919,15 @@ mod tests {
         assert_eq!(seen, 3, "ci.yml, nightly.yml and publish.yml");
     }
 
-    /// Exactly one job writes each cache, on the nightly, so what a pull request
-    /// restores is one run's tree and never a race between two writers.
+    /// A host entry is saved only beside its manifest, which only a sealed tree
+    /// holds ([`cicache`]); every other cache has exactly one writer, on the
+    /// nightly, so what a run restores is one run's tree and never a race
+    /// between two writers.
     #[test]
-    fn each_cache_has_one_writer() {
+    fn a_cache_is_saved_only_where_a_reader_can_trust_it() {
         let dir = repo_root().join(".github/workflows");
         let mut writers = Vec::new();
+        let mut host = 0;
         for entry in std::fs::read_dir(&dir).expect(".github/workflows is readable").flatten() {
             let text = std::fs::read_to_string(entry.path()).expect("a readable workflow");
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -906,11 +939,20 @@ mod tests {
                         .iter()
                         .find_map(|l| l.trim_start().strip_prefix("key: "))
                         .expect("a save names its key");
-                    writers.push((name.clone(), key.split('$').next().unwrap_or("").to_string()));
+                    let prefix = key.split('$').next().unwrap_or("").to_string();
+                    if !prefix.starts_with("host-") {
+                        writers.push((name.clone(), prefix));
+                        continue;
+                    }
+                    host += 1;
+                    assert_eq!(prefix, cicache::SEALED, "{name}");
+                    let manifest = format!("hashFiles('{}') != ''", cicache::MANIFEST);
+                    assert!(lines[at - 1].contains(&manifest), "{name}: a host save without `{manifest}`");
                 }
             }
         }
-        assert!(!writers.is_empty(), "no job writes a cache, so every restore is cold");
+        assert!(host > 0, "no job writes the host cache, so every host run is cold");
+        assert!(!writers.is_empty(), "no job writes the guest cache, so every guest run is cold");
         writers.sort();
         let mut prefixes: Vec<&String> = writers.iter().map(|(_, p)| p).collect();
         prefixes.dedup();

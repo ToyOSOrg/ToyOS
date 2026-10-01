@@ -1121,19 +1121,31 @@ fn metadata(
     serde_json::from_slice(&out).map_err(|e| format!("cargo metadata printed no JSON: {e}"))
 }
 
-/// The fork's `library/`, checked out at the commit this tree pins. A checkout
-/// whose `rust/` was never initialised — a CI runner's — fetches that commit
-/// alone.
+/// The fork's `library/` at the commit this tree pins, in `rust/`, where its
+/// manifests' paths to `toyos` and `toyos-abi` land in this tree. A runner's
+/// `rust/` was never initialised, so it fetches that commit's `library/` alone,
+/// with no other blob of the fork: a checkout that sparse would be all a
+/// developer's later build found.
 fn std_library(root: &Path) -> Result<PathBuf, String> {
     let fork = crate::sysroot::fork_checkout(root);
-    if !fork.join("library/Cargo.toml").exists() {
-        run(
-            Command::new("git")
-                .args(["submodule", "update", "--init", "--depth", "1", "rust"])
-                .current_dir(root),
-            "git submodule update --init --depth 1 rust",
-        )?;
+    if fork.join("library/Cargo.toml").exists() {
+        return Ok(fork.join("library"));
     }
+    if !crate::ci::on_runner() {
+        return Err(format!("{} holds no fork checkout; any `cargo run` makes one", fork.display()));
+    }
+    let pin = crate::sync::git(root, &["rev-parse", ":rust"])?;
+    let url = crate::sync::git(root, &["config", "-f", ".gitmodules", "submodule.rust.url"])?;
+    for args in [
+        &["init", "-q"][..],
+        &["remote", "add", "origin", &url],
+        &["fetch", "-q", "--depth", "1", "--filter=blob:none", "origin", &pin],
+        &["sparse-checkout", "set", "library"],
+        &["checkout", "-q", "--detach", &pin],
+    ] {
+        crate::sync::git(&fork, args)?;
+    }
+    println!("the fork's library/ at {pin}, fetched");
     Ok(fork.join("library"))
 }
 
