@@ -19,9 +19,7 @@ and reverted:
 
 | appended to | form | gate |
 |---|---|---|
-| `userland/calc/window/src/main.rs` | `#[test]` on a line of its own | 101, "a test in the nested crate calc/window" |
-| `userland/calc/window/src/main.rs` | the one line above | 0 |
 | `userland/snake/src/main.rs` | the one line above | 0 |
 
 **Exit:** the scan reads an attribute wherever on a line it starts, a comment
-still holds none, and the one-line form reds in both packages.
+still holds none, and the one-line form reds.

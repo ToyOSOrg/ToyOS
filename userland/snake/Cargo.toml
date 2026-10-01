@@ -10,5 +10,11 @@ toyos-font = { path = "../toyos-font" }
 winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
 softbuffer = { version = "0.4", default-features = false }
 
+# With default features off, neither has a Linux backend. These load the X11
+# and Wayland client libraries at run time, so building installs none of them.
+[target.'cfg(target_os = "linux")'.dependencies]
+winit = { version = "0.30", default-features = false, features = ["x11", "wayland", "wayland-dlopen"] }
+softbuffer = { version = "0.4", default-features = false, features = ["x11", "x11-dlopen", "wayland", "wayland-dlopen"] }
+
 [build-dependencies]
 fontdue = "0.9"

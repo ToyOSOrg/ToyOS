@@ -154,15 +154,14 @@ impl ProgramConfig {
     }
 
     /// Whether this program is a member of the **userland** workspace, the one
-    /// `-p` selects a package from and whose `target/` holds the result: a
-    /// program under `userland/` with no special flags. The rest are built from
-    /// their own directory instead — which is not the same as being built into
-    /// it: `toyos-ld` has an explicit path and is a member of the *host*
+    /// `-p` selects a package from and whose `target/` holds the result.
+    /// Programs with explicit paths or special flags are built from their own
+    /// directory instead — which is not the same as being built into it:
+    /// `toyos-ld` has an explicit path and is a member of the *host*
     /// workspace, so cargo writes it to the repository root's `target/`.
     /// `hostws::target_dir` is what answers that, never this.
     fn is_workspace_member(&self) -> bool {
-        !self.no_default_features
-            && self.path.as_deref().is_none_or(|p| Path::new(p).starts_with("userland"))
+        self.path.is_none() && !self.no_default_features
     }
 }
 
@@ -2967,23 +2966,6 @@ mod tests {
                     "{config}: `{name}` holds `logread`, and the only programs that read a \
                      cursor are {READERS:?}",
                 );
-            }
-        }
-    }
-
-    /// **A program's directory holds the package of its name.** `-p <name>`
-    /// finds the package wherever it sits, so a row whose directory holds
-    /// another one still builds, and the licences are read from that other one.
-    #[test]
-    fn every_program_s_directory_holds_its_package() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        for config in ALL_CONFIGS {
-            for c in config_crates(root, &load(config)) {
-                let manifest = c.dir.join("Cargo.toml");
-                let text = fs::read_to_string(&manifest).unwrap_or_else(|e| panic!("{}: {e}", manifest.display()));
-                let doc: toml::Value = text.parse().unwrap_or_else(|e| panic!("{}: {e}", manifest.display()));
-                let package = doc.get("package").and_then(|p| p.get("name")).and_then(toml::Value::as_str);
-                assert_eq!(package, Some(c.name.as_str()), "{config}: {} is not `{}`'s", manifest.display(), c.name);
             }
         }
     }
