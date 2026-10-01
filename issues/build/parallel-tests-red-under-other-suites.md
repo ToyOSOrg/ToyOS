@@ -512,5 +512,3 @@ Named in this file and not deleted: `desktop_typing_damage` waits on `terminal:
 ready` since its row; `i8042_absent` no longer has the two-boot allowance its
 row is about; `hda_tone`, `tlb_shootdown_waits` and `wake_storm_cost` are T14
 rows and no QEMU guest runs them.
-
-`screen_loader_lines` is deleted; `issues/build/nothing-refuses-the-loader-an-exclusive-gop-open.md` records the commit that restores it.
