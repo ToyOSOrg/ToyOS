@@ -36,8 +36,8 @@ fn build(signature: u32, flags: u32, revision: u32, extended: &[(u32, u32)]) -> 
     let table = if extended.is_empty() { 0 } else { EXT_HEADER + EXT_SIGNATURE * extended.len() };
     let data = 2048 - HEADER - table;
     let mut update = vec![0; 2048];
-    for (i, word) in update[HEADER..HEADER + data].chunks_exact_mut(4).enumerate() {
-        word.copy_from_slice(&(i as u32).wrapping_mul(0x9e37_79b9).to_le_bytes());
+    for (i, word) in update[HEADER..HEADER + data].as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        *word = (i as u32).wrapping_mul(0x9e37_79b9).to_le_bytes();
     }
     for (at, value) in [(0, 1), (4, revision), (12, signature), (20, 1), (24, flags)] {
         put(&mut update, at, value);

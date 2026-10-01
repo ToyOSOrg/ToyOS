@@ -95,7 +95,7 @@ impl<'a> Update<'a> {
     fn names(&self, cpu: &Cpu) -> bool {
         let primary = (dword(self.bytes, 12), dword(self.bytes, 24));
         let table = self.bytes.get(HEADER + self.data + EXT_HEADER..).unwrap_or(&[]);
-        let extended = table.chunks_exact(EXT_SIGNATURE).map(|s| (dword(s, 0), dword(s, 4)));
+        let extended = table.as_chunks::<EXT_SIGNATURE>().0.iter().map(|s| (dword(s, 0), dword(s, 4)));
         core::iter::once(primary)
             .chain(extended)
             .any(|(sig, flags)| sig == cpu.signature.0 && flags & cpu.platform.flag() != 0)
@@ -210,7 +210,7 @@ fn parse(bytes: &[u8]) -> Result<Update<'_>, Refusal> {
         // An extended signature, flags and checksum replace the header's
         // three in the update it stands for, so the two triples sum alike.
         let header = dword(bytes, 12).wrapping_add(dword(bytes, 16)).wrapping_add(dword(bytes, 24));
-        for (index, s) in table[EXT_HEADER..].chunks_exact(EXT_SIGNATURE).enumerate() {
+        for (index, s) in table[EXT_HEADER..].as_chunks::<EXT_SIGNATURE>().0.iter().enumerate() {
             if dword(s, 0).wrapping_add(dword(s, 4)).wrapping_add(dword(s, 8)) != header {
                 return Err(Refusal::ExtendedSignatureChecksum { index });
             }
@@ -228,5 +228,5 @@ fn dword(bytes: &[u8], at: usize) -> u32 {
 
 /// Every dword of `bytes` summed, unsigned, with wrap (§12.11.5).
 fn sum(bytes: &[u8]) -> u32 {
-    bytes.chunks_exact(4).fold(0, |sum, w| sum.wrapping_add(dword(w, 0)))
+    bytes.as_chunks::<4>().0.iter().fold(0, |sum, &w| sum.wrapping_add(u32::from_le_bytes(w)))
 }
