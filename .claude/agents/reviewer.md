@@ -76,10 +76,10 @@ if it meets the bar above; otherwise it is a NOTE.
   saying what it is; a new cargo feature or `cfg` arm of one, or an arm a changed `src/clippy.rs`
   shape stops building, that no shape in `src/clippy.rs` lints; an `issues/` file added, changed
   or deleted against `issues/README.md`.
-- **Caches.** No gate reads these; a diff that breaks one is a BLOCKER. Each cache has one
-  writer, a nightly.yml job, and no workflow uses the combined `actions/cache`, which saves too;
-  the host cache's is nightly's `host`, and its one reader ci.yml's `host`, on the same
-  `runs-on`, both caching `src/cicache.rs`'s `PATHS` with its `DRIVER` as their
+- **Caches.** No gate reads these; a diff that breaks one is a BLOCKER. No workflow uses the
+  combined `actions/cache`, which saves too. The host cache has one writer, nightly's `host`,
+  and one reader, ci.yml's `host`, on the same `runs-on`, both caching `src/cicache.rs`'s
+  `PATHS` with its `DRIVER` as their
   `CARGO_TARGET_DIR`, the one variable an `env:` gives either: an `ImageOS` or `ImageVersion`
   set there outlives an image move. The reader's `restore-keys` is the writer's `key` up to its
   run id. A job that names the host cache runs `actions/checkout`, its cache step and
@@ -89,6 +89,13 @@ if it meets the bar above; otherwise it is a NOTE.
   skips only a draft, and nightly's `host` has no `if:` of its own, a skipped job being a green
   check. No `continue-on-error`, `shell:`, `defaults:` or cargo `runner` reaches them.
   nightly.yml's `on:` is one daily `schedule` and `workflow_dispatch`.
+- **Workflows.** A BLOCKER each:
+  - Only main's runs save a cache entry other refs restore: GitHub's cache scoping is every entry's provenance.
+  - `nightly.yml`'s `release` is the only job granted `contents: write`.
+  - No workflow runs on `pull_request_target`, `workflow_run`, `issue_comment` or any other trigger that runs code other than main's on main's ref.
+  - No workflow or job declares `cache-mode: write` or `write-only`.
+  - `guest / suite` has no job-level `if:`, and a job that calls it runs whatever `toolchain` concluded: a skipped required check reads as green.
+  - A job that saves a cache entry runs only `cargo run -- --ci <job>`.
 - **Growth.** Every line is a responsibility, not an asset. State the branch's net lines
   (`git diff --shortstat origin/main...<head>`), production and tests apart. Production code that
   grows needs a reason you accept; a branch that could delete more than it adds and does not goes

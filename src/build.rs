@@ -1713,8 +1713,8 @@ fn shipped_parts(root: &Path, boot: &Boot, plan: &Plan) -> (Vec<u8>, Vec<u8>, Ve
     // Held until the last staged artifact has been read back, so no clean of
     // this worktree's crate targets can land inside this build.
     let mut lock = buildlock::shared(root, "build");
-    let env = GuestEnv::new(toolchain::ensure(root, &mut lock));
     let config = parse_config(&boot.config);
+    let env = GuestEnv::new(toolchain::ensure(root, &mut lock, config.hosted_rustc));
 
     invalidate_stale(root, &mut lock, &env.sysroot.identity, &config_targets(root, &config));
 
@@ -1930,7 +1930,7 @@ pub fn build_test_parts(
     // back after the userland build, and a clean landing in between is the
     // same defect as one landing mid-compile.
     let mut lock = buildlock::shared(root, "test image");
-    let env = GuestEnv::new(toolchain::ensure(root, &mut lock));
+    let env = GuestEnv::new(toolchain::ensure(root, &mut lock, config.hosted_rustc));
 
     invalidate_stale(root, &mut lock, &env.sysroot.identity, &config_targets(root, &config));
 
@@ -2137,7 +2137,7 @@ struct TestBuild {
 impl TestBuild {
     fn begin(root: &Path, arch: Arch, what: &str, stale_targets: &[(PathBuf, Clean)]) -> Self {
         let mut lock = buildlock::shared(root, what);
-        let env = GuestEnv::new(toolchain::ensure(root, &mut lock));
+        let env = GuestEnv::new(toolchain::ensure(root, &mut lock, false));
         invalidate_stale(root, &mut lock, &env.sysroot.identity, stale_targets);
         let artifact = buildlock::artifact(root);
         TestBuild { target: arch.userland(), env, _lock: lock, _artifact: artifact }

@@ -34,18 +34,14 @@ Stages, in order:
    the release notes of every toolchain release carry it:
 
        mkdir -p toyos-toolchain
-       curl -sSL "$asset" | tar --zstd -x -C toyos-toolchain
+       curl -sSL "$asset" | tar -xz -C toyos-toolchain
        stage2=toyos-toolchain/x86_64-unknown-linux-gnu/stage2
        rustup toolchain link toyos "$stage2"
        ln -s "$(rustup which cargo)" "$stage2/bin/cargo"
        export PATH="$PATH:$PWD/$stage2/bin"
        cargo +toyos build --target x86_64-unknown-toyos
 
-   `toyos-ld` is in that `bin/` because rustc's ToyOS target names its linker
-   and finds it on `PATH`, and the release tag is the content hash of
-   everything the tarball's bytes depend on — the linker and the packaging
-   among them, so a change to either mints a release rather than reusing one
-   built without it. The glibc floor is 2.39 — `ubuntu-24.04`'s, the
+   The glibc floor is 2.39 — `ubuntu-24.04`'s, the
    image the host half is built on — measured over the shipped binaries and
    asserted at publish time, so a build on a newer machine is refused rather
    than published. A program that opens a window also carries a `[patch]` of

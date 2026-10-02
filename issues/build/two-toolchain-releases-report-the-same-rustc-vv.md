@@ -11,8 +11,7 @@ nor `description` under `[rust]`, so bootstrap's channel is `dev` and its
 default for that channel is `omit-git-hash = true`
 (`rust/src/bootstrap/src/core/config/config.rs`, the `omit_git_hash` line).
 Every release then reports `rustc 1.99.0-dev` with byte-identical `rustc -vV`
-output — and the release tag hashes more than `rust` anyway: `toyos-abi/src`,
-`toyos/src`, `userland/libc/src`, `toyos-ld` and the packaging.
+output.
 
 Cargo fingerprints a compile on `rustc -vV`. A consumer that switches releases
 in a reused target directory sees no compiler change, keeps the old rlibs, and

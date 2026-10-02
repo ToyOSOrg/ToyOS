@@ -165,6 +165,15 @@ image = { version = "0.25", default-features = false, features = ["jpeg"] }
 # The digest behind `NOTICE`'s record of every committed binary file
 # (`src/sourcegate.rs`).
 sha2 = "0.10"
+# The toolchain release's tarball, packed in-process (`src/release.rs`): Rust's
+# own tar and gzip, where the binaries are hosts' tools.
+tar = { version = "0.4.46", default-features = false }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# Every request the build system makes, GitHub's API and the crates.io index,
+# where curl is a host's tool: rustls on ring, the one TLS provider the tree
+# takes (`issues/design-debt/the-internet-clients-work-unchanged.md`), whose C
+# and assembly the host's `cc` compiles.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [dev-dependencies]
 # `USER_TOP`, so the harness judges a held `rsp` against the bound the kernel

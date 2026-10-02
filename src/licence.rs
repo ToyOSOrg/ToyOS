@@ -1173,12 +1173,7 @@ fn metadata(
 fn std_library(root: &Path) -> Result<PathBuf, String> {
     let fork = crate::sysroot::fork_checkout(root);
     if !fork.join("library/Cargo.toml").exists() {
-        run(
-            Command::new("git")
-                .args(["submodule", "update", "--init", "--depth", "1", "rust"])
-                .current_dir(root),
-            "git submodule update --init --depth 1 rust",
-        )?;
+        crate::ensure_shallow_fork(root)?;
     }
     Ok(fork.join("library"))
 }
