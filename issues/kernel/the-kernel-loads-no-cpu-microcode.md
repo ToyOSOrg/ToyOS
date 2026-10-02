@@ -54,8 +54,11 @@ unread. ToyOS has no AMD metal: the nightly's EPYCs are KVM guests, which load
 nothing.
 
 **Licence.** `LicenseRef-Intel-Microcode` is in no `ALLOWED` row of
-`src/licence.rs`, so the commit that embeds the file reds the licence gate
-until an exception scoped to CPU microcode admits it.
+`src/licence.rs`, and a committed file ships once a shipped package's directory
+holds it. So the commit that makes the kernel depend on `toyos-microcode` reds
+the licence gate on both files under `toyos-microcode/intel-ucode/`, the
+test-only `06-cc-02` included, whatever the kernel embeds, until an exception
+scoped to CPU microcode admits them.
 
 Each step's exit, in the testing ladder's order:
 
