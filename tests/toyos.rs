@@ -172,7 +172,7 @@ const MACHINE_TESTS: &[&str] = &[
     "nested_nmi_is_loud",
     // The power-off itself: the metal loop reaches the T14 over `ssh` and has
     // no way to turn it back on, so only a machine QEMU reports stopping can
-    // be asked.
+    // be asked. `machine_soft_off_decoded` reads the T14's own decode.
     "machine_shutdown",
 ];
 
@@ -541,6 +541,13 @@ const METAL: &[(&str, metal::Metal)] = &[
                 bootlog::handed_back(b[0].after_the_reset()?.text()).map_err(|why| why.to_string())
             },
         },
+    ),
+    (
+        // This machine's own PM1a block and `\_S5_`, which are not q35's. The
+        // write is `machine_shutdown`'s under QEMU: a T14 that powered itself
+        // off never answers the loop again.
+        "machine_soft_off_decoded",
+        metal::Metal { arms: JOBCASE, judge: |b| power::soft_off_decoded(&b[0].kernel()) },
     ),
     // ---- one image: tests/proctreecase ----
     (

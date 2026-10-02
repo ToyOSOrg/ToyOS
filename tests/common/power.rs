@@ -63,6 +63,14 @@ pub fn machine_shutdown(test_config: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// The kernel decoded S5 soft-off out of this machine's FADT and DSDT. Every
+/// other branch of `arch::power::init_off` says `no soft-off` and not this.
+pub fn soft_off_decoded(kernel: &serial::Serial) -> Result<(), String> {
+    let line = kernel.must_say(SOFT_OFF_DECODED)?;
+    eprintln!("  [power] {}", line.trim());
+    Ok(())
+}
+
 /// The kernel's read-back above its own arm, in
 /// `kernel/src/arch/x86_64/watchdog.rs`: whole clauses, one per branch.
 const ARMED_ON_ARRIVAL: &str = "so the bootloader had already armed the timer";

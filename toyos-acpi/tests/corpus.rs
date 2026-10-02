@@ -430,22 +430,12 @@ fn no_single_byte_mutation_of_a_real_table_panics_or_runs_away() {
     assert!(halts[1] > 0, "no resealed mutation halted a walk, so that arm is untested here");
 }
 
-/// **Stated as tests, so extending the decoder reds the statement.** Nothing in
-/// this crate reads what is *inside* a DSDT — `find_s5_slp_typ` scans AML and
-/// stays in the kernel — and the XSDT walk deliberately returns the first
-/// signature match's verdict rather than trying a second table of the same name.
+/// **Stated as a test, so extending the decoder reds the statement.** The XSDT
+/// walk deliberately returns the first signature match's verdict rather than
+/// trying a second table of the same name.
 #[test]
-fn the_two_things_the_corpus_does_not_cover_are_the_two_the_crate_does_not_do() {
+fn the_xsdt_walk_answers_with_its_first_match_and_tries_no_second() {
     let head = rsdp(XSDT_AT, 2, 36);
-    let dsdt = sdt(b"DSDT", 2, &[0u8; 8]);
-    let root = xsdt(&[TABLE_AT]);
-    let regions: &[(u64, &[u8])] = &[(RSDP_AT, &head), (XSDT_AT, &root), (TABLE_AT, &dsdt)];
-    let m = Machine { regions };
-    // A DSDT opens like any other table; its contents are nothing this crate
-    // reads, so no case here covers `\_S5_`.
-    assert!(Table::open(m, TABLE_AT, b"DSDT", 36).is_ok());
-    assert_eq!(hpet_base(m, RSDP_AT).err(), Some(TableError::Absent));
-
     let mut broken = sdt(b"HPET", 1, &[0u8; 20]);
     broken[9] = broken[9].wrapping_add(1);
     let good = sdt(b"HPET", 1, &[0u8; 20]);
