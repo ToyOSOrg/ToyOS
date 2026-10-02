@@ -101,6 +101,18 @@ const LOADER: &str = r"\EFI\BOOT\BOOTX64.EFI";
 const LID_KEYS: &[&str] =
     &["HandleLidSwitch", "HandleLidSwitchExternalPower", "HandleLidSwitchDocked"];
 
+/// What `toyos-metal`'s last words on its stderr begin with when it refuses:
+/// the harness reads the refusal back by it, to name it beside the exit status.
+pub const REFUSAL_HEAD: &str = "toyos-metal: ";
+
+/// The refusal a `toyos-metal` run's stderr ends on, from its [`REFUSAL_HEAD`] line
+/// to the end, or `None` where it said none.
+pub fn said_refusal(stderr: &str) -> Option<String> {
+    let lines: Vec<&str> = stderr.lines().collect();
+    let at = lines.iter().rposition(|line| line.starts_with(REFUSAL_HEAD))?;
+    Some(lines[at..].join("\n")[REFUSAL_HEAD.len()..].trim_end().to_string())
+}
+
 /// Every way this loop refuses, by name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
@@ -2612,6 +2624,23 @@ mod tests {
         assert_eq!(up, Err(Refusal::Silent { what: "go down", secs: 1 }));
         let refuses = || port_accepts("127.0.0.1", 0);
         assert_eq!(wait_on(1, "go down", false, refuses, || unreachable!()), Ok(0));
+    }
+
+    /// **The harness names the refusal, not only the exit status.** The
+    /// stderr is the T14's `lantalkcase` run's, cargo's own lines included, and
+    /// the refusal it ends on is read back whole, every finding with it.
+    #[test]
+    fn a_refusal_is_read_back_off_the_drivers_stderr() {
+        let stderr = "    Blocking waiting for file lock on package cache\n\
+            \x20   Finished `dev` profile [optimized + debuginfo] target(s) in 0.19s\n\
+            \x20    Running `target/debug/toyos-metal --image /Users/jan/Dev/jan/toyos-t14lan/target/metal/lantalkcase/image.img --readback /Users/jan/Dev/jan/toyos-t14lan/target/metal/lantalkcase --fat32-check --talk /Users/jan/Dev/jan/toyos-t14lan/target/metal/lantalkcase/ssh/id_ed25519`\n\
+            toyos-metal: the boot did not say over its own cable what a talking boot owes:\n\
+            \x20 217 line(s) arrived over the cable and none is this boot's `Boot: complete`\n";
+        let said = Refusal::Talk(vec![
+            "217 line(s) arrived over the cable and none is this boot's `Boot: complete`".into(),
+        ]);
+        assert_eq!(said_refusal(stderr), Some(said.to_string()));
+        assert_eq!(said_refusal(&stderr[..stderr.find(REFUSAL_HEAD).unwrap()]), None, "cargo's lines are no refusal");
     }
 
     /// **An image with no bound on its own boot never reaches the stick.**
