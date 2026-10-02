@@ -1,3 +1,7 @@
+// First: its `eprintln!` is in scope of every module declared after it.
+#[macro_use]
+pub mod printer;
+
 pub mod arch;
 pub mod assets;
 pub mod bootlog;

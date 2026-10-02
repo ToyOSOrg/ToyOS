@@ -6,6 +6,9 @@ include!("toyos.rs");
 
 mod checks {
     use super::*;
+    // `toyos.rs`'s `#[macro_use]` arrives by `include!` and reaches no module
+    // outside that text, so each of those names the printer's `eprintln!`.
+    use toyos_build::eprintln;
 
     #[path = "audio.rs"]
     mod audio_checks;

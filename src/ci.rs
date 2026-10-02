@@ -84,7 +84,7 @@ pub fn dispatch(root: &Path, args: &[String]) {
     let failed: Vec<&Step> = steps.iter().filter(|s| s.verdict.is_err()).collect();
     summary(&steps.iter().map(Step::line).collect::<Vec<_>>().join("\n"));
     if failed.is_empty() {
-        println!("[ci] {job:?}: {} step(s), all green", steps.len());
+        eprintln!("[ci] {job:?}: {} step(s), all green", steps.len());
     } else {
         eprintln!("[ci] {job:?}: {} of {} step(s) red:", failed.len(), steps.len());
         for s in failed {
@@ -110,12 +110,10 @@ impl Step {
 }
 
 fn step(label: &str, f: impl FnOnce() -> Result<String, String>) -> Step {
-    println!("\n=== [ci] {label}");
+    eprintln!("\n=== [ci] {label}");
     let verdict = f();
-    match &verdict {
-        Ok(said) => println!("[ci] {label}: {said}"),
-        Err(why) => eprintln!("[ci] {label}: {why}"),
-    }
+    let (Ok(said) | Err(said)) = &verdict;
+    eprintln!("[ci] {label}: {said}");
     Step { label: label.to_string(), verdict }
 }
 
@@ -784,12 +782,11 @@ fn guest(root: &Path, suite: &[String]) -> Vec<Step> {
 /// The suite's own count line and every line naming a verdict worth reading
 /// without the log: a failure.
 fn verdicts(log: &str) -> String {
-    let total = log
-        .lines()
+    let lines = || log.lines().map(crate::printer::unstamped);
+    let total = lines()
         .rfind(|l| l.contains("test result:") && l.contains(" total ("))
         .unwrap_or("no suite result line");
-    let named: Vec<&str> = log
-        .lines()
+    let named: Vec<&str> = lines()
         .filter(|l| {
             l.starts_with("FAIL ")
                 || (l.starts_with(' ')
@@ -1136,11 +1133,12 @@ mod tests {
     #[test]
     fn the_summary_keeps_the_count_and_the_verdicts() {
         let log = "test result: ok. 3 passed\n\
-                   FAIL rs::lan_talk: no exit code\nnoise\n\
-                   test result: FAILED. 40 passed; 1 failed, 41 total (300 s)\n";
+                   12:00:00 FAIL rs::lan_talk: no exit code\nnoise\n\
+                   12:00:07   STALL rs::lan_talk  (7s)\n\
+                   12:00:09 test result: FAILED. 40 passed; 1 failed, 41 total (300 s)\n";
         let said = verdicts(log);
         assert!(said.starts_with("test result: FAILED. 40 passed; 1 failed, 41 total"), "{said}");
-        assert!(said.contains("FAIL rs::lan_talk"), "{said}");
+        assert!(said.contains("\nFAIL rs::lan_talk: no exit code\n  STALL rs::lan_talk  (7s)\n"), "{said}");
         assert!(!said.contains("noise"), "{said}");
         assert_eq!(verdicts(""), "no suite result line");
     }

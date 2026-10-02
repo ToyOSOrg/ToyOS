@@ -206,7 +206,7 @@ pub fn run(root: &Path) -> Vec<String> {
     let mut failed = Vec::new();
     for shape in SHAPES {
         let scope = if shape.dir.is_empty() { "workspace root" } else { shape.dir };
-        println!("=== clippy: {scope} — {}", shape.line());
+        eprintln!("=== clippy: {scope} — {}", shape.line());
         let status = Command::new("cargo")
             .arg("clippy")
             .args(shape.args())
@@ -235,7 +235,7 @@ pub fn dispatch(root: &Path) {
         }
         std::process::exit(1);
     }
-    println!("clippy: {} invocations clean", SHAPES.len());
+    eprintln!("clippy: {} invocations clean", SHAPES.len());
 }
 
 #[cfg(test)]

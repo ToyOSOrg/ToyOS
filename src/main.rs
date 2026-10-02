@@ -1,3 +1,6 @@
+#[macro_use(eprintln)]
+extern crate toyos_build;
+
 mod qemu;
 
 use std::env;
