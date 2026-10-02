@@ -177,4 +177,4 @@ CPU-selection half of this family (`CpuHandle::answering`,
 orchestrator.
 
 **Its test is deleted**: `cd685b10a` and `b20d3fd40` took `desktop_window_child`
-out, and `git revert b20d3fd40 cd685b10a` brings it back.
+out.

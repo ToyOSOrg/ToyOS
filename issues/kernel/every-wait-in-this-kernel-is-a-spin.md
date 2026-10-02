@@ -541,4 +541,4 @@ Six entries under `issues/design-debt/` recorded that the deleted document's own
 citations had rotted — five against the tree, one against a log plan deleted
 before it. All six closed with it.
 
-`usb_boot_stick_pulled` is deleted; `issues/kernel/io-uring-enter-trips-the-one-queue-invariant.md` records the commit that restores it.
+`usb_boot_stick_pulled` is deleted.

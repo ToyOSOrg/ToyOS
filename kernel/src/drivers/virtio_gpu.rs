@@ -42,10 +42,6 @@ const CURSOR_SIZE: u32 = 64;
 const CURSOR_RESOURCE_ID: u32 = 1;
 /// Scanouts count up from here, so no mode change ever reuses the cursor's id.
 const FIRST_SCANOUT_RESOURCE_ID: u32 = 2;
-#[cfg(feature = "boot-actuators")]
-const FOREIGN_RESOURCE_ID: u32 = u32::MAX;
-#[cfg(feature = "boot-actuators")]
-const FOREIGN_COLUMNS: u32 = 32;
 
 const REQ_OFFSET: usize = 0x000;
 const RESP_OFFSET: usize = 0x800;
@@ -447,37 +443,6 @@ impl GpuController {
         Some(FbAlloc { regions, backing: Some(backing) })
     }
 
-    /// Hand the device a backing in another driver's pool, by its *physical*
-    /// address, which this display's own domain does not map. The answer is
-    /// logged, not asserted: the unit's fault halts every CPU from the handler,
-    /// so which of the halt and the response arrives first is a race.
-    #[cfg(feature = "boot-actuators")]
-    fn attach_a_foreign_backing(&mut self) {
-        let foreign =
-            super::xhci::FOREIGN_PROBE.load(core::sync::atomic::Ordering::Relaxed);
-        assert!(foreign != 0, "VirtIO GPU: this machine staged no foreign pool to aim at");
-        // Sized to the probe exactly, so one transfer of the whole resource reads every byte of it.
-        const ROWS: u32 = super::xhci::PROBE_LEN as u32 / (FOREIGN_COLUMNS * 4);
-        self.create_resource(FOREIGN_RESOURCE_ID, FORMAT_B8G8R8X8_UNORM, FOREIGN_COLUMNS, ROWS);
-        let resp = self.attach_backing_answering(
-            FOREIGN_RESOURCE_ID,
-            foreign,
-            super::xhci::PROBE_LEN as u32,
-        );
-        log!(
-            "VirtIO GPU: a backing at {foreign:#x}, inside another driver's pool, was answered \
-             {resp:#x} (actuator)"
-        );
-        if resp == RESP_OK_NODATA {
-            let rect = Rect { x: 0, y: 0, width: FOREIGN_COLUMNS, height: ROWS };
-            self.transfer_to_host(FOREIGN_RESOURCE_ID, rect, 0);
-            log!(
-                "VirtIO GPU: the device read all {} bytes of it (actuator)",
-                super::xhci::PROBE_LEN
-            );
-        }
-    }
-
     fn build_gpu_info(&self) -> GpuInfo {
         GpuInfo {
             scanout: self.fb.regions.clone(),
@@ -675,11 +640,6 @@ pub fn init(devices: &[PciDevice]) -> Option<(Box<dyn Gpu>, GpuInfo)> {
 
     gpu.width = width;
     gpu.height = height;
-
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::iommu_gpu_foreign_backing() {
-        gpu.attach_a_foreign_backing();
-    }
 
     let info = gpu.build_gpu_info();
 

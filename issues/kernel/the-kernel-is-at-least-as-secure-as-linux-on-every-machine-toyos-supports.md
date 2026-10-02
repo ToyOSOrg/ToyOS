@@ -14,7 +14,7 @@ probe is a `boot-actuators` arm or a `test-actuators` `SYS_DEBUG` action.
 
 **Exit**: every issue below is closed, in the order listed.
 
-- `issues/hardware/linuxs-readings-of-the-t14-and-the-tcg-model-are-not-committed.md`
+- `issues/hardware/linuxs-readings-of-the-t14-and-the-tcg-model-lack-reads-owed-before-the-t14s-wipe.md`
 - `issues/kernel/a-pure-function-decides-a-cpus-speculation-mitigations-as-linux-does.md`
 - `issues/kernel/spec-ctrl-and-gds-stay-as-firmware-left-them.md`
 - `issues/kernel/no-program-runs-with-speculative-store-bypass-disabled.md`

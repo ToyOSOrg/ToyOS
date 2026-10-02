@@ -118,13 +118,6 @@ impl Hasher for KernelHasher {
 /// kernel does not have.
 pub type HashMap<K, V> = hashbrown::HashMap<K, V, KernelHashState>;
 
-/// Build a container before [`seed`]: the panic is the point.
-#[cfg(feature = "boot-actuators")]
-pub fn probe_before_seed() {
-    let mut probe: HashMap<u64, u64> = HashMap::default();
-    probe.insert(0, 0);
-}
-
 /// **What the feature drop does not close**, as code so that closing either
 /// stops this compiling: a foreign `BuildHasher`, and `hashbrown::HashTable`,
 /// which needs none. Which hasher a container gets is held by review.

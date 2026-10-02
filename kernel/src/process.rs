@@ -847,9 +847,6 @@ pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Op
     let block = TlsBlock::build(&tls_modules, tls)?;
     let (tls_alloc, thread_pointer, tp_offset) = {
         let parent_data = process_data_arc.lock();
-        if crate::actuator::tls_rebase_window() {
-            crate::loader::rebase_window::spawning(arg);
-        }
         // VA exhaustion is a resource failure the process caused, not a kernel bug; the block drops on the way out, returning its pages.
         let published = block.publish(&parent_addr_space)?;
         drop(parent_data);

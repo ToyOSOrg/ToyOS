@@ -53,6 +53,5 @@ line never reached `/log`. That change has never run: the test's first run
 back is also that change's.
 
 **Its test is deleted**: `603b6ee54` took `log_ring_keeps_the_owners_slots`
-out, and `git revert 603b6ee54` brings it back as it stood before #536;
-`git show 84471bc58:tests/logkeepcase/system.toml` holds #536's adaptation of its
-config.
+out; `git show 84471bc58:tests/logkeepcase/system.toml` holds #536's adaptation
+of its config.

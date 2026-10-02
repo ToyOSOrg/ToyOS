@@ -26,11 +26,6 @@ pub use toyos_bootmap::aarch64::MAIR;
 /// levels; EL0's cache maintenance and `WFI`/`WFE` trap.
 pub const SCTLR: u64 = SCTLR_RES1 | 1 << 0 | 1 << 2 | 1 << 3 | 1 << 4 | 1 << 7 | 1 << 8 | 1 << 12;
 
-/// `SCTLR_EL1` with the MMU and caches off — [`SCTLR`] less `M`, `C`, `I`,
-/// `SA` and `SA0` — the only other value the entry writes: what a CPU entered at EL1 under firmware's tables is put through
-/// before its translation registers change.
-pub const SCTLR_MMU_OFF: u64 = SCTLR_RES1 | 1 << 7 | 1 << 8;
-
 const SCTLR_RES1: u64 = 1 << 29 | 1 << 28 | 1 << 23 | 1 << 22 | 1 << 20 | 1 << 11;
 
 /// `TCR_EL1` but for `IPS`: 48-bit regions from both tables (`T0SZ` = `T1SZ` =

@@ -36,9 +36,8 @@ pub struct Arm {
     /// Named rather than derived from (config, parameters), because sharing is
     /// not always safe and only the author knows: `mkdir_cap` fills the
     /// machine-wide directory cap and leaves it there, so `readdir_bound`'s own
-    /// `create_dir` on that boot is refused with `OutOfMemory` and it panics —
-    /// which is why each has a boot of its own in QEMU too. A test that must
-    /// not share names its own; it costs a minute and it says so.
+    /// `create_dir` on that boot is refused with `OutOfMemory` and it panics. A
+    /// test that must not share names its own; it costs a minute and it says so.
     pub boot: &'static str,
     /// The boot config's directory, relative to the repository root.
     pub config: &'static str,
@@ -158,17 +157,11 @@ fn sized(shared: &[SharedBoot]) -> Vec<SharedBoot> {
     out
 }
 
-/// Whether a registration runs on the T14, and how.
-pub enum Metal {
-    /// It does not, and why — a row rather than a silence, because "no metal
-    /// declaration" is the answer for the hundred tests nobody has looked at
-    /// and this is the answer for one somebody has.
-    QemuOnly(&'static str),
-    Runs {
-        arms: &'static [Arm],
-        /// The readbacks in `arms` order.
-        judge: fn(&[&Readback]) -> Result<(), String>,
-    },
+/// How a registration runs on the T14.
+pub struct Metal {
+    pub arms: &'static [Arm],
+    /// The readbacks in `arms` order.
+    pub judge: fn(&[&Readback]) -> Result<(), String>,
 }
 
 /// What one boot left on the stick, and what the host clock saw of it.
@@ -579,7 +572,7 @@ fn batches(
         }
     }
     for (name, decl) in tests {
-        let Metal::Runs { arms, .. } = decl else { continue };
+        let Metal { arms, .. } = decl;
         for arm in *arms {
             let batch = out.entry(arm.boot.to_string()).or_insert_with(|| Batch {
                 config: arm.config,
@@ -869,26 +862,12 @@ pub fn run(
             return Verdict::Red;
         }
     };
-    let declared: Vec<&str> = tests
-        .iter()
-        .filter_map(|(name, decl)| match decl {
-            Metal::QemuOnly(why) => Some((*name, *why)),
-            Metal::Runs { .. } => None,
-        })
-        .map(|(name, why)| {
-            eprintln!("[metal] QEMU-only: {name} — {why}");
-            name
-        })
-        .collect();
-    let runs: Vec<&(&str, &'static Metal)> =
-        tests.iter().filter(|(_, d)| matches!(d, Metal::Runs { .. })).collect();
+    let runs: Vec<&(&str, &'static Metal)> = tests.iter().collect();
     eprintln!(
-        "[metal] {} registration(s) and {} shared member(s) over {} boot(s); {} declared \
-         QEMU-only",
+        "[metal] {} registration(s) and {} shared member(s) over {} boot(s)",
         runs.len(),
         shared.iter().map(|b| b.jobs.len()).sum::<usize>(),
         batches.len(),
-        declared.len(),
     );
     if runs.is_empty() && shared.iter().all(|b| b.jobs.is_empty()) {
         eprintln!("[metal] nothing to run");
@@ -1075,7 +1054,7 @@ pub fn judge_readbacks(
     eprintln!("\n[metal] the tests");
     let mut passed = 0usize;
     for (name, decl) in runs {
-        let Metal::Runs { arms, judge } = decl else { continue };
+        let Metal { arms, judge } = decl;
         let mut owed: Vec<&Readback> = Vec::new();
         let mut missing: Option<String> = None;
         for arm in *arms {

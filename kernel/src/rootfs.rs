@@ -140,14 +140,6 @@ pub fn mount() -> Mounted<MemoryImage, ReadOnly> {
         ),
         Handed::Image(image) => image,
     };
-    // The actuator's other half: a loader that ignored it would leave the
-    // refusal above untested while the test reading it passed.
-    if crate::actuator::loader_withholds_root() {
-        panic!(
-            "boot: {} is armed and the loader handed a ROOT image anyway",
-            toyos_abi::boot::WITHHOLD_ROOT_PARAM
-        );
-    }
     let fs = Mounted::<_, ReadOnly>::open(image)
         .unwrap_or_else(|e| panic!("boot: the ROOT image holds no filesystem this kernel can mount: {e:?}"));
     if fs.uuid() != named {

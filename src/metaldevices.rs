@@ -92,64 +92,9 @@ pub fn quiesced(loader: &str) -> Option<Quiesced> {
     })
 }
 
-/// What one job's `exit:` record said.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Exit {
-    pub code: i64,
-    pub cpu_ms: u64,
-}
-
-/// The `exit: <name> pid=N code=N cpu=Nms` record for `name`, or `None` where
-/// the boot has none — which is a job that never ran, never returned, or was
-/// still running when the machine reset.
-///
-/// The **last** such record, because a name could in principle run twice and
-/// the boot's answer is the one it ended with. The record's whole message and
-/// not a substring of a line, so a program's line — which opens with the head
-/// `logd` gives it, never a kernel record's bracket — is never one.
-pub fn exit_of(log: &str, name: &str) -> Option<Exit> {
-    let head = format!("{}{name} pid=", crate::bootlog::EXIT);
-    log.lines().rev().find_map(|line| {
-        let rest = crate::bootlog::message(line)?.strip_prefix(&head)?;
-        let code = field(rest, "code=")?.parse().ok()?;
-        let cpu = field(rest, "cpu=")?;
-        let cpu_ms = cpu.strip_suffix("ms")?.parse().ok()?;
-        Some(Exit { code, cpu_ms })
-    })
-}
-
-/// The word after `key` in `rest`, up to the next space.
-fn field<'a>(rest: &'a str, key: &str) -> Option<&'a str> {
-    rest.split(key).nth(1)?.split_whitespace().next()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A boot log's shape, as `logd` writes one: the wall-clock tag, the
-    /// boot-relative stamp, the CPU, then the record.
-    fn line(at: &str, text: &str) -> String {
-        format!("[2026-09-07 06:45:03 {at} cpu0] {text}\n")
-    }
-
-    fn a_good_boot() -> String {
-        [
-            line("0.000", "PAT: IA32_PAT=0x0007040100070406, entry 4 = WC"),
-            line("0.087", "xHCI: found at PCI 00:14.0 8086:a36d"),
-            line("0.090", "xHCI: max_slots=32 max_ports=16 ctx_size=64 pagesize=0x1"),
-            line("0.140", "usb-storage: 1 device(s)"),
-            line("0.150", "i8042: ok selftest=0x55 cfg=0x45->0x44 port1=ok port2=ok"),
-            "{2026-09-29 08:43:12 1.162 blockd} blockd: no NVMe controller this row names is on \
-             this machine; serving no partition\n"
-                .to_string(),
-            line("0.319", "GOP: scanout memory type WC (MTRR WB, PAT entry 4)"),
-            line("0.368", "Boot: complete (368ms)"),
-            line("1.100", "exit: usbwrite pid=6 code=402000 cpu=140ms"),
-            line("2.100", "exit: usbread pid=7 code=30500 cpu=90ms"),
-        ]
-        .concat()
-    }
 
     /// `loader.log`'s pass after the reset, with the stop's tail and the
     /// shutdown's own account under the `|` the loader prefixes a report's
@@ -168,26 +113,6 @@ mod tests {
          12/16 port(s) unpowered\n\
          Loader log: the last boot is accounted for, so this pass resets the machine\n"
             .to_string()
-    }
-
-    #[test]
-    fn an_exit_record_is_read_as_its_number() {
-        let log = a_good_boot();
-        assert_eq!(exit_of(&log, "usbwrite"), Some(Exit { code: 402_000, cpu_ms: 140 }));
-        assert_eq!(exit_of(&log, "never_ran"), None);
-        // A name that is a prefix of another's is not that other one.
-        assert_eq!(exit_of(&log, "usb"), None);
-        // The last of two, because that is the answer the boot ended with.
-        let twice = format!("{log}{}", line("4.0", "exit: usbread pid=11 code=99 cpu=1ms"));
-        assert_eq!(exit_of(&twice, "usbread"), Some(Exit { code: 99, cpu_ms: 1 }));
-        // A program writing the record's words, and a whole record's line,
-        // after it.
-        let forged = format!(
-            "{twice}{{2026-09-08 16:08:23 5.000 evil}} exit: usbread pid=11 code=0 cpu=0ms\n\
-             {{2026-09-08 16:08:23 5.100 evil}} {}",
-            line("5.1", "exit: usbread pid=11 code=0 cpu=0ms"),
-        );
-        assert_eq!(exit_of(&forged, "usbread"), Some(Exit { code: 99, cpu_ms: 1 }));
     }
 
     #[test]

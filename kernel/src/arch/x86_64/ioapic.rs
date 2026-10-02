@@ -301,18 +301,6 @@ pub fn route(
     Ok(())
 }
 
-/// The redirection entry for `gsi` exactly as the chip holds it, high word first, or `None` when no unit covers it or the topology is busy.
-/// Raw, not decoded: a decode would have to guess which field the caller needs, and this exists to catch an unexpected one.
-#[cfg(feature = "boot-actuators")]
-pub fn redirection(gsi: Gsi) -> Option<u64> {
-    // try_lock: the caller runs in the idle loop on a possibly-stopped machine.
-    let topology = TOPOLOGY.try_lock()?;
-    let (unit, n) = locate(&topology, gsi).ok()?;
-    let low = unit.read(REG_REDTBL + 2 * n);
-    let high = unit.read(REG_REDTBL + 2 * n + 1);
-    Some(u64::from(high) << 32 | u64::from(low))
-}
-
 pub fn set_masked(gsi: Gsi, masked: bool) -> Result<(), RouteError> {
     let topology = TOPOLOGY.lock();
     let (unit, n) = locate(&topology, gsi)?;
