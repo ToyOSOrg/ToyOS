@@ -48,8 +48,7 @@ is that this name cannot be waved through on a scheduler branch.
 **A decisive A/B needs a quiet host and this one stopped being quiet.** Six more
 runs an arm were started and abandoned: the first took **417.4 s** against the
 58-79 s of every run above, and `pgrep` found three other worktrees' suites on
-the box. `tests/CLAUDE.md`'s rule is that a block which gains company mid-run is
-discarded and re-run, never corrected, so it was discarded.
+the box, so it was discarded.
 
 ## What to do with it
 
@@ -190,4 +189,4 @@ its module `tests/common/toybox.rs`), `redirty_mid_flush` (`5c3f464a1`, with
 its binary and `test-small-caches`), `fs_rename_durable` (`63b0874ba`, with
 its binary), `esp_filesystem` (`27a926141`, with `esp_files`),
 `device_claim_lifetime` (`51cc87fcc`) and `screen_i8042_health`
-(`b7f157a72`). `git revert` of each brings its test back.
+(`b7f157a72`).

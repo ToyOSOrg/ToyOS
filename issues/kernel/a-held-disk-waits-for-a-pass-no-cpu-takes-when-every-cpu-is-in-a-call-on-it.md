@@ -74,5 +74,5 @@ record before it. That change has never run: the test's first run back is
 also that change's.
 
 **`4f2bea143` holds #588's version of the test**: `git show 4f2bea143:tests/common/usb.rs`.
-`usb_stick_left` arms `usb-transport-break`, `usb-reset-moves`,
-`usb-reset-moves-after` and `usb-reset-moves-configured`, so they stay.
+`usb_stick_left`'s T14 row arms `usb-transport-break`, so it stays; `usb-reset-moves`,
+`usb-reset-moves-after` and `usb-reset-moves-configured` went with its QEMU arm in #660.

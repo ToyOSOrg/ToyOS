@@ -55,16 +55,6 @@ pub const MAX_LOG_PARTS: u32 = 9999;
 /// what `/system/bin/console` reads off USB before it paints anything.
 pub const MAX_LOG_BYTES: u64 = 1024 * 1024;
 
-/// The rotate-fast bound, and it is an argument now rather than a kernel
-/// actuator.
-///
-/// Filling megabytes by
-/// logging would take a boot far longer than a test should wait, and the code
-/// it drives is the shipped code — only the bound moves. 256 bytes, so one
-/// boot's own log crosses it many times over and drives both the continuation
-/// and the retention path.
-pub const ROTATE_FAST_BYTES: u64 = 256;
-
 /// The name of one file in this boot's sequence.
 ///
 /// The first part carries the bare stem, because that is what nearly every boot

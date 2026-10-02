@@ -19,8 +19,7 @@
 //!
 //! **The instrument is declared once.** `.github/qemu-version` is the QEMU
 //! every guest is measured with — the version has been measured to decide
-//! verdicts (`desktop_typing_damage` and `usb_storage_shapes` are red on 8.2.2
-//! and green on 11.0.3, same image, same commit, same accelerator). A guest job
+//! verdicts. A guest job
 //! reds on a disagreement, and on a `/dev/kvm` that is present and does not
 //! open; `cargo run` only notes one, because a build must not stop for brew.
 
@@ -28,47 +27,38 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::arch::Arch;
-use crate::{flags, release, sdkversion, sync};
-
-pub const GUEST_ARCH: Arch = Arch::X86_64;
+use crate::arch::{Accel, Arch};
+use crate::sysroot::git_out;
+use crate::userlandhost::{Host, Os, Program};
+use crate::{flags, release, sdkversion};
 
 const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
   host              every host test: the build system, the harness's own checks,
                     the host workspace, the licences of what ships, clippy, the
                     model controls, userland and the SDK (ci.yml, nightly)
   toolchain         publish this tree's toolchain if nobody has (nightly)
-  guest <i>/<n>     one shard of the guest suite (nightly)
-  tcg               one test on an emulated CPU (nightly)
+  guest             the guest suite (nightly)
   publish           put main's SDK crates on crates.io (publish.yml)";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Job {
     Host,
     Toolchain,
-    Guest(String),
-    Tcg,
+    Guest,
     Publish,
 }
 
 fn parse(words: &[String]) -> Result<Job, String> {
-    let shard = |spec: Option<&String>| -> Result<String, String> {
-        let spec = spec.ok_or("that job takes a shard, <index>/<count>")?;
-        crate::testargs::parse_shard(&["--shard".to_string(), spec.clone()])?;
-        Ok(spec.clone())
-    };
     let job = match words.first().map(String::as_str) {
         Some("host") => Job::Host,
         Some("toolchain") => Job::Toolchain,
-        Some("guest") => Job::Guest(shard(words.get(1))?),
-        Some("tcg") => Job::Tcg,
+        Some("guest") => Job::Guest,
         Some("publish") => Job::Publish,
         Some(other) => return Err(format!("no CI job is called {other:?}")),
         None => return Err("which job?".to_string()),
     };
-    let takes = usize::from(matches!(job, Job::Guest(_))) + 1;
-    if words.len() > takes {
-        return Err(format!("{:?} takes nothing after it: {:?}", words[0], &words[takes..]));
+    if words.len() > 1 {
+        return Err(format!("{:?} takes nothing after it: {:?}", words[0], &words[1..]));
     }
     Ok(job)
 }
@@ -81,8 +71,7 @@ pub fn dispatch(root: &Path, args: &[String]) {
     let steps = match &job {
         Job::Host => host(root),
         Job::Toolchain => vec![step("the toolchain release", || release::ensure_published(root))],
-        Job::Guest(shard) => guest(root, &suite_args(&["--shard", shard, "--jobs", "1"])),
-        Job::Tcg => guest(root, &suite_args(&["--jobs", "1", "empty_dir_stat"])),
+        Job::Guest => guest(root, &suite_args(&["--jobs", "1"])),
         Job::Publish => vec![step("the SDK crates on crates.io", || publish(root))],
     };
     let failed: Vec<&Step> = steps.iter().filter(|s| s.verdict.is_err()).collect();
@@ -184,14 +173,45 @@ pub(crate) struct Control {
     /// The model's package in the host workspace.
     pub(crate) krate: &'static str,
     pub(crate) feature: &'static str,
+    /// The test target the verdicts' tests are in; `None` is the library's own.
     test: Option<&'static str>,
     /// `false` is a case that catches its own panic and asserts on it: its
     /// teeth are a green run.
     must_red: bool,
     /// Every one must be in the output. An exit code alone would read a compile
     /// error as the model having teeth.
-    verdicts: &'static [&'static str],
+    verdicts: &'static [Verdict],
 }
+
+/// A line a control's run must print, and the test that prints it: the run is
+/// the tests its verdicts name and no other, so nothing it runs goes unread.
+#[derive(Clone, Copy)]
+enum Verdict {
+    /// The harness's own `<test> ... FAILED`.
+    Fails(&'static str),
+    /// The harness's own `<test> ... ok`.
+    Passes(&'static str),
+    /// A message the test prints itself.
+    Says { test: &'static str, message: &'static str },
+}
+
+impl Verdict {
+    fn test(self) -> &'static str {
+        match self {
+            Fails(test) | Passes(test) | Says { test, .. } => test,
+        }
+    }
+
+    fn line(self) -> String {
+        match self {
+            Fails(test) => format!("{test} ... FAILED"),
+            Passes(test) => format!("{test} ... ok"),
+            Says { message, .. } => message.to_string(),
+        }
+    }
+}
+
+use Verdict::{Fails, Passes, Says};
 
 const KERNEL_LOOM: &str = "kernel-loom";
 const SCHED_LOOM: &str = "toyos-sched-loom";
@@ -204,7 +224,7 @@ const fn red(
     krate: &'static str,
     feature: &'static str,
     test: Option<&'static str>,
-    verdicts: &'static [&'static str],
+    verdicts: &'static [Verdict],
 ) -> Control {
     Control { krate, feature, test, must_red: true, verdicts }
 }
@@ -213,106 +233,120 @@ const fn red(
 /// `every_model_control_is_run` holds this against the manifests.
 pub(crate) const CONTROLS: &[Control] = &[
     red(KERNEL_LOOM, "wake-fence-off", Some("log_wake"), &[
-        "a_commit_and_an_arm_cannot_both_miss ... FAILED",
+        Fails("a_commit_and_an_arm_cannot_both_miss"),
     ]),
     red(KERNEL_LOOM, "lock-acquire-off", Some("ticket_lock"), &[
-        "try_lock_observes_the_previous_owners_writes ... FAILED",
+        Fails("try_lock_observes_the_previous_owners_writes"),
     ]),
     red(KERNEL_LOOM, "seqlock-writer-fence-off", Some("panic_console_publish"), &[
-        "a_snapshot_is_one_publication_whole ... FAILED",
+        Fails("a_snapshot_is_one_publication_whole"),
     ]),
     red(KERNEL_LOOM, "serial-try-lock-then-some", Some("serial_lock"), &[
-        "a_lost_try_lock_leaves_the_lock_held ... FAILED",
-        "two_writers_never_overlap ... FAILED",
+        Fails("a_lost_try_lock_leaves_the_lock_held"),
+        Fails("two_writers_never_overlap"),
     ]),
     red(KERNEL_LOOM, "reap-raise-relaxed", Some("reap_gate"), &[
-        "a_claim_sees_the_enrolled_work ... FAILED",
+        Fails("a_claim_sees_the_enrolled_work"),
     ]),
     red(KERNEL_LOOM, "shootdown-serve-relaxed", Some("tlb_shootdown"), &[
-        "an_acknowledged_flush_postdates_the_page_table_write ... FAILED",
-        "one_serve_answers_two_concurrent_shootdowns ... FAILED",
+        Fails("an_acknowledged_flush_postdates_the_page_table_write"),
+        Fails("one_serve_answers_two_concurrent_shootdowns"),
     ]),
     red(KERNEL_LOOM, "roster-commit-relaxed", Some("smp_bringup"), &[
-        "a_committed_count_never_outruns_its_slot ... FAILED",
+        Fails("a_committed_count_never_outruns_its_slot"),
     ]),
     red(KERNEL_LOOM, "smp-ready-split", Some("smp_bringup"), &[
-        "a_released_machine_is_answering ... FAILED",
+        Fails("a_released_machine_is_answering"),
     ]),
     red(KERNEL_LOOM, "log-commit-release-off", Some("log_record"), &[
-        "a_committed_record_is_whole_or_absent ... FAILED",
-        "a_key_and_the_record_it_names_come_from_one_generation ... FAILED",
+        Fails("a_committed_record_is_whole_or_absent"),
+        Fails("a_key_and_the_record_it_names_come_from_one_generation"),
     ]),
     red(KERNEL_LOOM, "shard-publish-relaxed", Some("log_publish"), &[
-        "a_reader_that_finds_a_shard_finds_it_built ... FAILED",
+        Fails("a_reader_that_finds_a_shard_finds_it_built"),
     ]),
     red(KERNEL_LOOM, "log-ring-publish-relaxed", Some("log_ring"), &[
-        "a_published_record_is_whole_and_read_once ... FAILED",
-        "a_slot_is_reused_only_after_its_record_was_read ... FAILED",
-        "a_lane_publishes_whole_and_reuses_only_after_a_read ... FAILED",
+        Fails("a_published_record_is_whole_and_read_once"),
+        Fails("a_slot_is_reused_only_after_its_record_was_read"),
+        Fails("a_lane_publishes_whole_and_reuses_only_after_a_read"),
     ]),
     red(KERNEL_LOOM, "log-ring-tail-relaxed", Some("log_ring"), &[
-        "a_published_record_is_whole_and_read_once ... FAILED",
-        "a_slot_is_reused_only_after_its_record_was_read ... FAILED",
-        "a_lane_publishes_whole_and_reuses_only_after_a_read ... FAILED",
+        Fails("a_published_record_is_whole_and_read_once"),
+        Fails("a_slot_is_reused_only_after_its_record_was_read"),
+        Fails("a_lane_publishes_whole_and_reuses_only_after_a_read"),
     ]),
     red(KERNEL_LOOM, "log-ring-loads-swapped", Some("log_ring"), &[
-        "a_published_record_is_whole_and_read_once ... FAILED",
+        Fails("a_published_record_is_whole_and_read_once"),
     ]),
     red(KERNEL_LOOM, "poll-fire-load-store", Some("poll_once"), &[
-        "a_post_and_a_recheck_answer_a_poll_once ... FAILED",
-        "a_withdrawal_and_a_post_never_both_take_a_poll ... FAILED",
+        Fails("a_post_and_a_recheck_answer_a_poll_once"),
+        Fails("a_withdrawal_and_a_post_never_both_take_a_poll"),
     ]),
     red(KERNEL_LOOM, "sleeplock-acquire-off", Some("sleep_lock"), &[
-        "a_parking_contender_observes_the_holders_writes ... FAILED",
-        "two_holders_never_overlap ... FAILED",
+        Fails("a_parking_contender_observes_the_holders_writes"),
+        Fails("two_holders_never_overlap"),
     ]),
     red(KERNEL_LOOM, "device-irq-lossy", Some("device_irq"), &[
-        "every_message_is_counted_once ... FAILED",
+        Fails("every_message_is_counted_once"),
     ]),
     red(KERNEL_LOOM, "dump-report-relaxed", Some("dump_request"), &[
-        "a_request_filed_during_a_report_is_reported ... FAILED",
+        Fails("a_request_filed_during_a_report_is_reported"),
     ]),
     Control {
         krate: SCHED_LOOM,
         feature: "no-preempt-guard",
         test: Some("loom_mailbox"),
         must_red: false,
-        verdicts: &["preempted_producer_strands_suffix ... ok"],
+        verdicts: &[Passes("preempted_producer_strands_suffix")],
     },
-    // A double panic aborts before the harness prints a `FAILED` line, so the
-    // verdict is the first panic's own message.
-    red(SCHED_LOOM, "doorbell-kick-relaxed", Some("loom_sleep"), &[
-        "halted with 2 of 2 messages queued and no IPI in flight",
-    ]),
-    red(SCHED_LOOM, "push-fence-relaxed", Some("loom_push"), &["published and no push behind it"]),
+    red(SCHED_LOOM, "doorbell-kick-relaxed", Some("loom_sleep"), &[Says {
+        test: "a_halted_cpu_with_queued_work_was_kicked",
+        message: "halted with 2 of 2 messages queued and no IPI in flight",
+    }]),
+    red(SCHED_LOOM, "push-fence-relaxed", Some("loom_push"), &[Says {
+        test: "a_cpu_that_halts_without_seeing_the_surplus_was_pushed",
+        message: "published and no push behind it",
+    }]),
     // The watch's lost wake, staged: the waiter parks over a post it was flagged
-    // with. A double panic, so the verdict is the first one's message.
+    // with.
     red(SCHED_LOOM, "commit-ignores-notify", Some("loom_watch"), &[
-        "parked with the condition true and no wake owed: the post was lost",
-        "parked with both completions written and no wake owed: a ring's post was lost",
+        Says {
+            test: "a_post_racing_a_registration_leaves_nobody_parked",
+            message: "parked with the condition true and no wake owed: the post was lost",
+        },
+        Says {
+            test: "two_posts_through_one_rings_lock_lose_no_wake",
+            message: "parked with both completions written and no wake owed: a ring's post was \
+                      lost",
+        },
     ]),
     // The notify's flagged arm answering off a load: a second post reads the
     // word from before the waiter consumed the first flag.
-    red(SCHED_LOOM, "notify-flag-load-only", Some("loom_watch"), &[
-        "parked with both conditions true and no wake owed: a post answered off a load",
-    ]),
+    red(SCHED_LOOM, "notify-flag-load-only", Some("loom_watch"), &[Says {
+        test: "a_second_post_is_not_lost_to_a_flag_the_waiter_consumed",
+        message: "parked with both conditions true and no wake owed: a post answered off a load",
+    }]),
     // The stop's store-buffering pair with the gate's fences gone.
-    red(SCHED_LOOM, "gate-fence-off", Some("loom_watch"), &[
-        "the stop parked over a thread that had parked, and nothing posted it",
-    ]),
+    red(SCHED_LOOM, "gate-fence-off", Some("loom_watch"), &[Says {
+        test: "a_transition_racing_an_opening_gate_is_never_missed",
+        message: "the stop parked over a thread that had parked, and nothing posted it",
+    }]),
     // `kernel-loom`'s control, over the kernel's `Once` as the watch models'
     // ring entry.
     red(SCHED_LOOM, "poll-fire-load-store", Some("loom_watch"), &[
-        "a_poll_registered_racing_a_post_completes_exactly_once ... FAILED",
-        "a_poll_registered_racing_a_post_in_place_completes_exactly_once ... FAILED",
-        "a_poll_on_two_watches_racing_both_posts_completes_exactly_once ... FAILED",
+        Fails("a_poll_registered_racing_a_post_completes_exactly_once"),
+        Fails("a_poll_registered_racing_a_post_in_place_completes_exactly_once"),
+        Fails("a_poll_on_two_watches_racing_both_posts_completes_exactly_once"),
     ]),
     // The ring models' lost-completion half: the producer posts before it
     // stores the readiness its registrant rechecks.
     red(SCHED_LOOM, "fault-posted-before-it-is-set", Some("loom_watch"), &[
-        "a poll over a ready object was completed by neither",
-        "a_poll_registered_racing_a_post_completes_exactly_once ... FAILED",
-        "a_poll_registered_racing_a_post_in_place_completes_exactly_once ... FAILED",
+        Says {
+            test: "a_poll_registered_racing_a_post_completes_exactly_once",
+            message: "a poll over a ready object was completed by neither",
+        },
+        Fails("a_poll_registered_racing_a_post_completes_exactly_once"),
+        Fails("a_poll_registered_racing_a_post_in_place_completes_exactly_once"),
     ]),
     // Reproduces an open defect
     // (`issues/kernel/steal-probe-node-dies-with-its-victim.md`) rather than
@@ -322,55 +356,64 @@ pub(crate) const CONTROLS: &[Control] = &[
         feature: "victim-retires-mid-probe",
         test: Some("loom_mailbox"),
         must_red: false,
-        verdicts: &[
-            "caught the verdict: the victim retired with a probe still linked in its queue",
-        ],
+        verdicts: &[Says {
+            test: "a_probe_outstanding_when_its_victim_retires_is_never_reclaimed",
+            message: "caught the verdict: the victim retired with a probe still linked in its \
+                      queue",
+        }],
     },
     red(PROCLIFE, "mutate-spawn-skips-the-insert-recheck", None, &[
-        "a_published_exit_leaves_no_unretired_thread ... FAILED",
-        "a_kill_racing_a_spawn_leaves_no_unretired_thread ... FAILED",
+        Fails("interleave::tests::a_published_exit_leaves_no_unretired_thread"),
+        Fails("interleave::tests::a_kill_racing_a_spawn_leaves_no_unretired_thread"),
     ]),
     red(PROCLIFE, "mutate-claim-teardown-always-wins", None, &[
-        "an_exit_and_a_kill_never_both_tear_a_process_down ... FAILED",
+        Fails("interleave::tests::an_exit_and_a_kill_never_both_tear_a_process_down"),
     ]),
     red(PROCLIFE, "mutate-kill-waits-for-its-victims", None, &[
-        "two_processes_killing_each_other_both_end ... FAILED",
-        "a_kill_chain_of_three_ends ... FAILED",
+        Fails("interleave::tests::two_processes_killing_each_other_both_end"),
+        Fails("interleave::tests::a_kill_chain_of_three_ends"),
     ]),
     red(PROCLIFE, "mutate-first-out-tears-down", None, &[
-        "an_exit_and_a_kill_never_both_tear_a_process_down ... FAILED",
+        Fails("interleave::tests::an_exit_and_a_kill_never_both_tear_a_process_down"),
     ]),
     red(PROCLIFE, "mutate-join-collects-in-a-teardown", None, &[
-        "a_join_racing_the_kill_that_takes_its_target ... FAILED",
+        Fails("interleave::tests::a_join_racing_the_kill_that_takes_its_target"),
     ]),
     red(PROCLIFE, "mutate-last-out-leaves-before-its-teardown", None, &[
-        "the_last_one_out_is_in_its_process_until_its_teardown_is_done ... FAILED",
-        "only_the_thread_that_empties_a_claimed_process_tears_it_down ... FAILED",
+        Fails("interleave::tests::the_last_one_out_is_in_its_process_until_its_teardown_is_done"),
+        Fails("teardown::tests::only_the_thread_that_empties_a_claimed_process_tears_it_down"),
     ]),
     red(SCHED_SIM, "placement-ignores-staleness", Some("policy"), &[
-        "a_stopped_cpu_stops_taking_work ... FAILED",
+        Fails("a_stopped_cpu_stops_taking_work"),
     ]),
     // The block protocol's three: a completion lost to a session's end, a
     // completion given twice after a reset, and a loss nothing is written
     // again after.
     red(BLOCKRING, "mutate-session-end-forgets", None, &[
-        "every_request_is_answered_exactly_once ... FAILED",
+        Fails("model::tests::every_request_is_answered_exactly_once"),
     ]),
     red(BLOCKRING, "mutate-abort-keeps-inflight", None, &[
-        "every_request_is_answered_exactly_once ... FAILED",
+        Fails("model::tests::every_request_is_answered_exactly_once"),
     ]),
     red(BLOCKRING, "mutate-no-reissue-after-loss", None, &[
-        "what_a_flush_calls_durable_is_on_the_medium ... FAILED",
+        Fails("model::tests::what_a_flush_calls_durable_is_on_the_medium"),
     ]),
-    red(TRANSPORT, "publish-relaxed", Some("loom"), &["a_published_entry_is_read_whole ... FAILED"]),
-    red(TRANSPORT, "no-clamp", Some("loom"), &["a_hostile_producer_yields_entries_or_a_violation ... FAILED"]),
-    red(TRANSPORT, "end-keeps-inflight", None, &[
-        "an_end_answers_every_tag_once_and_a_late_completion_nothing ... FAILED",
-    ]),
+    red(TRANSPORT, "publish-relaxed", Some("loom"), &[Fails("a_published_entry_is_read_whole")]),
+    red(TRANSPORT, "no-clamp", Some("loom"), &[Fails(
+        "a_hostile_producer_yields_entries_or_a_violation",
+    )]),
+    red(TRANSPORT, "end-keeps-inflight", None, &[Fails(
+        "inflight::tests::an_end_answers_every_tag_once_and_a_late_completion_nothing",
+    )]),
 ];
 
 /// Whether a control's run showed its teeth.
 fn judge_control(control: &Control, exited_green: bool, log: &str) -> Result<String, String> {
+    if log.lines().any(|l| l == "running 0 tests") {
+        return Err("the run selected no test: no name its verdicts give is a test of its target, \
+                    so `CONTROLS` drifted from the model"
+            .into());
+    }
     if control.must_red && exited_green {
         return Err(format!("passed with `{}`: the model has no teeth", control.feature));
     }
@@ -380,8 +423,8 @@ fn judge_control(control: &Control, exited_green: bool, log: &str) -> Result<Str
             control.feature
         ));
     }
-    let missing: Vec<&str> =
-        control.verdicts.iter().copied().filter(|v| !log.contains(v)).collect();
+    let missing: Vec<String> =
+        control.verdicts.iter().map(|v| v.line()).filter(|v| !log.contains(v.as_str())).collect();
     if !missing.is_empty() {
         return Err(format!(
             "no verdict {missing:?}: this proved nothing, and whatever stopped the model is \
@@ -392,13 +435,15 @@ fn judge_control(control: &Control, exited_green: bool, log: &str) -> Result<Str
 }
 
 fn run_control(root: &Path, control: &Control) -> Result<String, String> {
-    let mut args = vec!["test", "-p", control.krate];
-    args.extend(["--features", control.feature]);
-    if let Some(test) = control.test {
-        args.extend(["--test", test]);
+    let mut args = vec!["test", "-p", control.krate, "--features", control.feature];
+    match control.test {
+        Some(test) => args.extend(["--test", test]),
+        None => args.push("--lib"),
     }
+    args.extend(["--", "--exact"]);
+    args.extend(control.verdicts.iter().map(|v| v.test()));
     if !control.must_red {
-        args.extend(["--", "--nocapture"]);
+        args.push("--nocapture");
     }
     let (green, log) = cargo_logged(root, &args)?;
     judge_control(control, green, &log)
@@ -409,7 +454,7 @@ fn run_control(root: &Path, control: &Control) -> Result<String, String> {
 /// member of the host workspace, clippy with warnings denied, the concurrency
 /// models' negative controls, every userland crate with a host test
 /// ([`crate::userlandhost`], which also reds on a userland test none of them
-/// runs), and the SDK.
+/// runs), every app the images ship for each host ([`apps_for`]), and the SDK.
 ///
 /// **Every step runs against a `$TMPDIR` of this job's own, and the last step
 /// reds on anything left in it** but the lock `toyos_tmpdir` keeps there: a test
@@ -485,6 +530,16 @@ fn host(root: &Path) -> Vec<Step> {
         }
         Err(why) => steps.push(Step { label: "the userland host crates".into(), verdict: Err(why) }),
     }
+    match crate::userlandhost::programs(root) {
+        Ok(programs) => {
+            for os in Os::ALL {
+                steps.push(step(&format!("the apps for {}", os.name()), || {
+                    apps_for(root, &programs, os, &host_triple)
+                }));
+            }
+        }
+        Err(why) => steps.push(Step { label: "the apps".into(), verdict: Err(why) }),
+    }
     // The SDK compiles against the ToyOS sysroot everywhere but here, and this
     // build links no syscall.
     steps.push(step("the toyos SDK", || {
@@ -492,6 +547,75 @@ fn host(root: &Path) -> Vec<Step> {
     }));
     steps.push(step("nothing left in $TMPDIR or /tmp", || left_behind(&tmp, short, &before)));
     steps
+}
+
+/// Every app the images ship, judged for `os` with the features its image
+/// builds it with ([`crate::userlandhost`]).
+///
+/// One cargo per app: features unify across the packages of one invocation, and
+/// an app that builds only beside another's features is what this gate is for.
+fn apps_for(
+    root: &Path,
+    programs: &[Program],
+    os: Os,
+    host_triple: &str,
+) -> Result<String, String> {
+    let triple = os.triple();
+    let status = Command::new("rustup")
+        .args(["target", "add", triple])
+        .status()
+        .map_err(|e| format!("rustup: {e}"))?;
+    if !status.success() {
+        return Err(format!("rustup target add {triple} exited {status}"));
+    }
+    let verb = verb(os, host_triple);
+    let (attempted, declared) = attempted(programs, os);
+    let mut red = Vec::new();
+    for program in &attempted {
+        let manifest = format!("{}/Cargo.toml", program.dir);
+        let mut args = vec![verb, "--manifest-path", manifest.as_str(), "--target", triple];
+        args.extend(program.features.args());
+        if let Err(exit) = cargo(root, &args) {
+            red.push(format!(
+                "{} fails for {} and declares neither `fails` there nor `exempt`: {exit}",
+                program.dir,
+                os.name()
+            ));
+        }
+    }
+    if !red.is_empty() {
+        return Err(red.join("; "));
+    }
+    let said = format!("{} app(s) pass `cargo {verb} --target {triple}`", attempted.len());
+    if declared.is_empty() {
+        Ok(said)
+    } else {
+        Ok(format!("{said}; {} not attempted, as their manifests declare", declared.join(", ")))
+    }
+}
+
+/// `build` where the gate runs on `os`'s own triple, and `check` elsewhere.
+fn verb(os: Os, host_triple: &str) -> &'static str {
+    if os.triple() == host_triple {
+        "build"
+    } else {
+        "check"
+    }
+}
+
+/// The apps judged for `os`, and those whose manifests declare they fail there;
+/// an exempt program is in neither.
+fn attempted(programs: &[Program], os: Os) -> (Vec<&Program>, Vec<&str>) {
+    let (mut attempted, mut declared) = (Vec::new(), Vec::new());
+    for program in programs {
+        let Host::App(fails) = &program.host else { continue };
+        if fails.contains(&os) {
+            declared.push(program.dir.as_str());
+        } else {
+            attempted.push(program);
+        }
+    }
+    (attempted, declared)
 }
 
 /// What `tmp` holds but the lock `toyos_tmpdir` keeps in it, and every root
@@ -561,7 +685,10 @@ fn guest(root: &Path, suite: &[String]) -> Vec<Step> {
     // inherits this, and nothing here reads the environment concurrently with
     // the write.
     std::env::set_var("TMPDIR", tmp.path());
-    let mut steps = vec![step("the instrument", || instrument(root, GUEST_ARCH))];
+    let mut steps: Vec<Step> = Arch::ALL
+        .iter()
+        .map(|&arch| step(&format!("the {} instrument", arch.name()), || instrument(root, arch)))
+        .collect();
     if steps.iter().all(|s| s.verdict.is_ok()) {
         steps.push(step("the toolchain", || release::install(root)));
     }
@@ -605,19 +732,21 @@ fn verdicts(log: &str) -> String {
     }
 }
 
-/// The QEMU on `PATH` against `.github/qemu-version`, the firmware it declares,
-/// and whether `/dev/kvm` opens where it is present — the three things a guest
-/// verdict must be read against.
+/// The QEMU on `PATH` that boots `arch` against `.github/qemu-version`, the
+/// firmware it declares, and whether `/dev/kvm` opens where it is present and
+/// `arch` is the host's — the three things a guest verdict must be read against.
 fn instrument(root: &Path, arch: Arch) -> Result<String, String> {
     let want = declared_qemu_version(root).ok_or(".github/qemu-version declares no version")?;
     let have = qemu_version(arch)?;
     let firmware = crate::firmware::of(arch)?;
     let node = Path::new("/dev/kvm").exists();
-    let accelerated = arch.accel().is_hardware();
-    let accel = match (node, accelerated) {
-        (true, true) => "/dev/kvm opens",
-        (true, false) => "/dev/kvm is present and does not open",
-        (false, _) => "no /dev/kvm: emulated",
+    let native = Arch::HOST == Some(arch);
+    let accel = match (native, arch.accel(), node) {
+        (false, _, _) => "another architecture's machine: emulated",
+        (true, Accel::Kvm, _) => "/dev/kvm opens",
+        (true, Accel::Hvf, _) => "Hypervisor.framework",
+        (true, Accel::Tcg, true) => "/dev/kvm is present and does not open",
+        (true, Accel::Tcg, false) => "no /dev/kvm: emulated",
     };
     let cpu = std::fs::read_to_string("/proc/cpuinfo")
         .ok()
@@ -639,7 +768,7 @@ fn instrument(root: &Path, arch: Arch) -> Result<String, String> {
              instrument moved"
         ));
     }
-    if node && !accelerated {
+    if native && node && !arch.accel().is_hardware() {
         return Err(format!("{line}: every boot would fall back to emulation in silence"));
     }
     Ok(line)
@@ -709,8 +838,8 @@ fn publish(root: &Path) -> Result<String, String> {
                 .into()
         );
     }
-    let tip = sync::git(root, &["ls-remote", "origin", "refs/heads/main"])?;
-    at_tip(&tip, &sync::git(root, &["rev-parse", "HEAD"])?)?;
+    let tip = git_out(root, &["ls-remote", "origin", "refs/heads/main"]);
+    at_tip(&tip, git_out(root, &["rev-parse", "HEAD"]).trim())?;
     let plan = sdkversion::plan(root)?;
     sdkversion::write_published_manifests(root, &plan)?;
     let mut said = Vec::new();
@@ -804,34 +933,87 @@ mod tests {
         line.split_whitespace().map(String::from).collect()
     }
 
+    /// **An app is judged for every host its `fails` does not name**, built
+    /// where the gate runs on that host and checked elsewhere; an exempt
+    /// program is judged for none.
     #[test]
-    fn a_job_is_named_and_a_shard_is_a_shard() {
+    fn an_app_is_judged_for_every_host_its_fails_does_not_name() {
+        let program = |dir: &str, host| Program {
+            dir: dir.into(),
+            features: crate::build::Features::Default,
+            host,
+        };
+        let programs = [
+            program("calc", Host::App(Vec::new())),
+            program("doom", Host::App(vec![Os::Windows])),
+            program("init", Host::Exempt),
+        ];
+        let judged = |os| {
+            let (attempted, declared) = attempted(&programs, os);
+            (attempted.iter().map(|p| p.dir.as_str()).collect::<Vec<_>>(), declared)
+        };
+        assert_eq!(judged(Os::Linux), (vec!["calc", "doom"], vec![]));
+        assert_eq!(judged(Os::Macos), (vec!["calc", "doom"], vec![]));
+        assert_eq!(judged(Os::Windows), (vec!["calc"], vec!["doom"]));
+        assert_eq!(Os::ALL.map(|os| verb(os, Os::Linux.triple())), ["build", "check", "check"]);
+    }
+
+    #[test]
+    fn a_job_is_named_and_takes_nothing_after_it() {
         assert_eq!(parse(&words("host")), Ok(Job::Host));
-        assert_eq!(parse(&words("guest 3/12")), Ok(Job::Guest("3/12".into())));
-        assert!(parse(&words("guest")).is_err());
-        assert!(parse(&words("guest 13/12")).is_err());
+        assert_eq!(parse(&words("guest")), Ok(Job::Guest));
+        assert!(parse(&words("guest 3/12")).is_err());
+        assert!(parse(&words("tcg")).is_err());
         assert!(parse(&words("host extra")).is_err());
         assert!(parse(&words("smoke")).is_err());
         assert!(parse(&[]).is_err());
     }
 
-    /// Teeth for the controls' judge: a green negative control, a control that
-    /// never reached its verdict, and a self-catching case that failed are all
-    /// red.
+    /// Teeth for the controls' judge, on libtest's text as a control's run
+    /// prints it: a green negative control, a verdict line absent or saying the
+    /// opposite, a filter that selected nothing, and a self-catching case that
+    /// failed are all red.
     #[test]
     fn a_control_is_judged_by_its_verdict_and_not_its_exit_alone() {
-        let must_red = &CONTROLS[0];
-        let verdict = must_red.verdicts[0];
-        assert!(judge_control(must_red, false, &format!("test {verdict}\n")).is_ok());
-        assert!(judge_control(must_red, true, verdict).unwrap_err().contains("no teeth"));
-        assert!(judge_control(must_red, false, "error[E0425]: cannot find value")
-            .unwrap_err()
-            .contains("proved nothing"));
+        let control =
+            |feature: &str| CONTROLS.iter().find(|c| c.feature == feature).expect(feature);
 
-        let catches = CONTROLS.iter().find(|c| !c.must_red).expect("a self-catching case");
-        assert!(judge_control(catches, true, catches.verdicts[0]).is_ok());
-        assert!(judge_control(catches, false, catches.verdicts[0]).is_err());
+        let two = control("serial-try-lock-then-some");
+        let both = "running 2 tests\n\
+                    test a_lost_try_lock_leaves_the_lock_held ... FAILED\n\
+                    test two_writers_never_overlap ... FAILED\n";
+        assert!(judge_control(two, false, both).is_ok());
+        assert!(judge_control(two, true, both).unwrap_err().contains("no teeth"));
+        let one = "running 2 tests\n\
+                   test a_lost_try_lock_leaves_the_lock_held ... FAILED\n\
+                   test two_writers_never_overlap ... ok\n";
+        assert!(judge_control(two, false, one).unwrap_err().contains("proved nothing"));
+        let none = "running 0 tests\n\n\
+                    test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; \
+                    finished in 0.00s\n";
+        assert!(judge_control(two, true, none).unwrap_err().contains("selected no test"));
+
+        let says = control("doorbell-kick-relaxed");
+        let panicked = "running 1 test\n\n\
+                        thread 'a_halted_cpu_with_queued_work_was_kicked' (77012) panicked at \
+                        toyos-sched/loom/tests/loom_sleep.rs:102:13:\n\
+                        halted with 2 of 2 messages queued and no IPI in flight — a sleep-through\n";
+        assert!(judge_control(says, false, panicked).is_ok());
+
+        let catches = control("no-preempt-guard");
+        let caught = "running 1 test\ntest preempted_producer_strands_suffix ... ok\n";
+        assert!(judge_control(catches, true, caught).is_ok());
+        assert!(judge_control(catches, false, caught).is_err());
         assert!(judge_control(catches, true, "").is_err());
+
+        for c in CONTROLS {
+            let judged = judge_control(c, !c.must_red, "error[E0425]: cannot find value");
+            assert!(
+                matches!(&judged, Err(why) if why.contains("proved nothing")),
+                "{}: {judged:?}",
+                c.feature
+            );
+        }
     }
 
     #[test]

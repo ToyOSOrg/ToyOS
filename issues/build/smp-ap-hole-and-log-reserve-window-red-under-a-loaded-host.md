@@ -37,8 +37,7 @@ Not investigated further.
 `smp_failed_ap_leaves_no_hole` out with `smp_hole_shootdown`, the binary only
 it ran, and `git revert aedcf17dc` brings it back. `4db54ffa5` took
 `log_reserve_window` out with `log-nested-reserve`; `3b8102cf5` then took the
-nest vector and the log gate it rode, so `git revert 3b8102cf5 4db54ffa5`
-brings it back, `log_nested_emit` with it.
+nest vector and the log gate it rode.
 
 **Exit**: a cause for `spawn_init`'s `WouldBlock` and for a root read that
 misses its budget under host load, and both tests restored and green beside

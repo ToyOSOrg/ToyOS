@@ -16,7 +16,7 @@ use uefi::{
     proto::device_path::{media::{PartitionFormat, PartitionSignature}, DevicePath, DevicePathNode, DeviceType, DeviceSubType},
     proto::loaded_image::LoadedImage,
     proto::media::file::{File, FileAttribute, FileInfo, FileMode},
-    table::{boot::{MemoryAttribute, MemoryType, OpenProtocolAttributes, OpenProtocolParams, PAGE_SIZE}, cfg::ACPI2_GUID, runtime::ResetType},
+    table::{boot::{MemoryAttribute, MemoryType, PAGE_SIZE}, cfg::ACPI2_GUID, runtime::ResetType},
     Event,
 };
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry, RootBridgeWindow, MAX_ROOT_BRIDGE_WINDOWS};
@@ -42,6 +42,7 @@ mod arch;
 mod attempt;
 mod blackbox;
 mod bootnext;
+mod protocol;
 mod floor;
 mod gcd;
 mod loaderlog;
@@ -175,9 +176,9 @@ struct BootPartition {
 /// Every early-return below is one of those, so none of them panics.
 fn boot_partition(handle: Handle, system_table: &SystemTable<Boot>) -> Option<BootPartition> {
     let bs = system_table.boot_services();
-    let image = bs.open_protocol_exclusive::<LoadedImage>(handle).ok()?;
+    let image = protocol::exclusive::<LoadedImage>(bs, handle).ok()?;
     let device = image.device()?;
-    let path = bs.open_protocol_exclusive::<DevicePath>(device).ok()?;
+    let path = protocol::exclusive::<DevicePath>(bs, device).ok()?;
 
     let is_hard_drive = |node: &&DevicePathNode| {
         node.full_type() == (DeviceType::MEDIA, DeviceSubType::MEDIA_HARD_DRIVE)
@@ -377,22 +378,7 @@ struct GopInfo {
 fn query_gop(system_table: &SystemTable<Boot>) -> Option<GopInfo> {
     let bs = system_table.boot_services();
     let gop_handle = bs.get_handle_for_protocol::<GraphicsOutput>().ok()?;
-    // Never `open_protocol_exclusive` here: EXCLUSIVE calls `Stop` on every
-    // driver holding this protocol BY_DRIVER, and the firmware's graphics
-    // console is one.
-    //
-    // SAFETY: `open_protocol`'s obligation is that this handle and its protocol
-    // stay installed until the `ScopedProtocol` drops. Nothing between the two
-    // can uninstall either: the loader is the one image running, it registers
-    // no event callback, and it calls no boot service that connects or
-    // disconnects a controller.
-    let mut gop = unsafe {
-        bs.open_protocol::<GraphicsOutput>(
-            OpenProtocolParams { handle: gop_handle, agent: bs.image_handle(), controller: None },
-            OpenProtocolAttributes::GetProtocol,
-        )
-    }
-    .ok()?;
+    let mut gop = protocol::get::<GraphicsOutput>(bs, gop_handle).ok()?;
 
     let mode = gop.current_mode_info();
     let (width, height) = mode.resolution();
@@ -519,7 +505,7 @@ fn tsc() -> u64 {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], layout: u32, root_image: Option<rootimage::RootImage>, entry_tsc: u64, system_table: SystemTable<Boot>) -> ! {
+fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], root_image: rootimage::RootImage, entry_tsc: u64, system_table: SystemTable<Boot>) -> ! {
     // Said before it is refused, for `report_reach`'s reason.
     match arch::cpu_as_entered() {
         Ok(None) => {}
@@ -553,8 +539,7 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     // the boot map runs from: the map holds it wherever that is.
     let loader = {
         let bs = system_table.boot_services();
-        let image = bs
-            .open_protocol_exclusive::<LoadedImage>(bs.image_handle())
+        let image = protocol::exclusive::<LoadedImage>(bs, bs.image_handle())
             .expect("firmware answers LoadedImage for the image it started");
         let (base, size) = image.info();
         (base as u64, size)
@@ -612,8 +597,7 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
             None => ([0u8; 16], 0, 0, 0),
         };
 
-    let (root_image_addr, root_image_len, root_partition_guid, root_read_tsc) =
-        root_image.as_ref().map_or((0, 0, [0; 16], 0), rootimage::RootImage::handoff);
+    let (root_image_addr, root_image_len, root_partition_guid, root_read_tsc) = root_image.handoff();
 
     // Built before the exit so the address the kernel is handed is one this
     // loader can still print and refuse on.
@@ -641,7 +625,7 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         boot_partition_guid,
         boot_partition_present,
         log_partition_guid,
-        layout,
+        layout: toyos_abi::boot::LAYOUT,
         cmdline_addr: cmdline.as_ptr() as u64,
         cmdline_len: cmdline.len() as u64,
         root_bridge_window_count,
@@ -960,21 +944,6 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
         .unwrap_or_else(|e| panic!("slot {}'s cmdline is not UTF-8: {e}", chosen.which.letter()));
     println!("Boot parameter: {params:?}");
 
-    let layout = if toyos_abi::boot::actuators(params).any(|token| token == toyos_abi::boot::WRITE_NO_LAYOUT_PARAM) {
-        println!("Kernel arguments: layout 0 on {}", toyos_abi::boot::WRITE_NO_LAYOUT_PARAM);
-        0
-    } else {
-        toyos_abi::boot::LAYOUT
-    };
-
-    let root_image = if toyos_abi::boot::actuators(params).any(|token| token == toyos_abi::boot::WITHHOLD_ROOT_PARAM) {
-        println!("ROOT: withheld on {}; the kernel is handed no image", toyos_abi::boot::WITHHOLD_ROOT_PARAM);
-        chosen.root.free(system_table.boot_services());
-        None
-    } else {
-        Some(chosen.root)
-    };
-
     println!("Loading kernel elf...");
     let loaded_kernel = load_kernel_elf(&kernel_bytes);
 
@@ -992,5 +961,5 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     watchdog::arm(&system_table, rsdp_addr, params);
 
     println!("Starting kernel...");
-    start_kernel(loaded_kernel, kernel_bytes, cmdline, rsdp_addr, gop, boot_part, log_guid, layout, root_image, entry_tsc, system_table);
+    start_kernel(loaded_kernel, kernel_bytes, cmdline, rsdp_addr, gop, boot_part, log_guid, chosen.root, entry_tsc, system_table);
 }

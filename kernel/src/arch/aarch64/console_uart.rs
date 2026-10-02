@@ -9,6 +9,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use toyos_acpi::{SerialInterface, GAS_SYSTEM_MEMORY};
 
 use crate::drivers::acpi::direct_phys;
+use crate::drivers::serial::Registers;
 use crate::log;
 use crate::mm::{DirectMap, Mmio};
 
@@ -41,7 +42,9 @@ fn regs() -> Mmio {
 }
 
 /// Find the UART SPCR names and answer whether it is one this file drives.
-pub fn init(rsdp_addr: u64) -> bool {
+/// Takes the registers for the call it shares with the 16550's `init`, which
+/// programs its UART; this one touches none.
+pub fn init(_: &mut Registers, rsdp_addr: u64) -> bool {
     let spcr = match toyos_acpi::spcr(direct_phys(), rsdp_addr) {
         Ok(spcr) => spcr,
         Err(e) => {
@@ -67,21 +70,21 @@ pub fn init(rsdp_addr: u64) -> bool {
 }
 
 /// Whether a received byte waits.
-pub fn rx_ready() -> bool {
+pub fn rx_ready(_: &mut Registers) -> bool {
     regs().read_u32(FR) & FR_RXFE == 0
 }
 
 /// The received byte; only after [`rx_ready`] said one waits.
-pub fn read_byte() -> u8 {
+pub fn read_byte(_: &mut Registers) -> u8 {
     regs().read_u32(DR) as u8
 }
 
 /// Whether the transmitter will take a byte.
-pub fn tx_ready() -> bool {
+pub fn tx_ready(_: &mut Registers) -> bool {
     regs().read_u32(FR) & FR_TXFF == 0
 }
 
 /// Put one byte in the transmitter; only after [`tx_ready`], or the byte may be lost.
-pub fn write_byte(byte: u8) {
+pub fn write_byte(_: &mut Registers, byte: u8) {
     regs().write_u32(DR, u32::from(byte));
 }

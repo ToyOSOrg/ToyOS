@@ -70,7 +70,7 @@ pub use counters::{Counter, Counters, RefusalLog};
 pub use egress::{Sent, UdpOut, FRAME};
 pub use igmp::IgmpMode;
 pub use limiter::Limiter;
-pub use nud::{Held, Incomplete, Linked, Nud, Pending, Probing, Reachable, Released, Unreachable};
+pub use nud::{Delaying, Held, Incomplete, Nud, Pending, Probing, Reachable, Released, Stale, Unreachable};
 pub use route::{NextHop, Route, Source};
 pub use toyos_net_wire::Instant;
 
@@ -429,7 +429,7 @@ mod compile_fail {
     /// pending queue, and a resolved state's queue only drains.
     ///
     /// ```
-    /// use toyos_net_ip::{Held, Linked, Nud};
+    /// use toyos_net_ip::{Held, Nud};
     /// fn f(n: &mut Nud, d: Held) -> Option<Held> {
     ///     match n {
     ///         Nud::Incomplete(i) => {
@@ -440,10 +440,8 @@ mod compile_fail {
     ///             let _ = r.mac();
     ///             r.released.pop()
     ///         }
-    ///         Nud::Stale(s) | Nud::Delay(s) => {
-    ///             let s: &mut Linked = s;
-    ///             s.released.pop()
-    ///         }
+    ///         Nud::Stale(s) => s.released.pop(),
+    ///         Nud::Delay(s) => s.released.pop(),
     ///         Nud::Probe(p) => {
     ///             let _ = p.requests();
     ///             p.released.pop()
@@ -475,6 +473,11 @@ mod compile_fail {
     /// ```compile_fail
     /// use toyos_net_ip::{Held, Nud};
     /// fn f(n: &mut Nud, d: Held) { if let Nud::Stale(s) = n { s.released.push(d); } }
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use toyos_net_ip::{Held, Nud};
+    /// fn f(n: &mut Nud, d: Held) { if let Nud::Delay(s) = n { s.released.push(d); } }
     /// ```
     ///
     /// ```compile_fail

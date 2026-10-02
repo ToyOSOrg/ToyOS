@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use common::*;
 use toyos_net_ip::limits::acd::{ANNOUNCE_WAIT, PROBE_MAX, PROBE_MIN, PROBE_WAIT};
-use toyos_net_ip::{limits, AddrState, Counter, Event, Instant, Peer, Source};
+use toyos_net_ip::{limits, AddrState, Counter, Event, IfIndex, Instant, Peer, Source};
 use toyos_net_wire::ethernet::MacAddr;
 
 fn ip4(a: u8, b: u8, c: u8, d: u8) -> Ipv4Addr {
@@ -268,20 +268,21 @@ fn s_ip_acd_017_detection_starts_at_the_first_announcement() {
     assert_eq!(h.count(Counter::AcdDefended), 1);
 }
 
-#[test]
-fn s_ip_acd_018_a_full_control_queue_holds_probes_and_announcements() {
-    // if1 fills the control queue every interface shares; then if0 probes for A.
+/// if1 at 198.51.100.1/24 beside if0, which holds no address.
+fn beside_if1() -> (H, IfIndex) {
     let mut h = H::raw();
     let if1 = h.add_if1();
     h.assign(if1, ip4(198, 51, 100, 1), 24, 0);
     h.settle();
-    for n in 0..limits::CONTROL_QUEUE as u8 {
-        let m = MacAddr([2, 1, 0, 0, 0, n]);
-        let request = arp_packet(1, m, ip4(198, 51, 100, 100 + n), MacAddr::ZERO, ip4(198, 51, 100, 1));
-        let _ = h.ip.receive(h.clock(), if1, &eth(MacAddr::BROADCAST, m, 0x0806, &request));
-    }
-    h.ip.add_address(h.clock(), h.if0, A, 24).unwrap();
+    (h, if1)
+}
+
+#[test]
+fn s_ip_acd_018_a_full_control_queue_holds_probes_and_announcements() {
+    let (mut h, if1) = beside_if1();
     let t0 = h.clock();
+    h.fill_control_queue(if1, t0, ip4(198, 51, 100, 1));
+    h.ip.add_address(t0, h.if0, A, 24).unwrap();
     let at = t0.after(Duration::from_secs(1));
     while let Some(d) = h.ip.next_deadline().filter(|d| *d <= at) {
         h.ip.fire(d);
@@ -303,12 +304,42 @@ fn s_ip_acd_018_a_full_control_queue_holds_probes_and_announcements() {
     assert!(h.events.contains(&Event::Verified { iface: h.if0, addr: A }));
     assert_eq!(h.ip.address(h.if0, A), Some(AddrState::Assigned));
 
+    // A probes with credit until its third probe leaves; then if1 fills the queue, and the first
+    // announcement it owes waits there, counted toward nothing until it leaves.
+    let (mut h, if1) = beside_if1();
+    h.ip.add_address(h.clock(), h.if0, A, 24).unwrap();
+    let p3 = third_probe(&mut h);
+    h.fill_control_queue(if1, p3, ip4(198, 51, 100, 1));
+    let verified = p3.after(ANNOUNCE_WAIT);
+    h.ip.fire(verified);
+    h.collect();
+    assert_eq!(h.ip.address(h.if0, A), Some(AddrState::Announcing));
+    assert!(h.events.contains(&Event::Verified { iface: h.if0, addr: A }));
+    assert_eq!(h.count(Counter::IpControlQueueFull), 0, "the announcement waits; it is not dropped");
+    let t1 = verified.after(Duration::from_secs(2));
+    while let Some(d) = h.ip.next_deadline().filter(|d| *d <= t1) {
+        h.ip.fire(d);
+    }
+    assert_eq!(h.ip.address(h.if0, A), Some(AddrState::Announcing), "not assigned while its first announcement waits");
+    let mut out = Vec::new();
+    h.ip.transmit(t1, usize::MAX, |iface, f| out.push((iface, f.to_vec())));
+    assert_eq!(out.len(), limits::CONTROL_QUEUE + 1, "nothing more was queued");
+    assert!(out[..limits::CONTROL_QUEUE].iter().all(|(iface, _)| *iface == if1), "the replies queued first");
+    assert_eq!(out[limits::CONTROL_QUEUE], (h.if0, hex(V_ARP_ANNOUNCE)));
+    assert!(run_exact(&mut h, t1.after(Duration::from_millis(1_999))).is_empty());
+    assert_eq!(h.ip.address(h.if0, A), Some(AddrState::Announcing), "ANNOUNCE_INTERVAL runs from the hand-off");
+    let second = t1.after(Duration::from_secs(2));
+    assert_eq!(h.ip.next_deadline(), Some(second));
+    h.ip.fire(second);
+    assert_eq!(h.ip.address(h.if0, A), Some(AddrState::Announcing), "not assigned while its second announcement waits");
+    out.clear();
+    h.ip.transmit(second, usize::MAX, |iface, f| out.push((iface, f.to_vec())));
+    assert_eq!(out, [(h.if0, hex(V_ARP_ANNOUNCE))]);
+    assert_eq!(h.ip.address(h.if0, A), Some(AddrState::Assigned));
+
     // A defence due while the queue is full waits too, one at a time.
     let mut h = H::fixture_i();
-    for n in 0..limits::CONTROL_QUEUE as u8 {
-        let m = MacAddr([2, 1, 0, 0, 0, n]);
-        h.frame(&eth(MacAddr::BROADCAST, m, 0x0806, &arp_packet(1, m, ip4(192, 0, 2, 100 + n), MacAddr::ZERO, A)));
-    }
+    h.fill_control_queue(h.if0, h.clock(), A);
     h.frame(&hex(V_ARP_CONFLICT_B));
     h.at(10_001);
     h.frame(&hex(V_ARP_CONFLICT_B));

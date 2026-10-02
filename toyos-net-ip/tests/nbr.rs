@@ -94,9 +94,7 @@ fn s_ip_nbr_008_a_known_router_moving() {
     let mut h = H::fixture_i();
     assert_eq!(h.send(A, R, 5001, 5001, b"1"), Ok(None));
     h.out();
-    for n in 0..toyos_net_ip::limits::CONTROL_QUEUE as u8 {
-        h.frame(&request(MacAddr([2, 1, 0, 0, 0, n]), ip4(192, 0, 2, 100 + n), A));
-    }
+    h.fill_control_queue(h.if0, h.clock(), A);
     h.frame(&request(MAC_R, R, A));
     assert!(matches!(h.state(R), Some(Nud::Stale(s)) if s.released.queued() == 1));
     h.frame(&hex(V_ARP_ROUTER_MOVED));

@@ -91,13 +91,8 @@ fn main() {
     }
     let asked = |flag: &flags::Flag| CARGO_RUN.present(&args, flag);
 
-    // **Before `check_prerequisites`**, because it builds nothing.
-    if asked(&flags::SYNC) {
-        toyos_build::sync::dispatch_sync(&root);
-        return;
-    }
-    // Every CI job. Here for the same reason: the host job's runner has no QEMU,
-    // and a guest job names its own instrument rather than being noted at.
+    // Every CI job, before `check_prerequisites`: the host job's runner has no
+    // QEMU, and a guest job names its own instrument rather than being noted at.
     if asked(&flags::CI) {
         toyos_build::ci::dispatch(&root, &args);
         return;
@@ -198,11 +193,6 @@ fn main() {
 
     if let Some(bank) = CARGO_RUN.value(&args, &flags::REGEN_SOUNDFONT) {
         toyos_build::soundfont::regen(&root, Path::new(bank));
-        return;
-    }
-
-    if asked(&flags::WORKTREE) {
-        toyos_build::worktree::dispatch(&root, &args);
         return;
     }
 

@@ -307,7 +307,7 @@ pub(crate) mod gs {
 /// that can arrive with `rsp` not a kernel stack (SDM Vol. 3A §6.14.5); `ist[n-1]` is IST*n*.
 pub(crate) const IST_STACKS: usize = 3;
 
-/// One size for every IST stack, for [`crate::sched::idle_stack::SIZE`]'s reason; must leave room to double the measured high water, which `double_fault_stack` asserts.
+/// One size for every IST stack, for [`crate::sched::idle_stack::SIZE`]'s reason; must leave room to double the measured high water.
 const IST_STACK_SIZE: usize = 16384;
 
 /// Filled with [`STACK_FILL`], not unmapped: a fault already on IST1 is a triple fault, so detecting after the fact beats trapping it.
@@ -461,11 +461,12 @@ pub fn ist1_report() {
         * 8;
     let used = IST_STACK_SIZE - untouched;
 
-    crate::drivers::serial::panic_raw(b"\n[ist1] used ");
-    crate::drivers::serial::panic_raw_dec(used as u64);
-    crate::drivers::serial::panic_raw(b" of ");
-    crate::drivers::serial::panic_raw_dec(IST_STACK_SIZE as u64);
-    crate::drivers::serial::panic_raw(if intact {
+    let mut uart = crate::drivers::serial::panic_registers();
+    uart.write(b"\n[ist1] used ");
+    uart.dec(used as u64);
+    uart.write(b" of ");
+    uart.dec(IST_STACK_SIZE as u64);
+    uart.write(if intact {
         b" bytes, guard intact\n"
     } else {
         b" bytes, GUARD CORRUPTED\n"
@@ -505,13 +506,6 @@ pub fn init_bsp(lapic_id: u32) {
     // handlers report on no channel of this kernel's — so a fault in `fpu`
     // below would stop the machine with the panel holding the record before it.
     super::idt::init();
-
-    // The first instruction at which a panic is reportable at all, which is why
-    // it is where this fires: what it judges is that the reset register was
-    // already decoded, so a panic here can end the machine and not just describe it.
-    if crate::actuator::test_panic_after_idt() {
-        panic!("test-panic-after-idt: the IDT is loaded and nothing else is up");
-    }
 
     super::fpu::init(0);
     // Between `fpu::init` and this function's own line: the facts `fpu::init`
