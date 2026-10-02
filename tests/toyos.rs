@@ -1365,7 +1365,7 @@ fn judge_virt_job(mut qemu: QemuInstance, job: &str, said: &str) -> Result<Strin
     Ok(serial)
 }
 
-/// What toybox's `unmap_touch` says once every read of a page just unmapped,
+/// What `unmap_touch` says once every read of a page just unmapped,
 /// on the unmapping thread and on another, ended its process.
 const UNMAP_TOUCH_SAID: &str =
     "unmap_touch: 4 reads of a page just unmapped on the unmapping thread, and 4 on another";
@@ -1731,10 +1731,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
             }
             Ok(())
         }
-        "virt_timer_preempts" => {
-            // Spelled in `userland/toybox/src/preempt.rs`.
-            virt_job(profile, "preempt", "preempt: the counting thread was preempted twice")
-        }
+        "virt_timer_preempts" => virt_job(profile, "preempt", "preempt: the counting thread was preempted twice"),
         "virt_fp_isolation" => virt_job(profile, "fp_isolation", "fp_isolation: v0-v31, FPCR and FPSR survived"),
         "virt_first_entry" => virt_job(profile, "first_entry", "first_entry: x1-x30 were zero"),
         "virt_unmap_touch" => virt_job(profile, "unmap_touch", UNMAP_TOUCH_SAID),
