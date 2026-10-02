@@ -19,8 +19,8 @@ on it waits as long, masked.
 Read in one T14 boot of `main` at `c59e09ed6` with a throwaway instrument that
 records every window of 2 ms or more with the addresses that opened and closed
 it, its CPU's last events, and samples of that CPU every 2 ms; the boot ran
-`test_rs_ring_park_herd` forty times. Its lines are quoted on the pull request
-that landed this text. Pid 4 is that fsd.
+`test_rs_ring_park_herd` forty times. Its lines are quoted on #681 (comments
+5962618149, 5962618492 and 5962618868). Pid 4 is that fsd.
 
 - **Eleven writes of 7.8 ms or more in 37 s**, 2.0 to 4.6 s apart, each window
   opened at the syscall's entry and closed at its return. Nine are on one CPU

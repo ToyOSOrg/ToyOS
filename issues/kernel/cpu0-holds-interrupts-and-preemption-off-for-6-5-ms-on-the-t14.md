@@ -41,7 +41,7 @@ records.
 
 It is init in `SYS_DEVICE_CLAIM`. One boot of `main` at `c59e09ed6` with a
 throwaway instrument that names a window's opener and samples its CPU every
-2 ms (its lines quoted on the pull request that landed this text) read cpu0's
+2 ms (#681, comment 5962618149) read cpu0's
 line at 6623907 and 6623757 and named that window: pid 0, opened at the
 syscall's entry and closed at its return, from 1.179 s, both samples in
 `XhciController::wait_transfer` under `storage_read`. Two more of init's

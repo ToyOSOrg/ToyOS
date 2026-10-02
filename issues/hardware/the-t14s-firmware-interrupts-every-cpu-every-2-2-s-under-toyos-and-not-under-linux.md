@@ -10,7 +10,8 @@ On LENOVO 20W0003AMZ, BIOS N34ET71W (1.71), one boot of `main` at `c59e09ed6`
 with a throwaway instrument that reads `MSR_SMI_COUNT` (MSR 0x34) on each CPU
 as each interrupts-off window opens and closes read the count from 1.20 s to
 38.79 s into the boot, `test_rs_ring_park_herd` running forty times in it. Its
-lines are quoted on the pull request that landed this text.
+lines are quoted on #681 (comment 5962619169; the boot itself in comment
+5962618149).
 
 - **It moved 17 times, from 4824 to 4841, on all eight CPUs alike**: at each of
   the boot's 42 reports the eight read the same value.
