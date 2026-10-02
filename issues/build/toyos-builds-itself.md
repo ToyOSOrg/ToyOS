@@ -36,14 +36,12 @@ AArch64 one step behind, on `issues/kernel/toyos-runs-on-arm64.md`'s track.
 - LLVM ships as a binary seed. C is accepted because the compiler is LLVM, in
   programs too, important ones included.
 - cargo's C dependencies are accepted.
-- ToyOS programs use rustls with ring (2026-10-02): stage 3 of
-  `issues/design-debt/the-internet-clients-work-unchanged.md`.
 - Perl and Python come to ToyOS.
 - Make it work, then optimise, then compare: no performance study now, and no
   comparison before a compilation inside ToyOS succeeds.
 
 **To build** (2026-10-01), in an order that is open. Where a stage names
-libc's state it is pull request #650's at `15625e0cb`.
+libc's state it is `userland/libc` at `15625e0cb`.
 - **The `libc` crate gains a ToyOS module**, checked by `ctest` against
   `userland/libc`'s headers. `libc` 0.2.189 has none (`rg -i toyos` over its
   `src` matches nothing) and is empty for an OS it does not know
@@ -57,28 +55,30 @@ libc's state it is pull request #650's at `15625e0cb`.
   3 of `issues/kernel/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`
   builds none, because a descriptor is a handle and passes `FD_SETSIZE`; what
   `select` answers for such a descriptor is open.
-- **libc gains what cargo's libraries call**, among them a `realpath` that
-  resolves, a file `mmap`, record locks and file identities served by fsd,
-  socket descriptors that are pollable and can be non-blocking, `setvbuf` and
-  `socketpair`. Read from each library's source and not run: SQLite's default
-  VFS takes `fcntl` record locks and keys them on `st_dev` and `st_ino`;
-  libgit2 opens every repository through `realpath` and reads packs through a
-  file `mmap`; curl and libssh2 wait on non-blocking sockets, curl's multi
-  handle wakes through a `socketpair`, and its TLS key log sets its buffering
-  through `setvbuf`. #650's libc defines no `setvbuf` or `socketpair`, refuses
-  `realpath`, a file `mmap` and a record lock, and files the refusals as a
-  defect.
+- **libc gains what cargo's libraries call**, among them `setvbuf` and
+  `socketpair`, which it does not define; a `realpath` that resolves, a file
+  `mmap` and record locks
+  (`issues/build/libc-refuses-what-toyos-cannot-yet-answer.md`); file
+  identities
+  (`issues/build/libc-stat-answers-one-serial-number-for-every-file.md`),
+  served like the locks by fsd; and socket descriptors that are pollable and
+  can be non-blocking
+  (`issues/build/libc-close-of-a-socket-ends-the-process.md`). Read from each
+  library's source and not run: SQLite's default VFS takes `fcntl` record
+  locks and keys them on `st_dev` and `st_ino`; libgit2 opens every repository
+  through `realpath` and reads packs through a file `mmap`; curl and libssh2
+  wait on non-blocking sockets, curl's multi handle wakes through a
+  `socketpair`, and its TLS key log sets its buffering through `setvbuf`.
 - **cargo's eight C libraries are cross-built for ToyOS**: curl, libgit2,
   libssh2, OpenSSL, SQLite, nghttp2, zlib and blake3. Compiled and linked
-  with the toolchain's clang against #650's C sysroot, the sources of nghttp2,
-  zlib and blake3 build with nothing undefined, and the other five stop on
-  headers, types or functions libc lacks. `openssl-src` 300.6.1 knows no ToyOS
-  target and refuses one it does not know (`src/lib.rs`), and `openssl-sys` is
-  a `cfg(unix)` dependency of `curl-sys` and `libssh2-sys`, which ToyOS is not.
-  Open until M4: whether cargo's OpenSSL is built for ToyOS through its Perl
-  `Configure`, or cargo takes curl's rustls backend there. On the host it is
-  decided (owner, 2026-10-02): OpenSSL's build runs under the host's own make
-  and shell, and `openssl-src` is not forked for it.
+  with the toolchain's clang against that libc's C sysroot, the sources of
+  nghttp2, zlib and blake3 build with nothing undefined, and the other five
+  stop on headers, types or functions libc lacks. `openssl-src` 300.6.1 knows
+  no ToyOS target and refuses one it does not know (`src/lib.rs`), and
+  `openssl-sys` is a `cfg(unix)` dependency of `curl-sys` and `libssh2-sys`,
+  which ToyOS is not. Open until M4: whether cargo's OpenSSL is built for
+  ToyOS through its Perl `Configure`, or cargo takes curl's rustls backend
+  there.
 - **The tools a self-build runs are built for ToyOS**: Perl and Python, ported
   to start a child by spawn and never by fork; brush as the POSIX `sh`
   (`issues/build/ninja-runs-every-command-through-a-bin-sh-toyos-does-not-have.md`);

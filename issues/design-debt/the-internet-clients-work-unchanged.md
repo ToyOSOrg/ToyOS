@@ -23,13 +23,17 @@ netd, `toyos::net` and std's ToyOS networking in the `rust/` fork.
    lossy transfers byte-exact, timeouts honoured, a departed client freeing
    everything in netd. **Exit**: each is a guest test against the host's own
    TCP stack, with a hash over every byte moved.
-3. **TLS.** `rustls` with the `ring` provider and the Mozilla root set
-   as a pinned data file in the signed image, used as published; what breaks
-   is fixed in this repository's layers or carried upstream as a fork.
-   The `graviola` provider is an option to revisit later.
-   **Exit**: an unmodified `rustls` client completes a handshake with a
-   host-side server in the harness, and refuses a wrong name and an untrusted
-   root.
+3. **TLS.** `rustls` with the `ring` provider (owner, 2026-10-02; `graviola`
+   is an option for later) and the Mozilla root set as a pinned data file in
+   the signed image, used as published; what breaks is fixed in this
+   repository's layers or carried upstream as a fork. It moves the tree off
+   `rustls-rustcrypto` 0.0.2-alpha, the tree's one provider: doom's build
+   script installs it, on the host, and `tests/toyos-rust-tests` declares it
+   and names it in no source. Open: whether `ring` builds for the ToyOS
+   target; no build compiles it.
+   **Exit**: an unmodified `rustls` client on the `ring` provider completes a
+   handshake with a host-side server in the harness, and refuses a wrong name
+   and an untrusted root; and no manifest names `rustls-rustcrypto`.
 4. **HTTP.** An HTTP crate used as published. **Exit**: an unmodified client
    fetches a body over HTTPS, following a redirect, byte-exact.
 5. **The proof is `pkg install <url>`** — the package track's HTTPS stage
