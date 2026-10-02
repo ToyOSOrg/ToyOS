@@ -148,8 +148,9 @@ times:
    device's `Watch` and ends its interrupt; the thread waiting on that watch
    does the work, and no step creates a kernel thread. `irq_ring`, the driver
    list in `drain_irqs` and the idle loop's device checks are gone by step 5.
-   Each step measures the kernel's lines, and from step 2 the longest
-   interrupts-off and preemption-off windows, against stage 6's first commit.
+   Each step measures the kernel's lines against stage 6's first commit, and
+   from step 2 the longest interrupts-off and preemption-off windows against
+   the readings step 2 records.
    Steps 3 and 4 do not land alone: they land with #592's i8042 stage and
    with usbd.
    1. **Interrupts post.** A post is legal in a handler: the watches a handler
@@ -167,10 +168,10 @@ times:
    2. **The windows, measured**: the longest interrupts-off and preemption-off
       windows per CPU, reported beside the IRQ census and fed by each
       architecture's masking primitives and entries, the number the ARM
-      track's stage 4 owes as well. Applied to stage 6's first commit for
-      the baseline. **Exit**: both windows read on the T14, which is x86
-      metal, at stage 6's start and at step 1's head, and neither is longer
-      at step 1's head than at the start, under the load
+      track's stage 4 owes as well. The baseline is step 1 reverted on the
+      tree that carries the instrument. **Exit**: both windows read on the
+      T14, which is x86 metal, on that tree with step 1 and with it reverted,
+      and neither is longer with step 1 than without it, under the load
       `issues/kernel/a-process-lengthens-an-interrupts-off-walk-by-the-threads-it-parks-on-one-ring.md`
       names as well.
    3. **The i8042's thread is ps2server's** (#592's i8042 stage): `irq_ring`'s
@@ -185,7 +186,7 @@ times:
       report on the panel and holding it there, a device the pass reaches
       (owner, 2026-09-30). **Exit**: `drain_irqs` and the
       idle loop's device checks are gone, both windows are measured against
-      stage 6's start, and the exits of
+      the readings step 2 records, and the exits of
       `issues/kernel/an-irq-watchs-freeing-cancel-compiles-in-a-handler.md`
       and
       `issues/kernel/nothing-fails-when-a-devices-release-or-close-stops-answering-its-polls.md`

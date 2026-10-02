@@ -37,5 +37,5 @@ measured: no instrument in the tree reads an interrupts-off window.
 
 **Exit**: step 2's interrupts-off window, read on the T14 while one process
 parks 256 threads in `submit` on one ring and a sibling thread completes into
-it, is no longer at step 1's head than at stage 6's first commit under the
-same load.
+it, is no longer with step 1 than with it reverted on the same tree, under
+the same load.
