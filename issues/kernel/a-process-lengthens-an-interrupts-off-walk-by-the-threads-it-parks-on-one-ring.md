@@ -57,8 +57,8 @@ mutated kernels) read the same report of the same load at 1980239
   969922 to 1044783.
 - 2 × 5075290 is one of eight: every CPU reads 2 × 5014552 to 2 × 5075290
   (`:416` to `:430`), beside `tlb: shootdowns=282 wait=131633us max=10038us`
-  (`:431`). It is the first reading of
-  `issues/kernel/some-t14-boots-carry-an-interrupts-off-window-of-9-ms-or-more.md`.
+  (`:431`). It is the all-CPU shape of
+  `issues/kernel/a-log-write-to-the-t14s-stick-masks-interrupts-for-its-whole-usb-transfer-on-one-cpu-or-on-all-eight.md`.
 - 4725822 is cpu0's. The other seven read 544283 to 1018355.
 
 So one size reads 1.03 to 10.15 ms over six boots, and which boot carried

@@ -36,13 +36,21 @@ cpu0's line, in the seven boots where no longer window covers it:
   before init's first line at 1.161 or 1.162 s.
 
 The fourth boot's cpu0 reads 9644415 and 9643939, the event
-`issues/kernel/some-t14-boots-carry-an-interrupts-off-window-of-9-ms-or-more.md`
+`issues/kernel/a-log-write-to-the-t14s-stick-masks-interrupts-for-its-whole-usb-transfer-on-one-cpu-or-on-all-eight.md`
 records.
 
-Nothing names what opens it. A report carries a span and no address, and one
-report a boot cannot say whether the window recurs. What will: the record
-keeping, beside each CPU's longest span, the address its opening hook was
-called from, printed in the report and resolved through the kernel's symbols.
+It is init in `SYS_DEVICE_CLAIM`. One boot of `main` at `c59e09ed6` with a
+throwaway instrument that names a window's opener and samples its CPU every
+2 ms (its lines quoted on the pull request that landed this text) read cpu0's
+line at 6623907 and 6623757 and named that window: pid 0, opened at the
+syscall's entry and closed at its return, from 1.179 s, both samples in
+`XhciController::wait_transfer` under `storage_read`. Two more of init's
+claims precede it on cpu0: one at 1.171 s of 6,002,063 ns, both samples in
+`wait_transfer` under `storage_read`, and one at 1.162 s of 3,817,265 ns,
+whose one sample is in `PciDevice::is_id` under `pcidev::claim`. By reading, a
+partition claim reads its disk's table when asked (`gpt::claimable`,
+`kernel/src/gpt.rs`) through the same masked USB wait as that event's. Nothing
+has said what the PCI claim spends 3.8 ms on.
 
 It opens before the boot's first job ends. The three boots of #649 at
 `8b73eba69` (comment 5959415453, readbacks `649-r5/1-head`,
@@ -53,6 +61,6 @@ boot (`windowscase/kernel.log:348` in each), reads 6533222, 2 × 3273547 and
 6508165. In the three reports after it cpu0 reads at most 943904, 2 × 472938
 and 345229.
 
-**Exit**: the section that opens the window is named by that reading on the
-T14, and cpu0's longest window there no longer includes it, or this file is
-replaced by the bound the section is held to and the derivation of it.
+**Exit**: on the T14, cpu0's longest window before the first job's exit no
+longer includes init's claims, or this file is replaced by the bound they are
+held to and the derivation of it.
