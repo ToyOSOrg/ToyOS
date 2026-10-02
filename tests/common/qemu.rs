@@ -174,7 +174,7 @@ static FASTEST_BOOT_MS: AtomicU32 = AtomicU32::new(u32::MAX);
 /// The fastest boot of the host the ceilings were measured on: at or above the
 /// fastest boot of every run a ceiling in this tree was measured in, so that
 /// host pays them at 1×.
-const REFERENCE_BOOT_MS: u32 = 1320;
+const REFERENCE_BOOT_MS: u32 = 1424;
 
 fn record_boot(took: Duration) {
     let ms = took.as_millis().min(u32::MAX as u128) as u32;
@@ -371,12 +371,9 @@ pub const GUEST_QUIET: Duration = Duration::from_secs(15);
 ///
 /// The compositor prints its interval line whatever else has stopped, so
 /// silence alone cannot end a desktop wait, and a suite that never ends is
-/// worse than one that reds.
-pub const GUEST_WEDGED: Duration = Duration::from_secs(300);
-
-pub fn guest_liveness() -> Liveness {
-    Liveness::new(GUEST_QUIET, GUEST_WEDGED)
-}
+/// worse than one that reds. [`budget_smp`]'s rule over the tests that wait
+/// through [`await_guest`].
+pub const GUEST_WEDGED: Duration = Duration::from_secs(141);
 
 /// A kernel line without its `[kernel <t> cpu<N>] ` stamp.
 fn without_stamp(line: &str) -> &str {
@@ -555,7 +552,7 @@ pub fn await_guest(
 ) -> Result<(), String> {
     // Where this wait's own evidence starts.
     let from = log.len();
-    let mut live = guest_liveness();
+    let mut live = Liveness::new(GUEST_QUIET, qemu.budget(GUEST_WEDGED));
     while !done(log) && live.working(log) {
         let more = qemu.drain_serial(Duration::from_millis(200));
         log.push_str(&more);
@@ -2312,8 +2309,8 @@ fn publish_line(
 }
 
 /// A boot's ceiling: [`budget_smp`]'s rule over the tests that are one boot and
-/// one trivial command.
-pub const BOOT_CEILING: Duration = Duration::from_secs(30);
+/// nothing after it.
+pub const BOOT_CEILING: Duration = Duration::from_secs(63);
 
 /// Returns every line seen on the way to the marker — see [`QemuInstance::boot_log`].
 fn wait_for_ready(

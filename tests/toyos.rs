@@ -1765,7 +1765,7 @@ fn virt_selftest(
         },
     );
     let said = format!("{param}: ");
-    let rest = qemu.drain_until(Duration::from_secs(180), |l| l.contains(&said));
+    let rest = qemu.drain_until(Duration::from_secs(36), |l| l.contains(&said));
     let serial = format!("{}\n{rest}", qemu.boot_log());
     let Some(verdict) = serial.lines().find(|l| l.contains(&said)) else {
         return Err(format!("{param} never reported\nserial:\n{serial}"));
@@ -1855,8 +1855,8 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
                     ..Default::default()
                 },
             );
-            let dump = qemu.screendump_until("EARLY PANIC:", Duration::from_secs(30));
-            let rest = qemu.drain_until(Duration::from_secs(10), |l| l.contains(EARLY_PANIC_MESSAGE));
+            let dump = qemu.screendump_until("EARLY PANIC:", Duration::from_secs(6));
+            let rest = qemu.drain_until(Duration::from_secs(6), |l| l.contains(EARLY_PANIC_MESSAGE));
             let serial = format!("{}\n{rest}", qemu.boot_log());
             // What stage 3 prints before it panics: every item is a record
             // only the AArch64 side of the loader or the kernel writes.
@@ -1947,9 +1947,9 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
                     ..Default::default()
                 },
             );
-            let dump = qemu.screendump_until("EARLY PANIC:", Duration::from_secs(30));
+            let dump = qemu.screendump_until("EARLY PANIC:", Duration::from_secs(6));
             const FAULT_MESSAGE: &str = "synchronous from EL1 on SP_EL1: unknown reason (an undefined instruction) at 0x";
-            let rest = qemu.drain_until(Duration::from_secs(10), |l| l.contains(FAULT_MESSAGE));
+            let rest = qemu.drain_until(Duration::from_secs(6), |l| l.contains(FAULT_MESSAGE));
             let serial = format!("{}\n{rest}", qemu.boot_log());
             for want in [
                 "KERNEL PANIC: synchronous from EL1 on SP_EL1: unknown reason (an undefined instruction)",
@@ -1985,7 +1985,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
                 },
             );
             const SPAWNED: &str = "spawn: /system/bin/logd pid=";
-            let rest = qemu.drain_until(Duration::from_secs(180), |l| l.contains(SPAWNED));
+            let rest = qemu.drain_until(Duration::from_secs(30), |l| l.contains(SPAWNED));
             let serial = format!("{}\n{rest}", qemu.boot_log());
             for want in [
                 "paging: the direct map holds memory below",
@@ -2074,7 +2074,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
             }
             // The pager runs only on the CPU that claimed the panel, and it is
             // the loop that watches the reset bound: a second page is its proof.
-            let paged = qemu.screendump_while(Duration::from_secs(20), Duration::from_millis(200), |d| {
+            let paged = qemu.screendump_while(Duration::from_secs(87), Duration::from_millis(200), |d| {
                 d.rows().iter().any(|r| r.contains("[page ")) && d.text() != text
             });
             if paged.text() == text {
@@ -2116,7 +2116,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
             // anything else is userland holding the panel. Without this the
             // test would prove that a fatal panic paints a screen nobody had
             // taken.
-            let up = qemu.screendump_while(Duration::from_secs(30), Duration::from_millis(200), |d| {
+            let up = qemu.screendump_while(Duration::from_secs(96), Duration::from_millis(200), |d| {
                 d.fill() != FILL_BOOT
             });
             if up.fill() == FILL_BOOT {
