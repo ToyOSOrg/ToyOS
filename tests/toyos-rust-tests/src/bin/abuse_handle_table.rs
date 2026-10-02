@@ -136,11 +136,15 @@ fn main() {
 
     // dup2 picks the slot, so it never went through the allocating path that
     // carried the cap.
+    let mut filled = Vec::new();
     let mut refused = None;
     for n in 3..40_000u16 {
-        if let Err(e) = syscall::dup2(RawHandle(1), n) {
-            refused = Some((n, e));
-            break;
+        match syscall::dup2(RawHandle(1), n) {
+            Ok(handle) => filled.push(handle),
+            Err(e) => {
+                refused = Some((n, e));
+                break;
+            }
         }
     }
     let (n, e) = refused.expect("dup2 must eventually refuse to grow the handle table");
@@ -150,10 +154,10 @@ fn main() {
         "handle table reached {n} slots, past the {MAX_HANDLES} cap"
     );
 
-    // The cap is a live limit, not a latched failure. Every slot below `n` is
-    // at generation 0, so its handle is the bare slot index.
-    for slot in 3..n {
-        syscall::close(RawHandle(u32::from(slot)));
+    // The cap is a live limit, not a latched failure. A slot the arms above
+    // closed is past generation 0, so each is closed by the handle dup2 answered.
+    for handle in filled {
+        syscall::close(handle);
     }
     let reused = syscall::dup2(RawHandle(1), 3)
         .expect("dup2 must work again after closing handles");
