@@ -167,15 +167,15 @@ fn register_gpu(driver: Box<dyn gpu::Gpu>, info: gpu::GpuInfo) {
     gpu::register(driver, info);
 }
 
-/// The boot from power-on, off the loader's TSC readings and `complete`'s, at
-/// the calibrated rate. The TSC counts from reset, so the first span is
-/// firmware's unless firmware wrote the counter.
+/// The boot from power-on, off the loader's [`cpu::counter`] readings and
+/// `complete`'s, at the clock's rate. The first span is firmware's time since
+/// the counter started.
 fn report_power_on(args: &KernelArgs, complete: u64) {
     arch::boot::report_counter_origin();
-    let (entry, handoff) = (args.loader_entry_tsc, args.loader_handoff_tsc);
+    let (entry, handoff) = (args.loader_entry_counter, args.loader_handoff_counter);
     if handoff < entry || complete < handoff {
         log!(
-            "boot: the TSC went backwards: {entry} at the loader's entry, {handoff} at its handoff, \
+            "boot: the counter went backwards: {entry} at the loader's entry, {handoff} at its handoff, \
              {complete} at Boot: complete"
         );
         return;
@@ -185,7 +185,7 @@ fn report_power_on(args: &KernelArgs, complete: u64) {
         "boot: power-on to loader {} ms, loader {} ms (ROOT read {} ms), kernel to Boot: complete {} ms",
         ms(entry),
         ms(handoff - entry),
-        ms(args.root_read_tsc),
+        ms(args.root_read_ticks),
         ms(complete - handoff),
     );
 }
@@ -536,9 +536,9 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     }
 
     report_log_destination();
-    let complete_tsc = cpu::counter();
+    let complete = cpu::counter();
     boot_phase!("complete", 0);
-    report_power_on(kernel_args, complete_tsc);
+    report_power_on(kernel_args, complete);
 
     #[cfg(feature = "boot-actuators")]
     if actuator::test_late_panic() {
