@@ -4,11 +4,10 @@ kind: tooling
 opened: 2026-10-02
 ---
 
-# Pcidev issues cite cut guest tests as cover that runs
+# Kernel issues cite the cut HTTPS tests as cover that runs
 
-`520c0d129` deleted the guest tests `https_tls13`, `https_tls13_e1000e`,
-`bar_placement_is_proven`, `pci_function_is_exclusive`, `virtio_net_no_msix` and
-`userdev_dma_fault`, and three issues still give them as tests that run:
+`520c0d129` deleted the guest tests `https_tls13` and `https_tls13_e1000e`, and
+three issues still give one or both as tests that run:
 
 - `issues/kernel/a-claims-own-refusals-are-read-by-nothing.md`
 - `issues/kernel/no-boot-reaches-the-refusal-that-keeps-a-bar-read-inside-a-declared-window.md`
@@ -23,8 +22,8 @@ record, and stage H of
 that test for its fetch alone, on a line stage 3 of
 `issues/design-debt/the-internet-clients-work-unchanged.md` deletes.
 
-**Exit**: none of the three gives a test the tree lacks as one that runs, and
-`BarReferenceEmpty` has a reader that reds when the refusal goes, or one of the
-three lists it as unread.
+**Exit**: none of the three cites a test of either name that the tree lacks,
+and `BarReferenceEmpty` has a reader that reds when the refusal goes, or one of
+the three lists it as unread.
 
 Owner: the orchestrator.
