@@ -1,3 +1,6 @@
+#[macro_use(eprintln)]
+extern crate toyos_build;
+
 mod common;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -3462,7 +3465,6 @@ type Binaries = Vec<(String, Vec<u8>)>;
 /// their stages.
 fn build_shared_bins() -> (Binaries, Binaries) {
     let rust_tests_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/toyos-rust-tests");
-    eprintln!("[toyos] Building Rust tests...");
     let rust_bins = qemu::build_toyos_bins(&rust_tests_dir);
     let c_names = discover_c_tests();
     eprintln!(
@@ -3610,14 +3612,23 @@ struct Tally {
     /// assertion failed, by name. Red like any other, and named apart.
     stalls: Vec<String>,
     invalid: Vec<(String, Duration)>,
+    /// Every outcome's `elapsed`, summed.
+    tested: Duration,
 }
 
 impl Tally {
     fn new() -> Self {
-        Tally { passed: 0, failures: Vec::new(), stalls: Vec::new(), invalid: Vec::new() }
+        Tally {
+            passed: 0,
+            failures: Vec::new(),
+            stalls: Vec::new(),
+            invalid: Vec::new(),
+            tested: Duration::ZERO,
+        }
     }
 
     fn record(&mut self, outcome: Outcome) {
+        self.tested += outcome.elapsed;
         match outcome.verdict() {
             Verdict::Pass => self.passed += 1,
             Verdict::Fail => {
@@ -3706,10 +3717,17 @@ impl Tally {
             say(String::new());
         }
 
+        // Summed over the workers: the two add up to the suite's time only
+        // in a run one wide.
+        let elapsed = format!(
+            "{elapsed:.1?}; workers: {:.0?} building, {:.0?} testing",
+            toyos_build::build::built(),
+            self.tested
+        );
         match self.exit_code() {
             1 => say(format!(
                 "test result: FAILED. {} passed, {} failed, {} invalidated, \
-                 {total} total ({elapsed:.1?})",
+                 {total} total ({elapsed})",
                 self.passed,
                 self.failures.len(),
                 self.invalid.len(),
@@ -3717,7 +3735,7 @@ impl Tally {
             2 => {
                 say(format!(
                     "test result: INVALID. {} passed, {} invalidated by a \
-                     host suspend of {suspended:.0?}, {total} total ({elapsed:.1?})",
+                     host suspend of {suspended:.0?}, {total} total ({elapsed})",
                     self.passed,
                     self.invalid.len(),
                 ));
@@ -3728,7 +3746,7 @@ impl Tally {
                 );
             }
             _ => say(format!(
-                "test result: ok. {} passed, {total} total ({elapsed:.1?})",
+                "test result: ok. {} passed, {total} total ({elapsed})",
                 self.passed
             )),
         }
@@ -3741,17 +3759,23 @@ fn run_task(task: Task, test_config: &Path, report: &std::sync::mpsc::Sender<Out
     // them is a different question from what it did during one: a lid closed
     // while nothing was running invalidates nothing.
     let name = task.name();
+    toyos_build::build::building_for(name);
+    eprintln!("{}", toyos_build::printer::started("RUN", name));
     let start = common::clock::mark();
     let outcome = catching(|| match task {
         Task::Machine(name) => run_machine_test(name, test_config),
         Task::Screen(name, profile) => run_screen_test(name, profile, test_config),
     });
-    let _ = report.send(Outcome {
+    let outcome = Outcome {
         name: name.to_string(),
         reason: outcome.err(),
         elapsed: start.elapsed(),
         suspended: start.suspended(),
-    });
+    };
+    // Here and not where the outcomes are collected: this worker's next task
+    // says what it builds, and this line comes before that one.
+    report_line(&outcome);
+    let _ = report.send(outcome);
 }
 
 impl Task {
@@ -3766,28 +3790,23 @@ impl Task {
 /// One outcome, as the run prints it.
 fn report_line(outcome: &Outcome) {
     let reason = || outcome.reason.as_deref().unwrap_or("check failed");
+    let line = |word| toyos_build::printer::outcome(word, &outcome.name, outcome.elapsed);
     match outcome.verdict() {
-        Verdict::Pass => eprintln!("  PASS  {}  ({:.0?})", outcome.name, outcome.elapsed),
+        Verdict::Pass => eprintln!("{}", line("PASS")),
         Verdict::Fail => {
             eprintln!("FAIL {}: {}", outcome.name, reason());
-            if outcome.stalled() {
-                eprintln!(
-                    "  STALL {}  ({:.0?})",
-                    outcome.name, outcome.elapsed
-                );
-            } else {
-                eprintln!("  FAIL  {}  ({:.0?})", outcome.name, outcome.elapsed);
-            }
+            eprintln!("{}", line(if outcome.stalled() { "STALL" } else { "FAIL" }));
         }
         Verdict::Invalid => eprintln!(
-            "  INVL  {}  ({:.0?}) — the host was suspended for {:.0?} while it ran",
-            outcome.name, outcome.elapsed, outcome.suspended
+            "{} — the host was suspended for {:.0?} while it ran",
+            line("INVL"),
+            outcome.suspended
         ),
     }
 }
 
-/// Run `tasks` on `width` workers, printing each outcome as it lands, and
-/// return once every worker has joined.
+/// Run `tasks` on `width` workers, each printing its outcomes as they land,
+/// and return once every worker has joined.
 fn run_tasks(tasks: Vec<Task>, width: usize, test_config: &Path) -> Vec<Outcome> {
     if tasks.is_empty() {
         return Vec::new();
@@ -3812,10 +3831,7 @@ fn run_tasks(tasks: Vec<Task>, width: usize, test_config: &Path) -> Vec<Outcome>
             });
         }
         drop(tx);
-        for outcome in rx {
-            report_line(&outcome);
-            all.push(outcome);
-        }
+        all.extend(rx);
     });
     all
 }
@@ -4086,8 +4102,8 @@ fn main() {
     // said. `issues/kernel/every-interrupt-lands-on-the-boot-cpu.md`'s step 4:
     // the number its later change is measured against, produced by an ordinary
     // run rather than by `--nocapture`, so a CI run's own log carries it.
-    eprint!("{}", common::irqcensus::summary());
-
-    eprint!("{}", tally.summary(total, suite_start.elapsed(), suite_start.suspended()));
+    let census = common::irqcensus::summary();
+    let summary = tally.summary(total, suite_start.elapsed(), suite_start.suspended());
+    census.lines().chain(summary.lines()).for_each(|line| eprintln!("{line}"));
     run.exit(tally.exit_code());
 }
