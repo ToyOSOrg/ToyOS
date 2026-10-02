@@ -794,16 +794,6 @@ impl Drop for Restore {
 }
 
 /// Where a compile error starts in an `x build` log, if there is one.
-///
-/// The hosted rustc's build lets a non-zero `x build` through when the
-/// artifacts it needs are on disk, because rustdoc for ToyOS does not link and
-/// never has. That allowance used to be *anything at all*, as long as a `rustc` from
-/// some earlier build was still there — so run `31370078581` compiled std with
-/// `error[E0433]`, took the allowance, and died 83 seconds and 260 lines later
-/// at a missing file. The reported failure was the consequence.
-///
-/// A compile error cannot be a link failure, so it cannot be the thing that
-/// allowance is for.
 fn compile_error_at(log: &[String]) -> Option<usize> {
     log.iter().position(|l| {
         let l = l.trim_start();
