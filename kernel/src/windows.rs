@@ -23,8 +23,8 @@
 //! is tracked from [`start_here`], where it joins the scheduler, and a window
 //! is reported by the report after it closes.
 //!
-//! Once a boot, [`hold_once`] holds both windows for a span it reads off the
-//! counter and prints, which a later report of that CPU reads back.
+//! Once a boot, [`hold_once`] keeps both windows open for a span it reads off
+//! the counter and prints, which a later report of that CPU reads back.
 
 use core::sync::atomic::AtomicBool;
 use core::sync::atomic::Ordering::Relaxed;
@@ -121,15 +121,14 @@ pub fn log_cpu(cpu: u32) {
     );
 }
 
-/// The boot's first `SYS_EXIT` holds both windows for [`HELD_NS`] by this
-/// CPU's counter and says how long that was: `windows: held cpuN ns=…`.
+/// The boot's first `SYS_EXIT`, which its entry left with interrupts masked
+/// and the preempt count raised, stays there for [`HELD_NS`] by this CPU's
+/// counter and says how long that was: `windows: held cpuN ns=…`.
 pub fn hold_once() {
     static HELD: AtomicBool = AtomicBool::new(false);
     if HELD.swap(true, Relaxed) {
         return;
     }
-    let _masked = crate::arch::IrqGuard::close();
-    crate::preempt::disable();
     let from = cpu::counter();
     let owed = crate::clock::counter_ticks(HELD_NS);
     let mut held = 0;
@@ -138,5 +137,4 @@ pub fn hold_once() {
         held = cpu::counter() - from;
     }
     crate::log!("windows: held cpu{} ns={}", percpu::cpu_id(), crate::clock::nanos_of_ticks(held));
-    crate::preempt::enable();
 }
