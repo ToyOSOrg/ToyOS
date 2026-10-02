@@ -57,13 +57,15 @@ mutated kernels) read the same report of the same load at 1980239
   969922 to 1044783.
 - 2 × 5075290 is one of eight: every CPU reads 2 × 5014552 to 2 × 5075290
   (`:416` to `:430`), beside `tlb: shootdowns=282 wait=131633us max=10038us`
-  (`:431`). It is the all-CPU shape of
-  `issues/kernel/a-log-write-to-the-t14s-stick-masks-interrupts-for-its-whole-usb-transfer-on-one-cpu-or-on-all-eight.md`.
-- 4725822 is cpu0's. The other seven read 544283 to 1018355.
+  (`:431`). It is a log write's all-CPU shape
+  (`issues/hardware/xhci-waits-are-spins.md`) by reading.
+- 4725822 is cpu0's, a firmware step's length by reading
+  (`issues/hardware/the-t14s-firmware-interrupts-every-cpu-every-2-2-s-under-toyos.md`).
+  The other seven read 544283 to 1018355.
 
-So one size reads 1.03 to 10.15 ms over six boots, and which boot carried
-one of the machine's own events decides a single reading. None of the six
-took an interrupt a handler #634 changed serves
+So one size reads 1.03 to 1.98 ms in the four of those reports none of the
+machine's own events reached, and which boot carried one decides a single
+reading. None of the six took an interrupt a handler #634 changed serves
 (`userdev=0 sound=0 dmafault=0 hda=0` on every CPU).
 
 **Exit**: the interrupts-off window step 2's instrument reads on the T14
