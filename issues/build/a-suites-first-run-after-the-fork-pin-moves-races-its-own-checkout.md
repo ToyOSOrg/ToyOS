@@ -1,7 +1,7 @@
 ---
 status: open
 kind: tooling
-opened: 2026-10-02
+opened: 2026-10-03
 ---
 
 # A suite's first run after the fork pin moves races its own checkout
