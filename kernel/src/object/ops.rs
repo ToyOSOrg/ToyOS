@@ -777,6 +777,21 @@ pub fn has_data(object: &KObjectRef) -> bool {
     }
 }
 
+/// Whether a post on this object's read watch is its readability, which
+/// [`has_data`] cannot be asked for: the log's, whose unread records are a
+/// property of the reader's cursor, which the kernel does not hold; and a
+/// console's, whose watch is the keyboard's while its data is the serial
+/// line's (`issues/kernel/a-console-watch-waits-on-the-keyboard-not-the-serial-line.md`).
+pub fn read_posts_are_readiness(object: &KObjectRef) -> bool {
+    match object {
+        KObjectRef::SysCap(_) | KObjectRef::Console(_) => true,
+        KObjectRef::PipeRead(_) | KObjectRef::PipeWrite(_) | KObjectRef::Connection(_)
+        | KObjectRef::Acceptor(_) | KObjectRef::File(_) | KObjectRef::Device(_)
+        | KObjectRef::Inbox(_) | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
+        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) => false,
+    }
+}
+
 pub fn has_space(object: &KObjectRef) -> bool {
     match object {
         KObjectRef::PipeWrite(w) => pipe::has_space(w.id()),

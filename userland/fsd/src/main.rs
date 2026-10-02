@@ -154,7 +154,6 @@ fn main() {
         caps.iter().map(|c| c.dir.as_str()).collect::<Vec<_>>().join(", "),
         volume.describe()
     );
-    let caps_len = caps.len() as u32;
     Server {
         volume,
         caps,
@@ -163,7 +162,6 @@ fn main() {
         streams: BTreeMap::new(),
         next_stream: 0,
         writeback: WriteBack::default(),
-        probe: Poller::new(caps_len),
         scratch: Vec::new(),
     }
     .serve()
@@ -318,9 +316,6 @@ struct Server {
     next_stream: u64,
     /// When the sync nobody asked for is due.
     writeback: WriteBack,
-    /// Asks an acceptor whether a connection waits, before [`Server::accept`]
-    /// takes it.
-    probe: Poller,
     /// A write's bytes, copied out of the client's window or a stream's pipe
     /// into this process's own memory before the volume sees them. Kept, so a
     /// write allocates nothing.
@@ -423,23 +418,7 @@ impl Server {
         }
     }
 
-    /// Take a connection that waits on `cap`'s port, if one does.
-    ///
-    /// **Asked first, because `accept` parks and a completion is a hint**: a
-    /// watch replaced while a connection arrives can answer beside the watch
-    /// that replaced it, so two completions name one connection, and the
-    /// second `accept` would park this server for good. This process is the
-    /// port's one acceptor, so a connection the probe sees is still there to
-    /// take. The probe's ring is drained whole each time and a completion is
-    /// read by its port's token, so what counts is an arrival on this port
-    /// since its last probe, none of them taken.
     fn accept(&mut self, cap: usize) {
-        self.probe.watch(&self.caps[cap].acceptor, READABLE, cap as u64);
-        let mut waiting = false;
-        self.probe.wait(0, 0, |token| waiting |= token == cap as u64);
-        if !waiting {
-            return;
-        }
         let conn = match self.caps[cap].acceptor.accept() {
             Ok(conn) => conn,
             Err(why) => panic!("fsd: its own acceptor refused an accept: {why:?}"),

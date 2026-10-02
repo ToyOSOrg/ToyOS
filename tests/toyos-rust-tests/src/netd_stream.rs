@@ -50,10 +50,6 @@ pub fn ring_capacity() -> u64 {
 /// Wait, with no deadline, until `check` answers, re-asking it each time
 /// `handle` reports ready for `flags`: an answer that never comes is a hang the
 /// harness ceiling reds.
-///
-/// **A readiness completion is a reason to look again, not an answer**: a
-/// zero-byte write still wakes the other end's watch, and netd's liveness
-/// probes are zero-byte writes.
 pub fn await_until<T>(
     handle: &impl AsHandle,
     flags: u32,

@@ -15,12 +15,29 @@ pub fn typing(write_back: &[(u64, u64)]) -> Typing<'_> {
     Typing::ByMap(write_back)
 }
 
-/// The generic timer's virtual count, `CNTVCT_EL0`.
+/// The exception level the loader runs at, from `CurrentEL`.
+fn current_el() -> u64 {
+    let current: u64;
+    // SAFETY: reads `CurrentEL`, which EL1 and above may read.
+    unsafe { core::arch::asm!("mrs {}, currentel", out(reg) current, options(nomem, nostack, preserves_flags)) };
+    (current >> 2) & 0b11
+}
+
+/// The count the kernel's clock reads, its virtual count. At EL2 that is the
+/// physical count, `CNTPCT_EL0`, because the kernel's entry writes
+/// `CNTVOFF_EL2` zero, which resets UNKNOWN; at EL1 the offset is the
+/// hypervisor's for good and `CNTVCT_EL0` is read.
 pub fn counter() -> u64 {
     let count: u64;
-    // SAFETY: reads a counter EL1 and EL2 may always read; the `ISB` keeps the
-    // read in program order.
-    unsafe { core::arch::asm!("isb", "mrs {}, cntvct_el0", out(reg) count, options(nomem, nostack, preserves_flags)) };
+    if current_el() == 2 {
+        // SAFETY: reads a counter EL2 may always read; the `ISB` keeps the
+        // read in program order.
+        unsafe { core::arch::asm!("isb", "mrs {}, cntpct_el0", out(reg) count, options(nomem, nostack, preserves_flags)) };
+    } else {
+        // SAFETY: reads a counter EL1 may always read; the `ISB` keeps the
+        // read in program order.
+        unsafe { core::arch::asm!("isb", "mrs {}, cntvct_el0", out(reg) count, options(nomem, nostack, preserves_flags)) };
+    }
     count
 }
 
@@ -31,10 +48,7 @@ pub fn counter() -> u64 {
 /// the console still prints; the entry's read-back of `HCR_EL2` stays as the
 /// last line of defence.
 pub fn cpu_as_entered() -> Result<Option<alloc::string::String>, alloc::string::String> {
-    let current: u64;
-    // SAFETY: reads `CurrentEL`, which EL1 and above may read.
-    unsafe { core::arch::asm!("mrs {}, currentel", out(reg) current, options(nomem, nostack, preserves_flags)) };
-    let el = (current >> 2) & 0b11;
+    let el = current_el();
     if el != 2 {
         return Ok(Some(alloc::format!("CPU: entered at EL{el}")));
     }

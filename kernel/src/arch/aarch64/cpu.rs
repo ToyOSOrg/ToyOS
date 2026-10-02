@@ -67,14 +67,24 @@ pub unsafe fn write_thread_pointer(tp: u64) {
 
 /// Unmask interrupts on this CPU: `DAIF.I` and `DAIF.F`.
 pub fn enable_interrupts() {
+    #[cfg(feature = "mask-windows")]
+    if !interrupts_enabled() {
+        crate::windows::irqs_unmasking();
+    }
     // SAFETY: writes two `DAIF` bits; a compiler barrier, so no access moves across it.
     unsafe { asm!("msr daifclr, #3", options(nostack)) };
 }
 
 /// Mask interrupts on this CPU.
 pub fn disable_interrupts() {
+    #[cfg(feature = "mask-windows")]
+    let were_open = interrupts_enabled();
     // SAFETY: writes two `DAIF` bits; a compiler barrier, so no access moves across it.
     unsafe { asm!("msr daifset, #3", options(nostack)) };
+    #[cfg(feature = "mask-windows")]
+    if were_open {
+        crate::windows::irqs_masked();
+    }
 }
 
 /// Whether this CPU takes interrupts: `DAIF.I` clear.

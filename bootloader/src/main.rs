@@ -499,13 +499,8 @@ fn report_reach(what: &str, at: u64, len: u64) {
     );
 }
 
-/// The CPU's free-running counter, which counts from reset.
-fn tsc() -> u64 {
-    arch::counter()
-}
-
 #[allow(clippy::too_many_arguments)]
-fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], root_image: rootimage::RootImage, entry_tsc: u64, system_table: SystemTable<Boot>) -> ! {
+fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], root_image: rootimage::RootImage, entry_counter: u64, system_table: SystemTable<Boot>) -> ! {
     // Said before it is refused, for `report_reach`'s reason.
     match arch::cpu_as_entered() {
         Ok(None) => {}
@@ -597,7 +592,7 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
             None => ([0u8; 16], 0, 0, 0),
         };
 
-    let (root_image_addr, root_image_len, root_partition_guid, root_read_tsc) = root_image.handoff();
+    let (root_image_addr, root_image_len, root_partition_guid, root_read_ticks) = root_image.handoff();
 
     // Built before the exit so the address the kernel is handed is one this
     // loader can still print and refuse on.
@@ -633,9 +628,9 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         root_image_addr,
         root_image_len,
         root_partition_guid,
-        loader_entry_tsc: entry_tsc,
-        loader_handoff_tsc: 0,
-        root_read_tsc,
+        loader_entry_counter: entry_counter,
+        loader_handoff_counter: 0,
+        root_read_ticks,
     };
     report_reach(
         "Kernel arguments",
@@ -643,10 +638,10 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         mem::size_of::<KernelArgs>() as u64,
     );
 
-    kernel_args.loader_handoff_tsc = tsc();
+    kernel_args.loader_handoff_counter = arch::counter();
     println!(
-        "Loader TSC: {entry_tsc} at entry, {} at the handoff",
-        kernel_args.loader_handoff_tsc,
+        "Loader counter: {entry_counter} at entry, {} at the handoff",
+        kernel_args.loader_handoff_counter,
     );
 
     // Last, and after every line above: a console write, a FAT write and a
@@ -750,8 +745,8 @@ fn end_this_pass(system_table: &SystemTable<Boot>, exit_event: Option<Event>) ->
 
 #[entry]
 fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
-    // First: the TSC counts from reset, so this is what firmware took.
-    let entry_tsc = tsc();
+    // First, so this reading is firmware's time and none of the loader's.
+    let entry_counter = arch::counter();
     let exit_event = uefi_services::init(&mut system_table).unwrap();
     // First, because it covers everything below it: firmware starts a
     // five-minute countdown when it loads an image and resets the machine if
@@ -961,5 +956,5 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     watchdog::arm(&system_table, rsdp_addr, params);
 
     println!("Starting kernel...");
-    start_kernel(loaded_kernel, kernel_bytes, cmdline, rsdp_addr, gop, boot_part, log_guid, chosen.root, entry_tsc, system_table);
+    start_kernel(loaded_kernel, kernel_bytes, cmdline, rsdp_addr, gop, boot_part, log_guid, chosen.root, entry_counter, system_table);
 }

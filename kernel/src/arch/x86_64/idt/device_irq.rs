@@ -28,8 +28,14 @@ macro_rules! device_irq_entry {
                 // Ring 0 entry has unknown rsp alignment; align via the rbp save.
                 "mov rbp, rsp",
                 "and rsp, -16",
+                #[cfg(feature = "mask-windows")]
+                "call {windows_entered}",
                 // No user-state save around this call: kernel code is soft-float and never touches it.
                 "call {handler}",
+                #[cfg(feature = "mask-windows")]
+                "mov rdi, [rbp + 88]",
+                #[cfg(feature = "mask-windows")]
+                "call {windows_leaving}",
                 "mov rsp, rbp",
                 "lock sub dword ptr gs:[{preempt_count}], 1",
                 "test dword ptr [rsp + 88], 3", // CS = 10 GPRs + RIP above
@@ -53,9 +59,31 @@ macro_rules! device_irq_entry {
                 handler = sym $handler,
                 exit_to_user = sym crate::arch::idt::kernel_exit_to_user_check,
                 preempt_count = const $crate::arch::percpu::OFF_PREEMPT_COUNT,
+                #[cfg(feature = "mask-windows")]
+                windows_entered = sym super::device_irq::windows_entered,
+                #[cfg(feature = "mask-windows")]
+                windows_leaving = sym super::device_irq::windows_leaving,
             );
         }
     };
 }
 
 pub(crate) use device_irq_entry;
+
+/// The gate masked interrupts, which a maskable vector finds open (SDM Vol. 3A
+/// §6.8.1), and the stub raised the preempt count by one.
+#[cfg(feature = "mask-windows")]
+pub(super) extern "sysv64" fn windows_entered() {
+    crate::windows::irqs_masked();
+    crate::windows::preempt_raised();
+}
+
+/// The stub lowers the count next, with the frame's `cs`; its `iretq` opens
+/// interrupts on a return to Ring 0, and `exit_to_user` on one to Ring 3.
+#[cfg(feature = "mask-windows")]
+pub(super) extern "sysv64" fn windows_leaving(cs: u64) {
+    crate::windows::preempt_lowering();
+    if !toyos_userbound::Ring::of_cs(cs).is_user() {
+        crate::windows::irqs_unmasking();
+    }
+}

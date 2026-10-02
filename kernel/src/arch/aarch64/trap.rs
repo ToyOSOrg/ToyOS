@@ -91,13 +91,26 @@ fn class_name(esr: u64) -> &'static str {
 /// The Rust half of every vector entry. Returns to the entry, which restores
 /// the frame and returns from the exception; everything fatal diverges.
 extern "C" fn dispatch(frame: &mut Frame, entry: u64) {
+    // Each returning entry found interrupts open, an IRQ because only then is
+    // one taken and EL0 because it never masks them, and taking it masked
+    // them; `exit_to_user` opens them for EL0, and the `ERET` for EL1.
     match entry {
-        EL1_IRQ => irq(false),
+        EL1_IRQ => {
+            #[cfg(feature = "mask-windows")]
+            crate::windows::irqs_masked();
+            irq(false);
+            #[cfg(feature = "mask-windows")]
+            crate::windows::irqs_unmasking();
+        }
         EL0_SYNC => {
+            #[cfg(feature = "mask-windows")]
+            crate::windows::irqs_masked();
             el0_sync(frame);
             crate::scheduler::exit_to_user();
         }
         EL0_IRQ => {
+            #[cfg(feature = "mask-windows")]
+            crate::windows::irqs_masked();
             irq(true);
             crate::scheduler::exit_to_user();
         }

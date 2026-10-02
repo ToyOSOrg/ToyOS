@@ -283,6 +283,11 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(KERNEL_LOOM, "log-ring-loads-swapped", Some("log_ring"), &[
         Fails("a_published_record_is_whole_and_read_once"),
     ]),
+    red(KERNEL_LOOM, "post-is-an-answer", Some("inbox_answer"), &[
+        Fails("a_post_with_nothing_to_read_answers_nothing"),
+        Fails("a_post_that_lands_after_its_bytes_were_read_answers_nothing"),
+        Fails("a_poll_armed_again_does_not_end_the_look"),
+    ]),
     red(KERNEL_LOOM, "poll-fire-load-store", Some("poll_once"), &[
         Fails("a_post_and_a_recheck_answer_a_poll_once"),
         Fails("a_withdrawal_and_a_post_never_both_take_a_poll"),
@@ -320,9 +325,8 @@ pub(crate) const CONTROLS: &[Control] = &[
             message: "parked with the condition true and no wake owed: the post was lost",
         },
         Says {
-            test: "two_posts_through_one_rings_lock_lose_no_wake",
-            message: "parked with both completions written and no wake owed: a ring's post was \
-                      lost",
+            test: "a_fire_racing_a_submitters_park_is_never_lost",
+            message: "parked over a fired poll and no wake owed: a fire was lost",
         },
     ]),
     // The notify's flagged arm answering off a load: a second post reads the
