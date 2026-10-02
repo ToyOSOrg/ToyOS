@@ -9,9 +9,9 @@ opened: 2026-09-30
 libc neither declares nor defines `alarm`, and LLVM bounds its wait on a child
 with one: a `SIGALRM` handler makes `wait4` answer `EINTR`
 (`llvm/lib/Support/Unix/Program.inc`, `Wait`), so an LLVM built for ToyOS does
-not link without it
-(`issues/build/toyos-libc-lacks-the-posix-surface-llvm-compiles-against.md`
-measures that link). POSIX gives `alarm` no refusal, and its `SIGALRM` reaches
+not link without it: rustc's LLVM wrapper linked `-shared -z defs` with the
+libraries it needs leaves it undefined, beside stage 3's `wait` and `wait4`.
+POSIX gives `alarm` no refusal, and its `SIGALRM` reaches
 a handler only through the signals libc imitates from stage 3 of
 `issues/kernel/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`
 on; this waits on that stage.

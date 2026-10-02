@@ -3,6 +3,13 @@
 //! that removes a key no registered worktree records and nobody is making or
 //! using.
 //!
+//! **A key hashes what its product's build reads**: its sources, the
+//! configuration its build is given, the tools that run that build and the keys
+//! of the products it reads; and it is known before the product is. So a
+//! product found under its key, made here or restored by a CI runner from
+//! another run's cache, is the one this tree's build would make. An input a
+//! build reads and its key does not is a defect of the key.
+//!
 //! A product lives at `<store>/<key>/`, whole once its maker renamed it there;
 //! any other name beginning `<key>.` is one half-made or half-removed. A whole
 //! one is renamed out of the way before anything in it is removed ([`retire`]),
@@ -62,6 +69,7 @@ impl AsRef<Path> for Key {
 fn record_path(root: &Path, kind: Keyed) -> PathBuf {
     root.join(match kind {
         Keyed::Sysroot => "target/toyos-sysroot-key",
+        Keyed::Freestanding => "target/toyos-freestanding-key",
         Keyed::Compiler => "target/toyos-compiler-key",
         Keyed::Llvm => "target/toyos-llvm-key",
     })
@@ -215,11 +223,37 @@ fn retire_by(path: &Path, remove: impl Fn(&Path)) {
     }
 }
 
-/// Remove the directory `path` and all it holds, read-only or not.
+/// Remove `path`, a file or a directory and all it holds, read-only or not;
+/// that nothing is there is not an error.
+///
+/// A writer on this host — the leftovers are `.DS_Store` files — can put a file
+/// into a directory while it is being emptied, so a plain recursive delete finds a directory it has just emptied not empty and
+/// stops halfway. The removal runs again over what is left, at most [`PASSES`]
+/// times; a tree still refusing after that has a writer this cannot outrun, and
+/// the panic says so.
 pub fn remove(path: &Path) {
-    writable(path);
-    fs::remove_dir_all(path).unwrap_or_else(|e| panic!("remove {}: {e}", path.display()));
+    for pass in 1..=PASSES {
+        let removed = match fs::symlink_metadata(path) {
+            Ok(meta) if meta.is_dir() => {
+                writable(path);
+                fs::remove_dir_all(path)
+            }
+            Ok(_) => fs::remove_file(path),
+            Err(e) => Err(e),
+        };
+        match removed {
+            Ok(()) => return,
+            Err(e) if e.kind() == ErrorKind::NotFound => return,
+            Err(e) if e.kind() == ErrorKind::DirectoryNotEmpty && pass < PASSES => {
+                eprintln!("{} gained files while it was removed ({e}); removing again", path.display());
+            }
+            Err(e) => panic!("remove {}: {e}, after {pass} pass(es)", path.display()),
+        }
+    }
 }
+
+/// How many times [`remove`] runs over a tree that keeps refusing.
+const PASSES: usize = 10;
 
 /// Give `dir` and every directory under it back its owner's write permission.
 pub(crate) fn writable(dir: &Path) {

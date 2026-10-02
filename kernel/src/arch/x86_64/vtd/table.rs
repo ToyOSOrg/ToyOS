@@ -27,9 +27,6 @@ const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
 const PRESENT: u64 = 1 << 0;
 
-/// How much room a device domain has under `iommu-domain-narrow`.
-pub const NARROW_BYTES: u64 = 128 * 1024 * 1024;
-
 /// The kernel's one domain; not 0, which an all-zero context entry also names — reusing it would blur a fault record and a domain-selective invalidation.
 pub const KERNEL_DOMAIN: u16 = 1;
 
@@ -239,12 +236,8 @@ impl Domain {
 
     /// Where this domain's addresses end: what this unit will translate, not
     /// what the tables can express — past `MGAW` the hardware faults before the
-    /// walk it has entries for. `iommu-domain-narrow` brings it down to
-    /// [`NARROW_BYTES`] above the floor, so running out is a short loop.
+    /// walk it has entries for.
     pub fn ceiling(&self) -> u64 {
-        if crate::actuator::iommu_domain_narrow() {
-            return self.floor() + NARROW_BYTES;
-        }
         1u64 << self.translatable
     }
 

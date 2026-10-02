@@ -43,9 +43,12 @@ members = [
     "toyos-logstream",
     "toyos-manifest",
     "toyos-mdns",
+    "toyos-microcode",
     "toyos-mixer",
     "toyos-net-ip",
+    "toyos-net-shard",
     "toyos-net-tcp",
+    "toyos-net-testnet",
     "toyos-net-udp",
     "toyos-net-wire",
     "toyos-pci",
@@ -112,9 +115,8 @@ default-run = "toyos-build"
 fatfs = "0.3.6"
 fontdue = "0.9"
 gpt = "3.1.0"
-# `statvfs` for `worktree::free_bytes`, and the unprivileged ICMP datagram
-# socket `icmp::echo` asks a metal boot over, which is the platform call that
-# replaces a `ping` binary.
+# The unprivileged ICMP datagram socket `icmp::echo` asks a metal boot over,
+# which is the platform call that replaces a `ping` binary.
 libc = "0.2"
 toml = "0.8"
 uuid = { version = "1", features = ["v4"] }
@@ -160,12 +162,18 @@ getrandom = "0.3"
 # disagree about which files on it are `logd`'s.
 toyos-wallclock = { path = "toyos-wallclock" }
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
-# The digest behind two readings that must not be able to agree by accident:
-# `NOTICE`'s record of every committed binary file (`src/sourcegate.rs`), and a
-# disk this system was not given, before and after a boot
-# (`src/fingerprint.rs`). Already resolved here through a dev-dependency, so
-# nothing new is fetched — but `cargo run` did not compile it before this.
+# The digest behind `NOTICE`'s record of every committed binary file
+# (`src/sourcegate.rs`).
 sha2 = "0.10"
+# The toolchain release's tarball, packed in-process (`src/release.rs`): Rust's
+# own tar and gzip, where the binaries are hosts' tools.
+tar = { version = "0.4.46", default-features = false }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# Every request the build system makes, GitHub's API and the crates.io index,
+# where curl is a host's tool: rustls on ring, the one TLS provider the tree
+# takes (`issues/design-debt/the-internet-clients-work-unchanged.md`), whose C
+# and assembly the host's `cc` compiles.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [dev-dependencies]
 # `USER_TOP`, so the harness judges a held `rsp` against the bound the kernel
@@ -180,12 +188,6 @@ toyos-sched = { path = "toyos-sched" }
 # The Bulk-Only phases, so the harness judging a wedge reads the word
 # `toyos_xhci::bot::Phase` declares instead of spelling it a second time.
 toyos-xhci = { path = "toyos-xhci" }
-# The second reader `pkg_install_gbae` is judged against: what is read back off
-# the guest's volume is compared with a third party's decoding of the committed
-# archive, never with `userland/pkg`'s own. The archive itself is committed
-# under `tests/fixtures` and no test fetches anything.
-flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
-tar = "0.4"
 
 [patch.crates-io]
 loom = { git = "https://github.com/ToyOSOrg/loom", branch = "toyos" }
@@ -207,8 +209,7 @@ opt-level = 2
 # `opt-level = 0`. Nothing fail-fast is traded for it — `opt-level` does not
 # touch `debug-assertions`, which cargo still passes as `on` (checked with
 # `cargo build -p toyos-fat32 -v`), and rustc derives `overflow-checks` from
-# that. The pure crates' hostile-input tests keep both knobs that *found* the
-# two crafted-ELF kernel panics in `issues/`.
+# that.
 #
 # **One member depends on this line for correctness rather than for speed, and
 # its own manifest says so at length — this is the other half of that
@@ -227,10 +228,8 @@ opt-level = 3
 
 # The one profile every guest binary is built with. Optimised, because an
 # unoptimised guest mismeasures everything under TCG;
-# debug-assertions and overflow-checks on, because fail-fast beats speed here
-# and both crafted-ELF kernel panics in `issues/` were *found* by
-# an overflow check. `--release` would turn the last two off silently, so this
-# build system no longer has the flag.
+# debug-assertions and overflow-checks on, because fail-fast beats speed here.
+# `--release` would turn the last two off silently.
 #
 # It is declared here rather than in `toyos-ld/Cargo.toml` because cargo
 # ignores `[profile]` in a workspace member and that is one now. It is the only

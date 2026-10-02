@@ -404,9 +404,19 @@ pub struct SpawnArgs {
     /// `/system/lib` alone.
     pub image: u64,
     pub image_len: u64,
+    /// The process the child is placed under, whose end takes it down: a
+    /// handle carrying [`Rights::WRITE`] to it — a copy of that process's
+    /// [`SELF_LABEL`] — or [`HANDLE_INVALID`] for the caller itself.
+    /// `PermissionDenied` for a handle without `WRITE` and `InvalidArgument`
+    /// for one to no process, since a place is a handle a peer sent;
+    /// `Gone` for a process being torn down, and `ResourceExhausted` for a
+    /// child more than `toyos_proclife::MAX_DEPTH` below init.
+    ///
+    /// [`Rights::WRITE`]: crate::handle::Rights::WRITE
+    pub place: u64,
 }
 
-const _: () = assert!(core::mem::size_of::<SpawnArgs>() == 112);
+const _: () = assert!(core::mem::size_of::<SpawnArgs>() == 120);
 
 /// One `(label, handle)` pair of a process's endowment table.
 ///
@@ -434,6 +444,10 @@ const _: () = assert!(core::mem::size_of::<EndowEntry>() == 16);
 pub const SYSCAP_LABEL: &str = "syscap";
 /// The label for a program's namespace — what its manifest `receives` becomes.
 pub const SVC_LABEL: &str = "svc";
+/// The label every process starts holding a handle to itself under, carrying
+/// `WRITE`, `DUP` and `TRANSFER`: what it hands on for a child to be placed
+/// under it ([`SpawnArgs::place`]). The kernel puts it in every table.
+pub const SELF_LABEL: &str = "self";
 /// `serve:<name>`: the acceptor of a machine-wide port this program serves.
 pub const SERVE_PREFIX: &str = "serve:";
 /// `dev:<class>`: the claim for a device class this program was given.
@@ -449,10 +463,12 @@ pub const DEV_PREFIX: &str = "dev:";
 /// everything else it gets.
 pub const PROVIDE_PREFIX: &str = "provide:";
 
-/// Endowed `(label, handle)` pairs one spawn may carry. Policy on the
-/// primitive, refused by name, never truncated — the widest manifest row plus
-/// stdio.
+/// `(label, handle)` pairs one endowment table holds, the kernel's own
+/// [`SELF_LABEL`] among them. Policy on the primitive, refused by name, never
+/// truncated — the widest manifest row plus stdio.
 pub const MAX_ENDOWMENTS: usize = 32;
+/// `(label, handle)` pairs one spawn may carry: the kernel adds [`SELF_LABEL`].
+pub const MAX_SPAWN_ENDOWMENTS: usize = MAX_ENDOWMENTS - 1;
 /// `(child slot, parent handle)` pairs one spawn may carry.
 ///
 /// **Derived rather than chosen.** A slot map installs into the child's table,
@@ -462,8 +478,10 @@ pub const MAX_ENDOWMENTS: usize = 32;
 /// pair is a `duplicate_entry` under the parent's own lock — enough of them to
 /// pass `MAX_HEAP_ALLOC`, where the allocator's refusal is a kernel panic.
 pub const MAX_SLOT_MAP: usize = RawHandle::MAX_SLOTS;
-/// Bytes of label blob one endowment table may carry.
+/// Bytes of label blob one endowment table holds, [`SELF_LABEL`]'s among them.
 pub const MAX_LABELS_LEN: usize = 4096;
+/// Bytes of label blob one spawn may carry: the kernel adds [`SELF_LABEL`]'s.
+pub const MAX_SPAWN_LABELS_LEN: usize = MAX_LABELS_LEN - SELF_LABEL.len();
 
 use crate::handle::Rights;
 use crate::pci::{DmaGrant, DmaMapping};
@@ -864,6 +882,11 @@ pub mod debug_action {
     /// Emit one patterned kernel log record, `logstorm t=0 i=<arg> …`, whose
     /// text the reader regenerates from its two numbers.
     pub const LOG_PATTERNED: u64 = 21;
+    /// Mark the caller's next spawn that reaches its commit: the kernel kills
+    /// the process it is placed under after the commit and before the child
+    /// lands. That window is the loader's own, so no caller can order a kill
+    /// inside it; the kill and the landing that follow are the shipped paths.
+    pub const KILL_PLACE_AS_SPAWN_LANDS: u64 = 22;
 }
 
 /// Every kind of kernel object, in the order the kernel's own `kobject!`
@@ -1070,6 +1093,37 @@ pub fn readdir(path: &[u8], buf: &mut [u8]) -> Result<usize, SyscallError> {
         Some(e) => Err(e),
         None => Ok(n as usize),
     }
+}
+
+/// The kind byte a [`readdir`] entry opens with: a file.
+pub const DIRENT_FILE: u8 = 1;
+/// The kind byte a [`readdir`] entry opens with: a directory.
+pub const DIRENT_DIR: u8 = 2;
+
+/// One entry of a [`readdir`] listing: its kind byte, its name, a NUL, and its
+/// size as eight bytes, little-endian.
+pub struct Dirent<'a> {
+    pub is_dir: bool,
+    pub name: &'a [u8],
+    pub size: u64,
+}
+
+/// The entry at `*at` in a whole [`readdir`] listing, with `*at` moved past
+/// it; `None` once `*at` is at its end. A listing of any other shape is a
+/// kernel that broke this ABI, and panics.
+pub fn dirent<'a>(listing: &'a [u8], at: &mut usize) -> Option<Dirent<'a>> {
+    let rest = listing.get(*at..).filter(|r| !r.is_empty())?;
+    let is_dir = match rest[0] {
+        DIRENT_FILE => false,
+        DIRENT_DIR => true,
+        kind => panic!("SYS_READDIR answered an entry of kind {kind}"),
+    };
+    let len = rest[1..].iter().position(|&b| b == 0).expect("SYS_READDIR answered a name with no NUL");
+    let size = rest
+        .get(len + 2..len + 10)
+        .expect("SYS_READDIR answered an entry with no size");
+    *at += len + 10;
+    Some(Dirent { is_dir, name: &rest[1..1 + len], size: u64::from_le_bytes(size.try_into().unwrap()) })
 }
 
 /// Delete a file or directory.
@@ -2505,5 +2559,56 @@ mod tests {
             assert_eq!(PciId::from_wire(id.wire()), Some(id));
         }
         assert_eq!(PciId::from_wire(1 << 32), None);
+    }
+
+    /// A listing of `entries`, each a name, whether it is a directory and a
+    /// size, encoded as `sys_readdir` (`kernel/src/syscall/fs.rs`) encodes it.
+    fn listing(entries: &[(&str, bool, u64)]) -> std::vec::Vec<u8> {
+        let mut out = std::vec::Vec::new();
+        for (name, is_dir, size) in entries {
+            out.push(if *is_dir { 2 } else { 1 });
+            out.extend_from_slice(name.as_bytes());
+            out.push(0);
+            out.extend_from_slice(&size.to_le_bytes());
+        }
+        out
+    }
+
+    fn read_listing(bytes: &[u8]) -> std::vec::Vec<(std::string::String, bool, u64)> {
+        let mut at = 0;
+        let mut out = std::vec::Vec::new();
+        while let Some(entry) = dirent(bytes, &mut at) {
+            out.push((std::string::String::from_utf8(entry.name.to_vec()).unwrap(), entry.is_dir, entry.size));
+        }
+        assert_eq!(at, bytes.len(), "the reader stopped short of the listing's end");
+        out
+    }
+
+    #[test]
+    fn every_dirent_is_read_back_whatever_its_size_holds() {
+        // Sizes whose bytes are NULs, kind bytes and letters: a reader that
+        // does not step over all eight takes them for names.
+        let entries = [
+            ("a", false, 0),
+            ("dir", true, 0x0201_0000_0000_0000),
+            ("b.txt", false, 0x6162_6300_0102_0304),
+            ("", false, u64::MAX),
+            ("last", true, 17),
+        ];
+        let want: std::vec::Vec<_> = entries.iter().map(|(n, d, s)| ((*n).into(), *d, *s)).collect();
+        assert_eq!(read_listing(&listing(&entries)), want);
+        assert!(read_listing(&[]).is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "of kind 3")]
+    fn a_dirent_of_another_kind_is_a_broken_kernel() {
+        read_listing(&[3, b'x', 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "no size")]
+    fn a_short_dirent_is_a_broken_kernel() {
+        read_listing(&[1, b'x', 0, 0, 0]);
     }
 }

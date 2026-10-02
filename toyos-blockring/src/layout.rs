@@ -62,7 +62,8 @@ pub fn client<W: Word>(page: &[W; RING_WORDS]) -> ClientRings {
 
 /// The server's ends of a session page it was sent, every word it owns set to
 /// 0. Whatever the client left in its own is bounded when first looked at.
-pub fn server<W: Word>(page: &[W; RING_WORDS]) -> ServerRings {
+/// A server's way to them is [`crate::wire::Opened::over`].
+pub(crate) fn server<W: Word>(page: &[W; RING_WORDS]) -> ServerRings {
     (Consumer::new(page, REQUESTS), Producer::new(page, COMPLETIONS))
 }
 

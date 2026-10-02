@@ -648,7 +648,7 @@ pub unsafe extern "C" fn mkdir(path: *const u8, _mode: u32) -> i32 {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn __assert_fail(expr: *const u8, file: *const u8, _line: i32) {
+pub unsafe extern "C" fn __assert_fail(expr: *const u8, file: *const u8, _line: i32, _func: *const u8) {
     fputs(b"assertion failed: \0".as_ptr(), unsafe { stderr });
     fputs(expr, unsafe { stderr });
     fputs(b" at \0".as_ptr(), unsafe { stderr });

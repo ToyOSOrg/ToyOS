@@ -86,4 +86,4 @@ stood all three would have read `heartbeats stopped at T` — a time and never a
 class. With `ran=` they read as a time *and* one of two classes, which is what
 makes a fourth flash worth more than the third was.
 
-`usb_boot_stick_pulled` is deleted, so no gate covers the pull; `issues/kernel/io-uring-enter-trips-the-one-queue-invariant.md` records the commit that restores it.
+`usb_boot_stick_pulled` is deleted, so no gate covers the pull.

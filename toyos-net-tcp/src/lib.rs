@@ -6,7 +6,8 @@
 //! credit; nothing here reads a clock, draws randomness or does I/O.
 //!
 //! **Pull egress.** A segment exists only while [`Tcp::transmit`] hands it to the caller's sink,
-//! built from the state of that moment.
+//! built from the state of that moment, once the caller has answered that its next hop is known;
+//! it counts as sent only once the sink took its frame.
 //!
 //! **Refusals are values.** Legacy or insecure input is refused, counted in [`Counters`], and
 //! named by an [`Event::Refused`] the shell logs through [`RefusalLog`].
@@ -258,6 +259,42 @@ pub enum IcmpKind {
     PacketTooBig { next_hop_mtu: Option<core::num::NonZeroU16>, quoted_length: u16 },
     TimeExceeded,
     ParameterProblem,
+}
+
+/// Whether a segment for a 4-tuple can be built now (`ip.md` §6.7): its next hop's link address
+/// is known, and `T` is what the caller needs to use it; resolution is under way; or it failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hop<T> {
+    Ready(T),
+    Pending,
+    Unreachable,
+}
+
+/// One flow's way out of a transmit opportunity: the hop question, asked once a segment is due and
+/// before it is built (`ip.md` §6.7 (1)), then the segment's frame, built before anything about the
+/// segment is committed (§11.3). Either refusing leaves everything owed as it was.
+pub(crate) trait Exit<T> {
+    fn ask(&mut self) -> Result<T, NotReady>;
+    fn send(&mut self, via: T, segment: &conn::Out, payload: (&[u8], &[u8])) -> Result<(), NotReady>;
+}
+
+/// Why a due segment did not leave.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NotReady {
+    Pending,
+    Unreachable,
+    /// The caller could not frame it.
+    Unframed,
+}
+
+impl<T> Hop<T> {
+    pub(crate) fn ready(self) -> Result<T, NotReady> {
+        match self {
+            Self::Ready(via) => Ok(via),
+            Self::Pending => Err(NotReady::Pending),
+            Self::Unreachable => Err(NotReady::Unreachable),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

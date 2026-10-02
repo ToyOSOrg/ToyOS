@@ -22,9 +22,14 @@ use alloc::vec;
 use alloc::vec::Vec;
 use std::collections::HashSet;
 
-use crate::model::World;
+use crate::model::{Climb, World};
 use crate::table::Processes;
+use crate::tree::{self, Admit, Admitted};
 use crate::{join, reap, spawn, teardown, Pid, Tid, Watch};
+
+/// `process::KILLED_EXIT_CODE`, which a walk claims every process below an end
+/// with.
+const KILLED: i32 = 137;
 
 /// One kernel path, mid-flight.
 ///
@@ -32,14 +37,32 @@ use crate::{join, reap, spawn, teardown, Pid, Tid, Watch};
 /// every field beside it is a value the real path carries in a local across a
 /// lock release — which is the whole reason a window exists to explore. A
 /// thread's own way out after its operation is the [`World`]'s: `depart_step`.
+///
+/// An exit's and a kill's `owed` is its walk: the processes below its end not
+/// yet claimed, one claim per lock section, each claim's retires posted with
+/// the lock given up.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Op {
     /// `process::exit`: a thread ending its own process — claim, retire the
-    /// rest, leave.
-    Exit { pid: Pid, tid: Tid, code: i32, pc: u32, retire: Vec<Tid> },
-    /// `process::kill_process`: claim, retire every thread, return. `by` is the
-    /// killing thread when the model holds it.
-    Kill { pid: Pid, code: i32, pc: u32, retire: Vec<Tid>, by: Option<(Pid, Tid)> },
+    /// rest, walk the subtree, leave.
+    Exit { pid: Pid, tid: Tid, code: i32, pc: u32, retire: Vec<(Pid, Tid)>, owed: Vec<Pid> },
+    /// `process::kill_process`: claim, retire every thread, walk the subtree,
+    /// return. `by` is the killing thread when the model holds it.
+    Kill { pid: Pid, code: i32, pc: u32, retire: Vec<(Pid, Tid)>, owed: Vec<Pid>, by: Option<(Pid, Tid)> },
+    /// `loader::spawn` under `place` by `by`'s thread: the admission, the
+    /// whole of a process built with every lock given up, then the move of
+    /// the caller's handles and the landing, whose retires the landing
+    /// answers. A build that `fails` lets the place go instead, and climbs
+    /// when that was the place's last hold.
+    SpawnUnder {
+        place: Pid,
+        by: (Pid, Tid),
+        fails: bool,
+        pc: u32,
+        admitted: Option<Admitted>,
+        retire: Vec<(Pid, Tid)>,
+        climb: Option<Climb>,
+    },
     /// `process::spawn_thread`: two lock sections with the whole of a thread
     /// built between them; `block` is the mapped TLS the build carries across.
     Spawn { pid: Pid, pc: u32, block: Option<u32> },
@@ -53,15 +76,24 @@ pub enum Op {
 
 impl Op {
     pub fn exit(pid: Pid, tid: Tid, code: i32) -> Self {
-        Op::Exit { pid, tid, code, pc: 0, retire: Vec::new() }
+        Op::Exit { pid, tid, code, pc: 0, retire: Vec::new(), owed: Vec::new() }
     }
     pub fn kill(pid: Pid, code: i32) -> Self {
-        Op::Kill { pid, code, pc: 0, retire: Vec::new(), by: None }
+        Op::Kill { pid, code, pc: 0, retire: Vec::new(), owed: Vec::new(), by: None }
     }
     /// A kill issued by a thread the model holds, which is in the kernel until
     /// the kill returns.
     pub fn kill_by(pid: Pid, code: i32, by: (Pid, Tid)) -> Self {
-        Op::Kill { pid, code, pc: 0, retire: Vec::new(), by: Some(by) }
+        Op::Kill { pid, code, pc: 0, retire: Vec::new(), owed: Vec::new(), by: Some(by) }
+    }
+    /// A spawn under `place` by `by`'s thread, which is in the kernel until it
+    /// returns.
+    pub fn spawn_under(place: Pid, by: (Pid, Tid)) -> Self {
+        Op::SpawnUnder { place, by, fails: false, pc: 0, admitted: None, retire: Vec::new(), climb: None }
+    }
+    /// The same spawn, whose build fails once it is admitted.
+    pub fn spawn_under_failing(place: Pid, by: (Pid, Tid)) -> Self {
+        Op::SpawnUnder { place, by, fails: true, pc: 0, admitted: None, retire: Vec::new(), climb: None }
     }
     pub fn spawn(pid: Pid) -> Self {
         Op::Spawn { pid, pc: 0, block: None }
@@ -82,6 +114,7 @@ impl Op {
             Op::Exit { pid, tid, .. } | Op::ThreadExit { pid, tid, .. } => Some((pid, tid)),
             Op::Join { pid, waiter, .. } => Some((pid, waiter)),
             Op::Kill { by, .. } => by,
+            Op::SpawnUnder { by, .. } => Some(by),
             Op::Spawn { .. } | Op::IdlePass { .. } => None,
         }
     }
@@ -90,6 +123,7 @@ impl Op {
         match self {
             Op::Exit { pc, .. }
             | Op::Kill { pc, .. }
+            | Op::SpawnUnder { pc, .. }
             | Op::Spawn { pc, .. }
             | Op::ThreadExit { pc, .. }
             | Op::Join { pc, .. }
@@ -101,7 +135,7 @@ impl Op {
     /// cannot run until that process publishes its exit.
     fn awaits_teardown(&self, world: &World) -> Option<Pid> {
         match *self {
-            Op::Kill { pid, pc: 2, .. } if world.published(pid).is_none() => Some(pid),
+            Op::Kill { pid, pc: WAIT, .. } if world.published(pid).is_none() => Some(pid),
             _ => None,
         }
     }
@@ -110,6 +144,7 @@ impl Op {
         match self {
             Op::Exit { .. } => "exit",
             Op::Kill { .. } => "kill",
+            Op::SpawnUnder { .. } => "spawn_under",
             Op::Spawn { .. } => "spawn_thread",
             Op::ThreadExit { .. } => "thread_exit",
             Op::Join { .. } => "thread_join",
@@ -120,38 +155,58 @@ impl Op {
     /// Run one lock section.
     fn step(&mut self, world: &mut World) {
         match self {
-            Op::Exit { pid, tid, code, pc, retire } => match *pc {
-                // The claim and the threads its winner retires, under the table lock.
+            Op::Exit { pid, tid, code, pc, retire, owed } => match *pc {
+                // The claim, the threads its winner retires and the children
+                // it owes, under the table lock.
                 0 => {
-                    if teardown::claim_teardown(world, *pid, *code) {
-                        *retire = teardown::retire_set(world.get(*pid).expect("just claimed"), Some(*tid));
+                    if tree::claim(world, *pid, *code, owed) {
+                        let proc = world.get(*pid).expect("just claimed");
+                        *retire = teardown::retire_set(proc, Some(*tid)).into_iter().map(|t| (*pid, t)).collect();
                     }
-                    *pc = 1;
+                    *pc = POST;
                 }
-                // With the lock given up: the retires, then this thread's own way out.
-                _ => {
-                    for &other in retire.iter() {
-                        world.post_retire(*pid, other);
+                // With the lock given up: the retires, then the walk's next
+                // claim, or this thread's own way out.
+                POST => {
+                    for (victim, thread) in retire.drain(..) {
+                        world.post_retire(victim, thread);
                     }
-                    world.depart(*pid, *tid, None);
-                    *pc = DONE;
+                    if owed.is_empty() {
+                        world.depart(*pid, *tid, None);
+                        *pc = DONE;
+                    } else {
+                        *pc = WALK;
+                    }
+                }
+                _ => {
+                    walk_claim(world, owed, retire);
+                    *pc = POST;
                 }
             },
-            Op::Kill { pid, code, pc, retire, by } => {
+            Op::Kill { pid, code, pc, retire, owed, by } => {
                 match *pc {
                     0 => {
-                        if teardown::claim_teardown(world, *pid, *code) {
-                            *retire = teardown::retire_set(world.get(*pid).expect("just claimed"), None);
-                            *pc = 1;
+                        if tree::claim(world, *pid, *code, owed) {
+                            let proc = world.get(*pid).expect("just claimed");
+                            *retire = teardown::retire_set(proc, None).into_iter().map(|t| (*pid, t)).collect();
+                            *pc = POST;
                         } else {
                             *pc = DONE;
                         }
                     }
-                    1 => {
-                        for &tid in retire.iter() {
-                            world.post_retire(*pid, tid);
+                    POST => {
+                        for (victim, thread) in retire.drain(..) {
+                            world.post_retire(victim, thread);
                         }
-                        *pc = if cfg!(feature = "mutate-kill-waits-for-its-victims") { 2 } else { DONE };
+                        *pc = match owed.is_empty() {
+                            false => WALK,
+                            true if cfg!(feature = "mutate-kill-waits-for-its-victims") => WAIT,
+                            true => DONE,
+                        };
+                    }
+                    WALK => {
+                        walk_claim(world, owed, retire);
+                        *pc = POST;
                     }
                     // The mutation's wait, which `enabled` holds until the victim's exit is published.
                     _ => *pc = DONE,
@@ -160,6 +215,64 @@ impl Op {
                     if let Some(by) = *by {
                         world.leave_kernel(by);
                     }
+                }
+            }
+            Op::SpawnUnder { place, by, fails, pc, admitted, retire, climb } => {
+                match *pc {
+                    // The admission, under the table lock and before anything is built.
+                    0 => match tree::admit_child(world, Some(*place)) {
+                        Admit::Yes(taken) => {
+                            *admitted = Some(taken);
+                            *pc = 1;
+                        }
+                        Admit::Gone | Admit::TooDeep { .. } | Admit::NoPid => {
+                            world.refuse_spawn(*by);
+                            *pc = DONE;
+                        }
+                    },
+                    // The build happened with every lock given up, and failed.
+                    1 if *fails => {
+                        let taken = admitted.take().expect("admitted at the first section");
+                        world.refuse_spawn(*by);
+                        match tree::refuse_child(world, taken) {
+                            Some(publish) => {
+                                *climb = Some(Climb::Publish(publish));
+                                *pc = 3;
+                            }
+                            None => *pc = DONE,
+                        }
+                    }
+                    // The caller's handles move, and the child lands, in the
+                    // hold that inserts it.
+                    1 => {
+                        world.move_handles(*by);
+                        let taken = admitted.take().expect("admitted at the first section");
+                        let child = taken.pid();
+                        let ((), owed) =
+                            tree::land_child(world, taken, KILLED, |world, node| world.insert(child, node));
+                        world.landed(*place, child);
+                        *retire = owed.into_iter().map(|t| (child, t)).collect();
+                        *pc = 2;
+                    }
+                    // With the lock given up: the retires the landing answered.
+                    2 => {
+                        for (victim, thread) in retire.drain(..) {
+                            world.post_retire(victim, thread);
+                        }
+                        *pc = DONE;
+                    }
+                    // The failed build let its place's last hold go: this
+                    // spawner publishes it, and climbs.
+                    _ => {
+                        let at = climb.take().expect("a climb is owed here");
+                        *climb = world.climb_step(at);
+                        if climb.is_none() {
+                            *pc = DONE;
+                        }
+                    }
+                }
+                if *pc == DONE {
+                    world.leave_kernel(*by);
                 }
             }
             Op::Spawn { pid, pc, block } => match *pc {
@@ -240,6 +353,28 @@ impl Op {
 }
 
 const DONE: u32 = u32::MAX;
+/// An exit's or a kill's section that posts the retires its last claim owes.
+const POST: u32 = 1;
+/// The walk's next claim.
+const WALK: u32 = 2;
+/// `mutate-kill-waits-for-its-victims`' wait.
+const WAIT: u32 = 3;
+
+/// The walk's next claim, under the table lock: one process, its retires and
+/// the children it owes. Under `mutate-walk-in-one-hold`, every process the
+/// walk owes, in this one section.
+fn walk_claim(world: &mut World, owed: &mut Vec<Pid>, retire: &mut Vec<(Pid, Tid)>) {
+    loop {
+        let Some(next) = owed.pop() else { return };
+        if tree::claim(world, next, KILLED, owed) {
+            let proc = world.get(next).expect("just claimed");
+            retire.extend(teardown::retire_set(proc, None).into_iter().map(|t| (next, t)));
+        }
+        if !cfg!(feature = "mutate-walk-in-one-hold") {
+            return;
+        }
+    }
+}
 
 /// One move the explorer can make: an op's next section, or a thread's next
 /// step out.
@@ -258,6 +393,19 @@ enum Move {
 /// before is not walked again: every law is a property of the state alone. The
 /// returned string is the schedule that produced it, in the order it ran.
 pub fn explore(initial: &World, ops: &[Op]) -> Result<usize, String> {
+    explore_leaves(initial, ops, &mut |_| {})
+}
+
+/// [`explore`], answering whether some schedule ends in a world `pred` holds
+/// of: a property one ordering has, where [`explore`]'s laws are ones every
+/// ordering keeps.
+pub fn explore_any(initial: &World, ops: &[Op], pred: impl Fn(&World) -> bool) -> Result<bool, String> {
+    let mut found = false;
+    explore_leaves(initial, ops, &mut |leaf| found |= pred(leaf))?;
+    Ok(found)
+}
+
+fn explore_leaves(initial: &World, ops: &[Op], leaf: &mut dyn FnMut(&World)) -> Result<usize, String> {
     let mut world = initial.clone();
     for op in ops {
         if let Some(actor) = op.actor() {
@@ -266,13 +414,19 @@ pub fn explore(initial: &World, ops: &[Op]) -> Result<usize, String> {
     }
     let mut trace = Vec::new();
     let mut seen = HashSet::new();
-    match walk(world, ops.to_vec(), &mut trace, &mut seen) {
+    match walk(world, ops.to_vec(), &mut trace, &mut seen, leaf) {
         Some(found) => Err(found),
         None => Ok(seen.len()),
     }
 }
 
-fn walk(world: World, ops: Vec<Op>, trace: &mut Vec<String>, seen: &mut HashSet<(World, Vec<Op>)>) -> Option<String> {
+fn walk(
+    world: World,
+    ops: Vec<Op>,
+    trace: &mut Vec<String>,
+    seen: &mut HashSet<(World, Vec<Op>)>,
+    leaf: &mut dyn FnMut(&World),
+) -> Option<String> {
     if !seen.insert((world.clone(), ops.clone())) {
         return None;
     }
@@ -284,6 +438,7 @@ fn walk(world: World, ops: Vec<Op>, trace: &mut Vec<String>, seen: &mut HashSet<
     if moves.is_empty() {
         let stuck: Vec<&str> = ops.iter().filter(|op| !op.done()).map(Op::label).collect();
         if stuck.is_empty() {
+            leaf(&world);
             return report(&world.final_faults(), trace);
         }
         return report(&[alloc::format!("deadlock: {} each wait and none can move", stuck.join(", "))], trace);
@@ -312,7 +467,7 @@ fn walk(world: World, ops: Vec<Op>, trace: &mut Vec<String>, seen: &mut HashSet<
                 }
             }
         }
-        if let Some(found) = report(&faults, trace).or_else(|| walk(next_world, next_ops, trace, seen)) {
+        if let Some(found) = report(&faults, trace).or_else(|| walk(next_world, next_ops, trace, seen, leaf)) {
             trace.pop();
             return Some(found);
         }
@@ -569,5 +724,102 @@ mod tests {
         let p = world.spawn_process();
         let sibling = world.spawn_thread(p);
         holds(&world, vec![Op::kill_by(p, 137, (p, sibling))]);
+    }
+
+    /// **A spawn racing its place's kill**, every ordering, with the spawner a
+    /// process that holds the place's `self` — init, serving a launch — and
+    /// its build landing or failing. A child lands before the claim and the
+    /// walk takes it, or after it and is claimed as it lands; a failed build
+    /// lets the place go. Nothing runs on under the place, a refused spawn
+    /// moved none of its caller's handles, and the place is published in
+    /// every one.
+    ///
+    /// Reds under `mutate-place-skips-the-insert-recheck`, where a child lands
+    /// unclaimed under the claimed place and outlives it, and under
+    /// `mutate-refused-spawn-keeps-the-count`, where the place is never
+    /// published.
+    #[test]
+    fn a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it() {
+        let mut world = World::new();
+        let init = world.spawn_process();
+        let place = world.spawn_child(init);
+        world.spawn_child(place);
+        let launcher = (init, world.main_tid(init));
+        let states = holds(&world, vec![Op::kill(place, KILLED), Op::spawn_under(place, launcher)]);
+        std::println!("a spawn racing its place's kill: {states} states");
+        holds(&world, vec![Op::kill(place, KILLED), Op::spawn_under_failing(place, launcher)]);
+    }
+
+    /// The same race with the place spawning under itself: its own thread is
+    /// in the spawn when the kill claims it, and its teardown waits for that
+    /// thread to come out.
+    #[test]
+    fn a_spawn_racing_the_kill_of_its_own_spawner() {
+        let mut world = World::new();
+        let init = world.spawn_process();
+        let place = world.spawn_child(init);
+        world.spawn_child(place);
+        let own = (place, world.main_tid(place));
+        holds(&world, vec![Op::kill(place, KILLED), Op::spawn_under(place, own)]);
+        holds(&world, vec![Op::kill(place, KILLED), Op::spawn_under_failing(place, own)]);
+    }
+
+    /// An exit takes a subtree two deep below it, and each end is published
+    /// after every end below it.
+    ///
+    /// Reds under `mutate-publish-before-the-children`.
+    #[test]
+    fn an_exit_publishes_after_every_end_below_it() {
+        let mut world = World::new();
+        let init = world.spawn_process();
+        let p = world.spawn_child(init);
+        let c = world.spawn_child(p);
+        world.spawn_child(c);
+        world.spawn_child(p);
+        let main = world.main_tid(p);
+        holds(&world, vec![Op::exit(p, main, 0)]);
+    }
+
+    /// A child's own exit racing its parent's kill: two walks over one
+    /// subtree, one claim per process whichever walk makes it.
+    #[test]
+    fn a_childs_exit_racing_its_parents_kill() {
+        let mut world = World::new();
+        let init = world.spawn_process();
+        let p = world.spawn_child(init);
+        let c = world.spawn_child(p);
+        world.spawn_child(c);
+        let main = world.main_tid(c);
+        holds(&world, vec![Op::kill(p, KILLED), Op::exit(c, main, 3)]);
+    }
+
+    /// **The walk gives the table up between two claims.** A spawn under a
+    /// process the walk does not reach lands, in some ordering, after the
+    /// walk's first claim and before its last: an end of any size holds the
+    /// table one process at a time.
+    ///
+    /// Reds under `mutate-walk-in-one-hold`.
+    #[test]
+    fn a_spawn_under_an_unrelated_process_lands_between_two_claims_of_one_walk() {
+        let mut world = World::new();
+        let init = world.spawn_process();
+        let p = world.spawn_child(init);
+        world.spawn_child(p);
+        world.spawn_child(p);
+        let unrelated = world.spawn_child(init);
+        let launcher = (init, world.main_tid(init));
+        let ops = vec![Op::kill(p, KILLED), Op::spawn_under(unrelated, launcher)];
+        // Two claimed when it landed: the end's own, and one of the two below it.
+        let between = match explore_any(&world, &ops, |leaf| {
+            leaf.inserted_at().iter().any(|&(_, claimed)| claimed == 2)
+        }) {
+            Ok(between) => between,
+            Err(found) => panic!("a lifecycle law broke:\n{found}"),
+        };
+        assert!(
+            between,
+            "no ordering landed the unrelated spawn between the walk's two claims below the end: \
+             the walk holds the table across its claims",
+        );
     }
 }

@@ -65,8 +65,6 @@ impl<T: Send> CellLock<T> for IrqLock<T> {
         preempt_off(|_| {
             let irq = crate::arch::IrqGuard::close();
             let mut held = self.0.lock(&irq);
-            #[cfg(feature = "boot-actuators")]
-            handler_post::raise_if_staged();
             f(&mut held)
         })
     }
@@ -148,8 +146,6 @@ impl IrqWatch {
     /// with its CPU's preempt count raised, as `device_irq_entry` holds it, so
     /// this post's own never reaches zero, and a pass, inside the interrupt.
     pub fn post_in_place(&self) {
-        #[cfg(feature = "boot-actuators")]
-        handler_post::note_post(self);
         preempt_off(|p| {
             let env = Poster { cpus: cpus(), kicker: &HW, preempt: p };
             self.0.post_in_place(WakeCause::new(WakeReason::Woken), &env);
@@ -169,11 +165,6 @@ impl<L: CellLock<List>> Waitable<L> {
         self.0.cancel_rings();
     }
 
-    /// `handler-post`'s stand where a registration holds the list lock.
-    #[cfg(feature = "boot-actuators")]
-    pub(crate) fn holding(&self, f: impl FnOnce()) {
-        self.0.holding(f);
-    }
 }
 
 /// A thread's registration on one watch, held across its wait and ended by
@@ -284,119 +275,6 @@ pub fn wait_until<L: CellLock<List>>(
         }
     }
     Ok(())
-}
-
-/// `handler-post`: the last claim slot's vector, which no claim holds, raised
-/// on this CPU while it holds preemption off, posts that slot's watch from the
-/// handler before any pass can run. Raised inside a post of the watch itself,
-/// the handler's post follows once the outer one lets go; raised inside a
-/// completion written into a ring that polls the watch, or inside that ring's
-/// own watch's list lock, the handler's post fires that poll once the
-/// section lets go. A hold counts the posts of the watch made on its CPU, and
-/// no other watch's, and lapses at its budget. One run of [`HOLDS`] holds per
-/// arm, on whichever idle loop reaches it first with interrupts open; its
-/// verdict is one [`Verdict`] line.
-#[cfg(feature = "boot-actuators")]
-pub mod handler_post {
-    use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
-
-    use toyos_sched::watch::handler_post::{Verdict, HOLDS};
-
-    use crate::pcidev::{MAX_FUNCTIONS, VECTORS};
-    use crate::time::{Budget, Deadline, Duration};
-
-    const SLOT: usize = MAX_FUNCTIONS - 1;
-
-    const WINDOW: Budget = Budget::of(
-        Duration::from_secs(1),
-        "the hold is counted as lapsed, and the verdict line says so",
-    );
-
-    const NOBODY: u32 = u32::MAX;
-    static RAN: AtomicBool = AtomicBool::new(false);
-    /// The CPU whose next interrupts-off section raises the vector inside itself.
-    static RAISE_INSIDE: AtomicU32 = AtomicU32::new(NOBODY);
-    static HOLDING: AtomicU32 = AtomicU32::new(NOBODY);
-    static POSTS: AtomicU64 = AtomicU64::new(0);
-
-    pub fn run() {
-        // A hold is a CPU that takes interrupts while it holds.
-        if RAN.load(Relaxed) || !crate::arch::cpu::interrupts_enabled() || RAN.swap(true, Relaxed) {
-            return;
-        }
-        // A held slot's driver would take counts its device never raised.
-        assert!(crate::pcidev::held_at(SLOT).is_none(), "handler-post: claim slot {SLOT} is held");
-        let me = crate::arch::percpu::cpu_id();
-        let claim = crate::pcidev::watch(SLOT);
-        let ring = crate::inbox::Staged::new();
-        let verdict = crate::sched::driver::preempt_off(|_| {
-            HOLDING.store(me, Relaxed);
-            // The outer post is one of the two a hold waits for.
-            let in_a_list = holds(2, || {
-                RAISE_INSIDE.store(me, Relaxed);
-                claim.post_in_place();
-            });
-            let in_a_ring = holds(1, || {
-                ring.poll(claim);
-                RAISE_INSIDE.store(me, Relaxed);
-                ring.complete();
-            });
-            // Where a submitter's registration holds it.
-            let in_a_rings_watch = holds(1, || {
-                ring.poll(claim);
-                ring.holding_its_watch(raise);
-            });
-            HOLDING.store(NOBODY, Relaxed);
-            Verdict { in_a_list, in_a_ring, in_a_rings_watch }
-        });
-        crate::log!("{verdict}");
-    }
-
-    /// [`HOLDS`] holds of `stage`, answering how many saw `owed` posts of the
-    /// claim's watch before their budget.
-    fn holds(owed: u64, stage: impl Fn()) -> u32 {
-        let mut posted = 0;
-        for _ in 0..HOLDS {
-            let before = POSTS.load(Relaxed);
-            stage();
-            let deadline = Deadline::at(crate::clock::now() + WINDOW.duration());
-            loop {
-                if POSTS.load(Relaxed) >= before + owed {
-                    posted += 1;
-                    break;
-                }
-                if deadline.reached(crate::clock::now()) {
-                    break;
-                }
-                core::hint::spin_loop();
-            }
-        }
-        posted
-    }
-
-    fn raise() {
-        crate::arch::irqchip::send_self(VECTORS[SLOT]);
-    }
-
-    /// From inside an interrupts-off section: the staged CPU's next one raises
-    /// the vector while it holds.
-    pub fn raise_if_staged() {
-        let staged = RAISE_INSIDE.load(Relaxed);
-        if staged != NOBODY && staged == crate::arch::percpu::cpu_id() {
-            RAISE_INSIDE.store(NOBODY, Relaxed);
-            raise();
-        }
-    }
-
-    pub fn note_post(watch: &super::IrqWatch) {
-        let holding = HOLDING.load(Relaxed);
-        if holding != NOBODY
-            && holding == crate::arch::percpu::cpu_id()
-            && core::ptr::eq(watch, crate::pcidev::watch(SLOT))
-        {
-            POSTS.fetch_add(1, Relaxed);
-        }
-    }
 }
 
 /// Register, then park until `ready()` holds, for a wait a kill may not end

@@ -18,7 +18,7 @@ netd runs smoltcp. Its replacement is ToyOS's own stack, built clean-room: reade
 
 The listener defects are this track's: `issues/hardware/a-handshake-nobody-finishes-holds-a-listeners-port-shut.md` and `issues/hardware/a-connect-between-two-accepts-is-reset.md`, on smoltcp until stage 5, and `issues/hardware/an-accept-that-never-reaches-netd-strands-its-listener.md`, in std's accept.
 
-Owed from the stage 3 specifications: OUT-07 by stage 4, whose scheduler chooses between a flow's segment and [ip]'s own frames; US-57 by stage 5, whose netd maps UDP's refusals onto the pipe ABI; `dhcp.renew-unroutable` by stage 5, whose netd counts it where `toyos-net-udp` refuses the renewal `udp.no-route`; FRA-01–20 and PMTU-01–06 by IP hardening.
+Owed from the stage 3 specifications: US-57 by stage 5, whose netd maps UDP's refusals onto the pipe ABI; `dhcp.renew-unroutable` by stage 5, whose netd counts it where `toyos-net-udp` refuses the renewal `udp.no-route`; FRA-01–20 and PMTU-01–06 by IP hardening.
 
 What stage 3 departs from its specifications:
 
@@ -29,6 +29,18 @@ What stage 3 departs from its specifications:
 What stage 3 does not yet meet:
 
 - Its only oracles are the readers' own: the specifications' scenarios and byte vectors, and the tests' own RFC 1071 sum. No behaviour of `toyos-net-ip`, `toyos-net-udp` or `toyos-dhcp` is checked against anything the readers did not write. Exit: exchanges captured from slirp and the T14 (ARP, DHCP, ICMP, IGMP) replay through them at stage 5 and match.
+
+What stage 4 has not yet built: deficit round-robin across flows (DRR-01–03; until it lands an owed RST or TIME-WAIT ACK waits for TCP's turn, behind at most one UDP datagram), flow steering, inter-shard mailboxes and their loom models, readiness events, inspect keys, the segment-script runner, the `mutate-*` `CONTROLS` rows, the resets owed when an address is lost (`ip.md` §8.4), or the remaining [net] scenarios at frame level: NET-02, NET-05 and NET-07–16 still run on `toyos-net-tcp`'s own two-node network, which goes with the last of them. Exit: each lands, or the specification moves it to a later stage.
+
+What stage 4 departs from its specifications:
+
+- `ip.md` §6.7 (4) and PL-12 have a waiting flow ask again at every transmit opportunity. [tcp] asks it again only once `Tcp::wake` names its peer, which [shard] calls when [ip] reports a change for that next hop (`Event::Resolved`, `Failed`, `Cleared`), for the routes, or room in a neighbour table that refused the flow for being full (`Event::Room`), so a waiting flow costs one question per change. Exit: the specification takes the wake.
+- PL-14 counts `tcp.next-hop-failed` once per opportunity; the spec owner ruled once per segment not built, which [tcp] counts. Exit: PL-14 reads as the ruling.
+- [ip]'s `Event::Cleared` and `Event::Room` are not in the specifications. Exit: they name them.
+- A frame the sink refuses is not in the specifications: [tcp] counts it `tcp.frame-refused`, commits nothing, and offers what it left owed again at the next `Tcp::transmit`. [shard] calls that once per frame of credit, so a flow whose frame it refused would cost one build and one `tcp.frame-refused` per frame of credit, not one per opportunity. [shard] cannot take that path: its builder refuses a segment longer than a frame, one with options no header holds, and a source no datagram may carry, and TCP's MTU, [tcp]'s own bounds and [ip]'s addresses rule them out. Exit: the shard's builder cannot refuse, and `NotReady::Unframed`, `tcp.frame-refused` and the refused set go.
+- `tcp.md` §10.8 and §11.3 disagree, and [tcp] follows §10.8: a user timeout replaces R2 and runs only while sent data is unacknowledged or a zero window holds data back, so with one set a connection whose data never left, for want of credit or of a next hop, has no give-up, where §11.3 has a device that never offers credit end its connections. Exit: the specification says which holds.
+
+The shard keeps no timing wheel: its deadlines stay in [tcp]'s and [ip]'s ordered sets, composed through `next_deadline()` (architecture §3.2). Exit: a soak or many-flows measurement shows the ordered sets cost, and the wheel lands.
 
 What `toyos-net-wire` does not yet meet:
 

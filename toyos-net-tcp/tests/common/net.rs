@@ -5,7 +5,7 @@
 
 use std::net::Ipv4Addr;
 
-use toyos_net_tcp::{ConnId, Counter, Error, Failure, Instant, ListenerId, Options, Received, Tcp, Tuple};
+use toyos_net_tcp::{ConnId, Counter, Error, Failure, Hop, Instant, ListenerId, Options, Received, Tcp, Tuple};
 use toyos_net_wire::ipv4::Ipv4Packet;
 use toyos_net_wire::tcp::TcpSegment;
 
@@ -113,6 +113,10 @@ pub type Rewrite = Box<dyn FnMut(usize, &O) -> Option<Vec<u8>>>;
 /// Called with a node's stack after each arrival and each firing (`None`), and with each segment it
 /// hands off (`Some`).
 pub type Check = Box<dyn FnMut(usize, &mut Tcp, Instant, Option<&O>)>;
+/// A node's answer to one hop question (`ip.md` §6.7).
+pub type Hops = Box<dyn FnMut(usize) -> Hop<()>>;
+/// Whether a node's device frames the segment it is handed.
+pub type Frames = Box<dyn FnMut(usize) -> bool>;
 
 pub struct Net {
     pub now: u64,
@@ -123,7 +127,6 @@ pub struct Net {
     held: [Option<Vec<u8>>; 2],
     order: u64,
     pub impair: Impair,
-    pub dark: Option<(u64, u64)>,
     /// Every datagram each node handed off, parsed: `(from, segment)`.
     pub wire: Vec<(usize, O)>,
     pub keep_wire: bool,
@@ -139,6 +142,10 @@ pub struct Net {
     /// Applications keep every byte they send and receive, not only its digest.
     pub keep_streams: bool,
     pub check: Option<Check>,
+    /// Every next hop is known when `None`.
+    pub hop: Option<Hops>,
+    /// Every frame is built when `None`.
+    pub framed: Option<Frames>,
 }
 
 pub fn ns(ms: u64) -> u64 {
@@ -177,7 +184,6 @@ impl Net {
             held: [None, None],
             order: 0,
             impair: Box::new(|_, _| Fate::Pass),
-            dark: None,
             wire: Vec::new(),
             keep_wire: false,
             rewrite: None,
@@ -187,6 +193,8 @@ impl Net {
             fired_at: None,
             keep_streams: false,
             check: None,
+            hop: None,
+            framed: None,
         }
     }
 
@@ -309,7 +317,8 @@ impl Net {
     fn transmit(&mut self, node: usize) {
         let now = self.instant(node);
         let ms = self.now / 1_000_000;
-        let n = &mut self.nodes[node];
+        let Self { nodes, hop, framed, .. } = self;
+        let n = &mut nodes[node];
         let credit = match n.credit_per_ms {
             None => usize::MAX,
             Some(per) => {
@@ -321,7 +330,14 @@ impl Net {
             }
         };
         let mut out = Vec::new();
-        let sent = n.tcp.transmit(now, credit, |o| out.push(datagram(o)));
+        let ask = |_: &Tuple| hop.as_mut().map_or(Hop::Ready(()), |hop| hop(node));
+        let sent = n.tcp.transmit(now, credit, ask, |o, ()| {
+            let built = framed.as_mut().is_none_or(|framed| framed(node));
+            if built {
+                out.push(datagram(o));
+            }
+            built
+        });
         if n.credit_per_ms.is_some() {
             n.credit -= sent;
         }
@@ -344,9 +360,6 @@ impl Net {
             self.wire.push((from, parsed.clone()));
         }
         let fate = (self.impair)(from, &parsed);
-        if self.dark.is_some_and(|(start, end)| (start..end).contains(&self.now)) {
-            return;
-        }
         let to = 1 - from;
         let push = |net: &mut Net, bytes: Vec<u8>, late: u64| {
             net.order += 1;
@@ -523,13 +536,6 @@ impl Net {
             );
         }
         text
-    }
-}
-
-impl Net {
-    /// Runs until nothing is on the wire.
-    pub fn drain(&mut self) {
-        assert!(self.run(10_000, |n| n.in_flight.is_empty() && n.held.iter().all(Option::is_none)));
     }
 }
 

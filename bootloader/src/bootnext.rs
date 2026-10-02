@@ -73,9 +73,9 @@ pub fn point_at_us(handle: Handle, system_table: &SystemTable<Boot>) {
 /// The GPT partition GUID of the volume firmware loaded this image from.
 fn our_partition(handle: Handle, system_table: &SystemTable<Boot>) -> Option<[u8; 16]> {
     let bs = system_table.boot_services();
-    let image = bs.open_protocol_exclusive::<LoadedImage>(handle).ok()?;
+    let image = crate::protocol::exclusive::<LoadedImage>(bs, handle).ok()?;
     let device = image.device()?;
-    let path = bs.open_protocol_exclusive::<DevicePath>(device).ok()?;
+    let path = crate::protocol::exclusive::<DevicePath>(bs, device).ok()?;
     hard_drive_guid(path.node_iter())
 }
 

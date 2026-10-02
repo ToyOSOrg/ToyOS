@@ -479,62 +479,6 @@ impl Partition {
     }
 }
 
-/// The duplicate-id control (`block-duplicate-id`): the impostor fills every
-/// read with its own mark, so a registry that took it is caught serving that
-/// mark for a device it is not.
-#[cfg(feature = "boot-actuators")]
-pub fn duplicate_id_selftest() {
-    use alloc::vec;
-
-    const MARK: &[u8] = b"impostor";
-
-    struct Impostor {
-        id: DeviceId,
-        blocks: u64,
-    }
-
-    impl BlockDevice for Impostor {
-        fn device_id(&self) -> DeviceId {
-            self.id
-        }
-        fn block_count(&self) -> u64 {
-            self.blocks
-        }
-        fn read_blocks(&mut self, _lba: u64, _count: u32, buf: &mut [u8]) -> BlockResult {
-            buf.fill(0);
-            buf[..MARK.len()].copy_from_slice(MARK);
-            Ok(())
-        }
-        fn write_blocks(&mut self, _lba: u64, _count: u32, _buf: &[u8]) -> BlockResult {
-            Ok(())
-        }
-        fn flush(&mut self) -> BlockResult {
-            Ok(())
-        }
-        fn losses(&self) -> u64 {
-            0
-        }
-    }
-
-    let before = registered();
-    let Some(first) = before.first().cloned() else {
-        log!("block-duplicate-id: FAIL (this boot registered no block device)");
-        return;
-    };
-    let id = first.device_id();
-    let refused = register(Box::new(Impostor { id, blocks: first.block_count() })).is_none();
-
-    let mut buf = vec![0u8; PAGE_SIZE as usize];
-    let served = open(id).is_some_and(|h| h.lock().read_blocks(0, 1, &mut buf).is_ok());
-    let by_impostor = buf[..MARK.len()] == *MARK;
-    log!(
-        "block-duplicate-id: device {id} claimed twice, second registration refused={refused}, \
-         devices {} before and {} after, block 0 served={served} by_impostor={by_impostor}",
-        before.len(),
-        registered().len()
-    );
-}
-
 /// Pages the file data cache may hold.
 pub fn file_cache_pages() -> usize {
     let (total, _) = crate::mm::pmm::stats();

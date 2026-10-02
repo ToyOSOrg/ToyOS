@@ -17,15 +17,6 @@ fn connecting(t: i64) -> H {
     h
 }
 
-fn listening() -> H {
-    let mut h = H::new(65_535);
-    h.peer = (B, 40_000);
-    h.local = (A, 80);
-    h.start(0);
-    h.listener = Some(h.tcp.listen(A, Some(port(80)), || 0).unwrap());
-    h
-}
-
 /// HS-03 before the ACK: a pending child.
 fn child() -> H {
     let mut h = listening();
