@@ -263,15 +263,6 @@ pub const SYS_PROCESS_WAIT: u64 = 108;
 ///
 /// [`Rights::MANAGE`]: crate::handle::Rights::MANAGE
 pub const SYS_PROCESS_KILL: u64 = 109;
-/// A `Process` handle for a pid, gated by [`Rights::MANAGE`] on a `SysCap`.
-/// See [`process_open`].
-///
-/// The one place a pid becomes authority, and only `init` holds a cap that
-/// carries the right — so the set of processes that can reach a process they
-/// did not start is exactly what init endowed.
-///
-/// [`Rights::MANAGE`]: crate::handle::Rights::MANAGE
-pub const SYS_PROCESS_OPEN: u64 = 110;
 
 /// Mint a device claim for a class, gated by [`Rights::DEVICE`] on a `SysCap`.
 /// Only `init` holds such a cap, so the set of processes that can ever
@@ -887,6 +878,11 @@ pub mod debug_action {
     /// lands. That window is the loader's own, so no caller can order a kill
     /// inside it; the kill and the landing that follow are the shipped paths.
     pub const KILL_PLACE_AS_SPAWN_LANDS: u64 = 22;
+    /// Mark the caller's next spawn whose child lands: its thread waits there,
+    /// before the spawn answers, until the child's exit is published. A child
+    /// ending inside the spawn that started it is a race no caller can order;
+    /// the landing and the exit either side of the wait are the shipped paths.
+    pub const HOLD_SPAWN_UNTIL_CHILD_ENDS: u64 = 23;
 }
 
 /// Every kind of kernel object, in the order the kernel's own `kobject!`
@@ -945,7 +941,10 @@ pub fn get_env(buf: &mut [u8]) -> usize {
 /// Answers a `Process` handle carrying `WAIT|MANAGE|READ|DUP|TRANSFER`. A
 /// caller that wants nothing to do with the child closes it; a caller that
 /// wants to hand it on transfers it. There is no pid-addressed way back to a
-/// process, so this handle is the whole of what a spawn confers.
+/// process, so this handle is the whole of what a spawn confers. Its slot is
+/// taken before an endowment moves: a caller whose table has none is refused
+/// `ResourceExhausted` with its table as it was, whatever its endowments
+/// would have freed.
 ///
 /// # Safety
 /// The raw pointer fields in `SpawnArgs` must point to valid memory.
@@ -982,13 +981,6 @@ pub fn process_wait_nonblock(proc: RawHandle) -> Result<i32, SyscallError> {
 /// caller asked for it to be gone and it is.
 pub fn process_kill(proc: RawHandle) -> Result<(), SyscallError> {
     check_unit(syscall(SYS_PROCESS_KILL, proc.0 as u64, 0, 0, 0))
-}
-
-/// A `Process` handle for `pid`, presenting a `SysCap` that carries
-/// `Rights::MANAGE`.
-pub fn process_open(syscap: RawHandle, pid: Pid) -> Result<RawHandle, SyscallError> {
-    check(syscall(SYS_PROCESS_OPEN, syscap.0 as u64, pid.0 as u64, 0, 0))
-        .map(|h| RawHandle(h as u32))
 }
 
 /// Copy records into `out`, oldest first and merged by `at_ns`, advancing
@@ -2355,10 +2347,9 @@ pub struct ProcessStats {
     pub fault_zero_count: u32,
     pub fault_ns: u64,
     pub io_read_ops: u32,
-    /// The process's own pid. Not authority — nothing takes a pid but
-    /// [`SYS_PROCESS_OPEN`], which takes a `SysCap` beside it — but it is the
-    /// name a diagnostic prints, and this is where a holder of a handle reads
-    /// it.
+    /// The process's own pid. Not authority — no syscall takes a pid — but it
+    /// is the name a diagnostic prints, and this is where a holder of a handle
+    /// reads it.
     pub pid: u32,
     pub io_read_bytes: u64,
     pub blocked_io_ns: u64,

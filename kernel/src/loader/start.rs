@@ -1,10 +1,13 @@
-//! Loads a built process onto a CPU and builds the handle table it starts
-//! with. The frame a new stack starts from and the trampolines it returns into
-//! are the architecture's (`arch::entry`).
+//! Loads a built process onto a CPU, builds the handle table it starts with
+//! and puts its spawner's handle to it in the spawner's table. The frame a new
+//! stack starts from and the trampolines it returns into are the
+//! architecture's (`arch::entry`).
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use crate::object::{HandleEntry, HandleTable, KObjectRef, Refusal};
+use crate::object::process::ProcessObject;
+use crate::object::{ops, HandleEntry, HandleTable, KObjectRef, Refusal};
 use crate::process::{
     process_data, Endowments, OwnedAlloc, ENDOW_ENTRY_LEN, KERNEL_STACK_SIZE,
 };
@@ -42,26 +45,19 @@ pub(crate) fn make_name(path: &str) -> [u8; crate::process::THREAD_NAME_LEN] {
     name
 }
 
-/// A child's table, and the endowments that have not left the parent yet.
-// The move must be last: an earlier move leaves a failed spawn's parent holding handles that name nothing.
-pub enum PendingHandles {
-    /// Built by the kernel and owing nobody anything — the boot's `/system/bin/init`.
-    Ready { table: HandleTable, entries: Vec<EndowEntry>, labels: Vec<u8> },
-    /// A caller's request: `endow` has not left the caller's table yet.
-    Moving { table: HandleTable, endow: Vec<u8>, labels: Vec<u8> },
+/// A caller's request for a child's table: `endow` has not left the caller's table yet.
+// The move must be last: an earlier move leaves a failed spawn's caller holding handles that name nothing.
+pub struct PendingHandles {
+    table: HandleTable,
+    endow: Vec<u8>,
+    labels: Vec<u8>,
 }
 
 impl PendingHandles {
-    /// Take the endowed handles out of the parent's table, all under one lock hold: a refusal leaves it unchanged.
-    /// `own` is the child itself, which its table holds under [`SELF_LABEL`] beside them.
-    pub fn commit(self, own: KObjectRef) -> Result<(HandleTable, Endowments), Refusal> {
-        let (mut table, endow, mut labels) = match self {
-            Self::Ready { mut table, mut entries, mut labels } => {
-                endow_self(&mut table, &mut entries, &mut labels, own);
-                return Ok((table, Endowments::new(entries, labels)));
-            }
-            Self::Moving { table, endow, labels } => (table, endow, labels),
-        };
+    /// Take the endowed handles out of the caller's table and put its handle to the child in it, all under one lock hold: a refusal leaves the table unchanged.
+    /// `own` is the child's handle to itself, which its table holds under [`SELF_LABEL`] beside the endowments, and the caller's handle is the third answer.
+    pub fn commit(self, own: HandleEntry) -> Result<(HandleTable, Endowments, RawHandle), Refusal> {
+        let Self { mut table, endow, mut labels } = self;
         let data_arc = process_data();
         let mut data = data_arc.lock();
 
@@ -94,7 +90,7 @@ impl PendingHandles {
             moving.push((EndowEntry { label_off, label_len, handle, _pad: 0 }, handle));
         }
         // Checked before any removal, so a failed install can't strand a handle out of a table that never spawned.
-        if !table.has_room(moving.len() + 1) {
+        if !table.has_room(moving.len() + 1) || !data.handles.has_room(1) {
             return Err(SyscallError::ResourceExhausted.into());
         }
 
@@ -109,17 +105,25 @@ impl PendingHandles {
                 .expect("a child table with verified room refused an endowment");
             entries.push(entry);
         }
+        // Minted while `own` is held, and `own` goes into a table no thread reaches until the child lands: another thread of the caller closing this handle never closes the object's last.
+        let held = ops::install(&mut data.handles, own.object().clone())
+            .expect("a caller's table with verified room refused its child");
         drop(data);
         endow_self(&mut table, &mut entries, &mut labels, own);
-        Ok((table, Endowments::new(entries, labels)))
+        Ok((table, Endowments::new(entries, labels), held))
     }
 }
 
-/// Install `own` in its own table under [`SELF_LABEL`]: `WRITE` to be named a spawn's place, `DUP` and `TRANSFER` to hand that on. Its caller verified the room.
-fn endow_self(table: &mut HandleTable, entries: &mut Vec<EndowEntry>, labels: &mut Vec<u8>, own: KObjectRef) {
+/// A new process's handle to itself, the first its object has: `WRITE` to be named a spawn's place, `DUP` and `TRANSFER` to hand that on.
+pub(super) fn own_handle(object: &Arc<ProcessObject>) -> HandleEntry {
     let rights = Rights::WRITE.union(Rights::DUP).union(Rights::TRANSFER);
+    HandleEntry::new(KObjectRef::Process(Arc::clone(object)), rights)
+}
+
+/// Install `own` in its own table under [`SELF_LABEL`]. Its caller verified the room.
+pub(super) fn endow_self(table: &mut HandleTable, entries: &mut Vec<EndowEntry>, labels: &mut Vec<u8>, own: HandleEntry) {
     let handle = table
-        .install(HandleEntry::new(own, rights))
+        .install(own)
         .expect("a child table with verified room refused its own handle");
     entries.push(EndowEntry {
         label_off: labels.len() as u32,
@@ -200,5 +204,5 @@ pub fn build_child_handles(
 
     let mut raw = alloc::vec![0u8; endow.len()];
     endow.read_at(0, &mut raw);
-    Ok(PendingHandles::Moving { table: handles, endow: raw, labels: labels.to_vec() })
+    Ok(PendingHandles { table: handles, endow: raw, labels: labels.to_vec() })
 }

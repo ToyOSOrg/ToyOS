@@ -47,7 +47,7 @@ use super::machine::{
 #[cfg(feature = "test-actuators")]
 use super::machine::lower_sysinfo_bound;
 use super::proc::{
-    spawn_place, sys_endowments, sys_exit, sys_nanosleep, sys_process_open, sys_process_stats,
+    spawn_place, sys_endowments, sys_exit, sys_nanosleep, sys_process_stats,
     sys_process_wait, sys_rt_enter, sys_spawn, sys_thread_exit, sys_thread_join, sys_thread_spawn,
 };
 use super::vm::{shared_image, sys_dlopen, sys_dlsym, sys_mmap, sys_munmap, sys_query_modules, sys_tls_alloc_block};
@@ -275,9 +275,6 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 Ok(object) => process::kill_process(&object),
                 Err(e) => e.refuse(),
             }
-        }
-        SYS_PROCESS_OPEN => {
-            sys_process_open(RawHandle(a1 as u32), process::Pid::from_raw(a2 as u32))
         }
 
         // No right: the one caller marks both ends of a pair, so requiring one would refuse the other.
@@ -633,6 +630,10 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             }
             DA::KILL_PLACE_AS_SPAWN_LANDS => {
                 process::debug_mark_spawn();
+                0
+            }
+            DA::HOLD_SPAWN_UNTIL_CHILD_ENDS => {
+                process::debug_mark_spawn_hold();
                 0
             }
             _ => SyscallError::InvalidArgument.to_u64(),

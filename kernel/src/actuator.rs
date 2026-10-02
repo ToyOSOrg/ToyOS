@@ -141,9 +141,6 @@ actuators! {
     /// Run the revoked-backing controls after mount.
     revoked_backing_selftest = "revoked-backing-selftest";
 
-    /// Reopen init by pid once it is spawned, and open every kernel thread's pid, the way `SYS_PROCESS_OPEN` does.
-    process_reopen_selftest = "process-reopen-selftest";
-
     /// Have Ctrl+Alt+D's report painter go fatal holding the panel's latch: a
     /// fatal path meeting a painter that will never let go.
     panel_painter_stalls = "panel-painter-stalls";

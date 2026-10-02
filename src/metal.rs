@@ -751,7 +751,6 @@ pub const FLASHABLE: &[&str] = &[
     // the boot goes on to userland and ends the way an unarmed one does; what
     // an armed image leaves behind is a longer log.
     "pci-cap-selftest",
-    "process-reopen-selftest",
     "revoked-backing-selftest",
     "leak-rollback-selftest",
     "lapic-spurious-selftest",
