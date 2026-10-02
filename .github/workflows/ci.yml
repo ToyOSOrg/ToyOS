@@ -1,8 +1,5 @@
 name: ci
 
-# A pull request and the merge queue: the host tests, and no guest.
-# nightly.yml boots the guests.
-
 on:
   pull_request:
     branches: [main]
@@ -12,6 +9,10 @@ on:
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
+
+# No job here writes: a toolchain release is main's publisher's alone.
+permissions:
+  contents: read
 
 jobs:
   host:
@@ -42,3 +43,18 @@ jobs:
           restore-keys: host-sealed-${{ runner.os }}-${{ runner.arch }}-
 
       - run: cargo run -- --ci host
+
+  toolchain:
+    if: github.event_name == 'merge_group' || github.event.pull_request.draft == false
+    uses: ./.github/workflows/toolchain.yml
+
+  # A required check that is skipped reads as green, so this runs whatever
+  # `toolchain` concluded.
+  guest:
+    needs: toolchain
+    if: ${{ !cancelled() && (github.event_name == 'merge_group' || github.event.pull_request.draft == false) }}
+    uses: ./.github/workflows/guest.yml
+    with:
+      kvm: true
+      sysroot-key: ${{ needs.toolchain.outputs.sysroot-key }}
+      sysroot-path: ${{ needs.toolchain.outputs.sysroot-path }}

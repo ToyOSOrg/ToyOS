@@ -63,9 +63,7 @@ const PATHS: [&str; 8] = [
 ];
 
 /// The most the files under [`PATHS`] may hold, uncompressed. The repository's
-/// caches are evicted by last access past 10 GB, and a night whose guest jobs
-/// restore after this entry is saved holds two host entries beside a guest
-/// one, then one beside two guest ones.
+/// caches are evicted by last access past 10 GB.
 const LIMIT: u64 = 8_000_000_000;
 
 /// 2001-09-09T01:46:40Z: older than any build, so a file dated so is never
@@ -226,7 +224,7 @@ fn seal_at(root: &Path, home: &Path, cold: &Cold) -> Result<String, String> {
     if bytes > LIMIT {
         return Err(format!(
             "{bytes} B in {files} files under the cache's paths, above the {LIMIT} B an entry may \
-             hold: saved, it could evict the guest entry or the next host one"
+             hold: saved, it could evict a toolchain layer or the next host one"
         ));
     }
     let now = sources(root)?;

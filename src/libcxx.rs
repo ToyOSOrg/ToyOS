@@ -15,9 +15,6 @@ use std::process::Command;
 use crate::arch::Arch;
 use crate::clang::CSysroot;
 
-/// This file, which the release tag hashes.
-pub(crate) const SOURCE: &str = file!();
-
 /// What of `src/llvm-project` the runtimes' build reads: the runtimes, the CMake
 /// modules they share with LLVM, and LLVM's libc, whose number parsing libc++
 /// compiles in.

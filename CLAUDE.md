@@ -64,7 +64,7 @@ Vendor firmware a device or CPU verifies by its maker's signature may be shipped
 
 ## Build & test
 
-- `cargo run` builds everything (toolchain, kernel, bootloader, userland, image) and launches QEMU; `--build-only` skips the launch. `cargo test` runs the QEMU harness, and `cargo test --test toyos-build -- --metal` the T14's. `cargo run -- --ci host` runs every host suite: it is the `host` check a ready pull request and the merge queue run. Guests run nightly.
+- `cargo run` builds everything (toolchain, kernel, bootloader, userland, image) and launches QEMU; `--build-only` skips the launch. `cargo test` runs the QEMU harness, and `cargo test --test toyos-build -- --metal` the T14's. `cargo run -- --ci host` runs every host suite: it is the `host` check a ready pull request and the merge queue run. The guest suite is their `guest / suite` check, under KVM; the nightly runs it under TCG.
 - **A behaviour is tested on the cheapest tier that reaches it**: a type that makes the bug unrepresentable, then a host test, then a metal row on the T14, and a QEMU guest test last.
 - **Agents run their own guest tests**, the whole suite or a filter, side by side. **The T14 is the orchestrator's alone: no other agent runs `--metal` without `--metal-readback`, which touches no machine.**
 - **Timing and audio verdicts come only from metal.** A QEMU test asserts order, completion, content and counts, never how long something took, and plays no audio; its only clock is a hang ceiling.

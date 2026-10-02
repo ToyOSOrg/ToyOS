@@ -2,13 +2,6 @@
 //! checkout, a cache and one line, and this host runs the same job to the same
 //! verdict.
 //!
-//! `.github/workflows/` is three files. `ci.yml` runs on a pull request and in
-//! the merge queue and boots no guest: [`Job::Host`] runs as `host`. Every
-//! test that boots no guest is in [`Job::Host`], so a merge is gated on all of
-//! them. `nightly.yml` runs everything that boots a guest, `host` again to
-//! write the cache the merge queue restores, and portability. `publish.yml`
-//! puts a landing's crates on crates.io.
-//!
 //! A host job runs every step and reds if any failed; a guest job stops at the
 //! first failure among the instrument, the toolchain and the suite, because
 //! what follows a wrong instrument or a missing toolchain measures nothing —
@@ -39,8 +32,10 @@ const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
                     model controls, userland and the SDK (ci.yml, nightly)
   seal              `host` from a cold tree, then that tree sealed as the host
                     cache's entry, which the step after it saves (nightly)
-  toolchain         publish this tree's toolchain if nobody has (nightly)
-  guest             the guest suite (nightly)
+  toolchain         the cache entry of each store of this tree's toolchain
+  bootstrap         build the stores of this tree's toolchain its job did not restore
+  guest             the guest suite, on the sysroot its job restored
+  release           put the sysroot main's nightly restored up as its toolchain release
   publish           put main's SDK crates on crates.io (publish.yml)";
 
 #[derive(Debug, PartialEq, Eq)]
@@ -48,7 +43,9 @@ enum Job {
     Host,
     Seal,
     Toolchain,
+    Bootstrap,
     Guest,
+    Release,
     Publish,
 }
 
@@ -57,7 +54,9 @@ fn parse(words: &[String]) -> Result<Job, String> {
         Some("host") => Job::Host,
         Some("seal") => Job::Seal,
         Some("toolchain") => Job::Toolchain,
+        Some("bootstrap") => Job::Bootstrap,
         Some("guest") => Job::Guest,
+        Some("release") => Job::Release,
         Some("publish") => Job::Publish,
         Some(other) => return Err(format!("no CI job is called {other:?}")),
         None => return Err("which job?".to_string()),
@@ -76,8 +75,10 @@ pub fn dispatch(root: &Path, args: &[String]) {
     let steps = match &job {
         Job::Host => host(root),
         Job::Seal => seal(root),
-        Job::Toolchain => vec![step("the toolchain release", || release::ensure_published(root))],
+        Job::Toolchain => vec![step("the stores of this tree's toolchain", || release::toolchain(root))],
+        Job::Bootstrap => vec![step("this tree's toolchain", || release::bootstrap(root))],
         Job::Guest => guest(root, &suite_args(&["--jobs", "1"])),
+        Job::Release => vec![step("main's toolchain release", || release::release(root))],
         Job::Publish => vec![step("the SDK crates on crates.io", || publish(root))],
     };
     let failed: Vec<&Step> = steps.iter().filter(|s| s.verdict.is_err()).collect();
@@ -471,10 +472,9 @@ fn run_control(root: &Path, control: &Control) -> Result<String, String> {
     judge_control(control, green, &log)
 }
 
-/// The merge queue's whole gate, and the nightly's host lane: every test that
-/// runs on the host and boots no guest. The build system's own tests, every
-/// member of the host workspace, clippy with warnings denied, the concurrency
-/// models' negative controls, every userland crate with a host test
+/// Every test that runs on the host and boots no guest. The build system's own
+/// tests, every member of the host workspace, clippy with warnings denied, the
+/// concurrency models' negative controls, every userland crate with a host test
 /// ([`crate::userlandhost`], which also reds on a userland test none of them
 /// runs), every app the images ship for each host ([`apps_for`]), and the SDK.
 ///
@@ -483,10 +483,10 @@ fn run_control(root: &Path, control: &Control) -> Result<String, String> {
 /// that writes scratch past a `toyos_tmpdir::TempDir`, or holds one past its
 /// end, is a test that fills the host's disk one run at a time.
 ///
-/// Clippy needs none of the ToyOS toolchain the nightly alone builds — the
-/// kernel and the bootloader lint against every architecture's bare targets
-/// ([`crate::clippy::BARE_TARGETS`]), which any rustup installs, and userland carries no
-/// clippy shape (`src/clippy.rs`). Userland and the SDK are tested against the
+/// Clippy needs none of the ToyOS toolchain — the kernel and the bootloader
+/// lint against every architecture's bare targets ([`crate::clippy::BARE_TARGETS`]),
+/// which any rustup installs, and userland carries no clippy shape
+/// (`src/clippy.rs`). Userland and the SDK are tested against the
 /// host triple for the same reason.
 ///
 /// In a job that carries the cache ([`cicache::carried`]) the restored entry is
@@ -1071,6 +1071,7 @@ mod tests {
         assert_eq!(parse(&words("host")), Ok(Job::Host));
         assert_eq!(parse(&words("seal")), Ok(Job::Seal));
         assert_eq!(parse(&words("guest")), Ok(Job::Guest));
+        assert_eq!(parse(&words("release")), Ok(Job::Release));
         assert!(parse(&words("guest 3/12")).is_err());
         assert!(parse(&words("tcg")).is_err());
         assert!(parse(&words("host extra")).is_err());
@@ -1177,7 +1178,7 @@ mod tests {
                 );
             }
         }
-        assert_eq!(seen, 3, "ci.yml, nightly.yml and publish.yml");
+        assert_eq!(seen, 5, "ci.yml, nightly.yml and publish.yml, and guest.yml and toolchain.yml");
     }
 
     #[test]

@@ -34,9 +34,9 @@ netd, `toyos::net` and std's ToyOS networking in the `rust/` fork.
    `rustls-rustcrypto` 0.0.2-alpha, and #660 cut both. The row comes back on
    `ring` and waits for it; `rustls-rustcrypto` does not come back (owner,
    2026-10-02). Whether `ring` builds for the ToyOS target is open and
-   untried: no build compiles it. `rustls-rustcrypto` is still named by
-   doom's build script, which installs it on the host, and by a line the cut
-   left in `tests/toyos-rust-tests`
+   untried: no build for that target compiles it. `rustls-rustcrypto` is
+   still named by doom's build script, which installs it on the host, and by
+   a line the cut left in `tests/toyos-rust-tests`
    (`issues/build/the-guest-test-crate-depends-on-three-crates-no-test-uses.md`).
    Open: what doom's build script installs instead.
    **Exit**: `https_tls13` is a `METAL` row: on the T14's I219 an unmodified

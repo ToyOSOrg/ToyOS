@@ -10,6 +10,14 @@ pub const CRATE: &str = "userland/libc";
 /// The features [`build`] gives [`CRATE`].
 pub const FEATURES: &str = "std-runtime";
 
+/// What [`build`] asks cargo for, but the target, the manifest and the target
+/// directory: what a sysroot's key reads of it. `--message-format=json` is how
+/// it finds the exact rlib artifacts.
+pub(crate) const BUILD: [&str; 5] = ["build", "--release", "--features", FEATURES, "--message-format=json"];
+
+/// What [`build_c`] asks cargo for, as [`BUILD`] is [`build`]'s.
+pub(crate) const BUILD_C: [&str; 4] = ["rustc", "--release", "--crate-type", "staticlib"];
+
 /// Build toyos-libc against the toolchain at `toolchain`, in `target_dir`, and
 /// install it there as `libtoyos_c.a`. Part of making a sysroot
 /// (`src/sysroot.rs`), whose key `userland/libc/src` is one of.
@@ -20,24 +28,11 @@ pub fn build(root: &Path, toolchain: &Path, target_dir: &Path, arch: Arch) {
 
     // The one guest artifact `build::PROFILE` does not reach, so it is the one
     // place `overflow-checks` is off — and it is linked into std, so it is in
-    // every userland binary. Left deliberately, on two grounds: CLAUDE.md gives
-    // the POSIX compatibility layer explicitly relaxed rules, and a flag changed
-    // here does not move any sysroot's key unless `sysroot::RECIPE` moves with
-    // it, so the installed archive would not be rebuilt and the manifest would
-    // then claim something the artifact does not have.
-    //
-    // --message-format=json to discover the exact rlib artifacts.
+    // every userland binary. Left deliberately: CLAUDE.md gives the POSIX
+    // compatibility layer explicitly relaxed rules.
     let output = Command::new("cargo")
-        .args([
-            "build",
-            "--release",
-            "--target",
-            arch.userland(),
-            "--features",
-            FEATURES,
-            "--message-format=json",
-            "--manifest-path",
-        ])
+        .args(BUILD)
+        .args(["--target", arch.userland(), "--manifest-path"])
         .arg(root.join(CRATE).join("Cargo.toml").to_str().unwrap())
         .arg("--target-dir")
         .arg(target_dir)
@@ -95,7 +90,8 @@ pub fn build(root: &Path, toolchain: &Path, target_dir: &Path, arch: Arch) {
 pub fn build_c(root: &Path, toolchain: &Path, target_dir: &Path, arch: Arch) {
     let target = arch.userland();
     let output = Command::new("cargo")
-        .args(["rustc", "--release", "--target", target, "--crate-type", "staticlib", "--manifest-path"])
+        .args(BUILD_C)
+        .args(["--target", target, "--manifest-path"])
         .arg(root.join(CRATE).join("Cargo.toml"))
         .arg("--target-dir")
         .arg(target_dir)

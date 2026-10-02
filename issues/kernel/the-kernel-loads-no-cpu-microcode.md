@@ -50,7 +50,7 @@ pages (Linux `amd.c`, `__apply_microcode_amd`). On families 0x17, 0x19 and part
 of 0x1a below a per-CPU cutoff revision the CPU's own signature check is broken
 (EntrySign; `cpu_has_entrysign`, `need_sha_check`), so the hash pin is the only
 check, as `amd_shas.c` is Linux's. linux-firmware's `LICENSE.amd-ucode` is
-unread. ToyOS has no AMD metal: the nightly's EPYCs are KVM guests, which load
+unread. ToyOS has no AMD metal: CI's EPYCs are KVM guests, which load
 nothing.
 
 **Licence.** `LicenseRef-Intel-Microcode` is in no `ALLOWED` row of
