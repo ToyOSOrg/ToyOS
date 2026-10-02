@@ -73,6 +73,10 @@ struct Kernel {
     closed: Cell<Option<RawHandle>>,
     /// A watch another thread submits while the next look runs.
     lands_during_look: Cell<Option<(RawHandle, u64)>>,
+    /// How many more renewals a peer's post follows at once.
+    posts_after_renewal: Cell<u32>,
+    /// How many looks the submitter has made.
+    looks: Cell<u32>,
     /// The completion ring, and how many answers it holds.
     answers: RefCell<Vec<(u64, i32)>>,
     size: usize,
@@ -89,6 +93,8 @@ impl Kernel {
             l: Object { posts_are_readiness: true, ..Object::default() },
             closed: Cell::new(None),
             lands_during_look: Cell::new(None),
+            posts_after_renewal: Cell::new(0),
+            looks: Cell::new(0),
             answers: RefCell::new(Vec::new()),
             size,
         }
@@ -195,6 +201,7 @@ impl Submitter<Ring> for Kernel {
     }
 
     fn look(&self, poll: &Arc<Poll<Ring>>) -> Look {
+        self.looks.set(self.looks.get() + 1);
         if let Some((handle, token)) = self.lands_during_look.take() {
             self.watch(handle, token);
         }
@@ -208,6 +215,10 @@ impl Submitter<Ring> for Kernel {
         let again = Arc::new(Poll::new(self.ring.clone(), poll.user_data, poll.handle, poll.flags));
         if self.polls.borrow_mut().renew(poll, again.clone()) {
             self.arm(again);
+        }
+        if let Some(left) = self.posts_after_renewal.get().checked_sub(1) {
+            self.posts_after_renewal.set(left);
+            self.post(poll.handle);
         }
         Look::Waits
     }
@@ -446,7 +457,7 @@ fn a_watch_during_a_look_that_finds_nothing_is_the_handles_one_poll() {
 }
 
 /// The same while the look finds bytes: one arrival, answered once, under the
-/// newer watch's token.
+/// newer watch's token, by the pass after the one it landed in.
 #[test]
 fn a_watch_during_a_look_that_finds_bytes_answers_alone() {
     loom::model(|| {
@@ -457,6 +468,9 @@ fn a_watch_during_a_look_that_finds_bytes_answers_alone() {
         kernel.fill(H);
         kernel.post(H);
         kernel.lands_during_look.set(Some((H, 2)));
+        kernel.submit();
+        assert_eq!(kernel.drain(), NOTHING, "the look answered under the watch it was replaced by");
+        assert!(kernel.awake(), "the newer watch's fire is owed the next look");
         kernel.submit();
         assert_eq!(kernel.drain(), [(2, BYTES)]);
     });
@@ -482,5 +496,27 @@ fn a_submitter_parks_only_with_nothing_it_could_answer() {
         assert!(!kernel.awake(), "the ring is full: the poll left over waits for room");
         assert_eq!(kernel.drain(), [(3, BYTES)]);
         assert!(kernel.awake(), "room came back with a poll still owed its look");
+    });
+}
+
+/// A peer that posts an empty object as fast as the submitter looks at it does
+/// not hold the look: the poll renewed in this pass waits for the next, and
+/// the handle behind it is answered.
+#[test]
+fn a_poll_fired_as_it_is_renewed_waits_for_the_next_look() {
+    loom::model(|| {
+        let kernel = Kernel::new(4);
+        kernel.watch(H, 3);
+        kernel.watch(G, 4);
+        kernel.submit();
+
+        kernel.post(H);
+        kernel.fill(G);
+        kernel.post(G);
+        kernel.posts_after_renewal.set(3);
+        kernel.submit();
+        assert_eq!(kernel.looks.get(), 2, "the look went round on a poll it had renewed");
+        assert_eq!(kernel.drain(), [(4, BYTES)]);
+        assert!(kernel.awake(), "the renewed poll's fire is owed the next look");
     });
 }
