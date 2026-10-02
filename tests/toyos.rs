@@ -2236,8 +2236,6 @@ fn pci_cap_selftest(log: &str) -> Result<(), String> {
         Ok(())
 }
 
-/// The kernel reopens init by pid after the last handle to it has gone, and
-/// no kernel thread's pid opens.
 /// `process_tree` passed, and the kernel said the two things the guest cannot
 /// see: each B's first spawn was refused by the loader, past the admission that
 /// holds B, and the chain's one depth refusal names `MAX_DEPTH` + 1.
@@ -2258,6 +2256,8 @@ fn process_tree(back: &metal::Readback) -> Result<(), String> {
     Ok(())
 }
 
+/// The kernel reopens init by pid after the last handle to it has gone, and
+/// no kernel thread's pid opens.
 fn process_reopen(log: &str) -> Result<(), String> {
         for control in ["process-reopen:", "process-open-kthread:"] {
             let Some(verdict) = log.lines().find(|l| l.contains(control)) else {

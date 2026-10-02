@@ -154,8 +154,7 @@ fn main() {
         "handle table reached {n} slots, past the {MAX_HANDLES} cap"
     );
 
-    // The cap is a live limit, not a latched failure. A slot the arms above
-    // closed is past generation 0, so each is closed by the handle dup2 answered.
+    // The cap is a live limit, not a latched failure.
     for handle in filled {
         syscall::close(handle);
     }
