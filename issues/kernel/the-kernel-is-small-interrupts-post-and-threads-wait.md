@@ -169,9 +169,11 @@ times:
       windows per CPU, reported beside the IRQ census and fed by each
       architecture's masking primitives and entries, the number the ARM
       track's stage 4 owes as well. Built: the `mask-windows` kernel and the
-      T14's `mask_windows` row. **Exit**, open: the instrument reads back a
-      window of known length on the T14, which is x86 metal, and its rows are
-      in that machine's record; and neither window is longer with step 1 than
+      T14's `mask_windows` row. The exit's first half is met: the instrument
+      reads back a window of known length on the T14, which is x86 metal, and
+      the row's judge refuses a boot that reads it back shorter than it was
+      held or at more than twice that. **Exit**, open: neither window is
+      longer with step 1 than
       with it reverted on the tree that carries the instrument, the patch
       posted on #649 being what reverted means. That comparison is the median
       of at least five interleaved boots an arm, each read from the load's own

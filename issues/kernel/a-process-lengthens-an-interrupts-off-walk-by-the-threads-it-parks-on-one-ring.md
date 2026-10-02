@@ -37,13 +37,18 @@ exit (`issues/kernel/syscall-preemption-is-incidental.md`), with #634 and
 without it: #634 did not mask it, and reverting #634 does not shorten it.
 The second runs in the device's handler since #634.
 
-How long either is has not been read. The eight T14 boots of #649 at
-`72f16e39a` ran the first with N = 256 (`test_rs_ring_park_herd`), but each
-printed one report, which spans every window since its CPU joined the
-scheduler, and none took an interrupt a handler #634 changed serves
-(`userdev=0 sound=0 dmafault=0 hda=0` on every CPU). They bound it from
-above: in the six boots no longer window covers, the seven CPUs other than
-cpu0 read 251,452 to 4,720,498 ns of interrupts off.
+How long the second is has not been read. The first has, at one size: the
+three T14 boots of #649 at `8b73eba69` (comment 5959415453, readbacks
+`649-r5/1-head`, `649-r5/2-report-halved`, whose kernel prints half of every
+span, and `649-r5/3-idle-halt-counted`) ran it with N = 256
+(`test_rs_ring_park_herd`) and read it from the herd's own report, which
+spans the runner's spawn of the herd as well. The longest `irqs_off_ns` on
+any CPU there is 1032292 (`windowscase/kernel.log:428`), 2 × 519358 (`:426`)
+and 1175943 (`:430`). The third is cpu7's, the CPU that spawned the herd
+(`issues/kernel/the-cpu-that-spawns-a-toybox-applet-reads-1-4-ms-of-interrupts-and-preemption-off-on-the-t14.md`),
+and the other seven read 257646 to 364953 in that boot. None of the three
+took an interrupt a handler #634 changed serves
+(`userdev=0 sound=0 dmafault=0 hda=0` on every CPU).
 
 **Exit**: the interrupts-off window step 2's instrument reads on the T14
 under N threads parked in `submit` on one ring, a sibling thread completing

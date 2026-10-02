@@ -43,9 +43,15 @@ Nothing names what opens it. A report carries a span and no address, and one
 report a boot cannot say whether the window recurs. What will: the record
 keeping, beside each CPU's longest span, the address its opening hook was
 called from, printed in the report and resolved through the kernel's symbols.
-The row's first report now ends at its first job's exit, half a second after
-the CPUs join, and no longer at the herd's: it says whether the window opens
-before that, and no more.
+
+It opens before the boot's first job ends. The three boots of #649 at
+`8b73eba69` (comment 5959415453, readbacks `649-r5/1-head`,
+`649-r5/2-report-halved`, whose kernel prints half of every span, and
+`649-r5/3-idle-halt-counted`) print a report at each of four exits. cpu0's
+`irqs_off_ns` in the first, at `test_rs_idle_span`'s exit 1.746 s into the
+boot (`windowscase/kernel.log:348` in each), reads 6533222, 2 × 3273547 and
+6508165. In the three reports after it cpu0 reads at most 943904, 2 × 472938
+and 345229.
 
 **Exit**: the section that opens the window is named by that reading on the
 T14, and cpu0's longest window there no longer includes it, or this file is

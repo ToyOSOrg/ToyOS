@@ -56,9 +56,18 @@ inside a shootdown would read as the fourth boot does.
 Nothing names what opens any of them. A report carries a span and no address,
 and no time: eight equal spans are not shown to be one event. What will: the
 record keeping, beside each CPU's longest span, the address its opening hook
-was called from and the counter it closed at, printed in the report. The row
-now takes a report after the herd's exit and before `reboot` is spawned,
-which says on which side of that the third reading falls.
+was called from and the counter it closed at, printed in the report.
+
+The third reading falls on the `reboot` and stop side of the herd's
+teardown. The three boots of #649 at `8b73eba69` (comment 5959415453,
+readbacks `649-r5/1-head`, `649-r5/2-report-halved`, whose kernel prints half
+of every span, and `649-r5/3-idle-halt-counted`) took a report at `echo`'s
+exit, after the herd's and before `reboot` was spawned. Its longest
+`irqs_off_ns` is cpu7's in each: 1499808, 2 × 748872 and 1479558
+(`windowscase/kernel.log:456`). The stop's report after it, in the six lines
+the black box keeps, reads cpu7 11522834 and cpu4 11645411 in the first boot
+(`649-r5/1-head/windowscase/loader.log:57`, `:63`), and at most cpu7's
+2 × 3799327 in the second and cpu7's 1305656 in the third.
 
 **Exit**: each of the three is named by that reading on the T14, and is
 removed, or this file is replaced by the bound it is held to and the
