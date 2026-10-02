@@ -53,7 +53,7 @@ impl FromHandle for Posted {
 const POSTERS: usize = 4;
 
 /// How long those threads go on posting after the kill before they say the
-/// child outlived it: a hang ceiling, for a hang that ends when its peers do.
+/// child outlived it.
 const HELD: Duration = Duration::from_secs(1);
 
 /// `process::KILLED_EXIT_CODE`.
