@@ -10,8 +10,9 @@
 //!
 //! **A guest job installs the sysroot its restore step put down** ([`install`]),
 //! and main's nightly packs that store into the release a consumer outside CI
-//! installs, then moves the SDK alias onto it ([`release`]); run anywhere else,
-//! that job is refused before it reads anything.
+//! installs, then moves the SDK alias onto it ([`release`]). Run as any other
+//! job, that is refused before it reads anything; run on a tree main has moved
+//! past, it puts nothing up.
 //!
 //! A dev host installs none: its build system builds its own from `rust/`.
 
@@ -26,6 +27,7 @@ use toyos_tmpdir::TempDir;
 
 use crate::buildlock::Keyed;
 use crate::keystore::Key;
+use crate::sdkversion::Release;
 
 const ASSET: &str = "toyos-toolchain.tar.gz";
 
@@ -303,7 +305,7 @@ fn run(cmd: &mut Command) -> Result<(), String> {
 /// `cargo run -- --ci release`: the sysroot main's nightly restored, put up as
 /// the release a consumer outside CI installs, and the `sdk-<version>` alias
 /// moved onto it. Refused before anything is read unless this job is main's
-/// publisher, and before anything is put up unless it runs at main's tip.
+/// publisher; a tree main has moved past puts nothing up ([`sdk_at_tip`]).
 pub fn release(root: &Path) -> Result<String, String> {
     let var = |name| std::env::var(name).ok();
     let repo = var("GITHUB_REPOSITORY").ok_or("GITHUB_REPOSITORY is unset: only a runner publishes a toolchain")?;
@@ -317,8 +319,11 @@ fn release_as(root: &Path, repo: &str, workflow: Option<&str>, event: Option<&st
     if !(cfg!(target_os = "linux") && crate::arch::Arch::HOST == Some(crate::arch::Arch::X86_64)) {
         return Err(format!("a release is {HOST}'s and this host is not one; a tarball packed here would install nowhere"));
     }
-    let tip = crate::sysroot::git_out(root, &["ls-remote", "origin", "refs/heads/main"]);
-    crate::ci::at_tip(&tip, crate::sysroot::git_out(root, &["rev-parse", "HEAD"]).trim())?;
+    let head = crate::sysroot::git_out(root, &["rev-parse", "HEAD"]);
+    let tip = || crate::sysroot::git_out(root, &["ls-remote", "origin", "refs/heads/main"]);
+    let Some(sdk) = sdk_at_tip(|| crate::sdkversion::plan(root), tip, head.trim())? else {
+        return Ok(format!("main has moved past {}, and its tip's nightly is the one that publishes", head.trim()));
+    };
     let key = lay_out(root)?;
     let rust_dir = root.join("rust");
     let need = shipped_glibc(&crate::toolchain::stage2(&rust_dir))?;
@@ -336,7 +341,30 @@ fn release_as(root: &Path, repo: &str, workflow: Option<&str>, event: Option<&st
     let notes = notes(root, repo, &tag, &manifest(&tag))?;
     let github = Github::new(repo)?;
     let put = put_up(&github, root, &tag, &notes, &tarball)?;
-    Ok(format!("{put}; {}", alias(&github, root, &tag, &notes, &tmp)?))
+    Ok(format!("{put}; {}", alias(&github, root, &sdk, &tag, &notes, &tmp)?))
+}
+
+/// The SDK crates as crates.io holds them, where `head` is main's tip as
+/// `ls_remote` prints it, and `None` where main has moved past `head`: a
+/// landing during a nightly is not its failure, and a run of an older tree
+/// moves no alias back. crates.io is read before the tip, so a landing whose
+/// crates that read shows is one the tip shows too. Refused where crates.io's
+/// newest is not the tip's own, which `publish.yml` owes.
+fn sdk_at_tip(
+    plan: impl FnOnce() -> Result<Vec<Release>, String>,
+    ls_remote: impl FnOnce() -> String,
+    head: &str,
+) -> Result<Option<Vec<Release>>, String> {
+    let sdk = plan()?;
+    let said = ls_remote();
+    let tip = said.split_whitespace().next().ok_or("origin names no main")?;
+    if tip != head {
+        return Ok(None);
+    }
+    match sdk.iter().find(|r| r.publish) {
+        Some(owed) => Err(format!("crates.io holds no {} of this tree, main's tip, so no sdk alias can name it", owed.krate.name)),
+        None => Ok(Some(sdk)),
+    }
 }
 
 /// The tarball of the toolchain laid out under `build` ([`lay_out`]) at
@@ -595,17 +623,12 @@ Until [rust-windowing/raw-window-handle#223](https://github.com/rust-windowing/r
 /// the name a consumer pins, moved onto `tag`. A second release carrying only a
 /// `TOOLCHAIN` naming `tag`, the commit that put it up and the SDK crates,
 /// because GitHub hangs an asset off one release id.
-fn alias(github: &Github, root: &Path, tag: &str, notes: &str, tmp: &Path) -> Result<String, String> {
-    let plan = crate::sdkversion::plan(root)?;
-    if let Some(owed) = plan.iter().find(|r| r.publish) {
-        let name = owed.krate.name;
-        return Err(format!("crates.io holds no {name} of this tree, so no sdk alias can name it"));
-    }
-    let abi = plan.iter().find(|r| r.krate.name == "toyos-abi").ok_or("toyos-abi is not published")?;
+fn alias(github: &Github, root: &Path, sdk: &[Release], tag: &str, notes: &str, tmp: &Path) -> Result<String, String> {
+    let abi = sdk.iter().find(|r| r.krate.name == "toyos-abi").ok_or("toyos-abi is not published")?;
     let abi = abi.version.split('+').next().unwrap_or(&abi.version);
     let alias = format!("toolchain-linux-x86_64-sdk-{abi}");
     let commit = |rev: &str| crate::sysroot::git_out(root, &["rev-parse", rev]).trim().to_string();
-    let sdk: String = plan.iter().map(|r| format!("{} {}\n", r.krate.name, r.version)).collect();
+    let sdk: String = sdk.iter().map(|r| format!("{} {}\n", r.krate.name, r.version)).collect();
     let toolchain = tmp.join("TOOLCHAIN");
     let text = format!("{}toyos {}\nrust {}\n{sdk}", manifest(tag), commit("HEAD"), commit("HEAD:rust"));
     fs::write(&toolchain, text).map_err(|e| format!("{}: {e}", toolchain.display()))?;
@@ -652,6 +675,42 @@ mod tests {
             assert!(why.starts_with("only ") && why.contains(&workflow) && why.contains(event), "{why}");
         }
         assert!(release_as(root, REPO, None, None).unwrap_err().starts_with("only "));
+    }
+
+    /// crates.io's newest `toyos-abi` as a plan reads it: this tree's, or owed.
+    fn sdk(owed: bool) -> Vec<Release> {
+        let krate = &crate::sdkversion::PUBLISHED[0];
+        vec![Release { krate, key: String::new(), version: "0.28.0+k".into(), publish: owed, manifest: String::new() }]
+    }
+
+    /// **A landing on main during a nightly is not that nightly's failure**:
+    /// whether it comes before the release reads anything, between its read of
+    /// crates.io and its read of main's tip, or not at all, and whether or not
+    /// it put newer SDK crates up, the release is the tip's or nothing is put
+    /// up, and neither is refused. What is refused is the tip's own crates not
+    /// being up, and a remote that names no main.
+    #[test]
+    fn a_landing_during_the_nightly_puts_nothing_up_and_is_no_failure() {
+        const HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
+        const LANDED: &str = "fedcba9876543210fedcba9876543210fedcba98";
+        let main = |tip: &str| format!("{tip}\trefs/heads/main\n");
+        // The release of `HEAD` on a main that lands once, after `after` of
+        // the release's reads: whether it publishes.
+        let publishes = |after: usize, moves_sdk: bool| {
+            let reads = std::cell::Cell::new(0);
+            let landed = || reads.replace(reads.get() + 1) >= after;
+            let read = sdk_at_tip(|| Ok(sdk(landed() && moves_sdk)), || main(if landed() { LANDED } else { HEAD }), HEAD);
+            read.map(|sdk| sdk.is_some())
+        };
+        for moves_sdk in [false, true] {
+            assert_eq!(publishes(0, moves_sdk), Ok(false), "a landing before the release read anything");
+            assert_eq!(publishes(1, moves_sdk), Ok(false), "a landing between the release's two reads");
+            assert_eq!(publishes(2, moves_sdk), Ok(true), "no landing");
+        }
+        let owed = sdk_at_tip(|| Ok(sdk(true)), || main(HEAD), HEAD).err().expect("the tip's crates are not up");
+        assert!(owed.contains("toyos-abi") && owed.contains("main's tip"), "{owed}");
+        let unnamed = sdk_at_tip(|| Ok(sdk(false)), String::new, HEAD).err().expect("no main");
+        assert!(unnamed.contains("names no main"), "{unnamed}");
     }
 
     fn release_json(assets: Value) -> Value {

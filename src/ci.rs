@@ -933,7 +933,7 @@ fn publish(root: &Path) -> Result<String, String> {
 
 /// Whether `HEAD` is `main`'s tip as `git ls-remote` printed it: a re-run of an
 /// older push would put older code up under a newer minor.
-pub(crate) fn at_tip(ls_remote: &str, head: &str) -> Result<(), String> {
+fn at_tip(ls_remote: &str, head: &str) -> Result<(), String> {
     match ls_remote.split_whitespace().next() {
         Some(tip) if tip == head => Ok(()),
         tip => Err(format!(
