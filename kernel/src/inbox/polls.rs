@@ -17,6 +17,9 @@
 //! poll and then posts the watch the submitter parks on, and the submitter,
 //! registered there, reads its polls again before it parks. The lost-wake
 //! argument is that watch's, and nothing here records a fire beside the poll.
+//! A poll one submitter is looking at is hidden from every other, which may
+//! park over it: what wakes that one is the answer ([`complete`]), which
+//! posts the same watch once the completion is written.
 //!
 //! Compiled a second time by `kernel-loom` and by `toyos-sched-loom`, so it
 //! names nothing of the kernel's.
@@ -210,10 +213,12 @@ pub enum Look {
     Waits,
 }
 
-/// The submitter's side of [`deliver`].
-pub trait Submitter<W> {
+/// The submitter's side of [`deliver`]; its [`Wake`] is the ring's own.
+pub trait Submitter<W>: Wake {
     /// Whether the completion ring takes one more answer.
     fn room(&self) -> bool;
+    /// Write one completion and wake nobody: [`complete`] is the one caller,
+    /// and owes the wake.
     fn answer(&self, user_data: u64, result: i32);
     /// Look at the object `poll` watches, and [`Polls::renew`] the poll if it
     /// is not ready.
@@ -221,6 +226,14 @@ pub trait Submitter<W> {
     /// Run `f` on the ring's polls under their lock; `None` once the ring is
     /// gone.
     fn polls<R>(&self, f: impl FnOnce(&mut Polls<W>) -> R) -> Option<R>;
+}
+
+/// Write one completion, then wake every submitter parked on the ring: one
+/// may wait for this count, and one may have parked over the poll it answers
+/// while a look hid it.
+pub fn complete<W: Wake>(ring: &impl Submitter<W>, user_data: u64, result: i32) {
+    ring.answer(user_data, result);
+    ring.wake();
 }
 
 /// Answer every poll owed a look, oldest first, while the ring has room; a
@@ -241,7 +254,7 @@ pub fn deliver<W: Wake>(ring: &impl Submitter<W>) {
             }
         };
         if ring.polls(|polls| polls.settle(&poll)) == Some(true) {
-            ring.answer(poll.user_data, result);
+            complete(ring, poll.user_data, result);
         }
     }
 }

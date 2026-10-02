@@ -12,7 +12,8 @@
 //! loom's atomics in this crate; every model here is one thread, and a watch
 //! another thread submits during a look is staged inside the look. A fire
 //! racing the submitter's park is `toyos-sched-loom`'s
-//! `a_fire_racing_a_submitters_park_is_never_lost`.
+//! `a_fire_racing_a_submitters_park_is_never_lost`, and two submitters of one
+//! ring its `an_answer_wakes_the_submitter_its_look_hid_the_poll_from`.
 //!
 //! The negative case is a cargo feature:
 //!
@@ -185,6 +186,11 @@ impl Kernel {
     fn drain(&self) -> Vec<(u64, i32)> {
         self.answers.take()
     }
+}
+
+/// An answer's wake, which has no waiter either.
+impl Wake for Kernel {
+    fn wake(&self) {}
 }
 
 impl Submitter<Ring> for Kernel {

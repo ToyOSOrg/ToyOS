@@ -10,9 +10,9 @@ Held by the small-kernel track's stage 6 step 2
 (`issues/kernel/the-kernel-is-small-interrupts-post-and-threads-wait.md`),
 whose instrument is the only thing that can read it.
 
-Every poll ring's own watch and its completions sit behind an `IrqLock`
+Every poll ring's own watch sits behind an `IrqLock`
 (`kernel/src/inbox/mod.rs`), because a device handler's post
-reaches them through the polls it fires. So any process, not only a device's
+reaches it through the polls it fires. So any process, not only a device's
 holder, decides how long a CPU runs with interrupts masked:
 
 - **N threads parked in `submit` on one ring**
@@ -25,9 +25,9 @@ holder, decides how long a CPU runs with interrupts masked:
   that finds the list full copies it, all with interrupts masked.
 - **A claim's holder polling its claim from R rings, P polls each** (up to
   `MAX_PENDING_WATCHES`, 1024) makes its device's
-  handler fire R × P entries under the claim's list lock, each taking that
-  ring's completions lock and posting that ring's watch, whose own N threads
-  it notifies. Entries a post in place fired stay in the list until
+  handler fire R × P entries under the claim's list lock, each posting its
+  ring's watch, whose own N threads it notifies. Entries a post in place
+  fired stay in the list until
   registrations sweep them four at a time.
 
 Nothing caps N: a thread costs its process a 128 KiB kernel stack

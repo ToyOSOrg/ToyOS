@@ -293,15 +293,6 @@ impl Completions {
 }
 
 impl Inbox {
-    /// Write one completion and wake whoever waits in `submit`. A ring already
-    /// torn down takes nothing and wakes nobody.
-    fn complete(&self, user_data: u64, result: i32) {
-        let posted = self.completions.lock().as_mut().map(|c| c.post_completion(user_data, result, 0));
-        if posted.is_some() {
-            self.watch.post_in_place();
-        }
-    }
-
     fn with_state<R>(&self, f: impl FnOnce(&mut RingState) -> R) -> Result<R, SyscallError> {
         self.state.lock().as_mut().map(f).ok_or(SyscallError::NotFound)
     }
@@ -422,6 +413,12 @@ pub fn submit(
             return Ok(count);
         }
 
+        // Read here and not only at the park: a peer whose posts keep this
+        // thread looking keeps it from the park, and may not keep its kill.
+        if crate::sched::driver::current_kill_pending() {
+            return Err(SyscallError::Gone);
+        }
+
         // The recheck closure is this ring's own condition, not mere readiness — else a waiter for `min_complete` spins.
         let parkable = scheduler::Parkable::at_entry();
         if crate::watch::wait_until(
@@ -479,19 +476,19 @@ fn process_submission(inbox: &Arc<Inbox>, submission: &Submission) {
     // `Submission::flags` is declared and read by nothing, so a caller setting
     // it is asking for a behaviour that does not exist.
     if submission.flags != 0 {
-        inbox.complete(submission.token, -(SyscallError::InvalidArgument as i32));
+        polls::complete(inbox, submission.token, -(SyscallError::InvalidArgument as i32));
         return;
     }
     let op = match Op::from_raw(submission.op) {
         Ok(op) => op,
         Err(_) => {
-            inbox.complete(submission.token, -(SyscallError::InvalidArgument as i32));
+            polls::complete(inbox, submission.token, -(SyscallError::InvalidArgument as i32));
             return;
         }
     };
 
     match op {
-        Op::Nop => inbox.complete(submission.token, 0),
+        Op::Nop => polls::complete(inbox, submission.token, 0),
         Op::Watch => process_watch(inbox, submission),
         Op::Accept => process_accept(inbox, submission),
     }
@@ -503,7 +500,7 @@ fn process_watch(inbox: &Arc<Inbox>, submission: &Submission) {
     let flags = match WatchFlags::from_raw(submission.op_flags) {
         Ok(flags) => flags,
         Err(e) => {
-            inbox.complete(user_data, -(e as i32));
+            polls::complete(inbox, user_data, -(e as i32));
             return;
         }
     };
@@ -512,7 +509,7 @@ fn process_watch(inbox: &Arc<Inbox>, submission: &Submission) {
         arm(inbox, Poll::new(inbox.clone(), user_data, submission.handle, flags.raw()), None, &object)
     });
     if let Err(refusal) = refused {
-        inbox.complete(user_data, -(refusal as i32));
+        polls::complete(inbox, user_data, -(refusal as i32));
     }
 }
 
@@ -590,7 +587,10 @@ impl Submitter<Arc<Inbox>> for Arc<Inbox> {
     }
 
     fn answer(&self, user_data: u64, result: i32) {
-        self.complete(user_data, result);
+        // A ring already torn down takes nothing.
+        if let Some(completions) = self.completions.lock().as_mut() {
+            completions.post_completion(user_data, result, 0);
+        }
     }
 
     fn polls<R>(&self, f: impl FnOnce(&mut Polls<Arc<Inbox>>) -> R) -> Option<R> {
@@ -627,7 +627,7 @@ impl Submitter<Arc<Inbox>> for Arc<Inbox> {
 }
 
 /// The submission form of `SYS_ACCEPT`; refusals fold into one `-InvalidArgument` completion instead of ending the process.
-fn process_accept(inbox: &Inbox, submission: &Submission) {
+fn process_accept(inbox: &Arc<Inbox>, submission: &Submission) {
     let user_data = submission.token;
 
     let acceptor = process::with_process_data(|data| {
@@ -639,7 +639,7 @@ fn process_accept(inbox: &Inbox, submission: &Submission) {
         // Nothing held: `with_process_data` has given the guard up.
         Err(e) => {
             let refusal = e.refuse_as_error();
-            inbox.complete(user_data, -(refusal as i32));
+            polls::complete(inbox, user_data, -(refusal as i32));
             return;
         }
     };
@@ -658,10 +658,10 @@ fn process_accept(inbox: &Inbox, submission: &Submission) {
                 )
             });
             match installed {
-                Ok(h) => inbox.complete(user_data, h.0 as i32),
-                Err(e) => inbox.complete(user_data, -(e as i32)),
+                Ok(h) => polls::complete(inbox, user_data, h.0 as i32),
+                Err(e) => polls::complete(inbox, user_data, -(e as i32)),
             }
         }
-        None => inbox.complete(user_data, -(SyscallError::WouldBlock as i32)),
+        None => polls::complete(inbox, user_data, -(SyscallError::WouldBlock as i32)),
     }
 }
