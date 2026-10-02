@@ -34,6 +34,13 @@ else, `pwd`'s and `echo`'s. cpu7's line in each
   spans the runner's spawn of it, and in the herd's cpu7 reads 1019488,
   2 × 514392 and 1175943, the last the longest line of its report by three
   times.
+- It is not all that line reads. In the three boots at `0aa8d4c88` (comment
+  5960575031, readbacks `649-r6/1-head`, `649-r6/2-report-halved` and
+  `649-r6/3-idle-halt-counted`, the same two mutated kernels) `pwd`'s report
+  reads cpu7 at 1511452, 2 × 740441 and 1360995
+  (`windowscase/kernel.log:388`), and the herd's reads it at 1980239 in
+  `1-head` (`:430`): 468787 past that boot's applet spawn, which the spawn
+  does not account for and nothing names.
 
 By reading, not measured: it is `SYS_SPAWN`, which runs with interrupts
 masked from entry to exit like every syscall

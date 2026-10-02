@@ -1480,7 +1480,7 @@ fn virt_smp(profile: qemu::Profile, conduit: &str, el: u32) -> Result<(), String
     // emitted before its client connected.
     let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(qemu::GUEST_QUIET));
     let serial = judge_virt_job(&mut qemu, "unmap_touch", UNMAP_TOUCH_SAID)?;
-    let psci =serial.lines().find(|l| l.contains("PSCI: ")).unwrap_or_default();
+    let psci = serial.lines().find(|l| l.contains("PSCI: ")).unwrap_or_default();
     if !psci.contains(&format!(" through {conduit}")) {
         return Err(format!("PSCI is not said to be reached through {conduit}: {psci:?}\nserial:\n{serial}"));
     }

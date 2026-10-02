@@ -69,6 +69,26 @@ the black box keeps, reads cpu7 11522834 and cpu4 11645411 in the first boot
 (`649-r5/1-head/windowscase/loader.log:57`, `:63`), and at most cpu7's
 2 × 3799327 in the second and cpu7's 1305656 in the third.
 
-**Exit**: each of the three is named by that reading on the T14, and is
-removed, or this file is replaced by the bound it is held to and the
-derivation of it.
+The three boots at `0aa8d4c88` (comment 5960575031, readbacks
+`649-r6/1-head`, `649-r6/2-report-halved` and `649-r6/3-idle-halt-counted`,
+the same two mutated kernels) print a report at three exits, `idle_span`'s,
+`pwd`'s and the herd's, and at the stop:
+
+- **The first reading recurred, inside the herd's own report**, which opens
+  at `pwd`'s exit. In `2-report-halved` every CPU reads 2 × 5014552 to
+  2 × 5075290 (`windowscase/kernel.log:416` to `:430`), beside
+  `tlb: shootdowns=282 wait=131633us max=10038us` (`:431`): the shootdown's
+  `max` is beside it again, 9575us then and 10038us now, and cpu0's second
+  NMI is not: `nmi=1` (`:415`). That is two boots of #649's fourteen.
+- **One CPU, before the first job's exit.** cpu7's line of the first report,
+  `idle_span`'s (`:362`), reads 11492028 in `1-head`, 2 × 1308074 in
+  `2-report-halved` and 8456658 in `3-idle-halt-counted`, beside
+  `max=1655us`, `max=1451us` and `max=1353us` (`:363`). The same line read
+  2327848, 2 × 1831727 and 3630933 at `8b73eba69`.
+- **Nothing after the herd's report.** The stop's report, in the six lines
+  the black box keeps, reads at most cpu7's 1396887, 2 × 758960 and 1470910
+  (`windowscase/loader.log:57`).
+
+**Exit**: each of the three, and the one-CPU reading before the first job's
+exit, is named by that reading on the T14, and is removed, or this file is
+replaced by the bound it is held to and the derivation of it.
