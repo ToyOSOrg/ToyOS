@@ -20,13 +20,7 @@ pub const OP_NOP: u8 = 0;
 /// cursor, and a console — whose read post is the answer. A watch replaces its
 /// handle's earlier one, fired or not, so one look answers a handle once.
 pub const OP_WATCH: u8 = 1;
-// Op code 2 unused (formerly IORING_OP_POLL_REMOVE): a watch this kernel takes
-// is one-shot, consumed by the completion it posts, so the interest a remove
-// would withdraw is gone before there is anything to name.
 pub const OP_ACCEPT: u8 = 3;
-// Op code 4 unused (formerly IORING_OP_CLOSE): it is the one handle path that
-// cannot obey the bad-handle policy, because it runs under the ring's own lock
-// where taking the process down is not available.
 
 /// Readiness flags for [`OP_WATCH`], stored in `Submission::op_flags`.
 ///

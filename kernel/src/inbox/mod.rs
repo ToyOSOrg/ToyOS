@@ -94,7 +94,6 @@ pub enum Op {
 
 impl Op {
     fn from_raw(raw: u8) -> Result<Self, SyscallError> {
-        // 2 is retired (formerly IORING_OP_POLL_REMOVE); it refuses like any undeclared op.
         match raw {
             0 => Ok(Self::Nop),
             1 => Ok(Self::Watch),
