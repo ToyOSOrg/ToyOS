@@ -8,7 +8,7 @@ opened: 2026-10-01
 
 The guest suite's first cut
 (`issues/build/the-guest-suite-runs-only-what-no-cheaper-tier-reaches.md`) deleted the only
-callers of nine `SYS_DEBUG` actions and the loader's reading of two boot words, and left their
+callers of eight `SYS_DEBUG` actions and the loader's reading of two boot words, and left their
 names in `toyos-abi/src`, because a deletion there is an ABI change and that pull request was not
 one. Each kernel arm still answers its action. `git grep -w <name> -- tests userland toyos src`
 finds no caller of:
@@ -18,14 +18,12 @@ finds no caller of:
   `syscall_fault_halts` and `heap_over_ceiling_halts` and stage C's `idle_stack_guard`;
 - `HEAP_AT_CEILING` (5), `HEAP_AT_CEILING_PAGE_ALIGNED` (7) and `LOWER_SYSINFO_BOUND` (19),
   `heap_ceiling`'s, for stage C's `heap_ceiling_bounds`;
-- `LOCK_ACROSS_SWITCH` (2), `test_panic_child`'s, and `LOG_PATTERNED` (21), test-runner's
-  `log-gate` and `log-storm`. Their stage C items are a type (`lock_across_switch_halts`) and
-  a host test (`log_conservation_smp2`), and neither calls `SYS_DEBUG`, so no stage brings a
-  caller back;
+- `LOCK_ACROSS_SWITCH` (2), `test_panic_child`'s. Its stage C item is a type
+  (`lock_across_switch_halts`), which calls no `SYS_DEBUG`, so no stage brings a caller back;
 - `boot::WRITE_NO_LAYOUT_PARAM` and `boot::WITHHOLD_ROOT_PARAM`, for stage A's
   `kernel_args_layout_refused` and `root_withheld_refused`.
 
 Owner: the orchestrator.
 
 **Exit**: for each name, `git grep -w` finds a caller again, its stage's row, or an ABI change
-retires the name with its kernel arm and never reuses its number.
+deletes the name with its kernel arm.

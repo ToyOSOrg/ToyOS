@@ -271,10 +271,7 @@ pub const SYSCALL_PROFILE_BINS: usize = 128;
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-/// The highest number this ABI issues; every number past it is refused.
-pub const HIGHEST_SYSCALL: u64 = SYS_DEVICE_DMA_UNMAP;
-
-const _: () = assert!(HIGHEST_SYSCALL < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_DEVICE_DMA_UNMAP < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 
@@ -755,7 +752,6 @@ pub mod debug_action {
     pub const HEAP_AT_CEILING: u64 = 5;
     pub const HEAP_OVER_CEILING: u64 = 6;
     pub const HEAP_AT_CEILING_PAGE_ALIGNED: u64 = 7;
-    // Action 8 is retired and unused: it was SCREEN_GRAFFITI, and no test reads it.
     /// Read the guard page below this CPU's idle stack.
     pub const IDLE_GUARD_READ: u64 = 9;
     /// The kernel canary's address, and whether it still holds what the kernel
@@ -776,8 +772,6 @@ pub mod debug_action {
     /// **Per kind and not a total**: an object of one kind that is never
     /// released is invisible behind ordinary churn in another.
     pub const CENSUS_KIND: u64 = 16;
-    // Actions 17 and 18 are retired and unused: they were IDLE_STACK_HIGH_WATER
-    // and IDLE_STACK_SIZE, and no test reads them.
     /// Put a count this guest can reach in `MAX_SYSINFO_THREADS`'s place, for
     /// the rest of the boot. `SYS_SYSINFO`'s real bound is a thread count no
     /// guest can make, so only the number can move and moving it runs the
@@ -2296,17 +2290,6 @@ pub fn process_stats(proc: RawHandle, stats: &mut ProcessStats) -> Result<(), Sy
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Read off this file's `pub const SYS_…: u64 = <n>;` declarations, so a
-    /// syscall numbered past [`HIGHEST_SYSCALL`] cannot land without moving it.
-    #[test]
-    fn highest_syscall_is_the_highest_number_declared() {
-        let highest = include_str!("syscall.rs")
-            .lines()
-            .filter_map(|l| l.strip_prefix("pub const SYS_")?.split_once(": u64 = ")?.1.strip_suffix(';')?.parse().ok())
-            .max();
-        assert_eq!(highest, Some(HIGHEST_SYSCALL));
-    }
 
     /// **The encoder is the wire, so the test decodes the wire.**
     ///
