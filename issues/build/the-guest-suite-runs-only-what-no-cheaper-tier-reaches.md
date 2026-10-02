@@ -122,9 +122,7 @@ and NVMe. Exit: as stage A.
   clients is restarted, or refused while its claim is held.
 - metal `home_overwrite_reads_back`, `apps_and_home_are_one_filesystem`, `layout_fresh_boot`:
   `/home`'s bytes and layout on the disk.
-- metal `pkg_install_gbae`: `pkg install` lands a package that runs. Its launch client exits
-  before the window is counted, and a launched program ends with its launcher, so the client
-  starts gbae under init (`CommandExt::under_init`).
+- metal `pkg_install_gbae`: `pkg install` lands a package that runs.
 - metal `partition_claim`: a partition claimed as a device, and its refusals.
 - metal `kernel_log_file`, `log_partition_layout`, `log_partition_identity`: `/log` on the stick
   and its layout.
