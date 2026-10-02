@@ -36,6 +36,8 @@ AArch64 one step behind, on `issues/kernel/toyos-runs-on-arm64.md`'s track.
 - LLVM ships as a binary seed. C is accepted because the compiler is LLVM, in
   programs too, important ones included.
 - cargo's C dependencies are accepted.
+- ToyOS programs use rustls with ring (2026-10-02): stage 3 of
+  `issues/design-debt/the-internet-clients-work-unchanged.md`.
 - Perl and Python come to ToyOS.
 - Make it work, then optimise, then compare: no performance study now, and no
   comparison before a compilation inside ToyOS succeeds.

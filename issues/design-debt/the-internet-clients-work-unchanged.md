@@ -23,9 +23,10 @@ netd, `toyos::net` and std's ToyOS networking in the `rust/` fork.
    lossy transfers byte-exact, timeouts honoured, a departed client freeing
    everything in netd. **Exit**: each is a guest test against the host's own
    TCP stack, with a hash over every byte moved.
-3. **TLS.** `rustls` with the `graviola` provider and the Mozilla root set
+3. **TLS.** `rustls` with the `ring` provider and the Mozilla root set
    as a pinned data file in the signed image, used as published; what breaks
    is fixed in this repository's layers or carried upstream as a fork.
+   The `graviola` provider is an option to revisit later.
    **Exit**: an unmodified `rustls` client completes a handshake with a
    host-side server in the harness, and refuses a wrong name and an untrusted
    root.
