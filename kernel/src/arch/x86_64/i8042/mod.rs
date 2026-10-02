@@ -143,11 +143,7 @@ fn health_period_ns() -> u64 {
         Duration::from_secs(10),
         "the PMM dump's own cadence, and one line per 10s of typing",
     );
-    if crate::actuator::i8042_fast_health() {
-        Duration::from_millis(500).nanos()
-    } else {
-        HEALTH.nanos()
-    }
+    HEALTH.nanos()
 }
 static NEXT_REPORT_NS: AtomicU64 = AtomicU64::new(u64::MAX);
 static REPORTED_IRQS: AtomicU32 = AtomicU32::new(0);
@@ -355,41 +351,6 @@ fn report_counters() {
     );
 }
 
-/// One status-register snapshot, for a machine with nothing else to explain
-/// a quiet pin. Side-effect-free (0x64, and an RTE read under the topology's
-/// own lock), so it need not run on `IRQ_CPU` and cannot race the ISR.
-#[cfg(feature = "boot-actuators")]
-pub fn report_line() {
-    if !ACTIVE.load(Ordering::Relaxed) {
-        return;
-    }
-    log!(
-        "i8042: line status={:#04x} irqs={} bytes={} kbd {} aux {}",
-        inb(STATUS),
-        TALLY.read().irqs(),
-        RX_BYTES.load(Ordering::Relaxed),
-        Rte(KEYBOARD_GSI.load(Ordering::Relaxed)),
-        Rte(AUX_GSI.load(Ordering::Relaxed)),
-    );
-}
-
-/// `gsi=1 rte=0x0000000000000024`, or why there is no entry to print.
-#[cfg(feature = "boot-actuators")]
-struct Rte(u32);
-
-#[cfg(feature = "boot-actuators")]
-impl core::fmt::Display for Rte {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        if self.0 == u32::MAX {
-            return write!(f, "unrouted");
-        }
-        match ioapic::redirection(Gsi(self.0)) {
-            Some(entry) => write!(f, "gsi={} rte={:#018x}", self.0, entry),
-            None => write!(f, "gsi={} rte=busy", self.0),
-        }
-    }
-}
-
 /// Put the verdict on the panel too, but only when there is no other
 /// channel: declines once `serial::has_console()`, mirroring
 /// `panic_flush`'s own test.
@@ -460,28 +421,8 @@ fn has_bytes() -> bool {
     HEAD.load(Ordering::Acquire) != TAIL.load(Ordering::Relaxed)
 }
 
-/// Under `i8042-fault`, armed after init so the next interrupt looks
-/// permanently full — the only way to reach the ISR's bound without a
-/// genuinely broken controller.
-static FAULT: AtomicBool = AtomicBool::new(false);
-
-/// Under `i8042-split-burst`: past [`SPLIT_CAP`] taken bytes the ISR answers
-/// empty until [`SPLIT_RESCUED`] — the verdict-beats-the-sequence interleaving, staged.
-static SPLIT_TAKEN: AtomicU32 = AtomicU32::new(0);
-static SPLIT_RESCUED: AtomicBool = AtomicBool::new(false);
-const SPLIT_CAP: u32 = 4;
-
-fn split_hidden() -> bool {
-    crate::actuator::i8042_split_burst()
-        && !SPLIT_RESCUED.load(Ordering::Relaxed)
-        && SPLIT_TAKEN.load(Ordering::Relaxed) >= SPLIT_CAP
-}
-
 #[inline]
 fn buffer_full(status: u8) -> bool {
-    if crate::actuator::i8042_fault() && FAULT.load(Ordering::Relaxed) {
-        return true;
-    }
     status & OBF != 0
 }
 
@@ -499,15 +440,12 @@ pub extern "sysv64" fn handler() {
     let mut n = 0;
     while n < ISR_BURST {
         let status = inb(STATUS);
-        if !buffer_full(status) || split_hidden() {
+        if !buffer_full(status) {
             break;
         }
         // Timestamped per byte, not once for the burst: the mouse framer
         // resyncs on the gap between adjacent bytes, and a burst would flatten it.
         push_isr(inb(DATA), status & AUXB != 0, crate::clock::nanos_since_boot());
-        if crate::actuator::i8042_split_burst() {
-            SPLIT_TAKEN.fetch_add(1, Ordering::Relaxed);
-        }
         n += 1;
     }
     if n == ISR_BURST && buffer_full(inb(STATUS)) {
@@ -598,18 +536,6 @@ pub fn service() {
     if AUX_RESET_PENDING.load(Ordering::Relaxed) && is_irq_cpu() {
         aux_reenable();
     }
-    widen_edge_window();
-    // The staged split's second half: once the mute verdict is out, the hidden
-    // bytes are polled in — interrupts off, `handler_poll` shares `push_isr`'s producer seat.
-    if crate::actuator::i8042_split_burst()
-        && !SPLIT_RESCUED.load(Ordering::Relaxed)
-        && HEALTH.load(Ordering::Relaxed) >= HEALTH_MUTE_SAID
-        && is_irq_cpu()
-    {
-        SPLIT_RESCUED.store(true, Ordering::Relaxed);
-        let _irq = crate::arch::IrqGuard::close();
-        handler_poll();
-    }
     if has_bytes() {
         // Asked again with bytes in hand: a record read absent may belong
         // to an interrupt that arrived just after that read.
@@ -624,17 +550,6 @@ pub fn service() {
     report_counters();
 }
 
-/// Under `i8042-edge-race`, widens the window between reading the record and
-/// reading the ring so an interrupt can land inside it.
-fn widen_edge_window() {
-    if !crate::actuator::i8042_edge_race() {
-        return;
-    }
-    for _ in 0..200 {
-        core::hint::spin_loop();
-    }
-}
-
 /// Decode what the ISR left in the ring and wake whoever it belongs to.
 /// `recorded` is whether this pass found an `irq_ring` record for the source.
 fn service_bytes(recorded: bool) {
@@ -647,7 +562,7 @@ fn service_bytes(recorded: bool) {
         }
     }
 
-    let Drained { bytes, keys, motion, aux_reset } = drain();
+    let Drained { keys, motion, aux_reset } = drain();
 
     // Wake only when the decode queued something, or a stray wake parks the
     // next reader until the following real event.
@@ -659,7 +574,6 @@ fn service_bytes(recorded: bool) {
     if woke_ms {
         crate::mouse::WATCH.post();
     }
-    trace_drain(bytes, keys, motion, woke_kb, woke_ms);
 
     if aux_reset {
         AUX_RESET_PENDING.store(true, Ordering::Relaxed);
@@ -667,7 +581,6 @@ fn service_bytes(recorded: bool) {
 }
 
 struct Drained {
-    bytes: usize,
     keys: usize,
     motion: usize,
     aux_reset: bool,
@@ -678,7 +591,7 @@ struct Drained {
 /// the reverse.
 fn drain() -> Drained {
     let mut state = PS2.lock();
-    let mut out = Drained { bytes: 0, keys: 0, motion: 0, aux_reset: false };
+    let mut out = Drained { keys: 0, motion: 0, aux_reset: false };
     let mut lost = false;
 
     let dropped = DROPPED.swap(0, Ordering::Relaxed);
@@ -696,7 +609,6 @@ fn drain() -> Drained {
     }
 
     while let Some((byte, aux, arrived)) = pop() {
-        out.bytes += 1;
         // Whether the run is over and whether it produced anything — a
         // dropped break or a zero-motion packet counts as "nothing" too.
         let explained = if aux {
@@ -798,22 +710,6 @@ fn quarantine() {
     );
 }
 
-/// `woke_*` are the gates the wakes actually ran under, not a re-derivation,
-/// so a test can assert the gate agrees with the event count.
-fn trace_drain(bytes: usize, keys: usize, motion: usize, woke_kb: bool, woke_ms: bool) {
-    if !crate::actuator::i8042_trace() {
-        return;
-    }
-    log!(
-        "i8042: drain bytes={} keys={} motion={} woke_kb={} woke_ms={}",
-        bytes,
-        keys,
-        motion,
-        u8::from(woke_kb),
-        u8::from(woke_ms)
-    );
-}
-
 // Each read below is done as its section's sole reader: init before the
 // vector is armed, the aux re-enable on `IRQ_CPU` under `IrqGuard::close`,
 // and the panic pager with every CPU halted — so no ISR ever races them.
@@ -859,11 +755,7 @@ const AUX_RESET: Budget = Budget::of(
 /// arming write, and that timeout would then present as `DISABLED — cfg …
 /// did not take`, a controller fault it is not.
 fn init_budget_ms() -> u64 {
-    if crate::actuator::i8042_budget_expired() {
-        0
-    } else {
-        ms(CONTROLLER) + ms(SELFTEST) + ms(KEYBOARD) + ms(AUX_RESET)
-    }
+    ms(CONTROLLER) + ms(SELFTEST) + ms(KEYBOARD) + ms(AUX_RESET)
 }
 
 /// A stage's own deadline, clamped to the probe's; `None` once the probe's
@@ -1011,7 +903,7 @@ fn query_scancode_set(deadline: u64) -> SetQuery {
         return SetQuery::Silent;
     }
     // A device may ack the command byte and then refuse the argument.
-    match echo_the_argument(read_data(deadline)) {
+    match read_data(deadline) {
         Some(0xFA) => {}
         Some(other) => return SetQuery::Refused(other),
         None => return SetQuery::Silent,
@@ -1019,16 +911,6 @@ fn query_scancode_set(deadline: u64) -> SetQuery {
     match read_data(deadline) {
         Some(set) => SetQuery::Told(set),
         None => SetQuery::Silent,
-    }
-}
-
-/// Under `i8042-kbd-echo`, answers the argument byte `0xEE` — ECHO's own
-/// reply, and the shape a real EC's refusal takes; QEMU always reports its set.
-fn echo_the_argument(real: Option<u8>) -> Option<u8> {
-    if crate::actuator::i8042_kbd_echo() {
-        Some(0xEE)
-    } else {
-        real
     }
 }
 
@@ -1072,14 +954,8 @@ fn aux_reenable() {
     log!("i8042: aux re-enable failed {failures} times — pointer written off, line masked");
 }
 
-/// What firmware claims about the 8042 — never what decides. Under
-/// `i8042-fadt-denial`, substitutes a real laptop's own FADT (8042 clear)
-/// for QEMU's, whose flag and hardware always agree — the only way to test
-/// that a denial doesn't stop the probe.
+/// What firmware claims about the 8042 — never what decides.
 fn firmware_claim(rsdp_addr: u64) -> Result<(u8, u16), crate::drivers::acpi::TableError> {
-    if crate::actuator::i8042_fadt_denial() {
-        return Ok((6, 0x0011));
-    }
     crate::drivers::acpi::iapc_boot_arch(rsdp_addr)
 }
 
@@ -1347,12 +1223,6 @@ pub fn init(rsdp_addr: u64) {
     handler_poll();
     crate::arch::cpu::enable_interrupts();
 
-    // Stages this boot's own arming edge: the vector, first, with no byte behind it.
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::i8042_arm_edge() {
-        crate::arch::apic::send_self(I8042_VECTOR);
-    }
-
     log!(
         "i8042: kbd {} ({}) scanning on, GSI {} -> vec {:#04x} apic {} {}",
         wire,
@@ -1373,11 +1243,10 @@ pub fn init(rsdp_addr: u64) {
         None => log!("i8042: no pointer on the aux port"),
     }
 
-    if crate::actuator::i8042_fault() {
-        FAULT.store(true, Ordering::Relaxed);
-        log!("i8042: fault injection armed");
-    }
 }
+
+/// Whether the panic path reads a key here: [`poll_byte`] is its poll.
+pub const PANIC_KEYS: bool = true;
 
 /// One byte from the controller if it has one; never waits. Only legal once
 /// every CPU is halted — port 0x60's sole reader is otherwise the ISR.

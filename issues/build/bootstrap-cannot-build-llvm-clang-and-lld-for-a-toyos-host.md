@@ -6,38 +6,32 @@ opened: 2026-09-30
 
 # Bootstrap cannot build LLVM, clang and lld for a ToyOS host
 
-M2's clang and lld (`issues/build/toyos-builds-itself.md`) are LLVM built for
-`x86_64-unknown-toyos`. Read from the fork at `rust/` and from
-`src/llvm-project` at `849da7d62`, not run, four things stop bootstrap's LLVM
-step for that target:
+M2's clang and lld (`issues/build/toyos-builds-itself.md`) are bootstrap's
+`Llvm` step, with `clang = true`, and its `Lld` step for
+`x86_64-unknown-toyos`, in a bootstrap build that names no `llvm-config` for
+the build triple and so builds that triple's LLVM, and its `clang-tblgen`,
+itself. CMake takes its toolchain file from
+`CMAKE_TOOLCHAIN_FILE_x86_64_unknown_toyos`: one that includes the C sysroot's
+`toolchain.cmake` and adds the ToyOS LLVM's install to `CMAKE_FIND_ROOT_PATH`,
+because the `Lld` step names that LLVM to `find_package` by a hint, and the
+sysroot's file has CMake find a package under a root alone. What stops the
+build, in the order it stops it:
 
-- **`clang-tblgen`.** With `clang = true`, the step for a target that is not
-  the host panics unless `clang-tblgen` is in the CMake build directory of a
-  host LLVM bootstrap built itself
-  (`src/bootstrap/src/core/build_steps/llvm.rs`, `CLANG_TABLEGEN`). Every
-  compiler build here names the store's LLVM (`src/llvm.rs`) as the host's
-  `llvm-config`, so bootstrap builds no host LLVM and the file is never there.
-- **Its CMake system.** `configure_cmake` names no system for a ToyOS target and
-  falls back to `Generic`, under which LLVM sets `LLVM_ON_UNIX` to 0
-  (`llvm/cmake/modules/HandleLLVMOptions.cmake`) and compiles no `Unix/`
-  implementation of `Support`.
-- **`bit.h`.** `llvm/include/llvm/ADT/bit.h` includes `<endian.h>` on the
-  systems it lists and `<machine/endian.h>` on any other, ToyOS among them.
-- **`is_local_impl`.** `llvm/lib/Support/Unix/Path.inc` reads the BSDs'
-  `MNT_LOCAL` on a system it does not list.
+- **Compile.** The first errors are `Support`'s: `Unix/Watchdog.inc` and
+  `Unix/Program.inc` call `alarm` (`issues/build/libc-has-no-alarm.md`), and
+  `Program.inc` stage 3's `wait` and `wait4`
+  (`issues/kernel/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`).
+  Then ORC's `shm_open` and `shm_unlink`, the interpreter's `scanf` and
+  `llvm-objdump`'s `ctime`
+  (`issues/build/libc-lacks-names-llvm-for-a-toyos-host-calls.md`), and
+  clang's `std::ifstream`, which libc++ has only with `std::filesystem`
+  (`issues/build/libcxx-is-built-without-std-filesystem.md`).
+- **Link.** clang needs `lround`, which libc does not define
+  (`issues/build/libc-lacks-names-llvm-for-a-toyos-host-calls.md`), beside
+  those above. LLVM's shared libraries, `libLTO`, `libRemarks`, `libclang` and
+  `libclang-cpp`, do not link against the C sysroot
+  (`issues/build/a-shared-object-does-not-link-against-the-c-sysroot-with-z-defs.md`).
+  clang and lld use none of them, and ToyOS's build turns them off.
 
-The last three are ToyOS arms at existing dispatch sites, written as upstream
-would take them. ToyOS joins `bit.h`'s `<endian.h>` list, so libc carries
-POSIX's `endian.h` and no BSD name
-(`issues/build/toyos-libc-lacks-the-posix-surface-llvm-compiles-against.md`).
-Bootstrap's arm names the system `ToyOS`, which LLVM's configure refuses,
-`Unable to determine platform`, until CMake knows ToyOS and sets `UNIX`
-(`issues/build/the-cxx-runtime-names-toyos-to-cmake-as-unix.md`).
-
-`clang-tblgen` is no arm, and neither bootstrap nor LLVM changes for it: ToyOS's
-build builds the LLVM for a ToyOS host in a bootstrap build that built the
-host's LLVM itself, as `src/llvm.rs` builds the store's, never in a compiler
-build that names the store's.
-
-**Exit**: bootstrap, with `clang = true`, installs a clang and an `ld.lld` for
-`x86_64-unknown-toyos`.
+**Exit**: ToyOS's build, with nothing supplied by hand, has bootstrap install
+a clang and an `ld.lld` for `x86_64-unknown-toyos`.

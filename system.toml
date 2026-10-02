@@ -1,7 +1,7 @@
 # sshd is deliberately not in `[boot] start`. It is built into the image and
-# started by hand (`/system/bin/sshd &`) on a machine that wants remote access: it
-# listens on every interface, so carrying it in every boot is a listening port
-# nobody asked for.
+# started by hand (`detach /system/bin/sshd`, so it outlives the shell) on a
+# machine that wants remote access: it listens on every interface, so carrying
+# it in every boot is a listening port nobody asked for.
 # `src/build.rs`'s `no_shipped_boot_config_starts_sshd` is the gate.
 
 hosted-rustc = false

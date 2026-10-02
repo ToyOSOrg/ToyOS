@@ -5,7 +5,7 @@ use std::net::Ipv4Addr;
 use common::*;
 use toyos_net_wire::ethernet::{FrameBuilder, MacAddr};
 use toyos_net_wire::igmp::{
-    self, Deciseconds, GroupRecord, IgmpError, IgmpMessage, IgmpPacket, Query, QueryGroup, QueryVersion, RecordType,
+    self, Deciseconds, GroupRecord, IgmpError, IgmpMessage, IgmpPacket, Query, QueryGroup, QueryVersion,
     ReportGroup, V2Builder, V2Kind, V3ReportBuilder,
 };
 use toyos_net_wire::ipv4::{Ecn, Ipv4Option, Ipv4Packet, Ipv4Source, MulticastAddr, TrafficClass};
@@ -233,13 +233,13 @@ fn emit_v3(source: Ipv4Addr, records: &[GroupRecord]) -> Vec<u8> {
     datagram.emit(&mut out).unwrap().to_vec()
 }
 
-fn record(record: RecordType) -> GroupRecord {
-    GroupRecord { group: ReportGroup::new(mdns()).unwrap(), record }
+fn group() -> ReportGroup {
+    ReportGroup::new(mdns()).unwrap()
 }
 
 #[test]
 fn w1_igmp3_join_frame() {
-    let records = [record(RecordType::ToExclude)];
+    let records = [GroupRecord::ToExclude(group())];
     let datagram = igmp::datagram(source_a(), network_control(), V3ReportBuilder { records: &records });
     let builder = FrameBuilder { destination: MacAddr::multicast(MulticastAddr::IGMPV3_ROUTERS), source: mac_a() };
     let mut out = junk(100);
@@ -248,15 +248,15 @@ fn w1_igmp3_join_frame() {
 
 #[test]
 fn w1_igmp3_leave_current_and_unspecified_source() {
-    assert_eq!(emit_v3(IP_A, &[record(RecordType::ToInclude)]), hex(V_IGMP3_LEAVE));
-    assert_eq!(emit_v3(IP_A, &[record(RecordType::IsExclude)]), hex(V_IGMP3_CURRENT));
-    assert_eq!(emit_v3(Ipv4Addr::UNSPECIFIED, &[record(RecordType::ToExclude)]), hex(V_IGMP3_JOIN_UNSPEC));
+    assert_eq!(emit_v3(IP_A, &[GroupRecord::ToInclude(group())]), hex(V_IGMP3_LEAVE));
+    assert_eq!(emit_v3(IP_A, &[GroupRecord::IsExclude(group())]), hex(V_IGMP3_CURRENT));
+    assert_eq!(emit_v3(Ipv4Addr::UNSPECIFIED, &[GroupRecord::ToExclude(group())]), hex(V_IGMP3_JOIN_UNSPEC));
 }
 
 #[test]
 fn w1_igmp3_records_layout() {
     let other = ReportGroup::new(MulticastAddr::new(Ipv4Addr::new(239, 1, 2, 3)).unwrap()).unwrap();
-    let records = [record(RecordType::ToExclude), GroupRecord { group: other, record: RecordType::IsExclude }];
+    let records = [GroupRecord::ToExclude(group()), GroupRecord::IsExclude(other)];
     let bytes = emit_v3(IP_A, &records);
     let ip = Ipv4Packet::parse(&bytes).unwrap();
     let igmp = ip.payload();
@@ -266,4 +266,19 @@ fn w1_igmp3_records_layout() {
     assert_eq!(igmp[8..16], hex("04 00 00 00 e0 00 00 fb")[..]);
     assert_eq!(igmp[16..24], hex("02 00 00 00 ef 01 02 03")[..]);
     assert_eq!(igmp.len(), 24);
+}
+
+/// ip.md W-1: IS_IN (B) is type 1 with B's count and addresses after the group (RFC 9776 §4.2.4).
+#[test]
+fn w1_igmp3_is_include_lists_its_sources() {
+    let sources = [Ipv4Addr::new(192, 0, 2, 9), Ipv4Addr::new(192, 0, 2, 10)];
+    let records = [GroupRecord::IsInclude(group(), &sources), GroupRecord::IsExclude(group())];
+    let bytes = emit_v3(IP_A, &records);
+    let ip = Ipv4Packet::parse(&bytes).unwrap();
+    let igmp = ip.payload();
+    assert_eq!(oracle_sum(igmp), 0xFFFF);
+    assert_eq!(igmp[4..8], [0, 0, 0, 2]);
+    assert_eq!(igmp[8..24], hex("01 00 00 02 e0 00 00 fb c0 00 02 09 c0 00 02 0a")[..]);
+    assert_eq!(igmp[24..32], hex("02 00 00 00 e0 00 00 fb")[..]);
+    assert_eq!(igmp.len(), 32);
 }

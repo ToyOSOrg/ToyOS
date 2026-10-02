@@ -40,8 +40,8 @@ pub(super) enum Intid {
     Kick = 0,
     /// Stops a CPU for good: [`stop_other_cpus`]'s.
     Halt,
-    /// `crate::log::nested`'s delivery, which [`send_self`] raises.
-    LogNest,
+    /// Turns a CPU off for the machine's power-off: [`off_all_but_self`]'s.
+    Off,
     /// What `irq-storm` floods this CPU with.
     Storm,
     Hda,
@@ -50,6 +50,7 @@ pub(super) enum Intid {
 
 pub(super) const SGI_KICK: u32 = Intid::Kick as u32;
 pub(super) const SGI_HALT: u32 = Intid::Halt as u32;
+pub(super) const SGI_OFF: u32 = Intid::Off as u32;
 #[cfg(feature = "boot-actuators")]
 pub(super) const SGI_STORM: u32 = Intid::Storm as u32;
 
@@ -215,9 +216,9 @@ pub fn init_cpu(frame: u64) {
     redistributor.write_u32(GICR_ICFGR1, edge);
 
     stop_timer_hardware();
-    let enabled = 1 << SGI_KICK | 1 << SGI_HALT | 1 << timer;
+    let enabled = 1 << SGI_KICK | 1 << SGI_HALT | 1 << SGI_OFF | 1 << timer;
     #[cfg(feature = "boot-actuators")]
-    let enabled = enabled | 1 << Intid::LogNest as u32 | 1 << SGI_STORM;
+    let enabled = enabled | 1 << SGI_STORM;
     redistributor.write_u32(GICR_ISENABLER0, enabled);
 
     // The CPU interface in system registers, as the declaration says.
@@ -294,13 +295,22 @@ pub fn kick_cpu(cpu: u32) {
     sgi(SGI_KICK, crate::smp::hardware_id(cpu));
 }
 
+pub fn kick_all_but_self() {
+    all_but_self(SGI_KICK);
+}
+
+/// Raise the power-off's SGI on every other CPU the roster holds.
+pub(super) fn off_all_but_self() {
+    all_but_self(SGI_OFF);
+}
+
 // Each by name, not with `IRM`'s broadcast: that reaches an AP which echoed too
 // late and halted with its SGIs enabled, where a kick left pending wakes the
 // masked `wfi` at once, for good.
-pub fn kick_all_but_self() {
+fn all_but_self(intid: u32) {
     let me = percpu::cpu_id();
     for cpu in (0..crate::smp::cpu_count()).filter(|&cpu| cpu != me) {
-        kick_cpu(cpu);
+        sgi(intid, crate::smp::hardware_id(cpu));
     }
 }
 

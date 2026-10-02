@@ -26,13 +26,12 @@ pub mod irqchip;
 pub mod keyboard_controller;
 pub mod paging;
 pub mod percpu;
-pub mod pio;
 pub mod pmu;
+pub mod power;
 pub mod psci;
 pub mod rtc;
 pub mod smp;
 pub mod switch;
-pub mod syscall;
 pub mod tlb;
 pub mod trap;
 pub mod watchdog;
@@ -70,18 +69,6 @@ impl IrqGuard {
         // SAFETY: reads `DAIF` and sets its `I` and `F` bits; touches nothing else.
         unsafe {
             core::arch::asm!("mrs {saved}, daif", "msr daifset, #3", saved = out(reg) daif);
-        }
-        Self { daif, _not_send_sync: core::marker::PhantomData }
-    }
-
-    /// The mask captured and interrupts left as they are: what the
-    /// `log-unbracketed-reserve` actuator stages a log reservation with.
-    #[cfg(feature = "boot-actuators")]
-    pub fn unclosed() -> Self {
-        let daif: u64;
-        // SAFETY: reads `DAIF` and writes nothing.
-        unsafe {
-            core::arch::asm!("mrs {saved}, daif", saved = out(reg) daif);
         }
         Self { daif, _not_send_sync: core::marker::PhantomData }
     }

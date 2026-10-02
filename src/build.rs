@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
@@ -16,6 +16,7 @@ use crate::buildlock;
 use crate::flags;
 use crate::hostws;
 use crate::image;
+use crate::sysroot::{Identity, Stale, Sysroot};
 use crate::toolchain;
 
 thread_local! {
@@ -173,46 +174,7 @@ fn parse_config(path: &Path) -> SystemConfig {
 
 // --- Freshness checking ---
 
-/// Fingerprint all external build dependencies that cargo cannot track: the
-/// sysroot `toolchain` is — by where it is, which names its key, and by its
-/// libraries. The linker is the sysroot's own `rust-lld`, which that key names
-/// with the compiler it came with.
-fn external_fingerprint(toolchain: &Path) -> String {
-    let sysroot = toolchain.join("lib/rustlib");
-    let mut entries = vec![format!("sysroot:{}", toolchain.display())];
-
-    for triple in toolchain::GUEST_TARGETS {
-        let lib_dir = sysroot.join(format!("{triple}/lib"));
-        let Ok(rd) = fs::read_dir(&lib_dir) else {
-            continue;
-        };
-        for entry in rd.flatten() {
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            let ext = path.extension().and_then(|e| e.to_str());
-            if !matches!(ext, Some("rlib" | "rmeta")) {
-                continue;
-            }
-            if let Ok(meta) = path.metadata() {
-                let name = path.file_name().unwrap().to_string_lossy();
-                let mtime = meta
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                    .map(|d| d.as_nanos())
-                    .unwrap_or(0);
-                entries.push(format!("{triple}/{name}:{}:{mtime}", meta.len()));
-            }
-        }
-    }
-
-    entries.sort();
-    entries.join("\n")
-}
-
-/// How much of a crate's target directory goes when the external deps change.
+/// How much of a crate's target directory goes when the compiler moves.
 #[derive(Clone, Copy)]
 enum Clean {
     All,
@@ -226,17 +188,23 @@ enum Clean {
     ToyosOnly,
 }
 
-fn stale(root: &Path, crate_dir: &Path, fingerprint: &str) -> bool {
+fn stale(root: &Path, crate_dir: &Path, identity: &Identity) -> Option<Stale> {
     let stamp = hostws::target_dir(root, crate_dir).join(".deps-stamp");
-    fs::read_to_string(&stamp).map_or(true, |stored| stored != fingerprint)
+    identity.stale(fs::read_to_string(&stamp).ok().as_deref())
 }
 
-fn clean(root: &Path, crate_dir: &Path, kind: Clean, fingerprint: &str) {
+fn clean(root: &Path, crate_dir: &Path, kind: Clean, stale: &Stale, identity: &Identity) {
     // Where cargo actually wrote it. `toyos-ld` is a member of the host
     // workspace, so its guest build lands in the root's `target/`.
     let target = hostws::target_dir(root, crate_dir);
-    match kind {
-        Clean::All => {
+    let remove = |dirs: &mut dyn Iterator<Item = PathBuf>| {
+        for dir in dirs.filter(|dir| dir.exists()) {
+            eprintln!("external deps changed: cleaning {}", dir.display());
+            crate::keystore::remove(&dir);
+        }
+    };
+    match (stale, kind) {
+        (Stale::All, Clean::All) => {
             // `cargo clean` in a member's directory cleans the whole workspace,
             // this build system's own target directory included. Nothing asks
             // for that today; refusing it by name is cheaper than finding out.
@@ -254,22 +222,19 @@ fn clean(root: &Path, crate_dir: &Path, kind: Clean, fingerprint: &str) {
                 .unwrap_or_else(|e| panic!("run cargo clean in {}: {e}", crate_dir.display()));
             assert!(status.success(), "cargo clean in {} exited {status}", crate_dir.display());
         }
-        Clean::ToyosOnly => {
+        (Stale::All, Clean::ToyosOnly) => {
             let guest = Arch::ALL.iter().map(|arch| target.join(arch.userland()));
-            for dir in guest.chain([target.join(PROFILE)]) {
-                if dir.exists() {
-                    eprintln!("external deps changed: cleaning {}", dir.display());
-                    fs::remove_dir_all(&dir).unwrap_or_else(|e| panic!("remove {}: {e}", dir.display()));
-                }
-            }
+            remove(&mut guest.chain([target.join(PROFILE)]));
         }
+        (Stale::Targets(moved), _) => remove(&mut moved.iter().map(|t| target.join(t))),
     }
 
-    fs::create_dir_all(&target).ok();
-    fs::write(target.join(".deps-stamp"), fingerprint).ok();
+    fs::create_dir_all(&target).unwrap_or_else(|e| panic!("create {}: {e}", target.display()));
+    let stamp = target.join(".deps-stamp");
+    fs::write(&stamp, identity.to_string()).unwrap_or_else(|e| panic!("write {}: {e}", stamp.display()));
 }
 
-/// Drop the target directories the changed external deps invalidated.
+/// Drop what in the target directories the sysroot's moved parts invalidated.
 ///
 /// Deciding and acting under one exclusive section is the whole point. Each of
 /// these cleans removes a tree another builder may be compiling into, and
@@ -280,24 +245,22 @@ fn clean(root: &Path, crate_dir: &Path, kind: Clean, fingerprint: &str) {
 fn invalidate_stale(
     root: &Path,
     lock: &mut buildlock::Held,
-    toolchain: &Path,
+    identity: &Identity,
     targets: &[(PathBuf, Clean)],
 ) {
     lock.act_if(
         buildlock::Scope::Worktree,
         "clean crate targets against changed external deps",
         || {
-            let fp = external_fingerprint(toolchain);
-            let work: Vec<(PathBuf, Clean)> = targets
+            let work: Vec<(PathBuf, Clean, Stale)> = targets
                 .iter()
-                .filter(|(dir, _)| stale(root, dir, &fp))
-                .cloned()
+                .filter_map(|(dir, kind)| stale(root, dir, identity).map(|s| (dir.clone(), *kind, s)))
                 .collect();
-            (!work.is_empty()).then_some((fp, work))
+            (!work.is_empty()).then_some(work)
         },
-        |(fp, work)| {
-            for (dir, kind) in work {
-                clean(root, &dir, kind, &fp);
+        |work| {
+            for (dir, kind, stale) in work {
+                clean(root, &dir, kind, &stale, identity);
             }
         },
     );
@@ -405,21 +368,16 @@ fn config_crates(root: &Path, config: &SystemConfig) -> Vec<ConfigCrate> {
 /// it in.
 ///
 /// One name, passed to every `cargo build` here and declared by every crate
-/// root the image is made of. `--release` used to be a flag on `cargo run`, and
-/// it silently turned `debug-assertions` and `overflow-checks` off — the two
-/// knobs `issues/`'s crafted-ELF panics were *found* by. There is
-/// no longer a second profile to pick, which is why there is no longer a flag.
+/// root the image is made of.
 pub const PROFILE: &str = "toyos";
 
 /// What every guest `cargo` and `rustc` here runs with: the toolchain directory
 /// of the sysroot this checkout's sources name, as `RUSTUP_TOOLCHAIN`, which
 /// carries the linker too. Never the `toyos` rustup name, which is the primary's.
-#[derive(Clone)]
 struct GuestEnv {
-    toolchain: PathBuf,
-    /// Whether that sysroot's compiler is the primary's, the one the hosted
-    /// rustc is built from (`src/compiler.rs`).
-    primary_compiler: bool,
+    /// Owned, so the sysroot is held in use for as long as anything here runs
+    /// against it.
+    sysroot: Sysroot,
     /// The public key the loader and `/system/bin/update` embed
     /// (`signing::KEY_ENV`): every guest build carries it, so no crate that
     /// names it can be built without it.
@@ -429,10 +387,9 @@ struct GuestEnv {
 }
 
 impl GuestEnv {
-    fn new(sysroot: &crate::sysroot::Sysroot) -> Self {
+    fn new(sysroot: Sysroot) -> Self {
         Self {
-            toolchain: sysroot.dir.clone(),
-            primary_compiler: sysroot.primary_compiler,
+            sysroot,
             image_key: crate::signing::key().public_hex(),
             floor_scope: crate::signing::key().floor_scope().word(),
         }
@@ -455,7 +412,7 @@ fn cargo_build(
     let mut cmd = Command::new("cargo");
     cmd.args(&args)
         .current_dir(crate_dir)
-        .env("RUSTUP_TOOLCHAIN", &env.toolchain)
+        .env("RUSTUP_TOOLCHAIN", env.sysroot.dir())
         .env_remove("RUSTFLAGS")
         .env(crate::signing::KEY_ENV, &env.image_key)
         .env(crate::signing::FLOOR_ENV, env.floor_scope)
@@ -580,7 +537,7 @@ fn assert_kernel_is_softfloat(env: &GuestEnv, arch: Arch) {
     }
     let out = Command::new("rustc")
         .args(["--print", "cfg", "--target", arch.kernel()])
-        .env("RUSTUP_TOOLCHAIN", &env.toolchain)
+        .env("RUSTUP_TOOLCHAIN", env.sysroot.dir())
         .env_remove("RUSTFLAGS")
         .env_remove("RUSTC")
         .output()
@@ -631,10 +588,7 @@ fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
 ///
 /// [`PROFILE`] states them and `--release` is gone from this build system, so
 /// the way they can still be lost is somebody editing `[profile.toyos]`. This
-/// asks the artifact rather than the manifest, which is the only question worth
-/// asking: `issues/`'s two crafted-ELF kernel panics were both
-/// *found* by an overflow check, and one of them had no configuration in which
-/// it was an error return.
+/// asks the artifact rather than the manifest.
 fn assert_overflow_checked(what: &str, image: &[u8]) {
     let found = contains_subslice(image, OVERFLOW_CHECK_MARKER);
     assert!(
@@ -750,12 +704,12 @@ fn build_and_assemble(
             arch.name()
         );
         assert!(
-            env.primary_compiler,
+            env.sysroot.primary_compiler,
             "hosted-rustc ships the primary checkout's hosted compiler, and this worktree builds with \
              a compiler of its own (src/compiler.rs): the image would carry a rustc that is not the \
              one its programs were built with"
         );
-        collect_hosted_rustc(root, &env.toolchain, &mut root_files);
+        collect_hosted_rustc(root, env.sysroot.dir(), &mut root_files);
     }
 
     if !config.assets.is_empty() {
@@ -852,7 +806,7 @@ fn build_programs(
 
     // Every userland crate that compiles C compiles it with the toolchain's
     // clang against libc's C sysroot.
-    let cc_env = crate::clang::CSysroot::of(&env.toolchain, arch).cc_env();
+    let cc_env = crate::clang::CSysroot::of(env.sysroot.dir(), arch).cc_env();
     let cc_env: Vec<(&str, &str)> = cc_env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
 
     // Build and read under one hold, exactly as `build_toyos_bins` does and for
@@ -1069,8 +1023,6 @@ impl Boot {
 
     /// The config declares no `devices`, so nothing started there claims the
     /// framebuffer and the kernel's last boot checkpoint stays on screen.
-    /// `screen_diag_boot` boots this same config, so the tested image and the
-    /// flashed image are the same image.
     pub fn diag(root: &Path) -> Self {
         Self::mode(root, &root.join("diag"))
     }
@@ -1078,7 +1030,7 @@ impl Boot {
     /// `/system/bin/console` claims the framebuffer and runs the shell on it.
     /// Claiming the screen is what stops the boot checkpoints painting, so a
     /// machine that wedges before userland is readable in this mode and in no
-    /// other. `screen_console_shell` boots this config.
+    /// other.
     pub fn console(root: &Path) -> Self {
         Self::mode(root, &root.join("console"))
     }
@@ -1122,6 +1074,8 @@ impl Boot {
 /// is a test image and is not here.
 pub struct Shipped {
     pub crates: BTreeSet<(PathBuf, Features)>,
+    /// `crates` but the kernel and the loader: every program an image runs.
+    pub programs: BTreeSet<(PathBuf, Features)>,
     pub assets: BTreeSet<PathBuf>,
 }
 
@@ -1131,6 +1085,7 @@ pub struct Shipped {
 /// the rust fork's `compiler/` workspace, which no reader of this answer walks.
 pub fn shipped(root: &Path) -> Result<Shipped, String> {
     let mut crates = BTreeSet::new();
+    let mut programs = BTreeSet::new();
     let mut assets = BTreeSet::new();
     for boot in [Boot::shipped(root), Boot::diag(root), Boot::console(root)] {
         let config = parse_config(&boot.config);
@@ -1140,10 +1095,15 @@ pub fn shipped(root: &Path) -> Result<Shipped, String> {
                 boot.config.display()
             ));
         }
-        crates.extend(config_crates(root, &config).into_iter().map(|c| (c.dir, c.features)));
+        for c in config_crates(root, &config) {
+            if matches!(c.built, Built::Member | Built::Standalone) {
+                programs.insert((c.dir.clone(), c.features));
+            }
+            crates.insert((c.dir, c.features));
+        }
         assets.extend(config.assets.iter().map(|dir| root.join(dir)));
     }
-    Ok(Shipped { crates, assets })
+    Ok(Shipped { crates, programs, assets })
 }
 
 /// The parameters an image built for flashing may carry: the kernel's own boot
@@ -1370,14 +1330,13 @@ fn declared_kernel_features(root: &Path) -> Vec<String> {
 pub const TEST_KERNEL: &[&str] = &["boot-actuators", "test-actuators"];
 
 /// Kernel builds the ordinary test suite is allowed to make.
-pub const TEST_SUITE_KERNEL_BUILDS: [&str; 5] =
-    ["", "boot-actuators,test-actuators", "fpu-save-nothing", "sched-check", "user-writable-gsbase"];
+pub const TEST_SUITE_KERNEL_BUILDS: [&str; 2] =
+    ["", "boot-actuators,test-actuators"];
 
 /// The scheduler core's own asserts, compiled in: `toyos-sched/check`.
 ///
-/// One name, read from here by the one test that boots it, for
-/// [`TEST_KERNEL`]'s reason — a second spelling is a second kernel and nothing
-/// would say so.
+/// One name, for [`TEST_KERNEL`]'s reason — a second spelling is a second
+/// kernel and nothing would say so.
 pub const SCHED_CHECK_KERNEL: &[&str] = &["sched-check"];
 
 /// The kernel build used only by the harness's interactive debugger.
@@ -1390,52 +1349,6 @@ pub fn harness_kernel_build_is_declared(features: &str, debug_wait: bool) -> boo
     } else {
         TEST_SUITE_KERNEL_BUILDS.contains(&features)
     }
-}
-
-/// Every name in which a process of this boot config can speak a console line
-/// that is not the program under test's.
-///
-/// **Derived, never listed.** The point of reading it out of the config is that
-/// a daemon added to `[boot] start` tomorrow is in this set the moment it
-/// exists — a hardcoded list would let the next `netd`'s lines start deciding C
-/// tests again, which is what task #84 was (`tests/common/console.rs`).
-/// `/system/bin/init` itself is added by hand because it is the one speaker that is not a
-/// `[programs]` key: it is the parent that starts every one of them, and it
-/// speaks before any of them exists (`init: netd: no nic on this machine` is on
-/// the console before netd is loaded).
-///
-/// The union of the two lists rather than `[boot] start` alone: a program the
-/// config declares is a binary this image carries and a name init can be asked
-/// to speak in, and the whole value of deriving the set is that it is the
-/// config's answer rather than an author's.
-///
-/// **A program also speaks in the name of every device it claims, and that is
-/// measured rather than supposed.** `userland/soundd/src/virtio.rs` writes
-/// `virtio-sound: configured stream 0: 44100Hz 2ch s16le` — the driver layer
-/// says which device is talking, not which program — and a plain
-/// `tests/testcases` boot puts three such lines on the console before the test
-/// runner is ready. `devices` is where those names are declared, so it is where
-/// they are read from; `c_capture_ignores_daemon_lines` walks a real boot log
-/// and reds on any line this set cannot account for, which is what keeps this
-/// derivation honest as the tree grows.
-///
-/// `config` is the `system.toml` itself, not its directory.
-pub fn console_speakers(config: &Path) -> std::collections::BTreeSet<String> {
-    let parsed = parse_config(config);
-    let mut names = std::collections::BTreeSet::new();
-    for (program, entry) in parsed.programs {
-        names.insert(program);
-        names.extend(entry.devices);
-    }
-    names.extend(parsed.boot.start);
-    names.insert("init".to_string());
-    names
-}
-
-/// What `/system/bin/init` starts on the boot `config` describes, in the manifest's
-/// order. `config` is the `system.toml` itself, not its directory.
-pub fn boot_start(config: &Path) -> Vec<String> {
-    parse_config(config).boot.start
 }
 
 /// The manifest bytes and the symlink table `config` renders to, for a reader
@@ -1534,27 +1447,6 @@ fn assert_actuators_match_features(root: &Path, features: &str, kernel: &[u8]) {
     );
 }
 
-/// The labels `arch::syscall` defines inside `syscall_entry` for
-/// `nmi_gate`, which the linker carries into `.strtab`.
-const ENTRY_LABELS: [&str; 3] =
-    ["syscall_entry_hold_spin", "syscall_entry_hold_end", "syscall_entry_end"];
-
-/// Refuse a test kernel whose entry lacks a label `nmi_gate` reads, and a
-/// shipping one that names any. What the shipping entry *does* is
-/// [`assert_entry_window_matches_features`]'s to judge: a label is a spelling,
-/// and a hold can be spelled without one.
-fn assert_entry_labels_match_features(features: &str, kernel: &[u8]) {
-    assert_names_match_features(
-        features,
-        kernel,
-        TEST_KERNEL,
-        &ENTRY_LABELS,
-        "labels `arch::syscall` puts inside `syscall_entry`",
-        "They bound what `nmi_gate` holds and counts, and belong to a kernel built with \
-         `boot-actuators`.",
-    );
-}
-
 /// `arch::syscall::syscall_entry`'s v0-mangled path, less the crate
 /// disambiguator that stands in front of it.
 const SYSCALL_ENTRY_SYMBOL: &str = "6kernel4arch6x86_647syscall13syscall_entry";
@@ -1635,28 +1527,15 @@ fn entry_window(entry: &[u8]) -> Result<Result<(), &[u8]>, String> {
 /// Refuse to write a shipping image whose `syscall_entry` does anything between
 /// saving the user's `rsp` and switching to the kernel's.
 ///
-/// The instructions, not their names: [`assert_entry_labels_match_features`]
-/// closes the two spellings `window_hold!` uses, and a hold respelled through
-/// local labels passes it with the whole spin in the entry. Read at the entry's
-/// own symbol, the shipping kernel's first three instructions are `cld`, the
-/// save and the switch, with nothing between. Both directions, for
-/// [`assert_names_match_features`]'s reason: the test kernel's entry has to
-/// have something between them, which is what says this can tell.
+/// Read at the entry's own symbol, the shipping kernel's first three
+/// instructions are `cld`, the save and the switch, with nothing between.
 fn judge_entry_window(features: &str, kernel: &[u8]) -> Result<(), String> {
-    let want_hold = match features {
-        "" => false,
-        f if f == TEST_KERNEL.join(",") => true,
-        _ => return Ok(()),
-    };
-    match (entry_window(syscall_entry_bytes(kernel)?)?, want_hold) {
-        (Ok(()), false) | (Err(_), true) => Ok(()),
-        (Ok(()), true) => Err(format!(
-            "the {} kernel's `syscall_entry` switches to the kernel's `rsp` in the instruction \
-             after it saves the user's, so `nmi_gate`'s hold is not in it and every test that \
-             arranges an arrival inside the window arranges nothing.",
-            TEST_KERNEL.join(","),
-        )),
-        (Err(between), false) => Err(format!(
+    if !features.is_empty() {
+        return Ok(());
+    }
+    match entry_window(syscall_entry_bytes(kernel)?)? {
+        Ok(()) => Ok(()),
+        Err(between) => Err(format!(
             "the shipping kernel's `syscall_entry` does not switch to the kernel's `rsp` in the \
              instruction after it saves the user's; between them stand {between:02x?}.\nEvery \
              instruction there runs at CPL 0 on a user's stack, and an image that ships must \
@@ -1677,7 +1556,7 @@ fn assert_entry_window_matches_features(features: &str, kernel: &[u8]) {
 /// Every one of these is a `#[cfg(feature = "check")]` site in `toyos-sched`.
 /// Two are asserts from `invariants::check_cpu` — invariant T's armed-timer
 /// bound and the container-versus-state-word agreement. The third is the
-/// pass-cost report (`cpu::PassCostReport::PREFIX`), which is a *measurement*
+/// pass-cost report, which is a *measurement*
 /// and not an assert: a pass's elapsed time includes any interval a hypervisor
 /// took the CPU away, so it is recorded rather than panicked over. Their format
 /// strings are the only part of the check build with a literal the linker keeps,
@@ -1697,11 +1576,8 @@ const SCHED_CHECK_LITERALS: [&str; 3] = [
 /// about the artifact, so the artifact is what is asked, and a convention
 /// nothing enforces is not a bar.
 ///
-/// This is the half of the check-build gate that a booted guest cannot supply.
-/// A guest proves the asserts did not *fire* and the report was published; a
-/// kernel with the feature quietly dropped proves the first of those too, and
-/// rather more easily. Measured on the two binaries this build produces: 0 of 3
-/// in the shipping kernel, 3 of 3 in the `sched-check` one.
+/// Measured on the two binaries this build produces: 0 of 3 in the shipping
+/// kernel, 3 of 3 in the `sched-check` one.
 fn assert_sched_check_matches_features(features: &str, kernel: &[u8]) {
     assert_names_match_features(
         features,
@@ -1710,8 +1586,7 @@ fn assert_sched_check_matches_features(features: &str, kernel: &[u8]) {
         &SCHED_CHECK_LITERALS,
         "scheduler check instruments",
         "`sched-check` forwards to `toyos-sched/check`, so a build that carries the feature and \
-         not the instruments is a check build in name only — which is what a green \
-         `sched_check_build` would then be certifying.",
+         not the instruments is a check build in name only.",
     );
 }
 
@@ -1750,7 +1625,6 @@ fn stage_and_certify_kernel(root: &Path, features: &str, env: &GuestEnv, arch: A
     match arch {
         Arch::X86_64 => {
             assert_entry_window_matches_features(features, &bytes);
-            assert_entry_labels_match_features(features, &bytes);
         }
         // Taking an exception to EL1 sets `PSTATE.SP`, so its handler's first
         // instruction already runs on `SP_EL1`: no instruction runs at EL1 on a
@@ -1839,12 +1713,10 @@ fn shipped_parts(root: &Path, boot: &Boot, plan: &Plan) -> (Vec<u8>, Vec<u8>, Ve
     // Held until the last staged artifact has been read back, so no clean of
     // this worktree's crate targets can land inside this build.
     let mut lock = buildlock::shared(root, "build");
-    let sysroot = toolchain::ensure(root, &mut lock);
-
-    let env = GuestEnv::new(&sysroot);
     let config = parse_config(&boot.config);
+    let env = GuestEnv::new(toolchain::ensure(root, &mut lock, config.hosted_rustc));
 
-    invalidate_stale(root, &mut lock, &env.toolchain, &config_targets(root, &config));
+    invalidate_stale(root, &mut lock, &env.sysroot.identity, &config_targets(root, &config));
 
     // Same lock-and-stage as `build_test_image`: `cargo run --build-only` and
     // `cargo test` share these paths, so this races the harness too. The kernel
@@ -1852,21 +1724,18 @@ fn shipped_parts(root: &Path, boot: &Boot, plan: &Plan) -> (Vec<u8>, Vec<u8>, Ve
     // path uses, so neither can grow an assertion the other lacks.
     let (kernel_bytes, bl_art) = {
         let _artifact = buildlock::artifact(root);
-        let kernel_handle = {
-            let root = root.to_path_buf();
-            let env = env.clone();
-            let features = kernel_features.clone();
-            std::thread::spawn(move || {
+        std::thread::scope(|threads| {
+            let kernel = threads.spawn(|| {
                 let mut extra = Vec::new();
-                if !features.is_empty() {
+                if !kernel_features.is_empty() {
                     extra.push("--features");
-                    extra.push(&features);
+                    extra.push(&kernel_features);
                 }
                 cargo_build(&root.join("kernel"), arch.kernel(), &extra, &env, &[], false);
-            })
-        };
-        cargo_build(&root.join("bootloader"), arch.loader(), &[], &env, &[], false);
-        kernel_handle.join().expect("kernel build thread panicked");
+            });
+            cargo_build(&root.join("bootloader"), arch.loader(), &[], &env, &[], false);
+            kernel.join().expect("kernel build thread panicked");
+        });
         (
             stage_and_certify_kernel(root, &kernel_features, &env, arch),
             stage_loader(root, arch, &env),
@@ -1988,8 +1857,7 @@ fn root_image_key(plan: &Plan, image_key: &str, extra_files: &[(String, Vec<u8>)
 ///
 /// The image itself is never memoized, only the three parts it is made of:
 /// [`image::create_boot_image`] mints a fresh partition GUID per call and writes
-/// it into both the GPT and the ESP, and a boot that did not get its own is a
-/// boot `log_partition_identity` is entitled to catch.
+/// it into both the GPT and the ESP.
 pub fn build_test_image(
     root: &Path,
     plan: &Plan,
@@ -2005,18 +1873,6 @@ pub fn build_test_image(
         &plan.params.join(","),
         image::Signing { key: crate::signing::key(), version: plan.version },
         plan.second,
-    )
-}
-
-/// The image `ssh … update` takes, built from a plan as a test image is and
-/// signed with this process's key at the plan's version.
-pub fn build_update_image(root: &Path, plan: &Plan, quiet: bool, extra_files: &[(String, Vec<u8>)]) -> Vec<u8> {
-    let parts = build_test_parts(root, plan, quiet, extra_files);
-    image::update_image(
-        &parts.kernel,
-        &parts.root,
-        &plan.params.join(","),
-        image::Signing { key: crate::signing::key(), version: plan.version },
     )
 }
 
@@ -2074,10 +1930,9 @@ pub fn build_test_parts(
     // back after the userland build, and a clean landing in between is the
     // same defect as one landing mid-compile.
     let mut lock = buildlock::shared(root, "test image");
-    let sysroot = crate::toolchain::ensure(root, &mut lock);
-    let env = GuestEnv::new(&sysroot);
+    let env = GuestEnv::new(toolchain::ensure(root, &mut lock, config.hosted_rustc));
 
-    invalidate_stale(root, &mut lock, &env.toolchain, &config_targets(root, &config));
+    invalidate_stale(root, &mut lock, &env.sysroot.identity, &config_targets(root, &config));
 
     // Build and stage under one lock, released before `build_and_assemble`.
     // Releasing it there is deliberate and required: that build takes its own
@@ -2143,19 +1998,9 @@ pub fn build_host_judges(root: &Path, quiet: bool) {
 /// silently repoint every accessor below.
 type Judge = (&'static str, &'static str);
 
-const HTTPS_SERVER: Judge = ("tests/https-server-host", "https_test_server");
-const HTTPS_FETCH: Judge = ("tests/https-fetch-host", "https_fetch");
 const SSH_CLIENT: Judge = ("tests/ssh-client-host", "toyos_ssh");
 
-const HOST_JUDGES: [Judge; 3] = [HTTPS_SERVER, HTTPS_FETCH, SSH_CLIENT];
-
-pub fn https_test_server(root: &Path) -> PathBuf {
-    host_judge(root, HTTPS_SERVER)
-}
-
-pub fn https_fetch_host(root: &Path) -> PathBuf {
-    host_judge(root, HTTPS_FETCH)
-}
+const HOST_JUDGES: [Judge; 1] = [SSH_CLIENT];
 
 /// Copy to `to` the binary the build leaves for userland workspace program
 /// `name`: the bytes a swap sends a running machine in place of the ones its
@@ -2292,9 +2137,8 @@ struct TestBuild {
 impl TestBuild {
     fn begin(root: &Path, arch: Arch, what: &str, stale_targets: &[(PathBuf, Clean)]) -> Self {
         let mut lock = buildlock::shared(root, what);
-        let sysroot = crate::toolchain::ensure(root, &mut lock);
-        let env = GuestEnv::new(&sysroot);
-        invalidate_stale(root, &mut lock, &env.toolchain, stale_targets);
+        let env = GuestEnv::new(toolchain::ensure(root, &mut lock, false));
+        invalidate_stale(root, &mut lock, &env.sysroot.identity, stale_targets);
         let artifact = buildlock::artifact(root);
         TestBuild { target: arch.userland(), env, _lock: lock, _artifact: artifact }
     }
@@ -2395,6 +2239,9 @@ mod tests {
                 shipped.crates
             );
         }
+        let (kernel, loader) = (root.join("kernel"), root.join("bootloader"));
+        let programs = shipped.crates.iter().filter(|(dir, _)| *dir != kernel && *dir != loader);
+        assert_eq!(shipped.programs, programs.cloned().collect());
     }
 
     /// **A standalone crate's clean takes all its guest build wrote — the
@@ -2414,13 +2261,98 @@ mod tests {
             Arch::ALL.iter().map(|arch| file(&format!("target/{}/{PROFILE}/ld", arch.userland()))).collect();
         guest.push(file(&format!("target/{PROFILE}/deps/libsyn-1.rlib")));
         let host = file("target/debug/toyos-build");
+        let identity = Identity::of_parts("compiler", "freestanding", "toyos");
 
-        clean(&root, &root.join("ld"), Clean::ToyosOnly, "fingerprint");
+        clean(&root, &root.join("ld"), Clean::ToyosOnly, &Stale::All, &identity);
         for gone in &guest {
             assert!(!gone.exists(), "{} survived a clean of what the guest build wrote", gone.display());
         }
         assert!(host.is_file(), "the host workspace's own build went");
-        assert_eq!(fs::read_to_string(root.join("target/.deps-stamp")).unwrap(), "fingerprint");
+        assert_eq!(fs::read_to_string(root.join("target/.deps-stamp")).unwrap(), identity.to_string());
+    }
+
+    /// **Moved libraries take what was built for their targets, and nothing
+    /// else**: an ABI edit moves the userland targets' libraries, so the
+    /// kernel's and the loader's target directories stay whole and of
+    /// userland's only `target/<userland triple>` goes; a fork edit moves every
+    /// target's, so the kernel's and the loader's builds go too. The host half
+    /// the same compiler built stays either way. A moved compiler, or a stamp
+    /// that names none, is all of it.
+    #[test]
+    fn moved_libraries_take_what_was_built_for_them_and_a_moved_compiler_all() {
+        let root = toyos_tmpdir::TempDir::new("moved-libraries");
+        fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
+        let file = |path: PathBuf| {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, "built").unwrap();
+            path
+        };
+        let (kernel, loader, userland) = (root.join("kernel"), root.join("bootloader"), root.join("userland"));
+        let crates = [&kernel, &loader, &userland];
+        let kernels = Arch::ALL.map(|arch| file(kernel.join(format!("target/{}/{PROFILE}/kernel", arch.kernel()))));
+        let loaders = Arch::ALL.map(|arch| file(loader.join(format!("target/{}/{PROFILE}/loader.efi", arch.loader()))));
+        let programs = Arch::ALL.map(|arch| file(userland.join(format!("target/{}/{PROFILE}/init", arch.userland()))));
+        let hosts = crates.map(|dir| file(dir.join(format!("target/{PROFILE}/deps/libproc-1.dylib"))));
+
+        let before = Identity::of_parts("compiler", "freestanding", "toyos");
+        for dir in crates {
+            fs::write(dir.join("target/.deps-stamp"), before.to_string()).unwrap();
+            assert_eq!(stale(&root, dir, &before), None, "{} was stale against its own stamp", dir.display());
+        }
+        let moved = |identity: &Identity, want: Vec<&'static str>| {
+            for dir in crates {
+                let found = stale(&root, dir, identity);
+                assert_eq!(found, Some(Stale::Targets(want.clone())), "{}", dir.display());
+                clean(&root, dir, Clean::All, &found.unwrap(), identity);
+                assert_eq!(stale(&root, dir, identity), None, "{} was not stamped", dir.display());
+            }
+        };
+
+        let mut toyos: Vec<&'static str> = Arch::ALL.map(Arch::userland).into();
+        toyos.sort();
+        moved(&Identity::of_parts("compiler", "freestanding", "toyos, edited"), toyos);
+        for kept in kernels.iter().chain(&loaders).chain(&hosts) {
+            assert!(kept.is_file(), "{} went, and nothing it was built from moved", kept.display());
+        }
+        for gone in &programs {
+            assert!(!gone.exists(), "{} survived its target's libraries moving", gone.display());
+        }
+
+        let mut all: Vec<&'static str> = Arch::ALL.into_iter().flat_map(|arch| [arch.userland(), arch.kernel(), arch.loader()]).collect();
+        all.sort();
+        let fork_edit = Identity::of_parts("compiler", "freestanding, edited", "toyos on the edited fork");
+        moved(&fork_edit, all);
+        for gone in kernels.iter().chain(&loaders) {
+            assert!(!gone.exists(), "{} survived its target's libraries moving", gone.display());
+        }
+        for kept in &hosts {
+            assert!(kept.is_file(), "{} went, and the compiler that built it did not move", kept.display());
+        }
+
+        let compiler = Identity::of_parts("another compiler", "freestanding, edited", "toyos on the edited fork");
+        assert_eq!(stale(&root, &kernel, &compiler), Some(Stale::All), "a moved compiler kept the host half");
+        fs::write(userland.join("target/.deps-stamp"), "sysroot:/a/stamp/naming/no/compiler").unwrap();
+        assert_eq!(stale(&root, &userland, &fork_edit), Some(Stale::All), "a stamp naming no compiler was trusted");
+    }
+
+    /// **A stamp that cannot be written stops the build**: one left behind would
+    /// call what the clean took current, or owe a clean every build after.
+    #[test]
+    fn a_stamp_that_cannot_be_written_panics() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = toyos_tmpdir::TempDir::new("unwritable-stamp");
+        fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
+        let target = root.join("kernel/target");
+        fs::create_dir_all(&target).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o555)).unwrap();
+        let identity = Identity::of_parts("compiler", "freestanding", "toyos");
+        let failed = std::panic::catch_unwind(|| {
+            clean(&root, &root.join("kernel"), Clean::All, &Stale::Targets(vec![]), &identity)
+        });
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+        let refusal = failed.expect_err("a stamp that was not written was taken for written");
+        let refusal = refusal.downcast_ref::<String>().expect("a formatted panic");
+        assert!(refusal.starts_with(&format!("write {}", target.join(".deps-stamp").display())), "{refusal}");
     }
 
     /// **A `cargo clean` that fails stops the build and stamps nothing**: a
@@ -2434,7 +2366,8 @@ mod tests {
         fs::create_dir_all(kernel.join("target")).unwrap();
         fs::write(kernel.join("Cargo.toml"), "[package\n").unwrap();
 
-        let failed = std::panic::catch_unwind(|| clean(&root, &kernel, Clean::All, "fingerprint"));
+        let identity = Identity::of_parts("compiler", "freestanding", "toyos");
+        let failed = std::panic::catch_unwind(|| clean(&root, &kernel, Clean::All, &Stale::All, &identity));
         let refusal = failed.expect_err("a cargo clean that failed was taken for one that ran");
         let refusal = refusal.downcast_ref::<String>().expect("a formatted panic");
         assert!(refusal.starts_with(&format!("cargo clean in {} exited", kernel.display())), "{refusal}");
@@ -2513,7 +2446,7 @@ mod tests {
         assert!(harness_kernel_build_is_declared(&debug, true));
         assert!(!harness_kernel_build_is_declared(&debug, false));
         assert!(!harness_kernel_build_is_declared(
-            "fpu-save-nothing,debug-wait",
+            "boot-actuators,test-actuators,debug-wait",
             true
         ));
         for suite_build in TEST_SUITE_KERNEL_BUILDS {
@@ -2667,11 +2600,10 @@ mod tests {
                 // instruction gone and `DF` back out of the `SYSCALL` mask, so a
                 // build carrying it inherits a set direction flag from whatever
                 // it interrupted. The negative control for that fix, and its own
-                // build for `fpu-save-nothing`'s reason — the defect is in a
-                // `naked_asm!` body on every ring transition, where a boot
-                // parameter would have to be a branch.
+                // build because the defect is in a `naked_asm!` body on every
+                // ring transition, where a boot parameter would have to be a
+                // branch.
                 "entry-df-unclean",
-                "fpu-save-nothing",
                 // The two band shapes that separate the two readings
                 // `heap-tripwire`'s own result left standing — the bands absorb
                 // a bounded overrun, or they displace every allocation and the
@@ -2771,8 +2703,6 @@ mod tests {
                 "switch-witness-mutate-frame",
                 "switch-witness-mutate-rsp",
                 "test-actuators",
-                // `FSGSBASE` back in `CR4`: `gsbase_locked`'s negative control.
-                "user-writable-gsbase",
                 // Costs no kernel build at all, for `loom`'s reason: declared
                 // so `cfg` checking knows the name, and turned on only by
                 // `kernel-loom` — to remove the log wake path's two `SeqCst`
@@ -3125,47 +3055,21 @@ mod tests {
         "system.toml",
         "diag/system.toml",
         "console/system.toml",
-        "tests/blockdcase/system.toml",
-        "tests/desktopcase/system.toml",
-        "tests/desktopaudiocase/system.toml",
-        "tests/doommusiccase/system.toml",
-        "tests/e1000case/system.toml",
-        "tests/e1000leasecase/system.toml",
-        "tests/e1000talkcase/system.toml",
-        "tests/flrswapcase/system.toml",
-        "tests/fsdclaimcase/system.toml",
-        "tests/fsdmountcase/system.toml",
-        "tests/fsdrestartcase/system.toml",
-        "tests/inspectcase/system.toml",
         "tests/jobcase/system.toml",
-        "tests/jobdeadlinecase/system.toml",
         "tests/lancase/system.toml",
         "tests/lanicscase/system.toml",
         "tests/lanleasecase/system.toml",
         "tests/lantalkcase/system.toml",
         "tests/latencycase/system.toml",
-        "tests/layoutcase/system.toml",
-        "tests/logflushcase/system.toml",
-        "tests/logkeepcase/system.toml",
-        "tests/logrotatecase/system.toml",
         "tests/logstallcase/system.toml",
-        "tests/logstreamcase/system.toml",
-        "tests/logstreame1000case/system.toml",
         "tests/metalcase/system.toml",
         "tests/metaldevicecase/system.toml",
         "tests/netcase/system.toml",
-        "tests/partclaimcase/system.toml",
-        "tests/pkgcase/system.toml",
-        "tests/quiescecase/system.toml",
-        "tests/quiescelastcase/system.toml",
-        "tests/quiescetwicecase/system.toml",
-        "tests/sshdcase/system.toml",
-        "tests/swapcase/system.toml",
+        "tests/proctreecase/system.toml",
         "tests/testcases/system.toml",
-        "tests/toolkitcase/system.toml",
-        "tests/updatecase/system.toml",
         "tests/virtjobcase/system.toml",
         "tests/virtpaniccase/system.toml",
+        "tests/virtrebootcase/system.toml",
         "tests/virtsmpcase/system.toml",
     ];
 
@@ -3293,33 +3197,16 @@ mod tests {
         assert!(provides_disjoint_from_serves(&bad).is_err());
     }
 
-    /// The one `devices` entry in the tree that is a deliberate second claim:
-    /// config, program, device. `pci_function_is_exclusive` boots it and reads
-    /// the kernel refusing it.
-    const STAGED_COLLISION: (&str, &str, &str) =
-        ("tests/netcase/system.toml", "test-runner", "pci:1af4:1041");
-
-    /// Init mints one claim per device, so a shipping config naming one twice
-    /// starts a program with a hole where its claim should be.
-    ///
-    /// `excused` is one `(program, device)` and never a whole config: every
-    /// other collision in the config that stages one is still refused.
-    fn one_claimant_per_device(
-        cfg: &SystemConfig,
-        excused: Option<(&str, &str)>,
-    ) -> Result<(), String> {
+    /// Init mints one claim per device, so a config naming one twice starts a
+    /// program with a hole where its claim should be.
+    fn one_claimant_per_device(cfg: &SystemConfig) -> Result<(), String> {
         let mut seen: BTreeMap<&str, &str> = BTreeMap::new();
         for (name, prog) in &cfg.programs {
             for d in &prog.devices {
-                if excused == Some((name.as_str(), d.as_str())) {
-                    continue;
-                }
                 if let Some(prev) = seen.insert(d, name) {
                     return Err(format!(
                         "device `{d}` is claimed by both `{prev}` and `{name}`; the second \
-                         claim is refused at boot, and `{}`'s `{}` is the one entry allowed \
-                         to stage that",
-                        STAGED_COLLISION.0, STAGED_COLLISION.1
+                         claim is refused at boot"
                     ));
                 }
             }
@@ -3328,25 +3215,18 @@ mod tests {
     }
 
     /// Not the capability boundary — `kernel/src/pcidev`'s slot reservation is,
-    /// and this compares `system.toml` strings. The excused entry is asserted to
-    /// still be a collision on the device it names, so the exception cannot rot
-    /// into a pass and cannot cover a second one added to the same config.
+    /// and this compares `system.toml` strings.
     #[test]
     fn every_device_class_has_at_most_one_claimant() {
         for cfg in ALL_CONFIGS {
-            let excused =
-                (*cfg == STAGED_COLLISION.0).then_some((STAGED_COLLISION.1, STAGED_COLLISION.2));
-            one_claimant_per_device(&load(cfg), excused).unwrap_or_else(|e| panic!("{cfg}: {e}"));
+            one_claimant_per_device(&load(cfg)).unwrap_or_else(|e| panic!("{cfg}: {e}"));
         }
-        let staged = one_claimant_per_device(&load(STAGED_COLLISION.0), None)
-            .expect_err("the excused entry no longer collides with anything");
-        assert!(staged.contains(STAGED_COLLISION.2), "{staged}");
         let bad: SystemConfig = toml::from_str(
             "init = []\n[programs.a]\ndevices = [\"framebuffer\"]\n\
              [programs.b]\ndevices = [\"framebuffer\"]\n",
         )
         .unwrap();
-        assert!(one_claimant_per_device(&bad, None).is_err());
+        assert!(one_claimant_per_device(&bad).is_err());
     }
 
     /// netd's two actuators that only its Intel driver answers, spelled here
@@ -3659,8 +3539,6 @@ mod tests {
     const ENTRY_OPENS: [u8; 10] = [0xfc, 0x65, 0x48, 0x89, 0x24, 0x25, 0x18, 0, 0, 0];
     /// `mov rsp, gs:[0x10]`.
     const SWITCH: [u8; 9] = [0x65, 0x48, 0x8b, 0x24, 0x25, 0x10, 0, 0, 0];
-    /// `window_hold!` as a shipping build with its cfgs taken off emits it: the
-    /// two global labels make each jump a near one.
     const LABELLED_HOLD: [u8; 84] = [
         0x65, 0x48, 0xf7, 0x04, 0x25, 0x18, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x0f, 0x84,
         0x41, 0x00, 0x00, 0x00, 0x65, 0xf0, 0x48, 0x83, 0x0c, 0x25, 0x18, 0x01, 0x00, 0x00, 0x02,
@@ -3744,11 +3622,9 @@ mod tests {
     }
 
     #[test]
-    fn a_clean_entry_is_the_shipping_kernels_and_not_the_test_kernels() {
+    fn a_clean_entry_is_the_shipping_kernels() {
         let kernel = kernel_with_entry(&[ENTRY_NAME], &entry_with(&[]));
         assert_eq!(judge_entry_window("", &kernel), Ok(()));
-        let refusal = judge_entry_window(&TEST_KERNEL.join(","), &kernel).unwrap_err();
-        assert!(refusal.contains("`nmi_gate`'s hold is not in it"), "{refusal}");
     }
 
     #[test]
@@ -3757,7 +3633,6 @@ mod tests {
             let kernel = kernel_with_entry(&[ENTRY_NAME], &entry_with(hold));
             let refusal = judge_entry_window("", &kernel).unwrap_err();
             assert!(refusal.contains(&format!("between them stand {hold:02x?}")), "{refusal}");
-            assert_eq!(judge_entry_window(&TEST_KERNEL.join(","), &kernel), Ok(()));
         }
     }
 
@@ -3765,10 +3640,8 @@ mod tests {
     fn a_hold_in_front_of_the_save_is_an_entry_the_judge_refuses_to_read() {
         let entry = [&[0xfc, 0xf3, 0x90][..], &ENTRY_OPENS[1..], &SWITCH[..]].concat();
         let kernel = kernel_with_entry(&[ENTRY_NAME], &entry);
-        for features in ["".to_string(), TEST_KERNEL.join(",")] {
-            let refusal = judge_entry_window(&features, &kernel).unwrap_err();
-            assert!(refusal.contains("does not open `cld`"), "{refusal}");
-        }
+        let refusal = judge_entry_window("", &kernel).unwrap_err();
+        assert!(refusal.contains("does not open `cld`"), "{refusal}");
     }
 
     #[test]
@@ -3783,6 +3656,8 @@ mod tests {
 
     #[test]
     fn a_kernel_of_any_other_feature_set_is_not_judged() {
-        assert_eq!(judge_entry_window(&SCHED_CHECK_KERNEL.join(","), b"not an ELF"), Ok(()));
+        for features in [SCHED_CHECK_KERNEL, TEST_KERNEL] {
+            assert_eq!(judge_entry_window(&features.join(","), b"not an ELF"), Ok(()));
+        }
     }
 }

@@ -102,3 +102,6 @@ path that has not been ruled out.
 **Exit condition.** Reproducing the keyboard route deliberately, which means a
 guest-side key generator rather than a host-side flood, and then accounting for
 whichever wait left the flag set.
+
+**`usb_boot_stick_pulled` is deleted**, as a red test is: `02366d741` took it
+out.

@@ -39,13 +39,12 @@ struct Shape {
 const INSTRUMENTS: &str = "debug-wait,sched-check,sched-tripwire,heap-tripwire,heap-sweep,\
                            pass-spin,stack-witness,switch-witness,switch-witness-mutate-frame,\
                            switch-witness-mutate-rsp,df-witness,df-witness-mutate,\
-                           entry-df-unclean,fpu-save-nothing,user-writable-gsbase";
+                           entry-df-unclean";
 
 /// [`INSTRUMENTS`] less the direction-flag three, which are x86-64's alone.
 const AARCH64_INSTRUMENTS: &str = "debug-wait,sched-check,sched-tripwire,heap-tripwire,heap-sweep,\
                                    pass-spin,stack-witness,switch-witness,\
-                                   switch-witness-mutate-frame,switch-witness-mutate-rsp,\
-                                   fpu-save-nothing,user-writable-gsbase";
+                                   switch-witness-mutate-frame,switch-witness-mutate-rsp";
 
 const UNCONTROLLED: &[&str] = &["toyos-pcid/counting-allocator", "toyos-sched/tripwire"];
 
@@ -153,9 +152,12 @@ const SHAPES: &[Shape] = &[
         ],
         after: &["$ADOPTED", "-D", "warnings"],
     },
+    // Its own target directory: cargo keeps one check of a unit, so a unit
+    // linted under two sets of lints is checked again by each, every run, and
+    // so is every crate depending on it.
     Shape {
         dir: "",
-        before: &["-p", "toyos-abi", "--all-targets", "--keep-going"],
+        before: &["-p", "toyos-abi", "--all-targets", "--keep-going", "--target-dir", "target/clippy-abi"],
         after: &["-W", "clippy::undocumented_unsafe_blocks", "-D", "warnings"],
     },
 ];

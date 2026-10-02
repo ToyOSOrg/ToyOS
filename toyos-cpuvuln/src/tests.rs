@@ -11,9 +11,8 @@ use super::*;
 
 const PREFIX: &str = "/sys/devices/system/cpu/vulnerabilities/";
 
-/// The T14's i5-1135G7 as S0 read it under the pinned Linux: PR #601's
-/// `toyos-t14linux/s0/t14/cpuid.txt`, `msr.txt` and `cpuinfo.txt` at commit
-/// 44eb3c2e. Every MSR reads the same on all eight CPUs.
+/// The T14's i5-1135G7, held to the pinned Linux's reading of it by
+/// [`the_t14s_facts_are_linuxs_reading_of_it`].
 const T14: Facts = Facts {
     vendor: Vendor::from_id(b"GenuineIntel"),
     signature: 0x0008_06c1,
@@ -28,9 +27,9 @@ const T14: Facts = Facts {
     cpuid_8000_0021_ecx: 0,
     arch_capabilities: 0x0a00_5c6b,
     mcu_opt_ctrl: Some(0),
-    // S0 did not read 0x3A. `cpuinfo.txt` lists `vmx` and its `vmx flags`, so
-    // Linux kept VMX (`feat_ctl.c:171-184`): these are the two bits that decide
-    // that, and no other bit is read.
+    // `fixtures/t14/` holds no 0x3A. `cpuinfo.txt` lists `vmx` and its
+    // `vmx flags`, so Linux kept VMX (`feat_ctl.c:171-184`): these are the two
+    // bits that decide that, and no other bit is read.
     feat_ctl: Some(FEAT_CTL_LOCKED | FEAT_CTL_VMX_ENABLED_OUTSIDE_SMX),
     ls_cfg_readable: None,
     sbpb_write_accepted: None,
@@ -38,9 +37,9 @@ const T14: Facts = Facts {
     smt: true,
 };
 
-/// The TCG model: `qemu64`, `AuthenticAMD` family 0xF model 0x6B stepping 1,
-/// the signature S0's capture verifies; the bits `decide` reads in leaves 7
-/// and 0x80000008 are clear in that model, and it has no leaf 0x80000021.
+/// The TCG model: `qemu64`, `AuthenticAMD` family 0xF model 0x6B stepping 1;
+/// the bits `decide` reads in leaves 7 and 0x80000008 are clear in that model,
+/// and it has no leaf 0x80000021.
 const TCG: Facts = Facts {
     vendor: Vendor::from_id(b"AuthenticAMD"),
     signature: 0x0006_0fb1,
@@ -248,9 +247,7 @@ fn line(facts: &Facts, v: Vuln) -> String {
 
 #[test]
 fn the_t14s_facts_give_its_lines_and_its_spec_ctrl() {
-    assert_eq!(Ident::new(T14.vendor, T14.signature).model, 0x8C);
     let d = assert_capture(&T14, include_str!("../fixtures/t14.txt"));
-    // `spec_ctrl` against S0's `msr.txt`: 0x48 reads 0x1 on every CPU.
     assert_eq!(
         state(&d),
         State {
@@ -266,19 +263,132 @@ fn the_t14s_facts_give_its_lines_and_its_spec_ctrl() {
     );
 }
 
-/// S0 verifies the TCG model's signature and nothing else it could read, so
-/// its lines are held over either value of every other fact they could rest on.
+/// [`T14`] against `fixtures/t14/`, each field read as [`Facts`] says Linux
+/// reads it, and what `decide` makes of it against the VMX Linux kept and the
+/// `IA32_SPEC_CTRL` it left.
+#[test]
+fn the_t14s_facts_are_linuxs_reading_of_it() {
+    let hex = |word: &str| u64::from_str_radix(word.trim_start_matches("0x"), 16).expect(word);
+    let leaves: Vec<Vec<u64>> = include_str!("../fixtures/t14/cpuid.txt")
+        .lines()
+        .map(|l| l.split(' ').map(hex).collect())
+        .collect();
+    // A leaf past its range's highest reads as 0, as Linux leaves it.
+    let leaf = |leaf: u32, subleaf: u32| {
+        let read = |leaf: u32, subleaf: u32| {
+            let l = leaves
+                .iter()
+                .find(|l| l[..2] == [u64::from(leaf), u64::from(subleaf)])
+                .unwrap_or_else(|| panic!("CPUID {leaf:#x}.{subleaf} was not read"));
+            [l[2], l[3], l[4], l[5]].map(|r| r as u32)
+        };
+        if leaf <= read(leaf & 0x8000_0000, 0)[0] { read(leaf, subleaf) } else { [0; 4] }
+    };
+    let blocks: Vec<Vec<(&str, &str)>> = include_str!("../fixtures/t14/cpuinfo.txt")
+        .split_terminator("\n\n")
+        .map(|b| {
+            b.lines().filter_map(|l| l.split_once(':')).map(|(k, v)| (k.trim(), v.trim())).collect()
+        })
+        .collect();
+    let cpuinfo = |key: &str| {
+        let mut each = blocks.iter().map(|b| b.iter().find(|f| f.0 == key).expect(key).1);
+        let first = each.next().expect("a CPU");
+        assert!(each.all(|v| v == first), "{key} differs between CPUs");
+        first
+    };
+    let msrs: Vec<(u64, usize, u64)> = include_str!("../fixtures/t14/msr.txt")
+        .lines()
+        .map(|l| match l.split(' ').collect::<Vec<_>>()[..] {
+            [index, cpu, value] => (hex(index), cpu.parse().expect(cpu), hex(value)),
+            _ => panic!("{l:?} is not `msr cpu value`"),
+        })
+        .collect();
+    let msr = |index: u64| {
+        let each: Vec<_> = msrs.iter().filter(|m| m.0 == index).collect();
+        assert!(each.iter().map(|m| m.1).eq(0..blocks.len()), "MSR {index:#x} on every CPU");
+        assert!(each.iter().all(|m| m.2 == each[0].2), "MSR {index:#x} differs between CPUs");
+        each[0].2
+    };
+
+    let [_, ebx0, ecx0, edx0] = leaf(0, 0);
+    let id: Vec<u8> = [ebx0, edx0, ecx0].iter().flat_map(|r| r.to_le_bytes()).collect();
+    let [eax1, _, ecx1, _] = leaf(1, 0);
+    let [_, ebx7, _, edx7] = leaf(7, 0);
+    let [eax21, _, ecx21, _] = leaf(0x8000_0021, 0);
+    let arch = if edx7 & CPUID_7_0_EDX_ARCH_CAPABILITIES != 0 { msr(0x10a) } else { 0 };
+    let Facts {
+        vendor,
+        signature,
+        microcode,
+        cpuid_1_ecx,
+        cpuid_7_0_ebx,
+        cpuid_7_0_edx,
+        cpuid_7_2_edx,
+        cpuid_8000_0008_ebx,
+        cpuid_8000_0021_eax,
+        cpuid_8000_0021_ecx,
+        arch_capabilities,
+        mcu_opt_ctrl,
+        // Stands in for 0x3A, which was not read: `decide`'s `vmx` is held below.
+        feat_ctl: _,
+        // Probed on AMD and Hygon alone.
+        ls_cfg_readable: _,
+        sbpb_write_accepted: _,
+        smt,
+    } = T14;
+    assert_eq!(cpuinfo("vendor_id").as_bytes(), &id[..]);
+    assert_eq!(vendor, Vendor::from_id(id[..].try_into().expect("12 bytes")));
+    assert_eq!(signature, eax1);
+    let ident = Ident::new(vendor, signature);
+    assert_eq!(
+        [ident.family, ident.model, ident.stepping].map(|n| n.to_string()),
+        ["cpu family", "model", "stepping"].map(|key| cpuinfo(key).to_string())
+    );
+    assert_eq!(u64::from(microcode), hex(cpuinfo("microcode")));
+    assert_eq!(u64::from(microcode), msr(0x8b) >> 32);
+    assert_eq!(cpuid_1_ecx, ecx1);
+    assert_eq!((cpuid_7_0_ebx, cpuid_7_0_edx), (ebx7, edx7));
+    assert_eq!(cpuid_7_2_edx, leaf(7, 2)[3]);
+    assert_eq!(cpuid_8000_0008_ebx, leaf(0x8000_0008, 0)[1]);
+    assert_eq!((cpuid_8000_0021_eax, cpuid_8000_0021_ecx), (eax21, ecx21));
+    assert_eq!(arch_capabilities, arch);
+    assert_eq!(mcu_opt_ctrl, (arch & ARCH_CAP_GDS_CTRL != 0).then(|| msr(0x123)));
+    let count = |key| cpuinfo(key).parse::<u32>().expect(key);
+    assert_eq!(smt, count("siblings") > count("cpu cores"));
+
+    let d = decide(&T14);
+    assert_eq!(d.vmx, cpuinfo("flags").split(' ').any(|f| f == "vmx"));
+    assert_eq!(d.spec_ctrl, msr(0x48));
+}
+
+/// `fixtures/tcg/console.txt` verifies the TCG model's signature and nothing
+/// else it could read, so its lines are held over either value of every other
+/// fact they could rest on.
 #[test]
 fn the_tcg_models_signature_gives_its_lines() {
+    let console = include_str!("../fixtures/tcg/console.txt");
+    // `print_cpu_info`: the vendor as its `cpu_dev` names it, the brand string,
+    // then the family, model and stepping.
+    let (name, identity) = console
+        .lines()
+        .find_map(|l| l.split_once("smpboot: CPU0: "))
+        .and_then(|(_, cpu0)| cpu0.split_once(" ("))
+        .expect("Linux names CPU 0");
     let id = Ident::new(TCG.vendor, TCG.signature);
-    assert_eq!((id.family, id.model, id.stepping), (15, 107, 1));
+    assert_eq!((TCG.vendor, name.split(' ').next()), (Vendor::Amd, Some("AMD")));
+    assert_eq!(
+        identity,
+        std::format!("family: {:#x}, model: {:#x}, stepping: {:#x})", id.family, id.model, id.stepping)
+    );
+    let lines: String =
+        console.lines().filter(|l| l.starts_with(PREFIX)).flat_map(|l| [l, "\n"]).collect();
     for hypervisor in [0, CPUID_1_ECX_HYPERVISOR] {
         for rdrand in [0, CPUID_1_ECX_RDRAND] {
             for microcode in [0, u32::MAX] {
                 for smt in [false, true] {
                     let facts =
                         Facts { cpuid_1_ecx: hypervisor | rdrand, microcode, smt, ..TCG };
-                    let d = assert_capture(&facts, include_str!("../fixtures/tcg.txt"));
+                    let d = assert_capture(&facts, &lines);
                     assert_eq!(
                         state(&d),
                         State { spectre_v2: Some(SpectreV2::Retpoline), ..NONE }
@@ -492,7 +602,7 @@ fn rtm_always_abort_decides_tsx_first() {
 
 // The two fixtures below are this crate's reading of the pinned Linux, awaiting
 // a capture on a nightly runner:
-// `issues/build/no-nightly-runner-has-had-its-cpuid-and-vulnerability-lines-captured.md`.
+// `issues/build/no-kvm-runner-has-had-its-cpuid-and-vulnerability-lines-captured.md`.
 
 /// A guest's lines do not read its microcode: `tsa_init` returns under a
 /// hypervisor (`amd.c:519-520`) before `amd_check_tsa_microcode`.

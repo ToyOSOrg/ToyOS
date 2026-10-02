@@ -25,11 +25,8 @@ pub(crate) enum Value {
     /// The next word, and the flag may be written again: `--kernel-param --help
     /// --kernel-param slow` arms two actuators, and every value is read.
     Each,
-    /// The next word unless that word is itself a flag: `--known-red` alone
-    /// answers about every row, and `--known-red <test>` about one.
-    Optional,
     /// Every word after it — the flag names a subcommand that owns the rest of
-    /// the line, as `--worktree add <path>` does.
+    /// the line, as `--ci <job>` does.
     Rest,
 }
 
@@ -53,10 +50,8 @@ pub(crate) use declare_flags;
 
 declare_flags!(pub CARGO_RUN = {
     pub HELP = "--help", None;
-    pub SYNC = "--sync", None;
     pub CI = "--ci", Rest;
     pub CLIPPY = "--clippy", None;
-    pub KNOWN_RED = "--known-red", Optional;
     pub DEBUG = "--debug", None;
     pub BUILD_ONLY = "--build-only", None;
     pub DUMP_AUDIO = "--dump-audio", None;
@@ -73,7 +68,6 @@ declare_flags!(pub CARGO_RUN = {
     pub REGEN_FONT = "--regen-font", None;
     pub REGEN_WALLPAPER = "--regen-wallpaper", None;
     pub REGEN_SOUNDFONT = "--regen-soundfont", Next;
-    pub WORKTREE = "--worktree", Rest;
     /// Mint the owner's image-signing key where `signing::owner_key_path`
     /// says, refusing to replace one.
     pub SIGNING_KEY_NEW = "--signing-key-new", None;
@@ -122,7 +116,6 @@ fn shape(value: Value) -> &'static str {
     match value {
         Value::None => "",
         Value::Next | Value::Each => " <value>",
-        Value::Optional => " [<value>]",
         Value::Rest => " <subcommand>",
     }
 }
@@ -168,7 +161,7 @@ impl Walk<'_> {
     /// A flag whose value no reader of this line would get — every shape that
     /// reaches a reader as a silent default, and the whole of what either
     /// command line asks. A flag with nothing after it — the end of the line,
-    /// an empty `--smp=`, or a `--worktree` owning no words — answers `None` to
+    /// an empty `--smp=`, or a `--ci` owning no words — answers `None` to
     /// [`Vocabulary::value`] and `&[]` to [`Vocabulary::rest`]; a flag written
     /// twice has every use but one dropped; and an inline value is dropped by
     /// exactly two readers, `Value::None` having none and `rest` taking only the
@@ -231,10 +224,6 @@ impl Vocabulary {
                 (Some(value), _) => Given::Inline(value),
                 (None, Value::None) => Given::Nothing,
                 (None, Value::Next | Value::Each) => take(args, &mut at),
-                (None, Value::Optional) => match args.get(at) {
-                    Some(next) if next.starts_with('-') => Given::Nothing,
-                    _ => take(args, &mut at),
-                },
                 (None, Value::Rest) => {
                     let rest = &args[at..];
                     at = args.len();
@@ -339,30 +328,23 @@ mod tests {
     fn an_inline_value_is_refused_exactly_where_it_would_be_dropped() {
         let debug = refusal(&["--debug=1"]);
         assert!(debug.contains("--debug takes no value"), "{debug}");
-        let worktree = refusal(&["--worktree=add"]);
-        assert!(worktree.contains("--worktree <subcommand>"), "{worktree}");
-        let line = argv(&["--smp=4", "--known-red=audio_tone", "--kernel-param=slow"]);
+        let ci = refusal(&["--ci=host"]);
+        assert!(ci.contains("--ci <subcommand>"), "{ci}");
+        let line = argv(&["--smp=4", "--kernel-param=slow"]);
         assert!(matches!(check(&line), Outcome::Proceed));
         assert_eq!(CARGO_RUN.value(&line, &SMP), Some("4"));
-        assert_eq!(CARGO_RUN.value(&line, &KNOWN_RED), Some("audio_tone"));
         assert_eq!(CARGO_RUN.values(&line, &KERNEL_PARAM), ["slow"]);
     }
 
     #[test]
     fn a_flag_left_without_its_value_is_refused() {
-        for flag in
-            CARGO_RUN.0.iter().filter(|f| !matches!(f.value, Value::None | Value::Optional))
-        {
+        for flag in CARGO_RUN.0.iter().filter(|f| f.value != Value::None) {
             for word in [flag.name.to_string(), format!("{}=", flag.name)] {
                 let message = refusal(&[word.as_str()]);
                 assert!(message.contains(flag.name), "{word}: {message}");
                 assert!(message.contains("no value"), "{word}: {message}");
             }
         }
-        assert!(refusal(&["--known-red="]).contains("no value"), "an optional value is a value");
-        assert!(matches!(checked(&["--known-red"]), Outcome::Proceed), "--known-red answers alone");
-        assert!(matches!(checked(&["--known-red", "audio_tone"]), Outcome::Proceed));
-        assert!(refusal(&["--known-red", "--frobnicate"]).contains("--frobnicate"));
     }
 
     #[test]
@@ -396,7 +378,7 @@ mod tests {
         for words in [
             vec!["--kernel-param", "--help"],
             vec!["--boot-config", "--help"],
-            vec!["--worktree", "add", "--help"],
+            vec!["--ci", "host", "--help"],
             vec!["--boot-config", "diag", "--build-only"],
         ] {
             assert!(matches!(checked(&words), Outcome::Proceed), "{words:?} must proceed");
@@ -404,8 +386,8 @@ mod tests {
         let line = argv(&["--kernel-param", "--help"]);
         assert_eq!(CARGO_RUN.values(&line, &KERNEL_PARAM), ["--help"]);
         assert!(!CARGO_RUN.present(&line, &HELP), "the actuator's name is not the flag");
-        let worktree = argv(&["--worktree", "add", "/tmp/wt"]);
-        assert_eq!(CARGO_RUN.rest(&worktree, &WORKTREE), ["add", "/tmp/wt"]);
+        let ci = argv(&["--ci", "guest", "--help"]);
+        assert_eq!(CARGO_RUN.rest(&ci, &CI), ["guest", "--help"]);
         assert_eq!(CARGO_RUN.value(&argv(&["--boot-config", "diag"]), &BOOT_CONFIG), Some("diag"));
         assert_eq!(CARGO_RUN.value(&argv(&["--build-only"]), &BOOT_CONFIG), None);
     }
