@@ -573,9 +573,6 @@ pub struct pollfd {
     pub revents: i16,
 }
 
-const POLLIN: i16 = 1;
-const POLLOUT: i16 = 4;
-
 #[no_mangle]
 pub unsafe extern "C" fn poll(fds: *mut pollfd, nfds: u32, timeout: i32) -> i32 {
     if nfds == 0 {
@@ -597,13 +594,10 @@ pub unsafe extern "C" fn poll(fds: *mut pollfd, nfds: u32, timeout: i32) -> i32 
     let timeout_ns = if timeout < 0 { None } else { Some(timeout as u64 * 1_000_000) };
 
     let n = nfds as usize;
+    let entries: alloc::vec::Vec<(i32, i16)> = (0..n).map(|i| ((*fds.add(i)).fd, (*fds.add(i)).events)).collect();
     let poller = toyos::poller::Poller::new(n as u32);
-    for i in 0..n {
-        let pfd = &*fds.add(i);
-        let mut flags = 0u32;
-        if pfd.events & POLLIN != 0 { flags |= toyos::poller::READABLE; }
-        if pfd.events & POLLOUT != 0 { flags |= toyos::poller::WRITABLE; }
-        poller.watch_raw(toyos_abi::RawHandle(pfd.fd as u32), flags, i as u64);
+    for (entry, fd, interest) in crate::pollreq::watches(&entries) {
+        poller.watch_raw(toyos_abi::RawHandle(fd as u32), interest, entry as u64);
     }
 
     let mut ready_set = alloc::vec![false; n];
@@ -612,9 +606,10 @@ pub unsafe extern "C" fn poll(fds: *mut pollfd, nfds: u32, timeout: i32) -> i32 
     });
     let mut ready = 0i32;
     for i in 0..n {
+        let answered = ready_set[crate::pollreq::watch_of(&entries, i)];
         let pfd = &mut *fds.add(i);
         pfd.revents = 0;
-        if ready_set[i] {
+        if answered {
             pfd.revents = pfd.events;
             ready += 1;
         }

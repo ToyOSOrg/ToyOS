@@ -34,6 +34,9 @@ mod listing;
 #[path = "../../userland/libc/src/memreq.rs"]
 mod memreq;
 #[cfg(test)]
+#[path = "../../userland/libc/src/pollreq.rs"]
+mod pollreq;
+#[cfg(test)]
 #[path = "../../userland/libc/src/sigmask.rs"]
 mod sigmask;
 #[cfg(test)]
@@ -66,6 +69,8 @@ mod listing_reader;
 mod long_double;
 #[cfg(test)]
 mod memory_refusals;
+#[cfg(test)]
+mod poll_requests;
 #[cfg(test)]
 mod prototypes;
 #[cfg(test)]

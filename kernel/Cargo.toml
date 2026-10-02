@@ -34,6 +34,11 @@ serial-try-lock-then-some = []
 # `kernel-loom/tests/poll_once.rs` must red when it does — a poll two posts
 # both answer.
 poll-fire-load-store = []
+# The same for a poll ring's answer: `kernel-loom` turns it on so
+# `inbox/polls.rs` answers a fired poll without looking at its object again,
+# and `kernel-loom/tests/inbox_answer.rs` must red — a post with nothing to
+# read, answered.
+post-is-an-answer = []
 # The same arrangement, five more times, one per `kernel-loom` model that had
 # no control of its own until 2026-08-17. Each is declared here and never
 # enabled here; `kernel-loom` turns exactly one on at a time and the named

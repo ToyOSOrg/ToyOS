@@ -7,26 +7,54 @@
 //! cannot end keeps the child's last thread in its process for ever, and
 //! `wait` below never returns; the harness's deadline is what says so.
 //! `mutual_kill` holds a kill inside a kill.
+//!
+//! `posted-poll` is the poll ring's wait a peer keeps from parking: this
+//! process's threads write no bytes into the pipe the child watches, so every
+//! post sends the child's wait round to look again. A kill those posts hold is
+//! held for as long as they win a race and no longer, which the harness's
+//! deadline cannot see: the posts stop at a ceiling of their own, [`HELD`],
+//! and the child has to have ended before it.
 
 use std::io::{Read, Write};
 use std::os::toyos::process::{ChildExt, CommandExt};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::AtomicU32;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Barrier, OnceLock};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
-use toyos::endow::{Endowments, SYSCAP_LABEL};
-use toyos::poller::Poller;
+use toyos::endow::{Endowments, FromHandle, SYSCAP_LABEL};
+use toyos::poller::{Poller, READABLE};
 use toyos::process::Process;
 use toyos::syscap::SysCap;
 use toyos::AsHandle;
-use toyos_abi::syscall;
+use toyos_abi::clock;
+use toyos_abi::syscall::{self, SyscallError};
 use toyos_abi::RawHandle;
 
 const SELF_PATH: &str = "/system/bin/test_rs_kill_ends_every_wait";
 
 /// The label the process-wait child finds the process it waits on under.
 const WAITED: &str = "waited";
+
+/// The label the posted-poll child finds the pipe it watches under.
+const POSTED: &str = "posted";
+
+/// That pipe's read end, which the child holds until it ends.
+struct Posted(RawHandle);
+
+impl FromHandle for Posted {
+    unsafe fn from_handle(raw: RawHandle) -> Self {
+        Self(raw)
+    }
+}
+
+/// The threads that post the pipe the posted-poll child watches.
+const POSTERS: usize = 4;
+
+/// How long those threads go on posting after the kill before they say the
+/// child outlived it.
+const HELD: Duration = Duration::from_secs(1);
 
 /// `process::KILLED_EXIT_CODE`.
 const KILLED: i32 = 137;
@@ -41,7 +69,7 @@ const ZOMBIE: u8 = 3;
 // sleep underneath (the waited process's `nanosleep`, the joined thread's
 // `std::thread::sleep`), so a mutation that breaks sleep would otherwise surface
 // under one of their names instead of its own.
-const WAITS: [&str; 5] = ["futex", "poll", "sleep", "process-wait", "thread-join"];
+const WAITS: [&str; 6] = ["futex", "poll", "posted-poll", "sleep", "process-wait", "thread-join"];
 
 fn main() {
     match std::env::args().nth(1).as_deref() {
@@ -54,13 +82,22 @@ fn test() {
     for role in WAITS {
         // The process the process-wait child waits on, which nothing ends but this.
         let mut waited = (role == "process-wait").then(|| spawn("sleep", None));
-        let endow = waited.as_ref().map(|w| {
-            let dup = syscall::dup(RawHandle(w.as_raw_handle())).expect("a handle to endow");
-            (WAITED.to_string(), dup.0)
-        });
+        // The pipe the posted-poll child watches, which no byte ever enters.
+        let posted = (role == "posted-poll").then(|| syscall::pipe().expect("a pipe to post"));
+        let endow = waited
+            .as_ref()
+            .map(|w| {
+                let dup = syscall::dup(RawHandle(w.as_raw_handle())).expect("a handle to endow");
+                (WAITED.to_string(), dup.0)
+            })
+            .or(posted.as_ref().map(|pipe| (POSTED.to_string(), pipe.read.0)));
         let mut child = spawn(role, endow);
+        let posts = posted.map(|pipe| Posts::hold(child.id(), pipe.write));
         println!("  {role}: killing");
         child.kill().expect("kill the parked child");
+        if let Some(posts) = posts {
+            posts.until_the_child_ends();
+        }
         let code = child.wait().expect("wait for the killed child").code();
         assert_eq!(code, Some(KILLED), "a child killed in its {role} wait ended with {code:?}");
         if let Some(mut waited) = waited.take() {
@@ -103,6 +140,69 @@ fn spawn(role: &str, endow: Option<(String, u32)>) -> Child {
         }
     }
     child
+}
+
+/// The threads posting the pipe the posted-poll child watches.
+struct Posts {
+    /// Each answers whether the pipe lost its reader before the ceiling.
+    threads: Vec<JoinHandle<bool>>,
+    /// When the threads stop, in nanoseconds since boot: never, until the kill.
+    stop_at: Arc<AtomicU64>,
+    write: RawHandle,
+}
+
+impl Posts {
+    /// Start [`POSTERS`] threads, each writing no bytes into `write` until the
+    /// pipe has no reader, and return once the roster shows `pid`'s main
+    /// thread out of the park the posts woke it from.
+    fn hold(pid: u32, write: RawHandle) -> Self {
+        let stop_at = Arc::new(AtomicU64::new(u64::MAX));
+        let posting = Arc::new(Barrier::new(POSTERS + 1));
+        let threads = (0..POSTERS)
+            .map(|_| {
+                let (stop_at, posting) = (stop_at.clone(), posting.clone());
+                std::thread::spawn(move || {
+                    let byte = [0u8];
+                    posting.wait();
+                    while clock::nanos_since_boot() < stop_at.load(Ordering::Relaxed) {
+                        // A slice of a real buffer: the kernel is handed an address it can read.
+                        match syscall::write(write, &byte[..0]) {
+                            Ok(0) => {}
+                            // The child ended, and the pipe's one read end with it.
+                            Err(SyscallError::Gone) => return true,
+                            other => panic!("a write of no bytes answered {other:?}"),
+                        }
+                    }
+                    false
+                })
+            })
+            .collect();
+        // Every thread is posting before the kill: one alone loses the race
+        // that holds the child.
+        posting.wait();
+        println!("  posted-poll: waiting for the roster to show it looking");
+        loop {
+            match main_thread_status(pid) {
+                RosterStatus::NotParked => break,
+                RosterStatus::Parked => std::thread::sleep(Duration::from_millis(10)),
+                RosterStatus::Gone => panic!("posted-poll: a write of no bytes ended the child's wait"),
+            }
+        }
+        Self { threads, stop_at, write }
+    }
+
+    /// After the kill: the posts go on until the child ends, and it has to
+    /// end within [`HELD`] of them.
+    fn until_the_child_ends(self) {
+        self.stop_at.store(clock::nanos_since_boot() + HELD.as_nanos() as u64, Ordering::Relaxed);
+        for thread in self.threads {
+            assert!(
+                thread.join().expect("a posting thread"),
+                "posted-poll: the child still watched its pipe {HELD:?} after its kill: the posts held it in its wait"
+            );
+        }
+        syscall::close(self.write);
+    }
 }
 
 /// What the roster says about `pid`'s main thread.
@@ -154,6 +254,20 @@ fn child(role: &str) -> ! {
         }
         "poll" => {
             let poller = Poller::new(1);
+            say(role);
+            poller.wait(1, u64::MAX, |_| {});
+        }
+        "posted-poll" => {
+            let Posted(read) = Endowments::get().take(POSTED).expect("the parent endowed a pipe");
+            let poller = Poller::new(Poller::MAX_HANDLES);
+            // As many polls as a poller holds, one handle each: a post fires
+            // them all, and the wait parks only if no post lands while it
+            // looks at every one of them.
+            poller.watch_raw(read, READABLE, 0);
+            for token in 1..u64::from(Poller::MAX_HANDLES) {
+                let dup = syscall::dup(read).expect("another handle to the pipe");
+                poller.watch_raw(dup, READABLE, token);
+            }
             say(role);
             poller.wait(1, u64::MAX, |_| {});
         }
