@@ -23,4 +23,7 @@ kept the same way.
 
 **Exit**: a handle's close answers the polls its own process made through it,
 and no other handle's; a test watches a held child through a duplicate, closes
-the duplicate, and reads `-NotFound` before the child ends.
+the duplicate, and reads `-NotFound` before the child ends. That change
+answers `issues/kernel/a-close-of-one-handle-ends-every-rings-poll-on-its-object.md`
+too, whose first exit, a poll ending only when the last handle to its source
+closes, would keep the very poll this exit ends at its own handle's close.
