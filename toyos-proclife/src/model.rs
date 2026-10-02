@@ -143,6 +143,13 @@ pub struct World {
     moved: BTreeSet<(Pid, Tid)>,
     /// Spawning threads answered a refusal after their handles moved.
     refused_after_move: BTreeSet<(Pid, Tid)>,
+    /// Handles to a process's object: the object, and the process whose table
+    /// holds one.
+    handles: BTreeSet<(Pid, Pid)>,
+    /// Objects whose last handle has gone.
+    retired: BTreeSet<Pid>,
+    /// Objects a handle was minted on after their last had gone.
+    minted_retired: BTreeSet<Pid>,
 }
 
 impl Processes for World {
@@ -193,6 +200,9 @@ impl World {
             inserted_at: Vec::new(),
             moved: BTreeSet::new(),
             refused_after_move: BTreeSet::new(),
+            handles: BTreeSet::new(),
+            retired: BTreeSet::new(),
+            minted_retired: BTreeSet::new(),
         }
     }
 
@@ -231,9 +241,35 @@ impl World {
             panic!("World::land: {place:?} admits no child");
         };
         let pid = admitted.pid();
+        // As a spawn's commit leaves them: its place's handle to it, and its own.
+        if let Some(place) = place {
+            self.mint(pid, place);
+        }
+        self.mint(pid, pid);
         let ((), retire) = tree::land_child(self, admitted, 137, |world, node| world.insert(pid, node));
         assert_eq!(retire, [], "World::land: {place:?} was claimed");
         pid
+    }
+
+    /// `HandleEntry::new`: `holder`'s table takes a handle to `object`.
+    pub fn mint(&mut self, object: Pid, holder: Pid) {
+        if self.retired.contains(&object) {
+            self.minted_retired.insert(object);
+        }
+        self.handles.insert((object, holder));
+    }
+
+    /// `teardown_resources` draining `pid`'s table: an object left with no
+    /// handle is retired.
+    fn close_table(&mut self, pid: Pid) {
+        let closed: Vec<Pid> =
+            self.handles.iter().filter(|&&(_, holder)| holder == pid).map(|&(object, _)| object).collect();
+        for object in closed {
+            self.handles.remove(&(object, pid));
+            if !self.handles.iter().any(|&(held, _)| held == object) {
+                self.retired.insert(object);
+            }
+        }
     }
 
     /// A spawn op's landing, at the end of the hold that made it: records a
@@ -407,6 +443,7 @@ impl World {
             Out::Free { code, mark } => {
                 *self.frees.entry(pid).or_insert(0) += 1;
                 self.mapped.retain(|&(p, _)| p != pid);
+                self.close_table(pid);
                 Out::Mark { code, mark }
             }
             Out::Mark { code, mark } => {
@@ -538,6 +575,11 @@ impl World {
         // L10. Nothing lands unclaimed under a place once its end is claimed.
         for pid in &self.landed_under_claimed {
             out.push(alloc::format!("pid {pid} landed unclaimed under a place whose end was already claimed"));
+        }
+        // L13. No handle is minted on an object whose last one has gone:
+        // `HandleEntry::new` asserts it.
+        for pid in &self.minted_retired {
+            out.push(alloc::format!("pid {pid}: a handle to it was minted after its last one had gone"));
         }
         out
     }

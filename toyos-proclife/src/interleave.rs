@@ -50,10 +50,11 @@ pub enum Op {
     /// return. `by` is the killing thread when the model holds it.
     Kill { pid: Pid, code: i32, pc: u32, retire: Vec<(Pid, Tid)>, owed: Vec<Pid>, by: Option<(Pid, Tid)> },
     /// `loader::spawn` under `place` by `by`'s thread: the admission, the
-    /// whole of a process built with every lock given up, then the move of
-    /// the caller's handles and the landing, whose retires the landing
-    /// answers. A build that `fails` lets the place go instead, and climbs
-    /// when that was the place's last hold.
+    /// whole of a process built with every lock given up, then the commit —
+    /// the caller's handles move, and its handle to the child and the child's
+    /// own are minted — and the landing, whose retires the landing answers.
+    /// A build that `fails` lets the place go instead, and climbs when that
+    /// was the place's last hold. `child` is the process the landing made.
     SpawnUnder {
         place: Pid,
         by: (Pid, Tid),
@@ -62,6 +63,7 @@ pub enum Op {
         admitted: Option<Admitted>,
         retire: Vec<(Pid, Tid)>,
         climb: Option<Climb>,
+        child: Option<Pid>,
     },
     /// `process::spawn_thread`: two lock sections with the whole of a thread
     /// built between them; `block` is the mapped TLS the build carries across.
@@ -89,11 +91,11 @@ impl Op {
     /// A spawn under `place` by `by`'s thread, which is in the kernel until it
     /// returns.
     pub fn spawn_under(place: Pid, by: (Pid, Tid)) -> Self {
-        Op::SpawnUnder { place, by, fails: false, pc: 0, admitted: None, retire: Vec::new(), climb: None }
+        Op::SpawnUnder { place, by, fails: false, pc: 0, admitted: None, retire: Vec::new(), climb: None, child: None }
     }
     /// The same spawn, whose build fails once it is admitted.
     pub fn spawn_under_failing(place: Pid, by: (Pid, Tid)) -> Self {
-        Op::SpawnUnder { place, by, fails: true, pc: 0, admitted: None, retire: Vec::new(), climb: None }
+        Op::SpawnUnder { place, by, fails: true, pc: 0, admitted: None, retire: Vec::new(), climb: None, child: None }
     }
     pub fn spawn(pid: Pid) -> Self {
         Op::Spawn { pid, pc: 0, block: None }
@@ -217,7 +219,7 @@ impl Op {
                     }
                 }
             }
-            Op::SpawnUnder { place, by, fails, pc, admitted, retire, climb } => {
+            Op::SpawnUnder { place, by, fails, pc, admitted, retire, climb, child } => {
                 match *pc {
                     // The admission, under the table lock and before anything is built.
                     0 => match tree::admit_child(world, Some(*place)) {
@@ -242,16 +244,23 @@ impl Op {
                             None => *pc = DONE,
                         }
                     }
-                    // The caller's handles move, and the child lands, in the
-                    // hold that inserts it.
+                    // The commit, then the child lands in the hold that
+                    // inserts it.
                     1 => {
                         world.move_handles(*by);
                         let taken = admitted.take().expect("admitted at the first section");
-                        let child = taken.pid();
+                        let made = taken.pid();
+                        // The mutation this feature stages: the caller's
+                        // handle waits for the spawn to land.
+                        if !cfg!(feature = "mutate-spawner-handle-after-the-landing") {
+                            world.mint(made, by.0);
+                        }
+                        world.mint(made, made);
                         let ((), owed) =
-                            tree::land_child(world, taken, KILLED, |world, node| world.insert(child, node));
-                        world.landed(*place, child);
-                        *retire = owed.into_iter().map(|t| (child, t)).collect();
+                            tree::land_child(world, taken, KILLED, |world, node| world.insert(made, node));
+                        world.landed(*place, made);
+                        *retire = owed.into_iter().map(|t| (made, t)).collect();
+                        *child = Some(made);
                         *pc = 2;
                     }
                     // With the lock given up: the retires the landing answered.
@@ -259,6 +268,12 @@ impl Op {
                         for (victim, thread) in retire.drain(..) {
                             world.post_retire(victim, thread);
                         }
+                        *pc = if cfg!(feature = "mutate-spawner-handle-after-the-landing") { LATE_HANDLE } else { DONE };
+                    }
+                    // The mutation's install, once the spawn has landed and
+                    // its retires are posted.
+                    LATE_HANDLE => {
+                        world.mint(child.expect("landed at the second section"), by.0);
                         *pc = DONE;
                     }
                     // The failed build let its place's last hold go: this
@@ -359,6 +374,8 @@ const POST: u32 = 1;
 const WALK: u32 = 2;
 /// `mutate-kill-waits-for-its-victims`' wait.
 const WAIT: u32 = 3;
+/// `mutate-spawner-handle-after-the-landing`'s install.
+const LATE_HANDLE: u32 = 4;
 
 /// The walk's next claim, under the table lock: one process, its retires and
 /// the children it owes. Under `mutate-walk-in-one-hold`, every process the
@@ -735,9 +752,11 @@ mod tests {
     /// every one.
     ///
     /// Reds under `mutate-place-skips-the-insert-recheck`, where a child lands
-    /// unclaimed under the claimed place and outlives it, and under
+    /// unclaimed under the claimed place and outlives it, under
     /// `mutate-refused-spawn-keeps-the-count`, where the place is never
-    /// published.
+    /// published, and under `mutate-spawner-handle-after-the-landing`, where a
+    /// child claimed as it lands closes its table before its spawner's handle
+    /// is minted.
     #[test]
     fn a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it() {
         let mut world = World::new();

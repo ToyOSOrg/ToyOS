@@ -8,6 +8,10 @@
 //! this process's next spawn, once its child has landed, until the child's
 //! exit is published.
 //!
+//! The same hold is what lets a refused spawn be asked whether it started a
+//! child: one that had landed would have run to its end, and spoken, before
+//! the spawn answered.
+//!
 //! Every wait is unbounded: the runner's deadline is the only clock.
 
 use toyos_abi::syscall::{self, debug_action, SpawnArgs, SyscallError};
@@ -21,6 +25,9 @@ const CODE: i32 = 7;
 fn main() {
     match std::env::args().nth(1).as_deref() {
         Some("exit") => std::process::exit(CODE),
+        Some("speak") => {
+            assert_eq!(syscall::write(RawHandle(1), b"x"), Ok(1), "the child's one byte");
+        }
         Some(other) => panic!("unknown role {other:?}"),
         None => test(),
     }
@@ -35,7 +42,36 @@ fn test() {
         "the child had not ended when its spawn answered, so the kernel held nothing"
     );
     syscall::close(child);
-    println!("spawn_child_ends_first: the spawn answered a child that had already ended");
+    a_spawn_from_a_full_table_starts_no_child();
+    println!("spawn_child_ends_first: the spawn answered a child that had already ended, and a refused one started none");
+}
+
+/// A spawn whose caller's table has no slot for its answer is refused with
+/// nothing of the child started: the pipe its child would have spoken into
+/// ends empty. The mark is left standing, since the spawn never lands.
+fn a_spawn_from_a_full_table_starts_no_child() {
+    let ends = syscall::pipe().expect("a pipe for the child to speak into");
+    let mut filled = Vec::new();
+    let full = loop {
+        match syscall::dup(ends.read) {
+            Ok(handle) => filled.push(handle),
+            Err(refused) => break refused,
+        }
+    };
+    assert_eq!(full, SyscallError::ResourceExhausted, "the table did not fill");
+    hold_the_next_spawn();
+    assert_eq!(
+        spawn("speak", &[[1, ends.write.0]]).err(),
+        Some(SyscallError::ResourceExhausted),
+        "a spawn from a full table was not refused"
+    );
+    for handle in filled {
+        syscall::close(handle);
+    }
+    syscall::close(ends.write);
+    let mut byte = [0u8; 1];
+    assert_eq!(syscall::read(ends.read, &mut byte), Ok(0), "the refused spawn's child started and spoke");
+    syscall::close(ends.read);
 }
 
 fn hold_the_next_spawn() {

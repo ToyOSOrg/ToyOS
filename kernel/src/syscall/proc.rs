@@ -8,7 +8,6 @@
 use alloc::vec::Vec;
 
 use crate::watch;
-use crate::object::{ops, KObjectRef};
 use crate::time::{Deadline, Duration};
 use crate::UserAddr;
 use crate::process;
@@ -43,7 +42,7 @@ pub(super) fn spawn_place(place: u64) -> Result<process::Parent, u64> {
     .map_err(|refused| refused.refuse())
 }
 
-/// Start a program in `cwd` under `parent` and return a handle to it; kill the child if the handle can't be installed.
+/// Start a program in `cwd` under `parent` and return the handle to it the spawn's commit put in the caller's table.
 pub(super) fn sys_spawn(
     args: &[&str],
     pending: crate::loader::PendingHandles,
@@ -52,21 +51,10 @@ pub(super) fn sys_spawn(
     image: Option<alloc::sync::Arc<dyn crate::file_backing::FileBacking>>,
     parent: process::Parent,
 ) -> u64 {
-    // Nothing to clean up yet: spawn's frame owns the child's resources on error.
-    let object = match process::spawn(args, pending, cwd, env, image, parent) {
-        Ok(object) => object,
-        Err(e) => return e.refuse(),
-    };
-    let installed = process::with_process_data(|data| {
-        ops::install(&mut data.handles, KObjectRef::Process(object.clone()))
-    });
-    match installed {
-        Ok(h) => h.0 as u64,
-        Err(e) => {
-            // Unnamed, it can be neither waited on nor killed later, so it is killed here.
-            process::kill_process(&object);
-            e.to_u64()
-        }
+    // Nothing to clean up: spawn's frame owns the child's resources on error.
+    match process::spawn(args, |own| pending.commit(own), cwd, env, image, parent) {
+        Ok((_, handle)) => u64::from(handle.0),
+        Err(e) => e.refuse(),
     }
 }
 

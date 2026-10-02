@@ -28,8 +28,8 @@ use crate::object::{ops, HandleTable, KObjectRef};
 use crate::mm::policy::{CachePolicy, Prot};
 use crate::mm::{PAGE_2M, PAGE_BYTES};
 use crate::process::{
-    Admission, ElfInfo, OwnedAlloc, PageAlloc, PageFaultTrace, PageTables, Parent, Pid,
-    ProcessAccounting, ProcessData, ProcessEntry, ThreadData, ThreadEntry, UserStack,
+    Admission, ElfInfo, Endowments, OwnedAlloc, PageAlloc, PageFaultTrace, PageTables, Parent,
+    Pid, ProcessAccounting, ProcessData, ProcessEntry, ThreadData, ThreadEntry, UserStack,
     PROCESS_TABLE,
 };
 use crate::sync::Lock;
@@ -335,8 +335,10 @@ fn rela_dyn_from_sections(
     }
 }
 
-/// Load a program and place its main thread under `parent`, answering the object
-/// a handle to the new process names.
+/// Load a program and place its main thread under `parent`, answering its pid
+/// and what `commit` left its caller holding of it. `commit` builds the
+/// child's handle table around the child's own object, once nothing is left
+/// to refuse.
 ///
 /// `image` is the program's bytes when the caller read them itself, and then
 /// `argv[0]` is only its name: nothing opens it, and its libraries come from
@@ -346,14 +348,14 @@ fn rela_dyn_from_sections(
 /// `Refusal`, not `-> !`, is the error type: every failure below owns a
 /// partly built process (address space, stack, kernel stack), and nothing
 /// unwinds, so the error must travel out as a value rather than strand it.
-pub fn spawn(
+pub fn spawn<H>(
     argv: &[&str],
-    pending: PendingHandles,
+    commit: impl FnOnce(KObjectRef) -> Result<(HandleTable, Endowments, H), crate::object::Refusal>,
     cwd: String,
     env: Vec<u8>,
     image: Option<Arc<dyn crate::file_backing::FileBacking>>,
     parent: Parent,
-) -> Result<Arc<crate::object::process::ProcessObject>, crate::object::Refusal> {
+) -> Result<(Pid, H), crate::object::Refusal> {
     // An argv of only separators survives sys_spawn's split as an empty slice.
     let Some(&path) = argv.first() else {
         return Err(SyscallError::InvalidArgument.into());
@@ -366,7 +368,7 @@ pub fn spawn(
     let backing: Arc<dyn crate::file_backing::FileBacking> = match image {
         Some(image) => image,
         None => {
-            // Scoped, not held across the match: dropping `pending` on any `return` here takes the VFS lock.
+            // Scoped, not held across the match: dropping `commit` on any `return` here takes the VFS lock.
             let opened = vfs::lock().open_backing(path);
             match opened {
                 Ok(b) => b,
@@ -590,7 +592,7 @@ pub fn spawn(
     let object = crate::object::process::ProcessObject::new(pid);
     // The point of no return: every failure above answers the caller with its
     // table untouched.
-    let (handles, endowments) = pending.commit(KObjectRef::Process(Arc::clone(&object)))?;
+    let (handles, endowments, held) = commit(KObjectRef::Process(Arc::clone(&object)))?;
     let proc_data = Arc::new(Lock::new(ProcessData {
         handles,
         cwd,
@@ -680,7 +682,7 @@ pub fn spawn(
         (t1 - t0) / 1_000_000, (t2 - t1) / 1_000_000, (t_deps - t2) / 1_000_000,
         (t_tls - t_deps) / 1_000_000, (t3 - t0) / 1_000_000);
 
-    Ok(object)
+    Ok((pid, held))
 }
 
 /// The libraries an executable's `DT_NEEDED` entries name, and the paths they were found at.
@@ -888,18 +890,20 @@ pub fn spawn_init() -> Pid {
         .install(crate::object::HandleEntry::new(cap, rights))
         .expect("spawn_init: an empty table refused the system capability");
     let label = toyos_abi::syscall::SYSCAP_LABEL;
-    let pending = PendingHandles::Ready {
-        table: handles,
-        entries: alloc::vec![toyos_abi::syscall::EndowEntry {
-            label_off: 0,
-            label_len: label.len() as u32,
-            handle: cap_handle,
-            _pad: 0,
-        }],
-        labels: label.as_bytes().to_vec(),
+    let mut entries = alloc::vec![toyos_abi::syscall::EndowEntry {
+        label_off: 0,
+        label_len: label.len() as u32,
+        handle: cap_handle,
+        _pad: 0,
+    }];
+    let mut labels = label.as_bytes().to_vec();
+    // Built by the kernel and owing nobody anything: no table but init's own holds it.
+    let commit = |own| {
+        start::endow_self(&mut handles, &mut entries, &mut labels, own);
+        Ok((handles, Endowments::new(entries, labels), ()))
     };
-    match spawn(&[INIT_PATH], pending, String::from("/"), Vec::new(), None, Parent::Root) {
-        Ok(object) => object.pid(),
+    match spawn(&[INIT_PATH], commit, String::from("/"), Vec::new(), None, Parent::Root) {
+        Ok((pid, ())) => pid,
         Err(crate::object::Refusal::Error(e)) => panic!("spawn_init: failed to spawn: {e:?}"),
         Err(crate::object::Refusal::Handle(e)) => panic!("spawn_init: {e}"),
     }

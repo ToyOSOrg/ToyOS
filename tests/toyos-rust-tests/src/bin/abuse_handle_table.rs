@@ -17,6 +17,10 @@
 //! each has an arm here and the last arm is what says the machine survived
 //! them.
 //!
+//! **A spawn's answer is an insert into its caller's table**, whose room is
+//! checked before the spawn's endowments move: at the cap the spawn is
+//! refused with every handle it named still the caller's.
+//!
 //! **An endowment vector is one entry and one label short of a table**, which
 //! the kernel's own `self` fills. So a caller's entry labelled `self` is
 //! refused before anything moves, and so is a vector of `MAX_ENDOWMENTS`
@@ -153,6 +157,13 @@ fn main() {
         u32::from(n) <= MAX_HANDLES + 16,
         "handle table reached {n} slots, past the {MAX_HANDLES} cap"
     );
+
+    // The handle this names is closed with the rest below, which ends this
+    // process if the refused spawn moved it.
+    let last = *filled.last().expect("the fill installed a handle");
+    let entry = EndowEntry { label_off: 0, label_len: LABELS.len() as u32, handle: last, _pad: 0 };
+    let err = spawn_endowed(&[entry], LABELS).expect_err("a spawn from a full table must be refused");
+    assert_eq!(err, SyscallError::ResourceExhausted, "wrong error for a spawn from a full table");
 
     // The cap is a live limit, not a latched failure.
     for handle in filled {

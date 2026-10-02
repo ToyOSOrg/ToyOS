@@ -941,7 +941,9 @@ pub fn get_env(buf: &mut [u8]) -> usize {
 /// Answers a `Process` handle carrying `WAIT|MANAGE|READ|DUP|TRANSFER`. A
 /// caller that wants nothing to do with the child closes it; a caller that
 /// wants to hand it on transfers it. There is no pid-addressed way back to a
-/// process, so this handle is the whole of what a spawn confers.
+/// process, so this handle is the whole of what a spawn confers. Its slot is
+/// taken before an endowment moves: a caller whose table has none is refused
+/// `ResourceExhausted` with its table as it was.
 ///
 /// # Safety
 /// The raw pointer fields in `SpawnArgs` must point to valid memory.
