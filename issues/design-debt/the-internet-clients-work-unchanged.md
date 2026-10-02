@@ -37,7 +37,7 @@ netd, `toyos::net` and std's ToyOS networking in the `rust/` fork.
    untried: no build compiles it. `rustls-rustcrypto` is still named by
    doom's build script, which installs it on the host, and by a line the cut
    left in `tests/toyos-rust-tests`
-   (`issues/build/the-guest-test-crate-keeps-the-cut-https-tests-dependencies.md`).
+   (`issues/build/the-guest-test-crate-depends-on-three-crates-no-test-uses.md`).
    Open: what doom's build script installs instead.
    **Exit**: `https_tls13` is a `METAL` row: on the T14's I219 an unmodified
    `ureq` and `rustls` client on the `ring` provider fetches over TLS 1.3
