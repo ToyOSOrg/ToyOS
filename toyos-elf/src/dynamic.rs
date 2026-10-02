@@ -5,8 +5,9 @@
 //! and the loader has to tell "the file did not say" from "the file said
 //! zero", because those two get different treatment at every use site.
 
+use crate::gnu_hash::GnuHash;
 use crate::layout::{Extent, ImageRange};
-use crate::{read, Error};
+use crate::{read, sym, Error};
 
 /// A table named by a (location, size) pair of tags.
 ///
@@ -83,6 +84,22 @@ impl Dynamic {
     /// The `DT_STRTAB`/`DT_STRSZ` pair, when the file names both.
     pub fn strtab_table(&self) -> Option<Table> {
         Table::from_tags(self.strtab, self.strsz)
+    }
+
+    /// `.dynsym`'s entry count where no section header says it: what the
+    /// `.gnu.hash` table describes, `gnu_hash` being its bytes from
+    /// `DT_GNU_HASH` on, or else the gap from `DT_SYMTAB` to `DT_STRTAB`,
+    /// adjacent in every layout a linker makes. A `.gnu.hash` that describes
+    /// no count is `Err`, carrying the gap.
+    pub fn sym_count(&self, gnu_hash: Option<&[u8]>) -> Result<usize, usize> {
+        let gap = match (self.symtab, self.strtab) {
+            (Some(symtab), Some(strtab)) if strtab > symtab => ((strtab - symtab) / sym::ENTRY_SIZE as u64) as usize,
+            _ => 0,
+        };
+        match gnu_hash {
+            None => Ok(gap),
+            Some(table) => GnuHash::parse(table).and_then(|h| h.sym_count()).ok_or(gap),
+        }
     }
 
     /// `DT_NEEDED` offsets into the string table, in the order they appear.
