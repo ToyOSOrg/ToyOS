@@ -60,14 +60,12 @@ fn a_spawn_from_a_full_table_starts_no_child() {
     };
     assert_eq!(full, SyscallError::ResourceExhausted, "the table did not fill");
     hold_the_next_spawn();
-    assert_eq!(
-        spawn("speak", &[[1, ends.write.0]]).err(),
-        Some(SyscallError::ResourceExhausted),
-        "a spawn from a full table was not refused"
-    );
+    let spawned = spawn("speak", &[[1, ends.write.0]]);
     for handle in filled {
         syscall::close(handle);
     }
+    // Judged once the table has room again: a panic at the cap aborts with no report.
+    assert_eq!(spawned, Err(SyscallError::ResourceExhausted), "a spawn from a full table was not refused");
     syscall::close(ends.write);
     let mut byte = [0u8; 1];
     assert_eq!(syscall::read(ends.read, &mut byte), Ok(0), "the refused spawn's child started and spoke");

@@ -158,17 +158,18 @@ fn main() {
         "handle table reached {n} slots, past the {MAX_HANDLES} cap"
     );
 
-    // The handle this names is closed with the rest below, which ends this
-    // process if the refused spawn moved it.
-    let last = *filled.last().expect("the fill installed a handle");
+    let last = filled.pop().expect("the fill installed a handle");
     let entry = EndowEntry { label_off: 0, label_len: LABELS.len() as u32, handle: last, _pad: 0 };
-    let err = spawn_endowed(&[entry], LABELS).expect_err("a spawn from a full table must be refused");
-    assert_eq!(err, SyscallError::ResourceExhausted, "wrong error for a spawn from a full table");
+    let spawned = spawn_endowed(&[entry], LABELS);
 
     // The cap is a live limit, not a latched failure.
     for handle in filled {
         syscall::close(handle);
     }
+    // Judged once the table has room again: a panic at the cap aborts with no report.
+    assert_eq!(spawned, Err(SyscallError::ResourceExhausted), "a spawn from a full table was not refused");
+    // Still this process's: the close ends it if the refused spawn moved it.
+    syscall::close(last);
     let reused = syscall::dup2(RawHandle(1), 3)
         .expect("dup2 must work again after closing handles");
     syscall::close(reused);
