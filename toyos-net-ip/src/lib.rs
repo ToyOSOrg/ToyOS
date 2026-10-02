@@ -190,9 +190,11 @@ pub enum Delivery<'a> {
     Error(TransportError),
 }
 
+/// The transport whose datagram an error quotes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Transport {
-    Tcp,
+    /// The quoted TCP sequence number with it: a quote too short to carry one is refused.
+    Tcp { sequence: u32 },
     Udp,
 }
 
@@ -212,8 +214,6 @@ pub struct TransportError {
     pub transport: Transport,
     /// The quoted datagram's 4-tuple: ours as its source.
     pub flow: Flow,
-    /// The quoted TCP sequence number.
-    pub sequence: Option<u32>,
     pub kind: ErrorKind,
     /// The ICMP message's own source.
     pub reporter: Ipv4Addr,
@@ -284,6 +284,12 @@ pub enum Event {
     Resolved { iface: IfIndex, next_hop: Ipv4Addr },
     /// A next hop failed resolution: flows waiting on it are told "host unreachable".
     Failed { iface: IfIndex, next_hop: Ipv4Addr },
+    /// A failed next hop's entry left FAILED: its hold-down ended, it was evicted, or the host
+    /// announced itself (§6.6). A flow told "host unreachable" may ask again.
+    Cleared { iface: IfIndex, next_hop: Ipv4Addr },
+    /// A neighbour table that refused a send for want of room can take an entry (§6.8): a flow
+    /// told "host unreachable" for it may ask again.
+    Room { iface: IfIndex },
     /// A UDP datagram [ip] took could not reach its next hop.
     Unreachable(Flow),
 }
@@ -342,6 +348,7 @@ impl Ip {
             gateways: Vec::new(),
             active: None,
             neighbours: BTreeMap::new(),
+            full: false,
             held: 0,
             reachable,
             reachable_drawn: now,

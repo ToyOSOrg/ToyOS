@@ -295,7 +295,7 @@ impl H {
     pub fn fixture_i_with(addr: Ipv4Addr, m: MacAddr) -> Self {
         let mut h = Self::raw_i();
         let setup = Instant::from_millis(5_000);
-        let _ = h.ip.resolve(setup, h.if0, addr);
+        let _ = h.ip.resolve(setup, h.if0, addr, A);
         h.ip.transmit(setup, usize::MAX, |_, _| {});
         let reply = eth(MAC_A, m, 0x0806, &arp_packet(2, m, addr, MAC_A, A));
         let _ = h.ip.receive(setup, h.if0, &reply);
@@ -309,7 +309,7 @@ impl H {
     /// Resolves `addr` on if0 by a request and its reply, now.
     pub fn reach(&mut self, addr: Ipv4Addr, m: MacAddr) {
         let now = self.clock();
-        let _ = self.ip.resolve(now, self.if0, addr);
+        let _ = self.ip.resolve(now, self.if0, addr, A);
         self.ip.transmit(now, usize::MAX, |_, _| {});
         self.reply_from(addr, m);
         self.ip.transmit(now, usize::MAX, |_, _| {});
@@ -780,7 +780,7 @@ impl H {
         let mut h = Self { ip, if0, now: 0, events: Vec::new(), counters: Vec::new(), wire: std::collections::BTreeMap::default() };
         h.assign(if0, B, 24, 0);
         let setup = Instant::from_millis(5_000);
-        let _ = h.ip.resolve(setup, if0, A);
+        let _ = h.ip.resolve(setup, if0, A, B);
         h.ip.transmit(setup, usize::MAX, |_, _| {});
         let _ = h.ip.receive(setup, if0, &eth(MAC_B, MAC_A, 0x0806, &arp_packet(2, MAC_A, A, MAC_B, B)));
         h.settle();
