@@ -242,7 +242,10 @@ Host: `toyos-net-tcp`, `toyos-dns`, `toyos-mdns`, `toyos-swap`, `toyos-inspect`,
   - an `env` request is answered with a failure, never left unanswered;
   - a program whose connection goes is ended: no `spin` left running for the next exec to list.
 - metal `https_tls13` (and `https_tls13_e1000e`, the same fetch on the 82574): ureq and rustls
-  fetch over TLS 1.3 on the I219.
+  fetch over TLS 1.3 on the I219. Stage 3 of
+  `issues/design-debt/the-internet-clients-work-unchanged.md` owns this row and deletes this
+  line: it comes back there on the `ring` provider, not on the `rustls-rustcrypto` its program
+  and judge installed on `main` before the cut.
 - metal `sshd_files`: sftp moves files byte for byte.
 - unrepresentable `netd_seeds_its_stack`: the stack cannot be built without the kernel's seed.
 
