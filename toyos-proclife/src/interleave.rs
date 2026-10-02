@@ -78,10 +78,6 @@ pub enum Op {
     /// A close that finds no handle is its caller's own end, which
     /// [`Op::Exit`] scripts, and does nothing here.
     Close { by: (Pid, Tid), object: Pid, pc: u32 },
-    /// `OP_WATCH` by `by`'s thread on its process's handle to `object`, and
-    /// the `inbox_submit` that waits on it: the poll registered on the
-    /// object's watch, then the look the registration owes it.
-    Watch { by: (Pid, Tid), object: Pid, pc: u32 },
     /// The idle loop's `reap_finished`.
     IdlePass { pc: u32 },
 }
@@ -119,9 +115,6 @@ impl Op {
     pub fn close(by: (Pid, Tid), object: Pid) -> Self {
         Op::Close { by, object, pc: 0 }
     }
-    pub fn watch(by: (Pid, Tid), object: Pid) -> Self {
-        Op::Watch { by, object, pc: 0 }
-    }
     pub fn idle_pass() -> Self {
         Op::IdlePass { pc: 0 }
     }
@@ -132,7 +125,7 @@ impl Op {
             Op::Exit { pid, tid, .. } | Op::ThreadExit { pid, tid, .. } => Some((pid, tid)),
             Op::Join { pid, waiter, .. } => Some((pid, waiter)),
             Op::Kill { by, .. } => by,
-            Op::SpawnUnder { by, .. } | Op::Close { by, .. } | Op::Watch { by, .. } => Some(by),
+            Op::SpawnUnder { by, .. } | Op::Close { by, .. } => Some(by),
             Op::Spawn { .. } | Op::IdlePass { .. } => None,
         }
     }
@@ -146,7 +139,6 @@ impl Op {
             | Op::ThreadExit { pc, .. }
             | Op::Join { pc, .. }
             | Op::Close { pc, .. }
-            | Op::Watch { pc, .. }
             | Op::IdlePass { pc, .. } => *pc == DONE,
         }
     }
@@ -169,7 +161,6 @@ impl Op {
             Op::ThreadExit { .. } => "thread_exit",
             Op::Join { .. } => "thread_join",
             Op::Close { .. } => "close",
-            Op::Watch { .. } => "watch",
             Op::IdlePass { .. } => "idle pass",
         }
     }
@@ -391,29 +382,9 @@ impl Op {
             }
             Op::Close { by, object, pc } => {
                 world.close(*object, by.0);
-                // The mutation this feature stages: the close ends every poll
-                // on the object's watch, another handle's included.
-                if cfg!(feature = "mutate-close-ends-a-process-watch") {
-                    world.post(Watch::Process(*object));
-                }
                 world.leave_kernel(*by);
                 *pc = DONE;
             }
-            Op::Watch { by, object, pc } => match *pc {
-                0 => {
-                    world.arm(Watch::Process(*object), *by);
-                    *pc = 1;
-                }
-                // `inbox::arm` reads the object again once the poll is
-                // registered, so an end published in the window answers it.
-                _ => {
-                    if world.published(*object).is_some() {
-                        world.post(Watch::Process(*object));
-                    }
-                    world.leave_kernel(*by);
-                    *pc = DONE;
-                }
-            },
             Op::IdlePass { pc } => {
                 for pid in reap::finished_pids(world) {
                     world.reap(pid);
@@ -866,25 +837,6 @@ mod tests {
         let made = next.pid();
         holds(&world, vec![Op::spawn_under(place, own), Op::close(sibling, made)]);
         holds(&world, vec![Op::kill(place, KILLED), Op::spawn_under(place, own), Op::close(sibling, made)]);
-    }
-
-    /// **A watch on a child, a close of another handle to it, and its end**,
-    /// every ordering: the child closes its own `self` while its parent
-    /// registers a watch on it and a kill ends it. The child's published end
-    /// answers the watch, registered before it or after, and nothing earlier
-    /// does.
-    ///
-    /// Reds under `mutate-close-ends-a-process-watch`, where the child's close
-    /// answers its parent's watch with the child still running.
-    #[test]
-    fn a_watch_on_a_process_is_answered_by_its_end_and_by_no_close() {
-        let mut world = World::new();
-        let init = world.spawn_process();
-        let parent = world.spawn_child(init);
-        let child = world.spawn_child(parent);
-        let watcher = (parent, world.main_tid(parent));
-        let own = (child, world.main_tid(child));
-        holds(&world, vec![Op::watch(watcher, child), Op::close(own, child), Op::kill(child, KILLED)]);
     }
 
     /// An exit takes a subtree two deep below it, and each end is published

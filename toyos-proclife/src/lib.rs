@@ -117,8 +117,7 @@ impl ThreadLocation {
 pub enum Watch {
     /// One thread's exit. `SYS_THREAD_JOIN` arms here.
     Thread(Pid, Tid),
-    /// A process's exit. `SYS_PROCESS_WAIT` arms here, and an `OP_WATCH` on a
-    /// handle to it registers here.
+    /// A process's exit. `SYS_PROCESS_WAIT` arms here.
     Process(Pid),
 }
 

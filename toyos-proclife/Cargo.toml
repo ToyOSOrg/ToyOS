@@ -101,13 +101,6 @@ mutate-spawner-handle-after-the-landing = []
 # `interleave::tests::a_sibling_closing_a_spawns_handle_before_the_spawn_returns`
 # must red under this.
 mutate-spawner-handle-before-the-childs-own = []
-# The model's close ends every poll on the watch of the process its handle
-# named, as a kernel whose `ops::close_ends_polls` answered `true` for a
-# process would: one holder letting a handle go answers every other holder's
-# watch, with the process still running.
-# `interleave::tests::a_watch_on_a_process_is_answered_by_its_end_and_by_no_close`
-# must red under this.
-mutate-close-ends-a-process-watch = []
 
 [dependencies]
 toyos-abi = { path = "../toyos-abi" }
