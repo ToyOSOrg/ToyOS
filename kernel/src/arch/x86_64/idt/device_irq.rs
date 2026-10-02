@@ -83,7 +83,7 @@ pub(super) extern "sysv64" fn windows_entered() {
 #[cfg(feature = "mask-windows")]
 pub(super) extern "sysv64" fn windows_leaving(cs: u64) {
     crate::windows::preempt_lowering();
-    if cs & 3 == 0 {
+    if !toyos_userbound::Ring::of_cs(cs).is_user() {
         crate::windows::irqs_unmasking();
     }
 }

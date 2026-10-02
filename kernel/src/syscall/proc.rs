@@ -26,13 +26,8 @@ pub(super) fn sys_thread_exit(code: i32) -> u64 {
 }
 
 pub(super) fn sys_exit(code: i32) -> u64 {
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::windows_staged() {
-        #[cfg(feature = "mask-windows")]
-        crate::windows::stage_once();
-        #[cfg(not(feature = "mask-windows"))]
-        panic!("windows-staged: armed on a kernel without `mask-windows`, which has no window to mark");
-    }
+    #[cfg(feature = "mask-windows")]
+    crate::windows::hold_once();
     process::exit(code);
 }
 

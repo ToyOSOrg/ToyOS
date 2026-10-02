@@ -132,64 +132,32 @@ impl Windows {
     }
 }
 
-/// The head of `windows-staged`'s lines: `windows: staged cpuK open` where it
-/// marks cpuK's open windows, and `windows: staged cpuK closed
-/// irqs_off=<bool> preempt_off=<bool>` in a report of cpuK after a marked
-/// window closed.
-pub const STAGED: &str = "windows: staged cpu";
+/// The line a `mask-windows` kernel prints once a boot, where it held both of
+/// cpuK's windows for a span read off that CPU's counter
+/// (`kernel/src/windows.rs`): `windows: held cpuK ns=<span>`.
+const HELD: &str = "windows: held cpu";
 
-enum Staged {
-    Open(u32),
-    Closed { cpu: u32, irqs_off: bool, preempt_off: bool },
-}
-
-fn staged(line: &str) -> Option<Result<Staged, String>> {
-    let rest = line.split(STAGED).nth(1)?;
-    let flag = |field: &str, name: &str| field.strip_prefix(name)?.parse::<bool>().ok();
+fn held(line: &str) -> Option<Result<(u32, u64), String>> {
+    let rest = line.split(HELD).nth(1)?;
     let parsed = match rest.split_whitespace().collect::<Vec<_>>().as_slice() {
-        [cpu, "open"] => cpu.parse().ok().map(Staged::Open),
-        [cpu, "closed", irqs, preempt] => (|| {
-            Some(Staged::Closed {
-                cpu: cpu.parse().ok()?,
-                irqs_off: flag(irqs, "irqs_off=")?,
-                preempt_off: flag(preempt, "preempt_off=")?,
-            })
-        })(),
+        [cpu, ns] => cpu.parse().ok().zip(ns.strip_prefix("ns=").and_then(|ns| ns.parse().ok())),
         _ => None,
     };
-    Some(parsed.ok_or_else(|| format!("unreadable staged line {rest:?}")))
+    Some(parsed.ok_or_else(|| format!("unreadable held line {rest:?}")))
 }
 
 /// The judge of every `mask-windows` boot, and it judges no duration: each
-/// census line has its CPU's windows line beside it, each CPU closed both
-/// kinds of window at some point of the boot, and a stage's CPU says each of
-/// its marked windows closed exactly once, in the reports after the stage.
-/// Answers each CPU's longest windows over the whole capture.
+/// census line has its CPU's windows line beside it, and each CPU closed both
+/// kinds of window at some point of the boot. Answers each CPU's longest
+/// windows over the whole capture.
 pub fn windows(capture: &str) -> Result<BTreeMap<u32, Windows>, String> {
     let mut censuses: BTreeMap<u32, usize> = BTreeMap::new();
     let mut reports: Vec<Windows> = Vec::new();
-    // The staged CPU, and how many of its marked windows of each kind closed.
-    let mut stage: Option<(u32, u32, u32)> = None;
     for line in capture.lines() {
         if let Some(census) = Census::parse(line) {
             *censuses.entry(census.map_err(|why| format!("{why}\nline: {line}"))?.cpu).or_default() += 1;
         } else if let Some(report) = Windows::parse(line) {
             reports.push(report.map_err(|why| format!("{why}\nline: {line}"))?);
-        } else if let Some(said) = staged(line) {
-            match said.map_err(|why| format!("{why}\nline: {line}"))? {
-                Staged::Open(cpu) => {
-                    if stage.replace((cpu, 0, 0)).is_some() {
-                        return Err(format!("a second stage, and the kernel stages once a boot\nline: {line}"));
-                    }
-                }
-                Staged::Closed { cpu, irqs_off, preempt_off } => match &mut stage {
-                    Some((staged, irqs, preempt)) if *staged == cpu => {
-                        *irqs += u32::from(irqs_off);
-                        *preempt += u32::from(preempt_off);
-                    }
-                    _ => return Err(format!("cpu{cpu} closed a window no stage before it marked\nline: {line}")),
-                },
-            }
         }
     }
     if censuses.is_empty() {
@@ -220,15 +188,98 @@ pub fn windows(capture: &str) -> Result<BTreeMap<u32, Windows>, String> {
             ));
         }
     }
-    if let Some((cpu, irqs, preempt)) = stage {
-        if (irqs, preempt) != (1, 1) {
-            return Err(format!(
-                "cpu{cpu}'s reports after its stage say its marked interrupts-off window closed \
-                 {irqs} time(s) and its marked preemption-off window {preempt}; each closes once"
-            ));
+    Ok(longest)
+}
+
+/// What a machine's boot read, each the longest interrupts-off and
+/// preemption-off window in nanoseconds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Measured {
+    /// What the holding CPU reported between its hold and the load's start.
+    pub held: (u64, u64),
+    /// What any CPU closed under the load.
+    pub load: (u64, u64),
+}
+
+/// The durations a machine's boot is judged by, read from the reports of
+/// `cpus` CPUs around the record `load_exited` heads, the load's exit.
+///
+/// **The load's reading is its own.** A report carries what closed since the
+/// report before, and the load's exit prints one before it tears the process
+/// down. So the reading is that report and the next, which carries the
+/// teardown, and it is refused unless a report before them emptied every CPU's
+/// record as the load started.
+///
+/// **A window of known length is read back.** The kernel held both of one
+/// CPU's windows for the span its held line states: that CPU's reports from
+/// there to the load's start carry a window of each kind no shorter.
+pub fn windows_under(capture: &str, cpus: u32, load_exited: &str) -> Result<Measured, String> {
+    let mut reports: Vec<(usize, Vec<Windows>)> = Vec::new();
+    let mut open: Vec<Windows> = Vec::new();
+    let mut hold: Option<(usize, u32, u64)> = None;
+    let mut exited: Option<usize> = None;
+    for (at, line) in capture.lines().enumerate() {
+        if let Some(report) = Windows::parse(line) {
+            let report = report.map_err(|why| format!("{why}\nline: {line}"))?;
+            if report.cpu as usize != open.len() {
+                return Err(format!("a report of {cpus} CPUs names cpu{} at place {}\nline: {line}", report.cpu, open.len()));
+            }
+            open.push(report);
+            if open.len() == cpus as usize {
+                reports.push((at, std::mem::take(&mut open)));
+            }
+        } else if let Some(said) = held(line) {
+            let (cpu, ns) = said.map_err(|why| format!("{why}\nline: {line}"))?;
+            if hold.replace((at, cpu, ns)).is_some() {
+                return Err(format!("a second hold, and the kernel holds once a boot\nline: {line}"));
+            }
+        } else if exited.is_none() && line.contains(load_exited) {
+            exited = Some(at);
         }
     }
-    Ok(longest)
+    let exited = exited.ok_or_else(|| format!("no `{load_exited}` record: the load never ended"))?;
+    let own = reports
+        .iter()
+        .rposition(|(at, _)| *at < exited)
+        .ok_or_else(|| format!("no report before `{load_exited}`: the load's exit printed none"))?;
+    if own == 0 {
+        return Err("the load's report is the boot's first: none was taken as the load started, so it \
+                    carries every window since each CPU joined"
+            .to_string());
+    }
+    let after = reports.get(own + 1).ok_or_else(|| {
+        format!("no report after `{load_exited}`: what the load's own exit closed was never read")
+    })?;
+    let longest = |lines: &mut dyn Iterator<Item = &Windows>| {
+        lines.fold((0, 0), |(irqs, preempt), w| (irqs.max(w.irqs_off_ns), preempt.max(w.preempt_off_ns)))
+    };
+
+    let (hold_at, cpu, ns) =
+        hold.ok_or_else(|| format!("no `{HELD}` line: this kernel held no window of known length"))?;
+    if ns < toyos_sched::windows::HELD_NS {
+        return Err(format!("cpu{cpu} held its windows for {ns} ns, and the kernel owes {}", toyos_sched::windows::HELD_NS));
+    }
+    let mut read_back = reports[..own]
+        .iter()
+        .filter(|(at, _)| *at > hold_at)
+        .filter_map(|(_, report)| report.get(cpu as usize))
+        .peekable();
+    if read_back.peek().is_none() {
+        return Err(format!(
+            "cpu{cpu} reported nothing between its hold and the load's own report, so the load's \
+             reading carries the hold"
+        ));
+    }
+    let held = longest(&mut read_back);
+    if held.0 < ns || held.1 < ns {
+        return Err(format!(
+            "cpu{cpu} held both windows for {ns} ns, and its reports before the load's read back \
+             irqs_off_ns={} preempt_off_ns={}: a window was reported shorter than it was held",
+            held.0, held.1
+        ));
+    }
+    let load = longest(&mut reports[own].1.iter().chain(&after.1));
+    Ok(Measured { held, load })
 }
 
 /// The newest census each CPU of each guest printed, keyed by the boot's own

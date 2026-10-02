@@ -47,10 +47,6 @@ const AARCH64_INSTRUMENTS: &str = "debug-wait,sched-check,sched-tripwire,heap-tr
                                    switch-witness-mutate-frame,switch-witness-mutate-rsp,\
                                    mask-windows";
 
-/// `build::MASK_WINDOWS_KERNEL`, the one build whose arms need both the
-/// windows and the actuators.
-const MASK_WINDOWS_KERNEL: &str = "boot-actuators,mask-windows,test-actuators";
-
 const UNCONTROLLED: &[&str] = &["toyos-pcid/counting-allocator", "toyos-sched/tripwire"];
 
 /// Every model's negative control and [`UNCONTROLLED`], as one `--features` list.
@@ -102,11 +98,6 @@ const SHAPES: &[Shape] = &[
     },
     Shape {
         dir: "kernel",
-        before: &["--target", Arch::X86_64.kernel(), "--features", MASK_WINDOWS_KERNEL],
-        after: &["$ADOPTED", "-D", "warnings"],
-    },
-    Shape {
-        dir: "kernel",
         before: &["--target", Arch::X86_64.kernel(), "--features", "heap-band-notail,heap-lockspin"],
         after: &["$ADOPTED", "-D", "warnings"],
     },
@@ -133,11 +124,6 @@ const SHAPES: &[Shape] = &[
     Shape {
         dir: "kernel",
         before: &["--target", Arch::Aarch64.kernel(), "--features", AARCH64_INSTRUMENTS],
-        after: &["$ADOPTED", "-D", "warnings"],
-    },
-    Shape {
-        dir: "kernel",
-        before: &["--target", Arch::Aarch64.kernel(), "--features", MASK_WINDOWS_KERNEL],
         after: &["$ADOPTED", "-D", "warnings"],
     },
     Shape {

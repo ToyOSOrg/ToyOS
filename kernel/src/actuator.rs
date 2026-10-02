@@ -70,10 +70,6 @@ actuators! {
     /// `usb_reset_records_the_phase_it_cut`.
     usb_reset_under_load = "usb-reset-under-load";
 
-    /// Mark the windows open at the first `SYS_EXIT`, whose entry opened both
-    /// of `mask-windows`' kinds, and say so; judged by `virt_mask_windows`.
-    windows_staged = "windows-staged";
-
     /// Make one CPU ignore a kick.
     dump_deaf_cpu = "dump-deaf-cpu";
 

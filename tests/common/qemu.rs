@@ -156,8 +156,7 @@ pub fn boot_census() -> (u32, u32, Vec<String>) {
 /// to pay a kernel build per suite run forever.
 /// [`toyos_build::build::MASK_WINDOWS_KERNEL`] made it: its hooks sit on every
 /// entry and masking primitive, where a parameter would be a branch on the path
-/// they measure, and it carries the test kernel's actuators so a stage can mark
-/// its windows. Interactive debug mode is separate: it builds
+/// they measure. Interactive debug mode is separate: it builds
 /// [`toyos_build::build::DEBUG_KERNEL_BUILD`] and returns before the suite.
 pub const DECLARED_KERNEL_BUILDS: [&str; 3] =
     toyos_build::build::TEST_SUITE_KERNEL_BUILDS;
@@ -1072,24 +1071,20 @@ pub struct QemuInstance {
 /// Which of [`DECLARED_KERNEL_BUILDS`] this boot wants.
 ///
 /// **A parameter never decides a build.** Every actuator lives in the one test
-/// kernel, so asking for one selects that kernel and nothing more; a build
-/// asked for by name arms one only if it carries them all too.
+/// kernel, so asking for one selects that kernel and nothing more; the third
+/// build is asked for by name and by one test.
 fn kernel_of(options: &BootOptions) -> Vec<&'static str> {
     if options.kernel_params.is_empty() {
         return options.kernel_features.to_vec();
     }
-    if options.kernel_features.is_empty() {
-        return toyos_build::build::TEST_KERNEL.to_vec();
-    }
     assert!(
-        toyos_build::build::carries_the_actuators(options.kernel_features),
-        "a boot asking to arm {:?} asks for the kernel build {:?}, which does not carry {:?}; \
-         an actuator is a parameter and the test kernel carries all of them",
+        options.kernel_features.is_empty(),
+        "a boot asking to arm {:?} also asks for the kernel build {:?}; an actuator is a \
+         parameter and the test kernel carries all of them",
         options.kernel_params,
         options.kernel_features,
-        toyos_build::build::TEST_KERNEL,
     );
-    options.kernel_features.to_vec()
+    toyos_build::build::TEST_KERNEL.to_vec()
 }
 
 // Eight, because an image is its architecture as much as its files and its kernel.

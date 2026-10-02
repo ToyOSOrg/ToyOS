@@ -14,10 +14,6 @@
 //! by one and [`Windows::lowering`] precedes every lowering by one; each acts
 //! only on a crossing of zero.
 //!
-//! **A mark names a window without judging its length**: [`Windows::mark`]
-//! marks the window of each kind open now, the mark rides to that window's
-//! close, and [`Windows::take_marked`] answers each marked close once.
-//!
 //! **Every transition is checked against the state it finds**, and one that
 //! could not have followed it is [`Unseen`]: a transition before it that
 //! nothing reported. The record is written by its CPU alone and a take
@@ -26,18 +22,16 @@
 
 use core::fmt;
 
-use crate::sync::{AtomicU32, AtomicU64, Ordering};
+use crate::sync::{AtomicU64, Ordering};
 
 /// A CPU that has not joined the scheduler, or that stopped being tracked:
 /// every transition is accepted and records nothing.
 const UNTRACKED: u64 = u64::MAX;
 
-/// [`Windows::marks`]: the open window of each kind carries a mark, and a
-/// marked window of each kind closed since the last [`Windows::take_marked`].
-const IRQS_MARKED: u32 = 1;
-const PREEMPT_MARKED: u32 = 2;
-const IRQS_MARK_CLOSED: u32 = 4;
-const PREEMPT_MARK_CLOSED: u32 = 8;
+/// How long the kernel holds both windows, once a boot, for a report to read
+/// back: more than twice any window a boot closes by itself, so no other
+/// window stands in for it, whole or halved.
+pub const HELD_NS: u64 = 50_000_000;
 
 /// One CPU's windows. The counter is never zero once firmware has run, so a
 /// stamp of zero is no open window.
@@ -49,8 +43,6 @@ pub struct Windows {
     preempt_off: AtomicU64,
     irqs_longest: AtomicU64,
     preempt_longest: AtomicU64,
-    /// Its CPU sets and moves the `*_MARKED` bits; a take clears the `*_MARK_CLOSED` ones.
-    marks: AtomicU32,
 }
 
 /// A transition the record says could not have happened, named by the one
@@ -59,12 +51,11 @@ pub struct Windows {
 pub enum Unseen {
     /// Masked, with a window open.
     AnUnmask,
-    /// Unmasking, or interrupted with interrupts masked, with no window open.
+    /// Unmasking, with no window open.
     AMask,
     /// The count left zero, or a halt ended, with a window open.
     ALowering,
-    /// The count returned to zero, a pass ran, a halt began, or a mark was
-    /// made, with no window open.
+    /// The count returned to zero, a pass ran or a halt began, with no window open.
     ARaise,
 }
 
@@ -94,7 +85,6 @@ impl Windows {
             preempt_off: AtomicU64::new(0),
             irqs_longest: AtomicU64::new(0),
             preempt_longest: AtomicU64::new(0),
-            marks: AtomicU32::new(0),
         }
     }
 
@@ -107,7 +97,6 @@ impl Windows {
             preempt_off: AtomicU64::new(0),
             irqs_longest: AtomicU64::new(0),
             preempt_longest: AtomicU64::new(0),
-            marks: AtomicU32::new(0),
         }
     }
 
@@ -147,14 +136,6 @@ impl Windows {
         }
     }
 
-    /// The CPU was interrupted with interrupts masked.
-    pub fn found_masked(&self) -> Result<(), Unseen> {
-        match self.irqs_off.load(Ordering::Relaxed) {
-            0 => Err(Unseen::AMask),
-            _ => Ok(()),
-        }
-    }
-
     /// Interrupts are masked and about to be opened.
     pub fn unmasking(&self, now: impl FnOnce() -> u64) -> Result<(), Unseen> {
         match self.irqs_off.load(Ordering::Relaxed) {
@@ -163,7 +144,6 @@ impl Windows {
             since => {
                 Self::record(&self.irqs_longest, since, now());
                 self.irqs_off.store(0, Ordering::Relaxed);
-                self.carry(IRQS_MARKED, IRQS_MARK_CLOSED);
                 Ok(())
             }
         }
@@ -240,33 +220,9 @@ impl Windows {
             since => {
                 Self::record(&self.preempt_longest, since, now);
                 self.preempt_off.store(0, Ordering::Relaxed);
-                self.carry(PREEMPT_MARKED, PREEMPT_MARK_CLOSED);
                 Ok(())
             }
         }
-    }
-
-    /// A window of the kind `marked` names has closed: a mark it carried is
-    /// left for the next [`Windows::take_marked`] as `closed`.
-    fn carry(&self, marked: u32, closed: u32) {
-        if self.marks.load(Ordering::Relaxed) & marked != 0 {
-            self.marks.fetch_or(closed, Ordering::Relaxed);
-            self.marks.fetch_and(!marked, Ordering::Relaxed);
-        }
-    }
-
-    /// Mark the window of each kind open now, where the caller knows both are.
-    pub fn mark(&self) -> Result<(), Unseen> {
-        match self.irqs_off.load(Ordering::Relaxed) {
-            UNTRACKED => return Ok(()),
-            0 => return Err(Unseen::AMask),
-            _ => {}
-        }
-        if self.preempt_off.load(Ordering::Relaxed) == 0 {
-            return Err(Unseen::ARaise);
-        }
-        self.marks.fetch_or(IRQS_MARKED | PREEMPT_MARKED, Ordering::Relaxed);
-        Ok(())
     }
 
     /// The longest interrupts-off and preemption-off windows closed since the
@@ -276,13 +232,6 @@ impl Windows {
             self.irqs_longest.swap(0, Ordering::Relaxed),
             self.preempt_longest.swap(0, Ordering::Relaxed),
         )
-    }
-
-    /// Whether a marked interrupts-off and a marked preemption-off window
-    /// closed since the last such take; the next starts from none.
-    pub fn take_marked(&self) -> (bool, bool) {
-        let closed = self.marks.fetch_and(!(IRQS_MARK_CLOSED | PREEMPT_MARK_CLOSED), Ordering::Relaxed);
-        (closed & IRQS_MARK_CLOSED != 0, closed & PREEMPT_MARK_CLOSED != 0)
     }
 }
 
@@ -362,9 +311,7 @@ mod tests {
     fn every_transition_nothing_reported_before_is_named() {
         let w = open_at(1);
         assert_eq!(w.unmasking(|| 2), Err(Unseen::AMask));
-        assert_eq!(w.found_masked(), Err(Unseen::AMask));
         w.masked(|| 3).unwrap();
-        w.found_masked().unwrap();
         assert_eq!(w.masked(|| 4), Err(Unseen::AnUnmask));
 
         let w = open_at(1);
@@ -376,29 +323,6 @@ mod tests {
         assert_eq!(w.raised(1, || 4), Err(Unseen::ALowering));
         assert_eq!(w.woken(|| 4), Err(Unseen::ALowering));
         assert_eq!(w.set(0, 1, || 4), Err(Unseen::ALowering));
-
-        let w = open_at(1);
-        assert_eq!(w.mark(), Err(Unseen::AMask));
-        w.masked(|| 2).unwrap();
-        assert_eq!(w.mark(), Err(Unseen::ARaise));
-    }
-
-    #[test]
-    fn a_mark_rides_to_its_windows_close_and_is_answered_once() {
-        let w = open_at(1);
-        w.masked(|| 10).unwrap();
-        w.raised(1, || 11).unwrap();
-        w.mark().unwrap();
-        assert_eq!(w.take_marked(), (false, false), "no marked window has closed yet");
-        w.unmasking(|| 20).unwrap();
-        assert_eq!(w.take_marked(), (true, false));
-        w.scheduled(|| 25).unwrap();
-        assert_eq!(w.take_marked(), (false, true), "a pass closes the marked window");
-        assert_eq!(w.take_marked(), (false, false), "a take starts the next from none");
-        w.lowering(1, || 30).unwrap();
-        w.masked(|| 40).unwrap();
-        w.unmasking(|| 50).unwrap();
-        assert_eq!(w.take_marked(), (false, false), "the windows after the marked ones carry no mark");
     }
 
     #[test]
@@ -411,9 +335,7 @@ mod tests {
         w.lowering(1, || 5).unwrap();
         w.lowering(1, || 6).unwrap();
         w.scheduled(|| 7).unwrap();
-        w.mark().unwrap();
         assert_eq!(w.take(), (0, 0));
-        assert_eq!(w.take_marked(), (false, false));
 
         let w = open_at(1);
         w.masked(|| 2).unwrap();

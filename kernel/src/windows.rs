@@ -7,25 +7,29 @@
 //! masking primitives, the halt, every entry (a gate, `SYSCALL` or an
 //! exception masks) and every return (`scheduler::exit_to_user`'s end for a
 //! return to user mode, the entry's own hook for a return to the kernel).
-//! Every entry is also held to what the hardware says it interrupted: a
-//! maskable interrupt is delivered only with interrupts open, and an
-//! exception's frame carries the flag. A context switch changes nothing: this
-//! build switches inside an `IrqGuard`, so every saved context holds
-//! interrupts masked. An NMI is not a window: nothing masks it, and it runs no
-//! hook. [`preempt_raised`] and [`preempt_lowering`] follow the preempt count's
-//! accessors and the entries that move it inline.
+//! Every maskable interrupt is also held to what the hardware says it
+//! interrupted: one is delivered only with interrupts open. A context switch
+//! changes nothing: this build switches inside an `IrqGuard`, so every saved
+//! context holds interrupts masked. An NMI is not a window: nothing masks it,
+//! and it runs no hook. [`preempt_raised`] and [`preempt_lowering`] follow the
+//! preempt count's accessors and the entries that move it inline.
 //!
 //! The hooks that change `IF` run with interrupts masked; a preempt hook may
 //! run with them open, since an interrupt cannot move the count across zero
 //! between it and the count it follows or precedes. A transition the record
 //! refuses panics, after the CPU stops being tracked so the panic's own
-//! masking finds nothing to check. A CPU is tracked from [`start_here`], where
-//! it joins the scheduler, and a window is reported by the report after it
-//! closes.
+//! masking finds nothing to check; an exception the kernel itself took stops
+//! it too ([`stop_here`]), so the fault's report is the one that is read. A CPU
+//! is tracked from [`start_here`], where it joins the scheduler, and a window
+//! is reported by the report after it closes.
+//!
+//! Once a boot, [`hold_once`] holds both windows for a span it reads off the
+//! counter and prints, which a later report of that CPU reads back.
 
+use core::sync::atomic::AtomicBool;
 use core::sync::atomic::Ordering::Relaxed;
 
-use toyos_sched::windows::{Unseen, Windows};
+use toyos_sched::windows::{Unseen, Windows, HELD_NS};
 
 use crate::arch::{cpu, percpu};
 use crate::sched::MAX_CPUS;
@@ -63,9 +67,13 @@ pub fn irqs_masked() {
     on(|w| w.masked(cpu::counter));
 }
 
-/// An exception's frame says it interrupted this CPU with interrupts masked.
-pub fn irqs_found_masked() {
-    on(Windows::found_masked);
+/// This CPU took an exception in the kernel, which ends the machine: nothing
+/// more of it is tracked or checked.
+pub fn stop_here() {
+    on(|w| {
+        w.stop();
+        Ok(())
+    });
 }
 
 /// Interrupts are masked and this CPU is about to open them.
@@ -103,42 +111,32 @@ pub fn woken() {
     on(|w| w.woken(cpu::counter));
 }
 
-/// `cpu`'s line, taking its longest windows so the next report starts from
-/// none, and under `boot-actuators` which of `windows-staged`'s marked windows
-/// closed since the report before.
+/// `cpu`'s line, taking its longest windows so the next report starts from none.
 pub fn log_cpu(cpu: u32) {
-    let Some(of) = CPUS.get(cpu as usize) else { return };
-    let (irqs, preempt) = of.take();
+    let (irqs, preempt) = CPUS[cpu as usize].take();
     crate::log!(
         "windows: cpu{cpu} irqs_off_ns={} preempt_off_ns={}",
         crate::clock::nanos_of_ticks(irqs),
         crate::clock::nanos_of_ticks(preempt),
     );
-    #[cfg(feature = "boot-actuators")]
-    {
-        let (irqs_off, preempt_off) = of.take_marked();
-        if irqs_off || preempt_off {
-            crate::log!("windows: staged cpu{cpu} closed irqs_off={irqs_off} preempt_off={preempt_off}");
-        }
-    }
 }
 
-/// `windows-staged`: at the first `SYS_EXIT`, whose entry masked interrupts
-/// and raised the preempt count, mark this CPU's open windows and say so; a
-/// later report of this CPU must say each marked window closed, once.
-#[cfg(feature = "boot-actuators")]
-pub fn stage_once() {
-    use core::sync::atomic::AtomicBool;
-    static STAGED: AtomicBool = AtomicBool::new(false);
-    if STAGED.swap(true, Relaxed) {
+/// The boot's first `SYS_EXIT` holds both windows for [`HELD_NS`] by this
+/// CPU's counter and says how long that was: `windows: held cpuN ns=…`.
+pub fn hold_once() {
+    static HELD: AtomicBool = AtomicBool::new(false);
+    if HELD.swap(true, Relaxed) {
         return;
     }
-    // From the CPU, not the record: a stage moved where either window is shut
-    // is refused as that, not as a hook the record says it missed.
-    assert!(
-        !cpu::interrupts_enabled() && crate::preempt::count() > 0,
-        "windows-staged: staged with interrupts open or the preempt count at zero, where no window is open"
-    );
-    on(Windows::mark);
-    crate::log!("windows: staged cpu{} open", percpu::cpu_id());
+    let _masked = crate::arch::IrqGuard::close();
+    crate::preempt::disable();
+    let from = cpu::counter();
+    let owed = crate::clock::counter_ticks(HELD_NS);
+    let mut held = 0;
+    while held < owed {
+        core::hint::spin_loop();
+        held = cpu::counter() - from;
+    }
+    crate::log!("windows: held cpu{} ns={}", percpu::cpu_id(), crate::clock::nanos_of_ticks(held));
+    crate::preempt::enable();
 }

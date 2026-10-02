@@ -396,61 +396,78 @@ mod checks {
         Ok(())
     }
 
-    /// [`mask_windows`] against captures no guest has to produce: two CPUs,
-    /// three reports, and a stage on cpu1 whose marked windows close apart.
+    /// [`mask_windows`] and `irqcensus::windows_under` against captures no
+    /// boot has to produce: two CPUs and the T14 row's four exits, a report
+    /// each, with cpu1 holding at the first.
     #[test]
     fn mask_windows_verdict() -> Result<(), String> {
+        use common::irqcensus::{windows_under, Measured};
         let census = |cpu: u32| {
             format!(
                 "[kernel 0.1 cpu0] irq: cpu{cpu} total=0 timer=0 xhci=0 userdev=0 sound=0 i8042=0 \
                  dmafault=0 hda=0 tlb=0 nmi=0 spurious=0 unclaimed=0\n"
             )
         };
-        let windows = |cpu: u32, irqs: u64, preempt: u64| {
+        let windows = |cpu: u32, (irqs, preempt): (u64, u64)| {
             format!("[kernel 0.1 cpu0] windows: cpu{cpu} irqs_off_ns={irqs} preempt_off_ns={preempt}\n")
         };
-        let open = |cpu: u32| format!("[kernel 0.1 cpu{cpu}] windows: staged cpu{cpu} open\n");
-        let closed = |cpu: u32, irqs: bool, preempt: bool| {
-            format!("[kernel 0.1 cpu0] windows: staged cpu{cpu} closed irqs_off={irqs} preempt_off={preempt}\n")
-        };
-        let report = |cpu1_closed: &str| {
-            [census(0), windows(0, 2, 2), census(1), windows(1, 1, 1), cpu1_closed.to_string()].concat()
-        };
-        let first = [census(0), windows(0, 5, 7), census(1), windows(1, 3, 4)].concat();
-        let (irqs, preempt) = (closed(1, true, false), closed(1, false, true));
-        let good = [first.clone(), open(1), report(&irqs), report(&preempt)].concat();
-        let refused = |what: &str, capture: &str, says: &str| match mask_windows(capture, 2) {
+        let report = |cpu0: (u64, u64), cpu1: (u64, u64)| [census(0), windows(0, cpu0), census(1), windows(1, cpu1)].concat();
+        let exit = |name: &str| format!("[kernel 0.1 cpu0] exit: {name} pid=9 code=0 cpu=1ms\n");
+        let held_ns = toyos_sched::windows::HELD_NS;
+        let hold = format!("[kernel 0.1 cpu1] windows: held cpu1 ns={}\n", held_ns + 7);
+        // Since each CPU joined: longer on cpu0 than anything under the load.
+        let first = [report((6_500_000, 6_400_000), (900, 800)), exit("test_rs_idle_span")].concat();
+        let read_back = (held_ns + 400, held_ns + 300);
+        let opening = [report((100, 100), read_back), exit("pwd")].concat();
+        let own = [report((3_000_000, 1_100_000), (700_000, 600_000)), exit(WINDOWS_LOAD)].concat();
+        let after = [report((300, 200), (2_000_000, 1_900_000)), exit("echo")].concat();
+        let good = [hold.as_str(), &first, &opening, &own, &after].concat();
+        let exited = windows_load_exited();
+
+        mask_windows(&good, 2).map_err(|e| format!("the good capture was refused: {e}"))?;
+        let unpaired = |what: &str, capture: &str, says: &str| match mask_windows(capture, 2) {
             Ok(()) => Err(format!("{what} was accepted")),
             Err(e) if e.contains(says) => Ok(()),
             Err(e) => Err(format!("{what} was refused for the wrong reason: {e}")),
         };
+        unpaired("a census without its windows", &good.replace(&windows(0, (100, 100)), ""), "went out without")?;
+        unpaired("a CPU that closed no window", &report((0, 7), (3, 4)), "closed no window")?;
+        unpaired("one CPU of two", &[census(0), windows(0, (5, 7))].concat(), "1 of 2")?;
+        unpaired("a field missing", &good.replace(" preempt_off_ns=100", ""), "fields")?;
 
-        mask_windows(&good, 2).map_err(|e| format!("the good capture was refused: {e}"))?;
-        let together = [first.clone(), open(1), report(&closed(1, true, true))].concat();
-        mask_windows(&together, 2).map_err(|e| format!("both closes in one report were refused: {e}"))?;
-
-        refused("no stage", &good.replace(&open(1), "").replace(&irqs, "").replace(&preempt, ""), "marked nothing")?;
-        refused("a stage no report says closed", &good.replace(&irqs, "").replace(&preempt, ""), "closed 0 time(s)")?;
-        refused("only the interrupts-off window closed", &good.replace(&preempt, ""), "preemption-off window 0")?;
-        refused("a marked window closed twice", &[good.clone(), report(&irqs)].concat(), "closed 2 time(s)")?;
-        refused("a close before the stage", &[first, report(&irqs), open(1), report(&preempt)].concat(), "no stage before it")?;
-        refused("a close on a CPU nobody staged", &good.replace(&irqs, &closed(0, true, false)), "cpu0 closed a window no stage")?;
-        refused("a second stage", &[good.clone(), open(0)].concat(), "a second stage")?;
-        refused("a staged span in nanoseconds", &good.replace(&open(1), "[kernel 0.1 cpu1] windows: staged cpu1 250000000ns\n"), "unreadable staged line")?;
-        refused("a census without its windows", &good.replace(&windows(0, 5, 7), ""), "went out without")?;
+        let read = windows_under(&good, 2, &exited)?;
+        let want = Measured { held: read_back, load: (3_000_000, 1_900_000) };
+        if read != want {
+            return Err(format!("the good capture read {read:?}, and the hold's and the load's reports say {want:?}"));
+        }
+        let refused = |what: &str, capture: &str, says: &str| match windows_under(capture, 2, &exited) {
+            Ok(read) => Err(format!("{what} was read as {read:?}")),
+            Err(e) if e.contains(says) => Ok(()),
+            Err(e) => Err(format!("{what} was refused for the wrong reason: {e}")),
+        };
+        refused("the load's report alone", &own, "the boot's first")?;
+        refused("a load's report with none before it", &[hold.as_str(), &own, &after].concat(), "the boot's first")?;
+        refused("no report after the load's exit", &good.replace(&after, ""), "no report after")?;
+        refused("a load that never ended", &good.replace(&exit(WINDOWS_LOAD), ""), "never ended")?;
+        refused("no hold", &good.replace(&hold, ""), "held no window of known length")?;
+        refused("a second hold", &[hold.as_str(), &good].concat(), "a second hold")?;
+        refused("a hold cut short", &good.replace(&hold, "[kernel 0.1 cpu1] windows: held cpu1 ns=1000\n"), "the kernel owes")?;
         refused(
-            "a CPU that closed no window",
-            &good.replace(&windows(0, 5, 7), &windows(0, 0, 7)).replace(&windows(0, 2, 2), &windows(0, 0, 2)),
-            "closed no window",
+            "an interrupts-off window read back at half",
+            &good.replace(&windows(1, read_back), &windows(1, (read_back.0 / 2, read_back.1))),
+            "shorter than it was held",
         )?;
         refused(
-            "one CPU of two",
-            &[census(0), windows(0, 5, 7), open(0), census(0), windows(0, 1, 1), closed(0, true, true)].concat(),
-            "1 of 2",
+            "a preemption-off window read back at half",
+            &good.replace(&windows(1, read_back), &windows(1, (read_back.0, read_back.1 / 2))),
+            "shorter than it was held",
         )?;
-        refused("a field missing", &good.replace(" preempt_off_ns=7", ""), "fields")?;
-
-        eprintln!("  [mask_windows] the verdict refuses 12 captures and accepts two");
+        refused(
+            "a hold the load's own report reads back",
+            &[first.as_str(), &opening, &hold, &own, &after].concat(),
+            "reported nothing between",
+        )?;
+        refused("a report that skips a CPU", &good.replace(&windows(0, (300, 200)), ""), "names cpu1 at place 0")?;
         Ok(())
     }
 

@@ -74,6 +74,9 @@ const RUST_SKIP: &[&str] = &[
     // its 256 threads' stacks would crowd every member after it in one boot.
     // The `mask_windows` metal row runs it.
     "ring_park_herd",
+    // It asserts nothing: it is half a second of an idle machine, which the
+    // same row reads the windows across.
+    "idle_span",
     // The C corpus's comparator: a helper reached through one symlink per case,
     // never a test of its own. `shared_metal` stages every name on this list.
     "ccheck",
@@ -155,8 +158,8 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("virt_unmap_touch", qemu::Profile::VirtEl2),
     ("virt_debug_refused", qemu::Profile::VirtEl2),
     ("virt_readonly_copyout", qemu::Profile::VirtEl2),
-    // The windows on AArch64, over every job of the case: the windows each
-    // report carries and the stage's marked ones, counts and an order; no clock.
+    // The windows on AArch64, on eight CPUs: every hook's check, and the lines
+    // each report carries; no clock.
     ("virt_mask_windows", qemu::Profile::VirtEl2),
     ("virt_smp", qemu::Profile::VirtEl2),
     ("virt_el1_smp", qemu::Profile::VirtTcg),
@@ -237,7 +240,7 @@ const METAL: &[(&str, metal::Metal)] = &[
     ),
     (
         // The windows on the machine that owes them: every CPU reported beside
-        // its census, and the boot's longest and the herd's own recorded.
+        // its census, a held window read back, and the herd's own recorded.
         "mask_windows",
         metal::Metal { arms: WINDOWSCASE, judge: |b| windows_on_metal(b[0]) },
     ),
@@ -648,11 +651,27 @@ const TESTCASES_READDIR: &[metal::Arm] =
 const JOBCASE: &[metal::Arm] = &[metal::once("jobcase", "tests/jobcase", &[], &[])];
 
 /// The shipping kernel with the windows' instrument and nothing else, so what
-/// it reads is that kernel under the herd.
+/// it reads is that kernel under the herd. Four exits, a report each:
+/// `idle_span`'s is the boot's first, where the kernel holds; `pwd`'s reads the
+/// hold back and empties every record as the herd starts; the herd's and
+/// `echo`'s are the herd's reading, the second carrying its teardown.
 const WINDOWSCASE: &[metal::Arm] = &[metal::Arm {
-    features: &["mask-windows"],
-    ..metal::once("windowscase", "tests/testcases", &[], &["test_rs_ring_park_herd"])
+    features: toyos_build::build::MASK_WINDOWS_KERNEL,
+    ..metal::once(
+        "windowscase",
+        "tests/testcases",
+        &[],
+        &["test_rs_idle_span", "pwd", WINDOWS_LOAD, "echo"],
+    )
 }];
+
+/// The load `mask_windows` reads the windows under.
+const WINDOWS_LOAD: &str = "test_rs_ring_park_herd";
+
+/// The head of the kernel's record of [`WINDOWS_LOAD`]'s exit.
+fn windows_load_exited() -> String {
+    format!("{}{} pid=", toyos_build::bootlog::EXIT, toyos_build::bootlog::recorded_name(WINDOWS_LOAD))
+}
 
 /// A `logd` that leaves soundd's ring unread until the job says the tone played.
 const LOGSTALLCASE: &[metal::Arm] =
@@ -1361,36 +1380,9 @@ fn virt_job(profile: qemu::Profile, job: &str, said: &str) -> Result<(), String>
     judge_virt_job(qemu, job, said).map(drop)
 }
 
-/// The windows on AArch64: every job of `tests/virtjobcase` run on a
-/// `mask-windows` kernel staged at the first `SYS_EXIT`, judged once the last
-/// has ended.
-fn virt_mask_windows(profile: qemu::Profile) -> Result<(), String> {
-    let config = compile::repo_root().join("tests/virtjobcase/system.toml");
-    let case = config.parent().expect("system.toml has a directory");
-    let qemu = QemuInstance::boot_with_options(
-        case,
-        &[],
-        &[],
-        BootOptions {
-            profile,
-            smp: 1,
-            kernel_features: toyos_build::build::MASK_WINDOWS_KERNEL,
-            kernel_params: &["windows-staged"],
-            ready_marker: "control registers: SCTLR_EL1=",
-            extra_root_files: vec![(format!("bin/test_rs_{VIRT_COPYOUT}"), virt_copyout(profile.arch()).to_vec())],
-            ..Default::default()
-        },
-    );
-    let serial = judge_virt_job(qemu, &format!("test_rs_{VIRT_COPYOUT}"), "a syscall writes only where its caller could store")?;
-    mask_windows(&serial, 1)
-}
-
-/// A `windows-staged` boot's windows: `common::irqcensus::windows`'s verdict,
-/// with a stage made and `cpus` CPUs reporting.
+/// A `mask-windows` boot's windows: `common::irqcensus::windows`'s verdict,
+/// with `cpus` CPUs reporting.
 fn mask_windows(capture: &str, cpus: u32) -> Result<(), String> {
-    if !capture.contains(common::irqcensus::STAGED) {
-        return Err(format!("`windows-staged` marked nothing, so no window was held to a stage:\n{capture}"));
-    }
     let longest = common::irqcensus::windows(capture)?;
     if longest.len() != cpus as usize {
         return Err(format!("{} of {cpus} CPUs reported windows: {longest:?}", longest.len()));
@@ -1436,8 +1428,22 @@ const UNMAP_TOUCH_SAID: &str =
 /// The CPUs `virt_smp` boots.
 const VIRT_CPUS: u32 = 8;
 
-/// Boot `tests/virtsmpcase` under `profile` on `cpus` CPUs, with `params` armed.
-fn boot_virt_smp(profile: qemu::Profile, cpus: u32, params: &'static [&'static str]) -> QemuInstance {
+/// The windows on AArch64: `tests/virtsmpcase` on [`VIRT_CPUS`] CPUs of a
+/// `mask-windows` kernel, whose every hook checks the state it finds, judged
+/// once the case's job has ended.
+fn virt_mask_windows(profile: qemu::Profile) -> Result<(), String> {
+    let qemu = boot_virt_smp(profile, VIRT_CPUS, toyos_build::build::MASK_WINDOWS_KERNEL, &[]);
+    mask_windows(&judge_virt_job(qemu, "unmap_touch", UNMAP_TOUCH_SAID)?, VIRT_CPUS)
+}
+
+/// Boot `tests/virtsmpcase` under `profile` on `cpus` CPUs of the kernel built
+/// with `features`, with `params` armed.
+fn boot_virt_smp(
+    profile: qemu::Profile,
+    cpus: u32,
+    features: &'static [&'static str],
+    params: &'static [&'static str],
+) -> QemuInstance {
     let config = compile::repo_root().join("tests/virtsmpcase/system.toml");
     let case = config.parent().expect("system.toml has a directory");
     QemuInstance::boot_with_options(
@@ -1447,6 +1453,7 @@ fn boot_virt_smp(profile: qemu::Profile, cpus: u32, params: &'static [&'static s
         BootOptions {
             profile,
             smp: cpus,
+            kernel_features: features,
             kernel_params: params,
             ready_marker: "control registers: SCTLR_EL1=",
             ..Default::default()
@@ -1460,7 +1467,7 @@ fn boot_virt_smp(profile: qemu::Profile, cpus: u32, params: &'static [&'static s
 /// entered there and joins the scheduler, and the case's job `unmap_touch`
 /// ends with exit 0.
 fn virt_smp(profile: qemu::Profile, conduit: &str, el: u32) -> Result<(), String> {
-    let serial = judge_virt_job(boot_virt_smp(profile, VIRT_CPUS, &[]), "unmap_touch", UNMAP_TOUCH_SAID)?;
+    let serial = judge_virt_job(boot_virt_smp(profile, VIRT_CPUS, &[], &[]), "unmap_touch", UNMAP_TOUCH_SAID)?;
     let psci = serial.lines().find(|l| l.contains("PSCI: ")).unwrap_or_default();
     if !psci.contains(&format!(" through {conduit}")) {
         return Err(format!("PSCI is not said to be reached through {conduit}: {psci:?}\nserial:\n{serial}"));
@@ -1491,7 +1498,7 @@ fn virt_smp(profile: qemu::Profile, conduit: &str, el: u32) -> Result<(), String
 /// exit 0.
 fn virt_failed_ap_leaves_no_hole(profile: qemu::Profile) -> Result<(), String> {
     const CPUS: u32 = 4;
-    let qemu = boot_virt_smp(profile, CPUS, &["smp-skip-ap"]);
+    let qemu = boot_virt_smp(profile, CPUS, &[], &["smp-skip-ap"]);
     let serial = judge_virt_job(qemu, "unmap_touch", UNMAP_TOUCH_SAID)?;
     // The premise, not just a small machine: cpu1 came up and cpu2 did not.
     for premise in ["SMP: cpu1 mpidr=0x1 online", "SMP: cpu2 mpidr=0x2 did not echo within"] {
@@ -2263,44 +2270,22 @@ fn irq_census(capture: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The T14's windows: `common::irqcensus::windows`' verdict with every CPU
-/// reporting, and the longest over the boot and in the herd's own report — the
-/// one its exit printed, just before its exit record — recorded.
+/// The T14's windows: [`mask_windows`]' verdict with every CPU reporting, and
+/// `common::irqcensus::windows_under`'s durations, recorded.
 fn windows_on_metal(boot: &metal::Readback) -> Result<(), String> {
-    const HERD: &str = "test_rs_ring_park_herd";
-    boot.job_passed(HERD)?;
+    boot.job_passed(WINDOWS_LOAD)?;
     let kernel = boot.kernel();
-    let text = kernel.text();
-    let longest = common::irqcensus::windows(text)?;
     let cpus = boot.cpus()?;
-    if longest.len() != cpus as usize {
-        return Err(format!("{} of {cpus} CPUs reported windows: {longest:?}", longest.len()));
-    }
-    let exited = format!("{}{} pid=", toyos_build::bootlog::EXIT, toyos_build::bootlog::recorded_name(HERD));
-    let mut latest = std::collections::BTreeMap::new();
-    let mut herd = None;
-    for line in text.lines() {
-        if let Some(Ok(report)) = common::irqcensus::Windows::parse(line) {
-            latest.insert(report.cpu, report);
-        } else if line.contains(&exited) {
-            herd = Some(latest.clone());
-            break;
-        }
-    }
-    let herd = herd.ok_or_else(|| format!("no `{exited}` record after a report:\n{text}"))?;
-    let most = |of: &mut dyn Iterator<Item = &common::irqcensus::Windows>| {
-        of.fold((0, 0), |(i, p), w| (w.irqs_off_ns.max(i), w.preempt_off_ns.max(p)))
-    };
-    let (irqs, preempt) = most(&mut longest.values());
-    let (herd_irqs, herd_preempt) = most(&mut herd.values());
+    mask_windows(kernel.text(), cpus)?;
+    let read = common::irqcensus::windows_under(kernel.text(), cpus, &windows_load_exited())?;
     eprintln!(
-        "  [windows] boot irqs_off_ns={irqs} preempt_off_ns={preempt}; herd irqs_off_ns={herd_irqs} \
-         preempt_off_ns={herd_preempt}"
+        "  [windows] held irqs_off_ns={} preempt_off_ns={}; herd irqs_off_ns={} preempt_off_ns={}",
+        read.held.0, read.held.1, read.load.0, read.load.1
     );
-    boot.measured("windows.windowscase.irqs_off_ns", irqs)?;
-    boot.measured("windows.windowscase.preempt_off_ns", preempt)?;
-    boot.measured("windows.windowscase.herd_irqs_off_ns", herd_irqs)?;
-    boot.measured("windows.windowscase.herd_preempt_off_ns", herd_preempt)
+    boot.measured("windows.windowscase.held_irqs_off_ns", read.held.0)?;
+    boot.measured("windows.windowscase.held_preempt_off_ns", read.held.1)?;
+    boot.measured("windows.windowscase.herd_irqs_off_ns", read.load.0)?;
+    boot.measured("windows.windowscase.herd_preempt_off_ns", read.load.1)
 }
 
 fn pci_cap_selftest(log: &str) -> Result<(), String> {
