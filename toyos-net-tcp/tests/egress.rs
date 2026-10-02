@@ -620,4 +620,11 @@ fn s_pl_015_resets_waiting_for_their_next_hop_stay_bounded() {
     h.credit = Some(0);
     nothing(&h.input(0, seg(5000).syn().from(C, 40_001).to(A, 81)));
     assert_eq!(h.count(Counter::ClosedRstLimited), 1);
+    // It leaves, and the 63 still waiting leave room for one, asked again or not.
+    h.unframed = false;
+    h.credit = None;
+    expect(&h.at(1), &["CTL=RST,ACK"]);
+    expect(&h.input(2, seg(5000).syn().from(C, 40_002).to(A, 81)), &["CTL=RST,ACK"]);
+    h.tcp.wake_all();
+    expect(&h.input(3, seg(5000).syn().from(C, 40_003).to(A, 81)), &["CTL=RST,ACK"]);
 }
