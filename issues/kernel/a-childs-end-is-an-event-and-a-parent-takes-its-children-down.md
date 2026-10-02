@@ -77,8 +77,8 @@ directory is `issues/isolation/every-program-sees-only-the-files-it-was-given.md
    signal-set calls; `environ`, `setenv`, `unsetenv`; `kill` with `SIGKILL` for
    a child or a `-pgid` of its children, 0 as a probe, `EINVAL` for other
    signals until stage 6; `system`, `popen` and `pclose` through
-   `/system/bin/shell -c`. No `select`: a descriptor is a handle and passes
-   `FD_SETSIZE`. A handler for any signal libc imitates runs at once, beside the
+   `/system/bin/shell -c`. No `select` in this stage: `issues/build/toyos-builds-itself.md`
+   owns it. A handler for any signal libc imitates runs at once, beside the
    program: inside a blocking call of a thread that leaves the signal unblocked
    (`ppoll` and `sigsuspend` under their mask), and, while no thread is in one,
    on libc's own thread. After it `read`, `recv`, `accept`, `wait`, `waitpid`
