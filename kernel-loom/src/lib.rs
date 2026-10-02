@@ -205,6 +205,18 @@ pub mod device_irq;
 #[path = "../../kernel/src/inbox/once.rs"]
 pub mod poll_once;
 
+/// `polls.rs` names its one-shot as `super::once`, which in the kernel is
+/// `crate::inbox::once`; this is what makes that path resolve here.
+pub use poll_once as once;
+
+extern crate alloc;
+
+/// A ring's polls and when one is answered, driven against a fake object by
+/// `tests/inbox_answer.rs`. It names the one-shot above, `toyos-abi` and
+/// `alloc`, and nothing of the kernel's.
+#[path = "../../kernel/src/inbox/polls.rs"]
+pub mod inbox_polls;
+
 /// What `sleeplock.rs` names of the kernel's watch, and nothing more.
 ///
 /// **The park is shimmed, and that is the scope statement for

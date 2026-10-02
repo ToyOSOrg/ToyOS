@@ -1,6 +1,6 @@
 //! The one way to wait: every waitable object holds exactly one [`Watch`], and
 //! a waiter on it is either a thread, which a post *wakes*, or a user poll
-//! ring's entry, which a post *completes*.
+//! ring's entry, which a post *fires*.
 //!
 //! The protocol is `toyos_sched::watch`'s and `toyos_sched::park`'s, and its
 //! lost-wake argument is theirs: a thread registers before it reads its
@@ -42,14 +42,14 @@ pub struct Waitable<L: CellLock<List>>(toyos_sched::watch::Watch<KMsg, PollEntry
 /// A watch no interrupt handler reaches.
 pub type Watch = Waitable<KernelLock<List>>;
 
-/// A watch an interrupt handler posts, and the watch of a ring such a post
-/// completes into. It has no `post`, which frees: [`IrqWatch::post_in_place`]
+/// A watch an interrupt handler posts, and the watch of a ring whose poll such
+/// a post fires. It has no `post`, which frees: [`IrqWatch::post_in_place`]
 /// frees nothing.
 pub type IrqWatch = Waitable<IrqLock<List>>;
 
-/// What an interrupt handler's post takes: an [`IrqWatch`]'s list and a poll
-/// ring's completions. Held with interrupts off, so a handler never finds one
-/// held by the context it interrupted; nothing allocates or frees under it.
+/// What an interrupt handler's post takes: an [`IrqWatch`]'s list. Held with
+/// interrupts off, so a handler never finds one held by the context it
+/// interrupted; nothing allocates or frees under it.
 pub struct IrqLock<T>(masked::Masked<T>);
 
 impl<T> IrqLock<T> {
@@ -95,7 +95,7 @@ impl Watch {
     }
 
     /// Something about the object changed: wake every thread waiting on it and
-    /// complete every poll.
+    /// fire every poll.
     pub fn post(&self) {
         self.post_as(WakeCause::new(WakeReason::Woken));
     }
@@ -142,7 +142,7 @@ impl IrqWatch {
     }
 
     /// Something about the object changed: wake every thread waiting on it and
-    /// complete every poll where it stands, freeing nothing. A handler makes it
+    /// fire every poll where it stands, freeing nothing. A handler makes it
     /// with its CPU's preempt count raised, as `device_irq_entry` holds it, so
     /// this post's own never reaches zero, and a pass, inside the interrupt.
     pub fn post_in_place(&self) {

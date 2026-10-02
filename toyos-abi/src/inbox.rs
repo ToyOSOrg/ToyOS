@@ -10,6 +10,15 @@
 use crate::RawHandle;
 
 pub const OP_NOP: u8 = 0;
+/// Answered once, when the handle is ready.
+///
+/// **An answer is what the object held when the waiting `inbox_submit` looked
+/// at it.** A post only owes the watch a look, so neither a post with nothing
+/// behind it nor one for bytes already read is answered, and a handle no other
+/// reader drains holds what its answer says. The exceptions are the objects
+/// whose readiness the kernel does not hold — the log, read on the reader's own
+/// cursor, and a console — whose read post is the answer. A watch replaces its
+/// handle's earlier one, fired or not, so one look answers a handle once.
 pub const OP_WATCH: u8 = 1;
 pub const OP_ACCEPT: u8 = 3;
 
@@ -72,12 +81,8 @@ pub struct RingHeader {
     /// Completions the kernel could not post because the completion ring
     /// reported itself full. Cumulative, and never cleared.
     ///
-    /// The 2x sizing makes this unreachable only for a process that keeps its
-    /// registrations within the depth it asked for: over-registering flushes a
-    /// full submission ring mid-registration, and the kernel then posts
-    /// completions for the handles already ready while the caller is still
-    /// registering the rest. `toyos`'s `Poller` sizes its rings so that cannot
-    /// happen and reads this on every wait.
+    /// `toyos`'s `Poller` sizes its rings so that cannot happen and reads this
+    /// on every wait.
     pub dropped: core::sync::atomic::AtomicU32,
 }
 
