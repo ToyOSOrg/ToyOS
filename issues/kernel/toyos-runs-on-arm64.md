@@ -267,7 +267,10 @@ Each stage names its exit; "measured" means a number from a run.
    entry's replacement, and the TLB flush before a reclaimed ASID is issued
    again, which QEMU's TCG, the only oracle this stage has, cannot fail on:
    the first HVF run, once stage 6 gives HVF its RNDR, is their exit; and the
-   three deletions shown red. They are shown red on a machine whose
+   three deletions shown red, and with them the loader's read of `CNTPCT_EL0`
+   at EL2 (`bootloader/src/arch/aarch64.rs`'s `counter`): with that arm
+   reading `CNTVCT_EL0`, `virt_boot_from_power_on` stays green, because
+   QEMU's firmware leaves `CNTVOFF_EL2` zero. They are shown red on a machine whose
    firmware leaves the registers otherwise, or by a loader that writes the
    opposite values before the handoff. The ITS moves to stage 6: a claimed
    function is its only consumer the small-kernel track leaves, and it needs that
