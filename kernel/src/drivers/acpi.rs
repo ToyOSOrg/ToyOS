@@ -233,9 +233,6 @@ pub fn iapc_boot_arch(rsdp_addr: u64) -> Result<(u8, u16), TableError> {
 // `Ok(None)` is "no century register", distinct from `Err`, which the caller must not treat as one.
 pub fn rtc_century_register(rsdp_addr: u64) -> Result<Option<u8>, TableError> {
     let named = toyos_acpi::rtc_century(direct_phys(), rsdp_addr)?;
-    // The host can't vary what QEMU's FADT declares, so the actuator override forces "no century register" here.
-    let named = if crate::actuator::rtc_no_century() { Century::Absent } else { named };
-
     match named {
         Century::Absent => {
             log!("ACPI: the FADT names no RTC century register");

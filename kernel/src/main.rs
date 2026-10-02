@@ -59,8 +59,6 @@ mod tmpfs;
 mod file_backing;
 mod bcachefs_adapter;
 mod fs_rename;
-#[cfg(feature = "boot-actuators")]
-mod heartbeat;
 mod vfs;
 mod elf;
 mod symbols;
@@ -89,13 +87,9 @@ mod user_ptr;
 mod vma;
 mod syscall;
 
-/// Nested generic forces a demangled symbol wider than the console grid,
-/// proving `screen_late_panic`'s renderer really wraps.
+/// Nested generic forces a demangled symbol wider than the console grid.
 #[cfg(feature = "boot-actuators")]
 mod late_panic {
-    /// The record the panic path writes after `capture()`, for `screen_late_panic`.
-    pub const AFTER_CAPTURE: &str = "test-late-panic: after the capture";
-
     pub struct Nest<T>(core::marker::PhantomData<T>);
 
     impl<T> Nest<T> {
@@ -162,12 +156,6 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     arch::trap::report_panic(info, cpu::frame_pointer());
 
     drivers::panic_console::capture();
-    // One record after the snapshot and before the paint: what tells a frozen
-    // report from a live re-read of a ring siblings are still writing to.
-    #[cfg(feature = "boot-actuators")]
-    if actuator::test_late_panic() {
-        log!("{}", late_panic::AFTER_CAPTURE);
-    }
     // SAFETY: IF is clear on this CPU and every other one halts before anything else can write the port.
     unsafe { drivers::serial::panic_flush(); }
 
@@ -288,20 +276,7 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     params::init(cmdline);
     deadline::claim(cmdline);
     actuator::init(cmdline);
-    // The actuator's other half: a loader that ignored it would boot on unrefused.
-    if actuator::loader_writes_no_layout() {
-        panic!(
-            "boot: {} is armed and the loader wrote this kernel's layout anyway",
-            toyos_abi::boot::WRITE_NO_LAYOUT_PARAM
-        );
-    }
     let root_image = rootfs::init(cmdline, &kernel_args, maps);
-
-    // Armed here so the next record — the architecture's first — reaches the console and the panel keeps the one before it.
-    #[cfg(feature = "boot-actuators")]
-    if actuator::test_early_halt() {
-        log::halt_before_the_next_repaint();
-    }
 
     arch::boot::after_console(&kernel_args, maps);
 
@@ -408,10 +383,6 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     // The last point before the first hash container (`mm::init`'s address
     // space), and not earlier: seeding fails only by panicking, and a panic
     // before the boot's own log lines reaches no channel at all.
-    #[cfg(feature = "boot-actuators")]
-    if actuator::test_hash_before_seed() {
-        hasher::probe_before_seed();
-    }
     hasher::seed();
 
     mm::init(maps, &reserved);
@@ -492,12 +463,6 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     let pid = process::spawn_init();
     log!("spawned {} pid={pid}", process::INIT_PATH);
 
-    // Here and not beside the other controls: it needs a process the table answers for.
-    #[cfg(feature = "boot-actuators")]
-    if actuator::process_reopen_selftest() {
-        object::process::reopen_selftest(pid);
-    }
-
     // The proof the boot up to here needed no disk: ROOT and init's image both
     // came out of memory.
     log!("{} {}", rootfs::INIT_WITHOUT_A_DISK, block::census::commands_issued());
@@ -511,25 +476,9 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     let t_storage = clock::nanos_since_boot();
 
     xhci::init(&pci_devices);
-    #[cfg(feature = "boot-actuators")]
-    if actuator::usb_storage_gate() {
-        usb_gate::run();
-    }
     // After xhci::init: a USB-booted disk doesn't exist until the controller binds it.
     gpt::probe_usb_disks();
-    #[cfg(feature = "boot-actuators")]
-    if actuator::partclaim_root_withheld() {
-        block::unanswered::refuse();
-    }
     rootfs::hold_source();
-    #[cfg(feature = "boot-actuators")]
-    if actuator::partclaim_root_withheld() {
-        block::unanswered::answer();
-    }
-    #[cfg(feature = "boot-actuators")]
-    if actuator::partclaim_table_unanswered() {
-        block::unanswered::refuse();
-    }
 
     #[cfg(feature = "boot-actuators")]
     if actuator::leak_rollback_selftest() {
@@ -539,11 +488,6 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     if actuator::revoked_backing_selftest() {
         revoke_selftest::run();
     }
-    // After every driver has registered: the number under test is one a real device holds.
-    #[cfg(feature = "boot-actuators")]
-    if actuator::block_duplicate_id() {
-        block::duplicate_id_selftest();
-    }
 
     boot_phase!("storage ready", t_storage);
 
@@ -552,13 +496,6 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     // First in the device phase, after storage: its lines are the diagnostic
     // boot's answer for a dead keyboard, and a panel shows the log's tail.
     arch::boot::platform_devices(kernel_args.rsdp_addr);
-
-    // Runs once for the machine: it touches no device, so per-driver repetition would say the same thing four times.
-    #[cfg(feature = "boot-actuators")]
-    if actuator::virtio_used_selftest() {
-        drivers::virtio::used_selftest();
-        drivers::virtio::wait_selftest();
-    }
 
     #[cfg(feature = "boot-actuators")]
     arch::boot::interrupt_selftests();
@@ -598,12 +535,6 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
         input_merge_test::run();
     }
 
-    // Under Drain::Inline every record above is already on the wire, so this gate reads the whole boot and then silence.
-    #[cfg(feature = "boot-actuators")]
-    if actuator::pre_idle_wedge() {
-        pre_idle_wedge();
-    }
-
     report_log_destination();
     let complete_tsc = cpu::counter();
     boot_phase!("complete", 0);
@@ -616,18 +547,8 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
             late_panic::Nest<late_panic::Nest<()>>>>>>>>>>::on_screen_console_check();
     }
 
-    if actuator::test_kernel_fault() {
-        cpu::undefined_instruction();
-    }
-
     // Last thing before enter_idle_loop: nothing can run before it, and a klogd spawned earlier would idle through phases 5-7 with no drainer.
     log::console::start();
-
-    // Here: the last kernel thread is spawned.
-    #[cfg(feature = "boot-actuators")]
-    if actuator::process_reopen_selftest() {
-        sched::kthread::open_selftest();
-    }
 
     smp::set_ready();
 
@@ -640,15 +561,5 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     }
 
     crate::scheduler::enter_idle_loop();
-}
-
-/// Wedges the machine: interrupts off then spin, with no timer, scheduler, or klogd left to drain anything logged after this.
-#[cfg(feature = "boot-actuators")]
-fn pre_idle_wedge() -> ! {
-    log!("pre-idle-wedge: the boot stops here, and this line is the last thing this machine says");
-    cpu::disable_interrupts();
-    loop {
-        core::hint::spin_loop();
-    }
 }
 

@@ -222,7 +222,7 @@ pub fn bound_ms() -> u64 {
 ///
 /// Called from `arch::trap::nmi`'s `note` and nowhere else. Returns on every NMI
 /// that is not this CPU's own overflow, so the diagnostic senders — the blocked
-/// task dump's probe, the syscall-window storm — cost one load and one compare.
+/// task dump's probe — cost one load and one compare.
 pub fn sample(pc: u64, sp: u64, flags: u64) {
     if BOUND_TSC.load(Relaxed) == 0 || STOOD_DOWN.load(Relaxed) {
         return;

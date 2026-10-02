@@ -13,7 +13,7 @@ receives = ["power"]
 # the bound reboots the guest with the job named.
 args = ["--bound-ms=240000", "unmap_touch"]
 
-[programs.toybox]
+[programs.kernelprobe]
 
 [symlinks]
-"bin/unmap_touch" = "/system/bin/toybox"
+"bin/unmap_touch" = "/system/bin/kernelprobe"

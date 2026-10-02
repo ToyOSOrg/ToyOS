@@ -12,12 +12,6 @@
 //! run under the case's own name and a host reading the stick can say which of
 //! a hundred and nineteen failed. `argv[0]` is what this reads to know which
 //! one it is.
-//!
-//! It is also a *better* comparison than the host's. The host reads a console
-//! every process on the machine shares, and has to take the other writers'
-//! lines out before comparing (`common::console::c_verdict`); this reads one
-//! pipe that only the case can write to, so there is nothing to filter and no
-//! line that can be attributed wrongly.
 
 use std::io::Read;
 use std::process::{Command, Stdio};
@@ -92,13 +86,9 @@ fn run() -> i32 {
         eprintln!("ccheck: {case}: the case exited {:?}", status.code());
         return code::CASE_FAILED;
     }
-    // **The host's rule, and it is one line there too.**
-    // `tests/common/console.rs`'s `verdict` compares `mine.trim_end()` against
-    // `expected.trim_end()`, so a case that ends its output with a newline and
-    // an expectation that does not are the same answer — six of the corpus's
-    // cases are exactly that pair, in one direction or the other. Spelled here
-    // because a guest binary cannot link the harness, and held to the host's
-    // by `the_two_comparisons_use_one_rule`.
+    // A case that ends its output with a newline and an expectation that does
+    // not are the same answer — six of the corpus's cases are exactly that
+    // pair, in one direction or the other.
     let got = trim_end(&got);
     let expected = trim_end(&expected);
     if got != expected {

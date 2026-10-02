@@ -1,7 +1,7 @@
 <!--
-This body becomes the merge commit's body on `main`, so write it as the record
-of what landed rather than as a note to a reviewer. `git log --no-merges` is
-still how you read the work itself.
+This body becomes the merge commit's body on `main` and is the reviewer's
+evidence: write it as the record of what landed, kept true of the branch as it
+stands. `git log --no-merges` is still how you read the work itself.
 
 **Do not hard-wrap the prose.** GitHub wraps this body itself when it composes
 the merge commit, and a paragraph you have already wrapped at 78 comes out
@@ -20,12 +20,15 @@ no heading.
 
 ## Evidence
 <!--
-Numbers come from a command that was actually run, with the run id or the
-command. An estimate says it is one. -->
+Each gate with its exit code. Numbers come from a command that was actually
+run, with the run id or the command. An estimate says it is one. -->
+
+
+## What is unsure
 
 
 ## Anything a reader of `main` must not miss
 <!--
-A known red this leaves behind, a test it disables in `src/redlist.rs`, an
+A test it deletes and the issue recording the commit that restores it, an
 `issues/` file it closes or invalidates.
 -->

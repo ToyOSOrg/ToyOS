@@ -13,6 +13,17 @@ pub unsafe extern "C" fn strlen(s: *const u8) -> usize {
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn strnlen(s: *const u8, max: usize) -> usize {
+    unsafe { crate::text::strnlen(s, max) }
+}
+
+/// The text is static, so no call overwrites another's.
+#[no_mangle]
+pub extern "C" fn strsignal(sig: i32) -> *const u8 {
+    crate::text::signal_text(sig).as_ptr()
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn strcpy(dst: *mut u8, src: *const u8) -> *mut u8 {
     let mut i = 0;
     loop {
@@ -174,6 +185,19 @@ pub unsafe extern "C" fn strdup(s: *const u8) -> *mut u8 {
 #[no_mangle]
 pub unsafe extern "C" fn strerror(_errnum: i32) -> *const u8 {
     b"unknown error\0".as_ptr()
+}
+
+/// POSIX's `strerror_r`: `strerror`'s text in `buf`, or `ERANGE` when it does
+/// not fit with its terminator.
+#[no_mangle]
+pub unsafe extern "C" fn strerror_r(errnum: i32, buf: *mut u8, buflen: usize) -> i32 {
+    let text = strerror(errnum);
+    let len = strlen(text);
+    if len >= buflen {
+        return crate::errno::ERANGE;
+    }
+    ptr::copy_nonoverlapping(text, buf, len + 1);
+    0
 }
 
 #[no_mangle]

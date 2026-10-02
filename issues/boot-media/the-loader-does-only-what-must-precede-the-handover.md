@@ -86,7 +86,9 @@ Each stage lands on its own, in this order.
    - Every volume the loader opens (the slot's FAT partition, the log
      partition and the attempts file on it) is found on the boot disk, where
      exactly one match is taken. `loaderlog::volume_handle`'s machine-wide
-     first match goes.
+     first match goes. Every stick written from one image carries the same
+     unique GUIDs: `src/image.rs`'s `create_boot_image` draws them once per
+     image.
    - A pass asks firmware once: one `LoadedImage` open, one device-path walk,
      one `Disk::open` and slot-table read, and one file reader.
      `load_file_bytes`, `MAX_ESP_FILE` and the unsound `alloc_uninit` go.

@@ -1,17 +1,19 @@
 [package]
 name = "toyos-libc-copies"
-description = "A host differential test of userland libc's architecture module: its copies, fills and square roots against core's."
+description = "A host test of userland libc: its self-contained modules against core's, the host C library's, exact IEEE 754 rounding and compiler-builtins', and its headers against its definitions."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 publish = false
 
-# `userland/libc/src/arch/`'s copies, fills and square roots, compiled for the
-# host this runs on and held against Rust's own. A package of its own because
-# libc cross-compiles and exports `memcpy`: this compiles only the architecture
-# module, the way `kernel-loom` compiles kernel files. `std-runtime` is libc's
-# own switch, on here so the module's `_start` stays out of a host binary that
-# has an entry of its own.
+# A package of its own because libc cross-compiles and exports `memcpy`: this
+# compiles only those modules, the way `kernel-loom` compiles kernel files.
+# `std-runtime` is libc's own switch, on here so the architecture module's
+# `_start` stays out of a host binary that has an entry of its own.
 [features]
 default = ["std-runtime"]
 std-runtime = []
+
+[dev-dependencies]
+toyos-abi = { path = "../toyos-abi" }
+toyos-elf = { path = "../toyos-elf" }

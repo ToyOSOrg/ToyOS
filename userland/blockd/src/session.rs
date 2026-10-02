@@ -159,7 +159,7 @@ impl Session {
 
     /// The partition's length in blocks.
     pub fn blocks(&self) -> u64 {
-        self.opened.blocks
+        self.opened.blocks()
     }
 
     /// The most requests this session has had on the wire at once.

@@ -1,5 +1,5 @@
 ---
-status: expected-red
+status: open
 kind: defect
 opened: 2026-08-19
 ---
@@ -85,8 +85,7 @@ re-run inside the same shared boot, on a pull request whose diff is
 comments-only and provably byte-identical in code. `PipeReadEnd` is a
 `deferred` row whose only release site is `on_zero_handles`, so this is the
 recorded mechanism through the census instrument on the hosted shard — the
-first sighting of this class off the dev host. Its redlist row cites this
-paragraph.
+first sighting of this class off the dev host.
 
 **A witness, PR #564 at `4919fbd7`.** `handle_basic` red at
 `tests/toyos-rust-tests/src/bin/handle_basic.rs:305` — sixteen more rounds of
@@ -95,11 +94,11 @@ handle churn left one extra live `PipeWrite` behind (`[("PipeWrite", 5, 6)]`),
 assertion on `wt/toyos-wv-fs` at `b10c4daf`, green when run alone. `PipeWrite`
 +1 with `PipeRead` unchanged is the last round's `drop(write)` still in the
 release queue at the second census reading: this issue's defect.
-While `handle_basic` is disabled, four of its assertions run in no gate at all —
+While `handle_basic` is deleted, four of its assertions run in no gate at all —
 a closed slot reissued at generation+1, a superset of rights refused, `dup2`
 answering generation 0, then 1, and keeping it across a live replace, and a
 spent slot retiring with the table exactly one slot smaller — so this issue's
-exit brings them back by re-enabling it.
+exit brings them back by restoring it.
 
 ## A syscall answering the wrong word, 2026-08-20
 
@@ -276,3 +275,11 @@ has just stopped, for at most two seconds, one millisecond apart. Owner: the
 swap's author. Exit condition: this issue closes — the kernel publishes a
 process's end only once its deferred releases have run — and `CLAIM_RETURN`
 is deleted with it.
+
+**Its tests are deleted**: `38a5064b6` took `handle_basic`, `handle_transfer`
+and `kill_while_blocked` out, and `009db6db3` retired `SYS_DEBUG` actions 17 and
+18, which only `handle_transfer` read. `02c35a85d` then moved `FILL`, which
+`009db6db3` stopped writing over the idle stacks, into x86-64's `percpu`, so
+`git revert 02c35a85d 009db6db3 38a5064b6` brings them back;
+`git show 84471bc58:tests/toyos-rust-tests/src/bin/handle_transfer.rs` holds #536's
+adaptation of the one #536 changed.

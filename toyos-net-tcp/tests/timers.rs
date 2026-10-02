@@ -6,7 +6,7 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use common::*;
-use toyos_net_tcp::{Event, Failure, Keepalive, Options, State};
+use toyos_net_tcp::{Event, Failure, Hop, Keepalive, Options, State};
 
 fn keepalive(h: &mut H, t: i64, idle: Duration) {
     let options = Options { keepalive: Some(Keepalive { idle, ..Keepalive::default() }), ..Options::default() };
@@ -178,7 +178,7 @@ fn s_gu_006_a_confirmation_after_a_reverify_is_kept() {
         assert_eq!(h.instant(t), at);
         h.start(t);
         h.tcp.fire(at);
-        h.tcp.transmit(at, usize::MAX, |_| {});
+        h.tcp.transmit(at, usize::MAX, |_| Hop::Ready(()), |_, ()| true);
     }
     h.arrive(seg(5001).ack(3921));
     let events: Vec<Event> = h.tcp.drain_events().collect();

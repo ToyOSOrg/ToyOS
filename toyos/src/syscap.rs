@@ -1,10 +1,9 @@
 //! The capability whose whole authority is in the rights on the handle.
 //!
 //! Some things are reachable no other way — minting a device claim, entering
-//! the real-time band, turning a pid into a process handle, listing every
-//! process in the machine, reading what the machine is made of, and taking its
-//! power away, off or back to firmware — and each is one bit on a handle to
-//! this. The kernel makes exactly one at boot, for `init`, so the set of
+//! the real-time band, listing every process in the machine, reading what the
+//! machine is made of, and taking its power away, off or back to firmware —
+//! and each is one bit on a handle to this. The kernel makes exactly one at boot, for `init`, so the set of
 //! processes that can ever do any of them is exactly what init endowed.
 
 use toyos_abi::handle::Rights;
@@ -134,22 +133,9 @@ impl SysCap {
     /// A second handle to this capability carrying **less**.
     ///
     /// How init gives a program the RT band and nothing else: rights only
-    /// shrink, so the dup can never mint a claim or open a process however the
-    /// holder asks.
+    /// shrink, so the dup can never mint a claim however the holder asks.
     pub fn narrowed(&self, rights: Rights) -> Result<Self, SyscallError> {
         syscall::dup_narrowed(self.0.raw(), rights).map(|h| Self(OwnedHandle(h)))
-    }
-
-    /// A `Process` handle for a pid.
-    ///
-    /// The one place a pid becomes authority over anything, and only a cap
-    /// carrying [`Rights::MANAGE`] reaches it — which in the whole system is
-    /// `init`'s.
-    pub fn open_process(&self, pid: toyos_abi::Pid) -> Result<crate::process::Process, SyscallError> {
-        let raw = syscall::process_open(self.0.raw(), pid)?;
-        // SAFETY: the kernel installed this handle in this process's table for
-        // this call and no other.
-        Ok(unsafe { crate::process::Process::from_raw(raw) })
     }
 
     /// Give up ownership, for a handle about to be endowed.

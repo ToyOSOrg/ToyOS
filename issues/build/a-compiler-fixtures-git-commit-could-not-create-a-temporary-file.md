@@ -18,9 +18,7 @@ that run. The fixture's own git failed, not the code under test:
     fatal: failed to write commit object
 
 The other 199 runs passed. Nothing has measured why git's temporary file in
-that repository's object store failed with EINVAL. No host-test counterpart of
-`src/redlist.rs` disables the test, so every `cargo test -p toyos-build --lib`
-still runs it.
+that repository's object store failed with EINVAL.
 
 ## Exit condition
 

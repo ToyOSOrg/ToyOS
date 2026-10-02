@@ -19,8 +19,7 @@ On top of retention, in dependency order:
    `Process` handle narrowed to `Rights::READ`. `SYS_PROCESS_STATS` takes a
    `Process` handle and a handle is the whole of the right, so nothing hands a
    diagnostic tool a way to sample a daemon: `/system/bin/init` holds the only `Process`
-   handles for what `[boot] start` names and the only `SysCap` carrying
-   `Rights::MANAGE`, which is what `SYS_PROCESS_OPEN` takes. So "where is
+   handles for what `[boot] start` names. So "where is
    soundd's / the compositor's / netd's time going?" is unanswerable from a
    shell, and `audio_idle_suspend` name-matches `SYS_SYSINFO` entries out of a
    byte buffer to sample a running daemon twice. Nothing in the kernel has to
