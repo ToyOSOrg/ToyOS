@@ -134,6 +134,12 @@ debug-wait = []
 # Not a boot parameter, and the one that could not be: it forwards to a
 # dependency's cargo feature, which no runtime value can reach.
 sched-check = ["toyos-sched/check"]
+# The longest interrupts-off and preemption-off window each CPU closed since the
+# last report, printed beside the IRQ census (`src/windows.rs`). Its own build
+# because it reads the counter at every masking transition and every preempt
+# count crossing zero, on every entry and exit: a kernel being measured for
+# anything else must not carry it.
+mask-windows = []
 # The stray-write tripwire on the per-CPU `CpuSched` record: a shadow copy of its
 # bytes, taken when the driver's exclusive region is left and compared when it is
 # next entered, so a word that changed while nothing was allowed to change it is

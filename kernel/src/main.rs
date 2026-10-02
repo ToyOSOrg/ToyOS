@@ -71,6 +71,8 @@ mod hw;
 mod iommu;
 mod preempt;
 mod irq_census;
+#[cfg(feature = "mask-windows")]
+mod windows;
 mod irq_ring;
 mod trace;
 mod time;

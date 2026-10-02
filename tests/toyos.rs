@@ -73,6 +73,13 @@ const RUST_SKIP: &[&str] = &[
     // is read off the clock around the syscall. The `tlb_shootdown_waits`
     // metal row runs it on the T14.
     "tlb_shootdown_waits",
+    // Its product is the windows a `mask-windows` kernel reports under it, and
+    // its 256 threads' stacks would crowd every member after it in one boot.
+    // The `mask_windows` metal row runs it.
+    "ring_park_herd",
+    // It asserts nothing: it is half a second of an idle machine, which the
+    // same row reads the windows across.
+    "idle_span",
     // The C corpus's comparator: a helper reached through one symlink per case,
     // never a test of its own. `shared_metal` stages every name on this list.
     "ccheck",
@@ -154,6 +161,7 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("virt_unmap_touch", qemu::Profile::VirtEl2),
     ("virt_debug_refused", qemu::Profile::VirtEl2),
     ("virt_readonly_copyout", qemu::Profile::VirtEl2),
+    ("virt_mask_windows", qemu::Profile::VirtEl2),
     ("virt_smp", qemu::Profile::VirtEl2),
     ("virt_el1_smp", qemu::Profile::VirtTcg),
     ("virt_failed_ap_leaves_no_hole", qemu::Profile::VirtEl2),
@@ -237,6 +245,12 @@ const METAL: &[(&str, metal::Metal)] = &[
             arms: TESTCASES,
             judge: |b| irq_census(b[0].kernel().text()),
         },
+    ),
+    (
+        // The windows on the machine that owes them: every CPU reported beside
+        // its census, and a held window read back.
+        "mask_windows",
+        metal::Metal { arms: WINDOWSCASE, judge: |b| windows_on_metal(b[0]) },
     ),
     (
         "mkdir_cap",
@@ -646,6 +660,28 @@ const TESTCASES_READDIR: &[metal::Arm] =
     &[metal::once("testcases-readdir", "tests/testcases", &[], &["test_rs_readdir_bound"])];
 
 const JOBCASE: &[metal::Arm] = &[metal::once("jobcase", "tests/jobcase", &[], &[])];
+
+/// The shipping kernel with the windows' instrument and nothing else, so what
+/// it reads is that kernel under the herd. Three exits, a report each:
+/// `idle_span`'s is the boot's first, where the kernel holds; `pwd`'s reads the
+/// hold back and empties every record; the herd's is the herd's reading.
+const WINDOWSCASE: &[metal::Arm] = &[metal::Arm {
+    features: toyos_build::build::MASK_WINDOWS_KERNEL,
+    ..metal::once(
+        "windowscase",
+        "tests/testcases",
+        &[],
+        &["test_rs_idle_span", "pwd", WINDOWS_LOAD],
+    )
+}];
+
+/// The load `mask_windows` reads the windows under.
+const WINDOWS_LOAD: &str = "test_rs_ring_park_herd";
+
+/// The head of the kernel's record of [`WINDOWS_LOAD`]'s exit.
+fn windows_load_exited() -> String {
+    format!("{}{} pid=", toyos_build::bootlog::EXIT, toyos_build::bootlog::recorded_name(WINDOWS_LOAD))
+}
 
 /// A `logd` that leaves soundd's ring unread until the job says the tone played.
 const LOGSTALLCASE: &[metal::Arm] =
@@ -1352,6 +1388,22 @@ fn virt_job(profile: qemu::Profile, job: &str, said: &str) -> Result<(), String>
     judge_virt_job(&mut qemu, job, said).map(drop)
 }
 
+/// A `mask-windows` boot's windows: `common::irqcensus::windows`'s verdict,
+/// with `cpus` CPUs reporting.
+fn mask_windows(capture: &str, cpus: u32) -> Result<(), String> {
+    let longest = common::irqcensus::windows(capture)?;
+    if longest.len() != cpus as usize {
+        return Err(format!("{} of {cpus} CPUs reported windows: {longest:?}", longest.len()));
+    }
+    for most in longest.values() {
+        eprintln!(
+            "  [windows] cpu{} irqs_off_ns={} preempt_off_ns={}",
+            most.cpu, most.irqs_off_ns, most.preempt_off_ns
+        );
+    }
+    Ok(())
+}
+
 /// Wait for `job`'s end on a guest booted with it, and judge it: it ends with
 /// exit 0, having said `said`. Answers everything the PL011 carried.
 fn judge_virt_job(qemu: &mut QemuInstance, job: &str, said: &str) -> Result<String, String> {
@@ -1383,6 +1435,19 @@ const UNMAP_TOUCH_SAID: &str =
 
 /// The CPUs `virt_smp` boots.
 const VIRT_CPUS: u32 = 8;
+
+/// The windows on AArch64: `tests/virtsmpcase` on [`VIRT_CPUS`] CPUs of a
+/// `mask-windows` kernel, whose every hook checks the state it finds, judged
+/// once the case's job `unmap_touch` has ended.
+fn virt_mask_windows(profile: qemu::Profile) -> Result<(), String> {
+    let mut qemu = boot_virt_smp(BootOptions {
+        profile,
+        smp: VIRT_CPUS,
+        kernel_features: toyos_build::build::MASK_WINDOWS_KERNEL,
+        ..Default::default()
+    });
+    mask_windows(&judge_virt_job(&mut qemu, "unmap_touch", UNMAP_TOUCH_SAID)?, VIRT_CPUS)
+}
 
 /// Boot `tests/virtsmpcase` as `options` say.
 fn boot_virt_smp(options: BootOptions) -> QemuInstance {
@@ -1961,6 +2026,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
         "virt_readonly_copyout" => {
             virt_job(profile, &format!("test_rs_{VIRT_COPYOUT}"), "a syscall writes only where its caller could store")
         }
+        "virt_mask_windows" => virt_mask_windows(profile),
         "virt_irq_storm" => {
             // The CPU floods itself with SGIs until the timer has fired a
             // thousand times through the flood, then waits for every SGI it
@@ -2417,6 +2483,22 @@ fn irq_census(capture: &str) -> Result<(), String> {
         "  [tlb] {last_issued} shootdown(s) issued, deliveries per CPU {:?} — every \
          delivery accounted for",
         newest.values().map(|c| c.source("tlb")).collect::<Vec<_>>(),
+    );
+    Ok(())
+}
+
+/// The T14's windows: [`mask_windows`]' verdict with every CPU reporting, and
+/// `common::irqcensus::windows_under`'s. Its durations are printed and none is
+/// recorded: one boot's longest window is no baseline for the next.
+fn windows_on_metal(boot: &metal::Readback) -> Result<(), String> {
+    boot.job_passed(WINDOWS_LOAD)?;
+    let kernel = boot.kernel();
+    let cpus = boot.cpus()?;
+    mask_windows(kernel.text(), cpus)?;
+    let read = common::irqcensus::windows_under(kernel.text(), cpus, &windows_load_exited())?;
+    eprintln!(
+        "  [windows] held irqs_off_ns={} preempt_off_ns={}; herd irqs_off_ns={} preempt_off_ns={}",
+        read.held.0, read.held.1, read.load.0, read.load.1
     );
     Ok(())
 }

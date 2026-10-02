@@ -24,6 +24,8 @@ pub(super) fn sys_thread_exit(code: i32) -> u64 {
 }
 
 pub(super) fn sys_exit(code: i32) -> u64 {
+    #[cfg(feature = "mask-windows")]
+    crate::windows::hold_once();
     process::exit(code);
 }
 

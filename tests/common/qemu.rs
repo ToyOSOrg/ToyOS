@@ -153,10 +153,12 @@ pub fn boot_census() -> (u32, u32, Vec<String>) {
 ///
 /// `""` is what an image ships. [`toyos_build::build::TEST_KERNEL`] is every
 /// actuator compiled in, armed by boot parameter. An entry here is a decision
-/// to pay a kernel build per suite run forever. Interactive debug mode is
-/// separate: it builds [`toyos_build::build::DEBUG_KERNEL_BUILD`] and returns
-/// before the suite.
-pub const DECLARED_KERNEL_BUILDS: [&str; 2] =
+/// to pay a kernel build per suite run forever.
+/// [`toyos_build::build::MASK_WINDOWS_KERNEL`] made it: its hooks sit on every
+/// entry and masking primitive, where a parameter would be a branch on the path
+/// they measure. Interactive debug mode is separate: it builds
+/// [`toyos_build::build::DEBUG_KERNEL_BUILD`] and returns before the suite.
+pub const DECLARED_KERNEL_BUILDS: [&str; 3] =
     toyos_build::build::TEST_SUITE_KERNEL_BUILDS;
 
 /// How many guests the run may have up at once.
