@@ -1,7 +1,6 @@
 //! Process and thread syscalls: spawn, wait, exit, and self-ops on a thread.
 //!
-//! A handle is the authority over a process; a pid alone is not. Only
-//! `sys_process_open` mints a handle from a pid, gated on a `SysCap`.
+//! A handle is the authority over a process; a pid alone is not.
 //!
 //! The parking calls clone what they wait on out of the table before
 //! blocking, so no guard is held across a park.
@@ -9,7 +8,6 @@
 use alloc::vec::Vec;
 
 use crate::watch;
-use crate::object::{ops, KObjectRef};
 use crate::time::{Deadline, Duration};
 use crate::UserAddr;
 use crate::process;
@@ -19,7 +17,7 @@ use toyos_abi::syscall::*;
 use toyos_sched::task::WaitClass;
 
 use super::cancelled;
-use super::handles::{demand_syscap, handle_result};
+use super::handles::demand_syscap;
 
 pub(super) fn sys_thread_exit(code: i32) -> u64 {
     process::thread_exit(code);
@@ -46,7 +44,7 @@ pub(super) fn spawn_place(place: u64) -> Result<process::Parent, u64> {
     .map_err(|refused| refused.refuse())
 }
 
-/// Start a program in `cwd` under `parent` and return a handle to it; kill the child if the handle can't be installed.
+/// Start a program in `cwd` under `parent` and return the handle to it the spawn's commit put in the caller's table.
 pub(super) fn sys_spawn(
     args: &[&str],
     pending: crate::loader::PendingHandles,
@@ -55,21 +53,10 @@ pub(super) fn sys_spawn(
     image: Option<alloc::sync::Arc<dyn crate::file_backing::FileBacking>>,
     parent: process::Parent,
 ) -> u64 {
-    // Nothing to clean up yet: spawn's frame owns the child's resources on error.
-    let object = match process::spawn(args, pending, cwd, env, image, parent) {
-        Ok(object) => object,
-        Err(e) => return e.refuse(),
-    };
-    let installed = process::with_process_data(|data| {
-        ops::install(&mut data.handles, KObjectRef::Process(object.clone()))
-    });
-    match installed {
-        Ok(h) => h.0 as u64,
-        Err(e) => {
-            // Unnamed, it can be neither waited on nor killed later, so it is killed here.
-            process::kill_process(&object);
-            e.to_u64()
-        }
+    // Nothing to clean up: spawn's frame owns the child's resources on error.
+    match process::spawn(args, |own| pending.commit(own), cwd, env, image, parent) {
+        Ok((_, handle)) => u64::from(handle.0),
+        Err(e) => e.refuse(),
     }
 }
 
@@ -109,19 +96,6 @@ pub(super) fn sys_process_wait(h: RawHandle, flags: u64) -> u64 {
         // Reachable from userland (WNOHANG raced the exit), so this refuses rather than asserts.
         None => SyscallError::WouldBlock.to_u64(),
     }
-}
-
-/// Mint a `Process` handle for a pid, gated on a `SysCap` carrying [`Rights::MANAGE`].
-pub(super) fn sys_process_open(syscap: RawHandle, pid: process::Pid) -> u64 {
-    if let Err(e) = demand_syscap(syscap, Rights::MANAGE) {
-        return e.refuse();
-    }
-    let Some(object) = process::process_object(pid) else {
-        return SyscallError::NotFound.to_u64();
-    };
-    process::with_process_data(|data| {
-        handle_result(ops::install(&mut data.handles, KObjectRef::Process(object)))
-    })
 }
 
 /// Enter the real-time band, gated on a `SysCap` carrying [`Rights::RT`].

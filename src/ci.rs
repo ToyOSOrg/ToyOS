@@ -406,6 +406,13 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(PROCLIFE, "mutate-walk-in-one-hold", None, &[
         Fails("interleave::tests::a_spawn_under_an_unrelated_process_lands_between_two_claims_of_one_walk"),
     ]),
+    red(PROCLIFE, "mutate-spawner-handle-after-the-landing", None, &[
+        Fails("interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it"),
+        Fails("interleave::tests::a_spawn_racing_the_kill_of_its_own_spawner"),
+    ]),
+    red(PROCLIFE, "mutate-spawner-handle-before-the-childs-own", None, &[
+        Fails("interleave::tests::a_sibling_closing_a_spawns_handle_before_the_spawn_returns"),
+    ]),
     red(SCHED_SIM, "placement-ignores-staleness", Some("policy"), &[
         Fails("a_stopped_cpu_stops_taking_work"),
     ]),

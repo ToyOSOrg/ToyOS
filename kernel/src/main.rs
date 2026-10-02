@@ -36,6 +36,7 @@ mod hardlockup;
 mod mm;
 mod panic;
 mod panic_reboot;
+mod power;
 
 mod keyboard;
 mod mouse;
@@ -431,7 +432,6 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     arch::watchdog::init(&pci_devices);
     file_cache::init();
     gpt::init(kernel_args);
-    acpi::init_power(kernel_args.rsdp_addr);
 
     boot_phase!("peripherals ready", t_periph);
 
@@ -464,12 +464,6 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     // init reads /system/etc/system.manifest itself; the boot config never names the program it starts.
     let pid = process::spawn_init();
     log!("spawned {} pid={pid}", process::INIT_PATH);
-
-    // Here and not beside the other controls: it needs a process the table answers for.
-    #[cfg(feature = "boot-actuators")]
-    if actuator::process_reopen_selftest() {
-        object::process::reopen_selftest(pid);
-    }
 
     // The proof the boot up to here needed no disk: ROOT and init's image both
     // came out of memory.
@@ -557,12 +551,6 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
 
     // Last thing before enter_idle_loop: nothing can run before it, and a klogd spawned earlier would idle through phases 5-7 with no drainer.
     log::console::start();
-
-    // Here: the last kernel thread is spawned.
-    #[cfg(feature = "boot-actuators")]
-    if actuator::process_reopen_selftest() {
-        sched::kthread::open_selftest();
-    }
 
     smp::set_ready();
 

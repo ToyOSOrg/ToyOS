@@ -28,7 +28,7 @@
 //! stuck: it seals a `WEDGED` record naming itself, its `pc` and `sp` from the
 //! NMI frame, the lock it is spinning on if `Lock::lock` recorded one, a line
 //! for every other CPU, and the tail of the log ring — then writes the reset
-//! register through `acpi::reset_now`.
+//! register through `power::reset_now`.
 //!
 //! # The discipline this file is written under
 //!
@@ -284,7 +284,7 @@ fn locked_up(me: usize, pc: u64, sp: u64, now: u64) -> ! {
     // The seal first, because the USB stop `reset_now` makes before it writes
     // the register is bounded but not instant, and this record is the
     // diagnostic the whole mechanism exists for.
-    crate::drivers::acpi::reset_now()
+    crate::power::reset_now()
 }
 
 /// What this CPU was waiting for before a nested acquisition took the slot, so

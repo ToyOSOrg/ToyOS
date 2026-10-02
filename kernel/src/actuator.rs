@@ -113,6 +113,19 @@ actuators! {
     /// Skip the startup for the AP that would be cpu2, so a non-last AP never starts.
     smp_skip_ap = "smp-skip-ap";
 
+    /// The roster's last two CPUs take the power-off's SGI and halt without
+    /// `CPU_OFF`, so PSCI answers them on for the whole budget. Judged by
+    /// `virt_off_names_the_cpus_left_on`.
+    // PSCI is AArch64's alone, so x86-64 builds an accessor it never reads.
+    #[allow(dead_code)]
+    power_off_spares_the_last_two = "power-off-spares-the-last-two";
+
+    /// `psci::init` keeps no conduit, so this kernel has no reset: a machine
+    /// without PSCI. Judged by `virt_reboot_refused_without_psci`.
+    // PSCI is AArch64's alone, so x86-64 builds an accessor it never reads.
+    #[allow(dead_code)]
+    psci_withheld = "psci-withheld";
+
     /// Time the same read loop on every CPU, either side of the `mov cr0` that enables caching.
     control_regs_bench = "control-regs-bench";
 
@@ -140,9 +153,6 @@ actuators! {
 
     /// Run the revoked-backing controls after mount.
     revoked_backing_selftest = "revoked-backing-selftest";
-
-    /// Reopen init by pid once it is spawned, and open every kernel thread's pid, the way `SYS_PROCESS_OPEN` does.
-    process_reopen_selftest = "process-reopen-selftest";
 
     /// Have Ctrl+Alt+D's report painter go fatal holding the panel's latch: a
     /// fatal path meeting a painter that will never let go.

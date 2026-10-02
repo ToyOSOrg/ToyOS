@@ -30,11 +30,11 @@ pub struct ApStart {
 
 /// Start every other CPU `gic` names, in the MADT's order, until one does not
 /// echo within [`AP_START`] or the roster is full.
-pub fn start(gic: &irqchip::Gic, psci: Option<psci::Conduit>) {
+pub fn start(gic: &irqchip::Gic) {
     let me = cpu::hardware_id();
     ROSTER.set_bsp(me);
     let others = gic.cpus.iter().filter(|gicc| packed_affinity(gicc.mpidr) != me);
-    let Some(psci) = psci else {
+    let Some(psci) = psci::conduit() else {
         log!("SMP: no PSCI to start the other {} CPUs with; the boot CPU runs alone", others.count());
         return;
     };

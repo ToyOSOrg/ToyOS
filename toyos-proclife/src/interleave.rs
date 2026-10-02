@@ -50,10 +50,12 @@ pub enum Op {
     /// return. `by` is the killing thread when the model holds it.
     Kill { pid: Pid, code: i32, pc: u32, retire: Vec<(Pid, Tid)>, owed: Vec<Pid>, by: Option<(Pid, Tid)> },
     /// `loader::spawn` under `place` by `by`'s thread: the admission, the
-    /// whole of a process built with every lock given up, then the move of
-    /// the caller's handles and the landing, whose retires the landing
-    /// answers. A build that `fails` lets the place go instead, and climbs
-    /// when that was the place's last hold.
+    /// whole of a process built with every lock given up, then the commit
+    /// under the caller's own lock — its handles move, and its handle to the
+    /// child is minted beside the child's own — then, with that lock given
+    /// up, the landing, whose retires the landing answers.
+    /// A build that `fails` lets the place go instead, and climbs when that
+    /// was the place's last hold. `child` is the process the landing made.
     SpawnUnder {
         place: Pid,
         by: (Pid, Tid),
@@ -62,6 +64,7 @@ pub enum Op {
         admitted: Option<Admitted>,
         retire: Vec<(Pid, Tid)>,
         climb: Option<Climb>,
+        child: Option<Pid>,
     },
     /// `process::spawn_thread`: two lock sections with the whole of a thread
     /// built between them; `block` is the mapped TLS the build carries across.
@@ -70,6 +73,11 @@ pub enum Op {
     ThreadExit { pid: Pid, tid: Tid, code: i32, pc: u32 },
     /// `sys_thread_join`: collect or arm, then re-check.
     Join { pid: Pid, target: Tid, waiter: Tid, pc: u32 },
+    /// `sys_close` by `by`'s thread on its process's handle to `object`, named
+    /// by the number a spawn will answer: one section, the table's own lock.
+    /// A close that finds no handle is its caller's own end, which
+    /// [`Op::Exit`] scripts, and does nothing here.
+    Close { by: (Pid, Tid), object: Pid, pc: u32 },
     /// The idle loop's `reap_finished`.
     IdlePass { pc: u32 },
 }
@@ -89,11 +97,11 @@ impl Op {
     /// A spawn under `place` by `by`'s thread, which is in the kernel until it
     /// returns.
     pub fn spawn_under(place: Pid, by: (Pid, Tid)) -> Self {
-        Op::SpawnUnder { place, by, fails: false, pc: 0, admitted: None, retire: Vec::new(), climb: None }
+        Op::SpawnUnder { place, by, fails: false, pc: 0, admitted: None, retire: Vec::new(), climb: None, child: None }
     }
     /// The same spawn, whose build fails once it is admitted.
     pub fn spawn_under_failing(place: Pid, by: (Pid, Tid)) -> Self {
-        Op::SpawnUnder { place, by, fails: true, pc: 0, admitted: None, retire: Vec::new(), climb: None }
+        Op::SpawnUnder { place, by, fails: true, pc: 0, admitted: None, retire: Vec::new(), climb: None, child: None }
     }
     pub fn spawn(pid: Pid) -> Self {
         Op::Spawn { pid, pc: 0, block: None }
@@ -103,6 +111,9 @@ impl Op {
     }
     pub fn join(pid: Pid, target: Tid, waiter: Tid) -> Self {
         Op::Join { pid, target, waiter, pc: 0 }
+    }
+    pub fn close(by: (Pid, Tid), object: Pid) -> Self {
+        Op::Close { by, object, pc: 0 }
     }
     pub fn idle_pass() -> Self {
         Op::IdlePass { pc: 0 }
@@ -114,7 +125,7 @@ impl Op {
             Op::Exit { pid, tid, .. } | Op::ThreadExit { pid, tid, .. } => Some((pid, tid)),
             Op::Join { pid, waiter, .. } => Some((pid, waiter)),
             Op::Kill { by, .. } => by,
-            Op::SpawnUnder { by, .. } => Some(by),
+            Op::SpawnUnder { by, .. } | Op::Close { by, .. } => Some(by),
             Op::Spawn { .. } | Op::IdlePass { .. } => None,
         }
     }
@@ -127,6 +138,7 @@ impl Op {
             | Op::Spawn { pc, .. }
             | Op::ThreadExit { pc, .. }
             | Op::Join { pc, .. }
+            | Op::Close { pc, .. }
             | Op::IdlePass { pc, .. } => *pc == DONE,
         }
     }
@@ -148,6 +160,7 @@ impl Op {
             Op::Spawn { .. } => "spawn_thread",
             Op::ThreadExit { .. } => "thread_exit",
             Op::Join { .. } => "thread_join",
+            Op::Close { .. } => "close",
             Op::IdlePass { .. } => "idle pass",
         }
     }
@@ -217,7 +230,7 @@ impl Op {
                     }
                 }
             }
-            Op::SpawnUnder { place, by, fails, pc, admitted, retire, climb } => {
+            Op::SpawnUnder { place, by, fails, pc, admitted, retire, climb, child } => {
                 match *pc {
                     // The admission, under the table lock and before anything is built.
                     0 => match tree::admit_child(world, Some(*place)) {
@@ -237,28 +250,53 @@ impl Op {
                         match tree::refuse_child(world, taken) {
                             Some(publish) => {
                                 *climb = Some(Climb::Publish(publish));
-                                *pc = 3;
+                                *pc = CLIMB;
                             }
                             None => *pc = DONE,
                         }
                     }
-                    // The caller's handles move, and the child lands, in the
-                    // hold that inserts it.
+                    // The commit, under the caller's own lock.
                     1 => {
                         world.move_handles(*by);
+                        let made = admitted.as_ref().expect("admitted at the first section").pid();
+                        // The mutation this feature stages: the child's own
+                        // handle waits for the caller's lock to be given up.
+                        if !cfg!(feature = "mutate-spawner-handle-before-the-childs-own") {
+                            world.mint(made, made);
+                        }
+                        // The mutation this feature stages: the caller's
+                        // handle waits for the spawn to land.
+                        if !cfg!(feature = "mutate-spawner-handle-after-the-landing") {
+                            world.mint(made, by.0);
+                        }
+                        *pc = LAND;
+                    }
+                    // With that lock given up: the child lands in the hold
+                    // that inserts it.
+                    LAND => {
                         let taken = admitted.take().expect("admitted at the first section");
-                        let child = taken.pid();
+                        let made = taken.pid();
+                        if cfg!(feature = "mutate-spawner-handle-before-the-childs-own") {
+                            world.mint(made, made);
+                        }
                         let ((), owed) =
-                            tree::land_child(world, taken, KILLED, |world, node| world.insert(child, node));
-                        world.landed(*place, child);
-                        *retire = owed.into_iter().map(|t| (child, t)).collect();
-                        *pc = 2;
+                            tree::land_child(world, taken, KILLED, |world, node| world.insert(made, node));
+                        world.landed(*place, made);
+                        *retire = owed.into_iter().map(|t| (made, t)).collect();
+                        *child = Some(made);
+                        *pc = LANDED;
                     }
                     // With the lock given up: the retires the landing answered.
-                    2 => {
+                    LANDED => {
                         for (victim, thread) in retire.drain(..) {
                             world.post_retire(victim, thread);
                         }
+                        *pc = if cfg!(feature = "mutate-spawner-handle-after-the-landing") { LATE_HANDLE } else { DONE };
+                    }
+                    // The mutation's install, once the spawn has landed and
+                    // its retires are posted.
+                    LATE_HANDLE => {
+                        world.mint(child.expect("landed two sections back"), by.0);
                         *pc = DONE;
                     }
                     // The failed build let its place's last hold go: this
@@ -342,6 +380,11 @@ impl Op {
                     world.leave_kernel((*pid, *waiter));
                 }
             }
+            Op::Close { by, object, pc } => {
+                world.close(*object, by.0);
+                world.leave_kernel(*by);
+                *pc = DONE;
+            }
             Op::IdlePass { pc } => {
                 for pid in reap::finished_pids(world) {
                     world.reap(pid);
@@ -359,6 +402,14 @@ const POST: u32 = 1;
 const WALK: u32 = 2;
 /// `mutate-kill-waits-for-its-victims`' wait.
 const WAIT: u32 = 3;
+/// `mutate-spawner-handle-after-the-landing`'s install.
+const LATE_HANDLE: u32 = 4;
+/// A spawn's landing.
+const LAND: u32 = 2;
+/// The section that posts the retires a spawn's landing answered.
+const LANDED: u32 = 3;
+/// A failed spawn's climb.
+const CLIMB: u32 = 5;
 
 /// The walk's next claim, under the table lock: one process, its retires and
 /// the children it owes. Under `mutate-walk-in-one-hold`, every process the
@@ -735,9 +786,11 @@ mod tests {
     /// every one.
     ///
     /// Reds under `mutate-place-skips-the-insert-recheck`, where a child lands
-    /// unclaimed under the claimed place and outlives it, and under
+    /// unclaimed under the claimed place and outlives it, under
     /// `mutate-refused-spawn-keeps-the-count`, where the place is never
-    /// published.
+    /// published, and under `mutate-spawner-handle-after-the-landing`, where a
+    /// child claimed as it lands closes its table before its spawner's handle
+    /// is minted.
     #[test]
     fn a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it() {
         let mut world = World::new();
@@ -762,6 +815,28 @@ mod tests {
         let own = (place, world.main_tid(place));
         holds(&world, vec![Op::kill(place, KILLED), Op::spawn_under(place, own)]);
         holds(&world, vec![Op::kill(place, KILLED), Op::spawn_under_failing(place, own)]);
+    }
+
+    /// **A spawner's other thread closes the spawn's handle the moment it is
+    /// in their table**, every ordering, alone and with the place's kill
+    /// racing both: a handle's number is its table's own arithmetic, so the
+    /// handle is nameable before the spawn that answers it has returned.
+    ///
+    /// Reds under `mutate-spawner-handle-before-the-childs-own`, where that
+    /// handle is the object's only one until the caller's lock is given up.
+    #[test]
+    fn a_sibling_closing_a_spawns_handle_before_the_spawn_returns() {
+        let mut world = World::new();
+        let init = world.spawn_process();
+        let place = world.spawn_child(init);
+        let sibling = (place, world.spawn_thread(place));
+        let own = (place, world.main_tid(place));
+        let Admit::Yes(next) = tree::admit_child(&mut world.clone(), Some(place)) else {
+            panic!("a live place admitted no child");
+        };
+        let made = next.pid();
+        holds(&world, vec![Op::spawn_under(place, own), Op::close(sibling, made)]);
+        holds(&world, vec![Op::kill(place, KILLED), Op::spawn_under(place, own), Op::close(sibling, made)]);
     }
 
     /// An exit takes a subtree two deep below it, and each end is published
