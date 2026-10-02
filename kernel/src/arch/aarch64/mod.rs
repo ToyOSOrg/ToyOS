@@ -70,12 +70,21 @@ impl IrqGuard {
         unsafe {
             core::arch::asm!("mrs {saved}, daif", "msr daifset, #3", saved = out(reg) daif);
         }
+        #[cfg(feature = "mask-windows")]
+        if trap::frame_interrupts_enabled(daif) {
+            crate::windows::irqs_masked();
+        }
         Self { daif, _not_send_sync: core::marker::PhantomData }
     }
 }
 
 impl Drop for IrqGuard {
     fn drop(&mut self) {
+        // Only where the restore opens them.
+        #[cfg(feature = "mask-windows")]
+        if trap::frame_interrupts_enabled(self.daif) && !cpu::interrupts_enabled() {
+            crate::windows::irqs_unmasking();
+        }
         // SAFETY: the word `close` read out of `DAIF` on this CPU (the guard is
         // `!Send`), restored whole.
         unsafe {

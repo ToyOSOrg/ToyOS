@@ -404,6 +404,10 @@ pub fn exit_to_user() {
         leave_user_if_due();
         // `do_preempt` owns clearing `need_resched`; this function never clears it itself.
         if !crate::preempt::need_resched() {
+            // Every caller's next unmask is the return to user mode, or a
+            // kernel thread's first.
+            #[cfg(feature = "mask-windows")]
+            crate::windows::irqs_unmasking();
             return;
         }
         assert!(!in_schedule_self(), "exit-to-user inside a scheduler pass");

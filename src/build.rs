@@ -1330,8 +1330,12 @@ fn declared_kernel_features(root: &Path) -> Vec<String> {
 pub const TEST_KERNEL: &[&str] = &["boot-actuators", "test-actuators"];
 
 /// Kernel builds the ordinary test suite is allowed to make.
-pub const TEST_SUITE_KERNEL_BUILDS: [&str; 2] =
-    ["", "boot-actuators,test-actuators"];
+pub const TEST_SUITE_KERNEL_BUILDS: [&str; 3] =
+    ["", "boot-actuators,test-actuators", MASK_WINDOWS_KERNEL[0]];
+
+/// The shipping kernel with the windows' instrument and nothing else, for
+/// [`SCHED_CHECK_KERNEL`]'s reason: one spelling, so one build.
+pub const MASK_WINDOWS_KERNEL: &[&str] = &["mask-windows"];
 
 /// The scheduler core's own asserts, compiled in: `toyos-sched/check`.
 ///
@@ -2644,6 +2648,7 @@ mod tests {
                 "lock-acquire-off",
                 "log-commit-release-off",
                 "loom",
+                "mask-windows",
                 // `heap-lockspin`'s other arm: the same visit to the pass path,
                 // for the same span, without the allocator's lock.
                 "pass-spin",

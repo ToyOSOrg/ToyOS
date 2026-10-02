@@ -751,18 +751,26 @@ pub fn preempt_count() -> u32 {
 
 #[inline]
 pub fn set_preempt_count(value: u32) {
+    #[cfg(feature = "mask-windows")]
+    let old = preempt_count();
     gs::write_u32::<OFF_PREEMPT_COUNT>(value);
+    #[cfg(feature = "mask-windows")]
+    crate::windows::preempt_set(old, value);
 }
 
 /// One increment, atomic against an interrupt on this CPU.
 #[inline]
 pub fn preempt_count_up() {
     gs::lock_inc_u32::<OFF_PREEMPT_COUNT>();
+    #[cfg(feature = "mask-windows")]
+    crate::windows::preempt_raised();
 }
 
 /// One decrement, atomic against an interrupt on this CPU.
 #[inline]
 pub fn preempt_count_down() {
+    #[cfg(feature = "mask-windows")]
+    crate::windows::preempt_lowering();
     gs::lock_dec_u32::<OFF_PREEMPT_COUNT>();
 }
 

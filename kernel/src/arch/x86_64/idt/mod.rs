@@ -362,12 +362,35 @@ extern "sysv64" fn trap_dispatch(frame: *mut TrapFrame) {
         Vector::DoubleFault => exceptions::double_fault_handler(frame),
         Vector::MachineCheck => exceptions::machine_check_handler(frame),
         Vector::PageFault => {
+            #[cfg(feature = "mask-windows")]
+            windows_entered(frame);
             cpu::enable_interrupts();
             exceptions::page_fault_handler(frame);
             cpu::disable_interrupts();
+            // Only a Ring 3 fault comes back: `common_entry` lowers the count
+            // next, and `exit_to_user` opens interrupts.
+            #[cfg(feature = "mask-windows")]
+            crate::windows::preempt_lowering();
         }
-        _ => exceptions::exception_handler(frame),
+        _ => {
+            #[cfg(feature = "mask-windows")]
+            windows_entered(frame);
+            exceptions::exception_handler(frame)
+        }
     }
+}
+
+/// A Ring 3 frame had interrupts open, the gate masked them, and
+/// `common_entry` raised the preempt count by one. A Ring 0 frame ends the
+/// machine: its CPU's record stops first, so no hook from here on refuses in
+/// place of the fault's report.
+#[cfg(feature = "mask-windows")]
+fn windows_entered(frame: &TrapFrame) {
+    if !toyos_userbound::Ring::of_cs(frame.cs).is_user() {
+        crate::windows::stop_here();
+    }
+    crate::windows::irqs_masked();
+    crate::windows::preempt_raised();
 }
 
 /// This CPU's state as the black box records it, read out of the frame the stub

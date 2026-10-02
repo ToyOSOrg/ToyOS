@@ -58,15 +58,15 @@ pub struct RootImage {
     len: u64,
     /// The partition it was read from, raw as in its GPT entry.
     partition: [u8; 16],
-    /// The TSC cycles the read took.
-    cycles: u64,
+    /// The counter ticks the read took.
+    ticks: u64,
 }
 
 impl RootImage {
     /// Where the kernel is told the image is, which partition it came from, and
-    /// the cycles reading it took.
+    /// the counter ticks reading it took.
     pub fn handoff(&self) -> (u64, u64, [u8; 16], u64) {
-        (self.at, self.len, self.partition, self.cycles)
+        (self.at, self.len, self.partition, self.ticks)
     }
 
     /// The image's bytes, for the hash its slot's header names.
@@ -222,10 +222,10 @@ impl<'a> Disk<'a> {
         // Chunks are whole `BLOCK`s from a page-aligned buffer, so each one
         // keeps the `IoAlign` `open` checked against `BLOCK`.
         let chunk = chunk::chunk_bytes(CHUNK_BOUND, BLOCK, self.lba_bytes, granularity.unwrap_or(0));
-        let began = crate::tsc();
+        let began = crate::arch::counter();
         let mut device = Firmware { io: &self.io, media_id: self.media_id };
         let read = chunk::read(&mut device, part.first_lba(), self.lba_bytes, chunk, into);
-        let image = RootImage { at, len, partition: part.unique_guid().0, cycles: crate::tsc().wrapping_sub(began) };
+        let image = RootImage { at, len, partition: part.unique_guid().0, ticks: crate::arch::counter().wrapping_sub(began) };
         if let Err(failed) = read {
             let why = alloc::format!(
                 "the read of {} blocks at LBA {} failed: {:?}, after {} of {len} bytes read",
@@ -238,14 +238,14 @@ impl<'a> Disk<'a> {
             return Err(why);
         }
         println!(
-            "{READ_AT} {at:#x}+{len:#x} from LBA {}+{}, {chunk} bytes a request (optimal granularity: {}), in {} TSC cycles",
+            "{READ_AT} {at:#x}+{len:#x} from LBA {}+{}, {chunk} bytes a request (optimal granularity: {}), in {} counter ticks",
             part.first_lba(),
             len / u64::from(self.lba_bytes),
             match granularity {
                 Some(lbas) => alloc::format!("{lbas} block(s)"),
                 None => String::from("not reported"),
             },
-            image.cycles
+            image.ticks
         );
         Ok(image)
     }

@@ -70,12 +70,21 @@ impl IrqGuard {
         unsafe {
             core::arch::asm!("pushfq", "pop {saved}", "cli", saved = out(reg) rflags);
         }
+        #[cfg(feature = "mask-windows")]
+        if idt::frame_interrupts_enabled(rflags) {
+            crate::windows::irqs_masked();
+        }
         Self { rflags, _not_send_sync: core::marker::PhantomData }
     }
 }
 
 impl Drop for IrqGuard {
     fn drop(&mut self) {
+        // Only where the restore opens them.
+        #[cfg(feature = "mask-windows")]
+        if idt::frame_interrupts_enabled(self.rflags) && !cpu::interrupts_enabled() {
+            crate::windows::irqs_unmasking();
+        }
         // SAFETY: the word `close` read out of RFLAGS on this CPU (the guard is
         // `!Send`), restored whole.
         unsafe {
