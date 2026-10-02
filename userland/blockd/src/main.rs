@@ -55,7 +55,7 @@ use toyos_abi::part::{PartGuid, GUID_TEXT_LEN};
 use toyos_abi::syscall::{DEV_PREFIX, SyscallError};
 use toyos_blockhold::Holds;
 use toyos_blockring::entry::{Completion, Op};
-use toyos_blockring::layout::{self, ServerRings, DEPTH};
+use toyos_blockring::layout::{ServerRings, DEPTH};
 use toyos_blockring::server::{ServerSession, Taken};
 use toyos_blockring::wire::{self, Opened, Refusal};
 use toyos_blockring::{BLOCK_BYTES, PORT, SESSION_BYTES};
@@ -247,13 +247,10 @@ struct Service {
 /// A session decided on and not yet told to its client.
 struct Opening {
     region: Region,
-    /// Made before the client is told: it reads them the moment it hears, and
-    /// a region it opens again holds the last server's until they are.
     rings: ServerRings,
+    opened: Opened,
     device_addr: u64,
     first: u64,
-    blocks: u64,
-    unique: [u8; 16],
 }
 
 impl Service {
@@ -306,8 +303,8 @@ impl Service {
         let (first, blocks) = self.place(guid)?;
         match self.ctrl.up().claim().dma_map(region.handle()) {
             Ok(mapping) if mapping.bytes == SESSION_BYTES as u64 => {
-                let rings = layout::server(region.words());
-                Ok(Opening { region, rings, device_addr: mapping.device_addr, first, blocks, unique: guid })
+                let (rings, opened) = Opened::over(region.words(), blocks, guid);
+                Ok(Opening { region, rings, opened, device_addr: mapping.device_addr, first })
             }
             // A region longer than a session would spend the claim's bound on
             // the kernel's side for every other client: refused whole.
@@ -339,8 +336,8 @@ impl Service {
                 region: opening.region,
                 device_addr: opening.device_addr,
                 rings: opening.rings,
-                state: ServerSession::new(opening.first, opening.blocks),
-                unique: opening.unique,
+                state: ServerSession::new(opening.first, opening.opened.blocks()),
+                unique: opening.opened.unique(),
                 closing: false,
                 requests: 0,
                 posted: false,
@@ -717,13 +714,13 @@ fn handshake(service: &mut Service, p: Pending, msg_type: u32, payload_len: usiz
             refuse(&p.conn, why);
         }
         Ok(opening) => {
-            let opened = Opened { blocks: opening.blocks, unique: guid };
+            let opened = opening.opened;
             if p.conn.try_send_bytes(wire::MSG_OPENED, &opened.encode()).is_err() {
                 service.abandon(opening);
                 return;
             }
             let id = service.admit(opening, p.conn);
-            println!("blockd: session {id} opened {} ({} blocks)", guid_text(guid), opened.blocks);
+            println!("blockd: session {id} opened {} ({} blocks)", guid_text(guid), opened.blocks());
         }
     }
 }

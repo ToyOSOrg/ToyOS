@@ -151,7 +151,7 @@ impl Queues {
     }
 
     /// The next session over the same page: both ends set their cursors
-    /// before the client looks at it ([`crate::layout::server`]).
+    /// before the client looks at it ([`crate::wire::Opened::over`]).
     fn reopen(&mut self) {
         self.client = Self::client_ends(&self.page);
         self.server = Self::server_ends(&self.page);
