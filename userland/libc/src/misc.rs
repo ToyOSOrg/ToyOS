@@ -211,11 +211,43 @@ pub unsafe extern "C" fn sigaction(
     0 // success
 }
 
+/// The calling thread's mask, which is what POSIX's process mask is in a
+/// process of one thread (`pthread_sigmask`).
 #[no_mangle]
-pub unsafe extern "C" fn sigprocmask(
-    _how: i32, _set: *const u64, _oldset: *mut u64,
-) -> i32 {
+pub unsafe extern "C" fn sigprocmask(how: i32, set: *const u64, oldset: *mut u64) -> i32 {
+    match unsafe { crate::pthread::pthread_sigmask(how, set, oldset) } {
+        0 => 0,
+        refused => {
+            crate::errno::set(refused);
+            -1
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sigemptyset(set: *mut u64) -> i32 {
+    unsafe { *set = 0 };
     0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sigfillset(set: *mut u64) -> i32 {
+    unsafe { *set = crate::sigmask::FULL };
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sigaddset(set: *mut u64, signo: i32) -> i32 {
+    match crate::sigmask::with(unsafe { *set }, signo) {
+        Some(next) => {
+            unsafe { *set = next };
+            0
+        }
+        None => {
+            crate::errno::set(crate::errno::EINVAL);
+            -1
+        }
+    }
 }
 
 #[no_mangle]
@@ -230,17 +262,25 @@ pub unsafe extern "C" fn kill(_pid: i32, _sig: i32) -> i32 {
 
 // sysconf
 
+const _SC_ARG_MAX: i32 = 0;
 const _SC_PAGESIZE: i32 = 30;
+const _SC_GETPW_R_SIZE_MAX: i32 = 70;
 const _SC_NPROCESSORS_ONLN: i32 = 84;
 const _SC_CLK_TCK: i32 = 2;
 
 #[no_mangle]
 pub unsafe extern "C" fn sysconf(name: i32) -> i64 {
     match name {
-        _SC_PAGESIZE => 4096,
+        _SC_PAGESIZE => crate::memreq::PAGE as i64,
         _SC_NPROCESSORS_ONLN => syscall::cpu_count() as i64,
         _SC_CLK_TCK => 100,
-        _ => -1,
+        // POSIX's -1 with `errno` untouched: the function each bounds, `exec`
+        // and the `getpw*_r` lookups, is one ToyOS does not have.
+        _SC_ARG_MAX | _SC_GETPW_R_SIZE_MAX => -1,
+        _ => {
+            crate::errno::set(crate::errno::EINVAL);
+            -1
+        }
     }
 }
 

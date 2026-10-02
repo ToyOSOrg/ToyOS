@@ -106,13 +106,52 @@ pub fn build_c(root: &Path, toolchain: &Path, target_dir: &Path, arch: Arch) {
         "toyos-libc's staticlib for {target} did not build:\n{}",
         String::from_utf8_lossy(&output.stderr),
     );
-    let c = crate::clang::CSysroot::of(toolchain, arch).dir;
-    let lib = c.join("lib");
+    let c = crate::clang::CSysroot::of(toolchain, arch);
+    let lib = c.dir.join("lib");
     fs::create_dir_all(&lib).unwrap_or_else(|e| panic!("create {}: {e}", lib.display()));
     let archive = target_dir.join(format!("{target}/release/libtoyos_libc.a"));
     fs::copy(&archive, lib.join("libtoyos_c.a"))
         .unwrap_or_else(|e| panic!("copy {} into {}: {e}", archive.display(), lib.display()));
-    crate::sysroot::clone_tree(&root.join(CRATE).join("include"), &c.join("include"));
+    empty_libraries(&lib);
+    crate::sysroot::clone_tree(&root.join(CRATE).join("include"), &c.dir.join("include"));
+    links_naming_every_library(&c, target_dir);
+}
+
+const EMPTY_LIBRARIES: [&str; 5] = ["c", "m", "pthread", "dl", "rt"];
+
+/// Refuse the C sysroot `c` unless its clang links a C program against it
+/// naming each of [`EMPTY_LIBRARIES`], as LLVM's configure links every probe
+/// with `-lm` (`llvm/cmake/config-ix.cmake`). The program and its binary are
+/// written in `scratch`.
+fn links_naming_every_library(c: &crate::clang::CSysroot, scratch: &Path) {
+    let source = scratch.join(format!("probe-{}.c", c.target));
+    fs::write(&source, "int main(void) { return 0; }\n")
+        .unwrap_or_else(|e| panic!("write {}: {e}", source.display()));
+    let names = EMPTY_LIBRARIES.map(|name| format!("-l{name}"));
+    let output = Command::new(&c.clang)
+        .args(c.args())
+        .arg(&source)
+        .args(&names)
+        .arg("-o")
+        .arg(source.with_extension(""))
+        .output()
+        .unwrap_or_else(|e| panic!("run {}: {e}", c.clang.display()));
+    assert!(
+        output.status.success(),
+        "the C sysroot at {} links no program naming {}:\n{}",
+        c.dir.display(),
+        names.join(" "),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+/// Put each of [`EMPTY_LIBRARIES`] in `lib` as an archive of no members: a
+/// link that names one finds it and takes nothing from it.
+fn empty_libraries(lib: &Path) {
+    for name in EMPTY_LIBRARIES {
+        let path = lib.join(format!("lib{name}.a"));
+        fs::write(&path, b"!<arch>\n").unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+    }
 }
 
 /// Extract .o files from rlibs and merge them into a single GNU-format ar archive.
@@ -268,6 +307,22 @@ fn extract_rlib_objects(data: &[u8], out: &mut Vec<(String, Vec<u8>)>) {
         }
         if name.ends_with(".o") {
             out.push((name, member_data.to_vec()));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use toyos_tmpdir::TempDir;
+
+    #[test]
+    fn the_c_sysroot_names_the_empty_libraries() {
+        let lib = TempDir::new("libc-empty");
+        empty_libraries(&lib);
+        for name in ["c", "m", "pthread", "dl", "rt"] {
+            let path = lib.join(format!("lib{name}.a"));
+            assert_eq!(fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())), b"!<arch>\n");
         }
     }
 }

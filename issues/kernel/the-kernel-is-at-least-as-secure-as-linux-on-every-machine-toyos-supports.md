@@ -23,7 +23,7 @@ probe is a `boot-actuators` arm or a `test-actuators` `SYS_DEBUG` action.
 - `issues/kernel/user-pointer-checks-have-no-spectre-v1-fence-and-smap-is-optional.md`
 - `issues/kernel/indirect-branches-and-returns-run-without-thunks.md`
 - `issues/kernel/tsx-stays-as-firmware-left-it.md`
-- `issues/kernel/whether-the-kernel-loads-cpu-microcode-is-the-owners.md`
+- `issues/kernel/the-kernel-loads-no-cpu-microcode.md`
 - `issues/kernel/no-user-address-is-drawn-per-spawn.md`
 - `issues/kernel/the-kernel-has-no-stack-protector.md`
 - `issues/kernel/no-kernel-address-is-drawn-per-boot.md`
