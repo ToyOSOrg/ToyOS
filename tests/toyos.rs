@@ -3683,12 +3683,16 @@ fn run_task(task: Task, test_config: &Path, report: &std::sync::mpsc::Sender<Out
         Task::Machine(name) => run_machine_test(name, test_config),
         Task::Screen(name, profile) => run_screen_test(name, profile, test_config),
     });
-    let _ = report.send(Outcome {
+    let outcome = Outcome {
         name: name.to_string(),
         reason: outcome.err(),
         elapsed: start.elapsed(),
         suspended: start.suspended(),
-    });
+    };
+    // Here and not where the outcomes are collected: this worker's next task
+    // says what it builds, and this line comes before that one.
+    report_line(&outcome);
+    let _ = report.send(outcome);
 }
 
 impl Task {
@@ -3718,8 +3722,8 @@ fn report_line(outcome: &Outcome) {
     }
 }
 
-/// Run `tasks` on `width` workers, printing each outcome as it lands, and
-/// return once every worker has joined.
+/// Run `tasks` on `width` workers, each printing its outcomes as they land,
+/// and return once every worker has joined.
 fn run_tasks(tasks: Vec<Task>, width: usize, test_config: &Path) -> Vec<Outcome> {
     if tasks.is_empty() {
         return Vec::new();
@@ -3744,10 +3748,7 @@ fn run_tasks(tasks: Vec<Task>, width: usize, test_config: &Path) -> Vec<Outcome>
             });
         }
         drop(tx);
-        for outcome in rx {
-            report_line(&outcome);
-            all.push(outcome);
-        }
+        all.extend(rx);
     });
     all
 }
