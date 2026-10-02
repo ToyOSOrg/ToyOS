@@ -1887,6 +1887,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "kernelprobe"
+version = "0.1.0"
+dependencies = [
+ "toyos-abi",
+]
+
+[[package]]
 name = "kurbo"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

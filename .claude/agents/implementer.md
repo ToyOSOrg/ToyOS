@@ -32,9 +32,9 @@ guess. Then build, then test on root `CLAUDE.md`'s tiers before anyone reviews:
 - A result is the command's own exit code: `<cmd> > <file> 2>&1; echo EXIT=$?`. A grepped
   `test result` line is not one, and a gate you did not run is a gate you do not claim.
 - Long commands run in the background with output to a file under the scratchpad the brief names.
-  Stay inside one turn while anything runs: block in the foreground on `until <it is done>; do sleep
-  2; done` under an explicit `timeout`, print a line, repeat; a long `sleep` is refused. Ten minutes
-  of silence kills you, and ending a turn to announce a wait strands the work.
+  Stay inside one turn while anything runs: block in the foreground on `n=0; until <it is done> ||
+  [ $((n+=1)) -gt 50 ]; do sleep 2; done`, print a line, repeat; a long `sleep` is refused. Ten
+  minutes of silence kills you, and ending a turn to announce a wait strands the work.
 - Nothing a pull request's evidence rests on, mutation patches and run logs included, lives only in
   a temporary directory: `/tmp` is wiped when the CLI restarts. Post mutation patches to the pull
   request as a comment.
