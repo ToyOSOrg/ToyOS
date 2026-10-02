@@ -3,8 +3,8 @@
 //!
 //! `#[cfg(test)]`, so none of it reaches a kernel build. What it adds beyond
 //! the two traits is the *consequences* a decision hands back and the kernel
-//! performs — a watch's post, a retire, a `publish_exit`, a handle minted, a
-//! table closed, an idle pass taking an entry — because the laws worth
+//! performs — a watch's post, a retire, a `publish_exit`, a handle minted or
+//! closed, an idle pass taking an entry — because the laws worth
 //! checking are about the order
 //! those happen in, and a model that only held the two states could not see
 //! one.
@@ -260,16 +260,20 @@ impl World {
         self.handles.insert((object, holder));
     }
 
-    /// `teardown_resources` draining `pid`'s table: an object left with no
-    /// handle is retired.
+    /// `HandleEntry`'s drop: `holder`'s handle to `object` goes, if it has
+    /// one, and an object left with no handle is retired.
+    pub fn close(&mut self, object: Pid, holder: Pid) {
+        if self.handles.remove(&(object, holder)) && !self.handles.iter().any(|&(held, _)| held == object) {
+            self.retired.insert(object);
+        }
+    }
+
+    /// `teardown_resources` draining `pid`'s table.
     fn close_table(&mut self, pid: Pid) {
         let closed: Vec<Pid> =
             self.handles.iter().filter(|&&(_, holder)| holder == pid).map(|&(object, _)| object).collect();
         for object in closed {
-            self.handles.remove(&(object, pid));
-            if !self.handles.iter().any(|&(held, _)| held == object) {
-                self.retired.insert(object);
-            }
+            self.close(object, pid);
         }
     }
 
