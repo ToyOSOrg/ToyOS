@@ -878,6 +878,11 @@ pub mod debug_action {
     /// lands. That window is the loader's own, so no caller can order a kill
     /// inside it; the kill and the landing that follow are the shipped paths.
     pub const KILL_PLACE_AS_SPAWN_LANDS: u64 = 22;
+    /// Mark the caller's next spawn whose child lands: its thread waits there,
+    /// before the spawn answers, until the child's exit is published. A child
+    /// ending inside the spawn that started it is a race no caller can order;
+    /// the landing and the exit either side of the wait are the shipped paths.
+    pub const HOLD_SPAWN_UNTIL_CHILD_ENDS: u64 = 23;
 }
 
 /// Every kind of kernel object, in the order the kernel's own `kobject!`

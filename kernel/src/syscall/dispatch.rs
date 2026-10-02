@@ -632,6 +632,10 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 process::debug_mark_spawn();
                 0
             }
+            DA::HOLD_SPAWN_UNTIL_CHILD_ENDS => {
+                process::debug_mark_spawn_hold();
+                0
+            }
             _ => SyscallError::InvalidArgument.to_u64(),
         },
         SYS_SCHED_INFO => match ctx.copy_out(UserAddr::new(a1), &sys_sched_info()) {

@@ -47,6 +47,9 @@ const ACTUATOR_TESTS: &[&str] = &[
     // Action 22: the kernel kills a spawn's place between the spawn's commit
     // and its landing, a window no caller can order a kill inside.
     "spawn_lands_claimed",
+    // Action 23: the kernel holds a spawn, once its child has landed, until
+    // the child has ended — a child's end no caller can order inside its spawn.
+    "spawn_child_ends_first",
 ];
 
 /// What [`ACTUATOR_TESTS`] boots: the one kernel that carries `SYS_DEBUG`, with

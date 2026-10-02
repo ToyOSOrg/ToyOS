@@ -671,6 +671,9 @@ pub fn spawn(
         scheduler::post_retire(sched);
     }
 
+    #[cfg(feature = "test-actuators")]
+    crate::process::debug_hold_marked_spawn(parent, &object);
+
     let t3 = crate::clock::nanos_since_boot();
     log!("spawn: {} pid={} tid={} dst={} base={:#x} entry={:#x} root={:#x} symbols={}KiB (layout={}ms relocs={}ms deps={}ms tls={}ms total={}ms)",
         path, pid, tid, dst.0, base, entry, child_pt.lock().root().phys(), sym_bytes / 1024,
