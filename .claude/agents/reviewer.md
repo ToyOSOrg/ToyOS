@@ -50,6 +50,8 @@ if it meets the bar above; otherwise it is a NOTE.
   `arch::aarch64` in no generic kernel code; and none of them in a crate whose manifest
   `description` says pure.
   A `4096` in the kernel that means a page is a private copy of `mm::PAGE_SIZE`.
+  Nothing ships for tests alone: a program, an applet or a kernel path whose only user is a test
+  lives in a test image or a test kernel, and one a shipped image carries is a BLOCKER.
 - **Hosts.** A BLOCKER: a change that makes an app build on fewer of Linux under Wayland, macOS
   and Windows, or answers a host build failure by making the app ToyOS-only — by a split, a `cfg`
   that compiles what it does out of a host, or an `exempt` in its manifest — instead of fixing it
@@ -127,6 +129,8 @@ if it meets the bar above; otherwise it is a NOTE.
 - **Forks.** A broken rule of `implementer.md`'s "A fork" is a BLOCKER, and so is a lockfile or
   gitlink left naming a fork branch whose consumed commit the pull request changes. A search for
   callers that skipped the fork clones and `~/.cargo/git/checkouts/` searched part of the tree.
+  LLVM and Rust are never changed to suit a ToyOS tool; a tool that cannot build them unchanged is
+  the one that goes, and a diff that changes either for one is a BLOCKER.
 
 ## Prose
 
