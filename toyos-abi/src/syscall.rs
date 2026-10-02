@@ -943,7 +943,8 @@ pub fn get_env(buf: &mut [u8]) -> usize {
 /// wants to hand it on transfers it. There is no pid-addressed way back to a
 /// process, so this handle is the whole of what a spawn confers. Its slot is
 /// taken before an endowment moves: a caller whose table has none is refused
-/// `ResourceExhausted` with its table as it was.
+/// `ResourceExhausted` with its table as it was, whatever its endowments
+/// would have freed.
 ///
 /// # Safety
 /// The raw pointer fields in `SpawnArgs` must point to valid memory.

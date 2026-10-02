@@ -337,8 +337,8 @@ fn rela_dyn_from_sections(
 
 /// Load a program and place its main thread under `parent`, answering its pid
 /// and what `commit` left its caller holding of it. `commit` builds the
-/// child's handle table around the child's own object, once nothing is left
-/// to refuse.
+/// child's handle table around the child's handle to itself, once nothing is
+/// left to refuse.
 ///
 /// `image` is the program's bytes when the caller read them itself, and then
 /// `argv[0]` is only its name: nothing opens it, and its libraries come from
@@ -350,7 +350,7 @@ fn rela_dyn_from_sections(
 /// unwinds, so the error must travel out as a value rather than strand it.
 pub fn spawn<H>(
     argv: &[&str],
-    commit: impl FnOnce(KObjectRef) -> Result<(HandleTable, Endowments, H), crate::object::Refusal>,
+    commit: impl FnOnce(crate::object::HandleEntry) -> Result<(HandleTable, Endowments, H), crate::object::Refusal>,
     cwd: String,
     env: Vec<u8>,
     image: Option<Arc<dyn crate::file_backing::FileBacking>>,
@@ -592,7 +592,7 @@ pub fn spawn<H>(
     let object = crate::object::process::ProcessObject::new(pid);
     // The point of no return: every failure above answers the caller with its
     // table untouched.
-    let (handles, endowments, held) = commit(KObjectRef::Process(Arc::clone(&object)))?;
+    let (handles, endowments, held) = commit(start::own_handle(&object))?;
     let proc_data = Arc::new(Lock::new(ProcessData {
         handles,
         cwd,

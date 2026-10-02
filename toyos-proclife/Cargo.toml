@@ -94,6 +94,13 @@ mutate-walk-in-one-hold = []
 # `interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it`
 # must red under this.
 mutate-spawner-handle-after-the-landing = []
+# The model's spawn mints its caller's handle to the child under the caller's
+# lock and the child's own once that lock is given up, as a kernel whose commit
+# installed the one before it minted the other would: another thread of the
+# caller closes the only handle the object has.
+# `interleave::tests::a_sibling_closing_a_spawns_handle_before_the_spawn_returns`
+# must red under this.
+mutate-spawner-handle-before-the-childs-own = []
 
 [dependencies]
 toyos-abi = { path = "../toyos-abi" }

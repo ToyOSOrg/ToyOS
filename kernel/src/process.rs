@@ -751,7 +751,7 @@ pub fn try_for_each_thread(mut f: impl FnMut(ThreadCensus<'_>)) -> bool {
     true
 }
 
-/// Accounting for a process. `None` only in the window between a live process and its published exit (the process being torn down right now).
+/// Accounting for a process.
 pub fn stats_of(
     object: &crate::object::process::ProcessObject,
 ) -> Option<toyos_abi::syscall::ProcessStats> {

@@ -52,8 +52,8 @@ pub enum Op {
     /// `loader::spawn` under `place` by `by`'s thread: the admission, the
     /// whole of a process built with every lock given up, then the commit
     /// under the caller's own lock — its handles move, and its handle to the
-    /// child is minted — then, with that lock given up, the child's own
-    /// handle and the landing, whose retires the landing answers.
+    /// child is minted beside the child's own — then, with that lock given
+    /// up, the landing, whose retires the landing answers.
     /// A build that `fails` lets the place go instead, and climbs when that
     /// was the place's last hold. `child` is the process the landing made.
     SpawnUnder {
@@ -258,20 +258,27 @@ impl Op {
                     // The commit, under the caller's own lock.
                     1 => {
                         world.move_handles(*by);
+                        let made = admitted.as_ref().expect("admitted at the first section").pid();
+                        // The mutation this feature stages: the child's own
+                        // handle waits for the caller's lock to be given up.
+                        if !cfg!(feature = "mutate-spawner-handle-before-the-childs-own") {
+                            world.mint(made, made);
+                        }
                         // The mutation this feature stages: the caller's
                         // handle waits for the spawn to land.
                         if !cfg!(feature = "mutate-spawner-handle-after-the-landing") {
-                            let made = admitted.as_ref().expect("admitted at the first section").pid();
                             world.mint(made, by.0);
                         }
                         *pc = LAND;
                     }
-                    // With that lock given up: the child's own handle, and
-                    // the child lands in the hold that inserts it.
+                    // With that lock given up: the child lands in the hold
+                    // that inserts it.
                     LAND => {
                         let taken = admitted.take().expect("admitted at the first section");
                         let made = taken.pid();
-                        world.mint(made, made);
+                        if cfg!(feature = "mutate-spawner-handle-before-the-childs-own") {
+                            world.mint(made, made);
+                        }
                         let ((), owed) =
                             tree::land_child(world, taken, KILLED, |world, node| world.insert(made, node));
                         world.landed(*place, made);
@@ -814,6 +821,9 @@ mod tests {
     /// in their table**, every ordering, alone and with the place's kill
     /// racing both: a handle's number is its table's own arithmetic, so the
     /// handle is nameable before the spawn that answers it has returned.
+    ///
+    /// Reds under `mutate-spawner-handle-before-the-childs-own`, where that
+    /// handle is the object's only one until the caller's lock is given up.
     #[test]
     fn a_sibling_closing_a_spawns_handle_before_the_spawn_returns() {
         let mut world = World::new();
