@@ -353,9 +353,8 @@ fn s_ip_icd_002_fragmentation_needed_for_tcp() {
     let mut h = H::fixture_i();
     let generation = h.ip.generation();
     let e = delivered_error(&mut h, &hex(V_ICMP_FRAG_NEEDED));
-    assert_eq!(e.transport, Transport::Tcp);
+    assert_eq!(e.transport, Transport::Tcp { sequence: 0x1111_1111 });
     assert_eq!(e.kind, ErrorKind::FragmentationNeeded { next_hop_mtu: std::num::NonZeroU16::new(1_400), quoted_length: 1_500 });
-    assert_eq!(e.sequence, Some(0x1111_1111));
     assert_eq!(e.reporter, R);
     assert_eq!(h.ip.generation(), generation);
     assert!(h.out().is_empty());
@@ -406,7 +405,8 @@ fn s_ip_icd_006_quotes_of_igmp_and_others() {
 fn s_ip_icd_007_time_exceeded() {
     let mut h = H::fixture_i();
     let e = delivered_error(&mut h, &hex(V_ICMP_TIME_EXCEEDED));
-    assert_eq!((e.transport, e.kind), (Transport::Tcp, ErrorKind::TimeExceeded(TimeExceededCode::InTransit)));
+    assert!(matches!(e.transport, Transport::Tcp { .. }));
+    assert_eq!(e.kind, ErrorKind::TimeExceeded(TimeExceededCode::InTransit));
     assert_eq!((e.flow.source_port.get(), e.flow.destination, e.flow.destination_port.get()), (49153, REMOTE, 443));
 }
 
@@ -546,7 +546,8 @@ fn s_icmp_038_each_error_goes_to_its_transport() {
     let udp = delivered_error(&mut h, &hex(V_ICMP_PORT_UNREACH));
     assert_eq!((udp.transport, udp.flow.source_port.get()), (Transport::Udp, 49152));
     let tcp = delivered_error(&mut h, &hex(V_ICMP_FRAG_NEEDED));
-    assert_eq!((tcp.transport, tcp.flow.source_port.get(), tcp.flow.destination, tcp.flow.destination_port.get()), (Transport::Tcp, 49153, REMOTE, 443));
+    assert!(matches!(tcp.transport, Transport::Tcp { .. }));
+    assert_eq!((tcp.flow.source_port.get(), tcp.flow.destination, tcp.flow.destination_port.get()), (49153, REMOTE, 443));
     assert!(matches!(tcp.kind, ErrorKind::FragmentationNeeded { next_hop_mtu: Some(m), .. } if m.get() == 1_400));
 }
 

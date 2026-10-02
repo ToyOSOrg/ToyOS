@@ -10,7 +10,8 @@
 //! drains in every state resolution leads to (§6.2).
 //! Resolution moves INCOMPLETE's queue into the resolved state and gives each datagram a turn in
 //! the control queue, where it leaves to the MAC of that moment. While its queue holds any, an
-//! entry does not idle out and is evicted only after every other candidate (§6.8).
+//! entry does not idle out and is evicted only after every other candidate (§6.8). A send the
+//! full table refused is told, by [`Event::Room`], once an entry may be evicted.
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
@@ -308,19 +309,29 @@ fn make_room(i: &mut Interface, cx: &mut Cx<'_>) -> bool {
     if i.neighbours.len() < TABLE_MAX {
         return true;
     }
-    let class = |n: &Neighbour| {
-        let class = match &n.state {
-            Nud::Failed => 0,
-            Nud::Unreachable(u) if u.quiescent() => 1,
-            Nud::Stale(_) => 2,
-            _ => return None,
-        };
-        Some(if n.state.releasing() { 3 } else { class })
-    };
-    let victim = i.neighbours.iter().filter_map(|(a, n)| class(n).map(|c| (c, n.used, *a))).min().map(|(_, _, a)| a);
+    let victim = i.neighbours.iter().filter_map(|(a, n)| evictable(n).map(|c| (c, n.used, *a))).min().map(|(_, _, a)| a);
     let Some(victim) = victim else { return false };
     remove(i, cx, victim);
     true
+}
+
+/// Eviction's order for `n`, lowest first; `None` is an entry in use, which never goes (§6.8).
+fn evictable(n: &Neighbour) -> Option<u8> {
+    let class = match &n.state {
+        Nud::Failed => 0,
+        Nud::Unreachable(u) if u.quiescent() => 1,
+        Nud::Stale(_) => 2,
+        _ => return None,
+    };
+    Some(if n.state.releasing() { 3 } else { class })
+}
+
+/// An entry became one eviction takes, or the table emptied: a send refused since room last
+/// appeared is told it may be tried again.
+fn room(i: &mut Interface, cx: &mut Cx<'_>) {
+    if core::mem::take(&mut i.full) {
+        cx.log.event(Event::Room { iface: cx.iface });
+    }
 }
 
 /// Deletes `addr`'s entry, and with it the released datagrams its queue still holds, their turns
@@ -328,6 +339,9 @@ fn make_room(i: &mut Interface, cx: &mut Cx<'_>) -> bool {
 fn remove(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) {
     cx.timers.cancel(timer(cx, addr));
     let Some(mut n) = i.neighbours.remove(&addr) else { return };
+    if matches!(n.state, Nud::Failed) {
+        cx.log.event(Event::Cleared { iface: cx.iface, next_hop: addr });
+    }
     let turns = cx.control.purge_entry(cx.iface, addr);
     i.held = i.held.saturating_sub(turns);
     for held in n.state.take_released().0 {
@@ -345,6 +359,7 @@ pub(crate) fn send(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr, hint: Opt
     let now = cx.now;
     let Some(n) = i.neighbours.get_mut(&addr) else {
         if !make_room(i, cx) {
+            i.full = true;
             cx.log.count(Counter::NbTableFull);
             return Link::Failed(Counter::NbTableFull);
         }
@@ -442,6 +457,9 @@ pub(crate) fn fire(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) {
             route::refresh_active(i, cx);
         }
     }
+    if i.neighbours.get(&addr).is_some_and(|n| evictable(n).is_some()) {
+        room(i, cx);
+    }
 }
 
 /// The turn of `addr`'s oldest released datagram came, and is spent: the datagram leaves now, to
@@ -532,10 +550,14 @@ fn reach(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr, mac: MacAddr) {
 fn stale(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr, mac: MacAddr) {
     let now = cx.now;
     let Some(n) = i.neighbours.get_mut(&addr) else { return };
+    if matches!(n.state, Nud::Failed) {
+        cx.log.event(Event::Cleared { iface: cx.iface, next_hop: addr });
+    }
     let released = inherit(cx, addr, n, mac);
     n.state = Nud::Stale(Stale { mac, lifetime: Lifetime::Runs, released });
     cx.timers.arm(timer(cx, addr), now.after(IDLE_LIFETIME));
     route::refresh_active(i, cx);
+    room(i, cx);
 }
 
 /// Whether a reply from `addr` now answers a request of ours.
@@ -611,4 +633,5 @@ pub(crate) fn flush(i: &mut Interface, cx: &mut Cx<'_>) {
     }
     cx.control.purge(cx.iface);
     i.held = 0;
+    room(i, cx);
 }

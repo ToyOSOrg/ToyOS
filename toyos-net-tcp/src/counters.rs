@@ -57,6 +57,8 @@ toyos_net_wire::counters! {
     PmtuLowered = "tcp.pmtu-lowered";
     SelfConnect = "tcp.self-connect";
     NoEphemeralPort = "tcp.no-ephemeral-port";
+    NextHopFailed = "tcp.next-hop-failed";
+    FrameRefused = "tcp.frame-refused";
     Rto = "tcp.rto";
     RtoUnsent = "tcp.rto-unsent";
     RetransmitBytes = "tcp.retransmit.bytes";

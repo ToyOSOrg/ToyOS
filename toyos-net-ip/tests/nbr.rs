@@ -121,7 +121,7 @@ fn s_ip_nbr_009_locktime() {
 #[test]
 fn s_ip_nbr_010_a_second_answer_is_locked_out() {
     let mut h = H::fixture_i();
-    let _ = h.ip.resolve(h.clock(), h.if0, R);
+    let _ = h.ip.resolve(h.clock(), h.if0, R, A);
     h.out();
     h.at(5);
     h.frame(&hex(V_ARP_REPLY_R));
@@ -177,7 +177,7 @@ fn s_ip_nbr_014_a_reply_for_another_target_asserts() {
 #[test]
 fn s_ip_nbr_015_a_broadcast_reply_is_still_solicited() {
     let mut h = H::fixture_i();
-    let _ = h.ip.resolve(h.clock(), h.if0, R);
+    let _ = h.ip.resolve(h.clock(), h.if0, R, A);
     h.out();
     let mut frame = hex(V_ARP_REPLY_R);
     frame[..6].copy_from_slice(&MacAddr::BROADCAST.0);
