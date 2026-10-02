@@ -79,11 +79,14 @@ if it meets the bar above; otherwise it is a NOTE.
 - **Caches.** No gate reads these; a diff that breaks one is a BLOCKER. Each cache has one
   writer, a nightly.yml job; the host cache's is nightly's `host`, and its one reader ci.yml's
   `host`, on the same `runs-on`, both caching `src/cicache.rs`'s `PATHS` with its `DRIVER` as
-  their `CARGO_TARGET_DIR`. A job that names the host cache runs `actions/checkout`, its cache
-  step and `cargo run -- --ci <job>`, and nothing else. The save's guard,
-  `github.ref == 'refs/heads/main'`, is the only step-level `if:` in those jobs, and ci.yml's
-  `host` skips only a draft. No `continue-on-error`, `shell:`, `defaults:` or cargo `runner`
-  reaches them. nightly.yml's `on:` is one daily `schedule` and `workflow_dispatch`.
+  their `CARGO_TARGET_DIR`, the one variable an `env:` gives either: an `ImageOS` or
+  `ImageVersion` set there outlives an image move. A job that names the host cache runs
+  `actions/checkout`, its cache step and `cargo run -- --ci <job>`, `seal` in the writer and
+  `host` in the reader, and nothing else. The save's guard, `github.ref == 'refs/heads/main'`,
+  is the only step-level `if:` in those jobs; ci.yml's `host` skips only a draft, and nightly's
+  `host` has no `if:` of its own, a skipped job being a green check. No `continue-on-error`,
+  `shell:`, `defaults:` or cargo `runner` reaches them. nightly.yml's `on:` is one daily
+  `schedule` and `workflow_dispatch`.
 - **Growth.** Every line is a responsibility, not an asset. State the branch's net lines
   (`git diff --shortstat origin/main...<head>`), production and tests apart. Production code that
   grows needs a reason you accept; a branch that could delete more than it adds and does not goes
