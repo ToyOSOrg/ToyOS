@@ -17,8 +17,7 @@ for, an executable:
 - `main`, undefined: `libtoyos_c.a`'s entry point, `start_c`, sits in an
   object the link takes for other names.
 - `__tls_get_addr`, undefined: a shared object reaches a thread-local, its own
-  (LLVM's `PrettyStackTrace.cpp`, clang's `Stack.cpp`) or libc's, through it,
-  and only std defines it.
+  or libc's, through it, and only std defines it.
 - `R_X86_64_TPOFF32` against libc++abi's `eh_globals`, and `R_X86_64_PC32`
   against libc++'s vtables: the C++ runtime is compiled for an executable
   (`issues/build/a-rust-std-binary-cannot-link-the-cxx-runtime.md`).

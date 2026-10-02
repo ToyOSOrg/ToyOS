@@ -14,11 +14,12 @@ itself. CMake takes the C sysroot's `toolchain.cmake` from
 `CMAKE_TOOLCHAIN_FILE_x86_64_unknown_toyos`. What stops the build, in the
 order it stops it:
 
-- **Compile.** The first error is `sigemptyset`, undeclared in `Support`'s
-  `CrashRecoveryContext.cpp`: stage 3's signal-set calls, `wait` and `wait4`
-  (`issues/kernel/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`)
-  and `alarm` (`issues/build/libc-has-no-alarm.md`). Then ORC's `shm_open` and
-  `shm_unlink`, the interpreter's `scanf` and `llvm-objdump`'s `ctime`
+- **Compile.** The first errors are `Support`'s: `Unix/Watchdog.inc` and
+  `Unix/Program.inc` call `alarm` (`issues/build/libc-has-no-alarm.md`), and
+  `Program.inc` stage 3's `wait` and `wait4`
+  (`issues/kernel/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`).
+  Then ORC's `shm_open` and `shm_unlink`, the interpreter's `scanf` and
+  `llvm-objdump`'s `ctime`
   (`issues/build/libc-lacks-names-llvm-for-a-toyos-host-calls.md`), and
   clang's `std::ifstream`, which libc++ has only with `std::filesystem`. Built
   with it, libc++ asks libc for `setbuf`, `fseeko`, `ftello`, `utimes`,
