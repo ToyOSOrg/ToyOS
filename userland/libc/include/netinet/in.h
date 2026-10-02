@@ -4,6 +4,10 @@
 #include <stdint.h>
 #include <sys/socket.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define INADDR_ANY       ((uint32_t)0x00000000)
 #define INADDR_LOOPBACK  ((uint32_t)0x7f000001)
 #define INADDR_NONE      ((uint32_t)0xffffffff)
@@ -27,5 +31,9 @@ uint16_t htons(uint16_t hostshort);
 uint16_t ntohs(uint16_t netshort);
 uint32_t htonl(uint32_t hostlong);
 uint32_t ntohl(uint32_t netlong);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

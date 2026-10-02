@@ -29,16 +29,32 @@ pub(super) fn sys_exit(code: i32) -> u64 {
     process::exit(code);
 }
 
-/// Start a program in `cwd` and return a handle to it; kill the child if the handle can't be installed.
+/// `SpawnArgs::place`: the caller itself, or the process a handle carrying `WRITE` names — a handle a peer sent, so a wrong type is refused rather than ending the caller.
+pub(super) fn spawn_place(place: u64) -> Result<process::Parent, u64> {
+    if place == u64::from(toyos_abi::HANDLE_INVALID.0) {
+        return Ok(process::Parent::Under(process::current_process()));
+    }
+    let Ok(raw) = u32::try_from(place) else {
+        return Err(SyscallError::InvalidArgument.to_u64());
+    };
+    process::with_process_data(|data| {
+        data.handles.get_sent::<crate::object::process::ProcessObject>(RawHandle(raw), Rights::WRITE)
+    })
+    .map(|object| process::Parent::Under(object.pid()))
+    .map_err(|refused| refused.refuse())
+}
+
+/// Start a program in `cwd` under `parent` and return a handle to it; kill the child if the handle can't be installed.
 pub(super) fn sys_spawn(
     args: &[&str],
     pending: crate::loader::PendingHandles,
     cwd: alloc::string::String,
     env: Vec<u8>,
     image: Option<alloc::sync::Arc<dyn crate::file_backing::FileBacking>>,
+    parent: process::Parent,
 ) -> u64 {
     // Nothing to clean up yet: spawn's frame owns the child's resources on error.
-    let object = match process::spawn(args, pending, cwd, env, image) {
+    let object = match process::spawn(args, pending, cwd, env, image, parent) {
         Ok(object) => object,
         Err(e) => return e.refuse(),
     };
@@ -180,8 +196,6 @@ pub(super) fn sys_thread_join(tid: u64) -> u64 {
 }
 
 pub(super) fn sys_nanosleep(nanos: u64) -> u64 {
-    #[cfg(feature = "boot-actuators")]
-    crate::quiesce::last::hold(crate::quiesce::last::Last::Park);
     // The ABI's relative span becomes an absolute Deadline here, and only here.
     let deadline = Deadline::at(crate::clock::now() + Duration::from_nanos(nanos));
     // Armed on its own thread with no subject: nothing posts, only the deadline fires it.

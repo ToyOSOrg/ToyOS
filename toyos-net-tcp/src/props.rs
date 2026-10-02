@@ -15,7 +15,7 @@ use common::net::{End, Fate, Impair, Net};
 use common::{datagram, parse_out, seg, Opt, O, FIN, RST, SYN, URG};
 
 use crate::seq::Seq;
-use crate::{Counter, Event, Failure, Instant, Tcp, Tuple};
+use crate::{Counter, Endpoint, Event, Failure, Hop, Instant, Tcp, Tuple};
 
 #[derive(Clone)]
 struct Rng(u64);
@@ -51,12 +51,15 @@ struct Shape {
     reading: u64,
     abort: bool,
     adversary: bool,
+    /// Hop questions answer at random, a frame is now and then refused, and every flow is woken
+    /// now and then.
+    hops: bool,
 }
 
 impl Shape {
     fn new(rng: &mut Rng) -> Self {
         let reading = 5 + rng.below(90);
-        Self { loss: rng.below(8), duplicate: rng.below(5), jitter: rng.below(20), only_acks: false, reading, abort: false, adversary: false }
+        Self { loss: rng.below(8), duplicate: rng.below(5), jitter: rng.below(20), only_acks: false, reading, abort: false, adversary: false, hops: false }
     }
 }
 
@@ -85,6 +88,10 @@ struct Checker {
     rng: Rng,
     shape: Shape,
     edges: HashMap<(usize, Tuple), Seq>,
+    /// The end of the highest sequence space each connection's segments carried out.
+    left: HashMap<(usize, Tuple), Seq>,
+    /// The acknowledgment and the right edge each connection's last segment carried out.
+    told: HashMap<(usize, Tuple), (Seq, Seq)>,
     expiries: [u64; 2],
     /// The oldest unacknowledged sequence number at each node's last expiry, until it leaves again.
     expired: [Option<Seq>; 2],
@@ -124,7 +131,15 @@ impl Checker {
             }
             let tx = &sync.tx;
             assert!(tx.una.at_or_before(tx.nxt), "PROP-01: SND.UNA past SND.NXT");
+            if let Some(&left) = self.left.get(&(node, tuple)) {
+                assert!(tx.nxt.at_or_before(left), "§11.3: SND.NXT {:?} past what left, {left:?}", tx.nxt);
+            }
             let edge = sync.rx.edge();
+            if let Some(&(acked, offered)) = self.told.get(&(node, tuple)) {
+                let sent = sync.rx.last_ack_sent;
+                assert!(sent.at_or_before(acked), "§11.3: acknowledged to {sent:?}, past what left, {acked:?}");
+                assert!(edge.at_or_before(offered) || edge.since(offered) < 1 << sync.rx.shift, "§11.3: the edge {edge:?} past what left, {offered:?}");
+            }
             if let Some(previous) = self.edges.insert((node, tuple), edge) {
                 assert!(previous.at_or_before(edge), "PROP-04: the right edge retreated");
             }
@@ -159,6 +174,13 @@ impl Checker {
 
     /// MOD-04, OP-25 and PROP-04 on each segment as it leaves, and RT-17's record.
     fn segment(&mut self, node: usize, tcp: &mut Tcp, now: Instant, o: &O) {
+        let endpoint = |(addr, port): (std::net::Ipv4Addr, u16)| Endpoint { addr, port: toyos_net_wire::Port::new(port).unwrap() };
+        let tuple = Tuple { local: endpoint(o.src), remote: endpoint(o.dst) };
+        if o.flags & RST == 0 {
+            let end = Seq::new(o.seq).add(o.len());
+            let left = self.left.entry((node, tuple)).or_insert(end);
+            *left = left.later(end);
+        }
         assert_eq!(o.flags & URG, 0, "MOD-04: URG set");
         assert_eq!(o.urg, 0, "MOD-04: an urgent pointer");
         let Some((_, sync)) = tcp.each_sync().next() else { return };
@@ -170,6 +192,7 @@ impl Checker {
             let advertised = Seq::new(ack).add(u32::from(o.wnd) << shift);
             let edge = sync.rx.edge();
             assert!(advertised.at_or_before(edge) && edge.since(advertised) < 1 << shift, "PROP-04: advertised {advertised:?}, edge {edge:?}");
+            self.told.insert((node, tuple), (Seq::new(ack), advertised));
         }
         if o.flags & SYN == 0 {
             self.sacked[node].extend(o.sack.iter().map(|&(l, r)| (Seq::new(l), Seq::new(r))));
@@ -219,6 +242,8 @@ impl Run {
             rng: Rng::new(seed ^ 0x5555),
             shape: s,
             edges: HashMap::new(),
+            left: HashMap::new(),
+            told: HashMap::new(),
             expiries: [0, 0],
             expired: [None, None],
             sends: Vec::new(),
@@ -239,7 +264,20 @@ impl Run {
 
     /// The applications write, read and now and then abort; the device's credit comes and goes.
     fn run(&mut self, steps: usize) {
+        if self.shape.hops {
+            let mut rng = self.rng.clone();
+            self.net.hop = Some(Box::new(move |_| match rng.below(20) {
+                0 => Hop::Unreachable,
+                1..=3 => Hop::Pending,
+                _ => Hop::Ready(()),
+            }));
+            let mut rng = Rng::new(self.rng.next());
+            self.net.framed = Some(Box::new(move |_| rng.chance(95)));
+        }
         for _ in 0..steps {
+            if self.shape.hops && self.rng.chance(30) {
+                self.net.nodes.iter_mut().for_each(|n| n.tcp.wake_all());
+            }
             for app in &mut self.net.apps {
                 app.write_limit = Some(if self.rng.chance(60) { 1 + self.rng.below(8000) as usize } else { 0 });
                 app.reading = self.rng.chance(self.shape.reading);
@@ -269,6 +307,8 @@ impl Run {
 
     /// Lets the connection finish on a clean link, and checks each direction arrived whole.
     fn finish(&mut self) {
+        (self.net.hop, self.net.framed) = (None, None);
+        self.net.nodes.iter_mut().for_each(|n| n.tcp.wake_all());
         self.net.impair = link(self.rng.clone(), Shape { loss: 0, duplicate: 0, ..self.shape });
         for app in &mut self.net.apps {
             (app.write_limit, app.read_limit, app.reading) = (None, None, true);
@@ -338,6 +378,24 @@ fn runs(salt: u64, shape: impl Fn(&mut Shape)) {
 #[test]
 fn s_prop_001_snd_una_at_or_before_snd_nxt() {
     runs(0x9e37_79b9, |s| s.loss = 15);
+}
+
+/// No RTO for a segment that never left, SND.UNA never past SND.NXT, and nothing sent,
+/// acknowledged or offered that no segment carried out, whatever the next hop answers and whether
+/// or not the device frames each segment.
+#[test]
+fn s_prop_001_snd_una_at_or_before_snd_nxt_whatever_the_next_hop_answers() {
+    let (mut failed, mut refused) = (0, 0);
+    for seed in 0..RUNS {
+        let mut run = Run::new(0x2b99_2ddf ^ seed, |s| (s.loss, s.hops) = (5, true));
+        run.run(1500);
+        for node in &run.net.nodes {
+            failed += node.tcp.counters().get(Counter::NextHopFailed);
+            refused += node.tcp.counters().get(Counter::FrameRefused);
+        }
+        run.finish();
+    }
+    assert!(failed > 0 && refused > 0, "the runs meet both: {failed} unreachable, {refused} refused");
 }
 
 #[test]
@@ -424,7 +482,10 @@ fn s_op_025_prop_timestamps_on_every_segment() {
         let tcp = &mut run.net.nodes[node].tcp;
         tcp.abort(now, id).unwrap();
         let mut out = Vec::new();
-        tcp.transmit(now, usize::MAX, |o| out.push(parse_out(&datagram(o), 0)));
+        tcp.transmit(now, usize::MAX, |_| Hop::Ready(()), |o, ()| {
+            out.push(parse_out(&datagram(o), 0));
+            true
+        });
         if let Some(rst) = out.iter().find(|o| o.flags & RST != 0) {
             assert_eq!(rst.ts, Some((ts.value, ts.echo)), "OP-25: the abort's RST");
         }

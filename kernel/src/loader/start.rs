@@ -4,14 +4,16 @@
 
 use alloc::vec::Vec;
 
-use crate::object::{HandleTable, Refusal};
+use crate::object::{HandleEntry, HandleTable, KObjectRef, Refusal};
 use crate::process::{
     process_data, Endowments, OwnedAlloc, ENDOW_ENTRY_LEN, KERNEL_STACK_SIZE,
 };
 use crate::scheduler;
 use crate::user_ptr::UserBytes;
 use toyos_abi::handle::{RawHandle, Rights};
-use toyos_abi::syscall::{EndowEntry, SyscallError, MAX_ENDOWMENTS, MAX_LABELS_LEN, MAX_SLOT_MAP};
+use toyos_abi::syscall::{
+    EndowEntry, SyscallError, MAX_SLOT_MAP, MAX_SPAWN_ENDOWMENTS, MAX_SPAWN_LABELS_LEN, SELF_LABEL,
+};
 
 /// One `[child_slot, parent_handle]` pair of `SpawnArgs::slot_map_ptr`, in bytes.
 pub const SLOT_PAIR_LEN: usize = 8;
@@ -44,16 +46,20 @@ pub(crate) fn make_name(path: &str) -> [u8; crate::process::THREAD_NAME_LEN] {
 // The move must be last: an earlier move leaves a failed spawn's parent holding handles that name nothing.
 pub enum PendingHandles {
     /// Built by the kernel and owing nobody anything — the boot's `/system/bin/init`.
-    Ready(HandleTable, Endowments),
+    Ready { table: HandleTable, entries: Vec<EndowEntry>, labels: Vec<u8> },
     /// A caller's request: `endow` has not left the caller's table yet.
     Moving { table: HandleTable, endow: Vec<u8>, labels: Vec<u8> },
 }
 
 impl PendingHandles {
     /// Take the endowed handles out of the parent's table, all under one lock hold: a refusal leaves it unchanged.
-    pub fn commit(self) -> Result<(HandleTable, Endowments), Refusal> {
-        let (mut table, endow, labels) = match self {
-            Self::Ready(table, endowments) => return Ok((table, endowments)),
+    /// `own` is the child itself, which its table holds under [`SELF_LABEL`] beside them.
+    pub fn commit(self, own: KObjectRef) -> Result<(HandleTable, Endowments), Refusal> {
+        let (mut table, endow, mut labels) = match self {
+            Self::Ready { mut table, mut entries, mut labels } => {
+                endow_self(&mut table, &mut entries, &mut labels, own);
+                return Ok((table, Endowments::new(entries, labels)));
+            }
             Self::Moving { table, endow, labels } => (table, endow, labels),
         };
         let data_arc = process_data();
@@ -71,6 +77,10 @@ impl PendingHandles {
             if end > labels.len() {
                 return Err(SyscallError::InvalidArgument.into());
             }
+            // The kernel's own, which a caller's of that name would shadow in the child's lookup.
+            if &labels[label_off as usize..end] == SELF_LABEL.as_bytes() {
+                return Err(SyscallError::InvalidArgument.into());
+            }
             // Checked before any removal, so a missing `TRANSFER` refuses the spawn instead of leaving a hole.
             let rights = data.handles.rights_of(handle)?;
             if !rights.contains(Rights::TRANSFER) {
@@ -84,7 +94,7 @@ impl PendingHandles {
             moving.push((EndowEntry { label_off, label_len, handle, _pad: 0 }, handle));
         }
         // Checked before any removal, so a failed install can't strand a handle out of a table that never spawned.
-        if !table.has_room(moving.len()) {
+        if !table.has_room(moving.len() + 1) {
             return Err(SyscallError::ResourceExhausted.into());
         }
 
@@ -99,8 +109,25 @@ impl PendingHandles {
                 .expect("a child table with verified room refused an endowment");
             entries.push(entry);
         }
+        drop(data);
+        endow_self(&mut table, &mut entries, &mut labels, own);
         Ok((table, Endowments::new(entries, labels)))
     }
+}
+
+/// Install `own` in its own table under [`SELF_LABEL`]: `WRITE` to be named a spawn's place, `DUP` and `TRANSFER` to hand that on. Its caller verified the room.
+fn endow_self(table: &mut HandleTable, entries: &mut Vec<EndowEntry>, labels: &mut Vec<u8>, own: KObjectRef) {
+    let rights = Rights::WRITE.union(Rights::DUP).union(Rights::TRANSFER);
+    let handle = table
+        .install(HandleEntry::new(own, rights))
+        .expect("a child table with verified room refused its own handle");
+    entries.push(EndowEntry {
+        label_off: labels.len() as u32,
+        label_len: SELF_LABEL.len() as u32,
+        handle,
+        _pad: 0,
+    });
+    labels.extend_from_slice(SELF_LABEL.as_bytes());
 }
 
 /// Reads `SpawnArgs`'s two handle vectors into the child's pending handle state.
@@ -110,7 +137,7 @@ pub fn build_child_handles(
     endow: &UserBytes,
     labels: &[u8],
 ) -> Result<PendingHandles, Refusal> {
-    if endow.len() / ENDOW_ENTRY_LEN > MAX_ENDOWMENTS {
+    if endow.len() / ENDOW_ENTRY_LEN > MAX_SPAWN_ENDOWMENTS {
         return Err(SyscallError::InvalidArgument.into());
     }
     // Checked before the loop: `install_at`'s cap misses a repeated slot, which would duplicate
@@ -118,7 +145,7 @@ pub fn build_child_handles(
     if slot_map.len() / SLOT_PAIR_LEN > MAX_SLOT_MAP {
         return Err(SyscallError::InvalidArgument.into());
     }
-    if labels.len() > MAX_LABELS_LEN {
+    if labels.len() > MAX_SPAWN_LABELS_LEN {
         return Err(SyscallError::InvalidArgument.into());
     }
     let data_arc = process_data();

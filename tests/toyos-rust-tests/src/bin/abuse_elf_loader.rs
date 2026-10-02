@@ -244,6 +244,7 @@ fn spawn_path(path: &str) -> Result<u64, SyscallError> {
             cwd_len: CWD.len() as u64,
             image: 0,
             image_len: 0,
+            place: u64::from(toyos_abi::HANDLE_INVALID.0),
         })
     }
     .map(|pid| pid.0 as u64)
@@ -296,6 +297,7 @@ fn spawn_image(path: &str, bytes: &[u8]) -> Result<u64, SyscallError> {
             cwd_len: CWD.len() as u64,
             image: toyos::AsHandle::as_handle(&object).0 as u64,
             image_len: bytes.len() as u64,
+            place: u64::from(toyos_abi::HANDLE_INVALID.0),
         })
     }
     .map(|pid| pid.0 as u64)

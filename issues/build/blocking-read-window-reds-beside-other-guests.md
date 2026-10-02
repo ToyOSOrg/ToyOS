@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-09-26
 ---
 
@@ -8,7 +8,7 @@ opened: 2026-09-26
 
 The verdict, in the fast tier: `blocking_read_stress: only N of 500 round trips
 completed inside 3s — a wake was not delivered`. The harness's re-run alone is
-green. `cargo run -- --known-red blocking_read_window` answers NO.
+green.
 
 Sightings, all on 2026-09-26:
 
@@ -43,3 +43,7 @@ wake does.
 progress over the window, not only the count at its end), and a cause for these
 runs — a lost wake, or a 3 s budget a starved host cannot meet, and if it is
 the budget, the bound derived rather than measured.
+
+**Its test is deleted**, as a flaky test is: `dc62efca4` took
+`blocking_read_window` out, QEMU and T14 rows both, with `watch-window`, the
+actuator only it armed, and `git revert dc62efca4` brings them back.

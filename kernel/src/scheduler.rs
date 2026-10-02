@@ -342,12 +342,6 @@ pub fn yield_now() {
     driver::pass(Dispose::Yield);
 }
 
-/// Whether [`yield_now`] may be called where the running context stands.
-#[cfg(feature = "boot-actuators")]
-pub fn may_yield() -> bool {
-    crate::preempt::count() == blocking_baseline()
-}
-
 /// Unified preempt entry: the user-mode timer path, [`exit_to_user`]
 /// and the `preempt::enable` slow path all funnel through here.
 #[track_caller]
@@ -410,10 +404,6 @@ pub fn exit_to_user() {
         leave_user_if_due();
         // `do_preempt` owns clearing `need_resched`; this function never clears it itself.
         if !crate::preempt::need_resched() {
-            #[cfg(feature = "boot-actuators")]
-            if crate::actuator::dump_in_blocking_pass() {
-                crate::sched::dump::staged::note_return_to_user();
-            }
             return;
         }
         assert!(!in_schedule_self(), "exit-to-user inside a scheduler pass");

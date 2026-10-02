@@ -39,14 +39,7 @@ const PREFIX_BYTES: usize = 3072 * 512;
 fn corpus() -> &'static (Vec<u8>, u64) {
     static ONCE: OnceLock<(Vec<u8>, u64)> = OnceLock::new();
     ONCE.get_or_init(|| {
-        let image = Image::new("hostile", 64 * 1024 * 1024, 1);
-        image.with_mount(|mount| {
-            std::fs::create_dir_all(mount.join("sub/deeper")).expect("mkdir");
-            std::fs::write(mount.join("plain.txt"), b"a short file").expect("write");
-            std::fs::write(mount.join("A Long Name For Entries.bin"), pattern(20_000, 5)).expect("write");
-            std::fs::write(mount.join("sub/inner.dat"), pattern(4000, 6)).expect("write");
-            std::fs::write(mount.join("sub/deeper/leaf.txt"), b"leaf").expect("write");
-        });
+        let image = Image::fixture("hostile");
         image.fsck();
         (image.bytes(PREFIX_BYTES), image.size())
     })
@@ -507,11 +500,7 @@ fn the_caller_limit_is_the_named_directorys_and_not_the_volumes() {
 /// with a kernel line calling a healthy volume corrupt.
 #[test]
 fn an_empty_file_is_not_a_corrupt_directory() {
-    let image = Image::new("empty-file", 64 * 1024 * 1024, 1);
-    image.with_mount(|mount| {
-        std::fs::write(mount.join("empty.txt"), b"").expect("write");
-        std::fs::write(mount.join("full.txt"), b"twelve bytes").expect("write");
-    });
+    let image = Image::fixture("empty-file");
     image.fsck();
     let mut fs = Fat32::mount(SparseDevice::from_prefix(&image.bytes(PREFIX_BYTES), image.size()))
         .expect("mount");

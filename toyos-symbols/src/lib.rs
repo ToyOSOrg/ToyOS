@@ -46,8 +46,7 @@ pub const SYMBOL_BUDGET: usize = MAX_RECORD_MESSAGE - FRAME_OVERHEAD;
 ///
 /// An even split of what is left, because a backtrace with only one end of a
 /// name in it names nothing either way: the head is the crate and the module
-/// path, the tail is the function, and `screen_late_panic` asserts on the tail
-/// for that reason.
+/// path, the tail is the function.
 const SYMBOL_KEPT: usize = SYMBOL_BUDGET - MARKER_MAX;
 pub const SYMBOL_HEAD: usize = SYMBOL_KEPT / 2;
 pub const SYMBOL_TAIL: usize = SYMBOL_KEPT - SYMBOL_HEAD;
@@ -63,12 +62,6 @@ const _: () = assert!(SYMBOL_BUDGET == 944 && SYMBOL_HEAD == 451 && SYMBOL_TAIL 
 /// A demangled symbol, rendered head-and-tail when it is wider than a record
 /// can carry. `toyos-elide` is the mechanism and the argument.
 ///
-/// **Nothing in the guest suite reaches this at the shipped bound, and saying
-/// so is the point of this comment.** `screen_late_panic`'s
-/// `late_panic::Nest` demangles to 288 bytes against a budget of 944, so
-/// that gate proves the panel keeps a symbol's tail and proves nothing about
-/// the elision — the tree's own widest symbol is under a third of what
-/// triggers it.
 /// `toyos-elide`'s own tests are where the seams are checked, on the host,
 /// against characters that straddle both of them.
 pub fn symbol_text<D>(name: D) -> Elided<D, SYMBOL_HEAD, SYMBOL_TAIL> {

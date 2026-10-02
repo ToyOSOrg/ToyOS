@@ -17,15 +17,6 @@ fn connecting(t: i64) -> H {
     h
 }
 
-fn listening() -> H {
-    let mut h = H::new(65_535);
-    h.peer = (B, 40_000);
-    h.local = (A, 80);
-    h.start(0);
-    h.listener = Some(h.tcp.listen(A, Some(port(80)), || 0).unwrap());
-    h
-}
-
 /// HS-03 before the ACK: a pending child.
 fn child() -> H {
     let mut h = listening();
@@ -367,7 +358,7 @@ fn s_hs_034_synack_give_up() {
 #[test]
 fn s_hs_035_connect_needs_a_unicast_remote() {
     let mut h = H::new(65_535);
-    for addr in [Ipv4Addr::BROADCAST, Ipv4Addr::new(224, 0, 0, 1), Ipv4Addr::UNSPECIFIED] {
+    for addr in [Ipv4Addr::BROADCAST, Ipv4Addr::new(224, 0, 0, 1), Ipv4Addr::UNSPECIFIED, Ipv4Addr::LOCALHOST, Ipv4Addr::new(0, 1, 2, 3)] {
         assert_eq!(h.tcp.connect(h.now(), A, None, ep(addr, 80)), Err(Error::InvalidRemote));
     }
     nothing(&h.transmit());

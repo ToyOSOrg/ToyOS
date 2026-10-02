@@ -23,39 +23,21 @@ const REQUIRED: &[Tool] = &[
     Tool { any: &["cc"], why: "rustc links every host binary through it; no guest binary" },
     Tool {
         any: &["cmake"],
-        why: "every build keys the host's LLVM on its `--version`, and rustc's bootstrap \
-              configures LLVM and clang with it; `brew install cmake` on macOS",
-    },
-];
-
-/// Named, because a list that stops at what is fatal reads as the whole list.
-/// Each of these costs one thing when absent rather than the build, so none of
-/// them exits.
-///
-/// Ninja is what rustc's bootstrap builds LLVM and clang from
-/// `rust/src/llvm-project` with, under CMake, which it does only when this
-/// host has not built that LLVM. Both are host tools like `cc`, and never in a
-/// guest: on macOS from Homebrew, on CI's toolchain runner at the versions
-/// `.github/workflows` pins.
-const ALSO_USED: &[Tool] = &[
-    Tool {
-        any: &["python3", "python", "py", "python2", "uv"],
-        why: "rust/x runs rustc's bootstrap, which is Python — a clean clone and \
-              every toolchain change need one",
+        why: "every build keys the host's LLVM on its `--version`, rustc's bootstrap \
+              configures LLVM and clang with it, and every sysroot build the C++ runtime; \
+              `brew install cmake` on macOS",
     },
     Tool {
-        any: &["ninja"],
-        why: "rustc's bootstrap builds LLVM and clang with it, under CMake; `brew install \
-              ninja` on macOS",
+        any: &["python3", "python"],
+        why: "rust/x runs rustc's bootstrap, which is Python, and the C++ runtime's CMake \
+              requires a Python 3 and runs it in every sysroot build",
     },
 ];
 
 /// Where the OS would find `name`, if anywhere.
 ///
 /// A `PATH` scan and not a `--version` run: it is what `Command::new` does
-/// anyway, and one name above must not be executed — asking macOS for `py`
-/// opens the Command Line Tools installer, which is why `rust/x` searches
-/// `python3` ahead of it.
+/// anyway.
 fn executable_on_path(name: &str) -> bool {
     use std::os::unix::fs::PermissionsExt;
     let Some(path) = env::var_os("PATH") else {
@@ -68,16 +50,11 @@ fn executable_on_path(name: &str) -> bool {
 }
 
 fn check_prerequisites(root: &Path, arch: Arch) {
-    fn absent(tools: &'static [Tool]) -> Vec<&'static Tool> {
-        tools.iter().filter(|t| !t.any.iter().any(|n| executable_on_path(n))).collect()
-    }
-
-    for tool in absent(ALSO_USED) {
-        eprintln!("Note: no {} — {}", tool.any.join(" or "), tool.why);
-    }
-
-    let mut missing: Vec<String> =
-        absent(REQUIRED).iter().map(|t| format!("{} ({})", t.any.join(" or "), t.why)).collect();
+    let mut missing: Vec<String> = REQUIRED
+        .iter()
+        .filter(|t| !t.any.iter().any(|n| executable_on_path(n)))
+        .map(|t| format!("{} ({})", t.any.join(" or "), t.why))
+        .collect();
     if !executable_on_path(arch.qemu()) {
         missing.push(format!("{} (every {} boot — install QEMU)", arch.qemu(), arch.name()));
     }
@@ -114,13 +91,8 @@ fn main() {
     }
     let asked = |flag: &flags::Flag| CARGO_RUN.present(&args, flag);
 
-    // **Before `check_prerequisites`**, because it builds nothing.
-    if asked(&flags::SYNC) {
-        toyos_build::sync::dispatch_sync(&root);
-        return;
-    }
-    // Every CI job. Here for the same reason: the host job's runner has no QEMU,
-    // and a guest job names its own instrument rather than being noted at.
+    // Every CI job, before `check_prerequisites`: the host job's runner has no
+    // QEMU, and a guest job names its own instrument rather than being noted at.
     if asked(&flags::CI) {
         toyos_build::ci::dispatch(&root, &args);
         return;
@@ -130,13 +102,6 @@ fn main() {
     // it shells to `cargo clippy` and the runner that runs it has no QEMU.
     if asked(&flags::CLIPPY) {
         toyos_build::clippy::dispatch(&root);
-        return;
-    }
-    // Reads one table and prints. Here for the same reason again, and for one
-    // more: the question it answers — "is this test disabled?" — is asked
-    // while a build is broken as often as while one works.
-    if asked(&flags::KNOWN_RED) {
-        toyos_build::redlist::dispatch(&args);
         return;
     }
     // Writes one file outside the checkout and builds nothing.
@@ -228,11 +193,6 @@ fn main() {
 
     if let Some(bank) = CARGO_RUN.value(&args, &flags::REGEN_SOUNDFONT) {
         toyos_build::soundfont::regen(&root, Path::new(bank));
-        return;
-    }
-
-    if asked(&flags::WORKTREE) {
-        toyos_build::worktree::dispatch(&root, &args);
         return;
     }
 

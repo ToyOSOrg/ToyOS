@@ -17,7 +17,7 @@ use core::fmt;
 use uefi::proto::media::file::{Directory, File, FileAttribute, FileMode, RegularFile};
 use uefi::proto::media::fs::SimpleFileSystem;
 use uefi::proto::media::partition::PartitionInfo;
-use uefi::table::boot::{BootServices, OpenProtocolAttributes, OpenProtocolParams, SearchType};
+use uefi::table::boot::{BootServices, SearchType};
 use uefi::{prelude::*, CStr16, Handle};
 
 /// The loader's first line, which is also the file's: [`open`] runs before it.
@@ -111,8 +111,7 @@ pub fn with_volume<T>(
 ) -> Result<T, alloc::string::String> {
     let bs = system_table.boot_services();
     let handle = volume_handle(bs, guid)?;
-    let mut fs = bs
-        .open_protocol_exclusive::<SimpleFileSystem>(handle)
+    let mut fs = crate::protocol::exclusive::<SimpleFileSystem>(bs, handle)
         .map_err(|e| alloc::format!("the log partition would not open ({e})"))?;
     let mut root = fs
         .open_volume()
@@ -138,7 +137,7 @@ pub fn open(system_table: &SystemTable<Boot>, guid: &[u8; 16], truncate: bool) {
         Ok(handle) => handle,
         Err(why) => return refused(format_args!("{why}")),
     };
-    let mut fs = match bs.open_protocol_exclusive::<SimpleFileSystem>(handle) {
+    let mut fs = match crate::protocol::exclusive::<SimpleFileSystem>(bs, handle) {
         Ok(fs) => fs,
         Err(e) => return refused(format_args!("the log partition would not open ({e})")),
     };
@@ -216,21 +215,7 @@ pub fn close() {
 /// The unique GUID of the GPT partition `handle` sits on. `None` is a handle
 /// that publishes no partition record, or one on a table that is not GPT.
 fn unique_guid(bs: &BootServices, handle: Handle) -> Option<[u8; 16]> {
-    // `GetProtocol`, never `Exclusive`: this runs over every filesystem on the
-    // machine, and EXCLUSIVE would call `Stop` on whatever driver holds each.
-    //
-    // SAFETY: `open_protocol`'s obligation is that this handle and its protocol
-    // stay installed until the `ScopedProtocol` drops. Nothing between the two
-    // can uninstall either: the loader is the one image running, it registers
-    // no event callback, and it calls no boot service that connects or
-    // disconnects a controller.
-    let info = unsafe {
-        bs.open_protocol::<PartitionInfo>(
-            OpenProtocolParams { handle, agent: bs.image_handle(), controller: None },
-            OpenProtocolAttributes::GetProtocol,
-        )
-    }
-    .ok()?;
+    let info = crate::protocol::get::<PartitionInfo>(bs, handle).ok()?;
     let entry = info.gpt_partition_entry()?;
     // A `repr(packed)` entry, where a reference into it would be unaligned.
     Some({ entry.unique_partition_guid }.to_bytes())

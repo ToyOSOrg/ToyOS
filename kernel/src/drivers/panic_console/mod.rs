@@ -519,7 +519,6 @@ pub fn remap() {
 /// framebuffer is armed. Freezes the report at the instant of the panic —
 /// [`live_tail`] re-reads a ring siblings may still be writing to, and a sibling
 /// logging between panic and paint would push the report off its window.
-/// `screen_late_panic` writes such a record and reads the panel for its absence.
 pub fn capture() {
     capture_into(false);
 }
@@ -1363,22 +1362,6 @@ fn row_base(fb: &Fb, y: usize, len: usize) -> Option<*mut u32> {
     // the `then`: `start`/`end` are checked products and `end <= fb.bytes`
     // gates the pointer's existence.
     (end <= fb.bytes).then(|| unsafe { fb.ptr.add(start as usize) as *mut u32 })
-}
-
-/// Paint the whole panel a colour no glyph contains, over whatever is
-/// there. The actuator for "something drew over the console's back": no
-/// other painter can stage this, since `render` (the one that ignores the
-/// userland claim) halts the machine on its way out.
-#[cfg(feature = "test-actuators")]
-pub fn graffiti() {
-    let Some(fb) = snapshot() else { return };
-    if !mapped(&fb) {
-        return;
-    }
-    log!("SYS_DEBUG: painting over the screen a userland process owns");
-    forget_the_glass();
-    let _ = fill_screen(&fb, rgb(&fb, 0x00, 0xC0, 0x00), &|| false);
-    flush_stores();
 }
 
 /// Erases whatever the compositor left behind, so nothing on screen is

@@ -66,10 +66,8 @@ winit = { git = "https://github.com/ToyOSOrg/winit", branch = "toyos-0.30.13" }
 
 # The one profile every guest binary is built with.
 # Optimised, because an unoptimised guest mismeasures everything under TCG;
-# debug-assertions and overflow-checks on, because fail-fast beats speed here
-# and both crafted-ELF kernel panics in `issues/` were *found* by
-# an overflow check. `--release` would turn the last two off silently, so this
-# build system no longer has the flag.
+# debug-assertions and overflow-checks on, because fail-fast beats speed here.
+# `--release` would turn the last two off silently.
 #
 # What it replaces here: dependencies at 2 through `package."*"`, doom and the
 # compositor named individually at 2, and every other program at the dev
