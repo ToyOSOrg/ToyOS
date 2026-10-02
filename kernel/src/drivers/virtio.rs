@@ -165,18 +165,6 @@ const RESET: crate::time::Budget = crate::time::Budget::of(
     "the device is refused, never waited on",
 );
 
-/// The reset handshake's answer; the actuator blinds it to stage a device that
-/// never answers, sparing the console — the staged boot's own capture channel.
-fn reset_acknowledged(common: &Mmio, pci_dev: &PciDevice) -> bool {
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::virtio_reset_stuck() && pci_dev.device_id() != 0x1043 {
-        return false;
-    }
-    #[cfg(not(feature = "boot-actuators"))]
-    let _ = pci_dev;
-    common.read_u32(COMMON_DEVICE_STATUS) == 0
-}
-
 /// Every driver's accepted set carries [`VIRTIO_F_ACCESS_PLATFORM`]; the actuator
 /// withholds it to stage a function no unit sees, sparing the console.
 fn platform_addressing(pci_dev: &PciDevice) -> u64 {
@@ -331,32 +319,6 @@ impl DescSlot {
     pub fn id(&self) -> u16 { self.0 }
 }
 
-/// Why a used-ring element this driver read is not one it will act on.
-/// Refused rather than clamped: there is nothing here to recover from a forged completion.
-/// Userland maps virtio-sound's control and event queues writable, so neither device-written field is trustworthy unchecked.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UsedRefusal {
-    /// The head descriptor id is not an index into this queue's table.
-    Head(Refused),
-    /// The head names a descriptor this queue has published no chain at.
-    NoChain { id: u16 },
-    /// The device claims more bytes written than the chain this head was given.
-    Written { id: u16, refused: Refused },
-}
-
-impl core::fmt::Display for UsedRefusal {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Head(refused) => write!(f, "its head descriptor {refused}"),
-            Self::NoChain { id } => {
-                write!(f, "a completion for descriptor {id}, where this queue published no chain")
-            }
-            Self::Written { id, refused } => {
-                write!(f, "chain {id} was written {refused}")
-            }
-        }
-    }
-}
 
 /// Interrupt-context, lock-free consumer of a virtqueue's used ring; an ISR can drain while another CPU submits under a lock.
 /// Lock-free because it reads only device-written memory and its own `last_used_idx`, never shared driver state.
@@ -410,14 +372,6 @@ pub struct Virtqueue<'pool> {
     used_split: bool,
     /// Bytes each chain's descriptor was given; the one bound a device-reported `len` is compared against. 0 means no chain.
     chain_bytes: alloc::vec::Vec<u32>,
-    /// Used-ring elements this queue refused, for the life of the boot.
-    ///
-    /// Counted always; the only thing that *reads it out* is
-    /// [`used_selftest`], in the actuator kernel. The drivers still on this
-    /// type — console, sound, GPU — answer a refusal where they are rather than
-    /// by reading a total, and the one that did read it took its driver to
-    /// userland with it.
-    refused: u32,
 }
 
 /// Direction of a buffer in a descriptor chain.
@@ -455,7 +409,6 @@ impl<'pool> Virtqueue<'pool> {
             notify_offset: 0,
             used_split: false,
             chain_bytes: alloc::vec![0u32; queue_size as usize],
-            refused: 0,
         }
     }
 
@@ -594,7 +547,7 @@ impl<'pool> Virtqueue<'pool> {
     }
 
     /// Non-blocking poll of the used ring: `(DescSlot, written_len)` on completion, `None` if nothing new.
-    /// A refused element is counted and skipped, never returned, so one forged element cannot hide the ones behind it.
+    /// A refused element is skipped, never returned, so one forged element cannot hide the ones behind it.
     /// Never logs: the caller may hold `serial::BackendGuard`, the lock the log backend itself takes.
     pub fn poll_used(&mut self) -> Option<(DescSlot, u32)> {
         assert!(!self.used_split, "virtqueue: used ring split off");
@@ -609,60 +562,28 @@ impl<'pool> Virtqueue<'pool> {
             let id = self.used_ring_id(slot);
             let len = self.used_ring_len(slot);
             self.last_used_idx = self.last_used_idx.wrapping_add(1);
-            match self.parse_used(id, len) {
-                Ok(elem) => return Some(elem),
-                Err(_) => {
-                    // Forfeit rather than recovered: losing a token costs throughput, believing a bad one costs memory.
-                    self.refused = self.refused.saturating_add(1);
-                    continue;
-                }
+            // Forfeit rather than recovered: losing a token costs throughput, believing a bad one costs memory.
+            if let Some(elem) = self.parse_used(id, len) {
+                return Some(elem);
             }
         }
     }
 
-    /// What a used-ring element must satisfy, separated from the volatile reads so the self-test can exercise it.
-    fn parse_used(
-        &self,
-        id: Untrusted<u32>,
-        len: Untrusted<u32>,
-    ) -> Result<(DescSlot, u32), UsedRefusal> {
+    /// What a used-ring element must satisfy: a head inside this queue's table, at a published
+    /// chain, written no further than that chain. Refused rather than clamped: there is nothing
+    /// here to recover from a forged completion, and userland maps virtio-sound's control and
+    /// event queues writable, so neither device-written field is trustworthy unchecked.
+    fn parse_used(&self, id: Untrusted<u32>, len: Untrusted<u32>) -> Option<(DescSlot, u32)> {
         // `chain_bytes` is exactly `size` long: the descriptor table's own bound, not a constant beside it.
-        let head = id.index(self.chain_bytes.len()).map_err(UsedRefusal::Head)?;
-        // Exact: `index` proved `head < size`, a `u16`.
-        let id = head as u16;
+        let head = id.index(self.chain_bytes.len()).ok()?;
         let chain = self.chain_bytes[head];
         if chain == 0 {
-            return Err(UsedRefusal::NoChain { id });
+            return None;
         }
-        let written = len
-            .at_most(chain as u64)
-            .map_err(|refused| UsedRefusal::Written { id, refused })?;
-        // Exact: `at_most` proved it is no more than `chain`, a `u32`.
-        Ok((DescSlot(id), written as u32))
-    }
-
-    /// How many used-ring elements this queue has refused, for [`used_selftest`]
-    /// alone: every case it stages would pass against a `poll_used` that
-    /// refused right and counted nothing.
-    ///
-    /// Only the actuator kernel has a reader. A shipping kernel's drivers each
-    /// report their own refusals where they can log — the counter is here, and
-    /// what is done about it is theirs.
-    #[cfg(feature = "boot-actuators")]
-    pub fn refused(&self) -> u32 {
-        self.refused
-    }
-
-    /// Write one used-ring element as a device would; the only writer of a used ring in this kernel, for [`used_selftest`] alone.
-    /// Compiled only into the actuator kernel, so the shipping kernel never gains a way to write its own used ring.
-    #[cfg(feature = "boot-actuators")]
-    fn write_used_as_a_device_would(&self, at: u16, id: u32, len: u32) {
-        let slot = at % self.size;
-        self.used.write(self.used_elem_at(slot), id);
-        self.used.write(self.used_elem_at(slot) + 4, len);
-        // As a device does: the element before the idx.
-        barrier::dma_wmb();
-        self.used.write::<u16>(USED_IDX_OFF, at.wrapping_add(1));
+        let written = len.at_most(chain as u64).ok()?;
+        // Exact: `index` proved `head < size`, a `u16`, and `at_most` that `written` is no more
+        // than `chain`, a `u32`.
+        Some((DescSlot(head as u16), written as u32))
     }
 
     /// Submit a descriptor chain and block until the device completes it, returning the recovered `DescSlot`.
@@ -735,104 +656,6 @@ fn wait_until<T>(at: u64, mut now: impl FnMut() -> u64, mut look: impl FnMut() -
             }
         }
     }
-}
-
-/// [`wait_until`] on a clock that has already passed its bound, as a waiter
-/// that was off its CPU for all of it finds it: a completion the next look
-/// finds is taken, and one that never comes is `None`.
-#[cfg(feature = "boot-actuators")]
-pub fn wait_selftest() {
-    const CASES: usize = 2;
-    let mut passed = 0usize;
-    let mut looks = 0u32;
-    let late = wait_until(0, || u64::MAX, || {
-        looks += 1;
-        (looks > LOOKS_PER_CHECK).then_some(())
-    });
-    if late.is_some() {
-        passed += 1;
-    } else {
-        log!("virtio: wait selftest FAILED on a completion found after the bound: the wait gave up on it");
-    }
-    if wait_until(0, || u64::MAX, || None::<()>).is_none() {
-        passed += 1;
-    } else {
-        log!("virtio: wait selftest FAILED on a device that never answers");
-    }
-    log!("virtio: wait selftest {passed}/{CASES}");
-}
-
-/// Run [`Virtqueue::poll_used`] over eleven crafted used-ring elements no real device would ever send.
-/// Exercises the shipped `poll_used` over a real [`Virtqueue`] and DMA page; only the writer of the ring is not a device.
-#[cfg(feature = "boot-actuators")]
-pub fn used_selftest() {
-    use super::DmaPool;
-
-    const SIZE: u16 = 16;
-    /// The chain the self-test publishes at descriptor 3, in bytes.
-    const CHAIN: u32 = 256;
-    /// A descriptor inside the queue that no chain was ever built at.
-    const UNBUILT: u32 = 5;
-    const CASES: usize = 11;
-
-    // Not leaked: the pool's pages go back when this returns, and `Dma<'_>`'s borrow keeps the queue from outliving them.
-    let pool = DmaPool::alloc_in(0x1000, crate::iommu::DeviceSpace::Untranslated);
-    let dma = pool.view();
-    let mut q = Virtqueue::new(dma.subview(0, 0x1000), SIZE);
-    q.write_chain(3, &[(dma.device_addr(), CHAIN, BufDir::Writable)]);
-
-    // `at` is what the queue's own `last_used_idx` will be when this element is read.
-    let publish = Virtqueue::write_used_as_a_device_would;
-
-    /// One table row: name, head id, completion length, and what `poll_used` must answer (`None` = must refuse).
-    type Case = (&'static str, u32, u32, Option<(u16, u32)>);
-
-    /// One element, and what `poll_used` must answer for it.
-    const TABLE: [Case; 9] = [
-        ("a chain the device filled", 3, CHAIN, Some((3, CHAIN))),
-        ("a chain the device part-filled", 3, 1, Some((3, 1))),
-        // A readable-only chain: the device wrote nothing into it and says so.
-        ("a chain the device wrote nothing into", 3, 0, Some((3, 0))),
-        ("a head past the queue", SIZE as u32, 0, None),
-        // 0x1_0003 narrows to 3 under `as u16`; a driver that truncated before comparing would accept this.
-        ("a head whose low 16 bits are in range", 0x1_0003, CHAIN, None),
-        ("a head of every bit", u32::MAX, 0, None),
-        ("one byte more than the chain", 3, CHAIN + 1, None),
-        ("a length of every bit", 3, u32::MAX, None),
-        ("a completion for a chain never published", UNBUILT, 0, None),
-    ];
-
-    let mut passed = 0usize;
-    let mut at = 0u16;
-    for (name, id, len, want) in TABLE {
-        publish(&q, at, id, len);
-        at = at.wrapping_add(1);
-        let got = q.poll_used().map(|(slot, len)| (slot.id(), len));
-        if got == want {
-            passed += 1;
-        } else {
-            log!("virtio: used-ring selftest FAILED on {name}: got {got:?}, want {want:?}");
-        }
-    }
-
-    // A completion behind a refused element is still delivered: forging one element must not hide the rest.
-    publish(&q, at, u32::MAX, u32::MAX);
-    publish(&q, at.wrapping_add(1), 3, CHAIN);
-    let got = q.poll_used().map(|(slot, len)| (slot.id(), len));
-    if got == Some((3, CHAIN)) {
-        passed += 1;
-    } else {
-        log!("virtio: used-ring selftest FAILED on a chain behind a refused element: got {got:?}");
-    }
-
-    // The count is checked too: every case above would pass against a `poll_used` that refused right but counted nothing.
-    let refused = q.refused();
-    if refused != 7 {
-        log!("virtio: used-ring selftest FAILED on the count: refused {refused}, want 7");
-    } else {
-        passed += 1;
-    }
-    log!("virtio: used-ring selftest {passed}/{CASES}");
 }
 
 /// Drive the real walk, window check and parse over config space no device produces: a cyclic
@@ -1027,7 +850,7 @@ impl VirtioDevice {
 
         // Order fixed by virtio 1.2 §3.1.1: reset, ACKNOWLEDGE, DRIVER, negotiate features, FEATURES_OK, verify.
         common.write_u32(COMMON_DEVICE_STATUS, 0);
-        if !crate::clock::settles(RESET.nanos(), || reset_acknowledged(&common, pci_dev)) {
+        if !crate::clock::settles(RESET.nanos(), || common.read_u32(COMMON_DEVICE_STATUS) == 0) {
             pci_dev.disable_bus_master();
             return Err(InitRefusal::ResetUnanswered);
         }

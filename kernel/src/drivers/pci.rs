@@ -1,6 +1,4 @@
 use alloc::vec::Vec;
-#[cfg(feature = "boot-actuators")]
-use core::sync::atomic::{AtomicU32, Ordering};
 
 use toyos_pci::{bar, bridge, caps, msi, msix};
 
@@ -33,34 +31,6 @@ const MSG_DEST: u32 = 0;
 
 /// No requester id: a bus/device/function is sixteen bits, so this is none of them.
 pub(crate) const NO_FUNCTION: u32 = u32::MAX;
-
-/// The one function whose capability list is staged to end early, as a
-/// requester id, or [`NO_FUNCTION`]: every other walk in this kernel reads the
-/// list the device published.
-#[cfg(feature = "boot-actuators")]
-static STAGED: AtomicU32 = AtomicU32::new(NO_FUNCTION);
-
-/// Stages the function a claim is bringing up as one publishing MSI and, past a
-/// link the spec forbids, an MSI-X table — for as long as this is held.
-#[cfg(feature = "boot-actuators")]
-pub(crate) struct StagedCaps;
-
-#[cfg(feature = "boot-actuators")]
-impl StagedCaps {
-    pub(crate) fn armed_for(pci: &PciDevice) -> Self {
-        if crate::actuator::pcidev_caps_truncated() {
-            STAGED.store(u32::from(crate::pcidev::requester(pci)), Ordering::Relaxed);
-        }
-        Self
-    }
-}
-
-#[cfg(feature = "boot-actuators")]
-impl Drop for StagedCaps {
-    fn drop(&mut self) {
-        STAGED.store(NO_FUNCTION, Ordering::Relaxed);
-    }
-}
 
 /// Why a walk of a function's capability list answered no capability.
 pub enum NoCapability {
@@ -372,7 +342,7 @@ impl PciDevice {
     /// function has no entry, so the message it would otherwise write is one the
     /// unit blocks.
     fn message(&self, vector: u8) -> Option<(u32, u32)> {
-        let dest = if crate::actuator::iommu_dest_apic1() { 1 } else { MSG_DEST };
+        let dest = MSG_DEST;
         match crate::iommu::remap_msi(self.bus, self.dev, self.func, vector, dest) {
             // The same CPU the remappable one would name.
             crate::iommu::Delivery::Direct => match crate::arch::msi_message(dest, vector) {
@@ -514,14 +484,6 @@ impl<'a> Iterator for CapabilityIter<'a> {
         // walk rather than running it off the window or forever.
         let offset = self.walk.step(self.next)?;
         self.next = self.device.read_config_u8(offset as u64 + 1);
-        // A staged function's link past its MSI capability is one byte off
-        // dword alignment, so the walk ends here and nothing past it is read.
-        #[cfg(feature = "boot-actuators")]
-        if STAGED.load(Ordering::Relaxed) == u32::from(crate::pcidev::requester(self.device))
-            && self.device.read_config_u8(offset as u64) == msi::CAP_ID
-        {
-            self.next = offset | 1;
-        }
         Some(Capability { device: self.device, offset: offset as u64 })
     }
 }

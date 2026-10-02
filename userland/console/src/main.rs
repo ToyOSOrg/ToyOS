@@ -18,7 +18,6 @@
 //! - **A fatal panic still takes the screen back.** `render` ignores
 //!   `SCREEN_OWNED_BY_USERLAND` entirely — only boot checkpoints honour it —
 //!   so the report paints over whatever this program drew.
-//!   `screen_console_panic` is the gate.
 //! - **The emulator is `/system/bin/terminal`'s**, unchanged. `Console::new` always
 //!   took a raw mapping; the compositor was never below it. This is the caller
 //!   whose mapping is the scanout, so it is the one that pays for a read.

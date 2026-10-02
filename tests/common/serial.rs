@@ -40,8 +40,7 @@ pub enum Died {
     Kernel,
     /// A process the kernel killed: a Ring 3 fault, reported by name in
     /// `kernel/src/arch/x86_64/idt/exceptions.rs`. The machine is fine — a test whose
-    /// whole subject is a process dying (`handle_kill_policy` and every
-    /// `faults.rs` probe) produces these deliberately. Before a boot's ready
+    /// whole subject is a process dying produces these deliberately. Before a boot's ready
     /// marker it still ends the boot: whatever died was `init` or one of its
     /// children, and nothing left is going to reach the marker.
     Faulted,
@@ -109,7 +108,7 @@ pub(crate) const DEATHS: &[(&str, Died, Died)] = &[
     // capture can carry it twice.
     ("DOUBLE PANIC", Died::Kernel, Died::Kernel),
     // kernel/src/main.rs — the reentry guard, written straight out the UART
-    // port with no lock and therefore with no prefix. It reaches the 16550 log
+    // port with no prefix. It reaches the 16550 log
     // rather than the console, and is here so that a capture carrying it is
     // never read as anything else.
     ("PANIC REENTRY", Died::Kernel, Died::Kernel),
@@ -211,19 +210,10 @@ impl Serial {
         Self { text: qemu.boot_log().to_string(), source: String::from("boot console") }
     }
 
-    /// For text a test collected itself — a `drain_serial` window, a
-    /// `TestResult::serial`, the 16550 file of a guest that died early.
+    /// For text a test collected itself — a `drain_serial` window, the 16550
+    /// file of a guest that died early.
     pub fn named(source: &str, text: impl Into<String>) -> Self {
         Self { text: text.into(), source: source.to_string() }
-    }
-
-    /// Append a later window — `drain_serial`, a test's own serial. Keeps one
-    /// object to assert against instead of a `format!` of two.
-    pub fn push(&mut self, more: &str) {
-        self.text.push_str(more);
-        if !more.ends_with('\n') {
-            self.text.push('\n');
-        }
     }
 
     pub fn text(&self) -> &str {
@@ -281,13 +271,9 @@ impl Serial {
     /// A whole-capture scan answers with the earliest line of that shape,
     /// whoever wrote it and whenever — and for a test that *stages* the event it
     /// is looking for, the earliest line is the wrong one whenever anything else
-    /// on the machine can produce the same shape. `i8042_undecoded_bytes`
-    /// injects an undecodable key once the guest prints `===I8042_READY===` and
-    /// then read the first `nothing decoded` line in its capture as the answer;
-    /// the driver's own bring-up can produce one before that marker, and on a
-    /// laptop a real spurious interrupt can too.
+    /// on the machine can produce the same shape.
     ///
-    /// The marker is what the injection was timed off, so it is the boundary the
+    /// The marker is what the staging was timed off, so it is the boundary the
     /// test actually knows — no host clock is involved, and a stranger line
     /// before it can no longer be read as the test's own. A missing marker is a
     /// failure rather than a fallback to the whole capture: the anchor going
@@ -350,37 +336,6 @@ impl Serial {
         }
         Ok(())
     }
-
-    /// [`Self::must_be_clean`] for the one test that staged one of
-    /// [`NEVER_CLEAN`]'s lines on purpose.
-    ///
-    /// `allowed` may appear exactly `times` and no other never-clean line may
-    /// appear at all, so a boot that produced a *second* one — or a different
-    /// one — still reds. Named rather than a flag, because the whole value of
-    /// `NEVER_CLEAN` is that a test cannot pass one by without saying so.
-    pub fn must_be_clean_apart_from(&self, allowed: &str, times: usize) -> Result<(), String> {
-        for (bad, by_kernel, _) in DEATHS {
-            if *by_kernel != Died::Kernel {
-                continue;
-            }
-            self.must_not_say(bad)?;
-        }
-        for bad in NEVER_CLEAN {
-            if *bad == allowed {
-                continue;
-            }
-            self.must_not_say(bad)?;
-        }
-        let seen = self.text().matches(allowed).count();
-        if seen != times {
-            return Err(format!(
-                "{allowed:?} appears {seen} time(s) on a {} and this test staged {times}:\n{}",
-                self.source,
-                self.text
-            ));
-        }
-        Ok(())
-    }
 }
 
 /// Lines a boot survives and still must not print.
@@ -394,7 +349,6 @@ const NEVER_CLEAN: &[&str] = &[
     // address its own domain does not map. The machine goes on and the claim
     // refuses every later call, so this is not a death; it is a driver whose
     // descriptors are wrong, and a netd that did it on every boot would
-    // otherwise pass everywhere. `userdev_dma_fault` stages exactly one on
-    // purpose and reads it with `must_say`.
+    // otherwise pass everywhere.
     "iommu: DMA FAULT owner=slot",
 ];

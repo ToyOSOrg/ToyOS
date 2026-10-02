@@ -93,7 +93,7 @@ pub fn self_check() -> Result<(), String> {
     // `must_say_after`, against the capture that made it exist: a stranger line
     // of the right shape before the marker, and the test's own after it. The
     // first case is the defect and is asserted in both directions — the plain
-    // scan reads the stranger, which is what `i8042_undecoded_bytes` did.
+    // scan reads the stranger.
     const READY: &str = "===I8042_READY===";
     let stranger = "[kernel 0.418 cpu1] i8042: 1 interrupts and 0 bytes, nothing decoded — first \
                     seen at 418ms";

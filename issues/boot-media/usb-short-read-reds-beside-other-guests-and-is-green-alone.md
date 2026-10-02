@@ -1,6 +1,6 @@
 ---
 status: open
-kind: tooling
+kind: defect
 opened: 2026-08-22
 ---
 
@@ -15,8 +15,6 @@ FAIL usb_short_read: one short read cost the disk the rest of its sweep
   ALONE usb_short_read: GREEN — it fails only beside other guests, so its
   Sched::Parallel is wrong. The run stays red on the classification.
 ```
-
-`cargo run -- --known-red usb_short_read` answers `NOT ON THE LIST`.
 
 Re-run immediately after, alone, on the same tree and in the same session:
 **green, 2 of 2**, 2.9 s each, host load average 7.70 with another agent's work
@@ -33,9 +31,9 @@ Not the diff it was seen from: that branch changes `syscall_window_nmi`'s
 assertions and two kernel doc headers, and touches nothing under `xhci/` or
 `usb_gate`.
 
-## Promoted 2026-08-25
+**Its test is deleted**, as a flaky test is: `402107ba2` took `usb_short_read`
+out with `usb-short-read`, the actuator only it armed, and `git revert
+402107ba2` brings both back.
 
-A flaky test under load with no known-red row and no rate is real, owed work
-(verified 2026-08-25: `cargo run -- --known-red usb_short_read` still answers
-`NOT ON THE LIST`). Owed to whoever next runs a session free to measure it
-and, if it reproduces, to file the `src/redlist.rs` row.
+**Exit**: a cause for one short read costing the disk the rest of its sweep
+beside other guests, and the test restored and green beside them.

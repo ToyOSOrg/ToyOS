@@ -5,9 +5,6 @@
 //! because some volume happens to carry a directory by that name; `/` is no
 //! filesystem either, so every syscall that would change what is at it is
 //! refused the way a read-only mount refuses one, and the machine survives it.
-//!
-//! The two files this writes are the other half of
-//! `apps_and_home_are_one_filesystem` in `tests/common/storage.rs`.
 
 use std::fs;
 use std::io::Write;
@@ -19,8 +16,6 @@ use toyos_abi::syscall::{self, OpenFlags, SyscallError};
 const ROOT_ENTRIES: [&str; 9] =
     ["apps", "boot", "config", "home", "log", "media", "state", "system", "tmp"];
 
-/// Mirrored in `tests/common/storage.rs`, whose reader sees them without the
-/// mount point, inside the one volume.
 const IN_HOME: &str = "/home/hierarchy-home.bin";
 const IN_APPS: &str = "/apps/hierarchy-apps.bin";
 const LEN: usize = 2 * 4096 + 61;

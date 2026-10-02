@@ -91,13 +91,8 @@ fn main() {
     }
     let asked = |flag: &flags::Flag| CARGO_RUN.present(&args, flag);
 
-    // **Before `check_prerequisites`**, because it builds nothing.
-    if asked(&flags::SYNC) {
-        toyos_build::sync::dispatch_sync(&root);
-        return;
-    }
-    // Every CI job. Here for the same reason: the host job's runner has no QEMU,
-    // and a guest job names its own instrument rather than being noted at.
+    // Every CI job, before `check_prerequisites`: the host job's runner has no
+    // QEMU, and a guest job names its own instrument rather than being noted at.
     if asked(&flags::CI) {
         toyos_build::ci::dispatch(&root, &args);
         return;
@@ -107,13 +102,6 @@ fn main() {
     // it shells to `cargo clippy` and the runner that runs it has no QEMU.
     if asked(&flags::CLIPPY) {
         toyos_build::clippy::dispatch(&root);
-        return;
-    }
-    // Reads one table and prints. Here for the same reason again, and for one
-    // more: the question it answers — "is this test disabled?" — is asked
-    // while a build is broken as often as while one works.
-    if asked(&flags::KNOWN_RED) {
-        toyos_build::redlist::dispatch(&args);
         return;
     }
     // Writes one file outside the checkout and builds nothing.
@@ -205,11 +193,6 @@ fn main() {
 
     if let Some(bank) = CARGO_RUN.value(&args, &flags::REGEN_SOUNDFONT) {
         toyos_build::soundfont::regen(&root, Path::new(bank));
-        return;
-    }
-
-    if asked(&flags::WORKTREE) {
-        toyos_build::worktree::dispatch(&root, &args);
         return;
     }
 
