@@ -149,8 +149,8 @@ times:
    does the work, and no step creates a kernel thread. `irq_ring`, the driver
    list in `drain_irqs` and the idle loop's device checks are gone by step 5.
    Each step measures the kernel's lines against stage 6's first commit, and
-   from step 2 the longest interrupts-off and preemption-off windows against
-   the readings step 2 records.
+   the longest interrupts-off and preemption-off windows against the readings
+   step 2's exit puts in the tree, by that exit's rule.
    Steps 3 and 4 do not land alone: they land with #592's i8042 stage and
    with usbd.
    1. **Interrupts post.** A post is legal in a handler: the watches a handler
@@ -168,12 +168,21 @@ times:
    2. **The windows, measured**: the longest interrupts-off and preemption-off
       windows per CPU, reported beside the IRQ census and fed by each
       architecture's masking primitives and entries, the number the ARM
-      track's stage 4 owes as well. The baseline is step 1 reverted on the
-      tree that carries the instrument. **Exit**: both windows read on the
-      T14, which is x86 metal, on that tree with step 1 and with it reverted,
-      and neither is longer with step 1 than without it, under the load
-      `issues/kernel/a-process-lengthens-an-interrupts-off-walk-by-the-threads-it-parks-on-one-ring.md`
-      names as well.
+      track's stage 4 owes as well. Built: the `mask-windows` kernel and the
+      T14's `mask_windows` row. **Exit**, open: the instrument reads back a
+      window of known length on the T14, which is x86 metal, and its rows are
+      in that machine's record; and neither window is longer with step 1 than
+      with it reverted on the tree that carries the instrument, the patch
+      posted on #649 being what reverted means. That comparison is the median
+      of at least five interleaved boots an arm, each read from the load's own
+      report with a report taken as the load starts, against a tolerance
+      stated before measuring, the reverted arm's own spread, with the tail
+      reported beside it, under a load in which a handler step 1 changed posts
+      into a watch that reaches a ring with parked threads
+      (`issues/kernel/a-process-lengthens-an-interrupts-off-walk-by-the-threads-it-parks-on-one-ring.md`'s
+      second bullet). `ring_park_herd` is not that load: its walks start in
+      `SYS_INBOX_SUBMIT`, which runs with interrupts masked on both arms, and
+      it reaches no handler step 1 changed.
    3. **The i8042's thread is ps2server's** (#592's i8042 stage): `irq_ring`'s
       `I8042`, `keyboard_controller::service` and the idle loop's
       `verdict_due` go with the kernel's driver. **Exit**: that stage's.
@@ -186,7 +195,7 @@ times:
       report on the panel and holding it there, a device the pass reaches
       (owner, 2026-09-30). **Exit**: `drain_irqs` and the
       idle loop's device checks are gone, both windows are measured against
-      the readings step 2 records, and the exits of
+      step 2's readings by its rule, and the exits of
       `issues/kernel/an-irq-watchs-freeing-cancel-compiles-in-a-handler.md`
       and
       `issues/kernel/nothing-fails-when-a-devices-release-or-close-stops-answering-its-polls.md`

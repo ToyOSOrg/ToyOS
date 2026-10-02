@@ -31,11 +31,24 @@ holder, decides how long a CPU runs with interrupts masked:
   registrations sweep them four at a time.
 
 Nothing caps N: a thread costs its process a 128 KiB kernel stack
-(`kernel/src/process.rs`) and no count. Before #634 every one of these
-walks ran with interrupts open, under preemption off. By reading, not
-measured: no instrument in the tree reads an interrupts-off window.
+(`kernel/src/process.rs`) and no count. The first walk starts in
+`SYS_INBOX_SUBMIT`, and a syscall runs with interrupts masked from entry to
+exit (`issues/kernel/syscall-preemption-is-incidental.md`), with #634 and
+without it: #634 did not mask it, and reverting #634 does not shorten it.
+The second runs in the device's handler since #634.
 
-**Exit**: step 2's interrupts-off window, read on the T14 while one process
-parks 256 threads in `submit` on one ring and a sibling thread completes into
-it, is no longer with step 1 than with it reverted on the same tree, under
-the same load.
+How long either is has not been read. The eight T14 boots of #649 at
+`72f16e39a` ran the first with N = 256 (`test_rs_ring_park_herd`), but each
+printed one report, which spans every window since its CPU joined the
+scheduler, and none took an interrupt a handler #634 changed serves
+(`userdev=0 sound=0 dmafault=0 hda=0` on every CPU). They bound it from
+above: in the six boots no longer window covers, the seven CPUs other than
+cpu0 read 251,452 to 4,720,498 ns of interrupts off.
+
+**Exit**: the interrupts-off window step 2's instrument reads on the T14
+under N threads parked in `submit` on one ring, a sibling thread completing
+into it, does not grow with N: read at two sizes on one kernel, each from the
+load's own report. `ring_park_herd`'s sibling waits on the kernel's roster,
+which is itself a masked walk over every thread of the machine (3,619 to
+4,111 `SYS_SYSINFO` calls a run in those boots, and 768 to 847 ms of syscall
+wall in a run of 0.9 s), so that reading has to tell the two walks apart.
