@@ -99,6 +99,93 @@ pub fn next(climbed: Option<Rung>, left: Left) -> Rung {
     above.max(enters_at(left))
 }
 
+/// A device's run of breaks: how many, and the highest rung among them.
+///
+/// **Per device, not per command**: the run it bounds is the device's, however
+/// many callers and operations it is spread over, and only a completed round
+/// trip ends it ([`Self::over`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Run {
+    breaks: u8,
+    climbed: Option<Rung>,
+}
+
+/// What one break costs the run.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Climb {
+    pub rung: Rung,
+    /// The run's first rung is above the class reset: the device is owed the
+    /// Data-Out of the command that broke ([`enters_at`]).
+    pub skips_class_reset: bool,
+}
+
+impl Run {
+    pub const NONE: Self = Self { breaks: 0, climbed: None };
+
+    /// Breaks in the run so far.
+    pub fn breaks(self) -> u8 {
+        self.breaks
+    }
+
+    /// A break that left the device `left`: counted, and the rung it climbs.
+    pub fn broke(&mut self, left: Left) -> Climb {
+        self.breaks = self.breaks.saturating_add(1);
+        let rung = next(self.climbed, left);
+        let skips_class_reset = self.climbed.is_none() && rung != Rung::ClassReset;
+        self.climbed = Some(rung);
+        Climb { rung, skips_class_reset }
+    }
+
+    /// A round trip completed: the run is over. How many breaks it held.
+    pub fn over(&mut self) -> u8 {
+        core::mem::replace(self, Self::NONE).breaks
+    }
+
+    /// The rung this run last climbed ended `ended`, below [`Rung::Offline`],
+    /// on a port that `holds` its device or not (`Portsc::holds`, read once
+    /// the rung has ended).
+    ///
+    /// **A device its port no longer holds left, whichever rung it was and
+    /// however the rung ended.** That is no break, and no rung above reaches
+    /// the device: its port's teardown owns what it held. Otherwise the rung
+    /// is the next break.
+    pub fn unverified<W>(&mut self, ended: &Unverified<W>, holds: bool) -> AfterRung {
+        if !holds {
+            return AfterRung::Left;
+        }
+        // After a step that was not answered the event is spent: the rung has
+        // commanded the pair since, and only the fields speak for it now.
+        let broke = match ended {
+            Unverified::OutOfStep(why) => why.event(),
+            Unverified::Failed => None,
+        };
+        // A rung's own TEST UNIT READY has no data phase to be left in.
+        AfterRung::Climbs { climb: self.broke(Left::Elsewhere), broke }
+    }
+}
+
+/// How a rung below [`Rung::Offline`] ended without bringing its device back
+/// in step; `W` is the driver's reason for a silence.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Unverified<W> {
+    /// Every step before its TEST UNIT READY was answered, and that broke this
+    /// way: a break like the one recovered from.
+    OutOfStep(crate::bot::Broke<W>),
+    /// A step before its TEST UNIT READY was not answered; the device was
+    /// asked nothing after it.
+    Failed,
+}
+
+/// What a climb does after a rung that did not verify ([`Run::unverified`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AfterRung {
+    /// The device left.
+    Left,
+    /// The next break: the rung it climbs, and the transfer event that rung
+    /// quiesces against, where one ended the round trip.
+    Climbs { climb: Climb, broke: Option<(crate::reset_recovery::Pipe, u32)> },
+}
+
 /// One step of [`Rung::PortReset`], in the order taken.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PortStep {
@@ -170,6 +257,13 @@ impl AfterReset {
     pub fn finished(self) -> bool {
         !matches!(self, Self::NeverFinished | Self::Left)
     }
+
+    /// Whether the port rung goes on past its reset: only for the device it
+    /// was enumerated as, on its port. Any other reading ends the rung, and
+    /// nothing is sent to a port that reads empty.
+    pub fn goes_on(self) -> bool {
+        self == Self::Enumerate
+    }
 }
 
 impl core::fmt::Display for AfterReset {
@@ -233,6 +327,76 @@ mod tests {
                     let offline = rungs.iter().position(|r| *r == Some(Rung::Offline)).expect("reached");
                     assert_eq!(rungs[offline - 1], Some(Rung::PortReset), "{rungs:?}");
                 }
+            }
+        }
+    }
+
+    /// The run is the device's: every break climbs above the last, the count
+    /// reaches [`MOST_BREAKS`] exactly where the run is offline, and a completed
+    /// round trip starts the next run at the bottom.
+    #[test]
+    fn a_run_climbs_one_rung_per_break_until_a_round_trip_ends_it() {
+        let mut run = Run::NONE;
+        assert_eq!(run.broke(Left::Elsewhere), Climb { rung: Rung::ClassReset, skips_class_reset: false });
+        assert_eq!(run.broke(Left::Elsewhere), Climb { rung: Rung::PortReset, skips_class_reset: false });
+        assert_eq!(run.broke(Left::Elsewhere).rung, Rung::Offline);
+        assert_eq!(run.breaks(), MOST_BREAKS);
+        assert_eq!(run.over(), MOST_BREAKS);
+        assert_eq!(run, Run::NONE);
+        assert_eq!(run.broke(Left::Elsewhere).rung, Rung::ClassReset, "a run begun again climbs from the bottom");
+    }
+
+    /// Said once, at the first rung of a run, and only when that rung is the
+    /// port reset.
+    #[test]
+    fn only_a_run_that_begins_owed_data_out_skips_the_class_reset() {
+        let mut run = Run::NONE;
+        assert_eq!(run.broke(Left::OwedDataOut), Climb { rung: Rung::PortReset, skips_class_reset: true });
+        assert_eq!(run.broke(Left::OwedDataOut), Climb { rung: Rung::Offline, skips_class_reset: false });
+        let mut run = Run::NONE;
+        run.broke(Left::Elsewhere);
+        assert!(!run.broke(Left::OwedDataOut).skips_class_reset, "the class reset was climbed");
+    }
+
+    /// Every run that reaches a rung below [`Rung::Offline`], each way that
+    /// rung can end unverified: its device left exactly where its port no
+    /// longer holds it, which is no break; otherwise the rung is the next
+    /// break, and the next rung quiesces against the event that ended the
+    /// TEST UNIT READY, where one did.
+    #[test]
+    fn a_rung_that_did_not_verify_left_exactly_where_its_port_no_longer_holds_the_device() {
+        use crate::bot::{Broke, Phase};
+        use crate::reset_recovery::Pipe;
+        let stalled = Broke::<()>::Code { phase: Phase::Command, code: 6, pipe: Pipe::Out };
+        let endings = [
+            (Unverified::Failed, None),
+            (Unverified::OutOfStep(stalled), Some((Pipe::Out, 6))),
+            (Unverified::OutOfStep(Broke::Gone { phase: Phase::Command }), None),
+            (Unverified::OutOfStep(Broke::Silence { phase: Phase::Status, why: () }), None),
+        ];
+        let runs: [(&[Left], Rung); 3] = [
+            (&[Left::Elsewhere], Rung::ClassReset),
+            (&[Left::Elsewhere, Left::Elsewhere], Rung::PortReset),
+            (&[Left::OwedDataOut], Rung::PortReset),
+        ];
+        for (breaks, rung) in runs {
+            let mut at = Run::NONE;
+            for left in breaks {
+                at.broke(*left);
+            }
+            assert_eq!(at.climbed, Some(rung), "{breaks:?}");
+            for (ended, event) in endings {
+                let mut run = at;
+                assert_eq!(run.unverified(&ended, false), AfterRung::Left, "{rung:?} {ended:?}");
+                assert_eq!(run, at, "a device that left is no break: {rung:?} {ended:?}");
+                let mut next = at;
+                let climb = next.broke(Left::Elsewhere);
+                assert_eq!(
+                    run.unverified(&ended, true),
+                    AfterRung::Climbs { climb, broke: event },
+                    "{rung:?} {ended:?}"
+                );
+                assert_eq!(run, next, "{rung:?} {ended:?}");
             }
         }
     }
@@ -303,6 +467,15 @@ mod tests {
         }
         for left in [AfterReset::Enumerate, AfterReset::NotEnabled, AfterReset::SpeedChanged { was: 3, now: 4 }] {
             assert!(left.finished(), "{left:?}");
+        }
+        assert!(AfterReset::Enumerate.goes_on());
+        for after in [
+            AfterReset::NeverFinished,
+            AfterReset::Left,
+            AfterReset::NotEnabled,
+            AfterReset::SpeedChanged { was: 3, now: 4 },
+        ] {
+            assert!(!after.goes_on(), "{after:?}");
         }
     }
 }

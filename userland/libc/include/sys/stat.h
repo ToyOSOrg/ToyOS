@@ -4,6 +4,10 @@
 #include <sys/types.h>
 #include <time.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct stat {
     dev_t st_dev;
     ino_t st_ino;
@@ -61,6 +65,11 @@ int fstat(int fd, struct stat *buf);
 int lstat(const char *path, struct stat *buf);
 int mkdir(const char *path, mode_t mode);
 int chmod(const char *path, mode_t mode);
+int fchmod(int fd, mode_t mode);
 mode_t umask(mode_t mask);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

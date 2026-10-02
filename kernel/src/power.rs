@@ -1,0 +1,59 @@
+//! The machine's two ends this kernel performs, a reset and a power-off, each
+//! the architecture's own (`arch::power`).
+//!
+//! **No reset this kernel performs leaves a USB device mid-command.**
+//! [`reset_now`] and [`shutdown`] are the only two places this kernel ends the
+//! machine, and each stops every xHCI controller ([`stop::before_reset`])
+//! before it does — which is what makes that a property of the reset rather
+//! than of whoever asked for one, and what a third caller gets without knowing
+//! it is owed. Resets this kernel does not perform — a TCO or firmware
+//! watchdog, a triple fault, power loss — are outside it and always will be.
+
+use crate::drivers::{serial, xhci::stop};
+
+/// Whether this machine has a reset this kernel can perform.
+pub fn can_reboot() -> bool {
+    crate::arch::power::can_reset()
+}
+
+/// Return the machine to firmware.
+pub fn reboot() -> ! {
+    serial::flush_final();
+    // Kernel-internal, so a bug rather than a machine quiesced and then left halted quietly.
+    assert!(can_reboot(), "reboot: no reset, and the caller did not ask can_reboot() first");
+    reset_now()
+}
+
+/// Reset the machine and do nothing else.
+///
+/// **[`reboot`] is not reachable from a wedge**, which is why this exists
+/// beside it: that path opens with `serial::flush_final`, and a `BackendGuard`
+/// masks interrupts for its whole life — so a CPU stuck inside one holds what
+/// the call would wait for, on exactly the boots `crate::deadline` exists for.
+/// This takes no lock.
+///
+/// A machine with no reset halts here rather than returning: the caller has
+/// already sealed why, and holding is what such a machine has always done.
+pub fn reset_now() -> ! {
+    // **Here and not at either caller.** `stop::before_reset` is registers and
+    // nothing else — written for the panic path, so it takes no lock and
+    // allocates nothing, which is the only kind of call a wedge may make — and
+    // it *appends* its account to whatever this boot already sealed, so a
+    // `WEDGED` page carries what the reset did to USB the way a `PANIC` one
+    // does. A caller seals first and calls this second: the record is the
+    // diagnostic the seal exists for and may not be lost to a stop that does
+    // not return.
+    stop::before_reset();
+    crate::arch::power::reset()
+}
+
+/// Power the machine off, or halt on one that offers no power-off.
+pub fn shutdown() -> ! {
+    // Last chance: nothing drains the log ring after this point.
+    serial::flush_final();
+    // A power-off takes VBUS with it on a machine whose ports are not
+    // always-on and takes nothing on one whose are, so the devices are handed
+    // back here for the same reason as at a reboot.
+    stop::before_reset();
+    crate::arch::power::off()
+}

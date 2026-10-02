@@ -15,6 +15,7 @@ use crate::process::{
 use crate::scheduler::{self, TaskId};
 use crate::symbols::SymbolTable;
 use crate::sync::Lock;
+use toyos_proclife::Processes;
 
 use super::payload::ThreadSched;
 
@@ -72,23 +73,6 @@ pub fn is_kernel_task(id: TaskId) -> bool {
     ROWS.iter().any(|row| row.load(Ordering::Relaxed) == packed)
 }
 
-/// Control for `process::process_object`'s refusal: no kernel thread's pid names a process a handle could hold.
-#[cfg(feature = "boot-actuators")]
-pub fn open_selftest() {
-    let pids: Vec<_> = ROWS
-        .iter()
-        .map(|row| row.load(Ordering::Relaxed))
-        .filter(|&task| task != NO_TASK)
-        .map(|task| {
-            assert_ne!(task, CLAIMING, "kthread: a row is still being claimed after the last spawn");
-            TaskId::unpack(task).0
-        })
-        .collect();
-    let opened = pids.iter().filter(|&&pid| crate::process::process_object(pid).is_some()).count();
-    let verdict = if !pids.is_empty() && opened == 0 { "PASS" } else { "FAIL" };
-    crate::log!("process-open-kthread: {verdict} ({} kernel threads, {opened} opened)", pids.len());
-}
-
 /// Start a kernel thread running `body(arg)` on its own kernel stack and return its scheduler faces.
 pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64) -> ThreadSched {
     let (stack, entry_sp) = crate::loader::alloc_kernel_stack(
@@ -101,6 +85,8 @@ pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64) -> ThreadSched
 
     // Before the table lock: a panic holding the process table hangs the machine.
     let claim = Claim::take(name);
+    let taken = PROCESS_TABLE.lock().as_mut().expect("kthread: spawned before process::init").pids().take();
+    let pid = taken.unwrap_or_else(|| panic!("kthread: {name} found every pid issued"));
 
     let mut short = [0u8; THREAD_NAME_LEN];
     let len = name.len().min(THREAD_NAME_LEN - 1);
@@ -112,15 +98,14 @@ pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64) -> ThreadSched
     // One hold across insert and place: a visible pid already has its thread scheduled.
     let mut guard = PROCESS_TABLE.lock();
     let table = guard.as_mut().expect("kthread: spawned before process::init");
-    let pid = table.insert_with(|pid| {
-        ProcessEntry::new(
-            pid,
-            short,
-            Arc::new(Lock::new(kernel_process_data(name))),
-            Arc::clone(&syms),
-            ThreadEntry::new(Arc::new(Lock::new(kernel_thread_data()))),
-        )
-    });
+    table.insert(ProcessEntry::new(
+        crate::object::process::ProcessObject::new(pid),
+        short,
+        Arc::new(Lock::new(kernel_process_data(name))),
+        Arc::clone(&syms),
+        ThreadEntry::new(Arc::new(Lock::new(kernel_thread_data()))),
+        toyos_proclife::Node::root(),
+    ));
     let tid = table.get(pid).expect("kthread: the entry just inserted is gone").main_tid();
     claim.publish(TaskId(pid, tid));
     // The kernel address space, named so one declaration decides every task's `cr3`.

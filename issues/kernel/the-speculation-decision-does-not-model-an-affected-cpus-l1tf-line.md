@@ -25,7 +25,7 @@ second has no counterpart in a kernel that runs no VM, so parity needs a ruling
 on which `VMX:` state ToyOS is held to.
 
 No machine ToyOS is tested on reaches it: the T14 has `RDCL_NO`, and the TCG
-model and the nightly's KVM runners are AMD.
+model and the KVM runners are AMD.
 
 **Exit**: the line is decided from the memory map and CPUID and the owner's
 `VMX:` ruling, and held by a fixture captured under the pinned Linux on such a

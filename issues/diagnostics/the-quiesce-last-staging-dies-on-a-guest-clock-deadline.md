@@ -8,8 +8,7 @@ opened: 2026-09-30
 
 `hold` panics the boot when the stop has not counted the held thread alone
 within it, and `await_the_held_thread` panics when no thread named
-`quiesce-last` has reached its syscall within it. `quiesce-last-park` and
-`quiesce-last-teardown` rest on it. A QEMU test's only clock is the harness's
+`quiesce-last` has reached its syscall within it. A QEMU test's only clock is the harness's
 ceiling: a guest slower than the deadline dies with a staging panic that names
 no defect.
 

@@ -5,6 +5,8 @@
 //! [`ImageOffset`] inside its module ([`Sym::address`]) or a [`TlsOffset`]
 //! inside its module's TLS segment ([`Sym::tls_offset`]).
 
+use core::ffi::CStr;
+
 use crate::layout::{Extent, ImageOffset, TlsSegment};
 use crate::read;
 use crate::tls::TlsOffset;
@@ -17,6 +19,9 @@ pub const STB_GLOBAL: u8 = 1;
 pub const STB_WEAK: u8 = 2;
 pub const STT_FUNC: u8 = 2;
 pub const STT_TLS: u8 = 6;
+pub const SHN_ABS: u16 = 0xfff1;
+pub const STV_INTERNAL: u8 = 1;
+pub const STV_HIDDEN: u8 = 2;
 
 /// An `r_sym` below the symbol count it was parsed against: made only by the
 /// relocation parse.
@@ -41,6 +46,7 @@ fn widen(v: u32) -> usize {
 pub struct Sym {
     name: u32,
     info: u8,
+    other: u8,
     shndx: u16,
     value: u64,
     size: u64,
@@ -61,9 +67,12 @@ impl Sym {
         self.info & 0xf
     }
 
-    /// Whether another module may bind to this symbol.
+    /// Whether another module may bind to this symbol: defined, global or
+    /// weak, and visible outside its own.
     pub const fn is_exported(&self) -> bool {
-        self.is_defined() && matches!(self.bind(), STB_GLOBAL | STB_WEAK)
+        self.is_defined()
+            && matches!(self.bind(), STB_GLOBAL | STB_WEAK)
+            && !matches!(self.other & 3, STV_INTERNAL | STV_HIDDEN)
     }
 
     /// This symbol's name in `strings`, `""` when it names nothing readable.
@@ -233,6 +242,38 @@ impl<'a> SymTab<'a> {
         (!name.is_empty()).then_some((name, within))
     }
 
+    /// The symbol `dladdr` names for `offset`, and how far into it that is.
+    ///
+    /// glibc's choice (`elf/dl-addr.c`): an exported symbol
+    /// ([`Sym::is_exported`]), not `STT_TLS` and not `SHN_ABS`, whose name is
+    /// a C string in the string table, holding `offset` in
+    /// `[value, value + size)` or at `value` for a size of 0; of several, the
+    /// first at the highest value. `offset` is relative to the module's load
+    /// base, as `st_value` is.
+    pub fn dladdr(&self, offset: u64) -> Option<(&'a CStr, u64)> {
+        let mut best: Option<(&'a CStr, u64)> = None;
+        for sym in (0..self.count()).filter_map(|i| self.get(i)) {
+            if !sym.is_exported() || sym.kind() == STT_TLS || sym.shndx == SHN_ABS {
+                continue;
+            }
+            let Some(within) = offset.checked_sub(sym.value) else { continue };
+            if !(within < sym.size || (sym.size == 0 && within == 0)) {
+                continue;
+            }
+            let Some(name) = self.c_name(sym) else { continue };
+            if best.is_none_or(|(_, best_within)| within < best_within) {
+                best = Some((name, within));
+            }
+        }
+        best
+    }
+
+    /// `sym`'s name as the C string at `st_name`, or `None` when no NUL ends
+    /// it inside the string table.
+    fn c_name(&self, sym: Sym) -> Option<&'a CStr> {
+        CStr::from_bytes_until_nul(self.strs.get(usize::try_from(sym.name).ok()?..)?).ok()
+    }
+
     /// Every index whose symbol is defined, in order.
     pub fn defined(self) -> impl Iterator<Item = (usize, Sym)> + 'a {
         (1..self.count()).filter_map(move |i| {
@@ -251,6 +292,7 @@ pub fn parse_at(data: &[u8], off: usize) -> Option<Sym> {
     Some(Sym {
         name: read::u32_at(data, off)?,
         info: *data.get(off.checked_add(4)?)?,
+        other: *data.get(off.checked_add(5)?)?,
         shndx: read::u16_at(data, off.checked_add(6)?)?,
         value: read::u64_at(data, off.checked_add(8)?)?,
         size: read::u64_at(data, off.checked_add(16)?)?,

@@ -12,3 +12,6 @@ toyos-logstream = { path = "../../toyos-logstream" }
 toyos-elide = { path = "../../toyos-elide" }
 toyos-inspect = { path = "../../toyos-inspect" }
 toyos-wallclock = { path = "../../toyos-wallclock" }
+
+[package.metadata.toyos.host]
+exempt.owns = "the kernel's record ring, read under the `logread` SysCap"

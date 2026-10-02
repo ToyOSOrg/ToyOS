@@ -35,7 +35,7 @@ use core::sync::atomic::Ordering;
 use std::collections::HashSet;
 
 use toyos_blockhold::Holds;
-use toyos_transport::{Consumer, Place, Producer, Untrusted, Word};
+use toyos_transport::{Consumer, Place, Producer, Untrusted, Violation, Word};
 
 use crate::client::{Client, Outcome, Ticket, MAX_ATTEMPTS};
 use crate::entry::{Completion, Op, Request};
@@ -768,6 +768,28 @@ mod tests {
             world = after.expect("no law is broken on the way");
         }
         world
+    }
+
+    /// A used page reads fresh once a server's ends are made over it. A
+    /// client's ends alone leave the dead server's two cursors on it: no room
+    /// to ask, and the last session's completion to hear, which the client
+    /// refuses as the server breaking the protocol.
+    #[test]
+    fn a_used_page_reads_fresh_once_a_servers_ends_are_made_over_it() {
+        let world = walk(start(at_most(0, 1, 0)), &["ask", "take", "done", "read", "crash"]);
+        let page = &world.queues.page;
+        let mut client = world.client.clone();
+        client.session_ended();
+        client.session_started();
+        let (mut asks, mut hears): ClientEnds = (Producer::new(page, SQ), Consumer::new(page, CQ));
+        assert_eq!(asks.space(page), Err(Violation::HeadPastTail));
+        let stale = hears.pop(page).expect("a tail inside the ring").expect("the last session's completion");
+        let stale = Completion::decode(stale).expect("a completion the last server wrote");
+        assert_eq!(client.complete(stale), Err(Violation::Tag));
+
+        let ((mut asks, mut hears), _server) = Queues::ends(page);
+        assert_eq!(asks.space(page), Ok(DEPTH));
+        assert_eq!(hears.pop(page), Ok(None));
     }
 
     /// Two states a key that orders tags by value merges, though a reset parts

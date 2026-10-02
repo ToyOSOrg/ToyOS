@@ -17,4 +17,4 @@ Owed: a mechanism. Nobody has one.
 
 **Exit condition.** The cause of the missing refusal is fixed, shown against
 `so_cache_refusals` and the `so-cache-tiny` budget it arms, as both stand at
-`1808fb8d`, restored and green on CI's KVM `guest` shards. Owner: orchestrator.
+`1808fb8d`, restored and green. Owner: orchestrator.

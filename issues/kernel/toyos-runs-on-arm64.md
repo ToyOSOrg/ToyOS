@@ -95,7 +95,6 @@ bound). Heaviest: `arch::cpu` (57 references), `arch::percpu` (28),
 
 - **Port I/O** (`cpu::inb/outb/inw/outw`): `rtc.rs:203-204`,
   `drivers/serial.rs` (16 sites), `drivers/i8042/mod.rs` (12 sites),
-  `drivers/acpi.rs:325,345` (reset and PM1a soft-off),
   `drivers/watchdog.rs:84-158`, `bootloader/src/watchdog.rs:195,204`.
 - **APIC / IOAPIC / MSI.** `hw.rs:1-5`: "Everything here is x2APIC, TSC or a
   single instruction." The MSI doorbell `0xFEE0_0000` is hardcoded three
@@ -293,11 +292,7 @@ Each stage names its exit; "measured" means a number from a run.
    `toyos_elf::RelocError::TlsDescriptor` for a library).
    **Every CPU starts, ahead of small-kernel stage 6 by the owner's word, as
    stage 4 did:** it ports no device interrupt, so nothing of the relay.
-   Owed before the exit holds:
-   `SYSTEM_RESET`, `SYSTEM_OFF` and `CPU_OFF` behind a reset and power-off
-   seam that takes x86-64's reset register and PM1a out of
-   `drivers/acpi.rs`, and the stop shown on eight CPUs ending in that
-   power-off; the TLS-descriptor resolver;
+   Owed before the exit holds: the TLS-descriptor resolver;
    `issues/kernel/the-crash-evidence-records-x86-fault-registers.md`; the
    blocked-task dump's probe of a CPU that ignored its kick
    (`sched/dump.rs`'s `probe_silent`), which reaches `irqchip::send_nmi`'s
@@ -337,8 +332,8 @@ Each stage names its exit; "measured" means a number from a run.
 8. **The harness boots aarch64.** `tests/common/qemu.rs` takes an
    `Arch`: `virt`, edk2-aarch64, HVF on Apple hosts (TCG otherwise).
    **Exit**: once the track's stages are done, the whole suite is run on
-   aarch64 on the M4 host by hand, once; a test red on only one arch is a
-   named known-red, not a skip.
+   aarch64 on the M4 host by hand, once; a test red on only one arch is
+   fixed or deleted with its issue, not skipped.
 
 ## Exit
 

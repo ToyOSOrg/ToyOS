@@ -6,7 +6,7 @@
 //! claims its word if it is parked or committing and flags it otherwise, so its
 //! own next commit rechecks instead of parking. A **ring** entry is one poll a
 //! process submitted and is *posted*: a post hands it to [`Ring::fire`], once,
-//! and the environment writes that poll's completion into the ring it names.
+//! and the environment owes the ring it names a look at that poll's object.
 //!
 //! **A lost wake has no expression here.** A thread registers before it reads
 //! its condition, under the list lock a post also takes, so a post either
@@ -54,14 +54,14 @@ pub enum Fire {
 
 /// One poll a ring is waiting on, as the watch holds it.
 pub trait Ring {
-    /// Post this poll's completion. One-shot across every watch the poll is
+    /// Fire this poll for its ring. One-shot across every watch the poll is
     /// registered on: an entry that already fired, or whose poll was withdrawn,
-    /// posts nothing. Called with at most the posting watch's list lock held,
+    /// does nothing. Called with at most the posting watch's list lock held,
     /// and from an interrupt handler by a post in place: may take only its
     /// ring's own lock and post only the watch its ring's submitters park on,
     /// and allocates and frees nothing.
     fn fire(&self, how: Fire);
-    /// Whether a fire would still post anything. `false` is permanent.
+    /// Whether a fire would still do anything. `false` is permanent.
     fn live(&self) -> bool;
 }
 
@@ -385,57 +385,6 @@ impl<M, R: Ring, L: CellLock<Waiters<M, R>>> Drop for Watch<M, R, L> {
         let ended = self.list.with(|w| core::mem::take(&mut w.rings));
         for ring in &ended {
             ring.fire(Fire::Gone);
-        }
-    }
-}
-
-/// The `watch-window` actuator's line: the kernel writes it once per [`STEP`]
-/// held windows a post ended, and the harness reads the count after [`HELD`].
-///
-/// [`STEP`]: window::STEP
-/// [`HELD`]: window::HELD
-pub mod window {
-    /// The line's words; the running count follows them.
-    pub const HELD: &str = "watch-window: a post landed in the held window";
-    /// One line per this many holds a post ended.
-    pub const STEP: u64 = 64;
-}
-
-/// The `handler-post` actuator's line: the kernel writes it once, and the
-/// harness compares it whole against [`Verdict::GREEN`].
-///
-/// [`Verdict::GREEN`]: handler_post::Verdict::GREEN
-pub mod handler_post {
-    use core::fmt;
-
-    /// The line's first word, which the harness waits for.
-    pub const SAID: &str = "handler-post:";
-    /// Holds staged per arm.
-    pub const HOLDS: u32 = 4;
-
-    /// The holds a handler's post ended, per arm: its vector raised inside a
-    /// watch's list lock, inside a ring's completions, and inside the list
-    /// lock of the watch that ring's own submitters park on.
-    #[derive(Clone, Copy)]
-    pub struct Verdict {
-        pub in_a_list: u32,
-        pub in_a_ring: u32,
-        pub in_a_rings_watch: u32,
-    }
-
-    impl Verdict {
-        pub const GREEN: Self =
-            Self { in_a_list: HOLDS, in_a_ring: HOLDS, in_a_rings_watch: HOLDS };
-    }
-
-    impl fmt::Display for Verdict {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(
-                f,
-                "{SAID} of {HOLDS} holds per arm, a handler posted into {} inside a list lock, \
-                 {} inside a ring's completions and {} inside a ring's own watch",
-                self.in_a_list, self.in_a_ring, self.in_a_rings_watch,
-            )
         }
     }
 }

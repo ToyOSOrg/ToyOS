@@ -4,7 +4,7 @@ use crate::log;
 use toyos_xhci::enumerate::{
     self, ep0_packet_from_descriptor, initial_ep0_packet, Act, Enumeration, Learnt, Next, Request,
 };
-use toyos_xhci::job::{Await, Outcome, Stages};
+use toyos_xhci::job::{Await, Outcome, Stages, CC_SUCCESS};
 use toyos_xhci::port::{self, Reset};
 use toyos_xhci::identity::UsbId;
 use toyos_xhci::recovery;
@@ -14,7 +14,7 @@ use super::{deadline, Answer, Trb, TrbRing, What, XhciController, PAGE};
 use super::{OFF_INPUT_CTX, OFF_DATA_BUF};
 use super::{DEV_INT_RING, DEV_EP0_RING, DEV_OUT_CTX, DEV_REPORT, EP0_DCI};
 use super::{TRB_ENABLE_SLOT, TRB_ADDRESS_DEVICE, TRB_CONFIGURE_EP, TRB_EVALUATE_CONTEXT};
-use super::{enqueue_control, CC_SUCCESS};
+use super::enqueue_control;
 
 use super::hid::{HidType, HidRole, HidDevice};
 use super::msc::{Bind, MscInterface, MscRings};
@@ -232,7 +232,7 @@ pub fn reset_port(ctrl: &mut XhciController, port_idx: u8, kind: Reset) {
 
 /// Whether the port has finished the reset it was asked for.
 pub fn reset_done(ctrl: &XhciController, port_idx: u8) -> bool {
-    super::port_answers() && ctrl.read_portsc(port_idx).reset_finished()
+    ctrl.read_portsc(port_idx).reset_finished()
 }
 
 /// One device's enumeration: the state an answer needs, carried because the pass that asked gave up its stack.

@@ -125,36 +125,6 @@ impl Ppm {
         rows.join("\n")
     }
 
-    /// Every cell row as `/system/bin/console` drew it, right-trimmed, blanks kept.
-    pub fn console_rows(&self, font: &ConsoleFont) -> Vec<String> {
-        let mut rows: Vec<String> = Vec::new();
-        for cy in 0..self.height / GLYPH_H {
-            let mut row = String::new();
-            for cx in 0..self.width / GLYPH_W {
-                let mut cell = [0u8; CELL];
-                for r in 0..GLYPH_H {
-                    for c in 0..GLYPH_W {
-                        let p = self.pixels[(cy * GLYPH_H + r) * self.width + cx * GLYPH_W + c];
-                        cell[r * GLYPH_W + c] = p[0].max(p[1]).max(p[2]);
-                    }
-                }
-                row.push(font.lookup(&cell));
-            }
-            rows.push(row.trim_end().to_string());
-        }
-        rows
-    }
-
-    /// [`Ppm::console_rows`] joined, trailing blank rows dropped — the console's
-    /// counterpart to [`Ppm::text`].
-    pub fn console_text(&self, font: &ConsoleFont) -> String {
-        let mut rows = self.console_rows(font);
-        while rows.last().is_some_and(|r| r.is_empty()) {
-            rows.pop();
-        }
-        rows.join("\n")
-    }
-
     /// The colour of the first foreground pixel in cell row `cy`, or `None`
     /// for a blank row.
     ///
@@ -173,53 +143,6 @@ impl Ppm {
         None
     }
 
-    /// How many rows of text are on the panel, counted without decoding a
-    /// glyph: no firmware font is committed here, so a row one drew is
-    /// invisible to [`Ppm::text`].
-    ///
-    /// A band taller than the pitch is a logo or two rows that touch, and
-    /// neither is one row of text; the pitch is the median distance between
-    /// band tops, because a stray scanline sets a minimum of one and drags a
-    /// mean as well. A panel with fewer than two bands has no pitch to take,
-    /// and is refused rather than counted as none.
-    pub fn text_row_bands(&self) -> Result<usize, String> {
-        let mut bands: Vec<(usize, usize)> = Vec::new();
-        let mut top = None;
-        for y in 0..self.height {
-            let lit = (0..self.width)
-                .any(|x| self.pixels[y * self.width + x].iter().any(|c| *c >= FG_THRESHOLD));
-            match (lit, top) {
-                (true, None) => top = Some(y),
-                (false, Some(from)) => {
-                    bands.push((from, y));
-                    top = None;
-                }
-                _ => {}
-            }
-        }
-        if let Some(from) = top {
-            bands.push((from, self.height));
-        }
-        let mut gaps: Vec<usize> = bands.windows(2).map(|pair| pair[1].0 - pair[0].0).collect();
-        if gaps.is_empty() {
-            return Err(format!(
-                "the panel carries {} band(s) of lit scanlines, too few to take a row pitch from",
-                bands.len()
-            ));
-        }
-        gaps.sort_unstable();
-        let pitch = gaps[gaps.len() / 2];
-        let rows = bands.iter().filter(|(from, to)| to - from <= pitch).count();
-        if rows == 0 {
-            return Err(format!(
-                "every one of the panel's {} band(s) is taller than the {pitch}-pixel pitch, so \
-                 none of them is a row of text",
-                bands.len()
-            ));
-        }
-        Ok(rows)
-    }
-
     /// The fill colour, read from the bottom-right pixel. The renderer paints
     /// at most `MAX_ROWS` rows and never the last column of a glyph cell, so
     /// this corner carries the fill and nothing else.
@@ -230,101 +153,6 @@ impl Ppm {
     /// The index of the first cell row containing `needle`.
     pub fn row_index(&self, needle: &str) -> Option<usize> {
         self.rows().iter().position(|r| r.contains(needle))
-    }
-
-    /// Whether every pixel matches `other`.
-    pub fn identical_to(&self, other: &Ppm) -> bool {
-        self.width == other.width && self.height == other.height && self.pixels == other.pixels
-    }
-}
-
-/// Cells of the console's font, in the alpha values it blits.
-const CELL: usize = GLYPH_W * GLYPH_H;
-
-/// The font `/system/bin/console` and `/system/bin/terminal` draw with — 8x16 anti-aliased
-/// alpha, not the kernel's 1-bit table.
-///
-/// The two decoders exist for the same reason and read the same way: a glyph on
-/// screen is a bit-exact function of the table the drawer used, so decoding
-/// against *that* table makes a screen assertion an ordinary string assertion.
-/// The table is rebuilt here by [`toyos_build::assets::console_font`], the same
-/// producer that puts it on ROOT.
-///
-/// Exact, not nearest-match, and that is a property of the blend rather than a
-/// tolerance: `font::Font::draw_char` computes `(fg*a + bg*(255-a))/255` per
-/// channel, so white on black is `a` and black on white — the cursor cell — is
-/// its complement. Both are looked up.
-///
-/// **It is also the discriminator that keeps the console tests non-vacuous.**
-/// A boot checkpoint paints the same kernel log lines from the same ring, in
-/// `font8x16.bin`. Those cells are the *thresholded* form of these, so they
-/// decode to [`UNKNOWN`] here and these decode to `UNKNOWN` there: "the console
-/// rendered the log" and "the console never ran and the kernel's paint is still
-/// up" cannot be confused for one another.
-pub struct ConsoleFont {
-    pub(crate) by_cell: HashMap<[u8; CELL], char>,
-}
-
-impl ConsoleFont {
-    pub fn load() -> ConsoleFont {
-        let raw = toyos_build::assets::console_font(&super::compile::repo_root());
-        let width = u16::from_le_bytes([raw[0], raw[1]]) as usize;
-        let height = u16::from_le_bytes([raw[2], raw[3]]) as usize;
-        assert_eq!(
-            (width, height),
-            (GLYPH_W, GLYPH_H),
-            "the console font is not the 8x16 cell this decoder grids for"
-        );
-        let count = u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]) as usize;
-        let alpha = 8 + count * 4;
-
-        let mut by_cell: HashMap<[u8; CELL], char> = HashMap::new();
-        let mut ascii_clash: Vec<(char, char)> = Vec::new();
-        for i in 0..count {
-            let cp = u32::from_le_bytes([
-                raw[8 + i * 4],
-                raw[9 + i * 4],
-                raw[10 + i * 4],
-                raw[11 + i * 4],
-            ]);
-            // C0 and C1 have no glyph and all rasterize blank, which would make
-            // a space decode as whichever control code sorted first.
-            if cp < 0x20 || (0x7F..=0x9F).contains(&cp) {
-                continue;
-            }
-            let Some(ch) = char::from_u32(cp) else { continue };
-            let mut cell = [0u8; CELL];
-            cell.copy_from_slice(&raw[alpha + i * CELL..alpha + (i + 1) * CELL]);
-            // Lowest codepoint wins, so U+00A0 does not take the blank cell
-            // away from a space. A clash *inside* printable ASCII would make
-            // every assertion in the suite ambiguous, so it is refused here
-            // rather than decoded into whichever codepoint sorted first.
-            if let Some(&first) = by_cell.get(&cell) {
-                if (0x20..0x7F).contains(&cp) && (0x20..0x7F).contains(&(first as u32)) {
-                    ascii_clash.push((first, ch));
-                }
-                continue;
-            }
-            by_cell.insert(cell, ch);
-        }
-        assert!(
-            ascii_clash.is_empty(),
-            "the console font rasterizes these printable ASCII pairs identically at \
-             8x16, so a decoded screen cannot say which was drawn: {ascii_clash:?}"
-        );
-        ConsoleFont { by_cell }
-    }
-
-    fn lookup(&self, cell: &[u8; CELL]) -> char {
-        if let Some(&ch) = self.by_cell.get(cell) {
-            return ch;
-        }
-        // The cursor cell, drawn with foreground and background swapped.
-        let mut inverted = [0u8; CELL];
-        for (dst, &src) in inverted.iter_mut().zip(cell.iter()) {
-            *dst = 255 - src;
-        }
-        *self.by_cell.get(&inverted).unwrap_or(&UNKNOWN)
     }
 }
 

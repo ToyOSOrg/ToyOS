@@ -1,0 +1,18 @@
+# The one job returns the machine to firmware.
+[boot]
+start = ["logd", "test-runner"]
+
+[programs.logd]
+service = true
+syscap = ["logread"]
+
+[programs.test-runner]
+receives = ["power"]
+# Four minutes from boot: the job runs on emulated CPUs, and a job past the
+# bound reboots the guest with the job named.
+args = ["--bound-ms=240000", "reboot"]
+
+[programs.toybox]
+
+[symlinks]
+"bin/reboot" = "/system/bin/toybox"
