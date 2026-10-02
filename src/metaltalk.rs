@@ -301,23 +301,6 @@ impl Stream {
             state = self.shared.moved.wait_timeout(state, left).expect("the stream's state").0;
         }
     }
-
-    /// Wait until the latest connection ends, or `by` has passed; whether it
-    /// ended.
-    pub fn wait_ended(&self, by: Duration) -> bool {
-        let began = Instant::now();
-        let mut state = self.state();
-        loop {
-            if state.end.is_some() {
-                return true;
-            }
-            let left = by.saturating_sub(began.elapsed());
-            if left.is_zero() || (state.unopened.is_some() && state.current.is_none()) {
-                return false;
-            }
-            state = self.shared.moved.wait_timeout(state, left).expect("the stream's state").0;
-        }
-    }
 }
 
 /// The reader: the first dial by `until`, then each redial it is asked for,
@@ -1174,6 +1157,25 @@ pub fn judge(heard: &Heard, stream: &[String]) -> Result<Vec<String>, Vec<String
 mod tests {
     use super::*;
     use std::net::Shutdown;
+
+    impl Stream {
+        /// Wait until the latest connection ends, or `by` has passed; whether it
+        /// ended.
+        fn wait_ended(&self, by: Duration) -> bool {
+            let began = Instant::now();
+            let mut state = self.state();
+            loop {
+                if state.end.is_some() {
+                    return true;
+                }
+                let left = by.saturating_sub(began.elapsed());
+                if left.is_zero() || (state.unopened.is_some() && state.current.is_none()) {
+                    return false;
+                }
+                state = self.shared.moved.wait_timeout(state, left).expect("the stream's state").0;
+            }
+        }
+    }
 
     fn heard(exec: Result<Exec, String>, reboot: Result<String, String>) -> Heard {
         let said = Conversation {

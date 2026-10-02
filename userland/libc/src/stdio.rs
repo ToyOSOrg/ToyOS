@@ -102,7 +102,14 @@ pub struct FILE {
     owned: bool,
     /// Next stream in the open list, for `fflush(NULL)`.
     next: *mut FILE,
+    /// Bytes `ungetc` pushed back; the last pushed is read first.
+    unget: [u8; UNGET_MAX],
+    unget_len: usize,
 }
+
+/// How many bytes `ungetc` holds: one multibyte character, which is what
+/// libc++'s standard input pushes back after a peek.
+const UNGET_MAX: usize = 4;
 
 const STDIN_FD: i32 = 0;
 const STDOUT_FD: i32 = 1;
@@ -117,17 +124,17 @@ static mut STDOUT_BUF: [u8; BUFSIZ] = [0; BUFSIZ];
 static mut STDOUT_FILE: FILE = FILE {
     fd: STDOUT_FD, eof: false, error: false,
     mode: MODE_UNSET, buf: (&raw mut STDOUT_BUF) as *mut u8, cap: BUFSIZ, len: 0,
-    owned: false, next: &raw mut STDERR_FILE,
+    owned: false, next: &raw mut STDERR_FILE, unget: [0; UNGET_MAX], unget_len: 0,
 };
 static mut STDERR_FILE: FILE = FILE {
     fd: STDERR_FD, eof: false, error: false,
     mode: IONBF, buf: ptr::null_mut(), cap: 0, len: 0,
-    owned: false, next: ptr::null_mut(),
+    owned: false, next: ptr::null_mut(), unget: [0; UNGET_MAX], unget_len: 0,
 };
 static mut STDIN_FILE: FILE = FILE {
     fd: STDIN_FD, eof: false, error: false,
     mode: IONBF, buf: ptr::null_mut(), cap: 0, len: 0,
-    owned: false, next: ptr::null_mut(),
+    owned: false, next: ptr::null_mut(), unget: [0; UNGET_MAX], unget_len: 0,
 };
 
 /// Head of the open-stream list. `fflush(NULL)` walks it, which is what makes
@@ -372,6 +379,8 @@ unsafe fn new_stream(fd: i32) -> FILE {
         len: 0,
         owned: !buf.is_null(),
         next: ptr::null_mut(),
+        unget: [0; UNGET_MAX],
+        unget_len: 0,
     }
 }
 
@@ -403,6 +412,13 @@ pub unsafe extern "C" fn fread(buf: *mut u8, size: usize, count: usize, f: *mut 
     unsafe { sync_before_fd_use(f); }
     let slice = unsafe { core::slice::from_raw_parts_mut(buf, total) };
     let mut read_so_far = 0;
+    while read_so_far < total && unsafe { (*f).unget_len } > 0 {
+        unsafe {
+            (*f).unget_len -= 1;
+            slice[read_so_far] = (*f).unget[(*f).unget_len];
+        }
+        read_so_far += 1;
+    }
     while read_so_far < total {
         let n = sys_read(unsafe { (*f).fd }, &mut slice[read_so_far..]);
         if n <= 0 {
@@ -428,7 +444,7 @@ pub unsafe extern "C" fn fwrite(buf: *const u8, size: usize, count: usize, f: *m
 #[no_mangle]
 pub unsafe extern "C" fn fseek(f: *mut FILE, offset: i64, whence: i32) -> i32 {
     if f.is_null() { return -1; }
-    unsafe { sync_before_fd_use(f); (*f).eof = false; }
+    unsafe { sync_before_fd_use(f); (*f).eof = false; (*f).unget_len = 0; }
     if sys_seek(unsafe { (*f).fd }, offset, whence) >= 0 { 0 } else { -1 }
 }
 
@@ -438,7 +454,8 @@ pub unsafe extern "C" fn ftell(f: *mut FILE) -> i64 {
     // Pending bytes have not moved the fd's offset yet, so reporting it now
     // would be short by exactly what is still in the buffer.
     unsafe { sync_before_fd_use(f); }
-    sys_seek(unsafe { (*f).fd }, 0, 1) // SEEK_CUR
+    let at = sys_seek(unsafe { (*f).fd }, 0, 1); // SEEK_CUR
+    if at < 0 { at } else { at - unsafe { (*f).unget_len } as i64 }
 }
 
 #[no_mangle]
@@ -568,7 +585,28 @@ pub unsafe extern "C" fn puts(s: *const u8) -> i32 {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn ungetc(_c: i32, _f: *mut FILE) -> i32 { -1 }
+pub unsafe extern "C" fn ungetc(c: i32, f: *mut FILE) -> i32 {
+    if c == -1 || f.is_null() || !unsafe { unget(f, &[c as u8]) } {
+        return -1;
+    }
+    i32::from(c as u8)
+}
+
+/// Push `bytes` back onto `f`, to be read in their order: all of them, or
+/// none when they do not fit.
+pub(crate) unsafe fn unget(f: *mut FILE, bytes: &[u8]) -> bool {
+    unsafe {
+        if (*f).unget_len + bytes.len() > UNGET_MAX {
+            return false;
+        }
+        for &b in bytes.iter().rev() {
+            (*f).unget[(*f).unget_len] = b;
+            (*f).unget_len += 1;
+        }
+        (*f).eof = false;
+    }
+    true
+}
 
 // File operations
 
@@ -610,7 +648,7 @@ pub unsafe extern "C" fn mkdir(path: *const u8, _mode: u32) -> i32 {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn __assert_fail(expr: *const u8, file: *const u8, _line: i32) {
+pub unsafe extern "C" fn __assert_fail(expr: *const u8, file: *const u8, _line: i32, _func: *const u8) {
     fputs(b"assertion failed: \0".as_ptr(), unsafe { stderr });
     fputs(expr, unsafe { stderr });
     fputs(b" at \0".as_ptr(), unsafe { stderr });

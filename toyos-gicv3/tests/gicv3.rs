@@ -1,10 +1,18 @@
-use toyos_gicv3::{find_redistributor, packed_affinity, sgi1r, sgi1r_others, FRAME};
+use toyos_gicv3::{find_redistributor, packed_affinity, sgi1r, sgi1r_others, unpacked_affinity, FRAME};
 
 #[test]
 fn affinity_drops_mpidr_flags_between_aff2_and_aff3() {
     // Aff3 in 39:32; `U` (30), `MT` (24) and the RES1 bit 31 in between.
     let mpidr = 0x12 << 32 | 1 << 31 | 1 << 30 | 1 << 24 | 0x34_5678;
     assert_eq!(packed_affinity(mpidr), 0x1234_5678);
+}
+
+#[test]
+fn unpacking_puts_each_field_back_and_no_flag() {
+    let mpidr = 0x12 << 32 | 1 << 31 | 1 << 30 | 1 << 24 | 0x34_5678;
+    assert_eq!(unpacked_affinity(packed_affinity(mpidr)), 0x12_0034_5678);
+    // QEMU `virt`'s seventeenth CPU, the first of its second cluster.
+    assert_eq!(unpacked_affinity(0x100), 0x100);
 }
 
 #[test]

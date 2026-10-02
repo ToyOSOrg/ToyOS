@@ -10,7 +10,7 @@ Owner ruling, 2026-09-25: the kernel is to be super small, super performant
 and safe. This track holds that, and supersedes the ordering of
 `issues/kernel/every-wait-in-this-kernel-is-a-spin.md`,
 `issues/kernel/every-driver-is-still-in-the-kernel.md` and
-`issues/hardware/the-bot-scsi-machine-is-still-hand-written-in-the-kernel.md`,
+`issues/hardware/a-disk-plugged-in-after-boot-is-bound-inside-a-scheduling-pass.md`,
 which stay as the evidence each stage closes.
 
 The design review of 2026-09-25 read the code and found the same shape three
@@ -144,15 +144,15 @@ times:
    written once as straight-line code. **Exit**: no interrupts-off window
    longer than a register access, and keyboard input keeps flowing while a
    stick misbehaves.
-6. **The scheduler knows nothing about devices.** A handler posts its
+6. A handler posts its
    device's `Watch` and ends its interrupt; the thread waiting on that watch
    does the work, and no step creates a kernel thread. `irq_ring`, the driver
    list in `drain_irqs` and the idle loop's device checks are gone by step 5.
-   Each step measures the kernel's lines, and from step 2 the longest
-   interrupts-off and preemption-off windows, against stage 6's first commit.
+   Each step measures the kernel's lines against stage 6's first commit, and
+   the longest interrupts-off and preemption-off windows against the readings
+   step 2's exit puts in the tree, by that exit's rule.
    Steps 3 and 4 do not land alone: they land with #592's i8042 stage and
-   with usbd. Stage 6 stays open past step 5 until the owner rules on the
-   panel the dump paints.
+   with usbd.
    1. **Interrupts post.** A post is legal in a handler: the watches a handler
       posts, and the completions of a ring they complete into, sit behind
       interrupts-off locks nothing allocates or frees under, and every other
@@ -168,12 +168,23 @@ times:
    2. **The windows, measured**: the longest interrupts-off and preemption-off
       windows per CPU, reported beside the IRQ census and fed by each
       architecture's masking primitives and entries, the number the ARM
-      track's stage 4 owes as well. Applied to stage 6's first commit for
-      the baseline. **Exit**: both windows read on the T14, which is x86
-      metal, at stage 6's start and at step 1's head, and neither is longer
-      at step 1's head than at the start, under the load
-      `issues/kernel/a-process-lengthens-an-interrupts-off-walk-by-the-threads-it-parks-on-one-ring.md`
-      names as well.
+      track's stage 4 owes as well. Built: the `mask-windows` kernel and the
+      T14's `mask_windows` row. The exit's first half is met: the instrument
+      reads back a window of known length on the T14, which is x86 metal, and
+      the row's judge refuses a boot that reads it back shorter than it was
+      held or at more than twice that. **Exit**, open: neither window is
+      longer with step 1 than
+      with it reverted on the tree that carries the instrument, the patch
+      posted on #649 being what reverted means. That comparison is the median
+      of at least five interleaved boots an arm, each read from the load's own
+      report with a report taken as the load starts, against a tolerance
+      stated before measuring, the reverted arm's own spread, with the tail
+      reported beside it, under a load in which a handler step 1 changed posts
+      into a watch that reaches a ring with parked threads
+      (`issues/kernel/a-process-lengthens-an-interrupts-off-walk-by-the-threads-it-parks-on-one-ring.md`'s
+      second bullet). `ring_park_herd` is not that load: its walks start in
+      `SYS_INBOX_SUBMIT`, which runs with interrupts masked on both arms, and
+      it reaches no handler step 1 changed.
    3. **The i8042's thread is ps2server's** (#592's i8042 stage): `irq_ring`'s
       `I8042`, `keyboard_controller::service` and the idle loop's
       `verdict_due` go with the kernel's driver. **Exit**: that stage's.
@@ -182,11 +193,11 @@ times:
       them. **Exit**: step 10's.
    5. **The pass is the scheduler's.** `drain_irqs` goes: the blocked-task
       dump and the heartbeat become `pass`'s own, and the TCO feed stays,
-      since what it proves is that passes run. The dump still paints its
-      report on the panel and holds it there, a device the pass reaches;
-      whether that stays is the owner's ruling. **Exit**: `drain_irqs` and the
+      since what it proves is that passes run. The dump keeps painting its
+      report on the panel and holding it there, a device the pass reaches
+      (owner, 2026-09-30). **Exit**: `drain_irqs` and the
       idle loop's device checks are gone, both windows are measured against
-      stage 6's start, and the exits of
+      step 2's readings by its rule, and the exits of
       `issues/kernel/an-irq-watchs-freeing-cancel-compiles-in-a-handler.md`
       and
       `issues/kernel/nothing-fails-when-a-devices-release-or-close-stops-answering-its-polls.md`

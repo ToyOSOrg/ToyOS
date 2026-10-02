@@ -3,10 +3,8 @@
 # listener the parameter line names, and sshd taking a command — `reboot`
 # among them, which is how the host hands the machine back.
 #
-# `tests/e1000talkcase` is the same boot in front of QEMU's 82574; the two
-# differ by the one `devices` row, for the reason `tests/e1000case` is its
-# own directory. Nothing here reaches the internal NVMe: no `[disks]`
-# row, and the only device any program claims is the PCI function below.
+# Nothing here reaches the internal NVMe: no `[disks]` row, and the only
+# device any program claims is the PCI function below.
 
 [boot]
 start = ["logd", "blockd", "fsd", "netd", "sshd", "test-runner"]

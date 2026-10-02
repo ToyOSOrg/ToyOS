@@ -151,9 +151,7 @@ pub fn ceiling_self_check() -> Result<(), String> {
     //     that talks forever.
     const TIGHT: Duration = Duration::from_secs(153);
     let bstop = TIGHT * 2;
-    // (a) The flake itself: `launcher_refusals` at `192s "still talking 1s ago"`
-    //     on a loaded smp:2 runner. Past its 153 s budget, but talking — no
-    //     verdict, it runs on.
+    // (a) Past its 153 s budget, but talking — no verdict, it runs on.
     if ceiling_verdict(None, Duration::from_secs(192), TIGHT, Duration::from_secs(1), 500).is_some()
     {
         return Err(String::from(
@@ -266,8 +264,7 @@ pub fn ceiling_self_check() -> Result<(), String> {
 
     // 5. **The pre-marker death, the other half of that omission.** A test that
     //    never announced itself has an empty `serial`, so the arm formatting
-    //    `serial` prints nothing and `before` is the only record there is —
-    //    `sched_check_build`'s empty `serial:` block in run `31890991692`. Both
+    //    `serial` prints nothing and `before` is the only record there is. Both
     //    directions, because a started test's window is already where its arm
     //    looks.
     let never = WaitVerdict::for_test(slow.clone(), window_before, "", false);
@@ -298,70 +295,6 @@ pub fn ceiling_self_check() -> Result<(), String> {
          that never announced itself carries the {} it was given, and the rest carry nothing",
         carried.to_string().lines().count() - 1,
         never.to_string().lines().count() - 2,
-    );
-    Ok(())
-}
-
-/// [`Ceiling`] reading a capture its caller keeps, staged on instants ahead of
-/// now so that nothing here sleeps: a capture still growing past its ceiling
-/// is ended by the backstop alone, one that stopped growing by the stall, and
-/// a kernel death appended after the first read by its own name and report.
-pub fn capture_ceiling_self_check() -> Result<(), String> {
-    const CEILING: Duration = Duration::from_secs(10);
-    const LINE: &str = "compositor: frames=2\n";
-    const REPORT: &str = "rip=0xffffffff80121a40";
-    let t0 = Instant::now();
-    let at = |secs: u64| t0 + Duration::from_secs(secs);
-
-    let far = backstop(CEILING).as_secs();
-    let mut talking = Ceiling::new(CEILING);
-    let mut capture = String::new();
-    for s in 1..=far {
-        capture.push_str(LINE);
-        if let Some(cut) = talking.verdict(&capture, at(s)) {
-            return Err(format!("growing at {s}s under a {CEILING:?} ceiling, and cut: {cut}"));
-        }
-    }
-    capture.push_str(LINE);
-    let slow = talking.verdict(&capture, at(far + 1)).map(|v| v.to_string());
-    if !slow.as_deref().is_some_and(|v| v.starts_with(TIMED_OUT)) {
-        return Err(format!("growing past the {far}s backstop: {slow:?}"));
-    }
-
-    let mut stopped = Ceiling::new(CEILING);
-    let capture = String::from(LINE);
-    let quiet = GUEST_QUIET.as_secs();
-    for s in 2..=quiet + 1 {
-        if let Some(cut) = stopped.verdict(&capture, at(s)) {
-            return Err(format!("silent since 2s and cut at {s}s, inside {GUEST_QUIET:?}: {cut}"));
-        }
-    }
-    let stalled = quiet + 3;
-    let stall = stopped.verdict(&capture, at(stalled)).map(|v| v.to_string());
-    if !stall.as_deref().is_some_and(|v| v.starts_with(STALLED)) {
-        return Err(format!("silent from 2s to {stalled}s under a {CEILING:?} ceiling: {stall:?}"));
-    }
-
-    let mut dying = Ceiling::new(CEILING);
-    let mut capture = String::from(LINE);
-    let early = dying.verdict(&capture, at(1)).is_some();
-    capture.push_str(&format!(
-        "[kernel 1.450 cpu3] PANIC: panicked at kernel/src/sched/reserve.rs:812:9:\n\
-         [kernel 1.450 cpu3]   {REPORT}\n"
-    ));
-    if early || dying.verdict(&capture, at(2)).is_some() {
-        return Err(format!("a capture 2s into a {CEILING:?} ceiling was ended"));
-    }
-    let died = dying.verdict(&capture, at(2 + quiet)).map(|v| v.to_string());
-    if !died.as_deref().is_some_and(|v| {
-        v.starts_with("kernel panic") && v.contains(DIED_SAYING) && v.contains(REPORT)
-    }) {
-        return Err(format!("a kernel death appended at 2s, silent since: {died:?}"));
-    }
-
-    eprintln!(
-        "  [ceiling] a capture growing to {far}s is ended by the backstop alone, one silent \
-         since 2s by the stall at {stalled}s, and a death appended later by its name and report"
     );
     Ok(())
 }

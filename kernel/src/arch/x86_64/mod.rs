@@ -25,13 +25,11 @@ pub mod i8042;
 pub mod idt;
 pub mod ioapic;
 pub mod mtrr;
-#[cfg(feature = "boot-actuators")]
-pub mod nmi_gate;
 pub mod paging;
 pub mod pat;
 pub mod percpu;
-pub mod pio;
 pub mod pmu;
+pub mod power;
 pub mod rtc;
 pub mod smp;
 pub mod switch;
@@ -72,17 +70,9 @@ impl IrqGuard {
         unsafe {
             core::arch::asm!("pushfq", "pop {saved}", "cli", saved = out(reg) rflags);
         }
-        Self { rflags, _not_send_sync: core::marker::PhantomData }
-    }
-
-    /// The flags captured and interrupts left as they are: what the
-    /// `log-unbracketed-reserve` actuator stages a log reservation with.
-    #[cfg(feature = "boot-actuators")]
-    pub fn unclosed() -> Self {
-        let rflags: u64;
-        // SAFETY: pushfq/pop is balanced and writes no RFLAGS bit.
-        unsafe {
-            core::arch::asm!("pushfq", "pop {saved}", saved = out(reg) rflags);
+        #[cfg(feature = "mask-windows")]
+        if idt::frame_interrupts_enabled(rflags) {
+            crate::windows::irqs_masked();
         }
         Self { rflags, _not_send_sync: core::marker::PhantomData }
     }
@@ -90,6 +80,11 @@ impl IrqGuard {
 
 impl Drop for IrqGuard {
     fn drop(&mut self) {
+        // Only where the restore opens them.
+        #[cfg(feature = "mask-windows")]
+        if idt::frame_interrupts_enabled(self.rflags) && !cpu::interrupts_enabled() {
+            crate::windows::irqs_unmasking();
+        }
         // SAFETY: the word `close` read out of RFLAGS on this CPU (the guard is
         // `!Send`), restored whole.
         unsafe {

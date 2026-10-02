@@ -1,0 +1,16 @@
+[package]
+name = "toyos-net-shard"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "One shard of ToyOS's network stack, pure: toyos-net-ip, toyos-net-tcp and toyos-net-udp over one interface, frames in and frames pulled out with the device's credit."
+publish = false
+
+[dependencies]
+toyos-net-ip = { path = "../toyos-net-ip" }
+toyos-net-tcp = { path = "../toyos-net-tcp" }
+toyos-net-udp = { path = "../toyos-net-udp" }
+toyos-net-wire = { path = "../toyos-net-wire" }
+
+[dev-dependencies]
+toyos-net-testnet = { path = "../toyos-net-testnet" }

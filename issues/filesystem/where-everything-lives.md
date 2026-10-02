@@ -114,6 +114,7 @@ until that lands nothing verifies it.
 ## Not moved
 
 `/log/lease.txt` stays on `/log`. It is not netd's lease: it is the
-`--exit-with-lease` bench report the harness reads off the image's FAT log
-volume, and the DATA volume is not readable there. It goes with
+`--exit-with-lease` bench report the metal loop reads off the stick's FAT log
+volume, as it reads `/log/metal-*.bin`, and the DATA volume is not readable
+there. It goes with
 `issues/diagnostics/netds-lease-probe-answers-a-question-its-lines-already-answer.md`.

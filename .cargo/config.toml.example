@@ -4,8 +4,8 @@
 # no setup. When you need to *edit* a fork, clone it next to the monorepo and
 # list it here; cargo then uses your working copy instead of the git branch.
 #
-#   git clone https://github.com/Japabu/cpal ../forks/cpal
-#   cd ../forks/cpal && git checkout toyos
+#   git clone https://github.com/ToyOSOrg/cpal ../forks/cpal
+#   cd ../forks/cpal && git checkout toyos-0.18.0
 #
 # Delete the entry (or the file) to go back to the pushed branch.
 

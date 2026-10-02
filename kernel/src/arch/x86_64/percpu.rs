@@ -5,7 +5,6 @@ use alloc::alloc::alloc_zeroed;
 use core::alloc::Layout;
 
 use super::cpu;
-use crate::sched::idle_stack::{words, FILL as STACK_FILL, FILL_WORD as STACK_FILL_WORD};
 use crate::log;
 
 const MSR_GS_BASE: u32 = 0xC000_0101;
@@ -103,9 +102,6 @@ pub struct PerCpu {
     /// Non-zero inside this CPU's NMI handler, written only by `arch::idt::nmi`'s entry; IST2 isn't re-entrant, so this proves no second NMI lands on it.
     nmi_active: u32,
     ap_token: u32,
-    /// `nmi_gate::hold`'s word: the storm asks in it from another CPU, and `arch::syscall`'s entry acknowledges and spins on it inside its window, through [`OFF_NMI_HOLD`].
-    #[cfg(feature = "boot-actuators")]
-    nmi_hold: AtomicU64,
     /// Interrupt deliveries, one counter per `irq_census::Source`; written only by `irq_census::irq_took!`, kept last so growing `SLOTS` moves nothing else.
     pub irq_counts: [AtomicU64; crate::irq_census::SLOTS],
 }
@@ -202,9 +198,6 @@ pub(crate) const OFF_FAULT_STATE: u32 = offset_of!(PerCpu, fault_state) as u32;
 pub(crate) const OFF_NMI_ACTIVE: u32 = offset_of!(PerCpu, nmi_active) as u32;
 /// The AP's bring-up token, read by `ap_entry` to answer for its own attempt.
 const OFF_AP_TOKEN: u32 = offset_of!(PerCpu, ap_token) as u32;
-/// Spun on by `arch::syscall`'s entry from inside its window, with nothing pushed.
-#[cfg(feature = "boot-actuators")]
-pub(crate) const OFF_NMI_HOLD: u32 = offset_of!(PerCpu, nmi_hold) as u32;
 /// Where this CPU's interrupt counters start; `irq_census::slot_offset` derives every handler's offset from it.
 pub const OFF_IRQ_COUNTS: u32 = offset_of!(PerCpu, irq_counts) as u32;
 
@@ -314,11 +307,22 @@ pub(crate) mod gs {
 /// that can arrive with `rsp` not a kernel stack (SDM Vol. 3A §6.14.5); `ist[n-1]` is IST*n*.
 pub(crate) const IST_STACKS: usize = 3;
 
-/// One size for every IST stack, for [`crate::sched::idle_stack::SIZE`]'s reason; must leave room to double the measured high water, which `double_fault_stack` asserts.
+/// One size for every IST stack, for [`crate::sched::idle_stack::SIZE`]'s reason; must leave room to double the measured high water.
 const IST_STACK_SIZE: usize = 16384;
 
 /// Filled with [`STACK_FILL`], not unmapped: a fault already on IST1 is a triple fault, so detecting after the fact beats trapping it.
 const IST_GUARD_SIZE: usize = 4096;
+
+const STACK_FILL: u8 = 0xA5;
+const STACK_FILL_WORD: u64 = u64::from_ne_bytes([STACK_FILL; 8]);
+
+/// Sequential u64s from `base`; every address is inside the caller's
+/// already-bounds-checked allocation.
+fn words(base: u64, len: usize) -> impl Iterator<Item = u64> {
+    // SAFETY: `i < len/8` bounds each address inside the caller's checked
+    // allocation; `read_volatile` keeps the fill-pattern read.
+    (0..len / 8).map(move |i| unsafe { core::ptr::read_volatile((base as *const u64).add(i)) })
+}
 
 
 /// Allocate and initialize `PerCpu` for a CPU; the pointer lives forever, one `write` of the whole struct so a new field must be given a value here.
@@ -358,8 +362,6 @@ fn alloc_percpu(cpu_id: u32) -> *mut PerCpu {
                 log_shard: log::shard_for(cpu_id) as *const log::Shard as u64,
                 nmi_active: 0,
                 ap_token: 0,
-                #[cfg(feature = "boot-actuators")]
-                nmi_hold: AtomicU64::new(0),
                 irq_counts: [const { AtomicU64::new(0) }; crate::irq_census::SLOTS],
             },
         );
@@ -371,8 +373,6 @@ fn alloc_percpu(cpu_id: u32) -> *mut PerCpu {
     percpu.init_tss_descriptor();
     // Published before the CPU it belongs to runs an instruction — no window where the census misses it.
     crate::irq_census::publish(cpu_id, percpu.irq_counts.as_ptr());
-    #[cfg(feature = "boot-actuators")]
-    crate::arch::nmi_gate::publish(cpu_id, &raw const percpu.nmi_hold, &raw const percpu.user_rsp);
     ptr
 }
 
@@ -404,8 +404,6 @@ pub fn reserve_log_slot(
             pid_off = const OFF_CURRENT_PID,
             options(preserves_flags),
         );
-        // `log-nested-reserve`'s injection point: must sit between the shard-pointer read and the `xadd`, the only place ordering is decided (no-op outside tests).
-        crate::log::nested::reserve_window();
         seq = (&*(shard as *const log::Shard)).reserve(guard);
     }
     (shard as *const log::Shard, seq, cpu, tid, pid)
@@ -413,18 +411,6 @@ pub fn reserve_log_slot(
 
 fn alloc_idle_stack(percpu: &mut PerCpu) {
     percpu.idle_stack_top = crate::sched::idle_stack::alloc();
-}
-
-/// How big one idle stack is; read by `SYS_DEBUG` for scale.
-#[cfg(feature = "test-actuators")]
-pub fn idle_stack_size() -> usize {
-    crate::sched::idle_stack::SIZE
-}
-
-/// The deepest any CPU's idle stack has ever been, in bytes.
-#[cfg(feature = "test-actuators")]
-pub fn idle_stack_high_water() -> usize {
-    crate::sched::idle_stack::high_water()
 }
 
 /// One stack per [`IST_STACKS`] row; an `ist[n-1]` left zero faults to address 0 unchecked.
@@ -475,11 +461,12 @@ pub fn ist1_report() {
         * 8;
     let used = IST_STACK_SIZE - untouched;
 
-    crate::drivers::serial::panic_raw(b"\n[ist1] used ");
-    crate::drivers::serial::panic_raw_dec(used as u64);
-    crate::drivers::serial::panic_raw(b" of ");
-    crate::drivers::serial::panic_raw_dec(IST_STACK_SIZE as u64);
-    crate::drivers::serial::panic_raw(if intact {
+    let mut uart = crate::drivers::serial::panic_registers();
+    uart.write(b"\n[ist1] used ");
+    uart.dec(used as u64);
+    uart.write(b" of ");
+    uart.dec(IST_STACK_SIZE as u64);
+    uart.write(if intact {
         b" bytes, guard intact\n"
     } else {
         b" bytes, GUARD CORRUPTED\n"
@@ -519,13 +506,6 @@ pub fn init_bsp(lapic_id: u32) {
     // handlers report on no channel of this kernel's — so a fault in `fpu`
     // below would stop the machine with the panel holding the record before it.
     super::idt::init();
-
-    // The first instruction at which a panic is reportable at all, which is why
-    // it is where this fires: what it judges is that the reset register was
-    // already decoded, so a panic here can end the machine and not just describe it.
-    if crate::actuator::test_panic_after_idt() {
-        panic!("test-panic-after-idt: the IDT is loaded and nothing else is up");
-    }
 
     super::fpu::init(0);
     // Between `fpu::init` and this function's own line: the facts `fpu::init`
@@ -771,18 +751,26 @@ pub fn preempt_count() -> u32 {
 
 #[inline]
 pub fn set_preempt_count(value: u32) {
+    #[cfg(feature = "mask-windows")]
+    let old = preempt_count();
     gs::write_u32::<OFF_PREEMPT_COUNT>(value);
+    #[cfg(feature = "mask-windows")]
+    crate::windows::preempt_set(old, value);
 }
 
 /// One increment, atomic against an interrupt on this CPU.
 #[inline]
 pub fn preempt_count_up() {
     gs::lock_inc_u32::<OFF_PREEMPT_COUNT>();
+    #[cfg(feature = "mask-windows")]
+    crate::windows::preempt_raised();
 }
 
 /// One decrement, atomic against an interrupt on this CPU.
 #[inline]
 pub fn preempt_count_down() {
+    #[cfg(feature = "mask-windows")]
+    crate::windows::preempt_lowering();
     gs::lock_dec_u32::<OFF_PREEMPT_COUNT>();
 }
 

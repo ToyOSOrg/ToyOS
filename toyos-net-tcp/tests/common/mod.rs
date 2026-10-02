@@ -20,7 +20,7 @@ use std::fmt;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use toyos_net_tcp::{Config, ConnId, Counter, Endpoint, Event, Info, Instant, ListenerId, Outgoing, Secrets, Status, Tcp, Tuple};
+use toyos_net_tcp::{Config, ConnId, Counter, Endpoint, Event, Hop, Info, Instant, ListenerId, Outgoing, Secrets, Status, Tcp, Tuple};
 use toyos_net_wire::ipv4::{Ipv4Builder, Ipv4Packet, Ipv4Source, TrafficClass, Ttl};
 use toyos_net_wire::tcp::TcpSegment;
 use toyos_net_wire::Port;
@@ -412,6 +412,9 @@ struct Delta {
     ts: Option<u32>,
 }
 
+/// The answer to the hop question for a 4-tuple at spec time t (`ip.md` §6.7).
+pub type Hops = Box<dyn FnMut(i64, &Tuple) -> Hop<()>>;
+
 /// Stack A and its scripted peer.
 pub struct H {
     pub tcp: Tcp,
@@ -431,6 +434,11 @@ pub struct H {
     pub conn: Option<ConnId>,
     pub listener: Option<ListenerId>,
     pub events: Vec<Event>,
+    pub hop: Hops,
+    /// Hop questions asked so far.
+    pub asked: usize,
+    /// The sink refuses every frame.
+    pub unframed: bool,
 }
 
 impl H {
@@ -454,6 +462,9 @@ impl H {
             conn: None,
             listener: None,
             events: Vec::new(),
+            hop: Box::new(|_, _| Hop::Ready(())),
+            asked: 0,
+            unframed: false,
         }
     }
 
@@ -533,8 +544,17 @@ impl H {
     pub fn transmit(&mut self) -> Vec<O> {
         let credit = self.credit.unwrap_or(usize::MAX);
         let mut raw = Vec::new();
-        let now = self.now();
-        self.tcp.transmit(now, credit, |out| raw.push(datagram(out)));
+        let (now, t, hop, asked, unframed) = (self.now, self.t, &mut self.hop, &mut self.asked, self.unframed);
+        let ask = |tuple: &Tuple| {
+            *asked += 1;
+            hop(t, tuple)
+        };
+        self.tcp.transmit(now, credit, ask, |out, ()| {
+            if !unframed {
+                raw.push(datagram(out));
+            }
+            !unframed
+        });
         if let Some(c) = self.credit.as_mut() {
             *c = c.saturating_sub(raw.len());
         }
@@ -701,6 +721,16 @@ pub fn fixture_e() -> H {
 /// Fixture EF: established, full options, A is the client.
 pub fn fixture_ef() -> H {
     client(65_535, seg(5000).ack(1001).syn().wnd(65_535).mss(1460).sackok().ts(50_000, 990).ws(7))
+}
+
+/// A listens on 80 at t = 0, for B's SYNs from 40000.
+pub fn listening() -> H {
+    let mut h = H::new(65_535);
+    h.peer = (B, 40_000);
+    h.local = (A, 80);
+    h.start(0);
+    h.listener = Some(h.tcp.listen(A, Some(port(80)), || 0).unwrap());
+    h
 }
 
 /// A listens on 80; B's SYN from 40000 at −20, its ACK at 0; the user accepts.

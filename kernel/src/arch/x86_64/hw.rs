@@ -13,6 +13,10 @@ use crate::sched::payload::{KernelCtx, KernelPayload};
 
 /// `sti; hlt`, the atomic enable-and-wait pair: a wake landing between the two is not lost.
 pub fn halt() {
+    #[cfg(feature = "mask-windows")]
+    if !cpu::interrupts_enabled() {
+        crate::windows::irqs_unmasking();
+    }
     // SAFETY: enables interrupts and waits for one; touches no memory.
     unsafe { asm!("sti; hlt", options(nomem, nostack)); }
 }
@@ -280,6 +284,10 @@ impl Hw for KernelHw {
     unsafe fn switch(&self, token: RunToken<KernelPayload>) {
         let save = token.save_ptr();
         let restore = token.restore_ptr();
+        // Every context is saved masked, so `context_switch`'s `popfq` never
+        // moves `IF`; the resumed context's own guard puts back what it had.
+        #[cfg(feature = "mask-windows")]
+        let _masked = crate::arch::IrqGuard::close();
         // SAFETY: `save`/`restore` are live Box-backed contexts from `SchedPass::finish`, freed only by a later pass; `incoming.thread_pointer` is this kernel's own canonical value for the thread being installed.
         unsafe {
             (*save).thread_pointer = cpu::read_fs_base();
@@ -297,11 +305,6 @@ impl Hw for KernelHw {
             percpu::set_current_pid(incoming.id.map(|id| id.0));
             match incoming.id {
                 Some(_) => {
-                    // Here, not in the pass: this is the one place a task (not idle) becomes what a
-                    // CPU runs, which `note_dispatch` below must count for `heartbeat`'s `ran=` to
-                    // be meaningful.
-                    #[cfg(feature = "boot-actuators")]
-                    crate::heartbeat::note_dispatch();
                     percpu::set_kernel_stack(incoming.kernel_stack_top);
                     incoming.root.activate();
                     cpu::write_fs_base(incoming.thread_pointer);

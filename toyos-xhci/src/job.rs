@@ -50,6 +50,8 @@ pub enum Await {
 /// controller still owes whatever stages are left.
 pub const CC_SUCCESS: u32 = 1;
 pub const CC_SHORT_PACKET: u32 = 13;
+/// Table 6-90's Stall Error: the device STALLed the transfer.
+pub const CC_STALL: u32 = 6;
 
 /// What the controller still owes one operation after the completion it was
 /// submitted on.

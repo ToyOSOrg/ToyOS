@@ -529,6 +529,8 @@ pub fn pass(dispose: Dispose) {
         };
         disposed.finish()
     });
+    #[cfg(feature = "mask-windows")]
+    crate::windows::scheduled();
     charge_cpu_time(now);
     with_cpu(|cpu| {
         if let Some(current) = cpu.running() {
@@ -600,6 +602,8 @@ pub fn pass_block(ticket: Ticket, deadline: Option<Nanos>) {
             Commit::Killed => (pass.dispose_none().finish(), false),
         }
     });
+    #[cfg(feature = "mask-windows")]
+    crate::windows::scheduled();
     charge_cpu_time(now);
     with_cpu(|cpu| {
         if let Some(current) = cpu.running() {
@@ -658,10 +662,6 @@ fn execute(action: Action<KernelPayload>) {
 
 /// Consume this CPU's `irq_ring` records into wakes, before the mailbox drain, so a wake posted here reaches this pass's pick.
 fn drain_irqs(entered: super::dump::Entered) {
-    // First in the function, so the stamp means "this CPU reached a
-    // pass" and not "this CPU got all the way through one".
-    #[cfg(feature = "boot-actuators")]
-    crate::heartbeat::note_pass();
     crate::drivers::xhci::poll_if_pending();
     crate::arch::keyboard_controller::service();
     // Here, not at the keystroke: the keystroke's decoding driver's guard is done by this point.
@@ -675,6 +675,8 @@ fn drain_irqs(entered: super::dump::Entered) {
 
 /// Leave the current stack for this CPU's idle stack and never come back.
 pub fn enter_idle_loop() -> ! {
+    #[cfg(feature = "mask-windows")]
+    crate::windows::start_here();
     percpu::set_current_tid(None);
     percpu::set_current_pid(None);
     // SAFETY: `set_kernel_stack` requires the caller be the CPU its GS base belongs to — true here, on that CPU, after its base was set.
@@ -693,28 +695,23 @@ extern "C" fn idle_loop() -> ! {
         if crate::actuator::dump_deaf_cpu() {
             super::dump::deaf_window();
         }
-        // From the other side: the storming CPU has nothing to run,
-        // while the one under observation spins on `syscall` from Ring 3.
+        // The first NMI; its handler stages the nested one.
         #[cfg(feature = "boot-actuators")]
-        if crate::actuator::syscall_window_nmi() {
-            crate::arch::syscall::window_storm();
+        if crate::actuator::nmi_nested() {
+            static SENT: AtomicBool = AtomicBool::new(false);
+            if !SENT.swap(true, Ordering::Relaxed) {
+                crate::arch::irqchip::send_nmi(percpu::cpu_id());
+            }
         }
         #[cfg(feature = "boot-actuators")]
         if crate::drivers::panic_console::probe_due() {
             panic!("metal-panic-probe: a fatal report over a desktop that owns the screen");
-        }
-        #[cfg(feature = "boot-actuators")]
-        if crate::actuator::handler_post() {
-            crate::watch::handler_post::run();
         }
         crate::scheduler::log_health();
         crate::scheduler::reap_finished();
         // `pass` below covers this too; here as well so a CPU that
         // halts immediately has still run every hook first.
         crate::object::drain_zero_handles();
-        // A heartbeat is a record like any other; the idle loop touches no filesystem itself.
-        #[cfg(feature = "boot-actuators")]
-        crate::heartbeat::poll();
         pass(Dispose::None);
     }
 }

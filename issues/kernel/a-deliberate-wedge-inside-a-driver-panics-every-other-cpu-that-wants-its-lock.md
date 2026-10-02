@@ -35,10 +35,10 @@ Two things are true and neither is decided here:
 
 ## Where it bites
 
-Any actuator that stops a CPU inside a driver — today the `usb-wedge-*` arms,
-which are QEMU registrations and reach no flashed image. It does not change
-their verdicts, but it adds a panic and a page of dropped
-records to every one of them.
+Any actuator that stops a CPU inside a driver: the `usb-wedge-*` arms, which
+went with `usb_reset_records_the_phase_it_cut`'s QEMU registration and come back
+as T14 rows in stage E of
+`issues/build/the-guest-suite-runs-only-what-no-cheaper-tier-reaches.md`.
 
 ## Exit condition
 

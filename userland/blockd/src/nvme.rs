@@ -210,15 +210,12 @@ pub struct Controller {
     pub peak: usize,
     /// Commands issued down each I/O queue.
     pub issued: Vec<u64>,
-    /// `--silence-write <n>`: the answer to the `n`th write a session asked
-    /// for, from 1, is not given, as if the device never gave it.
-    silence: Option<u32>,
 }
 
 impl Controller {
     /// Bring the controller up (§3.5.1): disable, program the admin queue,
     /// enable, identify, and make the I/O queue pairs.
-    pub fn open(dev: PciDev, silence: Option<u32>) -> Result<Self, Refusal> {
+    pub fn open(dev: PciDev) -> Result<Self, Refusal> {
         let class = dev
             .config_read(0x08, toyos_abi::syscall::RegWidth::U32)
             .map_err(|e| Refusal::Kernel("the class code", e))?;
@@ -269,7 +266,6 @@ impl Controller {
             stray: false,
             peak: 0,
             issued: Vec::new(),
-            silence,
         };
         ctrl.enable()?;
         ctrl.identify()?;
@@ -462,7 +458,6 @@ impl Controller {
     /// Read every answer queue `queue` holds into `out`.
     fn reap_queue(&mut self, queue: Option<usize>, out: &mut Vec<Done>) {
         let (regs, dma, stride) = (self.regs, self.dma, self.stride);
-        let silence = &mut self.silence;
         let stray = &mut self.stray;
         let q = match queue {
             Some(i) => &mut self.io[i],
@@ -496,20 +491,6 @@ impl Controller {
                 }
                 continue;
             };
-            // `--silence-write`: the write the device did is read off the
-            // queue and its answer not given, and its slot stays waiting, so
-            // the silence this driver meets is the device's as far as anything
-            // above can tell.
-            let write = matches!(slot.owner, Owner::Session { write: true, .. });
-            if write && let Some(n) = silence.as_mut() {
-                *n -= 1;
-            }
-            if write && *silence == Some(0) {
-                *silence = None;
-                q.slots[cid as usize] = Some(slot);
-                println!("blockd: WITHHELD the device's answer to a write, queue {} identifier {cid}", q.qid);
-                continue;
-            }
             q.free.push(cid);
             out.push(Done { owner: slot.owner, ok: status == 0, status, dw0 });
         }

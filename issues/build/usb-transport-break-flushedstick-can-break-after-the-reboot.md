@@ -29,3 +29,5 @@ The case's premise is arranged rather than raced: a write after a verified
 flush is made to go out before the job ends the boot (or the case waits on the
 break before it starts the job), and ten consecutive
 `usb_transport_break` runs are green.
+
+`usb_transport_break` is deleted; `issues/kernel/a-held-disk-waits-for-a-pass-no-cpu-takes-when-every-cpu-is-in-a-call-on-it.md` records the commit that restores it.

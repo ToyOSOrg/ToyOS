@@ -1,0 +1,14 @@
+[package]
+name = "toyos-dhcp"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "ToyOS's DHCPv4 client, pure: the caller hands in the time, the draws and the server's messages, and carries out what each call returns."
+publish = false
+
+[dependencies]
+toyos-net-wire = { path = "../toyos-net-wire" }
+
+[dev-dependencies]
+toyos-net-ip = { path = "../toyos-net-ip" }
+toyos-net-udp = { path = "../toyos-net-udp" }

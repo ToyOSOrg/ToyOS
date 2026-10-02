@@ -91,13 +91,26 @@ fn class_name(esr: u64) -> &'static str {
 /// The Rust half of every vector entry. Returns to the entry, which restores
 /// the frame and returns from the exception; everything fatal diverges.
 extern "C" fn dispatch(frame: &mut Frame, entry: u64) {
+    // Each returning entry found interrupts open, an IRQ because only then is
+    // one taken and EL0 because it never masks them, and taking it masked
+    // them; `exit_to_user` opens them for EL0, and the `ERET` for EL1.
     match entry {
-        EL1_IRQ => irq(false),
+        EL1_IRQ => {
+            #[cfg(feature = "mask-windows")]
+            crate::windows::irqs_masked();
+            irq(false);
+            #[cfg(feature = "mask-windows")]
+            crate::windows::irqs_unmasking();
+        }
         EL0_SYNC => {
+            #[cfg(feature = "mask-windows")]
+            crate::windows::irqs_masked();
             el0_sync(frame);
             crate::scheduler::exit_to_user();
         }
         EL0_IRQ => {
+            #[cfg(feature = "mask-windows")]
+            crate::windows::irqs_masked();
             irq(true);
             crate::scheduler::exit_to_user();
         }
@@ -166,6 +179,7 @@ fn irq(from_el0: bool) {
         // Never ended: the running priority it keeps is every interrupt's
         // own, so the interface signals this CPU nothing and the halt stays.
         irqchip::SGI_HALT => cpu::halt(),
+        irqchip::SGI_OFF => super::power::cpu_off(),
         irqchip::SGI_KICK => {
             percpu::irq_took(Source::Timer);
             irqchip::end(intid);
@@ -174,13 +188,6 @@ fn irq(from_el0: bool) {
             } else {
                 crate::preempt::set_need_resched();
             }
-        }
-        #[cfg(feature = "boot-actuators")]
-        intid if intid == u32::from(LOG_NEST_VECTOR) => {
-            percpu::preempt_count_up();
-            crate::log::nested::deliver();
-            percpu::preempt_count_down();
-            irqchip::end(intid);
         }
         #[cfg(feature = "boot-actuators")]
         irqchip::SGI_STORM => {
@@ -279,9 +286,6 @@ fn user_fatal(frame: &Frame) -> ! {
     // First: a panic anywhere below reaches the panic handler as DOUBLE
     // PANIC, which can only report what was captured here.
     crate::panic::record_fault(class_name(frame.esr), frame.elr, frame.far, frame.esr);
-    if crate::actuator::panic_in_report() {
-        panic!("panic-in-report: the crash report panicked before it said anything");
-    }
     let tid = percpu::current_tid().map_or(u32::MAX, |t| t.raw());
     alert!(
         "FAULT pc={:#018x} far={:#018x} esr={:#010x} sp={:#018x} tid={tid}{}",
@@ -463,7 +467,6 @@ pub fn install() {
 
 pub const HDA_VECTOR: u8 = irqchip::Intid::Hda as u8;
 pub const VIRTIO_SOUND_VECTOR: u8 = irqchip::Intid::VirtioSound as u8;
-pub const LOG_NEST_VECTOR: u8 = irqchip::Intid::LogNest as u8;
 
 /// The crash report for a panic, from the frame pointer the panic handler
 /// stood on: the backtrace, which CPU is on which stack, and what the

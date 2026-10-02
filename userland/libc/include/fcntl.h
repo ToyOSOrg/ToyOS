@@ -3,6 +3,10 @@
 
 #include <sys/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define O_RDONLY    0x0000
 #define O_WRONLY    0x0001
 #define O_RDWR      0x0002
@@ -18,10 +22,32 @@
 #define F_SETFD  2
 #define F_GETFL  3
 #define F_SETFL  4
+#define F_GETLK  5
+#define F_SETLK  6
+#define F_SETLKW 7
+#define F_SETOWN 8
+#define F_GETOWN 9
+#define F_DUPFD_CLOEXEC 1030
 #define FD_CLOEXEC 1
+
+#define F_RDLCK 0
+#define F_WRLCK 1
+#define F_UNLCK 2
+
+struct flock {
+    short l_type;
+    short l_whence;
+    off_t l_start;
+    off_t l_len;
+    pid_t l_pid;
+};
 
 int open(const char *path, int flags, ...);
 int fcntl(int fd, int cmd, ...);
-int creat(const char *path, int mode);
+int creat(const char *path, mode_t mode);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

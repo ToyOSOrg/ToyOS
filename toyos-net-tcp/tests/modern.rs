@@ -65,7 +65,7 @@ fn s_mod_005_one_line_per_rule_per_10_s() {
         .refusals(Counter::SynFin)
         .into_iter()
         .zip(times)
-        .filter_map(|(r, t)| log.admit(Instant::from_millis(t), &r).map(|n| (r, n)))
+        .filter_map(|(r, t)| log.admit(Instant::from_millis(t), r.rule).map(|n| (r, n)))
         .collect();
     assert_eq!(lines.len(), 2);
     assert_eq!((lines[0].0.remote, lines[0].1), (ep(Ipv4Addr::new(192, 0, 2, 10), 1234), 0));
@@ -118,7 +118,7 @@ fn s_mod_007_fast_open() {
 
 fn log_lines(h: &H, rule: Counter, times: &[i64]) -> usize {
     let mut log = RefusalLog::default();
-    h.refusals(rule).into_iter().zip(times).filter(|(r, &t)| log.admit(Instant::from_millis(t as u64), r).is_some()).count()
+    h.refusals(rule).into_iter().zip(times).filter(|(r, &t)| log.admit(Instant::from_millis(t as u64), r.rule).is_some()).count()
 }
 
 #[test]

@@ -8,3 +8,7 @@ license = "MIT OR Apache-2.0"
 toyos = { path = "../../toyos" }
 # `launch_path`, which is the other half of the gate init refuses a launch on.
 toyos-manifest = { path = "../../toyos-manifest" }
+
+[package.metadata.toyos.host]
+fails = ["linux", "macos", "windows"]
+issue = "issues/build/apps-that-build-or-run-on-toyos-alone.md"

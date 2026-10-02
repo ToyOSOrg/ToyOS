@@ -110,6 +110,14 @@ impl Portsc {
         self.0 & CSC != 0
     }
 
+    /// Whether the port still holds the device the driver last consumed its
+    /// connect change for: connected, with no connect change since. A device
+    /// replugged between two looks reads connected again, and only CSC says
+    /// the one that was here has gone.
+    pub const fn holds(self) -> bool {
+        self.connected() && !self.connect_changed()
+    }
+
     /// Whether reset signalling is still on the wire.
     ///
     /// **PR is RW1S and the xHC is what clears it** (§4.19.5), so a port reading
@@ -284,8 +292,7 @@ mod tests {
         assert!(!Portsc::from_raw(1 << 16).any_change());
     }
 
-    /// The finding `xhci-portsc-rw1c` exists for, as a host test: a write built
-    /// from a read word must not carry PED back.
+    /// A write built from a read word must not carry PED back.
     #[test]
     fn a_write_never_carries_ped() {
         let enabled = Portsc::from_raw(CCS | PED | PRC | PP | (4 << 10));
@@ -304,6 +311,18 @@ mod tests {
         let write = word.neutral().acknowledging(word).resetting();
         assert_eq!(write.raw() & PED, 0, "{write:?}");
         assert_ne!(write.raw() & PR, 0);
+    }
+
+    /// The T14's USB2 port under the port rung's reset: before it, at its
+    /// completion, and once its SuperSpeed stick had left for the USB3 half of
+    /// the receptacle.
+    #[test]
+    fn a_port_holds_its_device_only_while_it_reads_connected_with_no_change_unconsumed() {
+        assert!(Portsc::from_raw(0x0000_0e03).holds(), "Enabled at high speed");
+        assert!(Portsc::from_raw(0x0020_0e03).holds(), "a reset that ended is no connect change");
+        assert!(!Portsc::from_raw(0x0002_02a0).holds(), "Disconnected (§4.19.1.1.2), unconsumed");
+        assert!(!Portsc::from_raw(0x0000_02a0).holds(), "Disconnected, its change consumed");
+        assert!(!Portsc::from_raw(0x0002_02e1).holds(), "Disabled on a connect since: another connection");
     }
 
     /// A change flag raised between the read and the write is not cleared by

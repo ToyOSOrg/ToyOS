@@ -2,23 +2,30 @@ use alloc::vec;
 use core::ffi::VaList;
 use core::fmt::Write;
 
-/// Output buffer for printf family. Writes to a raw C buffer with optional capacity limit.
+/// Output buffer for printf family. Writes to a raw C buffer with optional
+/// capacity limit, and counts every byte it was given, as C's return value
+/// does, whether or not it fit.
 struct BufWriter {
     buf: *mut u8,
     pos: usize,
     cap: usize, // usize::MAX = unlimited (sprintf)
+    /// A wide argument that is no Unicode scalar value: C's `EILSEQ`.
+    refused: bool,
+}
+
+impl BufWriter {
+    fn put(&mut self, b: u8) {
+        if !self.buf.is_null() && self.pos + 1 < self.cap {
+            unsafe { *self.buf.add(self.pos) = b; }
+        }
+        self.pos += 1;
+    }
 }
 
 impl Write for BufWriter {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         for &b in s.as_bytes() {
-            if self.cap > 0 && self.pos >= self.cap - 1 {
-                continue; // leave room for null terminator
-            }
-            if !self.buf.is_null() {
-                unsafe { *self.buf.add(self.pos) = b; }
-            }
-            self.pos += 1;
+            self.put(b);
         }
         Ok(())
     }
@@ -261,12 +268,12 @@ fn format_float<'a>(
 /// Core printf engine. Parses the format string as a byte slice.
 unsafe fn do_printf(buf: *mut u8, n: usize, fmt: *const u8, ap: &mut VaList<'_>) -> i32 {
     let fmt = core::slice::from_raw_parts(fmt, super::string::strlen(fmt));
-    let mut w = BufWriter { buf, pos: 0, cap: n };
+    let mut w = BufWriter { buf, pos: 0, cap: n, refused: false };
     let mut i = 0;
 
     while i < fmt.len() {
         if fmt[i] != b'%' {
-            let _ = w.write_char(fmt[i] as char);
+            w.put(fmt[i]);
             i += 1;
             continue;
         }
@@ -371,10 +378,37 @@ unsafe fn do_printf(buf: *mut u8, n: usize, fmt: *const u8, ap: &mut VaList<'_>)
                 let s = format_unsigned(val, 8, false, &mut tmp);
                 write_int_padded(&mut w, s, 0, width, pad_char, left_align, precision);
             }
+            b'c' if long => {
+                let mut utf8 = [0u8; 4];
+                match crate::wchar::encode(ap.next_arg::<i32>() as crate::arch::WChar, &mut utf8) {
+                    Some(n) => write_padded_bytes(&mut w, &utf8[..n], width, left_align),
+                    None => w.refused = true,
+                }
+            }
             b'c' => {
                 let c = ap.next_arg::<i32>() as u8;
-                let s = core::str::from_utf8_unchecked(core::slice::from_ref(&c));
-                write_padded(&mut w, s, width, ' ', left_align);
+                write_padded_bytes(&mut w, &[c], width, left_align);
+            }
+            b's' if long => {
+                let p: *const crate::arch::WChar = ap.next_arg::<*const crate::arch::WChar>();
+                let mut bytes = alloc::vec::Vec::new();
+                if p.is_null() {
+                    bytes.extend_from_slice(b"(null)");
+                }
+                let mut k = 0;
+                while !p.is_null() && *p.add(k) != 0 {
+                    let mut utf8 = [0u8; 4];
+                    let Some(n) = crate::wchar::encode(*p.add(k), &mut utf8) else {
+                        w.refused = true;
+                        break;
+                    };
+                    if precision.is_some_and(|prec| bytes.len() + n > prec) {
+                        break;
+                    }
+                    bytes.extend_from_slice(&utf8[..n]);
+                    k += 1;
+                }
+                write_padded_bytes(&mut w, &bytes, width, left_align);
             }
             b's' => {
                 let p: *const u8 = ap.next_arg::<*const u8>();
@@ -407,8 +441,8 @@ unsafe fn do_printf(buf: *mut u8, n: usize, fmt: *const u8, ap: &mut VaList<'_>)
             }
             b'%' => { let _ = w.write_char('%'); }
             other => {
-                let _ = w.write_char('%');
-                let _ = w.write_char(other as char);
+                w.put(b'%');
+                w.put(other);
             }
         }
         i += 1;
@@ -418,27 +452,50 @@ unsafe fn do_printf(buf: *mut u8, n: usize, fmt: *const u8, ap: &mut VaList<'_>)
         *buf.add(w.pos.min(n - 1)) = 0;
     }
 
+    if w.refused {
+        crate::errno::set(crate::errno::EILSEQ);
+        return -1;
+    }
     w.pos as i32
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn printf(fmt: *const u8, mut args: ...) -> i32 {
-    let mut buf = [0u8; 4096];
-    let n = do_printf(buf.as_mut_ptr(), buf.len(), fmt, &mut args);
-    if n > 0 {
-        super::stdio::fwrite(buf.as_ptr(), 1, n as usize, super::stdio::stdout);
+/// Hand `take` the whole of what `fmt` formats to, NUL-terminated, formatted
+/// into a buffer on the stack, and again on the heap for an output that
+/// buffer cannot hold: its length, or -1 when the format or `take` refuses.
+unsafe fn formatted(fmt: *const u8, ap: VaList<'_>, take: impl FnOnce(&[u8]) -> bool) -> i32 {
+    let mut stack = [0u8; 4096];
+    let n = do_printf(stack.as_mut_ptr(), stack.len(), fmt, &mut ap.clone());
+    if n < 0 {
+        return n;
     }
-    n
+    let len = n as usize;
+    let taken = if len < stack.len() {
+        take(&stack[..=len])
+    } else {
+        let mut whole = vec![0u8; len + 1];
+        let mut ap = ap;
+        do_printf(whole.as_mut_ptr(), whole.len(), fmt, &mut ap);
+        take(&whole)
+    };
+    if taken { n } else { -1 }
+}
+
+/// Write the whole of what `fmt` formats to to `f`.
+unsafe fn print_to(f: *mut super::stdio::FILE, fmt: *const u8, ap: VaList<'_>) -> i32 {
+    formatted(fmt, ap, |bytes| {
+        super::stdio::fwrite(bytes.as_ptr(), 1, bytes.len() - 1, f);
+        true
+    })
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn fprintf(f: *mut super::stdio::FILE, fmt: *const u8, mut args: ...) -> i32 {
-    let mut buf = [0u8; 4096];
-    let n = do_printf(buf.as_mut_ptr(), buf.len(), fmt, &mut args);
-    if n > 0 {
-        super::stdio::fwrite(buf.as_ptr(), 1, n as usize, f);
-    }
-    n
+pub unsafe extern "C" fn printf(fmt: *const u8, args: ...) -> i32 {
+    print_to(super::stdio::stdout, fmt, args)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn fprintf(f: *mut super::stdio::FILE, fmt: *const u8, args: ...) -> i32 {
+    print_to(f, fmt, args)
 }
 
 #[no_mangle]
@@ -457,13 +514,8 @@ pub unsafe extern "C" fn vsnprintf(buf: *mut u8, n: usize, fmt: *const u8, mut a
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn vfprintf(f: *mut super::stdio::FILE, fmt: *const u8, mut ap: VaList<'_>) -> i32 {
-    let mut buf = [0u8; 4096];
-    let n = do_printf(buf.as_mut_ptr(), buf.len(), fmt, &mut ap);
-    if n > 0 {
-        super::stdio::fwrite(buf.as_ptr(), 1, n as usize, f);
-    }
-    n
+pub unsafe extern "C" fn vfprintf(f: *mut super::stdio::FILE, fmt: *const u8, ap: VaList<'_>) -> i32 {
+    print_to(f, fmt, ap)
 }
 
 #[no_mangle]
@@ -525,4 +577,33 @@ pub unsafe extern "C" fn sscanf(input: *const u8, fmt: *const u8, mut args: ...)
         }
     }
     matched
+}
+
+/// `bytes`, space-padded to `width` on the side `left` says.
+fn write_padded_bytes(w: &mut BufWriter, bytes: &[u8], width: usize, left: bool) {
+    let pad = width.saturating_sub(bytes.len());
+    if !left {
+        (0..pad).for_each(|_| w.put(b' '));
+    }
+    bytes.iter().for_each(|&b| w.put(b));
+    if left {
+        (0..pad).for_each(|_| w.put(b' '));
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn vasprintf(out: *mut *mut u8, fmt: *const u8, ap: VaList<'_>) -> i32 {
+    formatted(fmt, ap, |bytes| {
+        let buf = super::memory::malloc(bytes.len());
+        if !buf.is_null() {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, bytes.len());
+            *out = buf;
+        }
+        !buf.is_null()
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn asprintf(out: *mut *mut u8, fmt: *const u8, args: ...) -> i32 {
+    vasprintf(out, fmt, args)
 }

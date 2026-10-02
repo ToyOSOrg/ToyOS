@@ -48,6 +48,12 @@ const EXIT_WITH_LEASE: &str = "--exit-with-lease";
 
 /// How long [`EXIT_WITH_LEASE`] serves before it ends, counted from this
 /// process's start.
+///
+/// **It ends inside the job that holds its boot open**: `test_rs_lan_hold`
+/// sleeps `toyos_tco::LEASE_BOUND_MS` from a start after this process's, so
+/// the exit record and the report's last line land before the runner reboots,
+/// with two seconds to spare. Every moment of it after the lease is a moment
+/// the machine answers the host's ping at the leased address.
 const LEASE_WINDOW: Duration = Duration::from_millis(toyos_tco::LEASE_BOUND_MS - 2_000);
 
 fn armed(actuator: &str) -> bool {

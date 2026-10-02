@@ -86,7 +86,9 @@ Each stage lands on its own, in this order.
    - Every volume the loader opens (the slot's FAT partition, the log
      partition and the attempts file on it) is found on the boot disk, where
      exactly one match is taken. `loaderlog::volume_handle`'s machine-wide
-     first match goes.
+     first match goes. Every stick written from one image carries the same
+     unique GUIDs: `src/image.rs`'s `create_boot_image` draws them once per
+     image.
    - A pass asks firmware once: one `LoadedImage` open, one device-path walk,
      one `Disk::open` and slot-table read, and one file reader.
      `load_file_bytes`, `MAX_ESP_FILE` and the unsound `alloc_uninit` go.
@@ -186,7 +188,7 @@ Each stage lands on its own, in this order.
    `kernel_args_last_layout_refused` boots with
    `loader-writes-the-last-layout` and finds the kernel's refusal naming both
    words before any `black box:` record. Moving `layout` after
-   `root_read_tsc` fails to build, and so does padding `KernelArgs` back to
+   `root_read_ticks` fails to build, and so does padding `KernelArgs` back to
    1272 bytes: `size_of::<KernelArgs>()` is then stage 1's size again, the
    derived `LAYOUT` collapses onto the literal `LAST_LAYOUT`
    (`0x5459_0000 | 1272`), and `assert!(LAYOUT != LAST_LAYOUT)` fails the

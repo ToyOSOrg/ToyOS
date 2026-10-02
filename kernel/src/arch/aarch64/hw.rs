@@ -13,6 +13,12 @@ use crate::sched::payload::{KernelCtx, KernelPayload};
 /// `WFI` whatever `DAIF` says (Arm ARM K.a, D1.6.2), so a wake that lands
 /// between the decision and the wait is taken right after it, not slept through.
 pub fn halt() {
+    // Before the `WFI`: what it waits for is taken the moment it unmasks, so
+    // the wait is no window.
+    #[cfg(feature = "mask-windows")]
+    if !cpu::interrupts_enabled() {
+        crate::windows::irqs_unmasking();
+    }
     // SAFETY: waits for an interrupt and unmasks `I` and `F`; touches no memory.
     unsafe { core::arch::asm!("wfi", "msr daifclr, #3", "isb", options(nomem, nostack)) };
 }
@@ -64,6 +70,10 @@ impl Hw for KernelHw {
     unsafe fn switch(&self, token: RunToken<KernelPayload>) {
         let save = token.save_ptr();
         let restore = token.restore_ptr();
+        // Every context is saved masked, so `context_switch`'s `msr daif`
+        // never unmasks; the resumed context's own guard puts back what it had.
+        #[cfg(feature = "mask-windows")]
+        let _masked = crate::arch::IrqGuard::close();
         // SAFETY: `save`/`restore` are live Box-backed contexts from
         // `SchedPass::finish`, freed only by a later pass.
         unsafe {
@@ -76,8 +86,6 @@ impl Hw for KernelHw {
             percpu::set_current_pid(incoming.id.map(|id| id.0));
             match incoming.id {
                 Some(_) => {
-                    #[cfg(feature = "boot-actuators")]
-                    crate::heartbeat::note_dispatch();
                     percpu::set_kernel_stack(incoming.kernel_stack_top);
                     incoming.root.activate();
                     cpu::write_thread_pointer(incoming.thread_pointer);

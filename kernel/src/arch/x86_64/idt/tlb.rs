@@ -18,12 +18,22 @@ pub(super) extern "sysv64" fn tlb_flush_entry() {
         "lock add dword ptr gs:[{preempt_count}], 1",
         "mov rbp, rsp",
         "and rsp, -16",
+        #[cfg(feature = "mask-windows")]
+        "call {windows_entered}",
         "call {flush}",
         "mov rsp, rbp",
         "mov ecx, 0x80B",
         "xor eax, eax",
         "xor edx, edx",
         "wrmsr",
+        #[cfg(feature = "mask-windows")]
+        "mov rdi, [rsp + 88]",
+        #[cfg(feature = "mask-windows")]
+        "and rsp, -16",
+        #[cfg(feature = "mask-windows")]
+        "call {windows_leaving}",
+        #[cfg(feature = "mask-windows")]
+        "mov rsp, rbp",
         "lock sub dword ptr gs:[{preempt_count}], 1",
         // Only this branch can context-switch; user state is saved and restored around it alone.
         "test dword ptr [rsp + 88], 3",
@@ -47,6 +57,10 @@ pub(super) extern "sysv64" fn tlb_flush_entry() {
         flush = sym flush,
         exit_to_user = sym crate::arch::idt::kernel_exit_to_user_check,
         preempt_count = const crate::arch::percpu::OFF_PREEMPT_COUNT,
+        #[cfg(feature = "mask-windows")]
+        windows_entered = sym super::device_irq::windows_entered,
+        #[cfg(feature = "mask-windows")]
+        windows_leaving = sym super::device_irq::windows_leaving,
     );
 }
 

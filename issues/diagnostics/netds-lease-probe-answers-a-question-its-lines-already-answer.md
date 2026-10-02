@@ -14,9 +14,8 @@ the lease, what the driver and the MAC counted each way), and ends with
 about the same things was a console write, and on the T14 a console write
 reached no file. Every program's lines reach `/log` through its log ring now,
 and the talking boot's `lan_dhcp_lease` judge reads the lease off netd's own
-lines, so the probe's T14 boot, `tests/lanleasecase`, is gone. What still arms
-it is `tests/e1000leasecase` and the `lan_lease_report` QEMU registration,
-whose link-flap check reads the report.
+lines. What still arms the probe is `tests/lanleasecase`, the `lan_lease_report`
+metal row: a T14 flash of its own, because netd ends inside it.
 
 ## Owner
 
@@ -24,9 +23,12 @@ The I219 bring-up's author, and after it the network track.
 
 ## What would close it
 
-The flap judged off netd's own lines. Then netd's `--exit-with-lease`,
-`userland/netd/src/report.rs`, `toyos-i219/src/lease.rs`'s report lines,
-`tests/e1000leasecase` and the `lan_lease_report` QEMU registration go.
+The probe deleted: `tests/lanleasecase/system.toml`, its row and its gate in
+`src/build.rs`, the `lan_lease_report` metal row in `tests/toyos.rs` with
+`LANLEASECASE`, `lan::leased_on_metal`, `Readback::log_volume_file` and
+`tests/common/volumes.rs`, netd's `--exit-with-lease` and
+`userland/netd/src/report.rs`, `toyos-i219/src/lease.rs`'s report lines, and
+`toyos_i219::phy::Outcome`, whose tests then assert the refusal itself.
 
 An earlier form of this arm, `--exit-with-phy-outcome` on `d409139f^:tests/lanphycase`,
 ended right after the bring-up with the PHY's outcome; its codes are still

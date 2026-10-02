@@ -241,6 +241,22 @@ pub extern "C" fn fabs(x: f64) -> f64 { f64::from_bits(x.to_bits() & !(1u64 << 6
 #[no_mangle]
 pub extern "C" fn fabsf(x: f32) -> f32 { f32::from_bits(x.to_bits() & !(1u32 << 31)) }
 
+#[no_mangle]
+pub unsafe extern "C" fn modf(x: f64, iptr: *mut f64) -> f64 {
+    let (int, fraction) = crate::fparts::modf(x);
+    unsafe { *iptr = int };
+    fraction
+}
+
+/// `math.h`'s `math_errhandling` is `MATH_ERRNO`, so a pole sets `errno`.
+#[no_mangle]
+pub extern "C" fn logb(x: f64) -> f64 {
+    crate::fparts::logb(x).unwrap_or_else(|crate::fparts::Pole| {
+        crate::errno::set(crate::errno::ERANGE);
+        f64::NEG_INFINITY
+    })
+}
+
 // --- Utility functions ---
 
 #[no_mangle]
@@ -260,12 +276,3 @@ pub unsafe extern "C" fn frexp(x: f64, exp: *mut i32) -> f64 {
     *exp = biased - 1022; // exponent such that x = mantissa * 2^exp, mantissa in [0.5, 1.0)
     f64::from_bits((bits & 0x800FFFFFFFFFFFFF) | 0x3FE0000000000000)
 }
-
-#[no_mangle]
-pub extern "C" fn isnan(x: f64) -> i32 { x.is_nan() as i32 }
-
-#[no_mangle]
-pub extern "C" fn isinf(x: f64) -> i32 { x.is_infinite() as i32 }
-
-#[no_mangle]
-pub extern "C" fn isfinite(x: f64) -> i32 { x.is_finite() as i32 }

@@ -229,6 +229,12 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
     (
+        "toyos-acpi/fixtures/qemu-11.1.1/dsdt.bin",
+        "d183acae4048280f9c9cd8353045544d7d84319b304b7f65d4d0895e8b8ac06b",
+        "ours: QEMU's own DSDT, captured by the commit that reads `\\_S5_` out of it",
+        Terms::Spdx("MIT OR Apache-2.0"),
+    ),
+    (
         "toyos-acpi/fixtures/qemu-11.1.1/facp.bin",
         "410716dfb169eaba296ed3c336028843b3cf9fce6ca7c179bb242199cfec9d1a",
         "ours: QEMU's own FADT, captured by the commit that added toyos-acpi",
@@ -284,6 +290,46 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         "7be2c99db0e68c784ea59ef394454a084fa57868b14027528ab6b8b21031840e",
         "NOTICE",
         Terms::Spdx("MIT OR Apache-2.0"),
+    ),
+    // FAT32 volumes macOS's `newfs_msdos` formatted and its `msdosfs`
+    // populated, as runs of nonzero sectors. Each boot sector carries
+    // `newfs_msdos`'s boot stub; `NOTICE` carries its notice, each raw digest
+    // and the commands.
+    (
+        "toyos-fat32/tests/fixtures/blank-4k.runs",
+        "14e98fc505450882f4d284fb712d32b4f9e4d50c1bfc86702ace8f0adee745e0",
+        "NOTICE",
+        Terms::Spdx("(MIT OR Apache-2.0) AND BSD-2-Clause"),
+    ),
+    (
+        "toyos-fat32/tests/fixtures/blank-512.runs",
+        "4f1686152769fb4b064a78b0a2287c8b54bff3ec1e279b35c8f337d538a45f78",
+        "NOTICE",
+        Terms::Spdx("(MIT OR Apache-2.0) AND BSD-2-Clause"),
+    ),
+    (
+        "toyos-fat32/tests/fixtures/empty-file.runs",
+        "68a6abf1626e4bdf6b3586d3f52b2d7051390e4e18beb31258dd0021bb3e96b9",
+        "NOTICE",
+        Terms::Spdx("(MIT OR Apache-2.0) AND BSD-2-Clause"),
+    ),
+    (
+        "toyos-fat32/tests/fixtures/hostile.runs",
+        "c570b3c6944f47d2cd1498da14f12c4a98dc85683f782624181917eba68f9066",
+        "NOTICE",
+        Terms::Spdx("(MIT OR Apache-2.0) AND BSD-2-Clause"),
+    ),
+    (
+        "toyos-fat32/tests/fixtures/read-4k.runs",
+        "cab78e1ea6c46b0a04a0de32a24f1a6ac90a2017dd7188745de2d603c5ab121b",
+        "NOTICE",
+        Terms::Spdx("(MIT OR Apache-2.0) AND BSD-2-Clause"),
+    ),
+    (
+        "toyos-fat32/tests/fixtures/read-512.runs",
+        "6bef14efca36070830f5a4a2b1dc9b69a0e2627679cc5c9ed542acaa4ece416c",
+        "NOTICE",
+        Terms::Spdx("(MIT OR Apache-2.0) AND BSD-2-Clause"),
     ),
     (
         "assets/DOOM1.WAD",
@@ -396,8 +442,8 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
     (
         "doom.jpg",
         "ae22f71dc732580bd4f789937c9fe564969029413fc2092f27bdae8d1ceaf8e3",
-        "a screenshot of this system running doom, in README.md; \
-         issues/build/doom-jpg-shows-ids-art-under-no-recorded-terms.md",
+        "the owner's own screenshot of this system running doom, in README.md; \
+         no licence question applies",
         Terms::Spdx("NOASSERTION"),
     ),
     (
@@ -413,12 +459,6 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         Terms::Font("OFL-1.1"),
     ),
     (
-        "tests/fixtures/gbae-v0.2.0-toyos-x86_64.tar.gz",
-        "99fcd8a7263b5c25cd90cead1baaa7200ef272100fc2226e008a4e8205ba2916",
-        "NOTICE",
-        Terms::Spdx("MIT"),
-    ),
-    (
         "toyos-elf/tests/fixtures/toyos-ld-headers.bin",
         "6243d543a15941133514c1a8a24c79d118060caeae7e985870a67d9fc3021354",
         "ours: the first 4096 bytes of a toyos-ld output (toyos-elf/tests/real.rs)",
@@ -429,6 +469,18 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         "6a08f75ee01bdbd1e77c9b3affd6185e981d86995da432c90ed107676f08eb83",
         "ours: a ToyOS binary this build produced (toyos-symbols/tests/real.rs)",
         Terms::Spdx("MIT OR Apache-2.0"),
+    ),
+    (
+        "toyos-microcode/intel-ucode/06-8c-01",
+        "efe83e312b90f7fe4b8f75260087edf03e048d2f4f80caef2ef631c842714bb3",
+        "NOTICE",
+        Terms::Spdx("LicenseRef-Intel-Microcode"),
+    ),
+    (
+        "toyos-microcode/intel-ucode/06-cc-02",
+        "4e43bb4d23c3638f8c16967d61e8f6456ae0da2ddd1da82ab579a50715147bb1",
+        "NOTICE",
+        Terms::Spdx("LicenseRef-Intel-Microcode"),
     ),
 ];
 
@@ -1127,12 +1179,7 @@ fn metadata(
 fn std_library(root: &Path) -> Result<PathBuf, String> {
     let fork = crate::sysroot::fork_checkout(root);
     if !fork.join("library/Cargo.toml").exists() {
-        run(
-            Command::new("git")
-                .args(["submodule", "update", "--init", "--depth", "1", "rust"])
-                .current_dir(root),
-            "git submodule update --init --depth 1 rust",
-        )?;
+        crate::ensure_shallow_fork(root)?;
     }
     Ok(fork.join("library"))
 }
@@ -1324,7 +1371,6 @@ mod tests {
         );
         assert!(names(&parse("MIT AND MPL-2.0").unwrap()));
     }
-
 
     /// The kernel's `--kernel-feature` picks any feature it declares, so its
     /// graph is resolved with all of them; a `[programs]` row's
