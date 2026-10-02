@@ -573,9 +573,6 @@ pub struct pollfd {
     pub revents: i16,
 }
 
-const POLLIN: i16 = 1;
-const POLLOUT: i16 = 4;
-
 #[no_mangle]
 pub unsafe extern "C" fn poll(fds: *mut pollfd, nfds: u32, timeout: i32) -> i32 {
     if nfds == 0 {
@@ -597,19 +594,10 @@ pub unsafe extern "C" fn poll(fds: *mut pollfd, nfds: u32, timeout: i32) -> i32 
     let timeout_ns = if timeout < 0 { None } else { Some(timeout as u64 * 1_000_000) };
 
     let n = nfds as usize;
-    // One watch per fd, under the first entry naming it and for every entry's
-    // interest: a watch replaces its handle's earlier one, so a second watch
-    // on the fd would leave the first entry unanswered.
-    let first = |i: usize| (0..i).find(|&j| (*fds.add(j)).fd == (*fds.add(i)).fd).unwrap_or(i);
-    let mut interest = alloc::vec![0u32; n];
-    for i in 0..n {
-        let events = (*fds.add(i)).events;
-        if events & POLLIN != 0 { interest[first(i)] |= toyos::poller::READABLE; }
-        if events & POLLOUT != 0 { interest[first(i)] |= toyos::poller::WRITABLE; }
-    }
+    let entries: alloc::vec::Vec<(i32, i16)> = (0..n).map(|i| ((*fds.add(i)).fd, (*fds.add(i)).events)).collect();
     let poller = toyos::poller::Poller::new(n as u32);
-    for i in (0..n).filter(|&i| first(i) == i) {
-        poller.watch_raw(toyos_abi::RawHandle((*fds.add(i)).fd as u32), interest[i], i as u64);
+    for (entry, fd, interest) in crate::pollreq::watches(&entries) {
+        poller.watch_raw(toyos_abi::RawHandle(fd as u32), interest, entry as u64);
     }
 
     let mut ready_set = alloc::vec![false; n];
@@ -618,7 +606,7 @@ pub unsafe extern "C" fn poll(fds: *mut pollfd, nfds: u32, timeout: i32) -> i32 
     });
     let mut ready = 0i32;
     for i in 0..n {
-        let answered = ready_set[first(i)];
+        let answered = ready_set[crate::pollreq::watch_of(&entries, i)];
         let pfd = &mut *fds.add(i);
         pfd.revents = 0;
         if answered {

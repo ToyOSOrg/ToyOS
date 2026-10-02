@@ -50,9 +50,8 @@ wake-fence-off = []
 # Never on by default, and no kernel build can reach it.
 poll-fire-load-store = []
 # The negative control for a poll ring's answer. It makes `inbox/polls.rs`
-# answer a fired poll with its interest and look at nothing, which is what a
-# ring did before that file, so a post with nothing behind it is an answer and
-# `inbox_answer.rs` must red:
+# answer a fired poll with its interest and look at nothing, so a post with
+# nothing behind it is an answer and `inbox_answer.rs` must red:
 #
 #   cargo test --manifest-path kernel-loom/Cargo.toml --features post-is-an-answer \
 #     --test inbox_answer

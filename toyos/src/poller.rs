@@ -200,8 +200,9 @@ pub struct Poller {
 // Safety: the base pointer is process-local shared memory mapped from the
 // kernel. It is only ever reached through `Rings`, which takes no reference
 // over it: atomics for the shared words, whole-value volatile copies for
-// everything else. Not `Sync`: a watch moves the submission tail in two steps.
+// everything else.
 unsafe impl Send for Poller {}
+unsafe impl Sync for Poller {}
 
 impl Poller {
     /// Widest handle set one poller can carry — the kernel's deepest
@@ -304,8 +305,7 @@ impl Poller {
     /// Submit pending entries and wait for completions.
     ///
     /// Blocks until at least `min_complete` completions are ready or `timeout_nanos`
-    /// elapses. Calls `f` for each completed token: a handle that was ready when
-    /// the kernel looked, inside this wait ([`OP_WATCH`]).
+    /// elapses. Calls `f` for each completed token.
     pub fn wait(&self, min_complete: u32, timeout_nanos: u64, mut f: impl FnMut(u64)) {
         self.submit(min_complete, timeout_nanos);
         self.drain(&mut f);

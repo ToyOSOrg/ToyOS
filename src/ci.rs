@@ -327,9 +327,8 @@ pub(crate) const CONTROLS: &[Control] = &[
             message: "parked with the condition true and no wake owed: the post was lost",
         },
         Says {
-            test: "two_posts_through_one_rings_lock_lose_no_wake",
-            message: "parked with both completions written and no wake owed: a ring's post was \
-                      lost",
+            test: "a_fire_racing_a_submitters_park_is_never_lost",
+            message: "parked over a fired poll and no wake owed: a fire was lost",
         },
     ]),
     // The notify's flagged arm answering off a load: a second post reads the

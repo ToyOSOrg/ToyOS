@@ -30,16 +30,19 @@
 //! models must red with a poll completed by neither.
 //!
 //! **The ring entry is the kernel's [`Once`], compiled from
-//! `kernel/src/inbox/once.rs`**, the decision a `PollEntry` makes; what else a
-//! `PollEntry` is — the ring's page, its lock, the look it owes — names half the
-//! kernel and cannot be compiled here, so the model's entry counts its answers
-//! instead.
+//! `kernel/src/inbox/once.rs`**, the decision a `PollEntry` makes, and the last
+//! model's ring is the kernel's `kernel/src/inbox/polls.rs` whole: its polls,
+//! the submitter's `deliver` and its park predicate. What else a ring is — its
+//! page, the objects its looks read — names half the kernel and cannot be
+//! compiled here, so the models count answers instead of writing them.
 //!
 //! [`TaskShared::notify`]: toyos_sched_loom::task::TaskShared::notify
 //! [`Gate`]: toyos_sched_loom::watch::Gate
 //! [`Once`]: once::Once
 //! [`prepare`]: toyos_sched_loom::park::prepare
 //! [`Ring::fire`]: toyos_sched_loom::watch::Ring::fire
+
+extern crate alloc;
 
 use loom::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use loom::sync::Arc;
@@ -57,6 +60,11 @@ use toyos_sched_loom::watch::{Fire, Gate, Poster, Ring, Waiters, Watch};
 
 #[path = "../../../kernel/src/inbox/once.rs"]
 mod once;
+
+/// Names the one-shot above as `super::once`.
+#[expect(dead_code, reason = "every look here finds its object ready: a renewal and a refusal are `kernel-loom`'s `inbox_answer`'s")]
+#[path = "../../../kernel/src/inbox/polls.rs"]
+mod polls;
 
 /// One poll, as the kernel's is: its answer taken once, by the kernel's own
 /// [`once::Once`], across everything that may fire it; it counts what it
@@ -658,92 +666,137 @@ fn a_poll_on_two_watches_racing_both_posts_completes_exactly_once() {
     });
 }
 
-/// A poll ring: its completions behind a lock of its own, and a watch its
-/// submitter parks on, which holds threads and no ring.
+/// A poll ring as its fires and its submitter see it: the kernel's polls, the
+/// answers its submitter wrote, and the watch that submitter parks on, which
+/// holds threads and no ring.
 struct PollRing {
     cpus: CpuHandles<Msg>,
     kicks: Kicks,
-    written: LoomLock<u32>,
+    polls: LoomLock<polls::Polls<RingRef>>,
+    answers: LoomLock<u32>,
     parked: RingWatch,
 }
 
-/// One of that ring's polls, registered on one device's watch.
-struct RingPoll {
-    ring: Arc<PollRing>,
-    state: once::Once,
+#[derive(Clone)]
+struct RingRef(Arc<PollRing>);
+
+type RingPoll = alloc::sync::Arc<polls::Poll<RingRef>>;
+
+impl polls::Wake for RingRef {
+    fn wake(&self) {
+        let ring = &self.0;
+        let env = Poster { cpus: &ring.cpus, kicker: &ring.kicks, preempt: &RemoteGuard };
+        ring.parked.post_in_place(WakeCause::new(WakeReason::Woken), &env);
+    }
 }
 
-struct RingEntry(Arc<RingPoll>);
+/// Every look finds its object ready: each device posts once, for good.
+impl polls::Submitter<RingRef> for PollRing {
+    fn room(&self) -> bool {
+        true
+    }
+
+    fn answer(&self, _user_data: u64, _result: i32) {
+        self.answers.with(|n| *n += 1);
+    }
+
+    fn look(&self, poll: &RingPoll) -> polls::Look {
+        polls::Look::Ready(poll.flags)
+    }
+
+    fn polls<R>(&self, f: impl FnOnce(&mut polls::Polls<RingRef>) -> R) -> Option<R> {
+        Some(self.polls.with(f))
+    }
+}
+
+/// One of that ring's polls, as one device's watch holds it.
+struct RingEntry(RingPoll);
 
 type RingWatch = Watch<Msg, RingEntry, LoomLock<Waiters<Msg, RingEntry>>>;
 
 impl Ring for RingEntry {
+    // As the kernel's `PollEntry`.
     fn fire(&self, how: Fire) {
-        let took = match how {
-            Fire::Ready => self.0.state.fire(),
-            Fire::Gone => self.0.state.end(),
-        };
-        if took {
-            let ring = &self.0.ring;
-            ring.written.with(|n| *n += 1);
-            let env = Poster { cpus: &ring.cpus, kicker: &ring.kicks, preempt: &RemoteGuard };
-            ring.parked.post_in_place(WakeCause::new(WakeReason::Woken), &env);
+        match how {
+            Fire::Ready => self.0.fire(self.0.flags),
+            Fire::Gone => self.0.end(),
         }
     }
 
     fn live(&self) -> bool {
-        self.0.state.armed()
+        self.0.armed()
     }
 }
 
-/// **A post in place fires its rings under its own list lock**, so beneath it
-/// are the ring's lock and the ring's watch. Two devices' watches each hold a
-/// poll of one ring and are posted at once, while the ring's submitter waits
-/// for both completions: a submitter parked with both completions written was
-/// owed the wake the second one posted.
+/// `inbox::submit`'s wait for `want` answers, as far as its first park:
+/// whether it parked. A park leaves the submitter registered, as a thread
+/// blocked in `watch::wait_until` is.
+fn submit_parks(ring: &PollRing, submitter: &Arc<TaskShared<Msg>>, want: u32) -> bool {
+    let enough = || ring.answers.with(|n| *n) >= want;
+    // A fire ends at most one iteration short of the last.
+    for _ in 0..=want {
+        polls::deliver(ring);
+        if enough() {
+            return false;
+        }
+        // `watch::wait_until` over `submit`'s predicate.
+        if polls::awake(ring, enough) {
+            continue;
+        }
+        ring.parked.register(submitter, 0);
+        while !polls::awake(ring, enough) {
+            let Ok(ticket) =
+                prepare(&CurrentTask::new(submitter, CPU0), Cancel::Answers, WaitClass::Io)
+            else {
+                continue;
+            };
+            match ticket.commit() {
+                Commit::Parked(_) => return true,
+                Commit::AlreadyWoken => continue,
+                Commit::Killed => unreachable!("nothing retires in this model"),
+            }
+        }
+        ring.parked.unregister(submitter);
+    }
+    unreachable!("{want} fires ended more than {want} iterations")
+}
+
+/// **A submitter parks on its polls, and a fire posts the watch it parks on.**
+/// Two devices' watches each hold a poll of one ring and are posted at once,
+/// from an interrupt handler's post in place, while the ring's submitter waits
+/// for both answers. A fire takes its poll and posts the ring's watch; the
+/// submitter answers what was fired and, registered, reads its polls again
+/// before it parks. A submitter parked over a fired poll was owed the wake
+/// that fire posted.
 #[test]
-fn two_posts_through_one_rings_lock_lose_no_wake() {
+fn a_fire_racing_a_submitters_park_is_never_lost() {
     model(|| {
         let (tx, mut rx) = mailbox::<Msg>();
         let ring = Arc::new(PollRing {
             cpus: CpuHandles::new(vec![CpuHandle::new(CPU0, tx)]),
             kicks: Kicks::new(),
-            written: LoomLock::new(0),
+            polls: LoomLock::new(polls::Polls::new()),
+            answers: LoomLock::new(0),
             parked: Watch::new(watch_list()),
         });
         let devices: Vec<Arc<RingWatch>> =
             (0..2).map(|_| Arc::new(Watch::new(watch_list()))).collect();
-        for device in &devices {
-            device.add_ring(RingEntry(Arc::new(RingPoll {
-                ring: ring.clone(),
-                state: once::Once::new(),
-            })));
+        for (handle, device) in devices.iter().enumerate() {
+            let poll = alloc::sync::Arc::new(polls::Poll::new(
+                RingRef(ring.clone()),
+                handle as u64,
+                toyos_abi::handle::RawHandle(handle as u32),
+                toyos_abi::inbox::READABLE,
+            ));
+            assert!(ring.polls.with(|polls| polls.admit(poll.clone(), devices.len())));
+            device.add_ring(RingEntry(poll));
         }
         let submitter = task(1);
 
         let waiting = {
             let ring = ring.clone();
             let submitter = submitter.clone();
-            loom::thread::spawn(move || {
-                ring.parked.register(&submitter, 0);
-                // Each post ends at most one iteration.
-                for _ in 0..4 {
-                    if ring.written.with(|n| *n) == 2 {
-                        return false;
-                    }
-                    let Ok(ticket) =
-                        prepare(&CurrentTask::new(&submitter, CPU0), Cancel::Answers, WaitClass::Io)
-                    else {
-                        continue;
-                    };
-                    match ticket.commit() {
-                        Commit::Parked(_) => return true,
-                        Commit::AlreadyWoken => continue,
-                        Commit::Killed => unreachable!("nothing retires in this model"),
-                    }
-                }
-                unreachable!("two posts ended more than three iterations")
-            })
+            loom::thread::spawn(move || submit_parks(&ring, &submitter, 2))
         };
         let posters: Vec<_> = devices
             .iter()
@@ -768,11 +821,14 @@ fn two_posts_through_one_rings_lock_lose_no_wake() {
             assert_eq!(
                 msgs,
                 [Msg::Wake(TaskKey(1), WakeReason::Woken)],
-                "parked with both completions written and no wake owed: a ring's post was lost",
+                "parked over a fired poll and no wake owed: a fire was lost",
             );
         } else {
+            assert_eq!(ring.answers.with(|n| *n), 2, "the wait ended short of its answers");
             assert!(msgs.is_empty(), "a submitter that never parked is owed nothing: {msgs:?}");
         }
         ring.parked.unregister(&submitter);
+        // The ring's teardown: its polls hold it.
+        ring.polls.with(polls::Polls::withdraw_all);
     });
 }

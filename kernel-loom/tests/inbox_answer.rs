@@ -9,7 +9,10 @@
 //! sequence and its assertion the answers it is handed.
 //!
 //! In `loom::model`, because the one-shot under each poll is built from
-//! loom's atomics in this crate; every model here is one thread.
+//! loom's atomics in this crate; every model here is one thread, and a watch
+//! another thread submits during a look is staged inside the look. A fire
+//! racing the submitter's park is `toyos-sched-loom`'s
+//! `a_fire_racing_a_submitters_park_is_never_lost`.
 //!
 //! The negative case is a cargo feature:
 //!
@@ -18,16 +21,14 @@
 //!   --test inbox_answer
 //! ```
 //!
-//! answers a fired poll without looking, as a ring did before `polls.rs`, and
-//! this file must red.
+//! answers a fired poll without looking, and this file must red.
 
 #![cfg(feature = "loom")]
 
 use std::cell::{Cell, RefCell};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
-use kernel_loom::inbox_polls::{deliver, Look, Poll, Polls, Submitter, Wake};
+use kernel_loom::inbox_polls::{awake, deliver, Look, Poll, Polls, Submitter, Wake};
 use toyos_abi::handle::RawHandle;
 use toyos_abi::inbox::READABLE;
 use toyos_abi::syscall::SyscallError;
@@ -42,14 +43,12 @@ const BYTES: i32 = READABLE as i32;
 
 const NOTHING: [(u64, i32); 0] = [];
 
-/// What a fire tells: a count, standing in for the ring's waiter.
-#[derive(Clone, Default)]
-struct Owed(Arc<AtomicU32>);
+/// The ring a fire tells, which has no waiter: every model is one thread.
+#[derive(Clone)]
+struct Ring;
 
-impl Wake for Owed {
-    fn owe(&self) {
-        self.0.fetch_add(1, Ordering::Relaxed);
-    }
+impl Wake for Ring {
+    fn wake(&self) {}
 }
 
 /// One object: whether it holds bytes, and the polls armed on its watch.
@@ -58,30 +57,39 @@ struct Object {
     bytes: Cell<bool>,
     /// Whether a post on it is its readiness, the kernel holding none to look at.
     posts_are_readiness: bool,
-    armed: RefCell<Vec<Arc<Poll<Owed>>>>,
+    armed: RefCell<Vec<Arc<Poll<Ring>>>>,
 }
 
 /// One ring's kernel over the objects `H`, `G` and `L`.
 struct Kernel {
-    owed: Owed,
-    polls: RefCell<Polls<Owed>>,
+    ring: Ring,
+    polls: RefCell<Polls<Ring>>,
+    /// How many polls the ring keeps.
+    cap: usize,
     h: Object,
     g: Object,
     l: Object,
+    /// The handle the process has closed since it watched it.
+    closed: Cell<Option<RawHandle>>,
+    /// A watch another thread submits while the next look runs.
+    lands_during_look: Cell<Option<(RawHandle, u64)>>,
     /// The completion ring, and how many answers it holds.
-    ring: RefCell<Vec<(u64, i32)>>,
+    answers: RefCell<Vec<(u64, i32)>>,
     size: usize,
 }
 
 impl Kernel {
     fn new(size: usize) -> Self {
         Self {
-            owed: Owed::default(),
+            ring: Ring,
             polls: RefCell::new(Polls::new()),
+            cap: 16,
             h: Object::default(),
             g: Object::default(),
             l: Object { posts_are_readiness: true, ..Object::default() },
-            ring: RefCell::new(Vec::new()),
+            closed: Cell::new(None),
+            lands_during_look: Cell::new(None),
+            answers: RefCell::new(Vec::new()),
             size,
         }
     }
@@ -95,16 +103,24 @@ impl Kernel {
         }
     }
 
-    /// `OP_WATCH` for bytes on `handle`, answered under `token`.
+    /// `OP_WATCH` for bytes on `handle`, answered under `token`: the handle's
+    /// one poll.
     fn watch(&self, handle: RawHandle, token: u64) {
-        self.arm(Poll::new(self.owed.clone(), token, handle, READABLE));
+        assert!(self.admit(handle, token), "the ring keeps no more polls");
     }
 
-    /// The handle's one poll: fired now if its object holds bytes, armed on
-    /// its watch if not.
-    fn arm(&self, poll: Poll<Owed>) {
-        let poll = Arc::new(poll);
-        assert!(self.polls.borrow_mut().admit(poll.clone(), 16));
+    /// The same, answering whether the ring kept the poll.
+    fn admit(&self, handle: RawHandle, token: u64) -> bool {
+        let poll = Arc::new(Poll::new(self.ring.clone(), token, handle, READABLE));
+        let kept = self.polls.borrow_mut().admit(poll.clone(), self.cap);
+        if kept {
+            self.arm(poll);
+        }
+        kept
+    }
+
+    /// Fired now if its object holds bytes, armed on its watch if not.
+    fn arm(&self, poll: Arc<Poll<Ring>>) {
         let object = self.object(poll.handle);
         if object.bytes.get() {
             poll.fire(0);
@@ -137,33 +153,63 @@ impl Kernel {
         }
     }
 
+    /// The process closes `handle`, whose watch other handles share: no close
+    /// ends its polls.
+    fn close(&self, handle: RawHandle) {
+        self.closed.set(Some(handle));
+    }
+
+    /// How many polls on `handle`'s watch a post would still fire.
+    fn live(&self, handle: RawHandle) -> usize {
+        self.object(handle).armed.borrow().iter().filter(|poll| poll.armed()).count()
+    }
+
     /// `inbox_submit`'s look at what the ring is owed.
     fn submit(&self) {
-        deliver(|| self.polls.borrow_mut().take_owed(), self);
+        deliver(self);
+    }
+
+    /// Whether a submitter waiting for one more answer than the ring holds
+    /// would go round again instead of parking.
+    fn awake(&self) -> bool {
+        awake(self, || false)
     }
 
     /// Every answer the reader's drain hands it.
     fn drain(&self) -> Vec<(u64, i32)> {
-        self.ring.take()
+        self.answers.take()
     }
 }
 
-impl Submitter<Owed> for Kernel {
+impl Submitter<Ring> for Kernel {
     fn room(&self) -> bool {
-        self.ring.borrow().len() < self.size
+        self.answers.borrow().len() < self.size
     }
 
     fn answer(&self, user_data: u64, result: i32) {
-        self.ring.borrow_mut().push((user_data, result));
+        self.answers.borrow_mut().push((user_data, result));
     }
 
-    fn look(&self, poll: &Poll<Owed>) -> Look {
+    fn polls<R>(&self, f: impl FnOnce(&mut Polls<Ring>) -> R) -> Option<R> {
+        Some(f(&mut self.polls.borrow_mut()))
+    }
+
+    fn look(&self, poll: &Arc<Poll<Ring>>) -> Look {
+        if let Some((handle, token)) = self.lands_during_look.take() {
+            self.watch(handle, token);
+        }
+        if self.closed.get() == Some(poll.handle) {
+            return Look::Refused(SyscallError::NotFound);
+        }
         let object = self.object(poll.handle);
         if object.bytes.get() || (object.posts_are_readiness && poll.posted() & READABLE != 0) {
             return Look::Ready(READABLE);
         }
-        self.arm(Poll::new(self.owed.clone(), poll.user_data, poll.handle, poll.flags));
-        Look::Armed
+        let again = Arc::new(Poll::new(self.ring.clone(), poll.user_data, poll.handle, poll.flags));
+        if self.polls.borrow_mut().renew(poll, again.clone()) {
+            self.arm(again);
+        }
+        Look::Waits
     }
 }
 
@@ -316,5 +362,125 @@ fn a_post_answers_for_an_object_with_nothing_to_look_at() {
         kernel.post(L);
         kernel.submit();
         assert_eq!(kernel.drain(), [(7, BYTES)]);
+    });
+}
+
+/// A watch that replaces an armed poll takes it off its object's watch: a
+/// poll left live there is one more entry for every re-watch of an idle handle.
+#[test]
+fn a_replaced_poll_is_withdrawn_from_its_watch() {
+    loom::model(|| {
+        let kernel = Kernel::new(4);
+        kernel.watch(H, 1);
+        kernel.submit();
+        kernel.watch(H, 2);
+        kernel.submit();
+        assert_eq!(kernel.live(H), 1, "the replaced poll is still live on its object's watch");
+    });
+}
+
+/// A ring torn down leaves no poll live on any watch.
+#[test]
+fn a_ring_torn_down_withdraws_every_poll() {
+    loom::model(|| {
+        let kernel = Kernel::new(4);
+        kernel.watch(H, 1);
+        kernel.watch(G, 2);
+        kernel.submit();
+
+        kernel.polls.borrow_mut().withdraw_all();
+        assert_eq!((kernel.live(H), kernel.live(G)), (0, 0));
+    });
+}
+
+/// A handle closed since it was watched names nothing to look at: the look's
+/// refusal is the answer.
+#[test]
+fn a_handle_closed_since_its_watch_is_answered_with_the_refusal() {
+    loom::model(|| {
+        let kernel = Kernel::new(4);
+        kernel.watch(H, 7);
+        kernel.submit();
+
+        kernel.close(H);
+        kernel.post(H);
+        kernel.submit();
+        assert_eq!(kernel.drain(), [(7, -(SyscallError::NotFound as i32))]);
+    });
+}
+
+/// A ring keeps its cap of polls and no more, and a watch that replaces one
+/// of them is inside it.
+#[test]
+fn a_ring_keeps_its_cap_of_polls_and_no_more() {
+    loom::model(|| {
+        let kernel = Kernel { cap: 2, ..Kernel::new(4) };
+        assert!(kernel.admit(H, 1));
+        assert!(kernel.admit(G, 2), "a ring under its cap refused a poll");
+        assert!(!kernel.admit(L, 3), "a ring at its cap kept one more poll");
+        assert!(kernel.admit(H, 4), "a ring at its cap refused a watch that replaces a poll");
+    });
+}
+
+/// A second thread's watch lands while the look at the handle's fired poll
+/// finds nothing: the newer watch holds the handle's place, and the look arms
+/// nothing beside it.
+#[test]
+fn a_watch_during_a_look_that_finds_nothing_is_the_handles_one_poll() {
+    loom::model(|| {
+        let kernel = Kernel::new(4);
+        kernel.watch(H, 1);
+        kernel.submit();
+
+        kernel.post(H);
+        kernel.lands_during_look.set(Some((H, 2)));
+        kernel.submit();
+        assert_eq!(kernel.drain(), NOTHING);
+        assert_eq!(kernel.live(H), 1, "the look armed the older watch again beside the newer");
+
+        kernel.fill(H);
+        kernel.post(H);
+        kernel.submit();
+        assert_eq!(kernel.drain(), [(2, BYTES)]);
+    });
+}
+
+/// The same while the look finds bytes: one arrival, answered once, under the
+/// newer watch's token.
+#[test]
+fn a_watch_during_a_look_that_finds_bytes_answers_alone() {
+    loom::model(|| {
+        let kernel = Kernel::new(4);
+        kernel.watch(H, 1);
+        kernel.submit();
+
+        kernel.fill(H);
+        kernel.post(H);
+        kernel.lands_during_look.set(Some((H, 2)));
+        kernel.submit();
+        assert_eq!(kernel.drain(), [(2, BYTES)]);
+    });
+}
+
+/// A submitter does not park over a poll it could answer, and does over a
+/// poll a full ring leaves it no room to answer: it would go round for good.
+#[test]
+fn a_submitter_parks_only_with_nothing_it_could_answer() {
+    loom::model(|| {
+        let kernel = Kernel::new(1);
+        kernel.watch(H, 3);
+        kernel.watch(G, 4);
+        kernel.submit();
+        assert!(!kernel.awake(), "nothing is owed a look");
+
+        for handle in [H, G] {
+            kernel.fill(handle);
+            kernel.post(handle);
+        }
+        assert!(kernel.awake(), "a fired poll is owed a look and the ring has room");
+        kernel.submit();
+        assert!(!kernel.awake(), "the ring is full: the poll left over waits for room");
+        assert_eq!(kernel.drain(), [(3, BYTES)]);
+        assert!(kernel.awake(), "room came back with a poll still owed its look");
     });
 }
