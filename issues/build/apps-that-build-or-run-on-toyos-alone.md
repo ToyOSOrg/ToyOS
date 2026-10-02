@@ -7,7 +7,7 @@ opened: 2026-10-01
 # Apps that build or run on ToyOS alone
 
 An app builds and runs on Linux under Wayland, macOS and Windows from the same
-source as on ToyOS (`userland/CLAUDE.md`). These build on none of the three:
+source as on ToyOS (root `CLAUDE.md`). These build on none of the three:
 each manifest's `[package.metadata.toyos.host] fails` names all three, so
 `cargo run -- --ci host` checks none of them there.
 

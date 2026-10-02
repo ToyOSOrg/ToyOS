@@ -1,15 +1,15 @@
 # Kernel
 
-The module header at the site owns its subsystem — read it before changing a module. The scheduler core is `toyos-sched/`, driven from `kernel/src/sched/`; every Ring 3 transition's machine state is `kernel/src/arch/x86_64/fpu.rs`; every syscall is `kernel/src/syscall/`, and `dispatch.rs` decodes every user pointer the ABI takes.
+The module header at the site owns its subsystem — read it before changing a module. The scheduler core is `toyos-sched/`, driven from `kernel/src/sched/`; every user transition's machine state is `arch/*/fpu.rs`, with AArch64's `entry.rs` and `trap.rs`; every syscall is `kernel/src/syscall/`, and `dispatch.rs` decodes every user pointer the ABI takes.
 
 ## Caveats that bite every agent
 
 - **Nothing on the idle path touches a filesystem.** No gate holds this.
 - **Anything added to the idle loop is an audio change** — housekeeping runs before `pass()`, so a woken CPU is late by what it costs; and on a machine with nothing to run the idle loop does not run, so a diagnostic there reports nothing exactly when it is needed.
 - **The idle loop may not take a global lock unconditionally** — the crash report reads the process table through a `try_lock` it must never block on. `sched/reap_gate.rs` is the pattern: a relaxed-load gate in front of the lock.
-- **Every Ring 0 entry clears the direction flag** — no hardware gate does it, and `memmove` sets it across `rep` operations with interrupts on; `arch::entry::ring3_naked_asm` is where it lives.
+- **Every x86 Ring 0 entry clears the direction flag** — no hardware gate does it, and `memmove` sets it across `rep` operations with interrupts on; `arch::entry::ring3_naked_asm` is where it lives.
 - **`BackendGuard` masks interrupts for its whole life**, so anything written under it is an interrupt latency; a new holder bounds itself as the console drain and the userland `write` flush do.
-- **No disk wait in this kernel can park** — at the moment a transfer is waited for, the CPU is four ticket spinlocks deep, each disabling preemption.
+- **No disk wait in this kernel can park** — a transfer is waited for under ticket spinlocks, each disabling preemption.
 - **`crate::log!` may not be called inside `with_cpu`'s exclusive region unless a `panic!` follows it** — the log's readiness path re-enters `driver::pass` and wedges the machine.
 - **`drain_irqs` is the drivers' engine and nothing on it may wait** — a blocking call there empties the audio pipeline on every plug.
 - **A syscall that can block resolves its handle and clones the object out before it blocks** — a `with_object`/`with_process_data` guard held across a park is a runtime panic no compile check catches; the `SYS_FSYNC` arm in `syscall/dispatch.rs` is the pattern.

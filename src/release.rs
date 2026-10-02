@@ -323,8 +323,8 @@ fn release_as(root: &Path, repo: &str, workflow: Option<&str>, event: Option<&st
     if !(cfg!(target_os = "linux") && crate::arch::Arch::HOST == Some(crate::arch::Arch::X86_64)) {
         return Err(format!("a release is {HOST}'s and this host is not one; a tarball packed here would install nowhere"));
     }
-    let tip = crate::sync::git(root, &["ls-remote", "origin", "refs/heads/main"])?;
-    crate::ci::at_tip(&tip, crate::sync::git(root, &["rev-parse", "HEAD"])?.trim())?;
+    let tip = crate::sysroot::git_out(root, &["ls-remote", "origin", "refs/heads/main"]);
+    crate::ci::at_tip(&tip, crate::sysroot::git_out(root, &["rev-parse", "HEAD"]).trim())?;
     let key = lay_out(root)?;
     let rust_dir = root.join("rust");
     let need = shipped_glibc(&crate::toolchain::stage2(&rust_dir))?;
@@ -418,7 +418,7 @@ fn put_up(github: &Github, root: &Path, tag: &str, notes: &str, file: &Path) -> 
     let found = github.call("GET", &at, None)?;
     let release = match &found {
         None => {
-            let commit = crate::sync::git(root, &["rev-parse", "HEAD"])?;
+            let commit = crate::sysroot::git_out(root, &["rev-parse", "HEAD"]);
             let body = serde_json::json!({ "tag_name": tag, "name": tag, "body": notes, "target_commitish": commit.trim() });
             github.send("POST", &github.api("releases"), &body)?
         }
@@ -610,10 +610,10 @@ fn alias(github: &Github, root: &Path, tag: &str, notes: &str, tmp: &Path) -> Re
     let abi = plan.iter().find(|r| r.krate.name == "toyos-abi").ok_or("toyos-abi is not published")?;
     let abi = abi.version.split('+').next().unwrap_or(&abi.version);
     let alias = format!("toolchain-linux-x86_64-sdk-{abi}");
-    let commit = |rev: &str| crate::sync::git(root, &["rev-parse", rev]).map(|sha| sha.trim().to_string());
+    let commit = |rev: &str| crate::sysroot::git_out(root, &["rev-parse", rev]).trim().to_string();
     let sdk: String = plan.iter().map(|r| format!("{} {}\n", r.krate.name, r.version)).collect();
     let toolchain = tmp.join("TOOLCHAIN");
-    let text = format!("{}toyos {}\nrust {}\n{sdk}", manifest(tag), commit("HEAD")?, commit("HEAD:rust")?);
+    let text = format!("{}toyos {}\nrust {}\n{sdk}", manifest(tag), commit("HEAD"), commit("HEAD:rust"));
     fs::write(&toolchain, text).map_err(|e| format!("{}: {e}", toolchain.display()))?;
     put_up(github, root, &alias, notes, &toolchain).map(|said| format!("{said}, naming {tag}"))
 }

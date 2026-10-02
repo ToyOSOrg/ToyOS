@@ -4,6 +4,7 @@ pub mod bootlog;
 pub mod build;
 pub mod buildlock;
 pub mod ci;
+pub mod cicache;
 pub mod clang;
 pub mod clippy;
 pub mod compiler;
@@ -41,14 +42,12 @@ pub mod soundfont;
 /// build system at all.
 #[cfg(test)]
 pub mod sourcegate;
-pub mod sync;
 pub mod sysroot;
 pub mod testargs;
 pub mod tether;
 pub mod toolchain;
 pub mod userlandhost;
 pub mod wallpaper;
-pub mod worktree;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

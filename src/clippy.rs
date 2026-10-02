@@ -152,9 +152,12 @@ const SHAPES: &[Shape] = &[
         ],
         after: &["$ADOPTED", "-D", "warnings"],
     },
+    // Its own target directory: cargo keeps one check of a unit, so a unit
+    // linted under two sets of lints is checked again by each, every run, and
+    // so is every crate depending on it.
     Shape {
         dir: "",
-        before: &["-p", "toyos-abi", "--all-targets", "--keep-going"],
+        before: &["-p", "toyos-abi", "--all-targets", "--keep-going", "--target-dir", "target/clippy-abi"],
         after: &["-W", "clippy::undocumented_unsafe_blocks", "-D", "warnings"],
     },
 ];

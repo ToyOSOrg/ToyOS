@@ -16,7 +16,7 @@ use crate::buildlock;
 use crate::flags;
 use crate::hostws;
 use crate::image;
-use crate::sysroot::{Identity, Stale};
+use crate::sysroot::{Identity, Stale, Sysroot};
 use crate::toolchain;
 
 thread_local! {
@@ -200,7 +200,7 @@ fn clean(root: &Path, crate_dir: &Path, kind: Clean, stale: &Stale, identity: &I
     let remove = |dirs: &mut dyn Iterator<Item = PathBuf>| {
         for dir in dirs.filter(|dir| dir.exists()) {
             eprintln!("external deps changed: cleaning {}", dir.display());
-            crate::worktree::remove_tree(&dir);
+            crate::keystore::remove(&dir);
         }
     };
     match (stale, kind) {
@@ -374,15 +374,10 @@ pub const PROFILE: &str = "toyos";
 /// What every guest `cargo` and `rustc` here runs with: the toolchain directory
 /// of the sysroot this checkout's sources name, as `RUSTUP_TOOLCHAIN`, which
 /// carries the linker too. Never the `toyos` rustup name, which is the primary's.
-#[derive(Clone)]
 struct GuestEnv {
-    toolchain: PathBuf,
-    /// Whether that sysroot's compiler is the primary's, the one the hosted
-    /// rustc is built from (`src/compiler.rs`).
-    primary_compiler: bool,
-    /// What its crates compile against beside their sources
-    /// (`sysroot::Identity`).
-    identity: Identity,
+    /// Owned, so the sysroot is held in use for as long as anything here runs
+    /// against it.
+    sysroot: Sysroot,
     /// The public key the loader and `/system/bin/update` embed
     /// (`signing::KEY_ENV`): every guest build carries it, so no crate that
     /// names it can be built without it.
@@ -392,11 +387,9 @@ struct GuestEnv {
 }
 
 impl GuestEnv {
-    fn new(sysroot: &crate::sysroot::Sysroot) -> Self {
+    fn new(sysroot: Sysroot) -> Self {
         Self {
-            toolchain: sysroot.dir.clone(),
-            primary_compiler: sysroot.primary_compiler,
-            identity: sysroot.identity.clone(),
+            sysroot,
             image_key: crate::signing::key().public_hex(),
             floor_scope: crate::signing::key().floor_scope().word(),
         }
@@ -419,7 +412,7 @@ fn cargo_build(
     let mut cmd = Command::new("cargo");
     cmd.args(&args)
         .current_dir(crate_dir)
-        .env("RUSTUP_TOOLCHAIN", &env.toolchain)
+        .env("RUSTUP_TOOLCHAIN", env.sysroot.dir())
         .env_remove("RUSTFLAGS")
         .env(crate::signing::KEY_ENV, &env.image_key)
         .env(crate::signing::FLOOR_ENV, env.floor_scope)
@@ -544,7 +537,7 @@ fn assert_kernel_is_softfloat(env: &GuestEnv, arch: Arch) {
     }
     let out = Command::new("rustc")
         .args(["--print", "cfg", "--target", arch.kernel()])
-        .env("RUSTUP_TOOLCHAIN", &env.toolchain)
+        .env("RUSTUP_TOOLCHAIN", env.sysroot.dir())
         .env_remove("RUSTFLAGS")
         .env_remove("RUSTC")
         .output()
@@ -711,12 +704,12 @@ fn build_and_assemble(
             arch.name()
         );
         assert!(
-            env.primary_compiler,
+            env.sysroot.primary_compiler,
             "hosted-rustc ships the primary checkout's hosted compiler, and this worktree builds with \
              a compiler of its own (src/compiler.rs): the image would carry a rustc that is not the \
              one its programs were built with"
         );
-        collect_hosted_rustc(root, &env.toolchain, &mut root_files);
+        collect_hosted_rustc(root, env.sysroot.dir(), &mut root_files);
     }
 
     if !config.assets.is_empty() {
@@ -813,7 +806,7 @@ fn build_programs(
 
     // Every userland crate that compiles C compiles it with the toolchain's
     // clang against libc's C sysroot.
-    let cc_env = crate::clang::CSysroot::of(&env.toolchain, arch).cc_env();
+    let cc_env = crate::clang::CSysroot::of(env.sysroot.dir(), arch).cc_env();
     let cc_env: Vec<(&str, &str)> = cc_env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
 
     // Build and read under one hold, exactly as `build_toyos_bins` does and for
@@ -1721,11 +1714,9 @@ fn shipped_parts(root: &Path, boot: &Boot, plan: &Plan) -> (Vec<u8>, Vec<u8>, Ve
     // this worktree's crate targets can land inside this build.
     let mut lock = buildlock::shared(root, "build");
     let config = parse_config(&boot.config);
-    let sysroot = toolchain::ensure(root, &mut lock, config.hosted_rustc);
+    let env = GuestEnv::new(toolchain::ensure(root, &mut lock, config.hosted_rustc));
 
-    let env = GuestEnv::new(&sysroot);
-
-    invalidate_stale(root, &mut lock, &env.identity, &config_targets(root, &config));
+    invalidate_stale(root, &mut lock, &env.sysroot.identity, &config_targets(root, &config));
 
     // Same lock-and-stage as `build_test_image`: `cargo run --build-only` and
     // `cargo test` share these paths, so this races the harness too. The kernel
@@ -1733,21 +1724,18 @@ fn shipped_parts(root: &Path, boot: &Boot, plan: &Plan) -> (Vec<u8>, Vec<u8>, Ve
     // path uses, so neither can grow an assertion the other lacks.
     let (kernel_bytes, bl_art) = {
         let _artifact = buildlock::artifact(root);
-        let kernel_handle = {
-            let root = root.to_path_buf();
-            let env = env.clone();
-            let features = kernel_features.clone();
-            std::thread::spawn(move || {
+        std::thread::scope(|threads| {
+            let kernel = threads.spawn(|| {
                 let mut extra = Vec::new();
-                if !features.is_empty() {
+                if !kernel_features.is_empty() {
                     extra.push("--features");
-                    extra.push(&features);
+                    extra.push(&kernel_features);
                 }
                 cargo_build(&root.join("kernel"), arch.kernel(), &extra, &env, &[], false);
-            })
-        };
-        cargo_build(&root.join("bootloader"), arch.loader(), &[], &env, &[], false);
-        kernel_handle.join().expect("kernel build thread panicked");
+            });
+            cargo_build(&root.join("bootloader"), arch.loader(), &[], &env, &[], false);
+            kernel.join().expect("kernel build thread panicked");
+        });
         (
             stage_and_certify_kernel(root, &kernel_features, &env, arch),
             stage_loader(root, arch, &env),
@@ -1942,10 +1930,9 @@ pub fn build_test_parts(
     // back after the userland build, and a clean landing in between is the
     // same defect as one landing mid-compile.
     let mut lock = buildlock::shared(root, "test image");
-    let sysroot = crate::toolchain::ensure(root, &mut lock, config.hosted_rustc);
-    let env = GuestEnv::new(&sysroot);
+    let env = GuestEnv::new(toolchain::ensure(root, &mut lock, config.hosted_rustc));
 
-    invalidate_stale(root, &mut lock, &env.identity, &config_targets(root, &config));
+    invalidate_stale(root, &mut lock, &env.sysroot.identity, &config_targets(root, &config));
 
     // Build and stage under one lock, released before `build_and_assemble`.
     // Releasing it there is deliberate and required: that build takes its own
@@ -2150,9 +2137,8 @@ struct TestBuild {
 impl TestBuild {
     fn begin(root: &Path, arch: Arch, what: &str, stale_targets: &[(PathBuf, Clean)]) -> Self {
         let mut lock = buildlock::shared(root, what);
-        let sysroot = crate::toolchain::ensure(root, &mut lock, false);
-        let env = GuestEnv::new(&sysroot);
-        invalidate_stale(root, &mut lock, &env.identity, stale_targets);
+        let env = GuestEnv::new(toolchain::ensure(root, &mut lock, false));
+        invalidate_stale(root, &mut lock, &env.sysroot.identity, stale_targets);
         let artifact = buildlock::artifact(root);
         TestBuild { target: arch.userland(), env, _lock: lock, _artifact: artifact }
     }
