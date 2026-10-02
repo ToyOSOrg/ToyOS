@@ -252,20 +252,19 @@ fn a_kill_publishes_like_an_exit() {
     println!("  a kill publishes {KILLED} once, and a second kill changes nothing");
 }
 
-/// Three held children in one poller, each watched under its index, let go
-/// one at a time and out of order. Before each release nothing is ready; after
-/// it the one completion names that child, and its code is there without a
-/// wait.
+/// Three held children in one poller, each watched once under its index, let
+/// go one at a time and out of order. Before each release nothing is ready;
+/// after it the one completion names that child, and its code is there without
+/// a wait.
 fn each_end_completes_its_own_watch() {
     const CODES: [i32; 3] = [21, 22, 23];
     let mut held: Vec<(Child, Option<ChildStdin>)> =
         CODES.iter().map(|&code| start(code)).map(|(child, stdin)| (child, Some(stdin))).collect();
     let poller = Poller::new(CODES.len() as u32);
-    let mut running: Vec<usize> = (0..CODES.len()).collect();
+    for (i, (child, _)) in held.iter().enumerate() {
+        poller.watch_raw(RawHandle(child.as_raw_handle()), READABLE, i as u64);
+    }
     for released in [1, 2, 0] {
-        for &i in &running {
-            poller.watch_raw(RawHandle(held[i].0.as_raw_handle()), READABLE, i as u64);
-        }
         poller.wait(0, 0, |token| panic!("child {token} is held, and its watch completed"));
         drop(held[released].1.take());
         let mut ended = Vec::new();
@@ -273,7 +272,6 @@ fn each_end_completes_its_own_watch() {
         assert_eq!(ended, [released as u64], "child {released} was let go");
         let status = held[released].0.try_wait().expect("try_wait");
         assert_eq!(status.and_then(|s| s.code()), Some(CODES[released]), "child {released}'s code");
-        running.retain(|&i| i != released);
     }
     println!("  one poller: each end completes the watch of the child that ended, and only it");
 }

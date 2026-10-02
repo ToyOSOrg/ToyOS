@@ -1,9 +1,10 @@
 //! A process, as something a handle can name.
 //!
 //! The exit code lives on the object, not a table entry: no zombie, no reap,
-//! no orphan adoption. A wait after the fact reads a value and an `OP_WATCH`
-//! completes at once; before it, the wait parks, the watch registers, and the
-//! publish answers both. A process nobody holds a handle to disappears.
+//! no orphan adoption. A wait after the fact reads a value; a wait before it
+//! parks and is woken by the publish. An `OP_WATCH` reads the same fact at its
+//! look, so a handle is readable from the publish on. A process nobody holds a
+//! handle to disappears.
 
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -29,8 +30,8 @@ pub struct ProcessObject {
     exit: Lock<Option<Exit>>,
     /// The same fact, without the lock, for a waiter's per-wake predicate.
     finished: AtomicBool,
-    /// What `SYS_PROCESS_WAIT` arms on and an `OP_WATCH` registers on; an `Arc`
-    /// so a poll's registration holds it with no object borrowed.
+    /// What `SYS_PROCESS_WAIT` arms on; holding the `Arc` across the park keeps the watch from outliving its subject.
+    /// An `Arc` of its own, as a port's is, for the share `ops::read_watch` answers.
     watch: Arc<Watch>,
 }
 

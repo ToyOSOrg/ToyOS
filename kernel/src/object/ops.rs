@@ -272,7 +272,6 @@ pub fn read_watch(object: &KObjectRef) -> Option<WatchRef> {
         KObjectRef::PipeRead(r) => pipe::read_watch(r.id()).map(WatchRef::Shared),
         KObjectRef::Connection(c) => pipe::read_watch(c.rx()).map(WatchRef::Shared),
         KObjectRef::Acceptor(a) => Some(WatchRef::Shared(a.watch().clone())),
-        // Readable once its exit is published, the one post its watch gets.
         KObjectRef::Process(p) => Some(WatchRef::Shared(p.watch().clone())),
         KObjectRef::Console(_) => Some(WatchRef::Static(&keyboard::WATCH)),
         KObjectRef::Device(d) => match d.class() {

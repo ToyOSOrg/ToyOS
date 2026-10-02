@@ -37,16 +37,10 @@ directory is `issues/isolation/every-program-sees-only-the-files-it-was-given.md
 
 ## Stages
 
-1. **An end is an event**. `read_watch` and `has_data` answer for a
-   `Process`, whose watch becomes an `Arc` as an `Acceptor`'s is, and
-   `close_ends_polls` answers `false` for one; init's waiter threads go.
-   *Exit*: children held on their stdin (`process_lifecycle`'s `held` role),
-   watched in one poller and released one at a time, each completion naming the
-   child just released, whose code `try_wait` then reads; a watch on a child
-   already gone completes at once; a kill completes one; after one of two
-   handles to a held child closes, a non-blocking submit finds nothing.
-   Negative control: the stage reverted whole (`NotSupported`); mutation:
-   `close_ends_polls` at `true` reds the last arm. Oracle: pidfd_open(2).
+1. **init's waiter threads go**. A child's end is readiness on its handle,
+   and init still parks one thread per service on `SYS_PROCESS_WAIT`
+   (`close_when_it_ends`, `userland/init/src/main.rs`). *Exit*: init starts no
+   thread to wait for a service's end, and `close_when_it_ends` is gone.
 2. **An end says how**. An end reads as an exit, a kill or a fault kind
    alike on every architecture, and a bare code reads the last two as failures.
    No end reads as a quit's reason. *Exit*: exited 137, killed, and each fault
