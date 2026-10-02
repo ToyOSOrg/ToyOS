@@ -1,4 +1,4 @@
-//! What the probes must say in assembly, one module per architecture.
+//! What the probes must say in assembly.
 
 #[cfg(target_arch = "aarch64")]
 mod aarch64;

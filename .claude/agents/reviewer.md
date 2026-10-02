@@ -50,8 +50,7 @@ if it meets the bar above; otherwise it is a NOTE.
   `arch::aarch64` in no generic kernel code; and none of them in a crate whose manifest
   `description` says pure.
   A `4096` in the kernel that means a page is a private copy of `mm::PAGE_SIZE`.
-  Nothing ships for tests alone: a program, an applet or a kernel path whose only user is a test
-  lives in a test image or a test kernel, and a diff that ships one is a BLOCKER.
+  Nothing ships for tests alone, and a diff that ships something for a test alone is a BLOCKER.
 - **Hosts.** A BLOCKER: a change that makes an app build on fewer of Linux under Wayland, macOS
   and Windows, or answers a host build failure by making the app ToyOS-only — by a split, a `cfg`
   that compiles what it does out of a host, or an `exempt` in its manifest — instead of fixing it
