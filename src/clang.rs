@@ -75,7 +75,9 @@ pub(crate) const CMAKE: [(&str, &str); 3] = [
     // `dlopen` and its kin are the C library's own. The loader finds a library
     // by the name `DT_NEEDED` holds, beside its executable or in `/system/lib`,
     // so a library carries its soname and one without is linked by name; and it
-    // reads no runtime path, so no flag asks the linker for one.
+    // reads no runtime path, so no flag asks the linker for one. The flags that
+    // switch a link between static and shared libraries and the `RESCAN` link
+    // group are left out too: no build of ToyOS's asks CMake for either.
     (
         "Platform/ToyOS.cmake",
         "set(CMAKE_DL_LIBS \"\")\n\
