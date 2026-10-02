@@ -1407,7 +1407,6 @@ fn boot_virt_smp(options: BootOptions) -> QemuInstance {
 /// off, every other CPU turned off first ([`psci_powered_off`]).
 fn virt_smp(profile: qemu::Profile, conduit: &str, el: u32) -> Result<(), String> {
     let trace = common::lane::dir().join(format!("virt_smp-{conduit}.psci"));
-    let _ = fs::remove_file(&trace);
     let mut qemu = boot_virt_smp(BootOptions {
         profile,
         smp: VIRT_CPUS,
@@ -1569,7 +1568,6 @@ fn virt_reboot(profile: qemu::Profile) -> Result<(), String> {
     let config = compile::repo_root().join("tests/virtrebootcase/system.toml");
     let case = config.parent().expect("system.toml has a directory");
     let trace = common::lane::dir().join("virt_reboot.psci");
-    let _ = fs::remove_file(&trace);
     let mut qemu = QemuInstance::boot_with_options(
         case,
         &[],
@@ -1609,7 +1607,6 @@ fn virt_reboot(profile: qemu::Profile) -> Result<(), String> {
 /// the one `SYSTEM_OFF`.
 fn virt_off_names_the_cpus_left_on(profile: qemu::Profile) -> Result<(), String> {
     let trace = common::lane::dir().join("virt_off_left_on.psci");
-    let _ = fs::remove_file(&trace);
     let mut qemu = boot_virt_smp(BootOptions {
         profile,
         smp: VIRT_CPUS,
@@ -3477,8 +3474,7 @@ const STOP_CPUS: u32 = 4;
 /// **QEMU is the judge, and no clock is in it.** Once the fatal path of the
 /// `test_rs_panic_halts_first` that `qemu` runs has said its line past the
 /// stop, `panic_reboot::arm`'s, every vCPU but the one that went fatal must be
-/// one [`qemu::stopped_cpus`] calls halted. The fatal one holds its panel, so
-/// the machine is still there to ask.
+/// one [`qemu::stopped_cpus`] calls halted.
 fn the_others_halt_first(mut qemu: QemuInstance, arch: toyos_build::arch::Arch) -> Result<(), String> {
     let cpus = STOP_CPUS as usize;
     let mut console = String::new();
