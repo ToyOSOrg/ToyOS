@@ -3535,7 +3535,7 @@ fn the_others_halt_first(mut qemu: QemuInstance, arch: toyos_build::arch::Arch) 
     let fatal = fatal_past_the_stop(&console).expect("awaited above");
     let before = &console[..console.find(FATAL_HALT_NONCE).expect("awaited above")];
     // Non-vacuity: another CPU was making records up to the fatal one.
-    if !before.lines().any(|l| l.contains(RETIRED_RECORD) && record_cpu(l).is_some_and(|cpu| cpu != fatal)) {
+    if !before.lines().any(|l| l.contains(SIBLING_RECORD) && record_cpu(l).is_some_and(|cpu| cpu != fatal)) {
         return Err(format!(
             "no other CPU made a record before the fatal one on cpu{fatal}, so nothing was running \
              to be stopped\n{console}"
@@ -3565,7 +3565,7 @@ fn the_others_halt_first(mut qemu: QemuInstance, arch: toyos_build::arch::Arch) 
 }
 
 /// The record each sibling of `test_rs_panic_halts_first` makes, over and over.
-const RETIRED_RECORD: &str = "syscall 26 is retired";
+const SIBLING_RECORD: &str = "logstorm t=0 i=0 ";
 
 /// The CPU a kernel record is stamped with: `[kernel <secs> cpu<N>]`.
 fn record_cpu(line: &str) -> Option<u32> {
