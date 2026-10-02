@@ -336,10 +336,11 @@ pub struct Platform {
 /// Interrupt delivery: this CPU's per-CPU block, the GIC and the timer's
 /// interrupt, and interrupts unmasked. The syscall gate is the vectors' own.
 pub fn interrupts(rsdp_addr: u64) -> Platform {
+    // First, so a panic in anything below has a reset to end its bound with.
+    super::psci::init(rsdp_addr);
     super::percpu::init_bsp();
     let gic = super::irqchip::init(rsdp_addr);
     super::cpu::enable_interrupts();
-    super::psci::init(rsdp_addr);
     Platform { gic }
 }
 

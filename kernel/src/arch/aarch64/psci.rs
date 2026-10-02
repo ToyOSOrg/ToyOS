@@ -75,22 +75,6 @@ impl Error {
             other => Self::Unnamed(other),
         }
     }
-
-    /// The code PSCI answered with: [`Error::of`] undone.
-    pub fn code(self) -> i32 {
-        match self {
-            Self::NotSupported => -1,
-            Self::InvalidParameters => -2,
-            Self::Denied => -3,
-            Self::AlreadyOn => -4,
-            Self::OnPending => -5,
-            Self::InternalFailure => -6,
-            Self::NotPresent => -7,
-            Self::Disabled => -8,
-            Self::InvalidAddress => -9,
-            Self::Unnamed(code) => code,
-        }
-    }
 }
 
 impl Conduit {
@@ -134,33 +118,33 @@ impl Conduit {
         }
     }
 
-    /// Turn this CPU off: an answer is a refusal, since `CPU_OFF` does not
-    /// return when it succeeds.
-    pub fn cpu_off(self) -> Error {
-        Error::of(self.call(CPU_OFF, 0, 0, 0))
+    /// Turn this CPU off: an answer is the code of a refusal, since `CPU_OFF`
+    /// does not return when it succeeds.
+    pub fn cpu_off(self) -> i32 {
+        self.call(CPU_OFF, 0, 0, 0)
     }
 
     /// Whether the CPU whose `MPIDR_EL1` is `mpidr` is on, off, or on its way
-    /// on: affinity level 0, the CPU itself.
-    pub fn affinity_info(self, mpidr: u64) -> Result<Affinity, Error> {
+    /// on: affinity level 0, the CPU itself. `Err` is the code of a refusal.
+    pub fn affinity_info(self, mpidr: u64) -> Result<Affinity, i32> {
         match self.call(AFFINITY_INFO, mpidr & TARGET_CPU, 0, 0) {
             0 => Ok(Affinity::On),
             1 => Ok(Affinity::Off),
             2 => Ok(Affinity::OnPending),
-            code => Err(Error::of(code)),
+            code => Err(code),
         }
     }
 
     /// Power the machine off. Neither this nor [`Conduit::system_reset`]
-    /// returns (DEN0022 §5.1.9, §5.1.11), so an answer is firmware breaking
-    /// that.
-    pub fn system_off(self) -> Error {
-        Error::of(self.call(SYSTEM_OFF, 0, 0, 0))
+    /// returns (DEN0022 §5.1.9, §5.1.11), so an answer is the code firmware
+    /// broke that with.
+    pub fn system_off(self) -> i32 {
+        self.call(SYSTEM_OFF, 0, 0, 0)
     }
 
     /// Reset the machine cold.
-    pub fn system_reset(self) -> Error {
-        Error::of(self.call(SYSTEM_RESET, 0, 0, 0))
+    pub fn system_reset(self) -> i32 {
+        self.call(SYSTEM_RESET, 0, 0, 0)
     }
 
     fn name(self) -> &'static str {

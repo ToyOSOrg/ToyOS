@@ -1633,7 +1633,10 @@ fn virt_off_names_the_cpus_left_on(profile: qemu::Profile) -> Result<(), String>
     let (_, calls) = ended_through_psci(&mut qemu, &mut stop, serial, power::SHUTTING_DOWN, "guest-shutdown", &trace, named)?;
     let left_on = spared(&calls);
     let last = psci_powered_off(&calls, VIRT_CPUS, &left_on)?;
-    eprintln!("  [virt] {left_on:?} left on and named; the rest CPU_OFF, then {last:#x} SYSTEM_OFF");
+    eprintln!(
+        "  [virt] {left_on:?} left on and named; the rest CPU_OFF, then {last:#x} SYSTEM_OFF; {} PSCI call(s) traced",
+        calls.len()
+    );
     Ok(())
 }
 
@@ -3527,16 +3530,14 @@ fn record_cpu(line: &str) -> Option<u32> {
 }
 
 /// The CPU that went fatal, once the console carries its line past
-/// `stop_other_cpus` — `panic_reboot::arm`'s, in either of its two words.
+/// `stop_other_cpus`: `panic_reboot::arm`'s, as a machine with a reset whose
+/// panic path reads no key says it.
 fn fatal_past_the_stop(console: &str) -> Option<u32> {
-    const PAST_THE_STOP: [&str; 2] = ["panic: rebooting in", "panic: holding this panel"];
+    let armed = format!("panic: rebooting in {} s, timed by", toyos_tco::PANIC_BOUND_MS / 1_000);
     let lines: Vec<&str> = console.lines().collect();
     let nonce = lines.iter().position(|l| l.contains(FATAL_HALT_NONCE))?;
     let fatal = record_cpu(lines[nonce])?;
-    lines[nonce..]
-        .iter()
-        .any(|l| record_cpu(l) == Some(fatal) && PAST_THE_STOP.iter().any(|word| l.contains(word)))
-        .then_some(fatal)
+    lines[nonce..].iter().any(|l| record_cpu(l) == Some(fatal) && l.contains(&armed)).then_some(fatal)
 }
 
 /// What a run has established, as it establishes it.

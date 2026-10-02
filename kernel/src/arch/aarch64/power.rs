@@ -9,13 +9,13 @@
 
 use super::{cpu, irqchip, percpu, psci};
 use crate::drivers::serial;
-use crate::time::{Budget, Deadline, Duration};
+use crate::time::{Cadence, Deadline, Duration, DEAF_CPU};
 
-/// How long the other CPUs get to be off by PSCI's answer before this one
-/// powers the machine off anyway.
-const OTHERS_OFF: Budget = Budget::of(
-    Duration::from_millis(100),
-    "the machine powers off with the CPUs PSCI still answers on, each named on the console",
+/// How often [`off`] asks again of a CPU PSCI still answers on: PSCI says a
+/// CPU is off only to one that asks.
+const ASK_AGAIN: Cadence = Cadence::every(
+    Duration::from_millis(1),
+    "one call into firmware per period, and a power-off at most one period after the last CPU is off",
 );
 
 pub fn can_reset() -> bool {
@@ -37,19 +37,28 @@ pub fn reset() -> ! {
 
 /// `SYSTEM_OFF`, once every other CPU the roster holds has turned itself off
 /// with `CPU_OFF` and PSCI answers it off: the caller puts every core in a
-/// known state first, and this is DEN0022 §5.10.3's own way to.
+/// known state first, and this is DEN0022 §5.10.3's own way to. The budget
+/// for all of them is [`DEAF_CPU`]'s span from the SGI: a CPU PSCI still
+/// answers on at its end is named, and the machine powers off regardless.
 pub fn off() -> ! {
     cpu::disable_interrupts();
     let Some(psci) = psci::conduit() else { cpu::halt() };
     irqchip::off_all_but_self();
-    let deadline = Deadline::at(crate::clock::now() + OTHERS_OFF.duration());
+    // The tripwire's span without its panic: what keeps a CPU on may be
+    // firmware's refusal, and firmware's word never panics this kernel.
+    let deadline = Deadline::at(crate::clock::now() + Duration::from_nanos(DEAF_CPU.nanos()));
     let me = percpu::cpu_id();
     for cpu in (0..crate::smp::cpu_count()).filter(|&cpu| cpu != me) {
         let mpidr = toyos_gicv3::unpacked_affinity(crate::smp::hardware_id(cpu));
         loop {
             match psci.affinity_info(mpidr) {
                 Ok(psci::Affinity::Off) => break,
-                Ok(_) if !deadline.reached(crate::clock::now()) => core::hint::spin_loop(),
+                Ok(_) if !deadline.reached(crate::clock::now()) => {
+                    let again = Deadline::at(crate::clock::now() + ASK_AGAIN.duration());
+                    while !again.reached(crate::clock::now()) {
+                        core::hint::spin_loop();
+                    }
+                }
                 Ok(_) => {
                     let mut uart = serial::panic_registers();
                     uart.write(b"power: cpu");
@@ -103,8 +112,7 @@ pub(super) fn cpu_off() -> ! {
 }
 
 /// The code PSCI refused a call with, signed.
-fn say_code(uart: &mut serial::PanicUart, refusal: psci::Error) {
-    let code = refusal.code();
+fn say_code(uart: &mut serial::PanicUart, code: i32) {
     if code < 0 {
         uart.write(b"-");
     }

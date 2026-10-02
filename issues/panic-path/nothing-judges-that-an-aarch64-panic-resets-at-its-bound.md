@@ -9,9 +9,9 @@ opened: 2026-10-02
 Since PSCI gave AArch64 a reset, a panic there after `psci::init` arms
 `panic_reboot`'s bound, where it used to hold the panel, and at the bound's
 end `reboot_now` calls `SYSTEM_RESET`. No test waits for that reset.
-`virt_fatal_halts_the_others_first` reads the arm line in either of its two
-words and ends there; `virt_reboot` judges `SYSTEM_RESET` from the syscall,
-not from a panic.
+`virt_fatal_halts_the_others_first` holds the arm line, `panic: rebooting in
+60 s, timed by`, and ends there; `virt_reboot` judges `SYSTEM_RESET` from the
+syscall, not from a panic.
 
 A test is one boot and costs the shipped bound, `toyos_tco::PANIC_BOUND_MS`,
 60 s of every suite run, on a suite that takes 45 s. The actuator that
