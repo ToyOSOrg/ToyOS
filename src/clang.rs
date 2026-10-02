@@ -42,10 +42,12 @@ const TOOLS: [&str; 3] = ["llvm-ar", "clang", "ld.lld"];
 
 /// CMake's description of ToyOS, which CMake does not ship, as every C sysroot
 /// carries it: a toolchain file that names the system, the target and the
-/// sysroot it sits in, and puts beside it on CMake's module path the platform
-/// module, laid out as CMake's `Modules/Platform` lays out a Unix-like system.
-/// The compilers are the caller's. `@PROCESSOR@` and `@TARGET@` are the
-/// sysroot's.
+/// sysroot it sits in, has CMake find a library, a header and a package there
+/// alone and a program on the host alone, and puts beside it on CMake's module
+/// path the platform module, laid out as CMake's `Modules/Platform` lays out a
+/// Unix-like system. The compilers are the caller's, and so is the root of any
+/// package it built outside the sysroot (`CMAKE_FIND_ROOT_PATH`). `@PROCESSOR@`
+/// and `@TARGET@` are the sysroot's.
 pub(crate) const CMAKE: [(&str, &str); 3] = [
     (
         "toolchain.cmake",
@@ -55,11 +57,26 @@ pub(crate) const CMAKE: [(&str, &str); 3] = [
          set(CMAKE_C_COMPILER_TARGET @TARGET@)\n\
          set(CMAKE_CXX_COMPILER_TARGET @TARGET@)\n\
          set(CMAKE_ASM_COMPILER_TARGET @TARGET@)\n\
+         set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)\n\
+         set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)\n\
+         set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)\n\
+         set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)\n\
          list(APPEND CMAKE_MODULE_PATH \"${CMAKE_CURRENT_LIST_DIR}\")\n",
     ),
     ("Platform/ToyOS-Initialize.cmake", "set(UNIX 1)\n"),
-    // `dlopen` and its kin are the C library's own.
-    ("Platform/ToyOS.cmake", "set(CMAKE_DL_LIBS \"\")\n\ninclude(Platform/UnixPaths)\n"),
+    // `dlopen` and its kin are the C library's own. The loader finds a library
+    // by the name `DT_NEEDED` holds, beside its executable or in `/system/lib`,
+    // so a library carries its soname and one without is linked by name; and it
+    // reads no runtime path, so no flag asks the linker for one.
+    (
+        "Platform/ToyOS.cmake",
+        "set(CMAKE_DL_LIBS \"\")\n\
+         set(CMAKE_SHARED_LIBRARY_SONAME_C_FLAG \"-Wl,-soname,\")\n\
+         set(CMAKE_EXE_EXPORTS_C_FLAG \"-Wl,--export-dynamic\")\n\
+         set(CMAKE_PLATFORM_USES_PATH_WHEN_NO_SONAME 1)\n\
+         \n\
+         include(Platform/UnixPaths)\n",
+    ),
 ];
 
 /// `lib/rustlib/<host>/bin` of `toolchain`, where `rust-lld` is.

@@ -21,10 +21,7 @@ order it stops it:
   Then ORC's `shm_open` and `shm_unlink`, the interpreter's `scanf` and
   `llvm-objdump`'s `ctime`
   (`issues/build/libc-lacks-names-llvm-for-a-toyos-host-calls.md`), and
-  clang's `std::ifstream`, which libc++ has only with `std::filesystem`. Built
-  with it, libc++ asks libc for `setbuf`, `fseeko`, `ftello`, `utimes`,
-  `truncate`, `pathconf`, `openat`, `unlinkat`, `fdopendir`, `_PC_PATH_MAX`,
-  `O_DIRECTORY`, `O_NOFOLLOW`, `AT_FDCWD` and `AT_REMOVEDIR`
+  clang's `std::ifstream`, which libc++ has only with `std::filesystem`
   (`issues/build/libcxx-is-built-without-std-filesystem.md`).
 - **Link.** clang needs `lround`, which libc does not define
   (`issues/build/libc-lacks-names-llvm-for-a-toyos-host-calls.md`), beside
