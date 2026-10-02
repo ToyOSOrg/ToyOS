@@ -702,7 +702,7 @@ mod tests {
             let read = sdk_at_tip(|| Ok(sdk(landed() && moves_sdk)), || main(if landed() { LANDED } else { HEAD }), HEAD);
             read.map(|sdk| sdk.is_some())
         };
-        for moves_sdk in [false, true] {
+        for moves_sdk in [true, false] {
             assert_eq!(publishes(0, moves_sdk), Ok(false), "a landing before the release read anything");
             assert_eq!(publishes(1, moves_sdk), Ok(false), "a landing between the release's two reads");
             assert_eq!(publishes(2, moves_sdk), Ok(true), "no landing");
