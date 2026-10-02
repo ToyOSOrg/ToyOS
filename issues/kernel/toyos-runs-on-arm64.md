@@ -332,8 +332,8 @@ Each stage names its exit; "measured" means a number from a run.
 8. **The harness boots aarch64.** `tests/common/qemu.rs` takes an
    `Arch`: `virt`, edk2-aarch64, HVF on Apple hosts (TCG otherwise).
    **Exit**: once the track's stages are done, the whole suite is run on
-   aarch64 on the M4 host by hand, once; a test red on only one arch is a
-   named known-red, not a skip.
+   aarch64 on the M4 host by hand, once; a test red on only one arch is
+   fixed or deleted with its issue, not skipped.
 
 ## Exit
 

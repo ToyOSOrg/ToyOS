@@ -540,3 +540,5 @@ green, which is the calibration for how this one is landed.
 Six entries under `issues/design-debt/` recorded that the deleted document's own
 citations had rotted — five against the tree, one against a log plan deleted
 before it. All six closed with it.
+
+`usb_boot_stick_pulled` is deleted.

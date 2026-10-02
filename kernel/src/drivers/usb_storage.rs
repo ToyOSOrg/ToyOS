@@ -46,13 +46,6 @@ pub fn untold(index: usize, losses: u64) -> bool {
     block::open(USB_DEVICE_ID_BASE + index as DeviceId).is_some_and(|disk| disk.untold(losses))
 }
 
-/// Whether the controller will still speak to the disk, distinct from a failed
-/// transfer — unlike geometry, which outlives recovery giving up on it.
-#[cfg(feature = "boot-actuators")]
-pub fn healthy(index: usize) -> bool {
-    xhci::storage_online(index) == Some(true)
-}
-
 struct UsbBlockDevice {
     index: usize,
     id: DeviceId,

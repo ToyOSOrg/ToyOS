@@ -1,9 +1,5 @@
 name: ci
 
-# A pull request and the merge queue: the host tests, and no guest. Each step
-# is `cargo run -- --ci <job>` (src/ci.rs), which runs the same on a dev host;
-# nightly.yml boots the guests.
-
 on:
   pull_request:
     branches: [main]
@@ -14,13 +10,19 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# No job here writes: a toolchain release is main's publisher's alone.
+permissions:
+  contents: read
+
 jobs:
-  # macOS, because `toyos-fat32`'s fixtures are formatted with `newfs_msdos`
-  # and `hdiutil`.
   host:
     if: github.event_name == 'merge_group' || github.event.pull_request.draft == false
-    runs-on: macos-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
+    # The driver's own target, and no step's: it says this job carries the
+    # host cache (src/cicache.rs).
+    env:
+      CARGO_TARGET_DIR: target/ci-driver
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -37,7 +39,22 @@ jobs:
             toyos/target
             kernel/target
             bootloader/target
-          key: host-${{ github.run_id }}
-          restore-keys: host-
+          key: host-sealed-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}
+          restore-keys: host-sealed-${{ runner.os }}-${{ runner.arch }}-
 
       - run: cargo run -- --ci host
+
+  toolchain:
+    if: github.event_name == 'merge_group' || github.event.pull_request.draft == false
+    uses: ./.github/workflows/toolchain.yml
+
+  # A required check that is skipped reads as green, so this runs whatever
+  # `toolchain` concluded.
+  guest:
+    needs: toolchain
+    if: ${{ !cancelled() && (github.event_name == 'merge_group' || github.event.pull_request.draft == false) }}
+    uses: ./.github/workflows/guest.yml
+    with:
+      kvm: true
+      sysroot-key: ${{ needs.toolchain.outputs.sysroot-key }}
+      sysroot-path: ${{ needs.toolchain.outputs.sysroot-path }}

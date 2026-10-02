@@ -20,13 +20,6 @@ alternative the client offers, a restart, which gives the address up before it
 asks again and so takes a machine whose cable only flapped off its network for
 a whole exchange.
 
-## Evidence
-
-`lan_lease_report` (`tests/common/lan.rs`) takes QEMU's link away after the
-lease and gives it back, and passes only if the report records no second
-`leased` line and no `lost` line after the flap: the old lease is kept and no
-server was asked about it.
-
 ## Owner
 
 The successor of the I219 PHY branch (PR #453) on the LAN track, "The LAN
@@ -37,4 +30,4 @@ reaches a router, and is not yet production grade" (stage 4, the stack).
 The DHCP client verifies a kept lease when the link comes back: a renew-now
 request, or RFC 2131 §3.2's INIT-REBOOT (a DHCPREQUEST for the address it
 holds), with the lease kept while the answer is outstanding and given up on a
-DHCPNAK. `lan_lease_report` then sees the request after the flap.
+DHCPNAK.

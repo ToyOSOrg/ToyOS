@@ -177,13 +177,6 @@ fn irq(from_el0: bool) {
             }
         }
         #[cfg(feature = "boot-actuators")]
-        intid if intid == u32::from(LOG_NEST_VECTOR) => {
-            percpu::preempt_count_up();
-            crate::log::nested::deliver();
-            percpu::preempt_count_down();
-            irqchip::end(intid);
-        }
-        #[cfg(feature = "boot-actuators")]
         irqchip::SGI_STORM => {
             storm::sgi();
             irqchip::end(intid);
@@ -280,9 +273,6 @@ fn user_fatal(frame: &Frame) -> ! {
     // First: a panic anywhere below reaches the panic handler as DOUBLE
     // PANIC, which can only report what was captured here.
     crate::panic::record_fault(class_name(frame.esr), frame.elr, frame.far, frame.esr);
-    if crate::actuator::panic_in_report() {
-        panic!("panic-in-report: the crash report panicked before it said anything");
-    }
     let tid = percpu::current_tid().map_or(u32::MAX, |t| t.raw());
     alert!(
         "FAULT pc={:#018x} far={:#018x} esr={:#010x} sp={:#018x} tid={tid}{}",
@@ -464,7 +454,6 @@ pub fn install() {
 
 pub const HDA_VECTOR: u8 = irqchip::Intid::Hda as u8;
 pub const VIRTIO_SOUND_VECTOR: u8 = irqchip::Intid::VirtioSound as u8;
-pub const LOG_NEST_VECTOR: u8 = irqchip::Intid::LogNest as u8;
 
 /// The crash report for a panic, from the frame pointer the panic handler
 /// stood on: the backtrace, which CPU is on which stack, and what the

@@ -2,8 +2,10 @@
 //! §5.12, §5.10), through the conduit [`super::psci`] kept. A machine without
 //! PSCI has neither, and holds where either is asked for.
 //!
-//! Every line here goes to the UART raw: it takes no lock, and nothing drains
-//! the log ring after any of these calls.
+//! Every line here goes straight to the UART, each whole under one fatal
+//! path's hold of its registers ([`serial::panic_registers`]): nothing drains
+//! the log ring after any of these calls. The hold is let go before a halt,
+//! since a CPU halted holding it costs every later line the whole bound.
 
 use super::{cpu, irqchip, percpu, psci};
 use crate::drivers::serial;
@@ -20,14 +22,15 @@ pub fn can_reset() -> bool {
     psci::conduit().is_some()
 }
 
-/// `SYSTEM_RESET`, which asks nothing of the other CPUs (DEN0022 §5.12.2): a
-/// wedge calls this, so it takes no lock.
+/// `SYSTEM_RESET`, which asks nothing of the other CPUs (DEN0022 §5.12.2). A
+/// wedge calls this: the call takes no lock, and only its refusal is said.
 pub fn reset() -> ! {
     if let Some(psci) = psci::conduit() {
         let refusal = psci.system_reset();
-        serial::panic_raw(b"power: SYSTEM_RESET answered ");
-        say_code(refusal);
-        serial::panic_raw(b"; holding\n");
+        let mut uart = serial::panic_registers();
+        uart.write(b"power: SYSTEM_RESET answered ");
+        say_code(&mut uart, refusal);
+        uart.write(b"; holding\n");
     }
     cpu::halt()
 }
@@ -48,26 +51,30 @@ pub fn off() -> ! {
                 Ok(psci::Affinity::Off) => break,
                 Ok(_) if !deadline.reached(crate::clock::now()) => core::hint::spin_loop(),
                 Ok(_) => {
-                    serial::panic_raw(b"power: cpu");
-                    serial::panic_raw_dec(u64::from(cpu));
-                    serial::panic_raw(b" is not off by PSCI's answer inside the budget; SYSTEM_OFF regardless\n");
+                    let mut uart = serial::panic_registers();
+                    uart.write(b"power: cpu");
+                    uart.dec(u64::from(cpu));
+                    uart.write(b" is not off by PSCI's answer inside the budget; SYSTEM_OFF regardless\n");
                     break;
                 }
                 Err(refusal) => {
-                    serial::panic_raw(b"power: cpu");
-                    serial::panic_raw_dec(u64::from(cpu));
-                    serial::panic_raw(b"'s AFFINITY_INFO answered ");
-                    say_code(refusal);
-                    serial::panic_raw(b"; SYSTEM_OFF regardless\n");
+                    let mut uart = serial::panic_registers();
+                    uart.write(b"power: cpu");
+                    uart.dec(u64::from(cpu));
+                    uart.write(b"'s AFFINITY_INFO answered ");
+                    say_code(&mut uart, refusal);
+                    uart.write(b"; SYSTEM_OFF regardless\n");
                     break;
                 }
             }
         }
     }
     let refusal = psci.system_off();
-    serial::panic_raw(b"power: SYSTEM_OFF answered ");
-    say_code(refusal);
-    serial::panic_raw(b"; holding\n");
+    let mut uart = serial::panic_registers();
+    uart.write(b"power: SYSTEM_OFF answered ");
+    say_code(&mut uart, refusal);
+    uart.write(b"; holding\n");
+    drop(uart);
     cpu::halt()
 }
 
@@ -85,19 +92,21 @@ pub(super) fn cpu_off() -> ! {
         unreachable!("power: SGI_OFF is raised only by `off`, which holds a conduit")
     };
     let refusal = psci.cpu_off();
-    serial::panic_raw(b"power: cpu");
-    serial::panic_raw_dec(u64::from(percpu::cpu_id()));
-    serial::panic_raw(b"'s CPU_OFF answered ");
-    say_code(refusal);
-    serial::panic_raw(b"\n");
+    let mut uart = serial::panic_registers();
+    uart.write(b"power: cpu");
+    uart.dec(u64::from(percpu::cpu_id()));
+    uart.write(b"'s CPU_OFF answered ");
+    say_code(&mut uart, refusal);
+    uart.write(b"\n");
+    drop(uart);
     cpu::halt()
 }
 
 /// The code PSCI refused a call with, signed.
-fn say_code(refusal: psci::Error) {
+fn say_code(uart: &mut serial::PanicUart, refusal: psci::Error) {
     let code = refusal.code();
     if code < 0 {
-        serial::panic_raw(b"-");
+        uart.write(b"-");
     }
-    serial::panic_raw_dec(u64::from(code.unsigned_abs()));
+    uart.dec(u64::from(code.unsigned_abs()));
 }

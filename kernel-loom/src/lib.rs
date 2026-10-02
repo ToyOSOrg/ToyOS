@@ -101,6 +101,26 @@ pub mod arch {
         pub fn poll() {}
     }
 
+    /// Which CPU a model thread is, which the console lock's fatal word and the
+    /// roster's echo name.
+    /// The model says, through [`become_cpu`]; the kernel asks the CPU. Per
+    /// model thread for `scheduler`'s reason: loom's threads share an OS one.
+    #[cfg(feature = "loom")]
+    pub mod cpu {
+        loom::thread_local! {
+            static CPU: core::cell::Cell<Option<u32>> = core::cell::Cell::new(None);
+        }
+
+        /// Say which CPU the current model thread is. No kernel counterpart.
+        pub fn become_cpu(id: u32) {
+            CPU.with(|cpu| cpu.set(Some(id)));
+        }
+
+        pub fn hardware_id() -> u32 {
+            CPU.with(|cpu| cpu.get()).expect("a model thread asked which cpu it is before saying")
+        }
+    }
+
     /// **A strictly stronger model than the instruction, and the direction is
     /// the whole argument.**
     ///
@@ -134,26 +154,6 @@ pub mod arch {
     }
 }
 
-/// What the kernel has been told to break, and the models never are.
-///
-/// A shim rather than a `cfg` at the call site, so `commit` is one statement in
-/// every build and the model drives the same line the kernel does.
-pub mod actuator {
-    /// The one `shard.rs` names: the nesting gate's mid-body injection point.
-    /// Loom has no CPU flags and no interrupts, which is exactly why that gate
-    /// exists on a machine instead — so the models drive the loop with nothing
-    /// in it.
-    pub const fn log_nested_emit() -> bool {
-        false
-    }
-}
-
-/// `shard.rs` calls into this from the mid-body point; in the kernel it is
-/// `crate::log::nested`, and here `super` is the crate root.
-pub mod nested {
-    pub fn mid_body() {}
-}
-
 /// The contention and deadlock reports are unreachable in these models — the
 /// spin they fire from is what loom cannot explore — but the arguments are
 /// consumed so the kernel file's bindings are still live code here.
@@ -168,7 +168,9 @@ pub mod sync;
 #[path = "../../kernel/src/shootdown.rs"]
 pub mod shootdown;
 
-/// The CPU roster and the release/answer word, driven by `tests/smp_bringup.rs`.
+/// The CPU roster and the release/answer word, driven by `tests/smp_bringup.rs`;
+/// under `loom` alone, as is the [`arch::cpu`] shim it names.
+#[cfg(feature = "loom")]
 #[path = "../../kernel/src/smp_roster.rs"]
 pub mod smp_roster;
 
@@ -372,6 +374,8 @@ pub mod log_ring;
 #[path = "../../kernel/src/drivers/panic_console/published.rs"]
 pub mod panic_console_published;
 
-/// The console backend's lock, driven by `tests/serial_lock.rs`.
+/// The console backend's lock, driven by `tests/serial_lock.rs`; under `loom`
+/// alone, as is the [`arch::cpu`] shim it names.
+#[cfg(feature = "loom")]
 #[path = "../../kernel/src/drivers/serial_lock.rs"]
 pub mod serial_lock;

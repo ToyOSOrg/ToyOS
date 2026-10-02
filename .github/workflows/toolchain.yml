@@ -1,0 +1,77 @@
+name: toolchain
+
+on:
+  workflow_call:
+    outputs:
+      sysroot-key:
+        value: ${{ jobs.build.outputs.sysroot-key }}
+      sysroot-path:
+        value: ${{ jobs.build.outputs.sysroot-path }}
+
+jobs:
+  build:
+    # Bare, not a container: its glibc is a build's floor.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    # Main's two callers build one key once, one after the other, and one that
+    # waits is never cancelled for a later one.
+    concurrency:
+      group: toolchain-${{ github.ref }}
+      queue: max
+    outputs:
+      sysroot-key: ${{ steps.keys.outputs.sysroot-key }}
+      sysroot-path: ${{ steps.keys.outputs.sysroot-path }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - id: keys
+        run: cargo run -- --ci toolchain
+
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ steps.keys.outputs.llvm-path }}
+          key: ${{ steps.keys.outputs.llvm-key }}
+
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ steps.keys.outputs.compiler-path }}
+          key: ${{ steps.keys.outputs.compiler-key }}
+
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ steps.keys.outputs.freestanding-path }}
+          key: ${{ steps.keys.outputs.freestanding-key }}
+
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ steps.keys.outputs.sysroot-path }}
+          key: ${{ steps.keys.outputs.sysroot-key }}
+
+      - id: build
+        run: cargo run -- --ci bootstrap
+
+      # A merge group's scope is read only by its own guest job, which restores
+      # the sysroot alone.
+      - if: steps.build.outputs.llvm == 'built' && github.event_name != 'merge_group'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ steps.keys.outputs.llvm-path }}
+          key: ${{ steps.keys.outputs.llvm-key }}
+
+      - if: steps.build.outputs.compiler == 'built' && github.event_name != 'merge_group'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ steps.keys.outputs.compiler-path }}
+          key: ${{ steps.keys.outputs.compiler-key }}
+
+      - if: steps.build.outputs.freestanding == 'built' && github.event_name != 'merge_group'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ steps.keys.outputs.freestanding-path }}
+          key: ${{ steps.keys.outputs.freestanding-key }}
+
+      - if: steps.build.outputs.sysroot == 'built'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ steps.keys.outputs.sysroot-path }}
+          key: ${{ steps.keys.outputs.sysroot-key }}

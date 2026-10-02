@@ -42,8 +42,6 @@ pub(super) enum Intid {
     Halt,
     /// Turns a CPU off for the machine's power-off: [`off_all_but_self`]'s.
     Off,
-    /// `crate::log::nested`'s delivery, which [`send_self`] raises.
-    LogNest,
     /// What `irq-storm` floods this CPU with.
     Storm,
     Hda,
@@ -220,7 +218,7 @@ pub fn init_cpu(frame: u64) {
     stop_timer_hardware();
     let enabled = 1 << SGI_KICK | 1 << SGI_HALT | 1 << SGI_OFF | 1 << timer;
     #[cfg(feature = "boot-actuators")]
-    let enabled = enabled | 1 << Intid::LogNest as u32 | 1 << SGI_STORM;
+    let enabled = enabled | 1 << SGI_STORM;
     redistributor.write_u32(GICR_ISENABLER0, enabled);
 
     // The CPU interface in system registers, as the declaration says.

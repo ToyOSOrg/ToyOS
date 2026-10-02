@@ -267,20 +267,6 @@ fn crash_report_exception(ctx: &ExceptionContext) {
 }
 
 fn crash_report_panic(info: &core::panic::PanicInfo, rbp: u64) {
-    // Must run first: if this panics, only DOUBLE PANIC speaks for it —
-    // everything else comes from the copy `panic::record_panic` took.
-    if crate::actuator::panic_in_report() {
-        panic!("panic-in-report: the crash report panicked before it said anything");
-    }
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::fault_in_report() {
-        // Canonical, high-half, past any physical memory this kernel boots on:
-        // the read faults instead of hitting the direct map.
-        const UNMAPPED: u64 = 0xFFFF_8FFF_FFFF_F000;
-        // SAFETY: none — deliberately unsafe, staged only when the boot
-        // actuator asked for it, to fault a CPU already `Panic` mid-report.
-        unsafe { core::ptr::read_volatile(UNMAPPED as *const u64) };
-    }
     alert!("PANIC: {}", info);
 
     log!("  Backtrace:");
@@ -480,9 +466,6 @@ fn fatal_exception(ctx: &ExceptionContext) -> ! {
         ctx.cr2,
         ctx.frame.error_code,
     );
-    if crate::actuator::panic_in_report() {
-        panic!("panic-in-report: the crash report panicked before it said anything");
-    }
 
     let tid_raw = percpu::current_tid().map_or(u32::MAX, |t| t.raw());
     if recursive {
