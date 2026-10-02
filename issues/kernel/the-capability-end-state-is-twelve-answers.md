@@ -295,9 +295,7 @@ no replace", and a narrower one is a *new* object built from an existing one
 (`4a98107f^:kernel/src/arch/syscall.rs:1861`); `SYS_NAMESPACE_BUILD` demands
 `Rights::TRANSFER` on every added connector and resolves kept names against the
 base before installing anything (`:1754`). A process with no `svc` endowment
-resolves no name at all, and there is no registry to fall back to: 85
-`SYS_LISTEN` and 87 `SYS_CONNECT` are retired numbers
-(`4a98107f^:kernel/src/arch/syscall.rs:77`, `:78`). The **filesystem** path space is the
+resolves no name at all, and there is no registry to fall back to. The **filesystem** path space is the
 other thing the word could mean, and it is ambient process state
 (`4a98107f^:kernel/src/arch/syscall.rs:1234`) — questions 2 and 5 hold that half.
 
