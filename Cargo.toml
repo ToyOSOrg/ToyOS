@@ -43,6 +43,7 @@ members = [
     "toyos-logstream",
     "toyos-manifest",
     "toyos-mdns",
+    "toyos-microcode",
     "toyos-mixer",
     "toyos-net-ip",
     "toyos-net-shard",

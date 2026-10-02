@@ -3,7 +3,7 @@
 //!
 //! **A sysroot is a function of its key.** The key ([`key`]) is the identity
 //! (`src/identity.rs`, so a comment is no change) of everything a sysroot is
-//! built from: the three trees std and `libtoyos_c.a` compile
+//! built from: the trees std and `libtoyos_c.a` compile
 //! ([`SYSROOT_SOURCES`]), the std fork's `library/` and `src/bootstrap/` in the
 //! checkout that builds it, and the compiler that builds it. `rust/build/
 //! sysroots/<key>/` is a whole toolchain — the compiler's files cloned from its
@@ -58,13 +58,13 @@ use crate::toolchain::{self, host_triple, GuestTarget, Owner, Role, GUEST_TARGET
 use whole_toolchain::{whole, Whole};
 
 /// The per-worktree sources that end up inside a sysroot: std links `toyos-abi`
-/// and `toyos`, and `libtoyos_c.a` is `userland/libc`.
-pub const SYSROOT_SOURCES: [&str; 4] =
-    ["toyos-abi/src", "toyos/src", "userland/libc/src", "userland/libc/include"];
+/// and `toyos`, and `libtoyos_c.a` is `userland/libc` with `toyos-elf`.
+pub const SYSROOT_SOURCES: [&str; 5] =
+    ["toyos-abi/src", "toyos/src", "toyos-elf/src", "userland/libc/src", "userland/libc/include"];
 
 /// Their manifests, whose features and versions decide the same build.
-pub(crate) const SYSROOT_MANIFESTS: [&str; 3] =
-    ["toyos-abi/Cargo.toml", "toyos/Cargo.toml", "userland/libc/Cargo.toml"];
+pub(crate) const SYSROOT_MANIFESTS: [&str; 4] =
+    ["toyos-abi/Cargo.toml", "toyos/Cargo.toml", "toyos-elf/Cargo.toml", "userland/libc/Cargo.toml"];
 
 /// Of [`SYSROOT_MANIFESTS`], the ones std's lockfile resolves with the fork's
 /// own: what of a worktree can move a freestanding target's dependency versions.
@@ -78,9 +78,10 @@ const SOURCES: &str = "SOURCES";
 /// is none of them, nor std's configuration ([`std_config`]), which the
 /// freestanding key reads whole. Moving it moves every key.
 const RECIPE: &str = "bootstrap stage-0 local rebuild, libraries from the stamp, libtoyos_c merged, \
-                      a C sysroot of libc's staticlib and headers per target, and its C++ runtime \
-                      built under n2 from the runtimes' sources of the compiler's LLVM, the \
-                      freestanding libraries cloned from their key's; 10";
+                      a C sysroot of libc's staticlib, the empty libraries beside it, and headers \
+                      per target, refused unless a C program naming each library links against \
+                      it, and its C++ runtime built under n2 from the runtimes' sources of the \
+                      compiler's LLVM, the freestanding libraries cloned from their key's; 12";
 
 /// Every sysroot on this host.
 pub fn sysroots_dir(rust_dir: &Path) -> PathBuf {
@@ -965,7 +966,7 @@ mod tests {
         fs::write(path, text).unwrap();
     }
 
-    /// A worktree's three trees, a fork checkout and a compiler, laid out the
+    /// A worktree's trees, a fork checkout and a compiler, laid out the
     /// way the key reads them.
     fn keyed(base: &Path) -> (PathBuf, PathBuf, PathBuf) {
         let root = base.join("root");
