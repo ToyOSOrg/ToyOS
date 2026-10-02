@@ -2,7 +2,10 @@
 //!
 //! The states are two and the questions about them are the whole of this
 //! crate: a thread is [`Scheduled`] or it is a [`Zombie`] with a code, and a
-//! process is either being torn down by somebody or it is not. What is hard
+//! process is either being torn down by somebody or it is not — and, in
+//! [`tree`], where a process stands under the others, which its end takes
+//! down with it and when that end is published, and in [`pids`], which pid it
+//! has. What is hard
 //! about the subject is not either state — it is that **two CPUs are inside one
 //! process's lifecycle at once**, and the defects it has are the interleavings
 //! rather than the arithmetic. A spawn builds a thread's TLS block, its kernel
@@ -52,17 +55,21 @@ extern crate alloc;
 extern crate std;
 
 pub mod join;
+pub mod pids;
 pub mod reap;
 pub mod spawn;
 pub mod table;
 pub mod teardown;
+pub mod tree;
 
 #[cfg(test)]
 mod interleave;
 #[cfg(test)]
 mod model;
 
+pub use pids::Pids;
 pub use table::{Lifecycle, Processes};
+pub use tree::{Node, MAX_DEPTH};
 
 pub use toyos_abi::{Pid, Tid};
 
