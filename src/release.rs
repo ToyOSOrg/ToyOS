@@ -205,7 +205,7 @@ pub fn ensure_published(root: &Path) -> Result<String, String> {
         ));
     }
     let tmp = TempDir::new("toolchain-publish");
-    let manifest = manifest(root, &tag)?;
+    let manifest = manifest(root, &tag);
     let notes = notes(root, &tag, &manifest)?;
     fs::write(tmp.join("TOOLCHAIN"), &manifest).map_err(|e| e.to_string())?;
     fs::write(tmp.join("notes.md"), &notes).map_err(|e| e.to_string())?;
@@ -350,15 +350,15 @@ fn glibc_named(bytes: &[u8]) -> (u32, u32) {
 
 /// `TOOLCHAIN`: the pin a consumer writes down, and what it gets. Inside the
 /// tarball, and the alias release's own asset.
-fn manifest(root: &Path, tag: &str) -> Result<String, String> {
-    let head = |rev: &str| crate::sync::git(root, &["rev-parse", rev]);
-    let toyos = std::env::var("GITHUB_SHA").or_else(|_| head("HEAD"))?;
-    Ok(format!(
+fn manifest(root: &Path, tag: &str) -> String {
+    let head = |rev: &str| crate::sysroot::git_out(root, &["rev-parse", rev]).trim().to_string();
+    let toyos = std::env::var("GITHUB_SHA").unwrap_or_else(|_| head("HEAD"));
+    format!(
         "toolchain {tag}\ntoyos {toyos}\nrust {}\nhost {HOST}\nglibc {}.{}\n",
-        head("HEAD:rust")?,
+        head("HEAD:rust"),
         GLIBC_FLOOR.0,
         GLIBC_FLOOR.1
-    ))
+    )
 }
 
 /// The release notes: how to install it, what glibc it needs.

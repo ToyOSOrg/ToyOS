@@ -165,6 +165,12 @@ fn build_trampoline_data() -> TrampolineData {
 /// Boot all Application Processors found in the MADT, using `boot_cr3` — the bootloader's identity+high-half PML4 — until each AP switches to the kernel PML4 in `ap_entry`.
 pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
     let bsp_id = apic::id();
+    let read = cpu::hardware_id();
+    assert_eq!(
+        read,
+        bsp_id,
+        "smp: the boot CPU reads its own hardware id as {read:#x}, and its roster slot and every IPI name it {bsp_id:#x}"
+    );
     ROSTER.set_bsp(bsp_id);
     copy_trampoline();
 

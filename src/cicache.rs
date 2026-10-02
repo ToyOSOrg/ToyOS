@@ -246,8 +246,8 @@ fn seal_at(root: &Path, home: &Path, cold: &Cold) -> Result<String, String> {
         each_under(&target, &mut |path, _| date(path, built()))?;
         date(&target, built())?;
     }
-    let head = crate::sync::git(root, &["rev-parse", "HEAD"])?;
-    let mut text = format!("{head}\n{}\n", cold.runner);
+    let head = crate::sysroot::git_out(root, &["rev-parse", "HEAD"]);
+    let mut text = format!("{}\n{}\n", head.trim(), cold.runner);
     for (path, hash) in &cold.sources {
         text.push_str(&format!("{hash} {path}\n"));
     }

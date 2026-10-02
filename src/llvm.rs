@@ -30,7 +30,7 @@
 //! writes, `build/toyos-llvm/`, which is removed once the LLVM is placed.
 //!
 //! An LLVM no worktree names any more is removed by `keystore::sweep`, which
-//! `--worktree remove` and every placement run: each worktree records the key of
+//! every placement runs: each worktree records the key of
 //! the LLVM its compiler links, and a key no registered worktree records, that
 //! nobody is making or using, goes.
 
@@ -257,9 +257,7 @@ fn place(fork: &Path, key: &Key, dir: &Path, build: &impl Fn(&Path) -> PathBuf) 
     let built = build(fork);
     let host = host_triple();
     let partial = dir.with_extension("partial");
-    if partial.exists() {
-        keystore::remove(&partial);
-    }
+    keystore::remove(&partial);
     for part in KEPT {
         clone_tree(&built.join(&host).join("llvm").join(part), &partial.join(part));
     }

@@ -29,8 +29,9 @@ use std::process::Command;
 
 use crate::arch::{Accel, Arch};
 use crate::cicache;
+use crate::sysroot::git_out;
 use crate::userlandhost::{Host, Os, Program};
-use crate::{flags, release, sdkversion, sync};
+use crate::{flags, release, sdkversion};
 
 const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
   host              every host test: the build system, the harness's own checks,
@@ -885,8 +886,8 @@ fn publish(root: &Path) -> Result<String, String> {
                 .into()
         );
     }
-    let tip = sync::git(root, &["ls-remote", "origin", "refs/heads/main"])?;
-    at_tip(&tip, &sync::git(root, &["rev-parse", "HEAD"])?)?;
+    let tip = git_out(root, &["ls-remote", "origin", "refs/heads/main"]);
+    at_tip(&tip, git_out(root, &["rev-parse", "HEAD"]).trim())?;
     let plan = sdkversion::plan(root)?;
     sdkversion::write_published_manifests(root, &plan)?;
     let mut said = Vec::new();
