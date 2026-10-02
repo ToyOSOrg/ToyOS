@@ -1,4 +1,4 @@
-# One CPU and the AArch64 guest's jobs, each a toybox applet or, last because
+# One CPU and the AArch64 guest's jobs, each a kernelprobe applet or, last because
 # a kernel it fails on rewrites the clock page every reader asserts on, the
 # suite's `test_rs_abuse_readonly_copyout`, which the harness puts on ROOT;
 # each job's line comes only if the kernel kept what that job asks about.
@@ -15,11 +15,11 @@ receives = ["power"]
 # CPU, and a job past the bound reboots the guest with the job named.
 args = ["--bound-ms=240000", "preempt", "fp_isolation", "first_entry", "unmap_touch", "debug_refused", "test_rs_abuse_readonly_copyout"]
 
-[programs.toybox]
+[programs.kernelprobe]
 
 [symlinks]
-"bin/preempt" = "/system/bin/toybox"
-"bin/fp_isolation" = "/system/bin/toybox"
-"bin/first_entry" = "/system/bin/toybox"
-"bin/unmap_touch" = "/system/bin/toybox"
-"bin/debug_refused" = "/system/bin/toybox"
+"bin/preempt" = "/system/bin/kernelprobe"
+"bin/fp_isolation" = "/system/bin/kernelprobe"
+"bin/first_entry" = "/system/bin/kernelprobe"
+"bin/unmap_touch" = "/system/bin/kernelprobe"
+"bin/debug_refused" = "/system/bin/kernelprobe"
