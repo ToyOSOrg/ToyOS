@@ -949,4 +949,35 @@ mod checks {
             .expect("03_struct's expectation is staged");
         assert_eq!(staged.trim_end(), got);
     }
+
+    /// `arm_psci_call` as QEMU 11.1.1's `trace-events` formats it, with and
+    /// without the log backend's `pid@time:` head, and every way a power-off's
+    /// trace falls short of PSCI's recipe refused, a CPU left on calling
+    /// `CPU_OFF` among them.
+    #[test]
+    fn psci_power_off_judge() {
+        let line = |head: &str, function: u64, cpu: u64| {
+            format!("{head}arm_psci_call PSCI Call x0=0x{function:016x} x1=0x0000000000000000 x2=0x0000000000000000 x3=0x0000000000000000 cpuid=0x{cpu:x}")
+        };
+        let text = [line("", PSCI_CPU_OFF, 1), line("4242@1759272000.123456:", PSCI_SYSTEM_OFF, 0)].join("\n");
+        assert_eq!(psci_calls(&text), Ok(vec![(PSCI_CPU_OFF, 1), (PSCI_SYSTEM_OFF, 0)]));
+        assert!(psci_calls("arm_psci_call PSCI Call x0=?").is_err());
+
+        let (off, system_off) = (PSCI_CPU_OFF, PSCI_SYSTEM_OFF);
+        let affinity_info = 0xC400_0004;
+        assert_eq!(psci_powered_off(&[(off, 1), (affinity_info, 3), (off, 2), (off, 0), (system_off, 3)], 4, &[]), Ok(3));
+        assert_eq!(psci_powered_off(&[(off, 1), (off, 0), (system_off, 3)], 4, &[2]), Ok(3));
+        for short in [
+            vec![(off, 1), (off, 0), (system_off, 3)],
+            vec![(off, 1), (off, 0), (system_off, 3), (off, 2)],
+            vec![(off, 1), (off, 1), (off, 2), (off, 0), (system_off, 3)],
+            vec![(off, 1), (off, 2), (off, 0)],
+            vec![(off, 1), (off, 2), (off, 0), (system_off, 3), (system_off, 3)],
+            vec![(off, 1), (off, 2), (off, 0), (PSCI_SYSTEM_RESET, 3), (system_off, 3)],
+            vec![(off, 1), (off, 2), (off, 3), (system_off, 3)],
+        ] {
+            assert!(psci_powered_off(&short, 4, &[]).is_err(), "{short:x?}");
+        }
+        assert!(psci_powered_off(&[(off, 1), (off, 2), (off, 0), (system_off, 3)], 4, &[2]).is_err());
+    }
 }

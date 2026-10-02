@@ -87,9 +87,10 @@ pub fn interrupts(rsdp_addr: u64) -> Platform {
     // Off the same tables as the MADT, and before the IDT below makes a panic
     // reportable: a panic that can be reported but not ended leaves the machine
     // holding its panel for a hand that may not be in the room.
-    acpi::init_reset(rsdp_addr);
+    super::power::init_reset(rsdp_addr);
     apic::init();
     percpu::init_bsp(apic::id());
+    super::power::init_off(rsdp_addr);
     ioapic::init(&madt);
     idt::enable_interrupts();
     super::syscall::init();

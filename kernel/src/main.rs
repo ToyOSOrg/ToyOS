@@ -36,6 +36,7 @@ mod hardlockup;
 mod mm;
 mod panic;
 mod panic_reboot;
+mod power;
 
 mod keyboard;
 mod mouse;
@@ -429,7 +430,6 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     arch::watchdog::init(&pci_devices);
     file_cache::init();
     gpt::init(kernel_args);
-    acpi::init_power(kernel_args.rsdp_addr);
 
     boot_phase!("peripherals ready", t_periph);
 

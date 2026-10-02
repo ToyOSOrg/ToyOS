@@ -3,25 +3,46 @@
 //! where a hypervisor stands in for it. Every call is SMCCC's (Arm DEN0028D):
 //! the function in `x0`, its arguments in `x1`–`x3`, the answer in `x0`.
 
+use core::sync::atomic::{AtomicU8, Ordering::Relaxed};
+
 use toyos_acpi::Psci;
 
 use crate::drivers::acpi::direct_phys;
 use crate::log;
 
-/// The function IDs of `PSCI_VERSION` and the SMC64 `CPU_ON`, as PSCI
-/// numbers them from 0.2 on.
+/// The function IDs this kernel calls, as PSCI numbers them from 0.2 on
+/// (DEN0022 §5.1), each the SMC64 one where there is one.
 const PSCI_VERSION: u32 = 0x8400_0000;
+const CPU_OFF: u32 = 0x8400_0002;
 const CPU_ON: u32 = 0xC400_0003;
+const AFFINITY_INFO: u32 = 0xC400_0004;
+const SYSTEM_OFF: u32 = 0x8400_0008;
+const SYSTEM_RESET: u32 = 0x8400_0009;
 
-/// `CPU_ON`'s `target_cpu`: `MPIDR_EL1`'s affinity fields where they stand,
-/// Aff3 in bits 39:32, every other bit zero.
+/// `CPU_ON`'s `target_cpu` and `AFFINITY_INFO`'s `target_affinity`:
+/// `MPIDR_EL1`'s affinity fields where they stand, Aff3 in bits 39:32, every
+/// other bit zero.
 const TARGET_CPU: u64 = 0xFF_00FF_FFFF;
 
 /// How this machine reaches PSCI.
 #[derive(Clone, Copy)]
+#[repr(u8)]
 pub enum Conduit {
-    Smc,
+    Smc = 1,
     Hvc,
+}
+
+/// The conduit [`init`] found, zero for none: one word, because a reset on a
+/// wedged machine reads it and may take no lock. Written on the boot CPU
+/// before any other starts.
+static CONDUIT: AtomicU8 = AtomicU8::new(0);
+
+/// What `AFFINITY_INFO` answers of one CPU (DEN0022 §5.7.1).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Affinity {
+    On,
+    Off,
+    OnPending,
 }
 
 /// A PSCI call's refusal, as the specification numbers its return codes.
@@ -97,6 +118,35 @@ impl Conduit {
         }
     }
 
+    /// Turn this CPU off: an answer is the code of a refusal, since `CPU_OFF`
+    /// does not return when it succeeds.
+    pub fn cpu_off(self) -> i32 {
+        self.call(CPU_OFF, 0, 0, 0)
+    }
+
+    /// Whether the CPU whose `MPIDR_EL1` is `mpidr` is on, off, or on its way
+    /// on: affinity level 0, the CPU itself. `Err` is the code of a refusal.
+    pub fn affinity_info(self, mpidr: u64) -> Result<Affinity, i32> {
+        match self.call(AFFINITY_INFO, mpidr & TARGET_CPU, 0, 0) {
+            0 => Ok(Affinity::On),
+            1 => Ok(Affinity::Off),
+            2 => Ok(Affinity::OnPending),
+            code => Err(code),
+        }
+    }
+
+    /// Power the machine off. Neither this nor [`Conduit::system_reset`]
+    /// returns (DEN0022 §5.1.9, §5.1.11), so an answer is the code firmware
+    /// broke that with.
+    pub fn system_off(self) -> i32 {
+        self.call(SYSTEM_OFF, 0, 0, 0)
+    }
+
+    /// Reset the machine cold.
+    pub fn system_reset(self) -> i32 {
+        self.call(SYSTEM_RESET, 0, 0, 0)
+    }
+
     fn name(self) -> &'static str {
         match self {
             Self::Smc => "SMC",
@@ -105,14 +155,15 @@ impl Conduit {
     }
 }
 
-/// PSCI as the FADT names it, asked for its version: `None` where the machine
-/// offers none this kernel can call, which the log says.
-pub fn init(rsdp_addr: u64) -> Option<Conduit> {
+/// PSCI as the FADT names it, asked for its version and kept for
+/// [`conduit`]; none where the machine offers none this kernel can call,
+/// which the log says.
+pub fn init(rsdp_addr: u64) {
     let fadt = match toyos_acpi::find_table(direct_phys(), rsdp_addr, b"FACP", toyos_acpi::SDT_HEADER_LEN) {
         Ok(fadt) => fadt,
         Err(e) => {
             log!("PSCI: none, because the FADT is unusable: {e:?}");
-            return None;
+            return;
         }
     };
     let conduit = match toyos_acpi::psci(&fadt) {
@@ -120,27 +171,41 @@ pub fn init(rsdp_addr: u64) -> Option<Conduit> {
         Psci::Hvc => Conduit::Hvc,
         Psci::Absent => {
             log!("PSCI: none: the FADT's ARM_BOOT_ARCH does not set PSCI_COMPLIANT");
-            return None;
+            return;
         }
         Psci::Undefined { revision, minor } => {
             log!("PSCI: none: the FADT is version {revision}.{minor}, and ARM_BOOT_ARCH begins at 5.1");
-            return None;
+            return;
         }
         Psci::Short => {
             log!("PSCI: none: the FADT ends before ARM_BOOT_ARCH and the minor version after it");
-            return None;
+            return;
         }
     };
     let version = conduit.call(PSCI_VERSION, 0, 0, 0);
     if version < 0 {
         log!("PSCI: PSCI_VERSION through {} answered {:?}; none used", conduit.name(), Error::of(version));
-        return None;
+        return;
     }
     let (major, minor) = (version >> 16, version & 0xFFFF);
     if major == 0 && minor < 2 {
         log!("PSCI: {major}.{minor} through {}, which numbers no SMC64 CPU_ON; none used", conduit.name());
-        return None;
+        return;
+    }
+    if crate::actuator::psci_withheld() {
+        log!("PSCI: {major}.{minor} through {}, withheld: this kernel keeps no conduit", conduit.name());
+        return;
     }
     log!("PSCI: {major}.{minor} through {}", conduit.name());
-    Some(conduit)
+    CONDUIT.store(conduit as u8, Relaxed);
+}
+
+/// The conduit [`init`] kept, or `None` on a machine without PSCI.
+pub fn conduit() -> Option<Conduit> {
+    match CONDUIT.load(Relaxed) {
+        0 => None,
+        1 => Some(Conduit::Smc),
+        2 => Some(Conduit::Hvc),
+        other => unreachable!("PSCI: the kept conduit reads {other}, which `init` never stores"),
+    }
 }
