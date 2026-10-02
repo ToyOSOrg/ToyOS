@@ -94,7 +94,7 @@ times:
       restart is a supervisor's in the test.
    4. **Partitions in blockd**. **Exit**: a partition held by one session at a
       time, the idle slot claimed by GUID and written through blockd, and
-      `SYS_PARTITION_READ/WRITE` retired once no disk the kernel drives serves
+      `SYS_PARTITION_READ/WRITE` deleted once no disk the kernel drives serves
       a claim. **Built** (#525) but for the last: the kernel's disks, the stick
       among them, still serve claims until step 10, and a `part:` row still
       mints a kernel claim.
@@ -120,8 +120,8 @@ times:
       stage's escape suite, run against fsd.
    9. **Delete the kernel storage stack**: the VFS down to ROOT's resolver,
       both writable adapters, both caches, write-back, durability, tmpfs, the
-      block layer, GPT, the NVMe driver, the refusal chain and the retired file
-      syscalls' numbers. **Exit**: `BudgetExpired`, `DEADMAN` and
+      block layer, GPT, the NVMe driver, the refusal chain and the file
+      syscalls. **Exit**: `BudgetExpired`, `DEADMAN` and
       `between_attempts` appear nowhere, and the kernel's lines and longest
       interrupts-off and preemption-off windows are measured.
    10. **usbd**, stage 5's second half: the whole xHCI moves, HID to the

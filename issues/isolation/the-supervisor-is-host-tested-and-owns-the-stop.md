@@ -16,8 +16,8 @@ nothing.
 1. **The rename**, one mechanical PR, first after #536. Before stage 1 is
    briefed, the exit's search below runs once over the `rust/` fork's delta as
    well as the superproject, so its hits are known going in. It touches `toyos/src`,
-   `toyos-abi/src`, `userland/libc/src` and the `rust/` fork's delta, so it is
-   briefed as an ABI brief, and its `CLAUDE.md` edits are placed in the same PR
+   `toyos-abi/src`, `userland/libc/src` and the `rust/` fork's delta, and its
+   `CLAUDE.md` edits are placed in the same PR
    by an agent briefed for them. Issue slugs carrying an old name are renamed
    with every citation.
 

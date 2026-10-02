@@ -21,8 +21,7 @@ the privilege: a `SysCap` carrying `Rights::RT`, granted by a `system.toml` row
 and not in the scheduler. The gate this file was opened against is gone —
 `SYS_SET_RT_PRIORITY` (96) demanded a `VirtioSound` or `HdaAudio` device claim,
 so a latency tool could only reach the band by taking the sound card away from
-soundd and measuring a different machine. Number 96 is retired, and
-`toyos-abi/src/syscall.rs` says why: "a claim is not a privilege".
+soundd and measuring a different machine.
 
 **What exists is not a substitute, and each instrument fails differently.**
 soundd's `max_wake_lat_ns` (`toyos-mixer/src/stats.rs`, printed by
