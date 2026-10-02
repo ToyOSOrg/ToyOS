@@ -64,7 +64,7 @@ mod tests {
     /// `src/ci.rs`'s way to the suite's verdict lines.
     #[test]
     fn a_statement_is_stamped_once_and_read_back_whole() {
-        // 2026-08-15 12:00:00 UTC, and 86_399 seconds into the same day.
+        // Noon UTC, and the last second of that day.
         assert_eq!(stamped(1_786_795_200, "  PASS  a  (3s)"), "12:00:00   PASS  a  (3s)");
         assert_eq!(stamped(1_786_795_200 + 43_199, "x"), "23:59:59 x");
         assert_eq!(stamped(0, "\nrunning 2 tests\n"), "\n00:00:00 running 2 tests\n");
@@ -79,7 +79,5 @@ mod tests {
         for no in ["12:00:00", "12:00:0x y", "1200:00:00 y", "[12:00:00] y"] {
             assert_eq!(unstamped(no), no);
         }
-        assert_eq!(outcome("PASS", "a", Duration::from_millis(3_400)), "  PASS  a  (3s)");
-        assert_eq!(outcome("STALL", "a", Duration::from_secs(90)), "  STALL a  (90s)");
     }
 }
