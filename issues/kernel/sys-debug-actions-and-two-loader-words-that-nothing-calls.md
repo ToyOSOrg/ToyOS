@@ -23,7 +23,11 @@ finds no caller of:
 - `boot::WRITE_NO_LAYOUT_PARAM` and `boot::WITHHOLD_ROOT_PARAM`, for stage A's
   `kernel_args_layout_refused` and `root_withheld_refused`.
 
+`LOG_PATTERNED` (21) has one caller, `panic_halts_first`, which wants a record and reads none of
+the pattern `kernel/src/log/storm.rs` writes into it: the checksum and payload had test-runner's
+`log-gate` and `log-storm` as their readers, and stage C's `log_conservation_smp2` is a host test.
+
 Owner: the orchestrator.
 
 **Exit**: for each name, `git grep -w` finds a caller again, its stage's row, or an ABI change
-deletes the name with its kernel arm.
+deletes the name with its kernel arm; and `storm.rs`'s pattern has a reader or is deleted.
