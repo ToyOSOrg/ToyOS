@@ -30,13 +30,17 @@
 use std::io::Read;
 use std::os::toyos::process::{ChildExt, CommandExt};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::OnceLock;
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::poller::{Poller, READABLE};
 use toyos::process::Process;
 use toyos::syscap::SysCap;
+use toyos_abi::inbox::{
+    Completion, RingHeader, Submission, COMPLETION_RING_OFF, OP_WATCH, RING_TAIL_OFF, SUBMISSIONS_OFF,
+    SUBMISSION_RING_OFF,
+};
 use toyos_abi::syscall::{self, SyscallError};
 use toyos_abi::RawHandle;
 
@@ -296,20 +300,51 @@ fn a_watch_on_an_ended_child_completes_at_once() {
     println!("  a watch on a child already gone completes at once");
 }
 
-/// A kill ends the child without its cooperation, and its end completes a
-/// watch as an exit's does.
+/// A kill ends the child without its cooperation, and its end answers a watch
+/// as an exit's does: as readable, and not as a watch whose source is gone.
 fn a_kill_completes_a_watch() {
     let (mut child, _release) = start(0);
-    let poller = Poller::new(1);
-    poller.watch_raw(RawHandle(child.as_raw_handle()), READABLE, 0);
-    poller.wait(0, 0, |token| panic!("the held child's watch completed ({token})"));
-    child.kill().expect("kill");
-    let mut ended = Vec::new();
-    poller.wait(1, u64::MAX, |token| ended.push(token));
-    assert_eq!(ended, [0], "the killed child's watch");
+    let handle = RawHandle(child.as_raw_handle());
+    let result = watch_result_across(handle, || child.kill().expect("kill"));
+    assert_eq!(result, READABLE as i32, "the killed child's watch");
     let status = child.try_wait().expect("try_wait");
     assert_eq!(status.and_then(|s| s.code()), Some(KILLED), "the killed child's code");
-    println!("  a kill completes a watch");
+    println!("  a kill completes a watch, as readable");
+}
+
+/// One `OP_WATCH` `READABLE` on `handle` in a ring of its own: nothing
+/// completes before `end` runs, and the answer is the result word of the one
+/// completion after it, which `Poller` does not hand out.
+fn watch_result_across(handle: RawHandle, end: impl FnOnce()) -> i32 {
+    const TOKEN: u64 = 0x5EED;
+    // SAFETY: the page is this function's own ring, mapped until the close below.
+    let (inbox, base) = unsafe { syscall::inbox_setup(1) }.expect("inbox_setup");
+    // SAFETY: slot 0 of a fresh ring's submission array and its tail word, both
+    // inside the page and aligned; the kernel reads the slot only once the tail
+    // publishes it, and the tail is reached as the atomic it is.
+    unsafe {
+        (base.add(SUBMISSIONS_OFF as usize) as *mut Submission).write(Submission {
+            op: OP_WATCH,
+            handle,
+            op_flags: READABLE,
+            token: TOKEN,
+            ..Submission::default()
+        });
+        AtomicU32::from_ptr(base.add(SUBMISSION_RING_OFF as usize + RING_TAIL_OFF) as *mut u32)
+            .store(1, Ordering::Release);
+    }
+    assert_eq!(syscall::inbox_submit(inbox, 1, 0, 0), Ok(0), "the held child's watch completed");
+    end();
+    assert_eq!(syscall::inbox_submit(inbox, 0, 1, u64::MAX), Ok(1), "the watch's one completion");
+    // SAFETY: entry 0 of the completion ring, which the kernel wrote before it
+    // answered the submit above; copied out whole.
+    let completion = unsafe {
+        (base.add(COMPLETION_RING_OFF as usize + core::mem::size_of::<RingHeader>()) as *const Completion)
+            .read_volatile()
+    };
+    syscall::close(inbox);
+    assert_eq!(completion.token, TOKEN, "the completion's token");
+    completion.result
 }
 
 /// A second handle closed while the first is watched: the child did not end,
