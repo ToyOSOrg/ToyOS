@@ -86,8 +86,6 @@ impl Hw for KernelHw {
             percpu::set_current_pid(incoming.id.map(|id| id.0));
             match incoming.id {
                 Some(_) => {
-                    #[cfg(feature = "boot-actuators")]
-                    crate::heartbeat::note_dispatch();
                     percpu::set_kernel_stack(incoming.kernel_stack_top);
                     incoming.root.activate();
                     cpu::write_thread_pointer(incoming.thread_pointer);

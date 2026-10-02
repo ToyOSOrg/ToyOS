@@ -102,7 +102,7 @@ impl Machine for KernelHw {
     }
 }
 
-/// Longest sleep on a `diag-tick` build; kept under `heartbeat`'s reporting period so a healthy CPU reports on every line.
+/// Longest sleep on a `diag-tick` build.
 #[cfg(feature = "boot-actuators")]
 const DIAG_TICK_NS: u64 = 100_000_000;
 

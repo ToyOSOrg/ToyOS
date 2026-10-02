@@ -1,8 +1,7 @@
 # The metal-sim boot: what `Profile::Metal` puts in front of userland.
 #
 # soundd, netd and sshd are here for exactly the reason they have no device:
-# their graceful exit is half of what this config certifies, and with a console
-# `metal_sim_compositor` reads their exit lines rather than assuming them.
+# their graceful exit is half of what this config certifies.
 # sshd is the one whose absence *is* the device absence — it has no device of
 # its own and reaches the machine's shape only through netd — and it was the
 # one this config left out, so nothing anywhere ran the branch where it finds

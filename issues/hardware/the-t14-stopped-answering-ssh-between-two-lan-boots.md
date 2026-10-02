@@ -39,3 +39,5 @@ Three consecutive T14 metal runs each reach both judges, `lanleasecase` and
 `lanswapcase`, without an `ssh` timeout before either flash; then this file is
 deleted. A red on a judge in any of the three is filed as its own issue file
 naming that test and its cause before this one closes.
+
+`lan_swap` and its boot `lanswapcase` are deleted; `issues/hardware/a-connect-between-two-accepts-is-reset.md` records the commit that restores them, and this exit's `lanswapcase` half waits on that restore.

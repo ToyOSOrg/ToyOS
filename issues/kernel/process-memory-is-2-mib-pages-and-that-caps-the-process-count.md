@@ -52,8 +52,8 @@ live split of a user leaf.
    to 40 ns more. No job measures it in-guest yet: the stage owes
    `copy_cost`, a job beside `syscall_cost` that times `read` into a 64 KiB
    and a 64 MiB window, and its metal row, so that
-   `cargo test -- --metal copy_cost` at the stage's merge and at its base is
-   the A/B.
+   `cargo test --test toyos-build -- --metal copy_cost` at the stage's merge
+   and at its base is the A/B.
 2. **Superframe frame allocator.** 4 KiB frames carved from 2 MiB
    superframes; the pin rule held per superframe, so no pinned frame is
    reissued and no superframe holding one is handed out whole; a watermark

@@ -25,8 +25,8 @@ reached the device before the shutdown's own.
 ## What is known
 
 - **The staged break lands inside `logd`.** The arm abandons the boot's first
-  WRITE(10). Under QEMU (`tests/jobcase` on `Profile::Metal` with the arm, the
-  boot `power::transport_break_chain` takes) one such boot has `spawn:
+  WRITE(10). Under QEMU (`tests/jobcase` on `Profile::Metal` with the arm) one
+  such boot has `spawn:
   /system/bin/logd` at 0.301 s, the break at 0.323 s and `logd: this boot's
   kernel log is …` after it: the write is `Volume::open` creating the file.
 - **One refused create is no log for the boot.** `userland/logd/src/store.rs`'s

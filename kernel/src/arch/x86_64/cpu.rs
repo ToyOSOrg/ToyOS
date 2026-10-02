@@ -382,12 +382,6 @@ pub fn frame_pointer() -> u64 {
     rbp
 }
 
-/// Raise the architecture's undefined-instruction exception here: `ud2`, whose `#UD` the IDT catches as the kernel's own fault.
-pub fn undefined_instruction() {
-    // SAFETY: ud2 reads and writes nothing and raises #UD, caught by the installed IDT.
-    unsafe { asm!("ud2", options(nomem, nostack)) };
-}
-
 /// The TSC's frequency in hertz as CPUID *states* it, for the one caller that
 /// may run before the clock is calibrated — the panic path, which has to bound a wait on a
 /// machine that never reached the HPET. Nothing calibrates against it and no

@@ -3,3 +3,7 @@ name = "proctest"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
+
+[package.metadata.toyos.host]
+fails = ["linux", "macos", "windows"]
+issue = "issues/build/apps-that-build-or-run-on-toyos-alone.md"

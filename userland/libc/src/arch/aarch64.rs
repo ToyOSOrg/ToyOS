@@ -117,3 +117,83 @@ pub(crate) fn sqrt_f32(x: f32) -> f32 {
     unsafe { core::arch::asm!("fsqrt {0:s}, {0:s}", inout(vreg) x => result, options(pure, nomem, nostack)) };
     result
 }
+
+/// `wchar_t`, which is `unsigned int` here.
+pub(crate) type WChar = u32;
+
+// What the `long double` readers below widen, named as C names them, since
+// this module is also compiled on its own (`toyos-libc-copies`).
+unsafe extern "C" {
+    fn strtod(s: *const u8, endptr: *mut *mut u8) -> f64;
+    fn wcstod(s: *const WChar, endptr: *mut *mut WChar) -> f64;
+}
+
+/// An IEEE binary128's bits, returned in `x0` and `x1`.
+#[repr(C)]
+struct Quad {
+    lo: u64,
+    hi: u64,
+}
+
+/// `x` as binary128, `long double` here: every `double` is exactly one.
+extern "C" fn quad(x: f64) -> Quad {
+    let bits = x.to_bits();
+    let exponent = (bits >> 52) & 0x7ff;
+    let fraction = u128::from(bits & ((1 << 52) - 1));
+    let (exponent, fraction) = match exponent {
+        0 if fraction == 0 => (0, 0),
+        // A subnormal double is a normal quad: its leading one at bit `top`.
+        0 => {
+            let top = 127 - u128::from(fraction.leading_zeros());
+            (top + 16383 - 1074, (fraction << (112 - top)) & ((1 << 112) - 1))
+        }
+        0x7ff => (0x7fff, fraction << 60),
+        _ => (u128::from(exponent) + 16383 - 1023, fraction << 60),
+    };
+    let q = u128::from(bits >> 63) << 127 | exponent << 112 | fraction;
+    Quad { lo: q as u64, hi: (q >> 64) as u64 }
+}
+
+/// `strtod`'s number as `long double`, in `q0`: read to `double`'s precision
+/// and widened, which is exact.
+#[unsafe(no_mangle)]
+#[unsafe(naked)]
+unsafe extern "C" fn strtold() {
+    core::arch::naked_asm!(
+        "stp x29, x30, [sp, #-16]!",
+        "mov x29, sp",
+        "bl {strtod}",
+        "bl {quad}",
+        "fmov d0, x0",
+        "mov v0.d[1], x1",
+        "ldp x29, x30, [sp], #16",
+        "ret",
+        strtod = sym strtod,
+        quad = sym quad,
+    );
+}
+
+/// `strtold`, in the one locale there is.
+#[unsafe(no_mangle)]
+#[unsafe(naked)]
+unsafe extern "C" fn strtold_l() {
+    core::arch::naked_asm!("b {strtold}", strtold = sym strtold);
+}
+
+/// `wcstod`'s number as `long double`, as [`strtold`] widens `strtod`'s.
+#[unsafe(no_mangle)]
+#[unsafe(naked)]
+unsafe extern "C" fn wcstold() {
+    core::arch::naked_asm!(
+        "stp x29, x30, [sp, #-16]!",
+        "mov x29, sp",
+        "bl {wcstod}",
+        "bl {quad}",
+        "fmov d0, x0",
+        "mov v0.d[1], x1",
+        "ldp x29, x30, [sp], #16",
+        "ret",
+        wcstod = sym wcstod,
+        quad = sym quad,
+    );
+}

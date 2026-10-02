@@ -161,7 +161,6 @@ const GUEST_CODE: &[&str] = &[
     "toyos-abi/src",
     "userland",
     "tests/toyos-rust-tests",
-    "tests/iced-counter",
     "tests/testcases",
 ];
 
@@ -413,6 +412,33 @@ mod tests {
             "a hand-written `Send`/`Sync` is a bound the compiler stops checking on every later \
              field, so each one is a row somebody wrote on purpose.\n{}",
             complaints.join("\n"),
+        );
+    }
+
+    /// One process closing a capability cancels no other process's log poll:
+    /// every `SysCap` names the log's one machine-wide watch, which outlives
+    /// every handle, so `close_ends_polls` answers a `SysCap` with `false` and
+    /// with nothing that could be anything else.
+    #[test]
+    fn a_capability_closing_ends_no_log_poll() {
+        const OPS: &str = "kernel/src/object/ops.rs";
+        const ARM: &str = "KObjectRef::SysCap(_) =>";
+        let lines = kernel_lines();
+        let body: Vec<String> = lines
+            .iter()
+            .filter(|(file, _, _)| file == OPS)
+            .map(|(_, _, line)| code_only(line))
+            .skip_while(|code| !code.contains("fn close_ends_polls("))
+            .take_while(|code| code != "}")
+            .collect();
+        assert!(!body.is_empty(), "{OPS} has no `fn close_ends_polls(`: this gate reads nothing");
+        let arms: Vec<&str> =
+            body.iter().map(|code| code.trim()).filter(|code| code.starts_with(ARM)).collect();
+        assert_eq!(
+            arms,
+            [format!("{ARM} false,")],
+            "`close_ends_polls` must answer a `SysCap` with `false`: any other answer lets one \
+             process's close cancel every log poll in the machine"
         );
     }
 

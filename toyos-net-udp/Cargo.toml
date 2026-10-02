@@ -1,0 +1,11 @@
+[package]
+name = "toyos-net-udp"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "ToyOS's UDP, pure: sockets, binding, demultiplexing, bounded queues and ICMP errors over toyos-net-ip's addressing."
+publish = false
+
+[dependencies]
+toyos-net-ip = { path = "../toyos-net-ip" }
+toyos-net-wire = { path = "../toyos-net-wire" }

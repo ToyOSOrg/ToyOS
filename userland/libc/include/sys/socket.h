@@ -4,9 +4,14 @@
 #include <stddef.h>
 #include <sys/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef unsigned int socklen_t;
 
 #define AF_UNSPEC 0
+#define AF_UNIX   1
 #define AF_INET   2
 
 #define SOCK_STREAM 1
@@ -28,13 +33,15 @@ typedef unsigned int socklen_t;
 
 #define MSG_NOSIGNAL 0x4000
 
+typedef unsigned short sa_family_t;
+
 struct sockaddr {
-    unsigned short sa_family;
+    sa_family_t sa_family;
     char sa_data[14];
 };
 
 struct sockaddr_storage {
-    unsigned short ss_family;
+    sa_family_t ss_family;
     char _pad[126];
 };
 
@@ -54,5 +61,9 @@ int setsockopt(int fd, int level, int optname, const void *optval, socklen_t opt
 int getsockopt(int fd, int level, int optname, void *optval, socklen_t *optlen);
 int getpeername(int fd, struct sockaddr *addr, socklen_t *addrlen);
 int getsockname(int fd, struct sockaddr *addr, socklen_t *addrlen);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

@@ -26,3 +26,6 @@ features = [
     "multicast",
     "alloc",
 ]
+
+[package.metadata.toyos.host]
+exempt.owns = "the NIC ToyOS claims for it"

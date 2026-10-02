@@ -12,8 +12,8 @@
 //! landed across every guest a run booted. The second is the instrument the
 //! `every-interrupt-lands-on-the-boot-cpu` track's later change is measured
 //! against, so it has to be produced by an ordinary run rather than by
-//! `--nocapture`: CI's `guest` shards do not pass that flag, and a number only a
-//! developer's terminal can produce is not a baseline.
+//! `--nocapture`: a number only a developer's terminal can produce is not a
+//! baseline.
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -258,9 +258,7 @@ struct Guest {
     /// Interrupts on cpu0 as a fraction of the machine's.
     boot_cpu_share: f64,
     /// Interrupts on cpu0, so the run's pooled share is an exact ratio of two
-    /// integers rather than a mean of per-guest fractions. A run is twelve
-    /// shards on CI and one process here, so the order statistics below are
-    /// per-shard and only this pair adds up across them.
+    /// integers rather than a mean of per-guest fractions.
     on_boot_cpu: u64,
     total: u64,
     /// Per source, summed over every CPU, and the cpu0 part of it.

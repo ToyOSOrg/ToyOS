@@ -209,22 +209,30 @@ impl IgmpBody for V2Builder {
     }
 }
 
+/// A host's any-source records carry no sources; only the answer to a group-and-source query,
+/// IS_IN (B), lists them (RFC 9776 §5.2, Table 5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RecordType {
-    IsExclude,
-    ToInclude,
-    ToExclude,
+pub enum GroupRecord<'a> {
+    IsInclude(ReportGroup, &'a [Ipv4Addr]),
+    IsExclude(ReportGroup),
+    ToInclude(ReportGroup),
+    ToExclude(ReportGroup),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct GroupRecord {
-    pub group: ReportGroup,
-    pub record: RecordType,
+impl GroupRecord<'_> {
+    fn parts(&self) -> (u8, ReportGroup, &[Ipv4Addr]) {
+        match *self {
+            Self::IsInclude(group, sources) => (1, group, sources),
+            Self::IsExclude(group) => (2, group, &[]),
+            Self::ToInclude(group) => (3, group, &[]),
+            Self::ToExclude(group) => (4, group, &[]),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct V3ReportBuilder<'a> {
-    pub records: &'a [GroupRecord],
+    pub records: &'a [GroupRecord<'a>],
 }
 
 impl WritePayload for V3ReportBuilder<'_> {
@@ -233,7 +241,10 @@ impl WritePayload for V3ReportBuilder<'_> {
     }
 
     fn length(&self, _header_len: usize) -> Result<usize, BuildError> {
-        Ok(HEADER_LEN.saturating_add(self.records.len().saturating_mul(8)))
+        self.records.iter().try_fold(HEADER_LEN, |len, record| {
+            let (_, _, sources) = record.parts();
+            len.checked_add(8)?.checked_add(sources.len().checked_mul(4)?)
+        }).ok_or(BuildError::IpTooLong)
     }
 
     fn write(&self, _pseudo: &PseudoHeader, out: &mut [u8]) -> Result<(), BuildError> {
@@ -241,15 +252,17 @@ impl WritePayload for V3ReportBuilder<'_> {
         let (header, mut rest) = out.split_first_chunk_mut::<HEADER_LEN>().ok_or(BuildError::BufferTooSmall)?;
         let mut sum = Accumulator::new();
         for record in self.records {
-            let kind = match record.record {
-                RecordType::IsExclude => 2,
-                RecordType::ToInclude => 3,
-                RecordType::ToExclude => 4,
-            };
-            let [g0, g1, g2, g3] = record.group.0.get().octets();
-            let fixed = [kind, 0, 0, 0, g0, g1, g2, g3];
+            let (kind, group, sources) = record.parts();
+            let [n0, n1] = u16::try_from(sources.len()).map_err(|_| BuildError::IpTooLong)?.to_be_bytes();
+            let [g0, g1, g2, g3] = group.0.get().octets();
+            let fixed = [kind, 0, n0, n1, g0, g1, g2, g3];
             sum = sum.feed(&fixed);
             rest = put(rest, fixed)?;
+            for source in sources {
+                let octets = source.octets();
+                sum = sum.feed(&octets);
+                rest = put(rest, octets)?;
+            }
         }
         let [a, b, n0, n1] = be16x2(0x2200, count);
         let [c0, c1] = sum.feed(&[a, b, 0, 0, 0, 0, n0, n1]).sum().checksum().to_be_bytes();

@@ -27,15 +27,6 @@ const PANIC_BOUND: Budget = Budget::of(
     "the machine returns itself to firmware instead of holding a panel nobody is reading",
 );
 
-/// `tco-fast`'s counterpart for this bound: a judge cannot spend the shipped
-/// minute per boot, and its control cannot press a key inside a bound shorter
-/// than the round trip that presses it.
-#[cfg(feature = "boot-actuators")]
-const FAST_BOUND: Budget = Budget::of(
-    Duration::from_secs(5),
-    "a guest reaches the reset inside one test, and a control still beats it to the keyboard",
-);
-
 /// Whether a reboot is armed on this panic, and when.
 #[derive(Clone, Copy)]
 pub enum Bound {
@@ -107,9 +98,6 @@ fn deadline(bound: Budget) -> Option<(u64, Source)> {
 /// and on the console; false is for the reentry guard, whose suspect is the log
 /// path itself, and there the line goes to the UART raw and the panel carries none.
 pub fn arm(on_the_record: bool) -> Bound {
-    #[cfg(feature = "boot-actuators")]
-    let budget = if crate::actuator::panic_reboot_fast() { FAST_BOUND } else { PANIC_BOUND };
-    #[cfg(not(feature = "boot-actuators"))]
     let budget = PANIC_BOUND;
 
     // ASCII only, here and in every line below: the panel's font renders
@@ -126,7 +114,7 @@ pub fn arm(on_the_record: bool) -> Bound {
                     source.named()
                 );
             } else {
-                serial::panic_raw(b"panic: rebooting unless a key is pressed\n");
+                serial::panic_registers().write(b"panic: rebooting unless a key is pressed\n");
             }
             Bound::At(cycles)
         }
@@ -138,7 +126,7 @@ pub fn arm(on_the_record: bool) -> Bound {
                     source.named()
                 );
             } else {
-                serial::panic_raw(b"panic: holding this panel: no reset register\n");
+                serial::panic_registers().write(b"panic: holding this panel: no reset register\n");
             }
             Bound::Held
         }
@@ -149,7 +137,7 @@ pub fn arm(on_the_record: bool) -> Bound {
                      nothing here can time a wait"
                 );
             } else {
-                serial::panic_raw(b"panic: holding this panel: no clock\n");
+                serial::panic_registers().write(b"panic: holding this panel: no clock\n");
             }
             Bound::Held
         }
@@ -159,7 +147,7 @@ pub fn arm(on_the_record: bool) -> Bound {
 /// Return the machine to firmware. The second of this path's two lines, and it
 /// goes out raw: the log has already been flushed and drained by here.
 pub fn reboot_now() -> ! {
-    serial::panic_raw(
+    serial::panic_registers().write(
         b"\npanic: no key inside the bound, so nobody is here: returning this machine to \
           firmware\n",
     );

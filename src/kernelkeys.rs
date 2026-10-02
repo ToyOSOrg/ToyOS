@@ -58,6 +58,12 @@ pub const DECLARED: &[Declared] = &[
         ty: "HashMap<Pid, Arc<KShare>>",
         keys: "`process::Pid`, minted by the process table",
     },
+    Declared {
+        file: "kernel/src/process.rs",
+        ty: "HashMap<Pid, ProcessEntry>",
+        keys: "the pid of the entry's `ProcessObject`, which only `toyos_proclife::Pids::take` issues, \
+               at a spawn's admission or a kernel thread's start",
+    },
 ];
 
 /// The one file the scan does not read, by exact path: it *defines* the alias

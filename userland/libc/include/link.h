@@ -4,6 +4,10 @@
 #include <elf.h>
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define ElfW(type) Elf64_##type
 
 /* The first four fields of glibc's layout. There is no dlpi_adds or
@@ -18,5 +22,9 @@ struct dl_phdr_info {
 };
 
 int dl_iterate_phdr(int (*callback)(struct dl_phdr_info *info, size_t size, void *data), void *data);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
