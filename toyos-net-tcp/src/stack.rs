@@ -217,7 +217,7 @@ pub struct Tcp {
     /// TIME-WAITs owing an ACK: a set, so a segment finds its entry in log n.
     tw_owed: BTreeSet<Tuple>,
     parked: BTreeMap<Ipv4Addr, Parked>,
-    /// Answers held in a [`Parked`], which [`ANSWERS`] bounds with the queued ones.
+    /// Answers in `parked`, which [`ANSWERS`] bounds with the queued ones.
     parked_answers: usize,
     port_table: [u16; 16],
     log: Log,
@@ -1235,7 +1235,6 @@ impl Tcp {
                     Err(NotReady::Unframed) => {
                         self.log.count(Counter::FrameRefused);
                         refused.answers.push(answer);
-                        self.parked_answers = self.parked_answers.saturating_add(1);
                     }
                 }
                 continue;
@@ -1298,6 +1297,7 @@ impl Tcp {
     /// [ip] answers for it may have changed. Nothing is told what it will answer.
     pub fn wake(&mut self, remote: Ipv4Addr) {
         if let Some(parked) = self.parked.remove(&remote) {
+            self.parked_answers = self.parked_answers.saturating_sub(parked.answers.len());
             self.requeue(parked);
         }
     }
@@ -1305,12 +1305,12 @@ impl Tcp {
     /// Everything waiting for a next hop asks again: a route may have changed (`ip.md` §3.6).
     pub fn wake_all(&mut self) {
         for (_, parked) in core::mem::take(&mut self.parked) {
+            self.parked_answers = self.parked_answers.saturating_sub(parked.answers.len());
             self.requeue(parked);
         }
     }
 
     fn requeue(&mut self, parked: Parked) {
-        self.parked_answers = self.parked_answers.saturating_sub(parked.answers.len());
         for tuple in parked.stubs.into_iter().rev() {
             self.stubs.push_front(tuple);
         }
