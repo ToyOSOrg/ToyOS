@@ -760,7 +760,7 @@ fn shared_metal(keep: impl Fn(&str) -> bool) -> Vec<metal::SharedBoot> {
             config: "tests/testcases",
             params: &[],
             features: &[],
-            members: const { std::num::NonZeroUsize::new(62).expect("a chunk holds a member") },
+            members: const { metal::members_fitting(toyos_tco::RUST_MEMBER_MS) },
             jobs: shipping
                 .iter()
                 .filter(|n| keep(n))
@@ -779,7 +779,7 @@ fn shared_metal(keep: impl Fn(&str) -> bool) -> Vec<metal::SharedBoot> {
             config: "tests/testcases",
             params: &[],
             features: toyos_build::build::TEST_KERNEL,
-            members: const { std::num::NonZeroUsize::new(67).expect("a chunk holds a member") },
+            members: const { std::num::NonZeroUsize::new(18).expect("a chunk holds a member") },
             jobs: debug.iter().filter(|n| keep(n)).map(|n| format!("test_rs_{n}")).collect(),
             files: Vec::new(),
             links: Vec::new(),
@@ -850,7 +850,7 @@ fn c_corpus_metal(
         config: "tests/testcases",
         params: &[],
         features: &[],
-        members: const { std::num::NonZeroUsize::new(207).expect("a chunk holds a member") },
+        members: const { metal::members_fitting(toyos_tco::C_MEMBER_MS) },
         jobs,
         files,
         links,

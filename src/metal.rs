@@ -1413,7 +1413,7 @@ impl Driver {
             secs,
             what,
             answering,
-            || port_accepts(host, crate::metaltalk::SSH_PORT),
+            |within| port_accepts(host, crate::metaltalk::SSH_PORT, within),
             || self.ssh("probing", "true").is_ok(),
         )
     }
@@ -1494,21 +1494,25 @@ impl Driver {
     }
 }
 
-/// Poll once a [`POLL`] whether a port `accepts`, and say how long the machine
-/// took to answer as asked. **Coming back is `ssh` itself answering**: a port
-/// that accepts is only asked whether `ssh` `answers`, since a listener can come
-/// up before the service behind it.
+/// Poll once a [`POLL`] whether a port `accepts` a dial bounded by what it is
+/// handed, and say how long the machine took to answer as asked. **Coming back
+/// is `ssh` itself answering**: a port that accepts is only asked whether `ssh`
+/// `answers`, since a listener can come up before the service behind it.
+/// **Going down is a dial refused or unanswered for [`CONNECT_SECS`]**, what
+/// `ssh`'s own connect is given: a SYN lost while Ubuntu is still up would
+/// otherwise read as down, and the stick be read before ToyOS booted it.
 fn wait_on(
     secs: u64,
     what: &'static str,
     answering: bool,
-    mut accepts: impl FnMut() -> bool,
+    mut accepts: impl FnMut(std::time::Duration) -> bool,
     mut answers: impl FnMut() -> bool,
 ) -> Result<u64, Refusal> {
+    let dial = if answering { POLL } else { std::time::Duration::from_secs(CONNECT_SECS) };
     let began = std::time::Instant::now();
     while began.elapsed().as_secs() < secs {
         let next = std::time::Instant::now() + POLL;
-        let listening = accepts();
+        let listening = accepts(dial);
         let answered = listening && (!answering || answers());
         if answered == answering {
             return Ok(began.elapsed().as_secs());
@@ -1518,14 +1522,14 @@ fn wait_on(
     Err(Refusal::Silent { what, secs })
 }
 
-/// Whether `host`'s `port` accepts a connection inside one [`POLL`]; a name
-/// that does not resolve is a machine that is not there.
-fn port_accepts(host: &str, port: u16) -> bool {
+/// Whether `host`'s `port` accepts a connection `within`; a name that does not
+/// resolve is a machine that is not there.
+fn port_accepts(host: &str, port: u16, within: std::time::Duration) -> bool {
     use std::net::ToSocketAddrs;
     let Ok(mut addrs) = (host, port).to_socket_addrs() else {
         return false;
     };
-    addrs.any(|addr| std::net::TcpStream::connect_timeout(&addr, POLL).is_ok())
+    addrs.any(|addr| std::net::TcpStream::connect_timeout(&addr, within).is_ok())
 }
 
 fn unstarted(what: &str, e: &std::io::Error) -> Refusal {
@@ -2011,45 +2015,19 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     let entry = driver.boot_entry(&image.esp)?;
 
     driver.as_root("setting bootnext", Job::BootNext, Some(&entry), None)?;
-    let rebooted = driver.as_root("rebooting", Job::Reboot, None, None);
+    driver.as_root("rebooting", Job::Reboot, None, None)?;
     if driver.dry_run {
-        rebooted?;
         driver.as_root("mounting the log partition", Job::Mount, None, None)?;
         driver.as_root("unmounting the log partition", Job::Umount, None, None)?;
         println!("dry run: nothing was written and the machine was not rebooted");
         return Ok(None);
     }
-    let judged = rebooted.and_then(|_| {
-        after_the_reboot(&driver, args, &image, &armed, &machine, cable.as_ref(), wire.as_ref())
-    });
-    // **A refusal after `reboot` can leave the machine on its way back**, and
-    // the next invocation's first `ssh` would then refuse a boot that never
-    // happened. One the machine was already waited out for is not waited again.
-    if let Err(refused) = &judged {
-        if !matches!(refused, Refusal::Silent { .. }) {
-            if let Err(silent) = driver.wait(args.wait_secs, "come back", true) {
-                println!("after that refusal, {silent}");
-            }
-        }
-    }
-    judged
-}
 
-/// Everything from the machine going down to the boot's verdict.
-fn after_the_reboot(
-    driver: &Driver,
-    args: &Args,
-    image: &Flashable,
-    armed: &[String],
-    machine: &Machine,
-    cable: Option<&Talking>,
-    wire: Option<&Wire>,
-) -> Result<Option<u64>, Refusal> {
     // The conversation runs while the loop watches the machine come back; its
     // `reboot` is what brings it back before the boot's own hold does.
     let mut talking = None;
-    let ridden = driver.ride_the_reboot(args.wait_secs, wire.map(|w| w.addr), || {
-        if let Some(cable) = cable {
+    let ridden = driver.ride_the_reboot(args.wait_secs, wire.as_ref().map(|w| w.addr), || {
+        if let Some(cable) = &cable {
             talking = Some(cable.start(std::time::Duration::from_secs(args.wait_secs)));
         }
     });
@@ -2077,7 +2055,7 @@ fn after_the_reboot(
     };
     let (back, replied) = ridden?;
     println!("the machine answered ssh again after {back} s");
-    if let Some(wire) = wire {
+    if let Some(wire) = &wire {
         match replied {
             Some(reply) => println!(
                 "{} answered a ping {} s into the window, after {PING_SILENCE_SECS} s of \
@@ -2112,8 +2090,8 @@ fn after_the_reboot(
         }
         println!("toyos-fat32-check: the log partition's {} bytes check out", bytes.len());
     }
-    let boot = boot_file(back, stick, machine, wire, replied);
-    judge_and_write_readback(armed, &loader, &log, heard.as_ref(), args.readback.as_deref(), &boot)
+    let boot = boot_file(back, stick, &machine, wire.as_ref(), replied);
+    judge_and_write_readback(&armed, &loader, &log, heard.as_ref(), args.readback.as_deref(), &boot)
         .map(Some)
 }
 
@@ -2603,15 +2581,16 @@ mod tests {
     }
 
     /// **A port that accepts is not a machine that came back**, and a machine
-    /// going down is its port refusing. Staged through [`port_accepts`] on a
-    /// listener of this host's own, which accepts and never speaks `ssh`, and on
-    /// port 0, which nothing listens on: a port the listener let go of can be
-    /// another socket's by the time it is dialled.
+    /// going down is its port refusing a dial given what `ssh`'s own connect is.
+    /// Staged through [`port_accepts`] on a listener of this host's own, which
+    /// accepts and never speaks `ssh`, and on port 0, which nothing listens on:
+    /// a port the listener let go of can be another socket's by the time it is
+    /// dialled.
     #[test]
     fn coming_back_is_ssh_answering_and_not_its_port() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback listener");
         let port = listener.local_addr().expect("its address").port();
-        let accepts = || port_accepts("127.0.0.1", port);
+        let accepts = |within| port_accepts("127.0.0.1", port, within);
         let mut asked = 0;
         let back = wait_on(1, "come back", true, accepts, || {
             asked += 1;
@@ -2620,9 +2599,19 @@ mod tests {
         assert_eq!(back, Err(Refusal::Silent { what: "come back", secs: 1 }));
         assert!(asked > 0, "`ssh` was never asked of a port that accepts");
         assert_eq!(wait_on(1, "come back", true, accepts, || true), Ok(0));
-        let up = wait_on(1, "go down", false, accepts, || unreachable!("`ssh` asked of one going down"));
+        let mut dialled = Vec::new();
+        let dial = |within| {
+            dialled.push(within);
+            accepts(within)
+        };
+        let up = wait_on(1, "go down", false, dial, || unreachable!("`ssh` asked of one going down"));
         assert_eq!(up, Err(Refusal::Silent { what: "go down", secs: 1 }));
-        let refuses = || port_accepts("127.0.0.1", 0);
+        let connect = std::time::Duration::from_secs(CONNECT_SECS);
+        assert!(
+            !dialled.is_empty() && dialled.iter().all(|&within| within == connect),
+            "going down dialled within {dialled:?}, where `ssh`'s own connect is given {connect:?}"
+        );
+        let refuses = |within| port_accepts("127.0.0.1", 0, within);
         assert_eq!(wait_on(1, "go down", false, refuses, || unreachable!()), Ok(0));
     }
 

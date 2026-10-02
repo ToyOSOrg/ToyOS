@@ -52,7 +52,7 @@ const PING_WAIT: Duration = Duration::from_secs(1);
 /// How long the stream gets to carry this boot's `Boot: complete` before
 /// `reboot` is asked regardless, and the judge reds on the record's absence. A
 /// liveness bound, inside the boot's own `boot-deadline=` that `reboot` has to
-/// beat: the stream stalls only while netd retransmits what its NIC dropped.
+/// beat.
 const CARRIED_WAIT: Duration = Duration::from_secs(30);
 
 /// How long one connect waits for the machine's answer to its SYN.
@@ -1472,9 +1472,7 @@ mod tests {
 
     /// **`reboot` is not asked while the stream is stalled short of
     /// `Boot: complete`**: it waits out its bound, and the record ends the wait
-    /// as the judge reads it. The lines are the T14's: its `lantalkcase` stream
-    /// stopped at `xHCI: configuration set` when `reboot` outran it, and
-    /// `Boot: complete` was 72 lines further on.
+    /// as the judge reads it.
     #[test]
     fn the_hand_back_waits_for_the_boot_record_the_judge_reads() {
         const STALLED_AT: [&str; 2] = [

@@ -28,6 +28,11 @@ stopped at the same 217th line, with 595 ms between the admit and the stop
 windows are shorter than the first retransmit timeout. The same count appears
 on the `lanswapcase` boot: 11, 18 and 23 frames dropped.
 
+## Owner
+
+Stage 2 of `issues/hardware/the-lan-is-not-yet-production-grade.md`, a gigabit
+driver that holds.
+
 ## Exit
 
 `transmit` answers `None` when no descriptor is free, and a descriptor coming

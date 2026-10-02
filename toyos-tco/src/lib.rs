@@ -114,6 +114,11 @@ pub const FIRMWARE_BOUND_MS: u64 = 60_000;
 /// while a job never finishes is no wedge to it and nothing else ends the boot.
 pub const JOB_BOUND_MS: u64 = 60_000;
 
+/// What one member of a metal shared boot is allowed of [`JOB_BOUND_MS`], in
+/// milliseconds: a Rust test on the shipping kernel, and a C corpus case.
+pub const RUST_MEMBER_MS: u64 = 860;
+pub const C_MEMBER_MS: u64 = 260;
+
 /// The bound netd gives this machine's first DHCP lease before it says it has
 /// none and serves anyway, in milliseconds. The harness waits it out on a wire
 /// with no server, so the two read one declaration.

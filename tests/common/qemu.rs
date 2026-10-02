@@ -469,6 +469,10 @@ impl std::fmt::Display for WaitVerdict {
     }
 }
 
+/// How often a test's read loop asks [`ceiling_verdict`] about a guest that
+/// has said nothing since it last asked.
+pub const VERDICT_POLL: Duration = Duration::from_millis(100);
+
 /// What a test's ceiling caught — the panic, the stall, or the slow test.
 ///
 /// `dying` is the line on which the kernel said it was dying, if it ever did,
@@ -1568,7 +1572,7 @@ impl QemuInstance {
                 };
             }
 
-            match self.rx.recv_timeout(Duration::from_millis(100)) {
+            match self.rx.recv_timeout(VERDICT_POLL) {
                 Ok(line) => {
                     last_line = Instant::now();
                     lines += 1;

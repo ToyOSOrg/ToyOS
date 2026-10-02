@@ -116,6 +116,13 @@ pub struct SharedBoot {
     pub links: Vec<(String, String)>,
 }
 
+/// How many members allowed `allowance_ms` each one shared boot holds: the
+/// runner's [`toyos_tco::JOB_BOUND_MS`] less a tenth of it, shared among them.
+pub const fn members_fitting(allowance_ms: u64) -> NonZeroUsize {
+    let members = (toyos_tco::JOB_BOUND_MS - toyos_tco::JOB_BOUND_MS / 10) / allowance_ms;
+    NonZeroUsize::new(members as usize).expect("a chunk holds a member")
+}
+
 /// The name of one chunk of a boot that had to be cut in two.
 fn chunk_name(boot: &str, index: usize) -> String {
     if index == 0 {

@@ -197,9 +197,7 @@ pub fn ceiling_self_check() -> Result<(), String> {
         ));
     }
     const SHORT: Duration = Duration::from_secs(5);
-    // What the read loop polls a silent guest at.
-    const STEP: Duration = Duration::from_millis(100);
-    let every = || (0..).map(|n| STEP * n);
+    let every = || (0..).map(|n| VERDICT_POLL * n);
     let first = |dying: Option<&str>, from: Duration| {
         every().find_map(|quiet| ceiling_verdict(dying, from + quiet, SHORT, quiet, 40))
     };

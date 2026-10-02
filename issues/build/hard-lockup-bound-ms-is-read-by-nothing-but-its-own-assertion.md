@@ -19,7 +19,8 @@ alone.
 
 ## Owner
 
-Whoever next changes `toyos-tco`.
+`issues/hardware/the-t14-boots-toyos-unattended.md`, the track that holds the
+hard-lockup detector and its bound.
 
 ## What would close it
 
