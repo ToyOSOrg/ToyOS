@@ -47,6 +47,9 @@ const ACTUATOR_TESTS: &[&str] = &[
     // Action 22: the kernel kills a spawn's place between the spawn's commit
     // and its landing, a window no caller can order a kill inside.
     "spawn_lands_claimed",
+    // Action 23: the kernel holds a spawn, once its child has landed, until
+    // the child has ended — a child's end no caller can order inside its spawn.
+    "spawn_child_ends_first",
 ];
 
 /// What [`ACTUATOR_TESTS`] boots: the one kernel that carries `SYS_DEBUG`, with
@@ -547,7 +550,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         "metal_sim_scanout_wc",
         metal::Metal { arms: METALCASE, judge: |b| scanout_wc(b[0].kernel().text()) },
     ),
-    // ---- one image, eleven actuators, ten tests ----
+    // ---- one image ----
     // The cheapest cluster there is: every one of these arms a check that runs
     // at init, logs its verdict and does nothing else, so they cost one flash
     // between them. **Nothing had to be promoted into `kernel/src/params.rs`**
@@ -556,10 +559,6 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         "pci_capability_walk",
         metal::Metal { arms: SELFTESTS, judge: |b| pci_cap_selftest(b[0].kernel().text()) },
-    ),
-    (
-        "process_reopen_selftest",
-        metal::Metal { arms: SELFTESTS, judge: |b| process_reopen(b[0].kernel().text()) },
     ),
     (
         "read_fault_selftests",
@@ -690,17 +689,15 @@ const LANTALKCASE: &[metal::Arm] = &[metal::Arm {
 /// One boot for every in-kernel self-test that logs its verdict at init and
 /// does nothing else.
 ///
-/// **Eleven actuators in one image.** They cost the machine one flash between
-/// them because none of them changes what the machine *is*: each stages inputs
-/// the hardware cannot produce — a crafted capability list, a malformed
-/// descriptor, a vector nothing claims — runs a check over them and prints a
-/// count.
+/// They cost the machine one flash between them because none of them changes
+/// what the machine *is*: each stages inputs the hardware cannot produce — a
+/// crafted capability list, a malformed descriptor, a vector nothing claims —
+/// runs a check over them and prints a count.
 const SELFTESTS: &[metal::Arm] = &[metal::once(
     "selftests",
     "tests/testcases",
     &[
         "pci-cap-selftest",
-        "process-reopen-selftest",
         "revoked-backing-selftest",
         "leak-rollback-selftest",
         "lapic-spurious-selftest",
@@ -2251,21 +2248,6 @@ fn process_tree(back: &metal::Readback) -> Result<(), String> {
         return Err(format!("the kernel's depth refusals were {refused:?}, not one naming depth 65"));
     }
     Ok(())
-}
-
-/// The kernel reopens init by pid after the last handle to it has gone, and
-/// no kernel thread's pid opens.
-fn process_reopen(log: &str) -> Result<(), String> {
-        for control in ["process-reopen:", "process-open-kthread:"] {
-            let Some(verdict) = log.lines().find(|l| l.contains(control)) else {
-                return Err(format!("{control} never ran:\n{log}"));
-            };
-            if !verdict.contains("PASS") {
-                return Err(format!("{}\n{log}", verdict.trim()));
-            }
-            eprintln!("  [process] {}", verdict.trim());
-        }
-        Ok(())
 }
 
 /// A backing read after deletion is refused on both writable mounts, and a page-cache slot whose fill the device refused is unbound.

@@ -17,6 +17,10 @@
 //! each has an arm here and the last arm is what says the machine survived
 //! them.
 //!
+//! **A spawn's answer is an insert into its caller's table**, whose room is
+//! checked before the spawn's endowments move: at the cap the spawn is
+//! refused with every handle it named still the caller's.
+//!
 //! **An endowment vector is one entry and one label short of a table**, which
 //! the kernel's own `self` fills. So a caller's entry labelled `self` is
 //! refused before anything moves, and so is a vector of `MAX_ENDOWMENTS`
@@ -154,10 +158,18 @@ fn main() {
         "handle table reached {n} slots, past the {MAX_HANDLES} cap"
     );
 
+    let last = filled.pop().expect("the fill installed a handle");
+    let entry = EndowEntry { label_off: 0, label_len: LABELS.len() as u32, handle: last, _pad: 0 };
+    let spawned = spawn_endowed(&[entry], LABELS);
+
     // The cap is a live limit, not a latched failure.
     for handle in filled {
         syscall::close(handle);
     }
+    // Judged once the table has room again: a panic at the cap aborts with no report.
+    assert_eq!(spawned, Err(SyscallError::ResourceExhausted), "a spawn from a full table was not refused");
+    // Still this process's: the close ends it if the refused spawn moved it.
+    syscall::close(last);
     let reused = syscall::dup2(RawHandle(1), 3)
         .expect("dup2 must work again after closing handles");
     syscall::close(reused);

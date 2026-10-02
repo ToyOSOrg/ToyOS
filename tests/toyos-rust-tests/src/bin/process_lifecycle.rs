@@ -9,10 +9,7 @@
 //! wait before it parks and is woken by the publish, and two holders both get
 //! the answer.
 //!
-//! Each arm below is one sentence of that paragraph, and three of them assert
-//! the *opposite* of what the pid-keyed shape did: reading the code does not
-//! spend it, a process that never started the child can still wait for it, and
-//! a pid on its own reaches nothing at all.
+//! Each arm below is one sentence of that paragraph.
 //!
 //! One arm is about the wait rather than the shape.
 //! `an_unrelated_wake_does_not_end_the_wait` provokes a wake that is not this
@@ -31,7 +28,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};
-use toyos::AsHandle;
 use toyos::process::Process;
 use toyos::syscap::SysCap;
 use toyos_abi::syscall::{self, SyscallError};
@@ -65,9 +61,8 @@ fn test() {
     two_handles_answer_the_same();
     a_kill_publishes_like_an_exit();
     a_handle_is_the_whole_of_the_right();
-    a_pid_is_not_authority();
     an_undefined_wait_flag_bit_is_refused();
-    println!("a process is a handle: the code is read, not claimed, and a pid grants nothing");
+    println!("a process is a handle: the code is read, not claimed");
 }
 
 /// `WNOHANG` is the whole of `SYS_PROCESS_WAIT`'s flag word; the other 63 bits
@@ -211,8 +206,7 @@ fn a_thread_of_mine_has_exited() -> bool {
 /// The estate's system capability, taken once.
 ///
 /// **Once, because taking is a swap**: a second `take` of the same label finds
-/// `HANDLE_INVALID` and answers `None`, and two arms here want the same cap —
-/// one for the `MANAGE` refusal, one for the roster below.
+/// `HANDLE_INVALID` and answers `None`.
 fn cap() -> &'static SysCap {
     static CAP: OnceLock<SysCap> = OnceLock::new();
     CAP.get_or_init(|| {
@@ -270,20 +264,6 @@ fn a_handle_is_the_whole_of_the_right() {
 
     assert_eq!(subject.wait().expect("wait").code(), Some(9), "and the spawner still can");
     println!("  a process that did not start the child waited for it, and so did the one that did");
-}
-
-/// A pid is a name everybody can say, and saying it is not a key. The one call
-/// that turns one into a handle needs a capability carrying `MANAGE`, and the
-/// kernel mints exactly one — `/system/bin/init`'s. The test estate's carries `DEVICE`
-/// and `DUP`, which is what makes this refusal non-vacuous: the handle resolves,
-/// and it is the right that is missing.
-fn a_pid_is_not_authority() {
-    assert_eq!(
-        syscall::process_open(cap().as_handle(), syscall::getpid()),
-        Err(SyscallError::PermissionDenied),
-        "a capability without MANAGE opened a process by pid",
-    );
-    println!("  a pid does not become a handle without MANAGE");
 }
 
 /// A child that exits with `code` when this process says so, and the write end

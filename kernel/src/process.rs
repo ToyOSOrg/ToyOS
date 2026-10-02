@@ -365,7 +365,6 @@ impl ProcessEntry {
         }
     }
     pub fn pid(&self) -> Pid { self.pid }
-    pub fn object(&self) -> &Arc<crate::object::process::ProcessObject> { &self.object }
     pub fn name(&self) -> &[u8; THREAD_NAME_LEN] { &self.name }
     pub fn name_str(&self) -> &str {
         core::str::from_utf8(&self.name).unwrap_or("?").trim_end_matches('\0')
@@ -752,18 +751,7 @@ pub fn try_for_each_thread(mut f: impl FnMut(ThreadCensus<'_>)) -> bool {
     true
 }
 
-/// The object a handle to `pid` would name, for a process still in the table.
-/// A kernel thread's pid names none: it has no Ring 3 boundary a kill could end it at.
-pub fn process_object(pid: Pid) -> Option<Arc<crate::object::process::ProcessObject>> {
-    let guard = PROCESS_TABLE.lock();
-    let proc = guard.as_ref()?.get(pid)?;
-    if crate::sched::kthread::is_kernel_task(TaskId(pid, proc.main_tid())) {
-        return None;
-    }
-    Some(Arc::clone(proc.object()))
-}
-
-/// Accounting for a process. `None` only in the window between a live process and its published exit (the process being torn down right now).
+/// Accounting for a process.
 pub fn stats_of(
     object: &crate::object::process::ProcessObject,
 ) -> Option<toyos_abi::syscall::ProcessStats> {
@@ -1741,6 +1729,35 @@ pub fn debug_kill_marked_place(parent: Parent) {
     let Parent::Under(place) = parent else { return };
     if MARKED_SPAWNER.compare_exchange(current_process().0, Pid::MAX.0, Relaxed, Relaxed).is_ok() {
         kill(place);
+    }
+}
+
+/// The process whose next landed spawn `debug_action::HOLD_SPAWN_UNTIL_CHILD_ENDS` marked; `Pid::MAX` for none.
+#[cfg(feature = "test-actuators")]
+static HELD_SPAWNER: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(Pid::MAX.0);
+
+/// Mark the calling process's next spawn whose child lands.
+#[cfg(feature = "test-actuators")]
+pub fn debug_mark_spawn_hold() {
+    HELD_SPAWNER.store(current_process().0, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Park the thread of a spawn its caller marked until `child`'s exit is published, and take the mark. The loader calls it once the child has landed.
+#[cfg(feature = "test-actuators")]
+pub fn debug_hold_marked_spawn(parent: Parent, child: &crate::object::process::ProcessObject) {
+    use core::sync::atomic::Ordering::Relaxed;
+    let Parent::Under(_) = parent else { return };
+    if HELD_SPAWNER.compare_exchange(current_process().0, Pid::MAX.0, Relaxed, Relaxed).is_ok() {
+        let parkable = scheduler::Parkable::at_entry();
+        // A cancelled wait is the spawner's own end, which the spawn's return meets.
+        let _ = crate::watch::wait_until(
+            &parkable,
+            child.watch(),
+            0,
+            toyos_sched::task::WaitClass::Other,
+            crate::time::Deadline::never(),
+            || child.finished(),
+        );
     }
 }
 
