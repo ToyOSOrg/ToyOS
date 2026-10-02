@@ -6,9 +6,11 @@
 //! row init built out of `/apps/gbae/manifest.toml`, because inheritance
 //! carries nothing that would draw one.
 //!
-//! It does not wait: gbae runs until the machine goes down, and the compositor
-//! census on the host's side of the serial says the window exists.
+//! It does not wait, and a launch's child ends with its launcher, so it asks
+//! init to be gbae's parent: gbae runs until the machine goes down, and the
+//! compositor census on the host's side of the serial says the window exists.
 
+use std::os::toyos::process::CommandExt;
 use std::process::Command;
 
 const PROGRAM: &str = "/apps/gbae/gbae";
@@ -26,7 +28,7 @@ fn main() -> std::process::ExitCode {
     // The refusal arm is a first-class outcome and not a panic: the same
     // binary runs before the package is installed and after it is removed,
     // where init answering "no" is the assertion.
-    match Command::new(PROGRAM).spawn() {
+    match Command::new(PROGRAM).under_init().spawn() {
         Ok(child) => {
             println!("pkg-launch: started {PROGRAM} as pid {}", child.id());
             std::process::ExitCode::SUCCESS
