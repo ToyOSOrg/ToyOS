@@ -169,10 +169,10 @@ sha2 = "0.10"
 # own tar and gzip, where the binaries are hosts' tools.
 tar = { version = "0.4.46", default-features = false }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
-# Every request the build system makes, GitHub's API and the crates.io index:
-# rustls over RustCrypto, where curl is a host's tool and a TLS stack in C.
-ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots"] }
-rustls-rustcrypto = "0.0.2-alpha"
+# Every request the build system makes, GitHub's API and the crates.io index,
+# where curl is a host's tool: rustls on ring, the tree's one TLS provider,
+# whose C and assembly the host's `cc` compiles.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [dev-dependencies]
 # `USER_TOP`, so the harness judges a held `rsp` against the bound the kernel

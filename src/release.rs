@@ -19,7 +19,6 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -80,16 +79,11 @@ fn on_runner() -> bool {
     std::env::var("GITHUB_ACTIONS").is_ok_and(|v| v == "true")
 }
 
-/// The HTTP client of every request the build system makes: rustls with
-/// RustCrypto's primitives and webpki's roots, so no C; a status is an answer,
-/// not an error.
+/// The HTTP client of every request the build system makes: rustls on ring
+/// with webpki's roots, as ureq configures it; a status is an answer, not an
+/// error.
 pub(crate) fn agent() -> ureq::Agent {
-    let tls = ureq::tls::TlsConfig::builder()
-        .provider(ureq::tls::TlsProvider::Rustls)
-        .root_certs(ureq::tls::RootCerts::WebPki)
-        .unversioned_rustls_crypto_provider(Arc::new(rustls_rustcrypto::provider()))
-        .build();
-    ureq::Agent::config_builder().tls_config(tls).user_agent(USER_AGENT).http_status_as_error(false).build().new_agent()
+    ureq::Agent::config_builder().user_agent(USER_AGENT).http_status_as_error(false).build().new_agent()
 }
 
 /// Whether this job is main's publisher — [`PUBLISHER`] on main, scheduled or
