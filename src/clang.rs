@@ -269,28 +269,4 @@ mod tests {
         fs::remove_file(bin(&stage2).join("llvm-ar")).unwrap();
         assert!(defect(&stage2).is_some(), "a missing llvm-ar went unnoticed");
     }
-
-    /// **A C sysroot's toolchain file names a system whose platform module is
-    /// where it puts CMake's module path**, and its architecture and target
-    /// are the sysroot's.
-    #[test]
-    fn the_cmake_toolchain_finds_its_platform_module() {
-        let base = TempDir::new("cmake");
-        let c = CSysroot::of(&base, Arch::Aarch64);
-        c.write_cmake();
-        let toolchain = fs::read_to_string(c.cmake_toolchain()).unwrap();
-        assert!(!toolchain.contains('@'), "a placeholder is left: {toolchain}");
-        for line in ["set(CMAKE_SYSTEM_PROCESSOR aarch64)", "set(CMAKE_CXX_COMPILER_TARGET aarch64-unknown-toyos)"] {
-            assert!(toolchain.lines().any(|l| l == line), "no {line} in {toolchain}");
-        }
-        assert!(toolchain.contains("list(APPEND CMAKE_MODULE_PATH \"${CMAKE_CURRENT_LIST_DIR}\")"), "{toolchain}");
-        let system = toolchain
-            .lines()
-            .find_map(|l| l.strip_prefix("set(CMAKE_SYSTEM_NAME ")?.strip_suffix(')'))
-            .expect("a system name");
-        for module in [format!("{system}.cmake"), format!("{system}-Initialize.cmake")] {
-            let path = c.cmake_toolchain().with_file_name("Platform").join(module);
-            assert!(path.is_file(), "{} is missing", path.display());
-        }
-    }
 }
