@@ -83,7 +83,7 @@ impl Building {
             Some(test) => format!("{what}, for {test}"),
             None => what,
         };
-        eprintln!("  BUILD {what}");
+        eprintln!("{}", printer::started("BUILD", &what));
         Self { what, began: Instant::now() }
     }
 }
@@ -1725,7 +1725,7 @@ pub fn build_update(root: &Path, boot: &Boot, plan: &Plan, out: &Path) {
 /// This run's key, said with whose it is and the version it signs.
 fn said_key(plan: &Plan) -> &'static crate::signing::Key {
     let key = crate::signing::key();
-    println!(
+    eprintln!(
         "Signed with {} {} at version {}",
         match key.whose() {
             crate::signing::Whose::Owner(_) => "the owner's key",

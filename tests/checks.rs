@@ -642,7 +642,7 @@ mod checks {
             ));
         }
 
-        println!(
+        eprintln!(
             "  [split] {} shared binaries on the shipping kernel, {} on the actuator one, {} of them \
              driven elsewhere and declared",
             registry.len() - listed.len(),

@@ -239,7 +239,7 @@ fn declining_is_not_free(test_config: &Path) -> Result<(), String> {
     }
     // The console kept the bit, so this is not simply a machine with no virtio.
     log.must_say("access_platform=y")?;
-    eprintln!("  [iommu] declined: {}", refused.join("\n  [iommu] declined: "));
+    refused.iter().for_each(|line| eprintln!("  [iommu] declined: {line}"));
     Ok(())
 }
 

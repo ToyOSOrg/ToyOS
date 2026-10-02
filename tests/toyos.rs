@@ -3760,6 +3760,7 @@ fn run_task(task: Task, test_config: &Path, report: &std::sync::mpsc::Sender<Out
     // while nothing was running invalidates nothing.
     let name = task.name();
     toyos_build::build::building_for(name);
+    eprintln!("{}", toyos_build::printer::started("RUN", name));
     let start = common::clock::mark();
     let outcome = catching(|| match task {
         Task::Machine(name) => run_machine_test(name, test_config),

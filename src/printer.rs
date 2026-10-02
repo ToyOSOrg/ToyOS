@@ -16,68 +16,35 @@ macro_rules! eprintln {
     ($($arg:tt)*) => { $crate::printer::say(::std::format_args!($($arg)*)) };
 }
 
-/// Write `said` and a newline to stderr, stamped with now.
+/// Write `said` and a newline to stderr, with now's time of day and a space
+/// before its first line that is not blank. One string, because stderr is
+/// unbuffered and each piece of a format is a write of its own.
 pub fn say(said: fmt::Arguments) {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).expect("the host's clock reads before 1970");
-    std::eprintln!("{}", stamped(now.as_secs(), &said.to_string()));
-}
-
-/// `text` with `HH:MM:SS ` before its first line that is not blank.
-fn stamped(unix_secs: u64, text: &str) -> String {
+    let at = Civil::from_unix_secs(now.as_secs()).time_of_day();
+    let text = said.to_string();
     let said = text.trim_start_matches('\n');
-    if said.is_empty() {
-        return text.to_string();
-    }
-    let at = Civil::from_unix_secs(unix_secs);
-    let blank = &text[..text.len() - said.len()];
-    format!("{blank}{:02}:{:02}:{:02} {said}", at.hour, at.min, at.sec)
+    let statement = if said.is_empty() {
+        format!("{text}\n")
+    } else {
+        format!("{}{at} {said}\n", &text[..text.len() - said.len()])
+    };
+    std::eprint!("{statement}");
 }
 
 /// `line` without the stamp [`say`] opened it with: what a reader of this
 /// package's output judges.
 pub fn unstamped(line: &str) -> &str {
-    const SHAPE: &[u8] = b"dd:dd:dd ";
-    let stamp = line.as_bytes().get(..SHAPE.len()).is_some_and(|head| {
-        head.iter().zip(SHAPE).all(|(b, want)| match want {
-            b'd' => b.is_ascii_digit(),
-            c => b == c,
-        })
-    });
-    if stamp {
-        &line[SHAPE.len()..]
-    } else {
-        line
-    }
+    toyos_wallclock::after_time_of_day(line).and_then(|said| said.strip_prefix(' ')).unwrap_or(line)
+}
+
+/// One task's line when it starts, a test's and a build's alike.
+pub fn started(word: &str, name: &str) -> String {
+    format!("  {word:<5} {name}")
 }
 
 /// One finished task's line, a test's and a build's alike: what became of it,
 /// its name, and how long it took.
 pub fn outcome(word: &str, name: &str, took: Duration) -> String {
-    format!("  {word:<5} {name}  ({took:.0?})")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A reader strips exactly what the printer wrote: [`unstamped`] is
-    /// `src/ci.rs`'s way to the suite's verdict lines.
-    #[test]
-    fn a_statement_is_stamped_once_and_read_back_whole() {
-        // Noon UTC, and the last second of that day.
-        assert_eq!(stamped(1_786_795_200, "  PASS  a  (3s)"), "12:00:00   PASS  a  (3s)");
-        assert_eq!(stamped(1_786_795_200 + 43_199, "x"), "23:59:59 x");
-        assert_eq!(stamped(0, "\nrunning 2 tests\n"), "\n00:00:00 running 2 tests\n");
-        assert_eq!(stamped(0, "FAIL a: short\n[kernel 0.1 cpu0] x"), "00:00:00 FAIL a: short\n[kernel 0.1 cpu0] x");
-        assert_eq!(stamped(0, ""), "");
-        assert_eq!(stamped(0, "\n"), "\n");
-
-        for said in ["  PASS  a  (3s)", "FAIL a: short", "test result: ok. 1 passed, 1 total (9.0s)"] {
-            assert_eq!(unstamped(&stamped(1_786_795_200, said)), said);
-            assert_eq!(unstamped(said), said);
-        }
-        for no in ["12:00:00", "12:00:0x y", "1200:00:00 y", "[12:00:00] y"] {
-            assert_eq!(unstamped(no), no);
-        }
-    }
+    format!("{}  ({took:.0?})", started(word, name))
 }

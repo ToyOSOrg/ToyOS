@@ -123,7 +123,7 @@ fn main() {
     let update_image = CARGO_RUN.value(&args, &flags::UPDATE_IMAGE).map(PathBuf::from);
     if asked(&flags::OWNER_KEY) || update_image.is_some() {
         match toyos_build::signing::use_owner() {
-            Ok(key) => println!("Signing with the owner's key {}.", key.fingerprint()),
+            Ok(key) => eprintln!("Signing with the owner's key {}.", key.fingerprint()),
             Err(why) => {
                 eprintln!("Error: {why}");
                 std::process::exit(1);
@@ -215,7 +215,7 @@ fn main() {
         return;
     }
     let image = toyos_build::build::build(&root, boot, &plan);
-    println!("Build finished.");
+    eprintln!("Build finished.");
     println!("Boot image: {}", image.display());
 
     if !build_only {

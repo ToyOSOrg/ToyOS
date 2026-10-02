@@ -1,10 +1,5 @@
 //! The calendar.
 //!
-//! Two things live here because two programs need them and the host is where
-//! either can be tested: the kernel decodes an RTC into a [`Civil`] and stamps
-//! FAT directory entries from it, and `/system/bin/logd` names one file per boot from
-//! the same calendar.
-//!
 //! Nothing here allocates, nothing here is `unsafe`, and nothing here reads a
 //! device: it is arithmetic over numbers its callers hand it.
 
@@ -33,11 +28,7 @@ pub struct Civil {
 
 impl fmt::Display for Civil {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-            self.year, self.month, self.day, self.hour, self.min, self.sec
-        )
+        write!(f, "{:04}-{:02}-{:02} {}", self.year, self.month, self.day, self.time_of_day())
     }
 }
 
@@ -90,6 +81,12 @@ impl Civil {
     pub fn stem(&self) -> Stem {
         Stem(*self)
     }
+
+    /// `HH:MM:SS`, what a line that says only when in the day it was written
+    /// opens with.
+    pub fn time_of_day(&self) -> TimeOfDay {
+        TimeOfDay(*self)
+    }
 }
 
 /// [`Civil::stem`]'s rendering. Sortable by name, which is what makes `/log`
@@ -107,6 +104,16 @@ impl fmt::Display for Stem {
     }
 }
 
+/// [`Civil::time_of_day`]'s rendering.
+pub struct TimeOfDay(Civil);
+
+impl fmt::Display for TimeOfDay {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let t = self.0;
+        write!(f, "{:02}:{:02}:{:02}", t.hour, t.min, t.sec)
+    }
+}
+
 /// The shape [`Stem`] renders, as the character classes a name must match to be
 /// one of the log's own files: `d` is a digit and every other byte is itself.
 ///
@@ -114,13 +121,28 @@ impl fmt::Display for Stem {
 /// dated name looks like.
 pub const STEM_SHAPE: &[u8] = b"dddd-dd-dd-dddddd";
 
-/// Whether `stem` is exactly what [`Stem`] would have rendered.
-pub fn is_stem(stem: &str) -> bool {
-    stem.len() == STEM_SHAPE.len()
-        && stem.bytes().zip(STEM_SHAPE).all(|(b, want)| match want {
+/// The shape [`TimeOfDay`] renders, in [`STEM_SHAPE`]'s classes.
+const TIME_OF_DAY_SHAPE: &[u8] = b"dd:dd:dd";
+
+/// Whether `text` is exactly what a rendering of `shape` looks like.
+fn is_shaped(text: &str, shape: &[u8]) -> bool {
+    text.len() == shape.len()
+        && text.bytes().zip(shape).all(|(b, want)| match want {
             b'd' => b.is_ascii_digit(),
             c => b == *c,
         })
+}
+
+/// Whether `stem` is exactly what [`Stem`] would have rendered.
+pub fn is_stem(stem: &str) -> bool {
+    is_shaped(stem, STEM_SHAPE)
+}
+
+/// What follows the [`TimeOfDay`] `line` opens with, or `None` where it opens
+/// with none.
+pub fn after_time_of_day(line: &str) -> Option<&str> {
+    let (head, rest) = line.split_at_checked(TIME_OF_DAY_SHAPE.len())?;
+    is_shaped(head, TIME_OF_DAY_SHAPE).then_some(rest)
 }
 
 /// The name a boot gets when the machine would not say what time it is.
@@ -238,6 +260,24 @@ mod tests {
         }
         for no in ["2026-08-15-12000", "2026-8-15-120000", "unknown-01", "2026-08-15-12000x"] {
             assert!(!is_stem(no), "`{no}` was accepted as a dated stem");
+        }
+    }
+
+    /// A time of day this renders is one a reader of the line it opens finds,
+    /// and what the reader is handed is the rest of that line, whole.
+    #[test]
+    fn every_time_of_day_this_renders_is_one_it_reads_back() {
+        // Midnight, noon, and the last second of a day.
+        for (secs, rendered) in [(0, "00:00:00"), (1_786_795_200, "12:00:00"), (1_786_838_399, "23:59:59")] {
+            let at = format!("{}", Civil::from_unix_secs(secs).time_of_day());
+            assert_eq!(at, rendered);
+            assert_eq!(after_time_of_day(&at), Some(""));
+            assert_eq!(after_time_of_day(&format!("{at}   PASS  a  (3s)")), Some("   PASS  a  (3s)"));
+        }
+        // Short of one, not one, one that is not where the line opens, and one
+        // whose eighth byte is the first of a wider character.
+        for no in ["", "12:00:0", "12:00:0x y", "1200:00:00 y", "[12:00:00] y", "12:00:0é"] {
+            assert_eq!(after_time_of_day(no), None, "`{no}` was read as opening with a time of day");
         }
     }
 

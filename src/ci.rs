@@ -157,13 +157,12 @@ fn cargo_logged(dir: &Path, args: &[&str]) -> Result<(bool, String), String> {
         .spawn()
         .map_err(|e| format!("cargo: {e}"))?;
     let mut log = String::new();
-    let mut out = std::io::stdout();
+    let mut err = std::io::stderr();
     for line in BufReader::new(reader).split(b'\n') {
         let line = line.map_err(|e| format!("reading cargo: {e}"))?;
-        let line = String::from_utf8_lossy(&line);
-        let _ = writeln!(out, "{line}");
+        let line = format!("{}\n", String::from_utf8_lossy(&line));
+        let _ = err.write_all(line.as_bytes());
         log.push_str(&line);
-        log.push('\n');
     }
     let status = child.wait().map_err(|e| format!("cargo: {e}"))?;
     Ok((status.success(), log))
