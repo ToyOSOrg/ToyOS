@@ -10,9 +10,12 @@ M2's clang and lld (`issues/build/toyos-builds-itself.md`) are bootstrap's
 `Llvm` step, with `clang = true`, and its `Lld` step for
 `x86_64-unknown-toyos`, in a bootstrap build that names no `llvm-config` for
 the build triple and so builds that triple's LLVM, and its `clang-tblgen`,
-itself. CMake takes the C sysroot's `toolchain.cmake` from
-`CMAKE_TOOLCHAIN_FILE_x86_64_unknown_toyos`. What stops the build, in the
-order it stops it:
+itself. CMake takes its toolchain file from
+`CMAKE_TOOLCHAIN_FILE_x86_64_unknown_toyos`: one that includes the C sysroot's
+`toolchain.cmake` and adds the ToyOS LLVM's install to `CMAKE_FIND_ROOT_PATH`,
+because the `Lld` step names that LLVM to `find_package` by a hint, and the
+sysroot's file has CMake find a package under a root alone. What stops the
+build, in the order it stops it:
 
 - **Compile.** The first errors are `Support`'s: `Unix/Watchdog.inc` and
   `Unix/Program.inc` call `alarm` (`issues/build/libc-has-no-alarm.md`), and
