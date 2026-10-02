@@ -30,7 +30,7 @@ build, in the order it stops it:
   (`issues/build/libc-lacks-names-llvm-for-a-toyos-host-calls.md`), beside
   those above. LLVM's shared libraries, `libLTO`, `libRemarks`, `libclang` and
   `libclang-cpp`, do not link against the C sysroot
-  (`issues/build/a-shared-object-does-not-link-against-the-c-sysroot.md`).
+  (`issues/build/a-shared-object-does-not-link-against-the-c-sysroot-with-z-defs.md`).
   clang and lld use none of them, and ToyOS's build turns them off.
 
 **Exit**: ToyOS's build, with nothing supplied by hand, has bootstrap install
