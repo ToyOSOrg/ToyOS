@@ -18,9 +18,9 @@
 //!
 //! **An end is also an event**: an `OP_WATCH` on the handle completes once the
 //! exit is published, so one poller waits for any number of children beside
-//! whatever else it watches. Four arms are this paragraph's: each completion
-//! names the child that ended, a watch on one already gone completes at once, a
-//! kill completes one, and closing one handle ends no other's watch.
+//! whatever else it watches. Its arms: each completion names the child that
+//! ended, a watch on one already gone completes at once, a kill completes one
+//! as readable, and closing one handle ends no other's watch.
 //!
 //! Two roles besides the test. `held` exits with a code of the parent's
 //! choosing, but not until its stdin closes — which is what lets every arm here
