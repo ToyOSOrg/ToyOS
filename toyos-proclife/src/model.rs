@@ -586,6 +586,16 @@ impl World {
         for pid in &self.minted_retired {
             out.push(alloc::format!("pid {pid}: a handle to it was minted after its last one had gone"));
         }
+        // L14. Only a process's published end answers a wait or a watch on it.
+        for &(watch, waiter, tid) in &self.released {
+            if let Watch::Process(pid) = watch {
+                if !self.published.contains_key(&pid) {
+                    out.push(alloc::format!(
+                        "pid {waiter} tid {tid}: its watch on pid {pid} was answered with pid {pid}'s exit unpublished",
+                    ));
+                }
+            }
+        }
         out
     }
 

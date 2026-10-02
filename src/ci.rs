@@ -417,6 +417,9 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(PROCLIFE, "mutate-spawner-handle-before-the-childs-own", None, &[
         Fails("interleave::tests::a_sibling_closing_a_spawns_handle_before_the_spawn_returns"),
     ]),
+    red(PROCLIFE, "mutate-close-ends-a-process-watch", None, &[
+        Fails("interleave::tests::a_watch_on_a_process_is_answered_by_its_end_and_by_no_close"),
+    ]),
     red(SCHED_SIM, "placement-ignores-staleness", Some("policy"), &[
         Fails("a_stopped_cpu_stops_taking_work"),
     ]),
