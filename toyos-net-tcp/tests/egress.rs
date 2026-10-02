@@ -606,4 +606,18 @@ fn s_pl_015_resets_waiting_for_their_next_hop_stay_bounded() {
     }
     assert_eq!(h.count(Counter::ClosedRstLimited), 6, "64 answers held");
     assert_eq!(woken(&mut h, 50).len(), 64);
+    expect(&h.input(60, seg(5000).syn().from(B, 41_000).to(A, 81)), &["CTL=RST,ACK"]);
+
+    // An answer whose frame was refused is held too: 63 waiting and it are 64.
+    let mut h = H::new(65_535);
+    h.hop = hop_b(|_| Hop::Pending);
+    for p in 0..63u16 {
+        nothing(&h.input(0, seg(5000).syn().from(B, 40_000 + p).to(A, 81)));
+    }
+    h.unframed = true;
+    nothing(&h.input(0, seg(5000).syn().from(C, 40_000).to(A, 81)));
+    assert_eq!((h.count(Counter::FrameRefused), h.count(Counter::ClosedRstLimited)), (1, 0));
+    h.credit = Some(0);
+    nothing(&h.input(0, seg(5000).syn().from(C, 40_001).to(A, 81)));
+    assert_eq!(h.count(Counter::ClosedRstLimited), 1);
 }
