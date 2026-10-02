@@ -85,7 +85,17 @@ pub unsafe extern "C" fn malloc(size: usize) -> *mut u8 {
     if size == 0 {
         return ptr::null_mut();
     }
-    unsafe { backend::alloc(size, 16) }
+    or_enomem(unsafe { backend::alloc(size, 16) })
+}
+
+/// `p`, with `errno` set to `ENOMEM` if it is null: POSIX's for an allocator
+/// that answers null for want of memory.
+#[cfg(not(feature = "std-runtime"))]
+fn or_enomem(p: *mut u8) -> *mut u8 {
+    if p.is_null() {
+        crate::errno::set(crate::errno::ENOMEM);
+    }
+    p
 }
 
 #[cfg(not(feature = "std-runtime"))]
@@ -95,11 +105,7 @@ pub unsafe extern "C" fn aligned_alloc(align: usize, size: usize) -> *mut u8 {
         crate::errno::set(crate::errno::EINVAL);
         return ptr::null_mut();
     }
-    let p = unsafe { backend::alloc(size, align) };
-    if p.is_null() {
-        crate::errno::set(crate::errno::ENOMEM);
-    }
-    p
+    or_enomem(unsafe { backend::alloc(size, align) })
 }
 
 #[cfg(not(feature = "std-runtime"))]
@@ -128,10 +134,7 @@ pub unsafe extern "C" fn free(p: *mut u8) {
 #[cfg(not(feature = "std-runtime"))]
 #[no_mangle]
 pub unsafe extern "C" fn calloc(count: usize, size: usize) -> *mut u8 {
-    let total = match count.checked_mul(size) {
-        Some(t) => t,
-        None => return ptr::null_mut(),
-    };
+    let Some(total) = count.checked_mul(size) else { return or_enomem(ptr::null_mut()) };
     let p = unsafe { malloc(total) };
     if !p.is_null() {
         unsafe { ptr::write_bytes(p, 0, total); }
@@ -149,7 +152,7 @@ pub unsafe extern "C" fn realloc(p: *mut u8, new_size: usize) -> *mut u8 {
         unsafe { free(p); }
         return ptr::null_mut();
     }
-    unsafe { backend::realloc(p, new_size) }
+    or_enomem(unsafe { backend::realloc(p, new_size) })
 }
 
 // memcpy, memmove and memset are the architecture's (`arch`): Rust's
