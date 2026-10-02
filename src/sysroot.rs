@@ -86,10 +86,11 @@ const SOURCES: &str = "SOURCES";
 /// is none of them, nor std's configuration ([`std_config`]), which the
 /// freestanding key reads whole. Moving it moves every key.
 const RECIPE: &str = "bootstrap stage-0 local rebuild, libraries from the stamp, libtoyos_c merged, \
-                      a C sysroot of libc's staticlib, the empty libraries beside it, and headers \
-                      per target, refused unless a C program naming each library links against \
-                      it, and its C++ runtime built under n2 from the runtimes' sources of the \
-                      compiler's LLVM, the freestanding libraries cloned from their key's; 12";
+                      a C sysroot of libc's staticlib, the empty libraries beside it, headers and \
+                      CMake's description of ToyOS per target, refused unless a C program naming \
+                      each library links against it, and its C++ runtime built under n2 from the \
+                      runtimes' sources of the compiler's LLVM, the freestanding libraries cloned \
+                      from their key's; 13";
 
 /// Every sysroot on this host.
 pub fn sysroots_dir(rust_dir: &Path) -> PathBuf {
@@ -464,11 +465,16 @@ pub(crate) fn key(root: &Path, freestanding: &Key) -> Key {
 }
 
 /// What a sysroot's build is beyond its sources and its freestanding libraries:
-/// its targets, the C++ runtime's options and libc's cargo invocations.
+/// its targets, the C++ runtime's options, CMake's description of ToyOS and
+/// libc's cargo invocations.
 fn build_text() -> String {
     let targets = Libraries::Worktree.targets().join(" ");
     let (libc, staticlib) = (crate::libc::BUILD, crate::libc::BUILD_C);
-    format!("targets {targets}; C++ runtime {:?}; libc {libc:?} {staticlib:?}", crate::libcxx::OPTIONS)
+    format!(
+        "targets {targets}; C++ runtime {:?}; CMake {:?}; libc {libc:?} {staticlib:?}",
+        crate::libcxx::OPTIONS,
+        crate::clang::CMAKE,
+    )
 }
 
 /// [`key`], with the build it reads.
@@ -707,7 +713,7 @@ fn build(root: &Path, rust_dir: &Path, compiler: &Compiler, fork: &Path, keys: &
         for arch in Arch::ALL {
             let scratch = dir.with_extension(format!("libcxx-{}", arch.name()));
             let c = crate::clang::CSysroot::of(partial, arch);
-            crate::libcxx::build(&c, arch, &llvm.dir.join("src"), &ninja, &scratch);
+            crate::libcxx::build(&c, &llvm.dir.join("src"), &ninja, &scratch);
         }
 
         // The sources the key named are the ones built, or this is not that key's.

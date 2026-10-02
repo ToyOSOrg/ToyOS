@@ -48,6 +48,47 @@ pub(crate) fn tools() -> impl Iterator<Item = &'static str> {
     TOOLS.into_iter().chain(host_triple().ends_with("apple-darwin").then_some(APPLE_STRIP))
 }
 
+/// CMake's description of ToyOS, which CMake does not ship, as every C sysroot
+/// carries it: a toolchain file that names the system, the target and the
+/// sysroot it sits in, has CMake find a library, a header and a package there
+/// alone and a program on the host alone, and puts beside it on CMake's module
+/// path the platform module, laid out as CMake's `Modules/Platform` lays out a
+/// Unix-like system. The compilers are the caller's, and so is the root of any
+/// package it built outside the sysroot (`CMAKE_FIND_ROOT_PATH`). `@PROCESSOR@`
+/// and `@TARGET@` are the sysroot's.
+pub(crate) const CMAKE: [(&str, &str); 3] = [
+    (
+        "toolchain.cmake",
+        "set(CMAKE_SYSTEM_NAME ToyOS)\n\
+         set(CMAKE_SYSTEM_PROCESSOR @PROCESSOR@)\n\
+         set(CMAKE_SYSROOT \"${CMAKE_CURRENT_LIST_DIR}\")\n\
+         set(CMAKE_C_COMPILER_TARGET @TARGET@)\n\
+         set(CMAKE_CXX_COMPILER_TARGET @TARGET@)\n\
+         set(CMAKE_ASM_COMPILER_TARGET @TARGET@)\n\
+         set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)\n\
+         set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)\n\
+         set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)\n\
+         set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)\n\
+         list(APPEND CMAKE_MODULE_PATH \"${CMAKE_CURRENT_LIST_DIR}\")\n",
+    ),
+    ("Platform/ToyOS-Initialize.cmake", "set(UNIX 1)\n"),
+    // `dlopen` and its kin are the C library's own. The loader finds a library
+    // by the name `DT_NEEDED` holds, beside its executable or in `/system/lib`,
+    // so a library carries its soname and one without is linked by name; and it
+    // reads no runtime path, so no flag asks the linker for one. The flags that
+    // switch a link between static and shared libraries and the `RESCAN` link
+    // group are left out too: no build of ToyOS's asks CMake for either.
+    (
+        "Platform/ToyOS.cmake",
+        "set(CMAKE_DL_LIBS \"\")\n\
+         set(CMAKE_SHARED_LIBRARY_SONAME_C_FLAG \"-Wl,-soname,\")\n\
+         set(CMAKE_EXE_EXPORTS_C_FLAG \"-Wl,--export-dynamic\")\n\
+         set(CMAKE_PLATFORM_USES_PATH_WHEN_NO_SONAME 1)\n\
+         \n\
+         include(Platform/UnixPaths)\n",
+    ),
+];
+
 /// `lib/rustlib/<host>/bin` of `toolchain`, where `rust-lld` is.
 fn bin(toolchain: &Path) -> PathBuf {
     toolchain.join("lib/rustlib").join(host_triple()).join("bin")
@@ -64,6 +105,8 @@ pub struct CSysroot {
     pub ar: PathBuf,
     /// The guest target, as clang's `--target` spells it.
     pub target: &'static str,
+    /// Its architecture, as CMake's `CMAKE_SYSTEM_PROCESSOR` spells it.
+    processor: &'static str,
 }
 
 impl CSysroot {
@@ -75,6 +118,23 @@ impl CSysroot {
             clang: bin(toolchain).join("clang"),
             ar: bin(toolchain).join("llvm-ar"),
             target,
+            processor: arch.name(),
+        }
+    }
+
+    /// Its CMake toolchain file, the first of [`CMAKE`].
+    pub fn cmake_toolchain(&self) -> PathBuf {
+        self.dir.join(CMAKE[0].0)
+    }
+
+    /// Write [`CMAKE`] into it.
+    pub fn write_cmake(&self) {
+        for (name, text) in CMAKE {
+            let path = self.dir.join(name);
+            let parent = path.parent().expect("a file in the sysroot");
+            fs::create_dir_all(parent).unwrap_or_else(|e| panic!("create {}: {e}", parent.display()));
+            let text = text.replace("@PROCESSOR@", self.processor).replace("@TARGET@", self.target);
+            fs::write(&path, text).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
         }
     }
 

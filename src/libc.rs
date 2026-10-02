@@ -114,6 +114,7 @@ pub fn build_c(root: &Path, toolchain: &Path, target_dir: &Path, arch: Arch) {
         .unwrap_or_else(|e| panic!("copy {} into {}: {e}", archive.display(), lib.display()));
     empty_libraries(&lib);
     crate::sysroot::clone_tree(&root.join(CRATE).join("include"), &c.dir.join("include"));
+    c.write_cmake();
     links_naming_every_library(&c, target_dir);
 }
 

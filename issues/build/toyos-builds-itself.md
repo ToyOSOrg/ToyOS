@@ -123,13 +123,9 @@ goes when lld runs in the guest: the row, the crate and its host tests go togeth
 the published crates.io crate is yanked.
 
 **What stops M2: LLVM, clang and lld built for a ToyOS host**, in the order
-each blocks the next.
-- Configure: the `clang-tblgen` and the CMake system of
-  `issues/build/bootstrap-cannot-build-llvm-clang-and-lld-for-a-toyos-host.md`.
-- Compile: the bootstrap issue's `bit.h` and `is_local_impl`, and `wait` and
-  `wait4` of the child-process track's stage 3
-  with `issues/build/libc-has-no-alarm.md`.
-- Link: the same stage 3 names and `alarm`.
+each blocks the next, as
+`issues/build/bootstrap-cannot-build-llvm-clang-and-lld-for-a-toyos-host.md`
+measures it.
 - Run: what `issues/build/libc-refuses-what-toyos-cannot-yet-answer.md` lists,
   `issues/build/libc-has-no-pread-or-pwrite.md`, and
   `issues/build/libc-stat-answers-one-serial-number-for-every-file.md`.
