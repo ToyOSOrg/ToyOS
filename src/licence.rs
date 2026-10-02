@@ -229,6 +229,12 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
     (
+        "toyos-acpi/fixtures/qemu-11.1.1/dsdt.bin",
+        "d183acae4048280f9c9cd8353045544d7d84319b304b7f65d4d0895e8b8ac06b",
+        "ours: QEMU's own DSDT, captured by the commit that reads `\\_S5_` out of it",
+        Terms::Spdx("MIT OR Apache-2.0"),
+    ),
+    (
         "toyos-acpi/fixtures/qemu-11.1.1/facp.bin",
         "410716dfb169eaba296ed3c336028843b3cf9fce6ca7c179bb242199cfec9d1a",
         "ours: QEMU's own FADT, captured by the commit that added toyos-acpi",

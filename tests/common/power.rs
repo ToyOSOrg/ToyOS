@@ -1,7 +1,75 @@
+use std::io::Write;
+use std::path::Path;
+
 use toyos_blackbox::{PHYS, State};
 use toyos_build::bootlog::{self, REBOOTING};
 
+use super::qemu::{self, BootOptions, QemuInstance};
 use super::serial;
+
+/// The kernel's last word when it powers the machine off, in
+/// `kernel/src/syscall/machine.rs`.
+pub const SHUTTING_DOWN: &str = "Shutting down.";
+
+/// What the kernel logs once it has decoded S5 soft-off, ahead of the PM1a
+/// control block's port and the `SLP_TYPa` the DSDT's `\_S5_` names.
+const SOFT_OFF_DECODED: &str = "ACPI: PM1a=";
+
+/// Wait for the boot's `last` word on a guest asked to end, then for QEMU to
+/// stop for `reason` and exit; `console` gains everything said on the way.
+///
+/// A reset, a power-off and a triple fault all end a `-no-reboot` QEMU with
+/// status 0, so the cause is the one its `SHUTDOWN` event names. `stop` is
+/// opened before the guest is asked: QMP delivers no event emitted before its
+/// client connected.
+pub fn ended(
+    qemu: &mut QemuInstance,
+    stop: &mut qemu::QmpShutdown,
+    console: &mut String,
+    last: &str,
+    reason: &str,
+) -> Result<(), String> {
+    qemu::await_marker(qemu, console, last, "the boot's last word")?;
+    let stopped = stop.reason();
+    let by = qemu.budget(qemu::GUEST_QUIET);
+    console.push_str(&qemu.await_exit(by)?);
+    if stopped.as_deref() != Some(reason) {
+        return Err(format!("QEMU stopped this guest for {stopped:?}, not {reason:?}\n{console}"));
+    }
+    Ok(())
+}
+
+/// A process holding `POWER` runs `shutdown` and the machine powers off: the
+/// boot decoded q35's PM1a block and its `\_S5_`, and QEMU stops for
+/// `guest-shutdown`, which neither a reset nor a halt is.
+pub fn machine_shutdown(test_config: &Path) -> Result<(), String> {
+    let options = BootOptions { qmp: true, ..Default::default() };
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
+
+    let boot = serial::Serial::boot(&qemu);
+    boot.must_be_clean()?;
+    // The values this kernel read out of q35's tables, so a decode it got
+    // wrong fails here and not as a machine that stayed up.
+    boot.must_say(&format!("{SOFT_OFF_DECODED}0x604 SLP_TYPa=0"))?;
+
+    let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(qemu::GUEST_QUIET));
+    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    let mut console = String::new();
+    ended(&mut qemu, &mut stop, &mut console, SHUTTING_DOWN, "guest-shutdown")?;
+    serial::Serial::named("shutdown drain", console).must_be_clean()?;
+
+    eprintln!("  [power] shutdown: QEMU stopped the guest for guest-shutdown");
+    Ok(())
+}
+
+/// The kernel decoded S5 soft-off out of this machine's FADT and DSDT. Every
+/// other branch of `arch::power::init_off` says `no soft-off` and not this.
+pub fn soft_off_decoded(kernel: &serial::Serial) -> Result<(), String> {
+    let line = kernel.must_say(SOFT_OFF_DECODED)?;
+    eprintln!("  [power] {}", line.trim());
+    Ok(())
+}
 
 /// The kernel's read-back above its own arm, in
 /// `kernel/src/arch/x86_64/watchdog.rs`: whole clauses, one per branch.
