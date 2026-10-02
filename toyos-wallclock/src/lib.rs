@@ -82,8 +82,7 @@ impl Civil {
         Stem(*self)
     }
 
-    /// `HH:MM:SS`, what a line that says only when in the day it was written
-    /// opens with.
+    /// `HH:MM:SS`, the stamp a line the build system prints opens with.
     pub fn time_of_day(&self) -> TimeOfDay {
         TimeOfDay(*self)
     }
