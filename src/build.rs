@@ -3073,6 +3073,7 @@ mod tests {
         "tests/testcases/system.toml",
         "tests/virtjobcase/system.toml",
         "tests/virtpaniccase/system.toml",
+        "tests/virtrebootcase/system.toml",
         "tests/virtsmpcase/system.toml",
     ];
 

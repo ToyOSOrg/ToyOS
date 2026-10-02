@@ -986,6 +986,10 @@ pub struct BootOptions {
     /// the image is memoized on their names and bytes, so two boots staging
     /// different fixtures do not share one.
     pub extra_root_files: Vec<(String, Vec<u8>)>,
+    /// Have QEMU record every PSCI call a vCPU makes into this file, with the
+    /// calling CPU's affinity: the firmware side's own account of what the
+    /// kernel asked of it.
+    pub psci_trace: Option<PathBuf>,
 }
 
 impl BootOptions {
@@ -1022,6 +1026,7 @@ impl Default for BootOptions {
             mute: false,
             ready_marker: DEFAULT_READY,
             extra_root_files: Vec::new(),
+            psci_trace: None,
         }
     }
 }
@@ -1436,6 +1441,38 @@ impl QemuInstance {
         self.stdin.flush().expect("Failed to flush QEMU stdin");
     }
 
+    /// Wait for QEMU to exit within `by`: its console closing is the event, and
+    /// the process is reaped after it. Answers what the guest said on the way.
+    /// A file QEMU finishes only at its exit is whole once this answers, and is
+    /// still there until this instance is dropped.
+    pub fn await_exit(&mut self, by: Duration) -> Result<String, String> {
+        let deadline = Instant::now() + by;
+        let mut said = String::new();
+        loop {
+            let left = deadline.checked_duration_since(Instant::now()).unwrap_or_default();
+            match self.rx.recv_timeout(left) {
+                Ok(line) => {
+                    said.push_str(&line);
+                    said.push('\n');
+                }
+                Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Timeout) => {
+                    return Err(format!("QEMU had not exited {} s after it was asked to\n{said}", by.as_secs()))
+                }
+            }
+        }
+        let status = self.child.wait().map_err(|e| format!("QEMU could not be waited for: {e}"))?;
+        if !status.success() {
+            return Err(format!("QEMU exited {status}\n{said}"));
+        }
+        Ok(said)
+    }
+
+    /// [`budget_smp`] for a host-side wait on this guest's own vCPU count.
+    pub fn budget(&self, one_guest: Duration) -> Duration {
+        budget_smp(one_guest, self.smp)
+    }
+
     /// Keep collecting serial output for `dur` after a test has returned.
     /// **Not scaled by the width**, and it is the one duration in this file that
     /// is not. Callers use it to *pace* — "let the guest run for 400 ms and tell
@@ -1841,6 +1878,48 @@ impl Qmp {
     }
 }
 
+/// QEMU's own account of why a guest stopped, off the `SHUTDOWN` event. Held
+/// open across the stop: the event is emitted once and QEMU exits behind it, so
+/// a connection opened afterwards finds nothing.
+pub struct QmpShutdown(Qmp);
+
+impl QmpShutdown {
+    /// `budget` bounds the wait and is set here, while the peer is still there
+    /// to accept it: macOS refuses a `setsockopt` on a socket already closed.
+    pub fn open(socket: &Path, budget: Duration) -> Self {
+        let qmp = Qmp::connect(socket);
+        qmp.stream.set_read_timeout(Some(budget)).expect("qmp: the shutdown-event budget");
+        Self(qmp)
+    }
+
+    /// The `reason` the `SHUTDOWN` event names — `guest-reset`,
+    /// `guest-shutdown`, `host-signal` — or `None` if the guest never stopped.
+    pub fn reason(&mut self) -> Option<String> {
+        let qmp = &mut self.0;
+        loop {
+            if let Some(reason) = shutdown_reason(&qmp.pending) {
+                return Some(reason);
+            }
+            let mut buf = [0u8; 4096];
+            match qmp.stream.read(&mut buf) {
+                // Budget spent, or the socket ended: what it had is in `pending`.
+                Ok(0) | Err(_) => return shutdown_reason(&qmp.pending),
+                Ok(n) => qmp.pending.extend_from_slice(&buf[..n]),
+            }
+        }
+    }
+}
+
+/// The `reason` of the `SHUTDOWN` event in what QMP has sent so far.
+fn shutdown_reason(bytes: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(bytes);
+    let line = text.lines().find(|l| l.contains("\"SHUTDOWN\""))?;
+    let (_, after) = line.split_once("\"reason\"")?;
+    let (_, value) = after.split_once('"')?;
+    let (value, _) = value.split_once('"')?;
+    Some(value.to_string())
+}
+
 /// An open QMP connection to QEMU's human monitor, for the questions QMP has
 /// no command of its own for.
 pub struct QmpMonitor(Qmp);
@@ -2121,6 +2200,13 @@ fn qemu_command(
     if let Some(socket) = qmp_socket {
         qemu.arg("-qmp")
             .arg(format!("unix:{},server,nowait", socket.display()));
+    }
+    if let Some(trace) = &options.psci_trace {
+        assert!(
+            arch == Arch::Aarch64 && accel == Accel::Tcg,
+            "a PSCI trace is TCG's `arm_psci_call`, and this profile's PSCI is not QEMU's TCG"
+        );
+        qemu.arg("-trace").arg("arm_psci_call").arg("-D").arg(trace);
     }
 
     qemu

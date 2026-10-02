@@ -15,4 +15,11 @@ right. Each table sums to zero.
 
 The addresses are `tests/fixtures.rs`'s `REGIONS`, so the XSDT's own entries
 point at them and the walk under test is the real one. The DSDT this boot named
-(0x7fb7a000, 8500 bytes) is not here: nothing in this crate decodes one.
+(0x7fb7a000, 8500 bytes) is not here.
+
+dsdt.bin is the DSDT of a later boot of the same QEMU and profile, read off
+guest physical memory with the monitor's `pmemsave`: 8500 bytes at 0x7f77a000,
+summing to zero. That boot's firmware put every table 0x400000 lower and the
+ECAM elsewhere, so its RSDP, XSDT, FADT and MCFG differ from the files here in
+address bytes and checksums and in nothing else, and its MADT, HPET, DMAR and
+WAET are these byte for byte. Its kernel logged `ACPI: PM1a=0x604 SLP_TYPa=0`.
