@@ -1,6 +1,7 @@
-//! Loads a built process onto a CPU and builds the handle table it starts
-//! with. The frame a new stack starts from and the trampolines it returns into
-//! are the architecture's (`arch::entry`).
+//! Loads a built process onto a CPU, builds the handle table it starts with
+//! and puts its spawner's handle to it in the spawner's table. The frame a new
+//! stack starts from and the trampolines it returns into are the
+//! architecture's (`arch::entry`).
 
 use alloc::vec::Vec;
 

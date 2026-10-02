@@ -3,8 +3,9 @@
 //!
 //! `#[cfg(test)]`, so none of it reaches a kernel build. What it adds beyond
 //! the two traits is the *consequences* a decision hands back and the kernel
-//! performs — a watch's post, a retire, a `publish_exit`, an idle
-//! pass taking an entry — because the laws worth checking are about the order
+//! performs — a watch's post, a retire, a `publish_exit`, a handle minted, a
+//! table closed, an idle pass taking an entry — because the laws worth
+//! checking are about the order
 //! those happen in, and a model that only held the two states could not see
 //! one.
 //!
