@@ -44,6 +44,9 @@ const ACTUATOR_TESTS: &[&str] = &[
     // memory, which every other binary in a shared boot moves under it.
     "handle_lifetime",
     "shm_release_reclaims",
+    // Action 22: the kernel kills a spawn's place between the spawn's commit
+    // and its landing, a window no caller can order a kill inside.
+    "spawn_lands_claimed",
 ];
 
 /// What [`ACTUATOR_TESTS`] boots: the one kernel that carries `SYS_DEBUG`, with
@@ -74,6 +77,9 @@ const RUST_SKIP: &[&str] = &[
     "fault_gate_child",
     // It takes the machine down; `virt_fatal_halts_the_others_first` runs it.
     "panic_halts_first",
+    // Needs a launcher and a declared `cat` and shell, which `tests/testcases`
+    // does not give: the `process_tree` metal row runs it on tests/proctreecase.
+    "process_tree",
     // It asserts nothing at all: it holds a `tests/lancase` boot open for
     // twenty seconds so the host can reach this machine over the cable. On a
     // shared boot it would be twenty seconds of nothing.
@@ -529,6 +535,13 @@ const METAL: &[(&str, metal::Metal)] = &[
             },
         },
     ),
+    // ---- one image: tests/proctreecase ----
+    (
+        // A parent's end takes its children down. The guest carries every
+        // verdict but two the kernel speaks.
+        "process_tree",
+        metal::Metal { arms: PROCTREECASE, judge: |b| process_tree(b[0]) },
+    ),
     // ---- one image: tests/metalcase ----
     (
         "metal_sim_scanout_wc",
@@ -638,6 +651,11 @@ const USB_RESET_BOOTS: &[metal::Arm] = &[
 ];
 
 const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/metalcase", &[], &[])];
+
+/// A launcher and a declared `cat` and shell, which `process_tree`'s subtree
+/// launches.
+const PROCTREECASE: &[metal::Arm] =
+    &[metal::once("proctreecase", "tests/proctreecase", &[], &["test_rs_process_tree"])];
 
 /// The cable's own boot: netd in front of the T14's I219, and one job that
 /// holds the machine up long enough for the host to reach it. The one arm in
@@ -2216,6 +2234,26 @@ fn pci_cap_selftest(log: &str) -> Result<(), String> {
         }
         eprintln!("  [pci] {}", verdict.trim());
         Ok(())
+}
+
+/// `process_tree` passed, and the kernel said the two things the guest cannot
+/// see: each B's first spawn was refused by the loader, past the admission that
+/// holds B, and the chain's one depth refusal names `MAX_DEPTH` + 1.
+fn process_tree(back: &metal::Readback) -> Result<(), String> {
+    back.job_passed("test_rs_process_tree")?;
+    let kernel = back.kernel();
+    let log = kernel.text();
+    let unloaded = log.lines().filter(|l| l.contains("spawn: /system/bin/no_such_program: ")).count();
+    if unloaded != 2 {
+        return Err(format!(
+            "the loader refused /system/bin/no_such_program {unloaded} times, not once per B"
+        ));
+    }
+    let refused: Vec<&str> = log.lines().filter(|l| l.contains("spawn: refused under pid ")).collect();
+    if refused.len() != 1 || !refused[0].contains("at depth 65, more than 64 below init") {
+        return Err(format!("the kernel's depth refusals were {refused:?}, not one naming depth 65"));
+    }
+    Ok(())
 }
 
 /// The kernel reopens init by pid after the last handle to it has gone, and

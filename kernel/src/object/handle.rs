@@ -27,7 +27,7 @@ pub enum HandleError {
     BadHandle,
     /// The slot has moved past this handle: closed, or its generations ran out.
     Stale,
-    /// Not the caller's bug at `SYS_NAMESPACE_BUILD`'s connector argument — the sole named exception.
+    /// Ends the caller like the two above, except through [`HandleTable::get_sent`], the one lookup of a handle a peer sent — `SYS_NAMESPACE_BUILD`'s connector and `SYS_SPAWN`'s place — where it is `InvalidArgument`.
     WrongType { held: &'static str, wanted: &'static str },
     /// The handle is fine and does not carry what the call needs.
     Rights { held: Rights, needed: Rights },
@@ -272,6 +272,18 @@ impl HandleTable {
         T::from_ref(&entry.object)
             .cloned()
             .ok_or(HandleError::WrongType { held: entry.object.kind(), wanted: T::NAME })
+    }
+
+    /// [`get`](Self::get) for a handle a peer sent, whose type is that peer's claim rather than proof of a bug in this caller: a wrong type refuses `InvalidArgument`, and every other failure is `get`'s.
+    pub fn get_sent<T: KObjectVariant>(
+        &self,
+        h: RawHandle,
+        need: Rights,
+    ) -> Result<Arc<T>, Refusal> {
+        match self.get::<T>(h, need) {
+            Err(HandleError::WrongType { .. }) => Err(SyscallError::InvalidArgument.into()),
+            other => other.map_err(Refusal::from),
+        }
     }
 
     /// The borrowing accessor, for a call that completes while still holding the guard.

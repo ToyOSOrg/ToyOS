@@ -390,6 +390,22 @@ pub(crate) const CONTROLS: &[Control] = &[
         Fails("interleave::tests::the_last_one_out_is_in_its_process_until_its_teardown_is_done"),
         Fails("teardown::tests::only_the_thread_that_empties_a_claimed_process_tears_it_down"),
     ]),
+    red(PROCLIFE, "mutate-place-skips-the-insert-recheck", None, &[
+        Fails("interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it"),
+    ]),
+    red(PROCLIFE, "mutate-refused-spawn-keeps-the-count", None, &[
+        Fails("interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it"),
+    ]),
+    red(PROCLIFE, "mutate-landed-child-retires-nothing", None, &[
+        Fails("interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it"),
+        Fails("tree::tests::a_child_landed_under_a_place_claimed_since_its_admission_is_claimed_with_it"),
+    ]),
+    red(PROCLIFE, "mutate-publish-before-the-children", None, &[
+        Fails("interleave::tests::an_exit_publishes_after_every_end_below_it"),
+    ]),
+    red(PROCLIFE, "mutate-walk-in-one-hold", None, &[
+        Fails("interleave::tests::a_spawn_under_an_unrelated_process_lands_between_two_claims_of_one_walk"),
+    ]),
     red(SCHED_SIM, "placement-ignores-staleness", Some("policy"), &[
         Fails("a_stopped_cpu_stops_taking_work"),
     ]),

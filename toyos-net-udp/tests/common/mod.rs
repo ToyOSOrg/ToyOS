@@ -208,7 +208,7 @@ impl U {
         ip.join(t, if0, MulticastAddr::new(MDNS).unwrap()).unwrap();
         let t = Instant::from_millis(5_000);
         for (addr, m) in [(B, MAC_B), (DNS, MAC_DNS), (R, MAC_R)] {
-            let _ = ip.resolve(t, if0, addr);
+            let _ = ip.resolve(t, if0, addr, A);
             ip.transmit(t, usize::MAX, |_, _| {});
             let _ = ip.receive(t, if0, &eth(MAC_A, m, 0x0806, &arp(2, m, addr, MAC_A, A)));
         }

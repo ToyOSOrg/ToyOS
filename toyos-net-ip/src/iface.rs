@@ -23,6 +23,8 @@ pub(crate) struct Interface {
     pub gateways: Vec<Ipv4Addr>,
     pub active: Option<Ipv4Addr>,
     pub neighbours: BTreeMap<Ipv4Addr, nud::Neighbour>,
+    /// A send found the table full of entries in use (§6.8), and none has become evictable since.
+    pub full: bool,
     /// Datagrams its entries queue, held for resolution or released and not yet left:
     /// PENDING_TOTAL bounds them (§6.5).
     pub held: usize,

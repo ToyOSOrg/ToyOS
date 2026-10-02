@@ -259,7 +259,7 @@ pub fn framed(t: &Transmission) -> Vec<u8> {
     };
     setup(&mut ip, at(3_000));
     let now = at(3_000);
-    let _ = ip.resolve(now, if0, R);
+    let _ = ip.resolve(now, if0, R, A);
     ip.transmit(now, usize::MAX, |_, _| {});
     let mut reply = MAC_A.0.to_vec();
     reply.extend_from_slice(&MAC_R.0);

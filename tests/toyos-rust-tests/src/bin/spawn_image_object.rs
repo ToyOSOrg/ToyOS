@@ -47,6 +47,7 @@ fn spawn(image: RawHandle, len: u64) -> Result<RawHandle, SyscallError> {
             cwd_len: CWD.len() as u64,
             image: image.0 as u64,
             image_len: len,
+            place: u64::from(toyos_abi::HANDLE_INVALID.0),
         })
     }
 }

@@ -128,14 +128,14 @@ impl Ip {
     }
 
     /// Whether a flow may build a segment for `next_hop` now (§6.7): a flow never parks one in
-    /// [ip], it waits for [`crate::Event::Resolved`] or [`crate::Event::Failed`].
-    pub fn resolve(&mut self, now: Instant, iface: IfIndex, next_hop: Ipv4Addr) -> Resolution {
+    /// [ip]. A request this queues prefers the flow's `source` (§6.3).
+    pub fn resolve(&mut self, now: Instant, iface: IfIndex, next_hop: Ipv4Addr, source: Ipv4Addr) -> Resolution {
         let now = self.clock(now);
         let Some((i, mut cx)) = self.split(now, iface) else { return Resolution::Failed };
         if !i.up {
             return Resolution::Pending;
         }
-        match nud::send(i, &mut cx, next_hop, None) {
+        match nud::send(i, &mut cx, next_hop, Some(source)) {
             Link::Resolved(mac) => Resolution::Resolved(mac),
             Link::Pending => Resolution::Pending,
             Link::Failed(_) => Resolution::Failed,
