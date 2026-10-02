@@ -8,6 +8,7 @@ use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use super::pci::PciDevice;
+use super::serial::BackendGuard;
 use super::virtio::{wait_used, BufDir, DescSlot, Virtqueue, VirtioDevice, VIRTIO_F_VERSION_1};
 use super::DmaPool;
 use crate::log;
@@ -91,8 +92,8 @@ fn refill_rx(c: &mut VConsole, buf_idx: usize, slot: DescSlot) {
     c.desc_to_rx[desc_id as usize] = buf_idx as u8;
 }
 
-/// Synchronous: blocks until the host consumes each chunk. Caller must hold `serial::BackendGuard` with IRQs disabled.
-pub fn write_bytes_locked(bytes: &[u8]) {
+/// Synchronous: blocks until the host consumes each chunk.
+pub fn write_bytes_locked(_: &mut BackendGuard, bytes: &[u8]) {
     with_console(|c| {
         let mut off = 0;
         while off < bytes.len() {
@@ -165,8 +166,8 @@ pub fn write_burst(bytes: &[u8]) {
     });
 }
 
-/// Read one byte from RX. Caller must hold `serial::BackendGuard` with IRQs disabled.
-pub fn try_read_byte_locked() -> Option<u8> {
+/// Read one byte from RX.
+pub fn try_read_byte_locked(_: &mut BackendGuard) -> Option<u8> {
     with_console(|c| {
         if c.rx_pending.is_none() {
             // `slot`/`len` are bounded by `poll_used`: id indexes `desc_to_rx`
@@ -190,8 +191,7 @@ pub fn try_read_byte_locked() -> Option<u8> {
     .flatten()
 }
 
-/// Caller must hold `serial::BackendGuard` with IRQs disabled.
-pub fn has_data_locked() -> bool {
+pub fn has_data_locked(_: &BackendGuard) -> bool {
     with_console(|c| c.rx_pending.is_some() || c.rx.has_used()).unwrap_or(false)
 }
 

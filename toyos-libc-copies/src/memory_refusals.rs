@@ -1,12 +1,9 @@
 //! What libc's memory calls refuse before the kernel or the allocator is
-//! asked: `mmap` a file, executable memory, no bytes, or a fixed place off a
-//! page; `posix_madvise` anything but its five; `madvise` the same, an
+//! asked: `mmap` a file, executable memory, no bytes, a fixed place off a
+//! page, or no one disposition; `posix_madvise` anything but its five; `madvise` the same, an
 //! address off a page, and Linux's discard.
 
-use crate::memreq::{self, MapRefusal, MAP_ANONYMOUS, MAP_FIXED, PROT_EXEC, PROT_READ, PROT_WRITE};
-
-const MAP_SHARED: i32 = 0x01;
-const MAP_PRIVATE: i32 = 0x02;
+use crate::memreq::{self, MapRefusal, MAP_ANONYMOUS, MAP_FIXED, MAP_PRIVATE, MAP_SHARED, PROT_EXEC, PROT_READ, PROT_WRITE};
 
 #[test]
 fn mmap_refuses_what_the_kernel_cannot_map_and_nothing_else() {
@@ -21,6 +18,10 @@ fn mmap_refuses_what_the_kernel_cannot_map_and_nothing_else() {
         (0x4000_0001, 4096, rw, anonymous, None),
         (0x4000_0001, 4096, rw, anonymous | MAP_FIXED, Some(MapRefusal::Invalid)),
         (0, 0, rw, anonymous, Some(MapRefusal::Invalid)),
+        // Neither disposition, and both.
+        (0, 4096, rw, MAP_ANONYMOUS, Some(MapRefusal::Invalid)),
+        (0, 4096, rw, MAP_SHARED | MAP_PRIVATE | MAP_ANONYMOUS, Some(MapRefusal::Invalid)),
+        (0, 4096, PROT_READ, 0, Some(MapRefusal::Invalid)),
         (0, 4096, PROT_READ, MAP_PRIVATE, Some(MapRefusal::File)),
         (0, 4096, rw, MAP_SHARED, Some(MapRefusal::File)),
         (0, 4096, PROT_READ | PROT_EXEC, anonymous, Some(MapRefusal::Exec)),

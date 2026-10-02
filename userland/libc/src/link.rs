@@ -81,7 +81,7 @@ pub unsafe extern "C" fn dladdr(addr: *const u8, info: *mut DlInfo) -> i32 {
             *info = DlInfo {
                 dli_fname: named(module.base, path),
                 dli_fbase: core::ptr::with_exposed_provenance_mut(image.start() as usize),
-                dli_sname: symbol.map_or(core::ptr::null(), |(name, _)| name),
+                dli_sname: symbol.map_or(core::ptr::null(), |(name, _)| name.as_ptr().cast()),
                 dli_saddr: symbol.map_or(core::ptr::null_mut(), |(_, at)| core::ptr::with_exposed_provenance_mut(at as usize)),
             };
         }
@@ -128,16 +128,7 @@ fn named(base: u64, path: &[u8]) -> *const u8 {
     }
 }
 
-/// One whole `SYS_QUERY_MODULES` answer: asked again while a `dlopen`
-/// elsewhere grows it between the size and the read.
+/// One whole `SYS_QUERY_MODULES` answer.
 fn answer() -> Vec<u8> {
-    let mut buf = Vec::new();
-    loop {
-        let need = syscall::query_modules(&mut buf).expect("SYS_QUERY_MODULES refused a buffer this process owns");
-        if need <= buf.len() {
-            buf.truncate(need);
-            return buf;
-        }
-        buf.resize(need, 0);
-    }
+    crate::listing::whole(syscall::query_modules).expect("SYS_QUERY_MODULES refused a buffer this process owns")
 }

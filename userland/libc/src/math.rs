@@ -248,9 +248,13 @@ pub unsafe extern "C" fn modf(x: f64, iptr: *mut f64) -> f64 {
     fraction
 }
 
+/// `math.h`'s `math_errhandling` is `MATH_ERRNO`, so a pole sets `errno`.
 #[no_mangle]
 pub extern "C" fn logb(x: f64) -> f64 {
-    crate::fparts::logb(x)
+    crate::fparts::logb(x).unwrap_or_else(|crate::fparts::Pole| {
+        crate::errno::set(crate::errno::ERANGE);
+        f64::NEG_INFINITY
+    })
 }
 
 // --- Utility functions ---

@@ -1,12 +1,9 @@
 //! Direction one of the gate: macOS writes the volume, this crate reads it.
 //!
-//! Everything asserted here has ground truth outside this repository — the
-//! bytes came from `newfs_msdos` and the macOS `msdosfs` driver, so a reader
-//! that agrees with itself cannot pass.
+//! The bytes came from `newfs_msdos` and the macOS `msdosfs` driver, so a
+//! reader that agrees with itself cannot pass.
 
 mod common;
-
-use std::fs;
 
 use common::{pattern, read_all, sorted_walk, walk_expectation, Image};
 use toyos_fat32::{Error, Fat32};
@@ -20,37 +17,27 @@ struct Fixture {
     files: Vec<(String, Vec<u8>)>,
 }
 
-/// A volume with one of everything that has ever broken a FAT reader.
-fn populated(sectors_per_cluster: u32, cluster_bytes: usize) -> Fixture {
+/// A volume with one of everything that has ever broken a FAT reader, and the
+/// files macOS wrote to it in this order.
+fn populated() -> Fixture {
     let files: Vec<(String, Vec<u8>)> = vec![
         ("UPPER.TXT".into(), b"a pure 8.3 name needs no long entry".to_vec()),
         ("hello.txt".into(), b"lowercase, which 8.3 cannot hold".to_vec()),
         ("A very long file name that needs several LFN entries.txt".into(), b"lfn".to_vec()),
         ("\u{fc}n\u{ef}c\u{f6}d\u{e9}.txt".into(), "non-ascii".as_bytes().to_vec()),
         ("empty.bin".into(), Vec::new()),
-        ("exactly-one-cluster.bin".into(), pattern(cluster_bytes, 1)),
-        ("one-byte-over.bin".into(), pattern(cluster_bytes + 1, 2)),
+        ("exactly-one-cluster.bin".into(), pattern(CLUSTER, 1)),
+        ("one-byte-over.bin".into(), pattern(CLUSTER + 1, 2)),
         ("sub/one.txt".into(), b"in a subdirectory".to_vec()),
         ("sub/nested/deep.bin".into(), pattern(300 * 1024, 3)),
-        ("sub/nested/A Second Long Name.dat".into(), pattern(3 * cluster_bytes, 4)),
+        ("sub/nested/A Second Long Name.dat".into(), pattern(3 * CLUSTER, 4)),
     ];
-
-    let image = Image::new("read", 64 * 1024 * 1024, sectors_per_cluster);
-    image.with_mount(|mount| {
-        for (name, data) in &files {
-            let path = mount.join(name);
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent).expect("mkdir");
-            }
-            fs::write(&path, data).expect("write");
-        }
-    });
-    Fixture { image, files }
+    Fixture { image: Image::fixture("read-512"), files }
 }
 
 #[test]
 fn walk_sees_exactly_what_the_host_wrote() {
-    let fx = populated(1, CLUSTER);
+    let fx = populated();
     let mut fs = Fat32::mount(fx.image.device()).expect("mount");
 
     assert_eq!(sorted_walk(&mut fs), walk_expectation(&fx.files));
@@ -60,7 +47,7 @@ fn walk_sees_exactly_what_the_host_wrote() {
 /// Ignoring those bits reports `HELLO.TXT`, which is a different file name.
 #[test]
 fn lowercase_short_names_survive() {
-    let fx = populated(1, CLUSTER);
+    let fx = populated();
     let mut fs = Fat32::mount(fx.image.device()).expect("mount");
     let names: Vec<String> = fs.read_dir("", 64).expect("read_dir").into_iter().map(|e| e.name).collect();
     assert!(names.contains(&String::from("hello.txt")), "{names:?}");
@@ -69,7 +56,7 @@ fn lowercase_short_names_survive() {
 
 #[test]
 fn every_file_reads_back_byte_for_byte() {
-    let fx = populated(1, CLUSTER);
+    let fx = populated();
     let mut fs = Fat32::mount(fx.image.device()).expect("mount");
     for (name, data) in &fx.files {
         assert_eq!(&read_all(&mut fs, name), data, "contents of {name}");
@@ -79,7 +66,7 @@ fn every_file_reads_back_byte_for_byte() {
 
 #[test]
 fn reads_land_correctly_at_every_offset_and_length() {
-    let fx = populated(1, CLUSTER);
+    let fx = populated();
     let mut fs = Fat32::mount(fx.image.device()).expect("mount");
     let name = "sub/nested/deep.bin";
     let truth = &fx.files.iter().find(|(n, _)| n == name).expect("fixture").1;
@@ -103,7 +90,7 @@ fn reads_land_correctly_at_every_offset_and_length() {
 
 #[test]
 fn subdirectories_list_independently() {
-    let fx = populated(1, CLUSTER);
+    let fx = populated();
     let mut fs = Fat32::mount(fx.image.device()).expect("mount");
 
     let mut top: Vec<String> = fs.read_dir("sub", 64).expect("read_dir").into_iter().map(|e| e.name).collect();
@@ -122,7 +109,7 @@ fn subdirectories_list_independently() {
 /// and no file behind it. A reader that treats it as a file invents one.
 #[test]
 fn the_volume_label_is_not_a_file() {
-    let fx = populated(1, CLUSTER);
+    let fx = populated();
     let mut fs = Fat32::mount(fx.image.device()).expect("mount");
     let names: Vec<String> = fs.read_dir("", 64).expect("read_dir").into_iter().map(|e| e.name).collect();
     assert!(!names.iter().any(|n| n.starts_with("TF")), "label leaked into the listing: {names:?}");
@@ -130,7 +117,7 @@ fn the_volume_label_is_not_a_file() {
 
 #[test]
 fn missing_paths_are_not_found_rather_than_anything_else() {
-    let fx = populated(1, CLUSTER);
+    let fx = populated();
     let mut fs = Fat32::mount(fx.image.device()).expect("mount");
     assert_eq!(fs.open("nope.txt").unwrap_err(), Error::NotFound);
     assert_eq!(fs.open("sub/nope.txt").unwrap_err(), Error::NotFound);
@@ -144,7 +131,7 @@ fn missing_paths_are_not_found_rather_than_anything_else() {
 /// looks for `EFI/BOOT/BOOTX64.EFI`.
 #[test]
 fn lookup_ignores_case() {
-    let fx = populated(1, CLUSTER);
+    let fx = populated();
     let mut fs = Fat32::mount(fx.image.device()).expect("mount");
     assert!(fs.exists("HELLO.TXT").expect("exists"));
     assert!(fs.exists("upper.txt").expect("exists"));
@@ -154,7 +141,7 @@ fn lookup_ignores_case() {
 
 #[test]
 fn extents_cover_the_file_and_point_at_its_bytes() {
-    let fx = populated(1, CLUSTER);
+    let fx = populated();
     let mut fs = Fat32::mount(fx.image.device()).expect("mount");
     let name = "sub/nested/deep.bin";
     let truth = &fx.files.iter().find(|(n, _)| n == name).expect("fixture").1;
@@ -192,17 +179,7 @@ fn a_four_kib_cluster_volume_reads_the_same() {
     ];
     // 65_525 clusters of 4 KiB is the floor for FAT32, so this volume cannot
     // be smaller. It is sparse, so it costs what is written to it.
-    let image = Image::new("read4k", 300 * 1024 * 1024, 8);
-    image.with_mount(|mount| {
-        for (name, data) in &files {
-            let path = mount.join(name);
-            if let Some(p) = path.parent() {
-                fs::create_dir_all(p).expect("mkdir");
-            }
-            fs::write(&path, data).expect("write");
-        }
-    });
-
+    let image = Image::fixture("read-4k");
     let mut fs = Fat32::mount(image.device()).expect("mount");
     assert_eq!(fs.geometry().bytes_per_cluster(), 4096);
     for (name, data) in &files {

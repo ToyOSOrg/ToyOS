@@ -761,12 +761,6 @@ fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
     // leave the machine changed by a hand-over that did not happen.
     let Space { space, lend } = slot_space(slot).map_err(Refusal::Untranslated)?;
 
-    // Held across every walk this hand-over makes of the function's own list —
-    // both readers below and the MSI fallback between them — so the staged
-    // shape is the device's and not one reader's view of it.
-    #[cfg(feature = "boot-actuators")]
-    let _staged = crate::drivers::pci::StagedCaps::armed_for(&pci);
-
     // The table's own BAR, so it can be left where it is and kept out of what
     // the holder maps.
     let table_bar = msix_bar(&pci);
@@ -936,11 +930,7 @@ impl Kept {
     /// is half-written. [`bring_up`] turns decode on again.
     fn restore(&self, pci: &PciDevice) {
         pci.set_memory_decode(false);
-        let lost = crate::actuator::pcidev_bar_lost_on_reset().then(|| msix_bar(pci));
         for (index, bar) in self.bars.iter().enumerate().take(self.slots as usize) {
-            if lost.is_some_and(|table| table != Some(index as u8)) {
-                continue;
-            }
             pci.write_config_u32(bar::BASE + index as u64 * 4, *bar);
         }
         if let (Some((control, second)), Ok(cap)) = (self.control, pci.capability(express::CAP_ID)) {
@@ -987,8 +977,6 @@ enum Declined {
     /// The function is not in D0, so a round trip from it is not one this
     /// kernel knows the timing of.
     NotInD0,
-    /// `pcidev-reset-nothing` declined it without asking the function.
-    Staged,
 }
 
 impl core::fmt::Display for Declined {
@@ -999,7 +987,6 @@ impl core::fmt::Display for Declined {
             Self::NoFlr => "no function level reset advertised",
             Self::NoSoftReset => "No_Soft_Reset set",
             Self::NotInD0 => "not in D0",
-            Self::Staged => "declined unasked, as staged",
         })
     }
 }
@@ -1046,10 +1033,6 @@ impl core::fmt::Display for How {
 /// in its place, then the D3hot round trip, which resets any function that
 /// does not say `No_Soft_Reset`.
 fn reset(pci: &PciDevice) -> (How, Option<Resetting>) {
-    if crate::actuator::pcidev_reset_nothing() {
-        let staged = Declined::Staged;
-        return (How::Nothing { express: staged, af: staged, pm: staged }, None);
-    }
     let now = crate::clock::nanos_since_boot();
     let express = match pci.capability(express::CAP_ID) {
         Ok(cap) if express::resets(cap.read_u32(express::DEVICE_CAPABILITIES)) => {
@@ -1109,30 +1092,6 @@ fn settle_after_reset(pci: &PciDevice) {
         wait_until(crate::clock::nanos_since_boot() + pm::TRANSITION_NANOS);
     }
     kept.restore(pci);
-    if crate::actuator::pcidev_bar_moved_on_reset() && matches!(resetting, Resetting::Flr { .. }) {
-        move_inside_its_window(pci);
-    }
-}
-
-/// [`crate::actuator::pcidev_bar_moved_on_reset`]: BAR 0 one BAR's size above
-/// the window it was cut, so the register decodes an address that is not the
-/// cut and that nothing else decodes.
-fn move_inside_its_window(pci: &PciDevice) {
-    let (at, span) = {
-        let who = requester(pci);
-        let machine = MACHINE.lock();
-        let &(_, _, at, span) = machine
-            .windows
-            .iter()
-            .find(|(w, i, _, _)| *w == who && *i == 0)
-            .expect("pcidev-bar-moved-on-reset: BAR 0 of a reset function was never cut");
-        (at, span)
-    };
-    let size = pci.bar_size(0).expect("pcidev-bar-moved-on-reset: BAR 0 does not size");
-    assert!(size < span, "pcidev-bar-moved-on-reset: BAR 0 fills its window, so no address inside it is not the cut");
-    let low = pci.read_config_u32(bar::BASE);
-    assert_eq!(u64::from(low & !0xf), at & 0xffff_ffff, "pcidev-bar-moved-on-reset: BAR 0 was not restored to its cut");
-    pci.write_config_u32(bar::BASE, low + size as u32);
 }
 
 fn wait_until(at: u64) {
@@ -1570,13 +1529,12 @@ pub fn dma_alloc(
                 Err(why) => refused(why),
             },
         };
-        let first = bound.grants.is_empty();
         let origin = Origin::Allocated { residual };
         bound.grants.push(Grant { memory: Arc::clone(&memory), at, bytes: span, origin });
         // After the mapping and never before: the first thing this function may
         // reach has to exist before it may reach anything.
         bound.start_mastering();
-        Ok((memory, foreign_if_armed(first, &bound.pci, at), span))
+        Ok((memory, at, span))
     })
 }
 
@@ -1670,28 +1628,6 @@ pub fn dma_unmap(slot: usize, at: u64) -> Result<(), SyscallError> {
     // zero-handle teardown, which takes other objects' locks.
     drop(grant);
     Ok(())
-}
-
-/// The address a grant answers with, or — for a network function's first
-/// grant, with the actuator armed — another driver's pool.
-///
-/// The grant is real and mapped; only the address the driver is *told* is one
-/// this function's domain does not have, so what the device is pointed at is a
-/// wrong descriptor rather than a driver written to misbehave.
-fn foreign_if_armed(first: bool, pci: &PciDevice, at: u64) -> u64 {
-    // A network function's alone: the staging is netd's, and any other claim
-    // it met would fail beside it and give its slot up.
-    #[cfg(feature = "boot-actuators")]
-    if first && crate::actuator::iommu_userdev_foreign_dma() && pci.matches_class(0x02, 0x00, None) {
-        let foreign =
-            crate::drivers::xhci::FOREIGN_PROBE.load(core::sync::atomic::Ordering::Relaxed);
-        if foreign != 0 {
-            return foreign;
-        }
-    }
-    #[cfg(not(feature = "boot-actuators"))]
-    let _ = (first, pci);
-    at
 }
 
 /// The window a claim's configuration reads are checked against, for the one

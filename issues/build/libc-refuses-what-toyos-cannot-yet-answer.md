@@ -8,11 +8,11 @@ opened: 2026-10-01
 
 These answer failure in their POSIX form and do nothing
 (`userland/libc/src/refused.rs`, `posix_io.rs`), each asserted by
-`tests/testcases/tinycc/206_libc_refusals.c`. A program that calls one and
-carries on without it runs; one that needs it does not. Each waits on what it
-names:
+`tests/testcases/tinycc/206_libc_refusals.c`. Each waits on what it names:
 
 - `link`, `ENOSYS`: no call gives a file a second name.
+- `symlink`, `ENOSYS`: `SYS_SYMLINK` displaces what its name held
+  (`issues/filesystem/a-symbolic-link-on-tmp-displaces-its-name-and-lists-nowhere.md`).
 - `chmod` and `fchmod`, `ENOSYS`: a file has no mode bits to set.
 - `statvfs` and `fstatvfs`, `ENOSYS`: no call answers a filesystem's size or
   free space.
@@ -32,11 +32,12 @@ names:
   keeps it mapped, so it cannot read back as zeros as Linux's does.
 - `fcntl`: a record lock, `EINVAL`, POSIX's answer for a file that supports no
   locking; `F_DUPFD_CLOEXEC`, `F_GETFL`, `F_SETFL`, `F_GETOWN` and `F_SETOWN`,
-  `ENOSYS`. `F_GETFD` and `F_SETFD` answer 0 and keep nothing: close-on-exec is
-  the descriptor table of stage 3 of
-  `issues/kernel/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`.
-  `F_DUPFD` answers a duplicate at or above its argument, the first the kernel
-  hands `dup`, where POSIX has the lowest free number.
+  `ENOSYS`. `F_DUPFD` answers a duplicate at or above its argument, the first
+  the kernel hands `dup`, where POSIX has the lowest free number, and refuses
+  `EINVAL` an argument at or above the slots a handle table has
+  (`RawHandle::MAX_SLOTS`). `F_GETFD` and `F_SETFD` of a descriptor the
+  process does not hold answer 0, where POSIX has `EBADF`: the kernel ends a
+  process that names a handle it does not hold, so libc asks it nothing.
 
 Ruled out, and owed nothing while the ruling stands: `execv` and `execve`, no
 call replacing a process's image; `setsid` and `getsid`, no POSIX session;

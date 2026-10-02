@@ -4,6 +4,7 @@ use std::sync::OnceLock;
 use std::fs;
 
 use toyos_build::clang::CSysroot;
+use toyos_build::sysroot::Sysroot;
 
 /// Root of the repository.
 pub fn repo_root() -> PathBuf {
@@ -17,15 +18,14 @@ pub fn testcases_dir() -> PathBuf {
 
 /// The C sysroot every C program here is built against, and the clang that
 /// builds it: the toolchain's own, for the suite's architecture. Once per
-/// process — a hundred and fifty C programs build against it.
+/// process, and held in use by the static until the process ends.
 pub fn c_sysroot() -> CSysroot {
-    static C: OnceLock<CSysroot> = OnceLock::new();
-    C.get_or_init(|| {
+    static SYSROOT: OnceLock<Sysroot> = OnceLock::new();
+    let sysroot = SYSROOT.get_or_init(|| {
         let mut lock = toyos_build::buildlock::shared(&repo_root(), "the C sysroot");
-        let sysroot = toyos_build::toolchain::ensure(&repo_root(), &mut lock);
-        CSysroot::of(&sysroot.dir, super::qemu::SUITE_ARCH)
-    })
-    .clone()
+        toyos_build::toolchain::ensure(&repo_root(), &mut lock)
+    });
+    CSysroot::of(sysroot.dir(), super::qemu::SUITE_ARCH)
 }
 
 /// The one flag the corpus is compiled with beyond the target and sysroot:
@@ -92,9 +92,7 @@ pub fn compile_c(name: &str) -> Vec<PathBuf> {
 ///
 /// An image whose lowest address is 0 hides a table reported from the load bias
 /// instead of the image's first byte; the case prints its lowest `PT_LOAD`, so
-/// an entry that stops reaching its case reds it. The libraries POSIX has a C
-/// compiler take are named by one case, so a C sysroot without one of them
-/// builds no corpus.
+/// an entry that stops reaching its case reds it.
 const LINK_FLAGS: &[(&str, &[&str])] = &[
     ("205_dl_iterate_phdr_image_base", &["-Wl,--image-base=0x200000"]),
     ("206_libc_refusals", &["-lc", "-lm", "-lpthread", "-ldl", "-lrt"]),

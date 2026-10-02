@@ -1,11 +1,12 @@
 //! Host-side scaffolding: real FAT32 images made by macOS, devices that carry
 //! them, and the volume-checker gate.
 //!
-//! Nothing here formats a volume. The images come from `newfs_msdos`, are
-//! populated through a real mount, and are judged by `toyos-fat32-check`, which
-//! is written from the specification and shares no code with this crate — so
-//! the ground truth on both sides of every test is something other than the
-//! driver under test.
+//! Nothing here formats a volume. The images are `tests/fixtures/`: macOS's
+//! `newfs_msdos` formatted each and its `msdosfs` populated it, once, and
+//! `NOTICE` records the commands and the release. They are judged by
+//! `toyos-fat32-check`, which is written from the specification and shares no
+//! code with this crate — so the ground truth on both sides of every test is
+//! something other than the driver under test.
 //!
 //! **A device here standing in for the kernel adapter models that adapter's
 //! cache wherever the two can differ.** A write refused after it reached the
@@ -22,44 +23,9 @@ use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Mutex;
 
 use toyos_fat32::{BlockAccess, IoError};
 use toyos_tmpdir::TempDir;
-
-/// `hdiutil` hands out device nodes from one global pool and mounts into one
-/// global `/Volumes`. Two tests attaching at once is a race in macOS, not in
-/// this crate, so attach/detach pairs are serialised.
-static HDIUTIL: Mutex<()> = Mutex::new(());
-
-static LABEL_SEQ: AtomicU32 = AtomicU32::new(0);
-
-fn run(cmd: &mut Command) -> (bool, String) {
-    let out = cmd.output().unwrap_or_else(|e| panic!("failed to run {cmd:?}: {e}"));
-    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-    text.push_str(&String::from_utf8_lossy(&out.stderr));
-    (out.status.success(), text)
-}
-
-/// Delete every `._*` AppleDouble sidecar `root` or a directory under it
-/// holds — recursively, since macOS drops one beside any file it touches on
-/// a mount at any depth. A directory that vanished mid-walk (macOS removing
-/// its own sidecar concurrently) is not an error: there is nothing left in
-/// it to delete.
-fn delete_apple_double_sidecars(root: &Path) {
-    let Ok(entries) = std::fs::read_dir(root) else { return };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        if is_dir {
-            delete_apple_double_sidecars(&path);
-        } else if path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("._")) {
-            let _ = std::fs::remove_file(&path);
-        }
-    }
-}
 
 // ---------------------------------------------------------------- devices
 
@@ -435,46 +401,35 @@ impl AdapterCache {
 
 pub struct Image {
     pub path: PathBuf,
-    label: String,
     /// Where the image file is, gone with it.
     _dir: TempDir,
 }
 
 impl Image {
-    /// A sparse file of `bytes`, formatted by `newfs_msdos -F 32` through a
-    /// `hdiutil` device node.
+    /// `tests/fixtures/<name>.runs` expanded into a sparse file of this test's
+    /// own, which the test may write.
     ///
-    /// `newfs_msdos` refuses a plain file — it wants a device to ask for the
-    /// partition offset — so the file is attached first. The file stays sparse
-    /// throughout, which is what makes a 300 MB volume with 4 KiB clusters
-    /// affordable.
-    pub fn new(name: &str, bytes: u64, sectors_per_cluster: u32) -> Image {
-        let seq = LABEL_SEQ.fetch_add(1, Ordering::Relaxed);
-        let label = format!("TF{:09}", (std::process::id() * 1000 + seq) % 1_000_000_000);
+    /// The form is the image's length, then each run of nonzero 512-byte
+    /// sectors as its offset, its length and its bytes, every number a
+    /// little-endian `u64`. Everything between two runs is zero, which a sparse
+    /// file holds for nothing, so a 300 MB volume with 4 KiB clusters costs what
+    /// is on it.
+    pub fn fixture(name: &str) -> Image {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/fixtures/{name}.runs"));
+        let runs = std::fs::read(&source).unwrap_or_else(|e| panic!("{}: {e}", source.display()));
+        let word = |at: usize| u64::from_le_bytes(runs[at..at + 8].try_into().expect("eight bytes"));
         let dir = TempDir::new(&format!("fat32-{name}"));
-        let path = dir.join(format!("{label}.img"));
+        let path = dir.join(format!("{name}.img"));
         let file = File::create(&path).expect("create image");
-        file.set_len(bytes).expect("size image");
-        drop(file);
-
-        let guard = HDIUTIL.lock().unwrap_or_else(|e| e.into_inner());
-        let dev = attach(&path, false).0;
-        let (ok, out) = run(Command::new("/sbin/newfs_msdos").args([
-            "-F",
-            "32",
-            "-S",
-            "512",
-            "-c",
-            &sectors_per_cluster.to_string(),
-            "-v",
-            &label,
-            &dev,
-        ]));
-        detach(&dev);
-        drop(guard);
-        assert!(ok, "newfs_msdos failed on {}:\n{out}", path.display());
-
-        Image { path, label, _dir: dir }
+        file.set_len(word(0)).expect("size image");
+        let mut at = 8;
+        while at < runs.len() {
+            let (offset, len) = (word(at), word(at + 8) as usize);
+            assert!(offset + len as u64 <= word(0), "{}: a run at {offset} ends past the image", source.display());
+            file.write_all_at(&runs[at + 16..at + 16 + len], offset).expect("write a run");
+            at += 16 + len;
+        }
+        Image { path, _dir: dir }
     }
 
     pub fn size(&self) -> u64 {
@@ -498,26 +453,6 @@ impl Image {
         assert_fats_agree(g, &self.bytes(g.fat_base_offset(g.num_fats) as usize));
     }
 
-    /// Attach and mount, run `f`, remove the files macOS leaves behind, and
-    /// detach.
-    pub fn with_mount<T>(&self, f: impl FnOnce(&Path) -> T) -> T {
-        let guard = HDIUTIL.lock().unwrap_or_else(|e| e.into_inner());
-        let (dev, mount) = attach(&self.path, true);
-        let mount = mount.unwrap_or_else(|| panic!("{} did not mount", self.path.display()));
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(Path::new(&mount))));
-        // AppleDouble sidecars and Spotlight state are macOS's, not the test's.
-        delete_apple_double_sidecars(Path::new(&mount));
-        for junk in [".fseventsd", ".Spotlight-V100", ".Trashes", ".TemporaryItems"] {
-            let _ = std::fs::remove_dir_all(Path::new(&mount).join(junk));
-        }
-        detach(&dev);
-        drop(guard);
-        match result {
-            Ok(v) => v,
-            Err(p) => std::panic::resume_unwind(p),
-        }
-    }
-
     /// Assert the volume checker finds nothing to complain about.
     ///
     /// Silence is the whole gate: [`toyos_fat32_check::check`] answers with the
@@ -533,37 +468,6 @@ impl Image {
             toyos_fat32_check::describe(&complaints)
         );
     }
-}
-
-fn attach(path: &Path, mount: bool) -> (String, Option<String>) {
-    let mut cmd = Command::new("/usr/bin/hdiutil");
-    cmd.args(["attach", "-imagekey", "diskimage-class=CRawDiskImage", "-nobrowse"]);
-    if !mount {
-        cmd.arg("-nomount");
-    }
-    cmd.arg(path);
-    let (ok, out) = run(&mut cmd);
-    assert!(ok, "hdiutil attach failed for {}:\n{out}", path.display());
-
-    let line = out.lines().find(|l| l.starts_with("/dev/")).unwrap_or_else(|| {
-        panic!("no device node in hdiutil output for {}:\n{out}", path.display())
-    });
-    let mut parts = line.split('\t').map(str::trim);
-    let dev = parts.next().unwrap_or_default().to_string();
-    let mount = line.split('\t').map(str::trim).find(|p| p.starts_with("/Volumes/")).map(String::from);
-    (dev, mount)
-}
-
-fn detach(dev: &str) {
-    for _ in 0..10 {
-        let (ok, _) = run(Command::new("/usr/bin/hdiutil").args(["detach", dev]));
-        if ok {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(200));
-    }
-    let (ok, out) = run(Command::new("/usr/bin/hdiutil").args(["detach", "-force", dev]));
-    assert!(ok, "could not detach {dev}:\n{out}");
 }
 
 // ------------------------------------------------------------- assertions

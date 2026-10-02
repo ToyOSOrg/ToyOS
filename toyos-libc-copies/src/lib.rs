@@ -4,13 +4,10 @@
 //! against `copy_within` and `fill`, with the two buffers overlapping both ways;
 //! and its square roots against `f64::sqrt` and `f32::sqrt`. Each host
 //! architecture checks its own module. The UTF-8 reader against
-//! `core::str::from_utf8`, the number reader against the host C library's,
-//! AArch64's `long double` widening against compiler-builtins', and the errno
-//! codes against `include/errno.h`. `strnlen`, `modf` and `logb` against the
-//! host C library's, `strsignal`'s texts, a signal mask's changes, the readdir
-//! answer's reader, `dladdr`'s symbol search on an image laid out here, and
-//! what the memory calls refuse. And libc's headers against its definitions
-//! (`prototypes`).
+//! `core::str::from_utf8`, the number reader against the host C library's and
+//! IEEE 754's rounding of hexadecimal input computed exactly, AArch64's
+//! `long double` widening against compiler-builtins', and the errno codes
+//! against `include/errno.h`.
 
 #[cfg(test)]
 extern crate alloc;
@@ -22,8 +19,14 @@ mod arch;
 #[path = "../../userland/libc/src/elfsym.rs"]
 mod elfsym;
 #[cfg(test)]
+#[path = "../../userland/libc/src/fdreq.rs"]
+mod fdreq;
+#[cfg(test)]
 #[path = "../../userland/libc/src/fparts.rs"]
 mod fparts;
+#[cfg(test)]
+#[path = "../../userland/libc/src/linkreq.rs"]
+mod linkreq;
 #[cfg(test)]
 #[path = "../../userland/libc/src/listing.rs"]
 mod listing;
@@ -44,11 +47,19 @@ mod text;
 mod utf8;
 
 #[cfg(test)]
+mod descriptor_requests;
+#[cfg(test)]
 mod dladdr_symbols;
 #[cfg(test)]
 mod errno_codes;
 #[cfg(test)]
+mod exact_hex;
+#[cfg(test)]
 mod fparts_differential;
+#[cfg(test)]
+mod header;
+#[cfg(test)]
+mod link_requests;
 #[cfg(test)]
 mod listing_reader;
 #[cfg(all(test, target_arch = "aarch64"))]

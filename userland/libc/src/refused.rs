@@ -1,6 +1,4 @@
-//! What this C library refuses. Each function sets `errno` to `ENOSYS`, which
-//! POSIX spells "functionality not supported", answers failure in its own
-//! POSIX form, and does nothing else. What each waits on is
+//! What this C library refuses. What each waits on is
 //! `issues/build/libc-refuses-what-toyos-cannot-yet-answer.md`'s.
 
 use core::ptr;
@@ -51,6 +49,13 @@ pub unsafe extern "C" fn uname(_buf: *mut u8) -> i32 {
 /// No filesystem ToyOS mounts keeps a second name for a file.
 #[no_mangle]
 pub unsafe extern "C" fn link(_existing: *const u8, _new: *const u8) -> i32 {
+    refuse()
+}
+
+/// `SYS_SYMLINK` displaces whatever holds the name, where POSIX refuses one
+/// that exists, and a question asked first races its answer.
+#[no_mangle]
+pub unsafe extern "C" fn symlink(_target: *const u8, _link: *const u8) -> i32 {
     refuse()
 }
 

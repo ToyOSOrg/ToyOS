@@ -5,6 +5,7 @@ getsid: -1, ENOSYS
 gethostname: -1, ENOSYS
 uname: -1, ENOSYS
 link: -1, ENOSYS
+symlink: -1, ENOSYS
 fchown: -1, ENOSYS
 chmod: -1, ENOSYS
 fchmod: -1, ENOSYS
@@ -18,9 +19,15 @@ realpath: -1, ENOSYS
 fcntl F_SETLK: -1, EINVAL
 fcntl F_SETLKW: -1, EINVAL
 fcntl F_GETLK: -1, EINVAL
+fcntl F_GETFD: 0
+fcntl F_SETFD FD_CLOEXEC: 0; F_GETFD: 1
+fcntl F_DUPFD 10: 10 or above; fstat of it: the file's one byte; F_GETFD of it: 0
+fcntl F_SETFD 0: 0; F_GETFD: 0
+open O_CLOEXEC; F_GETFD: 1
+dup2 onto it: answered it; F_GETFD: 0
 fcntl F_DUPFD -1: -1, EINVAL
+fcntl F_DUPFD 4096: -1, EINVAL
 fcntl F_DUPFD_CLOEXEC: -1, ENOSYS
-fcntl F_DUPFD 10: 10 or above; fstat of it: the file's one byte
 fcntl F_GETFL: -1, ENOSYS
 fcntl F_SETFL: -1, ENOSYS
 fcntl 12345: -1, EINVAL
@@ -32,6 +39,9 @@ mmap a file shared: -1, ENODEV
 mmap a file shared at a page: -1, ENODEV
 mmap executable: -1, ENOTSUP
 mmap nothing: -1, EINVAL
+malloc SIZE_MAX: -1, ENOMEM
+calloc SIZE_MAX 2: -1, ENOMEM
+realloc SIZE_MAX: -1, ENOMEM
 sysconf _SC_ARG_MAX: -1, no errno
 sysconf _SC_GETPW_R_SIZE_MAX: -1, no errno
 sysconf 12345: -1, EINVAL

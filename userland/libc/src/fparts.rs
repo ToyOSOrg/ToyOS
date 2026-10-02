@@ -37,24 +37,27 @@ pub(crate) fn modf(x: f64) -> (f64, f64) {
     (int, x - int)
 }
 
+/// `logb` at a zero: POSIX's pole error, `-inf` with `errno` `ERANGE`.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Pole;
+
 /// `logb`: the exponent of `x` as a double, the one a normalized `x` would
-/// have for a subnormal; `-inf` for a zero, `+inf` for an infinity, the NaN
-/// for a NaN.
-pub(crate) fn logb(x: f64) -> f64 {
+/// have for a subnormal; `+inf` for an infinity, the NaN for a NaN.
+pub(crate) fn logb(x: f64) -> Result<f64, Pole> {
     if x.is_nan() {
-        return x;
+        return Ok(x);
     }
     if x.is_infinite() {
-        return f64::INFINITY;
+        return Ok(f64::INFINITY);
     }
     if x == 0.0 {
-        return f64::NEG_INFINITY;
+        return Err(Pole);
     }
     let e = exponent(x);
     if e > -BIAS {
-        return f64::from(e);
+        return Ok(f64::from(e));
     }
     // Subnormal: `mantissa * 2^-1074`, whose top set bit is the exponent.
     let mantissa = x.to_bits() & ((1u64 << MANTISSA_BITS) - 1);
-    f64::from(63 - mantissa.leading_zeros() as i32 - 1074)
+    Ok(f64::from(63 - mantissa.leading_zeros() as i32 - 1074))
 }

@@ -4,6 +4,7 @@
 
 use std::collections::BTreeSet;
 
+use crate::header;
 use crate::text;
 
 extern "C" {
@@ -57,17 +58,7 @@ fn text_of(sig: i32) -> String {
 
 #[test]
 fn every_signal_signal_h_numbers_has_glibcs_text() {
-    let header = include_str!("../../userland/libc/include/signal.h");
-    // `#define SIGHUP 1`, and not `SIG_DFL` or `SIG_BLOCK`.
-    let numbered: Vec<(&str, i32)> = header
-        .lines()
-        .filter_map(|line| line.strip_prefix("#define "))
-        .filter_map(|rest| {
-            let mut words = rest.split_whitespace();
-            let name = words.next().filter(|n| n.starts_with("SIG") && !n.contains('_'))?;
-            Some((name, words.next()?.parse().ok()?))
-        })
-        .collect();
+    let numbered = header::signals();
     assert_eq!(numbered.len(), GLIBC.len(), "signal.h numbers {numbered:?}");
     let mut texts = BTreeSet::new();
     for (name, sig) in numbered {

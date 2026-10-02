@@ -36,9 +36,8 @@ pub struct Arm {
     /// Named rather than derived from (config, parameters), because sharing is
     /// not always safe and only the author knows: `mkdir_cap` fills the
     /// machine-wide directory cap and leaves it there, so `readdir_bound`'s own
-    /// `create_dir` on that boot is refused with `OutOfMemory` and it panics —
-    /// which is why each has a boot of its own in QEMU too. A test that must
-    /// not share names its own; it costs a minute and it says so.
+    /// `create_dir` on that boot is refused with `OutOfMemory` and it panics. A
+    /// test that must not share names its own; it costs a minute and it says so.
     pub boot: &'static str,
     /// The boot config's directory, relative to the repository root.
     pub config: &'static str,
@@ -68,14 +67,6 @@ pub struct Arm {
     /// runs a command there and tells it to reboot. `false` on every boot whose
     /// judge reads the stick alone.
     pub talk: bool,
-    /// **The boot has one of its services swapped while it runs**, with no
-    /// reboot: its image is staged as a talking boot's is, the invocation
-    /// that flashes it is not told `--talk`, and a second invocation —
-    /// `toyos-metal --swap <this service>`, started beside the first — dials
-    /// the machine under its own name, sends the build's own binary of that
-    /// service and writes [`toyos_build::metal::READBACK_SWAP`] beside the
-    /// stick's files.
-    pub swap: Option<&'static str>,
 }
 
 /// The ordinary arm: one boot, and the fields a caller must still say.
@@ -89,7 +80,7 @@ pub const fn once(
     params: &'static [&'static str],
     jobs: &'static [&'static str],
 ) -> Arm {
-    Arm { boot, config, params, jobs, features: &[], nic: None, talk: false, swap: None }
+    Arm { boot, config, params, jobs, features: &[], nic: None, talk: false }
 }
 
 /// One boot carrying members that are **discovered rather than registered**.
@@ -166,17 +157,11 @@ fn sized(shared: &[SharedBoot]) -> Vec<SharedBoot> {
     out
 }
 
-/// Whether a registration runs on the T14, and how.
-pub enum Metal {
-    /// It does not, and why — a row rather than a silence, because "no metal
-    /// declaration" is the answer for the hundred tests nobody has looked at
-    /// and this is the answer for one somebody has.
-    QemuOnly(&'static str),
-    Runs {
-        arms: &'static [Arm],
-        /// The readbacks in `arms` order.
-        judge: fn(&[&Readback]) -> Result<(), String>,
-    },
+/// How a registration runs on the T14.
+pub struct Metal {
+    pub arms: &'static [Arm],
+    /// The readbacks in `arms` order.
+    pub judge: fn(&[&Readback]) -> Result<(), String>,
 }
 
 /// What one boot left on the stick, and what the host clock saw of it.
@@ -248,20 +233,6 @@ impl Readback {
         let at = self.home.join(toyos_build::metal::READBACK_STREAM);
         let stream = std::fs::read_to_string(&at).map_err(|e| format!("{}: {e}", at.display()))?;
         Ok((heard, stream.split_inclusive('\n').map(str::to_string).collect()))
-    }
-
-    /// What the swap invocation beside this boot heard, and the stream it
-    /// received — or why a swapping boot has neither.
-    pub fn swap(&self) -> Result<(toyos_build::metalswap::Swapped, Vec<String>), String> {
-        let at = self.home.join(toyos_build::metal::READBACK_SWAP);
-        let text = std::fs::read_to_string(&at).map_err(|e| {
-            format!("{}: {e} — no `toyos-metal --swap` ran beside this boot", at.display())
-        })?;
-        let swapped = toyos_build::metalswap::Swapped::parse(&text)?
-            .ok_or_else(|| format!("{} names no swap:\n{text}", at.display()))?;
-        let at = self.home.join(toyos_build::metal::READBACK_SWAP_STREAM);
-        let stream = std::fs::read_to_string(&at).map_err(|e| format!("{}: {e}", at.display()))?;
-        Ok((swapped, stream.split_inclusive('\n').map(str::to_string).collect()))
     }
 
     /// One file off the log volume that is neither the loader's nor `logd`'s,
@@ -436,9 +407,8 @@ impl Readback {
     /// name would find nothing on a perfectly good boot.
     ///
     /// **And the name alone does not identify one process.** A guest binary that
-    /// cannot ask what a handle it does not hold does — the pattern
-    /// `handle_kill_policy` is built on — re-executes *itself*, one child per
-    /// fault, and every child is recorded under that same name with whatever
+    /// cannot ask what a handle it does not hold does re-executes *itself*, one
+    /// child per fault, and every child is recorded under that same name with whatever
     /// exit the fault gave it. Measured on a metal-shaped guest that binary left
     /// forty-two records reading `code=139` and the job's own reading zero, and
     /// the last of them is a child. The job's is the one with the **lowest
@@ -550,8 +520,6 @@ struct Batch {
     nic: Option<&'static str>,
     /// [`Arm::talk`], carried to the image and to the invocation.
     talk: bool,
-    /// [`Arm::swap`], carried to the image, the invocation and the second one.
-    swap: Option<&'static str>,
 }
 
 impl Batch {
@@ -597,7 +565,6 @@ fn batches(
                 links: boot.links.clone(),
                 nic: None,
                 talk: false,
-                swap: None,
             },
         );
         if was.is_some() {
@@ -605,7 +572,7 @@ fn batches(
         }
     }
     for (name, decl) in tests {
-        let Metal::Runs { arms, .. } = decl else { continue };
+        let Metal { arms, .. } = decl;
         for arm in *arms {
             let batch = out.entry(arm.boot.to_string()).or_insert_with(|| Batch {
                 config: arm.config,
@@ -616,14 +583,12 @@ fn batches(
                 links: Vec::new(),
                 nic: arm.nic,
                 talk: arm.talk,
-                swap: arm.swap,
             });
             if batch.config != arm.config
                 || batch.params != arm.params
                 || batch.features != arm.features
                 || batch.nic != arm.nic
                 || batch.talk != arm.talk
-                || batch.swap != arm.swap
             {
                 return Err(format!(
                     "{name} rides the boot {:?} as ({}, {:?}, {:?}, {:?}, talk={}) and another row \
@@ -777,10 +742,10 @@ fn build(
     let deadline = format!("{}{}", toyos_tco::DEADLINE_PARAM, toyos_tco::WEDGE_BOUND_MS);
     let mut params: Vec<&str> = batch.params.clone();
     params.push(&deadline);
-    // **A talking or swapping boot carries the key the loop will offer**,
+    // **A talking boot carries the key the loop will offer**,
     // minted beside the image so the loop finds it there. Nothing about this
     // host is in it: the loop finds the machine by its name.
-    if batch.talk || batch.swap.is_some() {
+    if batch.talk {
         let identity = super::ssh::Identity::mint_in(&talk_home(&home))?;
         extra.push((super::ssh::KEYS_ON_ROOT.to_string(), identity.authorized_line().into_bytes()));
     }
@@ -788,11 +753,6 @@ fn build(
     let bytes = toyos_build::build::build_test_image(root, &plan, quiet, &extra);
     let image = home.join("image.img");
     std::fs::write(&image, &bytes).map_err(|e| format!("{}: {e}", image.display()))?;
-    // The binary the second invocation sends, copied now so it is this
-    // build's and not whatever the tree holds when the machine is reached.
-    if let Some(service) = batch.swap {
-        toyos_build::build::copy_guest_program(root, toyos_build::arch::Arch::X86_64, service, &home.join(service))?;
-    }
     Ok(image)
 }
 
@@ -833,29 +793,6 @@ fn invocation(image: &Path, home: &Path, nic: Option<&str>, talk: bool) -> Vec<S
         words.push(talk_home(home).join("id_ed25519").display().to_string());
     }
     words
-}
-
-/// The second invocation a swapping boot owes: started beside the one that
-/// flashes it, it dials the address the machine answers to under its own
-/// name and swaps `service` for the binary [`build`] copied beside the image.
-fn swap_invocation(home: &Path, service: &str) -> Vec<String> {
-    [
-        "run",
-        "--bin",
-        "toyos-metal",
-        "--",
-        "--swap",
-        service,
-        "--binary",
-        &home.join(service).display().to_string(),
-        "--talk",
-        &talk_home(home).join("id_ed25519").display().to_string(),
-        "--readback",
-        &home.display().to_string(),
-        "--hand-back",
-    ]
-    .map(str::to_string)
-    .to_vec()
 }
 
 pub fn read_readback(dir: &Path, label: &str) -> Result<Readback, String> {
@@ -925,26 +862,12 @@ pub fn run(
             return Verdict::Red;
         }
     };
-    let declared: Vec<&str> = tests
-        .iter()
-        .filter_map(|(name, decl)| match decl {
-            Metal::QemuOnly(why) => Some((*name, *why)),
-            Metal::Runs { .. } => None,
-        })
-        .map(|(name, why)| {
-            eprintln!("[metal] QEMU-only: {name} — {why}");
-            name
-        })
-        .collect();
-    let runs: Vec<&(&str, &'static Metal)> =
-        tests.iter().filter(|(_, d)| matches!(d, Metal::Runs { .. })).collect();
+    let runs: Vec<&(&str, &'static Metal)> = tests.iter().collect();
     eprintln!(
-        "[metal] {} registration(s) and {} shared member(s) over {} boot(s); {} declared \
-         QEMU-only",
+        "[metal] {} registration(s) and {} shared member(s) over {} boot(s)",
         runs.len(),
         shared.iter().map(|b| b.jobs.len()).sum::<usize>(),
         batches.len(),
-        declared.len(),
     );
     if runs.is_empty() && shared.iter().all(|b| b.jobs.is_empty()) {
         eprintln!("[metal] nothing to run");
@@ -974,7 +897,7 @@ pub fn run(
     if !judging {
         // The key a talking boot authorizes is minted by the harness's own ssh
         // client, which the suite builds only on its QEMU path.
-        if batches.values().any(|b| b.talk || b.swap.is_some()) {
+        if batches.values().any(|b| b.talk) {
             toyos_build::build::build_host_judges(&root, quiet);
         }
         for (label, batch) in &batches {
@@ -1006,12 +929,6 @@ pub fn run(
                 image.display(),
                 invocation(image, &at(dir, label), batches[*label].nic, batches[*label].talk).join(" ")
             ));
-            if let Some(service) = batches[*label].swap {
-                request.push_str(&format!(
-                    "  and beside it, started first:\n  cargo {}\n",
-                    swap_invocation(&at(dir, label), service).join(" ")
-                ));
-            }
         }
         let path = dir.join("request.txt");
         if let Err(e) = std::fs::write(&path, &request) {
@@ -1036,27 +953,8 @@ pub fn run(
     if !offline {
         for (label, image) in &images {
             let words = invocation(image, &at(dir, label), batches[*label].nic, batches[*label].talk);
-            // A swapping boot's second invocation is started first: it dials
-            // the machine under its own name for as long as it takes, and
-            // waits for the boot.
-            let beside = batches[*label].swap.map(|service| {
-                let words = swap_invocation(&at(dir, label), service);
-                eprintln!("[metal] {label}, beside it: cargo {}", words.join(" "));
-                Command::new("cargo").args(&words).current_dir(&root).spawn()
-            });
             eprintln!("[metal] {label}: cargo {}", words.join(" "));
             let booted = Command::new("cargo").args(&words).current_dir(&root).status();
-            if let Some(swap) = beside {
-                match swap.and_then(|mut child| child.wait()) {
-                    Ok(status) if status.success() => {}
-                    Ok(status) => {
-                        refused.insert(label, format!("toyos-metal --swap exited {status}"));
-                    }
-                    Err(e) => {
-                        refused.insert(label, format!("toyos-metal --swap: {e}"));
-                    }
-                }
-            }
             match booted {
                 Ok(status) if status.success() => {}
                 Ok(status) => {
@@ -1156,7 +1054,7 @@ pub fn judge_readbacks(
     eprintln!("\n[metal] the tests");
     let mut passed = 0usize;
     for (name, decl) in runs {
-        let Metal::Runs { arms, judge } = decl else { continue };
+        let Metal { arms, judge } = decl;
         let mut owed: Vec<&Readback> = Vec::new();
         let mut missing: Option<String> = None;
         for arm in *arms {

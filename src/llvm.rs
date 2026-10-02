@@ -30,7 +30,7 @@
 //! writes, `build/toyos-llvm/`, which is removed once the LLVM is placed.
 //!
 //! An LLVM no worktree names any more is removed by `keystore::sweep`, which
-//! `--worktree remove` and every placement run: each worktree records the key of
+//! every placement runs: each worktree records the key of
 //! the LLVM its compiler links, and a key no registered worktree records, that
 //! nobody is making or using, goes.
 
@@ -42,8 +42,8 @@ use std::sync::OnceLock;
 
 use crate::buildlock::{Guard, Keyed};
 use crate::compiler::{llvm_commit, LLVM};
-use crate::keystore;
-use crate::sysroot::{clone_tree, git_bytes, git_out, short};
+use crate::keystore::{self, Key};
+use crate::sysroot::{clone_tree, git_bytes, git_out};
 use crate::toolchain::{self, host_triple};
 
 /// What changes how a key's sources become an LLVM and is none of the other
@@ -53,9 +53,10 @@ const RECIPE: &str = "bootstrap build of src/llvm-project/llvm and src/llvm-proj
 
 /// What of the caller's environment the LLVM build, and every tool its key
 /// asks, sees:
-/// - `PATH` finds what runs the build: the Python behind `./x`, git, curl,
-///   Ninja, and CMake, which the key names by path and version. The C and C++
-///   compilers it finds, the configuration names by path.
+/// - `PATH` finds what runs the build: the Python behind `./x`, git, curl, and
+///   CMake, which the key names by path and version. The C and C++ compilers
+///   it finds, the configuration names by path. The build's has n2's directory
+///   first ([`build_in_fork`]).
 /// - `TMPDIR` is where those tools write what they discard; the sandbox a build
 ///   runs in may allow no other place.
 ///
@@ -122,15 +123,15 @@ pub fn store(rust_dir: &Path) -> PathBuf {
 
 /// The key of the LLVM `fork` names; refused while its `src/bootstrap` holds
 /// changes no commit does.
-pub fn key(fork: &Path) -> String {
+pub fn key(fork: &Path) -> Key {
     let tools = host_tools();
     key_of(fork, RECIPE, &config_text(Path::new(KEYED_BUILD_DIR), &host_triple(), tools), &tools.identity)
 }
 
-fn key_of(fork: &Path, recipe: &str, config: &str, tools: &str) -> String {
+fn key_of(fork: &Path, recipe: &str, config: &str, tools: &str) -> Key {
     refuse_uncommitted_bootstrap(fork);
     let bootstrap = git_out(fork, &["rev-parse", &format!("HEAD:{BOOTSTRAP}")]);
-    short([recipe, config, &llvm_commit(fork), bootstrap.trim(), tools].join("\n\0\n").as_bytes())
+    Key::of([recipe, config, &llvm_commit(fork), bootstrap.trim(), tools].join("\n\0\n").as_bytes())
 }
 
 /// Give `command` nothing of this process's environment but [`ENVIRONMENT`].
@@ -197,7 +198,7 @@ fn on_path(name: &str) -> PathBuf {
 /// The LLVM `fork` names, made if nobody on this host has made it, and held in
 /// use for as long as the returned value lives. `root` records its key.
 pub fn resolve(root: &Path, rust_dir: &Path, fork: &Path) -> Llvm {
-    choose(root, rust_dir, fork, build_in_fork)
+    choose(root, rust_dir, fork, |fork| build_in_fork(root, fork))
 }
 
 /// [`resolve`] with the build that makes an LLVM passed in, so a test can stand
@@ -214,7 +215,7 @@ fn choose(root: &Path, rust_dir: &Path, fork: &Path, build: impl Fn(&Path) -> Pa
 /// LLVM its compiler links, whose record is that compiler's
 /// (`compiler::choose`).
 pub fn held(root: &Path, rust_dir: &Path, fork: &Path) -> Llvm {
-    held_with(root, rust_dir, fork, build_in_fork)
+    held_with(root, rust_dir, fork, |fork| build_in_fork(root, fork))
 }
 
 /// [`held`] with the build passed in, as [`choose`] takes it.
@@ -251,14 +252,12 @@ fn refuse_uncommitted_bootstrap(fork: &Path) {
 
 /// Build the LLVM `key` names from `fork` and put it at `dir`. The caller holds
 /// the key's lock.
-fn place(fork: &Path, key: &str, dir: &Path, build: &impl Fn(&Path) -> PathBuf) {
+fn place(fork: &Path, key: &Key, dir: &Path, build: &impl Fn(&Path) -> PathBuf) {
     eprintln!("Building LLVM {key} in {}: nobody on this host has", fork.display());
     let built = build(fork);
     let host = host_triple();
     let partial = dir.with_extension("partial");
-    if partial.exists() {
-        keystore::remove(&partial);
-    }
+    keystore::remove(&partial);
     for part in KEPT {
         clone_tree(&built.join(&host).join("llvm").join(part), &partial.join(part));
     }
@@ -269,7 +268,7 @@ fn place(fork: &Path, key: &str, dir: &Path, build: &impl Fn(&Path) -> PathBuf) 
     // refuses a bootstrap the build left holding what no commit does.
     let again = self::key(fork);
     assert!(
-        again == key,
+        again == *key,
         "the fork's LLVM sources moved while LLVM {key} was being built (they now name {again}); \
          nothing was kept, and the next build makes the one they name"
     );
@@ -370,8 +369,14 @@ pub fn retire_in_tree(build: &Path) {
 }
 
 /// Bootstrap's build of LLVM, clang and LLD in `fork`, into its own build
-/// directory, which it returns.
-fn build_in_fork(fork: &Path) -> PathBuf {
+/// directory, which it returns, under the n2 installed under `root`.
+fn build_in_fork(root: &Path, fork: &Path) -> PathBuf {
+    let n2 = crate::n2::bin(root);
+    // Bootstrap refuses to build with no `ninja` on `PATH`, and CMake's Ninja
+    // generator runs the first one there; n2's directory holds nothing but n2.
+    let caller = std::env::var_os("PATH").unwrap_or_else(|| panic!("PATH is unset, and the LLVM build finds its tools on it"));
+    let path = std::env::join_paths(std::iter::once(n2.clone()).chain(std::env::split_paths(&caller)))
+        .unwrap_or_else(|e| panic!("{} cannot lead PATH: {e}", n2.display()));
     let host = host_triple();
     let build_dir = fork.join("build/toyos-llvm");
     fs::create_dir_all(&build_dir).unwrap_or_else(|e| panic!("create {}: {e}", build_dir.display()));
@@ -380,7 +385,10 @@ fn build_in_fork(fork: &Path) -> PathBuf {
         .unwrap_or_else(|e| panic!("write {}: {e}", config.display()));
     let config = config.to_str().unwrap_or_else(|| panic!("{} is not UTF-8", config.display()));
     let args = ["build", "--config", config, "src/llvm-project/llvm", "src/llvm-project/lld"];
-    let (ok, _) = toolchain::x_build_with(fork, &args, "LLVM", clear);
+    let (ok, _) = toolchain::x_build_with(fork, &args, "LLVM", |command| {
+        clear(command);
+        command.env("PATH", path);
+    });
     assert!(ok, "the LLVM build in {} failed: its output above says why", fork.display());
     build_dir
 }
@@ -610,11 +618,16 @@ mod tests {
         let config = config_text(Path::new(KEYED_BUILD_DIR), &host_triple(), tools);
         let base = key(&fork);
         assert_eq!(key_of(&fork, RECIPE, &config, &tools.identity), base);
-        let linux = config_text(Path::new(KEYED_BUILD_DIR), "x86_64-unknown-linux-gnu", tools);
+        let elsewhere = if host_triple() == "x86_64-unknown-linux-gnu" {
+            "aarch64-unknown-linux-gnu"
+        } else {
+            "x86_64-unknown-linux-gnu"
+        };
+        let elsewhere = config_text(Path::new(KEYED_BUILD_DIR), elsewhere, tools);
         for (what, other) in [
             ("the recipe", key_of(&fork, "another recipe", &config, &tools.identity)),
             ("the [llvm]", key_of(&fork, RECIPE, &config.replace("X86", "RISCV;X86"), &tools.identity)),
-            ("the host", key_of(&fork, RECIPE, &linux, &tools.identity)),
+            ("the host", key_of(&fork, RECIPE, &elsewhere, &tools.identity)),
             ("the host's tools", key_of(&fork, RECIPE, &config, "/usr/bin/gcc\ngcc 14\n")),
         ] {
             assert_ne!(other, base, "{what} did not move the key");
@@ -648,7 +661,7 @@ mod tests {
         for tool in [&tools.cc, &tools.cxx] {
             assert!(tool.is_absolute() && tool.is_file(), "{} is no compiler", tool.display());
             let at = lines.iter().position(|l| Path::new(l) == tool.as_path()).unwrap_or_else(|| panic!("{}", tools.identity));
-            assert!(lines[at + 1].contains("version"), "{} said no version: {}", tool.display(), tools.identity);
+            assert!(lines[at + 1].chars().any(|c| c.is_ascii_digit()), "{} said no version: {}", tool.display(), tools.identity);
         }
         assert!(lines.iter().any(|l| l.starts_with("cmake version")), "{}", tools.identity);
         if host_triple().ends_with("apple-darwin") {
@@ -713,6 +726,7 @@ mod tests {
     }
 
     const FORK: &str = "TOYOS_LLVM_TEST_FORK";
+    const ROOT: &str = "TOYOS_LLVM_TEST_ROOT";
 
     /// What a caller's environment may hold that would reach an LLVM build:
     /// flags, compilers, tools, and the SDK and deployment target.
@@ -734,7 +748,8 @@ mod tests {
     /// a process holding every [`AMBIENT`] name keys the LLVM as this one does,
     /// and the bootstrap it runs, a script that writes down its environment,
     /// sees nothing but `PATH`, `TMPDIR` and what a shell sets itself, named
-    /// here and not read from [`ENVIRONMENT`].
+    /// here and not read from [`ENVIRONMENT`]; its `PATH` is the caller's with
+    /// n2's directory first.
     #[test]
     fn the_caller_s_environment_reaches_neither_the_build_nor_the_key() {
         use std::os::unix::fs::PermissionsExt;
@@ -744,29 +759,35 @@ mod tests {
         write(&fork.join("library/Cargo.lock"), "# lock\n");
         write(&fork.join("x"), "#!/bin/sh\nenv > build/toyos-llvm/environment\n");
         fs::set_permissions(fork.join("x"), fs::Permissions::from_mode(0o755)).unwrap();
+        let n2 = crate::n2::tests::installed_stand_in(&scratch);
 
-        let out = buildlock::tests::rerun("llvm::tests::keyed_and_built").env(FORK, &fork).envs(AMBIENT).output().unwrap();
+        let mut rerun = buildlock::tests::rerun("llvm::tests::keyed_and_built");
+        let out = rerun.env(FORK, &fork).env(ROOT, &*scratch).envs(AMBIENT).output().unwrap();
         assert!(out.status.success(), "{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         let built = fork.join("build/toyos-llvm");
-        assert_eq!(fs::read_to_string(built.join("key")).unwrap(), key(&fork), "the caller's environment moved the key");
+        assert_eq!(fs::read_to_string(built.join("key")).unwrap(), key(&fork).as_str(), "the caller's environment moved the key");
         let seen = fs::read_to_string(built.join("environment")).unwrap();
         let allowed = ["PATH", "TMPDIR", "BOOTSTRAP_SKIP_TARGET_SANITY", "PWD", "OLDPWD", "SHLVL", "_"];
         for name in seen.lines().filter_map(|l| l.split_once('=')).map(|(name, _)| name) {
             assert!(allowed.contains(&name), "the build saw {name}: {seen}");
         }
-        assert!(seen.lines().any(|l| l.starts_with("PATH=")), "the build saw no PATH: {seen}");
+        let caller = std::env::var_os("PATH").unwrap();
+        let path = std::env::join_paths(std::iter::once(n2).chain(std::env::split_paths(&caller))).unwrap();
+        let path = format!("PATH={}", path.to_str().unwrap());
+        assert!(seen.lines().any(|l| l == path), "the build's PATH is not {path}: {seen}");
     }
 
     /// The process [`the_caller_s_environment_reaches_neither_the_build_nor_the_key`]
-    /// runs: the key of the fork in [`FORK`] and its build, the key written
-    /// beside what the build wrote.
+    /// runs: the key of the fork in [`FORK`] and its build under the n2 of the
+    /// root in [`ROOT`], the key written beside what the build wrote.
     #[test]
     #[ignore = "the process the environment test runs; never runs on its own"]
     fn keyed_and_built() {
         let fork = PathBuf::from(std::env::var(FORK).unwrap_or_else(|_| panic!("keyed_and_built ran without {FORK}; it is not a test")));
+        let root = PathBuf::from(std::env::var(ROOT).unwrap_or_else(|_| panic!("keyed_and_built ran without {ROOT}; it is not a test")));
         let key = key(&fork);
-        let built = build_in_fork(&fork);
-        fs::write(built.join("key"), key).unwrap();
+        let built = build_in_fork(&root, &fork);
+        fs::write(built.join("key"), key.as_str()).unwrap();
     }
 
     /// **A gitlink staged and not committed names no LLVM**: bootstrap checks

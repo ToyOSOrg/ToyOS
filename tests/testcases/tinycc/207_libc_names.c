@@ -1,8 +1,7 @@
-/* What libc does for the names LLVM builds against: creat, symlink and
-   readlink as POSIX has them, each read back; a directory listed with the name
-   and kind of each entry; dladdr naming the image and the exported symbol an
-   address lies in; and strnlen, strsignal, modf, logb and the <endian.h>
-   conversions. */
+/* What libc does for the names LLVM builds against: a directory listed with
+   the name and kind of each entry; dladdr naming the image and the exported
+   symbol an address lies in; and strnlen, strsignal, modf, logb and the
+   <endian.h> conversions. */
 #include <dirent.h>
 #include <dlfcn.h>
 #include <endian.h>
@@ -12,6 +11,7 @@
 #include <link.h>
 #include <math.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,10 +23,24 @@
 
 #define DIR_PATH "/tmp/207_libc_names"
 #define TARGET DIR_PATH "/target"
-#define LINK DIR_PATH "/link"
 #define LISTED DIR_PATH "/listed"
+/* A link the image holds, to /system/bin/toybox. */
+#define LINK "/system/bin/cat"
 /* The image's test library, which exports tls_get_label. */
 #define LIB "/system/lib/libtls_lib.so"
+
+/* The rest of what LLVM reads of these headers, by value and by size. */
+_Static_assert(BYTE_ORDER == LITTLE_ENDIAN, "BYTE_ORDER");
+_Static_assert(htobe32(0x01020304) == 0x04030201, "htobe32");
+_Static_assert(le16toh(0x0102) == 0x0102, "le16toh");
+_Static_assert(AF_UNIX == 1, "AF_UNIX");
+_Static_assert(sizeof(struct sockaddr_un) == 110, "sockaddr_un");
+_Static_assert(EX_IOERR == 74, "EX_IOERR");
+_Static_assert(_POSIX_ARG_MAX == 4096, "_POSIX_ARG_MAX");
+_Static_assert((SA_ONSTACK | SA_NODEFER | SA_RESETHAND) == 0xc8000000, "SA_ONSTACK|SA_NODEFER|SA_RESETHAND");
+_Static_assert(F_RDLCK == 0 && F_UNLCK == 2, "F_RDLCK, F_UNLCK");
+_Static_assert(sizeof(struct rusage) == 144, "rusage");
+_Static_assert(RLIM_INFINITY == ~0UL, "RLIM_INFINITY");
 
 int main(void);
 
@@ -55,24 +69,20 @@ static void links(void) {
         printf("creat %s failed\n", TARGET);
         return;
     }
-    printf("symlink: %d\n", symlink(TARGET, LINK));
-    refused("symlink over the link", symlink(TARGET, LINK));
-    refused("symlink over a file", symlink(LINK, TARGET));
+    fd = open(TARGET, O_RDONLY);
+    ssize_t n = fd < 0 ? -1 : read(fd, buf, sizeof buf);
+    printf("read what creat wrote: \"%.*s\"\n", n > 0 ? (int)n : 0, buf);
+    if (fd >= 0)
+        close(fd);
 
-    ssize_t n = readlink(LINK, buf, sizeof buf);
+    n = readlink(LINK, buf, sizeof buf);
     printf("readlink: %zd, \"%.*s\"\n", n, n > 0 ? (int)n : 0, buf);
     memset(buf, '#', sizeof buf);
     n = readlink(LINK, buf, 4);
     printf("readlink into 4: %zd, \"%.5s\"\n", n, buf);
+    refused("readlink into 0", readlink(LINK, buf, 0));
     refused("readlink of a file", readlink(TARGET, buf, sizeof buf));
     refused("readlink of nothing", readlink(DIR_PATH "/none", buf, sizeof buf));
-    refused("readlink into 0", readlink(LINK, buf, 0));
-
-    fd = open(LINK, O_RDONLY);
-    n = fd < 0 ? -1 : read(fd, buf, sizeof buf);
-    printf("read through the link: \"%.*s\"\n", n > 0 ? (int)n : 0, buf);
-    if (fd >= 0)
-        close(fd);
 }
 
 static void listing(void) {
@@ -152,16 +162,10 @@ int main(void) {
     double whole;
     double part = modf(-3.25, &whole);
     printf("modf(-3.25): %g and %g\n", whole, part);
-    printf("logb: %g %g %g\n", logb(0.1), logb(1024.0), logb(0.0));
-    printf("endian: %s 0x%x 0x%x\n", BYTE_ORDER == LITTLE_ENDIAN ? "little" : "big",
-           (unsigned)htobe32(0x01020304), (unsigned)le16toh(0x0102));
-
-    /* The rest of what LLVM reads of these headers, by value and by size. */
-    struct sockaddr_un local = { AF_UNIX, "" };
-    printf("names: AF_UNIX %d, sockaddr_un %zu, EX_IOERR %d, _POSIX_ARG_MAX %d, page %ld\n", local.sun_family,
-           sizeof local, EX_IOERR, _POSIX_ARG_MAX, sysconf(_SC_PAGE_SIZE));
-    printf("names: SA_ONSTACK|SA_NODEFER|SA_RESETHAND 0x%lx, F_RDLCK %d, F_UNLCK %d, rusage %zu, RLIM_INFINITY %s\n",
-           (unsigned long)(SA_ONSTACK | SA_NODEFER | SA_RESETHAND), F_RDLCK, F_UNLCK, sizeof(struct rusage),
-           RLIM_INFINITY == ~0UL ? "every bit" : "not every bit");
+    printf("logb: %g %g\n", logb(0.1), logb(1024.0));
+    errno = 0;
+    double pole = logb(0.0);
+    printf("logb(0): %g, %s\n", pole, errno == ERANGE ? "ERANGE" : errno_name(errno));
+    printf("sysconf _SC_PAGE_SIZE: %ld\n", sysconf(_SC_PAGE_SIZE));
     return 0;
 }

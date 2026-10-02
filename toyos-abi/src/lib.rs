@@ -48,11 +48,6 @@ impl core::fmt::Display for Pid {
     }
 }
 
-impl core::ops::Add for Pid {
-    type Output = Self;
-    fn add(self, rhs: Self) -> Self { Pid(self.0 + rhs.0) }
-}
-
 /// A thread ID. Identifies a schedulable entity — goes in run queues.
 /// Every process has at least one thread (the main thread).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

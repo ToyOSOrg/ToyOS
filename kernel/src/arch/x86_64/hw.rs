@@ -297,11 +297,6 @@ impl Hw for KernelHw {
             percpu::set_current_pid(incoming.id.map(|id| id.0));
             match incoming.id {
                 Some(_) => {
-                    // Here, not in the pass: this is the one place a task (not idle) becomes what a
-                    // CPU runs, which `note_dispatch` below must count for `heartbeat`'s `ran=` to
-                    // be meaningful.
-                    #[cfg(feature = "boot-actuators")]
-                    crate::heartbeat::note_dispatch();
                     percpu::set_kernel_stack(incoming.kernel_stack_top);
                     incoming.root.activate();
                     cpu::write_fs_base(incoming.thread_pointer);

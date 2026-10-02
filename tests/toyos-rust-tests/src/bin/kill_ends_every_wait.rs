@@ -6,8 +6,7 @@
 //! process's end, a thread's end and a sleep. A wait the kill
 //! cannot end keeps the child's last thread in its process for ever, and
 //! `wait` below never returns; the harness's deadline is what says so.
-//! `kill_while_blocked` holds the pipe, connection and accept waits, and
-//! `mutual_kill` a kill inside a kill.
+//! `mutual_kill` holds a kill inside a kill.
 
 use std::io::{Read, Write};
 use std::os::toyos::process::{ChildExt, CommandExt};

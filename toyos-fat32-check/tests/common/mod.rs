@@ -1,12 +1,10 @@
 //! A FAT32 volume built here, byte by byte, from the specification.
 //!
 //! The mutation tests need a volume they can break in exactly one place, and
-//! they need to know where that place is. Nothing in this repository can hand
-//! them one: `newfs_msdos` is a macOS binary, which is the dependency this
-//! crate exists to remove, and `toyos-fat32` is the writer under judgement.
-//! So the fixture is written from fatgen103 the same way the checker reads it,
-//! and its being clean is asserted first — a mutation from a volume the checker
-//! already complains about proves nothing.
+//! they need to know where that place is. So the fixture is written from
+//! fatgen103 the same way the checker reads it, and its being clean is asserted
+//! first — a mutation from a volume the checker already complains about proves
+//! nothing.
 //!
 //! The layout is the smallest one FAT32 admits: 512-byte sectors, one sector to
 //! a cluster, and 65,600 clusters, which is 75 above the 65,525 that separates

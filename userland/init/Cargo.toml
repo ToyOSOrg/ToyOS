@@ -18,3 +18,6 @@ toyos-gpt = { path = "../../toyos-gpt" }
 toyos-blockring = { path = "../../toyos-blockring" }
 # How long a stop is prepared before the kernel is asked for it.
 toyos-quiesce = { path = "../../toyos-quiesce" }
+
+[package.metadata.toyos.host]
+exempt.owns = "the machine's system capability: the kernel starts it, and it builds every program's namespace"

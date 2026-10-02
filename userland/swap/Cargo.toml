@@ -8,3 +8,6 @@ license = "MIT OR Apache-2.0"
 toyos = { path = "../../toyos" }
 # The words init and the host say about a swap, and the digest it is held to.
 toyos-swap = { path = "../../toyos-swap" }
+
+[package.metadata.toyos.host]
+exempt.manages = "ToyOS's running services: it replaces one's binary through init's `swap` port"

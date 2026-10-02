@@ -119,11 +119,36 @@ pub fn build_c(root: &Path, toolchain: &Path, target_dir: &Path, arch: Arch) {
     empty_libraries(&lib);
     crate::sysroot::clone_tree(&root.join(CRATE).join("include"), &c.dir.join("include"));
     c.write_cmake();
+    links_naming_every_library(&c, target_dir);
 }
 
-/// The libraries POSIX has a C compiler take, `-lc` and `-lm` among them, whose
-/// functions are all `libtoyos_c.a`'s.
 const EMPTY_LIBRARIES: [&str; 5] = ["c", "m", "pthread", "dl", "rt"];
+
+/// Refuse the C sysroot `c` unless its clang links a C program against it
+/// naming each of [`EMPTY_LIBRARIES`], as LLVM's configure links every probe
+/// with `-lm` (`llvm/cmake/config-ix.cmake`). The program and its binary are
+/// written in `scratch`.
+fn links_naming_every_library(c: &crate::clang::CSysroot, scratch: &Path) {
+    let source = scratch.join(format!("probe-{}.c", c.target));
+    fs::write(&source, "int main(void) { return 0; }\n")
+        .unwrap_or_else(|e| panic!("write {}: {e}", source.display()));
+    let names = EMPTY_LIBRARIES.map(|name| format!("-l{name}"));
+    let output = Command::new(&c.clang)
+        .args(c.args())
+        .arg(&source)
+        .args(&names)
+        .arg("-o")
+        .arg(source.with_extension(""))
+        .output()
+        .unwrap_or_else(|e| panic!("run {}: {e}", c.clang.display()));
+    assert!(
+        output.status.success(),
+        "the C sysroot at {} links no program naming {}:\n{}",
+        c.dir.display(),
+        names.join(" "),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
 
 /// Put each of [`EMPTY_LIBRARIES`] in `lib` as an archive of no members: a
 /// link that names one finds it and takes nothing from it.
@@ -296,10 +321,8 @@ mod tests {
     use super::*;
     use toyos_tmpdir::TempDir;
 
-    /// **`-lc` and `-lm` find a library in the C sysroot**, and so do POSIX's
-    /// other three: each an `ar` archive of no members.
     #[test]
-    fn the_c_sysroot_names_the_posix_libraries() {
+    fn the_c_sysroot_names_the_empty_libraries() {
         let lib = TempDir::new("libc-empty");
         empty_libraries(&lib);
         for name in ["c", "m", "pthread", "dl", "rt"] {
