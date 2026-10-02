@@ -1061,6 +1061,10 @@ dependencies = [
 [[package]]
 name = "toyos-libc-copies"
 version = "0.1.0"
+dependencies = [
+ "toyos-abi",
+ "toyos-elf",
+]
 
 [[package]]
 name = "toyos-logstream"
@@ -1082,6 +1086,10 @@ version = "0.1.0"
 dependencies = [
  "toyos-dns",
 ]
+
+[[package]]
+name = "toyos-microcode"
+version = "0.1.0"
 
 [[package]]
 name = "toyos-mixer"

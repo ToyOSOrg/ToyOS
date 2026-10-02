@@ -963,8 +963,8 @@ const NOT_RUN: &[NotRun] = &[
     },
     NotRun {
         case: "114_bound_signal",
-        stage: Stage::Refused("use of undeclared identifier 'SIGUSR1'"),
-        why: Why::Declined("sigaction, sigjmp_buf and the signal numbers, which no header here declares"),
+        stage: Stage::Refused("'semaphore.h' file not found"),
+        why: Why::Declined("semaphores, sigjmp_buf and a signal's handler run, none of which libc has"),
     },
     NotRun {
         case: "115_bound_setjmp",
