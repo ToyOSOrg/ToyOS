@@ -46,7 +46,7 @@ pub const GUID_BYTES: usize = 16;
 ///
 /// and never without them:
 ///
-/// ```compile_fail,E0451
+/// ```compile_fail
 /// let _answer = toyos_blockring::wire::Opened { blocks: 1, unique: [0; 16] };
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

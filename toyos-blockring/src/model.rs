@@ -129,32 +129,21 @@ struct Queues {
 impl Queues {
     fn new() -> Self {
         let page = core::array::from_fn(|_| Shared(Cell::new(0)));
-        let (client, server) = (Self::client_ends(&page), Self::server_ends(&page));
+        let (client, server) = Self::ends(&page);
         Self { sq: VecDeque::new(), cq: VecDeque::new(), page, client, server }
     }
 
-    /// The client's ends over `page`, its two cursors stored 0.
-    fn client_ends(page: &[Shared; WORDS]) -> ClientEnds {
-        (Producer::new(page, SQ), Consumer::new(page, CQ))
+    /// Both ends over `page`, every cursor stored 0.
+    fn ends(page: &[Shared; WORDS]) -> (ClientEnds, ServerEnds) {
+        ((Producer::new(page, SQ), Consumer::new(page, CQ)), (Consumer::new(page, SQ), Producer::new(page, CQ)))
     }
 
-    /// A server's ends over `page`, its two cursors stored 0.
-    fn server_ends(page: &[Shared; WORDS]) -> ServerEnds {
-        (Consumer::new(page, SQ), Producer::new(page, CQ))
-    }
-
-    /// The session is over: what either queue held is gone, and the page keeps
-    /// every cursor where its end left it.
-    fn ended(&mut self) {
+    /// The session is over: what either queue held is gone, and the next
+    /// session's two ends start over the same page.
+    fn reset(&mut self) {
         self.sq.clear();
         self.cq.clear();
-    }
-
-    /// The next session over the same page: both ends set their cursors
-    /// before the client looks at it ([`crate::wire::Opened::over`]).
-    fn reopen(&mut self) {
-        self.client = Self::client_ends(&self.page);
-        self.server = Self::server_ends(&self.page);
+        (self.client, self.server) = Self::ends(&self.page);
     }
 
     fn send(&mut self, request: Request) {
@@ -189,13 +178,12 @@ impl Queues {
         Some(want)
     }
 
-    /// A ring whose queue is empty gives nothing to an end that is looking:
-    /// the server while it lives, the client while its session is up.
-    fn hold_empty(&mut self, server: bool, client: bool) {
-        if server && self.sq.is_empty() {
+    /// A ring whose queue is empty gives nothing.
+    fn hold_empty(&mut self) {
+        if self.sq.is_empty() {
             assert_eq!(self.server.0.pop(&self.page), Ok(None), "the request ring gave what the queue does not hold");
         }
-        if client && self.cq.is_empty() {
+        if self.cq.is_empty() {
             assert_eq!(self.client.1.pop(&self.page), Ok(None), "the completion ring gave what the queue does not hold");
         }
     }
@@ -283,7 +271,6 @@ fn start(failures: Failures) -> World {
 }
 
 fn connect(world: &mut World) {
-    world.queues.reopen();
     let mut holds = Holds::new();
     holds.hold(0, BLOCKS as u64, 1).expect("a fresh server holds nothing");
     world.server = Some(Server { session: ServerSession::new(0, BLOCKS as u64), holds });
@@ -475,7 +462,7 @@ fn key(world: &World) -> String {
 }
 
 fn dfs(run: &mut Run, mut world: World) {
-    world.queues.hold_empty(world.alive, world.client.up());
+    world.queues.hold_empty();
     if run.broken.is_some() || !run.seen.insert(key(&world)) {
         return;
     }
@@ -646,7 +633,7 @@ fn next(script: &[Step], world: &World) -> Vec<(String, After)> {
     if !world.alive && world.client.up() {
         let mut w = world.clone();
         w.client.session_ended();
-        w.queues.ended();
+        w.queues.reset();
         after("notice".into(), Ok(w));
     }
 
@@ -783,25 +770,24 @@ mod tests {
         world
     }
 
-    /// The page a client reconnects over holds the dead server's cursors until
-    /// the new server sets its own. A client looking before then has no room
-    /// to ask and meets the last session's completion, which it refuses as the
-    /// server breaking the protocol; once the server's ends are made, as
-    /// blockd makes them before it answers the open, the page is a fresh one.
+    /// A used page reads fresh once a server's ends are made over it. A
+    /// client's ends alone leave the dead server's two cursors on it: no room
+    /// to ask, and the last session's completion to hear, which the client
+    /// refuses as the server breaking the protocol.
     #[test]
-    fn the_new_server_sets_its_cursors_before_the_client_looks() {
-        let world = walk(start(at_most(0, 1, 0)), &["ask", "take", "done", "read", "crash", "notice"]);
+    fn a_used_page_reads_fresh_once_a_servers_ends_are_made_over_it() {
+        let world = walk(start(at_most(0, 1, 0)), &["ask", "take", "done", "read", "crash"]);
         let page = &world.queues.page;
         let mut client = world.client.clone();
+        client.session_ended();
         client.session_started();
-        let (mut asks, mut hears) = Queues::client_ends(page);
+        let (mut asks, mut hears): ClientEnds = (Producer::new(page, SQ), Consumer::new(page, CQ));
         assert_eq!(asks.space(page), Err(Violation::HeadPastTail));
         let stale = hears.pop(page).expect("a tail inside the ring").expect("the last session's completion");
         let stale = Completion::decode(stale).expect("a completion the last server wrote");
         assert_eq!(client.complete(stale), Err(Violation::Tag));
 
-        let (mut asks, mut hears) = Queues::client_ends(page);
-        let _server = Queues::server_ends(page);
+        let ((mut asks, mut hears), _server) = Queues::ends(page);
         assert_eq!(asks.space(page), Ok(DEPTH));
         assert_eq!(hears.pop(page), Ok(None));
     }
