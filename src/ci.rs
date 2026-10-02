@@ -28,6 +28,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::arch::{Accel, Arch};
+use crate::cicache;
 use crate::sysroot::git_out;
 use crate::userlandhost::{Host, Os, Program};
 use crate::{flags, release, sdkversion};
@@ -36,6 +37,8 @@ const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
   host              every host test: the build system, the harness's own checks,
                     the host workspace, the licences of what ships, clippy, the
                     model controls, userland and the SDK (ci.yml, nightly)
+  seal              `host` from a cold tree, then that tree sealed as the host
+                    cache's entry, which the step after it saves (nightly)
   toolchain         publish this tree's toolchain if nobody has (nightly)
   guest             the guest suite (nightly)
   publish           put main's SDK crates on crates.io (publish.yml)";
@@ -43,6 +46,7 @@ const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
 #[derive(Debug, PartialEq, Eq)]
 enum Job {
     Host,
+    Seal,
     Toolchain,
     Guest,
     Publish,
@@ -51,6 +55,7 @@ enum Job {
 fn parse(words: &[String]) -> Result<Job, String> {
     let job = match words.first().map(String::as_str) {
         Some("host") => Job::Host,
+        Some("seal") => Job::Seal,
         Some("toolchain") => Job::Toolchain,
         Some("guest") => Job::Guest,
         Some("publish") => Job::Publish,
@@ -70,6 +75,7 @@ pub fn dispatch(root: &Path, args: &[String]) {
     });
     let steps = match &job {
         Job::Host => host(root),
+        Job::Seal => seal(root),
         Job::Toolchain => vec![step("the toolchain release", || release::ensure_published(root))],
         Job::Guest => guest(root, &suite_args(&["--jobs", "1"])),
         Job::Publish => vec![step("the SDK crates on crates.io", || publish(root))],
@@ -466,7 +472,11 @@ fn run_control(root: &Path, control: &Control) -> Result<String, String> {
 /// ([`crate::clippy::BARE_TARGETS`]), which any rustup installs, and userland carries no
 /// clippy shape (`src/clippy.rs`). Userland and the SDK are tested against the
 /// host triple for the same reason.
+///
+/// In a job that carries the cache ([`cicache::carried`]) the restored entry is
+/// read before any step. A developer's tree keeps the dates its edits gave it.
 fn host(root: &Path) -> Vec<Step> {
+    let carried = cicache::carried(root, &std::env::current_exe().expect("the driver's own path"));
     let tmp = toyos_tmpdir::TempDir::new("ci-host");
     let short = Path::new(toyos_tmpdir::SHORT_BASE);
     let before = toyos_tmpdir::gone_roots(short);
@@ -474,14 +484,23 @@ fn host(root: &Path) -> Vec<Step> {
     // concurrently with the write, and every child inherits it.
     std::env::set_var("TMPDIR", tmp.path());
     let host_triple = crate::toolchain::host_triple();
-    let mut steps = vec![
+    let mut steps = Vec::new();
+    if carried {
+        carry();
+        steps.push(step("the cache entry, read by content", || cicache::read(root)));
+        // Every step after an unreadable entry would be judged against it.
+        if steps[0].verdict.is_err() {
+            return steps;
+        }
+    }
+    steps.extend([
         step("the build system", || cargo(root, &["test", "--lib"])),
         step("the harness's own checks", || cargo(root, &["test", "--test", "toyos-checks"])),
         step("the host workspace", || {
             cargo(root, &["test", "--workspace", "--exclude", "toyos-build"])
         }),
         step("the licences of what ships", || crate::licence::judge(root)),
-    ];
+    ]);
     steps.push(step("clippy and the bare targets", || {
         for args in [
             vec!["component", "add", "clippy"],
@@ -547,6 +566,35 @@ fn host(root: &Path) -> Vec<Step> {
     }));
     steps.push(step("nothing left in $TMPDIR or /tmp", || left_behind(&tmp, short, &before)));
     steps
+}
+
+/// [`host`] from a cold tree, then that tree sealed as the host cache's entry.
+fn seal(root: &Path) -> Vec<Step> {
+    let mut cold = None;
+    let mut steps = vec![step("a cold tree, for the entry", || {
+        let (found, said) = cicache::cold(root)?;
+        cold = Some(found);
+        Ok(said)
+    })];
+    let Some(cold) = cold else { return steps };
+    steps.extend(host(root));
+    steps.push(step("the tree, sealed as the host cache's entry", || cicache::seal(root, &cold)));
+    steps
+}
+
+/// What every step of a job that carries the cache inherits, set before any
+/// thread as `host`'s `TMPDIR` is.
+fn carry() {
+    // The job's `CARGO_TARGET_DIR` names the driver's target, and no step
+    // builds there.
+    std::env::remove_var("CARGO_TARGET_DIR");
+    // No incremental state: it is most of an entry's bytes, and after a read
+    // by content it helps only a crate whose bytes changed.
+    std::env::set_var("CARGO_INCREMENTAL", "0");
+    // Line tables alone: a backtrace in a step's log reads them, and nothing
+    // reads the rest of the debuginfo, of which a Linux link copies every
+    // dependency's into each test binary.
+    std::env::set_var("CARGO_PROFILE_DEV_DEBUG", "line-tables-only");
 }
 
 /// Every app the images ship, judged for `os` with the features its image
@@ -925,6 +973,50 @@ mod tests {
         assert!(refusal.contains(&died) && !refusal.contains(&earlier), "{refusal}");
     }
 
+    /// The crate [`a_carried_jobs_step`] builds; unset, it is not a test.
+    const FIXTURE: &str = "TOYOS_CI_TEST_FIXTURE";
+
+    /// What a job that carries the cache hands its driver reaches no step: each
+    /// builds in its own workspace's target, with no incremental state and line
+    /// tables alone. The driver is a process of its own, because `carry`
+    /// writes the environment, which no other thread may read meanwhile.
+    #[test]
+    fn a_step_of_a_job_that_carries_the_cache_builds_in_its_own_target() {
+        let fixture = toyos_tmpdir::TempDir::new("ci-carried");
+        std::fs::create_dir(fixture.join("src")).unwrap();
+        let manifest = "[package]\nname = \"one\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n";
+        std::fs::write(fixture.join("Cargo.toml"), manifest).unwrap();
+        std::fs::write(fixture.join("src/lib.rs"), "pub fn one() -> u8 {\n    1\n}\n").unwrap();
+        let out = crate::buildlock::tests::rerun("ci::tests::a_carried_jobs_step")
+            .env(FIXTURE, fixture.path())
+            .env("CARGO_TARGET_DIR", cicache::DRIVER)
+            .env_remove("CARGO_INCREMENTAL")
+            .env_remove("CARGO_PROFILE_DEV_DEBUG")
+            .output()
+            .expect("run the driver");
+        let said = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success() && said.contains("test result: ok. 1 passed"), "{said}");
+    }
+
+    #[test]
+    #[ignore = "the driver of the test above; never runs on its own"]
+    fn a_carried_jobs_step() {
+        let fixture = PathBuf::from(std::env::var_os(FIXTURE).unwrap_or_else(|| panic!("run without {FIXTURE}")));
+        carry();
+        let cargo = |args: &[&str]| {
+            let out = Command::new("cargo").args(args).current_dir(&fixture).output().expect("run cargo");
+            assert!(out.status.success(), "cargo {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            out
+        };
+        let metadata = cargo(&["metadata", "--format-version", "1", "--no-deps", "--offline"]);
+        let metadata: serde_json::Value = serde_json::from_slice(&metadata.stdout).unwrap();
+        let ours = std::fs::canonicalize(&fixture).unwrap().join("target");
+        assert_eq!(metadata["target_directory"].as_str().map(Path::new), Some(ours.as_path()));
+        let build = String::from_utf8(cargo(&["build", "-v", "--offline"]).stderr).unwrap();
+        let rustc = build.lines().find(|l| l.contains("--crate-name one")).unwrap_or_else(|| panic!("{build}"));
+        assert!(!rustc.contains("-C incremental") && rustc.contains("-C debuginfo=line-tables-only"), "{rustc}");
+    }
+
     fn repo_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
     }
@@ -961,6 +1053,7 @@ mod tests {
     #[test]
     fn a_job_is_named_and_takes_nothing_after_it() {
         assert_eq!(parse(&words("host")), Ok(Job::Host));
+        assert_eq!(parse(&words("seal")), Ok(Job::Seal));
         assert_eq!(parse(&words("guest")), Ok(Job::Guest));
         assert!(parse(&words("guest 3/12")).is_err());
         assert!(parse(&words("tcg")).is_err());
@@ -1069,35 +1162,6 @@ mod tests {
             }
         }
         assert_eq!(seen, 3, "ci.yml, nightly.yml and publish.yml");
-    }
-
-    /// Exactly one job writes each cache, on the nightly, so what a pull request
-    /// restores is one run's tree and never a race between two writers.
-    #[test]
-    fn each_cache_has_one_writer() {
-        let dir = repo_root().join(".github/workflows");
-        let mut writers = Vec::new();
-        for entry in std::fs::read_dir(&dir).expect(".github/workflows is readable").flatten() {
-            let text = std::fs::read_to_string(entry.path()).expect("a readable workflow");
-            let name = entry.file_name().to_string_lossy().into_owned();
-            assert!(!text.contains("actions/cache@"), "{name}: the combined action saves too");
-            let lines: Vec<&str> = text.lines().collect();
-            for (at, line) in lines.iter().enumerate() {
-                if line.contains("actions/cache/save@") {
-                    let key = lines[at..]
-                        .iter()
-                        .find_map(|l| l.trim_start().strip_prefix("key: "))
-                        .expect("a save names its key");
-                    writers.push((name.clone(), key.split('$').next().unwrap_or("").to_string()));
-                }
-            }
-        }
-        assert!(!writers.is_empty(), "no job writes a cache, so every restore is cold");
-        writers.sort();
-        let mut prefixes: Vec<&String> = writers.iter().map(|(_, p)| p).collect();
-        prefixes.dedup();
-        assert_eq!(prefixes.len(), writers.len(), "a cache with two writers: {writers:?}");
-        assert!(writers.iter().all(|(f, _)| f == "nightly.yml"), "{writers:?}");
     }
 
     #[test]

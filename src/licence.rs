@@ -464,6 +464,18 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         "ours: a ToyOS binary this build produced (toyos-symbols/tests/real.rs)",
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
+    (
+        "toyos-microcode/intel-ucode/06-8c-01",
+        "efe83e312b90f7fe4b8f75260087edf03e048d2f4f80caef2ef631c842714bb3",
+        "NOTICE",
+        Terms::Spdx("LicenseRef-Intel-Microcode"),
+    ),
+    (
+        "toyos-microcode/intel-ucode/06-cc-02",
+        "4e43bb4d23c3638f8c16967d61e8f6456ae0da2ddd1da82ab579a50715147bb1",
+        "NOTICE",
+        Terms::Spdx("LicenseRef-Intel-Microcode"),
+    ),
 ];
 
 /// `NOTICE` sections that name no files, and why.

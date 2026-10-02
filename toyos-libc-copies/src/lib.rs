@@ -16,20 +16,64 @@ extern crate alloc;
 #[path = "../../userland/libc/src/arch/mod.rs"]
 mod arch;
 #[cfg(test)]
+#[path = "../../userland/libc/src/elfsym.rs"]
+mod elfsym;
+#[cfg(test)]
+#[path = "../../userland/libc/src/fdreq.rs"]
+mod fdreq;
+#[cfg(test)]
+#[path = "../../userland/libc/src/fparts.rs"]
+mod fparts;
+#[cfg(test)]
+#[path = "../../userland/libc/src/linkreq.rs"]
+mod linkreq;
+#[cfg(test)]
+#[path = "../../userland/libc/src/listing.rs"]
+mod listing;
+#[cfg(test)]
+#[path = "../../userland/libc/src/memreq.rs"]
+mod memreq;
+#[cfg(test)]
+#[path = "../../userland/libc/src/sigmask.rs"]
+mod sigmask;
+#[cfg(test)]
 #[path = "../../userland/libc/src/strtonum.rs"]
 mod strtonum;
+#[cfg(test)]
+#[path = "../../userland/libc/src/text.rs"]
+mod text;
 #[cfg(test)]
 #[path = "../../userland/libc/src/utf8.rs"]
 mod utf8;
 
 #[cfg(test)]
+mod descriptor_requests;
+#[cfg(test)]
+mod dladdr_symbols;
+#[cfg(test)]
 mod errno_codes;
 #[cfg(test)]
 mod exact_hex;
+#[cfg(test)]
+mod fparts_differential;
+#[cfg(test)]
+mod header;
+#[cfg(test)]
+mod link_requests;
+#[cfg(test)]
+mod listing_reader;
 #[cfg(all(test, target_arch = "aarch64"))]
 mod long_double;
 #[cfg(test)]
+mod memory_refusals;
+#[cfg(test)]
+mod prototypes;
+#[cfg(test)]
+mod signal_masks;
+#[cfg(test)]
 mod strtonum_differential;
+#[cfg(test)]
+mod text_differential;
 #[cfg(test)]
 mod utf8_differential;
 
