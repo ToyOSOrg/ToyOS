@@ -13,10 +13,11 @@ jobs:
     # Bare, not a container: its glibc is a build's floor.
     runs-on: ubuntu-24.04
     timeout-minutes: 350
-    # Main's two callers build one key once, one after the other.
+    # Main's two callers build one key once, one after the other, and one that
+    # waits is never cancelled for a later one.
     concurrency:
       group: toolchain-${{ github.ref }}
-      cancel-in-progress: false
+      queue: max
     outputs:
       sysroot-key: ${{ steps.keys.outputs.sysroot-key }}
       sysroot-path: ${{ steps.keys.outputs.sysroot-path }}

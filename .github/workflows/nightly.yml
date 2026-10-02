@@ -51,8 +51,10 @@ jobs:
   toolchain:
     uses: ./.github/workflows/toolchain.yml
 
+  # Skipped off main, where the driver refuses it by name.
   release:
     needs: toolchain
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
