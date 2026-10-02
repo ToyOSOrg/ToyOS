@@ -8,7 +8,7 @@ opened: 2026-09-29
 
 ToyOS takes each hardware feature that makes it faster on every CPU that
 enumerates it; a CPU without one runs the plain path, or is refused by name
-where the stage says so. The proving machines are the T14 and the nightly's
+where the stage says so. The proving machines are the T14 and
 AMD EPYC KVM guests, and a stage's correctness test runs on each that has its
 feature. A figure is the T14's, since the EPYC guests are shared CI runners:
 the median of 11 runs with its spread, taken by the program of
