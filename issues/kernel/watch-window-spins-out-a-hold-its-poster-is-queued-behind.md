@@ -32,3 +32,5 @@ not reproduced.
 (`CpuHandle::doorbell().kick_pending()`, `CpuHandle::load()`), so a post from a
 task on the same CPU lands in it; and `blocking_read_window` shown green at a
 rate on a guest whose canary pair shares a CPU.
+
+`watch-window` and `blocking_read_window` are deleted; `issues/build/blocking-read-window-reds-beside-other-guests.md` records the commit that restores them.

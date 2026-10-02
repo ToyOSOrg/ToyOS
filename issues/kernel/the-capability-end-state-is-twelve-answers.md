@@ -339,3 +339,5 @@ Question 12 is not in this set: its track already holds it.
 - **Zero-handle hooks stay mechanically constrained** — the drain sites'
   "no hook may take a sleep lock" doc constraint wants enforcement the
   compiler or an assert can see, per the review's finalization-path point.
+
+`handle_kill_policy` is deleted; `issues/kernel/handle-kill-policy-census-grew-one-sharedmem-on-two-nightlies.md` records the commit that restores it.

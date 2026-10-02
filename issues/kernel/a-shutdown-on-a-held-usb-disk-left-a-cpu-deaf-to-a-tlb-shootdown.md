@@ -50,3 +50,5 @@ What holds cpu1's interrupts off across that window is named from a boot, and
 either the shutdown's calls on a held disk take interrupts between them or the
 shootdown on another CPU cannot need them then; a staged `usb-transport-break`
 shutdown with a thread ending on the other CPU inside the window stays up.
+
+`usb_transport_break` is deleted; `issues/kernel/a-held-disk-waits-for-a-pass-no-cpu-takes-when-every-cpu-is-in-a-call-on-it.md` records the commit that restores it.

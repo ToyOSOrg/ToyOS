@@ -47,7 +47,7 @@ use super::machine::{
 #[cfg(feature = "test-actuators")]
 use super::machine::lower_sysinfo_bound;
 use super::proc::{
-    sys_endowments, sys_exit, sys_nanosleep, sys_process_stats,
+    spawn_place, sys_endowments, sys_exit, sys_nanosleep, sys_process_stats,
     sys_process_wait, sys_rt_enter, sys_spawn, sys_thread_exit, sys_thread_join, sys_thread_spawn,
 };
 use super::vm::{shared_image, sys_dlopen, sys_dlsym, sys_mmap, sys_munmap, sys_query_modules, sys_tls_alloc_block};
@@ -118,9 +118,6 @@ fn task_probes() {
 }
 
 pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
-    // Placed first so the architecture counts the call whatever it turns out to be.
-    #[cfg(feature = "boot-actuators")]
-    crate::arch::syscall::note_entry();
     #[cfg(feature = "boot-actuators")]
     task_probes();
     let t0 = crate::clock::nanos_since_boot();
@@ -216,13 +213,18 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                     Err(refused) => return refused,
                 },
             };
+            // Before an endowment can move the handle that names it.
+            let parent = match spawn_place(args.place) {
+                Ok(parent) => parent,
+                Err(refused) => return refused,
+            };
             let text = match ctx.user_str(UserAddr::new(args.argv_ptr), args.argv_len) { Ok(s) => s, Err(e) => return e.to_u64() };
             let cwd = match ctx.user_str(UserAddr::new(args.cwd_ptr), args.cwd_len).and_then(|p| spawn_cwd(&p)) {
                 Ok(cwd) => cwd,
                 Err(e) => return e.to_u64(),
             };
-            if args.endow_count as usize > toyos_abi::syscall::MAX_ENDOWMENTS
-                || args.labels_len > toyos_abi::syscall::MAX_LABELS_LEN as u64
+            if args.endow_count as usize > toyos_abi::syscall::MAX_SPAWN_ENDOWMENTS
+                || args.labels_len > toyos_abi::syscall::MAX_SPAWN_LABELS_LEN as u64
             {
                 return SyscallError::InvalidArgument.to_u64();
             }
@@ -262,7 +264,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 alloc::vec::Vec::new()
             };
             let argv: alloc::vec::Vec<&str> = text.split('\0').filter(|s| !s.is_empty()).collect();
-            sys_spawn(&argv, pending, cwd, env, image)
+            sys_spawn(&argv, pending, cwd, env, image, parent)
         }
         SYS_PROCESS_WAIT => sys_process_wait(RawHandle(a1 as u32), a2),
         SYS_PROCESS_KILL => {
@@ -574,11 +576,6 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             DA::HEAP_AT_CEILING => debug_heap_alloc(crate::mm::MAX_HEAP_ALLOC, 8),
             DA::HEAP_OVER_CEILING => debug_heap_alloc(crate::mm::PAGE_2M as usize, 8),
             DA::HEAP_AT_CEILING_PAGE_ALIGNED => debug_heap_alloc(crate::mm::MAX_HEAP_ALLOC, 4096),
-            // Returns, unlike other actions here: the console must survive being drawn over.
-            DA::SCREEN_GRAFFITI => {
-                crate::drivers::panic_console::graffiti();
-                0
-            }
             // A read, not a write: tests the page is absent without the feature also
             // handing userland a kernel store; returning 0 means the guard failed.
             DA::IDLE_GUARD_READ => {
@@ -610,8 +607,6 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                     None => SyscallError::InvalidArgument.to_u64(),
                 }
             }
-            DA::IDLE_STACK_HIGH_WATER => crate::arch::percpu::idle_stack_high_water() as u64,
-            DA::IDLE_STACK_SIZE => crate::arch::percpu::idle_stack_size() as u64,
             // Armed, not #[cfg]'d, so it doesn't ship in every kernel this suite boots:
             // the real bound is unreachable (no guest makes 65,536 threads).
             DA::LOWER_SYSINFO_BOUND => {
@@ -631,6 +626,10 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             }
             DA::LOG_PATTERNED => {
                 crate::log::storm::emit_patterned(0, a2);
+                0
+            }
+            DA::KILL_PLACE_AS_SPAWN_LANDS => {
+                process::debug_mark_spawn();
                 0
             }
             _ => SyscallError::InvalidArgument.to_u64(),

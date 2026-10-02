@@ -2,12 +2,20 @@
 #define _PTHREAD_H
 
 #include <stddef.h>
+#include <sched.h>
 #include <time.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 typedef unsigned long pthread_t;
 
 typedef struct {
     unsigned int __state;
+    unsigned int __kind;
+    unsigned long __owner;
+    unsigned long __count;
 } pthread_mutex_t;
 
 typedef struct {
@@ -28,9 +36,9 @@ typedef unsigned long pthread_rwlockattr_t;
 typedef unsigned long pthread_attr_t;
 typedef unsigned int pthread_key_t;
 
-#define PTHREAD_MUTEX_INITIALIZER  { 0 }
+#define PTHREAD_MUTEX_INITIALIZER  { 0, 0, 0, 0 }
 #define PTHREAD_COND_INITIALIZER   { 0 }
-#define PTHREAD_RWLOCK_INITIALIZER { { 0 } }
+#define PTHREAD_RWLOCK_INITIALIZER { PTHREAD_MUTEX_INITIALIZER }
 #define PTHREAD_ONCE_INIT          { 0 }
 
 #define PTHREAD_MUTEX_NORMAL     0
@@ -41,11 +49,15 @@ typedef unsigned int pthread_key_t;
 #define PTHREAD_CREATE_JOINABLE 0
 #define PTHREAD_CREATE_DETACHED 1
 
+#define PTHREAD_KEYS_MAX 128
+#define PTHREAD_DESTRUCTOR_ITERATIONS 4
+
 /* Thread */
 int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
                    void *(*start_routine)(void *), void *arg);
 int pthread_join(pthread_t thread, void **retval);
 int pthread_detach(pthread_t thread);
+__attribute__((__noreturn__)) void pthread_exit(void *retval);
 pthread_t pthread_self(void);
 int pthread_equal(pthread_t t1, pthread_t t2);
 
@@ -59,10 +71,13 @@ int pthread_mutex_destroy(pthread_mutex_t *mutex);
 int pthread_mutexattr_init(pthread_mutexattr_t *attr);
 int pthread_mutexattr_destroy(pthread_mutexattr_t *attr);
 int pthread_mutexattr_settype(pthread_mutexattr_t *attr, int type);
+int pthread_mutexattr_gettype(const pthread_mutexattr_t *attr, int *type);
 
 /* Condition variable */
 int pthread_cond_init(pthread_cond_t *cond, const pthread_condattr_t *attr);
 int pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex);
+int pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mutex,
+                           const struct timespec *abstime);
 int pthread_cond_signal(pthread_cond_t *cond);
 int pthread_cond_broadcast(pthread_cond_t *cond);
 int pthread_cond_destroy(pthread_cond_t *cond);
@@ -92,5 +107,9 @@ int pthread_attr_destroy(pthread_attr_t *attr);
 int pthread_attr_setstacksize(pthread_attr_t *attr, size_t stacksize);
 int pthread_attr_getstacksize(const pthread_attr_t *attr, size_t *stacksize);
 int pthread_attr_setdetachstate(pthread_attr_t *attr, int detachstate);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

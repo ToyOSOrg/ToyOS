@@ -29,3 +29,5 @@ the console once it has.
 
 A job's exit record either precedes the boot's last word or never reaches the
 console after it, and the test is green under a loaded host.
+
+`quiesce_wakes_on_the_last_park` is deleted; `issues/kernel/quiesce-wakes-on-the-last-park-gave-up-on-one-thread-beside-the-held-one.md` records the commit that restores it.

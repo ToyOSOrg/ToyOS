@@ -20,8 +20,7 @@ Two ways a disk that could still be served is lost today:
   enumerated on the USB2 half of its receptacle answered the bus reset by
   training SuperSpeed on the other half, so it left port 1 and arrived on port
   13. `toyos_xhci::identity` now holds such a disk for `RETURN_WINDOW` and
-  gives its number back to a device that proves the same identity; QEMU
-  judges it (`usb_transport_break`'s moved boots).
+  gives its number back to a device that proves the same identity.
 - **Offline is for the connection's life.** Nothing asks an offline device
   again, however long it stays plugged in.
 
@@ -34,3 +33,5 @@ a device that is the same device.
 A T14 boot whose stick's transport broke mid-boot and that finishes with its
 mounts intact, on either half of the receptacle; and a disk that left its port
 under a reset and arrived on another keeps its number.
+
+`usb_transport_break` is deleted; `issues/kernel/a-held-disk-waits-for-a-pass-no-cpu-takes-when-every-cpu-is-in-a-call-on-it.md` records the commit that restores it.

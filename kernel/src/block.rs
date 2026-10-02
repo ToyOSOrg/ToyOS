@@ -209,13 +209,6 @@ static DEVICES: Lock<BTreeMap<DeviceId, Handle>> = Lock::new(BTreeMap::new());
 /// cache, which a plain insert here would arrange in silence.
 #[must_use = "a refused registration leaves the device unreachable"]
 pub fn register(dev: Box<dyn BlockDevice>) -> Option<Handle> {
-    #[cfg(feature = "boot-actuators")]
-    let dev: Box<dyn BlockDevice> =
-        if crate::actuator::partclaim_table_unanswered() || crate::actuator::partclaim_root_withheld() {
-            Box::new(unanswered::Table(dev))
-        } else {
-            dev
-        };
     let id = dev.device_id();
     let blocks = dev.block_count();
     let mut devices = DEVICES.lock();
@@ -233,60 +226,6 @@ pub fn register(dev: Box<dyn BlockDevice>) -> Option<Handle> {
     devices.insert(id, handle.clone());
     log!("block: device {id} registered, {blocks} blocks");
     Some(handle)
-}
-
-#[cfg(feature = "boot-actuators")]
-pub mod unanswered {
-    use core::sync::atomic::{AtomicBool, Ordering};
-
-    use alloc::boxed::Box;
-
-    use super::{BlockDevice, BlockError, BlockResult, DeviceId};
-
-    static REFUSING: AtomicBool = AtomicBool::new(false);
-
-    pub(super) struct Table(pub(super) Box<dyn BlockDevice>);
-
-    impl BlockDevice for Table {
-        fn device_id(&self) -> DeviceId {
-            self.0.device_id()
-        }
-
-        fn block_count(&self) -> u64 {
-            self.0.block_count()
-        }
-
-        fn read_blocks(&mut self, lba: u64, count: u32, buf: &mut [u8]) -> BlockResult {
-            if lba == 0 && count > 0 && REFUSING.load(Ordering::Relaxed) {
-                return Err(BlockError::Device);
-            }
-            self.0.read_blocks(lba, count, buf)
-        }
-
-        fn write_blocks(&mut self, lba: u64, count: u32, buf: &[u8]) -> BlockResult {
-            self.0.write_blocks(lba, count, buf)
-        }
-
-        fn flush(&mut self) -> BlockResult {
-            self.0.flush()
-        }
-
-        fn losses(&self) -> u64 {
-            self.0.losses()
-        }
-    }
-
-    /// Every disk registered from here on, and before, refuses reads of its
-    /// block 0.
-    pub fn refuse() {
-        REFUSING.store(true, Ordering::Relaxed);
-        log!("block: device block 0 of every disk refuses reads from now on");
-    }
-
-    pub fn answer() {
-        REFUSING.store(false, Ordering::Relaxed);
-        log!("block: device block 0 of every disk answers reads again");
-    }
 }
 
 pub fn open(id: DeviceId) -> Option<Handle> {
@@ -540,67 +479,8 @@ impl Partition {
     }
 }
 
-/// The duplicate-id control (`block-duplicate-id`): the impostor fills every
-/// read with its own mark, so a registry that took it is caught serving that
-/// mark for a device it is not.
-#[cfg(feature = "boot-actuators")]
-pub fn duplicate_id_selftest() {
-    use alloc::vec;
-
-    const MARK: &[u8] = b"impostor";
-
-    struct Impostor {
-        id: DeviceId,
-        blocks: u64,
-    }
-
-    impl BlockDevice for Impostor {
-        fn device_id(&self) -> DeviceId {
-            self.id
-        }
-        fn block_count(&self) -> u64 {
-            self.blocks
-        }
-        fn read_blocks(&mut self, _lba: u64, _count: u32, buf: &mut [u8]) -> BlockResult {
-            buf.fill(0);
-            buf[..MARK.len()].copy_from_slice(MARK);
-            Ok(())
-        }
-        fn write_blocks(&mut self, _lba: u64, _count: u32, _buf: &[u8]) -> BlockResult {
-            Ok(())
-        }
-        fn flush(&mut self) -> BlockResult {
-            Ok(())
-        }
-        fn losses(&self) -> u64 {
-            0
-        }
-    }
-
-    let before = registered();
-    let Some(first) = before.first().cloned() else {
-        log!("block-duplicate-id: FAIL (this boot registered no block device)");
-        return;
-    };
-    let id = first.device_id();
-    let refused = register(Box::new(Impostor { id, blocks: first.block_count() })).is_none();
-
-    let mut buf = vec![0u8; PAGE_SIZE as usize];
-    let served = open(id).is_some_and(|h| h.lock().read_blocks(0, 1, &mut buf).is_ok());
-    let by_impostor = buf[..MARK.len()] == *MARK;
-    log!(
-        "block-duplicate-id: device {id} claimed twice, second registration refused={refused}, \
-         devices {} before and {} after, block 0 served={served} by_impostor={by_impostor}",
-        before.len(),
-        registered().len()
-    );
-}
-
 /// Pages the file data cache may hold.
 pub fn file_cache_pages() -> usize {
-    if crate::actuator::test_small_caches() {
-        return 64;
-    }
     let (total, _) = crate::mm::pmm::stats();
     (((total / 64) / PAGE_SIZE) as usize).clamp(2048, 65536)
 }

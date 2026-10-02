@@ -37,12 +37,17 @@ name = "toyos-abi"
 version = "0.16.0"
 
 [[package]]
+name = "toyos-elf"
+version = "0.1.0"
+
+[[package]]
 name = "toyos-libc"
 version = "0.1.0"
 dependencies = [
  "dlmalloc",
  "toyos",
  "toyos-abi",
+ "toyos-elf",
 ]
 
 [[package]]

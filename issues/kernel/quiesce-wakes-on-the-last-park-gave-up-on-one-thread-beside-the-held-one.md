@@ -1,5 +1,5 @@
 ---
-status: expected-red
+status: assigned
 kind: defect
 opened: 2026-09-28
 ---
@@ -36,7 +36,7 @@ the `stop:` record carries only counts.
 thread queued on that CPU then runs only if `dispose_yield`
 (`toyos-sched/src/cpu.rs`) re-inserts the spinner behind it.
 
-**What no enabled guest test checks while this is disabled.**
+**What no guest test checks while these are deleted.**
 
 - that a band, a park or an exit wakes the stop, rather than its deadline;
 - `in_flight == 0` with `begun > 0`;
@@ -44,7 +44,7 @@ thread queued on that CPU then runs only if `dispose_yield`
 - the `console-queue-at-the-stop` drain;
 - that the stop waits for a teardown in flight —
   `quiesce_wakes_on_the_last_teardown`'s only claim, and the only enabled
-  guest check of it, disabled by this same issue.
+  guest check of it, deleted on this same issue.
 
 `quiesce_refuses_a_second_shutdown` stays green over a lost post.
 
@@ -68,3 +68,10 @@ budget of the kernel's own clock, so on metal alone
 judges the held thread before the sync and more than one sweep, and the failure
 quoted above no longer reds it. That change has never run: the test's first run
 back is also that change's.
+
+**Its tests are deleted**: `6b3ce2374` took `quiesce_wakes_on_the_last_park`
+and `quiesce_wakes_on_the_last_teardown` out, and `b82f45e6e` the
+`quiesce-last-teardown` actuator only the second armed. `git revert b82f45e6e
+6b3ce2374` brings both back as they stood before #536; `git show 84471bc58`
+holds #536's adaptation of `tests/quiescelastcase/system.toml` and of
+`tests/common/power.rs`'s `woken_by_the_held_thread`.

@@ -1,7 +1,7 @@
 //! A process is something you hold, and holding it is the whole of the right to
 //! wait for it.
 //!
-//! **There is no zombie here and no parent.** A pid-keyed wait needed the
+//! **There is no zombie here.** A pid-keyed wait needed the
 //! process table to keep a corpse until somebody claimed it, and rules for who
 //! was allowed to claim one and what happened when nobody did. The exit code
 //! lives on the object instead, published once by whichever of exit or kill

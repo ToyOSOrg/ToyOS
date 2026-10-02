@@ -1,8 +1,8 @@
 //! Threads that make kernel records as fast as they can while this one has
 //! the kernel go fatal (`SYS_DEBUG` action 3). A sibling still running after
 //! the fatal path stopped the other CPUs is a record past the fatal path's own
-//! line after the stop; `panic_halts_the_others_first` reads the console for
-//! one.
+//! line after the stop; `virt_fatal_halts_the_others_first` reads the console
+//! for one.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
