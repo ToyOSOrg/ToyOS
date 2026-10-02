@@ -423,6 +423,55 @@ fn s_ip_nud_022_a_full_table_evicts_in_order() {
     assert!(h.state(asker).is_none());
 }
 
+/// A table of TABLE_MAX neighbours, each REACHABLE since t = 0: none may go.
+fn full_of_reachable() -> H {
+    let mut h = wide();
+    for n in 0..limits::nud::TABLE_MAX as u32 {
+        reach_wide(&mut h, neighbour(n));
+    }
+    h
+}
+
+/// A datagram to a neighbour the full table holds no entry for.
+fn send_to_a_new_neighbour(h: &mut H) -> Result<Option<Vec<u8>>, Counter> {
+    h.send(WIDE_A, neighbour(9_000), 5001, 5001, b"x")
+}
+
+fn rooms(h: &H) -> usize {
+    h.events.iter().filter(|e| **e == Event::Room { iface: h.if0 }).count()
+}
+
+#[test]
+fn s_ip_nud_022_a_send_a_full_table_refused_is_told_of_room() {
+    // REACHABLE ages into STALE, which may go, no sooner than 15 s after its confirmation.
+    let mut h = full_of_reachable();
+    assert_eq!(send_to_a_new_neighbour(&mut h), Err(Counter::NbTableFull));
+    h.run(14_999);
+    assert_eq!(rooms(&h), 0, "every entry is still in use");
+    h.run(45_000);
+    assert!((0..limits::nud::TABLE_MAX as u32).all(|n| h.is_stale(neighbour(n))));
+    assert_eq!(rooms(&h), 1, "one report for the one refusal, however many entries age");
+    assert_eq!(send_to_a_new_neighbour(&mut h), Ok(None));
+
+    let mut h = full_of_reachable();
+    h.run(45_000);
+    assert_eq!(rooms(&h), 0, "nothing was refused");
+
+    // Another MAC's announcement, past LOCKTIME, makes its entry STALE on arrival.
+    let mut h = full_of_reachable();
+    h.at(2_000);
+    assert_eq!(send_to_a_new_neighbour(&mut h), Err(Counter::NbTableFull));
+    h.frame(&eth(MacAddr::BROADCAST, MAC_X, 0x0806, &arp_packet(1, MAC_X, neighbour(0), MacAddr::ZERO, neighbour(0))));
+    assert!(h.is_stale(neighbour(0)));
+    assert_eq!(rooms(&h), 1);
+
+    let mut h = full_of_reachable();
+    assert_eq!(send_to_a_new_neighbour(&mut h), Err(Counter::NbTableFull));
+    h.ip.link_down(h.clock(), h.if0).unwrap();
+    h.collect();
+    assert_eq!(rooms(&h), 1, "the table emptied");
+}
+
 #[test]
 fn s_ip_nud_023_link_down_drops_the_table() {
     let mut h = H::fixture_i();

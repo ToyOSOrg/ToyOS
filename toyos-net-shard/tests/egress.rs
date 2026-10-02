@@ -95,7 +95,7 @@ fn s_pl_013_shard_a_connect_with_no_route_fails_at_once() {
     let id = net.nodes[a].shard.connect(now, Some(port(49152)), ep(B, 80)).unwrap();
     net.nodes[a].shard.link_down(now).unwrap();
     net.advance(Duration::from_secs(5));
-    assert_eq!(net.nodes[a].shard.status(id).unwrap().failure, Some(HOST_UNREACHABLE), "Q8: no route is unreachable");
+    assert_eq!(net.nodes[a].shard.status(id).unwrap().failure, Some(HOST_UNREACHABLE));
     let counters = net.nodes[a].shard.tcp_counters();
     assert_eq!((counters.get(Counter::Rto), counters.get(Counter::NextHopFailed)), (0, 1));
     assert_eq!(routes_refused(&net, a), 1, "one question, refused once");
@@ -164,8 +164,8 @@ fn s_pl_014_shard_an_established_flow_records_host_unreachable() {
     assert_eq!((status.state, status.soft_error), (State::Established, Some(SoftError::Unreachable(UnreachableCode::Host))));
     let failed = |net: &Net| net.nodes[a].shard.tcp_counters().get(Counter::NextHopFailed);
     assert_eq!((net.nodes[a].shard.tcp_counters().get(Counter::Rto), failed(&net)), (0, 1), "nothing left, so nothing expired");
-    // Q8: no count per opportunity. The next question is at the hold-down's end, 20 s on, which
-    // resolves B afresh; that fails 3 s later, a second segment not built.
+    // The next question is at the hold-down's end, 20 s on, which resolves B afresh; that fails
+    // 3 s later, a second segment not built.
     net.advance(Duration::from_millis(22_999));
     assert_eq!(failed(&net), 1);
     net.advance(Duration::from_millis(1));
@@ -403,7 +403,7 @@ fn s_ip_nud_020_shard_a_stalled_connect_reverifies_the_gateway() {
 }
 
 #[test]
-fn s_ip_nud_022_shard_a_flow_refused_by_a_full_table_asks_again_as_entries_age() {
+fn s_ip_nud_022_shard_a_flow_refused_by_a_full_table_asks_again_once_an_entry_may_go() {
     let mut net = Net::new(Instant::from_millis(3_600_000));
     let a = net.add_node(MAC_A, A, 22);
     let b = net.add_node(MAC_B, B, 22);
@@ -423,7 +423,13 @@ fn s_ip_nud_022_shard_a_flow_refused_by_a_full_table_asks_again_as_entries_age()
     net.nodes[a].shard.send(now, to_b, &[0x55; 100]).unwrap();
     net.advance(Duration::from_millis(1));
     assert_eq!(net.nodes[a].shard.status(to_b).unwrap().soft_error, Some(SoftError::Unreachable(UnreachableCode::Host)));
-    assert_eq!(net.nodes[a].shard.ip().counters().get(IpCounter::NbTableFull), 1);
+    let asked = |net: &Net| (net.nodes[a].shard.ip().counters().get(IpCounter::NbTableFull), net.nodes[a].shard.tcp_counters().get(Counter::NextHopFailed));
+    assert_eq!(asked(&net), (1, 1));
+
+    // [ip]'s timers fire at 1 s and 2 s, for the second and third requests: no entry may go yet,
+    // and B's flow is not asked.
+    net.advance(Duration::from_millis(2_998));
+    assert_eq!(asked(&net), (1, 1));
 
     // At 3 s the requests fail and their entries may go: B's flow asks again, and leaves.
     net.advance(Duration::from_secs(4));

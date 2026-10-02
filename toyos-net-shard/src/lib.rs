@@ -8,9 +8,10 @@
 //! taking turns. A TCP segment is built only once its next hop's link address is known, and
 //! committed only once its frame is (`ip.md` §6.7, `tcp.md` §11.3); the send registers with the
 //! neighbour entry then. A flow whose next hop is unresolved or failed builds nothing, spends
-//! nothing, and is not asked again until [ip] reports a change for that next hop or for the
-//! routes: a waiting flow costs one question per such change. A UDP datagram whose next hop is
-//! unresolved waits in [ip], spending nothing.
+//! nothing, and is not asked again until [ip] reports a change for that next hop, for the routes,
+//! or, to a flow a full neighbour table refused, that the table has room: a waiting flow costs
+//! one question per such change. A UDP datagram whose next hop is unresolved waits in [ip],
+//! spending nothing.
 //!
 //! **Refusals.** Each crate's refusals of legacy or insecure input pass through that crate's
 //! `RefusalLog` here: at most one [`Event::Refused`] per rule in any 10 s, carrying how many
@@ -112,7 +113,6 @@ enum Wait {
 struct Via {
     next_hop: Ipv4Addr,
     mac: MacAddr,
-    source: Ipv4Source,
 }
 
 /// The transports whose data frames take turns.
@@ -253,16 +253,16 @@ impl Shard {
             1,
             |tuple| hop(ip, now, iface, tuple, waiting),
             |out, via| {
-                let Some(bytes) = tcp_datagram(out, *mac, &via, frame) else { return false };
+                let Some(bytes) = tcp_datagram(out, *mac, via.mac, frame) else { return false };
                 sink(bytes);
-                built = Some((via.next_hop, via.source));
+                built = Some((via.next_hop, out.source));
                 true
             },
         );
         match built {
             Some((next_hop, source)) => {
                 // The send the neighbour machine counts: STALE moves to DELAY (RFC 4861 §7.3.3).
-                ip.resolve(now, iface, next_hop, source.get());
+                ip.resolve(now, iface, next_hop, source);
                 true
             }
             None => false,
@@ -285,12 +285,7 @@ impl Shard {
 
     /// Every deadline at or before `now`; the work they make due waits for [`Self::transmit`].
     pub fn fire(&mut self, now: Instant) {
-        let aged = self.ip.next_deadline().is_some_and(|at| at <= now);
         self.ip.fire(now);
-        if aged {
-            // A full table holds entries in use, which leave use as [ip]'s timers fire.
-            wake(&mut self.tcp, &mut self.waiting, Wait::Room);
-        }
         self.tcp.fire(now);
         self.settle(now);
     }
@@ -320,6 +315,7 @@ impl Shard {
                 toyos_net_ip::Event::Resolved { next_hop, .. } | toyos_net_ip::Event::Failed { next_hop, .. } | toyos_net_ip::Event::Cleared { next_hop, .. } => {
                     wake(tcp, waiting, Wait::Hop(next_hop));
                 }
+                toyos_net_ip::Event::Room { .. } => wake(tcp, waiting, Wait::Room),
                 toyos_net_ip::Event::Verified { addr, .. } => events.push(Event::Verified(addr)),
                 toyos_net_ip::Event::Conflict { addr, mac, .. } => events.push(Event::Conflict { addr, mac }),
                 toyos_net_ip::Event::Lost { addr, mac, .. } => events.push(Event::Lost { addr, mac }),
@@ -441,21 +437,20 @@ impl Shard {
 
 /// Whether `tuple`'s next segment can be built now, peeking its next hop's entry, which does not
 /// move (`ip.md` §6.7 (2)): only a next hop with no entry is resolved, which queues its request.
-/// No route is a local destination unreachable (RFC 1122 §3.3.1.1), and so is a source [ip] would
-/// not send from. A flow told to wait is recorded under what it waits on.
+/// No route is a local destination unreachable (RFC 1122 §3.3.1.1). A flow told to wait is
+/// recorded under what it waits on; one with no route waits on the routes.
 fn hop(ip: &mut Ip, now: Instant, iface: IfIndex, tuple: &Tuple, waiting: &mut BTreeMap<Wait, BTreeSet<Ipv4Addr>>) -> Hop<Via> {
     let remote = tuple.remote.addr;
     let Ok(route) = ip.route(remote, Source::Bound(tuple.local.addr), Some(iface)) else { return Hop::Unreachable };
     let NextHop::Neighbour(next_hop) = route.next_hop else { return Hop::Unreachable };
-    let Ok(source) = Ipv4Source::new(route.source) else { return Hop::Unreachable };
     let (answer, wait) = match ip.neighbour(iface, next_hop) {
         Some(entry) => match entry.mac() {
-            Some(mac) => (Hop::Ready(Via { next_hop, mac, source }), None),
+            Some(mac) => (Hop::Ready(Via { next_hop, mac }), None),
             None if matches!(entry, Nud::Failed) => (Hop::Unreachable, Some(Wait::Hop(next_hop))),
             None => (Hop::Pending, Some(Wait::Hop(next_hop))),
         },
         None => match ip.resolve(now, iface, next_hop, route.source) {
-            Resolution::Resolved(mac) => (Hop::Ready(Via { next_hop, mac, source }), None),
+            Resolution::Resolved(mac) => (Hop::Ready(Via { next_hop, mac }), None),
             Resolution::Pending => (Hop::Pending, Some(Wait::Hop(next_hop))),
             Resolution::Failed => (Hop::Unreachable, Some(Wait::Room)),
         },
@@ -473,18 +468,19 @@ fn wake(tcp: &mut Tcp, waiting: &mut BTreeMap<Wait, BTreeSet<Ipv4Addr>>, wait: W
     }
 }
 
-/// A segment in its IPv4 datagram and Ethernet frame: DF, TTL 64, DSCP and ECN 0 (`tcp.md` §19).
-/// `None` is a segment longer than a frame carries, which TCP's MTU rules out.
-fn tcp_datagram<'f>(out: &Outgoing<'_>, mac: IndividualMac, via: &Via, frame: &'f mut [u8; FRAME]) -> Option<&'f [u8]> {
+/// A segment in its IPv4 datagram and Ethernet frame to `to`: DF, TTL 64, DSCP and ECN 0
+/// (`tcp.md` §19). `None` is a segment longer than a frame carries, which TCP's MTU rules out, or
+/// from a source no datagram may carry, which [ip]'s addresses rule out.
+fn tcp_datagram<'f>(out: &Outgoing<'_>, mac: IndividualMac, to: MacAddr, frame: &'f mut [u8; FRAME]) -> Option<&'f [u8]> {
     let datagram = Ipv4Builder {
-        source: via.source,
+        source: Ipv4Source::new(out.source).ok()?,
         destination: out.destination,
         ttl: Ttl::DEFAULT,
         traffic_class: TrafficClass::ZERO,
         options: &[],
         payload: out.segment,
     };
-    FrameBuilder { destination: via.mac, source: mac }.emit(&datagram, frame).ok()
+    FrameBuilder { destination: to, source: mac }.emit(&datagram, frame).ok()
 }
 
 /// An error [ip] validated against a TCP segment of ours, in TCP's terms.

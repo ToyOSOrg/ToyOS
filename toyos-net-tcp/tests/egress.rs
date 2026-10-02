@@ -197,12 +197,121 @@ fn s_pl_001_a_frame_the_sink_refuses_never_left() {
     nothing(&h.send(0, 1000));
     let info = h.info();
     assert_eq!((info.snd_nxt, info.rtx_timer), (info.snd_una, None), "nothing of it counts as sent");
-    assert_eq!(h.count(Counter::FrameRefused), 1);
-    nothing(&h.at(5_000));
-    assert_eq!(h.count(Counter::FrameRefused), 1, "it waits for a change, like a pending flow");
+    assert_eq!(h.count(Counter::FrameRefused), 1, "offered once in the opportunity that refused it");
+    nothing(&h.at(4_999));
+    assert_eq!(h.count(Counter::FrameRefused), 2, "and once more at the next");
     h.unframed = false;
-    expect(&woken(&mut h, 5_000), &["SEQ=1001 ACK=5001 LEN=1000"]);
+    expect(&h.at(5_000), &["SEQ=1001 ACK=5001 LEN=1000"]);
     assert_eq!(h.info().rtx_timer, Some(h.instant(5_200)), "timed from its hand-off");
+}
+
+/// Two in-order segments from B in one receive pass at t = 1: A owes an ACK at once.
+fn two_in_order(h: &mut H) -> Vec<O> {
+    let mut outs = h.at(1);
+    h.arrive(seg(5001).ack(1001).len(100));
+    h.arrive(seg(5101).ack(1001).len(100));
+    outs.extend(h.transmit());
+    outs
+}
+
+#[test]
+fn s_pl_012_an_owed_ack_waits_for_its_next_hop() {
+    let mut h = fixture_e();
+    h.hop = hop_b(|t| if t < 100 { Hop::Pending } else { Hop::Ready(()) });
+    nothing(&two_in_order(&mut h));
+    nothing(&h.at(99));
+    expect(&woken(&mut h, 100), &["SEQ=1001 ACK=5201 CTL=ACK LEN=0"]);
+    nothing(&h.at(1_000));
+}
+
+#[test]
+fn s_pl_014_an_owed_ack_outlasts_an_unreachable_next_hop() {
+    let mut h = fixture_e();
+    h.hop = hop_b(|t| if t < 100 { Hop::Unreachable } else { Hop::Ready(()) });
+    nothing(&two_in_order(&mut h));
+    assert_eq!((h.status().soft_error, h.count(Counter::NextHopFailed)), (Some(SoftError::Unreachable(UnreachableCode::Host)), 1));
+    nothing(&h.at(99));
+    expect(&woken(&mut h, 100), &["SEQ=1001 ACK=5201 CTL=ACK LEN=0"]);
+    nothing(&h.at(1_000));
+}
+
+#[test]
+fn s_pl_001_an_ack_the_sink_refuses_stays_owed() {
+    let mut h = fixture_e();
+    h.unframed = true;
+    nothing(&two_in_order(&mut h));
+    assert_eq!(h.count(Counter::FrameRefused), 1);
+    h.unframed = false;
+    expect(&h.at(2), &["SEQ=1001 ACK=5201 CTL=ACK LEN=0"]);
+    nothing(&h.at(1_000));
+}
+
+#[test]
+fn s_pl_012_a_window_update_offers_nothing_until_it_leaves() {
+    // B fills A's buffer of two segments, and A's window is shut.
+    let mut h = client(2_920, seg(5000).ack(1001).syn().wnd(65_535).mss(1460));
+    nothing(&h.input(1, seg(5001).ack(1001).len(1460)));
+    expect(&h.input(2, seg(6461).ack(1001).len(1460)), &["ACK=7921 WND=0"]);
+    h.hop = hop_b(|t| if t < 100 { Hop::Pending } else { Hop::Ready(()) });
+    assert_eq!(h.read(2_920).len(), 2_920);
+    nothing(&h.transmit());
+    assert_eq!(h.info().rcv_edge.get(), 7_921, "the edge the update will offer is not offered yet");
+    nothing(&h.at(99));
+    expect(&woken(&mut h, 100), &["SEQ=1001 ACK=7921 WND=2920 LEN=0"]);
+    assert_eq!(h.info().rcv_edge.get(), 10_841);
+}
+
+#[test]
+fn s_pl_012_an_ack_owed_in_syn_received_waits_for_its_next_hop() {
+    // A segment outside the window is owed an ACK (RFC 9293 §3.10.7.4).
+    let outside = || seg(75_001).ack(1001).len(10);
+
+    let mut h = listening();
+    expect(&h.input(0, seg(5000).syn().mss(1460)), &["CTL=SYN,ACK"]);
+    h.hop = hop_b(|t| if t < 100 { Hop::Pending } else { Hop::Ready(()) });
+    nothing(&h.input(10, outside()));
+    nothing(&h.at(99));
+    expect(&woken(&mut h, 100), &["SEQ=1001 ACK=5001 CTL=ACK LEN=0"]);
+    nothing(&h.at(999));
+
+    let mut h = listening();
+    expect(&h.input(0, seg(5000).syn().mss(1460)), &["CTL=SYN,ACK"]);
+    h.unframed = true;
+    nothing(&h.input(10, outside()));
+    assert_eq!(h.count(Counter::FrameRefused), 1);
+    h.unframed = false;
+    expect(&h.at(11), &["SEQ=1001 ACK=5001 CTL=ACK LEN=0"]);
+    nothing(&h.at(999));
+}
+
+#[test]
+fn s_pl_015_what_is_owed_outside_a_connection_outlasts_a_refused_frame() {
+    let mut h = fixture_e();
+    h.unframed = true;
+    nothing(&h.call(0, |tcp, now, id| tcp.abort(now, id).unwrap()).1);
+    assert_eq!(h.count(Counter::FrameRefused), 1);
+    h.unframed = false;
+    expect(&h.at(1), &["SEQ=1001 ACK=5001 CTL=RST,ACK"]);
+    nothing(&h.at(2));
+
+    let mut h = H::new(65_535);
+    h.unframed = true;
+    nothing(&h.input(0, seg(5000).syn().from(B, 40_000).to(A, 81)));
+    assert_eq!(h.count(Counter::FrameRefused), 1);
+    h.unframed = false;
+    expect(&h.at(1), &["SEQ=0 ACK=5001 CTL=RST,ACK"]);
+    nothing(&h.at(2));
+
+    let mut h = fixture_e();
+    h.close(0);
+    h.input(10, seg(5001).ack(1002));
+    expect(&h.input(20, seg(5001).ack(1002).fin()), &["SEQ=1002 ACK=5002"]);
+    h.unframed = true;
+    nothing(&h.input(1_000, seg(5001).ack(1002).fin()));
+    assert_eq!(h.count(Counter::FrameRefused), 1);
+    h.unframed = false;
+    expect(&h.at(1_001), &["SEQ=1002 ACK=5002 CTL=ACK"]);
+    nothing(&h.at(1_002));
 }
 
 /// B's next hop as `answer` gives it at spec time t; every other next hop is known.
@@ -316,7 +425,6 @@ fn s_pl_014_a_synchronized_connection_records_host_unreachable_soft() {
     let status = h.status();
     assert_eq!((status.state, status.soft_error), (State::Established, Some(SoftError::Unreachable(UnreachableCode::Host))));
     assert_eq!((h.count(Counter::Rto), h.count(Counter::NextHopFailed), h.count(Counter::IcmpSoft)), (0, 1, 0));
-    // Ruled (Q8): one count per segment not built, never one per opportunity.
     let (before, asked) = (counters(&h), h.asked);
     for t in [3_001, 3_002, 29_999] {
         nothing(&h.at(t));

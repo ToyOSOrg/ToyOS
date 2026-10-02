@@ -287,6 +287,9 @@ pub enum Event {
     /// A failed next hop's entry left FAILED: its hold-down ended, it was evicted, or the host
     /// announced itself (§6.6). A flow told "host unreachable" may ask again.
     Cleared { iface: IfIndex, next_hop: Ipv4Addr },
+    /// A neighbour table that refused a send for want of room can take an entry (§6.8): a flow
+    /// told "host unreachable" for it may ask again.
+    Room { iface: IfIndex },
     /// A UDP datagram [ip] took could not reach its next hop.
     Unreachable(Flow),
 }
@@ -345,6 +348,7 @@ impl Ip {
             gateways: Vec::new(),
             active: None,
             neighbours: BTreeMap::new(),
+            full: false,
             held: 0,
             reachable,
             reachable_drawn: now,

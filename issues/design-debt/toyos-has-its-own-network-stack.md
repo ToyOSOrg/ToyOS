@@ -34,9 +34,10 @@ What stage 4 has not yet built: deficit round-robin across flows (DRR-01–03; u
 
 What stage 4 departs from its specifications:
 
-- `ip.md` §6.7 (4) and PL-12 have a waiting flow ask again at every transmit opportunity. [tcp] asks it again only once `Tcp::wake` names its peer, which [shard] calls when [ip] reports a change for that next hop (`Event::Resolved`, `Failed`, `Cleared`) or for the routes, so a waiting flow costs one question per change. Exit: the specification takes the wake.
+- `ip.md` §6.7 (4) and PL-12 have a waiting flow ask again at every transmit opportunity. [tcp] asks it again only once `Tcp::wake` names its peer, which [shard] calls when [ip] reports a change for that next hop (`Event::Resolved`, `Failed`, `Cleared`), for the routes, or room in a neighbour table that refused the flow for being full (`Event::Room`), so a waiting flow costs one question per change. Exit: the specification takes the wake.
 - PL-14 counts `tcp.next-hop-failed` once per opportunity; the spec owner ruled once per segment not built, which [tcp] counts. Exit: PL-14 reads as the ruling.
-- `tcp.frame-refused` and [ip]'s `Event::Cleared` are not in the specifications. Exit: they name them.
+- `tcp.frame-refused` and [ip]'s `Event::Cleared` and `Event::Room` are not in the specifications. Exit: they name them.
+- `tcp.md` §10.8 and §11.3 disagree, and [tcp] follows §10.8: a user timeout replaces R2 and runs only while sent data is unacknowledged or a zero window holds data back, so with one set a connection whose data never left, for want of credit or of a next hop, has no give-up, where §11.3 has a device that never offers credit end its connections. Exit: the specification says which holds.
 
 The shard keeps no timing wheel: its deadlines stay in [tcp]'s and [ip]'s ordered sets, composed through `next_deadline()` (architecture §3.2). Exit: a soak or many-flows measurement shows the ordered sets cost, and the wheel lands.
 

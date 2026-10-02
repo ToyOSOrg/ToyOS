@@ -90,6 +90,8 @@ struct Checker {
     edges: HashMap<(usize, Tuple), Seq>,
     /// The end of the highest sequence space each connection's segments carried out.
     left: HashMap<(usize, Tuple), Seq>,
+    /// The acknowledgment and the right edge each connection's last segment carried out.
+    told: HashMap<(usize, Tuple), (Seq, Seq)>,
     expiries: [u64; 2],
     /// The oldest unacknowledged sequence number at each node's last expiry, until it leaves again.
     expired: [Option<Seq>; 2],
@@ -133,6 +135,11 @@ impl Checker {
                 assert!(tx.nxt.at_or_before(left), "§11.3: SND.NXT {:?} past what left, {left:?}", tx.nxt);
             }
             let edge = sync.rx.edge();
+            if let Some(&(acked, offered)) = self.told.get(&(node, tuple)) {
+                let sent = sync.rx.last_ack_sent;
+                assert!(sent.at_or_before(acked), "§11.3: acknowledged to {sent:?}, past what left, {acked:?}");
+                assert!(edge.at_or_before(offered) || edge.since(offered) < 1 << sync.rx.shift, "§11.3: the edge {edge:?} past what left, {offered:?}");
+            }
             if let Some(previous) = self.edges.insert((node, tuple), edge) {
                 assert!(previous.at_or_before(edge), "PROP-04: the right edge retreated");
             }
@@ -167,10 +174,11 @@ impl Checker {
 
     /// MOD-04, OP-25 and PROP-04 on each segment as it leaves, and RT-17's record.
     fn segment(&mut self, node: usize, tcp: &mut Tcp, now: Instant, o: &O) {
+        let endpoint = |(addr, port): (std::net::Ipv4Addr, u16)| Endpoint { addr, port: toyos_net_wire::Port::new(port).unwrap() };
+        let tuple = Tuple { local: endpoint(o.src), remote: endpoint(o.dst) };
         if o.flags & RST == 0 {
-            let endpoint = |(addr, port): (std::net::Ipv4Addr, u16)| Endpoint { addr, port: toyos_net_wire::Port::new(port).unwrap() };
             let end = Seq::new(o.seq).add(o.len());
-            let left = self.left.entry((node, Tuple { local: endpoint(o.src), remote: endpoint(o.dst) })).or_insert(end);
+            let left = self.left.entry((node, tuple)).or_insert(end);
             *left = left.later(end);
         }
         assert_eq!(o.flags & URG, 0, "MOD-04: URG set");
@@ -184,6 +192,7 @@ impl Checker {
             let advertised = Seq::new(ack).add(u32::from(o.wnd) << shift);
             let edge = sync.rx.edge();
             assert!(advertised.at_or_before(edge) && edge.since(advertised) < 1 << shift, "PROP-04: advertised {advertised:?}, edge {edge:?}");
+            self.told.insert((node, tuple), (Seq::new(ack), advertised));
         }
         if o.flags & SYN == 0 {
             self.sacked[node].extend(o.sack.iter().map(|&(l, r)| (Seq::new(l), Seq::new(r))));
@@ -234,6 +243,7 @@ impl Run {
             shape: s,
             edges: HashMap::new(),
             left: HashMap::new(),
+            told: HashMap::new(),
             expiries: [0, 0],
             expired: [None, None],
             sends: Vec::new(),
@@ -370,8 +380,9 @@ fn s_prop_001_snd_una_at_or_before_snd_nxt() {
     runs(0x9e37_79b9, |s| s.loss = 15);
 }
 
-/// No RTO for a segment that never left, and SND.UNA never past SND.NXT, whatever the next hop
-/// answers and whether or not the device frames each segment.
+/// No RTO for a segment that never left, SND.UNA never past SND.NXT, and nothing sent,
+/// acknowledged or offered that no segment carried out, whatever the next hop answers and whether
+/// or not the device frames each segment.
 #[test]
 fn s_prop_001_snd_una_at_or_before_snd_nxt_whatever_the_next_hop_answers() {
     let (mut failed, mut refused) = (0, 0);

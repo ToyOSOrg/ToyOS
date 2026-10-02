@@ -151,8 +151,9 @@ struct Answer {
     rst: Rst,
 }
 
-/// What waits for the next hop of one remote address. Nothing of it is asked again until
-/// [`Tcp::wake`] names the address: then it goes back ahead of anything queued since.
+/// What is owed and not offered: under a remote address, what waits for its next hop until
+/// [`Tcp::wake`] names it; within a transmit opportunity, what a refused frame left owed until
+/// the opportunity ends. Either then goes back ahead of anything queued since.
 #[derive(Default)]
 struct Parked {
     stubs: Vec<Tuple>,
@@ -216,7 +217,7 @@ pub struct Tcp {
     /// TIME-WAITs owing an ACK: a set, so a segment finds its entry in log n.
     tw_owed: BTreeSet<Tuple>,
     parked: BTreeMap<Ipv4Addr, Parked>,
-    /// Answers in `parked`, which [`ANSWERS`] bounds with the queued ones.
+    /// Answers held in a [`Parked`], which [`ANSWERS`] bounds with the queued ones.
     parked_answers: usize,
     port_table: [u16; 16],
     log: Log,
@@ -424,7 +425,8 @@ impl Tcp {
 
     fn free(&mut self, index: u32) {
         let Some(conn) = release(&mut self.conns, &mut self.free_conns, index) else { return };
-        self.unpark(index, conn.tuple.remote.addr);
+        // Its index may name another connection next.
+        self.unpark(conn.tuple.remote.addr, |parked| parked.conns.retain(|&i| i != index));
         if let Some(at) = conn.deadline {
             self.deadlines.remove(&(at, index));
         }
@@ -486,9 +488,7 @@ impl Tcp {
     fn leave_time_wait(&mut self, tuple: Tuple, end: Instant) {
         self.time_waits.remove(&(end, tuple));
         self.tw_owed.remove(&tuple);
-        if let Some(parked) = self.parked.get_mut(&tuple.remote.addr) {
-            parked.time_waits.retain(|t| *t != tuple);
-        }
+        self.unpark(tuple.remote.addr, |parked| parked.time_waits.retain(|t| *t != tuple));
         if matches!(self.demux.get(&tuple), Some(Entry::TimeWait(_))) {
             self.demux.remove(&tuple);
         }
@@ -1189,8 +1189,9 @@ impl Tcp {
     /// if `sink` framed it. What waits for its next hop spends nothing and is not asked again until
     /// [`Self::wake`]. A failed next hop drops an owed reset or ACK, fails a connect, and is the soft
     /// error of any other connection (`ip.md` §9.6); each such question counts
-    /// `tcp.next-hop-failed`. A refused frame leaves its segment owed and counts
-    /// `tcp.frame-refused`. Returns how many left.
+    /// `tcp.next-hop-failed`. A refused frame counts `tcp.frame-refused` and commits nothing: what
+    /// it left owed is offered again at the next opportunity, never in this one. Returns how many
+    /// left.
     pub fn transmit<T>(
         &mut self,
         now: Instant,
@@ -1199,6 +1200,7 @@ impl Tcp {
         mut sink: impl FnMut(&Outgoing<'_>, T) -> bool,
     ) -> usize {
         let mut sent = 0usize;
+        let mut refused = Parked::default();
         while sent < credit {
             if let Some(tuple) = self.stubs.pop_front() {
                 let Some(&Entry::Stub(rst, _)) = self.demux.get(&tuple) else { continue };
@@ -1210,7 +1212,11 @@ impl Tcp {
                         continue;
                     }
                     Err(NotReady::Unreachable) => self.log.count(Counter::NextHopFailed),
-                    Err(NotReady::Unframed) => self.log.count(Counter::FrameRefused),
+                    Err(NotReady::Unframed) => {
+                        self.log.count(Counter::FrameRefused);
+                        refused.stubs.push(tuple);
+                        continue;
+                    }
                 }
                 if let Some(Entry::Stub(_, Some(tw))) = self.demux.remove(&tuple) {
                     self.enter_time_wait(tuple, tw, false);
@@ -1226,7 +1232,11 @@ impl Tcp {
                         self.parked_answers = self.parked_answers.saturating_add(1);
                     }
                     Err(NotReady::Unreachable) => self.log.count(Counter::NextHopFailed),
-                    Err(NotReady::Unframed) => self.log.count(Counter::FrameRefused),
+                    Err(NotReady::Unframed) => {
+                        self.log.count(Counter::FrameRefused);
+                        refused.answers.push(answer);
+                        self.parked_answers = self.parked_answers.saturating_add(1);
+                    }
                 }
                 continue;
             }
@@ -1238,7 +1248,10 @@ impl Tcp {
                     Ok(()) => sent = sent.saturating_add(1),
                     Err(NotReady::Pending) => self.parked.entry(tuple.remote.addr).or_default().time_waits.push(tuple),
                     Err(NotReady::Unreachable) => self.log.count(Counter::NextHopFailed),
-                    Err(NotReady::Unframed) => self.log.count(Counter::FrameRefused),
+                    Err(NotReady::Unframed) => {
+                        self.log.count(Counter::FrameRefused);
+                        refused.time_waits.push(tuple);
+                    }
                 }
                 continue;
             }
@@ -1272,11 +1285,12 @@ impl Tcp {
                 }
                 Err(NotReady::Unframed) => {
                     self.log.count(Counter::FrameRefused);
-                    self.park(index, tuple.remote.addr);
+                    refused.conns.push(index);
                 }
             }
             self.settle_deadline(index, now);
         }
+        self.requeue(refused);
         sent
     }
 
@@ -1314,10 +1328,10 @@ impl Tcp {
         self.parked.entry(remote).or_default().conns.push(index);
     }
 
-    /// A freed connection waits for nothing: its index may name another one next.
-    fn unpark(&mut self, index: u32, remote: Ipv4Addr) {
+    /// `leave` takes what waits no longer out of `remote`'s record, and a record left empty goes.
+    fn unpark(&mut self, remote: Ipv4Addr, leave: impl FnOnce(&mut Parked)) {
         if let Some(parked) = self.parked.get_mut(&remote) {
-            parked.conns.retain(|&i| i != index);
+            leave(parked);
             if parked.is_empty() {
                 self.parked.remove(&remote);
             }
