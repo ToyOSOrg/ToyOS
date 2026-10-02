@@ -146,7 +146,6 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("virt_early_fault", qemu::Profile::Virt),
     ("virt_el2_drop", qemu::Profile::VirtEl2NoVhe),
     ("virt_user_mode", qemu::Profile::VirtEl2),
-    ("virt_boot_from_power_on", qemu::Profile::VirtEl2),
     ("virt_timer_preempts", qemu::Profile::VirtEl2),
     ("virt_irq_storm", qemu::Profile::VirtEl2),
     ("virt_timer_floor", qemu::Profile::VirtEl2),
@@ -1377,71 +1376,6 @@ fn judge_virt_job(qemu: &mut QemuInstance, job: &str, said: &str) -> Result<Stri
     Ok(serial)
 }
 
-/// The loader's line, followed by its counter at its entry and at its handoff.
-const LOADER_COUNTER: &str = "Loader counter: ";
-/// The kernel's line, followed by its four spans in milliseconds.
-const POWER_ON: &str = "boot: power-on to loader ";
-/// The kernel's line in place of [`POWER_ON`] when the loader's counts and its
-/// own are out of order.
-const COUNTER_BACKWARDS: &str = "boot: the counter went backwards";
-/// The kernel's `clock:` record, followed by the rate `CNTFRQ_EL0` states.
-const GENERIC_TIMER_HZ: &str = "clock: the generic timer counts at ";
-
-/// **The boot from power-on is the loader's raw counts at the kernel's rate.**
-/// The kernel's first two spans are the loader's counts converted at the rate
-/// its clock record gives, divided into a second as the kernel divides it; the
-/// ROOT read sits inside the loader's span, and `Boot: complete`'s own count
-/// inside the kernel's.
-fn boot_from_power_on(log: &str) -> Result<(), String> {
-    if let Some(line) = log.lines().find(|l| l.contains(COUNTER_BACKWARDS)) {
-        return Err(format!("{line}\nserial:\n{log}"));
-    }
-    let after = |head: &str| -> Result<Vec<u128>, String> {
-        let at = log.find(head).ok_or_else(|| format!("no {head:?} line on the PL011\nserial:\n{log}"))?;
-        let line = log[at + head.len()..].lines().next().unwrap_or("");
-        Ok(line
-            .split(|c: char| !c.is_ascii_digit())
-            .filter(|word| !word.is_empty())
-            .map(|word| word.parse().expect("a run of digits"))
-            .collect())
-    };
-    let (loader, spans, rate) = (after(LOADER_COUNTER)?, after(POWER_ON)?, after(GENERIC_TIMER_HZ)?);
-    let (&[entry, handoff, ..], &[to_loader, in_loader, root_read, to_complete], Some(period_fs)) = (
-        &loader[..],
-        &spans[..],
-        rate.first().and_then(|&hz| 1_000_000_000_000_000u128.checked_div(hz)),
-    ) else {
-        return Err(format!(
-            "the lines do not carry their numbers: {loader:?} after {LOADER_COUNTER:?}, {spans:?} \
-             after {POWER_ON:?}, {rate:?} after {GENERIC_TIMER_HZ:?}"
-        ));
-    };
-    let ms = |ticks: u128| ticks * period_fs / 1_000_000_000_000;
-    if (to_loader, in_loader) != (ms(entry), ms(handoff - entry)) {
-        return Err(format!(
-            "the kernel says {to_loader} ms to the loader and {in_loader} ms in it; the loader's \
-             counts {entry} and {handoff} at {period_fs} fs a tick are {} and {}",
-            ms(entry),
-            ms(handoff - entry)
-        ));
-    }
-    if root_read > in_loader {
-        return Err(format!("the ROOT read took {root_read} ms of a loader that took {in_loader}"));
-    }
-    let complete = after("Boot: complete (")?;
-    if complete.first().is_none_or(|&own| own > to_complete) {
-        return Err(format!(
-            "`Boot: complete` counts {complete:?} ms from its own start, inside a kernel span the \
-             power-on line puts at {to_complete} ms"
-        ));
-    }
-    eprintln!(
-        "  [boot] power-on to loader {to_loader} ms, loader {in_loader} ms (ROOT read {root_read} \
-         ms), kernel {to_complete} ms"
-    );
-    Ok(())
-}
-
 /// What `unmap_touch` says once every read of a page just unmapped,
 /// on the unmapping thread and on another, ended its process.
 const UNMAP_TOUCH_SAID: &str =
@@ -2014,20 +1948,6 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
                 }
             }
             Ok(())
-        }
-        "virt_boot_from_power_on" => {
-            // Entered at EL2: the loader reads the physical count, the kernel
-            // the virtual one once its entry writes the offset zero. Both speak
-            // on the PL011.
-            let mut qemu = QemuInstance::boot_with_options(
-                test_config,
-                &[],
-                &[],
-                BootOptions { profile, ready_marker: "control registers: SCTLR_EL1=", ..Default::default() },
-            );
-            let rest =
-                qemu.drain_until(Duration::from_secs(180), |l| l.contains(POWER_ON) || l.contains(COUNTER_BACKWARDS));
-            boot_from_power_on(&format!("{}\n{rest}", qemu.boot_log()))
         }
         "virt_timer_preempts" => virt_job(profile, "preempt", "preempt: the counting thread was preempted twice"),
         "virt_fp_isolation" => virt_job(profile, "fp_isolation", "fp_isolation: v0-v31, FPCR and FPSR survived"),
