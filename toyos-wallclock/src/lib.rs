@@ -267,8 +267,9 @@ mod tests {
     /// and what the reader is handed is the rest of that line, whole.
     #[test]
     fn every_time_of_day_this_renders_is_one_it_reads_back() {
-        // Midnight, noon, and the last second of a day.
-        for (secs, rendered) in [(0, "00:00:00"), (1_786_795_200, "12:00:00"), (1_786_838_399, "23:59:59")] {
+        // Midnight, an hour, minute and second that differ, and the last
+        // second of a day.
+        for (secs, rendered) in [(0, "00:00:00"), (1_786_806_245, "15:04:05"), (1_786_838_399, "23:59:59")] {
             let at = format!("{}", Civil::from_unix_secs(secs).time_of_day());
             assert_eq!(at, rendered);
             assert_eq!(after_time_of_day(&at), Some(""));
