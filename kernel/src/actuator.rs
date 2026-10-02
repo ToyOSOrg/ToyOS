@@ -39,15 +39,6 @@ actuators! {
     /// control on `crate::deadline`: nothing else in this kernel ends it.
     wedge_before_reset = "wedge-before-reset";
 
-    /// The loader hands the kernel no ROOT image, which `rootfs::mount` has to
-    /// refuse by name; read by the loader as [`toyos_abi::boot::WITHHOLD_ROOT_PARAM`].
-    loader_withholds_root = "loader-withholds-root";
-
-    /// The loader writes 0 as the `KernelArgs` layout word, which `kernel_main`
-    /// has to refuse by name; read by the loader as
-    /// [`toyos_abi::boot::WRITE_NO_LAYOUT_PARAM`].
-    loader_writes_no_layout = "loader-writes-no-layout";
-
     /// Panic between arming the on-screen console and `mm::init`.
     test_early_panic = "test-early-panic";
 
@@ -57,168 +48,21 @@ actuators! {
     /// x86-64 loads its IDT later, and panics by name instead.
     test_early_fault = "test-early-fault";
 
-    /// Panic inside `percpu::init_bsp`, one statement after it loads the IDT:
-    /// the earliest point a panic is reportable at all, and the window the T14
-    /// stops in. What it judges is that the reset register is decoded by then.
-    test_panic_after_idt = "test-panic-after-idt";
-
-    /// Halt between a record's commit and its repaint, so the panel holds the
-    /// record before it and `screen_early_panel` reads a paint it can attribute.
-    test_early_halt = "test-early-halt";
-
     /// Have the first syscall null SS, force a switch, and report whether it reloaded — the
     /// AMD `SYSRET` SS-attributes workaround's only guest-observable proof.
     sysret_ss_probe = "sysret-ss-probe";
 
-    /// Log every i8042 drain: bytes seen, events queued, whether the queue woke.
-    i8042_trace = "i8042-trace";
-
-    /// Hold a scheduler pass between reading `irq_ring` and the byte ring so an interrupt lands between them.
-    i8042_edge_race = "i8042-edge-race";
-
-    /// Make the ISR's output-buffer check trip its 16-byte bound and run the quarantine path.
-    i8042_fault = "i8042-fault";
-
-    /// Zero the i8042 probe's init budget so its expiry paths run.
-    i8042_budget_expired = "i8042-budget-expired";
-
-    /// Hand the i8042 probe a FADT denying a controller that is present.
-    i8042_fadt_denial = "i8042-fadt-denial";
-
-    /// Answer the i8042 probe's scancode-set query with ECHO's own `0xEE`.
-    i8042_kbd_echo = "i8042-kbd-echo";
-
-    /// Shorten the i8042 post-verdict counter report from 10s to 500ms.
-    i8042_fast_health = "i8042-fast-health";
-
-    /// Cap the i8042 ISR at 4 bytes and answer empty until the mute verdict is out; `service` then polls the rest, so the verdict beats the sequence on every boot instead of on a loaded shard's luck.
-    i8042_split_burst = "i8042-split-burst";
-
     /// Script the input core directly at end of boot.
     test_input_merge = "test-input-merge";
-
-    /// Clamp the xHCI driver to one device block.
-    xhci_one_slot = "xhci-one-slot";
 
     /// Run the xHCI extended-capability walk over eight malformed lists at init.
     xhci_xecp_selftest = "xhci-xecp-selftest";
 
-    /// Read and write every USB disk carrying the gate's stamp in block 0; the stamp, not the parameter, picks the disk, since the boot stick shares the bus.
-    usb_storage_gate = "usb-storage-gate";
-
-    /// Hold the thread named `toyos_quiesce::LAST_THREAD` inside `SYS_NANOSLEEP`, and the shutdown until it is held there, until the stop waits on it alone: its park is then the stop's last transition.
-    quiesce_last_park = "quiesce-last-park";
-
-    /// The same for the last thread out of its process, between its leaving and its teardown: that teardown is then the stop's last transition.
-    quiesce_last_teardown = "quiesce-last-teardown";
-
     /// Establish three nested `scheduler::Operation`s and report what each observed and restored; it stages nothing, touching no device.
     sched_operation_nesting = "sched-operation-nesting";
 
-    /// Answer SYNCHRONIZE CACHE with ILLEGAL REQUEST / INVALID COMMAND OPERATION CODE.
-    usb_flush_unimplemented = "usb-flush-unimplemented";
-
-    /// The same, with a HARDWARE ERROR in place of ILLEGAL REQUEST.
-    usb_flush_fails = "usb-flush-fails";
-
     /// Abandon the boot's first WRITE(10) data phase without waiting for it.
     usb_transport_break = "usb-transport-break";
-
-    /// Leave the TEST UNIT READY every rung of the recovery ladder ends on
-    /// unsent and unanswered for the whole of that rung's bound, so no rung is
-    /// ever in step, each spends all it may, and a disk whose transport breaks
-    /// once is taken offline: the one way to the last rung on a device that
-    /// answers, and with the rungs before it spent.
-    usb_transport_offline = "usb-transport-offline";
-
-    /// Skip the waits of every transfer of the next climb of the recovery
-    /// ladder, once: a device that answers nothing on any rung.
-    usb_reset_break = "usb-reset-break";
-
-    /// Hold the port rung's first reset, once, until the port reads empty, so
-    /// the host can move the device to another port as a reset moved T14 run
-    /// 79's stick. See `xhci::msc::reset_moves`; judged by
-    /// `usb_transport_break`.
-    usb_reset_moves = "usb-reset-moves";
-
-    /// `usb-transport-break`'s break, on the first WRITE(10) that goes out
-    /// while its device holds a write it reported complete and no flush has
-    /// emptied: a device that leaves then may have lost it. Judged by
-    /// `usb_transport_break`.
-    usb_transport_break_owed = "usb-transport-break-owed";
-
-    /// `usb-transport-break`'s break, on the first WRITE(10) that goes out
-    /// after a write was reported complete and a SYNCHRONIZE CACHE then
-    /// succeeded, with no write since: a device that leaves then owes nothing.
-    /// Judged by `usb_transport_break`.
-    usb_transport_break_flushed = "usb-transport-break-flushed";
-
-    /// Refuse the machine's first stop, `SYS_SHUTDOWN` or `SYS_REBOOT`, before
-    /// anything is torn down, as a machine with no way to stop refuses it: the
-    /// path on which init tells `logd` the machine runs on. Judged by
-    /// `log_after_a_refused_stop`.
-    power_refused_once = "power-refused-once";
-
-    /// Hold a typed copy into user memory whose destination carries
-    /// `user_ptr::remap_race`'s mark between its translation and its store,
-    /// until its own process has mapped memory again: a sibling's `munmap`
-    /// and `mmap` staged inside the copy. Judged by `user_copy_races_munmap`.
-    copy_meets_a_remap = "copy-meets-a-remap";
-
-    /// Hold a thread spawn whose argument carries `loader::rebase_window`'s
-    /// mark between its TLS block being given an address and the block's
-    /// pointers being rebased to it: where the process can already reach the
-    /// block, until a sibling has stored into its DTV; where it cannot, it
-    /// says so. Judged by `tls_rebase_window`.
-    tls_rebase_window = "tls-rebase-window";
-
-    /// Stall the bind of a disk that arrives while another is held for its
-    /// device, for less than `usb-slow-return` does, and leave every transfer
-    /// of the operation the held call sends again on it unanswered, once, each
-    /// waited for to the end of what the call may spend. See
-    /// `xhci::msc::return_silent`; judged by `usb_transport_break`.
-    usb_return_silent = "usb-return-silent";
-
-    /// Stall the bind of a disk that arrives while another is held for its
-    /// device, before its first command, as a stick slow to answer after a
-    /// reset: the wait held for it is not where it binds. Judged by
-    /// `usb_transport_break`.
-    usb_slow_return = "usb-slow-return";
-
-    /// Ask for a disk's serial number string in fewer bytes than it carries, as
-    /// a device that delivered part of its descriptor. Judged by
-    /// `usb_transport_break`.
-    usb_serial_short = "usb-serial-short";
-
-    /// Have the first disk the boot scan binds answer nothing for longer than
-    /// the scan's whole silence bound and then be refused, as T14 run 103's
-    /// stick was: the refusal's Disable Slot is submitted into the scan's one
-    /// operation slot after the scan has stopped listening, and the next port
-    /// to connect enumerates on top of it. See
-    /// `xhci::msc::bind_spends_the_scan`; judged by
-    /// `xhci_scan_hands_over_a_free_slot`.
-    usb_bind_spends_the_scan = "usb-bind-spends-the-scan";
-
-    /// Leave one READ(10) the gate stages it on unanswered for the whole of
-    /// its wait, and the class reset's TEST UNIT READY out of step, so a port
-    /// reset that takes comes after a wait that spent the operation's budget.
-    /// Judged by `usb_transport_break`.
-    usb_first_wait_spent = "usb-first-wait-spent";
-
-    /// Stop every CPU inside one WRITE(10) at the shutdown syscall, with the
-    /// device holding the CBW and nothing queued for its data phase, so the
-    /// bound that ends the machine ends a device inside a Bulk-Only command.
-    /// See `usb_gate::wedge_inside_a_write`; judged by
-    /// `usb_reset_records_the_phase_it_cut`.
-    usb_wedge_data_owed = "usb-wedge-data-owed";
-
-    /// The same, stopped one step later: the data phase's TRB is on the ring
-    /// and its doorbell has not been rung.
-    usb_wedge_in_data = "usb-wedge-in-data";
-
-    /// The same, stopped after the data phase completed and before anything has
-    /// asked for the CSW.
-    usb_wedge_before_status = "usb-wedge-before-status";
 
     /// Sweep the boot stick from the shutdown syscall so the reset lands on a
     /// controller that is moving bytes rather than on a bus idle since the
@@ -226,51 +70,8 @@ actuators! {
     /// `usb_reset_records_the_phase_it_cut`.
     usb_reset_under_load = "usb-reset-under-load";
 
-    /// Run the first attempt of each run `object::ops::until_answered` retries —
-    /// a file's `SYS_FSYNC`, a claimed partition's read, write or flush — under an
-    /// operation that is already over, once per file and per partition and kind.
-    fsync_budget_spent = "fsync-budget-spent";
-
-    /// Make the deadman of every run `object::ops::until_answered` makes already
-    /// expired.
-    fsync_deadman_now = "fsync-deadman-now";
-
-    /// Under-deliver one READ(10) data phase so the byte counts disagree.
-    usb_short_read = "usb-short-read";
-
-    /// Have the gate stage runs of transport faults on its disk: runs the
-    /// recovery brings back, then one as long as the transport's whole budget,
-    /// then one on the next disk to bind.
-    usb_transport_faults = "usb-transport-faults";
-
-    /// Have the gate's last read end as one whose port read disconnected
-    /// mid-wait does.
-    usb_port_gone = "usb-port-gone";
-
-    /// Report the preempt depth and backtrace at the deepest point of a disk transfer; it stages nothing, only measures.
-    io_depth_probe = "io-depth-probe";
-
-    /// Hold every thread that waits on a watch between reading its condition and
-    /// parking, so a post lands in the window its commit must refuse the park over.
-    watch_window = "watch-window";
-
-    /// Raise an unheld claim slot's vector inside a post of its own watch,
-    /// inside a completion into a ring polling it, and inside that ring's own
-    /// watch, while the CPU holds preemption off, and count whether the
-    /// handler posted it there.
-    handler_post = "handler-post";
-
-    /// Starve the four xHCI bring-up register waits in `init_one`.
-    xhci_deaf_controller = "xhci-deaf-controller";
-
-    /// Starve the port-reset wait in `init_device`.
-    xhci_deaf_port = "xhci-deaf-port";
-
     /// Make one CPU ignore a kick.
     dump_deaf_cpu = "dump-deaf-cpu";
-
-    /// On one CPU, file Ctrl+Alt+D's request inside each kind of pass that may not serve it and inside a report, and count the Ring 3 returns each is left pending across.
-    dump_in_blocking_pass = "dump-in-blocking-pass";
 
     /// Wedge one CPU with interrupts off, spinning on a lock another CPU holds
     /// and never gives back: the negative control on `crate::hardlockup`, and a
@@ -280,44 +81,14 @@ actuators! {
     /// decision; on hardware the counter does it and nothing is sent.
     hard_lockup_probe = "hard-lockup-probe";
 
-    /// Storm the CPU spinning on `syscall` from Ring 3 with NMIs.
-    syscall_window_nmi = "syscall-window-nmi";
-
-    /// Take the IST index off vector 2's gate — the negative control on the row above: the CPU builds the NMI frame at whatever the stack pointer holds and takes a `#DF`.
-    nmi_without_ist = "nmi-without-ist";
-
-    /// Return from the NMI handler via `iretq` with a second NMI already pending.
+    /// Send one NMI from the idle loop, and return from its handler via `iretq` with a second NMI already pending.
     nmi_nested = "nmi-nested";
-
-    /// Report an empty root hub for the xHCI driver's `SLOW_CONNECT_NS` after a controller powers its ports.
-    xhci_slow_connect = "xhci-slow-connect";
-
-    /// Report the first root-hub port empty until the boot scan has run, the rest normal — distinct from hiding the whole bus, since settle waits only for a non-empty settled set.
-    xhci_slow_storage_connect = "xhci-slow-storage-connect";
-
-    /// Give PORTSC's PED bit the RW1CS meaning xHCI 1.2 §5.4.8 gives it.
-    xhci_portsc_rw1c = "xhci-portsc-rw1c";
 
     /// Run `parse_config` over nine crafted configuration descriptors at init.
     xhci_descriptor_selftest = "xhci-descriptor-selftest";
 
-    /// Run `Virtqueue::poll_used` over eleven crafted used-ring elements at init.
-    virtio_used_selftest = "virtio-used-selftest";
-
     /// Walk the PCI capability list, window check and parse over crafted config-space layouts at init.
     pci_cap_selftest = "pci-cap-selftest";
-
-    /// End the capability list of the function a claim is bringing up at a link the spec forbids, one link past its MSI capability: a claimed function publishing an MSI-X table no walk may reach.
-    pcidev_caps_truncated = "pcidev-caps-truncated";
-
-    /// Put back none of a reset function's BARs but its MSI-X table's, so a function the reset returned to its defaults comes to its next claim no longer decoding the window it was cut: what a reset nobody restored looks like.
-    pcidev_bar_lost_on_reset = "pcidev-bar-lost-on-reset";
-
-    /// Put a function a level reset returned to its defaults back with BAR 0 one BAR's size above the window it was cut, inside that window: a register holding a decodable address that is not the cut.
-    pcidev_bar_moved_on_reset = "pcidev-bar-moved-on-reset";
-
-    /// Release every claimed function as though it advertised no reset at all, the way the T14's I219 is released: what it had taken in is still aimed at its last holder's grants when the next claim starts it mastering.
-    pcidev_reset_nothing = "pcidev-reset-nothing";
 
     /// Raise the local APIC's spurious vector on this CPU once.
     lapic_spurious_selftest = "lapic-spurious-selftest";
@@ -332,12 +103,6 @@ actuators! {
     /// Make this CPU's timer due with interrupts masked, ask it to fire within
     /// a quantum, and take its interrupts with them open.
     timer_floor = "timer-floor";
-
-    /// Deliver the i8042 vector once at arming with no byte behind it — the arming edge, staged.
-    i8042_arm_edge = "i8042-arm-edge";
-
-    /// Blind init's read of the reset handshake, staging virtio devices that never answer; the console — the staged boot's capture channel — is spared.
-    virtio_reset_stuck = "virtio-reset-stuck";
 
     /// Withhold `VIRTIO_F_ACCESS_PLATFORM` from every virtio device but the console, staging a function whose addresses the unit never translates.
     virtio_no_access_platform = "virtio-no-access-platform";
@@ -355,33 +120,6 @@ actuators! {
     /// machine brought up, with nothing else running, and report the distribution.
     tlb_shootdown_bench = "tlb-shootdown-bench";
 
-    /// Shrink both disk caches to 64 entries each.
-    test_small_caches = "test-small-caches";
-
-    /// Shrink each process's VA arena from ~1015GB to 256MiB.
-    test_tiny_va = "test-tiny-va";
-
-    /// Build a hash container before `hasher::seed()`, so the refusal that stops a seedless container from being silent is executed.
-    test_hash_before_seed = "test-hash-before-seed";
-
-    /// Hold the shutdown open for a tenth of a second after the boot's last
-    /// word, yielding: the window hardware has between `Rebooting.` and the
-    /// reset and QEMU does not. A boot that writes a record into it is one the
-    /// stop did not stop.
-    quiesce_late_word = "quiesce-late-word";
-
-    /// Queue one console holder's line once the stop has stopped every holder,
-    /// and keep `klogd` off the queue from the stop's claim on: a line still queued
-    /// at the stop with `klogd` behind it, which otherwise only a `klogd` slower
-    /// than `logd` stages. Judged by `quiesce_stops_the_machine`.
-    console_queue_at_the_stop = "console-queue-at-the-stop";
-
-    /// Make the shutdown's bounded acquisitions of the xHCI controller lock
-    /// find it busy for their whole bound — the negative control on "no
-    /// shutdown path may fail to reset". A boot armed with it must still hand
-    /// the machine back, with its account saying the barrier was refused.
-    xhci_lock_wedged = "xhci-lock-wedged";
-
     /// Panic once boot phases are done, with no thread current.
     test_late_panic = "test-late-panic";
 
@@ -391,85 +129,11 @@ actuators! {
     /// report it and end the chain.
     blackbox_foreign_identity = "blackbox-foreign-identity";
 
-    /// Take a Ring 0 `#UD` once boot phases are done, with no thread current.
-    test_kernel_fault = "test-kernel-fault";
-
-    /// Panic inside the crash report before it has said anything; armed alone, a boot that reports no crash never reaches it.
-    panic_in_report = "panic-in-report";
-
-    /// Take a `#PF` inside the crash report before it has said anything; armed alone, a boot that reports no crash never reaches it.
-    fault_in_report = "fault-in-report";
-
     /// Panic a few seconds after a compositor claims the framebuffer, from an idle CPU.
     metal_panic_probe = "metal-panic-probe";
 
     /// Cap how long an idle CPU may sleep so the idle loop keeps running.
     diag_tick = "diag-tick";
-
-    /// Log the monotonic time and which CPUs are alive every 250ms.
-    heartbeat = "heartbeat";
-
-    /// Remove the IF/TF bracket around shard selection through publication — the negative control on the log's interrupt-atomicity claim.
-    log_unbracketed_reserve = "log-unbracketed-reserve";
-
-    /// Send this CPU an IPI mid record-copy and emit one shard generation from the handler.
-    log_nested_emit = "log-nested-emit";
-
-    /// The same IPI, sent between the shard-pointer read and the unlocked `xadd` — stages order damage the log gate detects, unlike the row above's invisible corruption.
-    log_nested_reserve = "log-nested-reserve";
-
-    /// Let a handle close cancel every poll on the log's watch in the machine.
-    log_close_cancels_any_syscap = "log-close-cancels-any-syscap";
-
-    /// Let a handle close cancel every poll on the keyboard's watch in the machine.
-    keyboard_close_cancels_every_console = "keyboard-close-cancels-every-console";
-
-    /// Read address zero inside `klogd` on its first instruction.
-    klogd_fault = "klogd-fault";
-
-    /// Stop the boot dead in phase 3, interrupts off, before any log drain.
-    pre_idle_wedge = "pre-idle-wedge";
-
-    /// Leave the xHCI controller out of the IOMMU's root table.
-    iommu_context_absent = "iommu-context-absent";
-
-    /// Give it a present context entry naming an empty second-level table, distinct from an absent context: passthrough would fault identically to the row above.
-    iommu_empty_domain = "iommu-empty-domain";
-
-    /// Answer a claimed network function's first DMA grant with an address in another driver's pool, which its own domain does not map.
-    iommu_userdev_foreign_dma = "iommu-userdev-foreign-dma";
-
-    /// Point a scanout backing at that same page, which the display's own domain does not map.
-    iommu_gpu_foreign_backing = "iommu-gpu-foreign-backing";
-
-    /// Point the HDA stream's buffer descriptor list at that page and start the stream, so the controller fetches descriptors from memory it does not own.
-    iommu_hda_foreign_bdl = "iommu-hda-foreign-bdl";
-
-    /// Point a virtio-sound control answer at that page and submit the chain, so the device writes where it may not.
-    iommu_sound_foreign_dma = "iommu-sound-foreign-dma";
-
-    /// Cap every device domain at `vtd::table::NARROW_BYTES` of addresses, so a
-    /// holder that spends addresses runs a domain dry in a short loop.
-    iommu_domain_narrow = "iommu-domain-narrow";
-
-    /// Point every device MSI at APIC 1 rather than 0 — the only way to tell the
-    /// two remapping-entry destination encodings apart, since 0 encodes alike in both.
-    iommu_dest_apic1 = "iommu-dest-apic1";
-
-    /// Run the HDA register allow-list over every arm of it at bind time.
-    hda_allowlist_selftest = "hda-allowlist-selftest";
-
-    /// Make the wall clock's update flag never clear.
-    rtc_dead = "rtc-dead";
-
-    /// Make the RTC registers never settle: no two of four reads agree.
-    rtc_unstable = "rtc-unstable";
-
-    /// Make firmware name no century register.
-    rtc_no_century = "rtc-no-century";
-
-    /// Make the century register read `0x21`.
-    rtc_century_next = "rtc-century-next";
 
     /// Run the leak-rollback controls (device mint) after mount.
     leak_rollback_selftest = "leak-rollback-selftest";
@@ -480,30 +144,6 @@ actuators! {
     /// Reopen init by pid once it is spawned, and open every kernel thread's pid, the way `SYS_PROCESS_OPEN` does.
     process_reopen_selftest = "process-reopen-selftest";
 
-    /// Refuse every read of device block 0 of each disk the kernel drives — its
-    /// protective MBR and GPT header — once the boot has read its own tables,
-    /// so a partition claim meets a disk that does not answer a read of its
-    /// table. Judged by `partition_claim_gives_up`.
-    partclaim_table_unanswered = "partclaim-table-unanswered";
-
-    /// Refuse every read of device block 0 of each disk the kernel drives across
-    /// `rootfs::hold_source` alone, so ROOT's hold finds the disk carrying it
-    /// silent and withholds its GUID, and the disk answers every read after.
-    /// Judged by `partition_claim_gives_up`.
-    partclaim_root_withheld = "partclaim-root-withheld";
-
-    /// Offer the block layer a second device claiming a registered `DeviceId`, and report what it did with it.
-    block_duplicate_id = "block-duplicate-id";
-
-    /// Arm the watchdog at seconds rather than minutes, so a guest reaches the reset.
-    watchdog_fast = "tco-fast";
-
-    /// Stop feeding it once boot is done, which is what a wedge looks like to the chipset.
-    watchdog_starve = "tco-starve";
-
-    /// Shorten the panicked kernel's own reboot bound from a minute to seconds, so a guest reaches the reset.
-    panic_reboot_fast = "panic-reboot-fast";
-
     /// Have Ctrl+Alt+D's report painter go fatal holding the panel's latch: a
     /// fatal path meeting a painter that will never let go.
     panel_painter_stalls = "panel-painter-stalls";
@@ -511,14 +151,7 @@ actuators! {
 
 #[cfg(feature = "boot-actuators")]
 const IMPLIES: &[(&str, &[&str])] = &[
-    ("i8042-trace", &["i8042-fast-health", "i8042-edge-race"]),
-    ("usb-short-read", &["usb-storage-gate"]),
-    ("usb-transport-faults", &["usb-storage-gate"]),
-    ("usb-port-gone", &["usb-storage-gate"]),
-    ("usb-first-wait-spent", &["usb-storage-gate"]),
     ("metal-panic-probe", &["diag-tick"]),
-    ("heartbeat", &["diag-tick"]),
-    ("syscall-window-nmi", &["diag-tick"]),
     // The staged CPU has to still be deaf when its bound passes, and this boot
     // would otherwise have handed the machine back at the end of its job list —
     // so the control that ends a machine no other bound ends is staged over the
@@ -651,10 +284,3 @@ const _: () = {
         i += 1;
     }
 };
-
-// The loader reads this actuator's word out of the ABI and the table above
-// spells it as a literal; the two are one name or the build fails.
-#[cfg(feature = "boot-actuators")]
-const _: () = assert!(str_eq("loader-withholds-root", toyos_abi::boot::WITHHOLD_ROOT_PARAM));
-#[cfg(feature = "boot-actuators")]
-const _: () = assert!(str_eq("loader-writes-no-layout", toyos_abi::boot::WRITE_NO_LAYOUT_PARAM));

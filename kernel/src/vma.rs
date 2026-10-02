@@ -17,14 +17,11 @@ const GUARD_SIZE: u64 = PAGE_2M;
 
 /// The floor at 8 GB.
 const WINDOW: Window = Window::new(0x0002_0000_0000, ALLOC_CEILING, GUARD_SIZE);
-/// The `test-tiny-va` actuator's: 256 MiB under the ceiling, so a process can
-/// run out of address space before it runs out of memory.
-const TINY_WINDOW: Window = Window::new(ALLOC_CEILING - 256 * 1024 * 1024, ALLOC_CEILING, GUARD_SIZE);
 
 /// Where `find_gap` places, and the bound every length from userland is
 /// refused against before any sum is taken on it.
 pub fn window() -> Window {
-    if crate::actuator::test_tiny_va() { TINY_WINDOW } else { WINDOW }
+    WINDOW
 }
 
 

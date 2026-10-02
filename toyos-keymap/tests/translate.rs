@@ -127,13 +127,6 @@ fn changing_layout_drops_a_pending_diacritic() {
     assert_eq!(t.press(E, NONE).as_str(), "e");
 }
 
-/// The Swiss German gate's own key sequence, by position, through the type the
-/// guest gate now holds.
-///
-/// The same presses `swiss_german_layout` injects through QMP and the same
-/// string it asserts on. Here it costs a millisecond and proves the tables and
-/// the machine; there it costs a boot and proves that the i8042, the kernel's
-/// merge, the surface channel and the config all carry it.
 #[test]
 fn the_swiss_german_gates_own_sequence() {
     let out = typed(

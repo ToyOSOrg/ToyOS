@@ -180,17 +180,6 @@ pub fn idle_guard_byte() -> u64 {
     idle_stack_top() - crate::sched::idle_stack::SIZE as u64 - 1
 }
 
-/// How big one idle stack is; read by `SYS_DEBUG` for scale.
-#[cfg(feature = "test-actuators")]
-pub fn idle_stack_size() -> usize {
-    crate::sched::idle_stack::SIZE
-}
-
-#[cfg(feature = "test-actuators")]
-pub fn idle_stack_high_water() -> usize {
-    crate::sched::idle_stack::high_water()
-}
-
 /// No task on this CPU is inside a syscall; [`pack_task`] never produces this value.
 const NO_SYSCALL: u64 = u64::MAX;
 
@@ -252,8 +241,6 @@ pub fn reserve_log_slot(guard: &crate::arch::IrqGuard) -> (*const log::Shard, u6
     let block = this();
     let (shard, cpu, tid, pid) =
         (block.log_shard, block.cpu_id, block.current_tid.load(Relaxed), block.current_pid.load(Relaxed));
-    // `log-nested-reserve`'s injection point: between the shard read and the reservation.
-    crate::log::nested::reserve_window();
     // SAFETY: `guard` masks this CPU, the only one that reserves in its shard.
     let seq = unsafe { shard.reserve(guard) };
     (shard, seq, cpu, tid, pid)

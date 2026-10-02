@@ -32,9 +32,10 @@
 //! primary's (`src/compiler.rs`) is locked the same way under its own key, and
 //! neither it nor a sysroot built from it takes the global lock.
 //!
-//! key's lock → a sysroot key's lock → the worktree build lock → the global one
-//! → an LLVM key's lock → artifact. A compiler's or a sysroot's key lock is
-//! taken with the worktree lock put down ([`Held::without_shared`]), because the
+//! A compiler key's lock → a sysroot key's lock → a freestanding key's lock → the
+//! worktree build lock → the global one → an LLVM key's lock → artifact. A
+//! compiler's, a sysroot's or a freestanding key lock is taken with the
+//! worktree lock put down ([`Held::without_shared`]), because the
 //! key's builder takes the worktree lock exclusively; an LLVM key's is taken
 //! inside the worktree or global lock covering the fork build directory its
 //! builder writes.
@@ -50,6 +51,8 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use crate::keystore::Key;
 
 unsafe extern "C" {
     fn flock(fd: i32, operation: i32) -> i32;
@@ -215,12 +218,14 @@ pub fn artifact(root: &Path) -> Guard {
     exclusive(&root.join(LOCK_DIR).join("artifact"), "artifact lock", "artifact staging")
 }
 
-/// A content-addressed product of the host, locked per key: a sysroot, a
-/// compiler a worktree's fork checkout names (`src/compiler.rs`), or the LLVM
-/// a compiler links (`src/llvm.rs`).
+/// A content-addressed product of the host, locked per key: a sysroot, the
+/// freestanding targets' libraries it carries (`src/sysroot.rs`), a compiler
+/// a worktree's fork checkout names (`src/compiler.rs`), or the LLVM a
+/// compiler links (`src/llvm.rs`).
 #[derive(Clone, Copy)]
 pub enum Keyed {
     Sysroot,
+    Freestanding,
     Compiler,
     Llvm,
 }
@@ -229,6 +234,7 @@ impl Keyed {
     fn dir(self) -> &'static str {
         match self {
             Keyed::Sysroot => "sysroots",
+            Keyed::Freestanding => "freestanding",
             Keyed::Compiler => "compilers",
             Keyed::Llvm => "llvm",
         }
@@ -237,6 +243,7 @@ impl Keyed {
     pub(crate) fn name(self) -> &'static str {
         match self {
             Keyed::Sysroot => "sysroot",
+            Keyed::Freestanding => "freestanding libraries",
             Keyed::Compiler => "compiler",
             Keyed::Llvm => "LLVM",
         }
@@ -245,14 +252,14 @@ impl Keyed {
 
 /// Make what `key` names: exclusive, and waited for by every other process that
 /// wants the same key, which then finds it made.
-fn keyed_building(root: &Path, kind: Keyed, key: &str) -> Guard {
+fn keyed_building(root: &Path, kind: Keyed, key: &Key) -> Guard {
     let lock = format!("{} lock", kind.name());
     exclusive(&keyed_lock_path(root, kind, key), &lock, &format!("building {} {key}", kind.name()))
 }
 
 /// Use what `key` names: shared, so any number of builds use it at once, a
 /// builder of it is waited for, and a sweep cannot remove it.
-fn keyed_using(root: &Path, kind: Keyed, key: &str) -> Guard {
+fn keyed_using(root: &Path, kind: Keyed, key: &Key) -> Guard {
     let path = keyed_lock_path(root, kind, key);
     let file = open_lock_file(&path);
     if !try_lock(&file, LOCK_SH) {
@@ -273,7 +280,7 @@ fn keyed_using(root: &Path, kind: Keyed, key: &str) -> Guard {
 pub fn keyed_made(
     root: &Path,
     kind: Keyed,
-    key: &str,
+    key: &Key,
     defect: impl Fn() -> Option<String>,
     mut make: impl FnMut(),
 ) -> Guard {
@@ -295,12 +302,12 @@ pub fn keyed_made(
 
 /// What `key` names, exclusively and only if nobody is making or using it: what
 /// a sweep holds while it removes one.
-pub fn keyed_idle(root: &Path, kind: Keyed, key: &str) -> Option<Guard> {
+pub fn keyed_idle(root: &Path, kind: Keyed, key: &Key) -> Option<Guard> {
     let file = open_lock_file(&keyed_lock_path(root, kind, key));
     try_lock(&file, LOCK_EX).then_some(Guard { file, records_holder: false })
 }
 
-fn keyed_lock_path(root: &Path, kind: Keyed, key: &str) -> PathBuf {
+fn keyed_lock_path(root: &Path, kind: Keyed, key: &Key) -> PathBuf {
     git_lock_dir(root).join(kind.dir()).join(key)
 }
 
@@ -616,8 +623,8 @@ pub(crate) mod tests {
     }
 
     /// Sysroot `key` of `root`, held in use by a process of its own.
-    pub(crate) fn sysroot_used_elsewhere(root: &Path, key: &str) -> Elsewhere {
-        let env = [(ROLE, OsStr::new("use-sysroot")), (ROOT, root.as_os_str()), (KEY, OsStr::new(key))];
+    pub(crate) fn sysroot_used_elsewhere(root: &Path, key: &Key) -> Elsewhere {
+        let env = [(ROLE, OsStr::new("use-sysroot")), (ROOT, root.as_os_str()), (KEY, OsStr::new(key.as_str()))];
         Elsewhere::hold("buildlock::tests::child_role", &env)
     }
 
@@ -743,7 +750,7 @@ pub(crate) mod tests {
                 note(&root, "sh");
             }
             "hold-sysroot-build" => {
-                let _building = keyed_building(&root, Keyed::Sysroot, "k1");
+                let _building = keyed_building(&root, Keyed::Sysroot, &Key::of(b"k1"));
                 hold_until_released();
                 note(&root, "built");
             }
@@ -752,11 +759,11 @@ pub(crate) mod tests {
                 note(&root, "landed");
             }
             "want-sysroot" => {
-                let _using = keyed_using(&root, Keyed::Sysroot, "k1");
+                let _using = keyed_using(&root, Keyed::Sysroot, &Key::of(b"k1"));
                 note(&root, "used");
             }
             "use-sysroot" => {
-                let _using = keyed_using(&root, Keyed::Sysroot, &std::env::var(KEY).unwrap());
+                let _using = keyed_using(&root, Keyed::Sysroot, &Key::parse(&std::env::var(KEY).unwrap()).unwrap());
                 hold_until_released();
             }
             "clean" | "clean-unlocked" => {
@@ -925,7 +932,7 @@ pub(crate) mod tests {
     #[test]
     fn a_released_holder_is_gone() {
         let root = scratch("released");
-        let user = sysroot_used_elsewhere(&root, "k");
+        let user = sysroot_used_elsewhere(&root, &Key::of(b"k"));
         let pid = user.id() as i32;
         user.release();
         assert!(!alive(pid), "release returned before the holder was reaped");
@@ -941,8 +948,8 @@ pub(crate) mod tests {
         let root = scratch("sysroot-keys");
         let builder = held_elsewhere(&root, "hold-sysroot-build");
 
-        assert!(keyed_idle(&root, Keyed::Sysroot, "k1").is_none(), "a sweep could remove a key being built");
-        let other = keyed_building(&root, Keyed::Sysroot, "k2");
+        assert!(keyed_idle(&root, Keyed::Sysroot, &Key::of(b"k1")).is_none(), "a sweep could remove a key being built");
+        let other = keyed_building(&root, Keyed::Sysroot, &Key::of(b"k2"));
         drop(other);
 
         let mut user = child(&root, "want-sysroot");
@@ -954,10 +961,10 @@ pub(crate) mod tests {
         assert!(user.wait().unwrap().success());
         assert_eq!(fs::read_to_string(root.join("order.log")).unwrap(), "built\nused\n");
 
-        let user = sysroot_used_elsewhere(&root, "k1");
-        assert!(keyed_idle(&root, Keyed::Sysroot, "k1").is_none(), "a sweep could remove a key in use");
+        let user = sysroot_used_elsewhere(&root, &Key::of(b"k1"));
+        assert!(keyed_idle(&root, Keyed::Sysroot, &Key::of(b"k1")).is_none(), "a sweep could remove a key in use");
         user.release();
-        assert!(keyed_idle(&root, Keyed::Sysroot, "k1").is_some(), "a sweep could not remove a key nobody uses");
+        assert!(keyed_idle(&root, Keyed::Sysroot, &Key::of(b"k1")).is_some(), "a sweep could not remove a key nobody uses");
     }
 
     #[test]

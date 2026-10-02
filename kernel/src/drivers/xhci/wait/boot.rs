@@ -21,7 +21,7 @@ use super::super::{OFF_CMD_RING, OFF_DCBAA, OFF_ERST, OFF_EVT_RING};
 use super::super::{OP_CONFIG, OP_CRCR, OP_DCBAAP, OP_PAGESIZE, OP_PORT_BASE, OP_USBCMD, OP_USBSTS};
 use super::super::{USBCMD_HCRST, USBCMD_RS, USBSTS_CNR, USBSTS_HCH};
 use super::super::{PORTSC_PP, PORT_REG_SIZE, XHCI};
-use super::super::{controller_answers, PORT_DEBOUNCE_NS};
+use super::super::PORT_DEBOUNCE_NS;
 use super::settles;
 use toyos_xhci::port::{self, GaveUp, Reset, ResetOutcome};
 use toyos_xhci::Protocol;
@@ -313,17 +313,17 @@ fn init_one(pci_dev: &PciDevice) -> Option<XhciController> {
         op_base.write_u32(OP_USBCMD, usbcmd & !USBCMD_RS);
     }
     let deadline_ms = USB_TIMEOUT_NS / 1_000_000;
-    if !settles(|| controller_answers() && op_base.read_u32(OP_USBSTS) & USBSTS_HCH != 0) {
+    if !settles(|| op_base.read_u32(OP_USBSTS) & USBSTS_HCH != 0) {
         refuse(format_args!("it never halted, within {deadline_ms} ms of being asked to"));
         return None;
     }
 
     op_base.write_u32(OP_USBCMD, USBCMD_HCRST);
-    if !settles(|| controller_answers() && op_base.read_u32(OP_USBCMD) & USBCMD_HCRST == 0) {
+    if !settles(|| op_base.read_u32(OP_USBCMD) & USBCMD_HCRST == 0) {
         refuse(format_args!("it held HCRST for {deadline_ms} ms"));
         return None;
     }
-    if !settles(|| controller_answers() && op_base.read_u32(OP_USBSTS) & USBSTS_CNR == 0) {
+    if !settles(|| op_base.read_u32(OP_USBSTS) & USBSTS_CNR == 0) {
         refuse(format_args!("it stayed Controller Not Ready for {deadline_ms} ms after its reset"));
         return None;
     }
@@ -359,13 +359,6 @@ fn init_one(pci_dev: &PciDevice) -> Option<XhciController> {
         }
 
         op_base.write_u64(OP_DCBAAP, dma.device_addr() + OFF_DCBAA as u64);
-        #[cfg(feature = "boot-actuators")]
-        let _ = super::super::FOREIGN_PROBE.compare_exchange(
-            0,
-            dma.subview(super::super::PROBE_OFF, super::super::PROBE_LEN).host_phys(),
-            core::sync::atomic::Ordering::Relaxed,
-            core::sync::atomic::Ordering::Relaxed,
-        );
 
         // CRCR bit 0 is RCS; the pointer is 64-byte aligned so `| 1` only sets
         // that bit (xHCI 1.2 §5.4.5).
@@ -387,7 +380,7 @@ fn init_one(pci_dev: &PciDevice) -> Option<XhciController> {
 
         op_base.write_u32(OP_USBCMD, 1 | (1 << 2));
     }
-    if !settles(|| controller_answers() && op_base.read_u32(OP_USBSTS) & 1 == 0) {
+    if !settles(|| op_base.read_u32(OP_USBSTS) & 1 == 0) {
         refuse(format_args!("it stayed halted for {deadline_ms} ms after R/S"));
         return None;
     }
@@ -447,7 +440,6 @@ fn init_one(pci_dev: &PciDevice) -> Option<XhciController> {
             .collect(),
         ports_dirty: false,
         outstanding: Outstanding::EMPTY,
-        software_disabled: [0u64; 4],
         after_break: toyos_xhci::call::AfterBreak::CLOSED,
         bulk_began: 0,
         stopped: None,
@@ -542,14 +534,5 @@ pub fn scan_ports(ctrl: &mut XhciController) {
     // Completions from an earlier port's device can arrive during a later
     // port's enumeration; without this drain a broken one goes unrecorded.
     ctrl.settle_outstanding();
-    // After acknowledge_port_changes: the connect this raises must be a change
-    // the port machine sees, not one the scan just cleared.
-    if crate::actuator::xhci_slow_storage_connect() {
-        super::super::BOOT_SCAN_DONE.store(true, core::sync::atomic::Ordering::Relaxed);
-    }
-    if crate::actuator::xhci_portsc_rw1c() {
-        log!("xHCI: PED as RW1C, {} port(s) disabled by a driver write",
-            ctrl.software_disabled_ports());
-    }
 }
 

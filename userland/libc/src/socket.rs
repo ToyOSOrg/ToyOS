@@ -7,6 +7,8 @@ use toyos_abi::RawHandle;
 use toyos_abi::syscall;
 use toyos::net::{NetError, TcpSocketId, UdpSocketId, OPT_NODELAY};
 
+use crate::errno::{EADDRINUSE, EAFNOSUPPORT, EBADF, ECONNREFUSED, ECONNRESET, EINVAL, EIO, ENOMEM, ENOTCONN, ETIMEDOUT};
+
 // C types matching POSIX
 
 type SocklenT = u32;
@@ -52,17 +54,6 @@ const IPPROTO_TCP: i32 = 6;
 const SOL_SOCKET: i32 = 1;
 const SO_ERROR: i32 = 4;
 const TCP_NODELAY: i32 = 1;
-
-const EINVAL: i32 = 22;
-const EBADF: i32 = 9;
-const ENOMEM: i32 = 12;
-const EAFNOSUPPORT: i32 = 97;
-const ECONNREFUSED: i32 = 111;
-const ECONNRESET: i32 = 104;
-const ETIMEDOUT: i32 = 110;
-const EADDRINUSE: i32 = 98;
-const ENOTCONN: i32 = 107;
-const EIO: i32 = 5;
 
 // Internal socket table
 

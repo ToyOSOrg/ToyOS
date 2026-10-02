@@ -10,7 +10,7 @@ Owner ruling, 2026-09-25: the kernel is to be super small, super performant
 and safe. This track holds that, and supersedes the ordering of
 `issues/kernel/every-wait-in-this-kernel-is-a-spin.md`,
 `issues/kernel/every-driver-is-still-in-the-kernel.md` and
-`issues/hardware/the-bot-scsi-machine-is-still-hand-written-in-the-kernel.md`,
+`issues/hardware/a-disk-plugged-in-after-boot-is-bound-inside-a-scheduling-pass.md`,
 which stay as the evidence each stage closes.
 
 The design review of 2026-09-25 read the code and found the same shape three
@@ -144,15 +144,14 @@ times:
    written once as straight-line code. **Exit**: no interrupts-off window
    longer than a register access, and keyboard input keeps flowing while a
    stick misbehaves.
-6. **The scheduler knows nothing about devices.** A handler posts its
+6. A handler posts its
    device's `Watch` and ends its interrupt; the thread waiting on that watch
    does the work, and no step creates a kernel thread. `irq_ring`, the driver
    list in `drain_irqs` and the idle loop's device checks are gone by step 5.
    Each step measures the kernel's lines, and from step 2 the longest
    interrupts-off and preemption-off windows, against stage 6's first commit.
    Steps 3 and 4 do not land alone: they land with #592's i8042 stage and
-   with usbd. Stage 6 stays open past step 5 until the owner rules on the
-   panel the dump paints.
+   with usbd.
    1. **Interrupts post.** A post is legal in a handler: the watches a handler
       posts, and the completions of a ring they complete into, sit behind
       interrupts-off locks nothing allocates or frees under, and every other
@@ -182,9 +181,9 @@ times:
       them. **Exit**: step 10's.
    5. **The pass is the scheduler's.** `drain_irqs` goes: the blocked-task
       dump and the heartbeat become `pass`'s own, and the TCO feed stays,
-      since what it proves is that passes run. The dump still paints its
-      report on the panel and holds it there, a device the pass reaches;
-      whether that stays is the owner's ruling. **Exit**: `drain_irqs` and the
+      since what it proves is that passes run. The dump keeps painting its
+      report on the panel and holding it there, a device the pass reaches
+      (owner, 2026-09-30). **Exit**: `drain_irqs` and the
       idle loop's device checks are gone, both windows are measured against
       stage 6's start, and the exits of
       `issues/kernel/an-irq-watchs-freeing-cancel-compiles-in-a-handler.md`

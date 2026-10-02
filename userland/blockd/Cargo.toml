@@ -20,3 +20,6 @@ toyos = { path = "../../toyos" }
 toyos-blockring = { path = "../../toyos-blockring" }
 toyos-blockhold = { path = "../../toyos-blockhold" }
 toyos-gpt = { path = "../../toyos-gpt" }
+
+[package.metadata.toyos.host]
+exempt.owns = "the NVMe controller ToyOS claims for it"

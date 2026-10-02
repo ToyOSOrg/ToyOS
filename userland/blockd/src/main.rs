@@ -73,12 +73,6 @@ const MAX_SESSIONS: usize = 8;
 const MAX_PENDING: usize = 16;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Argv, followed by `n`: the device's answer to the `n`th write a session
-/// asks for is withheld, so a write the device did that nobody was told of, a
-/// silence, and the controller reset that ends it are staged on a device that
-/// always answers.
-const SILENCE_WRITE: &str = "--silence-write";
-
 /// Argv, followed by a unique GUID: the partition the machine runs from, which
 /// no session opens.
 const RUNNING: &str = "--running";
@@ -532,12 +526,6 @@ fn claim() -> Option<toyos::PciDev> {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let silence = args.iter().position(|a| a == SILENCE_WRITE).map(|at| {
-        args.get(at + 1)
-            .and_then(|n| n.parse::<u32>().ok())
-            .filter(|n| *n > 0)
-            .unwrap_or_else(|| panic!("blockd: {SILENCE_WRITE} takes the write whose answer to withhold, from 1"))
-    });
     let running = args.iter().position(|a| a == RUNNING).map(|at| {
         args.get(at + 1)
             .and_then(|text| PartGuid::parse(text))
@@ -559,7 +547,7 @@ fn main() {
         println!("blockd: no NVMe controller this row names is on this machine; serving no partition");
         serve(&mut Service::new(Drive::Absent, running), &acceptor);
     };
-    let mut ctrl = match Controller::open(dev, silence) {
+    let mut ctrl = match Controller::open(dev) {
         Ok(ctrl) => ctrl,
         Err(why) => {
             println!("blockd: NOT SERVING — {why}; serving no partition");

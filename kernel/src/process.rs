@@ -847,9 +847,6 @@ pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Op
     let block = TlsBlock::build(&tls_modules, tls)?;
     let (tls_alloc, thread_pointer, tp_offset) = {
         let parent_data = process_data_arc.lock();
-        if crate::actuator::tls_rebase_window() {
-            crate::loader::rebase_window::spawning(arg);
-        }
         // VA exhaustion is a resource failure the process caused, not a kernel bug; the block drops on the way out, returning its pages.
         let published = block.publish(&parent_addr_space)?;
         drop(parent_data);
@@ -1058,11 +1055,7 @@ pub fn leave(chosen: Option<i32>) {
     match out {
         // The table says zombie now, which a sweep counts as nothing left to stop.
         proclife::Leave::NotLast => crate::quiesce::note_progress(),
-        proclife::Leave::Last { code, mark } => {
-            #[cfg(feature = "boot-actuators")]
-            crate::quiesce::last::hold(crate::quiesce::last::Last::Teardown);
-            teardown(pid, tid, code, mark, &process_data);
-        }
+        proclife::Leave::Last { code, mark } => teardown(pid, tid, code, mark, &process_data),
     }
 }
 

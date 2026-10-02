@@ -60,3 +60,5 @@ all for a program the launcher answers `NotDeclared` for, since that is the
 path both probes took. The instrument is a guest arm that hands a child a
 handle it must not be able to use and asserts the refusal, which is the shape
 `handle_kill_policy` already has for handles a process does not hold.
+
+`handle_kill_policy` is deleted; `issues/kernel/handle-kill-policy-census-grew-one-sharedmem-on-two-nightlies.md` records the commit that restores it.

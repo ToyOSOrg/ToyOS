@@ -117,3 +117,5 @@ What is left to build:
   regions, the 2× cost bar, and the compatibility-format question in
   `issues/kernel/qemu-passes-compatibility-format-interrupts.md`
   (`issues/kernel/the-iommu-refuses-nothing-yet.md` states the first two).
+
+`smp_failed_ap_leaves_no_hole` is deleted; `issues/build/smp-ap-hole-and-log-reserve-window-red-under-a-loaded-host.md` records the commit that restores it.

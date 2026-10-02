@@ -39,7 +39,7 @@ pub struct Timezone {
     pub tz_dsttime: i32,
 }
 
-const CLOCK_REALTIME: i32 = 0;
+pub(crate) const CLOCK_REALTIME: i32 = 0;
 const CLOCK_MONOTONIC: i32 = 1;
 
 /// POSIX's own answer for a machine that cannot tell the time: `time()` returns

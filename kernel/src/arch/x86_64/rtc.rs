@@ -121,7 +121,7 @@ fn read_registers(century_reg: Option<u8>) -> Result<Registers, RtcFault> {
 /// Answers the *next* century, so a test can see the register's value reach
 /// the target year.
 fn century_read(reg: u8) -> u8 {
-    if crate::actuator::rtc_century_next() { 0x21 } else { cmos_read(reg) }
+    cmos_read(reg)
 }
 
 fn wait_for_update() -> Result<(), RtcFault> {
@@ -207,16 +207,5 @@ fn port_read(reg: u8) -> u8 {
 /// The one substitution point for actuator-injected RTC faults; everything
 /// downstream reads whatever this returns.
 fn cmos_read(reg: u8) -> u8 {
-    if crate::actuator::rtc_dead() {
-        // 0xFF sets `UPDATE_IN_PROGRESS`, so a dead RTC surfaces as `Updating`.
-        return 0xFF;
-    }
-    if crate::actuator::rtc_unstable() && reg == SECONDS {
-        use core::sync::atomic::{AtomicU8, Ordering::Relaxed};
-        static TICK: AtomicU8 = AtomicU8::new(0);
-        // 0x01..=0x09: always valid BCD, so this stages `Unstable`, not
-        // `NotADate`.
-        return TICK.fetch_add(1, Relaxed) % 9 + 1;
-    }
     port_read(reg)
 }

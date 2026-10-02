@@ -34,3 +34,5 @@ disk 0's slot, and the rung's acknowledge spent the edge.
 number is read again and judged by `toyos_xhci::identity::same` before the
 volume carries on. A `usb-reset-moves` staging that plugs another serial number
 into the same port refuses it by name.
+
+`usb_transport_break` is deleted; `issues/kernel/a-held-disk-waits-for-a-pass-no-cpu-takes-when-every-cpu-is-in-a-call-on-it.md` records the commit that restores it.

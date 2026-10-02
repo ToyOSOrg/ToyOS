@@ -26,7 +26,7 @@ fn trees() -> Vec<&'static str> {
     std::iter::once("rust")
         .chain(crate::sysroot::SYSROOT_SOURCES)
         .chain(crate::sysroot::SYSROOT_MANIFESTS)
-        .chain([crate::clang::SOURCE, file!()])
+        .chain([crate::clang::SOURCE, crate::libcxx::SOURCE, crate::n2::SOURCE, file!()])
         .collect()
 }
 
@@ -205,7 +205,7 @@ pub fn ensure_published(root: &Path) -> Result<String, String> {
         ));
     }
     let tmp = TempDir::new("toolchain-publish");
-    let manifest = manifest(root, &tag)?;
+    let manifest = manifest(root, &tag);
     let notes = notes(root, &tag, &manifest)?;
     fs::write(tmp.join("TOOLCHAIN"), &manifest).map_err(|e| e.to_string())?;
     fs::write(tmp.join("notes.md"), &notes).map_err(|e| e.to_string())?;
@@ -350,15 +350,15 @@ fn glibc_named(bytes: &[u8]) -> (u32, u32) {
 
 /// `TOOLCHAIN`: the pin a consumer writes down, and what it gets. Inside the
 /// tarball, and the alias release's own asset.
-fn manifest(root: &Path, tag: &str) -> Result<String, String> {
-    let head = |rev: &str| crate::sync::git(root, &["rev-parse", rev]);
-    let toyos = std::env::var("GITHUB_SHA").or_else(|_| head("HEAD"))?;
-    Ok(format!(
+fn manifest(root: &Path, tag: &str) -> String {
+    let head = |rev: &str| crate::sysroot::git_out(root, &["rev-parse", rev]).trim().to_string();
+    let toyos = std::env::var("GITHUB_SHA").unwrap_or_else(|_| head("HEAD"));
+    format!(
         "toolchain {tag}\ntoyos {toyos}\nrust {}\nhost {HOST}\nglibc {}.{}\n",
-        head("HEAD:rust")?,
+        head("HEAD:rust"),
         GLIBC_FLOOR.0,
         GLIBC_FLOOR.1
-    ))
+    )
 }
 
 /// The release notes: how to install it, what glibc it needs.
@@ -463,7 +463,8 @@ mod tests {
         assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
     }
 
-    /// A commit to the C toolchain's declarations or headers moves the tag.
+    /// A commit to the C and C++ toolchain's declarations or headers, or to the
+    /// n2 it is built under, moves the tag.
     #[test]
     fn the_tag_moves_with_the_c_toolchain() {
         let repo = TempDir::new("release-tag");
@@ -493,9 +494,17 @@ mod tests {
         let riscv = r#"targets = \"AArch64;RISCV;X86\""#;
         assert!(clang.contains(tools) && clang.contains(targets), "src/clang.rs no longer declares what this mutates");
         let with_objdump = clang.replace(tools, objdump);
+        let cxx = fs::read_to_string(here.join(crate::libcxx::SOURCE)).unwrap();
+        let (no_fs, fs_on) = (r#"("LIBCXX_ENABLE_FILESYSTEM", "OFF")"#, r#"("LIBCXX_ENABLE_FILESYSTEM", "ON")"#);
+        assert!(cxx.contains(no_fs), "src/libcxx.rs no longer declares what this mutates");
+        let n2 = fs::read_to_string(here.join(crate::n2::SOURCE)).unwrap();
+        let pin = crate::n2::N2[crate::n2::N2.len() - 1];
+        assert!(n2.contains(pin), "src/n2.rs no longer declares what this mutates");
         let mutations = [
             (crate::clang::SOURCE, with_objdump.clone()),
             (crate::clang::SOURCE, with_objdump.replace(targets, riscv)),
+            (crate::libcxx::SOURCE, cxx.replace(no_fs, fs_on)),
+            (crate::n2::SOURCE, n2.replace(pin, &"0".repeat(pin.len()))),
             ("userland/libc/include/placeholder", "y".to_string()),
         ];
         for (path, text) in mutations {
