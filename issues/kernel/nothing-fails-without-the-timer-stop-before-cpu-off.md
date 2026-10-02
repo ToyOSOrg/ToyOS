@@ -26,7 +26,8 @@ The stop serves a wider claim: no interrupt reaches a core `CPU_OFF` turned
 off. That claim also covers a kick from a CPU that is not off yet, and the
 stop does nothing about kicks.
 
-**Evidence**: the deletion mutation, a guest run at PR #647's head:
+**Evidence**: the deletion mutation, applied at `94dea677c` and reversed
+after the run:
 
 ```diff
 --- a/kernel/src/arch/aarch64/power.rs
@@ -35,9 +36,10 @@ stop does nothing about kicks.
 -    irqchip::stop_timer();
 ```
 
-`cargo test --test toyos-build -- virt_`, run by the orchestrator as the job
-`armnext-r2-t0-no-timer-stop`. The guest runs are the orchestrator's, and its
-exit code is recorded here once measured.
+`cargo test --test toyos-build -- virt_` exited 0 with it applied: `19
+passed, 19 total`, the power-off of eight CPUs in `virt_smp`, `virt_el1_smp`
+and `virt_off_names_the_cpus_left_on` among them. The patch and the run are
+https://github.com/ToyOSOrg/ToyOS/pull/647#issuecomment-5956924013.
 
 **Exit**: an AArch64 metal target where `SGI_OFF` lands on a CPU whose timer
 is armed, with the deletion mutation red there.
