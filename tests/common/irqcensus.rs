@@ -197,22 +197,23 @@ pub fn windows(capture: &str) -> Result<BTreeMap<u32, Windows>, String> {
 pub struct Measured {
     /// What the holding CPU reported between its hold and the load's start.
     pub held: (u64, u64),
-    /// What any CPU closed under the load.
+    /// What any CPU closed in the load's own report.
     pub load: (u64, u64),
 }
 
 /// The durations a machine's boot is judged by, read from the reports of
-/// `cpus` CPUs around the record `load_exited` heads, the load's exit.
+/// `cpus` CPUs before the record `load_exited` heads, the load's exit.
 ///
-/// **The load's reading is its own.** A report carries what closed since the
-/// report before, and the load's exit prints one before it tears the process
-/// down. So the reading is that report and the next, which carries the
-/// teardown, and it is refused unless a report before them emptied every CPU's
-/// record as the load started.
+/// **The load's reading is its own report alone.** A report carries what
+/// closed since the report before, and the load's exit prints one before it
+/// tears the process down. So that report spans the teardown of the job
+/// before, the runner's spawn of the load and the load up to its exit, and it
+/// is refused unless a report before it emptied every CPU's record.
 ///
 /// **A window of known length is read back.** The kernel held both of one
 /// CPU's windows for the span its held line states: that CPU's reports from
-/// there to the load's start carry a window of each kind no shorter.
+/// there to the load's start carry a window of each kind no shorter, and none
+/// past `metaltimings::ceiling` of it.
 pub fn windows_under(capture: &str, cpus: u32, load_exited: &str) -> Result<Measured, String> {
     let mut reports: Vec<(usize, Vec<Windows>)> = Vec::new();
     let mut open: Vec<Windows> = Vec::new();
@@ -247,9 +248,6 @@ pub fn windows_under(capture: &str, cpus: u32, load_exited: &str) -> Result<Meas
                     carries every window since each CPU joined"
             .to_string());
     }
-    let after = reports.get(own + 1).ok_or_else(|| {
-        format!("no report after `{load_exited}`: what the load's own exit closed was never read")
-    })?;
     let longest = |lines: &mut dyn Iterator<Item = &Windows>| {
         lines.fold((0, 0), |(irqs, preempt), w| (irqs.max(w.irqs_off_ns), preempt.max(w.preempt_off_ns)))
     };
@@ -271,14 +269,21 @@ pub fn windows_under(capture: &str, cpus: u32, load_exited: &str) -> Result<Meas
         ));
     }
     let held = longest(&mut read_back);
+    let read = format!(
+        "cpu{cpu} held both windows for {ns} ns, and its reports before the load's read back \
+         irqs_off_ns={} preempt_off_ns={}",
+        held.0, held.1
+    );
     if held.0 < ns || held.1 < ns {
+        return Err(format!("{read}: a window was reported shorter than it was held"));
+    }
+    let ceiling = toyos_build::metaltimings::ceiling(ns);
+    if held.0 > ceiling || held.1 > ceiling {
         return Err(format!(
-            "cpu{cpu} held both windows for {ns} ns, and its reports before the load's read back \
-             irqs_off_ns={} preempt_off_ns={}: a window was reported shorter than it was held",
-            held.0, held.1
+            "{read}, past the ceiling of {ceiling}: a window was reported at more than twice what was held"
         ));
     }
-    let load = longest(&mut reports[own].1.iter().chain(&after.1));
+    let load = longest(&mut reports[own].1.iter());
     Ok(Measured { held, load })
 }
 

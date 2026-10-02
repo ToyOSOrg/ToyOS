@@ -130,11 +130,12 @@ pub fn hold_once() {
         return;
     }
     let from = cpu::counter();
-    let owed = crate::clock::counter_ticks(HELD_NS);
-    let mut held = 0;
-    while held < owed {
+    let mut ns = 0;
+    // In the nanoseconds it prints: a tick count that stands for `HELD_NS` can
+    // convert back to one less.
+    while ns < HELD_NS {
         core::hint::spin_loop();
-        held = cpu::counter() - from;
+        ns = crate::clock::nanos_of_ticks(cpu::counter() - from);
     }
-    crate::log!("windows: held cpu{} ns={}", percpu::cpu_id(), crate::clock::nanos_of_ticks(held));
+    crate::log!("windows: held cpu{} ns={ns}", percpu::cpu_id());
 }

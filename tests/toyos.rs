@@ -161,8 +161,6 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("virt_unmap_touch", qemu::Profile::VirtEl2),
     ("virt_debug_refused", qemu::Profile::VirtEl2),
     ("virt_readonly_copyout", qemu::Profile::VirtEl2),
-    // The windows on AArch64, on eight CPUs: every hook's check, and the lines
-    // each report carries; no clock.
     ("virt_mask_windows", qemu::Profile::VirtEl2),
     ("virt_smp", qemu::Profile::VirtEl2),
     ("virt_el1_smp", qemu::Profile::VirtTcg),
@@ -250,7 +248,7 @@ const METAL: &[(&str, metal::Metal)] = &[
     ),
     (
         // The windows on the machine that owes them: every CPU reported beside
-        // its census, a held window read back, and the herd's own recorded.
+        // its census, and a held window read back.
         "mask_windows",
         metal::Metal { arms: WINDOWSCASE, judge: |b| windows_on_metal(b[0]) },
     ),
@@ -664,17 +662,16 @@ const TESTCASES_READDIR: &[metal::Arm] =
 const JOBCASE: &[metal::Arm] = &[metal::once("jobcase", "tests/jobcase", &[], &[])];
 
 /// The shipping kernel with the windows' instrument and nothing else, so what
-/// it reads is that kernel under the herd. Four exits, a report each:
+/// it reads is that kernel under the herd. Three exits, a report each:
 /// `idle_span`'s is the boot's first, where the kernel holds; `pwd`'s reads the
-/// hold back and empties every record as the herd starts; the herd's and
-/// `echo`'s are the herd's reading, the second carrying its teardown.
+/// hold back and empties every record; the herd's is the herd's reading.
 const WINDOWSCASE: &[metal::Arm] = &[metal::Arm {
     features: toyos_build::build::MASK_WINDOWS_KERNEL,
     ..metal::once(
         "windowscase",
         "tests/testcases",
         &[],
-        &["test_rs_idle_span", "pwd", WINDOWS_LOAD, "echo"],
+        &["test_rs_idle_span", "pwd", WINDOWS_LOAD],
     )
 }];
 
@@ -2491,7 +2488,8 @@ fn irq_census(capture: &str) -> Result<(), String> {
 }
 
 /// The T14's windows: [`mask_windows`]' verdict with every CPU reporting, and
-/// `common::irqcensus::windows_under`'s durations, recorded.
+/// `common::irqcensus::windows_under`'s. Its durations are printed and none is
+/// recorded: one boot's longest window is no baseline for the next.
 fn windows_on_metal(boot: &metal::Readback) -> Result<(), String> {
     boot.job_passed(WINDOWS_LOAD)?;
     let kernel = boot.kernel();
@@ -2502,10 +2500,7 @@ fn windows_on_metal(boot: &metal::Readback) -> Result<(), String> {
         "  [windows] held irqs_off_ns={} preempt_off_ns={}; herd irqs_off_ns={} preempt_off_ns={}",
         read.held.0, read.held.1, read.load.0, read.load.1
     );
-    boot.measured("windows.windowscase.held_irqs_off_ns", read.held.0)?;
-    boot.measured("windows.windowscase.held_preempt_off_ns", read.held.1)?;
-    boot.measured("windows.windowscase.herd_irqs_off_ns", read.load.0)?;
-    boot.measured("windows.windowscase.herd_preempt_off_ns", read.load.1)
+    Ok(())
 }
 
 fn pci_cap_selftest(log: &str) -> Result<(), String> {

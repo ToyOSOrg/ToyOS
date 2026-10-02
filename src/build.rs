@@ -2648,9 +2648,6 @@ mod tests {
                 "lock-acquire-off",
                 "log-commit-release-off",
                 "loom",
-                // The longest interrupts-off and preemption-off windows: a
-                // counter read on every masking transition and entry, so its
-                // own build and never one being measured for anything else.
                 "mask-windows",
                 // `heap-lockspin`'s other arm: the same visit to the pass path,
                 // for the same span, without the allocator's lock.

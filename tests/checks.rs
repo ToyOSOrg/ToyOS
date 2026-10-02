@@ -397,7 +397,7 @@ mod checks {
     }
 
     /// [`mask_windows`] and `irqcensus::windows_under` against captures no
-    /// boot has to produce: two CPUs and the T14 row's four exits, a report
+    /// boot has to produce: two CPUs and the T14 row's three exits, a report
     /// each, with cpu1 holding at the first.
     #[test]
     fn mask_windows_verdict() -> Result<(), String> {
@@ -420,8 +420,7 @@ mod checks {
         let read_back = (held_ns + 400, held_ns + 300);
         let opening = [report((100, 100), read_back), exit("pwd")].concat();
         let own = [report((3_000_000, 1_100_000), (700_000, 600_000)), exit(WINDOWS_LOAD)].concat();
-        let after = [report((300, 200), (2_000_000, 1_900_000)), exit("echo")].concat();
-        let good = [hold.as_str(), &first, &opening, &own, &after].concat();
+        let good = [hold.as_str(), &first, &opening, &own].concat();
         let exited = windows_load_exited();
 
         mask_windows(&good, 2).map_err(|e| format!("the good capture was refused: {e}"))?;
@@ -436,7 +435,7 @@ mod checks {
         unpaired("a field missing", &good.replace(" preempt_off_ns=100", ""), "fields")?;
 
         let read = windows_under(&good, 2, &exited)?;
-        let want = Measured { held: read_back, load: (3_000_000, 1_900_000) };
+        let want = Measured { held: read_back, load: (3_000_000, 1_100_000) };
         if read != want {
             return Err(format!("the good capture read {read:?}, and the hold's and the load's reports say {want:?}"));
         }
@@ -445,9 +444,7 @@ mod checks {
             Err(e) if e.contains(says) => Ok(()),
             Err(e) => Err(format!("{what} was refused for the wrong reason: {e}")),
         };
-        refused("the load's report alone", &own, "the boot's first")?;
-        refused("a load's report with none before it", &[hold.as_str(), &own, &after].concat(), "the boot's first")?;
-        refused("no report after the load's exit", &good.replace(&after, ""), "no report after")?;
+        refused("a load's report with none before it", &[hold.as_str(), &own].concat(), "the boot's first")?;
         refused("a load that never ended", &good.replace(&exit(WINDOWS_LOAD), ""), "never ended")?;
         refused("no hold", &good.replace(&hold, ""), "held no window of known length")?;
         refused("a second hold", &[hold.as_str(), &good].concat(), "a second hold")?;
@@ -463,11 +460,21 @@ mod checks {
             "shorter than it was held",
         )?;
         refused(
+            "an interrupts-off window read back at ten times",
+            &good.replace(&windows(1, read_back), &windows(1, (read_back.0 * 10, read_back.1))),
+            "past the ceiling",
+        )?;
+        refused(
+            "a preemption-off window read back at ten times",
+            &good.replace(&windows(1, read_back), &windows(1, (read_back.0, read_back.1 * 10))),
+            "past the ceiling",
+        )?;
+        refused(
             "a hold the load's own report reads back",
-            &[first.as_str(), &opening, &hold, &own, &after].concat(),
+            &[first.as_str(), &opening, &hold, &own].concat(),
             "reported nothing between",
         )?;
-        refused("a report that skips a CPU", &good.replace(&windows(0, (300, 200)), ""), "names cpu1 at place 0")?;
+        refused("a report that skips a CPU", &good.replace(&windows(0, (3_000_000, 1_100_000)), ""), "names cpu1 at place 0")?;
         Ok(())
     }
 
