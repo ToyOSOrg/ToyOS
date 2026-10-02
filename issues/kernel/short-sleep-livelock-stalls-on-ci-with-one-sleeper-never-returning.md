@@ -30,7 +30,7 @@ instrument, and the owner is the sleep path in `kernel/src/sched` that the
 test's write-up (`tests/toyos.rs`, `short_sleep_livelock`) names.
 
 **Exit condition.** The fifth sleeper's stall is fixed in the sleep path, and
-`short_sleep_livelock` green on CI's KVM `guest` shards.
+`short_sleep_livelock` green.
 Owner: the sleep path, `kernel/src/sched`; held by the orchestrator.
 
 **Its test is deleted**: `1962baa5d` took `short_sleep_livelock` out, QEMU and

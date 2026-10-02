@@ -479,8 +479,7 @@ mechanism for it.
 
 ## Deleted as flaky tests
 
-A flaky test is deleted at once. Each commit below takes one out, and
-`git revert` of it brings it back:
+A flaky test is deleted at once. Each commit below takes one out:
 
 - `metal_job_reboot` — `99ee9625d`, also on
   `issues/build/metal-job-reboot-drained-no-kernel-output-beside-other-guests.md`;
@@ -489,12 +488,12 @@ A flaky test is deleted at once. Each commit below takes one out, and
 - `launcher_refusals` — `4c191469f`;
 - `screen_console_shell` — `958ada05e`;
 - `screen_console_clear` — `315526e83`, and `c7d9efeb1` retired `SYS_DEBUG`
-  action 8, which only it asked for: `git revert c7d9efeb1 315526e83`;
+  action 8, which only it asked for;
 - `fs_transactional` — `8e172f7a8`;
 - `fs_dirs_durable` — `690fa3e83`;
 - `i8042_undecoded_bytes` — `c6923cd50`, with `i8042-split-burst`;
 - `log_poll_outlives_a_close` — `ad6dc0781`, with test-runner's `log-close`
-  and `log-close-cancels-any-syscap`: `git revert 87f74892d ad6dc0781`;
+  and `log-close-cancels-any-syscap`;
 - `metal_sim_pointer_churn` — `525e59ad1`;
 - `blocked_dump` — `0a7fc5f70`, red after its retirement here on the
   sightings `issues/build/log-reserve-window-negative-times-out-beside-other-guests.md`
@@ -512,5 +511,3 @@ Named in this file and not deleted: `desktop_typing_damage` waits on `terminal:
 ready` since its row; `i8042_absent` no longer has the two-boot allowance its
 row is about; `hda_tone`, `tlb_shootdown_waits` and `wake_storm_cost` are T14
 rows and no QEMU guest runs them.
-
-`screen_loader_lines` is deleted; `issues/build/nothing-refuses-the-loader-an-exclusive-gop-open.md` records the commit that restores it.

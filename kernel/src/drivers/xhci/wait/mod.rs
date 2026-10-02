@@ -14,26 +14,7 @@ pub mod msc;
 /// measurement only.
 #[cfg(feature = "boot-actuators")]
 mod depth_probe {
-    use core::sync::atomic::{AtomicU32, Ordering};
 
-    use crate::log;
-
-    static DEEPEST: AtomicU32 = AtomicU32::new(0);
-
-    pub fn report() {
-        let depth = crate::preempt::count();
-        // Logs only a new deepest depth: logging every wait would write to
-        // the same device the wait is on, a self-sustaining loop.
-        if depth <= DEEPEST.fetch_max(depth, Ordering::Relaxed) {
-            return;
-        }
-        log!(
-            "io-depth: a disk transfer is being waited for at preempt depth {depth}, task {:?}",
-            crate::arch::percpu::current_tid().map(|t| t.raw())
-        );
-        // `kernel_backtrace` stops at the first unreadable frame.
-        crate::symbols::kernel_backtrace(crate::arch::cpu::frame_pointer(), 20);
-    }
 }
 
 use crate::log;
@@ -370,10 +351,6 @@ impl XhciController {
     /// Matched by (slot, dci, trb) rather than the endpoint, since a stalled
     /// endpoint still completes late transfers this driver stopped waiting for.
     fn wait_transfer(&mut self, slot: u8, dci: u8, trb: u64) -> Result<(u32, u32), Quiet> {
-        #[cfg(feature = "boot-actuators")]
-        if crate::actuator::io_depth_probe() {
-            depth_probe::report();
-        }
         let on = Await::Transfer { slot, dci, trb };
         let (began, deadline) = self.wait_ends();
         let port = self.port_of_slot(slot);

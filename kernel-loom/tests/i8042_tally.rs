@@ -6,15 +6,9 @@
 //! port-drain burst, subtracted by a reader on another CPU, and a reader landing
 //! between the two writes blamed an interrupt that had carried nothing.
 //!
-//! **That torn read is not what produced the rate the write-up records.**
-//! `i8042_undecoded_bytes` at about one full suite in three under load came from
-//! the same handler counting on the way *in*, ahead of any byte reaching the
-//! ring, which needs no subtraction at all — no reader could have been inside
-//! the bring-up ISR's window: the reporting CPU was an AP, and `i8042::init`
-//! runs on the BSP before `smp::boot_aps`.
-//! One word closes both. The distinction is written here because blaming a
-//! proved race for an observed line, without checking that a reader could have
-//! been there, is the mistake this file exists downstream of.
+//! The same handler counting on the way *in*, ahead of any byte reaching the
+//! ring, needs no subtraction at all to blame an interrupt that carried
+//! nothing. One word closes both.
 //!
 //! **A rate is why this is a model and not a test.** Either window is a handful
 //! of instructions on one CPU; no guest boot can be made to land in one on

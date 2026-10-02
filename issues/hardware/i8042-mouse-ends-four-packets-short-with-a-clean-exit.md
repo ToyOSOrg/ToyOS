@@ -64,5 +64,4 @@ deleted.
 
 The i8042/input path, held by the orchestrator.
 
-**Its test is deleted**: `57ac19ada` took `i8042_mouse` out, and
-`git revert 57ac19ada` brings it back.
+**Its test is deleted**: `57ac19ada` took `i8042_mouse` out.

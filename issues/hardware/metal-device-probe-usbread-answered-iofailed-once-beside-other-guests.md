@@ -33,5 +33,4 @@ sighting, and whether `usb-storage` logged a transport break before it.
 **Its test is deleted**, as a flaky test is: `24aa31815` took
 `metal_device_probe` out, its QEMU and T14 rows both, with the T14 judge and
 the device inventory in `src/metaldevices.rs` only that judge read — among
-them the T14's assertion that blockd drives no NVMe there. `git revert
-24aa31815` brings them back.
+them the T14's assertion that blockd drives no NVMe there.

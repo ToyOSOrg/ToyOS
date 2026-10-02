@@ -55,23 +55,6 @@ pub const WEDGE_STAGED: &str = "wedge: staged, and only the boot deadline ends t
 pub const WEDGE_ARRIVED_DEAF: &str =
     "arrived with interrupts off, through the syscall gate, and takes them again here";
 
-/// What the USB wedge arms say before the write they stop the machine inside,
-/// in `kernel/src/usb_gate.rs`; the phase and the traffic behind it follow on
-/// the same line.
-///
-/// The witness that the boot the deadline then ended was one holding a device
-/// inside a Bulk-Only command, which is the whole of what those controls stage —
-/// a wedge taken anywhere else is `WEDGE_STAGED`'s boot with a longer log.
-pub const USB_WEDGE_STAGED: &str = "usb-wedge: stopping every CPU at the";
-
-/// What the same arms say if every write ran to completion, which means no CPU
-/// was stopped inside one.
-///
-/// **A control that stages nothing passes for the wrong reason**: without this
-/// line the boot would still wedge — at the shutdown, with no device inside
-/// anything — and read back exactly like the arm that proves the point.
-pub const USB_WEDGE_MISSED: &str = "usb-wedge: the write completed";
-
 /// What the `usb-reset-under-load` arm says once it is streaming, and the three
 /// ways it says it is not, in `kernel/src/usb_gate.rs`.
 ///
@@ -93,11 +76,6 @@ pub const USB_LOAD_SWEPT: &str = "usb-load: the sweep reached the end of the dis
 /// single cpu that stopped taking them and where it was standing when it did —
 /// whatever the rest of the machine was doing.
 pub const LOCKED_UP: &str = "a cpu locked up with interrupts off";
-
-/// What the `hard-lockup-probe` actuator says before its cpu stops answering,
-/// in `kernel/src/hardlockup/probe.rs` — the witness in the sealed record's tail
-/// that this machine was ended by the control that was staged on it.
-pub const LOCKUP_STAGED: &str = "hard-lockup: staged, and only the lockup detector ends this cpu";
 
 /// What the kernel seals under its own `DONE` record, in
 /// `kernel/src/log/mod.rs`'s `seal_tail`: the head of the boot's newest
@@ -228,12 +206,6 @@ pub fn panel_census(log: &str) -> Option<Panel> {
 /// stick as its lines under its name, and this is the kernel's record of how it
 /// ended, which no program writes ([`is_program_line`]).
 pub const EXIT: &str = "exit: ";
-
-/// The kernel's record for a process that started, in `kernel/src/process.rs`.
-///
-/// Read for where it must *not* be: after the boot's own last word, where it
-/// says a process still on a run queue started another one under a shutdown.
-pub const SPAWN: &str = "spawn: ";
 
 /// One rendered record's message: what follows the bracket every kernel
 /// record opens with. `None` for a line that is not a kernel record's first.
@@ -530,65 +502,9 @@ pub fn verdict(log: &str) -> Result<u64, Unfit> {
     Ok(boot_ms)
 }
 
-/// **`Rebooting.` is the last record, and nothing this boot still holds may
-/// write one after it.**
-///
-/// The runner's deadline kills the job it is watching, which releases the `wait`
-/// its own job loop is inside, and that loop can spawn the next job into the
-/// window between the boot's last word and the reset.
-///
-/// A boot with no such word — a panic — is not asked: it correctly writes none.
-/// The window ends at the next loader pass, because everything that pass prints
-/// is after the reset by construction.
-///
-/// **A spawn record and not every record**, because those are the two different
-/// claims. `quiesce` writes after its own last word by construction — an idle
-/// CPU's `sched:` report can land there — and nothing is left running to take
-/// it anywhere but the console. A *spawn* is a process that was still on a run
-/// queue after the stop said it had stopped every one.
-///
-/// **The boot's own word, not the next pass's copy of it**: that pass prints
-/// the boot's newest records under [`LOG_TAIL`], newest first, so the
-/// copy of the last word heads records that were written before it.
-pub fn nothing_after_the_last_word(text: &str) -> Result<(), String> {
-    let lines: Vec<&str> = text.lines().collect();
-    let Some(at) = lines
-        .iter()
-        .rposition(|line| line.contains(REBOOTING) && !line.contains(LOG_TAIL))
-    else {
-        return Ok(());
-    };
-    let mut window =
-        lines[at + 1..].iter().take_while(|line| !line.contains(LOADER_FIRST_LINE));
-    match window.find(|line| line.contains(SPAWN)) {
-        None => Ok(()),
-        Some(line) => Err(format!(
-            "a process started after {REBOOTING:?}, which is the boot's own last word and what a \
-             metal boot is judged on: {line:?}"
-        )),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A spawn after the boot's own last word is refused; the next pass's
-    /// newest-first copy of that word, which heads records written before it,
-    /// opens no window, and the next pass is after the reset.
-    #[test]
-    fn a_spawn_after_the_boots_own_last_word_is_refused() {
-        let word = format!("[kernel 23.340 cpu1] {REBOOTING}\n");
-        let spawn = format!("[kernel 23.341 cpu0] {SPAWN}late pid=9\n");
-        let loader = format!("{LOADER_FIRST_LINE}\n");
-        let tail = format!(
-            "| {LOG_TAIL}[kernel 23.340 cpu1] {REBOOTING}\n| {LOG_TAIL}[kernel 1.0 cpu0] {SPAWN}init pid=1\n"
-        );
-        assert_eq!(nothing_after_the_last_word(&format!("{word}{loader}{tail}")), Ok(()));
-        assert!(nothing_after_the_last_word(&format!("{word}{spawn}{loader}{tail}")).is_err());
-        assert_eq!(nothing_after_the_last_word(&format!("{word}{loader}{spawn}")), Ok(()));
-        assert_eq!(nothing_after_the_last_word(&spawn), Ok(()));
-    }
 
     /// The half-told boot: the kernel got all the way up and the log stops
     /// there, so the machine either never asked for the reset or `logd` never
@@ -710,17 +626,11 @@ mod tests {
             ("kernel/src/deadline.rs", format!("\"{DEADLINE_ARMED}{{ms}} ms")),
             ("kernel/src/deadline.rs", format!("WEDGE_STAGED: &str = \"{WEDGE_STAGED}\"")),
             ("kernel/src/deadline.rs", format!("\"{WEDGE_ARRIVED_DEAF}\"")),
-            ("kernel/src/usb_gate.rs", format!("USB_WEDGE_STAGED: &str = \"{USB_WEDGE_STAGED}\"")),
-            ("kernel/src/usb_gate.rs", format!("USB_WEDGE_MISSED: &str = \"{USB_WEDGE_MISSED}\"")),
             ("kernel/src/usb_gate.rs", format!("LOAD_RUNNING: &str = \"{USB_LOAD_RUNNING}\"")),
             ("kernel/src/usb_gate.rs", format!("LOAD_REFUSED: &str = \"{USB_LOAD_REFUSED}\"")),
             ("kernel/src/usb_gate.rs", format!("LOAD_STOPPED: &str = \"{USB_LOAD_STOPPED}\"")),
             ("kernel/src/usb_gate.rs", format!("LOAD_SWEPT: &str = \"{USB_LOAD_SWEPT}\"")),
             ("kernel/src/hardlockup/mod.rs", format!("LOCKED_UP: &str = \"{LOCKED_UP}\"")),
-            (
-                "kernel/src/hardlockup/probe.rs",
-                format!("PROBE_STAGED: &str = \"{LOCKUP_STAGED}\""),
-            ),
             (
                 "kernel/src/drivers/panic_console/mod.rs",
                 format!("CENSUS: &str = \"{PANEL_CENSUS}\""),

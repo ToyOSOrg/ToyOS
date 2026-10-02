@@ -292,8 +292,7 @@ mod tests {
         assert!(!Portsc::from_raw(1 << 16).any_change());
     }
 
-    /// The finding `xhci-portsc-rw1c` exists for, as a host test: a write built
-    /// from a read word must not carry PED back.
+    /// A write built from a read word must not carry PED back.
     #[test]
     fn a_write_never_carries_ped() {
         let enabled = Portsc::from_raw(CCS | PED | PRC | PP | (4 << 10));

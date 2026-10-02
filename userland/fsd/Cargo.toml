@@ -22,3 +22,6 @@ toyos-gpt = { path = "../../toyos-gpt" }
 toyos-fat32 = { path = "../../toyos-fat32" }
 bcachefs = { path = "../../bcachefs" }
 blockd = { path = "../blockd" }
+
+[package.metadata.toyos.host]
+exempt.owns = "ToyOS's storage roles, served from the partitions ToyOS claims for it"
