@@ -645,6 +645,9 @@ pub fn spawn(
     // One table, two holders: cloned so a crash report on this thread reads names without the process table.
     let syms = Arc::new(syms);
 
+    #[cfg(feature = "test-actuators")]
+    crate::process::debug_kill_marked_place(parent);
+
     let mut guard = PROCESS_TABLE.lock();
     let ((tid, dst), retire) = admission.land(guard.as_mut().unwrap(), |table, node| {
         table.insert(ProcessEntry::new(

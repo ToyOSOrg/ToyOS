@@ -122,6 +122,9 @@ const ACTUATOR_TESTS: &[&str] = &[
     // memory, which every other binary in a shared boot moves under it.
     "handle_lifetime",
     "shm_release_reclaims",
+    // Action 22: the kernel kills a spawn's place between the spawn's commit
+    // and its landing, a window no caller can order a kill inside.
+    "spawn_lands_claimed",
 ];
 
 /// What [`ACTUATOR_TESTS`] boots: the one kernel that carries `SYS_DEBUG`, with

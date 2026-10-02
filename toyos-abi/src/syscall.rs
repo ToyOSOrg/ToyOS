@@ -882,6 +882,11 @@ pub mod debug_action {
     /// Emit one patterned kernel log record, `logstorm t=0 i=<arg> …`, whose
     /// text the reader regenerates from its two numbers.
     pub const LOG_PATTERNED: u64 = 21;
+    /// Mark the caller's next spawn that reaches its commit: the kernel kills
+    /// the process it is placed under after the commit and before the child
+    /// lands. That window is the loader's own, so no caller can order a kill
+    /// inside it; the kill and the landing that follow are the shipped paths.
+    pub const KILL_PLACE_AS_SPAWN_LANDS: u64 = 22;
 }
 
 /// Every kind of kernel object, in the order the kernel's own `kobject!`

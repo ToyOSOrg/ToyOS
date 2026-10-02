@@ -631,6 +631,10 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 crate::log::storm::emit_patterned(0, a2);
                 0
             }
+            DA::KILL_PLACE_AS_SPAWN_LANDS => {
+                process::debug_mark_spawn();
+                0
+            }
             _ => SyscallError::InvalidArgument.to_u64(),
         },
         SYS_SCHED_INFO => match ctx.copy_out(UserAddr::new(a1), &sys_sched_info()) {

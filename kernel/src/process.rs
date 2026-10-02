@@ -1715,12 +1715,36 @@ fn with_current_symbols(f: impl FnOnce(&crate::symbols::SymbolTable) -> bool) ->
 /// The handle is the whole authorization, not the parent relationship: a `Process` handle carrying `Rights::MANAGE` says who may, and it can be narrowed away or handed on. `Ok` for an already-gone process: the caller asked for it to be dead and it is.
 /// Returns once every retire is posted, never waiting on a victim: one may be killing this caller. The object's exit is published once every end below it is.
 pub fn kill_process(object: &crate::object::process::ProcessObject) -> u64 {
+    kill(object.pid());
+    0
+}
+
+fn kill(pid: Pid) {
     let mut owed = Vec::new();
-    for sched in claim(object.pid(), KILLED_EXIT_CODE, None, &mut owed) {
+    for sched in claim(pid, KILLED_EXIT_CODE, None, &mut owed) {
         scheduler::post_retire(&sched);
     }
     walk(owed);
-    0
+}
+
+/// The process whose next spawn `debug_action::KILL_PLACE_AS_SPAWN_LANDS` marked; `Pid::MAX`, which is never issued, for none.
+#[cfg(feature = "test-actuators")]
+static MARKED_SPAWNER: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(Pid::MAX.0);
+
+/// Mark the calling process's next spawn that reaches its commit.
+#[cfg(feature = "test-actuators")]
+pub fn debug_mark_spawn() {
+    MARKED_SPAWNER.store(current_process().0, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Kill the place of a spawn its caller marked, and take the mark. The loader calls it between the spawn's commit and its landing.
+#[cfg(feature = "test-actuators")]
+pub fn debug_kill_marked_place(parent: Parent) {
+    use core::sync::atomic::Ordering::Relaxed;
+    let Parent::Under(place) = parent else { return };
+    if MARKED_SPAWNER.compare_exchange(current_process().0, Pid::MAX.0, Relaxed, Relaxed).is_ok() {
+        kill(place);
+    }
 }
 
 /// The shell convention for "died on SIGKILL"; kept because every test that reads one already spells it.
