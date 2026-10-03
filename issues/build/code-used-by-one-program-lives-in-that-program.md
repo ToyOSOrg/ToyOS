@@ -45,10 +45,6 @@ and #631, of which #631 has landed, before the latency work
    the host workspace, not a list. An `unsafe {}` planted in a module that was
    `forbid(unsafe_code)` does not compile. `cargo tree -e normal -p
    toyos-build` names no `kernel`.
-3. **libc's host test moves to the tests.** `toyos-libc-copies` moves to
-   `tests/libc-arch/`.
-   Check: `--ci host` runs there every test the package lists today, and
-   `--clippy` lints them.
 4. **A crate one package uses goes under it, a crate of its own.** A crate of
    this tree with exactly one consumer moves under it. Its consumers are the
    packages that name it as a dependency of any kind, under any `cfg`, as

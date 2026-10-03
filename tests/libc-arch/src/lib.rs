@@ -13,40 +13,40 @@
 extern crate alloc;
 
 #[cfg(test)]
-#[path = "../../userland/libc/src/arch/mod.rs"]
+#[path = "../../../userland/libc/src/arch/mod.rs"]
 mod arch;
 #[cfg(test)]
-#[path = "../../userland/libc/src/elfsym.rs"]
+#[path = "../../../userland/libc/src/elfsym.rs"]
 mod elfsym;
 #[cfg(test)]
-#[path = "../../userland/libc/src/fdreq.rs"]
+#[path = "../../../userland/libc/src/fdreq.rs"]
 mod fdreq;
 #[cfg(test)]
-#[path = "../../userland/libc/src/fparts.rs"]
+#[path = "../../../userland/libc/src/fparts.rs"]
 mod fparts;
 #[cfg(test)]
-#[path = "../../userland/libc/src/linkreq.rs"]
+#[path = "../../../userland/libc/src/linkreq.rs"]
 mod linkreq;
 #[cfg(test)]
-#[path = "../../userland/libc/src/listing.rs"]
+#[path = "../../../userland/libc/src/listing.rs"]
 mod listing;
 #[cfg(test)]
-#[path = "../../userland/libc/src/memreq.rs"]
+#[path = "../../../userland/libc/src/memreq.rs"]
 mod memreq;
 #[cfg(test)]
-#[path = "../../userland/libc/src/pollreq.rs"]
+#[path = "../../../userland/libc/src/pollreq.rs"]
 mod pollreq;
 #[cfg(test)]
-#[path = "../../userland/libc/src/sigmask.rs"]
+#[path = "../../../userland/libc/src/sigmask.rs"]
 mod sigmask;
 #[cfg(test)]
-#[path = "../../userland/libc/src/strtonum.rs"]
+#[path = "../../../userland/libc/src/strtonum.rs"]
 mod strtonum;
 #[cfg(test)]
-#[path = "../../userland/libc/src/text.rs"]
+#[path = "../../../userland/libc/src/text.rs"]
 mod text;
 #[cfg(test)]
-#[path = "../../userland/libc/src/utf8.rs"]
+#[path = "../../../userland/libc/src/utf8.rs"]
 mod utf8;
 
 #[cfg(test)]

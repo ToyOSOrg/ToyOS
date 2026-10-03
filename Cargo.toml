@@ -17,6 +17,7 @@
 members = [
     "bcachefs",
     "kernel-loom",
+    "tests/libc-arch",
     "toyos-abi",
     "toyos-acpi",
     "toyos-blackbox",
@@ -39,7 +40,6 @@ members = [
     "toyos-inspect",
     "toyos-keymap",
     "toyos-ld",
-    "toyos-libc-copies",
     "toyos-logstream",
     "toyos-manifest",
     "toyos-mdns",
@@ -97,7 +97,8 @@ exclude = [
     # Guest programs `src/build.rs` builds for `x86_64-unknown-toyos`, each from
     # its own directory. The harness's own integration test lives here too
     # (`tests/toyos.rs`), and that one is a target of the root package rather
-    # than a package of its own.
+    # than a package of its own. `tests/libc-arch` is a member all the same: a
+    # directory `members` names outranks an exclusion.
     "tests",
 ]
 

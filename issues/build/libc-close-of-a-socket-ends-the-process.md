@@ -13,7 +13,7 @@ handle. `close` (`userland/libc/src/posix_io.rs`) passes every descriptor to
 ending the caller (`kernel/src/syscall/handles.rs`, `sys_close`, through
 `HandleError::refuse`). `close_socket`, which closes the socket's pipes and
 tells netd, is exported under `no_mangle` and called by nothing; the header
-gate excuses it by this file (`toyos-libc-copies/src/prototypes.rs`).
+gate excuses it by this file (`tests/libc-arch/src/prototypes.rs`).
 
 **Exit**: `close` of a socket's descriptor releases the socket and its pipes
 and answers 0, `close_socket` is no export, and a guest C case closes a
