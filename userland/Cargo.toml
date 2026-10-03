@@ -13,7 +13,6 @@ members = [
     "fsd",
     "host",
     "init",
-    "input-test",
     "inspect",
     "kernelprobe",
     "logd",

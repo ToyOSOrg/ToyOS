@@ -8,15 +8,6 @@
 //! judge being GNU `readelf`/`nm` (`/opt/homebrew/opt/binutils/bin`, a distinct
 //! implementation of the ELF spec from `toyos-elf`) rather than anything this
 //! tree wrote.
-//!
-//! Refresh it with:
-//! ```text
-//! cargo run -- --build-only
-//! cp userland/target/x86_64-unknown-toyos/toyos/input-test \
-//!    toyos-symbols/tests/fixtures/input-test.bin
-//! ```
-//! and expect every number below to move — `readelf -S`/`readelf --syms`/`nm`
-//! against the fresh binary is what re-derives them.
 
 use toyos_elf::sym::SymTab;
 

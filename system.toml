@@ -36,7 +36,6 @@ receives = ["compositor", "soundd", "filepicker"]
 # its own `/state/<name>` and makes that directory first. Every other row runs
 # with the session user's home.
 [programs]
-input-test = {}
 proctest = {}
 # The installer. It holds nothing: it writes under `/apps` because `/apps` is
 # writable to it, and a row that gave it more would make that untrue.
