@@ -29,7 +29,7 @@ const ADOPTED: &[&str] = &[
 /// the root itself — `.cargo/config.toml` is found from the working directory,
 /// so the kernel and bootloader run from their own; a `$ADOPTED` token splices
 /// [`ADOPTED`] there, a `$CONTROLS` token [`control_features`], and a
-/// `$KERNEL_CONTROLS` token those of them the kernel package declares.
+/// `$KERNEL_CONTROLS` token those of them whose package is `kernel`.
 struct Shape {
     dir: &'static str,
     before: &'static [&'static str],
@@ -69,7 +69,7 @@ fn control_features() -> Vec<String> {
 /// test arm excludes `no-preempt-guard`, which `$CONTROLS` turns on beside it.
 /// The kernel's library, no member of the host workspace, is linted on the host
 /// from its own manifest: its tests as `--ci host` runs them, and again with
-/// every control it declares.
+/// `$KERNEL_CONTROLS`.
 const SHAPES: &[Shape] = &[
     Shape {
         dir: "",
