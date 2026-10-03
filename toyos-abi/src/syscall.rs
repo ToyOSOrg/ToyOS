@@ -914,7 +914,8 @@ pub fn process_kill(proc: RawHandle) -> Result<(), SyscallError> {
 /// indexes by shift and the kernel does no length arithmetic. A buffer that
 /// cannot hold one record, or that cannot hold what the machine's shard count
 /// requires, is `InvalidArgument` — untrusted input that cannot be satisfied is
-/// refused, never truncated to fit.
+/// refused, never truncated to fit. So is a `cursor` ahead of a shard
+/// ([`crate::log::LogCursor::next`]).
 pub fn log_read(
     syscap: RawHandle,
     cursor: &mut crate::log::LogCursor,

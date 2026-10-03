@@ -44,7 +44,7 @@ pub fn transport_break_verdict() -> Result<(), String> {
         [kernel 1.279 cpu3] usb-storage: disk 0 left port 1 (its port read empty) after this \
         driver reset it; it is held 1894 ms for the same device to come back\n\
         [kernel 2.211 cpu0] usb-storage: disk 0 came back on port 13 slot 6 as the same device \
-        (USB 0781:5581, serial number \"4C530001310614121352\", 7507812 blocks of 512 B), \
+        (USB 0781:5581, serial number \"FEDCBA98765432FEDCBA\", 7507812 blocks of 512 B), \
         msc_block +0x30000; its volume carries on\n\
         [kernel 2.259 cpu3] usb-storage: disk 0 is back, and the operation it was asked went out \
         again on it: it completed\n";

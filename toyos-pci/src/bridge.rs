@@ -1,5 +1,5 @@
 //! A PCI-to-PCI bridge's forwarded memory windows (PCI-to-PCI Bridge
-//! Architecture Specification §3.2.5.6-3.2.5.8).
+//! Architecture Specification §3.2.5.6 to §3.2.5.8).
 //!
 //! **What a bridge forwards, nothing above it may hand out.** An address inside
 //! a bridge's window is routed to that bridge's secondary bus and answered by
