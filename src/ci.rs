@@ -545,8 +545,6 @@ fn host(root: &Path) -> Vec<Step> {
             Err(failed.join("; "))
         }
     }));
-    // `log_zeroed_init` and `log_body_words` are gated `cfg(not(feature =
-    // "loom"))`, so the default invocation runs nothing from either.
     steps.push(step("kernel-loom without loom", || {
         cargo(root, &[
             "test",
@@ -557,6 +555,8 @@ fn host(root: &Path) -> Vec<Step> {
             "log_zeroed_init",
             "--test",
             "log_body_words",
+            "--test",
+            "log_cursor",
         ])
     }));
     for control in CONTROLS {
