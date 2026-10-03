@@ -12,13 +12,13 @@ request fails. Run 36998451606, `main` at `7c4a648b3`: the step logged
 `Requesting token from: https://crates.io/api/v1/trusted_publishing/tokens`
 and, 89 ms later, `##[error]fetch failed`; `cargo run -- --ci publish` was
 skipped, and the run was over 12 s after it was created. Nothing ran it
-again. The next landing's run, 37000495781 at `c1c504835`, was green, and it
-is the one red among the forty `publish` runs on `main` from 36772021165 to
-37110586853.
+again. The next landing's run, 37000495781 at `c1c504835`, was green, and
+36998451606 is the one red among the forty `publish` runs on `main` from
+36772021165 to 37110586853.
 
-A tip whose `publish` is red is what
-`issues/build/a-release-that-decides-before-its-tips-crates-are-up-reds-the-nightly.md`
-reads as crates that are not up.
+Until the next landing, what that tip changed in the SDK crates is not on
+crates.io, and the nightly's `release` refuses such a tip
+(`issues/build/a-release-that-decides-before-its-tips-crates-are-up-reds-the-nightly.md`).
 
 Owner: the orchestrator.
 
