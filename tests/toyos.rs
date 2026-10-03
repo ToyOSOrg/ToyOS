@@ -80,6 +80,10 @@ const RUST_SKIP: &[&str] = &[
     // its 256 threads' stacks would crowd every member after it in one boot.
     // The `mask_windows` metal row runs it.
     "ring_park_herd",
+    // Its product is the windows across its burst, and its 256 threads crowd
+    // every member after it as the herd's do. The `heap_growth_windows` metal
+    // row runs it.
+    "heap_growth",
     // It asserts nothing: it is half a second of an idle machine, which the
     // same row reads the windows across.
     "idle_span",
@@ -259,7 +263,16 @@ const METAL: &[(&str, metal::Metal)] = &[
         // The windows on the machine that owes them: every CPU reported beside
         // its census, and a held window read back.
         "mask_windows",
-        metal::Metal { arms: WINDOWSCASE, judge: |b| windows_on_metal(b[0]) },
+        metal::Metal { arms: WINDOWSCASE, judge: |b| windows_on_metal(b[0], WINDOWS_LOAD, "herd") },
+    ),
+    (
+        // The same reading across a burst that grows the kernel heap by whole
+        // frames, each growth inside the thread spawn that needed it.
+        "heap_growth_windows",
+        metal::Metal {
+            arms: HEAPGROWCASE,
+            judge: |b| windows_on_metal(b[0], HEAP_GROWTH_LOAD, "burst"),
+        },
     ),
     (
         "mkdir_cap",
@@ -732,9 +745,25 @@ const WINDOWSCASE: &[metal::Arm] = &[metal::Arm {
 /// The load `mask_windows` reads the windows under.
 const WINDOWS_LOAD: &str = "test_rs_ring_park_herd";
 
-/// The head of the kernel's record of [`WINDOWS_LOAD`]'s exit.
-fn windows_load_exited() -> String {
-    format!("{}{} pid=", toyos_build::bootlog::EXIT, toyos_build::bootlog::recorded_name(WINDOWS_LOAD))
+/// [`WINDOWSCASE`] with [`HEAP_GROWTH_LOAD`] for its load, on a boot of its
+/// own: the herd's teardown would be in the burst's report, and the heap the
+/// herd grew would leave the burst nothing to grow.
+const HEAPGROWCASE: &[metal::Arm] = &[metal::Arm {
+    features: toyos_build::build::MASK_WINDOWS_KERNEL,
+    ..metal::once(
+        "heapgrowcase",
+        "tests/testcases",
+        &[],
+        &["test_rs_idle_span", "pwd", HEAP_GROWTH_LOAD],
+    )
+}];
+
+/// The load `heap_growth_windows` reads the windows under.
+const HEAP_GROWTH_LOAD: &str = "test_rs_heap_growth";
+
+/// The head of the kernel's record of a process of `load`'s exit.
+fn load_exited(load: &str) -> String {
+    format!("{}{} pid=", toyos_build::bootlog::EXIT, toyos_build::bootlog::recorded_name(load))
 }
 
 /// A `logkeeper` that leaves soundserver's ring unread until the job says the tone played.
@@ -2536,17 +2565,18 @@ fn irq_census(capture: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The T14's windows: [`mask_windows`]' verdict with every CPU reporting, and
+/// The T14's windows under `load`, its reading printed as `what`'s:
+/// [`mask_windows`]' verdict with every CPU reporting, and
 /// `common::irqcensus::windows_under`'s. Its durations are printed and none is
 /// recorded: one boot's longest window is no baseline for the next.
-fn windows_on_metal(boot: &metal::Readback) -> Result<(), String> {
-    boot.job_passed(WINDOWS_LOAD)?;
+fn windows_on_metal(boot: &metal::Readback, load: &str, what: &str) -> Result<(), String> {
+    boot.job_passed(load)?;
     let kernel = boot.kernel();
     let cpus = boot.cpus()?;
     mask_windows(kernel.text(), cpus)?;
-    let read = common::irqcensus::windows_under(kernel.text(), cpus, &windows_load_exited())?;
+    let read = common::irqcensus::windows_under(kernel.text(), cpus, &load_exited(load))?;
     eprintln!(
-        "  [windows] held irqs_off_ns={} preempt_off_ns={}; herd irqs_off_ns={} preempt_off_ns={}",
+        "  [windows] held irqs_off_ns={} preempt_off_ns={}; {what} irqs_off_ns={} preempt_off_ns={}",
         read.held.0, read.held.1, read.load.0, read.load.1
     );
     Ok(())
