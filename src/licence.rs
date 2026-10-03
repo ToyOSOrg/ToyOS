@@ -1174,8 +1174,8 @@ fn metadata(
 /// whose `rust/` was never initialised — a CI runner's — fetches that commit
 /// alone.
 fn std_library(root: &Path) -> Result<PathBuf, String> {
-    crate::sysroot::make_fork_checkout(root);
-    let fork = crate::sysroot::fork_checkout(root);
+    let mut lock = crate::buildlock::shared(root, "the licences of what ships");
+    let fork = crate::sysroot::fork_checkout(root, &mut lock);
     if !fork.join("library/Cargo.toml").exists() {
         crate::ensure_shallow_fork(root)?;
     }

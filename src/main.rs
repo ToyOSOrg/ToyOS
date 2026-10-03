@@ -205,8 +205,6 @@ fn main() {
     if matches!(toyos_build::toolchain::owner(&root), toyos_build::toolchain::Owner::Us) {
         toyos_build::ensure_submodules(&root);
     }
-    // There it is a fork checkout, and this is the process's one move of it.
-    toyos_build::sysroot::make_fork_checkout(&root);
 
     // Toolchain included: `build` holds the build lock across both, so no other
     // agent's clean or bootstrap can land between the two.

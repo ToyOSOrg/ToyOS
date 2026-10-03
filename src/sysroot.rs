@@ -20,10 +20,8 @@
 //! moved ([`Identity`]). Each build refuses dep-info that says otherwise.
 //!
 //! **Each worktree builds std in its own fork checkout.** The primary builds in its `rust/`;
-//! a linked worktree in its own `rust/`, made where its process starts as a git
-//! worktree of the primary's fork repository at the commit this tree pins
-//! ([`make_fork_checkout`]), and read by every build after that
-//! ([`fork_checkout`]).
+//! a linked worktree in its own `rust/`, made on first need as a git worktree of
+//! the primary's fork repository at the commit this tree pins ([`fork_checkout`]).
 //! `library/std` names `toyos-abi` and `toyos` as `../../../`, so each
 //! checkout's std compiles against its own worktree's ABI with nothing
 //! rewritten. The build is bootstrap's stage-0 local rebuild: the compiler the
@@ -53,7 +51,7 @@ use std::process::Command;
 use sha2::{Digest, Sha256};
 
 use crate::arch::Arch;
-use crate::buildlock::{self, Guard, Held, Keyed};
+use crate::buildlock::{self, Guard, Held, Keyed, Scope};
 use crate::compiler::{self, Compiler};
 use crate::identity;
 use crate::keystore::{self, Key};
@@ -496,112 +494,101 @@ fn pinned_fork(root: &Path) -> String {
     }
 }
 
-/// The commit the fork checkout at `fork` holds, where a tree pinning `pinned`
-/// does not build its std there: it is neither that commit nor ahead of it.
-fn off_pin(fork: &Path, pinned: &str) -> Option<String> {
-    let head = git_out(fork, &["rev-parse", "HEAD"]).trim().to_string();
-    let ahead = Command::new("git")
-        .args(["merge-base", "--is-ancestor", pinned, &head])
-        .current_dir(fork)
-        .status()
-        .is_ok_and(|s| s.success());
-    (head != pinned && !ahead).then_some(head)
-}
-
-/// The fork checkout `root`'s std is built in: the primary's own `rust/`, or a
-/// linked worktree's as [`make_fork_checkout`] left it. Every worker of a
-/// process builds at once, so a build moves no checkout: one that is not at the
-/// commit this tree pins or ahead of it is refused by name.
-pub fn fork_checkout(root: &Path) -> PathBuf {
+/// The fork checkout `root`'s std is built in.
+///
+/// The primary's is its own `rust/`. A linked worktree's `rust/` starts as the
+/// empty stub `git worktree add` leaves; it is made here, the first time it is
+/// needed, as a git worktree of the primary's fork repository at the commit
+/// this tree pins, sharing its objects — and `library/backtrace` the same way
+/// from the primary's, or by git's own clone where the primary does not hold
+/// that commit.
+///
+/// A checkout that exists is used as it stands, which is where an agent edits
+/// the fork; one whose `HEAD` is neither the pinned commit nor ahead of it is
+/// moved there itself, fetching the commit from the primary's repository first
+/// if the checkout does not already hold it, unless the checkout has local
+/// changes, in which case it is refused by name rather than moved out from
+/// under whoever made them.
+///
+/// Every build in a worktree asks this at once, so the making and the move are
+/// each decided and done under the worktree's lock held exclusively
+/// ([`Held::act_if`]): one build does it, and none reads a checkout another is
+/// still writing.
+pub fn fork_checkout(root: &Path, lock: &mut Held) -> PathBuf {
     let fork = root.join("rust");
-    match toolchain::owner(root) {
-        Owner::Us => {}
+    let primary = match toolchain::owner(root) {
+        Owner::Us => return fork,
         Owner::Installed => panic!("an installed toolchain has no fork checkout to build std in"),
-        Owner::Elsewhere(_) => {
-            let pinned = pinned_fork(root);
+        Owner::Elsewhere(primary) => primary,
+    };
+    let pinned = pinned_fork(root);
+    lock.act_if(
+        Scope::Worktree,
+        "make the fork checkout",
+        || (!fork.join(".git").exists()).then_some(()),
+        |()| {
+            let stub = fs::read_dir(&fork).map_or(0, |d| d.count());
             assert!(
-                fork.join(".git").exists() && off_pin(&fork, &pinned).is_none(),
-                "{} is not a fork checkout at {pinned}, which this tree pins, or ahead of it, and \
-                 a build moves none: `sysroot::make_fork_checkout` does, where a process starts. \
-                 One that changed under this run is moved by the next.",
+                stub == 0,
+                "{} is neither a fork checkout nor the empty stub a worktree starts with",
+                fork.display()
+            );
+            let _ = fs::remove_dir(&fork);
+            eprintln!("Making {} a fork checkout at {pinned} (a git worktree of the primary's)", fork.display());
+            git_run(&primary.join("rust"), &["worktree", "add", "--detach", path_str(&fork), &pinned]);
+            let backtrace = git_out(&fork, &["ls-tree", "HEAD", "library/backtrace"]);
+            let commit = backtrace.split_whitespace().nth(2).unwrap_or_else(|| {
+                panic!("{} pins no library/backtrace: {backtrace:?}", fork.display())
+            });
+            let theirs = primary.join("rust/library/backtrace");
+            let held = Command::new("git")
+                .args(["cat-file", "-e", &format!("{commit}^{{commit}}")])
+                .current_dir(&theirs)
+                .status()
+                .is_ok_and(|s| s.success());
+            let at = fork.join("library/backtrace");
+            if held {
+                let _ = fs::remove_dir(&at);
+                git_run(&theirs, &["worktree", "add", "--detach", path_str(&at), commit]);
+            } else {
+                git_run(&fork, &["submodule", "update", "--init", "library/backtrace"]);
+            }
+        },
+    );
+    lock.act_if(
+        Scope::Worktree,
+        "move the fork checkout to its pin",
+        || {
+            let head = git_out(&fork, &["rev-parse", "HEAD"]).trim().to_string();
+            let ahead = Command::new("git")
+                .args(["merge-base", "--is-ancestor", &pinned, &head])
+                .current_dir(&fork)
+                .status()
+                .is_ok_and(|s| s.success());
+            (head != pinned && !ahead).then_some(head)
+        },
+        |head| {
+            let dirty = git_out(&fork, &["status", "--porcelain", "--ignore-submodules=none"]);
+            assert!(
+                dirty.is_empty(),
+                "{} is at {head} with uncommitted work, and this tree pins the fork at {pinned}, which \
+                 that is not ahead of: a build here would compile a std this tree does not name, and \
+                 moving the checkout would lose that work.\n{dirty}",
                 fork.display(),
             );
-        }
-    }
-    fork
-}
-
-/// Make a linked worktree's fork checkout the one its tree pins. The primary's
-/// is its own `rust/`, and an installed toolchain has none.
-///
-/// A linked worktree's `rust/` starts as the empty stub `git worktree add`
-/// leaves; it is made here as a git worktree of the primary's fork repository
-/// at the commit this tree pins, sharing its objects — and `library/backtrace`
-/// the same way from the primary's, or by git's own clone where the primary
-/// does not hold that commit.
-///
-/// A checkout that exists is left as it stands, which is where an agent edits
-/// the fork; one whose `HEAD` is neither the pinned commit nor ahead of it is
-/// moved there, fetching the commit from the primary's repository first if the
-/// checkout does not already hold it, unless the checkout has local changes, in
-/// which case it is refused by name rather than moved out from under whoever
-/// made them.
-///
-/// **Its caller is the checkout's one mover**: a process calls it where it
-/// starts, before a second thread of it builds. Two movers of one checkout
-/// corrupt it, and nothing here keeps a second out.
-pub fn make_fork_checkout(root: &Path) {
-    let Owner::Elsewhere(primary) = toolchain::owner(root) else { return };
-    let fork = root.join("rust");
-    let pinned = pinned_fork(root);
-    if !fork.join(".git").exists() {
-        let stub = fs::read_dir(&fork).map_or(0, |d| d.count());
-        assert!(
-            stub == 0,
-            "{} is neither a fork checkout nor the empty stub a worktree starts with",
-            fork.display()
-        );
-        let _ = fs::remove_dir(&fork);
-        eprintln!("Making {} a fork checkout at {pinned} (a git worktree of the primary's)", fork.display());
-        git_run(&primary.join("rust"), &["worktree", "add", "--detach", path_str(&fork), &pinned]);
-        let backtrace = git_out(&fork, &["ls-tree", "HEAD", "library/backtrace"]);
-        let commit = backtrace.split_whitespace().nth(2).unwrap_or_else(|| {
-            panic!("{} pins no library/backtrace: {backtrace:?}", fork.display())
-        });
-        let theirs = primary.join("rust/library/backtrace");
-        let held = Command::new("git")
-            .args(["cat-file", "-e", &format!("{commit}^{{commit}}")])
-            .current_dir(&theirs)
-            .status()
-            .is_ok_and(|s| s.success());
-        let at = fork.join("library/backtrace");
-        if held {
-            let _ = fs::remove_dir(&at);
-            git_run(&theirs, &["worktree", "add", "--detach", path_str(&at), commit]);
-        } else {
-            git_run(&fork, &["submodule", "update", "--init", "library/backtrace"]);
-        }
-        return;
-    }
-    let Some(head) = off_pin(&fork, &pinned) else { return };
-    let dirty = git_out(&fork, &["status", "--porcelain", "--ignore-submodules=none"]);
-    assert!(
-        dirty.is_empty(),
-        "{} is at {head} with uncommitted work, and this tree pins the fork at {pinned}, which \
-         that is not ahead of: a build here would compile a std this tree does not name, and \
-         moving the checkout would lose that work.\n{dirty}",
-        fork.display(),
+            let held = Command::new("git")
+                .args(["cat-file", "-e", &format!("{pinned}^{{commit}}")])
+                .current_dir(&fork)
+                .status()
+                .is_ok_and(|s| s.success());
+            if !held {
+                git_run(&fork, &["fetch", path_str(&primary.join("rust")), &pinned]);
+            }
+            git_run(&fork, &["checkout", "--detach", "-q", &pinned]);
+            eprintln!("{} was at {head}, behind this tree's pin {pinned}: checked it out", fork.display());
+        },
     );
-    let held = Command::new("git")
-        .args(["cat-file", "-e", &format!("{pinned}^{{commit}}")])
-        .current_dir(&fork)
-        .status()
-        .is_ok_and(|s| s.success());
-    if !held {
-        git_run(&fork, &["fetch", path_str(&primary.join("rust")), &pinned]);
-    }
-    git_run(&fork, &["checkout", "--detach", "-q", &pinned]);
-    eprintln!("{} was at {head}, behind this tree's pin {pinned}: checked it out", fork.display());
+    fork
 }
 
 /// What a sysroot's [`SOURCES`] says: its key, the fork checkout its std was
@@ -645,7 +632,7 @@ fn held(root: &Path, key: &Key, dir: &Path, make: impl FnMut()) -> Guard {
 /// The sysroot this worktree's sources name, made if nobody has made it, and
 /// held in use for as long as the returned value lives.
 pub fn ensure(root: &Path, rust_dir: &Path, lock: &mut Held) -> Sysroot {
-    let fork = fork_checkout(root);
+    let fork = fork_checkout(root, lock);
     let compiler = compiler::resolve(root, rust_dir, &fork, lock);
     let keys = Keys::of(root, &compiler, &fork);
     let dir = sysroots_dir(rust_dir).join(&keys.sysroot);
@@ -1436,6 +1423,7 @@ mod tests {
         fs::create_dir_all(&primary).unwrap();
         git(&primary, &["init", "-q"]);
         write(&primary.join("toyos-abi/src/lib.rs"), "pub struct A;\n");
+        write(&primary.join(".gitignore"), ".build-locks/\n");
         git(&primary, &["submodule", "add", "-q", fork.to_str().unwrap(), "rust"]);
         git(&primary.join("rust"), &["checkout", "-q", &c1]);
         git(&primary, &["add", "-A"]);
@@ -1458,9 +1446,9 @@ mod tests {
         let base = TempDir::new("fork-pins");
         let (primary, linked, c1, c2) = two_pins(&base);
         let before = git(&primary.join("rust"), &["status", "--porcelain"]);
+        let mut lock = buildlock::shared(&linked, "a build");
 
-        make_fork_checkout(&linked);
-        let fork = fork_checkout(&linked);
+        let fork = fork_checkout(&linked, &mut lock);
 
         assert_eq!(fork, linked.join("rust"));
         assert_eq!(git(&fork, &["rev-parse", "HEAD"]), c2);
@@ -1478,73 +1466,48 @@ mod tests {
         // Work on the fork in the worktree's own checkout is what it builds.
         write(&fork.join("library/std/src/lib.rs"), "pub fn c() {}\n");
         git(&fork, &["commit", "-qam", "C3, the agent's own"]);
-        make_fork_checkout(&linked);
-        assert_eq!(fork_checkout(&linked), fork);
+        let c3 = git(&fork, &["rev-parse", "HEAD"]);
+        assert_eq!(fork_checkout(&linked, &mut lock), fork);
+        assert_eq!(git(&fork, &["rev-parse", "HEAD"]), c3, "a checkout ahead of its pin was moved");
 
         // A clean checkout behind what the tree pins is moved to the pin itself.
         git(&fork, &["checkout", "-q", &c1]);
-        make_fork_checkout(&linked);
+        assert_eq!(fork_checkout(&linked, &mut lock), fork);
         assert_eq!(git(&fork, &["rev-parse", "HEAD"]), c2, "a checkout behind its pin was not moved to it");
 
         // One with local changes is never moved out from under whoever made them.
         git(&fork, &["checkout", "-q", &c1]);
         write(&fork.join("library/std/src/lib.rs"), "pub fn uncommitted() {}\n");
-        let refused = std::panic::catch_unwind(|| make_fork_checkout(&linked))
-            .expect_err("a fork checkout with local changes was moved out from under them");
-        let message = refused.downcast::<String>().expect("a formatted refusal");
+        let message = refusal(|| drop(fork_checkout(&linked, &mut lock)));
         assert!(message.contains(&c1) && message.contains(&c2), "{message}");
     }
 
-    /// What each of twelve builds starting at once in `linked` read as its fork
-    /// checkout, or was refused with.
-    fn twelve_builds_read(linked: &Path) -> Vec<Result<PathBuf, String>> {
-        let start = std::sync::Barrier::new(12);
-        std::thread::scope(|builds| {
-            let reads: Vec<_> = (0..12)
-                .map(|_| {
-                    builds.spawn(|| {
-                        start.wait();
-                        std::panic::catch_unwind(|| fork_checkout(linked))
-                            .map_err(|refusal| *refusal.downcast::<String>().expect("a formatted refusal"))
-                    })
-                })
-                .collect();
-            reads.into_iter().map(|read| read.join().expect("a build's refusal is caught")).collect()
-        })
-    }
-
-    /// **A build reads its fork checkout and never moves it**: twelve at once
-    /// neither make one that is not there nor move one behind its pin — each is
-    /// refused by name and the checkout stands as it was — and all twelve read
-    /// the one [`make_fork_checkout`] made, and the one it moved.
+    /// **Twelve builds starting at once in a worktree make its fork checkout
+    /// once, and move one behind its pin once**: each holds the worktree's lock
+    /// as a process of its own does, and each returns the checkout whole and at
+    /// the pin.
     #[test]
-    fn a_build_reads_the_fork_checkout_and_never_moves_it() {
+    fn twelve_builds_at_once_make_and_move_one_fork_checkout() {
         let base = TempDir::new("fork-builds");
         let (_primary, linked, c1, c2) = two_pins(&base);
         let fork = linked.join("rust");
-        let head = || git(&fork, &["rev-parse", "HEAD"]);
-        let refused = || {
-            for read in twelve_builds_read(&linked) {
-                let said = read.expect_err("a build took a fork checkout its tree does not pin");
-                assert!(said.contains(&c2) && said.contains("`sysroot::make_fork_checkout`"), "{said}");
-            }
+        let twelve_build = || {
+            let start = std::sync::Barrier::new(12);
+            std::thread::scope(|builds| {
+                for _ in 0..12 {
+                    builds.spawn(|| {
+                        let mut lock = buildlock::shared(&linked, "a build");
+                        start.wait();
+                        assert_eq!(fork_checkout(&linked, &mut lock), fork);
+                        assert_eq!(git(&fork, &["rev-parse", "HEAD"]), c2);
+                        assert!(fork.join("library/backtrace/lib.rs").is_file(), "a build read a checkout still being made");
+                    });
+                }
+            });
         };
-        let read = || assert_eq!(twelve_builds_read(&linked), vec![Ok(fork.clone()); 12]);
-
-        refused();
-        assert!(!fork.join(".git").exists(), "a build made the fork checkout");
-
-        make_fork_checkout(&linked);
-        read();
-        assert_eq!(head(), c2);
-
+        twelve_build();
         git(&fork, &["checkout", "-q", &c1]);
-        refused();
-        assert_eq!(head(), c1, "a build moved the fork checkout");
-
-        make_fork_checkout(&linked);
-        read();
-        assert_eq!(head(), c2);
+        twelve_build();
     }
 
     /// The primary's compiler under `base`: `rustc` and `rust-lld`, and the C

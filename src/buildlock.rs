@@ -15,8 +15,8 @@
 //! - **shared** — "I am building against the state as it stands". Any number
 //!   at once.
 //! - **exclusive** — "I am replacing it": the rust bootstrap, this worktree's
-//!   std build, the `cargo clean`s. One at a time, and never while a build
-//!   holds the shared mode.
+//!   std build, the `cargo clean`s, the making or moving of its fork checkout.
+//!   One at a time, and never while a build holds the shared mode.
 //!
 //! And two [`Scope`]s: a crate target directory is shared by the builds in one
 //! worktree, while the primary's `rust/build` — the compiler every sysroot is
@@ -94,8 +94,9 @@ pub enum Scope {
     /// State every worktree shares: the primary's `rust/` build tree — the
     /// compiler every sysroot is made with — and the machine-global rustup link.
     Global,
-    /// State this worktree alone owns — its crate target directories. Two
-    /// worktrees cleaning their own have nothing to say to each other.
+    /// State this worktree alone owns — its crate target directories and its
+    /// fork checkout. Two worktrees cleaning their own have nothing to say to
+    /// each other.
     Worktree,
 }
 
