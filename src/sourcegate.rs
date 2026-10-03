@@ -791,9 +791,9 @@ mod tests {
     /// **No tracked file carries a value that identifies a machine or its
     /// network.** This repository is public, and a captured log or command
     /// reply carries such a value whoever pastes it: every tracked file is read
-    /// for the shapes, and each one found is named by file, line and kind, cut
-    /// to four characters. A stale row reds too, which is also what says the
-    /// scan read the tree.
+    /// for the shapes, and each one found is named by file, line and kind and
+    /// by no character of it, because a red gate's log is posted. A stale row
+    /// reds too, which is also what says the scan read the tree.
     ///
     /// Only text has a shape. A value spelled as bytes, a GUID, and a serial
     /// that nothing on its line calls a serial number are the reader's to see.
@@ -814,12 +814,7 @@ mod tests {
                         Some(row) => {
                             kept.insert(*row);
                         }
-                        None => complaints.push(format!(
-                            "{name}:{}: {} ({}…)",
-                            n + 1,
-                            shape,
-                            value.chars().take(4).collect::<String>()
-                        )),
+                        None => complaints.push(format!("{name}:{}: {shape}", n + 1)),
                     }
                 }
             }
@@ -846,21 +841,24 @@ mod tests {
         let public = [203, 0, 114, 7].map(|octet: u8| octet.to_string()).join(".");
         let shared = [100, 64, 0, 1].map(|octet: u8| octet.to_string()).join(".");
         let global = ["2a00", "1", "", "1"].join(":");
+        let prefix = ["2a00", "1", "2", "300", "", ""].join(":");
         let link_local = ["fe80", "", "1c2d", "3e4f", "5a6b", "7c8d"].join(":");
         for (line, shape) in [
             (format!("netd: MAC {mac}"), MAC),
             (format!("MAC:{mac}: the lease went to it"), MAC),
+            (format!("{mac}:eth0 took the lease"), MAC),
             (format!("? (10.0.2.2) at {} on en0", ["0", "11", "22", "3", "44", "55"].join(":")), MAC),
             (format!("dns [{public}]"), PUBLIC_V4),
             (format!("see §4.1 for {public}."), PUBLIC_V4),
             (format!("tailscale0 UNKNOWN {shared}/32"), SHARED_V4),
             (format!("inet6 {global}/64"), GLOBAL_V6),
             (format!("addr:{global}"), GLOBAL_V6),
+            (format!("delegated {prefix}/56"), GLOBAL_V6),
             (format!("IPv6:{link_local}"), LINK_LOCAL_V6),
             (format!("inet6 {link_local}: link"), LINK_LOCAL_V6),
             (format!("USB 0781:5581, serial number \\\"{}\\\"", ["A1B2", "C3D4"].concat()), SERIAL),
             (format!("Serial Number: {}", ["PF", "000000"].concat()), SERIAL),
-            (["Somebody", "s-MacBook-Pro.local"].concat(), HOSTNAME),
+            (["Somebody", "s-MacBook-Air.local"].concat(), HOSTNAME),
             (["somebody", "s-imac"].concat(), HOSTNAME),
         ] {
             assert_eq!(shapes(&line), [shape], "{line}");
@@ -875,7 +873,7 @@ mod tests {
             "Architecture Specification §3.2.5.6 to §3.2.5.8, Section 6.5.2.7, 612523 §9.5.9.2.23",
             "fe80::1 2001:db8::1 ff02::fb ::1 fd00::5, and `c::{name}` in std::net::Ipv6Addr",
             "usb-storage: slot {slot_id} serial number {}, and its serial number differs",
-            "Host-MacBook-Pro.local, toyos-t14.local, s-macbook",
+            "Lab-MacBook-Air.local, toyos-t14.local, s-macbook",
         ] {
             let found = shapes(line);
             assert!(found.is_empty(), "{line}: {found:?}");
