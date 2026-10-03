@@ -34,8 +34,8 @@
 use alloc::sync::Arc;
 use core::sync::atomic::Ordering;
 
-use toyos_sched::task::WaitClass;
-use toyos_sched::watch::{Fire, Ring};
+use kernel::sched::task::WaitClass;
+use kernel::sched::watch::{Fire, Ring};
 
 use crate::object::shm::SharedMemObject;
 use crate::object::{ops, HandleError, KObjectRef};

@@ -2,7 +2,7 @@
 //!
 //! `Watch::post_n` walks the waiters registered on one word, claims each one
 //! and posts a message to its home CPU — one loop, on the caller's CPU, before
-//! the syscall returns. `toyos-sched/sim`'s wakeup-storm case measures how long
+//! the syscall returns. `kernel/sim`'s wakeup-storm case measures how long
 //! the *waiters* then take to reach a CPU and can say nothing whatever about
 //! that loop: the model's clock does not advance inside a step, so raising a
 //! storm of any size is free there. The cost is a guest measurement, and this

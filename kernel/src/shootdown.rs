@@ -1,5 +1,5 @@
 //! The acknowledgement half of a TLB shootdown, with no hardware in it.
-//! Compiled a second time into `kernel-loom/` against loom's atomics, so this file must hold no `crate::` references.
+//! Compiled a second time into `kernel/loom/` against loom's atomics, so this file must hold no `crate::` references.
 //! The read must happen before the flush, or a target could publish a generation its flush has not yet completed.
 
 #[cfg(not(feature = "loom"))]
