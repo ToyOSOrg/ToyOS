@@ -232,7 +232,7 @@ mod tests {
         inquiry[24..].copy_from_slice(b"1.00");
         Identity {
             usb: UsbId { vendor: 0x0781, product: 0x5581, release: 0x0100 },
-            serial: serial("4C530123456789ABCDEF"),
+            serial: serial("FEDCBA98765432FEDCBA"),
             inquiry,
             sectors: 7_507_812 * 8,
             sector_bytes: 512,
@@ -253,7 +253,7 @@ mod tests {
             (|i| i.usb.vendor ^= 1, Differs::Vendor),
             (|i| i.usb.product ^= 1, Differs::Product),
             (|i| i.usb.release ^= 1, Differs::Release),
-            (|i| i.serial = serial("4C530123456789ABCDEE"), Differs::Serial),
+            (|i| i.serial = serial("FEDCBA98765432FEDCBB"), Differs::Serial),
             (|i| i.inquiry[27] ^= 1, Differs::Inquiry),
             (|i| i.sectors -= 1, Differs::Capacity),
             (|i| i.sector_bytes = 4096, Differs::Capacity),

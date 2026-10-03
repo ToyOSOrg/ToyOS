@@ -296,7 +296,7 @@ const HOSTNAME: &str = "a hostname carrying a personal name";
 /// administered MAC, an RFC 5737 or RFC 3849 address.
 const IDENTIFIES_NOBODY: &[(&str, &str)] = &[
     // Made up, in the kernel's own record of a disk that came back.
-    ("tests/checks/usb.rs", "4C530123456789ABCDEF"),
+    ("tests/checks/usb.rs", "FEDCBA98765432FEDCBA"),
 ];
 
 /// Every maximal run of `line`'s bytes that `of` takes, and where it starts.
