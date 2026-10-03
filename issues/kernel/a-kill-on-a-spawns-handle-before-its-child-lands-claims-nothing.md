@@ -24,6 +24,6 @@ the same window are sound.
 
 *Exit*: a kill on a handle whose process has not landed ends that process —
 the landing claims it, as it claims a child under a claimed place — or the
-handle resolves only once the child has landed; `toyos-proclife` scripts the
+handle resolves only once the child has landed; `kernel::proclife` scripts the
 kill as a step between the commit and the landing, and no schedule leaves the
 child running.

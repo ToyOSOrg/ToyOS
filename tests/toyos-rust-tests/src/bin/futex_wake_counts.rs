@@ -248,7 +248,7 @@ const ATTEMPTS: usize = 6;
 /// — and that window used to be whatever the machine felt like giving.
 ///
 /// **The window is the scheduler's own contract, not a sleep.** An ordinary
-/// wake is `Urgency::Normal`, which `toyos_sched::mailbox` defines as "a busy
+/// wake is `Urgency::Normal`, which `kernel::sched::mailbox` defines as "a busy
 /// target drains at its next safe point (≤ one quantum, matching today's
 /// contract) and needs no interrupt; a sleeping target is always kicked". One
 /// spinner per CPU is therefore the whole arrangement: no CPU is sleeping, so

@@ -4,13 +4,13 @@
 //! the head index; payload writes are non-atomic, so a reader may see a torn
 //! record for the most recent entry.
 //!
-//! [`Record`] is the `repr(C)` wire form of `toyos_sched::hw::TraceEvent`;
+//! [`Record`] is the `repr(C)` wire form of `kernel::sched::hw::TraceEvent`;
 //! [`record`] maps one onto the other and is `Machine::trace`.
 
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use toyos_sched::hw::{TraceEvent, TraceKind};
+use kernel::sched::hw::{TraceEvent, TraceKind};
 
 use crate::arch::percpu;
 

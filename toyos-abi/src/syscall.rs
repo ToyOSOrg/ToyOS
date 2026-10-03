@@ -327,7 +327,7 @@ pub struct SpawnArgs {
     /// `PermissionDenied` for a handle without `WRITE` and `InvalidArgument`
     /// for one to no process, since a place is a handle a peer sent;
     /// `Gone` for a process being torn down, and `ResourceExhausted` for a
-    /// child more than `toyos_proclife::MAX_DEPTH` below the supervisor.
+    /// child more than `kernel::proclife::MAX_DEPTH` below the supervisor.
     ///
     /// [`Rights::WRITE`]: crate::handle::Rights::WRITE
     pub place: u64,
