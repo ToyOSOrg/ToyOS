@@ -5,6 +5,7 @@ use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -16,25 +17,40 @@ use crate::buildlock;
 use crate::flags;
 use crate::hostws;
 use crate::image;
+use crate::printer;
 use crate::sysroot::{Identity, Stale, Sysroot};
 use crate::toolchain;
 
 thread_local! {
-    /// Time this worker has spent constructing memoized boot artifacts.
+    /// Time this worker has spent in a [`Building`].
     ///
     /// A suite worker is also the thread that asks for its boot image, so a
     /// cumulative thread-local clock lets the harness remove a cold build from
     /// the test that happened to ask for it first. A process-wide counter would
     /// subtract another worker's concurrent build instead.
     static ARTIFACT_BUILD_TIME: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    /// The test this worker builds for, where it said: [`building_for`].
+    static BUILDING_FOR: Cell<Option<&'static str>> = const { Cell::new(None) };
+}
+
+/// Every thread's [`ARTIFACT_BUILD_TIME`], summed, in nanoseconds.
+static BUILT_NANOS: AtomicU64 = AtomicU64::new(0);
+
+/// Name the test every build this thread makes from here on is reported as
+/// made for.
+pub fn building_for(test: &'static str) {
+    BUILDING_FOR.set(Some(test));
+}
+
+/// How long this process's threads have spent building, summed over them.
+pub fn built() -> Duration {
+    Duration::from_nanos(BUILT_NANOS.load(Ordering::Relaxed))
 }
 
 /// One reading of the artifact-build clock for the current thread.
 ///
 /// Test duration profiles are execution prices, not ownership of a shared
-/// cache miss. The raw suite wall clock still includes every build. Only
-/// per-test prices use this mark to remove construction of memoized kernel,
-/// bootloader, and root-image artifacts.
+/// cache miss. The raw suite wall clock still includes every build.
 #[derive(Clone, Copy)]
 pub struct ArtifactBuildMark(Duration, PhantomData<Rc<()>>);
 
@@ -51,22 +67,34 @@ impl ArtifactBuildMark {
     }
 }
 
-/// Charges the slow, cache-filling half of [`build_test_image`] to the build
-/// clock even if it unwinds. Image creation on a memo hit is deliberately
-/// outside this guard: every boot pays that work, so it is part of the test's
-/// repeatable execution price.
-struct ArtifactBuildTimer(Instant);
+/// One build, reported as a test is: a `BUILD` line naming it when it starts,
+/// and when it ends, unwinding or not, [`printer::outcome`]'s line with how
+/// long it took, which is charged to the build clocks. Image creation on a
+/// memo hit is deliberately outside this guard: every boot pays that work, so
+/// it is part of the test's repeatable execution price.
+struct Building {
+    what: String,
+    began: Instant,
+}
 
-impl ArtifactBuildTimer {
-    fn start() -> Self {
-        Self(Instant::now())
+impl Building {
+    fn start(what: String) -> Self {
+        let what = match BUILDING_FOR.get() {
+            Some(test) => format!("{what}, for {test}"),
+            None => what,
+        };
+        eprintln!("{}", printer::started("BUILD", &what));
+        Self { what, began: Instant::now() }
     }
 }
 
-impl Drop for ArtifactBuildTimer {
+impl Drop for Building {
     fn drop(&mut self) {
-        let elapsed = self.0.elapsed();
-        ARTIFACT_BUILD_TIME.set(ARTIFACT_BUILD_TIME.get().saturating_add(elapsed));
+        let took = self.began.elapsed();
+        ARTIFACT_BUILD_TIME.set(ARTIFACT_BUILD_TIME.get().saturating_add(took));
+        BUILT_NANOS.fetch_add(took.as_nanos() as u64, Ordering::Relaxed);
+        let word = if std::thread::panicking() { "FAIL" } else { "BUILT" };
+        eprintln!("{}", printer::outcome(word, &self.what, took));
     }
 }
 
@@ -1697,7 +1725,7 @@ pub fn build_update(root: &Path, boot: &Boot, plan: &Plan, out: &Path) {
 /// This run's key, said with whose it is and the version it signs.
 fn said_key(plan: &Plan) -> &'static crate::signing::Key {
     let key = crate::signing::key();
-    println!(
+    eprintln!(
         "Signed with {} {} at version {}",
         match key.whose() {
             crate::signing::Whose::Owner(_) => "the owner's key",
@@ -1918,9 +1946,8 @@ pub fn build_test_parts(
 
     // Nothing left to build, so nothing for the lock, the toolchain check or the
     // staleness sweep to protect.
-    if let (Some(kernel), Some(bootloader), Some(root)) =
-        (KERNEL.get(kernel_key), BOOTLOADER.get(bl_key), ROOT_IMAGE.get(root_image_key))
-    {
+    let memo = (KERNEL.get(kernel_key), BOOTLOADER.get(bl_key), ROOT_IMAGE.get(root_image_key));
+    if let (Some(kernel), Some(bootloader), Some(root)) = memo {
         return Parts { kernel, bootloader, root };
     }
 
@@ -1928,7 +1955,15 @@ pub fn build_test_parts(
     // to be first on this shard. Keep it on a separate clock until all missing
     // memo parts have been constructed. The fresh per-boot image below remains
     // outside the charge because every execution needs one.
-    let build_timer = ArtifactBuildTimer::start();
+    let missing = [
+        memo.0.is_none().then(|| format!("kernel {features}").trim_end().to_string()),
+        memo.1.is_none().then(|| "loader".to_string()),
+        memo.2.is_none().then(|| {
+            format!("ROOT of {}", hostws::rel(root, config_path.parent().unwrap_or(config_path)))
+        }),
+    ];
+    let missing: Vec<String> = missing.into_iter().flatten().collect();
+    let building = Building::start(format!("{} {}", arch.name(), missing.join(", ")));
 
     // Held to the end of the function: the staged artifacts below are read
     // back after the userland build, and a clean landing in between is the
@@ -1966,7 +2001,7 @@ pub fn build_test_parts(
         build_and_assemble(root, &config, &env, extra_files, quiet, arch)
     });
 
-    drop(build_timer);
+    drop(building);
 
     Parts { kernel: kernel_bytes, bootloader: bl_bytes, root: root_bytes }
 }
@@ -1980,6 +2015,7 @@ pub fn build_test_parts(
 /// not the harness's to resolve.
 pub fn build_host_judges(root: &Path, quiet: bool) {
     for (dir, _) in HOST_JUDGES {
+        let _building = Building::start(format!("the host's {dir}"));
         let at = root.join(dir);
         let mut cmd = Command::new("cargo");
         cmd.args(["build", "--release"]);
@@ -2036,6 +2072,7 @@ fn host_judge(root: &Path, (dir, bin): Judge) -> PathBuf {
 /// nothing in the tree can produce any more — into the ROOT image, into the test list,
 /// and over the name of whatever gets it next.
 pub fn build_toyos_bins(root: &Path, arch: Arch, crate_path: &Path, quiet: bool) -> Vec<(String, Vec<u8>)> {
+    let _building = Building::start(format!("{} binaries of {}", arch.name(), hostws::rel(root, crate_path)));
     let mut targets = vec![(crate_path.to_path_buf(), Clean::All)];
     for entry in fs::read_dir(crate_path).into_iter().flatten().flatten() {
         let sub_path = entry.path();
@@ -2151,6 +2188,7 @@ impl TestBuild {
 /// The one binary `name` of the crate at `crate_path`, built for `arch`: for an
 /// architecture the crate's other binaries do not all build for.
 pub fn build_toyos_bin(root: &Path, arch: Arch, crate_path: &Path, name: &str, quiet: bool) -> Vec<u8> {
+    let _building = Building::start(format!("{} {name} of {}", arch.name(), hostws::rel(root, crate_path)));
     let build = TestBuild::begin(root, arch, "a test binary", &[(crate_path.to_path_buf(), Clean::All)]);
     let (target, env) = (build.target, &build.env);
     cargo_build(crate_path, target, &["--bin", name], env, &[], quiet);

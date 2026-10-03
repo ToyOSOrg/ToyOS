@@ -10,7 +10,10 @@ opened: 2026-10-03
 to the commit the tree pins when the checkout is behind it, with
 `git checkout --detach`. The guest suite boots its tests on twelve threads and
 each reaches `fork_checkout` on its own, so the first run after a merge that
-moved the gitlink runs that checkout in every thread at once.
+moved the gitlink runs that checkout in every thread at once. The same unlocked
+function reds a new worktree's first run while `git worktree add` is still
+writing:
+`issues/build/a-worktrees-first-wide-run-reds-on-the-fork-checkout-it-is-still-making.md`.
 
 ## Measured
 

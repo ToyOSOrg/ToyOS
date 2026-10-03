@@ -101,16 +101,22 @@ const LOADER: &str = r"\EFI\BOOT\BOOTX64.EFI";
 const LID_KEYS: &[&str] =
     &["HandleLidSwitch", "HandleLidSwitchExternalPower", "HandleLidSwitchDocked"];
 
-/// What `toyos-metal`'s last words on its stderr begin with when it refuses:
-/// the harness reads the refusal back by it, to name it beside the exit status.
+/// What `toyos-metal`'s last statement on its stderr opens with, past the
+/// printer's stamp, when it refuses: the harness reads the refusal back by it,
+/// to name it beside the exit status.
 pub const REFUSAL_HEAD: &str = "toyos-metal: ";
 
-/// The refusal a `toyos-metal` run's stderr ends on, from its [`REFUSAL_HEAD`] line
-/// to the end, or `None` where it said none.
+/// The refusal a `toyos-metal` run's stderr ends on, from its [`REFUSAL_HEAD`]
+/// line to the end, or `None` where it said none. Only a statement's first line
+/// carries the stamp, so only that line is read past it.
 pub fn said_refusal(stderr: &str) -> Option<String> {
     let lines: Vec<&str> = stderr.lines().collect();
-    let at = lines.iter().rposition(|line| line.starts_with(REFUSAL_HEAD))?;
-    Some(lines[at..].join("\n")[REFUSAL_HEAD.len()..].trim_end().to_string())
+    let at = lines
+        .iter()
+        .rposition(|line| crate::printer::unstamped(line).starts_with(REFUSAL_HEAD))?;
+    let mut said = vec![&crate::printer::unstamped(lines[at])[REFUSAL_HEAD.len()..]];
+    said.extend(&lines[at + 1..]);
+    Some(said.join("\n").trim_end().to_string())
 }
 
 /// Every way this loop refuses, by name.
@@ -2616,14 +2622,15 @@ mod tests {
     }
 
     /// **The harness names the refusal, not only the exit status.** The
-    /// stderr is the T14's `lantalkcase` run's, cargo's own lines included, and
-    /// the refusal it ends on is read back whole, every finding with it.
+    /// stderr is the T14's `lantalkcase` run's, cargo's own lines included and
+    /// the driver's statement under the printer's stamp, and the refusal it ends
+    /// on is read back whole, every finding with it.
     #[test]
     fn a_refusal_is_read_back_off_the_drivers_stderr() {
         let stderr = "    Blocking waiting for file lock on package cache\n\
             \x20   Finished `dev` profile [optimized + debuginfo] target(s) in 0.19s\n\
             \x20    Running `target/debug/toyos-metal --image /Users/jan/Dev/jan/toyos-t14lan/target/metal/lantalkcase/image.img --readback /Users/jan/Dev/jan/toyos-t14lan/target/metal/lantalkcase --fat32-check --talk /Users/jan/Dev/jan/toyos-t14lan/target/metal/lantalkcase/ssh/id_ed25519`\n\
-            toyos-metal: the boot did not say over its own cable what a talking boot owes:\n\
+            14:02:11 toyos-metal: the boot did not say over its own cable what a talking boot owes:\n\
             \x20 217 line(s) arrived over the cable and none is this boot's `Boot: complete`\n";
         let said = Refusal::Talk(vec![
             "217 line(s) arrived over the cable and none is this boot's `Boot: complete`".into(),

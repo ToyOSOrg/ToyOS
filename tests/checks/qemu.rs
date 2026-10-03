@@ -1,5 +1,6 @@
 use super::*;
 use qemu::*;
+use toyos_build::eprintln;
 
 /// The oversubscription derivation, staged against known `(vcpus, cores)` pairs
 /// with no guest at all — the oracle for [`budget_smp`]'s widening.
