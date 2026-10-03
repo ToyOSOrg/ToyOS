@@ -8,7 +8,7 @@
 use crate::mm::Mmio;
 use crate::time::{Duration, Tripwire};
 
-use super::table::{Table, Tables};
+use super::table::{Displaced, Table, Tables};
 use super::{FSTS_REG, IQA_REG, IQT_REG};
 
 /// 4 KiB of descriptors: 256 entries of 16 bytes (`IQA.QS = 0`).
@@ -90,25 +90,22 @@ impl Queue {
         );
     }
 
-    /// One requester's context entry, then everything cached for the domain it
-    /// now names — Section 6.5.2.1's order, and the IOTLB half is not optional:
-    /// a translation cached under the old context entry outlives it.
-    pub fn invalidate_context(&mut self, regs: Mmio, domain: u16, stream: u16) {
+    /// A replaced context entry, then everything cached under the domain it
+    /// named, in Section 6.5.2.1's order: the unit looks a translation up by
+    /// requester and keeps it under that id (Section 6.2.1).
+    pub fn invalidate_context(&mut self, regs: Mmio, displaced: Displaced) {
+        let domain = (displaced.domain() as u64) << DOMAIN_SHIFT;
         self.submit(
             regs,
             &[
                 (
                     CONTEXT_CACHE
                         | DEVICE
-                        | ((domain as u64) << DOMAIN_SHIFT)
-                        | ((stream as u64) << SOURCE_SHIFT),
+                        | domain
+                        | ((displaced.requester() as u64) << SOURCE_SHIFT),
                     0,
                 ),
-                (
-                    IOTLB | DOMAIN | DRAIN_WRITES | DRAIN_READS
-                        | ((domain as u64) << DOMAIN_SHIFT),
-                    0,
-                ),
+                (IOTLB | DOMAIN | DRAIN_WRITES | DRAIN_READS | domain, 0),
             ],
         );
     }
