@@ -61,9 +61,9 @@ const _: () = assert!(
 /// promised, which hands a client the decision of when the control thread runs
 /// again: one client parking a partial header would wedge accept and
 /// volume/close/disconnect handling for every other client (the mix thread is
-/// unaffected either way). This was soundserver's own buffer until the SDK's grew a
-/// non-blocking one; the doctrine is `userland/CLAUDE.md`'s, and the type is
-/// the same one the supervisor, the compositor, netstack and every surface host read with.
+/// unaffected either way). The doctrine is `userland/CLAUDE.md`'s, and the type
+/// is the same one the supervisor, the compositor, netstack and every surface
+/// host read with.
 ///
 /// A client may declare anything up to `ipc::MAX_FRAME_LEN`; the excess past
 /// [`MAX_KEPT_PAYLOAD`] is counted down and discarded rather than waited for, so
