@@ -136,3 +136,32 @@ pub fn dump_nmi_probe_on_metal(kernel: &Serial) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// Where `test_rs_fault_gate_child`'s kernel arms aim: the direct map's first
+/// words, which no process may name.
+const KERNEL_RSP: &str = "0xffff800000000000";
+const KERNEL_RBP: &str = "0xffff800000000010";
+const KERNEL_READ: &str = "0xffff800000000008";
+
+/// **A crash report reads a faulting process's memory only at user
+/// addresses.** One of `test_rs_fault_gates`' children dies with its stack and
+/// frame pointers aimed at the kernel's direct map, another reading there; the
+/// kernel's records name each refusal, and carry neither a word from behind
+/// them nor the kernel's page walk for the read.
+pub fn crash_report_reads_no_kernel_memory(kernel: &Serial) -> Result<(), String> {
+    for refused in [
+        format!("Stack (from RSP): {KERNEL_RSP} refused: no user address"),
+        format!("rbp {KERNEL_RBP} refused: no user address"),
+        format!("Page walk for {KERNEL_READ} refused: no user address"),
+    ] {
+        kernel.must_say(&refused)?;
+    }
+    // A stack word the report read is `[address] = value`, and the walk's
+    // header is `Page walk for address [PML4=…`.
+    let walk = format!("Page walk for {KERNEL_READ} [");
+    let leaked = |l: &&str| (l.contains("[0xffff8") && l.contains("] = ")) || l.contains(&walk);
+    match kernel.text().lines().find(leaked) {
+        Some(line) => Err(format!("the kernel's records carry kernel memory a crash report read: {line:?}")),
+        None => Ok(()),
+    }
+}
