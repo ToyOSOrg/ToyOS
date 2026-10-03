@@ -2,8 +2,9 @@
 //!
 //! The exit code lives on the object, not a table entry: no zombie, no reap,
 //! no orphan adoption. A wait after the fact reads a value; a wait before it
-//! parks and is woken by the publish. A process nobody holds a handle to
-//! disappears.
+//! parks and is woken by the publish. An `OP_WATCH` reads the same fact at its
+//! look, so a handle is readable from the publish on. A process nobody holds a
+//! handle to disappears.
 
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -30,7 +31,8 @@ pub struct ProcessObject {
     /// The same fact, without the lock, for a waiter's per-wake predicate.
     finished: AtomicBool,
     /// What `SYS_PROCESS_WAIT` arms on; holding the `Arc` across the park keeps the watch from outliving its subject.
-    watch: Watch,
+    /// An `Arc` of its own, as a port's is, for the share `ops::read_watch` answers.
+    watch: Arc<Watch>,
 }
 
 impl ProcessObject {
@@ -40,7 +42,7 @@ impl ProcessObject {
             pid,
             exit: Lock::new(None),
             finished: AtomicBool::new(false),
-            watch: Watch::new(),
+            watch: Arc::new(Watch::new()),
         })
     }
 
@@ -61,7 +63,7 @@ impl ProcessObject {
         self.exit.lock().as_ref().map(|e| e.stats)
     }
 
-    pub fn watch(&self) -> &Watch {
+    pub fn watch(&self) -> &Arc<Watch> {
         &self.watch
     }
 

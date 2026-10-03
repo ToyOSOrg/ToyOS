@@ -1,5 +1,6 @@
 use super::*;
 use serial::*;
+use toyos_build::eprintln;
 
 /// What the one answer is made of, for the gate that keeps it the only one.
 ///

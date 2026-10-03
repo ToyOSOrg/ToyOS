@@ -80,7 +80,7 @@ pub fn excluded(root: &Path) -> BTreeSet<String> {
 }
 
 /// `path` relative to `root`, with forward slashes.
-fn rel(root: &Path, path: &Path) -> String {
+pub(crate) fn rel(root: &Path, path: &Path) -> String {
     path.strip_prefix(root)
         .unwrap_or(path)
         .to_string_lossy()

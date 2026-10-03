@@ -1123,18 +1123,15 @@ fn verdict(report: Report, exceptions: &[Exception]) -> Result<String, String> {
             ));
         }
     }
-    let mut out = String::new();
     for line in report.notes.iter().chain(&report.named).chain(&excepted) {
-        out.push_str(&format!("  {line}\n"));
+        eprintln!("  {line}");
     }
     if red.is_empty() {
-        println!("{out}");
         Ok(format!(
             "{} exception(s) stand, and nothing else is refused",
             excepted.len()
         ))
     } else {
-        eprintln!("{out}");
         Err(format!("{} refusal(s):\n  {}", red.len(), red.join("\n  ")))
     }
 }

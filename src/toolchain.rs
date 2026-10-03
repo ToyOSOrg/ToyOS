@@ -723,7 +723,7 @@ pub(crate) fn x_build_with(
     what: &str,
     environment: impl FnOnce(&mut Command),
 ) -> (bool, Vec<String>) {
-    use std::io::{BufRead, BufReader, Read, Write};
+    use std::io::{BufRead, BufReader, Read};
     use std::sync::{Arc, Mutex};
 
     let _locks = [
@@ -746,21 +746,16 @@ pub(crate) fn x_build_with(
     // One log in the order the two streams produced it, because the error and
     // the `--> file:line` under it are what a reader needs together.
     let log = Arc::new(Mutex::new(Vec::new()));
-    let pump = |stream: Box<dyn Read + Send>, to_stderr: bool, log: Arc<Mutex<Vec<String>>>| {
+    let pump = |stream: Box<dyn Read + Send>, log: Arc<Mutex<Vec<String>>>| {
         std::thread::spawn(move || {
             for line in BufReader::new(stream).lines().map_while(Result::ok) {
-                if to_stderr {
-                    eprintln!("{line}");
-                } else {
-                    println!("{line}");
-                    let _ = std::io::stdout().flush();
-                }
+                eprintln!("{line}");
                 log.lock().expect("the log outlives both pumps").push(line);
             }
         })
     };
-    let out = pump(Box::new(child.stdout.take().expect("piped")), false, Arc::clone(&log));
-    let err = pump(Box::new(child.stderr.take().expect("piped")), true, Arc::clone(&log));
+    let out = pump(Box::new(child.stdout.take().expect("piped")), Arc::clone(&log));
+    let err = pump(Box::new(child.stderr.take().expect("piped")), Arc::clone(&log));
     let status = child.wait().unwrap_or_else(|e| panic!("waiting for {x} {what}: {e}"));
     out.join().expect("the stdout pump");
     err.join().expect("the stderr pump");
