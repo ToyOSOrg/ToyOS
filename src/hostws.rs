@@ -186,9 +186,7 @@ fn unclaimed(members: &BTreeSet<String>, found: &BTreeSet<String>) -> Vec<String
 ///
 /// The host workspace's own, plus those of the workspaces it excludes: a
 /// workspace excluded from this one is still a workspace, and its members still
-/// have no target directory of their own. `userland/` is the one that matters —
-/// `sshserver` and `calc` are members of it, and `host-tests.yml` cached
-/// `userland/sshserver/target`, a directory that has never existed.
+/// have no target directory of their own.
 #[cfg(test)]
 fn every_workspace_member(root: &Path) -> BTreeSet<String> {
     let mut all: BTreeSet<String> = members(root).into_iter().filter(|m| m != ".").collect();
@@ -423,12 +421,7 @@ mod tests {
     /// into its workspace root's target directory, so such a path is one that
     /// cannot exist.
     ///
-    /// Every workspace in the tree, not just this one: the first thing this
-    /// found after `userland/doom/build.rs` was `host-tests.yml` caching
-    /// `userland/sshserver/target`, which has never been a directory — `sshserver` is a
-    /// member of `userland/`'s workspace and builds into `userland/target`. A
-    /// cache path that matches nothing fails silently and forever, which is why
-    /// it survived.
+    /// Every workspace in the tree, not just this one.
     ///
     /// The files scanned are the ones that *act* on a path: the workflows, this
     /// build system, and every `build.rs` in the tree. Prose is left alone —

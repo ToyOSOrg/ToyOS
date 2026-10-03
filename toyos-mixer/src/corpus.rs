@@ -329,7 +329,6 @@ pub fn transcript() -> String {
     let mut o = Out::new();
     o.line("# toyos-mixer corpus: every decision, over the space that reaches it.");
     o.line("# f32 values are their bit patterns; i16 values are decimal.");
-    o.line("# Captured from userland/soundserver/src/main.rs before the extraction.");
 
     constants(&mut o);
     decode(&mut o);
@@ -987,7 +986,7 @@ mod tests {
             );
         }
         panic!(
-            "this crate no longer computes what userland/soundserver/src/main.rs computed.\n{first}\n\
+            "this crate no longer computes what fixtures/mix-corpus.txt holds.\n{first}\n\
              This is a change to what a speaker plays. Do not regenerate the fixture."
         );
     }

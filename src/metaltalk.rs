@@ -1461,12 +1461,12 @@ mod tests {
         stream.wait_connected(Duration::from_secs(5)).expect("the peer");
         assert!(stream.wait_for("Boot: complete", Duration::from_secs(5)), "the first line was not read");
         assert!(!stream.wait_ended(Duration::ZERO), "a quiet peer was read as a closed one");
-        writeln!(conn, "[kernel 1.217 cpu0] the supervisor: started logkeeper").unwrap();
+        writeln!(conn, "[kernel 1.217 cpu0] supervisor: started logkeeper").unwrap();
         drop(conn);
         assert!(stream.wait_ended(Duration::from_secs(5)));
         assert_eq!(
             stream.lines(),
-            vec!["[kernel 1.216 cpu0] Boot: complete (1216ms)\n", "[kernel 1.217 cpu0] the supervisor: started logkeeper\n"]
+            vec!["[kernel 1.216 cpu0] Boot: complete (1216ms)\n", "[kernel 1.217 cpu0] supervisor: started logkeeper\n"]
         );
     }
 

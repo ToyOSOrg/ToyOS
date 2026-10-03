@@ -115,18 +115,15 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 /// One caller's inbound framing.
 ///
 /// **The supervisor never reads a client with a blocking read.** `recv_header` and
-/// `recv_bytes` park the caller until the peer sends the bytes it promised, so
-/// a client that connected and said nothing used to park the supervisor — and the supervisor is the
-/// machine's only way to start a process. The whole request blob is kept
-/// because a launch carries the child's argv, environment and working
-/// directory, and a truncated one is a launch refused for a reason the caller
-/// did not cause.
+/// `recv_bytes` park the caller until the peer sends the bytes it promised. The
+/// whole request blob is kept because a launch carries the child's argv,
+/// environment and working directory, and a truncated one is a launch refused
+/// for a reason the caller did not cause.
 type LaunchRx = ipc::FrameRx<{ ipc::MAX_FRAME_LEN as usize }>;
 
 /// A connection that has been accepted and has not yet said what to start.
 ///
-/// It exists because accept and the request frame are two events, and the supervisor used
-/// to fuse them with a blocking `recv_header` on the fresh connection.
+/// It exists because accept and the request frame are two events.
 struct Pending {
     conn: Connection,
     rx: LaunchRx,
@@ -878,11 +875,7 @@ impl<'a> Supervisor<'a> {
     /// server in this tree obeys binds the supervisor hardest.** A server never blocks on
     /// a client: accept and the first frame are two events, a frame is buffered
     /// until whole before anything acts on it, and a reply is one non-blocking
-    /// write. The supervisor used to read the fresh connection with `recv_header`, so any
-    /// process holding a `launcher` connector — the compositor, every terminal,
-    /// every shell, sshserver, the one thing reachable from the network — could
-    /// connect, say nothing, and take the machine's only way to create a
-    /// process with two syscalls, leaving the supervisor alive and looking healthy.
+    /// write.
     ///
     /// What a swap waits on is the loop's too: the requester's hang-up is an
     /// event, and the ends of the hang-up bound and of probation are deadlines

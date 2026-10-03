@@ -555,7 +555,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
-        // The machine came back to `sshserver`, which is what tells a reset from the
+        // The machine came back to Ubuntu's ssh server, which is what tells a reset from the
         // S5 power-off the QEMU stop reason exists to catch — the driver
         // established it before this judge ran. What is left is the kernel's own
         // decode, and `0xcf9 <- 0x0f` is q35's register rather than this one's.

@@ -551,16 +551,13 @@ const MAX_PIPED_SLOTS: u64 = ((Poller::MAX_HANDLES - FIXED_POLL_HANDLES - MAX_PE
 ///
 /// **netstack never reads a client with a blocking read.** That is the whole point
 /// of [`ipc::FrameRx`]: `ipc::recv_header` and `ipc::recv_payload` park the
-/// caller until the peer sends the bytes it promised, and netstack used to call
-/// both — so one client that connected and wrote four bytes stopped the network
-/// stack for everyone until it disconnected. Here a peer that stops halfway
+/// caller until the peer sends the bytes it promised. Here a peer that stops halfway
 /// through a frame costs a buffer and a deadline instead of the event loop.
 type ClientRx = ipc::FrameRx<MAX_KEPT_REQUEST>;
 
 /// A connection that has been accepted and has not yet said what it wants.
 ///
-/// It exists because `accept` and the request frame are two events, and netstack
-/// used to fuse them with a blocking `recv_header` on the fresh connection.
+/// It exists because `accept` and the request frame are two events.
 struct PendingConn {
     conn: Connection,
     rx: ClientRx,

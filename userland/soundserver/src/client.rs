@@ -45,12 +45,10 @@ pub(crate) struct ClientResampler {
 /// Two things witness a client leaving and they race: the control thread reads
 /// the peer, and the mix loop finds the signal pipe gone on its next write.
 /// Both start the same ramp, so no audio differs — but only the first of them
-/// *knows* anything, and soundserver used to report the second as a death. A clean
-/// exit and a crash tear down the same descriptors the same way; the kernel's
-/// `exit:` line carries the code and nothing on this side can tell them apart,
-/// so `died` was a false positive at 11% of ordinary disconnects (5 of 44
-/// runs). Each variant below is something soundserver observed rather than inferred,
-/// and the cause is left to the log that has it.
+/// *knows* anything. A clean exit and a crash tear down the same descriptors the
+/// same way; the kernel's `exit:` line carries the code and nothing on this side
+/// can tell them apart. Each variant below is something soundserver observed
+/// rather than inferred, and the cause is left to the log that has it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Departure {
     /// `MSG_STREAM_CLOSE`: the client said so itself, which is the one reason

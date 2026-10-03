@@ -185,7 +185,7 @@ pub struct Readback {
     log: String,
     /// `Boot: complete (Nms)`, or `None` on a boot that never got there.
     pub boot_ms: Option<u64>,
-    /// What the machine spent getting back to `sshserver`.
+    /// What the machine spent getting back to Ubuntu's ssh server.
     pub back_secs: u64,
     /// How long after that the boot stick's own partition was there again.
     pub stick_secs: u64,

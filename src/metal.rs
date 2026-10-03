@@ -30,7 +30,7 @@ const CONNECT_SECS: u64 = 10;
 /// How long the machine has to go quiet after `reboot`.
 const GOING_DOWN_SECS: u64 = 120;
 
-/// What the machine spends getting back to `sshserver` once a ToyOS boot is over:
+/// What the machine spends getting back to Ubuntu's ssh server once a ToyOS boot is over:
 /// the firmware's pass and Ubuntu's own boot.
 const RETURN_ALLOWANCE_SECS: u64 = 300;
 
@@ -1726,7 +1726,7 @@ fn swap_running(args: &Args, service: &str) -> Result<(), Refusal> {
     stream.give_up();
     let swapped = swapped.map_err(|why| Refusal::Swap(vec![why]))?;
     for (word, detail) in &swapped.words {
-        println!("  the supervisor: {}: {detail}", word.as_str());
+        println!("  supervisor: {}: {detail}", word.as_str());
     }
     for line in &swapped.said {
         print!("  {service}| {line}");
