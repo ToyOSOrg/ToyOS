@@ -26,9 +26,6 @@ Every step lands green on `--ci host` and `--build-only`. Test counts are what
 and #631, of which #631 has landed, before the latency work
 (`issues/kernel/toyos-beats-linuxs-latency-on-the-t14.md`; owner, 2026-10-03).
 
-1. **Delete `toyos-userpin`.** It models the pin invariant and names nothing
-   the kernel defines; `munmap_reissues_read_window` holds the kernel to it.
-   Check: `git grep toyos-userpin -- ':!issues/'` is empty.
 2. **The kernel's library.** `kernel/pure/` is the `kernel` package's lib, and
    its bin is `test = false`. `toyos-pcid`, `toyos-proclife` and `toyos-sched`
    move in. `kernel-loom` and `toyos-sched/loom` become `kernel/loom/`, and

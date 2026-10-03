@@ -1437,10 +1437,6 @@ name = "toyos-userbound"
 version = "0.1.0"
 
 [[package]]
-name = "toyos-userpin"
-version = "0.1.0"
-
-[[package]]
 name = "toyos-wallclock"
 version = "0.1.0"
 
