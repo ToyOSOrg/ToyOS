@@ -1162,7 +1162,8 @@ pub fn flashable_params(root: &Path, asked: &[String]) -> Result<(), String> {
 /// separated argument.
 ///
 /// **Every name the caller asked for is checked against `kernel/Cargo.toml`,
-/// and an unknown one stops the build by name.** Read from the manifest rather
+/// and an unknown one stops the build by name**, as does a control or a name in
+/// [`KERNEL_CARRIES`]: neither is a kernel build. Read from the manifest rather
 /// than listed here, so the check cannot drift from what cargo would accept —
 /// and, more to the point, so that deleting a feature takes its own command
 /// lines down with it. That is what a temporary feature needs: once one is
@@ -1199,6 +1200,12 @@ fn kernel_features(
                  Every actuator is now a --kernel-param; `cargo run -- --kernel-param --help` \
                  lists them.",
                 declared.join(", ")
+            );
+            assert!(
+                !crate::ci::CONTROLS.iter().any(|c| c.feature == name)
+                    && !KERNEL_CARRIES.contains(&name.as_str()),
+                "--kernel-feature {name}: a model's negative control or a name the kernel \
+                 declares for another package's build of its sources, and never a kernel build"
             );
             features.push(name);
         }
@@ -1348,6 +1355,11 @@ fn declared_kernel_features(root: &Path) -> Vec<String> {
         .unwrap_or_else(|e| panic!("Failed to parse {}: {e}", path.display()));
     manifest.features.into_keys().collect()
 }
+
+/// The features the kernel declares for another package's build of its
+/// sources: `loom`, which `kernel-loom` turns on, and `protocol-port`, which
+/// `kernel-sim` does.
+const KERNEL_CARRIES: &[&str] = &["loom", "protocol-port"];
 
 /// The kernel every test that needs an actuator boots: all of them compiled in
 /// and none of them armed, plus the `SYS_DEBUG` number.
@@ -2604,7 +2616,7 @@ mod tests {
 
     /// Every kernel feature that is a kernel build of its own, each beside what
     /// earned it one. Every other feature the kernel declares is a control a row
-    /// of `crate::ci::CONTROLS` runs, or [`NOT_A_CONTROL`].
+    /// of `crate::ci::CONTROLS` runs, or one of [`KERNEL_CARRIES`].
     const KERNEL_BUILDS: &[&str] = &[
         "boot-actuators",
         "debug-wait",
@@ -2699,17 +2711,16 @@ mod tests {
         "test-actuators",
     ];
 
-    /// Features that choose a build's world rather than revert a decision:
-    /// loom's atomics, a crate's `std` and its default set, the toolchain's
-    /// `core` and `rustc-dep-of-std`, libc's `std-runtime`, the signer's `sign`,
-    /// and `flaws` and `protocol-port`, which compile what a simulator's negative
-    /// gates select at run time.
+    /// Features of a host workspace member that choose a build's world rather
+    /// than revert a decision: loom's atomics, a crate's `std` and its default
+    /// set, the toolchain's `core` and `rustc-dep-of-std`, libc's `std-runtime`,
+    /// the signer's `sign`, and `flaws`, which compiles what a simulator's
+    /// negative gates select at run time.
     const NOT_A_CONTROL: &[&str] = &[
         "core",
         "default",
         "flaws",
         "loom",
-        "protocol-port",
         "rustc-dep-of-std",
         "sign",
         "std",
@@ -2729,7 +2740,7 @@ mod tests {
         let controls: BTreeSet<&str> = crate::ci::CONTROLS.iter().map(|c| c.feature).collect();
         let mut builds: Vec<String> = declared_kernel_features(root)
             .into_iter()
-            .filter(|f| !controls.contains(f.as_str()) && !NOT_A_CONTROL.contains(&f.as_str()))
+            .filter(|f| !controls.contains(f.as_str()) && !KERNEL_CARRIES.contains(&f.as_str()))
             .collect();
         builds.sort();
         assert_eq!(
@@ -2740,8 +2751,8 @@ mod tests {
     }
 
     /// Every negative control the tree declares: every feature of the kernel's
-    /// manifest and of every host workspace member's, but the kernel's builds and
-    /// [`NOT_A_CONTROL`].
+    /// manifest but its builds and [`KERNEL_CARRIES`], and every feature of every
+    /// host workspace member's but [`NOT_A_CONTROL`].
     ///
     /// **Every manifest, and no list of the crates that hold a model.** A model
     /// of memory orderings, of the process table's interleavings, of a simulated
@@ -2757,10 +2768,14 @@ mod tests {
                 .unwrap_or_else(|e| panic!("Failed to read {}: {e}", path.display()));
             let parsed: KernelManifest = toml::from_str(&text)
                 .unwrap_or_else(|e| panic!("Failed to parse {}: {e}", path.display()));
-            let builds = if dir == crate::ci::KERNEL { KERNEL_BUILDS } else { &[] };
-            out.extend(parsed.features.into_keys().filter(|name| {
-                !NOT_A_CONTROL.contains(&name.as_str()) && !builds.contains(&name.as_str())
-            }));
+            let skip: &[&[&str]] = if dir == crate::ci::KERNEL {
+                &[KERNEL_BUILDS, KERNEL_CARRIES]
+            } else {
+                &[NOT_A_CONTROL]
+            };
+            out.extend(
+                parsed.features.into_keys().filter(|name| !skip.iter().any(|s| s.contains(&name.as_str()))),
+            );
         }
         out
     }
