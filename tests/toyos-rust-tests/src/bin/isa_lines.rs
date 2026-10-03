@@ -55,6 +55,9 @@ const ACK: u8 = 0xFA;
 const CONTROLLER: Duration = Duration::from_secs(1);
 /// The ceiling on the record behind an acknowledgement.
 const RECORD: Duration = Duration::from_secs(5);
+/// More records than the holder's own setup can raise before it asks the
+/// keyboard anything: one byte answers the configuration read.
+const STALE_RECORDS: usize = 8;
 
 fn main() {
     match std::env::args().nth(1).as_deref() {
@@ -164,6 +167,23 @@ fn record(claim: &Device) -> Option<u32> {
     }
 }
 
+/// Arm `poller`'s watch on `claim` with no record behind it. Where the
+/// controller came with its keyboard interrupt on, the configuration's own
+/// answer raised the line: a record of that is read away and the watch armed
+/// again.
+fn arm(poller: &Poller, claim: &Device) {
+    for _ in 0..STALE_RECORDS {
+        let _ = record(claim);
+        poller.watch(claim, READABLE, 0);
+        let mut ready = false;
+        poller.wait(0, 0, |_| ready = true);
+        if !ready {
+            return;
+        }
+    }
+    panic!("isa device: the claim was readable {STALE_RECORDS} times with nothing asked of the keyboard");
+}
+
 /// Drive the controller through `claim` until the keyboard's acknowledgement
 /// arrives as a record and a byte, then give the claim up and have it
 /// acknowledge again.
@@ -181,14 +201,12 @@ fn device(claim: Device) {
     data((config | CFG_KEYBOARD_IRQ | CFG_AUX_CLOCK_OFF) & !CFG_KEYBOARD_CLOCK_OFF);
     command(0xAE);
     drain();
-    // Where the controller came with its keyboard interrupt on, the
-    // configuration's own answer raised the line: that record is not the
-    // keyboard's.
-    let _ = record(&claim);
     println!("isa device: config {config:#04x}, keyboard line on");
 
+    // Armed before the keyboard is asked anything, so the watch is completed
+    // by a post from the line's handler and by nothing this thread reads.
     let poller = Poller::new(1);
-    poller.watch(&claim, READABLE, 0);
+    arm(&poller, &claim);
     data(ENABLE_SCANNING);
     let mut woke = false;
     poller.wait(1, RECORD.as_nanos() as u64, |_| woke = true);
