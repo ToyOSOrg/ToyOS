@@ -3,6 +3,7 @@ mod device_irq;
 mod dma_fault;
 mod hda;
 mod i8042;
+mod isa;
 mod nmi;
 pub(crate) mod spurious;
 mod timer;
@@ -29,6 +30,11 @@ const PIC2_DATA: u16 = 0xA1;
 
 /// The vector both PS/2 lines are routed to.
 pub const I8042_VECTOR: u8 = Vector::I8042 as u8;
+
+/// The vector each `pio::GRANTABLE` row's lines are routed to, by row: the
+/// vector is how the kernel knows whose record an interrupt belongs to.
+pub const ISA_VECTORS: [u8; 1] = [Vector::Isa0 as u8];
+const _: () = assert!(ISA_VECTORS.len() == super::pio::GRANTABLE.len(), "a row with no vector");
 
 /// The vector an IOMMU writes into its own `FEDATA`.
 pub const DMA_FAULT_VECTOR: u8 = Vector::DmaFault as u8;
@@ -261,6 +267,7 @@ idt_vectors! {
         ring3 UserDev1     = 0x29, user_dev::user_dev1_entry;
         ring3 UserDev2     = 0x2A, user_dev::user_dev2_entry;
         ring3 UserDev3     = 0x2B, user_dev::user_dev3_entry;
+        ring3 Isa0         = 0x2C, isa::isa0_entry;
         // Ring 0 because it never returns: `cli; hlt` forever.
         ring0 HaltAll      = 0xFD, stub_halt_all;
         ring3 TlbFlush     = 0xFE, tlb::tlb_flush_entry;

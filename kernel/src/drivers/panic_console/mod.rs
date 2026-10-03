@@ -6,9 +6,9 @@
 //! [`render`] paints it inside `halt_all_cpus`, before `panic_flush`. virtio-gpu
 //! is unsupported: its scanout needs the unbounded-poll wedge this module avoids.
 //!
-//! The two holds this module ends a panic in — [`page_forever`] and
-//! [`hold_the_panel`] — are also where `crate::panic_reboot`'s bound is
-//! watched, because the keyboard poll that retires it is here.
+//! The hold this module ends a panic in, [`hold_the_panel`], is also where
+//! `crate::panic_reboot`'s bound is watched. It reads no input and scrolls
+//! nothing: a dead kernel takes none, and its report shows what fits, once.
 
 mod access;
 mod latch;
@@ -18,7 +18,6 @@ use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
-use toyos_ps2::{KeyDecoder, KeyOutcome};
 
 use crate::log;
 use crate::panic_reboot::Bound;
@@ -43,12 +42,6 @@ const _: () = assert!(SNAPSHOT_CAP >= MAX_ROWS * MAX_COLS);
 
 /// One bit per byte `text` can hold — worst case is a message of nothing but newlines, one line per byte.
 const ALERT_WORDS: usize = SNAPSHOT_CAP.div_ceil(64);
-
-/// How long each page stays up; a [`Cadence`], not a deadline — nothing expires.
-const PAGE_HOLD: Cadence = Cadence::every(
-    Duration::from_secs(3),
-    "a five-page report cycles inside a 15-second video",
-);
 
 /// How long Ctrl+Alt+D's report keeps the panel.
 const REPORT_HOLD: Budget = Budget::of(
@@ -586,8 +579,7 @@ fn live_tail() -> View<'static> {
 // already partly consumed.
 
 /// What a fatal path paints: the captured report, or the live ring for a
-/// path that reached `halt_all_cpus` without the panic handler. Idempotent
-/// for the captured case, which [`page_forever`] walks repeatedly.
+/// path that reached `halt_all_cpus` without the panic handler.
 fn fatal_text() -> View<'static> {
     if CAPTURE_ACCESS.read() {
         // SAFETY: `read` changed the state to `READING` before access; every writer refuses that state.
@@ -637,8 +629,8 @@ fn fatal_claimed() -> bool {
 }
 
 /// Paint the newest page of the captured report, fatal paths only; returns
-/// whether this call claimed the screen, entitling [`page_forever`] — which it
-/// does whatever any painter that is not a fatal path holds.
+/// whether this call claimed the screen, entitling [`hold_the_panel`] — which
+/// it does whatever any painter that is not a fatal path holds.
 pub fn render() -> bool {
     if !seize() {
         return false;
@@ -648,7 +640,7 @@ pub fn render() -> bool {
     // Before the paint, from the same view the panel gets: a fault inside the
     // painter then costs the screen and not the copy the next boot reads.
     crate::blackbox::record_panic(text.text);
-    paint(Fill::Fatal, text, Page::Last, Watch::No, || false);
+    paint(Fill::Fatal, text, Watch::No, || false);
     true
 }
 
@@ -670,114 +662,19 @@ pub fn seal_wedge(said: core::fmt::Arguments) {
     crate::blackbox::record_wedge(format_args!("{said}{Census}\n"), live_tail().text);
 }
 
-/// Cycle the report across the screen until the machine is switched off, or
-/// until `bound` returns it to firmware. Reached only from `halt_all_cpus`,
-/// after `panic_flush`, on the CPU whose [`render`] claimed [`FATAL`]; the
-/// handler's other two exits reach [`hold_the_panel`] the same way, and every
-/// one of the three is the last call its CPU makes.
-pub fn page_forever(mut bound: Bound) -> ! {
-    if !crate::clock::calibrated() {
-        hold_the_panel(bound);
+/// Keep the panel as it is until `bound` resets the machine: the panic path's
+/// terminal hold, and the last call its CPU makes.
+pub fn hold_the_panel(bound: Bound) -> ! {
+    if !bound.is_armed() {
+        // Nothing to wait for, so this CPU costs the machine no power.
+        crate::arch::cpu::halt()
     }
-    let text = fatal_text();
-    let Some(fb) = snapshot() else { hold_the_panel(bound) };
-    let Some((cols, grid_rows)) = geometry(&fb) else { hold_the_panel(bound) };
-    let (_, pages, _) = pagination(text.text, cols, grid_rows);
-    if pages < 2 {
-        hold_the_panel(bound);
-    }
-    // `None` is the screenful [`render`] already painted, not a numbered page, so the first key reaches either end.
-    let mut shown: Option<usize> = None;
-    let mut keys = KeyDecoder::new();
-    // Once steered, the cycle is his: there is no way back to automatic paging.
-    let mut steered = false;
-    // Spins rather than `hlt`: nothing would wake it, and re-arming the LAPIC timer would dispatch the scheduler mid-panic.
+    // Spins rather than `hlt`: nothing would wake it, and re-arming the LAPIC
+    // timer would dispatch the scheduler mid-panic.
     loop {
-        let step = hold((!steered).then_some(PAGE_HOLD.nanos()), &mut keys, &mut bound);
-        steered |= step.is_some();
-        let next = match (shown, step.unwrap_or(PageKey::Down)) {
-            (None, PageKey::Down) => 0,
-            (None, PageKey::Up) => pages - 1,
-            (Some(page), PageKey::Down) => (page + 1) % pages,
-            (Some(page), PageKey::Up) => (page + pages - 1) % pages,
-        };
-        paint(Fill::Fatal, text, Page::Nth(next), Watch::No, || false);
-        shown = Some(next);
-    }
-}
-
-/// Keep the panel as it is until `bound` resets the machine, or for good once a
-/// key has retired it. The panic path's terminal hold wherever there is no
-/// second page to cycle — and the whole of it on a machine with no panel at all.
-///
-/// One poller: every caller is the CPU that claimed [`FATAL`], because two CPUs
-/// reading port 0x60 would each see half of every scancode.
-pub fn hold_the_panel(mut bound: Bound) -> ! {
-    let mut keys = KeyDecoder::new();
-    while bound.is_armed() {
-        read_key(&mut keys, &mut bound);
         bound.check();
         core::hint::spin_loop();
     }
-    // Nothing left to wait for, so this CPU costs the machine no power.
-    crate::arch::cpu::halt()
-}
-
-/// One byte off the controller, folded into `keys`; a key **press** retires
-/// `bound`, since pressing one is how the person reading the panel says he is
-/// there. `None` is a poll that found nothing, which is not the decoder's
-/// `Pending`.
-///
-/// The pointer shares the port; its packet bytes look like scancodes to
-/// anything that does not skip them. [`i8042::poll_byte`] is an `inb` — no
-/// lock, no MMIO.
-///
-/// [`i8042::poll_byte`]: crate::arch::keyboard_controller::poll_byte
-fn read_key(keys: &mut KeyDecoder, bound: &mut Bound) -> Option<KeyOutcome> {
-    let (byte, false) = crate::arch::keyboard_controller::poll_byte()? else {
-        return None;
-    };
-    let outcome = keys.feed(byte);
-    // A make code and nothing else. A break code is the release of a key
-    // pressed before this panel existed, and a controller's own byte — an ACK,
-    // a self-test result — is the hardware answering itself; neither is a
-    // person saying he is here to read it.
-    if matches!(outcome, KeyOutcome::Key { pressed: true, .. }) {
-        bound.retire();
-    }
-    Some(outcome)
-}
-
-/// Which way the next paint moves.
-#[derive(Clone, Copy)]
-enum PageKey {
-    Up,
-    Down,
-}
-
-/// HID usages: what the wire decoder emits, not scancodes.
-const HID_PAGE_UP: u8 = 0x4B;
-const HID_PAGE_DOWN: u8 = 0x4E;
-
-/// Wait for a page key, giving up after `nanos`; `None` means the deadline
-/// expired. `bound` is retired by any key and resets the machine at its own
-/// expiry, so an unattended panel pages until it is over and no longer.
-fn hold(nanos: Option<u64>, keys: &mut KeyDecoder, bound: &mut Bound) -> Option<PageKey> {
-    let target = nanos.map(|n| crate::clock::nanos_since_boot().saturating_add(n));
-    while target.is_none_or(|t| crate::clock::nanos_since_boot() < t) {
-        match read_key(keys, bound) {
-            Some(KeyOutcome::Key { usage: HID_PAGE_UP, pressed: true }) => {
-                return Some(PageKey::Up);
-            }
-            Some(KeyOutcome::Key { usage: HID_PAGE_DOWN, pressed: true }) => {
-                return Some(PageKey::Down);
-            }
-            _ => {}
-        }
-        bound.check();
-        core::hint::spin_loop();
-    }
-    None
 }
 
 /// Repaint at a boot phase boundary, so a machine that wedges later still shows how far it got.
@@ -815,7 +712,7 @@ fn repaint() {
     if SCREEN_OWNED_BY_USERLAND.load(Ordering::Relaxed) || !take_for_boot() {
         return;
     }
-    paint(Fill::Boot, live_tail(), Page::Last, Watch::No, fatal_claimed);
+    paint(Fill::Boot, live_tail(), Watch::No, fatal_claimed);
     PAINTING.store(false, Ordering::SeqCst);
 }
 
@@ -851,7 +748,7 @@ fn paint_held_report() {
     #[cfg(feature = "boot-actuators")]
     stall::inside_the_latch();
     forget_the_glass();
-    paint(Fill::Boot, report_text(), Page::Last, Watch::Yes, fatal_claimed);
+    paint(Fill::Boot, report_text(), Watch::Yes, fatal_claimed);
     PAINTING.store(false, Ordering::SeqCst);
 }
 
@@ -889,14 +786,6 @@ pub fn hold_report() {
     }
     log!("panic console: the panel was drawn over, putting the report back");
     paint_held_report();
-}
-
-/// Which slice of the text a paint shows.
-#[derive(Clone, Copy)]
-enum Page {
-    /// The newest screenful: a page-aligned last page would leave the bottom blank when rows divide badly.
-    Last,
-    Nth(usize),
 }
 
 /// Carries "halted" vs "still booting" at zero cost, and proves the console ran this boot.
@@ -1144,7 +1033,7 @@ fn spent(began: u64, pixels: u64) {
 
 /// `stop` is asked before every row and every scanline of a fill: a paint it
 /// answers yes to leaves at once, and the grid is forgotten, not believed.
-fn paint(fill: Fill, view: View, page: Page, watch: Watch, stop: impl Fn() -> bool) {
+fn paint(fill: Fill, view: View, watch: Watch, stop: impl Fn() -> bool) {
     let Some(fb) = snapshot() else { return };
     if !mapped(&fb) {
         return;
@@ -1154,14 +1043,9 @@ fn paint(fill: Fill, view: View, page: Page, watch: Watch, stop: impl Fn() -> bo
     let mut pixels = 0u64;
     let text = view.text;
     let (total, pages, per) = pagination(text, cols, grid_rows);
-    // `Last` is the newest `per` rows, not page `pages - 1`, so both an even
-    // and uneven division fill the screen; the footer's page number therefore
-    // can't be derived from `first` and `shown` carries it separately.
-    let newest = total.saturating_sub(per);
-    let (first, shown) = match page {
-        Page::Last => (newest, pages),
-        Page::Nth(n) => (n.saturating_mul(per).min(newest), (n + 1).min(pages)),
-    };
+    // The newest `per` rows, not page `pages - 1`: a page-aligned last page
+    // would leave the bottom blank when rows divide badly.
+    let first = total.saturating_sub(per);
 
     let ground = match fill {
         Fill::Fatal => rgb(&fb, 0x60, 0x00, 0x00),
@@ -1215,7 +1099,7 @@ fn paint(fill: Fill, view: View, page: Page, watch: Watch, stop: impl Fn() -> bo
             }
         }
         if pages > 1 && r == grid_rows - 1 {
-            footer_cells(shown, pages, want);
+            footer_cells(pages, want);
         }
 
         let glassed = glass.row(r, cols);
@@ -1280,15 +1164,15 @@ fn flush_stores() {
     crate::arch::barrier::scanout_flush();
 }
 
-/// `[page 2/4]` into the bottom row's cells; not decoration — the pager advances on a timer with no key to press.
-fn footer_cells(page: usize, pages: usize, row: &mut [Cell]) {
+/// `[page 4/4]` into the bottom row's cells: the screen is the last page of more.
+fn footer_cells(pages: usize, row: &mut [Cell]) {
     let mut buf = [0u8; 24];
     let mut n = 0;
     for &b in b"[page " {
         buf[n] = b;
         n += 1;
     }
-    n += write_num(&mut buf[n..], page);
+    n += write_num(&mut buf[n..], pages);
     buf[n] = b'/';
     n += 1;
     n += write_num(&mut buf[n..], pages);

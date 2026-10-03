@@ -303,6 +303,7 @@ impl Hw for KernelHw {
             crate::preempt::set_count(incoming.preempt);
             percpu::set_current_tid(incoming.id.map(|id| id.1));
             percpu::set_current_pid(incoming.id.map(|id| id.0));
+            super::pio::switch_to(incoming.id.map(|id| id.0));
             match incoming.id {
                 Some(_) => {
                     percpu::set_kernel_stack(incoming.kernel_stack_top);

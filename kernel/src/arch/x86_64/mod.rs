@@ -28,6 +28,7 @@ pub mod mtrr;
 pub mod paging;
 pub mod pat;
 pub mod percpu;
+pub mod pio;
 pub mod pmu;
 pub mod power;
 pub mod rtc;

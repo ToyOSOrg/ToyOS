@@ -43,6 +43,8 @@ What is left of the staged work:
 3. Done: **the capability itself** is `DeviceType::PciFunction` plus
    `SYS_DEVICE_BAR_MAP` and `SYS_DEVICE_DMA_ALLOC`, with config space readable
    and unwritable and the interrupt delivered as a record on the claim.
+4. **The i8042 (PS/2)**: staged as stage 7 of
+   `issues/kernel/the-kernel-is-small-interrupts-post-and-threads-wait.md`.
 
 - **USB HID cannot move to userspace without moving the boot block device or
   splitting the controller.** It shares the controller, the event ring and the

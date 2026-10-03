@@ -661,10 +661,10 @@ fn words(monitor: &mut QmpMonitor, at: u64) -> Vec<u32> {
 ///
 /// Not a display setting: each variant is a whole machine. `Headless` is the
 /// historical test config -- no VGA and no GPU device at all, so firmware
-/// publishes no GOP and `kernel_args.gop_framebuffer` is zero. `Gop` swaps in
-/// `-vga std` so firmware publishes a linear framebuffer, which is the path a
-/// laptop takes and the only one in which the on-screen panic console renders
-/// anything. `Metal` goes the whole way to the target laptop's shape.
+/// publishes no GOP and `kernel_args.gop_framebuffer` is zero. `Metal` is the
+/// target laptop's shape, with `-vga std` so firmware publishes a linear
+/// framebuffer, the only path in which the on-screen panic console renders
+/// anything.
 #[derive(Clone, Copy, PartialEq)]
 pub enum Profile {
     Headless,
@@ -674,7 +674,6 @@ pub enum Profile {
     /// `iommu_platform=on`, and the harness sets that only where a unit exists,
     /// so the guest's own negotiation comes out the other way here.
     HeadlessNoIommu,
-    Gop,
     /// M1 metal-sim: GOP, NVMe, xHCI with the boot stick on it, i8042 from
     /// q35, and nothing else -- no virtio device and no USB HID. This is the
     /// machine shape that gets flashed, so it is the one the input tests run
@@ -711,7 +710,6 @@ impl Profile {
             Self::Virt | Self::VirtEl2 | Self::VirtEl2NoVhe | Self::VirtTcg => Arch::Aarch64,
             Self::Headless
             | Self::HeadlessNoIommu
-            | Self::Gop
             | Self::Metal => Arch::X86_64,
         }
     }
@@ -862,16 +860,6 @@ impl Profile {
             },
             Self::Headless => Shape {
                 vga: "none",
-                panel: None,
-                virtio: Virtio::Present,
-                nic: Nic::Virtio,
-                xhci: &[XHCI_DEFAULT],
-                usb: &["usb-kbd,bus=xhci.0"],
-                nvme_bytes: NVME_SMALL,
-                iommu: Some(IOMMU_DEFAULT),
-            },
-            Self::Gop => Shape {
-                vga: "std",
                 panel: None,
                 virtio: Virtio::Present,
                 nic: Nic::Virtio,
@@ -1337,13 +1325,8 @@ impl QemuInstance {
 
     /// Screendump until the decoded screen carries `needle`, or the timeout.
     ///
-    /// Every fatal path needs this, for one of two reasons. The panic
-    /// handler's own path paints after the drain that emits the report, so a
-    /// marker on serial does not yet prove a paint. The halt_all_cpus paths
-    /// are the other way round and once *did* need only a single dump — but a
-    /// report too long for one screen now pages, so the screen a marker
-    /// proves is only the first of several and any given dump may hold a
-    /// different one.
+    /// The panic handler's own path paints after the drain that emits the
+    /// report, so a marker on serial does not yet prove a paint.
     pub fn screendump_until(&mut self, needle: &str, timeout: Duration) -> super::screen::Ppm {
         self.screendump_while(timeout, Duration::from_millis(100), |dump| {
             dump.text().contains(needle)

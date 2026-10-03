@@ -292,7 +292,7 @@ mod checks {
              [nmi]   rip=0xffffffff8012d3a0 rsp=0xffff80000017df50\n\
              [nmi]   the outer handler's frame is gone; the machine stops here.\n\
              ining scheduler\n\
-             [kernel 0.390 cpu0] panic: rebooting in 60 s unless a key is pressed\n";
+             [kernel 0.390 cpu0] panic: rebooting in 60 s, timed by the calibrated clock\n";
         const SPLICED: &str = "[[kenrnmel i0.38]5  cpNu1E] CSPUT 1E: Djo inNiMngI s choednule r\n\
              c[pkeurn el0 0:.3 85a cp u1s] sechcedo: ncpud=1  rNeaMdyI=0  deyinngt=0e srtoeppded= 0 wpahrkield=0e c urrIentS=NTon2e  trwipas=s1\n \
              stil[lke rnieln 0 .3u87s cep.u1\n\

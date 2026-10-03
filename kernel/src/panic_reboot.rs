@@ -1,8 +1,6 @@
 //! What a panicked kernel does with the machine once its report is on the
 //! panel: it holds the panel for [`toyos_tco::PANIC_BOUND_MS`] and then returns
-//! the machine to firmware. A key press retires the bound for good — a key is
-//! how a person at the machine says the panel is being read — and nobody
-//! pressing one inside the bound means nobody is there to read it.
+//! the machine to firmware.
 //!
 //! **The bound is carried in counter ticks, not nanoseconds** (`cpu::counter`:
 //! the TSC, the generic timer's count). A panic may land before `clock::init`,
@@ -12,7 +10,7 @@
 //! that states no frequency and has no calibrated clock cannot time anything,
 //! and the arm line says so instead of resetting on a guess.
 
-use crate::arch::{cpu, keyboard_controller};
+use crate::arch::cpu;
 use crate::drivers::serial;
 use crate::time::{Budget, Duration};
 
@@ -22,22 +20,24 @@ const PANIC_BOUND: Budget = Budget::of(
     "the machine returns itself to firmware instead of holding a panel nobody is reading",
 );
 
+/// `panic-reboot-fast`'s bound: a judge cannot spend the shipped minute per boot.
+#[cfg(feature = "boot-actuators")]
+const FAST_BOUND: Budget = Budget::of(
+    Duration::from_secs(5),
+    "a guest reaches the reset inside one test",
+);
+
 /// Whether a reboot is armed on this panic, and when.
 #[derive(Clone, Copy)]
 pub enum Bound {
     /// Reset the machine at this `cpu::counter` reading.
     At(u64),
-    /// Hold the panel: somebody is reading it, or nothing here could time a
-    /// wait, or this machine has no reset this kernel performs.
+    /// Hold the panel: nothing here could time a wait, or this machine has no
+    /// reset this kernel performs.
     Held,
 }
 
 impl Bound {
-    /// A key arrived: the machine is that person's from here on.
-    pub fn retire(&mut self) {
-        *self = Self::Held;
-    }
-
     /// Reset the machine if the bound has passed; every wait on the panic path
     /// calls this, and it is the only place that decides the reset has come due.
     pub fn check(self) {
@@ -93,25 +93,20 @@ fn deadline(bound: Budget) -> Option<(u64, Source)> {
 /// and on the console; false is for the reentry guard, whose suspect is the log
 /// path itself, and there the line goes to the UART raw and the panel carries none.
 pub fn arm(on_the_record: bool) -> Bound {
+    #[cfg(feature = "boot-actuators")]
+    let budget = if crate::actuator::panic_reboot_fast() { FAST_BOUND } else { PANIC_BOUND };
+    #[cfg(not(feature = "boot-actuators"))]
     let budget = PANIC_BOUND;
 
     // ASCII only, here and in every line below: the panel's font renders
     // anything outside 0x20..=0x7E as a dot.
     let secs = budget.duration().millis() / 1_000;
-    // A key retires the bound only where the panic path reads one.
-    let unless = if keyboard_controller::PANIC_KEYS { " unless a key is pressed" } else { "" };
     match (deadline(budget), crate::power::can_reboot()) {
         (Some((cycles, source)), true) => {
             if on_the_record {
-                alert!(
-                    "{ARMED} in {secs} s{unless}, timed by {}",
-                    source.named()
-                );
+                alert!("{ARMED} in {secs} s, timed by {}", source.named());
             } else {
-                let mut uart = serial::panic_registers();
-                uart.write(b"panic: rebooting");
-                uart.write(unless.as_bytes());
-                uart.write(b"\n");
+                serial::panic_registers().write(b"panic: rebooting\n");
             }
             Bound::At(cycles)
         }
@@ -144,11 +139,8 @@ pub fn arm(on_the_record: bool) -> Bound {
 /// Return the machine to firmware. The second of this path's two lines, and it
 /// goes out raw: the log has already been flushed and drained by here.
 pub fn reboot_now() -> ! {
-    serial::panic_registers().write(if keyboard_controller::PANIC_KEYS {
-        b"\npanic: no key inside the bound, so nobody is here: returning this machine to firmware\n"
-    } else {
-        b"\npanic: the bound is over: returning this machine to firmware\n"
-    });
+    serial::panic_registers()
+        .write(b"\npanic: the bound is over: returning this machine to firmware\n");
     // Not `power::reboot`: its flush waits on the console wire, and a CPU this
     // panic stopped may be holding it.
     crate::power::reset_now()

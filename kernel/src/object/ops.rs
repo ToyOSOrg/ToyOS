@@ -280,6 +280,9 @@ pub fn read_watch(object: &KObjectRef) -> Option<WatchRef> {
             device_registry::DeviceType::PciFunction => {
                 d.pci_slot().map(|slot| WatchRef::Irq(crate::pcidev::watch(slot)))
             }
+            device_registry::DeviceType::Isa => {
+                d.isa_row().map(|row| WatchRef::Irq(crate::isa::watch(row)))
+            }
             device_registry::DeviceType::HdaAudio | device_registry::DeviceType::VirtioSound => {
                 Some(WatchRef::Irq(&crate::drivers::AUDIO_WATCH))
             }
@@ -324,6 +327,7 @@ fn close_ends_polls(object: &KObjectRef) -> bool {
             device_registry::DeviceType::Keyboard => false,
             device_registry::DeviceType::Mouse
             | device_registry::DeviceType::PciFunction
+            | device_registry::DeviceType::Isa
             | device_registry::DeviceType::HdaAudio
             | device_registry::DeviceType::VirtioSound
             | device_registry::DeviceType::Framebuffer
@@ -427,6 +431,25 @@ pub fn read_device(
                 Ok(record) => record?,
                 Err(refused) => return Some(refused.to_u64()),
             };
+            buf.write_at(0, record_bytes(&record));
+            Some(toyos_abi::pci::DeviceIrqRecord::SIZE as u64)
+        }
+        // The PCI shape, but the description is what binds the ports to the
+        // reader, and nothing after it answers any other process.
+        device_registry::DeviceType::Isa => {
+            let row = claim.isa_row().expect("an ISA claim knows its row");
+            let pid = crate::process::current_process();
+            if !claim.info_read() {
+                crate::isa::bind(row, pid);
+                return Some(claim.describe(table, buf));
+            }
+            if !crate::isa::bound_to(row, pid) {
+                return Some(SyscallError::PermissionDenied.to_u64());
+            }
+            if buf.len() < toyos_abi::pci::DeviceIrqRecord::SIZE {
+                return Some(SyscallError::InvalidArgument.to_u64());
+            }
+            let record = crate::isa::take_record(row)?;
             buf.write_at(0, record_bytes(&record));
             Some(toyos_abi::pci::DeviceIrqRecord::SIZE as u64)
         }
@@ -621,7 +644,9 @@ pub fn fstat(object: &KObjectRef) -> Stat {
             device_registry::DeviceType::Keyboard => FileType::Keyboard,
             device_registry::DeviceType::Mouse => FileType::Mouse,
             device_registry::DeviceType::Framebuffer => FileType::Framebuffer,
-            device_registry::DeviceType::PciFunction => FileType::Unknown,
+            device_registry::DeviceType::PciFunction | device_registry::DeviceType::Isa => {
+                FileType::Unknown
+            }
             device_registry::DeviceType::HdaAudio
             | device_registry::DeviceType::VirtioSound => FileType::Unknown,
             device_registry::DeviceType::Partition => FileType::Unknown,
@@ -701,7 +726,8 @@ fn partition_fsync(claim: &DeviceClaim) -> u64 {
         | device_registry::DeviceType::Framebuffer
         | device_registry::DeviceType::HdaAudio
         | device_registry::DeviceType::VirtioSound
-        | device_registry::DeviceType::PciFunction => {
+        | device_registry::DeviceType::PciFunction
+        | device_registry::DeviceType::Isa => {
             return SyscallError::PermissionDenied.to_u64();
         }
     }
@@ -766,6 +792,9 @@ pub fn has_data(object: &KObjectRef) -> bool {
             device_registry::DeviceType::Mouse => mouse::has_data(),
             device_registry::DeviceType::PciFunction => {
                 !d.info_read() || d.pci_slot().is_some_and(crate::pcidev::has_irq)
+            }
+            device_registry::DeviceType::Isa => {
+                !d.info_read() || d.isa_row().is_some_and(crate::isa::has_irq)
             }
             device_registry::DeviceType::Framebuffer => true,
             device_registry::DeviceType::Partition => true,
