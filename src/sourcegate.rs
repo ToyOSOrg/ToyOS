@@ -317,26 +317,27 @@ fn runs(line: &str, of: impl Fn(u8) -> bool) -> Vec<(usize, &str)> {
     out
 }
 
-/// The MAC addresses `line` spells with `sep` that a vendor gave a device: six
-/// octets and no more, globally administered, unicast, and not the zero vendor
-/// a placeholder is written with.
-fn macs(line: &str, sep: char) -> Vec<&str> {
+/// The MAC addresses `line` spells that a vendor gave a device: six octets and
+/// no more, globally administered, unicast, and not the zero vendor a
+/// placeholder is written with.
+fn macs(line: &str) -> Vec<&str> {
     let mut out = Vec::new();
-    for (start, run) in runs(line, |b| b.is_ascii_hexdigit() || char::from(b) == sep) {
+    for (start, run) in runs(line, |b| b.is_ascii_hexdigit() || b == b':') {
         // A run that begins or ends inside a word shares that end with the
         // word: `MAC:` gives the address after it an octet's worth of letters.
         let mut from = start;
         if word_at(line, start.checked_sub(1)) {
-            from += run.find(sep).map_or(run.len(), |at| at + 1);
+            from += run.find(':').map_or(run.len(), |at| at + 1);
         }
         let mut to = start + run.len();
         if word_at(line, Some(to)) {
-            to = start + run.rfind(sep).unwrap_or(0);
+            to = start + run.rfind(':').unwrap_or(0);
         }
-        let Some(spelled) = line.get(from..to).map(|s| s.trim_matches(sep)) else { continue };
+        let Some(spelled) = line.get(from..to).map(|s| s.trim_matches(':')) else { continue };
+        // One digit or two: macOS's `arp` drops an octet's leading zero.
         let octets: Option<Vec<u8>> = spelled
-            .split(sep)
-            .map(|octet| (octet.len() == 2).then(|| u8::from_str_radix(octet, 16).ok()).flatten())
+            .split(':')
+            .map(|octet| (octet.len() <= 2).then(|| u8::from_str_radix(octet, 16).ok()).flatten())
             .collect();
         if octets.is_some_and(|o| o.len() == 6 && o[0] & 0b11 == 0 && o[..3] != [0, 0, 0]) {
             out.push(spelled);
@@ -453,8 +454,7 @@ fn personal_hostnames(line: &str) -> Vec<&str> {
 
 /// Every value in `line` of a shape that identifies a machine or its network.
 fn identifying(line: &str) -> Vec<(&'static str, &str)> {
-    let mut out: Vec<(&'static str, &str)> =
-        [':', '-'].iter().flat_map(|sep| macs(line, *sep)).map(|mac| (MAC, mac)).collect();
+    let mut out: Vec<_> = macs(line).into_iter().map(|mac| (MAC, mac)).collect();
     out.extend(v4s(line));
     out.extend(v6s(line));
     out.extend(serials(line).into_iter().map(|serial| (SERIAL, serial)));
@@ -799,6 +799,9 @@ mod tests {
     /// for the shapes, and each one found is named by file, line and kind, cut
     /// to four characters. A stale row reds too, which is also what says the
     /// scan read the tree.
+    ///
+    /// Only text has a shape. A value spelled as bytes, a GUID, and a serial
+    /// that nothing on its line calls a serial number are the reader's to see.
     #[test]
     fn no_tracked_file_identifies_a_machine_or_its_network() {
         let root = repo_root();
@@ -848,7 +851,7 @@ mod tests {
         for (line, shape) in [
             (format!("netd: MAC {mac}"), MAC),
             (format!("MAC:{mac}: the lease went to it"), MAC),
-            (format!("Physical Address {}", mac.replace(':', "-")), MAC),
+            (format!("? (10.0.2.2) at {} on en0", ["0", "11", "22", "3", "44", "55"].join(":")), MAC),
             (format!("dns [{public}]"), PUBLIC_V4),
             (format!("see §4.1 for {public}."), PUBLIC_V4),
             (format!("tailscale0 UNKNOWN {shared}/32"), SHARED_V4),
