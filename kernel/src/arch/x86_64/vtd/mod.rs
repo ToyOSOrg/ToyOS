@@ -505,12 +505,11 @@ fn enable(
     if crate::actuator::iommu_firmware_left() {
         unit.leave_on();
     }
-    unit.hand_over();
     // Before any table is built: what a domain of a driver's own can be is the
     // narrowest thing every translating unit on this machine agrees to.
     domain::unit_agrees(width, unit.caps.domains(), unit.caps.mgaw());
 
-    let (root, queue) = {
+    let root = {
         let mut tables = TABLES.lock();
         let domain = match domains[domain_slot(width)] {
             Some(domain) => domain,
@@ -533,27 +532,31 @@ fn enable(
             let stream = StreamId::pci(device.bus, device.dev, device.func);
             table::bind_identity(&mut tables, root, stream, domain, width);
         }
-
-        let mut queue = Queue::new(&mut tables, unit.regs);
-        drop(tables);
-        // Outside the `TABLES` lock: `interrupt::arm` takes its own lock and
-        // then that one, and the order this subsystem holds is the reverse.
-        let irta = remap.map(interrupt::arm);
-
-        // Before `TE`: the first blocked transaction must be reportable, not merely counted.
-        fault::arm(index, unit.regs, records, crate::arch::idt::DMA_FAULT_VECTOR);
-
-        unit.command(QUEUED_INVALIDATION_ENABLE, true, "queued invalidation");
-        unit.regs.write_u64(RTADDR_REG, root.phys());
-        unit.command(SET_ROOT_TABLE_POINTER, true, "the root table pointer");
-        if let Some(irta) = irta {
-            unit.regs.write_u64(interrupt::IRTA_REG, irta);
-            unit.command(interrupt::SET_TABLE_POINTER, true, "the interrupt remap table pointer");
-            queue.invalidate_interrupts(unit.regs);
-        }
-        queue.invalidate_all(unit.regs);
-        (root, queue)
+        root
     };
+
+    // After the tables are built, so a unit firmware left translating passes DMA
+    // untranslated only while it is programmed
+    // (`issues/kernel/a-unit-left-translating-passes-dma-untranslated-while-programmed.md`),
+    // and before the queue is pointed, which §6.5.2 does only with it off.
+    unit.hand_over();
+    let mut queue = Queue::new(&mut TABLES.lock(), unit.regs);
+    // Outside the `TABLES` lock: `interrupt::arm` takes its own lock and
+    // then that one, and the order this subsystem holds is the reverse.
+    let irta = remap.map(interrupt::arm);
+
+    // Before `TE`: the first blocked transaction must be reportable, not merely counted.
+    fault::arm(index, unit.regs, records, crate::arch::idt::DMA_FAULT_VECTOR);
+
+    unit.command(QUEUED_INVALIDATION_ENABLE, true, "queued invalidation");
+    unit.regs.write_u64(RTADDR_REG, root.phys());
+    unit.command(SET_ROOT_TABLE_POINTER, true, "the root table pointer");
+    if let Some(irta) = irta {
+        unit.regs.write_u64(interrupt::IRTA_REG, irta);
+        unit.command(interrupt::SET_TABLE_POINTER, true, "the interrupt remap table pointer");
+        queue.invalidate_interrupts(unit.regs);
+    }
+    queue.invalidate_all(unit.regs);
 
     unit.command(TRANSLATION_ENABLE, true, "translation");
     if remap.is_some() {

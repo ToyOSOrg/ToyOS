@@ -2807,8 +2807,12 @@ fn iommu_firmware_left(log: &str) -> Result<(), String> {
                 .nth(1)
                 .and_then(|rest| rest.split_whitespace().next())
                 .ok_or_else(|| format!("an unreadable unit line: {line:?}"))?;
-            let remaps =
-                log.lines().any(|l| l.contains(&format!("iommu: {unit} @")) && l.contains(" ir=y "));
+            let remaps = log
+                .lines()
+                .filter(|l| l.contains(&format!("iommu: {unit} @")))
+                .find_map(|l| common::iommu::unit_fields(l).remove("ir"))
+                .ok_or_else(|| format!("{unit} translates and no line describes its ir:\n{log}"))?
+                == "y";
             let left = ["translation", "queued invalidation"]
                 .into_iter()
                 .chain(remaps.then_some("interrupt remapping"));
