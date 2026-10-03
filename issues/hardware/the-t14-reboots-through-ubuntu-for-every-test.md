@@ -8,9 +8,10 @@ opened: 2026-09-29
 
 The owner's direction: the tests run one after another in a ToyOS that stays
 booted, driven by the host over ssh, with no reboot between them and no Ubuntu.
-The T14 is the integration tier:
-`issues/build/the-guest-suite-runs-only-what-no-cheaper-tier-reaches.md` leaves
-the shared boot to `shared_metal` and `c_corpus_metal` and adds metal rows.
+The T14 is the integration tier: the shared boot runs only as `shared_metal`
+and `c_corpus_metal`, and
+`issues/build/the-guest-suite-runs-only-what-no-cheaper-tier-reaches.md` adds
+metal rows.
 
 - **A metal row is a member** of the session its kernel build, parameter line
   and config name, and costs no boot, unless it ends the machine (a panic, a
@@ -31,10 +32,9 @@ the shared boot to `shared_metal` and `c_corpus_metal` and adds metal rows.
   (`kernel/src/vfs.rs:83-86`). The host holds both to the session's first,
   `/log` less `bootlog::split_listing`'s files. Claims join once
   `issues/kernel/deferred-release-outlives-its-syscall.md` closes; until then a
-  member that mints one runs last, so `device_claim_lifetime` ends one session
-  and `endowment_denied` the other.
+  member that mints one runs last in its session, as `endowment_denied` does.
 - **A stuck test** is killed at the bound the host's `run` names, as
-  `--bound-ms=` names the job list's (`userland/test-runner/src/main.rs:101-107`):
+  `--bound-ms=` names the job list's (`userland/test-runner/src/main.rs:78-83`):
   14.1 s, twice `mutual_kill`'s 7.041 s. It reds by name and the next member
   runs. QEMU's harness names no bound and sends no `list`; its own ceiling ends
   the guest.
@@ -43,14 +43,15 @@ the shared boot to `shared_metal` and `c_corpus_metal` and adds metal rows.
 `testcases`, `testcases-mkdir` and `testcases-readdir` share a config, a
 parameter line and the shipping kernel. The session image is `tests/testcases`
 with `tests/lantalkcase`'s netd, sshd and streaming `logd`, under the same
-120 s `boot-deadline=`. A session holds 74.8 s of members, priced as
-`SharedBoot::members` prices them and a list at twice its slowest on the T14:
-the bound less a tenth, less a lease as late as 19.1 s
+120 s `boot-deadline=`. A session holds 74.8 s of members, priced at
+`toyos_tco::RUST_MEMBER_MS` a Rust member, `toyos_tco::C_MEMBER_MS` a C case
+and a list at twice its slowest on the T14: the bound less a tenth, less a
+lease as late as 19.1 s
 (`issues/hardware/most-t14-leases-land-one-dhcp-retry-late.md`), less one
-per-job bound. Every judge reads the stick as today but `syscall_cost` and
-`log_poll_outlives_a_close`, which read the window. `loader_watchdog_arms`'
-control arm rides a session, `mkdir_cap` and `readdir_bound` remove what they
-made, and `audio_idle_suspend` waits for soundd's `inspect` to read `suspended`
+per-job bound. Every judge reads the stick as today but `syscall_cost`, which
+reads the window. `loader_watchdog_arms`' control arm rides a session,
+`mkdir_cap` and `readdir_bound` remove what they made, and `audio_idle_suspend`
+waits for soundd's `inspect` to read `suspended`
 (`userland/soundd/src/inspect.rs:21-33`), not for a boot no client has reached.
 
 **Exit**, on the T14: every registration those boots carried gives the
