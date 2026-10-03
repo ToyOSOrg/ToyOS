@@ -17,6 +17,7 @@
 members = [
     "bcachefs",
     "kernel-loom",
+    "tests/libc-arch",
     "toyos-abi",
     "toyos-acpi",
     "toyos-blackbox",
@@ -39,7 +40,6 @@ members = [
     "toyos-inspect",
     "toyos-keymap",
     "toyos-ld",
-    "toyos-libc-copies",
     "toyos-logstream",
     "toyos-manifest",
     "toyos-mdns",
@@ -94,10 +94,12 @@ exclude = [
     # `cargo test` in it against the host triple.
     "toyos",
     # Guest programs `src/build.rs` builds for `x86_64-unknown-toyos`, each from
-    # its own directory. The harness's own integration test lives here too
-    # (`tests/toyos.rs`), and that one is a target of the root package rather
-    # than a package of its own.
-    "tests",
+    # its own directory. Named, and not `tests/` whole, so the gate finds a host
+    # test under `tests/` that joined neither list.
+    "tests/toyos-rust-tests",
+    # A host judge: a second implementation, whose dependency graph is not the
+    # harness's to resolve (`src/build.rs`, `build_host_judges`).
+    "tests/ssh-client-host",
 ]
 
 [package]

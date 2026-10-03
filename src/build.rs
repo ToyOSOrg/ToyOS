@@ -2010,7 +2010,7 @@ pub fn build_test_parts(
 /// test: a judge's price is its exchange and not a compile.
 ///
 /// Each of these keeps its own `Cargo.lock` and is excluded from the host
-/// workspace with `tests/`. That is what makes them possible: they exist to be
+/// workspace. That is what makes them possible: they exist to be
 /// a *second* implementation, and a second implementation's dependency graph is
 /// not the harness's to resolve.
 pub fn build_host_judges(root: &Path, quiet: bool) {
