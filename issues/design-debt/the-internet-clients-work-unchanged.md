@@ -33,8 +33,24 @@ netd, `toyos::net` and std's ToyOS networking in the `rust/` fork.
    program on `rustls`; the program and its judge's server installed
    `rustls-rustcrypto` 0.0.2-alpha, and #660 cut both. The row comes back on
    `ring` and waits for it; `rustls-rustcrypto` does not come back (owner,
-   2026-10-02). Whether `ring` builds for the ToyOS target is open and
-   untried: no build for that target compiles it. `rustls-rustcrypto` is
+   2026-10-02). Published `ring` 0.17.14 does not link for
+   `x86_64-unknown-toyos`: its `build.rs` picks its assembly by an OS list
+   that lacks `toyos`, and `src/rand.rs` has an OS list of its own. With
+   `"toyos"` added to `build.rs`'s `LINUX_ABI` and `target_os = "toyos"` to
+   `src/rand.rs` it builds for both ToyOS targets. In an x86-64 QEMU guest
+   it passes known answers (SHA-256,
+   SHA-512, HMAC, X25519, ChaCha20-Poly1305, AES-GCM, Ed25519, P-256,
+   `SystemRandom`), and `ureq` 3.4.2 on `rustls` 0.23.45 fetches 320000
+   bytes over TLS 1.3 from a server on the host and refuses a wrong name and
+   an untrusted root. What stands before it lands: a git fork's
+   `build.rs` runs `perl`, which
+   `issues/build/the-build-runs-host-tools-outside-rust-and-qemu.md` does not
+   declare, and leaves C asserts on, so `__assert_fail` is undefined unless
+   ring builds with `debug = false` or `toyos_c` is linked; `src/build.rs`
+   gives the C compiler's environment (`cc_env`) to userland builds alone, so
+   a test crate's C is compiled by the host's `cc`; and not run: AArch64, the
+   T14, a `git =` dependency, the licence gate over ring in an image.
+   `rustls-rustcrypto` is
    still named by doom's build script, which installs it on the host, and by
    a line the cut left in `tests/toyos-rust-tests`
    (`issues/build/the-guest-test-crate-depends-on-three-crates-no-test-uses.md`).
