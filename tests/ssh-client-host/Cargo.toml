@@ -1,5 +1,6 @@
 [package]
 name = "ssh-client-host"
+description = "The harness's SSH client, russh built for the host: what a test does to a guest over SSH, one fact per line."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

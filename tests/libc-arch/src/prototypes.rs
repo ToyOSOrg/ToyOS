@@ -25,7 +25,7 @@ const UNDECLARED: &[(&str, &str)] = &[
 ];
 
 fn libc() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../userland/libc")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../userland/libc")
 }
 
 /// How a value crosses a call.

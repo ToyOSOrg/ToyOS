@@ -538,6 +538,10 @@ pub fn ceiling_verdict(
 /// Collect console output until `done` reads true of the whole capture, or the
 /// guest stops making progress.
 ///
+/// The capture runs past the line that made `done` true to the end of that
+/// line's drain, which can fall inside anything the guest says in more than
+/// one line.
+///
 /// The shape [`QemuInstance::drain_serial`] cannot have: its caller passes a
 /// number of seconds, and a number of seconds is a claim about the host. Here
 /// the wait ends when the guest goes quiet or wedges, so a guest with a twelfth

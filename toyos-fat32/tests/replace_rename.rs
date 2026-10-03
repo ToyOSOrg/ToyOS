@@ -1,7 +1,7 @@
 //! Replacing rename's device-error window, exercised against the real writer
 //! and judged by the independent FAT checker.
 
-#[path = "../../toyos-fat32-check/tests/common/mod.rs"]
+#[path = "../check/tests/common/mod.rs"]
 mod spec_volume;
 
 use spec_volume::{cluster_offset, Volume, DIR_FST_CLUS_HI, DIR_FST_CLUS_LO, ROOT_CLUSTER};

@@ -6,7 +6,7 @@ use crate::header::{self, ERRNO_H};
 
 #[test]
 fn every_code_libc_answers_with_is_errno_h_s() {
-    let list = include_str!("../../userland/libc/src/errno.rs");
+    let list = include_str!("../../../userland/libc/src/errno.rs");
     let codes: Vec<(&str, i32)> = list
         .lines()
         .filter_map(|line| line.strip_prefix("pub(crate) const "))
