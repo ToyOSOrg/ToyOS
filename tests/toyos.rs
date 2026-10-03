@@ -4000,6 +4000,10 @@ fn main() {
         }
     };
 
+    // Before anything is built and before a worker exists: the process's one
+    // move of its fork checkout.
+    toyos_build::sysroot::make_fork_checkout(&compile::repo_root());
+
     if let Some(mode) = parsed.metal {
         let (c_bins, rust_bins) = build_shared_bins();
         let selected: Vec<(&str, &'static metal::Metal)> = METAL
