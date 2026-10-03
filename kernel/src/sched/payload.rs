@@ -5,12 +5,12 @@
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use toyos_sched::fair::{FairShare, ShareState};
-use toyos_sched::hw::Nanos;
-use toyos_sched::msg::Msg;
-use toyos_sched::sync::CellLock;
-use toyos_sched::task::{SchedPayload, TaskAccounting, TaskShared, WaitClass};
-use toyos_sched::park::WaitTicket;
+use kernel::sched::fair::{FairShare, ShareState};
+use kernel::sched::hw::Nanos;
+use kernel::sched::msg::Msg;
+use kernel::sched::sync::CellLock;
+use kernel::sched::task::{SchedPayload, TaskAccounting, TaskShared, WaitClass};
+use kernel::sched::park::WaitTicket;
 
 use crate::watch::Watch;
 use crate::mm::paging::Root;
@@ -158,7 +158,7 @@ pub struct ThreadSched {
 
 impl ThreadSched {
     pub fn sched_state(&self) -> u8 {
-        use toyos_sched::task::TaskState;
+        use kernel::sched::task::TaskState;
         match self.shared.state() {
             TaskState::Running(_) => SCHED_RUNNING,
             TaskState::Ready(_) | TaskState::WakeQueued(_) | TaskState::InTransit(_) => SCHED_READY,

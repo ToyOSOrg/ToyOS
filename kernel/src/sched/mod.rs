@@ -1,4 +1,4 @@
-//! The kernel's half of the scheduler core; `toyos-sched` decides.
+//! The kernel's half of the scheduler core; `kernel::sched` decides.
 
 #![warn(clippy::undocumented_unsafe_blocks)]
 

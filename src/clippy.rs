@@ -12,6 +12,7 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::arch::Arch;
+use crate::ci::{KERNEL_HOST_TARGET, KERNEL_MANIFEST};
 
 /// The pedantic/nursery lints adopted one at a time, each on a measured finding
 /// (`issues/build/clippy-stage-two-is-lints-one-at-a-time.md`).
@@ -27,7 +28,8 @@ const ADOPTED: &[&str] = &[
 /// One `cargo clippy`. `dir` is relative to the repository root and empty for
 /// the root itself — `.cargo/config.toml` is found from the working directory,
 /// so the kernel and bootloader run from their own; a `$ADOPTED` token splices
-/// [`ADOPTED`] there, and a `$CONTROLS` token [`control_features`].
+/// [`ADOPTED`] there, a `$CONTROLS` token [`control_features`], and a
+/// `$KERNEL_CONTROLS` token those of them whose package is `kernel`.
 struct Shape {
     dir: &'static str,
     before: &'static [&'static str],
@@ -47,12 +49,12 @@ const AARCH64_INSTRUMENTS: &str = "debug-wait,sched-check,sched-tripwire,heap-tr
                                    switch-witness-mutate-frame,switch-witness-mutate-rsp,\
                                    mask-windows";
 
-const UNCONTROLLED: &[&str] = &["toyos-pcid/counting-allocator", "toyos-sched/tripwire"];
+const UNCONTROLLED: &[&str] = &["kernel/sched-tripwire"];
 
-/// Every model's negative control and [`UNCONTROLLED`], as one `--features` list.
-fn control_features() -> String {
+/// Every model's negative control and [`UNCONTROLLED`], as `package/feature`.
+fn control_features() -> Vec<String> {
     let controls = crate::ci::CONTROLS.iter().map(|c| format!("{}/{}", c.krate, c.feature));
-    controls.chain(UNCONTROLLED.iter().map(|f| (*f).to_string())).collect::<Vec<_>>().join(",")
+    controls.chain(UNCONTROLLED.iter().map(|f| (*f).to_string())).collect()
 }
 
 /// `--all-targets` on the host workspace only: on the bootloader and kernel a
@@ -63,8 +65,11 @@ fn control_features() -> String {
 /// `undocumented_unsafe_blocks` is adopted per area as each area's
 /// justifications land. `toyos-xhci` has a shape of its own because the
 /// workspace run builds it only with `toyos-xhci-sim`'s `flaws`, never as the
-/// kernel does. `toyos-sched-loom` has one because `victim-retires-mid-probe`'s
+/// kernel does. `kernel-loom` has one because `victim-retires-mid-probe`'s
 /// test arm excludes `no-preempt-guard`, which `$CONTROLS` turns on beside it.
+/// The kernel's library, no member of the host workspace, is linted on the host
+/// from its own manifest: its tests as `--ci host` runs them, and again with
+/// `$KERNEL_CONTROLS`.
 const SHAPES: &[Shape] = &[
     Shape {
         dir: "",
@@ -74,6 +79,36 @@ const SHAPES: &[Shape] = &[
     Shape {
         dir: "",
         before: &["--workspace", "--all-targets", "--keep-going", "--features", "$CONTROLS"],
+        after: &["$ADOPTED", "-D", "warnings"],
+    },
+    Shape {
+        dir: "",
+        before: &[
+            "--manifest-path",
+            KERNEL_MANIFEST,
+            "--target-dir",
+            KERNEL_HOST_TARGET,
+            "--lib",
+            "--tests",
+            "--features",
+            "sched-check",
+        ],
+        after: &["$ADOPTED", "-D", "warnings"],
+    },
+    Shape {
+        dir: "",
+        before: &[
+            "--manifest-path",
+            KERNEL_MANIFEST,
+            "--target-dir",
+            KERNEL_HOST_TARGET,
+            "--lib",
+            "--tests",
+            "--features",
+            "sched-check,protocol-port",
+            "--features",
+            "$KERNEL_CONTROLS",
+        ],
         after: &["$ADOPTED", "-D", "warnings"],
     },
     Shape {
@@ -145,7 +180,7 @@ const SHAPES: &[Shape] = &[
         dir: "",
         before: &[
             "-p",
-            "toyos-sched-loom",
+            "kernel-loom",
             "--test",
             "loom_mailbox",
             "--features",
@@ -169,7 +204,7 @@ pub const BARE_TARGETS: [&str; 4] =
     [Arch::X86_64.kernel(), Arch::X86_64.loader(), Arch::Aarch64.kernel(), Arch::Aarch64.loader()];
 
 impl Shape {
-    /// The command as a reader writes it, `$ADOPTED` and `$CONTROLS` unexpanded.
+    /// The command as a reader writes it, its tokens unexpanded.
     fn line(&self) -> String {
         let mut parts = vec!["cargo clippy".to_string()];
         parts.extend(self.before.iter().map(|s| (*s).to_string()));
@@ -178,13 +213,21 @@ impl Shape {
         parts.join(" ")
     }
 
-    /// The arguments to `cargo clippy`, both tokens spliced in — what actually
+    /// The arguments to `cargo clippy`, every token spliced in — what actually
     /// runs.
     fn args(&self) -> Vec<String> {
+        let kernel = format!("{}/", crate::ci::KERNEL);
         let mut args: Vec<String> = self
             .before
             .iter()
-            .map(|s| if *s == "$CONTROLS" { control_features() } else { (*s).to_string() })
+            .map(|s| match *s {
+                "$CONTROLS" => control_features().join(","),
+                "$KERNEL_CONTROLS" => {
+                    let ours = control_features().into_iter().filter(|f| f.starts_with(&kernel));
+                    ours.collect::<Vec<_>>().join(",")
+                }
+                arg => arg.to_string(),
+            })
             .collect();
         args.push("--".to_string());
         for token in self.after {

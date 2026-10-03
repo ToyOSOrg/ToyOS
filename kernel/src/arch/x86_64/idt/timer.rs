@@ -1,4 +1,4 @@
-use toyos_sched::hw::{CpuId, Machine, TraceEvent, TraceKind};
+use kernel::sched::hw::{CpuId, Machine, TraceEvent, TraceKind};
 
 use crate::arch::entry::{restore_user_state, ring3_naked_asm, save_user_state};
 use crate::hw::HW;

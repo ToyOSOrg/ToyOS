@@ -14,7 +14,7 @@ use crate::{device, pipe, process};
 
 use toyos_abi::handle::{RawHandle, Rights};
 use toyos_abi::syscall::*;
-use toyos_sched::task::WaitClass;
+use kernel::sched::task::WaitClass;
 
 use super::cancelled;
 use super::handles::with_object_ref;

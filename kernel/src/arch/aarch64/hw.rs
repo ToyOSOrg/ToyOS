@@ -1,8 +1,8 @@
 //! AArch64's half of `crate::hw::KernelHw`: the halt and the context switch.
 
-use toyos_sched::cpu::RunToken;
-use toyos_sched::hw::Hw;
-use toyos_sched::task::{TaskAccounting, TaskKey};
+use kernel::sched::cpu::RunToken;
+use kernel::sched::hw::Hw;
+use kernel::sched::task::{TaskAccounting, TaskKey};
 
 use super::switch::{context_switch, RETURN_AT};
 use super::{cpu, percpu};

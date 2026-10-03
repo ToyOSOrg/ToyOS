@@ -21,7 +21,7 @@
 //! park over it: what wakes that one is the answer ([`complete`]), which
 //! posts the same watch once the completion is written.
 //!
-//! Compiled a second time by `kernel-loom` and by `toyos-sched-loom`, so it
+//! Compiled a second time by `kernel-loom`, so it
 //! names nothing of the kernel's.
 
 use alloc::sync::Arc;
