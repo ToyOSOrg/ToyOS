@@ -25,12 +25,13 @@ race, a fallback or second code path, a sibling of something the tree already ha
 high-risk code a test that cannot fail on a claim the change makes. **NOTE** is everything else,
 fixed before landing. **REMOVE** is prose to delete.
 
-A change that touches no source, test or manifest is judged only on what is false of the tree or
-of the record it describes; a citation that points at nothing, and a deleted document still cited;
-a ruling of the owner's stated more broadly or more narrowly than he gave it, or a design presented
-as his; an issue or stage without an owner that exists, or without an exit something can read; and
-a close whose exit is not met. Its phrasing, order and length are never a BLOCKER, a NOTE or a
-REMOVE.
+A change that touches no source, test or manifest is held to every rule this file names, and past
+them is judged only on what is false of the tree or of the record it describes; a citation that
+points at nothing, and a deleted document still cited; a ruling of the owner's stated more broadly
+or more narrowly than he gave it, or a design presented as his; an issue or stage without an owner
+that exists, or without an exit something can read; and a close whose exit is not met. The
+phrasing, order and length of its prose are never a BLOCKER, a NOTE or a REMOVE under any rule,
+save a track's length, which `issues/README.md` bounds.
 
 Name a mutation only where a defect would otherwise land unseen, never one a type refuses or one a
 reader of the diff catches: a mutation you suspect would still pass is a BLOCKER naming the exact
@@ -142,9 +143,10 @@ if it meets the bar above; otherwise it is a NOTE.
 
 In a source comment or a doc, a wrong line number, a stale run id, a count, a date, a citation:
 never a send-back, never corrected, never checked for its own sake. Every comment, doc line, issue
-line and PR-body line a branch adds or rewrites is load-bearing — the code or the record needs it —
-or it is REMOVE, one line, and the implementer deletes it. So is a source comment that is not one
-of root `CLAUDE.md`'s three kinds, and a comment or doc line corrected instead of deleted.
+line and PR-body line a branch that touches source, a test or a manifest adds or rewrites is
+load-bearing — the code or the record needs it — or it is REMOVE, one line, and the implementer
+deletes it. So is a source comment that is not one of root `CLAUDE.md`'s three kinds, and a comment
+or doc line corrected instead of deleted.
 
 ## Output
 
