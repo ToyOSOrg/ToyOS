@@ -16,7 +16,8 @@
 [workspace]
 members = [
     "bcachefs",
-    "kernel-loom",
+    "kernel/loom",
+    "kernel/sim",
     "toyos-abi",
     "toyos-acpi",
     "toyos-blackbox",
@@ -52,14 +53,9 @@ members = [
     "toyos-net-udp",
     "toyos-net-wire",
     "toyos-pci",
-    "toyos-pcid",
-    "toyos-proclife",
     "toyos-ps2",
     "toyos-quiesce",
     "toyos-rootimage",
-    "toyos-sched",
-    "toyos-sched/loom",
-    "toyos-sched/sim",
     "toyos-swap",
     "toyos-symbols",
     "toyos-tco",
@@ -81,7 +77,9 @@ default-members = ["."]
 exclude = [
     # Cross-compiled by a `.cargo/config.toml` below them, to targets no host
     # test can run. Cargo refuses to merge an inherited `build.target` away, so
-    # these cannot be members at any price.
+    # these cannot be members at any price. The kernel's library is tested on the
+    # host from its own manifest all the same, and `kernel/loom` and `kernel/sim`
+    # are members: `members` names them, which outranks this list.
     "bootloader",
     "kernel",
     "userland",
@@ -184,7 +182,9 @@ toyos-userbound = { path = "toyos-userbound" }
 # declaration. Pure and `no_std`, so it compiles for the host as it does for
 # the guest.
 toyos-i219 = { path = "toyos-i219" }
-toyos-sched = { path = "toyos-sched" }
+# The scheduler's quantum and the windows' hold, so the harness judges a boot
+# against the constants the kernel schedules by.
+kernel = { path = "kernel" }
 # The Bulk-Only phases, so the harness judging a wedge reads the word
 # `toyos_xhci::bot::Phase` declares instead of spelling it a second time.
 toyos-xhci = { path = "toyos-xhci" }

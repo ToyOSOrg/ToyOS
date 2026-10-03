@@ -9,9 +9,9 @@
 
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
-use toyos_sched::cpu::SleepToken;
-use toyos_sched::fair::QUANTUM_NS;
-use toyos_sched::hw::{CpuId, Kicker, Machine, Nanos, TraceEvent};
+use kernel::sched::cpu::SleepToken;
+use kernel::sched::fair::QUANTUM_NS;
+use kernel::sched::hw::{CpuId, Kicker, Machine, Nanos, TraceEvent};
 
 use crate::arch::{irqchip, percpu};
 use crate::sched::payload::KernelCtx;
@@ -91,7 +91,7 @@ impl Machine for KernelHw {
         // interrupt at all. `crate::deadline`'s poll and `crate::hardlockup`'s
         // sample both rest on some CPU taking one. Arming earlier than the
         // scheduler planned is a spurious pass and never a missed deadline
-        // (`toyos_sched::timer::TimerPlan`), and the next pass replaces it
+        // (`kernel::sched::timer::TimerPlan`), and the next pass replaces it
         // either way.
         //
         // Asked, because it is only those two that need it: a boot under no

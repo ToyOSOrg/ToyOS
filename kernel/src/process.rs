@@ -5,7 +5,7 @@
 //! symbols off the task's own record ([`resolve_user_symbol`]), never off
 //! this table.
 //!
-//! `toyos-proclife` decides lifecycle transitions; this file only performs them.
+//! `kernel::proclife` decides lifecycle transitions; this file only performs them.
 
 use alloc::alloc::{alloc_zeroed, dealloc, Layout};
 use alloc::string::String;
@@ -29,8 +29,8 @@ pub use crate::scheduler::TaskId;
 use toyos_abi::syscall::{EndowEntry, SyscallError};
 
 /// The lifecycle's decisions; this file only performs them.
-pub use toyos_proclife::{ThreadLocation, Watch};
-use toyos_proclife::{join, reap, spawn as proclife_spawn, teardown as proclife, tree, Lifecycle, Node, Processes};
+pub use kernel::proclife::{ThreadLocation, Watch};
+use kernel::proclife::{join, reap, spawn as proclife_spawn, teardown as proclife, tree, Lifecycle, Node, Processes};
 
 /// One `EndowEntry` on the wire; `loader::start` and [`Endowments::encode`] both index by it.
 pub const ENDOW_ENTRY_LEN: usize = core::mem::size_of::<EndowEntry>();
@@ -333,7 +333,7 @@ pub struct ProcessEntry {
     threads: crate::id_map::IdMap<Tid, ThreadEntry>,
     /// Set once, with the exit's code, by the exit or kill that claims teardown; checked by `spawn_thread` so no thread appears after the retire set.
     teardown_code: Option<i32>,
-    /// Its parent, children and depth, answered by no syscall; `toyos_proclife::tree` reads and writes it.
+    /// Its parent, children and depth, answered by no syscall; `kernel::proclife::tree` reads and writes it.
     node: Node,
     /// The exit its teardown made, kept until every end below it is published.
     exit: Option<crate::object::process::Exit>,
@@ -380,7 +380,7 @@ impl ProcessEntry {
     pub fn tearing_down(&self) -> bool { self.teardown_code.is_some() }
 }
 
-/// The lifecycle face of an entry: only the fields `toyos-proclife` decides against, and nothing else this type carries.
+/// The lifecycle face of an entry: only the fields `kernel::proclife` decides against, and nothing else this type carries.
 impl Lifecycle for ProcessEntry {
     fn main_tid(&self) -> Tid { self.main_tid }
     fn teardown_code(&self) -> Option<i32> { self.teardown_code }
@@ -423,7 +423,7 @@ impl Processes for ProcessTable {
             f(pid);
         }
     }
-    fn pids(&mut self) -> &mut toyos_proclife::Pids {
+    fn pids(&mut self) -> &mut kernel::proclife::Pids {
         &mut self.pids
     }
 }
@@ -670,15 +670,15 @@ impl IdleProof {
 }
 
 
-/// Every process by pid, and the pids not yet issued (`toyos_proclife::pids`).
+/// Every process by pid, and the pids not yet issued (`kernel::proclife::pids`).
 pub struct ProcessTable {
     entries: crate::hasher::HashMap<Pid, ProcessEntry>,
-    pids: toyos_proclife::Pids,
+    pids: kernel::proclife::Pids,
 }
 
 impl ProcessTable {
     fn new() -> Self {
-        Self { entries: crate::hasher::HashMap::default(), pids: toyos_proclife::Pids::default() }
+        Self { entries: crate::hasher::HashMap::default(), pids: kernel::proclife::Pids::default() }
     }
 
     pub fn get(&self, pid: Pid) -> Option<&ProcessEntry> {
@@ -873,7 +873,7 @@ impl Admission {
             tree::Admit::Gone => Err(SyscallError::Gone),
             tree::Admit::TooDeep { depth } => {
                 log!("spawn: refused under pid {} at depth {depth}, more than {} below init",
-                    place.expect("spawn: init is admitted at depth 0"), toyos_proclife::MAX_DEPTH);
+                    place.expect("spawn: init is admitted at depth 0"), kernel::proclife::MAX_DEPTH);
                 Err(SyscallError::ResourceExhausted)
             }
             tree::Admit::NoPid => {
@@ -1083,7 +1083,7 @@ fn teardown_bookkeeping(table: &mut ProcessTable, process_pid: Pid, code: i32) -
     cpu_ns
 }
 
-/// Publish `first`, then every parent each publication lets go, child before parent: at most `toyos_proclife::MAX_DEPTH` + 1 publications, each with the table lock given up.
+/// Publish `first`, then every parent each publication lets go, child before parent: at most `kernel::proclife::MAX_DEPTH` + 1 publications, each with the table lock given up.
 /// Once published an entry is reapable, so only its parent's entry is read after.
 fn publish_climb(first: Option<tree::Publish>) {
     let mut ready = first;
@@ -1756,7 +1756,7 @@ pub fn debug_hold_marked_spawn(parent: Parent, child: &crate::object::process::P
             &parkable,
             child.watch(),
             0,
-            toyos_sched::task::WaitClass::Other,
+            kernel::sched::task::WaitClass::Other,
             crate::time::Deadline::never(),
             || child.finished(),
         );

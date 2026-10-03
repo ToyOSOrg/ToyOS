@@ -25,7 +25,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use toyos_bootmap::aarch64::{coverage, direct_map_end, Coverage, ATTR_DEVICE, ATTR_NORMAL, ATTR_NORMAL_NC};
-use toyos_pcid::{Alloc, Pcid, PcidPool};
+use kernel::pcid::{Alloc, Pcid, PcidPool};
 
 use super::tlb;
 use crate::mm::policy::{CachePolicy, MmioPolicy, Prot, WindowProt};
@@ -279,7 +279,7 @@ impl Root {
     }
 
     /// No invalidation: the ASID is this space's alone, and a returned one was
-    /// dropped from every CPU before it was issued again (`toyos_pcid`).
+    /// dropped from every CPU before it was issued again (`kernel::pcid`).
     /// # Safety
     /// The underlying page tables must be valid and live.
     pub unsafe fn activate(self) {
@@ -288,7 +288,7 @@ impl Root {
     }
 }
 
-/// The ASID allocator: `toyos_pcid`'s tags, which 16-bit ASIDs hold whole,
+/// The ASID allocator: `kernel::pcid`'s tags, which 16-bit ASIDs hold whole,
 /// and its reclaim given the shootdown it asks for.
 static ASIDS: Lock<PcidPool> = Lock::new(PcidPool::new());
 
@@ -310,7 +310,7 @@ enum Asid {
 impl Asid {
     fn value(&self) -> u16 {
         match self {
-            Self::Kernel => toyos_pcid::KERNEL_PCID,
+            Self::Kernel => kernel::pcid::KERNEL_PCID,
             Self::User(guard) => guard.0.get(),
         }
     }

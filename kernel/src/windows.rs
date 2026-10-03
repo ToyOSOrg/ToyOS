@@ -1,4 +1,4 @@
-//! Each CPU's [`toyos_sched::windows::Windows`], fed where this CPU's
+//! Each CPU's [`kernel::sched::windows::Windows`], fed where this CPU's
 //! interrupts and preempt count change, and printed beside the IRQ census as
 //! `windows: cpuN irqs_off_ns=… preempt_off_ns=…` (`mask-windows` builds only).
 //!
@@ -29,7 +29,7 @@
 use core::sync::atomic::AtomicBool;
 use core::sync::atomic::Ordering::Relaxed;
 
-use toyos_sched::windows::{Unseen, Windows, HELD_NS};
+use kernel::sched::windows::{Unseen, Windows, HELD_NS};
 
 use crate::arch::{cpu, percpu};
 use crate::sched::MAX_CPUS;

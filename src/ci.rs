@@ -174,7 +174,7 @@ fn cargo_logged(dir: &Path, args: &[&str]) -> Result<(bool, String), String> {
 /// that takes away the one edge the model's property rests on, and the verdict
 /// lines the model must then print.
 pub(crate) struct Control {
-    /// The model's package in the host workspace.
+    /// The model's package: a member of the host workspace, or [`KERNEL`].
     pub(crate) krate: &'static str,
     pub(crate) feature: &'static str,
     /// The test target the verdicts' tests are in; `None` is the library's own.
@@ -217,10 +217,14 @@ impl Verdict {
 
 use Verdict::{Fails, Passes, Says};
 
+/// The kernel package, whose library's tests are its models.
+pub(crate) const KERNEL: &str = "kernel";
+/// Its manifest, resolved on its own. Run from the repository root, cargo
+/// builds it for the host: `kernel/.cargo/config.toml` is read only below
+/// `kernel/`.
+pub(crate) const KERNEL_MANIFEST: &str = "kernel/Cargo.toml";
 const KERNEL_LOOM: &str = "kernel-loom";
-const SCHED_LOOM: &str = "toyos-sched-loom";
-const SCHED_SIM: &str = "toyos-sched-sim";
-const PROCLIFE: &str = "toyos-proclife";
+const KERNEL_SIM: &str = "kernel-sim";
 const BLOCKRING: &str = "toyos-blockring";
 const TRANSPORT: &str = "toyos-transport";
 
@@ -302,23 +306,23 @@ pub(crate) const CONTROLS: &[Control] = &[
         Fails("a_request_filed_during_a_report_is_reported"),
     ]),
     Control {
-        krate: SCHED_LOOM,
+        krate: KERNEL_LOOM,
         feature: "no-preempt-guard",
         test: Some("loom_mailbox"),
         must_red: false,
         verdicts: &[Passes("preempted_producer_strands_suffix")],
     },
-    red(SCHED_LOOM, "doorbell-kick-relaxed", Some("loom_sleep"), &[Says {
+    red(KERNEL_LOOM, "doorbell-kick-relaxed", Some("loom_sleep"), &[Says {
         test: "a_halted_cpu_with_queued_work_was_kicked",
         message: "halted with 2 of 2 messages queued and no IPI in flight",
     }]),
-    red(SCHED_LOOM, "push-fence-relaxed", Some("loom_push"), &[Says {
+    red(KERNEL_LOOM, "push-fence-relaxed", Some("loom_push"), &[Says {
         test: "a_cpu_that_halts_without_seeing_the_surplus_was_pushed",
         message: "published and no push behind it",
     }]),
     // The watch's lost wake, staged: the waiter parks over a post it was flagged
     // with.
-    red(SCHED_LOOM, "commit-ignores-notify", Some("loom_watch"), &[
+    red(KERNEL_LOOM, "commit-ignores-notify", Some("loom_watch"), &[
         Says {
             test: "a_post_racing_a_registration_leaves_nobody_parked",
             message: "parked with the condition true and no wake owed: the post was lost",
@@ -330,25 +334,25 @@ pub(crate) const CONTROLS: &[Control] = &[
     ]),
     // The notify's flagged arm answering off a load: a second post reads the
     // word from before the waiter consumed the first flag.
-    red(SCHED_LOOM, "notify-flag-load-only", Some("loom_watch"), &[Says {
+    red(KERNEL_LOOM, "notify-flag-load-only", Some("loom_watch"), &[Says {
         test: "a_second_post_is_not_lost_to_a_flag_the_waiter_consumed",
         message: "parked with both conditions true and no wake owed: a post answered off a load",
     }]),
     // The stop's store-buffering pair with the gate's fences gone.
-    red(SCHED_LOOM, "gate-fence-off", Some("loom_watch"), &[Says {
+    red(KERNEL_LOOM, "gate-fence-off", Some("loom_watch"), &[Says {
         test: "a_transition_racing_an_opening_gate_is_never_missed",
         message: "the stop parked over a thread that had parked, and nothing posted it",
     }]),
     // `kernel-loom`'s control, over the kernel's `Once` as the watch models'
     // ring entry.
-    red(SCHED_LOOM, "poll-fire-load-store", Some("loom_watch"), &[
+    red(KERNEL_LOOM, "poll-fire-load-store", Some("loom_watch"), &[
         Fails("a_poll_registered_racing_a_post_completes_exactly_once"),
         Fails("a_poll_registered_racing_a_post_in_place_completes_exactly_once"),
         Fails("a_poll_on_two_watches_racing_both_posts_completes_exactly_once"),
     ]),
     // The ring models' lost-completion half: the producer posts before it
     // stores the readiness its registrant rechecks.
-    red(SCHED_LOOM, "fault-posted-before-it-is-set", Some("loom_watch"), &[
+    red(KERNEL_LOOM, "fault-posted-before-it-is-set", Some("loom_watch"), &[
         Says {
             test: "a_poll_registered_racing_a_post_completes_exactly_once",
             message: "a poll over a ready object was completed by neither",
@@ -360,7 +364,7 @@ pub(crate) const CONTROLS: &[Control] = &[
     // (`issues/kernel/steal-probe-node-dies-with-its-victim.md`) rather than
     // proving a lie is caught, and goes with its fix.
     Control {
-        krate: SCHED_LOOM,
+        krate: KERNEL_LOOM,
         feature: "victim-retires-mid-probe",
         test: Some("loom_mailbox"),
         must_red: false,
@@ -370,51 +374,57 @@ pub(crate) const CONTROLS: &[Control] = &[
                       queue",
         }],
     },
-    red(PROCLIFE, "mutate-spawn-skips-the-insert-recheck", None, &[
-        Fails("interleave::tests::a_published_exit_leaves_no_unretired_thread"),
-        Fails("interleave::tests::a_kill_racing_a_spawn_leaves_no_unretired_thread"),
+    // The isolation test reds, and the SDM's own judge of the allocator sees
+    // the cross-space read it lets through.
+    red(KERNEL, "counting-allocator", None, &[
+        Fails("pcid::tests::two_live_address_spaces_never_share_a_pcid"),
+        Passes("pcid::oracle::tests::the_counting_allocator_produces_a_cross_space_read"),
     ]),
-    red(PROCLIFE, "mutate-claim-teardown-always-wins", None, &[
-        Fails("interleave::tests::an_exit_and_a_kill_never_both_tear_a_process_down"),
+    red(KERNEL, "mutate-spawn-skips-the-insert-recheck", None, &[
+        Fails("proclife::interleave::tests::a_published_exit_leaves_no_unretired_thread"),
+        Fails("proclife::interleave::tests::a_kill_racing_a_spawn_leaves_no_unretired_thread"),
     ]),
-    red(PROCLIFE, "mutate-kill-waits-for-its-victims", None, &[
-        Fails("interleave::tests::two_processes_killing_each_other_both_end"),
-        Fails("interleave::tests::a_kill_chain_of_three_ends"),
+    red(KERNEL, "mutate-claim-teardown-always-wins", None, &[
+        Fails("proclife::interleave::tests::an_exit_and_a_kill_never_both_tear_a_process_down"),
     ]),
-    red(PROCLIFE, "mutate-first-out-tears-down", None, &[
-        Fails("interleave::tests::an_exit_and_a_kill_never_both_tear_a_process_down"),
+    red(KERNEL, "mutate-kill-waits-for-its-victims", None, &[
+        Fails("proclife::interleave::tests::two_processes_killing_each_other_both_end"),
+        Fails("proclife::interleave::tests::a_kill_chain_of_three_ends"),
     ]),
-    red(PROCLIFE, "mutate-join-collects-in-a-teardown", None, &[
-        Fails("interleave::tests::a_join_racing_the_kill_that_takes_its_target"),
+    red(KERNEL, "mutate-first-out-tears-down", None, &[
+        Fails("proclife::interleave::tests::an_exit_and_a_kill_never_both_tear_a_process_down"),
     ]),
-    red(PROCLIFE, "mutate-last-out-leaves-before-its-teardown", None, &[
-        Fails("interleave::tests::the_last_one_out_is_in_its_process_until_its_teardown_is_done"),
-        Fails("teardown::tests::only_the_thread_that_empties_a_claimed_process_tears_it_down"),
+    red(KERNEL, "mutate-join-collects-in-a-teardown", None, &[
+        Fails("proclife::interleave::tests::a_join_racing_the_kill_that_takes_its_target"),
     ]),
-    red(PROCLIFE, "mutate-place-skips-the-insert-recheck", None, &[
-        Fails("interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it"),
+    red(KERNEL, "mutate-last-out-leaves-before-its-teardown", None, &[
+        Fails("proclife::interleave::tests::the_last_one_out_is_in_its_process_until_its_teardown_is_done"),
+        Fails("proclife::teardown::tests::only_the_thread_that_empties_a_claimed_process_tears_it_down"),
     ]),
-    red(PROCLIFE, "mutate-refused-spawn-keeps-the-count", None, &[
-        Fails("interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it"),
+    red(KERNEL, "mutate-place-skips-the-insert-recheck", None, &[
+        Fails("proclife::interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it"),
     ]),
-    red(PROCLIFE, "mutate-landed-child-retires-nothing", None, &[
-        Fails("interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it"),
-        Fails("tree::tests::a_child_landed_under_a_place_claimed_since_its_admission_is_claimed_with_it"),
+    red(KERNEL, "mutate-refused-spawn-keeps-the-count", None, &[
+        Fails("proclife::interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it"),
     ]),
-    red(PROCLIFE, "mutate-publish-before-the-children", None, &[
-        Fails("interleave::tests::an_exit_publishes_after_every_end_below_it"),
+    red(KERNEL, "mutate-landed-child-retires-nothing", None, &[
+        Fails("proclife::interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it"),
+        Fails("proclife::tree::tests::a_child_landed_under_a_place_claimed_since_its_admission_is_claimed_with_it"),
     ]),
-    red(PROCLIFE, "mutate-walk-in-one-hold", None, &[
-        Fails("interleave::tests::a_spawn_under_an_unrelated_process_lands_between_two_claims_of_one_walk"),
+    red(KERNEL, "mutate-publish-before-the-children", None, &[
+        Fails("proclife::interleave::tests::an_exit_publishes_after_every_end_below_it"),
     ]),
-    red(PROCLIFE, "mutate-spawner-handle-after-the-landing", None, &[
-        Fails("interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it"),
-        Fails("interleave::tests::a_spawn_racing_the_kill_of_its_own_spawner"),
+    red(KERNEL, "mutate-walk-in-one-hold", None, &[
+        Fails("proclife::interleave::tests::a_spawn_under_an_unrelated_process_lands_between_two_claims_of_one_walk"),
     ]),
-    red(PROCLIFE, "mutate-spawner-handle-before-the-childs-own", None, &[
-        Fails("interleave::tests::a_sibling_closing_a_spawns_handle_before_the_spawn_returns"),
+    red(KERNEL, "mutate-spawner-handle-after-the-landing", None, &[
+        Fails("proclife::interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it"),
+        Fails("proclife::interleave::tests::a_spawn_racing_the_kill_of_its_own_spawner"),
     ]),
-    red(SCHED_SIM, "placement-ignores-staleness", Some("policy"), &[
+    red(KERNEL, "mutate-spawner-handle-before-the-childs-own", None, &[
+        Fails("proclife::interleave::tests::a_sibling_closing_a_spawns_handle_before_the_spawn_returns"),
+    ]),
+    red(KERNEL_SIM, "placement-ignores-staleness", Some("policy"), &[
         Fails("a_stopped_cpu_stops_taking_work"),
     ]),
     // The block protocol's three: a completion lost to a session's end, a
@@ -466,7 +476,12 @@ fn judge_control(control: &Control, exited_green: bool, log: &str) -> Result<Str
 }
 
 fn run_control(root: &Path, control: &Control) -> Result<String, String> {
-    let mut args = vec!["test", "-p", control.krate, "--features", control.feature];
+    // Cargo refuses `--features` for a package outside the workspace.
+    let package = match control.krate {
+        KERNEL => ["--manifest-path", KERNEL_MANIFEST],
+        member => ["-p", member],
+    };
+    let mut args = vec!["test", package[0], package[1], "--features", control.feature];
     match control.test {
         Some(test) => args.extend(["--test", test]),
         None => args.push("--lib"),
@@ -481,10 +496,11 @@ fn run_control(root: &Path, control: &Control) -> Result<String, String> {
 }
 
 /// Every test that runs on the host and boots no guest. The build system's own
-/// tests, every member of the host workspace, clippy with warnings denied, the
-/// concurrency models' negative controls, every userland crate with a host test
-/// ([`crate::userlandhost`], which also reds on a userland test none of them
-/// runs), every app the images ship for each host ([`apps_for`]), and the SDK.
+/// tests, every member of the host workspace, the kernel's library, clippy with
+/// warnings denied, the concurrency models' negative controls, every userland
+/// crate with a host test ([`crate::userlandhost`], which also reds on a
+/// userland test none of them runs), every app the images ship for each host
+/// ([`apps_for`]), and the SDK.
 ///
 /// **Every step runs against a `$TMPDIR` of this job's own, and the last step
 /// reds on anything left in it** but the lock `toyos_tmpdir` keeps there: a test
@@ -523,6 +539,16 @@ fn host(root: &Path) -> Vec<Step> {
         step("the host workspace", || {
             cargo(root, &["test", "--workspace", "--exclude", "toyos-build"])
         }),
+        step("the kernel's library", || {
+            cargo(root, &[
+                "test",
+                "--manifest-path",
+                KERNEL_MANIFEST,
+                "--lib",
+                "--features",
+                "sched-check",
+            ])
+        }),
         step("the licences of what ships", || crate::licence::judge(root)),
     ]);
     steps.push(step("clippy and the bare targets", || {
@@ -550,8 +576,8 @@ fn host(root: &Path) -> Vec<Step> {
     steps.push(step("kernel-loom without loom", || {
         cargo(root, &[
             "test",
-            "--manifest-path",
-            "kernel-loom/Cargo.toml",
+            "-p",
+            KERNEL_LOOM,
             "--no-default-features",
             "--test",
             "log_zeroed_init",
@@ -1113,7 +1139,7 @@ mod tests {
         let says = control("doorbell-kick-relaxed");
         let panicked = "running 1 test\n\n\
                         thread 'a_halted_cpu_with_queued_work_was_kicked' (77012) panicked at \
-                        toyos-sched/loom/tests/loom_sleep.rs:102:13:\n\
+                        kernel/loom/tests/loom_sleep.rs:102:13:\n\
                         halted with 2 of 2 messages queued and no IPI in flight — a sleep-through\n";
         assert!(judge_control(says, false, panicked).is_ok());
 

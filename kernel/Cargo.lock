@@ -50,12 +50,9 @@ dependencies = [
  "toyos-gpt",
  "toyos-hda",
  "toyos-pci",
- "toyos-pcid",
- "toyos-proclife",
  "toyos-ps2",
  "toyos-quiesce",
  "toyos-rootimage",
- "toyos-sched",
  "toyos-symbols",
  "toyos-tco",
  "toyos-untrusted",
@@ -142,17 +139,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "toyos-pcid"
-version = "0.1.0"
-
-[[package]]
-name = "toyos-proclife"
-version = "0.1.0"
-dependencies = [
- "toyos-abi",
-]
-
-[[package]]
 name = "toyos-ps2"
 version = "0.1.0"
 
@@ -162,10 +148,6 @@ version = "0.1.0"
 
 [[package]]
 name = "toyos-rootimage"
-version = "0.1.0"
-
-[[package]]
-name = "toyos-sched"
 version = "0.1.0"
 
 [[package]]

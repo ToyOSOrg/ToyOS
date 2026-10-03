@@ -2,7 +2,7 @@
 //! a waiter on it is either a thread, which a post *wakes*, or a user poll
 //! ring's entry, which a post *fires*.
 //!
-//! The protocol is `toyos_sched::watch`'s and `toyos_sched::park`'s, and its
+//! The protocol is `kernel::sched::watch`'s and `kernel::sched::park`'s, and its
 //! lost-wake argument is theirs: a thread registers before it reads its
 //! condition, and a post either precedes the registration or writes the
 //! thread's state word, which its own next commit reads. Nothing here keeps a
@@ -20,12 +20,12 @@
 
 use alloc::sync::Arc;
 
-use toyos_sched::hw::Nanos;
-use toyos_sched::sync::CellLock;
-use toyos_sched::task::{Refused, WaitClass, WakeCause, WakeReason};
-use toyos_sched::watch::{Poster, Waiters};
+use kernel::sched::hw::Nanos;
+use kernel::sched::sync::CellLock;
+use kernel::sched::task::{Refused, WaitClass, WakeCause, WakeReason};
+use kernel::sched::watch::{Poster, Waiters};
 
-pub use toyos_sched::park::Cancel;
+pub use kernel::sched::park::Cancel;
 
 use crate::hw::HW;
 use crate::inbox::PollEntry;
@@ -37,7 +37,7 @@ use crate::time::Deadline;
 type List = Waiters<KMsg, PollEntry>;
 
 /// What an object holds to be waitable, its list behind `L`.
-pub struct Waitable<L: CellLock<List>>(toyos_sched::watch::Watch<KMsg, PollEntry, L>);
+pub struct Waitable<L: CellLock<List>>(kernel::sched::watch::Watch<KMsg, PollEntry, L>);
 
 /// A watch no interrupt handler reaches.
 pub type Watch = Waitable<KernelLock<List>>;
@@ -91,7 +91,7 @@ mod masked {
 
 impl Watch {
     pub const fn new() -> Self {
-        Self(toyos_sched::watch::Watch::new(KernelLock::new(Waiters::new())))
+        Self(kernel::sched::watch::Watch::new(KernelLock::new(Waiters::new())))
     }
 
     /// Something about the object changed: wake every thread waiting on it and
@@ -138,7 +138,7 @@ impl Watch {
 
 impl IrqWatch {
     pub const fn new() -> Self {
-        Self(toyos_sched::watch::Watch::new(IrqLock::new(Waiters::new())))
+        Self(kernel::sched::watch::Watch::new(IrqLock::new(Waiters::new())))
     }
 
     /// Something about the object changed: wake every thread waiting on it and

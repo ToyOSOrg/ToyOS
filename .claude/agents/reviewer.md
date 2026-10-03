@@ -45,8 +45,11 @@ if it meets the bar above; otherwise it is a NOTE.
 
 ## What to look for
 
-- **Fit.** Does the tree already do this? Is each new thing where it belongs: a pure decision in a
-  pure crate, the user/kernel boundary in `toyos-userbound`, a device claim in a userland server?
+- **Fit.** Does the tree already do this? Is each new thing where it belongs: what one program alone
+  uses in that program's package, a decision of the kernel's in its library, and a crate of its own
+  only for what two programs share, one per subject, or for an input boundary, whose own source
+  decodes or bounds a word from outside its trust, whoever uses it; the user/kernel boundary in
+  `toyos-userbound`, a device claim in a userland server?
   One declaration read by every reader, refusal by name, authority moved in by the parent. Zero
   legacy: no shim, no workaround, no silent default. A BLOCKER each: a kernel addition that
   userland could own; a design made worse to spare the ABI. A new dependency only where it is the

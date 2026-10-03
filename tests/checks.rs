@@ -419,7 +419,7 @@ mod checks {
         };
         let report = |cpu0: (u64, u64), cpu1: (u64, u64)| [census(0), windows(0, cpu0), census(1), windows(1, cpu1)].concat();
         let exit = |name: &str| format!("[kernel 0.1 cpu0] exit: {name} pid=9 code=0 cpu=1ms\n");
-        let held_ns = toyos_sched::windows::HELD_NS;
+        let held_ns = kernel::sched::windows::HELD_NS;
         let hold = format!("[kernel 0.1 cpu1] windows: held cpu1 ns={}\n", held_ns + 7);
         // Since each CPU joined: longer on cpu0 than anything under the load.
         let first = [report((6_500_000, 6_400_000), (900, 800)), exit("test_rs_idle_span")].concat();
