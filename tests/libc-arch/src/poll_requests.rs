@@ -6,7 +6,7 @@ use toyos_abi::inbox::{READABLE, WRITABLE};
 use crate::header;
 use crate::pollreq::{watch_of, watches};
 
-const POLL_H: &str = include_str!("../../userland/libc/include/poll.h");
+const POLL_H: &str = include_str!("../../../userland/libc/include/poll.h");
 
 fn events(names: &[&str]) -> i16 {
     names.iter().fold(0, |events, name| events | header::int(POLL_H, name) as i16)

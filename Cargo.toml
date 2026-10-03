@@ -18,6 +18,7 @@ members = [
     "bcachefs",
     "kernel/loom",
     "kernel/sim",
+    "tests/libc-arch",
     "toyos-abi",
     "toyos-acpi",
     "toyos-blackbox",
@@ -32,7 +33,7 @@ members = [
     "toyos-elf",
     "toyos-elide",
     "toyos-fat32",
-    "toyos-fat32-check",
+    "toyos-fat32/check",
     "toyos-gicv3",
     "toyos-gpt",
     "toyos-hda",
@@ -40,7 +41,6 @@ members = [
     "toyos-inspect",
     "toyos-keymap",
     "toyos-ld",
-    "toyos-libc-copies",
     "toyos-logstream",
     "toyos-manifest",
     "toyos-mdns",
@@ -64,7 +64,6 @@ members = [
     "toyos-untrusted",
     "toyos-update",
     "toyos-userbound",
-    "toyos-userpin",
     "toyos-wallclock",
     "toyos-xhci",
     "toyos-xhci/sim",
@@ -93,10 +92,12 @@ exclude = [
     # `cargo test` in it against the host triple.
     "toyos",
     # Guest programs `src/build.rs` builds for `x86_64-unknown-toyos`, each from
-    # its own directory. The harness's own integration test lives here too
-    # (`tests/toyos.rs`), and that one is a target of the root package rather
-    # than a package of its own.
-    "tests",
+    # its own directory. Named, and not `tests/` whole, so the gate finds a host
+    # test under `tests/` that joined neither list.
+    "tests/toyos-rust-tests",
+    # A host judge: a second implementation, whose dependency graph is not the
+    # harness's to resolve (`src/build.rs`, `build_host_judges`).
+    "tests/ssh-client-host",
 ]
 
 [package]
@@ -130,7 +131,7 @@ toyos-fat32 = { path = "toyos-fat32" }
 # The two readers `image::certify` judges every published image with. They are
 # dependencies of the build rather than of its tests because a flash target is
 # not published until they have both passed on it.
-toyos-fat32-check = { path = "toyos-fat32-check" }
+toyos-fat32-check = { path = "toyos-fat32/check" }
 toyos-gpt = { path = "toyos-gpt" }
 toyos-keymap = { path = "toyos-keymap" }
 # The form a program's line takes in a boot's log and the port `logd` serves it

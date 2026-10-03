@@ -15,5 +15,5 @@ default = ["std-runtime"]
 std-runtime = []
 
 [dev-dependencies]
-toyos-abi = { path = "../toyos-abi" }
-toyos-elf = { path = "../toyos-elf" }
+toyos-abi = { path = "../../toyos-abi" }
+toyos-elf = { path = "../../toyos-elf" }
