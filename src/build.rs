@@ -2754,8 +2754,7 @@ mod tests {
 
     /// The kernel depends on no libc (root `CLAUDE.md`, Dependencies), and its
     /// `Cargo.lock` cannot show it: a lock records every platform's edges and
-    /// none of their `cfg`s, so it names `libc`, `dlmalloc`'s edge on unix,
-    /// whether a kernel target takes that edge or not.
+    /// none of their `cfg`s.
     #[test]
     fn the_kernel_resolves_no_libc_for_either_target() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
