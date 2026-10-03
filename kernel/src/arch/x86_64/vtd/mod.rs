@@ -325,20 +325,15 @@ impl Unit {
     /// wait. `CFI` is written as firmware writes it, unconfirmed: whether
     /// `GSTS` reports it is the unit's to say.
     ///
-    /// Through an identity domain of its own, never an empty root: a unit left
+    /// Through the identity domain, never an empty root: a unit left
     /// translating through tables that miss a reserved region faults its
     /// device's DMA for as long as it is left so, which firmware may not do.
     #[cfg(feature = "boot-actuators")]
-    fn leave_on(&self, devices: &[PciDevice], width: AddressWidth) {
+    fn leave_on(&self, devices: &[PciDevice], domain: Table, width: AddressWidth) {
         let (mut queue, root, remap) = {
             let mut tables = TABLES.lock();
             let queue = Queue::new(&mut tables, self.regs);
-            let (domain, _) = table::identity_domain(&mut tables, width, crate::mm::pmm::top());
-            let root = tables.alloc();
-            for device in devices {
-                let stream = StreamId::pci(device.bus, device.dev, device.func);
-                table::bind_identity(&mut tables, root, stream, domain, width);
-            }
+            let root = identity_root(&mut tables, devices, domain, width);
             (queue, root, tables.alloc())
         };
         self.command(QUEUED_INVALIDATION_ENABLE, true, "queued invalidation");
@@ -512,39 +507,21 @@ fn enable(
 ) {
     let index = unit.index;
     let Plan { width, records } = plan;
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::iommu_firmware_left() {
-        unit.leave_on(devices, width);
-    }
     // Before any table is built: what a domain of a driver's own can be is the
     // narrowest thing every translating unit on this machine agrees to.
     domain::unit_agrees(width, unit.caps.domains(), unit.caps.mgaw());
 
-    let root = {
-        let mut tables = TABLES.lock();
-        let domain = match domains[domain_slot(width)] {
-            Some(domain) => domain,
-            None => {
-                let top = crate::mm::pmm::top();
-                let (domain, frames) = table::identity_domain(&mut tables, width, top);
-                log!(
-                    "iommu: identity domain aw={} covers 0x0..{top:#x} in {frames} 2 MiB leaves",
-                    width.bits()
-                );
-                domains[domain_slot(width)] = Some(domain);
-                domain
-            }
-        };
-
-        // Every enumerated function needs a context entry before `TE`: one
-        // missing bricks the boot disk instead of merely faulting later.
-        let root = tables.alloc();
-        for device in devices {
-            let stream = StreamId::pci(device.bus, device.dev, device.func);
-            table::bind_identity(&mut tables, root, stream, domain, width);
-        }
-        root
-    };
+    let domain = *domains[domain_slot(width)].get_or_insert_with(|| {
+        let top = crate::mm::pmm::top();
+        let (domain, frames) = table::identity_domain(&mut TABLES.lock(), width, top);
+        log!("iommu: identity domain aw={} covers 0x0..{top:#x} in {frames} 2 MiB leaves", width.bits());
+        domain
+    });
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::iommu_firmware_left() {
+        unit.leave_on(devices, domain, width);
+    }
+    let root = identity_root(&mut TABLES.lock(), devices, domain, width);
 
     // After the tables are built, so a unit firmware left translating passes DMA
     // untranslated only while it is programmed
@@ -594,6 +571,17 @@ fn enable(
         width.bits(),
         devices.len(),
     );
+}
+
+/// A root table giving every enumerated function a context entry in `domain`:
+/// one missing before `TE` bricks the boot disk instead of merely faulting later.
+fn identity_root(tables: &mut Tables, devices: &[PciDevice], domain: Table, width: AddressWidth) -> Table {
+    let root = tables.alloc();
+    for device in devices {
+        let stream = StreamId::pci(device.bus, device.dev, device.func);
+        table::bind_identity(tables, root, stream, domain, width);
+    }
+    root
 }
 
 /// Slot of the per-width domain cache; exhaustive match so a new `AddressWidth` fails to compile here.
