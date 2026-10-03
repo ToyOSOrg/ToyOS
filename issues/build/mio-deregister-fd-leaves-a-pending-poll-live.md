@@ -55,22 +55,18 @@ first (grepped the estate for a submitter — found none, which is true and
 remains true) rather than asking whether `deregister_fd`'s behavior was itself
 correct.
 
-## Why it matters for pipeline 2
+## What a fix has to promise
 
-The completion track makes every kernel wait a cancellable completion, answered
-by `Cancelled` rather than by discarding the stack
-(`issues/kernel/every-wait-in-this-kernel-is-a-spin.md`). The 2026-08-15
-mechanism-consolidation audit called the userland-facing half of that "pipeline
-2" and named its cancellation rewrite the highest-risk piece of the whole
-track. mio's selector is exactly
-the kind of consumer that rewrite has to get right: a `deregister` that cannot
-promise "no event after this point" is the userland mirror of the kernel-side
-bug pipeline 2 exists to remove. Re-adding a cancel op (or otherwise making
-`deregister_fd` synchronous with the kernel's pending state — draining the SQ/CQ
-for that fd, or having the kernel answer a targeted query) is in scope for
-whoever designs that half; retiring `IORING_OP_POLL_REMOVE` a second time
-without addressing this would repeat the same reasoning gap.
+A kernel wait a kill ends is answered `Cancelled` (`kernel/src/watch.rs`).
+mio's selector is the userland mirror of that, and a `deregister` that cannot
+promise "no event after this point" is what it lacks: no ring op withdraws a
+watch (`toyos-abi/src/inbox.rs` has `OP_NOP`, `OP_WATCH` and `OP_ACCEPT`).
+Re-adding a cancel op (or otherwise making `deregister_fd` synchronous with
+the kernel's pending state — draining the SQ/CQ for that fd, or having the
+kernel answer a targeted query) is in scope for whoever fixes this; retiring
+`IORING_OP_POLL_REMOVE` a second time without addressing this would repeat the
+same reasoning gap.
 
 Filed rather than fixed: this is a fork (mio, not this repository) and a
-design question (what the cancel primitive should look like once pipeline 2
-exists), not a local bug fix.
+design question (what the cancel primitive should look like), not a local bug
+fix.

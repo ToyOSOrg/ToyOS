@@ -13,7 +13,8 @@ of the shipped `system.toml` in three rows:
   nothing in the tree runs `/system/bin/proctest` but `proctest` itself.
 - `input-test = {}`: a test utility by its README, and nothing runs
   `/system/bin/input-test`; `toyos-symbols/tests/real.rs` reads a frozen copy
-  under `toyos-symbols/tests/fixtures/`, not the shipped binary.
+  under `toyos-symbols/tests/fixtures/`, not the shipped binary. It leaves the
+  shipped image (owner, 2026-10-03).
 - `"bin/spin" = "/system/bin/toybox"`: `userland/toybox/src/spin.rs` loops
   forever, and nothing in the tree runs it; its one named use is a test, the
   metal `sshd_exec` row

@@ -22,7 +22,9 @@ program named is neither. No step here merges one; each stays a crate under
 the no-panic track.
 
 Every step lands green on `--ci host` and `--build-only`. Test counts are what
-`cargo test -p <package> -- --list` lists today.
+`cargo test -p <package> -- --list` lists today. Step 2 lands right after #592
+and #631, of which #631 has landed, before the latency work
+(`issues/kernel/toyos-beats-linuxs-latency-on-the-t14.md`; owner, 2026-10-03).
 
 1. **Delete `toyos-userpin`.** It models the pin invariant and names nothing
    the kernel defines; `munmap_reissues_read_window` holds the kernel to it.
