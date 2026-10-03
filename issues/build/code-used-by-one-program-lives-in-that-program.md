@@ -56,11 +56,6 @@ and #631, of which #631 has landed, before the latency work
    tests, which it lists as escapes today.
    Check: `--ci host` runs every test each package lists today, and `--clippy`
    lints them.
-5. **`toyos-fat32-check` goes under `toyos-fat32/`.** The build and
-   `toyos-fat32`'s tests both use it, and it moves to `toyos-fat32/check/`,
-   beside the one subject it judges.
-   Check: `--ci host` runs every test the package lists today, and `--clippy`
-   lints them.
 
 **Exit:** no directory this file names as moved or merged still exists, and
 step 4's count finds no crate outside its one consumer.
