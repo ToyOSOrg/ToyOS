@@ -44,19 +44,28 @@ What differs, as far as anything has read:
   `SMI_CMD=0xb2` and `ACPI_ENABLE=0xf0`; `PM1a_CNT` (port 0x1804) `0x0001`,
   `SCI_EN` set; `SMI_EN` (port 0x1830) `0x10002033`, bits 0 (`GBL_SMI_EN`), 1
   (`EOS`), 4 (`SLP_SMI_EN`), 5 (`APMC_EN`), 13 (`TCO_EN`) and 28.
-- Under ToyOS neither `SCI_EN` nor `SMI_EN` has been read.
 
-The cause is not known. The `mask-windows` kernel prints such a window as its
-CPU's own: cpu4's 4,720,498 ns in the sixth of #649's `mask_windows` boots at
-`72f16e39a`, and cpu0's 4,725,822 in `649-r6/3-idle-halt-counted`
+**The cause, measured, is the firmware's legacy mode.** A scout on `main` at
+`73282fa93` (comment 5966817345) booted the T14 twice, each boot 30 s idle and
+then 30 s with a spinning thread on every CPU:
+
+- With nothing written, `PM1a_CNT` read `0x0000`, `SCI_EN` clear, from 0.156 s
+  to 61.226 s, and `SMI_EN` read `0x10002033`, Linux's value. The count rose
+  by 14 in the idle 30 s and 13 in the busy 30 s, on every CPU alike.
+- With `ACPI_ENABLE` written to `SMI_CMD` at 0.156 s, `SCI_EN` read set
+  2,129,279 ns later. The write moved the writing CPU's count from 4817 to
+  4818, and every CPU then read 4818 at every report through 61.233 s. The
+  SCI's line, GSI 9, stayed masked: nothing in ToyOS handles an SCI.
+
+The `mask-windows` kernel prints such a window as its CPU's own: cpu4's
+4,720,498 ns in the sixth of #649's `mask_windows` boots at `72f16e39a`, and cpu0's 4,725,822 in `649-r6/3-idle-halt-counted`
 (`issues/kernel/a-process-lengthens-an-interrupts-off-walk-by-the-threads-it-parks-on-one-ring.md`),
 are this by reading, those kernels not reading the count.
 
 **Owner**: the T14 loop (`issues/hardware/the-t14-boots-toyos-unattended.md`)
 owns only the reading: its jobs are the measurements owed on hardware, and it
-builds the row. The fix has no owner in the tree yet: the owner has approved a
-scout of the switch to ACPI mode, and who owns a fix is put to him with the
-scout's result.
+builds the row. The fix has no owner in the tree yet: who owns it is put to
+the owner with the scout's result.
 
 **Exit**: a T14 row reads `MSR_SMI_COUNT` on every CPU after init is spawned
 and after the boot's last write to `SMI_CMD`, whoever makes it, and again at
