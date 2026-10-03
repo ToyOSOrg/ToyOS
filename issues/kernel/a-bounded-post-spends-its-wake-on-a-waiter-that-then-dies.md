@@ -20,6 +20,6 @@ claim through `scheduler::wake_sched`.
 ## Exit condition
 
 A bounded post never counts a waiter whose commit answers `Killed` — a model in
-`toyos-sched/loom/tests/loom_watch.rs` with two waiters on one token, one of
+`kernel/loom/tests/loom_watch.rs` with two waiters on one token, one of
 them killed while committing, and a `post_n(token, 1)` racing it, where the live
 one must be reached.
