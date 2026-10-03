@@ -39,8 +39,8 @@
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering::AcqRel, Ordering::Relaxed};
 
 use toyos_quiesce::{must_stop, Record, Sweep, ThreadId};
-use toyos_sched::task::WaitClass;
-use toyos_sched::watch::Gate;
+use kernel::sched::task::WaitClass;
+use kernel::sched::watch::Gate;
 
 use crate::arch::percpu;
 use crate::watch::{self, Watch};
@@ -56,7 +56,7 @@ use crate::time::{Budget, Deadline, Duration};
 /// without parking. A thread can therefore outlast this, which is why its
 /// expiry is a clause in the record.
 pub(crate) const PARK: Budget = Budget::of(
-    Duration::from_nanos(toyos_sched::fair::QUANTUM_NS + crate::block::OPERATION.nanos()),
+    Duration::from_nanos(kernel::sched::fair::QUANTUM_NS + crate::block::OPERATION.nanos()),
     "the reset lands wherever the threads that never reached a safe point are, and \
      the record names how many",
 );

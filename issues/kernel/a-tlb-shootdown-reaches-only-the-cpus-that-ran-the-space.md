@@ -20,7 +20,7 @@ CPU touches a page the initiator unmaps and then faults; on each proving
 machine with PCID, the sibling touches the page and blocks off its pinned CPU,
 the initiator unmaps it while the sibling is blocked and a thread of another
 space runs there, and the sibling faults on touching it again after it wakes
-there; cases in `kernel-loom/tests/tlb_shootdown.rs` switch a CPU into the
+there; cases in `kernel/loom/tests/tlb_shootdown.rs` switch a CPU into the
 space, and out of it, while the initiator reads the target set; the T14's
 munmap figure. **Mutation**, each red: a target set that omits a CPU the space
 ran on; a CPU that joins the set after loading CR3; a CPU cleared from the set

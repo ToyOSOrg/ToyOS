@@ -81,7 +81,7 @@ console's renderer. Exit: as stage A.
 
 ## Stage C: CPUs, memory, scheduling and the kernel log
 
-Metal: test kernels armed on the T14. Host: `toyos-sched` and its sim, `kernel-loom`,
+Metal: test kernels armed on the T14. Host: `kernel::sched` and `kernel-sim`, `kernel-loom`,
 `toyos-wallclock`. Exit: as stage A; an unrepresentable name is a type the kernel builds against
 and a compile-fail case.
 

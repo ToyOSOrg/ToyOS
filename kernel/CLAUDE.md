@@ -1,6 +1,6 @@
 # Kernel
 
-The module header at the site owns its subsystem — read it before changing a module. The scheduler core is `toyos-sched/`, driven from `kernel/src/sched/`; every user transition's machine state is `arch/*/fpu.rs`, with AArch64's `entry.rs` and `trap.rs`; every syscall is `kernel/src/syscall/`, and `dispatch.rs` decodes every user pointer the ABI takes.
+The module header at the site owns its subsystem — read it before changing a module. The scheduler core is `kernel/pure/sched/`, driven from `kernel/src/sched/`; every user transition's machine state is `arch/*/fpu.rs`, with AArch64's `entry.rs` and `trap.rs`; every syscall is `kernel/src/syscall/`, and `dispatch.rs` decodes every user pointer the ABI takes.
 
 ## Caveats that bite every agent
 
@@ -14,7 +14,7 @@ The module header at the site owns its subsystem — read it before changing a m
 - **`drain_irqs` is the drivers' engine and nothing on it may wait** — a blocking call there empties the audio pipeline on every plug.
 - **A syscall that can block resolves its handle and clones the object out before it blocks** — a `with_object`/`with_process_data` guard held across a park is a runtime panic no compile check catches; the `SYS_FSYNC` arm in `syscall/dispatch.rs` is the pattern.
 - **A block-layer `BudgetExpired` is not-durable-yet and never a loss** — it is retried on a fresh budget above every lock; a flush that discards its pages on one splits a FAT mirror.
-- **A decision the process table makes lives in `toyos-proclife`, never in `process.rs`** — its defects are interleavings and that crate is the only machine that can enumerate one.
+- **A decision the process table makes lives in `kernel/pure/proclife/`, never in `process.rs`** — its defects are interleavings and its host tests are the only machine that can enumerate one.
 - **A task holds at most one watch registration** — a standing registration across a loop must not call anything that registers again. A double registration panics only at attempt ≥ 2, so the contention depth is the coverage.
 - **A console is per holder, minted at spawn** — the object *is* the line buffer.
 - **`ops::close` cancels a poll only for a source its object really ends** — `Watch::cancel_polls` answers every ring's poll on that watch; `ops::close_ends_polls` is where a new object kind answers.
