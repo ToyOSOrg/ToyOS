@@ -63,7 +63,6 @@ fn role() -> ! {
 }
 
 fn attacker() {
-    let _ = std::fs::remove_file(LINK);
     symlink(DECLARED, LINK).expect("create the link at the declared row");
 
     let stop = Arc::new(AtomicBool::new(false));
