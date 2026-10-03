@@ -562,14 +562,16 @@ pub unsafe fn set_kernel_stack(rsp: u64) {
     core::ptr::write_unaligned(&raw mut (*percpu).tss.rsp0, rsp);
 }
 
-/// This CPU's I/O permission bitmap. Called with interrupts off, so the CPU
-/// whose bitmap this reaches cannot change under `f`, and nothing else on it
-/// runs to reach the bitmap during `f`.
+/// This CPU's I/O permission bitmap. Called with preemption held, by a
+/// scheduler pass's own hold or by closed interrupts, so the caller cannot
+/// leave the CPU whose bitmap this reaches while `f` runs.
 pub fn io_bitmap<R>(f: impl FnOnce(&mut IoBitmap) -> R) -> R {
     let percpu = gs::read_u64::<OFF_SELF_PTR>() as *mut PerCpu;
     // SAFETY: this CPU's own `PerCpu`, read from `gs:[0]`, and the only Rust
-    // reference into its bitmap for as long as interrupts stay off; `IoBitmap`
-    // has alignment 1, which no packed struct breaks.
+    // reference into its bitmap while `f` runs: the caller stays on this CPU,
+    // and the one handler that reaches the bitmap is a Ring 3 #GP's, which
+    // interrupts no kernel code; `IoBitmap` has alignment 1, which no packed
+    // struct breaks.
     f(unsafe { &mut (*percpu).tss.io_bitmap })
 }
 

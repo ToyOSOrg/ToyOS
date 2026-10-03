@@ -43,8 +43,8 @@ pub fn set_masked(line: Line, masked: bool) {
 }
 
 /// Open every row's ports if `pid` holds that row and close them otherwise, on
-/// this CPU: at every switch, with `pid` the incoming task's process, and with
-/// interrupts off.
+/// this CPU: at every switch, with `pid` the incoming task's process, under the
+/// pass's preemption hold; and at a bind, with interrupts closed.
 pub fn switch_to(pid: Option<Pid>) {
     let rows = GRANTABLE
         .iter()
