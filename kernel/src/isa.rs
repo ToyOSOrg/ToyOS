@@ -76,14 +76,6 @@ static WATCHES: [IrqWatch; MAX_ROWS] = [const { IrqWatch::new() }; MAX_ROWS];
 
 /// Mint the claim on the row `set` names, lines routed and unmasked.
 pub fn claim(set: IsaId) -> Result<usize, ClaimError> {
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::isa_claim_straddles_quarantine() {
-        return pio::straddling(|| mint(set));
-    }
-    mint(set)
-}
-
-fn mint(set: IsaId) -> Result<usize, ClaimError> {
     let row = GRANTABLE
         .iter()
         .position(|g| {

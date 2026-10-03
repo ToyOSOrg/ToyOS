@@ -58,10 +58,3 @@ pub fn switch_to(pid: Option<Pid>) {
 pub fn refused_port(access: PortAccess) -> Option<u16> {
     super::percpu::io_bitmap(|bitmap| bitmap.refused(access))
 }
-
-/// Under `isa-claim-straddles-quarantine`, `claim` staged against the i8042's
-/// quarantine.
-#[cfg(feature = "boot-actuators")]
-pub fn straddling<R>(claim: impl FnOnce() -> R) -> R {
-    super::i8042::straddle::around(claim)
-}

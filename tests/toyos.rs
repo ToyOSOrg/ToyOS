@@ -88,12 +88,11 @@ const RUST_SKIP: &[&str] = &[
     "ccheck",
     "disk_backtrace_child",
     "fault_gate_child",
-    // Each needs a boot whose i8042 the kernel does not drive, or stops driving:
-    // the `isa_ports_are_the_binders_alone`, `isa_lines_reach_their_holder` and
-    // `isa_claim_straddles_the_quarantine` metal rows run them.
+    // Each needs a boot whose i8042 the kernel does not drive: the
+    // `isa_ports_are_the_binders_alone` and `isa_lines_reach_their_holder`
+    // metal rows run them.
     "isa_grant",
     "isa_lines",
-    "isa_straddled",
     // It takes the machine down; `virt_fatal_halts_the_others_first` runs it.
     "panic_halts_first",
     // Needs a launcher and a declared `cat` and shell, which `tests/testcases`
@@ -641,8 +640,7 @@ const METAL: &[(&str, metal::Metal)] = &[
             judge: |b| operation_nesting_log(b[0].kernel().text()),
         },
     ),
-    // ---- the `isa` claim: one image whose i8042 the kernel leaves alone, and
-    // one whose kernel drives it into its quarantine ----
+    // ---- the `isa` claim: one image whose i8042 the kernel leaves alone ----
     (
         // The I/O permission bitmap on the machine's own processor: the ports
         // open to the process that bound them, and every other access killed
@@ -665,21 +663,6 @@ const METAL: &[(&str, metal::Metal)] = &[
             judge: |b| {
                 b[0].job_passed("test_rs_isa_lines")?;
                 isa::lines(&b[0].kernel())
-            },
-        },
-    ),
-    (
-        "isa_claim_straddles_the_quarantine",
-        metal::Metal {
-            arms: &[metal::once(
-                "isa-straddle",
-                "tests/testcases",
-                &["isa-claim-straddles-quarantine"],
-                &["test_rs_isa_straddled"],
-            )],
-            judge: |b| {
-                b[0].job_passed("test_rs_isa_straddled")?;
-                isa::straddle(&b[0].kernel())
             },
         },
     ),

@@ -827,10 +827,6 @@ pub const FLASHABLE: &[&str] = &[
     // own driver sends the controller on every boot. It reaches no firmware
     // state, and firmware programs the controller again at the next power-on.
     "i8042-withheld",
-    // The kernel drives the i8042 as on any boot, masks its two lines and lets
-    // it go, as its quarantine does for a flooding controller; the same test
-    // process then drives it. The keyboard is dead for that boot and no other.
-    "isa-claim-straddles-quarantine",
 ];
 
 /// The arm that stops the machine, named once: [`FLASHABLE`] rules on it and

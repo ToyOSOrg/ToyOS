@@ -23,9 +23,3 @@ pub fn set_masked(line: Line, _masked: bool) {
 pub fn switch_to(_pid: Option<Pid>) {
     unreachable!("AArch64 has no I/O permission bitmap")
 }
-
-/// No quarantine to stage a claim against.
-#[cfg(feature = "boot-actuators")]
-pub fn straddling<R>(claim: impl FnOnce() -> R) -> R {
-    claim()
-}

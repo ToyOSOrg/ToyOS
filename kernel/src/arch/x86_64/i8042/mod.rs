@@ -65,7 +65,7 @@ const ISA_IRQ_AUX: u8 = 12;
 const ISR_BURST: usize = 16;
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
-static QUARANTINE: flood::Flood = flood::Flood::new();
+static QUARANTINE: AtomicBool = AtomicBool::new(false);
 static KBD_EVENTS: AtomicU32 = AtomicU32::new(0);
 static AUX_EVENTS: AtomicU32 = AtomicU32::new(0);
 static LOST_EDGES: AtomicU32 = AtomicU32::new(0);
@@ -103,143 +103,6 @@ static LAST_IRQ_NS: AtomicU64 = AtomicU64::new(0);
 /// only CPU an `irq_ring` record for this source can exist on.
 static IRQ_CPU: AtomicU32 = AtomicU32::new(u32::MAX);
 
-/// Whether this driver holds the controller, which refuses an `isa` claim on it.
-pub fn drives() -> bool {
-    ACTIVE.load(Ordering::Acquire)
-}
-
-/// The flood that quarantines the driver: raised by [`handler`], taken by
-/// [`service`], and taken at most once per boot, since nothing gives the
-/// controller back once the quarantine has let it go.
-mod flood {
-    use core::sync::atomic::{AtomicU8, Ordering};
-
-    use super::Pinned;
-
-    const IDLE: u8 = 0;
-    const RAISED: u8 = 1;
-    const TAKEN: u8 = 2;
-
-    pub struct Flood(AtomicU8);
-
-    /// The boot's one quarantine; only [`Flood::take`] makes one.
-    pub struct Taken(());
-
-    impl Flood {
-        pub const fn new() -> Self {
-            Self(AtomicU8::new(IDLE))
-        }
-
-        /// Only from idle: an ISR still in flight when the quarantine masks
-        /// the lines raises nothing under a claim granted after it.
-        pub fn raise(&self) {
-            let _ = self.0.compare_exchange(IDLE, RAISED, Ordering::Relaxed, Ordering::Relaxed);
-        }
-
-        /// The quarantine, to the one caller that moves the flood from raised
-        /// to taken. `Relaxed`: exclusivity is the read-modify-write's own.
-        pub fn take(&self, _: &Pinned) -> Option<Taken> {
-            self.0
-                .compare_exchange(RAISED, TAKEN, Ordering::Relaxed, Ordering::Relaxed)
-                .ok()
-                .map(|_| Taken(()))
-        }
-
-        /// Exact on `IRQ_CPU`, the one CPU that takes it.
-        pub fn taken(&self) -> bool {
-            self.0.load(Ordering::Relaxed) == TAKEN
-        }
-    }
-}
-
-/// Interrupts closed on [`IRQ_CPU`]: the vector's CPU, and the only one that
-/// drives the controller by polled I/O. The quarantine runs under one, so every
-/// port access the kernel makes precedes its let-go in one CPU's program order.
-struct Pinned {
-    _irq: crate::arch::IrqGuard,
-}
-
-impl Pinned {
-    fn close() -> Self {
-        let irq = crate::arch::IrqGuard::close();
-        assert!(
-            is_irq_cpu(),
-            "i8042: cpu {} would quarantine the controller cpu {} drives",
-            crate::arch::percpu::cpu_id(),
-            IRQ_CPU.load(Ordering::Relaxed)
-        );
-        Self { _irq: irq }
-    }
-}
-
-/// The `isa-claim-straddles-quarantine` actuator: an `isa` claim answered
-/// between the quarantine's two steps, the flood raised with no controller
-/// flooding, and the late edge a flood leaves behind.
-#[cfg(feature = "boot-actuators")]
-pub mod straddle {
-    use core::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
-
-    use super::{is_irq_cpu, I8042_VECTOR, IRQ_CPU, QUARANTINE};
-
-    /// Claims begun this boot.
-    static BEGUN: AtomicU64 = AtomicU64::new(0);
-    /// [`BEGUN`] when the quarantine's first step ran; [`NONE`] before it.
-    static HELD_FROM: AtomicU64 = AtomicU64::new(NONE);
-    const NONE: u64 = u64::MAX;
-    /// The lines the first step masked, for the second's log.
-    static MASKED: AtomicU32 = AtomicU32::new(0);
-    /// `WAITING` → `STRADDLED` → `RESUMED`, and nothing moves it back: the
-    /// second step runs once.
-    static STEP: AtomicU8 = AtomicU8::new(WAITING);
-    const WAITING: u8 = 0;
-    const STRADDLED: u8 = 1;
-    const RESUMED: u8 = 2;
-
-    /// Run `claim`, an `isa` claim's whole answer, and then raise the flood as
-    /// [`super::handler`] raises it: before the quarantine that is what starts
-    /// it, and after a grant it is the ISR still in flight at the mask.
-    pub fn around<R>(claim: impl FnOnce() -> R) -> R {
-        let begun = BEGUN.fetch_add(1, Ordering::SeqCst);
-        let answer = claim();
-        // A claim that began before the first step read the controller as
-        // driven either way, so only a later one decides anything.
-        let from = HELD_FROM.load(Ordering::SeqCst);
-        if from != NONE && begun >= from {
-            let _ = STEP.compare_exchange(WAITING, STRADDLED, Ordering::SeqCst, Ordering::SeqCst);
-        }
-        QUARANTINE.raise();
-        // A pass owed on `IRQ_CPU`, where alone the flood is taken and the
-        // second step runs; a halted CPU has stopped its timer.
-        let cpu = IRQ_CPU.load(Ordering::Relaxed);
-        if cpu != crate::arch::percpu::cpu_id() {
-            crate::arch::irqchip::kick_cpu(cpu);
-        }
-        answer
-    }
-
-    /// The quarantine's first step ran and masked `masked` lines.
-    pub(super) fn hold(masked: u32) {
-        MASKED.store(masked, Ordering::SeqCst);
-        HELD_FROM.store(BEGUN.load(Ordering::SeqCst), Ordering::SeqCst);
-        crate::log!("i8042: the quarantine holds after its first step for a claim");
-    }
-
-    /// The first step's masked count, once, after a claim begun after it has
-    /// been answered; the second step is the caller's.
-    pub(super) fn resume() -> Option<u32> {
-        STEP.compare_exchange(STRADDLED, RESUMED, Ordering::SeqCst, Ordering::SeqCst).ok()?;
-        crate::log!("i8042: a claim was answered between the quarantine's steps");
-        Some(MASKED.load(Ordering::SeqCst))
-    }
-
-    /// The edge a flood leaves in IRR, sent from the holder's own interrupt so
-    /// that [`super::handler`] runs with the holder's byte in the output buffer.
-    pub fn stage_late_edge() {
-        assert!(is_irq_cpu(), "i8042: the holder's line is not on IRQ_CPU");
-        crate::arch::apic::send_self(I8042_VECTOR);
-    }
-}
-
 fn is_irq_cpu() -> bool {
     IRQ_CPU.load(Ordering::Relaxed) == crate::arch::percpu::cpu_id()
 }
@@ -271,6 +134,13 @@ const HEALTH_MUTE_BLIND: u8 = 7;
 
 static HEALTH: AtomicU8 = AtomicU8::new(HEALTH_OFF);
 static ARMED_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Whether this driver armed the controller this boot, which refuses an `isa`
+/// claim on it from then on: [`HEALTH`] never returns to [`HEALTH_OFF`], so a
+/// quarantined controller is still this driver's.
+pub fn drives() -> bool {
+    HEALTH.load(Ordering::Relaxed) != HEALTH_OFF
+}
 
 // Repeats, but only when the pin has asserted since the last line — so past
 // the first repeat, silence means no interrupt, not a driver that stopped.
@@ -567,12 +437,6 @@ fn buffer_full(status: u8) -> bool {
 /// anything to it.
 pub extern "sysv64" fn handler() {
     crate::arch::percpu::irq_took!(I8042);
-    // A late edge, held in IRR, on a controller the quarantine
-    // may have handed on: the take ran here with interrupts closed.
-    if QUARANTINE.taken() {
-        crate::arch::apic::eoi();
-        return;
-    }
     let timestamp = crate::clock::nanos_since_boot();
     // No compare-exchange: this handler cannot nest, so there's no second writer.
     let first = FIRST_IRQ_NS.load(Ordering::Relaxed) == 0;
@@ -593,7 +457,7 @@ pub extern "sysv64" fn handler() {
     }
     if n == ISR_BURST && buffer_full(inb(STATUS)) {
         // It cannot mask the line itself — that needs the I/O APIC lock.
-        QUARANTINE.raise();
+        QUARANTINE.store(true, Ordering::Relaxed);
     }
     // Only the first interrupt can be the arming edge (IRR delivers it before
     // any later assertion), and it settles the debt either way.
@@ -667,10 +531,10 @@ pub fn service() {
     // Unconditional and first: an undrained `irq_ring` record keeps
     // `any_pending_self` true, spinning a CPU that never halts.
     let recorded = crate::irq_ring::take(IrqSource::I8042).is_some();
-    if is_irq_cpu() && quarantine_step(&Pinned::close()) {
+    if QUARANTINE.load(Ordering::Relaxed) {
+        quarantine();
         return;
     }
-    // `IRQ_CPU` cleared it itself, so none of its polled I/O below follows the let-go.
     if !ACTIVE.load(Ordering::Relaxed) {
         return;
     }
@@ -826,33 +690,17 @@ fn drain() -> Drained {
     out
 }
 
-/// The quarantine's step that is due, if any; `true` when one ran.
-fn quarantine_step(pinned: &Pinned) -> bool {
-    if let Some(taken) = QUARANTINE.take(pinned) {
-        quarantine(taken, pinned);
-        return true;
-    }
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::isa_claim_straddles_quarantine() {
-        if let Some(masked) = straddle::resume() {
-            let_go(masked, pinned);
-            return true;
-        }
-    }
-    false
-}
-
 /// A controller producing bytes faster than the ISR's bound can drain them.
 /// One masked line and a dead keyboard, never a spinning CPU.
-///
-/// **Masked before the driver lets go**: `isa::claim` refuses only while
-/// [`ACTIVE`] holds, so a claim that lands once it is clear routes and unmasks
-/// lines nothing here touches again. **And let go last on [`IRQ_CPU`]**: the
-/// handler reads no port once the flood is taken, and the aux re-enable reads
-/// [`ACTIVE`] there, so no kernel access to the controller follows a grant.
-fn quarantine(_: flood::Taken, pinned: &Pinned) {
+fn quarantine() {
+    QUARANTINE.store(false, Ordering::Relaxed);
+    ACTIVE.store(false, Ordering::Relaxed);
     // The pin is about to be masked, so no health verdict follows this line.
     HEALTH.store(HEALTH_DONE, Ordering::Relaxed);
+    // Force-released: nothing else can lift a held key or pointer button
+    // once the line is masked.
+    crate::keyboard::release_all();
+    crate::mouse::release_buttons(crate::mouse::PointerSource::PS2);
     // The count, not the intent: the log line is only true if the mask took.
     let mut masked = 0;
     for line in [KEYBOARD_GSI.load(Ordering::Relaxed), AUX_GSI.load(Ordering::Relaxed)] {
@@ -860,22 +708,6 @@ fn quarantine(_: flood::Taken, pinned: &Pinned) {
             masked += 1;
         }
     }
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::isa_claim_straddles_quarantine() {
-        straddle::hold(masked);
-        return;
-    }
-    let_go(masked, pinned);
-}
-
-/// The quarantine's second step, once `masked` of the lines are down.
-fn let_go(masked: u32, _: &Pinned) {
-    // `Release`: a claim that reads the driver gone finds the lines masked.
-    ACTIVE.store(false, Ordering::Release);
-    // Force-released: nothing else can lift a held key or pointer button
-    // once the line is masked.
-    crate::keyboard::release_all();
-    crate::mouse::release_buttons(crate::mouse::PointerSource::PS2);
     log!(
         "i8042: quarantined — output buffer never emptied, masked={} (kbd={} aux={} lost={})",
         masked,

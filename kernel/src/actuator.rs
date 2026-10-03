@@ -57,15 +57,6 @@ actuators! {
     /// and `isa_lines_reach_their_holder`.
     i8042_withheld = "i8042-withheld";
 
-    /// Every answered `isa` claim raises the i8042's flood, as its ISR would,
-    /// and the quarantine holds between its two steps, in two scheduler
-    /// passes, until a claim begun after the first has been answered: the
-    /// claim lands between them on every boot, and the raise after a grant is
-    /// the ISR still in flight at the mask. The holder's own interrupt then
-    /// sends the i8042's vector to its CPU, the edge a flood leaves in IRR.
-    /// Judged by `isa_claim_straddles_the_quarantine`.
-    isa_claim_straddles_quarantine = "isa-claim-straddles-quarantine";
-
     /// Script the input core directly at end of boot.
     test_input_merge = "test-input-merge";
 

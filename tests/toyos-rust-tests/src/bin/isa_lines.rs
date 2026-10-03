@@ -8,8 +8,6 @@
 //! - `device` holds the claim: it drives the controller until the
 //!   acknowledgement arrives as a record and a byte, gives the claim up, and
 //!   has the keyboard acknowledge once more, on a line then masked.
-//!   `isa_straddled` runs this role on a controller the kernel's quarantine
-//!   let go.
 //! - `after` holds the next claim on the row, and finds no record on it.
 
 use std::os::toyos::process::CommandExt;

@@ -45,19 +45,3 @@ pub fn lines(kernel: &Serial) -> Result<(), String> {
     kernel.must_say(WITHHELD)?;
     said(kernel, "isa: the i8042 took its first interrupt", 1)
 }
-
-/// `test_rs_isa_straddled` under `isa-claim-straddles-quarantine`: the kernel
-/// drove the controller, and its quarantine held, resumed and let go once each,
-/// whatever raised the flood again after the grant.
-pub fn straddle(kernel: &Serial) -> Result<(), String> {
-    // The premise: a controller the kernel never armed has no quarantine.
-    kernel.must_say("scanning on, GSI ")?;
-    for once in [
-        "i8042: the quarantine holds after its first step for a claim",
-        "i8042: a claim was answered between the quarantine's steps",
-        "i8042: quarantined",
-    ] {
-        said(kernel, once, 1)?;
-    }
-    said(kernel, "isa: the i8042 took its first interrupt", 1)
-}
