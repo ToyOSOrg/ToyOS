@@ -26,4 +26,4 @@ placement story has three parts none of which we have:
 
 Composes with the reservation model (placement decides *where*, reservations
 decide *how much*) and with the toyos-sched sim, which would need a topology
-model to gate any of this. Independent of pipeline 2's remaining chunks.
+model to gate any of this.
