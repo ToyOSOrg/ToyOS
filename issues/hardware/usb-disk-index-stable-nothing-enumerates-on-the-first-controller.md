@@ -13,7 +13,6 @@ controller`. Re-taken 2026-09-04 against the last three nightly `ci` runs on
 `main` (`33485669019`, `33603832656`, `33728852421`): of the eleven names that
 probe found, only this one still reds.
 
-Split out of `issues/hardware/eleven-names-red-on-ci.md`, which covers eleven
-names and has no exit condition for this one in particular.
+`usb_disk_index_stable` is deleted; `4505f872d`'s parent restores it.
 
 **Exit condition.** The cause of the empty first controller is fixed. Owner: orchestrator.
