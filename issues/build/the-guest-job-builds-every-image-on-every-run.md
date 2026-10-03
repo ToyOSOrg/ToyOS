@@ -10,7 +10,7 @@ opened: 2026-10-03
 rest in the job: the build driver, the harness, and each kernel, loader, ROOT
 and test binary a guest boots. Job 111020980149 of run 37061831501 (#649's
 head `b6635359a`, a pull request run with the sysroot restored from cache)
-ran 18 min 11 s:
+ran 18 min 11 s (its log's lines: #682, comment 5968053849):
 
 - 2 min 46 s in `deps`, before the checkout;
 - 2 min 15 s compiling the driver and the harness (`Finished` in 1m 26s and

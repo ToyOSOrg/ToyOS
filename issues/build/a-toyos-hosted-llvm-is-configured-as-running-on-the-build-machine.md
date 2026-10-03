@@ -15,6 +15,7 @@ bootstrap names none: the `rust/` fork's
 cross-builds to run on ToyOS (`issues/build/toyos-builds-itself.md`) records
 the machine that built it as its host. The configure of that build on the
 development Mac, the fork at the commit `main` pins (`95960d6c214`), logged
+(#682, comment 5968053849)
 
 ```
 -- LLVM host triple: arm64-apple-darwin27.0.0

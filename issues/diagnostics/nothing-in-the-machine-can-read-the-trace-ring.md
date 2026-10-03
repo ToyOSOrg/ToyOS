@@ -11,8 +11,7 @@ records, enabled from `main.rs` at boot and written by the timer, the
 scheduler, `irq_ring` and every `toyos_sched::hw::TraceEvent` the core emits.
 Its one reader is LLDB: `p &TRACE_RINGS` and then `memory read`, which is why
 the discriminants are fixed by hand and held there by const assertions. A
-booted machine can ask itself nothing: no syscall, no tool, no gate. No
-profiler exists.
+booted machine can ask itself nothing: no syscall, no tool, no gate.
 
 **Ruled** (owner, 2026-10-03): the ring is finished in three steps, and the
 work then stops and is judged before anything more is built on it.

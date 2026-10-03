@@ -42,7 +42,8 @@ netd, `toyos::net` and std's ToyOS networking in the `rust/` fork.
    SHA-512, HMAC, X25519, ChaCha20-Poly1305, AES-GCM, Ed25519, P-256,
    `SystemRandom`), and `ureq` 3.4.2 on `rustls` 0.23.45 fetches 320000
    bytes over TLS 1.3 from a server on the host and refuses a wrong name and
-   an untrusted root. What stands before it lands: a git fork's
+   an untrusted root (#682, comment 5968053596). What stands before it
+   lands: a git fork's
    `build.rs` runs `perl`, an arrival
    `issues/build/the-build-runs-host-tools-outside-rust-and-qemu.md` does not
    declare, and leaves C asserts on, so `__assert_fail` is undefined unless

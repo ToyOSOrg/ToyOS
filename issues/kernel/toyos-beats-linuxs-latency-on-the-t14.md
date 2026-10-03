@@ -19,8 +19,8 @@ the same T14, and its order is the three steps below, with stage 4 of
 
 **Linux's reading, the reference.** Ubuntu's `6.8.0-142-generic` on the same
 machine, `rtla timerlat top -q -d 1m --dma-latency 0`, a 1 kHz timer on each
-CPU (#649, comment 5961690204). It samples: a window under 1 ms is seen only
-when a tick falls in it.
+CPU (#649, comment 5961690204; its log whole in #682's comment 5968053374).
+It samples: a window under 1 ms is seen only when a tick falls in it.
 
 - The timer interrupt's longest lateness on a CPU: 3 to 99 µs idle and 16 to
   131 µs with every CPU spawning `/bin/true`, on seven CPUs. cpu4 read 2952

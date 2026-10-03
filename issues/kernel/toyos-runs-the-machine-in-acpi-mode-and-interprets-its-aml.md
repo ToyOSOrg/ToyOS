@@ -29,7 +29,7 @@ writes its own, and the battery comes first (his direction of `0ee814f5a`).
 - **Each embedded-controller event is taken off the controller**, and none is
   acted on. The log gets a line the first time a query number appears and a
   count at intervals, never a line per event: under Linux the T14's EC raises
-  about 2.6 a second.
+  about 2.6 a second (#682, comment 5968053374).
 - **The server holds the EC's ports unfiltered.** The kernel filters no EC
   command; what the holder can do with those ports is recorded as a weakness
   in an issue of its own, as #592 records the i8042 holder's reset line.
