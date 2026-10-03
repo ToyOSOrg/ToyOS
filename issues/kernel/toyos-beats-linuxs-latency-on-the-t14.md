@@ -34,5 +34,12 @@ It samples: a window under 1 ms is seen only when a tick falls in it.
 Open with the owner: which figure of Linux's is the bar, cpu4's 2.9 ms or
 the other CPUs' longest.
 
-**Exit**: the three steps' exits are met, and a reading of ToyOS on the T14,
-taken as Linux's was, is under Linux's.
+**Exit**: each step's exit is met, in the file the step names, and on the T14
+the longest lateness of a 1 kHz timer's interrupt and of the thread it wakes,
+on each CPU, reads under Linux's. Nothing takes that reading of ToyOS today:
+`latency_wake` reads one thread's p99 and `mask_windows` each CPU's longest
+masked windows. Two files owe it: step 2 of
+`issues/diagnostics/nothing-in-the-machine-can-read-the-trace-ring.md`, a
+reader that computes timer and thread lateness from the ring, and
+`issues/hardware/no-program-measures-toyos-against-linux-on-one-machine.md`,
+one program that reads lateness past a 1 ms timer under both systems.
