@@ -324,11 +324,22 @@ impl Unit {
     /// is for, left the way this kernel leaves a unit, each batch ended by a
     /// wait. `CFI` is written as firmware writes it, unconfirmed: whether
     /// `GSTS` reports it is the unit's to say.
+    ///
+    /// Through an identity domain of its own, never an empty root: a unit left
+    /// translating through tables that miss a reserved region faults its
+    /// device's DMA for as long as it is left so, which firmware may not do.
     #[cfg(feature = "boot-actuators")]
-    fn leave_on(&self) {
+    fn leave_on(&self, devices: &[PciDevice], width: AddressWidth) {
         let (mut queue, root, remap) = {
             let mut tables = TABLES.lock();
-            (Queue::new(&mut tables, self.regs), tables.alloc(), tables.alloc())
+            let queue = Queue::new(&mut tables, self.regs);
+            let (domain, _) = table::identity_domain(&mut tables, width, crate::mm::pmm::top());
+            let root = tables.alloc();
+            for device in devices {
+                let stream = StreamId::pci(device.bus, device.dev, device.func);
+                table::bind_identity(&mut tables, root, stream, domain, width);
+            }
+            (queue, root, tables.alloc())
         };
         self.command(QUEUED_INVALIDATION_ENABLE, true, "queued invalidation");
         self.regs.write_u64(RTADDR_REG, root.phys());
@@ -503,7 +514,7 @@ fn enable(
     let Plan { width, records } = plan;
     #[cfg(feature = "boot-actuators")]
     if crate::actuator::iommu_firmware_left() {
-        unit.leave_on();
+        unit.leave_on(devices, width);
     }
     // Before any table is built: what a domain of a driver's own can be is the
     // narrowest thing every translating unit on this machine agrees to.
