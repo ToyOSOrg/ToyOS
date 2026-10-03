@@ -55,7 +55,16 @@ then 30 s with a spinning thread on every CPU:
 - With `ACPI_ENABLE` written to `SMI_CMD` at 0.156 s, `SCI_EN` read set
   2,129,279 ns later. The write moved the writing CPU's count from 4817 to
   4818, and every CPU then read 4818 at every report through 61.233 s. The
-  SCI's line, GSI 9, stayed masked: nothing in ToyOS handles an SCI.
+  SCI's line, GSI 9, stayed masked: nothing in ToyOS handles an SCI. Two GPEs
+  moved after the switch, in that boot's `kernel.log` lines quoted in comment
+  5966982752 (the patch, comment 5966982939, prints each GPE register byte by
+  byte, lowest address first):
+  - the firmware's enable set GPE 9's enable bit: `gpe0_en` byte 1 reads `00`
+    at line 121, before the write, and `02` at line 123, after it;
+  - GPE 110's status rose after the switch and stayed set, served by nothing:
+    `gpe0_sts` byte 13 reads `00` at line 123 and `40` at every report from
+    line 298 through line 759. The boot with nothing written shows it in none
+    of its 25 reports (comment 5966982609).
 
 The `mask-windows` kernel prints such a window as its CPU's own: cpu4's
 4,720,498 ns in the sixth of #649's `mask_windows` boots at `72f16e39a`, and cpu0's 4,725,822 in `649-r6/3-idle-halt-counted`
