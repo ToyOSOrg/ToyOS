@@ -26,7 +26,14 @@ have left the kernel.
 whose stage 5 exits on no interrupts-off window longer than a register access,
 and whose step 10 takes the partition claims off cpu0.
 
-**Exit**: after step 10, the T14's `mask_windows` row reads cpu0's
-`irqs_off_ns` in its first report, at `test_rs_idle_span`'s exit, under
-3,817,265 ns; or this file is replaced by the bound the claim is held to and
-the derivation of it.
+**Exit**: a T14 boot reads that claim's window, from the syscall's entry to
+its return, under 223 µs, with `MSR_SMI_COUNT` unmoved across it. The bound
+is an estimate: the claim's 24 vendor-ID reads at 9.3 µs each, the most a
+read averaged over the last 7,871 or more of the same boot's enumeration, all
+of absent functions, between `PCI 0a:00.0` at 0.072 s and `Enumeration
+complete` at 0.144 s: at most 73 ms on stamps of whole milliseconds (#681,
+comment 5966492598). Not every read was that fast: the 31 to 38 absent functions
+behind `00:1c.4`, between `PCI 09:00.0` at 0.068 s and `PCI 0a:00.0`, took 3
+to 5 ms, about 80 to 160 µs a read, and 3,817,265 ns is 159 µs for each of
+the claim's 24. A claim whose reads cost that clears this bound only by making
+fewer.

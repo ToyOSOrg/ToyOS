@@ -12,17 +12,22 @@ so preemption off for its whole life: `settles()` for the controller's halt,
 reset and port reset, and `wait_command()` and `wait_transfer()` for every
 command and transfer, each bounded by `USB_TIMEOUT_NS`, 2 s. The port
 machine's enumeration and HID recovery submit and return; what still spins is
-the boot path's bring-up, the stop, and a disk call.
+the boot path's bring-up, the stop, a disk's bind after boot, inside a
+scheduler pass
+(`issues/hardware/a-disk-plugged-in-after-boot-is-bound-inside-a-scheduling-pass.md`),
+and a disk call.
 
 A call on a USB disk holds `XHCI` from its first command (`with_disk`,
 `kernel/src/drivers/xhci/wait/msc.rs`) inside a syscall, which runs with
 interrupts masked from entry to exit
 (`issues/kernel/syscall-preemption-is-incidental.md`): a partition claim's
-`SYS_PARTITION_READ` and `SYS_PARTITION_WRITE`, and the table
-`SYS_DEVICE_CLAIM` reads for one (`gpt::claimable`, `kernel/src/gpt.rs`). So
-its CPU holds interrupts and preemption off for as long as the device takes,
-and a CPU whose TLB shootdown waits on that CPU's acknowledgement spins as
-long, masked.
+`SYS_PARTITION_READ`, `SYS_PARTITION_WRITE` and `SYS_FSYNC`, the last a cache
+flush through `xhci::storage_flush` (`partition_fsync`,
+`kernel/src/object/ops.rs`), and the table `SYS_DEVICE_CLAIM` reads for one
+(`gpt::claimable`, `kernel/src/gpt.rs`). logd's `fsync` is one of these: the
+LOG fsd answers each with `SYS_FSYNC` on its claim. So its CPU holds
+interrupts and preemption off for as long as the device takes, and a CPU whose
+TLB shootdown waits on that CPU's acknowledgement spins as long, masked.
 
 **Its bound outruns the TLB-ack tripwire.** `time::DEAF_CPU` (5 s), past which
 a CPU waiting on an acknowledgement panics, is held above `CALL_AFTER_BREAK`
@@ -67,6 +72,7 @@ fsd.
 - **init's partition claims**: on cpu0, 6,002,063 ns at 1.171 s and
   6,623,907 ns at 1.179 s, each `SYS_DEVICE_CLAIM` from entry to return, all
   four samples in `wait_transfer` under `storage_read`.
+- **No `SYS_FSYNC`** of that fsd's held interrupts off for 2 ms.
 - **Not the firmware**: `MSR_SMI_COUNT` does not move across any of them. The
   windows it does move across are
   `issues/hardware/the-t14s-firmware-interrupts-every-cpu-every-2-2-s-under-toyos.md`'s.
@@ -89,7 +95,15 @@ opener, and #649's T14 boots printed these by reading:
   11,645,411 (`loader.log:57`, `:63`).
 
 **Owner**: `issues/kernel/the-kernel-is-small-interrupts-post-and-threads-wait.md`,
-whose step 10 moves the whole xHCI to usbd and deletes the kernel's driver.
+whose step 10 moves the whole xHCI to usbd and deletes the kernel's driver. It
+owes both exits.
 
-**Exit**: the tree has no `kernel/src/drivers/xhci`, so no kernel wait is a USB
-device's.
+**Exit**, two:
+- **The tripwire's, short of step 10**: the whole of one operation's `IF`-clear
+  spin is under `DEAF_CPU` by construction, because the call's bound opens
+  where the operation opens, or a later batch starts only while a whole call's
+  bound is still inside it; and a staged boot whose first batch spends most of
+  the budget and whose next batch breaks shows the operation ending inside
+  `DEAF_CPU`.
+- **The spin's**: the tree has no `kernel/src/drivers/xhci`, so no kernel wait
+  is a USB device's. Step 10 meets both.

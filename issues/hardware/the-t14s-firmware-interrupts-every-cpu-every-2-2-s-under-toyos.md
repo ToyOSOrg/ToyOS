@@ -52,14 +52,14 @@ CPU's own: cpu4's 4,720,498 ns in the sixth of #649's `mask_windows` boots at
 (`issues/kernel/a-process-lengthens-an-interrupts-off-walk-by-the-threads-it-parks-on-one-ring.md`),
 are this by reading, those kernels not reading the count.
 
-The ACPI enable is itself a write of `ACPI_ENABLE` to `SMI_CMD`, which raises
-one firmware interrupt where `APMC_EN` is set, so a boot that tests it reads
-the count over an interval after that write, never across it.
+**Owner**: the T14 loop (`issues/hardware/the-t14-boots-toyos-unattended.md`)
+owns only the reading: its jobs are the measurements owed on hardware, and it
+builds the row. The fix has no owner in the tree yet: the owner has approved a
+scout of the switch to ACPI mode, and who owns a fix is put to him with the
+scout's result.
 
-**Owner**: the T14 loop
-(`issues/hardware/the-t14-boots-toyos-unattended.md`), whose jobs are the
-measurements owed on hardware: it builds the row.
-
-**Exit**: a T14 row reads `MSR_SMI_COUNT` on every CPU as init is spawned,
-after every write the kernel's bring-up makes, and again at the stop's report,
-and on every CPU the two agree.
+**Exit**: a T14 row reads `MSR_SMI_COUNT` on every CPU after init is spawned
+and after the boot's last write to `SMI_CMD`, whoever makes it, and again at
+the stop's report, and on every CPU the two agree. The interval opens after
+that write because the ACPI enable is one, a write of `ACPI_ENABLE` to
+`SMI_CMD`, and raises one firmware interrupt where `APMC_EN` is set.
