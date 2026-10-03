@@ -19,7 +19,7 @@
 
 mod common;
 
-#[path = "../../toyos-fat32-check/tests/common/mod.rs"]
+#[path = "../check/tests/common/mod.rs"]
 mod spec_volume;
 
 use spec_volume::{fat_offset, Volume, BYTES_PER_SECTOR, CLUSTERS, FAT_SECTORS, NUM_FATS};
