@@ -71,11 +71,10 @@ The `mask-windows` kernel prints such a window as its CPU's own: cpu4's
 (`issues/kernel/a-process-lengthens-an-interrupts-off-walk-by-the-threads-it-parks-on-one-ring.md`),
 are this by reading, those kernels not reading the count.
 
-**Owner**: the fix is stage 1 of
-`issues/kernel/toyos-runs-the-machine-in-acpi-mode-and-interprets-its-aml.md`.
-The T14 loop (`issues/hardware/the-t14-boots-toyos-unattended.md`) owns only
-the reading: its jobs are the measurements owed on hardware, and it builds the
-row.
+**Owner**: stage 1 of
+`issues/kernel/toyos-runs-the-machine-in-acpi-mode-and-interprets-its-aml.md`,
+for the fix and for the reading: its exit holds the count flat on the T14 over
+this exit's interval, so the stage builds the row.
 
 **Exit**: a T14 row reads `MSR_SMI_COUNT` on every CPU after init is spawned
 and after the boot's last write to `SMI_CMD`, whoever makes it, and again at
