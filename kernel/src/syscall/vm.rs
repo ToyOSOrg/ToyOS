@@ -93,9 +93,7 @@ pub(super) fn sys_mmap(req_addr: u64, size: u64, prot: MmapProt, flags: MmapFlag
             // a partial overlap is refused — `map_range` would otherwise
             // assert on an already-present PDE.
             let replacing = match as_guard.occupancy(start, aligned as u64) {
-                // A new region past the per-process bound is refused by name;
-                // the non-FIXED arm's `alloc_region` refuses the same way. A
-                // replacement (`Whole`) grows no ledger and is never refused here.
+                // A replacement (`Whole`) grows no ledger and is never refused here.
                 Occupancy::Free if !as_guard.has_region_room() => {
                     return Err(SyscallError::ResourceExhausted)
                 }
@@ -354,6 +352,12 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
             }
         }
         return idx as u64;
+    }
+    // Asked here for the same reason, so a load past the bound is refused
+    // having registered nothing; its mapping goes down with the guard.
+    if data.elf.loaded_libs.len() >= MAX_LIBRARIES {
+        drop(data);
+        return SyscallError::ResourceExhausted.to_u64();
     }
     mapping.commit();
 

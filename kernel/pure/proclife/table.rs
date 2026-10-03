@@ -51,6 +51,10 @@ pub trait Lifecycle {
     /// Every thread of this process, in whatever order the container has.
     fn each_thread(&self, f: &mut dyn FnMut(Tid, ThreadLocation));
 
+    /// How many threads the process holds, zombies a join has not collected
+    /// among them.
+    fn thread_count(&self) -> usize;
+
     /// Where this process stands in the tree. Read and written by
     /// [`crate::proclife::tree`] alone.
     fn node(&self) -> &Node;

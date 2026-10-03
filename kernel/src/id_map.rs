@@ -57,6 +57,10 @@ impl<K: IdKey, V> IdMap<K, V> {
         self.map.remove(&id)
     }
 
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (K, &V)> {
         self.map.iter().map(|(&k, v)| (k, v))
     }

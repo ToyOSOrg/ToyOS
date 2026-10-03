@@ -26,7 +26,7 @@ use crate::loader::{alloc_kernel_stack, thread_start, TlsBlock};
 
 pub use toyos_abi::{Pid, Tid};
 pub use crate::scheduler::TaskId;
-use toyos_abi::syscall::{EndowEntry, SyscallError};
+use toyos_abi::syscall::{EndowEntry, SyscallError, MAX_LIBRARIES, MAX_REGIONS, MAX_THREADS};
 
 /// The lifecycle's decisions; this file only performs them.
 pub use kernel::proclife::{ThreadLocation, Watch};
@@ -375,6 +375,14 @@ impl ProcessEntry {
     pub fn threads_mut(&mut self) -> &mut crate::id_map::IdMap<Tid, ThreadEntry> { &mut self.threads }
 }
 
+// hashbrown grows a table only once its live entries pass 7/16 of its buckets, so one never holding
+// more than `MAX_THREADS` stays one heap allocation: its entries, then a control byte per bucket and a group.
+const _: () = {
+    let buckets = (16 * (MAX_THREADS + 1)).div_ceil(7).next_power_of_two();
+    let entries = (buckets * core::mem::size_of::<(Tid, ThreadEntry)>()).next_multiple_of(16);
+    assert!(entries + buckets + 16 <= crate::mm::MAX_HEAP_ALLOC);
+};
+
 impl ProcessEntry {
     /// Mirrors [`Lifecycle::tearing_down`], usable without the trait in scope.
     pub fn tearing_down(&self) -> bool { self.teardown_code.is_some() }
@@ -400,6 +408,9 @@ impl Lifecycle for ProcessEntry {
         for (tid, thread) in self.threads.iter() {
             f(tid, thread.state);
         }
+    }
+    fn thread_count(&self) -> usize {
+        self.threads.len()
     }
     fn node(&self) -> &Node { &self.node }
     fn node_mut(&mut self) -> &mut Node { &mut self.node }
@@ -507,6 +518,9 @@ pub struct ElfInfo {
     /// Paths of dlopen'd libraries (parallel to loaded_libs).
     pub lib_paths: Vec<String>,
 }
+
+// The ledger stops at `MAX_LIBRARIES`, and a doubling from below it stays inside one heap allocation.
+const _: () = assert!(2 * MAX_LIBRARIES * core::mem::size_of::<elf::LoadedLib>() <= crate::mm::MAX_HEAP_ALLOC);
 
 impl ElfInfo {
     /// The state of a process with no ELF at all (a kernel thread). Not `Default`: `next_tls_module_id`'s only honest default is 1, not 0; written here, not at the one call site, so a field added to [`ElfInfo`] stops this build too.
@@ -660,8 +674,8 @@ pub struct MmapRegion {
 
 // One region per record, and a power of two: the ledger's doubling stops at it, inside one heap allocation.
 const _: () = assert!(
-    crate::vma::MAX_REGIONS.is_power_of_two()
-        && crate::vma::MAX_REGIONS * core::mem::size_of::<MmapRegion>() <= crate::mm::MAX_HEAP_ALLOC
+    MAX_REGIONS.is_power_of_two()
+        && MAX_REGIONS * core::mem::size_of::<MmapRegion>() <= crate::mm::MAX_HEAP_ALLOC
 );
 
 
@@ -927,7 +941,7 @@ pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Op
         // Not `is_yes()`: a missing entry here means this thread's own process was reaped out from under it, which panics rather than refuses.
         match proclife_spawn::admit_thread_start(table, parent_process) {
             proclife_spawn::Admit::Yes => {}
-            proclife_spawn::Admit::TearingDown => return None,
+            proclife_spawn::Admit::TearingDown | proclife_spawn::Admit::Full => return None,
             proclife_spawn::Admit::NoSuchProcess => {
                 panic!("spawn_thread: pid {parent_process} is spawning and is not in the table")
             }

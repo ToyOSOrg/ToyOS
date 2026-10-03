@@ -4,6 +4,7 @@ use alloc::sync::Arc;
 use crate::file_backing::FileBacking;
 use crate::mm::policy::Prot;
 use crate::mm::{UserAddr, PAGE_2M};
+use toyos_abi::syscall::MAX_REGIONS;
 use toyos_userbound::{PageSpan, Window};
 
 /// The stack extends upward to the PIE base, so no usable VA space exists above it.
@@ -23,10 +24,6 @@ const WINDOW: Window = Window::new(0x0002_0000_0000, ALLOC_CEILING, GUARD_SIZE);
 pub fn window() -> Window {
     WINDOW
 }
-
-/// The most regions one address space registers; a placement past it is
-/// refused, so every ledger keyed by one region is bounded by it.
-pub const MAX_REGIONS: usize = 32_768;
 
 
 /// `Mapped` has no `prot`: its pages are already installed, so nothing reads one.
@@ -78,7 +75,6 @@ impl Regions {
         window().gap(span, taken).map(UserAddr::new)
     }
 
-    /// Whether one more region may be registered.
     pub fn has_room(&self) -> bool {
         self.0.len() < MAX_REGIONS
     }
@@ -98,14 +94,8 @@ impl Regions {
     /// A [`RegionKind::Mapped`] region for `size` bytes: its address and its
     /// size in whole pages, which the caller maps.
     pub fn alloc_mapped(&mut self, size: u64) -> Option<(UserAddr, u64)> {
-        let span = window().span(size)?;
-        if !self.has_room() {
-            return None;
-        }
-        let addr = self.find_gap(span)?;
-        let aligned = span.bytes();
-        self.0.insert(addr, Region { size: aligned, kind: RegionKind::Mapped });
-        Some((addr, aligned))
+        let addr = self.alloc(size, RegionKind::Mapped)?;
+        Some((addr, self.0[&addr].size))
     }
 
     /// Unregister the region at `addr`, answering its size.

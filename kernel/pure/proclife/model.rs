@@ -62,6 +62,9 @@ impl Lifecycle for ModelProc {
             f(tid, at);
         }
     }
+    fn thread_count(&self) -> usize {
+        self.threads.len()
+    }
     fn node(&self) -> &Node {
         &self.node
     }
