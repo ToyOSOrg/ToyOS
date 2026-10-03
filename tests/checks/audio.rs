@@ -128,6 +128,15 @@ pub fn judges_verdict() -> Result<(), String> {
         &stall(second.clone(), &format!("{{2.500 soundd}} soundd: repeated completion for free buffer\n{next}")),
         false,
     )?;
+    judged("the T14's stalled client", client_stall_on_metal, T14_STALL, true)?;
+    judged(
+        "the T14's stalled client, its second stream opened on a running soundd",
+        client_stall_on_metal,
+        &T14_STALL
+            .replace("{2026-10-03 07:05:06 7.865 soundd} soundd: suspended\n", "")
+            .replace("{2026-10-03 07:05:07 8.143 soundd} soundd: resumed\n", ""),
+        false,
+    )?;
 
     let departures = |second: &str| {
         format!(
@@ -195,3 +204,29 @@ pub fn judges_verdict() -> Result<(), String> {
     judged("a log stall that counted nothing unwritten", log_stall_on_metal, &stalled(64, 0, 11), false)?;
     Ok(())
 }
+
+/// The T14's `testcases` boot, verbatim: the tone's last records, and the
+/// stalled client's from its spawn to its exit. Its first stream opens 3 ms
+/// after the tone's left, on a soundd that has not suspended.
+const T14_STALL: &str = r"{2026-10-03 07:05:04 5.681 soundd} soundd: client 0 removed (closed)
+{2026-10-03 07:05:04 5.681 soundd} soundd: wakes=573 completions=415 submitted=415 underruns=0 drains=0 max_wake_lat_us=2307 max_batch=2 clients=0 deferred=0 starve_max=0 worst_irq_late_us=2288 worst_pickup_us=18 worst_empty=0 worst_batch=2 late_wakes=0
+[2026-10-03 07:05:04 5.682 cpu4] exit: test_rs_audio_tone pid=11 code=0 cpu=2ms
+[2026-10-03 07:05:04 5.683 cpu7] spawn: /system/bin/test_rs_hda_client_stall pid=12 tid=0 dst=6 base=0x10000000000 entry=0x1000003df40 root=0x83d6000 symbols=2048KiB (layout=0ms relocs=0ms deps=0ms tls=0ms total=1ms)
+{2026-10-03 07:05:04 5.684 tid=1 soundd} soundd: opening stream: 44100Hz 2ch fmt=0
+{2026-10-03 07:05:04 5.684 soundd} soundd: client 0 connected (id=1)
+{2026-10-03 07:05:06 7.685 soundd} soundd: wakes=842 completions=690 submitted=690 underruns=104 drains=0 max_wake_lat_us=1746 max_batch=2 clients=1 deferred=0 starve_max=13 worst_irq_late_us=1724 worst_pickup_us=22 worst_empty=0 worst_batch=2 late_wakes=0
+{2026-10-03 07:05:06 7.842 soundd} soundd: client 1 removed (closed)
+{2026-10-03 07:05:06 7.842 soundd} soundd: wakes=85 completions=54 submitted=54 underruns=0 drains=0 max_wake_lat_us=70 max_batch=1 clients=0 deferred=0 starve_max=0 worst_irq_late_us=17 worst_pickup_us=53 worst_empty=1 worst_batch=1 late_wakes=0
+[2026-10-03 07:05:06 7.842 cpu7 tid=1] exit: test_rs_hda_client_stall tid=1 code=0 cpu=15ms
+{2026-10-03 07:05:06 7.865 soundd} soundd: suspended
+{2026-10-03 07:05:07 8.142 tid=1 soundd} soundd: opening stream: 44100Hz 2ch fmt=0
+{2026-10-03 07:05:07 8.142 soundd} soundd: client 0 connected (id=2)
+{2026-10-03 07:05:07 8.143 soundd} soundd: resumed
+{2026-10-03 07:05:08 9.051 soundd} soundd: client 2 removed (closed)
+{2026-10-03 07:05:08 9.051 soundd} soundd: wakes=425 completions=313 submitted=321 underruns=26 drains=0 max_wake_lat_us=88 max_batch=1 clients=0 deferred=0 starve_max=13 worst_irq_late_us=53 worst_pickup_us=34 worst_empty=1 worst_batch=1 late_wakes=0
+[2026-10-03 07:05:08 9.051 cpu0 tid=2] exit: test_rs_hda_client_stall tid=2 code=0 cpu=3ms
+{2026-10-03 07:05:08 9.079 soundd} soundd: suspended
+{2026-10-03 07:05:08 9.079 soundd} soundd: idle wake 1 (1 records)
+{2026-10-03 07:05:08 9.351 pid=12 test-runner} stalled 8 then 2 times, soundd survived
+[2026-10-03 07:05:08 9.352 cpu6] exit: test_rs_hda_client_stall pid=12 code=0 cpu=2ms
+";
