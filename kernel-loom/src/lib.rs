@@ -186,6 +186,34 @@ pub use log_shard as shard;
 #[path = "../../kernel/src/log/registry.rs"]
 pub mod log_registry;
 
+/// The walks `SYS_LOG_READ` and the console drain take, driven by
+/// `tests/log_cursor.rs` over real shards; without `loom` alone, as is the
+/// [`shards`] shim it names.
+#[cfg(not(feature = "loom"))]
+#[path = "../../kernel/src/log/read.rs"]
+pub mod log_read;
+
+// The shards `read.rs` walks: in the kernel cpu0's and every AP's published
+// one, here whichever the calling test thread installed. A `//` comment for
+// the reason `WHO`'s is one.
+#[cfg(not(feature = "loom"))]
+std::thread_local! {
+    static SHARDS: core::cell::Cell<[Option<&'static shard::Shard>; toyos_abi::log::MAX_LOG_SHARDS]> =
+        const { core::cell::Cell::new([None; toyos_abi::log::MAX_LOG_SHARDS]) };
+}
+
+/// What `read.rs` names as `super::shards()`.
+#[cfg(not(feature = "loom"))]
+pub fn shards() -> [Option<&'static shard::Shard>; toyos_abi::log::MAX_LOG_SHARDS] {
+    SHARDS.with(core::cell::Cell::get)
+}
+
+/// Install the shards this thread's walks see. No kernel counterpart.
+#[cfg(not(feature = "loom"))]
+pub fn install_shards(shards: [Option<&'static shard::Shard>; toyos_abi::log::MAX_LOG_SHARDS]) {
+    SHARDS.with(|cell| cell.set(shards));
+}
+
 #[path = "../../kernel/src/sched/reap_gate.rs"]
 pub mod reap_gate;
 

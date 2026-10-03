@@ -69,6 +69,8 @@ use crate::AsHandle;
 /// line.
 pub struct LogTail {
     cursor: LogCursor,
+    /// Every read's `cursor.lost`, summed: the kernel answers each read's alone.
+    lost: u64,
 }
 
 impl Default for LogTail {
@@ -79,16 +81,16 @@ impl Default for LogTail {
 
 impl LogTail {
     pub const fn new() -> Self {
-        Self { cursor: LogCursor::new() }
+        Self { cursor: LogCursor::new(), lost: 0 }
     }
 
     /// Records this cursor never saw because a producer overwrote them.
     ///
-    /// Cumulative and exact: the kernel derives it from the two numbers that
-    /// have to be right anyway, so it cannot drift from the ring the way a
-    /// producer-side counter would.
+    /// Cumulative and exact: the kernel derives each read's from the two
+    /// numbers that have to be right anyway, so it cannot drift from the ring
+    /// the way a producer-side counter would.
     pub fn lost(&self) -> u64 {
-        self.cursor.lost
+        self.lost
     }
 
     /// Shards the machine has, once a read has answered. Zero before that.
@@ -106,6 +108,7 @@ impl LogTail {
         out: &'a mut [LogRecord],
     ) -> Result<&'a [LogRecord], SyscallError> {
         let count = syscall::log_read(cap.as_handle(), &mut self.cursor, out)?;
+        self.lost += self.cursor.lost;
         Ok(&out[..count])
     }
 }

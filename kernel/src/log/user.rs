@@ -1,6 +1,6 @@
 //! Kernel side of `SYS_LOG_READ` and its readiness source.
 //!
-//! No per-reader state in a read: a cursor is the caller's own sequence numbers and loss count, copied in, walked, and copied back; readers coexist uncoordinated. Requires [`Rights::LOG`] on a `SysCap`, not ambient.
+//! No per-reader state in a read: a cursor is the caller's own sequence numbers, copied in, refused if ahead of a shard, walked, and copied back with this read's loss; readers coexist uncoordinated. Requires [`Rights::LOG`] on a `SysCap`, not ambient.
 //!
 //! [`Rights::LOG`]: toyos_abi::handle::Rights::LOG
 
@@ -52,7 +52,9 @@ pub fn read(
         return Err(SyscallError::InvalidArgument);
     }
 
-    let mut walk = Cursor::from_reader(cursor);
+    let Some(mut walk) = Cursor::from_reader(cursor) else {
+        return Err(SyscallError::InvalidArgument);
+    };
     let mut sink = UserRecords { out, written: 0, capacity };
     drain_ordered(&mut walk, &mut sink);
     let written = sink.written;
