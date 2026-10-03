@@ -39,9 +39,7 @@ anything touching the boot path.
    these to be read-verified only: TCG reports every CPU feature present, so the
    missing-bit path cannot run.
 4. **The on-screen console. If this fails, do not flash.** Every screen test.
-   Confirm the muted profile actually removes the UART, and that the paging test
-   is driven by a timer rather than a keypress — input may be dead on the
-   machine. *False pass:* the late-panic gate passes with the capture routine's
+   Confirm the muted profile actually removes the UART. *False pass:* the late-panic gate passes with the capture routine's
    body replaced by a bare return, so these cover rendering, not capture.
 5. **Input, which is the milestone and which a verdict once omitted entirely.**
    The 2026-08-01 verdict recorded GO over six sections and a seventeen-row

@@ -293,6 +293,16 @@ swap's author. Exit condition: this issue closes — the kernel publishes a
 process's end only once its deferred releases have run — and `CLAIM_RETURN`
 is deleted with it.
 
+**A second loop waits the same release out.**
+`tests/toyos-rust-tests/src/isa_row.rs`'s `claim_after` asks for the `isa` row
+again while the claim is refused as `AlreadyExists`, for at most five seconds,
+wherever `isa_grant` or `isa_lines` claims the row after a holder has exited.
+No run was red without it: it rests on the `Device` release measured in this
+section. Owner: the `isa` claim's author. Exit condition: the same, and
+`claim_after` is deleted with `CLAIM_RETURN` — once the release is no longer
+deferred, a claim refused after its holder's exit is a defect that loop would
+hide for five seconds.
+
 **Its tests are deleted**: `38a5064b6` took `handle_basic`, `handle_transfer`
 and `kill_while_blocked` out, and `009db6db3` retired `SYS_DEBUG` actions 17 and
 18, which only `handle_transfer` read. `02c35a85d` then moved `FILL`, which

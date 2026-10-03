@@ -7,6 +7,8 @@ pub mod devices;
 pub mod faults;
 pub mod iommu;
 pub mod irqcensus;
+/// The `isa` claim's rows on the T14.
+pub mod isa;
 /// The cable: netd's address, and the T14 answering the host on it.
 pub mod lan;
 pub mod logstream;

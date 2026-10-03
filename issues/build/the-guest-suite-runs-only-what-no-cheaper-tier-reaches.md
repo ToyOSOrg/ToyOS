@@ -69,8 +69,6 @@ console's renderer. Exit: as stage A.
 - metal `watchdog_resets`: the TCO ends the machine.
 - metal `quiesce_refuses_a_second_shutdown`: the machine has one shutdown, and a second caller is
   refused while the first holds it.
-- metal `screen_pager_keys`: PageUp pages a halted report.
-- host `screen_paged_scrollback`: a report longer than the panel pages with no input.
 - host `screen_early_panel`: the panel repaints after each committed record.
 - host `screen_log_absent`: a `/log` that did not mount is said on the panel.
 - host `screen_blocked_dump`: Ctrl+Alt+D's summary tells the three states apart.

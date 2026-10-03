@@ -125,10 +125,8 @@ pub const C_MEMBER_MS: u64 = 260;
 pub const LEASE_BOUND_MS: u64 = 20_000;
 
 /// The bound a panicked kernel holds its panel for before it returns the
-/// machine to firmware itself, in milliseconds. Nothing feeds this one: a key
-/// press retires it, because a key means somebody is reading the panel, and
-/// nobody pressing one inside the bound means nobody is there to. A minute is
-/// this project's bound for every watchdog.
+/// machine to firmware itself, in milliseconds. A minute is this project's
+/// bound for every watchdog.
 pub const PANIC_BOUND_MS: u64 = 60_000;
 
 /// The bound the *kernel* gives a whole boot, in milliseconds, before it seals

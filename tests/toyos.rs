@@ -14,7 +14,7 @@ use common::qemu::{
     self, await_guest, await_marker, BootOptions, QemuInstance,
     STALLED, TIMED_OUT,
 };
-use common::{audio, compile, devices, faults, lan, metal, power, screen, serial, usb};
+use common::{audio, compile, devices, faults, isa, lan, metal, power, screen, serial, usb};
 use toyos_build::bootlog::{self};
 use toyos_build::testargs::{self, SUITE};
 
@@ -88,6 +88,11 @@ const RUST_SKIP: &[&str] = &[
     "ccheck",
     "disk_backtrace_child",
     "fault_gate_child",
+    // Each needs a boot whose i8042 the kernel does not drive: the
+    // `isa_ports_are_the_binders_alone` and `isa_lines_reach_their_holder`
+    // metal rows run them.
+    "isa_grant",
+    "isa_lines",
     // It takes the machine down; `virt_fatal_halts_the_others_first` runs it.
     "panic_halts_first",
     // Needs a launcher and a declared `cat` and shell, which `tests/testcases`
@@ -129,6 +134,9 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     // Its shared run is the x86-64 verdict; `virt_readonly_copyout` builds it
     // for AArch64 and runs it on that architecture's job case.
     "abuse_readonly_copyout",
+    // Its shared run asserts every arm's kill; `crash_report_reads_no_kernel_memory`
+    // reads what the kernel said of two of them.
+    "fault_gates",
     "sched_stress",
     "std_alloc",
 ];
@@ -146,8 +154,9 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("screen_panic_muted", qemu::Profile::Metal),
     // The same fatal path from inside Ctrl+Alt+D's report painter, holding the
     // panel's latch it will never give back: the report has to take the screen
-    // anyway, and its CPU has to go on to watch the reset bound.
-    ("screen_fatal_behind_a_painter", qemu::Profile::Gop),
+    // anyway, and its CPU has to go on to watch the reset bound. The profile
+    // whose 16550 is the console, where the fatal path writes its last line raw.
+    ("screen_fatal_behind_a_painter", qemu::Profile::Metal),
     // The same fatal path with a compositor holding the panel, which is the
     // only configuration the owner's laptop is ever in.
     ("screen_fatal_halt_composited", qemu::Profile::Metal),
@@ -630,7 +639,52 @@ const METAL: &[(&str, metal::Metal)] = &[
             judge: |b| operation_nesting_log(b[0].kernel().text()),
         },
     ),
+    // ---- the `isa` claim: one image whose i8042 the kernel leaves alone ----
+    (
+        // The I/O permission bitmap on the machine's own processor: the ports
+        // open to the process that bound them, and every other access killed
+        // by name.
+        "isa_ports_are_the_binders_alone",
+        metal::Metal {
+            arms: ISA_WITHHELD,
+            judge: |b| {
+                b[0].job_passed("test_rs_isa_grant")?;
+                isa::ports(&b[0].kernel())
+            },
+        },
+    ),
+    (
+        // The machine's own controller raises its line through the I/O APIC to
+        // the claim's holder, and to nobody once the claim is gone.
+        "isa_lines_reach_their_holder",
+        metal::Metal {
+            arms: ISA_WITHHELD,
+            judge: |b| {
+                b[0].job_passed("test_rs_isa_lines")?;
+                isa::lines(&b[0].kernel())
+            },
+        },
+    ),
+    (
+        "crash_report_reads_no_kernel_memory",
+        metal::Metal {
+            arms: &[metal::once("testcases", "tests/testcases", &[], &["test_rs_fault_gates"])],
+            judge: |b| {
+                b[0].job_passed("test_rs_fault_gates")?;
+                faults::crash_report_reads_no_kernel_memory(&b[0].kernel())
+            },
+        },
+    ),
 ];
+
+/// A boot whose kernel leaves the i8042 unprobed, so the one grantable row is
+/// free: the ports' job first, since its last holder keeps them until it ends.
+const ISA_WITHHELD: &[metal::Arm] = &[metal::once(
+    "isa-withheld",
+    "tests/testcases",
+    &["i8042-withheld"],
+    &["test_rs_isa_grant", "test_rs_isa_lines"],
+)];
 
 /// The boot most of the first tranche rides: the plain `tests/testcases` shape
 /// with a job list that ends it.
@@ -1816,12 +1870,11 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
             print_screen(name, &text);
             // The arm line is here and nowhere else: this is the machine whose
             // panel is its only account, so it is the only one whose capture
-            // `halt_all_cpus` refreshes to carry it. Newest record, so it sits
-            // at the foot of the same `Page::Last` the two lines above are on.
+            // `halt_all_cpus` refreshes to carry it.
             // The bound is derived: a panel promising a minute while the kernel
             // counts something else is the failure this line exists to catch.
             let armed = format!(
-                "panic: rebooting in {} s unless a key is pressed",
+                "panic: rebooting in {} s, timed by ",
                 toyos_tco::PANIC_BOUND_MS / 1_000
             );
             for want in ["PANIC:", "test-late-panic: on-screen console check", &armed] {
@@ -2039,8 +2092,11 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
             // go fatal once it holds the latch, so the fatal path meets a
             // holder beneath itself; the report must take the screen
             // regardless, and its CPU must go on to watch the reset bound,
-            // which is what the paging proves.
+            // which is what the reset proves.
             const HELD: &str = "panel: a painter holding the panel went fatal";
+            /// `panic_reboot::reboot_now`'s line, raw on the 16550, which is
+            /// this profile's console.
+            const BOUND_OVER: &str = "panic: the bound is over";
             let mut qemu = QemuInstance::boot_with_options(
                 test_config,
                 &[],
@@ -2048,7 +2104,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
                 BootOptions {
                     profile,
                     qmp: true,
-                    kernel_params: &["panel-painter-stalls"],
+                    kernel_params: &["panel-painter-stalls", "panic-reboot-fast"],
                     ..Default::default()
                 },
             );
@@ -2073,15 +2129,17 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
                     dump.fill()
                 ));
             }
-            // The pager runs only on the CPU that claimed the panel, and it is
-            // the loop that watches the reset bound: a second page is its proof.
-            let paged = qemu.screendump_while(Duration::from_secs(87), Duration::from_millis(200), |d| {
-                d.rows().iter().any(|r| r.contains("[page ")) && d.text() != text
-            });
-            if paged.text() == text {
+            // Only the CPU that claimed the panel watches the reset bound, so
+            // the machine resetting at it is that CPU's proof: QEMU exits on a
+            // reset, and the fatal path's last line says whose reset it was.
+            let by = qemu.budget(Duration::from_secs(15));
+            let said = qemu.await_exit(by).map_err(|why| {
+                format!("no CPU is watching the reset bound: {why}\ndecoded screen:\n{text}")
+            })?;
+            if !said.contains(BOUND_OVER) {
                 return Err(format!(
-                    "the report never paged, so no CPU is watching the reset bound\ndecoded \
-                     screen:\n{text}"
+                    "QEMU exited without {BOUND_OVER:?} on the console, so this was not the panic \
+                     path's reset\n{said}"
                 ));
             }
             Ok(())
@@ -2124,8 +2182,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
                 return Err("the compositor never took the screen".to_string());
             }
 
-            // The probe fires 5 s after the claim; the poll is for that plus
-            // the pager cycling pages.
+            // The probe fires 5 s after the claim; the poll is for that.
             const MARKER: &str = "metal-panic-probe";
             let dump = qemu.screendump_while(
                 Duration::from_secs(40),

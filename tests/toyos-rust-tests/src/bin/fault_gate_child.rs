@@ -8,6 +8,9 @@
 //! so a surviving arm is evidence rather than a shrug: the CPU either never
 //! flagged the condition, or flagged it and declined to trap.
 
+#[path = "../arch/stack.rs"]
+mod stack;
+
 fn main() {
     let kind = std::env::args().nth(1).expect("usage: fault_gate_child <kind>");
     match kind.as_str() {
@@ -19,6 +22,8 @@ fn main() {
         "xm" => simd_exception(),
         "ac" => alignment_check(),
         "pf" => read_null(),
+        "kernel_stack" => kernel_stack(),
+        "kernel_page" => kernel_page(),
         other => panic!("unknown fault kind {other}"),
     }
     println!("survived {kind}");
@@ -176,4 +181,21 @@ fn alignment_check() {
         );
     }
     println!("  RFLAGS.AC readback after a misaligned load: {}", (flags >> 18) & 1);
+}
+
+/// The kernel's direct map starts here (`kernel/src/mm/mod.rs`'s
+/// `PHYS_OFFSET`): the first byte of physical memory, and no process's.
+const DIRECT_MAP: u64 = 0xFFFF_8000_0000_0000;
+
+/// #UD (6) with the stack and frame pointers aimed at the direct map, so a
+/// crash report that followed either would print physical memory.
+fn kernel_stack() {
+    stack::undefined_with_stack_at(DIRECT_MAP, DIRECT_MAP + 0x10)
+}
+
+/// #PF (14) at a direct-map address, whose page walk is the kernel's tables.
+#[inline(never)]
+fn kernel_page() {
+    // SAFETY: none — the fault is the point, and it ends this process.
+    unsafe { core::ptr::read_volatile((DIRECT_MAP + 8) as *const u64) };
 }

@@ -26,6 +26,7 @@ pub mod irqchip;
 pub mod keyboard_controller;
 pub mod paging;
 pub mod percpu;
+pub mod pio;
 pub mod pmu;
 pub mod power;
 pub mod psci;

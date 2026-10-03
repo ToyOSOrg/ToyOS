@@ -126,8 +126,7 @@ times:
    10. **usbd**, stage 5's second half: the whole xHCI moves, HID to the
        keyboard claim and mass storage over `toyos-blockring`, and the kernel
        USB bridge is deleted. **What must work with no userland stays off
-       USB**: the panic console pages its report by itself and needs no
-       keyboard, and steers only from the i8042 it polls; the kernel's one
+       USB**: the kernel's one
        hotkey, Ctrl+Alt+D (`kernel/src/keyboard.rs`, the blocked-task dump),
        is recognised on the i8042's transitions and no longer on a USB
        keyboard's, which from here reach the kernel only as usbd's keyboard
@@ -150,7 +149,7 @@ times:
    Each step measures the kernel's lines against stage 6's first commit, and
    the longest interrupts-off and preemption-off windows against the readings
    step 2's exit puts in the tree, by that exit's rule.
-   Steps 3 and 4 do not land alone: they land with #592's i8042 stage and
+   Steps 3 and 4 do not land alone: they land with stage 7.2 and
    with usbd.
    1. **Interrupts post.** A post is legal in a handler: the watches a handler
       posts, and the completions of a ring they complete into, sit behind
@@ -159,7 +158,7 @@ times:
       IOMMU's refusal and both audio backends post from the handler, and
       `irq_ring`'s `UserDev` and `Audio` and their arms in `drain_irqs` go.
       The thread is the holder's: netd's, blockd's, soundd's mix thread, and
-      the `isa` claim's when #592 lands. **Exit**: `handler_post_without_a_pass`,
+      an `isa` claim's holder. **Exit**: `handler_post_without_a_pass`,
       a vector taken on a CPU holding preemption off, inside a post of its own
       watch, inside a completion into a ring polling it, or inside that ring's
       own watch, posting once that section lets go and before any pass, red on
@@ -184,7 +183,7 @@ times:
       second bullet). `ring_park_herd` is not that load: its walks start in
       `SYS_INBOX_SUBMIT`, which runs with interrupts masked on both arms, and
       it reaches no handler step 1 changed.
-   3. **The i8042's thread is ps2server's** (#592's i8042 stage): `irq_ring`'s
+   3. **The i8042's thread is ps2server's** (stage 7.2): `irq_ring`'s
       `I8042`, `keyboard_controller::service` and the idle loop's
       `verdict_due` go with the kernel's driver. **Exit**: that stage's.
    4. **xHCI's thread is usbd's** (step 10 above): `Xhci`, `poll_if_pending`
@@ -201,6 +200,18 @@ times:
       and
       `issues/kernel/nothing-fails-when-a-devices-release-or-close-stops-answering-its-polls.md`
       are met.
+7. **The i8042 leaves the kernel.** Owner ruling, 2026-09-28: drivers are
+   userland, and a dead kernel takes no input, with no emergency way.
+   1. **The panic console takes no input, and an `isa` claim grants a process
+      exact ports through the TSS I/O permission bitmap and its ISA lines as
+      records** (`kernel/src/isa.rs`). **Done** (#592).
+   2. **ps2server**, the server over that claim, feeding the kernel's keyboard
+      and mouse streams so Ctrl+Alt+D and the merge with USB HID stay where
+      they are; the kernel's driver, its vector, its actuators and the
+      `keyboard_controller` seam deleted. A keyboard claim is refused while no
+      source exists, which init's order of endowment then decides. **Exit**:
+      no i8042 code in the kernel, and typing resumes after ps2server is killed
+      and restarted.
 
 ## Standing
 

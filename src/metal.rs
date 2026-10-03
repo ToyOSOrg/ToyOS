@@ -803,6 +803,12 @@ pub const FLASHABLE: &[&str] = &[
     // writes no firmware state; the CPU rejoins, and the boot goes on to
     // userland and ends the way an unarmed one does.
     "dump-deaf-cpu",
+    // The kernel leaves the i8042 unprobed and a test process drives it through
+    // an `isa` claim: it reads the configuration byte, has the keyboard
+    // acknowledge `0xF4` and writes the byte back, each a command this kernel's
+    // own driver sends the controller on every boot. It reaches no firmware
+    // state, and firmware programs the controller again at the next power-on.
+    "i8042-withheld",
 ];
 
 /// The arm that stops the machine, named once: [`FLASHABLE`] rules on it and
