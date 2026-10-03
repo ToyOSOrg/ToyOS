@@ -8,7 +8,7 @@
 //!
 //! Incoming segments are built byte by byte, not with the wire crate's typed builders, so a test
 //! can send what no correct stack sends (SYN with FIN, MSS 0, a shift of 15, TCP-MD5); they are
-//! then parsed by the wire crate exactly as netd will. The checksum here is written apart from the
+//! then parsed by the wire crate exactly as netstack will. The checksum here is written apart from the
 //! crate's.
 
 #![allow(dead_code)]

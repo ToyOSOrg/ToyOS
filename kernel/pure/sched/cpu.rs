@@ -1283,7 +1283,7 @@ pub const MAX_PASS_NS: u64 = 200_000;
 ///   corpse to `dying` and the pick handed it straight back.
 /// * The dying list behind `rq` unconditionally starved the corpse *forever*
 ///   under one permanently-RT thread that never parks — `Rights::RT` is
-///   capability-gated but `soundd` holds it and `SYS_RT_ENTER` has no
+///   capability-gated but `soundserver` holds it and `SYS_RT_ENTER` has no
 ///   revocation, so a killed thread of an RT process on that CPU never reaches
 ///   `Hw::release`.
 ///
@@ -1310,7 +1310,7 @@ pub const DYING_AGE_NS: u64 = QUANTUM_NS;
 /// the other side can afford. Under saturated RT an unwind is delivered at one
 /// chunk per `DYING_AGE_NS + DYING_CHUNK_NS`, so the corpse's release is
 /// stretched by 11×. A larger chunk buys that
-/// back and spends it on RT latency; `soundd` is the process that pays, and 1 ms
+/// back and spends it on RT latency; `soundserver` is the process that pays, and 1 ms
 /// of added worst-case jitter once per 10 ms is the trade this picks.
 pub const DYING_CHUNK_NS: u64 = QUANTUM_NS / 10;
 
@@ -1806,7 +1806,7 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
     /// permanently-RT thread that never parks holds this CPU's dying list closed
     /// for ever, and no sibling CPU can rescue a corpse (`hand_off` refuses to
     /// migrate a killed task, `pop_surplus` reads `fair` only). That is
-    /// reachable from a legal `Rights::RT` workload — `soundd` holds the right
+    /// reachable from a legal `Rights::RT` workload — `soundserver` holds the right
     /// and `SYS_RT_ENTER` has no revocation.
     ///
     /// So the question asked here is `rq.has_rt()` **unless the head of the
@@ -3359,7 +3359,7 @@ mod tests {
     /// parks holds this CPU's dying list closed for ever. `hand_off` refuses to migrate a killed task and
     /// `pop_surplus` reads `fair` only, so no sibling CPU can rescue it.
     ///
-    /// The workload is legal: `Rights::RT` is capability-gated, `soundd` holds
+    /// The workload is legal: `Rights::RT` is capability-gated, `soundserver` holds
     /// it, and `SYS_RT_ENTER` has no revocation anywhere in the tree.
     ///
     /// So the deferral is bounded, and the bound is measured here rather than
@@ -3545,7 +3545,7 @@ mod tests {
     /// would exempt the corpse while `pick` gated its dying list on
     /// `rq.has_rt()` whatever it was — two halves of one rule disagreeing about
     /// one task, and the corpse holding its CPU for a full quantum against a
-    /// ready real-time sibling. `soundd` holds the right, and a killed `soundd`
+    /// ready real-time sibling. `soundserver` holds the right, and a killed `soundserver`
     /// thread is exactly this.
     ///
     /// The control is `a_live_fair_task_loses_the_cpu_to_a_ready_rt_task` and

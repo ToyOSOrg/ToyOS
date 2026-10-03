@@ -1,7 +1,7 @@
 //! ToyOS userland networking library.
 //!
-//! Owns the netd IPC protocol and provides client functions for TCP, UDP, and DNS.
-//! All networking in ToyOS goes through the `netd` daemon via message passing
+//! Owns the netstack IPC protocol and provides client functions for TCP, UDP, and DNS.
+//! All networking in ToyOS goes through the `netstack` daemon via message passing
 //! and kernel pipes.
 
 use crate::ipc::{IpcError, IpcHeader, IpcPayload};
@@ -60,16 +60,16 @@ pub const ERR_TIMED_OUT: u32 = 3;
 pub const ERR_ADDR_IN_USE: u32 = 4;
 pub const ERR_NOT_CONNECTED: u32 = 5;
 pub const ERR_INVALID_INPUT: u32 = 6;
-/// netd will not hold another connection of this kind right now.
+/// netstack will not hold another connection of this kind right now.
 ///
 /// Distinct from [`ERR_CONNECTION_REFUSED`] on purpose, and the distinction is
 /// not cosmetic: the two ask the client for opposite responses. A peer that
 /// refused the SYN will keep refusing it, so the right move is to give up on
-/// that peer; netd being full is a condition of this machine that clears when
+/// that peer; netstack being full is a condition of this machine that clears when
 /// something closes, so the right move is to back off and retry the same peer.
 /// A client that cannot tell them apart cannot do either correctly.
 ///
-/// The conflation was real, not hypothetical: `netd`'s own pending-connect
+/// The conflation was real, not hypothetical: `netstack`'s own pending-connect
 /// path answers a socket that reached `Closed` with `ERR_CONNECTION_REFUSED`,
 /// so a capacity refusal on that code is indistinguishable from an ordinary
 /// failed connection — including to a test trying to find where the cap is.
@@ -80,14 +80,14 @@ pub const OPT_NODELAY: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetError {
-    NetdNotFound,
+    NetstackNotFound,
     ConnectionRefused,
     ConnectionReset,
     TimedOut,
     AddrInUse,
     NotConnected,
     InvalidInput,
-    /// netd is at its own limit. Retryable against the same peer, unlike
+    /// netstack is at its own limit. Retryable against the same peer, unlike
     /// [`NetError::ConnectionRefused`] — see [`ERR_RESOURCE_EXHAUSTED`].
     ResourceExhausted,
     Protocol(u32),
@@ -105,7 +105,7 @@ impl NetError {
             ERR_INVALID_INPUT => NetError::InvalidInput,
             ERR_RESOURCE_EXHAUSTED => NetError::ResourceExhausted,
             ERR_OTHER => NetError::Io,
-            // An older client meets a newer netd here rather than at a panic:
+            // An older client meets a newer netstack here rather than at a panic:
             // an unknown code is still an error, and still says which one.
             code => NetError::Protocol(code),
         }
@@ -128,12 +128,12 @@ pub struct UdpSocketId(pub u32);
 /// reversed pair is two working pipes carrying each other's bytes, which no
 /// type here can catch.
 pub const DATA_HANDLES: usize = 2;
-/// The end netd writes into and the client reads from.
+/// The end netstack writes into and the client reads from.
 pub const DATA_TO_CLIENT: usize = 0;
-/// The end the client writes into and netd reads from.
+/// The end the client writes into and netstack reads from.
 pub const DATA_FROM_CLIENT: usize = 1;
 
-/// A bind sends one end: the one netd writes an accept notification into.
+/// A bind sends one end: the one netstack writes an accept notification into.
 pub const NOTIFY_HANDLES: usize = 1;
 
 ipc_payload! {
@@ -262,30 +262,30 @@ pub struct UdpBound {
     pub rx: Pipe,
 }
 
-// NetdConn — per-operation IPC connection (typestate protocol)
+// NetstackConn — per-operation IPC connection (typestate protocol)
 
-pub struct NetdConn(Connection);
+pub struct NetstackConn(Connection);
 
-impl NetdConn {
-    /// One connection to netd, through this process's own namespace.
+impl NetstackConn {
+    /// One connection to netstack, through this process's own namespace.
     ///
     /// **There was a retry loop here and it is gone.** It spun a hundred times
     /// at ten milliseconds waiting for a name to appear in a global registry;
-    /// a `netd` connector is live from this process's first instruction, so
+    /// a `netstack` connector is live from this process's first instruction, so
     /// there is nothing to wait for.
     ///
     /// [`NetError::ResourceExhausted`] is a separate answer and a retryable
-    /// one: it is the *kernel's* port queue full of connections netd has not
-    /// accepted yet, which is backpressure and not a limit netd chose. The
+    /// one: it is the *kernel's* port queue full of connections netstack has not
+    /// accepted yet, which is backpressure and not a limit netstack chose. The
     /// retry loop used to hide it — it retried every error alike — and
-    /// collapsing it into `NetdNotFound` would leave a caller told the machine
+    /// collapsing it into `NetstackNotFound` would leave a caller told the machine
     /// has no network because a burst outran one accept loop.
     pub fn connect() -> Result<Self, NetError> {
-        crate::endow::service("netd").map(Self).map_err(|e| match e {
-            // Both are "there is no netd to reach from here": one because the
+        crate::endow::service("netstack").map(Self).map_err(|e| match e {
+            // Both are "there is no netstack to reach from here": one because the
             // manifest gave this program none, one because it has exited.
             crate::endow::EndowError::NotEndowed
-            | crate::endow::EndowError::ServerGone => NetError::NetdNotFound,
+            | crate::endow::EndowError::ServerGone => NetError::NetstackNotFound,
             crate::endow::EndowError::Refused(
                 toyos_abi::syscall::SyscallError::ResourceExhausted,
             ) => NetError::ResourceExhausted,
@@ -298,7 +298,7 @@ impl NetdConn {
         Ok(PendingResponse(self))
     }
 
-    /// A request that hands netd pipe ends.
+    /// A request that hands netstack pipe ends.
     ///
     /// **The handles are moved whether or not this answers `Ok`**: a send the
     /// kernel refuses drops the batch rather than putting it back, so the
@@ -320,15 +320,15 @@ impl NetdConn {
     }
 }
 
-/// A netd that hung up mid-exchange is a netd that is not there.
+/// A netstack that hung up mid-exchange is a netstack that is not there.
 ///
-/// **[`NetdConn::connect`] already says so and the exchange did not, which is
+/// **[`NetstackConn::connect`] already says so and the exchange did not, which is
 /// a distinction this architecture removed.** A connector is in the namespace
-/// from a program's first instruction, so connecting to a netd that has
+/// from a program's first instruction, so connecting to a netstack that has
 /// already exited *succeeds* — the connection queues on a port nobody will
 /// ever accept from — and the hang-up arrives at the first send or the first
 /// read instead. Reporting that as [`NetError::Io`] left every caller unable
-/// to tell "this machine has no network" from "netd failed", and `sshd`
+/// to tell "this machine has no network" from "netstack failed", and `sshserver`
 /// panicked across the boot of every NIC-less machine that lost the race
 /// rather than exiting with the line it has for exactly this.
 ///
@@ -351,12 +351,12 @@ impl NetdConn {
 fn hangup(e: IpcError) -> NetError {
     match e {
         IpcError::Disconnected
-        | IpcError::Syscall(toyos_abi::syscall::SyscallError::Gone) => NetError::NetdNotFound,
+        | IpcError::Syscall(toyos_abi::syscall::SyscallError::Gone) => NetError::NetstackNotFound,
         _ => NetError::Io,
     }
 }
 
-pub struct PendingResponse(NetdConn);
+pub struct PendingResponse(NetstackConn);
 
 impl PendingResponse {
     fn conn(&self) -> &Connection { &(self.0).0 }
@@ -394,25 +394,25 @@ impl PendingResponse {
 }
 
 /// The two pipes behind a duplex data path, split into what the caller keeps
-/// and what netd is given.
+/// and what netstack is given.
 ///
-/// The `to_netd` ends are owned here only until the send; a caller that errors
+/// The `to_netstack` ends are owned here only until the send; a caller that errors
 /// out before then drops this and both pipes go with it.
 struct DataPath {
     rx: Pipe,
     tx: Pipe,
-    to_netd: [Pipe; DATA_HANDLES],
+    to_netstack: [Pipe; DATA_HANDLES],
 }
 
 impl DataPath {
     fn create() -> Result<Self, NetError> {
-        let (rx, netd_tx) = crate::pipe_pair().map_err(|_| NetError::Io)?;
-        let (netd_rx, tx) = crate::pipe_pair().map_err(|_| NetError::Io)?;
-        Ok(Self { rx, tx, to_netd: [netd_tx, netd_rx] })
+        let (rx, netstack_tx) = crate::pipe_pair().map_err(|_| NetError::Io)?;
+        let (netstack_rx, tx) = crate::pipe_pair().map_err(|_| NetError::Io)?;
+        Ok(Self { rx, tx, to_netstack: [netstack_tx, netstack_rx] })
     }
 
     fn split(self) -> (Pipe, Pipe, [RawHandle; DATA_HANDLES]) {
-        let [to_client, from_client] = self.to_netd;
+        let [to_client, from_client] = self.to_netstack;
         (self.rx, self.tx, [to_client.into_raw(), from_client.into_raw()])
     }
 }
@@ -424,10 +424,10 @@ pub fn tcp_connect(
     port: u16,
     timeout_ms: u32,
 ) -> Result<TcpConnection, NetError> {
-    let netd = NetdConn::connect()?;
+    let netstack = NetstackConn::connect()?;
     let (rx, tx, handles) = DataPath::create()?.split();
 
-    let resp: TcpConnectResponse = netd
+    let resp: TcpConnectResponse = netstack
         .request_with_handles(&handles, MsgType::TcpConnectPiped, &TcpConnectPipedRequest {
             addr,
             port,
@@ -440,12 +440,12 @@ pub fn tcp_connect(
 }
 
 pub fn tcp_bind(addr: [u8; 4], port: u16) -> Result<TcpBound, NetError> {
-    let netd = NetdConn::connect()?;
-    let (notify, netd_notify) = crate::pipe_pair().map_err(|_| NetError::Io)?;
+    let netstack = NetstackConn::connect()?;
+    let (notify, netstack_notify) = crate::pipe_pair().map_err(|_| NetError::Io)?;
 
-    let resp: TcpBindResponse = netd
+    let resp: TcpBindResponse = netstack
         .request_with_handles(
-            &[netd_notify.into_raw()],
+            &[netstack_notify.into_raw()],
             MsgType::TcpBindPiped,
             &TcpBindPipedRequest { addr, port, _pad: 0 },
         )?
@@ -455,10 +455,10 @@ pub fn tcp_bind(addr: [u8; 4], port: u16) -> Result<TcpBound, NetError> {
 }
 
 pub fn tcp_accept(socket_id: TcpSocketId) -> Result<TcpAccepted, NetError> {
-    let netd = NetdConn::connect()?;
+    let netstack = NetstackConn::connect()?;
     let (rx, tx, handles) = DataPath::create()?.split();
 
-    let resp: TcpAcceptPipedResponse = netd
+    let resp: TcpAcceptPipedResponse = netstack
         .request_with_handles(&handles, MsgType::TcpAcceptPiped, &TcpAcceptPipedRequest {
             socket_id: socket_id.0,
         })?
@@ -475,25 +475,25 @@ pub fn tcp_accept(socket_id: TcpSocketId) -> Result<TcpAccepted, NetError> {
 }
 
 pub fn tcp_shutdown(socket_id: TcpSocketId, how: u32) -> Result<(), NetError> {
-    NetdConn::connect()?
+    NetstackConn::connect()?
         .request(MsgType::TcpShutdown, &TcpShutdownRequest { socket_id: socket_id.0, how })?
         .status()
 }
 
 pub fn tcp_close(socket_id: TcpSocketId) -> Result<(), NetError> {
-    NetdConn::connect()?
+    NetstackConn::connect()?
         .request(MsgType::TcpClose, &SocketCloseRequest { socket_id: socket_id.0 })?
         .status()
 }
 
 pub fn tcp_set_option(socket_id: TcpSocketId, option: u32, value: u32) -> Result<(), NetError> {
-    NetdConn::connect()?
+    NetstackConn::connect()?
         .request(MsgType::TcpSetOption, &SocketOptionRequest { socket_id: socket_id.0, option, value })?
         .status()
 }
 
 pub fn tcp_get_option(socket_id: TcpSocketId, option: u32) -> Result<u32, NetError> {
-    let resp: SocketOptionResponse = NetdConn::connect()?
+    let resp: SocketOptionResponse = NetstackConn::connect()?
         .request(MsgType::TcpGetOption, &SocketOptionRequest { socket_id: socket_id.0, option, value: 0 })?
         .response()?;
     Ok(resp.value)
@@ -502,10 +502,10 @@ pub fn tcp_get_option(socket_id: TcpSocketId, option: u32) -> Result<u32, NetErr
 // UDP client functions
 
 pub fn udp_bind(addr: [u8; 4], port: u16) -> Result<UdpBound, NetError> {
-    let netd = NetdConn::connect()?;
+    let netstack = NetstackConn::connect()?;
     let (rx, tx, handles) = DataPath::create()?.split();
 
-    let resp: UdpBindResponse = netd
+    let resp: UdpBindResponse = netstack
         .request_with_handles(&handles, MsgType::UdpBind, &UdpBindRequest { addr, port, _pad: 0 })?
         .response()?;
 
@@ -513,7 +513,7 @@ pub fn udp_bind(addr: [u8; 4], port: u16) -> Result<UdpBound, NetError> {
 }
 
 pub fn udp_send_to(socket_id: UdpSocketId, addr: [u8; 4], port: u16, len: u16) -> Result<u32, NetError> {
-    let resp: SentBytes = NetdConn::connect()?
+    let resp: SentBytes = NetstackConn::connect()?
         .request(MsgType::UdpSendTo, &UdpSendToRequest {
             socket_id: socket_id.0,
             addr,
@@ -525,7 +525,7 @@ pub fn udp_send_to(socket_id: UdpSocketId, addr: [u8; 4], port: u16, len: u16) -
 }
 
 pub fn udp_recv_from(socket_id: UdpSocketId, max_len: u32) -> Result<UdpRecvResponse, NetError> {
-    NetdConn::connect()?
+    NetstackConn::connect()?
         .request(MsgType::UdpRecvFrom, &UdpRecvFromRequest {
             socket_id: socket_id.0,
             max_len,
@@ -534,14 +534,14 @@ pub fn udp_recv_from(socket_id: UdpSocketId, max_len: u32) -> Result<UdpRecvResp
 }
 
 pub fn udp_close(socket_id: UdpSocketId) -> Result<(), NetError> {
-    NetdConn::connect()?
+    NetstackConn::connect()?
         .request(MsgType::UdpClose, &SocketCloseRequest { socket_id: socket_id.0 })?
         .status()
 }
 
 pub fn dns_lookup(hostname: &str, results: &mut [[u8; 4]]) -> Result<usize, NetError> {
     let mut buf = [0u8; 256];
-    let n = NetdConn::connect()?
+    let n = NetstackConn::connect()?
         .request_bytes(MsgType::DnsLookup, hostname.as_bytes())?
         .response_bytes(&mut buf)?;
 
@@ -568,7 +568,7 @@ pub fn dns_lookup(hostname: &str, results: &mut [[u8; 4]]) -> Result<usize, NetE
 }
 
 /// [`hangup`]'s whole table, which is what decides whether a program that needs
-/// netd leaves quietly or dies loudly.
+/// netstack leaves quietly or dies loudly.
 ///
 /// **Both directions are asserted and the second is the point.** A guard that
 /// accepted every error would pass the three tests above and would be the wrong
@@ -580,32 +580,32 @@ mod tests {
     use toyos_abi::syscall::SyscallError;
 
     /// `SYS_HANDLE_SEND` into a connection whose server end has gone. The first
-    /// refusal a `tcp_bind` can meet, because a request that hands netd pipe
+    /// refusal a `tcp_bind` can meet, because a request that hands netstack pipe
     /// ends moves the handles before it writes the frame.
     #[test]
-    fn a_gone_handle_transfer_is_a_netd_that_is_not_there() {
-        assert_eq!(hangup(IpcError::Syscall(SyscallError::Gone)), NetError::NetdNotFound);
+    fn a_gone_handle_transfer_is_a_netstack_that_is_not_there() {
+        assert_eq!(hangup(IpcError::Syscall(SyscallError::Gone)), NetError::NetstackNotFound);
     }
 
     /// `SYS_WRITE` into the same connection a moment later reaches the same
     /// word, so `NotFound` is not this fact and no longer reaches it.
     #[test]
-    fn a_not_found_is_not_a_netd_that_is_not_there() {
+    fn a_not_found_is_not_a_netstack_that_is_not_there() {
         assert_eq!(hangup(IpcError::Syscall(SyscallError::NotFound)), NetError::Io);
     }
 
-    /// The case that already worked: netd was still there for the request and
+    /// The case that already worked: netstack was still there for the request and
     /// left before the response, so the hang-up arrives at a `read` of zero.
     #[test]
-    fn a_read_that_hung_up_is_a_netd_that_is_not_there() {
-        assert_eq!(hangup(IpcError::Disconnected), NetError::NetdNotFound);
+    fn a_read_that_hung_up_is_a_netstack_that_is_not_there() {
+        assert_eq!(hangup(IpcError::Disconnected), NetError::NetstackNotFound);
     }
 
     /// Everything that is *not* a peer that has gone. Each of these on a
-    /// machine with a live netd is a real failure and must reach the caller as
-    /// one — `sshd` panics on `NetError::Io` by design.
+    /// machine with a live netstack is a real failure and must reach the caller as
+    /// one — `sshserver` panics on `NetError::Io` by design.
     #[test]
-    fn nothing_else_becomes_a_missing_netd() {
+    fn nothing_else_becomes_a_missing_netstack() {
         for e in [
             IpcError::Syscall(SyscallError::PermissionDenied),
             IpcError::Syscall(SyscallError::ResourceExhausted),
@@ -620,12 +620,12 @@ mod tests {
         }
     }
 
-    /// netd's own wire codes are a separate vocabulary and this change does not
-    /// touch it: an `ErrorResponse` netd chose to send is an answer from a netd
+    /// netstack's own wire codes are a separate vocabulary and this change does not
+    /// touch it: an `ErrorResponse` netstack chose to send is an answer from a netstack
     /// that is *there*, and only `ERR_NOT_CONNECTED` means the machine has no
     /// network.
     #[test]
-    fn a_code_netd_chose_is_still_its_own_answer() {
+    fn a_code_netstack_chose_is_still_its_own_answer() {
         assert_eq!(NetError::from_error_code(ERR_NOT_CONNECTED), NetError::NotConnected);
         assert_eq!(NetError::from_error_code(ERR_ADDR_IN_USE), NetError::AddrInUse);
         assert_eq!(

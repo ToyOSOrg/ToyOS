@@ -238,7 +238,7 @@ pub fn done_chain(after: &serial::Serial) -> Result<(), String> {
 }
 
 /// The tail the stop sealed under the seal: the one channel for what the
-/// kernel said after `logd` stopped — its stop record, the panel's census, and
+/// kernel said after `logkeeper` stopped — its stop record, the panel's census, and
 /// the last word. Read after the seal,
 /// because the same lines are in the capture on the first boot's console.
 fn the_tail_is_the_stops(after: &serial::Serial) -> Result<(), String> {
@@ -272,7 +272,7 @@ fn the_tail_is_the_stops(after: &serial::Serial) -> Result<(), String> {
 pub fn usb_load_chain(after: &serial::Serial) -> Result<(), String> {
     after.must_say(bootlog::PREVIOUS_PANIC)?;
     after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::DEADLINE_EXPIRED)?;
-    // The sweep starts inside the stop, after init had the file made whole, so
+    // The sweep starts inside the stop, after the supervisor had the file made whole, so
     // its records cross only in the page's tail.
     after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::USB_LOAD_RUNNING)?;
     // A sweep that refused, one the disk stopped answering, and one that swept
@@ -305,8 +305,8 @@ pub fn usb_load_chain(after: &serial::Serial) -> Result<(), String> {
 /// The metal half of [`boot_deadline_ends_a_wedge`]: a T14 boot that wedged on
 /// purpose ended itself, and the pass after the reset read why off the page.
 ///
-/// **The only evidence a wedge can leave on this machine.** `logd` writes the
-/// kernel log to the stick, and a wedged boot's `logd` never runs again — so
+/// **The only evidence a wedge can leave on this machine.** `logkeeper` writes the
+/// kernel log to the stick, and a wedged boot's `logkeeper` never runs again — so
 /// everything after the wedge exists only in the record ring, and the black box
 /// is the one channel that carries a copy of it across the reset.
 pub fn deadline_wedge_chain(after: &serial::Serial) -> Result<(), String> {
@@ -349,7 +349,7 @@ pub fn hard_lockup_chain(
     kernel: &serial::Serial,
     after: &serial::Serial,
 ) -> Result<(), String> {
-    // **Nothing this judge reads was written after the wedge.** `logd` stops
+    // **Nothing this judge reads was written after the wedge.** `logkeeper` stops
     // where the scheduler does, so the stick's kernel log ends at the last
     // spawn, and the sealed page can fill with a boot's *older* records before
     // it reaches the lines the control writes about itself. What crosses is the

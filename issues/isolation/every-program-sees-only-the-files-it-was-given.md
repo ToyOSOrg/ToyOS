@@ -11,7 +11,7 @@ longer the declared exception to the capability model. This reverses question
 2 of `issues/kernel/the-capability-end-state-is-twelve-answers.md`. Today any
 process opens, deletes or spawns any path, so there is no boundary between two
 programs, let alone between two people: any process can append a line to
-sshd's key list and log in remotely (`issues/isolation/sshd-authorized-keys-unprotected.md`).
+sshd's key list and log in remotely (`issues/isolation/sshserver-authorized-keys-unprotected.md`).
 
 ## The model
 

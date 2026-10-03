@@ -5,7 +5,7 @@
 //!
 //! The file is `loader.log` at the root of the partition
 //! `KernelArgs::log_partition_guid` names, truncated at each boot. One file
-//! under a fixed name and never one of `logd`'s timestamped ones, so a reader
+//! under a fixed name and never one of `logkeeper`'s timestamped ones, so a reader
 //! looking for the kernel's log on this volume never picks this up.
 //!
 //! A partition this cannot open or write is refused by name on the console and

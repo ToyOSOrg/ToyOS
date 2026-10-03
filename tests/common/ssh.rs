@@ -67,9 +67,7 @@ fn str(path: &Path) -> &str {
     path.to_str().expect("the lane's scratch paths are utf-8")
 }
 
-// --- The gate: one boot of `tests/sshdcase`, three judges on it ---
-
 /// Where the image's `authorized_keys` file lands, ROOT-relative — the guest
-/// reads it at `/system/etc/ssh_authorized_keys`, which `userland/sshd`'s
+/// reads it at `/system/etc/ssh_authorized_keys`, which `userland/sshserver`'s
 /// `AUTHORIZED_KEYS` is the other half of.
 pub const KEYS_ON_ROOT: &str = "etc/ssh_authorized_keys";

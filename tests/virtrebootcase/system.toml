@@ -1,8 +1,8 @@
 # The one job returns the machine to firmware.
 [boot]
-start = ["logd", "test-runner"]
+start = ["logkeeper", "test-runner"]
 
-[programs.logd]
+[programs.logkeeper]
 service = true
 syscap = ["logread"]
 

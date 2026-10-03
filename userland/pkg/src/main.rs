@@ -88,7 +88,7 @@ fn install(file: &Path, assume_yes: bool) -> Result<(), String> {
     }
 
     // The manifest is written last, so a directory carrying one is a finished
-    // install: init and the launcher both reach a package through it.
+    // install: the supervisor and the launcher both reach a package through it.
     write_package(
         &dir,
         &plan.dirs,

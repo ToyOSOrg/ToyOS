@@ -119,7 +119,7 @@ pub const JOB_BOUND_MS: u64 = 60_000;
 pub const RUST_MEMBER_MS: u64 = 860;
 pub const C_MEMBER_MS: u64 = 260;
 
-/// The bound netd gives this machine's first DHCP lease before it says it has
+/// The bound netstack gives this machine's first DHCP lease before it says it has
 /// none and serves anyway, in milliseconds. The harness waits it out on a wire
 /// with no server, so the two read one declaration.
 pub const LEASE_BOUND_MS: u64 = 20_000;

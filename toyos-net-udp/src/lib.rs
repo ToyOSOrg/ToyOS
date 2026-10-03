@@ -354,7 +354,7 @@ impl Udp {
         self.socket(id).map(|s| s.rx_full)
     }
 
-    /// Only netd's own sockets: POSIX's `SO_BROADCAST` (§U4.3).
+    /// Only netstack's own sockets: POSIX's `SO_BROADCAST` (§U4.3).
     pub fn set_broadcast(&mut self, id: SocketId, permitted: bool) -> Result<(), Error> {
         self.socket(id).map(|s| s.broadcast = permitted)
     }
@@ -366,7 +366,7 @@ impl Udp {
         })
     }
 
-    /// Marks netd's DHCP client's socket: the only one that may send from 0.0.0.0, and the only
+    /// Marks netstack's DHCP client's socket: the only one that may send from 0.0.0.0, and the only
     /// one the acquisition exception delivers to (§U4.4 (3), §U5.3).
     pub fn set_acquisition(&mut self, id: SocketId) -> Result<(), Error> {
         self.socket(id).map(|s| s.acquisition = true)

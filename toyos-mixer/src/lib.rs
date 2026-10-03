@@ -1,12 +1,12 @@
-//! Everything soundd decides about a sample, as pure functions over pure state.
+//! Everything soundserver decides about a sample, as pure functions over pure state.
 //!
 //! What a client's `i16` becomes on the bus, what the sum of every client
 //! becomes at the wire, what a channel count conversion does to it, what gain
 //! rides on it and how that gain moves, plus the arithmetic those rest on: the
 //! device shapes a period can be rendered into, the period sizes a client's
 //! rate implies, the delay-locked loop that tracks the device's grid, and the
-//! counters soundd reports. No devices, no handles, no shared memory, no
-//! timers — those are `userland/soundd/`'s, and it is the only caller.
+//! counters soundserver reports. No devices, no handles, no shared memory, no
+//! timers — those are `userland/soundserver/`'s, and it is the only caller.
 //!
 //! **The split exists because a QEMU boot cannot ask any of these questions.**
 //!
@@ -17,7 +17,7 @@
 //! ## What this crate does not decide
 //!
 //! Resampling. A client at a rate the device does not run at is carried by
-//! `rubato`, which is a third-party crate soundd holds and this one does not
+//! `rubato`, which is a third-party crate soundserver holds and this one does not
 //! name. What is here is everything on both sides of it — the decode that feeds
 //! it ([`decode_i16_to_f32`]), the planar append that fills it
 //! ([`append_planar`]), the interleave that empties it ([`interleave`]), and the

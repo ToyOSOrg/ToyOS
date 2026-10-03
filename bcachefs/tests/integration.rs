@@ -1266,7 +1266,7 @@ fn a_filesystems_name_round_trips_through_its_superblock() {
     }
 
     let mut fs = Formatted::format(VecBlockIO::new(128)).expect("format");
-    fs.create("bin/init", b"init-binary", 0).expect("create");
+    fs.create("bin/supervisor", b"supervisor-binary", 0).expect("create");
     fs.set_uuid(named);
     let raw = fs.into_io().expect("finish").into_vec();
     let mounted =

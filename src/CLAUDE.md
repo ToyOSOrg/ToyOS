@@ -5,7 +5,7 @@ Loads when you read a file under `src/` — the root cargo project, package name
 ## Entry points
 
 - **`.github/qemu-version` is the QEMU every guest is measured with, declared once**; every guest job's first step (`src/ci.rs`'s `instrument`) reds on a disagreement.
-- `system.toml` defines which programs to build and the init sequence.
+- `system.toml` defines which programs to build and what the supervisor starts at boot.
 
 ## The host's locks
 

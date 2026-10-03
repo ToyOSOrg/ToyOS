@@ -386,7 +386,7 @@ fn idle_ctx() -> KernelCtx {
 }
 
 /// Where a spawn goes: the rule is [`CpuHandles::place`]'s; this supplies the rotating start, load-bearing at
-/// boot since every init program is spawned before any CPU has published a load.
+/// boot since every program the supervisor starts is spawned before any CPU has published a load.
 fn placement(now: Nanos) -> CpuId {
     static ROTATE: AtomicU64 = AtomicU64::new(0);
     let count = crate::smp::cpu_count() as u64;

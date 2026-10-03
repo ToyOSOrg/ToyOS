@@ -9,7 +9,7 @@
 use std::fs::{self, File};
 use std::io::{Read, Write};
 
-/// Mirrored from `userland/fsd/src/cache.rs`, in 4 KiB blocks.
+/// Mirrored from `userland/fileserver/src/cache.rs`, in 4 KiB blocks.
 const CLEAN_LIMIT: usize = 16 * 1024;
 
 const PATH: &str = "/home/fs_cache_eviction.bin";

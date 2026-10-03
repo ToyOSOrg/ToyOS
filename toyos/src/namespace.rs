@@ -47,7 +47,7 @@ impl AsHandle for Namespace {
 /// Collects the names and the connectors one `SYS_NAMESPACE_BUILD` will carry.
 ///
 /// The connectors are **borrowed**: building a namespace does not consume them,
-/// because the same connector goes into several children's namespaces and init
+/// because the same connector goes into several children's namespaces and the supervisor
 /// does exactly that.
 pub struct Builder<'a> {
     base: RawHandle,
@@ -60,7 +60,7 @@ pub struct Builder<'a> {
 }
 
 /// A fixed-capacity name blob and vector, so building a namespace needs no
-/// allocator — `init` builds one per program before anything else runs.
+/// allocator — the supervisor builds one per program before anything else runs.
 mod heapless_names {
     use toyos_abi::syscall::{MAX_NAMESPACE_ENTRIES, MAX_SERVICE_NAME};
 

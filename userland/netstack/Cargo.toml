@@ -1,0 +1,31 @@
+[package]
+name = "netstack"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+toyos-abi = { path = "../../toyos-abi" }
+toyos = { path = "../../toyos" }
+toyos-i219 = { path = "../../toyos-i219" }
+toyos-tco = { path = "../../toyos-tco" }
+toyos-mdns = { path = "../../toyos-mdns" }
+toyos-dns = { path = "../../toyos-dns" }
+toyos-inspect = { path = "../../toyos-inspect" }
+
+[dependencies.smoltcp]
+version = "0.12"
+default-features = false
+features = [
+    "medium-ethernet",
+    "proto-ipv4",
+    "socket-tcp",
+    "socket-udp",
+    "socket-dhcpv4",
+    # The multicast DNS group, which `mdns.rs` joins to answer for this
+    # machine's name.
+    "multicast",
+    "alloc",
+]
+
+[package.metadata.toyos.host]
+exempt.owns = "the NIC ToyOS claims for it"

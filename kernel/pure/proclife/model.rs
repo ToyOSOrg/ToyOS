@@ -226,7 +226,7 @@ impl World {
     }
 
     /// A process under none with one thread, which is its main one — what
-    /// the loader builds for init.
+    /// the loader builds for the supervisor.
     pub fn spawn_process(&mut self) -> Pid {
         self.land(None)
     }

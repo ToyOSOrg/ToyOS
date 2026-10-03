@@ -3,7 +3,7 @@
 # page's layout, where its two `toyos-transport` rings are, the words a request
 # and a completion are, the control frames a session is opened with, and every
 # decision either end makes about what a completion means — with nothing that
-# touches a device, a handle or a mapping. `userland/blockd` serves it and its
+# touches a device, a handle or a mapping. `userland/diskserver` serves it and its
 # client glue speaks it; both map the page and hand this crate the words.
 #
 # Its defects are orders — a completion racing a crash, a flush racing a reset,

@@ -13,7 +13,7 @@
 //! first not yet published.
 //!
 //! **A lane** is a ring with one writer, which a thread that may not retry at
-//! all claims for itself — soundd's mix thread. Its write is a load, a
+//! all claims for itself — soundserver's mix thread. Its write is a load, a
 //! compare, a body copy and a store, and a full lane is a count in the lane's
 //! own `refused` word, which only its writer stores. Wait-free.
 //!

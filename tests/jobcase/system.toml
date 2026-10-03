@@ -2,15 +2,15 @@
 # job list is the manifest's own and the last thing it does is hand the machine
 # back to firmware. This is the shape a T14 boot has.
 [boot]
-start = ["logd", "blockd", "fsd", "test-runner"]
+start = ["logkeeper", "diskserver", "fileserver", "test-runner"]
 
-[programs.logd]
+[programs.logkeeper]
 service = true
 syscap = ["logread"]
 
 # One binary name per job, never a command line: the stdin path's `run <name>`
 # has the only parser. `power` because the one job ends the machine, asking
-# init.
+# the supervisor.
 [programs.test-runner]
 receives = ["power"]
 args = ["reboot"]
@@ -23,7 +23,7 @@ args = ["reboot"]
 # The block service: the NVMe controller this machine's DATA is on, driven
 # from userland through its claim. Started again when it ends; the claim goes
 # back with the process and is minted again for the next.
-[programs.blockd]
+[programs.diskserver]
 service = true
 restart = true
 serves = ["block"]
@@ -32,7 +32,7 @@ devices = ["pci:1b36:0010"]
 # The file servers: DATA, the log and the running slot's volume, one process
 # each, serving every program the directories of its role. Started again when
 # one ends, on the same ports.
-[programs.fsd]
+[programs.fileserver]
 restart = true
 roles = ["data", "log", "boot"]
 receives = ["block"]

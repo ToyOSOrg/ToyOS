@@ -1,4 +1,4 @@
-//! What netd's lease probe answers, in the two places it can answer on a
+//! What netstack's lease probe answers, in the two places it can answer on a
 //! machine whose console reaches nobody: its exit code, and a file of durable
 //! lines on the log volume. One table both ends read.
 //!
@@ -15,7 +15,7 @@ use crate::{Counters, Link, Speed, Wire};
 
 /// The code a probe that holds a leased address when its window ends exits
 /// with. Clear of [`Outcome`]'s block and its retired 82, and of 101, which a
-/// panicking netd ends with.
+/// panicking netstack ends with.
 pub const LEASED: i32 = 83;
 
 const _: () = {

@@ -2,7 +2,7 @@
 //! the black box.
 //!
 //! **Text in, verdicts out.** Everything here reads the two strings
-//! `src/metal.rs` brings back off the stick — the loader's file and `logd`'s —
+//! `src/metal.rs` brings back off the stick — the loader's file and `logkeeper`'s —
 //! and nothing here touches a machine.
 
 #![forbid(unsafe_code)]

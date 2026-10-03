@@ -1,27 +1,27 @@
 //! A parent's end takes its children down.
 //!
 //! **Every end takes the whole subtree.** A starts B; B spawns C, launches D
-//! through init and asks init for E; B hands A a handle to each and a copy of
+//! through the supervisor and asks the supervisor for E; B hands A a handle to each and a copy of
 //! its own `self`. Then B ends — killed by A, and by a CPU fault, one B per
 //! arm — and the arm asserts, once A's wait on B answers:
 //!
 //! - C and D have ended, as killed;
-//! - E, which init started, runs on: init is the one way to outlive a starter;
+//! - E, which the supervisor started, runs on: the supervisor is the one way to outlive a starter;
 //! - after the kill, a spawn and a launch under B's `self` answer `Gone`.
 //!
 //! B's first act is a spawn the loader refuses once it is admitted under B: its
 //! hold on B goes with it, or B is never published and the arm's wait never
 //! answers.
 //!
-//! **The other arms.** A `MANAGE`-only handle is no place, and init refuses a
+//! **The other arms.** A `MANAGE`-only handle is no place, and the supervisor refuses a
 //! launch whose place is a pipe and answers the launches after it. A launch
 //! carries a copy of its place, so std refuses one under a place this process
-//! cannot duplicate, rather than spawning it directly. init starts a
-//! child only by a launch, so std refuses `under_init` for a program no row
+//! cannot duplicate, rather than spawning it directly. The supervisor starts a
+//! child only by a launch, so std refuses `under_supervisor` for a program no row
 //! declares and for a command carrying an extra slot. A chain alternating spawn
 //! and launch — each link launches a shell, and the shell spawns the next link
 //! — stops where the kernel refuses a process more than `MAX_DEPTH` below
-//! init, and dies whole with its first link. And a `cat` a shell `detach`es
+//! the supervisor, and dies whole with its first link. And a `cat` a shell `detach`es
 //! outlives the shell.
 //!
 //! Every wait is unbounded: the harness ceiling is the only clock.
@@ -64,7 +64,7 @@ const CPU_FAULT: i32 = -1;
 const MAX_DEPTH: u32 = 64;
 
 /// The links a chain may grow before a refusal must have stopped it: each
-/// adds two levels, so from any start below init the refusal comes sooner.
+/// adds two levels, so from any start below the supervisor the refusal comes sooner.
 const LINK_BOUND: u32 = MAX_DEPTH / 2 + 1;
 
 /// `sched::payload`'s state for a thread whose entry is a zombie, which
@@ -96,7 +96,7 @@ fn test() {
     a_manage_only_handle_is_no_place();
     a_pipe_is_no_place();
     a_place_without_dup_is_refused();
-    init_is_asked_only_by_a_launch();
+    the_supervisor_is_asked_only_by_a_launch();
     a_chain_stops_at_max_depth_and_dies_whole();
     a_detached_program_outlives_its_shell();
     println!("process_tree: PASS");
@@ -171,13 +171,13 @@ fn an_end_takes_its_subtree(end: End) {
     let status = grown.b.wait().expect("wait for B");
     assert_eq!(status.code(), Some(b_code), "B ended {end:?} and read {:?}", status.code());
     assert_eq!(grown.c.try_wait(), Ok(KILLED), "C was not ended, as killed, once B's end was published ({end:?})");
-    assert_eq!(grown.d.try_wait(), Ok(KILLED), "D, which init launched under B, was not ended with B ({end:?})");
-    assert_eq!(grown.e.try_wait(), Err(SyscallError::WouldBlock), "E, started under init, ended with B ({end:?})");
+    assert_eq!(grown.d.try_wait(), Ok(KILLED), "D, which the supervisor launched under B, was not ended with B ({end:?})");
+    assert_eq!(grown.e.try_wait(), Err(SyscallError::WouldBlock), "E, started under the supervisor, ended with B ({end:?})");
 
     grown.e.kill().expect("kill E");
     assert_eq!(grown.e.wait(), Ok(KILLED));
     syscall::close(grown.b_self);
-    println!("  B {end:?}: C and D ended, as killed; E, under init, ran on");
+    println!("  B {end:?}: C and D ended, as killed; E, under the supervisor, ran on");
 }
 
 /// A spawn and a launch placed under B's `self` both answer `Gone`.
@@ -252,7 +252,7 @@ fn a_manage_only_handle_is_no_place() {
 }
 
 /// A pipe's write end carries `WRITE`, so the kernel reaches the type it is
-/// not: init answers the launch refused, and the arms after this one are init
+/// not: the supervisor answers the launch refused, and the arms after this one are the supervisor
 /// answering the next.
 fn a_pipe_is_no_place() {
     let (_read, write) = toyos::pipe_pair().expect("a pipe of our own");
@@ -274,7 +274,7 @@ fn a_pipe_is_no_place() {
         Ok(_) => panic!("a launch whose place is a pipe was answered as something other than refused"),
         Err(_) => panic!("the launcher did not answer a launch whose place is a pipe"),
     }
-    println!("  a pipe is no place: init refused the launch");
+    println!("  a pipe is no place: the supervisor refused the launch");
 }
 
 /// This process's `self` narrowed to `WRITE`: a place the kernel takes and a
@@ -295,25 +295,25 @@ fn a_place_without_dup_is_refused() {
     println!("  a place without DUP: the launch is refused, and nothing starts");
 }
 
-/// init is reached only by a launch: std refuses `under_init` for what the
-/// launcher would not start under init, and starts nothing.
-fn init_is_asked_only_by_a_launch() {
-    let undeclared = Command::new(SELF_PATH).arg("c").under_init().spawn();
+/// The supervisor is reached only by a launch: std refuses `under_supervisor` for what the
+/// launcher would not start under the supervisor, and starts nothing.
+fn the_supervisor_is_asked_only_by_a_launch() {
+    let undeclared = Command::new(SELF_PATH).arg("c").under_supervisor().spawn();
     refused(undeclared, "a program no row declares");
 
     let (_read, write) = toyos::pipe_pair().expect("a pipe of our own");
-    let extra = Command::new(HELD).inherit_handle(5, write.as_handle().0).under_init().spawn();
+    let extra = Command::new(HELD).inherit_handle(5, write.as_handle().0).under_supervisor().spawn();
     refused(extra, "a command carrying an extra slot");
-    println!("  init is asked only by a launch: the two others are refused");
+    println!("  the supervisor is asked only by a launch: the two others are refused");
 }
 
 fn refused(spawned: std::io::Result<Child>, what: &str) {
     match spawned {
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {}
-        Err(e) => panic!("under_init for {what} was refused as {e:?}, not PermissionDenied"),
+        Err(e) => panic!("under_supervisor for {what} was refused as {e:?}, not PermissionDenied"),
         Ok(mut child) => {
             let _ = child.kill();
-            panic!("under_init for {what} started it");
+            panic!("under_supervisor for {what} started it");
         }
     }
 }
@@ -365,7 +365,7 @@ fn link(k: u32) -> ! {
     park();
 }
 
-/// A `cat` a shell `detach`es is init's child, so it runs on once the shell's
+/// A `cat` a shell `detach`es is the supervisor's child, so it runs on once the shell's
 /// end is published: it reads the input this process holds open.
 fn a_detached_program_outlives_its_shell() {
     let mut shell = Command::new(SHELL)
@@ -416,7 +416,7 @@ fn b() -> ! {
     assert!(Command::new("/system/bin/no_such_program").spawn().is_err(), "a program that is not there started");
     let c = Command::new(SELF_PATH).arg("c").stdin(Stdio::null()).spawn().expect("B spawns C");
     let d = Command::new(HELD).spawn().expect("B launches D");
-    let e = Command::new(HELD).under_init().spawn().expect("B asks init for E");
+    let e = Command::new(HELD).under_supervisor().spawn().expect("B asks the supervisor for E");
     let own = endow::this_process();
     let handles = [
         syscall::dup(RawHandle(c.as_raw_handle())).expect("a copy of C"),

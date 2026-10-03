@@ -33,7 +33,7 @@ pub enum Op {
     Wake {
         queue: usize,
         all: bool,
-        /// Lend the woken task RT for this long — soundd signalling its
+        /// Lend the woken task RT for this long — soundserver signalling its
         /// clients.
         boost: Option<u64>,
     },
@@ -74,7 +74,7 @@ pub struct ProcSpec {
     pub initial: Vec<usize>,
     /// Scripts a `Spawn` op can instantiate, indexed by `template`.
     pub templates: Vec<Script>,
-    /// Threads of this process start out real-time (soundd).
+    /// Threads of this process start out real-time (soundserver).
     pub rt: bool,
 }
 

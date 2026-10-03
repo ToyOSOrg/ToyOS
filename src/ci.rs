@@ -1094,7 +1094,7 @@ mod tests {
         let programs = [
             program("calc", Host::App(Vec::new())),
             program("doom", Host::App(vec![Os::Windows])),
-            program("init", Host::Exempt),
+            program("supervisor", Host::Exempt),
         ];
         let judged = |os| {
             let (attempted, declared) = attempted(&programs, os);
