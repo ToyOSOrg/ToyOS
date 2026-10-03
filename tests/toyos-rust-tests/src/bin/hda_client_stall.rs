@@ -13,11 +13,11 @@
 //! run measured). This one empties it on purpose, for longer than the ring
 //! takes to come round.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use toyos_inspect::{Value, SOUND};
 
 const FREQ_HZ: f64 = 440.0;
 const AMPLITUDE: f64 = 16000.0;
@@ -32,25 +32,33 @@ const STALL: Duration = Duration::from_millis(60);
 const STALLS: u64 = 8;
 const CALLBACKS_BETWEEN_STALLS: u64 = 60;
 
+/// How long each wait here has before it panics by name. A hang ceiling: what
+/// each waits on is a quarter of a second or a lap of the ring away.
+const WITHIN: Duration = Duration::from_secs(5);
+
 fn main() {
-    let first = play(STALLS);
+    play(STALLS);
     // A second stream over the same device, after soundd has drained and
     // suspended: on a ring the drain gives the periods up rather than holding
     // them, so what the resume primes and where in the ring it starts are both
     // state the first stream left behind.
-    let second = play(2);
-    println!("stalled {first} then {second} times, soundd survived");
+    await_suspended();
+    play(2);
+    println!("stalled {STALLS} then 2 times, soundd survived");
 }
 
-fn play(stalls_wanted: u64) -> u64 {
+/// One stream of `stalls + 1` stretches of tone with a stall after each but
+/// the last, closed when the last has played: the laps of the ring that follow
+/// the last stall are played to a client that is still there, as every other
+/// stall's are.
+fn play(stalls: u64) {
     let host = cpal::default_host();
     let device = host.default_output_device().expect("no audio output device");
     let config = device.default_output_config().expect("no audio config");
     let sample_rate = config.sample_rate() as f64;
     let channels = config.channels() as usize;
 
-    let stalls = Arc::new(AtomicU64::new(0));
-    let stalls_cb = stalls.clone();
+    let (ended, stretch_ended) = mpsc::channel();
     let mut n: u64 = 0;
     let mut callbacks: u64 = 0;
 
@@ -64,12 +72,14 @@ fn play(stalls_wanted: u64) -> u64 {
                     n += 1;
                 }
                 callbacks += 1;
-                if callbacks % CALLBACKS_BETWEEN_STALLS == 0
-                    && stalls_cb.load(Ordering::Relaxed) < stalls_wanted
-                {
-                    stalls_cb.fetch_add(1, Ordering::Relaxed);
+                let stretch = callbacks / CALLBACKS_BETWEEN_STALLS;
+                if callbacks % CALLBACKS_BETWEEN_STALLS != 0 || stretch > stalls + 1 {
+                    return;
+                }
+                if stretch <= stalls {
                     std::thread::sleep(STALL);
                 }
+                ended.send(()).expect("`play` holds the receiver until the last stretch ends");
             },
             |err| eprintln!("audio error: {err}"),
             None,
@@ -77,14 +87,41 @@ fn play(stalls_wanted: u64) -> u64 {
         .expect("failed to build audio stream");
 
     stream.play().expect("failed to play");
-    while stalls.load(Ordering::Relaxed) < stalls_wanted {
-        std::thread::sleep(Duration::from_millis(50));
+    let stretches = stalls + 1;
+    for stretch in 1..=stretches {
+        if let Err(why) = stretch_ended.recv_timeout(WITHIN) {
+            panic!("stretch {stretch} of {stretches} did not end within {WITHIN:?}: {why}");
+        }
     }
-    // Long enough for the pipeline to play out and soundd to suspend: the
-    // drain is one lap of the ring and the second stream has to find a
-    // suspended daemon for the resume to be the thing under test.
-    std::thread::sleep(Duration::from_millis(500));
     drop(stream);
-    std::thread::sleep(Duration::from_millis(300));
-    stalls.load(Ordering::Relaxed)
+}
+
+/// Wait until soundd says its device stream is stopped.
+///
+/// soundd tells no client that it suspended: its `inspect` answer is the one
+/// place a client reads it. The mix loop publishes that once a wake, and the
+/// device playing its tail out wakes it once a period, so a period is how
+/// often it is asked.
+fn await_suspended() {
+    let deadline = Instant::now() + WITHIN;
+    loop {
+        let sound =
+            inspect::ask(SOUND).unwrap_or_else(|why| panic!("soundd's inspect answer: {why}"));
+        let (Some(Value::Text(state)), Some(&Value::U64(frames)), Some(&Value::U64(rate))) = (
+            sound.get("sound.stream.state"),
+            sound.get("sound.period_frames"),
+            sound.get("sound.rate_hz"),
+        ) else {
+            panic!("soundd's snapshot names no stream state and period: {sound:?}");
+        };
+        if state == "suspended" {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "soundd's stream still reads `{state}` {WITHIN:?} after its only client closed, so \
+             the second stream has no suspended daemon to resume"
+        );
+        std::thread::sleep(Duration::from_nanos(1_000_000_000 * frames / rate));
+    }
 }

@@ -106,14 +106,19 @@ pub(crate) const DEVICE_STARTED: &str = "soundd: resumed";
 /// buffer it completes, so soundd has to fill the periods the client did not
 /// cover (`underruns`) and may hold none of them back (`deferred`), across a
 /// suspend and a resume.
+///
+/// The resume is the second stream's, which the job stages. Whether the first
+/// stream finds soundd suspended is the job before it: on a shared boot it can
+/// open while soundd still plays that job's tail out.
 pub fn client_stall_on_metal(log: &Serial) -> Result<(), String> {
+    const JOB: &str = "test_rs_hda_client_stall";
     log.must_not_say("repeated completion for free buffer")?;
-    let window = job_window(log.text(), "test_rs_hda_client_stall", 2)?;
-    let resumes = window.matches("soundd: resumed").count();
-    if resumes < 2 {
+    let first = job_window(log.text(), JOB, 1)?;
+    let window = job_window(log.text(), JOB, 2)?;
+    if !window[first.len()..].contains(DEVICE_STARTED) {
         return Err(format!(
-            "soundd resumed {resumes} time(s) — the second stream did not find a suspended \
-             daemon, so nothing here tests a resume:\n{window}"
+            "no `{DEVICE_STARTED}` after the first stream's end — the second stream did not find \
+             a suspended daemon, so nothing here tests a resume:\n{window}"
         ));
     }
     if !window.contains("soundd: wakes=") {
