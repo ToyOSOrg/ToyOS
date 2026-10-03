@@ -49,7 +49,13 @@ fn expired_at(reached: i64) -> String {
 }
 
 /// One boot's readback as the loop writes it.
-fn plant(dir: &Path, label: &str, page: &str, kernel: &str, verdict: Option<&Refusal>) {
+pub(super) fn plant(
+    dir: &Path,
+    label: &str,
+    page: &str,
+    kernel: &str,
+    verdict: Option<&Refusal>,
+) {
     let home = metal::at(dir, label);
     fs::create_dir_all(&home).expect("a readback directory");
     let boot = format!(
