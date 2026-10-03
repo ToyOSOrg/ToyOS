@@ -1,6 +1,8 @@
 //! Scaffolding shared by the loom models: the message type, the modelled
 //! preempt count, the cell lock and the kick recorder.
 
+#![deny(unsafe_code)]
+
 use loom::sync::atomic::{AtomicUsize, Ordering};
 use loom::sync::{Mutex, MutexGuard};
 

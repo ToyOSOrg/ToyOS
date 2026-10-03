@@ -399,8 +399,11 @@ pub mod serial_lock;
 /// mailbox push/drain, doorbell edges, the ticket CAS protocol, kill-bit vs wake
 /// ordering, retire-node re-post, the sleep handshake — and the simulator
 /// (`kernel/sim/`) owns the protocol above them. Loom does not scale to the
-/// whole scheduler; the simulator does not model weak memory.
+/// whole scheduler; the simulator does not model weak memory. Under `loom`
+/// alone, as is every model that drives it.
+#[cfg(feature = "loom")]
 #[path = "../../pure/sched/mod.rs"]
 pub mod sched;
 
+#[cfg(feature = "loom")]
 pub mod sched_model;
