@@ -1,8 +1,8 @@
-//! The log a machine serves, judged from the host: a guest whose `logd` port
+//! The log a machine serves, judged from the host: a guest whose `logkeeper` port
 //! is forwarded, a reader that connects when the test says so, and the guest's
 //! own `/log` as the oracle.
 //!
-//! **The file is what the stream is judged against.** `logd` writes each round
+//! **The file is what the stream is judged against.** `logkeeper` writes each round
 //! to `/log` and then hands the same bytes to every reader, from the boot's
 //! first line however late the reader came, so what a reader received is the
 //! file's own first lines in the file's own order ([`is_prefix_of`]). The file

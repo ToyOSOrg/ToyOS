@@ -29,10 +29,10 @@ pub fn self_check() -> Result<(), String> {
         "test capture",
         "[2026-09-29 11:11:20 0.000 cpu0 boot] panic console: armed 1920x1080 stride=1920 \
          format=1 at 0x4000000000, write-combining\n\
-         {2026-09-29 11:11:21 1.170 init} init: started logd\n",
+         {2026-09-29 11:11:21 1.170 supervisor} supervisor: started logkeeper\n",
     );
     let readback_mute =
-        Serial::named("test capture", "{2026-09-29 11:11:21 1.170 init} init: started logd\n");
+        Serial::named("test capture", "{2026-09-29 11:11:21 1.170 supervisor} supervisor: started logkeeper\n");
     let panicking = Serial::named(
         "test capture",
         "[kernel 0.001 cpu0] NVMe: found\n[kernel 0.002 cpu0] PANIC: nope\n",
@@ -142,7 +142,7 @@ pub fn self_check() -> Result<(), String> {
     // the same words, once from the kernel and once from somebody else.
     const KERNEL_PANIC_LINE: &str =
         "[kernel 1.450 cpu3] PANIC: panicked at kernel/src/sched/reserve.rs:812:9:";
-    const USER_PANIC_LINE: &str = "thread 'main' (1) panicked at sshd/src/main.rs:359:23:";
+    const USER_PANIC_LINE: &str = "thread 'main' (1) panicked at sshserver/src/main.rs:359:23:";
     let whose: &[(&str, Option<Died>)] = &[
         // The kernel, about itself.
         (KERNEL_PANIC_LINE, Some(Died::Kernel)),
@@ -190,7 +190,7 @@ pub fn self_check() -> Result<(), String> {
         ("PANIC: printed by a program that felt like printing it", Some(Died::Panicked)),
         // A `/log` readback's heads: the kernel's panic, and a program's.
         ("[2026-09-29 11:11:22 2.000 cpu1] PANIC: nope", Some(Died::Kernel)),
-        ("{2026-09-29 11:11:22 2.000 init} PANIC: printed by init", Some(Died::Panicked)),
+        ("{2026-09-29 11:11:22 2.000 supervisor} PANIC: printed by the supervisor", Some(Died::Panicked)),
         // Nothing died.
         ("[kernel 0.377 cpu0] NVMe: found", None),
         ("hello from userland", None),
@@ -239,7 +239,7 @@ pub fn self_check() -> Result<(), String> {
          [kernel 6.204 cpu1]   cr2=0xffff800002672ff8 (address that caused the fault chain)\n\
          [kernel 6.204 cpu1]   rip=0xffffffff80121a40  rsp=0xffff800002673000  rbp=0x0\n\
          [kernel 6.204 cpu1]   Kernel backtrace:\n\
-         soundd: suspended\n\
+         soundserver: suspended\n\
          [kernel 6.205 cpu1]   Found interrupt frame at stack offset +0x18:\n"
     );
     let Some(report) = death_report(&staged_df) else {
@@ -266,7 +266,7 @@ pub fn self_check() -> Result<(), String> {
     // A line another process wrote *after* the header stays: the console is not
     // line-atomic and a report with holes cut in it is worse than one with a
     // daemon's line in the middle.
-    if !report.contains("soundd: suspended") {
+    if !report.contains("soundserver: suspended") {
         return Err(format!("the report drops the lines it did not recognise:\n{report}"));
     }
     // The other direction, and the one that keeps this out of everybody's

@@ -203,8 +203,8 @@ pub const SYS_PROCESS_WAIT: u64 = 108;
 pub const SYS_PROCESS_KILL: u64 = 109;
 
 /// Mint a device claim for a class, gated by [`Rights::DEVICE`] on a `SysCap`.
-/// Only `init` holds such a cap, so the set of processes that can ever
-/// claim a device is exactly what init endowed. See [`device_claim`].
+/// Only the supervisor holds such a cap, so the set of processes that can ever
+/// claim a device is exactly what the supervisor endowed. See [`device_claim`].
 ///
 /// [`Rights::DEVICE`]: crate::handle::Rights::DEVICE
 pub const SYS_DEVICE_CLAIM: u64 = 111;
@@ -219,7 +219,7 @@ pub const SYS_RT_ENTER: u64 = 112;
 /// [`crate::log`].
 ///
 /// **The kernel keeps no per-reader state**, so a second reader costs nothing
-/// and the stream is not consumed: `logd` and a `log-follow` tool coexist
+/// and the stream is not consumed: `logkeeper` and a `log-follow` tool coexist
 /// with no coordination. Reading the whole machine's log is authority, which is
 /// why it rides a right rather than being ambient.
 ///
@@ -327,7 +327,7 @@ pub struct SpawnArgs {
     /// `PermissionDenied` for a handle without `WRITE` and `InvalidArgument`
     /// for one to no process, since a place is a handle a peer sent;
     /// `Gone` for a process being torn down, and `ResourceExhausted` for a
-    /// child more than `toyos_proclife::MAX_DEPTH` below init.
+    /// child more than `toyos_proclife::MAX_DEPTH` below the supervisor.
     ///
     /// [`Rights::WRITE`]: crate::handle::Rights::WRITE
     pub place: u64,
@@ -353,8 +353,8 @@ pub struct EndowEntry {
 
 const _: () = assert!(core::mem::size_of::<EndowEntry>() == 16);
 
-/// The label the kernel puts on `init`'s system capability, and the one
-/// init puts on the `RT`-only dup it endows a `realtime` program.
+/// The label the kernel puts on the supervisor's system capability, and the one
+/// the supervisor puts on the `RT`-only dup it endows a `realtime` program.
 ///
 /// Here rather than in the SDK because the kernel writes it and userland reads
 /// it, and a label spelled twice is a label that can be spelled two ways.
@@ -1169,7 +1169,7 @@ pub fn reboot(syscap: RawHandle) -> SyscallError {
 /// `devices` entry and a `dev:` endowment label spell each one with.
 ///
 /// **One row per class, so the four cannot disagree.** The build system checks
-/// a config against this table, `init` mints from it, and a claimant finds
+/// a config against this table, the supervisor mints from it, and a claimant finds
 /// its own claim by it; a second spelling anywhere is a class a config can name
 /// and no program can find. The wire number is here too, because a class whose
 /// number and name came from different lists is the same defect one level down.
@@ -1424,7 +1424,7 @@ fn decimal_line(text: &str) -> Option<u8> {
 /// partition, and for an ISA function which ports and lines.
 ///
 /// One parser, because four places read the same spelling — the build system's
-/// gate, `/system/bin/init`'s mint, the kernel's claim and the claimant's own
+/// gate, `/system/bin/supervisor`'s mint, the kernel's claim and the claimant's own
 /// lookup — and a second would be a name a config can write and a program
 /// cannot find.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1560,7 +1560,7 @@ const HEX: &[u8; 16] = b"0123456789abcdef";
 
 /// Mint a device claim for `request`, presenting a `SysCap` handle that carries
 /// [`Rights::DEVICE`]. `NotFound` for a class no driver registered, or a PCI
-/// function or partition this machine does not have — init endows what exists
+/// function or partition this machine does not have — the supervisor endows what exists
 /// and logs what it did not. `AlreadyExists` names one already claimed, and
 /// `PermissionDenied` one the kernel drives itself — for a partition, one it
 /// has mounted. A request matching more than one function or partition answers
@@ -1976,7 +1976,7 @@ pub fn dup(handle: RawHandle) -> Result<RawHandle, SyscallError> {
 ///
 /// `PermissionDenied` for a set the source does not itself hold: rights only
 /// shrink, and asking to widen is a bug in the asker rather than a request to
-/// be quietly cut down to size. This is how init hands a program an `RT`-only
+/// be quietly cut down to size. This is how the supervisor hands a program an `RT`-only
 /// `SysCap` while keeping the full one.
 pub fn dup_narrowed(handle: RawHandle, rights: Rights) -> Result<RawHandle, SyscallError> {
     check(syscall(SYS_HANDLE_DUP, handle.0 as u64, rights.bits() as u64, 0, 0))
@@ -2604,7 +2604,7 @@ mod tests {
         }
     }
 
-    /// A claim is found again by the label init wrote it under, and the label's
+    /// A claim is found again by the label the supervisor wrote it under, and the label's
     /// tail is this name: a round trip that lost a digit would be a claim its
     /// holder cannot look up.
     #[test]

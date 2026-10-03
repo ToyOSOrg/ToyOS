@@ -12,7 +12,7 @@
 //!
 //! **Every arm runs, and the exit status carries one bit per arm that let a
 //! write through**, which the kernel's own exit record prints: a rewritten
-//! clock page asserts in every stamp any process takes, `logd`'s among them, so
+//! clock page asserts in every stamp any process takes, `logkeeper`'s among them, so
 //! the clock arm's verdict may reach no other line.
 
 use std::os::toyos::process::ChildExt;

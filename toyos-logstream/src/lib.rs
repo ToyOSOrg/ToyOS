@@ -1,12 +1,12 @@
-//! A boot's log as `logd` writes it and serves it: the form a program's line
-//! takes beside the kernel's records, the frame `/system/bin/init` hands `logd`
+//! A boot's log as `logkeeper` writes it and serves it: the form a program's line
+//! takes beside the kernel's records, the frame `/system/bin/supervisor` hands `logkeeper`
 //! a program's output on, and the replay a reader who connects late is served
 //! from.
 //!
 //! **Whose line a line is, is decided by the ring it came out of, never by its
-//! words.** init creates one log ring per program it starts, hands the program
-//! the ring as its stdout and stderr, and sends `logd` the ring under the
-//! manifest's name for the program and its pid ([`REGISTER`]). `logd` alone
+//! words.** The supervisor creates one log ring per program it starts, hands the program
+//! the ring as its stdout and stderr, and sends `logkeeper` the ring under the
+//! manifest's name for the program and its pid ([`REGISTER`]). `logkeeper` alone
 //! writes a line's head, so the head is structure no program's bytes can
 //! reach:
 //!
@@ -17,7 +17,7 @@
 //!   newline. A program's text never does: a record ends at a newline, and
 //!   [`Text`] writes every control byte as text.
 //!
-//! The same form goes to the console, where `logd` is the one writer of
+//! The same form goes to the console, where `logkeeper` is the one writer of
 //! program lines, without the wall-clock stamp.
 //!
 //! Pure: `core` and `alloc`, no `unsafe`, no I/O.
@@ -35,27 +35,27 @@ use core::fmt::{self, Display, Write};
 
 pub use toyos_abi::log::Severity;
 
-/// The TCP port `logd` serves this boot's log on, from its first line, on a
-/// boot whose manifest gives `logd` a `netd` connector. **No shipping image
+/// The TCP port `logkeeper` serves this boot's log on, from its first line, on a
+/// boot whose manifest gives `logkeeper` a `netstack` connector. **No shipping image
 /// does**: the port answers whoever connects, with no authentication, so it is
 /// the test estates' and the metal bench's alone.
 pub const PORT: u16 = 41337;
 
 /// The service every connection on [`PORT`] is carried by. A swap of it ends
 /// each one with no FIN and no reset, which no reader could tell from a boot
-/// with nothing to say — so `logd` turns new readers away from init's
+/// with nothing to say — so `logkeeper` turns new readers away from the supervisor's
 /// [`SWAP`] frame accepting that swap until the process it listened through is
 /// gone, and says so ([`CARRIER_LEAVING`]) before the swap may go.
-pub const CARRIER: &str = "netd";
+pub const CARRIER: &str = "netstack";
 
-/// `logd`'s line once it turns new readers away for a swap of [`CARRIER`]. A
+/// `logkeeper`'s line once it turns new readers away for a swap of [`CARRIER`]. A
 /// reader whose own connection that swap will end holds the swap's go until
 /// this has reached it: a reader that asks again after it is turned away until
 /// the next [`CARRIER`] serves, and never admitted by the one being stopped.
 pub const CARRIER_LEAVING: &str =
-    "logd: netd is being replaced, and readers are turned away until the next one serves";
+    "logkeeper: netstack is being replaced, and readers are turned away until the next one serves";
 
-/// The name of the port a reader on this machine asks `logd` for the log on;
+/// The name of the port a reader on this machine asks `logkeeper` for the log on;
 /// the answer is the read end of a pipe the log is written into. The same port
 /// answers `inspect`, so a reader says which it wants ([`READ`]).
 pub const SERVICE: &str = "log";
@@ -63,60 +63,60 @@ pub const SERVICE: &str = "log";
 /// A reader's request on [`SERVICE`]: a bare frame, answered by [`SERVED`].
 pub const READ: u32 = 3;
 
-/// The manifest's name for the program that is the log: init endows it the
+/// The manifest's name for the program that is the log: the supervisor endows it the
 /// [`ORIGINS`] acceptor and a console it may write ([`CONSOLE`]), and gives
 /// it a ring like every other program's, which it reads like every other.
-pub const LOGD: &str = "logd";
+pub const LOGKEEPER: &str = "logkeeper";
 
-/// The endowment label of the acceptor init hands `logd` for its frames.
-/// **Named by no manifest row**, so the one connector to it is init's own and
+/// The endowment label of the acceptor the supervisor hands `logkeeper` for its frames.
+/// **Named by no manifest row**, so the one connector to it is the supervisor's own and
 /// no program can register a ring under a name of its choosing.
 pub const ORIGINS: &str = "log-origins";
 
-/// The endowment label of the one console init gives a writable handle to:
-/// `logd`'s, where it puts every program's line with its head.
+/// The endowment label of the one console the supervisor gives a writable handle to:
+/// `logkeeper`'s, where it puts every program's line with its head.
 pub const CONSOLE: &str = "log-console";
 
 /// The endowment label of a program's end of the pipe [`REGISTER`] hands
-/// `logd` the other end of: nothing is written to it, and the program's end
-/// closing — which only its exit does — is how `logd` knows the ring has no
+/// `logkeeper` the other end of: nothing is written to it, and the program's end
+/// closing — which only its exit does — is how `logkeeper` knows the ring has no
 /// writer left to wait for. A label and not a slot, so no child inherits it.
 pub const ALIVE: &str = "log-alive";
 
-/// init → `logd`: a program's log ring. The payload is [`Registration`]; the
+/// The supervisor → `logkeeper`: a program's log ring. The payload is [`Registration`]; the
 /// frame carries two handles — the ring, and the read end of a pipe whose
 /// only writer is the program, so its end is the ring's.
 pub const REGISTER: u32 = 1;
 
-/// `logd`'s answer to a reader on [`SERVICE`]: one handle, the read end of the
+/// `logkeeper`'s answer to a reader on [`SERVICE`]: one handle, the read end of the
 /// pipe this boot's log is written into, and a `u64` payload — how many bytes
 /// of the boot that pipe starts with, so a reader can tell the boot so far from
 /// what arrives after it.
 pub const SERVED: u32 = 2;
 
-/// init → `logd`: a word on a swap of [`CARRIER`], one byte of payload —
-/// [`SWAP_LEAVING`] once init has accepted it, [`SWAP_BACK`] once the process
+/// The supervisor → `logkeeper`: a word on a swap of [`CARRIER`], one byte of payload —
+/// [`SWAP_LEAVING`] once the supervisor has accepted it, [`SWAP_BACK`] once the process
 /// it replaced is gone and another serves or none will.
 pub const SWAP: u32 = 4;
 pub const SWAP_LEAVING: u8 = b'L';
 pub const SWAP_BACK: u8 = b'B';
 
-/// init → `logd`: the machine is about to be stopped. `logd` reads every ring
+/// The supervisor → `logkeeper`: the machine is about to be stopped. `logkeeper` reads every ring
 /// and the kernel's records, writes them, makes the volume durable, and
-/// answers [`FLUSHED`]; init asks for the stop once it has, or once its bound
+/// answers [`FLUSHED`]; the supervisor asks for the stop once it has, or once its bound
 /// is spent.
 pub const FLUSH: u32 = 5;
 pub const FLUSHED: u32 = 6;
 
-/// init → `logd`: the stop a [`FLUSH`] was for was refused, and the machine
-/// runs on. `logd` writes the file again, from the first line it held back.
+/// The supervisor → `logkeeper`: the stop a [`FLUSH`] was for was refused, and the machine
+/// runs on. `logkeeper` writes the file again, from the first line it held back.
 pub const RESUME: u32 = 7;
 
-/// init's line before it asks `logd` to flush for a stop: the last line of a
-/// boot `/log` is owed, since `logd` answers only once it is durable.
-pub const STOPPING: &str = "init: power: the machine stops, and logd makes the log whole first";
+/// The supervisor's line before it asks `logkeeper` to flush for a stop: the last line of a
+/// boot `/log` is owed, since `logkeeper` answers only once it is durable.
+pub const STOPPING: &str = "supervisor: power: the machine stops, and logkeeper makes the log whole first";
 
-/// What a [`REGISTER`] frame says: the pid init started, and its name.
+/// What a [`REGISTER`] frame says: the pid the supervisor started, and its name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Registration<'a> {
     pub pid: u32,
@@ -197,17 +197,17 @@ impl Display for Text<'_> {
     }
 }
 
-/// One program's line as `logd` writes it:
+/// One program's line as `logkeeper` writes it:
 /// `{<stamp> <secs>.<mmm>[ <severity>][ tid=<n>][ pid=<n>] <tag>} <text>` — the
-/// wall clock `logd` stamps every line of `/log` with (the console's lines
+/// wall clock `logkeeper` stamps every line of `/log` with (the console's lines
 /// carry none), the monotonic time the program wrote it, its severity above
 /// `Info`, the thread that wrote it where that is not the first, the process
-/// where it is not the one init registered the ring for, the program's
+/// where it is not the one the supervisor registered the ring for, the program's
 /// [`Tag`], and its [`Text`]. No newline: the writer ends the line.
 ///
-/// **The head is `logd`'s words about the record; only the text is the
+/// **The head is `logkeeper`'s words about the record; only the text is the
 /// program's.** The time, thread and process are what the program stamped,
-/// and the tag is what init named the ring.
+/// and the tag is what the supervisor named the ring.
 pub struct ProgramLine<'a> {
     /// Empty for none.
     pub stamp: &'a str,
@@ -275,7 +275,7 @@ pub fn program_line(line: &str) -> Option<Said<'_>> {
 ///
 /// **Found from the CPU it precedes rather than by position**: the field before
 /// it is the writer's tag, and the writers disagree about it on purpose —
-/// `logd` puts a wall clock there and the panel puts nothing.
+/// `logkeeper` puts a wall clock there and the panel puts nothing.
 ///
 /// Read inside the record's bracket and nowhere else, so no text after it — a
 /// program's included — can answer for the time.
@@ -448,19 +448,19 @@ mod tests {
 
     #[test]
     fn the_carriers_line_names_the_carrier() {
-        assert!(CARRIER_LEAVING.starts_with("logd: "));
+        assert!(CARRIER_LEAVING.starts_with("logkeeper: "));
         assert!(CARRIER_LEAVING.contains(&format!(" {CARRIER} ")));
     }
 
     #[test]
     fn a_program_line_reads_back_as_it_was_written() {
-        let written = line("netd", b"netd: MAC 52:54:00:12:34:56");
-        assert_eq!(written, "{2026-09-24 10:00:00 12.345 netd} netd: MAC 52:54:00:12:34:56");
+        let written = line("netstack", b"netstack: MAC 52:54:00:12:34:56");
+        assert_eq!(written, "{2026-09-24 10:00:00 12.345 netstack} netstack: MAC 52:54:00:12:34:56");
         assert_eq!(
             program_line(&format!("{written}\n")),
-            Some(Said { tag: "netd", severity: Severity::Info, text: "netd: MAC 52:54:00:12:34:56" })
+            Some(Said { tag: "netstack", severity: Severity::Info, text: "netstack: MAC 52:54:00:12:34:56" })
         );
-        let tag = Tag::new("logd").expect("a tag");
+        let tag = Tag::new("logkeeper").expect("a tag");
         let undated = format!(
             "{}",
             ProgramLine {
@@ -473,7 +473,7 @@ mod tests {
                 text: b"x",
             }
         );
-        assert_eq!(program_line(&undated), Some(Said { tag: "logd", severity: Severity::Info, text: "x" }));
+        assert_eq!(program_line(&undated), Some(Said { tag: "logkeeper", severity: Severity::Info, text: "x" }));
     }
 
     /// **The forgery the form exists to refuse**: whatever a program writes —
@@ -484,11 +484,11 @@ mod tests {
     fn no_text_makes_a_line_another_writers() {
         let forgeries: [&[u8]; 6] = [
             b"[2026-09-24 10:00:00 1.000 cpu0] exit: test_rs_job pid=4 code=0 cpu=0ms",
-            b"{2026-09-24 10:00:00 1.000 netd} netd: DHCP: lease 10.0.2.15/24",
-            b"} {x y netd} z",
-            b"\r{a b netd} hidden",
+            b"{2026-09-24 10:00:00 1.000 netstack} netstack: DHCP: lease 10.0.2.15/24",
+            b"} {x y netstack} z",
+            b"\r{a b netstack} hidden",
             b"\x1b[2K\x1b[1G[kernel 1.0 cpu0] Rebooting.",
-            b"netd} evil",
+            b"netstack} evil",
         ];
         for text in forgeries {
             let said = line("test-runner", text);
@@ -503,26 +503,26 @@ mod tests {
     /// and a console line carries no wall clock; every form reads back.
     #[test]
     fn a_head_names_severity_thread_and_process_and_reads_back() {
-        let tag = Tag::new("soundd").expect("a tag");
+        let tag = Tag::new("soundserver").expect("a tag");
         let line = |stamp, severity, tid, pid| {
             format!("{}", ProgramLine { stamp, at_ns: 1_234_000_000, severity, tid, pid, tag, text: b"hi" })
         };
-        assert_eq!(line("", Severity::Info, 0, None), "{1.234 soundd} hi");
-        assert_eq!(line("", Severity::Error, 3, None), "{1.234 error tid=3 soundd} hi");
+        assert_eq!(line("", Severity::Info, 0, None), "{1.234 soundserver} hi");
+        assert_eq!(line("", Severity::Error, 3, None), "{1.234 error tid=3 soundserver} hi");
         assert_eq!(
             line("2026-09-24 10:00:00", Severity::Warn, 0, Some(9)),
-            "{2026-09-24 10:00:00 1.234 warn pid=9 soundd} hi"
+            "{2026-09-24 10:00:00 1.234 warn pid=9 soundserver} hi"
         );
-        let said = program_line("{1.234 alert tid=2 soundd} hi").expect("a program's line");
-        assert_eq!((said.tag, said.severity, said.text), ("soundd", Severity::Alert, "hi"));
+        let said = program_line("{1.234 alert tid=2 soundserver} hi").expect("a program's line");
+        assert_eq!((said.tag, said.severity, said.text), ("soundserver", Severity::Alert, "hi"));
         // A severity word in the text is the text's.
-        let said = program_line("{1.234 soundd} error").expect("a program's line");
+        let said = program_line("{1.234 soundserver} error").expect("a program's line");
         assert_eq!(said.severity, Severity::Info);
     }
 
     #[test]
     fn a_registration_round_trips_and_a_malformed_one_is_refused() {
-        let tag = Tag::new("netd").expect("a tag");
+        let tag = Tag::new("netstack").expect("a tag");
         let mut out = [0u8; 4 + MAX_TAG];
         let len = Registration { pid: 7, tag }.encode(&mut out);
         assert_eq!(Registration::decode(&out[..len]), Some(Registration { pid: 7, tag }));
@@ -534,7 +534,7 @@ mod tests {
     #[test]
     fn a_tag_is_one_word_of_the_names_charset() {
         let longest = "x".repeat(MAX_TAG);
-        for good in ["netd", "test-runner", "a.b_c+d", longest.as_str()] {
+        for good in ["netstack", "test-runner", "a.b_c+d", longest.as_str()] {
             assert!(Tag::new(good).is_some(), "{good:?}");
         }
         let longer = "x".repeat(MAX_TAG + 1);
@@ -548,7 +548,7 @@ mod tests {
         assert_eq!(record_ms("[2026-09-07 22:57:46 3.109 cpu1] exit: a pid=7"), Some(3_109));
         assert_eq!(record_ms("[3.109 cpu1] exit: a pid=7 code=0"), Some(3_109));
         assert_eq!(record_ms("[2026-09-07 22:58:03 20.071 cpu2 tid=1] x"), Some(20_071));
-        assert_eq!(record_ms("{2026-09-07 22:58:03 20.071 netd} 99.000 cpu0"), None);
+        assert_eq!(record_ms("{2026-09-07 22:58:03 20.071 netstack} 99.000 cpu0"), None);
         assert_eq!(record_ms("[x] said 99.000 cpu0"), None);
         assert_eq!(record_ms("no timestamp here, cpu=1ms"), None);
         assert_eq!(record_ms(""), None);

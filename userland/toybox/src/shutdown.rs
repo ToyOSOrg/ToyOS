@@ -1,4 +1,4 @@
-//! Power the machine off, by asking `/system/bin/init`, which has the log made
+//! Power the machine off, by asking `/system/bin/supervisor`, which has the log made
 //! whole first ([`toyos::power`]).
 //!
 //! **The `power` connector is the whole of the authority.** `/system/bin/shutdown`

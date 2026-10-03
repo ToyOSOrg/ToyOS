@@ -1,6 +1,6 @@
 use super::*;
 
-/// `logd`'s `/log` on the boot stick: a writer whose writes the departed
+/// `logkeeper`'s `/log` on the boot stick: a writer whose writes the departed
 /// device lost and who writes nothing after it, while another writer's flush
 /// comes first.
 #[test]

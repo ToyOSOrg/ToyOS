@@ -1,6 +1,5 @@
 # toyos-mixer corpus: every decision, over the space that reaches it.
 # f32 values are their bit patterns; i16 values are decimal.
-# Captured from userland/soundd/src/main.rs before the extraction.
 
 == constants
 I16_SCALE 47000000

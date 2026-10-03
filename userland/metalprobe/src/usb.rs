@@ -4,7 +4,7 @@
 //!
 //! **`/log` is the one writable place on a metal boot.** A flashed image carries
 //! an ESP, a read-only ROOT and the `TOYOS-LOG` volume, so the only durable
-//! bytes a job can lay down are on the FAT32 partition `logd` also writes —
+//! bytes a job can lay down are on the FAT32 partition `logkeeper` also writes —
 //! which is the partition the driver reads back and the host's FAT check judges.
 
 use std::fs;
@@ -38,7 +38,7 @@ const SHARE_PERCENT: u64 = 8;
 const BYTES: usize =
     (SLOWEST_KIB_S * toyos_tco::JOB_BOUND_MS * SHARE_PERCENT / 100 / 1_000 * 1024) as usize;
 
-/// Both files, plus a boot's `logd` output, inside the 34 MiB the log volume is
+/// Both files, plus a boot's `logkeeper` output, inside the 34 MiB the log volume is
 /// formatted at — and each removed as soon as it is measured, so only one is
 /// ever on the volume at once.
 const _: () = assert!(BYTES * 2 < 16 * 1024 * 1024);
@@ -73,7 +73,7 @@ pub fn write() -> Measured {
         f.sync_all().map_err(|_| Refusal::IoFailed)?;
     }
     let took = began.elapsed();
-    // The volume is 34 MiB and `logd` shares it; a measurement that left its
+    // The volume is 34 MiB and `logkeeper` shares it; a measurement that left its
     // own file behind would shrink what the next boot's log may write.
     fs::remove_file(WRITTEN).map_err(|_| Refusal::IoFailed)?;
     span(took.as_nanos())
@@ -83,7 +83,7 @@ pub fn write() -> Measured {
 ///
 /// **The staged file is closed before the clock starts**, though the read is
 /// answered from the file server's cache
-/// (`issues/hardware/metalprobes-usb-read-is-answered-from-fsds-cache.md`).
+/// (`issues/hardware/metalprobes-usb-read-is-answered-from-fileservers-cache.md`).
 pub fn read() -> Measured {
     let blob = payload();
     {

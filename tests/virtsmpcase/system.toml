@@ -2,9 +2,9 @@
 # CPU: a page unmapped beside a thread that is still reading it. Then the
 # machine powers off, every CPU but one turned off first.
 [boot]
-start = ["logd", "test-runner"]
+start = ["logkeeper", "test-runner"]
 
-[programs.logd]
+[programs.logkeeper]
 service = true
 syscap = ["logread"]
 

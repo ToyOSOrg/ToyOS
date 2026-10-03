@@ -64,7 +64,7 @@ pub fn play_tone() {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
 
-    // Let the tail of the tone drain through soundd and the device.
+    // Let the tail of the tone drain through soundserver and the device.
     std::thread::sleep(std::time::Duration::from_millis(200));
 
     drop(stream);

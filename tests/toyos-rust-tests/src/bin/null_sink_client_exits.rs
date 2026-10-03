@@ -1,7 +1,7 @@
 //! A client that plays through the null sink must finish and exit.
 //!
 //! `/system/bin/tone` and not this crate's own tone: the T14 hangs on the shipped
-//! binary, which reaches soundd through `cpal`. Whatever the defect is, only the
+//! binary, which reaches soundserver through `cpal`. Whatever the defect is, only the
 //! path a user actually takes shows it — which is why this spawns the program the
 //! shell spawns rather than linking the SDK directly.
 //!

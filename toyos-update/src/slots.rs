@@ -190,7 +190,7 @@ pub fn next_write(current: (Table, usize), mut next: Table) -> (usize, [u8; BLOC
     (1 - current.1, next.encode())
 }
 
-/// The labels `/system/bin/init` endows a `slots` grant under, and
+/// The labels `/system/bin/supervisor` endows a `slots` grant under, and
 /// `/system/bin/update` takes it by: the slot table's partition, and the idle
 /// slot's FAT volume and ROOT, each a partition claim.
 pub const TABLE_LABEL: &str = "slots:table";

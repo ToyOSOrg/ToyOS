@@ -1,6 +1,6 @@
 //! ROOT as the VFS reads it: the signed image, a read-only bcachefs volume in
 //! memory. The only filesystem this kernel mounts; every writable one is a
-//! file server's (`/system/bin/fsd`).
+//! file server's (`/system/bin/fileserver`).
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;

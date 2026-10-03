@@ -256,7 +256,7 @@ fn a_device_that_fails_mid_read_reports_it() {
     assert_eq!(fs.walk("", 1024).unwrap_err(), Error::Io);
 }
 
-/// The flush is the call `/system/bin/logd`'s durability claim rests on: a
+/// The flush is the call `/system/bin/logkeeper`'s durability claim rests on: a
 /// device that refuses it is `Io`, and one that flushes is `Ok`.
 #[test]
 fn a_refused_flush_is_io() {

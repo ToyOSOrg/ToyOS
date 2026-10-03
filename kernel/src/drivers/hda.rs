@@ -3,7 +3,7 @@
 //! The kernel touches only registers whose value is an address, indexes a
 //! kernel structure, or acknowledges the interrupt; everything else a driver
 //! reaches goes through [`reg_write`] and [`reg_read`], gated by a positive
-//! list and refused by name. Codec and pin decisions belong to soundd, never
+//! list and refused by name. Codec and pin decisions belong to soundserver, never
 //! to this file.
 
 use core::cell::UnsafeCell;
@@ -80,7 +80,7 @@ const SD_STS_WRITE_CLEAR: u8 = SD_STS_BCIS | SD_STS_FIFOE | SD_STS_DESE;
 const PERIODS: usize = 8;
 const PERIOD_BYTES: usize = 512;
 
-/// The tag this stream carries; [`HdaInfo::stream_tag`] is how soundd's verb names the same number.
+/// The tag this stream carries; [`HdaInfo::stream_tag`] is how soundserver's verb names the same number.
 const STREAM_TAG: u8 = 1;
 
 /// The smallest register window that can hold a stream descriptor; a BAR under this is refused.

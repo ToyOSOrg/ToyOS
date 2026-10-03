@@ -45,7 +45,7 @@
 //! # What a snapshot may carry
 //!
 //! **Aggregates of the owner's own state, never another client's.** A connector
-//! is held by many programs — every audio client holds `soundd` — so anything a
+//! is held by many programs — every audio client holds `soundserver` — so anything a
 //! snapshot carries is readable by all of them: a count of windows, never a
 //! title; a count of sockets, never an endpoint.
 //!
@@ -79,11 +79,11 @@ pub struct Owner {
     pub port: &'static str,
 }
 
-/// netd: the link, the lease, the card's counters and the socket table's size.
-pub const NET: Owner = Owner { root: "net", port: "netd" };
-/// soundd: the device it drives, its stream state and its underruns.
-pub const SOUND: Owner = Owner { root: "sound", port: "soundd" };
-/// logd: where this boot's log is going, and how much has gone there.
+/// netstack: the link, the lease, the card's counters and the socket table's size.
+pub const NET: Owner = Owner { root: "net", port: "netstack" };
+/// soundserver: the device it drives, its stream state and its underruns.
+pub const SOUND: Owner = Owner { root: "sound", port: "soundserver" };
+/// logkeeper: where this boot's log is going, and how much has gone there.
 pub const LOG: Owner = Owner { root: "log", port: "log" };
 /// The compositor: the panel, the windows it holds and its frame statistics.
 pub const DISPLAY: Owner = Owner { root: "display", port: "compositor" };

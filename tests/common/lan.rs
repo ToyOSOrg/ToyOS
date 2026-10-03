@@ -1,34 +1,34 @@
-//! The cable: netd taking this machine's address from the network, and the T14
+//! The cable: netstack taking this machine's address from the network, and the T14
 //! answering the development host on it.
 //!
 //! Every line read here is a line of a boot's log — the kernel's records, and
-//! netd's own lines, which reach the stick under netd's name through its log
-//! ring — or the one file netd leaves beside them, the lease probe's
-//! report. The judge reads netd's lines by that name and no other program's.
+//! netstack's own lines, which reach the stick under netstack's name through its log
+//! ring — or the one file netstack leaves beside them, the lease probe's
+//! report. The judge reads netstack's lines by that name and no other program's.
 
 use toyos_build::lan::{lease_in, link_up_ms, LINK_UP, MAC, READY};
 use toyos_i219::lease::{self, Event, Verdict};
 
 use super::metal;
 
-/// The boot with netd's `--exit-with-lease` armed: netd brings the card up and
+/// The boot with netstack's `--exit-with-lease` armed: netstack brings the card up and
 /// serves, leaves [`LEASE_FILE`] on the log volume one durable line at a time,
 /// and ends with the lease's verdict as its exit code, which the kernel's
 /// `exit:` record carries off a machine whose console reaches nobody.
 pub const LEASE_CONFIG: &str = "tests/lanleasecase";
 pub const LEASE_BOOT: &str = "lanleasecase";
 
-/// The file that report is left in, at the root of the log volume — netd's
+/// The file that report is left in, at the root of the log volume — netstack's
 /// `report::PATH` under `/log`.
 pub const LEASE_FILE: &str = "lease.txt";
 
-/// netd, as the kernel's `exit:` record names it.
-const NETD: &str = "netd";
+/// netstack, as the kernel's `exit:` record names it.
+const NETSTACK: &str = "netstack";
 
 /// The one job on that boot: it holds the machine up.
 pub const JOBS: &[&str] = &["test_rs_lan_hold"];
 
-/// The boot the host talks to over its own cable: the log it serves, sshd, and
+/// The boot the host talks to over its own cable: the log it serves, sshserver, and
 /// `reboot` as the way the machine is handed back.
 pub const TALK_CONFIG: &str = "tests/lantalkcase";
 pub const TALK_BOOT: &str = "lantalkcase";
@@ -54,9 +54,9 @@ const ID: &str = "8086:15fc";
 /// the metal loop reads the cable and the card's MAC before the flash.
 pub const NIC: &str = "0000:00:1f.6";
 
-/// The T14's judge: the claim, the card, and the lease in netd's own lines.
+/// The T14's judge: the claim, the card, and the lease in netstack's own lines.
 ///
-/// **The host learns the leased address from the boot**: netd answers for the
+/// **The host learns the leased address from the boot**: netstack answers for the
 /// machine's name once it holds a lease, and the loop reads the log served at
 /// the address the name answered with. The lease record is held to that
 /// address here, so no lease but this boot's own is judged.
@@ -87,17 +87,17 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
         }),
     }
 
-    // netd's own records, in the form the kernel gives a program's, under netd's tag.
+    // netstack's own records, in the form the kernel gives a program's, under netstack's tag.
     let log = back.log();
-    let netd = toyos_build::lan::netd_records(log.text());
+    let netstack = toyos_build::lan::netstack_records(log.text());
     for owed in [MAC, LINK_UP, READY] {
-        if !netd.contains(owed) {
+        if !netstack.contains(owed) {
             bad.push(format!("no {owed:?} record"));
         }
     }
 
     // Neither MAC is printed: a judge's lines are quoted in public.
-    if !netd.contains(&format!("{MAC}{wire_mac}")) {
+    if !netstack.contains(&format!("{MAC}{wire_mac}")) {
         bad.push(format!(
             "no {MAC:?} record names the MAC the operating system before this boot read on \
              {NIC}, which is `{}` in its `{}`: the card this boot brought up is not that one",
@@ -106,12 +106,12 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
         ));
     }
 
-    match link_up_ms(&netd) {
+    match link_up_ms(&netstack) {
         Ok(ms) => eprintln!("  [lan] the link came up {ms} ms after the driver did"),
         Err(why) => bad.push(why),
     }
 
-    match lease_in(&netd) {
+    match lease_in(&netstack) {
         Ok(lease) => {
             // The resolvers are counted and not printed, for the same reason.
             eprintln!(
@@ -126,7 +126,7 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
             if lease.address != heard.peer {
                 bad.push(format!(
                     "this boot leased {} and answered for its name at {}: the address the host \
-                     reached it at is not the one netd says it leased",
+                     reached it at is not the one netstack says it leased",
                     lease.address, heard.peer
                 ));
             }
@@ -140,13 +140,13 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
     Err(format!("{} finding(s):\n  {}", bad.len(), bad.join("\n  ")))
 }
 
-/// The lease probe's judge: netd's exit code, decoded through the table the
+/// The lease probe's judge: netstack's exit code, decoded through the table the
 /// driver crate owns, and the report it left on the log volume — the lease,
 /// the router, and what the driver and the MAC counted each way. A code that is
 /// no lease is a finding by its name, which the shipping boot's silence cannot
 /// give.
 pub fn leased_on_metal(back: &metal::Readback) -> Result<(), String> {
-    let code = back.exit_code(NETD)?;
+    let code = back.exit_code(NETSTACK)?;
     let text = back
         .log_volume_file(LEASE_FILE)?
         .ok_or_else(|| format!("{LEASE_BOOT}'s log volume carries no {LEASE_FILE}"))?;
@@ -156,23 +156,23 @@ pub fn leased_on_metal(back: &metal::Readback) -> Result<(), String> {
     let summary = lease::summary(&text).map_err(|why| format!("{LEASE_FILE}: {why}"))?;
     if summary.exit != Some(code) {
         return Err(format!(
-            "netd exited {code} and its report ends in {:?}: the two records of one exit disagree",
+            "netstack exited {code} and its report ends in {:?}: the two records of one exit disagree",
             summary.exit
         ));
     }
     match Verdict::from_exit_code(code) {
         Some(Verdict::Leased) => {}
-        Some(other) => return Err(format!("netd exited {code} on {LEASE_BOOT}: {other}")),
+        Some(other) => return Err(format!("netstack exited {code} on {LEASE_BOOT}: {other}")),
         None => {
-            return Err(format!("netd exited {code} on {LEASE_BOOT}, which is no verdict the probe encodes"))
+            return Err(format!("netstack exited {code} on {LEASE_BOOT}, which is no verdict the probe encodes"))
         }
     }
     let Some((ms, Event::Leased { address, prefix, server, router })) = summary.lease else {
-        return Err(format!("netd exited leased and {LEASE_FILE} records no lease"));
+        return Err(format!("netstack exited leased and {LEASE_FILE} records no lease"));
     };
     let counts = summary.counts.ok_or_else(|| format!("{LEASE_FILE} carries no counts"))?;
     eprintln!(
-        "  [lan] leased {address}/{prefix} from {server}, router {router:?}, {ms} ms after netd \
+        "  [lan] leased {address}/{prefix} from {server}, router {router:?}, {ms} ms after netstack \
          started; the driver counted {} sent and {} received, the MAC {} sent, {} received of \
          {} seen",
         counts.sent, counts.received, counts.wire.sent, counts.wire.received, counts.wire.seen
@@ -195,7 +195,7 @@ pub fn talked_on_metal(back: &metal::Readback) -> Result<(), String> {
         Ok(said) => said.iter().for_each(|line| eprintln!("  [talk] {line}")),
         Err(found) => bad.extend(found),
     }
-    // **The stick is the oracle the wire is compared with**: `logd` writes a
+    // **The stick is the oracle the wire is compared with**: `logkeeper` writes a
     // round to `/log` and then hands it to every reader from the boot's first
     // line, so what arrived is the file's own first lines in the file's own
     // order — and the file came back over a different path.

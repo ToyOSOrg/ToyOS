@@ -7,7 +7,7 @@
 //! signature over them is the whole of its authority to install anything.
 //!
 //! **What it holds is the whole of what it can write** (`slots` in its
-//! `system.toml` row): init claims the slot table's partition and the idle
+//! `system.toml` row): the supervisor claims the slot table's partition and the idle
 //! slot's FAT volume and ROOT and endows them, and the slot this boot runs is
 //! never among them (`toyos_update::slots::idle`). So it writes, in order:
 //!
@@ -55,12 +55,12 @@ fn main() {
     }
 }
 
-/// The three claims init endowed, or why this process holds none.
+/// The three claims the supervisor endowed, or why this process holds none.
 fn grant() -> Result<(PartitionDev, PartitionDev, PartitionDev), String> {
     let take = |label: &str| {
         Endowments::get()
             .take::<PartitionDev>(label)
-            .ok_or_else(|| format!("this process holds no `{label}`: init grants the idle slot to one update at a time, and says why where it grants none"))
+            .ok_or_else(|| format!("this process holds no `{label}`: the supervisor grants the idle slot to one update at a time, and says why where it grants none"))
     };
     Ok((take(slots::TABLE_LABEL)?, take(slots::BOOT_LABEL)?, take(slots::ROOT_LABEL)?))
 }

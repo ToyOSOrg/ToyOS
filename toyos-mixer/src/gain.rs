@@ -1,6 +1,6 @@
 //! Volume: what a client is allowed to ask for, and how the answer moves.
 //!
-//! Nothing here steps a gain instantly. Every change soundd makes to a stream's
+//! Nothing here steps a gain instantly. Every change soundserver makes to a stream's
 //! level — a connect, a disconnect, a `MSG_STREAM_SET_VOLUME` — is a ramp,
 //! because a level that jumps between two samples is a click, and a click is
 //! the one artefact a listener cannot fail to notice.

@@ -2,14 +2,14 @@
 //!
 //! **Every process has one parent and any number of children, and an end takes
 //! the whole subtree.** A spawn's parent is its *place*: the spawner, or a
-//! process whose `self` the spawner was handed. The kernel starts init with no
-//! parent, init starts everything else, and nothing reparents.
+//! process whose `self` the spawner was handed. The kernel starts the supervisor with no
+//! parent, the supervisor starts everything else, and nothing reparents.
 //!
 //! Three questions, each asked under `PROCESS_TABLE` and each one lock hold:
 //!
 //! - **May a child be placed here?** [`admit_child`] at the top of a spawn,
 //!   before anything is built: a place being torn down takes nothing more,
-//!   and a child deeper than [`MAX_DEPTH`] below init is refused. It takes
+//!   and a child deeper than [`MAX_DEPTH`] below the supervisor is refused. It takes
 //!   the child's pid ([`crate::pids`]).
 //! - **Who does an end take?** [`claim`] one process at a time: its claim is
 //!   what closes admission under it, and the same hold reads its children.
@@ -27,7 +27,7 @@ use alloc::vec::Vec;
 use crate::table::{Lifecycle, Processes};
 use crate::{teardown, Pid, Tid};
 
-/// How far below init a process may be. Bounds the climb one teardown can
+/// How far below the supervisor a process may be. Bounds the climb one teardown can
 /// owe.
 pub const MAX_DEPTH: u32 = 64;
 
@@ -44,7 +44,7 @@ pub struct Node {
 }
 
 impl Node {
-    /// A process placed under none: init at depth 0, and a kernel thread's.
+    /// A process placed under none: the supervisor at depth 0, and a kernel thread's.
     pub fn root() -> Self {
         Self { parent: None, depth: 0, children: Vec::new(), holds: 1 }
     }
@@ -65,7 +65,7 @@ pub enum Admit {
     Yes(Admitted),
     /// The place is being torn down or has gone.
     Gone,
-    /// The child would be `depth` below init, past [`MAX_DEPTH`].
+    /// The child would be `depth` below the supervisor, past [`MAX_DEPTH`].
     TooDeep { depth: u32 },
     /// Every pid below [`Pid::MAX`] is issued.
     NoPid,
@@ -76,7 +76,7 @@ pub enum Admit {
 #[must_use = "an admitted spawn holds its place's publication and its pid until it lands or is refused"]
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Admitted {
-    /// `None` for init, which the kernel starts under no process.
+    /// `None` for the supervisor, which the kernel starts under no process.
     place: Option<Pid>,
     depth: u32,
     pid: Pid,
@@ -97,7 +97,7 @@ pub struct Publish {
     pub parent: Option<Pid>,
 }
 
-/// The question at the top of a spawn under `place`, or of init's under
+/// The question at the top of a spawn under `place`, or of the supervisor's under
 /// none, before anything is built.
 pub fn admit_child<T: Processes>(table: &mut T, place: Option<Pid>) -> Admit {
     let depth = match place {
@@ -229,13 +229,13 @@ mod tests {
     use crate::model::World;
     use crate::Pids;
 
-    /// A chain from init down to `MAX_DEPTH`: the last is admitted, and one
+    /// A chain from the supervisor down to `MAX_DEPTH`: the last is admitted, and one
     /// more below it is refused naming the depth it would have had.
     #[test]
-    fn a_chain_is_refused_at_max_depth_plus_one_below_init() {
+    fn a_chain_is_refused_at_max_depth_plus_one_below_the_supervisor() {
         let mut world = World::new();
-        let init = world.spawn_process();
-        let mut at = init;
+        let supervisor = world.spawn_process();
+        let mut at = supervisor;
         for depth in 1..=MAX_DEPTH {
             at = world.spawn_child(at);
             assert_eq!(world.get(at).unwrap().node().depth(), depth);
@@ -251,8 +251,8 @@ mod tests {
     #[test]
     fn a_place_being_torn_down_admits_nothing() {
         let mut world = World::new();
-        let init = world.spawn_process();
-        let place = world.spawn_child(init);
+        let supervisor = world.spawn_process();
+        let place = world.spawn_child(supervisor);
         assert!(claim(&mut world, place, 137, &mut Vec::new()));
         assert_eq!(admit_child(&mut world, Some(place)), Admit::Gone);
         assert_eq!(admit_child(&mut world, Some(Pid(99))), Admit::Gone);
@@ -264,8 +264,8 @@ mod tests {
     #[test]
     fn a_child_landed_under_a_place_claimed_since_its_admission_is_claimed_with_it() {
         let mut world = World::new();
-        let init = world.spawn_process();
-        let place = world.spawn_child(init);
+        let supervisor = world.spawn_process();
+        let place = world.spawn_child(supervisor);
         let Admit::Yes(admitted) = admit_child(&mut world, Some(place)) else { panic!("admitted") };
         assert!(claim(&mut world, place, 137, &mut Vec::new()));
         assert_eq!(teardown_done(&mut world, place), None, "published with a child admitted under it");
@@ -274,7 +274,7 @@ mod tests {
         assert_eq!(retire, [world.main_tid(child)], "the child's spawner was not answered its thread to retire");
         assert_eq!(world.get(child).unwrap().teardown_code(), Some(137));
         assert_eq!(teardown_done(&mut world, child), Some(Publish { pid: child, parent: Some(place) }));
-        assert_eq!(published(&mut world, place, child), Some(Publish { pid: place, parent: Some(init) }));
+        assert_eq!(published(&mut world, place, child), Some(Publish { pid: place, parent: Some(supervisor) }));
     }
 
     /// A published child leaves its parent's children, so a parent's walk
@@ -282,14 +282,14 @@ mod tests {
     #[test]
     fn a_published_child_leaves_its_parents_children() {
         let mut world = World::new();
-        let init = world.spawn_process();
-        let child = world.spawn_child(init);
+        let supervisor = world.spawn_process();
+        let child = world.spawn_child(supervisor);
         assert!(claim(&mut world, child, 0, &mut Vec::new()));
-        assert_eq!(teardown_done(&mut world, child), Some(Publish { pid: child, parent: Some(init) }));
-        assert_eq!(published(&mut world, init, child), None);
+        assert_eq!(teardown_done(&mut world, child), Some(Publish { pid: child, parent: Some(supervisor) }));
+        assert_eq!(published(&mut world, supervisor, child), None);
         let mut owed = Vec::new();
-        assert!(claim(&mut world, init, 137, &mut owed));
-        assert_eq!(owed, [], "init's walk owes pid {child}, which was published");
+        assert!(claim(&mut world, supervisor, 137, &mut owed));
+        assert_eq!(owed, [], "the supervisor's walk owes pid {child}, which was published");
     }
 
     /// Once every pid below `Pid::MAX` is issued a spawn is refused by name
@@ -298,29 +298,29 @@ mod tests {
     #[test]
     fn a_spawn_past_the_last_pid_is_refused_and_a_refused_spawn_spends_none() {
         let mut world = World::with_pids(Pids::issued_below(Pid(u32::MAX - 2)));
-        let init = world.spawn_process();
-        let Admit::Yes(admitted) = admit_child(&mut world, Some(init)) else { panic!("the last pid was refused") };
+        let supervisor = world.spawn_process();
+        let Admit::Yes(admitted) = admit_child(&mut world, Some(supervisor)) else { panic!("the last pid was refused") };
         let last = admitted.pid();
         assert_eq!(last, Pid(u32::MAX - 1));
-        assert_eq!(admit_child(&mut world, Some(init)), Admit::NoPid);
+        assert_eq!(admit_child(&mut world, Some(supervisor)), Admit::NoPid);
         assert_eq!(refuse_child(&mut world, admitted), None);
         for _ in 0..3 {
-            let Admit::Yes(again) = admit_child(&mut world, Some(init)) else {
+            let Admit::Yes(again) = admit_child(&mut world, Some(supervisor)) else {
                 panic!("a refused spawn spent pid {last}");
             };
             assert_eq!(again.pid(), last);
             assert_eq!(refuse_child(&mut world, again), None);
         }
-        let Admit::Yes(lands) = admit_child(&mut world, Some(init)) else { panic!("pid {last} was spent") };
+        let Admit::Yes(lands) = admit_child(&mut world, Some(supervisor)) else { panic!("pid {last} was spent") };
         let ((), retire) = land_child(&mut world, lands, 137, |world, node| world.insert(last, node));
         assert_eq!(retire, []);
-        assert_eq!(admit_child(&mut world, Some(init)), Admit::NoPid);
+        assert_eq!(admit_child(&mut world, Some(supervisor)), Admit::NoPid);
         assert_eq!(admit_child(&mut world, None), Admit::NoPid);
-        // init's own hold and its child's are all that hold it.
+        // The supervisor's own hold and its child's are all that hold it.
         assert!(claim(&mut world, last, 0, &mut Vec::new()));
-        assert_eq!(teardown_done(&mut world, last), Some(Publish { pid: last, parent: Some(init) }));
-        assert!(claim(&mut world, init, 0, &mut Vec::new()));
-        assert_eq!(teardown_done(&mut world, init), None);
-        assert_eq!(published(&mut world, init, last), Some(Publish { pid: init, parent: None }));
+        assert_eq!(teardown_done(&mut world, last), Some(Publish { pid: last, parent: Some(supervisor) }));
+        assert!(claim(&mut world, supervisor, 0, &mut Vec::new()));
+        assert_eq!(teardown_done(&mut world, supervisor), None);
+        assert_eq!(published(&mut world, supervisor, last), Some(Publish { pid: supervisor, parent: None }));
     }
 }

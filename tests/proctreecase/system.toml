@@ -1,16 +1,16 @@
 # The boot `process_tree` runs on: a parent's end takes its children down.
 #
-# A `launcher`, because the subtree under test has children init launches; a
+# A `launcher`, because the subtree under test has children the supervisor launches; a
 # declared `cat`, which runs until its input ends; and a declared shell, which a
 # depth chain launches and which detaches a `cat`.
 
 [boot]
-start = ["logd", "blockd", "fsd", "test-runner"]
+start = ["logkeeper", "diskserver", "fileserver", "test-runner"]
 
-# `every_boot_config_runs_logd` is what refuses a boot config without it: the
+# `every_boot_config_runs_logkeeper` is what refuses a boot config without it: the
 # kernel keeps the record ring and writes no file, so such a boot's `/log` is
 # empty. It claims no device and serves no port.
-[programs.logd]
+[programs.logkeeper]
 service = true
 syscap = ["logread"]
 
@@ -31,7 +31,7 @@ receives = ["launcher"]
 # The block service: the NVMe controller this machine's DATA is on, driven
 # from userland through its claim. Started again when it ends; the claim goes
 # back with the process and is minted again for the next.
-[programs.blockd]
+[programs.diskserver]
 service = true
 restart = true
 serves = ["block"]
@@ -40,7 +40,7 @@ devices = ["pci:1b36:0010"]
 # The file servers: DATA, the log and the running slot's volume, one process
 # each, serving every program the directories of its role. Started again when
 # one ends, on the same ports.
-[programs.fsd]
+[programs.fileserver]
 restart = true
 roles = ["data", "log", "boot"]
 receives = ["block"]

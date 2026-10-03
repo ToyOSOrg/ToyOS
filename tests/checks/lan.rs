@@ -4,16 +4,16 @@
 use super::*;
 use toyos_build::metal::{READBACK_BOOT, READBACK_STREAM, READBACK_TALK};
 
-/// The T14's `lantalkcase` boot: the card's hand-over, what netd said of its
-/// MAC, its link and its lease, and init's stop. The MAC and the two resolvers
+/// The T14's `lantalkcase` boot: the card's hand-over, what netstack said of its
+/// MAC, its link and its lease, and the supervisor's stop. The MAC and the two resolvers
 /// are stand-ins that name nobody; every other byte is the machine's.
 const LOG: &str = r"[2026-10-03 10:20:01 1.192 cpu0] pcidev: PCI 00:1f.6 [8086:15fc] handed over on slot 0, vector 0x28
-{2026-10-03 10:20:05 5.727 netd} netd: MAC 02:00:00:00:00:01
+{2026-10-03 10:20:05 5.727 netstack} netstack: MAC 02:00:00:00:00:01
 [2026-10-03 10:20:08 8.499 cpu4] pcidev: slot 0 took its first message on vector 0x28
-{2026-10-03 10:20:08 8.499 netd} netd: I219: link up at 1000 Mb/s full duplex, 2772 ms after the driver came up
-{2026-10-03 10:20:19 19.053 netd} netd: DHCP: lease 192.168.1.48/24 from 192.168.1.1, gateway 192.168.1.1, dns [192.0.2.53 198.51.100.53], 13326 ms after netd came up
-{2026-10-03 10:20:19 19.053 netd} netd: ready, at most 103 piped connections (4 MiB each of 16022 MiB total)
-{2026-10-03 10:20:20 20.249 init} init: power: the machine stops, and logd makes the log whole first (Reboot)
+{2026-10-03 10:20:08 8.499 netstack} netstack: I219: link up at 1000 Mb/s full duplex, 2772 ms after the driver came up
+{2026-10-03 10:20:19 19.053 netstack} netstack: DHCP: lease 192.168.1.48/24 from 192.168.1.1, gateway 192.168.1.1, dns [192.0.2.53 198.51.100.53], 13326 ms after netstack came up
+{2026-10-03 10:20:19 19.053 netstack} netstack: ready, at most 103 piped connections (4 MiB each of 16022 MiB total)
+{2026-10-03 10:20:20 20.249 supervisor} supervisor: power: the machine stops, and logkeeper makes the log whole first (Reboot)
 ";
 
 /// That boot's `boot.txt`, under the same stand-in.
@@ -37,8 +37,8 @@ fn judged(log: &str, boot: &str) -> Result<(), String> {
 }
 
 /// The lease judged is the one this boot took: the T14's boot passes on the
-/// address it answered the host at, and reds where netd's record names another
-/// address, where netd read another MAC than Ubuntu did, and with no lease.
+/// address it answered the host at, and reds where netstack's record names another
+/// address, where netstack read another MAC than Ubuntu did, and with no lease.
 pub fn the_lease_judged_is_this_boots_own() {
     assert_eq!(judged(LOG, BOOT), Ok(()));
     let refused = |what: &str, log: &str, boot: &str, says: &str| {
@@ -55,7 +55,7 @@ pub fn the_lease_judged_is_this_boots_own() {
         "a MAC that is not the one Ubuntu read",
         LOG,
         &BOOT.replace("wire_mac 02:00:00:00:00:01", "wire_mac 02:00:00:00:00:02"),
-        "no \"netd: MAC \" record names the MAC the operating system before this boot read",
+        "no \"netstack: MAC \" record names the MAC the operating system before this boot read",
     );
     let unleased: String =
         LOG.lines().filter(|l| !l.contains("DHCP: lease")).map(|l| format!("{l}\n")).collect();

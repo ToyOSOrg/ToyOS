@@ -117,4 +117,4 @@ until that lands nothing verifies it.
 `--exit-with-lease` bench report the metal loop reads off the stick's FAT log
 volume, as it reads `/log/metal-*.bin`, and the DATA volume is not readable
 there. It goes with
-`issues/diagnostics/netds-lease-probe-answers-a-question-its-lines-already-answer.md`.
+`issues/diagnostics/netstacks-lease-probe-answers-a-question-its-lines-already-answer.md`.

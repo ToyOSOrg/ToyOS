@@ -32,7 +32,7 @@ work then stops and is judged before anything more is built on it.
    trace. A window's record names its opener by address, which
    `issues/kernel/the-cpu-that-spawns-a-toybox-applet-reads-1-4-ms-of-interrupts-and-preemption-off-on-the-t14.md`
    and
-   `issues/kernel/inits-claim-of-a-pci-function-the-t14-lacks-holds-interrupts-off-for-3-8-ms.md`
+   `issues/kernel/the-supervisors-claim-of-a-pci-function-the-t14-lacks-holds-interrupts-off-for-3-8-ms.md`
    need.
 
 Behind that judgement, and not before it: interrupt enter and exit records

@@ -354,7 +354,7 @@ fn uart_write_fifo(bytes: &[u8]) {
 /// `klogd`'s queue ([`crate::log::console::queue`]), and `klogd` puts it on
 /// the wire between its own records — so the kernel has one console writer,
 /// and a write here never waits on a device. The bytes go as they came: the
-/// only holder that writes is `/system/bin/logd`, which renders every control
+/// only holder that writes is `/system/bin/logkeeper`, which renders every control
 /// byte a program wrote as text before it gets here.
 ///
 /// **A write takes the whole lines the queue has room for and no more**, and

@@ -155,7 +155,7 @@ pub fn retire_under_balance() -> Scenario {
             // arm, which is the second caller of `hand_off` and the one that
             // needs no surplus to fire.
             ProcSpec {
-                name: "soundd",
+                name: "soundserver",
                 initial: vec![0],
                 templates: vec![Script::looping(
                     vec![
@@ -175,7 +175,7 @@ pub fn retire_under_balance() -> Scenario {
                 rt: true,
             },
             // The client, and the process that dies: a main thread that tears
-            // down while its workers are parked on the queue soundd boosts.
+            // down while its workers are parked on the queue soundserver boosts.
             process(
                 "client",
                 vec![0, 1, 1, 1, 1],
@@ -232,7 +232,7 @@ pub fn old_migrate_kept_the_corpse() -> Scenario {
 /// into a kernel panic if that precedence over the dying list is unqualified.
 ///
 /// It is not a hypothetical workload. `Rights::RT` is capability-gated, but
-/// `soundd` holds it in the shipped `system.toml` and `SYS_RT_ENTER` has no
+/// `soundserver` holds it in the shipped `system.toml` and `SYS_RT_ENTER` has no
 /// revocation call anywhere in the tree, so an RT process that stops blocking is
 /// one bug away — and every thread killed on its CPU then waits behind it. One
 /// CPU is deliberate: `hand_off` refuses to migrate a killed task and
@@ -253,7 +253,7 @@ pub fn rt_saturated_retire() -> Scenario {
             // precedence over the dying list were unqualified, the corpse would
             // still be queued when this run ended.
             ProcSpec {
-                name: "soundd",
+                name: "soundserver",
                 initial: vec![0],
                 templates: vec![Script::new(vec![
                     Op::Block {
@@ -519,7 +519,7 @@ pub fn rt_wake_latency() -> Scenario {
         vec![queue(WaitClass::Io)],
         vec![
             ProcSpec {
-                name: "soundd",
+                name: "soundserver",
                 initial: vec![0],
                 templates: vec![Script::looping(
                     vec![
@@ -567,7 +567,7 @@ pub fn audio_pipeline(cpus: usize) -> Scenario {
         vec![queue(WaitClass::Io), queue(WaitClass::Pipe)],
         vec![
             ProcSpec {
-                name: "soundd",
+                name: "soundserver",
                 initial: vec![0],
                 templates: vec![Script::looping(
                     vec![

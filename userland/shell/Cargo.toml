@@ -6,7 +6,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 toyos = { path = "../../toyos" }
-# `launch_path`, which is the other half of the gate init refuses a launch on.
+# `launch_path`, which is the other half of the gate the supervisor refuses a launch on.
 toyos-manifest = { path = "../../toyos-manifest" }
 
 [package.metadata.toyos.host]

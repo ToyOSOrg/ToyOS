@@ -338,7 +338,7 @@ Each stage lands on its own, in this order.
      `issues/hardware/the-t14-redial-re-asks-mdns-after-every-refusal.md`,
      `issues/diagnostics/a-first-dial-turned-away-before-a-line-is-waited-on-to-its-callers-bound.md`
      and
-     `issues/diagnostics/a-netd-that-dies-while-serving-leaves-the-hosts-stream-silent.md`.
+     `issues/diagnostics/a-netstack-that-dies-while-serving-leaves-the-hosts-stream-silent.md`.
    - #539's issues `a-loader-change-reaches-a-machine-only-by-writing-its-stick`,
      `the-bench-reads-no-quiescent-log-volume`,
      `the-bench-runs-with-no-bound-on-its-own-boot`,

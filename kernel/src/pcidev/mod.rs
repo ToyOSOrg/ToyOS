@@ -82,7 +82,7 @@
 //! **That rests on the next holder laying its grants out as the last one
 //! did.** The stale transfer — data and descriptor write-back — lands in
 //! whatever the new holder keeps at that address, after it has set up its own
-//! rings or not: harmless for a netd succeeding a netd, a silent write into its
+//! rings or not: harmless for a netstack succeeding a netstack, a silent write into its
 //! own memory for a holder with another layout.
 //!
 //! **A reset returns a function's configuration to its defaults, BARs

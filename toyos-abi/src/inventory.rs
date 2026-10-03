@@ -503,7 +503,7 @@ mod tests {
 
     fn every_kind() -> [Record; 8] {
         let at = PciAddr { segment: 0x1234, bus: 0, dev: 0x1f, func: 6 };
-        let holder = Holder { pid: 7, name: name("netd") };
+        let holder = Holder { pid: 7, name: name("netstack") };
         [
             Record::Pci(Pci {
                 at,
@@ -547,7 +547,7 @@ mod tests {
         for record in every_kind() {
             assert_eq!(Record::decode(&record.encode()), Ok(record));
         }
-        assert_eq!(Holder { pid: 1, name: name("soundd") }.name(), Some("soundd"));
+        assert_eq!(Holder { pid: 1, name: name("soundserver") }.name(), Some("soundserver"));
         for psiv in 0..=u8::MAX {
             if let Some(speed) = UsbSpeed::from_psiv(psiv) {
                 assert_eq!(speed.psiv(), psiv);
