@@ -317,23 +317,34 @@ fn runs(line: &str, of: impl Fn(u8) -> bool) -> Vec<(usize, &str)> {
     out
 }
 
+/// Every run of hex digits and colons in `line`, less what a word owns of it.
+/// A run that begins or ends inside a word shares that end with the word, up
+/// to the colon nearest it: `MAC:` gives the address after it an octet's worth
+/// of letters, and `IPv6:` a digit.
+fn colon_runs(line: &str) -> Vec<&str> {
+    runs(line, |b| b.is_ascii_hexdigit() || b == b':')
+        .into_iter()
+        .filter_map(|(start, run)| {
+            let mut from = start;
+            if word_at(line, start.checked_sub(1)) {
+                from += run.find(':').map_or(run.len(), |at| at + 1);
+            }
+            let mut to = start + run.len();
+            if word_at(line, Some(to)) {
+                to = start + run.rfind(':').unwrap_or(0);
+            }
+            line.get(from..to)
+        })
+        .collect()
+}
+
 /// The MAC addresses `line` spells that a vendor gave a device: six octets and
 /// no more, globally administered, unicast, and not the zero vendor a
 /// placeholder is written with.
 fn macs(line: &str) -> Vec<&str> {
     let mut out = Vec::new();
-    for (start, run) in runs(line, |b| b.is_ascii_hexdigit() || b == b':') {
-        // A run that begins or ends inside a word shares that end with the
-        // word: `MAC:` gives the address after it an octet's worth of letters.
-        let mut from = start;
-        if word_at(line, start.checked_sub(1)) {
-            from += run.find(':').map_or(run.len(), |at| at + 1);
-        }
-        let mut to = start + run.len();
-        if word_at(line, Some(to)) {
-            to = start + run.rfind(':').unwrap_or(0);
-        }
-        let Some(spelled) = line.get(from..to).map(|s| s.trim_matches(':')) else { continue };
+    for run in colon_runs(line) {
+        let spelled = run.trim_matches(':');
         // One digit or two: macOS's `arp` drops an octet's leading zero.
         let octets: Option<Vec<u8>> = spelled
             .split(':')
@@ -346,38 +357,25 @@ fn macs(line: &str) -> Vec<&str> {
     out
 }
 
-/// What stands between a word saying what a value is and the value, in a log
-/// line, a manifest or a string literal quoting either.
-const BETWEEN: [char; 7] = [' ', '\t', ':', '=', '"', '\'', '\\'];
-
-/// The words a dotted quad follows where it is a section or a version, and
-/// what joins the next quad to one that is.
-const NUMBERED: [&str; 4] = ["§", "section", "sections", "version"];
-const NUMBERED_ON: [&str; 2] = [" and ", "-"];
+/// The words a dotted quad follows where it is a section number.
+const NUMBERED: [&str; 2] = ["§", "section"];
 
 /// The IPv4 addresses `line` spells that are routed to one machine or one
 /// network: four decimal octets and no more, outside a word, none of them a
-/// section or version number, and outside the ranges that are everybody's.
+/// section number, and outside the ranges that are everybody's.
 fn v4s(line: &str) -> Vec<(&'static str, &str)> {
-    let (mut out, mut numbered_until) = (Vec::new(), None);
+    let mut out = Vec::new();
     for (start, run) in runs(line, |b| b.is_ascii_digit() || b == b'.') {
         let spelled = run.trim_end_matches('.');
-        let octets: Option<Vec<u8>> = spelled
-            .split('.')
-            .map(|o| (o == "0" || !o.starts_with('0')).then(|| o.parse().ok()).flatten())
-            .collect();
-        let Some(&[a, b, c, d]) = octets.as_deref() else { continue };
+        let Ok(addr) = spelled.parse::<std::net::Ipv4Addr>() else { continue };
         if word_at(line, start.checked_sub(1)) || word_at(line, Some(start + run.len())) {
             continue;
         }
-        let before = line[..start].trim_end_matches(BETWEEN).to_ascii_lowercase();
-        if NUMBERED.iter().any(|word| before.ends_with(word))
-            || numbered_until.is_some_and(|end| NUMBERED_ON.contains(&&line[end..start]))
-        {
-            numbered_until = Some(start + spelled.len());
+        let before = line[..start].trim_end().to_ascii_lowercase();
+        if NUMBERED.iter().any(|word| before.ends_with(word)) {
             continue;
         }
-        let addr = std::net::Ipv4Addr::new(a, b, c, d);
+        let [a, b, ..] = addr.octets();
         if a == 100 && (64..128).contains(&b) {
             out.push((SHARED_V4, spelled));
         } else if !(a == 0
@@ -398,13 +396,7 @@ fn v4s(line: &str) -> Vec<(&'static str, &str)> {
 /// identifier longer than one group.
 fn v6s(line: &str) -> Vec<(&'static str, &str)> {
     let mut out = Vec::new();
-    for (start, run) in runs(line, |b| b.is_ascii_hexdigit() || b == b':') {
-        if run.matches(':').count() < 2
-            || word_at(line, start.checked_sub(1))
-            || word_at(line, Some(start + run.len()))
-        {
-            continue;
-        }
+    for run in colon_runs(line) {
         // A sentence's colon after an address is not the address's.
         let spelled = if run.ends_with("::") { run } else { run.trim_end_matches(':') };
         let Ok(addr) = spelled.parse::<std::net::Ipv6Addr>() else { continue };
@@ -423,6 +415,9 @@ fn v6s(line: &str) -> Vec<(&'static str, &str)> {
 /// and the `Serial Number:` of a tool's report.
 fn serials(line: &str) -> Vec<&str> {
     const NAMED: &str = "serial number";
+    // What stands between those words and the serial, in a record, a report
+    // or a string literal quoting either.
+    const BETWEEN: [char; 7] = [' ', '\t', ':', '=', '"', '\'', '\\'];
     let lower = line.to_ascii_lowercase();
     let mut out = Vec::new();
     for (at, _) in lower.match_indices(NAMED) {
@@ -802,14 +797,17 @@ mod tests {
     ///
     /// Only text has a shape. A value spelled as bytes, a GUID, and a serial
     /// that nothing on its line calls a serial number are the reader's to see.
+    /// A home-directory path carrying the owner's first name is not private,
+    /// and is no shape here.
     #[test]
     fn no_tracked_file_identifies_a_machine_or_its_network() {
         let root = repo_root();
         let listing = crate::sysroot::tracked_files(&root, &[]).unwrap_or_else(|e| panic!("{e}"));
         let mut complaints = Vec::new();
         let mut kept = std::collections::BTreeSet::new();
-        for name in &listing {
-            let Ok(bytes) = std::fs::read(root.join(name)) else { continue };
+        // The fork's gitlink is a commit, and every other tracked path a file.
+        for name in listing.iter().filter(|name| *name != NOT_OURS) {
+            let bytes = std::fs::read(root.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
             for (n, line) in String::from_utf8_lossy(&bytes).lines().enumerate() {
                 for (shape, value) in identifying(line) {
                     match IDENTIFIES_NOBODY.iter().find(|row| **row == (name.as_str(), value)) {
@@ -833,7 +831,8 @@ mod tests {
             complaints.is_empty(),
             "a value that identifies a machine or its network is private, and this tree is not: \
              write one that identifies nobody (a locally administered MAC, an RFC 5737 or RFC \
-             3849 address, a made-up serial or name).\n{}",
+             3849 address, a made-up serial or name). A section number that reads as an address \
+             takes a `§` in front of it.\n{}",
             complaints.join("\n"),
         );
     }
@@ -856,6 +855,8 @@ mod tests {
             (format!("see §4.1 for {public}."), PUBLIC_V4),
             (format!("tailscale0 UNKNOWN {shared}/32"), SHARED_V4),
             (format!("inet6 {global}/64"), GLOBAL_V6),
+            (format!("addr:{global}"), GLOBAL_V6),
+            (format!("IPv6:{link_local}"), LINK_LOCAL_V6),
             (format!("inet6 {link_local}: link"), LINK_LOCAL_V6),
             (format!("USB 0781:5581, serial number \\\"{}\\\"", ["A1B2", "C3D4"].concat()), SERIAL),
             (format!("Serial Number: {}", ["PF", "000000"].concat()), SERIAL),
@@ -870,9 +871,8 @@ mod tests {
             "a longer run of octets 0a:1b:2c:3d:4e:5f:60:71, and 16:08:23 on 2026-09-08",
             "leased 10.0.2.15/24 from 10.0.2.2, 127.0.0.1, 169.254.1.1, 192.168.1.46, 172.16.0.1",
             "192.0.2.4 198.51.100.7 203.0.113.9 224.0.0.251 0.0.0.0 240.0.0.0/4 255.255.255.255.",
-            "PCIe base spec 6.0 §7.5.3.3, §7.5.3.4 and 7.5.3.16; Sections 11.4.4.1 and 11.4.4.2",
-            "Architecture Specification §3.2.5.6-3.2.5.8, Section 6.5.2.7, 612523 §9.5.9.2.23",
-            "version = \"1.2.3.4\", QEMU emulator version 11.0.3.1, v1.2.3.4, 1.2.3.4.5, D7.5.9.2",
+            "PCIe base spec 6.0 §7.5.3.3, §7.5.3.4 and §7.5.3.16, v1.2.3.4, 1.2.3.4.5, D7.5.9.2",
+            "Architecture Specification §3.2.5.6 to §3.2.5.8, Section 6.5.2.7, 612523 §9.5.9.2.23",
             "fe80::1 2001:db8::1 ff02::fb ::1 fd00::5, and `c::{name}` in std::net::Ipv6Addr",
             "usb-storage: slot {slot_id} serial number {}, and its serial number differs",
             "Host-MacBook-Pro.local, toyos-t14.local, s-macbook",
