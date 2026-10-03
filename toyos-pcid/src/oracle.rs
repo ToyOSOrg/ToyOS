@@ -69,12 +69,12 @@ impl Tlb {
 }
 
 const SHARED_VA: u64 = 0x1_0000;
-const INIT_AS: u64 = 0;
+const SUPERVISOR_AS: u64 = 0;
 
 /// Run the reachable attack through the real allocator and the SDM model, and
 /// return the first cross-space read the model observes.
 ///
-/// `churn` short-lived spaces are allocated and freed between init's tag and the
+/// `churn` short-lived spaces are allocated and freed between the supervisor's tag and the
 /// attacker's; past `MAX_USER_PCID` of them drive the base counter through its
 /// wrap. The flush the owned allocator asks for is applied to the model too —
 /// the shootdown the kernel performs, and why the owned allocator is safe.
@@ -82,8 +82,8 @@ pub fn drive(churn: u32) -> Option<CrossSpaceRead> {
     let mut pool = PcidPool::new();
     let mut tlb = Tlb::new();
 
-    let init_pcid = alloc_now(&mut pool, &mut tlb)?;
-    if let Some(v) = tlb.access(INIT_AS, init_pcid.get(), SHARED_VA) {
+    let supervisor_pcid = alloc_now(&mut pool, &mut tlb)?;
+    if let Some(v) = tlb.access(SUPERVISOR_AS, supervisor_pcid.get(), SHARED_VA) {
         return Some(v);
     }
 
@@ -150,11 +150,11 @@ mod tests {
     }
 
     /// The reverted counting allocator, judged the same way, does: the wrap hands
-    /// the attacker init's still-live tag.
+    /// the attacker the supervisor's still-live tag.
     #[test]
     #[cfg(feature = "counting-allocator")]
     fn the_counting_allocator_produces_a_cross_space_read() {
-        let read = drive(MAX_USER_PCID as u32 - 1).expect("the wrap must alias init");
-        assert_eq!(read.cached, INIT_AS, "the attacker read init's translation");
+        let read = drive(MAX_USER_PCID as u32 - 1).expect("the wrap must alias the supervisor");
+        assert_eq!(read.cached, SUPERVISOR_AS, "the attacker read the supervisor's translation");
     }
 }

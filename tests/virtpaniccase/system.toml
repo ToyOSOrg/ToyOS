@@ -2,9 +2,9 @@
 # while its siblings make kernel records on the other CPUs, and takes the
 # machine with it, so nothing runs after it.
 [boot]
-start = ["logd", "test-runner"]
+start = ["logkeeper", "test-runner"]
 
-[programs.logd]
+[programs.logkeeper]
 service = true
 syscap = ["logread"]
 

@@ -151,7 +151,7 @@ impl Pipe {
         self.backing.as_mut()
     }
 
-    /// Republish "is the other end gone?" into the mapped header, for netd; the kernel itself decides from its own counts.
+    /// Republish "is the other end gone?" into the mapped header, for netstack; the kernel itself decides from its own counts.
     fn publish_ends(&mut self) {
         let Some(backing) = self.backing.as_mut() else { return };
         if self.readers == 0 { backing.ring.close_reader() } else { backing.ring.open_reader() }

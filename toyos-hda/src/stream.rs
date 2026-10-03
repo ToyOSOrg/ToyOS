@@ -22,7 +22,7 @@ const BITS_SHIFT: u16 = 4;
 
 /// How many periods a cyclic buffer may have.
 ///
-/// Policy: the mask is a `u32` and soundd's pipeline is eight deep. A caller
+/// Policy: the mask is a `u32` and soundserver's pipeline is eight deep. A caller
 /// past this is told, rather than handed a mask with bits missing.
 pub const MAX_PERIODS: usize = 32;
 
@@ -112,7 +112,7 @@ pub fn last_valid_index(periods: usize) -> Option<u8> {
 /// Which periods have played since `last`, and where the engine is now.
 ///
 /// Derived from a position read and never from counting interrupts: one
-/// interrupt can cover several periods, and soundd's mix loop already asserts
+/// interrupt can cover several periods, and soundserver's mix loop already asserts
 /// that a completion never repeats a buffer it still holds.
 ///
 /// `position` is the device's own byte offset and is checked against the
@@ -221,7 +221,7 @@ mod tests {
 
     #[test]
     fn the_rate_this_pipeline_plays_encodes_as_the_forty_four_one_base() {
-        // 44.1 kHz, S16, stereo — soundd's grid, and what both the laptop's
+        // 44.1 kHz, S16, stereo — soundserver's grid, and what both the laptop's
         // converter and QEMU's offer.
         assert_eq!(stream_format(44_100, 16, 2), Some(0x4011));
     }
@@ -287,7 +287,7 @@ mod tests {
 
     #[test]
     fn the_pipeline_s_own_shape_builds_a_ring() {
-        // soundd: eight buffers of 512 bytes.
+        // soundserver: eight buffers of 512 bytes.
         let bdl = build_bdl(0x1000, 512, 8).unwrap();
         assert_eq!(bdl.len(), 8);
         assert_eq!(bdl[0].address, 0x1000);

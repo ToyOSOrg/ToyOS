@@ -1,4 +1,4 @@
-//! soundd IPC protocol and slot-ring shared memory audio streaming.
+//! soundserver IPC protocol and slot-ring shared memory audio streaming.
 
 use core::sync::atomic::Ordering;
 use toyos_abi::audio::AudioSlotHeader;
@@ -9,7 +9,7 @@ pub const MSG_STREAM_OPEN: u32 = 1;
 pub const MSG_STREAM_OPENED: u32 = 2;
 pub const MSG_STREAM_SET_VOLUME: u32 = 3;
 pub const MSG_STREAM_CLOSE: u32 = 4;
-/// soundd rejected `MSG_STREAM_OPEN` (unsupported format/channels/rate).
+/// soundserver rejected `MSG_STREAM_OPEN` (unsupported format/channels/rate).
 pub const MSG_STREAM_ERROR: u32 = 5;
 
 /// The only sample format currently implemented end-to-end.
@@ -39,11 +39,11 @@ crate::ipc_payload! {
 }
 
 /// The two handles `MSG_STREAM_OPENED` is sent with: the slot ring, then the
-/// read end of the pipe soundd signals on.
+/// read end of the pipe soundserver signals on.
 ///
-/// **Both travel soundd → client**, which is the direction that makes a dead
+/// **Both travel soundserver → client**, which is the direction that makes a dead
 /// client detectable: the last `PipeReadEnd` handle goes with the client's
-/// table and soundd's next signal answers `Gone`, by construction rather than
+/// table and soundserver's next signal answers `Gone`, by construction rather than
 /// by bookkeeping.
 pub const STREAM_OPENED_HANDLES: usize = 2;
 pub const STREAM_OPENED_SHM: usize = 0;
@@ -70,7 +70,7 @@ impl SlotWriteGuard<'_> {
         self.writer.slot_data_mut(slot)
     }
 
-    /// Publish the filled slot to soundd.
+    /// Publish the filled slot to soundserver.
     pub fn commit(self) {
         self.writer
             .header()
@@ -98,7 +98,7 @@ impl AudioSlotWriter {
     /// Acquire the next free slot for writing. Returns None if the ring is full.
     pub fn begin_fill(&mut self) -> Option<SlotWriteGuard<'_>> {
         // Only this side writes write_idx; read_idx needs Acquire so the slot
-        // data reads soundd finished before releasing the slot are ordered.
+        // data reads soundserver finished before releasing the slot are ordered.
         let w = self.header().write_idx.load(Ordering::Relaxed);
         let r = self.header().read_idx.load(Ordering::Acquire);
         if w.wrapping_sub(r) >= self.slot_count {
@@ -132,7 +132,7 @@ impl AudioSlotReader {
 
     /// The oldest filled slot, or None if the ring is empty (underrun).
     ///
-    /// The slot stays owned by soundd — the client may not refill it — until
+    /// The slot stays owned by soundserver — the client may not refill it — until
     /// [`SlotReadGuard::advance`] publishes the consumption. Advancing before
     /// the data is copied out lets a concurrently-filling client overwrite the
     /// slot mid-read (torn audio).
@@ -151,7 +151,7 @@ impl AudioSlotReader {
 /// advance without a successful peek is unrepresentable — and the release
 /// uses the index captured at peek time, never re-reading header state the
 /// untrusted client can scribble on (a hostile peer rewinding `write_idx`
-/// must only garble its own stream, not abort soundd).
+/// must only garble its own stream, not abort soundserver).
 pub struct SlotReadGuard<'a> {
     reader: &'a AudioSlotReader,
     idx: u32,
@@ -174,11 +174,11 @@ impl SlotReadGuard<'_> {
 #[derive(Debug)]
 pub enum AudioError {
     NotFound,
-    /// soundd rejected the requested format/channels/rate.
+    /// soundserver rejected the requested format/channels/rate.
     Rejected,
-    /// soundd closed the signal pipe (daemon exit or client removal).
+    /// soundserver closed the signal pipe (daemon exit or client removal).
     Disconnected,
-    /// soundd announced the stream and did not send the ring and the signal
+    /// soundserver announced the stream and did not send the ring and the signal
     /// pipe with it. Handles cross before the frame that names them, so a
     /// short batch is a protocol violation and never something to wait for.
     MissingHandles,
@@ -197,7 +197,7 @@ pub struct AudioStream {
 
 impl AudioStream {
     pub fn open(sample_rate: u32, channels: u16, format: u16) -> Result<Self, AudioError> {
-        let control = Self::connect_soundd()?;
+        let control = Self::connect_soundserver()?;
         let req = StreamOpenRequest { sample_rate, channels, format };
         control.send(MSG_STREAM_OPEN, &req).map_err(AudioError::Ipc)?;
 
@@ -229,10 +229,10 @@ impl AudioStream {
         })
     }
 
-    /// Block until soundd signals, then fill all available ring slots via the
+    /// Block until soundserver signals, then fill all available ring slots via the
     /// callback. Each callback invocation receives one period-sized buffer.
     ///
-    /// Returns `Err(Disconnected)` on signal-pipe EOF (soundd is gone or
+    /// Returns `Err(Disconnected)` on signal-pipe EOF (soundserver is gone or
     /// removed this client) — the caller must stop the stream, not retry.
     pub fn wait_and_fill(&mut self, mut callback: impl FnMut(&mut [u8])) -> Result<(), AudioError> {
         let mut buf = [0u8; 64];
@@ -269,13 +269,13 @@ impl AudioStream {
         let _ = self.control.signal(MSG_STREAM_CLOSE);
     }
 
-    /// One connection to soundd, through this process's own namespace.
+    /// One connection to soundserver, through this process's own namespace.
     ///
     /// **There was a retry loop here and it is gone**, along with its twin in
-    /// `net`. A `soundd` connector is live from this process's first
+    /// `net`. A `soundserver` connector is live from this process's first
     /// instruction, so `NotFound` now means the manifest did not give this
     /// program sound.
-    fn connect_soundd() -> Result<crate::Connection, AudioError> {
-        crate::endow::service("soundd").map_err(|_| AudioError::NotFound)
+    fn connect_soundserver() -> Result<crate::Connection, AudioError> {
+        crate::endow::service("soundserver").map_err(|_| AudioError::NotFound)
     }
 }

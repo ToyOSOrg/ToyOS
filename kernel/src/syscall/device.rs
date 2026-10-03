@@ -139,7 +139,7 @@ pub(super) fn sys_device_claim(syscap: RawHandle, class: u64, selector: [u64; 2]
     if let Err(e) = demand_syscap(syscap, Rights::DEVICE) {
         return e.refuse();
     }
-    // Each refusal keeps its own word: init logs what it could not mint, and
+    // Each refusal keeps its own word: the supervisor logs what it could not mint, and
     // "this machine has none" is a configuration while the rest are faults.
     let claim = match device::try_claim(class, selector) {
         Ok(c) => c,

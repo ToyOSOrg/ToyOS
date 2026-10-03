@@ -844,7 +844,7 @@ mod tests {
         let prefix = ["2a00", "1", "2", "300", "", ""].join(":");
         let link_local = ["fe80", "", "1c2d", "3e4f", "5a6b", "7c8d"].join(":");
         for (line, shape) in [
-            (format!("netd: MAC {mac}"), MAC),
+            (format!("netstack: MAC {mac}"), MAC),
             (format!("MAC:{mac}: the lease went to it"), MAC),
             (format!("{mac}:eth0 took the lease"), MAC),
             (format!("? (10.0.2.2) at {} on en0", ["0", "11", "22", "3", "44", "55"].join(":")), MAC),
@@ -864,7 +864,7 @@ mod tests {
             assert_eq!(shapes(&line), [shape], "{line}");
         }
         for line in [
-            "netd: MAC 52:54:00:12:34:56, ff:ff:ff:ff:ff:ff, 01:00:5e:00:00:fb, 33:33:00:00:00:01",
+            "netstack: MAC 52:54:00:12:34:56, ff:ff:ff:ff:ff:ff, 01:00:5e:00:00:fb, 33:33:00:00:00:01",
             "wire_mac 02:00:00:aa:bb:cc and the placeholder 00:00:00:00:00:01",
             "a longer run of octets 0a:1b:2c:3d:4e:5f:60:71, and 16:08:23 on 2026-09-08",
             "leased 10.0.2.15/24 from 10.0.2.2, 127.0.0.1, 169.254.1.1, 192.168.1.46, 172.16.0.1",

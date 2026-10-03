@@ -1542,7 +1542,7 @@ const BARRIER: crate::time::Duration =
 /// either way and the account says which of the two it was.
 ///
 /// Called from the shutdown path only, and after the log volume's last byte is
-/// durable — before that, `logd` still has that volume to write.
+/// durable — before that, `logkeeper` still has that volume to write.
 pub fn seal_shut() {
     match take_within(BARRIER.nanos()) {
         Some(guard) => {

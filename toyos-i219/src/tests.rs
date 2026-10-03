@@ -1548,7 +1548,7 @@ fn a_register_nothing_decodes_is_refused_and_never_written() {
 }
 
 /// Every answer the probe can give has one exit code, and every code reads back
-/// as its answer: the table netd exits through and the harness decodes with is
+/// as its answer: the table netstack exits through and the harness decodes with is
 /// one declaration, so the two ends cannot disagree about a number.
 #[test]
 fn every_probe_outcome_has_one_exit_code_that_reads_back() {
@@ -1593,7 +1593,7 @@ fn every_probe_outcome_has_one_exit_code_that_reads_back() {
         assert_eq!(Outcome::of(phy, link), outcome, "{phy:?} {link:?}");
         let code = outcome.exit_code();
         assert!((64..128).contains(&code), "{outcome:?} exits {code}");
-        assert_ne!(code, 101, "{outcome:?} exits the code a panicking netd ends with");
+        assert_ne!(code, 101, "{outcome:?} exits the code a panicking netstack ends with");
         assert_eq!(Outcome::from_exit_code(code), Some(outcome));
         assert!(!codes.contains(&code), "{outcome:?} shares {code} with another outcome");
         codes.push(code);
@@ -2670,7 +2670,7 @@ fn the_driver_and_the_macs_statistics_count_the_same_frames() {
 }
 
 /// Every verdict the lease probe can exit with reads back to itself, and none
-/// of them is a code a panicking netd or an ordinary exit ends with.
+/// of them is a code a panicking netstack or an ordinary exit ends with.
 #[test]
 fn every_lease_verdict_has_one_exit_code_that_reads_back() {
     use crate::lease::{Verdict, LEASED};

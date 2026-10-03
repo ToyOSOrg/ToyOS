@@ -1,5 +1,5 @@
 //! DH-07 and DH-75: server messages reaching the client through `toyos-net-ip` and
-//! `toyos-net-udp`, as netd will compose them.
+//! `toyos-net-udp`, as netstack will compose them.
 
 mod common;
 
@@ -54,7 +54,7 @@ struct Stack {
 }
 
 impl Stack {
-    /// A's interface up with no address, netd's acquisition socket on port 68.
+    /// A's interface up with no address, netstack's acquisition socket on port 68.
     fn new() -> Self {
         let mut ip = Ip::new(Instant::from_nanos(0), [0x5a; 16]);
         let if0 = ip.add_interface(Instant::from_nanos(0), IndividualMac::new(MAC_A).unwrap());

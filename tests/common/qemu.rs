@@ -356,7 +356,7 @@ pub const TIMED_OUT: &str = "timed out after";
 /// How long a guest may say nothing before a wait on it is a stall.
 ///
 /// Every config these waits run on has something on a periodic interval — the
-/// compositor's frame batch and soundd's stats window are both about 2 s — so
+/// compositor's frame batch and soundserver's stats window are both about 2 s — so
 /// silence here is a machine that has stopped rather than a machine that is
 /// thinking. It is not a verdict about any of them: no assertion in this suite
 /// is satisfied by the guest merely talking.
@@ -490,7 +490,7 @@ pub const VERDICT_POLL: Duration = Duration::from_millis(100);
 /// **`elapsed > ceiling` stays a necessary condition, and that is what keeps
 /// this safe.** Silence alone is not a wedge on this suite's boots: a healthy
 /// but idle guest on a config with no live periodic speaker — no compositor, an
-/// idle soundd, and the kernel's own ~10 s line halting with the idle loop — was
+/// idle soundserver, and the kernel's own ~10 s line halting with the idle loop — was
 /// measured quiet for as long as 102 s, so a guard that fired on 15 s of silence
 /// by itself would red a working machine. A guest's own budget is what says how
 /// long its silence is allowed; only past *that* does quiet mean stopped.
@@ -950,7 +950,7 @@ impl BootOptions {
 
 /// The in-guest test runner's startup marker.
 ///
-/// It is that runner's own first line and nothing else's. Init spawns its
+/// It is that runner's own first line and nothing else's. The supervisor spawns its
 /// programs without waiting, so this marker orders nothing about any other
 /// program's startup — a test asking about a daemon's line waits on the guest
 /// for that line ([`await_guest`]), never on a span of host wall clock after
@@ -1135,14 +1135,14 @@ pub fn build_toyos_bin(arch: Arch, crate_path: &Path, name: &str) -> Vec<u8> {
 
 /// A kernel record's line, whichever writer spelled its head: `klogd`'s console
 /// `[kernel …]` and a `/log` file's `[<date> <time> …]` alike. Nothing else
-/// writes either — a program's line reaches both only through `logd`, under the
+/// writes either — a program's line reaches both only through `logkeeper`, under the
 /// program's own head.
 pub fn is_kernel_line(line: &str) -> bool {
     line.starts_with(toyos_build::kernelconsole::HEAD) || toyos_logstream::record_ms(line).is_some()
 }
 
 /// A console line's text as its program wrote it: a program's line without
-/// the head `logd` gives it (`toyos_logstream::program_line`), and any other
+/// the head `logkeeper` gives it (`toyos_logstream::program_line`), and any other
 /// line as it is.
 pub fn user_text(line: &str) -> &str {
     toyos_logstream::program_line(line).map_or(line, |said| said.text)
@@ -1212,7 +1212,7 @@ impl QemuInstance {
             .collect();
 
         // **Every boot gets a blank DATA volume**, so what one boot leaves under
-        // `/home` — sshd's host identity, a package, a cache — is never the
+        // `/home` — sshserver's host identity, a package, a cache — is never the
         // premise of whatever test the lane runs next. The lane's one file is
         // remade rather than a file per boot.
         //
@@ -1572,7 +1572,7 @@ impl QemuInstance {
                     if line.contains(&format!("===TEST_START {want}===")) {
                         in_test = true;
                         // **The runner's marker reaches the console through
-                        // `logd` and the kernel's records through `klogd`**, so
+                        // `logkeeper` and the kernel's records through `klogd`**, so
                         // the kernel's record of this test's spawn, and what
                         // followed it, may arrive before the marker that opens
                         // the window. Everything from that record on is this
@@ -1961,7 +1961,7 @@ fn qemu_command(
     // on QEMU 11.0.2, an e1000e at 00:02.0 with a slirp backend, an empty
     // ide-cd on the ich9-ahci, and an isa-parallel — none of them declared by
     // anything, none of them visible to an argv assertion, and the first of
-    // them enough to make netd claim a NIC on the machine whose whole point is
+    // them enough to make netstack claim a NIC on the machine whose whole point is
     // that it has none. `-net none` and `-nic none` are gone in QEMU 11; this
     // is the option that does it, and it leaves i8042/ps2-kbd/ps2-mouse alone.
     qemu.arg("-nodefaults");
@@ -2068,7 +2068,7 @@ fn qemu_command(
     // with no NVMe is a shape, and the argv is the only place it is visible:
     // no console line and no screendump can see a device that is absent.
     //
-    // Its MSI-X table in a BAR of its own, because blockd drives it and a claim
+    // Its MSI-X table in a BAR of its own, because diskserver drives it and a claim
     // never maps the BAR holding the table. On a machine that boots off NVMe it
     // answers under Intel's ids, so the `pci:1b36:0010` row names the boot
     // controller alone and this one is nobody's, as the kernel's first-by-class
@@ -2340,12 +2340,12 @@ fn wait_for_ready(
             // **A death nothing left on this machine can come back from.** The
             // kernel's own, or a process the kernel killed — before the ready
             // marker the second is as fatal as the first, because whatever died
-            // was `init` or one of its children and nothing else is going to
+            // was the supervisor or one of its children and nothing else is going to
             // reach the marker.
             //
             // A process that ended *itself* is not on that list, and the
-            // difference is not academic: `sshd` panicked across four recorded
-            // boots that then came up perfectly, losing a race with `netd`'s
+            // difference is not academic: `sshserver` panicked across four recorded
+            // boots that then came up perfectly, losing a race with `netstack`'s
             // teardown on a machine with no NIC.
             // The words are the same words — `panicked at` — and who wrote the
             // line is the whole of what tells them apart. `super::serial::died`
@@ -2372,7 +2372,7 @@ fn wait_for_ready(
                     }
                 }
                 let _ = child.kill();
-                panic!("[qemu] Init process crashed during boot:\n{crash_msg}");
+                panic!("[qemu] The supervisor process crashed during boot:\n{crash_msg}");
             }
             Ok(line) => {
                 seen.push_str(&line);

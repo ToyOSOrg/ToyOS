@@ -2,10 +2,10 @@
 //! header, [`LANES`] lanes of [`LANE_SLOTS`] slots, and [`SHARED_SLOTS`] slots
 //! of shared ring — each slot a protocol word and a [`Body`].
 //!
-//! `/system/bin/init` creates one per program it starts, lays it out before
+//! `/system/bin/supervisor` creates one per program it starts, lays it out before
 //! any other process can map it ([`Ring::lay_out`]), gives the program
-//! duplicates as its stdout and stderr, and hands `/system/bin/logd` the
-//! region with the program's name. The program writes, `logd` reads, and
+//! duplicates as its stdout and stderr, and hands `/system/bin/logkeeper` the
+//! region with the program's name. The program writes, `logkeeper` reads, and
 //! [`super::ring`] is the whole of what they agree on beyond this layout.
 //!
 //! **Every access goes through the protocol's words or a volatile copy of a
@@ -49,7 +49,7 @@ pub const MAGIC: u64 = 0x544F_594F_534C_4F47; // "TOYOSLOG"
 /// The header's words, each group a cache line of its own: writers hammer
 /// `head` and `refused`, the reader `tail`.
 const MAGIC_AT: usize = 0;
-/// The process init started with the ring.
+/// The process the supervisor started with the ring.
 const OWNER_AT: usize = 8;
 const HEAD_AT: usize = 64;
 const TAIL_AT: usize = 128;

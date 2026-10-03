@@ -440,13 +440,13 @@ impl core::fmt::Display for Phy {
 /// which is what one exit code carries off a machine whose console reaches
 /// nobody.
 ///
-/// **One table, read at both ends.** netd exits with [`Outcome::exit_code`]
+/// **One table, read at both ends.** netstack exits with [`Outcome::exit_code`]
 /// when its caller asks for the outcome that way, the kernel records the code
 /// in its `exit:` record, and the harness reads the record back through
 /// [`Outcome::from_exit_code`]. The block starts at 64: clear of 0, a clean
 /// exit, of the codes at 128 and above that a process ends with when it did
 /// not choose its own end, and of 101, which the Rust runtime ends a panicking
-/// netd with and which would therefore read back as an outcome the PHY never
+/// netstack with and which would therefore read back as an outcome the PHY never
 /// gave.
 ///
 /// **A PHY that came up is seven codes and not one.** The question the probe

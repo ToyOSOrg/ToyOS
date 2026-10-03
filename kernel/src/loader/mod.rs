@@ -852,14 +852,14 @@ fn apply_tls_relocs(
 
 /// The one program the kernel starts. `src/build.rs` puts this binary in every
 /// image, so a missing one is a bad build, not a different boot.
-pub const INIT_PATH: &str = "/system/bin/init";
+pub const SUPERVISOR_PATH: &str = "/system/bin/supervisor";
 
-/// Start `/system/bin/init`, holding the machine's one full-rights `SysCap`.
+/// Start `/system/bin/supervisor`, holding the machine's one full-rights `SysCap`.
 ///
-/// Nothing else can construct one: what init endows is the entire set of
+/// Nothing else can construct one: what the supervisor endows is the entire set of
 /// processes that can ever claim a device, enter the RT band, or power off.
-/// Panics on failure: a boot that cannot start init has nowhere to report to.
-pub fn spawn_init() -> Pid {
+/// Panics on failure: a boot that cannot start the supervisor has nowhere to report to.
+pub fn spawn_supervisor() -> Pid {
     let mut handles = HandleTable::new();
     let console = KObjectRef::Console(crate::object::device::ConsoleObject::new());
     for slot in 0..3 {
@@ -869,7 +869,7 @@ pub fn spawn_init() -> Pid {
         );
         let (_, displaced) = handles
             .install_at(slot, entry)
-            .expect("spawn_init: three slots cannot exhaust an empty table");
+            .expect("spawn_supervisor: three slots cannot exhaust an empty table");
         assert!(displaced.is_none(), "an empty table had something at slot {slot}");
     }
     let cap = KObjectRef::SysCap(crate::object::syscap::SysCap::new());
@@ -888,7 +888,7 @@ pub fn spawn_init() -> Pid {
         .union(Rights::INVENTORY);
     let cap_handle = handles
         .install(crate::object::HandleEntry::new(cap, rights))
-        .expect("spawn_init: an empty table refused the system capability");
+        .expect("spawn_supervisor: an empty table refused the system capability");
     let label = toyos_abi::syscall::SYSCAP_LABEL;
     let mut entries = alloc::vec![toyos_abi::syscall::EndowEntry {
         label_off: 0,
@@ -897,14 +897,14 @@ pub fn spawn_init() -> Pid {
         _pad: 0,
     }];
     let mut labels = label.as_bytes().to_vec();
-    // Built by the kernel and owing nobody anything: no table but init's own holds it.
+    // Built by the kernel and owing nobody anything: no table but the supervisor's own holds it.
     let commit = |own| {
         start::endow_self(&mut handles, &mut entries, &mut labels, own);
         Ok((handles, Endowments::new(entries, labels), ()))
     };
-    match spawn(&[INIT_PATH], commit, String::from("/"), Vec::new(), None, Parent::Root) {
+    match spawn(&[SUPERVISOR_PATH], commit, String::from("/"), Vec::new(), None, Parent::Root) {
         Ok((pid, ())) => pid,
-        Err(crate::object::Refusal::Error(e)) => panic!("spawn_init: failed to spawn: {e:?}"),
-        Err(crate::object::Refusal::Handle(e)) => panic!("spawn_init: {e}"),
+        Err(crate::object::Refusal::Error(e)) => panic!("spawn_supervisor: failed to spawn: {e:?}"),
+        Err(crate::object::Refusal::Handle(e)) => panic!("spawn_supervisor: {e}"),
     }
 }

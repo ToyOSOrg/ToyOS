@@ -874,7 +874,7 @@ mod checks {
         }
     }
 
-    /// One boot's readback, out of a `loader.log` and a `logd` text.
+    /// One boot's readback, out of a `loader.log` and a `logkeeper` text.
     fn readback(label: &str, loader: &str, log: &str) -> metal::Readback {
         let boot = "back_secs 50\nstick_secs 0\n";
         metal::Readback::new(label, std::path::PathBuf::new(), loader.into(), log.into(), boot)

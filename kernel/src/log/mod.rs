@@ -67,8 +67,8 @@ const TAIL_HEAD: &str = "log: this boot's newest records follow, newest first";
 /// Seal the newest of this boot's records onto the black box, the one channel
 /// a boot's own tail has once the stop has begun.
 ///
-/// **The kernel does not wait for `/system/bin/logd`, so it does not know what
-/// reached `/log`.** `/system/bin/init` has `logd` flush before it asks for the
+/// **The kernel does not wait for `/system/bin/logkeeper`, so it does not know what
+/// reached `/log`.** `/system/bin/supervisor` has `logkeeper` flush before it asks for the
 /// stop; everything committed after that — the stop's own record, the last
 /// word — is on the console, and here, where the next
 /// loader pass prints it into `loader.log`.

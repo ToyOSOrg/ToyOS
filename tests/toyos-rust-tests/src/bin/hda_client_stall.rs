@@ -1,15 +1,15 @@
 //! A client that stops producing mid-stream, on a machine whose audio device
 //! is a cyclic DMA ring.
 //!
-//! The stall is the whole actuator. soundd's mix loop may leave a freed period
+//! The stall is the whole actuator. soundserver's mix loop may leave a freed period
 //! unfilled while a streaming client is still producing it, and on
-//! virtio-sound that costs nothing: a period soundd has not submitted is a
+//! virtio-sound that costs nothing: a period soundserver has not submitted is a
 //! period the device does not have. HDA's engine owns every period for as long
 //! as it runs and replays the ones nobody refilled, so a period held across a
-//! lap is completed a second time — which is what killed soundd on the T14.
+//! lap is completed a second time — which is what killed soundserver on the T14.
 //!
 //! Nothing in the ordinary tone clients reaches that state: they keep their
-//! ring full, so soundd never defers at all (`deferred=0` on every `hda_tone`
+//! ring full, so soundserver never defers at all (`deferred=0` on every `hda_tone`
 //! run measured). This one empties it on purpose, for longer than the ring
 //! takes to come round.
 
@@ -25,7 +25,7 @@ const AMPLITUDE: f64 = 16000.0;
 /// Periods of tone between stalls, and how long each stall lasts.
 ///
 /// The stall has to outlast one lap of the device ring — 8 periods, 23.2 ms —
-/// or the engine never reaches a period soundd is still holding. 60 ms is two
+/// or the engine never reaches a period soundserver is still holding. 60 ms is two
 /// and a half laps, and the run stages eight of them so the test does not rest
 /// on catching one window.
 const STALL: Duration = Duration::from_millis(60);
@@ -38,13 +38,13 @@ const WITHIN: Duration = Duration::from_secs(5);
 
 fn main() {
     play(STALLS);
-    // A second stream over the same device, after soundd has drained and
+    // A second stream over the same device, after soundserver has drained and
     // suspended: on a ring the drain gives the periods up rather than holding
     // them, so what the resume primes and where in the ring it starts are both
     // state the first stream left behind.
     await_suspended();
     play(2);
-    println!("stalled {STALLS} then 2 times, soundd survived");
+    println!("stalled {STALLS} then 2 times, soundserver survived");
 }
 
 /// One stream of `stalls + 1` stretches of tone with a stall after each but
@@ -96,9 +96,9 @@ fn play(stalls: u64) {
     drop(stream);
 }
 
-/// Wait until soundd says its device stream is stopped.
+/// Wait until soundserver says its device stream is stopped.
 ///
-/// soundd tells no client that it suspended: its `inspect` answer is the one
+/// soundserver tells no client that it suspended: its `inspect` answer is the one
 /// place a client reads it. The mix loop publishes that once a wake, and the
 /// device playing its tail out wakes it once a period, so a period is how
 /// often it is asked.
@@ -106,20 +106,20 @@ fn await_suspended() {
     let deadline = Instant::now() + WITHIN;
     loop {
         let sound =
-            inspect::ask(SOUND).unwrap_or_else(|why| panic!("soundd's inspect answer: {why}"));
+            inspect::ask(SOUND).unwrap_or_else(|why| panic!("soundserver's inspect answer: {why}"));
         let (Some(Value::Text(state)), Some(&Value::U64(frames)), Some(&Value::U64(rate))) = (
             sound.get("sound.stream.state"),
             sound.get("sound.period_frames"),
             sound.get("sound.rate_hz"),
         ) else {
-            panic!("soundd's snapshot names no stream state and period: {sound:?}");
+            panic!("soundserver's snapshot names no stream state and period: {sound:?}");
         };
         if state == "suspended" {
             return;
         }
         assert!(
             Instant::now() < deadline,
-            "soundd's stream still reads `{state}` {WITHIN:?} after its only client closed, so \
+            "soundserver's stream still reads `{state}` {WITHIN:?} after its only client closed, so \
              the second stream has no suspended daemon to resume"
         );
         std::thread::sleep(Duration::from_nanos(1_000_000_000 * frames / rate));

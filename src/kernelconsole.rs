@@ -93,7 +93,7 @@ mod tests {
 
     #[test]
     fn a_port_the_firmware_left_alone_passes_whole() {
-        let later = format!("{KERNEL}{{1.002 init}} init: a program's line\n");
+        let later = format!("{KERNEL}{{1.002 supervisor}} supervisor: a program's line\n");
         assert_eq!(passed(&later, &[3, 40]), later);
     }
 

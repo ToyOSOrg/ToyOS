@@ -3,9 +3,9 @@
 # suite's `test_rs_abuse_readonly_copyout`, which the harness puts on ROOT;
 # each job's line comes only if the kernel kept what that job asks about.
 [boot]
-start = ["logd", "test-runner"]
+start = ["logkeeper", "test-runner"]
 
-[programs.logd]
+[programs.logkeeper]
 service = true
 syscap = ["logread"]
 

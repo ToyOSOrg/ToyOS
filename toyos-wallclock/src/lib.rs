@@ -163,10 +163,10 @@ pub enum Class {
     Dated,
 }
 
-/// Whether `name` on the log volume is one of `logd`'s files, and which kind.
+/// Whether `name` on the log volume is one of `logkeeper`'s files, and which kind.
 ///
 /// An allow-list, and the strictness is the safety property in both
-/// directions: `logd` deletes nothing this does not recognise, and a host
+/// directions: `logkeeper` deletes nothing this does not recognise, and a host
 /// reading the volume for a boot's log reads nothing else — the bootloader's
 /// own `loader.log` is not one of these.
 pub fn classify(name: &str) -> Option<Class> {
@@ -281,10 +281,10 @@ mod tests {
         }
     }
 
-    /// The allow-list, from both sides: `logd` deletes only what this names,
+    /// The allow-list, from both sides: `logkeeper` deletes only what this names,
     /// and a host reading the volume for a boot's log reads only what it names.
     #[test]
-    fn only_logds_own_names_are_logds() {
+    fn only_logkeepers_own_names_are_logkeepers() {
         assert_eq!(classify("2026-09-06-084003.log"), Some(Class::Dated));
         assert_eq!(classify("2026-09-06-084003_0002.log"), Some(Class::Dated));
         assert_eq!(classify("unknown-00.log"), Some(Class::Undated));
@@ -295,7 +295,7 @@ mod tests {
         // The bootloader's own file, and anything else on a volume a person
         // and `toybox` can both write to.
         for no in ["loader.log", "LOADER.LOG", "boot.log", "notes.txt", ".log", "log"] {
-            assert_eq!(classify(no), None, "`{no}` was taken for one of logd's");
+            assert_eq!(classify(no), None, "`{no}` was taken for one of logkeeper's");
         }
         // A part number that is not four digits, and an index that is not two.
         for no in [
@@ -306,7 +306,7 @@ mod tests {
             "unknown-000.log",
             "unknown.log",
         ] {
-            assert_eq!(classify(no), None, "`{no}` was taken for one of logd's");
+            assert_eq!(classify(no), None, "`{no}` was taken for one of logkeeper's");
         }
     }
 

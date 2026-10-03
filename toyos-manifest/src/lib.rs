@@ -1,9 +1,9 @@
 //! What every program in an image is allowed to hold, written by the build
-//! system and read by `/system/bin/init`.
+//! system and read by `/system/bin/supervisor`.
 //!
 //! **One definition of the format, used by both halves.** `src/build.rs`
 //! resolves `system.toml` into a [`Manifest`] and [`render`]s it into the
-//! ROOT at [`PATH`]; init [`parse`]s it back. A round-trip test here is what
+//! ROOT at [`PATH`]; the supervisor [`parse`]s it back. A round-trip test here is what
 //! makes that a fact rather than two hand-matched implementations — the shape
 //! this crate exists to prevent is a renderer and a parser that disagree about
 //! one record and a machine that boots with an authority nobody declared.
@@ -15,17 +15,17 @@
 //! ```text
 //! program <name> <path>     starts a program's records
 //! arg <text>                argv after argv[0]
-//! serve <name>              init makes one machine-wide port and endows the acceptor
+//! serve <name>              the supervisor makes one machine-wide port and endows the acceptor
 //! provide <name>            this program makes its own port, once per instance
 //! receive <name>            a connector in this program's namespace
-//! device <class>            a claim init mints and endows
-//! syscap <right>            a right on the SysCap dup init endows
-//! slots                     the idle slot's partitions and the slot table, claimed by init
+//! device <class>            a claim the supervisor mints and endows
+//! syscap <right>            a right on the SysCap dup the supervisor endows
+//! slots                     the idle slot's partitions and the slot table, claimed by the supervisor
 //! service                   a system service: its `HOME` is `/state/<name>`, not the session's
 //! role <role>               a file server for `<role>`: one process of it per role
-//! restart                   init starts it again when it ends
-//! init-serve <name>         a name init serves itself
-//! start <name>              init starts this program at boot
+//! restart                   the supervisor starts it again when it ends
+//! supervisor-serve <name>   a name the supervisor serves itself
+//! start <name>              the supervisor starts this program at boot
 //! app-receive <name>        a connector every program launched from /apps holds
 //! ```
 //!
@@ -38,7 +38,7 @@ pub mod package;
 /// spelling. [`GUEST_PATH`] is what a process opens.
 pub const PATH: &str = "etc/system.manifest";
 
-/// The path `/system/bin/init` opens.
+/// The path `/system/bin/supervisor` opens.
 pub const GUEST_PATH: &str = "/system/etc/system.manifest";
 
 /// A program key may be this long. Policy on the primitive: the launcher
@@ -46,7 +46,7 @@ pub const GUEST_PATH: &str = "/system/etc/system.manifest";
 /// truncated into some other program's.
 pub const MAX_PROGRAM_NAME: usize = 32;
 
-/// The dev image's one user, until the users track gives init a login row.
+/// The dev image's one user, until the users track gives the supervisor a login row.
 pub const USER: &str = "toy";
 
 /// The session user's home: every program's `HOME` that no service row claims,
@@ -72,7 +72,7 @@ pub fn role_dirs(role: &str) -> Option<&'static [&'static str]> {
     ROLES.iter().find(|(name, _)| *name == role).map(|(_, dirs)| *dirs)
 }
 
-/// How often a `restart` row is started again before init gives up on it: at
+/// How often a `restart` row is started again before the supervisor gives up on it: at
 /// most this many ends inside [`RESTART_WINDOW_SECS`]. Past it the row's ports
 /// close, and a client's next connection is answered `Gone`.
 pub const RESTARTS: u32 = 3;
@@ -85,10 +85,10 @@ pub use toyos_abi::syscall::{DeviceRequest, DeviceType};
 ///
 /// **A short list on purpose.** Every entry is a machine-wide authority that
 /// exists nowhere else, so a name added here is a decision — and a config that
-/// can write a name init cannot act on is what this being the only spelling
+/// can write a name the supervisor cannot act on is what this being the only spelling
 /// prevents.
 ///
-/// `TRANSFER` is not nameable and is always added: init endows the duplicate,
+/// `TRANSFER` is not nameable and is always added: the supervisor endows the duplicate,
 /// and endowing is a transfer, so a cap without it could not reach the program
 /// the config is talking about at all.
 const SYSCAP_RIGHTS: &[(&str, Rights)] = &[
@@ -144,21 +144,21 @@ pub struct Program {
     pub name: String,
     pub path: String,
     pub args: Vec<String>,
-    /// Machine-wide ports init creates and endows the **acceptor** of.
+    /// Machine-wide ports the supervisor creates and endows the **acceptor** of.
     pub serves: Vec<String>,
-    /// Ports this program makes for itself, once per instance. init creates
+    /// Ports this program makes for itself, once per instance. The supervisor creates
     /// nothing and holds nothing for these.
     pub provides: Vec<String>,
     /// Names in this program's namespace, each a connector.
     pub receives: Vec<String>,
     pub devices: Vec<String>,
-    /// Rights on the `SysCap` duplicate init endows this program, by the names
+    /// Rights on the `SysCap` duplicate the supervisor endows this program, by the names
     /// [`syscap_rights`] takes. Empty for all but a handful: nothing else in
     /// the system may enter the RT band, mint a device claim, read the machine
     /// log, list every process in the machine, or power the machine off.
     pub syscap: Vec<String>,
     /// The machine's idle slot, granted as claims: the slot table's partition
-    /// and the idle slot's FAT volume and ROOT, which init resolves against
+    /// and the idle slot's FAT volume and ROOT, which the supervisor resolves against
     /// the ROOT the kernel holds and mints (`toyos_update::slots`). The
     /// authority to write the next image and nothing else: the slot a boot
     /// runs is never among them. One program holds it — `src/build.rs` gates
@@ -168,17 +168,17 @@ pub struct Program {
     /// than the session user's home, so what it keeps is machine state and no
     /// user's.
     pub service: bool,
-    /// The file-server roles this row serves, one process each: init starts
+    /// The file-server roles this row serves, one process each: the supervisor starts
     /// the binary once per role, with the role as its argument and the
     /// acceptors of the role's directories ([`role_dirs`]).
     pub roles: Vec<String>,
-    /// init starts it again when it ends, on the same ports, for as long as
+    /// The supervisor starts it again when it ends, on the same ports, for as long as
     /// it does not end faster than [`RESTARTS`] allows.
     pub restart: bool,
 }
 
 impl Program {
-    /// The `HOME` init starts this row with. A location grants nothing: what
+    /// The `HOME` the supervisor starts this row with. A location grants nothing: what
     /// the program can reach is its view's business, never this string's.
     pub fn home(&self) -> String {
         match self.service {
@@ -193,9 +193,9 @@ pub struct Manifest {
     /// Sorted by name, which is what makes [`render`] byte-for-byte
     /// deterministic.
     pub programs: Vec<Program>,
-    /// Names init serves itself. init is in every image and is no `[programs]`
+    /// Names the supervisor serves itself. The supervisor is in every image and is no `[programs]`
     /// key, so these have no declaration to come from.
-    pub init_serves: Vec<String>,
+    pub supervisor_serves: Vec<String>,
     /// The namespace every program launched from `/apps` is given: connectors,
     /// and nothing else. A package directory is writable, so this row is the
     /// image's rather than the package's — which is why a device class and a
@@ -251,8 +251,8 @@ pub enum RenderError {
     /// A field whose bytes would not survive the round trip.
     Unrepresentable { program: String, field: &'static str, value: String },
     /// A row that serves a machine-wide port and is not marked a service, so
-    /// init would start it in the session user's home. A service that serves
-    /// nothing (`sshd`) cannot be told from its row, and is marked by hand.
+    /// the supervisor would start it in the session user's home. A service that serves
+    /// nothing (`sshserver`) cannot be told from its row, and is marked by hand.
     ServesWithoutService(String),
     /// A `roles` entry naming no file-server role.
     NoSuchRole { program: String, role: String },
@@ -309,16 +309,16 @@ pub fn render(manifest: &Manifest) -> Result<Vec<u8>, RenderError> {
             out.push_str("restart\n");
         }
     }
-    for name in &manifest.init_serves {
-        check("init", "init_serves", name)?;
-        out.push_str(&format!("init-serve {name}\n"));
+    for name in &manifest.supervisor_serves {
+        check("supervisor", "supervisor_serves", name)?;
+        out.push_str(&format!("supervisor-serve {name}\n"));
     }
     for name in &manifest.apps {
-        check("init", "apps", name)?;
+        check("supervisor", "apps", name)?;
         out.push_str(&format!("app-receive {name}\n"));
     }
     for name in &manifest.start {
-        check("init", "start", name)?;
+        check("supervisor", "start", name)?;
         out.push_str(&format!("start {name}\n"));
     }
     Ok(out.into_bytes())
@@ -374,7 +374,7 @@ pub fn parse(text: &str) -> Manifest {
                     ..Program::default()
                 });
             }
-            "init-serve" => manifest.init_serves.push(rest.to_string()),
+            "supervisor-serve" => manifest.supervisor_serves.push(rest.to_string()),
             "app-receive" => manifest.apps.push(rest.to_string()),
             "start" => manifest.start.push(rest.to_string()),
             "" => {}
@@ -413,15 +413,15 @@ mod tests {
                     name: "compositor".into(),
                     path: "/system/bin/compositor".into(),
                     serves: vec!["compositor".into()],
-                    receives: vec!["soundd".into(), "launcher".into()],
+                    receives: vec!["soundserver".into(), "launcher".into()],
                     devices: vec!["framebuffer".into(), "keyboard".into()],
                     service: true,
                     ..Program::default()
                 },
                 Program {
-                    name: "soundd".into(),
-                    path: "/system/bin/soundd".into(),
-                    serves: vec!["soundd".into()],
+                    name: "soundserver".into(),
+                    path: "/system/bin/soundserver".into(),
+                    serves: vec!["soundserver".into()],
                     devices: vec!["hda-audio".into(), "virtio-sound".into()],
                     syscap: vec!["rt".into()],
                     service: true,
@@ -434,8 +434,8 @@ mod tests {
                     ..Program::default()
                 },
                 Program {
-                    name: "fsd".into(),
-                    path: "/system/bin/fsd".into(),
+                    name: "fileserver".into(),
+                    path: "/system/bin/fileserver".into(),
                     receives: vec!["block".into()],
                     roles: vec!["data".into(), "log".into()],
                     restart: true,
@@ -450,9 +450,9 @@ mod tests {
                     ..Program::default()
                 },
             ],
-            init_serves: vec!["launcher".into()],
-            apps: vec!["compositor".into(), "soundd".into()],
-            start: vec!["compositor".into(), "soundd".into()],
+            supervisor_serves: vec!["launcher".into()],
+            apps: vec!["compositor".into(), "soundserver".into()],
+            start: vec!["compositor".into(), "soundserver".into()],
         }
     }
 
@@ -461,7 +461,7 @@ mod tests {
     #[test]
     fn a_package_row_is_connectors_and_nothing_else() {
         let row = sample().app_row("gbae", "/apps/gbae/gbae");
-        assert_eq!(row.receives, ["compositor", "soundd"]);
+        assert_eq!(row.receives, ["compositor", "soundserver"]);
         assert!(row.devices.is_empty());
         assert!(row.syscap.is_empty());
         assert!(row.serves.is_empty());
@@ -471,7 +471,7 @@ mod tests {
 
     /// The one property both halves depend on, and the reason they live here.
     #[test]
-    fn what_the_build_writes_is_what_init_reads() {
+    fn what_the_build_writes_is_what_the_supervisor_reads() {
         let manifest = sample();
         let rendered = render(&manifest).expect("render");
         assert_eq!(parse(std::str::from_utf8(&rendered).unwrap()), manifest);
@@ -494,11 +494,11 @@ mod tests {
     #[test]
     fn a_service_s_home_is_its_state_and_every_other_row_s_the_session_s() {
         let m = sample();
-        assert_eq!(m.program("soundd").unwrap().home(), "/state/soundd");
+        assert_eq!(m.program("soundserver").unwrap().home(), "/state/soundserver");
         assert_eq!(m.program("terminal").unwrap().home(), "/home/toy");
         assert_eq!(m.app_row("gbae", "/apps/gbae/gbae").home(), "/home/toy");
-        let m = parse("program sshd /system/bin/sshd\nservice\nprogram shell /system/bin/shell\n");
-        assert!(m.program("sshd").unwrap().service);
+        let m = parse("program sshserver /system/bin/sshserver\nservice\nprogram shell /system/bin/shell\n");
+        assert!(m.program("sshserver").unwrap().service);
         assert!(!m.program("shell").unwrap().service);
     }
 
@@ -510,14 +510,14 @@ mod tests {
     #[test]
     fn records_attach_to_the_program_above_them() {
         let m = parse(
-            "program soundd /system/bin/soundd\nserve soundd\nsyscap rt\n\
+            "program soundserver /system/bin/soundserver\nserve soundserver\nsyscap rt\n\
              program toybox /system/bin/toybox\narg pwd\nreceive compositor\n\
-             init-serve launcher\nstart soundd\n",
+             supervisor-serve launcher\nstart soundserver\n",
         );
-        assert_eq!(m.program("soundd").unwrap().syscap, ["rt"]);
+        assert_eq!(m.program("soundserver").unwrap().syscap, ["rt"]);
         assert!(m.program("toybox").unwrap().syscap.is_empty());
         assert_eq!(m.program("toybox").unwrap().args, ["pwd"]);
-        assert_eq!(m.served_names(), ["soundd"]);
+        assert_eq!(m.served_names(), ["soundserver"]);
     }
 
     /// A name with a space in it parses back as a different record, so it is
@@ -537,7 +537,7 @@ mod tests {
         assert!(matches!(render(&newline), Err(RenderError::Unrepresentable { .. })));
     }
 
-    /// `TRANSFER` is in every set and is nameable in none: init endows the
+    /// `TRANSFER` is in every set and is nameable in none: the supervisor endows the
     /// duplicate, so a set without it names a capability that cannot reach the
     /// program the config is about.
     #[test]
@@ -569,7 +569,7 @@ mod tests {
     /// **The census is one bit and the log is another**, asserted because the
     /// two are the same shape — a machine-wide reading no program gets by
     /// default — and a config that named one meaning the other would build an
-    /// image whose `ps` works and whose `logd` writes nothing, or the reverse.
+    /// image whose `ps` works and whose `logkeeper` writes nothing, or the reverse.
     ///
     /// `WAIT` is deliberately absent: `SYS_SYSINFO` answers where it stands and
     /// there is nothing to park on, so a roster holder needs no readiness
@@ -587,15 +587,15 @@ mod tests {
         assert!(syscap_rights(&["sysinfo".into()]).is_err());
     }
 
-    /// A file server's roles reach init as records, and a name that is no
-    /// role is refused where it is written: init would start a server for
+    /// A file server's roles reach the supervisor as records, and a name that is no
+    /// role is refused where it is written: the supervisor would start a server for
     /// directories nobody named.
     #[test]
     fn a_role_is_one_of_the_three_and_its_directories_are_fixed() {
         let m = sample();
-        let fsd = m.program("fsd").unwrap();
-        assert_eq!(fsd.roles, ["data", "log"]);
-        assert!(fsd.restart);
+        let fileserver = m.program("fileserver").unwrap();
+        assert_eq!(fileserver.roles, ["data", "log"]);
+        assert!(fileserver.restart);
         assert_eq!(role_dirs("data"), Some(&["/apps", "/config", "/home", "/state"][..]));
         assert_eq!(role_dirs("boot"), Some(&["/boot"][..]));
         assert_eq!(role_dirs("tmp"), None);
@@ -603,7 +603,7 @@ mod tests {
         bad.programs[3].roles = vec!["tmp".into()];
         assert_eq!(
             render(&bad),
-            Err(RenderError::NoSuchRole { program: "fsd".into(), role: "tmp".into() })
+            Err(RenderError::NoSuchRole { program: "fileserver".into(), role: "tmp".into() })
         );
     }
 

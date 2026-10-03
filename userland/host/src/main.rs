@@ -1,6 +1,6 @@
 //! `host <name>...`: each name's IPv4 addresses, one line apiece, asked the
 //! way every Rust program asks, through `std::net::ToSocketAddrs`, which
-//! reaches netd's resolver.
+//! reaches netstack's resolver.
 //!
 //! Named for the BIND utility whose line it prints, `<name> has address <a>`:
 //! the resolver hands a client addresses and nothing else, which is what that

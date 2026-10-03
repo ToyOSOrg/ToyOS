@@ -7,26 +7,26 @@
 # `exit: <name> pid=N code=N cpu=Nms` record is what carries it off the stick.
 #
 # No compositor: the framebuffer jobs claim the display themselves, and a claim
-# is minted for one holder. soundd *is* here, and claims the HDA controller
+# is minted for one holder. soundserver *is* here, and claims the HDA controller
 # without a client: on this machine the controller is real, and its codec walk
 # and output-path choice are the only exercise of `toyos-hda` that hardware can
 # give.
 [boot]
-start = ["logd", "blockd", "fsd", "soundd", "test-runner"]
+start = ["logkeeper", "diskserver", "fileserver", "soundserver", "test-runner"]
 
-[programs.logd]
+[programs.logkeeper]
 service = true
 syscap = ["logread"]
 
-[programs.soundd]
+[programs.soundserver]
 service = true
-serves = ["soundd"]
+serves = ["soundserver"]
 devices = ["hda-audio"]
 syscap = ["rt"]
 
 # `device` because every framebuffer job mints its own claim and no manifest row
 # can name what a spawned job holds; `dup` because the capability is handed down
-# to each job in turn. `power` is the connector the last job asks init through
+# to each job in turn. `power` is the connector the last job asks the supervisor through
 # to hand the machine back.
 #
 # **The order is by where the bound's expiry may land.** One bound covers the
@@ -38,7 +38,7 @@ syscap = ["rt"]
 # copy run after them.
 [programs.test-runner]
 args = ["usbwrite", "usbread", "fbcheck", "fbfill", "fbread", "reboot"]
-receives = ["soundd", "power"]
+receives = ["soundserver", "power"]
 syscap = ["device", "dup"]
 
 [programs.metalprobe]
@@ -56,7 +56,7 @@ syscap = ["device", "dup"]
 # The block service: the NVMe controller this machine's DATA is on, driven
 # from userland through its claim. Started again when it ends; the claim goes
 # back with the process and is minted again for the next.
-[programs.blockd]
+[programs.diskserver]
 service = true
 restart = true
 serves = ["block"]
@@ -65,7 +65,7 @@ devices = ["pci:1b36:0010"]
 # The file servers: DATA, the log and the running slot's volume, one process
 # each, serving every program the directories of its role. Started again when
 # one ends, on the same ports.
-[programs.fsd]
+[programs.fileserver]
 restart = true
 roles = ["data", "log", "boot"]
 receives = ["block"]

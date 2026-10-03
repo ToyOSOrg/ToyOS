@@ -465,7 +465,7 @@ mod tests {
 
     #[test]
     fn the_laptop_s_converter_offers_what_this_pipeline_plays() {
-        // node 0x02 pcm=0x000e0060, and soundd's period grid is 44.1 kHz S16.
+        // node 0x02 pcm=0x000e0060, and soundserver's period grid is 44.1 kHz S16.
         let pcm = PcmCaps::decode(response(0x000e_0060));
         let rates: Vec<u32> = pcm.rates().collect();
         assert_eq!(rates, [44100, 48000]);

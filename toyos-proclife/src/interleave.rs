@@ -778,7 +778,7 @@ mod tests {
     }
 
     /// **A spawn racing its place's kill**, every ordering, with the spawner a
-    /// process that holds the place's `self` — init, serving a launch — and
+    /// process that holds the place's `self` — the supervisor, serving a launch — and
     /// its build landing or failing. A child lands before the claim and the
     /// walk takes it, or after it and is claimed as it lands; a failed build
     /// lets the place go. Nothing runs on under the place, a refused spawn
@@ -794,10 +794,10 @@ mod tests {
     #[test]
     fn a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it() {
         let mut world = World::new();
-        let init = world.spawn_process();
-        let place = world.spawn_child(init);
+        let supervisor = world.spawn_process();
+        let place = world.spawn_child(supervisor);
         world.spawn_child(place);
-        let launcher = (init, world.main_tid(init));
+        let launcher = (supervisor, world.main_tid(supervisor));
         let states = holds(&world, vec![Op::kill(place, KILLED), Op::spawn_under(place, launcher)]);
         std::println!("a spawn racing its place's kill: {states} states");
         holds(&world, vec![Op::kill(place, KILLED), Op::spawn_under_failing(place, launcher)]);
@@ -809,8 +809,8 @@ mod tests {
     #[test]
     fn a_spawn_racing_the_kill_of_its_own_spawner() {
         let mut world = World::new();
-        let init = world.spawn_process();
-        let place = world.spawn_child(init);
+        let supervisor = world.spawn_process();
+        let place = world.spawn_child(supervisor);
         world.spawn_child(place);
         let own = (place, world.main_tid(place));
         holds(&world, vec![Op::kill(place, KILLED), Op::spawn_under(place, own)]);
@@ -827,8 +827,8 @@ mod tests {
     #[test]
     fn a_sibling_closing_a_spawns_handle_before_the_spawn_returns() {
         let mut world = World::new();
-        let init = world.spawn_process();
-        let place = world.spawn_child(init);
+        let supervisor = world.spawn_process();
+        let place = world.spawn_child(supervisor);
         let sibling = (place, world.spawn_thread(place));
         let own = (place, world.main_tid(place));
         let Admit::Yes(next) = tree::admit_child(&mut world.clone(), Some(place)) else {
@@ -846,8 +846,8 @@ mod tests {
     #[test]
     fn an_exit_publishes_after_every_end_below_it() {
         let mut world = World::new();
-        let init = world.spawn_process();
-        let p = world.spawn_child(init);
+        let supervisor = world.spawn_process();
+        let p = world.spawn_child(supervisor);
         let c = world.spawn_child(p);
         world.spawn_child(c);
         world.spawn_child(p);
@@ -860,8 +860,8 @@ mod tests {
     #[test]
     fn a_childs_exit_racing_its_parents_kill() {
         let mut world = World::new();
-        let init = world.spawn_process();
-        let p = world.spawn_child(init);
+        let supervisor = world.spawn_process();
+        let p = world.spawn_child(supervisor);
         let c = world.spawn_child(p);
         world.spawn_child(c);
         let main = world.main_tid(c);
@@ -877,12 +877,12 @@ mod tests {
     #[test]
     fn a_spawn_under_an_unrelated_process_lands_between_two_claims_of_one_walk() {
         let mut world = World::new();
-        let init = world.spawn_process();
-        let p = world.spawn_child(init);
+        let supervisor = world.spawn_process();
+        let p = world.spawn_child(supervisor);
         world.spawn_child(p);
         world.spawn_child(p);
-        let unrelated = world.spawn_child(init);
-        let launcher = (init, world.main_tid(init));
+        let unrelated = world.spawn_child(supervisor);
+        let launcher = (supervisor, world.main_tid(supervisor));
         let ops = vec![Op::kill(p, KILLED), Op::spawn_under(unrelated, launcher)];
         // Two claimed when it landed: the end's own, and one of the two below it.
         let between = match explore_any(&world, &ops, |leaf| {

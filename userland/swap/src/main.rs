@@ -1,28 +1,28 @@
 //! `/system/bin/swap <service> <sha256> <length>`: a running service's binary
-//! replaced by the one on standard input, handed to `/system/bin/init`, which
+//! replaced by the one on standard input, handed to `/system/bin/supervisor`, which
 //! alone can swap it.
 //!
-//! An ordinary program: `ssh <machine> swap netd <sha256> <length> < netd`
+//! An ordinary program: `ssh <machine> swap netstack <sha256> <length> < netstack`
 //! runs it over a plain `exec` channel, and a local shell runs it the same
-//! way. It holds the one connector to init's [`toyos_swap::PORT`] the build
-//! lets any program hold, so what it can do is ask; every decision is init's
+//! way. It holds the one connector to the supervisor's [`toyos_swap::PORT`] the build
+//! lets any program hold, so what it can do is ask; every decision is the supervisor's
 //! ([`toyos_swap`]'s header is the order).
 //!
 //! **The length is not optional, because an input's end says nothing.** A
 //! connection that drops mid-upload ends this program's input exactly as the
 //! end of the file does, so a binary read to the end of its input is whatever
 //! arrived. The input is exactly `<length>` bytes, an input that ends sooner
-//! is refused by name before init hears of it, and the digest is the caller's
+//! is refused by name before the supervisor hears of it, and the digest is the caller's
 //! end-to-end word on the bytes.
 //!
 //! After the answer this program waits for the input to close — the caller's
 //! proof that it has the answer, which matters when the service being swapped
 //! is the one carrying the caller's connection — at most
-//! [`toyos_swap::ANSWER_MS`], and then lets init go.
+//! [`toyos_swap::ANSWER_MS`], and then lets the supervisor go.
 //!
 //! The answer is one line on standard output: `accepted <path>` with exit
-//! status 0; `refused <why>`, init's refusal, with 1; or `unasked <why>`, this
-//! program's own before init heard of the ask — so a caller knows init will
+//! status 0; `refused <why>`, the supervisor's refusal, with 1; or `unasked <why>`, this
+//! program's own before the supervisor heard of the ask — so a caller knows the supervisor will
 //! say nothing about it — with 1.
 
 use std::io::{Read, Write};
@@ -42,19 +42,19 @@ fn main() {
     };
     println!("{line}");
     std::io::stdout().flush().expect("the answer reaches standard output");
-    if let Some(init) = held {
-        go(init);
+    if let Some(supervisor) = held {
+        go(supervisor);
     }
     std::process::exit(if matches!(answer, Answer::Accepted(_)) { 0 } else { 1 });
 }
 
 /// What this program answers.
 enum Answer {
-    /// init verified and installed the binary; the path it runs from.
+    /// The supervisor verified and installed the binary; the path it runs from.
     Accepted(String),
-    /// init refused, and said so in its own log.
+    /// The supervisor refused, and said so in its own log.
     Refused(String),
-    /// This program refused before init heard of the ask.
+    /// This program refused before the supervisor heard of the ask.
     Unasked(String),
 }
 
@@ -65,7 +65,7 @@ struct Asked {
     body: Vec<u8>,
 }
 
-/// The answer, and the connection to init held until the go where init
+/// The answer, and the connection to the supervisor held until the go where the supervisor
 /// accepted.
 fn run(args: &[String]) -> (Answer, Option<toyos::ipc::Connection>) {
     match take(args) {
@@ -96,16 +96,16 @@ fn take(args: &[String]) -> Result<Asked, Refusal> {
     Ok(Asked { service: service.clone(), digest, body })
 }
 
-/// Stage the binary and ask init: its answer, and the connection this program
-/// holds until the go where init accepted.
+/// Stage the binary and ask the supervisor: its answer, and the connection this program
+/// holds until the go where the supervisor accepted.
 fn ask(asked: &Asked) -> (Answer, Option<toyos::ipc::Connection>) {
     let unasked = |why: String| (Answer::Unasked(why), None);
     let Some(held) = Endowments::get().take::<Namespace>(toyos_swap::LABEL) else {
         return unasked(Refusal::NoAuthority.to_string());
     };
-    let init = match held.open(toyos_swap::PORT) {
+    let supervisor = match held.open(toyos_swap::PORT) {
         Ok(conn) => conn,
-        Err(e) => return unasked(format!("init's swap port did not answer: {e:?}")),
+        Err(e) => return unasked(format!("the supervisor's swap port did not answer: {e:?}")),
     };
     let staged = toyos_swap::staged_path(&asked.service, u64::from(std::process::id()));
     let written = std::fs::create_dir_all(toyos_swap::STAGING).and_then(|()| std::fs::write(&staged, &asked.body));
@@ -114,30 +114,30 @@ fn ask(asked: &Asked) -> (Answer, Option<toyos::ipc::Connection>) {
         return unasked(format!("{staged} could not be written: {e}"));
     }
     let request = Request { service: asked.service.clone(), staged, digest: asked.digest };
-    if let Err(e) = init.send_bytes(toyos_swap::MSG_SWAP, &request.encode()) {
+    if let Err(e) = supervisor.send_bytes(toyos_swap::MSG_SWAP, &request.encode()) {
         let _ = std::fs::remove_file(&request.staged);
-        return unasked(format!("init did not take the request: {e:?}"));
+        return unasked(format!("the supervisor did not take the request: {e:?}"));
     }
-    let answer = match init.recv_header() {
+    let answer = match supervisor.recv_header() {
         Ok(answer) => answer,
-        Err(e) => return (Answer::Refused(format!("init did not answer: {e:?}")), None),
+        Err(e) => return (Answer::Refused(format!("the supervisor did not answer: {e:?}")), None),
     };
     let mut text = vec![0u8; answer.len() as usize];
-    let said = match init.recv_bytes(&answer, &mut text) {
+    let said = match supervisor.recv_bytes(&answer, &mut text) {
         Ok(n) => String::from_utf8_lossy(&text[..n]).into_owned(),
-        Err(e) => return (Answer::Refused(format!("init's answer did not arrive whole: {e:?}")), None),
+        Err(e) => return (Answer::Refused(format!("the supervisor's answer did not arrive whole: {e:?}")), None),
     };
     match answer.msg_type {
-        toyos_swap::MSG_ACCEPTED => (Answer::Accepted(said), Some(init)),
+        toyos_swap::MSG_ACCEPTED => (Answer::Accepted(said), Some(supervisor)),
         toyos_swap::MSG_REFUSED => (Answer::Refused(said), None),
-        other => (Answer::Refused(format!("init answered message {other}, which is no swap answer")), None),
+        other => (Answer::Refused(format!("the supervisor answered message {other}, which is no swap answer")), None),
     }
 }
 
-/// Wait for the caller's go — its input closing — and let init go by
-/// dropping the connection: **this program hanging up on init is what tells
+/// Wait for the caller's go — its input closing — and let the supervisor go by
+/// dropping the connection: **this program hanging up on the supervisor is what tells
 /// it to stop the old service**.
-fn go(init: toyos::ipc::Connection) {
+fn go(supervisor: toyos::ipc::Connection) {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let mut rest = Vec::new();
@@ -152,5 +152,5 @@ fn go(init: toyos::ipc::Connection) {
             toyos_swap::ANSWER_MS
         ),
     }
-    drop(init);
+    drop(supervisor);
 }

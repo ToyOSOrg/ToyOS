@@ -1,19 +1,19 @@
 //! Replacing a running service's binary on a machine over its own cable, and
-//! what the host heard of it: the ask over ssh, init's words over the record
+//! what the host heard of it: the ask over ssh, the supervisor's words over the record
 //! stream, and the machine answering ssh again afterwards.
 //!
 //! One exchange for a QEMU guest and for the T14: the ask is an `exec` of
-//! `/system/bin/swap` through the harness's russh client, and init's
+//! `/system/bin/swap` through the harness's russh client, and the supervisor's
 //! verdict is read off the stream in [`toyos_swap::heard`]'s form. **The stream
-//! is the one channel that outlives a swap of netd**: the ssh connection that
-//! asked goes with the netd that carried it, and this side's connection to
-//! `logd` goes with it too, with no FIN and no reset. So a swap of
-//! [`toyos_logstream::CARRIER`] is let go only once `logd` has said it turns new
-//! readers away until the next netd serves
+//! is the one channel that outlives a swap of netstack**: the ssh connection that
+//! asked goes with the netstack that carried it, and this side's connection to
+//! `logkeeper` goes with it too, with no FIN and no reset. So a swap of
+//! [`toyos_logstream::CARRIER`] is let go only once `logkeeper` has said it turns new
+//! readers away until the next netstack serves
 //! ([`toyos_logstream::CARRIER_LEAVING`]), and this side then dials again
-//! ([`Stream::redial`]) — every connection it makes before the old netd is gone
+//! ([`Stream::redial`]) — every connection it makes before the old netstack is gone
 //! turned away, the first one admitted a connection through the new one — so
-//! the verdict is whatever init said, as the machine's own log carries it.
+//! the verdict is whatever the supervisor said, as the machine's own log carries it.
 
 use std::net::{SocketAddr, SocketAddrV4};
 use std::path::Path;
@@ -23,7 +23,7 @@ use toyos_swap::Word;
 
 use crate::metaltalk::{self, Exec, Ssh, Stream, SSH_PORT};
 
-/// How long the host keeps asking for the swap once the stream is open: sshd
+/// How long the host keeps asking for the swap once the stream is open: sshserver
 /// may still be binding when a boot's stream opens.
 const ASK_WINDOW: Duration = Duration::from_secs(30);
 const RETRY: Duration = Duration::from_secs(1);
@@ -32,17 +32,17 @@ const RETRY: Duration = Duration::from_secs(1);
 /// the answer is sent, over a stream the refusal left alone.
 const REFUSED_WORD: Duration = Duration::from_secs(10);
 
-/// How long `logd`'s [`toyos_logstream::CARRIER_LEAVING`] has to reach this
-/// side before the swap goes: `swap` hangs up on init this long after it
-/// answered whether or not this side has closed its input, and the old netd is
+/// How long `logkeeper`'s [`toyos_logstream::CARRIER_LEAVING`] has to reach this
+/// side before the swap goes: `swap` hangs up on the supervisor this long after it
+/// answered whether or not this side has closed its input, and the old netstack is
 /// stopped then.
 ///
-/// **Not widened to cover a slow `logd` round, because nothing on this side
-/// can.** The line reaches a reader in the round after the one `logd` was in
-/// when it was said, and that round's flush may outlast `logd`'s own
+/// **Not widened to cover a slow `logkeeper` round, because nothing on this side
+/// can.** The line reaches a reader in the round after the one `logkeeper` was in
+/// when it was said, and that round's flush may outlast `logkeeper`'s own
 /// `LOG_WRITE_BUDGET` on a slow volume; the swap goes on `swap`'s clock whatever
 /// this side waits for. A reader that dialled again without the line could be
-/// admitted by the netd being stopped and lose its connection with no word, so
+/// admitted by the netstack being stopped and lose its connection with no word, so
 /// a missing line is a red verdict rather than a longer wait.
 const CARRIER_WORD: Duration = Duration::from_millis(toyos_swap::ANSWER_MS);
 
@@ -55,17 +55,17 @@ pub struct Swapped {
     pub digest: String,
     /// The machine's answer, or the client's last refusal to ask it.
     pub answer: Result<String, String>,
-    /// Every word init said about this service on the stream after the ask.
+    /// Every word the supervisor said about this service on the stream after the ask.
     pub words: Vec<(Word, String)>,
     /// The service's own lines on the stream after the ask.
     pub said: Vec<String>,
-    /// `echo` asked after init's verdict, through whatever carries the
+    /// `echo` asked after the supervisor's verdict, through whatever carries the
     /// network then.
     pub again: Result<Exec, String>,
     /// Stream connections before the ask and when this ended.
     pub connections: (usize, usize),
     /// Dials the stream made from the ask on that ended with no line: each
-    /// redial `logd` or the machine turned away, refusals included.
+    /// redial `logkeeper` or the machine turned away, refusals included.
     pub turned_away: usize,
     /// From the ask to the answer, and to `echo`'s answer.
     pub answer_ms: u64,
@@ -73,7 +73,7 @@ pub struct Swapped {
 }
 
 impl Swapped {
-    /// init's final word, if it said one.
+    /// The supervisor's final word, if it said one.
     pub fn outcome(&self) -> Option<&(Word, String)> {
         self.words.iter().rev().find(|(word, _)| word.is_final())
     }
@@ -89,38 +89,38 @@ pub struct Ask<'a> {
 }
 
 /// The manifest's name for the program whose lines judge a swap.
-const INIT: &str = "init";
+const SUPERVISOR: &str = "supervisor";
 
-/// `line`'s text where it is `tag`'s own line: judged by the head `logd`
+/// `line`'s text where it is `tag`'s own line: judged by the head `logkeeper`
 /// gives it (`toyos_logstream::program_line`), never by its words, so no other
-/// program can say init's word for it.
+/// program can say the supervisor's word for it.
 fn said_by<'a>(line: &'a str, tag: &str) -> Option<&'a str> {
     toyos_logstream::program_line(line).filter(|said| said.tag == tag).map(|said| said.text)
 }
 
-/// init's word about `service` in `line`, where `line` is init's.
-fn init_heard<'a>(line: &'a str, service: &str) -> Option<(Word, &'a str)> {
-    said_by(line, INIT).and_then(|text| toyos_swap::heard(text, service))
+/// The supervisor's word about `service` in `line`, where `line` is the supervisor's.
+fn supervisor_heard<'a>(line: &'a str, service: &str) -> Option<(Word, &'a str)> {
+    said_by(line, SUPERVISOR).and_then(|text| toyos_swap::heard(text, service))
 }
 
 /// Whether the wait for `service`'s outcome is over, reading `lines[mark..]`:
-/// init's final word about it. A refusal `swap` made before init heard of the
+/// The supervisor's final word about it. A refusal `swap` made before the supervisor heard of the
 /// ask is its answer on the channel (`unasked …`), and is never waited for here.
 fn settled(lines: &[String], mark: usize, service: &str) -> Option<()> {
     lines[mark.min(lines.len())..]
         .iter()
-        .any(|line| init_heard(line, service).is_some_and(|(word, _)| word.is_final()))
+        .any(|line| supervisor_heard(line, service).is_some_and(|(word, _)| word.is_final()))
         .then_some(())
 }
 
 /// Ask the machine that opens `stream` to replace a service's binary, and
-/// follow it to init's verdict and to ssh answering again.
+/// follow it to the supervisor's verdict and to ssh answering again.
 ///
-/// `ssh_at` is where sshd is reached, and `None` is the
+/// `ssh_at` is where sshserver is reached, and `None` is the
 /// stream's peer's own port 22; QEMU's forward is the other case.
 ///
 /// `Err` is a boot that never opened the stream within `window`, a binary this
-/// host cannot read, or a swap of the stream's own carrier whose `logd` never
+/// host cannot read, or a swap of the stream's own carrier whose `logkeeper` never
 /// said it would turn readers away before `swap` let the swap go without
 /// this side.
 pub fn swap(
@@ -166,12 +166,12 @@ pub fn swap(
     let heard = |lines: &[String]| -> Vec<(Word, String)> {
         lines[mark.min(lines.len())..]
             .iter()
-            .filter_map(|line| init_heard(line, service))
+            .filter_map(|line| supervisor_heard(line, service))
             .map(|(word, detail)| (word, detail.to_string()))
             .collect()
     };
-    // A refusal leaves the service as it was, and init's word on it is on the
-    // stream at once; an accepted swap is followed to init's final word.
+    // A refusal leaves the service as it was, and the supervisor's word on it is on the
+    // stream at once; an accepted swap is followed to the supervisor's final word.
     let accepted = matches!(&answer, Ok(said) if said.starts_with("accepted "));
     let until = match &answer {
         Ok(said) if said.starts_with("refused ") => Some(REFUSED_WORD),
@@ -182,12 +182,12 @@ pub fn swap(
         let leaving = stream.wait_until(CARRIER_WORD, |lines| {
             lines[mark.min(lines.len())..]
                 .iter()
-                .any(|line| said_by(line, toyos_logstream::LOGD) == Some(toyos_logstream::CARRIER_LEAVING))
+                .any(|line| said_by(line, toyos_logstream::LOGKEEPER) == Some(toyos_logstream::CARRIER_LEAVING))
                 .then_some(())
         });
         if leaving.is_none() {
             return Err(format!(
-                "`logd` did not say it turns readers away within {} ms of the swap of {service} \
+                "`logkeeper` did not say it turns readers away within {} ms of the swap of {service} \
                  being accepted, so `swap` let the swap go without this side, and the connection \
                  it carries may end with no word",
                 CARRIER_WORD.as_millis()
@@ -203,7 +203,7 @@ pub fn swap(
         let (left, seen, redialed) = (window.saturating_sub(began.elapsed()), stream.connections(), Instant::now());
         stream.redial(left);
         if stream.wait_for_connection(seen, left).is_some() {
-            println!("  swap: `logd` admitted the stream again {} ms after the redial", redialed.elapsed().as_millis());
+            println!("  swap: `logkeeper` admitted the stream again {} ms after the redial", redialed.elapsed().as_millis());
         }
     }
     if let Some(until) = until {
@@ -269,15 +269,15 @@ pub fn judge(heard: &Swapped, expect: Expect) -> Result<Vec<String>, Vec<String>
         Expect::InService => "accepted ",
     };
     match &heard.answer {
-        // A refusal `swap` made itself, before init heard of the ask, is a
-        // refusal too, and the one init never speaks about.
+        // A refusal `swap` made itself, before the supervisor heard of the ask, is a
+        // refusal too, and the one the supervisor never speaks about.
         Ok(answer) if answer.starts_with(owed_prefix) || (expect == Expect::Refused && answer.starts_with("unasked ")) => {
             said.push(format!("the machine answered the swap of {service} {answer:?} in {} ms", heard.answer_ms))
         }
         // The answer and the service carrying it can go together: what
-        // decides then is init's own word on the stream.
+        // decides then is the supervisor's own word on the stream.
         Ok(answer) if answer.starts_with("unanswered") && expect != Expect::Refused => {
-            said.push(format!("the swap of {service} was {answer:?}; init's words decide"))
+            said.push(format!("the swap of {service} was {answer:?}; the supervisor's words decide"))
         }
         other => bad.push(format!("the swap of {service} was answered {other:?}, where `{owed_prefix}…` is owed")),
     }
@@ -285,17 +285,17 @@ pub fn judge(heard: &Swapped, expect: Expect) -> Result<Vec<String>, Vec<String>
         (Expect::InService, Some((Word::InService, detail))) => {
             let path = toyos_swap::installed_path(service, &toyos_swap::parse_hex(&heard.digest).unwrap_or_default());
             if detail.starts_with(&path) {
-                said.push(format!("init: {service} is in service from {detail}"));
+                said.push(format!("supervisor: {service} is in service from {detail}"));
             } else {
-                bad.push(format!("init put {detail:?} in service, where {path} was sent"));
+                bad.push(format!("the supervisor put {detail:?} in service, where {path} was sent"));
             }
         }
         (Expect::Refused, _) if !word(Word::Stopping) => said.push(format!(
-            "init stopped nothing: {:?}",
+            "the supervisor stopped nothing: {:?}",
             heard.words.iter().map(|(w, d)| format!("{}: {d}", w.as_str())).collect::<Vec<_>>()
         )),
         (_, outcome) => bad.push(format!(
-            "init's words on {service} were {:?} ending in {outcome:?}, where {expect:?} is owed \
+            "the supervisor's words on {service} were {:?} ending in {outcome:?}, where {expect:?} is owed \
              (the stream had {} connection(s) before the ask and {} after)",
             heard.words.iter().map(|(w, _)| w.as_str()).collect::<Vec<_>>(),
             heard.connections.0,
@@ -328,7 +328,7 @@ pub fn judge(heard: &Swapped, expect: Expect) -> Result<Vec<String>, Vec<String>
 mod tests {
     use super::*;
 
-    /// `text` as `logd` writes it under `tag`.
+    /// `text` as `logkeeper` writes it under `tag`.
     fn line(tag: &str, text: &str) -> String {
         let tag = toyos_logstream::Tag::new(tag).expect("a tag");
         let stamp = "2026-09-24 22:01:37";
@@ -343,29 +343,29 @@ mod tests {
         })
     }
 
-    /// init's words and `logd`'s carrier line count only under their own
+    /// The supervisor's words and `logkeeper`'s carrier line count only under their own
     /// programs' names: another program printing them settles nothing.
     #[test]
     fn a_judge_reads_the_speaker_from_the_head_and_never_the_words() {
-        let words = toyos_swap::said("netd", Word::InService, "/tmp/netd as pid 12");
-        assert_eq!(settled(&[line("init", &words)], 0, "netd"), Some(()));
-        assert_eq!(settled(&[line("test-runner", &words), line("netd", &words)], 0, "netd"), None);
-        assert_eq!(settled(&[line("init", &words)], 1, "netd"), None, "before mark");
-        assert_eq!(init_heard(&line("test-runner", &words), "netd"), None);
-        let leaving = line("logd", toyos_logstream::CARRIER_LEAVING);
-        assert_eq!(said_by(&leaving, toyos_logstream::LOGD), Some(toyos_logstream::CARRIER_LEAVING));
-        assert_eq!(said_by(&line("netd", toyos_logstream::CARRIER_LEAVING), toyos_logstream::LOGD), None);
+        let words = toyos_swap::said("netstack", Word::InService, "/tmp/netstack as pid 12");
+        assert_eq!(settled(&[line("supervisor", &words)], 0, "netstack"), Some(()));
+        assert_eq!(settled(&[line("test-runner", &words), line("netstack", &words)], 0, "netstack"), None);
+        assert_eq!(settled(&[line("supervisor", &words)], 1, "netstack"), None, "before mark");
+        assert_eq!(supervisor_heard(&line("test-runner", &words), "netstack"), None);
+        let leaving = line("logkeeper", toyos_logstream::CARRIER_LEAVING);
+        assert_eq!(said_by(&leaving, toyos_logstream::LOGKEEPER), Some(toyos_logstream::CARRIER_LEAVING));
+        assert_eq!(said_by(&line("netstack", toyos_logstream::CARRIER_LEAVING), toyos_logstream::LOGKEEPER), None);
     }
 
     fn heard(expect: Expect) -> Swapped {
-        let digest = toyos_swap::digest(b"netd");
-        let path = toyos_swap::installed_path("netd", &digest);
+        let digest = toyos_swap::digest(b"netstack");
+        let path = toyos_swap::installed_path("netstack", &digest);
         let (answer, words) = match expect {
             Expect::InService => (
                 format!("accepted {path}"),
                 vec![
-                    (Word::Accepted, format!("{path} replaces /system/bin/netd (pid 7)")),
-                    (Word::Stopping, "pid 7 (/system/bin/netd)".into()),
+                    (Word::Accepted, format!("{path} replaces /system/bin/netstack (pid 7)")),
+                    (Word::Stopping, "pid 7 (/system/bin/netstack)".into()),
                     (Word::Started, format!("{path} as pid 12; in service if it runs 5000 ms")),
                     (Word::InService, format!("{path} as pid 12")),
                 ],
@@ -376,11 +376,11 @@ mod tests {
             ),
         };
         Swapped {
-            service: "netd".into(),
+            service: "netstack".into(),
             digest: toyos_swap::hex(&digest),
             answer: Ok(answer),
             words,
-            said: vec![line("netd", "netd: DHCP: lease 10.0.2.15/24 from 10.0.2.2, \"x\"")],
+            said: vec![line("netstack", "netstack: DHCP: lease 10.0.2.15/24 from 10.0.2.2, \"x\"")],
             again: Ok(Exec { stdout: metaltalk::owed(), status: Some(0) }),
             connections: (1, 2),
             turned_away: 3,
@@ -390,7 +390,7 @@ mod tests {
     }
 
     /// Each expectation refuses the others' outcomes, and the machine not
-    /// answering afterwards is a finding whatever init said.
+    /// answering afterwards is a finding whatever the supervisor said.
     #[test]
     fn the_judge_holds_each_expectation_to_its_own_outcome() {
         for (got, want) in [
@@ -403,7 +403,7 @@ mod tests {
         silent.again = Err("connecting: refused".into());
         assert!(judge(&silent, Expect::InService).is_err());
         let mut elsewhere = heard(Expect::InService);
-        elsewhere.words.last_mut().unwrap().1 = "/tmp/swap/other/netd as pid 12".into();
+        elsewhere.words.last_mut().unwrap().1 = "/tmp/swap/other/netstack as pid 12".into();
         assert!(judge(&elsewhere, Expect::InService).is_err());
         let mut spun = heard(Expect::InService);
         spun.turned_away = 10_000;

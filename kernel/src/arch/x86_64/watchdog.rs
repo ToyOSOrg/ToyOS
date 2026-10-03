@@ -1,7 +1,7 @@
 //! The chipset's TCO watchdog, armed on request and fed from the scheduler
 //! pass — the one function an idle CPU and a busy one both run every trip, so
 //! **what it proves alive is that some CPU still reaches it**. A panicked
-//! machine is reset by the same bound, which is the loop's recovery: logd is
+//! machine is reset by the same bound, which is the loop's recovery: logkeeper is
 //! dead after a kernel panic, so nothing more could be made durable anyway.
 
 use core::sync::atomic::{AtomicU16, AtomicU64, Ordering};
