@@ -254,8 +254,8 @@ pub fn windows_under(capture: &str, cpus: u32, load_exited: &str) -> Result<Meas
 
     let (hold_at, cpu, ns) =
         hold.ok_or_else(|| format!("no `{HELD}` line: this kernel held no window of known length"))?;
-    if ns < toyos_sched::windows::HELD_NS {
-        return Err(format!("cpu{cpu} held its windows for {ns} ns, and the kernel owes {}", toyos_sched::windows::HELD_NS));
+    if ns < kernel::sched::windows::HELD_NS {
+        return Err(format!("cpu{cpu} held its windows for {ns} ns, and the kernel owes {}", kernel::sched::windows::HELD_NS));
     }
     let mut read_back = reports[..own]
         .iter()

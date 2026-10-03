@@ -1,6 +1,6 @@
 //! The kernel driver for the scheduler core: plumbing only — percpu,
 //! the asm switch, the idle loop, the trampoline. Every scheduling
-//! decision lives in `toyos-sched`.
+//! decision lives in `kernel::sched`.
 //!
 //! A pass is not complete when it returns: restoring a context before its last `switch` instruction runs puts two CPUs on the same stack.
 
@@ -11,14 +11,14 @@ use core::cell::UnsafeCell;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
-use toyos_sched::cpu::{Action, Balance, CpuHandle, CpuHandles, CpuSched, Env, SchedPass};
-use toyos_sched::fair::Frontier;
-use toyos_sched::hw::{CpuId, Hw, Kicker, Machine, Nanos};
-use toyos_sched::mailbox::{mailbox, Kick, PreemptGuard, Urgency};
-use toyos_sched::msg::Msg;
-use toyos_sched::task::{RtState, TaskBuilder, TaskKey, WaitClass};
-use toyos_sched::park::{prepare, Cancel, Commit, CurrentTask};
-use toyos_sched::task::Refused;
+use kernel::sched::cpu::{Action, Balance, CpuHandle, CpuHandles, CpuSched, Env, SchedPass};
+use kernel::sched::fair::Frontier;
+use kernel::sched::hw::{CpuId, Hw, Kicker, Machine, Nanos};
+use kernel::sched::mailbox::{mailbox, Kick, PreemptGuard, Urgency};
+use kernel::sched::msg::Msg;
+use kernel::sched::task::{RtState, TaskBuilder, TaskKey, WaitClass};
+use kernel::sched::park::{prepare, Cancel, Commit, CurrentTask};
+use kernel::sched::task::Refused;
 
 use crate::arch::percpu;
 use crate::hw::HW;
@@ -446,7 +446,7 @@ pub fn spawn(new: NewTask) -> (ThreadSched, CpuId) {
         shared: task.shared().clone(),
     };
     let dst = match task.shared().state() {
-        toyos_sched::task::TaskState::InTransit(cpu) => cpu,
+        kernel::sched::task::TaskState::InTransit(cpu) => cpu,
         state => panic!("a freshly built task is not in transit: {state:?}"),
     };
     preempt_off(|p| {
@@ -485,7 +485,7 @@ fn env(preempt: &PreemptOff) -> Env<'_, crate::hw::KernelHw, PreemptOff> {
         frontier: &FRONTIER,
         preempt,
         balance: Balance::PushOnSurplus {
-            threshold: toyos_sched::cpu::PUSH_THRESHOLD,
+            threshold: kernel::sched::cpu::PUSH_THRESHOLD,
         },
     }
 }
@@ -742,7 +742,7 @@ pub fn current_symbols() -> Option<Arc<crate::symbols::SymbolTable>> {
 }
 
 /// What the running task's marks say it does instead of returning to Ring 3 — one load, no clone, since an `Arc` refcount here is too costly on this path.
-pub fn current_safe_point(stopping: bool) -> Option<toyos_sched::task::SafePoint> {
+pub fn current_safe_point(stopping: bool) -> Option<kernel::sched::task::SafePoint> {
     try_with_cpu(|cpu| cpu.running().and_then(|t| t.shared().at_safe_point(stopping))).flatten()
 }
 
@@ -761,7 +761,7 @@ pub fn current_address_space() -> Option<PageTables> {
 }
 
 pub fn with_current_acct<R>(
-    f: impl FnOnce(&toyos_sched::task::TaskAccounting) -> R,
+    f: impl FnOnce(&kernel::sched::task::TaskAccounting) -> R,
 ) -> Option<R> {
     try_with_cpu(|cpu| cpu.running().map(|t| f(t.acct()))).flatten()
 }
@@ -826,7 +826,7 @@ pub fn running_id() -> Option<TaskId> {
 /// One parked task, flattened because a `ParkedView` borrows the `CpuSched`, which nothing outside this file may hold.
 pub struct ParkedInfo {
     pub id: TaskId,
-    pub class: toyos_sched::task::WaitClass,
+    pub class: kernel::sched::task::WaitClass,
     pub deadline: Option<u64>,
     /// When the park began.
     pub since: u64,
