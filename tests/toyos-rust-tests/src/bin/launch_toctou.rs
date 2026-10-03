@@ -81,15 +81,14 @@ fn attacker() {
 
     let (mut under_row, mut direct) = (0u32, 0u32);
     for attempt in 1..=ATTEMPTS {
-        let mut child = Command::new(LINK)
+        // Captured rather than null: a direct spawn holds no slot it was not
+        // given, and `ps` says why it refused on stderr.
+        let output = Command::new(LINK)
             .arg(ROLE)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap_or_else(|e| panic!("launch {attempt} of {LINK} was refused: {e}"));
-        let status = child.wait().unwrap_or_else(|e| panic!("launch {attempt} was not waited: {e}"));
-        match status.code() {
+            .output()
+            .unwrap_or_else(|e| panic!("launch {attempt} of {LINK} was refused or not waited: {e}"));
+        match output.status.code() {
             Some(PS_UNDER_ROW) => under_row += 1,
             Some(PS_DIRECT) | Some(PLAIN) => direct += 1,
             Some(EXPLOIT) => panic!(
