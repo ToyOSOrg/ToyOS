@@ -1,5 +1,6 @@
 [package]
 name = "toyos-rust-tests"
+description = "The Rust programs the harness runs inside a ToyOS guest: one binary per test, and the helpers they spawn."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
