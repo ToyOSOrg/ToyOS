@@ -1,0 +1,14 @@
+[package]
+name = "toyos-mdns"
+description = "Multicast DNS (RFC 6762) for one machine's own <host>.local name."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[lib]
+doctest = false
+
+[dependencies]
+# The wire reader: a question's name is read by the same code, under the same
+# rules, as a resolver's reply.
+toyos-dns = { path = "../../../toyos-dns" }

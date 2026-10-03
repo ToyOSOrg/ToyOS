@@ -8,7 +8,7 @@ toyos-abi = { path = "../../toyos-abi" }
 toyos = { path = "../../toyos" }
 toyos-i219 = { path = "../../toyos-i219" }
 toyos-tco = { path = "../../toyos-tco" }
-toyos-mdns = { path = "../../toyos-mdns" }
+toyos-mdns = { path = "mdns" }
 toyos-dns = { path = "../../toyos-dns" }
 toyos-inspect = { path = "../../toyos-inspect" }
 
