@@ -1511,9 +1511,8 @@ mod tests {
     }
 
     /// **No submodule is initialised in a linked worktree**: where its `rust/`
-    /// holds `.git` and no file, as a killed `git worktree add` leaves it,
-    /// [`crate::ensure_shallow_fork`] refuses, and git in the primary's fork
-    /// still runs.
+    /// is a fork checkout that is not whole, [`crate::ensure_shallow_fork`]
+    /// refuses, and git in the primary's fork still runs.
     #[test]
     fn a_linked_worktree_initialises_no_submodule() {
         let base = TempDir::new("fork-shallow");
