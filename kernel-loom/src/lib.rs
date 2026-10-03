@@ -194,8 +194,7 @@ pub mod log_registry;
 pub mod log_read;
 
 // The shards `read.rs` walks: in the kernel cpu0's and every AP's published
-// one, here whichever the calling test thread installed. A `//` comment for
-// the reason `WHO`'s is one.
+// one, here whichever the calling test thread installed.
 #[cfg(not(feature = "loom"))]
 std::thread_local! {
     static SHARDS: core::cell::Cell<[Option<&'static shard::Shard>; toyos_abi::log::MAX_LOG_SHARDS]> =

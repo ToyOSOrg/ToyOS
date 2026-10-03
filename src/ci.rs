@@ -545,9 +545,6 @@ fn host(root: &Path) -> Vec<Step> {
             Err(failed.join("; "))
         }
     }));
-    // `log_zeroed_init`, `log_body_words` and `log_cursor` are gated
-    // `cfg(not(feature = "loom"))`, so the default invocation runs nothing from
-    // any of them.
     steps.push(step("kernel-loom without loom", || {
         cargo(root, &[
             "test",

@@ -15,7 +15,6 @@ shape. A `mem::forget` planted in the non-`loom` `percpu_fetch_add` leaves
 `cargo clippy -p kernel-loom --no-default-features --all-targets -- -D warnings`
 exits 101: `missing_safety_doc` on that `percpu_fetch_add`, and
 `new_without_default` on each kernel type's non-`loom` `const fn new` that
-`kernel-loom` exports `pub` and the kernel binary does not. Their `loom` arms
-carry `#[allow(clippy::new_without_default)]`; these do not.
+`kernel-loom` exports `pub` and the kernel binary does not.
 
 Exit: a shape builds `kernel-loom` without `loom`, and it is clean.

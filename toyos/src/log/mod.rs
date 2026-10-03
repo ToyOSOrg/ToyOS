@@ -85,10 +85,6 @@ impl LogTail {
     }
 
     /// Records this cursor never saw because a producer overwrote them.
-    ///
-    /// Cumulative and exact: the kernel derives each read's from the two
-    /// numbers that have to be right anyway, so it cannot drift from the ring
-    /// the way a producer-side counter would.
     pub fn lost(&self) -> u64 {
         self.lost
     }
