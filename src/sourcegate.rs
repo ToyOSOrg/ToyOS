@@ -419,8 +419,8 @@ fn v6s(line: &str) -> Vec<(&'static str, &str)> {
 }
 
 /// What each `serial number` in `line` is followed by, where it is six or more
-/// letters and digits with a digit among them: the
-/// kernel's record of a disk, and what `smartctl` and `dmidecode` print.
+/// letters and digits with a digit among them: the kernel's record of a disk,
+/// and the `Serial Number:` of a tool's report.
 fn serials(line: &str) -> Vec<&str> {
     const NAMED: &str = "serial number";
     let lower = line.to_ascii_lowercase();
