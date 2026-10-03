@@ -169,7 +169,7 @@ fn next_key() -> TaskKey {
 }
 
 pub fn total_cpu_ns() -> u64 {
-    (0..crate::arch::smp::cpu_count() as usize)
+    (0..crate::smp::cpu_count() as usize)
         .map(|i| CPU_TIME_NS[i].0.load(Ordering::Relaxed))
         .sum()
 }
@@ -352,7 +352,7 @@ fn try_with_cpu<R>(f: impl FnOnce(&CpuSched<KernelPayload>) -> R) -> Option<R> {
 
 /// Build every CPU's mailbox and handle, and the BSP's `CpuSched`. Called once, before any task exists.
 pub fn init() {
-    let count = crate::arch::smp::cpu_count() as usize;
+    let count = crate::smp::cpu_count() as usize;
     assert!(count <= MAX_CPUS, "cpu count {count} exceeds MAX_CPUS");
     let mut handles = Vec::with_capacity(count);
     // A CPU number, not a walk of `SCHEDS`: `SCHEDS` is `MAX_CPUS` long whatever `count` is.
@@ -374,9 +374,9 @@ pub fn init() {
 /// The context a CPU runs on when idle — never a dead task's stack, so a pass can free the previous zombie.
 fn idle_ctx() -> KernelCtx {
     KernelCtx {
-        rsp: 0,
+        sp: 0,
         root: crate::mm::paging::kernel_root(),
-        fs_base: 0,
+        thread_pointer: 0,
         kernel_stack_top: 0,
         id: None,
         // Never read: the idle loop is entered by jump, not switch, and
@@ -389,20 +389,20 @@ fn idle_ctx() -> KernelCtx {
 /// boot since every init program is spawned before any CPU has published a load.
 fn placement(now: Nanos) -> CpuId {
     static ROTATE: AtomicU64 = AtomicU64::new(0);
-    let count = crate::arch::smp::cpu_count() as u64;
+    let count = crate::smp::cpu_count() as u64;
     let start = CpuId((ROTATE.fetch_add(1, Ordering::Relaxed) % count) as u32);
     cpus().place(start, now)
 }
 
-/// Everything a new thread needs. `entry_rsp` points at the trampoline frame `alloc_kernel_stack` built;
+/// Everything a new thread needs. `entry_sp` points at the trampoline frame `alloc_kernel_stack` built;
 /// `address_space` is not `Option` — every kernel thread uses the kernel address space, so one declaration
 /// decides `cr3`.
 pub struct NewTask {
     pub id: TaskId,
     pub kernel_stack: OwnedAlloc,
-    pub entry_rsp: u64,
+    pub entry_sp: u64,
     pub address_space: PageTables,
-    pub fs_base: u64,
+    pub thread_pointer: u64,
     pub share: Arc<KShare>,
     /// The process's symbol table; a kernel thread names an empty one.
     pub symbols: Arc<crate::symbols::SymbolTable>,
@@ -416,9 +416,9 @@ pub fn spawn(new: NewTask) -> (ThreadSched, CpuId) {
     let root = new.address_space.lock().root();
     let kernel_stack_top = new.kernel_stack.ptr() as u64 + KERNEL_STACK_SIZE as u64;
     let ctx = KernelCtx {
-        rsp: new.entry_rsp,
+        sp: new.entry_sp,
         root,
-        fs_base: new.fs_base,
+        thread_pointer: new.thread_pointer,
         kernel_stack_top,
         id: Some(new.id),
         // The one level `trampoline_entry` discharges before the first `iretq`.
@@ -529,6 +529,8 @@ pub fn pass(dispose: Dispose) {
         };
         disposed.finish()
     });
+    #[cfg(feature = "mask-windows")]
+    crate::windows::scheduled();
     charge_cpu_time(now);
     with_cpu(|cpu| {
         if let Some(current) = cpu.running() {
@@ -600,6 +602,8 @@ pub fn pass_block(ticket: Ticket, deadline: Option<Nanos>) {
             Commit::Killed => (pass.dispose_none().finish(), false),
         }
     });
+    #[cfg(feature = "mask-windows")]
+    crate::windows::scheduled();
     charge_cpu_time(now);
     with_cpu(|cpu| {
         if let Some(current) = cpu.running() {
@@ -658,10 +662,6 @@ fn execute(action: Action<KernelPayload>) {
 
 /// Consume this CPU's `irq_ring` records into wakes, before the mailbox drain, so a wake posted here reaches this pass's pick.
 fn drain_irqs(entered: super::dump::Entered) {
-    // First in the function, so the stamp means "this CPU reached a
-    // pass" and not "this CPU got all the way through one".
-    #[cfg(feature = "boot-actuators")]
-    crate::heartbeat::note_pass();
     crate::drivers::xhci::poll_if_pending();
     crate::arch::keyboard_controller::service();
     // Here, not at the keystroke: the keystroke's decoding driver's guard is done by this point.
@@ -671,23 +671,12 @@ fn drain_irqs(entered: super::dump::Entered) {
     super::dump::serve_if_owed();
     // Repaints the panel if whoever owns the screen has drawn over the report.
     crate::drivers::panic_console::hold_report();
-
-    if crate::irq_ring::take(crate::irq_ring::IrqSource::UserDev).is_some() {
-        // Which claim it was is the per-slot flag `pcidev` and `isa` keep; the
-        // record here says only that a pass is owed, so one function's
-        // interrupt does not wake every user driver in the machine.
-        crate::pcidev::drain_pending();
-        crate::isa::drain_pending();
-    }
-    if crate::irq_ring::take(crate::irq_ring::IrqSource::Audio).is_some() {
-        // Both backends share one watch, so a second would need the parking side
-        // to know which driver bound, which it doesn't.
-        crate::drivers::AUDIO_WATCH.post();
-    }
 }
 
 /// Leave the current stack for this CPU's idle stack and never come back.
 pub fn enter_idle_loop() -> ! {
+    #[cfg(feature = "mask-windows")]
+    crate::windows::start_here();
     percpu::set_current_tid(None);
     percpu::set_current_pid(None);
     // SAFETY: `set_kernel_stack` requires the caller be the CPU its GS base belongs to — true here, on that CPU, after its base was set.
@@ -706,11 +695,13 @@ extern "C" fn idle_loop() -> ! {
         if crate::actuator::dump_deaf_cpu() {
             super::dump::deaf_window();
         }
-        // From the other side: the storming CPU has nothing to run,
-        // while the one under observation spins on `syscall` from Ring 3.
+        // The first NMI; its handler stages the nested one.
         #[cfg(feature = "boot-actuators")]
-        if crate::actuator::syscall_window_nmi() {
-            crate::arch::syscall::window_storm();
+        if crate::actuator::nmi_nested() {
+            static SENT: AtomicBool = AtomicBool::new(false);
+            if !SENT.swap(true, Ordering::Relaxed) {
+                crate::arch::irqchip::send_nmi(percpu::cpu_id());
+            }
         }
         #[cfg(feature = "boot-actuators")]
         if crate::drivers::panic_console::probe_due() {
@@ -721,9 +712,6 @@ extern "C" fn idle_loop() -> ! {
         // `pass` below covers this too; here as well so a CPU that
         // halts immediately has still run every hook first.
         crate::object::drain_zero_handles();
-        // A heartbeat is a record like any other; the idle loop touches no filesystem itself.
-        #[cfg(feature = "boot-actuators")]
-        crate::heartbeat::poll();
         pass(Dispose::None);
     }
 }
@@ -865,7 +853,7 @@ pub fn for_each_parked(mut f: impl FnMut(ParkedInfo)) -> bool {
 /// preempt-count bracket's other half is owed.
 pub extern "C" fn trampoline_entry() {
     crate::preempt::enable_no_resched();
-    crate::arch::trap::kernel_exit_to_user_check();
+    crate::scheduler::exit_to_user();
 }
 
 const STACK_CANARY: u64 = 0xDEAD_BEEF_CAFE_BABE;
@@ -940,30 +928,30 @@ fn check_stack_canary(payload: &KernelPayload) {
 
 /// Does every Ring 3 → Ring 0 entry land on the stack of the task this CPU is running, and is this CPU standing on it?
 ///
-/// A stray `kernel_rsp` or `tss.rsp0` aims a future entry at a stack it did not grow; this catches it before
-/// that entry, not after.
+/// A stray entry stack aims a future entry at a stack it did not grow; this catches it before that entry, not
+/// after.
 #[cfg(feature = "stack-witness")]
 fn check_stack_ownership(payload: &KernelPayload) {
     let bottom = payload.kernel_stack.ptr() as u64;
     let top = bottom + KERNEL_STACK_SIZE as u64;
     // SAFETY: a pass runs on the CPU whose GS base is its own `PerCpu`.
-    let (kernel_rsp, rsp0) = unsafe { percpu::entry_stacks() };
-    let rsp = crate::arch::cpu::stack_pointer();
-    if kernel_rsp == top && rsp0 == top && rsp <= top && rsp > bottom {
+    let (entry, interrupt) = unsafe { percpu::entry_stacks() };
+    let sp = crate::arch::cpu::stack_pointer();
+    if entry == top && interrupt == top && sp <= top && sp > bottom {
         return;
     }
     panic!(
         "STACK WITNESS: cpu{} is passing on tid={} whose stack is \
-         [{bottom:#018x}, {top:#018x}) — kernel_rsp={kernel_rsp:#018x} \
-         (off by {}), tss.rsp0={rsp0:#018x} (off by {}), rsp={rsp:#018x} \
-         ({} bytes below the top). A Ring 3 entry takes its stack from one of \
+         [{bottom:#018x}, {top:#018x}) — the syscall entry's stack {entry:#018x} \
+         (off by {}), the interrupt entry's {interrupt:#018x} (off by {}), sp={sp:#018x} \
+         ({} bytes below the top). An entry from user mode takes its stack from one of \
          those two words, so one that is not this task's top aims the next \
          entry's return addresses into memory another execution owns.",
         percpu::cpu_id(),
         payload.id.1,
-        kernel_rsp.wrapping_sub(top) as i64,
-        rsp0.wrapping_sub(top) as i64,
-        top.wrapping_sub(rsp) as i64,
+        entry.wrapping_sub(top) as i64,
+        interrupt.wrapping_sub(top) as i64,
+        top.wrapping_sub(sp) as i64,
     );
 }
 

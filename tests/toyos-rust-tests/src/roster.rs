@@ -33,9 +33,13 @@ pub fn my_threads(cap: &SysCap) -> Vec<(bool, u8)> {
 pub fn threads_of(cap: &SysCap, pid: u32) -> Vec<(bool, u8)> {
     const HEADER: usize = toyos::system::SYSINFO_HEADER_SIZE;
     const ENTRY: usize = toyos::system::SYSINFO_ENTRY_SIZE;
-    let mut buf = vec![0u8; HEADER + ENTRY * 256];
+    const ENTRIES: usize = 1024;
+    let mut buf = vec![0u8; HEADER + ENTRY * ENTRIES];
     let n = cap.roster(&mut buf);
     assert!((HEADER..=buf.len()).contains(&n), "sysinfo answered {n}");
+    // Past the buffer the roster is cut short, and a thread cut off is one never found.
+    let live = toyos_abi::syscall::SysinfoHeader::decode(buf[..HEADER].try_into().unwrap()).entries;
+    assert!(live as usize <= ENTRIES, "the machine has {live} threads and the roster holds {ENTRIES}");
     (HEADER..)
         .step_by(ENTRY)
         .take_while(|pos| pos + ENTRY <= n)

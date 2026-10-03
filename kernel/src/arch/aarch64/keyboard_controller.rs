@@ -11,11 +11,3 @@ pub fn service() {}
 
 /// Nothing to report.
 pub fn report_line() {}
-
-/// Nothing floods: no `isa` claim is ever granted here.
-#[cfg(feature = "boot-actuators")]
-pub fn raise_flood() {}
-
-/// Nothing to wake: no quarantine runs here.
-#[cfg(feature = "boot-actuators")]
-pub fn wake_irq_cpu() {}

@@ -81,7 +81,21 @@ impl Claim {
 impl Drop for Claim {
     fn drop(&mut self) {
         match self.what {
-            Claimed::Class(class) => *taken(class).lock() = false,
+            Claimed::Class(class) => {
+                // Before the flag goes: a poll the next holder registers is not this claim's to answer.
+                match class {
+                    DeviceType::HdaAudio | DeviceType::VirtioSound => {
+                        crate::drivers::AUDIO_WATCH.cancel_polls()
+                    }
+                    DeviceType::Keyboard
+                    | DeviceType::Mouse
+                    | DeviceType::Framebuffer
+                    | DeviceType::PciFunction
+                    | DeviceType::Partition
+                    | DeviceType::Isa => {}
+                }
+                *taken(class).lock() = false;
+            }
             // Bus mastering off, then the domain, then the pages: `release`
             // owns that order, and this is where a dying process reaches it.
             Claimed::PciFunction(slot) => crate::pcidev::release(slot),
@@ -228,13 +242,13 @@ fn partition_view(found: &crate::gpt::Claimable) -> Result<crate::block::Partiti
                 return Err(ClaimError::Unusable);
             }
         };
-    match crate::block::Partition::of(handle, first_block, blocks, Holder::Claim) {
+    match crate::block::Partition::of(handle, first_block, blocks, Holder::Claim(guid)) {
         Ok(view) => Ok(view),
         Err(ViewRefused::Held(Holder::Kernel(what))) => {
             log!("partclaim: {guid} is held by the kernel ({what}) and cannot be claimed");
             Err(ClaimError::KernelDriven)
         }
-        Err(ViewRefused::Held(Holder::Claim)) => Err(ClaimError::Owned),
+        Err(ViewRefused::Held(Holder::Claim(_))) => Err(ClaimError::Owned),
         Err(ViewRefused::OffDevice) => {
             log!(
                 "partclaim: {guid} is at {first_block}+{blocks} blocks, off device {}",

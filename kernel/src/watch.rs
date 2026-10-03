@@ -1,6 +1,6 @@
 //! The one way to wait: every waitable object holds exactly one [`Watch`], and
 //! a waiter on it is either a thread, which a post *wakes*, or a user poll
-//! ring's entry, which a post *completes*.
+//! ring's entry, which a post *fires*.
 //!
 //! The protocol is `toyos_sched::watch`'s and `toyos_sched::park`'s, and its
 //! lost-wake argument is theirs: a thread registers before it reads its
@@ -9,9 +9,10 @@
 //! record of what was posted — a waiter re-reads the object, never the post.
 //!
 //! **A post allocates nothing and may be made under any lock but a poll
-//! ring's** (`crate::inbox`), so a driver posts from its scheduler-pass drain
-//! and never from its ISR, which publishes to `irq_ring` and nothing else.
-//! Registration allocates, in the syscall that registers.
+//! ring's** (`crate::inbox`). A watch an interrupt handler posts is an
+//! [`IrqWatch`]: its list sits behind an [`IrqLock`], and its post is made in
+//! place and frees nothing. Every other watch's list lock leaves interrupts
+//! open, and no handler takes it. Registration allocates, in the syscall that registers.
 //!
 //! A [`Watch`] is a borrowed reference for the whole of a wait: [`Armed`]
 //! holds it, so an object cannot be freed under a thread waiting on it, and
@@ -20,6 +21,7 @@
 use alloc::sync::Arc;
 
 use toyos_sched::hw::Nanos;
+use toyos_sched::sync::CellLock;
 use toyos_sched::task::{Refused, WaitClass, WakeCause, WakeReason};
 use toyos_sched::watch::{Poster, Waiters};
 
@@ -32,18 +34,68 @@ use crate::sched::payload::{KMsg, KShared, KernelLock, TaskHandle};
 use crate::scheduler::Parkable;
 use crate::time::Deadline;
 
-type Inner = toyos_sched::watch::Watch<KMsg, PollEntry, KernelLock<Waiters<KMsg, PollEntry>>>;
+type List = Waiters<KMsg, PollEntry>;
 
-/// What an object holds to be waitable.
-pub struct Watch(Inner);
+/// What an object holds to be waitable, its list behind `L`.
+pub struct Waitable<L: CellLock<List>>(toyos_sched::watch::Watch<KMsg, PollEntry, L>);
+
+/// A watch no interrupt handler reaches.
+pub type Watch = Waitable<KernelLock<List>>;
+
+/// A watch an interrupt handler posts, and the watch of a ring whose poll such
+/// a post fires. It has no `post`, which frees: [`IrqWatch::post_in_place`]
+/// frees nothing.
+pub type IrqWatch = Waitable<IrqLock<List>>;
+
+/// What an interrupt handler's post takes: an [`IrqWatch`]'s list. Held with
+/// interrupts off, so a handler never finds one held by the context it
+/// interrupted; nothing allocates or frees under it.
+pub struct IrqLock<T>(masked::Masked<T>);
+
+impl<T> IrqLock<T> {
+    pub const fn new(value: T) -> Self {
+        Self(masked::Masked::new(value))
+    }
+}
+
+impl<T: Send> CellLock<T> for IrqLock<T> {
+    fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
+        // Raised first, so the lock's own release never reaches depth zero, and
+        // a pass, with interrupts masked.
+        preempt_off(|_| {
+            let irq = crate::arch::IrqGuard::close();
+            let mut held = self.0.lock(&irq);
+            f(&mut held)
+        })
+    }
+}
+
+mod masked {
+    use crate::arch::IrqGuard;
+    use crate::sync::{Lock, LockGuard};
+
+    /// A lock taken only through a borrow of a closed [`IrqGuard`]: never
+    /// before the mask, and never held past it.
+    pub struct Masked<T>(Lock<T>);
+
+    impl<T> Masked<T> {
+        pub const fn new(value: T) -> Self {
+            Self(Lock::new(value))
+        }
+
+        pub fn lock<'a>(&'a self, _closed: &'a IrqGuard) -> LockGuard<'a, T> {
+            self.0.lock()
+        }
+    }
+}
 
 impl Watch {
     pub const fn new() -> Self {
-        Self(Inner::new(KernelLock::new(Waiters::new())))
+        Self(toyos_sched::watch::Watch::new(KernelLock::new(Waiters::new())))
     }
 
     /// Something about the object changed: wake every thread waiting on it and
-    /// complete every poll.
+    /// fire every poll.
     pub fn post(&self) {
         self.post_as(WakeCause::new(WakeReason::Woken));
     }
@@ -82,23 +134,44 @@ impl Watch {
             )
         })
     }
+}
 
+impl IrqWatch {
+    pub const fn new() -> Self {
+        Self(toyos_sched::watch::Watch::new(IrqLock::new(Waiters::new())))
+    }
+
+    /// Something about the object changed: wake every thread waiting on it and
+    /// fire every poll where it stands, freeing nothing. A handler makes it
+    /// with its CPU's preempt count raised, as `device_irq_entry` holds it, so
+    /// this post's own never reaches zero, and a pass, inside the interrupt.
+    pub fn post_in_place(&self) {
+        preempt_off(|p| {
+            let env = Poster { cpus: cpus(), kicker: &HW, preempt: p };
+            self.0.post_in_place(WakeCause::new(WakeReason::Woken), &env);
+        });
+    }
+}
+
+impl<L: CellLock<List>> Waitable<L> {
     /// A poll ring's entry, from `inbox`'s registration and nowhere else.
     pub(crate) fn add_poll(&self, entry: PollEntry) {
         self.0.add_ring(entry);
     }
 
     /// Answer every poll registered here as gone: the source it watched ended.
+    /// A thread's, since it frees what it answered.
     pub fn cancel_polls(&self) {
         self.0.cancel_rings();
     }
+
 }
 
 /// A thread's registration on one watch, held across its wait and ended by
 /// its drop.
 #[must_use = "a registration must outlive the park it was made for"]
-pub struct Armed<'a> {
-    watch: &'a Watch,
+pub struct Armed<'a, L: CellLock<List> = KernelLock<List>> {
+    watch: &'a Waitable<L>,
     shared: Arc<KShared>,
     task: Arc<TaskHandle>,
     /// Wait class for the blocked-time breakdown; the park carries no subject
@@ -106,7 +179,7 @@ pub struct Armed<'a> {
     class: WaitClass,
 }
 
-impl Drop for Armed<'_> {
+impl<L: CellLock<List>> Drop for Armed<'_, L> {
     fn drop(&mut self) {
         self.watch.0.unregister(&self.shared);
     }
@@ -114,7 +187,11 @@ impl Drop for Armed<'_> {
 
 /// Register the running task on `watch`; `None` when there is no current task.
 /// Call before reading the condition the wait is for.
-pub fn arm(watch: &Watch, token: u64, class: WaitClass) -> Option<Armed<'_>> {
+pub fn arm<L: CellLock<List>>(
+    watch: &Waitable<L>,
+    token: u64,
+    class: WaitClass,
+) -> Option<Armed<'_, L>> {
     let task = crate::sched::driver::current_handle()?;
     let shared = crate::sched::driver::current_shared()?;
     watch.0.register(&shared, token);
@@ -144,7 +221,11 @@ fn not_revocable() -> ! {
 /// this thread is cancelled. A return is not an answer — the caller re-reads
 /// its condition.
 #[track_caller]
-pub fn wait(p: &Parkable, armed: &Armed<'_>, deadline: Deadline) -> Result<(), Cancelled> {
+pub fn wait<L: CellLock<List>>(
+    p: &Parkable,
+    armed: &Armed<'_, L>,
+    deadline: Deadline,
+) -> Result<(), Cancelled> {
     match wait_inner(p, armed, deadline, Cancel::Answers) {
         Ok(()) => Ok(()),
         Err(Ended::Cancelled) => Err(Cancelled(())),
@@ -154,7 +235,7 @@ pub fn wait(p: &Parkable, armed: &Armed<'_>, deadline: Deadline) -> Result<(), C
 
 /// The same as [`wait`], for a wait a kill may not end.
 #[track_caller]
-pub fn wait_uncancellable(p: &Parkable, armed: &Armed<'_>, deadline: Deadline) {
+pub fn wait_uncancellable<L: CellLock<List>>(p: &Parkable, armed: &Armed<'_, L>, deadline: Deadline) {
     match wait_inner(p, armed, deadline, Cancel::Ignores) {
         Ok(()) => {}
         Err(Ended::Cancelled) => unreachable!("an uncancellable wait never reports a cancel"),
@@ -168,9 +249,9 @@ pub fn wait_uncancellable(p: &Parkable, armed: &Armed<'_>, deadline: Deadline) {
 /// be waited on again safely, and the caller reads its own condition again to
 /// tell them apart.
 #[track_caller]
-pub fn wait_until(
+pub fn wait_until<L: CellLock<List>>(
     p: &Parkable,
-    watch: &Watch,
+    watch: &Waitable<L>,
     token: u64,
     class: WaitClass,
     deadline: Deadline,
@@ -187,8 +268,6 @@ pub fn wait_until(
         if deadline.reached(crate::clock::now()) {
             return Ok(());
         }
-        #[cfg(feature = "boot-actuators")]
-        window::hold(&armed);
         match wait_inner(p, &armed, deadline, Cancel::Answers) {
             Ok(()) => {}
             Err(Ended::Cancelled) => return Err(Cancelled(())),
@@ -196,55 +275,6 @@ pub fn wait_until(
         }
     }
     Ok(())
-}
-
-/// `watch-window`: hold a pipe waiter between reading its condition false and
-/// its phase 1 until a post lands there — the post only the notified bit
-/// carries to the commit — or its budget lapses. The holds a post ended are
-/// counted, and every `STEP`th is a `HELD` line the harness reads: a boot
-/// whose count did not move staged nothing, however green its canary.
-#[cfg(feature = "boot-actuators")]
-mod window {
-    use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
-
-    use toyos_sched::task::WaitClass;
-    use toyos_sched::watch::window::{HELD, STEP};
-
-    use super::Armed;
-    use crate::time::{Budget, Deadline, Duration};
-
-    /// A pipe wait nothing posts — a reader whose writer is idle — ends its
-    /// hold here and waits on unstaged; the count of those is on every line.
-    const WINDOW: Budget = Budget::of(
-        Duration::from_millis(50),
-        "the wait goes on unstaged, counted as lapsed",
-    );
-
-    static POSTED: AtomicU64 = AtomicU64::new(0);
-    static LAPSED: AtomicU64 = AtomicU64::new(0);
-
-    pub(super) fn hold(armed: &Armed<'_>) {
-        if !crate::actuator::watch_window() || armed.class != WaitClass::Pipe {
-            return;
-        }
-        let deadline = Deadline::at(crate::clock::now() + WINDOW.duration());
-        loop {
-            // Counted only on the bit itself: a hold that ended any other way
-            // staged nothing.
-            if armed.shared.notified() {
-                let posted = POSTED.fetch_add(1, Relaxed) + 1;
-                if posted.is_multiple_of(STEP) {
-                    crate::log!("{HELD} {posted} times, {} lapsed", LAPSED.load(Relaxed));
-                }
-                return;
-            }
-            if deadline.reached(crate::clock::now()) {
-                LAPSED.fetch_add(1, Relaxed);
-                return;
-            }
-            core::hint::spin_loop();
-        }
-    }
 }
 
 /// Register, then park until `ready()` holds, for a wait a kill may not end
@@ -267,9 +297,9 @@ pub fn wait_uncancellable_until(p: &Parkable, watch: &Watch, token: u64, ready: 
 }
 
 #[track_caller]
-fn wait_inner(
+fn wait_inner<L: CellLock<List>>(
     _p: &Parkable,
-    armed: &Armed<'_>,
+    armed: &Armed<'_, L>,
     deadline: Deadline,
     cancel: Cancel,
 ) -> Result<(), Ended> {

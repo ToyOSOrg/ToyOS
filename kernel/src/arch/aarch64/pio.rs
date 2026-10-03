@@ -4,10 +4,6 @@ use core::convert::Infallible;
 
 use crate::process::Pid;
 
-/// Whether this architecture has an I/O port space at all. Firmware tables
-/// that name a port are only honoured where it does.
-pub const EXISTS: bool = false;
-
 /// Nothing: every `isa` claim is refused as naming no function.
 pub const GRANTABLE: &[crate::isa::Grantable] = &[];
 
@@ -28,12 +24,8 @@ pub fn switch_to(_pid: Option<Pid>) {
     unreachable!("AArch64 has no I/O permission bitmap")
 }
 
-/// Never called: every caller checks [`EXISTS`] first.
-pub unsafe fn outb(_port: u16, _value: u8) {
-    unreachable!("AArch64 has no I/O port space")
-}
-
-/// Never called: every caller checks [`EXISTS`] first.
-pub unsafe fn outw(_port: u16, _value: u16) {
-    unreachable!("AArch64 has no I/O port space")
+/// No quarantine to stage a claim against.
+#[cfg(feature = "boot-actuators")]
+pub fn straddling<R>(claim: impl FnOnce() -> R) -> R {
+    claim()
 }

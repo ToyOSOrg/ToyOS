@@ -13,23 +13,20 @@
 //! something an arm names rather than something derived, because sharing is not
 //! always safe and only the author knows.
 
+use std::cell::RefCell;
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::{BufRead, BufReader};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use toyos_build::bootlog;
 use toyos_build::metalimage;
-use toyos_build::metalprofile::{job_ms_row, Profile, AROUND_THE_LIST_MS};
+use toyos_build::metaltimings::{self, Machine, Reading, Record};
 use toyos_build::testargs::MetalMode;
 
 use super::serial::Serial;
-
-/// The fields only the boots that took that path produce: the two bounds'
-/// lateness, and the stop's own count. Absent **and** unpriced is a boot that
-/// did not take the path and owes nothing; absent and priced is a boot armed
-/// for one path that ended on another, which is a red the pricing loop names.
-const PATH_TAKEN: &[&str] =
-    &["deadline_lateness_ms", "lockup_lateness_ms", "park_open_operations"];
 
 /// One boot a metal test needs.
 pub struct Arm {
@@ -40,12 +37,8 @@ pub struct Arm {
     /// Named rather than derived from (config, parameters), because sharing is
     /// not always safe and only the author knows: `mkdir_cap` fills the
     /// machine-wide directory cap and leaves it there, so `readdir_bound`'s own
-    /// `create_dir` on that boot is refused with `OutOfMemory` and it panics —
-    /// which is why each has a boot of its own in QEMU too. A test that must
-    /// not share names its own; it costs a minute and it says so.
-    ///
-    /// It is also the label: the image directory, the readback directory and
-    /// every `tests/metal-profile.toml` row for that boot are named after it.
+    /// `create_dir` on that boot is refused with `OutOfMemory` and it panics. A
+    /// test that must not share names its own; it costs a minute and it says so.
     pub boot: &'static str,
     /// The boot config's directory, relative to the repository root.
     pub config: &'static str,
@@ -75,14 +68,6 @@ pub struct Arm {
     /// runs a command there and tells it to reboot. `false` on every boot whose
     /// judge reads the stick alone.
     pub talk: bool,
-    /// **The boot has one of its services swapped while it runs**, with no
-    /// reboot: its image is staged as a talking boot's is, the invocation
-    /// that flashes it is not told `--talk`, and a second invocation —
-    /// `toyos-metal --swap <this service>`, started beside the first — dials
-    /// the machine under its own name, sends the build's own binary of that
-    /// service and writes [`toyos_build::metal::READBACK_SWAP`] beside the
-    /// stick's files.
-    pub swap: Option<&'static str>,
 }
 
 /// The ordinary arm: one boot, and the fields a caller must still say.
@@ -96,7 +81,7 @@ pub const fn once(
     params: &'static [&'static str],
     jobs: &'static [&'static str],
 ) -> Arm {
-    Arm { boot, config, params, jobs, features: &[], nic: None, talk: false, swap: None }
+    Arm { boot, config, params, jobs, features: &[], nic: None, talk: false }
 }
 
 /// One boot carrying members that are **discovered rather than registered**.
@@ -108,13 +93,6 @@ pub const fn once(
 /// exit record for it. So they are a boot with a list rather than a row each,
 /// and each member is still reported under its own name.
 ///
-/// The list is **sized to the bound before it is flashed** ([`sized`]): the
-/// runner's deadline runs from boot and ends the whole list, so a list longer
-/// than the bound is a boot whose tail members never run and are reported as
-/// missing records rather than as the boot being too long. A boot named here
-/// may therefore become several, `<boot>`, `<boot>-2`, …, and each is a row in
-/// `tests/metal-profile.toml` like any other.
-///
 /// A chunk rides one flash. A member that takes the machine down takes every
 /// member after it *in its chunk* with it, and that is the honest price: on the
 /// T14 there is no `MAX_SHARED_REBOOTS` to answer a dead guest with a new one.
@@ -125,6 +103,7 @@ pub struct SharedBoot {
     pub params: &'static [&'static str],
     /// The kernel build, empty for the one an image ships.
     pub features: &'static [&'static str],
+    pub members: NonZeroUsize,
     /// What the runner spawns, in order — the whole binary name, `test_rs_`
     /// prefix and all, because that is what the kernel records it under.
     pub jobs: Vec<String>,
@@ -137,6 +116,13 @@ pub struct SharedBoot {
     pub links: Vec<(String, String)>,
 }
 
+/// How many members allowed `allowance_ms` each one shared boot holds: the
+/// runner's [`toyos_tco::JOB_BOUND_MS`] less a tenth of it, shared among them.
+pub const fn members_fitting(allowance_ms: u64) -> NonZeroUsize {
+    let members = (toyos_tco::JOB_BOUND_MS - toyos_tco::JOB_BOUND_MS / 10) / allowance_ms;
+    NonZeroUsize::new(members as usize).expect("a chunk holds a member")
+}
+
 /// The name of one chunk of a boot that had to be cut in two.
 fn chunk_name(boot: &str, index: usize) -> String {
     if index == 0 {
@@ -146,31 +132,13 @@ fn chunk_name(boot: &str, index: usize) -> String {
     }
 }
 
-/// Cut every shared boot's list to what the bound and the profile's allowance
-/// leave room for.
-///
-/// **A list nothing sized loses its tail without saying so.** The runner's
-/// bound ends the whole list rather than the job it is inside, so every member
-/// past the cut is reported as a missing exit record.
-///
 /// **A chunk carries only the files and links its own members name.** The C
 /// corpus stages a binary and an expectation per case; putting all of both on
 /// every chunk would double a flash that is already written over `ssh`.
-fn sized(shared: &[SharedBoot], profile: &Profile) -> Result<Vec<SharedBoot>, String> {
+fn sized(shared: &[SharedBoot]) -> Vec<SharedBoot> {
     let mut out = Vec::new();
     for boot in shared {
-        if boot.jobs.is_empty() {
-            continue;
-        }
-        let per = profile.members_per_boot(&boot.boot).map_err(|why| {
-            format!(
-                "the shared boot {:?} has {} member(s) and none of them is priced, so the list \
-                 cannot be cut to the runner's bound and would lose its tail: {why}",
-                boot.boot,
-                boot.jobs.len()
-            )
-        })?;
-        for (index, jobs) in boot.jobs.chunks(per).enumerate() {
+        for (index, jobs) in boot.jobs.chunks(boot.members.get()).enumerate() {
             let named: BTreeSet<&str> = jobs.iter().map(String::as_str).collect();
             let mine = |path: &str| {
                 let last = path.rsplit('/').next().unwrap_or(path);
@@ -182,6 +150,7 @@ fn sized(shared: &[SharedBoot], profile: &Profile) -> Result<Vec<SharedBoot>, St
                 config: boot.config,
                 params: boot.params,
                 features: boot.features,
+                members: boot.members,
                 jobs: jobs.to_vec(),
                 files: boot
                     .files
@@ -193,20 +162,14 @@ fn sized(shared: &[SharedBoot], profile: &Profile) -> Result<Vec<SharedBoot>, St
             });
         }
     }
-    Ok(out)
+    out
 }
 
-/// Whether a registration runs on the T14, and how.
-pub enum Metal {
-    /// It does not, and why — a row rather than a silence, because "no metal
-    /// declaration" is the answer for the hundred tests nobody has looked at
-    /// and this is the answer for one somebody has.
-    QemuOnly(&'static str),
-    Runs {
-        arms: &'static [Arm],
-        /// The readbacks in `arms` order.
-        judge: fn(&[&Readback]) -> Result<(), String>,
-    },
+/// How a registration runs on the T14.
+pub struct Metal {
+    pub arms: &'static [Arm],
+    /// The readbacks in `arms` order.
+    pub judge: fn(&[&Readback]) -> Result<(), String>,
 }
 
 /// What one boot left on the stick, and what the host clock saw of it.
@@ -224,19 +187,43 @@ pub struct Readback {
     /// What the machine spent getting back to `sshd`.
     pub back_secs: u64,
     /// How long after that the boot stick's own partition was there again.
-    ///
-    /// **The one judge of the device there is.** QEMU cannot wedge a stick, so
-    /// whether a reset left the bench's own device enumerable is a fact only
-    /// this machine holds, and it is a row rather than the reason a mount
-    /// happened to work.
     pub stick_secs: u64,
     /// What the host asked the cable while the machine was between its two
     /// operating systems, and `None` on every boot that named no function to
     /// ask over.
     pub cable: Option<toyos_build::metal::Cable>,
+    /// The machine the loop read before the flash.
+    pub machine: Result<Machine, String>,
+    /// What this boot's judges measured, for the machine's record to judge.
+    numbers: RefCell<BTreeMap<String, u64>>,
 }
 
 impl Readback {
+    /// One boot's readback out of the three files the loop wrote for it:
+    /// `loader.log`, the `logd` files as one text, and the boot file.
+    pub fn new(label: &str, home: PathBuf, loader: String, log: String, boot: &str) -> Result<Self, String> {
+        let kernel = bootlog::kernel_records(&log);
+        let back_secs = toyos_build::metal::back_secs(boot)
+            .ok_or_else(|| format!("{label}'s boot file names no `back_secs`: {boot:?}"))?;
+        let stick_secs = toyos_build::metal::stick_secs(boot)
+            .ok_or_else(|| format!("{label}'s boot file names no `stick_secs`: {boot:?}"))?;
+        let cable = toyos_build::metal::cable(boot).map_err(|why| format!("{label}: {why}"))?;
+        Ok(Readback {
+            label: label.to_string(),
+            home,
+            boot_ms: bootlog::boot_millis(&kernel),
+            loader,
+            kernel,
+            log,
+            back_secs,
+            stick_secs,
+            cable,
+            machine: toyos_build::metal::machine(boot)
+                .map_err(|why| format!("{label}'s boot file {why}")),
+            numbers: RefCell::new(BTreeMap::new()),
+        })
+    }
+
     /// What the loop heard over the boot's own cable, and the log the machine
     /// served it — or why a boot that was to be talked to has neither.
     ///
@@ -254,20 +241,6 @@ impl Readback {
         let at = self.home.join(toyos_build::metal::READBACK_STREAM);
         let stream = std::fs::read_to_string(&at).map_err(|e| format!("{}: {e}", at.display()))?;
         Ok((heard, stream.split_inclusive('\n').map(str::to_string).collect()))
-    }
-
-    /// What the swap invocation beside this boot heard, and the stream it
-    /// received — or why a swapping boot has neither.
-    pub fn swap(&self) -> Result<(toyos_build::metalswap::Swapped, Vec<String>), String> {
-        let at = self.home.join(toyos_build::metal::READBACK_SWAP);
-        let text = std::fs::read_to_string(&at).map_err(|e| {
-            format!("{}: {e} — no `toyos-metal --swap` ran beside this boot", at.display())
-        })?;
-        let swapped = toyos_build::metalswap::Swapped::parse(&text)?
-            .ok_or_else(|| format!("{} names no swap:\n{text}", at.display()))?;
-        let at = self.home.join(toyos_build::metal::READBACK_SWAP_STREAM);
-        let stream = std::fs::read_to_string(&at).map_err(|e| format!("{}: {e}", at.display()))?;
-        Ok((swapped, stream.split_inclusive('\n').map(str::to_string).collect()))
     }
 
     /// One file off the log volume that is neither the loader's nor `logd`'s,
@@ -290,6 +263,8 @@ impl Readback {
 
     /// Every `logd` file this boot wrote, as one text, less every program's
     /// line ([`bootlog::kernel_records`]): no program's line is read as the kernel's.
+    /// It ends where init had `logd` make it whole, so what the kernel writes
+    /// inside the stop or a wedge is only on the page ([`Self::after_the_reset`]).
     pub fn kernel(&self) -> Serial {
         Serial::named(&format!("{}'s kernel log", self.label), self.kernel.as_str())
     }
@@ -348,12 +323,18 @@ impl Readback {
         Ok(())
     }
 
-    /// How far past its bound this boot's deadline fired, or `None` on a boot
-    /// whose deadline did not — which is every boot but the one armed to stop
-    /// itself. Read out of the record the pass after the reset printed, because
-    /// that is the only channel a wedged boot has.
-    pub fn deadline_lateness_ms(&self) -> Option<u64> {
-        toyos_build::metal::deadline_lateness_ms(&self.loader)
+    /// Whether this boot's deadline, where it expired, fired within one timer
+    /// period of its bound: every CPU a staged wedge holds re-arms a one-shot of
+    /// one scheduler quantum, and the timer entry is what polls. Read out of the
+    /// record the pass after the reset printed, because that is the only
+    /// channel a wedged boot has.
+    pub fn deadline_on_time(&self) -> Result<(), String> {
+        let Some(late) = toyos_build::metal::deadline_lateness_ms(&self.loader, &self.kernel)
+        else {
+            return Ok(());
+        };
+        within_one_period(late?, toyos_sched::fair::QUANTUM_NS)
+            .map_err(|why| format!("{}'s boot deadline {why}", self.label))
     }
 
     /// What the on-screen panel cost this boot, off the kernel's own census.
@@ -368,11 +349,15 @@ impl Readback {
         bootlog::panel_census(after.text())
     }
 
-    /// The same for the other bound: how far past its own bound a hard-lockup
-    /// sample was when it found a cpu stuck, or `None` on a boot no cpu locked
-    /// up on. Read out of the same channel and for the same reason.
-    pub fn lockup_lateness_ms(&self) -> Option<u64> {
-        toyos_build::metal::lockup_lateness_ms(&self.loader)
+    /// The same for the other bound: a hard-lockup sample finds a stuck cpu
+    /// within one of its sample periods past its bound. Read out of the same
+    /// channel and for the same reason.
+    pub fn lockup_on_time(&self) -> Result<(), String> {
+        let Some(late) = toyos_build::metal::lockup_lateness_ms(&self.loader) else {
+            return Ok(());
+        };
+        within_one_period(late?, toyos_tco::HARD_LOCKUP_SAMPLE_NS)
+            .map_err(|why| format!("{}'s hard-lockup detector {why}", self.label))
     }
 
     /// The stop's own record, off the page its tail is sealed on: the stop
@@ -381,22 +366,15 @@ impl Readback {
         toyos_build::metal::park(self.after_the_reset().ok()?.text())
     }
 
-    /// Block-device operations still open where this boot's stop ended.
-    /// `None` on a boot that reset without going through `quiesce`. It is the
-    /// block layer's own count, so it is what the stop can be wrong against.
-    pub fn park_open_operations(&self) -> Option<u64> {
-        self.stop_record().map(|park| u64::from(park.in_flight))
-    }
-
-    /// Whether the stop stopped the machine, as against how long it spent
-    /// trying.
-    ///
-    /// **No ceiling can ask this.** A stop that gave up returns having spent
-    /// its budget and no more, and `park_open_operations` then reads whatever
-    /// the threads it left running happened to be doing. The shortfall the
-    /// record names is the only thing that says the machine was not stopped.
     pub fn stop_completed(&self) -> Result<(), String> {
+        let handed_back =
+            self.after_the_reset().is_ok_and(|after| after.text().contains(bootlog::HANDED_BACK));
         match self.stop_record() {
+            None if handed_back => Err(format!(
+                "{} handed the machine back and its page carries no record of the stop",
+                self.label
+            )),
+            None => Ok(()),
             Some(park) if !park.stopped_the_machine() => Err(format!(
                 "{}'s stop gave up on {} userland thread(s) that never reached a safe point, so \
                  this boot's sync and its last word are claims about a machine that was still \
@@ -404,7 +382,11 @@ impl Readback {
                 self.label,
                 park.sweep.running,
             )),
-            _ => Ok(()),
+            Some(park) if park.in_flight != 0 => Err(format!(
+                "{}'s stop ended with {} block operation(s) open:\n    {park}",
+                self.label, park.in_flight,
+            )),
+            Some(_) => Ok(()),
         }
     }
 
@@ -412,17 +394,14 @@ impl Readback {
     /// report is. `None` where the chain did not go round — which for a boot
     /// that ended itself is a finding, not an absence.
     pub fn after_the_reset(&self) -> Result<Serial, String> {
-        let at = self.loader.find(bootlog::SEPARATOR).ok_or_else(|| {
+        let after = bootlog::after_the_reset(&self.loader).ok_or_else(|| {
             format!(
                 "{}'s loader.log carries no pass after the reset: the loader did not point \
                  `BootNext` at itself, or the machine went back to the boot manager\n{}",
                 self.label, self.loader
             )
         })?;
-        Ok(Serial::named(
-            &format!("{}'s loader pass after the reset", self.label),
-            &self.loader[at..],
-        ))
+        Ok(Serial::named(&format!("{}'s loader pass after the reset", self.label), after))
     }
 
     /// What the kernel recorded about the process the *runner* spawned as
@@ -436,9 +415,8 @@ impl Readback {
     /// name would find nothing on a perfectly good boot.
     ///
     /// **And the name alone does not identify one process.** A guest binary that
-    /// cannot ask what a handle it does not hold does — the pattern
-    /// `handle_kill_policy` is built on — re-executes *itself*, one child per
-    /// fault, and every child is recorded under that same name with whatever
+    /// cannot ask what a handle it does not hold does re-executes *itself*, one
+    /// child per fault, and every child is recorded under that same name with whatever
     /// exit the fault gave it. Measured on a metal-shaped guest that binary left
     /// forty-two records reading `code=139` and the job's own reading zero, and
     /// the last of them is a child. The job's is the one with the **lowest
@@ -473,24 +451,21 @@ impl Readback {
             })
     }
 
-    /// One number this boot measured, against the ceiling
-    /// `tests/metal-profile.toml` holds for it.
-    ///
-    /// **The gate fails closed on a name with no row**, which is the profile's
-    /// own rule: a measurement nobody has priced must not pass by having no
-    /// ceiling. The file is read once and kept, because every judge that asks
-    /// asks inside one process and [`run`] has already read it to judge the
-    /// boots.
-    pub fn number(&self, name: &str, value: u64) -> Result<(), String> {
-        static PROFILE: std::sync::OnceLock<Result<Profile, String>> = std::sync::OnceLock::new();
-        PROFILE
-            .get_or_init(|| {
-                Profile::load(&super::compile::repo_root()).map_err(|why| why.to_string())
-            })
-            .as_ref()
-            .map_err(Clone::clone)?
-            .judge(name, value)
-            .map_err(|why| why.to_string())
+    /// One number this boot measured, judged by [`run`] against this machine's
+    /// record once every judge has spoken. A second value under one name is
+    /// refused: which of the two a record kept would be nobody's reading.
+    pub fn measured(&self, name: &str, value: u64) -> Result<(), String> {
+        match self.numbers.borrow_mut().entry(name.to_string()) {
+            Entry::Vacant(slot) => {
+                slot.insert(value);
+                Ok(())
+            }
+            Entry::Occupied(was) => Err(format!(
+                "{} measured {name} twice, {} and then {value}",
+                self.label,
+                was.get()
+            )),
+        }
     }
 
     /// The job ran and the kernel recorded it exiting cleanly.
@@ -530,6 +505,17 @@ impl Readback {
     }
 }
 
+/// A bound's lateness against the period of what polls it, and a millisecond
+/// either way for the two floored readings the lateness is the difference of.
+fn within_one_period(late_ms: i64, period_ns: u64) -> Result<(), String> {
+    let period_ms = i64::try_from(period_ns / 1_000_000).expect("a period in milliseconds");
+    if (-1..=period_ms + 1).contains(&late_ms) {
+        Ok(())
+    } else {
+        Err(format!("fired {late_ms} ms past its bound, and what polls it runs every {period_ms} ms"))
+    }
+}
+
 /// One image, and every test that rides it.
 struct Batch {
     config: &'static str,
@@ -542,8 +528,6 @@ struct Batch {
     nic: Option<&'static str>,
     /// [`Arm::talk`], carried to the image and to the invocation.
     talk: bool,
-    /// [`Arm::swap`], carried to the image, the invocation and the second one.
-    swap: Option<&'static str>,
 }
 
 impl Batch {
@@ -557,7 +541,7 @@ impl Batch {
 }
 
 /// Where a batch's derived config, its image and its readback live.
-fn at(dir: &Path, label: &str) -> PathBuf {
+pub fn at(dir: &Path, label: &str) -> PathBuf {
     dir.join(label)
 }
 
@@ -569,7 +553,6 @@ fn at(dir: &Path, label: &str) -> PathBuf {
 fn batches(
     tests: &[(&str, &'static Metal)],
     shared: &[SharedBoot],
-    profile: &Profile,
 ) -> Result<BTreeMap<String, Batch>, String> {
     let mut out: BTreeMap<String, Batch> = BTreeMap::new();
     // First, so a registration naming a shared boot rides it rather than
@@ -590,7 +573,6 @@ fn batches(
                 links: boot.links.clone(),
                 nic: None,
                 talk: false,
-                swap: None,
             },
         );
         if was.is_some() {
@@ -598,7 +580,7 @@ fn batches(
         }
     }
     for (name, decl) in tests {
-        let Metal::Runs { arms, .. } = decl else { continue };
+        let Metal { arms, .. } = decl;
         for arm in *arms {
             let batch = out.entry(arm.boot.to_string()).or_insert_with(|| Batch {
                 config: arm.config,
@@ -609,14 +591,12 @@ fn batches(
                 links: Vec::new(),
                 nic: arm.nic,
                 talk: arm.talk,
-                swap: arm.swap,
             });
             if batch.config != arm.config
                 || batch.params != arm.params
                 || batch.features != arm.features
                 || batch.nic != arm.nic
                 || batch.talk != arm.talk
-                || batch.swap != arm.swap
             {
                 return Err(format!(
                     "{name} rides the boot {:?} as ({}, {:?}, {:?}, {:?}, talk={}) and another row \
@@ -637,33 +617,36 @@ fn batches(
             batch.add(arm.jobs.iter().map(|j| (*j).to_string()));
         }
     }
-    // **Every boot, and the shared ones have already been cut to fit.** An
-    // authored arm is refused rather than cut: the order of an arm's jobs is
-    // the author's, and only the author knows where one may be broken in two —
-    // `Arm::boot`'s own doc is that argument.
-    for (label, batch) in &out {
-        let row = job_ms_row(label);
-        let Some(priced) = profile.row(&row) else {
-            return Err(format!(
-                "the boot {label:?} runs {} job(s) and {row} prices none of them; a list nobody \
-                 has priced cannot be sized to the runner's bound",
-                batch.jobs.len()
-            ));
-        };
-        let per = toyos_build::metalprofile::members_per_boot(priced.ceiling);
-        if batch.jobs.len() > per {
-            return Err(format!(
-                "the boot {label:?} carries {} job(s) and {row} leaves room for {per} of them \
-                 ({} ms each inside {} ms, less the {AROUND_THE_LIST_MS} ms the boot around the \
-                 list costs). The runner's bound ends the whole list, so the members past that \
-                 would never run — split this boot's arms across two named boots",
-                batch.jobs.len(),
-                priced.ceiling,
-                toyos_tco::JOB_BOUND_MS,
-            ));
+    Ok(out)
+}
+
+/// What `reachable`, a batch's text, names beside its `jobs`: every binary it
+/// spells `test_rs_<name>` that is not one of them, and every shared library.
+pub fn reached(
+    reachable: &str,
+    jobs: &[String],
+    rust_bins: &[(String, Vec<u8>)],
+) -> Vec<(String, Vec<u8>)> {
+    // Whole: a longer name that opens with this one is another binary's.
+    let names = |staged: &str| {
+        reachable.match_indices(staged).any(|(at, _)| {
+            !reachable[at + staged.len()..]
+                .starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        })
+    };
+    let mut out = Vec::new();
+    for (name, data) in rust_bins {
+        let staged = format!("test_rs_{name}");
+        // The shared libraries go on whole: a `dlopen` names a path and never a
+        // `test_rs_` literal, so no text could find one — and all of them
+        // together are a fraction of one helper binary.
+        if name.ends_with(".so") {
+            out.push((format!("lib/{name}"), data.clone()));
+        } else if !jobs.contains(&staged) && names(&staged) {
+            out.push((format!("bin/{staged}"), data.clone()));
         }
     }
-    Ok(out)
+    out
 }
 
 /// Build one batch's image, and answer where it landed.
@@ -673,7 +656,6 @@ fn build(
     label: &str,
     batch: &Batch,
     rust_bins: &[(String, Vec<u8>)],
-    helpers: &[&str],
     quiet: bool,
 ) -> Result<PathBuf, String> {
     let home = at(dir, label);
@@ -711,13 +693,13 @@ fn build(
     // and `fault_gates` each panicked on `entity not found`
     // looking for a child nothing had staged.
     //
-    // **Which helper, though, is read rather than assumed.** Staging all of them
+    // **Which binary, though, is read rather than assumed.** Staging all of them
     // on every image cost 150 MB a boot, and a stick is written over `ssh`. A
     // driver reaches a binary as the literal `test_rs_<name>` — the same
     // spelling `suite_split` reads the harness for — so the text a boot could
     // possibly name it in is its job list, its symlink targets, and the source
-    // of every Rust job on it. A helper named nowhere in that is a helper this
-    // boot cannot reach.
+    // of every Rust job on it. A binary named nowhere in that is one this boot
+    // cannot reach.
     if !batch.jobs.is_empty() {
         let bin = root.join("tests/toyos-rust-tests/src/bin");
         let mut reachable = batch.jobs.join(" ");
@@ -734,18 +716,7 @@ fn build(
                 reachable.push_str(&source);
             }
         }
-        for (name, data) in rust_bins {
-            // The shared libraries go on whole: a `dlopen` names a path and
-            // never a `test_rs_` literal, so nothing above could find one — and
-            // all of them together are a fraction of one helper binary.
-            if name.ends_with(".so") {
-                extra.push((format!("lib/{name}"), data.clone()));
-            } else if helpers.contains(&name.as_str())
-                && reachable.contains(&format!("test_rs_{name}"))
-            {
-                extra.push((format!("bin/test_rs_{name}"), data.clone()));
-            }
-        }
+        extra.extend(reached(&reachable, &batch.jobs, rust_bins));
     }
 
     // The build a boot asked for, or — where it asked for none — the one its
@@ -776,13 +747,17 @@ fn build(
              field on an arm"
         ));
     }
-    let deadline = format!("{}{}", toyos_tco::DEADLINE_PARAM, toyos_tco::WEDGE_BOUND_MS);
+    let deadline = format!(
+        "{}{}",
+        toyos_tco::DEADLINE_PARAM,
+        toyos_build::metal::bound_for(&batch.params)
+    );
     let mut params: Vec<&str> = batch.params.clone();
     params.push(&deadline);
-    // **A talking or swapping boot carries the key the loop will offer**,
+    // **A talking boot carries the key the loop will offer**,
     // minted beside the image so the loop finds it there. Nothing about this
     // host is in it: the loop finds the machine by its name.
-    if batch.talk || batch.swap.is_some() {
+    if batch.talk {
         let identity = super::ssh::Identity::mint_in(&talk_home(&home))?;
         extra.push((super::ssh::KEYS_ON_ROOT.to_string(), identity.authorized_line().into_bytes()));
     }
@@ -790,11 +765,6 @@ fn build(
     let bytes = toyos_build::build::build_test_image(root, &plan, quiet, &extra);
     let image = home.join("image.img");
     std::fs::write(&image, &bytes).map_err(|e| format!("{}: {e}", image.display()))?;
-    // The binary the second invocation sends, copied now so it is this
-    // build's and not whatever the tree holds when the machine is reached.
-    if let Some(service) = batch.swap {
-        toyos_build::build::copy_guest_program(root, toyos_build::arch::Arch::X86_64, service, &home.join(service))?;
-    }
     Ok(image)
 }
 
@@ -837,30 +807,34 @@ fn invocation(image: &Path, home: &Path, nic: Option<&str>, talk: bool) -> Vec<S
     words
 }
 
-/// The second invocation a swapping boot owes: started beside the one that
-/// flashes it, it dials the address the machine answers to under its own
-/// name and swaps `service` for the binary [`build`] copied beside the image.
-fn swap_invocation(home: &Path, service: &str) -> Vec<String> {
-    [
-        "run",
-        "--bin",
-        "toyos-metal",
-        "--",
-        "--swap",
-        service,
-        "--binary",
-        &home.join(service).display().to_string(),
-        "--talk",
-        &talk_home(home).join("id_ed25519").display().to_string(),
-        "--readback",
-        &home.display().to_string(),
-        "--hand-back",
-    ]
-    .map(str::to_string)
-    .to_vec()
+/// One `toyos-metal` run. Its stderr is echoed here as it comes and kept, so a
+/// failed run's verdict names the refusal it ended on beside its exit.
+fn drive(root: &Path, words: &[String]) -> Result<(), String> {
+    let mut child = Command::new("cargo")
+        .args(words)
+        .current_dir(root)
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("toyos-metal could not be started: {e}"))?;
+    let mut stderr = BufReader::new(child.stderr.take().expect("stderr was asked for piped"));
+    let (mut said, mut line) = (String::new(), Vec::new());
+    while stderr.read_until(b'\n', &mut line).map_err(|e| format!("toyos-metal's stderr: {e}"))? > 0 {
+        let text = String::from_utf8_lossy(&line);
+        eprint!("{text}");
+        said.push_str(&text);
+        line.clear();
+    }
+    let status = child.wait().map_err(|e| format!("toyos-metal: {e}"))?;
+    if status.success() {
+        return Ok(());
+    }
+    Err(match toyos_build::metal::said_refusal(&said) {
+        Some(refusal) => format!("toyos-metal exited {status}: {refusal}"),
+        None => format!("toyos-metal exited {status} and said no refusal"),
+    })
 }
 
-fn read_readback(dir: &Path, label: &str) -> Result<Readback, String> {
+pub fn read_readback(dir: &Path, label: &str) -> Result<Readback, String> {
     let home = at(dir, label);
     let read = |name: &str| -> Result<String, String> {
         let at = home.join(name);
@@ -868,26 +842,28 @@ fn read_readback(dir: &Path, label: &str) -> Result<Readback, String> {
             format!("{}: {e} — no readback for {label}; run the driver on its image first", at.display())
         })
     };
+    toyos_build::metal::loop_verdict(&read(toyos_build::metal::READBACK_VERDICT)?)
+        .map_err(|why| format!("toyos-metal refused {label}: {why}"))?;
     let loader = read(toyos_build::metal::READBACK_LOADER)?;
     let log = read(toyos_build::metal::READBACK_KERNEL)?;
-    let kernel = bootlog::kernel_records(&log);
     let boot = read(toyos_build::metal::READBACK_BOOT)?;
-    let back_secs = toyos_build::metal::back_secs(&boot)
-        .ok_or_else(|| format!("{label}'s boot file names no `back_secs`: {boot:?}"))?;
-    let stick_secs = toyos_build::metal::stick_secs(&boot)
-        .ok_or_else(|| format!("{label}'s boot file names no `stick_secs`: {boot:?}"))?;
-    let cable = toyos_build::metal::cable(&boot).map_err(|why| format!("{label}: {why}"))?;
-    Ok(Readback {
-        label: label.to_string(),
-        home,
-        boot_ms: bootlog::boot_millis(&kernel),
-        loader,
-        kernel,
-        log,
-        back_secs,
-        stick_secs,
-        cable,
-    })
+    Readback::new(label, home, loader, log, &boot)
+}
+
+/// The machine every boot that came back names, or why there is not one.
+fn one_machine(readbacks: &BTreeMap<String, Result<Readback, String>>) -> Result<Machine, String> {
+    let mut named: Option<Machine> = None;
+    for back in readbacks.values().filter_map(|back| back.as_ref().ok()) {
+        let machine = back.machine.clone()?;
+        match &named {
+            Some(first) if *first != machine => {
+                return Err(format!("one run names two machines: {first:?} and {machine:?}"))
+            }
+            Some(_) => {}
+            None => named = Some(machine),
+        }
+    }
+    named.ok_or_else(|| "no boot came back to name the machine".to_string())
 }
 
 /// What a metal run established.
@@ -913,57 +889,24 @@ pub fn run(
     tests: &[(&str, &'static Metal)],
     shared: &[SharedBoot],
     rust_bins: &[(String, Vec<u8>)],
-    // Binaries a job spawns that are not jobs themselves: the shared block's
-    // helper children, which discovery leaves out and which nothing else would
-    // then put on the image.
-    helpers: &[&str],
     quiet: bool,
 ) -> Verdict {
     let root = super::compile::repo_root();
-    let profile = match Profile::load(&root) {
-        Ok(profile) => profile,
-        Err(why) => {
-            eprintln!("[metal] {why}");
-            return Verdict::Red;
-        }
-    };
-    // Before anything is batched: what rides one flash is what the runner's
-    // bound leaves room for, and a boot named once here can be several.
-    let shared = match sized(shared, &profile) {
-        Ok(shared) => shared,
-        Err(why) => {
-            eprintln!("[metal] {why}");
-            return Verdict::Red;
-        }
-    };
+    let shared = sized(shared);
     let shared = shared.as_slice();
-    let batches = match batches(tests, shared, &profile) {
+    let batches = match batches(tests, shared) {
         Ok(batches) => batches,
         Err(why) => {
             eprintln!("[metal] {why}");
             return Verdict::Red;
         }
     };
-    let declared: Vec<&str> = tests
-        .iter()
-        .filter_map(|(name, decl)| match decl {
-            Metal::QemuOnly(why) => Some((*name, *why)),
-            Metal::Runs { .. } => None,
-        })
-        .map(|(name, why)| {
-            eprintln!("[metal] QEMU-only: {name} — {why}");
-            name
-        })
-        .collect();
-    let runs: Vec<&(&str, &'static Metal)> =
-        tests.iter().filter(|(_, d)| matches!(d, Metal::Runs { .. })).collect();
+    let runs: Vec<&(&str, &'static Metal)> = tests.iter().collect();
     eprintln!(
-        "[metal] {} registration(s) and {} shared member(s) over {} boot(s); {} declared \
-         QEMU-only",
+        "[metal] {} registration(s) and {} shared member(s) over {} boot(s)",
         runs.len(),
         shared.iter().map(|b| b.jobs.len()).sum::<usize>(),
         batches.len(),
-        declared.len(),
     );
     if runs.is_empty() && shared.iter().all(|b| b.jobs.is_empty()) {
         eprintln!("[metal] nothing to run");
@@ -993,11 +936,11 @@ pub fn run(
     if !judging {
         // The key a talking boot authorizes is minted by the harness's own ssh
         // client, which the suite builds only on its QEMU path.
-        if batches.values().any(|b| b.talk || b.swap.is_some()) {
+        if batches.values().any(|b| b.talk) {
             toyos_build::build::build_host_judges(&root, quiet);
         }
         for (label, batch) in &batches {
-            match build(&root, dir, label, batch, rust_bins, helpers, quiet) {
+            match build(&root, dir, label, batch, rust_bins, quiet) {
                 Ok(image) => {
                     eprintln!(
                         "[metal] {label}: {} job(s), armed with {:?} — {}",
@@ -1025,12 +968,6 @@ pub fn run(
                 image.display(),
                 invocation(image, &at(dir, label), batches[*label].nic, batches[*label].talk).join(" ")
             ));
-            if let Some(service) = batches[*label].swap {
-                request.push_str(&format!(
-                    "  and beside it, started first:\n  cargo {}\n",
-                    swap_invocation(&at(dir, label), service).join(" ")
-                ));
-            }
         }
         let path = dir.join("request.txt");
         if let Err(e) = std::fs::write(&path, &request) {
@@ -1050,42 +987,14 @@ pub fn run(
     }
 
     // **The driver's exit is the boot's verdict, and nothing below reads a file
-    // instead of it.** `toyos-metal` exits 1 for the machine and 2 for the loop,
-    // and a boot it refused wrote no readback of its own — so a directory still
-    // holding files after one is holding somebody else's boot.
+    // instead of it.** `toyos-metal` exits 1 for the machine and 2 for the loop.
     let mut refused: BTreeMap<&str, String> = BTreeMap::new();
     if !offline {
         for (label, image) in &images {
             let words = invocation(image, &at(dir, label), batches[*label].nic, batches[*label].talk);
-            // A swapping boot's second invocation is started first: it dials
-            // the machine under its own name for as long as it takes, and
-            // waits for the boot.
-            let beside = batches[*label].swap.map(|service| {
-                let words = swap_invocation(&at(dir, label), service);
-                eprintln!("[metal] {label}, beside it: cargo {}", words.join(" "));
-                Command::new("cargo").args(&words).current_dir(&root).spawn()
-            });
             eprintln!("[metal] {label}: cargo {}", words.join(" "));
-            let booted = Command::new("cargo").args(&words).current_dir(&root).status();
-            if let Some(swap) = beside {
-                match swap.and_then(|mut child| child.wait()) {
-                    Ok(status) if status.success() => {}
-                    Ok(status) => {
-                        refused.insert(label, format!("toyos-metal --swap exited {status}"));
-                    }
-                    Err(e) => {
-                        refused.insert(label, format!("toyos-metal --swap: {e}"));
-                    }
-                }
-            }
-            match booted {
-                Ok(status) if status.success() => {}
-                Ok(status) => {
-                    refused.insert(label, format!("toyos-metal exited {status}"));
-                }
-                Err(e) => {
-                    refused.insert(label, format!("toyos-metal could not be started: {e}"));
-                }
+            if let Err(why) = drive(&root, &words) {
+                refused.insert(label, why);
             }
         }
     }
@@ -1099,83 +1008,85 @@ pub fn run(
         };
         readbacks.insert(label.clone(), back);
     }
+    if judge_readbacks(&root, &readbacks, &runs, shared) {
+        Verdict::Red
+    } else {
+        Verdict::Green
+    }
+}
 
+/// Every verdict a run's readbacks carry, and this machine's record judged by
+/// them and added to off the boots that passed: one function of the readbacks,
+/// whether the loop wrote them a moment ago or a run long past did. Answers
+/// whether anything was red.
+pub fn judge_readbacks(
+    root: &Path,
+    readbacks: &BTreeMap<String, Result<Readback, String>>,
+    runs: &[&(&str, &'static Metal)],
+    shared: &[SharedBoot],
+) -> bool {
     let mut red = false;
+    // **A boot with any failure of its own adds no row**, whether the loop,
+    // the boot's own checks, or a test or member riding it failed.
+    let mut failed: BTreeSet<&str> = BTreeSet::new();
     eprintln!("\n[metal] the boots");
-    for (label, back) in &readbacks {
-        match back {
+    for (label, back) in readbacks {
+        let back = match back {
             Err(why) => {
                 eprintln!("  FAIL {label}: {why}");
-                red = true;
+                failed.insert(label);
+                continue;
             }
-            Ok(back) => {
-                let ms = back.boot_ms.map_or_else(|| "-".to_string(), |ms| ms.to_string());
-                eprintln!(
-                    "  {label}: Boot: complete {ms} ms, back in {} s, the stick enumerated {} s \
-                     after that",
-                    back.back_secs, back.stick_secs
-                );
-                let panel = back.panel();
-                // Evidence beside the two numbers that are priced: what a
-                // reader needs to tell a slower paint from more of them.
-                if let Some(panel) = panel {
-                    eprintln!(
-                        "    the panel painted {} time(s) and put {} px on the glass",
-                        panel.paints, panel.pixels
-                    );
-                }
-                // A boot the file prices a path-taken field for and that
-                // produced none is a boot some *other* bound ended.
-                for (field, value) in [
-                    ("complete_ms", back.boot_ms),
-                    ("back_secs", Some(back.back_secs)),
-                    ("stick_secs", Some(back.stick_secs)),
-                    ("deadline_lateness_ms", back.deadline_lateness_ms()),
-                    ("lockup_lateness_ms", back.lockup_lateness_ms()),
-                    ("panel_max_us", panel.map(|panel| panel.max_micros)),
-                    ("panel_us", panel.map(|panel| panel.micros)),
-                    ("park_open_operations", back.park_open_operations()),
-                ] {
-                    let name = format!("boot.{label}.{field}");
-                    let priced = profile.row(&name).is_some();
-                    if value.is_none() && !priced && PATH_TAKEN.contains(&field) {
-                        continue;
-                    }
-                    let Some(value) = value else {
-                        eprintln!(
-                            "    FAIL {name}: this boot recorded none, and the profile prices \
-                             it — so the bound this boot was armed for is not the one that \
-                             ended it"
-                        );
-                        red = true;
-                        continue;
-                    };
-                    if let Err(why) = profile.judge(&name, value) {
-                        eprintln!("    FAIL {why}");
-                        red = true;
-                    }
-                }
-                // **Every boot, and before any verdict is read out of its
-                // log.** A test's judge reads the file the stick came back
-                // with, so a file that stops before the boot does turns a
-                // machine fact into a missing line — and the missing line is
-                // what a reader would have to guess about.
-                if let Err(why) = back.log_reached_the_stick() {
-                    eprintln!("    FAIL {why}");
-                    red = true;
-                }
-                if let Err(why) = back.stop_completed() {
-                    eprintln!("    FAIL {why}");
-                    red = true;
-                }
+            Ok(back) => back,
+        };
+        let ms = back.boot_ms.map_or_else(|| "-".to_string(), |ms| ms.to_string());
+        eprintln!(
+            "  {label}: Boot: complete {ms} ms, back in {} s, the stick enumerated {} s after that",
+            back.back_secs, back.stick_secs
+        );
+        let panel = back.panel();
+        if let Some(panel) = panel {
+            eprintln!(
+                "    the panel painted {} time(s) and put {} px on the glass",
+                panel.paints, panel.pixels
+            );
+        }
+        let mut findings: Vec<String> = Vec::new();
+        // The census crosses only on the page, and a page the pass after the
+        // reset cleared as another image's carries none.
+        let owes_a_panel = bootlog::foreign_done(&back.loader).is_err();
+        for (field, value, owed) in [
+            ("complete_ms", back.boot_ms, true),
+            ("panel_max_us", panel.map(|panel| panel.max_micros), owes_a_panel),
+            ("panel_us", panel.map(|panel| panel.micros), owes_a_panel),
+        ] {
+            let name = format!("boot.{label}.{field}");
+            match value {
+                Some(value) => findings.extend(back.measured(&name, value).err()),
+                None if owed => findings.push(format!("{name}: this boot recorded none")),
+                None => {}
             }
+        }
+        // **Every boot, and before any verdict is read out of its log.** A
+        // test's judge reads the file the stick came back with, so a file that
+        // stops before the boot does turns a machine fact into a missing line —
+        // and the missing line is what a reader would have to guess about.
+        findings.extend(back.log_reached_the_stick().err());
+        findings.extend(back.stop_completed().err());
+        findings.extend(back.deadline_on_time().err());
+        findings.extend(back.lockup_on_time().err());
+        for why in &findings {
+            eprintln!("    FAIL {why}");
+        }
+        if !findings.is_empty() {
+            failed.insert(label);
         }
     }
 
     eprintln!("\n[metal] the tests");
     let mut passed = 0usize;
-    for (name, decl) in &runs {
-        let Metal::Runs { arms, judge } = decl else { continue };
+    for (name, decl) in runs {
+        let Metal { arms, judge } = decl;
         let mut owed: Vec<&Readback> = Vec::new();
         let mut missing: Option<String> = None;
         for arm in *arms {
@@ -1195,7 +1106,7 @@ pub fn run(
             }
             Err(why) => {
                 eprintln!("  FAIL {name}: {why}");
-                red = true;
+                failed.extend(arms.iter().map(|arm| arm.boot));
             }
         }
     }
@@ -1222,34 +1133,91 @@ pub fn run(
                 // bury the four that matter.
                 Err(why) => {
                     eprintln!("  FAIL {job}: {}", why.lines().next().unwrap_or(&why));
-                    red = true;
+                    failed.insert(&boot.boot);
                 }
             }
         }
-        // **What a member of this list actually cost, against the allowance the
-        // split was derived from.** Over the members that ran and not the
-        // members the list named: a boot the bound cut short would otherwise
-        // report a cost that looks smaller the more of its list it lost.
         if let (Ok(back), true) = (back, ran > 0) {
             if let (Some(complete), Some(last)) = (back.boot_ms, back.last_record_ms()) {
                 let each = last.saturating_sub(complete) / ran as u64;
                 eprintln!("  {} ms per member over the {ran} that ran", each);
-                if let Err(why) = profile.judge(&job_ms_row(&boot.boot), each) {
-                    eprintln!("    FAIL {why}");
+            }
+        }
+    }
+    red |= !failed.is_empty();
+
+    eprintln!("\n[metal] the timings");
+    let mut measured: BTreeMap<String, Reading> = BTreeMap::new();
+    for (label, back) in readbacks {
+        let Ok(back) = back else { continue };
+        let passed = !failed.contains(label.as_str());
+        for (name, &value) in back.numbers.borrow().iter() {
+            match measured.entry(name.clone()) {
+                Entry::Vacant(slot) => {
+                    slot.insert(Reading { value, passed });
+                }
+                // Judged on the first, and recorded off neither.
+                Entry::Occupied(mut first) => {
+                    eprintln!("  FAIL {name} is measured by two boots, and {label} is the second");
+                    first.get_mut().passed = false;
                     red = true;
                 }
             }
+        }
+    }
+    let machine = one_machine(readbacks);
+    let record =
+        machine.as_ref().map_err(Clone::clone).and_then(|machine| Record::load(root, machine));
+    match (machine, record) {
+        (Ok(machine), Ok(record)) => {
+            let judged = metaltimings::judge(&machine, record, &measured);
+            if let Some(firmware) = &judged.firmware {
+                eprintln!("  FAIL {firmware}");
+                red = true;
+            }
+            for over in &judged.over {
+                eprintln!("  FAIL {over}");
+                red = true;
+            }
+            if !judged.unmeasured.is_empty() {
+                eprintln!(
+                    "  {} recorded number(s) this run measured nothing for: {}",
+                    judged.unmeasured.len(),
+                    judged.unmeasured.join(", ")
+                );
+            }
+            eprintln!(
+                "  {} number(s) on {} {}, BIOS {}; {} past its record, {} off a boot that failed",
+                measured.len(),
+                machine.vendor,
+                machine.product,
+                machine.bios,
+                judged.over.len(),
+                measured.values().filter(|reading| !reading.passed).count()
+            );
+            if judged.changed {
+                match judged.record.save(root) {
+                    Ok(at) => eprintln!(
+                        "  {} now records {} number(s) for this machine: commit it",
+                        at.display(),
+                        judged.record.measured.len()
+                    ),
+                    Err(why) => {
+                        eprintln!("  FAIL {why}");
+                        red = true;
+                    }
+                }
+            }
+        }
+        (Err(why), _) | (_, Err(why)) => {
+            eprintln!("  FAIL {} number(s) and no record to judge them by: {why}", measured.len());
+            red = true;
         }
     }
     eprintln!(
         "\n[metal] {passed} passed, {} failed, {} boot(s)",
         runs.len() + members - passed,
-        batches.len()
+        readbacks.len()
     );
-    if red {
-        Verdict::Red
-    } else {
-        Verdict::Green
-    }
+    red
 }
-

@@ -18,8 +18,9 @@
 //! thread has left, and no thread that has left returns to Ring 3.
 //!
 //! **A line is routed once per boot and masked while no claim holds it**, since
-//! an interrupt-remapping entry is never given back. Its ISR counts into the
-//! record a claimed PCI function's does, read back the same way.
+//! an interrupt-remapping entry is never given back. Its handler counts into
+//! the record a claimed PCI function's does and posts the claim's watch, and
+//! the holder reads the record back the same way.
 
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -32,14 +33,15 @@ use crate::device::ClaimError;
 use crate::pcidev::record::Interrupt;
 use crate::process::Pid;
 use crate::sync::Lock;
-use crate::watch::Watch;
+use crate::watch::IrqWatch;
 
 /// One function a process may be handed whole.
 pub struct Grantable {
     /// What the log calls it.
     pub name: &'static str,
-    /// Ascending, as [`IsaId`] spells them.
-    pub ports: &'static [u16],
+    /// Ascending, as [`IsaId`] spells them, and each one the I/O permission
+    /// bitmap names: a port past it is no `u8`.
+    pub ports: &'static [u8],
     pub irqs: &'static [u8],
     /// Whether this kernel drives the function itself, which no claim shares.
     pub kernel_drives: fn() -> bool,
@@ -70,19 +72,13 @@ static BOUND: [AtomicU32; MAX_ROWS] = [const { AtomicU32::new(NOBODY) }; MAX_ROW
 static IRQ: [Interrupt; MAX_ROWS] = [const { Interrupt::new() }; MAX_ROWS];
 
 /// What a claim's poll waits on, one per row.
-static WATCHES: [Watch; MAX_ROWS] = [const { Watch::new() }; MAX_ROWS];
+static WATCHES: [IrqWatch; MAX_ROWS] = [const { IrqWatch::new() }; MAX_ROWS];
 
 /// Mint the claim on the row `set` names, lines routed and unmasked.
 pub fn claim(set: IsaId) -> Result<usize, ClaimError> {
     #[cfg(feature = "boot-actuators")]
     if crate::actuator::isa_claim_straddles_quarantine() {
-        let begun = straddle::begin();
-        let answer = mint(set);
-        straddle::answered(begun);
-        if answer.is_ok() {
-            crate::arch::keyboard_controller::raise_flood();
-        }
-        return answer;
+        return pio::straddling(|| mint(set));
     }
     mint(set)
 }
@@ -91,7 +87,8 @@ fn mint(set: IsaId) -> Result<usize, ClaimError> {
     let row = GRANTABLE
         .iter()
         .position(|g| {
-            set.ports().eq(g.ports.iter().copied()) && set.irqs().eq(g.irqs.iter().copied())
+            set.ports().eq(g.ports.iter().map(|&port| u16::from(port)))
+                && set.irqs().eq(g.irqs.iter().copied())
         })
         .ok_or(ClaimError::Absent)?;
     let grantable = &GRANTABLE[row];
@@ -114,7 +111,6 @@ fn mint(set: IsaId) -> Result<usize, ClaimError> {
             .collect()
     });
     let Ok(lines) = lines else { return Err(ClaimError::Unusable) };
-    IRQ[row].clear();
     for &line in lines.iter() {
         pio::set_masked(line, false);
     }
@@ -122,7 +118,7 @@ fn mint(set: IsaId) -> Result<usize, ClaimError> {
     Ok(row)
 }
 
-/// The claim's last handle went: its lines masked, its record emptied. The
+/// The claim's last handle went: its lines masked and its record emptied. The
 /// ports stay with the process that bound them until that process ends.
 pub fn release(row: usize) {
     let mut state = ROWS[row].lock();
@@ -164,84 +160,24 @@ pub fn process_ends(pid: Pid) {
 
 /// The interrupts since the last read, or `None` for none.
 pub fn take_record(row: usize) -> Option<DeviceIrqRecord> {
-    IRQ[row].take().map(|count| DeviceIrqRecord { count })
+    let taken = IRQ[row].take();
+    if taken.is_some() && IRQ[row].take_unannounced() {
+        log!("isa: {} took its first interrupt", GRANTABLE[row].name);
+    }
+    taken.map(|count| DeviceIrqRecord { count })
 }
 
 pub fn has_irq(row: usize) -> bool {
     IRQ[row].armed()
 }
 
-/// Called from the row's ISR: no lock, no allocation.
+/// Records one interrupt and posts the claim's watch. Called from the row's
+/// handler, so it takes no lock but the watch's own and allocates nothing.
 pub fn isr(row: usize) {
     IRQ[row].took();
+    WATCHES[row].post_in_place();
 }
 
-/// Turn every interrupt taken since the last pass into a wake.
-pub fn drain_pending() {
-    for (row, irq) in IRQ.iter().enumerate().take(GRANTABLE.len()) {
-        if !irq.take_pending() {
-            continue;
-        }
-        if irq.take_unannounced() {
-            log!("isa: {} took its first interrupt", GRANTABLE[row].name);
-        }
-        WATCHES[row].post();
-    }
-}
-
-pub fn watch(row: usize) -> &'static Watch {
+pub fn watch(row: usize) -> &'static IrqWatch {
     &WATCHES[row]
-}
-
-/// The `isa-claim-straddles-quarantine` actuator: a claim answered between the
-/// two steps of the i8042's quarantine, which holds after its first until one
-/// begun after it has been; a granted one then raises the flood again.
-#[cfg(feature = "boot-actuators")]
-pub mod straddle {
-    use core::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
-
-    /// Claims begun this boot.
-    static BEGUN: AtomicU64 = AtomicU64::new(0);
-    /// [`BEGUN`] when the quarantine's first step ran; [`NONE`] before it.
-    static HELD_FROM: AtomicU64 = AtomicU64::new(NONE);
-    const NONE: u64 = u64::MAX;
-    /// The lines the first step masked, for the second's log.
-    static MASKED: AtomicU32 = AtomicU32::new(0);
-    /// `WAITING` → `STRADDLED` → `RESUMED`, and nothing moves it back: the
-    /// second step runs once.
-    static STEP: AtomicU8 = AtomicU8::new(WAITING);
-    const WAITING: u8 = 0;
-    const STRADDLED: u8 = 1;
-    const RESUMED: u8 = 2;
-
-    pub(super) fn begin() -> u64 {
-        BEGUN.fetch_add(1, Ordering::SeqCst)
-    }
-
-    /// A claim that began before the first step read the controller as driven
-    /// either way, so only a later one decides anything.
-    pub(super) fn answered(begun: u64) {
-        let from = HELD_FROM.load(Ordering::SeqCst);
-        if from != NONE
-            && begun >= from
-            && STEP.compare_exchange(WAITING, STRADDLED, Ordering::SeqCst, Ordering::SeqCst).is_ok()
-        {
-            crate::arch::keyboard_controller::wake_irq_cpu();
-        }
-    }
-
-    /// The quarantine's first step ran and masked `masked` lines.
-    pub fn hold(masked: u32) {
-        MASKED.store(masked, Ordering::SeqCst);
-        HELD_FROM.store(BEGUN.load(Ordering::SeqCst), Ordering::SeqCst);
-        log!("isa: the i8042's quarantine holds after its first step for a claim");
-    }
-
-    /// The first step's masked count, once, after a claim begun after it has
-    /// been answered; the second step is the caller's.
-    pub fn resume() -> Option<u32> {
-        STEP.compare_exchange(STRADDLED, RESUMED, Ordering::SeqCst, Ordering::SeqCst).ok()?;
-        log!("isa: a claim was answered between the i8042's quarantine steps");
-        Some(MASKED.load(Ordering::SeqCst))
-    }
 }

@@ -8,7 +8,6 @@
 
 use crate::log;
 use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use crate::hasher::HashMap;
 
@@ -21,7 +20,6 @@ use crate::arch::cpu::Invpcid;
 use crate::sync::Lock;
 use crate::vma::{self, Occupancy, Region, RegionKind};
 use toyos_bootmap::ROOT_HIGH_HALF;
-use toyos_userbound::PageSpan;
 use crate::MemoryMapEntry;
 
 const PAGE_PRESENT: u64 = 1 << 0;
@@ -368,7 +366,7 @@ pub struct AddressSpace {
     /// Physical data pages mapped into user space, keyed by physical address. Freed on drop.
     pages: HashMap<u64, crate::mm::pmm::PhysPage>,
     /// All virtual memory regions, keyed by start address.
-    regions: BTreeMap<UserAddr, Region>,
+    regions: vma::Regions,
     /// Owned for this space's life: dropping the space returns a user tag, so two
     /// live spaces can never share one.
     pcid: PcidHandle,
@@ -396,7 +394,7 @@ impl AddressSpace {
             root: pml4,
             children: Vec::new(),
             pages: HashMap::default(),
-            regions: BTreeMap::new(),
+            regions: vma::Regions::default(),
             pcid: PcidHandle::User(pcid),
         })
     }
@@ -607,20 +605,9 @@ impl AddressSpace {
         Some((crate::mm::DirectMap::from_phys(page_phys + offset), rights, PAGE_2M))
     }
 
-    /// Where `span` goes, top-down and never below the floor: a region the
-    /// kernel placed under it, the clock page, bounds no gap.
-    fn find_gap(&self, span: PageSpan) -> Option<UserAddr> {
-        let taken = self.regions.iter().rev().map(|(start, region)| (start.raw(), region.size));
-        vma::window().gap(span, taken).map(UserAddr::new)
-    }
-
-    /// Allocate a virtual address range and register the region. `size` is
-    /// made a [`PageSpan`] before anything is summed on it.
+    /// Allocate a virtual address range and register the region.
     pub fn alloc_region(&mut self, size: u64, kind: RegionKind) -> Option<UserAddr> {
-        let span = vma::window().span(size)?;
-        let addr = self.find_gap(span)?;
-        self.regions.insert(addr, Region { size: span.bytes(), kind });
-        Some(addr)
+        self.regions.alloc(size, kind)
     }
 
     /// A mixed-`Prot` image uses [`alloc_region`](Self::alloc_region) plus [`map_window`](Self::map_window) per 2 MiB instead.
@@ -635,59 +622,30 @@ impl AddressSpace {
             phys & (PAGE_2M - 1) == 0,
             "alloc_and_map: phys {phys:#x} not 2MB-aligned"
         );
-        let span = vma::window().span(size)?;
-        let addr = self.find_gap(span)?;
-        let aligned = span.bytes();
-        self.regions.insert(
-            addr,
-            Region {
-                size: aligned,
-                kind: RegionKind::Mapped,
-            },
-        );
+        let (addr, aligned) = self.regions.alloc_mapped(size)?;
         self.map_range(addr, phys, aligned, prot, cache);
         Some((addr, aligned))
     }
 
     /// Free a previously allocated region and unmap it.
     pub fn free_and_unmap(&mut self, addr: UserAddr) -> Option<u64> {
-        let size = self.regions.remove(&addr)?.size;
+        let size = self.regions.remove(addr)?;
         self.unmap_range(addr, size);
         Some(size)
     }
 
     /// Insert a region at a specific address (for ELF segments, stack, etc.)
     pub fn insert_region(&mut self, addr: UserAddr, region: Region) {
-        assert!(
-            self.find_region(addr).is_none(),
-            "insert_region: address {:#x} already occupied",
-            addr.raw()
-        );
         self.regions.insert(addr, region);
     }
 
     /// Find the region containing `addr`. Returns (start_addr, region).
     pub fn find_region(&self, addr: UserAddr) -> Option<(UserAddr, &Region)> {
-        let (&start, region) = self.regions.range(..=addr).next_back()?;
-        if addr.raw() < start.raw() + region.size {
-            Some((start, region))
-        } else {
-            None
-        }
+        self.regions.find(addr)
     }
 
-    /// The end is saturating so a caller's arithmetic cannot wrap into a smaller range.
     pub fn occupancy(&self, addr: UserAddr, size: u64) -> Occupancy {
-        let end = UserAddr::new(addr.raw().saturating_add(size));
-        let mut over = self.overlapping_regions(addr, end);
-        let Some((&start, region)) = over.next() else {
-            return Occupancy::Free;
-        };
-        if over.next().is_none() && start == addr && region.size == size {
-            Occupancy::Whole
-        } else {
-            Occupancy::Partial
-        }
+        self.regions.occupancy(addr, size)
     }
 
     /// Iterate all regions that overlap the range [start, end).
@@ -696,10 +654,7 @@ impl AddressSpace {
         start: UserAddr,
         end: UserAddr,
     ) -> impl Iterator<Item = (&UserAddr, &Region)> {
-        // Overlaps [start, end) iff s < end && s+n > start; `range(..end)` prunes the first half.
-        self.regions
-            .range(..end)
-            .filter(move |(&s, r)| s.raw() + r.size > start.raw())
+        self.regions.overlapping(start, end)
     }
 
     /// Private: not safe to use until every CPU is told — the free fn [`map_mmio`] is the whole operation.
@@ -921,18 +876,11 @@ pub fn map_mmio(phys: u64, size: u64, policy: MmioPolicy) -> crate::mm::Mmio {
     mmio
 }
 
-
-/// Take the 4 KiB page holding `addr` out of the kernel direct map; `addr`'s
-/// page must be owned by the caller forever (see [`AddressSpace::guard_4k`]).
-pub fn guard_kernel_page(addr: u64) {
-    assert!(crate::mm::is_kernel_addr(addr), "guard_kernel_page: {addr:#x} is not a kernel address");
-    kernel().lock().guard_4k(crate::mm::DirectMap::phys_of(addr as *const u8));
-}
-
 /// Build kernel page tables: the direct map in the high half, in 2 MiB pages,
 /// as far as [`toyos_bootmap::x86_64::direct_map_end`] reaches, and answer
-/// that end.
-pub(crate) fn init(memory_map: &[MemoryMapEntry]) -> toyos_bootmap::DirectMapEnd {
+/// that end. The scanout is not mapped for itself: in the low map the MTRRs
+/// type it until `panic_console::remap` gives it a type of its own.
+pub(crate) fn init(memory_map: &[MemoryMapEntry], _scanout: Option<(u64, u64)>) -> toyos_bootmap::DirectMapEnd {
     let extent = toyos_bootmap::x86_64::direct_map_end(memory_map)
         .unwrap_or_else(|refusal| panic!("paging: firmware's memory map: {refusal}"));
     let end = extent.get();
@@ -941,7 +889,7 @@ pub(crate) fn init(memory_map: &[MemoryMapEntry]) -> toyos_bootmap::DirectMapEnd
         root: Box::new(PageTablePage([0; 512])),
         children: Vec::new(),
         pages: HashMap::default(),
-        regions: BTreeMap::new(),
+        regions: vma::Regions::default(),
         pcid: PcidHandle::Kernel,
     };
 
@@ -1206,4 +1154,15 @@ pub fn scanout_memory_type(addr: u64, size: u64) -> impl core::fmt::Display {
         }
     }
     Report(crate::arch::mtrr::range_type(addr, size))
+}
+
+/// Whether a process can be given the scanout at `phys`, which it is in
+/// 2 MiB pages: its base on one, as the loader already requires, since what
+/// the last page covers past it is the aperture firmware put it in.
+pub fn scanout_whole_pages(phys: u64, _size: u64) -> Result<(), &'static str> {
+    if phys.is_multiple_of(PAGE_2M) {
+        Ok(())
+    } else {
+        Err("its base is not on a 2 MiB page, and a process is given a scanout in 2 MiB pages")
+    }
 }

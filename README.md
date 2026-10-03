@@ -10,7 +10,7 @@ cargo run
 ```
 
 One command, and a complete OS boots. No Make, no Docker, no LLVM to install,
-no cross-toolchain to assemble, no system linker. Everything that boots is
+no cross-toolchain to assemble. Everything that boots is
 built by a toolchain in this repository.
 
 Rust and QEMU, plus the four things `rustc`'s own bootstrap needs on every
@@ -182,9 +182,7 @@ hundred third-party crates compiled for ToyOS, the large majority of them
 exactly as published. Doom opens its window through `winit`, presents frames
 through `softbuffer`, and plays through `cpal`; its music is General MIDI
 rendered by `rustysynth`. The handful of crates that needed patches live as
-`toyos` branches of their own repositories, never vendored — `forks.toml` is
-the manifest, and `git log <base>..toyos` in any of them is exactly the ToyOS
-delta.
+branches of their own repositories, never vendored.
 
 **Booting on real hardware.** The first boot on a physical machine — a
 ThinkPad T14 Gen 2, from a USB stick — reached CPU bring-up, x2APIC, I/O APIC,
@@ -224,30 +222,26 @@ same font the kernel blits.
 - Rust, with rustup
 - QEMU
 - A C compiler on `PATH` as `cc`, and a Python 3
-- CMake and Ninja
+- CMake
 
-The last two lines are `rustc`'s and not ToyOS's, and nothing that boots touches
-them. `rustc` links every **host** binary through `cc`, which rustup does not
+`rustc` links every **host** binary through `cc`, which rustup does not
 install. `rust/x`, the entry point to rustc's own bootstrap, is a shell script
 whose whole job is to find a Python to run `bootstrap.py` with — so a clean
 clone needs one, and so does every toolchain change. And that bootstrap builds
-LLVM and clang from source with CMake and Ninja, whenever the LLVM commit
+LLVM and clang from source with CMake, whenever the LLVM commit
 `rust/` names has not been built on the machine before.
 
 Nothing in the OS goes near any of them. `bootloader/`, `kernel/` and
 `userland/` all link with the toolchain's `rust-lld`, and no image contains a C
 toolchain or a Python. On macOS `cc` and Python arrive with the Xcode Command
-Line Tools, and CMake and Ninja come from Homebrew (`brew install cmake
-ninja`); on Debian and Ubuntu they are `build-essential`, `python3`, `cmake`
-and `ninja-build`.
+Line Tools, and CMake comes from Homebrew (`brew install cmake`); on Debian and
+Ubuntu they are `build-essential`, `python3` and `cmake`.
 
 `cargo run` names anything it needs and cannot find, before it does anything
-else — including the Python that only the toolchain bootstrap runs, which
-costs that bootstrap rather than the build.
+else.
 Everything this project depends on that it did not write is named
 where it is carried: `NOTICE` lists every committed third-party file with its
-hash, upstream and licence, and `forks.toml` lists every crate ToyOS patches
-with its upstream, pinned base and licence.
+hash, upstream and licence.
 
 Linux and macOS. Windows is a goal, not a claim — the build system still
 assumes Unix in places, and nothing should be advertised until a clean Windows

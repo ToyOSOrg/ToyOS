@@ -32,13 +32,10 @@
 //! primary's (`src/compiler.rs`) is locked the same way under its own key, and
 //! neither it nor a sysroot built from it takes the global lock.
 //!
-//! [`integration`] is neither: one file of its own, exclusive-only, and held
-//! while this host's `main` moves rather than while anything builds.
-//!
-//! **The lock order is a constraint, not a preference:** a compiler
-//! key's lock → a sysroot key's lock → the worktree build lock → the global one
-//! → an LLVM key's lock → artifact. A compiler's or a sysroot's key lock is
-//! taken with the worktree lock put down ([`Held::without_shared`]), because the
+//! A compiler key's lock → a sysroot key's lock → a freestanding key's lock → the
+//! worktree build lock → the global one → an LLVM key's lock → artifact. A
+//! compiler's, a sysroot's or a freestanding key lock is taken with the
+//! worktree lock put down ([`Held::without_shared`]), because the
 //! key's builder takes the worktree lock exclusively; an LLVM key's is taken
 //! inside the worktree or global lock covering the fork build directory its
 //! builder writes.
@@ -54,6 +51,8 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use crate::keystore::Key;
 
 unsafe extern "C" {
     fn flock(fd: i32, operation: i32) -> i32;
@@ -219,34 +218,14 @@ pub fn artifact(root: &Path) -> Guard {
     exclusive(&root.join(LOCK_DIR).join("artifact"), "artifact lock", "artifact staging")
 }
 
-/// The integration lock: one process at a time moves this host's `main`.
-///
-/// It used to hold a whole landing — lock, merge, gate, fast-forward.
-/// GitHub does the merging now, so what is left on
-/// this side is `--sync` fast-forwarding the primary checkout onto
-/// `origin/main`, and that is still a tree somebody may be building in.
-///
-/// Its own file and not `Scope::Global`'s `state`, because a sysroot build
-/// holds `state` shared for its whole length and this must not wait for one.
-///
-/// No `intent` beside it either. Writer preference exists because a stream of
-/// shared acquirers can starve an exclusive one out of `state`; nothing takes
-/// this file in shared mode at all, so there is no stream to be starved by, and
-/// an `intent` here would be a file only its own exclusive holders ever touched.
-pub fn integration(root: &Path) -> Guard {
-    exclusive(&integration_path(root), "integration lock", "moving main")
-}
-
-fn integration_path(root: &Path) -> PathBuf {
-    git_lock_dir(root).join("integration")
-}
-
-/// A content-addressed product of the host, locked per key: a sysroot, a
-/// compiler a worktree's fork checkout names (`src/compiler.rs`), or the LLVM
-/// a compiler links (`src/llvm.rs`).
+/// A content-addressed product of the host, locked per key: a sysroot, the
+/// freestanding targets' libraries it carries (`src/sysroot.rs`), a compiler
+/// a worktree's fork checkout names (`src/compiler.rs`), or the LLVM a
+/// compiler links (`src/llvm.rs`).
 #[derive(Clone, Copy)]
 pub enum Keyed {
     Sysroot,
+    Freestanding,
     Compiler,
     Llvm,
 }
@@ -255,6 +234,7 @@ impl Keyed {
     fn dir(self) -> &'static str {
         match self {
             Keyed::Sysroot => "sysroots",
+            Keyed::Freestanding => "freestanding",
             Keyed::Compiler => "compilers",
             Keyed::Llvm => "llvm",
         }
@@ -263,6 +243,7 @@ impl Keyed {
     pub(crate) fn name(self) -> &'static str {
         match self {
             Keyed::Sysroot => "sysroot",
+            Keyed::Freestanding => "freestanding libraries",
             Keyed::Compiler => "compiler",
             Keyed::Llvm => "LLVM",
         }
@@ -271,14 +252,14 @@ impl Keyed {
 
 /// Make what `key` names: exclusive, and waited for by every other process that
 /// wants the same key, which then finds it made.
-fn keyed_building(root: &Path, kind: Keyed, key: &str) -> Guard {
+fn keyed_building(root: &Path, kind: Keyed, key: &Key) -> Guard {
     let lock = format!("{} lock", kind.name());
     exclusive(&keyed_lock_path(root, kind, key), &lock, &format!("building {} {key}", kind.name()))
 }
 
 /// Use what `key` names: shared, so any number of builds use it at once, a
 /// builder of it is waited for, and a sweep cannot remove it.
-fn keyed_using(root: &Path, kind: Keyed, key: &str) -> Guard {
+fn keyed_using(root: &Path, kind: Keyed, key: &Key) -> Guard {
     let path = keyed_lock_path(root, kind, key);
     let file = open_lock_file(&path);
     if !try_lock(&file, LOCK_SH) {
@@ -299,7 +280,7 @@ fn keyed_using(root: &Path, kind: Keyed, key: &str) -> Guard {
 pub fn keyed_made(
     root: &Path,
     kind: Keyed,
-    key: &str,
+    key: &Key,
     defect: impl Fn() -> Option<String>,
     mut make: impl FnMut(),
 ) -> Guard {
@@ -321,12 +302,12 @@ pub fn keyed_made(
 
 /// What `key` names, exclusively and only if nobody is making or using it: what
 /// a sweep holds while it removes one.
-pub fn keyed_idle(root: &Path, kind: Keyed, key: &str) -> Option<Guard> {
+pub fn keyed_idle(root: &Path, kind: Keyed, key: &Key) -> Option<Guard> {
     let file = open_lock_file(&keyed_lock_path(root, kind, key));
     try_lock(&file, LOCK_EX).then_some(Guard { file, records_holder: false })
 }
 
-fn keyed_lock_path(root: &Path, kind: Keyed, key: &str) -> PathBuf {
+fn keyed_lock_path(root: &Path, kind: Keyed, key: &Key) -> PathBuf {
     git_lock_dir(root).join(kind.dir()).join(key)
 }
 
@@ -425,13 +406,6 @@ fn announce(lock: &str, label: &str, holder: &str) {
 }
 
 /// [`take_lock`], saying every 30 s that it is still waiting and who for.
-///
-/// One opening line is enough for a wait of seconds and not for one of tens of
-/// minutes. On 2026-08-07 eight `--land` processes queued on the integration
-/// lock at once; each printed its line and then went silent for as long as the
-/// seven ahead of it took, which is indistinguishable from a wedge — and an
-/// agent that cannot tell a queue from a wedge kills it and retries, which puts
-/// its gate back at the end of the queue.
 ///
 /// The kernel keeps the queue and a thread does the talking: nothing here polls
 /// a lock, so `flock`'s own ordering is given up nowhere. The holder is re-read
@@ -649,8 +623,8 @@ pub(crate) mod tests {
     }
 
     /// Sysroot `key` of `root`, held in use by a process of its own.
-    pub(crate) fn sysroot_used_elsewhere(root: &Path, key: &str) -> Elsewhere {
-        let env = [(ROLE, OsStr::new("use-sysroot")), (ROOT, root.as_os_str()), (KEY, OsStr::new(key))];
+    pub(crate) fn sysroot_used_elsewhere(root: &Path, key: &Key) -> Elsewhere {
+        let env = [(ROLE, OsStr::new("use-sysroot")), (ROOT, root.as_os_str()), (KEY, OsStr::new(key.as_str()))];
         Elsewhere::hold("buildlock::tests::child_role", &env)
     }
 
@@ -762,12 +736,8 @@ pub(crate) mod tests {
                     },
                 );
             }
-            "hold-integration" => {
-                let _landing = integration(&root);
-                hold_until_released();
-            }
-            "hold-integration-forever" => {
-                let _landing = integration(&root);
+            "hold-artifact-forever" => {
+                let _landing = artifact(&root);
                 touch(&root.join("held"));
                 until_orphaned();
             }
@@ -780,20 +750,20 @@ pub(crate) mod tests {
                 note(&root, "sh");
             }
             "hold-sysroot-build" => {
-                let _building = keyed_building(&root, Keyed::Sysroot, "k1");
+                let _building = keyed_building(&root, Keyed::Sysroot, &Key::of(b"k1"));
                 hold_until_released();
                 note(&root, "built");
             }
-            "want-integration" => {
-                let _landing = integration(&root);
+            "want-artifact" => {
+                let _landing = artifact(&root);
                 note(&root, "landed");
             }
             "want-sysroot" => {
-                let _using = keyed_using(&root, Keyed::Sysroot, "k1");
+                let _using = keyed_using(&root, Keyed::Sysroot, &Key::of(b"k1"));
                 note(&root, "used");
             }
             "use-sysroot" => {
-                let _using = keyed_using(&root, Keyed::Sysroot, &std::env::var(KEY).unwrap());
+                let _using = keyed_using(&root, Keyed::Sysroot, &Key::parse(&std::env::var(KEY).unwrap()).unwrap());
                 hold_until_released();
             }
             "clean" | "clean-unlocked" => {
@@ -853,64 +823,6 @@ pub(crate) mod tests {
         // And the note it left behind names a pid that is gone, so nobody is
         // sent to wait on it.
         assert_eq!(describe_holder(&worktree_lock_dir(&root).join("state")), None);
-    }
-
-    /// Two processes moving this host's `main` at once is what the lock stops:
-    /// the primary is a checkout somebody may be building in, and `--sync`
-    /// fast-forwards its tree.
-    #[test]
-    fn two_landings_serialise() {
-        let root = scratch("integration");
-        let kid = held_elsewhere(&root, "hold-integration");
-
-        let mine = open_lock_file(&integration_path(&root));
-        assert!(!try_lock(&mine, LOCK_EX), "two landings held the integration lock at once");
-        let holder = describe_holder(&integration_path(&root)).expect("no holder note");
-        assert!(
-            holder.starts_with(&format!("held by pid {} (moving main)", kid.id())),
-            "the queued landing cannot name the one ahead of it: {holder}"
-        );
-
-        kid.release();
-        drop(mine);
-        let _mine = integration(&root);
-    }
-
-    /// An agent kills a landing that is taking too long at least as readily as
-    /// it kills a build, and a stranded integration lock wedges every worktree
-    /// at once.
-    #[test]
-    fn a_killed_landing_releases_the_integration_lock() {
-        let root = scratch("integration-killed");
-        let mut kid = child(&root, "hold-integration-forever");
-        assert!(appeared(&root.join("held"), Duration::from_secs(20)), "child never acquired");
-
-        let mine = open_lock_file(&integration_path(&root));
-        assert!(!try_lock(&mine, LOCK_EX), "the lock was not actually held");
-
-        kid.kill().unwrap();
-        kid.wait().unwrap();
-
-        assert!(try_lock(&mine, LOCK_EX), "a SIGKILLed landing stranded the integration lock");
-        assert_eq!(describe_holder(&integration_path(&root)), None);
-    }
-
-    /// The property that forced a second file. A sysroot build takes the global
-    /// `state` shared for its whole length, and `--sync` must not wait for one:
-    /// a landing that queued behind it would be a hang rather than a message.
-    #[test]
-    fn a_landing_and_a_build_do_not_exclude_each_other() {
-        let root = scratch("integration-vs-build");
-
-        let building = compiler_shared(&root, "the gate's sysroot build");
-        let landing = open_lock_file(&integration_path(&root));
-        assert!(try_lock(&landing, LOCK_EX), "a build in flight kept a landing out");
-        drop(landing);
-        drop(building);
-
-        let _landing = integration(&root);
-        let state = open_lock_file(&git_common_lock_dir(&root).join("state"));
-        assert!(try_lock(&state, LOCK_SH), "a landing kept its own gate's build out");
     }
 
     #[test]
@@ -979,7 +891,7 @@ pub(crate) mod tests {
     fn git(dir: &Path, args: &[&str]) {
         let ok = Command::new("git")
             .args(["-c", "commit.gpgsign=false", "-c", "user.email=t@t", "-c", "user.name=t"])
-            .args(crate::pr::tests::NO_AUTO_MAINTENANCE)
+            .args(crate::gitfixture::NO_AUTO_MAINTENANCE)
             .args(args)
             .current_dir(dir)
             .status()
@@ -1020,7 +932,7 @@ pub(crate) mod tests {
     #[test]
     fn a_released_holder_is_gone() {
         let root = scratch("released");
-        let user = sysroot_used_elsewhere(&root, "k");
+        let user = sysroot_used_elsewhere(&root, &Key::of(b"k"));
         let pid = user.id() as i32;
         user.release();
         assert!(!alive(pid), "release returned before the holder was reaped");
@@ -1036,8 +948,8 @@ pub(crate) mod tests {
         let root = scratch("sysroot-keys");
         let builder = held_elsewhere(&root, "hold-sysroot-build");
 
-        assert!(keyed_idle(&root, Keyed::Sysroot, "k1").is_none(), "a sweep could remove a key being built");
-        let other = keyed_building(&root, Keyed::Sysroot, "k2");
+        assert!(keyed_idle(&root, Keyed::Sysroot, &Key::of(b"k1")).is_none(), "a sweep could remove a key being built");
+        let other = keyed_building(&root, Keyed::Sysroot, &Key::of(b"k2"));
         drop(other);
 
         let mut user = child(&root, "want-sysroot");
@@ -1049,24 +961,20 @@ pub(crate) mod tests {
         assert!(user.wait().unwrap().success());
         assert_eq!(fs::read_to_string(root.join("order.log")).unwrap(), "built\nused\n");
 
-        let user = sysroot_used_elsewhere(&root, "k1");
-        assert!(keyed_idle(&root, Keyed::Sysroot, "k1").is_none(), "a sweep could remove a key in use");
+        let user = sysroot_used_elsewhere(&root, &Key::of(b"k1"));
+        assert!(keyed_idle(&root, Keyed::Sysroot, &Key::of(b"k1")).is_none(), "a sweep could remove a key in use");
         user.release();
-        assert!(keyed_idle(&root, Keyed::Sysroot, "k1").is_some(), "a sweep could not remove a key nobody uses");
+        assert!(keyed_idle(&root, Keyed::Sysroot, &Key::of(b"k1")).is_some(), "a sweep could not remove a key nobody uses");
     }
 
-    /// A wait of minutes that says one line and then goes silent is
-    /// indistinguishable from a wedge, and an agent kills a wedge. Eight
-    /// landings queued on this lock on 2026-08-07; the ones behind saw nothing
-    /// after their opening line for as long as the queue took.
     #[test]
     fn a_lasting_wait_keeps_saying_so() {
         let root = scratch("heartbeat");
-        let mut holder = child(&root, "hold-integration-forever");
+        let mut holder = child(&root, "hold-artifact-forever");
         assert!(appeared(&root.join("held"), Duration::from_secs(20)), "child never acquired");
 
         let mut queued = rerun("buildlock::tests::child_role")
-            .env(ROLE, "want-integration")
+            .env(ROLE, "want-artifact")
             .env(ROOT, &root)
             .stderr(std::process::Stdio::piped())
             .spawn()
@@ -1088,7 +996,7 @@ pub(crate) mod tests {
         while repeats.len() < 2 && Instant::now() < deadline {
             let left = deadline.saturating_duration_since(Instant::now());
             match rx.recv_timeout(left) {
-                Ok(line) if line.contains("still waiting for the integration lock") => {
+                Ok(line) if line.contains("still waiting for the artifact lock") => {
                     repeats.push(line);
                 }
                 Ok(_) => {}

@@ -20,7 +20,9 @@ use toyos_abi::syscall::{self, SpawnArgs, SyscallError};
 /// Where the child starts: `SpawnArgs` names a working directory or the spawn is refused.
 const CWD: &str = "/";
 
-const DIR: &str = "/home/abuse_elf";
+/// Kernel-served, so a path spawn reaches the kernel's own open; every refusal
+/// is asked again with the same bytes handed over as an image.
+const DIR: &str = "/tmp/abuse_elf";
 
 const ET_DYN: u16 = 3;
 const EM_X86_64: u16 = 62;
@@ -121,12 +123,25 @@ impl Phdr {
     }
 }
 
-/// Write `bytes` to `path` and try to spawn it. Returns the spawn error.
+/// Write `bytes` to `path` and try to spawn it, then spawn the same bytes as an
+/// image. Returns the spawn error, which the two routes must agree on.
 fn spawn_err(name: &str, bytes: &[u8]) -> SyscallError {
     let path = format!("{DIR}/{name}");
     fs::write(&path, bytes).unwrap_or_else(|e| panic!("write {path}: {e}"));
+    let by_path = spawn_as(&path, &[]);
+    let by_image = spawn_as(&path, bytes);
+    assert_eq!(by_path, by_image, "{name}: the path and the image were refused differently");
+    by_path
+}
 
+/// A raw spawn of `path`, handing `image` over in a memory object of this
+/// process's own when it is not empty.
+fn spawn_as(path: &str, image: &[u8]) -> SyscallError {
     let argv = format!("{path}\0");
+    let object = toyos::shm::SharedMemory::create(image.len().max(1)).expect("a memory object for the image");
+    // SAFETY: the region is at least `image.len()` long, mapped here, and this
+    // process's alone; `image` is not in it.
+    unsafe { core::ptr::copy_nonoverlapping(image.as_ptr(), object.as_ptr(), image.len()) };
     unsafe {
         syscall::spawn(&SpawnArgs {
             argv_ptr: argv.as_ptr() as u64,
@@ -141,9 +156,12 @@ fn spawn_err(name: &str, bytes: &[u8]) -> SyscallError {
             labels_len: 0,
             cwd_ptr: CWD.as_ptr() as u64,
             cwd_len: CWD.len() as u64,
+            image: toyos::AsHandle::as_handle(&object).0 as u64,
+            image_len: image.len() as u64,
+            place: u64::from(toyos_abi::HANDLE_INVALID.0),
         })
     }
-    .map(|pid| panic!("{name}: spawn succeeded (pid {pid:?}) — the header is malformed"))
+    .map(|pid| panic!("{path}: spawn succeeded (pid {pid:?}) — the header is malformed"))
     .unwrap_err()
 }
 
@@ -158,7 +176,7 @@ fn dlopen_err(name: &str, bytes: &[u8]) -> String {
 }
 
 fn main() {
-    fs::create_dir_all(DIR).expect("create /home/abuse_elf");
+    fs::create_dir_all(DIR).expect("create /tmp/abuse_elf");
 
     // 1. PT_TLS filesz > memsz: 16 KiB copied into a 16-byte kernel heap
     //    allocation. The overflow that made this test necessary.

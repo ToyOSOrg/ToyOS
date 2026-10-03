@@ -894,17 +894,6 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         Ok(nic)
     }
 
-    /// Raise one enabled cause on purpose (§10.2.4.4).
-    ///
-    /// **Nothing on a shipping path calls this**: the caller arms it and
-    /// [`Self::open`] does not, because a driver that raised a message every
-    /// boot would make the kernel's first-message record read the same on a
-    /// working card and a dead one. `LSC` is the cause, because acting on it is
-    /// re-reading `STATUS`, which the next pass does anyway.
-    pub fn provoke_message(&self) {
-        self.regs.write(regs::ICS, cause::LSC);
-    }
-
     /// Pass frames sent to the multicast address `group`: the one bit of the
     /// Multicast Table Array its hash names on this part ([`regs::mta_bit_82574`],
     /// [`regs::mta_bit_pch`]) is set, and

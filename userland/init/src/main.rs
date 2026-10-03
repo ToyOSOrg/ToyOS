@@ -32,14 +32,28 @@
 //! server nothing keeps. A program started through `launcher` still gets its
 //! acceptor by move and is started once per boot.
 //!
+//! **init never waits on a file server it supervises from its loop alone**:
+//! the loop is also where a server that ended is started again. Its calls into
+//! the file servers run on one worker thread ([`Worker`]) — a launch's files
+//! included, read there before its spawn (`CommandExt::prepare`) — and init
+//! waits on the call and on a service's end together ([`Init::files`]), so a
+//! call a server's end left in the port's queue goes on to the server started
+//! in its place, and one alive and silent costs a bounded wait
+//! ([`FILES_BOUND`]).
+//!
 //! **Every program it starts gets `HOME` from its row** (`Program::home`), over
 //! anything a launching caller carried: a service its own `/state/<name>`, made
 //! before it runs, and everything else the session user's home, made at boot.
 //! A launch of a program no row names is answered with the session's, which
 //! the caller's direct spawn carries in place of its own.
+//!
+//! **A launched program is spawned under the place its request names** — a
+//! copy of the caller's `self` — so the caller's end takes it down; a request
+//! that asks for init is the one way to outlive the caller, and one naming
+//! neither is refused.
 
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::os::toyos::process::{ChildExt, CommandExt};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -50,8 +64,9 @@ use toyos_swap::{Refusal, Request as SwapRequest, Word};
 use toyos_manifest::package::{self, Package};
 use toyos_manifest::{Manifest, Program};
 use toyos::endow::Endowments;
+use toyos::fs::CAPABILITY_PREFIX;
 use toyos::ipc::{self, Connection, RxStep};
-use toyos::launch::{self, Request};
+use toyos::launch::{self, Parent, Request};
 use toyos::namespace::{self, Namespace};
 use toyos::poller::{Poller, READABLE};
 use toyos::port::{self, Acceptor, Connector};
@@ -136,7 +151,8 @@ const TOKEN_ACCEPTOR: u64 = 0;
 const TOKEN_SWAP_ACCEPTOR: u64 = 1;
 const TOKEN_HANGUP: u64 = 2;
 const TOKEN_POWER_ACCEPTOR: u64 = 3;
-const TOKEN_PENDING_BASE: u64 = 4;
+const TOKEN_WAKE: u64 = 4;
+const TOKEN_PENDING_BASE: u64 = 5;
 
 /// How long a stop waits for `logd` to say the log is whole.
 ///
@@ -144,7 +160,7 @@ const TOKEN_PENDING_BASE: u64 = 4;
 /// device flush, and a stick that takes longer than this is one whose
 /// last lines this boot gives up on rather than the stop it was asked for.
 /// Past it the stop goes ahead, and the lines are on the console.
-const FLUSH_BOUND: Duration = Duration::from_secs(5);
+const FLUSH_BOUND: Duration = Duration::from_millis(toyos_quiesce::FLUSH_MS);
 
 /// The connection init hands `logd` every program's ring on, and the rest of
 /// what init owns of the log.
@@ -173,16 +189,21 @@ struct Log {
 const STDIN_RIGHTS: Rights =
     Rights::READ.union(Rights::WAIT).union(Rights::DUP).union(Rights::TRANSFER);
 
-/// A fresh log ring, laid out before any other process can map it: init's
-/// handle, which a spawn duplicates into the program and [`Log::register`]
-/// moves to `logd`.
-fn new_ring() -> toyos::RawHandle {
+/// A fresh log ring, laid out before any other process can map it, which a
+/// spawn duplicates into the program and [`Log::register`] names it the owner
+/// of. **Owned by no process until then**: the program's pid exists only once
+/// it runs, and a child it spawns may write before init has it.
+fn new_ring() -> SharedMemory {
     let region = SharedMemory::create(RING_BYTES).expect("init: no memory for a log ring");
+    view(&region).lay_out_with_placeholder_owner();
+    region
+}
+
+fn view(region: &SharedMemory) -> Ring {
     let base = core::ptr::NonNull::new(region.as_ptr()).expect("a mapped region is not null");
-    // SAFETY: `region` maps `RING_BYTES` here and stays mapped until the
-    // handle below is the only one left, which this function returns.
-    unsafe { Ring::at(base) }.lay_out();
-    region.share().expect("init: a log ring would not duplicate")
+    // SAFETY: `region` maps `RING_BYTES` for as long as it is held, and the
+    // view is used only while it is.
+    unsafe { Ring::at(base) }
 }
 
 impl Log {
@@ -206,7 +227,7 @@ impl Log {
         // kernel filled with its console.
         let ring = new_ring();
         for slot in [1, 2] {
-            toyos_abi::syscall::dup2(ring, slot).expect("init: its ring would not take its own slot");
+            toyos_abi::syscall::dup2(ring.as_handle(), slot).expect("init: its ring would not take its own slot");
         }
         let (alive, keep) = toyos::pipe_pair().expect("init: no pipe to say it lives");
         // Held for the machine's life: init's end is the machine's.
@@ -215,12 +236,15 @@ impl Log {
         log
     }
 
-    /// Move `ring`, program `pid`'s log, to `logd` under `name`, with the read
-    /// end of the pipe whose only writer is that program.
-    fn register(&self, name: &str, pid: u32, ring: toyos::RawHandle, alive: Pipe) {
+    /// Name program `pid` the owner of `ring`, its log, and move the ring to
+    /// `logd` under `name`, with the read end of the pipe whose only writer is
+    /// that program.
+    fn register(&self, name: &str, pid: u32, ring: SharedMemory, alive: Pipe) {
         let Some(tag) = Tag::new(name) else {
             panic!("init: `{name}` is not a name a line of the log can carry");
         };
+        view(&ring).own(pid);
+        let ring = ring.share().expect("init: a log ring would not duplicate");
         let mut payload = [0u8; 4 + MAX_TAG];
         let len = Registration { pid, tag }.encode(&mut payload);
         let handles = [ring, alive.into_raw()];
@@ -288,8 +312,8 @@ impl Log {
 }
 
 /// The session user's home and [`HOME_FOLDERS`]. A boot whose DATA volume did
-/// not mount has no `/home`, which the kernel has already said; this says what
-/// it cost and starts the machine without it.
+/// not mount has no `/home`, which its file server has already said; this says
+/// what it cost and starts the machine without it.
 fn make_session_home() {
     let home = toyos_manifest::session_home();
     if let Err(e) = make_dir(&home) {
@@ -303,9 +327,7 @@ fn make_session_home() {
     }
 }
 
-/// One directory, whose parent is there already. Not `create_dir_all`: DATA
-/// keeps no directories, and the VFS's own record of one takes a child whose
-/// parent it never made, so every level is made in turn.
+/// One directory, whose parent is there already.
 fn make_dir(path: &str) -> std::io::Result<()> {
     match std::fs::create_dir(path) {
         Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => Err(e),
@@ -316,17 +338,17 @@ fn make_dir(path: &str) -> std::io::Result<()> {
 fn main() {
     // Before anything is started, and before init says anything: from here
     // init's own lines are records in its ring.
-    let mut log = Log::open();
+    let log = Log::open();
 
     let syscap: SysCap = Endowments::get()
         .take(SYSCAP_LABEL)
         .expect("init: the kernel spawns this program holding the system capability");
 
-    make_session_home();
-
-    let text = std::fs::read_to_string(toyos_manifest::GUEST_PATH)
-        .unwrap_or_else(|e| panic!("init: cannot read {}: {e}", toyos_manifest::GUEST_PATH));
-    let system = toyos_manifest::parse(&text);
+    let text = read_manifest()
+        .unwrap_or_else(|e| panic!("init: cannot read {}: {e:?}", toyos_manifest::GUEST_PATH));
+    // For the machine's life, and `'static` so a launch's path can be resolved
+    // against it on init's file worker.
+    let system: &'static Manifest = Box::leak(Box::new(toyos_manifest::parse(&text)));
 
     // Before anything is spawned, and for every `serves` name in the manifest
     // rather than only the ones `[boot] start` names: the filepicker is
@@ -345,66 +367,172 @@ fn main() {
         connectors.insert(name, connector);
     }
 
-    // Kept for the machine's life: init is the only thing that can kill a
-    // daemon, and there is no other way back to a process it started.
-    let mut services: Vec<Service> = Vec::new();
-    for name in &system.start {
-        let program = system
-            .program(name)
-            .unwrap_or_else(|| panic!("init: [boot] start names `{name}`, which is not declared"));
-        let kept = program
-            .serves
-            .iter()
-            .map(|served| {
-                let acceptor = acceptors.remove(served.as_str()).unwrap_or_else(|| {
-                    panic!("init: `{}` has already been given the `{served}` acceptor", program.name)
-                });
-                (served.clone(), acceptor)
-            })
-            .collect();
-        let mut service = Service::new(program, kept);
-        if let Err(e) =
-            service.spawn(&program.path, &[], &system, &syscap, &connectors, &mut log)
-        {
-            panic!("init: cannot start {}: {e}", program.name);
+    // One port per directory a file server serves, made here for the same
+    // reason: a program's first open works whether or not its server runs yet.
+    let mut dirs: BTreeMap<String, Connector> = BTreeMap::new();
+    let mut dir_acceptors: BTreeMap<String, Acceptor> = BTreeMap::new();
+    for role in system.programs.iter().flat_map(|p| p.roles.iter()) {
+        for dir in toyos_manifest::role_dirs(role).expect("init: the build refuses a role it does not know") {
+            let name = format!("{CAPABILITY_PREFIX}{dir}");
+            let (acceptor, connector) =
+                port::create().unwrap_or_else(|e| panic!("init: no port for `{name}`: {e:?}"));
+            dir_acceptors.insert(name.clone(), acceptor);
+            dirs.insert(name, connector);
         }
-        services.push(service);
     }
+    // init's own files are resolved through the same directories as every
+    // program's, and it is the one process nobody endows a namespace: std
+    // resolves through this one, and the stop's syncs through the second.
+    let files: &'static Namespace = {
+        let build = || {
+            let mut builder = namespace::build();
+            for (name, connector) in &dirs {
+                builder = builder.add(name, connector);
+            }
+            builder.finish().expect("init: no namespace for its own files")
+        };
+        // SAFETY: a namespace handle built here and used nowhere else.
+        if let Err(e) = unsafe { std::os::toyos::fs::adopt_namespace(build().into_raw().0) } {
+            panic!("init: std would not take its namespace ({e}), and init is endowed none");
+        }
+        Box::leak(Box::new(build()))
+    };
+
+    let (wake_read, wake_write) = toyos::pipe_pair().expect("init: no pipe to hear a service end");
+    let mut init = Init {
+        system,
+        syscap: &syscap,
+        acceptors,
+        connectors,
+        dirs,
+        files,
+        services: Vec::new(),
+        log,
+        wake: wake_read,
+        worker: Worker::start(),
+        restarting: false,
+    };
+    init.boot(&mut dir_acceptors, wake_write.into_raw());
 
     // Nothing else holds a `serves` acceptor that has not been launched yet, so
     // init outliving its children is what keeps those ports open. It parks
     // here.
-    let launcher = acceptors
+    let launcher = init
+        .acceptors
         .remove(LAUNCHER)
         .expect("init: the manifest declares init serves `launcher`");
-    let swap = acceptors
+    let swap = init
+        .acceptors
         .remove(toyos_swap::PORT)
         .expect("init: the manifest declares init serves `swap`");
-    let power = acceptors
+    let power = init
+        .acceptors
         .remove(power::PORT)
         .expect("init: the manifest declares init serves `power`");
-    let mut init = Init { system: &system, syscap: &syscap, acceptors, connectors, services, log };
     init.serve_forever(&launcher, &swap, &power);
+}
+
+/// How long init waits on one call into a file server that is alive and has
+/// not answered, before it answers without it.
+///
+/// **A policy number, and not the bound on a server that ended**: one that
+/// ends is started again while init waits (`Init::files`), and the call then
+/// goes on to the new process. What this bounds is a server alive and silent,
+/// which would otherwise hold the machine's only way to start a process. A
+/// first boot's DATA server formats and mounts before its first answer, so the
+/// bound is generous.
+const FILES_BOUND: Duration = Duration::from_millis(toyos_quiesce::FILES_MS);
+
+/// A job on init's file worker.
+type Job = Box<dyn FnOnce() + Send>;
+
+/// The one thread init makes its calls into the file servers on.
+///
+/// **A call into a file server is a wait on a process init supervises**, and
+/// init's loop is also where that process is started again when it ends: a
+/// call made from the loop, to a server that ended under it, waits in the
+/// port's queue for a server only the loop can start. So the call runs here
+/// and the loop waits on it and on the end together ([`Init::files`]).
+struct Worker {
+    jobs: std::sync::mpsc::Sender<Job>,
+    /// Readable once per job finished.
+    done: Pipe,
+    /// Jobs handed over and not seen finished: one that outlived its bound is
+    /// still here, and the worker takes no other until it finishes.
+    owed: u32,
+    /// What the job still owed is, for the refusal a second one gets.
+    owed_what: String,
+    /// Waits on `done` and on a service's end together.
+    poller: Poller,
+}
+
+impl Worker {
+    fn start() -> Self {
+        let (jobs, queue) = std::sync::mpsc::channel::<Job>();
+        let (done, finished) = toyos::pipe_pair().expect("init: no pipe for its file worker");
+        std::thread::Builder::new()
+            .name("files".into())
+            .spawn(move || {
+                for job in queue {
+                    job();
+                    finished.write(&[1]).expect("init: its file worker could not say a job finished");
+                }
+            })
+            .expect("init: its file worker could not be started");
+        Self { jobs, done, owed: 0, owed_what: String::new(), poller: Poller::new(2) }
+    }
+
+    /// Count the jobs that have finished since last asked.
+    fn settle(&mut self) {
+        let mut seen = [0u8; 8];
+        while self.owed > 0 {
+            match self.done.read_nonblock(&mut seen) {
+                Ok(n) if n > 0 => self.owed -= n as u32,
+                _ => return,
+            }
+        }
+    }
+}
+
+/// A row whose process the machine's files depend on: a block service, or a
+/// file server. Started before every other row, and never made a home, which
+/// would be a directory on the volume it serves.
+fn is_storage(program: &Program) -> bool {
+    !program.roles.is_empty() || program.serves.iter().any(|s| s == toyos_blockring::PORT)
 }
 
 /// Everything init's loop acts on, for the machine's life.
 struct Init<'a> {
-    system: &'a Manifest,
+    system: &'static Manifest,
     syscap: &'a SysCap,
     /// The `serves` acceptors nobody has been started with yet, which a launch
     /// takes by move.
     acceptors: BTreeMap<&'a str, Acceptor>,
     connectors: BTreeMap<&'a str, Connector>,
-    /// What `[boot] start` named, in that order.
+    /// Every directory capability, by its namespace name: what each program's
+    /// view is built from.
+    dirs: BTreeMap<String, Connector>,
+    /// The same directories as a namespace of init's own, for the stop's syncs.
+    files: &'static Namespace,
+    /// What `[boot] start` named, a file server once per role.
     services: Vec<Service<'a>>,
     /// Where a service init (re)starts writes its stdout and stderr, whichever
     /// process ends up holding its row.
     log: Log,
+    /// Readable when a `restart` service has ended and is owed a new process.
+    wake: Pipe,
+    /// Where init's calls into the file servers are made.
+    worker: Worker,
+    /// Inside [`Init::restart_ended`]: a file call made there leaves the wake
+    /// for the loop, which is the one caller that acts on it.
+    restarting: bool,
 }
 
 /// One program init started at boot, and the ports it serves.
 struct Service<'a> {
     program: &'a Program,
+    /// The file-server role this process serves, for a row with `roles`.
+    role: Option<&'a str>,
     /// The binary the running process was started from: the row's path, or a
     /// swap's installed one.
     path: String,
@@ -414,28 +542,51 @@ struct Service<'a> {
     /// started in its place is owed.
     devices: Vec<String>,
     kept: Arc<Mutex<Kept>>,
+    /// When each recent start after an end happened, for [`toyos_manifest::RESTARTS`].
+    restarts: VecDeque<Instant>,
 }
 
 /// What a service's waiter thread shares with the loop.
 struct Kept {
     /// The acceptors of every name the service serves. Empty once the service
-    /// has ended with no swap owning it: the port is then closed for good.
+    /// has ended with no swap owning it and no restart owed: the port is then
+    /// closed for good.
     acceptors: Vec<(String, Acceptor)>,
     /// Counts the service's starts, so a waiter answers only for its own.
     generation: u64,
     /// A swap owns the service: its process ending is expected and the port
     /// stays open for the next one.
     swapping: bool,
+    /// The row says init starts it again when it ends.
+    restart: bool,
+    /// It ended, and the loop owes it a new process on the same ports.
+    ended: bool,
+    /// The write end of [`Init::wake`].
+    wake: toyos::RawHandle,
 }
 
 impl<'a> Service<'a> {
-    fn new(program: &'a Program, acceptors: Vec<(String, Acceptor)>) -> Self {
+    fn new(
+        program: &'a Program,
+        role: Option<&'a str>,
+        acceptors: Vec<(String, Acceptor)>,
+        wake: toyos::RawHandle,
+    ) -> Self {
         Self {
             program,
+            role,
             path: program.path.clone(),
             child: None,
             devices: Vec::new(),
-            kept: Arc::new(Mutex::new(Kept { acceptors, generation: 0, swapping: false })),
+            kept: Arc::new(Mutex::new(Kept {
+                acceptors,
+                generation: 0,
+                swapping: false,
+                restart: program.restart,
+                ended: false,
+                wake,
+            })),
+            restarts: VecDeque::new(),
         }
     }
 
@@ -450,8 +601,9 @@ impl<'a> Service<'a> {
         system: &Manifest,
         syscap: &SysCap,
         connectors: &BTreeMap<&str, Connector>,
+        dirs: &BTreeMap<String, Connector>,
         log: &mut Log,
-    ) -> std::io::Result<u32> {
+    ) -> Result<u32, StartError> {
         // **Checked again at every start, not only on arrival**: the installed
         // file lives in an ambient directory, so what init verified when it
         // wrote it is not a claim about what is there now. This narrows the
@@ -470,6 +622,7 @@ impl<'a> Service<'a> {
             0 => Served::Keep(&kept.acceptors),
             _ => Served::Restart { acceptors: &kept.acceptors, owed },
         };
+        let storage = storage_endowment(self.program, self.role, syscap)?;
         let (child, devices) = start(
             Command::new(path),
             self.program,
@@ -477,10 +630,13 @@ impl<'a> Service<'a> {
             syscap,
             served,
             connectors,
+            dirs,
             &[],
+            storage,
             Output::Boot(log),
         )?;
         kept.generation += 1;
+        kept.ended = false;
         if !kept.acceptors.is_empty() {
             let process = toyos_abi::syscall::dup(toyos::RawHandle(child.as_raw_handle()))
                 .unwrap_or_else(|e| panic!("init: {}'s process handle: {e:?}", self.program.name));
@@ -500,20 +656,54 @@ impl<'a> Service<'a> {
     fn pid(&self) -> Option<u32> {
         self.child.as_ref().map(Child::id)
     }
+
+    /// The name its lines and init's say it under: a file server's role
+    /// beside its row's.
+    fn label(&self) -> String {
+        match self.role {
+            Some(role) => format!("{} {role}", self.program.name),
+            None => self.program.name.clone(),
+        }
+    }
+}
+
+/// Why a service did not start.
+enum StartError {
+    /// The partition its file-server role is on was refused, so the role is
+    /// absent: its ports close and nothing serves its paths from memory.
+    Partition(String),
+    Other(std::io::Error),
+}
+
+impl From<std::io::Error> for StartError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Other(e)
+    }
+}
+
+impl std::fmt::Display for StartError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Partition(why) => f.write_str(why),
+            Self::Other(e) => e.fmt(f),
+        }
+    }
 }
 
 /// Wait for one start of a service to end, and close its ports if nothing was
-/// expecting it to.
-///
-/// **A thread, because the kernel answers a process's end to a wait and to
-/// nothing a poll can watch.** It parks in the kernel for the process's life
-/// and costs nothing until then.
+/// expecting it to, or wake the loop to start it again if its row says so.
 fn close_when_it_ends(kept: &Mutex<Kept>, generation: u64, process: toyos::RawHandle) {
     let _ = toyos_abi::syscall::process_wait(process);
     toyos_abi::syscall::close(process);
     let mut kept = kept.lock().expect("init: a service's state is poisoned");
     if kept.generation == generation && !kept.swapping {
-        kept.acceptors.clear();
+        if kept.restart {
+            kept.ended = true;
+            // A full pipe is a wake already pending, which is all this is.
+            let _ = toyos_abi::syscall::write_nonblock(kept.wake, &[1]);
+        } else {
+            kept.acceptors.clear();
+        }
     }
 }
 
@@ -548,6 +738,140 @@ impl Flight {
 }
 
 impl<'a> Init<'a> {
+    /// Start `[boot] start`, kept for the machine's life: init is the only
+    /// thing that can kill a daemon, and there is no other way back to a
+    /// process it started. The storage rows go first — every other start may
+    /// make a directory, and a directory is a file server's — and the
+    /// session's home is made before the first row that is not one.
+    fn boot(&mut self, dir_acceptors: &mut BTreeMap<String, Acceptor>, wake: toyos::RawHandle) {
+        let system = self.system;
+        let storage_first = system
+            .start
+            .iter()
+            .filter(|n| system.program(n).is_some_and(is_storage))
+            .chain(system.start.iter().filter(|n| system.program(n).is_none_or(|p| !is_storage(p))));
+        let mut homes_made = false;
+        for name in storage_first {
+            let program = system
+                .program(name)
+                .unwrap_or_else(|| panic!("init: [boot] start names `{name}`, which is not declared"));
+            if !is_storage(program) && !homes_made {
+                self.make_session_home();
+                homes_made = true;
+            }
+            let instances: Vec<Option<&str>> = match program.roles.is_empty() {
+                true => vec![None],
+                false => program.roles.iter().map(|r| Some(r.as_str())).collect(),
+            };
+            for role in instances {
+                let kept: Vec<(String, Acceptor)> = match role {
+                    None => program
+                        .serves
+                        .iter()
+                        .map(|served| {
+                            let acceptor = self.acceptors.remove(served.as_str()).unwrap_or_else(|| {
+                                panic!("init: `{}` has already been given the `{served}` acceptor", program.name)
+                            });
+                            (served.clone(), acceptor)
+                        })
+                        .collect(),
+                    Some(role) => toyos_manifest::role_dirs(role)
+                        .expect("known role")
+                        .iter()
+                        .map(|dir| {
+                            let name = format!("{CAPABILITY_PREFIX}{dir}");
+                            let acceptor = dir_acceptors
+                                .remove(&name)
+                                .unwrap_or_else(|| panic!("init: the `{role}` role is served twice"));
+                            (name, acceptor)
+                        })
+                        .collect(),
+                };
+                self.make_home(program);
+                let mut service = Service::new(program, role, kept, wake);
+                let started =
+                    service.spawn(&program.path, &[], system, self.syscap, &self.connectors, &self.dirs, &mut self.log);
+                match started {
+                    Ok(_) => {}
+                    Err(StartError::Partition(why)) => {
+                        service.kept.lock().expect("init: a service's state is poisoned").acceptors.clear();
+                        say!("init: {} did not start ({why}); its ports are closed this boot", service.label());
+                    }
+                    Err(e) => panic!("init: cannot start {}: {e}", program.name),
+                }
+                self.services.push(service);
+            }
+        }
+        if !homes_made {
+            self.make_session_home();
+        }
+    }
+
+    fn make_session_home(&mut self) {
+        if let Err(why) = self.files("the session home", make_session_home) {
+            say!("init: the session home was not made: {why}");
+        }
+    }
+
+    /// A service's own `HOME`, made before it first runs.
+    fn make_home(&mut self, program: &Program) {
+        if !program.service || is_storage(program) {
+            return;
+        }
+        let home = program.home();
+        let asked = home.clone();
+        match self.files("a service's home", move || make_dir(&asked)) {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => say!("init: {}: {home} could not be made: {e}", program.name),
+            Err(why) => say!("init: {}: {home} was not made: {why}", program.name),
+        }
+    }
+
+    /// `work`, a call into the file servers, made on [`Worker`], and its
+    /// answer — with every server that ends meanwhile started again, so a call
+    /// its end left waiting in the port's queue goes on to the new process.
+    /// `Err` is the call still unanswered at [`FILES_BOUND`], which the worker
+    /// goes on waiting for alone, or the worker still waiting on an earlier
+    /// one.
+    fn files<T: Send + 'static>(&mut self, what: &str, work: impl FnOnce() -> T + Send + 'static) -> Result<T, String> {
+        const DONE: u64 = 0;
+        const WAKE: u64 = 1;
+        self.worker.settle();
+        if self.worker.owed > 0 {
+            return Err(format!("init's file worker still waits on {}", self.worker.owed_what));
+        }
+        let (answer, answered) = std::sync::mpsc::channel();
+        let job: Job = Box::new(move || {
+            // The receiver is gone once the bound has passed.
+            let _ = answer.send(work());
+        });
+        self.worker.jobs.send(job).expect("init: its file worker has ended");
+        self.worker.owed = 1;
+        self.worker.owed_what = what.to_string();
+        let deadline = Instant::now() + FILES_BOUND;
+        loop {
+            self.worker.poller.watch(&self.worker.done, READABLE, DONE);
+            if !self.restarting {
+                self.worker.poller.watch(&self.wake, READABLE, WAKE);
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            let mut woken = false;
+            self.worker.poller.wait(1, left.as_nanos() as u64, |token| woken |= token == WAKE);
+            if woken {
+                let mut sink = [0u8; 64];
+                while matches!(self.wake.read_nonblock(&mut sink), Ok(n) if n > 0) {}
+                self.restart_ended();
+            }
+            self.worker.settle();
+            if self.worker.owed == 0 {
+                return Ok(answered.recv().expect("init: a finished file job answered"));
+            }
+            if Instant::now() >= deadline {
+                return Err(format!("{what} was not answered in {} s", FILES_BOUND.as_secs()));
+            }
+        }
+    }
+
     /// Serve `launcher` and `swap` for the rest of the machine's life.
     ///
     /// **An event loop and not an accept loop, because the rule every other
@@ -566,7 +890,7 @@ impl<'a> Init<'a> {
     /// service it has just killed to finish ending, which is the kernel's
     /// teardown and no client's.
     fn serve_forever(&mut self, launcher: &Acceptor, swap: &Acceptor, power: &Acceptor) -> ! {
-        let poller = Poller::new(4 + MAX_PENDING_LAUNCHES as u32);
+        let poller = Poller::new(5 + MAX_PENDING_LAUNCHES as u32);
         let mut pending: Vec<Pending> = Vec::new();
         let mut flight: Option<Flight> = None;
         let mut ready: Vec<u64> = Vec::new();
@@ -574,6 +898,7 @@ impl<'a> Init<'a> {
             poller.watch(launcher, READABLE, TOKEN_ACCEPTOR);
             poller.watch(swap, READABLE, TOKEN_SWAP_ACCEPTOR);
             poller.watch(power, READABLE, TOKEN_POWER_ACCEPTOR);
+            poller.watch(&self.wake, READABLE, TOKEN_WAKE);
             if let Some(Flight { phase: Phase::Answered { conn, .. }, .. }) = &flight {
                 poller.watch(conn, READABLE, TOKEN_HANGUP);
             }
@@ -658,16 +983,7 @@ impl<'a> Init<'a> {
                     RxStep::Frame { msg_type, payload_len } => {
                         let p = pending.remove(i);
                         match p.port {
-                            Port::Launcher => serve_launch(
-                                &p.conn,
-                                msg_type,
-                                p.rx.payload(payload_len),
-                                self.system,
-                                self.syscap,
-                                &mut self.acceptors,
-                                &self.connectors,
-                                &mut self.log,
-                            ),
+                            Port::Launcher => self.serve_launch(&p.conn, msg_type, p.rx.payload(payload_len)),
                             Port::Power => self.stop(&p.conn, msg_type),
                             Port::Swap => {
                                 let payload = p.rx.payload(payload_len).to_vec();
@@ -695,6 +1011,12 @@ impl<'a> Init<'a> {
             pending.retain(|p| now.duration_since(p.since) < HANDSHAKE_TIMEOUT);
 
             flight = flight.and_then(|f| self.advance(f, ready.contains(&TOKEN_HANGUP)));
+
+            if ready.contains(&TOKEN_WAKE) {
+                let mut sink = [0u8; 64];
+                while matches!(self.wake.read_nonblock(&mut sink), Ok(n) if n > 0) {}
+                self.restart_ended();
+            }
         }
     }
 
@@ -810,6 +1132,8 @@ impl<'a> Init<'a> {
         // What the process being stopped holds, which its replacement and the
         // binary a failed swap starts again are each owed.
         let owed = self.services[index].devices.clone();
+        let program = self.services[index].program;
+        self.make_home(program);
         let service = &mut self.services[index];
         swapped(
             &self.log,
@@ -827,7 +1151,7 @@ impl<'a> Init<'a> {
             let _ = old.wait();
         }
         let started =
-            service.spawn(&path, &owed, self.system, self.syscap, &self.connectors, &mut self.log);
+            service.spawn(&path, &owed, self.system, self.syscap, &self.connectors, &self.dirs, &mut self.log);
         match started {
             Ok(pid) => {
                 swapped(
@@ -908,6 +1232,7 @@ impl<'a> Init<'a> {
         };
         say!("{STOPPING} ({how:?})");
         self.log.flush();
+        self.sync_files();
         let refused = match how {
             Stop::Reboot => self.syscap.reboot(),
             Stop::Shutdown => self.syscap.shutdown(),
@@ -917,12 +1242,110 @@ impl<'a> Init<'a> {
         let _ = conn.try_send_bytes(power::MSG_REFUSED, &refused.to_u64().to_le_bytes());
     }
 
+    /// Have every writable file server make its volume durable: the kernel's
+    /// stop waits for no process, so what a server holds and has not written
+    /// is lost unless it is asked first. After `logd`'s flush, so the log's
+    /// server writes what logd wrote last.
+    fn sync_files(&self) {
+        let roles = self.system.programs.iter().flat_map(|p| p.roles.iter());
+        let mut syncing = Vec::new();
+        for role in roles.filter(|r| *r != "boot") {
+            let Some(dir) = toyos_manifest::role_dirs(role).and_then(|dirs| dirs.first()) else { continue };
+            let name = format!("{CAPABILITY_PREFIX}{dir}");
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let (asked, names) = (name.clone(), self.files);
+            let spawned = std::thread::Builder::new().name(format!("sync-{role}")).spawn(move || {
+                let answer = toyos::fs::Dir::connect(names, &asked)
+                    .and_then(|mut dir| {
+                        dir.sync().map_err(|e| match e {
+                            toyos::fs::Refused::Error(e) => e,
+                            toyos::fs::Refused::Link(_) => SyscallError::Unknown,
+                        })
+                    });
+                let _ = done_tx.send(answer);
+            });
+            match spawned {
+                Ok(syncer) => syncing.push((name, done_rx, syncer)),
+                Err(_) => say!("init: power: no thread to sync {name}; its unsynced writes are lost with the stop"),
+            }
+        }
+        let until = Instant::now() + Duration::from_millis(toyos_quiesce::SYNC_MS);
+        for (name, done_rx, syncer) in syncing {
+            let answered = done_rx.recv_timeout(until.saturating_duration_since(Instant::now()));
+            // Joined once it has answered, so the stop never counts a thread
+            // that was on its way out.
+            if answered.is_ok() {
+                syncer.join().expect("init: a sync thread panicked");
+            }
+            match answered {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => say!("init: power: {name}'s server would not sync ({e:?})"),
+                Err(_) => say!(
+                    "init: power: {name}'s server did not sync in {} ms; stopping without it",
+                    toyos_quiesce::SYNC_MS
+                ),
+            }
+        }
+    }
+
+    /// Start again every `restart` service that ended, on the ports it kept,
+    /// unless it has ended [`toyos_manifest::RESTARTS`] times inside
+    /// [`toyos_manifest::RESTART_WINDOW_SECS`]: then its ports close, and a
+    /// client's next connection is answered `Gone`.
+    fn restart_ended(&mut self) {
+        self.restarting = true;
+        let window = Duration::from_secs(toyos_manifest::RESTART_WINDOW_SECS);
+        for index in 0..self.services.len() {
+            let ended = self.services[index].kept.lock().expect("init: a service's state is poisoned").ended;
+            if !ended {
+                continue;
+            }
+            let service = &mut self.services[index];
+            let label = service.label();
+            let now = Instant::now();
+            while service.restarts.front().is_some_and(|at| now.duration_since(*at) > window) {
+                service.restarts.pop_front();
+            }
+            let pid = service.pid().map_or(0, |p| p);
+            if let Some(mut old) = service.child.take() {
+                let _ = old.wait();
+            }
+            if service.restarts.len() as u32 >= toyos_manifest::RESTARTS {
+                let mut kept = service.kept.lock().expect("init: a service's state is poisoned");
+                kept.ended = false;
+                kept.acceptors.clear();
+                say!(
+                    "init: {label} ended {} times in {} s; its ports are closed and its clients answered Gone",
+                    toyos_manifest::RESTARTS + 1,
+                    toyos_manifest::RESTART_WINDOW_SECS
+                );
+                continue;
+            }
+            service.restarts.push_back(now);
+            let (path, owed, program) = (service.path.clone(), service.devices.clone(), service.program);
+            self.make_home(program);
+            let service = &mut self.services[index];
+            match service.spawn(&path, &owed, self.system, self.syscap, &self.connectors, &self.dirs, &mut self.log) {
+                Ok(new) => say!("init: {label} (pid {pid}) ended; started again as pid {new}"),
+                Err(e) => {
+                    let mut kept = service.kept.lock().expect("init: a service's state is poisoned");
+                    kept.ended = false;
+                    kept.acceptors.clear();
+                    say!("init: {label} ended and would not start again ({e}); its ports are closed");
+                }
+            }
+        }
+        self.restarting = false;
+    }
+
     /// Start the binary a failed swap replaced, or close the service's ports
     /// when that will not start either.
     fn restore(&mut self, index: usize, previous: &str, owed: &[String]) {
+        let program = self.services[index].program;
+        self.make_home(program);
         let service = &mut self.services[index];
         let name = service.program.name.clone();
-        match service.spawn(previous, owed, self.system, self.syscap, &self.connectors, &mut self.log) {
+        match service.spawn(previous, owed, self.system, self.syscap, &self.connectors, &self.dirs, &mut self.log) {
             Ok(pid) => {
                 service.kept.lock().expect("init: a service's state is poisoned").swapping = false;
                 swapped(&self.log, &name, Word::Restored, &format!("{previous} as pid {pid}"));
@@ -943,7 +1366,8 @@ impl<'a> Init<'a> {
 }
 
 /// A staged or installed binary's bytes, refused past [`toyos_swap::MAX_BINARY_BYTES`]
-/// before any of it is read.
+/// before any of it is read. Made from the loop: a swap's files are under
+/// [`toyos_swap::STAGING`], which the kernel serves.
 fn read_binary(path: &str) -> Result<Vec<u8>, Refusal> {
     let unreadable = |e: std::io::Error| Refusal::Unreadable { path: path.to_string(), why: e.to_string() };
     let len = std::fs::metadata(path).map_err(unreadable)?.len();
@@ -975,170 +1399,218 @@ fn forget(path: &str) {
     }
 }
 
-/// One `MSG_LAUNCH`, from the frame to the `Process` handle that answers it.
-///
-/// **Everything in the request is a client's claim about itself.** A program
-/// nothing declares is refused by name; a frame that does not decode is a
-/// dropped connection and nothing else. What the child ends up holding is the
-/// manifest's row for it plus whatever connectors the caller transferred, and
-/// the caller could only transfer what it already had — so a launch confers
-/// exactly the manifest row and nothing beyond it.
-fn serve_launch<'a>(
-    conn: &Connection,
-    msg_type: u32,
-    payload: &[u8],
-    system: &'a Manifest,
-    syscap: &SysCap,
-    acceptors: &mut BTreeMap<&'a str, Acceptor>,
-    connectors: &BTreeMap<&str, Connector>,
-    log: &mut Log,
-) {
-    if msg_type != launch::MSG_LAUNCH {
-        return;
-    }
-    let mut batch = [toyos::RawHandle(0); toyos_abi::syscall::MAX_TRANSFER_HANDLES];
-    let received = conn.recv_handles(&mut batch).unwrap_or(0);
-
-    // **Owned on the statement after they arrive, and before anything can
-    // refuse.** The send moved them into init's table, so every path out of
-    // here releases them — a launcher that leaked a handle per refused launch
-    // would exhaust the one table the machine cannot do without, and a client
-    // picks which refusal it takes.
-    let mut held = Moved(batch[..received].to_vec());
-
-    let Some(request) = Request::decode(payload) else { return };
-    // `extra_names` drops an empty or non-UTF-8 name, so its count is what
-    // will actually be paired with a handle. A frame whose two counts
-    // disagree would otherwise leave the unpaired handles behind.
-    let names: Vec<&str> = request.extra_names().collect();
-    if received != request.slot_count() + request.extra_count
-        || names.len() != request.extra_count
-    {
-        say!(
-            "init: launcher: a frame promising {} handles under {} names carried {received}",
-            request.slot_count() + request.extra_count,
-            names.len(),
-        );
-        return;
-    }
-
-    // Past every refusal that does not know which handle is which, so ownership
-    // can be split. Both halves still release on every path below.
-    let all = held.take();
-    let (slot_handles, extra_handles) = all.split_at(request.slot_count());
-    let slots = Moved(slot_handles.to_vec());
-    // Owned, so they close when this call returns: `SYS_NAMESPACE_BUILD` copies
-    // a connector into the namespace and leaves the caller's handle, and init's
-    // copy of a client's connector has no life beyond this launch.
-    let extras: Vec<(&str, Connector)> = names
-        .into_iter()
-        .zip(extra_handles.iter().copied())
-        // SAFETY: the kernel moved these into init's table with the frame, and
-        // nothing else answers for them. **Not a claim about the type** — a
-        // client sends what it likes, and everything below treats a wrong one
-        // as a refused launch rather than as init's own bug.
-        .map(|(name, handle)| (name, unsafe { Connector::from_raw(handle) }))
-        .collect();
-
-    let installed;
-    let program = match resolve(system, request.program) {
-        Resolved::Row(row) => row,
-        Resolved::Package(row) => {
-            installed = row;
-            &installed
-        }
-        Resolved::NotDeclared => {
-            // **`try_send_bytes` and not `send`.** A blocking write is the
-            // other half of the rule that made the read side an event loop: a
-            // client that never drains its end decides when init runs again.
-            // The `HOME` is the session's: a program no row names is no service.
-            let home = toyos_manifest::session_home();
-            let _ = conn.try_send_bytes(launch::MSG_NOT_DECLARED, home.as_bytes());
+impl Init<'_> {
+    /// One `MSG_LAUNCH`, from the frame to the `Process` handle that answers it.
+    ///
+    /// **Everything in the request is a client's claim about itself.** A program
+    /// nothing declares is refused by name; a frame that does not decode is a
+    /// dropped connection and nothing else. What the child ends up holding is the
+    /// manifest's row for it plus whatever connectors the caller transferred, and
+    /// the caller could only transfer what it already had — so a launch confers
+    /// exactly the manifest row and nothing beyond it.
+    fn serve_launch(&mut self, conn: &Connection, msg_type: u32, payload: &[u8]) {
+        if msg_type != launch::MSG_LAUNCH {
             return;
         }
-        Resolved::Refused(why) => {
-            say!("init: launcher: {why}");
+        let mut batch = [toyos::RawHandle(0); toyos_abi::syscall::MAX_TRANSFER_HANDLES];
+        let received = conn.recv_handles(&mut batch).unwrap_or(0);
+
+        // **Owned on the statement after they arrive, and before anything can
+        // refuse.** The send moved them into init's table, so every path out of
+        // here releases them — a launcher that leaked a handle per refused launch
+        // would exhaust the one table the machine cannot do without, and a client
+        // picks which refusal it takes.
+        let mut held = Moved(batch[..received].to_vec());
+
+        let Some(request) = Request::decode(payload) else { return };
+        // `extra_names` drops an empty or non-UTF-8 name, so its count is what
+        // will actually be paired with a handle. A frame whose two counts
+        // disagree would otherwise leave the unpaired handles behind.
+        let names: Vec<&str> = request.extra_names().collect();
+        if received != request.handle_count() || names.len() != request.extra_count {
+            say!(
+                "init: launcher: a frame promising {} handles under {} names carried {received}",
+                request.handle_count(),
+                names.len(),
+            );
+            return;
+        }
+
+        // Past every refusal that does not know which handle is which, so ownership
+        // can be split. Every part still releases on every path below.
+        let all = held.take();
+        let (slot_handles, rest) = all.split_at(request.slot_count());
+        let (extra_handles, place_handle) = rest.split_at(request.extra_count);
+        let slots = Moved(slot_handles.to_vec());
+        let place = Moved(place_handle.to_vec());
+        // Owned, so they close when this call returns: `SYS_NAMESPACE_BUILD` copies
+        // a connector into the namespace and leaves the caller's handle, and init's
+        // copy of a client's connector has no life beyond this launch.
+        let extras: Vec<(&str, Connector)> = names
+            .into_iter()
+            .zip(extra_handles.iter().copied())
+            // SAFETY: the kernel moved these into init's table with the frame, and
+            // nothing else answers for them. **Not a claim about the type** — a
+            // client sends what it likes, and everything below treats a wrong one
+            // as a refused launch rather than as init's own bug.
+            .map(|(name, handle)| (name, unsafe { Connector::from_raw(handle) }))
+            .collect();
+
+        // std joins a relative `current_dir` onto init's own cwd, so passing one
+        // on would start the child in init's `/` — the default this field removes.
+        if !request.cwd.starts_with('/') {
+            say!("init: launcher: refused a working directory that is not absolute");
             let _ = conn.try_signal(launch::MSG_REFUSED);
             return;
         }
-    };
 
-    // std joins a relative `current_dir` onto init's own cwd, so passing one
-    // on would start the child in init's `/` — the default this field removes.
-    if !request.cwd.starts_with('/') {
-        say!("init: launcher: refused a working directory that is not absolute");
-        let _ = conn.try_signal(launch::MSG_REFUSED);
-        return;
-    }
+        // **A launch names its parent**: the place it carries, spawned under, or
+        // init. One that names neither is refused rather than given to init,
+        // which would let it outlive a caller that never asked it to.
+        let under = match request.parent() {
+            Some(Parent::Place(())) => Some(place.0[0]),
+            Some(Parent::Init) => None,
+            None => {
+                say!("init: launcher: refused a launch that names no parent");
+                let _ = conn.try_signal(launch::MSG_REFUSED);
+                return;
+            }
+        };
 
-    // **The caller's path, not the row's, and `argv[0]` is why.** `declared`
-    // has already established that the two name one binary, so this grants
-    // nothing extra — and `/system/bin/echo` spawned as `/system/bin/toybox` is a toybox that
-    // was never told which applet it is.
-    let mut command = Command::new(request.program);
-    let caller_slots: Vec<(u32, toyos::RawHandle)> =
-        request.slot_numbers().zip(slots.0.iter().copied()).collect();
-    // **Carried, not inherited.** A child of the launcher would otherwise get
-    // init's environment and init's working directory, so `cd /tmp && ls` would
-    // list `/`. The launcher is a spawn service, not a session.
-    command.env_clear();
-    for entry in request.env.split(|&b| b == 0).filter(|e| !e.is_empty()) {
-        let Some(eq) = entry.iter().position(|&b| b == b'=') else { continue };
-        if let (Ok(key), Ok(value)) =
-            (std::str::from_utf8(&entry[..eq]), std::str::from_utf8(&entry[eq + 1..]))
-        {
-            command.env(key, value);
-        }
-    }
-    command.current_dir(request.cwd);
-    for arg in request.argv.split(|&b| b == 0).skip(1).filter(|a| !a.is_empty()) {
-        if let Ok(arg) = std::str::from_utf8(arg) {
-            command.arg(arg);
-        }
-    }
-
-    // `inherit_handle` duplicates into the child, so init's own copies go with
-    // `slots` when this returns.
-    let started = start(
-        command,
-        program,
-        system,
-        syscap,
-        Served::Move(acceptors),
-        connectors,
-        &extras,
-        Output::Launch { log, slots: &caller_slots },
-    );
-    match started {
-        Ok((child, _)) => {
-            let handle = toyos::RawHandle(child.into_raw_handle());
-            // **Which side owns the handle is the whole of what the two arms
-            // differ by.** A refused `handle_send` leaves it in init's table
-            // and init must close it — init keeps no `Process` handle from a
-            // launch, or a client launching `/system/bin/true` in a loop exhausts the
-            // one table the machine cannot do without. A send that *took* it
-            // and a frame that then did not go leaves it queued on a connection
-            // this call is about to drop, which releases it — and closing it
-            // here would be closing a handle init no longer holds, which under
-            // the bad-handle policy is init exiting.
-            match toyos_abi::syscall::handle_send(conn.as_handle(), &[handle]) {
-                Ok(()) => {
-                    let _ = conn.try_signal(launch::MSG_LAUNCHED);
-                }
-                Err(_) => toyos_abi::syscall::close(handle),
+        // **The caller's path, not the row's, and `argv[0]` is why.** `declared`
+        // has already established that the two name one binary, so this grants
+        // nothing extra — and `/system/bin/echo` spawned as `/system/bin/toybox` is a toybox that
+        // was never told which applet it is.
+        let mut command = Command::new(request.program);
+        // **Carried, not inherited.** A child of the launcher would otherwise get
+        // init's environment and init's working directory, so `cd /tmp && ls` would
+        // list `/`. The launcher is a spawn service, not a session.
+        command.env_clear();
+        for entry in request.env.split(|&b| b == 0).filter(|e| !e.is_empty()) {
+            let Some(eq) = entry.iter().position(|&b| b == b'=') else { continue };
+            if let (Ok(key), Ok(value)) =
+                (std::str::from_utf8(&entry[..eq]), std::str::from_utf8(&entry[eq + 1..]))
+            {
+                command.env(key, value);
             }
         }
-        Err(e) => {
-            say!("init: launcher: cannot start {}: {e}", program.name);
-            let _ = conn.try_signal(launch::MSG_REFUSED);
+        command.current_dir(request.cwd);
+        if let Some(place) = under {
+            command.under(place.0);
+        }
+        for arg in request.argv.split(|&b| b == 0).skip(1).filter(|a| !a.is_empty()) {
+            if let Ok(arg) = std::str::from_utf8(arg) {
+                command.arg(arg);
+            }
+        }
+
+        let installed;
+        // On the worker, every file the launch reads: a path under `/apps` is
+        // read off its package, and the program and its working directory may
+        // be a file server's, which init supervises.
+        let (system, path) = (self.system, request.program.to_string());
+        let found = self.files("a launch's files", move || {
+            let resolved = resolve(system, &path);
+            let prepared = match resolved {
+                Resolved::Row(_) | Resolved::Package(_) => command.prepare().map(drop),
+                Resolved::NotDeclared | Resolved::Refused(_) => Ok(()),
+            };
+            (resolved, prepared.map(|()| command))
+        });
+        let (resolved, prepared) = match found {
+            Ok(found) => found,
+            Err(why) => {
+                say!("init: launcher: {} was not resolved: {why}", request.program);
+                let _ = conn.try_signal(launch::MSG_REFUSED);
+                return;
+            }
+        };
+        let program = match resolved {
+            Resolved::Row(row) => row,
+            Resolved::Package(row) => {
+                installed = row;
+                &installed
+            }
+            Resolved::NotDeclared => {
+                // **`try_send_bytes` and not `send`.** A blocking write is the
+                // other half of the rule that made the read side an event loop: a
+                // client that never drains its end decides when init runs again.
+                // The `HOME` is the session's: a program no row names is no service.
+                let home = toyos_manifest::session_home();
+                let _ = conn.try_send_bytes(launch::MSG_NOT_DECLARED, home.as_bytes());
+                return;
+            }
+            Resolved::Refused(why) => {
+                say!("init: launcher: {why}");
+                let _ = conn.try_signal(launch::MSG_REFUSED);
+                return;
+            }
+        };
+        let command = match prepared {
+            Ok(command) => command,
+            Err(e) => {
+                say!("init: launcher: cannot start {}: {e}", program.name);
+                let _ = conn.try_signal(launch::MSG_REFUSED);
+                return;
+            }
+        };
+        let caller_slots: Vec<(u32, toyos::RawHandle)> =
+            request.slot_numbers().zip(slots.0.iter().copied()).collect();
+
+        // `inherit_handle` duplicates into the child, so init's own copies go with
+        // `slots` when this returns.
+        self.make_home(program);
+        let started = start(
+            command,
+            program,
+            self.system,
+            self.syscap,
+            Served::Move(&mut self.acceptors),
+            &self.connectors,
+            &self.dirs,
+            &extras,
+            Storage::default(),
+            Output::Launch { log: &mut self.log, slots: &caller_slots },
+        );
+        match started {
+            Ok((child, _)) => {
+                let handle = toyos::RawHandle(child.into_raw_handle());
+                // **Which side owns the handle is the whole of what the two arms
+                // differ by.** A refused `handle_send` leaves it in init's table
+                // and init must close it — init keeps no `Process` handle from a
+                // launch, or a client launching `/system/bin/true` in a loop exhausts the
+                // one table the machine cannot do without. A send that *took* it
+                // and a frame that then did not go leaves it queued on a connection
+                // this call is about to drop, which releases it — and closing it
+                // here would be closing a handle init no longer holds, which under
+                // the bad-handle policy is init exiting.
+                match toyos_abi::syscall::handle_send(conn.as_handle(), &[handle]) {
+                    Ok(()) => {
+                        let _ = conn.try_signal(launch::MSG_LAUNCHED);
+                    }
+                    Err(_) => toyos_abi::syscall::close(handle),
+                }
+            }
+            // std's word for the kernel's `Gone` for the place, and nothing else
+            // here answers it: the command is prepared, so its spawn calls no
+            // file server, and every refusal `start` makes before the spawn is
+            // `Other`.
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe && under.is_some() => {
+                say!("init: launcher: {} was not started: the place it names is ending", program.name);
+                let _ = conn.try_signal(launch::MSG_GONE);
+            }
+            Err(e) => {
+                say!("init: launcher: cannot start {}: {e}", program.name);
+                let _ = conn.try_signal(launch::MSG_REFUSED);
+            }
         }
     }
 }
 
 /// Handles a launch moved into init, released on every path out of it.
 ///
-/// A `Drop` and not a close at each `return`: there are seven ways out of
-/// `serve_launch` and a client picks which one by what it sends.
+/// A `Drop` and not a close at each `return`: a client picks which way out of
+/// `serve_launch` it takes by what it sends.
 struct Moved(Vec<toyos::RawHandle>);
 
 impl Moved {
@@ -1241,14 +1713,11 @@ fn resolve<'a>(system: &'a Manifest, path: &str) -> Resolved<'a> {
 /// its two partitions are claimed only as `toyos_update::slots::grant` admits
 /// them.
 fn slot_grant(syscap: &SysCap) -> Result<[(&'static str, toyos::Device); 3], String> {
-    use toyos_abi::inventory::{PartState, Partition, RawRecord, Record};
-    let asked = syscap.inventory(&mut []).map_err(|e| format!("the inventory would not count: {e:?}"))?;
-    let mut raw = vec![RawRecord::EMPTY; asked];
-    let n = syscap.inventory(&mut raw).map_err(|e| format!("the inventory would not read: {e:?}"))?;
-    let parts: Vec<Partition> = raw[..n]
-        .iter()
-        .filter_map(|r| match Record::decode(r) {
-            Ok(Record::Partition(p)) => Some(p),
+    use toyos_abi::inventory::{PartState, Partition, Record};
+    let parts: Vec<Partition> = inventory(syscap)?
+        .into_iter()
+        .filter_map(|r| match r {
+            Record::Partition(p) => Some(p),
             _ => None,
         })
         .collect();
@@ -1368,21 +1837,20 @@ fn start<'a>(
     syscap: &SysCap,
     served: Served<'_, 'a>,
     connectors: &BTreeMap<&str, Connector>,
+    dirs: &BTreeMap<String, Connector>,
     extras: &[(&str, Connector)],
+    storage: Storage,
     output: Output<'_>,
 ) -> std::io::Result<(Child, Vec<String>)> {
+    // A storage row's own arguments first: a file server's role leads its argv.
+    command.args(&storage.args);
     command.args(&program.args);
     let booting = matches!(output, Output::Boot(_));
 
     // **Set here, over whatever a launching caller carried**: the row decides
-    // where a program's home is, and a service's is made before it first runs.
-    let home = program.home();
-    if program.service {
-        if let Err(e) = make_dir(&home) {
-            say!("init: {}: {home} could not be made: {e}", program.name);
-        }
-    }
-    command.env("HOME", &home);
+    // where a program's home is, and a service's is made before this
+    // (`Init::make_home`), on init's file worker.
+    command.env("HOME", program.home());
 
     // **Everything endowed stays owned until the spawn that moves it
     // succeeds.** `endow` records a number; a refused spawn moves nothing
@@ -1395,7 +1863,12 @@ fn start<'a>(
     // acceptor is gone can never be served again.
     let mut taken: Vec<(&'a str, Acceptor)> = Vec::new();
 
-    if let Some(ns) = build_namespace(program, system, connectors, extras)? {
+    for (label, claim) in storage.claims {
+        let raw = claim.into_raw();
+        command.endow(&label, raw.0);
+        held.0.push(raw);
+    }
+    if let Some(ns) = build_namespace(program, system, connectors, dirs, extras)? {
         let raw = ns.into_raw();
         command.endow(SVC_LABEL, raw.0);
         held.0.push(raw);
@@ -1447,10 +1920,13 @@ fn start<'a>(
             given_back = Some(acceptors);
         }
         Served::Keep(kept) | Served::Restart { acceptors: kept, .. } => {
-            for name in &program.serves {
-                let (_, acceptor) = kept.iter().find(|(kept, _)| kept == name).ok_or_else(|| {
-                    std::io::Error::other(format!("the `{name}` port is closed for good"))
-                })?;
+            // Every acceptor the service keeps: its row's `serves`, or the
+            // directories of a file server's role. None left is a service
+            // whose ports closed for good.
+            if kept.is_empty() && (!program.serves.is_empty() || !program.roles.is_empty()) {
+                return Err(std::io::Error::other("its ports are closed for good"));
+            }
+            for (name, acceptor) in kept {
                 let handed = toyos_abi::syscall::dup(acceptor.as_handle()).map_err(|e| {
                     std::io::Error::other(format!("the `{name}` acceptor did not duplicate: {e:?}"))
                 })?;
@@ -1522,7 +1998,14 @@ fn start<'a>(
             // has none" is a configuration and every other answer is a fault,
             // and one sentence for all six sends whoever reads the line looking
             // in the wrong place.
-            Err(e) => say!("init: {}: {}", program.name, refused(name, e)),
+            Err(e) => {
+                say!("init: {}: {}", program.name, refused(name, e));
+                // A block service is told, so the partitions on a controller
+                // the machine has are refused and never taken for none.
+                if e != SyscallError::NotFound && program.serves.iter().any(|s| s == toyos_blockring::PORT) {
+                    command.args(["--claim-refused", name.as_str()]);
+                }
+            }
         }
     }
     // The idle slot, for the one program whose row asks for it: minted here,
@@ -1568,16 +2051,15 @@ fn start<'a>(
     // the rings reach it on and the one console handle that may write. A
     // launch keeps the slots its caller sent, but for a ring among them —
     // the caller's own log — which is replaced by the program's.
-    let mut ring: Option<toyos::RawHandle> = None;
+    let mut ring: Option<SharedMemory> = None;
     let mut origins: Option<Acceptor> = None;
     let log: &mut Log = match output {
         Output::Boot(log) => {
-            let own = new_ring();
+            let own = ring.insert(new_ring()).as_handle();
             command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
             command.inherit_handle(0, log.stdin.0);
             command.inherit_handle(1, own.0);
             command.inherit_handle(2, own.0);
-            ring = Some(own);
             if program.name == LOGD {
                 let Some(acceptor) = log.acceptor.take() else {
                     panic!("init: `{LOGD}` is started twice, and the log's origins are the first's");
@@ -1597,7 +2079,7 @@ fn start<'a>(
                     && toyos_abi::syscall::fstat(handle)
                         .is_ok_and(|stat| stat.file_type == FileType::SharedMemory);
                 if caller_ring {
-                    let own = *ring.get_or_insert_with(new_ring);
+                    let own = ring.get_or_insert_with(new_ring).as_handle();
                     command.inherit_handle(slot, own.0);
                 } else {
                     command.inherit_handle(slot, handle.0);
@@ -1649,9 +2131,6 @@ fn start<'a>(
             if let Some(acceptor) = origins {
                 log.acceptor = Some(acceptor);
             }
-            if let Some(ring) = ring {
-                toyos_abi::syscall::close(ring);
-            }
             Err(e)
         }
     }
@@ -1677,12 +2156,14 @@ fn build_namespace(
     program: &Program,
     system: &Manifest,
     connectors: &BTreeMap<&str, Connector>,
+    dirs: &BTreeMap<String, Connector>,
     extras: &[(&str, Connector)],
 ) -> std::io::Result<Option<Namespace>> {
     // Never the swap port: [`swap_namespace`] says why.
     let receives: Vec<&String> =
         program.receives.iter().filter(|name| *name != toyos_swap::PORT).collect();
-    if receives.is_empty() && extras.is_empty() {
+    let view: Vec<(&String, &Connector)> = dirs.iter().filter(|(name, _)| in_view(program, name)).collect();
+    if receives.is_empty() && extras.is_empty() && view.is_empty() {
         return Ok(None);
     }
     let mut builder = namespace::build();
@@ -1696,6 +2177,9 @@ fn build_namespace(
             ),
         }
     }
+    for (name, connector) in view {
+        builder = builder.add(name, connector);
+    }
     // A `provides` name reaches its holder from whoever made the port, never
     // from init, and this is where it arrives.
     for (name, connector) in extras {
@@ -1708,6 +2192,17 @@ fn build_namespace(
         }
         Err(e) => Err(std::io::Error::other(format!("a provided connector was refused: {e:?}"))),
     }
+}
+
+/// Whether the directory capability `name` is in `program`'s view.
+///
+/// **Every program sees the whole tree the file servers serve**, which is the
+/// kernel's old view kept whole until each row declares its own
+/// (`issues/isolation/every-program-sees-only-the-files-it-was-given.md`,
+/// stage 2), with one exception: a storage row sees none, since a file server
+/// resolving a path of its own through itself waits for ever.
+fn in_view(program: &Program, name: &str) -> bool {
+    !is_storage(program) && name.starts_with(CAPABILITY_PREFIX)
 }
 
 /// [`toyos_swap::PORT`] in a namespace of its own, for a program whose row
@@ -1744,4 +2239,117 @@ fn swapped(log: &Log, service: &str, word: Word, detail: &str) {
             Word::Refused | Word::Stopping | Word::InService => {}
         }
     }
+}
+
+/// What a storage row's process is started with beside its row: its
+/// arguments, and the claims on the partition a file server's role is on
+/// where a disk the kernel drives carries it.
+#[derive(Default)]
+struct Storage {
+    args: Vec<String>,
+    claims: Vec<(String, toyos::Device)>,
+}
+
+/// Every record the kernel's inventory answers.
+fn inventory(syscap: &SysCap) -> Result<Vec<toyos_abi::inventory::Record>, String> {
+    syscap
+        .records(|n| vec![toyos_abi::inventory::RawRecord::EMPTY; n])
+        .map_err(|why| why.to_string())
+}
+
+/// The unique GUID the loader named for `role`.
+fn loaded(records: &[toyos_abi::inventory::Record], role: toyos_abi::inventory::Role) -> Option<[u8; 16]> {
+    records.iter().find_map(|r| match r {
+        toyos_abi::inventory::Record::Loaded(l) if l.role == role => Some(l.unique_guid),
+        _ => None,
+    })
+}
+
+fn guid_text(guid: [u8; 16]) -> String {
+    let mut buf = [0u8; toyos_abi::part::GUID_TEXT_LEN];
+    toyos_abi::part::PartGuid(guid).write_text(&mut buf).to_string()
+}
+
+/// A storage row's arguments and claims for one start.
+///
+/// A block service is told the ROOT the machine runs from, which it serves no
+/// session on. A file server is told its role, and gets a claim on every
+/// partition of its role a disk the kernel drives carries — the stick, until
+/// usbd serves it — and otherwise the partition's GUID, which it opens through
+/// the block service; DATA it finds by type there itself, and counts with its
+/// claims. A log or boot role the loader named no partition for, and a claim
+/// the kernel refuses, each refuse the start: the role is then absent, never
+/// served from memory.
+fn storage_endowment(program: &Program, role: Option<&str>, syscap: &SysCap) -> Result<Storage, StartError> {
+    use toyos_abi::inventory::{Record, Role};
+    let mut storage = Storage::default();
+    let is_block = program.serves.iter().any(|s| s == toyos_blockring::PORT);
+    if !is_block && role.is_none() {
+        return Ok(storage);
+    }
+    let records = inventory(syscap).map_err(|why| StartError::Other(std::io::Error::other(why)))?;
+    if is_block {
+        if let Some(root) = loaded(&records, Role::Root) {
+            storage.args.extend(["--running".to_string(), guid_text(root)]);
+        }
+        return Ok(storage);
+    }
+    let role = role.expect("checked above");
+    storage.args.push(role.to_string());
+    let on_kernel_disk = |pick: &dyn Fn(&toyos_abi::inventory::Partition) -> bool| -> Vec<[u8; 16]> {
+        records
+            .iter()
+            .filter_map(|r| match r {
+                Record::Partition(p) if pick(p) => Some(p.unique_guid),
+                _ => None,
+            })
+            .collect()
+    };
+    let (kernel, named) = match role {
+        "data" => (on_kernel_disk(&|p| p.type_guid == toyos_gpt::Guid::TOYOS_DATA.0), None),
+        "log" | "boot" => {
+            let which = if role == "log" { Role::Log } else { Role::Boot };
+            let Some(guid) = loaded(&records, which) else {
+                return Err(StartError::Partition(format!("the loader named no `{role}` partition")));
+            };
+            (on_kernel_disk(&|p| p.unique_guid == guid), Some(guid))
+        }
+        other => panic!("init: `{other}` is no role; the build refuses it"),
+    };
+    for guid in &kernel {
+        let request = toyos_abi::syscall::DeviceRequest::Partition(toyos_abi::part::PartGuid(*guid));
+        let mut buf = [0u8; toyos_abi::syscall::DeviceRequest::MAX_NAME];
+        let name = request.write_name(&mut buf).to_string();
+        match syscap.claim_partition::<toyos::Device>(toyos_abi::part::PartGuid(*guid)) {
+            Ok(claim) => storage.claims.push((format!("{DEV_PREFIX}{name}"), claim)),
+            Err(e) => return Err(StartError::Partition(refused(&name, e))),
+        }
+    }
+    if let (Some(guid), []) = (named, kernel.as_slice()) {
+        storage.args.push(guid_text(guid));
+    }
+    Ok(storage)
+}
+
+/// The manifest, off ROOT through the kernel's own `open`.
+///
+/// **Not through std**: std resolves a path through this process's namespace,
+/// and the first path it resolves fixes that namespace for the process's life.
+/// init builds its namespace out of the manifest, so the manifest is read
+/// before std is asked anything.
+fn read_manifest() -> Result<String, SyscallError> {
+    use toyos_abi::syscall::{self, OpenFlags};
+    let handle = syscall::open(toyos_manifest::GUEST_PATH.as_bytes(), OpenFlags::READ)?;
+    let mut bytes = Vec::new();
+    let mut buf = [0u8; 4096];
+    let read = loop {
+        match syscall::read(handle, &mut buf) {
+            Ok(0) => break Ok(()),
+            Ok(n) => bytes.extend_from_slice(&buf[..n]),
+            Err(e) => break Err(e),
+        }
+    };
+    syscall::close(handle);
+    read?;
+    String::from_utf8(bytes).map_err(|_| SyscallError::InvalidArgument)
 }

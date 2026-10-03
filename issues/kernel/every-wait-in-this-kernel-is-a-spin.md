@@ -119,7 +119,7 @@ both before any lock conversion; the order is forced, not preferred.
 
 - A watch is a node the waiter lends to the object, and the subject is a
   borrowed reference, never an id. **Rejected:** a global registry, a slot
-  arena, two park channels, posting from interrupt context, multishot polls,
+  arena, two park channels, multishot polls,
   userspace-only blocking wrappers, a sleep lock that spins where it cannot
   park, poisoning, and shootdown-as-completion. A freed object cannot be named.
 - The park token proves the *context* may park and never encodes which locks are
@@ -405,12 +405,7 @@ lock converted** — `vfs::VFS` stays a spinlock, `iod` spins in the driver, and
 the drain pops under the VFS lock so `sync_all` cannot commit a device ahead of
 a file's flush. This is the state that unblocks `vfs::VFS`'s conversion (the
 next chunk): a `Drop` reaching this release site now touches neither a sleep
-lock nor a device. Negative controls: `writeback_reopen` (an `iod` stalled by
-`writeback-stall`, a re-open reads the pinned pages) and `writeback_durability`
-(a close with no fsync reaches the `/log` volume through the drain,
-`toyos-fat32-check` the oracle). Measured, and recorded in `iod.rs`'s header: a
-360-file close burst on NVMe `/home` drove worst close-to-drained latency to
-~72 ms, the single `iod` thread draining the backlog serially.
+lock nor a device.
 
 ### Wall 5: demand paging holds `ProcessData` across the device, and a nested trap is a level above the baseline
 
@@ -545,3 +540,5 @@ green, which is the calibration for how this one is landed.
 Six entries under `issues/design-debt/` recorded that the deleted document's own
 citations had rotted — five against the tree, one against a log plan deleted
 before it. All six closed with it.
+
+`usb_boot_stick_pulled` is deleted.

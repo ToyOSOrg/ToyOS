@@ -45,62 +45,36 @@ use super::machine::{
     MAX_INVENTORY_RECORDS,
 };
 #[cfg(feature = "test-actuators")]
-use super::machine::SYSINFO_BOUND_LOWERED;
+use super::machine::lower_sysinfo_bound;
 use super::proc::{
-    sys_endowments, sys_exit, sys_nanosleep, sys_process_open, sys_process_stats,
+    spawn_place, sys_endowments, sys_exit, sys_nanosleep, sys_process_stats,
     sys_process_wait, sys_rt_enter, sys_spawn, sys_thread_exit, sys_thread_join, sys_thread_spawn,
 };
-use super::vm::{sys_dlopen, sys_dlsym, sys_mmap, sys_munmap, sys_query_modules, sys_tls_alloc_block};
+use super::vm::{shared_image, sys_dlopen, sys_dlsym, sys_mmap, sys_munmap, sys_query_modules, sys_tls_alloc_block};
 
-/// A number a deleted syscall used is retired, never reused.
-macro_rules! retired_syscalls {
-    ($($num:literal => $name:literal),+ $(,)?) => {
-        const RETIRED_SYSCALLS: &[(u64, &str)] = &[$(($num, $name)),+];
-
-        const _: () = {
-            let mut i = 1;
-            while i < RETIRED_SYSCALLS.len() {
-                assert!(
-                    RETIRED_SYSCALLS[i - 1].0 < RETIRED_SYSCALLS[i].0,
-                    "the retired-syscall table is not strictly ascending, so a \
-                     number is retired twice or the list is unreadable",
-                );
-                i += 1;
-            }
-        };
-
-        fn retired_syscall(num: u64) -> Option<&'static str> {
-            RETIRED_SYSCALLS.iter().find(|(n, _)| *n == num).map(|(_, name)| *name)
-        }
-    };
-}
-
-retired_syscalls! {
-    26 => "SYS_WAITPID",
-    29 => "SYS_SEND_MSG",
-    30 => "SYS_RECV_MSG",
-    31 => "SYS_OPEN_DEVICE",
-    32 => "SYS_REGISTER_NAME",
-    33 => "SYS_FIND_PID",
-    36 => "SYS_ALLOC_SHARED",
-    37 => "SYS_GRANT_SHARED",
-    38 => "SYS_MAP_SHARED",
-    39 => "SYS_RELEASE_SHARED",
-    65 => "SYS_KILL",
-    68 => "SYS_PIPE_OPEN",
-    70 => "SYS_PIPE_ID",
-    78 => "SYS_NIC_RX_POLL",
-    79 => "SYS_NIC_RX_DONE",
-    80 => "SYS_NIC_TX",
-    85 => "SYS_LISTEN",
-    87 => "SYS_CONNECT",
-    96 => "SYS_SET_RT_PRIORITY",
+/// `sched-operation-nesting`'s task half and `sysret-ss-probe`, run once a boot
+/// on the first syscall: a task's own deadline slot, and a park that switches
+/// away from it and back.
+#[cfg(feature = "boot-actuators")]
+fn task_probes() {
+    use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
+    static RAN: AtomicBool = AtomicBool::new(false);
+    let nesting = crate::actuator::sched_operation_nesting();
+    let ss = crate::actuator::sysret_ss_probe();
+    if !(nesting || ss) || RAN.swap(true, Relaxed) {
+        return;
+    }
+    if nesting {
+        crate::sched_gate::run("syscall");
+    }
+    if ss {
+        crate::arch::hw::sysret_ss_probe(&crate::scheduler::Parkable::at_entry());
+    }
 }
 
 pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
-    // Placed first so the architecture counts the call whatever it turns out to be.
     #[cfg(feature = "boot-actuators")]
-    crate::arch::syscall::note_entry();
+    task_probes();
     let t0 = crate::clock::nanos_since_boot();
 
     process::with_current_data(|data| {
@@ -185,13 +159,27 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         SYS_PIPE => sys_pipe(),
         SYS_SPAWN => {
             let Ok(args) = ctx.copy_in::<SpawnArgs>(UserAddr::new(a1)) else { return bad_addr };
+            // First, and nothing copied: the image is the caller's object, and
+            // an endowment below may move the caller's own handle to it.
+            let image = match args.image_len {
+                0 => None,
+                len => match shared_image(args.image, len) {
+                    Ok(image) => Some(alloc::sync::Arc::new(image) as alloc::sync::Arc<dyn crate::file_backing::FileBacking>),
+                    Err(refused) => return refused,
+                },
+            };
+            // Before an endowment can move the handle that names it.
+            let parent = match spawn_place(args.place) {
+                Ok(parent) => parent,
+                Err(refused) => return refused,
+            };
             let text = match ctx.user_str(UserAddr::new(args.argv_ptr), args.argv_len) { Ok(s) => s, Err(e) => return e.to_u64() };
             let cwd = match ctx.user_str(UserAddr::new(args.cwd_ptr), args.cwd_len).and_then(|p| spawn_cwd(&p)) {
                 Ok(cwd) => cwd,
                 Err(e) => return e.to_u64(),
             };
-            if args.endow_count as usize > toyos_abi::syscall::MAX_ENDOWMENTS
-                || args.labels_len > toyos_abi::syscall::MAX_LABELS_LEN as u64
+            if args.endow_count as usize > toyos_abi::syscall::MAX_SPAWN_ENDOWMENTS
+                || args.labels_len > toyos_abi::syscall::MAX_SPAWN_LABELS_LEN as u64
             {
                 return SyscallError::InvalidArgument.to_u64();
             }
@@ -231,7 +219,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 alloc::vec::Vec::new()
             };
             let argv: alloc::vec::Vec<&str> = text.split('\0').filter(|s| !s.is_empty()).collect();
-            sys_spawn(&argv, pending, cwd, env)
+            sys_spawn(&argv, pending, cwd, env, image, parent)
         }
         SYS_PROCESS_WAIT => sys_process_wait(RawHandle(a1 as u32), a2),
         SYS_PROCESS_KILL => {
@@ -242,9 +230,6 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 Ok(object) => process::kill_process(&object),
                 Err(e) => e.refuse(),
             }
-        }
-        SYS_PROCESS_OPEN => {
-            sys_process_open(RawHandle(a1 as u32), process::Pid::from_raw(a2 as u32))
         }
 
         // No right: the one caller marks both ends of a pair, so requiring one would refuse the other.
@@ -349,7 +334,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 Err(e) => e.to_u64(),
             }
         }
-        SYS_CPU_COUNT => crate::arch::smp::cpu_count() as u64,
+        SYS_CPU_COUNT => crate::smp::cpu_count() as u64,
         SYS_FUTEX_WAIT => match UserAddr::checked(a1) {
             Some(addr) => process::futex_wait(addr, a2 as u32, a3),
             None => bad_addr,
@@ -546,11 +531,6 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             DA::HEAP_AT_CEILING => debug_heap_alloc(crate::mm::MAX_HEAP_ALLOC, 8),
             DA::HEAP_OVER_CEILING => debug_heap_alloc(crate::mm::PAGE_2M as usize, 8),
             DA::HEAP_AT_CEILING_PAGE_ALIGNED => debug_heap_alloc(crate::mm::MAX_HEAP_ALLOC, 4096),
-            // Returns, unlike other actions here: the console must survive being drawn over.
-            DA::SCREEN_GRAFFITI => {
-                crate::drivers::panic_console::graffiti();
-                0
-            }
             // A read, not a write: tests the page is absent without the feature also
             // handing userland a kernel store; returning 0 means the guard failed.
             DA::IDLE_GUARD_READ => {
@@ -582,12 +562,10 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                     None => SyscallError::InvalidArgument.to_u64(),
                 }
             }
-            DA::IDLE_STACK_HIGH_WATER => crate::arch::percpu::idle_stack_high_water() as u64,
-            DA::IDLE_STACK_SIZE => crate::arch::percpu::idle_stack_size() as u64,
             // Armed, not #[cfg]'d, so it doesn't ship in every kernel this suite boots:
             // the real bound is unreachable (no guest makes 65,536 threads).
             DA::LOWER_SYSINFO_BOUND => {
-                SYSINFO_BOUND_LOWERED.store(true, core::sync::atomic::Ordering::Relaxed);
+                lower_sysinfo_bound();
                 0
             }
             // Puts one free slot one lifecycle from the end so retirement is reachable without
@@ -603,6 +581,14 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             }
             DA::LOG_PATTERNED => {
                 crate::log::storm::emit_patterned(0, a2);
+                0
+            }
+            DA::KILL_PLACE_AS_SPAWN_LANDS => {
+                process::debug_mark_spawn();
+                0
+            }
+            DA::HOLD_SPAWN_UNTIL_CHILD_ENDS => {
+                process::debug_mark_spawn_hold();
                 0
             }
             _ => SyscallError::InvalidArgument.to_u64(),
@@ -635,14 +621,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         },
         SYS_DEVICE_REG_READ => sys_device_reg(RawHandle(a1 as u32), a2, a3, None),
         SYS_DEVICE_REG_WRITE => sys_device_reg(RawHandle(a1 as u32), a2, a3, Some(a4)),
-        // Retired, not reused: an old binary is told which call it was, not that the number is nonsense.
-        _ => match retired_syscall(num) {
-            Some(name) => {
-                crate::log!("syscall {num} is retired (formerly {name})");
-                SyscallError::NotSupported.to_u64()
-            }
-            None => SyscallError::InvalidArgument.to_u64(),
-        },
+        _ => SyscallError::InvalidArgument.to_u64(),
     } })();
 
     // The first of the object layer's three drain sites. Here, not at the drop that

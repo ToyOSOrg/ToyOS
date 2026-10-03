@@ -1,17 +1,16 @@
 //! The vector a claimed ISA function's lines deliver on: a count into the
-//! row's record and a pass owed, as a claimed PCI function's message is.
+//! row's record and a post of its claim's watch, as a claimed PCI function's
+//! message is.
 
 use super::device_irq::device_irq_entry;
-use crate::irq_ring::IrqSource;
 
 extern "sysv64" fn isa0_handler() {
     crate::arch::percpu::irq_took!(UserDev);
     crate::isa::isr(0);
     #[cfg(feature = "boot-actuators")]
     if crate::actuator::isa_claim_straddles_quarantine() {
-        crate::arch::i8042::stage_late_edge();
+        crate::arch::i8042::straddle::stage_late_edge();
     }
-    crate::irq_ring::isr_publish(IrqSource::UserDev, crate::clock::nanos_since_boot());
     crate::preempt::set_need_resched();
     crate::arch::apic::eoi();
 }

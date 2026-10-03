@@ -49,6 +49,15 @@ wake-fence-off = []
 #
 # Never on by default, and no kernel build can reach it.
 poll-fire-load-store = []
+# The negative control for a poll ring's answer. It makes `inbox/polls.rs`
+# answer a fired poll with its interest and look at nothing, so a post with
+# nothing behind it is an answer and `inbox_answer.rs` must red:
+#
+#   cargo test --manifest-path kernel-loom/Cargo.toml --features post-is-an-answer \
+#     --test inbox_answer
+#
+# Never on by default, and no kernel build can reach it.
+post-is-an-answer = []
 # The negative control for the ticket lock's acquire edge. It makes `sync.rs`'s
 # two loads of `now` — the ones that decide ownership — `Relaxed`, so the
 # previous owner's writes are unordered against the next owner's reads, and
@@ -138,18 +147,8 @@ shard-publish-relaxed = []
 # Never on by default and never reachable from a kernel build, which declares
 # the same name only so `cfg` checking knows it.
 sleeplock-acquire-off = []
-# The negative control for the durability generations. It turns `settle` back
-# into the pre-generation blind clear, and `durability.rs` must red under it —
-# a page marked clean whose bytes never reached the device:
-#
-#   cargo test --manifest-path kernel-loom/Cargo.toml --features durability-settle-blind \
-#     --test durability
-#
-# Never on by default, and no kernel build can reach it.
-durability-settle-blind = []
-# The negative control for a claimed PCI function's interrupt record. Its two
-# read-modify-writes — the reader's `swap` of the count and the scheduler pass's
-# `swap` of the wake flag — become a load and a store, which is the whole of
+# The negative control for a claimed PCI function's interrupt record. The
+# reader's `swap` of the count becomes a load and a store, which is the whole of
 # what this record's design is, and `device_irq.rs` must red:
 #
 #   cargo test --manifest-path kernel-loom/Cargo.toml --features device-irq-lossy \

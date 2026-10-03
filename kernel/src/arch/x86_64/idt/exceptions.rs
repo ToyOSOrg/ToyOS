@@ -80,7 +80,7 @@ fn read_user_u64(addr: u64) -> Result<u64, Unread> {
 
 /// The `in` or `out` at `rip`, read through the page tables as the rest of the
 /// report reads user memory; `None` for any other instruction or an unreadable one.
-fn port_access_at(rip: u64, rdx: u64) -> Option<super::super::pio::PortAccess> {
+fn port_access_at(rip: u64, rdx: u64) -> Option<toyos_userbound::PortAccess> {
     let (at, shift) = (rip & !7, rip & 7);
     let lo = read_user_u64(at).ok()?;
     // The next word only where the four bytes run into it: an `in` that ends
@@ -88,7 +88,7 @@ fn port_access_at(rip: u64, rdx: u64) -> Option<super::super::pio::PortAccess> {
     let hi = if shift > 4 { read_user_u64(at + 8).ok()? } else { 0 };
     // Shifted rather than indexed: nothing on this path may panic.
     let code = ((u128::from(lo) | u128::from(hi) << 64) >> (8 * shift)) as u32;
-    super::super::pio::port_access(code.to_le_bytes(), rdx as u16)
+    toyos_userbound::port_access(code.to_le_bytes(), rdx as u16)
 }
 
 pub(crate) struct ExceptionContext<'a> {
@@ -295,20 +295,6 @@ fn crash_report_exception(ctx: &ExceptionContext) {
 }
 
 fn crash_report_panic(info: &core::panic::PanicInfo, rbp: u64) {
-    // Must run first: if this panics, only DOUBLE PANIC speaks for it —
-    // everything else comes from the copy `panic::record_panic` took.
-    if crate::actuator::panic_in_report() {
-        panic!("panic-in-report: the crash report panicked before it said anything");
-    }
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::fault_in_report() {
-        // Canonical, high-half, past any physical memory this kernel boots on:
-        // the read faults instead of hitting the direct map.
-        const UNMAPPED: u64 = 0xFFFF_8FFF_FFFF_F000;
-        // SAFETY: none — deliberately unsafe, staged only when the boot
-        // actuator asked for it, to fault a CPU already `Panic` mid-report.
-        unsafe { core::ptr::read_volatile(UNMAPPED as *const u64) };
-    }
     alert!("PANIC: {}", info);
 
     log!("  Backtrace:");
@@ -506,9 +492,6 @@ fn fatal_exception(ctx: &ExceptionContext) -> ! {
         ctx.cr2,
         ctx.frame.error_code,
     );
-    if crate::actuator::panic_in_report() {
-        panic!("panic-in-report: the crash report panicked before it said anything");
-    }
 
     let tid_raw = percpu::current_tid().map_or(u32::MAX, |t| t.raw());
     if recursive {

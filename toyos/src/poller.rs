@@ -179,9 +179,7 @@ impl Rings {
 /// and sizes both rings from it: the submission ring holds them all, so no
 /// batch is ever flushed mid-registration, and the kernel's completion ring —
 /// always twice the submission ring — holds the most completions that can exist
-/// between two [`wait`](Self::wait) calls, which is two per watched handle (a
-/// registration left over from the previous round firing, and this round's
-/// registration finding the handle ready).
+/// between two [`wait`](Self::wait) calls.
 ///
 /// Going past the capacity is a contract violation and panics, because it is
 /// the caller's own bug and the alternative is the failure this replaced: the

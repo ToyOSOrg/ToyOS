@@ -5,7 +5,7 @@
 use core::num::NonZeroU32;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::sync::LeafLock;
+use crate::sync::CellLock;
 
 /// Clamp for stored lag at the Runnable→NonRunnable transition: how far
 /// behind (entitled catch-up) or ahead (throttled on wake) of the frontier a
@@ -206,13 +206,13 @@ fn vrt_from_lag(frontier: u64, lag: i64) -> u64 {
 }
 
 /// One process's fair-share pot, reached through any thread that owns it. The
-/// cell is supplied by the environment for the reason stated on [`LeafLock`]:
+/// cell is supplied by the environment for the reason stated on [`CellLock`]:
 /// the kernel's is a word-sized spin, the simulator's a mutex.
 pub struct FairShare<L> {
     state: L,
 }
 
-impl<L: LeafLock<ShareState>> FairShare<L> {
+impl<L: CellLock<ShareState>> FairShare<L> {
     pub fn new(state: L) -> Self {
         Self { state }
     }

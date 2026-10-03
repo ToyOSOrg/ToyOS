@@ -34,6 +34,10 @@ pub const JOB_DEADLINE_SAID: &str =
 /// it has: a wedged boot's `logd` wrote nothing.
 pub const DEADLINE_EXPIRED: &str = "the boot deadline expired";
 
+/// What the kernel logs as it arms that deadline, in `kernel/src/deadline.rs`:
+/// the record whose time the bound is counted from.
+pub const DEADLINE_ARMED: &str = "boot deadline: ";
+
 /// What the `wedge-before-reset` actuator says before it stops every CPU, in
 /// `kernel/src/deadline.rs`. The witness that a deadline ended a wedge and not
 /// a boot merely slower than its bound, which is what makes that control one.
@@ -50,23 +54,6 @@ pub const WEDGE_STAGED: &str = "wedge: staged, and only the boot deadline ends t
 /// for it.
 pub const WEDGE_ARRIVED_DEAF: &str =
     "arrived with interrupts off, through the syscall gate, and takes them again here";
-
-/// What the USB wedge arms say before the write they stop the machine inside,
-/// in `kernel/src/usb_gate.rs`; the phase and the traffic behind it follow on
-/// the same line.
-///
-/// The witness that the boot the deadline then ended was one holding a device
-/// inside a Bulk-Only command, which is the whole of what those controls stage —
-/// a wedge taken anywhere else is `WEDGE_STAGED`'s boot with a longer log.
-pub const USB_WEDGE_STAGED: &str = "usb-wedge: stopping every CPU at the";
-
-/// What the same arms say if every write ran to completion, which means no CPU
-/// was stopped inside one.
-///
-/// **A control that stages nothing passes for the wrong reason**: without this
-/// line the boot would still wedge — at the shutdown, with no device inside
-/// anything — and read back exactly like the arm that proves the point.
-pub const USB_WEDGE_MISSED: &str = "usb-wedge: the write completed";
 
 /// What the `usb-reset-under-load` arm says once it is streaming, and the three
 /// ways it says it is not, in `kernel/src/usb_gate.rs`.
@@ -90,11 +77,6 @@ pub const USB_LOAD_SWEPT: &str = "usb-load: the sweep reached the end of the dis
 /// whatever the rest of the machine was doing.
 pub const LOCKED_UP: &str = "a cpu locked up with interrupts off";
 
-/// What the `hard-lockup-probe` actuator says before its cpu stops answering,
-/// in `kernel/src/hardlockup/probe.rs` — the witness in the sealed record's tail
-/// that this machine was ended by the control that was staged on it.
-pub const LOCKUP_STAGED: &str = "hard-lockup: staged, and only the lockup detector ends this cpu";
-
 /// What the kernel seals under its own `DONE` record, in
 /// `kernel/src/log/mod.rs`'s `seal_tail`: the head of the boot's newest
 /// records. The next loader pass prints it back under [`PREVIOUS_PANIC`].
@@ -116,16 +98,18 @@ pub const LOG_TAIL: &str = "log-tail: ";
 /// two registrations whose whole subject is that it stopped.
 pub const HANDED_BACK: &str = "the last boot read DONE";
 
+/// What the loader says, in `bootloader/src/blackbox.rs`, of a `DONE` record
+/// sealed under another stick's identity: the foreign-identity arm's
+/// [`HANDED_BACK`]. The kernel seals every state under that identity, so only
+/// this word says the stop finished rather than panicked or wedged.
+pub const FOREIGN_DONE: &str = "held a DONE record another image left in this memory";
+
 /// The bootloader's own file at the root of the log partition.
 pub const LOADER_LOG: &str = "loader.log";
 
 /// That file's first line and its last.
 pub const LOADER_FIRST_LINE: &str = "ToyOS Bootloader 1.0";
 pub const LOADER_LAST_LINE: &str = "Loader log: the kernel handoff begins, so this file ends here";
-
-/// The line the loader prints once it has opened `GraphicsOutput`, which the
-/// kernel's own `GOP:` line does not begin with.
-pub const LOADER_GOP_LINE: &str = "GOP: mode";
 
 /// The head the loader writes every line about the black-box page under, and
 /// the line a harvested report goes under.
@@ -223,12 +207,6 @@ pub fn panel_census(log: &str) -> Option<Panel> {
 /// ended, which no program writes ([`is_program_line`]).
 pub const EXIT: &str = "exit: ";
 
-/// The kernel's record for a process that started, in `kernel/src/process.rs`.
-///
-/// Read for where it must *not* be: after the boot's own last word, where it
-/// says a process still on a run queue started another one under a shutdown.
-pub const SPAWN: &str = "spawn: ";
-
 /// One rendered record's message: what follows the bracket every kernel
 /// record opens with. `None` for a line that is not a kernel record's first.
 pub fn message(line: &str) -> Option<&str> {
@@ -317,6 +295,9 @@ pub enum Unfit {
     /// The loader pass after the reset read no `DONE`, or read one with no
     /// [`REBOOTING`] in its tail: the stop never finished.
     NotHandedBack,
+    /// The loader pass after the foreign-identity arm's reset read no
+    /// [`FOREIGN_DONE`]: the stop it staged never finished.
+    NoForeignDone,
 }
 
 impl fmt::Display for Unfit {
@@ -334,6 +315,11 @@ impl fmt::Display for Unfit {
                 "the loader's pass after the reset carries no {HANDED_BACK:?} with {REBOOTING:?} \
                  under {LOG_TAIL:?}: the stop this boot asked for never reached the reset"
             ),
+            Self::NoForeignDone => write!(
+                f,
+                "the loader's pass after the reset carries no {FOREIGN_DONE:?}: the stop this \
+                 boot asked for never sealed its record DONE"
+            ),
         }
     }
 }
@@ -348,6 +334,22 @@ pub fn handed_back(loader: &str) -> Result<(), Unfit> {
     } else {
         Err(Unfit::NotHandedBack)
     }
+}
+
+/// The loader's half of a passing foreign-identity boot, whose own chain the
+/// loader ends as a hang: the record it cleared was sealed `DONE`.
+pub fn foreign_done(loader: &str) -> Result<(), Unfit> {
+    // The pass before the handoff clears a stale foreign record the same way.
+    match after_the_reset(loader) {
+        Some(after) if after.contains(FOREIGN_DONE) => Ok(()),
+        _ => Err(Unfit::NoForeignDone),
+    }
+}
+
+/// `loader.log` from [`SEPARATOR`] on: the pass that read what this boot left,
+/// or `None` where the chain did not go round.
+pub fn after_the_reset(loader: &str) -> Option<&str> {
+    loader.find(SEPARATOR).map(|at| &loader[at..])
 }
 
 /// Init's line saying the machine stops, the last one `log` carries.
@@ -500,65 +502,9 @@ pub fn verdict(log: &str) -> Result<u64, Unfit> {
     Ok(boot_ms)
 }
 
-/// **`Rebooting.` is the last record, and nothing this boot still holds may
-/// write one after it.**
-///
-/// The runner's deadline kills the job it is watching, which releases the `wait`
-/// its own job loop is inside, and that loop can spawn the next job into the
-/// window between the boot's last word and the reset.
-///
-/// A boot with no such word — a panic — is not asked: it correctly writes none.
-/// The window ends at the next loader pass, because everything that pass prints
-/// is after the reset by construction.
-///
-/// **A spawn record and not every record**, because those are the two different
-/// claims. `quiesce` writes after its own last word by construction — an idle
-/// CPU's `sched:` report can land there — and nothing is left running to take
-/// it anywhere but the console. A *spawn* is a process that was still on a run
-/// queue after the stop said it had stopped every one.
-///
-/// **The boot's own word, not the next pass's copy of it**: that pass prints
-/// the boot's newest records under [`LOG_TAIL`], newest first, so the
-/// copy of the last word heads records that were written before it.
-pub fn nothing_after_the_last_word(text: &str) -> Result<(), String> {
-    let lines: Vec<&str> = text.lines().collect();
-    let Some(at) = lines
-        .iter()
-        .rposition(|line| line.contains(REBOOTING) && !line.contains(LOG_TAIL))
-    else {
-        return Ok(());
-    };
-    let mut window =
-        lines[at + 1..].iter().take_while(|line| !line.contains(LOADER_FIRST_LINE));
-    match window.find(|line| line.contains(SPAWN)) {
-        None => Ok(()),
-        Some(line) => Err(format!(
-            "a process started after {REBOOTING:?}, which is the boot's own last word and what a \
-             metal boot is judged on: {line:?}"
-        )),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A spawn after the boot's own last word is refused; the next pass's
-    /// newest-first copy of that word, which heads records written before it,
-    /// opens no window, and the next pass is after the reset.
-    #[test]
-    fn a_spawn_after_the_boots_own_last_word_is_refused() {
-        let word = format!("[kernel 23.340 cpu1] {REBOOTING}\n");
-        let spawn = format!("[kernel 23.341 cpu0] {SPAWN}late pid=9\n");
-        let loader = format!("{LOADER_FIRST_LINE}\n");
-        let tail = format!(
-            "| {LOG_TAIL}[kernel 23.340 cpu1] {REBOOTING}\n| {LOG_TAIL}[kernel 1.0 cpu0] {SPAWN}init pid=1\n"
-        );
-        assert_eq!(nothing_after_the_last_word(&format!("{word}{loader}{tail}")), Ok(()));
-        assert!(nothing_after_the_last_word(&format!("{word}{spawn}{loader}{tail}")).is_err());
-        assert_eq!(nothing_after_the_last_word(&format!("{word}{loader}{spawn}")), Ok(()));
-        assert_eq!(nothing_after_the_last_word(&spawn), Ok(()));
-    }
 
     /// The half-told boot: the kernel got all the way up and the log stops
     /// there, so the machine either never asked for the reset or `logd` never
@@ -625,7 +571,6 @@ mod tests {
             ("bootloader/src/loaderlog.rs", format!("\"{CHAIN_ENDS_LINE}\"")),
             ("bootloader/src/loaderlog.rs", format!("\"{SEPARATOR}\"")),
             ("bootloader/src/main.rs", format!("\"{HUNG_WITHOUT_A_RECORD}\"")),
-            ("bootloader/src/loaderlog.rs", format!("\"{LOADER_GOP_LINE}\"")),
             ("bootloader/src/blackbox.rs", format!("\"{BLACKBOX_HEAD}\"")),
             ("bootloader/src/blackbox.rs", format!("\"{PREVIOUS_PANIC}\"")),
             ("bootloader/src/blackbox.rs", format!("\"{TAIL_IN_THE_FILE}\"")),
@@ -640,6 +585,13 @@ mod tests {
                 path.display()
             );
         }
+        // A format and not a constant: the loader fills its hole with the
+        // state's own word.
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("bootloader/src/blackbox.rs");
+        let source = std::fs::read_to_string(&path).expect("a loader module");
+        let format = FOREIGN_DONE.replacen(toyos_blackbox::State::Done.named(), "{}", 1);
+        assert!(source.contains(&format), "{} formats no {format:?}", path.display());
     }
 
     #[test]
@@ -671,19 +623,14 @@ mod tests {
             ("kernel/src/arch/x86_64/smp.rs", format!("log!(\"{AP_BRINGUP}")),
             ("kernel/src/process.rs", format!("THREAD_NAME_LEN: usize = {NAME_LEN}")),
             ("kernel/src/deadline.rs", format!("EXPIRED: &str = \"{DEADLINE_EXPIRED}\"")),
+            ("kernel/src/deadline.rs", format!("\"{DEADLINE_ARMED}{{ms}} ms")),
             ("kernel/src/deadline.rs", format!("WEDGE_STAGED: &str = \"{WEDGE_STAGED}\"")),
             ("kernel/src/deadline.rs", format!("\"{WEDGE_ARRIVED_DEAF}\"")),
-            ("kernel/src/usb_gate.rs", format!("USB_WEDGE_STAGED: &str = \"{USB_WEDGE_STAGED}\"")),
-            ("kernel/src/usb_gate.rs", format!("USB_WEDGE_MISSED: &str = \"{USB_WEDGE_MISSED}\"")),
             ("kernel/src/usb_gate.rs", format!("LOAD_RUNNING: &str = \"{USB_LOAD_RUNNING}\"")),
             ("kernel/src/usb_gate.rs", format!("LOAD_REFUSED: &str = \"{USB_LOAD_REFUSED}\"")),
             ("kernel/src/usb_gate.rs", format!("LOAD_STOPPED: &str = \"{USB_LOAD_STOPPED}\"")),
             ("kernel/src/usb_gate.rs", format!("LOAD_SWEPT: &str = \"{USB_LOAD_SWEPT}\"")),
             ("kernel/src/hardlockup/mod.rs", format!("LOCKED_UP: &str = \"{LOCKED_UP}\"")),
-            (
-                "kernel/src/hardlockup/probe.rs",
-                format!("PROBE_STAGED: &str = \"{LOCKUP_STAGED}\""),
-            ),
             (
                 "kernel/src/drivers/panic_console/mod.rs",
                 format!("CENSUS: &str = \"{PANEL_CENSUS}\""),

@@ -4,6 +4,8 @@ use core::sync::atomic::{AtomicU32, AtomicU64, AtomicU8};
 use alloc::alloc::alloc_zeroed;
 use core::alloc::Layout;
 
+use toyos_userbound::IoBitmap;
+
 use super::cpu;
 use crate::log;
 
@@ -22,10 +24,6 @@ pub const STAR_SYSRET_BASE: u16 = USER_DS - 8;
 const _: () = assert!(STAR_SYSRET_BASE + 8 == USER_DS);
 const _: () = assert!(STAR_SYSRET_BASE + 16 == USER_CS);
 
-/// Ports the I/O permission bitmap names; every port from here on is past the
-/// TSS limit, which refuses it without a bit (Intel SDM Vol. 1 §19.5.2).
-pub const IO_PORTS: usize = 0x100;
-
 /// The 104-byte 64-bit TSS, then the I/O permission bitmap.
 #[repr(C, packed)]
 pub struct Tss {
@@ -38,12 +36,9 @@ pub struct Tss {
     reserved2: u64,
     reserved3: u16,
     iopb_offset: u16,
-    /// A set bit refuses its port to Ring 3; `pio::switch_to` clears one only
-    /// while the process holding it runs.
-    io_bitmap: [u8; IO_PORTS / 8],
-    /// All ones: the processor reads two bytes for every check, and the byte
-    /// past the last one the bitmap names must refuse.
-    io_bitmap_end: u8,
+    /// What Ring 3 may `in` and `out` on this CPU; `pio::switch_to` opens a
+    /// port only while the process holding it runs.
+    io_bitmap: IoBitmap,
 }
 
 impl Tss {
@@ -58,16 +53,15 @@ impl Tss {
             reserved2: 0,
             reserved3: 0,
             iopb_offset: offset_of!(Tss, io_bitmap) as u16,
-            io_bitmap: [0xFF; IO_PORTS / 8],
-            io_bitmap_end: 0xFF,
+            io_bitmap: IoBitmap::refusing(),
         }
     }
 }
 
 const _: () = assert!(offset_of!(Tss, io_bitmap) == 104, "the bitmap follows the architectural TSS");
 const _: () = assert!(
-    offset_of!(Tss, io_bitmap_end) + 1 == size_of::<Tss>(),
-    "the TSS limit ends at the refusing byte"
+    offset_of!(Tss, io_bitmap) + size_of::<IoBitmap>() == size_of::<Tss>(),
+    "the TSS limit ends at the bitmap's refusing byte"
 );
 
 /// Per-CPU fault state machine for the escalation policy on nested faults.
@@ -119,11 +113,7 @@ pub struct PerCpu {
     log_shard: u64,
     /// Non-zero inside this CPU's NMI handler, written only by `arch::idt::nmi`'s entry; IST2 isn't re-entrant, so this proves no second NMI lands on it.
     nmi_active: u32,
-    /// The token of the attempt that booted this AP; the AP echoes it into `AP_STARTED` so a stale AP cannot answer for a later attempt. Zero on the BSP.
     ap_token: u32,
-    /// `nmi_gate::hold`'s word: the storm asks in it from another CPU, and `arch::syscall`'s entry acknowledges and spins on it inside its window, through [`OFF_NMI_HOLD`].
-    #[cfg(feature = "boot-actuators")]
-    nmi_hold: AtomicU64,
     /// Interrupt deliveries, one counter per `irq_census::Source`; written only by `irq_census::irq_took!`, kept last so growing `SLOTS` moves nothing else.
     pub irq_counts: [AtomicU64; crate::irq_census::SLOTS],
 }
@@ -220,9 +210,6 @@ pub(crate) const OFF_FAULT_STATE: u32 = offset_of!(PerCpu, fault_state) as u32;
 pub(crate) const OFF_NMI_ACTIVE: u32 = offset_of!(PerCpu, nmi_active) as u32;
 /// The AP's bring-up token, read by `ap_entry` to answer for its own attempt.
 const OFF_AP_TOKEN: u32 = offset_of!(PerCpu, ap_token) as u32;
-/// Spun on by `arch::syscall`'s entry from inside its window, with nothing pushed.
-#[cfg(feature = "boot-actuators")]
-pub(crate) const OFF_NMI_HOLD: u32 = offset_of!(PerCpu, nmi_hold) as u32;
 /// Where this CPU's interrupt counters start; `irq_census::slot_offset` derives every handler's offset from it.
 pub const OFF_IRQ_COUNTS: u32 = offset_of!(PerCpu, irq_counts) as u32;
 
@@ -328,27 +315,27 @@ pub(crate) mod gs {
     }
 }
 
-/// Same size as a task's kernel stack: a `deferred` [`kobject!`] object may
-/// own an `immediate` one, whose destructor then runs here instead.
-const IDLE_STACK_SIZE: usize = crate::process::KERNEL_STACK_SIZE;
-
-/// One unmapped 4 KiB page below every idle stack: unmapped, not filled like
-/// [`IST_GUARD_SIZE`], so a fault here escalates to IST1's `#DF` rather than silently corrupting memory.
-const IDLE_GUARD_SIZE: usize = 4096;
-
 /// The IST stacks this machine has: IST1 `#DF`, IST2 NMI, IST3 `#MC` — vectors
 /// that can arrive with `rsp` not a kernel stack (SDM Vol. 3A §6.14.5); `ist[n-1]` is IST*n*.
 pub(crate) const IST_STACKS: usize = 3;
 
-/// One size for every IST stack, for [`IDLE_STACK_SIZE`]'s reason; must leave room to double the measured high water, which `double_fault_stack` asserts.
+/// One size for every IST stack, for [`crate::sched::idle_stack::SIZE`]'s reason; must leave room to double the measured high water.
 const IST_STACK_SIZE: usize = 16384;
 
 /// Filled with [`STACK_FILL`], not unmapped: a fault already on IST1 is a triple fault, so detecting after the fact beats trapping it.
 const IST_GUARD_SIZE: usize = 4096;
 
-/// Chosen so a zeroed or ASCII byte cannot be mistaken for untouched stack.
 const STACK_FILL: u8 = 0xA5;
 const STACK_FILL_WORD: u64 = u64::from_ne_bytes([STACK_FILL; 8]);
+
+/// Sequential u64s from `base`; every address is inside the caller's
+/// already-bounds-checked allocation.
+fn words(base: u64, len: usize) -> impl Iterator<Item = u64> {
+    // SAFETY: `i < len/8` bounds each address inside the caller's checked
+    // allocation; `read_volatile` keeps the fill-pattern read.
+    (0..len / 8).map(move |i| unsafe { core::ptr::read_volatile((base as *const u64).add(i)) })
+}
+
 
 /// Allocate and initialize `PerCpu` for a CPU; the pointer lives forever, one `write` of the whole struct so a new field must be given a value here.
 fn alloc_percpu(cpu_id: u32) -> *mut PerCpu {
@@ -384,11 +371,9 @@ fn alloc_percpu(cpu_id: u32) -> *mut PerCpu {
                 fault_state: CpuFaultState::Normal as u8,
                 _pad_after_fault_state: [0; 3],
                 last_armed_ticks: AtomicU32::new(0),
-                log_shard: alloc_log_shard(cpu_id),
+                log_shard: log::shard_for(cpu_id) as *const log::Shard as u64,
                 nmi_active: 0,
                 ap_token: 0,
-                #[cfg(feature = "boot-actuators")]
-                nmi_hold: AtomicU64::new(0),
                 irq_counts: [const { AtomicU64::new(0) }; crate::irq_census::SLOTS],
             },
         );
@@ -400,26 +385,7 @@ fn alloc_percpu(cpu_id: u32) -> *mut PerCpu {
     percpu.init_tss_descriptor();
     // Published before the CPU it belongs to runs an instruction — no window where the census misses it.
     crate::irq_census::publish(cpu_id, percpu.irq_counts.as_ptr());
-    #[cfg(feature = "boot-actuators")]
-    crate::arch::nmi_gate::publish(cpu_id, &raw const percpu.nmi_hold, &raw const percpu.user_rsp);
     ptr
-}
-
-/// This CPU's log shard: cpu0's is the boot shard, every other fresh; allocated here rather than in [`init_ap`], which already logs.
-fn alloc_log_shard(cpu_id: u32) -> u64 {
-    if cpu_id == 0 {
-        return &raw const log::BOOT_SHARD as u64;
-    }
-    let layout = Layout::from_size_align(size_of::<log::Shard>(), 64).unwrap();
-    // SAFETY: `alloc_percpu`'s argument — non-zero size, power-of-two alignment, never freed.
-    let ptr = unsafe { alloc_zeroed(layout) } as *mut log::Shard;
-    assert!(!ptr.is_null(), "percpu: log shard alloc failed for cpu{cpu_id}");
-    // SAFETY: fresh, zeroed, 64-byte-aligned, and not yet published.
-    unsafe { log::Shard::initialize_zeroed(ptr) };
-    // Published before the CPU executes an instruction: a reader can't find it through `gs:` otherwise.
-    // SAFETY: the allocation is live for the machine's life and initialised.
-    unsafe { log::publish_ap_shard(cpu_id, ptr) };
-    ptr as u64
 }
 
 /// This CPU's shard, its identity, and one sequence number out of that shard.
@@ -450,85 +416,13 @@ pub fn reserve_log_slot(
             pid_off = const OFF_CURRENT_PID,
             options(preserves_flags),
         );
-        // `log-nested-reserve`'s injection point: must sit between the shard-pointer read and the `xadd`, the only place ordering is decided (no-op outside tests).
-        crate::log::nested::reserve_window();
         seq = (&*(shard as *const log::Shard)).reserve(guard);
     }
     (shard as *const log::Shard, seq, cpu, tid, pid)
 }
 
-/// One idle stack and the guard page under it.
-const IDLE_SLOT: usize = IDLE_GUARD_SIZE + IDLE_STACK_SIZE;
-
-/// Idle stacks come from their own 2 MiB pages, not the kernel heap: the guard's hole in the direct map would split a heap-shared leaf's TLB entry into 512.
-/// Never freed — a leaf returned to the PMM would keep the hole.
-static IDLE_STACKS: crate::sync::Lock<IdleArena> = crate::sync::Lock::new(IdleArena {
-    pages: alloc::vec::Vec::new(),
-    stacks: alloc::vec::Vec::new(),
-    next: 0,
-    left: 0,
-});
-
-struct IdleArena {
-    pages: alloc::vec::Vec<crate::mm::pmm::PhysPage>,
-    /// The bottom of every idle stack, so the deepest any CPU has gone reads from one.
-    stacks: alloc::vec::Vec<u64>,
-    /// Direct-map address of the next free slot.
-    next: u64,
-    left: usize,
-}
-
-/// A 4 KiB-aligned `IDLE_SLOT` from the arena.
-fn alloc_idle_slot() -> u64 {
-    let mut arena = IDLE_STACKS.lock();
-    if arena.left < IDLE_SLOT {
-        let page = crate::mm::pmm::alloc_page(crate::mm::pmm::Category::KernelHeap)
-            .expect("percpu: no physical page for an idle stack");
-        arena.next = page.direct_map().as_mut_ptr::<u8>() as u64;
-        arena.left = crate::mm::PAGE_2M as usize;
-        arena.pages.push(page);
-    }
-    let base = arena.next;
-    arena.next += IDLE_SLOT as u64;
-    arena.left -= IDLE_SLOT;
-    arena.stacks.push(base + IDLE_GUARD_SIZE as u64);
-    base
-}
-
 fn alloc_idle_stack(percpu: &mut PerCpu) {
-    let base = alloc_idle_slot();
-    crate::mm::paging::guard_kernel_page(base);
-    // SAFETY: exactly `IDLE_STACK_SIZE` bytes above the unmapped guard, within the returned `IDLE_SLOT` — filled, not zeroed, so zero can't mark "untouched" for [`idle_stack_high_water`].
-    unsafe {
-        core::ptr::write_bytes(
-            (base + IDLE_GUARD_SIZE as u64) as *mut u8,
-            STACK_FILL,
-            IDLE_STACK_SIZE,
-        )
-    };
-    percpu.idle_stack_top = base + IDLE_SLOT as u64;
-}
-
-/// How big one idle stack is; read by `SYS_DEBUG` for scale.
-#[cfg(feature = "test-actuators")]
-pub fn idle_stack_size() -> usize {
-    IDLE_STACK_SIZE
-}
-
-/// The deepest any CPU's idle stack has ever been, in bytes, read from the bottom up: nothing legitimate writes [`STACK_FILL`], so a touched byte stays changed.
-#[cfg(feature = "test-actuators")]
-pub fn idle_stack_high_water() -> usize {
-    let arena = IDLE_STACKS.lock();
-    arena
-        .stacks
-        .iter()
-        .map(|&bottom| {
-            let untouched =
-                words(bottom, IDLE_STACK_SIZE).take_while(|&w| w == STACK_FILL_WORD).count() * 8;
-            IDLE_STACK_SIZE - untouched
-        })
-        .max()
-        .unwrap_or(0)
+    percpu.idle_stack_top = crate::sched::idle_stack::alloc();
 }
 
 /// One stack per [`IST_STACKS`] row; an `ist[n-1]` left zero faults to address 0 unchecked.
@@ -579,22 +473,18 @@ pub fn ist1_report() {
         * 8;
     let used = IST_STACK_SIZE - untouched;
 
-    crate::drivers::serial::panic_raw(b"\n[ist1] used ");
-    crate::drivers::serial::panic_raw_dec(used as u64);
-    crate::drivers::serial::panic_raw(b" of ");
-    crate::drivers::serial::panic_raw_dec(IST_STACK_SIZE as u64);
-    crate::drivers::serial::panic_raw(if intact {
+    let mut uart = crate::drivers::serial::panic_registers();
+    uart.write(b"\n[ist1] used ");
+    uart.dec(used as u64);
+    uart.write(b" of ");
+    uart.dec(IST_STACK_SIZE as u64);
+    uart.write(if intact {
         b" bytes, guard intact\n"
     } else {
         b" bytes, GUARD CORRUPTED\n"
     });
 }
 
-/// Sequential u64s from `base`; every address is inside the caller's already-bounds-checked allocation.
-fn words(base: u64, len: usize) -> impl Iterator<Item = u64> {
-    // SAFETY: `i < len/8` bounds each address inside the caller's checked allocation; `read_volatile` keeps the fill-pattern read.
-    (0..len / 8).map(move |i| unsafe { core::ptr::read_volatile((base as *const u64).add(i)) })
-}
 
 /// Initialize per-CPU data for the BSP, and bring this CPU's exception
 /// handlers up. Call after paging + allocator, before `syscall::init`.
@@ -628,13 +518,6 @@ pub fn init_bsp(lapic_id: u32) {
     // handlers report on no channel of this kernel's — so a fault in `fpu`
     // below would stop the machine with the panel holding the record before it.
     super::idt::init();
-
-    // The first instruction at which a panic is reportable at all, which is why
-    // it is where this fires: what it judges is that the reset register was
-    // already decoded, so a panic here can end the machine and not just describe it.
-    if crate::actuator::test_panic_after_idt() {
-        panic!("test-panic-after-idt: the IDT is loaded and nothing else is up");
-    }
 
     super::fpu::init(0);
     // Between `fpu::init` and this function's own line: the facts `fpu::init`
@@ -679,28 +562,15 @@ pub unsafe fn set_kernel_stack(rsp: u64) {
     core::ptr::write_unaligned(&raw mut (*percpu).tss.rsp0, rsp);
 }
 
-/// Open or close `port` to Ring 3 on this CPU. Called with interrupts off, so
-/// the CPU whose bitmap this reaches cannot change under the write.
-pub fn set_port_open(port: u16, open: bool) {
-    let (byte, bit) = (port as usize / 8, 1u8 << (port % 8));
-    assert!(byte < IO_PORTS / 8, "port {port:#x} is past the I/O permission bitmap");
+/// This CPU's I/O permission bitmap. Called with interrupts off, so the CPU
+/// whose bitmap this reaches cannot change under `f`, and nothing else on it
+/// runs to reach the bitmap during `f`.
+pub fn io_bitmap<R>(f: impl FnOnce(&mut IoBitmap) -> R) -> R {
     let percpu = gs::read_u64::<OFF_SELF_PTR>() as *mut PerCpu;
-    // SAFETY: this CPU's own `PerCpu`, read from `gs:[0]`; `byte` is inside the
-    // array (asserted), and a `u8` has no alignment a packed struct could break.
-    unsafe {
-        let at = &raw mut (*percpu).tss.io_bitmap[byte];
-        *at = if open { *at & !bit } else { *at | bit };
-    }
-}
-
-/// Whether this CPU's bitmap opens `port` to Ring 3; every port past it is
-/// refused by the TSS limit. Panic-free: the crash report asks it.
-pub fn port_open(port: u16) -> bool {
-    let (byte, bit) = (port as usize / 8, 1u8 << (port % 8));
-    let percpu = gs::read_u64::<OFF_SELF_PTR>() as *const PerCpu;
-    // SAFETY: this CPU's own `PerCpu`, read from `gs:[0]`; `get` keeps the read
-    // inside the array, and a `u8` has no alignment a packed struct could break.
-    unsafe { (*percpu).tss.io_bitmap.get(byte).is_some_and(|&b| b & bit == 0) }
+    // SAFETY: this CPU's own `PerCpu`, read from `gs:[0]`, and the only Rust
+    // reference into its bitmap for as long as interrupts stay off; `IoBitmap`
+    // has alignment 1, which no packed struct breaks.
+    f(unsafe { &mut (*percpu).tss.io_bitmap })
 }
 
 /// The two words [`set_kernel_stack`] writes: `kernel_rsp` (syscall entry) and `tss.rsp0` (Ring 3 interrupt entry); read only by an instrument.
@@ -751,15 +621,15 @@ pub fn percpu_ptr() -> *mut PerCpu {
 }
 
 /// Ring 0 timer fires the assembly stub has taken; written with a plain `inc` (IF clear there).
-pub fn ring0_timer_fires() -> u32 {
+pub fn kernel_timer_fires() -> u32 {
     gs::read_u32::<OFF_RING0_TIMER_FIRES>()
 }
 
-pub fn last_seen_ring0_fires() -> u32 {
+pub fn last_seen_kernel_timer_fires() -> u32 {
     gs::read_u32::<OFF_LAST_SEEN_RING0_FIRES>()
 }
 
-pub fn set_last_seen_ring0_fires(v: u32) {
+pub fn set_last_seen_kernel_timer_fires(v: u32) {
     gs::write_u32::<OFF_LAST_SEEN_RING0_FIRES>(v);
 }
 
@@ -771,7 +641,7 @@ pub fn set_last_armed_ticks(ticks: u32) {
 /// The last byte of this CPU's idle guard page — the first byte an overflow reaches.
 #[cfg(feature = "test-actuators")]
 pub fn idle_guard_byte() -> u64 {
-    idle_stack_top() - IDLE_STACK_SIZE as u64 - 1
+    idle_stack_top() - crate::sched::idle_stack::SIZE as u64 - 1
 }
 
 /// Top of this CPU's idle stack.
@@ -904,18 +774,26 @@ pub fn preempt_count() -> u32 {
 
 #[inline]
 pub fn set_preempt_count(value: u32) {
+    #[cfg(feature = "mask-windows")]
+    let old = preempt_count();
     gs::write_u32::<OFF_PREEMPT_COUNT>(value);
+    #[cfg(feature = "mask-windows")]
+    crate::windows::preempt_set(old, value);
 }
 
 /// One increment, atomic against an interrupt on this CPU.
 #[inline]
 pub fn preempt_count_up() {
     gs::lock_inc_u32::<OFF_PREEMPT_COUNT>();
+    #[cfg(feature = "mask-windows")]
+    crate::windows::preempt_raised();
 }
 
 /// One decrement, atomic against an interrupt on this CPU.
 #[inline]
 pub fn preempt_count_down() {
+    #[cfg(feature = "mask-windows")]
+    crate::windows::preempt_lowering();
     gs::lock_dec_u32::<OFF_PREEMPT_COUNT>();
 }
 

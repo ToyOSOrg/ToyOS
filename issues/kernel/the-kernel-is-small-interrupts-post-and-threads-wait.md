@@ -10,7 +10,7 @@ Owner ruling, 2026-09-25: the kernel is to be super small, super performant
 and safe. This track holds that, and supersedes the ordering of
 `issues/kernel/every-wait-in-this-kernel-is-a-spin.md`,
 `issues/kernel/every-driver-is-still-in-the-kernel.md` and
-`issues/hardware/the-bot-scsi-machine-is-still-hand-written-in-the-kernel.md`,
+`issues/hardware/a-disk-plugged-in-after-boot-is-bound-inside-a-scheduling-pass.md`,
 which stay as the evidence each stage closes.
 
 The design review of 2026-09-25 read the code and found the same shape three
@@ -94,7 +94,7 @@ times:
       restart is a supervisor's in the test.
    4. **Partitions in blockd**. **Exit**: a partition held by one session at a
       time, the idle slot claimed by GUID and written through blockd, and
-      `SYS_PARTITION_READ/WRITE` retired once no disk the kernel drives serves
+      `SYS_PARTITION_READ/WRITE` deleted once no disk the kernel drives serves
       a claim. **Built** (#525) but for the last: the kernel's disks, the stick
       among them, still serve claims until step 10, and a `part:` row still
       mints a kernel claim.
@@ -120,8 +120,8 @@ times:
       stage's escape suite, run against fsd.
    9. **Delete the kernel storage stack**: the VFS down to ROOT's resolver,
       both writable adapters, both caches, write-back, durability, tmpfs, the
-      block layer, GPT, the NVMe driver, the refusal chain and the retired file
-      syscalls' numbers. **Exit**: `BudgetExpired`, `DEADMAN` and
+      block layer, GPT, the NVMe driver, the refusal chain and the file
+      syscalls. **Exit**: `BudgetExpired`, `DEADMAN` and
       `between_attempts` appear nowhere, and the kernel's lines and longest
       interrupts-off and preemption-off windows are measured.
    10. **usbd**, stage 5's second half: the whole xHCI moves, HID to the
@@ -135,15 +135,72 @@ times:
        has no kernel hotkey from this step, declared. **Exit**, on the T14:
        `/log` survives usbd killed mid-batch, the keyboard keeps working while
        a stick misbehaves, and Ctrl+Alt+D on the machine's own keyboard files
-       the dump with usbd killed.
+       the dump with usbd killed. Where QEMU's and the T14's xHCI keep their
+       MSI-X tables is not measured: one in the BAR that holds the registers
+       refuses usbd's claim as it refuses blockd's
+       (`issues/kernel/a-controller-whose-msix-table-is-in-bar-0-cannot-be-driven-from-userland.md`).
 5. **USB by userland**, with discovery and recovery
    written once as straight-line code. **Exit**: no interrupts-off window
    longer than a register access, and keyboard input keeps flowing while a
    stick misbehaves.
-6. **The scheduler knows nothing about devices.** Interrupt handlers only post
-   to their device's `Watch`, and the device's thread does the work. The
-   per-CPU IRQ relay, the driver list in the scheduler pass and the idle
-   special cases are deleted.
+6. A handler posts its
+   device's `Watch` and ends its interrupt; the thread waiting on that watch
+   does the work, and no step creates a kernel thread. `irq_ring`, the driver
+   list in `drain_irqs` and the idle loop's device checks are gone by step 5.
+   Each step measures the kernel's lines against stage 6's first commit, and
+   the longest interrupts-off and preemption-off windows against the readings
+   step 2's exit puts in the tree, by that exit's rule.
+   Steps 3 and 4 do not land alone: they land with stage 7.2 and
+   with usbd.
+   1. **Interrupts post.** A post is legal in a handler: the watches a handler
+      posts, and the completions of a ring they complete into, sit behind
+      interrupts-off locks nothing allocates or frees under, and every other
+      watch's lock leaves interrupts open. A claimed function's vector, the
+      IOMMU's refusal and both audio backends post from the handler, and
+      `irq_ring`'s `UserDev` and `Audio` and their arms in `drain_irqs` go.
+      The thread is the holder's: netd's, blockd's, soundd's mix thread, and
+      an `isa` claim's holder. **Exit**: `handler_post_without_a_pass`,
+      a vector taken on a CPU holding preemption off, inside a post of its own
+      watch, inside a completion into a ring polling it, or inside that ring's
+      own watch, posting once that section lets go and before any pass, red on
+      the base; the watch's loom models over the new post.
+   2. **The windows, measured**: the longest interrupts-off and preemption-off
+      windows per CPU, reported beside the IRQ census and fed by each
+      architecture's masking primitives and entries, the number the ARM
+      track's stage 4 owes as well. Built: the `mask-windows` kernel and the
+      T14's `mask_windows` row. The exit's first half is met: the instrument
+      reads back a window of known length on the T14, which is x86 metal, and
+      the row's judge refuses a boot that reads it back shorter than it was
+      held or at more than twice that. **Exit**, open: neither window is
+      longer with step 1 than
+      with it reverted on the tree that carries the instrument, the patch
+      posted on #649 being what reverted means. That comparison is the median
+      of at least five interleaved boots an arm, each read from the load's own
+      report with a report taken as the load starts, against a tolerance
+      stated before measuring, the reverted arm's own spread, with the tail
+      reported beside it, under a load in which a handler step 1 changed posts
+      into a watch that reaches a ring with parked threads
+      (`issues/kernel/a-process-lengthens-an-interrupts-off-walk-by-the-threads-it-parks-on-one-ring.md`'s
+      second bullet). `ring_park_herd` is not that load: its walks start in
+      `SYS_INBOX_SUBMIT`, which runs with interrupts masked on both arms, and
+      it reaches no handler step 1 changed.
+   3. **The i8042's thread is ps2server's** (stage 7.2): `irq_ring`'s
+      `I8042`, `keyboard_controller::service` and the idle loop's
+      `verdict_due` go with the kernel's driver. **Exit**: that stage's.
+   4. **xHCI's thread is usbd's** (step 10 above): `Xhci`, `poll_if_pending`
+      and `port_work_pending` go with the kernel's driver, and `irq_ring` with
+      them. **Exit**: step 10's.
+   5. **The pass is the scheduler's.** `drain_irqs` goes: the blocked-task
+      dump and the heartbeat become `pass`'s own, and the TCO feed stays,
+      since what it proves is that passes run. The dump keeps painting its
+      report on the panel and holding it there, a device the pass reaches
+      (owner, 2026-09-30). **Exit**: `drain_irqs` and the
+      idle loop's device checks are gone, both windows are measured against
+      step 2's readings by its rule, and the exits of
+      `issues/kernel/an-irq-watchs-freeing-cancel-compiles-in-a-handler.md`
+      and
+      `issues/kernel/nothing-fails-when-a-devices-release-or-close-stops-answering-its-polls.md`
+      are met.
 7. **The i8042 leaves the kernel.** Owner ruling, 2026-09-28: drivers are
    userland, and a dead kernel takes no input, with no emergency way.
    1. **The panic console takes no input, and an `isa` claim grants a process
@@ -152,13 +209,10 @@ times:
    2. **ps2server**, the server over that claim, feeding the kernel's keyboard
       and mouse streams so Ctrl+Alt+D and the merge with USB HID stay where
       they are; the kernel's driver, its vector, its actuators and the
-      `keyboard_controller` seam deleted. Constraints: the harness paces typed
-      input on the kernel's `i8042: drain bytes=` trace (`shell_type_once`,
-      every `i8042-trace` boot), every boot config that types needs the server,
-      and a keyboard claim is refused while no source exists, which init's
-      order of endowment then decides. **Exit**: every keyboard and mouse guest
-      test green with no i8042 code in the kernel, and typing resumes after
-      ps2server is killed and restarted.
+      `keyboard_controller` seam deleted. A keyboard claim is refused while no
+      source exists, which init's order of endowment then decides. **Exit**:
+      no i8042 code in the kernel, and typing resumes after ps2server is killed
+      and restarted.
 
 ## Standing
 

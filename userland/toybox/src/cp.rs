@@ -106,9 +106,8 @@ fn stream(reader: &mut File, source: &Path, partial: &Path) -> Result<(), String
     sync(&writer, partial)
 }
 
-/// Closing a file reports nothing: the last handle's drop hands its dirty pages
-/// to the kernel's write-back queue and returns, so a copy that never asks is a
-/// copy that cannot be told the volume was full. `fsync` is the channel that
+/// Closing a file reports nothing, so a copy that never asks is a copy that
+/// cannot be told the volume was full. `fsync` is the channel that
 /// answers, which is why every write here goes through this function.
 fn sync(writer: &File, partial: &Path) -> Result<(), String> {
     writer.sync_all().map_err(|e| format!("flushing {}: {e}", partial.display()))

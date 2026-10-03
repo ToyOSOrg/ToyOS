@@ -6,7 +6,7 @@ opened: 2026-09-27
 
 # `screen_diag_boot` finds no `i8042:` line on the panel
 
-`screen_diag_boot` (nightly tier) fails with `"i8042:" is not on screen five
+`screen_diag_boot` fails with `"i8042:" is not on screen five
 seconds after the boot finished`. The decoded panel ends at `Boot: complete`,
 and no i8042 line is painted in the five seconds after it. The i8042 health
 line (`report_health`, `to_screen`) never reaches the panel on the diag image.
@@ -21,7 +21,8 @@ The range 3f46a019..e8d7c9c0 holds fourteen landings and is not bisected.
 The candidates that touch the idle path, the console or the log are #502
 (a288537b), #492 (b0adc600) and #506 (265a0fce).
 
-`cargo run -- --known-red screen_diag_boot` answers NO.
-
 **Exit**: the landing named by a build at it and at its parent, and
 `screen_diag_boot` green on a nightly.
+
+**Its test is deleted**, as a red test nobody has a fix for is: `8bf3fc24d`
+took `screen_diag_boot` out, and `git revert 8bf3fc24d` brings it back.

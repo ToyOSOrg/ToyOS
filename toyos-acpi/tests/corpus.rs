@@ -12,8 +12,8 @@ use common::{declare_len, entry, madt, rsdp, sdt, xsdt, Machine};
 use toyos_abi::boot::RootBridgeWindow;
 use toyos_acpi::{
     dsdt_address, ecam_base, find_table, hpet_base, iapc_boot_arch, madt_entries, memory_windows,
-    reset_register, rtc_century, Century, MadtEntry, MadtHalt, Phys, Reset, Table, TableError,
-    MADT_ENTRIES, MAX_TABLE_LEN,
+    psci, reset_register, rtc_century, s5_slp_typ, Century, MadtEntry, MadtHalt, Phys, Psci, Reset,
+    Table, TableError, MADT_ENTRIES, MAX_TABLE_LEN, S5,
 };
 
 const RSDP_AT: u64 = 0x1_0000;
@@ -395,6 +395,7 @@ fn no_single_byte_mutation_of_a_real_table_panics_or_runs_away() {
                     let _ = iapc_boot_arch(m, rsdp_at);
                     if let Ok(t) = find_table(m, rsdp_at, b"FACP", 36) {
                         let _ = reset_register(&t);
+                        let _ = psci(&t);
                     }
                     if let Ok(t) = find_table(m, rsdp_at, b"APIC", MADT_ENTRIES) {
                         // Bounded by the table's own length, so a walk that has
@@ -429,22 +430,12 @@ fn no_single_byte_mutation_of_a_real_table_panics_or_runs_away() {
     assert!(halts[1] > 0, "no resealed mutation halted a walk, so that arm is untested here");
 }
 
-/// **Stated as tests, so extending the decoder reds the statement.** Nothing in
-/// this crate reads what is *inside* a DSDT — `find_s5_slp_typ` scans AML and
-/// stays in the kernel — and the XSDT walk deliberately returns the first
-/// signature match's verdict rather than trying a second table of the same name.
+/// **Stated as a test, so extending the decoder reds the statement.** The XSDT
+/// walk deliberately returns the first signature match's verdict rather than
+/// trying a second table of the same name.
 #[test]
-fn the_two_things_the_corpus_does_not_cover_are_the_two_the_crate_does_not_do() {
+fn the_xsdt_walk_answers_with_its_first_match_and_tries_no_second() {
     let head = rsdp(XSDT_AT, 2, 36);
-    let dsdt = sdt(b"DSDT", 2, &[0u8; 8]);
-    let root = xsdt(&[TABLE_AT]);
-    let regions: &[(u64, &[u8])] = &[(RSDP_AT, &head), (XSDT_AT, &root), (TABLE_AT, &dsdt)];
-    let m = Machine { regions };
-    // A DSDT opens like any other table; its contents are nothing this crate
-    // reads, so no case here covers `\_S5_`.
-    assert!(Table::open(m, TABLE_AT, b"DSDT", 36).is_ok());
-    assert_eq!(hpet_base(m, RSDP_AT).err(), Some(TableError::Absent));
-
     let mut broken = sdt(b"HPET", 1, &[0u8; 20]);
     broken[9] = broken[9].wrapping_add(1);
     let good = sdt(b"HPET", 1, &[0u8; 20]);
@@ -528,6 +519,51 @@ fn reset_fields_are_read_only_from_a_revision_that_defines_them() {
     assert_eq!(reset_of(&short), Reset::Absent);
 }
 
+/// A revision-`rev` FADT carrying `ARM_BOOT_ARCH` `flags` at 129 and `FADT
+/// Minor Version` `minor` at 131.
+fn arm_facp(rev: u8, minor: u8, flags: u16) -> Vec<u8> {
+    let mut body = vec![0u8; 132 - 36];
+    body[129 - 36..131 - 36].copy_from_slice(&flags.to_le_bytes());
+    body[131 - 36] = minor;
+    sdt(b"FACP", rev, &body)
+}
+
+fn psci_of(table: &[u8]) -> Psci {
+    let regions: &[(u64, &[u8])] = &[(TABLE_AT, table)];
+    let fadt = Table::open(Machine { regions }, TABLE_AT, b"FACP", 36).expect("a sealed FADT");
+    psci(&fadt)
+}
+
+/// `ARM_BOOT_ARCH` on a FADT that defines it.
+#[test]
+fn the_psci_conduit_is_read_off_a_fadt_that_defines_it() {
+    assert_eq!(psci_of(&arm_facp(6, 3, 0b01)), Psci::Smc);
+    assert_eq!(psci_of(&arm_facp(6, 3, 0b11)), Psci::Hvc);
+    assert_eq!(psci_of(&arm_facp(6, 3, 0b10)), Psci::Absent, "USE_HVC without COMPLIANT is no PSCI");
+    assert_eq!(psci_of(&arm_facp(6, 3, 0)), Psci::Absent);
+    assert_eq!(psci_of(&arm_facp(5, 1, 0b01)), Psci::Smc, "5.1 is the first version with the field");
+}
+
+/// Before ACPI 5.1 the three bytes are reserved, and flags written there are
+/// not read; the minor version is the low nibble, the high one an errata letter.
+#[test]
+fn a_fadt_before_acpi_5_1_says_nothing_about_psci() {
+    assert_eq!(psci_of(&arm_facp(5, 0, 0b11)), Psci::Undefined { revision: 5, minor: 0 });
+    assert_eq!(psci_of(&arm_facp(3, 0, 0b01)), Psci::Undefined { revision: 3, minor: 0 });
+    assert_eq!(psci_of(&arm_facp(5, 0x10, 0b01)), Psci::Undefined { revision: 5, minor: 0 });
+}
+
+/// A table that ends inside `ARM_BOOT_ARCH`, or before the minor version that
+/// says whether it has one, is short whatever its revision says.
+#[test]
+fn a_fadt_that_ends_before_arm_boot_arch_is_short() {
+    for len in [130, 131] {
+        let mut short = arm_facp(6, 3, 0b01);
+        declare_len(&mut short, len);
+        assert_eq!(psci_of(&short), Psci::Short, "a FADT of {len} bytes");
+    }
+}
+
 /// Where the two firmwares' descriptor lists sit for the sweep below.
 const ROOT_BRIDGE_AT: u64 = 0x4_0000;
 const ROOT_BRIDGES: &[(&str, &[u8])] = &[
@@ -568,4 +604,69 @@ fn no_single_byte_mutation_of_a_firmwares_descriptor_list_panics_or_runs_away() 
     // decoded, would be measuring one path.
     assert_eq!(mutations, 2 * 186 * 255);
     assert!(refused > 0 && refused < mutations, "{refused} of {mutations} refused");
+}
+
+/// `dsdt` opened as the kernel opens one, and its `\_S5_` read.
+fn s5_of(dsdt: &[u8]) -> S5 {
+    let regions: &[(u64, &[u8])] = &[(TABLE_AT, dsdt)];
+    let dsdt = Table::open(Machine { regions }, TABLE_AT, b"DSDT", 36).expect("DSDT");
+    s5_slp_typ(&dsdt)
+}
+
+/// `Name (_S5_, Package (4) { first, ... })`: `NameOp`, the name,
+/// `PackageOp`, a one-byte `PkgLength`, `NumElements`, then `first` and three
+/// `ZeroOp`s.
+fn s5_package(first: &[u8]) -> Vec<u8> {
+    let mut aml = vec![0x08, b'_', b'S', b'5', b'_', 0x12, (2 + first.len() + 3) as u8, 0x04];
+    aml.extend_from_slice(first);
+    aml.extend_from_slice(&[0x00; 3]);
+    aml
+}
+
+/// `ZeroOp`, `OneOp` and a `BytePrefix` constant are each the value they
+/// encode, and `\_S4_`'s package before it is not `\_S5_`'s.
+#[test]
+fn s5s_first_element_is_read_whichever_constant_encodes_it() {
+    let s4 = [0x08, b'_', b'S', b'4', b'_', 0x12, 0x08, 0x04, 0x0A, 0x06, 0x0A, 0x06, 0x00, 0x00];
+    for (first, want) in [(&[0x00][..], 0), (&[0x01], 1), (&[0x0A, 0x07], 7)] {
+        let aml = [&s4[..], &s5_package(first)].concat();
+        assert_eq!(s5_of(&sdt(b"DSDT", 2, &aml)), S5::SlpTyp(want), "{first:x?}");
+    }
+}
+
+/// A `PkgLength` whose lead byte says one more follows: the element is past
+/// both, where reading it one byte early would answer `NumElements`, 4.
+#[test]
+fn a_two_byte_package_length_is_stepped_over() {
+    let aml = [0x08, b'_', b'S', b'5', b'_', 0x12, 0x48, 0x00, 0x04, 0x0A, 0x05, 0x00, 0x00, 0x00];
+    assert_eq!(s5_of(&sdt(b"DSDT", 2, &aml)), S5::SlpTyp(5));
+}
+
+/// Three bits hold `SLP_TYPx`: a wider constant, and an encoding this scan
+/// does not read as a byte (`WordPrefix`), are refused with the byte, never
+/// shifted into `SLP_EN`.
+#[test]
+fn an_s5_value_wider_than_slp_typ_is_refused_with_it() {
+    assert_eq!(s5_of(&sdt(b"DSDT", 2, &s5_package(&[0x0A, 0x08]))), S5::Wide(8));
+    assert_eq!(s5_of(&sdt(b"DSDT", 2, &s5_package(&[0x0B, 0x05, 0x00]))), S5::Wide(0x0B));
+}
+
+/// No `_S5_`, an `_S5_` that is not a package, and a package the table ends
+/// inside are all no soft-off.
+#[test]
+fn an_s5_package_that_is_not_there_to_its_first_element_is_absent() {
+    assert_eq!(s5_of(&sdt(b"DSDT", 2, &[0u8; 16])), S5::Absent);
+    let method = [0x14, 0x07, b'_', b'S', b'5', b'_', 0x00, 0xA3];
+    assert_eq!(s5_of(&sdt(b"DSDT", 2, &method)), S5::Absent);
+    let cut = &s5_package(&[0x0A, 0x05])[..9];
+    assert_eq!(s5_of(&sdt(b"DSDT", 2, cut)), S5::Absent);
+}
+
+/// The scan stops at the declared length: a package in bytes past it, which
+/// the machine holds and the table does not, is not read.
+#[test]
+fn an_s5_package_past_the_declared_length_is_not_read() {
+    let mut dsdt = sdt(b"DSDT", 2, &s5_package(&[0x01]));
+    declare_len(&mut dsdt, 36);
+    assert_eq!(s5_of(&dsdt), S5::Absent);
 }

@@ -57,16 +57,34 @@ pub fn thread_pointer() -> u64 {
     tp
 }
 
+/// Install the thread pointer the next return to EL0 runs with.
+/// # Safety
+/// `tp` is the thread's own, which the kernel computed for it.
+pub unsafe fn write_thread_pointer(tp: u64) {
+    // SAFETY: `TPIDR_EL0` is EL0's register; the kernel never reads through it.
+    unsafe { asm!("msr tpidr_el0, {}", in(reg) tp, options(nomem, nostack, preserves_flags)) };
+}
+
 /// Unmask interrupts on this CPU: `DAIF.I` and `DAIF.F`.
 pub fn enable_interrupts() {
+    #[cfg(feature = "mask-windows")]
+    if !interrupts_enabled() {
+        crate::windows::irqs_unmasking();
+    }
     // SAFETY: writes two `DAIF` bits; a compiler barrier, so no access moves across it.
     unsafe { asm!("msr daifclr, #3", options(nostack)) };
 }
 
 /// Mask interrupts on this CPU.
 pub fn disable_interrupts() {
+    #[cfg(feature = "mask-windows")]
+    let were_open = interrupts_enabled();
     // SAFETY: writes two `DAIF` bits; a compiler barrier, so no access moves across it.
     unsafe { asm!("msr daifset, #3", options(nostack)) };
+    #[cfg(feature = "mask-windows")]
+    if were_open {
+        crate::windows::irqs_masked();
+    }
 }
 
 /// Whether this CPU takes interrupts: `DAIF.I` clear.
@@ -114,5 +132,5 @@ pub fn hardware_id() -> u32 {
     let mpidr: u64;
     // SAFETY: reads an ID register.
     unsafe { asm!("mrs {}, mpidr_el1", out(reg) mpidr, options(nomem, nostack, preserves_flags)) };
-    ((mpidr & 0xFF_FFFF) | ((mpidr >> 8) & 0xFF00_0000)) as u32
+    toyos_gicv3::packed_affinity(mpidr)
 }

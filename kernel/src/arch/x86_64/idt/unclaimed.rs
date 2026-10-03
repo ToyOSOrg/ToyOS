@@ -56,7 +56,10 @@ pub(super) extern "sysv64" fn unclaimed_entry() {
 }
 
 /// Counts the delivery, remembers the vector, and EOIs only if the ISR needs one.
+/// Its `iretq` returns to either ring with interrupts open, as the vector found them.
 extern "sysv64" fn took() {
+    #[cfg(feature = "mask-windows")]
+    crate::windows::irqs_masked();
     crate::arch::percpu::irq_took!(Unclaimed);
     match apic::in_service_highest() {
         Some(vector) => {
@@ -67,6 +70,8 @@ extern "sysv64" fn took() {
             NO_ISR.fetch_add(1, Ordering::Relaxed);
         }
     }
+    #[cfg(feature = "mask-windows")]
+    crate::windows::irqs_unmasking();
 }
 
 /// Whether `vector` has been taken through this gate.

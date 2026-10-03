@@ -6,9 +6,8 @@ opened: 2026-09-07
 
 # No boot that panics can be judged on the T14
 
-Three of this project's kernel-performed resets are reachable under QEMU and
-judged there by `usb_reset_hands_devices_back`: a job list's `reboot`, the test
-runner's job deadline, and the panic console's bound. Only the first two reach
+Three of this project's kernel-performed resets are reachable under QEMU: a job
+list's `reboot`, the test runner's job deadline, and the panic console's bound. Only the first two reach
 the T14, and the reason is the loop rather than the kernel.
 
 **Two walls, and a boot has to clear both.**
@@ -18,9 +17,7 @@ the T14, and the reason is the loop rather than the kernel.
    `Boot: complete (Nms)` *and* a trailing `Rebooting.`. A boot whose subject is
    a panic correctly writes neither the second word nor anything after it, so
    the loop refuses it — the readback is still written, and
-   `tests/common/metal.rs`'s `Mode::Drive` tolerates the non-zero exit, but the
-   boot-level rows `tests/metal-profile.toml` prices are then judged against a
-   log the loop has already called unfit.
+   `tests/common/metal.rs`'s `Mode::Drive` tolerates the non-zero exit.
 
 2. `test-late-panic` fires in `kernel_main` after `spawn_init` and before
    `enter_idle_loop`, so `logd` has not run: that boot writes no `/log` file at
@@ -29,14 +26,6 @@ the T14, and the reason is the loop rather than the kernel.
    `src/metalimage.rs`'s `derive` appends `reboot` to every arm's job list
    unconditionally, so the runner hands the machine back at about one second and
    the probe never comes due.
-
-## What it costs
-
-The panic path's register stop (`kernel/src/drivers/xhci/stop.rs`) is the one
-arm of the ruling "no reset this kernel performs leaves a USB device
-mid-command" that only QEMU has answered. QEMU cannot wedge a stick, so what is
-unproven on hardware is exactly the case the ruling is about: the machine's own
-controllers, its own stick, and a reset with no shutdown in front of it.
 
 ## What would clear it
 

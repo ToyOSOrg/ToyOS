@@ -1,14 +1,14 @@
-# The one boot that runs netd with a virtio NIC in front of it.
+# The one boot that runs netd with a virtio NIC in front of it, with blockd's
+# NVMe controller beside it: `iommu_virtio_platform`'s machine.
 #
 # netd's `main` opens the NIC before anything else and returns on `NotFound`,
 # so a config with no NIC never reaches a line of the daemon proper.
 #
 # test-runner is here for the same reason it is in metalcase: it makes the boot
-# announce itself and lets an in-guest binary be driven over the
-# ===TEST_START=== protocol.
+# announce itself.
 
 [boot]
-start = ["logd", "netd", "test-runner"]
+start = ["logd", "blockd", "fsd", "netd", "test-runner"]
 
 # `every_boot_config_runs_logd` is what refuses a boot config without it: the
 # kernel keeps the record ring and writes no file, so such a boot's `/log` is
@@ -16,9 +16,6 @@ start = ["logd", "netd", "test-runner"]
 [programs.logd]
 service = true
 syscap = ["logread"]
-# What lets `logd` serve this boot's log on the network, to whoever connects:
-# without it the log is served on this machine only.
-receives = ["netd"]
 
 # netd holds the NIC's PCI function and drives it: the virtqueues, the register
 # window and the interrupt are its own, and the kernel keeps only the claim.
@@ -29,31 +26,21 @@ service = true
 serves = ["netd"]
 devices = ["pci:1af4:1041"]
 
-# `launcher` for `launcher_refusals`, whose subject is what a client can make
-# `/system/bin/init` do — so the test estate has to be able to reach it somewhere.
-# This is also the only config whose test binaries take the launcher path to
-# `Command::spawn` at all: everywhere else test-runner holds no connector and
-# every spawn is direct.
 [programs.test-runner]
-receives = ["netd", "launcher"]
-syscap = ["logread"]
-# The second claimant on netd's function, and the only one in the tree: what
-# `pci_function_is_exclusive` reads is the kernel answering `Owned` to it while
-# netd keeps driving the card. `src/build.rs` names this exact entry — config,
-# program, device — as the one exception to
-# `every_device_class_has_at_most_one_claimant`.
-devices = ["pci:1af4:1041"]
 
-# What `launcher_refusals` asks init to start. A declared program that serves
-# nothing and provides nothing, so a refused launch of it takes no acceptor
-# with it and a granted one is a clean round trip.
-[programs.toybox]
+# The block service: the NVMe controller this machine's DATA is on, driven
+# from userland through its claim. Started again when it ends; the claim goes
+# back with the process and is minted again for the next.
+[programs.blockd]
+service = true
+restart = true
+serves = ["block"]
+devices = ["pci:1b36:0010"]
 
-# What `spawn_cwd` asks for the owner's `cd` and a launch from it: the shell
-# reaches the launcher through its own row, as it does on the desktop.
-[programs.shell]
-receives = ["launcher"]
-
-# What `dns_resolve` runs: a name's addresses, asked of netd's resolver.
-[programs.host]
-receives = ["netd"]
+# The file servers: DATA, the log and the running slot's volume, one process
+# each, serving every program the directories of its role. Started again when
+# one ends, on the same ports.
+[programs.fsd]
+restart = true
+roles = ["data", "log", "boot"]
+receives = ["block"]

@@ -34,8 +34,7 @@ notification for a resource it was promised was gone.
 
 There used to be an ABI op for this. `toyos-abi/src/inbox.rs` op code 2 was
 `IORING_OP_POLL_REMOVE`, retired in PR #89 (`c41b831`,
-"abi: four names retired, and the number each one held") as caller-less. The
-retirement's own reasoning is recorded at the site:
+"abi: four names retired, and the number each one held") as caller-less:
 
 ```
 // Op code 2 unused (formerly IORING_OP_POLL_REMOVE). It had no submitter

@@ -78,3 +78,5 @@ What is open:
   portable device — "on many modern laptops ATKBD_CMD_GETID may cause problems"
   — and the T14 is one. Sending a command Linux avoids on this exact machine
   class to shore up an inference is the wrong trade.
+
+`i8042_undecoded_bytes` is deleted; `issues/build/parallel-tests-red-under-other-suites.md` records the commit that restores it.

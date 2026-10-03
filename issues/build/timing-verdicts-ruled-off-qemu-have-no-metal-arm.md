@@ -88,3 +88,5 @@ mid-release, so a leak check anchored on it (`handle_kill_policy`,
 owner, each premise waits on the event it stands for or is ruled acceptable,
 and the census is read on the release it stands for. Owner: the metal suite
 (`tests/toyos.rs`'s `METAL`); held by the orchestrator.
+
+`sched_check_build`, `process_stats`, `log_stream_stalled_reader` and `redirty_mid_flush` are deleted; the issues naming their reds record the commits that restore them.

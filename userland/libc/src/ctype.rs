@@ -50,3 +50,22 @@ pub extern "C" fn toupper(c: i32) -> i32 {
 pub extern "C" fn tolower(c: i32) -> i32 {
     if isupper(c) != 0 { c + 32 } else { c }
 }
+#[no_mangle]
+pub extern "C" fn isblank(c: i32) -> i32 {
+    (c == b' ' as i32 || c == b'\t' as i32) as i32
+}
+
+#[no_mangle]
+pub extern "C" fn iscntrl(c: i32) -> i32 {
+    ((0..0x20).contains(&c) || c == 0x7f) as i32
+}
+
+#[no_mangle]
+pub extern "C" fn isgraph(c: i32) -> i32 {
+    (c > 0x20 && c <= 0x7e) as i32
+}
+
+#[no_mangle]
+pub extern "C" fn ispunct(c: i32) -> i32 {
+    (isgraph(c) != 0 && isalnum(c) == 0) as i32
+}

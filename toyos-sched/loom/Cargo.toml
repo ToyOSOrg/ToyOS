@@ -101,9 +101,23 @@ gate-fence-off = []
 #   cargo test -p toyos-sched-loom --release --features poll-fire-load-store --test loom_watch
 #
 poll-fire-load-store = []
+# The control for `poll_racing`'s lost-completion half: its producer posts, then
+# stores the readiness, the reverse of the order `pcidev::note_fault` keeps, so
+# both `*_racing_a_post*_completes_exactly_once` models must red with a poll
+# completed by neither:
+#
+#   cargo test -p toyos-sched-loom --features fault-posted-before-it-is-set --test loom_watch
+#
+# `toyos-sched` declares no twin, because this decides nothing in `../src`.
+fault-posted-before-it-is-set = []
 
 [dependencies]
 loom = "0.7"
+
+# `loom_watch.rs` compiles `kernel/src/inbox/polls.rs`, which names a handle and
+# a refusal.
+[dev-dependencies]
+toyos-abi = { path = "../../toyos-abi" }
 
 [lib]
 # The primitives are compiled into the lib; the models are the test targets.
@@ -112,3 +126,9 @@ path = "src/lib.rs"
 # and run there, against real atomics. Loom atomics outside a `loom::model`
 # panic, so this crate exposes no unit tests of its own.
 test = false
+
+# `kernel-loom`'s control for a ring's answer, which `polls.rs` carries and no
+# model here turns on. A `cfg` name and not a feature, since a feature here is
+# a model control.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("post-is-an-answer"))'] }

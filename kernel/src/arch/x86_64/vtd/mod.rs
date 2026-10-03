@@ -468,25 +468,6 @@ fn enable(
         let root = tables.alloc();
         for device in devices {
             let stream = StreamId::pci(device.bus, device.dev, device.func);
-            // Unreachable from the host side, so these actuators substitute for
-            // it; both are answered on the device's first *read*, since a
-            // first-write access would cache write permission and never fault.
-            if crate::actuator::iommu_context_absent()
-                && device.matches_class(NVME_CLASS, NVME_SUBCLASS, None)
-            {
-                log!("iommu: unit{index} leaves {stream} out of the root table (actuator)");
-                continue;
-            }
-            // A present context entry naming an empty domain, distinct from a
-            // missing entry: passthrough would fault identically either way.
-            if crate::actuator::iommu_empty_domain()
-                && device.matches_class(NVME_CLASS, NVME_SUBCLASS, None)
-            {
-                let empty = tables.alloc();
-                log!("iommu: unit{index} gives {stream} a domain with no mappings (actuator)");
-                table::bind_identity(&mut tables, root, stream, empty, width);
-                continue;
-            }
             table::bind_identity(&mut tables, root, stream, domain, width);
         }
 
@@ -555,12 +536,6 @@ fn enable(
         devices.len(),
     );
 }
-
-/// Device class the actuators target, not a bus/device/function: QEMU's slot
-/// choice is not this kernel's business, and the harness reads the same
-/// class independently out of `pci::enumerate`.
-const NVME_CLASS: u8 = 0x01;
-const NVME_SUBCLASS: u8 = 0x08;
 
 /// Slot of the per-width domain cache; exhaustive match so a new `AddressWidth` fails to compile here.
 fn domain_slot(width: AddressWidth) -> usize {

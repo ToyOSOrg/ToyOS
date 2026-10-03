@@ -165,12 +165,7 @@ pub(super) fn sys_mmap(req_addr: u64, size: u64, prot: MmapProt, flags: MmapFlag
             Ok(vaddr)
         });
         match vaddr {
-            Ok(v) => {
-                if crate::actuator::copy_meets_a_remap() {
-                    crate::user_ptr::remap_race::mapped();
-                }
-                v.raw()
-            }
+            Ok(v) => v.raw(),
             Err(()) => SyscallError::ResourceExhausted.to_u64(),
         }
     }
@@ -196,6 +191,20 @@ pub(super) fn sys_munmap(addr: u64, _size: u64) -> u64 {
     // sibling can be spinning on the process-data lock with `IF` clear.
     drop(unmapped);
     0
+}
+
+/// The first `len` bytes of the shared memory object `handle` names, as a
+/// program image; `Err` is the syscall's answer.
+pub(super) fn shared_image(handle: u64, len: u64) -> Result<crate::file_backing::SharedImage, u64> {
+    let Ok(raw) = u32::try_from(handle) else { return Err(SyscallError::InvalidArgument.to_u64()) };
+    let object = process::with_process_data(|data| {
+        data.handles.get::<crate::object::shm::SharedMemObject>(
+            toyos_abi::handle::RawHandle(raw),
+            toyos_abi::handle::Rights::MAP,
+        )
+    })
+    .map_err(|e| e.refuse())?;
+    crate::file_backing::SharedImage::over(object, len).map_err(|e| e.to_u64())
 }
 
 pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init_out: Option<UserAddr>) -> u64 {
@@ -484,11 +493,14 @@ pub(super) fn sys_query_modules(out: &mut UserBytesMut) -> u64 {
         let mut path_offset = (module_count * info_size) as u32;
 
         let (eh_addr, eh_size) = data.elf.exe_eh_frame_hdr;
+        let (phdr, phnum) = data.elf.exe_phdrs;
         let exe_info = ModuleInfo {
             base: data.elf.elf_base.raw(),
             text_end: data.elf.exe_vaddr_max,
             eh_frame_hdr: eh_addr,
             eh_frame_hdr_size: eh_size,
+            phdr,
+            phnum: phnum.into(),
             path_offset,
             path_len: exe_path_bytes.len() as u32,
         };
@@ -507,6 +519,8 @@ pub(super) fn sys_query_modules(out: &mut UserBytesMut) -> u64 {
                 text_end: lib.user_end(),
                 eh_frame_hdr: lib.eh_frame_hdr.map_or(0, |r| (lib.user_base + r.start().get()).raw()),
                 eh_frame_hdr_size: lib.eh_frame_hdr.map_or(0, |r| r.len()),
+                phdr: (lib.user_base + lib.phdrs.image().start().get()).raw(),
+                phnum: lib.phdrs.count().into(),
                 path_offset,
                 path_len: lib_path_bytes.len() as u32,
             };

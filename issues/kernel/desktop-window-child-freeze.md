@@ -1,5 +1,5 @@
 ---
-status: expected-red
+status: assigned
 kind: defect
 opened: 2026-08-06
 task: 156
@@ -134,10 +134,7 @@ machine that is still running passes somewhere. Judge the next occurrence by the
 signature exactly as before; a green run of this test proves what it always
 proved, which is nothing.
 
-Two things a reader looking for the next sighting needs. The test is
-`Tier::Nightly` (`src/tiers.rs`), so a plain `cargo test` does not run it at all
-— `cargo test --test toyos-build -- --nightly desktop_window_child` does. And
-the one instrument that could name what a stopped CPU is doing has still never
+The one instrument that could name what a stopped CPU is doing has still never
 been fired at one: `sched::dump`'s NMI probe separates a CPU spinning with `IF`
 clear from one halted with its kick undelivered from one wedged below the
 interrupt layer. Take `info registers -a` over QMP before pressing Ctrl+Alt+D,
@@ -170,7 +167,7 @@ calls "#156 did not fire this run, which proves nothing". What changed is that a
 red now means the desktop stopped answering, which is what the declaration was
 written about.
 
-**Exit condition and owner.** Re-enabled when #156 is fixed and a `sched::dump`
+**Exit condition and owner.** Restored when #156 is fixed and a `sched::dump`
 NMI probe taken on a reproduction confirms no CPU stopped taking scheduler
 passes during the freeze — nothing short of that instrument distinguishes this
 signature from a green run, which this entry has already shown proves nothing
@@ -178,3 +175,6 @@ either way. Owner: `toyos-sched`, the placement track that closed the
 CPU-selection half of this family (`CpuHandle::answering`,
 `toyos-sched/src/cpu.rs`) and is nearest the remaining half; held by the
 orchestrator.
+
+**Its test is deleted**: `cd685b10a` and `b20d3fd40` took `desktop_window_child`
+out.

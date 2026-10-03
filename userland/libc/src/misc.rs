@@ -1,12 +1,13 @@
 // Miscellaneous POSIX/C functions: environment, process, signals, sysconf.
 
+use alloc::vec::Vec;
 use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use toyos_abi::syscall;
 
-const ENOSYS: i32 = 38;
-const ECHILD: i32 = 10;
+use crate::errno::{ECHILD, ENOSYS};
+use crate::strtonum;
 
 // Environment variables
 
@@ -123,38 +124,52 @@ pub unsafe extern "C" fn waitpid(_pid: i32, _status: *mut i32, _options: i32) ->
 
 // Exit / abort / atexit
 
-const MAX_ATEXIT: usize = 32;
-static mut ATEXIT_FNS: [Option<unsafe extern "C" fn()>; MAX_ATEXIT] = [None; MAX_ATEXIT];
-static mut ATEXIT_COUNT: usize = 0;
+/// A handler `exit` runs: `atexit`'s takes nothing, `__cxa_atexit`'s its object.
+enum AtExit {
+    Plain(unsafe extern "C" fn()),
+    WithArg(unsafe extern "C" fn(*mut u8), *mut u8),
+}
+
+// SAFETY: the argument is the registrant's to hand to its own handler.
+unsafe impl Send for AtExit {}
+
+/// Every handler registered, in order; `exit` runs the last first.
+static AT_EXIT: crate::pthread::Lock<Vec<AtExit>> = crate::pthread::Lock::new(Vec::new());
+
+/// What names this image to `__cxa_atexit`: the address is the identity.
+#[no_mangle]
+pub static __dso_handle: usize = 0;
 
 #[no_mangle]
 pub unsafe extern "C" fn atexit(func: unsafe extern "C" fn()) -> i32 {
-    let count = ptr::addr_of!(ATEXIT_COUNT).read();
-    if count >= MAX_ATEXIT {
-        return -1;
-    }
-    let fns = ptr::addr_of_mut!(ATEXIT_FNS).as_mut().unwrap();
-    fns[count] = Some(func);
-    ptr::addr_of_mut!(ATEXIT_COUNT).write(count + 1);
+    AT_EXIT.lock().push(AtExit::Plain(func));
     0
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn __cxa_atexit(func: unsafe extern "C" fn(*mut u8), arg: *mut u8, _dso: *mut u8) -> i32 {
+    AT_EXIT.lock().push(AtExit::WithArg(func, arg));
+    0
+}
+
+/// Run the handlers, the last registered first, including any a handler
+/// registers; none runs with the list locked.
 unsafe fn run_atexit() {
-    // Run in reverse order
-    let fns = ptr::addr_of_mut!(ATEXIT_FNS).as_mut().unwrap();
-    let mut count = ptr::addr_of!(ATEXIT_COUNT).read();
-    while count > 0 {
-        count -= 1;
-        if let Some(f) = fns[count] {
-            f();
+    loop {
+        let Some(handler) = AT_EXIT.lock().pop() else { return };
+        match handler {
+            AtExit::Plain(f) => unsafe { f() },
+            AtExit::WithArg(f, arg) => unsafe { f(arg) },
         }
     }
-    ptr::addr_of_mut!(ATEXIT_COUNT).write(0);
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn exit(status: i32) -> ! {
-    run_atexit();
+    unsafe {
+        crate::pthread::run_thread_dtors();
+        run_atexit();
+    }
     #[cfg(not(feature = "std-runtime"))]
     crate::runtime::fini();
     super::stdio::fflush(ptr::null_mut());
@@ -196,11 +211,43 @@ pub unsafe extern "C" fn sigaction(
     0 // success
 }
 
+/// The calling thread's mask, which is what POSIX's process mask is in a
+/// process of one thread (`pthread_sigmask`).
 #[no_mangle]
-pub unsafe extern "C" fn sigprocmask(
-    _how: i32, _set: *const u64, _oldset: *mut u64,
-) -> i32 {
+pub unsafe extern "C" fn sigprocmask(how: i32, set: *const u64, oldset: *mut u64) -> i32 {
+    match unsafe { crate::pthread::pthread_sigmask(how, set, oldset) } {
+        0 => 0,
+        refused => {
+            crate::errno::set(refused);
+            -1
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sigemptyset(set: *mut u64) -> i32 {
+    unsafe { *set = 0 };
     0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sigfillset(set: *mut u64) -> i32 {
+    unsafe { *set = crate::sigmask::FULL };
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sigaddset(set: *mut u64, signo: i32) -> i32 {
+    match crate::sigmask::with(unsafe { *set }, signo) {
+        Some(next) => {
+            unsafe { *set = next };
+            0
+        }
+        None => {
+            crate::errno::set(crate::errno::EINVAL);
+            -1
+        }
+    }
 }
 
 #[no_mangle]
@@ -215,17 +262,25 @@ pub unsafe extern "C" fn kill(_pid: i32, _sig: i32) -> i32 {
 
 // sysconf
 
+const _SC_ARG_MAX: i32 = 0;
 const _SC_PAGESIZE: i32 = 30;
+const _SC_GETPW_R_SIZE_MAX: i32 = 70;
 const _SC_NPROCESSORS_ONLN: i32 = 84;
 const _SC_CLK_TCK: i32 = 2;
 
 #[no_mangle]
 pub unsafe extern "C" fn sysconf(name: i32) -> i64 {
     match name {
-        _SC_PAGESIZE => 4096,
+        _SC_PAGESIZE => crate::memreq::PAGE as i64,
         _SC_NPROCESSORS_ONLN => syscall::cpu_count() as i64,
         _SC_CLK_TCK => 100,
-        _ => -1,
+        // POSIX's -1 with `errno` untouched: the function each bounds, `exec`
+        // and the `getpw*_r` lookups, is one ToyOS does not have.
+        _SC_ARG_MAX | _SC_GETPW_R_SIZE_MAX => -1,
+        _ => {
+            crate::errno::set(crate::errno::EINVAL);
+            -1
+        }
     }
 }
 
@@ -296,7 +351,22 @@ pub unsafe extern "C" fn bsearch(
     ptr::null_mut()
 }
 
-// String-to-number conversions
+// String-to-number conversions: the grammar and the rounding are `strtonum`'s.
+
+/// What C is told of `read`, a number read from `s`: its value, returned;
+/// where it ends in `endptr`, or `s` itself when there was none; and a
+/// refusal in `errno`.
+pub(crate) unsafe fn answer<U, T>(s: *const U, read: strtonum::Read<T>, endptr: *mut *mut U) -> T {
+    match read.refused {
+        Some(strtonum::Refusal::Base) => crate::errno::set(crate::errno::EINVAL),
+        Some(strtonum::Refusal::Range) => crate::errno::set(crate::errno::ERANGE),
+        None => {}
+    }
+    if !endptr.is_null() {
+        unsafe { *endptr = s.add(read.end).cast_mut() };
+    }
+    read.value
+}
 
 #[no_mangle]
 pub unsafe extern "C" fn atoi(s: *const u8) -> i32 {
@@ -309,112 +379,96 @@ pub unsafe extern "C" fn atol(s: *const u8) -> i64 {
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn atoll(s: *const u8) -> i64 {
+    strtol(s, ptr::null_mut(), 10)
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn strtol(s: *const u8, endptr: *mut *mut u8, base: i32) -> i64 {
-    if s.is_null() { return 0; }
-    let mut p = s;
-    // Skip whitespace
-    while *p == b' ' || *p == b'\t' || *p == b'\n' || *p == b'\r' { p = p.add(1); }
-    // Sign
-    let neg = *p == b'-';
-    if *p == b'-' || *p == b'+' { p = p.add(1); }
-    // Detect base
-    let mut base = base as u32;
-    if base == 0 {
-        if *p == b'0' {
-            p = p.add(1);
-            if *p == b'x' || *p == b'X' {
-                base = 16;
-                p = p.add(1);
-            } else {
-                base = 8;
-            }
-        } else {
-            base = 10;
-        }
-    } else if base == 16 && *p == b'0' && (*p.add(1) == b'x' || *p.add(1) == b'X') {
-        p = p.add(2);
-    }
-    let mut val: i64 = 0;
-    loop {
-        let c = *p;
-        let digit = match c {
-            b'0'..=b'9' => c - b'0',
-            b'a'..=b'z' => c - b'a' + 10,
-            b'A'..=b'Z' => c - b'A' + 10,
-            _ => break,
-        };
-        if digit as u32 >= base { break; }
-        val = val.wrapping_mul(base as i64).wrapping_add(digit as i64);
-        p = p.add(1);
-    }
-    if !endptr.is_null() { *endptr = p as *mut u8; }
-    if neg { -val } else { val }
+    unsafe { answer(s, strtonum::signed(s, base), endptr) }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn strtoul(s: *const u8, endptr: *mut *mut u8, base: i32) -> u64 {
-    strtol(s, endptr, base) as u64
+    unsafe { answer(s, strtonum::unsigned(s, base), endptr) }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn strtoll(s: *const u8, endptr: *mut *mut u8, base: i32) -> i64 {
-    strtol(s, endptr, base)
+    unsafe { strtol(s, endptr, base) }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn strtoull(s: *const u8, endptr: *mut *mut u8, base: i32) -> u64 {
-    strtol(s, endptr, base) as u64
+    unsafe { strtoul(s, endptr, base) }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn strtoimax(s: *const u8, endptr: *mut *mut u8, base: i32) -> i64 {
+    unsafe { strtol(s, endptr, base) }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn strtoumax(s: *const u8, endptr: *mut *mut u8, base: i32) -> u64 {
+    unsafe { strtoul(s, endptr, base) }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn strtod(s: *const u8, endptr: *mut *mut u8) -> f64 {
-    if s.is_null() { return 0.0; }
-    let mut p = s;
-    while *p == b' ' || *p == b'\t' || *p == b'\n' || *p == b'\r' { p = p.add(1); }
-    let neg = *p == b'-';
-    if *p == b'-' || *p == b'+' { p = p.add(1); }
-
-    let mut val: f64 = 0.0;
-    while *p >= b'0' && *p <= b'9' {
-        val = val * 10.0 + (*p - b'0') as f64;
-        p = p.add(1);
-    }
-    if *p == b'.' {
-        p = p.add(1);
-        let mut frac = 0.1;
-        while *p >= b'0' && *p <= b'9' {
-            val += (*p - b'0') as f64 * frac;
-            frac *= 0.1;
-            p = p.add(1);
-        }
-    }
-    if *p == b'e' || *p == b'E' {
-        p = p.add(1);
-        let exp_neg = *p == b'-';
-        if *p == b'-' || *p == b'+' { p = p.add(1); }
-        let mut exp: i32 = 0;
-        while *p >= b'0' && *p <= b'9' {
-            exp = exp * 10 + (*p - b'0') as i32;
-            p = p.add(1);
-        }
-        if exp_neg { exp = -exp; }
-        val *= super::math::pow(10.0, exp as f64);
-    }
-
-    if !endptr.is_null() { *endptr = p as *mut u8; }
-    if neg { -val } else { val }
+    unsafe { answer(s, strtonum::float::<u8, f64>(s), endptr) }
 }
 
-// abs
+#[no_mangle]
+pub unsafe extern "C" fn strtof(s: *const u8, endptr: *mut *mut u8) -> f32 {
+    unsafe { answer(s, strtonum::float::<u8, f32>(s), endptr) }
+}
+
+// abs and div
 
 #[no_mangle]
 pub unsafe extern "C" fn abs(j: i32) -> i32 {
-    if j < 0 { -j } else { j }
+    j.wrapping_abs()
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn labs(j: i64) -> i64 {
-    if j < 0 { -j } else { j }
+    j.wrapping_abs()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn llabs(j: i64) -> i64 {
+    j.wrapping_abs()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn imaxabs(j: i64) -> i64 {
+    j.wrapping_abs()
+}
+
+#[repr(C)]
+pub struct Div<T> {
+    quot: T,
+    rem: T,
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn div(numer: i32, denom: i32) -> Div<i32> {
+    Div { quot: numer / denom, rem: numer % denom }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn ldiv(numer: i64, denom: i64) -> Div<i64> {
+    Div { quot: numer / denom, rem: numer % denom }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lldiv(numer: i64, denom: i64) -> Div<i64> {
+    Div { quot: numer / denom, rem: numer % denom }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn imaxdiv(numer: i64, denom: i64) -> Div<i64> {
+    Div { quot: numer / denom, rem: numer % denom }
 }
 
 // setjmp/longjmp (minimal stub — used by some C code)
@@ -432,13 +486,20 @@ pub unsafe extern "C" fn longjmp(_env: *mut u8, _val: i32) -> ! {
 }
 
 // dlopen/dlsym/dlclose
+//
+// A C handle is the kernel's module index plus one: index 0 is a module, and
+// NULL is dlopen's failure.
+
+fn module_index(handle: *mut u8) -> Option<u64> {
+    (handle as u64).checked_sub(1)
+}
 
 #[no_mangle]
 pub unsafe extern "C" fn dlopen(path: *const u8, _flags: i32) -> *mut u8 {
     if path.is_null() { return ptr::null_mut(); }
     let path_bytes = super::posix_io::c_str_to_bytes(path);
     match syscall::dl_open(path_bytes) {
-        Ok(handle) => handle as *mut u8,
+        Ok(index) => (index + 1) as *mut u8,
         Err(_) => ptr::null_mut(),
     }
 }
@@ -446,9 +507,10 @@ pub unsafe extern "C" fn dlopen(path: *const u8, _flags: i32) -> *mut u8 {
 #[no_mangle]
 pub unsafe extern "C" fn dlsym(handle: *mut u8, symbol: *const u8) -> *mut u8 {
     if symbol.is_null() { return ptr::null_mut(); }
+    let index = module_index(handle).expect("dlsym: RTLD_DEFAULT not implemented");
     let name = super::posix_io::c_str_to_bytes(symbol);
     // SAFETY: handle is from a prior dlopen, name is a valid C string
-    match unsafe { syscall::dl_sym(handle as u64, name) } {
+    match unsafe { syscall::dl_sym(index, name) } {
         Ok(addr) => addr as *mut u8,
         Err(_) => ptr::null_mut(),
     }
@@ -456,10 +518,35 @@ pub unsafe extern "C" fn dlsym(handle: *mut u8, symbol: *const u8) -> *mut u8 {
 
 #[no_mangle]
 pub unsafe extern "C" fn dlclose(handle: *mut u8) -> i32 {
-    syscall::dl_close(handle as u64) as i32
+    match module_index(handle) {
+        Some(index) => syscall::dl_close(index) as i32,
+        None => -1,
+    }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn dlerror() -> *const u8 {
     ptr::null()
+}
+
+/// `getentropy`: at most 256 bytes of the kernel's random source, all or an
+/// error, as POSIX says.
+#[no_mangle]
+pub unsafe extern "C" fn getentropy(buffer: *mut u8, length: usize) -> i32 {
+    if length > 256 {
+        crate::errno::set(crate::errno::EINVAL);
+        return -1;
+    }
+    // Before the slice: `buffer` may be null when there is nothing to fill.
+    if length == 0 {
+        return 0;
+    }
+    let buf = unsafe { core::slice::from_raw_parts_mut(buffer, length) };
+    match syscall::random(buf) {
+        Ok(()) => 0,
+        Err(_) => {
+            crate::errno::set(crate::errno::EIO);
+            -1
+        }
+    }
 }

@@ -19,7 +19,6 @@ use toyos_abi::boot::RootBridgeWindow;
 use toyos_acpi::{memory_windows, Phys, MAX_LIST_BYTES};
 use uefi::prelude::*;
 use uefi::proto::unsafe_protocol;
-use uefi::table::boot::{OpenProtocolAttributes, OpenProtocolParams};
 
 const HEAD: &str = "Root bridge:";
 
@@ -92,21 +91,7 @@ pub fn windows(system_table: &SystemTable<Boot>, out: &mut [RootBridgeWindow]) -
 
     let mut found = 0usize;
     for (index, handle) in handles.iter().enumerate() {
-        // Never `open_protocol_exclusive`: EXCLUSIVE stops every driver holding
-        // this protocol BY_DRIVER, and firmware's own PCI bus driver is one.
-        //
-        // SAFETY: `open_protocol`'s obligation is that the handle and its
-        // protocol stay installed until the `ScopedProtocol` drops. Nothing
-        // between the two can uninstall either: the loader is the one image
-        // running, it registers no event callback, and it calls no boot service
-        // that connects or disconnects a controller.
-        let bridge = unsafe {
-            bs.open_protocol::<PciRootBridgeIo>(
-                OpenProtocolParams { handle: *handle, agent: bs.image_handle(), controller: None },
-                OpenProtocolAttributes::GetProtocol,
-            )
-        };
-        let bridge = match bridge {
+        let bridge = match crate::protocol::get::<PciRootBridgeIo>(bs, *handle) {
             Ok(bridge) => bridge,
             Err(e) => {
                 println!("{HEAD} handle {index} would not open ({e}), so the kernel is handed no window");

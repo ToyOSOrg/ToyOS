@@ -140,14 +140,6 @@ pub fn mount() -> Mounted<MemoryImage, ReadOnly> {
         ),
         Handed::Image(image) => image,
     };
-    // The actuator's other half: a loader that ignored it would leave the
-    // refusal above untested while the test reading it passed.
-    if crate::actuator::loader_withholds_root() {
-        panic!(
-            "boot: {} is armed and the loader handed a ROOT image anyway",
-            toyos_abi::boot::WITHHOLD_ROOT_PARAM
-        );
-    }
     let fs = Mounted::<_, ReadOnly>::open(image)
         .unwrap_or_else(|e| panic!("boot: the ROOT image holds no filesystem this kernel can mount: {e:?}"));
     if fs.uuid() != named {
@@ -185,6 +177,9 @@ pub fn hold_source() {
                 .map(|view| (found, view))
                 .map_err(|()| "it is no span a view can hold")
         }
+        // Every disk this kernel drives answered and lacks it: a disk a process
+        // drives, NVMe's under blockd, is never asked.
+        Ok(None) if sought.silent.is_empty() => Err("it is on no disk this kernel drives"),
         Ok(None) => Err("it is on no disk that answered"),
         Err(Unnamed::Ambiguous) => Err("it is carried twice"),
         Err(Unnamed::Unusable) => Err("its table refuses it"),

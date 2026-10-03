@@ -221,7 +221,7 @@ fn expire() -> ! {
     // The seal first, because the USB stop `reset_now` makes before it writes
     // the register is bounded but not instant, and this record is the
     // diagnostic the whole mechanism exists for.
-    crate::drivers::acpi::reset_now()
+    crate::power::reset_now()
 }
 
 /// What a sealed record opens with, and so what the next boot's loader prints

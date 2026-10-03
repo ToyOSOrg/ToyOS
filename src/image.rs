@@ -286,32 +286,6 @@ fn cmdline_with_root(root: FsUuid, params: &str) -> String {
     }
 }
 
-/// Why a boot may not arm `asked` on the image at `path`, or `None` because
-/// that image is armed with exactly that list.
-///
-/// **An image carries the actuators it was built with**, in the boot parameter
-/// on its marked slot's volume — the file the bootloader reads, holds to the
-/// slot's signature and hands the kernel in `KernelArgs`. So what a guest will
-/// be armed with is a fact about the image, answerable before anything starts
-/// and without asking the guest; a caller that has an image and a list can be
-/// told it is holding two different boots.
-///
-/// Pure, and every input a parameter, so both directions can be staged without
-/// a guest — which is what `an_image_says_what_it_is_armed_with` does.
-pub fn param_conflict(path: &Path, asked: &[&str]) -> Option<String> {
-    let baked = match params_of(path) {
-        Ok(baked) => baked,
-        Err(why) => return Some(why),
-    };
-    if baked.iter().map(String::as_str).eq(asked.iter().copied()) {
-        return None;
-    }
-    Some(format!(
-        "the image {} is armed with {baked:?} and the boot asks for {asked:?}",
-        path.display()
-    ))
-}
-
 /// The actuator list an image is armed with, read back off the image.
 ///
 /// `root=` is not an actuator and is on every image: this answers what a boot
@@ -385,101 +359,6 @@ pub fn read_file_on(file: &mut std::fs::File, guid: [u8; 16], name: &str) -> Res
     Ok(bytes)
 }
 
-/// Put `update`'s sections into slot `which` of the disk image at `path` and
-/// mark it — what `/system/bin/update` does on a machine, **with nothing
-/// checked**: a test's way to put a slot in front of the loader that the
-/// updater would refuse to write. `signed: false` leaves the slot without its
-/// signed header.
-pub fn stage_slot(path: &Path, which: toyos_update::slots::Which, update: &[u8], signed: bool) -> Result<(), String> {
-    use std::io::Write;
-    let parts = toyos_update::image::Parts::split(update).map_err(|why| format!("the update image: {why}"))?;
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)
-        .map_err(|e| format!("open {}: {e}", path.display()))?;
-    let (table, copy, table_at) = table_on(&mut file)?;
-    let slot = table.slot(which).ok_or_else(|| format!("{} carries no slot {}", path.display(), which.letter()))?;
-
-    let (root_at, root_len) = partition_extent(&mut file, slot.root)?;
-    if parts.root.len() as u64 > root_len {
-        return Err(format!("ROOT is {} bytes and slot {}'s partition {root_len}", parts.root.len(), which.letter()));
-    }
-    file.seek(SeekFrom::Start(root_at))
-        .and_then(|_| file.write_all(parts.root))
-        .map_err(|e| format!("writing slot {}'s ROOT: {e}", which.letter()))?;
-
-    let (boot_at, boot_len) = partition_extent(&mut file, slot.boot)?;
-    let mut volume = vec![0u8; boot_len as usize];
-    file.seek(SeekFrom::Start(boot_at))
-        .and_then(|_| file.read_exact(&mut volume))
-        .map_err(|e| format!("reading slot {}'s volume: {e}", which.letter()))?;
-    {
-        let time = build_time();
-        let mut fs = Fat32::mount(VolumeIo(&mut volume)).map_err(|e| format!("slot {}'s volume: {e}", which.letter()))?;
-        fs.create_dir_all("toyos", time).map_err(|e| format!("toyos/: {e}"))?;
-        let mut files: Vec<(&str, &[u8])> = vec![
-            (toyos_update::slots::KERNEL_FILE, parts.kernel),
-            (toyos_update::slots::CMDLINE_FILE, parts.cmdline),
-        ];
-        if signed {
-            files.push((toyos_update::slots::SIGNED_FILE, &parts.signed[..]));
-        }
-        for name in [toyos_update::slots::KERNEL_FILE, toyos_update::slots::CMDLINE_FILE, toyos_update::slots::SIGNED_FILE] {
-            if fs.exists(name).map_err(|e| format!("{name}: {e}"))? {
-                fs.remove(name).map_err(|e| format!("removing {name}: {e}"))?;
-            }
-        }
-        for (name, bytes) in files {
-            let mut f = fs.create(name, time).map_err(|e| format!("creating {name}: {e}"))?;
-            fs.write(&mut f, 0, bytes).map_err(|e| format!("writing {name}: {e}"))?;
-            fs.flush_meta(&mut f, time).map_err(|e| format!("recording {name}: {e}"))?;
-        }
-        fs.sync().map_err(|e| format!("syncing slot {}'s volume: {e}", which.letter()))?;
-    }
-    file.seek(SeekFrom::Start(boot_at))
-        .and_then(|_| file.write_all(&volume))
-        .map_err(|e| format!("writing slot {}'s volume: {e}", which.letter()))?;
-
-    let mut next = table;
-    next.marked = which;
-    let mut marked = slot;
-    marked.version = parts.header.version;
-    next.slots[which.index()] = Some(marked);
-    let (to, block) = toyos_update::slots::next_write((table, copy), next);
-    file.seek(SeekFrom::Start(table_at + (to * toyos_update::slots::BLOCK) as u64))
-        .and_then(|_| file.write_all(&block))
-        .and_then(|_| file.sync_all())
-        .map_err(|e| format!("writing the slot table: {e}"))
-}
-
-/// Make `edit` of the slot table the disk image at `path` carries, as a writer
-/// does — the copy that is not current, one sequence past it — **with nothing
-/// checked**: a test's way to put a table in front of init that the updater
-/// holding the grant could write.
-pub fn restage_table(path: &Path, edit: impl FnOnce(&mut toyos_update::slots::Table)) -> Result<(), String> {
-    use std::io::Write;
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)
-        .map_err(|e| format!("open {}: {e}", path.display()))?;
-    let (table, copy, at) = table_on(&mut file)?;
-    let mut next = table;
-    edit(&mut next);
-    let (to, block) = toyos_update::slots::next_write((table, copy), next);
-    file.seek(SeekFrom::Start(at + (to * toyos_update::slots::BLOCK) as u64))
-        .and_then(|_| file.write_all(&block))
-        .and_then(|_| file.sync_all())
-        .map_err(|e| format!("writing the slot table: {e}"))
-}
-
-/// The unique GUID of the one partition of type `kind` on the disk image
-/// `file`, as a GPT entry stores it.
-pub fn unique_guid_of(file: &mut std::fs::File, kind: toyos_gpt::Guid) -> Result<[u8; 16], String> {
-    only_partition(&mut FileSectors(file), kind).map(|part| part.unique_guid().0)
-}
-
 /// Why a scan's `out[0]` and `matched` count did not pick out exactly one
 /// partition, once the table itself was readable.
 pub enum OnePartitionError {
@@ -516,41 +395,6 @@ pub fn only_partition(disk: &mut dyn toyos_gpt::Sectors, kind: toyos_gpt::Guid) 
     })
 }
 
-/// Overwrite the file `name` on the FAT partition `guid` of the disk image at
-/// `path` with `bytes`, exactly its length, **writing its data clusters and
-/// nothing else** — so a guest running on the image that does not write that
-/// file sees nothing else of its volume move.
-pub fn overwrite_file_on(path: &Path, guid: [u8; 16], name: &str, bytes: &[u8]) -> Result<(), String> {
-    use std::io::Write;
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)
-        .map_err(|e| format!("open {}: {e}", path.display()))?;
-    let (start, len) = partition_extent(&mut file, guid)?;
-    let mut volume = vec![0u8; usize::try_from(len).map_err(|_| format!("a {len}-byte volume"))?];
-    file.seek(SeekFrom::Start(start))
-        .and_then(|_| file.read_exact(&mut volume))
-        .map_err(|e| format!("reading the volume at byte {start}: {e}"))?;
-    let mut fs = Fat32::mount(VolumeIo(&mut volume)).map_err(|e| format!("the volume does not mount: {e}"))?;
-    let found = fs.open(name).map_err(|e| format!("the volume has no {name}: {e}"))?;
-    if found.len() != bytes.len() as u64 {
-        return Err(format!("{name} is {} bytes, and this writes {} in place", found.len(), bytes.len()));
-    }
-    let mut rest = bytes;
-    for extent in fs.extents(name, usize::MAX).map_err(|e| format!("{name}'s clusters: {e}"))? {
-        let n = rest.len().min(extent.len as usize);
-        file.seek(SeekFrom::Start(start + extent.offset))
-            .and_then(|_| file.write_all(&rest[..n]))
-            .map_err(|e| format!("writing {name} at byte {}: {e}", start + extent.offset))?;
-        rest = &rest[n..];
-    }
-    if !rest.is_empty() {
-        return Err(format!("{name}'s clusters hold {} bytes fewer than its length", rest.len()));
-    }
-    file.sync_all().map_err(|e| format!("syncing {}: {e}", path.display()))
-}
-
 /// The slot table on the disk image `file`, which copy is current, and where
 /// its partition starts.
 fn table_on(file: &mut std::fs::File) -> Result<(toyos_update::slots::Table, usize, u64), String> {
@@ -582,11 +426,11 @@ fn round_up_sectors(n: usize) -> usize {
 
 /// Where each partition is made to start.
 ///
-/// A correctness requirement rather than tidiness. The kernel's `BlockDevice`
-/// transfers whole 4 KiB blocks and each mounted volume keeps its own resident
-/// copies of the blocks it has touched (`fat32_adapter::FatDevice`); two
-/// partitions sharing one device block would make each other's copies stale
-/// with nothing able to notice. 1 MiB rather than the 4096 the kernel needs,
+/// A correctness requirement rather than tidiness. Every block service
+/// transfers whole 4 KiB blocks and each file server keeps its own cached
+/// copies of the blocks it has touched (`userland/fsd`); two partitions
+/// sharing one device block would make each other's copies stale with
+/// nothing able to notice. 1 MiB rather than the 4096 the kernel needs,
 /// because that is what every partitioner uses and what an erase block wants.
 const PARTITION_ALIGN: usize = 1024 * 1024;
 
@@ -875,66 +719,13 @@ pub fn designate_data_disk(path: &Path, len: u64) -> (u64, u64) {
     (start, bytes)
 }
 
-/// Lay a table on the disk at `path` carrying one TOYOS-DATA partition aligned
-/// to a sector rather than a page, so its start lands where the primary table
-/// ends and not on a 4096-byte boundary. `over_candidate` refuses that view
-/// before anything beneath it is read, and the GPT type still names the
-/// partition ours. Answers the byte offset it landed at.
-pub fn misaligned_data_disk(path: &Path, len: u64) -> u64 {
-    let Some(data_bytes) = len.checked_sub(PARTITION_ALIGN as u64).filter(|b| *b > 0) else {
-        panic!("a {len}-byte disk has no room for a misaligned DATA partition");
-    };
-
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)
-        .unwrap_or_else(|e| panic!("open {} to partition it: {e}", path.display()));
-    let mbr =
-        gpt::mbr::ProtectiveMBR::with_lb_size(u32::try_from(len / 512 - 1).unwrap_or(0xFF_FF_FF_FF));
-    mbr.overwrite_lba0(&mut file).expect("write the protective MBR");
-
-    let mut gdisk = gpt::GptConfig::default()
-        .initialized(false)
-        .writable(true)
-        .logical_block_size(gpt::disk::LogicalBlockSize::Lb512)
-        .create_from_device(Box::new(file), None)
-        .expect("create a GPT on the data disk");
-    gdisk
-        .update_partitions(BTreeMap::<u32, gpt::partition::Partition>::new())
-        .expect("initialize the data disk's partition table");
-    // One sector, not `PARTITION_ALIGN`: the partition lands at the first
-    // usable LBA, right after the primary table, which is not a page boundary.
-    let id = gdisk
-        .add_partition("ToyOS data", data_bytes, TOYOS_DATA, 0, Some(1))
-        .expect("add the data partition");
-    let placed = gdisk.partitions().get(&id).expect("the partition was just added");
-    let start = placed
-        .bytes_start(gpt::disk::LogicalBlockSize::Lb512)
-        .expect("the data partition's start");
-    assert_ne!(start % SECTOR as u64, 0, "the partition landed on a page boundary by accident");
-
-    gdisk.write().expect("write the data disk's GPT");
-    start
-}
-
-/// Block 0 of a volume the kernel may format: the magic and its block count.
+/// Block 0 of a volume: the magic and its block count.
 fn designation(blocks: u64) -> [u8; SECTOR] {
     let mut block = [0u8; SECTOR];
     block[..bcachefs::DESIGNATION_MAGIC.len()].copy_from_slice(&bcachefs::DESIGNATION_MAGIC);
     let at = bcachefs::DESIGNATION_BLOCKS_OFFSET;
     block[at..at + 8].copy_from_slice(&blocks.to_le_bytes());
     block
-}
-
-/// Where the one TOYOS-DATA partition on `path` is, by the parser the kernel
-/// selects it with.
-pub fn data_partition_of(path: &Path) -> Result<(u64, u64), String> {
-    let mut file =
-        std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
-    let part = only_partition(&mut FileSectors(&mut file), toyos_gpt::Guid::TOYOS_DATA)
-        .map_err(|why| format!("{}: {why}", path.display()))?;
-    Ok((part.first_lba() * u64::from(LBA), part.lba_count().get() * u64::from(LBA)))
 }
 
 /// A disk file as logical blocks, for a reader that may not hold the image.
@@ -1373,58 +1164,6 @@ mod tests {
         assert_eq!(parts.header, header);
         assert_eq!(toyos_update::image::Header::of(7, parts.kernel, parts.cmdline, parts.root), header);
         assert_eq!(parts.signed, &signed);
-    }
-
-    /// An image says which actuators a guest booting it would arm, and the
-    /// answer comes out of the image rather than from whoever built it.
-    ///
-    /// **This is what makes a staged boot image answerable.** The actuators are
-    /// baked in at build time, so a caller supplying its own image cannot arm
-    /// anything by asking, and a green run with an inert arm is the worst kind
-    /// of harness defect: every negative control staged through one proves
-    /// nothing. Both directions, because the reader is the writer's inverse.
-    #[test]
-    fn an_image_says_what_it_is_armed_with() {
-        let dir = toyos_tmpdir::TempDir::new("image-params");
-        let root_image = tiny_root();
-        let write = |name: &str, params: &str| {
-            let path = dir.join(name);
-            std::fs::write(&path, create_boot_image(Arch::X86_64, b"kernel", b"bootloader", &root_image, params, signing(&key()), None))
-                .expect("write an image");
-            path
-        };
-
-        // What every shipping image is: nothing armed at all.
-        let shipping = write("shipping.img", "");
-        // Two, because a reader that handed back the whole file as one name
-        // would answer every one-actuator question correctly.
-        let armed = write("armed.img", "usb-flush-fails,fat-boot-reads-fail");
-
-        for (image, asked) in [
-            (&shipping, &[][..]),
-            (&armed, &["usb-flush-fails", "fat-boot-reads-fail"][..]),
-        ] {
-            assert_eq!(
-                param_conflict(image, asked),
-                None,
-                "an image was refused the list it was built with: {asked:?}"
-            );
-        }
-
-        // An actuator armed beside an image built without it names both sides:
-        // the reader gets the message and nothing else.
-        for (image, asked, name) in [
-            (&shipping, &["usb-flush-fails"][..], "usb-flush-fails"),
-            (&armed, &[][..], "fat-boot-reads-fail"),
-            (&armed, &["usb-flush-fails"][..], "fat-boot-reads-fail"),
-        ] {
-            let why = param_conflict(image, asked)
-                .unwrap_or_else(|| panic!("{asked:?} was accepted on {}", image.display()));
-            assert!(
-                why.contains(name),
-                "the refusal does not name {name}, which is the whole of what it is about: {why}"
-            );
-        }
     }
 
     /// **One ordering of one set is one image.** The judge below compares

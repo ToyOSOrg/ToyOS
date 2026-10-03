@@ -1,14 +1,7 @@
 # Issues
 
-`issues/` at the repository root is the only prose this project maintains.
-Everything else that could be silently false — a spec, a plan, an assessment —
-was deleted, because prose is the one artifact nothing checks. An issue is
-different in kind: it reproduces or it does not, and closing it costs evidence.
-
 One file per issue, `issues/<area>/<slug>.md`. There is no index and no
-numbering: **`ls` is the index and the frontmatter is the query.** A number
-encodes a position, and every insertion moved one — which is what made a
-reference to an issue a reference that rots.
+numbering: **`ls` is the index and the frontmatter is the query.**
 
 `ls issues/*/` lists everything. To ask a question of the set:
 
@@ -16,7 +9,6 @@ reference to an issue a reference that rots.
 rg -l '^status: open' issues/       # every unheld piece of work
 rg -l '^status: assigned' issues/   # what somebody is holding
 rg -l '^status: owner' issues/      # what is waiting on the owner
-rg -c '' issues/audio/              # how much audio owes
 ```
 
 ## Frontmatter
@@ -27,20 +19,16 @@ Four fields, three required, no defaults.
 |---|---|---|
 | `status` | `open` | it is work, and nobody is holding it |
 | | `assigned` | it is work, and somebody is — the body says who or which task |
-| | `expected-red` | a test fails on this today and `src/redlist.rs` disables it |
 | | `owner` | it is the owner's to decide, and nobody else may |
 | | `none` | nothing is owed |
 | `kind` | `defect` | real, reproducible, someone should fix it |
 | | `tooling` | the development machine — the harness, a gate, a price, CI, the tracker, the build system, a measurement owed |
-| | `finding` | noticed in passing — and bounded: at its next review it is promoted to a `defect` or folded into the owning module header and closed (owner ruling 2026-08-25) |
+| | `finding` | noticed in passing — and bounded: at its next review it is promoted to a `defect` or folded into the owning module header and closed |
 | | `track` | staged work — something to build that nobody has built |
 | | `question` | blocked on the owner, and nobody else can decide it |
 | | `rejected` | considered and declined, recorded so nobody re-proposes it |
-| `opened` | `YYYY-MM-DD` | the first commit whose issue tracker carried this heading. Before 2026-08-08 that is derived from the single file this directory replaced, so a reworded heading dates from the rewording |
+| `opened` | `YYYY-MM-DD` | the first commit whose issue tracker carried this heading |
 | `task` | a number | optional; present only where the issue names one |
-
-`kind: defect` is the OS; `kind: tooling` is the development machine, worked
-only when it blocks a landing.
 
 **`status` and `kind` are not free of each other.**
 `kind` says what the entry is; `status` says what is owed. Two of the kinds
@@ -48,15 +36,10 @@ answer that second question by themselves, so they may not contradict it:
 
 | `kind` | `status` must be |
 |---|---|
-| `defect`, `tooling`, `finding` | `open`, `assigned` or `expected-red` |
+| `defect`, `tooling`, `finding` | `open` or `assigned` |
 | `track` | `open` or `assigned` |
 | `question` | `owner` |
 | `rejected` | `none` |
-
-That rule is what makes `rg -l '^status: open'` mean *unheld work* rather than
-"every file that was not assigned to somebody" — the eleven `question` and
-`rejected` files all said `open` before it existed, so the query over-reported
-by eleven and nothing could tell.
 
 **`kind: rejected` is not work.** It is here so the next agent does not spend a
 day re-deriving an answer the owner already gave. Nothing in a `rejected` file
@@ -64,7 +47,7 @@ is owed — and if the body says otherwise, the *kind* is what is wrong. A rulin
 that declared a standing failure rather than removing it deferred the work; it
 did not decline it, so the entry is a `defect` and stays open.
 
-**`kind: finding` does not accumulate** (owner ruling 2026-08-25). A finding
+**`kind: finding` does not accumulate.** A finding
 has a bounded life: whoever next reviews it either promotes it to a `defect`
 (something real that someone should act on — a fix, a measurement, an
 instrument) or moves its one durable line to the module header or doc comment
@@ -85,16 +68,11 @@ defect is. A `track` says what is to be built, what it is blocked on, and any
 constraint a reader would otherwise pay to re-derive — a hardware bound, a
 number somebody measured, a design line the owner already drew. It does not
 carry a design, a stage table, a rationale or a review history: a design that is
-right is written as code, and one that is not yet written is not yet known. A
-`track` that has grown past a screen is a plan again, and is cut back.
+right is written as code, and one that is not yet written is not yet known.
 
 ## Areas
 
-`isolation` · `panic-path` · `kernel` · `audio` · `diagnostics` · `build` ·
-`design-debt` · `hardware` · `filesystem` · `boot-media`
-
-That list is closed. An area is a
-directory because it makes every cross-reference a path that resolves. Moving
+An area is a directory because it makes every cross-reference a path that resolves. Moving
 an issue between areas is a `git mv`; the **slug** is its identity — unique
 across every area — so `rg <slug>` finds every pointer at it wherever it has
 been put. A slug is a claim like any sentence here: one the tree has refuted is
@@ -137,23 +115,5 @@ bare name is invisible to a path search. Search the *tree* rather than the
 checkout (`git grep <rev>`): `rg` skips dotfile directories without `--hidden`,
 and `.github/` holds citations too. Then read where the hits are. One in a comment
 under `toyos-abi/src`, `toyos/src` or a published crate changes no identity
-(`src/identity.rs`), so it owes no version and builds no sysroot. One in
-`src/redlist.rs` is a disabled test's `issue`: the row goes with the file.
+(`src/identity.rs`), so it owes no version and builds no sysroot.
 
-## Two area notes, carried over from the file this replaced
-
-**`filesystem`** — `toyos-fat32/` is new (host tests: `cargo test` inside it) and
-its kernel adapter is `kernel/src/fat32_adapter.rs`; `boot-media` carries what
-that adapter found. Most of what is filed here is not a defect found later but a
-residual the crate's own gate identified while it was being written, recorded so
-the adapter's author did not have to rediscover it.
-
-**`boot-media`** — `/boot` and `/log` are both `kernel/src/fat32_adapter.rs` over
-`toyos-fat32`, mounted from `gpt::boot_volume()` and `gpt::log_volume()`;
-the kernel writes no log file — `/system/bin/logd` does, an ordinary user process that
-owns "every policy about files — where they go, what they are called, how many
-there are, what happens when the stick stops answering"
-(`userland/logd/src/main.rs:1-10`). Gated by `esp_filesystem`,
-`kernel_log_file`, `log_backing_read_error`,
-`boot_volume_metadata_error`, `log_partition_layout` and
-`log_partition_identity`, plus `toybox_cp_volume`.

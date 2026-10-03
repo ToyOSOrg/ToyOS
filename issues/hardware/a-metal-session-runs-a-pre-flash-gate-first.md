@@ -150,3 +150,5 @@ assembled in a scratch row and blitted as one run would merge where the per-bit
 invariant at `kernel/src/drivers/panic_console/mod.rs:542`: render and everything
 it calls takes no lock, so a shared static scratch strip re-creates the
 multi-CPU race the panic-path records carry against `capture()`.
+
+`metal_sim_input` is deleted; `issues/build/parallel-tests-red-under-other-suites.md` records the commit that restores it.

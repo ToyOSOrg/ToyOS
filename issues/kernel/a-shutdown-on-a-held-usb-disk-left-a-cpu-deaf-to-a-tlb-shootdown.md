@@ -29,8 +29,8 @@ accord is logd's network thread, on a boot that gives logd no netd; the logd
 branch no longer starts that thread there, which would remove this boot's
 trigger and not the deaf CPU.
 
-`a-disk-operation-can-spin-past-the-tlb-ack-tripwire-before-its-break.md` is
-the arithmetic for one disk operation outrunning `time::DEAF_CPU`; this is a boot
+`issues/hardware/xhci-waits-are-spins.md` carries the arithmetic for one disk
+operation outrunning `time::DEAF_CPU`; this is a boot
 that did outrun it, in `quiesce`, across several operations each inside its
 own budget. Whether `quiesce` holds `IF` clear between them is not measured.
 
@@ -50,3 +50,5 @@ What holds cpu1's interrupts off across that window is named from a boot, and
 either the shutdown's calls on a held disk take interrupts between them or the
 shootdown on another CPU cannot need them then; a staged `usb-transport-break`
 shutdown with a thread ending on the other CPU inside the window stays up.
+
+`usb_transport_break` is deleted; `issues/kernel/a-held-disk-waits-for-a-pass-no-cpu-takes-when-every-cpu-is-in-a-call-on-it.md` records the commit that restores it.

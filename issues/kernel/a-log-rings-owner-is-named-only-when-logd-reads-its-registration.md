@@ -1,5 +1,5 @@
 ---
-status: expected-red
+status: assigned
 kind: defect
 opened: 2026-09-27
 ---
@@ -14,7 +14,7 @@ Until `logd` reads the frame the owner word is 0, and `push` then keeps
 nothing for anyone. A child that starts flooding in that window can take
 every slot, the owner's included.
 
-`log_ring_keeps_the_owners_slots` (fast tier) is red this way beside the
+`log_ring_keeps_the_owners_slots` is red this way beside the
 other `log_` guests and green alone. Its `/log` holds `===READY===`,
 `===TEST_START test_rs_log_flood===` and 1917 flood lines: exactly the ring's
 1919 shared slots, with no slot left for test-runner's `===TEST_END`.
@@ -51,3 +51,7 @@ a flush bound after init's stop line; the flush is unanswered when init says
 it waited one out (`FLUSH_WAITED_OUT`, on the console or in `/log`) or its stop
 line never reached `/log`. That change has never run: the test's first run
 back is also that change's.
+
+**Its test is deleted**: `603b6ee54` took `log_ring_keeps_the_owners_slots`
+out; `git show 84471bc58:tests/logkeepcase/system.toml` holds #536's adaptation
+of its config.

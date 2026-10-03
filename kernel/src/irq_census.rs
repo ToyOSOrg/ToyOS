@@ -19,9 +19,10 @@ pub enum Source {
     Timer,
     /// Vector 0x21, xHCI MSI-X (or MSI).
     Xhci,
-    /// Vectors 0x28-0x2B, the MSI-X of a PCI function a process drives. One
-    /// count for all four: which claim a message belonged to is the claim's own
-    /// record, and the census is about this machine's interrupt routing.
+    /// Vectors 0x28-0x2C: the MSI-X of a PCI function a process drives, and
+    /// the lines of an ISA function one does. One count for all five: which
+    /// claim an interrupt belonged to is the claim's own record, and the census
+    /// is about this machine's interrupt routing.
     UserDev,
     /// Vector 0x23, virtio-sound MSI-X.
     Sound,
@@ -133,14 +134,17 @@ pub fn taken_here() -> u64 {
 }
 
 /// Logs one `irq: cpuN total=… <source>=…` line per online CPU; counts are cumulative since boot.
+/// A `mask-windows` kernel follows each with that CPU's `windows:` line.
 /// Allocates nothing, takes no lock, touches no device.
 pub fn log_census() {
-    for cpu in 0..crate::arch::smp::cpu_count() {
+    for cpu in 0..crate::smp::cpu_count() {
         let Some(counts) = read(cpu) else { continue };
         crate::log!(
             "irq: cpu{cpu} total={}{}",
             counts[TOTAL],
             Fields(&counts[TOTAL + 1..])
         );
+        #[cfg(feature = "mask-windows")]
+        crate::windows::log_cpu(cpu);
     }
 }
