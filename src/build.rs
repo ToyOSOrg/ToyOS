@@ -2760,6 +2760,37 @@ mod tests {
         );
     }
 
+    /// The kernel depends on no libc (root `CLAUDE.md`, Dependencies), and its
+    /// `Cargo.lock` cannot show it: a lock records every platform's edges and
+    /// none of their `cfg`s, so it names `libc`, `dlmalloc`'s edge on unix,
+    /// whether a kernel target takes that edge or not.
+    #[test]
+    fn the_kernel_resolves_no_libc_for_either_target() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for arch in Arch::ALL {
+            let out = Command::new("cargo")
+                .args(["tree", "--locked", "--all-features", "-e", "normal,no-proc-macro"])
+                .args(["--prefix", "none", "--format", "{p}", "--target", arch.kernel()])
+                .arg("--manifest-path")
+                .arg(root.join("kernel/Cargo.toml"))
+                .output()
+                .expect("cargo tree failed to launch");
+            let tree = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                out.status.success() && tree.starts_with("kernel "),
+                "cargo tree --target {} exited {} and printed no kernel: {}",
+                arch.kernel(),
+                out.status,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(
+                !tree.lines().any(|package| package.starts_with("libc ")),
+                "the {} kernel resolves libc:\n{tree}",
+                arch.kernel()
+            );
+        }
+    }
+
     /// Every negative control the model crates declare — every feature name
     /// besides the structural ones they carry for other reasons.
     ///
