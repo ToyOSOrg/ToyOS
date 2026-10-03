@@ -36,7 +36,7 @@ handing it on, gated by simulator invariant I14. This half is not.
 The second instance of the same shape used to be the idle loop's log flush;
 the idle loop touches no filesystem now — the log is logd's file — and the
 disk wait that survives, logd's `fsync` pinning a CPU for the device round
-trip, is `issues/audio/disk-wait-pins-a-cpu.md`'s subject.
+trip, is `issues/hardware/xhci-waits-are-spins.md`'s subject.
 
 Closing this means making xHCI enumeration and endpoint recovery asynchronous, so
 that `drain_irqs` only ever does work it can finish: drain the event ring,
