@@ -21,16 +21,18 @@ the detector is armed on every boot; nothing ships for tests alone.
   holds it, which
   `issues/isolation/every-job-test-runner-starts-holds-its-whole-system-capability.md`
   fences.
-- **The kernel feeds from its arm until the class is first claimed, and never
-  after**, so a `watchdogd` that ends with no successor holding the class
-  resets the machine. A successor's claim that meets its predecessor's release
-  still in flight (`issues/kernel/deferred-release-outlives-its-syscall.md`) is
-  refused, so `watchdogd` waits on that defect.
+- **The scheduler pass feeds from the kernel's arm until the class is first
+  claimed, and never after**, so a `watchdogd` that ends with no successor
+  holding the class resets the machine. A successor's claim that meets its
+  predecessor's release still in flight
+  (`issues/kernel/deferred-release-outlives-its-syscall.md`) is refused, so
+  `watchdogd` waits on that defect.
 - `watchdogd` feeds from a thread under `rt`, until
   `issues/kernel/cpu-time-is-a-band-and-not-a-reservation.md` gives it a
   reservation.
 - **A panic's panel holds as it does today** and feeds the watchdog while it
-  holds, after a key too (`panic_console::hold_the_panel`).
+  holds, after a key too (`panic_console::hold_the_panel`): the one feed the
+  kernel keeps once the class is claimed.
 - **Every guest runs with `-action watchdog=none`.** q35's TCO counts
   `QEMU_CLOCK_VIRTUAL`, which a loaded host advances while it starves a guest,
   and its second expiry does what `-action watchdog=` says (QEMU 11.1.1,
@@ -77,5 +79,6 @@ has made the kernel's arm the only one. `toyos_tco::PARAM` goes, and with it
 
 **Exit**, on the T14: a boot whose `watchdogd` ends with no successor, and one
 wedged by `wedge-before-reset` with `watchdogd` feeding, each end in the TCO's
-reset, and the boot after each says so; a kernel that feeds on once the claim
-has gone keeps the first up. The boot after a held panic says no TCO reset.
+reset, and the boot after each says so; a kernel whose scheduler pass feeds on
+once the claim has gone keeps the first up. The boot after a held panic says
+no TCO reset.
