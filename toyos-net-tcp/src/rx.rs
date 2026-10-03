@@ -249,13 +249,17 @@ impl Rx {
 
     /// The window field for a segment built now, moving the edge by the silly-window rule
     /// (RFC 9293 §3.8.6.2.2, Fr = 1/2) only while no hole is open.
-    pub fn advertise(&mut self, mss: u32) -> u16 {
-        if let Some(candidate) = self.candidate(mss) {
-            self.edge = candidate;
-        }
-        let field = (self.window() >> self.shift).min(u32::from(u16::MAX));
-        self.last_window = field << self.shift;
-        u16::try_from(field).unwrap_or(u16::MAX)
+    /// The right edge and window field a segment built now carries; [`Self::advertise`] commits them.
+    pub fn offer(&self, mss: u32) -> (Seq, u16) {
+        let edge = self.candidate(mss).unwrap_or(self.edge);
+        let field = (edge.since(self.next) >> self.shift).min(u32::from(u16::MAX));
+        (edge, u16::try_from(field).unwrap_or(u16::MAX))
+    }
+
+    pub fn advertise(&mut self, mss: u32) {
+        let (edge, field) = self.offer(mss);
+        self.edge = edge;
+        self.last_window = u32::from(field) << self.shift;
     }
 
     fn candidate(&self, mss: u32) -> Option<Seq> {

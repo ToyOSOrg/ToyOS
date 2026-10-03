@@ -6,13 +6,11 @@ opened: 2026-09-14
 
 # A claim's own refusals are read by nothing
 
-The refusals `kernel/src/pcidev/mod.rs` raises that are read back are
-`ClaimError::Owned` by `pci_function_is_exclusive`, `Refusal::Untranslated` by
-`iommu_virtio_platform`'s no-unit arm, `Refusal::NoInterrupt` by
-`virtio_net_no_msix`, `Refusal::CapsTruncated` by `pci_claim_caps_truncated`,
-the domain by `userdev_dma_fault`, and `SYS_DEVICE_REG_READ`'s bound by netd's
-own `config_space_is_bounded`. These are reached by no test:
+Refusals of `kernel/src/pcidev/mod.rs` that no test reaches:
 
+- `ClaimError::Owned`, `Refusal::NoInterrupt`, `Refusal::CapsTruncated` and
+  the domain's fault, whose guest readers the guest suite's cut moved to stage J
+  of `issues/build/the-guest-suite-runs-only-what-no-cheaper-tier-reaches.md`;
 - `ClaimError::Ambiguous`, a config naming a device this machine has two of;
 - `ClaimError::KernelDriven`, a claim on a function one of this kernel's own
   drivers bound;

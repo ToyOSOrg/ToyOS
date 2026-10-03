@@ -4,11 +4,11 @@ kind: tooling
 opened: 2026-09-03
 ---
 
-# The host job tracks whatever toolchain `macos-latest` ships, and a runner roll reds every open pull request at once
+# The host job tracks whatever toolchain ships, and a runner roll reds every open pull request at once
 
 `35383398^:.github/workflows/host-tests.yml`'s `host` job installs no Rust toolchain: it
 runs `rustc -vV; cargo -V; rustup component add clippy` on whatever
-`macos-latest` ships that day, and there is no root `rust-toolchain.toml` —
+ships that day, and there is no root `rust-toolchain.toml` —
 only `kernel/`, `bootloader/` and `userland/` pin one, each to a target list
 and none to a version.
 
@@ -64,20 +64,15 @@ default 1.97.1 after the fix.
 
 A moving input under every verdict is a supply-chain decision, not a
 convenience, and every guest lane's container image is pinned by digest, never
-by tag; the host job's `macos-latest` toolchain is not. The
+by tag; the host job's toolchain is not. The
 `CLAUDE.md` principle for
 `rust/`, this project's own compiler fork, is "kept current with upstream" — a
-deliberate track-stable choice, stated and owned. The host job's ambient
-`macos-latest` toolchain has never been stated as either: it is not pinned like
-a container image, and it is not declared track-stable like `rust/` — it simply
-moves when Apple's
-runner image moves, silently, until a new lint reds every open pull request on
-the same morning.
+deliberate track-stable choice, stated and owned.
 
 **The decision owed, not taken here:** pin a toolchain version in the host job
 (`actions-rs`-style `rust-toolchain` input, or a root `rust-toolchain.toml`
 covering the host workspace too) and roll it deliberately on its own PR when
 the tree is ready to adopt a new compiler's lints — or keep tracking whatever
-`macos-latest` ships and accept that a runner-image roll reds every open pull
+ships and accept that a runner-image roll reds every open pull
 request until someone lands the fix, the way today's did. Both are legitimate
 engineering positions; this entry does not choose between them.

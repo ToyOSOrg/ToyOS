@@ -12,8 +12,8 @@ selects, built by the kernel and by a host test. Pull request #602 holds it.
 
 **Exit**: each committed fixture's facts give its lines: the T14's and the TCG
 model's from
-`issues/hardware/linuxs-readings-of-the-t14-and-the-tcg-model-are-not-committed.md`,
-and each nightly EPYC guest's once its runner is captured. **Mutation**: `GDS`
+`issues/hardware/linuxs-readings-of-the-t14-and-the-tcg-model-lack-reads-owed-before-the-t14s-wipe.md`,
+and each EPYC guest's once its runner is captured. **Mutation**: `GDS`
 deleted from `cpu_vuln_blacklist`'s TIGERLAKE_L row reds the T14's fixture,
 and `SRSO` deleted from its family 0x19 row reds a family-0x19 EPYC guest's.
 **Oracle**: those lines, and Linux's `cpu_vuln_whitelist` and

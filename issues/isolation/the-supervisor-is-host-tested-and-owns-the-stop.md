@@ -10,14 +10,14 @@ Held by the orchestrator. Every stage waits on PR #536 (`wt/toyos-fsd`).
 
 ## Stages
 
-Every guest test this track names is registered with no `src/redlist.rs` row.
-A deleted or disabled test covers nothing.
+Every guest test this track names is registered. A deleted test covers
+nothing.
 
 1. **The rename**, one mechanical PR, first after #536. Before stage 1 is
    briefed, the exit's search below runs once over the `rust/` fork's delta as
    well as the superproject, so its hits are known going in. It touches `toyos/src`,
-   `toyos-abi/src`, `userland/libc/src` and the `rust/` fork's delta, so it is
-   briefed as an ABI brief, and its `CLAUDE.md` edits are placed in the same PR
+   `toyos-abi/src`, `userland/libc/src` and the `rust/` fork's delta, and its
+   `CLAUDE.md` edits are placed in the same PR
    by an agent briefed for them. Issue slugs carrying an old name are renamed
    with every citation.
 
@@ -84,7 +84,5 @@ A deleted or disabled test covers nothing.
 
 ## Open with the owner
 
-- Before stage 3: the ask's ABI, which is Q6a of
-  `issues/kernel/the-child-process-track-waits-on-the-owners-rulings.md`; whether a program
-  started through `launcher` is asked or only stopped; whether
-  `SYS_SHUTDOWN`/`SYS_REBOOT` change at all.
+- Before stage 3: whether a program started through `launcher` is asked or
+  only stopped; whether `SYS_SHUTDOWN`/`SYS_REBOOT` change at all.

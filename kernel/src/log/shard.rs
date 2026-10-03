@@ -181,10 +181,6 @@ impl Shard {
         }
         let words = msg_words(len);
         for i in 0..words {
-            // Injection point for `log-nested-emit`'s test IPI; folds away outside `kernel-loom`'s shim.
-            if i * 2 == words && crate::actuator::log_nested_emit() {
-                super::nested::mid_body();
-            }
             let mut bytes = [0u8; 8];
             bytes.copy_from_slice(&record.msg[i * 8..i * 8 + 8]);
             slot.body[HEADER_WORDS + i].store(u64::from_le_bytes(bytes), Ordering::Relaxed);

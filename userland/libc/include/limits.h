@@ -24,6 +24,7 @@
 #define MB_LEN_MAX 4
 
 #define PATH_MAX   4096
+#define _POSIX_ARG_MAX 4096
 #define NAME_MAX   255
 
 #endif

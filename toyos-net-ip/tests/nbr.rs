@@ -94,9 +94,7 @@ fn s_ip_nbr_008_a_known_router_moving() {
     let mut h = H::fixture_i();
     assert_eq!(h.send(A, R, 5001, 5001, b"1"), Ok(None));
     h.out();
-    for n in 0..toyos_net_ip::limits::CONTROL_QUEUE as u8 {
-        h.frame(&request(MacAddr([2, 1, 0, 0, 0, n]), ip4(192, 0, 2, 100 + n), A));
-    }
+    h.fill_control_queue(h.if0, h.clock(), A);
     h.frame(&request(MAC_R, R, A));
     assert!(matches!(h.state(R), Some(Nud::Stale(s)) if s.released.queued() == 1));
     h.frame(&hex(V_ARP_ROUTER_MOVED));
@@ -123,7 +121,7 @@ fn s_ip_nbr_009_locktime() {
 #[test]
 fn s_ip_nbr_010_a_second_answer_is_locked_out() {
     let mut h = H::fixture_i();
-    let _ = h.ip.resolve(h.clock(), h.if0, R);
+    let _ = h.ip.resolve(h.clock(), h.if0, R, A);
     h.out();
     h.at(5);
     h.frame(&hex(V_ARP_REPLY_R));
@@ -179,7 +177,7 @@ fn s_ip_nbr_014_a_reply_for_another_target_asserts() {
 #[test]
 fn s_ip_nbr_015_a_broadcast_reply_is_still_solicited() {
     let mut h = H::fixture_i();
-    let _ = h.ip.resolve(h.clock(), h.if0, R);
+    let _ = h.ip.resolve(h.clock(), h.if0, R, A);
     h.out();
     let mut frame = hex(V_ARP_REPLY_R);
     frame[..6].copy_from_slice(&MacAddr::BROADCAST.0);

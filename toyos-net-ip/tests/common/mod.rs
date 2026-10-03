@@ -295,7 +295,7 @@ impl H {
     pub fn fixture_i_with(addr: Ipv4Addr, m: MacAddr) -> Self {
         let mut h = Self::raw_i();
         let setup = Instant::from_millis(5_000);
-        let _ = h.ip.resolve(setup, h.if0, addr);
+        let _ = h.ip.resolve(setup, h.if0, addr, A);
         h.ip.transmit(setup, usize::MAX, |_, _| {});
         let reply = eth(MAC_A, m, 0x0806, &arp_packet(2, m, addr, MAC_A, A));
         let _ = h.ip.receive(setup, h.if0, &reply);
@@ -309,7 +309,7 @@ impl H {
     /// Resolves `addr` on if0 by a request and its reply, now.
     pub fn reach(&mut self, addr: Ipv4Addr, m: MacAddr) {
         let now = self.clock();
-        let _ = self.ip.resolve(now, self.if0, addr);
+        let _ = self.ip.resolve(now, self.if0, addr, A);
         self.ip.transmit(now, usize::MAX, |_, _| {});
         self.reply_from(addr, m);
         self.ip.transmit(now, usize::MAX, |_, _| {});
@@ -319,6 +319,18 @@ impl H {
     /// `addr` at `m` answers a request of A's.
     pub fn reply_from(&mut self, addr: Ipv4Addr, m: MacAddr) {
         self.frame(&eth(MAC_A, m, 0x0806, &arp_packet(2, m, addr, MAC_A, A)));
+    }
+
+    /// Hosts on `ours`'s /24, from .100 up, ask `iface` for `ours` at `at`: their replies fill
+    /// the control queue every interface shares.
+    pub fn fill_control_queue(&mut self, iface: IfIndex, at: Instant, ours: Ipv4Addr) {
+        let [a, b, c, _] = ours.octets();
+        for n in 0..toyos_net_ip::limits::CONTROL_QUEUE as u8 {
+            let m = MacAddr([2, 1, 0, 0, 0, n]);
+            let request = arp_packet(1, m, Ipv4Addr::new(a, b, c, 100 + n), MacAddr::ZERO, ours);
+            let _ = self.ip.receive(at, iface, &eth(MacAddr::BROADCAST, m, 0x0806, &request));
+        }
+        self.collect();
     }
 
     pub fn count(&self, counter: Counter) -> u64 {
@@ -768,7 +780,7 @@ impl H {
         let mut h = Self { ip, if0, now: 0, events: Vec::new(), counters: Vec::new(), wire: std::collections::BTreeMap::default() };
         h.assign(if0, B, 24, 0);
         let setup = Instant::from_millis(5_000);
-        let _ = h.ip.resolve(setup, if0, A);
+        let _ = h.ip.resolve(setup, if0, A, B);
         h.ip.transmit(setup, usize::MAX, |_, _| {});
         let _ = h.ip.receive(setup, if0, &eth(MAC_B, MAC_A, 0x0806, &arp_packet(2, MAC_A, A, MAC_B, B)));
         h.settle();

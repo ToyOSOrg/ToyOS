@@ -14,26 +14,7 @@ pub mod msc;
 /// measurement only.
 #[cfg(feature = "boot-actuators")]
 mod depth_probe {
-    use core::sync::atomic::{AtomicU32, Ordering};
 
-    use crate::log;
-
-    static DEEPEST: AtomicU32 = AtomicU32::new(0);
-
-    pub fn report() {
-        let depth = crate::preempt::count();
-        // Logs only a new deepest depth: logging every wait would write to
-        // the same device the wait is on, a self-sustaining loop.
-        if depth <= DEEPEST.fetch_max(depth, Ordering::Relaxed) {
-            return;
-        }
-        log!(
-            "io-depth: a disk transfer is being waited for at preempt depth {depth}, task {:?}",
-            crate::arch::percpu::current_tid().map(|t| t.raw())
-        );
-        // `kernel_backtrace` stops at the first unreadable frame.
-        crate::symbols::kernel_backtrace(crate::arch::cpu::frame_pointer(), 20);
-    }
 }
 
 use crate::log;
@@ -370,16 +351,6 @@ impl XhciController {
     /// Matched by (slot, dci, trb) rather than the endpoint, since a stalled
     /// endpoint still completes late transfers this driver stopped waiting for.
     fn wait_transfer(&mut self, slot: u8, dci: u8, trb: u64) -> Result<(u32, u32), Quiet> {
-        #[cfg(feature = "boot-actuators")]
-        if crate::actuator::io_depth_probe() {
-            depth_probe::report();
-        }
-        // `usb-reset-break` stages a climb of the recovery ladder whose
-        // transfers answer nothing; see `msc::reset_break`.
-        #[cfg(feature = "boot-actuators")]
-        if msc::reset_break::active() {
-            return Err(Quiet::Staged);
-        }
         let on = Await::Transfer { slot, dci, trb };
         let (began, deadline) = self.wait_ends();
         let port = self.port_of_slot(slot);
@@ -388,13 +359,6 @@ impl XhciController {
             let cut = call.cut(began, crate::clock::nanos_since_boot(), USB_TIMEOUT_NS);
             if cut { Quiet::Spent } else { Quiet::Elapsed }
         };
-        // `usb-return-silent` stages an operation sent again whose transfers
-        // answer nothing and are waited for; see `msc::return_silent`.
-        #[cfg(feature = "boot-actuators")]
-        if msc::return_silent::active() {
-            let _ = crate::clock::settles(deadline.saturating_sub(began), || false);
-            return Err(quiet(&self.after_break));
-        }
         loop {
             if late.gives_up() {
                 return Err(quiet(&self.after_break));

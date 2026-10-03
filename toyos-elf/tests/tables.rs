@@ -758,3 +758,94 @@ fn each_machine_reads_its_own_relocation_numbers() {
     let parsed = rela::parse(entry, &rules, SymTab::empty()).unwrap().unwrap();
     assert_eq!((parsed.offset(), parsed.op()), (0x10, Op::Relative(rules.extent.offset(4).unwrap())));
 }
+
+// ── dladdr ──────────────────────────────────────────────────────────────
+
+/// One `Elf64_Sym` with its `st_other`, which carries the visibility.
+fn sym_visible(st_name: u32, st_info: u8, st_other: u8, st_shndx: u16, st_value: u64, st_size: u64) -> [u8; 24] {
+    let mut out = sym_sized(st_name, st_info, st_shndx, st_value, st_size);
+    out[5] = st_other;
+    out
+}
+
+/// The symbol `dladdr` names for each offset is glibc's (`elf/dl-addr.c`):
+/// exported, not thread-local, not absolute, holding the offset or at it with
+/// no size, the highest of several, the first of two at one value.
+#[test]
+fn dladdr_names_the_symbol_glibc_names() {
+    const WEAK_FUNC: u8 = (2 << 4) | 2;
+    const LOCAL_FUNC: u8 = 2;
+    const GLOBAL_TLS: u8 = (1 << 4) | 6;
+    const GLOBAL_NOTYPE: u8 = 1 << 4;
+    const HIDDEN: u8 = 2;
+    const INTERNAL: u8 = 1;
+    const PROTECTED: u8 = 3;
+    const ABS: u16 = 0xfff1;
+    let names = b"\0local\0func\0big\0weak\0mark\0hidden\0internal\0tls\0undef\0abs\0last\0guarded\0twin\0";
+    let at = |name: &str| {
+        let needle = [b"\0", name.as_bytes(), b"\0"].concat();
+        names.windows(needle.len()).position(|w| w == needle.as_slice()).unwrap() as u32 + 1
+    };
+    let syms = [
+        sym(0, 0, 0, 0),
+        sym_visible(at("local"), LOCAL_FUNC, 0, 1, 0x1000, 0x800),
+        sym_visible(at("func"), FUNC, 0, 1, 0x1100, 0x100),
+        sym_visible(at("big"), FUNC, 0, 1, 0x1000, 0x300),
+        sym_visible(at("weak"), WEAK_FUNC, 0, 1, 0x1200, 0x80),
+        sym_visible(at("mark"), GLOBAL_NOTYPE, 0, 1, 0x1280, 0),
+        sym_visible(at("hidden"), FUNC, HIDDEN, 1, 0x1300, 0x20),
+        sym_visible(at("internal"), FUNC, INTERNAL, 1, 0x1320, 0x20),
+        sym_visible(at("tls"), GLOBAL_TLS, 0, 1, 0x1340, 0x40),
+        sym_visible(at("undef"), FUNC, 0, 0, 0x1380, 0x40),
+        sym_visible(at("abs"), GLOBAL_NOTYPE, 0, ABS, 0x1400, 0x40),
+        sym_visible(at("last"), OBJECT, 0, 1, 0x1500, 0x10),
+        sym_visible(at("guarded"), FUNC, PROTECTED, 1, 0x1600, 0x10),
+        sym_visible(at("twin"), FUNC, 0, 1, 0x1700, 0x10),
+        sym_visible(at("func"), FUNC, 0, 1, 0x1700, 0x10),
+        // A name past the string table: never an answer.
+        sym_visible(names.len() as u32 + 40, FUNC, 0, 1, 0x1800, 0x10),
+    ]
+    .concat();
+    let table = SymTab::new(&syms, names);
+    for (offset, want) in [
+        (0x1000, Some(("big", 0))),
+        (0x1150, Some(("func", 0x50))),
+        (0x1210, Some(("weak", 0x10))),
+        (0x1280, Some(("mark", 0))),
+        (0x1281, Some(("big", 0x281))),
+        (0x1310, None),
+        (0x1330, None),
+        (0x1350, None),
+        (0x1390, None),
+        (0x1410, None),
+        (0x1505, Some(("last", 5))),
+        (0x1510, None),
+        (0x1605, Some(("guarded", 5))),
+        (0x1705, Some(("twin", 5))),
+        (0x1805, None),
+        (0x0800, None),
+    ] {
+        let got = table.dladdr(offset).map(|(name, within)| (name.to_str().unwrap(), within));
+        assert_eq!(got, want, "offset {offset:#x}");
+    }
+    // A name no NUL ends inside the string table: never an answer either.
+    let unended = [sym(0, 0, 0, 0), sym_visible(1, FUNC, 0, 1, 0x1000, 0x10)].concat();
+    assert_eq!(SymTab::new(&unended, b"\0abc").dladdr(0x1005), None);
+    assert!(SymTab::new(&unended, b"\0abc\0").dladdr(0x1005).is_some());
+}
+
+/// `.dynsym`'s count, where no section header says it, is what `.gnu.hash`
+/// describes, or the `DT_SYMTAB`–`DT_STRTAB` gap, which is also the answer,
+/// as an error, for a `.gnu.hash` that describes none.
+#[test]
+fn the_symbol_count_is_the_hash_tables_or_the_gap() {
+    let tables = Dynamic::parse(&dynamic(&[(dynamic::DT_SYMTAB, 0x200), (dynamic::DT_STRTAB, 0x200 + 24 * 9)]));
+    let hashed = hash_table(1, 2, 1, 6, &[2], &[4, 6, 9]);
+    assert_eq!(tables.sym_count(Some(&hashed)), Ok(5));
+    assert_eq!(tables.sym_count(None), Ok(9));
+    assert_eq!(tables.sym_count(Some(&[])), Err(9));
+    assert_eq!(tables.sym_count(Some(&hash_table(1, 0, 1, 0, &[1], &[0; 4]))), Err(9));
+    let backwards = Dynamic::parse(&dynamic(&[(dynamic::DT_SYMTAB, 0x400), (dynamic::DT_STRTAB, 0x200)]));
+    assert_eq!(backwards.sym_count(None), Ok(0));
+    assert_eq!(Dynamic::default().sym_count(None), Ok(0));
+}

@@ -80,7 +80,7 @@ pub fn excluded(root: &Path) -> BTreeSet<String> {
 }
 
 /// `path` relative to `root`, with forward slashes.
-fn rel(root: &Path, path: &Path) -> String {
+pub(crate) fn rel(root: &Path, path: &Path) -> String {
     path.strip_prefix(root)
         .unwrap_or(path)
         .to_string_lossy()
@@ -385,7 +385,7 @@ mod tests {
         }
         for excluded in excluded(&root) {
             // Not "holds a Cargo.toml": a linked worktree's `rust/` is the empty
-            // stub `git worktree add` leaves (src/CLAUDE.md), and excluding it
+            // stub `git worktree add` leaves, and excluding it
             // is right in both checkouts.
             assert!(
                 root.join(&excluded).is_dir(),

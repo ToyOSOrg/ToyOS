@@ -14,10 +14,6 @@ pub trait IdKey: Copy + Eq + Hash + Ord + Add<Output = Self> {
 }
 
 // No impl for u32/u64/usize: that would let a bare integer key an IdMap.
-impl IdKey for toyos_abi::Pid {
-    const ZERO: Self = Self(0);
-    const ONE: Self = Self(1);
-}
 impl IdKey for toyos_abi::Tid {
     const ZERO: Self = Self(0);
     const ONE: Self = Self(1);

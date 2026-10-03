@@ -101,13 +101,13 @@ pub struct KernelArgs {
     /// GPT entry like [`Self::boot_partition_guid`]; zero with no image. The
     /// kernel holds that partition so no claim writes the slot it is running.
     pub root_partition_guid: [u8; 16],
-    /// The time-stamp counter at the loader's entry and at its handoff, and the
-    /// cycles its read of ROOT took (zero with no image). The TSC counts from
-    /// reset, so the first is firmware's time since power-on unless firmware
-    /// wrote the counter; the kernel converts all three at its calibrated rate.
-    pub loader_entry_tsc: u64,
-    pub loader_handoff_tsc: u64,
-    pub root_read_tsc: u64,
+    /// The CPU's counter, the one the kernel's clock reads, at the loader's
+    /// entry and at its handoff, and the ticks its read of ROOT took (zero with
+    /// no image). The first is firmware's time since the counter started; the
+    /// kernel converts all three at its clock's rate.
+    pub loader_entry_counter: u64,
+    pub loader_handoff_counter: u64,
+    pub root_read_ticks: u64,
 }
 
 /// [`KernelArgs::layout`] for the struct this file declares: the struct's own
@@ -222,9 +222,9 @@ const _: () = {
     assert!(offset_of!(KernelArgs, root_image_addr) == 1216);
     assert!(offset_of!(KernelArgs, root_image_len) == 1224);
     assert!(offset_of!(KernelArgs, root_partition_guid) == 1232);
-    assert!(offset_of!(KernelArgs, loader_entry_tsc) == 1248);
-    assert!(offset_of!(KernelArgs, loader_handoff_tsc) == 1256);
-    assert!(offset_of!(KernelArgs, root_read_tsc) == 1264);
+    assert!(offset_of!(KernelArgs, loader_entry_counter) == 1248);
+    assert!(offset_of!(KernelArgs, loader_handoff_counter) == 1256);
+    assert!(offset_of!(KernelArgs, root_read_ticks) == 1264);
     assert!(size_of::<KernelArgs>() == 1272);
     assert!(LAYOUT as i32 > 1440 || (LAYOUT as i32) < -1440);
     assert!(align_of::<KernelArgs>() == 8);
@@ -317,9 +317,9 @@ mod tests {
         root_image_addr: 0,
         root_image_len: 0,
         root_partition_guid: [0; 16],
-        loader_entry_tsc: 0,
-        loader_handoff_tsc: 0,
-        root_read_tsc: 0,
+        loader_entry_counter: 0,
+        loader_handoff_counter: 0,
+        root_read_ticks: 0,
     };
 
     #[test]

@@ -133,6 +133,7 @@ pub fn taken_here() -> u64 {
 }
 
 /// Logs one `irq: cpuN total=… <source>=…` line per online CPU; counts are cumulative since boot.
+/// A `mask-windows` kernel follows each with that CPU's `windows:` line.
 /// Allocates nothing, takes no lock, touches no device.
 pub fn log_census() {
     for cpu in 0..crate::smp::cpu_count() {
@@ -142,5 +143,7 @@ pub fn log_census() {
             counts[TOTAL],
             Fields(&counts[TOTAL + 1..])
         );
+        #[cfg(feature = "mask-windows")]
+        crate::windows::log_cpu(cpu);
     }
 }

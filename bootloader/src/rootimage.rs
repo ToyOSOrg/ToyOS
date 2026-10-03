@@ -28,7 +28,7 @@ use uefi::prelude::*;
 use uefi::proto::device_path::{DevicePath, DevicePathNode, DeviceSubType, DeviceType};
 use uefi::proto::loaded_image::LoadedImage;
 use uefi::proto::media::block::{BlockIO, BlockIoProtocol};
-use uefi::table::boot::{AllocateType, MemoryType, OpenProtocolAttributes, OpenProtocolParams, ScopedProtocol};
+use uefi::table::boot::{AllocateType, MemoryType, ScopedProtocol};
 
 /// The unit ROOT's filesystem is written in, and the alignment every buffer
 /// here is allocated at.
@@ -58,15 +58,15 @@ pub struct RootImage {
     len: u64,
     /// The partition it was read from, raw as in its GPT entry.
     partition: [u8; 16],
-    /// The TSC cycles the read took.
-    cycles: u64,
+    /// The counter ticks the read took.
+    ticks: u64,
 }
 
 impl RootImage {
     /// Where the kernel is told the image is, which partition it came from, and
-    /// the cycles reading it took.
+    /// the counter ticks reading it took.
     pub fn handoff(&self) -> (u64, u64, [u8; 16], u64) {
-        (self.at, self.len, self.partition, self.cycles)
+        (self.at, self.len, self.partition, self.ticks)
     }
 
     /// The image's bytes, for the hash its slot's header names.
@@ -92,11 +92,10 @@ impl RootImage {
 /// image from: the one handle whose device path is the partition's without
 /// its last node, the HARDDRIVE one.
 pub fn boot_disk(handle: Handle, bs: &BootServices) -> Result<Handle, String> {
-    let image = bs
-        .open_protocol_exclusive::<LoadedImage>(handle)
+    let image = crate::protocol::exclusive::<LoadedImage>(bs, handle)
         .map_err(|e| alloc::format!("this image's LoadedImage: {e:?}"))?;
     let device = image.device().ok_or("firmware names no device this image was loaded from")?;
-    let path = try_get_protocol::<DevicePath>(bs, device)
+    let path = crate::protocol::get::<DevicePath>(bs, device)
         .map_err(|e| alloc::format!("the boot device's path: {e:?}"))?;
     let nodes: alloc::vec::Vec<&DevicePathNode> = path.node_iter().collect();
     let Some((last, disk_nodes)) = nodes.split_last() else {
@@ -116,32 +115,13 @@ pub fn boot_disk(handle: Handle, bs: &BootServices) -> Result<Handle, String> {
         // close then fails.
         .filter(|&candidate| candidate != device)
         .filter(|&candidate| {
-            let Ok(path) = try_get_protocol::<DevicePath>(bs, candidate) else { return false };
+            let Ok(path) = crate::protocol::get::<DevicePath>(bs, candidate) else { return false };
             path.node_iter().eq(disk_nodes.iter().copied())
         })
         .collect();
     match disks[..] {
         [disk] => Ok(disk),
         _ => Err(alloc::format!("{} block devices answer to the boot partition's disk path, wanted one", disks.len())),
-    }
-}
-
-fn try_get_protocol<P: uefi::proto::ProtocolPointer + ?Sized>(
-    bs: &BootServices,
-    handle: Handle,
-) -> uefi::Result<ScopedProtocol<'_, P>> {
-    // SAFETY: `open_protocol`'s obligation is that the handle and protocol stay
-    // installed until the `ScopedProtocol` drops. This loader is the one image
-    // running, registers no callback that could uninstall either, and calls no
-    // boot service that connects or disconnects a controller.
-    //
-    // Never exclusive: EXCLUSIVE stops every driver holding the protocol, and
-    // on a disk that is the partition driver the ESP's filesystem sits on.
-    unsafe {
-        bs.open_protocol::<P>(
-            OpenProtocolParams { handle, agent: bs.image_handle(), controller: None },
-            OpenProtocolAttributes::GetProtocol,
-        )
     }
 }
 
@@ -158,7 +138,7 @@ pub struct Disk<'a> {
 
 impl<'a> Disk<'a> {
     pub fn open(bs: &'a BootServices, handle: Handle) -> Result<Self, String> {
-        let io = try_get_protocol::<BlockIO>(bs, handle).map_err(|e| alloc::format!("the boot disk's block I/O: {e:?}"))?;
+        let io = crate::protocol::get::<BlockIO>(bs, handle).map_err(|e| alloc::format!("the boot disk's block I/O: {e:?}"))?;
         let media = io.media();
         if !media.is_media_present() {
             return Err("the boot disk reports no media".into());
@@ -242,10 +222,10 @@ impl<'a> Disk<'a> {
         // Chunks are whole `BLOCK`s from a page-aligned buffer, so each one
         // keeps the `IoAlign` `open` checked against `BLOCK`.
         let chunk = chunk::chunk_bytes(CHUNK_BOUND, BLOCK, self.lba_bytes, granularity.unwrap_or(0));
-        let began = crate::tsc();
+        let began = crate::arch::counter();
         let mut device = Firmware { io: &self.io, media_id: self.media_id };
         let read = chunk::read(&mut device, part.first_lba(), self.lba_bytes, chunk, into);
-        let image = RootImage { at, len, partition: part.unique_guid().0, cycles: crate::tsc().wrapping_sub(began) };
+        let image = RootImage { at, len, partition: part.unique_guid().0, ticks: crate::arch::counter().wrapping_sub(began) };
         if let Err(failed) = read {
             let why = alloc::format!(
                 "the read of {} blocks at LBA {} failed: {:?}, after {} of {len} bytes read",
@@ -258,14 +238,14 @@ impl<'a> Disk<'a> {
             return Err(why);
         }
         println!(
-            "{READ_AT} {at:#x}+{len:#x} from LBA {}+{}, {chunk} bytes a request (optimal granularity: {}), in {} TSC cycles",
+            "{READ_AT} {at:#x}+{len:#x} from LBA {}+{}, {chunk} bytes a request (optimal granularity: {}), in {} counter ticks",
             part.first_lba(),
             len / u64::from(self.lba_bytes),
             match granularity {
                 Some(lbas) => alloc::format!("{lbas} block(s)"),
                 None => String::from("not reported"),
             },
-            image.cycles
+            image.ticks
         );
         Ok(image)
     }

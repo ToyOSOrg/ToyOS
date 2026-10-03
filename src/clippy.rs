@@ -39,13 +39,13 @@ struct Shape {
 const INSTRUMENTS: &str = "debug-wait,sched-check,sched-tripwire,heap-tripwire,heap-sweep,\
                            pass-spin,stack-witness,switch-witness,switch-witness-mutate-frame,\
                            switch-witness-mutate-rsp,df-witness,df-witness-mutate,\
-                           entry-df-unclean,fpu-save-nothing,user-writable-gsbase";
+                           entry-df-unclean,mask-windows";
 
 /// [`INSTRUMENTS`] less the direction-flag three, which are x86-64's alone.
 const AARCH64_INSTRUMENTS: &str = "debug-wait,sched-check,sched-tripwire,heap-tripwire,heap-sweep,\
                                    pass-spin,stack-witness,switch-witness,\
                                    switch-witness-mutate-frame,switch-witness-mutate-rsp,\
-                                   fpu-save-nothing,user-writable-gsbase";
+                                   mask-windows";
 
 const UNCONTROLLED: &[&str] = &["toyos-pcid/counting-allocator", "toyos-sched/tripwire"];
 
@@ -153,9 +153,12 @@ const SHAPES: &[Shape] = &[
         ],
         after: &["$ADOPTED", "-D", "warnings"],
     },
+    // Its own target directory: cargo keeps one check of a unit, so a unit
+    // linted under two sets of lints is checked again by each, every run, and
+    // so is every crate depending on it.
     Shape {
         dir: "",
-        before: &["-p", "toyos-abi", "--all-targets", "--keep-going"],
+        before: &["-p", "toyos-abi", "--all-targets", "--keep-going", "--target-dir", "target/clippy-abi"],
         after: &["-W", "clippy::undocumented_unsafe_blocks", "-D", "warnings"],
     },
 ];
@@ -204,7 +207,7 @@ pub fn run(root: &Path) -> Vec<String> {
     let mut failed = Vec::new();
     for shape in SHAPES {
         let scope = if shape.dir.is_empty() { "workspace root" } else { shape.dir };
-        println!("=== clippy: {scope} — {}", shape.line());
+        eprintln!("=== clippy: {scope} — {}", shape.line());
         let status = Command::new("cargo")
             .arg("clippy")
             .args(shape.args())
@@ -233,7 +236,7 @@ pub fn dispatch(root: &Path) {
         }
         std::process::exit(1);
     }
-    println!("clippy: {} invocations clean", SHAPES.len());
+    eprintln!("clippy: {} invocations clean", SHAPES.len());
 }
 
 #[cfg(test)]

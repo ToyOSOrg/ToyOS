@@ -5,9 +5,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// This file, which the release tag hashes.
-pub(crate) const SOURCE: &str = file!();
-
 /// cargo's install of n2 but for its `--root`: without its default jemalloc,
 /// which is C.
 pub(crate) const N2: [&str; 7] = [

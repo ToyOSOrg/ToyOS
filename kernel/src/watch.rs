@@ -1,6 +1,6 @@
 //! The one way to wait: every waitable object holds exactly one [`Watch`], and
 //! a waiter on it is either a thread, which a post *wakes*, or a user poll
-//! ring's entry, which a post *completes*.
+//! ring's entry, which a post *fires*.
 //!
 //! The protocol is `toyos_sched::watch`'s and `toyos_sched::park`'s, and its
 //! lost-wake argument is theirs: a thread registers before it reads its
@@ -42,14 +42,14 @@ pub struct Waitable<L: CellLock<List>>(toyos_sched::watch::Watch<KMsg, PollEntry
 /// A watch no interrupt handler reaches.
 pub type Watch = Waitable<KernelLock<List>>;
 
-/// A watch an interrupt handler posts, and the watch of a ring such a post
-/// completes into. It has no `post`, which frees: [`IrqWatch::post_in_place`]
+/// A watch an interrupt handler posts, and the watch of a ring whose poll such
+/// a post fires. It has no `post`, which frees: [`IrqWatch::post_in_place`]
 /// frees nothing.
 pub type IrqWatch = Waitable<IrqLock<List>>;
 
-/// What an interrupt handler's post takes: an [`IrqWatch`]'s list and a poll
-/// ring's completions. Held with interrupts off, so a handler never finds one
-/// held by the context it interrupted; nothing allocates or frees under it.
+/// What an interrupt handler's post takes: an [`IrqWatch`]'s list. Held with
+/// interrupts off, so a handler never finds one held by the context it
+/// interrupted; nothing allocates or frees under it.
 pub struct IrqLock<T>(masked::Masked<T>);
 
 impl<T> IrqLock<T> {
@@ -65,8 +65,6 @@ impl<T: Send> CellLock<T> for IrqLock<T> {
         preempt_off(|_| {
             let irq = crate::arch::IrqGuard::close();
             let mut held = self.0.lock(&irq);
-            #[cfg(feature = "boot-actuators")]
-            handler_post::raise_if_staged();
             f(&mut held)
         })
     }
@@ -97,7 +95,7 @@ impl Watch {
     }
 
     /// Something about the object changed: wake every thread waiting on it and
-    /// complete every poll.
+    /// fire every poll.
     pub fn post(&self) {
         self.post_as(WakeCause::new(WakeReason::Woken));
     }
@@ -144,12 +142,10 @@ impl IrqWatch {
     }
 
     /// Something about the object changed: wake every thread waiting on it and
-    /// complete every poll where it stands, freeing nothing. A handler makes it
+    /// fire every poll where it stands, freeing nothing. A handler makes it
     /// with its CPU's preempt count raised, as `device_irq_entry` holds it, so
     /// this post's own never reaches zero, and a pass, inside the interrupt.
     pub fn post_in_place(&self) {
-        #[cfg(feature = "boot-actuators")]
-        handler_post::note_post(self);
         preempt_off(|p| {
             let env = Poster { cpus: cpus(), kicker: &HW, preempt: p };
             self.0.post_in_place(WakeCause::new(WakeReason::Woken), &env);
@@ -169,11 +165,6 @@ impl<L: CellLock<List>> Waitable<L> {
         self.0.cancel_rings();
     }
 
-    /// `handler-post`'s stand where a registration holds the list lock.
-    #[cfg(feature = "boot-actuators")]
-    pub(crate) fn holding(&self, f: impl FnOnce()) {
-        self.0.holding(f);
-    }
 }
 
 /// A thread's registration on one watch, held across its wait and ended by
@@ -277,8 +268,6 @@ pub fn wait_until<L: CellLock<List>>(
         if deadline.reached(crate::clock::now()) {
             return Ok(());
         }
-        #[cfg(feature = "boot-actuators")]
-        window::hold(&armed);
         match wait_inner(p, &armed, deadline, Cancel::Answers) {
             Ok(()) => {}
             Err(Ended::Cancelled) => return Err(Cancelled(())),
@@ -286,168 +275,6 @@ pub fn wait_until<L: CellLock<List>>(
         }
     }
     Ok(())
-}
-
-/// `watch-window`: hold a pipe waiter between reading its condition false and
-/// its phase 1 until a post lands there — the post only the notified bit
-/// carries to the commit — or its budget lapses. The holds a post ended are
-/// counted, and every `STEP`th is a `HELD` line the harness reads: a boot
-/// whose count did not move staged nothing, however green its canary.
-#[cfg(feature = "boot-actuators")]
-mod window {
-    use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
-
-    use toyos_sched::task::WaitClass;
-    use toyos_sched::watch::window::{HELD, STEP};
-
-    use super::{Armed, CellLock, List};
-    use crate::time::{Budget, Deadline, Duration};
-
-    /// A pipe wait nothing posts — a reader whose writer is idle — ends its
-    /// hold here and waits on unstaged; the count of those is on every line.
-    const WINDOW: Budget = Budget::of(
-        Duration::from_millis(50),
-        "the wait goes on unstaged, counted as lapsed",
-    );
-
-    static POSTED: AtomicU64 = AtomicU64::new(0);
-    static LAPSED: AtomicU64 = AtomicU64::new(0);
-
-    pub(super) fn hold<L: CellLock<List>>(armed: &Armed<'_, L>) {
-        if !crate::actuator::watch_window() || armed.class != WaitClass::Pipe {
-            return;
-        }
-        let deadline = Deadline::at(crate::clock::now() + WINDOW.duration());
-        loop {
-            // Counted only on the bit itself: a hold that ended any other way
-            // staged nothing.
-            if armed.shared.notified() {
-                let posted = POSTED.fetch_add(1, Relaxed) + 1;
-                if posted.is_multiple_of(STEP) {
-                    crate::log!("{HELD} {posted} times, {} lapsed", LAPSED.load(Relaxed));
-                }
-                return;
-            }
-            if deadline.reached(crate::clock::now()) {
-                LAPSED.fetch_add(1, Relaxed);
-                return;
-            }
-            core::hint::spin_loop();
-        }
-    }
-}
-
-/// `handler-post`: the last claim slot's vector, which no claim holds, raised
-/// on this CPU while it holds preemption off, posts that slot's watch from the
-/// handler before any pass can run. Raised inside a post of the watch itself,
-/// the handler's post follows once the outer one lets go; raised inside a
-/// completion written into a ring that polls the watch, or inside that ring's
-/// own watch's list lock, the handler's post completes that poll once the
-/// section lets go. A hold counts the posts of the watch made on its CPU, and
-/// no other watch's, and lapses at its budget. One run of [`HOLDS`] holds per
-/// arm, on whichever idle loop reaches it first with interrupts open; its
-/// verdict is one [`Verdict`] line.
-#[cfg(feature = "boot-actuators")]
-pub mod handler_post {
-    use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
-
-    use toyos_sched::watch::handler_post::{Verdict, HOLDS};
-
-    use crate::pcidev::{MAX_FUNCTIONS, VECTORS};
-    use crate::time::{Budget, Deadline, Duration};
-
-    const SLOT: usize = MAX_FUNCTIONS - 1;
-
-    const WINDOW: Budget = Budget::of(
-        Duration::from_secs(1),
-        "the hold is counted as lapsed, and the verdict line says so",
-    );
-
-    const NOBODY: u32 = u32::MAX;
-    static RAN: AtomicBool = AtomicBool::new(false);
-    /// The CPU whose next interrupts-off section raises the vector inside itself.
-    static RAISE_INSIDE: AtomicU32 = AtomicU32::new(NOBODY);
-    static HOLDING: AtomicU32 = AtomicU32::new(NOBODY);
-    static POSTS: AtomicU64 = AtomicU64::new(0);
-
-    pub fn run() {
-        // A hold is a CPU that takes interrupts while it holds.
-        if RAN.load(Relaxed) || !crate::arch::cpu::interrupts_enabled() || RAN.swap(true, Relaxed) {
-            return;
-        }
-        // A held slot's driver would take counts its device never raised.
-        assert!(crate::pcidev::held_at(SLOT).is_none(), "handler-post: claim slot {SLOT} is held");
-        let me = crate::arch::percpu::cpu_id();
-        let claim = crate::pcidev::watch(SLOT);
-        let ring = crate::inbox::Staged::new();
-        let verdict = crate::sched::driver::preempt_off(|_| {
-            HOLDING.store(me, Relaxed);
-            // The outer post is one of the two a hold waits for.
-            let in_a_list = holds(2, || {
-                RAISE_INSIDE.store(me, Relaxed);
-                claim.post_in_place();
-            });
-            let in_a_ring = holds(1, || {
-                ring.poll(claim);
-                RAISE_INSIDE.store(me, Relaxed);
-                ring.complete();
-            });
-            // Where a submitter's registration holds it.
-            let in_a_rings_watch = holds(1, || {
-                ring.poll(claim);
-                ring.holding_its_watch(raise);
-            });
-            HOLDING.store(NOBODY, Relaxed);
-            Verdict { in_a_list, in_a_ring, in_a_rings_watch }
-        });
-        crate::log!("{verdict}");
-    }
-
-    /// [`HOLDS`] holds of `stage`, answering how many saw `owed` posts of the
-    /// claim's watch before their budget.
-    fn holds(owed: u64, stage: impl Fn()) -> u32 {
-        let mut posted = 0;
-        for _ in 0..HOLDS {
-            let before = POSTS.load(Relaxed);
-            stage();
-            let deadline = Deadline::at(crate::clock::now() + WINDOW.duration());
-            loop {
-                if POSTS.load(Relaxed) >= before + owed {
-                    posted += 1;
-                    break;
-                }
-                if deadline.reached(crate::clock::now()) {
-                    break;
-                }
-                core::hint::spin_loop();
-            }
-        }
-        posted
-    }
-
-    fn raise() {
-        crate::arch::irqchip::send_self(VECTORS[SLOT]);
-    }
-
-    /// From inside an interrupts-off section: the staged CPU's next one raises
-    /// the vector while it holds.
-    pub fn raise_if_staged() {
-        let staged = RAISE_INSIDE.load(Relaxed);
-        if staged != NOBODY && staged == crate::arch::percpu::cpu_id() {
-            RAISE_INSIDE.store(NOBODY, Relaxed);
-            raise();
-        }
-    }
-
-    pub fn note_post(watch: &super::IrqWatch) {
-        let holding = HOLDING.load(Relaxed);
-        if holding != NOBODY
-            && holding == crate::arch::percpu::cpu_id()
-            && core::ptr::eq(watch, crate::pcidev::watch(SLOT))
-        {
-            POSTS.fetch_add(1, Relaxed);
-        }
-    }
 }
 
 /// Register, then park until `ready()` holds, for a wait a kill may not end

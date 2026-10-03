@@ -3,8 +3,9 @@
 //!
 //! `#[cfg(test)]`, so none of it reaches a kernel build. What it adds beyond
 //! the two traits is the *consequences* a decision hands back and the kernel
-//! performs — a watch's post, a retire, a `publish_exit`, an idle
-//! pass taking an entry — because the laws worth checking are about the order
+//! performs — a watch's post, a retire, a `publish_exit`, a handle minted or
+//! closed, an idle pass taking an entry — because the laws worth
+//! checking are about the order
 //! those happen in, and a model that only held the two states could not see
 //! one.
 //!
@@ -18,7 +19,8 @@ use alloc::vec::Vec;
 
 use crate::table::{Lifecycle, Processes};
 use crate::teardown::{self, Leave};
-use crate::{Pid, ThreadLocation, Tid, Watch};
+use crate::tree::{self, Admit, Publish};
+use crate::{Node, Pid, Pids, ThreadLocation, Tid, Watch};
 
 /// One process, as its lifecycle sees it.
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -30,6 +32,7 @@ pub struct ModelProc {
     /// How many times a claim was raised on this process. Counted here because
     /// `begin_teardown` has exactly one caller and the count is the law.
     claims: u32,
+    node: Node,
 }
 
 impl Lifecycle for ModelProc {
@@ -59,6 +62,12 @@ impl Lifecycle for ModelProc {
             f(tid, at);
         }
     }
+    fn node(&self) -> &Node {
+        &self.node
+    }
+    fn node_mut(&mut self) -> &mut Node {
+        &mut self.node
+    }
 }
 
 /// Where a thread is on its way out, one lock section or pass per step.
@@ -68,14 +77,23 @@ enum Out {
     Leave,
     /// The last one out: `teardown_resources`, the process's mappings and handles.
     Free { code: i32, mark: i32 },
-    /// The last one out: `teardown_bookkeeping`'s table section, which marks it dead.
+    /// The last one out: `teardown`'s last table section, which marks it dead,
+    /// stashes its exit and lets its own hold on its publication go.
     Mark { code: i32, mark: i32 },
-    /// The last one out: `ProcessObject::publish_exit`.
-    Publish { code: i32 },
+    /// A publication that hold owed, and the climb behind it.
+    Climb(Climb),
     /// `thread_exit`'s post on its own watch.
     Post,
     /// The exit pass: the thread never runs again.
     Gone,
+}
+
+/// A publication and the climb behind it, one step each: `publish_exit` with
+/// no lock held, then the parent's hold lowered under the lock.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Climb {
+    Publish(Publish),
+    Lower { parent: Pid, child: Pid },
 }
 
 /// A thread leaving: the code it chose, and how far it is.
@@ -89,7 +107,7 @@ struct Departure {
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct World {
     procs: BTreeMap<Pid, ModelProc>,
-    next_pid: Pid,
+    pids: Pids,
     /// The exit each process published, which is what `published_exit` reads —
     /// on the object in the kernel, and never on the entry.
     published: BTreeMap<Pid, i32>,
@@ -113,6 +131,26 @@ pub struct World {
     /// TLS blocks a spawn's phase 2 mapped and no thread owns yet.
     tls_mapped: BTreeSet<u32>,
     next_tls: u32,
+    /// Exits torn down and not yet published: the kernel keeps each on its
+    /// entry until its count lets it go.
+    stash: BTreeMap<Pid, i32>,
+    /// Processes that landed unclaimed under a place whose end was already
+    /// claimed.
+    landed_under_claimed: BTreeSet<Pid>,
+    /// Each process a spawn op inserted, and how many processes had been
+    /// claimed when it landed.
+    inserted_at: Vec<(Pid, usize)>,
+    /// Spawning threads whose caller's handles a spawn moved.
+    moved: BTreeSet<(Pid, Tid)>,
+    /// Spawning threads answered a refusal after their handles moved.
+    refused_after_move: BTreeSet<(Pid, Tid)>,
+    /// Handles to a process's object: the object, and the process whose table
+    /// holds one.
+    handles: BTreeSet<(Pid, Pid)>,
+    /// Objects whose last handle has gone.
+    retired: BTreeSet<Pid>,
+    /// Objects a handle was minted on after their last had gone.
+    minted_retired: BTreeSet<Pid>,
 }
 
 impl Processes for World {
@@ -132,13 +170,21 @@ impl Processes for World {
             f(pid);
         }
     }
+    fn pids(&mut self) -> &mut Pids {
+        &mut self.pids
+    }
 }
 
 impl World {
     pub fn new() -> Self {
+        Self::with_pids(Pids::default())
+    }
+
+    /// A world whose spawns take their pids from `pids`.
+    pub fn with_pids(pids: Pids) -> Self {
         Self {
             procs: BTreeMap::new(),
-            next_pid: Pid(1),
+            pids,
             published: BTreeMap::new(),
             waiters: BTreeSet::new(),
             released: BTreeSet::new(),
@@ -150,6 +196,14 @@ impl World {
             frees: BTreeMap::new(),
             tls_mapped: BTreeSet::new(),
             next_tls: 0,
+            stash: BTreeMap::new(),
+            landed_under_claimed: BTreeSet::new(),
+            inserted_at: Vec::new(),
+            moved: BTreeSet::new(),
+            refused_after_move: BTreeSet::new(),
+            handles: BTreeSet::new(),
+            retired: BTreeSet::new(),
+            minted_retired: BTreeSet::new(),
         }
     }
 
@@ -171,11 +225,95 @@ impl World {
         self.tls_mapped.remove(&block);
     }
 
-    /// A process with one thread, which is its main one — what
-    /// `ProcessEntry::new` builds.
+    /// A process under none with one thread, which is its main one — what
+    /// the loader builds for init.
     pub fn spawn_process(&mut self) -> Pid {
-        let pid = self.next_pid;
-        self.next_pid = Pid(pid.0 + 1);
+        self.land(None)
+    }
+
+    /// A process placed under `place`, admitted and inserted with nothing
+    /// between: how a test builds the tree its ops start from.
+    pub fn spawn_child(&mut self, place: Pid) -> Pid {
+        self.land(Some(place))
+    }
+
+    fn land(&mut self, place: Option<Pid>) -> Pid {
+        let Admit::Yes(admitted) = tree::admit_child(self, place) else {
+            panic!("World::land: {place:?} admits no child");
+        };
+        let pid = admitted.pid();
+        // As a spawn's commit leaves them: its place's handle to it, and its own.
+        if let Some(place) = place {
+            self.mint(pid, place);
+        }
+        self.mint(pid, pid);
+        let ((), retire) = tree::land_child(self, admitted, 137, |world, node| world.insert(pid, node));
+        assert_eq!(retire, [], "World::land: {place:?} was claimed");
+        pid
+    }
+
+    /// `HandleEntry::new`: `holder`'s table takes a handle to `object`.
+    pub fn mint(&mut self, object: Pid, holder: Pid) {
+        if self.retired.contains(&object) {
+            self.minted_retired.insert(object);
+        }
+        self.handles.insert((object, holder));
+    }
+
+    /// `HandleEntry`'s drop: `holder`'s handle to `object` goes, if it has
+    /// one, and an object left with no handle is retired.
+    pub fn close(&mut self, object: Pid, holder: Pid) {
+        if self.handles.remove(&(object, holder)) && !self.handles.iter().any(|&(held, _)| held == object) {
+            self.retired.insert(object);
+        }
+    }
+
+    /// `teardown_resources` draining `pid`'s table.
+    fn close_table(&mut self, pid: Pid) {
+        let closed: Vec<Pid> =
+            self.handles.iter().filter(|&&(_, holder)| holder == pid).map(|&(object, _)| object).collect();
+        for object in closed {
+            self.close(object, pid);
+        }
+    }
+
+    /// A spawn op's landing, at the end of the hold that made it: records a
+    /// process unclaimed under a claimed place, and how many processes had
+    /// been claimed when it landed.
+    pub fn landed(&mut self, place: Pid, pid: Pid) {
+        let unclaimed = !self.procs[&pid].tearing_down();
+        if unclaimed && self.procs.get(&place).is_some_and(Lifecycle::tearing_down) {
+            self.landed_under_claimed.insert(pid);
+        }
+        let claimed = self.claimed_count();
+        self.inserted_at.push((pid, claimed));
+    }
+
+    /// A spawn by `by` taking its caller's endowed handles out of its table.
+    pub fn move_handles(&mut self, by: (Pid, Tid)) {
+        self.moved.insert(by);
+    }
+
+    /// A spawn by `by` answering a refusal.
+    pub fn refuse_spawn(&mut self, by: (Pid, Tid)) {
+        if self.moved.contains(&by) {
+            self.refused_after_move.insert(by);
+        }
+    }
+
+    /// Each process a spawn op inserted, and how many had been claimed then.
+    pub fn inserted_at(&self) -> &[(Pid, usize)] {
+        &self.inserted_at
+    }
+
+    /// Every process claimed so far, those already reaped included.
+    pub fn claimed_count(&self) -> usize {
+        let reaped = self.published.keys().filter(|pid| !self.procs.contains_key(pid)).count();
+        self.procs.values().filter(|p| p.claims > 0).count() + reaped
+    }
+
+    /// `pid`'s entry, with one thread, which is its main one.
+    pub fn insert(&mut self, pid: Pid, node: Node) {
         let mut threads = BTreeMap::new();
         threads.insert(Tid(0), ThreadLocation::Scheduled);
         self.procs.insert(
@@ -186,10 +324,10 @@ impl World {
                 threads,
                 next_tid: Tid(1),
                 claims: 0,
+                node,
             },
         );
         self.mapped.insert((pid, Tid(0)));
-        pid
     }
 
     /// Insert a thread the way `spawn_thread`'s phase 3 does — in the table and
@@ -310,16 +448,21 @@ impl World {
             Out::Free { code, mark } => {
                 *self.frees.entry(pid).or_insert(0) += 1;
                 self.mapped.retain(|&(p, _)| p != pid);
+                self.close_table(pid);
                 Out::Mark { code, mark }
             }
             Out::Mark { code, mark } => {
                 teardown::torn_down(self, pid, tid, mark);
-                Out::Publish { code }
+                self.stash.insert(pid, code);
+                match tree::teardown_done(self, pid) {
+                    Some(publish) => Out::Climb(Climb::Publish(publish)),
+                    None => Out::Post,
+                }
             }
-            Out::Publish { code } => {
-                self.publish_exit(pid, code);
-                Out::Post
-            }
+            Out::Climb(climb) => match self.climb_step(climb) {
+                Some(next) => Out::Climb(next),
+                None => Out::Post,
+            },
             Out::Post => {
                 if chosen.is_some() {
                     self.post(Watch::Thread(pid, tid));
@@ -342,6 +485,21 @@ impl World {
             .iter()
             .find(|(&(p, _), d)| p == pid && matches!(d.at, Out::Free { .. } | Out::Mark { .. }))
             .map(|(&(_, tid), _)| tid)
+    }
+
+    /// One step of a climb, by whichever thread's lowering owed it.
+    pub fn climb_step(&mut self, climb: Climb) -> Option<Climb> {
+        match climb {
+            Climb::Publish(publish) => {
+                let code = self
+                    .stash
+                    .remove(&publish.pid)
+                    .expect("a publication takes the exit its teardown stashed");
+                self.publish_exit(publish.pid, code);
+                publish.parent.map(|parent| Climb::Lower { parent, child: publish.pid })
+            }
+            Climb::Lower { parent, child } => tree::published(self, parent, child).map(Climb::Publish),
+        }
     }
 
     /// `ProcessObject::publish_exit`, assertion and all: two publishes mean two
@@ -409,6 +567,25 @@ impl World {
                 "pid {pid} tid {tid}: its entry and its mapped TLS went while a sibling was still in the process",
             ));
         }
+        // L9. An end is published after every end below it.
+        for (&pid, proc) in &self.procs {
+            if let Some(parent) = proc.node.parent() {
+                if self.published.contains_key(&parent) && !self.published.contains_key(&pid) {
+                    out.push(alloc::format!(
+                        "pid {parent} was published with pid {pid} still unpublished below it",
+                    ));
+                }
+            }
+        }
+        // L10. Nothing lands unclaimed under a place once its end is claimed.
+        for pid in &self.landed_under_claimed {
+            out.push(alloc::format!("pid {pid} landed unclaimed under a place whose end was already claimed"));
+        }
+        // L13. No handle is minted on an object whose last one has gone:
+        // `HandleEntry::new` asserts it.
+        for pid in &self.minted_retired {
+            out.push(alloc::format!("pid {pid}: a handle to it was minted after its last one had gone"));
+        }
         out
     }
 
@@ -418,12 +595,24 @@ impl World {
     /// case, so checking it at every state would report every schedule.
     /// And **L5** — every TLS block a spawn mapped ends owned or released.
     /// And **L6** — every claimed process is torn down: its exit published,
-    /// every killed thread gone.
+    /// every killed thread gone. And **L11** — an end takes every process
+    /// below it. And **L12** — a spawn that answers a refusal moved none of
+    /// its caller's handles.
     pub fn final_faults(&self) -> Vec<String> {
         let mut out = self.faults();
+        for (pid, tid) in &self.refused_after_move {
+            out.push(alloc::format!("pid {pid} tid {tid}: a refused spawn moved its caller's handles"));
+        }
         for (&pid, proc) in &self.procs {
             if proc.claims > 0 && !self.published.contains_key(&pid) {
                 out.push(alloc::format!("pid {pid} was claimed for teardown and never published an exit"));
+            }
+            if let Some(parent) = proc.node.parent() {
+                let ended = self.published.contains_key(&parent)
+                    || self.procs.get(&parent).is_some_and(|p| p.claims > 0);
+                if ended && !self.published.contains_key(&pid) {
+                    out.push(alloc::format!("pid {pid} outlived the end of pid {parent} above it"));
+                }
             }
         }
         for &(pid, tid) in &self.killed {

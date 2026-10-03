@@ -6,6 +6,9 @@ include!("toyos.rs");
 
 mod checks {
     use super::*;
+    // `toyos.rs`'s `#[macro_use]` arrives by `include!` and reaches no module
+    // outside that text, so each of those names the printer's `eprintln!`.
+    use toyos_build::eprintln;
 
     #[path = "audio.rs"]
     mod audio_checks;
@@ -154,8 +157,9 @@ mod checks {
         // gate asserting against a string nothing produces any more.
         let real = format!("{STALLED} waiting for the long tone to start — it went quiet");
         let under_a_sentence = format!("the compositor stopped painting\n{real}");
-        let past = qemu::GUEST_WEDGED + Duration::from_secs(1);
-        let backstop = qemu::ceiling_verdict(None, past, qemu::GUEST_WEDGED, Duration::from_secs(1), 900)
+        let ceiling = Duration::from_secs(30);
+        let past = ceiling * 2 + Duration::from_secs(1);
+        let backstop = qemu::ceiling_verdict(None, past, ceiling, Duration::from_secs(1), 900)
             .ok_or("a guest talking past the backstop was given no verdict")?;
         let cases: [(&str, Option<&str>, bool); 5] = [
             ("an ordinary red", Some("the pointer never moved right"), false),
@@ -274,13 +278,64 @@ mod checks {
         Ok(())
     }
 
+    /// `nested_nmi_is_loud`'s verdict on a whole report, on the splice CI's KVM
+    /// lane recorded before the report held the console registers, on another
+    /// CPU's burst inside each of the report's three lines, and on each line
+    /// the kernel writes when they were not clean — held to the kernel's own
+    /// words, which nothing links this crate to.
+    #[test]
+    fn nested_nmi_verdict() -> Result<(), String> {
+        const WHOLE: &str = "[kernel 0.385 cpu1] CPU 1: jo\n\
+             [nmi] NESTED NMI on cpu 0: a second NMI entered while IST2 was still in use.\n\
+             [nmi]   rip=0xffffffff8012d3a0 rsp=0xffff80000017df50\n\
+             [nmi]   the outer handler's frame is gone; the machine stops here.\n\
+             ining scheduler\n\
+             [kernel 0.390 cpu0] panic: rebooting in 60 s unless a key is pressed\n";
+        const SPLICED: &str = "[[kenrnmel i0.38]5  cpNu1E] CSPUT 1E: Djo inNiMngI s choednule r\n\
+             c[pkeurn el0 0:.3 85a cp u1s] sechcedo: ncpud=1  rNeaMdyI=0  deyinngt=0e srtoeppded= 0 wpahrkield=0e c urrIentS=NTon2e  trwipas=s1\n \
+             stil[lke rnieln 0 .3u87s cep.u1\n\
+             ] [i8n04m2:i ar]me d  a t r37i2mps,= i0dlex fatf 38f7mfs,8 0 0in0te0r7rubpt3s 9\u{2014} 1th6e cp5in  hras snevper= as0sxerftefd f(kbfd 8GSI0 10, a0ux0 G0SI 612)0\n\
+             df50\n\
+             [nmi]   the outer handler's frame is gone; the machine stops here.\n\
+             [kernel 0.390 cpu0] panic: rebooting in 60 s unless a key is pressed\n";
+        if faults::report(WHOLE)? != WHOLE.lines().nth(1).unwrap_or_default() {
+            return Err("a whole report's first line was not the one answered".into());
+        }
+        if faults::report(SPLICED).is_ok() {
+            return Err("the recorded splice was read as a whole report".into());
+        }
+        // A burst of another CPU's line with no line end of its own, cut into
+        // the middle of each report line in turn (on the first, behind the
+        // prefix the report is found by): no line moves, so only the cut
+        // line's own shape can refuse it.
+        let lines: Vec<&str> = WHOLE.lines().collect();
+        for at in 1..=3 {
+            let (head, tail) = lines[at].split_at(lines[at].len() / 2);
+            let cut = format!("{head}[kernel 0.386 cp{tail}");
+            let mut spliced = lines.clone();
+            spliced[at] = &cut;
+            if faults::report(&spliced.join("\n")).is_ok() {
+                return Err(format!("a burst inside the report's line {at} was read as a whole report"));
+            }
+        }
+        let serial = Path::new(env!("CARGO_MANIFEST_DIR")).join("kernel/src/drivers/serial.rs");
+        let source = std::fs::read_to_string(&serial).map_err(|e| format!("{}: {e}", serial.display()))?;
+        for said in faults::UNCLEAN {
+            if !source.contains(said) {
+                return Err(format!("{} writes no {said:?}, so the test refusing it refuses nothing", serial.display()));
+            }
+            if faults::report(&format!("\n{said}; and so on\n{WHOLE}")).is_ok() {
+                return Err(format!("a capture saying {said:?} was read as clean"));
+            }
+        }
+        Ok(())
+    }
+
     /// [`control_regs`] against machines this host cannot boot, with no guest.
     ///
-    /// [`control_regs_negative`] runs the real defective machine and is the link
-    /// between this verdict and a kernel; what is here is the states no actuator
-    /// reaches — a CPU that differs from three others, a bit set uniformly on all
-    /// four, an AP that never printed. Every value is one this tree has printed or
-    /// one bit away from it.
+    /// What is here is the states no actuator reaches — a CPU that differs from
+    /// three others, a bit set uniformly on all four, an AP that never printed.
+    /// Every value is one this tree has printed or one bit away from it.
     #[test]
     fn control_regs_verdict() -> Result<(), String> {
         const AP_BEFORE: (u64, u64) = (0xe000_0011, 0x0031_0620);
@@ -342,6 +397,88 @@ mod checks {
         refused("three lines for four CPUs", &[DECLARED; 3], "{0, 1, 2, 3}")?;
 
         eprintln!("  [control_regs] the verdict refuses 10 machines and accepts the declared one");
+        Ok(())
+    }
+
+    /// [`mask_windows`] and `irqcensus::windows_under` against captures no
+    /// boot has to produce: two CPUs and the T14 row's three exits, a report
+    /// each, with cpu1 holding at the first.
+    #[test]
+    fn mask_windows_verdict() -> Result<(), String> {
+        use common::irqcensus::{windows_under, Measured};
+        let census = |cpu: u32| {
+            format!(
+                "[kernel 0.1 cpu0] irq: cpu{cpu} total=0 timer=0 xhci=0 userdev=0 sound=0 i8042=0 \
+                 dmafault=0 hda=0 tlb=0 nmi=0 spurious=0 unclaimed=0\n"
+            )
+        };
+        let windows = |cpu: u32, (irqs, preempt): (u64, u64)| {
+            format!("[kernel 0.1 cpu0] windows: cpu{cpu} irqs_off_ns={irqs} preempt_off_ns={preempt}\n")
+        };
+        let report = |cpu0: (u64, u64), cpu1: (u64, u64)| [census(0), windows(0, cpu0), census(1), windows(1, cpu1)].concat();
+        let exit = |name: &str| format!("[kernel 0.1 cpu0] exit: {name} pid=9 code=0 cpu=1ms\n");
+        let held_ns = toyos_sched::windows::HELD_NS;
+        let hold = format!("[kernel 0.1 cpu1] windows: held cpu1 ns={}\n", held_ns + 7);
+        // Since each CPU joined: longer on cpu0 than anything under the load.
+        let first = [report((6_500_000, 6_400_000), (900, 800)), exit("test_rs_idle_span")].concat();
+        let read_back = (held_ns + 400, held_ns + 300);
+        let opening = [report((100, 100), read_back), exit("pwd")].concat();
+        let own = [report((3_000_000, 1_100_000), (700_000, 600_000)), exit(WINDOWS_LOAD)].concat();
+        let good = [hold.as_str(), &first, &opening, &own].concat();
+        let exited = windows_load_exited();
+
+        mask_windows(&good, 2).map_err(|e| format!("the good capture was refused: {e}"))?;
+        let unpaired = |what: &str, capture: &str, says: &str| match mask_windows(capture, 2) {
+            Ok(()) => Err(format!("{what} was accepted")),
+            Err(e) if e.contains(says) => Ok(()),
+            Err(e) => Err(format!("{what} was refused for the wrong reason: {e}")),
+        };
+        unpaired("a census without its windows", &good.replace(&windows(0, (100, 100)), ""), "went out without")?;
+        unpaired("a CPU that closed no window", &report((0, 7), (3, 4)), "closed no window")?;
+        unpaired("one CPU of two", &[census(0), windows(0, (5, 7))].concat(), "1 of 2")?;
+        unpaired("a field missing", &good.replace(" preempt_off_ns=100", ""), "fields")?;
+
+        let read = windows_under(&good, 2, &exited)?;
+        let want = Measured { held: read_back, load: (3_000_000, 1_100_000) };
+        if read != want {
+            return Err(format!("the good capture read {read:?}, and the hold's and the load's reports say {want:?}"));
+        }
+        let refused = |what: &str, capture: &str, says: &str| match windows_under(capture, 2, &exited) {
+            Ok(read) => Err(format!("{what} was read as {read:?}")),
+            Err(e) if e.contains(says) => Ok(()),
+            Err(e) => Err(format!("{what} was refused for the wrong reason: {e}")),
+        };
+        refused("a load's report with none before it", &[hold.as_str(), &own].concat(), "the boot's first")?;
+        refused("a load that never ended", &good.replace(&exit(WINDOWS_LOAD), ""), "never ended")?;
+        refused("no hold", &good.replace(&hold, ""), "held no window of known length")?;
+        refused("a second hold", &[hold.as_str(), &good].concat(), "a second hold")?;
+        refused("a hold cut short", &good.replace(&hold, "[kernel 0.1 cpu1] windows: held cpu1 ns=1000\n"), "the kernel owes")?;
+        refused(
+            "an interrupts-off window read back at half",
+            &good.replace(&windows(1, read_back), &windows(1, (read_back.0 / 2, read_back.1))),
+            "shorter than it was held",
+        )?;
+        refused(
+            "a preemption-off window read back at half",
+            &good.replace(&windows(1, read_back), &windows(1, (read_back.0, read_back.1 / 2))),
+            "shorter than it was held",
+        )?;
+        refused(
+            "an interrupts-off window read back at ten times",
+            &good.replace(&windows(1, read_back), &windows(1, (read_back.0 * 10, read_back.1))),
+            "past the ceiling",
+        )?;
+        refused(
+            "a preemption-off window read back at ten times",
+            &good.replace(&windows(1, read_back), &windows(1, (read_back.0, read_back.1 * 10))),
+            "past the ceiling",
+        )?;
+        refused(
+            "a hold the load's own report reads back",
+            &[first.as_str(), &opening, &hold, &own].concat(),
+            "reported nothing between",
+        )?;
+        refused("a report that skips a CPU", &good.replace(&windows(0, (3_000_000, 1_100_000)), ""), "names cpu1 at place 0")?;
         Ok(())
     }
 
@@ -506,7 +643,7 @@ mod checks {
             ));
         }
 
-        println!(
+        eprintln!(
             "  [split] {} shared binaries on the shipping kernel, {} on the actuator one, {} of them \
              driven elsewhere and declared",
             registry.len() - listed.len(),
@@ -578,101 +715,58 @@ mod checks {
         Ok(())
     }
 
-    fn shared_row(name: &str) -> TestDef {
-        TestDef {
-            name: name.to_string(),
-            qemu_name: format!("test_rs_{name}"),
-            timeout: Duration::from_secs(1),
-            check: |_| true,
-            settle: no_settle,
-        }
-    }
-
-    /// A run takes every registered test its filter matches, and a shard drops
-    /// exactly the screen rows whose profile is not of [`toyos_build::ci::GUEST_ARCH`],
-    /// saying which.
+    /// A run takes every declared test its filter matches, of either
+    /// architecture.
     #[test]
-    fn a_run_selects_by_filter_and_shard() -> Result<(), String> {
-        let shared = [shared_row("shared_one")];
-        let taken = |filter: Option<&str>, sharded: bool| -> BTreeSet<String> {
-            let (tests, machine, screen) = select(&shared, filter, sharded);
-            tests
+    fn a_run_selects_by_filter() -> Result<(), String> {
+        let taken = |filter: Option<&str>| -> BTreeSet<String> {
+            let (machine, screen) = select(filter);
+            machine
                 .iter()
-                .map(|t| t.name.clone())
-                .chain(machine.iter().map(|(n, _)| n.to_string()))
-                .chain(screen.iter().map(|(n, _, _)| n.to_string()))
+                .map(|n| n.to_string())
+                .chain(screen.iter().map(|(n, _)| n.to_string()))
                 .collect()
         };
         let names = |of: &[&str]| -> BTreeSet<String> { of.iter().map(|n| n.to_string()).collect() };
-        let enabled = |n: &&str| redlist::disabled(redlist::DISABLED, n).is_none();
-        let every: BTreeSet<String> =
-            declared().chain(["shared_one"]).filter(enabled).map(String::from).collect();
-        let foreign: BTreeSet<String> = SCREEN_TESTS
-            .iter()
-            .filter(|(_, _, profile)| profile.arch() != toyos_build::ci::GUEST_ARCH)
-            .map(|(n, _, _)| *n)
-            .filter(enabled)
-            .map(String::from)
-            .collect();
-        if !foreign.contains("virt_el2_drop") {
-            return Err(format!("the premise: virt_el2_drop is a guest no CI lane boots, and {foreign:?} lacks it"));
-        }
+        let every: BTreeSet<String> = declared().map(String::from).collect();
         let cases = [
-            (None, false, every.clone()),
-            (None, true, every.difference(&foreign).cloned().collect()),
-            (Some("virt_el2"), false, names(&["virt_el2_drop"])),
-            (Some("el2_drop"), false, names(&["virt_el2_drop"])),
-            (Some("virt_el2"), true, BTreeSet::new()),
-            (Some("sshd_"), true, names(&["sshd_exec", "sshd_files", "sshd_key_auth"])),
-            (Some("shared_one"), true, names(&["shared_one"])),
+            (None, every),
+            (Some("virt_el2"), names(&["virt_el2_drop"])),
+            (Some("el2_drop"), names(&["virt_el2_drop"])),
+            (Some("nested_nmi"), names(&["nested_nmi_is_loud"])),
+            (Some("no_such_test"), BTreeSet::new()),
         ];
-        for (filter, sharded, want) in cases {
-            let got = taken(filter, sharded);
+        for (filter, want) in cases {
+            let got = taken(filter);
             if got != want {
                 return Err(format!(
-                    "filter {filter:?}, sharded {sharded}: took {:?} it should not and left out {:?}",
+                    "filter {filter:?}: took {:?} it should not and left out {:?}",
                     got.difference(&want).collect::<Vec<_>>(),
                     want.difference(&got).collect::<Vec<_>>()
                 ));
             }
         }
-        let named = |filter: Option<&str>| -> Option<(String, BTreeSet<String>)> {
-            let line = arch_drop_line(&shared, filter)?;
-            let (_, rows) = line.rsplit_once(": ").expect("the line names its rows after a colon");
-            let rows = rows.split(", ").map(String::from).collect();
-            Some((line, rows))
-        };
-        let (line, rows) =
-            named(None).ok_or("a shard that drops the rows of another architecture said nothing")?;
-        if rows != foreign || !line.starts_with(&format!("{} test(s)", foreign.len())) {
-            return Err(format!("a shard dropping {foreign:?} said {line:?}"));
-        }
-        let named_el2 = named(Some("el2_drop")).map(|(_, rows)| rows);
-        if named_el2 != Some(names(&["virt_el2_drop"])) {
-            return Err(format!("filter el2_drop: a shard said {named_el2:?}"));
-        }
-        if let Some((line, _)) = named(Some("sshd_")) {
-            return Err(format!("a filter matching no foreign row still had a shard say {line:?}"));
-        }
         Ok(())
     }
 
-    /// Two rows under one name are refused, whether both are shared-boot rows
-    /// or one is a declared registry's.
+    /// Two rows under one name are refused, whether both are shared-boot names
+    /// or one is a declared registry's or the metal table's.
     #[test]
     fn a_name_registered_twice_is_refused() -> Result<(), String> {
-        let apart = [shared_row("shared_one"), shared_row("shared_two")];
+        let shared = |of: &[&str]| -> Vec<String> { of.iter().map(|n| n.to_string()).collect() };
+        let apart = shared(&["shared_one", "shared_two"]);
         let names = registered(&apart)?;
-        for name in ["shared_one", "shared_two", "virt_el2_drop"] {
+        for name in ["shared_one", "shared_two", "virt_el2_drop", "control_regs"] {
             if !names.contains(name) {
                 return Err(format!("{name} is not among the {} registered names", names.len()));
             }
         }
         for twice in [
-            [shared_row("shared_one"), shared_row("shared_one")],
-            [shared_row("shared_one"), shared_row("virt_el2_drop")],
+            shared(&["shared_one", "shared_one"]),
+            shared(&["shared_one", "virt_el2_drop"]),
+            shared(&["shared_one", "control_regs"]),
         ] {
-            let twice_name = &twice[1].name;
+            let twice_name = &twice[1];
             match registered(&twice) {
                 Err(refusal) if refusal.contains(&format!("{twice_name} is registered twice")) => {}
                 other => {
@@ -768,8 +862,8 @@ mod checks {
     /// The judge a metal registration runs.
     fn metal_judge(name: &str) -> fn(&[&metal::Readback]) -> Result<(), String> {
         match METAL.iter().find(|(row, _)| *row == name) {
-            Some((_, metal::Metal::Runs { judge, .. })) => *judge,
-            _ => panic!("{name} runs no metal judge"),
+            Some((_, metal::Metal { judge, .. })) => *judge,
+            None => panic!("{name} runs no metal judge"),
         }
     }
 
@@ -808,13 +902,6 @@ mod checks {
         let judge = metal_judge("machine_reboot");
         assert_eq!(judge(&[&readback("jobcase", &done(rebooted), jobcase)]), Ok(()));
         assert!(judge(&[&readback("jobcase", &done(stopped), jobcase)]).is_err());
-
-        let testcases = "[2026-09-29 11:11:32 12.720 cpu2] exit: test_rs_null_sink_client_ex pid=12 \
-                         code=0 cpu=42ms\n\
-                         [2026-09-29 11:11:32 12.725 cpu7] exit: echo pid=15 code=0 cpu=0ms\n";
-        let judge = metal_judge("log_poll_outlives_a_close");
-        assert_eq!(judge(&[&readback("testcases", &done(rebooted), testcases)]), Ok(()));
-        assert!(judge(&[&readback("testcases", &done(stopped), testcases)]).is_err());
 
         let wedged = |tail: &str| {
             format!(
@@ -947,5 +1034,36 @@ mod checks {
             .map(|(_, bytes)| String::from_utf8(bytes.clone()).expect("an expectation is text"))
             .expect("03_struct's expectation is staged");
         assert_eq!(staged.trim_end(), got);
+    }
+
+    /// `arm_psci_call` as QEMU 11.1.1's `trace-events` formats it, with and
+    /// without the log backend's `pid@time:` head, and every way a power-off's
+    /// trace falls short of PSCI's recipe refused, a CPU left on calling
+    /// `CPU_OFF` among them.
+    #[test]
+    fn psci_power_off_judge() {
+        let line = |head: &str, function: u64, cpu: u64| {
+            format!("{head}arm_psci_call PSCI Call x0=0x{function:016x} x1=0x0000000000000000 x2=0x0000000000000000 x3=0x0000000000000000 cpuid=0x{cpu:x}")
+        };
+        let text = [line("", PSCI_CPU_OFF, 1), line("4242@1759272000.123456:", PSCI_SYSTEM_OFF, 0)].join("\n");
+        assert_eq!(psci_calls(&text), Ok(vec![(PSCI_CPU_OFF, 1), (PSCI_SYSTEM_OFF, 0)]));
+        assert!(psci_calls("arm_psci_call PSCI Call x0=?").is_err());
+
+        let (off, system_off) = (PSCI_CPU_OFF, PSCI_SYSTEM_OFF);
+        let affinity_info = 0xC400_0004;
+        assert_eq!(psci_powered_off(&[(off, 1), (affinity_info, 3), (off, 2), (off, 0), (system_off, 3)], 4, &[]), Ok(3));
+        assert_eq!(psci_powered_off(&[(off, 1), (off, 0), (system_off, 3)], 4, &[2]), Ok(3));
+        for short in [
+            vec![(off, 1), (off, 0), (system_off, 3)],
+            vec![(off, 1), (off, 0), (system_off, 3), (off, 2)],
+            vec![(off, 1), (off, 1), (off, 2), (off, 0), (system_off, 3)],
+            vec![(off, 1), (off, 2), (off, 0)],
+            vec![(off, 1), (off, 2), (off, 0), (system_off, 3), (system_off, 3)],
+            vec![(off, 1), (off, 2), (off, 0), (PSCI_SYSTEM_RESET, 3), (system_off, 3)],
+            vec![(off, 1), (off, 2), (off, 3), (system_off, 3)],
+        ] {
+            assert!(psci_powered_off(&short, 4, &[]).is_err(), "{short:x?}");
+        }
+        assert!(psci_powered_off(&[(off, 1), (off, 2), (off, 0), (system_off, 3)], 4, &[2]).is_err());
     }
 }

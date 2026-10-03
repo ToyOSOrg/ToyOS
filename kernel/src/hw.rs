@@ -78,7 +78,11 @@ impl Machine for KernelHw {
         if crate::actuator::diag_tick() {
             irqchip::arm_within(DIAG_TICK_NS);
         }
+        #[cfg(feature = "mask-windows")]
+        crate::windows::halting();
         self.halt();
+        #[cfg(feature = "mask-windows")]
+        crate::windows::woken();
         // **A CPU that is executing has a one-shot armed, and this is where
         // that becomes true again.** `TimerPlan::Stop` left this one at zero
         // before the halt above and only a pass reaching `apply_timer` arms
@@ -98,7 +102,7 @@ impl Machine for KernelHw {
     }
 }
 
-/// Longest sleep on a `diag-tick` build; kept under `heartbeat`'s reporting period so a healthy CPU reports on every line.
+/// Longest sleep on a `diag-tick` build.
 #[cfg(feature = "boot-actuators")]
 const DIAG_TICK_NS: u64 = 100_000_000;
 

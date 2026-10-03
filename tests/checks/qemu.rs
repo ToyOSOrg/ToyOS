@@ -1,5 +1,6 @@
 use super::*;
 use qemu::*;
+use toyos_build::eprintln;
 
 /// The oversubscription derivation, staged against known `(vcpus, cores)` pairs
 /// with no guest at all — the oracle for [`budget_smp`]'s widening.
@@ -31,8 +32,7 @@ pub fn host_scale_self_check() -> Result<(), String> {
     }
     // Finite in the worst case the suite can reach: eight vCPUs on a single
     // core is 8x, not unbounded — so a genuine hang still reports in bounded
-    // time. `budget_smp` composes this with `budget`'s own capped host_scale
-    // (<=8x) and phase width, and on the `--jobs 1` runner width is 1.
+    // time. `budget_smp` composes this with the capped host_scale (<=8x).
     if oversub_ratio(8, 1) != (8, 1) {
         return Err(format!("the worst suite case must stay finite at 8x, got {:?}", oversub_ratio(8, 1)));
     }
@@ -131,9 +131,9 @@ pub fn ceiling_self_check() -> Result<(), String> {
     if !stall.starts_with(STALLED) {
         return Err(format!("a genuine stall stopped reporting as one: {stall}"));
     }
-    // And the other end of the same guard: a guest still talking at the ceiling
-    // was working, and that is a different red.
-    let Some(slow) = ceiling_verdict(None, CEILING + Duration::from_secs(1), CEILING, talking, 900)
+    // And the other end of the same guard: a guest still talking at twice the
+    // ceiling was working, and that is a different red.
+    let Some(slow) = ceiling_verdict(None, CEILING * 2 + Duration::from_secs(1), CEILING, talking, 900)
     else {
         return Err(String::from("an expired guard on a talking guest returned no verdict"));
     };
@@ -151,11 +151,8 @@ pub fn ceiling_self_check() -> Result<(), String> {
     //     guard still fires, and fast; and the backstop still catches a guest
     //     that talks forever.
     const TIGHT: Duration = Duration::from_secs(153);
-    let bstop = TIGHT.max(GUEST_WEDGED);
-    assert!(TIGHT < bstop, "the case needs a ceiling below the backstop");
-    // (a) The flake itself: `launcher_refusals` at `192s "still talking 1s ago"`
-    //     on a loaded smp:2 runner. Past its 153 s budget, but talking — no
-    //     verdict, it runs on.
+    let bstop = TIGHT * 2;
+    // (a) Past its 153 s budget, but talking — no verdict, it runs on.
     if ceiling_verdict(None, Duration::from_secs(192), TIGHT, Duration::from_secs(1), 500).is_some()
     {
         return Err(String::from(
@@ -164,7 +161,8 @@ pub fn ceiling_self_check() -> Result<(), String> {
         ));
     }
     // (b) The backstop still bites a guest that is stuck *and* chatty: past
-    //     `GUEST_WEDGED`, still talking, it is the one thing silence cannot catch.
+    //     twice its ceiling, still talking, it is the one thing silence cannot
+    //     catch.
     let Some(forever) = ceiling_verdict(
         None,
         bstop + Duration::from_secs(1),
@@ -179,7 +177,7 @@ pub fn ceiling_self_check() -> Result<(), String> {
     }
     // (c) Negative control — the wedge guard still fires, and *fast*: a guest
     //     silent past its budget is caught the moment it passes, at 154 s, not
-    //     held to the 300 s backstop.
+    //     held to the backstop.
     let Some(wedged) = ceiling_verdict(None, TIGHT + Duration::from_secs(1), TIGHT, GUEST_QUIET, 40)
     else {
         return Err(String::from(
@@ -199,18 +197,22 @@ pub fn ceiling_self_check() -> Result<(), String> {
              would red healthy",
         ));
     }
-
-    // 3c. **The other side of `ceiling.max(GUEST_WEDGED)`**: a ceiling *above*
-    //     `GUEST_WEDGED` must itself be the backstop, not get clamped down to
-    //     the floor. `CEILING` (380 s, from case 1) is such a ceiling; a guest
-    //     talking past `GUEST_WEDGED` (300 s) but still short of `CEILING` is
-    //     not yet at its backstop and must run on.
-    if ceiling_verdict(None, GUEST_WEDGED + Duration::from_secs(50), CEILING, talking, 40).is_some()
-    {
-        return Err(String::from(
-            "a guest talking past GUEST_WEDGED but short of a higher ceiling was ended anyway — \
-             the backstop did not follow a ceiling above GUEST_WEDGED",
-        ));
+    const SHORT: Duration = Duration::from_secs(5);
+    let every = || (0..).map(|n| VERDICT_POLL * n);
+    let first = |dying: Option<&str>, from: Duration| {
+        every().find_map(|quiet| ceiling_verdict(dying, from + quiet, SHORT, quiet, 40))
+    };
+    for since in every().take_while(|&t| t <= SHORT) {
+        let got = first(None, since);
+        if !got.as_deref().is_some_and(|v| v.starts_with(STALLED)) {
+            return Err(format!("silent from {since:?} under a {SHORT:?} ceiling: {got:?}"));
+        }
+    }
+    for died in every().take_while(|&t| t <= SHORT * 4) {
+        let got = first(Some(KERNEL), died);
+        if !got.as_deref().is_some_and(|v| v.contains("kernel panic")) {
+            return Err(format!("a kernel death at {died:?} under a {SHORT:?} ceiling: {got:?}"));
+        }
     }
 
     // 4. **What the verdict carries, which is the half that was missing.** Every
@@ -261,8 +263,7 @@ pub fn ceiling_self_check() -> Result<(), String> {
 
     // 5. **The pre-marker death, the other half of that omission.** A test that
     //    never announced itself has an empty `serial`, so the arm formatting
-    //    `serial` prints nothing and `before` is the only record there is —
-    //    `sched_check_build`'s empty `serial:` block in run `31890991692`. Both
+    //    `serial` prints nothing and `before` is the only record there is. Both
     //    directions, because a started test's window is already where its arm
     //    looks.
     let never = WaitVerdict::for_test(slow.clone(), window_before, "", false);

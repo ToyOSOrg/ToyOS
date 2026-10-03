@@ -79,7 +79,7 @@ impl Rights {
     pub const MAP: Rights = Rights(1 << 4);
     /// Block on it, or name it in an [`OP_WATCH`](crate::inbox::OP_WATCH).
     pub const WAIT: Rights = Rights(1 << 5);
-    /// Kill a process; on a `SysCap`, open one by pid.
+    /// Kill a process.
     pub const MANAGE: Rights = Rights(1 << 6);
     /// On a `SysCap`: enter the RT band.
     pub const RT: Rights = Rights(1 << 7);

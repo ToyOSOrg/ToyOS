@@ -523,7 +523,7 @@ fn s_ip_out_005_link_destinations() {
 fn s_ip_out_006_the_control_queue_is_bounded() {
     let mut h = H::fixture_i();
     for n in 0..=limits::CONTROL_QUEUE as u8 {
-        let _ = h.ip.resolve(h.clock(), h.if0, ip4(192, 0, 2, 100 + n));
+        let _ = h.ip.resolve(h.clock(), h.if0, ip4(192, 0, 2, 100 + n), A);
     }
     assert_eq!(h.count(Counter::IpControlQueueFull), 1);
     assert!(h.out_with(0).is_empty(), "no credit, nothing leaves");
@@ -539,7 +539,7 @@ fn s_ip_out_008_released_datagrams_wait_at_the_head_of_their_queue() {
         assert_eq!(h.send(A, B, 5001, 5001, data), Ok(None));
     }
     for n in 1..limits::CONTROL_QUEUE as u8 {
-        let _ = h.ip.resolve(h.clock(), h.if0, ip4(192, 0, 2, 100 + n));
+        let _ = h.ip.resolve(h.clock(), h.if0, ip4(192, 0, 2, 100 + n), A);
     }
     h.frame(&hex(V_ARP_REPLY));
     assert!(matches!(h.state(B), Some(Nud::Reachable(r)) if r.released.queued() == 2), "B REACHABLE with only 1 and 2 queued");

@@ -12,25 +12,17 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use crate::arch::Arch;
 use crate::clang::CSysroot;
-
-/// This file, which the release tag hashes.
-pub(crate) const SOURCE: &str = file!();
 
 /// What of `src/llvm-project` the runtimes' build reads: the runtimes, the CMake
 /// modules they share with LLVM, and LLVM's libc, whose number parsing libc++
 /// compiles in.
 pub(crate) const SOURCES: [&str; 7] = ["runtimes", "cmake", "llvm/cmake", "libunwind", "libcxxabi", "libcxx", "libc"];
 
-/// The runtimes' CMake options beyond the target's and the tools'.
-pub(crate) const OPTIONS: [(&str, &str); 20] = [
+/// The runtimes' CMake options beyond the target's, which the C sysroot's
+/// toolchain file names (`clang::CMAKE`), and the tools'.
+pub(crate) const OPTIONS: [(&str, &str); 18] = [
     ("CMAKE_BUILD_TYPE", "Release"),
-    // CMake has no platform module for ToyOS, and `UNIX` is how it says what
-    // the runtimes' build needs to know of one: an ELF system with POSIX threads
-    // (`issues/build/the-cxx-runtime-names-toyos-to-cmake-as-unix.md`).
-    ("CMAKE_SYSTEM_NAME", "ToyOS"),
-    ("UNIX", "ON"),
     ("LLVM_ENABLE_RUNTIMES", "libunwind;libcxxabi;libcxx"),
     ("LLVM_INCLUDE_TESTS", "OFF"),
     ("LLVM_INCLUDE_DOCS", "OFF"),
@@ -55,10 +47,10 @@ pub(crate) const OPTIONS: [(&str, &str); 20] = [
     ("LIBCXX_INCLUDE_TESTS", "OFF"),
 ];
 
-/// Build `arch`'s C++ runtime from the runtimes' `sources` into `c`, which holds
+/// Build `c`'s C++ runtime from the runtimes' `sources` into it, which holds
 /// the C library already, under `ninja`, in `scratch`, which it removes when
 /// done.
-pub fn build(c: &CSysroot, arch: Arch, sources: &Path, ninja: &Path, scratch: &Path) {
+pub fn build(c: &CSysroot, sources: &Path, ninja: &Path, scratch: &Path) {
     eprintln!("Building the C++ runtime for {} under {}", c.target, ninja.display());
     if scratch.exists() {
         fs::remove_dir_all(scratch).unwrap_or_else(|e| panic!("remove {}: {e}", scratch.display()));
@@ -71,14 +63,12 @@ pub fn build(c: &CSysroot, arch: Arch, sources: &Path, ninja: &Path, scratch: &P
         .unwrap_or_else(|e| panic!("symlink {} -> {}: {e}", ranlib.display(), c.ar.display()));
     let path = |p: &Path| p.display().to_string();
     let mut definitions: Vec<(String, String)> = OPTIONS.iter().map(|(n, v)| (n.to_string(), v.to_string())).collect();
-    definitions.push(("CMAKE_SYSTEM_PROCESSOR".into(), arch.name().into()));
+    definitions.push(("CMAKE_TOOLCHAIN_FILE".into(), path(&c.cmake_toolchain())));
     for lang in ["C", "CXX", "ASM"] {
         definitions.push((format!("CMAKE_{lang}_COMPILER"), path(&c.clang)));
-        definitions.push((format!("CMAKE_{lang}_COMPILER_TARGET"), c.target.into()));
     }
     definitions.push(("CMAKE_AR".into(), path(&c.ar)));
     definitions.push(("CMAKE_RANLIB".into(), path(&ranlib)));
-    definitions.push(("CMAKE_SYSROOT".into(), path(&c.dir)));
     definitions.push(("CMAKE_INSTALL_PREFIX".into(), path(&c.dir)));
     definitions.push(("CMAKE_MAKE_PROGRAM".into(), path(ninja)));
 

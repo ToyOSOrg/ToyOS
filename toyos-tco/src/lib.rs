@@ -114,6 +114,11 @@ pub const FIRMWARE_BOUND_MS: u64 = 60_000;
 /// while a job never finishes is no wedge to it and nothing else ends the boot.
 pub const JOB_BOUND_MS: u64 = 60_000;
 
+/// What one member of a metal shared boot is allowed of [`JOB_BOUND_MS`], in
+/// milliseconds: a Rust test on the shipping kernel, and a C corpus case.
+pub const RUST_MEMBER_MS: u64 = 860;
+pub const C_MEMBER_MS: u64 = 260;
+
 /// The bound netd gives this machine's first DHCP lease before it says it has
 /// none and serves anyway, in milliseconds. The harness waits it out on a wire
 /// with no server, so the two read one declaration.
@@ -140,6 +145,13 @@ pub const WEDGE_BOUND_MS: u64 = JOB_BOUND_MS * 2;
 /// The kernel's bound has to outlast the one that ends a single job, or a slow
 /// test is a reset where it should have been a verdict.
 const _: () = assert!(WEDGE_BOUND_MS > JOB_BOUND_MS);
+
+/// The bound a boot that stages its own wedge carries instead of
+/// [`WEDGE_BOUND_MS`], in milliseconds: it ends the machine seconds after the
+/// wedge rather than at the bound every other boot keeps for a wedge nobody
+/// staged. Its half is the lockup detector's bound, which still outlasts the
+/// lockup probe's own reach to its lock.
+pub const STAGED_BOUND_MS: u64 = 10_000;
 
 /// The bound one *CPU* gets to take no interrupt at all while it is burning
 /// cycles, in milliseconds, before that CPU ends the machine from its own NMI.

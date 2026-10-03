@@ -7,8 +7,9 @@ use common::Machine;
 use toyos_abi::boot::RootBridgeWindow;
 use toyos_acpi::{
     century_of, dsdt_address, ecam_base, find_table, hpet_base, iapc_boot_arch, madt_entries,
-    memory_windows, psci, reset_register, rtc_century, Century, IoApicEntry, MadtEntry, Psci,
-    Reset, SourceOverride, TableError, FADT_PM1A_CNT_BLK, MADT_ENTRIES,
+    memory_windows, psci, reset_register, rtc_century, s5_slp_typ, Century, IoApicEntry,
+    MadtEntry, Psci, Reset, SourceOverride, Table, TableError, FADT_PM1A_CNT_BLK, MADT_ENTRIES,
+    S5,
 };
 
 /// Where each table sat in that guest's physical memory. The XSDT's entries
@@ -106,6 +107,17 @@ fn the_fadt_names_the_power_block_and_the_dsdt() {
     let fadt = find_table(m, RSDP, b"FACP", FADT_PM1A_CNT_BLK + 4).expect("FADT");
     assert_eq!(fadt.u32_at(FADT_PM1A_CNT_BLK), Some(0x604));
     assert_eq!(dsdt_address(&fadt), 0x7fb7_a000);
+}
+
+/// `ACPI: PM1a=0x604 SLP_TYPa=0`, off the DSDT of the boot that logged it
+/// (`fixtures/qemu-11.1.1/SOURCE`): `\_S5_`'s package, found past `\_S4_`'s,
+/// whose first element is 2.
+#[test]
+fn the_dsdt_names_the_sleep_type_that_powers_qemu_off() {
+    const DSDT: u64 = 0x7f77_a000;
+    let regions: &[(u64, &[u8])] = &[(DSDT, include_bytes!("../fixtures/qemu-11.1.1/dsdt.bin"))];
+    let dsdt = Table::open(Machine { regions }, DSDT, b"DSDT", 36).expect("DSDT");
+    assert_eq!(s5_slp_typ(&dsdt), S5::SlpTyp(0));
 }
 
 /// `ACPI: reset register SystemIO 0xcf9 <- 0x0f`, against QEMU 11.1.1's own

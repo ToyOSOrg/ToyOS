@@ -114,6 +114,11 @@ fault-posted-before-it-is-set = []
 [dependencies]
 loom = "0.7"
 
+# `loom_watch.rs` compiles `kernel/src/inbox/polls.rs`, which names a handle and
+# a refusal.
+[dev-dependencies]
+toyos-abi = { path = "../../toyos-abi" }
+
 [lib]
 # The primitives are compiled into the lib; the models are the test targets.
 path = "src/lib.rs"
@@ -121,3 +126,9 @@ path = "src/lib.rs"
 # and run there, against real atomics. Loom atomics outside a `loom::model`
 # panic, so this crate exposes no unit tests of its own.
 test = false
+
+# `kernel-loom`'s control for a ring's answer, which `polls.rs` carries and no
+# model here turns on. A `cfg` name and not a feature, since a feature here is
+# a model control.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("post-is-an-answer"))'] }

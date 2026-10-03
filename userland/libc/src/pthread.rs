@@ -47,6 +47,8 @@ struct Thread {
     start: StartRoutine,
     arg: *mut u8,
     result: AtomicPtr<u8>,
+    /// Its creator's signal mask, which POSIX has the thread start with.
+    mask: u64,
 }
 
 /// The bit a `pthread_t` of a thread this library did not start carries.
@@ -61,6 +63,10 @@ static SELF: Cell<*mut Thread> = Cell::new(ptr::null_mut());
 
 #[thread_local]
 static MARKER: u8 = 0;
+
+/// The calling thread's signal mask (`sigmask`).
+#[thread_local]
+static MASK: Cell<u64> = Cell::new(0);
 
 /// Blocks of detached threads that have ended, for the next creator to reap.
 static REAPED: Lock<Vec<usize>> = Lock::new(Vec::new());
@@ -149,6 +155,7 @@ unsafe extern "C" fn thread_entry(arg: u64) {
         unsafe { syscall::futex_wait(t.published.as_ptr(), 0, None) };
     }
     SELF.set(thread);
+    MASK.set(t.mask);
     let result = unsafe { (t.start)(t.arg) };
     unsafe { exit_thread(result) }
 }
@@ -198,6 +205,7 @@ pub unsafe extern "C" fn pthread_create(
         start: start_routine,
         arg,
         result: AtomicPtr::new(ptr::null_mut()),
+        mask: MASK.get(),
     }));
     let top = (stack as usize + stack_size) & !(STACK_ALIGN - 1);
     // SAFETY: the entry is a function of this library, and the stack is a
@@ -275,6 +283,24 @@ pub extern "C" fn pthread_self() -> PthreadT {
 #[no_mangle]
 pub extern "C" fn pthread_equal(t1: PthreadT, t2: PthreadT) -> i32 {
     (t1 == t2) as i32
+}
+
+/// The calling thread's signal mask, changed as `how` says when `set` is not
+/// null, answered in `old` when that is not. No signal is ever raised, so a
+/// blocked one is never held back: the mask is kept, answered, and inherited.
+#[no_mangle]
+pub unsafe extern "C" fn pthread_sigmask(how: i32, set: *const u64, old: *mut u64) -> i32 {
+    let mask = MASK.get();
+    if !set.is_null() {
+        match crate::sigmask::changed(mask, how, unsafe { *set }) {
+            Some(next) => MASK.set(next),
+            None => return EINVAL,
+        }
+    }
+    if !old.is_null() {
+        unsafe { *old = mask };
+    }
+    0
 }
 
 #[no_mangle]

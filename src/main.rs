@@ -1,3 +1,6 @@
+#[macro_use(eprintln)]
+extern crate toyos_build;
+
 mod qemu;
 
 use std::env;
@@ -91,13 +94,8 @@ fn main() {
     }
     let asked = |flag: &flags::Flag| CARGO_RUN.present(&args, flag);
 
-    // **Before `check_prerequisites`**, because it builds nothing.
-    if asked(&flags::SYNC) {
-        toyos_build::sync::dispatch_sync(&root);
-        return;
-    }
-    // Every CI job. Here for the same reason: the host job's runner has no QEMU,
-    // and a guest job names its own instrument rather than being noted at.
+    // Every CI job, before `check_prerequisites`: the host job's runner has no
+    // QEMU, and a guest job names its own instrument rather than being noted at.
     if asked(&flags::CI) {
         toyos_build::ci::dispatch(&root, &args);
         return;
@@ -107,13 +105,6 @@ fn main() {
     // it shells to `cargo clippy` and the runner that runs it has no QEMU.
     if asked(&flags::CLIPPY) {
         toyos_build::clippy::dispatch(&root);
-        return;
-    }
-    // Reads one table and prints. Here for the same reason again, and for one
-    // more: the question it answers — "is this test disabled?" — is asked
-    // while a build is broken as often as while one works.
-    if asked(&flags::KNOWN_RED) {
-        toyos_build::redlist::dispatch(&args);
         return;
     }
     // Writes one file outside the checkout and builds nothing.
@@ -132,7 +123,7 @@ fn main() {
     let update_image = CARGO_RUN.value(&args, &flags::UPDATE_IMAGE).map(PathBuf::from);
     if asked(&flags::OWNER_KEY) || update_image.is_some() {
         match toyos_build::signing::use_owner() {
-            Ok(key) => println!("Signing with the owner's key {}.", key.fingerprint()),
+            Ok(key) => eprintln!("Signing with the owner's key {}.", key.fingerprint()),
             Err(why) => {
                 eprintln!("Error: {why}");
                 std::process::exit(1);
@@ -208,11 +199,6 @@ fn main() {
         return;
     }
 
-    if asked(&flags::WORKTREE) {
-        toyos_build::worktree::dispatch(&root, &args);
-        return;
-    }
-
     // Only where the submodules belong. In a linked worktree `rust/` is an empty
     // stub and initialising it clones the whole rust history again, into a git
     // directory of its own that shares no objects with the one beside it.
@@ -229,7 +215,7 @@ fn main() {
         return;
     }
     let image = toyos_build::build::build(&root, boot, &plan);
-    println!("Build finished.");
+    eprintln!("Build finished.");
     println!("Boot image: {}", image.display());
 
     if !build_only {

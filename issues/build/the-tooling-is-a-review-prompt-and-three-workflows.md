@@ -9,12 +9,18 @@ opened: 2026-09-05
 The rules a prompt can read off a branch move into `.claude/agents/reviewer.md`,
 and the gates that held them go.
 
-- A test is green and fast or it is deleted in the same pull request and filed;
-  then `src/redlist.rs`, `35383398^:src/durations.rs` and
-  `tests/test-durations` have no subject and go.
+- A test is green and fast or it is deleted in the same pull request and filed.
+- Each gate in `--ci host` and in the harness is kept where it sees what
+  reading cannot (runtime behaviour, bytes, measurements), moved into a prompt
+  where a reviewer can read it, or deleted. Exit: each one's verdict is applied.
 - The toolchain is content-addressed by the four trees that produce it, one
   directory per hash, never mutated; then the sysroot claim, `src/buildlock.rs`
-  and `src/worktree.rs` go.
+  and `src/keystore.rs` go. The locks are made unnecessary rather than written
+  down: every store is published by an atomic rename and never rewritten, and
+  the build system `cargo clean`s no crate target, so cargo's own lock is the
+  only one.
+  Exit: both files are gone, and two builds started together in two worktrees
+  are measured green.
   The toolchain builds cargo from the Rust fork's submodule and ships it: one
   cargo matching rustc.
   - A shared cargo `target-dir` is safe only under `-Z checksum-freshness`;
