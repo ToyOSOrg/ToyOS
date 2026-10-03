@@ -15,8 +15,8 @@ const LOG: &str = r"[2026-10-03 06:50:58 1.192 cpu0] pcidev: PCI 00:1f.6 [8086:1
 {2026-10-03 06:51:17 20.351 init} init: power: the machine stops, and logd makes the log whole first (Reboot)
 ";
 
-/// That boot's `boot.txt`, verbatim: the loop that wrote it also pinged the
-/// address Ubuntu held on this MAC, `192.168.1.46`.
+/// That boot's `boot.txt`, verbatim. It also names `192.168.1.46`, the
+/// address Ubuntu held on this MAC, which no judge reads.
 const BOOT: &str = "back_secs 70\nstick_secs 0\nmachine_vendor LENOVO\nmachine_product 20W0003AMZ\n\
                     machine_bios N34ET71W (1.71 )\nping_addr 192.168.1.46\n\
                     wire_mac 38:f3:ab:35:37:3b\nclock_skew 1\nping_secs 64\nping_at 1791010315\n";
@@ -68,6 +68,7 @@ pub fn the_lease_judged_is_this_boots_own() {
         TALK,
         "no \"netd: MAC 38:f3:ab:35:37:3c\" record",
     );
-    let unleased: String = LOG.lines().filter(|l| !l.contains("DHCP: lease")).map(|l| format!("{l}\n")).collect();
+    let unleased: String =
+        LOG.lines().filter(|l| !l.contains("DHCP: lease")).map(|l| format!("{l}\n")).collect();
     refused("a boot that took no lease", &unleased, BOOT, TALK, "took no address from its network");
 }

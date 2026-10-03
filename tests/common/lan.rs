@@ -25,7 +25,7 @@ pub const LEASE_FILE: &str = "lease.txt";
 /// netd, as the kernel's `exit:` record names it.
 const NETD: &str = "netd";
 
-/// The one job on that boot.
+/// The one job on that boot: it holds the machine up.
 pub const JOBS: &[&str] = &["test_rs_lan_hold"];
 
 /// The boot the host talks to over its own cable: the log it serves, sshd, and

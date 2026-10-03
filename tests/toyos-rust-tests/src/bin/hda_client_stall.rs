@@ -89,9 +89,10 @@ fn play(stalls: u64) {
         .expect("failed to build audio stream");
 
     stream.play().expect("failed to play");
-    for stretch in 1..=stalls + 1 {
+    let stretches = stalls + 1;
+    for stretch in 1..=stretches {
         if let Err(why) = stretch_ended.recv_timeout(WITHIN) {
-            panic!("stretch {stretch} of {} did not end {WITHIN:?} after the one before it: {why}", stalls + 1);
+            panic!("stretch {stretch} of {stretches} did not end within {WITHIN:?}: {why}");
         }
     }
     drop(stream);
