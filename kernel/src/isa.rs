@@ -118,17 +118,22 @@ fn mint(set: IsaId) -> Result<usize, ClaimError> {
     Ok(row)
 }
 
-/// The claim's last handle went: its lines masked and its record emptied. The
-/// ports stay with the process that bound them until that process ends.
+/// The claim's last handle went: its lines masked, its record emptied and its
+/// polls answered. The ports stay with the process that bound them until that
+/// process ends.
 pub fn release(row: usize) {
-    let mut state = ROWS[row].lock();
-    if let Some(Ok(lines)) = &state.lines {
+    // Not held across the watch's answer; the row stays minted until that is
+    // made, so no next claim's poll is among the ones answered.
+    if let Some(Ok(lines)) = &ROWS[row].lock().lines {
         for &line in lines {
             pio::set_masked(line, true);
         }
     }
     IRQ[row].clear();
-    state.minted = false;
+    // The claim is gone, so a poll on it is answered rather than left for the
+    // next holder's interrupts.
+    WATCHES[row].cancel_polls();
+    ROWS[row].lock().minted = false;
 }
 
 /// Open the row's ports to `pid` for the rest of its life. Called once per

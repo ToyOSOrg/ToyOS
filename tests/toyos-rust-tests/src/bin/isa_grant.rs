@@ -10,14 +10,17 @@
 //! and steps one port past what it was granted, `wide` read it and makes a
 //! two-byte access at its data port, `out` read it and writes one port past
 //! the grant, `unclaimed` holds nothing, and `moved` was handed a claim its
-//! parent had already bound.
+//! parent had already bound and watches from its own ring.
 
 use std::os::toyos::process::CommandExt;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use toyos::endow::Endowments;
+use toyos::poller::{Poller, READABLE};
 use toyos::syscap::SysCap;
 use toyos::Device;
+use toyos_abi::pci::DeviceIrqRecord;
 use toyos_abi::syscall::{IsaId, SyscallError, SYSCAP_LABEL};
 
 #[path = "../arch/port.rs"]
@@ -34,6 +37,11 @@ const DATA: u16 = 0x60;
 const STATUS: u16 = 0x64;
 /// The port just past the data port, which no row names.
 const PAST: u16 = 0x61;
+
+/// The ceiling on a watch being answered once its claim has ended.
+const ANSWER: Duration = Duration::from_secs(5);
+/// More records than a controller nothing here asks anything of raises.
+const STALE_RECORDS: usize = 8;
 
 fn main() {
     match std::env::args().nth(1).as_deref() {
@@ -128,7 +136,14 @@ fn grant(cap: &SysCap) {
     bind(&held);
     let status = port_in(STATUS, false);
     println!("isa: bound here, status reads {status:#04x}");
+    let poller = Poller::new(1);
+    watch(&poller, &held);
     killed_after("moved", child("moved", Some(held)), "moved: in from 0x64");
+    // The claim ended with the child that held it, which answers this ring's
+    // watch on it: no later holder's interrupt is this process's to hear of.
+    let mut answered = false;
+    poller.wait(1, ANSWER.as_nanos() as u64, |_| answered = true);
+    assert!(answered, "isa: a watch on a claim that ended in another process was never answered");
     // The claim is gone with the child, and the ports are still this process's.
     match claim(cap, I8042) {
         Err(SyscallError::AlreadyExists) => {}
@@ -139,6 +154,23 @@ fn grant(cap: &SysCap) {
     }
     let _ = port_in(STATUS, false);
     println!("isa: a moved claim carries nothing, and the ports stay with the process that bound them");
+}
+
+/// Arm `poller`'s watch on `claim`, which this process has bound, with no
+/// record behind it: one a stray byte raised is read away and the watch armed
+/// again.
+fn watch(poller: &Poller, claim: &Device) {
+    for _ in 0..STALE_RECORDS {
+        poller.watch(claim, READABLE, 0);
+        let mut ready = false;
+        poller.wait(0, 0, |_| ready = true);
+        if !ready {
+            return;
+        }
+        let mut record = [0u8; DeviceIrqRecord::SIZE];
+        claim.read(&mut record).expect("isa: a readable claim reads its record");
+    }
+    panic!("isa: the claim was readable {STALE_RECORDS} times with nothing asked of the controller");
 }
 
 fn taken() -> Device {
