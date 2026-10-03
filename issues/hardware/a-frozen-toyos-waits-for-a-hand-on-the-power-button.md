@@ -17,7 +17,7 @@ kernel arms the chipset's TCO only on the `watchdog` parameter
 - A userland `watchdogd` feeds the watchdog on every machine, with no new
   syscall; the detector is armed on every boot; nothing ships for tests alone.
 - **A panic's panel holds as it does today** and feeds the watchdog while it
-  holds, after a key too (`panic_console::hold_the_panel`).
+  holds (`panic_console::hold_the_panel`).
 - **`watchdogd` reaches the chipset's timer through the general port claim
   #592 brings, its `isa` claim, as the ACPI server will**, and not through a
   device class of its own: one way of doing it and not two (2026-10-03). That

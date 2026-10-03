@@ -1059,6 +1059,8 @@ fn teardown_resources(
     crate::arch::trap::log_unclaimed();
 
     ops::close_all(&mut data.handles);
+    // Every thread has left, and none returns to Ring 3 to use them.
+    crate::isa::process_ends(pid);
     data.elf.elf_alloc.take();
     data.elf.loaded_libs.clear();
     data.mmap_regions.clear();

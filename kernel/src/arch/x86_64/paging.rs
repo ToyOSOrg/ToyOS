@@ -948,23 +948,37 @@ fn has(entry: u64, flag: u64) -> u8 {
 /// space); lock-free and silent, for the panic path to prove a mapping
 /// before writing through it.
 pub fn present_in_current_tables(addr: u64) -> bool {
+    translate_in_current_tables(addr).is_some()
+}
+
+/// Where `addr` lands in the tables this CPU runs under now, whatever the
+/// leaf's size; lock-free, for a crash path that may take no lock. Rights are
+/// not asked: a caller reading on a process's behalf refuses a non-user
+/// address itself.
+pub fn translate_in_current_tables(addr: u64) -> Option<crate::mm::DirectMap> {
     // SAFETY: `Cr3::current().phys()` names the table this CPU runs under
     // right now, so it can't be freed meanwhile. No lock: each entry read is
     // one aligned `u64`, atomic at the hardware level, so no read is torn.
     let mut table = unsafe { PageTablePage::from_phys(Cr3::current().phys()) };
     for level in 0..3 {
-        let entry = table[((addr >> (39 - level * 9)) & 0x1FF) as usize];
+        let shift = 39 - level * 9;
+        let entry = table[((addr >> shift) & 0x1FF) as usize];
         if entry & PAGE_PRESENT == 0 {
-            return false;
+            return None;
         }
         if level > 0 && entry & PAGE_SIZE_BIT != 0 {
-            return true;
+            let span = 1u64 << shift;
+            return Some(crate::mm::DirectMap::from_phys(
+                (entry & ADDR_MASK & !(span - 1)) | (addr & (span - 1)),
+            ));
         }
         // SAFETY: PRESENT just checked; same argument as above the loop — a
         // present entry under the current CR3 names a live table.
         table = unsafe { PageTablePage::from_phys(entry & ADDR_MASK) };
     }
-    table[((addr >> 12) & 0x1FF) as usize] & PAGE_PRESENT != 0
+    let pte = table[((addr >> 12) & 0x1FF) as usize];
+    (pte & PAGE_PRESENT != 0)
+        .then(|| crate::mm::DirectMap::from_phys((pte & ADDR_MASK) | (addr & 0xFFF)))
 }
 
 /// Give every 2 MiB leaf covering `[phys, phys + size)` the write-combining

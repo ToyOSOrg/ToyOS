@@ -342,8 +342,8 @@ pub fn last_words(
 }
 
 /// Halt all CPUs: stop the others, flush pending log output, then hold this
-/// machine's panel until a key retires the reboot bound or the bound returns it
-/// to firmware. Every fatal path's one funnel.
+/// machine's panel until the reboot bound returns it to firmware. Every fatal
+/// path's one funnel.
 // panic_flush bypasses the log-ring and serial locks — once the others are stopped a wedged holder never releases them, so taking them normally could deadlock.
 pub fn halt_all_cpus() -> ! {
     // Before the halt and the panel: from here this machine holds a report for
@@ -372,10 +372,10 @@ pub fn halt_all_cpus() -> ! {
     unsafe { serial::panic_flush(); }
     // Must follow the flush — it's the deepest stack this path reaches.
     crate::arch::trap::report_fault_stack();
-    // page_forever runs strictly after the flush: it is an unbounded loop and may only run once the serial report is out.
-    // Only the CPU that painted watches the bound; the rest halt below, since two CPUs polling one keyboard would split every key.
+    // hold_the_panel runs strictly after the flush: it is an unbounded loop and may only run once the serial report is out.
+    // Only the CPU that painted watches the bound; the rest halt below.
     if painted {
-        crate::drivers::panic_console::page_forever(bound);
+        crate::drivers::panic_console::hold_the_panel(bound);
     }
     cpu::halt();
 }

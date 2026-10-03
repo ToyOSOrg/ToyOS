@@ -27,7 +27,7 @@ pub const MSIX_ENTRY: u16 = 0;
 
 // Every device interrupt in this kernel targets cpu0, named as a destination for
 // the message and for the unit to put in an entry.
-const MSG_DEST: u32 = 0;
+pub(crate) const MSG_DEST: u32 = 0;
 
 /// No requester id: a bus/device/function is sixteen bits, so this is none of them.
 pub(crate) const NO_FUNCTION: u32 = u32::MAX;

@@ -8,8 +8,8 @@ opened: 2026-09-03
 
 Until `06ce633` no configuration in this tree produced a UEFI GOP at all:
 `kernel/src/drivers/gop.rs` had never executed and `kernel_args.gop_framebuffer`
-was zero everywhere. `cargo run --gop` and `BootOptions { profile: Profile::Gop }`
-(`-vga std`) fixed that and the path works.
+was zero everywhere. `cargo run --gop` (`-vga std`) fixed that and the path
+works.
 
 **The owner ruled on 2026-09-01: GOP is the floor, and the mode is the
 firmware's.** The mode half has landed. This file is the other half, and it is

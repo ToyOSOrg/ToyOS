@@ -31,3 +31,6 @@ so the native shape is smaller:
 Unstaffed until the owner opens it; sequenced naturally with the userland/
 product era. What must not happen meanwhile is the accident this track
 exists to prevent: `POWER` spreading to more manifest rows.
+
+Its recorded weakness: the i8042's holder resets the machine without it
+(`issues/isolation/the-i8042s-holder-holds-the-machines-reset-line.md`).

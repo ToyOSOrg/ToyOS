@@ -23,9 +23,7 @@ with no fallback by design (`kernel/src/drivers/acpi.rs:277-283`). Where the
 table named none, `arm` returns `Bound::Held`
 (`kernel/src/panic_reboot.rs:134-145`) and `hold_the_panel` loops
 `while bound.is_armed()` (`kernel/src/drivers/panic_console/mod.rs:647-650`),
-which never ends. A keypress also retires the bound, which is right for a
-machine with somebody in front of it and is exactly wrong for one running
-unattended.
+which never ends.
 
 **On the T14 that last bound is the one thing already known not to work.**
 `issues/hardware/an-armed-tco-has-never-reset-the-t14.md` records that no claim
@@ -61,5 +59,5 @@ prints it.
 
 **Exit condition**: a boot that takes a fatal event on the T14 with nobody in
 front of it either ends itself and leaves a record naming the fault, or the run
-shows which of `Bound::Held` and the retired-by-a-keypress path held it — read
-off the machine, not argued from the tree.
+shows that `Bound::Held` held it — read off the machine, not argued from the
+tree.

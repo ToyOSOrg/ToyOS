@@ -19,9 +19,10 @@ pub enum Source {
     Timer,
     /// Vector 0x21, xHCI MSI-X (or MSI).
     Xhci,
-    /// Vectors 0x28-0x2B, the MSI-X of a PCI function a process drives. One
-    /// count for all four: which claim a message belonged to is the claim's own
-    /// record, and the census is about this machine's interrupt routing.
+    /// Vectors 0x28-0x2C: the MSI-X of a PCI function a process drives, and
+    /// the lines of an ISA function one does. One count for all five: which
+    /// claim an interrupt belonged to is the claim's own record, and the census
+    /// is about this machine's interrupt routing.
     UserDev,
     /// Vector 0x23, virtio-sound MSI-X.
     Sound,

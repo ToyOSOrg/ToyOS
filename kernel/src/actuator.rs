@@ -52,6 +52,11 @@ actuators! {
     /// AMD `SYSRET` SS-attributes workaround's only guest-observable proof.
     sysret_ss_probe = "sysret-ss-probe";
 
+    /// Leave the i8042 unprobed, so this kernel drives no controller and an
+    /// `isa` claim on it is granted. Judged by `isa_ports_are_the_binders_alone`
+    /// and `isa_lines_reach_their_holder`.
+    i8042_withheld = "i8042-withheld";
+
     /// Script the input core directly at end of boot.
     test_input_merge = "test-input-merge";
 
@@ -153,6 +158,10 @@ actuators! {
 
     /// Run the revoked-backing controls after mount.
     revoked_backing_selftest = "revoked-backing-selftest";
+
+    /// Shorten the panicked kernel's own reboot bound from a minute to seconds,
+    /// so a guest reaches the reset. Judged by `screen_fatal_behind_a_painter`.
+    panic_reboot_fast = "panic-reboot-fast";
 
     /// Have Ctrl+Alt+D's report painter go fatal holding the panel's latch: a
     /// fatal path meeting a painter that will never let go.

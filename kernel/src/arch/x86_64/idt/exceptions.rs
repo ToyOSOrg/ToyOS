@@ -10,12 +10,19 @@ use super::{Vector, TrapFrame, PF_PRESENT, PF_WRITE, PF_INSTRUCTION_FETCH};
 
 /// Walk RBP chain for user backtrace through page tables. Takes no pid: this
 /// always backtraces the process running on this CPU.
-fn user_backtrace(start_rbp: u64, pml4: *const u64, max_frames: usize) {
+fn user_backtrace(start_rbp: u64, max_frames: usize) {
     let mut rbp = start_rbp;
     for _ in 0..max_frames {
-        if rbp == 0 || !rbp.is_multiple_of(8) { break; }
-        let Some(saved_rbp) = safe_read_u64(rbp, pml4) else { break };
-        let Some(return_addr) = safe_read_u64(rbp + 8, pml4) else { break };
+        if rbp == 0 { break; }
+        let saved_rbp = match read_user_u64(rbp) {
+            Ok(word) => word,
+            Err(Unread::Refused) => {
+                log!("    rbp {:#x} refused: no user address", rbp);
+                break;
+            }
+            Err(Unread::Absent) => break,
+        };
+        let Ok(return_addr) = read_user_u64(rbp + 8) else { break };
         if return_addr == 0 { break; }
         process::resolve_user_symbol_return(return_addr).log_bare(return_addr);
         rbp = saved_rbp;
@@ -46,48 +53,42 @@ fn safe_read_kernel(addr: u64) -> Option<u64> {
     Some(unsafe { core::ptr::read_volatile(addr as *const u64) })
 }
 
-/// Reads a u64; for a user address, walks page tables by hand to avoid
-/// demand-paging faults inside an exception handler.
-fn safe_read_u64(addr: u64, user_pml4: *const u64) -> Option<u64> {
-    if !addr.is_multiple_of(8) || addr == 0 {
-        return None;
+/// Why the crash report read no word at an address.
+#[derive(Clone, Copy)]
+enum Unread {
+    /// Not a user address: a crash report is never how a process reads the kernel.
+    Refused,
+    /// Misaligned, or nothing mapped there.
+    Absent,
+}
+
+/// A word of the faulting process's memory, read through the tables this CPU
+/// runs under: the crash path may neither take the address space's lock nor
+/// demand-page.
+fn read_user_u64(addr: u64) -> Result<u64, Unread> {
+    if !toyos_userbound::is_user_addr(addr) {
+        return Err(Unread::Refused);
     }
-    if !user_pml4.is_null() {
-        let pml4_idx = ((addr >> 39) & 0x1FF) as usize;
-        let pdpt_idx = ((addr >> 30) & 0x1FF) as usize;
-        let pd_idx = ((addr >> 21) & 0x1FF) as usize;
-        // SAFETY: each read is guarded by the present bit of the entry before
-        // it; `user_pml4` is a direct-map pointer to the live PML4 from `CR3`;
-        // every index is masked to nine bits, so `add` stays inside the
-        // 512-entry table, and each next-level pointer and the final
-        // `page_phys + offset` stay inside the direct map by the same walk.
-        //
-        // Hand-rolled instead of `mm::paging`: a faulted CPU may not take the
-        // address space lock and may not demand-page.
-        //
-        // Not `read_volatile` either: see `kernel_backtrace`.
-        let pml4e = unsafe { *user_pml4.add(pml4_idx) };
-        if pml4e & 1 == 0 { return None; }
-        let pdpt = crate::DirectMap::from_phys(pml4e & 0x000F_FFFF_FFFF_F000).as_ptr::<u64>();
-        // SAFETY: the walk's argument, one level down.
-        let pdpte = unsafe { *pdpt.add(pdpt_idx) };
-        if pdpte & 1 == 0 { return None; }
-        let pd = crate::DirectMap::from_phys(pdpte & 0x000F_FFFF_FFFF_F000).as_ptr::<u64>();
-        // SAFETY: the walk's argument, one level down again.
-        let pde = unsafe { *pd.add(pd_idx) };
-        if pde & 1 == 0 { return None; }
-        let page_phys = pde & 0x000F_FFFF_FFE0_0000;
-        let offset = addr & (mm::PAGE_2M - 1);
-        // SAFETY: the walk's argument — a direct-map read of a byte inside the
-        // present 2 MiB leaf the three entries above resolved.
-        Some(unsafe { *crate::DirectMap::from_phys(page_phys + offset).as_ptr::<u64>() })
-    } else if mm::is_kernel_addr(addr) {
-        // SAFETY: `addr` is 8-aligned (checked at the top) and a kernel address
-        // (checked in this arm), so it is inside the direct map.
-        Some(unsafe { *(addr as *const u64) })
-    } else {
-        None
+    if !addr.is_multiple_of(8) {
+        return Err(Unread::Absent);
     }
+    let at = mm::paging::translate_in_current_tables(addr).ok_or(Unread::Absent)?;
+    // SAFETY: a direct-map address of 8 aligned bytes inside the present leaf
+    // the current tables resolved. Not `read_volatile`: see `kernel_backtrace`.
+    Ok(unsafe { *at.as_ptr::<u64>() })
+}
+
+/// The `in` or `out` at `rip`, read through the page tables as the rest of the
+/// report reads user memory; `None` for any other instruction or an unreadable one.
+fn port_access_at(rip: u64, rdx: u64) -> Option<toyos_userbound::PortAccess> {
+    let (at, shift) = (rip & !7, rip & 7);
+    let lo = read_user_u64(at).ok()?;
+    // The next word only where the four bytes run into it: an `in` that ends
+    // just before an unmapped page is still named.
+    let hi = if shift > 4 { read_user_u64(at + 8).ok()? } else { 0 };
+    // Shifted rather than indexed: nothing on this path may panic.
+    let code = ((u128::from(lo) | u128::from(hi) << 64) >> (8 * shift)) as u32;
+    toyos_userbound::port_access(code.to_le_bytes(), rdx as u16)
 }
 
 pub(crate) struct ExceptionContext<'a> {
@@ -157,7 +158,6 @@ fn crash_report_exception(ctx: &ExceptionContext) {
     let ring3 = ctx.ring().is_user();
     let tid = percpu::current_tid().unwrap_or(crate::process::Tid(0));
     let pid = percpu::current_pid();
-    let pml4 = if ring3 { crate::DirectMap::from_phys(crate::mm::paging::Cr3::current().phys()).as_ptr::<u64>() } else { core::ptr::null() };
 
     let (pf_action, pf_cause) = if ctx.vector() == Vector::PageFault {
         let action = if ctx.frame.error_code & PF_INSTRUCTION_FETCH != 0 { "execute" }
@@ -180,7 +180,24 @@ fn crash_report_exception(ctx: &ExceptionContext) {
                 log!("SIGFPE tid={}: {}", tid, name)
             }
             Vector::GeneralProtection | Vector::StackSegment | Vector::AlignmentCheck => {
-                log!("SIGBUS tid={}: {} (error_code={:#x})", tid, name, ctx.frame.error_code)
+                log!("SIGBUS tid={}: {} (error_code={:#x})", tid, name, ctx.frame.error_code);
+                // At CPL 3 an `in` or `out` faults only on a port the bitmap refuses.
+                if let Some(access) = (ctx.vector() == Vector::GeneralProtection)
+                    .then(|| port_access_at(ctx.frame.rip, ctx.frame.rdx))
+                    .flatten()
+                {
+                    match super::super::pio::refused_port(access) {
+                        Some(port) if port == access.port => {
+                            log!("  {access}, which this process holds no grant for")
+                        }
+                        Some(port) => log!(
+                            "  {access}, reaching port {port:#06x}, which this process holds no grant for"
+                        ),
+                        // The bitmap opens the span whole, so the #GP is not
+                        // the port's: a string form's non-canonical `rsi`/`rdi`, say.
+                        None => log!("  {access}, a #GP this decode cannot attribute to a port"),
+                    }
+                }
             }
             _ => log!("FATAL tid={}: {}", tid, name),
         }
@@ -203,7 +220,12 @@ fn crash_report_exception(ctx: &ExceptionContext) {
     }
 
     if ctx.vector() == Vector::PageFault {
-        crate::mm::paging::debug_page_walk(ctx.cr2);
+        // A user fault walks its own half: the kernel's tables are no process's to read.
+        if ring3 && !toyos_userbound::is_user_addr(ctx.cr2) {
+            log!("  Page walk for {:#x} refused: no user address", ctx.cr2);
+        } else {
+            crate::mm::paging::debug_page_walk(ctx.cr2);
+        }
     }
 
     log!("  Registers:");
@@ -232,7 +254,7 @@ fn crash_report_exception(ctx: &ExceptionContext) {
     log!("  Backtrace:");
     if ring3 {
         if pid.is_some() {
-            user_backtrace(ctx.frame.rbp, pml4, 32);
+            user_backtrace(ctx.frame.rbp, 32);
         }
     } else {
         kernel_backtrace(ctx.frame.rbp, 32);
@@ -246,17 +268,23 @@ fn crash_report_exception(ctx: &ExceptionContext) {
                 percpu::syscall_num(), user_rip, percpu::user_rsp());
             log!("  User backtrace:");
             process::resolve_user_symbol(user_rip).log_bare(user_rip);
-            let pml4 = crate::DirectMap::from_phys(crate::mm::paging::Cr3::current().phys()).as_ptr::<u64>();
-            user_backtrace(percpu::syscall_rbp(), pml4, 20);
+            user_backtrace(percpu::syscall_rbp(), 20);
         }
     }
 
-    if safe_read_u64(ctx.frame.rsp, pml4).is_some() {
-        log!("  Stack (from RSP):");
-        for i in 0..8u64 {
-            let addr = ctx.frame.rsp + i * 8;
-            let Some(val) = safe_read_u64(addr, pml4) else { break };
-            log!("    [{:#x}] = {:#018x}", addr, val);
+    // A user fault's stack is the process's own, and a stack pointer it aimed
+    // at the kernel reads nothing.
+    let read = |addr: u64| if ring3 { read_user_u64(addr) } else { safe_read_kernel(addr).ok_or(Unread::Absent) };
+    match read(ctx.frame.rsp) {
+        Err(Unread::Refused) => log!("  Stack (from RSP): {:#x} refused: no user address", ctx.frame.rsp),
+        Err(Unread::Absent) => {}
+        Ok(_) => {
+            log!("  Stack (from RSP):");
+            for i in 0..8u64 {
+                let addr = ctx.frame.rsp.wrapping_add(i * 8);
+                let Ok(val) = read(addr) else { break };
+                log!("    [{:#x}] = {:#018x}", addr, val);
+            }
         }
     }
 
@@ -298,8 +326,7 @@ fn crash_report_panic(info: &core::panic::PanicInfo, rbp: u64) {
                 percpu::syscall_num(), user_rip, percpu::user_rsp());
             log!("  User backtrace:");
             process::resolve_user_symbol(user_rip).log_bare(user_rip);
-            let pml4 = crate::DirectMap::from_phys(crate::mm::paging::Cr3::current().phys()).as_ptr::<u64>();
-            user_backtrace(percpu::syscall_rbp(), pml4, 20);
+            user_backtrace(percpu::syscall_rbp(), 20);
         }
     }
 }
@@ -362,11 +389,10 @@ pub(super) fn double_fault_handler(frame: &TrapFrame) -> ! {
                     log!("  User context (pid={:?} tid={:?}):", pid, tid);
                     log!("    rip={:#018x}  rsp={:#018x}  rbp={:#018x}", maybe_rip, maybe_rsp, user_rbp);
 
-                    let pml4 = crate::DirectMap::from_phys(crate::mm::paging::Cr3::current().phys()).as_ptr::<u64>();
                     log!("  User backtrace:");
                     if pid.is_some() {
                         process::resolve_user_symbol(maybe_rip).log_bare(maybe_rip);
-                        user_backtrace(user_rbp, pml4, 20);
+                        user_backtrace(user_rbp, 20);
                     } else {
                         log!("    {:#x}", maybe_rip);
                     }

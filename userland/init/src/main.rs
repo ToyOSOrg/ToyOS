@@ -1955,6 +1955,7 @@ fn start<'a>(
             DeviceRequest::Class(class) => syscap.claim::<toyos::Device>(class),
             DeviceRequest::Pci(id) => syscap.claim_pci::<toyos::Device>(id),
             DeviceRequest::Partition(name) => syscap.claim_partition::<toyos::Device>(name),
+            DeviceRequest::Isa(set) => syscap.claim_isa::<toyos::Device>(set),
         };
         let asked = Instant::now();
         let mut held_still = 0u32;

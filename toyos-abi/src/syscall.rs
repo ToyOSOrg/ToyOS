@@ -1229,6 +1229,14 @@ device_classes! {
     /// Like `pci`, a class whose name is not the whole of the entry —
     /// `part:<GUID>` — and [`DeviceRequest`] is the one parser.
     Partition = 8 => "part",
+    /// One legacy ISA function, driven by whoever holds the claim: the process
+    /// that first reads the claim may `in` and `out` the function's ports for
+    /// the rest of its life and no other process may, and the function's lines
+    /// are answered as interrupt records on the claim ([`IsaId`]).
+    ///
+    /// Like `pci`, a class whose name is not the whole of the entry —
+    /// `isa:<port>,…:<irq>,…` — and [`DeviceRequest`] is the one parser.
+    Isa = 9 => "isa",
 }
 
 /// A PCI function named by what identifies the *card*, not the slot firmware
@@ -1285,9 +1293,134 @@ fn hex16(text: &str) -> Option<u16> {
     Some(value)
 }
 
+/// A legacy ISA function named by everything it decodes and raises:
+/// `isa:0060,0064:1,12` is the i8042's two ports and its keyboard and aux
+/// lines.
+///
+/// **The name is the grant**, so it is exact: the kernel opens these ports and
+/// routes these lines, and a set that is not one function it can hand out
+/// whole is refused rather than trimmed to one it can. One spelling per set —
+/// ports as four lowercase hex digits, lines in decimal with no leading zero,
+/// each list strictly ascending — because every reader compares the string.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct IsaId {
+    /// Ascending and nonzero, then zeros: port 0 is the DMA controller's and
+    /// never a function a process drives, which is what lets 0 mean no port.
+    ports: [u16; IsaId::MAX_PORTS],
+    /// One bit per ISA line.
+    irqs: u16,
+}
+
+impl IsaId {
+    pub const MAX_PORTS: usize = 4;
+    /// Bounded so the longest name fits [`DeviceRequest::MAX_NAME`].
+    pub const MAX_IRQS: usize = 4;
+    /// The ISA bus has sixteen lines.
+    const LINES: u8 = 16;
+
+    /// `None` for a set with no port or no line, a port 0, a line past 15, a
+    /// list longer than its bound, or a list not strictly ascending.
+    pub fn new(ports: &[u16], irqs: &[u8]) -> Option<Self> {
+        if ports.is_empty() || ports.len() > Self::MAX_PORTS || ports[0] == 0 || !ascending(ports) {
+            return None;
+        }
+        if irqs.is_empty() || irqs.len() > Self::MAX_IRQS || !ascending(irqs) {
+            return None;
+        }
+        let mut set = Self { ports: [0; Self::MAX_PORTS], irqs: 0 };
+        set.ports[..ports.len()].copy_from_slice(ports);
+        for &irq in irqs {
+            if irq >= Self::LINES {
+                return None;
+            }
+            set.irqs |= 1 << irq;
+        }
+        Some(set)
+    }
+
+    pub fn ports(&self) -> impl Iterator<Item = u16> + '_ {
+        self.ports.iter().copied().take_while(|&port| port != 0)
+    }
+
+    pub fn irqs(&self) -> impl Iterator<Item = u8> + '_ {
+        (0..Self::LINES).filter(|line| self.irqs & (1 << line) != 0)
+    }
+
+    /// `"<port>,…:<irq>,…"`, the tail of an `isa:` entry.
+    pub fn parse(text: &str) -> Option<Self> {
+        let (ports, irqs) = text.split_once(':')?;
+        let mut port_list = [0u16; Self::MAX_PORTS];
+        let mut n_ports = 0;
+        for port in ports.split(',') {
+            *port_list.get_mut(n_ports)? = hex16(port)?;
+            n_ports += 1;
+        }
+        let mut irq_list = [0u8; Self::MAX_IRQS];
+        let mut n_irqs = 0;
+        for irq in irqs.split(',') {
+            *irq_list.get_mut(n_irqs)? = decimal_line(irq)?;
+            n_irqs += 1;
+        }
+        Self::new(&port_list[..n_ports], &irq_list[..n_irqs])
+    }
+
+    /// The two selector words [`device_claim`] carries: the ports in 16-bit
+    /// lanes from the low end, and the lines as a mask.
+    pub fn wire(self) -> [u64; 2] {
+        let ports = self
+            .ports
+            .iter()
+            .enumerate()
+            .fold(0u64, |word, (lane, &port)| word | (port as u64) << (16 * lane));
+        [ports, self.irqs as u64]
+    }
+
+    /// The selector words decoded, refusing whatever [`Self::new`] refuses.
+    pub fn from_wire([ports, irqs]: [u64; 2]) -> Option<Self> {
+        let lanes: [u16; Self::MAX_PORTS] =
+            core::array::from_fn(|lane| (ports >> (16 * lane)) as u16);
+        let named = lanes.iter().take_while(|&&port| port != 0).count();
+        if lanes[named..].iter().any(|&port| port != 0) || irqs > u16::MAX as u64 {
+            return None;
+        }
+        let mut lines = [0u8; Self::LINES as usize];
+        let mut n = 0;
+        for line in 0..Self::LINES {
+            if irqs & (1 << line) != 0 {
+                lines[n] = line;
+                n += 1;
+            }
+        }
+        if n > Self::MAX_IRQS {
+            return None;
+        }
+        Self::new(&lanes[..named], &lines[..n])
+    }
+}
+
+fn ascending<T: PartialOrd>(list: &[T]) -> bool {
+    list.windows(2).all(|pair| pair[0] < pair[1])
+}
+
+/// One ISA line in decimal, `0` to `15`, with no sign and no leading zero.
+fn decimal_line(text: &str) -> Option<u8> {
+    let bytes = text.as_bytes();
+    if bytes.is_empty() || bytes.len() > 2 || (bytes.len() == 2 && bytes[0] == b'0') {
+        return None;
+    }
+    let mut value = 0u8;
+    for &byte in bytes {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        value = value * 10 + (byte - b'0');
+    }
+    (value < IsaId::LINES).then_some(value)
+}
+
 /// What one `devices` entry asks for: a class, and for
-/// [`DeviceType::PciFunction`] which function, and for a partition which
-/// partition.
+/// [`DeviceType::PciFunction`] which function, for a partition which
+/// partition, and for an ISA function which ports and lines.
 ///
 /// One parser, because four places read the same spelling — the build system's
 /// gate, `/system/bin/init`'s mint, the kernel's claim and the claimant's own
@@ -1298,6 +1431,7 @@ pub enum DeviceRequest {
     Class(DeviceType),
     Pci(PciId),
     Partition(crate::part::PartGuid),
+    Isa(IsaId),
 }
 
 impl DeviceRequest {
@@ -1306,6 +1440,9 @@ impl DeviceRequest {
 
     /// The spelling that carries a unique partition GUID.
     pub const PART_PREFIX: &'static str = "part:";
+
+    /// The spelling that carries an ISA function's ports and lines.
+    pub const ISA_PREFIX: &'static str = "isa:";
 
     /// The longest a `devices` entry, and so a `dev:` label's tail, can be:
     /// `part:` and a GUID, rounded up to a multiple of eight.
@@ -1318,11 +1455,14 @@ impl DeviceRequest {
         if let Some(guid) = name.strip_prefix(Self::PART_PREFIX) {
             return crate::part::PartGuid::parse(guid).map(Self::Partition);
         }
+        if let Some(set) = name.strip_prefix(Self::ISA_PREFIX) {
+            return IsaId::parse(set).map(Self::Isa);
+        }
         let class = DeviceType::from_class_name(name)?;
         match class {
-            // A bare `pci` or `part` names no device, and would otherwise
-            // leave the selector at zero.
-            DeviceType::PciFunction | DeviceType::Partition => None,
+            // A bare `pci`, `part` or `isa` names no device, and would
+            // otherwise leave the selector at zero.
+            DeviceType::PciFunction | DeviceType::Partition | DeviceType::Isa => None,
             _ => Some(Self::Class(class)),
         }
     }
@@ -1332,6 +1472,7 @@ impl DeviceRequest {
             Self::Class(class) => class,
             Self::Pci(_) => DeviceType::PciFunction,
             Self::Partition(_) => DeviceType::Partition,
+            Self::Isa(_) => DeviceType::Isa,
         }
     }
 
@@ -1342,6 +1483,7 @@ impl DeviceRequest {
             Self::Class(_) => [0, 0],
             Self::Pci(id) => [id.wire(), 0],
             Self::Partition(guid) => guid.wire(),
+            Self::Isa(set) => set.wire(),
         }
     }
 
@@ -1364,6 +1506,35 @@ impl DeviceRequest {
                 buf[at..at + GUID_TEXT_LEN].copy_from_slice(&text);
                 return core::str::from_utf8(&buf[..at + GUID_TEXT_LEN])
                     .expect("a prefix and a GUID's text are ASCII");
+            }
+            Self::Isa(set) => {
+                let mut at = Self::ISA_PREFIX.len();
+                buf[..at].copy_from_slice(Self::ISA_PREFIX.as_bytes());
+                for (i, port) in set.ports().enumerate() {
+                    if i > 0 {
+                        buf[at] = b',';
+                        at += 1;
+                    }
+                    for shift in [12, 8, 4, 0] {
+                        buf[at] = HEX[((port >> shift) & 0xF) as usize];
+                        at += 1;
+                    }
+                }
+                buf[at] = b':';
+                at += 1;
+                for (i, line) in set.irqs().enumerate() {
+                    if i > 0 {
+                        buf[at] = b',';
+                        at += 1;
+                    }
+                    if line >= 10 {
+                        buf[at] = b'1';
+                        at += 1;
+                    }
+                    buf[at] = b'0' + line % 10;
+                    at += 1;
+                }
+                return core::str::from_utf8(&buf[..at]).expect("hex, digits and separators are ASCII");
             }
             Self::Pci(id) => id,
         };
@@ -2411,6 +2582,21 @@ mod tests {
             "part:c12a7328-f81f-11d2-ba4b-00a0c93ec93b", // one spelling: uppercase
             // A partition is named by its unique GUID and nothing else.
             "part-type:C12A7328-F81F-11D2-BA4B-00A0C93EC93B",
+            "isa", // a bare ISA class names no ports
+            "isa:",
+            "isa:0060,0064", // a function with no line
+            "isa:0060,0064:",
+            "isa::1",
+            "isa:60,64:1,12",     // one spelling: four hex digits
+            "isa:0064,0060:1,12", // and ascending
+            "isa:0060,0060:1",
+            "isa:0060:12,1",
+            "isa:0060:01",
+            "isa:0060:16", // the bus has sixteen lines
+            "isa:0000:1",  // port 0 means no port
+            "isa:0060,0061,0062,0063,0064:1", // more ports than a selector word holds
+            "isa:0060:1,2,3,4,5",
+            "isa:0060:+1",
             "",
         ] {
             assert_eq!(DeviceRequest::parse(bad), None, "{bad:?} parsed");
@@ -2430,6 +2616,10 @@ mod tests {
             "mouse",
             // The longest entry there is, which is what `MAX_NAME` is for.
             "part:0FC63DAF-8483-4772-8E79-3D69D8477DE4",
+            "isa:0060,0064:1,12",
+            "isa:0001:0",
+            // The longest an ISA entry can be.
+            "isa:fff0,fff1,fff2,fffe:12,13,14,15",
         ] {
             let request = DeviceRequest::parse(name).expect("a name this table has");
             let mut buf = [0u8; DeviceRequest::MAX_NAME];
@@ -2447,6 +2637,31 @@ mod tests {
         assert_eq!(request, Some(DeviceRequest::Partition(guid)));
         assert_eq!(request.map(DeviceRequest::class), Some(DeviceType::Partition));
         assert_eq!(request.map(DeviceRequest::selector), Some(guid.wire()));
+    }
+
+    /// An `isa:` entry is its ports in the first selector word and its lines in
+    /// the second, and the kernel decodes nothing a config could not have
+    /// written: a port lane after a gap, or a line past the bus, is no set.
+    #[test]
+    fn an_isa_entry_survives_the_wire_and_nothing_else_decodes() {
+        let request = DeviceRequest::parse("isa:0060,0064:1,12").expect("the i8042's set");
+        let DeviceRequest::Isa(set) = request else { panic!("{request:?} is not an ISA set") };
+        assert_eq!(request.class(), DeviceType::Isa);
+        assert!(set.ports().eq([0x60, 0x64]));
+        assert!(set.irqs().eq([1, 12]));
+        assert_eq!(request.selector(), [0x0064_0060, (1 << 1) | (1 << 12)]);
+        assert_eq!(IsaId::from_wire(set.wire()), Some(set));
+        for bad in [
+            [0, 1 << 1],                  // no port
+            [0x0060, 0],                  // no line
+            [0x0060_0000, 1 << 1],        // a port after a gap
+            [0x0060_0064, 1 << 1],        // not ascending
+            [0x0060, 1 << 16],            // past the bus
+            [0x0060, 0b1_1111],           // more lines than a name holds
+            [0x0060_0060, 1 << 1],        // one port twice
+        ] {
+            assert_eq!(IsaId::from_wire(bad), None, "{bad:x?} decoded");
+        }
     }
 
     /// The selector is one word on the wire and the kernel decodes it back;

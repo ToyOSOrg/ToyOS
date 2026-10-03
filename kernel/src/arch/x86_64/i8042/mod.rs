@@ -135,6 +135,13 @@ const HEALTH_MUTE_BLIND: u8 = 7;
 static HEALTH: AtomicU8 = AtomicU8::new(HEALTH_OFF);
 static ARMED_NS: AtomicU64 = AtomicU64::new(0);
 
+/// Whether this driver armed the controller this boot, which refuses an `isa`
+/// claim on it from then on: [`HEALTH`] never returns to [`HEALTH_OFF`], so a
+/// quarantined controller is still this driver's.
+pub fn drives() -> bool {
+    HEALTH.load(Ordering::Relaxed) != HEALTH_OFF
+}
+
 // Repeats, but only when the pin has asserted since the last line — so past
 // the first repeat, silence means no interrupt, not a driver that stopped.
 fn health_period_ns() -> u64 {
@@ -711,8 +718,8 @@ fn quarantine() {
 }
 
 // Each read below is done as its section's sole reader: init before the
-// vector is armed, the aux re-enable on `IRQ_CPU` under `IrqGuard::close`,
-// and the panic pager with every CPU halted — so no ISR ever races them.
+// vector is armed, and the aux re-enable on `IRQ_CPU` under `IrqGuard::close`
+// — so no ISR ever races them.
 
 fn deadline(millis: u64) -> u64 {
     crate::clock::nanos_since_boot() + millis * 1_000_000
@@ -960,6 +967,10 @@ fn firmware_claim(rsdp_addr: u64) -> Result<(u8, u16), crate::drivers::acpi::Tab
 }
 
 pub fn init(rsdp_addr: u64) {
+    if crate::actuator::i8042_withheld() {
+        log!("i8042: withheld, left unprobed for a claim");
+        return;
+    }
     // Logged, never obeyed: bit 1 is one summary bit, while the handshake
     // below is three direct observations of the machine in front of us.
     match firmware_claim(rsdp_addr) {
@@ -1243,19 +1254,6 @@ pub fn init(rsdp_addr: u64) {
         None => log!("i8042: no pointer on the aux port"),
     }
 
-}
-
-/// Whether the panic path reads a key here: [`poll_byte`] is its poll.
-pub const PANIC_KEYS: bool = true;
-
-/// One byte from the controller if it has one; never waits. Only legal once
-/// every CPU is halted — port 0x60's sole reader is otherwise the ISR.
-pub fn poll_byte() -> Option<(u8, bool)> {
-    let status = inb(STATUS);
-    if status & OBF == 0 {
-        return None;
-    }
-    Some((inb(DATA), status & AUXB != 0))
 }
 
 /// The handler's drain loop, without the EOI. Runs with interrupts off on

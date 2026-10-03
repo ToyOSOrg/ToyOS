@@ -4,6 +4,8 @@ use core::sync::atomic::{AtomicU32, AtomicU64, AtomicU8};
 use alloc::alloc::alloc_zeroed;
 use core::alloc::Layout;
 
+use toyos_userbound::IoBitmap;
+
 use super::cpu;
 use crate::log;
 
@@ -22,7 +24,7 @@ pub const STAR_SYSRET_BASE: u16 = USER_DS - 8;
 const _: () = assert!(STAR_SYSRET_BASE + 8 == USER_DS);
 const _: () = assert!(STAR_SYSRET_BASE + 16 == USER_CS);
 
-/// 64-bit TSS (104 bytes).
+/// The 104-byte 64-bit TSS, then the I/O permission bitmap.
 #[repr(C, packed)]
 pub struct Tss {
     reserved0: u32,
@@ -34,6 +36,9 @@ pub struct Tss {
     reserved2: u64,
     reserved3: u16,
     iopb_offset: u16,
+    /// What Ring 3 may `in` and `out` on this CPU; `pio::switch_to` opens a
+    /// port only while the process holding it runs.
+    io_bitmap: IoBitmap,
 }
 
 impl Tss {
@@ -47,10 +52,17 @@ impl Tss {
             ist: [0; 7],
             reserved2: 0,
             reserved3: 0,
-            iopb_offset: size_of::<Tss>() as u16,
+            iopb_offset: offset_of!(Tss, io_bitmap) as u16,
+            io_bitmap: IoBitmap::refusing(),
         }
     }
 }
+
+const _: () = assert!(offset_of!(Tss, io_bitmap) == 104, "the bitmap follows the architectural TSS");
+const _: () = assert!(
+    offset_of!(Tss, io_bitmap) + size_of::<IoBitmap>() == size_of::<Tss>(),
+    "the TSS limit ends at the bitmap's refusing byte"
+);
 
 /// Per-CPU fault state machine for the escalation policy on nested faults.
 #[repr(u8)]
@@ -548,6 +560,19 @@ pub unsafe fn set_kernel_stack(rsp: u64) {
     let percpu = gs::read_u64::<OFF_SELF_PTR>() as *mut PerCpu;
     (*percpu).kernel_rsp = rsp;
     core::ptr::write_unaligned(&raw mut (*percpu).tss.rsp0, rsp);
+}
+
+/// This CPU's I/O permission bitmap. Called with preemption held, by a
+/// scheduler pass's own hold or by closed interrupts, so the caller cannot
+/// leave the CPU whose bitmap this reaches while `f` runs.
+pub fn io_bitmap<R>(f: impl FnOnce(&mut IoBitmap) -> R) -> R {
+    let percpu = gs::read_u64::<OFF_SELF_PTR>() as *mut PerCpu;
+    // SAFETY: this CPU's own `PerCpu`, read from `gs:[0]`, and the only Rust
+    // reference into its bitmap while `f` runs: the caller stays on this CPU,
+    // and the one handler that reaches the bitmap is a Ring 3 #GP's, which
+    // interrupts no kernel code; `IoBitmap` has alignment 1, which no packed
+    // struct breaks.
+    f(unsafe { &mut (*percpu).tss.io_bitmap })
 }
 
 /// The two words [`set_kernel_stack`] writes: `kernel_rsp` (syscall entry) and `tss.rsp0` (Ring 3 interrupt entry); read only by an instrument.
