@@ -7,6 +7,7 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 toyos-abi = { path = "../../toyos-abi" }
 toyos = { path = "../../toyos" }
+toyos-window = { path = "../../userland/toyos-window" }
 toyos-tco = { path = "../../toyos-tco" }
 toyos-inspect = { path = "../../toyos-inspect" }
 # The reader's asker, for `hda_client_stall`.

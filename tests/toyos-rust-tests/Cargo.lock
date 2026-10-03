@@ -682,11 +682,19 @@ name = "toyos-abi"
 version = "0.16.0"
 
 [[package]]
+name = "toyos-font"
+version = "0.2.0"
+
+[[package]]
 name = "toyos-inspect"
 version = "0.1.0"
 dependencies = [
  "toyos-abi",
 ]
+
+[[package]]
+name = "toyos-keymap"
+version = "0.1.0"
 
 [[package]]
 name = "toyos-rust-tests"
@@ -700,11 +708,22 @@ dependencies = [
  "toyos-abi",
  "toyos-inspect",
  "toyos-tco",
+ "toyos-window",
 ]
 
 [[package]]
 name = "toyos-tco"
 version = "0.1.0"
+
+[[package]]
+name = "toyos-window"
+version = "0.20.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+ "toyos-font",
+ "toyos-keymap",
+]
 
 [[package]]
 name = "unicode-ident"
