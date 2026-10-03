@@ -63,14 +63,11 @@ not what these boots died in — what is left is what happens when the job list
 ran.
 
 **The VFS lock is not in the window.** Run 20 also shows `vfs::lock()` held
-across a 32 s stick write with other CPUs at 200M spins
-(`issues/kernel/the-vfs-lock-is-held-across-a-usb-write-for-thirty-seconds.md`),
-which is within 2x of `Lock::lock`'s deadlock panic, and a spawn does take that
-lock. But it takes it at `loader/mod.rs:370` and in `load_needed_libs`, both
+across a 32 s stick write with other CPUs at 200M spins, and a spawn does take
+that lock. But it takes it at `loader/mod.rs:370` and in `load_needed_libs`, both
 *before* the `ELF: … relocations indexed` and `spawn: TLS … modules` records
 that every hung boot wrote; everything after them reads the already-open backing
-and takes no VFS lock. So it is a real hazard one step from a panic and it is
-not this.
+and takes no VFS lock. So it is not this.
 
 ## What now exists to answer it
 

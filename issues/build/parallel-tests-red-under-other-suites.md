@@ -218,7 +218,7 @@ changes.
   runs were 270/270 on a tree differing from the red one by two doc comments and
   one removed `#[track_caller]`; the branch's kernel delta touches no TLB, no
   shootdown and no `munmap` path. `ALONE … GREEN` in 145 ms. `screen_early_panic` failed in the same
-  run and is already this file's and the redlist's, `ALONE … GREEN` there too.
+  run and is already this file's, `ALONE … GREEN` there too.
 
   The assertion that went red is the test's own disarmed control: `munmap still
   took 11740090ns with the delay disarmed, so the numbers above measured
@@ -245,8 +245,7 @@ changes.
   never ran. Exactly this file's typed-on-a-wall-clock class, and the class
   fix had already landed when the row was read back: `shell_type_line`
   (7a033450, 2026-08-26) bounds each burst by the queue and takes the guest's
-  own echo of the whole line as the verdict, with three tries. The redlist row
-  is retired against it.
+  own echo of the whole line as the verdict, with three tries.
 
 - **`syscall_window_nmi`** — added 2026-08-27, one sighting, dev host, a
   288-name `cargo test` run at 92 guests with a second worktree's suite on the
@@ -452,20 +451,6 @@ mechanism for it.
   seconds. The test asserts an ordering of two lines, and the second line never
   came.
 
-  **It contradicts a retirement rather than joining a class.** All three of the
-  name's earlier rows in `src/redlist.rs` are retired: the two dev-host
-  `ALONE: GREEN` rows by the single-word tally in
-  `kernel/src/arch/x86_64/i8042/tally.rs` (2026-08-17), which made `N interrupts
-  and 0 bytes` unprintable, and the CI row by "the verdict revises itself once"
-  (2026-08-28) — a mute line said while a decoder still holds the run is
-  `HEALTH_MUTE_BLIND`, the first blamed byte moves it to `HEALTH_MUTE_SAID`
-  with the line that names the bytes, and `i8042-split-burst` stages that
-  interleaving on every run. Four bytes and not zero puts this sighting on the
-  CI row's producer — the test's own Pause, reported after the first interrupt
-  delivered four of its six bytes — which is exactly what the 2026-08-28 clause
-  says is no longer waited for. Under a loaded host the second line did not
-  arrive, so the revision that retirement rests on is not unconditional.
-
   Second sighting, the logd branch's fast tier at `eef19bd1`, on a dev host
   running two other worktrees' suites: the same words at `[kernel 5.865 cpu0]
   ... 2 interrupts and 4 bytes, nothing decoded`, the one red of 357, and
@@ -474,8 +459,7 @@ mechanism for it.
 
   Owner: the i8042 tally. **Exit condition**: the verdict revising itself in a
   parallel run — a loaded full suite in which `i8042_undecoded_bytes`'
-  first mute line names nothing and its second names the sequence, or the
-  retirement's clause narrowed to the conditions under which it holds.
+  first mute line names nothing and its second names the sequence.
 
 ## Deleted as flaky tests
 

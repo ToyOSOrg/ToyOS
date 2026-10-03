@@ -126,7 +126,7 @@ for six consecutive green hosted runs and has **three**: nightly `ci` runs
 screen_blocked_dump (4s)`. The loaded-dev-host half asked for three loaded
 observations and has them — green 3 of 3 beside a full `cargo test` fast tier
 in one worktree, twelve guests up in each, painting `== VERDICT:` every time —
-so its redlist row is retired and this shape's remaining count is the CI one.
+so this shape's remaining count is the CI one.
 Three more green nightlies close it; one red under this name restarts it.
 
 The recorded repaint mechanism does not cover this shape — that one names a
