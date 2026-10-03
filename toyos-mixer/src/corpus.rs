@@ -5,9 +5,8 @@
 //! runs every decision the mixer makes over inputs chosen to cover the space
 //! that reaches them, and writes each answer as the bits it actually is —
 //! `{:08x}` of an `f32`, the decimal of an `i16` — so no formatting rounds a
-//! difference away. The committed fixture was produced by
-//! `userland/soundserver/src/main.rs` before a line of it moved here, and the test
-//! that reads it asserts equality byte for byte. A change to any of this
+//! difference away. The test that reads the fixture asserts equality byte for
+//! byte. A change to any of this
 //! crate's arithmetic reds it, and that is the point: **audible behaviour is
 //! the owner's to change**, so it may not move under a refactor.
 //!
