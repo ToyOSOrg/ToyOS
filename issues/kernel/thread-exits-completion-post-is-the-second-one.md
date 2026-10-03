@@ -60,5 +60,5 @@ outcome on the same watch at `kernel/src/sched/payload.rs:222`. Two posts to one
 subject where the second is load-bearing regardless is either an undocumented
 promptness guarantee or dead code on the exit path — "one of two sentences and
 the evidence for it" is owed work, not an observation. Owed by the lifecycle
-work in `toyos-proclife`, which is the only machine that can enumerate the
+work in `kernel::proclife`, which is the only machine that can enumerate the
 interleaving either answer rests on.

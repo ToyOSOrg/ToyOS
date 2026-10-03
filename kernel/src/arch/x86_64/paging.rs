@@ -11,7 +11,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use crate::hasher::HashMap;
 
-use toyos_pcid::{Alloc, Pcid, PcidPool};
+use kernel::pcid::{Alloc, Pcid, PcidPool};
 
 use crate::mm::{UserAddr, PAGE_2M};
 use crate::mm::policy::{CachePolicy, MmioPolicy, Prot, WindowProt};
@@ -292,7 +292,7 @@ impl Cr3 {
 
     /// Sets NOFLUSH when PCID is active — sound only because a user tag is owned:
     /// no other live space holds it, and a reused one was flushed from every CPU
-    /// before this space took it (`toyos_pcid`).
+    /// before this space took it.
     /// # Safety
     /// The underlying page tables must be valid and live.
     pub unsafe fn activate(self) {
@@ -311,7 +311,7 @@ impl Cr3 {
     }
 }
 
-/// The user PCID allocator: `toyos_pcid` owns the decision that no live tag is
+/// The user PCID allocator: `kernel::pcid` owns the decision that no live tag is
 /// reissued; here it is given the shootdown its [`Alloc::NeedsFlush`] asks for.
 static PCID_POOL: Lock<PcidPool> = Lock::new(PcidPool::new());
 
@@ -336,7 +336,7 @@ enum PcidHandle {
 impl PcidHandle {
     fn value(&self) -> u16 {
         match self {
-            Self::Kernel => toyos_pcid::KERNEL_PCID,
+            Self::Kernel => kernel::pcid::KERNEL_PCID,
             Self::User(g) => g.0.get(),
         }
     }

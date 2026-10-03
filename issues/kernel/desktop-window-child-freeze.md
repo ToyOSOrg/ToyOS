@@ -171,9 +171,9 @@ written about.
 NMI probe taken on a reproduction confirms no CPU stopped taking scheduler
 passes during the freeze — nothing short of that instrument distinguishes this
 signature from a green run, which this entry has already shown proves nothing
-either way. Owner: `toyos-sched`, the placement track that closed the
+either way. Owner: `kernel::sched`, the placement track that closed the
 CPU-selection half of this family (`CpuHandle::answering`,
-`toyos-sched/src/cpu.rs`) and is nearest the remaining half; held by the
+`kernel/pure/sched/cpu.rs`) and is nearest the remaining half; held by the
 orchestrator.
 
 **Its test is deleted**: `cd685b10a` and `b20d3fd40` took `desktop_window_child`

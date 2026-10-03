@@ -89,7 +89,7 @@ pub(crate) fn between_attempts(attempt: u32) {
         &parkable,
         handle.watch(),
         0,
-        toyos_sched::task::WaitClass::Other,
+        kernel::sched::task::WaitClass::Other,
         deadline,
         || false,
     );

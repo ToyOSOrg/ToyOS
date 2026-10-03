@@ -15,8 +15,8 @@ use core::sync::atomic::{AtomicPtr, AtomicU64, AtomicU8, Ordering};
 use alloc::sync::Arc;
 
 use toyos_abi::log::LogRecord;
-use toyos_sched::task::{WaitClass, WakeCause, WakeReason};
-use toyos_sched::park::notify;
+use kernel::sched::task::{WaitClass, WakeCause, WakeReason};
+use kernel::sched::park::notify;
 
 use crate::drivers::serial::{self, BackendGuard, PanicUart, MAX_CONSOLE_LINE};
 use crate::hw::HW;
