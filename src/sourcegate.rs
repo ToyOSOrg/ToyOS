@@ -50,15 +50,16 @@ fn code_only(line: &str) -> String {
     out
 }
 
+/// Whether the byte at `at` of `line` is a letter, a digit or `_`.
+fn word_at(line: &str, at: Option<usize>) -> bool {
+    at.and_then(|at| line.as_bytes().get(at)).is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
+}
+
 /// Whether `code` names `needle` as an identifier rather than as a fragment of
 /// a longer one.
 fn names(code: &str, needle: &str) -> bool {
-    let bytes = code.as_bytes();
-    let word = |b: Option<&u8>| b.is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_');
-    code.match_indices(needle).any(|(at, _)| {
-        !word(at.checked_sub(1).and_then(|j| bytes.get(j)))
-            && !word(bytes.get(at + needle.len()))
-    })
+    code.match_indices(needle)
+        .any(|(at, _)| !word_at(code, at.checked_sub(1)) && !word_at(code, Some(at + needle.len())))
 }
 
 /// Every line of [`KERNEL_SRC`] under a relative path, with its number.
@@ -278,6 +279,187 @@ fn host_files() -> Vec<PathBuf> {
 fn digest(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The shapes of a value that identifies a machine or the network it is on,
+/// each by the name a finding gives it.
+const MAC: &str = "a device's MAC address";
+const PUBLIC_V4: &str = "a public IPv4 address";
+const SHARED_V4: &str = "a 100.64/10 address";
+const GLOBAL_V6: &str = "a global IPv6 address";
+const LINK_LOCAL_V6: &str = "an interface's link-local IPv6 address";
+const SERIAL: &str = "a device serial number";
+const HOSTNAME: &str = "a hostname carrying a personal name";
+
+/// Every value of a refused shape the tree keeps, by file, each identifying
+/// nobody. A value a shape passes says the same without a row here: a locally
+/// administered MAC, an RFC 5737 or RFC 3849 address.
+const IDENTIFIES_NOBODY: &[(&str, &str)] = &[
+    // Made up, in the kernel's own record of a disk that came back.
+    ("tests/checks/usb.rs", "4C530123456789ABCDEF"),
+];
+
+/// Every maximal run of `line`'s bytes that `of` takes, and where it starts.
+/// `of` takes ASCII alone, so a run begins and ends on a character.
+fn runs(line: &str, of: impl Fn(u8) -> bool) -> Vec<(usize, &str)> {
+    let bytes = line.as_bytes();
+    let (mut out, mut at) = (Vec::new(), 0);
+    while at < bytes.len() {
+        let start = at;
+        while at < bytes.len() && of(bytes[at]) {
+            at += 1;
+        }
+        if at > start {
+            out.push((start, &line[start..at]));
+        }
+        at += usize::from(at == start);
+    }
+    out
+}
+
+/// The MAC addresses `line` spells with `sep` that a vendor gave a device: six
+/// octets and no more, globally administered, unicast, and not the zero vendor
+/// a placeholder is written with.
+fn macs(line: &str, sep: char) -> Vec<&str> {
+    let mut out = Vec::new();
+    for (start, run) in runs(line, |b| b.is_ascii_hexdigit() || char::from(b) == sep) {
+        // A run that begins or ends inside a word shares that end with the
+        // word: `MAC:` gives the address after it an octet's worth of letters.
+        let mut from = start;
+        if word_at(line, start.checked_sub(1)) {
+            from += run.find(sep).map_or(run.len(), |at| at + 1);
+        }
+        let mut to = start + run.len();
+        if word_at(line, Some(to)) {
+            to = start + run.rfind(sep).unwrap_or(0);
+        }
+        let Some(spelled) = line.get(from..to).map(|s| s.trim_matches(sep)) else { continue };
+        let octets: Option<Vec<u8>> = spelled
+            .split(sep)
+            .map(|octet| (octet.len() == 2).then(|| u8::from_str_radix(octet, 16).ok()).flatten())
+            .collect();
+        if octets.is_some_and(|o| o.len() == 6 && o[0] & 0b11 == 0 && o[..3] != [0, 0, 0]) {
+            out.push(spelled);
+        }
+    }
+    out
+}
+
+/// What stands between a word saying what a value is and the value, in a log
+/// line, a manifest or a string literal quoting either.
+const BETWEEN: [char; 7] = [' ', '\t', ':', '=', '"', '\'', '\\'];
+
+/// The words a dotted quad follows where it is a section or a version, and
+/// what joins the next quad to one that is.
+const NUMBERED: [&str; 4] = ["§", "section", "sections", "version"];
+const NUMBERED_ON: [&str; 2] = [" and ", "-"];
+
+/// The IPv4 addresses `line` spells that are routed to one machine or one
+/// network: four decimal octets and no more, outside a word, none of them a
+/// section or version number, and outside the ranges that are everybody's.
+fn v4s(line: &str) -> Vec<(&'static str, &str)> {
+    let (mut out, mut numbered_until) = (Vec::new(), None);
+    for (start, run) in runs(line, |b| b.is_ascii_digit() || b == b'.') {
+        let spelled = run.trim_end_matches('.');
+        let octets: Option<Vec<u8>> = spelled
+            .split('.')
+            .map(|o| (o == "0" || !o.starts_with('0')).then(|| o.parse().ok()).flatten())
+            .collect();
+        let Some(&[a, b, c, d]) = octets.as_deref() else { continue };
+        if word_at(line, start.checked_sub(1)) || word_at(line, Some(start + run.len())) {
+            continue;
+        }
+        let before = line[..start].trim_end_matches(BETWEEN).to_ascii_lowercase();
+        if NUMBERED.iter().any(|word| before.ends_with(word))
+            || numbered_until.is_some_and(|end| NUMBERED_ON.contains(&&line[end..start]))
+        {
+            numbered_until = Some(start + spelled.len());
+            continue;
+        }
+        let addr = std::net::Ipv4Addr::new(a, b, c, d);
+        if a == 100 && (64..128).contains(&b) {
+            out.push((SHARED_V4, spelled));
+        } else if !(a == 0
+            || a >= 224
+            || addr.is_private()
+            || addr.is_loopback()
+            || addr.is_link_local()
+            || addr.is_documentation())
+        {
+            out.push((PUBLIC_V4, spelled));
+        }
+    }
+    out
+}
+
+/// The IPv6 addresses `line` spells that are one machine's: global unicast
+/// outside RFC 3849's documentation prefix, or link-local with an interface
+/// identifier longer than one group.
+fn v6s(line: &str) -> Vec<(&'static str, &str)> {
+    let mut out = Vec::new();
+    for (start, run) in runs(line, |b| b.is_ascii_hexdigit() || b == b':') {
+        if run.matches(':').count() < 2
+            || word_at(line, start.checked_sub(1))
+            || word_at(line, Some(start + run.len()))
+        {
+            continue;
+        }
+        // A sentence's colon after an address is not the address's.
+        let spelled = if run.ends_with("::") { run } else { run.trim_end_matches(':') };
+        let Ok(addr) = spelled.parse::<std::net::Ipv6Addr>() else { continue };
+        let groups = addr.segments();
+        if groups[0] & 0xe000 == 0x2000 && groups[..2] != [0x2001, 0x0db8] {
+            out.push((GLOBAL_V6, spelled));
+        } else if groups[0] & 0xffc0 == 0xfe80 && groups[4..7] != [0, 0, 0] {
+            out.push((LINK_LOCAL_V6, spelled));
+        }
+    }
+    out
+}
+
+/// What each `serial number` in `line` is followed by, where it is six or more
+/// letters and digits with a digit among them: the
+/// kernel's record of a disk, and what `smartctl` and `dmidecode` print.
+fn serials(line: &str) -> Vec<&str> {
+    const NAMED: &str = "serial number";
+    let lower = line.to_ascii_lowercase();
+    let mut out = Vec::new();
+    for (at, _) in lower.match_indices(NAMED) {
+        let rest = line[at + NAMED.len()..].trim_start_matches(BETWEEN);
+        let serial = &rest[..rest.bytes().take_while(u8::is_ascii_alphanumeric).count()];
+        if serial.len() >= 6 && serial.bytes().any(|b| b.is_ascii_digit()) {
+            out.push(serial);
+        }
+    }
+    out
+}
+
+/// The names in `line` macOS gives a machine by default: its owner's first
+/// name, an `s`, and the model.
+fn personal_hostnames(line: &str) -> Vec<&str> {
+    const MODELS: [&str; 5] = ["s-macbook", "s-imac", "s-mac-mini", "s-mac-studio", "s-mac-pro"];
+    let lower = line.to_ascii_lowercase();
+    let mut out = Vec::new();
+    for model in MODELS {
+        for (at, _) in lower.match_indices(model) {
+            let name = lower[..at].bytes().rev().take_while(u8::is_ascii_alphabetic).count();
+            if name > 0 {
+                out.push(&line[at - name..at + model.len()]);
+            }
+        }
+    }
+    out
+}
+
+/// Every value in `line` of a shape that identifies a machine or its network.
+fn identifying(line: &str) -> Vec<(&'static str, &str)> {
+    let mut out: Vec<(&'static str, &str)> =
+        [':', '-'].iter().flat_map(|sep| macs(line, *sep)).map(|mac| (MAC, mac)).collect();
+    out.extend(v4s(line));
+    out.extend(v6s(line));
+    out.extend(serials(line).into_iter().map(|serial| (SERIAL, serial)));
+    out.extend(personal_hostnames(line).into_iter().map(|name| (HOSTNAME, name)));
+    out
 }
 
 #[cfg(test)]
@@ -609,5 +791,91 @@ mod tests {
              judgement is:\n{}",
             complaints.join("\n"),
         );
+    }
+
+    /// **No tracked file carries a value that identifies a machine or its
+    /// network.** This repository is public, and a captured log or command
+    /// reply carries such a value whoever pastes it: every tracked file is read
+    /// for the shapes, and each one found is named by file, line and kind, cut
+    /// to four characters. A stale row reds too, which is also what says the
+    /// scan read the tree.
+    #[test]
+    fn no_tracked_file_identifies_a_machine_or_its_network() {
+        let root = repo_root();
+        let listing = crate::sysroot::tracked_files(&root, &[]).unwrap_or_else(|e| panic!("{e}"));
+        let mut complaints = Vec::new();
+        let mut kept = std::collections::BTreeSet::new();
+        for name in &listing {
+            let Ok(bytes) = std::fs::read(root.join(name)) else { continue };
+            for (n, line) in String::from_utf8_lossy(&bytes).lines().enumerate() {
+                for (shape, value) in identifying(line) {
+                    match IDENTIFIES_NOBODY.iter().find(|row| **row == (name.as_str(), value)) {
+                        Some(row) => {
+                            kept.insert(*row);
+                        }
+                        None => complaints.push(format!(
+                            "{name}:{}: {} ({}…)",
+                            n + 1,
+                            shape,
+                            value.chars().take(4).collect::<String>()
+                        )),
+                    }
+                }
+            }
+        }
+        for row in IDENTIFIES_NOBODY.iter().filter(|row| !kept.contains(*row)) {
+            complaints.push(format!("{} no longer carries {:?}, so its row is stale", row.0, row.1));
+        }
+        assert!(
+            complaints.is_empty(),
+            "a value that identifies a machine or its network is private, and this tree is not: \
+             write one that identifies nobody (a locally administered MAC, an RFC 5737 or RFC \
+             3849 address, a made-up serial or name).\n{}",
+            complaints.join("\n"),
+        );
+    }
+
+    /// Each shape is refused and what resembles it is not. The refused values
+    /// are assembled here, so that this file spells none.
+    #[test]
+    fn a_value_is_refused_by_its_shape_and_what_resembles_one_is_not() {
+        let shapes = |line: &str| identifying(line).into_iter().map(|(shape, _)| shape).collect::<Vec<_>>();
+        let mac = ["00", "11", "22", "33", "44", "55"].join(":");
+        let public = [203, 0, 114, 7].map(|octet: u8| octet.to_string()).join(".");
+        let shared = [100, 64, 0, 1].map(|octet: u8| octet.to_string()).join(".");
+        let global = ["2a00", "1", "", "1"].join(":");
+        let link_local = ["fe80", "", "1c2d", "3e4f", "5a6b", "7c8d"].join(":");
+        for (line, shape) in [
+            (format!("netd: MAC {mac}"), MAC),
+            (format!("MAC:{mac}: the lease went to it"), MAC),
+            (format!("Physical Address {}", mac.replace(':', "-")), MAC),
+            (format!("dns [{public}]"), PUBLIC_V4),
+            (format!("see §4.1 for {public}."), PUBLIC_V4),
+            (format!("tailscale0 UNKNOWN {shared}/32"), SHARED_V4),
+            (format!("inet6 {global}/64"), GLOBAL_V6),
+            (format!("inet6 {link_local}: link"), LINK_LOCAL_V6),
+            (format!("USB 0781:5581, serial number \\\"{}\\\"", ["A1B2", "C3D4"].concat()), SERIAL),
+            (format!("Serial Number: {}", ["PF", "000000"].concat()), SERIAL),
+            (["Somebody", "s-MacBook-Pro.local"].concat(), HOSTNAME),
+            (["somebody", "s-imac"].concat(), HOSTNAME),
+        ] {
+            assert_eq!(shapes(&line), [shape], "{line}");
+        }
+        for line in [
+            "netd: MAC 52:54:00:12:34:56, ff:ff:ff:ff:ff:ff, 01:00:5e:00:00:fb, 33:33:00:00:00:01",
+            "wire_mac 02:00:00:aa:bb:cc and the placeholder 00:00:00:00:00:01",
+            "a longer run of octets 0a:1b:2c:3d:4e:5f:60:71, and 16:08:23 on 2026-09-08",
+            "leased 10.0.2.15/24 from 10.0.2.2, 127.0.0.1, 169.254.1.1, 192.168.1.46, 172.16.0.1",
+            "192.0.2.4 198.51.100.7 203.0.113.9 224.0.0.251 0.0.0.0 240.0.0.0/4 255.255.255.255.",
+            "PCIe base spec 6.0 §7.5.3.3, §7.5.3.4 and 7.5.3.16; Sections 11.4.4.1 and 11.4.4.2",
+            "Architecture Specification §3.2.5.6-3.2.5.8, Section 6.5.2.7, 612523 §9.5.9.2.23",
+            "version = \"1.2.3.4\", QEMU emulator version 11.0.3.1, v1.2.3.4, 1.2.3.4.5, D7.5.9.2",
+            "fe80::1 2001:db8::1 ff02::fb ::1 fd00::5, and `c::{name}` in std::net::Ipv6Addr",
+            "usb-storage: slot {slot_id} serial number {}, and its serial number differs",
+            "Host-MacBook-Pro.local, toyos-t14.local, s-macbook",
+        ] {
+            let found = shapes(line);
+            assert!(found.is_empty(), "{line}: {found:?}");
+        }
     }
 }

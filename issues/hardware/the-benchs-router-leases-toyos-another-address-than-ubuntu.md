@@ -19,15 +19,15 @@ The full T14 run of `main` at `7e151819`
 (EXIT=1), boot `lancase`:
 
 ```
-  [lan] leased 192.168.1.49/24 from 192.168.1.1 in 13315 ms, gateway 192.168.1.1, dns [194.230.55.96, 212.98.37.130]
+  [lan] leased 192.168.1.49/24 from 192.168.1.1 in 13315 ms, gateway 192.168.1.1, dns […]
   FAIL lan_dhcp_lease: 2 finding(s):
   this boot leased 192.168.1.49 and the host pinged 192.168.1.46, which the router hands this MAC under the operating system before it — so either something else answered or that server does not repeat a lease across the two
   nothing answered a ping at 192.168.1.46 while this machine was between its two operating systems
 ```
 
-`lancase/boot.txt` records `ping_addr 192.168.1.46` and
-`wire_mac 38:f3:ab:35:37:3b`; `netd: MAC 38:f3:ab:35:37:3b` is the MAC the
-lease went to. The `lantalkcase` boot of the same run leased
+`lancase/boot.txt` records `ping_addr 192.168.1.46` and the `wire_mac` Ubuntu
+read off the I219, and this boot's `netd: MAC` line names the same one: the
+lease went to that MAC. The `lantalkcase` boot of the same run leased
 `192.168.1.49` again (`talk_peer 192.168.1.49`). What the router keys the
 lease on is not measured.
 

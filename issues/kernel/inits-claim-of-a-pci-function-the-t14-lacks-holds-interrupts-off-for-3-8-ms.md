@@ -8,7 +8,7 @@ opened: 2026-10-02
 
 On LENOVO 20W0003AMZ, BIOS N34ET71W (1.71), one boot of `main` at `c59e09ed6`
 with a throwaway instrument that names a window's opener and samples its CPU
-every 2 ms (#681, comment 5962618149) read init's `SYS_DEVICE_CLAIM` for
+every 2 ms (#681, comment 5968784527) read init's `SYS_DEVICE_CLAIM` for
 blockd's `pci:1b36:0010`, which this machine does not have, holding cpu0's
 interrupts off for 3,817,265 ns at 1.162 s, from the syscall's entry to its
 return, with `MSR_SMI_COUNT` unmoved. Its one sample, 1.7 µs before it closed,
