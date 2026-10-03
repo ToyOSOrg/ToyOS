@@ -98,6 +98,11 @@ const RUST_SKIP: &[&str] = &[
     // Needs a launcher and a declared `cat` and shell, which `tests/testcases`
     // does not give: the `process_tree` metal row runs it on tests/proctreecase.
     "process_tree",
+    // Needs a launcher and a declared row with a capability a plain job lacks,
+    // and it is both the attacker and the bytes a re-point substitutes, so its
+    // own `/system/bin` entry must exist: the `launch_toctou` machine test runs
+    // it on tests/launchoncecase.
+    "launch_toctou",
     // It asserts nothing at all: it holds a `tests/lanleasecase` boot open for
     // twenty seconds. On a shared boot it would be twenty seconds of nothing.
     "lan_hold",
@@ -196,6 +201,11 @@ const MACHINE_TESTS: &[&str] = &[
     // no way to turn it back on, so only a machine QEMU reports stopping can
     // be asked. `machine_soft_off_decoded` reads the T14's own decode.
     "machine_shutdown",
+    // A launch resolves a declared row's image from the row's own path, not from
+    // the caller's. Its own boot, because it needs a launcher and a declared row
+    // with a capability a plain job lacks, and it hammers hundreds of launches —
+    // a verdict about which bytes ran, not how fast, so QEMU answers it.
+    "launch_toctou",
 ];
 
 /// **The metal profile**: which registrations run on the ThinkPad T14, what
@@ -2361,7 +2371,46 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "iommu_virtio_platform" => common::iommu::iommu_virtio_platform(test_config),
         "nested_nmi_is_loud" => faults::nested_nmi_is_loud(test_config),
         "machine_shutdown" => power::machine_shutdown(test_config),
+        "launch_toctou" => launch_toctou(),
         other => Err(format!("unknown machine test {other}")),
+    }
+}
+
+/// A declared row's image is read from the row's own path, resolved once.
+///
+/// `tests/launchoncecase` gives `toybox` a `roster` capability no plain job
+/// holds. `test_rs_launch_toctou` points a `/tmp` symlink at `/system/bin/toybox`,
+/// launches it through the launcher while a thread re-points the symlink at its
+/// own binary, and asserts its bytes never ran holding that capability. On the
+/// base they do — the supervisor resolves `request.program` to the row and then
+/// re-reads it for the image — so the job exits non-zero. The verdict is which
+/// bytes ran, a content fact QEMU answers; the race is only how it is reached.
+fn launch_toctou() -> Result<(), String> {
+    let profile = qemu::Profile::Headless;
+    let bin = qemu::build_toyos_bin(
+        profile.arch(),
+        &compile::repo_root().join("tests/toyos-rust-tests"),
+        "launch_toctou",
+    );
+    let options = BootOptions { profile, ..Default::default() };
+    let mut qemu = QemuInstance::boot_with_options(
+        &compile::repo_root().join("tests/launchoncecase"),
+        &[],
+        &[("launch_toctou".to_string(), bin)],
+        options,
+    );
+    serial::Serial::boot(&qemu).must_be_clean()?;
+    let result = qemu.run_test("test_rs_launch_toctou", Duration::from_secs(120));
+    match result.exit_code {
+        Some(0) => {
+            eprintln!("  [launch] {}", result.stdout.lines().last().unwrap_or("").trim());
+            Ok(())
+        }
+        Some(code) => Err(format!("test_rs_launch_toctou exited {code}\n{}", result.stdout)),
+        None => Err(format!(
+            "test_rs_launch_toctou did not finish: {:?}\n{}",
+            result.error, result.stdout
+        )),
     }
 }
 

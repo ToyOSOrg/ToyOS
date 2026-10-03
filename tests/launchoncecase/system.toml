@@ -1,0 +1,49 @@
+# The boot `launch_toctou` runs on: a launcher, a declared row with a capability
+# the caller's own job does not hold (`toybox`, here given `roster`), and the
+# file servers, so a launch names a working directory a server judges — which is
+# where the base's second path resolution happens.
+#
+# `launch_toctou` creates a caller-writable `/tmp` symlink that resolves to
+# `/system/bin/toybox`, launches it through the launcher while a second thread
+# re-points the symlink at its own binary, and asserts the supervisor never runs
+# the caller's bytes under `toybox`'s row.
+
+[boot]
+start = ["logkeeper", "diskserver", "fileserver", "test-runner"]
+
+# `every_boot_config_runs_logkeeper` refuses a boot config without it: the kernel
+# keeps the record ring and writes no file, so such a boot's `/log` is empty. It
+# claims no device and serves no port.
+[programs.logkeeper]
+service = true
+syscap = ["logread"]
+
+# `roster` because the guest hands each binary a duplicate of its capability and
+# the launch places children under itself; `launcher` because the subtree under
+# test is started through it.
+[programs.test-runner]
+receives = ["launcher"]
+syscap = ["dup", "roster"]
+
+# The declared row the caller's symlink resolves to. `roster` is the capability a
+# launched instance of this row holds and a plain job does not: a win of the race
+# runs the caller's binary holding it, which is the whole defect.
+[programs.toybox]
+syscap = ["roster"]
+
+# The block service: the NVMe controller this machine's DATA is on, driven from
+# userland through its claim. Started again when it ends; the claim goes back
+# with the process and is minted again for the next.
+[programs.diskserver]
+service = true
+restart = true
+serves = ["block"]
+devices = ["pci:1b36:0010"]
+
+# The file servers: DATA, the log and the running slot's volume, one process
+# each, serving every program the directories of its role. Started again when
+# one ends, on the same ports.
+[programs.fileserver]
+restart = true
+roles = ["data", "log", "boot"]
+receives = ["block"]

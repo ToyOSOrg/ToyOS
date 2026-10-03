@@ -55,6 +55,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
 use std::os::toyos::process::{ChildExt, CommandExt};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -1470,10 +1471,13 @@ impl Supervisor<'_> {
             }
         };
 
-        // **The caller's path, not the row's, and `argv[0]` is why.** `declared`
-        // has already established that the two name one binary, so this grants
-        // nothing extra — and `/system/bin/echo` spawned as `/system/bin/toybox` is a toybox that
-        // was never told which applet it is.
+        // **`argv[0]` is the caller's path; the image is the row's.** The caller's
+        // name has to reach the child so an applet learns which it is —
+        // `/system/bin/echo` run as `ls` is an `ls` — but the bytes come from the
+        // row's own declared path (`image_from`, below), never from this path
+        // re-read. `declared` may have reached the row through a caller-writable
+        // symlink, and loading from here would run whatever that link named at
+        // load time: the caller's own bytes, under the row's claims.
         let mut command = Command::new(request.program);
         // **Carried, not inherited.** A child of the launcher would otherwise get
         // the supervisor's environment and the supervisor's working directory, so `cd /tmp && ls` would
@@ -1504,9 +1508,22 @@ impl Supervisor<'_> {
         let (system, path) = (self.system, request.program.to_string());
         let found = self.files("a launch's files", move || {
             let resolved = resolve(system, &path);
-            let prepared = match resolved {
-                Resolved::Row(_) | Resolved::Package(_) => command.prepare().map(drop),
-                Resolved::NotDeclared | Resolved::Refused(_) => Ok(()),
+            // The image is read from the row's own declared path, resolved once
+            // (`resolve`/`declared`), never from `request.program` a second time:
+            // the kernel loads the object this builds rather than re-opening the
+            // launch's `argv[0]`, so a caller-writable symlink cannot be
+            // re-pointed between naming the row and loading its bytes.
+            let row_path = match &resolved {
+                Resolved::Row(row) => Some(row.path.clone()),
+                Resolved::Package(row) => Some(row.path.clone()),
+                Resolved::NotDeclared | Resolved::Refused(_) => None,
+            };
+            let prepared = match row_path {
+                Some(row_path) => {
+                    command.image_from(Path::new(&row_path));
+                    command.prepare().map(drop)
+                }
+                None => Ok(()),
             };
             (resolved, prepared.map(|()| command))
         });
