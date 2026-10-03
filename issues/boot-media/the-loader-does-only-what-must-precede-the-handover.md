@@ -224,8 +224,9 @@ Each stage lands on its own, in this order.
      label `ready`, and the service writes one byte to it once it serves. A
      read end that closes with no byte is a service that never came up.
    - Init runs `update --good` once every service `[boot] up` names has
-     written its byte; `update` holds the `slots` claim's table and writes the
-     running slot's good flag and nothing else.
+     written its byte, and never for an image that names no `[boot] up`;
+     `update` holds the `slots` claim's table and writes the running slot's
+     good flag and nothing else.
    - An image whose `system.toml` grants no program the `slots` claim is never
      good, so each boot spends a try and it boots three times. Today only
      `system.toml` and `tests/updatecase/system.toml` grant it.
@@ -309,13 +310,35 @@ Each stage lands on its own, in this order.
    boot manager booting the entry the loader wrote.
 
 6. **The T14 bench.**
+   - It opens with a timed `ssh t14 update < image` of a session image of
+     `issues/hardware/the-t14-reboots-through-ubuntu-for-every-test.md`, since
+     an image switch costs that write and a reset: ToyOS has written this
+     stick at 0.2 s to 9.5 s per MiB.
    - It is built from #539's pieces that stage 6 takes above, and the bench
      path of `src/metal.rs`. `--via-ubuntu` stays as the old path.
+   - Every T14 image is signed with the bench key the T14 trusts, and a loader
+     reaches the T14 as an image does: ToyOS receives it over ssh and writes it
+     to the stick, and the running loader tries it once and keeps the old one
+     as the fallback (owner rulings). A stick that boots neither loader costs
+     a hand and `diag/flash.sh`.
+   - The host's first exec on an image is `update --good`, and a session image
+     names no `[boot] up`. A death goes by `update --once`, the kept slot boots
+     after it, and the host fetches the record over `sftp`.
    - The bench reads the loader's file off the ESP.
    - The tested pass's `loader.log` is kept as `loader-previous.log` by a
      rename (`SetInfo`), not by #539's copy.
    - It runs over the cable that
-     `issues/hardware/the-t14-answers-only-through-a-usb-stick.md` owns.
+     `issues/hardware/the-t14-answers-only-through-a-usb-stick.md` owns, and
+     waits on
+     `issues/isolation/a-reset-stops-xhci-and-leaves-every-claimed-pci-function-armed.md`,
+     `issues/hardware/the-t14-hung-after-rebooting-with-its-i219-faulted.md`,
+     `issues/panic-path/a-fatal-event-stands-down-both-bounds-and-may-leave-nothing-to-end-the-machine.md`,
+     `issues/hardware/most-t14-leases-land-one-dhcp-retry-late.md`,
+     `issues/diagnostics/a-swaps-redial-asks-again-with-no-event-to-wait-on.md`,
+     `issues/hardware/the-t14-redial-re-asks-mdns-after-every-refusal.md`,
+     `issues/diagnostics/a-first-dial-turned-away-before-a-line-is-waited-on-to-its-callers-bound.md`
+     and
+     `issues/diagnostics/a-netd-that-dies-while-serving-leaves-the-hosts-stream-silent.md`.
    - #539's issues `a-loader-change-reaches-a-machine-only-by-writing-its-stick`,
      `the-bench-reads-no-quiescent-log-volume`,
      `the-bench-runs-with-no-bound-on-its-own-boot`,
@@ -324,13 +347,26 @@ Each stage lands on its own, in this order.
      as far as it is true of what lands.
 
    **Exit**: `bench_loop_drives_a_toyos_machine` passes in QEMU. On the T14,
-   with Ubuntu never started, three things hold: a kernel change boots; a slot
-   with a flipped byte, no signature or a lower security version is refused
-   and the other boots; and a slot that dies falls back on its own.
+   with Ubuntu never started: a whole run, its sessions and every boot that
+   goes by `--once` (`deadlinewedge`, `hardlockup`, `usbload` and
+   `foreignrecord` among them), gives the verdicts a per-boot run gave at the
+   commit this stage branches from; a kernel change boots; a slot with a
+   flipped byte, no signature or a lower security version is refused and the
+   other boots; a slot that dies falls back on its own, and one whose `sshd`
+   refuses the host's key is never marked good; a `--once` image that panics
+   returns the machine to its session with its record judged; and a loader
+   sent over ssh boots once, and one that brings no slot to good leaves the
+   old one booting.
 
 7. **Ubuntu leaves the loop.** Delete `toyos-metal`'s `--via-ubuntu` path,
-   `--metal-via-ubuntu` and `bootloader/src/bootnext.rs`. After a reset the
-   firmware comes back to the loader because ToyOS's entry is first (stage 5).
+   `--metal-via-ubuntu`, `bootloader/src/bootnext.rs` and test-runner's
+   job-list mode. After a reset the firmware comes back to the loader because
+   ToyOS's entry is first (stage 5).
+   - `issues/build/a-hung-boots-log-partition-is-wiped-by-the-next-runs-flash.md`,
+     `issues/build/the-sudoers-rendering-has-no-host-side-judge.md`,
+     `issues/build/the-metal-loop-writes-the-readback-volume-into-a-directory-it-has-not-made.md`
+     and `issues/hardware/the-t14-stopped-answering-ssh-between-two-lan-boots.md`
+     close here, each only as far as it is true of what lands.
 
    **Exit**: no path in `src/metal*.rs` reaches Ubuntu. On the T14, a panic's
    reset reaches the loader with no `BootNext` set.
@@ -358,11 +394,13 @@ Each stage lands on its own, in this order.
      `watchdog_quiet`'s loader half. `watchdog_armed` judges the kernel's
      read-back, and `loader_watchdog_arms` becomes the kernel's row.
 
-   **Exit**: `bootloader/src` holds no TCO access. On q35, `watchdog_armed`
-   passes on the kernel's lines (counting, `no_reboot=0`, `timeout=0`), and
-   `watchdog_resets` passes. A boot that hangs right after the arm, before
-   `mm::init`, is reset by the TCO; moving the arm back after `pci::enumerate`
-   makes that test fail.
+   **Exit**: `bootloader/src` holds no TCO access. On the T14, `watchdog_armed`
+   passes on the kernel's lines (counting, `no_reboot=0`, `timeout=0`). Once
+   the reading of
+   `issues/hardware/a-frozen-toyos-waits-for-a-hand-on-the-power-button.md` has
+   seen the TCO reset the T14, a boot there that hangs right after the arm,
+   before `mm::init`, is reset by the TCO; moving the arm back after
+   `pci::enumerate` makes that row fail.
 
 9. **The crash report belongs to the kernel.** The loader hands the last
    boot's record to the kernel instead of decoding it. The kernel logs it, and
@@ -373,8 +411,7 @@ Each stage lands on its own, in this order.
      `DROPPED_OPENS_WITH`'s count.
    - The report pass goes, taking with it `end_this_pass`, the chain
      constants, `loaderlog`'s chain lines, `armed_at`'s `GetTime`, everything
-     else in `bootloader/src/blackbox.rs` except the claim and the arm, and the
-     chained-pass item of `issues/hardware/the-t14-boots-toyos-unattended.md`.
+     else in `bootloader/src/blackbox.rs` except the claim and the arm.
    - `ENDS_AT_CHAIN` goes, so this stage rewrites the exit of
      `issues/diagnostics/a-wedged-reports-newest-records-were-cut-by-the-loaders-own-log-file.md`:
      a `deadlinewedge` rerun whose `/log` carries the `WEDGED` report with its

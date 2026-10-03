@@ -19,10 +19,12 @@ alone.
 
 ## Owner
 
-`issues/hardware/the-t14-boots-toyos-unattended.md`, the track that holds the
-hard-lockup detector and its bound.
+`issues/hardware/a-frozen-toyos-waits-for-a-hand-on-the-power-button.md`, the
+track that arms the hard-lockup detector on every boot.
 
 ## What would close it
 
-The constant and its assertion deleted, with whatever `toyos-tco`'s version
-owes for it; `hard_lockup_bound_ms`'s own test already holds the half.
+That track's first step: a boot that names no `boot-deadline=` arms the
+detector at `HARD_LOCKUP_BOUND_MS`, whose doc then says so in place of "the one
+a T14 boot runs under". The constant is not deleted, since that step would
+declare it again.
