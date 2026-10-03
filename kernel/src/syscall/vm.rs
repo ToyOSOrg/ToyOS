@@ -93,6 +93,12 @@ pub(super) fn sys_mmap(req_addr: u64, size: u64, prot: MmapProt, flags: MmapFlag
             // a partial overlap is refused — `map_range` would otherwise
             // assert on an already-present PDE.
             let replacing = match as_guard.occupancy(start, aligned as u64) {
+                // A new region past the per-process bound is refused by name;
+                // the non-FIXED arm's `alloc_region` refuses the same way. A
+                // replacement (`Whole`) grows no ledger and is never refused here.
+                Occupancy::Free if !as_guard.has_region_room() => {
+                    return Err(SyscallError::ResourceExhausted)
+                }
                 Occupancy::Free => None,
                 Occupancy::Whole => {
                     let mine = data

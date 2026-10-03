@@ -658,6 +658,12 @@ pub struct MmapRegion {
     pub _pages: Option<PageAlloc>,
 }
 
+// One region per record, and a power of two: the ledger's doubling stops at it, inside one heap allocation.
+const _: () = assert!(
+    crate::vma::MAX_REGIONS.is_power_of_two()
+        && crate::vma::MAX_REGIONS * core::mem::size_of::<MmapRegion>() <= crate::mm::MAX_HEAP_ALLOC
+);
+
 
 /// Zero-sized proof of running on the per-CPU idle stack; required by `collect_orphan_zombies` so it never drops the thread entry it runs on.
 #[derive(Clone, Copy)]
