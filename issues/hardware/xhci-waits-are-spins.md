@@ -73,7 +73,8 @@ fsd.
   6,623,907 ns at 1.179 s, each `SYS_DEVICE_CLAIM` from entry to return, all
   four samples in `wait_transfer` under `storage_read`.
 - **Its `SYS_FSYNC`**: 15 windows' trails carry one, and in 7 it spins on a
-  contended `XHCI` at `with_disk_by`. None held interrupts off for 2 ms.
+  contended `XHCI` at `with_disk_by` (comment 5966523482). None held
+  interrupts off for 2 ms.
 - **Not the firmware**: `MSR_SMI_COUNT` does not move across any of them. The
   windows it does move across are
   `issues/hardware/the-t14s-firmware-interrupts-every-cpu-every-2-2-s-under-toyos.md`'s.
