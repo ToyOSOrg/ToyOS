@@ -55,7 +55,7 @@ pub fn the_lease_judged_is_this_boots_own() {
         "a MAC that is not the one Ubuntu read",
         LOG,
         &BOOT.replace("wire_mac 02:00:00:00:00:01", "wire_mac 02:00:00:00:00:02"),
-        "no \"netd: MAC 02:00:00:00:00:02\" record",
+        "no \"netd: MAC \" record names the MAC the operating system before this boot read",
     );
     let unleased: String =
         LOG.lines().filter(|l| !l.contains("DHCP: lease")).map(|l| format!("{l}\n")).collect();

@@ -96,11 +96,13 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
         }
     }
 
-    let mac = format!("{MAC}{wire_mac}");
-    if !netd.contains(&mac) {
+    // Neither MAC is printed: a judge's lines are quoted in public.
+    if !netd.contains(&format!("{MAC}{wire_mac}")) {
         bad.push(format!(
-            "no {mac:?} record: the card this boot brought up is not the one the operating \
-             system before it read on {NIC}"
+            "no {MAC:?} record names the MAC the operating system before this boot read on \
+             {NIC}, which is `{}` in its `{}`: the card this boot brought up is not that one",
+            toyos_build::metal::WIRE_MAC_KEY,
+            toyos_build::metal::READBACK_BOOT
         ));
     }
 
@@ -111,9 +113,15 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
 
     match lease_in(&netd) {
         Ok(lease) => {
+            // The resolvers are counted and not printed, for the same reason.
             eprintln!(
-                "  [lan] leased {}/{} from {} in {} ms, gateway {}, dns {:?}",
-                lease.address, lease.prefix, lease.server, lease.ms, lease.gateway, lease.dns
+                "  [lan] leased {}/{} from {} in {} ms, gateway {}, {} resolver(s)",
+                lease.address,
+                lease.prefix,
+                lease.server,
+                lease.ms,
+                lease.gateway,
+                lease.dns.len()
             );
             if lease.address != heard.peer {
                 bad.push(format!(

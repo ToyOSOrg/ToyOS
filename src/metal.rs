@@ -1875,10 +1875,9 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     let wire = match &args.nic {
         Some(nic) => {
             let wire = driver.wire(nic)?;
-            println!(
-                "the claimed function {nic} is {} at {}, MAC {}",
-                wire.iface, wire.addr, wire.mac
-            );
+            // The MAC goes to the readback and not to this log, which is
+            // quoted in public.
+            println!("the claimed function {nic} is {} at {}", wire.iface, wire.addr);
             Some(wire)
         }
         None => None,
