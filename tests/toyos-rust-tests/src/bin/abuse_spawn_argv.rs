@@ -36,6 +36,8 @@ fn main() {
     }
 
     let base = SpawnArgs {
+        path_ptr: region as u64,
+        path_len: 1,
         argv_ptr: region as u64,
         argv_len: 0,
         slot_map_ptr: 0,
@@ -75,7 +77,7 @@ fn main() {
     let err = unsafe {
         syscall::spawn(&SpawnArgs { argv_len: 2, ..base })
     }
-    .expect_err("argv[0] = \"a\" is not a program");
+    .expect_err("\"a\" is not a program");
     assert_eq!(err, SyscallError::NotFound, "wrong error for a short honest argv");
 
     // No non-empty token: there is no argv[0] to load.

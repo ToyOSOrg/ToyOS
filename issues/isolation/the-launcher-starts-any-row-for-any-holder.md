@@ -29,21 +29,21 @@ handed that row's whole authority. Three facts compose:
   fact two reach that row anyway. So any program can rewrite any boot service's
   binary.
 
-This is the service-namespace shape of the hole the per-program-views track
-names ("the swap port leaking to whatever sshd spawns", PR #484's review,
+The per-program-views track names the same shape in the service namespace ("the
+swap port leaking to whatever sshd spawns",
 `issues/isolation/every-program-sees-only-the-files-it-was-given.md`), and it is
 distinct from where a swapped binary lives
 (`issues/isolation/a-swapped-binary-lives-where-any-process-can-rewrite-it.md`):
 that one is which bytes a declared swap runs, this one is who may invoke a
 declared row at all.
 
-**Owner.** The per-program-views track
-(`issues/isolation/every-program-sees-only-the-files-it-was-given.md`), which
-badges a program's authority per row.
+**The owner's ruling:** each program may start only the rows its own row lists;
+swap and update of system programs only from the login session.
 
-**Exit condition.** `launcher` is badged per row: a launcher connector names
-which rows its holder may start, `serve_launch` refuses a row the badge does not
-name, and a swap gates on the requester's badge rather than on its digest alone.
-A test fails until then: a program whose row grants no launcher badge for
-`/system/bin/swap` launches it through an inherited `launcher` and the supervisor
-refuses the launch.
+**Owner.** The orchestrator.
+
+**Exit condition.** A guest test that is red until both halves of the ruling
+hold: a launch of a row the caller's own row does not list is refused —
+`/system/bin/swap` and `/system/bin/update` through an inherited `launcher`
+among them — and a swap and an update of a system program asked from outside
+the login session are refused.

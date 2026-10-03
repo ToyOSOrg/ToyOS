@@ -1471,13 +1471,12 @@ impl Supervisor<'_> {
             }
         };
 
-        // **`argv[0]` is the caller's path; the image is the row's.** The caller's
-        // name has to reach the child so an applet learns which it is —
-        // `/system/bin/echo` run as `ls` is an `ls` — but the bytes come from the
-        // row's own declared path (`image_from`, below), never from this path
-        // re-read. `declared` may have reached the row through a caller-writable
-        // symlink, and loading from here would run whatever that link named at
-        // load time: the caller's own bytes, under the row's claims.
+        // **`argv[0]` is the caller's path; the program is the row's.** An applet
+        // learns which it is from its name — `/system/bin/echo` run as `ls` is an
+        // `ls` — but the bytes are the row's `path` (`image_from`, below), never
+        // this one opened again: `declared` may have reached the row through a
+        // link the caller can re-point, and its own bytes would run under the
+        // row's claims.
         let mut command = Command::new(request.program);
         // **Carried, not inherited.** A child of the launcher would otherwise get
         // the supervisor's environment and the supervisor's working directory, so `cd /tmp && ls` would
@@ -1508,22 +1507,11 @@ impl Supervisor<'_> {
         let (system, path) = (self.system, request.program.to_string());
         let found = self.files("a launch's files", move || {
             let resolved = resolve(system, &path);
-            // The image is read from the row's own declared path, resolved once
-            // (`resolve`/`declared`), never from `request.program` a second time:
-            // the kernel loads the object this builds rather than re-opening the
-            // launch's `argv[0]`, so a caller-writable symlink cannot be
-            // re-pointed between naming the row and loading its bytes.
-            let row_path = match &resolved {
-                Resolved::Row(row) => Some(row.path.clone()),
-                Resolved::Package(row) => Some(row.path.clone()),
-                Resolved::NotDeclared | Resolved::Refused(_) => None,
-            };
-            let prepared = match row_path {
-                Some(row_path) => {
-                    command.image_from(Path::new(&row_path));
-                    command.prepare().map(drop)
+            let prepared = match &resolved {
+                Resolved::Row(Program { path, .. }) | Resolved::Package(Program { path, .. }) => {
+                    command.image_from(Path::new(path)).prepare().map(drop)
                 }
-                None => Ok(()),
+                Resolved::NotDeclared | Resolved::Refused(_) => Ok(()),
             };
             (resolved, prepared.map(|()| command))
         });

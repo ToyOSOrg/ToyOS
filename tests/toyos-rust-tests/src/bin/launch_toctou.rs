@@ -1,108 +1,109 @@
-//! A declared row's image comes from the row's own path, resolved once — never
-//! from a caller-writable path re-read after the row was named.
+//! A launched row runs the row's own program, never the bytes a caller's path
+//! names when it is opened again.
 //!
-//! The supervisor's launch path resolves `request.program` twice on the base: once
-//! to name the `[programs]` row (and with it the row's capabilities), and again
-//! to read the image. A `/tmp` symlink resolves to the declared row at the
-//! first and to the caller's own binary at the second, so the caller's bytes
-//! run holding the row's capability.
+//! The launcher names a `[programs]` row from the caller's path, following one
+//! link, and the row's capabilities go to whatever it then starts. This binary
+//! points a `/tmp` link at `/system/bin/toybox` — a row this boot gives the
+//! `roster` capability — launches it under the name `ps` while a second thread
+//! re-points the link between toybox and this binary, and judges every child by
+//! its exit:
 //!
-//! This binary is both halves. The default role is the attacker: it points a
-//! `/tmp` symlink at `/system/bin/toybox` (a declared row this config gives the
-//! `roster` capability a plain job never holds), launches it through the
-//! launcher while a second thread re-points the symlink at this binary, and
-//! waits each launched child. The `evil` role is what the re-point substitutes:
-//! it exits [`EXPLOIT`] when it holds the row's `SysCap` — proof the caller's
-//! bytes ran under the declared row — and `0` otherwise.
+//! - toybox's `ps` exits 0 only holding a `SysCap` with `ROSTER`, which only the
+//!   row gives: the row's own program under the row;
+//! - `ps` without one exits 1: the link named this binary when the launcher
+//!   asked, so the caller spawned it directly, and it named toybox again when the
+//!   kernel opened it;
+//! - this binary as [`ROLE`] exits [`PLAIN`] without a `SysCap` and [`EXPLOIT`]
+//!   with one — the caller's bytes under the row's claims, the defect.
 //!
-//! On the fix the supervisor reads the image from the row's `/system` path (an
-//! immutable, kernel-served mount) into an object, so the kernel never re-opens
-//! the caller's symlink and the `evil` bytes never run under the row. The race
-//! then never resolves to [`EXPLOIT`] and the attacker exits `0`.
-
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+//! Every launch must start and be waited, and both of the first two must happen:
+//! one shows a launch of the row runs, the other that the link really moved
+//! while launches were made.
 
 use std::os::toyos::fs::symlink;
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};
 
-/// This binary's own path, the bytes the re-point substitutes for the row's.
+/// This binary, the bytes a re-point substitutes for the row's.
 const SELF_PATH: &str = "/system/bin/test_rs_launch_toctou";
-/// The declared row the symlink resolves to. `/system` is read-only to every
-/// program, so the row's bytes cannot be rewritten — only which file the
-/// caller's symlink names can.
+/// The declared row the link names. `/system` is read-only to every program,
+/// so only which file the link names can move, never the row's bytes.
 const DECLARED: &str = "/system/bin/toybox";
-/// The caller-writable symlink raced between the two paths.
-const LINK: &str = "/tmp/x";
+/// The caller-writable link, named for the applet toybox runs as.
+const LINK: &str = "/tmp/ps";
+/// The argument that makes a child of this binary [`role`] rather than the
+/// attacker.
+const ROLE: &str = "role";
 
-/// The `evil` role's exit code when it ran holding the declared row's `SysCap`.
-/// Distinct from every code toybox or a plain spawn produces.
+/// This binary as a child, holding a `SysCap`: only a launch of the row gives one.
 const EXPLOIT: i32 = 123;
+/// This binary as a child, holding none.
+const PLAIN: i32 = 77;
+/// Toybox's `ps`, having read the roster.
+const PS_UNDER_ROW: i32 = 0;
+/// Toybox's `ps`, endowed no `SysCap`.
+const PS_DIRECT: i32 = 1;
 
-/// How long the attacker keeps racing before it concludes the exploit never
-/// landed. Well under the runner's one-job budget; the window the base leaves
-/// open is the whole of the supervisor's `start`, so a win comes in far fewer
-/// attempts than this bounds.
-const RACE_BUDGET: Duration = Duration::from_secs(30);
-const MAX_ATTEMPTS: u32 = 600;
+const ATTEMPTS: u32 = 100;
 
 fn main() {
     match std::env::args().nth(1).as_deref() {
-        Some("evil") => evil(),
+        Some(ROLE) => role(),
         _ => attacker(),
     }
 }
 
-/// The caller's bytes. Reached only when the supervisor read this binary's image
-/// for a launch it resolved to the `toybox` row.
-fn evil() -> ! {
-    // A launched instance of the `toybox` row is endowed that row's `SysCap`;
-    // a plain child the attacker spawns directly is not. So holding one here is
-    // proof these bytes ran under the row the caller never named for them.
+/// The caller's bytes, run by a launch.
+fn role() -> ! {
     let under_row = Endowments::get().holds(SYSCAP_LABEL);
-    std::process::exit(if under_row { EXPLOIT } else { 0 });
+    std::process::exit(if under_row { EXPLOIT } else { PLAIN });
 }
 
 fn attacker() {
-    // Start the symlink on the declared row, so the first resolution names it.
     let _ = std::fs::remove_file(LINK);
-    symlink(DECLARED, LINK).expect("create /tmp/x -> the declared row");
+    symlink(DECLARED, LINK).expect("create the link at the declared row");
 
-    // Re-point forever between the row's path and this binary's. tmpfs displaces
-    // the existing entry, so each call is one atomic swap of what `/tmp/x` names.
-    std::thread::spawn(|| loop {
-        let _ = symlink(SELF_PATH, LINK);
-        let _ = symlink(DECLARED, LINK);
+    let stop = Arc::new(AtomicBool::new(false));
+    let flipper = std::thread::spawn({
+        let stop = Arc::clone(&stop);
+        move || {
+            // tmpfs displaces the existing entry, so each call is one swap of
+            // what the link names.
+            while !stop.load(Ordering::Relaxed) {
+                symlink(SELF_PATH, LINK).expect("re-point the link at this binary");
+                symlink(DECLARED, LINK).expect("re-point the link at the declared row");
+            }
+        }
     });
 
-    let deadline = Instant::now() + RACE_BUDGET;
-    let mut exploited = false;
-    let mut attempts = 0u32;
-    while attempts < MAX_ATTEMPTS && Instant::now() < deadline {
-        attempts += 1;
-        // A served working directory, judged by a file server mid-launch, is
-        // one of the places the base's second resolution waits — widening the
-        // window the re-point has to land in.
-        let spawned = Command::new(LINK)
-            .arg("evil")
-            .current_dir("/home")
+    let (mut under_row, mut direct) = (0u32, 0u32);
+    for attempt in 1..=ATTEMPTS {
+        let mut child = Command::new(LINK)
+            .arg(ROLE)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .spawn();
-        let Ok(mut child) = spawned else { continue };
-        if child.wait().ok().and_then(|s| s.code()) == Some(EXPLOIT) {
-            exploited = true;
-            break;
+            .spawn()
+            .unwrap_or_else(|e| panic!("launch {attempt} of {LINK} was refused: {e}"));
+        let status = child.wait().unwrap_or_else(|e| panic!("launch {attempt} was not waited: {e}"));
+        match status.code() {
+            Some(PS_UNDER_ROW) => under_row += 1,
+            Some(PS_DIRECT) | Some(PLAIN) => direct += 1,
+            Some(EXPLOIT) => panic!(
+                "launch_toctou: launch {attempt} ran the caller's bytes holding the `toybox` \
+                 row's capability: the program a launched row runs was opened from the \
+                 caller's path"
+            ),
+            other => panic!("launch {attempt} exited {other:?}, which neither program answers"),
         }
     }
 
-    assert!(
-        !exploited,
-        "launch_toctou: the caller's bytes ran holding the `toybox` row's capability after \
-         {attempts} launch(es): the supervisor read a declared row's image from the caller's \
-         path, re-read after the row was named"
-    );
-    println!("launch_toctou: PASS ({attempts} launches, none ran the caller's bytes under the row)");
+    stop.store(true, Ordering::Relaxed);
+    flipper.join().expect("the re-point thread failed");
+    assert!(under_row > 0, "none of {ATTEMPTS} launches ran the `toybox` row's program under its row");
+    assert!(direct > 0, "the link never named this binary when the launcher asked in {ATTEMPTS} launches");
+    println!("launch_toctou: PASS ({under_row} of {ATTEMPTS} launches ran the row's program under it, none the caller's)");
 }

@@ -3069,7 +3069,6 @@ mod tests {
         "tests/lanleasecase/system.toml",
         "tests/lantalkcase/system.toml",
         "tests/latencycase/system.toml",
-        "tests/launchoncecase/system.toml",
         "tests/logstallcase/system.toml",
         "tests/metalcase/system.toml",
         "tests/metaldevicecase/system.toml",

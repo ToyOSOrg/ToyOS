@@ -18,7 +18,9 @@
 //! carries a copy of its place, so std refuses one under a place this process
 //! cannot duplicate, rather than spawning it directly. The supervisor starts a
 //! child only by a launch, so std refuses `under_supervisor` for a program no row
-//! declares and for a command carrying an extra slot. A chain alternating spawn
+//! declares and for a command carrying an extra slot; and a launch runs its row's
+//! own program, so std refuses a command naming its image under the supervisor or
+//! with a connector provided. A chain alternating spawn
 //! and launch — each link launches a shell, and the shell spawns the next link
 //! — stops where the kernel refuses a process more than `MAX_DEPTH` below
 //! the supervisor, and dies whole with its first link. And a `cat` a shell `detach`es
@@ -28,6 +30,7 @@
 
 use std::io::{BufRead, BufReader};
 use std::os::toyos::process::{ChildExt, CommandExt};
+use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 
 use toyos::endow::{self, Endowments, SVC_LABEL, SYSCAP_LABEL};
@@ -212,6 +215,8 @@ fn under_b_is_gone(grown: &Grown) {
 fn spawn_under(place: RawHandle) -> Result<Process, SyscallError> {
     let argv = format!("{SELF_PATH}\0c");
     let args = SpawnArgs {
+        path_ptr: SELF_PATH.as_ptr() as u64,
+        path_len: SELF_PATH.len() as u64,
         argv_ptr: argv.as_ptr() as u64,
         argv_len: argv.len() as u64,
         slot_map_ptr: 0,
@@ -295,25 +300,30 @@ fn a_place_without_dup_is_refused() {
     println!("  a place without DUP: the launch is refused, and nothing starts");
 }
 
-/// The supervisor is reached only by a launch: std refuses `under_supervisor` for what the
-/// launcher would not start under the supervisor, and starts nothing.
+/// The supervisor is reached only by a launch of its row's own program: std refuses
+/// `under_supervisor` or `provide` for what the launcher would not start, and starts nothing.
 fn the_supervisor_is_asked_only_by_a_launch() {
     let undeclared = Command::new(SELF_PATH).arg("c").under_supervisor().spawn();
-    refused(undeclared, "a program no row declares");
+    refused(undeclared, "under_supervisor for a program no row declares");
 
     let (_read, write) = toyos::pipe_pair().expect("a pipe of our own");
     let extra = Command::new(HELD).inherit_handle(5, write.as_handle().0).under_supervisor().spawn();
-    refused(extra, "a command carrying an extra slot");
-    println!("  the supervisor is asked only by a launch: the two others are refused");
+    refused(extra, "under_supervisor for a command carrying an extra slot");
+
+    let named = Command::new(HELD).image_from(Path::new(HELD)).under_supervisor().spawn();
+    refused(named, "under_supervisor for a command naming its image");
+    let provided = Command::new(HELD).image_from(Path::new(HELD)).provide("x", write.as_handle().0).spawn();
+    refused(provided, "provide for a command naming its image");
+    println!("  the supervisor is asked only by a launch of its row's own program: the others are refused");
 }
 
 fn refused(spawned: std::io::Result<Child>, what: &str) {
     match spawned {
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {}
-        Err(e) => panic!("under_supervisor for {what} was refused as {e:?}, not PermissionDenied"),
+        Err(e) => panic!("{what} was refused as {e:?}, not PermissionDenied"),
         Ok(mut child) => {
             let _ = child.kill();
-            panic!("under_supervisor for {what} started it");
+            panic!("{what} started it");
         }
     }
 }
