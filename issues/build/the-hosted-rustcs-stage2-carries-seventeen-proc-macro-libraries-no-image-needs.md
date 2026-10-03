@@ -17,7 +17,9 @@ stage2 beside it holds `librustc_driver` alone, 594,483,472 bytes, which
 `collect_hosted_rustc` (`src/build.rs`) puts every `lib/*.so` of that
 directory, and `bin/rustc`, into ROOT as built. `hosted-rustc` is `false` in
 `system.toml` and a config that sets it is refused until the compiler's
-licences are read (`build::shipped`), so no image carries them today.
+licences are read (`build::shipped`), so no image carries them today. #629
+deletes the function, the key and the refusal, and this paragraph goes in its
+merge.
 
 Owner: `issues/build/toyos-builds-itself.md`, M3.
 

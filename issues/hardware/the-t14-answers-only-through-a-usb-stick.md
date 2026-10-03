@@ -15,7 +15,8 @@ command and hands the machine back over the cable. The track is to make that
 cable the answer path.
 
 What is left is the harness running userland tests over ssh through a russh
-client, and a netboot spike in which the firmware fetches the loader over HTTP
+client, which `issues/hardware/the-t14-reboots-through-ubuntu-for-every-test.md`
+stages, and a netboot spike in which the firmware fetches the loader over HTTP
 so the stick leaves the boot path.
 
 Constraints a reader would otherwise pay to re-derive:
@@ -32,8 +33,8 @@ Constraints a reader would otherwise pay to re-derive:
 - **ssh is the bench's transport and a real feature**: sshd is built on russh
   and the harness's client is russh too. No host ssh binary, no fork.
 - **Addressing is DHCP with a hostname**, resolved through the router's DNS. The
-  T14's MAC is the same under ToyOS and Ubuntu, so the lease is the one `t14`
-  already resolves to. Wi-Fi is out — the AX210 needs a firmware image.
+  T14's MAC is the same under ToyOS and Ubuntu. Wi-Fi is out — the AX210 needs
+  a firmware image.
 - **QEMU's `virtio-net-pci-non-transitional` on `q35` advertises no PCIe
   function-level reset** — measured, not assumed: `pcidev`'s refusal on that
   ground reddened every netd registration at once. So a re-claim is made safe by

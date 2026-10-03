@@ -6,9 +6,9 @@ opened: 2026-09-28
 
 # The supervisor is host-tested and owns the machine's stop
 
-Held by the orchestrator. Stage 1 lands right after #592 and #631, before the
-latency work (`issues/kernel/toyos-beats-linuxs-latency-on-the-t14.md`; owner,
-2026-10-03).
+Held by the orchestrator. Stage 1 lands right after #592 and #631, of which
+#631 has landed, before the latency work
+(`issues/kernel/toyos-beats-linuxs-latency-on-the-t14.md`; owner, 2026-10-03).
 
 ## Stages
 

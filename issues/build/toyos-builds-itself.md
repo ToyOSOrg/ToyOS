@@ -139,3 +139,14 @@ M3's exit then waits on a linker in the guest
 (`issues/build/the-hosted-rustc-names-a-linker-toyos-does-not-have.md`), which
 toyos-ld is not: it refuses every executable with thread-local storage, so
 every std program.
+
+**Also owed, by milestone.**
+- M2: the host triple a ToyOS-hosted LLVM records
+  (`issues/build/a-toyos-hosted-llvm-is-configured-as-running-on-the-build-machine.md`,
+  whose other half, the configure inside ToyOS, is M5's).
+- M3: `issues/build/the-hosted-rustcs-stage2-carries-seventeen-proc-macro-libraries-no-image-needs.md`.
+- M4: cargo's file locks,
+  `issues/design-debt/std-file-lock-answers-ok-and-locks-nothing.md`.
+- M5: `issues/build/n2-does-not-compile-for-toyos.md`.
+- The tools of "To build", the first programs that start a script by its
+  path: `issues/build/nothing-launches-a-script-by-its-interpreter-line.md`.
