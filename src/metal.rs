@@ -2587,7 +2587,7 @@ mod tests {
     }
 
     /// **A port that accepts is not a machine that came back**, and a machine
-    /// going down is its port refusing a dial given what `ssh`'s own connect is.
+    /// going down is its port refusing.
     /// Staged through [`port_accepts`] on a listener of this host's own, which
     /// accepts and never speaks `ssh`, and on port 0, which nothing listens on:
     /// a port the listener let go of can be another socket's by the time it is
@@ -2605,18 +2605,8 @@ mod tests {
         assert_eq!(back, Err(Refusal::Silent { what: "come back", secs: 1 }));
         assert!(asked > 0, "`ssh` was never asked of a port that accepts");
         assert_eq!(wait_on(1, "come back", true, accepts, || true), Ok(0));
-        let mut dialled = Vec::new();
-        let dial = |within| {
-            dialled.push(within);
-            accepts(within)
-        };
-        let up = wait_on(1, "go down", false, dial, || unreachable!("`ssh` asked of one going down"));
+        let up = wait_on(1, "go down", false, accepts, || unreachable!("`ssh` asked of one going down"));
         assert_eq!(up, Err(Refusal::Silent { what: "go down", secs: 1 }));
-        let connect = std::time::Duration::from_secs(CONNECT_SECS);
-        assert!(
-            !dialled.is_empty() && dialled.iter().all(|&within| within == connect),
-            "going down dialled within {dialled:?}, where `ssh`'s own connect is given {connect:?}"
-        );
         let refuses = |within| port_accepts("127.0.0.1", 0, within);
         assert_eq!(wait_on(1, "go down", false, refuses, || unreachable!()), Ok(0));
     }

@@ -23,9 +23,8 @@ host's stream at 19.141 s. At 19.180 s netd said `9 frame(s) dropped with no
 transmit descriptor free`, and `reboot` came at 19.403 s. The host's
 `stream.log` is `kernel.log`'s first 217 lines, which is 21890 bytes, and
 15 × 1460 = 21900 falls inside line 218. The run of `main` at `7e151819`
-stopped at the same 217th line, with 595 ms between the admit and the stop
-(`issues/build/the-talking-boots-reboot-outruns-its-log-stream.md`). Both
-windows are shorter than the first retransmit timeout. The same count appears
+stopped at the same 217th line, with 595 ms between the admit and the stop.
+Both windows are shorter than the first retransmit timeout. The same count appears
 on the `lanswapcase` boot: 11, 18 and 23 frames dropped.
 
 ## Owner
