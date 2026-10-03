@@ -44,6 +44,10 @@ guess. Then build, then test on root `CLAUDE.md`'s tiers before anyone reviews:
 
 ## A fork
 
+A fork is for a crate, `rust/` or LLVM. A standalone C program has none: its ToyOS changes are patch
+files in a recipe in this repository, against an upstream archive pinned by hash, and only a delta
+too large to read as patches moves to a fork repository pinned by commit.
+
 To edit a fork, clone it beside the monorepo and list it in `.cargo/config.toml`. Fork clones are
 shared by every worktree: explicit paths, never `stash`, never switch a branch in one. A fork keeps
 one branch per upstream base; a fix is a commit appended to it, never a new branch. A fork depends

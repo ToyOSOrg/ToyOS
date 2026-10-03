@@ -13,7 +13,7 @@ use crate::bootlog::message;
 
 /// The records both arms are written against, spelled once.
 pub const MAC: &str = "netd: MAC ";
-pub const LEASE: &str = "netd: DHCP: lease ";
+const LEASE: &str = "netd: DHCP: lease ";
 pub const LINK_UP: &str = "netd: I219: link up at ";
 pub const READY: &str = "netd: ready, at most ";
 

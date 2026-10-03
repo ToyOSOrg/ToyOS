@@ -8,7 +8,6 @@ opened: 2026-09-25
 
 Owner ruling, 2026-09-25: the kernel is to be super small, super performant
 and safe. This track holds that, and supersedes the ordering of
-`issues/kernel/every-wait-in-this-kernel-is-a-spin.md`,
 `issues/kernel/every-driver-is-still-in-the-kernel.md` and
 `issues/hardware/a-disk-plugged-in-after-boot-is-bound-inside-a-scheduling-pass.md`,
 which stay as the evidence each stage closes.

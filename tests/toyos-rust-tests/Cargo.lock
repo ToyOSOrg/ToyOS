@@ -771,6 +771,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "inspect"
+version = "0.1.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+ "toyos-inspect",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2149,6 +2158,7 @@ version = "0.1.0"
 dependencies = [
  "blockd",
  "cpal",
+ "inspect",
  "libloading 0.8.9 (git+https://github.com/ToyOSOrg/rust_libloading?branch=toyos-sdk-0.12)",
  "memmap2",
  "rustls",

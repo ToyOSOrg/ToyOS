@@ -185,13 +185,14 @@ nothing about a batch another CPU is holding. The two honest shapes are
   makes "a killed process holds nothing" a fact rather than a race.
 
 The second is right and it is **not free-standing work**: it is the object
-layer's release protocol, and the track that owns it is
-`issues/kernel/every-wait-in-this-kernel-is-a-spin.md` — its one park site, its
-cancellable kill and its sleep lock between them decide what a hook released
-from this queue is allowed to do. The constraint that track's own reasoning
-derived, and which anything touching this queue must not lose: **none of the
-three drain sites can park, so no `on_zero_handles` hook may take a sleep lock
-at all.** It belongs with that track, not beside it.
+layer's release protocol, and no track owns it. What a hook released from this
+queue is allowed to do is decided by three things the tree has: the proof a
+park needs (`scheduler::Parkable`), a kill answered `Cancelled` at the park
+(`kernel/src/watch.rs`) and the sleep lock (`kernel/src/sleeplock.rs`). The
+constraint they leave, which `ZeroHandles::on_zero_handles`'s doc holds
+(`kernel/src/object/mod.rs`) and which anything touching this queue must not
+lose: **none of the three drain sites can park, so no `on_zero_handles` hook
+may take a sleep lock at all.**
 
 ### What "give the batch an owner" costs, worked out 2026-08-20
 
@@ -207,8 +208,8 @@ for the design — *"this is the one statement that makes 'a hook cannot run und
 a lock' structural"*. A `close_all` that hands its objects back for the caller
 to run re-opens, for that one call site, precisely the guard-outlives-the-drop
 trap the queue exists to make unwritable. Any owner-shaped fix has to pay for
-that property somewhere else rather than spend it, which is why this is the
-track's work and not a fix at the site.
+that property somewhere else rather than spend it, which is why this is a
+redesign of the release protocol and not a fix at the site.
 
 `kernel-loom` is not the instrument for it, and that is worth writing down so
 nobody re-derives it: the models compile the real kernel files with
@@ -216,38 +217,54 @@ nobody re-derives it: the models compile the real kernel files with
 `kobject!` set and every subsystem those hooks reach. A transliteration is what
 that crate's header exists to refuse.
 
-That is the cost on the `deferred` rows. The `immediate` rows have their own,
-and the section "What the sleep lock decided, 2026-08-20" is it.
+That is the cost on the `deferred` rows. The one `immediate` row that had a
+cost of its own was `File`, and the owner ruled on it.
 
-## What the sleep lock decided, 2026-08-20
+## What the owner ruled on `File`'s release, 2026-08-23
 
-That track's lock-conversion pass reached this and could not answer it, and why
-is worth recording here, because it changes what "give the batch an owner" has
-to cover.
+`File` is not on this queue. `object/mod.rs` makes it an `immediate` row —
+*"A file's flush and cache reference ride the last `Arc`"* — so its release is
+`OpenFileState::drop` (`kernel/src/object/file.rs`), which runs under
+`Lock<ProcessData>`. On 2026-08-20 that `Drop` took `vfs::lock()` and flushed
+a modified file to the device, and the lock conversions then planned made
+`vfs::VFS` a sleep lock, which no `Drop` could take: it cannot be handed a
+`Parkable`, and moving `File` to `deferred` swapped one site that may not park
+for another. The question went to the owner as "may a `Drop` impl park", in
+three shapes:
 
-**The kind that most needs a release site is `File`, and `File` is not on this
-queue.** `object/mod.rs` makes it an `immediate` row deliberately — *"A file's
-flush and its cache reference ride the last `Arc`"* — so its release is
-`OpenFileState::drop` (`kernel/src/object/file.rs:27-39`), which takes
-`vfs::lock()` and flushes. Once `vfs::VFS` is a sleep lock that `Drop` has no
-legal way to acquire it: a `Drop` impl cannot be handed a `Parkable`, and the
-two contexts it actually runs in — `ops::close` inside
-`process::with_process_data` (`arch/syscall.rs:1250`) and `ops::close_all`
-inside `teardown_resources`'s Phase 2 (`process.rs:1126`–`1149`) — hold a
-`Lock<ProcessData>` guard, so the baseline assertion refuses one level before
-the discipline rule does. `try_lock` is not an answer either: the holder it
-would lose to is a thread inside a device round trip, so the failure is routine,
-and what it loses is a modified file's write-back.
+1. **The write-back queue first.** A file's dirty pages outlive the handle
+   that dirtied them until write-back reports complete, and `Drop` releases a
+   cache reference and nothing else.
+2. **Let this one `Drop` park, and say so.** `ops::close` and
+   `teardown_resources` take the entry out and drop it once the `ProcessData`
+   guard is gone, and "a handle to a `File` may only be dropped from a context
+   that may park" becomes a rule nothing enforces.
+3. **Give the batch an owner**, the second shape under "What to do", **and
+   make `File` deferred**, which needs `drain_zero_handles`'s two scheduler
+   sites to stop running hooks that can park: a redesign of this queue rather
+   than a use of it.
 
-So the two constraints meet. **The hook queue may not park, and the row that
-would want to is not on the hook queue but in a `Drop` that also may not.**
-Moving `File` to `deferred` swaps one illegal site for another. The second shape
-above is still right for the `deferred` rows, and by itself it reaches neither
-`File` nor `close_all`.
+The ruling, in the words it was recorded in, where "wall 4" is this question:
 
-The track carries this as **wall 4**, with the three shapes the owner has to
-choose between. Nothing here should be built before that choice, because all
-three of them move this queue.
+> **Owner ruling on wall 4, 2026-08-23: shape 1 — the write-back queue chunk
+> lands first.** `vfs::VFS`'s conversion is sequenced behind the
+> write-back-queue chunk […]. That chunk's invariant — a file's dirty pages
+> outlive the handle that dirtied them until write-back reports complete —
+> leaves `OpenFileState::drop` releasing only a cache reference, which a
+> `Drop` may do, so no new rule ("a `Drop` may take a sleep lock") is created
+> and `scheduler::Parkable`'s header sentence stays true as written. Shapes 2
+> and 3 are declined precisely because they would create that rule or redesign
+> the zero-handle drain; shape 1 is the one that needs neither.
+
+The queue landed with #257 (`7ab9367b0`) and left the kernel in `80a1f1ceb`,
+when nothing the kernel flushed reached a device any more; the conversion it
+was sequenced before is planned by nothing. Today `OpenFileState::drop` calls
+`file_cache::release` and takes "the file cache's lock and no other", so
+`File` needs no release site that parks.
+
+Open with the owner: he declined shape 3 because it would "redesign the
+zero-handle drain", and whether that decline reaches "give the batch an owner"
+for the `deferred` rows is not ruled.
 
 ## A fourth witness: a device claim, and init waiting it out
 

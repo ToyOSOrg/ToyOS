@@ -99,8 +99,7 @@ const RUST_SKIP: &[&str] = &[
     // does not give: the `process_tree` metal row runs it on tests/proctreecase.
     "process_tree",
     // It asserts nothing at all: it holds a `tests/lanleasecase` boot open for
-    // twenty seconds so the host can reach this machine over the cable. On a
-    // shared boot it would be twenty seconds of nothing.
+    // twenty seconds. On a shared boot it would be twenty seconds of nothing.
     "lan_hold",
     // The same for `tests/lantalkcase`, held until the runner's bound is near
     // unless the host's `reboot` over ssh ends it first. `lan_talk` rides it.
@@ -219,7 +218,7 @@ const METAL: &[(&str, metal::Metal)] = &[
     ),
     (
         // The first byte: a lease from the bench's own router, read off the
-        // stick, while the host pings the address this machine had before.
+        // stick.
         "lan_lease_report",
         metal::Metal { arms: LANLEASECASE, judge: |b| lan::leased_on_metal(b[0]) },
     ),
@@ -763,8 +762,8 @@ const PROCTREECASE: &[metal::Arm] =
 
 /// netd in front of the T14's I219 with its lease probe armed: netd's exit code
 /// is the lease's verdict, read out of the kernel's own `exit:` record, and its
-/// report is on the log volume. It names the I219 for the loop to ping over the
-/// cable, as [`LANTALKCASE`] does.
+/// report is on the log volume. It names the I219, so the loop refuses a cable
+/// that is out before it flashes, as [`LANTALKCASE`] does.
 const LANLEASECASE: &[metal::Arm] = &[metal::Arm {
     nic: Some(lan::NIC),
     ..metal::once(lan::LEASE_BOOT, lan::LEASE_CONFIG, &[], lan::JOBS)
@@ -772,8 +771,7 @@ const LANLEASECASE: &[metal::Arm] = &[metal::Arm {
 
 /// The cable's boot, netd in front of the T14's I219, which the host talks to
 /// over that cable: the loop reads the log it serves under its name, pings it,
-/// runs a command on it and tells it to reboot. It names the PCI function, so
-/// the loop also pings the address it held under the operating system before.
+/// runs a command on it and tells it to reboot.
 const LANTALKCASE: &[metal::Arm] = &[metal::Arm {
     talk: true,
     nic: Some(lan::NIC),

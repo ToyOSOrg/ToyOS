@@ -14,6 +14,8 @@ mod checks {
     mod audio_checks;
     #[path = "clock.rs"]
     mod clock_checks;
+    #[path = "lan.rs"]
+    mod lan_checks;
     #[path = "metal.rs"]
     mod metal_checks;
     #[path = "qemu.rs"]
@@ -791,6 +793,11 @@ mod checks {
     #[test]
     fn metal_usb_judge() -> Result<(), String> {
         usb_checks::transport_break_verdict()
+    }
+
+    #[test]
+    fn metal_lease_judged_is_this_boots_own() {
+        lan_checks::the_lease_judged_is_this_boots_own();
     }
 
     #[test]

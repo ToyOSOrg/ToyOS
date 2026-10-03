@@ -37,3 +37,15 @@ switch (the scheduler's own baselines needed it): before that the count drifted,
 so a lock drop inside a syscall reached zero at random and preempted at random.
 The behaviour is now deterministic, and deterministically weaker than the model
 assumes.
+
+Owner: `issues/kernel/toyos-beats-linuxs-latency-on-the-t14.md`, whose second
+step is syscalls running with interrupts on (owner, 2026-10-03).
+
+**Exit**, on the T14: the longest interrupts-off window the `mask_windows` row
+reads under its load (`herd irqs_off_ns=`, printed by `windows_on_metal` in
+`tests/toyos.rs`) is no longer than the longest lateness of the timer's
+interrupt in Linux's reading of this machine, which that track keeps: a masked
+window makes a timer's interrupt late by at most its own length. No figure is
+set here. Which of Linux's figures is the bar is that track's open question,
+and what the row reads today, and which syscalls those windows are, is in
+`issues/hardware/xhci-waits-are-spins.md`, "On the T14".
