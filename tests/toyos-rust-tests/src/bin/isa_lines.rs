@@ -39,10 +39,11 @@ const STATUS: u16 = 0x64;
 const OBF: u8 = 1 << 0;
 const IBF: u8 = 1 << 1;
 
-/// The controller's configuration byte: its keyboard interrupt, and the bit
-/// that stops the keyboard's clock.
+/// The controller's configuration byte: its keyboard interrupt, and the bits
+/// that stop the keyboard's clock and the aux port's.
 const CFG_KEYBOARD_IRQ: u8 = 1 << 0;
 const CFG_KEYBOARD_CLOCK_OFF: u8 = 1 << 4;
+const CFG_AUX_CLOCK_OFF: u8 = 1 << 5;
 
 /// The keyboard's enable-scanning command, and its acknowledgement.
 const ENABLE_SCANNING: u8 = 0xF4;
@@ -170,13 +171,14 @@ fn device(claim: Device) {
     bind(&claim);
     drain();
     // Read the configuration byte, then write it back with the keyboard's line
-    // on and its clock running (i8042: 0x20 reads it, 0x60 writes it, 0xAE
-    // enables the keyboard's port).
+    // on and its clock running, and the aux port's clock stopped so that every
+    // byte from here on is the keyboard's (i8042: 0x20 reads it, 0x60 writes
+    // it, 0xAE enables the keyboard's port).
     command(0x20);
     wait_status("answered its configuration", |s| s & OBF != 0);
     let config = inb(DATA);
     command(0x60);
-    data((config | CFG_KEYBOARD_IRQ) & !CFG_KEYBOARD_CLOCK_OFF);
+    data((config | CFG_KEYBOARD_IRQ | CFG_AUX_CLOCK_OFF) & !CFG_KEYBOARD_CLOCK_OFF);
     command(0xAE);
     drain();
     // Where the controller came with its keyboard interrupt on, the
