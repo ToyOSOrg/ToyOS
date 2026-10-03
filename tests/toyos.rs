@@ -1426,7 +1426,8 @@ const VIRT_CPUS: u32 = 8;
 
 /// The windows on AArch64: `tests/virtsmpcase` on [`VIRT_CPUS`] CPUs of a
 /// `mask-windows` kernel, whose every hook checks the state it finds, judged
-/// once the case's job `unmap_touch` has ended.
+/// on the whole console once the case's job `unmap_touch` has ended and its
+/// job list has powered the machine off.
 fn virt_mask_windows(profile: qemu::Profile) -> Result<(), String> {
     let mut qemu = boot_virt_smp(BootOptions {
         profile,
@@ -1434,7 +1435,11 @@ fn virt_mask_windows(profile: qemu::Profile) -> Result<(), String> {
         kernel_features: toyos_build::build::MASK_WINDOWS_KERNEL,
         ..Default::default()
     });
-    mask_windows(&judge_virt_job(&mut qemu, "unmap_touch", UNMAP_TOUCH_SAID)?, VIRT_CPUS)
+    let mut serial = judge_virt_job(&mut qemu, "unmap_touch", UNMAP_TOUCH_SAID)?;
+    // To QEMU's exit, because the drain that took the job's end can stop between a census and its windows.
+    await_marker(&mut qemu, &mut serial, power::SHUTTING_DOWN, "the boot's last word")?;
+    serial.push_str(&qemu.await_exit(qemu.budget(qemu::GUEST_QUIET))?);
+    mask_windows(&serial, VIRT_CPUS)
 }
 
 /// Boot `tests/virtsmpcase` as `options` say.
