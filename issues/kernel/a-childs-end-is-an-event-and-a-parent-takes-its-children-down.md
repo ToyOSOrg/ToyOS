@@ -133,7 +133,7 @@ directory is `issues/isolation/every-program-sees-only-the-files-it-was-given.md
    the notice once one is handled, ignored or blocked: an ignored reason is
    dropped and an unhandled one ends the process with exit code 128 plus the
    signal's number. `kill` with one of the three is a quit with that reason.
-   *Exit*: host — `toyos-proclife`'s interleavings of a notice's read racing a
+   *Exit*: host — `kernel::proclife`'s interleavings of a notice's read racing a
    second quit kill only where the read comes second; of a spawn racing a quit
    on its spawner leave each child holding the reason once or started after the
    read; of a quit on a process that never watched leave every notice below it

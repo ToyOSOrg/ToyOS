@@ -90,9 +90,8 @@ impl Machine for KernelHw {
         // timer, which is stopped — and then held in the kernel takes no timer
         // interrupt at all. `crate::deadline`'s poll and `crate::hardlockup`'s
         // sample both rest on some CPU taking one. Arming earlier than the
-        // scheduler planned is a spurious pass and never a missed deadline
-        // (`kernel::sched::timer::TimerPlan`), and the next pass replaces it
-        // either way.
+        // scheduler planned is a spurious pass and never a missed deadline,
+        // and the next pass replaces it either way.
         //
         // Asked, because it is only those two that need it: a boot under no
         // bound pays a timer read and two writes per wake for nothing.

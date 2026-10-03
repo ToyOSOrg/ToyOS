@@ -670,7 +670,7 @@ impl IdleProof {
 }
 
 
-/// Every process by pid, and the pids not yet issued (`kernel::proclife::pids`).
+/// Every process by pid, and the pids not yet issued.
 pub struct ProcessTable {
     entries: crate::hasher::HashMap<Pid, ProcessEntry>,
     pids: kernel::proclife::Pids,

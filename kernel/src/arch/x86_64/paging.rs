@@ -292,7 +292,7 @@ impl Cr3 {
 
     /// Sets NOFLUSH when PCID is active — sound only because a user tag is owned:
     /// no other live space holds it, and a reused one was flushed from every CPU
-    /// before this space took it (`kernel::pcid`).
+    /// before this space took it.
     /// # Safety
     /// The underlying page tables must be valid and live.
     pub unsafe fn activate(self) {

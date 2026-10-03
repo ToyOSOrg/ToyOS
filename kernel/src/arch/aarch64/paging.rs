@@ -279,7 +279,7 @@ impl Root {
     }
 
     /// No invalidation: the ASID is this space's alone, and a returned one was
-    /// dropped from every CPU before it was issued again (`kernel::pcid`).
+    /// dropped from every CPU before it was issued again.
     /// # Safety
     /// The underlying page tables must be valid and live.
     pub unsafe fn activate(self) {
