@@ -3,7 +3,7 @@
 //! Every DMA address lives in the descriptor tables, built once at bind from
 //! kernel-allocated offsets; after bind the driver's whole vocabulary is an
 //! avail-ring index and a doorbell write. Stream selection, format and timing
-//! are soundd's, not this driver's.
+//! are soundserver's, not this driver's.
 //!
 //! Structure layouts and command codes follow VirtIO 1.2 §5.14.
 
@@ -116,7 +116,7 @@ pub fn isr_complete() {
 const RECORD_RING_CAP: u32 = 16;
 
 /// SPSC: producer is the MSI-X handler (single CPU, IF=0); consumer holds [`CONTROLLER`].
-/// One record per interrupt, never accumulated — a folded mask would misreport lateness to soundd's DLL.
+/// One record per interrupt, never accumulated — a folded mask would misreport lateness to soundserver's DLL.
 struct RecordRing {
     slots: [UnsafeCell<AudioCompletionRecord>; RECORD_RING_CAP as usize],
     head: AtomicU32,

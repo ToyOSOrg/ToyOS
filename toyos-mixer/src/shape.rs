@@ -7,11 +7,11 @@
 //! assertion in the mix loop at a client's choosing rather than a refusal at
 //! open. That is why the sizes are here and checked on the host.
 
-/// Of a pipeline's periods, how many soundd keeps in reserve rather than
+/// Of a pipeline's periods, how many soundserver keeps in reserve rather than
 /// spending on a client that is still filling.
 ///
 /// Policy, not physics, with the same standing as the kernel's `MAX_USER_STR`:
-/// of the shipped pipeline's 8 periods, soundd waits on a client for at most 3
+/// of the shipped pipeline's 8 periods, soundserver waits on a client for at most 3
 /// and always keeps 5 unplayed. It cannot be derived from worst-case wake
 /// lateness — the recorded worst exceeds two whole pipelines, so no floor
 /// inside the pipeline covers it. Move it only with a full re-baseline.
@@ -38,16 +38,16 @@ pub const MAX_CLIENT_RATE: u32 = 192_000;
 /// says what to do instead: *on a pipeline of five or fewer buffers the
 /// deferral policy is disabled and every free buffer is mixed immediately*. A
 /// reserve that is the whole pipeline is not a reserve, and mixing at once is
-/// what soundd does when it cannot afford to wait.
+/// what soundserver does when it cannot afford to wait.
 pub fn deferral_floor_nanos(num_buffers: usize, period_nanos: u64) -> Option<u64> {
     (num_buffers > DEFERRAL_RESERVE).then(|| DEFERRAL_RESERVE as u64 * period_nanos)
 }
 
-/// A device shape soundd cannot render a period into.
+/// A device shape soundserver cannot render a period into.
 ///
 /// Every arm is a constraint the mix loop's own arithmetic imposes, named where
 /// it is imposed. A shape that trips one is refused by name and the machine
-/// gets the null sink: soundd always runs and always
+/// gets the null sink: soundserver always runs and always
 /// accepts streams, and it does not except itself from that when the surprise
 /// is a device rather than an absence. Silence a client can play into beats a
 /// dead daemon whose every connect is refused for the machine's lifetime.
@@ -92,7 +92,7 @@ impl core::fmt::Display for Shape {
     }
 }
 
-/// The frames in one device period, or why soundd cannot serve this device.
+/// The frames in one device period, or why soundserver cannot serve this device.
 ///
 /// The arithmetic that could fault lives inside the check, so no caller can
 /// perform it before asking.

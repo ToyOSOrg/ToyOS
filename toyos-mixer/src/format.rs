@@ -179,7 +179,7 @@ mod tests {
     /// replaced over its entire domain.**
     ///
     /// `core` has no `f32::round`, so [`round_ties_away`] is ours — and a
-    /// quantizer that rounds differently from the one soundd shipped is a
+    /// quantizer that rounds differently from the one soundserver shipped is a
     /// change to what a speaker plays. All 2^32 bit patterns are walked, which
     /// is the whole input space and not a sample of it: at the quantizer, where
     /// the answer is the `i16` a device takes, the two agree at every single

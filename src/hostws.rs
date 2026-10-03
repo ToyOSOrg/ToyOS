@@ -187,8 +187,8 @@ fn unclaimed(members: &BTreeSet<String>, found: &BTreeSet<String>) -> Vec<String
 /// The host workspace's own, plus those of the workspaces it excludes: a
 /// workspace excluded from this one is still a workspace, and its members still
 /// have no target directory of their own. `userland/` is the one that matters —
-/// `sshd` and `calc` are members of it, and `host-tests.yml` cached
-/// `userland/sshd/target`, a directory that has never existed.
+/// `sshserver` and `calc` are members of it, and `host-tests.yml` cached
+/// `userland/sshserver/target`, a directory that has never existed.
 #[cfg(test)]
 fn every_workspace_member(root: &Path) -> BTreeSet<String> {
     let mut all: BTreeSet<String> = members(root).into_iter().filter(|m| m != ".").collect();
@@ -425,7 +425,7 @@ mod tests {
     ///
     /// Every workspace in the tree, not just this one: the first thing this
     /// found after `userland/doom/build.rs` was `host-tests.yml` caching
-    /// `userland/sshd/target`, which has never been a directory — `sshd` is a
+    /// `userland/sshserver/target`, which has never been a directory — `sshserver` is a
     /// member of `userland/`'s workspace and builds into `userland/target`. A
     /// cache path that matches nothing fails silently and forever, which is why
     /// it survived.
@@ -489,10 +489,10 @@ mod tests {
         assert!(dead_member_target_paths(&members, "userland/target").is_empty());
         // A member of the userland workspace, which is the real find above.
         let with_userland: BTreeSet<String> =
-            members.union(&["userland/sshd".to_string()].into()).cloned().collect();
+            members.union(&["userland/sshserver".to_string()].into()).cloned().collect();
         assert_eq!(
-            dead_member_target_paths(&with_userland, "            userland/sshd/target\n"),
-            ["userland/sshd/target"],
+            dead_member_target_paths(&with_userland, "            userland/sshserver/target\n"),
+            ["userland/sshserver/target"],
         );
         // And the root's own `target` is where members build *to*.
         assert!(dead_member_target_paths(&members, "root.join(\"target\")").is_empty());

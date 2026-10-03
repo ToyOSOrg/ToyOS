@@ -15,7 +15,7 @@
 //! or by an alias it leads to, are read (RFC 2181 §5.4.1), so a reply cannot
 //! plant an address for a name it was not asked about.
 //!
-//! **IPv4 only.** `A` is the one type asked for, because the stack under netd
+//! **IPv4 only.** `A` is the one type asked for, because the stack under netstack
 //! is built with IPv4 alone and an `AAAA` answer would name an address nothing
 //! on this machine can reach.
 //!

@@ -5,7 +5,7 @@
 //! [`ring`]): its stdout and stderr, and what it says with [`say!`](crate::say),
 //! [`warn!`](crate::warn) and [`error!`](crate::error), each stamped with its
 //! time, severity and thread as it is written ([`stdio`]). Whose lines they are is decided where the ring was made:
-//! `/system/bin/init` names each ring to `/system/bin/logd`, and nothing a
+//! `/system/bin/supervisor` names each ring to `/system/bin/logkeeper`, and nothing a
 //! program writes can change the name.
 //!
 //! **The kernel's records** are read with [`LogTail`]. The kernel keeps no
@@ -65,7 +65,7 @@ use crate::AsHandle;
 ///
 /// A fresh tail starts at the oldest record every shard still holds, which is
 /// the whole boot on a machine that has not logged 512 records on any CPU yet —
-/// so `logd` starting late still writes this boot's log from its first
+/// so `logkeeper` starting late still writes this boot's log from its first
 /// line.
 pub struct LogTail {
     cursor: LogCursor,

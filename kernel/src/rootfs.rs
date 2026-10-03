@@ -25,9 +25,9 @@ use crate::sync::Lock;
 /// The unit ROOT's filesystem is written in, which is the page.
 const BLOCK: usize = crate::mm::PAGE_SIZE as usize;
 
-/// The record init's spawn is reported on, followed by how many storage
+/// The record the supervisor's spawn is reported on, followed by how many storage
 /// commands the boot had issued by then: zero is the claim.
-pub const INIT_WITHOUT_A_DISK: &str = "boot: init spawned with ROOT from memory; storage commands before it:";
+pub const SUPERVISOR_WITHOUT_A_DISK: &str = "boot: the supervisor spawned with ROOT from memory; storage commands before it:";
 
 /// The record a ROOT mounted off the loader's image is reported on.
 pub const MOUNTED_FROM_MEMORY: &str = "root: mounted read-only from memory at";
@@ -178,7 +178,7 @@ pub fn hold_source() {
                 .map_err(|()| "it is no span a view can hold")
         }
         // Every disk this kernel drives answered and lacks it: a disk a process
-        // drives, NVMe's under blockd, is never asked.
+        // drives, NVMe's under diskserver, is never asked.
         Ok(None) if sought.silent.is_empty() => Err("it is on no disk this kernel drives"),
         Ok(None) => Err("it is on no disk that answered"),
         Err(Unnamed::Ambiguous) => Err("it is carried twice"),

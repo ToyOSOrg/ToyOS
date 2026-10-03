@@ -56,7 +56,7 @@ pub fn append_planar(decoded: &[f32], client_channels: usize, accum: &mut [Vec<f
                 accum[0].push((decoded[frame * 2] + decoded[frame * 2 + 1]) * 0.5);
             }
         }
-        (c, d) => panic!("soundd: unsupported channel conversion {c}→{d}"),
+        (c, d) => panic!("soundserver: unsupported channel conversion {c}→{d}"),
     }
 }
 
@@ -81,7 +81,7 @@ mod tests {
     use alloc::vec;
 
     /// A mono client on a stereo device is centred, which means identical
-    /// samples and not a half-power pan: soundd has no panning, and a channel
+    /// samples and not a half-power pan: soundserver has no panning, and a channel
     /// that differed from its twin by a rounding step would be an image nobody
     /// asked for.
     #[test]

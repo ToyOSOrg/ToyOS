@@ -38,7 +38,7 @@ pub const MAX_LOG_SHARDS: usize = 8;
 /// **Four because four have writers and readers.** The kernel writes `Info`
 /// (`log!`) and `Alert` (`alert!`); a program's stdout is `Info` and its stderr
 /// `Error`, and its own lines choose. The panel paints `Error` and above red;
-/// `/system/bin/logd` names every one above `Info` in the line, and makes the
+/// `/system/bin/logkeeper` names every one above `Info` in the line, and makes the
 /// volume durable at `Alert` rather than on its interval.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
@@ -233,10 +233,10 @@ impl core::fmt::Display for Tagged<'_> {
 }
 
 /// One implementation of a rendered line, so the kernel's serial sink, the
-/// panel, `logd` and any diagnostic tool produce byte-identical text.
+/// panel, `logkeeper` and any diagnostic tool produce byte-identical text.
 ///
 /// It renders the *body* — timestamp, origin and message — and no prefix of its
-/// own, because the three callers disagree about the prefix on purpose: `logd`
+/// own, because the three callers disagree about the prefix on purpose: `logkeeper`
 /// writes a wall clock into `/log`, the panel writes a monotonic offset into 80
 /// columns, and both are the same record.
 impl core::fmt::Display for LogRecord {
@@ -248,7 +248,7 @@ impl core::fmt::Display for LogRecord {
 /// Per-reader state. **The kernel holds none.**
 ///
 /// No object, no handle lifecycle, no cursor to leak or go stale, and a second
-/// reader costs nothing. The stream is not consumed either: `logd` and a
+/// reader costs nothing. The stream is not consumed either: `logkeeper` and a
 /// `log-follow` tool coexist with no coordination.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -373,7 +373,7 @@ mod tests {
 
     /// **`len` came across the syscall boundary**, so a record claiming more
     /// message than a record can hold answers with what it has rather than
-    /// panicking a reader. `logd` is userland and this is its input too.
+    /// panicking a reader. `logkeeper` is userland and this is its input too.
     #[test]
     fn a_length_past_the_bound_is_clamped_and_not_a_panic() {
         let mut r = record("abc");

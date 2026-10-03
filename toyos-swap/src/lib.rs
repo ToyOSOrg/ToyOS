@@ -1,30 +1,30 @@
 //! Replacing a running service's binary: every word `/system/bin/swap`,
-//! `/system/bin/init` and the host say about it, and every decision init makes
+//! `/system/bin/supervisor` and the host say about it, and every decision the supervisor makes
 //! about one. Pure.
 //!
-//! **A swap is asked by `/system/bin/swap` and done by init, and nothing else
-//! can do either.** `swap` is an ordinary program — `ssh <machine> swap netd <sha256>
-//! <length> < netd` runs it over a plain `exec` channel, for a login sshd has already
+//! **A swap is asked by `/system/bin/swap` and done by the supervisor, and nothing else
+//! can do either.** `swap` is an ordinary program — `ssh <machine> swap netstack <sha256>
+//! <length> < netstack` runs it over a plain `exec` channel, for a login sshserver has already
 //! authenticated — and it stages the bytes it was given under [`STAGING`] and
-//! asks init over the [`PORT`] init serves, which the build gate lets no
-//! program but [`HOLDER`] receive. init is the only process holding the system
+//! asks the supervisor over the [`PORT`] the supervisor serves, which the build gate lets no
+//! program but [`HOLDER`] receive. The supervisor is the only process holding the system
 //! capability, so it is the only one that can stop a service, give its device
 //! claims back and start it again holding exactly its manifest row.
 //!
 //! **The order is fixed and every refusal leaves the old service running.**
-//! init reads the staged file, holds its bytes against the requester's
+//! the supervisor reads the staged file, holds its bytes against the requester's
 //! [`Digest`] ([`verify`]), writes them to the [`installed_path`] — a
 //! temporary name and one rename, so the place a service is started from is
 //! never half-written — answers [`MSG_ACCEPTED`], and waits for the requester
 //! to hang up, at most [`HANGUP_MS`]. `swap` hangs up once its caller has closed
 //! its input, or [`ANSWER_MS`] after its answer — the close is the caller's
 //! proof it has the answer: the service being swapped may be
-//! the one carrying it, and is not stopped before it has arrived. Then init
+//! the one carrying it, and is not stopped before it has arrived. Then the supervisor
 //! stops the old
 //! process, starts the new binary, and holds it on probation for
 //! [`PROBATION_MS`]. A binary that does not spawn, is refused a device the
 //! process it replaces held, or ends inside probation, is [`Word::Failed`], and
-//! init starts the binary it replaced again — owed the same devices.
+//! the supervisor starts the binary it replaced again — owed the same devices.
 //!
 //! **A swap lasts one boot.** The root volume is the image and is read-only;
 //! a replaced binary lives in the per-boot tmpfs and a reboot runs the image's
@@ -35,7 +35,7 @@
 
 use sha2::{Digest as _, Sha256};
 
-/// The name init serves swap requests on — an `init-serve` record like
+/// The name the supervisor serves swap requests on — a `supervisor-serve` record like
 /// `launcher`.
 pub const PORT: &str = "swap";
 
@@ -52,11 +52,11 @@ pub const HOLDER: &str = "swap";
 /// Where a swap's bytes are staged and where a swapped binary is started from.
 pub const STAGING: &str = "/tmp/swap";
 
-/// The largest binary a swap carries. A bound on the memory `swap` and init
+/// The largest binary a swap carries. A bound on the memory `swap` and the supervisor
 /// each spend on one request; a service binary in this tree is a few megabytes.
 pub const MAX_BINARY_BYTES: u64 = 64 * 1024 * 1024;
 
-/// How long a new binary must keep running before init calls it in service.
+/// How long a new binary must keep running before the supervisor calls it in service.
 ///
 /// **Policy, and what "fails to start" means here**: a service in this tree has
 /// no readiness message, so a binary that ends inside this window is one that
@@ -65,10 +65,10 @@ pub const PROBATION_MS: u64 = 5_000;
 
 /// How long `swap` waits for its caller to close its input once it has
 /// answered — the caller's proof that it has the answer, and its word that the
-/// swap may go — before it hangs up on init anyway.
+/// swap may go — before it hangs up on the supervisor anyway.
 pub const ANSWER_MS: u64 = 2_000;
 
-/// How long init waits for the requester to hang up once it has answered
+/// How long the supervisor waits for the requester to hang up once it has answered
 /// [`MSG_ACCEPTED`]. The hang-up is the go; this bounds a requester that never
 /// sends one, and is wider than [`ANSWER_MS`] so a requester that waited for
 /// its client is never overtaken.
@@ -76,17 +76,17 @@ pub const HANGUP_MS: u64 = 2 * ANSWER_MS;
 
 const _: () = assert!(HANGUP_MS > ANSWER_MS);
 
-/// The request, `swap` to init: [`Request::encode`]'s bytes.
+/// The request, `swap` to the supervisor: [`Request::encode`]'s bytes.
 pub const MSG_SWAP: u32 = 1;
-/// init's answer: verified and installed; the payload is the installed path.
+/// The supervisor's answer: verified and installed; the payload is the installed path.
 pub const MSG_ACCEPTED: u32 = 2;
-/// init's answer: refused, and the old service untouched; the payload is why.
+/// The supervisor's answer: refused, and the old service untouched; the payload is why.
 pub const MSG_REFUSED: u32 = 3;
 
 /// A SHA-256 digest.
 pub type Digest = [u8; 32];
 
-/// The digest of `bytes`: the one definition the host, `swap` and init share.
+/// The digest of `bytes`: the one definition the host, `swap` and the supervisor share.
 pub fn digest(bytes: &[u8]) -> Digest {
     Sha256::digest(bytes).into()
 }
@@ -122,9 +122,9 @@ pub fn is_service_name(name: &str) -> bool {
 pub enum Refusal {
     /// The request does not decode.
     Malformed(String),
-    /// Nothing init started at boot has this name.
+    /// Nothing the supervisor started at boot has this name.
     NotAService(String),
-    /// init started it, and it has ended: its port is closed for good.
+    /// The supervisor started it, and it has ended: its port is closed for good.
     NotRunning(String),
     /// Another swap has not finished.
     Busy(String),
@@ -136,7 +136,7 @@ pub enum Refusal {
     Mismatch { got: Digest, want: Digest },
     /// The service already runs this binary.
     AlreadyRuns(String),
-    /// init could not put the verified bytes where a service is started from.
+    /// The supervisor could not put the verified bytes where a service is started from.
     Install { path: String, why: String },
     /// This process was given no [`PORT`]: the image does not let it swap.
     NoAuthority,
@@ -146,7 +146,7 @@ impl core::fmt::Display for Refusal {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Malformed(why) => write!(f, "the request is malformed: {why}"),
-            Self::NotAService(name) => write!(f, "{name} is no service init started at boot"),
+            Self::NotAService(name) => write!(f, "{name} is no service the supervisor started at boot"),
             Self::NotRunning(name) => write!(f, "{name} has ended and its port is closed"),
             Self::Busy(name) => write!(f, "a swap of {name} has not finished"),
             Self::NotStaged(path) => write!(f, "{path:?} is not a staged binary"),
@@ -201,7 +201,7 @@ pub fn installed_dir(digest: &Digest) -> String {
     format!("{STAGING}/{}", hex(digest))
 }
 
-/// Whether `path` is a binary a swap installed, which is what init may delete
+/// Whether `path` is a binary a swap installed, which is what the supervisor may delete
 /// once nothing runs it. A path in the image never is.
 pub fn is_installed(path: &str) -> bool {
     installed_digest(path).is_some()
@@ -218,7 +218,7 @@ pub fn installed_digest(path: &str) -> Option<Digest> {
     parse_hex(dir)
 }
 
-/// The request `swap` sends init: the service, the staged path and the digest the
+/// The request `swap` sends the supervisor: the service, the staged path and the digest the
 /// client named.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
@@ -239,7 +239,7 @@ impl Request {
     }
 
     /// Everything in it is the requester's claim: a name that is not a service
-    /// name and a path that is not a staged one are refused here, before init
+    /// name and a path that is not a staged one are refused here, before the supervisor
     /// looks anything up or opens anything.
     pub fn decode(bytes: &[u8]) -> Result<Self, Refusal> {
         if bytes.len() < 32 {
@@ -262,8 +262,8 @@ impl Request {
     }
 }
 
-/// What init says about a swap, in the one line form every reader matches:
-/// `init: swap <service>: <word>: <detail>`.
+/// What the supervisor says about a swap, in the one line form every reader matches:
+/// `supervisor: swap <service>: <word>: <detail>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Word {
     Refused,
@@ -307,13 +307,13 @@ impl Word {
 }
 
 pub fn said(service: &str, word: Word, detail: &str) -> String {
-    format!("init: swap {service}: {}: {detail}", word.as_str())
+    format!("supervisor: swap {service}: {}: {detail}", word.as_str())
 }
 
-/// init's line about `service` inside `line` — a console line or a record in
+/// The supervisor's line about `service` inside `line` — a console line or a record in
 /// any of the forms the log renders one in — as `(word, detail)`.
 pub fn heard<'a>(line: &'a str, service: &str) -> Option<(Word, &'a str)> {
-    let head = format!("init: swap {service}: ");
+    let head = format!("supervisor: swap {service}: ");
     let (_, rest) = line.split_once(&head)?;
     let rest = rest.trim_end_matches(['\n', '\r']);
     WORDS.iter().find_map(|(word, spelled)| {
@@ -321,7 +321,7 @@ pub fn heard<'a>(line: &'a str, service: &str) -> Option<(Word, &'a str)> {
     })
 }
 
-/// What a swap came to, read off init's lines about it: the last final word
+/// What a swap came to, read off the supervisor's lines about it: the last final word
 /// among `lines`, or `None` while the swap is still going.
 pub fn outcome<'a>(lines: impl IntoIterator<Item = &'a str>, service: &str) -> Option<(Word, String)> {
     lines
@@ -360,15 +360,15 @@ mod tests {
     #[test]
     fn a_request_round_trips_and_a_path_it_did_not_stage_is_refused() {
         let request =
-            Request { service: "netd".into(), staged: staged_path("netd", 7), digest: digest(b"x") };
+            Request { service: "netstack".into(), staged: staged_path("netstack", 7), digest: digest(b"x") };
         assert_eq!(Request::decode(&request.encode()), Ok(request.clone()));
         for staged in [
-            "/system/bin/netd",
-            "/tmp/swap/incoming-netd-",
-            "/tmp/swap/incoming-netd-7/../../../system/bin/sh",
+            "/system/bin/netstack",
+            "/tmp/swap/incoming-netstack-",
+            "/tmp/swap/incoming-netstack-7/../../../system/bin/sh",
             "/tmp/swap/incoming-../x-7",
-            "/tmp/swap/incoming-netd-7x",
-            "/tmp/swapincoming-netd-7",
+            "/tmp/swap/incoming-netstack-7x",
+            "/tmp/swapincoming-netstack-7",
         ] {
             let bent = Request { staged: staged.into(), ..request.clone() };
             assert_eq!(
@@ -386,47 +386,47 @@ mod tests {
     /// the installed file carries the service's own name and nothing else.
     #[test]
     fn an_installed_binary_is_named_by_its_service_under_its_digest() {
-        let path = installed_path("netd", &digest(b"abc"));
-        assert_eq!(path, format!("/tmp/swap/{ABC}/netd"));
+        let path = installed_path("netstack", &digest(b"abc"));
+        assert_eq!(path, format!("/tmp/swap/{ABC}/netstack"));
         assert!(is_installed(&path));
         assert_eq!(installed_digest(&path), Some(digest(b"abc")));
-        assert!(!is_installed("/system/bin/netd"));
-        assert!(!is_installed(&staged_path("netd", 1)));
+        assert!(!is_installed("/system/bin/netstack"));
+        assert!(!is_installed(&staged_path("netstack", 1)));
         assert!(!is_staged(&path));
     }
 
     #[test]
-    fn inits_lines_are_heard_in_every_form_the_log_renders_them() {
-        let line = said("netd", Word::InService, "/tmp/swap/x/netd as pid 9");
-        assert_eq!(line, "init: swap netd: in service: /tmp/swap/x/netd as pid 9");
+    fn the_supervisors_lines_are_heard_in_every_form_the_log_renders_them() {
+        let line = said("netstack", Word::InService, "/tmp/swap/x/netstack as pid 9");
+        assert_eq!(line, "supervisor: swap netstack: in service: /tmp/swap/x/netstack as pid 9");
         for rendered in [
             format!("{line}\n"),
             format!("[2026-09-23 18:00:01 12.345 cpu1] @{line}\n"),
         ] {
             assert_eq!(
-                heard(&rendered, "netd"),
-                Some((Word::InService, "/tmp/swap/x/netd as pid 9")),
+                heard(&rendered, "netstack"),
+                Some((Word::InService, "/tmp/swap/x/netstack as pid 9")),
                 "{rendered:?}"
             );
         }
-        assert_eq!(heard(&line, "sshd"), None);
-        assert_eq!(heard("init: swap netd: bored: x", "netd"), None);
+        assert_eq!(heard(&line, "sshserver"), None);
+        assert_eq!(heard("supervisor: swap netstack: bored: x", "netstack"), None);
     }
 
     #[test]
     fn the_outcome_is_the_last_final_word() {
         let lines = [
-            said("netd", Word::Accepted, "a"),
-            said("netd", Word::Stopping, "b"),
-            said("netd", Word::Started, "c"),
+            said("netstack", Word::Accepted, "a"),
+            said("netstack", Word::Stopping, "b"),
+            said("netstack", Word::Started, "c"),
         ];
-        assert_eq!(outcome(lines.iter().map(String::as_str), "netd"), None);
+        assert_eq!(outcome(lines.iter().map(String::as_str), "netstack"), None);
         let mut more = lines.to_vec();
-        more.push(said("netd", Word::Failed, "d"));
-        more.push(said("netd", Word::Restored, "/system/bin/netd as pid 4"));
+        more.push(said("netstack", Word::Failed, "d"));
+        more.push(said("netstack", Word::Restored, "/system/bin/netstack as pid 4"));
         assert_eq!(
-            outcome(more.iter().map(String::as_str), "netd"),
-            Some((Word::Restored, "/system/bin/netd as pid 4".to_string()))
+            outcome(more.iter().map(String::as_str), "netstack"),
+            Some((Word::Restored, "/system/bin/netstack as pid 4".to_string()))
         );
         for word in [Word::Accepted, Word::Stopping, Word::Started, Word::Failed] {
             assert!(!word.is_final());

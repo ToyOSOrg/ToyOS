@@ -1,6 +1,6 @@
 //! Idle-suspend certification: on a boot where no audio client ever
-//! connects, soundd's CPU cost is exactly zero. Two sysinfo samples ~1s apart
-//! must show no cpu_ns movement on any soundd thread — a suspended soundd
+//! connects, soundserver's CPU cost is exactly zero. Two sysinfo samples ~1s apart
+//! must show no cpu_ns movement on any soundserver thread — a suspended soundserver
 //! holds no timer and takes no wakes, so any nonzero delta is the mix or
 //! control loop running without a reason.
 //!
@@ -8,7 +8,7 @@
 //! `Rights::ROSTER` on a `SysCap` — `tests/testcases` names `roster` on the
 //! test-runner row and every binary it spawns holds the duplicate. A capability
 //! this binary does not hold is a config fact and says so, rather than reading
-//! back zero soundd threads and calling that a suspended daemon.
+//! back zero soundserver threads and calling that a suspended daemon.
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::syscap::SysCap;
@@ -17,10 +17,10 @@ use toyos::system;
 const HEADER: usize = system::SYSINFO_HEADER_SIZE;
 const ENTRY: usize = system::SYSINFO_ENTRY_SIZE;
 
-/// Live cpu_ns per soundd thread. The mix thread reports under the process
-/// name ("soundd"), the control thread under its own ("soundd-ctrl");
+/// Live cpu_ns per soundserver thread. The mix thread reports under the process
+/// name ("soundserver"), the control thread under its own ("soundserver-ctrl");
 /// matching the prefix covers both.
-fn soundd_threads(cap: &SysCap) -> Vec<(String, u64)> {
+fn soundserver_threads(cap: &SysCap) -> Vec<(String, u64)> {
     let mut buf = vec![0u8; HEADER + ENTRY * 128];
     let n = cap.roster(&mut buf);
     assert!(n >= HEADER, "sysinfo failed");
@@ -30,7 +30,7 @@ fn soundd_threads(cap: &SysCap) -> Vec<(String, u64)> {
     while pos + ENTRY <= n {
         let name_bytes = &buf[pos + 32..pos + 60];
         let len = name_bytes.iter().position(|&b| b == 0).unwrap_or(28);
-        if name_bytes[..len].starts_with(b"soundd") {
+        if name_bytes[..len].starts_with(b"soundserver") {
             let name = String::from_utf8_lossy(&name_bytes[..len]).into_owned();
             let cpu_ns = u64::from_le_bytes(buf[pos + 24..pos + 32].try_into().unwrap());
             threads.push((name, cpu_ns));
@@ -44,25 +44,25 @@ fn main() {
     let cap: SysCap = Endowments::get()
         .take(SYSCAP_LABEL)
         .expect("test-runner endows every binary it spawns a system capability");
-    // soundd's control thread is spawned after the mix thread, so a roster
+    // soundserver's control thread is spawned after the mix thread, so a roster
     // read can land between the two; the measurement starts once both exist.
-    let mut before = soundd_threads(&cap);
+    let mut before = soundserver_threads(&cap);
     let mut waited_ms = 0u32;
     while before.len() < 2 && waited_ms < 5_000 {
         std::thread::sleep(std::time::Duration::from_millis(20));
         waited_ms += 20;
-        before = soundd_threads(&cap);
+        before = soundserver_threads(&cap);
     }
     assert!(
         before.len() >= 2,
-        "expected soundd's mix and control threads in sysinfo, found {} after {waited_ms}ms",
+        "expected soundserver's mix and control threads in sysinfo, found {} after {waited_ms}ms",
         before.len()
     );
     std::thread::sleep(std::time::Duration::from_millis(1000));
-    let after = soundd_threads(&cap);
+    let after = soundserver_threads(&cap);
     assert!(
         after.len() >= 2,
-        "soundd lost a thread mid-sample: found {} of the 2 the first sample saw \
+        "soundserver lost a thread mid-sample: found {} of the 2 the first sample saw \
          (before {before:?}, after {after:?})",
         after.len()
     );
@@ -70,9 +70,9 @@ fn main() {
     let total_after: u64 = after.iter().map(|(_, ns)| ns).sum();
     assert_eq!(
         total_after, total_before,
-        "soundd consumed {}ns of CPU across ~1s with no client — it is not suspended \
+        "soundserver consumed {}ns of CPU across ~1s with no client — it is not suspended \
          (per thread, before {before:?}, after {after:?})",
         total_after.saturating_sub(total_before)
     );
-    println!("soundd idle cpu delta: 0ns over ~1s");
+    println!("soundserver idle cpu delta: 0ns over ~1s");
 }

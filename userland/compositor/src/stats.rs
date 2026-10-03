@@ -1,7 +1,7 @@
 use window::Traffic;
 
 /// Counters for one reporting window, flushed from a composited frame and
-/// never otherwise: a compositor with nothing to draw says nothing, as soundd
+/// never otherwise: a compositor with nothing to draw says nothing, as soundserver
 /// says nothing with no clients.
 ///
 /// Here to be read off `/log/kernel.log` on a machine whose only other

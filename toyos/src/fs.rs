@@ -3,7 +3,7 @@
 //!
 //! **A directory capability is a connector in the program's namespace**, named
 //! [`CAPABILITY_PREFIX`] and the absolute directory it serves (`fs:/home`).
-//! init builds each program's set and tells the server which directory and
+//! The supervisor builds each program's set and tells the server which directory and
 //! which rights each of its ports serves; a program names a file only under a
 //! directory it holds, and the kernel's part is who holds which connector.
 //!
@@ -22,7 +22,7 @@
 //! copies what it reads out of it once and acts on the copy.
 //!
 //! **A server that ends is survivable and not invisible.** [`Dir`] connects
-//! again through the same connector — init keeps a file server's ports open
+//! again through the same connector — the supervisor keeps a file server's ports open
 //! across its restart — and counts its connections in a generation. A file id
 //! from an earlier generation names nothing on the new connection. Nothing
 //! here keeps a write the server acknowledged and never made durable: that is

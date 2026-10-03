@@ -1,6 +1,6 @@
 //! What an installed package under `/apps/<name>/` says about itself.
 //!
-//! `/system/bin/pkg` writes one of these and `/system/bin/init` reads it back
+//! `/system/bin/pkg` writes one of these and `/system/bin/supervisor` reads it back
 //! to resolve a launch, so the format lives beside [`crate::Manifest`] for the
 //! same reason: one renderer, one parser, one round-trip test.
 //!
@@ -122,7 +122,7 @@ pub const MAX_LISTED: usize = 16;
 /// The packages a launcher shows, given `/apps`'s listing as
 /// `(directory name, its manifest.toml)` pairs.
 ///
-/// **An entry appears only where init would agree to start it**, because a
+/// **An entry appears only where the supervisor would agree to start it**, because a
 /// button that does nothing is worse than no button.
 pub fn listed(entries: &[(String, String)]) -> Vec<Package> {
     let mut out: Vec<Package> = entries
@@ -236,7 +236,7 @@ mod tests {
     }
 
     #[test]
-    fn what_the_installer_writes_is_what_init_reads() {
+    fn what_the_installer_writes_is_what_the_supervisor_reads() {
         let rendered = sample().render().expect("render");
         assert_eq!(Package::parse(&rendered).expect("parse"), sample());
     }
@@ -246,9 +246,9 @@ mod tests {
     #[test]
     fn a_manifest_cannot_name_a_binary_outside_its_own_directory() {
         for program in [
-            "/system/bin/init",
+            "/system/bin/supervisor",
             "/apps/other/other",
-            "/apps/gbae/../../system/bin/init",
+            "/apps/gbae/../../system/bin/supervisor",
             "/apps/gbae/sub/x",
             "/apps/gbae/",
         ] {
@@ -290,7 +290,7 @@ mod tests {
         ] {
             let got = launch_path(typed, cwd);
             assert_eq!(got, want, "{typed:?} from {cwd:?}");
-            assert!(is_canonical(&got), "{typed:?} resolved to {got:?}, which init refuses");
+            assert!(is_canonical(&got), "{typed:?} resolved to {got:?}, which the supervisor refuses");
         }
         // A bare name is `PATH`'s, and that rule is left where it was.
         for bare in ["foo", "echo", "toybox"] {
@@ -316,9 +316,9 @@ mod tests {
         }
     }
 
-    /// The launcher shows what init would start, in a bounded list.
+    /// The launcher shows what the supervisor would start, in a bounded list.
     #[test]
-    fn a_listing_shows_only_what_init_would_start_and_never_more_than_the_bound() {
+    fn a_listing_shows_only_what_the_supervisor_would_start_and_never_more_than_the_bound() {
         let good = sample().render().unwrap();
         let entries = vec![
             ("zed".to_string(), good.replace("\"gbae\"", "\"zed\"").replace("gbae/", "zed/")),
@@ -344,10 +344,10 @@ mod tests {
     fn a_launch_path_names_one_package_or_none() {
         assert_eq!(package_of("/apps/gbae/gbae"), Some("gbae"));
         assert_eq!(package_of("/apps/gbae/bin/gbae"), Some("gbae"));
-        assert_eq!(package_of("/system/bin/init"), None);
+        assert_eq!(package_of("/system/bin/supervisor"), None);
         assert_eq!(package_of("/apps/gbae"), None);
         assert_eq!(package_of("/apps//gbae"), None);
-        assert_eq!(package_of("/apps/../system/bin/init"), None);
+        assert_eq!(package_of("/apps/../system/bin/supervisor"), None);
         assert_eq!(package_of(&format!("/apps/{}/x", "n".repeat(MAX_PROGRAM_NAME + 1))), None);
     }
 }

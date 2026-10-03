@@ -3,8 +3,8 @@
 //! Some things are reachable no other way — minting a device claim, entering
 //! the real-time band, listing every process in the machine, reading what the
 //! machine is made of, and taking its power away, off or back to firmware —
-//! and each is one bit on a handle to this. The kernel makes exactly one at boot, for `init`, so the set of
-//! processes that can ever do any of them is exactly what init endowed.
+//! and each is one bit on a handle to this. The kernel makes exactly one at boot, for the supervisor, so the set of
+//! processes that can ever do any of them is exactly what the supervisor endowed.
 
 use toyos_abi::handle::Rights;
 use toyos_abi::inventory::{RawRecord, Record, Undecodable};
@@ -19,7 +19,7 @@ impl SysCap {
     /// Mint the claim for a device class, as whichever typed wrapper the caller
     /// drives it through.
     ///
-    /// `NotFound` is a machine with no such device, which is a fact init logs
+    /// `NotFound` is a machine with no such device, which is a fact the supervisor logs
     /// and endows nothing for — not a failure. `AlreadyExists` is another
     /// process holding the class, which is a different fact and stays loud.
     pub fn claim<T: FromHandle>(&self, class: DeviceType) -> Result<T, SyscallError> {
@@ -144,7 +144,7 @@ impl SysCap {
 
     /// A second handle to this capability carrying **less**.
     ///
-    /// How init gives a program the RT band and nothing else: rights only
+    /// How the supervisor gives a program the RT band and nothing else: rights only
     /// shrink, so the dup can never mint a claim however the holder asks.
     pub fn narrowed(&self, rights: Rights) -> Result<Self, SyscallError> {
         syscall::dup_narrowed(self.0.raw(), rights).map(|h| Self(OwnedHandle(h)))

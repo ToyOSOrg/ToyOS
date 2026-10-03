@@ -429,7 +429,7 @@ impl XhciController {
             // CODE once answers it every time, and issuing anyway costs a full
             // Bulk-Only round trip plus a REQUEST SENSE — under `XHCI`, with
             // preemption off, on the device the log is going to — for every
-            // `logd` batch on a stick like the T14's.
+            // `logkeeper` batch on a stick like the T14's.
             if dev.no_write_cache {
                 return Ok(());
             }

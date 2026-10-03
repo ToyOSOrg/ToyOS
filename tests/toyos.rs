@@ -112,12 +112,12 @@ const RUST_SKIP: &[&str] = &[
     "mkdir_cap",
     // Audio is judged on the T14 and nowhere else: the `hda_client_stall`,
     // `hda_tone`, `audio_idle_suspend`, `shipped_client_departures` and
-    // `soundd_log_stall` metal rows run these.
+    // `soundserver_log_stall` metal rows run these.
     "hda_client_stall",
     "audio_tone",
     "audio_idle_suspend",
     "null_sink_client_exits",
-    "soundd_log_stall",
+    "soundserver_log_stall",
 ];
 
 /// Binaries a metal row or a guest test drives that the shared boot also runs
@@ -284,7 +284,7 @@ const METAL: &[(&str, metal::Metal)] = &[
     ),
     (
         // The shipped tone client, twice in series, plays to completion and
-        // exits 0, and soundd names how each left.
+        // exits 0, and soundserver names how each left.
         "shipped_client_departures",
         metal::Metal {
             arms: TESTCASES,
@@ -295,7 +295,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
-        // soundd with no client costs no CPU, before any client has connected.
+        // soundserver with no client costs no CPU, before any client has connected.
         "audio_idle_suspend",
         metal::Metal {
             arms: TESTCASES,
@@ -327,11 +327,11 @@ const METAL: &[(&str, metal::Metal)] = &[
     ),
     // ---- the audio boot of its own ----
     (
-        "soundd_log_stall",
+        "soundserver_log_stall",
         metal::Metal {
             arms: LOGSTALLCASE,
             judge: |b| {
-                b[0].job_passed("test_rs_soundd_log_stall")?;
+                b[0].job_passed("test_rs_soundserver_log_stall")?;
                 audio::log_stall_on_metal(&b[0].log())
             },
         },
@@ -555,7 +555,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
-        // The machine came back to `sshd`, which is what tells a reset from the
+        // The machine came back to `sshserver`, which is what tells a reset from the
         // S5 power-off the QEMU stop reason exists to catch — the driver
         // established it before this judge ran. What is left is the kernel's own
         // decode, and `0xcf9 <- 0x0f` is q35's register rather than this one's.
@@ -737,9 +737,9 @@ fn windows_load_exited() -> String {
     format!("{}{} pid=", toyos_build::bootlog::EXIT, toyos_build::bootlog::recorded_name(WINDOWS_LOAD))
 }
 
-/// A `logd` that leaves soundd's ring unread until the job says the tone played.
+/// A `logkeeper` that leaves soundserver's ring unread until the job says the tone played.
 const LOGSTALLCASE: &[metal::Arm] =
-    &[metal::once("logstallcase", "tests/logstallcase", &[], &["test_rs_soundd_log_stall"])];
+    &[metal::once("logstallcase", "tests/logstallcase", &[], &["test_rs_soundserver_log_stall"])];
 
 /// The two boots the reset ruling is judged on: the device boot for a reset
 /// with megabytes behind it, and `jobcase` for one with nothing.
@@ -760,7 +760,7 @@ const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/metalcase", &
 const PROCTREECASE: &[metal::Arm] =
     &[metal::once("proctreecase", "tests/proctreecase", &[], &["test_rs_process_tree"])];
 
-/// netd in front of the T14's I219 with its lease probe armed: netd's exit code
+/// netstack in front of the T14's I219 with its lease probe armed: netstack's exit code
 /// is the lease's verdict, read out of the kernel's own `exit:` record, and its
 /// report is on the log volume. It names the I219, so the loop refuses a cable
 /// that is out before it flashes, as [`LANTALKCASE`] does.
@@ -769,7 +769,7 @@ const LANLEASECASE: &[metal::Arm] = &[metal::Arm {
     ..metal::once(lan::LEASE_BOOT, lan::LEASE_CONFIG, &[], lan::JOBS)
 }];
 
-/// The cable's boot, netd in front of the T14's I219, which the host talks to
+/// The cable's boot, netstack in front of the T14's I219, which the host talks to
 /// over that cable: the loop reads the log it serves under its name, pings it,
 /// runs a command on it and tells it to reboot.
 const LANTALKCASE: &[metal::Arm] = &[metal::Arm {
@@ -2024,9 +2024,9 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
         "virt_user_mode" => {
             // The port's stage 4, under the EL2 profile whose
             // entry also writes what the drop leaves EL2 holding: the kernel's
-            // own tables, the GIC and the timer, and a process at EL0 — init,
+            // own tables, the GIC and the timer, and a process at EL0 — the supervisor,
             // whose every page arrives by a demand fault and whose spawn of
-            // `logd` is a syscall the kernel answered. Emulated, and not under
+            // `logkeeper` is a syscall the kernel answered. Emulated, and not under
             // HVF, which exposes no RNDR for the kernel's hash seed.
             let mut qemu = QemuInstance::boot_with_options(
                 test_config,
@@ -2038,7 +2038,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
                     ..Default::default()
                 },
             );
-            const SPAWNED: &str = "spawn: /system/bin/logd pid=";
+            const SPAWNED: &str = "spawn: /system/bin/logkeeper pid=";
             let rest = qemu.drain_until(Duration::from_secs(30), |l| l.contains(SPAWNED));
             let serial = format!("{}\n{rest}", qemu.boot_log());
             for want in [
@@ -2046,7 +2046,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
                 "percpu: BSP cpu_id=0",
                 "GIC: v",
                 "clock: the generic timer counts at",
-                "spawned /system/bin/init pid=",
+                "spawned /system/bin/supervisor pid=",
                 SPAWNED,
             ] {
                 if !serial.contains(want) {
@@ -2211,7 +2211,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
             // the next boot's loader, out of the black box: that page, read
             // here out of the halted guest's memory, is the whole of the
             // promise. Before this, the panic path kept userland running for
-            // half a second to let `logd` write it, and the stick either had it
+            // half a second to let `logkeeper` write it, and the stick either had it
             // or the panel said it did not.
             let page = qemu.guest_memory(toyos_blackbox::PHYS, toyos_blackbox::BYTES)?;
             let page: &[u8; toyos_blackbox::BYTES] = page
@@ -2294,7 +2294,7 @@ fn metal_sim_argv_check(argv: &[String]) -> Result<(), String> {
         return Err(format!("metal-sim passed a USB device that is not the boot stick: {bad}"));
     }
     // Without this QEMU adds an e1000e with a slirp backend, an ide-cd and an
-    // isa-parallel that nothing declared — and the NIC is enough to make netd
+    // isa-parallel that nothing declared — and the NIC is enough to make netstack
     // claim a device on the machine whose whole point is that it has none.
     // None of them appears in argv, so this flag is the only observable form
     // of their absence here.
@@ -2596,7 +2596,7 @@ fn process_tree(back: &metal::Readback) -> Result<(), String> {
         ));
     }
     let refused: Vec<&str> = log.lines().filter(|l| l.contains("spawn: refused under pid ")).collect();
-    if refused.len() != 1 || !refused[0].contains("at depth 65, more than 64 below init") {
+    if refused.len() != 1 || !refused[0].contains("at depth 65, more than 64 below the supervisor") {
         return Err(format!("the kernel's depth refusals were {refused:?}, not one naming depth 65"));
     }
     Ok(())

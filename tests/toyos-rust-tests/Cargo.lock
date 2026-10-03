@@ -154,17 +154,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "blockd"
-version = "0.0.0"
-dependencies = [
- "toyos",
- "toyos-abi",
- "toyos-blockhold",
- "toyos-blockring",
- "toyos-gpt",
-]
-
-[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -471,6 +460,17 @@ dependencies = [
  "const-oid",
  "crypto-common",
  "subtle",
+]
+
+[[package]]
+name = "diskserver"
+version = "0.0.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+ "toyos-blockhold",
+ "toyos-blockring",
+ "toyos-gpt",
 ]
 
 [[package]]
@@ -2156,8 +2156,8 @@ version = "0.1.0"
 name = "toyos-rust-tests"
 version = "0.1.0"
 dependencies = [
- "blockd",
  "cpal",
+ "diskserver",
  "inspect",
  "libloading 0.8.9 (git+https://github.com/ToyOSOrg/rust_libloading?branch=toyos-sdk-0.12)",
  "memmap2",

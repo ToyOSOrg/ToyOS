@@ -3,7 +3,7 @@
 //! Everything a driver has to *decide* before it touches a register: what a
 //! codec said about itself, and which converter and pins carry sound to a
 //! speaker. No I/O, no register writes, no allocation of device memory — the
-//! effects are soundd's. It is a crate because the graph traversal is what QEMU
+//! effects are soundserver's. It is a crate because the graph traversal is what QEMU
 //! certifies least: pure, it is host-tested against the committed codec dumps of
 //! the machines that have to work, and against states no machine in reach
 //! constructs.

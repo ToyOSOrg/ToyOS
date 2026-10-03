@@ -55,7 +55,7 @@ pub fn mix_interleaved(
         match (client_channels, device_channels) {
             (1, 2) => channel_convert_mono_to_stereo(decoded, &mut convert_buf[..out_samples]),
             (2, 1) => channel_convert_stereo_to_mono(decoded, &mut convert_buf[..out_samples]),
-            (c, d) => panic!("soundd: unsupported channel conversion {c}→{d}"),
+            (c, d) => panic!("soundserver: unsupported channel conversion {c}→{d}"),
         }
         &convert_buf[..out_samples]
     } else {

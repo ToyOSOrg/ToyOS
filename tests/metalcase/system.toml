@@ -1,12 +1,12 @@
 # The metal-sim boot: what `Profile::Metal` puts in front of userland.
 #
-# soundd, netd and sshd are here for exactly the reason they have no device:
+# soundserver, netstack and sshserver are here for exactly the reason they have no device:
 # their graceful exit is half of what this config certifies.
-# sshd is the one whose absence *is* the device absence — it has no device of
-# its own and reaches the machine's shape only through netd — and it was the
+# sshserver is the one whose absence *is* the device absence — it has no device of
+# its own and reaches the machine's shape only through netstack — and it was the
 # one this config left out, so nothing anywhere ran the branch where it finds
-# no network. It costs the boot the second `NetdConn::connect_blocking` spends
-# retrying a netd that will never come, which is the price of certifying the
+# no network. It costs the boot the second `NetstackConn::connect_blocking` spends
+# retrying a netstack that will never come, which is the price of certifying the
 # line at all.
 # test-runner makes the boot announce itself, so the harness waits for a
 # marker instead of guessing from pixels — and it is what lets an in-guest
@@ -16,51 +16,51 @@
 assets = ["assets"]
 
 [boot]
-start = ["logd", "blockd", "fsd", "compositor", "soundd", "netd", "sshd", "test-runner"]
+start = ["logkeeper", "diskserver", "fileserver", "compositor", "soundserver", "netstack", "sshserver", "test-runner"]
 
 # **Every image that carries a `TOYOS-LOG` partition runs this**, and every
 # image does. The kernel keeps the record ring and writes no file at all, so a
-# boot config without `logd` is a boot whose `/log` is empty —
-# `every_boot_config_runs_logd` is what refuses one.
+# boot config without `logkeeper` is a boot whose `/log` is empty —
+# `every_boot_config_runs_logkeeper` is what refuses one.
 # It claims no device and serves no port: its row's authority is `logread`,
-# which is `Rights::LOG | Rights::WAIT` on a `SysCap` duplicate, and init hands
+# which is `Rights::LOG | Rights::WAIT` on a `SysCap` duplicate, and the supervisor hands
 # it every program's output beside that.
-[programs.logd]
+[programs.logkeeper]
 service = true
 syscap = ["logread"]
 
 [programs.compositor]
 service = true
 serves = ["compositor"]
-receives = ["soundd", "launcher"]
+receives = ["soundserver", "launcher"]
 devices = ["framebuffer", "keyboard", "mouse"]
 
-[programs.soundd]
+[programs.soundserver]
 service = true
-serves = ["soundd"]
+serves = ["soundserver"]
 devices = ["hda-audio", "virtio-sound"]
 syscap = ["rt"]
 
-# netd holds the NIC's PCI function and drives it: the virtqueues, the register
+# netstack holds the NIC's PCI function and drives it: the virtqueues, the register
 # window and the interrupt are its own, and the kernel keeps only the claim.
-[programs.netd]
+[programs.netstack]
 service = true
-serves = ["netd"]
+serves = ["netstack"]
 devices = ["pci:1af4:1041"]
 
-[programs.sshd]
+[programs.sshserver]
 service = true
-receives = ["netd", "launcher"]
+receives = ["netstack", "launcher"]
 
 # The union its guest binaries need on this machine shape.
 [programs.test-runner]
-receives = ["compositor", "soundd", "netd"]
+receives = ["compositor", "soundserver", "netstack"]
 syscap = ["logread"]
 
 # The block service: the NVMe controller this machine's DATA is on, driven
 # from userland through its claim. Started again when it ends; the claim goes
 # back with the process and is minted again for the next.
-[programs.blockd]
+[programs.diskserver]
 service = true
 restart = true
 serves = ["block"]
@@ -69,7 +69,7 @@ devices = ["pci:1b36:0010"]
 # The file servers: DATA, the log and the running slot's volume, one process
 # each, serving every program the directories of its role. Started again when
 # one ends, on the same ports.
-[programs.fsd]
+[programs.fileserver]
 restart = true
 roles = ["data", "log", "boot"]
 receives = ["block"]

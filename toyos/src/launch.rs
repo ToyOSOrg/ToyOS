@@ -1,11 +1,11 @@
-//! Asking `init` to start a declared program.
+//! Asking the supervisor to start a declared program.
 //!
 //! **`SYS_SPAWN` can only give a child what the caller holds, and that is not
 //! enough.** doom is started from a shell and doom is to hold sound; the shell
 //! is not. Under inheritance alone doom could hold sound only if every shell
-//! did. So init serves `launcher`: the caller names a `[programs]` key, init
+//! did. So the supervisor serves `launcher`: the caller names a `[programs]` key, the supervisor
 //! looks up what the manifest says that program holds, builds it out of the
-//! connectors and claims *init* holds, and spawns it.
+//! connectors and claims *the supervisor* holds, and spawns it.
 //!
 //! **The asker's authority is one connector**, and the policy is the manifest.
 //! A launch adds nothing to what the caller could do itself: the stdio handles
@@ -15,28 +15,28 @@
 //!
 //! **A launch names its parent**, by one of two words: a place, which is a
 //! handle to a process carrying `WRITE` — the caller's own `self`, duplicated —
-//! that init spawns the program under, so the caller's end takes it down; or
-//! init, the one way for a program to outlive whoever started it.
+//! that the supervisor spawns the program under, so the caller's end takes it down; or
+//! the supervisor, the one way for a program to outlive whoever started it.
 //!
 //! The wire is a single frame plus one handle batch, and this module is both
-//! halves of it — std's `Command` encodes and `init` decodes.
+//! halves of it — std's `Command` encodes and the supervisor decodes.
 
 use crate::ipc::{Connection, IpcError};
 use crate::RawHandle;
 
-/// Ask init to start a program. Carries the request blob below; the stdio
+/// Ask the supervisor to start a program. Carries the request blob below; the stdio
 /// handles and the extra connectors travel in the batch beside it.
 pub const MSG_LAUNCH: u32 = 1;
 /// It started. One `Process` handle travels with this.
 pub const MSG_LAUNCHED: u32 = 2;
-/// No `[programs]` row names that program, so init has nothing to build its
+/// No `[programs]` row names that program, so the supervisor has nothing to build its
 /// authority from. The caller spawns it directly instead, which gets
 /// inheritance — the right answer for a binary the image did not declare.
-/// The payload is the `HOME` init decides for it, which that spawn carries in
-/// place of the caller's own: a location is init's to hand out, not a parent's.
+/// The payload is the `HOME` the supervisor decides for it, which that spawn carries in
+/// place of the caller's own: a location is the supervisor's to hand out, not a parent's.
 pub const MSG_NOT_DECLARED: u32 = 3;
 /// It is declared and did not start: no such file, a full table, a refused
-/// endowment. The reason is in init's log, not in this frame — a caller can do
+/// endowment. The reason is in the supervisor's log, not in this frame — a caller can do
 /// nothing differently about any of them.
 pub const MSG_REFUSED: u32 = 4;
 /// The place it named is a process whose end has begun: nothing started, and
@@ -61,20 +61,20 @@ const HEADER: usize = 36;
 
 /// The header's last word for a launch that names a place.
 const PARENT_PLACE: u32 = 1;
-/// The header's last word for a launch that asks init to be the parent.
-const PARENT_INIT: u32 = 2;
+/// The header's last word for a launch that asks the supervisor to be the parent.
+const PARENT_SUPERVISOR: u32 = 2;
 
-/// Whom a launch asks init to place the program under.
+/// Whom a launch asks the supervisor to place the program under.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Parent<H = RawHandle> {
     /// The process a handle carrying `WRITE` names, moved as the batch's last
     /// handle.
     Place(H),
-    /// init itself.
-    Init,
+    /// The supervisor itself.
+    Supervisor,
 }
 
-/// What a caller asks init to start.
+/// What a caller asks the supervisor to start.
 ///
 /// `argv` and `env` are exactly the blobs `SYS_SPAWN` takes, so the launcher
 /// path and the direct path build one thing rather than two.
@@ -83,19 +83,19 @@ pub struct Launch<'a> {
     ///
     /// **Not a `[programs]` key**, because `ls` is a symlink to
     /// `toybox` and the row that says what an applet may hold is
-    /// `toybox`'s. init resolves the path to a key; the caller does not parse
+    /// `toybox`'s. The supervisor resolves the path to a key; the caller does not parse
     /// the manifest and there is deliberately no second reader of it.
     pub program: &'a str,
     /// NUL-separated, `argv[0]` first.
     pub argv: &'a [u8],
     /// `KEY=VALUE\0` repeated. **Carried rather than inherited**: without it a
-    /// launched child would get init's environment, and `cd /tmp && ls` would
+    /// launched child would get the supervisor's environment, and `cd /tmp && ls` would
     /// list `/`.
     pub env: &'a [u8],
     pub cwd: &'a str,
     /// `(name, connector)` the caller transfers into the child's namespace, on
     /// top of the manifest's. This is how a terminal gives its shell the
-    /// `surface` port it made — a name init cannot know, because there is one
+    /// `surface` port it made — a name the supervisor cannot know, because there is one
     /// per terminal.
     pub extras: &'a [(&'a str, RawHandle)],
     /// `(child slot, handle)`, at most [`MAX_LAUNCH_SLOTS`] of them. The
@@ -124,7 +124,7 @@ impl Launch<'_> {
         let mut n = 0;
         let place = match self.parent {
             Parent::Place(place) => Some(place),
-            Parent::Init => None,
+            Parent::Supervisor => None,
         };
         let slots = self.slots.iter().map(|(_, h)| h);
         let extras = self.extras.iter().map(|(_, h)| h);
@@ -139,7 +139,7 @@ impl Launch<'_> {
     pub fn encode(&self, buf: &mut [u8]) -> Result<usize, EncodeError> {
         let (place, word) = match self.parent {
             Parent::Place(_) => (1, PARENT_PLACE),
-            Parent::Init => (0, PARENT_INIT),
+            Parent::Supervisor => (0, PARENT_SUPERVISOR),
         };
         if self.extras.len() + place > MAX_LAUNCH_EXTRAS || self.slots.len() > MAX_LAUNCH_SLOTS {
             return Err(EncodeError::TooMany);
@@ -254,11 +254,11 @@ impl<'a> Request<'a> {
     }
 
     /// Whom the request names as the parent: `None` for neither word, which
-    /// is a launch init refuses.
+    /// is a launch the supervisor refuses.
     pub fn parent(&self) -> Option<Parent<()>> {
         match self.parent {
             PARENT_PLACE => Some(Parent::Place(())),
-            PARENT_INIT => Some(Parent::Init),
+            PARENT_SUPERVISOR => Some(Parent::Supervisor),
             _ => None,
         }
     }
@@ -357,8 +357,8 @@ pub fn launch<'a>(
 mod tests {
     use super::*;
 
-    /// The header's last word names the parent: a place, init, or — any other
-    /// word — neither, which init refuses.
+    /// The header's last word names the parent: a place, the supervisor, or — any other
+    /// word — neither, which the supervisor refuses.
     #[test]
     fn a_request_names_its_parent_by_one_word() {
         let mut buf = [0u8; 256];
@@ -371,11 +371,11 @@ mod tests {
             slots: &[],
             parent,
         };
-        for (parent, named) in [(Parent::Place(RawHandle(9)), Parent::Place(())), (Parent::Init, Parent::Init)] {
+        for (parent, named) in [(Parent::Place(RawHandle(9)), Parent::Place(())), (Parent::Supervisor, Parent::Supervisor)] {
             let len = request(parent).encode(&mut buf).expect("encode a launch");
             assert_eq!(Request::decode(&buf[..len]).expect("decode it").parent(), Some(named));
         }
-        let len = request(Parent::Init).encode(&mut buf).expect("encode a launch");
+        let len = request(Parent::Supervisor).encode(&mut buf).expect("encode a launch");
         for word in [0, 3, u32::MAX] {
             buf[HEADER - 4..HEADER].copy_from_slice(&word.to_le_bytes());
             assert_eq!(Request::decode(&buf[..len]).expect("decode it").parent(), None, "word {word}");

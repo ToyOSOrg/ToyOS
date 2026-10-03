@@ -19,7 +19,7 @@ sign = []
 [dependencies]
 # **The one verifier, and why this one.** `ed25519-dalek` is the Ed25519 the
 # Rust ecosystem ships (RustCrypto's `ssh-key` and `russh`, which this tree's
-# sshd already runs, verify with it), it is `no_std` without `alloc`, and it
+# sshserver already runs, verify with it), it is `no_std` without `alloc`, and it
 # is already resolved in the userland lockfile at this version. No default
 # features: no `std`, no precomputed tables (a verify is one per boot), no
 # `zeroize` (the machine holds no secret key). Verified with `verify_strict`,

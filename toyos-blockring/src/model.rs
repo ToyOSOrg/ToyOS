@@ -14,7 +14,7 @@
 //! were), the client noticing, and the client reconnecting to a fresh server.
 //! Each of the three failures is bounded by its own count ([`Failures`]).
 //! The client and the server are this crate's own types, not
-//! transliterations: what is checked is the code blockd and its clients run.
+//! transliterations: what is checked is the code diskserver and its clients run.
 //!
 //! The laws:
 //! - every ticket is answered exactly once — never twice, and by the end never

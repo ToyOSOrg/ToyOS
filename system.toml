@@ -1,8 +1,8 @@
-# sshd is deliberately not in `[boot] start`. It is built into the image and
-# started by hand (`detach /system/bin/sshd`, so it outlives the shell) on a
+# sshserver is deliberately not in `[boot] start`. It is built into the image and
+# started by hand (`detach /system/bin/sshserver`, so it outlives the shell) on a
 # machine that wants remote access: it listens on every interface, so carrying
 # it in every boot is a listening port nobody asked for.
-# `src/build.rs`'s `no_shipped_boot_config_starts_sshd` is the gate.
+# `src/build.rs`'s `no_shipped_boot_config_starts_sshserver` is the gate.
 
 hosted-rustc = false
 
@@ -13,7 +13,7 @@ hosted-rustc = false
 # day delete it.
 assets = ["assets"]
 
-# What `/system/bin/init` starts at boot. Program keys, not paths, and the order means
+# What `/system/bin/supervisor` starts at boot. Program keys, not paths, and the order means
 # nothing: every port exists before any server runs.
 [boot]
 # `filepicker` is a `serves` daemon like the three beside it: a machine-wide
@@ -21,7 +21,7 @@ assets = ["assets"]
 # while the compositor had no way to ask for a program's *declared* authority —
 # the launcher gives it one, and starting a service from `[boot] start` is not
 # the thing that needed fixing.
-start = ["logd", "blockd", "fsd", "compositor", "soundd", "netd", "filepicker"]
+start = ["logkeeper", "diskserver", "fileserver", "compositor", "soundserver", "netstack", "filepicker"]
 
 # What every program launched out of `/apps` holds, whatever its own directory
 # says. A package is unpacked by `/system/bin/pkg` into a writable directory, so
@@ -30,9 +30,9 @@ start = ["logd", "blockd", "fsd", "compositor", "soundd", "netd", "filepicker"]
 # `devices` and `syscap` have no spelling here, so nothing installed claims
 # hardware or enters the RT band.
 [apps]
-receives = ["compositor", "soundd", "filepicker"]
+receives = ["compositor", "soundserver", "filepicker"]
 
-# `service = true` makes a row a system service: init starts it with `HOME` at
+# `service = true` makes a row a system service: the supervisor starts it with `HOME` at
 # its own `/state/<name>` and makes that directory first. Every other row runs
 # with the session user's home.
 [programs]
@@ -46,10 +46,10 @@ toyos-ld = { path = "toyos-ld" }
 
 # **Every image that carries a `TOYOS-LOG` partition runs this**, and every
 # image does. The kernel keeps the record ring and the console and writes no
-# file at all, so a boot config without `logd` is a boot whose `/log` is empty —
-# `every_boot_config_runs_logd` is what refuses one. It claims no device, and
+# file at all, so a boot config without `logkeeper` is a boot whose `/log` is empty —
+# `every_boot_config_runs_logkeeper` is what refuses one. It claims no device, and
 # `log` is the port it answers `inspect` on.
-[programs.logd]
+[programs.logkeeper]
 service = true
 syscap = ["logread"]
 serves = ["log"]
@@ -57,53 +57,53 @@ serves = ["log"]
 [programs.compositor]
 service = true
 serves = ["compositor"]
-receives = ["soundd", "filepicker", "launcher"]
+receives = ["soundserver", "filepicker", "launcher"]
 devices = ["framebuffer", "keyboard", "mouse"]
 
-[programs.soundd]
+[programs.soundserver]
 service = true
-serves = ["soundd"]
+serves = ["soundserver"]
 devices = ["hda-audio", "virtio-sound"]
 syscap = ["rt"]
 
-# netd holds the NIC's PCI function and drives it: the virtqueues, the register
+# netstack holds the NIC's PCI function and drives it: the virtqueues, the register
 # window and the interrupt are its own, and the kernel keeps only the claim.
 # Named by vendor and device rather than by slot, so one row finds the card
 # wherever firmware put it.
-[programs.netd]
+[programs.netstack]
 service = true
-serves = ["netd"]
+serves = ["netstack"]
 devices = ["pci:1af4:1041"]
 
 # `launcher` is how a login's program is started holding its own row: `update`
 # and `swap` below are two such programs.
-[programs.sshd]
+[programs.sshserver]
 service = true
-receives = ["netd", "launcher"]
+receives = ["netstack", "launcher"]
 
 # `swap` is the authority to replace a running service's binary; the build
-# refuses it to any other program (`src/build.rs`). `ssh <machine> swap netd
-# <sha256> <length> < netd` runs it for a login.
+# refuses it to any other program (`src/build.rs`). `ssh <machine> swap netstack
+# <sha256> <length> < netstack` runs it for a login.
 [programs.swap]
 receives = ["swap"]
 
-# The idle slot: the slot table and the idle slot's two partitions, which init
+# The idle slot: the slot table and the idle slot's two partitions, which the supervisor
 # claims against the ROOT the kernel holds. The build refuses it to any other
 # program; the owner's signature on the image is the authority to install it.
 # `ssh <machine> update < image` runs it for a login.
 [programs.update]
 slots = true
 
-# A name's addresses, asked of netd's resolver: `netd` is the whole of what it
+# A name's addresses, asked of netstack's resolver: `netstack` is the whole of what it
 # holds.
 [programs.host]
-receives = ["netd"]
+receives = ["netstack"]
 
 # The reader of every owner's `inspect` answer: a connector to each owner's
 # port, and `inventory` for the kernel's `dev.*`, are the whole of what it can
 # observe.
 [programs.inspect]
-receives = ["netd", "soundd", "log", "compositor"]
+receives = ["netstack", "soundserver", "log", "compositor"]
 syscap = ["inventory"]
 
 [programs.filepicker]
@@ -119,7 +119,7 @@ receives = ["compositor", "launcher"]
 receives = ["surface", "launcher"]
 
 [programs.doom]
-receives = ["compositor", "soundd"]
+receives = ["compositor", "soundserver"]
 
 [programs.snake]
 receives = ["compositor", "filepicker"]
@@ -139,17 +139,17 @@ receives = ["compositor", "filepicker"]
 receives = ["compositor", "filepicker"]
 
 # `power` is `/system/bin/shutdown`'s and `/system/bin/reboot`'s: the
-# connector to init's port, which has `logd` make the log whole and then stops
+# connector to the supervisor's port, which has `logkeeper` make the log whole and then stops
 # the machine with a `SysCap` no program in the image holds. `roster` is
-# `/system/bin/ps`'s. Each of those is this binary under another name: init
+# `/system/bin/ps`'s. Each of those is this binary under another name: the supervisor
 # resolves the symlink to this row, so the applets are endowed both and nothing
 # else in the image is. The row's granularity is the binary, so every other
-# applet is endowed both too — the same shape as `soundd` reaching `ls`.
+# applet is endowed both too — the same shape as `soundserver` reaching `ls`.
 #
 # `free` is the same syscall as `ps` and is named by neither: the machine header
 # is ambient and the process roster is not.
 [programs.toybox]
-receives = ["compositor", "soundd", "surface", "power"]
+receives = ["compositor", "soundserver", "surface", "power"]
 syscap = ["roster"]
 
 # Symlinks created on ROOT at build time.
@@ -179,7 +179,7 @@ syscap = ["roster"]
 # The block service: the NVMe controller this machine's DATA is on, driven
 # from userland through its claim. Started again when it ends; the claim goes
 # back with the process and is minted again for the next.
-[programs.blockd]
+[programs.diskserver]
 service = true
 restart = true
 serves = ["block"]
@@ -188,7 +188,7 @@ devices = ["pci:1b36:0010"]
 # The file servers: DATA, the log and the running slot's volume, one process
 # each, serving every program the directories of its role. Started again when
 # one ends, on the same ports.
-[programs.fsd]
+[programs.fileserver]
 restart = true
 roles = ["data", "log", "boot"]
 receives = ["block"]

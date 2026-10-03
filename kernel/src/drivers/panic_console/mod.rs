@@ -2,7 +2,7 @@
 //!
 //! Renders log records as an 8x16 text grid onto the UEFI GOP framebuffer,
 //! through `LogRecord`'s `Display`, so no second formatter can drift from
-//! `logd`. [`capture`] freezes the report before `panic_flush` drains it;
+//! `logkeeper`. [`capture`] freezes the report before `panic_flush` drains it;
 //! [`render`] paints it inside `halt_all_cpus`, before `panic_flush`. virtio-gpu
 //! is unsupported: its scanout needs the unbounded-poll wedge this module avoids.
 //!
@@ -1000,7 +1000,7 @@ const CENSUS: &str = "panel: paints=";
 
 /// One line, written to the two channels a boot can end on: [`log_census`] for
 /// a boot that hands the machine back, and [`seal_wedge`] for one a bound ends
-/// with no `logd` left to write a file.
+/// with no `logkeeper` left to write a file.
 struct Census;
 
 impl core::fmt::Display for Census {

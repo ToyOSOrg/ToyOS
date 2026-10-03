@@ -328,7 +328,7 @@ async fn fire(host: &str, port: &str, key: &str, command: &str) -> Result<(), St
     })
     .await
     .unwrap_or("silent");
-    // **Held until the machine drops it**, or the bound: sshd ends a program
+    // **Held until the machine drops it**, or the bound: sshserver ends a program
     // whose connection is gone, so a client that left the moment the request
     // was accepted could end the very `reboot` it asked for before it reached
     // its syscall.
@@ -415,7 +415,7 @@ async fn swap(
         (Ok(()), Some(said)) if said.starts_with("accepted ") => {
             println!("{said}");
             // **The program's input closing is the go**: it stops waiting and
-            // exits, and init stops the old service when it hangs up. The
+            // exits, and the supervisor stops the old service when it hangs up. The
             // caller — whose own connections that service may carry too — says
             // when, by closing this program's stdin.
             tokio::task::spawn_blocking(|| std::io::Read::read_to_end(&mut std::io::stdin(), &mut Vec::new()))

@@ -30,7 +30,7 @@ const CONNECT_SECS: u64 = 10;
 /// How long the machine has to go quiet after `reboot`.
 const GOING_DOWN_SECS: u64 = 120;
 
-/// What the machine spends getting back to `sshd` once a ToyOS boot is over:
+/// What the machine spends getting back to `sshserver` once a ToyOS boot is over:
 /// the firmware's pass and Ubuntu's own boot.
 const RETURN_ALLOWANCE_SECS: u64 = 300;
 
@@ -165,7 +165,7 @@ pub enum Refusal {
     /// **The loader reported a record and booted no kernel.** Not the same thing
     /// as an absent boot record, and the difference is the whole diagnosis: the
     /// pass that reads the black box ends the chain by design, so a machine that
-    /// came back with `loader.log` carrying a reporting pass and `logd` carrying
+    /// came back with `loader.log` carrying a reporting pass and `logkeeper` carrying
     /// nothing did exactly what it was told — the question is why it had a
     /// record to report at all.
     ReportedAndBootedNothing { said: String },
@@ -189,7 +189,7 @@ pub enum Refusal {
     /// or the reader of the log the boot serves.
     Cable(String),
     /// **What a swap of a running machine's service came to is not the new
-    /// binary in service**: init's words, the machine's answer or ssh
+    /// binary in service**: the supervisor's words, the machine's answer or ssh
     /// afterwards, each finding by name.
     Swap(Vec<String>),
     /// The machine did not name itself: its SMBIOS answer is not
@@ -333,7 +333,7 @@ impl fmt::Display for Refusal {
             Self::ReportedAndBootedNothing { said } => write!(
                 f,
                 "the loader reported a record and booted no kernel: `loader.log` carries a \
-                 pass that read the black box and ended the chain, and `logd` wrote nothing \
+                 pass that read the black box and ended the chain, and `logkeeper` wrote nothing \
                  because nothing ran. This boot measured no test. What the pass said was: \
                  {said}"
             ),
@@ -605,7 +605,7 @@ impl Target {
             Job::Wipe => literal(&[WIPEFS, "--all", &node]),
             Job::Flash => literal(&[DD, &of, "bs=4M", "conv=fsync"]),
             // The log partition read whole, as bytes rather than as files: what
-            // `toyos-fat32-check` judges is the volume `logd` wrote, and a
+            // `toyos-fat32-check` judges is the volume `logkeeper` wrote, and a
             // `mount` has already had a driver's opinion about it. Read-only, and
             // the partition is the only node named, spelled from the disk's.
             Job::ReadLog => literal(&[DD, &read_log, "bs=4M"]),
@@ -1296,9 +1296,9 @@ impl Driver {
         )
     }
 
-    /// The loader's own file, and then everything `logd` wrote, in name order:
+    /// The loader's own file, and then everything `logkeeper` wrote, in name order:
     /// a freshly flashed volume holds one boot's files, and its newest file
-    /// alone would miss the continuations `logd` rotates into.
+    /// alone would miss the continuations `logkeeper` rotates into.
     ///
     /// Two strings and not one, because only the second is the boot's log and
     /// [`bootlog::verdict`] is about that.
@@ -1325,15 +1325,15 @@ impl Driver {
     fn read_mounted(&self) -> Result<(String, String), Refusal> {
         let at = shell_word(&self.target.mount);
         let listing = self.ssh("listing the log", &format!("ls -1 {at}"))?;
-        let (loader, logd) = bootlog::split_listing(&listing);
+        let (loader, logkeeper) = bootlog::split_listing(&listing);
         // Absence is an answer and not a failure: the boot is judged on what
-        // `logd` wrote either way.
+        // `logkeeper` wrote either way.
         let loader = match loader {
             Some(name) => self.cat(name)?,
             None => format!("{}: the loader wrote none\n", bootlog::LOADER_LOG),
         };
         let mut text = String::new();
-        for name in logd {
+        for name in logkeeper {
             text.push_str(&self.cat(name)?);
         }
         Ok((loader, text))
@@ -1679,7 +1679,7 @@ impl Talking {
     /// reboot conversation — a swap's own exchange
     /// ([`crate::metalswap::swap`]).
     ///
-    /// A swap of the netd carrying it is followed across by
+    /// A swap of the netstack carrying it is followed across by
     /// [`crate::metalswap::swap`] itself ([`crate::metaltalk::Stream::redial`]).
     fn connect(&self, file: &str, by: std::time::Duration) -> Result<crate::metaltalk::Stream, Refusal> {
         let peer = crate::metaltalk::Peer::Named {
@@ -1697,13 +1697,13 @@ impl Talking {
 pub const READBACK_SWAP_STREAM: &str = "swap-stream.log";
 
 /// Replace `service`'s binary on the machine that answers for its own name,
-/// and judge it: the machine is asked over ssh, init's words are read off the
+/// and judge it: the machine is asked over ssh, the supervisor's words are read off the
 /// log stream, and ssh must answer again afterwards.
 ///
 /// **Nothing is flashed and nothing is rebooted**: the machine is found at
 /// `toyos-t14.local` the way [`Talking::start`] finds it, so this can be
 /// started before that machine has booted or long after — and read on across
-/// a swap of netd itself ([`crate::metalswap::swap`]).
+/// a swap of netstack itself ([`crate::metalswap::swap`]).
 fn swap_running(args: &Args, service: &str) -> Result<(), Refusal> {
     let (Some(key), Some(dir), Some(binary)) = (&args.talk, &args.readback, &args.binary) else {
         return Err(Refusal::Usage("--swap wants --talk, --readback and --binary".into()));
@@ -1726,7 +1726,7 @@ fn swap_running(args: &Args, service: &str) -> Result<(), Refusal> {
     stream.give_up();
     let swapped = swapped.map_err(|why| Refusal::Swap(vec![why]))?;
     for (word, detail) in &swapped.words {
-        println!("  init: {}: {detail}", word.as_str());
+        println!("  the supervisor: {}: {detail}", word.as_str());
     }
     for line in &swapped.said {
         print!("  {service}| {line}");
@@ -2296,7 +2296,7 @@ fn boot_file(back: u64, stick: u64, machine: &Machine, wire: Option<&Wire>) -> S
 /// pass that ended the chain; the loader never reached its handoff line, which
 /// is what a pass that *did* boot a kernel writes; and the kernel log carries no
 /// boot record. A boot whose kernel died early has the handoff line and no
-/// chain-end; a boot that panicked has both, and a `logd` file besides.
+/// chain-end; a boot that panicked has both, and a `logkeeper` file besides.
 ///
 /// It exists because `Unfit::NoBootRecord` says "this boot failed" where the
 /// answer is "this boot never happened", and the two send a reader to different
@@ -2534,10 +2534,10 @@ mod tests {
     /// swap is no swap.
     #[test]
     fn a_swap_is_not_a_boot_and_names_what_it_acts_with() {
-        let whole = ["--swap", "netd", "--binary", "n", "--talk", "/tmp/k", "--readback", "/tmp/r"]
+        let whole = ["--swap", "netstack", "--binary", "n", "--talk", "/tmp/k", "--readback", "/tmp/r"]
             .map(String::from);
         let args = Args::parse(&whole).expect("a whole swap");
-        assert_eq!(args.swap.as_deref(), Some("netd"));
+        assert_eq!(args.swap.as_deref(), Some("netstack"));
 
         for flag in [
             vec!["--fat32-check"],
@@ -2563,7 +2563,7 @@ mod tests {
         let lone = ["--binary", "n"].map(String::from);
         assert!(Args::parse(&lone).unwrap_err().to_string().contains("--swap"));
         let mut bent = whole.to_vec();
-        bent[1] = "../netd".to_string();
+        bent[1] = "../netstack".to_string();
         assert!(Args::parse(&bent).unwrap_err().to_string().contains("no service"));
     }
 
@@ -2748,7 +2748,7 @@ mod tests {
             bootlog::CHAIN_ENDS_LINE,
         );
         let log = format!(
-            "[kernel 1.151 cpu0] Boot: complete (1151ms)\n{{1.203 init}} {} (Reboot)\n",
+            "[kernel 1.151 cpu0] Boot: complete (1151ms)\n{{1.203 supervisor}} {} (Reboot)\n",
             bootlog::STOPPING
         );
         assert_eq!(
@@ -3353,7 +3353,7 @@ mod tests {
             bootlog::SEPARATOR
         );
         let log = "[2026-09-29 10:36:53 1.171 cpu0] Boot: complete (1171ms)\n\
-                   {2026-09-29 10:36:53 1.186 init} init: power: the machine stops, and logd makes \
+                   {2026-09-29 10:36:53 1.186 supervisor} supervisor: power: the machine stops, and logkeeper makes \
                    the log whole first (Reboot)\n";
         let armed = |names: &[&str]| -> Vec<String> { names.iter().map(|n| (*n).to_string()).collect() };
         assert_eq!(

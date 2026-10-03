@@ -256,7 +256,7 @@ idt_vectors! {
         ring0 Nmi          = 0x02, nmi::nmi_entry, ist 2;
         ring3 Timer        = 0x20, timer::timer_entry;
         ring3 Xhci         = 0x21, xhci::xhci_entry;
-        // 0x22 was the kernel's own virtio-net driver, which now lives in netd.
+        // 0x22 was the kernel's own virtio-net driver, which now lives in netstack.
         ring3 VirtioSound  = 0x23, virtio_sound::virtio_sound_entry;
         ring3 I8042        = 0x24, i8042::i8042_entry;
         ring3 DmaFault     = 0x25, dma_fault::dma_fault_entry;

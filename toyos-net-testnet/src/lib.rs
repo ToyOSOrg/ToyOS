@@ -5,7 +5,7 @@
 //! repeats exactly. Serialising spaces a burst out, so a receiver takes its frames one by one as
 //! a real link hands them over.
 //!
-//! One pass at an instant is netd's loop: every frame due is received, then each node's timers
+//! One pass at an instant is netstack's loop: every frame due is received, then each node's timers
 //! fire, then the applications run, then each node's device offers its credit; passes repeat at
 //! that instant until nothing is due. An application writes a stream every byte of which its peer
 //! can check where it lands. Ours against ours is a consistency check, never an independent

@@ -21,7 +21,7 @@
 //! reading the roster of every process in the machine, and powering the machine
 //! off
 //! — and each is one bit on a handle to a `SysCap` the kernel mints exactly once,
-//! for `/system/bin/init`. A handle that carries the wrong *bit* is refused with a word,
+//! for `/system/bin/supervisor`. A handle that carries the wrong *bit* is refused with a word,
 //! because probing what an attenuated capability can still do is what
 //! attenuation is for; a handle that is **no handle at all** ends the caller.
 //!
@@ -119,26 +119,26 @@ const APPLET_NEEDS: &[(&str, &[&str])] = &[
     ("reboot", &["syscap power"]),
     ("rm", &[]),
     ("shutdown", &["syscap power"]),
-    ("tone", &["receive soundd"]),
+    ("tone", &["receive soundserver"]),
 ];
 
 /// Every authority this image hands an applet that has no use for it: the exact
 /// size of `issues/isolation/toybox-is-one-row-for-every-applet.md` here.
 const DECLARED_OVER_GRANTS: &[&str] = &[
-    "cat: receive soundd",
-    "cp: receive soundd",
-    "echo: receive soundd",
-    "free: receive soundd",
-    "grep: receive soundd",
-    "hexdump: receive soundd",
-    "ls: receive soundd",
-    "mkdir: receive soundd",
-    "mv: receive soundd",
-    "ps: receive soundd",
-    "pwd: receive soundd",
-    "reboot: receive soundd",
-    "rm: receive soundd",
-    "shutdown: receive soundd",
+    "cat: receive soundserver",
+    "cp: receive soundserver",
+    "echo: receive soundserver",
+    "free: receive soundserver",
+    "grep: receive soundserver",
+    "hexdump: receive soundserver",
+    "ls: receive soundserver",
+    "mkdir: receive soundserver",
+    "mv: receive soundserver",
+    "ps: receive soundserver",
+    "pwd: receive soundserver",
+    "reboot: receive soundserver",
+    "rm: receive soundserver",
+    "shutdown: receive soundserver",
 ];
 
 /// Presenting no handle at all, each raised in a child of its own because the
@@ -303,7 +303,7 @@ fn a_right_the_capability_lacks_is_a_word() {
     //
     // There is no arm for the unnarrowed cap here, and there cannot be: the
     // call that proves a capability holding `POWER` stops the machine does not
-    // come back, and init's, asked by `run shutdown` at the end of a dozen
+    // come back, and the supervisor's, asked by `run shutdown` at the end of a dozen
     // host-side gates, is that proof — `machine_reboot` is the same proof for
     // the reboot half.
     assert_eq!(
@@ -371,7 +371,7 @@ fn cap() -> &'static SysCap {
 /// **The pair is the point.** One capability, two calls that differ only in
 /// whether the buffer has room for a single entry: the shorter is answered and
 /// the longer is refused. A kernel that demanded the bit unconditionally would
-/// fail the first and break `free`, netd and the compositor's taskbar with it;
+/// fail the first and break `free`, netstack and the compositor's taskbar with it;
 /// a kernel that stopped demanding it — the tree as it stood before the owner's
 /// ruling of 2026-08-20 — fails the second.
 ///
@@ -449,7 +449,7 @@ fn the_roster_is_a_right_and_the_header_is_not() {
 /// `/system/bin/ps`, endowed a duplicate with the bit and a duplicate without it.
 ///
 /// **The shipped applet and not a raw call, because the plumbing is the risk.**
-/// The manifest's `roster` name, `syscap_rights`' bit, init's narrowing, the
+/// The manifest's `roster` name, `syscap_rights`' bit, the supervisor's narrowing, the
 /// SDK's `SysCap::roster` and the kernel's demand are five places that have to
 /// agree, and every arm above this one exercises the last of them through the
 /// first only by hand. This runs the program a user runs. It is also the only
@@ -499,8 +499,8 @@ fn the_shipped_applet_reaches_both_answers() {
 
 /// The authority records each `program` row grants, keyed by the binary path
 /// its own line names. **Its own parse, not `toyos_manifest`'s**: a checker that
-/// reads the manifest through init's parser and resolves links through init's
-/// resolver agrees with init by construction.
+/// reads the manifest through the supervisor's parser and resolves links through the supervisor's
+/// resolver agrees with the supervisor by construction.
 fn manifest_rows(text: &str) -> BTreeMap<String, Vec<String>> {
     let mut rows: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut current = String::new();

@@ -8,13 +8,13 @@ use std::path::Path;
 use super::qemu::{self, BootOptions, Profile, QemuInstance};
 use super::serial::Serial;
 
-/// The function `tests/netcase`'s netd claims, as its `devices` row spells it.
-const NETD_CLAIMS: &str = "1af4:1041";
+/// The function `tests/netcase`'s netstack claims, as its `devices` row spells it.
+const NETSTACK_CLAIMS: &str = "1af4:1041";
 
-/// fsd's word for DATA's directories served from memory.
+/// fileserver's word for DATA's directories served from memory.
 const IN_MEMORY: &str = "are in memory and will not survive a reboot";
 
-/// The boot config that runs `netd` with a virtio NIC in front of it.
+/// The boot config that runs `netstack` with a virtio NIC in front of it.
 fn netcase() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/netcase")
 }
@@ -63,12 +63,12 @@ pub fn iommu_virtio_platform(test_config: &Path) -> Result<(), String> {
         // `netcase`: the NIC's driver is a process, and this is the one config
         // that runs it. A daemon's line is waited for on the stream: the boot
         // log ends at test-runner's `===READY===`, its first act, and nothing
-        // orders that against what the programs init started before it print.
+        // orders that against what the programs the supervisor started before it print.
         let mut qemu = QemuInstance::boot_with_options(&netcase(), &[], &[], options);
         let said: &[&str] = if behind_unit {
-            &[CLAIM_BOUNDED, NETD_NEGOTIATED]
+            &[CLAIM_BOUNDED, NETSTACK_NEGOTIATED]
         } else {
-            &[BLOCKD_REFUSED, FSD_WITHOUT_DATA]
+            &[DISKSERVER_REFUSED, FILESERVER_WITHOUT_DATA]
         };
         let mut text = qemu.boot_log().to_string();
         qemu::await_guest(&mut qemu, &mut text, &format!("{name}: {said:?}"), |t| {
@@ -78,7 +78,7 @@ pub fn iommu_virtio_platform(test_config: &Path) -> Result<(), String> {
         let log = Serial::named("boot console", text);
         log.must_be_clean()?;
         log.must_say("Boot: complete")?;
-        log.must_say("init: started netd")?;
+        log.must_say("supervisor: started netstack")?;
 
         // **Whether the NIC's function is handed to a process at all is the
         // machine's answer, not a choice.** A process driving a device writes
@@ -88,10 +88,10 @@ pub fn iommu_virtio_platform(test_config: &Path) -> Result<(), String> {
         // unit has three negotiators, one of them across the boundary, and the
         // arm without one has two and a refusal.
         let expected = if behind_unit {
-            // And the claim netd was given is bounded to its own function's
+            // And the claim netstack was given is bounded to its own function's
             // configuration space, which is what makes its capability walk —
             // an index by numbers the *device* wrote — safe to run at all.
-            // netd asks the kernel for a read past the end, one straddling it
+            // netstack asks the kernel for a read past the end, one straddling it
             // and one misaligned, and refuses to drive a claim that answers any
             // of them.
             log.must_say(CLAIM_BOUNDED)?;
@@ -159,19 +159,19 @@ pub fn iommu_virtio_platform(test_config: &Path) -> Result<(), String> {
     declining_is_not_free(test_config)
 }
 
-/// netd's, once its claim answers nothing outside its own function.
+/// netstack's, once its claim answers nothing outside its own function.
 const CLAIM_BOUNDED: &str =
-    "netd: this claim answers 4096 bytes of configuration space and refuses every access \
+    "netstack: this claim answers 4096 bytes of configuration space and refuses every access \
      outside them";
-/// netd's feature line, the kernel's shape under netd's name.
-const NETD_NEGOTIATED: &str = "netd: VirtIO: PCI ";
-const BLOCKD_REFUSED: &str =
-    "blockd: NOT SERVING — pci:1b36:0010 is on this machine and the kernel refused this service its claim";
-const FSD_WITHOUT_DATA: &str =
-    "fsd: the block service would not list its partitions (Refused(ClaimRefused)); DATA is absent this boot";
+/// netstack's feature line, the kernel's shape under netstack's name.
+const NETSTACK_NEGOTIATED: &str = "netstack: VirtIO: PCI ";
+const DISKSERVER_REFUSED: &str =
+    "diskserver: NOT SERVING — pci:1b36:0010 is on this machine and the kernel refused this service its claim";
+const FILESERVER_WITHOUT_DATA: &str =
+    "fileserver: the block service would not list its partitions (Refused(ClaimRefused)); DATA is absent this boot";
 
 /// The slot QEMU's `-device` order puts `tests/netcase`'s NVMe controller on,
-/// the one its blockd row claims.
+/// the one its diskserver row claims.
 const NVME_AT: &str = "00:02.0";
 
 /// **A machine with no unit hands no function to a process**, and says so
@@ -181,19 +181,19 @@ const NVME_AT: &str = "00:02.0";
 /// (`issues/kernel/every-driver-is-still-in-the-kernel.md`) is that moving a
 /// driver out without translation costs security: a descriptor holding a
 /// physical address is an arbitrary read and write over all of memory. So the
-/// kernel refuses the claim by name, init says which device it could not mint,
-/// and netd exits rather than driving anything — and the machine finishes
+/// kernel refuses the claim by name, the supervisor says which device it could not mint,
+/// and netstack exits rather than driving anything — and the machine finishes
 /// booting, which is the half a refusal that panicked would fail. The NVMe
 /// controller is refused the same, and DATA with it by name: a disk that is
 /// there and cannot be used is never answered with memory.
 fn no_unit_is_no_claim(log: &Serial) -> Result<(), String> {
     const NO_DOMAIN: &str = "it would have no address space of its own";
-    // netd's own exit is the third saying, and is not read here.
-    refused_claim(log, NETD_CLAIMS, NO_DOMAIN, &[NVME_AT])?;
+    // netstack's own exit is the third saying, and is not read here.
+    refused_claim(log, NETSTACK_CLAIMS, NO_DOMAIN, &[NVME_AT])?;
     log.must_say(&format!("pcidev: PCI {NVME_AT} NOT HANDED OVER — {NO_DOMAIN}"))?;
-    log.must_say("init: blockd: pci:1b36:0010 is on this machine and could not be handed over")?;
-    log.must_say(BLOCKD_REFUSED)?;
-    log.must_say(FSD_WITHOUT_DATA)?;
+    log.must_say("supervisor: diskserver: pci:1b36:0010 is on this machine and could not be handed over")?;
+    log.must_say(DISKSERVER_REFUSED)?;
+    log.must_say(FILESERVER_WITHOUT_DATA)?;
     log.must_not_say(IN_MEMORY)?;
     // And this machine handed *nothing* over, which is more than the claim's
     // own refusal says: with no unit there is no function any process could be
@@ -243,7 +243,7 @@ fn declining_is_not_free(test_config: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// The slot QEMU's `-device` order puts the function netd claims on, and the
+/// The slot QEMU's `-device` order puts the function netstack claims on, and the
 /// address every judge below is an assertion about.
 ///
 /// **The address is the harness's own and never the guest's.** A judge that
@@ -296,7 +296,7 @@ fn functions_named<'a>(log: &'a Serial, marker: &str) -> Result<Vec<&'a str>, St
 
 /// **The claim on [`CLAIMED_AT`] was refused for `why`, and the refusal spent
 /// nothing**: no BAR of that function moved, neither of its two message
-/// mechanisms is armed, `claims` reached no holder, and init said so in the
+/// mechanisms is armed, `claims` reached no holder, and the supervisor said so in the
 /// boot config's own spelling. `beside` is every other function this machine
 /// refuses, each judged by its own caller.
 ///
@@ -320,11 +320,11 @@ fn refused_claim(log: &Serial, claims: &str, why: &str, beside: &[&str]) -> Resu
     log.must_not_say(&msi_armed())?;
     log.must_not_say(&bar_moved())?;
     // All the way out to userland, rather than a kernel that logged a refusal
-    // and handed netd a NIC anyway. init names what it could not mint in the
+    // and handed netstack a NIC anyway. The supervisor names what it could not mint in the
     // config's own spelling, and **with this refusal's own word**: the machine
     // has the function, so "no such device on this machine" would be false.
     log.must_say(&format!(
-        "init: netd: pci:{claims} is on this machine and could not be handed over"
+        "supervisor: netstack: pci:{claims} is on this machine and could not be handed over"
     ))?;
     Ok(())
 }

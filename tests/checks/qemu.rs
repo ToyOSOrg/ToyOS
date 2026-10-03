@@ -93,7 +93,7 @@ pub fn ceiling_self_check() -> Result<(), String> {
     //    read loop asks, so the case is staged where the loop reads it: the
     //    same words from a program classify as nobody's business, and a wait
     //    with no kernel death in it runs on.
-    const USER: &str = "thread 'main' (1) panicked at sshd/src/main.rs:359:23:";
+    const USER: &str = "thread 'main' (1) panicked at sshserver/src/main.rs:359:23:";
     if super::serial::died(USER) == Some(super::serial::Died::Kernel) {
         return Err(format!("a program's own panic reads as the kernel's: {USER:?}"));
     }

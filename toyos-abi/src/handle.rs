@@ -88,7 +88,7 @@ impl Rights {
     /// On a `SysCap`: read the whole machine's kernel log.
     ///
     /// [`SYS_LOG_READ`] answers every record every CPU wrote, which is every
-    /// process's business and no process's right by default. `logd` holds
+    /// process's business and no process's right by default. `logkeeper` holds
     /// it because writing `/log` is its job and `test-runner` because a gate
     /// reads what the kernel said; no other program in any boot config does.
     ///
@@ -101,12 +101,12 @@ impl Rights {
     /// carries — one bit for both, because a machine taken away from its
     /// processes is the same authority whichever state it is left in. It rides a bit for
     /// the same reason minting a device claim and entering the real-time band
-    /// do: what can cut the power is exactly what `init` endowed, and
+    /// do: what can cut the power is exactly what the supervisor endowed, and
     /// there is nothing a program can name to reach it otherwise.
     ///
-    /// The kernel mints one carrying it, at boot, for `init`
-    /// (`kernel::loader::spawn_init`); every other holder is a narrowed
-    /// duplicate init endowed from a `system.toml` row that named `power`.
+    /// The kernel mints one carrying it, at boot, for the supervisor
+    /// (`kernel::loader::spawn_supervisor`); every other holder is a narrowed
+    /// duplicate the supervisor endowed from a `system.toml` row that named `power`.
     ///
     /// [`SYS_SHUTDOWN`]: crate::syscall::SYS_SHUTDOWN
     /// [`SYS_REBOOT`]: crate::syscall::SYS_REBOOT

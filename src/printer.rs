@@ -1,6 +1,6 @@
 //! The one printer: `eprintln!` in every target of this package is the macro
 //! below, so each statement the build system or the harness makes on stderr
-//! opens with the UTC time of day it was made at — the clock `logd` stamps
+//! opens with the UTC time of day it was made at — the clock `logkeeper` stamps
 //! `/log` with. A statement of several lines is stamped once, on its first.
 //! What a child process writes to the terminal, and what is written to
 //! stdout, pass through no printer and carry no stamp.

@@ -1,21 +1,21 @@
 
 [boot]
-start = ["logd", "blockd", "fsd", "soundd", "test-runner"]
+start = ["logkeeper", "diskserver", "fileserver", "soundserver", "test-runner"]
 
 # **Every image that carries a `TOYOS-LOG` partition runs this**, and every
 # image does. The kernel keeps the record ring and writes no file at all, so a
-# boot config without `logd` is a boot whose `/log` is empty —
-# `every_boot_config_runs_logd` is what refuses one.
+# boot config without `logkeeper` is a boot whose `/log` is empty —
+# `every_boot_config_runs_logkeeper` is what refuses one.
 # It claims no device and serves no port: its row's authority is `logread`,
-# which is `Rights::LOG | Rights::WAIT` on a `SysCap` duplicate, and init hands
+# which is `Rights::LOG | Rights::WAIT` on a `SysCap` duplicate, and the supervisor hands
 # it every program's output beside that.
-[programs.logd]
+[programs.logkeeper]
 service = true
 syscap = ["logread"]
 
-[programs.soundd]
+[programs.soundserver]
 service = true
-serves = ["soundd"]
+serves = ["soundserver"]
 devices = ["hda-audio", "virtio-sound"]
 syscap = ["rt"]
 
@@ -29,19 +29,19 @@ syscap = ["rt"]
 # `power` because `endowment_denied` narrows it *away* to prove the two power
 # syscalls refuse a capability without it, which a capability that never
 # carried it would make vacuous. `run shutdown` does not use it: the applet asks
-# init through the `power` connector, and init has `logd` make the log whole
+# the supervisor through the `power` connector, and the supervisor has `logkeeper` make the log whole
 # before it stops the machine.
 # `roster` because guest binaries read `SYS_SYSINFO`'s per-thread entries —
-# soundd's, for the idle-suspend certification, and their own, which arrive in
+# soundserver's, for the idle-suspend certification, and their own, which arrive in
 # the same machine-wide answer and have no narrower question in the ABI. It is
 # also what `endowment_denied` narrows *away* to prove the refusal, so an estate
 # without it would make that arm vacuous rather than red.
 [programs.test-runner]
-receives = ["soundd", "power"]
+receives = ["soundserver", "power"]
 syscap = ["device", "dup", "logread", "power", "roster"]
 
 [programs.toybox]
-receives = ["soundd"]
+receives = ["soundserver"]
 
 [symlinks]
 "bin/cat" = "/system/bin/toybox"
@@ -66,7 +66,7 @@ receives = ["soundd"]
 # The block service: the NVMe controller this machine's DATA is on, driven
 # from userland through its claim. Started again when it ends; the claim goes
 # back with the process and is minted again for the next.
-[programs.blockd]
+[programs.diskserver]
 service = true
 restart = true
 serves = ["block"]
@@ -75,7 +75,7 @@ devices = ["pci:1b36:0010"]
 # The file servers: DATA, the log and the running slot's volume, one process
 # each, serving every program the directories of its role. Started again when
 # one ends, on the same ports.
-[programs.fsd]
+[programs.fileserver]
 restart = true
 roles = ["data", "log", "boot"]
 receives = ["block"]

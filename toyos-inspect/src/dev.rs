@@ -238,7 +238,7 @@ mod tests {
     }
 
     fn records() -> Vec<Record> {
-        let netd = holder(9, "netd");
+        let netstack = holder(9, "netstack");
         alloc::vec![
             pci(NIC, Driven::Claimed),
             pci(XHCI, Driven::Kernel),
@@ -258,10 +258,10 @@ mod tests {
             part(1, 1, 0xef, PartState::Free),
             // The image `dd`'d to a second disk: one GUID, two partitions.
             part(0, 1, 0xcd, PartState::Free),
-            Record::Claim(Claim { on: Claimed::Pci(NIC), holder: netd }),
+            Record::Claim(Claim { on: Claimed::Pci(NIC), holder: netstack }),
             // The same claim through a second handle in the same table.
-            Record::Claim(Claim { on: Claimed::Pci(NIC), holder: netd }),
-            Record::Claim(Claim { on: Claimed::Class(DeviceType::VirtioSound), holder: holder(7, "soundd") }),
+            Record::Claim(Claim { on: Claimed::Pci(NIC), holder: netstack }),
+            Record::Claim(Claim { on: Claimed::Class(DeviceType::VirtioSound), holder: holder(7, "soundserver") }),
             Record::Claim(Claim {
                 on: Claimed::Partition { device: 1, unique_guid: [0xcd; 16] },
                 holder: holder(12, "test-runner"),
@@ -283,7 +283,7 @@ mod tests {
         assert_eq!(text("dev.cpus").as_deref(), Some("2"));
         assert_eq!(text("dev.memory.used_bytes").as_deref(), Some("512"));
         assert_eq!(text("dev.pci.0000:00:1f:6.driver").as_deref(), Some("claimed"));
-        assert_eq!(text("dev.pci.0000:00:1f:6.holder.9").as_deref(), Some("netd"));
+        assert_eq!(text("dev.pci.0000:00:1f:6.holder.9").as_deref(), Some("netstack"));
         assert_eq!(text("dev.pci.0000:00:1f:6.class").as_deref(), Some("02:00:00"));
         assert_eq!(text("dev.pci.0000:00:04:0.driver").as_deref(), Some("kernel"));
         // Claimed, and its handle was in no table the kernel walked.
@@ -304,7 +304,7 @@ mod tests {
             text("dev.disk.0.part1.unique").as_deref(),
             Some("cdcdcdcd-cdcd-cdcd-cdcd-cdcdcdcdcdcd")
         );
-        assert_eq!(text("dev.class.virtio-sound.holder.7").as_deref(), Some("soundd"));
+        assert_eq!(text("dev.class.virtio-sound.holder.7").as_deref(), Some("soundserver"));
     }
 
     #[test]

@@ -39,7 +39,7 @@ static STOPPING: AtomicBool = AtomicBool::new(false);
 /// Nothing this process does can reach a log whose last line is already
 /// written, so the loop stops where it is.
 ///
-/// **Parks rather than exits**: the runner is what `init` waits on, so an exit
+/// **Parks rather than exits**: the runner is what the supervisor waits on, so an exit
 /// here would end the boot underneath the shutdown that is running on the other
 /// thread. A reboot that is refused ends this process from that thread instead.
 fn stand_down() -> ! {
@@ -184,7 +184,7 @@ fn give_the_machine_back(why: &str) -> ! {
 }
 
 /// Say why, on a console that may have nobody on it, and end this process —
-/// which on the job path ends the boot, because the runner is what init waits
+/// which on the job path ends the boot, because the runner is what the supervisor waits
 /// on.
 fn fatal(why: &str) -> ! {
     println!("test-runner: {why}");

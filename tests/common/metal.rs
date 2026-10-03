@@ -179,13 +179,13 @@ pub struct Readback {
     /// The directory the loop wrote this boot's files into.
     home: PathBuf,
     loader: String,
-    /// The kernel's own records of every `logd` file this boot wrote.
+    /// The kernel's own records of every `logkeeper` file this boot wrote.
     kernel: String,
     /// Every line of those files, the programs' included.
     log: String,
     /// `Boot: complete (Nms)`, or `None` on a boot that never got there.
     pub boot_ms: Option<u64>,
-    /// What the machine spent getting back to `sshd`.
+    /// What the machine spent getting back to `sshserver`.
     pub back_secs: u64,
     /// How long after that the boot stick's own partition was there again.
     pub stick_secs: u64,
@@ -201,7 +201,7 @@ pub struct Readback {
 
 impl Readback {
     /// One boot's readback out of the three files the loop wrote for it:
-    /// `loader.log`, the `logd` files as one text, and the boot file.
+    /// `loader.log`, the `logkeeper` files as one text, and the boot file.
     pub fn new(label: &str, home: PathBuf, loader: String, log: String, boot: &str) -> Result<Self, String> {
         let kernel = bootlog::kernel_records(&log);
         let back_secs = toyos_build::metal::back_secs(boot)
@@ -243,7 +243,7 @@ impl Readback {
         Ok((heard, stream.split_inclusive('\n').map(str::to_string).collect()))
     }
 
-    /// One file off the log volume that is neither the loader's nor `logd`'s,
+    /// One file off the log volume that is neither the loader's nor `logkeeper`'s,
     /// read out of the partition's own bytes; `None` where the volume has no
     /// such file.
     ///
@@ -261,9 +261,9 @@ impl Readback {
             .transpose()
     }
 
-    /// Every `logd` file this boot wrote, as one text, less every program's
+    /// Every `logkeeper` file this boot wrote, as one text, less every program's
     /// line ([`bootlog::kernel_records`]): no program's line is read as the kernel's.
-    /// It ends where init had `logd` make it whole, so what the kernel writes
+    /// It ends where the supervisor had `logkeeper` make it whole, so what the kernel writes
     /// inside the stop or a wedge is only on the page ([`Self::after_the_reset`]).
     pub fn kernel(&self) -> Serial {
         Serial::named(&format!("{}'s kernel log", self.label), self.kernel.as_str())
@@ -289,8 +289,8 @@ impl Readback {
     /// Whether this boot's log is whole to its stop, and the stop's own tail
     /// is on the page.
     ///
-    /// **The file ends where init had `logd` make it whole.** The stop stops
-    /// `logd` with every other thread, so what the kernel says from there on
+    /// **The file ends where the supervisor had `logkeeper` make it whole.** The stop stops
+    /// `logkeeper` with every other thread, so what the kernel says from there on
     /// goes on the black-box page under the boot's `DONE` seal and comes back
     /// in the next loader pass, and this reads it there — for every boot,
     /// because the suite's whole verdict is read out of those two files.
@@ -305,7 +305,7 @@ impl Readback {
         }
         if bootlog::stopping_line(&self.log).is_none() {
             return Err(format!(
-                "{}'s pass after the reset read DONE, and its log carries no {:?} from init: \
+                "{}'s pass after the reset read DONE, and its log carries no {:?} from the supervisor: \
                  nothing made the file whole before the stop",
                 self.label,
                 bootlog::STOPPING,
@@ -340,7 +340,7 @@ impl Readback {
     /// What the on-screen panel cost this boot, off the kernel's own census.
     ///
     /// **Off the page, because no file carries it.** A boot that hands the
-    /// machine back writes the census inside its stop, after `logd` has
+    /// machine back writes the census inside its stop, after `logkeeper` has
     /// stopped, and seals it among its tail; a boot a bound ended seals it with
     /// its record. The page from *this* boot is the one after the separator:
     /// an earlier chain's report can sit in the pass before it.
@@ -361,7 +361,7 @@ impl Readback {
     }
 
     /// The stop's own record, off the page its tail is sealed on: the stop
-    /// writes it after `logd` has stopped, so no file carries it.
+    /// writes it after `logkeeper` has stopped, so no file carries it.
     fn stop_record(&self) -> Option<toyos_quiesce::Record> {
         toyos_build::metal::park(self.after_the_reset().ok()?.text())
     }

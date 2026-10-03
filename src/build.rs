@@ -111,7 +111,7 @@ struct SystemConfig {
     hosted_rustc: bool,
     #[serde(default)]
     assets: Vec<String>,
-    /// What `/system/bin/init` starts at boot. Program *keys*, never paths — a path
+    /// What `/system/bin/supervisor` starts at boot. Program *keys*, never paths — a path
     /// here is a second spelling of a `[programs]` key and is what let a boot
     /// list smuggle an argument through. Arguments live on the program entry's
     /// `args` instead.
@@ -144,30 +144,30 @@ struct ProgramConfig {
     no_default_features: bool,
     /// Argv this program is started with, after argv[0].
     args: Vec<String>,
-    /// Names init creates **one machine-wide port** for and endows this program
+    /// Names the supervisor creates **one machine-wide port** for and endows this program
     /// the *acceptor* of.
     serves: Vec<String>,
     /// Names this program creates a port for **itself**, once per instance, and
-    /// hands the connector down to its own children. init creates nothing and
+    /// hands the connector down to its own children. The supervisor creates nothing and
     /// holds nothing for these — `surface` is the whole of this kind.
     provides: Vec<String>,
     /// Names in this program's namespace, each a *connector*.
     receives: Vec<String>,
-    /// Device classes init mints a claim for and endows.
+    /// Device classes the supervisor mints a claim for and endows.
     devices: Vec<String>,
-    /// Rights on the `SysCap` duplicate init endows this program, by the names
+    /// Rights on the `SysCap` duplicate the supervisor endows this program, by the names
     /// `toyos_manifest::syscap_rights` takes. A handful of rows in the whole
     /// tree declare one.
     syscap: Vec<String>,
     /// The idle slot, granted as partition claims (`toyos_manifest::Program::slots`).
     slots: bool,
-    /// A system service: init starts it with `HOME` at its own `/state/<name>`
+    /// A system service: the supervisor starts it with `HOME` at its own `/state/<name>`
     /// and makes that directory, where every other row gets the session's.
     service: bool,
     /// The file-server roles this binary serves, one process each
     /// (`toyos_manifest::Program::roles`).
     roles: Vec<String>,
-    /// init starts it again when it ends (`toyos_manifest::Program::restart`).
+    /// The supervisor starts it again when it ends (`toyos_manifest::Program::restart`).
     restart: bool,
 }
 
@@ -382,8 +382,8 @@ fn config_crates(root: &Path, config: &SystemConfig) -> Vec<ConfigCrate> {
         });
     }
     crates.push(ConfigCrate {
-        name: INIT_PROGRAM.to_string(),
-        dir: ProgramConfig::default().crate_dir(root, INIT_PROGRAM),
+        name: SUPERVISOR_PROGRAM.to_string(),
+        dir: ProgramConfig::default().crate_dir(root, SUPERVISOR_PROGRAM),
         built: Built::Member,
         features: Features::Default,
     });
@@ -487,14 +487,6 @@ fn cargo_build(
 // So: hold [`buildlock::artifact`] across each build→stage pair, and copy the
 // artifact to a name carrying what it is actually keyed by. Readers use the
 // staged name, which no other config can overwrite.
-//
-// The bootloader used to be here for the same reason and no longer is: its init
-// list was compiled into it, so the `.efi` was a function of the boot config,
-// and an image once carried metalcase's root image beside another config's
-// bootloader whose 28-byte init string was `"/system/bin/soundd;/system/bin/test-runner"` —
-// the compositor was never spawned and the test failed as though the daemon
-// under test were broken. The bootloader carries no config now, so it is
-// memoized once per profile and that hazard is not expressible.
 
 /// The staged-artifact key of a kernel built with `features`.
 ///
@@ -635,15 +627,15 @@ fn assert_overflow_checked(what: &str, image: &[u8]) {
 /// The one program the kernel starts, in **every** image whatever `[programs]`
 /// says. It reads the manifest below and starts what that names, so a ROOT image
 /// without it is a machine with a kernel and no userland at all.
-const INIT_PROGRAM: &str = "init";
+const SUPERVISOR_PROGRAM: &str = "supervisor";
 
-/// Names `/system/bin/init` serves itself.
+/// Names `/system/bin/supervisor` serves itself.
 ///
-/// init is in every image and is no `[programs]` key, so these have no
-/// declaration to come from. They travel in the manifest so init creates
+/// The supervisor is in every image and is no `[programs]` key, so these have no
+/// declaration to come from. They travel in the manifest so the supervisor creates
 /// exactly the ports the build-time gate counted as provided — one producer,
-/// rather than a constant here and a string in init.
-const INIT_SERVED: &[&str] = &["launcher", toyos_swap::PORT, "power"];
+/// rather than a constant here and a string in the supervisor.
+const SUPERVISOR_SERVED: &[&str] = &["launcher", toyos_swap::PORT, "power"];
 
 /// Who may hold the two authorities that change what the machine runs:
 /// the swap port, [`toyos_swap::HOLDER`] and nothing else — no other
@@ -672,10 +664,10 @@ fn held_by_their_holders_alone(config: &SystemConfig) -> Result<(), String> {
     Ok(())
 }
 
-/// The resolved config as the records `/system/bin/init` reads.
+/// The resolved config as the records `/system/bin/supervisor` reads.
 ///
 /// The format, the renderer and the parser are `toyos-manifest/`, whose
-/// round-trip test is what makes "what the build writes is what init reads" a
+/// round-trip test is what makes "what the build writes is what the supervisor reads" a
 /// fact rather than two hand-matched implementations.
 fn render_manifest(config: &SystemConfig) -> Vec<u8> {
     if let Err(why) = held_by_their_holders_alone(config) {
@@ -704,7 +696,7 @@ fn render_manifest(config: &SystemConfig) -> Vec<u8> {
                 }
             })
             .collect(),
-        init_serves: INIT_SERVED.iter().map(|s| (*s).to_string()).collect(),
+        supervisor_serves: SUPERVISOR_SERVED.iter().map(|s| (*s).to_string()).collect(),
         apps: config.apps.receives.clone(),
         start: config.boot.start.clone(),
     };
@@ -796,7 +788,7 @@ fn not_built_for(arch: Arch, program: &str) -> Option<&'static str> {
     NOT_YET_BUILT.iter().find(|(a, name, _)| *a == arch && *name == program).map(|(_, _, why)| *why)
 }
 
-/// Build `config`'s programs and init for `arch`, and add each to `root_files`.
+/// Build `config`'s programs and the supervisor for `arch`, and add each to `root_files`.
 fn build_programs(
     root: &Path,
     config: &SystemConfig,
@@ -882,7 +874,7 @@ fn symlink_target_name(to: &str) -> &str {
 }
 
 /// The converse of the crate assertion above: a `bin/` entry no name reaches.
-/// A name buys authority — `/system/bin/init` builds a `[programs]` row's namespace and
+/// A name buys authority — `/system/bin/supervisor` builds a `[programs]` row's namespace and
 /// device claims — and a harness binary has none, holding only what its spawner
 /// moved in, so it is legal exactly when the config starts something that could
 /// spawn it. **An inventory over the `bin/` namespace, not a reachability
@@ -894,7 +886,7 @@ fn unnamed_program(
 ) -> Result<(), String> {
     for name in names {
         let Some(program) = name.strip_prefix("bin/") else { continue };
-        if program == INIT_PROGRAM || programs.contains(program) {
+        if program == SUPERVISOR_PROGRAM || programs.contains(program) {
             continue;
         }
         if HARNESS_PREFIXES.iter().any(|p| name.starts_with(p)) {
@@ -909,7 +901,7 @@ fn unnamed_program(
             continue;
         }
         return Err(format!(
-            "the image carries {name} and no `[programs]` row names it, so `/system/bin/init` can build \
+            "the image carries {name} and no `[programs]` row names it, so `/system/bin/supervisor` can build \
              it no namespace and no device claim; add a row or take the file out"
         ));
     }
@@ -1826,7 +1818,7 @@ pub fn designate_for_format(path: &Path, len: u64) {
 /// run asks cargo again.
 ///
 /// Per part rather than per image, because a part is what a key can be true of:
-/// the kernel is its feature set, the bootloader is its init list, the ROOT image is
+/// the kernel is its feature set, the ROOT image is
 /// its config and the caller's extra files. That is the same split
 /// [`stage_artifact`] already writes into the artifact names, and it is what
 /// makes this affordable — a full run boots a handful of kernels, and builds
@@ -2054,7 +2046,7 @@ pub fn copy_guest_program(root: &Path, arch: Arch, name: &str, to: &Path) -> Res
 }
 
 /// The harness's SSH client — the only thing in this tree that speaks the
-/// protocol from the other side of `userland/sshd`.
+/// protocol from the other side of `userland/sshserver`.
 pub fn ssh_client_host(root: &Path) -> PathBuf {
     host_judge(root, SSH_CLIENT)
 }
@@ -2263,15 +2255,15 @@ fn collect_hosted_rustc(root: &Path, toolchain: &Path, root_files: &mut Vec<(Str
 mod tests {
     use super::*;
 
-    /// `console` is reached by `console/system.toml` alone and `init` by no
-    /// `[programs]` row, so a reader that drops a mode or init loses one.
+    /// `console` is reached by `console/system.toml` alone and the supervisor by no
+    /// `[programs]` row, so a reader that drops a mode or the supervisor loses one.
     #[test]
-    fn every_modes_crates_and_init_ship() {
+    fn every_modes_crates_and_the_supervisor_ship() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let shipped = shipped(root).expect("the modes' configs");
         for (dir, features) in [
             ("userland/console", Features::Default),
-            ("userland/init", Features::Default),
+            ("userland/supervisor", Features::Default),
             ("kernel", Features::AnyDeclared),
             ("bootloader", Features::Default),
         ] {
@@ -2333,7 +2325,7 @@ mod tests {
         let crates = [&kernel, &loader, &userland];
         let kernels = Arch::ALL.map(|arch| file(kernel.join(format!("target/{}/{PROFILE}/kernel", arch.kernel()))));
         let loaders = Arch::ALL.map(|arch| file(loader.join(format!("target/{}/{PROFILE}/loader.efi", arch.loader()))));
-        let programs = Arch::ALL.map(|arch| file(userland.join(format!("target/{}/{PROFILE}/init", arch.userland()))));
+        let programs = Arch::ALL.map(|arch| file(userland.join(format!("target/{}/{PROFILE}/supervisor", arch.userland()))));
         let hosts = crates.map(|dir| file(dir.join(format!("target/{PROFILE}/deps/libproc-1.dylib"))));
 
         let before = Identity::of_parts("compiler", "freestanding", "toyos");
@@ -2861,22 +2853,22 @@ mod tests {
         assert_eq!(not_built_for(Arch::X86_64, "calc"), None, "x86-64 builds every program");
     }
 
-    /// No image this repository ships starts sshd.
+    /// No image this repository ships starts sshserver.
     ///
     /// It listens on every interface and authenticates against a file that is
     /// absent on a fresh install, so on a default boot it would be a port that
     /// accepts connections and refuses all of them. Whoever wants it runs
-    /// `/system/bin/sshd` themselves. It stays in `[programs]` — the gate is on what
-    /// init starts, not on the binary being present.
+    /// `/system/bin/sshserver` themselves. It stays in `[programs]` — the gate is on what
+    /// the supervisor starts, not on the binary being present.
     #[test]
-    fn no_shipped_boot_config_starts_sshd() {
+    fn no_shipped_boot_config_starts_sshserver() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         for boot in [Boot::shipped(root), Boot::diag(root), Boot::console(root)] {
             let config = boot.config.clone();
             let start = parse_config(&config).boot.start;
             assert!(
-                !start.iter().any(|p| p == "sshd"),
-                "{} starts sshd: {start:?}",
+                !start.iter().any(|p| p == "sshserver"),
+                "{} starts sshserver: {start:?}",
                 config.display(),
             );
         }
@@ -2953,11 +2945,11 @@ mod tests {
         assert!(refusal.contains("not in this repository"), "{refusal}");
     }
 
-    /// **Every config with a `[boot] start` runs `/system/bin/logd`, `logd` always holds
+    /// **Every config with a `[boot] start` runs `/system/bin/logkeeper`, `logkeeper` always holds
     /// `logread`, and nothing outside the cursor readers ever does.**
     ///
-    /// The kernel writes no file — `/system/bin/logd` owns `/log` and reads records off
-    /// a cursor — so a boot config that does not start `logd` is an image whose
+    /// The kernel writes no file — `/system/bin/logkeeper` owns `/log` and reads records off
+    /// a cursor — so a boot config that does not start `logkeeper` is an image whose
     /// log partition stays empty for the whole of that boot — and on
     /// the machine this subsystem exists for, a T14 with no serial port, that is
     /// the boot with no record of itself anywhere. A config added later fails
@@ -2968,8 +2960,8 @@ mod tests {
     /// `Rights::LOG | Rights::WAIT` on a `SysCap` duplicate, which is authority
     /// over every record every CPU wrote, and a right with no caller is a
     /// capability handed out for a plan. Two programs read a cursor —
-    /// `/system/bin/logd`, which writes the file, and `test-runner`, which runs the
-    /// conservation gates inside itself. `logd` always does, since that is its
+    /// `/system/bin/logkeeper`, which writes the file, and `test-runner`, which runs the
+    /// conservation gates inside itself. `logkeeper` always does, since that is its
     /// whole job; `test-runner` does where an estate runs such a gate and not
     /// where it runs none. `/system/bin/console` is the near miss: it *could* show this boot's
     /// records live off a cursor, and holds the right only once something reads one.
@@ -2978,25 +2970,25 @@ mod tests {
     /// over the TOML would pass on a row that is commented out and on a key
     /// `serde` never saw.
     #[test]
-    fn every_boot_config_runs_logd() {
-        const READERS: &[&str] = &["logd", "test-runner"];
+    fn every_boot_config_runs_logkeeper() {
+        const READERS: &[&str] = &["logkeeper", "test-runner"];
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         for config in ALL_CONFIGS {
             let parsed = parse_config(&root.join(config));
             assert!(
-                parsed.boot.start.iter().any(|p| p == "logd"),
-                "{config} declares `[boot] start = {:?}` and no `logd` in it, so this image's \
+                parsed.boot.start.iter().any(|p| p == "logkeeper"),
+                "{config} declares `[boot] start = {:?}` and no `logkeeper` in it, so this image's \
                  /log is empty for the whole boot",
                 parsed.boot.start,
             );
             assert!(
-                parsed.programs.contains_key("logd"),
-                "{config} starts `logd` and has no `[programs.logd]` row to say what it holds",
+                parsed.programs.contains_key("logkeeper"),
+                "{config} starts `logkeeper` and has no `[programs.logkeeper]` row to say what it holds",
             );
             for (name, program) in &parsed.programs {
                 let holds = program.syscap.iter().any(|s| s == "logread");
-                if name == "logd" {
-                    assert!(holds, "{config}: `logd` writes the file and must read the cursor");
+                if name == "logkeeper" {
+                    assert!(holds, "{config}: `logkeeper` writes the file and must read the cursor");
                     continue;
                 }
                 assert!(
@@ -3008,21 +3000,21 @@ mod tests {
         }
     }
 
-    /// **An image a user boots serves no log on the network.** `logd` answers
+    /// **An image a user boots serves no log on the network.** `logkeeper` answers
     /// `toyos_logstream::PORT` to whoever connects, with nothing to authenticate
-    /// them, once it holds a `netd` connector: the test configs that read the
+    /// them, once it holds a `netstack` connector: the test configs that read the
     /// stream give it one, and these do not.
     #[test]
     fn no_shipped_image_serves_the_log_on_the_network() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         for config in ALL_CONFIGS.iter().filter(|config| !config.starts_with("tests/")) {
             let parsed = parse_config(&root.join(config));
-            let logd = parsed.programs.get("logd").expect("every config runs logd");
+            let logkeeper = parsed.programs.get("logkeeper").expect("every config runs logkeeper");
             assert!(
-                logd.receives.is_empty(),
-                "{config}: `logd` receives {:?}, and a `netd` connector is what serves this \
+                logkeeper.receives.is_empty(),
+                "{config}: `logkeeper` receives {:?}, and a `netstack` connector is what serves this \
                  machine's log to anyone on its network",
-                logd.receives,
+                logkeeper.receives,
             );
         }
     }
@@ -3039,7 +3031,7 @@ mod tests {
         }
     }
 
-    /// One prefix and no other, so a doc naming `/etc/logd` or `/apps/logd` is a
+    /// One prefix and no other, so a doc naming `/etc/logkeeper` or `/apps/logkeeper` is a
     /// token the filter below drops and an assertion that reds.
     const LOG_DOC_BIN: &str = "/system/bin/";
 
@@ -3123,11 +3115,11 @@ mod tests {
     }
 
     /// Every name a program `receives` must be served or provided by some
-    /// program in the *same* config, or served by init. The build-time form of
+    /// program in the *same* config, or served by the supervisor. The build-time form of
     /// "a client cannot name a service the system does not have", and the gate
     /// with the sharpest teeth: no guest, no mutated tree.
     fn receives_have_providers(cfg: &SystemConfig) -> Result<(), String> {
-        let mut providers: Vec<&str> = INIT_SERVED.to_vec();
+        let mut providers: Vec<&str> = SUPERVISOR_SERVED.to_vec();
         for prog in cfg.programs.values() {
             providers.extend(prog.serves.iter().map(String::as_str));
             providers.extend(prog.provides.iter().map(String::as_str));
@@ -3150,7 +3142,7 @@ mod tests {
             receives_have_providers(&load(cfg)).unwrap_or_else(|e| panic!("{cfg}: {e}"));
         }
         let bad: SystemConfig =
-            toml::from_str("init = []\n[programs.client]\nreceives = [\"ghost\"]\n").unwrap();
+            toml::from_str("[programs.client]\nreceives = [\"ghost\"]\n").unwrap();
         assert!(receives_have_providers(&bad).is_err());
     }
 
@@ -3168,9 +3160,9 @@ mod tests {
         let shell: SystemConfig =
             toml::from_str("[programs.shell]\nreceives = [\"swap\"]\n").unwrap();
         assert!(held_by_their_holders_alone(&shell).is_err());
-        let sshd: SystemConfig =
-            toml::from_str("[programs.sshd]\nreceives = [\"netd\", \"swap\"]\n").unwrap();
-        assert!(held_by_their_holders_alone(&sshd).is_err());
+        let sshserver: SystemConfig =
+            toml::from_str("[programs.sshserver]\nreceives = [\"netstack\", \"swap\"]\n").unwrap();
+        assert!(held_by_their_holders_alone(&sshserver).is_err());
         let apps: SystemConfig = toml::from_str("[apps]\nreceives = [\"swap\"]\n").unwrap();
         assert!(held_by_their_holders_alone(&apps).is_err());
         let slots: SystemConfig = toml::from_str("[programs.shell]\nslots = true\n").unwrap();
@@ -3179,9 +3171,9 @@ mod tests {
 
     /// `[apps] receives` is narrower than a program's: a `provides` name is one
     /// port per instance and nobody makes one for a package, so naming one here
-    /// is a namespace init cannot build.
+    /// is a namespace the supervisor cannot build.
     fn apps_receive_a_served_name(cfg: &SystemConfig) -> Result<(), String> {
-        let mut served: Vec<&str> = INIT_SERVED.to_vec();
+        let mut served: Vec<&str> = SUPERVISOR_SERVED.to_vec();
         for prog in cfg.programs.values() {
             served.extend(prog.serves.iter().map(String::as_str));
         }
@@ -3194,23 +3186,23 @@ mod tests {
     }
 
     #[test]
-    fn an_installed_app_receives_only_names_init_holds() {
+    fn an_installed_app_receives_only_names_the_supervisor_holds() {
         for cfg in ALL_CONFIGS {
             apps_receive_a_served_name(&load(cfg)).unwrap_or_else(|e| panic!("{cfg}: {e}"));
         }
         let provided: SystemConfig = toml::from_str(
-            "init = []\n[apps]\nreceives = [\"surface\"]\n\
+            "[apps]\nreceives = [\"surface\"]\n\
              [programs.terminal]\nprovides = [\"surface\"]\n",
         )
         .unwrap();
         assert!(apps_receive_a_served_name(&provided).is_err());
         let ghost: SystemConfig =
-            toml::from_str("init = []\n[apps]\nreceives = [\"ghost\"]\n").unwrap();
+            toml::from_str("[apps]\nreceives = [\"ghost\"]\n").unwrap();
         assert!(apps_receive_a_served_name(&ghost).is_err());
     }
 
     /// A `serves` name is one port machine-wide; a `provides` name is one port
-    /// per instance. A name declared both ways is a config where init makes a
+    /// per instance. A name declared both ways is a config where the supervisor makes a
     /// port nobody accepts from while the real one is made elsewhere.
     fn provides_disjoint_from_serves(cfg: &SystemConfig) -> Result<(), String> {
         let serves: Vec<&str> = cfg
@@ -3236,13 +3228,13 @@ mod tests {
             provides_disjoint_from_serves(&load(cfg)).unwrap_or_else(|e| panic!("{cfg}: {e}"));
         }
         let bad: SystemConfig = toml::from_str(
-            "init = []\n[programs.a]\nserves = [\"x\"]\n[programs.b]\nprovides = [\"x\"]\n",
+            "[programs.a]\nserves = [\"x\"]\n[programs.b]\nprovides = [\"x\"]\n",
         )
         .unwrap();
         assert!(provides_disjoint_from_serves(&bad).is_err());
     }
 
-    /// Init mints one claim per device, so a config naming one twice starts a
+    /// The supervisor mints one claim per device, so a config naming one twice starts a
     /// program with a hole where its claim should be.
     fn one_claimant_per_device(cfg: &SystemConfig) -> Result<(), String> {
         let mut seen: BTreeMap<&str, &str> = BTreeMap::new();
@@ -3267,32 +3259,32 @@ mod tests {
             one_claimant_per_device(&load(cfg)).unwrap_or_else(|e| panic!("{cfg}: {e}"));
         }
         let bad: SystemConfig = toml::from_str(
-            "init = []\n[programs.a]\ndevices = [\"framebuffer\"]\n\
+            "[programs.a]\ndevices = [\"framebuffer\"]\n\
              [programs.b]\ndevices = [\"framebuffer\"]\n",
         )
         .unwrap();
         assert!(one_claimant_per_device(&bad).is_err());
     }
 
-    /// netd's actuator that only its Intel driver answers, spelled here and
-    /// held to netd's own declaration by
-    /// [`netd_declares_the_flag_this_gate_spells`].
+    /// netstack's actuator that only its Intel driver answers, spelled here and
+    /// held to netstack's own declaration by
+    /// [`netstack_declares_the_flag_this_gate_spells`].
     const EXIT_WITH_LEASE: &str = "--exit-with-lease";
 
-    /// netd's main module, which is where both halves of this gate's spelling
+    /// netstack's main module, which is where both halves of this gate's spelling
     /// live: nothing links the two crates, so the build system reads the source.
-    fn netd_source() -> (std::path::PathBuf, String) {
-        let at = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("userland/netd/src/main.rs");
-        let text = std::fs::read_to_string(&at).expect("netd's main module");
+    fn netstack_source() -> (std::path::PathBuf, String) {
+        let at = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("userland/netstack/src/main.rs");
+        let text = std::fs::read_to_string(&at).expect("netstack's main module");
         (at, text)
     }
 
-    /// Nothing links the two crates: netd is a userland binary and this is the
-    /// build system, so the flags both ends spell are held to netd's own
+    /// Nothing links the two crates: netstack is a userland binary and this is the
+    /// build system, so the flags both ends spell are held to netstack's own
     /// declarations by reading its source.
     #[test]
-    fn netd_declares_the_flag_this_gate_spells() {
-        let (at, source) = netd_source();
+    fn netstack_declares_the_flag_this_gate_spells() {
+        let (at, source) = netstack_source();
         assert!(
             crate::bootlog::declares(&source, &format!("\"{EXIT_WITH_LEASE}\"")),
             "{} declares no constant equal to \"{EXIT_WITH_LEASE}\"",
@@ -3307,14 +3299,14 @@ mod tests {
         (digits.len() == 4).then_some(digits)
     }
 
-    /// The device entries netd opens with the driver that has §10.2.4.4's `ICS`,
-    /// read out of netd's own `CARDS` rather than guessed from a vendor id: each
+    /// The device entries netstack opens with the driver that has §10.2.4.4's `ICS`,
+    /// read out of netstack's own `CARDS` rather than guessed from a vendor id: each
     /// row spells an id and the constructor that takes it on one line.
     ///
     /// **The scan reaches that one spelling and no other**, so every
     /// `Card::intel` row it saw has to have yielded an id — a table written
     /// another way reds here instead of narrowing this gate to nothing.
-    fn netd_intel_cards(source: &str) -> Vec<String> {
+    fn netstack_intel_cards(source: &str) -> Vec<String> {
         let mut cards = Vec::new();
         let mut rows = 0;
         for line in source.lines() {
@@ -3331,16 +3323,16 @@ mod tests {
         assert_eq!(
             cards.len(),
             rows,
-            "netd names `Card::intel` on {rows} line(s) and an id was read off {}; its `CARDS` \
+            "netstack names `Card::intel` on {rows} line(s) and an id was read off {}; its `CARDS` \
              table is spelled in a way this gate does not reach",
             cards.len()
         );
         cards
     }
 
-    /// netd's Intel-only actuators — `--exit-with-lease` reports the Intel
+    /// netstack's Intel-only actuators — `--exit-with-lease` reports the Intel
     /// driver's bring-up beside the lease — and virtio's driver has none, so a
-    /// boot config that arms one on a card netd opens with any other driver is
+    /// boot config that arms one on a card netstack opens with any other driver is
     /// a boot that panics instead of answering the question it was built for.
     fn an_armed_intel_actuator_claims_a_card_the_driver_opens(
         cfg: &SystemConfig,
@@ -3353,7 +3345,7 @@ mod tests {
             if !prog.devices.iter().any(|d| cards.contains(d)) {
                 return Err(format!(
                     "`{name}` is armed with `{EXIT_WITH_LEASE}` and claims {:?}, none of which \
-                     is one of the {cards:?} netd opens with that driver",
+                     is one of the {cards:?} netstack opens with that driver",
                     prog.devices
                 ));
             }
@@ -3363,9 +3355,9 @@ mod tests {
 
     #[test]
     fn every_armed_intel_actuator_claims_a_card_the_driver_opens() {
-        let (_, source) = netd_source();
-        let cards = netd_intel_cards(&source);
-        assert!(!cards.is_empty(), "netd's `CARDS` names no card its Intel driver opens");
+        let (_, source) = netstack_source();
+        let cards = netstack_intel_cards(&source);
+        assert!(!cards.is_empty(), "netstack's `CARDS` names no card its Intel driver opens");
         let mut armed = 0;
         for cfg in ALL_CONFIGS {
             let config = load(cfg);
@@ -3382,12 +3374,12 @@ mod tests {
         assert!(armed > 0, "no shipped boot config arms `{EXIT_WITH_LEASE}` at all");
         let armed_on = |device: &str, args: &str| {
             let cfg: SystemConfig = toml::from_str(&format!(
-                "init = []\n[programs.netd]\ndevices = [\"{device}\"]\nargs = [{args}]\n"
+                "[programs.netstack]\ndevices = [\"{device}\"]\nargs = [{args}]\n"
             ))
             .unwrap();
             an_armed_intel_actuator_claims_a_card_the_driver_opens(&cfg, &cards)
         };
-        // The card netd drives with the other driver, and an Intel function it
+        // The card netstack drives with the other driver, and an Intel function it
         // drives with none: a vendor id is not what gives a part an `ICS` or a
         // PHY behind `MDIC`.
         let flag = format!("\"{EXIT_WITH_LEASE}\"");
@@ -3396,13 +3388,13 @@ mod tests {
         assert!(armed_on(&cards[0], &flag).is_ok());
     }
 
-    /// A device name the ABI does not know renders fine and leaves init with a
+    /// A device name the ABI does not know renders fine and leaves the supervisor with a
     /// `devices` entry it cannot mint — a dead machine for a typo, where this is
     /// a red in milliseconds. Same for a `syscap` right.
     ///
     /// The ABI's own parser, not a copy of it: a `pci:<vendor>:<device>` entry
     /// names a function and a class name names a class, and this is the same
-    /// `DeviceRequest::parse` init and the kernel read the entry with.
+    /// `DeviceRequest::parse` the supervisor and the kernel read the entry with.
     fn names_only_real_capabilities(cfg: &SystemConfig) -> Result<(), String> {
         for (name, prog) in &cfg.programs {
             for device in &prog.devices {
@@ -3444,7 +3436,7 @@ mod tests {
     }
 
     /// The diagnostic image's whole reason for existing: nothing in it can claim
-    /// the framebuffer, so the kernel's boot log stays on the panel. `/system/bin/init`
+    /// the framebuffer, so the kernel's boot log stays on the panel. `/system/bin/supervisor`
     /// is in every image and could reach a device, so the property becomes "the
     /// config declares no `devices`" — checkable here for the first time.
     #[test]
@@ -3452,12 +3444,12 @@ mod tests {
         claims_no_device(&load("diag/system.toml"))
             .unwrap_or_else(|e| panic!("diag/system.toml: {e}"));
         let bad: SystemConfig =
-            toml::from_str("init = []\n[programs.x]\ndevices = [\"framebuffer\"]\n").unwrap();
+            toml::from_str("[programs.x]\ndevices = [\"framebuffer\"]\n").unwrap();
         assert!(claims_no_device(&bad).is_err());
     }
 
     /// `[boot] start` names program keys, so a typo is a build error rather than
-    /// a refusal `/system/bin/init` reports at boot.
+    /// a refusal `/system/bin/supervisor` reports at boot.
     fn started_programs_are_declared(cfg: &SystemConfig) -> Result<(), String> {
         for name in &cfg.boot.start {
             if !cfg.programs.contains_key(name) {
@@ -3472,7 +3464,7 @@ mod tests {
         for cfg in ALL_CONFIGS {
             started_programs_are_declared(&load(cfg)).unwrap_or_else(|e| panic!("{cfg}: {e}"));
         }
-        let bad: SystemConfig = toml::from_str("init = []\n[boot]\nstart = [\"ghost\"]\n").unwrap();
+        let bad: SystemConfig = toml::from_str("[boot]\nstart = [\"ghost\"]\n").unwrap();
         assert!(started_programs_are_declared(&bad).is_err());
     }
 
@@ -3486,7 +3478,7 @@ mod tests {
         let programs = declared(&["shell"]);
         let started = ["shell".to_string()];
         assert!(unnamed_program(
-            &["bin/init", "bin/shell", "lib/libtls_lib.so", "etc/system.manifest"],
+            &["bin/supervisor", "bin/shell", "lib/libtls_lib.so", "etc/system.manifest"],
             &programs,
             &started,
         )
@@ -3515,10 +3507,10 @@ mod tests {
     /// carries. The day the check learns it, this reds.
     #[test]
     fn the_check_does_not_reach_a_spawner_that_never_spawns() {
-        // `logd` spawns nothing in any config this tree ships.
-        let programs = declared(&["logd"]);
+        // `logkeeper` spawns nothing in any config this tree ships.
+        let programs = declared(&["logkeeper"]);
         assert!(
-            unnamed_program(&["bin/test_rs_window_child"], &programs, &["logd".to_string()])
+            unnamed_program(&["bin/test_rs_window_child"], &programs, &["logkeeper".to_string()])
                 .is_ok(),
             "the scan now reaches whether the spawner spawns; correct this test and its header"
         );

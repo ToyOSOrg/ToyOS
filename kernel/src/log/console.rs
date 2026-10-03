@@ -3,7 +3,7 @@
 //!
 //! **One writer.** `klogd` puts the kernel's records on the wire, and between
 //! them the lines console holders write ([`queue`]) — which on this machine is
-//! `/system/bin/logd` alone, rendering each program's line with its tag.
+//! `/system/bin/logkeeper` alone, rendering each program's line with its tag.
 //! It holds the wire ([`serial::wire`]) with interrupts on and
 //! preemption allowed, and the registers only for one burst at a time.
 //!
@@ -31,7 +31,7 @@ use crate::sync::Lock;
 use super::read::{drain_ordered, Published, RecordSink};
 use super::shard;
 
-// klogd, not logd: `/system/bin/logd` is a separate userland process; one name for both would collide in a dump report.
+// klogd, not logkeeper: `/system/bin/logkeeper` is a separate userland process; one name for both would collide in a dump report.
 const NAME: &str = "klogd";
 
 // `emit` finds `klogd` through this, not the process table: the lookup takes a lock, and `emit` runs inside IRQ handlers and every syscall's locked region.
@@ -348,7 +348,7 @@ impl<F: FnMut(&[u8])> core::fmt::Write for Line<F> {
     }
 }
 
-/// Render one record as the console line; `logd`'s `/log` sink renders the same line with a different prefix.
+/// Render one record as the console line; `logkeeper`'s `/log` sink renders the same line with a different prefix.
 pub fn write_line(record: &LogRecord, emit: impl FnMut(&[u8])) {
     use core::fmt::Write;
     let mut line = Line::new(emit);

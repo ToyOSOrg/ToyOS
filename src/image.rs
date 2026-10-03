@@ -428,7 +428,7 @@ fn round_up_sectors(n: usize) -> usize {
 ///
 /// A correctness requirement rather than tidiness. Every block service
 /// transfers whole 4 KiB blocks and each file server keeps its own cached
-/// copies of the blocks it has touched (`userland/fsd`); two partitions
+/// copies of the blocks it has touched (`userland/fileserver`); two partitions
 /// sharing one device block would make each other's copies stale with
 /// nothing able to notice. 1 MiB rather than the 4096 the kernel needs,
 /// because that is what every partitioner uses and what an erase block wants.
@@ -628,7 +628,7 @@ fn create_slot_volume(image: Option<&Sections>, bytes: usize) -> Vec<u8> {
 /// The partition the kernel's log lives on, empty until a machine boots.
 ///
 /// Exactly [`FAT32_MIN_BYTES`], because the floor is not ours to choose and the
-/// log cannot use much of it: sixteen boots at `/system/bin/logd`'s `MAX_LOG_BYTES`
+/// log cannot use much of it: sixteen boots at `/system/bin/logkeeper`'s `MAX_LOG_BYTES`
 /// come to 16 MiB, under half of what this volume has free, and there is no
 /// smaller FAT32 to cut it down to.
 fn create_log_volume() -> Vec<u8> {
@@ -963,7 +963,7 @@ mod tests {
     /// A ROOT image with one file in it, for the tests that need a real one
     /// rather than a placeholder: the assembler reads its superblock.
     fn tiny_root() -> Vec<u8> {
-        create_root_image(&[("bin/init".to_string(), b"init".to_vec())], &[], true)
+        create_root_image(&[("bin/supervisor".to_string(), b"supervisor".to_vec())], &[], true)
     }
 
     /// A fixed key: what these tests judge is the image, not whose it is.
@@ -1175,9 +1175,9 @@ mod tests {
     #[test]
     fn one_ordering_of_one_set_is_one_image() {
         let files: Vec<(String, Vec<u8>)> = vec![
-            ("bin/init".to_string(), b"init-binary".to_vec()),
+            ("bin/supervisor".to_string(), b"supervisor-binary".to_vec()),
             ("bin/toybox".to_string(), (0..40_000u32).map(|i| (i ^ 0x5A) as u8).collect()),
-            ("etc/system.manifest".to_string(), b"[start]\ninit\n".to_vec()),
+            ("etc/system.manifest".to_string(), b"[start]\nsupervisor\n".to_vec()),
             ("share/empty".to_string(), Vec::new()),
         ];
         let symlinks = vec![
@@ -1230,11 +1230,11 @@ mod tests {
     #[test]
     fn the_root_partition_reads_back_as_the_files_the_build_put_in_it() {
         let files: Vec<(String, Vec<u8>)> = vec![
-            ("bin/init".to_string(), b"init-binary".to_vec()),
+            ("bin/supervisor".to_string(), b"supervisor-binary".to_vec()),
             // Multi-block, so an extent list that stopped after the first is
             // caught by the hash rather than by the size.
             ("bin/toybox".to_string(), (0..40_000u32).map(|i| (i ^ 0x5A) as u8).collect()),
-            ("etc/system.manifest".to_string(), b"[start]\ninit\n".to_vec()),
+            ("etc/system.manifest".to_string(), b"[start]\nsupervisor\n".to_vec()),
             ("share/empty".to_string(), Vec::new()),
         ];
         let symlinks = vec![("bin/ls".to_string(), "/system/bin/toybox".to_string())];
@@ -1303,8 +1303,8 @@ mod tests {
     /// ROOT by type where the table says, `bcachefs` mounts it, and
     /// `toyos-manifest` parses the records out of the volume.
     ///
-    /// `INIT_PATH` comes from the kernel source, and that is a **text scan of
-    /// one spelling** — the `pub const INIT_PATH: &str = "…";` line — so a
+    /// `SUPERVISOR_PATH` comes from the kernel source, and that is a **text scan of
+    /// one spelling** — the `pub const SUPERVISOR_PATH: &str = "…";` line — so a
     /// kernel computing its spawn path otherwise is walked past. Not finding
     /// the line fails here rather than skipping.
     #[test]
@@ -1322,7 +1322,7 @@ mod tests {
             .iter()
             .map(|p| (under_system(&p.path).to_string(), b"placeholder".to_vec()))
             .collect();
-        files.push(("bin/init".to_string(), b"init".to_vec()));
+        files.push(("bin/supervisor".to_string(), b"supervisor".to_vec()));
         files.push((toyos_manifest::PATH.to_string(), manifest.clone()));
 
         let disk = create_boot_image(
@@ -1355,19 +1355,19 @@ mod tests {
             "the path a process opens is not where ROOT carries the manifest"
         );
 
-        let init = init_path_of_the_kernel(root);
+        let supervisor = supervisor_path_of_the_kernel(root);
         let names: std::collections::BTreeSet<String> = fs
             .list(usize::MAX, &|_| true)
             .expect("list the ROOT partition")
             .into_iter()
             .map(|(name, _)| name)
             .collect();
-        for path in std::iter::once(&init).chain(declared.programs.iter().map(|p| &p.path)) {
+        for path in std::iter::once(&supervisor).chain(declared.programs.iter().map(|p| &p.path)) {
             let name = under_system(path);
             assert_ne!(name, path.as_str(), "{path} is not under the mount ROOT gets");
             assert!(names.contains(name), "ROOT has no {name} for the declared path {path}");
         }
-        assert!(names.contains("bin/init"), "ROOT carries {names:?} and no bin/init");
+        assert!(names.contains("bin/supervisor"), "ROOT carries {names:?} and no bin/supervisor");
     }
 
     /// A declared absolute path as ROOT carries it; unchanged off that mount.
@@ -1375,15 +1375,15 @@ mod tests {
         path.strip_prefix("/system/").unwrap_or(path)
     }
 
-    /// The literal in `kernel/src/loader/mod.rs`'s `INIT_PATH`.
-    fn init_path_of_the_kernel(root: &Path) -> String {
-        const ITEM: &str = "pub const INIT_PATH: &str = \"";
+    /// The literal in `kernel/src/loader/mod.rs`'s `SUPERVISOR_PATH`.
+    fn supervisor_path_of_the_kernel(root: &Path) -> String {
+        const ITEM: &str = "pub const SUPERVISOR_PATH: &str = \"";
         let source = std::fs::read_to_string(root.join("kernel/src/loader/mod.rs"))
             .expect("kernel/src/loader/mod.rs");
         source
             .lines()
             .find_map(|line| line.trim_start().strip_prefix(ITEM)?.split('"').next())
-            .expect("no `pub const INIT_PATH: &str = \"…\";` in kernel/src/loader/mod.rs")
+            .expect("no `pub const SUPERVISOR_PATH: &str = \"…\";` in kernel/src/loader/mod.rs")
             .to_string()
     }
 }

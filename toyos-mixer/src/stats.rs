@@ -1,19 +1,19 @@
-//! What soundd reports about its own streaming.
+//! What soundserver reports about its own streaming.
 //!
 //! Each counter has to mean exactly one thing and keep meaning it.
-//! Emitting the report is soundd's — one line, one `write` — and everything it
+//! Emitting the report is soundserver's — one line, one `write` — and everything it
 //! needs is public below.
 //!
 //! Two decisions live here, and both are about what one number may stand for.
 //! [`MixStats::period`]: which periods count as starvation and which are the
 //! design working. [`WorstWake`]: that a late wake is attributed to the half of
-//! the path it happened in, because "soundd was late" and "the device was late"
+//! the path it happened in, because "soundserver was late" and "the device was late"
 //! are different defects with different owners and `max_wake_lat_ns` on its own
 //! says neither.
 
 /// Counters for one reporting window. A window covers streaming only: zeroed
 /// when the first client arrives, flushed when the last one leaves, so no
-/// number here is diluted by the idle path — where soundd waits on raw
+/// number here is diluted by the idle path — where soundserver waits on raw
 /// completion IRQs with no timer and a batched IRQ is indistinguishable from a
 /// missed deadline.
 #[derive(Default)]
@@ -26,7 +26,7 @@ pub struct MixStats {
     /// client was streaming* (`ClientStream::is_streaming`) — silence that
     /// interrupted a stream rather than preceding or following one. Strictly
     /// narrower than `submitted`, which like `wakes`/`completions`/`drains`
-    /// covers the whole time soundd has clients.
+    /// covers the whole time soundserver has clients.
     pub underruns: u32,
     /// The longest unbroken run of them, which is the silence a listener
     /// actually hears — 54 scattered singles and one gap of 54 are the same
@@ -40,11 +40,11 @@ pub struct MixStats {
     /// counted in both, which understates it and never invents one.
     pub starve_run: u32,
     /// Cycles that found the whole DMA pipeline free *and* could only
-    /// have got there by soundd being late. A device that retires the pipeline
-    /// faster than it plays it empties the free list without soundd having
+    /// have got there by soundserver being late. A device that retires the pipeline
+    /// faster than it plays it empties the free list without soundserver having
     /// missed anything; see the count site.
     pub drains: u32,
-    /// Worst overshoot of a DLL prediction soundd actually armed a timer on.
+    /// Worst overshoot of a DLL prediction soundserver actually armed a timer on.
     /// Waits that named no wake time contribute nothing; see the
     /// sample site.
     pub max_wake_lat_ns: u64,
@@ -73,12 +73,12 @@ pub struct MixStats {
 }
 
 /// The worst wake of a window, taken apart into the two delays it is the sum
-/// of, plus what soundd was doing in between.
+/// of, plus what soundserver was doing in between.
 ///
 /// **One number was standing for two unrelated failures.** A wake is late
-/// either because the *interrupt* arrived after the grid point soundd armed on
+/// either because the *interrupt* arrived after the grid point soundserver armed on
 /// — the device, or the machine hosting it, produced nothing when it was due —
-/// or because soundd did not get a CPU after the interrupt landed. Those are
+/// or because soundserver did not get a CPU after the interrupt landed. Those are
 /// different defects with different owners, they are fixed in different places,
 /// and `max_wake_lat_ns` alone cannot tell an investigator which one it saw. So
 /// the sum is decomposed at the one instant where both halves are known.
@@ -89,13 +89,13 @@ pub struct MixStats {
 pub struct WorstWake {
     /// From the armed grid point to the completion interrupt's own timestamp,
     /// which the kernel stamps in the ISR. This is the device being late, and
-    /// nothing about it is soundd's.
+    /// nothing about it is soundserver's.
     pub irq_late_ns: u64,
-    /// From that timestamp to soundd reading the record. This is soundd being
+    /// From that timestamp to soundserver reading the record. This is soundserver being
     /// late: a CPU it did not get, a wake that did not reach it.
     pub pickup_ns: u64,
     /// Wakes between the grid point and this one that carried no completion at
-    /// all. A large count is soundd waking punctually, repeatedly, at a device
+    /// all. A large count is soundserver waking punctually, repeatedly, at a device
     /// that had produced nothing — the shape a stalled *host* leaves, and the
     /// one a single overlong sleep cannot.
     pub empty: u32,
@@ -104,7 +104,7 @@ pub struct WorstWake {
     pub batch: u32,
 }
 
-/// Whether a wake left soundd suspended: began with no client, the device
+/// Whether a wake left soundserver suspended: began with no client, the device
 /// already stopped at wake entry, no command byte to explain it, ended with
 /// none — a wake the idle discipline promises away, so the caller names it.
 /// The command exemption covers the control thread's expected stray — a
@@ -150,9 +150,9 @@ impl MixStats {
         self.empty_run += 1;
     }
 
-    /// The null sink's grid is soundd's own monotonic one: there is no device
-    /// and no interrupt, so the grid point *is* the instant soundd should have
-    /// run and every nanosecond past it is soundd's own.
+    /// The null sink's grid is soundserver's own monotonic one: there is no device
+    /// and no interrupt, so the grid point *is* the instant soundserver should have
+    /// run and every nanosecond past it is soundserver's own.
     pub fn wake_on_software_grid(&mut self, lateness_ns: u64, period_ns: u64) {
         self.wake(lateness_ns, 0, lateness_ns, 1, period_ns);
     }

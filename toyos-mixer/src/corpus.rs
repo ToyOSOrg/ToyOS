@@ -6,7 +6,7 @@
 //! that reaches them, and writes each answer as the bits it actually is —
 //! `{:08x}` of an `f32`, the decimal of an `i16` — so no formatting rounds a
 //! difference away. The committed fixture was produced by
-//! `userland/soundd/src/main.rs` before a line of it moved here, and the test
+//! `userland/soundserver/src/main.rs` before a line of it moved here, and the test
 //! that reads it asserts equality byte for byte. A change to any of this
 //! crate's arithmetic reds it, and that is the point: **audible behaviour is
 //! the owner's to change**, so it may not move under a refactor.
@@ -120,10 +120,10 @@ impl Out {
 }
 
 // ---------------------------------------------------------------------------
-// The arithmetic soundd performs inline, mirrored here verbatim
+// The arithmetic soundserver performs inline, mirrored here verbatim
 // ---------------------------------------------------------------------------
 //
-// Each of these was an expression inside `userland/soundd/src/main.rs` when the
+// Each of these was an expression inside `userland/soundserver/src/main.rs` when the
 // fixture was captured, and each is a public function of this crate now. They
 // are written out again rather than called so the transcript is the same
 // program on both sides of the move; `the_crate_agrees_with_the_captured_shell`
@@ -196,7 +196,7 @@ fn shell_mix_slot(
                 &decode_buf[..client_samples],
                 &mut convert_buf[..out_samples],
             ),
-            (c, d) => panic!("soundd: unsupported channel conversion {c}→{d}"),
+            (c, d) => panic!("soundserver: unsupported channel conversion {c}→{d}"),
         }
         &convert_buf[..out_samples]
     } else {
@@ -329,7 +329,7 @@ pub fn transcript() -> String {
     let mut o = Out::new();
     o.line("# toyos-mixer corpus: every decision, over the space that reaches it.");
     o.line("# f32 values are their bit patterns; i16 values are decimal.");
-    o.line("# Captured from userland/soundd/src/main.rs before the extraction.");
+    o.line("# Captured from userland/soundserver/src/main.rs before the extraction.");
 
     constants(&mut o);
     decode(&mut o);
@@ -361,7 +361,7 @@ fn constants(o: &mut Out) {
 
 /// The i16 domain is 65,536 values wide, so it is exhausted rather than
 /// sampled: every one of them decoded, and every one of them back again through
-/// an undithered quantizer. The round trip is the property `soundd` has asserted
+/// an undithered quantizer. The round trip is the property `soundserver` has asserted
 /// since 2026-08-15 — 32,768 as the scale in both directions, so nothing gains
 /// or loses an LSB in passing.
 fn decode(o: &mut Out) {
@@ -955,9 +955,9 @@ mod tests {
 
     /// **The gate this crate exists behind.**
     ///
-    /// `fixtures/mix-corpus.txt` was written by `userland/soundd/src/main.rs`
+    /// `fixtures/mix-corpus.txt` was written by `userland/soundserver/src/main.rs`
     /// before a line of it moved here — the same generator above, over the same
-    /// inputs, calling soundd's own inline functions. Every value in it is the
+    /// inputs, calling soundserver's own inline functions. Every value in it is the
     /// bits the shipped mixer produced. If this crate reproduces the file byte
     /// for byte then the extraction changed nothing a listener could hear, and
     /// if it does not then it did.
@@ -987,14 +987,14 @@ mod tests {
             );
         }
         panic!(
-            "this crate no longer computes what userland/soundd/src/main.rs computed.\n{first}\n\
+            "this crate no longer computes what userland/soundserver/src/main.rs computed.\n{first}\n\
              This is a change to what a speaker plays. Do not regenerate the fixture."
         );
     }
 
     /// The composites this crate publishes are the compositions the shell used
     /// to write inline — the corpus above exercises the inline ones, so this is
-    /// what carries its verdict onto the functions soundd actually calls.
+    /// what carries its verdict onto the functions soundserver actually calls.
     #[test]
     fn the_crate_agrees_with_the_captured_shell() {
         for device_rate in [44_100u32, 48_000, 96_000, 192_000] {
