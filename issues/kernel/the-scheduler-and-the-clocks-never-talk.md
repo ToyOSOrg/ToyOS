@@ -19,7 +19,7 @@ Two couplings every production scheduler has and ours lacks:
   wake. A latency-sensitive wake should prefer a shallow-idle core; a
   throughput task can pay to wake a deep one.
 
-Both wait for an AML interpreter, because today the kernel neither reads nor
-sets P-states or C-states on metal. Filed so the placement track (see
-`placement-is-blind-to-caches-and-topology.md`) leaves room for an idle-state
-input when it designs wake placement.
+Both wait for an AML interpreter (`issues/kernel/toyos-interprets-no-aml.md`),
+because today the kernel neither reads nor sets P-states or C-states on metal.
+Filed so the placement track (see `placement-is-blind-to-caches-and-topology.md`)
+leaves room for an idle-state input when it designs wake placement.

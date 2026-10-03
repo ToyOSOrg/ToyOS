@@ -60,6 +60,7 @@ scout's result.
 
 **Exit**: a T14 row reads `MSR_SMI_COUNT` on every CPU after init is spawned
 and after the boot's last write to `SMI_CMD`, whoever makes it, and again at
-the stop's report, and on every CPU the two agree. The interval opens after
-that write because the ACPI enable is one, a write of `ACPI_ENABLE` to
-`SMI_CMD`, and raises one firmware interrupt where `APMC_EN` is set.
+the stop's report at least 4.444 s later, two of the longest period read, and
+on every CPU the two agree. The interval opens after that write because the
+ACPI enable is one, a write of `ACPI_ENABLE` to `SMI_CMD`, and raises one
+firmware interrupt where `APMC_EN` is set.
