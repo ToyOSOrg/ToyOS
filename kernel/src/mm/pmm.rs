@@ -262,7 +262,7 @@ pub(super) fn init(entries: &[MemoryMapEntry], reserved: &[Region]) {
     );
 }
 
-/// Allocate one 2MB physical page. Does not heap-allocate (safe to call from the allocator).
+/// Allocate one 2MB physical page.
 pub fn alloc_page(cat: Category) -> Option<PhysPage> {
     let page = claim(cat)?;
     // SAFETY: `claim` just took the frame off the bitmap, so it is unaliased, and the direct map covers every address the bitmap can name.
@@ -272,12 +272,8 @@ pub fn alloc_page(cat: Category) -> Option<PhysPage> {
     Some(page)
 }
 
-/// One 2MB physical page for the kernel heap, holding what its last owner left in it: the heap answers uninitialized memory, and `alloc_zeroed` writes its own zeros.
-pub(super) fn alloc_heap_page() -> Option<PhysPage> {
-    claim(Category::KernelHeap)
-}
-
-fn claim(cat: Category) -> Option<PhysPage> {
+/// One 2MB physical page holding what its last owner left in it. Only the kernel heap takes one as it is: the heap answers uninitialized memory, and `alloc_zeroed` writes its own zeros. Does not heap-allocate: the heap calls it when it is full.
+pub(super) fn claim(cat: Category) -> Option<PhysPage> {
     let mut bm = BITMAP.lock();
     if bm.free_count == 0 { return None; }
     let start = bm.next_hint;

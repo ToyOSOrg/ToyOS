@@ -14,8 +14,7 @@ Every `SYS_THREAD_SPAWN` (`process::spawn_thread`) and every `SYS_SPAWN`
 exit (`issues/kernel/syscall-preemption-is-incidental.md`), so each spawn pays
 two writes of the block, at least 2 MiB each, in one interrupts-off window.
 
-By reading, not measured. The T14's `heap_growth_windows` row reads the longest
-window across 256 thread spawns, of which these writes are part.
+By reading, not measured.
 
 Owner: `issues/kernel/toyos-beats-linuxs-latency-on-the-t14.md`.
 

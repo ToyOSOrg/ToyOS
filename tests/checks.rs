@@ -427,7 +427,7 @@ mod checks {
         let opening = [report((100, 100), read_back), exit("pwd")].concat();
         let own = [report((3_000_000, 1_100_000), (700_000, 600_000)), exit(WINDOWS_LOAD)].concat();
         let good = [hold.as_str(), &first, &opening, &own].concat();
-        let exited = load_exited(WINDOWS_LOAD);
+        let exited = windows_load_exited();
 
         mask_windows(&good, 2).map_err(|e| format!("the good capture was refused: {e}"))?;
         let unpaired = |what: &str, capture: &str, says: &str| match mask_windows(capture, 2) {
