@@ -1510,11 +1510,11 @@ mod tests {
         twelve_build();
     }
 
-    /// **No submodule is initialised in a linked worktree**: where its `rust/`
-    /// is a fork checkout that is not whole, [`crate::ensure_shallow_fork`]
-    /// refuses, and git in the primary's fork still runs.
+    /// Where a linked worktree's `rust/` is a fork checkout that is not whole,
+    /// [`crate::ensure_shallow_fork`] refuses, and git in the primary's fork
+    /// still runs.
     #[test]
-    fn a_linked_worktree_initialises_no_submodule() {
+    fn ensure_shallow_fork_initialises_no_submodule_in_a_linked_worktree() {
         let base = TempDir::new("fork-shallow");
         let (primary, linked, c1, c2) = two_pins(&base);
         let fork = linked.join("rust");
