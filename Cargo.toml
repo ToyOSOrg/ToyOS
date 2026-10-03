@@ -31,7 +31,7 @@ members = [
     "toyos-elf",
     "toyos-elide",
     "toyos-fat32",
-    "toyos-fat32-check",
+    "toyos-fat32/check",
     "toyos-gicv3",
     "toyos-gpt",
     "toyos-hda",
@@ -68,7 +68,6 @@ members = [
     "toyos-untrusted",
     "toyos-update",
     "toyos-userbound",
-    "toyos-userpin",
     "toyos-wallclock",
     "toyos-xhci",
     "toyos-xhci/sim",
@@ -132,7 +131,7 @@ toyos-fat32 = { path = "toyos-fat32" }
 # The two readers `image::certify` judges every published image with. They are
 # dependencies of the build rather than of its tests because a flash target is
 # not published until they have both passed on it.
-toyos-fat32-check = { path = "toyos-fat32-check" }
+toyos-fat32-check = { path = "toyos-fat32/check" }
 toyos-gpt = { path = "toyos-gpt" }
 toyos-keymap = { path = "toyos-keymap" }
 # The form a program's line takes in a boot's log and the port `logd` serves it

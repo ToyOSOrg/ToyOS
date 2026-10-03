@@ -26,9 +26,6 @@ Every step lands green on `--ci host` and `--build-only`. Test counts are what
 and #631, of which #631 has landed, before the latency work
 (`issues/kernel/toyos-beats-linuxs-latency-on-the-t14.md`; owner, 2026-10-03).
 
-1. **Delete `toyos-userpin`.** It models the pin invariant and names nothing
-   the kernel defines; `munmap_reissues_read_window` holds the kernel to it.
-   Check: `git grep toyos-userpin -- ':!issues/'` is empty.
 2. **The kernel's library.** `kernel/pure/` is the `kernel` package's lib, and
    its bin is `test = false`. `toyos-pcid`, `toyos-proclife` and `toyos-sched`
    move in. `kernel-loom` and `toyos-sched/loom` become `kernel/loom/`, and
@@ -58,11 +55,6 @@ and #631, of which #631 has landed, before the latency work
    program lands with `src/userlandhost.rs`'s survey gating a nested crate's
    tests, which it lists as escapes today.
    Check: `--ci host` runs every test each package lists today, and `--clippy`
-   lints them.
-5. **`toyos-fat32-check` goes under `toyos-fat32/`.** The build and
-   `toyos-fat32`'s tests both use it, and it moves to `toyos-fat32/check/`,
-   beside the one subject it judges.
-   Check: `--ci host` runs every test the package lists today, and `--clippy`
    lints them.
 
 **Exit:** no directory this file names as moved or merged still exists, and
