@@ -1510,6 +1510,24 @@ mod tests {
         twelve_build();
     }
 
+    /// **No submodule is initialised in a linked worktree**: where its `rust/`
+    /// holds `.git` and no file, as a killed `git worktree add` leaves it,
+    /// [`crate::ensure_shallow_fork`] refuses, and git in the primary's fork
+    /// still runs.
+    #[test]
+    fn a_linked_worktree_initialises_no_submodule() {
+        let base = TempDir::new("fork-shallow");
+        let (primary, linked, c1, c2) = two_pins(&base);
+        let fork = linked.join("rust");
+        fs::remove_dir(&fork).unwrap();
+        git(&primary.join("rust"), &["worktree", "add", "-q", "--detach", "--no-checkout", path_str(&fork), &c2]);
+
+        let refused = crate::ensure_shallow_fork(&linked);
+
+        assert_eq!(git(&primary.join("rust"), &["rev-parse", "HEAD"]), c1);
+        assert!(refused.as_ref().is_err_and(|why| why.contains("linked worktree")), "{refused:?}");
+    }
+
     /// The primary's compiler under `base`: `rustc` and `rust-lld`, and the C
     /// toolchain `src/clang.rs` provisions beside them if `clang`; no cargo.
     fn primary_compiler(base: &Path, clang: bool) -> Compiler {
