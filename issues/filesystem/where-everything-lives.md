@@ -24,7 +24,7 @@ may reach it. Every line below is the owner's ruling.
 /home/<user>           Desktop Documents Downloads Music Pictures Videos Fonts Apps/<name>/
 /boot                  bootloader, kernel, kernel arguments; the updater's alone
 /log  /media           logs; foreign volumes, one /media/<label> each
-/tmp                   private per program
+/tmp                   one per session; each service and app its own
 ```
 
 `/system` is signed because the image is:
@@ -40,7 +40,9 @@ until that lands nothing verifies it.
   its own app folder: the owner accepted that as the honest limit.
 - **English names, never translated.**
 - **A path means the same file in every view.** `/tmp` is the one exception:
-  it is private per program. A view hides names and never renames one.
+  a session's programs share one, and each service and each app has its own
+  (amended by the owner, 2026-10-03: "Per session"). A view hides names and
+  never renames one.
 - **A program learns a location from an environment variable init sets**
   (`HOME` and those like it). A location grants nothing, because the view
   decides what a program can reach. On ToyOS `std::env::home_dir()` is `$HOME`

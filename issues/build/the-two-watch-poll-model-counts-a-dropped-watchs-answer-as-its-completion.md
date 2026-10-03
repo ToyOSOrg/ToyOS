@@ -6,7 +6,7 @@ opened: 2026-09-30
 
 # The two-watch poll model counts a dropped watch's answer as its completion
 
-`toyos-sched/loom/tests/loom_watch.rs`'s
+`kernel/loom/tests/loom_watch.rs`'s
 `a_poll_on_two_watches_racing_both_posts_completes_exactly_once` moves both
 worlds into their producer threads, so both watches drop before its assertion,
 and a watch's drop fires every live entry as `Fire::Gone`, which the model's

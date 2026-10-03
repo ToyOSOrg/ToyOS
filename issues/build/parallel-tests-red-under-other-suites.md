@@ -70,7 +70,7 @@ changes.
 - **`netd_connection_caps`** — retired 2026-09-04, green 5 of 5 beside a full
   fast tier.
 - **`metal_sim_pointer_churn`** — observed once, on a host carrying three other
-  suites *and* a `toyos-sched-sim` run. Not investigated. Still
+  suites *and* a `kernel-sim` run. Not investigated. Still
   `Sched::Parallel`.
 - **`dump_nmi_probe`** — retired 2026-09-04, green 3 of 3 beside a full fast
   tier. `4ad8875` made it `Sched::Serial`,
@@ -163,7 +163,7 @@ changes.
   of its own — five sightings, each carrying the *guest's own panic text* — and
   that class has since been diagnosed and fixed: a CPU could hand a thief the
   task whose context it was still standing on, so two CPUs ran one kernel stack
-  (`SchedPass::answer_steal_requests`, `toyos-sched/src/cpu.rs`). This sighting
+  (`SchedPass::answer_steal_requests`, `kernel/pure/sched/cpu.rs`). This sighting
   carried no console at all — `TestResult::error` held the verdict, a failing
   test's guest console is not printed, and by the time the re-runs were green
   the capture was gone — so it can be neither confirmed as that class nor ruled

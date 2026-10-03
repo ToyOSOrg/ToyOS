@@ -43,11 +43,11 @@ yet answers it.
 one sentence at the site saying whether the entry can be missing, and the two
 phases made to agree with it.
 
-Found while extracting the lifecycle's decisions into `toyos-proclife`
+Found while extracting the lifecycle's decisions into what is now `kernel/pure/proclife`
 (2026-08-24), which is what made the two spellings of one lookup visible: they
 are now one function asked twice, and the callers still disagree about its
 `NoSuchProcess` answer.
-`toyos_proclife::interleave::tests::a_thread_exit_that_outlived_its_entry_still_leaves`
+`kernel::proclife::interleave::tests::a_thread_exit_that_outlived_its_entry_still_leaves`
 holds the schedule that reaches the state at `thread_exit`. **It reaches it by
 routing rather than by running**: the model's `retire` takes a thread off every
 CPU, so no schedule it can enumerate has a live thread arriving at a syscall

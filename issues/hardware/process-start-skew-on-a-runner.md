@@ -27,7 +27,7 @@ time.
 
 **One of the three candidates has narrowed, and nothing here has been
 re-measured** (read 2026-08-24). `Balance::PushOnSurplus` ships as of the owner's
-2026-08-23 decision (`toyos-sched/src/cpu.rs`, `Balance`): the pull half was
+2026-08-23 decision (`kernel/pure/sched/cpu.rs`, `Balance`): the pull half was
 one-shot, so a CPU reaching its idle pass while every sibling still published
 zero surplus halted with no probe outstanding and nothing in the protocol woke
 it — which is exactly the shape "the scheduler leaving a task unclaimed"

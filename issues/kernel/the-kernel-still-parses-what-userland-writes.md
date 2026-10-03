@@ -41,7 +41,10 @@ needs the blocking story to be efficient, and the boot path needs its story told
 first: the kernel mounts ROOT itself, but what mounts `/boot` and `/home`, and
 with what authority, is the open question.
 
-**Move 3 — the panic-time symbol resolver**, small and independent. ELF parsing
+**Move 3 — the panic-time symbol resolver**, small and independent. Ruled
+(owner, 2026-10-03, "adopt", `issues/diagnostics/toyos-explains-itself.md`): the
+kernel names only itself, a killed program is reported as file and offset and
+userland names it, and the kernel keeps its own ELF reader. ELF parsing
 is already a pure crate that forbids unsafe and is tested against a crafted
 corpus, and the symbol machinery moved onto it in the 2026-08-15 consolidation —
 so what is left of this move is one decision: `rustc-demangle`'s standing. It is

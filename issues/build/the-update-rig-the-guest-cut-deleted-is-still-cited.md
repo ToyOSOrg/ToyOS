@@ -9,7 +9,7 @@ opened: 2026-10-03
 #660 (`06788146b`) deleted `tests/common/update.rs` with its `Rig`,
 `tests/common/fwvars.rs` and `tests/updatecase/system.toml`. `git grep -n
 'fwvars\|updatecase\|common/update\.rs\|Rig::\|vars::plant\|vars::live'` finds
-nine lines in three files, each planning or describing a test on them:
+seven lines in two files, each planning or describing a test on them:
 
 - `issues/boot-media/the-loader-does-only-what-must-precede-the-handover.md`,
   six lines. Stage 3's exit takes `fwvars::live` as
@@ -17,9 +17,6 @@ nine lines in three files, each planning or describing a test on them:
   `tests/updatecase/system.toml` grants `slots` and that two tests run
   `updatecase`; one of its negative controls signs with `Rig::update` and
   reads the floor with `fwvars::live`, which its oracles name too.
-- `issues/boot-media/the-loader-never-sets-the-firmwares-memory-overwrite-request.md`,
-  two lines: its exit's `mor_is_set_where_defined` plants and reads the vars
-  store with `vars::plant` and `vars::live`.
 - `issues/build/the-kernel-console-split-does-not-re-arm-across-a-guest-reset.md`,
   one line: the reset in place it describes is `Rig::boot`'s.
 

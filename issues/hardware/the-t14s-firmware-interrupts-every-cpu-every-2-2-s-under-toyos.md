@@ -74,7 +74,9 @@ are this by reading, those kernels not reading the count.
 **Owner**: stage 1 of
 `issues/kernel/toyos-runs-the-machine-in-acpi-mode-and-interprets-its-aml.md`,
 for the fix and for the reading: its exit holds the count flat on the T14 over
-this exit's interval, so the stage builds the row.
+this exit's interval, so the stage builds the row, and it reads the count
+through the general counters ("General counters", owner, 2026-10-03,
+`issues/diagnostics/toyos-explains-itself.md`).
 
 **Exit**: a T14 row reads `MSR_SMI_COUNT` on every CPU after init is spawned
 and after the boot's last write to `SMI_CMD`, whoever makes it, and again at
