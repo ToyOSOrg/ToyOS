@@ -260,10 +260,11 @@ The queue landed with #257 (`7ab9367b0`) and left the kernel in `80a1f1ceb`,
 when nothing the kernel flushed reached a device any more; the conversion it
 was sequenced before is planned by nothing. Today `OpenFileState::drop` calls
 `file_cache::release` and takes "the file cache's lock and no other", so
-`File` needs no release site that parks and nothing in this file waits on the
-owner. The ruling is on `File`'s release and names the `deferred` rows
-nowhere: for them "give the batch an owner" is still what this issue asks, at
-the cost worked out under its heading.
+`File` needs no release site that parks.
+
+Open with the owner: he declined shape 3 because it would "redesign the
+zero-handle drain", and whether that decline reaches "give the batch an owner"
+for the `deferred` rows is not ruled.
 
 ## A fourth witness: a device claim, and init waiting it out
 
