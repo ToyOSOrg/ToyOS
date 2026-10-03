@@ -223,6 +223,10 @@ pub(crate) const KERNEL: &str = "kernel";
 /// builds it for the host: `kernel/.cargo/config.toml` is read only below
 /// `kernel/`.
 pub(crate) const KERNEL_MANIFEST: &str = "kernel/Cargo.toml";
+/// Where a host build from it lands: the root's `target/`, since `kernel/target`
+/// is cleaned whole under the worktree's build lock, which `--ci host` does not
+/// take.
+pub(crate) const KERNEL_HOST_TARGET: &str = "target";
 const KERNEL_LOOM: &str = "kernel-loom";
 const KERNEL_SIM: &str = "kernel-sim";
 const BLOCKRING: &str = "toyos-blockring";
@@ -476,12 +480,13 @@ fn judge_control(control: &Control, exited_green: bool, log: &str) -> Result<Str
 }
 
 fn run_control(root: &Path, control: &Control) -> Result<String, String> {
+    let mut args = vec!["test"];
     // Cargo refuses `--features` for a package outside the workspace.
-    let package = match control.krate {
-        KERNEL => ["--manifest-path", KERNEL_MANIFEST],
-        member => ["-p", member],
-    };
-    let mut args = vec!["test", package[0], package[1], "--features", control.feature];
+    match control.krate {
+        KERNEL => args.extend(["--manifest-path", KERNEL_MANIFEST, "--target-dir", KERNEL_HOST_TARGET]),
+        member => args.extend(["-p", member]),
+    }
+    args.extend(["--features", control.feature]);
     match control.test {
         Some(test) => args.extend(["--test", test]),
         None => args.push("--lib"),
@@ -544,6 +549,8 @@ fn host(root: &Path) -> Vec<Step> {
                 "test",
                 "--manifest-path",
                 KERNEL_MANIFEST,
+                "--target-dir",
+                KERNEL_HOST_TARGET,
                 "--lib",
                 "--features",
                 "sched-check",

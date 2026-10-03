@@ -12,7 +12,7 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::arch::Arch;
-use crate::ci::KERNEL_MANIFEST;
+use crate::ci::{KERNEL_HOST_TARGET, KERNEL_MANIFEST};
 
 /// The pedantic/nursery lints adopted one at a time, each on a measured finding
 /// (`issues/build/clippy-stage-two-is-lints-one-at-a-time.md`).
@@ -83,7 +83,16 @@ const SHAPES: &[Shape] = &[
     },
     Shape {
         dir: "",
-        before: &["--manifest-path", KERNEL_MANIFEST, "--lib", "--tests", "--features", "sched-check"],
+        before: &[
+            "--manifest-path",
+            KERNEL_MANIFEST,
+            "--target-dir",
+            KERNEL_HOST_TARGET,
+            "--lib",
+            "--tests",
+            "--features",
+            "sched-check",
+        ],
         after: &["$ADOPTED", "-D", "warnings"],
     },
     Shape {
@@ -91,6 +100,8 @@ const SHAPES: &[Shape] = &[
         before: &[
             "--manifest-path",
             KERNEL_MANIFEST,
+            "--target-dir",
+            KERNEL_HOST_TARGET,
             "--lib",
             "--tests",
             "--features",
