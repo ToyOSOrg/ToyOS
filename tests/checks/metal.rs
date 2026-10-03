@@ -114,7 +114,7 @@ pub fn the_stop_owes_its_record_and_leaves_no_operation_open() {
 /// Each bound's lateness against the period of what polls it, a millisecond
 /// either way and no further.
 pub fn a_bound_fires_within_one_period_of_itself() {
-    let quantum = i64::try_from(toyos_sched::fair::QUANTUM_NS / 1_000_000).expect("ms");
+    let quantum = i64::try_from(kernel::sched::fair::QUANTUM_NS / 1_000_000).expect("ms");
     let deadline = |late: i64| planted(&expired_at(120_060 + late), &armed()).deadline_on_time();
     assert_eq!(deadline(4), Ok(()));
     assert_eq!(deadline(quantum + 1), Ok(()));

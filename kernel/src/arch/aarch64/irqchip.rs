@@ -430,7 +430,7 @@ pub fn floor_selftest() {
         ctl & TIMER_ISTATUS != 0
     };
     settles(100, "the timer armed for its floor", due);
-    let now = arm_within(toyos_sched::fair::QUANTUM_NS);
+    let now = arm_within(kernel::sched::fair::QUANTUM_NS);
     let cval: u64;
     // SAFETY: reads the EL1 virtual timer's comparator.
     unsafe { core::arch::asm!("mrs {}, cntv_cval_el0", out(reg) cval, options(nomem, nostack, preserves_flags)) };

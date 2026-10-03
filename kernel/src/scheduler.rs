@@ -8,9 +8,9 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::hasher::HashMap;
-use toyos_sched::fair::{ShareState, QUANTUM_NS};
-use toyos_sched::hw::{CpuId, Machine, Nanos};
-use toyos_sched::task::{Refused, SafePoint, WaitClass};
+use kernel::sched::fair::{ShareState, QUANTUM_NS};
+use kernel::sched::hw::{CpuId, Machine, Nanos};
+use kernel::sched::task::{Refused, SafePoint, WaitClass};
 
 use crate::arch::percpu;
 use crate::watch::{self, Cancel};
@@ -366,7 +366,7 @@ pub fn do_preempt() {
 /// `kernel/src/quiesce.rs`'s header says why that boundary is the safe point.
 ///
 /// **One call and one match, so the two marks have no order to disagree
-/// about**: `toyos_sched::task::SafePoint` ranks them, here and in
+/// about**: `kernel::sched::task::SafePoint` ranks them, here and in
 /// `CpuSched::place` alike.
 #[track_caller]
 pub fn leave_user_if_due() {
@@ -535,7 +535,7 @@ pub fn futex_wake(phys_addr: DirectMap, count: usize) -> u64 {
 /// The thread leaves at that safe point: `process::leave`.
 pub fn post_retire(sched: &ThreadSched) {
     preempt_off(|p| {
-        toyos_sched::retire::begin(&sched.shared).post(cpus(), &HW, p);
+        kernel::sched::retire::begin(&sched.shared).post(cpus(), &HW, p);
     });
 }
 

@@ -18,7 +18,7 @@
 use core::fmt;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
 
-use toyos_sched::hw::{CpuId, Machine, TraceEvent, TraceKind};
+use kernel::sched::hw::{CpuId, Machine, TraceEvent, TraceKind};
 
 use super::percpu::{self, CpuFaultState};
 use super::{cpu, irqchip};

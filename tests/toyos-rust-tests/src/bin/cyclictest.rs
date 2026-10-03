@@ -6,7 +6,7 @@
 //! Nothing else in the tree measures this — soundserver's `max_wake_lat_ns` is a
 //! maximum over a ~2 s window measured against a DLL's prediction of a DMA
 //! completion, so it folds in the device model and needs a sound card, and
-//! `toyos-sched`'s invariant I4 bounds the same quantity inside a simulator
+//! `kernel-sim`'s invariant I4 bounds the same quantity inside a simulator
 //! that can never see a real IPI.
 //!
 //! **The target is absolute and is never re-based on where the wake landed.**

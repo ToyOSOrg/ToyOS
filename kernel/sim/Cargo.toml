@@ -1,0 +1,20 @@
+[package]
+name = "kernel-sim"
+description = "The deterministic host simulator for the kernel's scheduler core: machine, explorer, shrinker and scenario corpus."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# `sched-check` turns on the core's own container/state-word cross-checks, and
+# `protocol-port` compiles the escape hatch the negative gate needs, which no
+# kernel build carries.
+kernel = { path = "..", features = ["sched-check", "protocol-port"] }
+rand = { version = "0.9", features = ["small_rng"] }
+
+[features]
+# Passthrough for the core's staleness negative control, so the arm can be
+# selected on the package the test runs in. Never on by default: with it every
+# path that chooses a CPU believes a stopped one's published load, which is what
+# `a_stopped_cpu_stops_taking_work` measures the cost of.
+placement-ignores-staleness = ["kernel/placement-ignores-staleness"]
