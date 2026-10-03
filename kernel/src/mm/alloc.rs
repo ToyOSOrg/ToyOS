@@ -1,4 +1,14 @@
+//! The kernel heap: `dlmalloc` behind one ticket lock, grown by whole 2 MiB
+//! frames.
+//!
+//! **No frame is acquired or zeroed while the heap lock is held.** A growth
+//! takes only the frame its hold was offered, and a hold is offered one only
+//! after a hold without one failed: `KernelAllocator::alloc` then takes a
+//! frame off the PMM with the lock released and asks again, and a frame the
+//! second hold did not take goes back once the lock is released.
+
 use core::alloc::{GlobalAlloc, Layout};
+use core::cell::Cell;
 use core::sync::atomic::{AtomicU8, Ordering};
 
 use super::MAX_HEAP_ALLOC;
@@ -7,24 +17,26 @@ use super::PAGE_2M;
 use super::pmm;
 
 /// Invariant: no method here may panic — it runs inside `dlmalloc.lock()`, which cannot unwind.
-struct KernelPageSource;
+struct KernelPageSource {
+    /// Set and taken back inside one hold of `dlmalloc.lock()`.
+    offer: Cell<Option<pmm::PhysPage>>,
+}
 
-// SAFETY: `alloc` only ever hands out whole `PAGE_2M` pages from `pmm::alloc_page`, and `free` is the only path that returns one.
+// SAFETY: `alloc` only ever hands out the whole `PAGE_2M` frame `offer` holds, and `free` is the only path that returns one.
 unsafe impl dlmalloc::Allocator for KernelPageSource {
     fn alloc(&self, size: usize) -> (*mut u8, usize, u32) {
         if size > PAGE_2M as usize {
             return (core::ptr::null_mut(), 0, 0);
         }
-        if let Some(page) = pmm::alloc_page(pmm::Category::KernelHeap) {
-            let ptr = page.direct_map().as_mut_ptr::<u8>();
-            #[expect(clippy::disallowed_methods, reason = "dlmalloc owns the page from here on")]
-            core::mem::forget(page);
-            #[cfg(feature = "heap-sweep")]
-            pages::add(ptr as u64);
-            (ptr, PAGE_2M as usize, 0)
-        } else {
-            (core::ptr::null_mut(), 0, 0)
-        }
+        let Some(page) = self.offer.take() else {
+            return (core::ptr::null_mut(), 0, 0);
+        };
+        let ptr = page.direct_map().as_mut_ptr::<u8>();
+        #[expect(clippy::disallowed_methods, reason = "dlmalloc owns the page from here on")]
+        core::mem::forget(page);
+        #[cfg(feature = "heap-sweep")]
+        pages::add(ptr as u64);
+        (ptr, PAGE_2M as usize, 0)
     }
 
     fn remap(&self, _ptr: *mut u8, _oldsize: usize, _newsize: usize, _can_move: bool) -> *mut u8 {
@@ -48,7 +60,7 @@ unsafe impl dlmalloc::Allocator for KernelPageSource {
     }
 
     fn allocates_zeros(&self) -> bool {
-        true
+        false
     }
 
     fn page_size(&self) -> usize {
@@ -509,7 +521,9 @@ use crate::sync::Lock;
 impl KernelAllocator {
     const fn new() -> Self {
         Self {
-            dlmalloc: Lock::new(dlmalloc::Dlmalloc::new_with_allocator(KernelPageSource)),
+            dlmalloc: Lock::new(dlmalloc::Dlmalloc::new_with_allocator(KernelPageSource {
+                offer: Cell::new(None),
+            })),
             phase: AtomicU8::new(PHASE_UNINIT),
         }
     }
@@ -531,10 +545,22 @@ unsafe impl GlobalAlloc for KernelAllocator {
                     layout.size(), MAX_HEAP_ALLOC);
                 // Bands are armed after the lock drops, so a failing band never fires inside `dlmalloc.lock()`.
                 let outer = tripwire::outer(layout);
-                let base = {
-                    let mut dlm = self.dlmalloc.lock();
-                    dlm.malloc(outer.size(), outer.align())
+                let malloc = |frame| {
+                    let (base, untaken) = {
+                        let mut dlm = self.dlmalloc.lock();
+                        dlm.allocator_mut().offer.set(frame);
+                        let base = dlm.malloc(outer.size(), outer.align());
+                        (base, dlm.allocator_mut().offer.take())
+                    };
+                    drop(untaken);
+                    base
                 };
+                let mut base = malloc(None);
+                if base.is_null() {
+                    if let Some(frame) = pmm::alloc_heap_page() {
+                        base = malloc(Some(frame));
+                    }
+                }
                 tripwire::arm(base, layout)
             }
             // Any byte other than the three phases is corrupt state — fail loudly rather than serve it as READY.
