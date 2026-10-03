@@ -16,9 +16,10 @@ Every guest test this track names is registered. A deleted test covers
 nothing.
 
 1. **The rename**, one mechanical PR. Before stage 1 is
-   briefed, the exit's search below runs once over the `rust/` fork's delta as
-   well as the superproject, so its hits are known going in. It touches `toyos/src`,
-   `toyos-abi/src`, `userland/libc/src` and the `rust/` fork's delta, and its
+   briefed, the exit's search below runs once over the `rust/` fork's delta and
+   the delta of every fork a lockfile pins as well as the superproject, so its
+   hits are known going in. It touches `toyos/src`, `toyos-abi/src`,
+   `userland/libc/src` and the `rust/`, `mio` and `socket2` forks' deltas, and its
    `CLAUDE.md` edits are placed in the same PR
    by an agent briefed for them. Issue slugs carrying an old name are renamed
    with every citation.
@@ -35,8 +36,8 @@ nothing.
    | `compositor` | unchanged |
 
    **Exit**: over every tracked path and every text file's content, in the
-   superproject and the `rust/` fork's delta,
-   excluding the bodies of `issues/` files (recorded evidence), no hit remains
+   superproject, the `rust/` fork's delta and the delta of every fork a
+   lockfile pins, excluding the bodies of `issues/` files (recorded evidence), no hit remains
    outside the exclusions, each judged per match and not per line:
    - a case-insensitive substring search for `netd`, `logd`, `soundd`,
      `blockd`, `fsd`, `sshd`, excluding, case-insensitively, an identifier

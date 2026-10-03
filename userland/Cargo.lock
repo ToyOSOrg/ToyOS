@@ -619,7 +619,7 @@ dependencies = [
 [[package]]
 name = "cpal"
 version = "0.18.0"
-source = "git+https://github.com/ToyOSOrg/cpal?branch=toyos-0.18.0#29180f7b5a524e6709d30c010e7e0280cd82ccda"
+source = "git+https://github.com/ToyOSOrg/cpal?branch=toyos-0.18.0#f46381d27cad65aa5ef5ece5cec1227aa31ef269"
 dependencies = [
  "alsa",
  "block2 0.6.2",
@@ -2023,7 +2023,7 @@ dependencies = [
 [[package]]
 name = "mio"
 version = "1.2.0"
-source = "git+https://github.com/ToyOSOrg/mio?branch=toyos#271eb00626fe5a3beae9a82f8d61e70cdc2aa350"
+source = "git+https://github.com/ToyOSOrg/mio?branch=toyos#d1edcaaddb7d4b651fb996e034d1b5e5ec9aef25"
 dependencies = [
  "libc",
  "toyos",
@@ -3793,7 +3793,7 @@ dependencies = [
 [[package]]
 name = "socket2"
 version = "0.6.3"
-source = "git+https://github.com/ToyOSOrg/socket2?branch=toyos#0b238fb870b01ec3a89916eeb96f8a4dc930d571"
+source = "git+https://github.com/ToyOSOrg/socket2?branch=toyos#1d9025096919dbc95ab647f65b99e2b8dff4664d"
 dependencies = [
  "libc",
  "toyos",
@@ -4093,7 +4093,7 @@ dependencies = [
 [[package]]
 name = "tokio"
 version = "1.51.1"
-source = "git+https://github.com/ToyOSOrg/tokio?branch=toyos#d6c5691cdb8ee281e62d282e67357f21c05d6f0d"
+source = "git+https://github.com/ToyOSOrg/tokio?branch=toyos#902fb97416c387396f962955f1b64dac20e855ec"
 dependencies = [
  "bytes",
  "libc",
