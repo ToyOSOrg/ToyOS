@@ -23,8 +23,7 @@ nine lines in three files, each planning or describing a test on them:
 - `issues/build/the-kernel-console-split-does-not-re-arm-across-a-guest-reset.md`,
   one line: the reset in place it describes is `Rig::boot`'s.
 
-Striking a path leaves its sentence naming an oracle, a rig or a config that
-is gone. What each should name is the tier its test has now, and stage A of
+What each should name is the tier its test has now, and stage A of
 `issues/build/the-guest-suite-runs-only-what-no-cheaper-tier-reaches.md` gives
 it: `update_floor_is_the_images_own`, `update_refusals_boot_the_other_slot`
 and `update_grant_refuses_a_stray_partition` are host tests there and guest
