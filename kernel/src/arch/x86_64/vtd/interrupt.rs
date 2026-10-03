@@ -6,7 +6,7 @@
 //!
 //! - **`IRTA_REG`**, Section 11.4.10: table address bits 63:12, `EIME` bit 11,
 //!   `S` bits 3:0 holding `2^(S+1)` entries.
-//! - **`GCMD`/`GSTS`**, Sections 11.4.4.1 and 11.4.4.2: `IRE`/`IRES` bit 25,
+//! - **`GCMD`/`GSTS`**, §11.4.4.1 and §11.4.4.2: `IRE`/`IRES` bit 25,
 //!   `SIRTP`/`IRTPS` bit 24, `CFI`/`CFIS` bit 23.
 //! - **IRTE**, Section 9.9 Figure 9-9: `P` bit 0, `DM` bit 2, `RH` bit 3,
 //!   `TM` bit 4, `DLM` bits 7:5, `IM` bit 15, `V` bits 23:16, `DST` bits 63:32,
