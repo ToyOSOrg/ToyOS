@@ -12,5 +12,5 @@ ToyOS takes from them it takes another way: `toyos-acpi/src/dsdt.rs` finds
 windows `_CRS` would name (`bootloader/src/rootbridge.rs`). Nothing reads
 `_CST`, which names a CPU's C-states.
 
-Two tracks wait on it: `issues/kernel/the-scheduler-and-the-clocks-never-talk.md`
-and `issues/kernel/idle-cpus-enter-the-c-states-cst-names.md`.
+The owner's direction, recorded in `0ee814f5a`: ToyOS writes its own AML
+interpreter, and the battery comes first.
