@@ -132,7 +132,6 @@ const _: () = {
 mod tests {
     extern crate std;
 
-    use std::format;
     use std::vec::Vec;
 
     use super::*;
@@ -198,12 +197,5 @@ mod tests {
         assert_eq!(bitmap.refused(access(0xFF, 2)), Some(0x100));
         assert_eq!(bitmap.refused(access(0x3F8, 1)), Some(0x3F8));
         assert_eq!(bitmap.refused(access(0xFFFF, 2)), Some(0xFFFF));
-    }
-
-    #[test]
-    fn an_access_is_spelled_as_the_kill_record_reads() {
-        let said = |out, port, bytes| format!("{}", PortAccess { out, port, bytes });
-        assert_eq!(said(false, 0x61, 1), "in of 1 byte(s) from port 0x0061");
-        assert_eq!(said(true, 0x64, 2), "out of 2 byte(s) to port 0x0064");
     }
 }

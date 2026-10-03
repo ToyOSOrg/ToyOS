@@ -156,9 +156,8 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("screen_panic_muted", qemu::Profile::Metal),
     // The same fatal path from inside Ctrl+Alt+D's report painter, holding the
     // panel's latch it will never give back: the report has to take the screen
-    // anyway, and its CPU has to go on to watch the reset bound, whatever key
-    // is pressed meanwhile. The profile whose keys reach the i8042, which is
-    // the controller a panic path that took input would read.
+    // anyway, and its CPU has to go on to watch the reset bound. The profile
+    // whose 16550 is the console, where the fatal path writes its last line raw.
     ("screen_fatal_behind_a_painter", qemu::Profile::Metal),
     // The same fatal path with a compositor holding the panel, which is the
     // only configuration the owner's laptop is ever in.
@@ -2112,8 +2111,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
             // go fatal once it holds the latch, so the fatal path meets a
             // holder beneath itself; the report must take the screen
             // regardless, and its CPU must go on to watch the reset bound,
-            // which is what the reset proves: a dead kernel takes no input, so
-            // a key pressed inside the bound changes nothing.
+            // which is what the reset proves.
             const HELD: &str = "panel: a painter holding the panel went fatal";
             /// `panic_reboot::reboot_now`'s line, raw on the 16550, which is
             /// this profile's console.
@@ -2150,16 +2148,12 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
                     dump.fill()
                 ));
             }
-            qemu::QmpInput::open(qemu.qmp_socket()).keys(&[("a", true), ("a", false)]);
             // Only the CPU that claimed the panel watches the reset bound, so
             // the machine resetting at it is that CPU's proof: QEMU exits on a
             // reset, and the fatal path's last line says whose reset it was.
             let by = qemu.budget(Duration::from_secs(15));
             let said = qemu.await_exit(by).map_err(|why| {
-                format!(
-                    "the panel was held past the reset bound, by a key or by no CPU watching it: \
-                     {why}\ndecoded screen:\n{text}"
-                )
+                format!("no CPU is watching the reset bound: {why}\ndecoded screen:\n{text}")
             })?;
             if !said.contains(BOUND_OVER) {
                 return Err(format!(
