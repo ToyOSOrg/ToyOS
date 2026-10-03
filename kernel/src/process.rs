@@ -35,7 +35,7 @@ use toyos_proclife::{join, reap, spawn as proclife_spawn, teardown as proclife, 
 /// One `EndowEntry` on the wire; `loader::start` and [`Endowments::encode`] both index by it.
 pub const ENDOW_ENTRY_LEN: usize = core::mem::size_of::<EndowEntry>();
 
-pub use crate::loader::{build_child_handles, spawn, spawn_init, INIT_PATH};
+pub use crate::loader::{build_child_handles, spawn, spawn_supervisor, SUPERVISOR_PATH};
 
 /// Page tables shared between a process and all its threads.
 pub type PageTables = Arc<Lock<crate::mm::paging::AddressSpace>>;
@@ -848,7 +848,7 @@ pub fn with_process_data<R>(f: impl FnOnce(&mut ProcessData) -> R) -> R {
 /// Whom a new process is placed under.
 #[derive(Clone, Copy)]
 pub enum Parent {
-    /// No process: init, which the kernel starts.
+    /// No process: the supervisor, which the kernel starts.
     Root,
     /// The spawner, or the process whose `self` its place named.
     Under(Pid),
@@ -858,7 +858,7 @@ pub enum Parent {
 pub struct Admission(Option<tree::Admitted>);
 
 impl Admission {
-    /// The question at the top of a spawn, before anything is built: `Gone` for a parent being torn down, and `ResourceExhausted`, which the log names, for a child more than `MAX_DEPTH` below init or no pid left to issue.
+    /// The question at the top of a spawn, before anything is built: `Gone` for a parent being torn down, and `ResourceExhausted`, which the log names, for a child more than `MAX_DEPTH` below the supervisor or no pid left to issue.
     pub fn ask(parent: Parent) -> Result<Self, SyscallError> {
         let place = match parent {
             Parent::Root => None,
@@ -872,8 +872,8 @@ impl Admission {
             tree::Admit::Yes(admitted) => Ok(Self(Some(admitted))),
             tree::Admit::Gone => Err(SyscallError::Gone),
             tree::Admit::TooDeep { depth } => {
-                log!("spawn: refused under pid {} at depth {depth}, more than {} below init",
-                    place.expect("spawn: init is admitted at depth 0"), toyos_proclife::MAX_DEPTH);
+                log!("spawn: refused under pid {} at depth {depth}, more than {} below the supervisor",
+                    place.expect("spawn: the supervisor is admitted at depth 0"), toyos_proclife::MAX_DEPTH);
                 Err(SyscallError::ResourceExhausted)
             }
             tree::Admit::NoPid => {

@@ -8,34 +8,34 @@
 # kernel logged — including the one `i8042:` line that says why the integrated
 # keyboard is dead — was on screen for about a tenth of a second and then gone.
 #
-# `/system/bin/init` is in every image and holds the one `SysCap`, so the guarantee is
+# `/system/bin/supervisor` is in every image and holds the one `SysCap`, so the guarantee is
 # no longer "nothing here *can* claim the framebuffer" but "this config declares
 # no `devices`" — which `no_diag_program_claims_the_screen` checks before the
 # image is written, and which nothing checked before. The reachable set is the
-# same; a bug in init could reach a device where previously no code in the image
+# same; a bug in the supervisor could reach a device where previously no code in the image
 # could, and that is the trade.
 #
 # **Two programs now, and the guarantee is restated rather than assumed.** It
 # used to be "nothing here can claim the framebuffer, because the compositor is
-# not built into this image at all". `logd` is in this image because the kernel
+# not built into this image at all". `logkeeper` is in this image because the kernel
 # writes no file, and an unchanged config here would flash a T14 that logs to a
-# panel and nowhere else. The argument survives verbatim: `logd` declares no
+# panel and nowhere else. The argument survives verbatim: `logkeeper` declares no
 # `devices` at all — its whole row is `syscap = ["logread"]` — so the reachable
 # set is unchanged and `no_diag_program_claims_the_screen` still checks it
 # before the image is written.
 #
 # The other program it starts prints the cwd and exits.
 [boot]
-start = ["logd", "fsd", "toybox"]
+start = ["logkeeper", "fileserver", "toybox"]
 
 # **Every image that carries a `TOYOS-LOG` partition runs this**, and every
 # image does. The kernel keeps the record ring and the console and writes no
-# file at all, so a boot config without `logd` is a boot whose `/log` is empty —
-# `every_boot_config_runs_logd` is what refuses one. It claims no device and
+# file at all, so a boot config without `logkeeper` is a boot whose `/log` is empty —
+# `every_boot_config_runs_logkeeper` is what refuses one. It claims no device and
 # serves no port: its row's authority is `logread`, which is
-# `Rights::LOG | Rights::WAIT` on a `SysCap` duplicate, and init hands it every
+# `Rights::LOG | Rights::WAIT` on a `SysCap` duplicate, and the supervisor hands it every
 # program's output beside that.
-[programs.logd]
+[programs.logkeeper]
 service = true
 syscap = ["logread"]
 
@@ -45,6 +45,6 @@ args = ["pwd"]
 # `/log`'s file server, and only it: the log partition is the kernel's
 # partition claim on the boot stick, so this row declares no `devices`, and
 # DATA's block service would be one.
-[programs.fsd]
+[programs.fileserver]
 restart = true
 roles = ["log"]

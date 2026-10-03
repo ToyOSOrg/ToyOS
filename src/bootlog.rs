@@ -16,7 +16,7 @@ use std::fmt;
 /// running to write it there.
 pub const REBOOTING: &str = "Rebooting.";
 
-/// What `/system/bin/init` says as it asks `logd` to make the log whole, before
+/// What `/system/bin/supervisor` says as it asks `logkeeper` to make the log whole, before
 /// it stops the machine: the last line a passing boot's log is owed, because
 /// nothing after it waits for the file.
 pub const STOPPING: &str = toyos_logstream::STOPPING;
@@ -31,7 +31,7 @@ pub const JOB_DEADLINE_SAID: &str =
 /// What the kernel's own boot deadline writes into the black box as it ends the
 /// machine, in `kernel/src/deadline.rs`. The loader prints it back under
 /// [`PREVIOUS_PANIC`] on the pass after the reset, and that is the only channel
-/// it has: a wedged boot's `logd` wrote nothing.
+/// it has: a wedged boot's `logkeeper` wrote nothing.
 pub const DEADLINE_EXPIRED: &str = "the boot deadline expired";
 
 /// What the kernel logs as it arms that deadline, in `kernel/src/deadline.rs`:
@@ -81,7 +81,7 @@ pub const LOCKED_UP: &str = "a cpu locked up with interrupts off";
 /// `kernel/src/log/mod.rs`'s `seal_tail`: the head of the boot's newest
 /// records. The next loader pass prints it back under [`PREVIOUS_PANIC`].
 ///
-/// **The one reader a boot's own tail has.** The stop stops `logd` with every
+/// **The one reader a boot's own tail has.** The stop stops `logkeeper` with every
 /// other thread, so what the kernel says from there on — the stop's record,
 /// its census, [`REBOOTING`] — is on the console and here, and on a machine
 /// with no serial port a console is nothing.
@@ -158,7 +158,7 @@ pub const SEPARATOR: &str = "--- the pass after the reset, reading what the boot
 /// **One channel carries it after the console**: the black-box page, where a
 /// boot that handed the machine back seals it among its [`LOG_TAIL`] records
 /// and a boot a bound ended seals it with its record. The stop writes it after
-/// `logd` has stopped, so no file does.
+/// `logkeeper` has stopped, so no file does.
 pub const PANEL_CENSUS: &str = "panel: paints=";
 
 /// What one boot's panel census says: how often the panel painted, how many
@@ -176,7 +176,7 @@ pub struct Panel {
 ///
 /// **This boot's census whole, or nothing.** A `max_us=` whose digits a cut
 /// took the end of parses as a cheaper panel than the boot had, and each
-/// channel says a line ended itself in its own way: `logd`'s file terminates
+/// channel says a line ended itself in its own way: `logkeeper`'s file terminates
 /// one, and the black-box page is a fixed size whose one cut line the loader
 /// closes with [`CUT_BY_THE_PAGE`]. An older census standing in for a cut one
 /// would be a second boot's number under this boot's name, so the cut line is
@@ -214,7 +214,7 @@ pub fn message(line: &str) -> Option<&str> {
 }
 
 /// Whether a line of the log is a program's (`toyos_logstream::ProgramLine`):
-/// `logd` writes that head and no kernel record opens with it.
+/// `logkeeper` writes that head and no kernel record opens with it.
 pub fn is_program_line(line: &str) -> bool {
     toyos_logstream::is_program_line(line)
 }
@@ -224,7 +224,7 @@ pub fn kernel_records(log: &str) -> String {
     log.split_inclusive('\n').filter(|line| !is_program_line(line)).collect()
 }
 
-/// One program's lines, by the name init started it under, as `logd` read them
+/// One program's lines, by the name the supervisor started it under, as `logkeeper` read them
 /// out of its log ring: each line's text, newline-terminated.
 pub fn lines_of(log: &str, name: &str) -> String {
     log.lines()
@@ -252,33 +252,33 @@ pub fn recorded_name(binary: &str) -> String {
     base[..base.len().min(NAME_LEN - 1)].to_string()
 }
 
-/// Whether `name` on the log volume is one of `logd`'s files, which is
-/// `logd`'s own allow-list and not a suffix: the loader's file ends in `.log`
+/// Whether `name` on the log volume is one of `logkeeper`'s files, which is
+/// `logkeeper`'s own allow-list and not a suffix: the loader's file ends in `.log`
 /// too, and a `toybox` run can leave anything there.
-pub fn is_logd_file(name: &str) -> bool {
+pub fn is_logkeeper_file(name: &str) -> bool {
     toyos_wallclock::classify(name).is_some()
 }
 
 /// The names on a mounted log volume, split into the loader's file and
-/// `logd`'s in the order theirs sort.
+/// `logkeeper`'s in the order theirs sort.
 ///
 /// The loader's is matched without case, because a FAT driver that does not
-/// read the lowercase flags in a directory entry yields `LOADER.LOG`; `logd`'s
+/// read the lowercase flags in a directory entry yields `LOADER.LOG`; `logkeeper`'s
 /// are matched as its own writer spells them, which no such driver preserves
-/// either — a volume read through one has no `logd` file this can name, and
+/// either — a volume read through one has no `logkeeper` file this can name, and
 /// says so by finding none.
 pub fn split_listing(listing: &str) -> (Option<&str>, Vec<&str>) {
     let mut loader = None;
-    let mut logd = Vec::new();
+    let mut logkeeper = Vec::new();
     for name in listing.lines().map(str::trim).filter(|name| !name.is_empty()) {
         if name.eq_ignore_ascii_case(LOADER_LOG) {
             loader = Some(name);
-        } else if is_logd_file(name) {
-            logd.push(name);
+        } else if is_logkeeper_file(name) {
+            logkeeper.push(name);
         }
     }
-    logd.sort_unstable();
-    (loader, logd)
+    logkeeper.sort_unstable();
+    (loader, logkeeper)
 }
 
 /// The kernel's boot-phase record for the end of boot, in
@@ -289,7 +289,7 @@ pub const COMPLETE: &str = "Boot: complete (";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Unfit {
     NoBootRecord,
-    /// The log carries no word from init that the machine stops: the last
+    /// The log carries no word from the supervisor that the machine stops: the last
     /// line it carries instead.
     Unfinished(String),
     /// The loader pass after the reset read no `DONE`, or read one with no
@@ -306,8 +306,8 @@ impl fmt::Display for Unfit {
             Self::NoBootRecord => write!(f, "the log carries no `{COMPLETE}Nms)` record"),
             Self::Unfinished(saw) => write!(
                 f,
-                "the log's last line is {saw:?} and init never said {STOPPING:?}: either the \
-                 boot never asked to hand the machine back to the firmware, or logd never made \
+                "the log's last line is {saw:?} and the supervisor never said {STOPPING:?}: either the \
+                 boot never asked to hand the machine back to the firmware, or logkeeper never made \
                  the log whole before it did"
             ),
             Self::NotHandedBack => write!(
@@ -352,11 +352,11 @@ pub fn after_the_reset(loader: &str) -> Option<&str> {
     loader.find(SEPARATOR).map(|at| &loader[at..])
 }
 
-/// Init's line saying the machine stops, the last one `log` carries.
+/// The supervisor's line saying the machine stops, the last one `log` carries.
 pub fn stopping_line(log: &str) -> Option<&str> {
     log.lines().rfind(|line| {
         toyos_logstream::program_line(line)
-            .is_some_and(|said| said.tag == "init" && said.text.starts_with(STOPPING))
+            .is_some_and(|said| said.tag == "supervisor" && said.text.starts_with(STOPPING))
     })
 }
 
@@ -364,7 +364,7 @@ pub fn stopping_line(log: &str) -> Option<&str> {
 ///
 /// **Found from the CPU it precedes rather than by position**: the field before
 /// it is the writer's tag, and the two writers disagree about it on purpose —
-/// `logd` puts a wall clock there and the panel puts nothing.
+/// `logkeeper` puts a wall clock there and the panel puts nothing.
 pub fn record_millis(line: &str) -> Option<u64> {
     toyos_logstream::record_ms(line)
 }
@@ -403,8 +403,8 @@ pub fn boot_millis(log: &str) -> Option<u64> {
 }
 
 /// A boot's duration if its log is a passing boot's, which takes both lines:
-/// the kernel's boot record, and init's word that the machine stops — said
-/// before `logd` made the log whole, so a log that carries it is whole to it.
+/// the kernel's boot record, and the supervisor's word that the machine stops — said
+/// before `logkeeper` made the log whole, so a log that carries it is whole to it.
 /// That the reset then came is the console's to say, or the next loader
 /// pass's ([`HANDED_BACK`], and [`REBOOTING`] under [`LOG_TAIL`]).
 pub fn verdict(log: &str) -> Result<u64, Unfit> {
@@ -421,26 +421,26 @@ mod tests {
     use super::*;
 
     /// The half-told boot: the kernel got all the way up and the log stops
-    /// there, so the machine either never asked for the reset or `logd` never
+    /// there, so the machine either never asked for the reset or `logkeeper` never
     /// made the log whole before it.
     #[test]
-    fn a_boot_record_without_inits_stop_is_not_a_pass() {
+    fn a_boot_record_without_the_supervisors_stop_is_not_a_pass() {
         let booted = "[kernel 1.151 cpu0] Boot: complete (1151ms)\n";
-        let stopping = format!("{{1.203 init}} {STOPPING} (Reboot)\n");
+        let stopping = format!("{{1.203 supervisor}} {STOPPING} (Reboot)\n");
         let ended = format!("{booted}{stopping}");
         assert_eq!(verdict(&ended), Ok(1151));
-        // What `logd` wrote between the flush and the stop is no refusal.
+        // What `logkeeper` wrote between the flush and the stop is no refusal.
         assert_eq!(verdict(&format!("{ended}[kernel 1.210 cpu0] exit: reboot pid=6\n")), Ok(1151));
 
         assert_eq!(
             verdict(booted),
             Err(Unfit::Unfinished("[kernel 1.151 cpu0] Boot: complete (1151ms)".to_string()))
         );
-        // The words, from anyone but init, and from init as anything but its
-        // line, are not init's stop.
+        // The words, from anyone but the supervisor, and from the supervisor as anything but its
+        // line, are not the supervisor's stop.
         let forged = format!("{booted}{{1.203 test-runner}} {STOPPING}\n");
         assert!(matches!(verdict(&forged), Err(Unfit::Unfinished(_))));
-        let quoted = format!("{booted}{{1.203 init}} init: said {STOPPING}\n");
+        let quoted = format!("{booted}{{1.203 supervisor}} supervisor: said {STOPPING}\n");
         assert!(matches!(verdict(&quoted), Err(Unfit::Unfinished(_))));
         assert_eq!(verdict(&stopping), Err(Unfit::NoBootRecord));
         assert_eq!(verdict(""), Err(Unfit::NoBootRecord));
@@ -509,7 +509,7 @@ mod tests {
     }
 
     #[test]
-    fn the_loaders_file_is_told_from_logds_however_a_driver_spelled_it() {
+    fn the_loaders_file_is_told_from_logkeepers_however_a_driver_spelled_it() {
         let listing = "2026-09-06-084003.log\nloader.log\nunknown-00.log\nnotes.txt\n";
         assert_eq!(
             split_listing(listing),
@@ -517,7 +517,7 @@ mod tests {
         );
         // A FAT driver that drops the lowercase flags yields 8.3 in upper case.
         assert_eq!(split_listing("LOADER.LOG\n").0, Some("LOADER.LOG"));
-        // And it is never one of logd's, under either spelling.
+        // And it is never one of logkeeper's, under either spelling.
         assert!(split_listing("LOADER.LOG\nloader.log\n").1.is_empty());
         // Blank rows and stray whitespace are a listing's, not a name's.
         assert_eq!(split_listing("\n  loader.log  \n\n").0, Some("loader.log"));
@@ -566,12 +566,12 @@ mod tests {
         let log = "[2026-09-08 16:08:23 2.100 cpu0] exit: test_rs_job pid=4 code=3 cpu=1ms\n\
                    [2026-09-08 16:08:23 2.150 cpu0] PANIC: a report\n  its second line\n\
                    {2026-09-08 16:08:23 2.200 test-runner} [2026-09-08 16:08:23 2.200 cpu0] exit: test_rs_job pid=4 code=0 cpu=0ms\n\
-                   {2026-09-08 16:08:23 2.300 test-runner} {x 2.3 netd} netd: MAC 00:00:00:00:00:00\n\
-                   {2026-09-08 16:08:23 2.400 netd} netd: MAC 52:54:00:12:34:56\n";
+                   {2026-09-08 16:08:23 2.300 test-runner} {x 2.3 netstack} netstack: MAC 00:00:00:00:00:00\n\
+                   {2026-09-08 16:08:23 2.400 netstack} netstack: MAC 52:54:00:12:34:56\n";
         let kernel = kernel_records(log);
         assert!(!kernel.contains("code=0"), "{kernel}");
         assert!(kernel.contains("code=3") && kernel.contains("  its second line\n"), "{kernel}");
-        assert_eq!(lines_of(log, "netd"), "netd: MAC 52:54:00:12:34:56\n");
+        assert_eq!(lines_of(log, "netstack"), "netstack: MAC 52:54:00:12:34:56\n");
         assert_eq!(lines_of(log, "test-runner").lines().count(), 2);
         assert!(is_program_line(log.lines().nth(3).expect("five lines")));
     }
@@ -598,7 +598,7 @@ mod tests {
 mod record_time_tests {
     use super::*;
 
-    /// Both writers' shapes: `logd`'s file carries a wall-clock tag before the
+    /// Both writers' shapes: `logkeeper`'s file carries a wall-clock tag before the
     /// elapsed field and the panel carries none, and the same reader answers
     /// for both.
     #[test]
@@ -618,15 +618,15 @@ mod record_time_tests {
         assert_eq!(record_millis(""), None);
     }
 
-    /// The two channels the census crosses, read by one reader: `logd`'s file,
+    /// The two channels the census crosses, read by one reader: `logkeeper`'s file,
     /// and the black-box page the loader prints back with its own margin and
     /// with the kernel's dashes flattened to ASCII.
     #[test]
     fn the_panel_census_is_read_off_either_channel() {
-        let logd = "[2026-09-08 06:50:53 2.5 cpu0] panel: paints=3 px=6220800 us=1500000 \
+        let logkeeper = "[2026-09-08 06:50:53 2.5 cpu0] panel: paints=3 px=6220800 us=1500000 \
                     max_us=520000\n";
         assert_eq!(
-            panel_census(logd),
+            panel_census(logkeeper),
             Some(Panel { paints: 3, pixels: 6_220_800, micros: 1_500_000, max_micros: 520_000 })
         );
 
@@ -659,7 +659,7 @@ mod record_time_tests {
         let mid_number = format!("paints=10 px=8886656 us=18693 max_us=38{CUT_BY_THE_PAGE}");
         assert_eq!(panel_census(&page(&mid_number, "")), None);
 
-        // `logd`'s file ends a record with the newline, so its own cut is a
+        // `logkeeper`'s file ends a record with the newline, so its own cut is a
         // last line that never got one.
         assert_eq!(panel_census("panel: paints=3 px=6220800 us=1500000 max_us=52"), None);
         // A field the cut took whole, and a log with no census at all.

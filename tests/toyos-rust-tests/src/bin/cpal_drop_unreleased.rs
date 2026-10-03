@@ -1,16 +1,16 @@
 //! cpal's ToyOS host, dropped while its stream's server never lets go of it.
 //!
-//! This binary is the stream's server: it answers the open as soundd does, and
+//! This binary is the stream's server: it answers the open as soundserver does, and
 //! then holds the signal pipe open without writing it until the client's
-//! `Drop` has come back — a soundd whose mix loop has stopped. Its child, the
-//! same binary with `client`, reaches it as `soundd`, builds a stream through
+//! `Drop` has come back — a soundserver whose mix loop has stopped. Its child, the
+//! same binary with `client`, reaches it as `soundserver`, builds a stream through
 //! cpal and drops it unplayed. The stream thread sends the close and waits on
 //! the pipe; `Drop` has to come back with the refusal by name through the error
 //! callback rather than wait for good. One signal then has to end the stream
 //! thread while its process lives, so the stream's connection closes as it
-//! would for soundd.
+//! would for soundserver.
 //!
-//! No sound is played and soundd is not involved.
+//! No sound is played and soundserver is not involved.
 
 use std::io::{BufRead, BufReader, Read};
 use std::os::toyos::process::CommandExt;
@@ -29,10 +29,10 @@ use toyos_abi::syscall::SVC_LABEL;
 
 const SELF: &str = "/system/bin/test_rs_cpal_drop_unreleased";
 
-/// cpal's ToyOS host's words for a soundd that did not let go.
-const REFUSAL: &str = "soundd did not let go of the closed stream within ";
+/// cpal's ToyOS host's words for a soundserver that did not let go.
+const REFUSAL: &str = "soundserver did not let go of the closed stream within ";
 
-/// What soundd answers a 44100 Hz stereo open with, which is the one stream
+/// What soundserver answers a 44100 Hz stereo open with, which is the one stream
 /// cpal's ToyOS host opens.
 const OPENED: StreamOpenResponse = StreamOpenResponse {
     client_period_frames: 128,
@@ -53,9 +53,9 @@ fn main() {
 fn serve() {
     let (acceptor, connector) = port::create().expect("a port");
     let names = namespace::build()
-        .add("soundd", &connector)
+        .add("soundserver", &connector)
         .finish()
-        .expect("a namespace naming this binary soundd");
+        .expect("a namespace naming this binary soundserver");
     let mut child = Command::new(SELF)
         .arg("client")
         .endow(SVC_LABEL, names.into_raw().0)

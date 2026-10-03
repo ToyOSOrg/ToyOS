@@ -46,7 +46,7 @@ pub fn initial_rights(object: &KObjectRef) -> Rights {
         KObjectRef::Inbox(_) => {
             BASE.union(Rights::READ).union(Rights::WRITE).union(Rights::MAP)
         }
-        // Every `SysCap` bit is authority init decides per program: no default, the creator states it.
+        // Every `SysCap` bit is authority the supervisor decides per program: no default, the creator states it.
         KObjectRef::SysCap(_) => Rights::NONE,
         // `MAP` is the whole of it: a region is examined through the memory, not the handle.
         KObjectRef::SharedMem(_) => {

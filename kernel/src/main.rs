@@ -194,7 +194,7 @@ fn report_power_on(args: &KernelArgs, complete: u64) {
 
 /// Says where this boot's log can be read, on the last surface still showing it once userland owns the screen.
 fn report_log_destination() {
-    // Kernel-side because panic_console owns the panel; logd reports which file it opened separately.
+    // Kernel-side because panic_console owns the panel; logkeeper reports which file it opened separately.
     // Whether the partition is on a disk this kernel reads, not whether its file server mounted it:
     // that server says so itself, and this kernel mounts nothing but ROOT.
     let console = drivers::serial::has_console();
@@ -448,7 +448,7 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     }
     pipe::init();
 
-    // ROOT is the loader's image in memory, so nothing from here to init's
+    // ROOT is the loader's image in memory, so nothing from here to the supervisor's
     // spawn asks a disk for anything: every storage driver comes up after it.
     use vfs::UserAccess;
     let root_fs = rootfs::mount();
@@ -461,18 +461,18 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
 
     boot_phase!("subsystems ready", t_subsys);
 
-    // init reads /system/etc/system.manifest itself; the boot config never names the program it starts.
-    let pid = process::spawn_init();
-    log!("spawned {} pid={pid}", process::INIT_PATH);
+    // The supervisor reads /system/etc/system.manifest itself; the boot config never names the program it starts.
+    let pid = process::spawn_supervisor();
+    log!("spawned {} pid={pid}", process::SUPERVISOR_PATH);
 
-    // The proof the boot up to here needed no disk: ROOT and init's image both
+    // The proof the boot up to here needed no disk: ROOT and the supervisor's image both
     // came out of memory.
-    log!("{} {}", rootfs::INIT_WITHOUT_A_DISK, block::census::commands_issued());
+    log!("{} {}", rootfs::SUPERVISOR_WITHOUT_A_DISK, block::census::commands_issued());
 
-    // After init's spawn and before it runs: nothing runs a task until
+    // After the supervisor's spawn and before it runs: nothing runs a task until
     // `smp::set_ready` below. This kernel mounts no disk: `/apps`, `/config`,
-    // `/home`, `/state`, `/log` and `/boot` are file servers' (`/system/bin/fsd`),
-    // and an NVMe controller is `/system/bin/blockd`'s. The USB disks are still
+    // `/home`, `/state`, `/log` and `/boot` are file servers' (`/system/bin/fileserver`),
+    // and an NVMe controller is `/system/bin/diskserver`'s. The USB disks are still
     // this kernel's, served to their file servers as partition claims, until
     // usbd drives the controller.
     let t_storage = clock::nanos_since_boot();

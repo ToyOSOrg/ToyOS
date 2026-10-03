@@ -154,7 +154,7 @@ pub fn this_process() -> &'static Process {
 }
 
 /// Make `ns` this process's namespace, for the one process no parent endows
-/// one: init, which builds the machine's ports itself and resolves its own
+/// one: the supervisor, which builds the machine's ports itself and resolves its own
 /// files through them as every program does. Refused when this process already
 /// has a namespace or has asked for one.
 pub fn adopt_namespace(ns: Namespace) -> Result<(), Namespace> {
@@ -213,8 +213,8 @@ pub fn provided(labels: &mut [Option<(&'static str, Connector)>]) -> usize {
 
 /// The claim for a device class the manifest says this program gets.
 ///
-/// `None` is a machine that had no such device when init asked, or a program
-/// the manifest gives none — the honest answer, and the one soundd degrades
+/// `None` is a machine that had no such device when the supervisor asked, or a program
+/// the manifest gives none — the honest answer, and the one soundserver degrades
 /// on. It replaces a two-syscall probe: "did I get an HDA or a virtio-sound?"
 /// is now "which claims are in my endowment table?", which is the same question
 /// with the answer already in hand.

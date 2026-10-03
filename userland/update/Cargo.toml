@@ -15,4 +15,4 @@ toyos-fat32 = { path = "../../toyos-fat32" }
 sha2 = { version = "0.10", default-features = false }
 
 [package.metadata.toyos.host]
-exempt.manages = "ToyOS's boot slots: it writes the idle one, onto the partitions init claims for it"
+exempt.manages = "ToyOS's boot slots: it writes the idle one, onto the partitions the supervisor claims for it"

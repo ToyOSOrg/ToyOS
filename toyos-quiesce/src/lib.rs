@@ -7,7 +7,7 @@
 //! here; `kernel/src/quiesce.rs` marks the threads and spends the time.
 //!
 //! **Nothing is carved out.** The log's writer stops with every other thread:
-//! `/system/bin/init` has it flush before it asks for the stop, and what the
+//! `/system/bin/supervisor` has it flush before it asks for the stop, and what the
 //! kernel says after that goes to its console and its black box, never to a
 //! process it would have to keep running.
 //!
@@ -67,15 +67,15 @@ impl Sweep {
     }
 }
 
-/// A policy number: how long init waits on one call into a file server that
+/// A policy number: how long the supervisor waits on one call into a file server that
 /// is alive and has not answered — and so how long a stop request can wait
-/// behind one, since init serves `power` between its loop's passes.
+/// behind one, since the supervisor serves `power` between its loop's passes.
 pub const FILES_MS: u64 = 30_000;
 
-/// A policy number: how long init waits for `logd`'s flush before a stop.
+/// A policy number: how long the supervisor waits for `logkeeper`'s flush before a stop.
 pub const FLUSH_MS: u64 = 5_000;
 
-/// A policy number: how long init waits for every file server's sync, run
+/// A policy number: how long the supervisor waits for every file server's sync, run
 /// together after the flush, before a stop.
 pub const SYNC_MS: u64 = 5_000;
 
@@ -203,13 +203,13 @@ mod tests {
         assert!(must_stop(id(10, 1), CALLER), "a sibling thread of the caller's process is not the caller");
     }
 
-    /// **The log's writer is not carved out**: `logd`'s threads stop like any
+    /// **The log's writer is not carved out**: `logkeeper`'s threads stop like any
     /// other process's, whatever it holds.
     #[test]
     fn every_other_thread_stops_the_log_writer_included() {
-        const LOGD: u32 = 2;
+        const LOGKEEPER: u32 = 2;
         for tid in 0..4 {
-            assert!(must_stop(id(LOGD, tid), CALLER));
+            assert!(must_stop(id(LOGKEEPER, tid), CALLER));
         }
     }
 

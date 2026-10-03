@@ -2,7 +2,7 @@
 //!
 //! `SYS_RELEASE_SHARED` unmapped the caller and dropped it from the region's
 //! `allowed` list, and stopped there: the "is anyone left?" test lived only in
-//! `cleanup_process`, so nothing freed a region at close time and soundd's
+//! `cleanup_process`, so nothing freed a region at close time and soundserver's
 //! per-client ring stayed resident until some unrelated process exited. There
 //! is no release call now — a region's life is its handle count, and the
 //! zero-handle hook is where the mappings go.

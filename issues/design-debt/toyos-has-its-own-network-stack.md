@@ -16,7 +16,7 @@ netd runs smoltcp. Its replacement is ToyOS's own stack, built clean-room: reade
 - Stage 5: netd on one shard, pipe ABI unchanged; smoltcp leaves netd, `Cargo.toml` and `userland/Cargo.lock` in the same PR.
 - Then multi-core, netring (blocked on the owner's ABI ruling), TCP and IP hardening, IPv6, offloads, soak.
 
-The listener defects are this track's: `issues/hardware/a-handshake-nobody-finishes-holds-a-listeners-port-shut.md` and `issues/hardware/a-connect-between-two-accepts-is-reset.md`, on smoltcp until stage 5, and `issues/hardware/an-accept-that-never-reaches-netd-strands-its-listener.md`, in std's accept.
+The listener defects are this track's: `issues/hardware/a-handshake-nobody-finishes-holds-a-listeners-port-shut.md` and `issues/hardware/a-connect-between-two-accepts-is-reset.md`, on smoltcp until stage 5, and `issues/hardware/an-accept-that-never-reaches-netstack-strands-its-listener.md`, in std's accept.
 
 Owed from the stage 3 specifications: US-57 by stage 5, whose netd maps UDP's refusals onto the pipe ABI; `dhcp.renew-unroutable` by stage 5, whose netd counts it where `toyos-net-udp` refuses the renewal `udp.no-route`; FRA-01–20 and PMTU-01–06 by IP hardening.
 

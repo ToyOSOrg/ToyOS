@@ -15,7 +15,7 @@ use crate::loaderlog;
 
 /// The file, at the root of the log partition beside `loader.log`.
 ///
-/// Not one of `logd`'s names and not the loader's log: a reader of the volume
+/// Not one of `logkeeper`'s names and not the loader's log: a reader of the volume
 /// that walks it for either finds this and passes over it
 /// (`toyos_build::bootlog::split_listing`).
 const NAME: &CStr16 = cstr16!("attempts");

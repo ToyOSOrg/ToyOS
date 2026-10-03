@@ -5,7 +5,7 @@
 //! between two `SYS_CLOCK_EPOCH` readings taken around what made it — a write,
 //! a create with truncation, a create of a missing file, a truncation — and a
 //! later write's stamp is later, which a clock of whole seconds cannot say.
-//! Then the same on `/home`, fsd's DATA, which keeps the nanosecond too.
+//! Then the same on `/home`, fileserver's DATA, which keeps the nanosecond too.
 //! Then `/log`: FAT keeps the whole seconds of its flush, read back after a
 //! reopen.
 //! `write <path>` makes the first judgement on `path` and `read <path>` only

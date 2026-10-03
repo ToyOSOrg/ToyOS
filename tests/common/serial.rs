@@ -41,13 +41,13 @@ pub enum Died {
     /// A process the kernel killed: a Ring 3 fault, reported by name in
     /// `kernel/src/arch/x86_64/idt/exceptions.rs`. The machine is fine — a test whose
     /// whole subject is a process dying produces these deliberately. Before a boot's ready
-    /// marker it still ends the boot: whatever died was `init` or one of its
+    /// marker it still ends the boot: whatever died was the supervisor or one of its
     /// children, and nothing left is going to reach the marker.
     Faulted,
     /// A process that ended itself — its own panic handler wrote the line
     /// (`userland/libc/src/lib.rs`, or the std fork's). Never the machine's
-    /// business, and not even always the boot's: `sshd` lost a race with
-    /// `netd`'s teardown on a NIC-less machine and panicked across four
+    /// business, and not even always the boot's: `sshserver` lost a race with
+    /// `netstack`'s teardown on a NIC-less machine and panicked across four
     /// recorded boots that then came up perfectly, which is why a boot wait
     /// must not end on one.
     Panicked,
@@ -348,7 +348,7 @@ const NEVER_CLEAN: &[&str] = &[
     // kernel/src/arch/x86_64/vtd/fault.rs — a function a *process* drives reached an
     // address its own domain does not map. The machine goes on and the claim
     // refuses every later call, so this is not a death; it is a driver whose
-    // descriptors are wrong, and a netd that did it on every boot would
+    // descriptors are wrong, and a netstack that did it on every boot would
     // otherwise pass everywhere.
     "iommu: DMA FAULT owner=slot",
 ];

@@ -1,0 +1,17 @@
+[package]
+name = "logkeeper"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+toyos = { path = "../../toyos" }
+toyos-abi = { path = "../../toyos-abi" }
+toyos-logstream = { path = "../../toyos-logstream" }
+# The per-program allowance: how many records a second a program may put in the log.
+toyos-elide = { path = "../../toyos-elide" }
+toyos-inspect = { path = "../../toyos-inspect" }
+toyos-wallclock = { path = "../../toyos-wallclock" }
+
+[package.metadata.toyos.host]
+exempt.owns = "the kernel's record ring, read under the `logread` SysCap"

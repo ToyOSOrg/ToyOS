@@ -13,11 +13,11 @@ public carries them unless whoever pastes it masks them by hand:
 
 - the USB stick's serial number: `kernel/src/drivers/xhci/wait/msc.rs:1407`,
   on every bind, and `:1415`, when a disk comes back;
-- the network card's MAC: `userland/netd/src/main.rs:1608`, and
+- the network card's MAC: `userland/netstack/src/main.rs:1605`, and
   `src/metal.rs:2281`, where the host loop writes the one it read before the
   flash into the readback's `boot.txt`;
 - the resolvers the lease named, which on the bench are the provider's public
-  ones: `userland/netd/src/dhcp.rs:149`.
+  ones: `userland/netstack/src/dhcp.rs:149`.
 
 `src/sourcegate.rs` reads tracked files only. A pull request's body, a comment
 and a commit message are read by nothing before they are public.

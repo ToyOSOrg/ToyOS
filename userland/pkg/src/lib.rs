@@ -193,7 +193,7 @@ mod tests {
     }
 
     /// A digest the manifest could not carry stops the install rather than
-    /// producing a directory init cannot resolve.
+    /// producing a directory the supervisor cannot resolve.
     #[test]
     fn a_digest_the_manifest_cannot_carry_stops_the_install() {
         assert!(plan(ASSET, "not-a-digest", &gbae()).is_err());

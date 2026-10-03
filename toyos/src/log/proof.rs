@@ -290,7 +290,7 @@ fn region() -> (Vec<u64>, Ring) {
     (words, ring)
 }
 
-/// **What soundd's mix thread does to log, allocating nothing and waiting on
+/// **What soundserver's mix thread does to log, allocating nothing and waiting on
 /// nothing.** A line of the stats line's shape composed on the stack and
 /// pushed into a claimed lane of a real ring layout — its refusal path
 /// included — and the same into the shared ring, is zero allocations on the
@@ -305,7 +305,7 @@ fn a_real_time_write_allocates_nothing() {
         for window in 0..(LANE_SLOTS + 4) {
             compose(
                 Severity::Info,
-                format_args!("soundd: wakes={} completions={} underruns={} late_wakes={}", window, 2, 0, 1),
+                format_args!("soundserver: wakes={} completions={} underruns={} late_wakes={}", window, 2, 0, 1),
                 &mut |body: &mut Body| {
                     body.at_ns = window;
                     let _ = lane.push(body);
@@ -363,7 +363,7 @@ fn a_ring_has_four_lanes_to_claim() {
     assert!(ring.claim_lane(1, 4).is_none());
 }
 
-/// A ring laid out exactly as `init`'s `new_ring` lays each program's out —
+/// A ring laid out exactly as the supervisor's `new_ring` lays each program's out —
 /// through [`Ring::lay_out_with_placeholder_owner`], the same call — keeps
 /// its owner's slots from every pid, because none of them is the placeholder,
 /// until the real owner is named.

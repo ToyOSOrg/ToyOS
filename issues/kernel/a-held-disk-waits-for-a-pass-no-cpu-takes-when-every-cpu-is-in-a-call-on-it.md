@@ -44,7 +44,7 @@ reboot's sync and cpu1 in a shootdown
 
 **What is still wrong**: the operation that waited answers `BudgetExpired`
 instead of the device's answer, and a caller that gives up on one — `logd` on a
-refused create (`issues/boot-media/logd-ends-the-boots-log-on-one-refused-create-and-nothing-durable-says-so.md`)
+refused create (`issues/boot-media/logkeeper-ends-the-boots-log-on-one-refused-create-and-nothing-durable-says-so.md`)
 — loses what it was doing. The retry loops above the block layer spin with `IF`
 clear too, so on a machine with one CPU the device binds only when the caller
 leaves the kernel.

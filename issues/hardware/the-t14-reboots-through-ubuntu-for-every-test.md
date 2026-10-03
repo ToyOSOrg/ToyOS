@@ -18,7 +18,7 @@ metal rows.
   wedge, a reset) or judges a boot (the loader, an update, a file read back
   after a reboot). Its registration says which.
 - **One exec channel**, to `test-runner`'s stdin loop, since `sshd` aliases a
-  second channel's input (`issues/isolation/sshd-holds-one-channel-and-does-not-say-so.md`).
+  second channel's input (`issues/isolation/sshserver-holds-one-channel-and-does-not-say-so.md`).
   `tests/ssh-client-host`'s `pipe` relays it once it writes output as it
   arrives (`tests/ssh-client-host/src/main.rs:251-263`).
 - **A test's window** is what crosses between its markers: the job's output,

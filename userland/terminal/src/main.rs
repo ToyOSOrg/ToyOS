@@ -214,7 +214,7 @@ fn main() {
 
 /// Start the shell: `[programs.shell]`'s own row, plus this terminal's surface.
 ///
-/// **The row is init's to build and the surface is this terminal's to give.**
+/// **The row is the supervisor's to build and the surface is this terminal's to give.**
 /// A shell's authority is a decision the manifest makes, and until the launcher
 /// existed a terminal could hand a child only what it held itself — so it
 /// handed over a hand-written union of its own names. `provide` is the shape
