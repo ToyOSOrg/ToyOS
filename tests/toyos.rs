@@ -708,9 +708,12 @@ const PROCTREECASE: &[metal::Arm] =
 
 /// netd in front of the T14's I219 with its lease probe armed: netd's exit code
 /// is the lease's verdict, read out of the kernel's own `exit:` record, and its
-/// report is on the log volume.
-const LANLEASECASE: &[metal::Arm] =
-    &[metal::once(lan::LEASE_BOOT, lan::LEASE_CONFIG, &[], lan::JOBS)];
+/// report is on the log volume. It names the I219, so the loop refuses a cable
+/// that is out before it flashes, as [`LANTALKCASE`] does.
+const LANLEASECASE: &[metal::Arm] = &[metal::Arm {
+    nic: Some(lan::NIC),
+    ..metal::once(lan::LEASE_BOOT, lan::LEASE_CONFIG, &[], lan::JOBS)
+}];
 
 /// The cable's boot, netd in front of the T14's I219, which the host talks to
 /// over that cable: the loop reads the log it serves under its name, pings it,

@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: tooling
 opened: 2026-10-03
 ---
 
@@ -15,3 +15,9 @@ is a fixed delay standing in for an event the job does not wait on, which root
 
 On the T14 run of #638's head netd exited at 19.212 s of the `lanleasecase`
 boot and init stopped the machine at 21.202 s.
+
+## Exit condition
+
+Neither boot's one job holds a sleep: each waits on the event it is held open
+for, bounded by a timeout that panics by name, and `lan_lease_report` and
+`dump_nmi_probe` pass on a T14 run of that head.

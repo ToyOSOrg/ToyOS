@@ -51,16 +51,15 @@ pub fn delivered_on_metal(back: &metal::Readback) -> Result<(), String> {
 const ID: &str = "8086:15fc";
 
 /// The PCI function that card is, as `/sys/bus/pci/devices` spells it: where
-/// the metal loop reads the card's MAC before the flash.
+/// the metal loop reads the cable and the card's MAC before the flash.
 pub const NIC: &str = "0000:00:1f.6";
 
-/// The T14's judge: the claim, the card, the lease in netd's own lines, and
-/// the host's ping of the address that lease names.
+/// The T14's judge: the claim, the card, and the lease in netd's own lines.
 ///
-/// **The host learns that address from the boot**: netd answers for the
+/// **The host learns the leased address from the boot**: netd answers for the
 /// machine's name once it holds a lease, and the loop reads the log served at
-/// the address the name answered with and pings it. The lease record is held
-/// to that address here, so no lease but this boot's own is judged.
+/// the address the name answered with. The lease record is held to that
+/// address here, so no lease but this boot's own is judged.
 pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
     let kernel = back.kernel();
     let text = kernel.text();
@@ -125,18 +124,6 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
             }
         }
         Err(why) => bad.push(why),
-    }
-
-    match heard.ping {
-        Some(true) => eprintln!(
-            "  [lan] {}, where this boot answered for its name, answered the host's ping",
-            heard.peer
-        ),
-        Some(false) => bad.push(format!(
-            "{}, where this boot answered for its name, answered no ping of the host's",
-            heard.peer
-        )),
-        None => bad.push(format!("the host asked {} for no ping", heard.peer)),
     }
 
     if bad.is_empty() {

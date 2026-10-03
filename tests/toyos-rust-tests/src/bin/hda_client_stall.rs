@@ -17,9 +17,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use toyos::ipc::{FrameRx, RxStep};
-use toyos::poller::{Poller, READABLE};
-use toyos_inspect::{Value, MAX_SNAPSHOT_BYTES, MSG_INSPECT, MSG_SNAPSHOT, SOUND};
+use toyos_inspect::{Value, SOUND};
 
 const FREQ_HZ: f64 = 440.0;
 const AMPLITUDE: f64 = 16000.0;
@@ -107,7 +105,8 @@ fn play(stalls: u64) {
 fn await_suspended() {
     let deadline = Instant::now() + WITHIN;
     loop {
-        let sound = inspect_sound();
+        let sound =
+            inspect::ask(SOUND).unwrap_or_else(|why| panic!("soundd's inspect answer: {why}"));
         let (Some(Value::Text(state)), Some(&Value::U64(frames)), Some(&Value::U64(rate))) = (
             sound.get("sound.stream.state"),
             sound.get("sound.period_frames"),
@@ -124,28 +123,5 @@ fn await_suspended() {
              the second stream has no suspended daemon to resume"
         );
         std::thread::sleep(Duration::from_nanos(1_000_000_000 * frames / rate));
-    }
-}
-
-/// soundd's own `inspect` answer, within [`WITHIN`].
-fn inspect_sound() -> std::collections::BTreeMap<String, Value> {
-    let conn = toyos::endow::service(SOUND.port).expect("a connection to soundd");
-    conn.signal(MSG_INSPECT).expect("soundd takes an inspect request");
-    let poller = Poller::new(1);
-    let mut rx: Box<FrameRx<MAX_SNAPSHOT_BYTES>> = Box::new(FrameRx::new());
-    let deadline = Instant::now() + WITHIN;
-    loop {
-        match rx.pump(&conn) {
-            RxStep::Frame { msg_type: MSG_SNAPSHOT, payload_len } => {
-                return toyos_inspect::decode(rx.payload(payload_len), SOUND)
-                    .unwrap_or_else(|why| panic!("soundd's snapshot: {why}"));
-            }
-            RxStep::Idle => {}
-            other => panic!("soundd answered inspect with {other:?}, not a snapshot"),
-        }
-        let left = deadline.saturating_duration_since(Instant::now());
-        assert!(!left.is_zero(), "soundd did not answer inspect within {WITHIN:?}");
-        poller.watch(&conn, READABLE, 0);
-        poller.wait(1, left.as_nanos() as u64, |_| {});
     }
 }

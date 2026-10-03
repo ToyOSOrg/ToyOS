@@ -151,8 +151,9 @@ pub enum Refusal {
     /// A lid key that no longer reads `ignore`, which is what keeps the machine up.
     Lid { key: &'static str, got: String },
     Remote { what: String, status: String, stderr: String },
-    /// The machine could not name the interface and the MAC it holds on the
-    /// function the flashed image claims.
+    /// The machine could not name the interface, the MAC and an IPv4 address it
+    /// holds on the function the flashed image claims. No address is a cable
+    /// that is out, and a boot flashed onto that bench is red for the bench.
     Wire { nic: String, why: String },
     /// The machine did not go down, or did not come back.
     Silent { what: &'static str, secs: u64 },
@@ -300,7 +301,7 @@ impl fmt::Display for Refusal {
             Self::Wire { nic, why } => write!(
                 f,
                 "the machine says nothing usable about PCI function {nic}, which the flashed \
-                 image claims: {why}"
+                 image claims and a boot of it could answer on: {why}"
             ),
             Self::Silent { what, secs } => write!(
                 f,
@@ -1039,8 +1040,30 @@ fn lid_policy(text: &str) -> Result<(), Refusal> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Wire {
     pub iface: String,
+    /// What the interface holds before the flash: that it holds one is the
+    /// cable being in. A boot leases its own, so no judge reads this.
+    pub addr: std::net::Ipv4Addr,
     /// Lower case, colon separated, as `/sys/class/net/<i>/address` writes it.
     pub mac: String,
+}
+
+/// `ip -4 -brief addr show <iface>`'s one line, as `Wire` needs it: the brief
+/// form is `<name> <state> <cidr>...`, and an interface with no address has no
+/// third field at all, which is the machine saying the cable is out.
+fn brief_address(iface: &str, text: &str) -> Result<std::net::Ipv4Addr, String> {
+    let line = text
+        .lines()
+        .find(|l| l.split_whitespace().next() == Some(iface))
+        .ok_or_else(|| format!("`ip -4 -brief addr show {iface}` said {text:?}"))?;
+    let cidr = line
+        .split_whitespace()
+        .nth(2)
+        .ok_or_else(|| format!("{iface} holds no IPv4 address: {line:?}"))?;
+    cidr.split('/')
+        .next()
+        .unwrap_or(cidr)
+        .parse()
+        .map_err(|_| format!("{iface}'s address reads {cidr:?}"))
 }
 
 /// The loop, over one target.
@@ -1094,9 +1117,9 @@ impl Driver {
     }
 
     /// What this machine holds on the function the flashed image claims: the
-    /// interface Ubuntu gave it and its MAC. Two reads and not one, so a
-    /// machine that answers oddly is refused with the read that was odd;
-    /// neither writes.
+    /// interface Ubuntu gave it, its MAC and its address. Three reads and not
+    /// one, so a machine that answers oddly is refused with the read that was
+    /// odd; none writes.
     fn wire(&self, nic: &str) -> Result<Wire, Refusal> {
         let bad = |why: String| Refusal::Wire { nic: nic.to_string(), why };
         let at = shell_word(&format!("/sys/bus/pci/devices/{nic}/net"));
@@ -1116,7 +1139,17 @@ impl Driver {
                 &format!("cat {}", shell_word(&format!("/sys/class/net/{iface}/address"))),
             )
             .map_err(|e| bad(e.to_string()))?;
-        Ok(Wire { iface: iface.to_string(), mac: mac.trim().to_ascii_lowercase() })
+        let brief = self
+            .ssh(
+                "reading the claimed function's address",
+                &format!("ip -4 -brief addr show {}", shell_word(iface)),
+            )
+            .map_err(|e| bad(e.to_string()))?;
+        Ok(Wire {
+            iface: iface.to_string(),
+            addr: brief_address(iface, &brief).map_err(bad)?,
+            mac: mac.trim().to_ascii_lowercase(),
+        })
     }
 
     /// The loop refuses to run at all until the rule is on the machine.
@@ -1451,8 +1484,8 @@ pub struct Args {
     fat32_check: bool,
     /// The PCI function this boot's image claims, in `/sys/bus/pci/devices`'s
     /// spelling. **A boot names it or the function is not read at all**: the
-    /// reads cost two `ssh` round trips and a boot whose judges read no MAC
-    /// would be refused for a fact none of them looks at.
+    /// reads cost three `ssh` round trips, and a boot that needs no cable would
+    /// be refused for one that is out.
     nic: Option<String>,
     /// The private key the image authorizes, and the ask to talk to the boot
     /// over its cable: once the machine has gone down, read the log it serves
@@ -1836,12 +1869,16 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     let machine = Machine::parse(&driver.ssh("reading the machine's SMBIOS", Machine::QUERY)?)
         .map_err(Refusal::Machine)?;
     println!("machine {} {}, BIOS {}", machine.vendor, machine.product, machine.bios);
-    // Before the flash, because the operating system that is still up is the
-    // one reader of this function's MAC that is not the driver under test.
+    // Before the flash: a cable that is out is refused while nothing is
+    // written, and the operating system that is still up is the one reader of
+    // this function's MAC that is not the driver under test.
     let wire = match &args.nic {
         Some(nic) => {
             let wire = driver.wire(nic)?;
-            println!("the claimed function {nic} is {}, MAC {}", wire.iface, wire.mac);
+            println!(
+                "the claimed function {nic} is {} at {}, MAC {}",
+                wire.iface, wire.addr, wire.mac
+            );
             Some(wire)
         }
         None => None,
@@ -2652,7 +2689,11 @@ mod tests {
         assert_eq!(back_secs(&boot), Some(47));
         assert!(machine("back_secs 47\nmachine_vendor LENOVO\n").is_err());
         assert_eq!(wire_mac(&boot), None);
-        let wire = Wire { iface: "enp0s31f6".to_string(), mac: "8c:8c:aa:bb:cc:dd".to_string() };
+        let wire = Wire {
+            iface: "enp0s31f6".to_string(),
+            addr: "192.168.1.46".parse().unwrap(),
+            mac: "02:00:00:00:00:01".to_string(),
+        };
         assert_eq!(wire_mac(&boot_file(47, 0, &t14, Some(&wire))), Some(wire.mac));
     }
 
@@ -2720,6 +2761,30 @@ mod tests {
             Err(unheard.clone())
         );
         assert_eq!(written(), Err(unheard.to_string().trim_end().to_string()));
+    }
+
+    /// **The address is the one on the function the image claims, and an
+    /// interface with none is refused rather than read as the next one's.**
+    /// `ip -4 -brief` prints the name, the state and then the addresses, and an
+    /// interface whose cable is out prints the first two and stops — which is
+    /// exactly the machine this loop must not go on to flash.
+    #[test]
+    fn an_interface_with_no_address_is_refused_by_name() {
+        let up = "enp0s31f6       UP             192.168.1.46/24 \n";
+        assert_eq!(brief_address("enp0s31f6", up), Ok("192.168.1.46".parse().unwrap()));
+
+        let down = "enp0s31f6       DOWN \n";
+        assert!(brief_address("enp0s31f6", down).unwrap_err().contains("no IPv4 address"));
+
+        // Another interface's line is not this one's answer, however many are
+        // printed.
+        let many = "lo    UNKNOWN   127.0.0.1/8\n\
+                    enp0s31f6   UP   192.168.1.46/24\n\
+                    wlp9s0   UP   192.168.1.244/24\n\
+                    tailscale0   UNKNOWN   100.92.92.12/32\n";
+        assert_eq!(brief_address("enp0s31f6", many), Ok("192.168.1.46".parse().unwrap()));
+        assert_eq!(brief_address("wlp9s0", many), Ok("192.168.1.244".parse().unwrap()));
+        assert!(brief_address("enp0s31f7", many).unwrap_err().contains("ip -4 -brief"));
     }
 
     #[test]

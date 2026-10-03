@@ -12,6 +12,8 @@ toyos-tco = { path = "../../toyos-tco" }
 toyos-quiesce = { path = "../../toyos-quiesce" }
 toyos-i219 = { path = "../../toyos-i219" }
 toyos-inspect = { path = "../../toyos-inspect" }
+# The reader's asker, for `hda_client_stall`.
+inspect = { path = "../../userland/inspect" }
 # blockd's client and its NVMe driver, for `blockd_io`, and the FAT32 crate it
 # writes a volume through a session with.
 blockd = { path = "../../userland/blockd" }
