@@ -3,9 +3,7 @@
 # soundserver, netstack and sshserver are here for exactly the reason they have no device:
 # their graceful exit is half of what this config certifies.
 # sshserver is the one whose absence *is* the device absence — it has no device of
-# its own and reaches the machine's shape only through netstack. It costs the
-# boot the second `NetstackConn::connect_blocking` spends retrying a netstack
-# that will never come, which is the price of certifying the line at all.
+# its own and reaches the machine's shape only through netstack.
 # test-runner makes the boot announce itself, so the harness waits for a
 # marker instead of guessing from pixels — and it is what lets an in-guest
 # binary run on the machine shape that gets flashed. Under `mute` it simply

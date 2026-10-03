@@ -10,9 +10,7 @@
 #
 # `/system/bin/supervisor` is in every image and holds the one `SysCap`, so the
 # guarantee is that this config declares no `devices`, which
-# `no_diag_program_claims_the_screen` checks before the image is written.
-#
-# The other program it starts prints the cwd and exits.
+# `no_diag_program_claims_the_screen` checks.
 [boot]
 start = ["logkeeper", "fileserver", "toybox"]
 
