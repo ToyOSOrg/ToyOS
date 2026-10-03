@@ -6,11 +6,7 @@
 //! ring — or the one file netd leaves beside them, the lease probe's
 //! report. The judge reads netd's lines by that name and no other program's.
 
-use toyos_build::bootlog;
-use toyos_build::lan::{
-    lease_in, link_up_ms, LEASE, LINK_UP, MAC,
-    READY,
-};
+use toyos_build::lan::{lease_in, link_up_ms, LINK_UP, MAC, READY};
 use toyos_i219::lease::{self, Event, Verdict};
 
 use super::metal;
@@ -29,7 +25,7 @@ pub const LEASE_FILE: &str = "lease.txt";
 /// netd, as the kernel's `exit:` record names it.
 const NETD: &str = "netd";
 
-/// The one job on that boot: it holds the machine up while the host pings it.
+/// The one job on that boot.
 pub const JOBS: &[&str] = &["test_rs_lan_hold"];
 
 /// The boot the host talks to over its own cable: the log it serves, sshd, and
@@ -54,22 +50,29 @@ pub fn delivered_on_metal(back: &metal::Readback) -> Result<(), String> {
 /// The card the T14 arm claims, as the kernel and the manifest spell it.
 const ID: &str = "8086:15fc";
 
-/// The PCI function that card is, as `/sys/bus/pci/devices` spells it: the
-/// cable the metal loop reaches this boot over while it runs.
+/// The PCI function that card is, as `/sys/bus/pci/devices` spells it: where
+/// the metal loop reads the card's MAC before the flash.
 pub const NIC: &str = "0000:00:1f.6";
 
-/// The T14's judge: the claim, the card, the lease, and the host's own ping.
+/// The T14's judge: the claim, the card, the lease in netd's own lines, and
+/// the host's ping of the address that lease names.
+///
+/// **The host learns that address from the boot**: netd answers for the
+/// machine's name once it holds a lease, and the loop reads the log served at
+/// the address the name answered with and pings it. The lease record is held
+/// to that address here, so no lease but this boot's own is judged.
 pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
     let kernel = back.kernel();
     let text = kernel.text();
     let mut bad: Vec<String> = Vec::new();
-    let cable = back.cable.as_ref().ok_or_else(|| {
+    let wire_mac = back.wire_mac.as_ref().ok_or_else(|| {
         format!(
-            "{}'s readback carries no cable: this boot was driven by a loop that was not asked \
-             to reach it over one, so nothing here is about the network",
+            "{}'s readback names no MAC: this boot was driven by a loop that was not told the \
+             function its image claims",
             back.label
         )
     })?;
+    let (heard, _) = back.talk()?;
 
     // A boot with no hand-over line carries the kernel's refusal instead, and
     // quoting that is the whole diagnosis.
@@ -94,12 +97,11 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
         }
     }
 
-    let mac = format!("{MAC}{}", cable.mac);
+    let mac = format!("{MAC}{wire_mac}");
     if !netd.contains(&mac) {
         bad.push(format!(
-            "no {mac:?} record: the card this boot brought up is not the one that held {} \
-             before it",
-            cable.addr
+            "no {mac:?} record: the card this boot brought up is not the one the operating \
+             system before it read on {NIC}"
         ));
     }
 
@@ -114,33 +116,27 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
                 "  [lan] leased {}/{} from {} in {} ms, gateway {}, dns {:?}",
                 lease.address, lease.prefix, lease.server, lease.ms, lease.gateway, lease.dns
             );
-            if lease.address != cable.addr {
+            if lease.address != heard.peer {
                 bad.push(format!(
-                    "this boot leased {} and the host pinged {}, which the router hands this \
-                     MAC under the operating system before it — so either something else \
-                     answered or that server does not repeat a lease across the two",
-                    lease.address, cable.addr
+                    "this boot leased {} and answered for its name at {}: the address the host \
+                     reached it at is not the one netd says it leased",
+                    lease.address, heard.peer
                 ));
             }
         }
         Err(why) => bad.push(why),
     }
 
-    match cable.reply {
-        Some(reply) => {
-            eprintln!(
-                "  [lan] {} answered the host's ping {} s into the window",
-                cable.addr, reply.secs
-            );
-            bad.extend(
-                bootlog::host_second_inside_this_boot(log.text(), cable.skew, LEASE, reply.at).err(),
-            );
-        }
-        None => bad.push(format!(
-            "nothing answered a ping at {} while this machine was between its two operating \
-             systems",
-            cable.addr
+    match heard.ping {
+        Some(true) => eprintln!(
+            "  [lan] {}, where this boot answered for its name, answered the host's ping",
+            heard.peer
+        ),
+        Some(false) => bad.push(format!(
+            "{}, where this boot answered for its name, answered no ping of the host's",
+            heard.peer
         )),
+        None => bad.push(format!("the host asked {} for no ping", heard.peer)),
     }
 
     if bad.is_empty() {
@@ -154,11 +150,6 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
 /// the router, and what the driver and the MAC counted each way. A code that is
 /// no lease is a finding by its name, which the shipping boot's silence cannot
 /// give.
-///
-/// **The host's ping is printed and not judged**: the lease is a server this
-/// machine does not control answering it, which is the claim; a reply at the
-/// leased address inside this boot is the same claim made from the bench's
-/// side, and the loop asks for it only where it was told the cable.
 pub fn leased_on_metal(back: &metal::Readback) -> Result<(), String> {
     let code = back.exit_code(NETD)?;
     let text = back
@@ -193,31 +184,6 @@ pub fn leased_on_metal(back: &metal::Readback) -> Result<(), String> {
     );
     if counts.sent == 0 || counts.received == 0 {
         return Err(format!("a lease with {counts:?} is no exchange this card carried"));
-    }
-    match back.cable.as_ref() {
-        None => eprintln!("  [lan] no cable was named, so the host asked nothing of this boot"),
-        Some(cable) => match cable.reply {
-            None => eprintln!("  [lan] nothing answered the host's ping at {}", cable.addr),
-            Some(reply) => {
-                let handed = format!("[{ID}] handed over on slot");
-                match bootlog::host_second_inside_this_boot(
-                    back.kernel().text(),
-                    cable.skew,
-                    &handed,
-                    reply.at,
-                ) {
-                    Ok(()) => eprintln!(
-                        "  [lan] {} answered the host's ping {} s into the window, inside this \
-                         boot",
-                        cable.addr, reply.secs
-                    ),
-                    Err(why) => eprintln!(
-                        "  [lan] {} answered the host's ping, and not inside this boot: {why}",
-                        cable.addr
-                    ),
-                }
-            }
-        },
     }
     Ok(())
 }

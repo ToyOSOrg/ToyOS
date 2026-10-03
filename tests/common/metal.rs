@@ -57,10 +57,10 @@ pub struct Arm {
     /// kernel, and that is what most of the suite wants: it is the artifact the
     /// owner flashes.
     pub features: &'static [&'static str],
-    /// The PCI function this boot's image claims, where the loop reaches the
-    /// boot over its cable while it runs. **`None` on every boot that does not
-    /// ask**: a boot whose judges read no cable would be refused for a fact
-    /// none of them looks at.
+    /// The PCI function this boot's image claims, where a judge holds the MAC
+    /// the boot's driver read to the one the operating system before the flash
+    /// read off it. **`None` on every boot that does not ask**: a boot whose
+    /// judges read no MAC would be refused for a fact none of them looks at.
     pub nic: Option<&'static str>,
     /// **The boot is talked to over its own cable.** Its image authorizes a
     /// key minted beside it, and the loop — told `--talk` — reads the log the
@@ -188,10 +188,10 @@ pub struct Readback {
     pub back_secs: u64,
     /// How long after that the boot stick's own partition was there again.
     pub stick_secs: u64,
-    /// What the host asked the cable while the machine was between its two
-    /// operating systems, and `None` on every boot that named no function to
-    /// ask over.
-    pub cable: Option<toyos_build::metal::Cable>,
+    /// The MAC of the function this boot's image claims, as the operating
+    /// system before the flash read it, and `None` on every boot that named no
+    /// function.
+    pub wire_mac: Option<String>,
     /// The machine the loop read before the flash.
     pub machine: Result<Machine, String>,
     /// What this boot's judges measured, for the machine's record to judge.
@@ -207,7 +207,6 @@ impl Readback {
             .ok_or_else(|| format!("{label}'s boot file names no `back_secs`: {boot:?}"))?;
         let stick_secs = toyos_build::metal::stick_secs(boot)
             .ok_or_else(|| format!("{label}'s boot file names no `stick_secs`: {boot:?}"))?;
-        let cable = toyos_build::metal::cable(boot).map_err(|why| format!("{label}: {why}"))?;
         Ok(Readback {
             label: label.to_string(),
             home,
@@ -217,7 +216,7 @@ impl Readback {
             log,
             back_secs,
             stick_secs,
-            cable,
+            wire_mac: toyos_build::metal::wire_mac(boot),
             machine: toyos_build::metal::machine(boot)
                 .map_err(|why| format!("{label}'s boot file {why}")),
             numbers: RefCell::new(BTreeMap::new()),
