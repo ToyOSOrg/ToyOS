@@ -23,6 +23,8 @@ use toyos::Device;
 use toyos_abi::pci::DeviceIrqRecord;
 use toyos_abi::syscall::{IsaId, SyscallError, SYSCAP_LABEL};
 
+#[path = "../isa_row.rs"]
+mod isa_row;
 #[path = "../arch/port.rs"]
 mod port;
 
@@ -120,19 +122,21 @@ fn grant(cap: &SysCap) {
     }
     killed_after("unbound", child("unbound", Some(held)), "unbound: in from 0x64");
 
-    // The claim died with its unbound holder, so the row is free again; each
+    // The claim died with its unbound holder, so the row comes back; each
     // bound child's ports go back with it.
+    let mut holder = "unbound";
     for (role, marker) in [
         ("bound", "bound: in from 0x61"),
         ("wide", "wide: in of two bytes from 0x60"),
         ("out", "out: out to 0x61"),
     ] {
-        let held = claim(cap, I8042).expect("isa: the row came back from the holder before");
+        let held = isa_row::claim_after(cap, set(I8042), holder);
         killed_after(role, child(role, Some(held)), marker);
+        holder = role;
     }
     killed_after("unclaimed", child("unclaimed", None), "unclaimed: in from 0x60");
 
-    let held = claim(cap, I8042).expect("isa: the row came back from a holder that bound it");
+    let held = isa_row::claim_after(cap, set(I8042), holder);
     bind(&held);
     let status = port_in(STATUS, false);
     println!("isa: bound here, status reads {status:#04x}");

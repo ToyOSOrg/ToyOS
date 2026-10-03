@@ -21,6 +21,8 @@ use toyos::{AsHandle, Device};
 use toyos_abi::pci::DeviceIrqRecord;
 use toyos_abi::syscall::{self, IsaId, SyscallError, SYSCAP_LABEL};
 
+#[path = "../isa_row.rs"]
+mod isa_row;
 #[path = "../arch/port.rs"]
 mod port;
 
@@ -80,10 +82,6 @@ fn set() -> IsaId {
     IsaId::parse(I8042).expect("the i8042's set")
 }
 
-fn claim(cap: &SysCap) -> Result<Device, SyscallError> {
-    cap.claim_isa(set())
-}
-
 /// Run `role` holding `claim`; it must end cleanly.
 fn role(role: &str, claim: Device) {
     let status = Command::new(SELF_PATH)
@@ -95,10 +93,10 @@ fn role(role: &str, claim: Device) {
 }
 
 fn lines(cap: &SysCap) {
-    role("device", claim(cap).expect("isa lines: the i8042 row is free where the kernel drives none"));
-    // The row came back with `device`, whose keyboard acknowledged once more
+    role("device", isa_row::claim_after(cap, set(), "the job before this one"));
+    // The row comes back with `device`, whose keyboard acknowledged once more
     // after its claim was gone.
-    role("after", claim(cap).expect("isa lines: the row came back from the holder before"));
+    role("after", isa_row::claim_after(cap, set(), "device"));
     println!("isa lines: the holder's interrupt reached it, and the one after its claim reached nobody");
 }
 
