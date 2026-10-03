@@ -92,9 +92,15 @@ exclude = [
     # `cargo test` in it against the host triple.
     "toyos",
     # Guest programs `src/build.rs` builds for `x86_64-unknown-toyos`, each from
-    # its own directory. Named, and not `tests/` whole, so the gate finds a host
-    # test under `tests/` that joined neither list.
+    # its own directory but `tls-multi-crate/dep`, its parent's dependency. Named,
+    # and not `tests/` whole, so the gate finds a host test under `tests/` that
+    # joined neither list.
     "tests/toyos-rust-tests",
+    "tests/toyos-rust-tests/tls-cranelift",
+    "tests/toyos-rust-tests/tls-dlopen-lib",
+    "tests/toyos-rust-tests/tls-lib",
+    "tests/toyos-rust-tests/tls-multi-crate",
+    "tests/toyos-rust-tests/tls-multi-crate/dep",
     # A host judge: a second implementation, whose dependency graph is not the
     # harness's to resolve (`src/build.rs`, `build_host_judges`).
     "tests/ssh-client-host",
