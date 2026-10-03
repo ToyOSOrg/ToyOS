@@ -1,7 +1,3 @@
-# Everything the desktop *decides* — where a window is, what changed, what the pointer hit, who has the
-# focus, what a key means — is a pure function of state, and a QEMU boot is a
-# poor way to ask any of them.
-
 [package]
 name = "toyos-desktop"
 description = "Every decision the compositor makes, pure."

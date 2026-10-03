@@ -1,6 +1,3 @@
-# What lives here is the wire form of one machine answering for its own name —
-# pure, so every byte of a reply is checked without a network.
-
 [package]
 name = "toyos-mdns"
 description = "Multicast DNS (RFC 6762) for one machine's own <host>.local name."
