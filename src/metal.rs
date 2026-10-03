@@ -2784,7 +2784,7 @@ mod tests {
         let many = "lo    UNKNOWN   127.0.0.1/8\n\
                     enp0s31f6   UP   192.168.1.46/24\n\
                     wlp9s0   UP   192.168.1.244/24\n\
-                    tailscale0   UNKNOWN   192.0.2.12/32\n";
+                    tailscale0   UNKNOWN   192.0.2.58/32\n";
         assert_eq!(brief_address("enp0s31f6", many), Ok("192.168.1.46".parse().unwrap()));
         assert_eq!(brief_address("wlp9s0", many), Ok("192.168.1.244".parse().unwrap()));
         assert!(brief_address("enp0s31f7", many).unwrap_err().contains("ip -4 -brief"));
