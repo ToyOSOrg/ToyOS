@@ -6,14 +6,16 @@ opened: 2026-09-28
 
 # The supervisor is host-tested and owns the machine's stop
 
-Held by the orchestrator. Every stage waits on PR #536 (`wt/toyos-fsd`).
+Held by the orchestrator. Stage 1 lands right after #592 and #631, before the
+latency work (`issues/kernel/toyos-beats-linuxs-latency-on-the-t14.md`; owner,
+2026-10-03).
 
 ## Stages
 
 Every guest test this track names is registered. A deleted test covers
 nothing.
 
-1. **The rename**, one mechanical PR, first after #536. Before stage 1 is
+1. **The rename**, one mechanical PR. Before stage 1 is
    briefed, the exit's search below runs once over the `rust/` fork's delta as
    well as the superproject, so its hits are known going in. It touches `toyos/src`,
    `toyos-abi/src`, `userland/libc/src` and the `rust/` fork's delta, and its

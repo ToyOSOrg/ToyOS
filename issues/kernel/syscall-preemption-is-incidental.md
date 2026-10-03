@@ -37,3 +37,6 @@ switch (the scheduler's own baselines needed it): before that the count drifted,
 so a lock drop inside a syscall reached zero at random and preempted at random.
 The behaviour is now deterministic, and deterministically weaker than the model
 assumes.
+
+Owner: `issues/kernel/toyos-beats-linuxs-latency-on-the-t14.md`, whose second
+step is syscalls running with interrupts on (owner, 2026-10-03).
