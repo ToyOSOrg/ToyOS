@@ -333,7 +333,7 @@ impl Readback {
         else {
             return Ok(());
         };
-        within_one_period(late?, toyos_sched::fair::QUANTUM_NS)
+        within_one_period(late?, kernel::sched::fair::QUANTUM_NS)
             .map_err(|why| format!("{}'s boot deadline {why}", self.label))
     }
 

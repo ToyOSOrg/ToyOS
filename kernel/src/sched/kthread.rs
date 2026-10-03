@@ -15,7 +15,7 @@ use crate::process::{
 use crate::scheduler::{self, TaskId};
 use crate::symbols::SymbolTable;
 use crate::sync::Lock;
-use toyos_proclife::Processes;
+use kernel::proclife::Processes;
 
 use super::payload::ThreadSched;
 
@@ -104,7 +104,7 @@ pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64) -> ThreadSched
         Arc::new(Lock::new(kernel_process_data(name))),
         Arc::clone(&syms),
         ThreadEntry::new(Arc::new(Lock::new(kernel_thread_data()))),
-        toyos_proclife::Node::root(),
+        kernel::proclife::Node::root(),
     ));
     let tid = table.get(pid).expect("kthread: the entry just inserted is gone").main_tid();
     claim.publish(TaskId(pid, tid));

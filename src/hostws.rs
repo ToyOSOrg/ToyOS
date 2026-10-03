@@ -133,7 +133,12 @@ pub fn target_dir(root: &Path, crate_dir: &Path) -> PathBuf {
 }
 
 /// Every directory under `root` holding a `Cargo.toml`, as paths relative to
-/// `root`, with the excluded subtrees pruned exactly as cargo prunes them.
+/// `root`, but the excluded ones.
+///
+/// An excluded workspace, or an excluded directory that is no package, is
+/// pruned whole. An excluded package's subdirectories are walked: cargo
+/// excludes a crate nested in one too unless `members` names it, which is an
+/// exclusion argued for the parent and never for it.
 ///
 /// `target`, `.git` and every other dotted directory go too: what is in them is
 /// build output and history, not a crate somebody has to have declared.
@@ -149,8 +154,17 @@ fn crate_dirs(root: &Path) -> BTreeSet<String> {
 
 #[cfg(test)]
 fn walk(root: &Path, dir: &Path, prune: &BTreeSet<String>, found: &mut BTreeSet<String>) {
-    if dir.join("Cargo.toml").is_file() {
-        let relative = rel(root, dir);
+    let relative = rel(root, dir);
+    let manifest = dir.join("Cargo.toml");
+    if prune.contains(&relative) {
+        let package = std::fs::read_to_string(&manifest)
+            .ok()
+            .and_then(|text| text.parse::<toml::Value>().ok())
+            .is_some_and(|doc| doc.get("package").is_some() && doc.get("workspace").is_none());
+        if !package {
+            return;
+        }
+    } else if manifest.is_file() {
         found.insert(if relative.is_empty() { ".".to_string() } else { relative });
     }
     let Ok(entries) = std::fs::read_dir(dir) else { return };
@@ -164,18 +178,15 @@ fn walk(root: &Path, dir: &Path, prune: &BTreeSet<String>, found: &mut BTreeSet<
         if name.starts_with('.') || name == "target" {
             continue;
         }
-        if prune.contains(&rel(root, &path)) {
-            continue;
-        }
         walk(root, &path, prune, found);
     }
 }
 
 /// The crate directories that joined neither list.
 ///
-/// Excluded subtrees never reach here — they are pruned during the walk, which
-/// is what excluding one means — so this is the whole question: a `Cargo.toml`
-/// the tree contains and the `[workspace]` table does not account for.
+/// Excluded directories never reach here — [`crate_dirs`] leaves them out — so
+/// this is the whole question: a `Cargo.toml` the tree contains and the
+/// `[workspace]` table does not account for.
 #[cfg(test)]
 fn unclaimed(members: &BTreeSet<String>, found: &BTreeSet<String>) -> Vec<String> {
     found.difference(members).cloned().collect()
@@ -327,7 +338,7 @@ mod tests {
     #[test]
     fn the_gate_refuses_a_crate_that_joined_neither_list() {
         let members: BTreeSet<String> =
-            [".", "toyos-elf", "toyos-sched", "toyos-sched/sim"].iter().map(|s| s.to_string()).collect();
+            [".", "toyos-elf", "toyos-xhci", "toyos-xhci/sim"].iter().map(|s| s.to_string()).collect();
 
         let all_declared: BTreeSet<String> = members.clone();
         assert!(unclaimed(&members, &all_declared).is_empty());
@@ -338,11 +349,10 @@ mod tests {
             members.union(&["toyos-newthing".to_string()].into()).cloned().collect();
         assert_eq!(unclaimed(&members, &with_a_newcomer), ["toyos-newthing"]);
 
-        // And a nested one, which is how `toyos-sched/loom` could have been
-        // lost when its parent stopped being a workspace of its own.
+        // And a nested one.
         let with_a_nested_newcomer: BTreeSet<String> =
-            members.union(&["toyos-sched/loom".to_string()].into()).cloned().collect();
-        assert_eq!(unclaimed(&members, &with_a_nested_newcomer), ["toyos-sched/loom"]);
+            members.union(&["toyos-xhci/newthing".to_string()].into()).cloned().collect();
+        assert_eq!(unclaimed(&members, &with_a_nested_newcomer), ["toyos-xhci/newthing"]);
     }
 
     /// The walk has teeth only if it can find anything: it must reach the real
@@ -355,9 +365,14 @@ mod tests {
         assert!(found.contains("."), "the walk did not find the root package");
         assert!(found.contains("toyos-elf"), "the walk did not find toyos-elf: {found:?}");
         assert!(
-            found.contains("toyos-sched/loom"),
+            found.contains("toyos-xhci/sim"),
             "the walk did not descend past the first level, so a nested member could \
              go missing without this gate noticing: {found:?}"
+        );
+        assert!(
+            found.contains("kernel/loom") && !found.contains("kernel"),
+            "the walk did not descend into an excluded package, so a crate nested in one \
+             could lose its `members` line without this gate noticing: {found:?}"
         );
         // With nothing declared a member, every one of them is a complaint —
         // the gate above is silent because the table accounts for the tree, not

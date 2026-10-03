@@ -278,7 +278,7 @@ fn this_cpu() -> ! {
     // claims.
     crate::preempt::disable();
     let arrived_awake = crate::arch::cpu::interrupts_enabled();
-    crate::arch::irqchip::arm_within(toyos_sched::fair::QUANTUM_NS);
+    crate::arch::irqchip::arm_within(kernel::sched::fair::QUANTUM_NS);
     crate::arch::cpu::enable_interrupts();
     log!(
         "wedge: cpu{} {}",

@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 
 use toyos_abi::handle::{RawHandle, Rights};
 use toyos_abi::syscall::{FileType, OpenFlags, SeekFrom, SyscallError};
-use toyos_sched::task::WaitClass;
+use kernel::sched::task::WaitClass;
 
 use crate::drivers::serial;
 use crate::file_cache;

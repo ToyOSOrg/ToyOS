@@ -7,7 +7,7 @@ use std::thread::sleep;
 use std::time::Duration;
 
 /// Five times what the record's ceiling allows the window the kernel holds at
-/// this exit (`toyos_sched::windows::HELD_NS`, doubled), so a halt counted as
+/// this exit (`kernel::sched::windows::HELD_NS`, doubled), so a halt counted as
 /// a window is past it.
 const SPAN: Duration = Duration::from_millis(500);
 

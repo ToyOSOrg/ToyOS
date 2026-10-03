@@ -1162,7 +1162,8 @@ pub fn flashable_params(root: &Path, asked: &[String]) -> Result<(), String> {
 /// separated argument.
 ///
 /// **Every name the caller asked for is checked against `kernel/Cargo.toml`,
-/// and an unknown one stops the build by name.** Read from the manifest rather
+/// and an unknown one stops the build by name**, as does a control or a name in
+/// [`KERNEL_CARRIES`]: neither is a kernel build. Read from the manifest rather
 /// than listed here, so the check cannot drift from what cargo would accept —
 /// and, more to the point, so that deleting a feature takes its own command
 /// lines down with it. That is what a temporary feature needs: once one is
@@ -1199,6 +1200,12 @@ fn kernel_features(
                  Every actuator is now a --kernel-param; `cargo run -- --kernel-param --help` \
                  lists them.",
                 declared.join(", ")
+            );
+            assert!(
+                !crate::ci::CONTROLS.iter().any(|c| c.feature == name)
+                    && !KERNEL_CARRIES.contains(&name.as_str()),
+                "--kernel-feature {name}: a model's negative control or a name the kernel \
+                 declares for another package's build of its sources, and never a kernel build"
             );
             features.push(name);
         }
@@ -1349,6 +1356,11 @@ fn declared_kernel_features(root: &Path) -> Vec<String> {
     manifest.features.into_keys().collect()
 }
 
+/// The features the kernel declares for another package's build of its
+/// sources: `loom`, which `kernel-loom` turns on, and `protocol-port`, which
+/// `kernel-sim` does.
+const KERNEL_CARRIES: &[&str] = &["loom", "protocol-port"];
+
 /// The kernel every test that needs an actuator boots: all of them compiled in
 /// and none of them armed, plus the `SYS_DEBUG` number.
 ///
@@ -1365,7 +1377,7 @@ pub const TEST_SUITE_KERNEL_BUILDS: [&str; 3] =
 /// [`SCHED_CHECK_KERNEL`]'s reason: one spelling, so one build.
 pub const MASK_WINDOWS_KERNEL: &[&str] = &["mask-windows"];
 
-/// The scheduler core's own asserts, compiled in: `toyos-sched/check`.
+/// The scheduler core's own asserts, compiled in.
 ///
 /// One name, for [`TEST_KERNEL`]'s reason — a second spelling is a second
 /// kernel and nothing would say so.
@@ -1585,7 +1597,7 @@ fn assert_entry_window_matches_features(features: &str, kernel: &[u8]) {
 /// The scheduler core's `feature = "check"` instruments, by their own text, and
 /// the two kernels that must disagree about carrying them.
 ///
-/// Every one of these is a `#[cfg(feature = "check")]` site in `toyos-sched`.
+/// Every one of these is a `#[cfg(feature = "sched-check")]` site in `kernel::sched`.
 /// Two are asserts from `invariants::check_cpu` — invariant T's armed-timer
 /// bound and the container-versus-state-word agreement. The third is the
 /// pass-cost report, which is a *measurement*
@@ -1617,8 +1629,8 @@ fn assert_sched_check_matches_features(features: &str, kernel: &[u8]) {
         SCHED_CHECK_KERNEL,
         &SCHED_CHECK_LITERALS,
         "scheduler check instruments",
-        "`sched-check` forwards to `toyos-sched/check`, so a build that carries the feature and \
-         not the instruments is a check build in name only.",
+        "`sched-check` compiles the scheduler core's instruments in, so a build that carries the \
+         feature and not the instruments is a check build in name only.",
     );
 }
 
@@ -2602,207 +2614,168 @@ mod tests {
         );
     }
 
+    /// Every kernel feature that is a kernel build of its own, each beside what
+    /// earned it one. Every other feature the kernel declares is a control a row
+    /// of `crate::ci::CONTROLS` runs, or one of [`KERNEL_CARRIES`].
+    const KERNEL_BUILDS: &[&str] = &[
+        "boot-actuators",
+        "debug-wait",
+        // Does this kernel reach a pass, a trap or a syscall with the
+        // direction flag set. No gate clears `DF` and
+        // `compiler_builtins::mem::memmove` sets it across three `rep`
+        // string operations, so before `arch::entry`'s `cld` it could be
+        // — and every `rep movs`/`rep stos` after that writes backwards.
+        // Its own build: a `pushfq` and a test on three hot paths, and
+        // the negative control for that `cld` in both directions.
+        "df-witness",
+        // Its control: a `std` one instruction before the reader that
+        // must refuse it. The witness fired zero times on an unclean
+        // kernel, which is a fact about where the flag reaches and would
+        // be indistinguishable from a broken reader without this.
+        "df-witness-mutate",
+        // The kernel this tree had before `arch::entry`'s `cld`: the
+        // instruction gone and `DF` back out of the `SYSCALL` mask, so a
+        // build carrying it inherits a set direction flag from whatever
+        // it interrupted. The negative control for that fix, and its own
+        // build because the defect is in a `naked_asm!` body on every
+        // ring transition, where a boot parameter would have to be a
+        // branch.
+        "entry-df-unclean",
+        // The two band shapes that separate the two readings
+        // `heap-tripwire`'s own result left standing — the bands absorb
+        // a bounded overrun, or they displace every allocation and the
+        // victim moved. No band can be zero-width and keep its
+        // placement, because the padding *is* the displacement, so the
+        // separation is per side: `notail` leaves the slack past a
+        // payload byte-for-byte what an unbanded build has, `nohead`
+        // puts the payload at the bottom of its own chunk. They are one
+        // experiment in two arms and refuse to build together.
+        "heap-band-nohead",
+        "heap-band-notail",
+        // The sweep's lock hold without the sweep. `heap-sweep` and
+        // `sched-tripwire` both multiply this class and both spend time
+        // on the pass path; only the sweep also holds `dlmalloc`'s lock
+        // while it does. This arm and `pass-spin` below spend one
+        // `HOLD_NS` with and without that lock, which is the one
+        // variable nobody has varied.
+        "heap-lockspin",
+        // The sweep that reads every live band rather than only the
+        // ones a `dealloc` reaches. Its own build for `heap-tripwire`'s
+        // reason twice over: the walk takes `dlmalloc`'s lock on the
+        // pass path, which nothing shipping may do.
+        "heap-sweep",
+        // `sched-tripwire`'s twin one layer down: a band of known bytes
+        // on each side of every heap allocation, read back at `dealloc`
+        // and — for the running task's kernel stack — at every pass. It
+        // earns a build of its own because the bands change what
+        // `GlobalAlloc::alloc` returns, which no boot parameter can
+        // reach: an allocation minted under one arm and freed under the
+        // other is a miscomputed base address. No suite builds it, so a
+        // full run pays nothing and a boot storm asks for it by name.
+        "heap-tripwire",
+        "mask-windows",
+        // `heap-lockspin`'s other arm: the same visit to the pass path,
+        // for the same span, without the allocator's lock.
+        "pass-spin",
+        "sched-check",
+        // The stray-write tripwire on the per-CPU `CpuSched` record: a
+        // byte shadow taken and compared at both ends of the driver's
+        // exclusive region, plus a walk of its three containers. It
+        // earns a build of its own because what it watches cannot be
+        // reached from a boot parameter — the shadow's subject is a
+        // whole record and the walk's is a container, and both are
+        // decided at compile time by a cargo feature, the same wall
+        // `sched-check` is behind. No suite builds it: it is
+        // not in `TEST_SUITE_KERNEL_BUILDS`, so a full run pays nothing
+        // for it and a boot storm asks for it by name.
+        "sched-tripwire",
+        // The two comparisons that ask who else is standing on a task's
+        // kernel stack: the words a Ring 3 entry takes its stack from,
+        // against the running task's own top, at every pass; and the one
+        // driver field this class has been caught changing inside a
+        // single call. Its own build because both halves are readers on
+        // hot paths, so it has to be in both arms of any comparison.
+        "stack-witness",
+        // The one window this class has never measured: the eight words
+        // `context_switch` pops, copied at `check_switch_frame` and
+        // compared from inside the switch, one instruction before the
+        // first `pop`, against the stack pointer the machine is standing
+        // on. Its own build for `stack-witness`'s reason and one more —
+        // the compare is a `call`, so the frame has to have been proven
+        // to be inside a real stack, which is why it turns that feature
+        // on. Its two mutation controls sit beside it, each staging one
+        // arm of what it watches.
+        "switch-witness",
+        "switch-witness-mutate-frame",
+        "switch-witness-mutate-rsp",
+        "test-actuators",
+    ];
+
+    /// Features of a host workspace member that choose a build's world rather
+    /// than revert a decision: loom's atomics, a crate's `std` and its default
+    /// set, the toolchain's `core` and `rustc-dep-of-std`, libc's `std-runtime`,
+    /// the signer's `sign`, and `flaws`, which compiles what a simulator's
+    /// negative gates select at run time.
+    const NOT_A_CONTROL: &[&str] = &[
+        "core",
+        "default",
+        "flaws",
+        "loom",
+        "rustc-dep-of-std",
+        "sign",
+        "std",
+        "std-runtime",
+    ];
+
     /// The features a kernel build may still carry, and the whole list.
     ///
-    /// **The gate on the count.** Each name here is a kernel `cargo test` may
-    /// build beside the two, so adding one is a decision to pay the ~6.9 s of
-    /// wall clock and ~29.6 s of CPU measured for one extra kernel build per
-    /// full run after any kernel edit — and `boot-actuators` exists so that
-    /// the answer is almost always a parameter instead.
+    /// **The gate on the count.** Each name in [`KERNEL_BUILDS`] is a kernel
+    /// `cargo test` may build beside the two, so adding one is a decision to pay
+    /// the ~6.9 s of wall clock and ~29.6 s of CPU measured for one extra kernel
+    /// build per full run after any kernel edit — and `boot-actuators` exists so
+    /// that the answer is almost always a parameter instead.
     #[test]
     fn the_kernel_declares_only_the_builds_that_earned_one() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let mut declared = declared_kernel_features(root);
-        declared.sort();
+        let controls: BTreeSet<&str> = crate::ci::CONTROLS.iter().map(|c| c.feature).collect();
+        let mut builds: Vec<String> = declared_kernel_features(root)
+            .into_iter()
+            .filter(|f| !controls.contains(f.as_str()) && !KERNEL_CARRIES.contains(&f.as_str()))
+            .collect();
+        builds.sort();
         assert_eq!(
-            declared,
-            [
-                "boot-actuators",
-                "debug-wait",
-                // Costs no kernel build, for `wake-fence-off`'s reason: only
-                // `kernel-loom` turns it on, and `device_irq` must red under it.
-                "device-irq-lossy",
-                // Does this kernel reach a pass, a trap or a syscall with the
-                // direction flag set. No gate clears `DF` and
-                // `compiler_builtins::mem::memmove` sets it across three `rep`
-                // string operations, so before `arch::entry`'s `cld` it could be
-                // — and every `rep movs`/`rep stos` after that writes backwards.
-                // Its own build: a `pushfq` and a test on three hot paths, and
-                // the negative control for that `cld` in both directions.
-                "df-witness",
-                // Its control: a `std` one instruction before the reader that
-                // must refuse it. The witness fired zero times on an unclean
-                // kernel, which is a fact about where the flag reaches and would
-                // be indistinguishable from a broken reader without this.
-                "df-witness-mutate",
-                // Costs no kernel build, for `wake-fence-off`'s reason: only
-                // `kernel-loom` turns it on, and `dump_request` must red under it.
-                "dump-report-relaxed",
-                // The kernel this tree had before `arch::entry`'s `cld`: the
-                // instruction gone and `DF` back out of the `SYSCALL` mask, so a
-                // build carrying it inherits a set direction flag from whatever
-                // it interrupted. The negative control for that fix, and its own
-                // build because the defect is in a `naked_asm!` body on every
-                // ring transition, where a boot parameter would have to be a
-                // branch.
-                "entry-df-unclean",
-                // The two band shapes that separate the two readings
-                // `heap-tripwire`'s own result left standing — the bands absorb
-                // a bounded overrun, or they displace every allocation and the
-                // victim moved. No band can be zero-width and keep its
-                // placement, because the padding *is* the displacement, so the
-                // separation is per side: `notail` leaves the slack past a
-                // payload byte-for-byte what an unbanded build has, `nohead`
-                // puts the payload at the bottom of its own chunk. They are one
-                // experiment in two arms and refuse to build together.
-                "heap-band-nohead",
-                "heap-band-notail",
-                // The sweep's lock hold without the sweep. `heap-sweep` and
-                // `sched-tripwire` both multiply this class and both spend time
-                // on the pass path; only the sweep also holds `dlmalloc`'s lock
-                // while it does. This arm and `pass-spin` below spend one
-                // `HOLD_NS` with and without that lock, which is the one
-                // variable nobody has varied.
-                "heap-lockspin",
-                // The sweep that reads every live band rather than only the
-                // ones a `dealloc` reaches. Its own build for `heap-tripwire`'s
-                // reason twice over: the walk takes `dlmalloc`'s lock on the
-                // pass path, which nothing shipping may do.
-                "heap-sweep",
-                // `sched-tripwire`'s twin one layer down: a band of known bytes
-                // on each side of every heap allocation, read back at `dealloc`
-                // and — for the running task's kernel stack — at every pass. It
-                // earns a build of its own because the bands change what
-                // `GlobalAlloc::alloc` returns, which no boot parameter can
-                // reach: an allocation minted under one arm and freed under the
-                // other is a miscomputed base address. No suite builds it, so a
-                // full run pays nothing and a boot storm asks for it by name.
-                "heap-tripwire",
-                // The four below cost no kernel build at all, for
-                // `wake-fence-off`'s reason: each is declared only so `cfg`
-                // checking knows the name, and turned on only by
-                // `kernel-loom`, one at a time, to relax the single edge its
-                // named model rests on and prove that model reds without it.
-                "lock-acquire-off",
-                "log-commit-release-off",
-                "loom",
-                "mask-windows",
-                // `heap-lockspin`'s other arm: the same visit to the pass path,
-                // for the same span, without the allocator's lock.
-                "pass-spin",
-                // `wake-fence-off`'s twin, for a poll ring's one-shot answer:
-                // turned on only by `kernel-loom`, to split `inbox/once.rs`'s
-                // exchange and prove `poll_once` reds without it.
-                "poll-fire-load-store",
-                // Costs no kernel build: turned on only by `kernel-loom`, so
-                // `inbox/polls.rs` answers a fired poll without a look and
-                // `inbox_answer` reds.
-                "post-is-an-answer",
-                "reap-raise-relaxed",
-                // `smp_roster.rs`'s count relaxed; `smp_bringup.rs` reds.
-                "roster-commit-relaxed",
-                "sched-check",
-                // The stray-write tripwire on the per-CPU `CpuSched` record: a
-                // byte shadow taken and compared at both ends of the driver's
-                // exclusive region, plus a walk of its three containers. It
-                // earns a build of its own because what it watches cannot be
-                // reached from a boot parameter — the shadow's subject is a
-                // whole record and the walk's is a container, and both are
-                // decided at compile time by a dependency's cargo feature, the
-                // same wall `sched-check` is behind. No suite builds it: it is
-                // not in `TEST_SUITE_KERNEL_BUILDS`, so a full run pays nothing
-                // for it and a boot storm asks for it by name.
-                "sched-tripwire",
-                // Costs no kernel build, for `wake-fence-off`'s reason: turned on
-                // only by `kernel-loom`, to drop the panic console publisher's
-                // `Release` fence and prove `panic_console_publish` reds without it.
-                "seqlock-writer-fence-off",
-                // Costs no kernel build: turned on only by `kernel-loom`, to build
-                // the backend lock's `try_lock` with `then_some` and prove
-                // `serial_lock` reds.
-                "serial-try-lock-then-some",
-                "shard-publish-relaxed",
-                "shootdown-serve-relaxed",
-                // The eighth loom control, and the first over a *contended*
-                // acquire: `src/sleeplock.rs`'s two loads of `now` go
-                // `Relaxed` and `kernel-loom/tests/sleep_lock.rs` reds. Costs
-                // no kernel build, for the same reason as the six above it.
-                "sleeplock-acquire-off",
-                // `smp_roster.rs`'s second release store; `smp_bringup.rs` reds.
-                "smp-ready-split",
-                // The two comparisons that ask who else is standing on a task's
-                // kernel stack: the words a Ring 3 entry takes its stack from,
-                // against the running task's own top, at every pass; and the one
-                // driver field this class has been caught changing inside a
-                // single call. Its own build because both halves are readers on
-                // hot paths, so it has to be in both arms of any comparison.
-                "stack-witness",
-                // The one window this class has never measured: the eight words
-                // `context_switch` pops, copied at `check_switch_frame` and
-                // compared from inside the switch, one instruction before the
-                // first `pop`, against the stack pointer the machine is standing
-                // on. Its own build for `stack-witness`'s reason and one more —
-                // the compare is a `call`, so the frame has to have been proven
-                // to be inside a real stack, which is why it turns that feature
-                // on. Its two mutation controls sit beside it, each staging one
-                // arm of what it watches.
-                "switch-witness",
-                "switch-witness-mutate-frame",
-                "switch-witness-mutate-rsp",
-                "test-actuators",
-                // Costs no kernel build at all, for `loom`'s reason: declared
-                // so `cfg` checking knows the name, and turned on only by
-                // `kernel-loom` — to remove the log wake path's two `SeqCst`
-                // fences and prove `log_wake` reds without them.
-                "wake-fence-off",
-            ],
-            "the kernel declares a feature this list does not account for"
+            builds, KERNEL_BUILDS,
+            "the kernel declares a feature that is neither a build this list accounts for nor a \
+             control `src/ci.rs` runs"
         );
     }
 
-    /// Every negative control the model crates declare — every feature name
-    /// besides the structural ones they carry for other reasons.
+    /// Every negative control the tree declares: every feature of the kernel's
+    /// manifest but its builds and [`KERNEL_CARRIES`], and every feature of every
+    /// host workspace member's but [`NOT_A_CONTROL`].
     ///
-    /// **The list is the crates that hold a model of the kernel, not the crates
-    /// that use loom.** `kernel-loom` and `toyos-sched-loom` swap in loom's
-    /// instrumented atomics because their subjects are memory orderings;
-    /// `toyos-proclife`'s subject is which CPU takes the process table lock
-    /// next, and every decision in it is made under that lock. Both kinds are
-    /// a model with controls, and a control with no step behind it is the same
-    /// hole either way.
-    ///
-    /// **And `toyos-sched-sim` is one of them**: what a whole simulated machine
-    /// can show wrong is a policy rather than an ordering, so a control over one
-    /// lives there and would otherwise be the only kind this gate could not see.
-    ///
-    /// `loom` selects loom's instrumented atomics; `check`, `protocol-port`,
-    /// `tripwire` and `std` mirror `toyos-sched`'s own features so the shared
-    /// sources compile identically and name nothing a model turns on. Everything
-    /// else declared in any of these files is, by construction, a
-    /// `--features <name>` command that must red a named model — each file's own
-    /// comment beside the name carries the argument for why.
-    fn declared_model_controls(root: &Path) -> Vec<(&'static str, String)> {
-        const NOT_A_CONTROL: &[&str] =
-            &["loom", "check", "protocol-port", "tripwire", "std", "default"];
-        let mut out = Vec::new();
-        for (crate_name, manifest) in [
-            ("kernel-loom", "kernel-loom/Cargo.toml"),
-            ("toyos-sched-loom", "toyos-sched/loom/Cargo.toml"),
-            ("toyos-sched-sim", "toyos-sched/sim/Cargo.toml"),
-            ("toyos-proclife", "toyos-proclife/Cargo.toml"),
-            ("toyos-blockring", "toyos-blockring/Cargo.toml"),
-            ("toyos-transport", "toyos-transport/Cargo.toml"),
-        ] {
-            let path = root.join(manifest);
+    /// **Every manifest, and no list of the crates that hold a model.** A model
+    /// of memory orderings, of the process table's interleavings, of a simulated
+    /// machine's policy or of an allocator's isolation each declares its controls
+    /// beside its own decisions, and a list of those crates is one a new model
+    /// can be left off — its control then declared and run nowhere, silently.
+    /// Each file's own comment beside a name carries the argument for it.
+    fn declared_model_controls(root: &Path) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        for dir in std::iter::once(crate::ci::KERNEL.to_string()).chain(crate::hostws::members(root)) {
+            let path = root.join(&dir).join("Cargo.toml");
             let text = fs::read_to_string(&path)
                 .unwrap_or_else(|e| panic!("Failed to read {}: {e}", path.display()));
             let parsed: KernelManifest = toml::from_str(&text)
                 .unwrap_or_else(|e| panic!("Failed to parse {}: {e}", path.display()));
-            for name in parsed.features.into_keys() {
-                if !NOT_A_CONTROL.contains(&name.as_str()) {
-                    out.push((crate_name, name));
-                }
-            }
+            let skip: &[&[&str]] = if dir == crate::ci::KERNEL {
+                &[KERNEL_BUILDS, KERNEL_CARRIES]
+            } else {
+                &[NOT_A_CONTROL]
+            };
+            out.extend(
+                parsed.features.into_keys().filter(|name| !skip.iter().any(|s| s.contains(&name.as_str()))),
+            );
         }
         out
     }
@@ -2814,12 +2787,10 @@ mod tests {
     #[test]
     fn every_model_control_is_run() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let declared: BTreeSet<String> =
-            declared_model_controls(root).into_iter().map(|(_, name)| name).collect();
         let run: BTreeSet<String> =
             crate::ci::CONTROLS.iter().map(|c| c.feature.to_string()).collect();
         assert_eq!(
-            declared, run,
+            declared_model_controls(root), run,
             "a model's negative control is declared and not in src/ci.rs's CONTROLS, or a row \
              there names a feature no model crate declares"
         );

@@ -60,7 +60,7 @@ const KILLED: i32 = 137;
 /// What `syscall::kill_process(-1)` publishes for a Ring 3 CPU fault.
 const CPU_FAULT: i32 = -1;
 
-/// `toyos_proclife::MAX_DEPTH`, which the kernel refuses a process past.
+/// `kernel::proclife::MAX_DEPTH`, which the kernel refuses a process past.
 const MAX_DEPTH: u32 = 64;
 
 /// The links a chain may grow before a refusal must have stopped it: each

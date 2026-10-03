@@ -2,9 +2,9 @@
 
 use core::arch::asm;
 
-use toyos_sched::cpu::RunToken;
-use toyos_sched::hw::Hw;
-use toyos_sched::task::{TaskAccounting, TaskKey};
+use kernel::sched::cpu::RunToken;
+use kernel::sched::hw::Hw;
+use kernel::sched::task::{TaskAccounting, TaskKey};
 
 use crate::arch::{cpu, percpu};
 use crate::hw::{report_contexts, KernelHw};
@@ -255,7 +255,7 @@ static PROBE_WATCH: crate::watch::Watch = crate::watch::Watch::new();
 pub fn sysret_ss_probe(parkable: &crate::scheduler::Parkable) {
     use crate::watch;
     use crate::time::{Deadline, Duration};
-    use toyos_sched::task::WaitClass;
+    use kernel::sched::task::WaitClass;
     let Some(armed) = watch::arm(&PROBE_WATCH, 0, WaitClass::Other)
     else {
         crate::log!("sysret-ss: probe could not arm");
