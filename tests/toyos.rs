@@ -93,7 +93,7 @@ const RUST_SKIP: &[&str] = &[
     // Needs a launcher and a declared `cat` and shell, which `tests/testcases`
     // does not give: the `process_tree` metal row runs it on tests/proctreecase.
     "process_tree",
-    // It asserts nothing at all: it holds a `tests/lancase` boot open for
+    // It asserts nothing at all: it holds a `tests/lanleasecase` boot open for
     // twenty seconds so the host can reach this machine over the cable. On a
     // shared boot it would be twenty seconds of nothing.
     "lan_hold",
@@ -202,13 +202,11 @@ const MACHINE_TESTS: &[&str] = &[
 const METAL: &[(&str, metal::Metal)] = &[
     (
         "lan_dhcp_lease",
-        metal::Metal { arms: LANCASE, judge: |b| lan::on_metal(b[0]) },
+        metal::Metal { arms: LANTALKCASE, judge: |b| lan::on_metal(b[0]) },
     ),
     (
-        // Folded into `lan_dhcp_lease`'s judge once the PHY is brought up
-        // (#453): lancase's own first-message record then carries this fact.
         "lan_message_delivery",
-        metal::Metal { arms: LANICSCASE, judge: |b| lan::provoked_on_metal(b[0]) },
+        metal::Metal { arms: LANTALKCASE, judge: |b| lan::delivered_on_metal(b[0]) },
     ),
     (
         // The first byte: a lease from the bench's own router, read off the
@@ -709,33 +707,22 @@ const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/metalcase", &
 const PROCTREECASE: &[metal::Arm] =
     &[metal::once("proctreecase", "tests/proctreecase", &[], &["test_rs_process_tree"])];
 
-/// The cable's own boot: netd in front of the T14's I219, and one job that
-/// holds the machine up long enough for the host to reach it. The one arm in
-/// this suite that names a PCI function for the loop to reach the boot over.
-const LANCASE: &[metal::Arm] =
-    &[metal::Arm { nic: Some(lan::NIC), ..metal::once(lan::BOOT, lan::CONFIG, &[], lan::JOBS) }];
-
-/// The cable's boot with netd's delivery actuator armed. **A count of no
-/// messages is two facts** — a part nothing made speak and a message that
-/// reached no CPU — so this boot asks the part for a message and `LANCASE` does
-/// not. It names no PCI function: its judge reads the kernel's own records and
-/// asks the cable nothing.
-const LANICSCASE: &[metal::Arm] = &[metal::once(lan::ICS_BOOT, lan::ICS_CONFIG, &[], lan::JOBS)];
-
-/// The cable's boot with netd's lease probe armed: netd's exit code is the
-/// lease's verdict, read out of the kernel's own `exit:` record, and its report
-/// is on the log volume. It names the I219 for the loop to ping over the cable,
-/// as [`LANCASE`] does.
+/// netd in front of the T14's I219 with its lease probe armed: netd's exit code
+/// is the lease's verdict, read out of the kernel's own `exit:` record, and its
+/// report is on the log volume. It names the I219 for the loop to ping over the
+/// cable, as [`LANTALKCASE`] does.
 const LANLEASECASE: &[metal::Arm] = &[metal::Arm {
     nic: Some(lan::NIC),
     ..metal::once(lan::LEASE_BOOT, lan::LEASE_CONFIG, &[], lan::JOBS)
 }];
 
-/// The boot the host talks to over its own cable: the loop reads the log it
-/// serves under its name, pings it, runs a command on it and tells it to
-/// reboot.
+/// The cable's boot, netd in front of the T14's I219, which the host talks to
+/// over that cable: the loop reads the log it serves under its name, pings it,
+/// runs a command on it and tells it to reboot. It names the PCI function, so
+/// the loop also pings the address it held under the operating system before.
 const LANTALKCASE: &[metal::Arm] = &[metal::Arm {
     talk: true,
+    nic: Some(lan::NIC),
     ..metal::once(lan::TALK_BOOT, lan::TALK_CONFIG, &[], lan::TALK_JOBS)
 }];
 
@@ -776,7 +763,7 @@ fn shared_metal(keep: impl Fn(&str) -> bool) -> Vec<metal::SharedBoot> {
             config: "tests/testcases",
             params: &[],
             features: &[],
-            members: const { std::num::NonZeroUsize::new(38).expect("a chunk holds a member") },
+            members: const { metal::members_fitting(toyos_tco::RUST_MEMBER_MS) },
             jobs: shipping
                 .iter()
                 .filter(|n| keep(n))
@@ -866,7 +853,7 @@ fn c_corpus_metal(
         config: "tests/testcases",
         params: &[],
         features: &[],
-        members: const { std::num::NonZeroUsize::new(90).expect("a chunk holds a member") },
+        members: const { metal::members_fitting(toyos_tco::C_MEMBER_MS) },
         jobs,
         files,
         links,
@@ -1781,7 +1768,7 @@ fn virt_selftest(
         },
     );
     let said = format!("{param}: ");
-    let rest = qemu.drain_until(Duration::from_secs(180), |l| l.contains(&said));
+    let rest = qemu.drain_until(Duration::from_secs(36), |l| l.contains(&said));
     let serial = format!("{}\n{rest}", qemu.boot_log());
     let Some(verdict) = serial.lines().find(|l| l.contains(&said)) else {
         return Err(format!("{param} never reported\nserial:\n{serial}"));
@@ -1871,8 +1858,8 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
                     ..Default::default()
                 },
             );
-            let dump = qemu.screendump_until("EARLY PANIC:", Duration::from_secs(30));
-            let rest = qemu.drain_until(Duration::from_secs(10), |l| l.contains(EARLY_PANIC_MESSAGE));
+            let dump = qemu.screendump_until("EARLY PANIC:", Duration::from_secs(6));
+            let rest = qemu.drain_until(Duration::from_secs(6), |l| l.contains(EARLY_PANIC_MESSAGE));
             let serial = format!("{}\n{rest}", qemu.boot_log());
             // What stage 3 prints before it panics: every item is a record
             // only the AArch64 side of the loader or the kernel writes.
@@ -1963,9 +1950,9 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
                     ..Default::default()
                 },
             );
-            let dump = qemu.screendump_until("EARLY PANIC:", Duration::from_secs(30));
+            let dump = qemu.screendump_until("EARLY PANIC:", Duration::from_secs(6));
             const FAULT_MESSAGE: &str = "synchronous from EL1 on SP_EL1: unknown reason (an undefined instruction) at 0x";
-            let rest = qemu.drain_until(Duration::from_secs(10), |l| l.contains(FAULT_MESSAGE));
+            let rest = qemu.drain_until(Duration::from_secs(6), |l| l.contains(FAULT_MESSAGE));
             let serial = format!("{}\n{rest}", qemu.boot_log());
             for want in [
                 "KERNEL PANIC: synchronous from EL1 on SP_EL1: unknown reason (an undefined instruction)",
@@ -2001,7 +1988,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
                 },
             );
             const SPAWNED: &str = "spawn: /system/bin/logd pid=";
-            let rest = qemu.drain_until(Duration::from_secs(180), |l| l.contains(SPAWNED));
+            let rest = qemu.drain_until(Duration::from_secs(30), |l| l.contains(SPAWNED));
             let serial = format!("{}\n{rest}", qemu.boot_log());
             for want in [
                 "paging: the direct map holds memory below",
@@ -2090,7 +2077,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
             }
             // The pager runs only on the CPU that claimed the panel, and it is
             // the loop that watches the reset bound: a second page is its proof.
-            let paged = qemu.screendump_while(Duration::from_secs(20), Duration::from_millis(200), |d| {
+            let paged = qemu.screendump_while(Duration::from_secs(87), Duration::from_millis(200), |d| {
                 d.rows().iter().any(|r| r.contains("[page ")) && d.text() != text
             });
             if paged.text() == text {
@@ -2132,7 +2119,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
             // anything else is userland holding the panel. Without this the
             // test would prove that a fatal panic paints a screen nobody had
             // taken.
-            let up = qemu.screendump_while(Duration::from_secs(30), Duration::from_millis(200), |d| {
+            let up = qemu.screendump_while(Duration::from_secs(96), Duration::from_millis(200), |d| {
                 d.fill() != FILL_BOOT
             });
             if up.fill() == FILL_BOOT {
@@ -3673,7 +3660,7 @@ impl Tally {
         if let Some(fastest) = fastest {
             say(format!(
                 "host: fastest boot {fastest} ms against the reference {reference} ms — liveness \
-                 ceilings paid at {:.2}x width",
+                 ceilings paid at {:.2}x",
                 f64::from(num) / f64::from(den)
             ));
         }
@@ -3812,7 +3799,6 @@ fn run_tasks(tasks: Vec<Task>, width: usize, test_config: &Path) -> Vec<Outcome>
         return Vec::new();
     }
     let width = width.clamp(1, tasks.len());
-    qemu::set_width(width as u32);
     let queue = std::sync::Mutex::new(std::collections::VecDeque::from(tasks));
     let mut all = Vec::new();
     thread::scope(|scope| {

@@ -60,7 +60,8 @@ pub fn return_secs() -> u64 {
     longest.div_ceil(1_000) + RETURN_ALLOWANCE_SECS
 }
 
-const POLL_SECS: u64 = 5;
+/// How often the loop asks whether the machine is there.
+const POLL: std::time::Duration = std::time::Duration::from_secs(1);
 
 const PING_EVERY_SECS: u64 = 1;
 
@@ -99,6 +100,24 @@ const LOADER: &str = r"\EFI\BOOT\BOOTX64.EFI";
 /// The three logind keys that keep a closed-lid machine awake.
 const LID_KEYS: &[&str] =
     &["HandleLidSwitch", "HandleLidSwitchExternalPower", "HandleLidSwitchDocked"];
+
+/// What `toyos-metal`'s last statement on its stderr opens with, past the
+/// printer's stamp, when it refuses: the harness reads the refusal back by it,
+/// to name it beside the exit status.
+pub const REFUSAL_HEAD: &str = "toyos-metal: ";
+
+/// The refusal a `toyos-metal` run's stderr ends on, from its [`REFUSAL_HEAD`]
+/// line to the end, or `None` where it said none. Only a statement's first line
+/// carries the stamp, so only that line is read past it.
+pub fn said_refusal(stderr: &str) -> Option<String> {
+    let lines: Vec<&str> = stderr.lines().collect();
+    let at = lines
+        .iter()
+        .rposition(|line| crate::printer::unstamped(line).starts_with(REFUSAL_HEAD))?;
+    let mut said = vec![&crate::printer::unstamped(lines[at])[REFUSAL_HEAD.len()..]];
+    said.extend(&lines[at + 1..]);
+    Some(said.join("\n").trim_end().to_string())
+}
 
 /// Every way this loop refuses, by name.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -833,8 +852,17 @@ pub const FOREIGN_RECORD_ARM: &str = "blackbox-foreign-identity";
 
 /// Whether this image is armed to stop itself, and so owes a sealed record
 /// rather than `Rebooting.`.
-pub fn stages_a_wedge(armed: &[String]) -> bool {
-    armed.iter().any(|name| WEDGE_ARMS.contains(&name.as_str()))
+pub fn stages_a_wedge(armed: &[impl AsRef<str>]) -> bool {
+    armed.iter().any(|name| WEDGE_ARMS.contains(&name.as_ref()))
+}
+
+/// The `boot-deadline=` bound an image armed with `armed` carries.
+pub fn bound_for(armed: &[impl AsRef<str>]) -> u64 {
+    if stages_a_wedge(armed) {
+        toyos_tco::STAGED_BOUND_MS
+    } else {
+        toyos_tco::WEDGE_BOUND_MS
+    }
 }
 
 /// Whether this image is armed so the pass after its reset clears its record
@@ -1384,15 +1412,16 @@ impl Driver {
         }
     }
 
+    /// [`wait_on`] the machine's `ssh`.
     fn wait(&self, secs: u64, what: &'static str, answering: bool) -> Result<u64, Refusal> {
-        let began = std::time::Instant::now();
-        while began.elapsed().as_secs() < secs {
-            std::thread::sleep(std::time::Duration::from_secs(POLL_SECS));
-            if self.ssh("probing", "true").is_ok() == answering {
-                return Ok(began.elapsed().as_secs());
-            }
-        }
-        Err(Refusal::Silent { what, secs })
+        let host = self.target.host.as_str();
+        wait_on(
+            secs,
+            what,
+            answering,
+            |within| port_accepts(host, crate::metaltalk::SSH_PORT, within),
+            || self.ssh("probing", "true").is_ok(),
+        )
     }
 
     /// The loader's own file, and then everything `logd` wrote, in name order:
@@ -1469,6 +1498,44 @@ impl Driver {
         let file = shell_word(&format!("{}/{name}", self.target.mount));
         self.ssh("reading a log file", &format!("cat {file}"))
     }
+}
+
+/// Poll once a [`POLL`] whether a port `accepts` a dial bounded by what it is
+/// handed, and say how long the machine took to answer as asked. **Coming back
+/// is `ssh` itself answering**: a port that accepts is only asked whether `ssh`
+/// `answers`, since a listener can come up before the service behind it.
+/// **Going down is a dial refused or unanswered for [`CONNECT_SECS`]**, what
+/// `ssh`'s own connect is given: a SYN lost while Ubuntu is still up would
+/// otherwise read as down, and the stick be read before ToyOS booted it.
+fn wait_on(
+    secs: u64,
+    what: &'static str,
+    answering: bool,
+    mut accepts: impl FnMut(std::time::Duration) -> bool,
+    mut answers: impl FnMut() -> bool,
+) -> Result<u64, Refusal> {
+    let dial = if answering { POLL } else { std::time::Duration::from_secs(CONNECT_SECS) };
+    let began = std::time::Instant::now();
+    while began.elapsed().as_secs() < secs {
+        let next = std::time::Instant::now() + POLL;
+        let listening = accepts(dial);
+        let answered = listening && (!answering || answers());
+        if answered == answering {
+            return Ok(began.elapsed().as_secs());
+        }
+        std::thread::sleep(next.saturating_duration_since(std::time::Instant::now()));
+    }
+    Err(Refusal::Silent { what, secs })
+}
+
+/// Whether `host`'s `port` accepts a connection `within`; a name that does not
+/// resolve is a machine that is not there.
+fn port_accepts(host: &str, port: u16, within: std::time::Duration) -> bool {
+    use std::net::ToSocketAddrs;
+    let Ok(mut addrs) = (host, port).to_socket_addrs() else {
+        return false;
+    };
+    addrs.any(|addr| std::net::TcpStream::connect_timeout(&addr, within).is_ok())
 }
 
 fn unstarted(what: &str, e: &std::io::Error) -> Refusal {
@@ -2519,6 +2586,49 @@ mod tests {
         }
     }
 
+    /// **A port that accepts is not a machine that came back**, and a machine
+    /// going down is its port refusing.
+    /// Staged through [`port_accepts`] on a listener of this host's own, which
+    /// accepts and never speaks `ssh`, and on port 0, which nothing listens on:
+    /// a port the listener let go of can be another socket's by the time it is
+    /// dialled.
+    #[test]
+    fn coming_back_is_ssh_answering_and_not_its_port() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback listener");
+        let port = listener.local_addr().expect("its address").port();
+        let accepts = |within| port_accepts("127.0.0.1", port, within);
+        let mut asked = 0;
+        let back = wait_on(1, "come back", true, accepts, || {
+            asked += 1;
+            false
+        });
+        assert_eq!(back, Err(Refusal::Silent { what: "come back", secs: 1 }));
+        assert!(asked > 0, "`ssh` was never asked of a port that accepts");
+        assert_eq!(wait_on(1, "come back", true, accepts, || true), Ok(0));
+        let up = wait_on(1, "go down", false, accepts, || unreachable!("`ssh` asked of one going down"));
+        assert_eq!(up, Err(Refusal::Silent { what: "go down", secs: 1 }));
+        let refuses = |within| port_accepts("127.0.0.1", 0, within);
+        assert_eq!(wait_on(1, "go down", false, refuses, || unreachable!()), Ok(0));
+    }
+
+    /// **The harness names the refusal, not only the exit status.** The
+    /// stderr is the T14's `lantalkcase` run's, cargo's own lines included and
+    /// the driver's statement under the printer's stamp, and the refusal it ends
+    /// on is read back whole, every finding with it.
+    #[test]
+    fn a_refusal_is_read_back_off_the_drivers_stderr() {
+        let stderr = "    Blocking waiting for file lock on package cache\n\
+            \x20   Finished `dev` profile [optimized + debuginfo] target(s) in 0.19s\n\
+            \x20    Running `target/debug/toyos-metal --image /Users/jan/Dev/jan/toyos-t14lan/target/metal/lantalkcase/image.img --readback /Users/jan/Dev/jan/toyos-t14lan/target/metal/lantalkcase --fat32-check --talk /Users/jan/Dev/jan/toyos-t14lan/target/metal/lantalkcase/ssh/id_ed25519`\n\
+            14:02:11 toyos-metal: the boot did not say over its own cable what a talking boot owes:\n\
+            \x20 217 line(s) arrived over the cable and none is this boot's `Boot: complete`\n";
+        let said = Refusal::Talk(vec![
+            "217 line(s) arrived over the cable and none is this boot's `Boot: complete`".into(),
+        ]);
+        assert_eq!(said_refusal(stderr), Some(said.to_string()));
+        assert_eq!(said_refusal(&stderr[..stderr.find(REFUSAL_HEAD).unwrap()]), None, "cargo's lines are no refusal");
+    }
+
     /// **An image with no bound on its own boot never reaches the stick.**
     ///
     /// The case, measured twice: a kernel that hung after its job list, and a
@@ -2712,6 +2822,7 @@ mod tests {
             assert!(flashable(arm), "{arm} reaches no stick");
             assert_eq!(judge_arms(&[arm.to_string(), bound.clone()]), Ok(()), "{arm}");
             assert!(stages_a_wedge(&[arm.to_string()]), "{arm}");
+            assert_eq!(bound_for(&[arm]), toyos_tco::STAGED_BOUND_MS, "{arm}");
             // And with no bound behind it, the sharpest refusal names it as the
             // wedge it is rather than as a plain image.
             assert_eq!(
@@ -2720,8 +2831,10 @@ mod tests {
                 "{arm}"
             );
         }
-        // The negative half: an arm that stops nothing is not judged as one.
+        // The negative half: an arm that stops nothing is not judged as one,
+        // and keeps the bound a wedge nobody staged is ended by.
         assert!(!stages_a_wedge(&["watchdog".to_string(), bound]));
+        assert_eq!(bound_for(&["watchdog"]), toyos_tco::WEDGE_BOUND_MS);
     }
 
     /// A row for a name the kernel no longer declares is a ruling about

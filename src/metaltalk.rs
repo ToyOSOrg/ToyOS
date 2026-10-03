@@ -49,6 +49,12 @@ pub const SSH_PORT: u16 = 22;
 const PING_TRIES: u32 = 10;
 const PING_WAIT: Duration = Duration::from_secs(1);
 
+/// How long the stream gets to carry this boot's `Boot: complete` before
+/// `reboot` is asked regardless, and the judge reds on the record's absence. A
+/// liveness bound, inside the boot's own `boot-deadline=` that `reboot` has to
+/// beat.
+const CARRIED_WAIT: Duration = Duration::from_secs(30);
+
 /// How long one connect waits for the machine's answer to its SYN.
 const CONNECT_WAIT: Duration = Duration::from_secs(5);
 
@@ -275,6 +281,12 @@ impl Stream {
     /// Wait for a line carrying `needle`, or `by`; whether one arrived.
     pub fn wait_for(&self, needle: &str, by: Duration) -> bool {
         self.wait_until(by, |lines| lines.iter().any(|l| l.contains(needle)).then_some(())).is_some()
+    }
+
+    /// This boot's `Boot: complete` in milliseconds, read as [`judge`] reads
+    /// it, once a line carries it, or `None` after `by`.
+    pub fn wait_for_boot(&self, by: Duration) -> Option<u64> {
+        self.wait_until(by, |lines| lines.iter().find_map(|line| crate::bootlog::boot_millis(line)))
     }
 
     /// The peer, once a connection has carried a line, or `None` after `by`
@@ -954,9 +966,28 @@ pub fn converse(
         Err(why) => println!("  talk: `{command}` was not answered: {why}"),
     }
 
-    let reboot = ssh.fire(ssh_at, REBOOT);
+    let reboot = hand_back(stream, began, CARRIED_WAIT, || ssh.fire(ssh_at, REBOOT));
     println!("  talk: `{REBOOT}` {reboot:?}");
     Ok(Conversation { peer, ping, exec, reboot, exec_ms, stream_end: stream.end() })
+}
+
+/// Ask for `reboot` through `fire` once the stream has carried this boot's
+/// `Boot: complete`, or once `by` has passed without it. `reboot` ends the
+/// stream the judge reads that record off, and `logd` serves the boot from its
+/// first line, so the backlog crosses at the network's pace and not the
+/// conversation's.
+fn hand_back<T>(stream: &Stream, began: Instant, by: Duration, fire: impl FnOnce() -> T) -> T {
+    match stream.wait_for_boot(by) {
+        Some(ms) => println!(
+            "  talk: the stream carried `Boot: complete` ({ms} ms), {} ms after it opened",
+            began.elapsed().as_millis()
+        ),
+        None => println!(
+            "  talk: the stream carried no `Boot: complete` in {} ms; `{REBOOT}` is asked regardless",
+            by.as_millis()
+        ),
+    }
+    fire()
 }
 
 /// The keys a conversation is written under, one `<key> <value>` per line, in
@@ -1437,6 +1468,39 @@ mod tests {
             stream.lines(),
             vec!["[kernel 1.216 cpu0] Boot: complete (1216ms)\n", "[kernel 1.217 cpu0] init: started logd\n"]
         );
+    }
+
+    /// **`reboot` is not asked while the stream is stalled short of
+    /// `Boot: complete`**: it waits out its bound, and the record ends the wait
+    /// as the judge reads it.
+    #[test]
+    fn the_hand_back_waits_for_the_boot_record_the_judge_reads() {
+        const STALLED_AT: [&str; 2] = [
+            "[2026-09-29 14:01:34 0.493 cpu0] xHCI: mass storage iface=0 in=0x81/512 out=0x2/512",
+            "[2026-09-29 14:01:34 0.493 cpu0] xHCI: configuration set",
+        ];
+        const RECORD: &str = "[2026-09-29 14:01:35 1.166 cpu0] Boot: complete (1166ms)";
+        let dir = toyos_tmpdir::TempDir::new("metaltalk-carried");
+        let server = TcpListener::bind("127.0.0.1:0").unwrap();
+        let at = server.local_addr().unwrap();
+        let stream = Stream::connect(Peer::At(at), &dir.join("s.log"), false, Duration::from_secs(5))
+            .expect("a loopback reader");
+        let (mut conn, _) = server.accept().unwrap();
+        for line in STALLED_AT {
+            writeln!(conn, "{line}").unwrap();
+        }
+        assert!(stream.wait_for("configuration set", Duration::from_secs(5)), "the stalled lines were not read");
+        let good = heard(Ok(Exec { stdout: owed(), status: Some(0) }), Ok("accepted".into()));
+        let bound = Duration::from_millis(100);
+        let began = Instant::now();
+        let (waited, lines) = hand_back(&stream, began, bound, || (began.elapsed(), stream.lines()));
+        assert!(waited >= bound, "`reboot` was asked {waited:?} into a stall bounded at {bound:?}");
+        assert!(judge(&good, &lines).is_err(), "the judge and the wait disagree on the stall");
+
+        writeln!(conn, "{RECORD}").unwrap();
+        let lines = hand_back(&stream, Instant::now(), Duration::from_secs(5), || stream.lines());
+        judge(&good, &lines).expect("`reboot` was asked before the stream carried the record");
+        assert_eq!(stream.wait_for_boot(Duration::ZERO), Some(1166));
     }
 
     /// The next connection `server` takes, or a panic naming `what` once a

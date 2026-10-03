@@ -31,8 +31,6 @@ pub const MDIC: usize = 0x00020;
 pub const ICR: usize = 0x000C0;
 /// Interrupt Throttling (§10.2.4.2, `0x000C4`).
 pub const ITR: usize = 0x000C4;
-/// Interrupt Cause Set (§10.2.4.4, `0x000C8`), write-only.
-pub const ICS: usize = 0x000C8;
 /// Interrupt Mask Set/Read (§10.2.4.5, `0x000D0`).
 pub const IMS: usize = 0x000D0;
 /// Interrupt Mask Clear (§10.2.4.6, `0x000D8`), write-only.

@@ -16,9 +16,10 @@
 use std::cell::RefCell;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::{BufRead, BufReader};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use toyos_build::bootlog;
 use toyos_build::metalimage;
@@ -113,6 +114,13 @@ pub struct SharedBoot {
     /// Names in `bin/` that reach one binary, so the kernel records each run
     /// under a name of its own. `(from, to)` as the manifest spells them.
     pub links: Vec<(String, String)>,
+}
+
+/// How many members allowed `allowance_ms` each one shared boot holds: the
+/// runner's [`toyos_tco::JOB_BOUND_MS`] less a tenth of it, shared among them.
+pub const fn members_fitting(allowance_ms: u64) -> NonZeroUsize {
+    let members = (toyos_tco::JOB_BOUND_MS - toyos_tco::JOB_BOUND_MS / 10) / allowance_ms;
+    NonZeroUsize::new(members as usize).expect("a chunk holds a member")
 }
 
 /// The name of one chunk of a boot that had to be cut in two.
@@ -739,7 +747,11 @@ fn build(
              field on an arm"
         ));
     }
-    let deadline = format!("{}{}", toyos_tco::DEADLINE_PARAM, toyos_tco::WEDGE_BOUND_MS);
+    let deadline = format!(
+        "{}{}",
+        toyos_tco::DEADLINE_PARAM,
+        toyos_build::metal::bound_for(&batch.params)
+    );
     let mut params: Vec<&str> = batch.params.clone();
     params.push(&deadline);
     // **A talking boot carries the key the loop will offer**,
@@ -793,6 +805,33 @@ fn invocation(image: &Path, home: &Path, nic: Option<&str>, talk: bool) -> Vec<S
         words.push(talk_home(home).join("id_ed25519").display().to_string());
     }
     words
+}
+
+/// One `toyos-metal` run. Its stderr is echoed here as it comes and kept, so a
+/// failed run's verdict names the refusal it ended on beside its exit.
+fn drive(root: &Path, words: &[String]) -> Result<(), String> {
+    let mut child = Command::new("cargo")
+        .args(words)
+        .current_dir(root)
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("toyos-metal could not be started: {e}"))?;
+    let mut stderr = BufReader::new(child.stderr.take().expect("stderr was asked for piped"));
+    let (mut said, mut line) = (String::new(), Vec::new());
+    while stderr.read_until(b'\n', &mut line).map_err(|e| format!("toyos-metal's stderr: {e}"))? > 0 {
+        let text = String::from_utf8_lossy(&line);
+        eprint!("{text}");
+        said.push_str(&text);
+        line.clear();
+    }
+    let status = child.wait().map_err(|e| format!("toyos-metal: {e}"))?;
+    if status.success() {
+        return Ok(());
+    }
+    Err(match toyos_build::metal::said_refusal(&said) {
+        Some(refusal) => format!("toyos-metal exited {status}: {refusal}"),
+        None => format!("toyos-metal exited {status} and said no refusal"),
+    })
 }
 
 pub fn read_readback(dir: &Path, label: &str) -> Result<Readback, String> {
@@ -954,15 +993,8 @@ pub fn run(
         for (label, image) in &images {
             let words = invocation(image, &at(dir, label), batches[*label].nic, batches[*label].talk);
             eprintln!("[metal] {label}: cargo {}", words.join(" "));
-            let booted = Command::new("cargo").args(&words).current_dir(&root).status();
-            match booted {
-                Ok(status) if status.success() => {}
-                Ok(status) => {
-                    refused.insert(label, format!("toyos-metal exited {status}"));
-                }
-                Err(e) => {
-                    refused.insert(label, format!("toyos-metal could not be started: {e}"));
-                }
+            if let Err(why) = drive(&root, &words) {
+                refused.insert(label, why);
             }
         }
     }

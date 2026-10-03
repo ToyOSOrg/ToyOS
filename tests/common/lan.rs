@@ -15,20 +15,10 @@ use toyos_i219::lease::{self, Event, Verdict};
 
 use super::metal;
 
-pub const CONFIG: &str = "tests/lancase";
-pub const BOOT: &str = "lancase";
-
-/// The same boot with netd's `--provoke-message` armed: the arm that says
-/// whether a message the card raises reaches a CPU at all, which no reading of
-/// the shipping boot separates from a card that raised none.
-pub const ICS_CONFIG: &str = "tests/lanicscase";
-pub const ICS_BOOT: &str = "lanicscase";
-
-/// The same boot with netd's `--exit-with-lease` armed: netd brings the card up
-/// and serves as that boot does, leaves [`LEASE_FILE`] on the log volume one
-/// durable line at a time, and ends with the lease's verdict as its exit code,
-/// which the kernel's `exit:` record carries off a machine whose console
-/// reaches nobody.
+/// The boot with netd's `--exit-with-lease` armed: netd brings the card up and
+/// serves, leaves [`LEASE_FILE`] on the log volume one durable line at a time,
+/// and ends with the lease's verdict as its exit code, which the kernel's
+/// `exit:` record carries off a machine whose console reaches nobody.
 pub const LEASE_CONFIG: &str = "tests/lanleasecase";
 pub const LEASE_BOOT: &str = "lanleasecase";
 
@@ -52,10 +42,9 @@ pub const TALK_BOOT: &str = "lantalkcase";
 const TALK_HOLD: &str = "test_rs_lan_talk_hold";
 pub const TALK_JOBS: &[&str] = &[TALK_HOLD];
 
-/// The armed boot's judge: the kernel's own records, tied to the I219's
-/// hand-over, say whether a message it raised reached a CPU — whatever the PHY
-/// did about a link.
-pub fn provoked_on_metal(back: &metal::Readback) -> Result<(), String> {
+/// The kernel's own records, tied to the I219's hand-over, say a message it
+/// raised reached a CPU — whatever the PHY did about a link.
+pub fn delivered_on_metal(back: &metal::Readback) -> Result<(), String> {
     let got = toyos_build::lan::delivered(back.kernel().text())?;
     eprintln!("  [lan] {}", got.handed.trim());
     eprintln!("  [lan] {}", got.took.trim());
@@ -91,7 +80,7 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
             Some(line) => format!("the kernel refused this function: {}", line.trim()),
             None => format!(
                 "no `{handed}` record and no refusal either: nothing on this machine claimed \
-                 {ID}, so `tests/lancase` was flashed onto a machine that has no such card"
+                 {ID}, so `tests/lantalkcase` was flashed onto a machine that has no such card"
             ),
         }),
     }
@@ -152,10 +141,6 @@ pub fn on_metal(back: &metal::Readback) -> Result<(), String> {
              systems",
             cable.addr
         )),
-    }
-
-    if let Err(why) = back.job_passed(JOBS[0]) {
-        bad.push(why);
     }
 
     if bad.is_empty() {

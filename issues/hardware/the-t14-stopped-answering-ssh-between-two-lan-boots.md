@@ -6,10 +6,9 @@ opened: 2026-09-29
 
 # The T14 stopped answering `ssh` between two LAN boots, and the next two arms died before their flash
 
-`lan_lease_report` (boot `lanleasecase`) and `lan_swap` (boot `lanswapcase`)
-are the two arms the metal suite flashes after `lanicscase`. On the run below
-neither reached the stick: the first `ssh` of each timed out, so neither boot
-happened and neither judge ran. The suite measured nothing about either test,
+On the run below neither `lan_lease_report` (boot `lanleasecase`) nor `lan_swap`
+(boot `lanswapcase`) reached the stick: the first `ssh` of each timed out, so
+neither boot happened and neither judge ran. The suite measured nothing about either test,
 and why the bench's `ssh` went away is not established by anything kept.
 
 ## Measured

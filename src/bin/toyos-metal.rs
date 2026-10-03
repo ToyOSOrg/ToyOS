@@ -6,7 +6,7 @@
 #[macro_use(eprintln)]
 extern crate toyos_build;
 
-use toyos_build::metal::{run, Args};
+use toyos_build::metal::{run, Args, REFUSAL_HEAD};
 
 fn main() {
     let words: Vec<String> = std::env::args().skip(1).collect();
@@ -18,6 +18,6 @@ fn main() {
         }
         Err(refusal) => refusal,
     };
-    eprintln!("toyos-metal: {refusal}");
+    eprintln!("{REFUSAL_HEAD}{refusal}");
     std::process::exit(if refusal.about_the_boot() { 1 } else { 2 });
 }

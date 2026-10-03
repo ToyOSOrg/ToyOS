@@ -23,8 +23,6 @@ judge refuses a boot whose leased address is not the one the loop pinged, and
 the one the loop pinged is what Ubuntu held on that MAC. A server that hands the
 MAC a different address under ToyOS reds the arm for a fact about the router
 rather than about the boot — a red naming the wrong thing, not a false green.
-Closed by a lancase run whose lease record and whose `ping_addr` are compared,
-which is the first thing that run prints.
 
 The router-lease measurement falsifies this premise:
 `issues/hardware/the-benchs-router-leases-toyos-another-address-than-ubuntu.md`.
