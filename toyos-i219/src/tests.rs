@@ -2754,7 +2754,7 @@ fn a_lease_report_reads_back_as_it_was_written() {
     for bad in [
         "x link up\n",
         "5 link up 10\n",
-        "5 leased 1.2.3.4 from 1.2.3.5 router none\n",
+        "5 leased 192.0.2.4 from 192.0.2.5 router none\n",
         "5 exit\n",
         "5 lost now\n",
     ] {

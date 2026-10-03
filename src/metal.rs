@@ -2784,7 +2784,7 @@ mod tests {
         let many = "lo    UNKNOWN   127.0.0.1/8\n\
                     enp0s31f6   UP   192.168.1.46/24\n\
                     wlp9s0   UP   192.168.1.244/24\n\
-                    tailscale0   UNKNOWN   100.92.92.12/32\n";
+                    tailscale0   UNKNOWN   192.0.2.58/32\n";
         assert_eq!(brief_address("enp0s31f6", many), Ok("192.168.1.46".parse().unwrap()));
         assert_eq!(brief_address("wlp9s0", many), Ok("192.168.1.244".parse().unwrap()));
         assert!(brief_address("enp0s31f7", many).unwrap_err().contains("ip -4 -brief"));
@@ -2990,7 +2990,7 @@ mod tests {
     fn a_create_that_moved_the_boot_order_is_refused() {
         let guid = "69ddc8f6-fab2-423f-9818-93bb0ba7349c";
         let before = "BootCurrent: 0001\nBootOrder: 0001,001D\n\
-             Boot0001* Ubuntu\tHD(1,GPT,16c1f60f-0f7b-4c3d-ba3f-5d75df1fe7bf,0x800,0x1000)\
+             Boot0001* Ubuntu\tHD(1,GPT,33333333-3333-3333-3333-333333333333,0x800,0x1000)\
              /File(\\EFI\\ubuntu\\shimx64.efi)\n";
         let made = format!(
             "Boot0002* ToyOS\tHD(1,GPT,{guid},0x800,0x11000)/File(\\EFI\\BOOT\\BOOTX64.EFI)\n"
@@ -3027,7 +3027,7 @@ mod tests {
     #[test]
     fn a_boot_entry_is_matched_on_the_partition_its_path_names() {
         let listing = "BootCurrent: 0001\nBootOrder: 0001,001D\n\
-             Boot0001* Ubuntu\tHD(1,GPT,16c1f60f-0f7b-4c3d-ba3f-5d75df1fe7bf,0x800,0x219800)\
+             Boot0001* Ubuntu\tHD(1,GPT,33333333-3333-3333-3333-333333333333,0x800,0x219800)\
              /File(\\EFI\\ubuntu\\shimx64.efi)\n\
              Boot0010  Setup\tFvFile(721c8b66-426c-4e86-8e99-3457c46ab0b9)\n\
              Boot0026* ToyOS\tHD(1,GPT,11111111-1111-1111-1111-111111111111,0x800,0x800)\

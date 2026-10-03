@@ -479,7 +479,10 @@ impl Log {
                 // The one call this program is built around. A refusal is not
                 // survivable by retrying — the buffer and the rights are the
                 // same every time — so it ends loudly.
-                Err(e) => panic!("logkeeper: SYS_LOG_READ refused a {BATCH}-record buffer ({e:?})"),
+                Err(e) => panic!(
+                    "logkeeper: SYS_LOG_READ refused a {BATCH}-record buffer or a cursor ahead of a \
+                     shard ({e:?})"
+                ),
             };
             let short = batch.len() < BATCH;
             out.extend(

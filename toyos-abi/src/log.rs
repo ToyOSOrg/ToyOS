@@ -257,15 +257,17 @@ pub struct LogCursor {
     /// the first time and reads it back.
     pub shards: u32,
     pub _pad: u32,
-    /// In/out: cumulative records this cursor never saw because they were
-    /// overwritten.
+    /// Out: records this read skipped because they were overwritten. The
+    /// kernel never reads it, so a reader's total is the reader's own sum.
     ///
     /// **Derived, never counted by a producer.** The kernel computes it from
     /// `head` and `next`, which both have to be right anyway, so no counter can
     /// drift from the ring. It lives here so a reader that ignores loss has to
     /// actively ignore a field it is already passing.
     pub lost: u64,
-    /// In/out: the next sequence number wanted from each shard.
+    /// In/out: the next sequence number wanted from each shard. A number past
+    /// the one the shard issues next is refused, and a shard not yet published
+    /// issues 1 next.
     pub next: [u64; MAX_LOG_SHARDS],
 }
 
