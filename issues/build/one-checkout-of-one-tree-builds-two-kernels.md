@@ -28,7 +28,7 @@ heads:
   still `2593c71c…`.
 
 The empty directories' kernel and `2593c71c…` differ in `.symtab` and
-`.strtab` and in no other section, so in none a machine loads: 121 of 6419
+`.strtab` and in no other section: 121 of 6419
 symbol names, each in its `.llvm.<n>` suffix alone, ten of the 261 suffixes
 the kernel carries. It is the suffix
 `issues/build/two-checkouts-of-one-tree-build-different-guest-bytes.md`
