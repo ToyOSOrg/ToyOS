@@ -68,7 +68,6 @@ members = [
     "toyos-untrusted",
     "toyos-update",
     "toyos-userbound",
-    "toyos-userpin",
     "toyos-wallclock",
     "toyos-xhci",
     "toyos-xhci/sim",
