@@ -4,9 +4,9 @@
 //! host` runs the same list as one of its steps, so the local command and
 //! the merge gate cannot verify different sets.
 //!
-//! Userland is not here: its targets are the fork's own, and the fork's
-//! `toyos` toolchain ships no clippy. The kernel and the bootloader are linted
-//! for every architecture.
+//! Userland's programs are not here: their targets are the fork's own, and the
+//! fork's `toyos` toolchain ships no clippy. The kernel and the bootloader are
+//! linted for every architecture.
 
 use std::path::Path;
 use std::process::Command;
@@ -185,6 +185,23 @@ const SHAPES: &[Shape] = &[
             "loom_mailbox",
             "--features",
             "victim-retires-mid-probe",
+        ],
+        after: &["$ADOPTED", "-D", "warnings"],
+    },
+    // The pure crates under userland programs, against the host, as `--ci
+    // host` tests them.
+    Shape {
+        dir: "",
+        before: &[
+            "--manifest-path",
+            "userland/Cargo.toml",
+            "-p",
+            "toyos-desktop",
+            "-p",
+            "toyos-mdns",
+            "-p",
+            "toyos-mixer",
+            "--all-targets",
         ],
         after: &["$ADOPTED", "-D", "warnings"],
     },

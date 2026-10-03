@@ -32,9 +32,11 @@ change, before the speed work starts" (2026-10-03).
    packages that name it as a dependency of any kind, under any `cfg`, as
    `cargo metadata --no-deps` reads every manifest `git ls-files '*Cargo.toml'`
    lists, excluded packages and `tests/` included; a crate the images ship as a
-   program of its own counts as its own consumer. A move under a userland
-   program lands with `src/userlandhost.rs`'s survey gating a nested crate's
-   tests, which it lists as escapes today.
+   program of its own counts as its own consumer. Of two crates that are each
+   other's only consumer, the one the other names only as a dev-dependency
+   moves under it, and the count treats the pair as one crate. A move under a
+   userland program lands with `src/userlandhost.rs`'s survey gating a nested
+   crate's tests, which it lists as escapes today.
    Check: `--ci host` runs every test each package lists today, and `--clippy`
    lints them.
 

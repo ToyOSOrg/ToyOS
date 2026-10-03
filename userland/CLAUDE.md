@@ -1,6 +1,6 @@
 # Userland
 
-The module header at the site owns its subject — surfaces, translators and the channel in `toyos/`'s surface modules, soundserver whole under `userland/soundserver/`, what a process holds and how it got it at `kernel/src/object/` and `/system/bin/supervisor`. The compositor's decisions are `toyos-desktop/`, pure and host-tested; `userland/compositor/` is devices, handles, shared memory and the panel.
+The module header at the site owns its subject — surfaces, translators and the channel in `toyos/`'s surface modules, soundserver whole under `userland/soundserver/`, what a process holds and how it got it at `kernel/src/object/` and `/system/bin/supervisor`. The compositor's decisions are `userland/compositor/desktop/`, pure and host-tested; `userland/compositor/` is devices, handles, shared memory and the panel.
 
 **A server never blocks on a client** — the doctrine no single site owns. Accept and the first frame are two events; a frame is buffered until whole before anything acts on it; a write is one `try_send` whose refusal drops the peer by name; a blocking read or write of a pipe the client owns is the same bug. The supervisor, the compositor, netstack, soundserver and every surface host use `ipc::FrameRx`.
 

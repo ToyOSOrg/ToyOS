@@ -491,19 +491,19 @@ toyos-abi = { path = "../toyos-abi" }
 [target.'cfg(target_os = "none")'.dependencies]
 bcachefs = { path = "../bcachefs", default-features = false }
 toyos-acpi = { path = "../toyos-acpi" }
-toyos-dma = { path = "../toyos-dma" }
+toyos-dma = { path = "dma" }
 toyos-elide = { path = "../toyos-elide" }
 toyos-blackbox = { path = "../toyos-blackbox" }
 toyos-blockhold = { path = "../toyos-blockhold" }
 toyos-bootmap = { path = "../toyos-bootmap" }
 toyos-fat32 = { path = "../toyos-fat32" }
 toyos-elf = { path = "../toyos-elf" }
-toyos-gicv3 = { path = "../toyos-gicv3" }
+toyos-gicv3 = { path = "gicv3" }
 toyos-gpt = { path = "../toyos-gpt" }
 toyos-hda = { path = "../toyos-hda" }
-toyos-pci = { path = "../toyos-pci" }
+toyos-pci = { path = "pci" }
 toyos-tco = { path = "../toyos-tco" }
-toyos-ps2 = { path = "../toyos-ps2" }
+toyos-ps2 = { path = "ps2" }
 toyos-rootimage = { path = "../toyos-rootimage" }
 toyos-quiesce = { path = "../toyos-quiesce" }
 toyos-symbols = { path = "../toyos-symbols" }

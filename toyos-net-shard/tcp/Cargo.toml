@@ -9,4 +9,4 @@ description = "ToyOS's TCP, pure: the caller hands in the time, the secrets, par
 publish = false
 
 [dependencies]
-toyos-net-wire = { path = "../toyos-net-wire" }
+toyos-net-wire = { path = "../../toyos-net-wire" }

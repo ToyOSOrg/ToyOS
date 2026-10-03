@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0"
 sprite = { path = "../sprite" }
 toyos = { path = "../../toyos" }
 toyos-abi = { path = "../../toyos-abi" }
-toyos-desktop = { path = "../../toyos-desktop" }
+toyos-desktop = { path = "desktop" }
 toyos-inspect = { path = "../../toyos-inspect" }
 toyos-font = { path = "../toyos-font" }
 toyos-manifest = { path = "../../toyos-manifest" }
