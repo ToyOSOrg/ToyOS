@@ -2375,7 +2375,8 @@ mod tests {
             .status()
             .unwrap();
         assert!(committed.success());
-        let head = crate::sysroot::git_out(&work, &["rev-parse", "HEAD"]);
+        // The ref as `git` wrote it, for an oracle that is not gitoxide.
+        let head = fs::read_to_string(work.join(".git/refs/heads/wt")).unwrap();
         let key = crate::keystore::Key::parse("0123456789abcdef").unwrap();
 
         let clean = release(&work, &key, Arch::Aarch64);
