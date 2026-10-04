@@ -145,7 +145,7 @@ before adopting:
 | `sched/` | 8 | **adopted 2026-08-22**, under the reduction ruling. 8 findings (26 `unsafe` blocks in all); **4 removed, 5 documented, 1 filed** — the five sites of the same shape outside this area, since taken by the root-file and `arch/` sweeps, so that file is closed too. |
 | `loader/` | 8 | **adopted** — every site now carries a `SAFETY:` comment (one finding shared with `elf/`, above) |
 | `iommu/` | 8 | **adopted 2026-08-22**, under the reduction ruling. 8 findings (8 `unsafe` blocks in all); **5 removed, 3 documented, 0 filed** — the area's whole remainder is two window constructions and a `clflush`. |
-| `log/` | 2 | **adopted 2026-08-22**, under the reduction ruling. 2 findings (9 `unsafe` blocks in all, seven of them documented before this pass); **0 removed, 2 documented, 1 filed** — and the filed one was built the same day: `LogRecord` has the safe `as_bytes` its six siblings carry, so `log::user`'s hand-rolled slice is gone and the area's remainder is one block (`shard::initialize_zeroed`, irreducible). |
+| `log/` | 2 | **adopted 2026-08-22**, under the reduction ruling. 2 findings (9 `unsafe` blocks in all, seven of them documented before this pass); **0 removed, 2 documented, 1 filed** — and the filed one was built the same day: `LogRecord` has the safe `as_bytes` its six siblings carry, so `log::user`'s hand-rolled slice is gone. The block left, `shard::initialize_zeroed`, went once a zeroed shard was an empty one. |
 | `object/` | 1 | **adopted** — the one site is `object::shm::Pages`'s `Send`/`Sync` pair, part of the finding filed above |
 | `completion` (since deleted) | 0 undocumented (3 unsafe sites, all already carrying a `SAFETY:`/`Safety:` comment predating this pass) | already documented |
 | **adopted** | **389** — the whole kernel (`mm` 35 + `elf` 23 + `loader` 8 + `object` 1 + root files 76 + `drivers` 121 + `arch` 107 + `sched` 8 + `iommu` 8 + `log` 2) | gated at the source, because the kernel is one crate with no `-p` scoping to hang a lint on. Every area sweep opened its entry module (`mm/mod.rs`, `object/mod.rs`, `elf/mod.rs`, `loader/mod.rs`, `drivers/mod.rs`, `arch/mod.rs`, `sched/mod.rs`, `iommu/mod.rs`, `log/mod.rs`) with `#![warn(clippy::undocumented_unsafe_blocks)]`; the root-file sweep could not — there is no entry module above them but the crate root — so it **inverted the form**: `main.rs` carries one crate-level `#![warn(...)]`, and an `#[allow(...)]` on a `mod` line is the form a tree not yet swept would take. Both compose with `host-tests.yml`'s existing `-D warnings` on the two kernel invocations, so no command line changed. The module attributes are redundant under the crate one and are left where they are — each still records its own area's status. |
@@ -480,14 +480,13 @@ What stayed: `table::flush`'s `clflush`/`mfence`, which has no safe spelling
 and no narrower one — the instruction takes an address and no length, so the
 bound has to be on the caller's side, and it now is.
 
-**`log/` removed nothing in the sweep itself, and both reasons are named at the
-site.** `shard::initialize_zeroed` writes one word in place through a
-caller-supplied pointer because the alternative is materialising a 512 KiB
-`Shard` on the BSP's 16 KiB stack — irreducible. `log::user`'s record-to-bytes
+**`log/` removed nothing in the sweep itself.** `log::user`'s record-to-bytes
 slice was reducible and needed a sysroot claim to reduce, so the sweep filed it
 and the next pull request that was claiming the sysroot anyway took it:
-`LogRecord::as_bytes` exists, `log::user`'s block is gone, and the area is down
-to the one irreducible site.
+`LogRecord::as_bytes` exists and `log::user`'s block is gone.
+`shard::initialize_zeroed`, which wrote a shard's one nonzero word in place
+rather than build 512 KiB on the BSP's 16 KiB stack, went once a zeroed shard
+was an empty one.
 
 **What was reducible and was declined, with the reason.** The kernel stack
 canary's two accesses (`write_stack_canary`, `check_stack_canary`) can go

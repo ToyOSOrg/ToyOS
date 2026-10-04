@@ -1,8 +1,8 @@
-# Every CPU the machine names, and the two jobs whose premise is more than one
-# CPU: a page unmapped beside a thread that is still reading it, and a counters
-# read every CPU answers for itself, the suite's `test_rs_counters_read`, which
-# the harness puts on ROOT. Then the machine powers off, every CPU but one
-# turned off first.
+# Every CPU the machine names, and the jobs whose premise is more than one
+# CPU: a page unmapped beside a thread that is still reading it; a counters read
+# every CPU answers for itself, the suite's `test_rs_counters_read`; and a diary
+# every CPU writes, the suite's `test_rs_trace_read`. The harness puts both on
+# ROOT. Then the machine powers off, every CPU but one turned off first.
 [boot]
 start = ["logkeeper", "test-runner"]
 
@@ -14,8 +14,9 @@ syscap = ["logread"]
 receives = ["power"]
 # Four minutes from boot: every job here runs on emulated CPUs, and a job past
 # the bound reboots the guest with the job named.
-args = ["--bound-ms=240000", "unmap_touch", "test_rs_counters_read", "shutdown"]
-# What `test_rs_counters_read` reads, and narrows away to prove its refusals.
+args = ["--bound-ms=240000", "unmap_touch", "test_rs_counters_read", "test_rs_trace_read", "shutdown"]
+# What `test_rs_counters_read` and `test_rs_trace_read` read, and narrow away
+# to prove their refusals.
 syscap = ["dup", "counters", "trace"]
 
 [programs.kernelprobe]

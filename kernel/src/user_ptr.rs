@@ -64,6 +64,8 @@ unsafe impl UserSafe for toyos_abi::input::MouseEvent {}
 
 // SAFETY: `#[repr(C)] Copy`, 88 bytes with no padding (checked by a compile-time size assertion); every field is clamped where it is used, not here.
 unsafe impl UserSafe for toyos_abi::log::LogCursor {}
+// SAFETY: `#[repr(transparent)]` over the `LogCursor` above.
+unsafe impl UserSafe for toyos_abi::trace::TraceCursor {}
 
 pub(crate) use toyos_userbound::Access;
 

@@ -308,7 +308,7 @@ fn check_retires(vm: &mut Vm<'_>) {
         let fresh = s.trace[vm.trace_cursor..]
             .iter()
             .filter_map(|ev| match ev.kind {
-                kernel::sched::hw::TraceKind::Migrate { task, to } => Some((task, to.0)),
+                kernel::sched::hw::TraceKind::Migrate { task, to, .. } => Some((task, to.0)),
                 _ => None,
             })
             .collect();

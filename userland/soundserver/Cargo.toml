@@ -1,5 +1,6 @@
 [package]
 name = "soundserver"
+description = "The audio server: ToyOS's audio devices claimed from the kernel, and every client's stream mixed onto them."
 edition = "2024"
 license = "MIT OR Apache-2.0"
 

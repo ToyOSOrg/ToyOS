@@ -1,5 +1,6 @@
 [package]
 name = "update"
+description = "update: a signed image on standard input, verified and installed into the slot this machine is not running, and marked to boot next."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
