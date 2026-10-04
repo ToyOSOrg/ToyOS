@@ -20,7 +20,7 @@ fn syn(now: Instant, tuple: Tuple) -> O {
     let mut tcp = Tcp::new(config(65_535)).unwrap();
     tcp.connect(now, tuple.local.addr, Some(tuple.local.port), tuple.remote).unwrap();
     let mut out = Vec::new();
-    tcp.transmit(now, 1, |_| Hop::Ready(()), |o, ()| {
+    pull(&mut tcp, &mut Default::default(), now, 1, |_| Hop::Ready(()), |o, ()| {
         out.push(datagram(o));
         true
     });

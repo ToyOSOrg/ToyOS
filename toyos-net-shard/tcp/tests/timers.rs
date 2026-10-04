@@ -178,7 +178,7 @@ fn s_gu_006_a_confirmation_after_a_reverify_is_kept() {
         assert_eq!(h.instant(t), at);
         h.start(t);
         h.tcp.fire(at);
-        h.tcp.transmit(at, usize::MAX, |_| Hop::Ready(()), |_, ()| true);
+        pull(&mut h.tcp, &mut h.round, at, usize::MAX, |_| Hop::Ready(()), |_, ()| true);
     }
     h.arrive(seg(5001).ack(3921));
     let events: Vec<Event> = h.tcp.drain_events().collect();

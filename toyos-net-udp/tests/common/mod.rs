@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 use std::net::Ipv4Addr;
 
 use toyos_net_ip::{Delivery, Event, IfIndex, Instant, Ip, Sent, FRAME};
-use toyos_net_udp::{Counter, SocketId, Udp, Verdict};
+use toyos_net_udp::{Counter, Sender, SocketId, Udp, Verdict};
 use toyos_net_wire::ethernet::{Frame, IndividualMac, MacAddr};
 use toyos_net_wire::ipv4::{Ipv4Packet, MulticastAddr};
 use toyos_net_wire::Port;
@@ -163,6 +163,8 @@ pub struct U {
     pub events: Vec<Event>,
     base: Vec<(Counter, u64)>,
     ip_base: Vec<(toyos_net_ip::Counter, u64)>,
+    /// The senders `out_with` takes turns among, one datagram a turn.
+    round: VecDeque<Sender>,
 }
 
 impl U {
@@ -189,7 +191,7 @@ impl U {
         ip.link_up(Instant::from_nanos(0), if0).unwrap();
         ip.join(Instant::from_nanos(0), if0, MulticastAddr::new(MDNS).unwrap()).unwrap();
         Self::setup_until(&mut ip, Self::instant(0));
-        let mut u = Self { ip, udp: Udp::new(), if0, now: 0, draws: VecDeque::new(), events: Vec::new(), base: Vec::new(), ip_base: Vec::new() };
+        let mut u = Self { ip, udp: Udp::new(), if0, now: 0, draws: VecDeque::new(), events: Vec::new(), base: Vec::new(), ip_base: Vec::new(), round: VecDeque::new() };
         u.rebase();
         u
     }
@@ -213,7 +215,7 @@ impl U {
             let _ = ip.receive(t, if0, &eth(MAC_A, m, 0x0806, &arp(2, m, addr, MAC_A, A)));
         }
         Self::setup_until(&mut ip, Self::instant(0));
-        let mut u = Self { ip, udp: Udp::new(), if0, now: 0, draws: VecDeque::new(), events: Vec::new(), base: Vec::new(), ip_base: Vec::new() };
+        let mut u = Self { ip, udp: Udp::new(), if0, now: 0, draws: VecDeque::new(), events: Vec::new(), base: Vec::new(), ip_base: Vec::new(), round: VecDeque::new() };
         u.rebase();
         u
     }
@@ -278,22 +280,29 @@ impl U {
     }
 
     /// A transmit opportunity with room for `credit` frames, composed as the shard composes it:
-    /// [ip]'s frames first, then UDP's, then what UDP's datagrams asked [ip] for.
+    /// [ip]'s frames first, then UDP's, a datagram per sender in turn, then what UDP's datagrams
+    /// asked [ip] for. A datagram [ip] holds for its next hop spends no frame.
     pub fn out_with(&mut self, credit: usize) -> Vec<Vec<u8>> {
         let now = self.clock();
         let mut frames = Vec::new();
         let mut spent = self.ip.transmit(now, credit, |_, f| frames.push(f.to_vec()));
-        let Self { ip, udp, .. } = self;
-        spent += udp.transmit(credit - spent, |out| {
-            let mut buf = [0u8; FRAME];
-            match ip.send_udp(now, out, &mut buf) {
-                Ok(Sent::Frame(n)) => {
+        let Self { ip, udp, round, .. } = self;
+        round.extend(udp.drain_eligible());
+        while spent < credit {
+            let Some(sender) = round.pop_front() else { break };
+            let mut framed = false;
+            let served = udp.serve(sender, |out| {
+                let mut buf = [0u8; FRAME];
+                if let Ok(Sent::Frame(n)) = ip.send_udp(now, out, &mut buf) {
                     frames.push(buf[..n].to_vec());
-                    true
+                    framed = true;
                 }
-                Ok(Sent::Held) | Err(_) => false,
+            });
+            if served {
+                round.push_back(sender);
+                spent += usize::from(framed);
             }
-        });
+        }
         self.ip.transmit(now, credit - spent, |_, f| frames.push(f.to_vec()));
         self.news();
         frames

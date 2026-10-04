@@ -99,6 +99,7 @@ pub struct Node {
     pub credit_per_ms: Option<usize>,
     credit: usize,
     credit_ms: u64,
+    round: std::collections::VecDeque<toyos_net_tcp::ConnId>,
 }
 
 struct Flight {
@@ -174,6 +175,7 @@ impl Net {
             credit_per_ms: None,
             credit: 0,
             credit_ms: u64::MAX,
+            round: std::collections::VecDeque::new(),
         };
         Self {
             now: ns(3_600_000),
@@ -331,7 +333,7 @@ impl Net {
         };
         let mut out = Vec::new();
         let ask = |_: &Tuple| hop.as_mut().map_or(Hop::Ready(()), |hop| hop(node));
-        let sent = n.tcp.transmit(now, credit, ask, |o, ()| {
+        let sent = super::pull(&mut n.tcp, &mut n.round, now, credit, ask, |o, ()| {
             let built = framed.as_mut().is_none_or(|framed| framed(node));
             if built {
                 out.push(datagram(o));

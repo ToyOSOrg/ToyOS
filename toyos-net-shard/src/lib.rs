@@ -4,14 +4,16 @@
 //! a clock, draws randomness or does I/O.
 //!
 //! **Egress.** Each frame of credit goes to [ip]'s own frames first — ARP, IGMP, ICMP and the
-//! datagrams resolution released (`ip.md` §5.4) — and otherwise to a data frame, TCP and UDP
-//! taking turns. A TCP segment is built only once its next hop's link address is known, and
-//! committed only once its frame is (`ip.md` §6.7, `tcp.md` §11.3); the send registers with the
-//! neighbour entry then. A flow whose next hop is unresolved or failed builds nothing, spends
-//! nothing, and is not asked again until [ip] reports a change for that next hop, for the routes,
-//! or, to a flow a full neighbour table refused, that the table has room: a waiting flow costs
-//! one question per such change. A UDP datagram whose next hop is unresolved waits in [ip],
-//! spending nothing.
+//! datagrams resolution released (`ip.md` §5.4) — then to what [tcp] owes outside a connection,
+//! and otherwise to the round: a deficit round-robin in bytes over every TCP connection and UDP
+//! sender with something to send, in the order each became eligible (architecture §3.3). A flow
+//! waiting for its next hop leaves the round, and rejoins at its tail when woken. A TCP segment is
+//! built only once its next hop's link address is known, and committed only once its frame is
+//! (`ip.md` §6.7, `tcp.md` §11.3); the send registers with the neighbour entry then. A flow whose
+//! next hop is unresolved or failed builds nothing, spends nothing, and is not asked again until
+//! [ip] reports a change for that next hop, for the routes, or, to a flow a full neighbour table
+//! refused, that the table has room: a waiting flow costs one question per such change. A UDP
+//! datagram whose next hop is unresolved waits in [ip], spending nothing and charged nothing.
 //!
 //! **Refusals.** Each crate's refusals of legacy or insecure input pass through that crate's
 //! `RefusalLog` here: at most one [`Event::Refused`] per rule in any 10 s, carrying how many
@@ -37,13 +39,13 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
-use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::vec::Vec;
 use core::net::Ipv4Addr;
 
 use toyos_net_ip::{Advice, Delivery, ErrorKind, IfIndex, Ip, Limiter, NextHop, Nud, Resolution, Sent, Source, Transport, TransportError, FRAME};
-use toyos_net_tcp::{ConnId, Endpoint, Hop, IcmpError, IcmpKind, ListenerId, Outgoing, Received, Seq, Status, Tcp, Tuple};
-use toyos_net_udp::{SocketId, Udp, Verdict};
+use toyos_net_tcp::{ConnId, Endpoint, Hop, IcmpError, IcmpKind, ListenerId, Outgoing, Received, Seq, Served, Status, Tcp, Tuple};
+use toyos_net_udp::{Sender, SocketId, Udp, Verdict};
 use toyos_net_wire::ethernet::{FrameBuilder, IndividualMac, MacAddr};
 use toyos_net_wire::ipv4::{Ipv4Builder, Ipv4Source, TrafficClass, Ttl};
 use toyos_net_wire::siphash::Key;
@@ -115,12 +117,38 @@ struct Via {
     mac: MacAddr,
 }
 
-/// The transports whose data frames take turns.
+/// A flow of the round: one TCP connection, or one UDP sender.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Data {
-    Tcp,
-    Udp,
+enum Flow {
+    Tcp(ConnId),
+    Udp(Sender),
 }
+
+#[derive(Clone, Copy, Debug)]
+struct Member {
+    flow: Flow,
+    /// Bytes the flow may still send in its turn; below 0, what it overdrew, repaid from its
+    /// next quanta.
+    deficit: i32,
+}
+
+/// What serving a flow did with a frame of credit.
+enum Outcome {
+    /// A frame of this length left.
+    Sent(usize),
+    /// A datagram left the flow and no frame: [ip] holds it for its next hop, or refused it.
+    Unsent,
+    /// Nothing to send: the flow leaves the round.
+    Done,
+    Refused,
+}
+
+/// The quantum: the largest frame the interface sends (architecture §3.3).
+const QUANTUM: i32 = {
+    let [a, b, c, d, rest @ ..] = FRAME.to_le_bytes();
+    assert!(matches!(rest, [0, 0, 0, 0]) && d < 0x80, "a frame's length fits an i32");
+    i32::from_le_bytes([a, b, c, d])
+};
 
 #[derive(Default)]
 struct Log {
@@ -138,8 +166,10 @@ pub struct Shard {
     resets: Limiter,
     log: Log,
     events: Vec<Event>,
-    /// The transport whose data frame did not go last goes first.
-    tcp_first: bool,
+    /// Every flow with something to send, in the order each became eligible.
+    round: VecDeque<Member>,
+    /// The round's head is in its turn: the quantum is added once per turn.
+    turn: bool,
     frame: Box<[u8; FRAME]>,
     /// The remote addresses of the TCP flows each wait holds, each until [ip] reports a change
     /// for it; a flow with no route waits on the routes.
@@ -169,7 +199,8 @@ impl Shard {
             resets: Limiter::new(config.secrets.resets),
             log: Log::default(),
             events: Vec::new(),
-            tcp_first: true,
+            round: VecDeque::new(),
+            turn: false,
             frame: Box::new([0; FRAME]),
             waiting: BTreeMap::new(),
         })
@@ -221,62 +252,110 @@ impl Shard {
     /// Returns how many left.
     pub fn transmit(&mut self, now: Instant, credit: usize, mut sink: impl FnMut(&[u8])) -> usize {
         let mut spent = 0usize;
+        let mut aside = Vec::new();
         while spent < credit {
-            if self.ip.transmit(now, 1, |_, frame| sink(frame)) > 0 {
-                spent = spent.saturating_add(1);
-                continue;
-            }
-            let order = if self.tcp_first { [Data::Tcp, Data::Udp] } else { [Data::Udp, Data::Tcp] };
-            let sent = order.into_iter().find(|data| match data {
-                Data::Tcp => self.tcp_frame(now, &mut sink),
-                Data::Udp => self.udp_frame(now, &mut sink),
-            });
-            match sent {
-                Some(sent) => self.tcp_first = sent == Data::Udp,
+            let sent = self.ip.transmit(now, 1, |_, frame| sink(frame)) > 0
+                || self.tcp_frame(now, &mut sink, |tcp, hop, out| tcp.transmit_owed(now, 1, hop, out)).1.is_some()
+                || self.round_frame(now, &mut sink, &mut aside)
                 // A flow that waits has queued the request it waits on.
-                None if self.ip.transmit(now, 1, |_, frame| sink(frame)) > 0 => {}
-                None => break,
+                || self.ip.transmit(now, 1, |_, frame| sink(frame)) > 0;
+            if !sent {
+                break;
             }
             spent = spent.saturating_add(1);
         }
+        self.round.extend(aside);
         self.settle(now);
         spent
     }
 
-    /// One TCP segment, if a flow whose next hop is known has one.
-    fn tcp_frame(&mut self, now: Instant, sink: &mut impl FnMut(&[u8])) -> bool {
-        let Self { ip, iface, mac, tcp, frame, waiting, .. } = self;
-        let iface = *iface;
-        let mut built = None;
-        tcp.transmit(
-            now,
-            1,
-            |tuple| hop(ip, now, iface, tuple, waiting),
-            |out, via| {
-                let Some(bytes) = tcp_datagram(out, *mac, via.mac, frame) else { return false };
-                sink(bytes);
-                built = Some((via.next_hop, out.source));
-                true
-            },
-        );
-        match built {
-            Some((next_hop, source)) => {
-                // The send the neighbour machine counts: STALE moves to DELAY (RFC 4861 §7.3.3).
-                ip.resolve(now, iface, next_hop, source);
-                true
+    /// One frame of the round's (architecture §3.3). The head's turn adds the quantum to its
+    /// deficit once, however many opportunities the turn spans; the flow is served while the
+    /// deficit is above 0, each frame's length charged as it leaves, and then goes to the tail
+    /// keeping its deficit. A flow with nothing to send leaves the round, its deficit with it. A
+    /// flow whose frame the sink refused is set aside until the opportunity ends, forfeiting what
+    /// is left of its turn.
+    fn round_frame(&mut self, now: Instant, sink: &mut impl FnMut(&[u8]), aside: &mut Vec<Member>) -> bool {
+        loop {
+            let Some(head) = self.round.front_mut() else { return false };
+            if !core::mem::replace(&mut self.turn, true) {
+                head.deficit = head.deficit.saturating_add(QUANTUM);
             }
-            None => false,
+            let flow = head.flow;
+            let outcome = match flow {
+                Flow::Tcp(id) => match self.tcp_frame(now, sink, |tcp, hop, out| tcp.serve(now, id, hop, out)) {
+                    (_, Some(len)) => Outcome::Sent(len),
+                    (Served::Refused, None) => Outcome::Refused,
+                    (Served::Sent | Served::Done, None) => Outcome::Done,
+                },
+                Flow::Udp(sender) => self.udp_frame(now, sender, sink),
+            };
+            match outcome {
+                Outcome::Sent(len) => {
+                    if let Some(head) = self.round.front_mut() {
+                        head.deficit = head.deficit.saturating_sub(i32::try_from(len).unwrap_or(QUANTUM));
+                        if head.deficit <= 0 {
+                            self.round.rotate_left(1);
+                            self.turn = false;
+                        }
+                    }
+                    return true;
+                }
+                Outcome::Unsent => {}
+                Outcome::Done => {
+                    self.round.pop_front();
+                    self.turn = false;
+                }
+                Outcome::Refused => {
+                    aside.extend(self.round.pop_front().map(|m| Member { deficit: m.deficit.min(0), ..m }));
+                    self.turn = false;
+                }
+            }
         }
     }
 
-    /// One UDP datagram, if [ip] put it in a frame; one it holds for its next hop spends nothing.
-    fn udp_frame(&mut self, now: Instant, sink: &mut impl FnMut(&[u8])) -> bool {
-        let Self { ip, udp, frame, .. } = self;
-        let spent = udp.transmit(1, |out| match ip.send_udp(now, out, frame) {
-            Ok(Sent::Frame(len)) => frame.get(..len).map(&mut *sink).is_some(),
-            Ok(Sent::Held) | Err(_) => false,
+    /// One TCP segment, if `send` gives one whose next hop is known: `send` hands [tcp] the hop
+    /// question and the sink that frames the segment. Returns what `send` did and the length of
+    /// the frame that left.
+    fn tcp_frame<R>(
+        &mut self,
+        now: Instant,
+        sink: &mut impl FnMut(&[u8]),
+        send: impl FnOnce(&mut Tcp, &mut dyn FnMut(&Tuple) -> Hop<Via>, &mut dyn FnMut(&Outgoing<'_>, Via) -> bool) -> R,
+    ) -> (R, Option<usize>) {
+        let Self { ip, iface, mac, tcp, frame, waiting, .. } = self;
+        let iface = *iface;
+        let mut built = None;
+        let done = send(tcp, &mut |tuple| hop(ip, now, iface, tuple, waiting), &mut |out, via| {
+            let Some(bytes) = tcp_datagram(out, *mac, via.mac, frame) else { return false };
+            sink(bytes);
+            built = Some((via.next_hop, out.source, bytes.len()));
+            true
         });
-        spent > 0
+        let Some((next_hop, source, len)) = built else { return (done, None) };
+        // The send the neighbour machine counts: STALE moves to DELAY (RFC 4861 §7.3.3).
+        ip.resolve(now, iface, next_hop, source);
+        (done, Some(len))
+    }
+
+    /// One datagram of `sender`'s, framed by [ip]; one [ip] holds for its next hop or refuses
+    /// leaves no frame.
+    fn udp_frame(&mut self, now: Instant, sender: Sender, sink: &mut impl FnMut(&[u8])) -> Outcome {
+        let Self { ip, udp, frame, .. } = self;
+        let mut sent = None;
+        let served = udp.serve(sender, |out| {
+            if let Ok(Sent::Frame(len)) = ip.send_udp(now, out, frame) {
+                sent = frame.get(..len).map(|bytes| {
+                    sink(bytes);
+                    len
+                });
+            }
+        });
+        match (served, sent) {
+            (false, _) => Outcome::Done,
+            (true, Some(len)) => Outcome::Sent(len),
+            (true, None) => Outcome::Unsent,
+        }
     }
 
     pub fn next_deadline(&self) -> Option<Instant> {
@@ -290,7 +369,9 @@ impl Shard {
         self.settle(now);
     }
 
-    /// Routes what each crate reported to the one that acts on it.
+    /// Routes what each crate reported to the one that acts on it, and puts the flows that became
+    /// eligible at the round's tail. Every call that can make a flow eligible ends here, so the
+    /// round holds flows in the order they became eligible.
     fn settle(&mut self, now: Instant) {
         let Self { ip, tcp, udp, log, events, waiting, .. } = self;
         for event in tcp.drain_events() {
@@ -332,6 +413,9 @@ impl Shard {
             waiting.clear();
             tcp.wake_all();
         }
+        let tcp = tcp.drain_eligible().map(Flow::Tcp);
+        let udp = udp.drain_eligible().map(Flow::Udp);
+        self.round.extend(tcp.chain(udp).map(|flow| Member { flow, deficit: 0 }));
     }
 
     // ---- configuration, the shell's ----
@@ -368,7 +452,9 @@ impl Shard {
     pub fn connect(&mut self, now: Instant, port: Option<Port>, remote: Endpoint) -> Result<ConnId, ConnectError> {
         let route = self.ip.route(remote.addr, Source::Any, None).map_err(ConnectError::Route)?;
         let NextHop::Neighbour(_) = route.next_hop else { return Err(ConnectError::NotUnicast) };
-        self.tcp.connect(now, route.source, port, remote).map_err(ConnectError::Tcp)
+        let connected = self.tcp.connect(now, route.source, port, remote).map_err(ConnectError::Tcp);
+        self.settle(now);
+        connected
     }
 
     /// `addr` is the local address to listen on, UNSPECIFIED for any; port 0 takes `random`'s
@@ -382,23 +468,33 @@ impl Shard {
     }
 
     pub fn send(&mut self, now: Instant, id: ConnId, data: &[u8]) -> Result<usize, toyos_net_tcp::Error> {
-        self.tcp.send(now, id, data)
+        let done = self.tcp.send(now, id, data);
+        self.settle(now);
+        done
     }
 
     pub fn recv(&mut self, now: Instant, id: ConnId, out: &mut [u8]) -> Result<Received, toyos_net_tcp::Error> {
-        self.tcp.recv(now, id, out)
+        let done = self.tcp.recv(now, id, out);
+        self.settle(now);
+        done
     }
 
     pub fn shutdown_write(&mut self, now: Instant, id: ConnId) -> Result<(), toyos_net_tcp::Error> {
-        self.tcp.shutdown_write(now, id)
+        let done = self.tcp.shutdown_write(now, id);
+        self.settle(now);
+        done
     }
 
     pub fn close(&mut self, now: Instant, id: ConnId) -> Result<(), toyos_net_tcp::Error> {
-        self.tcp.close(now, id)
+        let done = self.tcp.close(now, id);
+        self.settle(now);
+        done
     }
 
     pub fn abort(&mut self, now: Instant, id: ConnId) -> Result<(), toyos_net_tcp::Error> {
-        self.tcp.abort(now, id)
+        let done = self.tcp.abort(now, id);
+        self.settle(now);
+        done
     }
 
     pub fn status(&mut self, id: ConnId) -> Result<Status, toyos_net_tcp::Error> {

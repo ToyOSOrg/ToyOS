@@ -5,9 +5,10 @@
 //! in the time, the secrets, parsed segments, classified ICMP errors, user calls and transmit
 //! credit; nothing here reads a clock, draws randomness or does I/O.
 //!
-//! **Pull egress.** A segment exists only while [`Tcp::transmit`] hands it to the caller's sink,
-//! built from the state of that moment, once the caller has answered that its next hop is known;
-//! it counts as sent only once the sink took its frame.
+//! **Pull egress.** A segment exists only while [`Tcp::transmit_owed`] or [`Tcp::serve`] hands it
+//! to the caller's sink, built from the state of that moment, once the caller has answered that its
+//! next hop is known; it counts as sent only once the sink took its frame. Which connection is
+//! served is the caller's round: [`Tcp::drain_eligible`] offers each once it has something to send.
 //!
 //! **Refusals are values.** Legacy or insecure input is refused, counted in [`Counters`], and
 //! named by an [`Event::Refused`] the shell logs through [`RefusalLog`].
@@ -52,7 +53,7 @@ use toyos_net_wire::Port;
 
 pub use counters::{Counter, Counters, Refusal, RefusalLog};
 pub use seq::Seq;
-pub use stack::{ConnId, Info, ListenerId, Outgoing, Tcp};
+pub use stack::{ConnId, Info, ListenerId, Outgoing, Served, Tcp};
 pub use toyos_net_wire::siphash::Key;
 pub use toyos_net_wire::Instant;
 

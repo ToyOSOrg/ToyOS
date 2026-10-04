@@ -374,8 +374,8 @@ fn s_pl_012_a_flow_builds_nothing_while_its_next_hop_is_pending() {
     nothing(&h.at(499));
     h.credit = None;
     let outs = woken(&mut h, 500);
-    expect(&outs, &["SEQ=1001 ACK=5001 LEN=1000", "SEQ=1001 LEN=1000"]);
-    assert_eq!((outs[0].dst, outs[1].dst), ((B, 80), (C, 80)), "E's segment, then the second's retransmission");
+    expect(&outs, &["SEQ=1001 LEN=1000", "SEQ=1001 ACK=5001 LEN=1000"]);
+    assert_eq!((outs[0].dst, outs[1].dst), ((C, 80), (B, 80)), "the second's retransmission, then E's segment, woken to the round's tail");
     assert_eq!(h.info().rtx_timer, Some(h.instant(700)));
 }
 
