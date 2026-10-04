@@ -50,6 +50,10 @@ writes its own, and the battery comes first (his direction of `0ee814f5a`).
 - **"Extracts only"**: the repository holds small decoded extracts of the
   T14's ACPI tables; the whole tables stay out of the tree, read only by a
   check run outside it.
+- **"Local only; decode the 186 bytes"** (2026-10-04): "Full tables stay out
+  of the repo (a copy you hold); the 186-byte fixture on main is replaced by
+  decoded values, as 'Extracts only' says." The T14's root-bridge list is
+  `t14_root_bridge` in `toyos-acpi/tests/common/mod.rs`.
 - **"full clean room write with the spec"**: the AML interpreter is written
   from the ACPI specification.
 
