@@ -178,6 +178,19 @@ impl DropReason {
             Self::CopyTimeout => "it began a copy and never committed it",
         }
     }
+
+    /// Whether the going is a failure, said on stderr, rather than a client's
+    /// routine end, said on stdout.
+    pub fn failed(self) -> bool {
+        match self {
+            Self::Gone => false,
+            Self::OutOfProtocol
+            | Self::Retired
+            | Self::NotReading
+            | Self::HandshakeTimeout
+            | Self::CopyTimeout => true,
+        }
+    }
 }
 
 impl From<ipc::TrySendError> for DropReason {
@@ -200,7 +213,12 @@ pub fn mark_dead(dead: &mut Vec<Dead>, handle: RawHandle, reason: DropReason) {
 
 pub fn announce(dead: &[Dead]) {
     for (handle, reason) in dead {
-        eprintln!("compositor: dropping client {} — {}", handle.0, reason.why());
+        let (client, why) = (handle.0, reason.why());
+        if reason.failed() {
+            eprintln!("compositor: dropping client {client} — {why}");
+        } else {
+            println!("compositor: dropping client {client} — {why}");
+        }
     }
 }
 
@@ -216,7 +234,7 @@ pub fn announce(dead: &[Dead]) {
 /// asks of the log — and a caller that re-sends a close because it could not
 /// tell whether the first one landed closes the next window down.
 pub fn note_closed(by: &str, win: &Win, remaining: usize) {
-    eprintln!(
+    println!(
         "compositor: window closed client={} by {by}, {remaining} left, presents={} frames={}",
         win.client.conn.as_handle().0,
         win.client.presents,
@@ -227,7 +245,7 @@ pub fn note_closed(by: &str, win: &Win, remaining: usize) {
 /// The open's own line, and where the client's pixels are on the panel: the one
 /// fact about a window that nobody reading the screen can recover from it.
 pub fn note_opened(client: RawHandle, content: toyos_desktop::Rect, live: usize) {
-    eprintln!(
+    println!(
         "compositor: window opened client={} content={},{} {}x{}, {live} live",
         client.0,
         content.x0,

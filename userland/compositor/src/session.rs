@@ -195,7 +195,7 @@ impl Session {
             raw,
             scaled: Vec::new(),
         };
-        eprintln!(
+        println!(
             "compositor: wallpaper {}x{}, scaling to {}x{}",
             wallpaper.w,
             wallpaper.h,
@@ -215,7 +215,7 @@ impl Session {
         let total_mem = total_memory();
         let max_windows =
             toyos_desktop::max_windows(total_mem, desk.screen, MAX_WINDOW_SLOTS as usize);
-        eprintln!(
+        println!(
             "compositor: at most {max_windows} windows ({} MiB each of {} MiB total)",
             toyos_desktop::window_bytes(desk.screen) / (1024 * 1024),
             total_mem / (1024 * 1024),
@@ -239,7 +239,7 @@ impl Session {
         let mut damage = Damage::default();
         damage.add(desk.screen);
 
-        eprintln!("compositor: ready");
+        println!("compositor: ready");
 
         let now = Instant::now();
         Self {
