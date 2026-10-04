@@ -134,8 +134,9 @@ impl SysCap {
     /// how many. An empty `buf` asks how many CPUs there are — see
     /// [`syscall::counters`].
     ///
-    /// Needs [`Rights::COUNTERS`]; the counters that time programs come back
-    /// only where the capability carries [`Rights::TRACE`] too.
+    /// Needs [`Rights::COUNTERS`]; the counters that time programs and the
+    /// power envelope come back only where the capability carries
+    /// [`Rights::TRACE`] too.
     pub fn counters(
         &self,
         buf: &mut [toyos_abi::counters::RawRecord],

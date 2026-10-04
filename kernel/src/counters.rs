@@ -12,7 +12,8 @@
 //! [`JOIN`].
 //!
 //! A model-specific counter is read only where the CPU's own verdict at
-//! [`bring_up`] admitted it, and that bring-up's sample reads it once: a wrong
+//! [`bring_up`] admitted it, and the power envelope only where the CPU-state
+//! declaration declared it; that bring-up's sample reads each once, so a wrong
 //! verdict is `#GP` at boot, never inside a read.
 
 use kernel::sched::task::WaitClass;
@@ -48,6 +49,15 @@ pub struct Hardware {
     pub smi: Option<u64>,
     pub aperf: Option<u64>,
     pub mperf: Option<u64>,
+    pub envelope: Option<Envelope>,
+}
+
+/// The power envelope's registers, where the CPU's performance request is
+/// declared.
+pub struct Envelope {
+    pub hwp_request: u64,
+    pub hwp_request_pkg: u64,
+    pub energy_perf_bias: u64,
 }
 
 /// A block's words: the hardware id, a bit per counter it holds, and a word
@@ -68,8 +78,19 @@ pub fn bring_up() {
     let me = percpu::cpu_id() as usize;
     let words = sample(me);
     BLOCKS[me].publish(words);
-    let [smi, aperf, mperf] = [Counter::Smi, Counter::Aperf, Counter::Mperf].map(|c| held(&words, c));
-    log!("counters: cpu{me} reads smi={smi} aperf={aperf} mperf={mperf}");
+    let [smi, aperf, mperf, request, pkg, epb] = [
+        Counter::Smi,
+        Counter::Aperf,
+        Counter::Mperf,
+        Counter::HwpRequest,
+        Counter::HwpRequestPkg,
+        Counter::EnergyPerfBias,
+    ]
+    .map(|c| held(&words, c));
+    log!(
+        "counters: cpu{me} reads smi={smi} aperf={aperf} mperf={mperf} hwp_request={request} \
+         hwp_request_pkg={pkg} energy_perf_bias={epb}"
+    );
 }
 
 fn held(words: &[u64; WORDS], counter: Counter) -> bool {
@@ -89,6 +110,9 @@ fn sample(me: usize) -> [u64; WORDS] {
             Counter::Aperf => hardware.aperf,
             Counter::Mperf => hardware.mperf,
             Counter::Kicks => crate::irq_census::deliveries(me as u32, Source::Kick),
+            Counter::HwpRequest => hardware.envelope.as_ref().map(|e| e.hwp_request),
+            Counter::HwpRequestPkg => hardware.envelope.as_ref().map(|e| e.hwp_request_pkg),
+            Counter::EnergyPerfBias => hardware.envelope.as_ref().map(|e| e.energy_perf_bias),
         };
         if let Some(value) = value {
             words[1] |= 1 << counter as usize;
