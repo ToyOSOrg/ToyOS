@@ -48,7 +48,7 @@ the group).
 | lint | count | why |
 |---|---:|---|
 | `checked_conversions` | 1 | `4a98107f^:kernel/src/arch/syscall.rs`'s device-register-write syscall bounded a `u64` against `u32::MAX` with a manual `as` comparison, then cast twice more in the body. Restructured through `u32::try_from` — one conversion, no repeated casts, at a trust-boundary site that is exactly what this bar is for. |
-| `manual_midpoint` | 3 | `(a + b) / 2` can overflow near the integer's max; `T::midpoint` can't. Two in a `toyos-desktop` test, one in `toyos-sched/sim`'s binary-search shrinker — no realistic overflow today, but the fix is free and closes the class everywhere, forever. |
+| `manual_midpoint` | 3 | `(a + b) / 2` can overflow near the integer's max; `T::midpoint` can't. Two in a `toyos-desktop` test, one in `kernel/sim`'s binary-search shrinker — no realistic overflow today, but the fix is free and closes the class everywhere, forever. |
 | `redundant_clone` | 6 | Real, not the false-positive-prone lint its `nursery` placement suggested — every instance checked was a clone of a binding never used again after (verified by hand, not by trusting the lint): `4a98107f^:kernel/src/arch/syscall.rs`, a `kernel-loom` test, `toyos-cc`'s parser (a double clone — the match scrutinee was already an owned value), and three in `tests/toyos.rs`. |
 | `unchecked_time_subtraction` | 1 | `tests/toyos.rs`: a bare `Duration - Duration` that panics identically today either way — `.checked_sub().expect(msg)` says why it can't underflow instead of hiding the same panic behind an operator. No behavior change; an honesty win at zero cost. |
 | `unnecessary_semicolon` | 2 | Two dead `;` after `if` statements in `kernel/src/process.rs` and `kernel/src/main.rs`. Nothing to weigh. |

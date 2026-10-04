@@ -13,7 +13,7 @@ job before the job spawned anything.
 
 The kernel does not issue pids in landing order. A spawn refused after its
 admission gives its pid back, and the next admission takes it
-(`toyos_proclife::pids`). A spawn admitted before a job and refused after the
+(`kernel::proclife::pids`). A spawn admitted before a job and refused after the
 job landed hands a pid below the job's to the next spawn, and if that is the
 job's child of the same name the judge reads the child's exit as the job's.
 

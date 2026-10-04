@@ -13,7 +13,7 @@ sharper statement.
 
 The bound is derived from granularities the policy itself picked:
 `lag_spread + (ΣT_i + 1) × (QUANTUM + max KernelSection + 2 × RUN_CHUNK)`
-(`toyos-sched/sim/src/invariants.rs:695-697`).
+(`kernel/sim/src/invariants.rs:695-697`).
 
 **Re-measured 2026-08-24 at `739af0c2`**, the whole sweep, 500 seeds a width:
 

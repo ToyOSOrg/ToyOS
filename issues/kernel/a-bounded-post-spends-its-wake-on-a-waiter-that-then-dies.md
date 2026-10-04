@@ -6,7 +6,7 @@ opened: 2026-09-26
 
 # A bounded post spends its wake on a waiter that then answers Killed
 
-`toyos-sched/src/watch.rs`'s `Watch::post_n` counts a waiter whose word it
+`kernel/pure/sched/watch.rs`'s `Watch::post_n` counts a waiter whose word it
 claimed `Committing → WakeQueued` (`Notify::PrePark`) as woken. That waiter's
 own commit reads the kill bit before the claim (`park::WaitTicket::commit`) and
 answers `Commit::Killed`, so the claim was spent on a thread that unwinds and

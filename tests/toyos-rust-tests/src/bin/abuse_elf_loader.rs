@@ -230,6 +230,8 @@ fn spawn_path(path: &str) -> Result<u64, SyscallError> {
     let argv = format!("{path}\0");
     unsafe {
         syscall::spawn(&SpawnArgs {
+            path_ptr: path.as_ptr() as u64,
+            path_len: path.len() as u64,
             argv_ptr: argv.as_ptr() as u64,
             argv_len: argv.len() as u64,
             slot_map_ptr: 0,
@@ -283,6 +285,8 @@ fn spawn_image(path: &str, bytes: &[u8]) -> Result<u64, SyscallError> {
     let object = image_object(bytes);
     unsafe {
         syscall::spawn(&SpawnArgs {
+            path_ptr: path.as_ptr() as u64,
+            path_len: path.len() as u64,
             argv_ptr: argv.as_ptr() as u64,
             argv_len: argv.len() as u64,
             slot_map_ptr: 0,

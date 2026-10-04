@@ -173,6 +173,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 Ok(parent) => parent,
                 Err(refused) => return refused,
             };
+            let path = match ctx.user_str(UserAddr::new(args.path_ptr), args.path_len) { Ok(s) => s, Err(e) => return e.to_u64() };
             let text = match ctx.user_str(UserAddr::new(args.argv_ptr), args.argv_len) { Ok(s) => s, Err(e) => return e.to_u64() };
             let cwd = match ctx.user_str(UserAddr::new(args.cwd_ptr), args.cwd_len).and_then(|p| spawn_cwd(&p)) {
                 Ok(cwd) => cwd,
@@ -219,7 +220,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 alloc::vec::Vec::new()
             };
             let argv: alloc::vec::Vec<&str> = text.split('\0').filter(|s| !s.is_empty()).collect();
-            sys_spawn(&argv, pending, cwd, env, image, parent)
+            sys_spawn(&path, &argv, pending, cwd, env, image, parent)
         }
         SYS_PROCESS_WAIT => sys_process_wait(RawHandle(a1 as u32), a2),
         SYS_PROCESS_KILL => {

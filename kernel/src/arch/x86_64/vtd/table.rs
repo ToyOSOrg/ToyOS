@@ -109,6 +109,44 @@ impl Table {
         (self.read(index * 2), self.read(index * 2 + 1))
     }
 
+    /// Swaps the present 16-byte entry `old` at `index` for `new` in one
+    /// `lock cmpxchg16b`: the unit may fetch it at any moment and must read
+    /// the one or the other, never a half of each (§6.2.2.1).
+    fn replace_pair(self, index: usize, old: (u64, u64), new: (u64, u64)) {
+        let entry = self.window().subregion(index as u64 * 16, 16);
+        let (found_lo, found_hi): (u64, u64);
+        // SAFETY: `entry` is 16 bytes of a table `Tables::alloc` never frees,
+        // 16-byte aligned since a table is 4 KiB-aligned; `rbx`, which LLVM
+        // reserves, holds `new`'s low half only between the two moves.
+        unsafe {
+            core::arch::asm!(
+                "xchg {lo}, rbx",
+                "lock cmpxchg16b xmmword ptr [{entry}]",
+                "mov rbx, {lo}",
+                entry = in(reg) entry.addr(),
+                lo = inout(reg) new.0 => _,
+                in("rcx") new.1,
+                inout("rax") old.0 => found_lo,
+                inout("rdx") old.1 => found_hi,
+                options(nostack),
+            );
+        }
+        let found = (found_lo, found_hi);
+        // `found` is `old` exactly when the swap happened; nothing else
+        // writes an entry under `UNITS`, so anything else is a kernel bug.
+        assert!(
+            found == old,
+            "iommu: entry {index} of table {:#x} held {:#x}:{:#x}, not the {:#x}:{:#x} read before \
+             it was replaced",
+            self.phys,
+            found.1,
+            found.0,
+            old.1,
+            old.0
+        );
+        flush(entry.addr() as usize);
+    }
+
     fn flush_all(self) {
         let base = self.window().addr() as usize;
         for offset in (0..TABLE_BYTES).step_by(LINE_BYTES) {
@@ -147,7 +185,7 @@ fn flush(addr: usize) {
 }
 
 /// Second-level table depth for `width`; the context entry's `AW` field is this minus two.
-fn levels(width: AddressWidth) -> u8 {
+const fn levels(width: AddressWidth) -> u8 {
     match width {
         AddressWidth::Bits39 => 3,
         AddressWidth::Bits48 => 4,
@@ -398,28 +436,42 @@ fn map_2m(tables: &mut Tables, root: Table, levels: u8, at: Iova, phys: u64, per
     table.write(index, (phys & !(PAGE_2M - 1)) | SL_LARGE | perm);
 }
 
-/// Gives `stream` a context entry naming the identity domain.
+/// Translation type 00: untranslated requests route through the named second-level table.
+const fn context_entry(domain: Table, id: u16, width: AddressWidth) -> (u64, u64) {
+    (domain.phys | PRESENT, ((id as u64) << 8) | (levels(width) as u64 - 2))
+}
+
+/// What a unit may still hold cached for a context entry [`bind`] replaced:
+/// its requester and the domain id it named, the pair §6.5.2.1 invalidates by.
+#[must_use]
+pub struct Displaced {
+    requester: u16,
+    domain: u16,
+}
+
+impl Displaced {
+    pub fn requester(&self) -> u16 {
+        self.requester
+    }
+
+    pub fn domain(&self) -> u16 {
+        self.domain
+    }
+}
+
+/// The entry that moves `requester`'s present entry `old` onto `domain`, and
+/// what that leaves the unit holding: the id `old` named, never `domain`'s.
+const fn rebind(old: (u64, u64), requester: u16, domain: &Domain) -> ((u64, u64), Displaced) {
+    let new = context_entry(domain.root, domain.id, domain.width);
+    (new, Displaced { requester, domain: (old.1 >> 8) as u16 })
+}
+
+/// Gives `stream` its first context entry, naming the identity domain.
 pub fn bind_identity(
     tables: &mut Tables,
     root: Table,
     stream: StreamId,
     domain: Table,
-    width: AddressWidth,
-) {
-    write_context(tables, root, stream, domain, KERNEL_DOMAIN, width);
-}
-
-/// Moves `stream` onto a domain of its own, in one unit's root table.
-pub fn bind(tables: &mut Tables, root: Table, stream: StreamId, domain: &Domain) {
-    write_context(tables, root, stream, domain.root, domain.id, domain.width);
-}
-
-fn write_context(
-    tables: &mut Tables,
-    root: Table,
-    stream: StreamId,
-    domain: Table,
-    id: u16,
     width: AddressWidth,
 ) {
     let bus = stream.bus() as usize;
@@ -431,11 +483,44 @@ fn write_context(
         root.write_pair(bus, table.phys | PRESENT, 0);
         table
     };
-    // Translation type 00: untranslated requests route through the named second-level table.
-    let lo = domain.phys | PRESENT;
-    let hi = ((id as u64) << 8) | (levels(width) as u64 - 2);
+    let (lo, hi) = context_entry(domain, KERNEL_DOMAIN, width);
     context.write_pair(stream.devfn() as usize, lo, hi);
 }
+
+/// Moves `stream`'s present context entry in one unit's root table onto a
+/// domain of its own, and answers what that unit may still hold for the old one.
+pub fn bind(root: Table, stream: StreamId, domain: &Domain) -> Displaced {
+    let entry = root.read(stream.bus() as usize * 2);
+    let context = Table { phys: entry & ADDR_MASK };
+    let index = stream.devfn() as usize;
+    let old = if entry & PRESENT != 0 { context.read_pair(index) } else { (0, 0) };
+    // `bind_identity` gave every enumerated function one before `TE`.
+    assert!(
+        old.0 & PRESENT != 0,
+        "iommu: {stream} has no context entry to move — it was not enumerated when its unit \
+         was programmed"
+    );
+    let (new, displaced) = rebind(old, stream.requester(), domain);
+    context.replace_pair(index, old, new);
+    displaced
+}
+
+/// A function moved off the identity domain is invalidated under the identity
+/// domain's id, the only one its cached entry can match (§6.5.2.1), and its new
+/// entry names the domain it moved to.
+const _: () = {
+    const OWN: Domain = Domain {
+        root: Table { phys: 0x5000 },
+        id: u16::MAX,
+        width: AddressWidth::Bits39,
+        translatable: 39,
+        next: 0,
+    };
+    let identity = context_entry(Table { phys: 0x3000 }, KERNEL_DOMAIN, AddressWidth::Bits48);
+    let (new, displaced) = rebind(identity, 0x00F8, &OWN);
+    assert!(displaced.domain == KERNEL_DOMAIN && displaced.requester == 0x00F8);
+    assert!(new.0 == 0x5000 | PRESENT && new.1 == (u16::MAX as u64) << 8 | 1);
+};
 
 /// A unit whose `MGAW` is narrower than its `SAGAW` gets its window under the
 /// smaller of the two.

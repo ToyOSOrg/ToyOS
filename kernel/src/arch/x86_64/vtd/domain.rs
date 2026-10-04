@@ -168,8 +168,7 @@ pub fn attach(stream: StreamId, id: DomainId) {
     let domain = *domains.at(id);
     let mut units = UNITS.lock();
     for unit in units.iter_mut() {
-        table::bind(&mut TABLES.lock(), unit.root(), stream, &domain);
-        unit.invalidate_context(domain.id(), stream.requester());
+        unit.attach(stream, &domain);
     }
     super::fault::attached(stream, domain.id());
     log!("iommu: {stream} moves to domain{}", domain.id());

@@ -112,6 +112,11 @@ actuators! {
     /// Withhold `VIRTIO_F_ACCESS_PLATFORM` from every virtio device but the console, staging a function whose addresses the unit never translates.
     virtio_no_access_platform = "virtio-no-access-platform";
 
+    /// Leave every IOMMU unit queueing, translating and remapping through
+    /// tables of its own, as firmware may hand one over, just before this
+    /// kernel programs it. Judged by `iommu_firmware_left`.
+    iommu_firmware_left = "iommu-firmware-left";
+
     /// Leave every AP holding the CR0/CR4 that INIT left it.
     no_ap_control_regs = "no-ap-control-regs";
 

@@ -75,6 +75,8 @@ fn main() {
 
     let spawn_with = |slot_map_count: u64, endow_count: u64| {
         let args = SpawnArgs {
+            path_ptr: argv as u64,
+            path_len: (ARGV0.len() - 1) as u64,
             argv_ptr: argv as u64,
             argv_len: ARGV0.len() as u64,
             slot_map_ptr: region as u64,
@@ -185,6 +187,8 @@ fn spawn_endowed(entries: &[EndowEntry], labels: &[u8]) -> Result<RawHandle, Sys
     // SAFETY: every pointer names a live local for the whole call.
     unsafe {
         syscall::spawn(&SpawnArgs {
+            path_ptr: SELF.as_ptr() as u64,
+            path_len: SELF.len() as u64,
             argv_ptr: argv.as_ptr() as u64,
             argv_len: argv.len() as u64,
             slot_map_ptr: 0,

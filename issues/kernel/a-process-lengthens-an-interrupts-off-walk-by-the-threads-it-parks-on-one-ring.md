@@ -18,8 +18,8 @@ holder, decides how long a CPU runs with interrupts masked:
 - **N threads parked in `submit` on one ring**
   are N registrations on its watch. Every completion into that ring posts the
   watch in place, which notifies all N under the list lock
-  (`toyos-sched/src/watch.rs`), each a word exchange and, for a parked
-  thread, a mailbox push and perhaps an IPI (`toyos-sched/src/park.rs`).
+  (`kernel/pure/sched/watch.rs`), each a word exchange and, for a parked
+  thread, a mailbox push and perhaps an IPI (`kernel/pure/sched/park.rs`).
   Each woken thread's unregister is a `position` and a
   `remove` over the N, and a registration
   that finds the list full copies it, all with interrupts masked.

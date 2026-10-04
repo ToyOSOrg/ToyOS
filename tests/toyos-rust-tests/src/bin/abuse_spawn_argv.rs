@@ -1,9 +1,9 @@
-//! The kernel must survive a process that hands `SYS_SPAWN` absurd argv/env.
+//! The kernel must survive a process that hands `SYS_SPAWN` absurd path/argv/env.
 //!
-//! `argv_len` and `env_len` are raw `u64` fields of a user-supplied
-//! `SpawnArgs`. The argv blob is split into a `Vec<&str>` (16 bytes per token)
-//! and the env blob is copied with `to_vec()`, so either one sizes a kernel
-//! allocation. An argv with no non-empty token also has no `argv[0]`.
+//! `path_len`, `argv_len` and `env_len` are raw `u64` fields of a user-supplied
+//! `SpawnArgs`. The path is copied, the argv blob is split into a `Vec<&str>`
+//! (16 bytes per token) and the env blob is copied with `to_vec()`, so each one
+//! sizes a kernel allocation. An argv with no non-empty token also has no `argv[0]`.
 
 use std::process::Command;
 
@@ -36,6 +36,8 @@ fn main() {
     }
 
     let base = SpawnArgs {
+        path_ptr: region as u64,
+        path_len: 1,
         argv_ptr: region as u64,
         argv_len: 0,
         slot_map_ptr: 0,
@@ -70,12 +72,16 @@ fn main() {
     .expect_err("a 2 MiB env blob must be rejected");
     assert_eq!(err, SyscallError::InvalidArgument, "wrong error for oversized env");
 
+    let err = unsafe { syscall::spawn(&SpawnArgs { path_len: BLOB as u64, argv_len: 2, ..base }) }
+        .expect_err("a 2 MiB path must be rejected");
+    assert_eq!(err, SyscallError::InvalidArgument, "wrong error for oversized path");
+
     // The bound is a limit, not a ban: an argv the kernel will accept still
     // has to reach the loader and fail there for its own reason.
     let err = unsafe {
         syscall::spawn(&SpawnArgs { argv_len: 2, ..base })
     }
-    .expect_err("argv[0] = \"a\" is not a program");
+    .expect_err("\"a\" is not a program");
     assert_eq!(err, SyscallError::NotFound, "wrong error for a short honest argv");
 
     // No non-empty token: there is no argv[0] to load.
@@ -95,5 +101,5 @@ fn main() {
     assert!(status.success(), "/system/bin/echo exited {status:?}");
 
     unsafe { syscall::munmap(region, REGION) }.expect("munmap");
-    println!("oversized spawn argv/env rejected, spawn still usable");
+    println!("oversized spawn path/argv/env rejected, spawn still usable");
 }

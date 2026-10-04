@@ -144,6 +144,8 @@ fn spawn_as(path: &str, image: &[u8]) -> SyscallError {
     unsafe { core::ptr::copy_nonoverlapping(image.as_ptr(), object.as_ptr(), image.len()) };
     unsafe {
         syscall::spawn(&SpawnArgs {
+            path_ptr: path.as_ptr() as u64,
+            path_len: path.len() as u64,
             argv_ptr: argv.as_ptr() as u64,
             argv_len: argv.len() as u64,
             slot_map_ptr: 0,

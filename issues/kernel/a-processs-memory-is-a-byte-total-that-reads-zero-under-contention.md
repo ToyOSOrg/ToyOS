@@ -51,6 +51,8 @@ silent zero. Then bounded spawn/join plateaus driven through the real std path.
 not retain the objects it counts. Both are proved by comparing its total against
 a quiescent page-table and PMM walk at the start and at the end.
 
+Accounting is a pillar of `issues/diagnostics/toyos-explains-itself.md`.
+
 **Half the defect is not the joined half.** A `JoinHandle` dropped without `join`
 detaches, and the record's exit condition currently closes only the joined path.
 The plateau must cover both.

@@ -12,6 +12,10 @@ security feature such a CPU offers. The proving machines are the T14 and
 AMD EPYC KVM guests; the PR gate's TCG model proves wiring only. A
 probe is a `boot-actuators` arm or a `test-actuators` `SYS_DEBUG` action.
 
+One line of Linux's is declined, and ToyOS stays below it there: the
+firmware's memory-overwrite request, by the owner's "Keep crash records"
+(`issues/boot-media/the-loader-never-sets-the-firmwares-memory-overwrite-request.md`).
+
 **Exit**: every issue below is closed, in the order listed.
 
 - `issues/hardware/linuxs-readings-of-the-t14-and-the-tcg-model-lack-reads-owed-before-the-t14s-wipe.md`
@@ -33,7 +37,6 @@ probe is a `boot-actuators` arm or a `test-actuators` `SYS_DEBUG` action.
 - `issues/kernel/kernel-text-is-writable-and-every-kernel-page-executable.md`
 - `issues/kernel/the-kernel-heap-has-none-of-slubs-hardening.md`
 - `issues/kernel/a-device-without-a-domain-of-its-own-reaches-all-memory.md`
-- `issues/boot-media/the-loader-never-sets-the-firmwares-memory-overwrite-request.md`
 - `issues/kernel/user-programs-run-without-a-shadow-stack.md`
 - `issues/kernel/the-kernel-runs-without-indirect-branch-tracking.md`
 - `issues/kernel/the-kernel-runs-without-a-shadow-stack.md`
