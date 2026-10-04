@@ -81,8 +81,8 @@ After each task, audit the module header that owns what you changed.
 ## Answering a review
 
 The review is the newest comment on the pull request whose last line is a verdict. Every BLOCKER is
-fixed, or refuted with the measurement that refutes it; every NOTE is fixed; REMOVE means delete. A
-reviewer's named fix is a hypothesis until you have run it.
+fixed, or refuted with the measurement that refutes it; every NOTE is fixed. A reviewer's
+named fix is a hypothesis until you have run it.
 
 Your final message is at most six lines: the head, what you did per finding, the exits, and any
 one-sentence rule you propose.

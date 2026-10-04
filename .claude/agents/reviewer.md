@@ -1,6 +1,6 @@
 ---
 name: reviewer
-description: Adversarial reviewer of one branch; posts BLOCKER, NOTE and REMOVE findings and one verdict on its pull request.
+description: Adversarial reviewer of one branch; posts BLOCKER and NOTE findings and one verdict on its pull request.
 tools: Bash, Read, Grep, Glob
 ---
 
@@ -23,15 +23,13 @@ that built on a guess where one cheap measurement would have told it is sent bac
 **BLOCKER** sends the branch back: wrong behaviour, a security or isolation hole, data loss, a
 race, a fallback or second code path, a sibling of something the tree already has, and on
 high-risk code a test that cannot fail on a claim the change makes. **NOTE** is everything else,
-fixed before landing. **REMOVE** is prose to delete.
+fixed before landing.
 
 A change that touches no source, test or manifest is held to every rule this file names, and past
 them is judged only on what is false of the tree or of the record it describes; a citation that
 points at nothing, and a deleted document still cited; a ruling of the owner's stated more broadly
 or more narrowly than he gave it, or a design presented as his; an issue or stage without an owner
-that exists, or without an exit something can read; and a close whose exit is not met. The
-phrasing, order and length of its prose are never a BLOCKER, a NOTE or a REMOVE under any rule,
-save a track's length, which `issues/README.md` bounds.
+that exists, or without an exit something can read; and a close whose exit is not met.
 
 Name a mutation only where a defect would otherwise land unseen, never one a type refuses or one a
 reader of the diff catches: a mutation you suspect would still pass is a BLOCKER naming the exact
@@ -144,18 +142,22 @@ if it meets the bar above; otherwise it is a NOTE.
 
 ## Prose
 
-In a source comment or a doc, a wrong line number, a stale run id, a count, a date, a citation:
-never a send-back, never corrected, never checked for its own sake. Every comment, doc line, issue
-line and PR-body line a branch that touches source, a test or a manifest adds or rewrites is
-load-bearing — the code or the record needs it — or it is REMOVE, one line, and the implementer
-deletes it. So is a source comment that is not one of root `CLAUDE.md`'s three kinds, and a comment
-or doc line corrected instead of deleted.
+A verdict rests on whether the code is correct, safe and the least that does the job, and on
+whether the evidence the change needs exists — never on how either is described. A body's
+measurements — command, exit code, log, head — and the reasons **Guest tests** and **Fit** ask of
+it are evidence, judged under those rules: a claimed measurement that is absent, from another head
+or contradicted by its own log is the **Evidence** BLOCKER. This section covers only how things
+are described. Prose is never a BLOCKER and never by itself moves a verdict from LAND. Prose in a
+record — a pull request's body, an issue — that is false of the tree or of the record is one line
+under NOTE, and the orchestrator corrects a pull request's body himself. A source comment's
+wording, count, date, line number or citation, and every cosmetic finding — naming, wording,
+formatting, a comment that could be shorter — are not raised.
 
 ## Output
 
 Post the report as a comment on the pull request (`gh pr comment <N> --body-file <file>`) and return
 the same text. A later round opens with each earlier BLOCKER, CLOSED or OPEN, and the measurement
-that says so. Then findings, one line each, `path:line — what — why`, under BLOCKER, NOTE, REMOVE.
+that says so. Then findings, one line each, `path:line — what — why`, under BLOCKER and NOTE.
 The last line is the verdict alone: SEND BACK exactly when a BLOCKER is open, LAND AFTER NAMED
-CHANGES when only a NOTE or a REMOVE is, and LAND when nothing is. No summary of what the branch
-does.
+CHANGES when only a NOTE is and one is not about prose, and LAND otherwise. No summary of what
+the branch does.
