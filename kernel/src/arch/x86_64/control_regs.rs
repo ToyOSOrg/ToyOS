@@ -155,15 +155,14 @@ const HWP_REFUSED: u8 = 2;
 /// it has `IA32_HWP_INTERRUPT`: the machine's answer, a CPU that disagrees
 /// named.
 fn hwp_declared(cpu_id: u32) -> Option<toyos_cpuvuln::Hwp> {
-    let (max_leaf, _, _, _) = cpu::cpuid(0, 0);
-    // A leaf above the maximum answers with the highest basic leaf's data.
-    let (cpuid_6_eax, _, cpuid_6_ecx, _) = if max_leaf >= 6 { cpu::cpuid(6, 0) } else { (0, 0, 0, 0) };
+    let (cpuid_6_eax, cpuid_6_ecx) = cpu::leaf_6();
     let verdict = toyos_cpuvuln::hwp(&HwpFacts {
         vendor: cpu::vendor(),
         signature: cpu::cpuid(1, 0).0,
         cpuid_6_eax,
         cpuid_6_ecx,
-        cpuid_7_0_edx: if max_leaf >= 7 { cpu::cpuid(7, 0).3 } else { 0 },
+        // A leaf above the maximum answers with the highest basic leaf's data.
+        cpuid_7_0_edx: if cpu::cpuid(0, 0).0 >= 7 { cpu::cpuid(7, 0).3 } else { 0 },
     });
     let mine = if verdict.is_ok() { HWP_DECLARED } else { HWP_REFUSED };
     match HWP.compare_exchange(HWP_UNDECIDED, mine, Ordering::Release, Ordering::Acquire) {
@@ -182,12 +181,11 @@ fn hwp_declared(cpu_id: u32) -> Option<toyos_cpuvuln::Hwp> {
     verdict.ok()
 }
 
-/// Puts this CPU's `CR4`, `EFER` and performance request into the declaration
-/// and checks every register against it. Must run after [`init_cr0`] and
-/// before `arch::syscall::init`, which needs `SCE` set.
+/// Puts this CPU's `CR4` and `EFER` into the declaration and checks both
+/// against it. Must run after [`init_cr0`] and before `arch::syscall::init`,
+/// which needs `SCE` set.
 pub fn init(cpu_id: u32) {
     let declared = declaration(cpu_id);
-    let hwp = hwp_declared(cpu_id);
     if !skipped(cpu_id) {
         // SAFETY: `write_cr4` faults only on an undefined bit, on clearing `PAE`
         // in long mode, or on `PCIDE` with a nonzero PCID — `declaration` checked
@@ -204,18 +202,19 @@ pub fn init(cpu_id: u32) {
         }
     }
     self_check(cpu_id, declared);
-    if let Some(hwp) = hwp {
-        hwp_init(cpu_id, hwp);
-    }
 }
 
 /// Puts this CPU's performance request into the declaration and checks it.
+/// Must run after [`init`] and after this CPU's IDT is loaded, so a fault in
+/// its `wrmsr` or `rdmsr` panics by name.
+///
 /// The interrupt is cleared and HWP enabled before any other HWP register is
 /// touched, the request's input included: SDM Vol. 3B §17.4.2 (253669-093US),
 /// "Additional MSRs associated with HWP may only be accessed after HWP is
 /// enabled, with the exception of IA32_HWP_INTERRUPT and MSR_PPERF", and
 /// `intel_pstate_hwp_enable`'s order.
-fn hwp_init(cpu_id: u32, hwp: toyos_cpuvuln::Hwp) {
+pub fn init_performance(cpu_id: u32) {
+    let Some(hwp) = hwp_declared(cpu_id) else { return };
     // SAFETY: `hwp_declared` admitted this CPU only where CPUID enumerates HWP,
     // and `IA32_HWP_INTERRUPT` where it enumerates that too; both values hold
     // only defined bits.
@@ -237,7 +236,7 @@ fn hwp_init(cpu_id: u32, hwp: toyos_cpuvuln::Hwp) {
 }
 
 /// The power envelope this CPU runs under, where the performance request is
-/// declared: read only after this CPU's [`init`], which enabled HWP.
+/// declared: read only after this CPU's [`init_performance`], which enabled HWP.
 pub fn envelope() -> Option<crate::counters::Envelope> {
     (HWP.load(Ordering::Acquire) == HWP_DECLARED).then(|| crate::counters::Envelope {
         hwp_request: cpu::rdmsr(hwp::HWP_REQUEST),

@@ -3265,16 +3265,17 @@ const SMI_SPAN_NS: u64 = 4_444_000_000;
 /// Held: a record per CPU the bring-up started, naming the local APIC id the
 /// bring-up gave that CPU and carrying the counters its `counters: cpuN
 /// reads` line names, and none stale; every CPU's performance request
-/// declared at boot, `pm_enable=1`, and its power envelope in every read the
-/// one its `control_regs:` line holds. From `idle0` to `spin`, at least
+/// declared at boot, `pm_enable=1`, the request Linux makes on this machine
+/// (`tests/t14-linux/hwp-request.txt`), and its power envelope in every read
+/// the one its `control_regs:` line holds. From `idle0` to `spin`, at least
 /// [`SMI_SPAN_NS`] apart, every CPU's SMI count rose alike and by two or more:
 /// the firmware's legacy mode, the positive control ACPI stage 1's flatness
 /// is read against, and the row that stage changes. Across the spin every
 /// CPU's MPERF ran nine tenths of its stamp or more [e], a CPU in C0 the whole
 /// span: MPERF counts at the TSC's rate there (SDM Vol. 3B, "Hardware
 /// Coordination Feedback"); and every CPU's busy frequency reached the lowest
-/// Linux's turbostat read under one `yes` per CPU on the same machine
-/// (`tests/t14-linux/turbostat-loaded.txt`).
+/// Linux's turbostat read under one `yes` per CPU on the same machine over the
+/// same span of load (`tests/t14-linux/turbostat-loaded.txt`).
 ///
 /// Read and not held, beside Linux's turbostat: each CPU's idle busy
 /// fraction, and what one round cost its reader.
@@ -3310,8 +3311,10 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
         Ok((read, clock.get(name).ok_or_else(|| format!("counters_metal printed no {name} clock"))?.0))
     };
     let (idle0, at0) = phase("idle0")?;
-    let (idle1, _) = phase("idle1")?;
+    let (idle1, at1) = phase("idle1")?;
     let (spin, at2) = phase("spin")?;
+    let linux_request = u64::from_str_radix(include_str!("t14-linux/hwp-request.txt").trim().trim_start_matches("0x"), 16)
+        .map_err(|e| format!("t14-linux/hwp-request.txt: {e}"))?;
     let bsp = kernel.must_say("percpu: BSP cpu_id=0 lapic_id=")?;
     let mut roster = vec![bsp.rsplit("lapic_id=").next().unwrap_or_default().trim().to_string()];
     for cpu in 1..cpus {
@@ -3332,6 +3335,9 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
                 return Err(format!("{name}: cpu{cpu} is stale or not lapic {}: {counters:?}", roster[*cpu]));
             }
             let declared = kernel.must_say(&format!("control_regs: cpu{cpu} pm_enable=1 "))?;
+            if !declared.contains(&format!(" hwp_request={linux_request:#010x} ")) {
+                return Err(format!("cpu{cpu} declared {declared:?}, and Linux requests {linux_request:#010x} on this machine"));
+            }
             for (counter, field, radix) in
                 [("hwp_request", "hwp_request=0x", 16), ("hwp_request_pkg", "hwp_request_pkg=0x", 16), ("energy_perf_bias", "epb=", 10)]
             {
@@ -3368,15 +3374,26 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
     if busy.iter().any(|&b| b < 0.9) {
         return Err(format!("MPERF ran {busy:?} of each stamp across the spin, some cpu under 0.9"));
     }
-    let linux = |file: &str, column: &str| -> Result<(f64, f64), String> {
+    // Each interval's machine-wide row, in order.
+    let linux = |file: &str, column: &str| -> Result<Vec<f64>, String> {
         let mut rows = file.lines().map(|l| l.split('\t').collect::<Vec<_>>());
         let header = rows.next().ok_or("an empty turbostat reading")?;
         let at = header.iter().position(|c| *c == column).ok_or_else(|| format!("turbostat read no {column}"))?;
-        let values: Vec<f64> = rows.filter(|r| r[0] == "-").filter_map(|r| r.get(at)?.parse().ok()).collect();
-        Ok(values.iter().fold((f64::MAX, f64::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v))))
+        Ok(rows.filter(|r| r[0] == "-").filter_map(|r| r.get(at)?.parse().ok()).collect())
     };
-    let idle = linux(include_str!("t14-linux/turbostat-idle.txt"), "Busy%")?;
-    let loaded = linux(include_str!("t14-linux/turbostat-loaded.txt"), "Bzy_MHz")?;
+    let range = |values: &[f64]| values.iter().fold((f64::MAX, f64::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+    let idle = range(&linux(include_str!("t14-linux/turbostat-idle.txt"), "Busy%")?);
+    let loaded_rows = linux(include_str!("t14-linux/turbostat-loaded.txt"), "Bzy_MHz")?;
+    let loaded = range(&loaded_rows);
+    // The floor is Linux's clock over the spin's own span of load, not after
+    // the package settles: the intervals that open within it, the first 2 s
+    // into Linux's load and each 10 s long (`tests/t14-linux/SOURCE`).
+    let spin_ns = at2 - at1;
+    let opened = loaded_rows.iter().enumerate().take_while(|&(k, _)| 2_000_000_000 + k as u64 * 10_000_000_000 < spin_ns);
+    let floor = opened.map(|(_, &mhz)| mhz).fold(f64::MAX, f64::min);
+    if floor == f64::MAX {
+        return Err(format!("the spin lasted {spin_ns} ns, and no Linux interval opens within it"));
+    }
     let spinning: Vec<f64> = (0..cpus).map(|cpu| tsc_mhz * ratio(idle1, spin, cpu, "aperf", "mperf")).collect();
     eprintln!(
         "  [counters] {cpus} cpus, SMI +{} each over {} ms; TSC {tsc_mhz:.0} MHz",
@@ -3385,8 +3402,8 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
     );
     for (cpu, busy) in busy.iter().enumerate() {
         eprintln!(
-            "  [counters] cpu{cpu}: idle busy {:.2}% (Linux {:.2}-{:.2}%), spinning {:.0} MHz (Linux {:.0}-{:.0}), \
-             busy {busy:.3}",
+            "  [counters] cpu{cpu}: idle busy {:.2}% (Linux {:.2}-{:.2}%), spinning {:.0} MHz (Linux {floor:.0} over \
+             this span, {:.0}-{:.0} loaded), busy {busy:.3}",
             ratio(idle0, idle1, cpu, "mperf", "stamp") * 100.0,
             idle.0,
             idle.1,
@@ -3396,8 +3413,8 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
         );
     }
     eprintln!("  [counters] the spin's read, a whole round, took its reader {} ns", clock["spin"].1);
-    if spinning.iter().any(|&mhz| mhz < loaded.0) {
-        return Err(format!("spinning at {spinning:.0?} MHz, some cpu below the {:.0} Linux reached loaded", loaded.0));
+    if spinning.iter().any(|&mhz| mhz < floor) {
+        return Err(format!("spinning {spin_ns} ns at {spinning:.0?} MHz, some cpu below the {floor:.0} Linux held over that span"));
     }
     Ok(())
 }

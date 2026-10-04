@@ -133,6 +133,18 @@ pub fn vendor() -> toyos_cpuvuln::Vendor {
     toyos_cpuvuln::Vendor::from_id(&core::array::from_fn(|i| [ebx, edx, ecx][i / 4].to_le_bytes()[i % 4]))
 }
 
+/// CPUID.6's EAX and ECX, the thermal and power leaf; zero where CPUID.0
+/// does not reach it, as `init_scattered_cpuid_features` reads it: a level
+/// past the range's own is no level.
+pub fn leaf_6() -> (u32, u32) {
+    if (6..=0xFFFF).contains(&cpuid(0, 0).0) {
+        let (eax, _, ecx, _) = cpuid(6, 0);
+        (eax, ecx)
+    } else {
+        (0, 0)
+    }
+}
+
 /// CPUID with both index registers; `rbx` is saved by hand since Rust reserves it as an operand.
 pub fn cpuid(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
     let eax: u32;

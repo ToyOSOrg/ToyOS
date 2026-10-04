@@ -21,10 +21,8 @@ const APERF_MPERF: u8 = 1 << 1;
 static ADMITTED: [AtomicU8; MAX_CPUS] = [const { AtomicU8::new(0) }; MAX_CPUS];
 
 pub fn bring_up() {
-    let max_leaf = cpu::cpuid(0, 0).0;
     let (signature, _, cpuid_1_ecx, _) = cpu::cpuid(1, 0);
-    // As `init_scattered_cpuid_features` reads it: a level past the range's own is no level.
-    let cpuid_6_ecx = if (6..=0xFFFF).contains(&max_leaf) { cpu::cpuid(6, 0).2 } else { 0 };
+    let (_, cpuid_6_ecx) = cpu::leaf_6();
     let verdict = toyos_cpuvuln::counters(&CounterFacts {
         vendor: cpu::vendor(),
         signature,
