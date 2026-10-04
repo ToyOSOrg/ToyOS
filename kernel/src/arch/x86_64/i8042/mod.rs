@@ -12,6 +12,7 @@ use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicU8, 
 use toyos_ps2::{KeyDecoder, KeyOutcome, MouseDecoder, MouseOutcome};
 
 use crate::arch::cpu::{inb, outb};
+use crate::arch::pio::{self, Port};
 use crate::arch::idt::I8042_VECTOR;
 use crate::irq_ring::IrqSource;
 use crate::log;
@@ -23,9 +24,14 @@ mod tally;
 
 use tally::{Carried, Tally};
 
-const DATA: u16 = 0x60;
-const STATUS: u16 = 0x64;
-const COMMAND: u16 = 0x64;
+/// The controller's data port, and its status port, which is its command
+/// port when written; declared by [`init`] before its first access.
+static DATA: pio::Slot = pio::Slot::empty();
+static STATUS: pio::Slot = pio::Slot::empty();
+
+fn port(run: &pio::Slot) -> Port {
+    run.get().expect("i8042: a port reached before init declared it").port(0)
+}
 
 const OBF: u8 = 1 << 0;
 const IBF: u8 = 1 << 1;
@@ -134,13 +140,6 @@ const HEALTH_MUTE_BLIND: u8 = 7;
 
 static HEALTH: AtomicU8 = AtomicU8::new(HEALTH_OFF);
 static ARMED_NS: AtomicU64 = AtomicU64::new(0);
-
-/// Whether this driver armed the controller this boot, which refuses an `isa`
-/// claim on it from then on: [`HEALTH`] never returns to [`HEALTH_OFF`], so a
-/// quarantined controller is still this driver's.
-pub fn drives() -> bool {
-    HEALTH.load(Ordering::Relaxed) != HEALTH_OFF
-}
 
 // Repeats, but only when the pin has asserted since the last line — so past
 // the first repeat, silence means no interrupt, not a driver that stopped.
@@ -446,17 +445,16 @@ pub extern "sysv64" fn handler() {
     LAST_IRQ_NS.store(timestamp, Ordering::Relaxed);
     let mut n = 0;
     while n < ISR_BURST {
-        let status = inb(STATUS);
+        let status = inb(port(&STATUS));
         if !buffer_full(status) {
             break;
         }
         // Timestamped per byte, not once for the burst: the mouse framer
         // resyncs on the gap between adjacent bytes, and a burst would flatten it.
-        push_isr(inb(DATA), status & AUXB != 0, crate::clock::nanos_since_boot());
+        push_isr(inb(port(&DATA)), status & AUXB != 0, crate::clock::nanos_since_boot());
         n += 1;
     }
-    if n == ISR_BURST && buffer_full(inb(STATUS)) {
-        // It cannot mask the line itself — that needs the I/O APIC lock.
+    if n == ISR_BURST && buffer_full(inb(port(&STATUS))) {
         QUARANTINE.store(true, Ordering::Relaxed);
     }
     // Only the first interrupt can be the arming edge (IRR delivers it before
@@ -785,7 +783,7 @@ fn budget_spent(budget: u64) -> bool {
 
 /// The status register, or `None` when nothing decodes the port.
 fn status() -> Option<u8> {
-    match inb(STATUS) {
+    match inb(port(&STATUS)) {
         FLOATING_BUS => None,
         other => Some(other),
     }
@@ -806,7 +804,7 @@ fn wait_writable(deadline: u64) -> bool {
 fn read_data(deadline: u64) -> Option<u8> {
     loop {
         if status()? & OBF != 0 {
-            return Some(inb(DATA));
+            return Some(inb(port(&DATA)));
         }
         if crate::clock::nanos_since_boot() >= deadline {
             return None;
@@ -816,19 +814,19 @@ fn read_data(deadline: u64) -> Option<u8> {
 
 fn command(cmd: u8, deadline: u64) -> bool {
     wait_writable(deadline) && {
-        // SAFETY: COMMAND (0x64) is the 8042's fixed command port; `cmd` is
+        // SAFETY: the status port written is the 8042's command port; `cmd` is
         // always one of this module's own `CMD_*` constants, and the
         // controller has no path to memory.
-        unsafe { outb(COMMAND, cmd) };
+        unsafe { outb(port(&STATUS), cmd) };
         true
     }
 }
 
 fn write_data(byte: u8, deadline: u64) -> bool {
     wait_writable(deadline) && {
-        // SAFETY: DATA (0x60) is the controller's data port; `byte` is a
+        // SAFETY: the controller's data port; `byte` is a
         // config word or device command, neither reaching memory.
-        unsafe { outb(DATA, byte) };
+        unsafe { outb(port(&DATA), byte) };
         true
     }
 }
@@ -849,7 +847,7 @@ fn flush() -> bool {
             None => return false,
             Some(s) if s & OBF == 0 => return true,
             Some(_) => {
-                inb(DATA);
+                inb(port(&DATA));
             }
         }
     }
@@ -971,6 +969,17 @@ pub fn init(rsdp_addr: u64) {
         log!("i8042: withheld, left unprobed for a claim");
         return;
     }
+    // Declared before the first access, and for the rest of the boot: a
+    // controller this probe has touched is no process's to claim.
+    for (run, port) in [(&DATA, 0x60), (&STATUS, 0x64)] {
+        match pio::declare("the i8042", toyos_userbound::Ports::one(port)) {
+            Ok(declared) => run.set(declared),
+            Err(why) => {
+                log!("i8042: port {port:#x} not declared ({why:?}) — left unprobed");
+                return;
+            }
+        }
+    }
     // Logged, never obeyed: bit 1 is one summary bit, while the handshake
     // below is three direct observations of the machine in front of us.
     match firmware_claim(rsdp_addr) {
@@ -986,7 +995,7 @@ pub fn init(rsdp_addr: u64) {
     // One `inb` settles every machine that has nothing there, before a single
     // byte is written to ports that might belong to something else.
     if status().is_none() {
-        log!("i8042: absent — port {STATUS:#x} reads {FLOATING_BUS:#04x}, nothing decodes it");
+        log!("i8042: absent — port 0x64 reads {FLOATING_BUS:#04x}, nothing decodes it");
         return;
     }
 
@@ -1263,11 +1272,11 @@ fn handler_poll() {
     let timestamp = crate::clock::nanos_since_boot();
     let mut n = 0;
     while n < ISR_BURST {
-        let status = inb(STATUS);
+        let status = inb(port(&STATUS));
         if status & OBF == 0 {
             break;
         }
-        push_isr(inb(DATA), status & AUXB != 0, crate::clock::nanos_since_boot());
+        push_isr(inb(port(&DATA)), status & AUXB != 0, crate::clock::nanos_since_boot());
         n += 1;
     }
     if n > 0 {

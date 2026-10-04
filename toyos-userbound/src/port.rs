@@ -1,14 +1,61 @@
-//! Which I/O ports the CPU a process runs on opens to Ring 3, and which port
-//! a refused `in` or `out` named.
+//! Which I/O ports the CPU a process runs on opens to Ring 3, which ports no
+//! grant may ever name, and which port a refused `in` or `out` named.
 //!
 //! **A process reaches a port only through its CPU's I/O permission bitmap,
 //! with IOPL left at 0** (Intel SDM Vol. 1 §19.5.2, AMD APM Vol. 2 §12.2.4):
-//! the TSS carries one bit per port below [`IO_PORTS`], set unless the process
-//! running there holds a grant naming that port, and every port at or past it
-//! is past the TSS limit, which the processor refuses by itself.
+//! the TSS carries one bit per port of the whole 16-bit space, set unless the
+//! process running there holds a grant naming that port.
+//!
+//! **A grant never reaches a port the kernel declared** ([`Reserved`]): every
+//! port this kernel drives is declared once, by what drives it, and a grant
+//! that names one is refused naming that holder.
 
-/// Ports the bitmap names. A port the bitmap can open is therefore a `u8`.
-pub const IO_PORTS: usize = 0x100;
+/// Ports the bitmap names: every port there is.
+pub const IO_PORTS: usize = 0x10000;
+
+/// A run of consecutive ports: a register block, or what a grant or a
+/// declaration names. Never empty and never past the last port.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Ports {
+    first: u16,
+    count: u16,
+}
+
+impl Ports {
+    /// `None` for no ports, or a run past port `0xFFFF`.
+    pub const fn new(first: u16, count: u16) -> Option<Self> {
+        if count == 0 || first as usize + count as usize > IO_PORTS {
+            return None;
+        }
+        Some(Self { first, count })
+    }
+
+    pub const fn one(port: u16) -> Self {
+        Self { first: port, count: 1 }
+    }
+
+    pub const fn first(self) -> u16 {
+        self.first
+    }
+
+    pub const fn count(self) -> u16 {
+        self.count
+    }
+
+    /// The port `offset` into the run, or `None` past its end.
+    pub const fn at(self, offset: u16) -> Option<u16> {
+        if offset < self.count { Some(self.first + offset) } else { None }
+    }
+
+    pub const fn overlaps(self, other: Self) -> bool {
+        (self.first as u32) < other.first as u32 + other.count as u32
+            && (other.first as u32) < self.first as u32 + self.count as u32
+    }
+
+    pub fn iter(self) -> impl Iterator<Item = u16> {
+        (0..self.count).map(move |i| self.first + i)
+    }
+}
 
 /// The bitmap as the processor reads it at the end of a TSS: one bit per port,
 /// set to refuse, then the all-ones byte past the last (the processor reads two
@@ -29,25 +76,25 @@ impl IoBitmap {
 
     /// Whether Ring 3 may access `port`.
     pub const fn opens(&self, port: u16) -> bool {
-        (port as usize) < IO_PORTS && self.refused[port as usize / 8] & (1 << (port % 8)) == 0
+        self.refused[port as usize / 8] & (1 << (port % 8)) == 0
     }
 
-    fn set(&mut self, port: u8, open: bool) {
+    fn set(&mut self, port: u16, open: bool) {
         let (at, bit) = (&mut self.refused[port as usize / 8], 1u8 << (port % 8));
         *at = if open { *at & !bit } else { *at | bit };
     }
 
     /// Open each row's ports if the process switching in holds the row, and
-    /// close them otherwise: `rows` is every grantable row's ports, with
+    /// close them otherwise: `rows` is every grantable row's runs, with
     /// whether the incoming process holds it.
-    pub fn switch_to<'a>(&mut self, rows: impl IntoIterator<Item = (&'a [u8], bool)>) {
-        for (ports, held) in rows {
+    pub fn switch_to<'a>(&mut self, rows: impl IntoIterator<Item = (&'a [Ports], bool)>) {
+        for (runs, held) in rows {
             // A row's ports open and close together, so its first bit is its state.
-            let Some(&first) = ports.first() else { continue };
-            if self.opens(first as u16) == held {
+            let Some(first) = runs.first() else { continue };
+            if self.opens(first.first) == held {
                 continue;
             }
-            for &port in ports {
+            for port in runs.iter().flat_map(|run| run.iter()) {
                 self.set(port, held);
             }
         }
@@ -58,6 +105,43 @@ impl IoBitmap {
     /// not the port's, and its report must not guess one.
     pub fn refused(&self, access: PortAccess) -> Option<u16> {
         (0..access.bytes as u16).map(|i| access.port.wrapping_add(i)).find(|&port| !self.opens(port))
+    }
+}
+
+/// The ports no grant reaches, each run named by what holds it: the one
+/// declaration of every port the kernel drives, read by whatever decides a
+/// grant.
+pub struct Reserved<const N: usize> {
+    runs: [Option<(&'static str, Ports)>; N],
+}
+
+/// Why a run was not declared.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Undeclared {
+    /// It shares a port with the run this holder declared first.
+    Clash(&'static str),
+    /// Every slot is taken.
+    Full,
+}
+
+impl<const N: usize> Reserved<N> {
+    pub const fn new() -> Self {
+        Self { runs: [None; N] }
+    }
+
+    /// Reserve `ports` for `holder`, refused where another holder has one of them.
+    pub fn declare(&mut self, holder: &'static str, ports: Ports) -> Result<(), Undeclared> {
+        if let Some(first) = self.holder(ports) {
+            return Err(Undeclared::Clash(first));
+        }
+        let slot = self.runs.iter_mut().find(|slot| slot.is_none()).ok_or(Undeclared::Full)?;
+        *slot = Some((holder, ports));
+        Ok(())
+    }
+
+    /// Who holds a port of `ports`, if anyone does.
+    pub fn holder(&self, ports: Ports) -> Option<&'static str> {
+        self.runs.iter().flatten().find(|(_, held)| held.overlaps(ports)).map(|&(name, _)| name)
     }
 }
 
@@ -136,12 +220,28 @@ mod tests {
 
     use super::*;
 
-    /// The i8042's row, and a second one beside it.
-    const I8042: &[u8] = &[0x60, 0x64];
-    const OTHER: &[u8] = &[0x70, 0x71];
+    fn run(first: u16, count: u16) -> Ports {
+        Ports::new(first, count).expect("a run inside the port space")
+    }
+
+    /// The i8042's row, and a row of two runs high in the space, as a
+    /// firmware's PM1 event block and its embedded controller's ports are.
+    const I8042: &[Ports] = &[Ports::one(0x60), Ports::one(0x64)];
+    fn high() -> [Ports; 2] {
+        [run(0x1800, 4), run(0xFFFE, 2)]
+    }
 
     fn open_ports(bitmap: &IoBitmap) -> Vec<u16> {
         (0..=u16::MAX).filter(|&port| bitmap.opens(port)).collect()
+    }
+
+    #[test]
+    fn a_run_is_never_empty_and_never_past_the_last_port() {
+        assert_eq!(Ports::new(0x60, 0), None);
+        assert_eq!(Ports::new(0xFFFF, 2), None);
+        assert_eq!(Ports::new(0xFFFF, 1).map(|p| p.iter().collect::<Vec<_>>()), Some(std::vec![0xFFFF]));
+        assert_eq!(run(0x1800, 4).at(3), Some(0x1803));
+        assert_eq!(run(0x1800, 4).at(4), None);
     }
 
     #[test]
@@ -154,7 +254,7 @@ mod tests {
     #[test]
     fn a_held_row_opens_its_ports_and_no_other() {
         let mut bitmap = IoBitmap::refusing();
-        bitmap.switch_to([(I8042, true), (OTHER, false)]);
+        bitmap.switch_to([(I8042, true), (&high()[..], false)]);
         assert_eq!(open_ports(&bitmap), [0x60, 0x64], "a port beside a granted one opened with it");
         // The byte the processor reads past the bitmap still refuses.
         assert_eq!(bitmap.end, 0xFF);
@@ -163,28 +263,33 @@ mod tests {
     #[test]
     fn a_switch_to_a_process_holding_nothing_closes_the_row() {
         let mut bitmap = IoBitmap::refusing();
-        bitmap.switch_to([(I8042, true), (OTHER, true)]);
-        assert_eq!(open_ports(&bitmap), [0x60, 0x64, 0x70, 0x71]);
-        bitmap.switch_to([(I8042, false), (OTHER, true)]);
-        assert_eq!(open_ports(&bitmap), [0x70, 0x71], "the next process kept its predecessor's ports");
-        bitmap.switch_to([(I8042, false), (OTHER, false)]);
+        let high = high();
+        bitmap.switch_to([(I8042, true), (&high[..], true)]);
+        assert_eq!(open_ports(&bitmap), [0x60, 0x64, 0x1800, 0x1801, 0x1802, 0x1803, 0xFFFE, 0xFFFF]);
+        bitmap.switch_to([(I8042, false), (&high[..], true)]);
+        assert_eq!(
+            open_ports(&bitmap),
+            [0x1800, 0x1801, 0x1802, 0x1803, 0xFFFE, 0xFFFF],
+            "the next process kept its predecessor's ports"
+        );
+        bitmap.switch_to([(I8042, false), (&high[..], false)]);
         assert_eq!(open_ports(&bitmap), [] as [u16; 0]);
-        bitmap.switch_to([(I8042, true), (OTHER, false)]);
+        bitmap.switch_to([(I8042, true), (&high[..], false)]);
         assert_eq!(open_ports(&bitmap), [0x60, 0x64], "the holder's return did not open its row again");
     }
 
     #[test]
-    fn the_last_port_of_the_bitmap_opens_without_touching_the_end_byte() {
+    fn the_last_port_of_the_space_opens_without_touching_the_end_byte() {
         let mut bitmap = IoBitmap::refusing();
-        bitmap.switch_to([(&[0xFF][..], true)]);
-        assert_eq!(open_ports(&bitmap), [0xFF]);
+        bitmap.switch_to([(&[Ports::one(0xFFFF)][..], true)]);
+        assert_eq!(open_ports(&bitmap), [0xFFFF]);
         assert_eq!(bitmap.end, 0xFF);
     }
 
     #[test]
     fn a_refused_access_names_the_first_port_it_may_not_touch() {
         let mut bitmap = IoBitmap::refusing();
-        bitmap.switch_to([(I8042, true), (&[0xFF][..], true)]);
+        bitmap.switch_to([(I8042, true), (&[Ports::one(0xFF)][..], true)]);
         let access = |port, bytes| PortAccess { out: false, port, bytes };
         // A granted port, alone: the fault is not the port's.
         assert_eq!(bitmap.refused(access(0x60, 1)), None);
@@ -193,9 +298,33 @@ mod tests {
         assert_eq!(bitmap.refused(access(0x61, 1)), Some(0x61));
         assert_eq!(bitmap.refused(access(0x60, 2)), Some(0x61));
         assert_eq!(bitmap.refused(access(0x60, 4)), Some(0x61));
-        // Past the bitmap is past the TSS limit, and the span wraps as ports do.
         assert_eq!(bitmap.refused(access(0xFF, 2)), Some(0x100));
         assert_eq!(bitmap.refused(access(0x3F8, 1)), Some(0x3F8));
+        // The span wraps as ports do.
         assert_eq!(bitmap.refused(access(0xFFFF, 2)), Some(0xFFFF));
+    }
+
+    #[test]
+    fn a_declared_run_refuses_every_run_that_shares_a_port_with_it() {
+        let mut reserved = Reserved::<4>::new();
+        reserved.declare("the PM1a control block", run(0x1804, 2)).expect("the first run");
+        reserved.declare("SMI_CMD", Ports::one(0xB2)).expect("a disjoint run");
+        // Either end of the block, a run that covers it, and a run beside it.
+        assert_eq!(reserved.holder(Ports::one(0x1804)), Some("the PM1a control block"));
+        assert_eq!(reserved.holder(Ports::one(0x1805)), Some("the PM1a control block"));
+        assert_eq!(reserved.holder(run(0x1800, 8)), Some("the PM1a control block"));
+        assert_eq!(reserved.holder(run(0x1800, 4)), None);
+        assert_eq!(reserved.holder(Ports::one(0x1806)), None);
+        assert_eq!(reserved.holder(run(0xB0, 3)), Some("SMI_CMD"));
+        // A second holder of a declared port is refused naming the first.
+        assert_eq!(reserved.declare("the GPE0 block", run(0x1805, 1)), Err(Undeclared::Clash("the PM1a control block")));
+        assert_eq!(reserved.holder(run(0x1806, 0x10)), None, "a refused declaration reserved nothing");
+    }
+
+    #[test]
+    fn a_full_declaration_refuses_one_more_run() {
+        let mut reserved = Reserved::<1>::new();
+        reserved.declare("COM1", run(0x3F8, 8)).expect("the one slot");
+        assert_eq!(reserved.declare("the RTC", run(0x70, 2)), Err(Undeclared::Full));
     }
 }

@@ -136,6 +136,13 @@ const RUST_SKIP: &[&str] = &[
     "audio_idle_suspend",
     "null_sink_client_exits",
     "soundserver_log_stall",
+    // It hands the ACPI claim to a server of its own and kills it, which needs
+    // a boot that starts none: the `acpi_server_death` metal row runs it on
+    // tests/acpicase.
+    "acpi_release",
+    // It holds the boot open for the owner's press, and asserts nothing: the
+    // attended `acpi_power_button_pressed` metal row runs it.
+    "acpi_press_hold",
 ];
 
 /// Binaries a metal row or a guest test drives that the shared boot also runs
@@ -217,6 +224,9 @@ const MACHINE_TESTS: &[&str] = &[
     // no way to turn it back on, so only a machine QEMU reports stopping can
     // be asked. `machine_soft_off_decoded` reads the T14's own decode.
     "machine_shutdown",
+    // The press itself: QEMU raises the fixed power-button event on demand,
+    // and the T14's button needs the owner's hand (`acpi_power_button_pressed`).
+    "acpi_power_button",
 ];
 
 /// **The metal profile**: which registrations run on the ThinkPad T14, what
@@ -397,6 +407,33 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal {
             arms: &[metal::once("testcases", "tests/testcases", &[], &["test_rs_counters_metal"])],
             judge: |b| counters_on_metal(b[0]),
+        },
+    ),
+    (
+        // The ACPI server on the machine its stage is for: the row the kernel
+        // filled from the T14's own tables, the server armed on it, and the
+        // embedded controller's events taken and counted.
+        "acpi_server_events",
+        metal::Metal { arms: TESTCASES, judge: |b| acpi_events_on_metal(b[0]) },
+    ),
+    (
+        // The server killed: the kernel writes `ACPI_DISABLE` as its claim goes,
+        // and `SCI_EN` reads clear after it.
+        "acpi_server_death",
+        metal::Metal {
+            arms: &[metal::once("acpicase", "tests/acpicase", &[], &["test_rs_acpi_release"])],
+            judge: |b| acpi_death_on_metal(b[0]),
+        },
+    ),
+    (
+        // **Attended: the owner presses the power button once, briefly**, on a
+        // boot held open for it, and the machine stops through ToyOS's own
+        // power-off. Staying on, or coming back on, is red, and only the owner
+        // sees either.
+        "acpi_power_button_pressed",
+        metal::Metal {
+            arms: &[metal::once("testcases-press", "tests/testcases", &[], &["test_rs_acpi_press_hold"])],
+            judge: |b| acpi_press_on_metal(b[0]),
         },
     ),
     (
@@ -2447,6 +2484,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "iommu_virtio_platform" => common::iommu::iommu_virtio_platform(test_config),
         "nested_nmi_is_loud" => faults::nested_nmi_is_loud(test_config),
         "machine_shutdown" => power::machine_shutdown(test_config),
+        "acpi_power_button" => power::acpi_power_button(test_config),
         other => Err(format!("unknown machine test {other}")),
     }
 }
@@ -3264,10 +3302,13 @@ const SMI_SPAN_NS: u64 = 4_444_000_000;
 ///
 /// Held: a record per CPU the bring-up started, naming the local APIC id the
 /// bring-up gave that CPU and carrying the counters its `counters: cpuN
-/// reads` line names, and none stale. From `idle0` to `spin`, at least
-/// [`SMI_SPAN_NS`] apart, every CPU's SMI count rose alike and by two or more:
-/// the firmware's legacy mode, the positive control ACPI stage 1's flatness
-/// is read against, and the row that stage changes. Across the spin every
+/// reads` line names, and none stale. The boot ran in ACPI mode, which
+/// `/system/bin/acpiserver`'s claim put it in: `idle0` reads after the
+/// kernel's one write to `SMI_CMD`, and from there to `spin`, at least
+/// [`SMI_SPAN_NS`] apart, no CPU's SMI count moves
+/// (`issues/hardware/the-t14s-firmware-interrupts-every-cpu-every-2-2-s-under-toyos.md`'s
+/// exit). Linux on the same machine read none in 120 s; in legacy mode the
+/// count rose alike on every CPU, about every 2.2 s. Across the spin every
 /// CPU's MPERF ran nine tenths of its stamp or more [e], a CPU in C0 the whole
 /// span: MPERF counts at the TSC's rate there (SDM Vol. 3B, "Hardware
 /// Coordination Feedback").
@@ -3341,10 +3382,23 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
         return Err(format!("idle0 and spin are {} ns apart, short of {SMI_SPAN_NS}: lengthen the spin", at2 - at0));
     }
     let delta = |a: &Read, b: &Read, cpu: usize, name: &str| b[&cpu][name] - a[&cpu][name];
-    let smis: Vec<u64> = (0..cpus).map(|cpu| delta(idle0, spin, cpu, "smi")).collect();
-    if smis[0] < 2 || smis.iter().any(|&n| n != smis[0]) {
-        return Err(format!("the SMI count rose by {smis:?} over {} ns, not alike and by two or more", at2 - at0));
+    // The boot's one write to `SMI_CMD`, and what the CPU that made it read after it.
+    let enabled = kernel.must_say("acpi: ACPI mode: ACPI_ENABLE ")?;
+    let writer: usize = field_between(enabled, "; cpu", "'s SMI count ")?.parse().map_err(|_| format!("no CPU in {enabled:?}"))?;
+    let after = number_between(enabled, " before the write and ", " after")?;
+    if idle0[&writer]["smi"] < after {
+        return Err(format!("idle0 read cpu{writer}'s SMI count below what it read after the ACPI enable ({after}): it read before the boot's last write to SMI_CMD"));
     }
+    if let Ok(left) = kernel.must_say("acpi: legacy mode again") {
+        return Err(format!("the machine left ACPI mode inside the boot: {left}"));
+    }
+    let smis: Vec<u64> = (0..cpus).map(|cpu| delta(idle0, spin, cpu, "smi")).collect();
+    if smis.iter().any(|&n| n != 0) {
+        return Err(format!("in ACPI mode the SMI count moved by {smis:?} over {} ns", at2 - at0));
+    }
+    let firsts: Vec<u64> = (0..cpus).map(|cpu| idle0[&cpu]["smi"]).collect();
+    eprintln!("  [counters] {}", enabled.trim());
+    eprintln!("  [counters] idle0's SMI count per cpu {firsts:?}, the writer's after the enable {after} (a reading)");
     let tsc_mhz = delta(idle0, spin, 0, "stamp") as f64 * 1e3 / (at2 - at0) as f64;
     let ratio = |a: &Read, b: &Read, cpu: usize, top: &str, bottom: &str| {
         delta(a, b, cpu, top) as f64 / delta(a, b, cpu, bottom) as f64
@@ -3363,8 +3417,7 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
     let idle = linux(include_str!("t14-linux/turbostat-idle.txt"), "Busy%")?;
     let loaded = linux(include_str!("t14-linux/turbostat-loaded.txt"), "Bzy_MHz")?;
     eprintln!(
-        "  [counters] {cpus} cpus, SMI +{} each over {} ms; TSC {tsc_mhz:.0} MHz",
-        smis[0],
+        "  [counters] {cpus} cpus, SMI flat on each over {} ms; TSC {tsc_mhz:.0} MHz",
         (at2 - at0) / 1_000_000
     );
     for (cpu, busy) in busy.iter().enumerate() {
@@ -3380,6 +3433,69 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
         );
     }
     eprintln!("  [counters] the spin's read, a whole round, took its reader {} ns", clock["spin"].1);
+    Ok(())
+}
+
+/// The T14's ACPI row as the kernel filled it from the machine's FACP, ECDT
+/// and APIC (Linux on the same machine: `EC_CMD/EC_SC=0x66, EC_DATA=0x62`,
+/// `GPE=0x6e`, `INT_SRC_OVR (bus 0 bus_irq 9 global_irq 9 high level)`), the
+/// server armed on it, at least one embedded-controller query taken and a
+/// count of them logged, and no guard of the server's fired.
+fn acpi_events_on_metal(back: &metal::Readback) -> Result<(), String> {
+    let (log, kernel) = (back.log(), back.kernel());
+    kernel.must_say(
+        "acpi: the ACPI row: PM1a events 0x1800+4, GPE0 0x1860+32, SCI gsi 9 level/high, the \
+         fixed-hardware power button, embedded controller at 0x66/0x62 on GPE 0x6e; the firmware \
+         handed over in legacy mode",
+    )?;
+    log.must_say(
+        "acpiserver: armed: power button served, embedded controller on GPE 0x6e at 0x66/0x62, 0 GPE(s) \
+         the namespace runs",
+    )?;
+    let lines: Vec<&str> = log.text().lines().filter(|l| l.contains("acpiserver")).collect();
+    if let Some(fired) = lines.iter().find(|l| l.contains("panicked")) {
+        return Err(format!("the server died: {fired}"));
+    }
+    let firsts: Vec<&&str> = lines.iter().filter(|l| l.contains("taken for the first time")).collect();
+    let counts = lines.iter().rfind(|l| l.contains("embedded controller queries taken: "));
+    let (true, Some(counts)) = (!firsts.is_empty(), counts) else {
+        return Err(format!("the server logged {} first sighting(s) and {counts:?} for counts", firsts.len()));
+    };
+    for first in firsts {
+        eprintln!("  [acpi] {}", first.trim());
+    }
+    eprintln!("  [acpi] {}", counts.trim());
+    Ok(())
+}
+
+/// The server's death on the T14: the kernel put the machine in ACPI mode for
+/// the job's claim, and when the killed server's claim went it wrote
+/// `ACPI_DISABLE` (the FADT's 0xf1) and read `SCI_EN` clear: the firmware has
+/// the buttons again.
+fn acpi_death_on_metal(back: &metal::Readback) -> Result<(), String> {
+    back.job_passed("test_rs_acpi_release")?;
+    let kernel = back.kernel();
+    kernel.must_say("acpi: ACPI mode: ACPI_ENABLE 0xf0 written to SMI_CMD 0xb2, SCI_EN set ")?;
+    let left = kernel.must_say("acpi: legacy mode again: ACPI_DISABLE 0xf1 written to SMI_CMD, PM1a_CNT reads ")?;
+    if !left.trim_end().ends_with("SCI_EN clear") {
+        return Err(format!("the release left the machine in ACPI mode: {left}"));
+    }
+    eprintln!("  [acpi] {}", left.trim());
+    Ok(())
+}
+
+/// The owner's press: the server took it and asked for the stop, the
+/// supervisor stopped the machine for it, and the kernel's last word, sealed
+/// past the log, is the power-off's.
+fn acpi_press_on_metal(back: &metal::Readback) -> Result<(), String> {
+    let log = back.log();
+    if let Ok(none) = log.must_say("acpi_press_hold: no press in ") {
+        return Err(format!("the boot was held open and nobody pressed: {none}"));
+    }
+    let pressed = log.must_say("acpiserver: the power button was pressed, on SCI ")?;
+    log.must_say(&format!("{} (Shutdown)", bootlog::STOPPING))?;
+    back.after_the_reset()?.must_say(power::SHUTTING_DOWN)?;
+    eprintln!("  [acpi] {}", pressed.trim());
     Ok(())
 }
 

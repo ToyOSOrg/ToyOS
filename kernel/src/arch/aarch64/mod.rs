@@ -11,6 +11,7 @@ macro_rules! owed {
     };
 }
 
+pub mod acpi_mode;
 pub mod barrier;
 pub mod boot;
 pub mod cache;

@@ -1261,6 +1261,10 @@ device_classes! {
     /// Like `pci`, a class whose name is not the whole of the entry —
     /// `isa:<port>,…:<irq>,…` — and [`DeviceRequest`] is the one parser.
     Isa = 9 => "isa",
+    /// The machine's ACPI fixed hardware, served by whoever holds the claim
+    /// ([`crate::acpi`]): the kernel puts the machine in ACPI mode at the
+    /// mint, and the ports the firmware's tables name are the holder's.
+    Acpi = 10 => "acpi",
 }
 
 /// A PCI function named by what identifies the *card*, not the slot firmware

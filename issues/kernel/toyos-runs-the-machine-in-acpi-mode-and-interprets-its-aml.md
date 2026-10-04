@@ -67,3 +67,12 @@ power-off path (`SYS_SHUTDOWN`), and the boot's log records the press and that
 stop, and each EC query number once with its count: a T14 row reads them there.
 A second T14 row kills the server and reads `SCI_EN` clear in `PM1_CNT`
 afterwards, the kernel having written `ACPI_DISABLE` to `SMI_CMD`.
+
+**Open, the owner's to decide**: whether a machine whose firmware publishes no
+ECDT is put in ACPI mode. Stage 1 refuses it by name and leaves it in legacy
+mode, as it leaves a machine whose power button is a control method device:
+in legacy mode its firmware serves its embedded controller and its button,
+and in ACPI mode nothing would until the interpreter does. The cost: such a
+machine keeps its firmware interrupts, and this stage's exit cannot be met on
+it. A machine its firmware hands over in ACPI mode is served whatever it has,
+since nothing is written.

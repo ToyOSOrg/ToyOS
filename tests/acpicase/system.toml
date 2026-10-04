@@ -1,0 +1,40 @@
+# The ACPI server's death, judged on the T14 by `acpi_server_death`: the server
+# is built into the image and started by nothing but the one job, which holds
+# the claim it hands it. A boot that ends itself, as `tests/jobcase` does.
+[boot]
+start = ["logkeeper", "diskserver", "fileserver", "test-runner"]
+
+[programs.logkeeper]
+service = true
+syscap = ["logread"]
+
+[programs.acpiserver]
+
+# `device` because the job mints the `acpi` claim the server is handed;
+# `power` because the job list ends the machine, asking the supervisor.
+[programs.test-runner]
+receives = ["power"]
+syscap = ["device"]
+args = ["reboot"]
+
+[programs.toybox]
+
+[symlinks]
+"bin/reboot" = "/system/bin/toybox"
+
+# The block service: the NVMe controller this machine's DATA is on, driven
+# from userland through its claim. Started again when it ends; the claim goes
+# back with the process and is minted again for the next.
+[programs.diskserver]
+service = true
+restart = true
+serves = ["block"]
+devices = ["pci:1b36:0010"]
+
+# The file servers: DATA, the log and the running slot's volume, one process
+# each, serving every program the directories of its role. Started again when
+# one ends, on the same ports.
+[programs.fileserver]
+restart = true
+roles = ["data", "log", "boot"]
+receives = ["block"]

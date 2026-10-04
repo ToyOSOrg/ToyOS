@@ -280,7 +280,7 @@ pub fn read_watch(object: &KObjectRef) -> Option<WatchRef> {
             device_registry::DeviceType::PciFunction => {
                 d.pci_slot().map(|slot| WatchRef::Irq(crate::pcidev::watch(slot)))
             }
-            device_registry::DeviceType::Isa => {
+            device_registry::DeviceType::Isa | device_registry::DeviceType::Acpi => {
                 d.isa_row().map(|row| WatchRef::Irq(crate::isa::watch(row)))
             }
             device_registry::DeviceType::HdaAudio | device_registry::DeviceType::VirtioSound => {
@@ -328,6 +328,7 @@ fn close_ends_polls(object: &KObjectRef) -> bool {
             device_registry::DeviceType::Mouse
             | device_registry::DeviceType::PciFunction
             | device_registry::DeviceType::Isa
+            | device_registry::DeviceType::Acpi
             | device_registry::DeviceType::HdaAudio
             | device_registry::DeviceType::VirtioSound
             | device_registry::DeviceType::Framebuffer
@@ -436,8 +437,8 @@ pub fn read_device(
         }
         // The PCI shape, but the description is what binds the ports to the
         // reader, and nothing after it answers any other process.
-        device_registry::DeviceType::Isa => {
-            let row = claim.isa_row().expect("an ISA claim knows its row");
+        device_registry::DeviceType::Isa | device_registry::DeviceType::Acpi => {
+            let row = claim.isa_row().expect("an ISA or ACPI claim knows its row");
             let pid = crate::process::current_process();
             if !claim.info_read() {
                 crate::isa::bind(row, pid);
@@ -577,7 +578,8 @@ pub fn try_write(object: &KObjectRef, buf: &UserBytes) -> Option<u64> {
         // The whole lines `klogd`'s queue has room for, and a trailing partial one:
         // a short count is a writer ahead of the console, told so.
         KObjectRef::Console(c) => Some(c.write(buf) as u64),
-        KObjectRef::PipeRead(_) | KObjectRef::Device(_) | KObjectRef::Acceptor(_)
+        KObjectRef::Device(d) => Some(write_device(d, buf)),
+        KObjectRef::PipeRead(_) | KObjectRef::Acceptor(_)
         | KObjectRef::Inbox(_) | KObjectRef::SharedMem(_) | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
         | KObjectRef::Process(_) => {
@@ -644,9 +646,9 @@ pub fn fstat(object: &KObjectRef) -> Stat {
             device_registry::DeviceType::Keyboard => FileType::Keyboard,
             device_registry::DeviceType::Mouse => FileType::Mouse,
             device_registry::DeviceType::Framebuffer => FileType::Framebuffer,
-            device_registry::DeviceType::PciFunction | device_registry::DeviceType::Isa => {
-                FileType::Unknown
-            }
+            device_registry::DeviceType::PciFunction
+            | device_registry::DeviceType::Isa
+            | device_registry::DeviceType::Acpi => FileType::Unknown,
             device_registry::DeviceType::HdaAudio
             | device_registry::DeviceType::VirtioSound => FileType::Unknown,
             device_registry::DeviceType::Partition => FileType::Unknown,
@@ -727,7 +729,8 @@ fn partition_fsync(claim: &DeviceClaim) -> u64 {
         | device_registry::DeviceType::HdaAudio
         | device_registry::DeviceType::VirtioSound
         | device_registry::DeviceType::PciFunction
-        | device_registry::DeviceType::Isa => {
+        | device_registry::DeviceType::Isa
+        | device_registry::DeviceType::Acpi => {
             return SyscallError::PermissionDenied.to_u64();
         }
     }
@@ -793,7 +796,7 @@ pub fn has_data(object: &KObjectRef) -> bool {
             device_registry::DeviceType::PciFunction => {
                 !d.info_read() || d.pci_slot().is_some_and(crate::pcidev::has_irq)
             }
-            device_registry::DeviceType::Isa => {
+            device_registry::DeviceType::Isa | device_registry::DeviceType::Acpi => {
                 !d.info_read() || d.isa_row().is_some_and(crate::isa::has_irq)
             }
             device_registry::DeviceType::Framebuffer => true,
@@ -855,5 +858,37 @@ pub fn mark_tty(object: &KObjectRef) -> u64 {
         | KObjectRef::SysCap(_) | KObjectRef::SharedMem(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
         | KObjectRef::Process(_) => SyscallError::InvalidArgument.to_u64(),
+    }
+}
+
+/// A write to a claim: [`toyos_abi::acpi::ACK`] from the process its row's
+/// ports are bound to, which unmasks the row's level lines. Nothing else
+/// writes to a claim.
+fn write_device(claim: &DeviceClaim, buf: &UserBytes) -> u64 {
+    match claim.class() {
+        device_registry::DeviceType::Isa | device_registry::DeviceType::Acpi => {}
+        device_registry::DeviceType::Keyboard
+        | device_registry::DeviceType::Mouse
+        | device_registry::DeviceType::Framebuffer
+        | device_registry::DeviceType::HdaAudio
+        | device_registry::DeviceType::VirtioSound
+        | device_registry::DeviceType::PciFunction
+        | device_registry::DeviceType::Partition => return SyscallError::PermissionDenied.to_u64(),
+    }
+    let row = claim.isa_row().expect("an ISA or ACPI claim knows its row");
+    if !claim.info_read() || !crate::isa::bound_to(row, crate::process::current_process()) {
+        return SyscallError::PermissionDenied.to_u64();
+    }
+    let mut word = [0u8; 4];
+    if buf.len() != word.len() {
+        return SyscallError::InvalidArgument.to_u64();
+    }
+    buf.read_at(0, &mut word);
+    if u32::from_ne_bytes(word) != toyos_abi::acpi::ACK {
+        return SyscallError::InvalidArgument.to_u64();
+    }
+    match crate::isa::ack(row) {
+        Ok(()) => word.len() as u64,
+        Err(()) => SyscallError::InvalidArgument.to_u64(),
     }
 }

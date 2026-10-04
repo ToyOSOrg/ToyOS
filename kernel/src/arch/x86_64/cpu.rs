@@ -7,6 +7,7 @@
 use core::arch::asm;
 
 use super::control_regs::PcidActive;
+use super::pio::Port;
 
 #[inline]
 pub fn rdmsr(msr: u32) -> u64 {
@@ -335,19 +336,19 @@ pub fn halt() -> ! {
 }
 
 /// # Safety
-/// No fault in Ring 0; the caller owns which device answers at `port` and what the byte commands it to do.
+/// No fault in Ring 0; the caller owns what the byte commands the device at `port` to do.
 #[inline]
-pub unsafe fn outb(port: u16, value: u8) {
-    asm!("out dx, al", in("dx") port, in("al") value);
+pub unsafe fn outb(port: Port, value: u8) {
+    asm!("out dx, al", in("dx") port.number(), in("al") value);
 }
 
 /// One byte from an I/O port; safe because a read has no value a caller can get wrong.
 #[inline]
-pub fn inb(port: u16) -> u8 {
+pub fn inb(port: Port) -> u8 {
     let value: u8;
     // SAFETY: one instruction into the declared output, no memory operand, no fault in Ring 0 (outb's # Safety carries why).
     unsafe {
-        asm!("in al, dx", out("al") value, in("dx") port);
+        asm!("in al, dx", out("al") value, in("dx") port.number());
     }
     value
 }
@@ -355,16 +356,16 @@ pub fn inb(port: u16) -> u8 {
 /// # Safety
 /// `outb`'s contract, sixteen bits wide.
 #[inline]
-pub unsafe fn outw(port: u16, value: u16) {
-    asm!("out dx, ax", in("dx") port, in("ax") value);
+pub unsafe fn outw(port: Port, value: u16) {
+    asm!("out dx, ax", in("dx") port.number(), in("ax") value);
 }
 
 #[inline]
-pub fn inw(port: u16) -> u16 {
+pub fn inw(port: Port) -> u16 {
     let value: u16;
     // SAFETY: as `inb` — one instruction into the declared output, no memory operand.
     unsafe {
-        asm!("in ax, dx", out("ax") value, in("dx") port);
+        asm!("in ax, dx", out("ax") value, in("dx") port.number());
     }
     value
 }
@@ -372,8 +373,8 @@ pub fn inw(port: u16) -> u16 {
 /// One I/O bus cycle of delay, for a device that needs one between two commands.
 #[inline]
 pub fn io_wait() {
-    // SAFETY: port 0x80 is the unused POST diagnostic port, so this commands nothing.
-    unsafe { outb(0x80, 0) };
+    // SAFETY: the POST port, which nothing decodes, so this commands nothing.
+    unsafe { outb(super::pio::POST.port(0), 0) };
 }
 
 /// The CPU's free-running counter: the TSC, which counts from reset.

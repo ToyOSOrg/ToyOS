@@ -207,3 +207,19 @@ impl<T> Drop for LockGuard<'_, T> {
 }
 
 
+
+/// A lock taken only through a borrow of a closed `IrqGuard`: never before
+/// the mask, and never held past it, so an interrupt handler may take it too.
+#[cfg(not(feature = "loom"))]
+pub struct Masked<T>(Lock<T>);
+
+#[cfg(not(feature = "loom"))]
+impl<T> Masked<T> {
+    pub const fn new(value: T) -> Self {
+        Self(Lock::new(value))
+    }
+
+    pub fn lock<'a>(&'a self, _closed: &'a crate::arch::IrqGuard) -> LockGuard<'a, T> {
+        self.0.lock()
+    }
+}

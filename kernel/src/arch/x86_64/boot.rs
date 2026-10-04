@@ -135,6 +135,8 @@ pub fn timer() {
 /// The platform's own devices that are not PCI functions.
 pub fn platform_devices(rsdp_addr: u64) {
     super::i8042::init(rsdp_addr);
+    super::pio::fill_i8042_row();
+    super::acpi_mode::init(rsdp_addr);
 }
 
 /// Every other CPU, running.

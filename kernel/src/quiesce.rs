@@ -36,7 +36,7 @@
 //!
 //! Lock order: [`process::PROCESS_TABLE`] alone.
 
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering::AcqRel, Ordering::Relaxed};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering::AcqRel, Ordering::Acquire, Ordering::Relaxed};
 
 use toyos_quiesce::{must_stop, Record, Sweep, ThreadId};
 use kernel::sched::task::WaitClass;
@@ -109,6 +109,12 @@ pub fn claim_the_shutdown() -> bool {
 }
 
 static CLAIMED: AtomicBool = AtomicBool::new(false);
+
+/// Whether this boot's stop has been claimed: from then on no userland thread
+/// is let back into Ring 3.
+pub fn stopping() -> bool {
+    CLAIMED.load(Acquire)
+}
 
 /// What the stop's caller parks on between two sweeps.
 static PROGRESS: Watch = Watch::new();

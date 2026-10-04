@@ -5,11 +5,13 @@ mod common;
 
 use common::Machine;
 use toyos_abi::boot::RootBridgeWindow;
+use toyos_abi::acpi::Block;
 use toyos_acpi::{
-    century_of, dsdt_address, ecam_base, find_table, hpet_base, iapc_boot_arch, madt_entries,
-    memory_windows, psci, reset_register, rtc_century, s5_slp_typ, Century, IoApicEntry,
-    MadtEntry, Psci, Reset, SourceOverride, Table, TableError, FADT_PM1A_CNT_BLK, MADT_ENTRIES,
-    S5,
+    century_of, dsdt_address, ecam_base, find_table, fixed_hardware, hpet_base, iapc_boot_arch,
+    isa_line, madt_entries, memory_windows, psci, reset_register, rtc_century, s5_slp_typ, sci_line,
+    Century, FixedHardware, IoApicEntry, Line, MadtEntry, Polarity, PowerButton, Psci, Reset,
+    SourceOverride, Table, TableError, Trigger, FADT_FOR_FIXED_HARDWARE, FADT_PM1A_CNT_BLK,
+    MADT_ENTRIES, S5,
 };
 
 /// Where each table sat in that guest's physical memory. The XSDT's entries
@@ -199,4 +201,42 @@ fn a_second_firmwares_bytes_decode_to_that_machines_own_windows() {
             RootBridgeWindow { base: 0x40_0000_0000, length: 0x20_3dc0_0000 },
         ]
     );
+}
+
+/// q35's ICH9 power-management block at the base QEMU's firmware put it,
+/// 0x600, as the FADT names it: the blocks the `acpi_power_button` guest test
+/// takes its SCI through, and the 32-bit fields and their `X_` twins agreeing.
+#[test]
+fn the_q35_fadt_names_the_fixed_hardware_its_sci_is_served_through() {
+    let fadt = find_table(machine(), RSDP, b"FACP", FADT_FOR_FIXED_HARDWARE).expect("FADT");
+    assert_eq!(
+        fixed_hardware(&fadt),
+        Ok(FixedHardware {
+            sci_int: 9,
+            smi_cmd: Some(0xb2),
+            acpi_enable: 0x02,
+            acpi_disable: 0x03,
+            pm1a_event: Block { port: 0x600, len: 4 },
+            pm1a_control: Block { port: 0x604, len: 2 },
+            gpe0: Block { port: 0x620, len: 16 },
+            power_button: PowerButton::Fixed,
+        })
+    );
+}
+
+/// `ioapic: iso bus:irq->gsi [... 0:9->9 level/high ...]`: q35 names its SCI's
+/// trigger and polarity outright, so neither default is read.
+#[test]
+fn the_q35_madt_names_its_sci_level_and_active_high() {
+    let madt = find_table(machine(), RSDP, b"APIC", MADT_ENTRIES).expect("MADT");
+    let overrides: Vec<SourceOverride> = madt_entries(&madt)
+        .filter_map(|e| match e {
+            Ok(MadtEntry::SourceOverride(o)) => Some(o),
+            _ => None,
+        })
+        .collect();
+    let level_high = |gsi| Line { gsi, trigger: Trigger::Level, polarity: Polarity::High };
+    assert_eq!(sci_line(9, &overrides), level_high(9));
+    // The timer's override conforms, and the ISA bus's default is edge.
+    assert_eq!(isa_line(0, &overrides), Line { gsi: 2, trigger: Trigger::Edge, polarity: Polarity::High });
 }

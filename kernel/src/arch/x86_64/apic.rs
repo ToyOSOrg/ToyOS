@@ -56,6 +56,12 @@ pub fn msi_message(dest: u32, vector: u8) -> Result<(u32, u32), &'static str> {
 /// Calibrated LAPIC timer ticks per 10ms (computed on BSP, reused by APs).
 static TIMER_TICKS: AtomicU32 = AtomicU32::new(0);
 
+/// The spurious-interrupt vector register, whole (SDM Vol. 3A §11.9): the APIC
+/// enabled, the vector `arch::idt::spurious` gates, and every other bit
+/// clear — EOI-broadcast suppression among them, so an EOI for a level line
+/// reaches the I/O APIC and clears its Remote IRR.
+const SVR: u64 = 1 << 8 | super::idt::spurious::SPURIOUS_VECTOR as u64;
+
 /// Guards IPI sends before the APIC is enabled.
 static X2APIC_ENABLED: AtomicBool = AtomicBool::new(false);
 
@@ -64,9 +70,9 @@ fn enable_x2apic() {
     base |= (1 << 11) | (1 << 10);
     Reg::ApicBase.write(base);
 
-    // The low byte must match arch::idt::spurious's gate vector.
-    let svr = Reg::Svr.read();
-    Reg::Svr.write(svr | (1 << 8) | super::idt::spurious::SPURIOUS_VECTOR as u64);
+    Reg::Svr.write(SVR);
+    let held = Reg::Svr.read();
+    assert!(held == SVR, "LAPIC: SVR reads {held:#x} after {SVR:#x} was written");
 }
 
 /// Initialize the BSP's Local APIC in x2APIC mode.

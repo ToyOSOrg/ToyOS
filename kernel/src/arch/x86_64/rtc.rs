@@ -10,8 +10,8 @@ use crate::clock;
 use crate::time::{Bound, Duration};
 use toyos_wallclock::Civil;
 
-const CMOS_ADDR: u16 = 0x70;
-const CMOS_DATA: u16 = 0x71;
+const CMOS_ADDR: super::pio::Port = super::pio::CMOS.port(0);
+const CMOS_DATA: super::pio::Port = super::pio::CMOS.port(1);
 
 const SECONDS: u8 = 0x00;
 const MINUTES: u8 = 0x02;

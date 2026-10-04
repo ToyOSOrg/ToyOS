@@ -35,10 +35,11 @@ pub mod volatile;
 
 pub use ipc::Connection;
 pub use device::{
-    DmaRegion, FramebufferDev, HdaDev, Keyboard, Mouse, PartitionDev, PciDev, VirtioSoundDev,
+    AcpiDev, DmaRegion, FramebufferDev, HdaDev, Keyboard, Mouse, PartitionDev, PciDev, VirtioSoundDev,
 };
 
 pub use toyos_abi::RawHandle;
+pub use toyos_abi::ioport;
 
 /// Trait for types that wrap a kernel handle.
 ///

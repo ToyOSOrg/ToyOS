@@ -31,6 +31,8 @@ pub enum DeviceInfo {
     /// The ports and lines granted, as the selector named them, and the `isa`
     /// row they are.
     Isa(toyos_abi::syscall::IsaId, usize),
+    /// The fixed hardware's blocks, and the `isa` row they are.
+    Acpi(toyos_abi::acpi::AcpiInfo, usize),
 }
 
 /// The two scanout buffers and the cursor plane.
@@ -75,6 +77,7 @@ impl DeviceInfo {
             Self::PciFunction(info, _) => info.as_bytes().into(),
             Self::Partition(info) => info.as_bytes().into(),
             Self::Isa(set, _) => set.wire().iter().flat_map(|word| word.to_ne_bytes()).collect(),
+            Self::Acpi(info, _) => info.as_bytes().into(),
             Self::Hda(info, pcm) => {
                 let mut info = *info;
                 info.pcm = install_buffers(table, &[pcm])?[0];
@@ -119,7 +122,7 @@ impl DeviceClaim {
             _ => None,
         };
         let isa_row = match &info {
-            DeviceInfo::Isa(_, row) => Some(*row),
+            DeviceInfo::Isa(_, row) | DeviceInfo::Acpi(_, row) => Some(*row),
             _ => None,
         };
         Arc::new(Self {
@@ -145,7 +148,8 @@ impl DeviceClaim {
         self.pci_slot.map(usize::from)
     }
 
-    /// Which `isa` row this claim holds, for a claim on an ISA function.
+    /// Which `isa` row this claim holds, for a claim on an ISA function or the
+    /// ACPI fixed hardware.
     pub fn isa_row(&self) -> Option<usize> {
         self.isa_row
     }

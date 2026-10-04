@@ -4,13 +4,14 @@
 //! machine is reset by the same bound, which is the loop's recovery: logkeeper is
 //! dead after a kernel panic, so nothing more could be made durable anyway.
 
-use core::sync::atomic::{AtomicU16, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use toyos_tco::{
     Chipset, TCO1_CNT, TCO1_CNT_HALT, TCO1_CNT_RUN, TCO2_STS, TCO_BOOT_STS, TCO_RLD,
     TCO_SECOND_TO_STS, TCO_TMR, TCO_TMR_HLT, TIMER,
 };
 
+use crate::arch::pio::{self, Declared, Slot};
 use crate::drivers::pci::PciDevice;
 use crate::log;
 
@@ -29,8 +30,10 @@ const FEEDS_PER_BOUND: u64 = 4;
 const ARMED_ON_ARRIVAL: &str = "the bootloader had already armed the timer";
 const UNARMED_ON_ARRIVAL: &str = "nothing had armed the timer";
 
+/// The TCO block, declared by `init`.
+static TCO: Slot = Slot::empty();
 /// Written by `init` on the BSP before any AP exists, so a relaxed load is the whole of the ordering these need.
-static PORT: AtomicU16 = AtomicU16::new(0);
+static ARMED: AtomicBool = AtomicBool::new(false);
 static NEXT_FEED: AtomicU64 = AtomicU64::new(u64::MAX);
 static FEED_EVERY_NS: AtomicU64 = AtomicU64::new(0);
 
@@ -63,40 +66,50 @@ pub fn init(devices: &[PciDevice]) {
         }
     };
 
-    arm(row, port, timer);
+    // ICH9 and every PCH since: a 32-byte block.
+    let block = match toyos_userbound::Ports::new(port, 0x20).map(|run| pio::declare("the TCO watchdog", run)) {
+        Some(Ok(block)) => block,
+        refused => {
+            log!("watchdog: the TCO block at {port:#x} is not this kernel's to drive ({:?}) — not armed", refused.map(|r| r.err()));
+            return;
+        }
+    };
+    TCO.set(block);
+    arm(row, block, timer);
 }
 
-fn arm(row: &Chipset, port: u16, timer: u16) {
+fn arm(row: &Chipset, block: Declared, timer: u16) {
+    let port = block.ports().first();
     // Read before anything here is written: the bootloader arms the same timer
     // on the same port and hands over a machine already inside the bound, and
     // this is the only place that can say whether it did.
-    let cnt = crate::arch::cpu::inw(port + TCO1_CNT);
-    let tmr = crate::arch::cpu::inw(port + TCO_TMR) & toyos_tco::TMR_MASK;
+    let cnt = crate::arch::cpu::inw(block.port(TCO1_CNT));
+    let tmr = crate::arch::cpu::inw(block.port(TCO_TMR)) & toyos_tco::TMR_MASK;
     let already = cnt & TCO_TMR_HLT == 0 && tmr == TIMER;
     log!(
         "watchdog: TCO1_CNT={cnt:#06x} TCO_TMR={tmr} on arrival, so {}",
         if already { ARMED_ON_ARRIVAL } else { UNARMED_ON_ARRIVAL }
     );
 
-    let stale = crate::arch::cpu::inw(port + TCO2_STS);
+    let stale = crate::arch::cpu::inw(block.port(TCO2_STS));
     if stale & (TCO_SECOND_TO_STS | TCO_BOOT_STS) != 0 {
         log!("watchdog: the last boot ended in a TCO reset (TCO2_STS={stale:#06x})");
         // Cleared, so a reset is reported by the boot after it and not by every
         // boot after it.
         // SAFETY: as the arm below.
-        unsafe { crate::arch::cpu::outw(port + TCO2_STS, TCO_SECOND_TO_STS | TCO_BOOT_STS) };
+        unsafe { crate::arch::cpu::outw(block.port(TCO2_STS), TCO_SECOND_TO_STS | TCO_BOOT_STS) };
     }
 
-    // SAFETY: `port` is `toyos_tco`'s answer for the row this machine's own PCI ids matched, and every offset is inside that row's block.
+    // SAFETY: the block `toyos_tco` answered for the row this machine's own PCI ids matched, declared, and every offset is inside it.
     unsafe {
-        crate::arch::cpu::outw(port + TCO_TMR, timer);
-        crate::arch::cpu::outw(port + TCO1_CNT, TCO1_CNT_RUN);
+        crate::arch::cpu::outw(block.port(TCO_TMR), timer);
+        crate::arch::cpu::outw(block.port(TCO1_CNT), TCO1_CNT_RUN);
         // Reloading is also what returns the expiry count to zero.
-        crate::arch::cpu::outw(port + TCO_RLD, 1);
+        crate::arch::cpu::outw(block.port(TCO_RLD), 1);
     }
 
     // Read back: firmware may have set `TCO_LOCK`, which makes `TCO_TMR_HLT` unclearable.
-    let cnt = crate::arch::cpu::inw(port + TCO1_CNT);
+    let cnt = crate::arch::cpu::inw(block.port(TCO1_CNT));
     if cnt & TCO_TMR_HLT != 0 {
         log!("watchdog: {port:#x} kept the timer halted (TCO1_CNT={cnt:#06x}) — not armed");
         return;
@@ -105,7 +118,7 @@ fn arm(row: &Chipset, port: u16, timer: u16) {
     let bound_ms = toyos_tco::bound_of(timer);
     FEED_EVERY_NS.store(bound_ms * 1_000_000 / FEEDS_PER_BOUND, Ordering::Relaxed);
     NEXT_FEED.store(0, Ordering::Relaxed);
-    PORT.store(port, Ordering::Relaxed);
+    ARMED.store(true, Ordering::Relaxed);
     log!(
         "watchdog: {:04x}:{:04x} TCO at {port:#x} TCO_TMR={timer} — this machine resets if no \
          scheduler pass runs for {bound_ms}ms",
@@ -121,26 +134,26 @@ pub fn feed(now: u64) {
     if now < due {
         return;
     }
-    let port = PORT.load(Ordering::Relaxed);
-    if port == 0 {
+    if !ARMED.load(Ordering::Relaxed) {
         return;
     }
+    let block = TCO.get().expect("watchdog: armed with no TCO block");
     let next = now + FEED_EVERY_NS.load(Ordering::Relaxed);
     // A claim, so concurrent CPUs write the port once between them rather than each.
     if NEXT_FEED.compare_exchange(due, next, Ordering::Relaxed, Ordering::Relaxed).is_err() {
         return;
     }
     // SAFETY: as `arm`'s, and a reload racing `disarm` restarts nothing — `hw/acpi/ich9_tco.c:146` reloads only while `TCO_TMR_HLT` is clear, and the PCH half is unverified.
-    unsafe { crate::arch::cpu::outw(port + TCO_RLD, 1) };
+    unsafe { crate::arch::cpu::outw(block.port(TCO_RLD), 1) };
 }
 
 pub fn disarm() {
-    let port = PORT.swap(0, Ordering::Relaxed);
-    if port == 0 {
+    if !ARMED.swap(false, Ordering::Relaxed) {
         return;
     }
+    let block = TCO.get().expect("watchdog: armed with no TCO block");
     NEXT_FEED.store(u64::MAX, Ordering::Relaxed);
-    // SAFETY: as `arm`'s, on the port this call took out of `PORT`.
-    unsafe { crate::arch::cpu::outw(port + TCO1_CNT, TCO1_CNT_HALT) };
+    // SAFETY: as `arm`'s.
+    unsafe { crate::arch::cpu::outw(block.port(TCO1_CNT), TCO1_CNT_HALT) };
     log!("watchdog: disarmed");
 }
