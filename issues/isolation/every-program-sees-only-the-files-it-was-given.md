@@ -56,8 +56,14 @@ was handed, so isolating people follows from isolating programs.
   program.
 
 **Ruled** (owner, 2026-10-04), **the local desktop, "Desktop counts"**: the
-local desktop is a login session, so `swap` and `update` run from its shell.
-The compositor's `login = true` in `system.toml` is the whole of it.
+local desktop is a login session before a greeter authenticates anybody, so
+`swap` and `update` run from its shell. His words: "You can run swap/update
+from the desktop shell, as today. After #709, untrusted desktop programs no
+longer hold the launch right anyway, so excluding the desktop would mostly
+just block you." That premise holds while only the compositor, terminal,
+shell, toybox and sshserver rows list `starts` and no `/apps` row does. The
+compositor's `login = true` in `system.toml` is the whole of it. Whether the
+desktop stays one once stage 3's local greeter exists is not ruled.
 
 Unix permission bits and numeric user ids are rejected: they leave every path
 nameable by every program and make confused-deputy bugs structural.
