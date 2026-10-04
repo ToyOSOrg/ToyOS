@@ -288,7 +288,8 @@ impl Domain {
             return Err(IommuError::WindowBelowMemory { translatable, floor, top });
         }
         let ceiling = ceiling(translatable, floor, reserved);
-        if ceiling < floor || ceiling - floor < room.next_multiple_of(PAGE_2M) {
+        // At least one leaf, whatever was asked: a domain with none is no domain.
+        if ceiling.saturating_sub(floor) < room.next_multiple_of(PAGE_2M).max(PAGE_2M) {
             return Err(IommuError::NoRoom { floor, ceiling, room });
         }
         Ok(Self { root: tables.alloc(), id, width, floor, ceiling, next: floor })

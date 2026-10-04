@@ -227,10 +227,13 @@ pub fn msi(source: StreamId, vector: u8, dest: u32) -> Result<Msi, Refused> {
 pub fn claim(slot: usize, source: StreamId, vector: u8) -> Msi {
     let (index, read) = {
         let remap = REMAP.lock();
-        let (Some(table), Ok(index)) = (remap.table, u16::try_from(slot)) else {
+        let Some(table) = remap.table else {
             panic!("iommu: claim slot {slot} written with no table armed");
         };
-        assert!(index < remap.claims, "iommu: claim slot {slot} has no entry of its own");
+        let index = u16::try_from(slot)
+            .ok()
+            .filter(|index| *index < remap.claims)
+            .unwrap_or_else(|| panic!("iommu: claim slot {slot} has no entry of its own"));
         // Not present since the last release, so the high half written first
         // reaches nothing the unit can walk.
         assert!(
