@@ -1,7 +1,7 @@
-//! The published framebuffer descriptor: a seqlock whose payload is atomic
-//! words, so a reader racing the one publisher reads torn words it throws
-//! away rather than racing a plain write (a data race, and undefined, in the
-//! Rust memory model whatever the check after it concludes).
+//! A value one publisher replaces while others read it with no lock: a seqlock
+//! whose payload is atomic words, so a reader racing the publisher reads torn
+//! words it throws away rather than racing a plain write (a data race, and
+//! undefined, in the Rust memory model whatever the check after it concludes).
 //!
 //! The writer marks the sequence odd, fences `Release`, stores the words
 //! `Relaxed` and marks it even with a `Release` store; the reader loads the
@@ -16,22 +16,19 @@ use core::sync::atomic::{fence, AtomicU32, AtomicU64, Ordering};
 #[cfg(feature = "loom")]
 use loom::sync::atomic::{fence, AtomicU32, AtomicU64, Ordering};
 
-/// Words in one descriptor.
-pub const WORDS: usize = 4;
-
-/// Tries a snapshot makes before answering that the descriptor is changing.
+/// Tries a snapshot makes before answering that the value is changing.
 const TRIES: usize = 4;
 
-pub struct Published {
+pub struct Published<const N: usize> {
     seq: AtomicU32,
-    words: [AtomicU64; WORDS],
+    words: [AtomicU64; N],
 }
 
-impl Published {
-    // Must stay `const`: the kernel's is a `static`, and loom's atomics have no const constructor.
+impl<const N: usize> Published<N> {
+    // Must stay `const`: the kernel's are `static`s, and loom's atomics have no const constructor.
     #[cfg(not(feature = "loom"))]
     pub const fn new() -> Self {
-        Self { seq: AtomicU32::new(0), words: [const { AtomicU64::new(0) }; WORDS] }
+        Self { seq: AtomicU32::new(0), words: [const { AtomicU64::new(0) }; N] }
     }
 
     #[allow(clippy::new_without_default)]
@@ -40,10 +37,11 @@ impl Published {
         Self { seq: AtomicU32::new(0), words: core::array::from_fn(|_| AtomicU64::new(0)) }
     }
 
-    /// Replace the descriptor. One publisher at a time: the caller's own
-    /// exclusion (the boot sequence, a mode set's single-CPU window) is what
-    /// makes the load-then-store of `seq` sound.
-    pub fn publish(&self, words: [u64; WORDS]) {
+    /// Replace the value. One publisher at a time: the caller's own exclusion
+    /// (the boot sequence, a mode set's single-CPU window, the one CPU a
+    /// block belongs to with its interrupts closed) is what makes the
+    /// load-then-store of `seq` sound.
+    pub fn publish(&self, words: [u64; N]) {
         let seq = self.seq.load(Ordering::Relaxed);
         self.seq.store(seq.wrapping_add(1), Ordering::Relaxed);
         // Orders the odd mark before every word below: a reader that sees a
@@ -56,9 +54,9 @@ impl Published {
         self.seq.store(seq.wrapping_add(2), Ordering::Release);
     }
 
-    /// The descriptor, whole, or `None` when every try met a publication in
+    /// The value, whole, or `None` when every try met a publication in
     /// progress.
-    pub fn snapshot(&self) -> Option<[u64; WORDS]> {
+    pub fn snapshot(&self) -> Option<[u64; N]> {
         for _ in 0..TRIES {
             let before = self.seq.load(Ordering::Acquire);
             if before & 1 != 0 {

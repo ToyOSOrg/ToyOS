@@ -137,10 +137,31 @@ impl Rights {
     ///
     /// [`SYS_DEVICE_INVENTORY`]: crate::syscall::SYS_DEVICE_INVENTORY
     pub const INVENTORY: Rights = Rights(1 << 12);
+    /// On a `SysCap`: read the machine's counters.
+    ///
+    /// [`SYS_COUNTERS`] answers, per CPU, its own clock reading and how many
+    /// times firmware took it over, `MSR_SMI_COUNT` where the CPU counts that:
+    /// what the machine is doing, not what a program on it does. The counters
+    /// that time programs need [`TRACE`](Self::TRACE) beside this.
+    /// `inspect` holds it, and `test-runner`.
+    ///
+    /// [`SYS_COUNTERS`]: crate::syscall::SYS_COUNTERS
+    pub const COUNTERS: Rights = Rights(1 << 13);
+    /// On a `SysCap`: read what times the work of every other program.
+    ///
+    /// Beside [`COUNTERS`](Self::COUNTERS), [`SYS_COUNTERS`] answers each
+    /// CPU's `APERF` and `MPERF` — its frequency and busy fraction, the
+    /// Hertzbleed power channel — and the kicks it took, the wake-ups that time
+    /// keystrokes. Admin tools hold it, `inspect` and `test-runner`; no
+    /// ordinary program and no toybox applet does while a manifest row grants
+    /// a whole binary.
+    ///
+    /// [`SYS_COUNTERS`]: crate::syscall::SYS_COUNTERS
+    pub const TRACE: Rights = Rights(1 << 14);
 
     /// Every bit that has a caller. A wider set than this is a bug in whoever
     /// composed it, not a right nobody uses.
-    pub const ALL: Rights = Rights(0x1fff);
+    pub const ALL: Rights = Rights(0x7fff);
 
     pub const fn from_bits(bits: u32) -> Option<Self> {
         if bits & !Self::ALL.0 == 0 { Some(Rights(bits)) } else { None }
@@ -171,7 +192,7 @@ impl Rights {
 /// refusal saying which right was missing.
 impl core::fmt::Debug for Rights {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        const NAMES: [(Rights, &str); 13] = [
+        const NAMES: [(Rights, &str); 15] = [
             (Rights::DUP, "DUP"),
             (Rights::TRANSFER, "TRANSFER"),
             (Rights::READ, "READ"),
@@ -185,6 +206,8 @@ impl core::fmt::Debug for Rights {
             (Rights::POWER, "POWER"),
             (Rights::ROSTER, "ROSTER"),
             (Rights::INVENTORY, "INVENTORY"),
+            (Rights::COUNTERS, "COUNTERS"),
+            (Rights::TRACE, "TRACE"),
         ];
         if self.0 == 0 {
             return f.write_str("NONE");

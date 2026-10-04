@@ -560,6 +560,7 @@ dependencies = [
  "toyos-blackbox",
  "toyos-blockhold",
  "toyos-bootmap",
+ "toyos-cpuvuln",
  "toyos-dma",
  "toyos-elf",
  "toyos-elide",

@@ -41,6 +41,7 @@ dependencies = [
  "toyos-blackbox",
  "toyos-blockhold",
  "toyos-bootmap",
+ "toyos-cpuvuln",
  "toyos-dma",
  "toyos-elf",
  "toyos-elide",
@@ -98,6 +99,10 @@ version = "0.1.0"
 dependencies = [
  "toyos-abi",
 ]
+
+[[package]]
+name = "toyos-cpuvuln"
+version = "0.1.0"
 
 [[package]]
 name = "toyos-dma"

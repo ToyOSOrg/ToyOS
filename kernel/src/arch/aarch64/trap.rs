@@ -181,7 +181,11 @@ fn irq(from_el0: bool) {
         irqchip::SGI_HALT => cpu::halt(),
         irqchip::SGI_OFF => super::power::cpu_off(),
         irqchip::SGI_KICK => {
-            percpu::irq_took(Source::Timer);
+            percpu::irq_took(Source::Kick);
+            // Raised as an interrupt entry raises it, so the answer's post runs no pass here.
+            percpu::preempt_count_up();
+            crate::counters::serve_here();
+            percpu::preempt_count_down();
             irqchip::end(intid);
             if from_el0 {
                 crate::scheduler::do_preempt();

@@ -25,7 +25,7 @@ use crate::loader::{alloc_kernel_stack, thread_start, TlsBlock};
 
 pub use toyos_abi::{Pid, Tid};
 pub use crate::scheduler::TaskId;
-use toyos_abi::syscall::{EndowEntry, SyscallError};
+use toyos_abi::syscall::{EndowEntry, SyscallError, MAX_LIBRARIES, MAX_REGIONS};
 
 /// The lifecycle's decisions; this file only performs them.
 pub use kernel::proclife::{ThreadLocation, Watch};
@@ -400,6 +400,9 @@ impl Lifecycle for ProcessEntry {
             f(tid, thread.state);
         }
     }
+    fn thread_count(&self) -> usize {
+        self.threads.len()
+    }
     fn node(&self) -> &Node { &self.node }
     fn node_mut(&mut self) -> &mut Node { &mut self.node }
 }
@@ -506,6 +509,9 @@ pub struct ElfInfo {
     /// Paths of dlopen'd libraries (parallel to loaded_libs).
     pub lib_paths: Vec<String>,
 }
+
+// The ledger stops at `MAX_LIBRARIES`, and a doubling from below it stays inside one heap allocation.
+const _: () = assert!(2 * MAX_LIBRARIES * core::mem::size_of::<elf::LoadedLib>() <= crate::mm::MAX_HEAP_ALLOC);
 
 impl ElfInfo {
     /// The state of a process with no ELF at all (a kernel thread). Not `Default`: `next_tls_module_id`'s only honest default is 1, not 0; written here, not at the one call site, so a field added to [`ElfInfo`] stops this build too.
@@ -656,6 +662,12 @@ pub struct MmapRegion {
     /// `None` for a `MmapProt::NONE` mapping: the range is reserved, but no physical page backs an access whose whole purpose is to fault.
     pub _pages: Option<PageAlloc>,
 }
+
+// One region per record, and a power of two: the ledger's doubling stops at it, inside one heap allocation.
+const _: () = assert!(
+    MAX_REGIONS.is_power_of_two()
+        && MAX_REGIONS * core::mem::size_of::<MmapRegion>() <= crate::mm::MAX_HEAP_ALLOC
+);
 
 
 /// Zero-sized proof of running on the per-CPU idle stack; required by `collect_orphan_zombies` so it never drops the thread entry it runs on.
@@ -920,7 +932,7 @@ pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Op
         // Not `is_yes()`: a missing entry here means this thread's own process was reaped out from under it, which panics rather than refuses.
         match proclife_spawn::admit_thread_start(table, parent_process) {
             proclife_spawn::Admit::Yes => {}
-            proclife_spawn::Admit::TearingDown => return None,
+            proclife_spawn::Admit::TearingDown | proclife_spawn::Admit::Full => return None,
             proclife_spawn::Admit::NoSuchProcess => {
                 panic!("spawn_thread: pid {parent_process} is spawning and is not in the table")
             }
@@ -1818,6 +1830,8 @@ pub fn ap_idle() -> ! {
     // makes the BSP's mappings visible, and this settles every TLB
     // invalidation the wait could not take.
     crate::arch::tlb::join();
+
+    crate::counters::bring_up();
 
     // Once this CPU is committed and about to run something: the counter is
     // per CPU, so a CPU nobody arms here is one the hard-lockup bound does not cover.

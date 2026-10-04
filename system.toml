@@ -99,11 +99,12 @@ slots = true
 receives = ["netstack"]
 
 # The reader of every owner's `inspect` answer: a connector to each owner's
-# port, and `inventory` for the kernel's `dev.*`, are the whole of what it can
-# observe.
+# port, `inventory` for the kernel's `dev.*`, and `counters` and `trace` for its
+# `kernel.*`, are the whole of what it can observe. `trace` makes it an admin
+# tool: every CPU's frequency and wake-ups are what time other programs.
 [programs.inspect]
 receives = ["netstack", "soundserver", "log", "compositor"]
-syscap = ["inventory"]
+syscap = ["inventory", "counters", "trace"]
 
 # Names a killed program's frames from the file and offset the kernel records:
 # it reads the files a record names and holds nothing else.

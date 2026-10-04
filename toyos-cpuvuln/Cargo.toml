@@ -3,7 +3,7 @@
 
 [package]
 name = "toyos-cpuvuln"
-description = "Linux's verdict on each speculative-execution vulnerability and its mitigation choice, from a CPU's CPUID and MSR facts, pure."
+description = "Linux's verdicts from a CPU's CPUID and MSR facts, pure: each speculative-execution vulnerability and its mitigation choice, and which model-specific counters the CPU has."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

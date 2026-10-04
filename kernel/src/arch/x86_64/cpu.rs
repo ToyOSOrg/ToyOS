@@ -28,6 +28,15 @@ pub unsafe fn wrmsr(msr: u32, value: u64) {
     asm!("wrmsr", in("ecx") msr, in("eax") low, in("edx") high, options(nomem, nostack));
 }
 
+/// Every earlier load and store done before what follows, a `wrmsr` among it:
+/// Linux's `weak_wrmsr_fence`. No `nomem`, so the compiler moves no access
+/// across it either.
+#[inline]
+pub fn wrmsr_fence() {
+    // SAFETY: two fences; no register, flag or memory changes.
+    unsafe { asm!("mfence", "lfence", options(nostack, preserves_flags)) };
+}
+
 #[inline]
 pub fn rdtsc() -> u64 {
     let lo: u32;
