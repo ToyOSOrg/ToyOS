@@ -10,8 +10,9 @@ Owner ruling, 2026-09-29: on a machine with no IOMMU unit a driver signed and
 shipped in the ToyOS image may claim a device, and no other may.
 It is the same driver code as on a machine with a unit, never a second
 driver: the kernel's DMA layer hands it a physical address where there is no
-unit and a domain address where there is (`DeviceSpace`,
-`kernel/src/iommu/mod.rs`). Such a machine states plainly that it has no
+unit and a domain address where there is. A claim's space is an
+`iommu::OwnSpace` (`kernel/src/iommu/mod.rs`), which has no untranslated form
+until the ruled path adds one. Such a machine states plainly that it has no
 isolation — the full isolation guarantee needs an IOMMU, and there a bad
 signed driver can still crash or corrupt the system.
 
