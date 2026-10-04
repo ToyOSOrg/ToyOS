@@ -617,10 +617,11 @@ pub fn fork_checkout(root: &Path, lock: &mut Held) -> PathBuf {
                     at.display(),
                 );
             }
-            git_run(&fork, &["checkout", "--detach", "-q", &pinned]);
             for (at, commit) in &nested {
                 git_run(at, &["checkout", "--detach", "-q", commit]);
             }
+            // Last, so a move killed before it is asked for again: `HEAD` alone decides.
+            git_run(&fork, &["checkout", "--detach", "-q", &pinned]);
             eprintln!("{} was at {head}, and this tree pins {pinned}: checked it out", fork.display());
         },
     );
