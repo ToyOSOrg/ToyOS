@@ -10,8 +10,8 @@ ToyOS answers what it is doing, what it did and what it is made of from
 inside itself, with programs it ships. Today the answers are scattered: the
 log carries numbers in prose (`irq:`, `tlb:`, `PMM:`, `sched:`, `syscalls:`),
 the diary computes no lateness, nothing reads RAPL or C-state
-residency, a process's memory is a byte sum
-that reads 0 under contention, and a user symbol is resolved by the kernel.
+residency, and a process's memory is a byte sum that reads 0 under
+contention.
 Each pillar's own track carries its steps and its exits; this track holds the
 counters and sizes pillars, which no other track does.
 

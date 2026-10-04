@@ -13,7 +13,6 @@ use crate::process::{
     ThreadEntry, PROCESS_TABLE, THREAD_NAME_LEN,
 };
 use crate::scheduler::{self, TaskId};
-use crate::symbols::SymbolTable;
 use crate::sync::Lock;
 use kernel::proclife::Processes;
 
@@ -92,9 +91,6 @@ pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64) -> ThreadSched
     let len = name.len().min(THREAD_NAME_LEN - 1);
     short[..len].copy_from_slice(&name.as_bytes()[..len]);
 
-    // No user half: the empty table, and frames resolve through `symbols::resolve_kernel`.
-    let syms = Arc::new(SymbolTable::empty());
-
     // One hold across insert and place: a visible pid already has its thread scheduled.
     let mut guard = PROCESS_TABLE.lock();
     let table = guard.as_mut().expect("kthread: spawned before process::init");
@@ -102,7 +98,8 @@ pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64) -> ThreadSched
         crate::object::process::ProcessObject::new(pid),
         short,
         Arc::new(Lock::new(kernel_process_data(name))),
-        Arc::clone(&syms),
+        // No user image: its frames resolve through `symbols::resolve_kernel`.
+        None,
         ThreadEntry::new(Arc::new(Lock::new(kernel_thread_data()))),
         kernel::proclife::Node::root(),
     ));
@@ -115,7 +112,7 @@ pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64) -> ThreadSched
         entry_sp,
         crate::mm::paging::kernel().clone(),
         0,
-        syms,
+        None,
     );
     table
         .get_mut(pid)

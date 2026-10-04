@@ -296,7 +296,7 @@ pub fn enqueue_new(
     entry_sp: u64,
     address_space: crate::process::PageTables,
     thread_pointer: u64,
-    symbols: alloc::sync::Arc<crate::symbols::SymbolTable>,
+    image: Option<alloc::sync::Arc<crate::process::UserImage>>,
 ) -> (ThreadSched, CpuId) {
     driver::spawn(NewTask {
         id,
@@ -305,7 +305,7 @@ pub fn enqueue_new(
         address_space,
         thread_pointer,
         share: share_for(id.0),
-        symbols,
+        image,
     })
 }
 

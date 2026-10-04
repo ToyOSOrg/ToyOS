@@ -24,7 +24,7 @@ fn user_backtrace(start_rbp: u64, max_frames: usize) {
         };
         let Ok(return_addr) = read_user_u64(rbp + 8) else { break };
         if return_addr == 0 { break; }
-        process::resolve_user_symbol_return(return_addr).log_bare(return_addr);
+        process::record_user_frame_return(return_addr).log_bare(return_addr);
         rbp = saved_rbp;
     }
 }
@@ -211,7 +211,7 @@ fn crash_report_exception(ctx: &ExceptionContext) {
     log!("  rip:");
     if ring3 {
         if pid.is_some() {
-            process::resolve_user_symbol(ctx.frame.rip).log_bare(ctx.frame.rip);
+            process::record_user_frame(ctx.frame.rip).log_bare(ctx.frame.rip);
         } else {
             log!("    {:#x}", ctx.frame.rip);
         }
@@ -267,7 +267,7 @@ fn crash_report_exception(ctx: &ExceptionContext) {
             log!("  Syscall: num={} user_rip={:#x} user_rsp={:#x}",
                 percpu::syscall_num(), user_rip, percpu::user_rsp());
             log!("  User backtrace:");
-            process::resolve_user_symbol(user_rip).log_bare(user_rip);
+            process::record_user_frame(user_rip).log_bare(user_rip);
             user_backtrace(percpu::syscall_rbp(), 20);
         }
     }
@@ -325,7 +325,7 @@ fn crash_report_panic(info: &core::panic::PanicInfo, rbp: u64) {
             log!("  Syscall: num={} user_rip={:#x} user_rsp={:#x}",
                 percpu::syscall_num(), user_rip, percpu::user_rsp());
             log!("  User backtrace:");
-            process::resolve_user_symbol(user_rip).log_bare(user_rip);
+            process::record_user_frame(user_rip).log_bare(user_rip);
             user_backtrace(percpu::syscall_rbp(), 20);
         }
     }
@@ -391,7 +391,7 @@ pub(super) fn double_fault_handler(frame: &TrapFrame) -> ! {
 
                     log!("  User backtrace:");
                     if pid.is_some() {
-                        process::resolve_user_symbol(maybe_rip).log_bare(maybe_rip);
+                        process::record_user_frame(maybe_rip).log_bare(maybe_rip);
                         user_backtrace(user_rbp, 20);
                     } else {
                         log!("    {:#x}", maybe_rip);

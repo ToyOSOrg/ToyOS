@@ -2251,6 +2251,32 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
     } else {
         wait_for_ready(&mut child, &rx, options, &uart_log)
     };
+    // The ready marker is test-runner's, which the supervisor starts after its
+    // first line, so a boot that reached it has said its build, and the kernel
+    // named the ROOT that carries it before that. Both are read off the image
+    // this boot was handed, never off the checkout, which may have moved since.
+    if options.ready_marker == DEFAULT_READY && !options.mute {
+        let (root, bytes) = toyos_build::image::root_file_on(&boot_image, toyos_osrelease::PATH)
+            .unwrap_or_else(|why| panic!("[qemu] {why}"));
+        let release = toyos_osrelease::parse(&bytes)
+            .unwrap_or_else(|why| panic!("[qemu] {} on {} is not the build's: {why:?}", toyos_osrelease::PATH, boot_image.display()));
+        let named = format!("boot: root={root}");
+        let said = format!(
+            "{}{} {}, committed {} UTC, toolchain {}, {}",
+            toyos_osrelease::SAID,
+            release.commit.as_str(),
+            release.tree,
+            toyos_wallclock::Civil::from_unix_secs(release.committed),
+            release.toolchain.as_str(),
+            release.arch.machine()
+        );
+        for line in [&named, &said] {
+            if !boot_log.lines().any(|l| l.contains(line.as_str())) {
+                let _ = child.kill();
+                panic!("[qemu] the boot never said `{line}`, of the image this run built\nconsole:\n{boot_log}");
+            }
+        }
+    }
 
     QemuInstance {
         child,

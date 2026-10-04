@@ -119,6 +119,10 @@ syscap = ["inventory", "counters", "trace"]
 [programs.trace]
 syscap = ["trace"]
 
+# Names a killed program's frames from the file and offset the kernel records:
+# it reads the files a record names and holds nothing else.
+[programs.symbolize]
+
 [programs.filepicker]
 service = true
 serves = ["filepicker"]
