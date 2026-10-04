@@ -30,7 +30,7 @@ no-clamp = []
 end-keeps-inflight = []
 
 [dependencies]
-toyos-untrusted = { path = "../toyos-untrusted" }
+toyos-untrusted = { path = "../../toyos-untrusted" }
 
 [dev-dependencies]
 loom = "0.7"

@@ -1223,13 +1223,6 @@ name = "toyos-cpuvuln"
 version = "0.1.0"
 
 [[package]]
-name = "toyos-desktop"
-version = "0.1.0"
-dependencies = [
- "toyos-abi",
-]
-
-[[package]]
 name = "toyos-dhcp"
 version = "0.1.0"
 dependencies = [
@@ -1332,18 +1325,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "toyos-mdns"
-version = "0.1.0"
-dependencies = [
- "toyos-dns",
-]
-
-[[package]]
 name = "toyos-microcode"
-version = "0.1.0"
-
-[[package]]
-name = "toyos-mixer"
 version = "0.1.0"
 
 [[package]]
