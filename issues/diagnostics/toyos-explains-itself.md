@@ -49,7 +49,6 @@ rest were not put to him.
   bound reads as stale.
 - *Told*: one sampler per CPU, the hard-lockup detector's PMU NMI, at one
   fixed rate held by a profile handle.
-- The roast's: a Ring 3 sample raises a self-IPI.
 - The kick leaves the timer's vector for one cross-CPU request vector, which
   counter requests share.
 
