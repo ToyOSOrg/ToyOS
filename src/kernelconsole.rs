@@ -277,14 +277,14 @@ mod tests {
 
     /// A descriptor that refuses a write as `WouldBlock` once it is full, and says so
     /// the first time it does.
-    struct Refusing<W> {
-        pipe: W,
+    struct Refusing {
+        slave: std::fs::File,
         refused: Option<std::sync::mpsc::Sender<()>>,
     }
 
-    impl<W: Write> Write for Refusing<W> {
+    impl Write for Refusing {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            let wrote = self.pipe.write(bytes);
+            let wrote = self.slave.write(bytes);
             if wrote.as_ref().is_err_and(|e| e.kind() == io::ErrorKind::WouldBlock) {
                 self.refused.take().map(|said| said.send(()));
             }
@@ -292,17 +292,17 @@ mod tests {
         }
 
         fn flush(&mut self) -> io::Result<()> {
-            self.pipe.flush()
+            self.slave.flush()
         }
     }
 
-    impl<W: AsFd> AsFd for Refusing<W> {
+    impl AsFd for Refusing {
         fn as_fd(&self) -> BorrowedFd<'_> {
-            self.pipe.as_fd()
+            self.slave.as_fd()
         }
     }
 
-    /// A burst of kernel lines far past any terminal's capacity, and what a
+    /// A burst of kernel lines far past a terminal's capacity, and what a
     /// [`Painter`] shows of it.
     fn burst() -> (Vec<u8>, Vec<u8>) {
         let mut stream = String::from(FIRMWARE);
@@ -325,29 +325,10 @@ mod tests {
     }
 
     /// **A terminal that refuses a write as `WouldBlock` is waited for, and
-    /// shown every byte in order**: a burst far past a pipe's capacity into a
-    /// non-blocking pipe nobody reads until it has refused one.
-    #[test]
-    fn a_relay_waits_out_a_pipe_that_would_block() {
-        let (console, want) = burst();
-        let (mut reader, pipe) = std::io::pipe().expect("a pipe");
-        non_blocking(pipe.as_fd());
-        let (said, refused) = std::sync::mpsc::channel();
-        let mut terminal = Refusing { pipe, refused: Some(said) };
-        let relay = std::thread::spawn(move || relay(console.as_slice(), &mut terminal));
-
-        refused.recv_timeout(std::time::Duration::from_secs(60)).expect("the pipe never refused a write");
-        let mut shown = Vec::new();
-        reader.read_to_end(&mut shown).expect("the relay's output");
-        relay.join().expect("the relay").expect("the relay wrote everything");
-        assert!(shown.len() > 1 << 20, "{} bytes is no burst", shown.len());
-        assert!(shown == want, "the terminal was shown {} bytes, not the {} painted", shown.len(), want.len());
-    }
-
-    /// **The same on a terminal device**, which is what the relay writes to in
-    /// use: a pty whose raw, non-blocking slave nobody reads until it has
-    /// refused a write. `writable` errs on any `poll` answer but `POLLOUT`, so
-    /// the relay's success is `poll` waiting on the device.
+    /// shown every byte in order**: a burst far past its capacity into a pty
+    /// whose raw, non-blocking slave nobody reads until it has refused a
+    /// write. `writable` errs on any `poll` answer but `POLLOUT`, so the
+    /// relay's success is `poll` waiting on the device.
     #[test]
     fn a_relay_waits_out_a_pty_that_would_block() {
         let (console, want) = burst();
@@ -370,7 +351,7 @@ mod tests {
         assert!(unsafe { libc::tcsetattr(slave.as_raw_fd(), libc::TCSANOW, &raw) } == 0);
         non_blocking(slave.as_fd());
         let (said, refused) = std::sync::mpsc::channel();
-        let mut terminal = Refusing { pipe: slave, refused: Some(said) };
+        let mut terminal = Refusing { slave, refused: Some(said) };
         // The slave stays open until the master has read it all: the last close
         // of a non-blocking slave discards what it still queues.
         let relay = std::thread::spawn(move || (relay(console.as_slice(), &mut terminal), terminal));

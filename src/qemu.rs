@@ -295,11 +295,14 @@ pub fn launch(opts: &Options) {
     let mut terminal = File::from(std::io::stdout().as_fd().try_clone_to_owned().expect("this process's stdout"));
     let mut child = qemu.stdout(Stdio::piped()).spawn().expect("failed to execute QEMU");
     let console = child.stdout.take().expect("QEMU's stdout is piped");
-    let relay = std::thread::spawn(move || {
-        kernelconsole::relay(console, &mut terminal).expect("the console's relay to the terminal")
-    });
+    // The console ends when QEMU does; a relay that fails first ends QEMU, which
+    // would otherwise run on into a pipe nobody reads.
+    let relayed = kernelconsole::relay(console, &mut terminal);
+    if relayed.is_err() {
+        child.kill().expect("failed to kill QEMU");
+    }
     child.wait().expect("failed to wait for QEMU");
-    relay.join().expect("the console relay");
+    relayed.expect("the console's relay to the terminal");
 }
 
 /// The machine a profile runs on, with its IOMMU where the machine carries one
