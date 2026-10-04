@@ -13,6 +13,7 @@ static DEBUG_WAIT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBo
 pub use mm::{UserAddr, DirectMap, PHYS_OFFSET};
 
 mod invalidation;
+mod seqlock;
 mod shootdown;
 mod sleeplock;
 mod smp;
@@ -70,6 +71,7 @@ mod sched;
 mod hw;
 mod iommu;
 mod preempt;
+mod counters;
 mod irq_census;
 #[cfg(feature = "mask-windows")]
 mod windows;
@@ -396,6 +398,7 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     acpi::inventory(kernel_args.rsdp_addr);
 
     let platform = arch::boot::interrupts(kernel_args.rsdp_addr);
+    counters::bring_up();
     symbols::set_kernel_base(kernel_args.kernel_memory_addr);
     if !kernel_elf.is_empty() {
         symbols::load_kernel(kernel_elf, mm::PHYS_OFFSET + kernel_args.kernel_memory_addr);

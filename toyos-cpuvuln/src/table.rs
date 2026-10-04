@@ -1,6 +1,7 @@
-//! Linux's four CPU tables, row for row: `cpu_vuln_whitelist` and
+//! Linux's five CPU tables, row for row: `cpu_vuln_whitelist` and
 //! `cpu_vuln_blacklist` (`common.c:1182-1344`), `spectre_bad_microcodes`
-//! (`intel.c:141-163`) and `amd_check_tsa_microcode`'s (`amd.c:472-515`). A
+//! (`intel.c:141-163`), `amd_check_tsa_microcode`'s (`amd.c:472-515`) and
+//! `test_intel`'s (`arch/x86/events/msr.c:40-122`). A
 //! lookup in the first two is `x86_match_cpu` (`match.c:36-57`): the
 //! first row whose vendor, family, model and stepping all match, `0` matching
 //! any.
@@ -110,6 +111,13 @@ pub(crate) fn blacklisted(id: &Ident, which: Bl) -> bool {
 
 // `arch/x86/include/asm/intel-family.h`, family 6, the models the tables name.
 const CORE_YONAH: u32 = 0x0E;
+const NEHALEM: u32 = 0x1E;
+const NEHALEM_G: u32 = 0x1F;
+const NEHALEM_EP: u32 = 0x1A;
+const NEHALEM_EX: u32 = 0x2E;
+const WESTMERE: u32 = 0x25;
+const WESTMERE_EP: u32 = 0x2C;
+const WESTMERE_EX: u32 = 0x2F;
 const SANDYBRIDGE: u32 = 0x2A;
 const SANDYBRIDGE_X: u32 = 0x2D;
 const IVYBRIDGE: u32 = 0x3A;
@@ -133,12 +141,14 @@ const CANNONLAKE_L: u32 = 0x66;
 const ICELAKE_X: u32 = 0x6A;
 const ICELAKE_D: u32 = 0x6C;
 const ICELAKE_L: u32 = 0x7E;
+const ICELAKE: u32 = 0x7D;
 const ROCKETLAKE: u32 = 0xA7;
 const TIGERLAKE_L: u32 = 0x8C;
 const TIGERLAKE: u32 = 0x8D;
 const SAPPHIRERAPIDS_X: u32 = 0x8F;
 const EMERALDRAPIDS_X: u32 = 0xCF;
 const GRANITERAPIDS_X: u32 = 0xAD;
+const GRANITERAPIDS_D: u32 = 0xAE;
 const LAKEFIELD: u32 = 0x8A;
 const ALDERLAKE: u32 = 0x97;
 const ALDERLAKE_L: u32 = 0x9A;
@@ -146,6 +156,7 @@ const RAPTORLAKE: u32 = 0xB7;
 const RAPTORLAKE_P: u32 = 0xBA;
 const RAPTORLAKE_S: u32 = 0xBF;
 const METEORLAKE_L: u32 = 0xAA;
+const METEORLAKE: u32 = 0xAC;
 const ARROWLAKE_H: u32 = 0xC5;
 const ARROWLAKE: u32 = 0xC6;
 const ARROWLAKE_U: u32 = 0xB5;
@@ -343,4 +354,27 @@ pub(crate) fn tsa_microcode(id: &Ident, microcode: u32) -> bool {
     // `union zen_patch_rev` (`asm/cpu.h:80-90`) above its `rev` byte.
     let key = (id.family - 0xf) << 16 | (id.model >> 4) << 12 | (id.model & 0xf) << 4 | id.stepping;
     ROWS.iter().find(|&&(k, _)| k == key).is_some_and(|&(_, min)| microcode >= min)
+}
+
+/// `test_intel` for `PERF_MSR_SMI` (`arch/x86/events/msr.c:40-122`): an Intel
+/// family 6 CPU of one of these models counts its SMIs in `MSR_SMI_COUNT`.
+pub(crate) fn counts_smis(id: &Ident) -> bool {
+    const MODELS: &[u32] = &[
+        NEHALEM, NEHALEM_G, NEHALEM_EP, NEHALEM_EX,
+        WESTMERE, WESTMERE_EP, WESTMERE_EX,
+        SANDYBRIDGE, SANDYBRIDGE_X,
+        IVYBRIDGE, IVYBRIDGE_X,
+        HASWELL, HASWELL_X, HASWELL_L, HASWELL_G,
+        BROADWELL, BROADWELL_D, BROADWELL_G, BROADWELL_X,
+        SAPPHIRERAPIDS_X, EMERALDRAPIDS_X, GRANITERAPIDS_X, GRANITERAPIDS_D,
+        ATOM_SILVERMONT, ATOM_SILVERMONT_D, ATOM_AIRMONT, ATOM_AIRMONT_NP,
+        ATOM_GOLDMONT, ATOM_GOLDMONT_D, ATOM_GOLDMONT_PLUS,
+        ATOM_TREMONT_D, ATOM_TREMONT, ATOM_TREMONT_L,
+        XEON_PHI_KNL, XEON_PHI_KNM,
+        SKYLAKE_L, SKYLAKE, SKYLAKE_X, KABYLAKE_L, KABYLAKE, COMETLAKE_L, COMETLAKE,
+        ICELAKE_L, ICELAKE, ICELAKE_X, ICELAKE_D, TIGERLAKE_L, TIGERLAKE, ROCKETLAKE,
+        ALDERLAKE, ALDERLAKE_L, ATOM_GRACEMONT, RAPTORLAKE, RAPTORLAKE_P, RAPTORLAKE_S,
+        METEORLAKE, METEORLAKE_L,
+    ];
+    id.vendor == Vendor::Intel && id.family == 6 && MODELS.contains(&id.model)
 }

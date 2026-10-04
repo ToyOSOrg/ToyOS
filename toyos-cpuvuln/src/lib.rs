@@ -15,6 +15,9 @@
 //! Parity is exact: a line that rests on something the facts do not carry is
 //! [`Unmodelled`], never approximated.
 //!
+//! [`counters`] is the same tag's other verdict on a CPU: which of its
+//! model-specific counters exist.
+//!
 //! Pure: no I/O, no allocation, no `unsafe`. The caller reads the facts.
 
 #![no_std]
@@ -22,7 +25,10 @@
 
 use core::fmt;
 
+mod counters;
 mod table;
+
+pub use counters::{counters, CounterFacts, Counters};
 #[cfg(test)]
 mod tests;
 
