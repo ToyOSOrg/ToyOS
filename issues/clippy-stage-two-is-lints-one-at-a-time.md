@@ -36,7 +36,7 @@ Measuring the full `pedantic` + `nursery` groups (`-W` only, not gated) across
 the host workspace, kernel and bootloader found **~9,000 findings** across
 ~90 distinct lints (up from the 1,684-on-the-kernel-alone figure this entry
 carried before — that number was kernel only; the host workspace, including
-`toyos-ld` and `toyos-cc`, carries most of the rest). Six lints earned a
+`toyos-cc`, carries most of the rest). Six lints earned a
 place in the gate. Everything else stayed off, each for a reason below.
 
 ## Adopted
@@ -108,7 +108,7 @@ before adopting:
   `toyos-gpt/src/lib.rs`'s three-clause partition-bounds check
   (`partition.first_lba > partition.last_lba || partition.first_lba <
   header.first_usable_lba || partition.last_lba > header.last_usable_lba`)
-  and `toyos-ld/src/emit_macho.rs`'s Mach-O header-size sum both look like
+  and a since-deleted linker's Mach-O header-size sum both look like
   copy-paste bugs to the lint's cross-clause heuristic and are correct as
   written — verified against what each is actually checking, not assumed.
 - **`large_stack_arrays` / `large_stack_frames` (4 findings)**: flagged a

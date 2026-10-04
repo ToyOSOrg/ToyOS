@@ -1787,9 +1787,6 @@ version = "0.38.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "271638cd5fa9cca89c4c304675ca658efc4e64a66c716b7cfe1afb4b9611dbbc"
 dependencies = [
- "crc32fast",
- "hashbrown 0.16.1",
- "indexmap",
  "memchr",
 ]
 
@@ -2512,17 +2509,6 @@ dependencies = [
 [[package]]
 name = "toyos-keymap"
 version = "0.1.0"
-
-[[package]]
-name = "toyos-ld"
-version = "0.3.0"
-dependencies = [
- "object",
- "sha2",
- "thiserror 2.0.18",
- "toyos-tmpdir",
- "zerocopy",
-]
 
 [[package]]
 name = "toyos-libc-copies"

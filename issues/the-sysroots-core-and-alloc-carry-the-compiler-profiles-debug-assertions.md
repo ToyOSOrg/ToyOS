@@ -19,8 +19,7 @@ passes it to the library crates' cargo profile
 are built without. The libraries' assertions were never chosen: `std_config`'s
 doc comment takes the profile so the libraries are built as the compiler was.
 The guest profile keeps debug assertions on in ToyOS's own code "because
-fail-fast beats speed here" (`kernel/Cargo.toml`, `userland/Cargo.toml`, the
-root `Cargo.toml`); whether the libraries should too is the decision nobody
+fail-fast beats speed here" (`kernel/Cargo.toml`, `userland/Cargo.toml`); whether the libraries should too is the decision nobody
 made.
 
 So every kernel and program ships `alloc`'s and `core`'s `debug_assert!`s,

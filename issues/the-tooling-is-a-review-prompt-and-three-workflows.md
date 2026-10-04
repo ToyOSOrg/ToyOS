@@ -30,8 +30,8 @@ and the gates that held them go.
   - `kernel/`, `bootloader/` and `userland/` inherit a redirected
     `build.target-dir` unless their `.cargo/config.toml` sets
     `target-dir = "target"`.
-  - `stage_artifact` in `src/build.rs` builds its path outside
-    `hostws::target_dir`.
+  - `stage_artifact` in `src/build.rs` writes `root/target/…` whatever
+    `build.target-dir` redirects.
   - `cargo clean` follows a shared target dir.
   - Artifact size, bootstrap delta and CI cache keys are unmeasured.
 - The nine workflows become three — `pr`, `nightly`, `publish`; then
