@@ -199,6 +199,7 @@ fn main() {
     let cap: SysCap = Endowments::get().take(SYSCAP_LABEL).expect("test-runner endows a capability");
     settle();
     let idle0 = read(&cap);
+    print("idle0", &idle0);
     std::thread::sleep(IDLE);
     let idle1 = read(&cap);
     std::thread::scope(|s| {
@@ -212,7 +213,7 @@ fn main() {
         }
     });
     let spin = read(&cap);
-    for (phase, read) in [("idle0", &idle0), ("idle1", &idle1), ("spin", &spin)] {
+    for (phase, read) in [("idle1", &idle1), ("spin", &spin)] {
         print(phase, read);
     }
     loaded(&cap);
