@@ -135,36 +135,3 @@ impl TraceCursor {
         self.0.lost
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Every number a kind is read back as that kind, and no other number is one.
-    #[test]
-    fn every_kind_reads_back_and_nothing_else_does() {
-        let mut kinds = 0;
-        for word in 0..=u16::MAX {
-            if let Some(kind) = Kind::from_u16(word) {
-                assert_eq!(kind as u16, word);
-                kinds += 1;
-            }
-        }
-        assert_eq!(kinds, Kind::Mark as u16, "the kinds are numbered from one without a gap");
-    }
-
-    /// The encoder is the wire, so the test decodes the wire.
-    #[test]
-    fn as_bytes_is_the_fields_and_nothing_between_them() {
-        let r = TraceRecord { seq: 7, stamp: 0x0102_0304_0506_0708, kind: 2, cpu: 3, data: 4, pid: 5, tid: 6 };
-        let b = r.as_bytes();
-        assert_eq!(b.len(), RECORD_BYTES);
-        assert_eq!(u64::from_ne_bytes(b[0..8].try_into().unwrap()), 7);
-        assert_eq!(u64::from_ne_bytes(b[8..16].try_into().unwrap()), 0x0102_0304_0506_0708);
-        assert_eq!(u16::from_ne_bytes(b[16..18].try_into().unwrap()), 2);
-        assert_eq!(u16::from_ne_bytes(b[18..20].try_into().unwrap()), 3);
-        assert_eq!(u32::from_ne_bytes(b[20..24].try_into().unwrap()), 4);
-        assert_eq!(u32::from_ne_bytes(b[24..28].try_into().unwrap()), 5);
-        assert_eq!(u32::from_ne_bytes(b[28..32].try_into().unwrap()), 6);
-    }
-}

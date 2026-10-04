@@ -57,7 +57,7 @@ fn push(kind: Kind, task: Option<(u32, u32)>, data: u32) {
     }
     let guard = IrqGuard::close();
     let at = percpu::cpu_id();
-    let Some(ring) = RINGS.get(at as usize) else { return };
+    let ring = &RINGS[at as usize];
     let (pid, tid) = task.unwrap_or_else(|| {
         (
             percpu::current_pid().map_or(NO_THREAD, |p| p.raw()),

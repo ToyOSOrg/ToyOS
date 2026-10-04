@@ -60,7 +60,9 @@ fn main() {
             break;
         }
     }
-    let _ = stdout.flush();
+    if stdout.flush().is_err() {
+        return;
+    }
     if lost > 0 {
         eprintln!("trace: {lost} records were overwritten before this read reached them");
     }
