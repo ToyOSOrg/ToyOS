@@ -515,7 +515,8 @@ fn pinned_fork(root: &Path) -> String {
 ///
 /// Every nested submodule checked out in it moves with it to the commit the pin
 /// records there, refused by name where it does not hold that commit, or is at
-/// a commit neither that one nor behind it, which only its own `HEAD` records.
+/// a commit that neither the checkout's `HEAD` nor the pin records there, which
+/// only its own `HEAD` may record.
 ///
 /// Every build in a worktree asks this at once, so the making and the move are
 /// each decided and done under the worktree's lock held exclusively
@@ -610,8 +611,8 @@ pub fn fork_checkout(root: &Path, lock: &mut Held) -> PathBuf {
                     at.display(),
                 );
             }
-            // A nested submodule checked out at the commit the pin records there, or behind it, and nothing more, is
-            // no work: it moves with the checkout. One at any other commit holds a commit nothing else records.
+            // A nested submodule checked out at the commit the pin records there, and nothing more, is no work: a move
+            // killed before its last step leaves it so. One at any other commit may hold a commit nothing else records.
             let status = git_out(&fork, &["status", "--porcelain=v2", "--ignore-submodules=none"]);
             let work: Vec<String> = status
                 .lines()
@@ -622,9 +623,8 @@ pub fn fork_checkout(root: &Path, lock: &mut Held) -> PathBuf {
                     };
                     let at = fork.join(path);
                     let at_head = git_out(&at, &["rev-parse", "HEAD"]).trim().to_string();
-                    let behind = git_try(&at, &["merge-base", "--is-ancestor", &at_head, commit]).is_ok();
-                    (!behind).then(|| {
-                        format!("{} is at {at_head}, which is neither {commit}, what {pinned} records there, nor behind it", at.display())
+                    (at_head != *commit).then(|| {
+                        format!("{} is at {at_head}, not at {commit}, what {pinned} records there", at.display())
                     })
                 })
                 .collect();
