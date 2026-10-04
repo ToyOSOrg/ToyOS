@@ -60,9 +60,9 @@ never reads their source.
 **Stage 1: ACPI mode, its SCI served in userland.** The switch to ACPI mode,
 and a userland server that claims the SCI, handles the power button, a
 fixed event that needs no AML, and takes the EC's events. **Exit**: on the
-T14, `MSR_SMI_COUNT` stays
-flat on every CPU over the interval the firmware issue's exit defines, and a
-press of the power button stops the machine cleanly, through ToyOS's own
+T14, `MSR_SMI_COUNT`, read through the general counters and not by a check of
+its own, stays flat on every CPU over the interval the firmware issue's exit
+defines, and a press of the power button stops the machine cleanly, through ToyOS's own
 power-off path (`SYS_SHUTDOWN`), and the boot's log records the press and that
 stop, and each EC query number once with its count: a T14 row reads them there.
 A second T14 row kills the server and reads `SCI_EN` clear in `PM1_CNT`

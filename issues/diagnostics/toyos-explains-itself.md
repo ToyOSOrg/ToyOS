@@ -40,23 +40,16 @@ counters and sizes pillars, which no other track does.
 
 ## Decided by the orchestrator, not ruled (2026-10-03)
 
-From the orchestrator's strategy and the roast of it that he adopted. A line
-marked *told* was told to the owner with his veto open; the rest were not put
-to him.
+From the orchestrator's strategy and the roast of it that the orchestrator
+adopted. A line marked *told* was told to the owner with his veto open; the
+rest were not put to him.
 
-- Every reader (`trace`, `inspect kernel.*`, `size`) is in every image, and
-  access is by rights alone.
-- The decoder, reducers and symbolizer are a Rust crate built and tested for
-  ToyOS and run inside it, so reading a record rests on no other machine.
-- *Told*: words go to the log, events to the diary, numbers about now to
-  counters, the Process object and `inspect`, and static facts to the ELF
-  files; no pillar keeps a store of its own.
 - *Told*: counters are read on demand. The roast's bound: the requester serves
   its own CPU and parks on a Watch under a bound, and a CPU silent at the
   bound reads as stale.
 - *Told*: one sampler per CPU, the hard-lockup detector's PMU NMI, at one
-  fixed rate held by a profile handle. The roast's: a Ring 3 sample raises a
-  self-IPI.
+  fixed rate held by a profile handle.
+- The roast's: a Ring 3 sample raises a self-IPI.
 - The kick leaves the timer's vector for one cross-CPU request vector, which
   counter requests share.
 
@@ -84,6 +77,8 @@ thermal counters, the log's steps, accounting, `inspect` and `size`.
 
 **Exit**: every pillar track above is closed; at a ToyOS shell on the T14
 `inspect kernel.*`, `trace` and `size` answer, each under the right its
-manifest row names; and a T14 row holds each counter ToyOS reads there
-against Linux's reading of it
+manifest row names; a program without the counters right is refused a
+counter read, and one that holds it but not `trace` is refused the power and
+per-device interrupt counters; and a T14 row holds each counter ToyOS reads
+there against Linux's reading of it
 (`issues/hardware/linuxs-readings-of-the-t14-and-the-tcg-model-lack-reads-owed-before-the-t14s-wipe.md`).
