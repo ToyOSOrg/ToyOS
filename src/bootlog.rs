@@ -372,6 +372,74 @@ pub fn stopping_line(log: &str) -> Option<&str> {
     })
 }
 
+/// The loader's word for its clock, in `bootloader/src/main.rs`: the head of
+/// the line naming the rate the CPU states, and the line where it states none.
+pub const LOADER_CLOCK_STATED: &str =
+    "Loader clock: each line opens with the seconds since the counter's zero, at the counter's stated ";
+pub const LOADER_CLOCK_NONE: &str =
+    "Loader clock: this CPU states no counter rate, so no line carries the time it was said";
+
+/// The kernel's record of starting the first program.
+pub const SUPERVISOR_SPAWN: &str = "spawn: /system/bin/supervisor ";
+
+/// Whether the loader's lines, the kernel's records and a program's lines
+/// count from one zero: no timed kernel record is earlier than the loader's
+/// last timed line before the handoff, and the supervisor's first line is no
+/// earlier than the kernel's record of spawning it. A clock that kept another
+/// zero puts one of them before what caused it.
+///
+/// `loader` holds the pass that handed the machine to the kernel; `log` holds
+/// the kernel's records and the programs' lines, and may hold the loader's
+/// too, as a console does. Nothing to compare is a refusal wherever the boot
+/// owes it: a loader that states a rate owes timed lines, and a boot that
+/// reached [`COMPLETE`] owes the spawn and the supervisor's line.
+pub fn one_clock(loader: &str, log: &str) -> Result<(), String> {
+    use toyos_logstream::{parse, Source};
+    let handed = loader
+        .find(LOADER_LAST_LINE)
+        .map(|at| &loader[..at + LOADER_LAST_LINE.len()])
+        .ok_or_else(|| format!("the loader never said {LOADER_LAST_LINE:?}"))?;
+    let stated = handed.contains(LOADER_CLOCK_STATED);
+    if !stated && !handed.contains(LOADER_CLOCK_NONE) {
+        return Err("the loader said nothing of its clock before the handoff".to_string());
+    }
+    if stated {
+        let loader = handed
+            .lines()
+            .filter_map(parse)
+            .filter(|p| p.source == Source::Loader)
+            .filter_map(|p| p.ms)
+            .next_back()
+            .ok_or("the loader states its counter's rate and none of its lines carries a time")?;
+        let kernel = log
+            .lines()
+            .filter_map(record_millis)
+            .min()
+            .ok_or("the loader states its counter's rate and no kernel record carries a time")?;
+        if kernel < loader {
+            return Err(format!(
+                "the loader's last line before the handoff reads {loader} ms and the kernel's \
+                 earliest timed record {kernel} ms"
+            ));
+        }
+    }
+    let spawned = log.lines().find(|l| l.contains(SUPERVISOR_SPAWN)).and_then(record_millis);
+    let said = log.lines().filter_map(parse).find(|p| p.source == Source::Program("supervisor")).and_then(|p| p.ms);
+    let complete = log.lines().any(|l| message(l).is_some_and(|m| m.starts_with(COMPLETE)));
+    match (spawned, said) {
+        (Some(spawned), Some(said)) if said < spawned => Err(format!(
+            "the supervisor's first line reads {said} ms and the kernel's record of spawning it {spawned} ms"
+        )),
+        (Some(_), Some(_)) => Ok(()),
+        (spawned, said) if complete => Err(format!(
+            "the boot reached {COMPLETE:?} with {} and {}",
+            if spawned.is_some() { "a timed spawn record" } else { "no timed spawn record of the supervisor" },
+            if said.is_some() { "a timed supervisor line" } else { "no timed supervisor line" },
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// The milliseconds since the counter's zero one record line carries, whether
 /// `logkeeper` put a wall clock before them or the panel put nothing.
 pub fn record_millis(line: &str) -> Option<u64> {
@@ -508,6 +576,15 @@ mod tests {
                 "{} declares no constant equal to {rhs}",
                 path.display()
             );
+        }
+        // Formats, not constants: the loader fills the rate's hole with the
+        // counter's.
+        let main = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("bootloader/src/main.rs"),
+        )
+        .expect("the loader's main");
+        for said in [format!("{LOADER_CLOCK_STATED}{{hz}} Hz\""), format!("\"{LOADER_CLOCK_NONE}\"")] {
+            assert!(main.contains(&said), "bootloader/src/main.rs prints no {said:?}");
         }
         // A format and not a constant: the loader fills its hole with the
         // state's own word.

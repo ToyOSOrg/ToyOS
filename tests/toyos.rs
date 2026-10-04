@@ -203,6 +203,9 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     // anyway, and its CPU has to go on to watch the reset bound. The profile
     // whose 16550 is the console, where the fatal path writes its last line raw.
     ("screen_fatal_behind_a_painter", qemu::Profile::Metal),
+    // Ctrl+Alt+D's report on the panel: the records between the dump's two
+    // marks, and none from before it.
+    ("screen_dump_report", qemu::Profile::Metal),
     // The same fatal path with a compositor holding the panel, which is the
     // only configuration the owner's laptop is ever in.
     ("screen_fatal_halt_composited", qemu::Profile::Metal),
@@ -1634,7 +1637,11 @@ fn virt_job(profile: qemu::Profile, job: &str, said: &str) -> Result<(), String>
         },
     );
     let mut serial = virt_console(&qemu);
-    judge_virt_job(&mut qemu, &mut serial, job, said)
+    judge_virt_job(&mut qemu, &mut serial, job, said)?;
+    // The one console that carries the loader's, the kernel's and a program's
+    // lines on a CPU that states its counter's rate: the T14's metal rows
+    // judge the same on x86-64, and no machine of this architecture has one.
+    bootlog::one_clock(&serial, &serial).map_err(|why| format!("{why}\nserial:\n{serial}"))
 }
 
 /// A `mask-windows` boot's windows: `common::irqcensus::windows`'s verdict,
@@ -2453,6 +2460,41 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
                 return Err(format!(
                     "QEMU exited without {BOUND_OVER:?} on the console, so this was not the panic \
                      path's reset\n{said}"
+                ));
+            }
+            Ok(())
+        }
+        "screen_dump_report" => {
+            /// The dump's last line, written after every CPU answered.
+            const LAST: &str = "== deadlines: ";
+            /// Said before the dump opens its bracket, so it is outside it.
+            const BEFORE: &str = "Boot: complete";
+            let mut qemu = QemuInstance::boot_with_options(
+                test_config,
+                &[],
+                &[],
+                BootOptions { profile, qmp: true, ..Default::default() },
+            );
+            {
+                let mut input = qemu::QmpInput::open(qemu.qmp_socket());
+                input.keys(&[
+                    ("ctrl", true),
+                    ("alt", true),
+                    ("d", true),
+                    ("d", false),
+                    ("alt", false),
+                    ("ctrl", false),
+                ]);
+            }
+            let dump = qemu.screendump_until(LAST, Duration::from_secs(30));
+            let text = dump.text();
+            print_screen(name, &text);
+            if !text.contains(LAST) || text.contains(BEFORE) {
+                return Err(format!(
+                    "the report's panel is not the dump's own records: {LAST:?} on it {}, \
+                     {BEFORE:?} on it {}\ndecoded screen:\n{text}",
+                    text.contains(LAST),
+                    text.contains(BEFORE),
                 ));
             }
             Ok(())

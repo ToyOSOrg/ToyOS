@@ -286,37 +286,9 @@ impl Readback {
         bootlog::last_record_millis(&self.kernel)
     }
 
-    /// Whether the loader's lines, the kernel's records and a program's lines
-    /// count from one zero: no timed kernel record is earlier than
-    /// the loader's last timed line before the handoff, and the supervisor's
-    /// first line no earlier than the kernel's record of spawning it. A clock
-    /// that kept another zero puts one of them before what caused it. Nothing
-    /// to compare on a CPU that states no counter rate, whose loader lines
-    /// carry no time.
+    /// [`bootlog::one_clock`] of this boot.
     pub fn one_clock(&self) -> Result<(), String> {
-        use toyos_logstream::{parse, Source};
-        let handed = self.loader.split(bootlog::SEPARATOR).next().unwrap_or_default();
-        let loader = handed.lines().filter_map(parse).filter(|p| p.source == Source::Loader).filter_map(|p| p.ms).next_back();
-        let kernel = self.kernel.lines().filter_map(bootlog::record_millis).min();
-        if let (Some(loader), Some(kernel)) = (loader, kernel) {
-            if kernel < loader {
-                return Err(format!(
-                    "{}: the loader's last line before the handoff reads {loader} ms and the kernel's \
-                     earliest timed record {kernel} ms",
-                    self.label
-                ));
-            }
-        }
-        let spawned = self.kernel.lines().find(|l| l.contains("spawn: /system/bin/supervisor ")).and_then(bootlog::record_millis);
-        let said = self.log.lines().filter_map(parse).find(|p| p.source == Source::Program("supervisor")).and_then(|p| p.ms);
-        match (spawned, said) {
-            (Some(spawned), Some(said)) if said < spawned => Err(format!(
-                "{}: the supervisor's first line reads {said} ms and the kernel's record of spawning it \
-                 {spawned} ms",
-                self.label
-            )),
-            _ => Ok(()),
-        }
+        bootlog::one_clock(&self.loader, &self.log).map_err(|why| format!("{}: {why}", self.label))
     }
 
     /// When `Boot: complete` was written, on the same clock.

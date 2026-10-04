@@ -944,7 +944,7 @@ mod checks {
                       stride=1920 format=1 at 0x4000000000, write-combining\n";
         let staged = "| [ 1.509 cpu1 kernel] wedge: staged, and only the boot deadline ends this machine: \
                       every CPU stops taking scheduler passes from here\n";
-        let awake = |cpu: u32| format!("| [1.509 cpu{cpu}] wedge: cpu{cpu} arrived with interrupts on\n");
+        let awake = |cpu: u32| format!("| [ 1.509 cpu{cpu} kernel] wedge: cpu{cpu} arrived with interrupts on\n");
         let deaf = "| [ 1.509 cpu1 kernel] wedge: cpu1 arrived with interrupts off, through the syscall \
                     gate, and takes them again here\n";
         let judge = metal_judge("boot_deadline_ends_a_wedge");

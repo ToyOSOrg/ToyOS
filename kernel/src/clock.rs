@@ -46,17 +46,38 @@ fn ticks_to_nanos(ticks: u64, period_fs: u64) -> u64 {
     ((ticks as u128 * period_fs as u128) / 1_000_000) as u64
 }
 
+/// A log line's time, the clock a record's `at_ns` is on: nanoseconds since
+/// the counter's zero. A type of its own because [`nanos_since_boot`] counts
+/// the same nanoseconds from another zero, and a window over the log taken on
+/// that clock lands that far from the records it means.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct LogStamp(u64);
+
+impl LogStamp {
+    pub const ZERO: Self = Self(0);
+    pub const MAX: Self = Self(u64::MAX);
+
+    /// The stamp a record carries in its `at_ns`.
+    pub const fn recorded(at_ns: u64) -> Self {
+        Self(at_ns)
+    }
+
+    pub const fn nanos(self) -> u64 {
+        self.0
+    }
+}
+
 /// Now as a log line's time: nanoseconds since the counter's zero — power-on,
 /// or the reset since — at the clock's rate, and before [`set_counter`] at the
 /// rate the CPU states. `None` where it states none and the clock has not
 /// started: no rate reads the counter yet. Never panics, as
 /// [`nanos_since_boot`].
-pub fn stamp() -> Option<u64> {
+pub fn stamp() -> Option<LogStamp> {
     if calibrated() {
-        return Some(STAMP_AT_BOOT.load(Relaxed).saturating_add(nanos_since_boot()));
+        return Some(LogStamp(STAMP_AT_BOOT.load(Relaxed).saturating_add(nanos_since_boot())));
     }
     let stated = STATED_FS.load(Relaxed);
-    (stated != 0).then(|| ticks_to_nanos(cpu::counter(), stated))
+    (stated != 0).then(|| LogStamp(ticks_to_nanos(cpu::counter(), stated)))
 }
 
 /// The clock page's frame, or 0 before [`set_counter`]: the one every address space

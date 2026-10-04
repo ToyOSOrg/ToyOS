@@ -214,7 +214,7 @@ fn report(_proof: &UnderNothing) {
     let cpus = online_cpus();
     let me = percpu::cpu_id() as usize;
     // Two instants, not byte positions: there is no single stream across CPUs.
-    let from = crate::clock::nanos_since_boot();
+    let from = log_stamp();
     log!("=== blocked-task dump: {cpus} cpu(s), and this report takes the screen ===");
 
     // Indexed by cpu id: `OWES` is `MAX_CPUS` long regardless of `cpus`.
@@ -257,7 +257,11 @@ fn report(_proof: &UnderNothing) {
 
     let census = census();
     summary(cpus, silent, census);
-    crate::drivers::panic_console::paint_report(from, crate::clock::nanos_since_boot());
+    crate::drivers::panic_console::paint_report(from, log_stamp());
+}
+
+fn log_stamp() -> crate::clock::LogStamp {
+    crate::clock::stamp().expect("the dump runs in a scheduler pass, after the clock starts")
 }
 
 /// Sends an NMI to each CPU that ignored its kick: unlike a kick, an NMI

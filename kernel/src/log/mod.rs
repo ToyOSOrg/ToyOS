@@ -16,6 +16,7 @@ pub mod user;
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use crate::clock::LogStamp;
 use toyos_abi::log::{LogRecord, FLAG_UNTIMED, MAX_LOG_SHARDS, MAX_RECORD_MESSAGE};
 
 pub use shard::Shard;
@@ -91,7 +92,7 @@ pub fn seal_tail() {
     crate::blackbox::append(|out| {
         let _ = writeln!(out, "{TAIL_HEAD} ({TAIL_RECORDS})");
         let mut tail = Tail { out, left: TAIL_RECORDS };
-        read::snapshot_committed(0, read::newest_committed_at_ns(), &mut tail);
+        read::snapshot_committed(LogStamp::ZERO, read::newest_committed(), &mut tail);
     });
 }
 
@@ -191,7 +192,7 @@ pub fn emit(severity: Severity, args: core::fmt::Arguments) {
     // returning, which is what closes the two paths IF/TF masking alone
     // cannot.
     match crate::clock::stamp() {
-        Some(at_ns) => record.at_ns = at_ns,
+        Some(at) => record.at_ns = at.nanos(),
         None => record.flags = FLAG_UNTIMED,
     }
     let (origin, seq) = reserve(&guard);

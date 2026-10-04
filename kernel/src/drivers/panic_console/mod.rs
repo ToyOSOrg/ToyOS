@@ -18,6 +18,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering
 
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
 
+use crate::clock::LogStamp;
 use crate::log;
 use crate::panic_reboot::Bound;
 use crate::time::{Budget, Cadence, Duration};
@@ -152,7 +153,7 @@ impl Rendered {
         Self { text: [0; SNAPSHOT_CAP], marks: [0; MARK_BYTES], len: 0, lines: 0 };
 
     /// Render the newest records stamped in `from..=to` that fit; returns the byte count. Records older than the buffer holds are dropped.
-    fn render(&mut self, from: u64, to: u64) -> usize {
+    fn render(&mut self, from: LogStamp, to: LogStamp) -> usize {
         self.marks = [0; MARK_BYTES];
         self.lines = 0;
         self.len = 0;
@@ -579,7 +580,7 @@ fn capture_into(refresh: bool) {
     // panic path may take no lock. `SNAPSHOT` is written only here, under
     // `CAPTURE`, after `CAPTURE_ACCESS` admitted a writer and before publication.
     let into = unsafe { &mut *SNAPSHOT.0.get() };
-    CAPTURE_ACCESS.publish(into.render(0, u64::MAX) > 0);
+    CAPTURE_ACCESS.publish(into.render(LogStamp::ZERO, LogStamp::MAX) > 0);
 }
 
 /// This CPU's claim on `SNAPSHOT`; tokens never collide, unclaimed-0 and `EARLY_CAPTOR` included.
@@ -604,7 +605,7 @@ fn live_tail() -> View<'static> {
     // SAFETY: sound as `capture`'s `SNAPSHOT` write — `LIVE` is reached only
     // from here, every caller holds `PAINTING`; one block, not two, so render and view can't disagree.
     let into: &'static mut Rendered = unsafe { &mut *LIVE.0.get() };
-    into.render(0, u64::MAX);
+    into.render(LogStamp::ZERO, LogStamp::MAX);
     let rendered: &'static Rendered = into;
     rendered.view()
 }
@@ -761,7 +762,7 @@ fn repaint() {
 ///
 /// [`boot_checkpoint`] without the userland check — the keystroke is the
 /// consent. A single paint is not a report, so this arms a hold that [`hold_report`] answers.
-pub fn paint_report(from: u64, to: u64) {
+pub fn paint_report(from: LogStamp, to: LogStamp) {
     // SAFETY: sound as `capture`'s `SNAPSHOT` write — `REPORT` is reached
     // only from here and `report_text`; the dump reschedules every CPU, so only one is in flight.
     let into = unsafe { &mut *REPORT.0.get() };

@@ -6,6 +6,7 @@
 use toyos_abi::log::{LogRecord, MAX_LOG_SHARDS};
 
 use super::shard::{Ring, Shard, FIRST_SEQ};
+use crate::clock::LogStamp;
 
 /// Accepts one record; `false` means it was not taken and ends the walk.
 pub trait RecordSink<R = LogRecord> {
@@ -220,9 +221,9 @@ where
     }
 }
 
-/// The `at_ns` of the newest committed record, or zero if none: the upper bound
+/// The stamp of the newest committed record, or zero if none: the upper bound
 /// of a snapshot that must not chase records committed while it walks.
-pub fn newest_committed_at_ns() -> u64 {
+pub fn newest_committed() -> LogStamp {
     let mut newest = 0;
     for shard in super::shards().iter().flatten() {
         let mut descent = IDLE;
@@ -235,7 +236,7 @@ pub fn newest_committed_at_ns() -> u64 {
             newest = newest.max(at_ns);
         }
     }
-    newest
+    LogStamp::recorded(newest)
 }
 
 /// Is there a committed record this cursor has not taken, without taking it?
@@ -254,7 +255,8 @@ pub fn any_committed(cursor: &Cursor) -> bool {
 
 /// Every committed record stamped in `from..=to`, newest first merged by
 /// `at_ns` until `out` is full; returns nothing, since no caller counts.
-pub fn snapshot_committed(from: u64, to: u64, out: &mut impl RecordSink) {
+pub fn snapshot_committed(from: LogStamp, to: LogStamp, out: &mut impl RecordSink) {
+    let (from, to) = (from.nanos(), to.nanos());
     let mut descents = [IDLE; MAX_LOG_SHARDS];
     for (descent, shard) in descents.iter_mut().zip(super::shards()) {
         let Some(shard) = shard else { continue };

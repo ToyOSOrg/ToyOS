@@ -364,19 +364,21 @@ pub fn a_cleared_page_owes_no_panel() {
 /// **The loader's lines, the kernel's records and a program's lines count
 /// from one zero**: a kernel record stamped before the loader's handoff, or a
 /// supervisor line before its spawn record, is a clock that kept another
-/// zero, and an untimed loader is nothing to compare.
+/// zero; and a boot that owes something to compare and lacks it is refused.
 pub fn the_loader_the_kernel_and_a_program_count_from_one_zero() {
-    let read = |loader_ms: &str, kernel_ms: &str, said_ms: &str| {
+    const STATED: &str = "Loader clock: each line opens with the seconds since the counter's zero, at \
+                          the counter's stated 2419200000 Hz";
+    let read = |clock: &str, loader_ms: &str, kernel_ms: &str, said: &str| {
         let dir = toyos_tmpdir::TempDir::new("metal-one-clock");
         let kernel = format!(
             "[2026-10-04 09:30:00 {kernel_ms} cpu0 kernel] panic console: armed\n\
              [2026-10-04 09:30:00 12.000 cpu0 kernel] spawn: /system/bin/supervisor pid=1\n\
-             [2026-10-04 09:30:00 {said_ms} supervisor] supervisor: started logkeeper\n\
+             {said}\
              [2026-10-04 09:30:00 15.000 cpu0 kernel] Boot: complete (3335ms)\n"
         );
         plant(&dir, "planted", PANEL, &kernel, None);
         let loader = format!(
-            "[{loader_ms} cpu0 loader] {}\n[{loader_ms} cpu0 loader] {}\n{}\n{}\n{PANEL}",
+            "[{loader_ms} cpu0 loader] {}\n[{loader_ms} cpu0 loader] {clock}\n[{loader_ms} cpu0 loader] {}\n{}\n{}\n{PANEL}",
             bootlog::LOADER_FIRST_LINE,
             bootlog::LOADER_LAST_LINE,
             bootlog::SEPARATOR,
@@ -385,10 +387,19 @@ pub fn the_loader_the_kernel_and_a_program_count_from_one_zero() {
         fs::write(metal::at(&dir, "planted").join(READBACK_LOADER), loader).expect("a planted loader.log");
         metal::read_readback(&dir, "planted").expect("a planted readback").one_clock()
     };
-    assert_eq!(read(" 9.876", "11.665", "13.064"), Ok(()));
-    assert_eq!(read("--.---", " 0.050", "13.064"), Ok(()));
-    let why = read(" 9.876", " 0.050", "13.064").expect_err("a kernel that counts from its own start");
+    let (stated, none) = (STATED, bootlog::LOADER_CLOCK_NONE);
+    let said = |ms: &str| format!("[2026-10-04 09:30:00 {ms} supervisor] supervisor: started logkeeper\n");
+    assert_eq!(read(stated, " 9.876", "11.665", &said("13.064")), Ok(()));
+    assert_eq!(read(none, "--.---", " 0.050", &said("13.064")), Ok(()));
+    let why = read(stated, " 9.876", " 0.050", &said("13.064")).expect_err("a kernel that counts from its own start");
     assert!(why.contains("the kernel's earliest timed record 50 ms"), "{why}");
-    let why = read(" 9.876", "11.665", " 1.064").expect_err("a program that counts from the kernel's clock");
+    let why = read(stated, " 9.876", "11.665", &said(" 1.064")).expect_err("a program that counts from the kernel's clock");
     assert!(why.contains("the supervisor's first line reads 1064 ms"), "{why}");
+    // Nothing to compare, where the boot owes it.
+    let why = read(stated, "--.---", "11.665", &said("13.064")).expect_err("a loader that lost its time");
+    assert!(why.contains("none of its lines carries a time"), "{why}");
+    let why = read("Loader log: opened", " 9.876", "11.665", &said("13.064")).expect_err("a loader silent on its clock");
+    assert!(why.contains("said nothing of its clock"), "{why}");
+    let why = read(stated, " 9.876", "11.665", "").expect_err("a complete boot with no supervisor line");
+    assert!(why.contains("no timed supervisor line"), "{why}");
 }
