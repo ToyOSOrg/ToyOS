@@ -354,7 +354,8 @@ mod tests {
         let mut terminal = Refusing { slave, refused: Some(said) };
         // The slave stays open until the master has read it all: the last close
         // of a non-blocking slave discards what it still queues.
-        let relay = std::thread::spawn(move || (relay(console.as_slice(), &mut terminal), terminal));
+        let (relayed, done) = std::sync::mpsc::channel();
+        std::thread::spawn(move || relayed.send((relay(console.as_slice(), &mut terminal), terminal)));
         let length = want.len();
         let (read, all_read) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -363,7 +364,10 @@ mod tests {
             read.send(master.read_exact(&mut shown).map(|()| shown))
         });
 
-        let (wrote, _slave) = relay.join().expect("the relay");
+        // A relay whose wait never ends reds here rather than hanging the suite.
+        let (wrote, _slave) = done
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .unwrap_or_else(|e| panic!("the relay did not finish: {e}"));
         wrote.expect("the relay wrote everything");
         // A relay that lost bytes leaves the reader blocked on an open slave.
         let shown = all_read

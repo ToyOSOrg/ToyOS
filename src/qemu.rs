@@ -297,12 +297,19 @@ pub fn launch(opts: &Options) {
     let console = child.stdout.take().expect("QEMU's stdout is piped");
     // The console ends when QEMU does; a relay that fails first ends QEMU, which
     // would otherwise run on into a pipe nobody reads.
-    let relayed = kernelconsole::relay(console, &mut terminal);
-    if relayed.is_err() {
-        child.kill().expect("failed to kill QEMU");
+    if let Err(relay) = kernelconsole::relay(console, &mut terminal) {
+        // SIGTERM, not `Child::kill`'s SIGKILL: QEMU gives the terminal back its
+        // modes only on its own exit path.
+        let pid = libc::pid_t::try_from(child.id()).expect("a pid is a pid_t");
+        // SAFETY: `child` is not yet waited for, so `pid` is still QEMU's.
+        let ended = if unsafe { libc::kill(pid, libc::SIGTERM) } == 0 {
+            child.wait().map(drop)
+        } else {
+            Err(std::io::Error::last_os_error())
+        };
+        panic!("the console's relay to the terminal: {relay}; ending QEMU: {ended:?}");
     }
     child.wait().expect("failed to wait for QEMU");
-    relayed.expect("the console's relay to the terminal");
 }
 
 /// The machine a profile runs on, with its IOMMU where the machine carries one
