@@ -423,41 +423,11 @@ pub fn frame_pointer() -> u64 {
 /// and its caller says so rather than inventing a rate.
 pub fn stated_counter_hz() -> Option<u64> {
     let max_leaf = cpuid(0, 0).0;
-    tsc_hz_from(
+    toyos_tsc::stated_hz(
         (max_leaf >= 0x15).then(|| cpuid(0x15, 0)),
         (max_leaf >= 0x16).then(|| cpuid(0x16, 0)),
     )
 }
-
-/// SDM Vol. 2A, CPUID leaf 15H: EAX is the denominator and EBX the numerator of
-/// the core crystal's ratio to the TSC, ECX the crystal's hertz — any of the
-/// three reading zero means the leaf states nothing. Leaf 16H's EAX is the
-/// processor base frequency in MHz, which an invariant TSC counts at.
-const fn tsc_hz_from(
-    leaf15: Option<(u32, u32, u32, u32)>,
-    leaf16: Option<(u32, u32, u32, u32)>,
-) -> Option<u64> {
-    if let Some((denominator, numerator, crystal_hz, _)) = leaf15 {
-        if denominator != 0 && numerator != 0 && crystal_hz != 0 {
-            return Some(crystal_hz as u64 * numerator as u64 / denominator as u64);
-        }
-    }
-    if let Some((base_mhz, _, _, _)) = leaf16 {
-        if base_mhz != 0 {
-            return Some(base_mhz as u64 * 1_000_000);
-        }
-    }
-    None
-}
-
-const _: () = {
-    // The ratio, then the fall-through to the base frequency when the crystal
-    // is not enumerated, then the CPU that states neither.
-    assert!(matches!(tsc_hz_from(Some((2, 4, 25_000_000, 0)), None), Some(50_000_000)));
-    assert!(matches!(tsc_hz_from(Some((0, 0, 0, 0)), Some((2_400, 0, 0, 0))), Some(2_400_000_000)));
-    assert!(tsc_hz_from(None, Some((0, 0, 0, 0))).is_none());
-    assert!(tsc_hz_from(None, None).is_none());
-};
 
 
 /// The thread pointer this CPU is running with: the FS base, which user TLS is addressed from.
