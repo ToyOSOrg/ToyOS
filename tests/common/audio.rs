@@ -189,8 +189,8 @@ fn departures(serial: &str) -> Vec<String> {
 ///
 /// A crash and a clean exit close the same descriptors in the same order, so
 /// the mix loop's broken signal pipe witnesses neither — it used to say `died`
-/// anyway, and did so on 5 of 44 runs whose client exited `code=0`
-/// (`issues/audio/`, closed). Two things are asserted here, and the
+/// anyway, and did so on 5 of 44 runs whose client exited `code=0`.
+/// Two things are asserted here, and the
 /// second is the one with teeth: every removal names how the stream ended, in
 /// the fixed departure vocabulary, and no line claims a death.
 ///

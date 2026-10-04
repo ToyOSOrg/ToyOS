@@ -76,8 +76,7 @@ fn main() {
     // if the shell has not reached its first read. Before it, one is dropped
     // with no trace — which is what the desktop tests used to compensate for by
     // retyping against a clock, making every one of their verdicts a statement
-    // about how long a desktop takes to come up on the host of the day
-    // (`issues/design-debt/`).
+    // about how long a desktop takes to come up on the host of the day.
     eprintln!("terminal: ready");
 
     loop {

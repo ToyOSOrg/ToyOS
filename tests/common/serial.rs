@@ -169,7 +169,7 @@ pub(crate) const REPORT_LINES: usize = 80;
 /// original stack for the frame that started the chain — and the failing test's
 /// arm printed `result.stdout`, which is the *userland* half of the capture and
 /// carried two daemon lines. The report was in `result.serial` and nothing read
-/// it (`issues/kernel/a-double-fault-on-cpu-1-under-a-wide-suite.md`).
+/// it (`issues/a-double-fault-on-cpu-1-under-a-wide-suite.md`).
 ///
 /// The death line is where it starts, because everything before it is the run
 /// going normally and the point of a bound is that the report survives it.

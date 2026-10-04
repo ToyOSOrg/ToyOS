@@ -1,0 +1,341 @@
+---
+status: open
+kind: track
+opened: 2026-08-20
+---
+
+# The capability end-state is twelve answers, written before APIs answer them accidentally
+
+From the external review of 2026-08-20, adopted by the owner: the tree is
+making strong capability commitments, and postponing the conceptual model
+lets dozens of local API decisions harden into architecture by accident. The
+end-state is written down here — as this tracked document, since the tree
+keeps no spec corpus — with each answer either **COMMITTED** (the tree already
+enforces it; the enforcing site is cited) or **OPEN** (an owner ruling is owed
+before any interface constrains it). **Until each answer exists, an interface
+change that would answer one silently is stopped and the question surfaced
+instead.**
+
+The audit pass that first work item asked for was run on **2026-08-20**, from
+the code, against `syscall_dispatch`'s every arm, every `HandleEntry`
+constructor, both move paths and the boot's one capability mint.
+
+**Where the twelve stand, counted off the sections below.** Seven are
+**COMMITTED** — 1, 3, 6, 7, 8, 10, 11. Four were **RULED** and no longer await
+the owner — 2 (the filesystem is deliberately outside the model), 4 and 5
+(ruled and since implemented), and 9 (threads as objects, declined until a
+caller exists). **One is OPEN: question 12**, held by
+`issues/cpu-time-is-a-band-and-not-a-reservation.md`. "Eight answers are
+committed, four are open" was this line's own summary and stopped being true
+when those four rulings landed; "The ruling set" below is a record of decisions
+taken, not a queue waiting on anybody.
+
+**Every `4a98107f^:kernel/src/arch/syscall.rs` citation below points into
+history**: that one-file syscall layer is what `4a98107f` split, and the
+syscalls are `kernel/src/syscall/` now, twelve files with `dispatch.rs`
+decoding every user pointer. Its line numbers were taken earlier still, so
+they and the bare `` `:NNN` `` continuations hanging off them — which may
+equally belong to `kernel/src/process.rs` or `kernel/src/object/ops.rs` — are
+kept as the sections they were taken from, to be re-taken rather than trusted:
+a split moves every line, so re-pointing them needs a re-read, not arithmetic.
+
+## 1. What constitutes authority? — COMMITTED
+
+One `HandleEntry` — an object reference plus a `Rights` word — in one process's
+own table (`kernel/src/object/handle.rs:142`), reached only through a
+`RawHandle`, which "designates nothing outside that table: a number lifted out
+of another process's log, or counted up from zero, resolves to that process's
+own slot or to nothing at all" (`toyos-abi/src/handle.rs:1`). Nothing else in
+the ABI bears authority: a `Koid` is "**Never an authority**: no syscall turns a
+koid into access to anything" (`kernel/src/object/mod.rs:74`), and an endowment
+label is "a *local name* in one process's own table and buys nothing to guess"
+(`toyos-abi/src/syscall.rs:315`). Every syscall states the right it needs at its
+own arm — `Rights::NONE` where the handle alone is the authority
+(`4a98107f^:kernel/src/arch/syscall.rs:309`, `:442`, `:1032`) — because "a right left
+unstated is a right each call site invents" (`toyos-abi/src/handle.rs:53`). The
+qualification is question 5's ambient set.
+
+## 2. Is every authority ultimately derived from a handle/capability? — RULED 2026-08-20, REVERSED 2026-09-24
+
+**Reversed by the owner: isolation is non-negotiable, and the filesystem
+comes inside the model.** `issues/every-program-sees-only-the-files-it-was-given.md` holds it. The 2026-08-20 ruling below is kept
+as the record of what the tree still does until that track lands.
+
+**The owner ruled: the filesystem is deliberately outside the capability
+model, and the exception is declared** — the root `CLAUDE.md`'s Capabilities
+paragraph now states it. Kernel objects answer to handles alone; paths are
+ambient by ruling, with `/boot`'s mount guard as the one restriction the
+ambient space carries. Ticket-based file access, if ever wanted, is a future
+era opened deliberately, never a retrofit.
+
+**Two sites disagree.** The root `CLAUDE.md`'s Capabilities paragraph says "a
+process holds exactly what its parent moved into it, and there is nothing it can
+name to get more". The dispatch does not: `SYS_OPEN` resolves any absolute path
+against the machine's one VFS (`4a98107f^:kernel/src/arch/syscall.rs:1233`), gated only by
+a per-*mount* `user_may_modify` whose whole subject is protecting `/boot`
+(`kernel/src/vfs.rs:288`); `SYS_SPAWN` starts any binary on that filesystem by
+path (`4a98107f^:kernel/src/arch/syscall.rs:359`); `SYS_DLOPEN` loads any `.so` by path
+(`:504`); `SYS_SHUTDOWN` powers the machine off with no handle and no right
+(`:328`). So the answer today is **no**, and the sentence in `CLAUDE.md` is true
+of kernel objects and false of the filesystem.
+
+**Smallest decision:** is the filesystem inside the capability model or
+deliberately outside it? **Recommendation: deliberately outside, and say so.** A
+directory capability would be a second namespace mechanism beside `Namespace`
+for no caller that exists, and the ambient path space is what makes `/system/bin/init`
+able to start `/system/bin/toybox` at all. What does not follow from that ruling is
+`SYS_SHUTDOWN`: it is not path authority, and it was separated — the syscall
+demands the POWER capability now, and the isolation entry that tracked it is
+closed.
+
+## 3. Are PIDs and TIDs identity-only, or can naming one confer authority? — COMMITTED
+
+Identity-only. No arm takes a pid, and `SYS_GETPID` answers the caller's own
+(`4a98107f^:kernel/src/arch/syscall.rs:490`). `ProcessStats.pid` says so at the
+field: "Not authority — no syscall takes a pid" (`toyos-abi/src/syscall.rs`'s
+`ProcessStats`). Tids are process-local names:
+`SYS_THREAD_JOIN` resolves through `thread_sched(caller, tid)` and
+`collect_thread_zombie(table, tid, parent_pid)`, both keyed on the caller's own
+pid (`4a98107f^:kernel/src/arch/syscall.rs:2393`, `kernel/src/process.rs:1412`, `:848`).
+
+## 4. Can a process enumerate objects it lacks authority over? — RULED 2026-08-20, IMPLEMENTED 2026-08-22
+
+**No.** The owner ruled that `SYS_SYSINFO` demands a right, and it does:
+`Rights::ROSTER` on a `SysCap` (`toyos-abi/src/handle.rs`), spelled `roster` in
+`toyos_manifest`'s `SYSCAP_RIGHTS` (`toyos-manifest/src/lib.rs`), demanded by
+`sys_sysinfo` before a single per-process entry is collected or written
+(`4a98107f^:kernel/src/arch/syscall.rs`), and endowed by `system.toml` to `toybox` —
+which is what `/system/bin/ps` is under another name — exactly as `logread` is endowed
+to `logd`. The machine header the same call answers first stays ambient, which
+is question 5's committed set: `free`, netd's memory budget and the compositor's
+taskbar read it and nothing else, and which of the two answers a call is asking
+for is the buffer's own length. `endowment_denied` is the gate — a capability
+without the bit refused an entry, the same capability answered one byte of
+buffer earlier, and `/system/bin/ps` run twice on either side of it. Landed as PR #209
+(the ABI half) and PR #211.
+
+The rest of the object graph was clean when this was audited and is unchanged.
+No syscall lists another process's handles; a `Namespace` answers `lookup` and
+has no listing operation at all (`kernel/src/object/namespace.rs:59`);
+`SYS_ENDOWMENTS` answers the caller's own table
+(`4a98107f^:kernel/src/arch/syscall.rs:1707`); reading the machine's log is gated on
+`Rights::LOG` (`:1683`) precisely because it is "every process's business and no
+process's right by default"; the per-kind object census is `SYS_DEBUG`, which a
+shipping kernel does not have (`:704`, `:792`). `SYS_READDIR` enumerates any
+directory by path, which is question 2's ambient VFS rather than a separate
+hole.
+
+## 5. What ambient authority intentionally remains, if any? — RULED 2026-08-20, by composition
+
+Questions 2 and 4's rulings plus the `SYS_SHUTDOWN` fix (PR #169/#172) settle
+this one: the list below, minus `SYS_SHUTDOWN` (now `Rights::POWER`) and minus
+`SYS_SYSINFO`'s census (now `Rights::ROSTER`, PR #209/#211 — its machine header
+stays, as a machine fact beside `SYS_CPU_COUNT`), **is the committed intentional
+set** — a process's own execution, address space and record, machine facts,
+creation-that-confers-nothing, and the filesystem/`SYS_DLOPEN`/`SYS_SPAWN` path
+space under question 2's declared exception.
+
+Nothing states the set, so nothing is *intentional* yet. Classifying every arm
+of `syscall_dispatch` by what it demands, a process with an **empty handle
+table** can still reach:
+
+- **its own execution** — `SYS_EXIT`, `SYS_THREAD_EXIT`, `SYS_THREAD_SPAWN`,
+  `SYS_THREAD_JOIN`, `SYS_FUTEX_WAIT`/`WAKE`, `SYS_NANOSLEEP`,
+  `SYS_SET_THREAD_NAME`;
+- **its own address space** — `SYS_MMAP`, `SYS_MUNMAP`, `SYS_TLS_ALLOC_BLOCK`,
+  `SYS_STACK_INFO`;
+- **its own record** — `SYS_GETPID`, `SYS_GET_ENV`, `SYS_ENDOWMENTS`,
+  `SYS_QUERY_MODULES`, `SYS_SCHED_INFO`, `SYS_GETCWD`, `SYS_CHDIR`;
+- **machine facts** — `SYS_CLOCK_REALTIME`, `SYS_CLOCK_EPOCH`,
+  `SYS_CPU_COUNT`, `SYS_RANDOM`, and `SYS_SYSINFO`'s header (total and used
+  memory, the CPU count, the live-thread count, the uptime and the two CPU-time
+  accumulators) but not the roster after it;
+- **object creation, which confers nothing over anything that exists** —
+  `SYS_PIPE`, `SYS_PORT_CREATE` ("needs no right and grants none — a port with
+  no clients is not authority", `4a98107f^:kernel/src/arch/syscall.rs:1731`),
+  `SYS_SHM_CREATE`, `SYS_INBOX_SETUP`;
+- **and four that reach past the process** — the whole filesystem by path
+  (`SYS_OPEN`, `SYS_READDIR`, `SYS_DELETE`, `SYS_MKDIR`, `SYS_RMDIR`,
+  `SYS_RENAME`, `SYS_SYMLINK`, `SYS_READLINK`), `SYS_DLOPEN`/`SYS_DLSYM` over
+  the same paths, `SYS_SPAWN`, and `SYS_SHUTDOWN` — plus `SYS_SYSINFO`'s census.
+
+**Smallest decision:** the last group. **Recommendation:** keep the filesystem,
+`SYS_DLOPEN` and `SYS_SPAWN` ambient under question 2's ruling; make
+`SYS_SHUTDOWN` and `SYS_SYSINFO` rights-bearing, because neither is path
+authority and both are machine-wide. Then this list, minus those two, is the
+committed answer. **Both are done** — `Rights::POWER` and `Rights::ROSTER` — so
+the list minus them is what the tree now enforces.
+
+## 6. Can rights ever increase after delegation? — COMMITTED
+
+**No, and the type has no widening primitive** (`toyos-abi/src/handle.rs:53`).
+Every path that puts an entry in a table was walked. The only rights-taking
+constructor a caller can reach is `HandleEntry::duplicate`, which refuses
+without `Rights::DUP` and refuses a set that is not `subset_of` the source's
+(`kernel/src/object/handle.rs:170`); `SYS_HANDLE_DUP`
+(`4a98107f^:kernel/src/arch/syscall.rs:2596`) and `SYS_HANDLE_DUP_AT` (`:2624`) both go
+through it, so a device claim — created with no `DUP`
+(`kernel/src/object/ops.rs:47`) — cannot be copied at either. The five
+`HandleEntry::new` sites are all fresh objects, never a re-rating of a held one:
+`ops::install`/`ops::open` take `initial_rights` (`kernel/src/object/ops.rs:79`,
+`:160`), `install_buffer` a fixed `MAP|DUP|TRANSFER`
+(`kernel/src/object/device.rs:54`), `spawn_init` the machine's root cap
+(`kernel/src/loader/mod.rs:954`), and `build_child_handles`'s per-child console
+mint carries the **parent's** rights on the handle it replaces
+(`kernel/src/loader/start.rs:341`). Both move paths carry rights unchanged:
+`HandleTable::transfer` (`kernel/src/object/handle.rs:446`) and
+`PendingHandles::commit` (`kernel/src/loader/start.rs:230`). The one live
+consequence — unchanged means `TRANSFER` survives a move, so nothing can be
+delegated un-re-delegatably — is
+`issues/a-moved-handle-is-always-re-movable.md`, which is a bound on
+delegation and not a widening.
+
+## 7. What authority is implicit in process creation? — COMMITTED
+
+A child starts with an empty `HandleTable` and gets exactly two vectors:
+`slot_map` *duplicates* (the parent keeps its copy) and `endow` *moves*
+(`toyos-abi/src/syscall.rs:283`). Both are all-or-nothing and refuse by name — a
+slot-map pair naming a handle the parent does not hold ends the parent
+(`kernel/src/loader/start.rs:308`), an endowed handle without `TRANSFER` refuses
+the spawn before anything leaves the table (`:206`), and the move is the last
+thing a spawn does (`kernel/src/loader/mod.rs:649`). **Two things are implicit
+and nothing else is:**
+
+1. a `Console` slot is *minted fresh* rather than duplicated, at the parent's
+   rights, because the object is the line buffer
+   (`kernel/src/loader/start.rs:325`);
+2. the spawner is handed a `Process` handle carrying
+   `DUP|TRANSFER|WAIT|READ|MANAGE` by type (`kernel/src/object/ops.rs:74`), and
+   must dup-narrow and close if it wants to hold less.
+
+The child's cwd is not implicit: `SpawnArgs` states it (`cwd_ptr`/`cwd_len`),
+and the kernel starts the child there or refuses the spawn — `InvalidArgument`
+for a path that is not absolute, `NotFound` for one naming no directory — with
+no default to the caller's (`spawn_cwd` in `kernel/src/syscall/fs.rs`).
+std states `Command::current_dir`, or the caller's own directory when there is
+none, and `tests/toyos-rust-tests/src/bin/spawn_cwd.rs` holds both routes to it.
+
+Beyond that a child holds nothing, plus question 5's ambient set, which every
+process has.
+
+## 8. Which object types are transferable? — COMMITTED
+
+**All thirteen, by exactly two mechanisms.** `kobject!` declares thirteen kinds
+(`kernel/src/object/mod.rs:278`); twelve get `Rights::TRANSFER` from
+`initial_rights` (`kernel/src/object/ops.rs:34`), and the thirteenth, `SysCap`,
+is created with `Rights::NONE` there because "every bit on a `SysCap` is an
+authority init decides per program" — the machine's only one is minted with
+`TRANSFER` at `kernel/src/loader/mod.rs:946`. The mechanisms are
+`SYS_HANDLE_SEND`/`SYS_HANDLE_RECV` over a `Connection`, where the connection
+and every handle must carry `TRANSFER`, no handle may be named twice, and the
+connection may not be sent over itself (`4a98107f^:kernel/src/arch/syscall.rs:2086`,
+`:2090`); and `SpawnArgs::endow`. Nothing else crosses a process boundary — the
+handles `install_buffer` writes are the kernel handing a claim's holder its own
+buffers, not a transfer (`kernel/src/object/device.rs:49`).
+
+## 9. Are threads intended to become independently controllable first-class kernel objects? — RULED 2026-08-20
+
+**The owner ruled: declined until a caller exists.** No API may answer this by
+accident — an interface change that would make a thread independently
+holdable, waitable-by-others, or delegable is stopped and this ruling
+reopened deliberately, the day a debugger, profiler, or supervisor genuinely
+needs it.
+
+**Nothing in the tree has decided it.** There is no `Thread` row in `kobject!`
+(`kernel/src/object/mod.rs:278`), so a thread is not something a handle can
+name. `SYS_THREAD_SPAWN` answers a bare `Tid`
+(`4a98107f^:kernel/src/arch/syscall.rs:2376`), `SYS_THREAD_JOIN` takes one and resolves it
+only inside the caller's own process (`:2393`), there is no thread-kill and no
+cross-process thread operation, and a `Process` handle's `MANAGE` retires every
+thread at once (`kernel/src/process.rs:1960`). This is the shape that resulted
+from `Process` being the only lifecycle object, not a stated position.
+
+**Smallest decision:** does anything need to name a thread it did not create?
+**Recommendation: no, and record it as declined.** The two callers that would
+want one do not exist — there is no debugger, and
+`issues/cpu-time-is-a-band-and-not-a-reservation.md` prices its entities
+per real-time client and per CPU rather than per thread. A `Thread` object costs
+a fourteenth `kobject!` row plus a rights vocabulary for it; reopen when a
+caller exists.
+
+## 10. How is device authority delegated? — COMMITTED
+
+Four sites, and they cannot disagree. `system.toml` declares `devices` per
+program; `src/build.rs:1923` refuses a config where two programs name one class
+and `src/build.rs:1953` refuses a class the ABI does not have, so arbitration is
+a build-time fact rather than a runtime race. At boot the kernel mints one
+full-rights `SysCap` for `/system/bin/init` and nothing else can construct one
+(`kernel/src/loader/mod.rs:938`). init reads the manifest and calls
+`SYS_DEVICE_CLAIM` per declared class (`userland/init/src/main.rs:506`), which
+demands `Rights::DEVICE` on a `SysCap` (`4a98107f^:kernel/src/arch/syscall.rs:1627`) and
+takes the class exclusively (`kernel/src/device.rs:56`). The claim comes back
+**without `Rights::DUP`**, so endowing it is the only expressible form and init
+provably no longer holds it (`kernel/src/object/ops.rs:47`). Every
+device-driving syscall then presents that handle and the kernel checks the
+*class*, not merely the type: "a process holding the NIC has no more business
+setting the resolution than one holding nothing"
+(`4a98107f^:kernel/src/arch/syscall.rs:895`). `SYS_RT_ENTER` is the same shape
+on `Rights::RT` (`:1655`), narrowed per program by
+`toyos_manifest::syscap_rights` (`toyos-manifest/src/lib.rs:73`) — `system.toml`
+grants exactly two, `logread` to `logd` and `rt` to `soundd`.
+
+One inconsistency, known and unobservable: three arms demand three different
+rights on the same claim handle — `Rights::WRITE`
+(`4a98107f^:kernel/src/arch/syscall.rs:902`), `Rights::READ` (`:1136`) and `Rights::NONE`
+(`:1032`). No claim handle can ever carry a narrower set, because narrowing
+needs `DUP` and a claim has none, so the three are the same test today.
+
+## 11. Are namespaces capability objects or ambient process state? — COMMITTED
+
+**Capability objects.** `Namespace` is a `kobject!` row
+(`kernel/src/object/mod.rs:296`), immutable once built — "no insert, no remove,
+no replace", and a narrower one is a *new* object built from an existing one
+(`kernel/src/object/namespace.rs:1`). `SYS_NAMESPACE_OPEN` demands
+`Rights::READ` on a namespace handle and there is no second place to ask
+(`4a98107f^:kernel/src/arch/syscall.rs:1861`); `SYS_NAMESPACE_BUILD` demands
+`Rights::TRANSFER` on every added connector and resolves kept names against the
+base before installing anything (`:1754`). A process with no `svc` endowment
+resolves no name at all, and there is no registry to fall back to. The **filesystem** path space is the
+other thing the word could mean, and it is ambient process state
+(`4a98107f^:kernel/src/arch/syscall.rs:1234`) — questions 2 and 5 hold that half.
+
+## 12. Is CPU time an explicit schedulable/budget authority, or is process-level fair scheduling sufficient? — OPEN
+
+Held by `issues/cpu-time-is-a-band-and-not-a-reservation.md`, which
+already carries the commitment and the measurements; nothing is added here.
+Today the only CPU-time authority is a band: `SYS_RT_ENTER` puts the calling
+process in the real-time band on `Rights::RT`
+(`4a98107f^:kernel/src/arch/syscall.rs:1653`), with no budget, no period and no admission
+— "no entity is promised anything a number can check", measured at 93.3 ms of
+audio starvation behind a fair storm.
+
+## The ruling set
+
+Four decisions, in one place, for the owner:
+
+1. **The filesystem** (question 2) — inside the capability model or deliberately
+   outside it. Recommended: outside, stated.
+2. **`SYS_SHUTDOWN`** (questions 2 and 5) — ambient or rights-bearing.
+   Recommended: rights-bearing.
+3. **`SYS_SYSINFO`** (questions 4 and 5) — ambient or rights-bearing.
+   Recommended: rights-bearing, one more `SysCap` bit. Ruled that way on
+   2026-08-20 and implemented on 2026-08-22 as `Rights::ROSTER`, with the
+   machine header left ambient.
+4. **Threads as objects** (question 9) — intended or declined. Recommended:
+   declined until a caller exists.
+
+Question 12 is not in this set: its track already holds it.
+
+## The rest of the review's standing rules
+
+- **The adversarial handle-lifecycle suite** the review lists — stale-handle
+  behavior, rights reduction and duplication, cross-process transfer, table
+  exhaustion, teardown with references in flight, and every path where a
+  numeric identifier might become authority — is measured against what
+  `handle_kill_policy`, `abuse_handle_table`, `handle_lifetime` and the
+  census arm already cover, and the gaps become tests.
+- **Zero-handle hooks stay mechanically constrained** — the drain sites'
+  "no hook may take a sleep lock" doc constraint wants enforcement the
+  compiler or an assert can see, per the review's finalization-path point.
+
+`handle_kill_policy` is deleted; `issues/handle-kill-policy-census-grew-one-sharedmem-on-two-nightlies.md` records the commit that restores it.

@@ -271,7 +271,7 @@ fn steal_probe_node_is_never_double_linked() {
 /// **A control for a defect that stands, not for a mutation.** This crate's
 /// other features model a rule away to show the model catches the lie; this one
 /// changes nothing and lets the victim do what a stopped CPU does, and the
-/// model must then fail — `issues/kernel/steal-probe-node-dies-with-its-victim.md`
+/// model must then fail — `issues/steal-probe-node-dies-with-its-victim.md`
 /// reproduced instead of argued. `TOYOS_LOOM_RAW=1` skips the catch.
 ///
 /// **The exit is deletion, not a green run.** The feature *defines* every

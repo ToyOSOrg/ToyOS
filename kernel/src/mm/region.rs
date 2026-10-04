@@ -1,4 +1,4 @@
-//! `KernelSlice` is `Copy`, carries no lifetime, and can outlive its `Allocation`; tracked at `issues/design-debt/kernelslice-outlives-its-allocation.md`.
+//! `KernelSlice` is `Copy`, carries no lifetime, and can outlive its `Allocation`; tracked at `issues/kernelslice-outlives-its-allocation.md`.
 
 /// A kernel allocation that can vouch for its own extent.
 /// # Safety

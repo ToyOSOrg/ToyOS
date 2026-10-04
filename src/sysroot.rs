@@ -363,7 +363,7 @@ pub(crate) fn gitlink(checkout: &Path, path: &str) -> String {
 pub(crate) enum Links {
     /// Refused by name.
     Refused,
-    /// Left out of the identity (`issues/build/a-compiler-key-reads-no-symbolic-link.md`).
+    /// Left out of the identity (`issues/a-compiler-key-reads-no-symbolic-link.md`).
     Skipped,
 }
 
