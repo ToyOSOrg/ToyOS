@@ -309,18 +309,24 @@ fn cmdline_of(path: &Path) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|e| format!("the boot parameter on {} is not text: {e}", path.display()))
 }
 
-/// The name the ROOT of the image's marked slot carries in its superblock,
-/// read back off the image at `path`.
-pub fn root_uuid_on(path: &Path) -> Result<FsUuid, String> {
+/// The ROOT of the image's marked slot, read back off the image at `path`:
+/// its name, and the file `name` it carries, read with the driver the kernel
+/// mounts it with.
+pub fn root_file_on(path: &Path, name: &str) -> Result<(FsUuid, Vec<u8>), String> {
     let mut file = std::fs::File::open(path).map_err(|e| format!("opening {}: {e}", path.display()))?;
     let table = slot_table_of(&mut file).map_err(|why| format!("{}: {why}", path.display()))?;
     let slot = table.slot(table.marked).expect("a table marks a slot it carries");
-    let (start, _) = partition_extent(&mut file, slot.root).map_err(|why| format!("{}: {why}", path.display()))?;
-    let mut block = [0u8; 4096];
+    let (start, len) = partition_extent(&mut file, slot.root).map_err(|why| format!("{}: {why}", path.display()))?;
+    let len = usize::try_from(len).map_err(|_| format!("a {len}-byte ROOT on {}", path.display()))?;
+    let mut volume = vec![0u8; len];
     file.seek(SeekFrom::Start(start))
-        .and_then(|_| file.read_exact(&mut block))
+        .and_then(|_| file.read_exact(&mut volume))
         .map_err(|e| format!("reading {}'s ROOT at byte {start}: {e}", path.display()))?;
-    Ok(root_uuid_of(&block))
+    let uuid = root_uuid_of(&volume);
+    let fs = bcachefs::Mounted::<_, bcachefs::ReadOnly>::open(VecBlockIO::from_vec(volume))
+        .map_err(|e| format!("{}'s ROOT does not mount: {e:?}", path.display()))?;
+    let bytes = fs.read_file(name).map_err(|e| format!("{}'s ROOT: reading {name}: {e:?}", path.display()))?;
+    Ok((uuid, bytes))
 }
 
 /// The slot table on the disk image `file`, as the loader reads it.
