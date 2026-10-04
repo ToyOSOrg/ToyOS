@@ -811,14 +811,14 @@ const NOT_YET_BUILT: &[(Arch, &str, &str)] = &[
         Arch::Aarch64,
         "doom",
         "softbuffer's toyos fork stops it \
-         (issues/build/the-toolkit-forks-resolve-an-x86-only-toyos-window.md); its C compiles for \
+         (issues/the-toolkit-forks-resolve-an-x86-only-toyos-window.md); its C compiles for \
          AArch64 with the toolchain's clang",
     ),
 ];
 
 const TOOLKIT_FORKS: &str = "softbuffer's and winit's toyos forks resolve the published \
      toyos-window 0.2.0, whose framebuffer is x86-64 only \
-     (issues/build/the-toolkit-forks-resolve-an-x86-only-toyos-window.md)";
+     (issues/the-toolkit-forks-resolve-an-x86-only-toyos-window.md)";
 
 /// Why `arch`'s userland leaves `program` out, if it does.
 fn not_built_for(arch: Arch, program: &str) -> Option<&'static str> {
@@ -1028,7 +1028,7 @@ pub struct Boot {
     config: PathBuf,
     image: PathBuf,
     /// Which of the two build sequences writes it. They are not one function
-    /// yet — `issues/build/two-sequences-build-one-image.md` — and until they
+    /// yet — `issues/two-sequences-build-one-image.md` — and until they
     /// are, this is what keeps each artifact to a single writer.
     case: bool,
 }

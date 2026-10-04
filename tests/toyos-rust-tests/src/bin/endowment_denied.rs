@@ -123,7 +123,7 @@ const APPLET_NEEDS: &[(&str, &[&str])] = &[
 ];
 
 /// Every authority this image hands an applet that has no use for it: the exact
-/// size of `issues/isolation/toybox-is-one-row-for-every-applet.md` here.
+/// size of `issues/toybox-is-one-row-for-every-applet.md` here.
 const DECLARED_OVER_GRANTS: &[&str] = &[
     "cat: receive soundserver",
     "cp: receive soundserver",

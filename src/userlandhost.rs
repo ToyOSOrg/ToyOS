@@ -19,14 +19,14 @@
 //! ```toml
 //! [package.metadata.toyos.host]
 //! fails = ["windows"]
-//! issue = "issues/build/<slug>.md"
+//! issue = "issues/<slug>.md"
 //! ```
 //!
 //! A host's apps are built where the gate runs on its triple ([`Os::triple`]),
 //! and checked against that triple elsewhere. A check links nothing and runs
 //! build scripts on the host that checks, and a declared failure is attempted on
 //! no host, so one that outlives its fix goes unseen
-//! (`issues/build/a-hosts-apps-are-judged-on-other-hosts-runners.md`). An app
+//! (`issues/a-hosts-apps-are-judged-on-other-hosts-runners.md`). An app
 //! whose work a `cfg` compiles out of a host checks green there: only review
 //! holds that (`.claude/agents/reviewer.md`, Hosts).
 //!
@@ -257,18 +257,18 @@ fn declared(manifest: &toml::Value, root: &Path) -> Result<Host, String> {
     }
 }
 
-/// `issue` is `issues/<area>/<slug>.md`, work still owed, and names `app` in
+/// `issue` is `issues/<slug>.md`, work still owed, and names `app` in
 /// backticks.
 fn owed(root: &Path, issue: &str, app: &str) -> Result<(), String> {
     let word = |s: &str| {
         !s.is_empty() && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
     };
     let shaped = match issue.split('/').collect::<Vec<_>>()[..] {
-        ["issues", area, slug] => word(area) && slug.strip_suffix(".md").is_some_and(word),
+        ["issues", slug] => slug.strip_suffix(".md").is_some_and(word),
         _ => false,
     };
     if !shaped {
-        return Err(format!("`issue` is {issue:?}, which is no issues/<area>/<slug>.md"));
+        return Err(format!("`issue` is {issue:?}, which is no issues/<slug>.md"));
     }
     let text = std::fs::read_to_string(root.join(issue))
         .map_err(|e| format!("`issue` is {issue}, which does not open: {e}"))?;
@@ -538,17 +538,18 @@ mod tests {
             let text = format!("---\nstatus: {status}\nkind: defect\n---\n\n| `calc` | 101 |\n");
             fs::write(path, text).expect("write a fixture issue");
         };
-        put("issues/build/x.md", "open");
-        put("issues/build/held.md", "assigned");
-        put("issues/build/asked.md", "owner");
+        put("issues/x.md", "open");
+        put("issues/held.md", "assigned");
+        put("issues/asked.md", "owner");
         put("issues/README.md", "open");
+        put("issues/build/x.md", "open");
         put("notes.md", "open");
         let read = |host: &str| {
             let manifest = format!("[package]\nname = \"calc\"\n{host}");
             declared(&manifest.parse().expect("TOML"), &dir)
         };
         let table = "[package.metadata.toyos.host]\n";
-        let issue = "issue = \"issues/build/x.md\"\n";
+        let issue = "issue = \"issues/x.md\"\n";
         assert_eq!(read(""), Ok(Host::App(Vec::new())));
         assert_eq!(read("[package.metadata.toyos]\nother = 1\n"), Ok(Host::App(Vec::new())));
         for case in ["owns", "manages"] {
@@ -559,7 +560,7 @@ mod tests {
             Ok(Host::App(vec![Os::Windows, Os::Linux]))
         );
         assert_eq!(
-            read(&format!("{table}fails = [\"linux\"]\nissue = \"issues/build/held.md\"\n")),
+            read(&format!("{table}fails = [\"linux\"]\nissue = \"issues/held.md\"\n")),
             Ok(Host::App(vec![Os::Linux]))
         );
         for refused in [
@@ -579,8 +580,9 @@ mod tests {
             format!("{table}fails = [\"linux\"]\nissue = \"notes.md\"\n"),
             format!("{table}fails = [\"linux\"]\nissue = \"issues/README.md\"\n"),
             format!("{table}fails = [\"linux\"]\nissue = \"issues/../notes.md\"\n"),
-            format!("{table}fails = [\"linux\"]\nissue = \"issues/build/asked.md\"\n"),
-            format!("{table}fails = [\"linux\"]\nissue = \"issues/build/gone.md\"\n"),
+            format!("{table}fails = [\"linux\"]\nissue = \"issues/build/x.md\"\n"),
+            format!("{table}fails = [\"linux\"]\nissue = \"issues/asked.md\"\n"),
+            format!("{table}fails = [\"linux\"]\nissue = \"issues/gone.md\"\n"),
             format!("{table}exmept.owns = \"a panel\"\n"),
             format!("{table}exempt.owns = \"a panel\"\nnote = \"it may grow\"\n"),
             "[package.metadata.toyos]\nhost = \"exempt\"\n".to_string(),
