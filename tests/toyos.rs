@@ -2008,8 +2008,9 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
             let colours: BTreeSet<[u8; 3]> = dump.pixels.iter().copied().collect();
             if colours.len() != 2 || !colours.contains(&BLACK) {
                 return Err(format!(
-                    "the loader's screen carries {colours:?}, not black and the console's text: \
-                     something the firmware drew is still on it"
+                    "the loader's screen carries {} colours, not black and the console's text alone: \
+                     something the firmware drew is still on it",
+                    colours.len()
                 ));
             }
             // The top line of ink is the loader's first, as wide as its
