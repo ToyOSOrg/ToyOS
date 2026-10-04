@@ -22,4 +22,5 @@ toyos-elf = { path = "../toyos-elf" }
 toyos-elide = { path = "../toyos-elide" }
 
 [dev-dependencies]
+# unaligned: an include_bytes! fixture is aligned to 1, and object reads a header in place.
 object = { version = "0.38", default-features = false, features = ["read_core", "elf", "std", "unaligned"] }
