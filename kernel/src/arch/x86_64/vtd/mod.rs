@@ -543,7 +543,7 @@ fn enable(
 
     // After the tables are built, so a unit firmware left translating passes DMA
     // untranslated only while it is programmed
-    // (`issues/kernel/a-unit-left-translating-passes-dma-untranslated-while-programmed.md`),
+    // (`issues/a-unit-left-translating-passes-dma-untranslated-while-programmed.md`),
     // and before the queue is pointed, which §6.5.2 does only with it off.
     unit.hand_over();
     let mut queue = Queue::new(&mut TABLES.lock(), unit.regs);

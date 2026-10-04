@@ -400,7 +400,7 @@ global_asm!(
     // SSE state and `fxsave` without `CR4.OSFXSR` is `#UD`. This CR4 holds
     // `PAE` alone until `init_ap` reaches `control_regs::init`, so a fault
     // before that point faults again in its own handler —
-    // `issues/kernel/an-ap-loads-the-idt-before-its-control-registers.md`.
+    // `issues/an-ap-loads-the-idt-before-its-control-registers.md`.
     "mov edi, 0x8F00",
     "lidt [rdi + 0x28]",       // TrampolineData.kernel_idt
 

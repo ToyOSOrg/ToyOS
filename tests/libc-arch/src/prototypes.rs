@@ -21,7 +21,7 @@ const UNDECLARED: &[(&str, &str)] = &[
     ("_Unwind_Resume", "what the precompiled `alloc`'s landing pads name"),
     ("__cxa_atexit", "the C++ ABI's, which `cxxabi.h` declares"),
     ("__cxa_thread_atexit_impl", "what libc++abi's `__cxa_thread_atexit` calls, which it declares"),
-    ("close_socket", "`close`'s arm for a socket, which `close` never calls: issues/build/libc-close-of-a-socket-ends-the-process.md"),
+    ("close_socket", "`close`'s arm for a socket, which `close` never calls: issues/libc-close-of-a-socket-ends-the-process.md"),
 ];
 
 fn libc() -> PathBuf {

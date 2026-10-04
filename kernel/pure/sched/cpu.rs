@@ -229,7 +229,7 @@ pub struct CpuSched<X: SchedPayload> {
     /// occupied" is false.
     ///
     /// **Superseded in design by the reservation model**
-    /// (`issues/kernel/cpu-time-is-a-band-and-not-a-reservation.md`), which
+    /// (`issues/cpu-time-is-a-band-and-not-a-reservation.md`), which
     /// deletes the age, the chunk and the grant together: the deferral
     /// above is bounded per *corpse* and not per CPU, so k corpses take k
     /// consecutive grants, and a real-time band that briefly empties throws the
@@ -888,8 +888,8 @@ impl<X: SchedPayload> CpuSched<X> {
     /// disjoint from both. That argument is worth one comparison per migration
     /// to stop being an argument: if it is ever wrong, the far CPU restores a
     /// stack this one is standing on, and what the machine reports is not this
-    /// site but a container somewhere else reading as a value nothing can write
-    /// (`issues/kernel/`, the `BTreeMap`-inside-its-own-insert class). Two CPUs
+    /// site but a container somewhere else reading as a value nothing can write.
+    /// Two CPUs
     /// on one kernel stack is not a state to return an error from — it is a
     /// kernel bug, and it dies here where it can still be named.
     fn hand_off<H: Hw<Payload = X>, P: PreemptGuard>(

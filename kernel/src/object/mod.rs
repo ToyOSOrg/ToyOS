@@ -2,7 +2,7 @@
 //!
 //! Objects are plain `Arc<T>`: no custom refcounting, no `Weak`, no `dyn` hierarchy.
 //!
-//! `handle_count`, not the Arc strong count, is what userland-visible lifecycle rides: a syscall's `Arc` can be stranded on a killed thread's kernel stack, so release is deferred through [`ZERO_QUEUE`] — see `issues/kernel/deferred-release-outlives-its-syscall.md`.
+//! `handle_count`, not the Arc strong count, is what userland-visible lifecycle rides: a syscall's `Arc` can be stranded on a killed thread's kernel stack, so release is deferred through [`ZERO_QUEUE`] — see `issues/deferred-release-outlives-its-syscall.md`.
 
 // `warn` here gates via CI's `-D warnings`; the rest of the kernel is not yet swept.
 #![warn(clippy::undocumented_unsafe_blocks)]

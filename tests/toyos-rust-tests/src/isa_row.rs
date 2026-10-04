@@ -2,7 +2,7 @@
 //!
 //! A holder's exit is not its claim's release having run: the release is a
 //! deferred hook another CPU can still be inside when `wait` returns
-//! (`issues/kernel/deferred-release-outlives-its-syscall.md`). So the next
+//! (`issues/deferred-release-outlives-its-syscall.md`). So the next
 //! claim is asked for until it is granted.
 
 use std::time::{Duration, Instant};

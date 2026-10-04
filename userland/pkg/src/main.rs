@@ -200,7 +200,7 @@ fn remove(name: &str) -> Result<(), String> {
 /// Delete a directory and everything under it.
 ///
 /// **Not `fs::remove_dir_all`**: that one empties a directory and leaves it
-/// (`issues/filesystem/remove-dir-all-empties-a-directory-and-leaves-it.md`),
+/// (`issues/remove-dir-all-empties-a-directory-and-leaves-it.md`),
 /// and a package whose directory survives its removal is a name that can never
 /// be installed again.
 ///

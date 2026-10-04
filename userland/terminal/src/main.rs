@@ -74,10 +74,7 @@ fn main() {
     // The window exists and the shell's stdin is a pipe this process owns, so
     // from here a keystroke the compositor forwards has somewhere to land even
     // if the shell has not reached its first read. Before it, one is dropped
-    // with no trace — which is what the desktop tests used to compensate for by
-    // retyping against a clock, making every one of their verdicts a statement
-    // about how long a desktop takes to come up on the host of the day
-    // (`issues/design-debt/`).
+    // with no trace.
     eprintln!("terminal: ready");
 
     loop {

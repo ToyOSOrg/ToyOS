@@ -618,7 +618,7 @@ impl<'a> Service<'a> {
         // file lives in an ambient directory, so what the supervisor verified when it
         // wrote it is not a claim about what is there now. This narrows the
         // window to the spawn itself and does not close it
-        // (`issues/isolation/a-swapped-binary-lives-where-any-process-can-rewrite-it.md`).
+        // (`issues/a-swapped-binary-lives-where-any-process-can-rewrite-it.md`).
         if let Some(digest) = toyos_swap::installed_digest(path) {
             let bytes = read_binary(path).map_err(|why| std::io::Error::other(why.to_string()))?;
             toyos_swap::verify(&bytes, &digest).map_err(|why| {
@@ -1864,7 +1864,7 @@ enum Served<'m, 'a> {
 ///
 /// **A compromise over a kernel defect, recorded as one**: the kernel publishes
 /// a process's end before every deferred release its handles queued has run
-/// (`issues/kernel/deferred-release-outlives-its-syscall.md`), so a claim asked
+/// (`issues/deferred-release-outlives-its-syscall.md`), so a claim asked
 /// for the instant `wait` returns is refused as still held. Its release is one
 /// pass of the zero-handle drain; this bound is a liveness guard, and it goes
 /// when that issue closes.
@@ -2253,7 +2253,7 @@ fn build_namespace(
 ///
 /// **Every program sees the whole tree the file servers serve**, which is the
 /// kernel's old view kept whole until each row declares its own
-/// (`issues/isolation/every-program-sees-only-the-files-it-was-given.md`,
+/// (`issues/every-program-sees-only-the-files-it-was-given.md`,
 /// stage 2), with one exception: a storage row sees none, since a file server
 /// resolving a path of its own through itself waits for ever.
 fn in_view(program: &Program, name: &str) -> bool {
