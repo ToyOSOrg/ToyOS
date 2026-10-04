@@ -639,6 +639,10 @@ impl AddressSpace {
         self.regions.insert(addr, region);
     }
 
+    pub fn has_region_room(&self) -> bool {
+        self.regions.has_room()
+    }
+
     /// Find the region containing `addr`. Returns (start_addr, region).
     pub fn find_region(&self, addr: UserAddr) -> Option<(UserAddr, &Region)> {
         self.regions.find(addr)

@@ -4,6 +4,7 @@ use alloc::sync::Arc;
 use crate::file_backing::FileBacking;
 use crate::mm::policy::Prot;
 use crate::mm::{UserAddr, PAGE_2M};
+use toyos_abi::syscall::MAX_REGIONS;
 use toyos_userbound::{PageSpan, Window};
 
 /// The stack extends upward to the PIE base, so no usable VA space exists above it.
@@ -74,10 +75,17 @@ impl Regions {
         window().gap(span, taken).map(UserAddr::new)
     }
 
+    pub fn has_room(&self) -> bool {
+        self.0.len() < MAX_REGIONS
+    }
+
     /// Allocate a virtual address range and register the region. `size` is
     /// made a [`PageSpan`] before anything is summed on it.
     pub fn alloc(&mut self, size: u64, kind: RegionKind) -> Option<UserAddr> {
         let span = window().span(size)?;
+        if !self.has_room() {
+            return None;
+        }
         let addr = self.find_gap(span)?;
         self.0.insert(addr, Region { size: span.bytes(), kind });
         Some(addr)
@@ -86,11 +94,8 @@ impl Regions {
     /// A [`RegionKind::Mapped`] region for `size` bytes: its address and its
     /// size in whole pages, which the caller maps.
     pub fn alloc_mapped(&mut self, size: u64) -> Option<(UserAddr, u64)> {
-        let span = window().span(size)?;
-        let addr = self.find_gap(span)?;
-        let aligned = span.bytes();
-        self.0.insert(addr, Region { size: aligned, kind: RegionKind::Mapped });
-        Some((addr, aligned))
+        let addr = self.alloc(size, RegionKind::Mapped)?;
+        Some((addr, self.0[&addr].size))
     }
 
     /// Unregister the region at `addr`, answering its size.
@@ -98,9 +103,11 @@ impl Regions {
         Some(self.0.remove(&addr)?.size)
     }
 
-    /// Insert a region at a specific address (for ELF segments, stack, etc.)
+    /// Insert a region at a specific address (for ELF segments, stack, etc.);
+    /// a caller userland drives asks [`has_room`](Self::has_room) first.
     pub fn insert(&mut self, addr: UserAddr, region: Region) {
         assert!(self.find(addr).is_none(), "insert_region: address {:#x} already occupied", addr.raw());
+        assert!(self.has_room(), "insert_region: {MAX_REGIONS} regions are registered already");
         self.0.insert(addr, region);
     }
 
