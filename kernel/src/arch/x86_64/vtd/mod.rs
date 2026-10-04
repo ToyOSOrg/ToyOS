@@ -255,6 +255,14 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice]) {
 /// interrupt to whatever the handle bits spell. Every condition below therefore
 /// refuses for the machine, not for the unit that failed it.
 fn remappable(ready: &[(Unit, Plan)], described: usize) -> Option<bool> {
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::iommu_no_remap() {
+        log!(
+            "iommu: iommu-no-remap stands in for units that cannot remap, so every source stays \
+             in compatibility format"
+        );
+        return None;
+    }
     if ready.is_empty() {
         return None;
     }

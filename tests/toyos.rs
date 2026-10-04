@@ -14,7 +14,7 @@ use common::qemu::{
     self, await_guest, await_marker, BootOptions, QemuInstance,
     STALLED, TIMED_OUT,
 };
-use common::{audio, compile, devices, faults, isa, lan, metal, power, screen, serial, usb};
+use common::{audio, claims, compile, devices, faults, isa, lan, metal, power, screen, serial, usb};
 use toyos_build::bootlog::{self};
 use toyos_build::testargs::{self, SUITE};
 
@@ -93,6 +93,10 @@ const RUST_SKIP: &[&str] = &[
     // metal rows run them.
     "isa_grant",
     "isa_lines",
+    // It claims the T14's I219, which no guest has: the
+    // `claim_reuses_its_remapping_entry` and `claim_refused_without_remapping`
+    // metal rows run it.
+    "pci_reclaim",
     // It takes the machine down; `virt_fatal_halts_the_others_first` runs it.
     "panic_halts_first",
     // Needs a launcher and a declared `cat` and shell, which `tests/testcases`
@@ -656,6 +660,39 @@ const METAL: &[(&str, metal::Metal)] = &[
         "iommu_firmware_left",
         metal::Metal { arms: SELFTESTS, judge: |b| iommu_firmware_left(b[0].kernel().text()) },
     ),
+    // ---- a claimed function at the unit, on tests/testcases ----
+    (
+        // Claimed, given back and claimed again: both claims name one
+        // remapping entry, and each release leaves it not present.
+        "claim_reuses_its_remapping_entry",
+        metal::Metal {
+            arms: TESTCASES,
+            judge: |b| {
+                b[0].job_passed(claims::RECLAIM)?;
+                claims::reuses_its_entry(&b[0].kernel())
+            },
+        },
+    ),
+    (
+        // Every domain's addresses end below the first root-bridge window
+        // above where they start.
+        "domain_ends_below_the_host_bridges",
+        metal::Metal { arms: TESTCASES, judge: |b| claims::clear_of_host_bridges(&b[0].kernel()) },
+    ),
+    (
+        // A machine whose units do not remap: the claim is refused before
+        // anything on the function changes, and the boot goes on.
+        "claim_refused_without_remapping",
+        metal::Metal {
+            arms: &[metal::once(
+                "iommu-no-remap",
+                "tests/testcases",
+                &["iommu-no-remap"],
+                &[claims::RECLAIM],
+            )],
+            judge: |b| claims::refused_unremapped(&b[0].kernel()),
+        },
+    ),
     // ---- the `isa` claim: one image whose i8042 the kernel leaves alone ----
     (
         // The I/O permission bitmap on the machine's own processor: the ports
@@ -717,6 +754,7 @@ const TESTCASES: &[metal::Arm] = &[metal::once(
         "test_rs_hda_client_stall",
         "test_rs_syscall_cost",
         "test_rs_null_sink_client_exits",
+        claims::RECLAIM,
     ],
 )];
 

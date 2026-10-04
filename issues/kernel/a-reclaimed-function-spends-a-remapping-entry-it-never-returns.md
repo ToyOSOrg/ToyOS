@@ -1,5 +1,5 @@
 ---
-status: open
+status: assigned
 kind: defect
 opened: 2026-09-24
 ---
@@ -25,8 +25,16 @@ on the machine is refused (`TableFull`, which `pcidev` reports as
 `NoInterrupt`), so a swap then ends with the service `gone` — and so does
 every later claim of any function, by any process.
 
-Owner: the swap's author, because the swap is what turned a constant into a
-leak. Exit condition: a released claim returns its entry — freed at
-`pcidev::release`, or one entry kept per `pcidev` slot and rewritten on each
-claim, which bounds the table's use by `MAX_FUNCTIONS` — and a guest test that
-claims and releases one function more than 256 times in a boot stays armed.
+The T14 recorded it on a later boot: `irte5` for `00:1f.6` at its first claim,
+and `irte6` for the same function when the swap claimed it again.
+
+Owner: the IOMMU track's stage 1, branch `wt/toyos-iommu1`. Exit condition: a
+released claim returns its entry — freed at `pcidev::release`, or one entry
+kept per `pcidev` slot and rewritten on each claim, which bounds the table's
+use by `MAX_FUNCTIONS` — and the `claim_reuses_its_remapping_entry` metal row
+is green: the T14's I219 claimed, released and claimed again in one boot writes
+one entry for both claims and leaves it not present after each release. Once
+one re-claim reuses its entry, the count of claims in a boot moves nothing, so
+a guest test of more than 256 is not owed; and a metal row reaches a real
+function's claim before a guest test does, which is the tier root `CLAUDE.md`
+puts first.
