@@ -30,4 +30,6 @@ Owner: the SDK's connection, `toyos/src/ipc.rs`.
 
 **Exit**: no caller of a handle send can keep a handle the kernel refused to
 move. That holds when the send consumes handles it owns and closes them on the
-handle send's refusal, and when the three sites above use it.
+handle send's refusal, and when the three sites above use it. Its close also
+closes `issues/a-refused-handle-move-leaves-the-compositor-holding-it.md`: the
+fix that meets this exit deletes both files.
