@@ -166,12 +166,13 @@ const S5_TAKES: Tripwire = Tripwire::absurd(
 /// the panel shows it, and the black box carries it through the panic's reset,
 /// where a halt would leave a machine that is on, silent, and indistinguishable
 /// from one the power left.
-pub fn off() -> ! {
+pub fn off(stopping: crate::quiesce::Stopping) -> ! {
     let (Some(control), true) = (PM1A_CNT.get(), SOFT_OFF.load(Ordering::Acquire)) else { cpu::halt() };
     let control = control.port(0);
+    let taken = pio::take_back(&stopping);
     let held = cpu::inw(control);
     if held & SCI_EN != 0 {
-        super::acpi_mode::quiet();
+        super::acpi_mode::quiet(&taken);
     }
     let typed = held & !(SLP_TYP | SLP_EN) | u16::from(SLP_TYPA.load(Ordering::Relaxed)) << 10;
     let smis_before = super::counters::read().smi;
@@ -190,7 +191,7 @@ pub fn off() -> ! {
          the write of {:#06x} and reads {now:#06x} now, SCI_EN {}; {}; cpu{}'s SMI count {} before the write and {} now",
         typed | SLP_EN,
         if now & SCI_EN == 0 { "clear" } else { "set" },
-        super::acpi_mode::pm1_events(),
+        super::acpi_mode::pm1_events(&taken),
         super::percpu::cpu_id(),
         smis_before.map_or_else(|| "unread".into(), |n| alloc::format!("{n}")),
         super::counters::read().smi.map_or_else(|| "unread".into(), |n| alloc::format!("{n}")),

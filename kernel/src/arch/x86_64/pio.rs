@@ -109,12 +109,23 @@ pub fn holder(ports: Ports) -> Option<&'static str> {
     FIXED.iter().find(|(_, fixed)| fixed.0.overlaps(ports)).map(|&(name, _)| name).or_else(|| RUNTIME.lock().holder(ports))
 }
 
-/// A run some row grants, taken back by the kernel once this boot's stop has
-/// stopped every userland thread but its caller, which never returns to Ring
-/// 3: the power-off's, and nobody else's. `None` after a stop that fell short,
-/// whose holder may still run.
-pub fn taken_back(ports: Ports) -> Option<Declared> {
-    crate::quiesce::userland_stopped().then_some(Declared(ports))
+/// Every row's ports, the kernel's again: the power-off's, and nobody else's.
+pub struct TakenBack(());
+
+/// Take every row's ports back from whoever holds them, whatever the stop's
+/// record says. Once `stopping` exists a thread enters Ring 3 only past
+/// `scheduler::leave_user_if_due`, which stops all but the stop's caller; the
+/// shootdown returns only once every other CPU has answered it from Ring 0,
+/// so no thread that was in Ring 3 before is there still.
+pub fn take_back(_stopping: &crate::quiesce::Stopping) -> TakenBack {
+    super::tlb::shootdown(crate::invalidation::Origin::Stop);
+    TakenBack(())
+}
+
+impl TakenBack {
+    pub fn run(&self, ports: Ports) -> Declared {
+        Declared(ports)
+    }
 }
 
 /// A [`Declared`] kept where a later reader finds it; empty until set.

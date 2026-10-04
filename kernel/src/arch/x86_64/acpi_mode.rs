@@ -33,7 +33,7 @@ use toyos_acpi::{Ec, FixedHardware, PowerButton};
 use toyos_userbound::Ports;
 
 use super::cpu;
-use super::pio::{self, Declared};
+use super::pio::{self, Declared, TakenBack};
 use super::power::SCI_EN;
 use crate::device::ClaimError;
 use crate::isa::{self, Function};
@@ -265,25 +265,21 @@ fn leave(hardware: &Hardware) {
 const PM1_STATUS: u16 = 1 << 0 | 1 << 4 | 1 << 5 | 1 << 8 | 1 << 9 | 1 << 10 | 1 << 14 | 1 << 15;
 
 /// What the PM1 event block reads, status then enable, for a power-off that
-/// did not take; once userland has stopped, as [`quiet`] is.
-pub fn pm1_events() -> String {
+/// did not take.
+pub fn pm1_events(taken: &TakenBack) -> String {
     let Some(hardware) = hardware() else { return "no ACPI row, so no PM1 event block read".into() };
-    let Some(events) = pio::taken_back(run(hardware.fixed.pm1a_event)) else {
-        return "the PM1 event block unread: the stop left userland running".into();
-    };
+    let events = taken.run(run(hardware.fixed.pm1a_event));
     let half = hardware.fixed.pm1a_event.len / 2;
     format!("PM1 status {:#06x} under enable {:#06x}", cpu::inw(events.port(0)), cpu::inw(events.port(half)))
 }
 
 /// Every fixed and general-purpose event disabled and its status cleared:
-/// the power-off's, on a machine in ACPI mode, once userland has stopped.
-pub fn quiet() {
+/// the power-off's, on a machine in ACPI mode.
+pub fn quiet(taken: &TakenBack) {
     let Some(hardware) = hardware() else { return };
-    let Some(events) = pio::taken_back(run(hardware.fixed.pm1a_event)) else {
-        panic!("power: the stop left userland running, so the events its ACPI holder enabled cannot be quieted for S5");
-    };
+    let events = taken.run(run(hardware.fixed.pm1a_event));
     let half = hardware.fixed.pm1a_event.len / 2;
-    // SAFETY: the PM1a event block the FADT names, taken back from a holder that no longer runs.
+    // SAFETY: the PM1a event block the FADT names, taken back from any holder.
     unsafe {
         cpu::outw(events.port(half), 0);
         cpu::outw(events.port(0), PM1_STATUS);
@@ -291,7 +287,7 @@ pub fn quiet() {
     if hardware.fixed.gpe0.len == 0 {
         return;
     }
-    let gpe = pio::taken_back(run(hardware.fixed.gpe0)).expect("the PM1 block was taken back after the same stop");
+    let gpe = taken.run(run(hardware.fixed.gpe0));
     let half = hardware.fixed.gpe0.len / 2;
     for byte in 0..half {
         // SAFETY: the GPE0 block, taken back as the PM1 block is; its status bits clear on a one.

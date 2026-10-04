@@ -736,6 +736,12 @@ fn fixed_hardware_this_kernel_does_not_serve_is_refused_by_name() {
     );
     assert_eq!(fixed(|t| t[88] = 2), Err(FixedRefused::Length { field: Field::Pm1aEvent, len: 2 }));
     assert_eq!(control(|t| t[89] = 0), Err(FixedRefused::Length { field: Field::Pm1aControl, len: 0 }));
+    let nowhere = |t: &mut [u8], legacy: usize, x: usize| {
+        t[legacy..legacy + 4].fill(0);
+        t[x + 4..x + 12].fill(0);
+    };
+    assert_eq!(control(|t| nowhere(t, 64, 172)), Err(FixedRefused::Absent { field: Field::Pm1aControl }));
+    assert_eq!(fixed(|t| nowhere(t, 56, 148)), Err(FixedRefused::Absent { field: Field::Pm1aEvent }));
     assert_eq!(fixed(|t| t[92] = 5), Err(FixedRefused::Length { field: Field::Gpe0, len: 5 }));
     assert_eq!(
         fixed(|t| {

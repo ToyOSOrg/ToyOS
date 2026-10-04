@@ -244,7 +244,9 @@ pub enum FixedRefused {
     Pm1b,
     /// A GPE1 block: not served.
     Gpe1,
-    /// The block is missing, or shorter than its registers.
+    /// Neither field names the block.
+    Absent { field: Field },
+    /// The block is shorter than its registers.
     Length { field: Field, len: u8 },
     /// The `X_` block is not in the System I/O space.
     NotSystemIo { field: Field, space: u8 },
@@ -295,7 +297,10 @@ pub fn pm1a_control<P: Phys>(fadt: &Table<P>) -> Result<toyos_abi::acpi::Block, 
     // §4.8.1: a control block is at least two bytes.
     let len = fadt.byte(FADT_PM1_CNT_LEN).ok_or(FixedRefused::Short { len: fadt.len() })?;
     let at = address(fadt, Field::Pm1aControl, FADT_PM1A_CNT_BLK, FADT_X_PM1A_CNT_BLK)?;
-    if at == 0 || len < 2 {
+    if at == 0 {
+        return Err(FixedRefused::Absent { field: Field::Pm1aControl });
+    }
+    if len < 2 {
         return Err(FixedRefused::Length { field: Field::Pm1aControl, len });
     }
     block(Field::Pm1aControl, at, len)
@@ -331,7 +336,10 @@ pub fn fixed_hardware<P: Phys>(fadt: &Table<P>) -> Result<FixedHardware, FixedRe
     // two bytes each, and a GPE block a status half and an enable half.
     let pm1_event_len = byte(FADT_PM1_EVT_LEN)?;
     let pm1_event = address(fadt, Field::Pm1aEvent, FADT_PM1A_EVT_BLK, FADT_X_PM1A_EVT_BLK)?;
-    if pm1_event == 0 || pm1_event_len < 4 || pm1_event_len % 2 != 0 {
+    if pm1_event == 0 {
+        return Err(FixedRefused::Absent { field: Field::Pm1aEvent });
+    }
+    if pm1_event_len < 4 || pm1_event_len % 2 != 0 {
         return Err(FixedRefused::Length { field: Field::Pm1aEvent, len: pm1_event_len });
     }
     let gpe0_len = byte(FADT_GPE0_BLK_LEN)?;

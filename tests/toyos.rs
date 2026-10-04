@@ -161,6 +161,8 @@ const RUST_SKIP: &[&str] = &[
     // the `acpi_server_events` and attended `acpi_power_button_pressed` metal
     // rows run it.
     "acpi_hold",
+    // It powers the machine off: `machine_shutdown_short_stop` runs it.
+    "stop_short",
 ];
 
 /// Binaries a metal row or a guest test drives that the shared boot also runs
@@ -253,6 +255,10 @@ const MACHINE_TESTS: &[&str] = &[
     // The press itself: QEMU raises the fixed power-button event on demand,
     // and the T14's button needs the owner's hand (`acpi_power_button_pressed`).
     "acpi_power_button",
+    // The power-off after a stop that left a thread running, in ACPI mode: it
+    // ends the machine, so only one QEMU reports stopping can be asked, and
+    // the T14 hands over in legacy mode, where no holder means no quieting.
+    "machine_shutdown_short_stop",
 ];
 
 /// **The metal profile**: which registrations run on the ThinkPad T14, what
@@ -2684,6 +2690,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "nested_nmi_is_loud" => faults::nested_nmi_is_loud(test_config),
         "machine_shutdown" => power::machine_shutdown(test_config),
         "acpi_power_button" => power::acpi_power_button(test_config),
+        "machine_shutdown_short_stop" => power::machine_shutdown_short_stop(test_config),
         other => Err(format!("unknown machine test {other}")),
     }
 }
