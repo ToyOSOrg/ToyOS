@@ -815,7 +815,7 @@ pub fn has_data(object: &KObjectRef) -> bool {
 /// [`has_data`] cannot be asked for: the log's, whose unread records are a
 /// property of the reader's cursor, which the kernel does not hold; and a
 /// console's, whose watch is the keyboard's while its data is the serial
-/// line's (`issues/kernel/a-console-watch-waits-on-the-keyboard-not-the-serial-line.md`).
+/// line's (`issues/a-console-watch-waits-on-the-keyboard-not-the-serial-line.md`).
 pub fn read_posts_are_readiness(object: &KObjectRef) -> bool {
     match object {
         KObjectRef::SysCap(_) | KObjectRef::Console(_) => true,

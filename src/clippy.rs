@@ -12,7 +12,7 @@ use crate::arch::Arch;
 use crate::ci::{KERNEL_HOST_TARGET, KERNEL_MANIFEST};
 
 /// The pedantic/nursery lints adopted one at a time, each on a measured finding
-/// (`issues/build/clippy-stage-two-is-lints-one-at-a-time.md`).
+/// (`issues/clippy-stage-two-is-lints-one-at-a-time.md`).
 const ADOPTED: &[&str] = &[
     "clippy::checked_conversions",
     "clippy::default_trait_access",

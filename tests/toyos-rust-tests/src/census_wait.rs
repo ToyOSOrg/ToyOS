@@ -5,7 +5,7 @@
 //! queue, and `object::drain_zero_handles` clears its pending flag before it
 //! runs the hooks, so the release can land on another CPU after the caller's
 //! own drain site found the queue empty
-//! (`issues/kernel/deferred-release-outlives-its-syscall.md`). So a reading is
+//! (`issues/deferred-release-outlives-its-syscall.md`). So a reading is
 //! a wait for an event, and a leak is the event that never comes: the harness
 //! ceiling reds it.
 

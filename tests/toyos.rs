@@ -1121,7 +1121,7 @@ const NOT_RUN: &[NotRun] = &[
     NotRun {
         case: "22_floating_point",
         stage: Stage::Built,
-        why: Why::Declined("it prints `long double`s through `%Lf`, and libc reads a `long double` as a `double` (issues/build/libc-reads-a-long-double-as-a-double.md): every `%Lf` of a line whose `double`s filled the registers prints 0.000000"),
+        why: Why::Declined("it prints `long double`s through `%Lf`, and libc reads a `long double` as a `double` (issues/libc-reads-a-long-double-as-a-double.md): every `%Lf` of a line whose `double`s filled the registers prints 0.000000"),
     },
     NotRun {
         case: "31_args",
@@ -3360,7 +3360,7 @@ fn field_between<'a>(log: &'a str, head: &str, tail: &str) -> Result<&'a str, St
 
 /// The shortest span `counters_on_metal` reads the SMI count across: twice the
 /// longest period between the T14's firmware interrupts that has been read
-/// (`issues/hardware/the-t14s-firmware-interrupts-every-cpu-every-2-2-s-under-toyos.md`).
+/// (`issues/the-t14s-firmware-interrupts-every-cpu-every-2-2-s-under-toyos.md`).
 const SMI_SPAN_NS: u64 = 4_444_000_000;
 
 /// `counters_metal`'s three reads on the T14, held to what the hardware and
@@ -4539,7 +4539,7 @@ fn main() {
     );
 
     // Where this run's interrupts landed, aggregated over every guest that
-    // said. `issues/kernel/every-interrupt-lands-on-the-boot-cpu.md`'s step 4:
+    // said. `issues/every-interrupt-lands-on-the-boot-cpu.md`'s step 4:
     // the number its later change is measured against, produced by an ordinary
     // run rather than by `--nocapture`, so a CI run's own log carries it.
     let census = common::irqcensus::summary();

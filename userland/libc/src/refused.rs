@@ -1,5 +1,5 @@
 //! What this C library refuses. What each waits on is
-//! `issues/build/libc-refuses-what-toyos-cannot-yet-answer.md`'s.
+//! `issues/libc-refuses-what-toyos-cannot-yet-answer.md`'s.
 
 use core::ptr;
 

@@ -620,7 +620,7 @@ fn a_stop_at_any_write_leaves_only_the_named_windows() {
         // What these two calls' own write order leaves at a stop, owned by
         // their issue files and not by this repair.
         let own: fn(&Complaint) -> bool = match s.name {
-            // issues/filesystem/a-rename-that-stops-between-its-writes-leaves-a-chain-two-entries-reach.md
+            // issues/a-rename-that-stops-between-its-writes-leaves-a-chain-two-entries-reach.md
             "rename" => |c| {
                 matches!(
                     c,
@@ -629,7 +629,7 @@ fn a_stop_at_any_write_leaves_only_the_named_windows() {
                         | Complaint::DotEntry { .. }
                 )
             },
-            // issues/filesystem/a-shrink-frees-clusters-before-the-entry-stops-naming-them.md
+            // issues/a-shrink-frees-clusters-before-the-entry-stops-naming-them.md
             "truncate" => |c| matches!(c, Complaint::ChainTooShort { .. }),
             "truncate to zero" => |c| matches!(c, Complaint::ChainTooShort { .. } | Complaint::ChainOutOfRange { .. }),
             _ => |_| false,
