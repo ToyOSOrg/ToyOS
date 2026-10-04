@@ -1124,8 +1124,9 @@ impl Boot {
 /// is a test image and is not here.
 pub struct Shipped {
     pub crates: BTreeSet<(PathBuf, Features)>,
-    /// `crates` but the kernel and the loader: every program an image runs.
-    pub programs: BTreeSet<(PathBuf, Features)>,
+    /// The directories of `crates` but the kernel and the loader: every
+    /// program an image runs.
+    pub programs: BTreeSet<PathBuf>,
     pub assets: BTreeSet<PathBuf>,
 }
 
@@ -1147,7 +1148,7 @@ pub fn shipped(root: &Path) -> Result<Shipped, String> {
         }
         for c in config_crates(root, &config) {
             if c.built == Built::Member {
-                programs.insert((c.dir.clone(), c.features));
+                programs.insert(c.dir.clone());
             }
             crates.insert((c.dir, c.features));
         }
@@ -2368,8 +2369,8 @@ mod tests {
             );
         }
         let (kernel, loader) = (root.join("kernel"), root.join("bootloader"));
-        let programs = shipped.crates.iter().filter(|(dir, _)| *dir != kernel && *dir != loader);
-        assert_eq!(shipped.programs, programs.cloned().collect());
+        let programs = shipped.crates.iter().map(|(dir, _)| dir.clone());
+        assert_eq!(shipped.programs, programs.filter(|dir| *dir != kernel && *dir != loader).collect());
     }
 
     /// **Moved libraries take what was built for their targets, and nothing
