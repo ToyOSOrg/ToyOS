@@ -459,12 +459,6 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
     (
-        "toyos-elf/tests/fixtures/shell-headers.bin",
-        "4df3e42b699fd1ff6bfa569c6e0bed386e01dcec7ddfcc3bde32101fc1730046",
-        "ours: the first 4096 bytes of /system/bin/shell (toyos-elf/tests/real.rs)",
-        Terms::Spdx("MIT OR Apache-2.0"),
-    ),
-    (
         "toyos-symbols/tests/fixtures/input-test.bin",
         "6a08f75ee01bdbd1e77c9b3affd6185e981d86995da432c90ed107676f08eb83",
         "ours: a ToyOS binary this build produced (toyos-symbols/tests/real.rs)",
