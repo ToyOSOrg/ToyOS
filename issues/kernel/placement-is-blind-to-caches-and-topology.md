@@ -25,5 +25,5 @@ placement story has three parts none of which we have:
   kernel currently does not model at all.
 
 Composes with the reservation model (placement decides *where*, reservations
-decide *how much*) and with the toyos-sched sim, which would need a topology
+decide *how much*) and with the scheduler simulator (`kernel/sim`), which would need a topology
 model to gate any of this.

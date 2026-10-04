@@ -125,7 +125,7 @@ The family's other half is closed: a CPU that stops taking passes no longer
 keeps being *chosen*. `CpuHandle::answering` refuses a CPU whose doorbell edge
 has stood longer than a pass may take, and spawn placement, the RT
 wake-forward, the surplus push and the steal probe's victim all ask it
-(`toyos-sched/src/cpu.rs`). So one route from "a core goes quiet" to "the
+(`kernel/pure/sched/cpu.rs`). So one route from "a core goes quiet" to "the
 machine gets progressively worse" is gone.
 
 **Nothing in that explains this entry.** The signature at the top is a machine

@@ -163,7 +163,7 @@ changes.
   of its own — five sightings, each carrying the *guest's own panic text* — and
   that class has since been diagnosed and fixed: a CPU could hand a thief the
   task whose context it was still standing on, so two CPUs ran one kernel stack
-  (`SchedPass::answer_steal_requests`, `toyos-sched/src/cpu.rs`). This sighting
+  (`SchedPass::answer_steal_requests`, `kernel/pure/sched/cpu.rs`). This sighting
   carried no console at all — `TestResult::error` held the verdict, a failing
   test's guest console is not printed, and by the time the re-runs were green
   the capture was gone — so it can be neither confirmed as that class nor ruled
