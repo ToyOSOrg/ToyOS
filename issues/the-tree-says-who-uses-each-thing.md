@@ -180,13 +180,7 @@ tree's top level: `.cargo`, `.claude`, `.github`, `.gitignore`,
 2. **Version alignment** in today's workspaces:
    `issues/the-tree-resolves-in-five-cargo-locks-not-one.md`.
 3. **One workspace:** `issues/the-tree-resolves-in-five-cargo-locks-not-one.md`.
-   With it go `kernel/rust-toolchain.toml`, `bootloader/rust-toolchain.toml`
-   and `userland/rust-toolchain.toml`, which rule step 1 does not name. Its
-   root `.cargo/config.toml` is tracked, which `.gitignore` ignores today and
-   where `.claude/agents/implementer.md` has agents list fork clones, so this
-   stage moves that instruction. **Exit:** that file's; no
-   `rust-toolchain.toml` is tracked outside `rust/`; `.cargo/config.toml` is
-   tracked.
+   **Exit:** that file's.
 4. **std off repository paths:** `issues/std-names-the-sdk-crates-by-path.md`.
    **Exit:** that file's.
 5. **`sdk/`:** abi, toyos, keymap, font, window, filepicker and libc (with
