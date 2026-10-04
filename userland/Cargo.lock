@@ -3312,6 +3312,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustc-demangle"
+version = "0.1.27"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b50b8869d9fc858ce7266cce0194bd74df58b9d0e3f6df3a9fc8eb470d95c09d"
+
+[[package]]
 name = "rustc_version"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3973,6 +3979,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "symbolize"
+version = "0.1.0"
+dependencies = [
+ "toyos-symbols",
+]
+
+[[package]]
 name = "syn"
 version = "2.0.117"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4190,6 +4203,10 @@ name = "toyos-dns"
 version = "0.1.0"
 
 [[package]]
+name = "toyos-elf"
+version = "0.1.0"
+
+[[package]]
 name = "toyos-elide"
 version = "0.1.0"
 
@@ -4266,6 +4283,16 @@ version = "0.1.0"
 dependencies = [
  "sha2 0.10.9",
  "toyos-manifest",
+]
+
+[[package]]
+name = "toyos-symbols"
+version = "0.1.0"
+dependencies = [
+ "rustc-demangle",
+ "toyos-abi",
+ "toyos-elf",
+ "toyos-elide",
 ]
 
 [[package]]

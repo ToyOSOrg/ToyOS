@@ -29,8 +29,8 @@ use crate::mm::policy::{CachePolicy, Prot};
 use crate::mm::{PAGE_2M, PAGE_BYTES};
 use crate::process::{
     Admission, ElfInfo, Endowments, OwnedAlloc, PageAlloc, PageFaultTrace, PageTables, Parent,
-    Pid, ProcessAccounting, ProcessData, ProcessEntry, ThreadData, ThreadEntry, UserStack,
-    PROCESS_TABLE,
+    Pid, ProcessAccounting, ProcessData, ProcessEntry, ThreadData, ThreadEntry, UserImage,
+    UserStack, PROCESS_TABLE,
 };
 use crate::sync::Lock;
 use crate::{scheduler, vfs, UserAddr};
@@ -40,6 +40,7 @@ use toyos_elf::section::SectionTable;
 use toyos_elf::sym::{self, SymTab};
 use toyos_elf::rela::{FillLattice, Rules, FILL_GRANULE};
 use toyos_elf::{Layout, RelocError, TlsSegment};
+use toyos_symbols::frame::BuildId;
 
 const USER_STACK_SIZE: usize = 4 * PAGE_2M as usize; // 8 MB
 
@@ -572,12 +573,17 @@ pub fn spawn<H>(
     let sp = user_stack.write_argv(argv);
     let t_tls = crate::clock::nanos_since_boot();
 
-    let syms = symbols::read_backtrace_table(
-        backing.as_ref(), &layout, path, base,
-        image_start.raw(), image_end,
-        user_stack.base().raw(), user_stack.top(),
-    );
-    let sym_bytes = syms.resident_bytes();
+    // What a crash record names a frame by. The build-id is read at each
+    // `PT_NOTE`'s own offset, a page of it at most.
+    let image = Arc::new(UserImage {
+        name: String::from(path),
+        build_id: BuildId::find(&header_data, |note| {
+            Some(read_file_range(backing.as_ref(), note.offset, note.filesz.min(PAGE_BYTES as u64) as usize))
+        }),
+        start: image_start.raw(),
+        end: image_end,
+        bias: base,
+    });
 
     let (ks_alloc, ks_sp) = match alloc_kernel_stack(process_start, entry, sp, 0) {
         Some(ks) => ks,
@@ -637,9 +643,6 @@ pub fn spawn<H>(
         syscall_total_ns: 0,
     }));
 
-    // One table, two holders: cloned so a crash report on this thread reads names without the process table.
-    let syms = Arc::new(syms);
-
     #[cfg(feature = "test-actuators")]
     crate::process::debug_kill_marked_place(parent);
 
@@ -649,7 +652,8 @@ pub fn spawn<H>(
             Arc::clone(&object),
             start::make_name(name),
             proc_data,
-            Arc::clone(&syms),
+            // Two holders: a crash report on this thread reads it without the process table.
+            Some(Arc::clone(&image)),
             ThreadEntry::new(thread_data),
             node,
         ));
@@ -662,7 +666,7 @@ pub fn spawn<H>(
             ks_sp,
             child_pt.clone(),
             thread_pointer,
-            syms,
+            Some(image),
         );
         table.get_mut(pid).unwrap().threads_mut().get_mut(tid).unwrap().set_sched(sched);
         (tid, dst)
@@ -678,8 +682,8 @@ pub fn spawn<H>(
     crate::process::debug_hold_marked_spawn(parent, &object);
 
     let t3 = crate::clock::nanos_since_boot();
-    log!("spawn: {} pid={} tid={} dst={} base={:#x} entry={:#x} root={:#x} symbols={}KiB (layout={}ms relocs={}ms deps={}ms tls={}ms total={}ms)",
-        path, pid, tid, dst.0, base, entry, child_pt.lock().root().phys(), sym_bytes / 1024,
+    log!("spawn: {} pid={} tid={} dst={} base={:#x} entry={:#x} root={:#x} (layout={}ms relocs={}ms deps={}ms tls={}ms total={}ms)",
+        path, pid, tid, dst.0, base, entry, child_pt.lock().root().phys(),
         (t1 - t0) / 1_000_000, (t2 - t1) / 1_000_000, (t_deps - t2) / 1_000_000,
         (t_tls - t_deps) / 1_000_000, (t3 - t0) / 1_000_000);
 
