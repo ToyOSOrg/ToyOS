@@ -1,0 +1,12 @@
+[package]
+name = "toyos-aml"
+description = "The ACPI Machine Language interpreter, pure: a machine's DSDT and SSDTs into one namespace, its objects evaluated, every access to hardware through the caller, and a refusal by name for anything malformed."
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[lib]
+doctest = false
+
+[lints.rust]
+warnings = "deny"

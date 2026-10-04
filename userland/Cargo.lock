@@ -4173,6 +4173,10 @@ name = "toyos-abi"
 version = "0.16.0"
 
 [[package]]
+name = "toyos-aml"
+version = "0.1.0"
+
+[[package]]
 name = "toyos-blockhold"
 version = "0.1.0"
 
