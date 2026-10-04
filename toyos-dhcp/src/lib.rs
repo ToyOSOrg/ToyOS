@@ -289,13 +289,13 @@ pub struct Client {
     client_id: [u8; 15],
     host_name: Option<HostName>,
     state: State,
-    /// Consecutive NAKs since the last BOUND (§D11).
+    /// Consecutive NAKs since the last BOUND.
     naks: u32,
     counters: Counters,
     refusals: Vec<Refusal>,
 }
 
-/// §D4.1's unicast host address: a host, and not in 169.254.0.0/16, which RFC 3927 §1.6 says a
+/// A unicast host address: a host, and not in 169.254.0.0/16, which RFC 3927 §1.6 says a
 /// DHCP server should not hand out.
 fn host(addr: Ipv4Addr) -> bool {
     is_host(addr) && !addr.is_link_local()
@@ -310,7 +310,7 @@ fn backoff(step: u32) -> Duration {
     2u32.checked_pow(step).and_then(|m| limits::FIRST_WAIT.checked_mul(m)).map_or(limits::MAX_WAIT, |d| d.min(limits::MAX_WAIT))
 }
 
-/// A wait moved by (draw mod 2,001) − 1,000 ms (§D6.3 (1)).
+/// A wait moved by (draw mod 2,001) − 1,000 ms: RFC 2131 §4.1's uniform −1 to +1 s.
 fn jittered(wait: Duration, draw: u32) -> Duration {
     let jitter = u64::from(draw.checked_rem(2_001).unwrap_or(0));
     let ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX).saturating_add(jitter).saturating_sub(1_000);
@@ -328,7 +328,8 @@ fn ms(seconds: u32) -> Duration {
 }
 
 impl Client {
-    /// Begins the first exchange: a DISCOVER now (DIV-D1: no initial delay).
+    /// Begins the first exchange: a DISCOVER now, where RFC 2131 §4.4.1 has a client wait 1 to
+    /// 10 s first; the owner ruled that wait out.
     pub fn start(now: Instant, mac: IndividualMac, host_name: Option<HostName>, mut draw: impl FnMut() -> u32) -> (Self, Output) {
         let [m0, m1, m2, m3, m4, m5] = mac.get().0;
         let client_id = [255, m2, m3, m4, m5, 0, 3, 0, 1, m0, m1, m2, m3, m4, m5];
@@ -473,7 +474,7 @@ impl Client {
         Output { config: Some(Config::Deconfigured(Reason::Expired)), ..self.begin(now, draw) }
     }
 
-    /// A lease in use whose deadlines may be due: only the latest due event runs (§D5.2).
+    /// A lease in use whose deadlines may be due: only the latest due event runs.
     fn run_lease(&mut self, now: Instant, lease: Lease, started: Option<Instant>, draw: &mut impl FnMut() -> u32) -> Output {
         let Some(timers) = lease.timers else {
             self.state = State::Bound(lease);
@@ -498,7 +499,7 @@ impl Client {
         self.run_lease(now, lease, None, draw)
     }
 
-    /// A NAK the state accepted (§D11): the n-th in a row delays the new exchange by 0, 4, 8, 16,
+    /// A NAK the state accepted: the n-th in a row delays the new exchange by 0, 4, 8, 16,
     /// 32, then 64 s, each delayed one jittered.
     fn nak(&mut self, now: Instant, draw: &mut impl FnMut() -> u32) -> Output {
         self.naks = self.naks.saturating_add(1);
@@ -568,7 +569,7 @@ impl Client {
         self.broadcast(payload, Counter::TxRequest)
     }
 
-    /// The link came up (§D9): without a lease the exchange starts over; with one, INIT-REBOOT
+    /// The link came up: without a lease the exchange starts over; with one, INIT-REBOOT
     /// verifies it while it stays in use, and [ip] announces it rather than probing again.
     pub fn link_up(&mut self, now: Instant, mut draw: impl FnMut() -> u32) -> Output {
         let state = core::mem::replace(&mut self.state, State::BackingOff(now));
@@ -592,7 +593,7 @@ impl Client {
         Output { transmit: Some(transmit), ..Output::default() }
     }
 
-    /// [ip] finished conflict detection: the address is in use from here (§D8 (2)).
+    /// [ip] finished conflict detection: the address is in use from here.
     pub fn verified(&mut self, now: Instant, mut draw: impl FnMut() -> u32) -> Output {
         let lease = match core::mem::replace(&mut self.state, State::BackingOff(now)) {
             State::Probing(lease) => lease,
@@ -610,7 +611,7 @@ impl Client {
     }
 
     /// Another host holds the address: while probing, a DECLINE; while in use, it was lost after
-    /// [ip]'s one defence, so it is deconfigured and declined (§D8 (3), (5)).
+    /// [ip]'s one defence, so it is deconfigured and declined.
     pub fn conflict(&mut self, now: Instant, mac: MacAddr, mut draw: impl FnMut() -> u32) -> Output {
         let state = core::mem::replace(&mut self.state, State::BackingOff(now));
         let (lease, in_use) = match state {
@@ -628,7 +629,7 @@ impl Client {
         Output { transmit: Some(transmit), config, address: None }
     }
 
-    /// The link went down while [ip] probed: the exchange is abandoned (§D8 (6)).
+    /// The link went down while [ip] probed: the exchange is abandoned.
     pub fn not_verified(&mut self, now: Instant, mut draw: impl FnMut() -> u32) -> Output {
         match self.state {
             State::Probing(_) => self.begin(now, &mut draw),
@@ -636,7 +637,7 @@ impl Client {
         }
     }
 
-    /// A server's UDP payload and the IPv4 source it came from (§D3).
+    /// A server's UDP payload and the IPv4 source it came from.
     pub fn receive(&mut self, now: Instant, payload: &[u8], from: Ipv4Addr, mut draw: impl FnMut() -> u32) -> Output {
         let peer = Peer::From(from);
         let reply = match Reply::parse(payload, self.mac.get()) {
@@ -692,7 +693,7 @@ impl Client {
         Output::default()
     }
 
-    /// §D4.1: the address, the lease time and the mask an OFFER or ACK must carry.
+    /// The address, the lease time and the mask an OFFER or ACK must carry.
     fn acceptable(&mut self, reply: &Reply, server: Ipv4Addr, peer: Peer) -> Option<Offered> {
         let yiaddr = reply.yiaddr;
         let accepted = if !host(yiaddr) {
@@ -702,7 +703,7 @@ impl Client {
                 (None, _) => Err(Counter::NoLeaseTime),
                 (Some(0), _) => Err(Counter::LeaseZero),
                 (_, None) => Err(Counter::NoSubnetMask),
-                // A contiguous mask of 1 to 31 bits (H-14).
+                // A contiguous mask of 1 to 31 bits.
                 (Some(lease), Some(mask)) => match Cidr::from_mask(yiaddr, mask).filter(|c| c.prefix_len() <= 31) {
                     None => Err(Counter::MaskInvalid),
                     Some(cidr) if cidr.is_edge(yiaddr) => Err(Counter::YiaddrInvalid),
@@ -739,7 +740,7 @@ impl Client {
         Output { config: Some(Config::Deconfigured(Reason::Refused)), ..self.nak(now, draw) }
     }
 
-    /// An acceptable OFFER or ACK for the state the client is in (§D5.2): an ACK must name the
+    /// An acceptable OFFER or ACK for the state the client is in: an ACK must name the
     /// server asked while REQUESTING or RENEWING, and the address asked for or held.
     fn accept(&mut self, now: Instant, kind: ReplyKind, offered: Offered, peer: Peer, draw: &mut impl FnMut() -> u32) -> Output {
         let state = core::mem::replace(&mut self.state, State::BackingOff(now));
@@ -808,7 +809,7 @@ impl Client {
         Output { config: Some(config), ..self.bind(now, lease, draw) }
     }
 
-    /// §D4.2 and §D7: the first usable router, at most three resolvers, and T1 and T2, the
+    /// The first usable router, at most three resolvers, and T1 and T2, the
     /// lease running from `base`.
     fn lease_of(&mut self, offered: Offered, base: Instant, peer: Peer) -> Lease {
         let (cidr, address) = (offered.cidr, offered.cidr.addr());
@@ -861,7 +862,7 @@ impl Client {
     }
 }
 
-/// What an acceptable OFFER or ACK holds, before §D4.2 degrades it into a lease.
+/// What an acceptable OFFER or ACK holds, before it is degraded into a lease.
 struct Offered {
     cidr: Cidr,
     server: Ipv4Addr,

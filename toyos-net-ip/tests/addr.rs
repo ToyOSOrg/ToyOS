@@ -1,4 +1,4 @@
-//! §2 and §3: interface addressing and the host routing table.
+//! Interface addressing and the host routing table.
 
 mod common;
 

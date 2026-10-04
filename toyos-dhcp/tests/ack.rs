@@ -1,4 +1,4 @@
-//! §D8, §D10: acknowledgement, conflict detection, decline and rapid commit.
+//! Acknowledgement, conflict detection, decline and rapid commit.
 
 mod common;
 

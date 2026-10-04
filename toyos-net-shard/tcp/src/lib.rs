@@ -264,7 +264,7 @@ pub enum IcmpKind {
     ParameterProblem,
 }
 
-/// Whether a segment for a 4-tuple can be built now (`ip.md` §6.7): its next hop's link address
+/// Whether a segment for a 4-tuple can be built now: its next hop's link address
 /// is known, and `T` is what the caller needs to use it; resolution is under way; or it failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hop<T> {
@@ -274,8 +274,8 @@ pub enum Hop<T> {
 }
 
 /// One flow's way out of a transmit opportunity: the hop question, asked once a segment is due and
-/// before it is built (`ip.md` §6.7 (1)), then the segment, handed off before anything about it is
-/// committed (§11.3). A next hop not ready leaves everything owed as it was.
+/// before it is built, then the segment, handed off before anything about it is
+/// committed. A next hop not ready leaves everything owed as it was.
 pub(crate) trait Exit<T> {
     fn ask(&mut self) -> Result<T, NotReady>;
     fn send(&mut self, via: T, segment: &conn::Out, payload: (&[u8], &[u8]));

@@ -114,7 +114,7 @@ pub type Rewrite = Box<dyn FnMut(usize, &O) -> Option<Vec<u8>>>;
 /// Called with a node's stack after each arrival and each firing (`None`), and with each segment it
 /// hands off (`Some`).
 pub type Check = Box<dyn FnMut(usize, &mut Tcp, Instant, Option<&O>)>;
-/// A node's answer to one hop question (`ip.md` §6.7).
+/// A node's answer to one hop question.
 pub type Hops = Box<dyn FnMut(usize) -> Hop<()>>;
 
 pub struct Net {

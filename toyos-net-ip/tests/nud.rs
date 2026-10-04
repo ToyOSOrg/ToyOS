@@ -1,4 +1,4 @@
-//! §6: the reachability machine.
+//! The reachability machine.
 
 mod common;
 
@@ -403,7 +403,7 @@ fn s_ip_nud_022_a_full_table_evicts_in_order() {
         assert_eq!(h.send(WIDE_A, new, 5001, 5001, b"x"), Ok(None));
         assert!(matches!(h.state(new), Some(Nud::Incomplete(_))));
         let gone = left.remove(0);
-        assert!(h.state(gone).is_none(), "§6.8's order: {gone} next");
+        assert!(h.state(gone).is_none(), "eviction's order: {gone} next");
         assert!(left.iter().all(|a| h.state(*a).is_some()));
     }
     assert_eq!(h.send(WIDE_A, neighbour(9_003), 5001, 5001, b"x"), Err(Counter::NbTableFull));
@@ -874,7 +874,7 @@ fn s_ip_nud_031_a_request_queued_after_the_lifetime_is_not_idle() {
 
 #[test]
 fn s_ip_nud_031_a_request_queued_before_the_lifetime_is_not_idle() {
-    // §6.3's "send, no request pending" just before R's idle lifetime ends: its request waits,
+    // A send with no request pending just before R's idle lifetime ends: its request waits,
     // with no credit, as the lifetime's deadline passes.
     let (mut h, t0) = unreachable_r();
     let end = t0 + 600_000;

@@ -1,5 +1,5 @@
 //! DHCP messages (RFC 2131 §2, RFC 2132, RFC 3396): the client's, built to one layout with its
-//! options in one order (§D2), and a server's, read by §D3.1's checks 1 to 7 in order.
+//! options in one order, and a server's, read by `Reply::parse`'s checks in order.
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -26,7 +26,7 @@ pub(crate) enum Kind {
     Decline,
 }
 
-/// One message the client sends; which options it carries is §D2.2's table.
+/// One message the client sends; `bytes` decides which options it carries.
 pub(crate) struct Build<'a> {
     pub kind: Kind,
     pub xid: u32,
@@ -46,7 +46,7 @@ fn option(out: &mut Vec<u8>, code: u8, data: &[u8]) {
 }
 
 impl Build<'_> {
-    /// The payload: fixed fields, the cookie, the options in §D2.2's order, END, and zero bytes to
+    /// The payload: fixed fields, the cookie, the options in one order, END, and zero bytes to
     /// at least 300 in all (RFC 1542 §2.1).
     pub fn bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(limits::MIN_SENT);
@@ -97,14 +97,15 @@ pub(crate) enum ReplyKind {
     Nak,
 }
 
-/// A server message that passed checks 1 to 7, its options joined per RFC 3396 §7 and each read
+/// A server message that passed `parse`'s checks, its options joined per RFC 3396 §7 and each read
 /// one checked for its length.
 #[derive(Debug)]
 pub(crate) struct Reply {
     pub kind: ReplyKind,
     pub xid: u32,
     pub yiaddr: Ipv4Addr,
-    /// Fields that ended without END (L-D2).
+    /// Fields that ended without END, which RFC 2131 §4.1 requires: accepted, since once every
+    /// option is contained its absence loses nothing.
     pub no_end: u64,
     pub server: Option<Ipv4Addr>,
     pub lease: Option<u32>,
