@@ -639,16 +639,15 @@ fn execute(action: Action<KernelPayload>) {
             // Not `Machine::irq_guard`: both exits must set `IF`.
             crate::arch::cpu::disable_interrupts();
             let cpu = CpuId(percpu::cpu_id());
-            let awake = cpus().get(cpu).doorbell().kick_pending()
-                || crate::preempt::need_resched()
-                || crate::irq_ring::any_pending_self()
-                || !with_cpu(|c| c.mailbox_is_empty())
-                // The i8042 verdict needs a pass to notice its deadline; a quiet machine after boot runs none otherwise.
-                || crate::arch::keyboard_controller::verdict_due()
-                // No log condition here: a log to write means a runnable process, covered above. A pending
-                // root-hub port needs a pass too — no interrupt is coming.
-                || crate::drivers::xhci::port_work_pending();
+            let why = (cpus().get(cpu).doorbell().kick_pending() as u32)
+                | (crate::preempt::need_resched() as u32) << 1
+                | (crate::irq_ring::any_pending_self() as u32) << 2
+                | (!with_cpu(|c| c.mailbox_is_empty()) as u32) << 3
+                | (crate::arch::keyboard_controller::verdict_due() as u32) << 4
+                | (crate::drivers::xhci::port_work_pending() as u32) << 5;
+            let awake = why != 0;
             if awake {
+                crate::trace::trace(crate::trace::Kind::Mark, why);
                 crate::arch::cpu::enable_interrupts();
                 drop(token);
                 return;

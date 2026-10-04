@@ -75,7 +75,33 @@ fn main() {
     let (more, lost) = read_to_now(&mut first);
     read_first.extend(more);
     lost_first += lost;
+    let start = second;
     let (read_second, lost_second) = read_to_now(&mut second);
+    {
+        let mut by: BTreeMap<(u16, String, u32), u64> = BTreeMap::new();
+        let mut span: BTreeMap<u16, (u64, u64)> = BTreeMap::new();
+        for r in &read_second {
+            let k = match Entry::decode(r) {
+                Ok(e) => match e.event {
+                    Event::Mark { index } => format!("awake{index:#x}"),
+                    ev => format!("{ev:?}").split([' ', '{']).next().unwrap().to_string(),
+                },
+                Err(_) => format!("bad{}", r.kind),
+            };
+            *by.entry((r.cpu, k, r.pid)).or_default() += 1;
+            let s = span.entry(r.cpu).or_insert((u64::MAX, 0));
+            s.0 = s.0.min(r.stamp);
+            s.1 = s.1.max(r.stamp);
+        }
+        for cpu in 0..syscall::cpu_count() as usize {
+            eprintln!("DIAG cpu{cpu} wrote {} stamps {:?}", second.0.next[cpu] - start.0.next[cpu], span.get(&(cpu as u16)));
+        }
+        for ((cpu, k, pid), n) in &by {
+            eprintln!("DIAG cpu{cpu} {k} pid{pid} {n}");
+        }
+        eprintln!("DIAG test pid {} child pid {}", std::process::id(), task.pid);
+        eprintln!("DIAG lost {lost_first} {lost_second}");
+    }
     assert_eq!((lost_first, lost_second), (0, 0), "a quiet machine lapped a ring inside one spawn");
     let second_by_place: BTreeMap<(u16, u64), &TraceRecord> =
         read_second.iter().map(|r| ((r.cpu, r.seq), r)).collect();
