@@ -575,6 +575,7 @@ dependencies = [
  "toyos-rootimage",
  "toyos-symbols",
  "toyos-tco",
+ "toyos-tsc",
  "toyos-untrusted",
  "toyos-userbound",
  "toyos-wallclock",
@@ -1428,6 +1429,10 @@ dependencies = [
  "loom",
  "toyos-untrusted",
 ]
+
+[[package]]
+name = "toyos-tsc"
+version = "0.1.0"
 
 [[package]]
 name = "toyos-untrusted"
