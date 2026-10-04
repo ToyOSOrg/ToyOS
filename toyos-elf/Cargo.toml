@@ -10,3 +10,6 @@ description = "ELF64 decoding of untrusted program images (no_std, no alloc, for
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
+
+[dev-dependencies]
+object = { version = "0.38", default-features = false, features = ["read_core", "elf", "std"] }
