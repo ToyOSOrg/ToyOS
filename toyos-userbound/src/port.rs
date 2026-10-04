@@ -124,6 +124,12 @@ pub enum Undeclared {
     Full,
 }
 
+impl<const N: usize> Default for Reserved<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<const N: usize> Reserved<N> {
     pub const fn new() -> Self {
         Self { runs: [None; N] }
