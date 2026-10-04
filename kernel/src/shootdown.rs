@@ -5,10 +5,10 @@
 //! and an initiator that sees a generation served sees everything that answer wrote.
 
 #[cfg(not(feature = "loom"))]
-use core::sync::atomic::{fence, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(feature = "loom")]
-use loom::sync::atomic::{fence, AtomicU64, Ordering};
+use loom::sync::atomic::{AtomicU64, Ordering};
 
 /// Matches `sched::MAX_CPUS`.
 pub const MAX_CPUS: usize = 8;
@@ -82,27 +82,13 @@ impl Shootdown {
         self.flushed[cpu].load(SERVED) >= generation.0
     }
 
-    /// [`serve`](Self::serve) for a CPU not taking the interrupt.
-    pub fn serve_if_owed(&self, cpu: usize, flush: impl FnOnce()) {
-        if self.owes(cpu) {
+    /// [`serve`](Self::serve) for a CPU not taking the interrupt; whether it served.
+    pub fn serve_if_owed(&self, cpu: usize, flush: impl FnOnce()) -> bool {
+        let owed = self.owes(cpu);
+        if owed {
             self.serve(cpu, flush);
         }
-    }
-
-    /// [`serve_if_owed`](Self::serve_if_owed) for a round whose waiters park:
-    /// whether it served, and after it each of the first `cpus` CPUs has
-    /// served past what `cpu` had. Of the CPUs completing a generation the last
-    /// answers `true`, so its waiters are woken once a round and not once a
-    /// CPU. A serve on `cpu` must not nest inside this one.
-    pub fn serve_if_owed_completing(&self, cpu: usize, cpus: usize, flush: impl FnOnce()) -> bool {
-        if !self.owes(cpu) {
-            return false;
-        }
-        let before = self.flushed[cpu].load(Ordering::Relaxed);
-        self.serve(cpu, flush);
-        // SeqCst: of CPUs serving at once, the one whose fence is last sees every other's store.
-        fence(Ordering::SeqCst);
-        self.flushed[..cpus].iter().all(|flushed| flushed.load(Ordering::Relaxed) > before)
+        owed
     }
 
     /// One turn of an initiator's wait for `cpu`: answer first, then ask.

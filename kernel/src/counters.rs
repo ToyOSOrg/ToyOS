@@ -5,10 +5,7 @@
 //! round ([`Shootdown`]'s protocol): the reader issues a generation, answers
 //! for its own CPU, kicks every other, and parks until each has answered or
 //! the round's [`ANSWER`] bound has passed. A CPU answers from its kick
-//! handler ([`serve_here`]) wherever it was, and only the answer that
-//! completes a round wakes its readers: a post per answer would wake every
-//! reader once per CPU, under the lock each answer and each reader takes with
-//! interrupts closed. A CPU whose interrupts stay closed
+//! handler ([`serve_here`]) wherever it was; one whose interrupts stay closed
 //! past the bound is reported stale with the last block it published, never
 //! waited for without end. A read within [`JOIN`] of the last round's issue
 //! waits on that round, so no reader makes a CPU take more than one kick per
@@ -109,8 +106,8 @@ pub fn serve_here() {
 
 /// This CPU's answer, after kicking every other CPU when `kick` says so.
 fn answer(kick: bool) {
-    let completed = {
-        // One writer per block, one serve at a time per CPU, and one CPU both skipped by the kick and answered for.
+    let served = {
+        // One writer per block, and one CPU both skipped by the kick and answered for.
         let _closed = IrqGuard::close();
         if kick {
             irqchip::kick_all_but_self();
@@ -120,10 +117,9 @@ fn answer(kick: bool) {
         if deaf::DEAF.load(core::sync::atomic::Ordering::Relaxed) == me {
             return;
         }
-        let cpus = crate::smp::cpu_count() as usize;
-        ROUNDS.serve_if_owed_completing(me, cpus, || BLOCKS[me].publish(sample(me)))
+        ROUNDS.serve_if_owed(me, || BLOCKS[me].publish(sample(me)))
     };
-    if completed {
+    if served {
         ANSWERED.post_in_place();
     }
 }

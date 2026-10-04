@@ -68,34 +68,3 @@ fn a_cpu_read_as_answered_is_read_with_its_answer() {
     });
     assert!(READ.load(SeqCst), "no interleaving found the round answered, so the assertion never ran");
 }
-
-/// Two CPUs answering one round at once: whichever of them completes it says
-/// so, or its readers park to the bound with every answer in.
-#[test]
-fn the_answer_that_completes_a_round_says_so() {
-    let mut builder = loom::model::Builder::new();
-    builder.preemption_bound = Some(3);
-    builder.check(|| {
-        let rounds = Arc::new(Shootdown::new());
-        rounds.issue();
-        let cpu1 = {
-            let rounds = rounds.clone();
-            loom::thread::spawn(move || rounds.serve_if_owed_completing(1, 2, || ()))
-        };
-        let cpu0 = rounds.serve_if_owed_completing(0, 2, || ());
-        let cpu1 = cpu1.join().unwrap();
-        assert!(cpu0 || cpu1, "both CPUs answered the round and neither said it completed it");
-    });
-}
-
-/// An answer with another CPU still owing wakes nobody: a post per answer
-/// wakes every reader once per CPU.
-#[test]
-fn an_answer_that_leaves_a_cpu_owing_does_not_complete_the_round() {
-    loom::model(|| {
-        let rounds = Shootdown::new();
-        rounds.issue();
-        assert!(!rounds.serve_if_owed_completing(0, 2, || ()), "cpu 0 completed a round cpu 1 still owes");
-        assert!(rounds.serve_if_owed_completing(1, 2, || ()), "cpu 1's answer completed the round and did not say so");
-    });
-}
