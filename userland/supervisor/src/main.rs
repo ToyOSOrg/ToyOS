@@ -1345,7 +1345,7 @@ impl<'a> Supervisor<'a> {
                 kept.ended = false;
                 kept.acceptors.clear();
                 say!(
-                    "supervisor: {label} ended {} times in {} s; its ports are closed and its clients answered Gone",
+                    "supervisor: {label} ended {} times in {} s; its ports are closed, its clients answered Gone, and a program started from now on is given none of its directories",
                     toyos_manifest::RESTARTS + 1,
                     toyos_manifest::RESTART_WINDOW_SECS
                 );

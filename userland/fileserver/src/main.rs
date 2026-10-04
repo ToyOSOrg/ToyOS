@@ -19,7 +19,8 @@
 //! **One instance cannot take the server.** Beneath each machine-wide bound —
 //! connections waiting on their hello, connections served, streams — each
 //! instance a grant names has a share of its own, so one holding all it may
-//! leaves the rest of each bound to the others.
+//! leaves the rest of each bound to the others. Four at their shares take the
+//! server (`issues/a-file-servers-shares-are-per-instance-and-one-session-launches-instances.md`).
 //!
 //! **A server never blocks on a client.** Accept and the first frame are two
 //! events; a request is buffered until whole; every reply is one `try_send`,
@@ -71,10 +72,11 @@ const MAX_STREAMS: usize = 64;
 /// One instance's shares of [`MAX_SERVED`], [`MAX_HANDSHAKES`] and
 /// [`MAX_STREAMS`]. Past its share of served clients a hello is answered
 /// `ResourceExhausted`, and past its share of streams a `STREAM` is; past its
-/// share of handshakes a connection is, as it is taken, and let go.
-const SERVED_SHARE: usize = MAX_SERVED / 2;
-const HANDSHAKE_SHARE: usize = MAX_HANDSHAKES / 2;
-const STREAM_SHARE: usize = MAX_STREAMS / 2;
+/// share of handshakes a connection is, as it is taken, and let go. A quarter
+/// of each bound, so an instance at its share leaves the bound to three more.
+const SERVED_SHARE: usize = MAX_SERVED / 4;
+const HANDSHAKE_SHARE: usize = MAX_HANDSHAKES / 4;
+const STREAM_SHARE: usize = MAX_STREAMS / 4;
 
 /// What one turn of a stream appends at most.
 const STREAM_READ: usize = 64 * 1024;
