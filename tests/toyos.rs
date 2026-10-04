@@ -3264,17 +3264,20 @@ const SMI_SPAN_NS: u64 = 4_444_000_000;
 ///
 /// Held: a record per CPU the bring-up started, naming the local APIC id the
 /// bring-up gave that CPU and carrying the counters its `counters: cpuN
-/// reads` line names, and none stale. From `idle0` to `spin`, at least
+/// reads` line names, and none stale; every CPU's performance request
+/// declared at boot, `pm_enable=1`, and its power envelope in every read the
+/// one its `control_regs:` line holds. From `idle0` to `spin`, at least
 /// [`SMI_SPAN_NS`] apart, every CPU's SMI count rose alike and by two or more:
 /// the firmware's legacy mode, the positive control ACPI stage 1's flatness
 /// is read against, and the row that stage changes. Across the spin every
 /// CPU's MPERF ran nine tenths of its stamp or more [e], a CPU in C0 the whole
 /// span: MPERF counts at the TSC's rate there (SDM Vol. 3B, "Hardware
-/// Coordination Feedback").
+/// Coordination Feedback"); and every CPU's busy frequency reached the lowest
+/// Linux's turbostat read under one `yes` per CPU on the same machine
+/// (`tests/t14-linux/turbostat-loaded.txt`).
 ///
-/// Read and not held, beside Linux's turbostat on the same machine
-/// (`tests/t14-linux/`): each CPU's idle busy fraction, its busy
-/// frequency under the spin, and what one round cost its reader.
+/// Read and not held, beside Linux's turbostat: each CPU's idle busy
+/// fraction, and what one round cost its reader.
 fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
     type Read<'a> = BTreeMap<usize, BTreeMap<&'a str, u64>>;
     back.job_passed("test_rs_counters_metal")?;
@@ -3320,13 +3323,25 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
         }
         for (cpu, counters) in read {
             let reads = kernel.must_say(&format!("counters: cpu{cpu} reads "))?;
-            for counter in ["smi", "aperf", "mperf"] {
+            for counter in ["smi", "aperf", "mperf", "hwp_request", "hwp_request_pkg", "energy_perf_bias"] {
                 if !reads.contains(&format!("{counter}={}", counters.contains_key(counter))) {
                     return Err(format!("{name}: cpu{cpu} carries {counters:?} and its bring-up said {reads:?}"));
                 }
             }
             if counters.get("stale") != Some(&0) || counters.get("hardware_id").map(u64::to_string) != Some(roster[*cpu].clone()) {
                 return Err(format!("{name}: cpu{cpu} is stale or not lapic {}: {counters:?}", roster[*cpu]));
+            }
+            let declared = kernel.must_say(&format!("control_regs: cpu{cpu} pm_enable=1 "))?;
+            for (counter, field, radix) in
+                [("hwp_request", "hwp_request=0x", 16), ("hwp_request_pkg", "hwp_request_pkg=0x", 16), ("energy_perf_bias", "epb=", 10)]
+            {
+                let held = declared
+                    .split(' ')
+                    .find_map(|w| u64::from_str_radix(w.strip_prefix(field)?, radix).ok())
+                    .ok_or_else(|| format!("cpu{cpu}'s declaration carries no {field}: {declared:?}"))?;
+                if counters.get(counter) != Some(&held) {
+                    return Err(format!("{name}: cpu{cpu} reads {counter} {:?} and boot declared {held}: {declared:?}", counters.get(counter)));
+                }
             }
         }
     }
@@ -3362,6 +3377,7 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
     };
     let idle = linux(include_str!("t14-linux/turbostat-idle.txt"), "Busy%")?;
     let loaded = linux(include_str!("t14-linux/turbostat-loaded.txt"), "Bzy_MHz")?;
+    let spinning: Vec<f64> = (0..cpus).map(|cpu| tsc_mhz * ratio(idle1, spin, cpu, "aperf", "mperf")).collect();
     eprintln!(
         "  [counters] {cpus} cpus, SMI +{} each over {} ms; TSC {tsc_mhz:.0} MHz",
         smis[0],
@@ -3374,12 +3390,15 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
             ratio(idle0, idle1, cpu, "mperf", "stamp") * 100.0,
             idle.0,
             idle.1,
-            tsc_mhz * ratio(idle1, spin, cpu, "aperf", "mperf"),
+            spinning[cpu],
             loaded.0,
             loaded.1,
         );
     }
     eprintln!("  [counters] the spin's read, a whole round, took its reader {} ns", clock["spin"].1);
+    if spinning.iter().any(|&mhz| mhz < loaded.0) {
+        return Err(format!("spinning at {spinning:.0?} MHz, some cpu below the {:.0} Linux reached loaded", loaded.0));
+    }
     Ok(())
 }
 

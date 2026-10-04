@@ -127,6 +127,12 @@ pub fn df_witness(site: &str) {
     );
 }
 
+/// CPUID.0's vendor string, as `toyos_cpuvuln` names it.
+pub fn vendor() -> toyos_cpuvuln::Vendor {
+    let (_, ebx, ecx, edx) = cpuid(0, 0);
+    toyos_cpuvuln::Vendor::from_id(&core::array::from_fn(|i| [ebx, edx, ecx][i / 4].to_le_bytes()[i % 4]))
+}
+
 /// CPUID with both index registers; `rbx` is saved by hand since Rust reserves it as an operand.
 pub fn cpuid(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
     let eax: u32;

@@ -260,8 +260,8 @@ pub const SYS_DEVICE_DMA_MAP: u64 = 122;
 pub const SYS_DEVICE_DMA_UNMAP: u64 = 123;
 
 /// Every online CPU's counters, as [`crate::counters`] records. Gated by
-/// [`Rights::COUNTERS`] on a `SysCap`, and the counters that time programs by
-/// [`Rights::TRACE`] beside it. See [`counters`].
+/// [`Rights::COUNTERS`] on a `SysCap`, and the counters that time programs and
+/// the power envelope by [`Rights::TRACE`] beside it. See [`counters`].
 ///
 /// [`Rights::COUNTERS`]: crate::handle::Rights::COUNTERS
 /// [`Rights::TRACE`]: crate::handle::Rights::TRACE
