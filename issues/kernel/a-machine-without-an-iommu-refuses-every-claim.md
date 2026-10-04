@@ -25,10 +25,9 @@ Today `pcidev`'s `bring_up` refuses every claim on such a machine first with
 claimed function is armed only through `iommu::claim_msi`, which takes a
 `Remapping` such a machine never mints. Behind that, `Refusal::Untranslated`:
 a slot's space is an `iommu::OwnSpace`, which has no untranslated form, so
-there is no physical address for a grant to answer with. The ruled path has
-to pass both — a message for the claimed function that is not compatibility
-format's any-vector-at-any-CPU, and a space of its own kind for physical
-addresses.
+there is no physical address for a grant to answer with. The signed driver's
+claim is the path where `NotRemapped` and `Untranslated` both give way under
+the ruling.
 
 Exit, in both arms of `iommu_virtio_platform` (`tests/common/iommu.rs`):
 
