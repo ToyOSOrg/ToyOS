@@ -153,7 +153,7 @@ pub fn iommu_virtio_platform(test_config: &Path) -> Result<(), String> {
             "  [iommu] {name}: {} virtio function(s) behind a unit = {behind_unit}, the audio \
              function {sound} among them{}",
             negotiated.len(),
-            if behind_unit { "" } else { "; the NIC's claim refused for want of a domain" }
+            if behind_unit { "" } else { "; the NIC's claim refused for want of a unit" }
         );
     }
     declining_is_not_free(test_config)
@@ -179,18 +179,20 @@ const NVME_AT: &str = "00:02.0";
 ///
 /// The ordering ruling this whole stage stands on
 /// (`issues/kernel/every-driver-is-still-in-the-kernel.md`) is that moving a
-/// driver out without translation costs security: a descriptor holding a
-/// physical address is an arbitrary read and write over all of memory. So the
-/// kernel refuses the claim by name, the supervisor says which device it could not mint,
-/// and netstack exits rather than driving anything — and the machine finishes
-/// booting, which is the half a refusal that panicked would fail. The NVMe
-/// controller is refused the same, and DATA with it by name: a disk that is
-/// there and cannot be used is never answered with memory.
+/// driver out without the unit costs security: a message nothing remaps raises
+/// any vector on any CPU, and a descriptor holding a physical address is an
+/// arbitrary read and write over all of memory. The first is the refusal a
+/// claim takes first, before anything of the slot is spent. So the kernel
+/// refuses the claim by name, the supervisor says which device it could not
+/// mint, and netstack exits rather than driving anything — and the machine
+/// finishes booting, which is the half a refusal that panicked would fail. The
+/// NVMe controller is refused the same, and DATA with it by name: a disk that
+/// is there and cannot be used is never answered with memory.
 fn no_unit_is_no_claim(log: &Serial) -> Result<(), String> {
-    const NO_DOMAIN: &str = "it would have no address space of its own";
+    const NOT_REMAPPED: &str = "its interrupts would not be remapped on this machine";
     // netstack's own exit is the third saying, and is not read here.
-    refused_claim(log, NETSTACK_CLAIMS, NO_DOMAIN, &[NVME_AT])?;
-    log.must_say(&format!("pcidev: PCI {NVME_AT} NOT HANDED OVER — {NO_DOMAIN}"))?;
+    refused_claim(log, NETSTACK_CLAIMS, NOT_REMAPPED, &[NVME_AT])?;
+    log.must_say(&format!("pcidev: PCI {NVME_AT} NOT HANDED OVER — {NOT_REMAPPED}"))?;
     log.must_say("supervisor: diskserver: pci:1b36:0010 is on this machine and could not be handed over")?;
     log.must_say(DISKSERVER_REFUSED)?;
     log.must_say(FILESERVER_WITHOUT_DATA)?;
