@@ -5,9 +5,6 @@
 //!
 //! A CPU that states no rate gets lines with no head, and [`start`]'s caller
 //! says so once.
-//!
-//! [`say`] also counts what its lines cost, in counter ticks, split between the
-//! console and `loader.log`: [`cost`] is the two sums.
 
 use core::fmt;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -15,10 +12,6 @@ use core::sync::atomic::{AtomicU64, Ordering};
 /// The counter at the loader's entry, and its rate; zero until [`start`].
 static ENTRY: AtomicU64 = AtomicU64::new(0);
 static HZ: AtomicU64 = AtomicU64::new(0);
-
-static LINES: AtomicU64 = AtomicU64::new(0);
-static CONSOLE_TICKS: AtomicU64 = AtomicU64::new(0);
-static FILE_TICKS: AtomicU64 = AtomicU64::new(0);
 
 /// Take `entry` as every stamp's zero, and return the rate stamps are
 /// converted at, or `None` where the CPU states none.
@@ -41,20 +34,8 @@ pub fn now() -> Stamp {
 /// One line, stamped, to the console and then to `loader.log`.
 pub fn say(args: fmt::Arguments) {
     let stamp = now();
-    let before = crate::arch::counter();
     uefi_services::println!("{stamp}{args}");
-    let between = crate::arch::counter();
     crate::loaderlog::line(format_args!("{stamp}{args}"));
-    let after = crate::arch::counter();
-    LINES.fetch_add(1, Ordering::Relaxed);
-    CONSOLE_TICKS.fetch_add(between - before, Ordering::Relaxed);
-    FILE_TICKS.fetch_add(after - between, Ordering::Relaxed);
-}
-
-/// The lines [`say`] has said, and the counter ticks they spent on the console
-/// and in `loader.log`.
-pub fn cost() -> (u64, u64, u64) {
-    (LINES.load(Ordering::Relaxed), CONSOLE_TICKS.load(Ordering::Relaxed), FILE_TICKS.load(Ordering::Relaxed))
 }
 
 pub struct Stamp(Option<u64>);

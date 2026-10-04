@@ -23,5 +23,11 @@ A second rate source is the fix, and the choice of one is open: the
 `EFI_TIMESTAMP_PROTOCOL`'s stated frequency, the ACPI PM timer or the HPET, each
 a calibration the loader then pays for before its first stamped line.
 
+Until then no guest test sees the stamp on the screen: `screen_loader_clears`
+(`tests/toyos.rs`) matches the screen's first line with or without its head,
+because no x86 guest stamps one. The fix is where that test starts asserting
+the head on the screen.
+
 Exit: a loader line carries its milliseconds on an x86-64 CPU that states
-neither leaf 15H's ratio nor leaf 16H's base frequency.
+neither leaf 15H's ratio nor leaf 16H's base frequency, and `screen_loader_clears`
+asserts that line's head on the screen.

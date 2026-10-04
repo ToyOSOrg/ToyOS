@@ -16,8 +16,9 @@ bytes` (21 characters) follows its predecessor by 12 ms, each ~150-character
 
 Each line is two writes: ConOut's `OutputString`, and `loaderlog::line`'s
 `file.write` and `file.flush()` to `loader.log` on the stick's FAT
-(`bootloader/src/loaderlog.rs`). The file is the cost. The boot pass's
-`Loader lines:` line from the T14's `jobcase` boot at `d373045ee` reads: the
+(`bootloader/src/loaderlog.rs`). The file is the cost. A `Loader lines:` line that
+summed each half's counter ticks, carried at `d373045ee` for this one reading
+and removed after it, read on the T14's `jobcase` boot at that commit: the
 43 lines above it took 129796443 counter ticks on the console (53.7 ms, 1.2 ms
 a line) and 1505476678 in `loader.log` (622.3 ms, 14.5 ms a line), and the
 screen's clear before the first line 250073763 (103.4 ms), at 2419200000 Hz.
@@ -25,6 +26,8 @@ screen's clear before the first line 250073763 (103.4 ms), at 2419200000 Hz.
 The fix is fewer flushes, and that gives up `loaderlog`'s claim that a line is
 written and flushed before the loader goes on: what a hang between two flushes
 would lose is a decision of its own, not a side effect of the fix.
+
+The stamps' spacing reads the fix without it.
 
 Exit: the T14's loader lines cost what their content costs to draw and keep,
 with the durability `loader.log` keeps stated at `loaderlog`.

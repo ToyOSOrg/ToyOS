@@ -496,7 +496,7 @@ fn report_reach(what: &str, at: u64, len: u64) {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], root_image: rootimage::RootImage, entry_counter: u64, clear_ticks: u64, system_table: SystemTable<Boot>) -> ! {
+fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], root_image: rootimage::RootImage, entry_counter: u64, system_table: SystemTable<Boot>) -> ! {
     // Said before it is refused, for `report_reach`'s reason.
     match arch::cpu_as_entered() {
         Ok(None) => {}
@@ -639,12 +639,6 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         "Loader counter: {entry_counter} at entry, {} at the handoff",
         kernel_args.loader_handoff_counter,
     );
-    // What the loader's time went on that its stamps cannot split: a line's
-    // console half from its file half, and the clear before the first line.
-    let (lines, console_ticks, file_ticks) = stamp::cost();
-    println!(
-        "Loader lines: the {lines} above took {console_ticks} counter ticks on the console and {file_ticks} in loader.log, and the screen's clear {clear_ticks}",
-    );
 
     // Last, and after every line above: a console write, a FAT write and a
     // handle drop can each add a descriptor, and the margin below is fixed.
@@ -762,9 +756,7 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // of the firmware's: its logo and its boot manager's text. ClearScreen
     // (UEFI 2.11 §12.4.8) is the console's own clear, which also homes the
     // cursor; said once the log is open.
-    let before_the_clear = arch::counter();
     let cleared = system_table.stdout().clear();
-    let clear_ticks = arch::counter() - before_the_clear;
     // The same sixteen bytes the kernel is handed below, read once, and read
     // before the first line so that no line is only on the screen.
     let log_guid = log_partition_guid(handle, &system_table);
@@ -973,5 +965,5 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     watchdog::arm(&system_table, rsdp_addr, params);
 
     println!("Starting kernel...");
-    start_kernel(loaded_kernel, kernel_bytes, cmdline, rsdp_addr, gop, boot_part, log_guid, chosen.root, entry_counter, clear_ticks, system_table);
+    start_kernel(loaded_kernel, kernel_bytes, cmdline, rsdp_addr, gop, boot_part, log_guid, chosen.root, entry_counter, system_table);
 }
