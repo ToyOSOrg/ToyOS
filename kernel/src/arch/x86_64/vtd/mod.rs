@@ -20,6 +20,7 @@ use alloc::vec::Vec;
 
 use crate::drivers::acpi::TableError;
 use crate::drivers::pci::PciDevice;
+use toyos_abi::boot::RootBridgeWindow;
 use crate::iommu::{AddressWidth, StreamId};
 use crate::mm::policy::MmioPolicy;
 use crate::mm::Mmio;
@@ -123,7 +124,9 @@ pub(super) fn invalidate_interrupt_entries() {
     }
 }
 
-pub fn init(rsdp_addr: u64, devices: &[PciDevice]) {
+/// `windows` and every region firmware reserved are what no domain's addresses
+/// reach; the interrupt table's first `claims` entries are the claim slots'.
+pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: &[RootBridgeWindow], claims: usize) {
     let dmar = match Dmar::open(rsdp_addr) {
         Ok(dmar) => dmar,
         // ACPI cannot distinguish "no VT-d silicon" from "VT-d disabled in
@@ -164,6 +167,8 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice]) {
     // Described and planned before any unit is armed: whether sources may move
     // to the remappable format is one decision, taken before the first `IRE`.
     let mut ready: Vec<(Unit, Plan)> = Vec::new();
+    // What no domain's addresses may reach, RMRRs added below as the walk meets them.
+    let mut reserved: Vec<(u64, u64)> = windows.iter().map(|w| (w.base, w.end())).collect();
     for structure in dmar.structures() {
         match structure {
             Ok(Structure::Drhd(drhd)) => {
@@ -210,6 +215,7 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice]) {
                          identity domain 0x0..{identity_top:#x}"
                     );
                 }
+                reserved.push((base, limit.saturating_add(1)));
                 describe_scopes("rmrr", regions, rmrr.scopes());
                 regions += 1;
                 held_regions += usize::from(held);
@@ -238,12 +244,13 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice]) {
          them inside the identity domain"
     );
 
-    let remap = remappable(&ready, units);
+    domain::avoid(reserved);
+    let remap = remappable(&ready, units, dmar.flags);
     // One identity-domain table set per address width: units may disagree on
     // `CAP.SAGAW`, and a shared set would be programmed at the wrong depth for one.
     let mut domains: [Option<Table>; 2] = [None, None];
     for (unit, plan) in ready {
-        enable(unit, plan, devices, &mut domains, remap);
+        enable(unit, plan, devices, &mut domains, remap, claims);
     }
 }
 
@@ -254,7 +261,7 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice]) {
 /// it would read that address as a compatibility message and deliver the
 /// interrupt to whatever the handle bits spell. Every condition below therefore
 /// refuses for the machine, not for the unit that failed it.
-fn remappable(ready: &[(Unit, Plan)], described: usize) -> Option<bool> {
+fn remappable(ready: &[(Unit, Plan)], described: usize, flags: u8) -> Option<bool> {
     #[cfg(feature = "boot-actuators")]
     if crate::actuator::iommu_no_remap() {
         log!(
@@ -264,6 +271,13 @@ fn remappable(ready: &[(Unit, Plan)], described: usize) -> Option<bool> {
         return None;
     }
     if ready.is_empty() {
+        return None;
+    }
+    if flags & dmar::FLAG_INTR_REMAP == 0 {
+        log!(
+            "iommu: DMAR flags={flags:#04x} leave INTR_REMAP clear, so firmware says this \
+             platform does not remap — every source stays in compatibility format"
+        );
         return None;
     }
     if ready.len() != described {
@@ -512,6 +526,7 @@ fn enable(
     devices: &[PciDevice],
     domains: &mut [Option<Table>; 2],
     remap: Option<bool>,
+    claims: usize,
 ) {
     let index = unit.index;
     let Plan { width, records } = plan;
@@ -539,7 +554,7 @@ fn enable(
     let mut queue = Queue::new(&mut TABLES.lock(), unit.regs);
     // Outside the `TABLES` lock: `interrupt::arm` takes its own lock and
     // then that one, and the order this subsystem holds is the reverse.
-    let irta = remap.map(interrupt::arm);
+    let irta = remap.map(|extended| interrupt::arm(extended, claims));
 
     // Before `TE`: the first blocked transaction must be reportable, not merely counted.
     fault::arm(index, unit.regs, records, crate::arch::idt::DMA_FAULT_VECTOR);

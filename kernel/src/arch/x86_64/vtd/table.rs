@@ -104,6 +104,14 @@ impl Table {
         self.write(index * 2, lo);
     }
 
+    /// Zeroes a 16-byte entry low half first: the low half holds `P`, and an
+    /// entry whose high half went first would for a moment be present over a
+    /// field it no longer means.
+    pub fn clear_pair(self, index: usize) {
+        self.write(index * 2, 0);
+        self.write(index * 2 + 1, 0);
+    }
+
     /// The 16-byte entry at `index`, back out of memory: `write` flushed the line, so this refetches.
     pub fn read_pair(self, index: usize) -> (u64, u64) {
         (self.read(index * 2), self.read(index * 2 + 1))
@@ -214,10 +222,31 @@ pub struct Domain {
     root: Table,
     id: u16,
     width: AddressWidth,
-    /// Bits of device address this domain may hand out, which is not
-    /// [`AddressWidth::bits`] — see [`Domain::translatable`].
-    translatable: u8,
+    /// Where its addresses start: [`Domain::first_address`] of what its unit
+    /// translates, which is not [`AddressWidth::bits`] — see
+    /// [`Domain::translatable_bits`].
+    floor: u64,
+    /// Where they end: [`ceiling`].
+    ceiling: u64,
     next: u64,
+}
+
+/// Where a domain's addresses end: under what its unit translates, and under
+/// the first of `reserved` that reaches above `floor` — a root bridge's window,
+/// which a bridge may route peer-to-peer before the unit sees the request
+/// (PCIe Base §2.4), or a region firmware reserved (VT-d §3.16). At or below
+/// `floor` where one of them covers it.
+const fn ceiling(translatable: u8, floor: u64, reserved: &[(u64, u64)]) -> u64 {
+    let mut ceiling = 1u64 << translatable;
+    let mut i = 0;
+    while i < reserved.len() {
+        let (start, end) = reserved[i];
+        if end > floor && start < ceiling {
+            ceiling = start;
+        }
+        i += 1;
+    }
+    ceiling
 }
 
 impl Domain {
@@ -235,29 +264,34 @@ impl Domain {
         if mgaw < width.bits() { mgaw } else { width.bits() }
     }
 
-    /// A quarter of the way up what this domain can translate — above any
-    /// physical address these machines have, so a descriptor still carrying one
-    /// names nothing this domain maps and faults rather than landing.
+    /// A quarter of the way up what this domain can translate.
     const fn first_address(translatable: u8) -> u64 {
         1 << (translatable - 2)
     }
 
+    /// A domain with `room` bytes of addresses between its floor and its
+    /// [`ceiling`], or the reason it has not.
     pub fn new(
         tables: &mut Tables,
         id: u16,
         width: AddressWidth,
         mgaw: u8,
+        reserved: &[(u64, u64)],
+        room: u64,
     ) -> Result<Self, IommuError> {
         let translatable = Self::translatable_bits(width, mgaw);
         let floor = Self::first_address(translatable);
-        // The property `first_address` is chosen for, asserted rather than
-        // assumed: a machine with enough memory to reach the window would have
-        // stale descriptors landing on real pages instead of faulting.
+        // Above memory, so a descriptor still carrying one of these names
+        // nothing this domain maps and faults rather than landing on a page.
         let top = crate::mm::pmm::top();
         if floor <= top {
             return Err(IommuError::WindowBelowMemory { translatable, floor, top });
         }
-        Ok(Self { root: tables.alloc(), id, width, translatable, next: floor })
+        let ceiling = ceiling(translatable, floor, reserved);
+        if ceiling < floor || ceiling - floor < room.next_multiple_of(PAGE_2M) {
+            return Err(IommuError::NoRoom { floor, ceiling, room });
+        }
+        Ok(Self { root: tables.alloc(), id, width, floor, ceiling, next: floor })
     }
 
     pub fn root(&self) -> Table {
@@ -269,20 +303,11 @@ impl Domain {
     }
 
     pub const fn floor(&self) -> u64 {
-        Self::first_address(self.translatable)
+        self.floor
     }
 
-    /// Where this domain's addresses end: what this unit will translate, not
-    /// what the tables can express — past `MGAW` the hardware faults before the
-    /// walk it has entries for.
-    pub fn ceiling(&self) -> u64 {
-        1u64 << self.translatable
-    }
-
-    /// The bits of device address this domain hands out, for a refusal that
-    /// names what ran out rather than the depth of the tables.
-    pub fn translatable(&self) -> u8 {
-        self.translatable
+    pub const fn ceiling(&self) -> u64 {
+        self.ceiling
     }
 
     /// Reserve room for `bytes`, rounded up to whole leaves. An address is
@@ -333,7 +358,8 @@ const _: () = {
         root: ROOT,
         id: KERNEL_DOMAIN + 1,
         width: AddressWidth::Bits48,
-        translatable: 48,
+        floor: FLOOR,
+        ceiling: 1 << 48,
         next: FLOOR + PAGE_2M,
     };
     const TWO_LEAVES: Domain = Domain { next: FLOOR + 2 * PAGE_2M, ..ONE_LEAF };
@@ -351,6 +377,26 @@ const _: () = {
     // Mid-span but off a leaf boundary: inside the handed-out range without
     // being an address `reserve` ever returned.
     assert!(!TWO_LEAVES.handed_out(Iova::translated(FLOOR + 1), PAGE_2M));
+};
+
+/// [`ceiling`] over the windows the T14's firmware declares, unsorted as it
+/// declares them: a 39-bit unit's domain ends where the first window above its
+/// floor begins, and a window reaching over the floor leaves it nothing.
+const _: () = {
+    const FLOOR: u64 = Domain::first_address(39);
+    const T14: [(u64, u64); 7] = [
+        (0xA200_0000, 0xBD00_0000),
+        (0x40_0000_0000, 0x60_3DC0_0000),
+        (0xA080_0000, 0xA200_0000),
+        (0xBD00_0000, 0xC000_0000),
+        (0xFF00_0000, 0xFFB8_0000),
+        (0xFFD3_A070, 0x1_0000_0000),
+        (0x60_3DC0_0000, 0x80_0000_0000),
+    ];
+    assert!(FLOOR == 0x20_0000_0000);
+    assert!(ceiling(39, FLOOR, &T14) == 0x40_0000_0000);
+    assert!(ceiling(39, FLOOR, &[]) == 1 << 39);
+    assert!(ceiling(39, FLOOR, &[(0x10_0000_0000, FLOOR + 1)]) < FLOOR);
 };
 
 pub fn map(tables: &mut Tables, domain: &Domain, at: Iova, phys: u64, bytes: u64) {
@@ -513,7 +559,8 @@ const _: () = {
         root: Table { phys: 0x5000 },
         id: u16::MAX,
         width: AddressWidth::Bits39,
-        translatable: 39,
+        floor: 0,
+        ceiling: 0,
         next: 0,
     };
     let identity = context_entry(Table { phys: 0x3000 }, KERNEL_DOMAIN, AddressWidth::Bits48);
