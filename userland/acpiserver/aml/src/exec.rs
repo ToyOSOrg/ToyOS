@@ -96,6 +96,7 @@ fn type_name(code: u64) -> &'static [u8] {
         9 => b"[Mutex]",
         10 => b"[Operation Region]",
         11 => b"[Power Resource]",
+        12 => b"[Processor]",
         13 => b"[Thermal Zone]",
         14 => b"[Buffer Field]",
         16 => b"[Debug Object]",
@@ -415,8 +416,7 @@ impl<'a> Machine<'a> {
                 0x13 => self.def_create_field(f, c),
                 0x80 => self.def_region(f, c),
                 0x81 | 0x86 | 0x87 => self.def_field(f, c),
-                0x82 | 0x84 | 0x85 => self.def_scoped(f, c),
-                0x83 => Err(c.malformed("ProcessorOp, permanently reserved since ACPI 6.4 (§20.3)")),
+                0x82..=0x85 => self.def_scoped(f, c),
                 0x88 => Err(Error::Unsupported("DataTableRegion")),
                 0x20 => Err(Error::Unsupported("Load")),
                 0x21 | 0x22 => self.delay(f, c),
@@ -508,7 +508,10 @@ impl<'a> Machine<'a> {
         let id = self.resolve(f, &p)?;
         // §19.6.120: a Scope's location is a predefined scope, a Device, a
         // Processor, a Thermal Zone or a Power Resource.
-        if !matches!(self.node_object(id)?, Object::Scope | Object::Device | Object::ThermalZone | Object::PowerResource) {
+        if !matches!(
+            self.node_object(id)?,
+            Object::Scope | Object::Device | Object::Processor | Object::ThermalZone | Object::PowerResource
+        ) {
             return Err(Error::Type("a Scope names an object that opens no scope (§19.6.120)"));
         }
         let flow = self.within(f, id, &mut body)?;
@@ -523,8 +526,8 @@ impl<'a> Machine<'a> {
         flow
     }
 
-    /// Device, PowerResource and ThermalZone (§20.2.5.2): a named object
-    /// whose term list runs in its own scope.
+    /// Device, Processor, PowerResource and ThermalZone (§20.2.5.2): a named
+    /// object whose term list runs in its own scope.
     fn def_scoped(&mut self, f: &mut Frame, c: &mut Cursor<'_>) -> Result<Flow, Error> {
         c.byte()?;
         let op = c.byte()?;
@@ -534,6 +537,15 @@ impl<'a> Machine<'a> {
         let o = match op {
             0x82 => Object::Device,
             0x85 => Object::ThermalZone,
+            0x83 => {
+                // DefProcessor := ProcessorOp PkgLength NameString ProcID
+                // PblkAddr PblkLen TermList (ACPI 6.3A §20.2.5.2), parsed by
+                // the owner's ruling to accept what real firmware ships.
+                body.byte()?;
+                body.dword()?;
+                body.byte()?;
+                Object::Processor
+            }
             _ => {
                 // SystemLevel and ResourceOrder, which only OSPM's power
                 // resource management reads.
@@ -736,8 +748,8 @@ impl<'a> Machine<'a> {
         let v = self.int_arg(f, c)?;
         let id = self.node_of(f, &t)?;
         // §19.6.94: a device, processor, or thermal zone.
-        if !matches!(self.node_object(id)?, Object::Device | Object::ThermalZone) {
-            return Err(Error::Type("Notify of an object that is not a device or thermal zone (§19.6.94)"));
+        if !matches!(self.node_object(id)?, Object::Device | Object::Processor | Object::ThermalZone) {
+            return Err(Error::Type("Notify of an object that is not a device, processor or thermal zone (§19.6.94)"));
         }
         let path = self.ns.path_of(id, None);
         self.host.notify(&path, v);

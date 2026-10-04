@@ -466,7 +466,7 @@ fn osi_answers_like_windows() {
     // A DSDT of revision 1 answers Ones in 32 bits (§5.7.2).
     let mut m = Machine::default();
     let mut ip = toyos_aml::Interpreter::new();
-    ip.load(&mut m, &table(b"DSDT", 1, &method("Q", 0, &ret(&cat(&[&name("\\_OSI"), &string("Windows 2022")]))))).unwrap();
+    ip.load_bytes(&mut m, &table(b"DSDT", 1, &method("Q", 0, &ret(&cat(&[&name("\\_OSI"), &string("Windows 2022")]))))).unwrap();
     assert_eq!(ip.evaluate(&mut m, "\\Q", &[]), i(0xFFFF_FFFF));
 }
 

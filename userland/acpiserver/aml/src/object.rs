@@ -33,6 +33,8 @@ pub(crate) enum Object {
     /// A predefined scope such as `\_SB` (§5.3.1), typeless (§19.6.96).
     Scope,
     Device,
+    /// The Processor object ACPI 6.4 deprecated (ACPI 6.3A §19.6.108).
+    Processor,
     ThermalZone,
     PowerResource,
     Method(Rc<Method>),
@@ -89,8 +91,9 @@ impl Object {
         Object::Buf(bytes(v))
     }
 
-    /// The value ObjectType returns (§19.6.96, Table 19.36), a reference's
-    /// being its target's and found by the caller.
+    /// The value ObjectType returns (§19.6.96, Table 19.36; a Processor's 12
+    /// from ACPI 6.3A's), a reference's being its target's and found by the
+    /// caller.
     pub(crate) fn type_code(&self) -> u64 {
         match self {
             Object::Uninit | Object::Scope | Object::Lazy(_) | Object::Ref(_) => 0,
@@ -105,6 +108,7 @@ impl Object {
             Object::Mutex(_) => 9,
             Object::Region(_) => 10,
             Object::PowerResource => 11,
+            Object::Processor => 12,
             Object::ThermalZone => 13,
             Object::BufField(_) => 14,
         }

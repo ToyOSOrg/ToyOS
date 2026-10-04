@@ -87,8 +87,6 @@ pub(crate) const WINDOWS: &[&str] = &[
     "Windows 2022",
 ];
 
-const HEADER: usize = 36;
-
 /// Why a table or an evaluation was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
@@ -202,20 +200,25 @@ impl Interpreter {
         Interpreter { ns, width: None }
     }
 
-    /// Loads a DSDT or SSDT (§5.4.2): the DSDT first, then each SSDT.
-    pub fn load(&mut self, host: &mut dyn Host, table: &[u8]) -> Result<(), Error> {
-        let (signature, revision) = header(table)?;
-        let w = match (&signature, self.width) {
+    /// Loads a DSDT or SSDT (§5.4.2): the DSDT first, then each SSDT. The
+    /// table's length and checksum are [`toyos_acpi::Table::open`]'s.
+    pub fn load<P: toyos_acpi::Phys>(&mut self, host: &mut dyn Host, table: &toyos_acpi::Table<P>) -> Result<(), Error> {
+        let bytes: Vec<u8> = (0..table.len()).map_while(|i| table.byte(i)).collect();
+        let (Some(signature), Some(&revision)) = (bytes.first_chunk::<4>(), bytes.get(toyos_acpi::SDT_REVISION)) else {
+            return Err(Error::Table("shorter than its header (§5.2.6)"));
+        };
+        let w = match (signature, self.width) {
             (b"DSDT", None) => Width { bits: if revision < 2 { 32 } else { 64 } },
             (b"DSDT", Some(_)) => return Err(Error::Table("a second DSDT")),
-            (_, Some(w)) => w,
-            (_, None) => return Err(Error::Table("an SSDT before the DSDT, whose revision sets every integer's width")),
+            (b"SSDT", Some(w)) => w,
+            (b"SSDT", None) => return Err(Error::Table("an SSDT before the DSDT, whose revision sets every integer's width")),
+            _ => return Err(Error::Table("not a DSDT or SSDT (§5.2.11)")),
         };
-        let table: Rc<[u8]> = Rc::from(table);
+        let table: Rc<[u8]> = Rc::from(bytes);
         let root = self.ns.root();
         let mut f = Frame::new(root, Vec::new(), table.clone(), 0);
         let mut m = Machine::new(&mut self.ns, host, w);
-        let mut c = stream::Cursor::new(&table, HEADER, table.len());
+        let mut c = stream::Cursor::new(&table, toyos_acpi::SDT_HEADER_LEN, table.len());
         let r = m.term_list(&mut f, &mut c).and_then(|flow| match flow {
             exec::Flow::Next => Ok(()),
             _ => Err(Error::Rule("a Return, Break or Continue at definition block level")),
@@ -289,24 +292,4 @@ fn value_of(m: &mut Machine<'_>, o: Object, depth: usize) -> Result<Value, Error
         Object::Ref(Ref::Node(id)) => Value::Reference(m.ns.path_of(id, None)),
         _ => return Err(Error::Unsupported("a reference to an unnamed object, handed to the caller")),
     })
-}
-
-/// The header of a definition block (§5.2.6): its signature and revision,
-/// once its length and checksum agree with its bytes.
-fn header(t: &[u8]) -> Result<([u8; 4], u8), Error> {
-    if t.len() < HEADER {
-        return Err(Error::Table("shorter than the 36-byte header (§5.2.6)"));
-    }
-    let len = u32::from_le_bytes([t[4], t[5], t[6], t[7]]);
-    if usize::try_from(len).ok() != Some(t.len()) {
-        return Err(Error::Table("its Length is not its size (§5.2.6)"));
-    }
-    if t.iter().fold(0u8, |s, &b| s.wrapping_add(b)) != 0 {
-        return Err(Error::Table("its bytes do not sum to zero (§5.2.6)"));
-    }
-    let signature = [t[0], t[1], t[2], t[3]];
-    if &signature != b"DSDT" && &signature != b"SSDT" {
-        return Err(Error::Table("not a DSDT or SSDT (§5.2.11)"));
-    }
-    Ok((signature, t[8]))
 }

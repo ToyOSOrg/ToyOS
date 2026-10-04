@@ -10,32 +10,22 @@ fn int_of(i: &mut Interpreter, m: &mut Machine, path: &str) -> Result<Value, Err
     i.evaluate(m, path, &[])
 }
 
+/// A table's length and checksum are `toyos_acpi::Table::open`'s; what the
+/// interpreter decides is which tables load, and in which order.
 #[test]
-fn a_header_that_disagrees_with_its_bytes_is_refused() {
+fn a_dsdt_loads_first_and_then_ssdts() {
     let mut m = Machine::default();
     let good = dsdt(&def_name("A", &int(1)));
-    let mut short = good.clone();
-    short.truncate(35);
-    assert!(matches!(Interpreter::new().load(&mut m, &short), Err(Error::Table(_))));
-
-    let mut longer = good.clone();
-    longer.push(0);
-    assert!(matches!(Interpreter::new().load(&mut m, &longer), Err(Error::Table(_))));
-
-    let mut sum = good.clone();
-    sum[9] = sum[9].wrapping_add(1);
-    assert!(matches!(Interpreter::new().load(&mut m, &sum), Err(Error::Table(_))));
-
     let facp = table(b"FACP", 2, &def_name("A", &int(1)));
-    assert!(matches!(Interpreter::new().load(&mut m, &facp), Err(Error::Table(_))));
+    assert!(matches!(Interpreter::new().load_bytes(&mut m, &facp), Err(Error::Table(_))));
 
     let ssdt = table(b"SSDT", 2, &def_name("A", &int(1)));
-    assert!(matches!(Interpreter::new().load(&mut m, &ssdt), Err(Error::Table(_))));
+    assert!(matches!(Interpreter::new().load_bytes(&mut m, &ssdt), Err(Error::Table(_))));
 
     let mut i = Interpreter::new();
-    i.load(&mut m, &good).unwrap();
-    assert!(matches!(i.load(&mut m, &good), Err(Error::Table(_))));
-    i.load(&mut m, &table(b"SSDT", 2, &def_name("B", &int(2)))).unwrap();
+    i.load_bytes(&mut m, &good).unwrap();
+    assert!(matches!(i.load_bytes(&mut m, &good), Err(Error::Table(_))));
+    i.load_bytes(&mut m, &table(b"SSDT", 2, &def_name("B", &int(2)))).unwrap();
     assert_eq!(i.evaluate(&mut m, "\\B", &[]), Ok(Value::Integer(2)));
 }
 
@@ -59,11 +49,11 @@ fn a_dsdt_below_revision_2_makes_every_integer_32_bits() {
     let body = cat(&[&def_name("ONES", &ones()), &method("MAIN", 0, &ret(&add(&int(0xFFFF_FFFF), &int(2), &[0])))]);
     let mut m = Machine::default();
     let mut i = Interpreter::new();
-    i.load(&mut m, &table(b"DSDT", 1, &body)).unwrap();
+    i.load_bytes(&mut m, &table(b"DSDT", 1, &body)).unwrap();
     assert_eq!(i.evaluate(&mut m, "\\ONES", &[]), Ok(Value::Integer(0xFFFF_FFFF)));
     assert_eq!(i.evaluate(&mut m, "\\MAIN", &[]), Ok(Value::Integer(1)));
     // §19.6.29: the DSDT's revision decides for every SSDT too.
-    i.load(&mut m, &table(b"SSDT", 2, &def_name("SONE", &ones()))).unwrap();
+    i.load_bytes(&mut m, &table(b"SSDT", 2, &def_name("SONE", &ones()))).unwrap();
     assert_eq!(i.evaluate(&mut m, "\\SONE", &[]), Ok(Value::Integer(0xFFFF_FFFF)));
 }
 
@@ -126,7 +116,7 @@ fn a_prefix_above_the_root_finds_nothing() {
 #[test]
 fn a_definition_needs_every_segment_but_its_last() {
     let mut m = Machine::default();
-    let r = Interpreter::new().load(&mut m, &dsdt(&def_name("\\XYZ.ABCD", &int(1))));
+    let r = Interpreter::new().load_bytes(&mut m, &dsdt(&def_name("\\XYZ.ABCD", &int(1))));
     assert!(matches!(r, Err(Error::NotFound(_))));
     let (mut i, mut m) = loaded(&cat(&[&device("\\XYZ", &[]), &def_name("\\XYZ.ABCD", &int(1))]));
     assert_eq!(int_of(&mut i, &mut m, "\\XYZ.ABCD"), Ok(Value::Integer(1)));
@@ -136,7 +126,7 @@ fn a_definition_needs_every_segment_but_its_last() {
 fn a_collision_refuses_the_table_and_leaves_none_of_it() {
     let (mut i, mut m) = loaded(&def_name("A", &int(1)));
     let ssdt = table(b"SSDT", 2, &cat(&[&device("\\NEW", &def_name("X", &int(2))), &def_name("\\A", &int(3))]));
-    assert_eq!(i.load(&mut m, &ssdt), Err(Error::Exists("\\A___".into())));
+    assert_eq!(i.load_bytes(&mut m, &ssdt), Err(Error::Exists("\\A___".into())));
     assert!(matches!(int_of(&mut i, &mut m, "\\NEW.X"), Err(Error::NotFound(_))));
     assert!(matches!(int_of(&mut i, &mut m, "\\NEW"), Err(Error::NotFound(_))));
     assert_eq!(int_of(&mut i, &mut m, "\\A"), Ok(Value::Integer(1)));
@@ -145,7 +135,7 @@ fn a_collision_refuses_the_table_and_leaves_none_of_it() {
 #[test]
 fn a_scope_opens_only_what_has_one() {
     let mut m = Machine::default();
-    let r = Interpreter::new().load(&mut m, &dsdt(&cat(&[&def_name("NUM", &int(1)), &scope("NUM", &[])])));
+    let r = Interpreter::new().load_bytes(&mut m, &dsdt(&cat(&[&def_name("NUM", &int(1)), &scope("NUM", &[])])));
     assert!(matches!(r, Err(Error::Type(_))));
     let (mut i, mut m) = loaded(&cat(&[
         &thermal_zone("\\_TZ.TZ0", &[]),
@@ -171,7 +161,7 @@ fn an_alias_acts_exactly_as_its_source() {
     assert_eq!(int_of(&mut i, &mut m, "\\MAIN"), Ok(Value::Integer(9)));
     let mut m = Machine::default();
     let missing = cat(&[&[0x06], &name("\\NONE"), &name("ALI")]);
-    assert!(matches!(Interpreter::new().load(&mut m, &dsdt(&missing)), Err(Error::NotFound(_))));
+    assert!(matches!(Interpreter::new().load_bytes(&mut m, &dsdt(&missing)), Err(Error::NotFound(_))));
 }
 
 #[test]
@@ -181,14 +171,39 @@ fn an_external_defines_nothing() {
     assert!(matches!(int_of(&mut i, &mut m, "\\_SB.PCI0.XYZ"), Err(Error::NotFound(_))));
     let mut m = Machine::default();
     let bad = cat(&[&[0x15], &name("XYZ"), &[0x08, 0x08]]);
-    assert!(matches!(Interpreter::new().load(&mut m, &dsdt(&bad)), Err(Error::Malformed { .. })));
+    assert!(matches!(Interpreter::new().load_bytes(&mut m, &dsdt(&bad)), Err(Error::Malformed { .. })));
 }
 
+/// The owner's ruling (2026-10-05): "Parse Processor and other legacy
+/// constructs real tables still contain, per their last spec definition";
+/// ACPI 6.3A §20.2.5.2, §19.6.108, Table 19.36.
 #[test]
-fn the_processor_opcode_is_refused_as_reserved() {
-    let processor = cat(&[&[0x5B, 0x83], &pkg(&cat(&[&name("CPU0"), &[0x00, 0x10, 0x10, 0x00, 0x00, 0x06]]))]);
+fn a_processor_parses_opens_a_scope_and_takes_notify() {
+    let processor = cat(&[
+        &[0x5B, 0x83],
+        &pkg(&cat(&[&name("CPU0"), &[0x01, 0x10, 0x04, 0x00, 0x00, 0x06], &def_name("_PPC", &int(3))])),
+    ]);
+    let (mut i, mut m) = loaded(&cat(&[
+        &scope("\\_PR", &processor),
+        &method("TYPE", 0, &ret(&object_type(&name("\\_PR.CPU0")))),
+        &method("NOTE", 0, &cat(&[&[0x86], &name("\\_PR.CPU0"), &int(0x80)])),
+    ]));
+    assert_eq!(i.evaluate(&mut m, "\\_PR.CPU0._PPC", &[]), Ok(Value::Integer(3)));
+    assert_eq!(i.evaluate(&mut m, "\\TYPE", &[]), Ok(Value::Integer(12)));
+    i.evaluate(&mut m, "\\NOTE", &[]).unwrap();
+    assert_eq!(m.log, vec![Event::Notify("\\_PR_.CPU0".into(), 0x80)]);
+}
+
+/// QEMU 11.1.1's DSDT, as `toyos-acpi/fixtures/qemu-11.1.1/SOURCE` records
+/// it: a boot of it logged `ACPI: PM1a=0x604 SLP_TYPa=0`.
+#[test]
+fn qemus_dsdt_loads_and_its_s5_is_what_its_boot_logged() {
+    let dsdt = include_bytes!("../../../../toyos-acpi/fixtures/qemu-11.1.1/dsdt.bin");
     let mut m = Machine::default();
-    assert!(matches!(Interpreter::new().load(&mut m, &dsdt(&processor)), Err(Error::Malformed { .. })));
+    let mut i = Interpreter::new();
+    i.load_bytes(&mut m, dsdt).unwrap();
+    let Ok(Value::Package(s5)) = i.evaluate(&mut m, "\\_S5", &[]) else { panic!("\\_S5 is no package") };
+    assert_eq!(s5.first(), Some(&Value::Integer(0)));
 }
 
 #[test]

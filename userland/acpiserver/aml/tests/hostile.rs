@@ -9,7 +9,7 @@ use toyos_aml::{Error, Interpreter, Value};
 const ZERO: &[u8] = &[0x00];
 
 fn load(body: &[u8]) -> Result<(), Error> {
-    Interpreter::new().load(&mut Machine::default(), &dsdt(body))
+    Interpreter::new().load_bytes(&mut Machine::default(), &dsdt(body))
 }
 
 #[test]
@@ -209,7 +209,7 @@ fn mutated_tables_yield_a_value_or_a_refusal() {
         mutate(&mut body, &mut r);
         let mut m = Machine::default();
         let mut i = Interpreter::new();
-        if i.load(&mut m, &dsdt(&body)).is_err() {
+        if i.load_bytes(&mut m, &dsdt(&body)).is_err() {
             continue;
         }
         loads += 1;
@@ -231,7 +231,7 @@ fn every_truncation_yields_a_value_or_a_refusal() {
     for n in 0..seed.len() {
         let mut m = Machine::default();
         let mut i = Interpreter::new();
-        if i.load(&mut m, &dsdt(&seed[..n])).is_ok() {
+        if i.load_bytes(&mut m, &dsdt(&seed[..n])).is_ok() {
             let _ = i.evaluate(&mut m, "\\MAIN", &[Value::Integer(1), Value::Integer(2)]);
         }
     }

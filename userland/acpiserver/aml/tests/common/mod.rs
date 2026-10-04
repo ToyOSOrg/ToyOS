@@ -5,7 +5,8 @@
 
 use std::collections::BTreeMap;
 
-use toyos_aml::{Access, Address, Denied, Host, Interpreter, Value};
+use toyos_acpi::{Phys, Table};
+use toyos_aml::{Access, Address, Denied, Error, Host, Interpreter, Value};
 
 /// PkgLength (§20.2.4) of `n` bytes that follow it: the length counts its
 /// own encoding.
@@ -394,11 +395,39 @@ impl Host for Machine {
     }
 }
 
+/// A table's bytes as physical memory at address 0, for
+/// [`toyos_acpi::Table::open`].
+#[derive(Clone, Copy)]
+pub struct Image<'a>(pub &'a [u8]);
+
+impl Phys for Image<'_> {
+    fn readable(self, phys: u64, len: usize) -> bool {
+        usize::try_from(phys).ok().and_then(|p| p.checked_add(len)).is_some_and(|e| e <= self.0.len())
+    }
+
+    fn byte(self, phys: u64) -> u8 {
+        self.0[phys as usize]
+    }
+}
+
+/// Loading from bytes, through the `Table::open` the server reaches a table by.
+pub trait LoadBytes {
+    fn load_bytes(&mut self, m: &mut Machine, t: &[u8]) -> Result<(), Error>;
+}
+
+impl LoadBytes for Interpreter {
+    fn load_bytes(&mut self, m: &mut Machine, t: &[u8]) -> Result<(), Error> {
+        let signature: [u8; 4] = t.get(..4).and_then(|s| s.try_into().ok()).expect("a test table has a signature");
+        let table = Table::open(Image(t), 0, &signature, 0).expect("a test table opens");
+        self.load(m, &table)
+    }
+}
+
 /// An interpreter with one DSDT of `body` loaded.
 pub fn loaded(body: &[u8]) -> (Interpreter, Machine) {
     let mut m = Machine::default();
     let mut i = Interpreter::new();
-    i.load(&mut m, &dsdt(body)).expect("the DSDT loads");
+    i.load_bytes(&mut m, &dsdt(body)).expect("the DSDT loads");
     (i, m)
 }
 

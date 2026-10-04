@@ -248,10 +248,10 @@ fn a_host_refusal_and_a_space_not_carried_are_refused_by_name() {
     assert_eq!(read(&smbus, &[], "\\S").1, Err(Error::Unsupported("the SMBus address space")));
     let mut m = Machine::default();
     let reserved = op_region("RSV", 0x0C, &int(0), &int(1));
-    assert!(matches!(Interpreter::new().load(&mut m, &dsdt(&reserved)), Err(Error::Malformed { .. })));
+    assert!(matches!(Interpreter::new().load_bytes(&mut m, &dsdt(&reserved)), Err(Error::Malformed { .. })));
     for flags in [0x06, 0x60, 0x80] {
         let bad = memory_region(flags, &[unit("A", 8)]);
-        assert!(matches!(Interpreter::new().load(&mut m, &dsdt(&bad)), Err(Error::Malformed { .. })), "{flags:#x}");
+        assert!(matches!(Interpreter::new().load_bytes(&mut m, &dsdt(&bad)), Err(Error::Malformed { .. })), "{flags:#x}");
     }
 }
 
@@ -285,9 +285,9 @@ fn buffer_fields_read_and_write_their_buffer() {
     assert_eq!(i.evaluate(&mut m, "\\ALL", &[]), Ok(Value::Buffer(vec![0x81, 0xFF, 0x45, 0x23, 0x41, 0x42, 0, 0, 0, 0, 0, 0])));
     let mut m = Machine::default();
     let past = cat(&[&def_name("BUF", &buffer(&int(4), &[])), &cat(&[&[0x8A], &name("BUF"), &int(1), &name("X")])]);
-    assert!(matches!(Interpreter::new().load(&mut m, &dsdt(&past)), Err(Error::Rule(_))));
+    assert!(matches!(Interpreter::new().load_bytes(&mut m, &dsdt(&past)), Err(Error::Rule(_))));
     let none = cat(&[&def_name("BUF", &buffer(&int(4), &[])), &cat(&[&[0x5B, 0x13], &name("BUF"), &int(0), &int(0), &name("X")])]);
-    assert!(matches!(Interpreter::new().load(&mut m, &dsdt(&none)), Err(Error::Rule(_))));
+    assert!(matches!(Interpreter::new().load_bytes(&mut m, &dsdt(&none)), Err(Error::Rule(_))));
 }
 
 #[test]

@@ -4182,8 +4182,19 @@ name = "toyos-abi"
 version = "0.16.0"
 
 [[package]]
+name = "toyos-acpi"
+version = "0.1.0"
+dependencies = [
+ "toyos-abi",
+ "toyos-bootmap",
+]
+
+[[package]]
 name = "toyos-aml"
 version = "0.1.0"
+dependencies = [
+ "toyos-acpi",
+]
 
 [[package]]
 name = "toyos-blockhold"
@@ -4195,6 +4206,13 @@ version = "0.1.0"
 dependencies = [
  "toyos-blockhold",
  "toyos-transport",
+]
+
+[[package]]
+name = "toyos-bootmap"
+version = "0.1.0"
+dependencies = [
+ "toyos-abi",
 ]
 
 [[package]]
