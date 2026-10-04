@@ -202,7 +202,7 @@ impl core::fmt::Display for At {
     }
 }
 
-fn log_kernel(addr: u64,lookup: impl FnOnce(&SymbolTable) -> Option<(&str, u64)>) -> Option<u64> {
+fn log_kernel(addr: u64, lookup: impl FnOnce(&SymbolTable) -> Option<(&str, u64)>) -> Option<u64> {
     let ptr = KERNEL_SYMS.load(Ordering::Acquire);
     if ptr.is_null() {
         log!("    {:#x}", addr);

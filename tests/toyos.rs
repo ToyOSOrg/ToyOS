@@ -169,9 +169,8 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     // Its shared run is the x86-64 verdict; `virt_readonly_copyout` builds it
     // for AArch64 and runs it on that architecture's job case.
     "abuse_readonly_copyout",
-    // Its actuator-boot run is the T14's verdict; `x86_ring0_timer_in_syscall`
-    // and `virt_ring0_timer_in_syscall` drive it in guests of both
-    // architectures.
+    // Its actuator-boot run is the T14's verdict; `virt_ring0_timer_in_syscall`
+    // builds it for AArch64 and runs it on that architecture's job case.
     "ring0_timer_in_syscall",
     // Its shared run asserts every arm's kill; `crash_report_reads_no_kernel_memory`
     // reads what the kernel said of two of them.
@@ -236,13 +235,6 @@ const MACHINE_TESTS: &[&str] = &[
     // no way to turn it back on, so only a machine QEMU reports stopping can
     // be asked. `machine_soft_off_decoded` reads the T14's own decode.
     "machine_shutdown",
-    // A `mask-windows` kernel's bookkeeping on x86-64, where a syscall's body
-    // opens interrupts: `virt_mask_windows` reads AArch64's alone, and the
-    // T14's `mask_windows` row is in no CI.
-    "x86_mask_windows",
-    // The timer's interrupt inside a syscall's body on x86-64: the shared
-    // boots that also run it are the T14's alone.
-    "x86_ring0_timer_in_syscall",
 ];
 
 /// **The metal profile**: which registrations run on the ThinkPad T14, what
@@ -1537,8 +1529,7 @@ fn check_colors(
 /// `test_rs_abuse_readonly_copyout`.
 const VIRT_COPYOUT: &str = "abuse_readonly_copyout";
 
-/// The same for its job `test_rs_ring0_timer_in_syscall`, which
-/// `x86_ring0_timer_in_syscall` stages on x86-64.
+/// The same for its job `test_rs_ring0_timer_in_syscall`.
 const VIRT_RING0_TIMER: &str = "ring0_timer_in_syscall";
 
 /// `tests/toyos-rust-tests`' binary that `tests/virtsmpcase` runs as its job
@@ -1655,69 +1646,6 @@ fn virt_mask_windows(profile: qemu::Profile) -> Result<(), String> {
     // To the boot's last word, said after every census and its windows: the drain that took the job's end can stop between the two.
     await_marker(&mut qemu, &mut serial, power::SHUTTING_DOWN, "the boot's last word")?;
     mask_windows(&serial, VIRT_CPUS)
-}
-
-/// The windows on x86-64: `tests/testcases` on a `mask-windows` kernel under
-/// [`WINDOWS_LOAD`], judged on the whole console once the boot has said its
-/// last word. Its verdict is bookkeeping and not a duration: an `IF` change no
-/// hook saw, or a lock an interrupt handler took, panics the kernel.
-fn x86_mask_windows(test_config: &Path) -> Result<(), String> {
-    let profile = qemu::Profile::Headless;
-    let herd = WINDOWS_LOAD.strip_prefix("test_rs_").expect("a suite binary's job name");
-    let mut qemu = QemuInstance::boot_with_options(
-        test_config,
-        &[],
-        &[],
-        BootOptions {
-            profile,
-            kernel_features: toyos_build::build::MASK_WINDOWS_KERNEL,
-            extra_root_files: vec![suite_bin(profile.arch(), herd)],
-            ..Default::default()
-        },
-    );
-    let mut serial = qemu.boot_log().to_string();
-    run_job(&mut qemu, &mut serial, WINDOWS_LOAD)?;
-    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
-    qemu.flush_stdin();
-    // To the boot's last word, said after every census and its windows.
-    await_marker(&mut qemu, &mut serial, power::SHUTTING_DOWN, "the boot's last word")?;
-    mask_windows(&serial, BootOptions::default().smp)
-}
-
-/// `job` run on an x86-64 guest's runner, to its exit 0, everything the
-/// console said meanwhile added to `serial`.
-fn run_job(qemu: &mut QemuInstance, serial: &mut String, job: &str) -> Result<(), String> {
-    writeln!(qemu.stdin_mut(), "run {job}").expect("write to QEMU stdin");
-    qemu.flush_stdin();
-    await_marker(qemu, serial, &format!("===TEST_END {job} "), &format!("the job {job} to end"))?;
-    if !serial.contains(&format!("===TEST_END {job} exit=0===")) {
-        return Err(format!("{job} did not exit 0\nserial:\n{serial}"));
-    }
-    Ok(())
-}
-
-/// `test_rs_ring0_timer_in_syscall` on an x86-64 guest of the kernel that
-/// carries `SYS_DEBUG`, where the binary itself is the verdict.
-fn x86_ring0_timer_in_syscall(test_config: &Path) -> Result<(), String> {
-    let profile = qemu::Profile::Headless;
-    let mut qemu = QemuInstance::boot_with_options(
-        test_config,
-        &[],
-        &[],
-        BootOptions {
-            profile,
-            kernel_features: ACTUATOR_KERNEL,
-            extra_root_files: vec![suite_bin(profile.arch(), VIRT_RING0_TIMER)],
-            ..Default::default()
-        },
-    );
-    let mut serial = qemu.boot_log().to_string();
-    run_job(&mut qemu, &mut serial, &format!("test_rs_{VIRT_RING0_TIMER}"))?;
-    match serial.lines().find(|l| l.contains("ring0_timer_in_syscall: ")) {
-        Some(said) => eprintln!("  [x86] {}", said.trim()),
-        None => return Err(format!("the binary said nothing\nserial:\n{serial}")),
-    }
-    Ok(())
 }
 
 /// Boot `tests/virtsmpcase` as `options` say.
@@ -2602,8 +2530,6 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "iommu_virtio_platform" => common::iommu::iommu_virtio_platform(test_config),
         "nested_nmi_is_loud" => faults::nested_nmi_is_loud(test_config),
         "machine_shutdown" => power::machine_shutdown(test_config),
-        "x86_mask_windows" => x86_mask_windows(test_config),
-        "x86_ring0_timer_in_syscall" => x86_ring0_timer_in_syscall(test_config),
         other => Err(format!("unknown machine test {other}")),
     }
 }

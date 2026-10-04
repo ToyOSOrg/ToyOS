@@ -184,12 +184,6 @@ pub fn start() {
     log!("{}", crate::hardlockup::start(ms));
 }
 
-/// Whether this machine's bound has passed; the timer interrupt entry's, in
-/// both rings, and nothing else's.
-///
-/// **One relaxed load in the callee on the unarmed path.** The Ring 0 call site
-/// pays a caller-saved prologue on every tick of every CPU armed or not, and
-/// that cost is the entry's rather than this function's.
 pub fn poll() {
     past(AT_TSC.load(Relaxed))
 }
