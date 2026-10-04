@@ -208,6 +208,13 @@ pub fn compiler_shared(root: &Path, what: &str) -> Guard {
     acquire(&git_lock_dir(root), LOCK_SH, what, BUILD)
 }
 
+/// The global lock exclusively: what the primary holds, inside its worktree
+/// lock held exclusively, while it moves its fork checkout, which every
+/// worktree's compiler is built from.
+pub fn global_exclusive(root: &Path, what: &str) -> Guard {
+    acquire(&git_lock_dir(root), LOCK_EX, what, BUILD)
+}
+
 /// Exclusive lock over the shared cargo artifact paths.
 ///
 /// Cargo keys an artifact path on (crate, target, profile) and nothing else, so

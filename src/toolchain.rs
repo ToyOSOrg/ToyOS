@@ -560,6 +560,8 @@ pub fn ensure(root: &Path, lock: &mut buildlock::Held, hosted_rustc: bool) -> Sy
         Owner::Us => {}
     }
 
+    // The bootstrap decides from the `compiler/` this tree pins.
+    sysroot::fork_checkout(root, lock);
     let hosted_stamp = stamps_dir.join("hosted-rustc.stamp");
     lock.act_if(
         Scope::Global,
