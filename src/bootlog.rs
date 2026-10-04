@@ -379,20 +379,23 @@ pub const LOADER_CLOCK_STATED: &str =
 pub const LOADER_CLOCK_NONE: &str =
     "Loader clock: this CPU states no counter rate, so no line carries the time it was said";
 
-/// The kernel's record of starting the first program.
-pub const SUPERVISOR_SPAWN: &str = "spawn: /system/bin/supervisor ";
+/// The kernel's record of starting `logkeeper`, which every boot does, and the
+/// supervisor's line once that spawn has returned to it.
+pub const LOGKEEPER_SPAWN: &str = "spawn: /system/bin/logkeeper ";
+pub const LOGKEEPER_STARTED: &str = "supervisor: started logkeeper";
 
 /// Whether the loader's lines, the kernel's records and a program's lines
 /// count from one zero: no timed kernel record is earlier than the loader's
-/// last timed line before the handoff, and the supervisor's first line is no
-/// earlier than the kernel's record of spawning it. A clock that kept another
-/// zero puts one of them before what caused it.
+/// last timed line before the handoff, and the supervisor's
+/// [`LOGKEEPER_STARTED`] is no earlier than the kernel's [`LOGKEEPER_SPAWN`],
+/// which the same spawn call writes milliseconds before. A clock that kept
+/// another zero puts one of them before what caused it.
 ///
 /// `loader` holds the pass that handed the machine to the kernel; `log` holds
 /// the kernel's records and the programs' lines, and may hold the loader's
 /// too, as a console does. Nothing to compare is a refusal wherever the boot
 /// owes it: a loader that states a rate owes timed lines, and a boot that
-/// reached [`COMPLETE`] owes the spawn and the supervisor's line.
+/// reached [`COMPLETE`] owes the spawn record and the supervisor's line.
 pub fn one_clock(loader: &str, log: &str) -> Result<(), String> {
     use toyos_logstream::{parse, Source};
     let handed = loader
@@ -423,18 +426,22 @@ pub fn one_clock(loader: &str, log: &str) -> Result<(), String> {
             ));
         }
     }
-    let spawned = log.lines().find(|l| l.contains(SUPERVISOR_SPAWN)).and_then(record_millis);
-    let said = log.lines().filter_map(parse).find(|p| p.source == Source::Program("supervisor")).and_then(|p| p.ms);
+    let spawned = log.lines().find(|l| message(l).is_some_and(|m| m.starts_with(LOGKEEPER_SPAWN))).and_then(record_millis);
+    let said = log
+        .lines()
+        .filter_map(parse)
+        .find(|p| p.source == Source::Program("supervisor") && p.text == LOGKEEPER_STARTED)
+        .and_then(|p| p.ms);
     let complete = log.lines().any(|l| message(l).is_some_and(|m| m.starts_with(COMPLETE)));
     match (spawned, said) {
         (Some(spawned), Some(said)) if said < spawned => Err(format!(
-            "the supervisor's first line reads {said} ms and the kernel's record of spawning it {spawned} ms"
+            "the supervisor's {LOGKEEPER_STARTED:?} reads {said} ms and the kernel's record of that spawn {spawned} ms"
         )),
         (Some(_), Some(_)) => Ok(()),
         (spawned, said) if complete => Err(format!(
             "the boot reached {COMPLETE:?} with {} and {}",
-            if spawned.is_some() { "a timed spawn record" } else { "no timed spawn record of the supervisor" },
-            if said.is_some() { "a timed supervisor line" } else { "no timed supervisor line" },
+            if spawned.is_some() { "a timed spawn record of logkeeper" } else { "no timed spawn record of logkeeper" },
+            if said.is_some() { "a timed supervisor line saying so" } else { "no timed supervisor line saying so" },
         )),
         _ => Ok(()),
     }

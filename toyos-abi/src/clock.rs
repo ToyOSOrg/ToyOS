@@ -35,6 +35,14 @@ pub struct ClockPage {
     pub stamp_at_boot: u64,
 }
 
+impl ClockPage {
+    /// A counter reading as a log line's time: nanoseconds since the counter's
+    /// zero, on the kernel's formula.
+    pub const fn stamp_of(&self, counter: u64) -> u64 {
+        self.stamp_at_boot.saturating_add(nanos_between(self.counter_at_boot, self.period_fs, counter))
+    }
+}
+
 /// Nanoseconds between `counter_at_boot` and `now`, on the kernel's formula.
 ///
 /// Saturating below boot: a counter read on a CPU that trails reads as the
@@ -61,9 +69,7 @@ pub fn nanos_since_boot() -> u64 {
 /// # Panics
 /// As [`page`].
 pub fn stamp_ns() -> u64 {
-    let page = page();
-    let now = crate::arch::counter();
-    page.stamp_at_boot.saturating_add(nanos_between(page.counter_at_boot, page.period_fs, now))
+    page().stamp_of(crate::arch::counter())
 }
 
 /// This process's clock page.

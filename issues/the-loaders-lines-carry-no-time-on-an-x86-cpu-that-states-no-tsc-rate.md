@@ -30,10 +30,10 @@ A second rate source is the fix, and the choice of one is open: the
 `EFI_TIMESTAMP_PROTOCOL`'s stated frequency, the ACPI PM timer or the HPET, each
 a calibration the loader then pays for before its first timed line.
 
-Until then no guest test sees a time on the screen: `screen_loader_clears`
-(`tests/toyos.rs`) measures the screen's first line, head and all, and on every
-x86 guest that head reads `--.---`. The fix is where that test starts asserting
-a time in it.
+Until then no guest test asserts a time on the screen: `screen_loader_clears`
+(`tests/toyos.rs`) measures the screen's first line, head and all, whose head
+reads `--.---` under `qemu64` and whatever the runner's CPU states under
+`-cpu host`. The fix is where that test starts asserting a time in it.
 
 Exit: a loader line and a kernel record written before `clock: HPET at …` carry
 their time on an x86-64 CPU that states neither leaf 15H's ratio nor leaf 16H's
