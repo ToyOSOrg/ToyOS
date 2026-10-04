@@ -13,9 +13,10 @@
 //!   streams a child's output into it, and the bytes are read back here;
 //! - last, it opens more connections than any one instance may have waiting
 //!   on their hello: the ones past its share are answered `ResourceExhausted`
-//!   and let go as the server takes them, so a client connecting then is told
-//!   so, and the first to end is not the first opened, which the server would
-//!   otherwise let go first, at its handshake timeout. Last, because the
+//!   and let go as the server takes them, so the first to end is not the
+//!   first opened, which the server would otherwise let go first, at its
+//!   handshake timeout; that one reads why, and so does a client std connects
+//!   while the share is held. Last, because the
 //!   server reaps the ones this job drops only when it next reads them, and
 //!   until then they are this instance's share.
 
@@ -129,10 +130,6 @@ fn main() {
     // Connections that never say hello.
     let opened: Vec<Connection> =
         (0..UNANSWERED).map(|_| names.open("fs:/home").expect("connect to /home")).collect();
-    match Dir::connect(names, "fs:/home") {
-        Err(SyscallError::ResourceExhausted) => println!("  a client past the handshake share is told so"),
-        other => red.push(format!("a client past the handshake share was answered {:?}", other.map(|_| ()))),
-    }
     let poller = Poller::new(UNANSWERED as u32);
     for (i, conn) in opened.iter().enumerate() {
         poller.watch(conn, READABLE, i as u64);
@@ -144,6 +141,24 @@ fn main() {
         None => red.push(format!("none of {UNANSWERED} unanswered connections ended")),
         Some(0) => red.push(format!("the first unanswered connection ended first, with {ended:?}")),
         Some(_) => println!("  unanswered connections past the share ended first: {ended:?}"),
+    }
+    if let Some(&first) = ended.first() {
+        let conn = &opened[first];
+        let said = conn.recv_header().map_err(|e| format!("{e:?}")).and_then(|h| {
+            let reply: Reply = conn.recv_payload(&h).map_err(|e| format!("{e:?}"))?;
+            Ok((h.msg_type, SyscallError::from_u64(reply.status)))
+        });
+        match said {
+            Ok((REPLY, Some(SyscallError::ResourceExhausted))) => println!("  a connection let go was told why"),
+            other => red.push(format!("connection {first} was let go saying {other:?}")),
+        }
+    }
+    // Only once the server has let one go, so it has taken at least its share
+    // and one more: a port whose queue is full refuses a connect
+    // `ResourceExhausted` itself.
+    match Dir::connect(names, "fs:/home") {
+        Err(SyscallError::ResourceExhausted) => println!("  a client past the handshake share is told so"),
+        other => red.push(format!("a client past the handshake share was answered {:?}", other.map(|_| ()))),
     }
 
     assert!(red.is_empty(), "fs_share:\n  {}", red.join("\n  "));
