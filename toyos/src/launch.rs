@@ -24,6 +24,12 @@
 use crate::ipc::{Connection, IpcError};
 use crate::RawHandle;
 
+/// The label a holder is endowed its launcher under, and the one name in that
+/// namespace. **Never an entry of `svc`**, which std hands every direct spawn:
+/// a launcher carries its holder's row and session as a badge, and a program
+/// passes it on only by endowing it ([`crate::endow::launcher`]).
+pub const LAUNCHER: &str = "launcher";
+
 /// Ask the supervisor to start a program. Carries the request blob below; the stdio
 /// handles and the extra connectors travel in the batch beside it.
 pub const MSG_LAUNCH: u32 = 1;

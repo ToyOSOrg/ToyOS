@@ -2,9 +2,15 @@
 //! connection queue. Both ends are created together before either process
 //! runs, so a client's first connect always has something to reach — never a
 //! name that is not yet bound, so nothing to retry and no timeout.
+//!
+//! **The kernel vouches for what the acceptor's holder granted, never for who
+//! connected.** The holder mints a connector carrying bytes it chose
+//! ([`Acceptor::mint`]); a connection made through it is stamped with them and
+//! the port, and only that port's acceptor reads the stamp back.
 
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::pipe::{PipeReader, PipeWriter};
 use crate::sync::Lock;
@@ -22,7 +28,20 @@ pub struct PendingConnection {
     pub tx: PipeWriter,
     pub inbox: Arc<HandleQueue>,
     pub outbox: Arc<HandleQueue>,
+    /// [`Connector::stamp`] of the connector the client connected through.
+    pub stamp: Stamp,
 }
+
+/// What an accepted connection keeps of the connector it was made through.
+#[derive(Clone)]
+pub struct Stamp {
+    /// The port's never-repeating id, which the acceptor asking for the badge must match.
+    pub port: u64,
+    pub badge: Option<Arc<[u8]>>,
+}
+
+/// Never repeats, so a stamp outlives its port without ever naming another one.
+static NEXT_PORT: AtomicU64 = AtomicU64::new(1);
 
 /// `closed` and `pending` share one lock: checking `closed` and pushing must not
 /// interleave, or a connection queues after nothing will ever drain it again.
@@ -33,6 +52,7 @@ struct PortQueue {
 
 /// Everything the two ends share; neither end holds the other, so no `Arc` cycle exists.
 pub struct PortShared {
+    id: u64,
     queue: Lock<PortQueue>,
     /// Lives on the port, not either end: a client's connect must complete a
     /// poll the server registered on the `Acceptor`. An `Arc` so a poll
@@ -48,6 +68,8 @@ pub struct Acceptor {
 pub struct Connector {
     pub(super) core: ObjectCore,
     shared: Arc<PortShared>,
+    /// Immutable for the object's life: a duplicate is another handle to this object.
+    badge: Option<Arc<[u8]>>,
 }
 
 /// Why a connection was not queued.
@@ -59,12 +81,13 @@ pub enum PushError {
 
 pub fn create() -> (Arc<Acceptor>, Arc<Connector>) {
     let shared = Arc::new(PortShared {
+        id: NEXT_PORT.fetch_add(1, Ordering::Relaxed),
         queue: Lock::new(PortQueue { closed: false, pending: VecDeque::new() }),
         watch: Arc::new(Watch::new()),
     });
     (
         Arc::new(Acceptor { core: Acceptor::new_core(), shared: shared.clone() }),
-        Arc::new(Connector { core: Connector::new_core(), shared }),
+        Arc::new(Connector { core: Connector::new_core(), shared, badge: None }),
     )
 }
 
@@ -99,6 +122,15 @@ impl Acceptor {
     pub fn watch(&self) -> &Arc<Watch> {
         self.shared.watch()
     }
+
+    pub fn port_id(&self) -> u64 {
+        self.shared.id
+    }
+
+    /// A connector to this port whose every connection is stamped with `badge`.
+    pub fn mint(&self, badge: Arc<[u8]>) -> Arc<Connector> {
+        Arc::new(Connector { core: Connector::new_core(), shared: self.shared.clone(), badge: Some(badge) })
+    }
 }
 
 impl Connector {
@@ -121,6 +153,11 @@ impl Connector {
 
     pub fn port(&self) -> Arc<PortShared> {
         self.shared.clone()
+    }
+
+    /// What a connection made through this connector is stamped with.
+    pub fn stamp(&self) -> Stamp {
+        Stamp { port: self.shared.id, badge: self.badge.clone() }
     }
 }
 

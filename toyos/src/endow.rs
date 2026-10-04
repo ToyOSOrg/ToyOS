@@ -144,6 +144,14 @@ pub fn namespace() -> Option<&'static Namespace> {
     NAMESPACE.get().as_ref()
 }
 
+/// The namespace holding the supervisor's `launcher` this process was endowed
+/// under [`crate::launch::LAUNCHER`], or `None`. Borrowed, as [`namespace`] is:
+/// std opens it for every launch, and a parent that hands it on endows a
+/// duplicate.
+pub fn launcher() -> Option<&'static Namespace> {
+    LAUNCHER.get().as_ref()
+}
+
 /// This process's handle to itself, which it hands on for a child to be
 /// placed under it: `WRITE`, `DUP` and `TRANSFER`, from the kernel, under
 /// [`SELF_LABEL`]. Borrowed rather than taken, as the namespace is: every
@@ -299,10 +307,12 @@ impl<T> Once<T> {
 
 static TABLE: EndowTable = EndowTable(Once::new());
 static NAMESPACE: NamespaceCell = NamespaceCell(Once::new());
+static LAUNCHER: LauncherCell = LauncherCell(Once::new());
 static THIS_PROCESS: ProcessCell = ProcessCell(Once::new());
 
 struct EndowTable(Once<Endowments>);
 struct NamespaceCell(Once<Option<Namespace>>);
+struct LauncherCell(Once<Option<Namespace>>);
 struct ProcessCell(Once<Process>);
 
 impl EndowTable {
@@ -314,6 +324,12 @@ impl EndowTable {
 impl NamespaceCell {
     fn get(&'static self) -> &'static Option<Namespace> {
         self.0.get_or_init(|| Endowments::get().take::<Namespace>(SVC_LABEL))
+    }
+}
+
+impl LauncherCell {
+    fn get(&'static self) -> &'static Option<Namespace> {
+        self.0.get_or_init(|| Endowments::get().take::<Namespace>(crate::launch::LAUNCHER))
     }
 }
 

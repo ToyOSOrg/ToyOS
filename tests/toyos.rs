@@ -114,6 +114,13 @@ const RUST_SKIP: &[&str] = &[
     // `tests/testcases` does not give: the `launch_toctou` metal row runs it on
     // tests/proctreecase.
     "launch_toctou",
+    // Needs a launcher whose row lists `swap` and `update` and not `proctest`,
+    // and a shell that opens a login session: the `launch_authority` metal row
+    // runs it on tests/proctreecase.
+    "launch_authority",
+    // A kernel primitive with no use for any one boot's devices: the
+    // `port_badge` metal row runs it on tests/proctreecase.
+    "port_badge",
     // It asserts nothing at all: it holds a `tests/lanleasecase` boot open for
     // twenty seconds. On a shared boot it would be twenty seconds of nothing.
     "lan_hold",
@@ -638,6 +645,18 @@ const METAL: &[(&str, metal::Metal)] = &[
         "launch_toctou",
         metal::Metal { arms: PROCTREECASE, judge: |b| b[0].job_passed("test_rs_launch_toctou") },
     ),
+    (
+        // A launch starts only what the caller's row lists, and `swap` and
+        // `update` only in a login session.
+        "launch_authority",
+        metal::Metal { arms: PROCTREECASE, judge: |b| launch_authority(b[0]) },
+    ),
+    (
+        // A connection's badge is the minted bytes, read back by its own
+        // port's acceptor alone.
+        "port_badge",
+        metal::Metal { arms: PROCTREECASE, judge: |b| b[0].job_passed("test_rs_port_badge") },
+    ),
     // ---- one image: tests/metalcase ----
     (
         "metal_sim_scanout_wc",
@@ -862,12 +881,13 @@ const USB_RESET_BOOTS: &[metal::Arm] = &[
 const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/metalcase", &[], &[])];
 
 /// A launcher and a declared `cat` and shell, which `process_tree`'s subtree
-/// launches, and a `toybox` row holding `roster`, which `launch_toctou` races.
+/// launches, a `toybox` row holding `roster`, which `launch_toctou` races, and
+/// the rows `launch_authority` is refused and started.
 const PROCTREECASE: &[metal::Arm] = &[metal::once(
     "proctreecase",
     "tests/proctreecase",
     &[],
-    &["test_rs_process_tree", "test_rs_launch_toctou"],
+    &["test_rs_process_tree", "test_rs_launch_toctou", "test_rs_launch_authority", "test_rs_port_badge"],
 )];
 
 /// netstack in front of the T14's I219 with its lease probe armed: netstack's exit code
@@ -2802,6 +2822,28 @@ fn process_tree(back: &metal::Readback) -> Result<(), String> {
     let refused: Vec<&str> = log.lines().filter(|l| l.contains("spawn: refused under pid ")).collect();
     if refused.len() != 1 || !refused[0].contains("at depth 65, more than 64 below the supervisor") {
         return Err(format!("the kernel's depth refusals were {refused:?}, not one naming depth 65"));
+    }
+    Ok(())
+}
+
+/// `launch_authority` passed, and the supervisor refused each launch for its
+/// own reason: `proctest` as unlisted, `swap` and `update` as outside a login
+/// session, for test-runner and for the toybox it launched. The guest sees
+/// only that each was refused.
+fn launch_authority(back: &metal::Readback) -> Result<(), String> {
+    use toyos_manifest::launch::{refused, Refusal, Session};
+    back.job_passed("test_rs_launch_authority")?;
+    let log = back.log();
+    for (caller, target, why) in [
+        ("test-runner", "proctest", Refusal::NotListed),
+        ("test-runner", "swap", Refusal::OutsideLogin),
+        ("test-runner", "update", Refusal::OutsideLogin),
+        ("toybox", "swap", Refusal::OutsideLogin),
+    ] {
+        let line = refused(caller, Session::Machine, target, why);
+        if !log.text().lines().any(|l| l.contains(&line)) {
+            return Err(format!("the supervisor never said `{line}`\n{}", log.text()));
+        }
     }
     Ok(())
 }
