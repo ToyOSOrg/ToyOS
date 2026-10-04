@@ -150,14 +150,18 @@ fn write_all(out: &mut (impl Write + AsFd), mut bytes: &[u8]) -> io::Result<()> 
 
 /// Wait until `fd` takes a write. Unbounded, as a blocking write is: a
 /// terminal its user has stopped takes one when the user lets it.
+///
+/// Any answer but `POLLOUT` is an error, never a retry: a `POLLNVAL` or
+/// `POLLERR` comes back at once, and retrying it would spin.
 fn writable(fd: BorrowedFd<'_>) -> io::Result<()> {
     let mut ready = libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLOUT, revents: 0 };
     // SAFETY: one `pollfd`, which lives across the call.
     if unsafe { libc::poll(&mut ready, 1, -1) } < 0 {
         let e = io::Error::last_os_error();
-        if e.kind() != io::ErrorKind::Interrupted {
-            return Err(e);
-        }
+        return if e.kind() == io::ErrorKind::Interrupted { Ok(()) } else { Err(e) };
+    }
+    if ready.revents != libc::POLLOUT {
+        return Err(io::Error::other(format!("poll answered {:#x} for a terminal, not POLLOUT", ready.revents)));
     }
     Ok(())
 }
@@ -165,6 +169,7 @@ fn writable(fd: BorrowedFd<'_>) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::fd::FromRawFd;
 
     /// QEMU 11.1.1's own edk2 on the virtio port, as a boot put it there: the
     /// screen clears, `BdsDxe` and the loader, and the loader's last line cut
@@ -270,14 +275,14 @@ mod tests {
         }
     }
 
-    /// A pipe that refuses a write as `WouldBlock` once it is full, and says so
+    /// A descriptor that refuses a write as `WouldBlock` once it is full, and says so
     /// the first time it does.
-    struct Refusing {
-        pipe: std::io::PipeWriter,
+    struct Refusing<W> {
+        pipe: W,
         refused: Option<std::sync::mpsc::Sender<()>>,
     }
 
-    impl Write for Refusing {
+    impl<W: Write> Write for Refusing<W> {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
             let wrote = self.pipe.write(bytes);
             if wrote.as_ref().is_err_and(|e| e.kind() == io::ErrorKind::WouldBlock) {
@@ -291,17 +296,15 @@ mod tests {
         }
     }
 
-    impl AsFd for Refusing {
+    impl<W: AsFd> AsFd for Refusing<W> {
         fn as_fd(&self) -> BorrowedFd<'_> {
             self.pipe.as_fd()
         }
     }
 
-    /// **A terminal that refuses a write as `WouldBlock` is waited for, and
-    /// shown every byte in order**: a burst far past a pipe's capacity into a
-    /// non-blocking pipe nobody reads until it has refused one.
-    #[test]
-    fn a_relay_waits_out_a_terminal_that_would_block() {
+    /// A burst of kernel lines far past any terminal's capacity, and what a
+    /// [`Painter`] shows of it.
+    fn burst() -> (Vec<u8>, Vec<u8>) {
         let mut stream = String::from(FIRMWARE);
         for n in 0..20_000 {
             stream.push_str(&format!("[kernel 1.{:03} cpu{} alert tid=3] frame {n}: kernel::panic\n", n % 1000, n % 8));
@@ -311,15 +314,26 @@ mod tests {
         let mut painter = Painter::default();
         let mut want = painter.pass(stream.as_bytes());
         want.extend(painter.finish());
+        (stream.into_bytes(), want)
+    }
 
-        let (mut reader, pipe) = std::io::pipe().expect("a pipe");
-        // SAFETY: `pipe` is an open descriptor this test owns.
-        let flags = unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_GETFL) };
+    fn non_blocking(fd: BorrowedFd<'_>) {
+        // SAFETY: `fd` is open for the call.
+        let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
         // SAFETY: as above; the flags are its own and `O_NONBLOCK`.
-        assert!(flags >= 0 && unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } == 0);
+        assert!(flags >= 0 && unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } == 0);
+    }
+
+    /// **A terminal that refuses a write as `WouldBlock` is waited for, and
+    /// shown every byte in order**: a burst far past a pipe's capacity into a
+    /// non-blocking pipe nobody reads until it has refused one.
+    #[test]
+    fn a_relay_waits_out_a_pipe_that_would_block() {
+        let (console, want) = burst();
+        let (mut reader, pipe) = std::io::pipe().expect("a pipe");
+        non_blocking(pipe.as_fd());
         let (said, refused) = std::sync::mpsc::channel();
         let mut terminal = Refusing { pipe, refused: Some(said) };
-        let console = stream.into_bytes();
         let relay = std::thread::spawn(move || relay(console.as_slice(), &mut terminal));
 
         refused.recv_timeout(std::time::Duration::from_secs(60)).expect("the pipe never refused a write");
@@ -328,6 +342,49 @@ mod tests {
         relay.join().expect("the relay").expect("the relay wrote everything");
         assert!(shown.len() > 1 << 20, "{} bytes is no burst", shown.len());
         assert!(shown == want, "the terminal was shown {} bytes, not the {} painted", shown.len(), want.len());
+    }
+
+    /// **The same on a terminal device**, which is what the relay writes to in
+    /// use: a pty whose raw, non-blocking slave nobody reads until it has
+    /// refused a write. `writable` errs on any `poll` answer but `POLLOUT`, so
+    /// the relay's success is `poll` waiting on the device.
+    #[test]
+    fn a_relay_waits_out_a_pty_that_would_block() {
+        let (console, want) = burst();
+        let (mut master, mut slave) = (-1, -1);
+        // SAFETY: two out-pointers to live ints; no name, termios or size asked for.
+        let opened = unsafe {
+            libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut())
+        };
+        assert_eq!(opened, 0, "openpty: {}", io::Error::last_os_error());
+        // SAFETY: `openpty` returned both descriptors open and ours alone.
+        let (mut master, slave) =
+            unsafe { (std::fs::File::from_raw_fd(master), std::fs::File::from_raw_fd(slave)) };
+        // SAFETY: a zeroed termios is only a buffer `tcgetattr` fills.
+        let mut raw: libc::termios = unsafe { std::mem::zeroed() };
+        // SAFETY: `slave` is an open terminal and `raw` lives across both calls.
+        assert!(unsafe { libc::tcgetattr(slave.as_raw_fd(), &mut raw) } == 0);
+        // SAFETY: as above.
+        unsafe { libc::cfmakeraw(&mut raw) };
+        // SAFETY: as above.
+        assert!(unsafe { libc::tcsetattr(slave.as_raw_fd(), libc::TCSANOW, &raw) } == 0);
+        non_blocking(slave.as_fd());
+        let (said, refused) = std::sync::mpsc::channel();
+        let mut terminal = Refusing { pipe: slave, refused: Some(said) };
+        // The slave stays open until the master has read it all: the last close
+        // of a non-blocking slave discards what it still queues.
+        let relay = std::thread::spawn(move || (relay(console.as_slice(), &mut terminal), terminal));
+        let length = want.len();
+        let reader = std::thread::spawn(move || {
+            refused.recv_timeout(std::time::Duration::from_secs(60)).expect("the pty never refused a write");
+            let mut shown = vec![0; length];
+            master.read_exact(&mut shown).map(|()| shown)
+        });
+
+        let (wrote, _slave) = relay.join().expect("the relay");
+        wrote.expect("the relay wrote everything");
+        let shown = reader.join().expect("the reader").expect("the relay's output");
+        assert!(shown == want, "the terminal was shown other bytes than the {} painted", want.len());
     }
 
     #[test]
