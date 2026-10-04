@@ -79,7 +79,6 @@ impl ConnectionEnd {
         (HandleQueue::open(), HandleQueue::open())
     }
 
-    /// A client's end.
     pub fn new(
         rx: PipeReader,
         tx: PipeWriter,

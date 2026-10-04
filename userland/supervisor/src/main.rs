@@ -132,11 +132,9 @@ struct Pending {
     conn: Connection,
     rx: LaunchRx,
     since: Instant,
-    /// Which of the supervisor's two ports it came in on, which decides what its frame
+    /// Which of the supervisor's ports it came in on, which decides what its frame
     /// may ask for.
     port: Port,
-    /// Who asks, off the connection's badge: present exactly for [`Port::Launcher`].
-    caller: Option<Caller>,
 }
 
 /// A launch's caller: the row and session the badge on its connection names.
@@ -145,9 +143,9 @@ struct Caller {
     session: Session,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
 enum Port {
-    Launcher,
+    /// Who asks, off the connection's badge.
+    Launcher(Caller),
     Swap,
     Power,
 }
@@ -414,7 +412,6 @@ fn main() {
     let mut supervisor = Supervisor {
         system,
         launcher,
-        logins: 0,
         syscap: &syscap,
         acceptors,
         connectors,
@@ -516,8 +513,6 @@ struct Supervisor<'a> {
     system: &'static Manifest,
     /// What every launcher is minted on and every launch accepted from.
     launcher: Acceptor,
-    /// The login sessions opened so far: the last one's id.
-    logins: u64,
     syscap: &'a SysCap,
     /// The `serves` acceptors nobody has been started with yet, which a launch
     /// takes by move.
@@ -941,9 +936,9 @@ impl<'a> Supervisor<'a> {
 
             // Accept and the request are two events. Nothing is read here.
             for (token, acceptor, port) in [
-                (TOKEN_ACCEPTOR, &self.launcher, Port::Launcher),
-                (TOKEN_SWAP_ACCEPTOR, swap, Port::Swap),
-                (TOKEN_POWER_ACCEPTOR, power, Port::Power),
+                (TOKEN_ACCEPTOR, &self.launcher, (|s, c| s.caller(c).map(Port::Launcher)) as fn(&Self, &Connection) -> _),
+                (TOKEN_SWAP_ACCEPTOR, swap, |_, _| Ok(Port::Swap)),
+                (TOKEN_POWER_ACCEPTOR, power, |_, _| Ok(Port::Power)),
             ] {
                 if !ready.contains(&token) {
                     continue;
@@ -960,17 +955,14 @@ impl<'a> Supervisor<'a> {
                     );
                     continue;
                 }
-                let caller = match port {
-                    Port::Launcher => match self.caller(&conn) {
-                        Ok(caller) => Some(caller),
-                        Err(why) => {
-                            say!("supervisor: launcher: dropping client {} — {why}", conn.as_handle().0);
-                            continue;
-                        }
-                    },
-                    Port::Swap | Port::Power => None,
+                let port = match port(self, &conn) {
+                    Ok(port) => port,
+                    Err(why) => {
+                        say!("supervisor: launcher: dropping client {} — {why}", conn.as_handle().0);
+                        continue;
+                    }
                 };
-                pending.push(Pending { conn, rx: LaunchRx::new(), since: Instant::now(), port, caller });
+                pending.push(Pending { conn, rx: LaunchRx::new(), since: Instant::now(), port });
             }
 
             // `remove` rather than `swap_remove`: the entries after `i` shift
@@ -1005,9 +997,8 @@ impl<'a> Supervisor<'a> {
                     RxStep::Frame { msg_type, payload_len } => {
                         let p = pending.remove(i);
                         match p.port {
-                            Port::Launcher => {
-                                let caller = p.caller.as_ref().expect("a launcher connection is kept only with its caller");
-                                self.serve_launch(&p.conn, caller, msg_type, p.rx.payload(payload_len))
+                            Port::Launcher(caller) => {
+                                self.serve_launch(&p.conn, &caller, msg_type, p.rx.payload(payload_len))
                             }
                             Port::Power => self.stop(&p.conn, msg_type),
                             Port::Swap => {
@@ -1553,23 +1544,16 @@ impl Supervisor<'_> {
         // caller may start it is asked between the two, so a refused launch
         // reads no image and judges no directory.
         let (system, path) = (self.system, request.program.to_string());
-        let (row, session, opened) = (caller.row, caller.session, self.logins + 1);
+        let (row, session) = (caller.row, caller.session);
         let found = self.files("a launch's files", move || {
-            let resolved = resolve(system, &path);
-            let (target, path) = match &resolved {
-                Resolved::Row(program) => (Target::Row(program), &program.path),
-                Resolved::Package(program) => (Target::Package(program), &program.path),
-                Resolved::NotDeclared | Resolved::Refused(_) => return (resolved, None, Ok(command)),
-            };
-            let verdict = authority::may_start(row, session, target, || opened);
-            let prepared = match verdict {
-                Ok(_) => command.image_from(Path::new(path)).prepare().map(drop),
-                Err(_) => Ok(()),
-            };
-            let prepared = prepared.map(|()| command);
-            (resolved, Some(verdict), prepared)
+            resolve(system, &path, |target| -> Result<_, authority::Refusal> {
+                let session = authority::may_start(row, session, target)?;
+                let (Target::Row(program) | Target::Package(program)) = target;
+                let prepared = command.image_from(Path::new(&program.path)).prepare().map(drop);
+                Ok((session, prepared.map(|()| command)))
+            })
         });
-        let (resolved, verdict, prepared) = match found {
+        let resolved = match found {
             Ok(found) => found,
             Err(why) => {
                 say!("supervisor: launcher: {} was not resolved: {why}", request.program);
@@ -1577,11 +1561,11 @@ impl Supervisor<'_> {
                 return;
             }
         };
-        let program = match resolved {
-            Resolved::Row(row) => row,
-            Resolved::Package(row) => {
+        let (program, verdict) = match resolved {
+            Resolved::Row(row, verdict) => (row, verdict),
+            Resolved::Package(row, verdict) => {
                 installed = row;
-                &installed
+                (&installed, verdict)
             }
             Resolved::NotDeclared => {
                 // **`try_send_bytes` and not `send`.** A blocking write is the
@@ -1600,17 +1584,14 @@ impl Supervisor<'_> {
         };
         // **`MSG_REFUSED`, never `MSG_NOT_DECLARED`**: the latter is std's cue to
         // spawn the program itself.
-        let session = match verdict.expect("a resolved row is judged") {
-            Ok(session) => session,
+        let (session, prepared) = match verdict {
+            Ok(judged) => judged,
             Err(why) => {
                 say!("{}", authority::refused(&caller.row.name, caller.session, &program.name, why));
                 let _ = conn.try_signal(launch::MSG_REFUSED);
                 return;
             }
         };
-        if session == Session::Login(opened) {
-            self.logins = opened;
-        }
         let command = match prepared {
             Ok(command) => command,
             Err(e) => {
@@ -1715,11 +1696,11 @@ fn declared<'a>(system: &'a Manifest, path: &str) -> Option<&'a Program> {
     row(target.to_str()?)
 }
 
-/// What a launch's path resolves to.
-enum Resolved<'a> {
-    Row(&'a Program),
+/// What a launch's path resolves to, a row with `judge`'s verdict on it.
+enum Resolved<'a, V> {
+    Row(&'a Program, V),
     /// An installed package, whose row is the image's `[apps]` list.
-    Package(Program),
+    Package(Program, V),
     /// Nothing in the image declares it, and the caller spawns it itself.
     NotDeclared,
     /// A path under `/apps` whose package does not answer for it.
@@ -1739,13 +1720,13 @@ enum Resolved<'a> {
 /// A path under `/apps` that no manifest answers for is refused rather than
 /// answered undeclared, because the caller's fallback for undeclared is a
 /// direct spawn carrying the caller's own namespace.
-fn resolve<'a>(system: &'a Manifest, path: &str) -> Resolved<'a> {
+fn resolve<'a, V>(system: &'a Manifest, path: &str, judge: impl FnOnce(Target<'_>) -> V) -> Resolved<'a, V> {
     if !package::is_canonical(path) {
         return Resolved::Refused(format!("{path:?} is not a canonical path"));
     }
     let Some(name) = package::package_of(path) else {
         return match declared(system, path) {
-            Some(row) => Resolved::Row(row),
+            Some(row) => Resolved::Row(row, judge(Target::Row(row))),
             None => Resolved::NotDeclared,
         };
     };
@@ -1767,7 +1748,9 @@ fn resolve<'a>(system: &'a Manifest, path: &str) -> Resolved<'a> {
             installed.program
         ));
     }
-    Resolved::Package(system.app_row(name, path))
+    let row = system.app_row(name, path);
+    let verdict = judge(Target::Package(&row));
+    Resolved::Package(row, verdict)
 }
 
 /// The slot table's partition and the idle slot's two, claimed: the grant a

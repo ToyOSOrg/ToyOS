@@ -2,7 +2,8 @@
 //! port's acceptor.
 //!
 //! - A connection made through a minted connector carries its bytes, exactly,
-//!   and a connector [`MAX_BADGE`] long is the bound, not past it.
+//!   accepted by `SYS_ACCEPT` or by an inbox's `OP_ACCEPT`, and a connector
+//!   [`MAX_BADGE`] long is the bound, not past it.
 //! - A connection accepted on one port and asked of another port's acceptor is
 //!   refused: any process can make a port and mint any bytes on it, so this is
 //!   what a forged server end handed to a server meets.
@@ -11,12 +12,18 @@
 //! - A client's end is no accepted connection.
 //! - Minting takes `READ` on the acceptor, the right accepting takes.
 
+use core::sync::atomic::Ordering;
+
 use toyos::ipc::Connection;
 use toyos::namespace;
 use toyos::port::{self, Acceptor, Connector};
 use toyos::AsHandle;
 use toyos_abi::handle::Rights;
+use toyos_abi::inbox::{
+    Completion, RingHeader, Submission, COMPLETION_RING_OFF, OP_ACCEPT, SUBMISSIONS_OFF, SUBMISSION_RING_OFF,
+};
 use toyos_abi::syscall::{self, SyscallError, MAX_BADGE};
+use toyos_abi::RawHandle;
 
 const NAME: &str = "port";
 
@@ -39,8 +46,14 @@ fn main() {
             Err(SyscallError::PermissionDenied),
             "another port's acceptor read this port's stamp"
         );
+        let names = namespace::build().add(NAME, &minted).finish().expect("a namespace");
+        let _client = names.open(NAME).expect("connect");
+        let server = accept_through_inbox(&acceptor);
+        let len = syscall::port_badge(acceptor.as_handle(), server, &mut out);
+        assert_eq!(len.map(|len| &out[..len]), Ok(badge), "an inbox's accept lost the stamp");
+        syscall::close(server);
     }
-    println!("  a minted badge comes back exact on its own port, and on no other");
+    println!("  a minted badge comes back exact on its own port, through either accept, and on no other");
 
     let (unbadged_acceptor, unbadged) = port::create().expect("a third port");
     let (_client, server) = connect(&unbadged_acceptor, &unbadged);
@@ -65,6 +78,40 @@ fn main() {
     println!("  minting takes READ on the acceptor");
 
     println!("port_badge: PASS");
+}
+
+/// The server's end of the connection queued on `acceptor`, taken by an
+/// inbox's `OP_ACCEPT`.
+fn accept_through_inbox(acceptor: &Acceptor) -> RawHandle {
+    const DEPTH: u32 = 8;
+    // SAFETY: the rings are this process's own, mapped by the call and read
+    // only through the offsets the ABI defines.
+    let (inbox, base) = unsafe { syscall::inbox_setup(DEPTH) }.expect("inbox_setup");
+    let ring = unsafe { &*(base.add(SUBMISSION_RING_OFF as usize) as *const RingHeader) };
+    let head = ring.head.load(Ordering::Acquire);
+    let idx = (head & (DEPTH - 1)) as usize;
+    let submission = unsafe {
+        &mut *(base.add(SUBMISSIONS_OFF as usize + idx * core::mem::size_of::<Submission>()) as *mut Submission)
+    };
+    *submission = Submission { op: OP_ACCEPT, handle: acceptor.as_handle(), token: 0xACCE, ..Submission::default() };
+    ring.tail.store(head.wrapping_add(1), Ordering::Release);
+
+    assert_eq!(syscall::inbox_submit(inbox, 1, 1, 0), Ok(1), "the accept did not complete");
+    let cq = unsafe { &*(base.add(COMPLETION_RING_OFF as usize) as *const RingHeader) };
+    let ch = cq.head.load(Ordering::Acquire);
+    assert_ne!(ch, cq.tail.load(Ordering::Acquire), "no completion was posted");
+    let cidx = (ch & (cq.ring_size - 1)) as usize;
+    let completion = unsafe {
+        &*(base.add(
+            COMPLETION_RING_OFF as usize
+                + core::mem::size_of::<RingHeader>()
+                + cidx * core::mem::size_of::<Completion>(),
+        ) as *const Completion)
+    };
+    assert_eq!(completion.token, 0xACCE, "the completion is for another submission");
+    let handle = u32::try_from(completion.result).unwrap_or_else(|_| panic!("OP_ACCEPT refused: {}", completion.result));
+    syscall::close(inbox);
+    RawHandle(handle)
 }
 
 /// A connection through `connector`, and its end accepted on `acceptor`.

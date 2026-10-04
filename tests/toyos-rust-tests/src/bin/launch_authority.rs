@@ -9,23 +9,24 @@
 //! - `proctest`, which the row does not list, and `swap` and `update`, which
 //!   it lists and which start only in a login session: each is refused, and
 //!   nothing is spawned in its place;
-//! - a shell, whose row opens a login session, that detaches `swap`: it
-//!   starts there.
+//! - `toybox stats swap`: toybox's row lists `swap` and opens no session, so
+//!   it asks in the session it was launched in, the machine's, and is refused;
+//! - a shell, whose row opens a login session, running `toybox stats swap`:
+//!   toybox asks in that session, and `swap` starts.
+//!
+//! `stats` exits 1 when its command does not start, and 0 once it has run.
 //!
 //! And a child it spawns directly holds no launcher, under its label or in
 //! the namespace it inherits: the chain where any program a shell spawned
 //! could ask for `swap` is gone.
-//!
-//! Written against what the base it replaces had too, so the change reverted
-//! reds here and does not fail to build. Which refusal each refused launch
-//! got is in the supervisor's lines, which the metal judge reads.
 
 use std::process::{Command, Stdio};
 
 use toyos::endow::{self, EndowError, Endowments};
+use toyos::launch::LAUNCHER;
 
 const SELF_PATH: &str = "/system/bin/test_rs_launch_authority";
-const LAUNCHER: &str = "launcher";
+const STATS_SWAP: &str = "/system/bin/toybox stats /system/bin/swap";
 const CHILD: &str = "child";
 /// What the child exits with holding no launcher, and holding one.
 const HOLDS_NONE: i32 = 0;
@@ -58,14 +59,19 @@ fn test() {
         }
     }
 
-    // Piped, so the shell holds the input it hands what it detaches.
-    let detached = Command::new("/system/bin/shell")
-        .args(["-c", "detach /system/bin/swap"])
-        .stdin(Stdio::piped())
+    let from_machine = Command::new("/system/bin/toybox")
+        .args(["stats", "/system/bin/swap"])
         .output()
-        .expect("launch a shell");
-    if !detached.status.success() {
-        red.push(format!("swap did not start in a login session: {detached:?}"));
+        .expect("launch toybox as stats");
+    match from_machine.status.code() {
+        Some(1) => println!("  toybox in the machine's session: swap refused"),
+        _ => red.push(format!("toybox launched in the machine's session started swap: {from_machine:?}")),
+    }
+
+    let from_login = Command::new("/system/bin/shell").args(["-c", STATS_SWAP]).output().expect("launch a shell");
+    match from_login.status.code() {
+        Some(0) => println!("  toybox in a login session: swap started"),
+        _ => red.push(format!("toybox launched in a login session did not start swap: {from_login:?}")),
     }
 
     let child = Command::new(SELF_PATH).arg(CHILD).status().expect("spawn this binary as a child");

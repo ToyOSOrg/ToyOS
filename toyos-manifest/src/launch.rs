@@ -30,15 +30,15 @@ pub const APPS: &str = package::DIR;
 pub enum Session {
     /// A row the supervisor started at boot, and every launch made in it.
     Machine,
-    /// One a `login` row opened, by a never-repeating id.
-    Login(u64),
+    /// One a `login` row opened, and every launch made in it.
+    Login,
 }
 
 impl fmt::Display for Session {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Machine => f.write_str("the machine's session"),
-            Self::Login(id) => write!(f, "login session {id}"),
+            Self::Login => f.write_str("a login session"),
         }
     }
 }
@@ -54,19 +54,16 @@ pub struct Authority {
 const MACHINE: u8 = 0;
 const LOGIN: u8 = 1;
 
-const _: () = assert!(1 + 8 + MAX_PROGRAM_NAME <= MAX_BADGE, "an authority must fit one badge");
+const _: () = assert!(1 + MAX_PROGRAM_NAME <= MAX_BADGE, "an authority must fit one badge");
 
 impl Authority {
-    /// The session's kind, a login session's id, then the row's key.
+    /// The session's kind, then the row's key.
     pub fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(1 + 8 + self.row.len());
-        match self.session {
-            Session::Machine => out.push(MACHINE),
-            Session::Login(id) => {
-                out.push(LOGIN);
-                out.extend_from_slice(&id.to_le_bytes());
-            }
-        }
+        let mut out = Vec::with_capacity(1 + self.row.len());
+        out.push(match self.session {
+            Session::Machine => MACHINE,
+            Session::Login => LOGIN,
+        });
         out.extend_from_slice(self.row.as_bytes());
         out
     }
@@ -74,14 +71,12 @@ impl Authority {
     /// `None` for bytes [`Self::encode`] cannot have written.
     pub fn decode(bytes: &[u8]) -> Option<Self> {
         let (&kind, rest) = bytes.split_first()?;
-        let (session, row) = match kind {
-            MACHINE => (Session::Machine, rest),
-            LOGIN => {
-                let (id, row) = rest.split_first_chunk::<8>()?;
-                (Session::Login(u64::from_le_bytes(*id)), row)
-            }
+        let session = match kind {
+            MACHINE => Session::Machine,
+            LOGIN => Session::Login,
             _ => return None,
         };
+        let row = rest;
         if row.is_empty() || row.len() > MAX_PROGRAM_NAME {
             return None;
         }
@@ -114,14 +109,8 @@ impl fmt::Display for Refusal {
 }
 
 /// The session `target` starts in when `caller`, running in `session`, asks
-/// for it, or why it does not start. `open` names a new login session, and is
-/// called only for a listed target of a `login` caller.
-pub fn may_start(
-    caller: &Program,
-    session: Session,
-    target: Target<'_>,
-    open: impl FnOnce() -> u64,
-) -> Result<Session, Refusal> {
+/// for it, or why it does not start.
+pub fn may_start(caller: &Program, session: Session, target: Target<'_>) -> Result<Session, Refusal> {
     let (listed, program) = match target {
         Target::Row(row) => (row.name.as_str(), row),
         Target::Package(row) => (APPS, row),
@@ -130,10 +119,10 @@ pub fn may_start(
         return Err(Refusal::NotListed);
     }
     let session = match caller.login {
-        true => Session::Login(open()),
+        true => Session::Login,
         false => session,
     };
-    if program.login_only() && !matches!(session, Session::Login(_)) {
+    if program.login_only() && session != Session::Login {
         return Err(Refusal::OutsideLogin);
     }
     Ok(session)
@@ -173,44 +162,37 @@ mod tests {
     fn a_caller_starts_what_its_row_lists_and_swap_and_update_only_in_a_login_session() {
         let (ordinary, unlisted, own, package) = (row("ordinary"), row("unlisted"), caller(false), row("gbae"));
         let (swap, update) = (swap(), update());
-        let login = Session::Login(7);
-        let opened = Session::Login(9);
+        let (machine, login) = (Session::Machine, Session::Login);
         use Refusal::*;
         #[rustfmt::skip]
         let table: [(bool, Session, Target, Result<Session, Refusal>); 24] = [
-            (false, Session::Machine, Target::Row(&ordinary), Ok(Session::Machine)),
+            (false, machine, Target::Row(&ordinary), Ok(machine)),
             (false, login, Target::Row(&ordinary), Ok(login)),
-            (false, Session::Machine, Target::Row(&unlisted), Err(NotListed)),
+            (false, machine, Target::Row(&unlisted), Err(NotListed)),
             (false, login, Target::Row(&unlisted), Err(NotListed)),
-            (false, Session::Machine, Target::Row(&own), Ok(Session::Machine)),
+            (false, machine, Target::Row(&own), Ok(machine)),
             (false, login, Target::Row(&own), Ok(login)),
-            (false, Session::Machine, Target::Package(&package), Ok(Session::Machine)),
+            (false, machine, Target::Package(&package), Ok(machine)),
             (false, login, Target::Package(&package), Ok(login)),
-            (false, Session::Machine, Target::Row(&swap), Err(OutsideLogin)),
+            (false, machine, Target::Row(&swap), Err(OutsideLogin)),
             (false, login, Target::Row(&swap), Ok(login)),
-            (false, Session::Machine, Target::Row(&update), Err(OutsideLogin)),
+            (false, machine, Target::Row(&update), Err(OutsideLogin)),
             (false, login, Target::Row(&update), Ok(login)),
-            (true, Session::Machine, Target::Row(&ordinary), Ok(opened)),
-            (true, login, Target::Row(&ordinary), Ok(opened)),
-            (true, Session::Machine, Target::Row(&unlisted), Err(NotListed)),
+            (true, machine, Target::Row(&ordinary), Ok(login)),
+            (true, login, Target::Row(&ordinary), Ok(login)),
+            (true, machine, Target::Row(&unlisted), Err(NotListed)),
             (true, login, Target::Row(&unlisted), Err(NotListed)),
-            (true, Session::Machine, Target::Row(&own), Ok(opened)),
-            (true, login, Target::Row(&own), Ok(opened)),
-            (true, Session::Machine, Target::Package(&package), Ok(opened)),
-            (true, login, Target::Package(&package), Ok(opened)),
-            (true, Session::Machine, Target::Row(&swap), Ok(opened)),
-            (true, login, Target::Row(&swap), Ok(opened)),
-            (true, Session::Machine, Target::Row(&update), Ok(opened)),
-            (true, login, Target::Row(&update), Ok(opened)),
+            (true, machine, Target::Row(&own), Ok(login)),
+            (true, login, Target::Row(&own), Ok(login)),
+            (true, machine, Target::Package(&package), Ok(login)),
+            (true, login, Target::Package(&package), Ok(login)),
+            (true, machine, Target::Row(&swap), Ok(login)),
+            (true, login, Target::Row(&swap), Ok(login)),
+            (true, machine, Target::Row(&update), Ok(login)),
+            (true, login, Target::Row(&update), Ok(login)),
         ];
         for (i, (opens, session, target, want)) in table.into_iter().enumerate() {
-            let mut asked = false;
-            let got = may_start(&caller(opens), session, target, || {
-                asked = true;
-                9
-            });
-            assert_eq!(got, want, "row {i}");
-            assert_eq!(asked, opens && got.is_ok(), "row {i}: a login session opened for nothing");
+            assert_eq!(may_start(&caller(opens), session, target), want, "row {i}");
         }
     }
 
@@ -221,19 +203,19 @@ mod tests {
         let none = row("none");
         let (ordinary, package) = (row("ordinary"), row("gbae"));
         for target in [Target::Row(&ordinary), Target::Package(&package)] {
-            assert_eq!(may_start(&none, Session::Machine, target, || 1), Err(Refusal::NotListed));
+            assert_eq!(may_start(&none, Session::Machine, target), Err(Refusal::NotListed));
         }
         let apps_only = Program { starts: vec![APPS.into()], ..row("apps") };
-        assert_eq!(may_start(&apps_only, Session::Machine, Target::Row(&ordinary), || 1), Err(Refusal::NotListed));
-        assert_eq!(may_start(&apps_only, Session::Machine, Target::Package(&package), || 1), Ok(Session::Machine));
+        assert_eq!(may_start(&apps_only, Session::Machine, Target::Row(&ordinary)), Err(Refusal::NotListed));
+        assert_eq!(may_start(&apps_only, Session::Machine, Target::Package(&package)), Ok(Session::Machine));
     }
 
     #[test]
     fn an_authority_reads_back_as_written() {
         for authority in [
             Authority { row: "terminal".into(), session: Session::Machine },
-            Authority { row: "x".repeat(MAX_PROGRAM_NAME), session: Session::Login(u64::MAX) },
-            Authority { row: "sshserver".into(), session: Session::Login(1) },
+            Authority { row: "x".repeat(MAX_PROGRAM_NAME), session: Session::Login },
+            Authority { row: "s".into(), session: Session::Login },
         ] {
             let bytes = authority.encode();
             assert!(bytes.len() <= MAX_BADGE);
@@ -245,16 +227,15 @@ mod tests {
     /// authority reads back as it.
     #[test]
     fn what_encode_cannot_have_written_is_refused() {
-        let whole = Authority { row: "shell".into(), session: Session::Login(3) };
+        let whole = Authority { row: "shell".into(), session: Session::Login };
         let bytes = whole.encode();
         for end in 0..bytes.len() {
             assert_ne!(Authority::decode(&bytes[..end]).as_ref(), Some(&whole), "a prefix of {end} bytes");
         }
         assert_eq!(Authority::decode(&[]), None);
-        assert_eq!(Authority::decode(&[LOGIN, 1, 0, 0, 0, 0, 0, 0]), None);
         assert_eq!(Authority::decode(&[2, b's']), None);
         assert_eq!(Authority::decode(&[MACHINE]), None);
-        assert_eq!(Authority::decode(&[LOGIN, 1, 0, 0, 0, 0, 0, 0, 0]), None);
+        assert_eq!(Authority::decode(&[LOGIN]), None);
         assert_eq!(Authority::decode(&[MACHINE, 0xff]), None);
         let mut long = vec![MACHINE];
         long.extend(std::iter::repeat_n(b'x', MAX_PROGRAM_NAME + 1));

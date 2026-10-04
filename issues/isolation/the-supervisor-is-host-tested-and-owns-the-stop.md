@@ -61,8 +61,9 @@ nothing.
    manifest whose dependencies form an undeclared cycle; each refusal and
    each decision above has a mutation that reds a host test, named in the PR;
    and the stage deletes each decision from `userland/supervisor`, which calls
-   the crate for it, named per decision in the PR. No decision exists in two
-   places.
+   the crate for it, named per decision in the PR; `toyos_manifest::launch`,
+   who may start what and the launcher's badge codec, moves into the crate
+   and out of `toyos-manifest`. No decision exists in two places.
 3. **The supervisor owns the stop.** It asks each service it started to
    finish by a quit with reason terminate
    (`issues/kernel/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`

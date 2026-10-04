@@ -9,7 +9,9 @@
 #
 # And `launch_authority`: test-runner's row lists `swap` and `update`, which a
 # job is refused outside a login session, and not `proctest`, which it is
-# refused outright; the shell opens a login session, in which it starts `swap`.
+# refused outright; `toybox`, which opens no session, starts `swap` in the
+# session it was launched in: refused in the machine's, started in the one the
+# shell opens.
 
 [boot]
 start = ["logkeeper", "diskserver", "fileserver", "test-runner"]
@@ -31,9 +33,10 @@ starts = ["toybox", "shell", "swap", "update"]
 # it ran under this row, and `launch_toctou` asks which bytes that child was.
 [programs.toybox]
 syscap = ["roster"]
+starts = ["swap"]
 
 [programs.shell]
-starts = ["toybox", "swap"]
+starts = ["toybox"]
 login = true
 
 [programs.swap]
