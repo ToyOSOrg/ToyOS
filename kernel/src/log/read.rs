@@ -6,7 +6,7 @@
 use toyos_abi::log::{LogRecord, MAX_LOG_SHARDS};
 
 use super::shard::{Ring, Shard, FIRST_SEQ};
-use crate::clock::LogStamp;
+use super::stamp::LogStamp;
 
 /// Accepts one record; `false` means it was not taken and ends the walk.
 pub trait RecordSink<R = LogRecord> {
@@ -236,7 +236,7 @@ pub fn newest_committed() -> LogStamp {
             newest = newest.max(at_ns);
         }
     }
-    LogStamp::recorded(newest)
+    LogStamp::since_zero(newest)
 }
 
 /// Is there a committed record this cursor has not taken, without taking it?

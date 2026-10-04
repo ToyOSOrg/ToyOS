@@ -260,7 +260,7 @@ fn report(_proof: &UnderNothing) {
     crate::drivers::panic_console::paint_report(from, log_stamp());
 }
 
-fn log_stamp() -> crate::clock::LogStamp {
+fn log_stamp() -> crate::log::LogStamp {
     crate::clock::stamp().expect("the dump runs in a scheduler pass, after the clock starts")
 }
 

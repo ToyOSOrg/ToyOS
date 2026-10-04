@@ -12,7 +12,7 @@ use toyos_abi::log::LogRecord;
 use toyos_blackbox::{Kept, Recovery, Report};
 
 use super::read::{self, RecordSink};
-use crate::clock::LogStamp;
+use super::LogStamp;
 
 /// Write the section at `report`'s end.
 pub fn seal_into(report: &mut Report<'_>) {
@@ -37,7 +37,7 @@ pub fn seal_into(report: &mut Report<'_>) {
     read::snapshot_committed(LogStamp::ZERO, to, &mut measure);
     let mut kept = report.recovery(measure.0);
     if let Some(from) = kept.from() {
-        read::snapshot_committed(LogStamp::recorded(from), to, &mut Place(&mut kept));
+        read::snapshot_committed(LogStamp::since_zero(from), to, &mut Place(&mut kept));
     }
     kept.close();
 }

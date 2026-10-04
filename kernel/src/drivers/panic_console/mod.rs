@@ -18,8 +18,8 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering
 
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
 
-use crate::clock::LogStamp;
 use crate::log;
+use crate::log::LogStamp;
 use crate::panic_reboot::Bound;
 use crate::time::{Budget, Cadence, Duration};
 use crate::mm::policy::MmioPolicy;

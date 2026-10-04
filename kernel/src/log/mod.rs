@@ -10,13 +10,14 @@ pub mod read;
 pub mod recovery;
 pub mod registry;
 pub mod shard;
+mod stamp;
 #[cfg(feature = "test-actuators")]
 pub mod storm;
 pub mod user;
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use crate::clock::LogStamp;
+pub use stamp::LogStamp;
 use toyos_abi::log::{LogRecord, FLAG_UNTIMED, MAX_LOG_SHARDS, MAX_RECORD_MESSAGE};
 
 pub use shard::Shard;

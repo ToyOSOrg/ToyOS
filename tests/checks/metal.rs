@@ -23,8 +23,9 @@ fn t14() -> Machine {
 /// A `loader.log` whose pass after the reset reads `page`.
 fn loader(page: &str) -> String {
     format!(
-        "{}\n{}\n{}\n{}\n{page}",
+        "{}\n{}\n{}\n{}\n{}\n{page}",
         bootlog::LOADER_FIRST_LINE,
+        bootlog::LOADER_CLOCK_NONE,
         bootlog::LOADER_LAST_LINE,
         bootlog::SEPARATOR,
         bootlog::LOADER_FIRST_LINE
@@ -48,6 +49,10 @@ fn expired_at(reached: i64) -> String {
     )
 }
 
+/// What every boot that reaches `Boot: complete` owes `one_clock`.
+const STARTED: &str = "[2026-09-29 18:22:38  0.050 cpu0 kernel] spawn: /system/bin/logkeeper pid=6\n\
+                       [2026-09-29 18:22:38  0.050 supervisor] supervisor: started logkeeper\n";
+
 /// One boot's readback as the loop writes it.
 pub(super) fn plant(
     dir: &Path,
@@ -64,7 +69,7 @@ pub(super) fn plant(
     );
     for (name, text) in [
         (READBACK_LOADER, loader(page)),
-        (READBACK_KERNEL, kernel.to_string()),
+        (READBACK_KERNEL, format!("{STARTED}{kernel}")),
         (READBACK_BOOT, boot),
         (READBACK_VERDICT, verdict_file(verdict)),
     ] {
@@ -384,7 +389,9 @@ pub fn the_loader_the_kernel_and_a_program_count_from_one_zero() {
             bootlog::SEPARATOR,
             bootlog::LOADER_FIRST_LINE
         );
-        fs::write(metal::at(&dir, "planted").join(READBACK_LOADER), loader).expect("a planted loader.log");
+        let home = metal::at(&dir, "planted");
+        fs::write(home.join(READBACK_LOADER), loader).expect("a planted loader.log");
+        fs::write(home.join(READBACK_KERNEL), kernel).expect("a planted log");
         metal::read_readback(&dir, "planted").expect("a planted readback").one_clock()
     };
     let (stated, none) = (STATED, bootlog::LOADER_CLOCK_NONE);
