@@ -1,5 +1,6 @@
 //! One shard's TCP: the connection table and its demultiplexing, listeners and their queues,
-//! TIME-WAIT, port choice, the timers, and the transmit opportunity.
+//! TIME-WAIT, port choice, the timers, and egress: what is owed outside a connection, and each
+//! connection's next segment when the caller's round serves it.
 //!
 //! Connections live in a slab named by index and generation, so an id from a freed slot names
 //! nothing. The demux is an ordered map, which no chosen set of 4-tuples can degrade.
@@ -27,7 +28,7 @@ const EPHEMERAL_COUNT: u16 = 16_384;
 /// Answers to segments for no socket, waiting for credit or for their next hop.
 const ANSWERS: usize = 64;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ConnId {
     index: u32,
     generation: u32,
@@ -37,6 +38,14 @@ pub struct ConnId {
 pub struct ListenerId {
     index: u32,
     generation: u32,
+}
+
+/// What [`Tcp::serve`] did with one frame of credit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Served {
+    Sent,
+    /// Nothing more until it is offered again: the connection leaves the round.
+    Done,
 }
 
 /// A segment at the moment it leaves: headers from the state of now, payload borrowed from the
@@ -109,6 +118,7 @@ struct Conn {
     soft: Option<SoftError>,
     local: Local,
     state: Tcb,
+    /// Offered to the caller's round and not yet answered [`Served::Done`].
     queued: bool,
     deadline: Option<Instant>,
 }
@@ -151,9 +161,7 @@ struct Answer {
     rst: Rst,
 }
 
-/// What is owed and not offered: under a remote address, what waits for its next hop until
-/// [`Tcp::wake`] names it; within a transmit opportunity, what a refused frame left owed until
-/// the opportunity ends. Either then goes back ahead of anything queued since.
+/// What waits for the next hop of a remote address until [`Tcp::wake`] names it.
 #[derive(Default)]
 struct Parked {
     stubs: Vec<Tuple>,
@@ -169,7 +177,7 @@ impl Parked {
 }
 
 /// One flow's way out of a transmit opportunity: `hop` answers for its 4-tuple, and `sink` takes
-/// the frame or refuses it.
+/// the segment.
 struct Way<'a, H, S> {
     tuple: Tuple,
     hop: &'a mut H,
@@ -177,12 +185,12 @@ struct Way<'a, H, S> {
     scratch: &'a mut Vec<u8>,
 }
 
-impl<T, H: FnMut(&Tuple) -> Hop<T>, S: FnMut(&Outgoing<'_>, T) -> bool> Exit<T> for Way<'_, H, S> {
+impl<T, H: FnMut(&Tuple) -> Hop<T>, S: FnMut(&Outgoing<'_>, T)> Exit<T> for Way<'_, H, S> {
     fn ask(&mut self) -> Result<T, NotReady> {
         (self.hop)(&self.tuple).ready()
     }
 
-    fn send(&mut self, via: T, segment: &Out, (first, second): (&[u8], &[u8])) -> Result<(), NotReady> {
+    fn send(&mut self, via: T, segment: &Out, (first, second): (&[u8], &[u8])) {
         let Self { tuple, sink, scratch, .. } = self;
         let payload = if second.is_empty() {
             first
@@ -192,11 +200,7 @@ impl<T, H: FnMut(&Tuple) -> Hop<T>, S: FnMut(&Outgoing<'_>, T) -> bool> Exit<T> 
             scratch.extend_from_slice(second);
             scratch.as_slice()
         };
-        if sink(&builder(segment, tuple, payload), via) {
-            Ok(())
-        } else {
-            Err(NotReady::Unframed)
-        }
+        sink(&builder(segment, tuple, payload), via);
     }
 }
 
@@ -211,7 +215,10 @@ pub struct Tcp {
     demux: BTreeMap<Tuple, Entry>,
     time_waits: BTreeSet<(Instant, Tuple)>,
     deadlines: BTreeSet<(Instant, u32)>,
-    active: VecDeque<u32>,
+    /// Connections that became eligible for the caller's round since it last drained them.
+    eligible: Vec<ConnId>,
+    /// Connections freed while offered to the caller's round, since it last drained them.
+    gone: Vec<ConnId>,
     stubs: VecDeque<Tuple>,
     answers: VecDeque<Answer>,
     /// TIME-WAITs owing an ACK: a set, so a segment finds its entry in log n.
@@ -368,7 +375,8 @@ impl Tcp {
             demux: BTreeMap::new(),
             time_waits: BTreeSet::new(),
             deadlines: BTreeSet::new(),
-            active: VecDeque::new(),
+            eligible: Vec::new(),
+            gone: Vec::new(),
             stubs: VecDeque::new(),
             answers: VecDeque::new(),
             tw_owed: BTreeSet::new(),
@@ -416,17 +424,30 @@ impl Tcp {
     /// Re-files a connection's deadline and offers it the next transmit opportunity.
     fn settle(&mut self, index: u32, now: Instant) {
         self.settle_deadline(index, now);
-        if let Some(conn) = value(&mut self.conns, index) {
+        self.offer(index);
+    }
+
+    /// Offers a connection to the caller's round unless it is already there.
+    fn offer(&mut self, index: u32) {
+        let Some(slot) = self.conns.get_mut(usize::try_from(index).unwrap_or(usize::MAX)) else { return };
+        let generation = slot.generation;
+        if let Some(conn) = slot.value.as_mut() {
             if !core::mem::replace(&mut conn.queued, true) {
-                self.active.push_back(index);
+                self.eligible.push(ConnId { index, generation });
             }
         }
     }
 
     fn free(&mut self, index: u32) {
+        let Some(generation) = self.conns.get(usize::try_from(index).unwrap_or(usize::MAX)).map(|s| s.generation) else { return };
         let Some(conn) = release(&mut self.conns, &mut self.free_conns, index) else { return };
+        let remote = conn.tuple.remote.addr;
+        let parked = self.parked.get(&remote).is_some_and(|p| p.conns.contains(&index));
         // Its index may name another connection next.
-        self.unpark(conn.tuple.remote.addr, |parked| parked.conns.retain(|&i| i != index));
+        self.unpark(remote, |p| p.conns.retain(|&i| i != index));
+        if conn.queued && !parked {
+            self.gone.push(ConnId { index, generation });
+        }
         if let Some(at) = conn.deadline {
             self.deadlines.remove(&(at, index));
         }
@@ -1182,41 +1203,31 @@ impl Tcp {
 
     // ---- egress ----
 
-    /// A transmit opportunity with room for `credit` frames: resets first, then each connection
-    /// in turn one segment at a time. `hop` is asked for a 4-tuple once a segment for it is due and
-    /// before the segment is built (`ip.md` §6.7), so a flow with nothing due asks nothing. Each
-    /// segment is then built and handed to `sink` with what `hop` answered, and counts as sent only
-    /// if `sink` framed it. What waits for its next hop spends nothing and is not asked again until
-    /// [`Self::wake`]. A failed next hop drops an owed reset or ACK, fails a connect, and is the soft
-    /// error of any other connection (`ip.md` §9.6); each such question counts
-    /// `tcp.next-hop-failed`. A refused frame counts `tcp.frame-refused` and commits nothing: what
-    /// it left owed is offered again at the next opportunity, never in this one. Returns how many
-    /// left.
-    pub fn transmit<T>(
+    /// What is owed outside a connection, in frames of `credit`: resets for connections that are
+    /// gone, answers to segments for no socket, then TIME-WAIT's ACKs (architecture §3.3 (2)).
+    /// `hop` is asked for a 4-tuple once a segment for it is due and before the segment is built
+    /// (`ip.md` §6.7), and the segment is then handed to `sink` with what `hop` answered. What
+    /// waits for its next hop spends nothing and is not asked again until [`Self::wake`]. A failed
+    /// next hop drops it, counting `tcp.next-hop-failed`. Returns how many left.
+    pub fn transmit_owed<T>(
         &mut self,
         now: Instant,
         credit: usize,
         mut hop: impl FnMut(&Tuple) -> Hop<T>,
-        mut sink: impl FnMut(&Outgoing<'_>, T) -> bool,
+        mut sink: impl FnMut(&Outgoing<'_>, T),
     ) -> usize {
         let mut sent = 0usize;
-        let mut refused = Parked::default();
         while sent < credit {
             if let Some(tuple) = self.stubs.pop_front() {
                 let Some(&Entry::Stub(rst, _)) = self.demux.get(&tuple) else { continue };
                 let mut way = Way { tuple, hop: &mut hop, sink: &mut sink, scratch: &mut self.scratch };
-                match way.ask().and_then(|via| way.send(via, &Out::rst(&rst), NO_PAYLOAD)) {
+                match way.ask().map(|via| way.send(via, &Out::rst(&rst), NO_PAYLOAD)) {
                     Ok(()) => sent = sent.saturating_add(1),
                     Err(NotReady::Pending) => {
                         self.parked.entry(tuple.remote.addr).or_default().stubs.push(tuple);
                         continue;
                     }
                     Err(NotReady::Unreachable) => self.log.count(Counter::NextHopFailed),
-                    Err(NotReady::Unframed) => {
-                        self.log.count(Counter::FrameRefused);
-                        refused.stubs.push(tuple);
-                        continue;
-                    }
                 }
                 if let Some(Entry::Stub(_, Some(tw))) = self.demux.remove(&tuple) {
                     self.enter_time_wait(tuple, tw, false);
@@ -1225,72 +1236,84 @@ impl Tcp {
             }
             if let Some(answer) = self.answers.pop_front() {
                 let mut way = Way { tuple: answer.tuple, hop: &mut hop, sink: &mut sink, scratch: &mut self.scratch };
-                match way.ask().and_then(|via| way.send(via, &Out::rst(&answer.rst), NO_PAYLOAD)) {
+                match way.ask().map(|via| way.send(via, &Out::rst(&answer.rst), NO_PAYLOAD)) {
                     Ok(()) => sent = sent.saturating_add(1),
                     Err(NotReady::Pending) => {
                         self.parked.entry(answer.tuple.remote.addr).or_default().answers.push(answer);
                         self.parked_answers = self.parked_answers.saturating_add(1);
                     }
                     Err(NotReady::Unreachable) => self.log.count(Counter::NextHopFailed),
-                    Err(NotReady::Unframed) => {
-                        self.log.count(Counter::FrameRefused);
-                        refused.answers.push(answer);
-                    }
                 }
                 continue;
             }
-            if let Some(tuple) = self.tw_owed.pop_first() {
-                let Some(Entry::TimeWait(tw)) = self.demux.get(&tuple) else { continue };
-                let ack = tw.ack(now);
-                let mut way = Way { tuple, hop: &mut hop, sink: &mut sink, scratch: &mut self.scratch };
-                match way.ask().and_then(|via| way.send(via, &ack, NO_PAYLOAD)) {
-                    Ok(()) => sent = sent.saturating_add(1),
-                    Err(NotReady::Pending) => self.parked.entry(tuple.remote.addr).or_default().time_waits.push(tuple),
-                    Err(NotReady::Unreachable) => self.log.count(Counter::NextHopFailed),
-                    Err(NotReady::Unframed) => {
-                        self.log.count(Counter::FrameRefused);
-                        refused.time_waits.push(tuple);
-                    }
-                }
-                continue;
-            }
-            let Some(index) = self.active.pop_front() else { break };
-            let Some(conn) = value(&mut self.conns, index) else { continue };
-            let tuple = conn.tuple;
+            let Some(tuple) = self.tw_owed.pop_first() else { break };
+            let Some(Entry::TimeWait(tw)) = self.demux.get(&tuple) else { continue };
+            let ack = tw.ack(now);
             let mut way = Way { tuple, hop: &mut hop, sink: &mut sink, scratch: &mut self.scratch };
-            let mut ctx = conn.ctx(now, &mut self.log);
-            let next = match &mut conn.state {
-                Tcb::SynSent(s) => s.next_segment(&conn.local, now, &mut way),
-                Tcb::SynRcvd(s) => s.next_segment(&conn.local, now, &mut way),
-                Tcb::Sync(s) => s.next_segment(&mut ctx, &mut way),
-                Tcb::Ended(_) => Ok(false),
-            };
-            match next {
-                Ok(true) => {
-                    sent = sent.saturating_add(1);
-                    self.active.push_back(index);
-                }
-                Ok(false) => conn.queued = false,
-                Err(NotReady::Pending) => self.park(index, tuple.remote.addr),
-                Err(NotReady::Unreachable) if matches!(conn.state, Tcb::SynSent(_)) => {
-                    self.log.count(Counter::NextHopFailed);
-                    self.end(index, Some(Failure::Unreachable(SoftError::Unreachable(UnreachableCode::Host))), None);
-                    continue;
-                }
-                Err(NotReady::Unreachable) => {
-                    conn.soft = Some(SoftError::Unreachable(UnreachableCode::Host));
-                    self.log.count(Counter::NextHopFailed);
-                    self.park(index, tuple.remote.addr);
-                }
-                Err(NotReady::Unframed) => {
-                    self.log.count(Counter::FrameRefused);
-                    refused.conns.push(index);
-                }
+            match way.ask().map(|via| way.send(via, &ack, NO_PAYLOAD)) {
+                Ok(()) => sent = sent.saturating_add(1),
+                Err(NotReady::Pending) => self.parked.entry(tuple.remote.addr).or_default().time_waits.push(tuple),
+                Err(NotReady::Unreachable) => self.log.count(Counter::NextHopFailed),
             }
-            self.settle_deadline(index, now);
         }
-        self.requeue(refused);
         sent
+    }
+
+    /// Connections offered to the caller's round since the last call, each once, in the order
+    /// they became eligible, less those freed since: a connection is offered again only after
+    /// [`Self::serve`] answered [`Served::Done`] for it.
+    pub fn drain_eligible(&mut self) -> impl Iterator<Item = ConnId> + '_ {
+        let Self { eligible, conns, .. } = self;
+        eligible.drain(..).filter(|id| conns.get(usize::try_from(id.index).unwrap_or(usize::MAX)).is_some_and(|s| s.generation == id.generation && s.value.is_some()))
+    }
+
+    /// Connections freed while offered to the caller since the last call, each once: the caller
+    /// takes each out of its round, where one it never drained is not.
+    pub fn drain_gone(&mut self) -> alloc::vec::Drain<'_, ConnId> {
+        self.gone.drain(..)
+    }
+
+    /// One segment of `id`, if one is due, asked for and built as in [`Self::transmit_owed`].
+    /// A failed next hop fails a connect and is the soft error of any other connection
+    /// (`ip.md` §9.6). [`Served::Done`] takes the connection out of the round: it has nothing
+    /// due, waits for its next hop, ended, or `id` names nothing; it is offered again once it has
+    /// something.
+    pub fn serve<T>(&mut self, now: Instant, id: ConnId, mut hop: impl FnMut(&Tuple) -> Hop<T>, mut sink: impl FnMut(&Outgoing<'_>, T)) -> Served {
+        let index = id.index;
+        let Some(conn) = slot(&mut self.conns, index, id.generation) else { return Served::Done };
+        let tuple = conn.tuple;
+        let mut way = Way { tuple, hop: &mut hop, sink: &mut sink, scratch: &mut self.scratch };
+        let mut ctx = conn.ctx(now, &mut self.log);
+        let next = match &mut conn.state {
+            Tcb::SynSent(s) => s.next_segment(&conn.local, now, &mut way),
+            Tcb::SynRcvd(s) => s.next_segment(&conn.local, now, &mut way),
+            Tcb::Sync(s) => s.next_segment(&mut ctx, &mut way),
+            Tcb::Ended(_) => Ok(false),
+        };
+        let served = match next {
+            Ok(true) => Served::Sent,
+            Ok(false) => {
+                conn.queued = false;
+                Served::Done
+            }
+            Err(NotReady::Pending) => {
+                self.park(index, tuple.remote.addr);
+                Served::Done
+            }
+            Err(NotReady::Unreachable) if matches!(conn.state, Tcb::SynSent(_)) => {
+                self.log.count(Counter::NextHopFailed);
+                self.end(index, Some(Failure::Unreachable(SoftError::Unreachable(UnreachableCode::Host))), None);
+                return Served::Done;
+            }
+            Err(NotReady::Unreachable) => {
+                conn.soft = Some(SoftError::Unreachable(UnreachableCode::Host));
+                self.log.count(Counter::NextHopFailed);
+                self.park(index, tuple.remote.addr);
+                Served::Done
+            }
+        };
+        self.settle_deadline(index, now);
+        served
     }
 
     /// Everything waiting for the next hop of `remote` asks again at the next opportunity: what
@@ -1318,12 +1341,16 @@ impl Tcp {
             self.answers.push_front(answer);
         }
         self.tw_owed.extend(parked.time_waits);
-        for index in parked.conns.into_iter().rev() {
-            self.active.push_front(index);
+        for index in parked.conns {
+            if let Some(conn) = value(&mut self.conns, index) {
+                conn.queued = false;
+            }
+            self.offer(index);
         }
     }
 
-    /// A connection waits for its next hop, still queued, so nothing else queues it.
+    /// A connection waits for its next hop out of the round, still marked queued, so nothing but
+    /// a wake offers it again.
     fn park(&mut self, index: u32, remote: Ipv4Addr) {
         self.parked.entry(remote).or_default().conns.push(index);
     }
