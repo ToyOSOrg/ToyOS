@@ -886,7 +886,9 @@ pub fn spawn_supervisor() -> Pid {
         .union(Rights::WAIT)
         .union(Rights::POWER)
         .union(Rights::ROSTER)
-        .union(Rights::INVENTORY);
+        .union(Rights::INVENTORY)
+        .union(Rights::COUNTERS)
+        .union(Rights::TRACE);
     let cap_handle = handles
         .install(crate::object::HandleEntry::new(cap, rights))
         .expect("spawn_supervisor: an empty table refused the system capability");

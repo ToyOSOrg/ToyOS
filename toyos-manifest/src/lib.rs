@@ -133,6 +133,12 @@ const SYSCAP_RIGHTS: &[(&str, Rights)] = &[
     // `SYS_DEVICE_INVENTORY`'s records. A census of the hardware and of which
     // program drives what, and `/system/bin/inspect` is what it is for.
     ("inventory", Rights::INVENTORY),
+    // Read the machine's counters: `SYS_COUNTERS`, each CPU's clock reading
+    // and how often firmware took it over.
+    ("counters", Rights::COUNTERS),
+    // Read what times every other program: each CPU's frequency, its busy
+    // fraction and its wake-ups. An admin tool's, and no applet's.
+    ("trace", Rights::TRACE),
 ];
 
 /// The whole right set a program's `syscap` list asks for.

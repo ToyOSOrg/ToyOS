@@ -1,6 +1,6 @@
 //! The kernel's device inventory, rendered under `dev.*`.
 //!
-//! The one root no port answers for: the reader asks the kernel with a
+//! A root no port answers for: the reader asks the kernel with a
 //! `SysCap` carrying `Rights::INVENTORY` and renders its typed records here, so
 //! the path layout is decided in the same pure crate as every owner's.
 //!

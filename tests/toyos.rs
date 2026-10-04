@@ -53,6 +53,10 @@ const ACTUATOR_TESTS: &[&str] = &[
     // Action 23: the kernel holds a spawn, once its child has landed, until
     // the child has ended — a child's end no caller can order inside its spawn.
     "spawn_child_ends_first",
+    // Actions 24 and 25: one CPU answers no counters round until it is heard
+    // again, which is what a CPU silent past a read's bound is to the reader,
+    // and nothing in a guest makes one on demand.
+    "counters_silent",
 ];
 
 /// What [`ACTUATOR_TESTS`] boots: the one kernel that carries `SYS_DEBUG`, with
@@ -93,6 +97,10 @@ const RUST_SKIP: &[&str] = &[
     // metal rows run them.
     "isa_grant",
     "isa_lines",
+    // Its product is the T14's counters across an idle span and a spin on
+    // every CPU, which the `counters` metal row judges; on a guest it would be
+    // seconds of four CPUs spinning, read by nothing.
+    "counters_metal",
     // It takes the machine down; `virt_fatal_halts_the_others_first` runs it.
     "panic_halts_first",
     // Needs a launcher and a declared `cat` and shell, which `tests/testcases`
@@ -148,6 +156,9 @@ const RUST_SKIP: &[&str] = &[
 /// other, so neither answer is silence — `suite_split` is the gate.
 #[allow(dead_code, reason = "`suite_split` reads it, in `toyos-checks` alone")]
 const DRIVEN_AND_SHARED: &[&str] = &[
+    // Its shared run is the x86-64 verdict; `virt_smp` builds it for AArch64
+    // and runs it on that architecture's SMP case.
+    "counters_read",
     // Its shared run is the x86-64 verdict; `virt_readonly_copyout` builds it
     // for AArch64 and runs it on that architecture's job case.
     "abuse_readonly_copyout",
@@ -383,6 +394,16 @@ const METAL: &[(&str, metal::Metal)] = &[
                 power::watchdog_armed(&b[0].loader(), &b[0].kernel())?;
                 power::watchdog_quiet(&b[1].loader(), &b[1].kernel())
             },
+        },
+    ),
+    (
+        // Every CPU's counters as the shipped syscall reads them, across an
+        // idle second and a spin on every CPU: `counters_on_metal` says what
+        // is held and what is read beside Linux's.
+        "counters",
+        metal::Metal {
+            arms: &[metal::once("testcases", "tests/testcases", &[], &["test_rs_counters_metal"])],
+            judge: |b| counters_on_metal(b[0]),
         },
     ),
     (
@@ -1463,17 +1484,25 @@ fn check_colors(
 /// `test_rs_abuse_readonly_copyout`.
 const VIRT_COPYOUT: &str = "abuse_readonly_copyout";
 
-fn virt_copyout(arch: toyos_build::arch::Arch) -> &'static [u8] {
-    use toyos_build::arch::Arch;
-    static X86_64: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
-    static AARCH64: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
-    let built = match arch {
-        Arch::X86_64 => &X86_64,
-        Arch::Aarch64 => &AARCH64,
+/// `tests/toyos-rust-tests`' binary that `tests/virtsmpcase` runs as its job
+/// `test_rs_counters_read`.
+const VIRT_COUNTERS_READ: &str = "counters_read";
+
+/// `tests/toyos-rust-tests`' binary `name` built for `arch`, once a run, as a
+/// file a case's job list names on ROOT.
+fn suite_bin(arch: toyos_build::arch::Arch, name: &'static str) -> (String, Vec<u8>) {
+    type Built = Vec<(toyos_build::arch::Arch, &'static str, Vec<u8>)>;
+    static BUILT: std::sync::Mutex<Built> = std::sync::Mutex::new(Vec::new());
+    let mut built = BUILT.lock().expect("no build panics holding this");
+    let bytes = match built.iter().find(|(a, n, _)| *a == arch && *n == name) {
+        Some((.., bytes)) => bytes.clone(),
+        None => {
+            let bytes = qemu::build_toyos_bin(arch, &compile::repo_root().join("tests/toyos-rust-tests"), name);
+            built.push((arch, name, bytes.clone()));
+            bytes
+        }
     };
-    built.get_or_init(|| {
-        qemu::build_toyos_bin(arch, &compile::repo_root().join("tests/toyos-rust-tests"), VIRT_COPYOUT)
-    })
+    (format!("bin/test_rs_{name}"), bytes)
 }
 
 /// Boot `tests/virtjobcase` on one CPU and judge its job `job`: it ends with
@@ -1492,7 +1521,7 @@ fn virt_job(profile: qemu::Profile, job: &str, said: &str) -> Result<(), String>
             smp: 1,
             kernel_features: toyos_build::build::TEST_KERNEL,
             ready_marker: "control registers: SCTLR_EL1=",
-            extra_root_files: vec![(format!("bin/test_rs_{VIRT_COPYOUT}"), virt_copyout(profile.arch()).to_vec())],
+            extra_root_files: vec![suite_bin(profile.arch(), VIRT_COPYOUT)],
             ..Default::default()
         },
     );
@@ -1572,15 +1601,22 @@ fn boot_virt_smp(options: BootOptions) -> QemuInstance {
         case,
         &[],
         &[],
-        BootOptions { ready_marker: "control registers: SCTLR_EL1=", ..options },
+        BootOptions {
+            ready_marker: "control registers: SCTLR_EL1=",
+            extra_root_files: vec![suite_bin(options.profile.arch(), VIRT_COUNTERS_READ)],
+            ..options
+        },
     )
 }
+
+/// What `counters_read` says once every CPU answered for itself.
+const COUNTERS_READ_SAID: &str = "counters_read: every cpu answered for itself, and each counter is a right's";
 
 /// Boot `tests/virtsmpcase` on [`VIRT_CPUS`] CPUs under `profile`, whose
 /// firmware enters every CPU at EL`el` and whose FADT names PSCI's `conduit`:
 /// each CPU is started by `CPU_ON`, holds the control-register declaration as
-/// entered there and joins the scheduler, and the case's job `unmap_touch`
-/// ends with exit 0. Then its job `shutdown` stops the machine and powers it
+/// entered there and joins the scheduler, and the case's jobs `unmap_touch`
+/// and `test_rs_counters_read` end with exit 0. Then its job `shutdown` stops the machine and powers it
 /// off, every other CPU turned off first ([`psci_powered_off`]).
 fn virt_smp(profile: qemu::Profile, conduit: &str, el: u32) -> Result<(), String> {
     let trace = common::lane::dir().join(format!("virt_smp-{conduit}.psci"));
@@ -1616,8 +1652,9 @@ fn virt_smp(profile: qemu::Profile, conduit: &str, el: u32) -> Result<(), String
         }
     }
     eprintln!("  [virt] {VIRT_CPUS} CPUs entered at EL{el}, started through {conduit}, and scheduling");
+    let counted = judge_virt_job(&mut qemu, "test_rs_counters_read", COUNTERS_READ_SAID)?;
     let (console, calls) =
-        ended_through_psci(&mut qemu, &mut stop, serial, power::SHUTTING_DOWN, "guest-shutdown", &trace, |_| Vec::new())?;
+        ended_through_psci(&mut qemu, &mut stop, counted, power::SHUTTING_DOWN, "guest-shutdown", &trace, |_| Vec::new())?;
     let record = console
         .lines()
         .find_map(toyos_quiesce::Record::parse)
@@ -3257,6 +3294,135 @@ fn field_between<'a>(log: &'a str, head: &str, tail: &str) -> Result<&'a str, St
             Some(found)
         })
         .ok_or_else(|| format!("no record carrying {head:?} and then {tail:?}"))
+}
+
+/// The shortest span `counters_on_metal` reads the SMI count across: twice the
+/// longest period between the T14's firmware interrupts that has been read
+/// (`issues/hardware/the-t14s-firmware-interrupts-every-cpu-every-2-2-s-under-toyos.md`).
+const SMI_SPAN_NS: u64 = 4_444_000_000;
+
+/// `counters_metal`'s three reads on the T14, held to what the hardware and
+/// the bring-up said.
+///
+/// Held: a record per CPU the bring-up started, naming the local APIC id the
+/// bring-up gave that CPU and carrying the counters its `counters: cpuN
+/// reads` line names, and none stale. From `idle0` to `spin`, at least
+/// [`SMI_SPAN_NS`] apart, every CPU's SMI count rose alike and by two or more:
+/// the firmware's legacy mode, the positive control ACPI stage 1's flatness
+/// is read against, and the row that stage changes. Across the spin every
+/// CPU's MPERF ran nine tenths of its stamp or more [e], a CPU in C0 the whole
+/// span: MPERF counts at the TSC's rate there (SDM Vol. 3B, "Hardware
+/// Coordination Feedback").
+///
+/// Read and not held, beside Linux's turbostat on the same machine
+/// (`tests/t14-linux/`): each CPU's idle busy fraction, its busy
+/// frequency under the spin, and what one round cost its reader.
+fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
+    type Read<'a> = BTreeMap<usize, BTreeMap<&'a str, u64>>;
+    back.job_passed("test_rs_counters_metal")?;
+    let log = back.log();
+    let kernel = back.kernel();
+    let cpus = back.cpus()? as usize;
+    let mut reads: BTreeMap<&str, Read> = BTreeMap::new();
+    let mut clock: BTreeMap<&str, (u64, u64)> = BTreeMap::new();
+    for line in log.text().lines() {
+        let Some((phase, said)) = line.split("counters_metal ").nth(1).and_then(|r| r.split_once(": ")) else {
+            continue;
+        };
+        let number = |s: &str| s.trim().parse::<u64>().map_err(|_| format!("{s:?} in {line:?} is not a number"));
+        if let Some(rest) = said.strip_prefix("at ") {
+            let (at, took) = rest.split_once(" ns, the read took ").ok_or_else(|| format!("unreadable: {line}"))?;
+            clock.insert(phase, (number(at)?, number(took.trim_end_matches(" ns"))?));
+        } else if let Some(rest) = said.strip_prefix("kernel.cpu.") {
+            let (path, value) = rest.split_once(" = ").ok_or_else(|| format!("unreadable: {line}"))?;
+            let (cpu, name) = path.split_once('.').ok_or_else(|| format!("unreadable: {line}"))?;
+            let value = match value {
+                "true" => 1,
+                "false" => 0,
+                v => number(v)?,
+            };
+            reads.entry(phase).or_default().entry(number(cpu)? as usize).or_default().insert(name, value);
+        }
+    }
+    let phase = |name: &str| -> Result<(&Read, u64), String> {
+        let read = reads.get(name).ok_or_else(|| format!("counters_metal printed no {name} read"))?;
+        Ok((read, clock.get(name).ok_or_else(|| format!("counters_metal printed no {name} clock"))?.0))
+    };
+    let (idle0, at0) = phase("idle0")?;
+    let (idle1, _) = phase("idle1")?;
+    let (spin, at2) = phase("spin")?;
+    let bsp = kernel.must_say("percpu: BSP cpu_id=0 lapic_id=")?;
+    let mut roster = vec![bsp.rsplit("lapic_id=").next().unwrap_or_default().trim().to_string()];
+    for cpu in 1..cpus {
+        roster.push(field_between(kernel.text(), &format!("SMP: AP cpu{cpu} lapic="), " online")?.to_string());
+    }
+    for (name, read) in [("idle0", idle0), ("idle1", idle1), ("spin", spin)] {
+        if read.keys().copied().ne(0..cpus) {
+            return Err(format!("{name} read cpus {:?}, and the bring-up started {cpus}", read.keys()));
+        }
+        for (cpu, counters) in read {
+            let reads = kernel.must_say(&format!("counters: cpu{cpu} reads "))?;
+            for counter in ["smi", "aperf", "mperf"] {
+                if !reads.contains(&format!("{counter}={}", counters.contains_key(counter))) {
+                    return Err(format!("{name}: cpu{cpu} carries {counters:?} and its bring-up said {reads:?}"));
+                }
+            }
+            if counters.get("stale") != Some(&0) || counters.get("hardware_id").map(u64::to_string) != Some(roster[*cpu].clone()) {
+                return Err(format!("{name}: cpu{cpu} is stale or not lapic {}: {counters:?}", roster[*cpu]));
+            }
+        }
+    }
+    for cpu in 0..cpus {
+        for (name, &value) in &idle1[&cpu] {
+            if idle0[&cpu][name] > value || value > spin[&cpu][name] {
+                return Err(format!("cpu{cpu}'s {name} went backwards: {idle0:?} {idle1:?} {spin:?}"));
+            }
+        }
+    }
+    if at2 - at0 < SMI_SPAN_NS {
+        return Err(format!("idle0 and spin are {} ns apart, short of {SMI_SPAN_NS}: lengthen the spin", at2 - at0));
+    }
+    let delta = |a: &Read, b: &Read, cpu: usize, name: &str| b[&cpu][name] - a[&cpu][name];
+    let smis: Vec<u64> = (0..cpus).map(|cpu| delta(idle0, spin, cpu, "smi")).collect();
+    if smis[0] < 2 || smis.iter().any(|&n| n != smis[0]) {
+        return Err(format!("the SMI count rose by {smis:?} over {} ns, not alike and by two or more", at2 - at0));
+    }
+    let tsc_mhz = delta(idle0, spin, 0, "stamp") as f64 * 1e3 / (at2 - at0) as f64;
+    let ratio = |a: &Read, b: &Read, cpu: usize, top: &str, bottom: &str| {
+        delta(a, b, cpu, top) as f64 / delta(a, b, cpu, bottom) as f64
+    };
+    let busy: Vec<f64> = (0..cpus).map(|cpu| ratio(idle1, spin, cpu, "mperf", "stamp")).collect();
+    if busy.iter().any(|&b| b < 0.9) {
+        return Err(format!("MPERF ran {busy:?} of each stamp across the spin, some cpu under 0.9"));
+    }
+    let linux = |file: &str, column: &str| -> Result<(f64, f64), String> {
+        let mut rows = file.lines().map(|l| l.split('\t').collect::<Vec<_>>());
+        let header = rows.next().ok_or("an empty turbostat reading")?;
+        let at = header.iter().position(|c| *c == column).ok_or_else(|| format!("turbostat read no {column}"))?;
+        let values: Vec<f64> = rows.filter(|r| r[0] == "-").filter_map(|r| r.get(at)?.parse().ok()).collect();
+        Ok(values.iter().fold((f64::MAX, f64::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v))))
+    };
+    let idle = linux(include_str!("t14-linux/turbostat-idle.txt"), "Busy%")?;
+    let loaded = linux(include_str!("t14-linux/turbostat-loaded.txt"), "Bzy_MHz")?;
+    eprintln!(
+        "  [counters] {cpus} cpus, SMI +{} each over {} ms; TSC {tsc_mhz:.0} MHz",
+        smis[0],
+        (at2 - at0) / 1_000_000
+    );
+    for (cpu, busy) in busy.iter().enumerate() {
+        eprintln!(
+            "  [counters] cpu{cpu}: idle busy {:.2}% (Linux {:.2}-{:.2}%), spinning {:.0} MHz (Linux {:.0}-{:.0}), \
+             busy {busy:.3}",
+            ratio(idle0, idle1, cpu, "mperf", "stamp") * 100.0,
+            idle.0,
+            idle.1,
+            tsc_mhz * ratio(idle1, spin, cpu, "aperf", "mperf"),
+            loaded.0,
+            loaded.1,
+        );
+    }
+    eprintln!("  [counters] the spin's read, a whole round, took its reader {} ns", clock["spin"].1);
+    Ok(())
 }
 
 /// The same, parsed.

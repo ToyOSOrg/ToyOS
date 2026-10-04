@@ -41,7 +41,7 @@ use super::ipc::{
     sys_port_badge, sys_port_create, sys_port_mint, sys_shm_create, sys_shm_map,
 };
 use super::machine::{
-    sys_device_inventory, sys_log_read, sys_reboot, sys_sched_info, sys_shutdown, sys_sysinfo,
+    sys_counters, sys_device_inventory, sys_log_read, sys_reboot, sys_sched_info, sys_shutdown, sys_sysinfo,
     MAX_INVENTORY_RECORDS,
 };
 #[cfg(feature = "test-actuators")]
@@ -279,6 +279,16 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             let len = count * toyos_abi::inventory::RECORD_BYTES as u64;
             let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a2), len) else { return bad_addr };
             sys_device_inventory(RawHandle(a1 as u32), &mut buf)
+        }
+        // What every CPU counts, so it costs Rights::COUNTERS; a CPU per record,
+        // so the count is bounded by the most CPUs there can be.
+        SYS_COUNTERS => {
+            let Ok(count) = Untrusted::new(a3).at_most(crate::scheduler::MAX_CPUS as u64) else {
+                return SyscallError::InvalidArgument.to_u64();
+            };
+            let len = count * toyos_abi::counters::RECORD_BYTES as u64;
+            let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a2), len) else { return bad_addr };
+            sys_counters(RawHandle(a1 as u32), &mut buf)
         }
         SYS_NANOSLEEP => sys_nanosleep(a1),
         SYS_HANDLE_DUP => sys_handle_dup(RawHandle(a1 as u32), a2),
@@ -611,6 +621,10 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 process::debug_mark_spawn_hold();
                 0
             }
+            // A CPU silent past a round's bound, which a guest cannot make on demand: the reader's
+            // bound and its stale answer are the shipped paths.
+            DA::COUNTERS_DEAF => crate::counters::deaf::stage(a2),
+            DA::COUNTERS_HEAR => crate::counters::deaf::end(),
             _ => SyscallError::InvalidArgument.to_u64(),
         },
         SYS_SCHED_INFO => match ctx.copy_out(UserAddr::new(a1), &sys_sched_info()) {
