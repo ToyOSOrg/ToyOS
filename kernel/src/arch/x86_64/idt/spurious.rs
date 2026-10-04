@@ -54,13 +54,19 @@ pub(super) extern "sysv64" fn spurious_entry() {
 /// Its `iretq` returns to either ring with interrupts open, as the vector found them.
 extern "sysv64" fn took() {
     #[cfg(feature = "mask-windows")]
-    crate::windows::irqs_masked();
+    {
+        crate::windows::irqs_masked();
+        crate::windows::handler_entered();
+    }
     crate::arch::percpu::irq_took!(Spurious);
     if apic::in_service(SPURIOUS_VECTOR) {
         apic::eoi();
     }
     #[cfg(feature = "mask-windows")]
-    crate::windows::irqs_unmasking();
+    {
+        crate::windows::handler_leaving();
+        crate::windows::irqs_unmasking();
+    }
 }
 
 /// Raises the spurious vector on this CPU and verifies the handler ran and

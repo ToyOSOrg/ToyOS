@@ -53,8 +53,10 @@ pub fn msi_message(dest: u32, vector: u8) -> Result<(u32, u32), &'static str> {
     Ok((MSI_DOORBELL | (dest << 12), vector as u32))
 }
 
-/// Calibrated LAPIC timer ticks per 10ms (computed on BSP, reused by APs).
-static TIMER_TICKS: AtomicU32 = AtomicU32::new(0);
+/// Calibrated LAPIC timer ticks per 10ms (computed on BSP, reused by APs),
+/// which is one quantum: what the Ring 0 timer branch re-arms with.
+pub(crate) static TIMER_TICKS: AtomicU32 = AtomicU32::new(0);
+const _: () = assert!(kernel::sched::fair::QUANTUM_NS == 10_000_000);
 
 /// Guards IPI sends before the APIC is enabled.
 static X2APIC_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -275,6 +277,18 @@ pub fn arm_within(nanos: u64) {
     let remaining = Reg::TimerCurrent.read() as u32;
     let ticks = if remaining == 0 { want.0 } else { want.0.min(remaining) };
     OneShot::ticks(ticks as u64).arm();
+}
+
+/// What the timer was last armed with: `TIMER_INIT`, a count of ticks.
+#[cfg(feature = "test-actuators")]
+pub fn comparator() -> u64 {
+    Reg::TimerInit.read()
+}
+
+/// Whether a Ring 0 fire since [`comparator`] read `_armed` re-armed one quantum.
+#[cfg(feature = "test-actuators")]
+pub fn rearmed_a_quantum(_armed: u64) -> bool {
+    Reg::TimerInit.read() == u64::from(TIMER_TICKS.load(Ordering::Relaxed))
 }
 
 /// Stop the timer. No more interrupts until re-armed.

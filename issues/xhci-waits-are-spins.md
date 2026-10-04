@@ -4,7 +4,7 @@ kind: defect
 opened: 2026-08-03
 ---
 
-# The xHCI driver's waits are spins, and a USB disk call spins with interrupts masked
+# The xHCI driver's waits are spins, under a lock and with preemption off
 
 Every wait in the kernel's xHCI driver spins against a wall-clock deadline
 while holding `XHCI` (`kernel/src/drivers/xhci/mod.rs`), a ticket spinlock and
@@ -19,24 +19,21 @@ and a disk call.
 
 A call on a USB disk holds `XHCI` from its first command (`with_disk`,
 `kernel/src/drivers/xhci/wait/msc.rs`) inside a syscall, which runs with
-interrupts masked from entry to exit
-(`issues/syscall-preemption-is-incidental.md`): a partition claim's
+preemption off from entry to exit and, since the gate opens them, interrupts
+on (`issues/syscall-preemption-is-incidental.md`): a partition claim's
 `SYS_PARTITION_READ`, `SYS_PARTITION_WRITE` and `SYS_FSYNC`, the last a cache
 flush through `xhci::storage_flush` (`partition_fsync`,
 `kernel/src/object/ops.rs`), and the table `SYS_DEVICE_CLAIM` reads for one
 (`gpt::claimable`, `kernel/src/gpt.rs`). logd's `fsync` is one of these: the
 LOG fsd answers each with `SYS_FSYNC` on its claim. So its CPU holds
-interrupts and preemption off for as long as the device takes, and a CPU whose
-TLB shootdown waits on that CPU's acknowledgement spins as long, masked.
+preemption off for as long as the device takes. A disk's bind after boot
+spins inside the Ring 3 tick's pass, which runs with interrupts masked, and
+`time::DEAF_CPU` (5 s), past which a CPU waiting on a TLB acknowledgement
+panics, is held above `CALL_AFTER_BREAK` (4.75 s), the longest one call spins
+once its transport has broken.
 
-**Its bound outruns the TLB-ack tripwire.** `time::DEAF_CPU` (5 s), past which
-a CPU waiting on an acknowledgement panics, is held above `CALL_AFTER_BREAK`
-(4.75 s), the longest a disk call spins once its transport has broken. But that
-bound opens at the wait that broke, and `transfer_blocks` starts a batch while
-the operation's 2 s `block::OPERATION` has any left: a batch that starts at
-1.99 s and breaks runs its ladder to 6.74 s after the operation began, all of
-it with `IF` clear. That is arithmetic on the declared constants; no boot has
-been seen to do it.
+Its "On the T14" readings below were taken while a syscall still ran with
+interrupts masked from entry to exit.
 
 ## On the T14
 
@@ -101,11 +98,9 @@ whose step 10 moves the whole xHCI to usbd and deletes the kernel's driver. It
 owes both exits.
 
 **Exit**, two:
-- **The tripwire's, short of step 10**: the whole of one operation's `IF`-clear
-  spin is under `DEAF_CPU` by construction, because the call's bound opens
-  where the operation opens, or a later batch starts only while a whole call's
-  bound is still inside it; and a staged boot whose first batch spends most of
-  the budget and whose next batch breaks shows the operation ending inside
-  `DEAF_CPU`.
+- **The tripwire's, short of step 10**: no disk wait spins with `IF` clear,
+  because the tick's pass leaves the interrupt gate (step 2 of
+  `issues/toyos-beats-linuxs-latency-on-the-t14.md`), and
+  `kernel/src/drivers/xhci/mod.rs` holds no bound under `DEAF_CPU`.
 - **The spin's**: the tree has no `kernel/src/drivers/xhci`, so no kernel wait
   is a USB device's. Step 10 meets both.
