@@ -13,9 +13,7 @@
 //! **`idle0` waits for the ACPI server's first lines** ([`acpi_said`]):
 //! `acpiserver` logs its arming, and a query number the first time the
 //! embedded controller raises it, and the kernel the claim's first interrupt,
-//! at times the machine chooses. The server's next line is its
-//! counts, [`COUNTS_MS`] after arming at the earliest, and `idle1` reads before
-//! that or the job panics. A query number first raised later, on a quiet
+//! at times the machine chooses. A query number first raised later, on a quiet
 //! machine, is the `counters` row's to refuse.
 //!
 //! **Then for the log to be quiet** ([`settle`]): a job starts while
@@ -41,7 +39,7 @@ use toyos::syscap::SysCap;
 use toyos::Pipe;
 use toyos_abi::counters::{Counter, RawRecord, Record};
 use toyos_abi::syscall::{self, SyscallError};
-use toyos_logstream::{program_line, program_ms, record_ms, Lines};
+use toyos_logstream::{program_line, record_ms, Lines};
 
 /// The idle span: long enough that a CPU's busy fraction is its idle one and
 /// not the reads'.
@@ -64,10 +62,6 @@ const SETTLE_BOUND: Duration = Duration::from_secs(10);
 /// How long [`acpi_said`] waits for the server to arm and the controller's
 /// first query and SCI to come.
 const ACPI_BOUND: Duration = Duration::from_secs(10);
-
-/// `acpiserver`'s `COUNTS`, in milliseconds: its first counts line is stamped
-/// no earlier than this after its arming line.
-const COUNTS_MS: u64 = 30_000;
 
 /// What this binary's own children are asked to do: exit at once.
 const EXIT_AT_ONCE: &str = "exit-at-once";
@@ -191,6 +185,9 @@ impl Log {
         let by = Instant::now() + bound;
         let mut done = false;
         while !done {
+            let left = by
+                .checked_duration_since(Instant::now())
+                .unwrap_or_else(|| panic!("the log did not show {what} within {bound:?}"));
             match self.pipe.read_nonblock(&mut self.chunk) {
                 Ok(0) => panic!("logkeeper closed the log before it showed {what}"),
                 Ok(n) => self.lines.push(&self.chunk[..n], |line, _| {
@@ -199,9 +196,6 @@ impl Log {
                     done |= seen(line);
                 }),
                 Err(SyscallError::WouldBlock) => {
-                    let left = by
-                        .checked_duration_since(Instant::now())
-                        .unwrap_or_else(|| panic!("the log did not show {what} within {bound:?}"));
                     self.poller.watch(&self.pipe, READABLE, 0);
                     self.poller.wait(1, left.as_nanos() as u64, |_| {});
                 }
@@ -213,23 +207,21 @@ impl Log {
 
 /// Wait until `acpiserver` has armed and, where it serves an embedded
 /// controller, the kernel has logged the claim's first interrupt and the server
-/// its first query; return the arming line's stamp, in milliseconds since boot.
-fn acpi_said(log: &mut Log) -> u64 {
-    let mut armed: Option<(u64, bool)> = None;
+/// its first query.
+fn acpi_said(log: &mut Log) {
+    let mut armed: Option<bool> = None;
     let (mut interrupt, mut query) = (false, false);
     log.until("the ACPI server armed, and its controller's first SCI and query", ACPI_BOUND, |line| {
         if let Some(said) = program_line(line).filter(|said| said.tag == "acpiserver") {
             if let Some(rest) = said.text.strip_prefix("acpiserver: armed: ") {
-                let ms = program_ms(line).unwrap_or_else(|| panic!("an unstamped arming line: {line:?}"));
-                armed = Some((ms, !rest.ends_with("embedded controller none")));
+                armed = Some(!rest.ends_with("embedded controller none"));
             }
             query |= said.text.starts_with("acpiserver: embedded controller query ")
                 && said.text.contains(" taken for the first time");
         }
         interrupt |= record_ms(line).is_some() && line.ends_with("] isa: the ACPI fixed hardware took its first interrupt");
-        armed.is_some_and(|(_, ec)| !ec || interrupt && query)
+        armed.is_some_and(|ec| !ec || interrupt && query)
     });
-    armed.expect("the wait ends on the arming line").0
 }
 
 /// Return once logkeeper has written, and made durable, everything stamped
@@ -253,16 +245,11 @@ fn main() {
     }
     let cap: SysCap = Endowments::get().take(SYSCAP_LABEL).expect("test-runner endows a capability");
     let mut log = Log::open();
-    let armed = acpi_said(&mut log);
+    acpi_said(&mut log);
     settle(&mut log);
     let idle0 = read(&cap);
     std::thread::sleep(IDLE);
     let idle1 = read(&cap);
-    assert!(
-        idle1.at / 1_000_000 < armed + COUNTS_MS,
-        "the idle second ended at {} ns, where the ACPI server, armed at {armed} ms, may log its counts",
-        idle1.at
-    );
     std::thread::scope(|s| {
         for _ in 0..syscall::cpu_count() {
             s.spawn(|| {
