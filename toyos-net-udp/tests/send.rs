@@ -1,4 +1,4 @@
-//! §U3 and §U4: connecting and sending.
+//! Connecting and sending.
 
 mod common;
 

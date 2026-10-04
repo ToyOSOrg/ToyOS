@@ -40,3 +40,12 @@ both cost a day to discover:
 kernel allocation panics with the size, the layer and the call site named, and
 every kernel panic halts, so a grower userland can drive is refused at its bound
 or it ends the machine.
+
+**A port badge is kernel memory nobody is charged for.** Any process can make
+a port and mint on it (`SYS_PORT_MINT`), at most `MAX_BADGE` = 64 bytes per
+connector. Derived from the bounds, not measured: a namespace holds 64
+connectors and a table 4,096 handles, so one process pins 16 MiB of badge
+bytes in its table, and up to 2 GiB more in the handle queues of the 2,048
+connections it can hold both ends of (2 directions × 16 batches × 8 handles ×
+64 connectors × 64 bytes each), the same queues that already hold its
+unbadged connectors uncharged.

@@ -276,12 +276,6 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         "ours: OVMF's answer on a q35 guest, read off that boot's own loader log",
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
-    (
-        "toyos-acpi/fixtures/thinkpad-t14/root-bridge-0.bin",
-        "a734078ed9ca3971ce804fd9ecc97b7794f816058f9ae17e47e0d2bcb63af0f3",
-        "ours: the T14's answer, read off that boot's own loader log on the stick",
-        Terms::Spdx("MIT OR Apache-2.0"),
-    ),
     // A bcachefs volume upstream's own tools wrote, gzipped. The bytes inside
     // it are this repository's test material; `NOTICE` carries the raw digest,
     // the commands, and the fsck that called it clean.

@@ -41,10 +41,18 @@ struct Domains {
     /// By id minus [`FIRST`]; never shrinks, since a released id would name a
     /// domain some unit may still have cached.
     live: Vec<Domain>,
+    /// What no domain's addresses may reach: the root bridges' windows and
+    /// the regions firmware reserved, as `(start, end)`.
+    reserved: Vec<(u64, u64)>,
 }
 
 static DOMAINS: Lock<Domains> =
-    Lock::new(Domains { agreement: Agreement::None, live: Vec::new() });
+    Lock::new(Domains { agreement: Agreement::None, live: Vec::new(), reserved: Vec::new() });
+
+/// Before any domain is made: every one is built clear of these.
+pub fn avoid(reserved: Vec<(u64, u64)>) {
+    DOMAINS.lock().reserved = reserved;
+}
 
 pub fn unit_agrees(width: AddressWidth, ceiling: u32, mgaw: u8) {
     let mut domains = DOMAINS.lock();
@@ -57,7 +65,9 @@ pub fn unit_agrees(width: AddressWidth, ceiling: u32, mgaw: u8) {
     };
 }
 
-pub fn create() -> Result<DomainId, IommuError> {
+/// A new domain, with `room` bytes of it handed out first: refused, with no id
+/// spent, where the domain would have less than that.
+pub fn create(room: u64) -> Result<(DomainId, Iova), IommuError> {
     let mut domains = DOMAINS.lock();
     let (width, ceiling, mgaw) = match domains.agreement {
         Agreement::None => return Err(IommuError::NoUnit),
@@ -68,7 +78,8 @@ pub fn create() -> Result<DomainId, IommuError> {
     if u32::from(id) >= ceiling {
         return Err(IommuError::DomainsExhausted(ceiling));
     }
-    let domain = Domain::new(&mut TABLES.lock(), id, width, mgaw)?;
+    let mut domain = Domain::new(&mut TABLES.lock(), id, width, mgaw, &domains.reserved, room)?;
+    let first = domain.reserve(room).expect("`Domain::new` refuses a domain without the room");
     log!(
         "iommu: domain{id} root={:#x} aw={} mgaw={} addresses from {:#x} to {:#x}",
         domain.root().phys(),
@@ -78,7 +89,7 @@ pub fn create() -> Result<DomainId, IommuError> {
         domain.ceiling()
     );
     domains.live.push(domain);
-    Ok(DomainId::new(id))
+    Ok((DomainId::new(id), first))
 }
 
 pub fn map(id: DomainId, phys: u64, bytes: u64) -> Result<Iova, IommuError> {
@@ -87,11 +98,7 @@ pub fn map(id: DomainId, phys: u64, bytes: u64) -> Result<Iova, IommuError> {
     }
     let mut domains = DOMAINS.lock();
     let domain = domains.at(id);
-    let at = domain
-        .reserve(bytes)
-        // Named by what actually ran out: the unit's translatable width, which
-        // on a machine whose `MGAW` is under its `SAGAW` is not the table depth.
-        .ok_or(IommuError::AddressesExhausted(domain.translatable()))?;
+    let at = domain.reserve(bytes).ok_or(IommuError::AddressesExhausted(domain.ceiling()))?;
     let (did, domain) = (domain.id(), *domain);
     let mut units = UNITS.lock();
     table::map(&mut TABLES.lock(), &domain, at, phys, bytes);
@@ -105,14 +112,6 @@ pub fn map(id: DomainId, phys: u64, bytes: u64) -> Result<Iova, IommuError> {
         at.raw(),
     );
     Ok(at)
-}
-
-/// Hand out room for `bytes` and map nothing there: a caller that places its
-/// own mappings in it later, with [`place`].
-pub fn reserve(id: DomainId, bytes: u64) -> Result<Iova, IommuError> {
-    let mut domains = DOMAINS.lock();
-    let domain = domains.at(id);
-    domain.reserve(bytes).ok_or(IommuError::AddressesExhausted(domain.translatable()))
 }
 
 /// Put `bytes` at `phys` at `at`, room this domain handed out before and whose

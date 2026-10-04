@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::Machine;
+use common::{t14_root_bridge, Machine, OVMF_ROOT_BRIDGE};
 use toyos_abi::boot::RootBridgeWindow;
 use toyos_acpi::{
     century_of, dsdt_address, ecam_base, find_table, hpet_base, iapc_boot_arch, madt_entries,
@@ -163,10 +163,8 @@ fn the_xsdt_walk_reaches_every_entry() {
 }
 
 const ROOT_BRIDGE: u64 = 0x7f00_0000;
-const OVMF_BRIDGE: &[u8] = include_bytes!("../fixtures/ovmf-pure-efi/root-bridge-0.bin");
-const T14_BRIDGE: &[u8] = include_bytes!("../fixtures/thinkpad-t14/root-bridge-0.bin");
 
-fn bridge_windows(bytes: &'static [u8]) -> Vec<RootBridgeWindow> {
+fn bridge_windows(bytes: &[u8]) -> Vec<RootBridgeWindow> {
     let regions: &[(u64, &[u8])] = &[(ROOT_BRIDGE, bytes)];
     let mut out = [RootBridgeWindow::default(); 8];
     let count = memory_windows(Machine { regions }, ROOT_BRIDGE, &mut out).expect("bytes a firmware answered with");
@@ -178,7 +176,7 @@ fn bridge_windows(bytes: &'static [u8]) -> Vec<RootBridgeWindow> {
 #[test]
 fn the_windows_a_boot_printed_are_what_that_firmwares_own_bytes_say() {
     assert_eq!(
-        bridge_windows(OVMF_BRIDGE),
+        bridge_windows(OVMF_ROOT_BRIDGE),
         [
             RootBridgeWindow { base: 0xc000_0000, length: 0x0010_0000 },
             RootBridgeWindow { base: 0x8_0000_0000, length: 0x0010_0000 },
@@ -193,7 +191,7 @@ fn the_windows_a_boot_printed_are_what_that_firmwares_own_bytes_say() {
 #[test]
 fn a_second_firmwares_bytes_decode_to_that_machines_own_windows() {
     assert_eq!(
-        bridge_windows(T14_BRIDGE),
+        bridge_windows(&t14_root_bridge()),
         [
             RootBridgeWindow { base: 0xa200_0000, length: 0x1b00_0000 },
             RootBridgeWindow { base: 0x40_0000_0000, length: 0x20_3dc0_0000 },

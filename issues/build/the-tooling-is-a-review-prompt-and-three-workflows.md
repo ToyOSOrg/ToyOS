@@ -37,3 +37,9 @@ and the gates that held them go.
 - The nine workflows become three — `pr`, `nightly`, `publish`; then
   `a5b25a75^:src/mergehealth.rs` goes, and the ABI-lands-alone
   rule moves into the review prompt.
+
+**Ruled** (owner, 2026-10-04), on #629, which builds the content-addressed
+toolchain item, **"Design pass, then re-cut"**: "A short design pass against
+today's main (it would also ease the one-shared-fork-branch ordering
+problem), roasted, then rebuilt as a fresh PR; #629 is closed in favour of
+it."

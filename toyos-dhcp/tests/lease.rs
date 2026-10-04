@@ -1,4 +1,4 @@
-//! §D5–§D7 and §D11: renewing, rebinding, expiry, NAKs and the lease's times.
+//! Renewing, rebinding, expiry, NAKs and the lease's times.
 
 mod common;
 

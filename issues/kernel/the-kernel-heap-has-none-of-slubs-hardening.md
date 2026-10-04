@@ -19,10 +19,18 @@ free list (`mm/slub.c:2228,2290`), and `CONFIG_RANDOM_KMALLOC_CACHES` spreads
 each size over 16 caches chosen by call site and a per-boot seed
 (`include/linux/slab.h:340-341,398-401`).
 
-**Exit**: a free-list link is stored encoded with a per-boot secret and
-checked on every unlink, a size class's allocation order is drawn per boot,
-and one size is spread over 16 caches by call site and a per-boot seed. Host
-tests on the allocator: a corrupted link panics at the next unlink, and
-storing it plain passes it and reds; two seeds give two allocation orders, and
-a fixed order reds; 1000 call sites of one size use all 16 caches, and one
-cache reds.
+**Ruled** (owner, 2026-10-04, "Change the goal"): "Close the issue with the
+allocator's first stage under that stronger, ToyOS-shaped goal instead of
+copying Linux's SLUB features one by one." The goal, as put to him: no
+allocator bookkeeping stored inside objects, every free checked, and data
+kept apart from pointers. The first stage is the kernel's front of
+`issues/kernel/toyos-has-its-own-allocator.md`, which owns this issue.
+
+**Exit**: the kernel heap is that front, and its host tests hold the goal:
+no free-list link or size is stored in memory an object occupies, so a write
+past one object into a freed neighbour is followed by an allocation that
+returns sound memory; a free of a pointer the heap did not hand out, and a
+second free of one, each panic; and an allocation holding pointers never
+shares a page with one holding only data. Each of those tests reds against
+`dlmalloc`, or against the front with that property removed. The tests are
+the orchestrator's reading of the goal, not his.

@@ -1,4 +1,4 @@
-//! ICMPv4 (§9). An echo request to one of our unicast addresses is answered and routed like any
+//! ICMPv4. An echo request to one of our unicast addresses is answered and routed like any
 //! datagram. An error is generated only about a datagram to one of our unicast addresses, never
 //! about an error, a group or link-group destination, a non-initial fragment or a source that is
 //! not one host, and only when the destination's bucket and the global one both have a token.
@@ -66,7 +66,7 @@ impl Ip {
         None
     }
 
-    /// §9.5: the quote names one of our usable addresses, is not a later fragment, and carries a
+    /// The quote names one of our usable addresses, is not a later fragment, and carries a
     /// TCP or UDP header from which the error's 4-tuple is read.
     fn attribute<'a>(&mut self, iface: IfIndex, packet: &Ipv4Packet<'_>, kind: ErrorKind, quote: &Quote<'_>) -> Option<Delivery<'a>> {
         let i = self.ifaces.get(iface.0)?;
@@ -93,7 +93,7 @@ impl Ip {
         Some(Delivery::Error(TransportError { iface, transport, flow, kind, reporter: packet.source() }))
     }
 
-    /// §9.2: the reply copies identifier, sequence, data and DSCP, carries no option, ECN 0.
+    /// The reply copies identifier, sequence, data and DSCP, carries no option, ECN 0.
     fn echo(&mut self, now: Instant, iface: IfIndex, packet: &Ipv4Packet<'_>, echo: &Echo<'_>) {
         let Ok(route) = self.route(packet.source(), Source::Bound(packet.destination()), Some(iface)) else { return };
         let Ok(source) = Ipv4Source::new(packet.destination()) else { return };
@@ -110,7 +110,7 @@ impl Ip {
     }
 
     /// [udp] found no socket for `arrival`: a port unreachable, if suppression and the limiter
-    /// let one go (§9.3, §9.4).
+    /// let one go.
     pub fn port_unreachable(&mut self, now: Instant, arrival: &Arrival<'_>) {
         let now = self.clock(now);
         if arrival.cast != Cast::Unicast {

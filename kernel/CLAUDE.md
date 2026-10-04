@@ -10,7 +10,6 @@ The module header at the site owns its subsystem — read it before changing a m
 - **Every x86 Ring 0 entry clears the direction flag** — no hardware gate does it, and `memmove` sets it across `rep` operations with interrupts on; `arch::entry::ring3_naked_asm` is where it lives.
 - **`BackendGuard` masks interrupts for its whole life**, so anything written under it is an interrupt latency; a new holder bounds itself as the console drain and the userland `write` flush do.
 - **No disk wait in this kernel can park** — a transfer is waited for under ticket spinlocks, each disabling preemption.
-- **`crate::log!` may not be called inside `with_cpu`'s exclusive region unless a `panic!` follows it** — the log's readiness path re-enters `driver::pass` and wedges the machine.
 - **`drain_irqs` is the drivers' engine and nothing on it may wait** — a blocking call there empties the audio pipeline on every plug.
 - **A syscall that can block resolves its handle and clones the object out before it blocks** — a `with_object`/`with_process_data` guard held across a park is a runtime panic no compile check catches; the `SYS_FSYNC` arm in `syscall/dispatch.rs` is the pattern.
 - **A block-layer `BudgetExpired` is not-durable-yet and never a loss** — it is retried on a fresh budget above every lock; a flush that discards its pages on one splits a FAT mirror.

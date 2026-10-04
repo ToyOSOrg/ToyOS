@@ -53,11 +53,16 @@ service = true
 syscap = ["logread"]
 serves = ["log"]
 
+# `starts` is what the desktop's taskbar and launcher start. `login = true`
+# makes the local desktop a login session, so `swap` and `update` run from its
+# shell.
 [programs.compositor]
 service = true
 serves = ["compositor"]
-receives = ["soundserver", "filepicker", "launcher"]
+receives = ["soundserver", "filepicker"]
 devices = ["framebuffer", "keyboard", "mouse"]
+starts = ["terminal", "files", "/apps"]
+login = true
 
 [programs.soundserver]
 service = true
@@ -74,11 +79,13 @@ service = true
 serves = ["netstack"]
 devices = ["pci:1af4:1041"]
 
-# `launcher` is how a login's program is started holding its own row: `update`
-# and `swap` below are two such programs.
+# Every launch it makes opens a login session, the one `update` and `swap`
+# below start in.
 [programs.sshserver]
 service = true
-receives = ["netstack", "launcher"]
+receives = ["netstack"]
+starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "proctest", "toyos-ld", "sshserver", "swap", "update", "/apps"]
+login = true
 
 # `swap` is the authority to replace a running service's binary; the build
 # refuses it to any other program (`src/build.rs`). `ssh <machine> swap netstack
@@ -113,10 +120,12 @@ receives = ["compositor"]
 
 [programs.terminal]
 provides = ["surface"]
-receives = ["compositor", "launcher"]
+receives = ["compositor"]
+starts = ["shell"]
 
 [programs.shell]
-receives = ["surface", "launcher"]
+receives = ["surface"]
+starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "proctest", "toyos-ld", "sshserver", "swap", "update", "/apps"]
 
 [programs.doom]
 receives = ["compositor", "soundserver"]
@@ -151,6 +160,7 @@ receives = ["compositor", "filepicker"]
 [programs.toybox]
 receives = ["compositor", "soundserver", "surface", "power"]
 syscap = ["roster"]
+starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "proctest", "toyos-ld", "sshserver", "swap", "update", "/apps"]
 
 # Symlinks created on ROOT at build time.
 # Keys are ROOT-relative; targets are the guest paths they resolve to.

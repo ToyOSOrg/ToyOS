@@ -648,12 +648,7 @@ fn process_accept(inbox: &Arc<Inbox>, submission: &Submission) {
             let installed = process::with_process_data(|data| {
                 ops::install(
                     &mut data.handles,
-                    KObjectRef::Connection(crate::object::service::ConnectionEnd::new(
-                        conn.rx,
-                        conn.tx,
-                        conn.inbox,
-                        conn.outbox,
-                    )),
+                    KObjectRef::Connection(crate::object::service::ConnectionEnd::accepted(conn)),
                 )
             });
             match installed {

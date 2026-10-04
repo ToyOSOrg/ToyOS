@@ -131,13 +131,13 @@ impl Checker {
             let tx = &sync.tx;
             assert!(tx.una.at_or_before(tx.nxt), "PROP-01: SND.UNA past SND.NXT");
             if let Some(&left) = self.left.get(&(node, tuple)) {
-                assert!(tx.nxt.at_or_before(left), "§11.3: SND.NXT {:?} past what left, {left:?}", tx.nxt);
+                assert!(tx.nxt.at_or_before(left), "SND.NXT {:?} past what left, {left:?}", tx.nxt);
             }
             let edge = sync.rx.edge();
             if let Some(&(acked, offered)) = self.told.get(&(node, tuple)) {
                 let sent = sync.rx.last_ack_sent;
-                assert!(sent.at_or_before(acked), "§11.3: acknowledged to {sent:?}, past what left, {acked:?}");
-                assert!(edge.at_or_before(offered) || edge.since(offered) < 1 << sync.rx.shift, "§11.3: the edge {edge:?} past what left, {offered:?}");
+                assert!(sent.at_or_before(acked), "acknowledged to {sent:?}, past what left, {acked:?}");
+                assert!(edge.at_or_before(offered) || edge.since(offered) < 1 << sync.rx.shift, "the edge {edge:?} past what left, {offered:?}");
             }
             if let Some(previous) = self.edges.insert((node, tuple), edge) {
                 assert!(previous.at_or_before(edge), "PROP-04: the right edge retreated");
