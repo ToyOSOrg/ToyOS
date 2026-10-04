@@ -13,12 +13,14 @@
 //! used it — so every region a client writes is one the compositor made, and a
 //! handle a client sends stays queued until its connection closes.
 
+use std::fmt;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use toyos::shm::SharedMemory;
 use toyos::AsHandle;
 use toyos::{ipc, Connection};
+use toyos_abi::syscall::SyscallError;
 use toyos_abi::RawHandle;
 use toyos_desktop::Window;
 
@@ -159,26 +161,40 @@ pub enum DropReason {
     /// Its pipe would not take a whole frame — an entire pipe of messages it
     /// has not read.
     NotReading,
-    /// The connection is gone.
+    /// Its other end closed: the one send error that is a client's routine end.
     Gone,
+    /// The kernel refused a send to it for any other reason — a handle send
+    /// to a peer that leaves `MAX_QUEUED_BATCHES` unreceived is
+    /// `ResourceExhausted`.
+    Refused(SyscallError),
+    /// A message to it that this end will not frame.
+    TooLarge,
     /// Accepted, and never completed a first frame.
     HandshakeTimeout,
     /// Given a region to copy into, and never committed it.
     CopyTimeout,
 }
 
-impl DropReason {
-    pub fn why(self) -> &'static str {
+impl fmt::Display for DropReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::OutOfProtocol => "it sent a frame this protocol cannot describe",
-            Self::Retired => "it sent the retired clipboard region, whose handle is never taken",
-            Self::NotReading => "its pipe will not take another message and it is not reading",
-            Self::Gone => "its connection is gone",
-            Self::HandshakeTimeout => "it never finished its first message",
-            Self::CopyTimeout => "it began a copy and never committed it",
+            Self::OutOfProtocol => f.write_str("it sent a frame this protocol cannot describe"),
+            Self::Retired => {
+                f.write_str("it sent the retired clipboard region, whose handle is never taken")
+            }
+            Self::NotReading => {
+                f.write_str("its pipe will not take another message and it is not reading")
+            }
+            Self::Gone => f.write_str("its connection is gone"),
+            Self::Refused(e) => write!(f, "the kernel refused a send to it: {e}"),
+            Self::TooLarge => f.write_str("a message to it is too large to frame"),
+            Self::HandshakeTimeout => f.write_str("it never finished its first message"),
+            Self::CopyTimeout => f.write_str("it began a copy and never committed it"),
         }
     }
+}
 
+impl DropReason {
     /// Whether the going is a failure, said on stderr, rather than a client's
     /// routine end, said on stdout.
     pub fn failed(self) -> bool {
@@ -187,8 +203,19 @@ impl DropReason {
             Self::OutOfProtocol
             | Self::Retired
             | Self::NotReading
+            | Self::Refused(_)
+            | Self::TooLarge
             | Self::HandshakeTimeout
             | Self::CopyTimeout => true,
+        }
+    }
+}
+
+impl From<SyscallError> for DropReason {
+    fn from(e: SyscallError) -> Self {
+        match e {
+            SyscallError::Gone => Self::Gone,
+            e => Self::Refused(e),
         }
     }
 }
@@ -197,7 +224,8 @@ impl From<ipc::TrySendError> for DropReason {
     fn from(e: ipc::TrySendError) -> Self {
         match e {
             ipc::TrySendError::Full => Self::NotReading,
-            _ => Self::Gone,
+            ipc::TrySendError::TooLarge => Self::TooLarge,
+            ipc::TrySendError::Syscall(e) => e.into(),
         }
     }
 }
@@ -213,11 +241,11 @@ pub fn mark_dead(dead: &mut Vec<Dead>, handle: RawHandle, reason: DropReason) {
 
 pub fn announce(dead: &[Dead]) {
     for (handle, reason) in dead {
-        let (client, why) = (handle.0, reason.why());
+        let client = handle.0;
         if reason.failed() {
-            eprintln!("compositor: dropping client {client} — {why}");
+            eprintln!("compositor: dropping client {client} — {reason}");
         } else {
-            println!("compositor: dropping client {client} — {why}");
+            println!("compositor: dropping client {client} — {reason}");
         }
     }
 }
@@ -283,5 +311,27 @@ pub fn deliver_with_handles<T: ipc::IpcPayload>(
 pub fn deliver_signal(dead: &mut Vec<Dead>, win: &Win, msg_type: u32) {
     if let Err(e) = win.client.conn.try_signal(msg_type) {
         mark_dead(dead, win.client.conn.as_handle(), e.into());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every error the ABI can encode.
+    fn every_syscall_error() -> impl Iterator<Item = SyscallError> {
+        (0..=255).filter_map(|n| SyscallError::from_u64(u64::MAX - n))
+    }
+
+    #[test]
+    fn only_a_closed_peer_ends_a_send_without_a_failure() {
+        for e in every_syscall_error() {
+            let closed = e == SyscallError::Gone;
+            assert_eq!(DropReason::from(e).failed(), !closed, "a handle send's {e:?}");
+            let reason = DropReason::from(ipc::TrySendError::Syscall(e));
+            assert_eq!(reason.failed(), !closed, "a frame's {e:?}");
+        }
+        assert!(DropReason::from(ipc::TrySendError::Full).failed());
+        assert!(DropReason::from(ipc::TrySendError::TooLarge).failed());
     }
 }
