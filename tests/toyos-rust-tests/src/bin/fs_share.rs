@@ -12,8 +12,9 @@
 //!   the shell is an instance of its own: it opens a file under `/home` and
 //!   streams a child's output into it, and the bytes are read back here;
 //! - last, it opens more connections than any one instance may have waiting
-//!   on their hello: the ones past its share are let go as the server takes
-//!   them, so the first to end is not the first opened, which the server would
+//!   on their hello: the ones past its share are answered `ResourceExhausted`
+//!   and let go as the server takes them, so a client connecting then is told
+//!   so, and the first to end is not the first opened, which the server would
 //!   otherwise let go first, at its handshake timeout. Last, because the
 //!   server reaps the ones this job drops only when it next reads them, and
 //!   until then they are this instance's share.
@@ -128,6 +129,10 @@ fn main() {
     // Connections that never say hello.
     let opened: Vec<Connection> =
         (0..UNANSWERED).map(|_| names.open("fs:/home").expect("connect to /home")).collect();
+    match Dir::connect(names, "fs:/home") {
+        Err(SyscallError::ResourceExhausted) => println!("  a client past the handshake share is told so"),
+        other => red.push(format!("a client past the handshake share was answered {:?}", other.map(|_| ()))),
+    }
     let poller = Poller::new(UNANSWERED as u32);
     for (i, conn) in opened.iter().enumerate() {
         poller.watch(conn, READABLE, i as u64);
