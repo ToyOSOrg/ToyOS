@@ -6,7 +6,9 @@
 //! Three reads: `idle0` and `idle1` either side of [`IDLE`], and `spin` after
 //! [`SPIN`] iterations on a thread per CPU begun at `idle1`. Each read's
 //! records follow a line with the clock after it and what the read took, a
-//! whole round each, none joining another's.
+//! whole round each, none joining another's. **Nothing is printed until all
+//! three are taken**: a printed line reaches the stick within the second,
+//! through the `/log` fileserver on that fileserver's CPU.
 //!
 //! **Then `loaded`: how late the round's kick reaches each CPU** while a thread
 //! per CPU spawns a program that exits at once, which is the load Linux's
@@ -118,14 +120,25 @@ fn loaded(cap: &SysCap) {
     }
 }
 
-fn read(cap: &SysCap, phase: &str) {
+/// One read: the clock after it, what it took, and every CPU's records.
+struct Read {
+    at: u64,
+    took: Duration,
+    records: Vec<Record>,
+}
+
+fn read(cap: &SysCap) -> Read {
     let mut raw = vec![RawRecord::EMPTY; syscall::cpu_count() as usize];
     let asked = Instant::now();
     let n = cap.counters(&mut raw).expect("the estate's capability reads the counters");
     let took = asked.elapsed();
-    println!("counters_metal {phase}: at {} ns, the read took {} ns", toyos_abi::clock::nanos_since_boot(), took.as_nanos());
-    let records: Vec<Record> = raw[..n].iter().map(|r| Record::decode(r).expect("a record that decodes")).collect();
-    for (path, value) in toyos_inspect::kernel::render(&records).expect("one record per cpu") {
+    let at = toyos_abi::clock::nanos_since_boot();
+    Read { at, took, records: raw[..n].iter().map(|r| Record::decode(r).expect("a record that decodes")).collect() }
+}
+
+fn print(phase: &str, read: &Read) {
+    println!("counters_metal {phase}: at {} ns, the read took {} ns", read.at, read.took.as_nanos());
+    for (path, value) in toyos_inspect::kernel::render(&read.records).expect("one record per cpu") {
         println!("counters_metal {phase}: {}", toyos_inspect::line(&path, &value));
     }
 }
@@ -135,9 +148,9 @@ fn main() {
         return;
     }
     let cap: SysCap = Endowments::get().take(SYSCAP_LABEL).expect("test-runner endows a capability");
-    read(&cap, "idle0");
+    let idle0 = read(&cap);
     std::thread::sleep(IDLE);
-    read(&cap, "idle1");
+    let idle1 = read(&cap);
     std::thread::scope(|s| {
         for _ in 0..syscall::cpu_count() {
             s.spawn(|| {
@@ -148,6 +161,9 @@ fn main() {
             });
         }
     });
-    read(&cap, "spin");
+    let spin = read(&cap);
+    for (phase, read) in [("idle0", &idle0), ("idle1", &idle1), ("spin", &spin)] {
+        print(phase, read);
+    }
     loaded(&cap);
 }
