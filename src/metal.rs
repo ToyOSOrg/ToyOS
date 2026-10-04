@@ -767,6 +767,11 @@ pub const FLASHABLE: &[&str] = &[
     // each printing what it asked for and what it observed. It establishes and
     // drops them and reaches nothing else.
     "sched-operation-nesting",
+    // Every IOMMU unit left translating, remapping and queueing just before the
+    // kernel programs it, which switches each of those off again first. It
+    // writes only the units' registers, which a reset returns to firmware, and
+    // tables in memory this boot owns.
+    "iommu-firmware-left",
     // It seals this boot's own record under an identity one bit from this
     // stick's, so the pass that finds it clears it and boots a kernel. The page
     // is memory the loader allocated and the machine is what it was after.
