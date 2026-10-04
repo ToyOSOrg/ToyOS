@@ -665,7 +665,7 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
             // A `push` here would grow the vector, and growing it is the death
             // above. What was dropped is not reported: the page that carried
             // that refusal off this boot is gone with the claim, and
-            // `issues/panic-path/the-loaders-truncated-map-refusal-is-executed-by-nothing.md`
+            // `issues/the-loaders-truncated-map-refusal-is-executed-by-nothing.md`
             // holds what is owed.
             return;
         }

@@ -83,7 +83,7 @@ pub fn write() -> Measured {
 ///
 /// **The staged file is closed before the clock starts**, though the read is
 /// answered from the file server's cache
-/// (`issues/hardware/metalprobes-usb-read-is-answered-from-fileservers-cache.md`).
+/// (`issues/metalprobes-usb-read-is-answered-from-fileservers-cache.md`).
 pub fn read() -> Measured {
     let blob = payload();
     {

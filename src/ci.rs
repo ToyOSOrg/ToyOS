@@ -368,7 +368,7 @@ pub(crate) const CONTROLS: &[Control] = &[
         Fails("a_poll_registered_racing_a_post_in_place_completes_exactly_once"),
     ]),
     // Reproduces an open defect
-    // (`issues/kernel/steal-probe-node-dies-with-its-victim.md`) rather than
+    // (`issues/steal-probe-node-dies-with-its-victim.md`) rather than
     // proving a lie is caught, and goes with its fix.
     Control {
         krate: KERNEL_LOOM,

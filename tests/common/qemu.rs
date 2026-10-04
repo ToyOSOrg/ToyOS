@@ -414,7 +414,7 @@ const WINDOW_LINES: usize = 40;
 /// 2026-08-18 that is what a `DOUBLE FAULT on CPU 1` cost — the wait named the
 /// death in one sentence, the kernel's report sat in `TestResult::serial`, and
 /// the arm printed `stdout`
-/// (`issues/kernel/a-double-fault-on-cpu-1-under-a-wide-suite.md`). Fixing
+/// (`issues/a-double-fault-on-cpu-1-under-a-wide-suite.md`). Fixing
 /// the arms would have fixed the arms. What is fixed here is that the sentence
 /// cannot be built without the capture: [`Self::new`] is the only constructor
 /// there is and the capture is one of its two arguments, so a wait that reports
@@ -1988,7 +1988,7 @@ fn qemu_command(
 
     // `virt` puts RAM at 1 GiB and AAVMF allocates from its top, so with 4 GiB
     // the loader's allocations land past the 4 GiB its boot map reaches and it
-    // refuses the boot: issues/boot-media/the-boot-map-reaches-4-gib-and-firmware-decides-what-lands-in-it.md.
+    // refuses the boot: issues/the-boot-map-reaches-4-gib-and-firmware-decides-what-lands-in-it.md.
     let memory = match arch {
         Arch::X86_64 => "4G",
         Arch::Aarch64 => "2G",

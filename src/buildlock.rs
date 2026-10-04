@@ -208,6 +208,13 @@ pub fn compiler_shared(root: &Path, what: &str) -> Guard {
     acquire(&git_lock_dir(root), LOCK_SH, what, BUILD)
 }
 
+/// The global lock exclusively: what the primary holds, inside its worktree
+/// lock held exclusively, while it moves its fork checkout, which its
+/// [`Scope::Global`] phases build from with the worktree lock put down.
+pub fn global_exclusive(root: &Path, what: &str) -> Guard {
+    acquire(&git_lock_dir(root), LOCK_EX, what, BUILD)
+}
+
 /// Exclusive lock over the shared cargo artifact paths.
 ///
 /// Cargo keys an artifact path on (crate, target, profile) and nothing else, so
@@ -629,6 +636,16 @@ pub(crate) mod tests {
         Elsewhere::hold("buildlock::tests::child_role", &env)
     }
 
+    /// A [`Scope::Global`] phase of `root`, as a bootstrap holds it, in a process of its own.
+    pub(crate) fn global_phase_elsewhere(root: &Path) -> Elsewhere {
+        held_elsewhere(root, "global-phase")
+    }
+
+    /// Whether an exclusive acquirer of `root`'s global lock is queued for it.
+    pub(crate) fn global_queued(root: &Path) -> bool {
+        !try_lock(&open_lock_file(&git_lock_dir(root).join("intent")), LOCK_SH)
+    }
+
     /// What `role` of [`child_role`] takes in `root`, held by a process of its own.
     fn held_elsewhere(root: &Path, role: &str) -> Elsewhere {
         Elsewhere::hold("buildlock::tests::child_role", &[(ROLE, OsStr::new(role)), (ROOT, root.as_os_str())])
@@ -766,6 +783,10 @@ pub(crate) mod tests {
             "use-sysroot" => {
                 let _using = keyed_using(&root, Keyed::Sysroot, &Key::parse(&std::env::var(KEY).unwrap()).unwrap());
                 hold_until_released();
+            }
+            "global-phase" => {
+                let mut held = shared(&root, "child");
+                held.act_if(Scope::Global, "child global phase", || Some(()), |()| hold_until_released());
             }
             "clean" | "clean-unlocked" => {
                 touch(&root.join("cleaner-ready"));

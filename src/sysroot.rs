@@ -19,7 +19,8 @@
 //! it, and a crate built against a sysroot learns which targets' libraries
 //! moved ([`Identity`]). Each build refuses dep-info that says otherwise.
 //!
-//! **Each worktree builds std in its own fork checkout.** The primary builds in its `rust/`;
+//! **Each worktree builds std in its own fork checkout.** The primary builds in its `rust/`,
+//! moved to the commit its tree pins;
 //! a linked worktree in its own `rust/`, made on first need as a git worktree of
 //! the primary's fork repository at the commit this tree pins ([`fork_checkout`]).
 //! `library/std` names `toyos-abi` and `toyos` as `../../../`, so each
@@ -380,7 +381,7 @@ pub(crate) fn gitlink(checkout: &Path, path: &str) -> String {
 pub(crate) enum Links {
     /// Refused by name.
     Refused,
-    /// Left out of the identity (`issues/build/a-compiler-key-reads-no-symbolic-link.md`).
+    /// Left out of the identity (`issues/a-compiler-key-reads-no-symbolic-link.md`).
     Skipped,
 }
 
@@ -511,21 +512,28 @@ fn pinned_fork(root: &Path) -> String {
     }
 }
 
-/// The fork checkout `root`'s std is built in.
+/// The fork checkout `root`'s std is built in, at the commit `root`'s tree pins.
 ///
-/// The primary's is its own `rust/`. A linked worktree's `rust/` starts as the
-/// empty stub `git worktree add` leaves; it is made here, the first time it is
-/// needed, as a git worktree of the primary's fork repository at the commit
-/// this tree pins, sharing its objects — and `library/backtrace` the same way
-/// from the primary's, or by git's own clone where the primary does not hold
-/// that commit.
+/// The primary's is its own `rust/`, used where it is not initialised yet, which
+/// whoever initialises it does at the pin. It is no workspace, so one whose
+/// `HEAD` is not the pin is moved there, under the global lock held exclusively,
+/// which the primary's toolchain phases hold while they build from it; refused
+/// by name if it has local changes, or does not hold the pinned commit.
 ///
-/// A checkout that exists is used as it stands, which is where an agent edits
-/// the fork; one whose `HEAD` is neither the pinned commit nor ahead of it is
-/// moved there itself, fetching the commit from the primary's repository first
-/// if the checkout does not already hold it, unless the checkout has local
-/// changes, in which case it is refused by name rather than moved out from
-/// under whoever made them.
+/// A linked worktree's `rust/` starts as the empty stub `git worktree add`
+/// leaves; it is made here, the first time it is needed, as a git worktree of
+/// the primary's fork repository at the pin, sharing its objects — and
+/// `library/backtrace` the same way from the primary's, or by git's own clone
+/// where the primary does not hold that commit. It is where an agent edits the
+/// fork, so one ahead of the pin is used as it stands; one neither at the pin
+/// nor ahead of it is moved there, fetching the commit from the primary's
+/// repository first if it does not hold it, and refused by name if it has local
+/// changes rather than moved out from under whoever made them.
+///
+/// Every nested submodule checked out in it moves with it to the commit the pin
+/// records there, refused by name where it does not hold that commit, or is at
+/// a commit that neither the checkout's `HEAD` nor the pin records there, which
+/// only its own `HEAD` may record.
 ///
 /// Every build in a worktree asks this at once, so the making and the move are
 /// each decided and done under the worktree's lock held exclusively
@@ -534,78 +542,131 @@ fn pinned_fork(root: &Path) -> String {
 pub fn fork_checkout(root: &Path, lock: &mut Held) -> PathBuf {
     let fork = root.join("rust");
     let primary = match toolchain::owner(root) {
-        Owner::Us => return fork,
+        Owner::Us if !fork.join(".git").exists() => return fork,
+        Owner::Us => None,
         Owner::Installed => panic!("an installed toolchain has no fork checkout to build std in"),
-        Owner::Elsewhere(primary) => primary,
+        Owner::Elsewhere(primary) => Some(primary),
     };
     let pinned = pinned_fork(root);
-    lock.act_if(
-        Scope::Worktree,
-        "make the fork checkout",
-        || (!fork.join(".git").exists()).then_some(()),
-        |()| {
-            let stub = fs::read_dir(&fork).map_or(0, |d| d.count());
-            assert!(
-                stub == 0,
-                "{} is neither a fork checkout nor the empty stub a worktree starts with",
-                fork.display()
-            );
-            let _ = fs::remove_dir(&fork);
-            eprintln!("Making {} a fork checkout at {pinned} (a git worktree of the primary's)", fork.display());
-            git_run(&primary.join("rust"), &["worktree", "add", "--detach", path_str(&fork), &pinned]);
-            let backtrace = git_out(&fork, &["ls-tree", "HEAD", "library/backtrace"]);
-            let commit = backtrace.split_whitespace().nth(2).unwrap_or_else(|| {
-                panic!("{} pins no library/backtrace: {backtrace:?}", fork.display())
-            });
-            let theirs = primary.join("rust/library/backtrace");
-            let held = Command::new("git")
-                .args(["cat-file", "-e", &format!("{commit}^{{commit}}")])
-                .current_dir(&theirs)
-                .status()
-                .is_ok_and(|s| s.success());
-            let at = fork.join("library/backtrace");
-            if held {
-                let _ = fs::remove_dir(&at);
-                git_run(&theirs, &["worktree", "add", "--detach", path_str(&at), commit]);
-            } else {
-                git_run(&fork, &["submodule", "update", "--init", "library/backtrace"]);
-            }
-        },
-    );
+    if let Some(primary) = &primary {
+        lock.act_if(
+            Scope::Worktree,
+            "make the fork checkout",
+            || (!fork.join(".git").exists()).then_some(()),
+            |()| {
+                let stub = fs::read_dir(&fork).map_or(0, |d| d.count());
+                assert!(
+                    stub == 0,
+                    "{} is neither a fork checkout nor the empty stub a worktree starts with",
+                    fork.display()
+                );
+                let _ = fs::remove_dir(&fork);
+                eprintln!("Making {} a fork checkout at {pinned} (a git worktree of the primary's)", fork.display());
+                git_run(&primary.join("rust"), &["worktree", "add", "--detach", path_str(&fork), &pinned]);
+                let backtrace = git_out(&fork, &["ls-tree", "HEAD", "library/backtrace"]);
+                let commit = backtrace.split_whitespace().nth(2).unwrap_or_else(|| {
+                    panic!("{} pins no library/backtrace: {backtrace:?}", fork.display())
+                });
+                let theirs = primary.join("rust/library/backtrace");
+                let at = fork.join("library/backtrace");
+                if holds(&theirs, commit) {
+                    let _ = fs::remove_dir(&at);
+                    git_run(&theirs, &["worktree", "add", "--detach", path_str(&at), commit]);
+                } else {
+                    git_run(&fork, &["submodule", "update", "--init", "library/backtrace"]);
+                }
+            },
+        );
+    }
     lock.act_if(
         Scope::Worktree,
         "move the fork checkout to its pin",
         || {
             let head = git_out(&fork, &["rev-parse", "HEAD"]).trim().to_string();
-            let ahead = Command::new("git")
-                .args(["merge-base", "--is-ancestor", &pinned, &head])
-                .current_dir(&fork)
-                .status()
-                .is_ok_and(|s| s.success());
+            let ahead = primary.is_some()
+                && Command::new("git")
+                    .args(["merge-base", "--is-ancestor", &pinned, &head])
+                    .current_dir(&fork)
+                    .status()
+                    .is_ok_and(|s| s.success());
             (head != pinned && !ahead).then_some(head)
         },
         |head| {
-            let dirty = git_out(&fork, &["status", "--porcelain", "--ignore-submodules=none"]);
-            assert!(
-                dirty.is_empty(),
-                "{} is at {head} with uncommitted work, and this tree pins the fork at {pinned}, which \
-                 that is not ahead of: a build here would compile a std this tree does not name, and \
-                 moving the checkout would lose that work.\n{dirty}",
-                fork.display(),
-            );
-            let held = Command::new("git")
-                .args(["cat-file", "-e", &format!("{pinned}^{{commit}}")])
-                .current_dir(&fork)
-                .status()
-                .is_ok_and(|s| s.success());
-            if !held {
-                git_run(&fork, &["fetch", path_str(&primary.join("rust")), &pinned]);
+            let _global = primary.is_none().then(|| buildlock::global_exclusive(root, "move the fork checkout to its pin"));
+            if !holds(&fork, &pinned) {
+                match &primary {
+                    Some(primary) => git_run(&fork, &["fetch", path_str(&primary.join("rust")), &pinned]),
+                    None => panic!(
+                        "{} is at {head}, and this tree pins the fork at {pinned}, which it does not hold: \
+                         `git -C {} fetch origin {pinned}` fetches it",
+                        fork.display(),
+                        fork.display(),
+                    ),
+                }
             }
+            let recorded: Vec<(String, String)> = git_out(&fork, &["ls-tree", "-r", &pinned])
+                .lines()
+                .filter_map(|entry| {
+                    let (meta, path) = entry.split_once('\t')?;
+                    match meta.split_whitespace().collect::<Vec<_>>().as_slice() {
+                        ["160000", "commit", commit] => Some((path.to_string(), commit.to_string())),
+                        _ => None,
+                    }
+                })
+                .collect();
+            let nested: Vec<(PathBuf, String)> = recorded
+                .iter()
+                .map(|(path, commit)| (fork.join(path), commit.clone()))
+                .filter(|(at, commit)| at.join(".git").exists() && git_out(at, &["rev-parse", "HEAD"]).trim() != commit)
+                .collect();
+            for (at, commit) in &nested {
+                assert!(
+                    holds(at, commit),
+                    "{} does not hold {commit}, which the fork's {pinned} records there: \
+                     `git -C {} fetch origin {commit}` fetches it",
+                    at.display(),
+                    at.display(),
+                );
+            }
+            // A nested submodule checked out at the commit the pin records there, and nothing more, is no work: a move
+            // killed before its last step leaves it so. One at any other commit may hold a commit nothing else records.
+            let status = git_out(&fork, &["status", "--porcelain=v2", "--ignore-submodules=none"]);
+            let work: Vec<String> = status
+                .lines()
+                .filter_map(|entry| {
+                    let path = entry.strip_prefix("1 .M SC.. ").and_then(|rest| rest.splitn(6, ' ').nth(5));
+                    let Some((path, commit)) = path.and_then(|path| recorded.iter().find(|(p, _)| p == path)) else {
+                        return Some(entry.to_string());
+                    };
+                    let at = fork.join(path);
+                    let at_head = git_out(&at, &["rev-parse", "HEAD"]).trim().to_string();
+                    (at_head != *commit).then(|| {
+                        format!("{} is at {at_head}, not at {commit}, what {pinned} records there", at.display())
+                    })
+                })
+                .collect();
+            assert!(
+                work.is_empty(),
+                "{} is at {head} with uncommitted work, and this tree pins the fork at {pinned}: a build \
+                 here would compile a std this tree does not name, and moving the checkout would lose \
+                 that work.\n{}",
+                fork.display(),
+                work.join("\n"),
+            );
+            for (at, commit) in &nested {
+                git_run(at, &["checkout", "--detach", "-q", commit]);
+            }
+            // Last, so a move killed before it is asked for again: `HEAD` alone decides.
             git_run(&fork, &["checkout", "--detach", "-q", &pinned]);
-            eprintln!("{} was at {head}, behind this tree's pin {pinned}: checked it out", fork.display());
+            eprintln!("{} was at {head}, and this tree pins {pinned}: checked it out", fork.display());
         },
     );
     fork
+}
+
+/// Whether the repository at `dir` holds `commit`.
+fn holds(dir: &Path, commit: &str) -> bool {
+    git_try(dir, &["cat-file", "-e", &format!("{commit}^{{commit}}")]).is_ok()
 }
 
 /// What a sysroot's [`SOURCES`] says: its key, the fork checkout its std was
@@ -1416,7 +1477,8 @@ mod tests {
     }
 
     /// A primary with the fork as its `rust` submodule at `C1`, the fork's `C2`
-    /// one library change later, and a linked worktree whose tree pins `C2`.
+    /// one library change and one `library/backtrace` commit later, and a linked
+    /// worktree whose tree pins `C2`.
     fn two_pins(base: &Path) -> (PathBuf, PathBuf, String, String) {
         let bt = base.join("backtrace-src");
         fs::create_dir_all(&bt).unwrap();
@@ -1424,6 +1486,9 @@ mod tests {
         write(&bt.join("lib.rs"), "pub fn trace() {}\n");
         git(&bt, &["add", "-A"]);
         git(&bt, &["commit", "-qm", "backtrace"]);
+        let b1 = git(&bt, &["rev-parse", "HEAD"]);
+        write(&bt.join("lib.rs"), "pub fn trace_more() {}\n");
+        git(&bt, &["commit", "-qam", "backtrace, later"]);
 
         let fork = base.join("fork-src");
         fs::create_dir_all(&fork).unwrap();
@@ -1432,10 +1497,12 @@ mod tests {
         write(&fork.join("compiler/lib.rs"), "\n");
         write(&fork.join("x.py"), "\n");
         git(&fork, &["submodule", "add", "-q", bt.to_str().unwrap(), "library/backtrace"]);
+        git(&fork.join("library/backtrace"), &["checkout", "-q", &b1]);
         git(&fork, &["add", "-A"]);
         git(&fork, &["commit", "-qm", "C1"]);
         let c1 = git(&fork, &["rev-parse", "HEAD"]);
         write(&fork.join("library/std/src/lib.rs"), "pub fn b() {}\n");
+        git(&fork.join("library/backtrace"), &["checkout", "-q", "-"]);
         git(&fork, &["commit", "-qam", "C2"]);
         let c2 = git(&fork, &["rev-parse", "HEAD"]);
 
@@ -1494,12 +1561,45 @@ mod tests {
         git(&fork, &["checkout", "-q", &c1]);
         assert_eq!(fork_checkout(&linked, &mut lock), fork);
         assert_eq!(git(&fork, &["rev-parse", "HEAD"]), c2, "a checkout behind its pin was not moved to it");
+        let behind = git(&fork, &["rev-parse", &format!("{c1}:library/backtrace")]);
+        git(&fork.join("library/backtrace"), &["checkout", "-q", "--detach", &behind]);
+        git(&fork, &["checkout", "-q", &c1]);
+        assert_eq!(fork_checkout(&linked, &mut lock), fork);
+        assert_eq!(
+            git(&fork.join("library/backtrace"), &["rev-parse", "HEAD"]),
+            git(&fork, &["rev-parse", "HEAD:library/backtrace"]),
+            "a nested submodule was left behind its pin"
+        );
+        assert_eq!(git(&primary.join("rust"), &["status", "--porcelain"]), before, "the primary's nested submodule moved");
 
         // One with local changes is never moved out from under whoever made them.
         git(&fork, &["checkout", "-q", &c1]);
         write(&fork.join("library/std/src/lib.rs"), "pub fn uncommitted() {}\n");
         let message = refusal(|| drop(fork_checkout(&linked, &mut lock)));
         assert!(message.contains(&c1) && message.contains(&c2), "{message}");
+        git(&fork, &["checkout", "-q", "--", "."]);
+
+        // Nor one whose nested submodule holds a commit of the agent's that no gitlink records yet.
+        let nested = fork.join("library/backtrace");
+        git(&nested, &["checkout", "-q", "--detach", &behind]);
+        write(&nested.join("lib.rs"), "pub fn trace_mine() {}\n");
+        git(&nested, &["commit", "-qam", "the agent's own, not yet recorded"]);
+        let mine = git(&nested, &["rev-parse", "HEAD"]);
+        let recorded = git(&fork, &["rev-parse", &format!("{c2}:library/backtrace")]);
+        let message = refusal(|| drop(fork_checkout(&linked, &mut lock)));
+        assert!(message.contains(&mine) && message.contains(&recorded), "{message}");
+        assert_eq!(git(&nested, &["rev-parse", "HEAD"]), mine, "a nested commit nothing records was moved off");
+        assert_eq!(git(&fork, &["rev-parse", "HEAD"]), c1, "a checkout over a nested commit nothing records was moved");
+
+        // Nor when that commit sits on top of what the pin records there.
+        git(&nested, &["checkout", "-q", "--detach", &recorded]);
+        write(&nested.join("lib.rs"), "pub fn trace_mine_later() {}\n");
+        git(&nested, &["commit", "-qam", "the agent's own, on the pin's record"]);
+        let mine = git(&nested, &["rev-parse", "HEAD"]);
+        let message = refusal(|| drop(fork_checkout(&linked, &mut lock)));
+        assert!(message.contains(&mine) && message.contains(&recorded), "{message}");
+        assert_eq!(git(&nested, &["rev-parse", "HEAD"]), mine, "a nested commit on the pin's record was moved off");
+        assert_eq!(git(&fork, &["rev-parse", "HEAD"]), c1, "a checkout over a nested commit on the pin's record was moved");
     }
 
     /// **Twelve builds starting at once in a worktree make its fork checkout
@@ -1545,6 +1645,126 @@ mod tests {
 
         assert_eq!(git(&primary.join("rust"), &["rev-parse", "HEAD"]), c1);
         assert!(refused.as_ref().is_err_and(|why| why.contains("linked worktree")), "{refused:?}");
+    }
+
+    /// **The primary's fork checkout is the commit its tree pins**: one behind
+    /// the pin, as a `git pull` leaves it, and one ahead of it are moved there,
+    /// each nested submodule checked out in it with it; one whose nested
+    /// gitlink alone is moved is no work and moves too; one with local changes,
+    /// or pinned at a commit it or a nested submodule does not hold, is refused
+    /// by name and not moved; one not initialised yet is left to whoever
+    /// initialises it, and git is run in no other repository.
+    #[test]
+    fn the_primary_s_fork_checkout_is_moved_to_its_pin() {
+        let base = TempDir::new("fork-primary");
+        let (primary, _linked, c1, c2) = two_pins(&base);
+        let fork = primary.join("rust");
+        let nested = fork.join("library/backtrace");
+        let pin = |commit: &str| {
+            git(&primary, &["update-index", "--cacheinfo", &format!("160000,{commit},rust")]);
+            git(&primary, &["commit", "-qm", "a pin"]);
+        };
+        let head = || git(&fork, &["rev-parse", "HEAD"]);
+        let recorded = |commit: &str| git(&fork, &["rev-parse", &format!("{commit}:library/backtrace")]);
+        let nested_head = || git(&nested, &["rev-parse", "HEAD"]);
+        let mut lock = buildlock::shared(&primary, "a build");
+
+        pin(&c2);
+        assert_eq!(fork_checkout(&primary, &mut lock), fork);
+        assert_eq!(head(), c2, "a checkout behind its pin was not moved to it");
+        assert_eq!(nested_head(), recorded(&c2), "a nested submodule was left behind its pin");
+
+        pin(&c1);
+        assert_eq!(fork_checkout(&primary, &mut lock), fork);
+        assert_eq!(head(), c1, "a checkout ahead of its pin was kept");
+        assert_eq!(nested_head(), recorded(&c1), "a nested submodule was left ahead of its pin");
+
+        git(&nested, &["checkout", "-q", "--detach", &recorded(&c2)]);
+        pin(&c2);
+        assert_eq!(fork_checkout(&primary, &mut lock), fork);
+        assert_eq!((head(), nested_head()), (c2.clone(), recorded(&c2)), "a moved nested gitlink was read as work");
+
+        pin(&c1);
+        assert_eq!(fork_checkout(&primary, &mut lock), fork);
+        pin(&c2);
+        write(&fork.join("library/std/src/lib.rs"), "pub fn uncommitted() {}\n");
+        let said = refusal(|| drop(fork_checkout(&primary, &mut lock)));
+        assert!(said.contains(&format!("is at {c1} with uncommitted work")) && said.contains(&c2), "{said}");
+        assert_eq!(head(), c1, "a checkout with local changes was moved");
+        git(&fork, &["checkout", "-q", "--", "."]);
+
+        let upstream = base.join("fork-src");
+        write(&upstream.join("library/std/src/lib.rs"), "pub fn c() {}\n");
+        git(&upstream, &["commit", "-qam", "C3"]);
+        let c3 = git(&upstream, &["rev-parse", "HEAD"]);
+        pin(&c3);
+        let said = refusal(|| drop(fork_checkout(&primary, &mut lock)));
+        assert!(said.contains(&format!("`git -C {} fetch origin {c3}` fetches it", fork.display())), "{said}");
+        assert_eq!(head(), c1, "a checkout was moved to a commit it does not hold");
+
+        let bt = base.join("backtrace-src");
+        write(&bt.join("lib.rs"), "pub fn trace_most() {}\n");
+        git(&bt, &["commit", "-qam", "backtrace, latest"]);
+        let b3 = git(&bt, &["rev-parse", "HEAD"]);
+        git(&upstream.join("library/backtrace"), &["pull", "-q"]);
+        git(&upstream, &["commit", "-qam", "C4"]);
+        let c4 = git(&upstream, &["rev-parse", "HEAD"]);
+        git(&fork, &["-c", "fetch.recurseSubmodules=false", "fetch", "-q", path_str(&upstream), &c4]);
+        pin(&c4);
+        let said = refusal(|| drop(fork_checkout(&primary, &mut lock)));
+        assert!(said.contains(&format!("`git -C {} fetch origin {b3}` fetches it", nested.display())), "{said}");
+        assert_eq!((head(), nested_head()), (c1.clone(), recorded(&c1)), "a move half-made while a nested commit was missing");
+
+        fs::remove_dir_all(&fork).unwrap();
+        fs::create_dir(&fork).unwrap();
+        let superproject = git(&primary, &["rev-parse", "HEAD"]);
+        assert_eq!(fork_checkout(&primary, &mut lock), fork);
+        assert_eq!(git(&primary, &["rev-parse", "HEAD"]), superproject, "git ran in the superproject");
+    }
+
+    /// **The primary's fork checkout moves only while no toolchain phase builds
+    /// from it**: another primary process's bootstrap holds the global lock
+    /// exclusively with the worktree lock put down, and the move queues for it
+    /// and moves nothing until it is let go.
+    #[test]
+    fn the_primary_s_fork_checkout_moves_only_while_no_toolchain_phase_builds_from_it() {
+        let base = TempDir::new("fork-primary-global");
+        let (primary, _linked, c1, c2) = two_pins(&base);
+        let fork = primary.join("rust");
+        git(&primary, &["update-index", "--cacheinfo", &format!("160000,{c2},rust")]);
+        git(&primary, &["commit", "-qm", "pins C2"]);
+        let bootstrap = buildlock::tests::global_phase_elsewhere(&primary);
+        std::thread::scope(|scope| {
+            let mover = scope.spawn(|| drop(fork_checkout(&primary, &mut buildlock::shared(&primary, "a build"))));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while !buildlock::tests::global_queued(&primary) {
+                assert!(!mover.is_finished(), "the move took no global lock");
+                assert!(std::time::Instant::now() < deadline, "the move never queued for the global lock");
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert_eq!(git(&fork, &["rev-parse", "HEAD"]), c1, "the checkout moved under a running bootstrap");
+            bootstrap.release();
+            mover.join().unwrap();
+        });
+        assert_eq!(git(&fork, &["rev-parse", "HEAD"]), c2);
+    }
+
+    /// **The primary's bootstrap decides from the `compiler/` its tree pins**:
+    /// a fork checkout left at a commit naming another `compiler/` reads as a
+    /// stale compiler, and once it is moved to the pin the compiler the primary
+    /// built is current again.
+    #[test]
+    fn the_primary_s_bootstrap_decides_from_the_pinned_compiler() {
+        let scratch = TempDir::new("fork-primary-compiler");
+        let (primary, rust_dir, [_, a, _]) = crate::compiler::tests::estate(&scratch);
+        let pinned = git(&rust_dir, &["rev-parse", "HEAD"]);
+        git(&rust_dir, &["checkout", "-q", "--detach", &git(&a.join("rust"), &["rev-parse", "HEAD"])]);
+        assert!(!compiler::primary_is_current(&rust_dir), "another compiler/ read as the one built");
+
+        let mut lock = buildlock::shared(&primary, "a build");
+        assert_eq!(fork_checkout(&primary, &mut lock), rust_dir);
+        assert_eq!(git(&rust_dir, &["rev-parse", "HEAD"]), pinned);
+        assert!(compiler::primary_is_current(&rust_dir), "the pinned compiler/ read as stale");
     }
 
     /// The primary's compiler under `base`: `rustc` and `rust-lld`, and the C

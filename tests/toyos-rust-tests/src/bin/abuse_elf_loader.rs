@@ -510,8 +510,8 @@ fn main() {
     //     single Vec. Under the old growth-by-doubling that overshot to 4 MiB
     //     on the push.
     //
-    //     This case is also the actuator for the allocator-lock defect
-    //     (`issues/panic-path/`): the >2 MiB assert fires inside
+    //     This case is also the actuator for the allocator-lock defect:
+    //     the >2 MiB assert fires inside
     //     `KernelAllocator::alloc` *while it holds the dlmalloc lock*, so the
     //     recovered CPU's next allocation spins on a lock the dead thread
     //     still owns. Nothing else in the suite stages that, which is part of

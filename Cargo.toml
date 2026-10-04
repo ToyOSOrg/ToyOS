@@ -175,7 +175,7 @@ tar = { version = "0.4.46", default-features = false }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 # Every request the build system makes, GitHub's API and the crates.io index,
 # where curl is a host's tool: rustls on ring, the one TLS provider the tree
-# takes (`issues/design-debt/the-internet-clients-work-unchanged.md`), whose C
+# takes (`issues/the-internet-clients-work-unchanged.md`), whose C
 # and assembly the host's `cc` compiles.
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 # The commit an image is built from, its time and whether the tree is that
