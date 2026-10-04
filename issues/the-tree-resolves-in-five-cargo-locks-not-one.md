@@ -48,8 +48,12 @@ at `8b4f88446`, by type-check and one loader link, with no boot:
   userland patches in at the same versions. Those three move no version: they
   follow from the root `[patch]` and land with it. What the loader's `libc`,
   added since, pulls with it is not measured.
-- Of every version the userland alignment brings, only `zeroize_derive 1.5.0`
-  is in none of the five locks: `zeroize 1.9.0` requires `^1.5`.
+- `userland/Cargo.lock` carries `miniz_oxide` 0.8.9, for `png` 0.18.1,
+  beside 0.9.1, for `flate2` 1.1.10. Built with only `flate2` back at 1.1.9,
+  compositor and files are 204 to 228 bytes of text smaller on x86_64 and
+  704 on aarch64, and in neither build does a symbol of a third
+  `miniz_oxide` ship in them: `flate2`'s and std's are the two they carry.
+  Exit: `png` takes `miniz_oxide` 0.9.
 - Every fork commit the five locks pin stays pinned, and the crypto
   pre-releases (`ed25519-dalek 3.0.0-pre.6`, `pkcs5 0.8.0-rc.13`) are only in
   `userland/Cargo.lock` and stay.
