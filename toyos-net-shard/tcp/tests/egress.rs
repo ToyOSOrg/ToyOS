@@ -8,7 +8,7 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use common::*;
-use toyos_net_tcp::{Counter, Failure, Hop, Keepalive, Options, SoftError, State};
+use toyos_net_tcp::{Counter, Failure, Hop, Keepalive, Options, Served, SoftError, State};
 use toyos_net_wire::icmp::UnreachableCode;
 
 const C: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 3);
@@ -630,7 +630,7 @@ fn s_pl_015_resets_waiting_for_their_next_hop_stay_bounded() {
 }
 
 // No id: a connection freed before the caller drained it is never offered, and one freed in the
-// caller's round is named once, for the caller to take out.
+// caller's round is named once, for the caller to take out; its id names nothing after.
 #[test]
 fn a_freed_connection_leaves_no_turn_behind() {
     let mut h = H::new(65_535);
@@ -645,4 +645,8 @@ fn a_freed_connection_leaves_no_turn_behind() {
     assert_eq!(h.tcp.drain_eligible().collect::<Vec<_>>(), [id]);
     h.tcp.abort(now, id).unwrap();
     assert_eq!(h.tcp.drain_gone().collect::<Vec<_>>(), [id]);
+    // A caller that served it still would reach nothing, though another connection took its slot.
+    h.tcp.connect(now, A, Some(port(49155)), ep(B, 81)).unwrap();
+    let served = h.tcp.serve(now, id, |_| Hop::Ready(()), |_, ()| panic!("a freed id names nothing"));
+    assert_eq!(served, Served::Done);
 }
