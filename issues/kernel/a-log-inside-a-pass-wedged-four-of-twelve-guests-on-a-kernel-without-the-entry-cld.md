@@ -35,7 +35,7 @@ The first draft's probe (`log!` when `DEEPEST` rises, with an
 completion, `-action reboot=shutdown -action shutdown=pause`, 120 s ceiling.
 H, U and N ran 45 min each at 791367452, back to back, at host load average
 30 to 60 on 14 cores. S ran at 2cff52a60 until it passed H's boot count, 100
-min at load average 45 to 80:
+min at load average 40 to 80:
 
 | arm | kernel features | probe | boots | deaths | with `DF` set at capture |
 |---|---|---|---|---|---|
