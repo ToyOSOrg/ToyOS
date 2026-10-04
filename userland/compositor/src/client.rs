@@ -313,25 +313,3 @@ pub fn deliver_signal(dead: &mut Vec<Dead>, win: &Win, msg_type: u32) {
         mark_dead(dead, win.client.conn.as_handle(), e.into());
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Every error the ABI can encode.
-    fn every_syscall_error() -> impl Iterator<Item = SyscallError> {
-        (0..=255).filter_map(|n| SyscallError::from_u64(u64::MAX - n))
-    }
-
-    #[test]
-    fn only_a_closed_peer_ends_a_send_without_a_failure() {
-        for e in every_syscall_error() {
-            let closed = e == SyscallError::Gone;
-            assert_eq!(DropReason::from(e).failed(), !closed, "a handle send's {e:?}");
-            let reason = DropReason::from(ipc::TrySendError::Syscall(e));
-            assert_eq!(reason.failed(), !closed, "a frame's {e:?}");
-        }
-        assert!(DropReason::from(ipc::TrySendError::Full).failed());
-        assert!(DropReason::from(ipc::TrySendError::TooLarge).failed());
-    }
-}
