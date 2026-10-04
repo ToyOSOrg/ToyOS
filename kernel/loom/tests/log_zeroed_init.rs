@@ -1,17 +1,15 @@
 //! Host-fast regression for the AP shard's allocation path.
 //!
 //! Loom atomics are deliberately not byte-zeroable, so this test runs with
-//! `--no-default-features` and exercises the real `core` layout and the real
-//! in-place constructor used after `alloc_zeroed`.
+//! `--no-default-features` and exercises the real `core` layout of a shard
+//! that `alloc_zeroed` made and nothing constructed.
 //!
 //! **The gate below therefore runs under exactly one of this crate's two
 //! invocations, and the other one runs nothing from this file.** That is the
-//! shape, not an accident — but it was silent until 2026-08-14, when CI ran
-//! only the default invocation and this file's `running 0 tests` looked
-//! identical to a pass. `cargo run -- --ci host` runs both commands
-//! now, and every other `loom::model` file is gated `cfg(feature = "loom")`,
-//! so a bare `--no-default-features` run at the crate root exercises none of
-//! them either — the second command names this target explicitly instead.
+//! shape, not an accident. `cargo run -- --ci host` runs both commands, and
+//! every other `loom::model` file is gated `cfg(feature = "loom")`, so a bare
+//! `--no-default-features` run at the crate root exercises none of them either
+//! — the second command names this target explicitly instead.
 
 #![cfg(not(feature = "loom"))]
 
@@ -24,17 +22,8 @@ fn a_zero_allocated_ap_shard_issues_first_seq_first() {
     let layout = Layout::new::<Shard>();
     let ptr = unsafe { alloc_zeroed(layout) }.cast::<Shard>();
     assert!(!ptr.is_null());
-
-    // Negative witness: allocation alone leaves the first field — `head` by
-    // the layout assertion in `shard.rs` — at zero. Publishing that pointer
-    // directly is the reviewed defect and would issue the empty-state number.
-    let zero_head = unsafe { ptr.cast::<u64>().read() };
-    assert_eq!(zero_head, 0);
-    assert_ne!(zero_head, FIRST_SEQ);
-
-    // SAFETY: `ptr` is a fresh, aligned, zeroed allocation and remains private
-    // to this test until initialization completes.
-    unsafe { Shard::initialize_zeroed(ptr) };
+    // SAFETY: a fresh, aligned, zeroed allocation, which is an empty shard,
+    // private to this test.
     let shard = unsafe { &*ptr };
 
     assert_eq!(shard.head(), FIRST_SEQ);

@@ -91,7 +91,7 @@ fn a_commit_and_an_arm_cannot_both_miss() {
 
         // `klogd`'s park decision, and nothing else of its body: `true` is "do
         // not park".
-        let dont_park = arm_waiter(&m.waiter, || m.shard.at_ns(FIRST_SEQ).is_some());
+        let dont_park = arm_waiter(&m.waiter, || m.shard.stamp(FIRST_SEQ).is_some());
 
         p.join().unwrap();
 

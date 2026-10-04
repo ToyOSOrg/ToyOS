@@ -708,12 +708,20 @@ dependencies = [
  "toyos-abi",
  "toyos-inspect",
  "toyos-tco",
+ "toyos-trace",
  "toyos-window",
 ]
 
 [[package]]
 name = "toyos-tco"
 version = "0.1.0"
+
+[[package]]
+name = "toyos-trace"
+version = "0.1.0"
+dependencies = [
+ "toyos-abi",
+]
 
 [[package]]
 name = "toyos-window"

@@ -62,7 +62,7 @@ fn round_trip(len: usize) {
     assert_eq!(got.message(), want.message(), "the message");
     // And the key the merge orders by is the one the copy carries, read through
     // the other reader over the same words.
-    assert_eq!(shard.at_ns(seq), Some(want.at_ns), "at_ns through the key reader");
+    assert_eq!(shard.stamp(seq), Some(want.at_ns), "at_ns through the key reader");
 }
 
 /// Every field, at the three lengths the word arithmetic can disagree about:
