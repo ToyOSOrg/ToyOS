@@ -1,0 +1,437 @@
+//! Loom harness for the kernel's memory-ordering primitives.
+//!
+//! `kernel/src/sync.rs`, `kernel/src/shootdown.rs`,
+//! `kernel/src/sched/reap_gate.rs` and `kernel/src/arch/x86_64/i8042/tally.rs` are
+//! compiled into this crate with `feature = "loom"` on, so their atomics and
+//! cells resolve to loom's instrumented ones and the models drive the real
+//! primitives rather than transliterations of them — a transliteration is
+//! exactly the divergence risk a model checker is meant to remove. What the
+//! kernel files name through `crate::` is supplied below: the lock takes a
+//! preempt count and a log macro from its environment, and neither is what the
+//! models are about; `shootdown.rs`, `reap_gate.rs` and `tally.rs` name nothing
+//! at all, which is why none of the three has a shim here.
+//!
+//! Scope for the lock, stated because it is narrower than the file: the models
+//! drive `try_lock` and `LockGuard::drop`. `lock()`'s spin cannot be modelled —
+//! loom explores a spin as an unbounded branch and gives up ("Model exceeded
+//! maximum number of branches"), and the `yield_now` that would fix it belongs
+//! to loom rather than to a kernel that really does spin. The shootdown's spins
+//! *are* modelled, because they live in the caller — `arch::tlb` — and the model
+//! writes its own.
+//!
+//! **What that scope leaves certified by reading alone: contention on `lock()`
+//! — the ticket ordering, and the FIFO fairness the ticket exists to buy.** The
+//! *release* edge is shared, since both acquire paths end at the guard's
+//! `now.fetch_add(1, Release)`, so publication is driven from either side; the
+//! waiting side is not driven at all. Nothing in the guest suite substitutes for
+//! it: x86's TSO gives every load acquire and every store release semantics, so
+//! a missing edge in this primitive is invisible on the only architecture ToyOS
+//! boots and becomes observable on ARM64, which is planned and not built. That
+//! is why `try_lock`'s acquire edge sat on the wrong atomic through every green
+//! suite run until a model checker was pointed at it.
+//!
+//! **A model certifies only the transitions its threads exercise from both
+//! sides.** A guard that no thread in a model ever violates is unmeasured by
+//! it however green the run is, so a primitive whose refusal is enforced at
+//! its call site is certified by reading and not by loom.
+//!
+//! Every `loom::model` test file in this crate is gated `cfg(feature =
+//! "loom")`, so the crate's two supported invocations are `cargo test`
+//! (default features, every model) and `cargo test --no-default-features
+//! --test <name>` naming only a file gated the other way round.
+
+/// Loom's cell with the `get(&self) -> *mut T` shape `Lock` uses.
+///
+/// Every access is recorded as a mutable one. That is conservative in the safe
+/// direction: loom reports a pair only when they are *not* causally ordered, so
+/// a correctly synchronized lock still passes.
+pub mod cell {
+    pub struct UnsafeCell<T>(loom::cell::UnsafeCell<T>);
+
+    impl<T> UnsafeCell<T> {
+        pub fn new(value: T) -> Self {
+            Self(loom::cell::UnsafeCell::new(value))
+        }
+
+        pub fn get(&self) -> *mut T {
+            self.0.with_mut(|ptr| ptr)
+        }
+    }
+}
+
+/// The kernel's per-CPU preempt count has no bearing on the memory ordering
+/// these models check, and loom has no per-CPU state to hang one on.
+pub mod preempt {
+    pub fn disable() {}
+    pub fn enable() {}
+}
+
+/// `Lock::lock`'s spin also records what this CPU is waiting for, so a record
+/// sealed from an NMI can name it. Empty here for the same reason as `tlb`: the
+/// models do not drive that spin, and there is no per-CPU state to write it to.
+pub mod hardlockup {
+    /// What the outer spin was waiting for, which the kernel's own version
+    /// restores so a nested acquisition does not clear it.
+    #[derive(Clone, Copy)]
+    pub struct Spinning;
+
+    #[must_use]
+    pub fn spinning_on(_lock: u64, _at: &'static core::panic::Location<'static>) -> Spinning {
+        Spinning
+    }
+    pub fn spinning_on_nothing(_was: Spinning) {}
+}
+
+/// `Lock::lock`'s spin serves TLB shootdowns for a CPU that is not taking
+/// interrupts. Empty here: the models do not drive that spin at all (see the
+/// scope note above), and the protocol it would call has its own models.
+pub mod arch {
+    /// The kernel implementation masks IF and TF across reservation and
+    /// publication. Loom has no per-CPU flags; the model's sole-writer
+    /// precondition is the corresponding witness here.
+    pub struct IrqGuard;
+
+    impl IrqGuard {
+        pub fn close() -> Self {
+            Self
+        }
+    }
+
+    pub mod tlb {
+        pub fn poll() {}
+    }
+
+    /// Which CPU a model thread is, which the console lock's fatal word and the
+    /// roster's echo name.
+    /// The model says, through [`become_cpu`]; the kernel asks the CPU. Per
+    /// model thread for `scheduler`'s reason: loom's threads share an OS one.
+    #[cfg(feature = "loom")]
+    pub mod cpu {
+        loom::thread_local! {
+            static CPU: core::cell::Cell<Option<u32>> = core::cell::Cell::new(None);
+        }
+
+        /// Say which CPU the current model thread is. No kernel counterpart.
+        pub fn become_cpu(id: u32) {
+            CPU.with(|cpu| cpu.set(Some(id)));
+        }
+
+        pub fn hardware_id() -> u32 {
+            CPU.with(|cpu| cpu.get()).expect("a model thread asked which cpu it is before saying")
+        }
+    }
+
+    /// **A strictly stronger model than the instruction, and the direction is
+    /// the whole argument.**
+    ///
+    /// The kernel's `percpu_fetch_add` is one `xadd` with no `lock` prefix
+    /// inside a `cli` bracket. The only behaviour it has that a real
+    /// `fetch_add` does not is non-atomicity against *another CPU's* write to
+    /// the same word — and the bracket is what makes "no other CPU writes
+    /// `head`" true rather than hopeful. So every interleaving the real code
+    /// can produce, loom explores here; the shim cannot hide a race.
+    ///
+    /// Stated with its precondition, because without the bracket this shim is
+    /// the thing hiding the bug rather than the thing modelling around it.
+    ///
+    /// # Safety
+    /// Same contract as the kernel's: a word only one CPU writes.
+    #[cfg(feature = "loom")]
+    pub unsafe fn percpu_fetch_add(
+        counter: &loom::sync::atomic::AtomicU64,
+        _guard: &IrqGuard,
+    ) -> u64 {
+        counter.fetch_add(1, loom::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Host-fast form used to exercise the real zero-allocation constructor.
+    #[cfg(not(feature = "loom"))]
+    pub unsafe fn percpu_fetch_add(
+        counter: &core::sync::atomic::AtomicU64,
+        _guard: &IrqGuard,
+    ) -> u64 {
+        counter.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// The contention and deadlock reports are unreachable in these models — the
+/// spin they fire from is what loom cannot explore — but the arguments are
+/// consumed so the kernel file's bindings are still live code here.
+#[macro_export]
+macro_rules! log {
+    ($($arg:tt)*) => {{ let _ = format_args!($($arg)*); }};
+}
+
+#[path = "../../src/sync.rs"]
+pub mod sync;
+
+#[path = "../../src/shootdown.rs"]
+pub mod shootdown;
+
+/// The CPU roster and the release/answer word, driven by `tests/smp_bringup.rs`;
+/// under `loom` alone, as is the [`arch::cpu`] shim it names.
+#[cfg(feature = "loom")]
+#[path = "../../src/smp_roster.rs"]
+pub mod smp_roster;
+
+#[path = "../../src/log/shard.rs"]
+pub mod log_shard;
+
+/// `registry.rs` names its shard as `super::shard`, which in the kernel is
+/// `crate::log::shard`. Here `super` is the crate root, so this is what makes
+/// the one path resolve in both builds — and it holds whether or not the `loom`
+/// feature is on, which the crate's other invocation depends on.
+pub use log_shard as shard;
+
+#[path = "../../src/log/registry.rs"]
+pub mod log_registry;
+
+/// The walks `SYS_LOG_READ` and the console drain take, driven by
+/// `tests/log_cursor.rs` over real shards; without `loom` alone, as is the
+/// [`shards`] shim it names.
+#[cfg(not(feature = "loom"))]
+#[path = "../../src/log/read.rs"]
+pub mod log_read;
+
+// The shards `read.rs` walks: in the kernel cpu0's and every AP's published
+// one, here whichever the calling test thread installed.
+#[cfg(not(feature = "loom"))]
+std::thread_local! {
+    static SHARDS: core::cell::Cell<[Option<&'static shard::Shard>; toyos_abi::log::MAX_LOG_SHARDS]> =
+        const { core::cell::Cell::new([None; toyos_abi::log::MAX_LOG_SHARDS]) };
+}
+
+/// What `read.rs` names as `super::shards()`.
+#[cfg(not(feature = "loom"))]
+pub fn shards() -> [Option<&'static shard::Shard>; toyos_abi::log::MAX_LOG_SHARDS] {
+    SHARDS.with(core::cell::Cell::get)
+}
+
+/// Install the shards this thread's walks see. No kernel counterpart.
+#[cfg(not(feature = "loom"))]
+pub fn install_shards(shards: [Option<&'static shard::Shard>; toyos_abi::log::MAX_LOG_SHARDS]) {
+    SHARDS.with(|cell| cell.set(shards));
+}
+
+#[path = "../../src/sched/reap_gate.rs"]
+pub mod reap_gate;
+
+/// Ctrl+Alt+D's request word. Pure atomics, so it compiles here unshimmed.
+#[path = "../../src/sched/dump_request.rs"]
+pub mod dump_request;
+
+/// The interrupt record a claimed PCI function's ISR writes and its holder
+/// reads. Pure `core` atomics and nothing else, so it compiles here unshimmed.
+#[path = "../../src/pcidev/record.rs"]
+pub mod device_irq;
+
+/// A poll ring's one-shot answer. It names atomics and nothing else, and that
+/// narrowness is load-bearing: a file that named a ring's page or a watch could
+/// not be compiled here at all, and the race would stop being checked by
+/// anything.
+#[path = "../../src/inbox/once.rs"]
+pub mod poll_once;
+
+/// `polls.rs` names its one-shot as `super::once`, which in the kernel is
+/// `crate::inbox::once`; this is what makes that path resolve here.
+pub use poll_once as once;
+
+extern crate alloc;
+
+/// A ring's polls and when one is answered, driven against a fake object by
+/// `tests/inbox_answer.rs`. It names the one-shot above, `toyos-abi` and
+/// `alloc`, and nothing of the kernel's.
+#[path = "../../src/inbox/polls.rs"]
+pub mod inbox_polls;
+
+/// What `sleeplock.rs` names of the kernel's watch, and nothing more.
+///
+/// **The park is shimmed, and that is the scope statement for
+/// `tests/sleep_lock.rs`.** Loom has no scheduler, so there is nothing here to
+/// park *on*; [`watch::wait_uncancellable_until`] yields instead, which is what
+/// lets the model drive the real contended acquire at all. What the model
+/// therefore proves is the ticket arithmetic and the acquire/release edge —
+/// mutual exclusion, ordering, and the order contenders are served in. What it
+/// does **not** prove is the wake handshake: that a post reaches a waiter
+/// registered on a watch is the scheduler core's, modelled in
+/// `tests/loom_watch.rs` against the real watch and park.
+///
+/// `Watch` is a stand-in for the same reason: nothing registers here, so
+/// [`watch::Watch::post_n`] has nobody to tell and answers zero.
+pub mod watch {
+    use crate::scheduler::Parkable;
+
+    /// What a waitable object holds — a stand-in, because the park above it
+    /// is shimmed and nothing ever registers.
+    pub struct Watch;
+
+    impl Watch {
+        pub const fn new() -> Self {
+            Self
+        }
+
+        /// Nobody is registered here, so nobody is told. The kernel's answer
+        /// is how many parked waiters this post woke; the models never read it.
+        pub fn post_n(&self, _token: u64, _limit: usize) -> usize {
+            0
+        }
+    }
+
+    impl Default for Watch {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    /// The shimmed park. `yield_now` is loom's own way of saying "another
+    /// thread may run here", which is exactly what a park is from the schedule
+    /// explorer's point of view — and unlike `core::hint::spin_loop`, which is
+    /// what makes `Lock::lock`'s spin unmodellable, it is a branch loom can
+    /// bound.
+    pub fn wait_uncancellable_until(
+        _p: &Parkable,
+        _watch: &Watch,
+        _token: u64,
+        ready: impl Fn() -> bool,
+    ) {
+        while !ready() {
+            #[cfg(feature = "loom")]
+            loom::thread::yield_now();
+            #[cfg(not(feature = "loom"))]
+            std::hint::spin_loop();
+        }
+    }
+}
+
+/// What `sleeplock.rs` names of the scheduler: the right to park, and who is
+/// asking.
+///
+/// Four items, and the arithmetic in [`TaskId`] is the whole of what is
+/// restated here rather than compiled — `kernel/src/scheduler.rs` names the
+/// process table, the scheduler core's driver and half the kernel besides, so it
+/// cannot be a `#[path]` module the way `sync.rs` and `inbox/once.rs` are.
+pub mod scheduler {
+    /// The right to give the CPU back. In the kernel its constructor asserts
+    /// the context's baseline preempt depth; here there is no preempt count and
+    /// no context, so the type carries only the fact that a caller had one.
+    pub struct Parkable(());
+
+    impl Parkable {
+        pub fn at_entry() -> Self {
+            Self(())
+        }
+    }
+
+    /// Process-scoped thread identity, as the two halves of the word the lock
+    /// stores.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub struct TaskId(pub u32, pub u32);
+
+    impl TaskId {
+        pub fn pack(self) -> u64 {
+            u64::from(self.1) | (u64::from(self.0) << 32)
+        }
+
+        pub fn unpack(value: u64) -> Self {
+            Self((value >> 32) as u32, value as u32)
+        }
+    }
+
+    impl core::fmt::Display for TaskId {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            write!(f, "{}:{}", self.0, self.1)
+        }
+    }
+
+    // Who this thread is, so the lock's holder word and its self-deadlock
+    // refusal mean something. The model says; the kernel reads the same fact
+    // out of two per-CPU words. A `//` comment and not a doc one: rustdoc
+    // documents no item a macro invocation produces, and `///` here is a
+    // warning rather than documentation.
+    //
+    // **`loom::thread_local!` under loom and `std::thread_local!` without it**,
+    // and the split is not cosmetic: loom's threads are coroutines on one OS
+    // thread, so a `std` slot would be one cell shared by all of them and every
+    // task in the model would be the last one to speak.
+    #[cfg(feature = "loom")]
+    loom::thread_local! {
+        static WHO: core::cell::Cell<Option<TaskId>> = core::cell::Cell::new(None);
+    }
+    #[cfg(not(feature = "loom"))]
+    std::thread_local! {
+        static WHO: core::cell::Cell<Option<TaskId>> = const { core::cell::Cell::new(None) };
+    }
+
+    /// Say who the current thread is. No kernel counterpart: there, the answer
+    /// is whatever the CPU is running.
+    pub fn become_task(id: TaskId) {
+        WHO.with(|who| who.set(Some(id)));
+    }
+
+    pub fn current_task() -> Option<TaskId> {
+        WHO.with(|who| who.get())
+    }
+
+    /// Whether the scheduler exists. Always, in a model: the one lock taken
+    /// before it does is the kernel's boot console, on one CPU with no task.
+    pub fn started() -> bool {
+        true
+    }
+}
+
+/// The sleep lock, compiled a second time against loom's atomics. Its
+/// dependency surface is the two shim modules above and nothing else — the same
+/// narrowness `inbox/once.rs` carries, and for the same reason.
+#[path = "../../src/sleeplock.rs"]
+pub mod sleeplock;
+
+/// The i8042's interrupt tally. `tests/i8042_tally.rs` is the only model whose
+/// subject is a *driver*, and it is here for the reason the others are: the
+/// property is "no reader ever sees this pair disagree", which is a claim about
+/// instants that no guest test can express and that x86's TSO hides.
+#[path = "../../src/arch/x86_64/i8042/tally.rs"]
+pub mod i8042_tally;
+
+/// The panic snapshot's owner and access state, driven together by
+/// `tests/panic_capture.rs`.
+#[path = "../../src/drivers/panic_console/latch.rs"]
+pub mod capture_latch;
+
+#[path = "../../src/drivers/panic_console/access.rs"]
+pub mod capture_access;
+
+/// A program's log ring: not the kernel's, and here because it is the one
+/// other lock-free protocol on shared memory in the tree, and a model of it
+/// needs the same loom this crate already carries. `tests/log_ring.rs` drives
+/// its two protocols against loom's atomics; the file names nothing outside
+/// itself, so it needs no shim.
+#[path = "../../../toyos/src/log/ring.rs"]
+pub mod log_ring;
+
+/// The seqlock the panic console's descriptor and each CPU's counters are
+/// published through, driven by `tests/panic_console_publish.rs` and
+/// `tests/counters_round.rs`.
+#[path = "../../src/seqlock.rs"]
+pub mod seqlock;
+
+/// The console backend's lock, driven by `tests/serial_lock.rs`; under `loom`
+/// alone, as is the [`arch::cpu`] shim it names.
+#[cfg(feature = "loom")]
+#[path = "../../src/drivers/serial_lock.rs"]
+pub mod serial_lock;
+
+/// The scheduler core, `kernel/pure/sched/`, driven by `tests/loom_*.rs` over
+/// [`sched_model`]'s scaffolding.
+///
+/// Loom owns the primitives the simulator's step granularity assumes correct —
+/// mailbox push/drain, doorbell edges, the ticket CAS protocol, kill-bit vs wake
+/// ordering, retire-node re-post, the sleep handshake — and the simulator
+/// (`kernel/sim/`) owns the protocol above them. Loom does not scale to the
+/// whole scheduler; the simulator does not model weak memory. Under `loom`
+/// alone, as is every model that drives it.
+#[cfg(feature = "loom")]
+#[path = "../../pure/sched/mod.rs"]
+pub mod sched;
+
+#[cfg(feature = "loom")]
+pub mod sched_model;

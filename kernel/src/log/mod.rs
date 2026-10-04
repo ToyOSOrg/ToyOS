@@ -6,12 +6,11 @@
 #![warn(clippy::undocumented_unsafe_blocks)]
 
 pub mod console;
-pub mod nested;
 pub mod read;
 pub mod recovery;
 pub mod registry;
 pub mod shard;
-#[cfg(any(feature = "boot-actuators", feature = "test-actuators"))]
+#[cfg(feature = "test-actuators")]
 pub mod storm;
 pub mod user;
 
@@ -33,12 +32,28 @@ pub static BOOT_SHARD: Shard = Shard::new();
 // The ABI fixes how many shards a cursor can name; the kernel must not exceed it.
 const _: () = assert!(crate::sched::MAX_CPUS <= MAX_LOG_SHARDS);
 
-/// Makes an AP's shard reachable to a reader.
-/// # Safety
-/// `shard` must be a live, initialised [`Shard`] that is never freed.
-pub unsafe fn publish_ap_shard(cpu: u32, shard: *mut Shard) {
-    // SAFETY: the caller's contract is this one.
-    unsafe { registry::publish(registry::kernel_slots(), cpu, shard) };
+/// The shard `cpu` reserves in, published before that CPU runs an instruction,
+/// since a reader finds it only through the registry: the boot shard for CPU
+/// 0, and a fresh one, never freed, for every other.
+pub fn shard_for(cpu: u32) -> &'static Shard {
+    if cpu == 0 {
+        return &BOOT_SHARD;
+    }
+    assert!(
+        registry::published(registry::kernel_slots(), cpu as usize - 1).is_none(),
+        "log: cpu{cpu} already has a shard, and a second would hide every record written to the first",
+    );
+    let layout = alloc::alloc::Layout::new::<Shard>();
+    // SAFETY: a `Shard` is not zero-sized; the block is never freed.
+    let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) }.cast::<Shard>();
+    assert!(!ptr.is_null(), "log: no memory for cpu{cpu}'s shard");
+    // SAFETY: fresh, zeroed and aligned for a `Shard`, and not yet published;
+    // then live and initialised for the machine's life, as `publish` needs.
+    unsafe {
+        Shard::initialize_zeroed(ptr);
+        registry::publish(registry::kernel_slots(), cpu, ptr);
+        &*ptr
+    }
 }
 
 /// The newest records the stop's account carries whole. The page's account
@@ -52,10 +67,10 @@ const TAIL_HEAD: &str = "log: this boot's newest records follow, newest first";
 /// Seal the newest of this boot's records onto the black box, the one channel
 /// a boot's own tail has once the stop has begun.
 ///
-/// **The kernel does not wait for `/system/bin/logd`, so it does not know what
-/// reached `/log`.** `/system/bin/init` has `logd` flush before it asks for the
-/// stop; everything committed after that — the stop's own record, `Syncing
-/// filesystems...`, the last word — is on the console, and here, where the next
+/// **The kernel does not wait for `/system/bin/logkeeper`, so it does not know what
+/// reached `/log`.** `/system/bin/supervisor` has `logkeeper` flush before it asks for the
+/// stop; everything committed after that — the stop's own record, the last
+/// word — is on the console, and here, where the next
 /// loader pass prints it into `loader.log`.
 ///
 /// Called from the quiesce path under [`crate::blackbox::record_done`], where
@@ -178,14 +193,6 @@ pub fn emit(severity: Severity, args: core::fmt::Arguments) {
     record.len = message.len as u16;
     record.elided = message.elided.min(u16::MAX as usize) as u16;
 
-    // `log-unbracketed-reserve` stages a reservation made with interrupts open.
-    #[cfg(feature = "boot-actuators")]
-    let guard = if crate::actuator::log_unbracketed_reserve() {
-        crate::arch::IrqGuard::unclosed()
-    } else {
-        crate::arch::IrqGuard::close()
-    };
-    #[cfg(not(feature = "boot-actuators"))]
     let guard = crate::arch::IrqGuard::close();
     // Stamped inside the bracket: outside it, ordering by seq and by at_ns
     // could disagree. The NMI handler never logs and #MC halts rather than
@@ -219,25 +226,8 @@ pub fn emit(severity: Severity, args: core::fmt::Arguments) {
         }
     }
 
-    // Between the drain and the repaint, so the record this call just put on the
-    // console is the one the panel does not have.
-    #[cfg(feature = "boot-actuators")]
-    if HALT_BEFORE_REPAINT.load(Ordering::Relaxed) {
-        crate::arch::cpu::halt();
-    }
-
     // After the commit, so the record this call made is the one on the panel.
     crate::drivers::panic_console::early_checkpoint();
-}
-
-/// Armed by the `test-early-halt` actuator one record ahead of where it wants
-/// the boot to stop.
-#[cfg(feature = "boot-actuators")]
-static HALT_BEFORE_REPAINT: AtomicBool = AtomicBool::new(false);
-
-#[cfg(feature = "boot-actuators")]
-pub fn halt_before_the_next_repaint() {
-    HALT_BEFORE_REPAINT.store(true, Ordering::Relaxed);
 }
 
 /// A line of ordinary kernel log.

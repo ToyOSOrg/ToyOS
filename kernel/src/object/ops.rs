@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 
 use toyos_abi::handle::{RawHandle, Rights};
 use toyos_abi::syscall::{FileType, OpenFlags, SeekFrom, SyscallError};
+use kernel::sched::task::WaitClass;
 
 use crate::drivers::serial;
 use crate::file_cache;
@@ -16,7 +17,8 @@ use crate::time::Deadline;
 use crate::pipe::{self, PipeId};
 use crate::process::PipeMap;
 use crate::user_ptr::{UserBytes, UserBytesMut};
-use crate::watch::Watch;
+use crate::inbox::PollEntry;
+use crate::watch::{IrqWatch, Watch};
 use crate::{device as device_registry, keyboard, mouse};
 
 use super::device::DeviceClaim;
@@ -44,7 +46,7 @@ pub fn initial_rights(object: &KObjectRef) -> Rights {
         KObjectRef::Inbox(_) => {
             BASE.union(Rights::READ).union(Rights::WRITE).union(Rights::MAP)
         }
-        // Every `SysCap` bit is authority init decides per program: no default, the creator states it.
+        // Every `SysCap` bit is authority the supervisor decides per program: no default, the creator states it.
         KObjectRef::SysCap(_) => Rights::NONE,
         // `MAP` is the whole of it: a region is examined through the memory, not the handle.
         KObjectRef::SharedMem(_) => {
@@ -135,15 +137,14 @@ pub fn open(table: &mut HandleTable, path: &str, flags: OpenFlags) -> u64 {
                 Err(e) => Err(e),
             }
         };
-        built.map(|(file_id, mtime, position)| (target, file_id, mtime, position))
+        built
     };
 
-    let (target, file_id, mtime, position) = match opened {
+    let (file_id, mtime, position) = match opened {
         Ok(v) => v,
         Err(e) => return e.to_u64(),
     };
     let object = KObjectRef::File(FileObject::new(OpenFileState {
-        path: target.into_string(),
         file_id,
         position,
         mtime,
@@ -203,9 +204,19 @@ pub fn close_all(table: &mut HandleTable) {
 }
 
 pub fn pipe_id_read(object: &KObjectRef) -> Option<PipeId> {
+    pipe_read(object).map(|(id, _)| id)
+}
+
+pub fn pipe_id_write(object: &KObjectRef) -> Option<PipeId> {
+    pipe_write(object).map(|(id, _)| id)
+}
+
+/// The pipe a blocking read of `object` parks on, and the class its wait is
+/// charged to: a connection's is its peer's answer, which is IPC.
+pub fn pipe_read(object: &KObjectRef) -> Option<(PipeId, WaitClass)> {
     match object {
-        KObjectRef::PipeRead(r) => Some(r.id()),
-        KObjectRef::Connection(c) => Some(c.rx()),
+        KObjectRef::PipeRead(r) => Some((r.id(), WaitClass::Pipe)),
+        KObjectRef::Connection(c) => Some((c.rx(), WaitClass::Ipc)),
         KObjectRef::PipeWrite(_) | KObjectRef::File(_) | KObjectRef::Device(_)
         | KObjectRef::Console(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_)
@@ -214,10 +225,11 @@ pub fn pipe_id_read(object: &KObjectRef) -> Option<PipeId> {
     }
 }
 
-pub fn pipe_id_write(object: &KObjectRef) -> Option<PipeId> {
+/// [`pipe_read`]'s answer for a blocking write.
+pub fn pipe_write(object: &KObjectRef) -> Option<(PipeId, WaitClass)> {
     match object {
-        KObjectRef::PipeWrite(w) => Some(w.id()),
-        KObjectRef::Connection(c) => Some(c.tx()),
+        KObjectRef::PipeWrite(w) => Some((w.id(), WaitClass::Pipe)),
+        KObjectRef::Connection(c) => Some((c.tx(), WaitClass::Ipc)),
         KObjectRef::PipeRead(_) | KObjectRef::File(_) | KObjectRef::Device(_)
         | KObjectRef::Console(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_)
@@ -231,14 +243,24 @@ pub fn pipe_id_write(object: &KObjectRef) -> Option<PipeId> {
 pub enum WatchRef {
     Static(&'static Watch),
     Shared(Arc<Watch>),
+    /// A device's, which its interrupt handler posts.
+    Irq(&'static IrqWatch),
 }
 
-impl core::ops::Deref for WatchRef {
-    type Target = Watch;
-    fn deref(&self) -> &Watch {
+impl WatchRef {
+    pub(crate) fn add_poll(&self, entry: PollEntry) {
         match self {
-            Self::Static(watch) => watch,
-            Self::Shared(watch) => watch,
+            Self::Static(watch) => watch.add_poll(entry),
+            Self::Shared(watch) => watch.add_poll(entry),
+            Self::Irq(watch) => watch.add_poll(entry),
+        }
+    }
+
+    pub fn cancel_polls(&self) {
+        match self {
+            Self::Static(watch) => watch.cancel_polls(),
+            Self::Shared(watch) => watch.cancel_polls(),
+            Self::Irq(watch) => watch.cancel_polls(),
         }
     }
 }
@@ -250,27 +272,29 @@ pub fn read_watch(object: &KObjectRef) -> Option<WatchRef> {
         KObjectRef::PipeRead(r) => pipe::read_watch(r.id()).map(WatchRef::Shared),
         KObjectRef::Connection(c) => pipe::read_watch(c.rx()).map(WatchRef::Shared),
         KObjectRef::Acceptor(a) => Some(WatchRef::Shared(a.watch().clone())),
+        KObjectRef::Process(p) => Some(WatchRef::Shared(p.watch().clone())),
         KObjectRef::Console(_) => Some(WatchRef::Static(&keyboard::WATCH)),
         KObjectRef::Device(d) => match d.class() {
             device_registry::DeviceType::Keyboard => Some(WatchRef::Static(&keyboard::WATCH)),
             device_registry::DeviceType::Mouse => Some(WatchRef::Static(&mouse::WATCH)),
             device_registry::DeviceType::PciFunction => {
-                d.pci_slot().map(|slot| WatchRef::Static(crate::pcidev::watch(slot)))
+                d.pci_slot().map(|slot| WatchRef::Irq(crate::pcidev::watch(slot)))
+            }
+            device_registry::DeviceType::Isa => {
+                d.isa_row().map(|row| WatchRef::Irq(crate::isa::watch(row)))
             }
             device_registry::DeviceType::HdaAudio | device_registry::DeviceType::VirtioSound => {
-                Some(WatchRef::Static(&crate::drivers::AUDIO_WATCH))
+                Some(WatchRef::Irq(&crate::drivers::AUDIO_WATCH))
             }
             device_registry::DeviceType::Framebuffer => None,
             // A partition answers its description and has nothing to wait for.
             device_registry::DeviceType::Partition => None,
-            // A read asks when it runs, so nothing is ready before one.
-            device_registry::DeviceType::PerfState => None,
         },
         // Named unconditionally: the watch alone cannot enforce rights.
         KObjectRef::SysCap(_) => Some(WatchRef::Static(&crate::log::user::WATCH)),
         KObjectRef::PipeWrite(_) | KObjectRef::File(_) | KObjectRef::Inbox(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
-        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) => None,
+        | KObjectRef::SharedMem(_) => None,
     }
 }
 
@@ -291,28 +315,28 @@ pub fn write_watch(object: &KObjectRef) -> Option<WatchRef> {
 /// Whether closing one handle to this object ends what its watches watch, so
 /// every poll on them — in any ring — is answered as gone. `false` for the log
 /// and the keyboard, which the machine ends on its own and which other handles
-/// share: a console closing is not every console's keyboard going away.
+/// share: a console closing is not every console's keyboard going away. `false`
+/// for a process, which only its own end ends: closing one handle to it ends no
+/// other's watch.
 fn close_ends_polls(object: &KObjectRef) -> bool {
     match object {
-        KObjectRef::SysCap(_) => crate::actuator::log_close_cancels_any_syscap(),
-        // A keyboard *claim* closing is the stimulus, not a `SysCap`.
-        KObjectRef::Console(_) => crate::actuator::keyboard_close_cancels_every_console(),
+        KObjectRef::SysCap(_) => false,
+        KObjectRef::Console(_) => false,
+        KObjectRef::Process(_) => false,
         KObjectRef::Device(d) => match d.class() {
-            device_registry::DeviceType::Keyboard => {
-                crate::actuator::keyboard_close_cancels_every_console()
-            }
+            device_registry::DeviceType::Keyboard => false,
             device_registry::DeviceType::Mouse
             | device_registry::DeviceType::PciFunction
+            | device_registry::DeviceType::Isa
             | device_registry::DeviceType::HdaAudio
             | device_registry::DeviceType::VirtioSound
             | device_registry::DeviceType::Framebuffer
-            | device_registry::DeviceType::Partition
-            | device_registry::DeviceType::PerfState => true,
+            | device_registry::DeviceType::Partition => true,
         },
         KObjectRef::PipeRead(_) | KObjectRef::PipeWrite(_) | KObjectRef::Connection(_)
         | KObjectRef::Acceptor(_) | KObjectRef::File(_) | KObjectRef::Inbox(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
-        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) => true,
+        | KObjectRef::SharedMem(_) => true,
     }
 }
 
@@ -392,8 +416,6 @@ pub fn read_device(
         // Every read is the description: a partition's bytes move through
         // `SYS_PARTITION_READ`, never through a read of the claim.
         device_registry::DeviceType::Partition => Some(claim.describe(table, buf)),
-        // A read that does not wait: its ask ends with it.
-        device_registry::DeviceType::PerfState => claim.read_perf_state(&mut None, buf),
         // The description first and interrupts after, the shape the HDA stub
         // has: a driver reads what it is driving once, and everything it reads
         // afterwards is what its device has been doing.
@@ -409,6 +431,25 @@ pub fn read_device(
                 Ok(record) => record?,
                 Err(refused) => return Some(refused.to_u64()),
             };
+            buf.write_at(0, record_bytes(&record));
+            Some(toyos_abi::pci::DeviceIrqRecord::SIZE as u64)
+        }
+        // The PCI shape, but the description is what binds the ports to the
+        // reader, and nothing after it answers any other process.
+        device_registry::DeviceType::Isa => {
+            let row = claim.isa_row().expect("an ISA claim knows its row");
+            let pid = crate::process::current_process();
+            if !claim.info_read() {
+                crate::isa::bind(row, pid);
+                return Some(claim.describe(table, buf));
+            }
+            if !crate::isa::bound_to(row, pid) {
+                return Some(SyscallError::PermissionDenied.to_u64());
+            }
+            if buf.len() < toyos_abi::pci::DeviceIrqRecord::SIZE {
+                return Some(SyscallError::InvalidArgument.to_u64());
+            }
+            let record = crate::isa::take_record(row)?;
             buf.write_at(0, record_bytes(&record));
             Some(toyos_abi::pci::DeviceIrqRecord::SIZE as u64)
         }
@@ -527,8 +568,8 @@ pub fn try_write(object: &KObjectRef, buf: &UserBytes) -> Option<u64> {
                 return Some(SyscallError::Io.to_u64());
             }
             state.position += written;
-            // Dirty state lives in the cache now, set by `write_page`; the handle keeps only the mtime.
             state.mtime = crate::clock::mtime_now();
+            file_cache::touch(state.file_id, state.mtime);
             Some(written as u64)
         }),
         KObjectRef::PipeWrite(w) => write_pipe(w.id(), buf),
@@ -603,70 +644,24 @@ pub fn fstat(object: &KObjectRef) -> Stat {
             device_registry::DeviceType::Keyboard => FileType::Keyboard,
             device_registry::DeviceType::Mouse => FileType::Mouse,
             device_registry::DeviceType::Framebuffer => FileType::Framebuffer,
-            device_registry::DeviceType::PciFunction => FileType::Unknown,
+            device_registry::DeviceType::PciFunction | device_registry::DeviceType::Isa => {
+                FileType::Unknown
+            }
             device_registry::DeviceType::HdaAudio
             | device_registry::DeviceType::VirtioSound => FileType::Unknown,
-            device_registry::DeviceType::Partition
-            | device_registry::DeviceType::PerfState => FileType::Unknown,
+            device_registry::DeviceType::Partition => FileType::Unknown,
         }),
     }
 }
 
-/// `SYS_FSYNC`: the file's bytes on the device, and the device told to commit them.
-///
-/// The device-commit step is not optional: `/system/bin/logd` calls a line durable off `fsync`'s result, so a flush that stopped at the page cache would make that a claim about nothing.
+/// `SYS_FSYNC`: a partition claim's writes on its device and the device told to
+/// commit them; a kernel file's pages are the file (`/tmp`) or never written
+/// (ROOT), so it owes nothing.
 pub fn fsync(object: &KObjectRef) -> u64 {
-    let file = match object {
-        KObjectRef::File(file) => file,
-        KObjectRef::Device(claim) => return partition_fsync(claim),
-        _ => return SyscallError::PermissionDenied.to_u64(),
-    };
-    let (path, file_id, mtime) =
-        file.with(|state| (state.path.clone(), state.file_id, state.mtime));
-    // The file's debt or its mount's, not the handle's: another handle's write, and a
-    // device commit an earlier attempt failed to deliver, are both still owed here.
-    if !crate::vfs::lock().durability_owed(&path, file_id) {
-        return 0;
-    }
-    // A refused attempt can leave the two FATs split, and the park between two attempts is where the machine's stop would find this thread.
-    let _update = crate::block::begin_update();
-    // A refused attempt discards nothing — an unsettled debt needs no restoring.
-    let run = until_answered(|| Run::Fsync(file_id), || {
-        // Outside `FileObject`'s lock: this and `OpenFileState::drop` take the VFS lock in the same order.
-        // Flush and sync share one acquisition so this file cannot be unmounted between them.
-        let mut vfs = crate::vfs::lock();
-        // Tags the flush as `SYS_FSYNC`'s, for `quiesce-fsync-refuse` to stage on this path.
-        #[cfg(feature = "boot-actuators")]
-        crate::fat32_adapter::enter_fsync_flush(&path);
-        let done = vfs
-            .flush_file(&path, file_id, mtime)
-            .and_then(|()| vfs.sync_for_path(&path));
-        #[cfg(feature = "boot-actuators")]
-        crate::fat32_adapter::leave_fsync_flush();
-        drop(vfs);
-        done
-    });
-    match run {
-        Answered::Answer { answer: Ok(()), attempts, took } => {
-            if attempts > 1 {
-                crate::log!(
-                    "fsync: {path} durable on attempt {attempts} after {took} — a refused \
-                     attempt kept every page dirty and a later one delivered them",
-                );
-            }
-            // `flush_file` settled the file's debt and `sync_for_path` the mount's; there is no per-handle flag to clear.
-            0
-        }
-        // The device's own word (an error status, or a recovery that gave up) is passed through unchanged.
-        Answered::Answer { answer: Err(e), .. } => e.to_u64(),
-        Answered::Killed => SyscallError::WouldBlock.to_u64(),
-        Answered::Deadman { attempts, took } => {
-            crate::log!(
-                "fsync: {path} is not durable after {attempts} attempt(s) in {took} — {}",
-                crate::block::DEADMAN,
-            );
-            SyscallError::Io.to_u64()
-        }
+    match object {
+        KObjectRef::File(_) => 0,
+        KObjectRef::Device(claim) => partition_fsync(claim),
+        _ => SyscallError::PermissionDenied.to_u64(),
     }
 }
 
@@ -682,62 +677,20 @@ pub(crate) enum Answered {
     Deadman { attempts: u32, took: crate::time::Duration },
 }
 
-/// Whose run of attempts [`until_answered`] makes: what `fsync-budget-spent`
-/// refuses the first attempt of, once.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-#[cfg_attr(not(feature = "boot-actuators"), allow(dead_code))]
-pub(crate) enum Run {
-    /// `SYS_FSYNC` on one file.
-    Fsync(file_cache::FileId),
-    /// One kind of transfer on one claimed partition; `None` for a claim
-    /// whose partition is already let go, whose every attempt answers `Gone`.
-    Claim(Option<(crate::block::DeviceId, [u8; 16])>, ClaimOp),
-}
-
-/// A partition claim's kinds of transfer, each refused once on its own.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum ClaimOp {
-    Read,
-    Write,
-    Flush,
-}
-
-/// Whether `run`'s first attempt goes under an operation already over: once
-/// per run, so a writer whose every flush leaves records to flush (`logd`)
-/// is refused once and not on every flush it will ever make.
-#[cfg(feature = "boot-actuators")]
-fn staged_spent(run: impl Fn() -> Run) -> bool {
-    static REFUSED: crate::sync::Lock<alloc::collections::BTreeSet<Run>> =
-        crate::sync::Lock::new(alloc::collections::BTreeSet::new());
-    crate::actuator::fsync_budget_spent() && REFUSED.lock().insert(run())
-}
-
 /// `attempt` run until it answers anything but `WouldBlock` — a budget that
 /// expired on a live device, never a device fact — each time on a fresh
 /// budget, parked between two (`block::between_attempts`), and given up once
 /// [`crate::block::DEADMAN`] is spent. The one loop in this kernel that asks a
 /// block device again, for a caller holding no spinlock: nothing it holds can
 /// be held across the wait, so no disk wait here is under one.
-#[cfg_attr(not(feature = "boot-actuators"), allow(unused_variables))]
-pub(crate) fn until_answered(
-    run: impl Fn() -> Run,
-    mut attempt: impl FnMut() -> Result<(), SyscallError>,
-) -> Answered {
+pub(crate) fn until_answered(mut attempt: impl FnMut() -> Result<(), SyscallError>) -> Answered {
     let began = crate::clock::now();
     // Bounds the run of attempts, never a single attempt's elapsed time.
     let deadman = Deadline::at(began + crate::block::DEADMAN.duration());
-    #[cfg(feature = "boot-actuators")]
-    let deadman = if crate::actuator::fsync_deadman_now() { Deadline::passed() } else { deadman };
     let mut attempts = 0u32;
     loop {
         attempts += 1;
-        let answer = {
-            // Stages a first attempt with its budget already spent, exercising the shipped refusal itself.
-            #[cfg(feature = "boot-actuators")]
-            let _spent = (attempts == 1 && staged_spent(&run))
-                .then(|| crate::scheduler::Operation::begin(Deadline::passed()));
-            attempt()
-        };
+        let answer = attempt();
         if answer != Err(SyscallError::WouldBlock) {
             return Answered::Answer { answer, attempts, took: crate::clock::now() - began };
         }
@@ -774,15 +727,23 @@ fn partition_fsync(claim: &DeviceClaim) -> u64 {
         | device_registry::DeviceType::HdaAudio
         | device_registry::DeviceType::VirtioSound
         | device_registry::DeviceType::PciFunction
-        | device_registry::DeviceType::PerfState => {
+        | device_registry::DeviceType::Isa => {
             return SyscallError::PermissionDenied.to_u64();
         }
     }
-    let whose = || Run::Claim(claim.partition_on(), ClaimOp::Flush);
-    let run = until_answered(whose, || match claim.partition_view() {
+    let run = until_answered(|| match claim.partition_view() {
         Some(view) => view.flush().map_err(block_word),
         None => Err(SyscallError::Gone),
     });
+    if let (Answered::Answer { answer: Ok(()), attempts, took }, Some((_, guid))) = (&run, claim.partition_on()) {
+        if *attempts > 1 {
+            crate::log!(
+                "partclaim: a flush of {} durable on attempt {attempts} after {took} — a refused \
+                 attempt was asked again on a fresh budget",
+                toyos_gpt::Guid(guid),
+            );
+        }
+    }
     partition_word("a flush", run)
 }
 
@@ -809,23 +770,11 @@ pub fn ftruncate(object: &KObjectRef, size: u64) -> u64 {
     if size > file_cache::MAX_FILE_SIZE {
         return SyscallError::InvalidArgument.to_u64();
     }
-    let file_id = file.with(|state| state.file_id);
-    {
-        // The VFS lock outside `FileObject`'s (fsync's order) is `resize`'s witness.
-        let mut vfs = crate::vfs::lock();
-        // A refused resize changed nothing, so the size stays as it was.
-        // A budget expiry is the caller's own bound and not a fact about the device: retryable.
-        if let Err(e) = file_cache::resize(&mut vfs, file_id, size) {
-            return match e {
-                crate::block::BlockError::BudgetExpired => SyscallError::WouldBlock,
-                crate::block::BlockError::Device => SyscallError::Io,
-            }
-            .to_u64();
-        }
-    }
     // The seek pointer is not touched (POSIX ftruncate): a shrink leaves it past EOF.
     file.with(|state| {
+        file_cache::set_size(state.file_id, size);
         state.mtime = crate::clock::mtime_now();
+        file_cache::touch(state.file_id, state.mtime);
         0
     })
 }
@@ -836,6 +785,7 @@ pub fn has_data(object: &KObjectRef) -> bool {
         KObjectRef::Connection(c) => pipe::has_data(c.rx()),
         KObjectRef::Console(_) => serial::has_data(),
         KObjectRef::Acceptor(a) => a.has_pending(),
+        KObjectRef::Process(p) => p.finished(),
         KObjectRef::File(_) => true,
         KObjectRef::Device(d) => match d.class() {
             device_registry::DeviceType::Keyboard => keyboard::has_data(),
@@ -843,9 +793,11 @@ pub fn has_data(object: &KObjectRef) -> bool {
             device_registry::DeviceType::PciFunction => {
                 !d.info_read() || d.pci_slot().is_some_and(crate::pcidev::has_irq)
             }
+            device_registry::DeviceType::Isa => {
+                !d.info_read() || d.isa_row().is_some_and(crate::isa::has_irq)
+            }
             device_registry::DeviceType::Framebuffer => true,
             device_registry::DeviceType::Partition => true,
-            device_registry::DeviceType::PerfState => false,
             device_registry::DeviceType::HdaAudio => {
                 !d.info_read() || crate::drivers::hda::has_pending()
             }
@@ -855,6 +807,21 @@ pub fn has_data(object: &KObjectRef) -> bool {
         },
         KObjectRef::PipeWrite(_) | KObjectRef::Inbox(_) | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
+        | KObjectRef::SharedMem(_) => false,
+    }
+}
+
+/// Whether a post on this object's read watch is its readability, which
+/// [`has_data`] cannot be asked for: the log's, whose unread records are a
+/// property of the reader's cursor, which the kernel does not hold; and a
+/// console's, whose watch is the keyboard's while its data is the serial
+/// line's (`issues/kernel/a-console-watch-waits-on-the-keyboard-not-the-serial-line.md`).
+pub fn read_posts_are_readiness(object: &KObjectRef) -> bool {
+    match object {
+        KObjectRef::SysCap(_) | KObjectRef::Console(_) => true,
+        KObjectRef::PipeRead(_) | KObjectRef::PipeWrite(_) | KObjectRef::Connection(_)
+        | KObjectRef::Acceptor(_) | KObjectRef::File(_) | KObjectRef::Device(_)
+        | KObjectRef::Inbox(_) | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
         | KObjectRef::SharedMem(_) | KObjectRef::Process(_) => false,
     }
 }

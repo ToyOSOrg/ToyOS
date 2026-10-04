@@ -24,4 +24,13 @@ hypothesis, and one red at 18x its price is not a rate.
 Exit: a rate — the same suite run repeatedly with and without a second
 worktree's build on the host — that says whether this is contention the harness
 should schedule around or a defect in the guest's own boot, and the name is
-either re-tiered or fixed at the cause.
+fixed at the cause.
+
+**Its test is deleted**, as a flaky test is: `9ee7a7573` took
+`log_reserve_window_negative` out with `log-unbracketed-reserve`, the
+actuator only it armed. `4db54ffa5` then took `log_reserve_window` and
+`log-nested-reserve`, and `3b8102cf5` `log_nested_emit` with the nest vector
+and test-runner's `log-gate`, all of which it rode.
+
+`blocked_dump`, the other name this file saw red, is deleted too:
+`issues/build/parallel-tests-red-under-other-suites.md` records the commit.

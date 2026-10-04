@@ -6,19 +6,21 @@ opened: 2026-09-28
 
 # The supervisor is host-tested and owns the machine's stop
 
-Held by the orchestrator. Every stage waits on PR #536 (`wt/toyos-fsd`).
+Held by the orchestrator. Stage 1 landed before the latency work
+(`issues/kernel/toyos-beats-linuxs-latency-on-the-t14.md`; owner, 2026-10-03).
 
 ## Stages
 
-Every guest test this track names is registered at `Tier::Fast` or
-`Tier::Nightly` with no `src/redlist.rs` row. A deleted or disabled test covers
+Every guest test this track names is registered. A deleted test covers
 nothing.
 
-1. **The rename**, one mechanical PR, first after #536. Before stage 1 is
-   briefed, the exit's search below runs once over the `rust/` fork's delta as
-   well as the superproject, so its hits are known going in. It touches `toyos/src`,
-   `toyos-abi/src`, `userland/libc/src` and the `rust/` fork's delta, so it is
-   briefed as an ABI brief, and its `CLAUDE.md` edits are placed in the same PR
+1. **Done. The rename**, one mechanical PR. Before stage 1 is
+   briefed, the exit's search below runs once over the `rust/` fork's delta and
+   the delta of every fork a lockfile pins as well as the superproject, so its
+   hits are known going in. It touches `toyos/src`, `toyos-abi/src`,
+   `userland/libc/src` and the `rust/`, `mio`, `socket2`, `cpal` and `tokio`
+   forks' deltas, and its
+   `CLAUDE.md` edits are placed in the same PR
    by an agent briefed for them. Issue slugs carrying an old name are renamed
    with every citation.
 
@@ -34,8 +36,8 @@ nothing.
    | `compositor` | unchanged |
 
    **Exit**: over every tracked path and every text file's content, in the
-   superproject and the `rust/` fork's delta as `src/forkcheck.rs` defines it,
-   excluding the bodies of `issues/` files (recorded evidence), no hit remains
+   superproject, the `rust/` fork's delta and the delta of every fork a
+   lockfile pins, excluding the bodies of `issues/` files (recorded evidence), no hit remains
    outside the exclusions, each judged per match and not per line:
    - a case-insensitive substring search for `netd`, `logd`, `soundd`,
      `blockd`, `fsd`, `sshd`, excluding, case-insensitively, an identifier
@@ -62,7 +64,9 @@ nothing.
    the crate for it, named per decision in the PR. No decision exists in two
    places.
 3. **The supervisor owns the stop.** It asks each service it started to
-   finish, in reverse dependency order, storage last, each ask bounded; only
+   finish by a quit with reason terminate
+   (`issues/kernel/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`
+   stage 6), in reverse dependency order, storage last, each ask bounded; only
    then does it call the kernel, whose part is to stop whatever is left and
    cut power.
    **Exit**: two guest tests. In one, two non-storage services with a declared
@@ -70,8 +74,9 @@ nothing.
    they are asked in forward order, and when they are asked all at once with
    storage still last. In the other, a service holding unwritten state is
    asked to finish, answers, and has its state on disk after the reboot; its
-   negative control is the same service never answering, where the stop still
-   lands at the bound and the supervisor's line names the service.
+   negative control is the same service listening for the ask and never
+   ending, where the stop still lands at the bound and the supervisor's line
+   names the service.
 4. **The stop's coverage comes back.** **Exit**: each claim below is asserted
    by a host test or a guest test, and a mutation named in the PR reds it.
    - A held thread's transition wakes the stop.
@@ -82,6 +87,5 @@ nothing.
 
 ## Open with the owner
 
-- Before stage 3: the ask's ABI (no syscall is proposed); whether a program
-  started through `launcher` is asked or only stopped; whether
-  `SYS_SHUTDOWN`/`SYS_REBOOT` change at all.
+- Before stage 3: whether a program started through `launcher` is asked or
+  only stopped; whether `SYS_SHUTDOWN`/`SYS_REBOOT` change at all.

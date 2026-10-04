@@ -6,8 +6,7 @@
 //! are still alive and hands it to the kernel; this crate finds *that* GUID in
 //! *that* device's table, or refuses. Searching for a type GUID, or for the
 //! first FAT-looking thing, is how an operating system reformats a disk that
-//! belongs to somebody else — the same class of defect `bcachefs_adapter::probe`
-//! exists to prevent, and the reason `5dff9aa` exists.
+//! belongs to somebody else.
 //!
 //! Everything here treats the disk as hostile. A GPT is bytes an attacker (or
 //! a dying flash controller) may have written: every length, count and LBA in

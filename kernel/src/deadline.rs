@@ -221,7 +221,7 @@ fn expire() -> ! {
     // The seal first, because the USB stop `reset_now` makes before it writes
     // the register is bounded but not instant, and this record is the
     // diagnostic the whole mechanism exists for.
-    crate::drivers::acpi::reset_now()
+    crate::power::reset_now()
 }
 
 /// What a sealed record opens with, and so what the next boot's loader prints
@@ -278,7 +278,7 @@ fn this_cpu() -> ! {
     // claims.
     crate::preempt::disable();
     let arrived_awake = crate::arch::cpu::interrupts_enabled();
-    crate::arch::irqchip::arm_within(toyos_sched::fair::QUANTUM_NS);
+    crate::arch::irqchip::arm_within(kernel::sched::fair::QUANTUM_NS);
     crate::arch::cpu::enable_interrupts();
     log!(
         "wedge: cpu{} {}",

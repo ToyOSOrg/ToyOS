@@ -8,7 +8,7 @@ opened: 2026-09-27
 
 A consumer stores its head `Release` after it has loaded the entries below it,
 and a producer loads the head `Acquire` before it writes over them
-(`toyos-transport/src/queue.rs`, `Consumer::release` and `Producer::space`).
+(`toyos-blockring/transport/src/queue.rs`, `Consumer::release` and `Producer::space`).
 No test reds if either is `Relaxed`: what the pair forbids is load buffering —
 a consumer's load of an entry reading the producer's later overwrite — which
 loom does not model, and every other test runs both ends on one thread. The

@@ -1,0 +1,38 @@
+
+ Performance counter stats for 'system wide':
+
+CPU0           98,079,648      msr/aperf/                                                            
+CPU1          181,130,722      msr/aperf/                                                            
+CPU2          121,578,728      msr/aperf/                                                            
+CPU3          140,715,079      msr/aperf/                                                            
+CPU4           61,297,064      msr/aperf/                                                            
+CPU5          191,874,303      msr/aperf/                                                            
+CPU6           96,508,493      msr/aperf/                                                            
+CPU7           74,201,638      msr/aperf/                                                            
+CPU0          150,186,840      msr/mperf/                                                            
+CPU1          192,582,720      msr/mperf/                                                            
+CPU2          234,799,920      msr/mperf/                                                            
+CPU3          313,507,656      msr/mperf/                                                            
+CPU4          156,309,048      msr/mperf/                                                            
+CPU5          326,606,712      msr/mperf/                                                            
+CPU6          227,450,760      msr/mperf/                                                            
+CPU7          156,326,856      msr/mperf/                                                            
+CPU0                    0      msr/smi/                                                              
+CPU1                    0      msr/smi/                                                              
+CPU2                    0      msr/smi/                                                              
+CPU3                    0      msr/smi/                                                              
+CPU4                    0      msr/smi/                                                              
+CPU5                    0      msr/smi/                                                              
+CPU6                    0      msr/smi/                                                              
+CPU7                    0      msr/smi/                                                              
+CPU0      145,157,386,466      msr/tsc/                                                              
+CPU1      145,157,434,015      msr/tsc/                                                              
+CPU2      145,157,376,550      msr/tsc/                                                              
+CPU3      145,157,230,321      msr/tsc/                                                              
+CPU4      145,157,567,260      msr/tsc/                                                              
+CPU5      145,157,642,420      msr/tsc/                                                              
+CPU6      145,157,528,396      msr/tsc/                                                              
+CPU7      145,157,356,567      msr/tsc/                                                              
+
+      60.002902881 seconds time elapsed
+

@@ -42,20 +42,18 @@ dependencies = [
  "toyos-blackbox",
  "toyos-blockhold",
  "toyos-bootmap",
+ "toyos-cpuvuln",
  "toyos-dma",
  "toyos-elf",
  "toyos-elide",
  "toyos-fat32",
+ "toyos-gicv3",
  "toyos-gpt",
  "toyos-hda",
  "toyos-pci",
- "toyos-pcid",
- "toyos-perfstate",
- "toyos-proclife",
  "toyos-ps2",
  "toyos-quiesce",
  "toyos-rootimage",
- "toyos-sched",
  "toyos-symbols",
  "toyos-tco",
  "toyos-untrusted",
@@ -104,6 +102,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "toyos-cpuvuln"
+version = "0.1.0"
+
+[[package]]
 name = "toyos-dma"
 version = "0.1.0"
 
@@ -123,6 +125,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "toyos-gicv3"
+version = "0.1.0"
+
+[[package]]
 name = "toyos-gpt"
 version = "0.1.0"
 
@@ -138,21 +144,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "toyos-pcid"
-version = "0.1.0"
-
-[[package]]
-name = "toyos-perfstate"
-version = "0.1.0"
-
-[[package]]
-name = "toyos-proclife"
-version = "0.1.0"
-dependencies = [
- "toyos-abi",
-]
-
-[[package]]
 name = "toyos-ps2"
 version = "0.1.0"
 
@@ -162,10 +153,6 @@ version = "0.1.0"
 
 [[package]]
 name = "toyos-rootimage"
-version = "0.1.0"
-
-[[package]]
-name = "toyos-sched"
 version = "0.1.0"
 
 [[package]]

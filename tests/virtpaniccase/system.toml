@@ -1,0 +1,13 @@
+# The fatal path on a machine of more than one CPU: the one job goes fatal
+# while its siblings make kernel records on the other CPUs, and takes the
+# machine with it, so nothing runs after it.
+[boot]
+start = ["logkeeper", "test-runner"]
+
+[programs.logkeeper]
+service = true
+syscap = ["logread"]
+
+[programs.test-runner]
+receives = ["power"]
+args = ["--bound-ms=240000", "test_rs_panic_halts_first"]

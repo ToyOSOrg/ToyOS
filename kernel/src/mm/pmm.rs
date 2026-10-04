@@ -262,8 +262,18 @@ pub(super) fn init(entries: &[MemoryMapEntry], reserved: &[Region]) {
     );
 }
 
-/// Allocate one 2MB physical page. Does not heap-allocate (safe to call from the allocator).
+/// Allocate one 2MB physical page.
 pub fn alloc_page(cat: Category) -> Option<PhysPage> {
+    let page = claim(cat)?;
+    // SAFETY: `claim` just took the frame off the bitmap, so it is unaliased, and the direct map covers every address the bitmap can name.
+    unsafe {
+        core::ptr::write_bytes(page.direct_map().as_mut_ptr::<u8>(), 0, PAGE_2M as usize);
+    }
+    Some(page)
+}
+
+/// One 2MB physical page holding what its last owner left in it. Only the kernel heap takes one as it is: the heap answers uninitialized memory, and `alloc_zeroed` writes its own zeros. Does not heap-allocate: the heap calls it when it is full.
+pub(super) fn claim(cat: Category) -> Option<PhysPage> {
     let mut bm = BITMAP.lock();
     if bm.free_count == 0 { return None; }
     let start = bm.next_hint;
@@ -275,12 +285,6 @@ pub fn alloc_page(cat: Category) -> Option<PhysPage> {
             bm.next_hint = if idx + 1 < bm.page_count { idx + 1 } else { 0 };
             let phys = bm.idx_to_phys(idx);
             drop(bm);
-            // SAFETY: `idx` was just claimed under `BITMAP`'s lock, so it is unaliased, and the direct map covers every address the bitmap can name.
-            unsafe {
-                core::ptr::write_bytes(
-                    DirectMap::from_phys(phys).as_mut_ptr::<u8>(), 0, PAGE_2M as usize,
-                );
-            }
             CATEGORY_STATS[cat as usize].alloc_pages.fetch_add(1, Ordering::Relaxed);
             return Some(PhysPage { phys, category: cat as u8 });
         }

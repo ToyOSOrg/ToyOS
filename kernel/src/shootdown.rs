@@ -1,6 +1,8 @@
-//! The acknowledgement half of a machine-wide ask, with no hardware in it.
-//! Compiled a second time into `kernel-loom/` against loom's atomics, so this file must hold no `crate::` references.
-//! The read must happen before the flush, or a target could publish a generation its flush has not yet completed.
+//! A generation one CPU issues and every other acknowledges, with no hardware
+//! in it: a TLB shootdown's, and a counters read's round.
+//! Compiled a second time into `kernel/loom/` against loom's atomics, so this file must hold no `crate::` references.
+//! The read must happen before the answer, or a target could publish a generation its answer does not cover;
+//! and an initiator that sees a generation served sees everything that answer wrote.
 
 #[cfg(not(feature = "loom"))]
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -17,6 +19,13 @@ const OWED: Ordering = Ordering::Acquire;
 // Relaxed arm: kernel-loom's negative-control mutation, never selected by a kernel build.
 #[cfg(feature = "shootdown-serve-relaxed")]
 const OWED: Ordering = Ordering::Relaxed;
+
+// Acquire: pairs with `serve`'s Release, so what its closure wrote is visible once a generation reads served.
+#[cfg(not(feature = "shootdown-served-relaxed"))]
+const SERVED: Ordering = Ordering::Acquire;
+// Relaxed arm: kernel-loom's negative-control mutation, never selected by a kernel build.
+#[cfg(feature = "shootdown-served-relaxed")]
+const SERVED: Ordering = Ordering::Relaxed;
 
 /// Which shootdown a flush answers for: monotonic and machine-wide, so one target's flush answers every initiator waiting on it.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -70,15 +79,16 @@ impl Shootdown {
 
     /// Has `cpu` flushed since `generation` was issued?
     pub fn served(&self, cpu: usize, generation: Generation) -> bool {
-        // Acquire: pairs with `serve`'s Release, so what its closure wrote is visible once this is true.
-        self.flushed[cpu].load(Ordering::Acquire) >= generation.0
+        self.flushed[cpu].load(SERVED) >= generation.0
     }
 
-    /// [`serve`](Self::serve) for a CPU not taking the interrupt.
-    pub fn serve_if_owed(&self, cpu: usize, flush: impl FnOnce()) {
-        if self.owes(cpu) {
+    /// [`serve`](Self::serve) for a CPU not taking the interrupt; whether it served.
+    pub fn serve_if_owed(&self, cpu: usize, flush: impl FnOnce()) -> bool {
+        let owed = self.owes(cpu);
+        if owed {
             self.serve(cpu, flush);
         }
+        owed
     }
 
     /// One turn of an initiator's wait for `cpu`: answer first, then ask.

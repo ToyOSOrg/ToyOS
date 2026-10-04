@@ -1,10 +1,5 @@
 //! The calendar.
 //!
-//! Two things live here because two programs need them and the host is where
-//! either can be tested: the kernel decodes an RTC into a [`Civil`] and stamps
-//! FAT directory entries from it, and `/system/bin/logd` names one file per boot from
-//! the same calendar.
-//!
 //! Nothing here allocates, nothing here is `unsafe`, and nothing here reads a
 //! device: it is arithmetic over numbers its callers hand it.
 
@@ -33,11 +28,7 @@ pub struct Civil {
 
 impl fmt::Display for Civil {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-            self.year, self.month, self.day, self.hour, self.min, self.sec
-        )
+        write!(f, "{:04}-{:02}-{:02} {}", self.year, self.month, self.day, self.time_of_day())
     }
 }
 
@@ -90,6 +81,11 @@ impl Civil {
     pub fn stem(&self) -> Stem {
         Stem(*self)
     }
+
+    /// `HH:MM:SS`, the stamp a line the build system prints opens with.
+    pub fn time_of_day(&self) -> TimeOfDay {
+        TimeOfDay(*self)
+    }
 }
 
 /// [`Civil::stem`]'s rendering. Sortable by name, which is what makes `/log`
@@ -107,6 +103,16 @@ impl fmt::Display for Stem {
     }
 }
 
+/// [`Civil::time_of_day`]'s rendering.
+pub struct TimeOfDay(Civil);
+
+impl fmt::Display for TimeOfDay {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let t = self.0;
+        write!(f, "{:02}:{:02}:{:02}", t.hour, t.min, t.sec)
+    }
+}
+
 /// The shape [`Stem`] renders, as the character classes a name must match to be
 /// one of the log's own files: `d` is a digit and every other byte is itself.
 ///
@@ -114,13 +120,28 @@ impl fmt::Display for Stem {
 /// dated name looks like.
 pub const STEM_SHAPE: &[u8] = b"dddd-dd-dd-dddddd";
 
-/// Whether `stem` is exactly what [`Stem`] would have rendered.
-pub fn is_stem(stem: &str) -> bool {
-    stem.len() == STEM_SHAPE.len()
-        && stem.bytes().zip(STEM_SHAPE).all(|(b, want)| match want {
+/// The shape [`TimeOfDay`] renders, in [`STEM_SHAPE`]'s classes.
+const TIME_OF_DAY_SHAPE: &[u8] = b"dd:dd:dd";
+
+/// Whether `text` is exactly what a rendering of `shape` looks like.
+fn is_shaped(text: &str, shape: &[u8]) -> bool {
+    text.len() == shape.len()
+        && text.bytes().zip(shape).all(|(b, want)| match want {
             b'd' => b.is_ascii_digit(),
             c => b == *c,
         })
+}
+
+/// Whether `stem` is exactly what [`Stem`] would have rendered.
+pub fn is_stem(stem: &str) -> bool {
+    is_shaped(stem, STEM_SHAPE)
+}
+
+/// What follows the [`TimeOfDay`] `line` opens with, or `None` where it opens
+/// with none.
+pub fn after_time_of_day(line: &str) -> Option<&str> {
+    let (head, rest) = line.split_at_checked(TIME_OF_DAY_SHAPE.len())?;
+    is_shaped(head, TIME_OF_DAY_SHAPE).then_some(rest)
 }
 
 /// The name a boot gets when the machine would not say what time it is.
@@ -142,10 +163,10 @@ pub enum Class {
     Dated,
 }
 
-/// Whether `name` on the log volume is one of `logd`'s files, and which kind.
+/// Whether `name` on the log volume is one of `logkeeper`'s files, and which kind.
 ///
 /// An allow-list, and the strictness is the safety property in both
-/// directions: `logd` deletes nothing this does not recognise, and a host
+/// directions: `logkeeper` deletes nothing this does not recognise, and a host
 /// reading the volume for a boot's log reads nothing else — the bootloader's
 /// own `loader.log` is not one of these.
 pub fn classify(name: &str) -> Option<Class> {
@@ -241,10 +262,29 @@ mod tests {
         }
     }
 
-    /// The allow-list, from both sides: `logd` deletes only what this names,
+    /// A time of day this renders is one a reader of the line it opens finds,
+    /// and what the reader is handed is the rest of that line, whole.
+    #[test]
+    fn every_time_of_day_this_renders_is_one_it_reads_back() {
+        // Midnight, an hour, minute and second that differ, and the last
+        // second of a day.
+        for (secs, rendered) in [(0, "00:00:00"), (1_786_806_245, "15:04:05"), (1_786_838_399, "23:59:59")] {
+            let at = format!("{}", Civil::from_unix_secs(secs).time_of_day());
+            assert_eq!(at, rendered);
+            assert_eq!(after_time_of_day(&at), Some(""));
+            assert_eq!(after_time_of_day(&format!("{at}   PASS  a  (3s)")), Some("   PASS  a  (3s)"));
+        }
+        // Short of one, not one, one that is not where the line opens, and one
+        // whose eighth byte is the first of a wider character.
+        for no in ["", "12:00:0", "12:00:0x y", "1200:00:00 y", "[12:00:00] y", "12:00:0é"] {
+            assert_eq!(after_time_of_day(no), None, "`{no}` was read as opening with a time of day");
+        }
+    }
+
+    /// The allow-list, from both sides: `logkeeper` deletes only what this names,
     /// and a host reading the volume for a boot's log reads only what it names.
     #[test]
-    fn only_logds_own_names_are_logds() {
+    fn only_logkeepers_own_names_are_logkeepers() {
         assert_eq!(classify("2026-09-06-084003.log"), Some(Class::Dated));
         assert_eq!(classify("2026-09-06-084003_0002.log"), Some(Class::Dated));
         assert_eq!(classify("unknown-00.log"), Some(Class::Undated));
@@ -255,7 +295,7 @@ mod tests {
         // The bootloader's own file, and anything else on a volume a person
         // and `toybox` can both write to.
         for no in ["loader.log", "LOADER.LOG", "boot.log", "notes.txt", ".log", "log"] {
-            assert_eq!(classify(no), None, "`{no}` was taken for one of logd's");
+            assert_eq!(classify(no), None, "`{no}` was taken for one of logkeeper's");
         }
         // A part number that is not four digits, and an index that is not two.
         for no in [
@@ -266,7 +306,7 @@ mod tests {
             "unknown-000.log",
             "unknown.log",
         ] {
-            assert_eq!(classify(no), None, "`{no}` was taken for one of logd's");
+            assert_eq!(classify(no), None, "`{no}` was taken for one of logkeeper's");
         }
     }
 

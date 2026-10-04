@@ -1,6 +1,6 @@
 ---
 status: open
-kind: tooling
+kind: defect
 opened: 2026-09-16
 ---
 
@@ -9,9 +9,7 @@ opened: 2026-09-16
 Both `Sched::Parallel`, both first sightings, both in one `cargo test` fast-tier
 run on `wt/toyos-usbhang` sharing the host's twelve guest slots throughout with
 two other worktrees' suites (`[host-slots]` names `pid 49668` and `pid 2726`
-holding slots across the whole run). The branch's own diff at the time —
-`tests/toyos.rs`'s tier table, `src/tiers.rs`'s `RELEGATED` and
-`tests/test-durations`, all for `usb_reset_records_the_phase_it_cut` — touches
+holding slots across the whole run). The branch's own diff at the time touches
 neither SMP bring-up, `spawn_init`, nor `rootfs.rs`, so it is filed rather than
 chased. Same shape as
 `issues/build/parallel-tests-red-under-other-suites.md`, filed separately
@@ -33,4 +31,14 @@ the root disk's own read missed its 2000 ms budget under the host's load, so
 the GPT scan that follows legitimately found no partition to mount. `ALONE:
 GREEN`, `cargo test -- log_reserve_window` alone immediately after, PASS in 3s.
 
-Neither name is in `src/redlist.rs` yet. Not investigated further.
+Not investigated further.
+
+**Both tests are deleted**, as flaky tests are. `aedcf17dc` took
+`smp_failed_ap_leaves_no_hole` out with `smp_hole_shootdown`, the binary only
+it ran, and `git revert aedcf17dc` brings it back. `4db54ffa5` took
+`log_reserve_window` out with `log-nested-reserve`; `3b8102cf5` then took the
+nest vector and the log gate it rode.
+
+**Exit**: a cause for `spawn_init`'s `WouldBlock` and for a root read that
+misses its budget under host load, and both tests restored and green beside
+other guests.

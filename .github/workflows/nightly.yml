@@ -1,34 +1,43 @@
 name: nightly
 
-# Everything that boots a guest, the host gate again to write the cache the
-# merge queue restores, and portability: on main every night, the weekly tier
-# on Sundays, and on any branch by `gh workflow run nightly.yml --ref <branch>`.
 # Every job's logic is `cargo run -- --ci <job>` (src/ci.rs); this file says
 # where each one runs.
 
 on:
   schedule:
-    - cron: '0 3 * * 1-6'
-    - cron: '0 3 * * 0'
+    - cron: '0 3 * * *'
   workflow_dispatch:
 
-# Never cancelled: `build` may be an hour into a bootstrap.
 concurrency:
   group: nightly-${{ github.ref }}
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 jobs:
+  # The host cache's writer restores nothing, and `seal` is green only once
+  # src/cicache.rs has sealed the tree the save stores.
   host:
-    runs-on: macos-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
+    # The driver's own target, and no step's: it says this job carries the
+    # host cache (src/cicache.rs).
+    env:
+      CARGO_TARGET_DIR: target/ci-driver
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
-      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      - run: cargo run -- --ci seal
+
+      # The host cache's one writer. Only main's entries are readable from
+      # every branch.
+      - if: github.ref == 'refs/heads/main'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
-          path: &host-paths |
+          path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
@@ -37,150 +46,43 @@ jobs:
             toyos/target
             kernel/target
             bootloader/target
-          key: host-${{ github.run_id }}
-          restore-keys: host-
+          key: host-sealed-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}
 
-      - run: cargo run -- --ci host
+  toolchain:
+    uses: ./.github/workflows/toolchain.yml
 
-      # The host cache's one writer. Only main's entries are readable from
-      # every branch.
-      - if: github.ref == 'refs/heads/main'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: *host-paths
-          key: host-${{ github.run_id }}
-
-  # Publishes this tree's toolchain if nobody has, and on main moves the SDK
-  # alias onto it. Bare `ubuntu-24.04`, not a container: its glibc is the
-  # release's floor.
-  build:
+  # Skipped off main, where the driver refuses it by name.
+  release:
+    needs: toolchain
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
-    timeout-minutes: 350
+    timeout-minutes: 30
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          fetch-depth: 0
 
-      # CMake and Ninja are what bootstrap builds LLVM and clang with, pinned to
-      # the versions Ubuntu 24.04 released (src/main.rs's `ALSO_USED`).
-      - name: disk, QEMU, CMake and Ninja
-        run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
-                      /usr/local/share/boost /usr/local/.ghcup
-          sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq qemu-system-x86 zstd \
-                      cmake=3.28.3-1build7 ninja-build=1.11.1-2
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ needs.toolchain.outputs.sysroot-path }}
+          key: ${{ needs.toolchain.outputs.sysroot-key }}
+          fail-on-cache-miss: true
 
       - env:
           GH_TOKEN: ${{ github.token }}
-        run: cargo run -- --ci toolchain
+        run: cargo run -- --ci release
 
-  guest:
-    needs: build
-    runs-on: ubuntu-24.04
-    # A wedge guard, not a budget.
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
-    # The digest is the instrument's one pin: a dated image names the snapshot
-    # archive it was built from, and `deps` installs QEMU from that archive.
-    # The node ships `crw-rw---- root:kvm` and root opens it.
-    container: &kvm
-      image: &image debian:sid-20260918@sha256:a2aa46262453eba3f464d8b1c7a8c31db85eb15af180ae34dd400615d7208547
-      options: --device=/dev/kvm
-    env:
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      # Before the checkout, which wants git. Three attempts, because the
-      # archive is fixed and the network to it is not.
-      - &deps
-        name: deps
-        run: |
-          snap=$(sed -n 's|^# \(http://snapshot\.debian\.org/archive/debian/[0-9]*T[0-9]*Z\)$|\1|p' \
-                   /etc/apt/sources.list.d/debian.sources)
-          test -n "$snap"
-          echo "deb $snap sid main" > /etc/apt/sources.list
-          rm /etc/apt/sources.list.d/debian.sources
-          for attempt in 1 2 3; do
-            apt-get -o Acquire::Check-Valid-Until=false update -qq > /tmp/apt.log 2>&1 \
-              && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl ca-certificates \
-                   zstd xz-utils build-essential qemu-system-x86 ovmf-generic >> /tmp/apt.log 2>&1 \
-              && break
-            [ "$attempt" = 3 ] && { cat /tmp/apt.log; exit 1; }
-            sleep 20
-          done
-          # `actions/checkout` sets this only in a config it discards.
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          curl --proto '=https' --tlsv1.2 -sSf -o "$RUNNER_TEMP/rustup-init.sh" https://sh.rustup.rs
-          sh "$RUNNER_TEMP/rustup-init.sh" -y --profile minimal --default-toolchain stable
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-
-      - &checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-
-      - &guest-cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: &guest-paths |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-            kernel/target
-            bootloader/target
-            userland/target
-            tests/target
-            tests/toyos-rust-tests/*/target
-            tests/https-fetch-host/target
-            tests/https-server-host/target
-          key: guest-${{ github.run_id }}
-          restore-keys: guest-
-
-      - run: cargo run -- --ci guest ${{ matrix.shard }}/12
-
-      # Every boot's 16550 log: what a guest that died early still leaves.
-      - &serial
-        name: serial logs
-        if: failure()
-        continue-on-error: true
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: serial-${{ github.job }}-${{ strategy.job-index }}
-          path: target/red-run-serial/**/uart-*.log
-          if-no-files-found: warn
-          retention-days: 7
-
-  # The only lane with no `/dev/kvm`, so the only one that decodes the paths a
-  # KVM host's CPU never does; and the guest cache's one writer, since what it
-  # builds does not depend on the accelerator.
   tcg:
-    needs: build
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    container:
-      image: *image
-    env:
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - *deps
-      - *checkout
-      - *guest-cache
-      - run: cargo run -- --ci tcg
-      # After the test: what is worth keeping is a tree that built and booted.
-      - if: github.ref == 'refs/heads/main'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: *guest-paths
-          key: guest-${{ github.run_id }}
-      - *serial
+    needs: toolchain
+    if: ${{ !cancelled() }}
+    uses: ./.github/workflows/guest.yml
+    with:
+      kvm: false
+      sysroot-key: ${{ needs.toolchain.outputs.sysroot-key }}
+      sysroot-path: ${{ needs.toolchain.outputs.sysroot-path }}
 
-  # "Only Rust and QEMU", run rather than argued: `cargo run -- --build-only`
-  # from a fresh machine. `sid` as it stands, image and archive both, and no
-  # cache — a fresh machine is the premise.
+  # `cargo run -- --build-only` from a fresh machine. `sid` as it stands,
+  # image and archive both, and no cache — a fresh machine is the premise.
   portability-linux:
     runs-on: ubuntu-24.04
     timeout-minutes: 350
@@ -192,7 +94,7 @@ jobs:
           for attempt in 1 2 3; do
             apt-get update -qq > /tmp/apt.log 2>&1 \
               && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl ca-certificates \
-                   build-essential qemu-system-x86 python3 cmake ninja-build >> /tmp/apt.log 2>&1 \
+                   build-essential qemu-system-x86 python3 cmake >> /tmp/apt.log 2>&1 \
               && break
             [ "$attempt" = 3 ] && { cat /tmp/apt.log; exit 1; }
             sleep 20
@@ -202,9 +104,10 @@ jobs:
           sh "$RUNNER_TEMP/rustup-init.sh" -y --profile minimal --default-toolchain stable
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
-      - *checkout
+      - &checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - run: env -u GITHUB_ACTIONS -u CI cargo run -- --build-only
+      - run: cargo run -- --build-only
 
   portability-macos:
     runs-on: macos-latest
@@ -212,38 +115,12 @@ jobs:
     steps:
       - *checkout
       # Homebrew keeps one QEMU; `cargo run` notes it if it is not the declared one.
-      # CMake and Ninja build LLVM and clang, from Homebrew as on the dev host.
       - run: |
-          brew install qemu cmake ninja
+          brew install qemu cmake
       - run: |
           curl --proto '=https' --tlsv1.2 -sSf -o "$RUNNER_TEMP/rustup-init.sh" https://sh.rustup.rs
           sh "$RUNNER_TEMP/rustup-init.sh" -y --profile minimal --default-toolchain stable
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - run: env -u GITHUB_ACTIONS -u CI cargo run -- --build-only
-
-  # The declared Windows frontier
-  # (`issues/build/the-build-system-does-not-compile-on-windows.md`): red
-  # until that issue is fixed, and not a nightly red.
-  portability-windows:
-    runs-on: windows-latest
-    timeout-minutes: 30
-    continue-on-error: true
-    steps:
-      - *checkout
-      - run: cargo build -p toyos-build
-
-  # One standing issue, found by title and commented on; a dispatch is somebody
-  # watching the run, so only the schedule files.
-  nightly-red:
-    needs: [host, build, guest, tcg, portability-linux, portability-macos]
-    if: ${{ !cancelled() && github.event_name == 'schedule' }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      issues: write
-    steps:
-      - *checkout
-      - env:
-          GH_TOKEN: ${{ github.token }}
-          NEEDS: ${{ toJSON(needs) }}
-        run: cargo run -- --ci nightly-red
+      - run: cargo run -- --build-only
+      # The host suite's macOS arms run here alone: `ci.yml`'s `host` is Linux.
+      - run: cargo run -- --ci host

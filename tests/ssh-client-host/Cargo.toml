@@ -1,5 +1,6 @@
 [package]
 name = "ssh-client-host"
+description = "The harness's SSH client, russh built for the host: what a test does to a guest over SSH, one fact per line."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
@@ -13,7 +14,7 @@ russh = { git = "https://github.com/ToyOSOrg/russh", branch = "toyos", default-f
 russh-sftp = "2.4"
 rand = "0.10"
 tokio = { version = "1", features = ["rt", "net", "io-util", "sync", "time", "fs"] }
-# The swap subsystem's name and header, which sshd reads with the same code.
+# The swap subsystem's name and header, which sshserver reads with the same code.
 toyos-swap = { path = "../../toyos-swap" }
 
 [lints.rust]

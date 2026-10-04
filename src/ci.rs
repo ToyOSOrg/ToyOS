@@ -2,14 +2,6 @@
 //! checkout, a cache and one line, and this host runs the same job to the same
 //! verdict.
 //!
-//! `.github/workflows/` is three files. `ci.yml` runs on a pull request and in
-//! the merge queue and boots no guest: [`Job::Host`] and then
-//! [`Job::GateStage`] run as `host`. Every test that boots no guest is in
-//! [`Job::Host`], so a merge is gated on all of them. `nightly.yml` runs
-//! everything that boots a guest, `host` again to write the cache the merge
-//! queue restores, and portability. `publish.yml` puts a landing's crates on
-//! crates.io.
-//!
 //! A host job runs every step and reds if any failed; a guest job stops at the
 //! first failure among the instrument, the toolchain and the suite, because
 //! what follows a wrong instrument or a missing toolchain measures nothing —
@@ -20,8 +12,7 @@
 //!
 //! **The instrument is declared once.** `.github/qemu-version` is the QEMU
 //! every guest is measured with — the version has been measured to decide
-//! verdicts (`desktop_typing_damage` and `usb_storage_shapes` are red on 8.2.2
-//! and green on 11.0.3, same image, same commit, same accelerator). A guest job
+//! verdicts. A guest job
 //! reds on a disagreement, and on a `/dev/kvm` that is present and does not
 //! open; `cargo run` only notes one, because a build must not stop for brew.
 
@@ -29,64 +20,49 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::arch::Arch;
-use crate::{flags, pr, release, sdkversion, testargs};
-
-/// The checks `main`'s ruleset must require, as `gate-stage` reads them back:
-/// a minimum, never an equality, so a name GitHub requires and this does not
-/// is reported rather than refused.
-pub(crate) const REQUIRED_CHECKS: &[&str] = &["host"];
-
-/// The one issue a red nightly files or comments on, found by title.
-const NIGHTLY_RED: &str = "nightly is red";
-
-/// `nightly.yml`'s two schedules: the nightly reach six nights a week, the weekly
-/// reach on the seventh.
-const NIGHTLY_CRON: &str = "0 3 * * 1-6";
-const WEEKLY_CRON: &str = "0 3 * * 0";
+use crate::arch::{Accel, Arch};
+use crate::cicache;
+use crate::sysroot::git_out;
+use crate::userlandhost::{Host, Os, Program};
+use crate::{flags, release, sdkversion};
 
 const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
   host              every host test: the build system, the harness's own checks,
                     the host workspace, the licences of what ships, clippy, the
                     model controls, userland and the SDK (ci.yml, nightly)
-  gate-stage        what protects main, read back from GitHub (ci.yml)
-  toolchain         publish this tree's toolchain if nobody has (nightly)
-  guest <i>/<n>     one shard of the guest suite at the reach its schedule names (nightly)
-  tcg               one test on an emulated CPU (nightly)
-  nightly-red       file or update the nightly-red issue from $NEEDS (nightly)
+  seal              `host` from a cold tree, then that tree sealed as the host
+                    cache's entry, which the step after it saves (nightly)
+  toolchain         the cache entry of each store of this tree's toolchain
+  bootstrap         build the stores of this tree's toolchain its job did not restore
+  guest             the guest suite, on the sysroot its job restored
+  release           put the sysroot main's nightly restored up as its toolchain release
   publish           put main's SDK crates on crates.io (publish.yml)";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Job {
     Host,
-    GateStage,
+    Seal,
     Toolchain,
-    Guest(String),
-    Tcg,
-    NightlyRed,
+    Bootstrap,
+    Guest,
+    Release,
     Publish,
 }
 
 fn parse(words: &[String]) -> Result<Job, String> {
-    let shard = |spec: Option<&String>| -> Result<String, String> {
-        let spec = spec.ok_or("that job takes a shard, <index>/<count>")?;
-        crate::testargs::parse_shard(&["--shard".to_string(), spec.clone()])?;
-        Ok(spec.clone())
-    };
     let job = match words.first().map(String::as_str) {
         Some("host") => Job::Host,
-        Some("gate-stage") => Job::GateStage,
+        Some("seal") => Job::Seal,
         Some("toolchain") => Job::Toolchain,
-        Some("guest") => Job::Guest(shard(words.get(1))?),
-        Some("tcg") => Job::Tcg,
-        Some("nightly-red") => Job::NightlyRed,
+        Some("bootstrap") => Job::Bootstrap,
+        Some("guest") => Job::Guest,
+        Some("release") => Job::Release,
         Some("publish") => Job::Publish,
         Some(other) => return Err(format!("no CI job is called {other:?}")),
         None => return Err("which job?".to_string()),
     };
-    let takes = usize::from(matches!(job, Job::Guest(_))) + 1;
-    if words.len() > takes {
-        return Err(format!("{:?} takes nothing after it: {:?}", words[0], &words[takes..]));
+    if words.len() > 1 {
+        return Err(format!("{:?} takes nothing after it: {:?}", words[0], &words[1..]));
     }
     Ok(job)
 }
@@ -98,20 +74,17 @@ pub fn dispatch(root: &Path, args: &[String]) {
     });
     let steps = match &job {
         Job::Host => host(root),
-        Job::GateStage => vec![step("what protects main", || gate_stage(root))],
-        Job::Toolchain => vec![step("the toolchain release", || release::ensure_published(root))],
-        Job::Guest(shard) => match guest_reach() {
-            Ok(reach) => guest(root, &suite_args(&["--shard", shard, "--jobs", "1", reach])),
-            Err(refusal) => vec![step("the reach", || Err(refusal))],
-        },
-        Job::Tcg => guest(root, &suite_args(&["--jobs", "1", "process_stats"])),
-        Job::NightlyRed => vec![step("the nightly-red issue", nightly_red)],
+        Job::Seal => seal(root),
+        Job::Toolchain => vec![step("the stores of this tree's toolchain", || release::toolchain(root))],
+        Job::Bootstrap => vec![step("this tree's toolchain", || release::bootstrap(root))],
+        Job::Guest => guest(root, &suite_args(&["--jobs", "1"])),
+        Job::Release => vec![step("main's toolchain release", || release::release(root))],
         Job::Publish => vec![step("the SDK crates on crates.io", || publish(root))],
     };
     let failed: Vec<&Step> = steps.iter().filter(|s| s.verdict.is_err()).collect();
     summary(&steps.iter().map(Step::line).collect::<Vec<_>>().join("\n"));
     if failed.is_empty() {
-        println!("[ci] {job:?}: {} step(s), all green", steps.len());
+        eprintln!("[ci] {job:?}: {} step(s), all green", steps.len());
     } else {
         eprintln!("[ci] {job:?}: {} of {} step(s) red:", failed.len(), steps.len());
         for s in failed {
@@ -137,12 +110,10 @@ impl Step {
 }
 
 fn step(label: &str, f: impl FnOnce() -> Result<String, String>) -> Step {
-    println!("\n=== [ci] {label}");
+    eprintln!("\n=== [ci] {label}");
     let verdict = f();
-    match &verdict {
-        Ok(said) => println!("[ci] {label}: {said}"),
-        Err(why) => eprintln!("[ci] {label}: {why}"),
-    }
+    let (Ok(said) | Err(said)) = &verdict;
+    eprintln!("[ci] {label}: {said}");
     Step { label: label.to_string(), verdict }
 }
 
@@ -186,13 +157,12 @@ fn cargo_logged(dir: &Path, args: &[&str]) -> Result<(bool, String), String> {
         .spawn()
         .map_err(|e| format!("cargo: {e}"))?;
     let mut log = String::new();
-    let mut out = std::io::stdout();
+    let mut err = std::io::stderr();
     for line in BufReader::new(reader).split(b'\n') {
         let line = line.map_err(|e| format!("reading cargo: {e}"))?;
-        let line = String::from_utf8_lossy(&line);
-        let _ = writeln!(out, "{line}");
+        let line = format!("{}\n", String::from_utf8_lossy(&line));
+        let _ = err.write_all(line.as_bytes());
         log.push_str(&line);
-        log.push('\n');
     }
     let status = child.wait().map_err(|e| format!("cargo: {e}"))?;
     Ok((status.success(), log))
@@ -204,30 +174,69 @@ fn cargo_logged(dir: &Path, args: &[&str]) -> Result<(bool, String), String> {
 /// that takes away the one edge the model's property rests on, and the verdict
 /// lines the model must then print.
 pub(crate) struct Control {
-    /// `cargo test` arguments that select the model's crate.
-    krate: &'static [&'static str],
+    /// The model's package: a member of the host workspace, or [`KERNEL`].
+    pub(crate) krate: &'static str,
     pub(crate) feature: &'static str,
+    /// The test target the verdicts' tests are in; `None` is the library's own.
     test: Option<&'static str>,
     /// `false` is a case that catches its own panic and asserts on it: its
     /// teeth are a green run.
     must_red: bool,
     /// Every one must be in the output. An exit code alone would read a compile
     /// error as the model having teeth.
-    verdicts: &'static [&'static str],
+    verdicts: &'static [Verdict],
 }
 
-const KERNEL_LOOM: &[&str] = &["--manifest-path", "kernel-loom/Cargo.toml"];
-const SCHED_LOOM: &[&str] = &["-p", "toyos-sched-loom"];
-const SCHED_SIM: &[&str] = &["-p", "toyos-sched-sim"];
-const PROCLIFE: &[&str] = &["-p", "toyos-proclife"];
-const BLOCKRING: &[&str] = &["-p", "toyos-blockring"];
-const TRANSPORT: &[&str] = &["-p", "toyos-transport"];
+/// A line a control's run must print, and the test that prints it: the run is
+/// the tests its verdicts name and no other, so nothing it runs goes unread.
+#[derive(Clone, Copy)]
+enum Verdict {
+    /// The harness's own `<test> ... FAILED`.
+    Fails(&'static str),
+    /// The harness's own `<test> ... ok`.
+    Passes(&'static str),
+    /// A message the test prints itself.
+    Says { test: &'static str, message: &'static str },
+}
+
+impl Verdict {
+    fn test(self) -> &'static str {
+        match self {
+            Fails(test) | Passes(test) | Says { test, .. } => test,
+        }
+    }
+
+    fn line(self) -> String {
+        match self {
+            Fails(test) => format!("{test} ... FAILED"),
+            Passes(test) => format!("{test} ... ok"),
+            Says { message, .. } => message.to_string(),
+        }
+    }
+}
+
+use Verdict::{Fails, Passes, Says};
+
+/// The kernel package, whose library's tests are its models.
+pub(crate) const KERNEL: &str = "kernel";
+/// Its manifest, resolved on its own. Run from the repository root, cargo
+/// builds it for the host: `kernel/.cargo/config.toml` is read only below
+/// `kernel/`.
+pub(crate) const KERNEL_MANIFEST: &str = "kernel/Cargo.toml";
+/// Where a host build from it lands: the root's `target/`, since `kernel/target`
+/// is cleaned whole under the worktree's build lock, which `--ci host` does not
+/// take.
+pub(crate) const KERNEL_HOST_TARGET: &str = "target";
+const KERNEL_LOOM: &str = "kernel-loom";
+const KERNEL_SIM: &str = "kernel-sim";
+const BLOCKRING: &str = "toyos-blockring";
+const TRANSPORT: &str = "toyos-transport";
 
 const fn red(
-    krate: &'static [&'static str],
+    krate: &'static str,
     feature: &'static str,
     test: Option<&'static str>,
-    verdicts: &'static [&'static str],
+    verdicts: &'static [Verdict],
 ) -> Control {
     Control { krate, feature, test, must_red: true, verdicts }
 }
@@ -236,160 +245,223 @@ const fn red(
 /// `every_model_control_is_run` holds this against the manifests.
 pub(crate) const CONTROLS: &[Control] = &[
     red(KERNEL_LOOM, "wake-fence-off", Some("log_wake"), &[
-        "a_commit_and_an_arm_cannot_both_miss ... FAILED",
+        Fails("a_commit_and_an_arm_cannot_both_miss"),
     ]),
     red(KERNEL_LOOM, "lock-acquire-off", Some("ticket_lock"), &[
-        "try_lock_observes_the_previous_owners_writes ... FAILED",
+        Fails("try_lock_observes_the_previous_owners_writes"),
     ]),
     red(KERNEL_LOOM, "seqlock-writer-fence-off", Some("panic_console_publish"), &[
-        "a_snapshot_is_one_publication_whole ... FAILED",
+        Fails("a_snapshot_is_one_publication_whole"),
     ]),
     red(KERNEL_LOOM, "serial-try-lock-then-some", Some("serial_lock"), &[
-        "a_lost_try_lock_leaves_the_lock_held ... FAILED",
-        "two_writers_never_overlap ... FAILED",
+        Fails("a_lost_try_lock_leaves_the_lock_held"),
+        Fails("two_writers_never_overlap"),
     ]),
     red(KERNEL_LOOM, "reap-raise-relaxed", Some("reap_gate"), &[
-        "a_claim_sees_the_enrolled_work ... FAILED",
+        Fails("a_claim_sees_the_enrolled_work"),
     ]),
     red(KERNEL_LOOM, "shootdown-serve-relaxed", Some("tlb_shootdown"), &[
-        "an_acknowledged_flush_postdates_the_page_table_write ... FAILED",
-        "one_serve_answers_two_concurrent_shootdowns ... FAILED",
+        Fails("an_acknowledged_flush_postdates_the_page_table_write"),
+        Fails("one_serve_answers_two_concurrent_shootdowns"),
+    ]),
+    red(KERNEL_LOOM, "shootdown-served-relaxed", Some("counters_round"), &[
+        Fails("a_cpu_read_as_answered_is_read_with_its_answer"),
     ]),
     red(KERNEL_LOOM, "roster-commit-relaxed", Some("smp_bringup"), &[
-        "a_committed_count_never_outruns_its_slot ... FAILED",
+        Fails("a_committed_count_never_outruns_its_slot"),
     ]),
     red(KERNEL_LOOM, "smp-ready-split", Some("smp_bringup"), &[
-        "a_released_machine_is_answering ... FAILED",
+        Fails("a_released_machine_is_answering"),
     ]),
     red(KERNEL_LOOM, "log-commit-release-off", Some("log_record"), &[
-        "a_committed_record_is_whole_or_absent ... FAILED",
-        "a_key_and_the_record_it_names_come_from_one_generation ... FAILED",
+        Fails("a_committed_record_is_whole_or_absent"),
+        Fails("a_key_and_the_record_it_names_come_from_one_generation"),
     ]),
     red(KERNEL_LOOM, "shard-publish-relaxed", Some("log_publish"), &[
-        "a_reader_that_finds_a_shard_finds_it_built ... FAILED",
+        Fails("a_reader_that_finds_a_shard_finds_it_built"),
     ]),
     red(KERNEL_LOOM, "log-ring-publish-relaxed", Some("log_ring"), &[
-        "a_published_record_is_whole_and_read_once ... FAILED",
-        "a_slot_is_reused_only_after_its_record_was_read ... FAILED",
-        "a_lane_publishes_whole_and_reuses_only_after_a_read ... FAILED",
+        Fails("a_published_record_is_whole_and_read_once"),
+        Fails("a_slot_is_reused_only_after_its_record_was_read"),
+        Fails("a_lane_publishes_whole_and_reuses_only_after_a_read"),
     ]),
     red(KERNEL_LOOM, "log-ring-tail-relaxed", Some("log_ring"), &[
-        "a_published_record_is_whole_and_read_once ... FAILED",
-        "a_slot_is_reused_only_after_its_record_was_read ... FAILED",
-        "a_lane_publishes_whole_and_reuses_only_after_a_read ... FAILED",
+        Fails("a_published_record_is_whole_and_read_once"),
+        Fails("a_slot_is_reused_only_after_its_record_was_read"),
+        Fails("a_lane_publishes_whole_and_reuses_only_after_a_read"),
     ]),
     red(KERNEL_LOOM, "log-ring-loads-swapped", Some("log_ring"), &[
-        "a_published_record_is_whole_and_read_once ... FAILED",
+        Fails("a_published_record_is_whole_and_read_once"),
+    ]),
+    red(KERNEL_LOOM, "post-is-an-answer", Some("inbox_answer"), &[
+        Fails("a_post_with_nothing_to_read_answers_nothing"),
+        Fails("a_post_that_lands_after_its_bytes_were_read_answers_nothing"),
+        Fails("a_poll_armed_again_does_not_end_the_look"),
     ]),
     red(KERNEL_LOOM, "poll-fire-load-store", Some("poll_once"), &[
-        "a_post_and_a_recheck_answer_a_poll_once ... FAILED",
-        "a_withdrawal_and_a_post_never_both_take_a_poll ... FAILED",
+        Fails("a_post_and_a_recheck_answer_a_poll_once"),
+        Fails("a_withdrawal_and_a_post_never_both_take_a_poll"),
     ]),
     red(KERNEL_LOOM, "sleeplock-acquire-off", Some("sleep_lock"), &[
-        "a_parking_contender_observes_the_holders_writes ... FAILED",
-        "two_holders_never_overlap ... FAILED",
-    ]),
-    red(KERNEL_LOOM, "durability-settle-blind", Some("durability"), &[
-        "a_page_marked_clean_is_on_the_device ... FAILED",
-        "a_settled_commit_covers_only_flushed_writes ... FAILED",
+        Fails("a_parking_contender_observes_the_holders_writes"),
+        Fails("two_holders_never_overlap"),
     ]),
     red(KERNEL_LOOM, "device-irq-lossy", Some("device_irq"), &[
-        "every_message_is_counted_once ... FAILED",
-        "one_message_is_one_wake ... FAILED",
+        Fails("every_message_is_counted_once"),
     ]),
     red(KERNEL_LOOM, "dump-report-relaxed", Some("dump_request"), &[
-        "a_request_filed_during_a_report_is_reported ... FAILED",
+        Fails("a_request_filed_during_a_report_is_reported"),
     ]),
     Control {
-        krate: SCHED_LOOM,
+        krate: KERNEL_LOOM,
         feature: "no-preempt-guard",
         test: Some("loom_mailbox"),
         must_red: false,
-        verdicts: &["preempted_producer_strands_suffix ... ok"],
+        verdicts: &[Passes("preempted_producer_strands_suffix")],
     },
-    // A double panic aborts before the harness prints a `FAILED` line, so the
-    // verdict is the first panic's own message.
-    red(SCHED_LOOM, "doorbell-kick-relaxed", Some("loom_sleep"), &[
-        "halted with 2 of 2 messages queued and no IPI in flight",
-    ]),
-    red(SCHED_LOOM, "push-fence-relaxed", Some("loom_push"), &["published and no push behind it"]),
+    red(KERNEL_LOOM, "doorbell-kick-relaxed", Some("loom_sleep"), &[Says {
+        test: "a_halted_cpu_with_queued_work_was_kicked",
+        message: "halted with 2 of 2 messages queued and no IPI in flight",
+    }]),
+    red(KERNEL_LOOM, "push-fence-relaxed", Some("loom_push"), &[Says {
+        test: "a_cpu_that_halts_without_seeing_the_surplus_was_pushed",
+        message: "published and no push behind it",
+    }]),
     // The watch's lost wake, staged: the waiter parks over a post it was flagged
-    // with. A double panic, so the verdict is the first one's message.
-    red(SCHED_LOOM, "commit-ignores-notify", Some("loom_watch"), &[
-        "parked with the condition true and no wake owed: the post was lost",
+    // with.
+    red(KERNEL_LOOM, "commit-ignores-notify", Some("loom_watch"), &[
+        Says {
+            test: "a_post_racing_a_registration_leaves_nobody_parked",
+            message: "parked with the condition true and no wake owed: the post was lost",
+        },
+        Says {
+            test: "a_fire_racing_a_submitters_park_is_never_lost",
+            message: "parked over a fired poll and no wake owed: a fire was lost",
+        },
     ]),
     // The notify's flagged arm answering off a load: a second post reads the
     // word from before the waiter consumed the first flag.
-    red(SCHED_LOOM, "notify-flag-load-only", Some("loom_watch"), &[
-        "parked with both conditions true and no wake owed: a post answered off a load",
-    ]),
+    red(KERNEL_LOOM, "notify-flag-load-only", Some("loom_watch"), &[Says {
+        test: "a_second_post_is_not_lost_to_a_flag_the_waiter_consumed",
+        message: "parked with both conditions true and no wake owed: a post answered off a load",
+    }]),
     // The stop's store-buffering pair with the gate's fences gone.
-    red(SCHED_LOOM, "gate-fence-off", Some("loom_watch"), &[
-        "the stop parked over a thread that had parked, and nothing posted it",
-    ]),
+    red(KERNEL_LOOM, "gate-fence-off", Some("loom_watch"), &[Says {
+        test: "a_transition_racing_an_opening_gate_is_never_missed",
+        message: "the stop parked over a thread that had parked, and nothing posted it",
+    }]),
     // `kernel-loom`'s control, over the kernel's `Once` as the watch models'
     // ring entry.
-    red(SCHED_LOOM, "poll-fire-load-store", Some("loom_watch"), &[
-        "a_poll_registered_racing_a_post_completes_exactly_once ... FAILED",
-        "a_poll_on_two_watches_racing_both_posts_completes_exactly_once ... FAILED",
+    red(KERNEL_LOOM, "poll-fire-load-store", Some("loom_watch"), &[
+        Fails("a_poll_registered_racing_a_post_completes_exactly_once"),
+        Fails("a_poll_registered_racing_a_post_in_place_completes_exactly_once"),
+        Fails("a_poll_on_two_watches_racing_both_posts_completes_exactly_once"),
+    ]),
+    // The ring models' lost-completion half: the producer posts before it
+    // stores the readiness its registrant rechecks.
+    red(KERNEL_LOOM, "fault-posted-before-it-is-set", Some("loom_watch"), &[
+        Says {
+            test: "a_poll_registered_racing_a_post_completes_exactly_once",
+            message: "a poll over a ready object was completed by neither",
+        },
+        Fails("a_poll_registered_racing_a_post_completes_exactly_once"),
+        Fails("a_poll_registered_racing_a_post_in_place_completes_exactly_once"),
     ]),
     // Reproduces an open defect
     // (`issues/kernel/steal-probe-node-dies-with-its-victim.md`) rather than
     // proving a lie is caught, and goes with its fix.
     Control {
-        krate: SCHED_LOOM,
+        krate: KERNEL_LOOM,
         feature: "victim-retires-mid-probe",
         test: Some("loom_mailbox"),
         must_red: false,
-        verdicts: &[
-            "caught the verdict: the victim retired with a probe still linked in its queue",
-        ],
+        verdicts: &[Says {
+            test: "a_probe_outstanding_when_its_victim_retires_is_never_reclaimed",
+            message: "caught the verdict: the victim retired with a probe still linked in its \
+                      queue",
+        }],
     },
-    red(PROCLIFE, "mutate-spawn-skips-the-insert-recheck", None, &[
-        "a_published_exit_leaves_no_unretired_thread ... FAILED",
-        "a_kill_racing_a_spawn_leaves_no_unretired_thread ... FAILED",
+    // The isolation test reds, and the SDM's own judge of the allocator sees
+    // the cross-space read it lets through.
+    red(KERNEL, "counting-allocator", None, &[
+        Fails("pcid::tests::two_live_address_spaces_never_share_a_pcid"),
+        Passes("pcid::oracle::tests::the_counting_allocator_produces_a_cross_space_read"),
     ]),
-    red(PROCLIFE, "mutate-claim-teardown-always-wins", None, &[
-        "an_exit_and_a_kill_never_both_tear_a_process_down ... FAILED",
+    red(KERNEL, "mutate-spawn-skips-the-insert-recheck", None, &[
+        Fails("proclife::interleave::tests::a_published_exit_leaves_no_unretired_thread"),
+        Fails("proclife::interleave::tests::a_kill_racing_a_spawn_leaves_no_unretired_thread"),
     ]),
-    red(PROCLIFE, "mutate-kill-waits-for-its-victims", None, &[
-        "two_processes_killing_each_other_both_end ... FAILED",
-        "a_kill_chain_of_three_ends ... FAILED",
+    red(KERNEL, "mutate-claim-teardown-always-wins", None, &[
+        Fails("proclife::interleave::tests::an_exit_and_a_kill_never_both_tear_a_process_down"),
     ]),
-    red(PROCLIFE, "mutate-first-out-tears-down", None, &[
-        "an_exit_and_a_kill_never_both_tear_a_process_down ... FAILED",
+    red(KERNEL, "mutate-kill-waits-for-its-victims", None, &[
+        Fails("proclife::interleave::tests::two_processes_killing_each_other_both_end"),
+        Fails("proclife::interleave::tests::a_kill_chain_of_three_ends"),
     ]),
-    red(PROCLIFE, "mutate-join-collects-in-a-teardown", None, &[
-        "a_join_racing_the_kill_that_takes_its_target ... FAILED",
+    red(KERNEL, "mutate-first-out-tears-down", None, &[
+        Fails("proclife::interleave::tests::an_exit_and_a_kill_never_both_tear_a_process_down"),
     ]),
-    red(PROCLIFE, "mutate-last-out-leaves-before-its-teardown", None, &[
-        "the_last_one_out_is_in_its_process_until_its_teardown_is_done ... FAILED",
-        "only_the_thread_that_empties_a_claimed_process_tears_it_down ... FAILED",
+    red(KERNEL, "mutate-join-collects-in-a-teardown", None, &[
+        Fails("proclife::interleave::tests::a_join_racing_the_kill_that_takes_its_target"),
     ]),
-    red(SCHED_SIM, "placement-ignores-staleness", Some("policy"), &[
-        "a_stopped_cpu_stops_taking_work ... FAILED",
+    red(KERNEL, "mutate-last-out-leaves-before-its-teardown", None, &[
+        Fails("proclife::interleave::tests::the_last_one_out_is_in_its_process_until_its_teardown_is_done"),
+        Fails("proclife::teardown::tests::only_the_thread_that_empties_a_claimed_process_tears_it_down"),
+    ]),
+    red(KERNEL, "mutate-place-skips-the-insert-recheck", None, &[
+        Fails("proclife::interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it"),
+    ]),
+    red(KERNEL, "mutate-refused-spawn-keeps-the-count", None, &[
+        Fails("proclife::interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it"),
+    ]),
+    red(KERNEL, "mutate-landed-child-retires-nothing", None, &[
+        Fails("proclife::interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it"),
+        Fails("proclife::tree::tests::a_child_landed_under_a_place_claimed_since_its_admission_is_claimed_with_it"),
+    ]),
+    red(KERNEL, "mutate-publish-before-the-children", None, &[
+        Fails("proclife::interleave::tests::an_exit_publishes_after_every_end_below_it"),
+    ]),
+    red(KERNEL, "mutate-walk-in-one-hold", None, &[
+        Fails("proclife::interleave::tests::a_spawn_under_an_unrelated_process_lands_between_two_claims_of_one_walk"),
+    ]),
+    red(KERNEL, "mutate-spawner-handle-after-the-landing", None, &[
+        Fails("proclife::interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it"),
+        Fails("proclife::interleave::tests::a_spawn_racing_the_kill_of_its_own_spawner"),
+    ]),
+    red(KERNEL, "mutate-spawner-handle-before-the-childs-own", None, &[
+        Fails("proclife::interleave::tests::a_sibling_closing_a_spawns_handle_before_the_spawn_returns"),
+    ]),
+    red(KERNEL_SIM, "placement-ignores-staleness", Some("policy"), &[
+        Fails("a_stopped_cpu_stops_taking_work"),
     ]),
     // The block protocol's three: a completion lost to a session's end, a
     // completion given twice after a reset, and a loss nothing is written
     // again after.
     red(BLOCKRING, "mutate-session-end-forgets", None, &[
-        "every_request_is_answered_exactly_once ... FAILED",
+        Fails("model::tests::every_request_is_answered_exactly_once"),
     ]),
     red(BLOCKRING, "mutate-abort-keeps-inflight", None, &[
-        "every_request_is_answered_exactly_once ... FAILED",
+        Fails("model::tests::every_request_is_answered_exactly_once"),
     ]),
     red(BLOCKRING, "mutate-no-reissue-after-loss", None, &[
-        "what_a_flush_calls_durable_is_on_the_medium ... FAILED",
+        Fails("model::tests::what_a_flush_calls_durable_is_on_the_medium"),
     ]),
-    red(TRANSPORT, "publish-relaxed", Some("loom"), &["a_published_entry_is_read_whole ... FAILED"]),
-    red(TRANSPORT, "no-clamp", Some("loom"), &["a_hostile_producer_yields_entries_or_a_violation ... FAILED"]),
-    red(TRANSPORT, "end-keeps-inflight", None, &[
-        "an_end_answers_every_tag_once_and_a_late_completion_nothing ... FAILED",
-    ]),
+    red(TRANSPORT, "publish-relaxed", Some("loom"), &[Fails("a_published_entry_is_read_whole")]),
+    red(TRANSPORT, "no-clamp", Some("loom"), &[Fails(
+        "a_hostile_producer_yields_entries_or_a_violation",
+    )]),
+    red(TRANSPORT, "end-keeps-inflight", None, &[Fails(
+        "inflight::tests::an_end_answers_every_tag_once_and_a_late_completion_nothing",
+    )]),
 ];
 
 /// Whether a control's run showed its teeth.
 fn judge_control(control: &Control, exited_green: bool, log: &str) -> Result<String, String> {
+    if log.lines().any(|l| l == "running 0 tests") {
+        return Err("the run selected no test: no name its verdicts give is a test of its target, \
+                    so `CONTROLS` drifted from the model"
+            .into());
+    }
     if control.must_red && exited_green {
         return Err(format!("passed with `{}`: the model has no teeth", control.feature));
     }
@@ -399,8 +471,8 @@ fn judge_control(control: &Control, exited_green: bool, log: &str) -> Result<Str
             control.feature
         ));
     }
-    let missing: Vec<&str> =
-        control.verdicts.iter().copied().filter(|v| !log.contains(v)).collect();
+    let missing: Vec<String> =
+        control.verdicts.iter().map(|v| v.line()).filter(|v| !log.contains(v.as_str())).collect();
     if !missing.is_empty() {
         return Err(format!(
             "no verdict {missing:?}: this proved nothing, and whatever stopped the model is \
@@ -412,36 +484,47 @@ fn judge_control(control: &Control, exited_green: bool, log: &str) -> Result<Str
 
 fn run_control(root: &Path, control: &Control) -> Result<String, String> {
     let mut args = vec!["test"];
-    args.extend(control.krate);
-    args.extend(["--features", control.feature]);
-    if let Some(test) = control.test {
-        args.extend(["--test", test]);
+    // Cargo refuses `--features` for a package outside the workspace.
+    match control.krate {
+        KERNEL => args.extend(["--manifest-path", KERNEL_MANIFEST, "--target-dir", KERNEL_HOST_TARGET]),
+        member => args.extend(["-p", member]),
     }
+    args.extend(["--features", control.feature]);
+    match control.test {
+        Some(test) => args.extend(["--test", test]),
+        None => args.push("--lib"),
+    }
+    args.extend(["--", "--exact"]);
+    args.extend(control.verdicts.iter().map(|v| v.test()));
     if !control.must_red {
-        args.extend(["--", "--nocapture"]);
+        args.push("--nocapture");
     }
     let (green, log) = cargo_logged(root, &args)?;
     judge_control(control, green, &log)
 }
 
-/// The merge queue's whole gate, and the nightly's host lane: every test that
-/// runs on the host and boots no guest. The build system's own tests, every
-/// member of the host workspace, clippy with warnings denied, the concurrency
-/// models' negative controls, every userland crate with a host test
-/// ([`crate::userlandhost`], which also reds on a userland test none of them
-/// runs), and the SDK.
+/// Every test that runs on the host and boots no guest. The build system's own
+/// tests, every member of the host workspace, the kernel's library, clippy with
+/// warnings denied, the concurrency models' negative controls, every userland
+/// crate with a host test ([`crate::userlandhost`], which also reds on a
+/// userland test none of them runs), every app the images ship for each host
+/// ([`apps_for`]), and the SDK.
 ///
 /// **Every step runs against a `$TMPDIR` of this job's own, and the last step
 /// reds on anything left in it** but the lock `toyos_tmpdir` keeps there: a test
 /// that writes scratch past a `toyos_tmpdir::TempDir`, or holds one past its
 /// end, is a test that fills the host's disk one run at a time.
 ///
-/// Clippy needs none of the ToyOS toolchain the nightly alone builds — the
-/// kernel and the bootloader lint against every architecture's bare targets
-/// ([`crate::clippy::BARE_TARGETS`]), which any rustup installs, and userland carries no
-/// clippy shape (`src/clippy.rs`). Userland and the SDK are tested against the
+/// Clippy needs none of the ToyOS toolchain — the kernel and the bootloader
+/// lint against every architecture's bare targets ([`crate::clippy::BARE_TARGETS`]),
+/// which any rustup installs, and userland carries no clippy shape
+/// (`src/clippy.rs`). Userland and the SDK are tested against the
 /// host triple for the same reason.
+///
+/// In a job that carries the cache ([`cicache::carried`]) the restored entry is
+/// read before any step. A developer's tree keeps the dates its edits gave it.
 fn host(root: &Path) -> Vec<Step> {
+    let carried = cicache::carried(root, &std::env::current_exe().expect("the driver's own path"));
     let tmp = toyos_tmpdir::TempDir::new("ci-host");
     let short = Path::new(toyos_tmpdir::SHORT_BASE);
     let before = toyos_tmpdir::gone_roots(short);
@@ -449,14 +532,35 @@ fn host(root: &Path) -> Vec<Step> {
     // concurrently with the write, and every child inherits it.
     std::env::set_var("TMPDIR", tmp.path());
     let host_triple = crate::toolchain::host_triple();
-    let mut steps = vec![
+    let mut steps = Vec::new();
+    if carried {
+        carry();
+        steps.push(step("the cache entry, read by content", || cicache::read(root)));
+        // Every step after an unreadable entry would be judged against it.
+        if steps[0].verdict.is_err() {
+            return steps;
+        }
+    }
+    steps.extend([
         step("the build system", || cargo(root, &["test", "--lib"])),
         step("the harness's own checks", || cargo(root, &["test", "--test", "toyos-checks"])),
         step("the host workspace", || {
             cargo(root, &["test", "--workspace", "--exclude", "toyos-build"])
         }),
+        step("the kernel's library", || {
+            cargo(root, &[
+                "test",
+                "--manifest-path",
+                KERNEL_MANIFEST,
+                "--target-dir",
+                KERNEL_HOST_TARGET,
+                "--lib",
+                "--features",
+                "sched-check",
+            ])
+        }),
         step("the licences of what ships", || crate::licence::judge(root)),
-    ];
+    ]);
     steps.push(step("clippy and the bare targets", || {
         for args in [
             vec!["component", "add", "clippy"],
@@ -470,25 +574,25 @@ fn host(root: &Path) -> Vec<Step> {
         Ok("installed".into())
     }));
     steps.push(step("clippy, warnings denied", || {
-        let failed = crate::clippy::run(root);
+        let (failed, _) = crate::clippy::run(root)?;
         if failed.is_empty() {
             Ok("clean".into())
         } else {
             Err(failed.join("; "))
         }
     }));
-    // `log_zeroed_init` and `log_body_words` are gated `cfg(not(feature =
-    // "loom"))`, so the default invocation runs nothing from either.
     steps.push(step("kernel-loom without loom", || {
         cargo(root, &[
             "test",
-            "--manifest-path",
-            "kernel-loom/Cargo.toml",
+            "-p",
+            KERNEL_LOOM,
             "--no-default-features",
             "--test",
             "log_zeroed_init",
             "--test",
             "log_body_words",
+            "--test",
+            "log_cursor",
         ])
     }));
     for control in CONTROLS {
@@ -505,6 +609,16 @@ fn host(root: &Path) -> Vec<Step> {
         }
         Err(why) => steps.push(Step { label: "the userland host crates".into(), verdict: Err(why) }),
     }
+    match crate::userlandhost::programs(root) {
+        Ok(programs) => {
+            for os in Os::ALL {
+                steps.push(step(&format!("the apps for {}", os.name()), || {
+                    apps_for(root, &programs, os, &host_triple)
+                }));
+            }
+        }
+        Err(why) => steps.push(Step { label: "the apps".into(), verdict: Err(why) }),
+    }
     // The SDK compiles against the ToyOS sysroot everywhere but here, and this
     // build links no syscall.
     steps.push(step("the toyos SDK", || {
@@ -512,6 +626,104 @@ fn host(root: &Path) -> Vec<Step> {
     }));
     steps.push(step("nothing left in $TMPDIR or /tmp", || left_behind(&tmp, short, &before)));
     steps
+}
+
+/// [`host`] from a cold tree, then that tree sealed as the host cache's entry.
+fn seal(root: &Path) -> Vec<Step> {
+    let mut cold = None;
+    let mut steps = vec![step("a cold tree, for the entry", || {
+        let (found, said) = cicache::cold(root)?;
+        cold = Some(found);
+        Ok(said)
+    })];
+    let Some(cold) = cold else { return steps };
+    steps.extend(host(root));
+    steps.push(step("the tree, sealed as the host cache's entry", || cicache::seal(root, &cold)));
+    steps
+}
+
+/// What every step of a job that carries the cache inherits, set before any
+/// thread as `host`'s `TMPDIR` is.
+fn carry() {
+    // The job's `CARGO_TARGET_DIR` names the driver's target, and no step
+    // builds there.
+    std::env::remove_var("CARGO_TARGET_DIR");
+    // No incremental state: it is most of an entry's bytes, and after a read
+    // by content it helps only a crate whose bytes changed.
+    std::env::set_var("CARGO_INCREMENTAL", "0");
+    // Line tables alone: a backtrace in a step's log reads them, and nothing
+    // reads the rest of the debuginfo, of which a Linux link copies every
+    // dependency's into each test binary.
+    std::env::set_var("CARGO_PROFILE_DEV_DEBUG", "line-tables-only");
+}
+
+/// Every app the images ship, judged for `os` with the features its image
+/// builds it with ([`crate::userlandhost`]).
+///
+/// One cargo per app: features unify across the packages of one invocation, and
+/// an app that builds only beside another's features is what this gate is for.
+fn apps_for(
+    root: &Path,
+    programs: &[Program],
+    os: Os,
+    host_triple: &str,
+) -> Result<String, String> {
+    let triple = os.triple();
+    let status = Command::new("rustup")
+        .args(["target", "add", triple])
+        .status()
+        .map_err(|e| format!("rustup: {e}"))?;
+    if !status.success() {
+        return Err(format!("rustup target add {triple} exited {status}"));
+    }
+    let verb = verb(os, host_triple);
+    let (attempted, declared) = attempted(programs, os);
+    let mut red = Vec::new();
+    for program in &attempted {
+        let manifest = format!("{}/Cargo.toml", program.dir);
+        let mut args = vec![verb, "--manifest-path", manifest.as_str(), "--target", triple];
+        args.extend(program.features.args());
+        if let Err(exit) = cargo(root, &args) {
+            red.push(format!(
+                "{} fails for {} and declares neither `fails` there nor `exempt`: {exit}",
+                program.dir,
+                os.name()
+            ));
+        }
+    }
+    if !red.is_empty() {
+        return Err(red.join("; "));
+    }
+    let said = format!("{} app(s) pass `cargo {verb} --target {triple}`", attempted.len());
+    if declared.is_empty() {
+        Ok(said)
+    } else {
+        Ok(format!("{said}; {} not attempted, as their manifests declare", declared.join(", ")))
+    }
+}
+
+/// `build` where the gate runs on `os`'s own triple, and `check` elsewhere.
+fn verb(os: Os, host_triple: &str) -> &'static str {
+    if os.triple() == host_triple {
+        "build"
+    } else {
+        "check"
+    }
+}
+
+/// The apps judged for `os`, and those whose manifests declare they fail there;
+/// an exempt program is in neither.
+fn attempted(programs: &[Program], os: Os) -> (Vec<&Program>, Vec<&str>) {
+    let (mut attempted, mut declared) = (Vec::new(), Vec::new());
+    for program in programs {
+        let Host::App(fails) = &program.host else { continue };
+        if fails.contains(&os) {
+            declared.push(program.dir.as_str());
+        } else {
+            attempted.push(program);
+        }
+    }
+    (attempted, declared)
 }
 
 /// What `tmp` holds but the lock `toyos_tmpdir` keeps in it, and every root
@@ -562,111 +774,7 @@ fn left_behind(tmp: &Path, short: &Path, before: &[PathBuf]) -> Result<String, S
     Err(said.join("; "))
 }
 
-/// What protects `main` is configured outside the repository, so it is read
-/// back: every [`REQUIRED_CHECKS`] name required, deletion and force-push
-/// refused, and merge the only method.
-fn gate_stage(root: &Path) -> Result<String, String> {
-    let out = Command::new("gh")
-        .args(["api", "repos/{owner}/{repo}/rules/branches/main"])
-        .current_dir(root)
-        .output()
-        .map_err(|e| format!("gh: {e}"))?;
-    if !out.status.success() {
-        return Err(format!("gh api: {}", String::from_utf8_lossy(&out.stderr).trim()));
-    }
-    let rules: serde_json::Value =
-        serde_json::from_slice(&out.stdout).map_err(|e| format!("GitHub's rules: {e}"))?;
-    let (bad, said) = protection(&rules);
-    summary(&format!("### what protects main\n\n{}", said.join("\n")));
-    println!("{}", said.join("\n"));
-    if bad.is_empty() {
-        Ok("main is protected".into())
-    } else {
-        Err(bad.join("; "))
-    }
-}
-
-/// The refusals and the report, from `rules/branches/main`'s JSON.
-fn protection(rules: &serde_json::Value) -> (Vec<String>, Vec<String>) {
-    let all = rules.as_array().map(Vec::as_slice).unwrap_or_default();
-    let of = |kind: &'static str| all.iter().filter(move |r| r["type"] == kind);
-    let types: Vec<&str> = all.iter().filter_map(|r| r["type"].as_str()).collect();
-    let live: Vec<&str> = of("required_status_checks")
-        .flat_map(|r| r["parameters"]["required_status_checks"].as_array().into_iter().flatten())
-        .filter_map(|c| c["context"].as_str())
-        .collect();
-    let mut methods: Vec<&str> = of("pull_request")
-        .flat_map(|r| r["parameters"]["allowed_merge_methods"].as_array().into_iter().flatten())
-        .filter_map(|m| m.as_str())
-        .collect();
-    methods.sort_unstable();
-
-    let mut bad = Vec::new();
-    for want in REQUIRED_CHECKS {
-        if !live.contains(want) {
-            bad.push(format!("main does not require the check `{want}`"));
-        }
-    }
-    for want in ["deletion", "non_fast_forward", "pull_request", "required_status_checks"] {
-        if !types.contains(&want) {
-            bad.push(format!("main has no `{want}` rule"));
-        }
-    }
-    if methods != ["merge"] {
-        bad.push(format!("main allows merge methods {methods:?}, not merge alone"));
-    }
-    let mut said = vec![
-        format!("- rules: `{}`", types.join(" ")),
-        format!("- required checks: `{}`", live.join(" ")),
-        format!(
-            "- merge queue: `{}`, merge methods: `{}`",
-            types.contains(&"merge_queue"),
-            methods.join(",")
-        ),
-    ];
-    for extra in live.iter().filter(|c| !REQUIRED_CHECKS.contains(c)) {
-        said.push(format!("- `{extra}` is required at GitHub and not named in src/ci.rs"));
-    }
-    (bad, said)
-}
-
 // --- The guest jobs ------------------------------------------------------------
-
-/// The reach flag of the run that started this job: the weekly one on the weekly
-/// schedule, and the nightly one on the other schedule, on a dispatch and off a
-/// runner.
-fn guest_reach() -> Result<&'static str, String> {
-    reach_of_event(std::env::var("GITHUB_EVENT_NAME").ok().as_deref(), || {
-        let path = std::env::var("GITHUB_EVENT_PATH").map_err(|_| {
-            "a scheduled run with no $GITHUB_EVENT_PATH names no schedule".to_string()
-        })?;
-        std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))
-    })
-}
-
-/// [`guest_reach`] over the event's name and a reader of its payload, which
-/// only a scheduled run asks for.
-fn reach_of_event(
-    name: Option<&str>,
-    payload: impl FnOnce() -> Result<String, String>,
-) -> Result<&'static str, String> {
-    if name != Some("schedule") {
-        return Ok(testargs::NIGHTLY.name);
-    }
-    let event: serde_json::Value =
-        serde_json::from_str(&payload()?).map_err(|e| format!("the schedule event: {e}"))?;
-    reach_of_schedule(event["schedule"].as_str())
-}
-
-fn reach_of_schedule(cron: Option<&str>) -> Result<&'static str, String> {
-    match cron {
-        Some(NIGHTLY_CRON) => Ok(testargs::NIGHTLY.name),
-        Some(WEEKLY_CRON) => Ok(testargs::WEEKLY.name),
-        other => Err(format!(
-            "a scheduled run of {other:?}, which is neither schedule nightly.yml declares"
-        )),
-    }
-}
 
 fn suite_args(args: &[&str]) -> Vec<String> {
     let mut all = vec!["test", "--test", "toyos-build", "--"];
@@ -685,9 +793,10 @@ fn guest(root: &Path, suite: &[String]) -> Vec<Step> {
     // inherits this, and nothing here reads the environment concurrently with
     // the write.
     std::env::set_var("TMPDIR", tmp.path());
-    // Every guest lane boots x86-64 guests: no hosted runner has been measured
-    // for an aarch64 one.
-    let mut steps = vec![step("the instrument", || instrument(root, Arch::X86_64))];
+    let mut steps: Vec<Step> = Arch::ALL
+        .iter()
+        .map(|&arch| step(&format!("the {} instrument", arch.name()), || instrument(root, arch)))
+        .collect();
     if steps.iter().all(|s| s.verdict.is_ok()) {
         steps.push(step("the toolchain", || release::install(root)));
     }
@@ -712,12 +821,11 @@ fn guest(root: &Path, suite: &[String]) -> Vec<Step> {
 /// The suite's own count line and every line naming a verdict worth reading
 /// without the log: a failure.
 fn verdicts(log: &str) -> String {
-    let total = log
-        .lines()
+    let lines = || log.lines().map(crate::printer::unstamped);
+    let total = lines()
         .rfind(|l| l.contains("test result:") && l.contains(" total ("))
         .unwrap_or("no suite result line");
-    let named: Vec<&str> = log
-        .lines()
+    let named: Vec<&str> = lines()
         .filter(|l| {
             l.starts_with("FAIL ")
                 || (l.starts_with(' ')
@@ -731,19 +839,21 @@ fn verdicts(log: &str) -> String {
     }
 }
 
-/// The QEMU on `PATH` against `.github/qemu-version`, the firmware it declares,
-/// and whether `/dev/kvm` opens where it is present — the three things a guest
-/// verdict must be read against.
+/// The QEMU on `PATH` that boots `arch` against `.github/qemu-version`, the
+/// firmware it declares, and whether `/dev/kvm` opens where it is present and
+/// `arch` is the host's — the three things a guest verdict must be read against.
 fn instrument(root: &Path, arch: Arch) -> Result<String, String> {
     let want = declared_qemu_version(root).ok_or(".github/qemu-version declares no version")?;
     let have = qemu_version(arch)?;
     let firmware = crate::firmware::of(arch)?;
     let node = Path::new("/dev/kvm").exists();
-    let accelerated = arch.accel().is_hardware();
-    let accel = match (node, accelerated) {
-        (true, true) => "/dev/kvm opens",
-        (true, false) => "/dev/kvm is present and does not open",
-        (false, _) => "no /dev/kvm: emulated",
+    let native = Arch::HOST == Some(arch);
+    let accel = match (native, arch.accel(), node) {
+        (false, _, _) => "another architecture's machine: emulated",
+        (true, Accel::Kvm, _) => "/dev/kvm opens",
+        (true, Accel::Hvf, _) => "Hypervisor.framework",
+        (true, Accel::Tcg, true) => "/dev/kvm is present and does not open",
+        (true, Accel::Tcg, false) => "no /dev/kvm: emulated",
     };
     let cpu = std::fs::read_to_string("/proc/cpuinfo")
         .ok()
@@ -765,7 +875,7 @@ fn instrument(root: &Path, arch: Arch) -> Result<String, String> {
              instrument moved"
         ));
     }
-    if node && !accelerated {
+    if native && node && !arch.accel().is_hardware() {
         return Err(format!("{line}: every boot would fall back to emulation in silence"));
     }
     Ok(line)
@@ -818,68 +928,7 @@ pub fn qemu_version_note(root: &Path, arch: Arch) -> Option<String> {
     })
 }
 
-// --- The nightly's alarm and the publisher -------------------------------------
-
-/// The jobs `$NEEDS` (`toJSON(needs)`) says did not succeed, as `name(result)`.
-fn failed_jobs(needs: &serde_json::Value) -> Vec<String> {
-    let Some(jobs) = needs.as_object() else {
-        return vec!["NEEDS is not an object".into()];
-    };
-    jobs.iter()
-        .filter_map(|(name, job)| {
-            let result = job["result"].as_str().unwrap_or("unknown");
-            (result != "success").then(|| format!("{name}({result})"))
-        })
-        .collect()
-}
-
-/// One standing issue for a red nightly, found by title and commented on
-/// rather than filed twice. Every red is adjudicated into a fix, a
-/// `src/redlist.rs` row or a tier move; the issue is the alarm, not the record.
-fn nightly_red() -> Result<String, String> {
-    let needs = std::env::var("NEEDS").map_err(|_| "NEEDS carries no job results".to_string())?;
-    let needs: serde_json::Value =
-        serde_json::from_str(&needs).map_err(|e| format!("NEEDS is not JSON: {e}"))?;
-    let failed = failed_jobs(&needs);
-    if failed.is_empty() {
-        return Ok("every job was green".into());
-    }
-    let var = |k: &str| std::env::var(k).unwrap_or_default();
-    let body = format!(
-        "Run: {}/{}/actions/runs/{}\nFailed jobs: {}",
-        var("GITHUB_SERVER_URL"),
-        var("GITHUB_REPOSITORY"),
-        var("GITHUB_RUN_ID"),
-        failed.join(" ")
-    );
-    let found = Command::new("gh")
-        .args(["issue", "list", "--state", "open", "--limit", "30", "--json", "number,title"])
-        .args(["--search", &format!("in:title \"{NIGHTLY_RED}\"")])
-        .output()
-        .map_err(|e| format!("gh: {e}"))?;
-    if !found.status.success() {
-        // An unanswered search read as "none open" would file a duplicate.
-        return Err(format!("gh issue list: {}", String::from_utf8_lossy(&found.stderr).trim()));
-    }
-    let open: serde_json::Value =
-        serde_json::from_slice(&found.stdout).map_err(|e| format!("gh issue list: {e}"))?;
-    let number = open
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|i| i["title"] == NIGHTLY_RED)
-        .and_then(|i| i["number"].as_u64());
-    let mut gh = Command::new("gh");
-    match number {
-        Some(n) => gh.args(["issue", "comment", &n.to_string(), "--body", &body]),
-        None => gh.args(["issue", "create", "--title", NIGHTLY_RED, "--body", &body]),
-    };
-    let status = gh.status().map_err(|e| format!("gh: {e}"))?;
-    if !status.success() {
-        return Err(format!("gh exited {status}"));
-    }
-    Ok(format!("reported {}", failed.join(" ")))
-}
+// --- The publisher -------------------------------------------------------------
 
 /// Each SDK crate, under the version [`sdkversion::plan`] assigns it, in
 /// dependency order, waiting for each to be readable before the next resolves
@@ -896,8 +945,8 @@ fn publish(root: &Path) -> Result<String, String> {
                 .into()
         );
     }
-    let tip = pr::git(root, &["ls-remote", "origin", "refs/heads/main"])?;
-    at_tip(&tip, &pr::git(root, &["rev-parse", "HEAD"])?)?;
+    let tip = git_out(root, &["ls-remote", "origin", "refs/heads/main"]);
+    at_tip(&tip, git_out(root, &["rev-parse", "HEAD"]).trim())?;
     let plan = sdkversion::plan(root)?;
     sdkversion::write_published_manifests(root, &plan)?;
     let mut said = Vec::new();
@@ -961,9 +1010,9 @@ mod tests {
         let short = toyos_tmpdir::TempDir::new("left-behind-short");
         std::fs::write(tmp.join(toyos_tmpdir::GLOBAL), b"").unwrap();
         assert!(left_behind(&tmp, &short, &[]).is_ok());
-        std::fs::create_dir(tmp.join("forkcheck-1-current")).unwrap();
+        std::fs::create_dir(tmp.join("stale-1-current")).unwrap();
         let refusal = left_behind(&tmp, &short, &[]).expect_err("a directory left behind is a red");
-        assert!(refusal.contains("forkcheck-1-current"), "{refusal}");
+        assert!(refusal.contains("stale-1-current"), "{refusal}");
     }
 
     /// A short root whose process died while the steps ran is named; one already
@@ -983,6 +1032,50 @@ mod tests {
         assert!(refusal.contains(&died) && !refusal.contains(&earlier), "{refusal}");
     }
 
+    /// The crate [`a_carried_jobs_step`] builds; unset, it is not a test.
+    const FIXTURE: &str = "TOYOS_CI_TEST_FIXTURE";
+
+    /// What a job that carries the cache hands its driver reaches no step: each
+    /// builds in its own workspace's target, with no incremental state and line
+    /// tables alone. The driver is a process of its own, because `carry`
+    /// writes the environment, which no other thread may read meanwhile.
+    #[test]
+    fn a_step_of_a_job_that_carries_the_cache_builds_in_its_own_target() {
+        let fixture = toyos_tmpdir::TempDir::new("ci-carried");
+        std::fs::create_dir(fixture.join("src")).unwrap();
+        let manifest = "[package]\nname = \"one\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n";
+        std::fs::write(fixture.join("Cargo.toml"), manifest).unwrap();
+        std::fs::write(fixture.join("src/lib.rs"), "pub fn one() -> u8 {\n    1\n}\n").unwrap();
+        let out = crate::buildlock::tests::rerun("ci::tests::a_carried_jobs_step")
+            .env(FIXTURE, fixture.path())
+            .env("CARGO_TARGET_DIR", cicache::DRIVER)
+            .env_remove("CARGO_INCREMENTAL")
+            .env_remove("CARGO_PROFILE_DEV_DEBUG")
+            .output()
+            .expect("run the driver");
+        let said = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success() && said.contains("test result: ok. 1 passed"), "{said}");
+    }
+
+    #[test]
+    #[ignore = "the driver of the test above; never runs on its own"]
+    fn a_carried_jobs_step() {
+        let fixture = PathBuf::from(std::env::var_os(FIXTURE).unwrap_or_else(|| panic!("run without {FIXTURE}")));
+        carry();
+        let cargo = |args: &[&str]| {
+            let out = Command::new("cargo").args(args).current_dir(&fixture).output().expect("run cargo");
+            assert!(out.status.success(), "cargo {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            out
+        };
+        let metadata = cargo(&["metadata", "--format-version", "1", "--no-deps", "--offline"]);
+        let metadata: serde_json::Value = serde_json::from_slice(&metadata.stdout).unwrap();
+        let ours = std::fs::canonicalize(&fixture).unwrap().join("target");
+        assert_eq!(metadata["target_directory"].as_str().map(Path::new), Some(ours.as_path()));
+        let build = String::from_utf8(cargo(&["build", "-v", "--offline"]).stderr).unwrap();
+        let rustc = build.lines().find(|l| l.contains("--crate-name one")).unwrap_or_else(|| panic!("{build}"));
+        assert!(!rustc.contains("-C incremental") && rustc.contains("-C debuginfo=line-tables-only"), "{rustc}");
+    }
+
     fn repo_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
     }
@@ -991,117 +1084,100 @@ mod tests {
         line.split_whitespace().map(String::from).collect()
     }
 
+    /// **An app is judged for every host its `fails` does not name**, built
+    /// where the gate runs on that host and checked elsewhere; an exempt
+    /// program is judged for none.
     #[test]
-    fn a_job_is_named_and_a_shard_is_a_shard() {
+    fn an_app_is_judged_for_every_host_its_fails_does_not_name() {
+        let program = |dir: &str, host| Program {
+            dir: dir.into(),
+            features: crate::build::Features::Default,
+            host,
+        };
+        let programs = [
+            program("calc", Host::App(Vec::new())),
+            program("doom", Host::App(vec![Os::Windows])),
+            program("supervisor", Host::Exempt),
+        ];
+        let judged = |os| {
+            let (attempted, declared) = attempted(&programs, os);
+            (attempted.iter().map(|p| p.dir.as_str()).collect::<Vec<_>>(), declared)
+        };
+        assert_eq!(judged(Os::Linux), (vec!["calc", "doom"], vec![]));
+        assert_eq!(judged(Os::Macos), (vec!["calc", "doom"], vec![]));
+        assert_eq!(judged(Os::Windows), (vec!["calc"], vec!["doom"]));
+        assert_eq!(Os::ALL.map(|os| verb(os, Os::Linux.triple())), ["build", "check", "check"]);
+    }
+
+    #[test]
+    fn a_job_is_named_and_takes_nothing_after_it() {
         assert_eq!(parse(&words("host")), Ok(Job::Host));
-        assert_eq!(parse(&words("guest 3/12")), Ok(Job::Guest("3/12".into())));
-        assert!(parse(&words("guest")).is_err());
-        assert!(parse(&words("guest 13/12")).is_err());
+        assert_eq!(parse(&words("seal")), Ok(Job::Seal));
+        assert_eq!(parse(&words("guest")), Ok(Job::Guest));
+        assert_eq!(parse(&words("release")), Ok(Job::Release));
+        assert!(parse(&words("guest 3/12")).is_err());
+        assert!(parse(&words("tcg")).is_err());
         assert!(parse(&words("host extra")).is_err());
         assert!(parse(&words("smoke")).is_err());
         assert!(parse(&[]).is_err());
     }
 
-    #[test]
-    fn each_schedule_names_its_reach_and_another_is_refused() {
-        let nightly = reach_of_schedule(Some(NIGHTLY_CRON));
-        let weekly = reach_of_schedule(Some(WEEKLY_CRON));
-        assert_eq!(nightly, Ok("--nightly"), "the nightly schedule's reach");
-        assert_eq!(weekly, Ok("--weekly"), "the weekly schedule's reach");
-        for stray in [Some("0 4 * * *"), None] {
-            let refusal = reach_of_schedule(stray).unwrap_err();
-            assert!(refusal.contains(&format!("{stray:?}")), "{refusal}");
-        }
-    }
-
-    /// Only a scheduled run reads its payload, and every other run is a nightly one.
-    #[test]
-    fn a_run_no_schedule_started_reaches_nightly() {
-        for name in [None, Some("workflow_dispatch"), Some("push")] {
-            let reach = reach_of_event(name, || panic!("{name:?} read a schedule payload"));
-            assert_eq!(reach, Ok("--nightly"), "a {name:?} run");
-        }
-        let weekly = format!(r#"{{"schedule":"{WEEKLY_CRON}"}}"#);
-        assert_eq!(reach_of_event(Some("schedule"), || Ok(weekly)), Ok("--weekly"));
-        let unread = reach_of_event(Some("schedule"), || Err("no payload".into()));
-        assert_eq!(unread, Err("no payload".into()));
-    }
-
-    /// The schedules `nightly.yml` declares are exactly the two a reach is
-    /// named for, so no scheduled run reaches the refusal above.
-    #[test]
-    fn nightly_yml_declares_the_two_schedules() {
-        let text = std::fs::read_to_string(repo_root().join(".github/workflows/nightly.yml"))
-            .expect("nightly.yml is readable");
-        let crons: Vec<&str> = text
-            .lines()
-            .filter_map(|l| l.trim().strip_prefix("- cron: '")?.strip_suffix('\''))
-            .collect();
-        assert_eq!(crons, [NIGHTLY_CRON, WEEKLY_CRON]);
-    }
-
-    /// Teeth for the controls' judge: a green negative control, a control that
-    /// never reached its verdict, and a self-catching case that failed are all
-    /// red.
+    /// Teeth for the controls' judge, on libtest's text as a control's run
+    /// prints it: a green negative control, a verdict line absent or saying the
+    /// opposite, a filter that selected nothing, and a self-catching case that
+    /// failed are all red.
     #[test]
     fn a_control_is_judged_by_its_verdict_and_not_its_exit_alone() {
-        let must_red = &CONTROLS[0];
-        let verdict = must_red.verdicts[0];
-        assert!(judge_control(must_red, false, &format!("test {verdict}\n")).is_ok());
-        assert!(judge_control(must_red, true, verdict).unwrap_err().contains("no teeth"));
-        assert!(judge_control(must_red, false, "error[E0425]: cannot find value")
-            .unwrap_err()
-            .contains("proved nothing"));
+        let control =
+            |feature: &str| CONTROLS.iter().find(|c| c.feature == feature).expect(feature);
 
-        let catches = CONTROLS.iter().find(|c| !c.must_red).expect("a self-catching case");
-        assert!(judge_control(catches, true, catches.verdicts[0]).is_ok());
-        assert!(judge_control(catches, false, catches.verdicts[0]).is_err());
+        let two = control("serial-try-lock-then-some");
+        let both = "running 2 tests\n\
+                    test a_lost_try_lock_leaves_the_lock_held ... FAILED\n\
+                    test two_writers_never_overlap ... FAILED\n";
+        assert!(judge_control(two, false, both).is_ok());
+        assert!(judge_control(two, true, both).unwrap_err().contains("no teeth"));
+        let one = "running 2 tests\n\
+                   test a_lost_try_lock_leaves_the_lock_held ... FAILED\n\
+                   test two_writers_never_overlap ... ok\n";
+        assert!(judge_control(two, false, one).unwrap_err().contains("proved nothing"));
+        let none = "running 0 tests\n\n\
+                    test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; \
+                    finished in 0.00s\n";
+        assert!(judge_control(two, true, none).unwrap_err().contains("selected no test"));
+
+        let says = control("doorbell-kick-relaxed");
+        let panicked = "running 1 test\n\n\
+                        thread 'a_halted_cpu_with_queued_work_was_kicked' (77012) panicked at \
+                        kernel/loom/tests/loom_sleep.rs:102:13:\n\
+                        halted with 2 of 2 messages queued and no IPI in flight — a sleep-through\n";
+        assert!(judge_control(says, false, panicked).is_ok());
+
+        let catches = control("no-preempt-guard");
+        let caught = "running 1 test\ntest preempted_producer_strands_suffix ... ok\n";
+        assert!(judge_control(catches, true, caught).is_ok());
+        assert!(judge_control(catches, false, caught).is_err());
         assert!(judge_control(catches, true, "").is_err());
-    }
 
-    /// The rules as `gh api repos/ToyOSOrg/ToyOS/rules/branches/main` answered,
-    /// and the same with the protections this reads taken away.
-    #[test]
-    fn protection_is_read_back_and_a_loosened_rule_is_refused() {
-        let live = r#"[{"type":"deletion"},{"type":"non_fast_forward"},
-            {"type":"pull_request","parameters":{"allowed_merge_methods":["merge"]}},
-            {"type":"required_status_checks","parameters":{"required_status_checks":[
-              {"context":"host"},{"context":"abi-split"},{"context":"gate-stage"},
-              {"context":"guest-suite"},{"context":"build"}]}},
-            {"type":"merge_queue","parameters":{}}]"#;
-        let (bad, said) = protection(&serde_json::from_str(live).unwrap());
-        assert!(bad.is_empty(), "{bad:?}");
-        assert!(said.iter().any(|l| l.contains("`guest-suite` is required at GitHub")), "{said:?}");
-
-        let loose = r#"[{"type":"pull_request","parameters":{"allowed_merge_methods":["merge","squash"]}},
-            {"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"build"}]}}]"#;
-        let (bad, _) = protection(&serde_json::from_str(loose).unwrap());
-        assert!(bad.iter().any(|b| b.contains("does not require the check `host`")), "{bad:?}");
-        assert!(bad.iter().any(|b| b.contains("no `deletion` rule")), "{bad:?}");
-        assert!(bad.iter().any(|b| b.contains("merge methods")), "{bad:?}");
-        let (bad, _) = protection(&serde_json::json!({"message": "Not Found"}));
-        assert!(!bad.is_empty());
-    }
-
-    #[test]
-    fn the_nightly_names_every_job_that_did_not_succeed() {
-        let needs = serde_json::json!({
-            "host": {"result": "success", "outputs": {}},
-            "guest": {"result": "failure", "outputs": {}},
-            "tcg": {"result": "skipped", "outputs": {}},
-        });
-        assert_eq!(failed_jobs(&needs), ["guest(failure)", "tcg(skipped)"]);
-        assert!(failed_jobs(&serde_json::json!({"host": {"result": "success"}})).is_empty());
+        for c in CONTROLS {
+            let judged = judge_control(c, !c.must_red, "error[E0425]: cannot find value");
+            assert!(
+                matches!(&judged, Err(why) if why.contains("proved nothing")),
+                "{}: {judged:?}",
+                c.feature
+            );
+        }
     }
 
     #[test]
     fn the_summary_keeps_the_count_and_the_verdicts() {
         let log = "test result: ok. 3 passed\n\
-                   FAIL rs::lan_talk: no exit code\nnoise\n\
-                   test result: FAILED. 40 passed; 1 failed, 41 total (300 s)\n";
+                   12:00:00 FAIL rs::lan_talk: no exit code\nnoise\n\
+                   12:00:07   STALL rs::lan_talk  (7s)\n\
+                   12:00:09 test result: FAILED. 40 passed; 1 failed, 41 total (300 s)\n";
         let said = verdicts(log);
         assert!(said.starts_with("test result: FAILED. 40 passed; 1 failed, 41 total"), "{said}");
-        assert!(said.contains("FAIL rs::lan_talk"), "{said}");
+        assert!(said.contains("\nFAIL rs::lan_talk: no exit code\n  STALL rs::lan_talk  (7s)\n"), "{said}");
         assert!(!said.contains("noise"), "{said}");
         assert_eq!(verdicts(""), "no suite result line");
     }
@@ -1116,17 +1192,12 @@ mod tests {
         assert!(at_tip("", tip).is_err());
     }
 
-    /// Every name `gate-stage` holds the ruleset to is a job `ci.yml` runs on a
-    /// pull request and in the merge queue, so a required check always has
-    /// something reporting it.
     #[test]
-    fn every_required_check_is_a_job_on_every_pull_request() {
+    fn the_required_check_is_a_job_on_every_pull_request() {
         let text = std::fs::read_to_string(repo_root().join(".github/workflows/ci.yml"))
             .expect("ci.yml is readable");
         assert!(text.contains("\n  pull_request:\n") && text.contains("\n  merge_group:"));
-        for name in REQUIRED_CHECKS {
-            assert!(text.contains(&format!("\n  {name}:")), "ci.yml runs no job `{name}`");
-        }
+        assert!(text.contains("\n  host:"), "ci.yml runs no job `host`");
     }
 
     /// Every workflow's `pull_request:` trigger names `main` alone, and none
@@ -1151,36 +1222,7 @@ mod tests {
                 );
             }
         }
-        assert_eq!(seen, 3, "ci.yml, nightly.yml and publish.yml");
-    }
-
-    /// Exactly one job writes each cache, on the nightly, so what a pull request
-    /// restores is one run's tree and never a race between two writers.
-    #[test]
-    fn each_cache_has_one_writer() {
-        let dir = repo_root().join(".github/workflows");
-        let mut writers = Vec::new();
-        for entry in std::fs::read_dir(&dir).expect(".github/workflows is readable").flatten() {
-            let text = std::fs::read_to_string(entry.path()).expect("a readable workflow");
-            let name = entry.file_name().to_string_lossy().into_owned();
-            assert!(!text.contains("actions/cache@"), "{name}: the combined action saves too");
-            let lines: Vec<&str> = text.lines().collect();
-            for (at, line) in lines.iter().enumerate() {
-                if line.contains("actions/cache/save@") {
-                    let key = lines[at..]
-                        .iter()
-                        .find_map(|l| l.trim_start().strip_prefix("key: "))
-                        .expect("a save names its key");
-                    writers.push((name.clone(), key.split('$').next().unwrap_or("").to_string()));
-                }
-            }
-        }
-        assert!(!writers.is_empty(), "no job writes a cache, so every restore is cold");
-        writers.sort();
-        let mut prefixes: Vec<&String> = writers.iter().map(|(_, p)| p).collect();
-        prefixes.dedup();
-        assert_eq!(prefixes.len(), writers.len(), "a cache with two writers: {writers:?}");
-        assert!(writers.iter().all(|(f, _)| f == "nightly.yml"), "{writers:?}");
+        assert_eq!(seen, 5, "ci.yml, nightly.yml and publish.yml, and guest.yml and toolchain.yml");
     }
 
     #[test]

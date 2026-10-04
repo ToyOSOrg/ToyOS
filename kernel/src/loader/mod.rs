@@ -18,7 +18,6 @@ pub use start::{build_child_handles, PendingHandles, SLOT_PAIR_LEN};
 pub(crate) use start::alloc_kernel_stack;
 pub(crate) use crate::arch::entry::{kernel_start, process_start, thread_start};
 pub use tls::{TlsBlock, DTV_INITIAL_CAPACITY, VARIANT as TLS_VARIANT};
-pub(crate) use tls::rebase_window;
 
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -29,8 +28,8 @@ use crate::object::{ops, HandleTable, KObjectRef};
 use crate::mm::policy::{CachePolicy, Prot};
 use crate::mm::{PAGE_2M, PAGE_BYTES};
 use crate::process::{
-    ElfInfo, Endowments, OwnedAlloc, PageAlloc, PageFaultTrace, PageTables, Pid,
-    ProcessAccounting, ProcessData, ProcessEntry, ThreadData, ThreadEntry, UserStack,
+    Admission, ElfInfo, Endowments, OwnedAlloc, PageAlloc, PageFaultTrace, PageTables, Parent,
+    Pid, ProcessAccounting, ProcessData, ProcessEntry, ThreadData, ThreadEntry, UserStack,
     PROCESS_TABLE,
 };
 use crate::sync::Lock;
@@ -40,7 +39,7 @@ use toyos_abi::syscall::SyscallError;
 use toyos_elf::section::SectionTable;
 use toyos_elf::sym::{self, SymTab};
 use toyos_elf::rela::{FillLattice, Rules, FILL_GRANULE};
-use toyos_elf::{GnuHash, Layout, RelocError, TlsSegment};
+use toyos_elf::{Layout, RelocError, TlsSegment};
 
 const USER_STACK_SIZE: usize = 4 * PAGE_2M as usize; // 8 MB
 
@@ -295,32 +294,25 @@ fn read_exe_tables(
     Ok(ExeTables { needed, dynstr, dynsym, relas })
 }
 
-/// `.dynsym`'s entry count, from `.gnu.hash` if present, else the `DT_SYMTAB`–`DT_STRTAB` gap.
+/// `.dynsym`'s entry count, by the rule `Dynamic::sym_count` states.
 fn exe_sym_count(
     backing: &dyn crate::file_backing::FileBacking,
     layout: &Layout,
     dyn_info: &toyos_elf::Dynamic,
     path: &str,
 ) -> Result<usize, SyscallError> {
-    if let Some(vaddr) = dyn_info.gnu_hash {
-        let off = file_off(layout, path, "DT_GNU_HASH", vaddr)?;
-        let len = layout
-            .file_bytes_from(vaddr)
-            .unwrap_or(0)
-            .min(MAX_GNU_HASH_BYTES) as usize;
-        let data = read_file_range(backing, off, len);
-        if let Some(count) = GnuHash::parse(&data).and_then(|h| h.sym_count()) {
-            return Ok(count);
+    let gnu_hash = match dyn_info.gnu_hash {
+        Some(vaddr) => {
+            let off = file_off(layout, path, "DT_GNU_HASH", vaddr)?;
+            let len = layout.file_bytes_from(vaddr).unwrap_or(0).min(MAX_GNU_HASH_BYTES) as usize;
+            Some(read_file_range(backing, off, len))
         }
-        log!("spawn: {}: .gnu.hash does not describe a symbol count in {} bytes", path, len);
-    }
-    // Adjacent in every linker-produced layout, so the gap between them is the table size.
-    match (dyn_info.symtab, dyn_info.strtab) {
-        (Some(symtab), Some(strtab)) if strtab > symtab => {
-            Ok(((strtab - symtab) / sym::ENTRY_SIZE as u64) as usize)
-        }
-        _ => Ok(0),
-    }
+        None => None,
+    };
+    Ok(dyn_info.sym_count(gnu_hash.as_deref()).unwrap_or_else(|gap| {
+        log!("spawn: {}: .gnu.hash does not describe a symbol count in its {} bytes", path, gnu_hash.as_ref().map_or(0, |t| t.len()));
+        gap
+    }))
 }
 
 /// `.rela.dyn` located through section headers, for a file with no `PT_DYNAMIC`.
@@ -343,34 +335,49 @@ fn rela_dyn_from_sections(
     }
 }
 
-/// Load a program and place its main thread, answering the object a handle to
-/// the new process names.
+/// Load a program and place its main thread under `parent`, answering its pid
+/// and what `commit` left its caller holding of it. `commit` builds the
+/// child's handle table around the child's handle to itself, once nothing is
+/// left to refuse.
 ///
-/// No parent argument: a process has no parent, and the only thing the caller
-/// contributes beyond its endowment is the working directory it passes in.
+/// `path` is the program, opened here — or, with `image`, the bytes the caller
+/// read from it itself, and then nothing opens it and its libraries come from
+/// `/system/lib` alone, since the directory it names is no volume of this
+/// kernel's. `argv[0]` is only the name the child goes by.
 ///
 /// `Refusal`, not `-> !`, is the error type: every failure below owns a
 /// partly built process (address space, stack, kernel stack), and nothing
 /// unwinds, so the error must travel out as a value rather than strand it.
-pub fn spawn(
+pub fn spawn<H>(
+    path: &str,
     argv: &[&str],
-    pending: PendingHandles,
+    commit: impl FnOnce(crate::object::HandleEntry) -> Result<(HandleTable, Endowments, H), crate::object::Refusal>,
     cwd: String,
     env: Vec<u8>,
-) -> Result<Arc<crate::object::process::ProcessObject>, crate::object::Refusal> {
+    image: Option<Arc<dyn crate::file_backing::FileBacking>>,
+    parent: Parent,
+) -> Result<(Pid, H), crate::object::Refusal> {
     // An argv of only separators survives sys_spawn's split as an empty slice.
-    let Some(&path) = argv.first() else {
+    let Some(&name) = argv.first() else {
         return Err(SyscallError::InvalidArgument.into());
     };
+    // Before anything is built; dropped on every way out below but the insert.
+    let admission = Admission::ask(parent)?;
     let t0 = crate::clock::nanos_since_boot();
 
-    // Scoped, not held across the match: dropping `pending` on any `return` here takes the VFS lock.
-    let opened = vfs::lock().open_backing(path);
-    let backing: Arc<dyn crate::file_backing::FileBacking> = match opened {
-        Ok(b) => b,
-        Err(e) => {
-            log!("spawn: {}: {e}", path);
-            return Err(e.into());
+    let from_image = image.is_some();
+    let backing: Arc<dyn crate::file_backing::FileBacking> = match image {
+        Some(image) => image,
+        None => {
+            // Scoped, not held across the match: dropping `commit` on any `return` here takes the VFS lock.
+            let opened = vfs::lock().open_backing(path);
+            match opened {
+                Ok(b) => b,
+                Err(e) => {
+                    log!("spawn: {}: {e}", path);
+                    return Err(e.into());
+                }
+            }
         }
     };
 
@@ -396,6 +403,12 @@ pub fn spawn(
     // Where the image's first byte lands: every `ImageOffset` the file's
     // numbers were parsed into is added to it, and its span fits above it.
     let image_start = UserAddr::new(USER_VM_BASE);
+    // `SYS_QUERY_MODULES` answers with the mapped table, so an image without
+    // one has no true answer to give.
+    let Some(phdrs) = layout.program_headers() else {
+        log!("spawn: {}: no PT_LOAD maps the program header table", path);
+        return Err(SyscallError::InvalidArgument.into());
+    };
 
     let exe = read_exe_tables(backing.as_ref(), &layout, path)?;
     let t1 = crate::clock::nanos_since_boot();
@@ -414,7 +427,7 @@ pub fn spawn(
     }
 
     let t2 = crate::clock::nanos_since_boot();
-    let mut loaded_libs = load_needed_libs(&exe, path)?;
+    let mut loaded_libs = load_needed_libs(&exe, path, from_image)?;
     let t_deps = crate::clock::nanos_since_boot();
 
     // ELF segments are demand-faulted; the address space starts with the clock page alone.
@@ -547,7 +560,7 @@ pub fn spawn(
     };
 
     log!("spawn: TLS {} modules, total_memsz={}", tls_modules.len(), tls.total_memsz());
-    let Some((tls_pages, fs_base, _)) =
+    let Some((tls_pages, thread_pointer, _)) =
         tls::TlsBlock::build(&tls_modules, tls).and_then(|b| b.publish(&child_pt))
     else {
         log!("spawn: {}: failed to allocate TLS ({} bytes)", path, tls.total_memsz());
@@ -566,7 +579,7 @@ pub fn spawn(
     );
     let sym_bytes = syms.resident_bytes();
 
-    let (ks_alloc, ks_rsp) = match alloc_kernel_stack(process_start, entry, sp, 0) {
+    let (ks_alloc, ks_sp) = match alloc_kernel_stack(process_start, entry, sp, 0) {
         Some(ks) => ks,
         None => {
             log!("spawn: {}: failed to allocate kernel stack", path);
@@ -576,10 +589,11 @@ pub fn spawn(
 
 
     let NeededLibs { libs: loaded_libs, paths: lib_paths } = loaded_libs;
+    let pid = admission.pid();
+    let object = crate::object::process::ProcessObject::new(pid);
     // The point of no return: every failure above answers the caller with its
-    // table untouched. `commit`'s own `?` is different — reachable only if the
-    // caller raced its own spawn, and fatal to it, not a refusal.
-    let (handles, endowments) = pending.commit()?;
+    // table untouched.
+    let (handles, endowments, held) = commit(start::own_handle(&object))?;
     let proc_data = Arc::new(Lock::new(ProcessData {
         handles,
         cwd,
@@ -597,6 +611,7 @@ pub fn spawn(
                 .eh_frame_hdr()
                 .map_or((0, 0), |r| ((image_start + r.start().get()).raw(), r.len())),
             exe_vaddr_max: image_end,
+            exe_phdrs: ((image_start + phdrs.image().start().get()).raw(), phdrs.count()),
             lib_paths,
         },
         mmap_regions: Vec::new(),
@@ -625,30 +640,42 @@ pub fn spawn(
     // One table, two holders: cloned so a crash report on this thread reads names without the process table.
     let syms = Arc::new(syms);
 
-    let mut guard = PROCESS_TABLE.lock();
-    let table = guard.as_mut().unwrap();
-    let pid = table.insert_with(|pid| ProcessEntry::new(
-        pid,
-        start::make_name(path),
-        proc_data,
-        Arc::clone(&syms),
-        ThreadEntry::new(thread_data),
-    ));
-    let tid = table.get(pid).unwrap().main_tid();
-    let object = Arc::clone(table.get(pid).unwrap().object());
+    #[cfg(feature = "test-actuators")]
+    crate::process::debug_kill_marked_place(parent);
 
-    // Placed while still holding the table lock: kill_process claims teardown
-    // under it, so a retire sweep can never see the pid before its thread is scheduled.
-    let (sched, dst) = scheduler::enqueue_new(
-        scheduler::TaskId(pid, tid),
-        ks_alloc,
-        ks_rsp,
-        child_pt.clone(),
-        fs_base,
-        syms,
-    );
-    table.get_mut(pid).unwrap().threads_mut().get_mut(tid).unwrap().set_sched(sched);
+    let mut guard = PROCESS_TABLE.lock();
+    let ((tid, dst), retire) = admission.land(guard.as_mut().unwrap(), |table, node| {
+        table.insert(ProcessEntry::new(
+            Arc::clone(&object),
+            start::make_name(name),
+            proc_data,
+            Arc::clone(&syms),
+            ThreadEntry::new(thread_data),
+            node,
+        ));
+        let tid = table.get(pid).unwrap().main_tid();
+        // Placed while still holding the table lock: kill_process claims teardown
+        // under it, so a retire sweep can never see the pid before its thread is scheduled.
+        let (sched, dst) = scheduler::enqueue_new(
+            scheduler::TaskId(pid, tid),
+            ks_alloc,
+            ks_sp,
+            child_pt.clone(),
+            thread_pointer,
+            syms,
+        );
+        table.get_mut(pid).unwrap().threads_mut().get_mut(tid).unwrap().set_sched(sched);
+        (tid, dst)
+    });
     drop(guard);
+    // Its parent was claimed while it was built, and its walk has passed: the
+    // child is ended as that walk would have ended it, and the spawn answers it.
+    for sched in &retire {
+        scheduler::post_retire(sched);
+    }
+
+    #[cfg(feature = "test-actuators")]
+    crate::process::debug_hold_marked_spawn(parent, &object);
 
     let t3 = crate::clock::nanos_since_boot();
     log!("spawn: {} pid={} tid={} dst={} base={:#x} entry={:#x} root={:#x} symbols={}KiB (layout={}ms relocs={}ms deps={}ms tls={}ms total={}ms)",
@@ -656,7 +683,7 @@ pub fn spawn(
         (t1 - t0) / 1_000_000, (t2 - t1) / 1_000_000, (t_deps - t2) / 1_000_000,
         (t_tls - t_deps) / 1_000_000, (t3 - t0) / 1_000_000);
 
-    Ok(object)
+    Ok((pid, held))
 }
 
 /// The libraries an executable's `DT_NEEDED` entries name, and the paths they were found at.
@@ -669,13 +696,17 @@ struct NeededLibs {
 /// 2 MiB window, so a `DT_NEEDED` list naming more is refused rather than loaded.
 const MAX_NEEDED_LIBS: usize = 64;
 
-/// Load each distinct `DT_NEEDED` library, from the executable's own directory first and `/system/lib` second.
-fn load_needed_libs(exe: &ExeTables, path: &str) -> Result<NeededLibs, SyscallError> {
+/// Load each distinct `DT_NEEDED` library, from the executable's own directory
+/// first and `/system/lib` second; an image's from `/system/lib` alone.
+fn load_needed_libs(exe: &ExeTables, path: &str, from_image: bool) -> Result<NeededLibs, SyscallError> {
     let mut out = NeededLibs { libs: Vec::new(), paths: Vec::new() };
     if exe.needed.is_empty() {
         return Ok(out);
     }
-    let exe_dir = path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
+    let exe_dir = match from_image {
+        true => "/system/lib",
+        false => path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or(""),
+    };
 
     // Collapse duplicates to the distinct set and bound it: a repeat resolves to
     // one library `elf/cache.rs` holds one window for, so it buys no second one.
@@ -822,14 +853,14 @@ fn apply_tls_relocs(
 
 /// The one program the kernel starts. `src/build.rs` puts this binary in every
 /// image, so a missing one is a bad build, not a different boot.
-pub const INIT_PATH: &str = "/system/bin/init";
+pub const SUPERVISOR_PATH: &str = "/system/bin/supervisor";
 
-/// Start `/system/bin/init`, holding the machine's one full-rights `SysCap`.
+/// Start `/system/bin/supervisor`, holding the machine's one full-rights `SysCap`.
 ///
-/// Nothing else can construct one: what init endows is the entire set of
+/// Nothing else can construct one: what the supervisor endows is the entire set of
 /// processes that can ever claim a device, enter the RT band, or power off.
-/// Panics on failure: a boot that cannot start init has nowhere to report to.
-pub fn spawn_init() -> Pid {
+/// Panics on failure: a boot that cannot start the supervisor has nowhere to report to.
+pub fn spawn_supervisor() -> Pid {
     let mut handles = HandleTable::new();
     let console = KObjectRef::Console(crate::object::device::ConsoleObject::new());
     for slot in 0..3 {
@@ -839,7 +870,7 @@ pub fn spawn_init() -> Pid {
         );
         let (_, displaced) = handles
             .install_at(slot, entry)
-            .expect("spawn_init: three slots cannot exhaust an empty table");
+            .expect("spawn_supervisor: three slots cannot exhaust an empty table");
         assert!(displaced.is_none(), "an empty table had something at slot {slot}");
     }
     let cap = KObjectRef::SysCap(crate::object::syscap::SysCap::new());
@@ -851,28 +882,32 @@ pub fn spawn_init() -> Pid {
         .union(Rights::TRANSFER)
         .union(Rights::DEVICE)
         .union(Rights::RT)
-        .union(Rights::MANAGE)
         .union(Rights::LOG)
         .union(Rights::WAIT)
         .union(Rights::POWER)
         .union(Rights::ROSTER)
-        .union(Rights::INVENTORY);
+        .union(Rights::INVENTORY)
+        .union(Rights::COUNTERS)
+        .union(Rights::TRACE);
     let cap_handle = handles
         .install(crate::object::HandleEntry::new(cap, rights))
-        .expect("spawn_init: an empty table refused the system capability");
+        .expect("spawn_supervisor: an empty table refused the system capability");
     let label = toyos_abi::syscall::SYSCAP_LABEL;
-    let endowments = Endowments::new(
-        alloc::vec![toyos_abi::syscall::EndowEntry {
-            label_off: 0,
-            label_len: label.len() as u32,
-            handle: cap_handle,
-            _pad: 0,
-        }],
-        label.as_bytes().to_vec(),
-    );
-    match spawn(&[INIT_PATH], PendingHandles::Ready(handles, endowments), String::from("/"), Vec::new()) {
-        Ok(object) => object.pid(),
-        Err(crate::object::Refusal::Error(e)) => panic!("spawn_init: failed to spawn: {e:?}"),
-        Err(crate::object::Refusal::Handle(e)) => panic!("spawn_init: {e}"),
+    let mut entries = alloc::vec![toyos_abi::syscall::EndowEntry {
+        label_off: 0,
+        label_len: label.len() as u32,
+        handle: cap_handle,
+        _pad: 0,
+    }];
+    let mut labels = label.as_bytes().to_vec();
+    // Built by the kernel and owing nobody anything: no table but the supervisor's own holds it.
+    let commit = |own| {
+        start::endow_self(&mut handles, &mut entries, &mut labels, own);
+        Ok((handles, Endowments::new(entries, labels), ()))
+    };
+    match spawn(SUPERVISOR_PATH, &[SUPERVISOR_PATH], commit, String::from("/"), Vec::new(), None, Parent::Root) {
+        Ok((pid, ())) => pid,
+        Err(crate::object::Refusal::Error(e)) => panic!("spawn_supervisor: failed to spawn: {e:?}"),
+        Err(crate::object::Refusal::Handle(e)) => panic!("spawn_supervisor: {e}"),
     }
 }

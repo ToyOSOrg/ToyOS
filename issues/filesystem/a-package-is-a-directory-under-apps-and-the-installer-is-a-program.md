@@ -32,6 +32,21 @@ the binary in a ToyOS guest is this track's harness's job, not gbae's.
   desktop's launcher lists `/apps` and reads each manifest; init grants an
   app its namespace from that row the same way `system.toml` grants a system
   program's. Removal is deleting the directory.
+- **A package is a program, whole** (owner, 2026-10-02): self-contained and
+  fixed at build time. No library packages, no dependency solver, no install
+  scripts; a fix in what a package carries is a rebuild of the package.
+- Not his ruling, a refinement put to him with it that he did not object to: a
+  library can be a build input named exactly by hash, never an installed
+  thing; shared objects stay, only library packages go.
+- **`/apps/<name>` is immutable by stage-then-commit** (owner, 2026-10-02).
+  `pkg` unpacks into a private staging directory and commits it in one step,
+  one operation the file server gains; nothing writes a committed package.
+- **A standalone C program's ToyOS changes are patch files in a recipe**
+  (owner, 2026-10-02), against an upstream archive pinned by hash; a delta too
+  large to read as patches moves to a fork repository pinned by commit. Forks
+  stay for crates, `rust/` and LLVM. Recipes and patches live in this
+  repository, where `NOTICE` and the licence gate carry them, not in a ports
+  repository.
 - **The installer is an ordinary program**, `/system/bin/pkg`, with no
   authority a shell does not have: it fetches, verifies, unpacks and writes
   under `/apps` because `/apps` is writable to it, and it asks the user
@@ -57,17 +72,19 @@ the binary in a ToyOS guest is this track's harness's job, not gbae's.
 
 The storage track's users and mount-protocol stages do not block this one.
 
-1. Landed: `pkg install <file>`, `pkg remove`, `pkg list`, judged by
-   `pkg_install_gbae` against gbae's release archive committed under
-   `tests/fixtures`. **What a package holds is the image's `[apps]` row, never
+1. Landed: `pkg install <file>`, `pkg remove`, `pkg list`. Its judge,
+   `pkg_install_gbae`, is a metal row
+   `issues/build/the-guest-suite-runs-only-what-no-cheaper-tier-reaches.md`
+   owes. **What a package holds is the image's `[apps]` row, never
    its own `manifest.toml`** — that file names which of the directory's
    binaries a launch starts and nothing else, so a writable `/apps` cannot name
-   a device or a right.
+   a device or a right. The stage-then-commit above amends it: `pkg` writes
+   `/apps/<name>/` in place today, its `manifest.toml` last
+   (`userland/pkg/src/main.rs`).
 2. The HTTPS fetch: TLS client under `pkg`, the GitHub redirect, the sums
    file from the same release. This is the internet-client track's last
    stage (`issues/design-debt/the-internet-clients-work-unchanged.md`). Judged in QEMU against a server the harness
-   runs on the host in Rust, serving the bytes already committed under
-   `tests/fixtures`; then once against GitHub itself, by hand, with the owner
+   runs on the host in Rust; then once against GitHub itself, by hand, with the owner
    watching. No registered test fetches anything.
 3. Updates: `pkg install` of a newer version replaces the directory whole
    after the new archive verified; the old one is gone only after the new
@@ -76,8 +93,9 @@ The storage track's users and mount-protocol stages do not block this one.
    project.
 5. The users track's per-user `/home`
    (`issues/filesystem/a-user-is-a-home-tree-and-a-login-row.md`) decides
-   where a package's own data goes; until then a package writes under
-   `/apps/<name>/` only.
+   where a package's own data goes. Until then nothing says where: a
+   committed `/apps/<name>` is written by nothing, and that directory is where
+   a package wrote before the stage-then-commit ruling.
 6. **An app's rights are its request ∩ the user's grant ∩ the image's
    ceiling** (owner ruling, 2026-09-24; the ceiling's shape, 2026-09-26). The
    package's manifest *requests* rights; the user *grants* them per user
@@ -103,3 +121,10 @@ The storage track's users and mount-protocol stages do not block this one.
    `assets/soundfont.sf2`, which doom alone opens, leave the image as one
    installable package. Until they do, `src/licence.rs` names each as an
    exception pending this stage.
+
+## Open with the owner
+
+- The libraries the machine provides: GPU, video.
+- A C program's optional requests.
+- ABI stability.
+- Scale.

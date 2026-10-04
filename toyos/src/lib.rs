@@ -15,6 +15,7 @@ pub mod audio;
 pub mod census;
 pub mod device;
 pub mod endow;
+pub mod fs;
 pub mod gpu;
 pub mod poller;
 pub mod power;
@@ -107,7 +108,7 @@ impl Drop for OwnedHandle {
 
 /// A claimed hardware device, out of this process's endowment table.
 ///
-/// There is no `open`: `init` mints every claim from the machine's one
+/// There is no `open`: the supervisor mints every claim from the machine's one
 /// system capability and endows it, so which process drives a device is a fact
 /// the image was built with. See [`endow::device`].
 pub struct Device(pub(crate) OwnedHandle);
@@ -172,7 +173,7 @@ impl AsHandle for Pipe {
     fn as_handle(&self) -> RawHandle { self.0.raw() }
 }
 
-/// A console handle: the one `/system/bin/init` endows `/system/bin/logd` with,
+/// A console handle: the one `/system/bin/supervisor` endows `/system/bin/logkeeper` with,
 /// the only one in the machine that may write.
 ///
 /// **A write takes whole lines and says how many bytes that was.** The

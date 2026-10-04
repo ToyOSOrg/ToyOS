@@ -1,20 +1,21 @@
-/// The actuator-state coupling gate, read by nothing but its own tests.
-#[cfg(test)]
-pub mod actuatorstate;
+// First: its `eprintln!` is in scope of every module declared after it.
+#[macro_use]
+pub mod printer;
+
 pub mod arch;
 pub mod assets;
 pub mod bootlog;
 pub mod build;
 pub mod buildlock;
 pub mod ci;
+pub mod cicache;
 pub mod clang;
 pub mod clippy;
 pub mod compiler;
-/// What the untouched-disk gate compares a device against, in `tests/`.
-pub mod fingerprint;
 pub mod firmware;
+#[cfg(test)]
+pub mod gitfixture;
 pub mod flags;
-pub mod forkcheck;
 pub mod hostws;
 pub mod icmp;
 pub mod identity;
@@ -28,16 +29,16 @@ pub mod kernelkeys;
 pub mod keystore;
 pub mod lan;
 pub mod libc;
+pub mod libcxx;
 pub mod llvm;
 pub mod licence;
 pub mod metal;
 pub mod metaldevices;
 pub mod metalimage;
-pub mod metalprofile;
 pub mod metalswap;
 pub mod metaltalk;
-pub mod pr;
-pub mod redlist;
+pub mod metaltimings;
+pub mod n2;
 pub mod release;
 pub mod sdkversion;
 pub mod soundfont;
@@ -48,11 +49,9 @@ pub mod sourcegate;
 pub mod sysroot;
 pub mod testargs;
 pub mod tether;
-pub mod tiers;
 pub mod toolchain;
 pub mod userlandhost;
 pub mod wallpaper;
-pub mod worktree;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -117,6 +116,29 @@ pub fn ensure_submodules(repo_dir: &Path) {
             ensure_submodule(repo_dir, path);
         }
     }
+}
+
+/// `rust/` at the commit this tree pins and with no history, where a CI
+/// runner's checkout has none: what reading the fork's sources and building
+/// the toolchain from them need. Refused in a linked worktree, whose `rust/` is
+/// `sysroot::fork_checkout`'s to make: `git submodule` there rewrites the
+/// `core.worktree` of the primary's fork.
+pub fn ensure_shallow_fork(root: &Path) -> Result<(), String> {
+    if root.join("rust/x.py").exists() {
+        return Ok(());
+    }
+    if let toolchain::Owner::Elsewhere(_) = toolchain::owner(root) {
+        return Err(format!(
+            "{} is a linked worktree's fork checkout and is not whole: no submodule is initialised there",
+            root.join("rust").display()
+        ));
+    }
+    let status = Command::new("git")
+        .args(["submodule", "update", "--init", "--depth", "1", "rust"])
+        .current_dir(root)
+        .status()
+        .map_err(|e| format!("git submodule update --init --depth 1 rust: {e}"))?;
+    status.success().then_some(()).ok_or_else(|| format!("git submodule update --init --depth 1 rust exited {status}"))
 }
 
 /// Ensure a single git submodule is checked out.

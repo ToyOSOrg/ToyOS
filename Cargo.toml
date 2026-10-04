@@ -16,52 +16,51 @@
 [workspace]
 members = [
     "bcachefs",
-    "kernel-loom",
+    "kernel/dma",
+    "kernel/gicv3",
+    "kernel/loom",
+    "kernel/pci",
+    "kernel/ps2",
+    "kernel/sim",
+    "tests/libc-arch",
     "toyos-abi",
     "toyos-acpi",
     "toyos-blackbox",
     "toyos-blockhold",
     "toyos-blockring",
+    "toyos-blockring/transport",
     "toyos-bootmap",
-    "toyos-desktop",
+    "toyos-cpuvuln",
+    "toyos-dhcp",
     "toyos-dns",
-    "toyos-dma",
     "toyos-elf",
     "toyos-elide",
     "toyos-fat32",
-    "toyos-fat32-check",
+    "toyos-fat32/check",
     "toyos-gpt",
     "toyos-hda",
     "toyos-i219",
     "toyos-inspect",
     "toyos-keymap",
     "toyos-ld",
-    "toyos-libc-copies",
     "toyos-logstream",
     "toyos-manifest",
-    "toyos-mdns",
-    "toyos-mixer",
-    "toyos-net-tcp",
+    "toyos-microcode",
+    "toyos-net-ip",
+    "toyos-net-shard",
+    "toyos-net-shard/tcp",
+    "toyos-net-shard/testnet",
+    "toyos-net-udp",
     "toyos-net-wire",
-    "toyos-pci",
-    "toyos-pcid",
-    "toyos-perfstate",
-    "toyos-proclife",
-    "toyos-ps2",
     "toyos-quiesce",
     "toyos-rootimage",
-    "toyos-sched",
-    "toyos-sched/loom",
-    "toyos-sched/sim",
     "toyos-swap",
     "toyos-symbols",
     "toyos-tco",
     "toyos-tmpdir",
-    "toyos-transport",
     "toyos-untrusted",
     "toyos-update",
     "toyos-userbound",
-    "toyos-userpin",
     "toyos-wallclock",
     "toyos-xhci",
     "toyos-xhci/sim",
@@ -74,7 +73,9 @@ default-members = ["."]
 exclude = [
     # Cross-compiled by a `.cargo/config.toml` below them, to targets no host
     # test can run. Cargo refuses to merge an inherited `build.target` away, so
-    # these cannot be members at any price.
+    # these cannot be members at any price. The kernel's library is tested on the
+    # host from its own manifest all the same, and `kernel/loom` and `kernel/sim`
+    # are members: `members` names them, which outranks this list.
     "bootloader",
     "kernel",
     "userland",
@@ -88,10 +89,18 @@ exclude = [
     # `cargo test` in it against the host triple.
     "toyos",
     # Guest programs `src/build.rs` builds for `x86_64-unknown-toyos`, each from
-    # its own directory. The harness's own integration test lives here too
-    # (`tests/toyos.rs`), and that one is a target of the root package rather
-    # than a package of its own.
-    "tests",
+    # its own directory but `tls-multi-crate/dep`, its parent's dependency. Named,
+    # and not `tests/` whole, so the gate finds a host test under `tests/` that
+    # joined neither list.
+    "tests/toyos-rust-tests",
+    "tests/toyos-rust-tests/tls-cranelift",
+    "tests/toyos-rust-tests/tls-dlopen-lib",
+    "tests/toyos-rust-tests/tls-lib",
+    "tests/toyos-rust-tests/tls-multi-crate",
+    "tests/toyos-rust-tests/tls-multi-crate/dep",
+    # A host judge: a second implementation, whose dependency graph is not the
+    # harness's to resolve (`src/build.rs`, `build_host_judges`).
+    "tests/ssh-client-host",
 ]
 
 [package]
@@ -108,9 +117,8 @@ default-run = "toyos-build"
 fatfs = "0.3.6"
 fontdue = "0.9"
 gpt = "3.1.0"
-# `statvfs` for `worktree::free_bytes`, and the unprivileged ICMP datagram
-# socket `icmp::echo` asks a metal boot over, which is the platform call that
-# replaces a `ping` binary.
+# The unprivileged ICMP datagram socket `icmp::echo` asks a metal boot over,
+# which is the platform call that replaces a `ping` binary.
 libc = "0.2"
 toml = "0.8"
 uuid = { version = "1", features = ["v4"] }
@@ -126,19 +134,19 @@ toyos-fat32 = { path = "toyos-fat32" }
 # The two readers `image::certify` judges every published image with. They are
 # dependencies of the build rather than of its tests because a flash target is
 # not published until they have both passed on it.
-toyos-fat32-check = { path = "toyos-fat32-check" }
+toyos-fat32-check = { path = "toyos-fat32/check" }
 toyos-gpt = { path = "toyos-gpt" }
 toyos-keymap = { path = "toyos-keymap" }
-# The form a program's line takes in a boot's log and the port `logd` serves it
-# on, so the judges reading the log and `logd` writing it read one declaration.
+# The form a program's line takes in a boot's log and the port `logkeeper` serves it
+# on, so the judges reading the log and `logkeeper` writing it read one declaration.
 toyos-logstream = { path = "toyos-logstream" }
 toyos-manifest = { path = "toyos-manifest" }
 # The shutdown's stop record: the kernel renders it and this crate reads it back
 # off a stick, so one declaration is what both sides spell it with.
 toyos-quiesce = { path = "toyos-quiesce" }
 # The swap port's name and the one program the image may give it to, so the
-# gate on every manifest and the host that asks for a swap read what init and
-# sshd read.
+# gate on every manifest and the host that asks for a swap read what the supervisor and
+# sshserver read.
 toyos-swap = { path = "toyos-swap" }
 # The watchdog's parameter name, so the gate over `kernel/src/params.rs` reads
 # the same constant the kernel and the bootloader do.
@@ -152,48 +160,38 @@ toyos-blackbox = { path = "toyos-blackbox" }
 toyos-update = { path = "toyos-update", features = ["sign"] }
 # A throwaway key's seed, from the operating system. Already resolved here.
 getrandom = "0.3"
-# `classify`, so the host reading a log volume and `logd` writing it cannot
-# disagree about which files on it are `logd`'s.
+# `classify`, so the host reading a log volume and `logkeeper` writing it cannot
+# disagree about which files on it are `logkeeper`'s.
 toyos-wallclock = { path = "toyos-wallclock" }
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
-# The digest behind two readings that must not be able to agree by accident:
-# `NOTICE`'s record of every committed binary file (`src/sourcegate.rs`), and a
-# disk this system was not given, before and after a boot
-# (`src/fingerprint.rs`). Already resolved here through a dev-dependency, so
-# nothing new is fetched — but `cargo run` did not compile it before this.
+# The digest behind `NOTICE`'s record of every committed binary file
+# (`src/sourcegate.rs`).
 sha2 = "0.10"
+# The toolchain release's tarball, packed in-process (`src/release.rs`): Rust's
+# own tar and gzip, where the binaries are hosts' tools.
+tar = { version = "0.4.46", default-features = false }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# Every request the build system makes, GitHub's API and the crates.io index,
+# where curl is a host's tool: rustls on ring, the one TLS provider the tree
+# takes (`issues/design-debt/the-internet-clients-work-unchanged.md`), whose C
+# and assembly the host's `cc` compiles.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [dev-dependencies]
 # `USER_TOP`, so the harness judges a held `rsp` against the bound the kernel
 # checks every user pointer against and not against a second copy of it.
 toyos-userbound = { path = "toyos-userbound" }
 # The I219 driver's own words and its PHY probe's exit-code table, so the
-# harness judging netd's `exit:` record off the T14 and netd writing it read one
+# harness judging netstack's `exit:` record off the T14 and netstack writing it read one
 # declaration. Pure and `no_std`, so it compiles for the host as it does for
 # the guest.
 toyos-i219 = { path = "toyos-i219" }
-# The scheduler core, for two things the harness reads the kernel's words by:
-# the watch window's count (`watch::window`) that `blocking_read_window`'s
-# metal row judges, and `cpu::PassCostReport`, whose `Display`/`parse` pair
-# keeps the check build that publishes the pass-cost report and
-# `sched_check_build` that reads it on one format. `check` because that is
-# where the report lives: `src/build.rs`'s artifact gate asks the shipping
-# kernel to carry none of the check instruments' literals. `kernel/` is
-# excluded from this workspace with its own lockfile, so nothing here reaches
-# the kernel's resolution of the same crate.
-toyos-sched = { path = "toyos-sched", features = ["check"] }
+# The scheduler's quantum and the windows' hold, so the harness judges a boot
+# against the constants the kernel schedules by.
+kernel = { path = "kernel" }
 # The Bulk-Only phases, so the harness judging a wedge reads the word
 # `toyos_xhci::bot::Phase` declares instead of spelling it a second time.
 toyos-xhci = { path = "toyos-xhci" }
-# The performance request, so `perf_request`'s metal row holds each CPU's boot
-# line to the declaration the kernel makes from that line's own inputs.
-toyos-perfstate = { path = "toyos-perfstate" }
-# The second reader `pkg_install_gbae` is judged against: what is read back off
-# the guest's volume is compared with a third party's decoding of the committed
-# archive, never with `userland/pkg`'s own. The archive itself is committed
-# under `tests/fixtures` and no test fetches anything.
-flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
-tar = "0.4"
 
 [patch.crates-io]
 loom = { git = "https://github.com/ToyOSOrg/loom", branch = "toyos" }
@@ -215,8 +213,7 @@ opt-level = 2
 # `opt-level = 0`. Nothing fail-fast is traded for it — `opt-level` does not
 # touch `debug-assertions`, which cargo still passes as `on` (checked with
 # `cargo build -p toyos-fat32 -v`), and rustc derives `overflow-checks` from
-# that. The pure crates' hostile-input tests keep both knobs that *found* the
-# two crafted-ELF kernel panics in `issues/`.
+# that.
 #
 # **One member depends on this line for correctness rather than for speed, and
 # its own manifest says so at length — this is the other half of that
@@ -235,10 +232,8 @@ opt-level = 3
 
 # The one profile every guest binary is built with. Optimised, because an
 # unoptimised guest mismeasures everything under TCG;
-# debug-assertions and overflow-checks on, because fail-fast beats speed here
-# and both crafted-ELF kernel panics in `issues/` were *found* by
-# an overflow check. `--release` would turn the last two off silently, so this
-# build system no longer has the flag.
+# debug-assertions and overflow-checks on, because fail-fast beats speed here.
+# `--release` would turn the last two off silently.
 #
 # It is declared here rather than in `toyos-ld/Cargo.toml` because cargo
 # ignores `[profile]` in a workspace member and that is one now. It is the only

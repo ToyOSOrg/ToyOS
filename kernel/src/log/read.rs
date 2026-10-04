@@ -65,9 +65,13 @@ impl Cursor {
         Self { next: [FIRST_SEQ; MAX_LOG_SHARDS], lost: 0 }
     }
 
-    /// A caller's raw `LogCursor`, unvalidated: every field is clamped where it is used instead.
-    pub fn from_reader(cursor: &toyos_abi::log::LogCursor) -> Self {
-        Self { next: cursor.next, lost: cursor.lost }
+    /// A caller's `LogCursor` as a walk, or `None` for a position past the number its shard issues
+    /// next; its `lost` is never read, so the walk counts this read's loss alone.
+    pub fn from_reader(cursor: &toyos_abi::log::LogCursor) -> Option<Self> {
+        // An unpublished shard is held to the head it is published with, so no cursor is ahead of one that appears mid-walk.
+        let issued = |shard: Option<&'static Shard>| shard.map_or(FIRST_SEQ, Shard::head);
+        let ahead = cursor.next.iter().zip(super::shards()).any(|(&next, shard)| next > issued(shard));
+        (!ahead).then_some(Self { next: cursor.next, lost: 0 })
     }
 
     /// Writes the walk state back into the caller's `LogCursor`.
@@ -82,6 +86,7 @@ impl Cursor {
         let oldest = shard.oldest_readable();
         // Clamped to `FIRST_SEQ`: a zeroed cursor from the syscall boundary must not read as having missed everything.
         let want = self.next.get(i).copied().unwrap_or(FIRST_SEQ).max(FIRST_SEQ);
+        // Cannot overflow: `lost` starts at zero in every cursor and grows only as far as the clamp below moves `next[i]`, which never passes a head.
         self.lost += oldest.saturating_sub(want);
         let want = want.max(oldest);
         *self.next.get_mut(i)? = want;

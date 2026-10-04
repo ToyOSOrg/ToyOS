@@ -25,7 +25,8 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use crate::arch::{irqchip, cpu, percpu, smp};
+use crate::arch::{irqchip, cpu, percpu};
+use crate::smp;
 
 /// What the staged CPU says before it stops answering, and the witness a sealed
 /// record carries in its tail: a `WEDGED` page whose text does not hold this
@@ -139,7 +140,7 @@ fn go_deaf(me: usize, bound_ms: u64) -> ! {
     while cpu::counter() < until {
         core::hint::spin_loop();
     }
-    // Never acquires. The detector's NMI is what ends this CPU, and its `rip`
+    // Never acquires. The detector's NMI is what ends this CPU, and its `pc`
     // is inside `Lock::lock`'s spin when it does.
     let _never = PROBE_LOCK.lock();
     loop {

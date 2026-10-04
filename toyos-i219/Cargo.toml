@@ -3,7 +3,7 @@
 # host with no guest and no QEMU.
 #
 # What lives here is every decision the I219 driver makes — the descriptor
-# rings, the interrupt causes, the link — against four traits netd implements
+# rings, the interrupt causes, the link — against four traits netstack implements
 # one instruction deep. The device is on the far side of a trust boundary, so
 # the numbers it writes into a descriptor have to be driven with values no
 # working card would send far more often than a boot allows; and the machine

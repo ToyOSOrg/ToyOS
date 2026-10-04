@@ -16,9 +16,7 @@
 //! artifacts — a member's land in the workspace root's `target/`, not its own —
 //! and the gates below walk the tree and red on a `Cargo.toml` that joined
 //! neither `members` nor `exclude`. **A new host crate that forgets to join is
-//! a red, not a silent gap.** Every package the table names carries a
-//! `description`, and a gate below reds on one without: the table and those
-//! lines are the repository's layout, and nothing else lists it.
+//! a red, not a silent gap.**
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -82,7 +80,7 @@ pub fn excluded(root: &Path) -> BTreeSet<String> {
 }
 
 /// `path` relative to `root`, with forward slashes.
-fn rel(root: &Path, path: &Path) -> String {
+pub(crate) fn rel(root: &Path, path: &Path) -> String {
     path.strip_prefix(root)
         .unwrap_or(path)
         .to_string_lossy()
@@ -135,7 +133,12 @@ pub fn target_dir(root: &Path, crate_dir: &Path) -> PathBuf {
 }
 
 /// Every directory under `root` holding a `Cargo.toml`, as paths relative to
-/// `root`, with the excluded subtrees pruned exactly as cargo prunes them.
+/// `root`, but the excluded ones.
+///
+/// An excluded workspace, or an excluded directory that is no package, is
+/// pruned whole. An excluded package's subdirectories are walked: cargo
+/// excludes a crate nested in one too unless `members` names it, which is an
+/// exclusion argued for the parent and never for it.
 ///
 /// `target`, `.git` and every other dotted directory go too: what is in them is
 /// build output and history, not a crate somebody has to have declared.
@@ -151,8 +154,17 @@ fn crate_dirs(root: &Path) -> BTreeSet<String> {
 
 #[cfg(test)]
 fn walk(root: &Path, dir: &Path, prune: &BTreeSet<String>, found: &mut BTreeSet<String>) {
-    if dir.join("Cargo.toml").is_file() {
-        let relative = rel(root, dir);
+    let relative = rel(root, dir);
+    let manifest = dir.join("Cargo.toml");
+    if prune.contains(&relative) {
+        let package = std::fs::read_to_string(&manifest)
+            .ok()
+            .and_then(|text| text.parse::<toml::Value>().ok())
+            .is_some_and(|doc| doc.get("package").is_some() && doc.get("workspace").is_none());
+        if !package {
+            return;
+        }
+    } else if manifest.is_file() {
         found.insert(if relative.is_empty() { ".".to_string() } else { relative });
     }
     let Ok(entries) = std::fs::read_dir(dir) else { return };
@@ -166,47 +178,18 @@ fn walk(root: &Path, dir: &Path, prune: &BTreeSet<String>, found: &mut BTreeSet<
         if name.starts_with('.') || name == "target" {
             continue;
         }
-        if prune.contains(&rel(root, &path)) {
-            continue;
-        }
         walk(root, &path, prune, found);
     }
 }
 
 /// The crate directories that joined neither list.
 ///
-/// Excluded subtrees never reach here — they are pruned during the walk, which
-/// is what excluding one means — so this is the whole question: a `Cargo.toml`
-/// the tree contains and the `[workspace]` table does not account for.
+/// Excluded directories never reach here — [`crate_dirs`] leaves them out — so
+/// this is the whole question: a `Cargo.toml` the tree contains and the
+/// `[workspace]` table does not account for.
 #[cfg(test)]
 fn unclaimed(members: &BTreeSet<String>, found: &BTreeSet<String>) -> Vec<String> {
     found.difference(members).cloned().collect()
-}
-
-/// The `[package]` `description` of `manifest`: `Ok(None)` for a manifest with
-/// no `[package]` (a virtual workspace), `Err` for a package whose description
-/// is missing or blank.
-#[cfg(test)]
-fn description(manifest: &str) -> Result<Option<String>, &'static str> {
-    let doc: toml::Value = manifest.parse().expect("a manifest is TOML");
-    let Some(package) = doc.get("package") else { return Ok(None) };
-    match package.get("description").and_then(|d| d.as_str()).map(str::trim) {
-        Some(d) if !d.is_empty() => Ok(Some(d.to_string())),
-        Some(_) => Err("a blank `description`"),
-        None => Err("no `description`"),
-    }
-}
-
-/// The tables in `manifest` that cargo reads only from a workspace root.
-///
-/// Parsed as TOML and not scanned as text, for `src/sourcegate.rs`'s reason:
-/// `toyos-ld/Cargo.toml` carries a comment saying where its `[profile.toyos]`
-/// went and why, and a substring scan reads that explanation as the
-/// declaration it is warning about.
-#[cfg(test)]
-fn tables_cargo_would_ignore(manifest: &str) -> Vec<&'static str> {
-    let doc: toml::Value = manifest.parse().expect("a member's manifest is TOML");
-    ["profile", "patch"].into_iter().filter(|key| doc.get(key).is_some()).collect()
 }
 
 /// Every member of every workspace in this repository, as paths relative to the
@@ -214,9 +197,7 @@ fn tables_cargo_would_ignore(manifest: &str) -> Vec<&'static str> {
 ///
 /// The host workspace's own, plus those of the workspaces it excludes: a
 /// workspace excluded from this one is still a workspace, and its members still
-/// have no target directory of their own. `userland/` is the one that matters —
-/// `sshd` and `calc` are members of it, and `host-tests.yml` cached
-/// `userland/sshd/target`, a directory that has never existed.
+/// have no target directory of their own.
 #[cfg(test)]
 fn every_workspace_member(root: &Path) -> BTreeSet<String> {
     let mut all: BTreeSet<String> = members(root).into_iter().filter(|m| m != ".").collect();
@@ -355,7 +336,7 @@ mod tests {
     #[test]
     fn the_gate_refuses_a_crate_that_joined_neither_list() {
         let members: BTreeSet<String> =
-            [".", "toyos-elf", "toyos-sched", "toyos-sched/sim"].iter().map(|s| s.to_string()).collect();
+            [".", "toyos-elf", "toyos-xhci", "toyos-xhci/sim"].iter().map(|s| s.to_string()).collect();
 
         let all_declared: BTreeSet<String> = members.clone();
         assert!(unclaimed(&members, &all_declared).is_empty());
@@ -366,11 +347,10 @@ mod tests {
             members.union(&["toyos-newthing".to_string()].into()).cloned().collect();
         assert_eq!(unclaimed(&members, &with_a_newcomer), ["toyos-newthing"]);
 
-        // And a nested one, which is how `toyos-sched/loom` could have been
-        // lost when its parent stopped being a workspace of its own.
+        // And a nested one.
         let with_a_nested_newcomer: BTreeSet<String> =
-            members.union(&["toyos-sched/loom".to_string()].into()).cloned().collect();
-        assert_eq!(unclaimed(&members, &with_a_nested_newcomer), ["toyos-sched/loom"]);
+            members.union(&["toyos-xhci/newthing".to_string()].into()).cloned().collect();
+        assert_eq!(unclaimed(&members, &with_a_nested_newcomer), ["toyos-xhci/newthing"]);
     }
 
     /// The walk has teeth only if it can find anything: it must reach the real
@@ -383,9 +363,14 @@ mod tests {
         assert!(found.contains("."), "the walk did not find the root package");
         assert!(found.contains("toyos-elf"), "the walk did not find toyos-elf: {found:?}");
         assert!(
-            found.contains("toyos-sched/loom"),
+            found.contains("toyos-xhci/sim"),
             "the walk did not descend past the first level, so a nested member could \
              go missing without this gate noticing: {found:?}"
+        );
+        assert!(
+            found.contains("kernel/loom") && !found.contains("kernel"),
+            "the walk did not descend into an excluded package, so a crate nested in one \
+             could lose its `members` line without this gate noticing: {found:?}"
         );
         // With nothing declared a member, every one of them is a complaint —
         // the gate above is silent because the table accounts for the tree, not
@@ -413,7 +398,7 @@ mod tests {
         }
         for excluded in excluded(&root) {
             // Not "holds a Cargo.toml": a linked worktree's `rust/` is the empty
-            // stub `git worktree add` leaves (src/CLAUDE.md), and excluding it
+            // stub `git worktree add` leaves, and excluding it
             // is right in both checkouts.
             assert!(
                 root.join(&excluded).is_dir(),
@@ -447,107 +432,11 @@ mod tests {
         );
     }
 
-    /// **Every package the `[workspace]` table names says what it is.** Root
-    /// `CLAUDE.md` points here instead of listing the crates, so a crate that
-    /// arrives without a `description` is one nothing describes.
-    #[test]
-    fn every_package_the_workspace_names_has_a_description() {
-        let root = repo_root();
-        let mut missing = Vec::new();
-        let mut described = 0;
-        for dir in members(&root).into_iter().chain(excluded(&root)) {
-            let Ok(text) = std::fs::read_to_string(root.join(&dir).join("Cargo.toml")) else { continue };
-            match description(&text) {
-                Ok(Some(_)) => described += 1,
-                Ok(None) => {}
-                Err(why) => missing.push(format!("{dir}/Cargo.toml has {why}")),
-            }
-        }
-        assert!(described > 40, "only {described} packages read; the walk is reading no workspace");
-        assert!(
-            missing.is_empty(),
-            "a package the root Cargo.toml names says what it is in one line of its own \
-             [package] `description`:\n  {}",
-            missing.join("\n  "),
-        );
-    }
-
-    /// Teeth for the rule above.
-    #[test]
-    fn a_package_without_a_description_is_refused_and_a_virtual_workspace_is_not() {
-        assert_eq!(description("[package]\nname = \"a\"\ndescription = \"An a.\"\n"), Ok(Some("An a.".into())));
-        assert_eq!(description("[package]\nname = \"a\"\n"), Err("no `description`"));
-        assert_eq!(description("[package]\nname = \"a\"\ndescription = \"  \"\n"), Err("a blank `description`"));
-        assert_eq!(description("# description = \"x\"\n[package]\nname = \"a\"\n"), Err("no `description`"));
-        assert_eq!(description("[workspace]\nmembers = [\"a\"]\n"), Ok(None));
-    }
-
-    /// Cargo reads `[profile]` and `[patch]` from the workspace root and
-    /// **silently ignores both in a member** — it warns, into output nobody
-    /// reads on a green build. For `toyos-ld` that is not cosmetic: it is a
-    /// `[programs]` guest binary as well as a host crate, and the
-    /// `[profile.toyos]` it used to declare is what puts `overflow-checks` into
-    /// the image. Both crafted-ELF kernel panics in `issues/` were
-    /// *found* by an overflow check.
-    #[test]
-    fn no_member_declares_a_profile_or_a_patch_cargo_would_ignore() {
-        let root = repo_root();
-        let mut bad = Vec::new();
-        for member in members(&root) {
-            if member == "." {
-                continue;
-            }
-            let path = root.join(&member).join("Cargo.toml");
-            let text = std::fs::read_to_string(&path).expect("a member's manifest is readable");
-            for key in tables_cargo_would_ignore(&text) {
-                bad.push(format!("{member}/Cargo.toml declares a `[{key}]` table"));
-            }
-        }
-        assert!(
-            bad.is_empty(),
-            "cargo honours neither in a workspace member and says so only in a warning:\n  {}\n\
-             Move it to the root Cargo.toml, where it reaches the member it was written for.",
-            bad.join("\n  "),
-        );
-    }
-
-    /// Teeth for the rule above, and the reason it parses rather than greps:
-    /// the two manifests it was written against now explain in a comment where
-    /// their tables went, and the first draft of this gate read the explanation
-    /// as the offence.
-    #[test]
-    fn the_ignored_table_scan_reads_toml_and_not_prose() {
-        assert_eq!(
-            tables_cargo_would_ignore("[package]\nname = \"a\"\n\n[profile.toyos]\nopt-level = 2\n"),
-            ["profile"],
-        );
-        assert_eq!(
-            tables_cargo_would_ignore("[package]\nname = \"a\"\n\n[patch.crates-io]\nx = \"1\"\n"),
-            ["patch"],
-        );
-        assert!(tables_cargo_would_ignore(
-            "# `[profile.toyos]` used to be declared here; it lives in the root now.\n\
-             [package]\nname = \"a\"\n"
-        )
-        .is_empty());
-        // And a value whose *name* contains one, which a looser match would
-        // take for a table header.
-        assert!(tables_cargo_would_ignore(
-            "[package]\nname = \"a\"\n\n[dependencies]\nprofile-thing = \"1\"\n"
-        )
-        .is_empty());
-    }
-
     /// **Nothing that executes may name `<member>/target`** — a member builds
     /// into its workspace root's target directory, so such a path is one that
     /// cannot exist.
     ///
-    /// Every workspace in the tree, not just this one: the first thing this
-    /// found after `userland/doom/build.rs` was `host-tests.yml` caching
-    /// `userland/sshd/target`, which has never been a directory — `sshd` is a
-    /// member of `userland/`'s workspace and builds into `userland/target`. A
-    /// cache path that matches nothing fails silently and forever, which is why
-    /// it survived.
+    /// Every workspace in the tree, not just this one.
     ///
     /// The files scanned are the ones that *act* on a path: the workflows, this
     /// build system, and every `build.rs` in the tree. Prose is left alone —
@@ -608,10 +497,10 @@ mod tests {
         assert!(dead_member_target_paths(&members, "userland/target").is_empty());
         // A member of the userland workspace, which is the real find above.
         let with_userland: BTreeSet<String> =
-            members.union(&["userland/sshd".to_string()].into()).cloned().collect();
+            members.union(&["userland/sshserver".to_string()].into()).cloned().collect();
         assert_eq!(
-            dead_member_target_paths(&with_userland, "            userland/sshd/target\n"),
-            ["userland/sshd/target"],
+            dead_member_target_paths(&with_userland, "            userland/sshserver/target\n"),
+            ["userland/sshserver/target"],
         );
         // And the root's own `target` is where members build *to*.
         assert!(dead_member_target_paths(&members, "root.join(\"target\")").is_empty());

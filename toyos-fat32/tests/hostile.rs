@@ -29,7 +29,7 @@ mod common;
 use std::sync::OnceLock;
 
 use common::{pattern, Image, SparseDevice};
-use toyos_fat32::{BlockAccess, Error, Fat32, FatTime, IoError, MAX_DIR_ENTRIES};
+use toyos_fat32::{BlockAccess, Error, Fat32, FatTime, MAX_DIR_ENTRIES};
 
 /// Enough of the volume to hold the reserved sectors, both FATs, and the first
 /// thousand data clusters. Everything past it reads as zeroes, which is what
@@ -39,14 +39,7 @@ const PREFIX_BYTES: usize = 3072 * 512;
 fn corpus() -> &'static (Vec<u8>, u64) {
     static ONCE: OnceLock<(Vec<u8>, u64)> = OnceLock::new();
     ONCE.get_or_init(|| {
-        let image = Image::new("hostile", 64 * 1024 * 1024, 1);
-        image.with_mount(|mount| {
-            std::fs::create_dir_all(mount.join("sub/deeper")).expect("mkdir");
-            std::fs::write(mount.join("plain.txt"), b"a short file").expect("write");
-            std::fs::write(mount.join("A Long Name For Entries.bin"), pattern(20_000, 5)).expect("write");
-            std::fs::write(mount.join("sub/inner.dat"), pattern(4000, 6)).expect("write");
-            std::fs::write(mount.join("sub/deeper/leaf.txt"), b"leaf").expect("write");
-        });
+        let image = Image::fixture("hostile");
         image.fsck();
         (image.bytes(PREFIX_BYTES), image.size())
     })
@@ -263,58 +256,15 @@ fn a_device_that_fails_mid_read_reports_it() {
     assert_eq!(fs.walk("", 1024).unwrap_err(), Error::Io);
 }
 
-/// **A budget that expired is not a device that failed, and this crate must not
-/// flatten the two.**
-///
-/// `IoError` grew a second variant on 2026-08-22 for one reason: the kernel's
-/// implementor bounds an operation with `block::OPERATION`, and reaching that
-/// bound is a statement about the caller's clock. Flattening it into
-/// `Error::Io` is what made `/system/bin/logd` end a boot's log for a stick that was
-/// answering — 1 red in 73 full 12-wide suites (2026-08-22), one `SYS_FSYNC`
-/// held for 2.1 s while the guest's peers booted in 1.4 s.
-/// The two `assert_ne!`s are the point of the test: `Error::Io` is exactly the
-/// answer the collapsed version gives.
+/// The flush is the call `/system/bin/logkeeper`'s durability claim rests on: a
+/// device that refuses it is `Io`, and one that flushes is `Ok`.
 #[test]
-fn a_budget_that_expired_is_not_a_device_that_failed() {
-    let (prefix, cap) = corpus();
-    let mut dev = SparseDevice::from_prefix(prefix, *cap);
-    dev.fail_reads_past = Some(256);
-    dev.refusal = IoError::BudgetExpired;
-    let refused = common::mount_err(dev);
-    assert_eq!(refused, Error::BudgetExpired);
-    assert_ne!(refused, Error::Io);
-
-    let l = layout();
-    let mut dev = pristine();
-    dev.fail_reads_past = Some(l.first_data * l.bps);
-    dev.refusal = IoError::BudgetExpired;
-    let mut fs = Fat32::mount(dev).expect("mount");
-    assert_eq!(fs.walk("", 1024).unwrap_err(), Error::BudgetExpired);
-}
-
-/// The flush is the call `/system/bin/logd`'s durability claim rests on, so it is the
-/// one that has to keep the distinction all the way up.
-///
-/// Both arms against the same device, so what separates them is the refusal
-/// and nothing else.
-#[test]
-fn a_flush_says_which_of_the_two_refusals_it_was() {
+fn a_refused_flush_is_io() {
     let mut dev = pristine();
     dev.flush_refuses = true;
-    dev.refusal = IoError::Device;
     let mut fs = Fat32::mount(dev).expect("mount");
     assert_eq!(fs.sync().unwrap_err(), Error::Io);
 
-    let mut dev = pristine();
-    dev.flush_refuses = true;
-    dev.refusal = IoError::BudgetExpired;
-    let mut fs = Fat32::mount(dev).expect("mount");
-    let refused = fs.sync().unwrap_err();
-    assert_eq!(refused, Error::BudgetExpired);
-    assert_ne!(refused, Error::Io);
-
-    // And a device that flushes is still `Ok`, so the two arms above are about
-    // the refusal rather than about `sync` never succeeding on this fake.
     let mut fs = Fat32::mount(pristine()).expect("mount");
     assert_eq!(fs.sync(), Ok(()));
 }
@@ -550,11 +500,7 @@ fn the_caller_limit_is_the_named_directorys_and_not_the_volumes() {
 /// with a kernel line calling a healthy volume corrupt.
 #[test]
 fn an_empty_file_is_not_a_corrupt_directory() {
-    let image = Image::new("empty-file", 64 * 1024 * 1024, 1);
-    image.with_mount(|mount| {
-        std::fs::write(mount.join("empty.txt"), b"").expect("write");
-        std::fs::write(mount.join("full.txt"), b"twelve bytes").expect("write");
-    });
+    let image = Image::fixture("empty-file");
     image.fsck();
     let mut fs = Fat32::mount(SparseDevice::from_prefix(&image.bytes(PREFIX_BYTES), image.size()))
         .expect("mount");

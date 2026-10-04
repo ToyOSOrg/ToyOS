@@ -42,6 +42,11 @@ const ARMS: &[(&str, Expect)] = &[
     // on any machine this kernel runs on — emulated or not.
     ("ac", Expect::MachineLives),
     ("pf", Expect::Killed),
+    // Each dies with the kernel's direct map in a register or an operand its
+    // crash report would follow; `crash_report_reads_no_kernel_memory` reads
+    // what the report said.
+    ("kernel_stack", Expect::Killed),
+    ("kernel_page", Expect::Killed),
 ];
 
 fn main() {

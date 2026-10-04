@@ -1,4 +1,4 @@
-//! What a completion is, and the shared memory protocol soundd serves clients.
+//! What a completion is, and the shared memory protocol soundserver serves clients.
 
 use core::sync::atomic::AtomicU32;
 
@@ -8,7 +8,7 @@ use core::sync::atomic::AtomicU32;
 /// array of these: the kernel writes as many pending records as fit in the caller's
 /// buffer and returns the byte count. `mask` bit N set means period N finished
 /// playing, and `timestamp_nanos` is `nanos_since_boot` captured in the
-/// interrupt handler — the clock source for soundd's DLL, and the reason the
+/// interrupt handler — the clock source for soundserver's DLL, and the reason the
 /// mask is derived there rather than by the driver at wake time. Records are
 /// returned oldest-first.
 ///
@@ -29,9 +29,9 @@ impl AudioCompletionRecord {
 /// there is no gap for whatever the kernel stack held to travel in.
 const _: () = assert!(AudioCompletionRecord::SIZE == 4 + 4 + 8);
 
-/// Shared memory header for the client↔soundd slot-ring protocol.
+/// Shared memory header for the client↔soundserver slot-ring protocol.
 ///
-/// Client increments `write_idx` after filling a slot; soundd increments
+/// Client increments `write_idx` after filling a slot; soundserver increments
 /// `read_idx` after it has finished mixing from one. Ring is full when
 /// `write_idx - read_idx >= slot_count` (slot_count arrives in
 /// `MSG_STREAM_OPENED`). The two indices live on separate cache lines:

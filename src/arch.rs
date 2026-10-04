@@ -155,8 +155,6 @@ impl Arch {
         }
     }
 
-    /// The CPU every guest of this architecture gets under `accel`.
-    ///
     /// **One declaration, read by `cargo run` and by the harness both**, because
     /// the two drifted: the harness gained `+smep` and the interactive path did
     /// not, so the machine an owner looked at differed from the machine the

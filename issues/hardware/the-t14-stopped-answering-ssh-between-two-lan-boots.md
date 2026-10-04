@@ -6,10 +6,9 @@ opened: 2026-09-29
 
 # The T14 stopped answering `ssh` between two LAN boots, and the next two arms died before their flash
 
-`lan_lease_report` (boot `lanleasecase`) and `lan_swap` (boot `lanswapcase`)
-are the two arms the metal suite flashes after `lanicscase`. On the run below
-neither reached the stick: the first `ssh` of each timed out, so neither boot
-happened and neither judge ran. The suite measured nothing about either test,
+On the run below neither `lan_lease_report` (boot `lanleasecase`) nor `lan_swap`
+(boot `lanswapcase`) reached the stick: the first `ssh` of each timed out, so
+neither boot happened and neither judge ran. The suite measured nothing about either test,
 and why the bench's `ssh` went away is not established by anything kept.
 
 ## Measured
@@ -39,3 +38,5 @@ Three consecutive T14 metal runs each reach both judges, `lanleasecase` and
 `lanswapcase`, without an `ssh` timeout before either flash; then this file is
 deleted. A red on a judge in any of the three is filed as its own issue file
 naming that test and its cause before this one closes.
+
+`lan_swap` and its boot `lanswapcase` are deleted; `issues/hardware/a-connect-between-two-accepts-is-reset.md` records the commit that restores them, and this exit's `lanswapcase` half waits on that restore.

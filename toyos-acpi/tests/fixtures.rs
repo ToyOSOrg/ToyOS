@@ -7,8 +7,9 @@ use common::Machine;
 use toyos_abi::boot::RootBridgeWindow;
 use toyos_acpi::{
     century_of, dsdt_address, ecam_base, find_table, hpet_base, iapc_boot_arch, madt_entries,
-    memory_windows, reset_register, rtc_century, Century, IoApicEntry, MadtEntry, Reset,
-    SourceOverride, TableError, FADT_PM1A_CNT_BLK, MADT_ENTRIES,
+    memory_windows, psci, reset_register, rtc_century, s5_slp_typ, Century, IoApicEntry,
+    MadtEntry, Psci, Reset, SourceOverride, Table, TableError, FADT_PM1A_CNT_BLK, MADT_ENTRIES,
+    S5,
 };
 
 /// Where each table sat in that guest's physical memory. The XSDT's entries
@@ -108,6 +109,17 @@ fn the_fadt_names_the_power_block_and_the_dsdt() {
     assert_eq!(dsdt_address(&fadt), 0x7fb7_a000);
 }
 
+/// `ACPI: PM1a=0x604 SLP_TYPa=0`, off the DSDT of the boot that logged it
+/// (`fixtures/qemu-11.1.1/SOURCE`): `\_S5_`'s package, found past `\_S4_`'s,
+/// whose first element is 2.
+#[test]
+fn the_dsdt_names_the_sleep_type_that_powers_qemu_off() {
+    const DSDT: u64 = 0x7f77_a000;
+    let regions: &[(u64, &[u8])] = &[(DSDT, include_bytes!("../fixtures/qemu-11.1.1/dsdt.bin"))];
+    let dsdt = Table::open(Machine { regions }, DSDT, b"DSDT", 36).expect("DSDT");
+    assert_eq!(s5_slp_typ(&dsdt), S5::SlpTyp(0));
+}
+
 /// `ACPI: reset register SystemIO 0xcf9 <- 0x0f`, against QEMU 11.1.1's own
 /// source: `hw/i386/acpi-build.c:222-226` publishes `AML_AS_SYSTEM_IO`,
 /// `bit_width` 8, `ICH9_RST_CNT_IOPORT` (`include/hw/southbridge/ich9.h:122`,
@@ -116,6 +128,14 @@ fn the_fadt_names_the_power_block_and_the_dsdt() {
 fn the_fadt_names_the_reset_register_qemu_acts_on() {
     let fadt = find_table(machine(), RSDP, b"FACP", 36).expect("FADT");
     assert_eq!(reset_register(&fadt), Reset::Port { port: 0xcf9, value: 0x0f });
+}
+
+/// Revision 3, so bytes 129-131 are the reserved ones QEMU 11.1.1 writes zero:
+/// the table says nothing about PSCI.
+#[test]
+fn the_q35_fadt_predates_arm_boot_arch() {
+    let fadt = find_table(machine(), RSDP, b"FACP", 36).expect("FADT");
+    assert_eq!(psci(&fadt), Psci::Undefined { revision: 3, minor: 0 });
 }
 
 #[test]

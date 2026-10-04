@@ -1,4 +1,4 @@
-//! The kernel's half of the scheduler core; `toyos-sched` decides.
+//! The kernel's half of the scheduler core; `kernel::sched` decides.
 
 #![warn(clippy::undocumented_unsafe_blocks)]
 
@@ -9,6 +9,7 @@ pub mod kthread;
 pub mod payload;
 pub mod reap_gate;
 pub mod futex;
+pub mod idle_stack;
 
 /// Ceiling on CPUs the percpu arrays are sized for.
 pub const MAX_CPUS: usize = 8;

@@ -14,5 +14,7 @@ compiles. PR #564's round-2 review handed `pass_block`'s drain
 `Entered::Pass { depth: 0 }`: every host test and the fast tier stayed green,
 and only the nightly `blocked_dump` went red.
 
-**Exit**: a mutation of either call site's `Entered` reds a host test or a
-fast-tier test. Owner: orchestrator.
+**Exit**: a mutation of either call site's `Entered` reds a host test.
+Owner: orchestrator.
+
+`blocked_dump`, the nightly guest this names, is deleted; `issues/build/parallel-tests-red-under-other-suites.md` records the commit that restores it. Until then no test reds that mutation.

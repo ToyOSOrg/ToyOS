@@ -7,7 +7,7 @@ opened: 2026-09-25
 # A residue slot is held for the boot by a function never claimed again
 
 `pcidev::release` keeps a function it could not reset in its slot as
-`Slot::Residue` (`toyos-pci/src/slot.rs`), with the device addresses its last
+`Slot::Residue` (`kernel/pci/src/slot.rs`), with the device addresses its last
 holder's grants were at, so only that function's next claim is given the slot
 and its grants are placed at those addresses. Nothing ends that hold except
 that function's next claim. A function released without a reset and never

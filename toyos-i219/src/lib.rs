@@ -28,7 +28,7 @@
 //! implementation of one decides anything: every branch is above the boundary,
 //! in this crate, where the host tests it.
 //!
-//! In netd those four are the substrate's own: the mapped BAR, the monotonic
+//! In netstack those four are the substrate's own: the mapped BAR, the monotonic
 //! clock, a `DmaRegion` in this function's IOMMU domain, and the claim's
 //! interrupt record. On the host they are `stub.rs`, which is the datasheet
 //! written down.
@@ -38,7 +38,7 @@
 //! Every number in a written-back descriptor is the device's, and this driver
 //! is on the far side of an IOMMU domain from the rest of the machine but on
 //! the *same* side as its own memory. A length longer than the buffer it was
-//! given becomes the length of a slice netd hands to smoltcp, so `parse_rx`
+//! given becomes the length of a slice netstack hands to smoltcp, so `parse_rx`
 //! bounds it, and `RxRefusal` is every way a written-back descriptor is refused
 //! rather than believed.
 //!
@@ -658,7 +658,7 @@ fn phy_configured<R: Registers, C: Clock>(regs: &R, clock: &C, since: u64) -> Op
 
 /// Which part the claim is on.
 ///
-/// **The parent's answer and never a probe**: `/system/bin/init` moved a claim
+/// **The parent's answer and never a probe**: `/system/bin/supervisor` moved a claim
 /// on a declared vendor and device into this process, and a driver that read
 /// the register file to work out which part it was on would be guessing at the
 /// registers it does not yet trust.
@@ -892,17 +892,6 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         nic.opened_at = nic.clock.nanos();
         nic.refresh_link();
         Ok(nic)
-    }
-
-    /// Raise one enabled cause on purpose (§10.2.4.4).
-    ///
-    /// **Nothing on a shipping path calls this**: the caller arms it and
-    /// [`Self::open`] does not, because a driver that raised a message every
-    /// boot would make the kernel's first-message record read the same on a
-    /// working card and a dead one. `LSC` is the cause, because acting on it is
-    /// re-reading `STATUS`, which the next pass does anyway.
-    pub fn provoke_message(&self) {
-        self.regs.write(regs::ICS, cause::LSC);
     }
 
     /// Pass frames sent to the multicast address `group`: the one bit of the

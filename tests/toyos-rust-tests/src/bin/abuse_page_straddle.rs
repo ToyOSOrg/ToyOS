@@ -116,6 +116,8 @@ fn main() {
         core::ptr::copy_nonoverlapping(argv.as_ptr(), base as *mut u8, argv.len());
     }
     let args = SpawnArgs {
+        path_ptr: base,
+        path_len: "/system/bin/echo".len() as u64,
         argv_ptr: base,
         argv_len: argv.len() as u64,
         slot_map_ptr: 0,
@@ -128,6 +130,9 @@ fn main() {
         labels_len: 0,
         cwd_ptr: CWD.as_ptr() as u64,
         cwd_len: CWD.len() as u64,
+        image: 0,
+        image_len: 0,
+        place: u64::from(toyos_abi::HANDLE_INVALID.0),
     };
     let placed = (boundary - 8) as *mut SpawnArgs;
     unsafe { placed.write_volatile(args) };

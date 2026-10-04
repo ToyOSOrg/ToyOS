@@ -145,9 +145,9 @@ fn verify(
         println!("{HEAD} {letter}: ROOT: {why}");
         Refusal::Unreadable("root")
     })?;
-    let began = crate::tsc();
+    let began = crate::arch::counter();
     let root_hash = toyos_update::sha256(root.bytes());
-    println!("{HEAD} {letter}: ROOT hashed in {} TSC cycles", crate::tsc().wrapping_sub(began));
+    println!("{HEAD} {letter}: ROOT hashed in {} counter ticks", crate::arch::counter().wrapping_sub(began));
     if root_hash != header.root().sha256 {
         root.free(bs);
         return Err(Refusal::Hash("root"));
@@ -246,8 +246,7 @@ enum FileRefused {
 /// `max` bytes.
 fn read_file(bs: &BootServices, guid: &[u8; 16], path: &str, max: u64) -> Result<Vec<u8>, FileRefused> {
     let handle = crate::loaderlog::volume_handle(bs, guid).map_err(FileRefused::Other)?;
-    let mut fs = bs
-        .open_protocol_exclusive::<SimpleFileSystem>(handle)
+    let mut fs = crate::protocol::exclusive::<SimpleFileSystem>(bs, handle)
         .map_err(|e| FileRefused::Other(alloc::format!("would not open its volume ({e})")))?;
     let mut root = fs.open_volume().map_err(|e| FileRefused::Other(alloc::format!("has no volume ({e})")))?;
     let name = CString16::try_from(path.replace('/', "\\").as_str())

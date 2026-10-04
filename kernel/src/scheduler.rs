@@ -8,9 +8,9 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::hasher::HashMap;
-use toyos_sched::fair::{ShareState, QUANTUM_NS};
-use toyos_sched::hw::{CpuId, Machine, Nanos};
-use toyos_sched::task::{Refused, SafePoint, WaitClass};
+use kernel::sched::fair::{ShareState, QUANTUM_NS};
+use kernel::sched::hw::{CpuId, Machine, Nanos};
+use kernel::sched::task::{Refused, SafePoint, WaitClass};
 
 use crate::arch::percpu;
 use crate::watch::{self, Cancel};
@@ -293,17 +293,17 @@ pub fn global_min_vruntime() -> u64 {
 pub fn enqueue_new(
     id: TaskId,
     kernel_stack: crate::process::OwnedAlloc,
-    entry_rsp: u64,
+    entry_sp: u64,
     address_space: crate::process::PageTables,
-    fs_base: u64,
+    thread_pointer: u64,
     symbols: alloc::sync::Arc<crate::symbols::SymbolTable>,
 ) -> (ThreadSched, CpuId) {
     driver::spawn(NewTask {
         id,
         kernel_stack,
-        entry_rsp,
+        entry_sp,
         address_space,
-        fs_base,
+        thread_pointer,
         share: share_for(id.0),
         symbols,
     })
@@ -334,21 +334,15 @@ pub fn block_on(ticket: Ticket, deadline: Deadline) {
 
 /// Give the CPU up voluntarily, keeping the claim on it: the pass decides
 /// whether anything else deserves the quantum. Asserts the calling context's
-/// own baseline, not a flat trap level, since a kernel thread (`iod`'s
-/// write-back retry) yields at zero and a flat assert would panic it.
+/// own baseline, not a flat trap level, since a kernel thread yields at zero
+/// and a flat assert would panic it.
 #[track_caller]
 pub fn yield_now() {
     assert_baseline(blocking_baseline());
     driver::pass(Dispose::Yield);
 }
 
-/// Whether [`yield_now`] may be called where the running context stands.
-#[cfg(feature = "boot-actuators")]
-pub fn may_yield() -> bool {
-    crate::preempt::count() == blocking_baseline()
-}
-
-/// Unified preempt entry: the Ring 3 timer path, `kernel_exit_to_user_check`
+/// Unified preempt entry: the user-mode timer path, [`exit_to_user`]
 /// and the `preempt::enable` slow path all funnel through here.
 #[track_caller]
 pub fn do_preempt() {
@@ -367,15 +361,15 @@ pub fn do_preempt() {
     driver::pass(Dispose::None);
 }
 
-/// The last thing a thread does before returning to Ring 3, if either mark it
-/// can carry says it never does. `kernel_exit_to_user_check` is the one caller;
+/// The last thing a thread does before returning to user mode, if either mark it
+/// can carry says it never does. [`exit_to_user`] is the one caller;
 /// `kernel/src/quiesce.rs`'s header says why that boundary is the safe point.
 ///
 /// **One call and one match, so the two marks have no order to disagree
-/// about**: `toyos_sched::task::SafePoint` ranks them, here and in
+/// about**: `kernel::sched::task::SafePoint` ranks them, here and in
 /// `CpuSched::place` alike.
 #[track_caller]
-pub fn leave_ring3_if_due() {
+pub fn leave_user_if_due() {
     let Some(due) = driver::current_safe_point(crate::quiesce::stops_this_thread()) else {
         return;
     };
@@ -383,21 +377,56 @@ pub fn leave_ring3_if_due() {
     match due {
         SafePoint::Stop => {
             driver::pass(Dispose::Stop);
-            unreachable!("leave_ring3_if_due: a stopped task was dispatched again");
+            unreachable!("leave_user_if_due: a stopped task was dispatched again");
         }
         SafePoint::Exit => {
-            // `IF` set across the teardown, as a syscall's exit runs it: its
+            // Interrupts open across the teardown, as a syscall's exit runs it: its
             // closes and address-space drop are no interrupt latency. The
             // depth stays this boundary's, which is `do_preempt`'s own.
             crate::arch::cpu::enable_interrupts();
             process::leave(None);
             crate::arch::cpu::disable_interrupts();
             driver::pass(Dispose::Exit);
-            unreachable!("leave_ring3_if_due: returned from the exit pass");
+            unreachable!("leave_user_if_due: returned from the exit pass");
         }
     }
 }
 
+
+/// The deferred-preempt epilogue every return to user mode runs last, with
+/// interrupts masked on entry and on return: a killed or stopped thread leaves
+/// here, and a reschedule owed since the entry is served before the thread
+/// sees user mode again.
+pub fn exit_to_user() {
+    flush_kernel_timer_fires_to_trace();
+    loop {
+        // A killed or stopped thread returns to user mode exactly once more: never.
+        leave_user_if_due();
+        // `do_preempt` owns clearing `need_resched`; this function never clears it itself.
+        if !crate::preempt::need_resched() {
+            // Every caller's next unmask is the return to user mode, or a
+            // kernel thread's first.
+            #[cfg(feature = "mask-windows")]
+            crate::windows::irqs_unmasking();
+            return;
+        }
+        assert!(!in_schedule_self(), "exit-to-user inside a scheduler pass");
+        // Not an IrqGuard: both loop exits must open interrupts, not restore a saved value.
+        crate::arch::cpu::enable_interrupts();
+        do_preempt();
+        crate::arch::cpu::disable_interrupts();
+        flush_kernel_timer_fires_to_trace();
+    }
+}
+
+fn flush_kernel_timer_fires_to_trace() {
+    let cur = percpu::kernel_timer_fires();
+    let missed = cur.wrapping_sub(percpu::last_seen_kernel_timer_fires());
+    if missed > 0 {
+        crate::trace::trace(crate::trace::Kind::TimerFireBurst, missed);
+        percpu::set_last_seen_kernel_timer_fires(cur);
+    }
+}
 /// The exit pass of a thread that has left its process (`process::leave`).
 #[track_caller]
 pub fn exit_current() -> ! {
@@ -506,7 +535,7 @@ pub fn futex_wake(phys_addr: DirectMap, count: usize) -> u64 {
 /// The thread leaves at that safe point: `process::leave`.
 pub fn post_retire(sched: &ThreadSched) {
     preempt_off(|p| {
-        toyos_sched::retire::begin(&sched.shared).post(cpus(), &HW, p);
+        kernel::sched::retire::begin(&sched.shared).post(cpus(), &HW, p);
     });
 }
 

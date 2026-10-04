@@ -290,7 +290,7 @@ impl Connection {
     }
 }
 
-// Free functions — used by consumers that hold raw handles (compositor, netd).
+// Free functions — used by consumers that hold raw handles (compositor, netstack).
 // Will become pub(crate) once all callers migrate to Connection methods.
 
 pub fn send<T: IpcPayload>(handle: RawHandle, msg_type: u32, payload: &T) -> Result<(), IpcError> {

@@ -3,9 +3,9 @@
 //! machine over ssh — a ping, one command whose answer is compared, and
 //! `reboot`, which is how the host hands the machine back.
 //!
-//! **The machine is found by its name.** Its netd answers multicast DNS for
+//! **The machine is found by its name.** Its netstack answers multicast DNS for
 //! `toyos-t14.local` once it holds a lease (`toyos_mdns`), so this host asks its
-//! own resolver for that name and connects to `logd`'s port there
+//! own resolver for that name and connects to `logkeeper`'s port there
 //! ([`toyos_logstream::PORT`]); nothing is baked into the image about this
 //! host, and nothing on this host listens. The ping and both ssh exchanges go
 //! to the address the name answered with.
@@ -42,12 +42,18 @@ pub const PHRASE: &str = "the T14 answers over its own cable";
 /// boot config endows with `power`.
 pub const REBOOT: &str = "reboot";
 
-/// The port sshd listens on, which is the protocol's own.
+/// The port sshserver listens on, which is the protocol's own.
 pub const SSH_PORT: u16 = 22;
 
 /// How many echo requests the machine gets to answer one.
 const PING_TRIES: u32 = 10;
 const PING_WAIT: Duration = Duration::from_secs(1);
+
+/// How long the stream gets to carry this boot's `Boot: complete` before
+/// `reboot` is asked regardless, and the judge reds on the record's absence. A
+/// liveness bound, inside the boot's own `boot-deadline=` that `reboot` has to
+/// beat.
+const CARRIED_WAIT: Duration = Duration::from_secs(30);
 
 /// How long one connect waits for the machine's answer to its SYN.
 const CONNECT_WAIT: Duration = Duration::from_secs(5);
@@ -90,10 +96,10 @@ pub enum Peer {
 /// boot is red. A redial has none ([`Stream::redial`]).
 const TURNED_AWAY_CEILING: usize = 64;
 
-/// The log as this host reads it: this host dials `logd`'s port and reads until
+/// The log as this host reads it: this host dials `logkeeper`'s port and reads until
 /// the connection ends.
 ///
-/// **A connection is `logd`'s once it carries a line.** `logd` hands every
+/// **A connection is `logkeeper`'s once it carries a line.** `logkeeper` hands every
 /// reader it admits the boot from its first line at once, so a connection that
 /// ends before a line is one it never admitted — and through QEMU's forward,
 /// which takes this host's connect before it has asked the guest, that is the
@@ -120,11 +126,11 @@ struct Shared {
 #[derive(Default)]
 struct State {
     lines: Vec<String>,
-    /// The latest connection `logd` admitted.
+    /// The latest connection `logkeeper` admitted.
     peer: Option<SocketAddr>,
     /// How many connections carried a line.
     admitted: usize,
-    /// How many dials ended with no line: a connection `logd` turned away,
+    /// How many dials ended with no line: a connection `logkeeper` turned away,
     /// one nothing on the machine's side took, or a connect that failed.
     turned_away: usize,
     /// The connection being read, kept so [`Stream::redial`] can end it.
@@ -192,7 +198,7 @@ impl Stream {
         self.state().lines.clone()
     }
 
-    /// How many connections `logd` admitted.
+    /// How many connections `logkeeper` admitted.
     pub fn connections(&self) -> usize {
         self.state().admitted
     }
@@ -219,7 +225,7 @@ impl Stream {
         self.state().end.clone()
     }
 
-    /// Why the latest dial ended with no connection `logd` admitted.
+    /// Why the latest dial ended with no connection `logkeeper` admitted.
     pub fn unopened(&self) -> Option<String> {
         self.state().unopened.clone()
     }
@@ -239,11 +245,11 @@ impl Stream {
     /// ([`Stream::unopened`]).
     ///
     /// **The admitted dial is the event, and `by` its only bound**: nothing the
-    /// machine sends says when `logd` admits a reader again, so how many dials
+    /// machine sends says when `logkeeper` admits a reader again, so how many dials
     /// that takes is the length of the machine's gap and no verdict — the
     /// recorded compromise `issues/diagnostics/a-swaps-redial-asks-again-with-no-event-to-wait-on.md`.
     ///
-    /// **For a connection this host knows is going**: a swap of the netd
+    /// **For a connection this host knows is going**: a swap of the netstack
     /// carrying it ends it with no FIN and no reset, so nothing but this host
     /// ever says it has ended.
     pub fn redial(&self, by: Duration) {
@@ -277,6 +283,12 @@ impl Stream {
         self.wait_until(by, |lines| lines.iter().any(|l| l.contains(needle)).then_some(())).is_some()
     }
 
+    /// This boot's `Boot: complete` in milliseconds, read as [`judge`] reads
+    /// it, once a line carries it, or `None` after `by`.
+    pub fn wait_for_boot(&self, by: Duration) -> Option<u64> {
+        self.wait_until(by, |lines| lines.iter().find_map(|line| crate::bootlog::boot_millis(line)))
+    }
+
     /// The peer, once a connection has carried a line, or `None` after `by`
     /// or once the dial has given up.
     pub fn wait_connected(&self, by: Duration) -> Option<SocketAddr> {
@@ -301,30 +313,13 @@ impl Stream {
             state = self.shared.moved.wait_timeout(state, left).expect("the stream's state").0;
         }
     }
-
-    /// Wait until the latest connection ends, or `by` has passed; whether it
-    /// ended.
-    pub fn wait_ended(&self, by: Duration) -> bool {
-        let began = Instant::now();
-        let mut state = self.state();
-        loop {
-            if state.end.is_some() {
-                return true;
-            }
-            let left = by.saturating_sub(began.elapsed());
-            if left.is_zero() || (state.unopened.is_some() && state.current.is_none()) {
-                return false;
-            }
-            state = self.shared.moved.wait_timeout(state, left).expect("the stream's state").0;
-        }
-    }
 }
 
 /// The reader: the first dial by `until`, then each redial it is asked for,
 /// until the stream is given up.
 fn serve(reach: &dyn Reach, peer: &Peer, shared: &Shared, mut out: std::fs::File, echo: bool, mut until: Instant) {
     // Whether a connection closed before a line is asked again: never on the
-    // first dial, where that close is `logd`'s answer, and always on a redial,
+    // first dial, where that close is `logkeeper`'s answer, and always on a redial,
     // which is made while the machine's network is coming back.
     let mut again = false;
     let mut last = String::from("never asked");
@@ -339,7 +334,7 @@ fn serve(reach: &dyn Reach, peer: &Peer, shared: &Shared, mut out: std::fs::File
                 if echo {
                     println!("  stream: reading {peer:?} at {:?}", conn.peer_addr().ok());
                 }
-                // A connection `logd` turned away on a redial: asked again at
+                // A connection `logkeeper` turned away on a redial: asked again at
                 // once, the refusal being the event, and named by the dial
                 // after it should the redial's bound end that one.
                 if let Some(how) = read(conn, shared, &mut out, echo).filter(|_| again) {
@@ -615,7 +610,7 @@ fn dns_name(bytes: &[u8], at: usize) -> Option<(String, usize)> {
 /// Read one connection's lines into the stream until it ends, and how it ended
 /// where it carried none.
 ///
-/// **Every connection replays the boot from its first line** (`logd`'s
+/// **Every connection replays the boot from its first line** (`logkeeper`'s
 /// `serve.rs`): the lines this reader already has are skipped rather than kept
 /// twice, and a line the connection ends inside is dropped rather than kept, so
 /// the same content lands whole on the next connection.
@@ -693,7 +688,7 @@ pub struct End {
     pub how: String,
 }
 
-/// What one exchange with the machine's sshd came back with.
+/// What one exchange with the machine's sshserver came back with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Exec {
     pub stdout: Vec<u8>,
@@ -806,12 +801,12 @@ impl Ssh {
 
     /// Send `binary` as `service`'s replacement, naming `digest` for it — an
     /// `exec` of `/system/bin/swap` with the binary on its input — and answer
-    /// the machine's word: `accepted <path>`, `refused <why>` (init's),
+    /// the machine's word: `accepted <path>`, `refused <why>` (the supervisor's),
     /// `unasked <why>` (`swap`'s own), or `unanswered <what>`.
     ///
     /// **An `accepted` is answered with the program's input still open**:
-    /// closing it is the go — `swap` hangs up on init once its input closes,
-    /// and init stops the old service then ([`toyos_swap::ANSWER_MS`] bounds
+    /// closing it is the go — `swap` hangs up on the supervisor once its input closes,
+    /// and the supervisor stops the old service then ([`toyos_swap::ANSWER_MS`] bounds
     /// the wait) — and it is [`Answered::go`]'s, so a caller whose own
     /// connection that service carries can see to it first.
     pub fn swap(
@@ -917,12 +912,12 @@ pub fn owed() -> Vec<u8> {
 /// then ask it to reboot — whatever the first two said, because handing the
 /// machine back is owed either way.
 ///
-/// `ssh_at` is where sshd is reached, and `None` is the peer's own port 22;
+/// `ssh_at` is where sshserver is reached, and `None` is the peer's own port 22;
 /// QEMU's forward is the other case. `ping` is `false` where no ICMP can reach
 /// the machine at all, which is QEMU's user-mode network.
 ///
 /// **One ask of each**, each a wait on the machine's answer: a machine serving
-/// its log holds a lease, and sshd binds its port before netd can have one.
+/// its log holds a lease, and sshserver binds its port before netstack can have one.
 ///
 /// `Err` is only a stream that never opened.
 pub fn converse(
@@ -971,9 +966,28 @@ pub fn converse(
         Err(why) => println!("  talk: `{command}` was not answered: {why}"),
     }
 
-    let reboot = ssh.fire(ssh_at, REBOOT);
+    let reboot = hand_back(stream, began, CARRIED_WAIT, || ssh.fire(ssh_at, REBOOT));
     println!("  talk: `{REBOOT}` {reboot:?}");
     Ok(Conversation { peer, ping, exec, reboot, exec_ms, stream_end: stream.end() })
+}
+
+/// Ask for `reboot` through `fire` once the stream has carried this boot's
+/// `Boot: complete`, or once `by` has passed without it. `reboot` ends the
+/// stream the judge reads that record off, and `logkeeper` serves the boot from its
+/// first line, so the backlog crosses at the network's pace and not the
+/// conversation's.
+fn hand_back<T>(stream: &Stream, began: Instant, by: Duration, fire: impl FnOnce() -> T) -> T {
+    match stream.wait_for_boot(by) {
+        Some(ms) => println!(
+            "  talk: the stream carried `Boot: complete` ({ms} ms), {} ms after it opened",
+            began.elapsed().as_millis()
+        ),
+        None => println!(
+            "  talk: the stream carried no `Boot: complete` in {} ms; `{REBOOT}` is asked regardless",
+            by.as_millis()
+        ),
+    }
+    fire()
 }
 
 /// The keys a conversation is written under, one `<key> <value>` per line, in
@@ -1175,6 +1189,25 @@ mod tests {
     use super::*;
     use std::net::Shutdown;
 
+    impl Stream {
+        /// Wait until the latest connection ends, or `by` has passed; whether it
+        /// ended.
+        fn wait_ended(&self, by: Duration) -> bool {
+            let began = Instant::now();
+            let mut state = self.state();
+            loop {
+                if state.end.is_some() {
+                    return true;
+                }
+                let left = by.saturating_sub(began.elapsed());
+                if left.is_zero() || (state.unopened.is_some() && state.current.is_none()) {
+                    return false;
+                }
+                state = self.shared.moved.wait_timeout(state, left).expect("the stream's state").0;
+            }
+        }
+    }
+
     fn heard(exec: Result<Exec, String>, reboot: Result<String, String>) -> Heard {
         let said = Conversation {
             peer: Ipv4Addr::new(192, 168, 1, 49),
@@ -1312,7 +1345,7 @@ mod tests {
     }
 
     /// **A first dial refused is asked again, counted, and ends at its
-    /// ceiling**: a machine still coming up refuses until `logd` listens, and
+    /// ceiling**: a machine still coming up refuses until `logkeeper` listens, and
     /// one that never does is named at the ceiling rather than waited on to
     /// the bound. The refusals are staged through [`Reach`]: a listener this
     /// process drops still takes connects while any child it is spawning holds
@@ -1428,13 +1461,46 @@ mod tests {
         stream.wait_connected(Duration::from_secs(5)).expect("the peer");
         assert!(stream.wait_for("Boot: complete", Duration::from_secs(5)), "the first line was not read");
         assert!(!stream.wait_ended(Duration::ZERO), "a quiet peer was read as a closed one");
-        writeln!(conn, "[kernel 1.217 cpu0] init: started logd").unwrap();
+        writeln!(conn, "[kernel 1.217 cpu0] supervisor: started logkeeper").unwrap();
         drop(conn);
         assert!(stream.wait_ended(Duration::from_secs(5)));
         assert_eq!(
             stream.lines(),
-            vec!["[kernel 1.216 cpu0] Boot: complete (1216ms)\n", "[kernel 1.217 cpu0] init: started logd\n"]
+            vec!["[kernel 1.216 cpu0] Boot: complete (1216ms)\n", "[kernel 1.217 cpu0] supervisor: started logkeeper\n"]
         );
+    }
+
+    /// **`reboot` is not asked while the stream is stalled short of
+    /// `Boot: complete`**: it waits out its bound, and the record ends the wait
+    /// as the judge reads it.
+    #[test]
+    fn the_hand_back_waits_for_the_boot_record_the_judge_reads() {
+        const STALLED_AT: [&str; 2] = [
+            "[2026-09-29 14:01:34 0.493 cpu0] xHCI: mass storage iface=0 in=0x81/512 out=0x2/512",
+            "[2026-09-29 14:01:34 0.493 cpu0] xHCI: configuration set",
+        ];
+        const RECORD: &str = "[2026-09-29 14:01:35 1.166 cpu0] Boot: complete (1166ms)";
+        let dir = toyos_tmpdir::TempDir::new("metaltalk-carried");
+        let server = TcpListener::bind("127.0.0.1:0").unwrap();
+        let at = server.local_addr().unwrap();
+        let stream = Stream::connect(Peer::At(at), &dir.join("s.log"), false, Duration::from_secs(5))
+            .expect("a loopback reader");
+        let (mut conn, _) = server.accept().unwrap();
+        for line in STALLED_AT {
+            writeln!(conn, "{line}").unwrap();
+        }
+        assert!(stream.wait_for("configuration set", Duration::from_secs(5)), "the stalled lines were not read");
+        let good = heard(Ok(Exec { stdout: owed(), status: Some(0) }), Ok("accepted".into()));
+        let bound = Duration::from_millis(100);
+        let began = Instant::now();
+        let (waited, lines) = hand_back(&stream, began, bound, || (began.elapsed(), stream.lines()));
+        assert!(waited >= bound, "`reboot` was asked {waited:?} into a stall bounded at {bound:?}");
+        assert!(judge(&good, &lines).is_err(), "the judge and the wait disagree on the stall");
+
+        writeln!(conn, "{RECORD}").unwrap();
+        let lines = hand_back(&stream, Instant::now(), Duration::from_secs(5), || stream.lines());
+        judge(&good, &lines).expect("`reboot` was asked before the stream carried the record");
+        assert_eq!(stream.wait_for_boot(Duration::ZERO), Some(1166));
     }
 
     /// The next connection `server` takes, or a panic naming `what` once a
@@ -1458,9 +1524,9 @@ mod tests {
 
     /// **A redial ends the connection it replaces, asks again past every
     /// connection turned away before a line, and keeps each line once.** The
-    /// first connection is left open, as a swapped netd leaves it; the second
-    /// is closed before a byte, as `logd` turns a reader away; the third
-    /// replays the boot from its first line, as `logd` hands it to every
+    /// first connection is left open, as a swapped netstack leaves it; the second
+    /// is closed before a byte, as `logkeeper` turns a reader away; the third
+    /// replays the boot from its first line, as `logkeeper` hands it to every
     /// reader, and only its new line is kept.
     #[test]
     fn a_redial_asks_past_a_refusal_and_keeps_each_line_once() {
@@ -1538,7 +1604,7 @@ mod tests {
     }
 
     /// `server` dropping the next `closed` connections before a byte, as
-    /// QEMU's forward does while `logd` turns readers away, and replaying the
+    /// QEMU's forward does while `logkeeper` turns readers away, and replaying the
     /// boot on the one after, with one line past it.
     fn close_then_replay(server: &TcpListener, closed: usize) {
         let server = server.try_clone().unwrap();
@@ -1676,19 +1742,20 @@ mod tests {
     }
 
     /// A reply macOS's mDNSResponder sent this host's legacy question for its
-    /// own name: the question echoed, the `A` record by a compression pointer,
-    /// and two `AAAA` records after it.
+    /// own name, that name and both `AAAA` addresses replaced byte for byte:
+    /// the question echoed, the `A` record by a compression pointer, and two
+    /// `AAAA` records after it.
     const MDNS_REPLY: [u8; 112] = [
-        0xe6, 0xfb, 0x84, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x10, 0x4a, 0x61, 0x6e, 0x73,
-        0x2d, 0x4d, 0x61, 0x63, 0x42, 0x6f, 0x6f, 0x6b, 0x2d, 0x50, 0x72, 0x6f, 0x05, 0x6c, 0x6f, 0x63, 0x61,
+        0xe6, 0xfb, 0x84, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x10, 0x52, 0x65, 0x70, 0x6c,
+        0x79, 0x2d, 0x46, 0x69, 0x78, 0x74, 0x75, 0x72, 0x65, 0x2d, 0x30, 0x31, 0x05, 0x6c, 0x6f, 0x63, 0x61,
         0x6c, 0x00, 0x00, 0x01, 0x00, 0x01, 0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x0a, 0x00,
         0x04, 0xc0, 0xa8, 0x01, 0x2f, 0xc0, 0x0c, 0x00, 0x1c, 0x00, 0x01, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x10,
-        0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x28, 0xe1, 0x03, 0xd6, 0xd1, 0x40, 0xf2, 0xc0,
-        0x0c, 0x00, 0x1c, 0x00, 0x01, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x10, 0x20, 0x01, 0x17, 0x08, 0x47, 0x43,
-        0xd7, 0x00, 0x0c, 0xbc, 0x45, 0x4f, 0xa3, 0xfd, 0xc9, 0x2d,
+        0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0xc0,
+        0x0c, 0x00, 0x1c, 0x00, 0x01, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x10, 0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
     ];
     const MDNS_REPLY_ID: u16 = 0xe6fb;
-    const MDNS_REPLY_HOST: &str = "Jans-MacBook-Pro.local";
+    const MDNS_REPLY_HOST: &str = "Reply-Fixture-01.local";
 
     /// **The question is the one another responder echoes, and its answer is
     /// read through a compression pointer**: only for the question's own ID,
@@ -1699,7 +1766,7 @@ mod tests {
         assert_eq!(question[..2], MDNS_REPLY[..2]);
         assert_eq!(question[12..], MDNS_REPLY[12..question.len()], "the question as the responder echoed it");
         assert_eq!(mdns_answer(&MDNS_REPLY, MDNS_REPLY_HOST, MDNS_REPLY_ID), Some(Ipv4Addr::new(192, 168, 1, 47)));
-        assert_eq!(mdns_answer(&MDNS_REPLY, "jans-macbook-pro.LOCAL", MDNS_REPLY_ID), Some(Ipv4Addr::new(192, 168, 1, 47)));
+        assert_eq!(mdns_answer(&MDNS_REPLY, "reply-fixture-01.LOCAL", MDNS_REPLY_ID), Some(Ipv4Addr::new(192, 168, 1, 47)));
         assert_eq!(mdns_answer(&MDNS_REPLY, MDNS_REPLY_HOST, MDNS_REPLY_ID ^ 1), None, "another question's answer");
         assert_eq!(mdns_answer(&MDNS_REPLY, "toyos-t14.local", MDNS_REPLY_ID), None, "another name's answer");
         assert_eq!(mdns_answer(&MDNS_REPLY[..55], MDNS_REPLY_HOST, MDNS_REPLY_ID), None, "a record cut short");

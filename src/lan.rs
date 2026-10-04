@@ -12,23 +12,15 @@ use std::net::Ipv4Addr;
 use crate::bootlog::message;
 
 /// The records both arms are written against, spelled once.
-pub const MAC: &str = "netd: MAC ";
-pub const LEASE: &str = "netd: DHCP: lease ";
-pub const LINK_UP: &str = "netd: I219: link up at ";
-pub const READY: &str = "netd: ready, at most ";
-pub const NO_LEASE: &str = "netd: DHCP: no lease as ";
+pub const MAC: &str = "netstack: MAC ";
+const LEASE: &str = "netstack: DHCP: lease ";
+pub const LINK_UP: &str = "netstack: I219: link up at ";
+pub const READY: &str = "netstack: ready, at most ";
 
 /// The name this machine asks its network to record for it, and answers for as
-/// `<name>.local`; held to netd's own `dhcp::HOSTNAME` by
-/// [`tests::netd_declares_the_name_this_module_spells`].
+/// `<name>.local`; held to netstack's own `dhcp::HOSTNAME` by
+/// [`tests::netstack_declares_the_name_this_module_spells`].
 pub const HOSTNAME: &str = "toyos-t14";
-
-/// RFC 2132 §3.14: the kind, the length, and the name.
-fn host_name_option() -> Vec<u8> {
-    let mut option = vec![12, HOSTNAME.len() as u8];
-    option.extend_from_slice(HOSTNAME.as_bytes());
-    option
-}
 
 /// One lease, as the record carries it.
 #[derive(Debug, PartialEq, Eq)]
@@ -38,7 +30,7 @@ pub struct Lease {
     pub server: Ipv4Addr,
     pub gateway: Ipv4Addr,
     pub dns: Vec<Ipv4Addr>,
-    /// Milliseconds between netd starting and the lease landing.
+    /// Milliseconds between netstack starting and the lease landing.
     pub ms: u64,
 }
 
@@ -72,7 +64,7 @@ pub fn lease_in(text: &str) -> Result<Lease, String> {
         server: address("the server's address", after(" from ", ",")?)?,
         gateway: address("the gateway's address", after(", gateway ", ",")?)?,
         dns,
-        ms: after("], ", " ms after netd came up")?
+        ms: after("], ", " ms after netstack came up")?
             .parse()
             .map_err(|_| unreadable("a millisecond count"))?,
     })
@@ -94,9 +86,9 @@ pub fn link_up_ms(text: &str) -> Result<u64, String> {
         .map_err(|_| format!("{line:?} carries no readable link-up time"))
 }
 
-/// What netd wrote in a boot's `/log`: the text of each of its lines.
-pub fn netd_records(text: &str) -> String {
-    crate::bootlog::lines_of(text, "netd")
+/// What netstack wrote in a boot's `/log`: the text of each of its lines.
+pub fn netstack_records(text: &str) -> String {
+    crate::bootlog::lines_of(text, "netstack")
 }
 
 /// The T14's I219, as the kernel's hand-over record spells its id.
@@ -186,82 +178,21 @@ pub fn delivered(text: &str) -> Result<Delivery, String> {
     Err(why)
 }
 
-/// **The one place the host-name option can be read.** A server that ignores it
-/// answers the same lease either way, so the frames the client sent are the only
-/// evidence that it asked at all — and `filter-dump` records both directions, so
-/// a frame counts only where it is IPv4 over UDP *leaving* the client's own port.
-pub fn asked_under_its_own_name(pcap: &[u8]) -> Result<(), String> {
-    let option = host_name_option();
-    let sent = dhcp_client_frames(pcap)?;
-    if !sent.iter().any(|frame| frame.windows(option.len()).any(|w| w == option)) {
-        return Err(format!(
-            "none of the {} frame(s) this client sent a DHCP server carries the host-name \
-             option {option:?}",
-            sent.len()
-        ));
-    }
-    Ok(())
-}
-
-/// The transaction ID (RFC 2131 §2, `xid`) of every frame the DHCP client
-/// sent, in the order it sent them: what its random source drew.
-pub fn dhcp_transaction_ids(pcap: &[u8]) -> Result<Vec<u32>, String> {
-    dhcp_client_frames(pcap)?
-        .iter()
-        .map(|frame| match frame.get(DHCP_AT + 4..DHCP_AT + 8) {
-            Some(xid) => Ok(u32::from_be_bytes(xid.try_into().expect("four bytes"))),
-            None => Err(format!("a {}-byte frame the DHCP client sent ends before its xid", frame.len())),
-        })
-        .collect()
-}
-
-/// Where a DHCP message begins in a frame: behind Ethernet, an IPv4 header
-/// carrying no options, and UDP.
-const DHCP_AT: usize = 14 + 20 + 8;
-
-/// Every frame of `pcap` that is IPv4 over UDP *leaving* the DHCP client's own
-/// port, carrying anything: `filter-dump` records both directions.
-fn dhcp_client_frames(pcap: &[u8]) -> Result<Vec<&[u8]>, String> {
-    const LITTLE_ENDIAN_PCAP: [u8; 4] = [0xd4, 0xc3, 0xb2, 0xa1];
-    const GLOBAL_HEADER: usize = 24;
-    const RECORD_HEADER: usize = 16;
-    if pcap.get(..LITTLE_ENDIAN_PCAP.len()) != Some(&LITTLE_ENDIAN_PCAP[..]) {
-        return Err("this file does not open with a little-endian pcap header".to_string());
-    }
-    let mut at = GLOBAL_HEADER;
-    let mut sent = Vec::new();
-    while let Some(header) = pcap.get(at..at + RECORD_HEADER) {
-        let len = u32::from_le_bytes(header[8..12].try_into().expect("four bytes")) as usize;
-        let frame = pcap.get(at + RECORD_HEADER..at + RECORD_HEADER + len).ok_or_else(|| {
-            format!("this pcap's record at byte {at} names {len} bytes the file has not")
-        })?;
-        at += RECORD_HEADER + len;
-        if frame.len() > DHCP_AT
-            && frame[12..14] == [0x08, 0x00]
-            && frame[23] == 17
-            && frame[34..36] == [0, 68]
-        {
-            sent.push(frame);
-        }
-    }
-    Ok(sent)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const LEASED: &str = "[2026-09-08 16:08:23 2.100 cpu0] netd: DHCP: lease 10.0.2.15/24 from \
-                          10.0.2.2, gateway 10.0.2.2, dns [10.0.2.3 10.0.2.4], 412 ms after netd \
+    const LEASED: &str = "[2026-09-08 16:08:23 2.100 cpu0] netstack: DHCP: lease 10.0.2.15/24 from \
+                          10.0.2.2, gateway 10.0.2.2, dns [10.0.2.3 10.0.2.4], 412 ms after netstack \
                           came up";
 
-    /// Nothing links the two crates: netd is a `no_std`-shaped userland binary
+    /// Nothing links the two crates: netstack is a `no_std`-shaped userland binary
     /// and this is the build system, so the name both ends spell is held to
-    /// netd's own declaration by reading its source.
+    /// netstack's own declaration by reading its source.
     #[test]
-    fn netd_declares_the_name_this_module_spells() {
-        let at = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("userland/netd/src/dhcp.rs");
-        let source = std::fs::read_to_string(&at).expect("netd's dhcp module");
+    fn netstack_declares_the_name_this_module_spells() {
+        let at = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("userland/netstack/src/dhcp.rs");
+        let source = std::fs::read_to_string(&at).expect("netstack's dhcp module");
         assert!(
             crate::bootlog::declares(&source, &format!("\"{HOSTNAME}\"")),
             "{} declares no constant equal to \"{HOSTNAME}\"",
@@ -312,23 +243,23 @@ mod tests {
         assert!(why.contains("a millisecond count"), "{why}");
     }
 
-    /// netd's lines and nothing else: a kernel record spelled like netd's,
-    /// another program's line quoting netd's head, and a console line with no
+    /// netstack's lines and nothing else: a kernel record spelled like netstack's,
+    /// another program's line quoting netstack's head, and a console line with no
     /// head at all are each left out.
     #[test]
-    fn only_netds_own_lines_are_netds() {
+    fn only_netstacks_own_lines_are_netstacks() {
         let lease = LEASED.split_once("] ").expect("a record").1;
         let log = format!(
-            "{{2026-09-08 16:08:23 2.100 netd}} {lease}\n\
-             {{2026-09-08 16:08:23 2.200 netd}} netd: ready, at most 8 clients\n\
-             {{2026-09-08 16:08:23 2.300 evil}} {{2026-09-08 16:08:23 2.300 netd}} netd: MAC 00:00:00:00:00:00\n\
-             [2026-09-08 16:08:23 2.400 cpu0] netd: MAC 00:00:00:00:00:01\n\
-             netd: MAC 52:54:00:12:34:56\n"
+            "{{2026-09-08 16:08:23 2.100 netstack}} {lease}\n\
+             {{2026-09-08 16:08:23 2.200 netstack}} netstack: ready, at most 8 clients\n\
+             {{2026-09-08 16:08:23 2.300 evil}} {{2026-09-08 16:08:23 2.300 netstack}} netstack: MAC 00:00:00:00:00:00\n\
+             [2026-09-08 16:08:23 2.400 cpu0] netstack: MAC 00:00:00:00:00:01\n\
+             netstack: MAC 52:54:00:12:34:56\n"
         );
-        let netd = netd_records(&log);
-        assert_eq!(netd.lines().count(), 2, "{netd}");
-        assert!(lease_in(&netd).is_ok());
-        assert!(!netd.contains(MAC), "a line quoting netd was read as netd's: {netd}");
+        let netstack = netstack_records(&log);
+        assert_eq!(netstack.lines().count(), 2, "{netstack}");
+        assert!(lease_in(&netstack).is_ok());
+        assert!(!netstack.contains(MAC), "a line quoting netstack was read as netstack's: {netstack}");
     }
 
     #[test]
@@ -346,7 +277,7 @@ mod tests {
 [2026-09-16 15:01:20 1.333 cpu0] pcidev: PCI 00:1f.6 [8086:15fc] handed over on slot 0, vector 0x28
 [2026-09-16 15:01:20 1.360 cpu0] ELF: 3417 relocations indexed (RELATIVE + GLOB_DAT + TPOFF)
 [2026-09-16 15:01:20 1.360 cpu0] spawn: TLS 1 modules, total_memsz=144
-[2026-09-16 15:01:20 1.518 cpu0] spawn: /system/bin/netd pid=5 tid=0 dst=5 base=0x10000000000 entry=0x1000004e5c0 cr3=0x1cc1000 symbols=2048KiB (layout=25ms relocs=0ms deps=0ms tls=1ms total=184ms)
+[2026-09-16 15:01:20 1.518 cpu0] spawn: /system/bin/netstack pid=5 tid=0 dst=5 base=0x10000000000 entry=0x1000004e5c0 cr3=0x1cc1000 symbols=2048KiB (layout=25ms relocs=0ms deps=0ms tls=1ms total=184ms)
 [2026-09-16 15:01:20 1.552 cpu0] ELF: 2833 relocations indexed (RELATIVE + GLOB_DAT + TPOFF)
 [2026-09-16 15:01:20 1.552 cpu0] spawn: TLS 1 modules, total_memsz=144
 [2026-09-16 15:01:20 1.739 cpu0] spawn: /system/bin/test-runner pid=6 tid=0 dst=6 base=0x10000000000 entry=0x1000001fff0 cr3=0x1cbf000 symbols=2048KiB (layout=32ms relocs=0ms deps=0ms tls=2ms total=221ms)
@@ -388,7 +319,7 @@ mod tests {
     /// Another writer's line carrying the words is not the kernel's record.
     #[test]
     fn a_line_that_is_not_the_kernels_record_is_refused_and_named() {
-        let stray = "[2026-09-16 15:01:21 2.240 cpu3] test-runner: waiting until netd took its \
+        let stray = "[2026-09-16 15:01:21 2.240 cpu3] test-runner: waiting until netstack took its \
                      first message\n";
         let log = edited(TOOK, "").replacen(
             "total=184ms)\n",
@@ -399,7 +330,7 @@ mod tests {
         let why = delivered(&log).expect_err("a userland line");
         assert!(why.contains("no kernel record"), "{why}");
         assert!(why.contains("a line not in the kernel's spelling of the record: "), "{why}");
-        assert!(why.contains("test-runner: waiting until netd"), "{why}");
+        assert!(why.contains("test-runner: waiting until netstack"), "{why}");
     }
 
     #[test]
@@ -466,7 +397,7 @@ mod tests {
     /// hand-over.
     #[test]
     fn a_hand_over_not_in_the_kernels_spelling_is_refused() {
-        let stray = "[2026-09-16 15:01:20 1.333 cpu0] netd: [8086:15fc] handed over on slot 0, \
+        let stray = "[2026-09-16 15:01:20 1.333 cpu0] netstack: [8086:15fc] handed over on slot 0, \
                      vector 0x28\n";
         let why = delivered(&edited(HANDED, stray)).expect_err("a userland line");
         assert!(why.contains("no `[8086:15fc] handed over on slot ` record"), "{why}");
@@ -510,93 +441,5 @@ mod tests {
                 at.display()
             );
         }
-    }
-
-    /// One pcap record per frame, with the timestamps a reader here never looks
-    /// at left zero.
-    fn pcap(frames: &[Vec<u8>]) -> Vec<u8> {
-        let mut out = vec![0xd4, 0xc3, 0xb2, 0xa1];
-        out.extend_from_slice(&[0u8; 20]);
-        for frame in frames {
-            out.extend_from_slice(&[0u8; 8]);
-            out.extend_from_slice(&(frame.len() as u32).to_le_bytes());
-            out.extend_from_slice(&(frame.len() as u32).to_le_bytes());
-            out.extend_from_slice(frame);
-        }
-        out
-    }
-
-    /// One frame: an ethertype, an IPv4 protocol, the two UDP ports, and a
-    /// payload.
-    fn frame(ethertype: [u8; 2], protocol: u8, src: u16, dst: u16, payload: &[u8]) -> Vec<u8> {
-        let mut frame = vec![0u8; 14 + 20 + 8];
-        frame[12..14].copy_from_slice(&ethertype);
-        frame[23] = protocol;
-        frame[34..36].copy_from_slice(&src.to_be_bytes());
-        frame[36..38].copy_from_slice(&dst.to_be_bytes());
-        frame.extend_from_slice(payload);
-        frame
-    }
-
-    fn from_client(payload: &[u8]) -> Vec<u8> {
-        frame([0x08, 0x00], 17, 68, 67, payload)
-    }
-
-    /// **The server's own echo of the option is not the client asking.** A walk
-    /// keyed on the destination port would count the echo below and report the
-    /// question as asked when nothing asked it.
-    #[test]
-    fn only_the_direction_leaving_the_client_counts() {
-        let option = host_name_option();
-        assert_eq!(asked_under_its_own_name(&pcap(&[from_client(&option)])), Ok(()));
-        let echoed = frame([0x08, 0x00], 17, 67, 68, &option);
-        let why = asked_under_its_own_name(&pcap(std::slice::from_ref(&echoed)))
-            .expect_err("a server's reply is not this client asking");
-        assert!(why.contains("none of the 0 frame(s)"), "{why}");
-        // The same echo beside a client frame that asked nothing.
-        let why = asked_under_its_own_name(&pcap(&[echoed, from_client(&[53, 1, 1])]))
-            .expect_err("the one frame the client sent carried no name");
-        assert!(why.contains("none of the 1 frame(s)"), "{why}");
-    }
-
-    #[test]
-    fn a_frame_that_is_not_ipv4_over_udp_carries_no_option_here() {
-        let option = host_name_option();
-        // ARP, and IPv4 carrying TCP: both hold the bytes and neither is a
-        // DHCP request.
-        for stray in [
-            frame([0x08, 0x06], 17, 68, 67, &option),
-            frame([0x08, 0x00], 6, 68, 67, &option),
-        ] {
-            let why = asked_under_its_own_name(&pcap(&[stray])).expect_err("not a DHCP frame");
-            assert!(why.contains("none of the 0 frame(s)"), "{why}");
-        }
-        // A frame with the headers and no payload at all.
-        let bare = from_client(&[]);
-        assert!(asked_under_its_own_name(&pcap(&[bare])).is_err());
-    }
-
-    /// RFC 2131 §2: `op`, `htype`, `hlen`, `hops`, then the four bytes of
-    /// `xid`, big-endian, of the frames the client sent and no other.
-    #[test]
-    fn the_transaction_id_is_read_off_each_frame_the_client_sent() {
-        let discover = from_client(&[1, 1, 6, 0, 0xde, 0xad, 0xbe, 0xef, 0, 0]);
-        let offer = frame([0x08, 0x00], 17, 67, 68, &[2, 1, 6, 0, 1, 2, 3, 4]);
-        let request = from_client(&[1, 1, 6, 0, 0x01, 0x02, 0x03, 0x04]);
-        assert_eq!(dhcp_transaction_ids(&pcap(&[discover, offer, request])), Ok(vec![0xdead_beef, 0x0102_0304]));
-        let why = dhcp_transaction_ids(&pcap(&[from_client(&[1, 1, 6, 0, 0xde])])).expect_err("no whole xid");
-        assert!(why.contains("ends before its xid"), "{why}");
-    }
-
-    #[test]
-    fn a_file_that_is_not_a_pcap_and_a_record_past_its_end_are_refused_by_name() {
-        assert!(asked_under_its_own_name(b"").unwrap_err().contains("little-endian pcap"));
-        assert!(
-            asked_under_its_own_name(b"\xa1\xb2\xc3\xd4rest").unwrap_err().contains("pcap header")
-        );
-        let mut truncated = pcap(&[from_client(&host_name_option())]);
-        truncated.truncate(truncated.len() - 4);
-        let why = asked_under_its_own_name(&truncated).expect_err("the last record is cut short");
-        assert!(why.contains("bytes the file has not"), "{why}");
     }
 }

@@ -6,7 +6,7 @@
 //!
 //! - **`IRTA_REG`**, Section 11.4.10: table address bits 63:12, `EIME` bit 11,
 //!   `S` bits 3:0 holding `2^(S+1)` entries.
-//! - **`GCMD`/`GSTS`**, Sections 11.4.4.1 and 11.4.4.2: `IRE`/`IRES` bit 25,
+//! - **`GCMD`/`GSTS`**, §11.4.4.1 and §11.4.4.2: `IRE`/`IRES` bit 25,
 //!   `SIRTP`/`IRTPS` bit 24, `CFI`/`CFIS` bit 23.
 //! - **IRTE**, Section 9.9 Figure 9-9: `P` bit 0, `DM` bit 2, `RH` bit 3,
 //!   `TM` bit 4, `DLM` bits 7:5, `IM` bit 15, `V` bits 23:16, `DST` bits 63:32,
@@ -40,7 +40,7 @@ pub const IRTA_REG: u64 = 0xB8;
 
 pub const INTERRUPT_REMAPPING_ENABLE: u32 = 1 << 25;
 pub const SET_TABLE_POINTER: u32 = 1 << 24;
-/// Set means compatibility-format messages bypass remapping; `GCMD.CFI` is never written, so it reads clear.
+/// Set means compatibility-format messages bypass remapping.
 pub const COMPATIBILITY_FORMAT: u32 = 1 << 23;
 
 /// `2^(7+1)` entries of 128 bits is exactly the 4 KiB [`Tables::alloc`] hands out.

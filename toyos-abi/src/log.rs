@@ -38,7 +38,7 @@ pub const MAX_LOG_SHARDS: usize = 8;
 /// **Four because four have writers and readers.** The kernel writes `Info`
 /// (`log!`) and `Alert` (`alert!`); a program's stdout is `Info` and its stderr
 /// `Error`, and its own lines choose. The panel paints `Error` and above red;
-/// `/system/bin/logd` names every one above `Info` in the line, and makes the
+/// `/system/bin/logkeeper` names every one above `Info` in the line, and makes the
 /// volume durable at `Alert` rather than on its interval.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
@@ -233,10 +233,10 @@ impl core::fmt::Display for Tagged<'_> {
 }
 
 /// One implementation of a rendered line, so the kernel's serial sink, the
-/// panel, `logd` and any diagnostic tool produce byte-identical text.
+/// panel, `logkeeper` and any diagnostic tool produce byte-identical text.
 ///
 /// It renders the *body* — timestamp, origin and message — and no prefix of its
-/// own, because the three callers disagree about the prefix on purpose: `logd`
+/// own, because the three callers disagree about the prefix on purpose: `logkeeper`
 /// writes a wall clock into `/log`, the panel writes a monotonic offset into 80
 /// columns, and both are the same record.
 impl core::fmt::Display for LogRecord {
@@ -248,7 +248,7 @@ impl core::fmt::Display for LogRecord {
 /// Per-reader state. **The kernel holds none.**
 ///
 /// No object, no handle lifecycle, no cursor to leak or go stale, and a second
-/// reader costs nothing. The stream is not consumed either: `logd` and a
+/// reader costs nothing. The stream is not consumed either: `logkeeper` and a
 /// `log-follow` tool coexist with no coordination.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -257,15 +257,17 @@ pub struct LogCursor {
     /// the first time and reads it back.
     pub shards: u32,
     pub _pad: u32,
-    /// In/out: cumulative records this cursor never saw because they were
-    /// overwritten.
+    /// Out: records this read skipped because they were overwritten. The
+    /// kernel never reads it, so a reader's total is the reader's own sum.
     ///
     /// **Derived, never counted by a producer.** The kernel computes it from
     /// `head` and `next`, which both have to be right anyway, so no counter can
     /// drift from the ring. It lives here so a reader that ignores loss has to
     /// actively ignore a field it is already passing.
     pub lost: u64,
-    /// In/out: the next sequence number wanted from each shard.
+    /// In/out: the next sequence number wanted from each shard. A number past
+    /// the one the shard issues next is refused, and a shard not yet published
+    /// issues 1 next.
     pub next: [u64; MAX_LOG_SHARDS],
 }
 
@@ -373,7 +375,7 @@ mod tests {
 
     /// **`len` came across the syscall boundary**, so a record claiming more
     /// message than a record can hold answers with what it has rather than
-    /// panicking a reader. `logd` is userland and this is its input too.
+    /// panicking a reader. `logkeeper` is userland and this is its input too.
     #[test]
     fn a_length_past_the_bound_is_clamped_and_not_a_panic() {
         let mut r = record("abc");

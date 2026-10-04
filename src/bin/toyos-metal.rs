@@ -3,7 +3,10 @@
 //! two: a boot that failed exits 1 and a loop that could not run exits 2, so
 //! "the machine is broken" is never read as "the driver is".
 
-use toyos_build::metal::{run, Args};
+#[macro_use(eprintln)]
+extern crate toyos_build;
+
+use toyos_build::metal::{run, Args, REFUSAL_HEAD};
 
 fn main() {
     let words: Vec<String> = std::env::args().skip(1).collect();
@@ -15,6 +18,6 @@ fn main() {
         }
         Err(refusal) => refusal,
     };
-    eprintln!("toyos-metal: {refusal}");
+    eprintln!("{REFUSAL_HEAD}{refusal}");
     std::process::exit(if refusal.about_the_boot() { 1 } else { 2 });
 }

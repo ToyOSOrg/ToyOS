@@ -21,6 +21,6 @@ T14's `CONFIG_X86_INTEL_TSX_MODE_OFF=y`, runs `tsx_init`
 `issues/kernel/a-pure-function-decides-a-cpus-speculation-mitigations-as-linux-does.md`
 carries `tsx_init`'s decision and every CPU applies it; on the T14, ToyOS's
 reads of 0x122, 0x10F and 0x123 equal the Linux reads of
-`issues/hardware/linuxs-readings-of-the-t14-and-the-tcg-model-are-not-committed.md`
+`issues/hardware/linuxs-readings-of-the-t14-and-the-tcg-model-lack-reads-owed-before-the-t14s-wipe.md`
 where each exists, and dropping the write leaves 0x122 or 0x10F at firmware's
 value and reds it.

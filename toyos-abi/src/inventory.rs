@@ -205,6 +205,25 @@ pub struct Claim {
     pub holder: Holder,
 }
 
+/// Which of the machine's partitions the loader named for a role.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Role {
+    /// The ROOT this boot runs, read whole by the loader.
+    Root,
+    /// The running slot's volume: the kernel and its parameter.
+    Boot,
+    /// The log partition.
+    Log,
+}
+
+/// A partition the loader named, by its unique GUID: what a file server for
+/// that role serves, wherever the disk it is on is driven.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Loaded {
+    pub role: Role,
+    pub unique_guid: [u8; 16],
+}
+
 /// One record.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Record {
@@ -213,6 +232,7 @@ pub enum Record {
     Block(Block),
     Partition(Partition),
     Claim(Claim),
+    Loaded(Loaded),
 }
 
 /// Why a record did not decode.
@@ -241,6 +261,7 @@ const KIND_USB: u8 = 2;
 const KIND_BLOCK: u8 = 3;
 const KIND_PARTITION: u8 = 4;
 const KIND_CLAIM: u8 = 5;
+const KIND_LOADED: u8 = 6;
 
 /// Little-endian writes at fixed offsets.
 struct Out([u8; RECORD_BYTES]);
@@ -381,6 +402,18 @@ impl Record {
                 }
                 holder_out(&mut o, 28, &c.holder);
             }
+            Self::Loaded(l) => {
+                o.u8(0, KIND_LOADED);
+                o.u8(
+                    1,
+                    match l.role {
+                        Role::Root => 0,
+                        Role::Boot => 1,
+                        Role::Log => 2,
+                    },
+                );
+                o.bytes(8, &l.unique_guid);
+            }
         }
         RawRecord(o.0)
     }
@@ -444,6 +477,15 @@ impl Record {
                 },
                 holder: holder_in(&r, 28),
             }),
+            KIND_LOADED => Self::Loaded(Loaded {
+                role: r.variant(1, |b| match b {
+                    0 => Some(Role::Root),
+                    1 => Some(Role::Boot),
+                    2 => Some(Role::Log),
+                    _ => None,
+                })?,
+                unique_guid: r.array(8),
+            }),
             kind => return Err(Undecodable::Kind(kind)),
         })
     }
@@ -459,9 +501,9 @@ mod tests {
         n
     }
 
-    fn every_kind() -> [Record; 7] {
+    fn every_kind() -> [Record; 8] {
         let at = PciAddr { segment: 0x1234, bus: 0, dev: 0x1f, func: 6 };
-        let holder = Holder { pid: 7, name: name("netd") };
+        let holder = Holder { pid: 7, name: name("netstack") };
         [
             Record::Pci(Pci {
                 at,
@@ -496,6 +538,7 @@ mod tests {
                 on: Claimed::Partition { device: 3, unique_guid: [0x11; 16] },
                 holder,
             }),
+            Record::Loaded(Loaded { role: Role::Log, unique_guid: [0x22; 16] }),
         ]
     }
 
@@ -504,7 +547,7 @@ mod tests {
         for record in every_kind() {
             assert_eq!(Record::decode(&record.encode()), Ok(record));
         }
-        assert_eq!(Holder { pid: 1, name: name("soundd") }.name(), Some("soundd"));
+        assert_eq!(Holder { pid: 1, name: name("soundserver") }.name(), Some("soundserver"));
         for psiv in 0..=u8::MAX {
             if let Some(speed) = UsbSpeed::from_psiv(psiv) {
                 assert_eq!(speed.psiv(), psiv);
@@ -544,13 +587,13 @@ mod tests {
                 Err(Undecodable::Variant { at: 7, value: u64::from(psiv) })
             );
         }
-        // A class number no `DeviceType` carries: 3 and 4 are retired.
         let mut raw = Record::Claim(Claim {
             on: Claimed::Class(DeviceType::Keyboard),
             holder: Holder { pid: 1, name: name("x") },
         })
         .encode();
-        for class in [3u64, 4, 1 << 40] {
+        let past_the_last = DeviceType::ALL.iter().map(|&class| class as u64).max().expect("a class") + 1;
+        for class in [past_the_last, 1 << 40] {
             raw.0[4..12].copy_from_slice(&class.to_le_bytes());
             assert_eq!(Record::decode(&raw), Err(Undecodable::Variant { at: 4, value: class }));
         }

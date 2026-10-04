@@ -3,17 +3,23 @@
 //!
 //! **A sysroot is a function of its key.** The key ([`key`]) is the identity
 //! (`src/identity.rs`, so a comment is no change) of everything a sysroot is
-//! built from: the three trees std and `libtoyos_c.a` compile
-//! ([`SYSROOT_SOURCES`]), the std fork's `library/` and `src/bootstrap/` in the
-//! checkout that builds it, and the compiler that builds it. `rust/build/
+//! built from: the trees std and `libtoyos_c.a` compile
+//! ([`SYSROOT_SOURCES`]) and how libc is built ([`SYSROOT_MANIFESTS`],
+//! `libc::BUILD`), the std fork's `library/` and `src/bootstrap/` in the
+//! checkout that builds it, and the compiler's key. `rust/build/
 //! sysroots/<key>/` is a whole toolchain — the compiler's files cloned from its
 //! `stage2`, the guest targets' libraries built from this key's sources. A build
 //! compiles against the directory its own key names, so two worktrees with
 //! different ABIs or different compilers never refuse or wait for each other,
 //! and main and every branch matching it share one copy.
 //!
-//! **Each worktree builds std in its own fork checkout, and nothing but the
-//! primary's own sync moves the primary's.** The primary builds in its `rust/`;
+//! **The kernel's and the loader's libraries compile none of those trees**, so
+//! they are a key of their own ([`freestanding_key`]). They are built once per that key
+//! into `rust/build/freestanding/<key>/` and cloned into every sysroot naming
+//! it, and a crate built against a sysroot learns which targets' libraries
+//! moved ([`Identity`]). Each build refuses dep-info that says otherwise.
+//!
+//! **Each worktree builds std in its own fork checkout.** The primary builds in its `rust/`;
 //! a linked worktree in its own `rust/`, made on first need as a git worktree of
 //! the primary's fork repository at the commit this tree pins ([`fork_checkout`]).
 //! `library/std` names `toyos-abi` and `toyos` as `../../../`, so each
@@ -25,16 +31,19 @@
 //!
 //! Locks, in the one order every acquirer takes them: the compiler key's, if the
 //! compiler is a worktree's own; the sysroot key's (`buildlock::keyed_*`), with
-//! this worktree's build lock put down; then, to build, this worktree's
-//! exclusively (its fork build directory is written); then, if the compiler is
-//! the primary's, the global one shared, because it is read.
+//! this worktree's build lock put down; then the freestanding key's, while its
+//! libraries are cloned in; then, to build, this worktree's exclusively (its
+//! fork build directory is written); then, if the compiler is the primary's, the
+//! global one shared, because it is read; then the key of the compiler's LLVM,
+//! held in use while the C++ runtime is built from its sources.
 //!
-//! A sysroot no worktree names any more is removed by `keystore::sweep`, which
-//! `--worktree remove` runs: each build records the key it used in its
-//! worktree's `target/`, and a key no registered worktree records, that nobody
-//! is making or using, goes.
+//! A sysroot or freestanding libraries no worktree names any more are removed
+//! by `keystore::sweep`, which every placement runs: each build records the
+//! keys it used in its worktree's `target/`, and a key no registered worktree
+//! records, that nobody is making or using, goes.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -42,51 +51,188 @@ use std::process::Command;
 use sha2::{Digest, Sha256};
 
 use crate::arch::Arch;
-use crate::buildlock::{self, Guard, Held, Keyed};
+use crate::buildlock::{self, Guard, Held, Keyed, Scope};
 use crate::compiler::{self, Compiler};
 use crate::identity;
-use crate::toolchain::{self, host_triple, Owner, GUEST_TARGETS};
+use crate::keystore::{self, Key};
+use crate::toolchain::{self, host_triple, GuestTarget, Owner, Role, GUEST_TARGETS};
+use whole_toolchain::{whole, Whole};
 
 /// The per-worktree sources that end up inside a sysroot: std links `toyos-abi`
-/// and `toyos`, and `libtoyos_c.a` is `userland/libc`.
-pub const SYSROOT_SOURCES: [&str; 4] =
-    ["toyos-abi/src", "toyos/src", "userland/libc/src", "userland/libc/include"];
+/// and `toyos`, and `libtoyos_c.a` is `userland/libc` with `toyos-elf`.
+pub const SYSROOT_SOURCES: [&str; 5] =
+    ["toyos-abi/src", "toyos/src", "toyos-elf/src", "userland/libc/src", "userland/libc/include"];
 
-/// Their manifests, whose features and versions decide the same build.
-pub(crate) const SYSROOT_MANIFESTS: [&str; 3] =
-    ["toyos-abi/Cargo.toml", "toyos/Cargo.toml", "userland/libc/Cargo.toml"];
+/// Their manifests, and the lockfile and cargo configuration libc is built
+/// under: the features, versions and flags of the same build.
+pub(crate) const SYSROOT_MANIFESTS: [&str; 6] = [
+    "toyos-abi/Cargo.toml",
+    "toyos/Cargo.toml",
+    "toyos-elf/Cargo.toml",
+    "userland/libc/Cargo.toml",
+    "userland/libc/Cargo.lock",
+    "userland/.cargo/config.toml",
+];
 
-/// The file a finished sysroot carries last, naming what it was built from.
-/// A directory without it is a build that did not finish.
+/// Of [`SYSROOT_MANIFESTS`], the ones std's lockfile resolves with the fork's
+/// own: what of a worktree can move a freestanding target's dependency versions.
+const STD_MANIFESTS: [&str; 2] = ["toyos-abi/Cargo.toml", "toyos/Cargo.toml"];
+
+/// The file a directory [`publish`] made carries last, naming what it was
+/// built from. A directory without it is a build that did not finish.
 const SOURCES: &str = "SOURCES";
 
-/// What changes how a key's sources become a sysroot and is none of them: the
-/// std build's recipe below. Moving it moves every key.
-const RECIPE: &str = "bootstrap stage-0 local rebuild, profile compiler, no LLVM, \
-                      libtoyos_c merged, libraries from the stamp, linked by rust-lld, \
-                      a C sysroot of libc's staticlib and headers per target; 5";
+/// What changes how a key's sources become its libraries and its sysroot and
+/// is none of them, nor std's configuration ([`std_config`]), which the
+/// freestanding key reads whole. Moving it moves every key.
+const RECIPE: &str = "bootstrap stage-0 local rebuild, libraries from the stamp, libtoyos_c merged, \
+                      a C sysroot of libc's staticlib, the empty libraries beside it, headers and \
+                      CMake's description of ToyOS per target, refused unless a C program naming \
+                      each library links against it, and its C++ runtime built under n2 from the \
+                      runtimes' sources of the compiler's LLVM, the freestanding libraries cloned \
+                      from their key's; 13";
 
 /// Every sysroot on this host.
 pub fn sysroots_dir(rust_dir: &Path) -> PathBuf {
     rust_dir.join("build/sysroots")
 }
 
+/// Every freestanding target's libraries on this host, one directory per key.
+pub fn freestanding_dir(rust_dir: &Path) -> PathBuf {
+    rust_dir.join("build/freestanding")
+}
+
+/// Whose sources a guest target's libraries compile.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Libraries {
+    /// The fork's and [`SYSROOT_SOURCES`]: ToyOS userland's std, which names
+    /// `toyos-abi` and `toyos`.
+    Worktree,
+    /// The fork's alone: the kernel's `core` and `alloc` and the loader's std,
+    /// which is what lets them be a key of their own.
+    Freestanding,
+}
+
+impl Libraries {
+    fn of(target: GuestTarget) -> Self {
+        match target.role {
+            Role::Userland => Self::Worktree,
+            Role::Kernel | Role::Loader => Self::Freestanding,
+        }
+    }
+
+    /// The triples of the [`GUEST_TARGETS`] whose libraries these are.
+    fn targets(self) -> Vec<&'static str> {
+        GUEST_TARGETS.into_iter().filter(|t| Self::of(*t) == self).map(GuestTarget::triple).collect()
+    }
+}
+
 /// A sysroot a build compiles against, held in use for as long as this lives.
 pub struct Sysroot {
-    /// A toolchain directory: `RUSTUP_TOOLCHAIN` names it.
-    pub dir: PathBuf,
+    dir: PathBuf,
     /// Whether its compiler is the primary's, which the ToyOS-hosted rustc is
     /// built from.
     pub primary_compiler: bool,
+    pub identity: Identity,
     _using: Option<Guard>,
 }
 
 impl Sysroot {
     /// A checkout whose toolchain arrived as an artifact has one sysroot, the
     /// artifact's, which `toolchain::check_installed_toolchain` has matched to
-    /// these sources.
-    pub(crate) fn installed(stage2: PathBuf) -> Self {
-        Self { dir: stage2, primary_compiler: true, _using: None }
+    /// these sources; `release`, the `TOOLCHAIN` it was published with, is the
+    /// identity of all of it.
+    pub(crate) fn installed(stage2: PathBuf, release: &str) -> Self {
+        let id = Key::of(release.as_bytes());
+        Self { dir: stage2, primary_compiler: true, identity: Identity::new(id.clone(), &id, &id), _using: None }
+    }
+
+    /// Its toolchain directory, which `RUSTUP_TOOLCHAIN` names: lent, never
+    /// handed out, because a sweep may remove it once this is dropped.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+}
+
+/// What a crate compiled against a sysroot compiles against beside its own
+/// sources, as its target directory's `.deps-stamp` records it: the compiler,
+/// which everything a crate's build makes reads, its host half too; and per
+/// guest target the key of its libraries, which only what is made for that
+/// target reads.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Identity {
+    compiler: Key,
+    libraries: BTreeMap<&'static str, Key>,
+}
+
+/// What of a crate's target directory a sysroot's [`Identity`] leaves stale.
+/// Cargo keys nothing it reuses on the sysroot — every ToyOS compiler prints
+/// one `rustc -vV` — so this is where a moved compiler or library reaches a
+/// crate.
+#[derive(Debug, PartialEq)]
+pub enum Stale {
+    /// The compiler moved, or nothing records which one built it: all the guest
+    /// build wrote, its host half too.
+    All,
+    /// Only these guest targets' libraries moved: what was made for them,
+    /// `target/<target>/`, and nothing the compiler made for the host.
+    Targets(Vec<&'static str>),
+}
+
+impl Identity {
+    /// The identity of a sysroot whose compiler's key is `compiler`, whose
+    /// freestanding targets' libraries are `freestanding`'s, and whose others
+    /// are `key`'s.
+    fn new(compiler: Key, freestanding: &Key, key: &Key) -> Self {
+        let libraries = GUEST_TARGETS.map(|target| match Libraries::of(target) {
+            Libraries::Worktree => (target.triple(), key.clone()),
+            Libraries::Freestanding => (target.triple(), freestanding.clone()),
+        });
+        Self { compiler, libraries: libraries.into() }
+    }
+
+    /// The identity of these parts' keys, for its readers' tests.
+    #[cfg(test)]
+    pub(crate) fn of_parts(compiler: &str, freestanding: &str, key: &str) -> Self {
+        let of = |part: &str| Key::of(part.as_bytes());
+        Self::new(of(compiler), &of(freestanding), &of(key))
+    }
+
+    /// What this leaves stale of a target directory whose `.deps-stamp` says
+    /// `stamp`, if it has one: nothing, if it is this.
+    pub fn stale(&self, stamp: Option<&str>) -> Option<Stale> {
+        let Some(was) = stamp.and_then(Self::parse) else { return Some(Stale::All) };
+        if was.compiler != self.compiler {
+            return Some(Stale::All);
+        }
+        let moved: Vec<&'static str> = self
+            .libraries
+            .iter()
+            .filter(|(target, key)| was.libraries.get(*target) != Some(key))
+            .map(|(target, _)| *target)
+            .collect();
+        (!moved.is_empty()).then_some(Stale::Targets(moved))
+    }
+
+    /// The identity `text` spells, if it names a key for each of the
+    /// [`GUEST_TARGETS`] and for nothing else.
+    fn parse(text: &str) -> Option<Self> {
+        let mut lines = text.lines();
+        let compiler = Key::parse(lines.next()?.strip_prefix("compiler ")?)?;
+        let mut libraries = BTreeMap::new();
+        for line in lines {
+            let (triple, key) = line.split_once(' ')?;
+            let target = GUEST_TARGETS.into_iter().find(|t| t.triple() == triple)?;
+            libraries.insert(target.triple(), Key::parse(key)?);
+        }
+        (libraries.len() == GUEST_TARGETS.len()).then_some(Self { compiler, libraries })
+    }
+}
+
+impl fmt::Display for Identity {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "compiler {}", self.compiler)?;
+        self.libraries.iter().try_for_each(|(triple, key)| write!(f, "\n{triple} {key}"))
     }
 }
 
@@ -137,64 +283,204 @@ pub fn witness(root: &Path) -> String {
             lines.push(format!("{}:{}", rel.display(), short(&identity::of(&path, &data))));
         }
     }
-    for manifest in SYSROOT_MANIFESTS {
-        let path = root.join(manifest);
-        let data = fs::read(&path).unwrap_or_else(|e| panic!("witness {}: {e}", path.display()));
-        lines.push(format!("{manifest}:{}", short(&data)));
-    }
+    lines.extend(SYSROOT_MANIFESTS.map(|manifest| manifest_line(root, manifest)));
     lines.join("\n")
+}
+
+/// `manifest`'s witness line: its path and the hash of its bytes.
+fn manifest_line(root: &Path, manifest: &str) -> String {
+    let path = root.join(manifest);
+    let data = fs::read(&path).unwrap_or_else(|e| panic!("witness {}: {e}", path.display()));
+    format!("{manifest}:{}", short(&data))
 }
 
 /// The identity of the source files under `paths` of the git checkout `base`,
 /// as one hash.
 ///
 /// **Source as git sees it**: tracked files and untracked ones no ignore rule
-/// covers, into every submodule checked out there — never what a build or the
-/// desktop leaves beside them (bootstrap's `__pycache__`, Finder's
-/// `.DS_Store`), which would make a key that moves while it is being built.
-pub(crate) fn tree_identity(base: &Path, paths: &[&str]) -> String {
-    let mut files = Vec::new();
-    source_files(base, paths, &mut files);
-    files.sort();
+/// covers, and each submodule as the commit its gitlink records ([`gitlink`]),
+/// checked out or not — never what a build or the desktop leaves beside them
+/// (bootstrap's `__pycache__`, Finder's `.DS_Store`), which would make a key
+/// that moves while it is being built.
+pub(crate) fn tree_identity(base: &Path, paths: &[&str], links: Links) -> String {
+    let mut sources = Vec::new();
+    source_files(base, paths, links, &mut sources);
+    sources.sort();
     let mut hasher = Sha256::new();
-    for path in files {
-        let data = fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    for (path, commit) in sources {
         hasher.update(path.strip_prefix(base).unwrap_or(&path).to_string_lossy().as_bytes());
         hasher.update([0]);
-        hasher.update(&*identity::of(&path, &data));
+        match commit {
+            Some(commit) => hasher.update(commit.as_bytes()),
+            None => {
+                let data = fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+                hasher.update(&*identity::of(&path, &data));
+            }
+        }
         hasher.update([0]);
     }
     hex(&hasher.finalize())[..16].to_string()
 }
 
-fn source_files(checkout: &Path, paths: &[&str], out: &mut Vec<PathBuf>) {
-    let mut args = vec!["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--"];
-    args.extend(paths);
-    let listed = git_bytes(checkout, &args);
+/// The commit `checkout`'s `HEAD` records for its submodule at `path`, which is
+/// the one a build checks out there; refused when the submodule's checkout
+/// holds what no commit does, or the index stages another commit, because a
+/// key names it by that commit.
+pub(crate) fn gitlink(checkout: &Path, path: &str) -> String {
+    let submodule = checkout.join(path);
+    // The untracked cache spares each call a walk of a whole tree.
+    let status = ["-c", "core.untrackedCache=true", "status", "--porcelain", "--untracked-files=normal"];
+    let edited = submodule.join(".git").exists() && !git_bytes(&submodule, &status).is_empty();
+    assert!(
+        !edited,
+        "{} holds changes no commit does, and a key names it by the commit its gitlink records: \
+         commit them there and record that commit in {}",
+        submodule.display(),
+        checkout.display(),
+    );
+    let recorded = git_out(checkout, &["ls-tree", "HEAD", path]);
+    let committed = match recorded.split_whitespace().collect::<Vec<_>>().as_slice() {
+        ["160000", "commit", sha, _] => sha.to_string(),
+        _ => panic!("{} records no {path} gitlink: `git ls-tree HEAD {path}` said {recorded:?}", checkout.display()),
+    };
+    let indexed = git_out(checkout, &["ls-files", "--stage", path]);
+    let staged = match indexed.split_whitespace().collect::<Vec<_>>().as_slice() {
+        ["160000", sha, "0", _] => sha.to_string(),
+        _ => panic!("{} indexes no {path} gitlink: `git ls-files --stage {path}` said {indexed:?}", checkout.display()),
+    };
+    assert!(
+        staged == committed,
+        "{} stages {path} at {staged}, and its HEAD records {committed}: a build checks out the one \
+         staged, and nothing is keyed on what no commit holds; commit the gitlink, or unstage it",
+        checkout.display(),
+    );
+    committed
+}
+
+/// What [`tree_identity`] makes of a symbolic link, which git keeps as the path
+/// it names and a build reads through.
+#[derive(Clone, Copy)]
+pub(crate) enum Links {
+    /// Refused by name.
+    Refused,
+    /// Left out of the identity (`issues/build/a-compiler-key-reads-no-symbolic-link.md`).
+    Skipped,
+}
+
+/// Each source under `paths` of `checkout`, with the commit of each that is a
+/// submodule ([`gitlink`]).
+fn source_files(checkout: &Path, paths: &[&str], links: Links, out: &mut Vec<(PathBuf, Option<String>)>) {
+    let listed = |how: &[&str]| git_bytes(checkout, &[&["ls-files", "-z"][..], how, &["--"][..], paths].concat());
+    let cached = listed(&["--stage"]);
+    let others = listed(&["--others", "--exclude-standard"]);
+    // `<mode> <object> <stage>\t<path>`, and a gitlink's mode is 160000.
+    let cached = cached.split(|b| *b == 0).filter(|e| !e.is_empty()).map(|entry| {
+        let at = entry.iter().position(|b| *b == b'\t').unwrap_or_else(|| panic!("git ls-files --stage said {entry:?}"));
+        (&entry[at + 1..], entry.starts_with(b"160000 "))
+    });
+    let others = others.split(|b| *b == 0).filter(|e| !e.is_empty()).map(|entry| (entry, false));
     let mut seen = BTreeSet::new();
-    for entry in listed.split(|b| *b == 0).filter(|e| !e.is_empty()) {
-        let path = checkout.join(String::from_utf8_lossy(entry).as_ref());
+    for (entry, submodule) in cached.chain(others) {
+        let name = String::from_utf8_lossy(entry);
+        let path = checkout.join(name.as_ref());
         if !seen.insert(path.clone()) {
             continue;
         }
-        if path.join(".git").exists() {
-            source_files(&path, &["."], out);
-        } else if fs::symlink_metadata(&path).is_ok_and(|m| m.is_file()) {
-            out.push(path);
+        if submodule {
+            out.push((path, Some(gitlink(checkout, &name))));
+            continue;
+        }
+        let Ok(meta) = fs::symlink_metadata(&path) else { continue };
+        if meta.is_symlink() {
+            match links {
+                Links::Refused => panic!(
+                    "{} is a symbolic link, and a key of {} reads none: git keeps the path it names, \
+                     and a build reads what is there",
+                    path.display(),
+                    checkout.display()
+                ),
+                Links::Skipped => {}
+            }
+        } else if path.join(".git").exists() {
+            source_files(&path, &["."], links, out);
+        } else if meta.is_file() {
+            out.push((path, None));
         }
     }
 }
 
-/// The key of the sysroot `root` builds against with its std fork at `fork`,
-/// compiled by `compiler`.
-pub fn key(root: &Path, compiler: &Compiler, fork: &Path) -> String {
+/// What a build of a worktree compiles against, by key.
+#[derive(Debug, PartialEq)]
+struct Keys {
+    /// Its freestanding targets' libraries' ([`freestanding_key`]).
+    freestanding: Key,
+    /// Its sysroot's ([`key`]).
+    sysroot: Key,
+    /// What a crate compiled against that sysroot records.
+    identity: Identity,
+}
+
+impl Keys {
+    /// The keys of what `root` builds against with its std fork at `fork`,
+    /// compiled by `compiler`.
+    fn of(root: &Path, compiler: &Compiler, fork: &Path) -> Self {
+        let freestanding = freestanding_key(root, &compiler.key(), fork);
+        let sysroot = key(root, &freestanding);
+        let identity = Identity::new(Key::of(compiler.identity().as_bytes()), &freestanding, &sysroot);
+        Self { freestanding, sysroot, identity }
+    }
+}
+
+/// The key of the freestanding targets' libraries `root` builds against with
+/// its std fork at `fork`, compiled by the compiler whose key is `compiler`
+/// (`Compiler::key`): none of [`SYSROOT_SOURCES`], and of `root` only
+/// [`STD_MANIFESTS`].
+pub(crate) fn freestanding_key(root: &Path, compiler: &Key, fork: &Path) -> Key {
+    freestanding_key_of(root, compiler, fork, RECIPE, &keyed_std_config())
+}
+
+/// [`std_config`] with no path of this host in it, as a key reads it.
+fn keyed_std_config() -> String {
+    let placeholder = Path::new("<placeholder>");
+    std_config(placeholder, placeholder, placeholder, "<host>")
+}
+
+/// [`freestanding_key`], with the recipe and std's configuration it reads.
+fn freestanding_key_of(root: &Path, compiler: &Key, fork: &Path, recipe: &str, config: &str) -> Key {
     let parts = [
-        format!("{RECIPE}; cargo {STAGE0_CARGO}; targets {}", GUEST_TARGETS.join(" ")),
-        witness(root),
-        tree_identity(fork, &["library", "src/bootstrap"]),
-        compiler.identity(),
+        format!("{recipe}; cargo {STAGE0_CARGO}; targets {}", Libraries::Freestanding.targets().join(" ")),
+        config.to_string(),
+        STD_MANIFESTS.map(|manifest| manifest_line(root, manifest)).join("\n"),
+        tree_identity(fork, &["library", "src/bootstrap"], Links::Refused),
+        compiler.to_string(),
     ];
-    short(parts.join("\n\0\n").as_bytes())
+    Key::of(parts.join("\n\0\n").as_bytes())
+}
+
+/// The key of the sysroot `root` builds against, whose freestanding libraries
+/// are `freestanding`'s ([`freestanding_key`], which names the recipe, std's
+/// configuration, the fork and the compiler the rest is built with too).
+pub(crate) fn key(root: &Path, freestanding: &Key) -> Key {
+    key_of(root, freestanding, &build_text())
+}
+
+/// What a sysroot's build is beyond its sources and its freestanding libraries:
+/// its targets, the C++ runtime's options, CMake's description of ToyOS and
+/// libc's cargo invocations.
+fn build_text() -> String {
+    let targets = Libraries::Worktree.targets().join(" ");
+    let (libc, staticlib) = (crate::libc::BUILD, crate::libc::BUILD_C);
+    format!(
+        "targets {targets}; C++ runtime {:?}; CMake {:?}; libc {libc:?} {staticlib:?}",
+        crate::libcxx::OPTIONS,
+        crate::clang::CMAKE,
+    )
+}
+
+/// [`key`], with the build it reads.
+fn key_of(root: &Path, freestanding: &Key, build: &str) -> Key {
+    let parts = [build.to_string(), witness(root), freestanding.to_string()];
+    Key::of(parts.join("\n\0\n").as_bytes())
 }
 
 /// The commit this checkout's tree pins the std fork at: the index's, so a
@@ -223,7 +509,12 @@ fn pinned_fork(root: &Path) -> String {
 /// if the checkout does not already hold it, unless the checkout has local
 /// changes, in which case it is refused by name rather than moved out from
 /// under whoever made them.
-pub fn fork_checkout(root: &Path) -> PathBuf {
+///
+/// Every build in a worktree asks this at once, so the making and the move are
+/// each decided and done under the worktree's lock held exclusively
+/// ([`Held::act_if`]): one build does it, and none reads a checkout another is
+/// still writing.
+pub fn fork_checkout(root: &Path, lock: &mut Held) -> PathBuf {
     let fork = root.join("rust");
     let primary = match toolchain::owner(root) {
         Owner::Us => return fork,
@@ -231,111 +522,199 @@ pub fn fork_checkout(root: &Path) -> PathBuf {
         Owner::Elsewhere(primary) => primary,
     };
     let pinned = pinned_fork(root);
-    if !fork.join(".git").exists() {
-        let stub = fs::read_dir(&fork).map_or(0, |d| d.count());
-        assert!(
-            stub == 0,
-            "{} is neither a fork checkout nor the empty stub a worktree starts with",
-            fork.display()
-        );
-        let _ = fs::remove_dir(&fork);
-        eprintln!("Making {} a fork checkout at {pinned} (a git worktree of the primary's)", fork.display());
-        git_run(&primary.join("rust"), &["worktree", "add", "--detach", path_str(&fork), &pinned]);
-        let backtrace = git_out(&fork, &["ls-tree", "HEAD", "library/backtrace"]);
-        let commit = backtrace.split_whitespace().nth(2).unwrap_or_else(|| {
-            panic!("{} pins no library/backtrace: {backtrace:?}", fork.display())
-        });
-        let theirs = primary.join("rust/library/backtrace");
-        let held = Command::new("git")
-            .args(["cat-file", "-e", &format!("{commit}^{{commit}}")])
-            .current_dir(&theirs)
-            .status()
-            .is_ok_and(|s| s.success());
-        let at = fork.join("library/backtrace");
-        if held {
-            let _ = fs::remove_dir(&at);
-            git_run(&theirs, &["worktree", "add", "--detach", path_str(&at), commit]);
-        } else {
-            git_run(&fork, &["submodule", "update", "--init", "library/backtrace"]);
-        }
-        return fork;
-    }
-    let head = git_out(&fork, &["rev-parse", "HEAD"]);
-    let head = head.trim();
-    let ahead = Command::new("git")
-        .args(["merge-base", "--is-ancestor", &pinned, head])
-        .current_dir(&fork)
-        .status()
-        .is_ok_and(|s| s.success());
-    if head == pinned || ahead {
-        return fork;
-    }
-    let dirty = git_out(&fork, &["status", "--porcelain", "--ignore-submodules=none"]);
-    assert!(
-        dirty.is_empty(),
-        "{} is at {head} with uncommitted work, and this tree pins the fork at {pinned}, which \
-         that is not ahead of: a build here would compile a std this tree does not name, and \
-         moving the checkout would lose that work.\n{dirty}",
-        fork.display(),
+    lock.act_if(
+        Scope::Worktree,
+        "make the fork checkout",
+        || (!fork.join(".git").exists()).then_some(()),
+        |()| {
+            let stub = fs::read_dir(&fork).map_or(0, |d| d.count());
+            assert!(
+                stub == 0,
+                "{} is neither a fork checkout nor the empty stub a worktree starts with",
+                fork.display()
+            );
+            let _ = fs::remove_dir(&fork);
+            eprintln!("Making {} a fork checkout at {pinned} (a git worktree of the primary's)", fork.display());
+            git_run(&primary.join("rust"), &["worktree", "add", "--detach", path_str(&fork), &pinned]);
+            let backtrace = git_out(&fork, &["ls-tree", "HEAD", "library/backtrace"]);
+            let commit = backtrace.split_whitespace().nth(2).unwrap_or_else(|| {
+                panic!("{} pins no library/backtrace: {backtrace:?}", fork.display())
+            });
+            let theirs = primary.join("rust/library/backtrace");
+            let held = Command::new("git")
+                .args(["cat-file", "-e", &format!("{commit}^{{commit}}")])
+                .current_dir(&theirs)
+                .status()
+                .is_ok_and(|s| s.success());
+            let at = fork.join("library/backtrace");
+            if held {
+                let _ = fs::remove_dir(&at);
+                git_run(&theirs, &["worktree", "add", "--detach", path_str(&at), commit]);
+            } else {
+                git_run(&fork, &["submodule", "update", "--init", "library/backtrace"]);
+            }
+        },
     );
-    let held = Command::new("git")
-        .args(["cat-file", "-e", &format!("{pinned}^{{commit}}")])
-        .current_dir(&fork)
-        .status()
-        .is_ok_and(|s| s.success());
-    if !held {
-        git_run(&fork, &["fetch", path_str(&primary.join("rust")), &pinned]);
-    }
-    git_run(&fork, &["checkout", "--detach", "-q", &pinned]);
-    eprintln!("{} was at {head}, behind this tree's pin {pinned}: checked it out", fork.display());
+    lock.act_if(
+        Scope::Worktree,
+        "move the fork checkout to its pin",
+        || {
+            let head = git_out(&fork, &["rev-parse", "HEAD"]).trim().to_string();
+            let ahead = Command::new("git")
+                .args(["merge-base", "--is-ancestor", &pinned, &head])
+                .current_dir(&fork)
+                .status()
+                .is_ok_and(|s| s.success());
+            (head != pinned && !ahead).then_some(head)
+        },
+        |head| {
+            let dirty = git_out(&fork, &["status", "--porcelain", "--ignore-submodules=none"]);
+            assert!(
+                dirty.is_empty(),
+                "{} is at {head} with uncommitted work, and this tree pins the fork at {pinned}, which \
+                 that is not ahead of: a build here would compile a std this tree does not name, and \
+                 moving the checkout would lose that work.\n{dirty}",
+                fork.display(),
+            );
+            let held = Command::new("git")
+                .args(["cat-file", "-e", &format!("{pinned}^{{commit}}")])
+                .current_dir(&fork)
+                .status()
+                .is_ok_and(|s| s.success());
+            if !held {
+                git_run(&fork, &["fetch", path_str(&primary.join("rust")), &pinned]);
+            }
+            git_run(&fork, &["checkout", "--detach", "-q", &pinned]);
+            eprintln!("{} was at {head}, behind this tree's pin {pinned}: checked it out", fork.display());
+        },
+    );
     fork
 }
 
-/// Why `dir` is not a finished sysroot, if it is not: no [`SOURCES`], or not a
+/// What a sysroot's [`SOURCES`] says: its key, the fork checkout its std was
+/// built in, and the witness of the sources it was built from.
+fn sources_text(key: &Key, fork: &Path, witness: &str) -> String {
+    format!("{key}\nfork {}\n{witness}\n", fork.display())
+}
+
+/// The witness the sysroot at `dir` records it was built from ([`sources_text`]).
+pub(crate) fn recorded_witness(dir: &Path) -> Result<String, String> {
+    let path = dir.join(SOURCES);
+    let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    match text.splitn(3, '\n').collect::<Vec<_>>().as_slice() {
+        [_, fork, witness] if fork.starts_with("fork ") => Ok(witness.trim_end_matches('\n').to_string()),
+        _ => Err(format!("{} records no witness: {text:?}", path.display())),
+    }
+}
+
+/// Why `dir` is not a directory [`publish`] finished, if it is not: it carries
+/// no [`SOURCES`].
+pub(crate) fn unpublished(dir: &Path) -> Option<String> {
+    (!dir.join(SOURCES).is_file()).then(|| format!("{} carries no {SOURCES}", dir.display()))
+}
+
+/// Why `dir` is not a finished sysroot, if it is not: [`unpublished`], or not a
 /// whole toolchain (`toolchain::toolchain_defect`). One found with the first and
 /// not the second is made again rather than trusted — all of it even when only
 /// its `bin/cargo` link dangles, because that is rare and a sysroot has no
 /// repair path.
-fn unfinished(dir: &Path) -> Option<String> {
-    if !dir.join(SOURCES).is_file() {
-        return Some(format!("{} carries no {SOURCES}", dir.display()));
-    }
-    toolchain::toolchain_defect(dir)
+pub(crate) fn unfinished(dir: &Path) -> Option<String> {
+    unpublished(dir).or_else(|| toolchain::toolchain_defect(dir))
 }
 
-/// The sysroot `key` names at `dir`, made by `make` if nobody has made it, and
-/// held in use for as long as the returned guard lives.
-fn held(root: &Path, key: &str, dir: &Path, make: impl FnMut()) -> Guard {
-    buildlock::keyed_made(root, Keyed::Sysroot, key, || unfinished(dir), make)
+/// The sysroot `key` names at `dir`, recorded as `root`'s, made by `make` if
+/// nobody has made it, and held in use for as long as the returned guard lives.
+fn held(root: &Path, key: &Key, dir: &Path, make: impl FnMut()) -> Guard {
+    let store = dir.parent().expect("a sysroot is a directory of its store");
+    keystore::made(root, Keyed::Sysroot, store, key, || unfinished(dir), make)
 }
 
 /// The sysroot this worktree's sources name, made if nobody has made it, and
 /// held in use for as long as the returned value lives.
 pub fn ensure(root: &Path, rust_dir: &Path, lock: &mut Held) -> Sysroot {
-    let fork = fork_checkout(root);
+    let fork = fork_checkout(root, lock);
     let compiler = compiler::resolve(root, rust_dir, &fork, lock);
-    let key = key(root, &compiler, &fork);
-    let dir = sysroots_dir(rust_dir).join(&key);
-    crate::keystore::record(root, Keyed::Sysroot, &key);
+    let keys = Keys::of(root, &compiler, &fork);
+    let dir = sysroots_dir(rust_dir).join(&keys.sysroot);
+    keystore::record(root, Keyed::Freestanding, &keys.freestanding);
 
-    let using = lock.without_shared(|| held(root, &key, &dir, || build(root, &compiler, &fork, &key, &dir)));
-    Sysroot { dir, primary_compiler: compiler.primary, _using: Some(using) }
+    let using =
+        lock.without_shared(|| held(root, &keys.sysroot, &dir, || build(root, rust_dir, &compiler, &fork, &keys, &dir)));
+    Sysroot { dir, primary_compiler: compiler.primary, identity: keys.identity, _using: Some(using) }
 }
 
-/// Make the sysroot `key` names at `dir`, from `root`'s sources and the std fork
-/// at `fork`, with `compiler`. The caller holds the key's lock.
-fn build(root: &Path, compiler: &Compiler, fork: &Path, key: &str, dir: &Path) {
-    let what = format!("building sysroot {key}");
+/// Only [`whole`] makes a [`Whole`].
+mod whole_toolchain {
+    use std::path::Path;
+
+    use crate::compiler::Compiler;
+    use crate::toolchain;
+
+    /// A compiler [`whole`] found to be a whole toolchain: what a sysroot is
+    /// made from.
+    pub(super) struct Whole<'a>(&'a Compiler);
+
+    impl Whole<'_> {
+        pub(super) fn stage2(&self) -> &Path {
+            &self.0.stage2
+        }
+    }
+
+    /// `compiler`, refused unless it is a whole toolchain: no sysroot is made
+    /// from one that is not, and no std is built for one.
+    pub(super) fn whole(compiler: &Compiler) -> Whole<'_> {
+        if let Some(defect) = toolchain::toolchain_defect(&compiler.stage2) {
+            let fix = if compiler.primary {
+                "\nA bootstrap in the primary checkout was stopped before it finished: \
+                 `cargo run -- --build-only` there completes it."
+            } else {
+                ""
+            };
+            panic!("no sysroot is made from {}, and no std was built for one: {defect}{fix}", compiler.stage2.display());
+        }
+        Whole(compiler)
+    }
+}
+
+/// Make the sysroot `keys` names at `dir`, from `root`'s sources and the std
+/// fork at `fork`, with `compiler`, and the freestanding libraries `keys`
+/// names. The caller holds the sysroot key's lock.
+fn build(root: &Path, rust_dir: &Path, compiler: &Compiler, fork: &Path, keys: &Keys, dir: &Path) {
+    let made_from = whole(compiler);
+    let store = freestanding_dir(rust_dir).join(&keys.freestanding);
+    let _freestanding = keystore::made(
+        root,
+        Keyed::Freestanding,
+        &freestanding_dir(rust_dir),
+        &keys.freestanding,
+        || unpublished(&store),
+        || build_freestanding(root, compiler, fork, &keys.freestanding, &store),
+    );
+    let what = format!("building sysroot {}", keys.sysroot);
     let _worktree = buildlock::worktree_exclusive(root, &what);
     // Only the primary's compiler is rebuilt in place; one of a worktree's own
     // is written once and held in use by `compiler`.
     let _compiler = compiler.primary.then(|| buildlock::compiler_shared(root, &what));
-    eprintln!("Building sysroot {key}: std from {}, the compiler {}", fork.display(), compiler.stage2.display());
+    eprintln!(
+        "Building sysroot {}: ToyOS's std from {}, the compiler {}, the freestanding libraries {}",
+        keys.sysroot,
+        fork.display(),
+        compiler.stage2.display(),
+        keys.freestanding
+    );
 
-    publish(compiler, dir, |partial| {
-        let built = build_std(root, compiler, fork);
+    publish_toolchain(made_from, dir, |partial| {
+        let built = build_std(root, compiler, fork, Libraries::Worktree);
         for target in GUEST_TARGETS {
-            place_std(&stamp(&built, target), &partial.join("lib/rustlib").join(target).join("lib"));
+            let triple = target.triple();
+            let lib = partial.join("lib/rustlib").join(triple).join("lib");
+            match Libraries::of(target) {
+                Libraries::Worktree => place_std(&stamp(&built, triple), &lib),
+                Libraries::Freestanding => {
+                    keystore::remove(&lib);
+                    clone_tree(&store.join(triple), &lib);
+                }
+            }
         }
         let libc_target = dir.with_extension("libc-target");
         for arch in Arch::ALL {
@@ -343,81 +722,115 @@ fn build(root: &Path, compiler: &Compiler, fork: &Path, key: &str, dir: &Path) {
             crate::libc::build_c(root, partial, &libc_target, arch);
         }
         let _ = fs::remove_dir_all(&libc_target);
+        let llvm = crate::llvm::held(root, rust_dir, fork);
+        let ninja = crate::n2::ninja(root);
+        for arch in Arch::ALL {
+            let scratch = dir.with_extension(format!("libcxx-{}", arch.name()));
+            let c = crate::clang::CSysroot::of(partial, arch);
+            crate::libcxx::build(&c, &llvm.dir.join("src"), &ninja, &scratch);
+        }
 
         // The sources the key named are the ones built, or this is not that key's.
-        let again = self::key(root, compiler, fork);
+        let (key, again) = (&keys.sysroot, Keys::of(root, compiler, fork).sysroot);
         assert!(
-            again == key,
+            again == *key,
             "the sources moved while sysroot {key} was being built (they are now {again}); \
              nothing was kept, and the next build makes the one they name"
         );
-        format!("{key}\nfork {}\n{}\n", fork.display(), witness(root))
+        sources_text(key, fork, &witness(root))
     });
 }
 
-/// Put at `dir` a whole toolchain: `compiler`'s files and what `fill` adds to
-/// them, then the [`SOURCES`] `fill` returns, last. A `dir` already there is one
-/// [`unfinished`] refused, and it is replaced. A compiler that is not whole is
-/// refused before `fill` runs, and nothing is published.
-fn publish(compiler: &Compiler, dir: &Path, fill: impl FnOnce(&Path) -> String) {
-    if let Some(defect) = toolchain::toolchain_defect(&compiler.stage2) {
-        let fix = if compiler.primary {
-            "\nA bootstrap in the primary checkout was stopped before it finished: \
-             `cargo run -- --build-only` there completes it."
-        } else {
-            ""
-        };
-        panic!("no sysroot is made from {}, and no std was built for one: {defect}{fix}", compiler.stage2.display());
-    }
+/// Make the freestanding targets' libraries `key` names at `store`, from the std
+/// fork at `fork` with `compiler`. The caller holds the key's lock.
+fn build_freestanding(root: &Path, compiler: &Compiler, fork: &Path, key: &Key, store: &Path) {
+    let what = format!("building the freestanding libraries {key}");
+    let _worktree = buildlock::worktree_exclusive(root, &what);
+    let _compiler = compiler.primary.then(|| buildlock::compiler_shared(root, &what));
+    eprintln!(
+        "Building the freestanding libraries {key}: {} from {}, the compiler {}",
+        Libraries::Freestanding.targets().join(", "),
+        fork.display(),
+        compiler.stage2.display()
+    );
+    publish(store, |partial| {
+        let built = build_std(root, compiler, fork, Libraries::Freestanding);
+        for target in Libraries::Freestanding.targets() {
+            place_std(&stamp(&built, target), &partial.join(target));
+        }
+        let again = freestanding_key(root, &compiler.key(), fork);
+        assert!(
+            again == *key,
+            "the sources moved while the freestanding libraries {key} were being built (they are \
+             now {again}); nothing was kept, and the next build makes the ones they name"
+        );
+        format!("{key}\nfork {}\n", fork.display())
+    });
+}
+
+/// [`publish`] at `dir` a toolchain: `compiler`'s files, then what `fill`
+/// adds to them.
+fn publish_toolchain(compiler: Whole, dir: &Path, fill: impl FnOnce(&Path) -> String) {
+    publish(dir, |partial| {
+        clone_tree(compiler.stage2(), partial);
+        fill(partial)
+    });
+}
+
+/// Put at `dir` what `fill` makes at the path it is handed, then the
+/// [`SOURCES`] it returns, last. A `dir` already there is one [`unpublished`]
+/// or worse refused, and it is replaced.
+fn publish(dir: &Path, fill: impl FnOnce(&Path) -> String) {
     let partial = dir.with_extension("partial");
-    if partial.exists() {
-        fs::remove_dir_all(&partial).unwrap_or_else(|e| panic!("remove {}: {e}", partial.display()));
-    }
-    clone_tree(&compiler.stage2, &partial);
+    keystore::remove(&partial);
     let sources = fill(&partial);
     fs::write(partial.join(SOURCES), sources)
         .unwrap_or_else(|e| panic!("write {}: {e}", partial.join(SOURCES).display()));
-    if dir.exists() {
-        fs::remove_dir_all(dir).unwrap_or_else(|e| panic!("remove {}: {e}", dir.display()));
-    }
+    keystore::remove(dir);
     fs::rename(&partial, dir)
         .unwrap_or_else(|e| panic!("rename {} -> {}: {e}", partial.display(), dir.display()));
 }
 
-/// Compile the guest targets' libraries from `fork`'s `library/` with
-/// `compiler`, and return the directory each target's is under.
-fn build_std(root: &Path, compiler: &Compiler, fork: &Path) -> PathBuf {
+/// Compile the libraries of `libraries`' targets from `fork`'s `library/` with
+/// `compiler`, and return the directory each target's is under, once each
+/// target's dep-info shows it read of `root` what `libraries` says.
+fn build_std(root: &Path, compiler: &Compiler, fork: &Path, libraries: Libraries) -> PathBuf {
     crate::ensure_submodule(fork, "library/backtrace");
     let host = host_triple();
     let build_dir = fork.join("build/toyos-std");
-    prepare_std_build(&build_dir, &host, &compiler.identity());
+    let targets = libraries.targets();
+    prepare_std_build(&build_dir, &host, &compiler.identity(), &targets);
     let config = build_dir.join("bootstrap.toml");
     fs::write(&config, std_config(&compiler.stage2, &bootstrap_cargo(), &build_dir, &host))
         .unwrap_or_else(|e| panic!("write {}: {e}", config.display()));
 
-    let targets = GUEST_TARGETS.join(",");
+    let listed = targets.join(",");
     let args = ["build", "library", "--stage", "0", "--config", path_str(&config), "--warnings", "warn",
-                "--target", &targets];
+                "--target", &listed];
     let (ok, log) = toolchain::x_build(fork, &args, "std");
     toolchain::refuse_on_compile_error(&log, "std");
     assert!(ok, "the std build failed, and nothing in its output was a compile error");
-    for arch in Arch::ALL {
-        toolchain::assert_std_built_from(root, &build_dir.join(&host).join("stage0-std").join(arch.userland()));
+    let built = build_dir.join(&host).join("stage0-std");
+    for target in targets {
+        match libraries {
+            Libraries::Worktree => toolchain::assert_std_built_from(root, &built.join(target)),
+            Libraries::Freestanding => toolchain::assert_std_reads_no_worktree(root, fork, &built.join(target)),
+        }
     }
-    build_dir.join(&host).join("stage0-std")
+    built
 }
 
-/// Ready the std build directory `build_dir` for a build by the compiler
-/// `identity` names: nothing another compiler built, no LLVM, and no guest
-/// target's std.
-fn prepare_std_build(build_dir: &Path, host: &str, identity: &str) {
+/// Ready the std build directory `build_dir` for a build of `targets` by the
+/// compiler `identity` names: nothing another compiler built, no LLVM, and no
+/// std of those targets.
+fn prepare_std_build(build_dir: &Path, host: &str, identity: &str, targets: &[&str]) {
     fs::create_dir_all(build_dir).unwrap_or_else(|e| panic!("create {}: {e}", build_dir.display()));
     forget_another_compiler(build_dir, host, identity);
     crate::llvm::retire_in_tree(build_dir);
     // Bootstrap reuses what it built before and does not see a path dependency
     // outside the fork move, so each target's std starts from nothing.
-    for target in GUEST_TARGETS {
-        remove(&build_dir.join(host).join("stage0-std").join(target));
+    for target in targets {
+        keystore::remove(&build_dir.join(host).join("stage0-std").join(target));
     }
 }
 
@@ -445,25 +858,11 @@ fn forget_another_compiler(build_dir: &Path, host: &str, identity: &str) {
         for entry in entries {
             let entry = entry.unwrap_or_else(|e| panic!("read {}: {e}", dir.display()));
             if !kept.iter().any(|name| entry.file_name() == *name) {
-                remove(&entry.path());
+                keystore::remove(&entry.path());
             }
         }
     }
     fs::write(&record, identity).unwrap_or_else(|e| panic!("write {}: {e}", record.display()));
-}
-
-/// Remove `path`, a directory with all it holds or anything else; that nothing
-/// is there is not an error.
-fn remove(path: &Path) {
-    let removed = match fs::symlink_metadata(path) {
-        Ok(meta) if meta.is_dir() => fs::remove_dir_all(path),
-        Ok(_) => fs::remove_file(path),
-        Err(e) => Err(e),
-    };
-    match removed {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => panic!("remove {}: {e}", path.display()),
-        _ => {}
-    }
 }
 
 /// The stamp bootstrap wrote naming every library it built for `target` under
@@ -518,9 +917,11 @@ fn place_std(stamp: &Path, lib: &Path) {
 /// The linker is the compiler's own `rust-lld`, named by path so that which sysroot
 /// a stage-0 build searches for tools decides nothing; and no rpath, which bootstrap
 /// spells as a C driver's `-Wl,` arguments that a linker run directly refuses.
-/// No LLVM: std builds none, and the profile's `download-ci-llvm` fetches one.
+/// No LLVM: std builds none, and the profile's `download-ci-llvm` fetches one;
+/// and no Ninja, which bootstrap otherwise demands on `PATH` for the LLVM it does
+/// not build.
 fn std_config(compiler: &Path, cargo: &Path, build_dir: &Path, host: &str) -> String {
-    let targets = GUEST_TARGETS.iter().map(|t| format!("\"{t}\"")).collect::<Vec<_>>().join(", ");
+    let targets = GUEST_TARGETS.map(|t| format!("\"{}\"", t.triple())).join(", ");
     let linker = toolchain::rust_lld(compiler);
     let userland: String = Arch::ALL
         .iter()
@@ -540,6 +941,7 @@ target = [{targets}]
 
 [llvm]
 download-ci-llvm = false
+ninja = false
 
 [rust]
 lld = false
@@ -658,7 +1060,7 @@ mod tests {
         let out = Command::new("git")
             .args(["-c", "commit.gpgsign=false", "-c", "user.email=t@t", "-c", "user.name=t"])
             .args(["-c", "protocol.file.allow=always", "-c", "init.defaultBranch=main"])
-            .args(crate::pr::tests::NO_AUTO_MAINTENANCE)
+            .args(crate::gitfixture::NO_AUTO_MAINTENANCE)
             .args(args)
             .current_dir(dir)
             .output()
@@ -672,7 +1074,7 @@ mod tests {
         fs::write(path, text).unwrap();
     }
 
-    /// A worktree's three trees, a fork checkout and a compiler, laid out the
+    /// A worktree's trees, a fork checkout and a compiler, laid out the
     /// way the key reads them.
     fn keyed(base: &Path) -> (PathBuf, PathBuf, PathBuf) {
         let root = base.join("root");
@@ -693,55 +1095,190 @@ mod tests {
         (root, rust_dir, fork)
     }
 
-    /// **The key is the identity, and only the identity**: a comment in any tree
-    /// it reads — the ABI or the std fork — is the same sysroot, and a signature,
-    /// a line of the fork's code or another compiler is another.
+    /// **Each key is the identity of what it is built from, and only that**: a
+    /// comment in any tree they read moves neither; an edit to a tree only
+    /// ToyOS's std or the C sysroot compiles moves the sysroot and keeps its
+    /// freestanding libraries; a line of the fork's code, a manifest std's
+    /// lockfile resolves, the recipe, std's configuration or another compiler
+    /// moves both. A crate built against the old ones is stale in the targets
+    /// whose libraries moved, and in all of it when the compiler did. A
+    /// symbolic link in the fork, whose target no key would read, is refused.
     #[test]
     fn a_comment_is_the_same_sysroot_and_a_signature_is_another() {
         let base = TempDir::new("key");
         let (root, rust_dir, fork) = keyed(&base);
-        let k = || key(&root, &Compiler::primary(&rust_dir), &fork);
-        let base = k();
-        assert_eq!(base.len(), 16, "{base}");
+        let k = || Keys::of(&root, &Compiler::primary(&rust_dir), &fork);
+        let was = k();
+        assert_eq!((was.sysroot.as_str().len(), was.freestanding.as_str().len()), (16, 16), "{was:?}");
+        let stamp = was.identity.to_string();
+        let toyos = vec!["aarch64-unknown-toyos", "x86_64-unknown-toyos"];
+        let mut all = GUEST_TARGETS.map(GuestTarget::triple).to_vec();
+        all.sort();
+        let same = |what: &str| assert_eq!(k(), was, "{what} moved a key");
+        let sysroot_only = |what: &str| {
+            let now = k();
+            assert_ne!(now.sysroot, was.sysroot, "{what} kept the old sysroot");
+            assert_eq!(now.freestanding, was.freestanding, "{what} moved the freestanding libraries");
+            assert_eq!(now.identity.stale(Some(&stamp)), Some(Stale::Targets(toyos.clone())), "{what}");
+        };
+        let both = |what: &str| {
+            let now = k();
+            assert_ne!(now.sysroot, was.sysroot, "{what} kept the old sysroot");
+            assert_ne!(now.freestanding, was.freestanding, "{what} kept the old freestanding libraries");
+            assert_eq!(now.identity.stale(Some(&stamp)), Some(Stale::Targets(all.clone())), "{what}");
+        };
 
         let abi = root.join("toyos-abi/src/lib.rs");
         write(&abi, "//! The crate.\n/// A, said better.\n// and a plain comment\npub struct A;\n");
-        assert_eq!(k(), base, "a comment in toyos-abi made a new sysroot");
+        same("a comment in toyos-abi");
         write(&abi, "/// A.\npub struct A(pub u64);\n");
-        assert_ne!(k(), base, "a signature change kept the old sysroot");
+        sysroot_only("a signature change in toyos-abi");
         write(&abi, "/// A.\npub struct A;\n");
-        assert_eq!(k(), base);
+        same("toyos-abi as it was");
+
+        for tree in ["toyos/src", "userland/libc/src"] {
+            write(&root.join(tree).join("lib.rs"), "/// A.\npub struct A(u8);\n");
+            sysroot_only(tree);
+            write(&root.join(tree).join("lib.rs"), "/// A.\npub struct A;\n");
+            same(tree);
+        }
 
         let header = root.join("userland/libc/include/stdio.h");
         write(&header, "int puts(const char *);\n");
-        assert_ne!(k(), base, "a header the C sysroot carries kept the old sysroot");
+        sysroot_only("a header the C sysroot carries");
         fs::remove_file(&header).unwrap();
-        assert_eq!(k(), base);
+        same("the C sysroot's headers as they were");
+
+        for read in ["userland/libc/Cargo.toml", "userland/libc/Cargo.lock", "userland/.cargo/config.toml"] {
+            write(&root.join(read), "[package]\nversion = \"0.2.0\"\n");
+            sysroot_only(&format!("{read}, which std's lockfile does not resolve,"));
+            write(&root.join(read), "[package]\nversion = \"0.1.0\"\n");
+            same(&format!("{read} as it was"));
+        }
+        assert_eq!(key_of(&root, &was.freestanding, &build_text()), was.sysroot);
+        for flag in [crate::libc::BUILD[1], crate::libc::BUILD_C[1]] {
+            assert!(build_text().contains(flag), "the sysroot key reads none of libc's {flag}: {}", build_text());
+        }
+        let options = format!("{:?}", crate::libcxx::OPTIONS);
+        assert!(build_text().contains(&options), "the sysroot key reads no C++ runtime option: {}", build_text());
+        assert_ne!(key_of(&root, &was.freestanding, &build_text().replace("--release", "--profile=dev")), was.sysroot,
+                   "libc's cargo invocation kept the sysroot");
 
         let std = fork.join("library/std/src/lib.rs");
         write(&std, "//! std, documented\npub fn exit() {}\n");
-        assert_eq!(k(), base, "a comment in the std fork made a new sysroot");
+        same("a comment in the std fork");
         write(&std, "//! std\npub fn exit() { loop {} }\n");
-        assert_ne!(k(), base, "a change to the fork's code kept the old sysroot");
+        both("a change to the fork's code");
         write(&std, "//! std\npub fn exit() {}\n");
-        assert_eq!(k(), base);
+        same("the fork as it was");
 
         // What a build and the desktop leave in the checkout is not its source.
         write(&fork.join("src/bootstrap/__pycache__/bootstrap.cpython-313.pyc"), "bytecode");
         write(&fork.join("library/.DS_Store"), "finder");
-        assert_eq!(k(), base, "a file git ignores moved the key");
+        same("a file git ignores");
         write(&fork.join("library/std/src/new.rs"), "pub fn new() {}\n");
-        assert_ne!(k(), base, "an untracked source file was not in the key");
+        both("an untracked source file");
         fs::remove_file(fork.join("library/std/src/new.rs")).unwrap();
-        assert_eq!(k(), base);
+        same("the fork without it");
 
-        write(&root.join("toyos-abi/Cargo.toml"), "[package]\nversion = \"0.2.0\"\n");
-        assert_ne!(k(), base, "a manifest change kept the old sysroot");
-        write(&root.join("toyos-abi/Cargo.toml"), "[package]\nversion = \"0.1.0\"\n");
-        assert_eq!(k(), base);
+        let link = fork.join("library/std/src/linked.rs");
+        std::os::unix::fs::symlink("lib.rs", &link).unwrap();
+        let said = refusal(|| drop(k()));
+        assert!(said.starts_with(&format!("{} is a symbolic link", link.display())), "{said}");
+        fs::remove_file(&link).unwrap();
+        same("the fork without the link");
+
+        for manifest in STD_MANIFESTS {
+            write(&root.join(manifest), "[package]\nversion = \"0.2.0\"\n");
+            both(manifest);
+            write(&root.join(manifest), "[package]\nversion = \"0.1.0\"\n");
+            same(manifest);
+        }
+
+        let compiler = Compiler::primary(&rust_dir).key();
+        let config = keyed_std_config();
+        assert_eq!(freestanding_key_of(&root, &compiler, &fork, RECIPE, &config), was.freestanding);
+        assert_ne!(freestanding_key_of(&root, &compiler, &fork, RECIPE, ""), was.freestanding,
+                   "the freestanding key reads no std configuration");
+        for (what, moved) in [
+            ("the recipe", freestanding_key_of(&root, &compiler, &fork, "another recipe", &config)),
+            ("std's configuration", freestanding_key_of(&root, &compiler, &fork, RECIPE, &format!("{config}\n[rust]\n"))),
+        ] {
+            assert_ne!(moved, was.freestanding, "{what} kept the old freestanding libraries");
+        }
 
         write(&rust_dir.join("build/toyos-compiler"), "tree-2");
-        assert_ne!(k(), base, "another compiler kept the old sysroot");
+        let now = k();
+        assert!(now.sysroot != was.sysroot && now.freestanding != was.freestanding, "another compiler kept a key: {now:?}");
+        assert_eq!(now.identity.stale(Some(&stamp)), Some(Stale::All), "another compiler kept a crate's host half");
+    }
+
+    /// **A submodule is the commit its gitlink records, checked out or not**:
+    /// a fork whose `library/backtrace` is not checked out yet, as a runner's
+    /// is when it keys the stores its build then makes, keys its freestanding
+    /// libraries as it does once the build has checked it out. Another commit
+    /// moves the key; an edit there, or a gitlink staged and not committed, is
+    /// refused.
+    #[test]
+    fn a_submodule_is_the_commit_its_gitlink_records_checked_out_or_not() {
+        let base = TempDir::new("key-submodule");
+        let (root, rust_dir, _) = keyed(&base);
+        let backtrace = base.join("backtrace-src");
+        write(&backtrace.join("src/lib.rs"), "pub fn trace() {}\n");
+        git(&backtrace, &["init", "-q"]);
+        git(&backtrace, &["add", "-A"]);
+        git(&backtrace, &["commit", "-qm", "backtrace"]);
+        let fork = base.join("fork-src");
+        write(&fork.join("library/std/src/lib.rs"), "pub fn exit() {}\n");
+        write(&fork.join("src/bootstrap/src/lib.rs"), "fn main() {}\n");
+        git(&fork, &["init", "-q"]);
+        git(&fork, &["submodule", "add", "-q", backtrace.to_str().unwrap(), "library/backtrace"]);
+        git(&fork, &["add", "-A"]);
+        git(&fork, &["commit", "-qm", "the fork"]);
+        let clone = base.join("clone");
+        git(&base, &["clone", "-q", fork.to_str().unwrap(), clone.to_str().unwrap()]);
+
+        let k = || freestanding_key(&root, &Compiler::primary(&rust_dir).key(), &clone);
+        assert!(fs::read_dir(clone.join("library/backtrace")).unwrap().next().is_none(), "the clone checked its submodule out");
+        let unchecked = k();
+        git(&clone, &["submodule", "update", "-q", "--init", "library/backtrace"]);
+        assert_eq!(k(), unchecked, "checking the submodule out moved the key");
+
+        write(&clone.join("library/backtrace/src/lib.rs"), "pub fn trace() { loop {} }\n");
+        let said = refusal(|| drop(k()));
+        assert!(said.contains("library/backtrace holds changes no commit does"), "{said}");
+        git(&clone.join("library/backtrace"), &["commit", "-qam", "another backtrace"]);
+        git(&clone, &["add", "library/backtrace"]);
+        let said = refusal(|| drop(k()));
+        assert!(said.contains("stages library/backtrace"), "{said}");
+        git(&clone, &["commit", "-qm", "another backtrace"]);
+        assert_ne!(k(), unchecked, "another backtrace commit kept the key");
+    }
+
+    /// **A sysroot's recorded witness is the one its build wrote**, read back
+    /// whole; a `SOURCES` naming no fork records none.
+    #[test]
+    fn a_sysroot_records_the_witness_it_was_built_from() {
+        let dir = TempDir::new("recorded-witness");
+        let witness = "toyos-abi/src/lib.rs:0011223344556677\ntoyos/Cargo.toml:8899aabbccddeeff";
+        fs::write(dir.join(SOURCES), sources_text(&Key::of(b"a sysroot"), Path::new("/a/fork/rust"), witness)).unwrap();
+        assert_eq!(recorded_witness(&dir), Ok(witness.to_string()));
+        fs::write(dir.join(SOURCES), "0123456789abcdef\n").unwrap();
+        assert!(recorded_witness(&dir).is_err(), "a SOURCES with no fork line recorded a witness");
+    }
+
+    /// **A crate's compiler is the one that built it, rebuilt in place or
+    /// not**: the primary's is rebuilt where it stands, so a driver its rebuild
+    /// left leaves all of a crate stale, and the same driver none of it.
+    #[test]
+    fn a_compiler_rebuilt_in_place_leaves_all_of_a_crate_stale() {
+        let base = TempDir::new("identity-compiler");
+        let (root, rust_dir, fork) = keyed(&base);
+        let identity = || Keys::of(&root, &Compiler::primary(&rust_dir), &fork).identity;
+        let stamp = identity().to_string();
+        assert_eq!(identity().stale(Some(&stamp)), None, "a crate was stale against the compiler that built it");
+        write(&toolchain::stage2(&rust_dir).join("lib/librustc_driver-1.dylib"), "a driver, rebuilt in place");
+        assert_eq!(identity().stale(Some(&stamp)), Some(Stale::All), "a crate kept what the compiler made before its rebuild");
     }
 
     /// **What one compiler compiled in a std build directory is never another's**:
@@ -801,7 +1338,7 @@ mod tests {
         let build = base.join("toyos-std");
         let host = host_triple();
         let identity = Compiler::primary(&rust_dir).identity();
-        prepare_std_build(&build, &host, &identity);
+        prepare_std_build(&build, &host, &identity, &GUEST_TARGETS.map(GuestTarget::triple));
         let llvm = [
             build.join(&host).join("ci-llvm/lib/libLLVM.dylib"),
             build.join(&host).join("llvm/bin/llvm-config"),
@@ -811,19 +1348,20 @@ mod tests {
         for file in llvm.iter().chain(&kept) {
             write(file, "built");
         }
-        prepare_std_build(&build, &host, &identity);
+        prepare_std_build(&build, &host, &identity, &GUEST_TARGETS.map(GuestTarget::triple));
         for file in &llvm {
             assert!(!file.exists(), "{} outlived a std build's preparation", file.display());
         }
         assert!(kept.iter().all(|f| f.is_file()), "the same compiler's build went");
     }
 
-    /// **A std build fetches no LLVM**: it builds none, and the `compiler`
-    /// profile would download one.
+    /// **A std build fetches no LLVM and asks for no Ninja**: it builds none,
+    /// the `compiler` profile would download one, and bootstrap would refuse it
+    /// with no `ninja` on `PATH`.
     #[test]
-    fn a_std_build_downloads_no_llvm() {
+    fn a_std_build_downloads_no_llvm_and_asks_for_no_ninja() {
         let config = std_config(Path::new("/c"), Path::new("/cargo"), Path::new("/b"), "h");
-        assert!(config.contains("\n[llvm]\ndownload-ci-llvm = false\n"), "{config}");
+        assert!(config.contains("\n[llvm]\ndownload-ci-llvm = false\nninja = false\n"), "{config}");
     }
 
     /// **A switch that cannot remove the other compiler's build fails and does
@@ -840,7 +1378,8 @@ mod tests {
         let deps = build.join("bootstrap/debug/deps");
         write(&deps.join("libserde-1.rlib"), "built");
         write(&rust_dir.join("build/toyos-compiler"), "tree-2");
-        let mode = |bits| fs::set_permissions(&deps, fs::Permissions::from_mode(bits)).unwrap();
+        // The parent: a removal gives back the write permission of what it removes.
+        let mode = |bits| fs::set_permissions(&build, fs::Permissions::from_mode(bits)).unwrap();
 
         mode(0o555);
         let stuck = std::panic::catch_unwind(|| forget_another_compiler(&build, "host", &identity()));
@@ -884,6 +1423,7 @@ mod tests {
         fs::create_dir_all(&primary).unwrap();
         git(&primary, &["init", "-q"]);
         write(&primary.join("toyos-abi/src/lib.rs"), "pub struct A;\n");
+        write(&primary.join(".gitignore"), ".build-locks/\n");
         git(&primary, &["submodule", "add", "-q", fork.to_str().unwrap(), "rust"]);
         git(&primary.join("rust"), &["checkout", "-q", &c1]);
         git(&primary, &["add", "-A"]);
@@ -906,8 +1446,9 @@ mod tests {
         let base = TempDir::new("fork-pins");
         let (primary, linked, c1, c2) = two_pins(&base);
         let before = git(&primary.join("rust"), &["status", "--porcelain"]);
+        let mut lock = buildlock::shared(&linked, "a build");
 
-        let fork = fork_checkout(&linked);
+        let fork = fork_checkout(&linked, &mut lock);
 
         assert_eq!(fork, linked.join("rust"));
         assert_eq!(git(&fork, &["rev-parse", "HEAD"]), c2);
@@ -925,20 +1466,65 @@ mod tests {
         // Work on the fork in the worktree's own checkout is what it builds.
         write(&fork.join("library/std/src/lib.rs"), "pub fn c() {}\n");
         git(&fork, &["commit", "-qam", "C3, the agent's own"]);
-        assert_eq!(fork_checkout(&linked), fork);
+        let c3 = git(&fork, &["rev-parse", "HEAD"]);
+        assert_eq!(fork_checkout(&linked, &mut lock), fork);
+        assert_eq!(git(&fork, &["rev-parse", "HEAD"]), c3, "a checkout ahead of its pin was moved");
 
         // A clean checkout behind what the tree pins is moved to the pin itself.
         git(&fork, &["checkout", "-q", &c1]);
-        assert_eq!(fork_checkout(&linked), fork);
+        assert_eq!(fork_checkout(&linked, &mut lock), fork);
         assert_eq!(git(&fork, &["rev-parse", "HEAD"]), c2, "a checkout behind its pin was not moved to it");
 
         // One with local changes is never moved out from under whoever made them.
         git(&fork, &["checkout", "-q", &c1]);
         write(&fork.join("library/std/src/lib.rs"), "pub fn uncommitted() {}\n");
-        let refused = std::panic::catch_unwind(|| fork_checkout(&linked))
-            .expect_err("a fork checkout with local changes was moved out from under them");
-        let message = refused.downcast::<String>().expect("a formatted refusal");
+        let message = refusal(|| drop(fork_checkout(&linked, &mut lock)));
         assert!(message.contains(&c1) && message.contains(&c2), "{message}");
+    }
+
+    /// **Twelve builds starting at once in a worktree make its fork checkout
+    /// once, and move one behind its pin once**: each holds the worktree's lock
+    /// as a process of its own does, and each returns the checkout whole and at
+    /// the pin.
+    #[test]
+    fn twelve_builds_at_once_make_and_move_one_fork_checkout() {
+        let base = TempDir::new("fork-builds");
+        let (_primary, linked, c1, c2) = two_pins(&base);
+        let fork = linked.join("rust");
+        let twelve_build = || {
+            let start = std::sync::Barrier::new(12);
+            std::thread::scope(|builds| {
+                for _ in 0..12 {
+                    builds.spawn(|| {
+                        let mut lock = buildlock::shared(&linked, "a build");
+                        start.wait();
+                        assert_eq!(fork_checkout(&linked, &mut lock), fork);
+                        assert_eq!(git(&fork, &["rev-parse", "HEAD"]), c2);
+                        assert!(fork.join("library/backtrace/lib.rs").is_file(), "a build read a checkout still being made");
+                    });
+                }
+            });
+        };
+        twelve_build();
+        git(&fork, &["checkout", "-q", &c1]);
+        twelve_build();
+    }
+
+    /// Where a linked worktree's `rust/` is a fork checkout that is not whole,
+    /// [`crate::ensure_shallow_fork`] refuses, and git in the primary's fork
+    /// still runs.
+    #[test]
+    fn ensure_shallow_fork_initialises_no_submodule_in_a_linked_worktree() {
+        let base = TempDir::new("fork-shallow");
+        let (primary, linked, c1, c2) = two_pins(&base);
+        let fork = linked.join("rust");
+        fs::remove_dir(&fork).unwrap();
+        git(&primary.join("rust"), &["worktree", "add", "-q", "--detach", "--no-checkout", path_str(&fork), &c2]);
+
+        let refused = crate::ensure_shallow_fork(&linked);
+
+        assert_eq!(git(&primary.join("rust"), &["rev-parse", "HEAD"]), c1);
+        assert!(refused.as_ref().is_err_and(|why| why.contains("linked worktree")), "{refused:?}");
     }
 
     /// The primary's compiler under `base`: `rustc` and `rust-lld`, and the C
@@ -948,9 +1534,8 @@ mod tests {
         write(&compiler.stage2.join("bin/rustc"), "rustc");
         let lld = toolchain::rust_lld(&compiler.stage2);
         write(&lld, "lld");
-        write(&lld.with_file_name("llvm-ar"), "llvm-ar");
         if clang {
-            for tool in ["clang", "ld.lld"] {
+            for tool in ["clang", "llvm-ar", "ld.lld", "rust-objcopy"] {
                 write(&lld.with_file_name(tool), tool);
             }
             write(&lld.parent().unwrap().parent().unwrap().join("lib/clang/22/include/stddef.h"), "stddef");
@@ -967,7 +1552,8 @@ mod tests {
     /// **A sysroot is whole, or it is made again**: a `stage2` without cargo —
     /// what bootstrap leaves until the primary completes it — is refused by
     /// name and nothing is published, and one found with its `SOURCES` and
-    /// without its cargo is rebuilt rather than trusted, once.
+    /// without its cargo is rebuilt rather than trusted, once. Placing one
+    /// removes a sysroot no worktree names.
     #[test]
     fn a_sysroot_is_whole_or_it_is_made_again() {
         let base = TempDir::new("whole");
@@ -978,28 +1564,33 @@ mod tests {
         let make = |dir: &Path, most: usize| {
             made.set(made.get() + 1);
             assert!(made.get() <= most, "a sysroot that was not whole was made again: make {}", made.get());
-            publish(&compiler, dir, |partial| {
+            publish_toolchain(whole(&compiler), dir, |partial| {
                 write(&partial.join("lib/rustlib/x86_64-unknown-toyos/lib/libstd.rlib"), "std");
                 "found\n".to_string()
             })
         };
 
-        let fresh = sysroots_dir(&base.join("rust")).join("fresh");
-        let said = refusal(|| drop(held(&base, "fresh", &fresh, || make(&fresh, 1))));
+        let key = Key::of(b"fresh");
+        let fresh = sysroots_dir(&base.join("rust")).join(&key);
+        let said = refusal(|| drop(held(&base, &key, &fresh, || make(&fresh, 1))));
         assert!(said.contains("is missing cargo") && said.contains("`cargo run -- --build-only`"), "{said}");
         assert!(!fresh.exists() && !fresh.with_extension("partial").exists(), "a sysroot was published from a stage2 without cargo");
         assert_eq!(made.get(), 1);
 
-        let dir = sysroots_dir(&base.join("rust")).join("found");
+        let key = Key::of(b"found");
+        let dir = sysroots_dir(&base.join("rust")).join(&key);
         clone_tree(&compiler.stage2, &dir);
         write(&dir.join(SOURCES), "found\n");
         toolchain::provision_toolchain_cargo(&compiler.stage2);
-        let using = held(&base, "found", &dir, || make(&dir, 2));
+        let orphan = sysroots_dir(&base.join("rust")).join(Key::of(b"named by no worktree"));
+        fs::create_dir_all(&orphan).unwrap();
+        let using = held(&base, &key, &dir, || make(&dir, 2));
         assert_eq!(made.get(), 2, "a sysroot without its cargo was trusted because it has SOURCES");
+        assert!(!orphan.exists(), "placing a sysroot left one no worktree names");
         assert_eq!(toolchain::toolchain_defect(&dir), None);
         assert!(dir.join("lib/rustlib/x86_64-unknown-toyos/lib/libstd.rlib").is_file());
         drop(using);
-        drop(held(&base, "found", &dir, || make(&dir, 2)));
+        drop(held(&base, &key, &dir, || make(&dir, 2)));
         assert_eq!(made.get(), 2, "a whole sysroot was made again");
     }
 
@@ -1019,12 +1610,13 @@ mod tests {
             assert_eq!(made.get(), 1, "a sysroot that was not whole was made again");
         };
 
-        let dir = sysroots_dir(&base.join("rust")).join("cloned");
+        let key = Key::of(b"cloned");
+        let dir = sysroots_dir(&base.join("rust")).join(&key);
         let filled = std::cell::Cell::new(false);
         let said = refusal(|| {
-            drop(held(&base, "cloned", &dir, || {
+            drop(held(&base, &key, &dir, || {
                 once();
-                publish(&compiler, &dir, |_| {
+                publish_toolchain(whole(&compiler), &dir, |_| {
                     filled.set(true);
                     "cloned\n".to_string()
                 })
@@ -1037,15 +1629,16 @@ mod tests {
         assert_eq!(made.get(), 1);
 
         made.set(0);
-        let dir = sysroots_dir(&base.join("rust")).join("made");
+        let key = Key::of(b"made");
+        let dir = sysroots_dir(&base.join("rust")).join(&key);
         let said = refusal(|| {
-            drop(held(&base, "made", &dir, || {
+            drop(held(&base, &key, &dir, || {
                 once();
                 clone_tree(&compiler.stage2, &dir);
                 write(&dir.join(SOURCES), "made\n");
             }))
         });
-        assert!(said.starts_with("sysroot made was made, and is not whole") && said.contains("/clang"), "{said}");
+        assert!(said.starts_with(&format!("sysroot {key} was made, and is not whole")) && said.contains("/clang"), "{said}");
         assert_eq!(made.get(), 1);
     }
 
@@ -1074,29 +1667,5 @@ mod tests {
         write(&built.join(".libstd-stamp"), &format!("h{}\0", built.join("out/libstd-new.rlib").display()));
         let refused = std::panic::catch_unwind(|| place_std(&built.join(".libstd-stamp"), &lib));
         assert!(refused.is_err(), "a host library was placed in a guest target");
-    }
-
-    /// `--worktree remove` takes the worktree's fork checkout with it — git will
-    /// not remove a worktree around one — unless that checkout holds the only
-    /// copy of something.
-    #[test]
-    fn a_removed_worktree_takes_its_fork_checkout_and_refuses_to_lose_fork_work() {
-        let base = TempDir::new("fork-remove");
-        let (primary, linked, _c1, _c2) = two_pins(&base);
-        let fork = fork_checkout(&linked);
-        write(&fork.join("library/std/src/lib.rs"), "pub fn unsaved() {}\n");
-        let refused = std::panic::catch_unwind(|| crate::worktree::remove(&primary, linked.to_str().unwrap()));
-        assert!(refused.is_err(), "a fork checkout with uncommitted work was removed");
-        assert!(fork.join("library/std/src/lib.rs").is_file());
-
-        git(&fork, &["commit", "-qam", "committed, and on no ref"]);
-        let refused = std::panic::catch_unwind(|| crate::worktree::remove(&primary, linked.to_str().unwrap()));
-        assert!(refused.is_err(), "a fork commit no ref reaches was thrown away");
-
-        git(&fork, &["branch", "kept"]);
-        crate::worktree::remove(&primary, linked.to_str().unwrap());
-        assert!(!linked.exists(), "{} is still on disk", linked.display());
-        let listed = git(&primary.join("rust"), &["worktree", "list", "--porcelain"]);
-        assert_eq!(listed.lines().filter(|l| l.starts_with("worktree ")).count(), 1, "{listed}");
     }
 }

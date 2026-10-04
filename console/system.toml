@@ -5,7 +5,7 @@
 # boot checkpoint stays on the glass — which is the only thing that works on a
 # machine that wedges before userland, and is the answer to exactly one
 # question. This image answers the rest by being asked them: `/system/bin/console`
-# claims the screen, shows this boot's log as `logd` serves it — the kernel's
+# claims the screen, shows this boot's log as `logkeeper` serves it — the kernel's
 # records and every program's output — so nothing is lost with the checkpoint,
 # and puts a prompt underneath.
 #
@@ -16,17 +16,17 @@
 assets = ["assets"]
 
 [boot]
-start = ["logd", "console"]
+start = ["logkeeper", "diskserver", "fileserver", "console"]
 
 # `/system/bin/console` owns the screen and provides the surface its shell and the
 # shell's children inherit. No compositor here, so nothing receives one.
 # **Every image that carries a `TOYOS-LOG` partition runs this**, and every
 # image does. The kernel keeps the record ring and the console and writes no
-# file at all, so a boot config without `logd` is a boot whose `/log` is empty —
-# `every_boot_config_runs_logd` is what refuses one. It claims no device; it
+# file at all, so a boot config without `logkeeper` is a boot whose `/log` is empty —
+# `every_boot_config_runs_logkeeper` is what refuses one. It claims no device; it
 # reads the kernel's records with `logread`, which is `Rights::LOG |
 # Rights::WAIT` on a `SysCap` duplicate, and serves `log` to the console.
-[programs.logd]
+[programs.logkeeper]
 service = true
 syscap = ["logread"]
 serves = ["log"]
@@ -41,7 +41,7 @@ receives = ["surface", "launcher"]
 
 # `power` because `bin/shutdown` below is this binary, and on the machine this
 # image exists for — no serial port, a prompt on the panel — there is no other
-# way to turn it off: it asks init, which has `logd` make the log whole first.
+# way to turn it off: it asks the supervisor, which has `logkeeper` make the log whole first.
 # `roster` because `bin/ps` is the same binary and this image exists to be
 # asked what the machine is doing.
 [programs.toybox]
@@ -64,3 +64,20 @@ syscap = ["roster"]
 "bin/rm" = "/system/bin/toybox"
 "bin/shutdown" = "/system/bin/toybox"
 "bin/stats" = "/system/bin/toybox"
+
+# The block service: the NVMe controller this machine's DATA is on, driven
+# from userland through its claim. Started again when it ends; the claim goes
+# back with the process and is minted again for the next.
+[programs.diskserver]
+service = true
+restart = true
+serves = ["block"]
+devices = ["pci:1b36:0010"]
+
+# The file servers: DATA, the log and the running slot's volume, one process
+# each, serving every program the directories of its role. Started again when
+# one ends, on the same ports.
+[programs.fileserver]
+restart = true
+roles = ["data", "log", "boot"]
+receives = ["block"]

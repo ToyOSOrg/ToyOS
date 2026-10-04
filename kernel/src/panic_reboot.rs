@@ -1,8 +1,6 @@
 //! What a panicked kernel does with the machine once its report is on the
 //! panel: it holds the panel for [`toyos_tco::PANIC_BOUND_MS`] and then returns
-//! the machine to firmware. A key press retires the bound for good — a key is
-//! how a person at the machine says the panel is being read — and nobody
-//! pressing one inside the bound means nobody is there to read it.
+//! the machine to firmware.
 //!
 //! **The bound is carried in counter ticks, not nanoseconds** (`cpu::counter`:
 //! the TSC, the generic timer's count). A panic may land before `clock::init`,
@@ -11,14 +9,9 @@
 //! both phases then compare the same counter against the same unit. A machine
 //! that states no frequency and has no calibrated clock cannot time anything,
 //! and the arm line says so instead of resetting on a guess.
-//!
-//! The reset is the FADT's; a machine whose reset register this kernel could
-//! not decode is refused by name and holds, with no fallback. That register is
-//! decoded before `percpu::init_bsp` loads the IDT, so every panic that can
-//! reach this path at all has one to write.
 
 use crate::arch::cpu;
-use crate::drivers::{acpi, serial};
+use crate::drivers::serial;
 use crate::time::{Budget, Duration};
 
 /// The shipped bound.
@@ -27,13 +20,11 @@ const PANIC_BOUND: Budget = Budget::of(
     "the machine returns itself to firmware instead of holding a panel nobody is reading",
 );
 
-/// `tco-fast`'s counterpart for this bound: a judge cannot spend the shipped
-/// minute per boot, and its control cannot press a key inside a bound shorter
-/// than the round trip that presses it.
+/// `panic-reboot-fast`'s bound: a judge cannot spend the shipped minute per boot.
 #[cfg(feature = "boot-actuators")]
 const FAST_BOUND: Budget = Budget::of(
     Duration::from_secs(5),
-    "a guest reaches the reset inside one test, and a control still beats it to the keyboard",
+    "a guest reaches the reset inside one test",
 );
 
 /// Whether a reboot is armed on this panic, and when.
@@ -41,17 +32,12 @@ const FAST_BOUND: Budget = Budget::of(
 pub enum Bound {
     /// Reset the machine at this `cpu::counter` reading.
     At(u64),
-    /// Hold the panel: somebody is reading it, or nothing here could time a
-    /// wait, or this machine has no reset register to write.
+    /// Hold the panel: nothing here could time a wait, or this machine has no
+    /// reset this kernel performs.
     Held,
 }
 
 impl Bound {
-    /// A key arrived: the machine is that person's from here on.
-    pub fn retire(&mut self) {
-        *self = Self::Held;
-    }
-
     /// Reset the machine if the bound has passed; every wait on the panic path
     /// calls this, and it is the only place that decides the reset has come due.
     pub fn check(self) {
@@ -115,30 +101,24 @@ pub fn arm(on_the_record: bool) -> Bound {
     // ASCII only, here and in every line below: the panel's font renders
     // anything outside 0x20..=0x7E as a dot.
     let secs = budget.duration().millis() / 1_000;
-    // The clock and the reset register are two separate ways to have no
-    // reboot, and a line naming one when the other is what failed answers
-    // whoever reads the panel with nothing.
-    match (deadline(budget), acpi::can_reboot()) {
+    match (deadline(budget), crate::power::can_reboot()) {
         (Some((cycles, source)), true) => {
             if on_the_record {
-                alert!(
-                    "{ARMED} in {secs} s unless a key is pressed, timed by {}",
-                    source.named()
-                );
+                alert!("{ARMED} in {secs} s, timed by {}", source.named());
             } else {
-                serial::panic_raw(b"panic: rebooting unless a key is pressed\n");
+                serial::panic_registers().write(b"panic: rebooting\n");
             }
             Bound::At(cycles)
         }
         (Some((_, source)), false) => {
             if on_the_record {
                 alert!(
-                    "{HELD}, timed by {}: this kernel has decoded no reset register to hand \
-                     the machine back to firmware with",
+                    "{HELD}, timed by {}: this kernel has no reset to hand the machine back to \
+                     firmware with",
                     source.named()
                 );
             } else {
-                serial::panic_raw(b"panic: holding this panel: no reset register\n");
+                serial::panic_registers().write(b"panic: holding this panel: no reset\n");
             }
             Bound::Held
         }
@@ -149,7 +129,7 @@ pub fn arm(on_the_record: bool) -> Bound {
                      nothing here can time a wait"
                 );
             } else {
-                serial::panic_raw(b"panic: holding this panel: no clock\n");
+                serial::panic_registers().write(b"panic: holding this panel: no clock\n");
             }
             Bound::Held
         }
@@ -159,11 +139,9 @@ pub fn arm(on_the_record: bool) -> Bound {
 /// Return the machine to firmware. The second of this path's two lines, and it
 /// goes out raw: the log has already been flushed and drained by here.
 pub fn reboot_now() -> ! {
-    serial::panic_raw(
-        b"\npanic: no key inside the bound, so nobody is here: returning this machine to \
-          firmware\n",
-    );
-    // Not `acpi::reboot`: its flush waits on the console wire, and a CPU this
+    serial::panic_registers()
+        .write(b"\npanic: the bound is over: returning this machine to firmware\n");
+    // Not `power::reboot`: its flush waits on the console wire, and a CPU this
     // panic stopped may be holding it.
-    acpi::reset_now()
+    crate::power::reset_now()
 }

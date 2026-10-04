@@ -1,4 +1,4 @@
-// BSD sockets — TCP and UDP use pipe-backed data transfer via netd.
+// BSD sockets — TCP and UDP use pipe-backed data transfer via netstack.
 
 use alloc::alloc::{alloc as heap_alloc, dealloc as heap_dealloc};
 use alloc::vec::Vec;
@@ -6,6 +6,8 @@ use core::ptr;
 use toyos_abi::RawHandle;
 use toyos_abi::syscall;
 use toyos::net::{NetError, TcpSocketId, UdpSocketId, OPT_NODELAY};
+
+use crate::errno::{EADDRINUSE, EAFNOSUPPORT, EBADF, ECONNREFUSED, ECONNRESET, EINVAL, EIO, ENOMEM, ENOTCONN, ETIMEDOUT};
 
 // C types matching POSIX
 
@@ -53,17 +55,6 @@ const SOL_SOCKET: i32 = 1;
 const SO_ERROR: i32 = 4;
 const TCP_NODELAY: i32 = 1;
 
-const EINVAL: i32 = 22;
-const EBADF: i32 = 9;
-const ENOMEM: i32 = 12;
-const EAFNOSUPPORT: i32 = 97;
-const ECONNREFUSED: i32 = 111;
-const ECONNRESET: i32 = 104;
-const ETIMEDOUT: i32 = 110;
-const EADDRINUSE: i32 = 98;
-const ENOTCONN: i32 = 107;
-const EIO: i32 = 5;
-
 // Internal socket table
 
 #[derive(Clone, Copy)]
@@ -75,15 +66,15 @@ enum SocketKind {
 #[derive(Clone, Copy)]
 struct SocketEntry {
     kind: SocketKind,
-    netd_id: u32,       // netd socket_id (0 = not yet connected/bound)
+    netstack_id: u32,       // netstack socket_id (0 = not yet connected/bound)
     connected: bool,
     bound: bool,
     local_port: u16,
     remote_addr: [u8; 4],
     remote_port: u16,
     // Pipe fds for data path (0 = not set)
-    rx_fd: i32,         // read end of rx pipe (netd→client)
-    tx_fd: i32,         // write end of tx pipe (client→netd)
+    rx_fd: i32,         // read end of rx pipe (netstack→client)
+    tx_fd: i32,         // write end of tx pipe (client→netstack)
     notify_fd: i32,     // read end of listener notify pipe
 }
 
@@ -115,7 +106,7 @@ fn alloc_socket(entry: SocketEntry) -> i32 {
 
 use crate::errno::set as set_errno;
 
-// netd error conversion
+// netstack error conversion
 
 fn net_err_to_errno(e: NetError) -> i32 {
     match e {
@@ -174,7 +165,7 @@ pub unsafe extern "C" fn socket(domain: i32, sock_type: i32, _protocol: i32) -> 
     };
     let entry = SocketEntry {
         kind,
-        netd_id: 0,
+        netstack_id: 0,
         connected: false,
         bound: false,
         local_port: 0,
@@ -212,7 +203,7 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
                 Ok(c) => c,
                 Err(e) => { set_errno(net_err_to_errno(e)); return -1; }
             };
-            entry.netd_id = conn.socket_id.0;
+            entry.netstack_id = conn.socket_id.0;
             entry.local_port = conn.local_port;
             entry.remote_addr = ip;
             entry.remote_port = port;
@@ -251,7 +242,7 @@ pub unsafe extern "C" fn bind(fd: i32, addr: *const Sockaddr, addrlen: SocklenT)
                 Ok(b) => b,
                 Err(e) => { set_errno(net_err_to_errno(e)); return -1; }
             };
-            entry.netd_id = bound.socket_id.0;
+            entry.netstack_id = bound.socket_id.0;
             entry.local_port = bound.bound_port;
             entry.bound = true;
             entry.notify_fd = bound.notify.into_raw().0 as i32;
@@ -262,7 +253,7 @@ pub unsafe extern "C" fn bind(fd: i32, addr: *const Sockaddr, addrlen: SocklenT)
                 Ok(b) => b,
                 Err(e) => { set_errno(net_err_to_errno(e)); return -1; }
             };
-            entry.netd_id = bound.socket_id.0;
+            entry.netstack_id = bound.socket_id.0;
             entry.local_port = bound.bound_port;
             entry.bound = true;
             entry.tx_fd = bound.tx.into_raw().0 as i32;
@@ -274,7 +265,7 @@ pub unsafe extern "C" fn bind(fd: i32, addr: *const Sockaddr, addrlen: SocklenT)
 
 #[no_mangle]
 pub unsafe extern "C" fn listen(_fd: i32, _backlog: i32) -> i32 {
-    // netd handles listen implicitly via bind — no separate listen step needed
+    // netstack handles listen implicitly via bind — no separate listen step needed
     0
 }
 
@@ -292,7 +283,7 @@ pub unsafe extern "C" fn accept(
         Some(e) => e,
         None => { set_errno(EBADF); return -1; }
     };
-    let listener_id = TcpSocketId(entry.netd_id);
+    let listener_id = TcpSocketId(entry.netstack_id);
     let notify_fd = entry.notify_fd;
 
     // Block until a connection arrives (read 1 byte from notify pipe)
@@ -310,7 +301,7 @@ pub unsafe extern "C" fn accept(
 
     let new_entry = SocketEntry {
         kind: SocketKind::Tcp,
-        netd_id: accepted.socket_id.0,
+        netstack_id: accepted.socket_id.0,
         connected: true,
         bound: false,
         local_port: accepted.local_port,
@@ -430,7 +421,7 @@ pub unsafe extern "C" fn sendto(
                 return -1;
             }
             // Send control message with metadata
-            match toyos::net::udp_send_to(UdpSocketId(entry.netd_id), ip, port, len as u16) {
+            match toyos::net::udp_send_to(UdpSocketId(entry.netstack_id), ip, port, len as u16) {
                 Ok(sent) => sent as isize,
                 Err(e) => { set_errno(net_err_to_errno(e)); -1 }
             }
@@ -466,7 +457,7 @@ pub unsafe extern "C" fn recvfrom(
         }
         SocketKind::Udp => {
             // Send control request and get metadata response
-            let recv_resp = match toyos::net::udp_recv_from(UdpSocketId(entry.netd_id), len as u32) {
+            let recv_resp = match toyos::net::udp_recv_from(UdpSocketId(entry.netstack_id), len as u32) {
                 Ok(r) => r,
                 Err(e) => { set_errno(net_err_to_errno(e)); return -1; }
             };
@@ -502,7 +493,7 @@ pub unsafe extern "C" fn shutdown(fd: i32, how: i32) -> i32 {
     };
 
     if let SocketKind::Tcp = entry.kind {
-        if let Err(e) = toyos::net::tcp_shutdown(TcpSocketId(entry.netd_id), how as u32) {
+        if let Err(e) = toyos::net::tcp_shutdown(TcpSocketId(entry.netstack_id), how as u32) {
             set_errno(net_err_to_errno(e));
             return -1;
         }
@@ -529,11 +520,11 @@ pub unsafe extern "C" fn close_socket(fd: i32) -> bool {
     if entry.tx_fd != 0 { syscall::close(RawHandle(entry.tx_fd as u32)); }
     if entry.notify_fd != 0 { syscall::close(RawHandle(entry.notify_fd as u32)); }
 
-    // Tell netd to close the socket
-    if entry.netd_id != 0 {
+    // Tell netstack to close the socket
+    if entry.netstack_id != 0 {
         match entry.kind {
-            SocketKind::Tcp => { let _ = toyos::net::tcp_close(TcpSocketId(entry.netd_id)); }
-            SocketKind::Udp => { let _ = toyos::net::udp_close(UdpSocketId(entry.netd_id)); }
+            SocketKind::Tcp => { let _ = toyos::net::tcp_close(TcpSocketId(entry.netstack_id)); }
+            SocketKind::Udp => { let _ = toyos::net::udp_close(UdpSocketId(entry.netstack_id)); }
         }
     }
     true
@@ -558,10 +549,10 @@ pub unsafe extern "C" fn setsockopt(
         None => { set_errno(EBADF); return -1; }
     };
 
-    // TCP_NODELAY is the only option we actually send to netd
-    if level == IPPROTO_TCP && optname == TCP_NODELAY && entry.netd_id != 0 {
+    // TCP_NODELAY is the only option we actually send to netstack
+    if level == IPPROTO_TCP && optname == TCP_NODELAY && entry.netstack_id != 0 {
         let val = if optval.is_null() { 0u32 } else { *(optval as *const i32) as u32 };
-        if let Err(e) = toyos::net::tcp_set_option(TcpSocketId(entry.netd_id), OPT_NODELAY, val) {
+        if let Err(e) = toyos::net::tcp_set_option(TcpSocketId(entry.netstack_id), OPT_NODELAY, val) {
             set_errno(net_err_to_errno(e));
             return -1;
         }
@@ -592,8 +583,8 @@ pub unsafe extern "C" fn getsockopt(
         return -1;
     }
 
-    if level == IPPROTO_TCP && optname == TCP_NODELAY && entry.netd_id != 0 {
-        match toyos::net::tcp_get_option(TcpSocketId(entry.netd_id), OPT_NODELAY) {
+    if level == IPPROTO_TCP && optname == TCP_NODELAY && entry.netstack_id != 0 {
+        match toyos::net::tcp_get_option(TcpSocketId(entry.netstack_id), OPT_NODELAY) {
             Ok(val) => {
                 *(optval as *mut i32) = val as i32;
                 *optlen = 4;

@@ -1,7 +1,7 @@
 //! A program's stdout and stderr, and its own lines: records into its log ring
 //! when the stream is one, bytes into the handle when it is anything else.
 //!
-//! **Where a stream goes is what its slot holds.** `/system/bin/init` puts a
+//! **Where a stream goes is what its slot holds.** `/system/bin/supervisor` puts a
 //! program's log ring in slots 1 and 2, so a daemon's output is records; a
 //! program a terminal started holds that terminal's pipes there, so its output
 //! is bytes on the terminal. The first write to a stream asks the slot once
@@ -280,7 +280,7 @@ mod target {
     }
 
     /// Ask both streams now, so no later write is the one that asks. A thread
-    /// that may not make a syscall — soundd's mix thread — relies on this
+    /// that may not make a syscall — soundserver's mix thread — relies on this
     /// having run before it writes.
     pub fn bind() {
         let _ = sink(Stream::Out);

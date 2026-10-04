@@ -1,6 +1,6 @@
 //! Each test names the RFC section it holds the reader to. The four `REAL_*`
-//! replies are the independent half: bytes 1.1.1.1 (Cloudflare's public
-//! resolver) sent to this crate's own queries, compression and all.
+//! replies are the independent half: bytes Cloudflare's public resolver sent
+//! to this crate's own queries, compression and all.
 
 use super::*;
 use std::vec;

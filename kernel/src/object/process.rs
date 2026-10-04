@@ -2,8 +2,9 @@
 //!
 //! The exit code lives on the object, not a table entry: no zombie, no reap,
 //! no orphan adoption. A wait after the fact reads a value; a wait before it
-//! parks and is woken by the publish. A process nobody holds a handle to
-//! disappears.
+//! parks and is woken by the publish. An `OP_WATCH` reads the same fact at its
+//! look, so a handle is readable from the publish on. A process nobody holds a
+//! handle to disappears.
 
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -30,7 +31,8 @@ pub struct ProcessObject {
     /// The same fact, without the lock, for a waiter's per-wake predicate.
     finished: AtomicBool,
     /// What `SYS_PROCESS_WAIT` arms on; holding the `Arc` across the park keeps the watch from outliving its subject.
-    watch: Watch,
+    /// An `Arc` of its own, as a port's is, for the share `ops::read_watch` answers.
+    watch: Arc<Watch>,
 }
 
 impl ProcessObject {
@@ -40,7 +42,7 @@ impl ProcessObject {
             pid,
             exit: Lock::new(None),
             finished: AtomicBool::new(false),
-            watch: Watch::new(),
+            watch: Arc::new(Watch::new()),
         })
     }
 
@@ -61,7 +63,7 @@ impl ProcessObject {
         self.exit.lock().as_ref().map(|e| e.stats)
     }
 
-    pub fn watch(&self) -> &Watch {
+    pub fn watch(&self) -> &Arc<Watch> {
         &self.watch
     }
 
@@ -83,44 +85,4 @@ impl ProcessObject {
         crate::scheduler::note_reapable();
         self.watch.post();
     }
-}
-
-/// Control for the `reopenable` row: a process the table still answers for takes
-/// a fresh handle after its last one has gone. `sys_process_open`'s own two steps
-/// with the `SysCap` demand left off; the second install is where it used to assert.
-#[cfg(feature = "boot-actuators")]
-pub(crate) fn reopen_selftest(pid: Pid) {
-    use super::handle::HandleTable;
-    use super::{ops, KObjectRef};
-    use toyos_abi::handle::Rights;
-
-    let Some(object) = crate::process::process_object(pid) else {
-        crate::log!("process-reopen: FAIL (pid {} names no process)", pid.raw());
-        return;
-    };
-    let mut table = HandleTable::new();
-    let opened = match ops::install(&mut table, KObjectRef::Process(Arc::clone(&object))) {
-        Ok(h) => h,
-        Err(e) => {
-            crate::log!("process-reopen: FAIL (the first install was refused: {e:?})");
-            return;
-        }
-    };
-    match table.remove(opened) {
-        Ok(entry) => drop(entry),
-        Err(e) => {
-            crate::log!("process-reopen: FAIL (the first handle would not close: {e})");
-            return;
-        }
-    }
-    let retired = object.core().retired();
-    let reopened = ops::install(&mut table, KObjectRef::Process(Arc::clone(&object)))
-        .ok()
-        .and_then(|h| table.get::<ProcessObject>(h, Rights::WAIT).ok())
-        .is_some_and(|reached| reached.pid() == pid);
-    let verdict = if reopened && !retired { "PASS" } else { "FAIL" };
-    crate::log!(
-        "process-reopen: {verdict} (pid={} retired={retired} reopened={reopened})",
-        pid.raw(),
-    );
 }

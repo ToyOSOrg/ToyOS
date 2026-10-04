@@ -15,25 +15,30 @@ license = "MIT OR Apache-2.0"
 loom = []
 # Declared, never enabled here, and never enabled by any *kernel* build:
 # `kernel-loom` turns it on to remove the two `SeqCst` fences, and
-# `kernel-loom/tests/log_wake.rs` must red when it does. A model that has never
+# `kernel/loom/tests/log_wake.rs` must red when it does. A model that has never
 # failed proves nothing, and no guest test can stand in for it — on x86 a build
 # with either fence removed behaves identically, which is the whole reason the
 # obligation is a model.
 wake-fence-off = []
 # The same for the panic console's published descriptor: `kernel-loom` turns it on
-# to drop the publisher's `Release` fence from `drivers/panic_console/published.rs`,
-# and `kernel-loom/tests/panic_console_publish.rs` must red — a reader keeping a
+# to drop the publisher's `Release` fence from `seqlock.rs`,
+# and `kernel/loom/tests/panic_console_publish.rs` must red — a reader keeping a
 # descriptor that is half one publication and half the next.
 seqlock-writer-fence-off = []
 # The same for the console backend's lock: `kernel-loom` turns it on to build
 # `drivers/serial_lock.rs`'s `try_lock` with `then_some`, whose lost exchange
-# releases the holder's lock, and `kernel-loom/tests/serial_lock.rs` must red.
+# releases the holder's lock, and `kernel/loom/tests/serial_lock.rs` must red.
 serial-try-lock-then-some = []
 # The same arrangement for a poll ring's one-shot answer: `kernel-loom` turns it
 # on to split `inbox/once.rs`'s exchange into a load and a store, and
-# `kernel-loom/tests/poll_once.rs` must red when it does — a poll two posts
+# `kernel/loom/tests/poll_once.rs` must red when it does — a poll two posts
 # both answer.
 poll-fire-load-store = []
+# The same for a poll ring's answer: `kernel-loom` turns it on so
+# `inbox/polls.rs` answers a fired poll without looking at its object again,
+# and `kernel/loom/tests/inbox_answer.rs` must red — a post with nothing to
+# read, answered.
+post-is-an-answer = []
 # The same arrangement, five more times, one per `kernel-loom` model that had
 # no control of its own until 2026-08-17. Each is declared here and never
 # enabled here; `kernel-loom` turns exactly one on at a time and the named
@@ -48,18 +53,17 @@ reap-raise-relaxed = []
 # `src/shootdown.rs`'s `serve` reads what it owes `Relaxed`, and
 # `tlb_shootdown` reds.
 shootdown-serve-relaxed = []
+# `src/shootdown.rs`'s `served` reads `Relaxed`, and `counters_round` reds.
+shootdown-served-relaxed = []
 # `src/log/shard.rs`'s publishing store goes `Relaxed`, and `log_record` reds.
 log-commit-release-off = []
 # `src/log/registry.rs`'s pointer store and load go `Relaxed`, and
 # `log_publish` reds.
 shard-publish-relaxed = []
-# `src/durability.rs`'s `settle` becomes the pre-generation blind clear, and
-# `durability` reds.
-durability-settle-blind = []
-# `src/pcidev/record.rs`'s two read-modify-writes become a load and a store, so
-# a message the ISR records between a reader's two halves is lost and a wake can
-# be owed twice, and `device_irq` reds. That pair *is* the record's design, so
-# turning it off reverts the whole of what the model claims.
+# `src/pcidev/record.rs`'s read-modify-writes become a load and a store, so a
+# message the ISR records between a reader's two halves is lost, and
+# `device_irq` reds. They *are* the record's design, so turning them off reverts
+# the whole of what the model claims.
 device-irq-lossy = []
 # `src/sched/dump_request.rs`'s `take` and `end_report` go `Relaxed`, so the next report
 # is unordered against the last one's writes, and `dump_request` reds.
@@ -68,19 +72,137 @@ dump-report-relaxed = []
 # *contended*-acquire model this tree has: `src/sleeplock.rs`'s two loads of
 # `now` — the ones that decide whose turn it is — go `Relaxed`, so the previous
 # holder's writes are unordered against the next holder's reads, and
-# `kernel-loom/tests/sleep_lock.rs` reds. `Lock::lock`'s spin is unreachable by
+# `kernel/loom/tests/sleep_lock.rs` reds. `Lock::lock`'s spin is unreachable by
 # loom (`src/sync.rs`'s `ACQUIRED` says so at the site); a parking acquire has
 # no unbounded branch, which is what makes this one modellable at all.
 sleeplock-acquire-off = []
 # The same arrangement for the CPU roster's publication edge: `src/smp_roster.rs`'s
 # `commit` publishes the count with a `Relaxed` store instead of the release the
 # slot store needs, so a reader can see a count over an unfilled slot, and
-# `kernel-loom/tests/smp_bringup.rs` reds.
+# `kernel/loom/tests/smp_bringup.rs` reds.
 roster-commit-relaxed = []
 # The same for the release/answer word: `src/smp_roster.rs` grows the base's
 # second store back, so a shootdown can see the machine released while it is not
-# yet answering, and `kernel-loom/tests/smp_bringup.rs` reds.
+# yet answering, and `kernel/loom/tests/smp_bringup.rs` reds.
 smp-ready-split = []
+# The scheduler core's loom controls: `kernel-loom` compiles `pure/sched/`
+# into its own crate and turns each on, one at a time; declared here only so
+# `cfg` checking knows the names.
+#
+# The doorbell's kick-pending edge in `pure/sched/mailbox.rs`'s
+# `Doorbell::ring` goes `Relaxed`, and `kernel/loom/tests/loom_sleep.rs` must
+# red — the sleep handshake's own negative control.
+doorbell-kick-relaxed = []
+# The `SeqCst` fence `pure/sched/cpu.rs`'s `balance_fence` puts between the push
+# half's surplus store and its read of a target's SLEEPING bit is weakened, and
+# `kernel/loom/tests/loom_push.rs` must red — `Balance::PushOnSurplus`'s own
+# negative control.
+push-fence-relaxed = []
+# `pure/sched/task.rs`'s `begin_commit` goes blind to the notified bit — a post
+# landing between a waiter's registration on a watch and its commit is lost —
+# and `kernel/loom/tests/loom_watch.rs` must red.
+commit-ignores-notify = []
+# `pure/sched/task.rs`'s notify answers a post that finds its bits already set
+# off a load rather than a read-modify-write, and
+# `kernel/loom/tests/loom_watch.rs` must red.
+notify-flag-load-only = []
+# The two `SeqCst` fences of `pure/sched/watch.rs`'s `Gate` go, and
+# `kernel/loom/tests/loom_watch.rs` must red — the stop's store-buffering pair.
+gate-fence-off = []
+# The staleness test's negative control: `pure/sched/cpu.rs`'s
+# `CpuHandle::answering` answers `true` for every CPU under it, which is what
+# every path that chooses a CPU believed before it existed. `kernel-sim`'s
+# `a_stopped_cpu_stops_taking_work` must red when it is on. No kernel build
+# selects it, and one that did would place tasks onto CPUs that never pick
+# them up.
+placement-ignores-staleness = []
+# Compiles the escape hatch `kernel-sim`'s `old_steal_port` needs to re-create
+# the OLD scheduler's steal-in-transit algorithm. The simulator enables it; no
+# kernel build does.
+protocol-port = []
+# `pure/pcid/`'s negative control: it reverts `PcidPool` to the bare monotonic
+# counter that wrapped at 4095 and reissued a live tag, and the isolation tests
+# red under it. Never a default and reached by no kernel build.
+counting-allocator = []
+# The process lifecycle's controls (`pure/proclife/`), declared for the
+# library's own tests and never enabled by any kernel build: each reverts one
+# decision to the form this kernel really had, so the host model that refuses
+# it is shown able to red at all. `src/ci.rs`'s `CONTROLS` runs each and
+# demands the named test's own FAILED line; `src/build.rs`'s
+# `every_model_control_is_run` reds on a control declared with no row behind
+# it.
+#
+# `teardown::claim_teardown` stops being exclusive: every arrival wins. An exit
+# and a kill then both tear one process down, both retire its threads and both
+# publish an exit — which `ProcessObject::publish_exit` asserts against at run
+# time, in a guest, on whichever boot the two happen to meet.
+# `interleave::tests::an_exit_and_a_kill_never_both_tear_a_process_down` must
+# red under this, and it does so in every ordering rather than in one.
+mutate-claim-teardown-always-wins = []
+# `spawn::admit_thread_insert` stops re-reading the teardown claim, so the
+# question is asked once — at the top of `process::spawn_thread`, before the
+# TLS block, the kernel stack and the scheduler record are built. Everything
+# that makes a thread happens in that window, and teardown claims the process
+# under the very lock the insert takes. `interleave::tests::a_published_exit_
+# leaves_no_unretired_thread` must red under this.
+mutate-spawn-skips-the-insert-recheck = []
+# The model's kill waits for its victim's exit before it returns.
+# `interleave::tests::two_processes_killing_each_other_both_end` must red under
+# this: each killer waits on a process whose thread is inside the other's kill.
+mutate-kill-waits-for-its-victims = []
+# `teardown::leave` answers `Last` to every thread that leaves a claimed
+# process, so the first one out tears it down under its siblings.
+# `interleave::tests::an_exit_and_a_kill_never_both_tear_a_process_down` must
+# red under this.
+mutate-first-out-tears-down = []
+# `teardown::leave` marks the last one out dead before its teardown runs, so
+# the machine's stop finds nothing running while that teardown frees and logs.
+# `interleave::tests::the_last_one_out_is_in_its_process_until_its_teardown_is_done`
+# must red under this.
+mutate-last-out-leaves-before-its-teardown = []
+# `join::collect_zombie` gives up a thread of a process being torn down, whose
+# mappings its siblings may still run in.
+# `interleave::tests::a_join_racing_the_kill_that_takes_its_target` must red
+# under this.
+mutate-join-collects-in-a-teardown = []
+# `tree::land_child` stops re-reading its place's claim, so a spawn admitted
+# before a kill lands unclaimed under the place after the walk read its children.
+# `interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it`
+# must red under this.
+mutate-place-skips-the-insert-recheck = []
+# `tree::refuse_child` keeps a failed spawn's hold on its place, which then
+# waits for a child that will never be and is never published. The same test
+# must red under this.
+mutate-refused-spawn-keeps-the-count = []
+# `tree::land_child` claims a child landed under a place claimed since its
+# admission and answers no thread to retire, so the child runs on claimed, is
+# never torn down, and holds its place unpublished.
+# `interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it`
+# must red under this.
+mutate-landed-child-retires-nothing = []
+# `tree::teardown_done` publishes an end with its own teardown, whatever is
+# still unpublished below it. `interleave::tests::an_exit_publishes_after_every_end_below_it`
+# must red under this.
+mutate-publish-before-the-children = []
+# The model's walk claims everything it owes in one lock section, as a kernel
+# that held `PROCESS_TABLE` across its walk would.
+# `interleave::tests::a_spawn_under_an_unrelated_process_lands_between_two_claims_of_one_walk`
+# must red under this.
+mutate-walk-in-one-hold = []
+# The model's spawn mints its caller's handle to the child once the spawn has
+# landed and its retires are posted, as a kernel that installed it after
+# `loader::spawn` returned would: a child claimed as it lands closes its table,
+# its own `self` with it, before that.
+# `interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it`
+# must red under this.
+mutate-spawner-handle-after-the-landing = []
+# The model's spawn mints its caller's handle to the child under the caller's
+# lock and the child's own once that lock is given up, as a kernel whose commit
+# installed the one before it minted the other would: another thread of the
+# caller closes the only handle the object has.
+# `interleave::tests::a_sibling_closing_a_spawns_handle_before_the_spawn_returns`
+# must red under this.
+mutate-spawner-handle-before-the-childs-own = []
 # **Every actuator, and which one is armed comes from the boot parameter.**
 # `kernel/src/actuator.rs` declares every one of them with the claim each rests on; this
 # name is the whole of what a build decides about them. A kernel without it has
@@ -111,7 +233,7 @@ boot-actuators = []
 # than assumed, because that claim is what makes the split below sound.
 #
 # **Separate from `boot-actuators` on purpose.** A diagnostic image the owner
-# flashes wants `heartbeat` and `diag-tick`; it must not also gain a debug
+# flashes wants `diag-tick`; it must not also gain a debug
 # syscall, which is what folding the two into one name would give it.
 test-actuators = []
 # The debugger's spin gate, and the one thing `--debug` compiles in. Not a boot
@@ -119,24 +241,27 @@ test-actuators = []
 # `cargo run -- --debug` exists to debug is the kernel an image ships.
 debug-wait = []
 # The on-target half of the scheduler's invariants.
-# Turns on `toyos-sched/check`, which asserts container-vs-state-word agreement
-# and invariant T at the end of every scheduler pass, and asserts the pass
-# itself fits `toyos_sched::cpu::MAX_PASS_NS` — the term the simulator's
-# invariant I4 leaves out, because a simulated pass costs nothing.
+# Asserts container-vs-state-word agreement and invariant T at the end of every
+# scheduler pass (`pure/sched/invariants.rs`), and asserts the pass itself fits
+# `kernel::sched::cpu::MAX_PASS_NS` — the term the simulator's invariant I4
+# leaves out, because a simulated pass costs nothing.
 #
 # Off by default because it is not free: each pass gains a walk of this CPU's
 # ready queue and parked map plus a second clock read, and that lands on the
 # audio path. A bring-up, bisect or bare-metal build wants it; a build being
 # measured does not.
-#
-# Not a boot parameter, and the one that could not be: it forwards to a
-# dependency's cargo feature, which no runtime value can reach.
-sched-check = ["toyos-sched/check"]
+sched-check = []
+# The longest interrupts-off and preemption-off window each CPU closed since the
+# last report, printed beside the IRQ census (`src/windows.rs`). Its own build
+# because it reads the counter at every masking transition and every preempt
+# count crossing zero, on every entry and exit: a kernel being measured for
+# anything else must not carry it.
+mask-windows = []
 # The stray-write tripwire on the per-CPU `CpuSched` record: a shadow copy of its
 # bytes, taken when the driver's exclusive region is left and compared when it is
 # next entered, so a word that changed while nothing was allowed to change it is
 # reported as an offset, a field, a before and an after. `sched::driver`'s
-# `tripwire` module and `toyos_sched::cpu`'s `tripwire` impl block carry the
+# `tripwire` module and `kernel::sched::cpu`'s `tripwire` impl block carry the
 # argument, and the four deaths it exists for are named there.
 #
 # **Not `sched-check`, and the distinction is the whole point.** That one asserts
@@ -150,10 +275,7 @@ sched-check = ["toyos-sched/check"]
 # bytes at every entry to that region, which is every pass and every
 # `running`-peek. It compiles readers and no decision, so a kernel carrying it
 # schedules exactly as one without it.
-#
-# Not a boot parameter, and the one that could not be, for `sched-check`'s
-# reason: it forwards to a dependency's cargo feature.
-sched-tripwire = ["toyos-sched/tripwire"]
+sched-tripwire = []
 # The tripwire one layer below `sched-tripwire`: a band of known bytes on each
 # side of **every** heap allocation, read back when it is freed and, for the
 # running task's kernel stack, at every scheduler pass. `kernel/src/mm/alloc.rs`
@@ -313,8 +435,7 @@ df-witness-mutate = ["df-witness"]
 # carrying this inherits a set direction flag from whatever it interrupted
 # exactly as every kernel before 2026-08-21 did.
 #
-# It replaces the *behaviour* and not a verdict, which is `fpu-save-nothing`'s
-# argument one file over: everything else about the entry — the pushes, the FP
+# It replaces the *behaviour* and not a verdict: everything else about the entry — the pushes, the FP
 # bracket, the preempt count, the exit-to-user check — is the shipped one, and
 # what is absent is one instruction. A control that flipped an assertion would
 # make its own gate vacuous.
@@ -341,44 +462,11 @@ entry-df-unclean = []
 # own cost into the arm it is being compared against.
 pass-spin = []
 heap-lockspin = ["pass-spin"]
-# Take the FP body out of `arch::entry`'s bracket and the declared state out of
-# the loader's trampolines, leaving a kernel that preserves the *rest* of the
-# user machine state and nothing else — which is the kernel this tree had before
-# every Ring 3 transition that can reach another task saved and restored the
-# full x87/SSE state.
-#
-# The negative control for `fpu_isolation`, and the only way to have one: the
-# defect it stages is a CPU register file surviving a task switch, and QEMU has
-# no device, machine property or `-cpu` flag that changes what an entry saves.
-#
-# It replaces the *behaviour* and not a verdict. The reservation, the alignment,
-# the rsp bookkeeping and every assertion are the shipped ones; what is absent
-# is the `fxsave64`, the `fxrstor64` and the trampoline's load. A feature that
-# flipped an assertion would make its own gate vacuous.
-#
-# **The one actuator that kept its own kernel build, and here is why**: these
-# are `naked_asm!` bodies on every ring transition, so a
-# boot parameter would have to be a branch there — on the path the gate is about,
-# in a binary the shipping one no longer resembles. The gate would then certify
-# a bracket nothing ships.
-fpu-save-nothing = []
-# The kernel this tree had before `arch::control_regs` took `FSGSBASE` out of
-# `CR4`: the bit back in `CR4_REQUIRED`, so `WRGSBASE`/`RDGSBASE` are legal at
-# CPL 3 again and a Ring 3 thread can aim the `GS.base` every kernel entry
-# dereferences. The negative control for `gsbase_locked`, and its own kernel
-# build for `fpu-save-nothing`'s reason — the defect is one bit of the `CR4`
-# declaration every CPU is asserted against, which a boot parameter cannot reach
-# without becoming a branch on the path the doctrine forbids. It replaces the
-# machine and not a verdict: the MSR-based FS base, the entry paths and
-# `self_check` are the shipped kernel's, and only that one bit differs.
-user-writable-gsbase = []
 
 # The one profile every guest binary is built with.
 # Optimised, because an unoptimised guest mismeasures everything under TCG;
-# debug-assertions and overflow-checks on, because fail-fast beats speed here
-# and both crafted-ELF kernel panics in `issues/` were *found* by
-# an overflow check. `--release` would turn the last two off silently, so this
-# build system no longer has the flag.
+# debug-assertions and overflow-checks on, because fail-fast beats speed here.
+# `--release` would turn the last two off silently.
 [profile.toyos]
 inherits = "dev"
 opt-level = 2
@@ -389,28 +477,38 @@ strip = "debuginfo"
 debug-assertions = true
 overflow-checks = true
 
+[lib]
+path = "pure/lib.rs"
+
+# The library's tests run on the host; the binary builds for a bare target only.
+[[bin]]
+name = "kernel"
+path = "src/main.rs"
+test = false
+
 [dependencies]
-bcachefs = { path = "../bcachefs", default-features = false }
 toyos-abi = { path = "../toyos-abi" }
+
+# The binary's alone, so a host build of the library compiles none of them.
+[target.'cfg(target_os = "none")'.dependencies]
+bcachefs = { path = "../bcachefs", default-features = false }
 toyos-acpi = { path = "../toyos-acpi" }
-toyos-dma = { path = "../toyos-dma" }
+toyos-dma = { path = "dma" }
 toyos-elide = { path = "../toyos-elide" }
 toyos-blackbox = { path = "../toyos-blackbox" }
 toyos-blockhold = { path = "../toyos-blockhold" }
 toyos-bootmap = { path = "../toyos-bootmap" }
+toyos-cpuvuln = { path = "../toyos-cpuvuln" }
 toyos-fat32 = { path = "../toyos-fat32" }
 toyos-elf = { path = "../toyos-elf" }
+toyos-gicv3 = { path = "gicv3" }
 toyos-gpt = { path = "../toyos-gpt" }
 toyos-hda = { path = "../toyos-hda" }
-toyos-pci = { path = "../toyos-pci" }
-toyos-pcid = { path = "../toyos-pcid" }
-toyos-perfstate = { path = "../toyos-perfstate" }
+toyos-pci = { path = "pci" }
 toyos-tco = { path = "../toyos-tco" }
-toyos-proclife = { path = "../toyos-proclife" }
-toyos-ps2 = { path = "../toyos-ps2" }
+toyos-ps2 = { path = "ps2" }
 toyos-rootimage = { path = "../toyos-rootimage" }
 toyos-quiesce = { path = "../toyos-quiesce" }
-toyos-sched = { path = "../toyos-sched" }
 toyos-symbols = { path = "../toyos-symbols" }
 toyos-untrusted = { path = "../toyos-untrusted" }
 toyos-userbound = { path = "../toyos-userbound" }

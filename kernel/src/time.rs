@@ -138,12 +138,6 @@ impl Bound {
         Self { limit, cite }
     }
 
-    /// A bound a device register publishes; `cite` names the register. Not
-    /// `const`: the number is read off the hardware at the call site.
-    pub fn from_register(limit: Duration, cite: &'static str) -> Self {
-        Self { limit, cite }
-    }
-
     pub const fn duration(self) -> Duration {
         self.limit
     }
@@ -247,6 +241,14 @@ impl fmt::Display for Budget {
         write!(f, "{} ({})", self.limit, self.degraded)
     }
 }
+
+/// How long the boot CPU waits for an AP it started to echo its token:
+/// [`DEAF_CPU`]'s span, because a vCPU its host has not run yet is slow and not
+/// dead.
+pub const AP_START: Budget = Budget::of(
+    Duration::from_nanos(DEAF_CPU.nanos()),
+    "the machine boots with the CPUs that came up before the first that did not",
+);
 
 /// A duration used as a bound on *another* duration, never as a wait.
 /// Nothing expires; there is no caller and no register.

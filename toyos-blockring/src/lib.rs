@@ -29,7 +29,7 @@
 //! that needs one to follow another waits for the first's answer.
 //!
 //! Pure: `alloc`, `toyos-blockhold` and `toyos-transport`, no `unsafe`. The
-//! ends that map the page — `userland/blockd` and its client — hand it the
+//! ends that map the page — `userland/diskserver` and its client — hand it the
 //! page as words ([`toyos_transport::Word`]) and act on what it answers.
 
 #![cfg_attr(not(test), no_std)]

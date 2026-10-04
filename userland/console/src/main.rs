@@ -10,7 +10,7 @@
 //! - **It shows this boot's log, and keeps showing it.** Claiming
 //!   `DEVICE_FRAMEBUFFER` stops `panic_console::boot_checkpoint` from ever
 //!   painting again, so a console that merely cleared the screen would trade
-//!   the diagnostic that works today for one that might. It asks `logd` for the
+//!   the diagnostic that works today for one that might. It asks `logkeeper` for the
 //!   log ([`toyos_logstream::SERVICE`]) and draws the boot so far above the
 //!   first prompt — the kernel's records and every program's output — and
 //!   every program's line after as it is written, each under its program's
@@ -18,7 +18,6 @@
 //! - **A fatal panic still takes the screen back.** `render` ignores
 //!   `SCREEN_OWNED_BY_USERLAND` entirely — only boot checkpoints honour it —
 //!   so the report paints over whatever this program drew.
-//!   `screen_console_panic` is the gate.
 //! - **The emulator is `/system/bin/terminal`'s**, unchanged. `Console::new` always
 //!   took a raw mapping; the compositor was never below it. This is the caller
 //!   whose mapping is the scanout, so it is the one that pays for a read.
@@ -55,18 +54,18 @@ const KEY_PAGE_DOWN: u8 = 0x4E;
 /// apply.
 const SEED_MAX_BYTES: usize = 64 * 1024;
 
-/// The name `/system/bin/init` starts this program under, which its own lines
-/// come back from `logd` tagged with.
+/// The name `/system/bin/supervisor` starts this program under, which its own lines
+/// come back from `logkeeper` tagged with.
 const OWN_TAG: &str = "console";
 
-/// This boot's log as `logd` hands it to a reader on this machine: a pipe the
+/// This boot's log as `logkeeper` hands it to a reader on this machine: a pipe the
 /// log is written into, and how many of its bytes are the boot so far.
 struct Log {
     pipe: Pipe,
     lines: Lines,
     handed: u64,
     /// When this program asked, in milliseconds since boot: a kernel record
-    /// stamped before it is the boot so far, however late `logd` read it.
+    /// stamped before it is the boot so far, however late `logkeeper` read it.
     asked_ms: u64,
     /// Whether the last kernel record was kept, which its continuation lines
     /// follow.
@@ -76,18 +75,18 @@ struct Log {
 }
 
 impl Log {
-    /// Ask `logd`: one request, and a blocking read of its one answer.
+    /// Ask `logkeeper`: one request, and a blocking read of its one answer.
     fn subscribe() -> Result<Self, String> {
         let asked_ms = toyos_abi::clock::nanos_since_boot() / 1_000_000;
         let conn = endow::service(SERVICE).map_err(|e| format!("no `{SERVICE}` service: {e:?}"))?;
-        conn.signal(READ).map_err(|e| format!("logd would not take the request: {e:?}"))?;
-        let header = conn.recv_header().map_err(|e| format!("logd did not answer: {e:?}"))?;
+        conn.signal(READ).map_err(|e| format!("logkeeper would not take the request: {e:?}"))?;
+        let header = conn.recv_header().map_err(|e| format!("logkeeper did not answer: {e:?}"))?;
         if header.msg_type != SERVED {
-            return Err(format!("logd answered frame type {}", header.msg_type));
+            return Err(format!("logkeeper answered frame type {}", header.msg_type));
         }
         let handed: u64 =
-            conn.recv_payload(&header).map_err(|e| format!("logd's answer is short: {e:?}"))?;
-        let [raw] = conn.recv_handles_exact::<1>().ok_or("logd's answer carried no pipe")?;
+            conn.recv_payload(&header).map_err(|e| format!("logkeeper's answer is short: {e:?}"))?;
+        let [raw] = conn.recv_handles_exact::<1>().ok_or("logkeeper's answer carried no pipe")?;
         // SAFETY: the kernel moved this handle into this table with the frame
         // that names it, and nothing else answers for it.
         let pipe = unsafe { Pipe::from_raw(raw) };
@@ -157,7 +156,7 @@ fn main() {
     let mut shell = Shell::spawn(&connector);
 
     let Some(fb_dev) = endow::device::<FramebufferDev>(DeviceType::Framebuffer) else {
-        // The same answer soundd and netd give for their absent device: a
+        // The same answer soundserver and netstack give for their absent device: a
         // console with no screen has nothing to report a failure *to*, and a
         // panic here would replace the boot log with a crash report.
         eprintln!("console: no framebuffer, exiting");
@@ -277,8 +276,8 @@ fn main() {
                 let mut buf = [0u8; 4096];
                 match reader.pipe.read_nonblock(&mut buf) {
                     Ok(0) => {
-                        console.write_bytes(b"\n[console] logd stopped writing the log\n");
-                        log = Err("logd stopped".to_string());
+                        console.write_bytes(b"\n[console] logkeeper stopped writing the log\n");
+                        log = Err("logkeeper stopped".to_string());
                     }
                     Ok(n) => reader.take(&buf[..n]),
                     Err(SyscallError::WouldBlock) => {}
@@ -382,7 +381,7 @@ fn unfinished(partial: &mut Vec<u8>, bytes: &[u8]) {
     partial.drain(..over);
 }
 
-/// Draw the boot so far — the bytes `logd` handed over with the pipe — before
+/// Draw the boot so far — the bytes `logkeeper` handed over with the pipe — before
 /// the first prompt; returns the bytes drawn. Every later line arrives on the
 /// same pipe and is drawn as it comes.
 ///

@@ -5,38 +5,45 @@
 //!
 //! **A watch is a poll registered on the watched object's own
 //! [`Watch`](crate::watch::Watch)**, one entry per direction it asked for, and
-//! the object's post completes it. There is no table of sources here: what a
+//! the object's post fires it. There is no table of sources here: what a
 //! handle watches is `ops::read_watch`/`ops::write_watch`'s answer, and the
 //! poll holds no reference to the object at all.
 //!
+//! **Only the ring's submitter writes a watch's answer, after a look**
+//! ([`polls`]): a post owes the poll a look, and `submit` looks at the object
+//! again before it writes anything, so an answer is never older than the wait
+//! that returned it.
+//!
 //! **A completion is a trust boundary, and the kernel is the only writer of
 //! its position.** `completion_tail` lives here, never in the page; the head
-//! is the process's and is read once per post, so a head the process lies
+//! is the process's and is read once per write, so a head the process lies
 //! about makes the kernel drop the completion and count it, never write
 //! outside the ring. What a completion says comes from the kernel — the
-//! caller's own `token`, and a result that is either the direction the object
-//! posted or the refusal — so a process cannot make one appear in another
-//! process's ring or say something no object said. A post writes at most one
-//! entry, and a ring holds at most [`MAX_PENDING_WATCHES`] polls.
+//! caller's own `token`, and a result that is either the directions the object
+//! was ready in or the refusal — so a process cannot make one appear in another
+//! process's ring or say something no object said. A ring holds at most
+//! [`MAX_PENDING_WATCHES`] polls.
 //!
-//! **Locks.** A ring's own lock takes nothing under it and is never taken under
-//! a watch's: a post fires its polls with its list let go. A ring's own watch
-//! holds only threads, because no handle names a ring as a thing to watch.
+//! **Locks.** What a completion writes, and the page it is written into, sit
+//! behind a `Lock` of their own; nothing is taken under it. The rest of a
+//! ring, its submissions and its polls, is another's. No post reaches either:
+//! a fire takes its poll and posts the ring's watch. That watch is an
+//! [`IrqWatch`], because a device's interrupt handler fires polls, and holds
+//! only threads, because no handle names a ring as a thing to watch.
 
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 use core::sync::atomic::Ordering;
 
-use toyos_sched::task::WaitClass;
-use toyos_sched::watch::{Fire, Ring};
+use kernel::sched::task::WaitClass;
+use kernel::sched::watch::{Fire, Ring};
 
 use crate::object::shm::SharedMemObject;
-use crate::object::{ops, KObjectRef};
+use crate::object::{ops, HandleError, KObjectRef};
 use crate::process::{self, Pid};
 use crate::scheduler;
 use crate::sync::Lock;
 use crate::time::{Deadline, Duration};
-use crate::watch::Watch;
+use crate::watch::IrqWatch;
 use crate::DirectMap;
 
 use toyos_abi::inbox::{
@@ -47,8 +54,9 @@ use toyos_abi::handle::{RawHandle, Rights};
 use toyos_abi::syscall::SyscallError;
 
 mod once;
+mod polls;
 
-use once::Once;
+use polls::{Look, Polls, Submitter};
 
 /// The one owned reference to a ring, held by its handle's object; dropping it
 /// tears the ring down.
@@ -62,15 +70,18 @@ impl InboxRef {
 
 impl Drop for InboxRef {
     fn drop(&mut self) {
-        // Taken out under the lock and let go of outside it: the unmap flushes.
+        // The page is the completions', so it goes only once nothing can reach
+        // them. Both halves are taken out under their locks and let go of
+        // outside them: the unmap flushes.
+        let Some(completions) = self.0.completions.lock().take() else {
+            unreachable!("an inbox is torn down by its one reference, once");
+        };
         let Some(mut state) = self.0.state.lock().take() else {
             unreachable!("an inbox is torn down by its one reference, once");
         };
-        for poll in state.pending.drain(..) {
-            poll.withdraw();
-        }
+        state.polls.withdraw_all();
         // `Unmapped`'s drop flushes; the `Arc` drop after it frees the pages.
-        drop(state.shm.unmap_from(state.owner_pid));
+        drop(completions.shm.unmap_from(state.owner_pid));
     }
 }
 
@@ -83,7 +94,6 @@ pub enum Op {
 
 impl Op {
     fn from_raw(raw: u8) -> Result<Self, SyscallError> {
-        // 2 is retired (formerly IORING_OP_POLL_REMOVE); it refuses like any undeclared op.
         match raw {
             0 => Ok(Self::Nop),
             1 => Ok(Self::Watch),
@@ -133,35 +143,17 @@ impl Readiness {
         if self.writable { flags |= WatchFlags::WRITABLE.raw(); }
         flags
     }
+
+    fn any(self) -> bool {
+        self.readable || self.writable
+    }
 }
 
-/// One `OP_WATCH` a ring is waiting on: one-shot across every watch it is
-/// registered on and against its own registrant's recheck.
-pub struct Poll {
-    inbox: Arc<Inbox>,
-    user_data: u64,
-    /// The handle the poll was submitted against; the dedup key.
-    handle: RawHandle,
-    /// Taken by exactly one of a fire and a withdrawal.
-    state: Once,
-}
+type Poll = polls::Poll<Arc<Inbox>>;
 
-impl Poll {
-    /// Post this poll's completion if nothing has answered it yet.
-    fn complete(&self, result: i32) {
-        if self.state.fire() {
-            self.inbox.complete(self.user_data, result);
-        }
-    }
-
-    /// Answer nothing: a newer poll on the same handle replaced it, or its
-    /// ring went away.
-    fn withdraw(&self) {
-        let _ = self.state.withdraw();
-    }
-
-    fn armed(&self) -> bool {
-        self.state.armed()
+impl polls::Wake for Arc<Inbox> {
+    fn wake(&self) {
+        self.watch.post_in_place();
     }
 }
 
@@ -169,16 +161,15 @@ impl Poll {
 /// watch is.
 pub struct PollEntry {
     poll: Arc<Poll>,
-    direction: Readiness,
+    direction: WatchFlags,
 }
 
 impl Ring for PollEntry {
     fn fire(&self, how: Fire) {
-        self.poll.complete(match how {
-            // The direction this watch is: its object posted it.
-            Fire::Ready => self.direction.result_flags() as i32,
-            Fire::Gone => -(SyscallError::NotFound as i32),
-        });
+        match how {
+            Fire::Ready => self.poll.fire(self.direction.raw()),
+            Fire::Gone => self.poll.end(),
+        }
     }
 
     fn live(&self) -> bool {
@@ -189,60 +180,45 @@ impl Ring for PollEntry {
 /// Hard cap on pending polls per ring.
 const MAX_PENDING_WATCHES: usize = 1024;
 
-/// A ring: what a poll posts into, and what `submit` parks on.
 pub struct Inbox {
     /// `None` once the ring's one reference let go of it.
     state: Lock<Option<RingState>>,
+    /// `None` from the moment that reference starts letting go of it.
+    completions: Lock<Option<Completions>>,
     /// Threads parked in `submit`; never a poll — see the module header.
-    watch: Watch,
+    watch: IrqWatch,
 }
 
 struct RingState {
+    /// The page's address. The page is [`Completions`]'s, which the teardown
+    /// lets go of only after it has taken this.
     shm_phys: DirectMap,
-    /// A ring's page has no lifetime of its own; it goes with the last handle to the ring.
-    shm: Arc<SharedMemObject>,
     submission_size: u32,
-    completion_size: u32,
-    /// The kernel's own copy of the completion tail, the only one it reads.
-    completion_tail: u32,
-    /// Polls still armed as of the last registration, which sweeps the rest.
-    pending: Vec<Arc<Poll>>,
+    polls: Polls<Arc<Inbox>>,
     owner_pid: Pid,
 }
 
-impl RingState {
-    // No accessor below returns a Rust reference into this page — the process
-    // maps it writable, so only atomics or `read_volatile` are sound here.
+// No accessor below returns a Rust reference into a ring's page — the process
+// maps it writable, so only atomics or `read_volatile` are sound here.
 
-    /// One atomic word of one ring header; never `&RingHeader` — see the block above.
-    fn ring_word(&self, ring_off: u64, field_off: usize) -> &core::sync::atomic::AtomicU32 {
-        let ptr = self.shm_phys.as_mut_ptr::<u8>();
-        // SAFETY: offset is in-bounds and 4-aligned within the 2 MiB page; `AtomicU32` is sound over memory the process also writes.
-        unsafe {
-            core::sync::atomic::AtomicU32::from_ptr(
-                ptr.add(ring_off as usize + field_off) as *mut u32,
-            )
-        }
+/// One atomic word of one ring header; never `&RingHeader` — see the block above.
+fn ring_word(page: &DirectMap, ring_off: u64, field_off: usize) -> &core::sync::atomic::AtomicU32 {
+    let ptr = page.as_mut_ptr::<u8>();
+    // SAFETY: offset is in-bounds and 4-aligned within the 2 MiB page, which outlives both of the ring's halves that name it; `AtomicU32` is sound over memory the process also writes.
+    unsafe {
+        core::sync::atomic::AtomicU32::from_ptr(
+            ptr.add(ring_off as usize + field_off) as *mut u32,
+        )
     }
+}
 
+impl RingState {
     fn submission_head(&self) -> &core::sync::atomic::AtomicU32 {
-        self.ring_word(SUBMISSION_RING_OFF, core::mem::offset_of!(RingHeader, head))
+        ring_word(&self.shm_phys, SUBMISSION_RING_OFF, core::mem::offset_of!(RingHeader, head))
     }
 
     fn submission_tail(&self) -> &core::sync::atomic::AtomicU32 {
-        self.ring_word(SUBMISSION_RING_OFF, core::mem::offset_of!(RingHeader, tail))
-    }
-
-    fn completion_head(&self) -> &core::sync::atomic::AtomicU32 {
-        self.ring_word(COMPLETION_RING_OFF, core::mem::offset_of!(RingHeader, head))
-    }
-
-    fn completion_tail_word(&self) -> &core::sync::atomic::AtomicU32 {
-        self.ring_word(COMPLETION_RING_OFF, core::mem::offset_of!(RingHeader, tail))
-    }
-
-    fn completion_dropped(&self) -> &core::sync::atomic::AtomicU32 {
-        self.ring_word(COMPLETION_RING_OFF, core::mem::offset_of!(RingHeader, dropped))
+        ring_word(&self.shm_phys, SUBMISSION_RING_OFF, core::mem::offset_of!(RingHeader, tail))
     }
 
     /// One submission entry, copied out by value via `read_volatile` — never a `&Submission`.
@@ -251,17 +227,40 @@ impl RingState {
         // SAFETY: `index` is masked by `submission_size` (≤256), keeping the read in-bounds and aligned within the page.
         unsafe { (ptr.add(SUBMISSIONS_OFF as usize + index as usize * core::mem::size_of::<Submission>()) as *const Submission).read_volatile() }
     }
+}
+
+/// What a poll's completion writes, and the ring's page, which goes only
+/// with these.
+struct Completions {
+    /// A ring's page has no lifetime of its own; it goes with the last handle to the ring.
+    shm: Arc<SharedMemObject>,
+    page: DirectMap,
+    completion_size: u32,
+    /// The kernel's own copy of the completion tail, the only one it reads.
+    completion_tail: u32,
+}
+
+impl Completions {
+    fn completion_head(&self) -> &core::sync::atomic::AtomicU32 {
+        ring_word(&self.page, COMPLETION_RING_OFF, core::mem::offset_of!(RingHeader, head))
+    }
+
+    fn completion_tail_word(&self) -> &core::sync::atomic::AtomicU32 {
+        ring_word(&self.page, COMPLETION_RING_OFF, core::mem::offset_of!(RingHeader, tail))
+    }
+
+    fn completion_dropped(&self) -> &core::sync::atomic::AtomicU32 {
+        ring_word(&self.page, COMPLETION_RING_OFF, core::mem::offset_of!(RingHeader, dropped))
+    }
 
     /// The address of one completion entry — a pointer, never a `&mut` minted from a shared borrow.
     fn completion_at(&self, index: u32) -> *mut Completion {
-        let ptr = self.shm_phys.as_mut_ptr::<u8>();
+        let ptr = self.page.as_mut_ptr::<u8>();
         // SAFETY: `index` is masked by `completion_size` (≤512), keeping the offset inside the page.
         unsafe { ptr.add(COMPLETION_RING_OFF as usize + core::mem::size_of::<RingHeader>() + index as usize * core::mem::size_of::<Completion>()) as *mut Completion }
     }
 
     /// Posts a completion, or records a drop if the ring reports itself full.
-    /// A full ring is not fatal here: a poll completes on the poster's thread,
-    /// which belongs to a different process.
     fn post_completion(&mut self, user_data: u64, result: i32, flags: u32) {
         let tail = self.completion_tail;
         if tail.wrapping_sub(self.completion_head().load(Ordering::Acquire)) >= self.completion_size {
@@ -269,7 +268,7 @@ impl RingState {
             return;
         }
         let idx = tail & (self.completion_size - 1);
-        // SAFETY: `idx` is masked to ring size; the ring's lock serializes kernel writers.
+        // SAFETY: `idx` is masked to ring size; the completions' lock serializes kernel writers.
         unsafe { self.completion_at(idx).write(Completion { token: user_data, result, flags }) };
         self.completion_tail = tail.wrapping_add(1);
         self.completion_tail_word().store(tail.wrapping_add(1), Ordering::Release);
@@ -282,6 +281,10 @@ impl RingState {
         self.completion_tail.wrapping_sub(head)
     }
 
+    fn room(&self) -> bool {
+        self.completion_count() < self.completion_size
+    }
+
     /// Cumulative, never cleared.
     fn dropped(&self) -> u32 {
         self.completion_dropped().load(Ordering::Relaxed)
@@ -289,17 +292,12 @@ impl RingState {
 }
 
 impl Inbox {
-    /// Post one completion and wake whoever waits in `submit`. A ring already
-    /// torn down takes nothing and wakes nobody.
-    fn complete(&self, user_data: u64, result: i32) {
-        let posted = self.with_state(|state| state.post_completion(user_data, result, 0));
-        if posted.is_ok() {
-            self.watch.post();
-        }
-    }
-
     fn with_state<R>(&self, f: impl FnOnce(&mut RingState) -> R) -> Result<R, SyscallError> {
         self.state.lock().as_mut().map(f).ok_or(SyscallError::NotFound)
+    }
+
+    fn with_completions<R>(&self, f: impl FnOnce(&Completions) -> R) -> Result<R, SyscallError> {
+        self.completions.lock().as_ref().map(f).ok_or(SyscallError::NotFound)
     }
 }
 
@@ -357,14 +355,17 @@ pub fn create(depth: u32) -> Result<(InboxRef, u64), SyscallError> {
     let inbox = Arc::new(Inbox {
         state: Lock::new(Some(RingState {
             shm_phys,
-            shm,
             submission_size,
-            completion_size,
-            completion_tail: 0,
-            pending: Vec::new(),
+            polls: Polls::new(),
             owner_pid: pid,
         })),
-        watch: Watch::new(),
+        completions: Lock::new(Some(Completions {
+            shm,
+            page: shm_phys,
+            completion_size,
+            completion_tail: 0,
+        })),
+        watch: IrqWatch::new(),
     });
     Ok((InboxRef(inbox), shm_vaddr))
 }
@@ -391,7 +392,8 @@ pub fn submit(
     }
 
     loop {
-        let (count, dropped) = inbox.with_state(|s| (s.completion_count(), s.dropped()))?;
+        polls::deliver(inbox);
+        let (count, dropped) = inbox.with_completions(|c| (c.completion_count(), c.dropped()))?;
 
         if count >= min_complete || min_complete == 0 {
             return Ok(count);
@@ -410,6 +412,12 @@ pub fn submit(
             return Ok(count);
         }
 
+        // Read here and not only at the park: a peer whose posts keep this
+        // thread looking keeps it from the park, and may not keep its kill.
+        if crate::sched::driver::current_kill_pending() {
+            return Err(SyscallError::Gone);
+        }
+
         // The recheck closure is this ring's own condition, not mere readiness — else a waiter for `min_complete` spins.
         let parkable = scheduler::Parkable::at_entry();
         if crate::watch::wait_until(
@@ -418,7 +426,11 @@ pub fn submit(
             0,
             WaitClass::Io,
             deadline,
-            || inbox.with_state(|s| s.completion_count()).map_or(true, |n| n >= min_complete),
+            || {
+                polls::awake(inbox, || {
+                    inbox.with_completions(|c| c.completion_count()).map_or(true, |n| n >= min_complete)
+                })
+            },
         )
         .is_err()
         {
@@ -463,109 +475,101 @@ fn process_submission(inbox: &Arc<Inbox>, submission: &Submission) {
     // `Submission::flags` is declared and read by nothing, so a caller setting
     // it is asking for a behaviour that does not exist.
     if submission.flags != 0 {
-        inbox.complete(submission.token, -(SyscallError::InvalidArgument as i32));
+        polls::complete(inbox, submission.token, -(SyscallError::InvalidArgument as i32));
         return;
     }
     let op = match Op::from_raw(submission.op) {
         Ok(op) => op,
         Err(_) => {
-            inbox.complete(submission.token, -(SyscallError::InvalidArgument as i32));
+            polls::complete(inbox, submission.token, -(SyscallError::InvalidArgument as i32));
             return;
         }
     };
 
     match op {
-        Op::Nop => inbox.complete(submission.token, 0),
+        Op::Nop => polls::complete(inbox, submission.token, 0),
         Op::Watch => process_watch(inbox, submission),
         Op::Accept => process_accept(inbox, submission),
     }
 }
 
-/// Registers an `OP_WATCH`, or answers it immediately; every refusal posts a completion rather than going silent.
+/// Takes an `OP_WATCH` as its handle's one poll; every refusal writes a completion rather than going silent.
 fn process_watch(inbox: &Arc<Inbox>, submission: &Submission) {
-    let handle = submission.handle;
     let user_data = submission.token;
     let flags = match WatchFlags::from_raw(submission.op_flags) {
         Ok(flags) => flags,
         Err(e) => {
-            inbox.complete(user_data, -(e as i32));
+            polls::complete(inbox, user_data, -(e as i32));
             return;
         }
     };
-
-    // Readiness is checked on the process's table, not the thread's: a ring is process-wide.
-    // The object is cloned out so the registration below holds no process lock.
-    let resolved = process::with_process_data(|data| {
-        data.handles.get_ref(handle, Rights::WAIT).cloned()
+    // Nothing is held here: `resolve` has given the guard up.
+    let refused = resolve(submission.handle).map_err(HandleError::refuse_as_error).and_then(|object| {
+        arm(inbox, Poll::new(inbox.clone(), user_data, submission.handle, flags.raw()), None, &object)
     });
-    let object = match resolved {
-        Ok(object) => object,
-        // Nothing is held here: `with_process_data` has given the guard up.
-        Err(e) => {
-            let refusal = e.refuse_as_error();
-            inbox.complete(user_data, -(refusal as i32));
-            return;
-        }
-    };
+    if let Err(refusal) = refused {
+        polls::complete(inbox, user_data, -(refusal as i32));
+    }
+}
 
-    let readiness = readiness_of(&object, flags);
-    if readiness.readable || readiness.writable {
-        // Ready already: complete now, one-shot, with the directions that fired.
-        inbox.complete(user_data, readiness.result_flags() as i32);
-        return;
+/// The object `handle` names in this process's table, not the thread's: a ring is process-wide.
+/// Cloned out, so what follows holds no process lock.
+fn resolve(handle: RawHandle) -> Result<KObjectRef, HandleError> {
+    process::with_process_data(|data| data.handles.get_ref(handle, Rights::WAIT).cloned())
+}
+
+/// Keep `poll` as its handle's one poll, or in the place of `looked_at`, the
+/// poll a look found nothing for; then fire it if `object` is ready or arm it
+/// on the object's watches if not. The refusal, when nothing could ever answer
+/// it.
+fn arm(
+    inbox: &Arc<Inbox>,
+    poll: Poll,
+    looked_at: Option<&Arc<Poll>>,
+    object: &KObjectRef,
+) -> Result<(), SyscallError> {
+    let flags = WatchFlags(poll.flags);
+    let ready = readiness_of(object, flags).any();
+    let read = if flags.readable() { ops::read_watch(object) } else { None };
+    let write = if flags.writable() { ops::write_watch(object) } else { None };
+    // No readiness in either direction: nothing could ever answer this poll, so it is refused, not registered.
+    if !ready && read.is_none() && write.is_none() {
+        return Err(SyscallError::NotSupported);
     }
 
-    let read = if flags.readable() { ops::read_watch(&object) } else { None };
-    let write = if flags.writable() { ops::write_watch(&object) } else { None };
-    // No readiness in either direction: nothing could ever complete this poll, so it is refused, not registered.
-    if read.is_none() && write.is_none() {
-        inbox.complete(user_data, -(SyscallError::NotSupported as i32));
-        return;
-    }
-
-    let poll = Arc::new(Poll {
-        inbox: inbox.clone(),
-        user_data,
-        handle,
-        state: Once::new(),
-    });
+    let poll = Arc::new(poll);
     // The cap is checked before registering: registering first would leave a
     // watch holding a poll the ring never counted.
-    let admitted = inbox.with_state(|state| {
-        // The old poll on this handle answers nothing once this one replaces it.
-        if let Some(at) = state.pending.iter().position(|p| p.handle == handle && p.armed()) {
-            state.pending.swap_remove(at).withdraw();
-        }
-        state.pending.retain(|p| p.armed());
-        if state.pending.len() >= MAX_PENDING_WATCHES {
-            return false;
-        }
-        state.pending.push(poll.clone());
-        true
+    let kept = inbox.with_state(|state| match looked_at {
+        None if state.polls.admit(poll.clone(), MAX_PENDING_WATCHES) => Ok(true),
+        None => Err(SyscallError::ResourceExhausted),
+        Some(old) => Ok(state.polls.renew(old, poll.clone())),
     });
-    match admitted {
-        Ok(true) => {}
-        Ok(false) => {
-            inbox.complete(user_data, -(SyscallError::ResourceExhausted as i32));
-            return;
-        }
-        // The ring's last handle closed under this submit.
-        Err(_) => return,
+    match kept {
+        Ok(Ok(true)) => {}
+        Ok(Err(full)) => return Err(full),
+        // A newer watch took the handle's place during the look, or the
+        // ring's last handle closed under this submit.
+        Ok(Ok(false)) | Err(_) => return Ok(()),
+    }
+    if ready {
+        poll.fire(0);
+        return Ok(());
     }
 
     // Registered with no ring lock held, then rechecked: a post either ran
     // before the registration — and the recheck sees what it changed — or
-    // finds the entry. Whichever answers first answers alone.
+    // finds the entry. Whichever fires first fires alone.
     if let Some(watch) = &read {
-        watch.add_poll(PollEntry { poll: poll.clone(), direction: Readiness { readable: true, writable: false } });
+        watch.add_poll(PollEntry { poll: poll.clone(), direction: WatchFlags::READABLE });
     }
     if let Some(watch) = &write {
-        watch.add_poll(PollEntry { poll: poll.clone(), direction: Readiness { readable: false, writable: true } });
+        watch.add_poll(PollEntry { poll: poll.clone(), direction: WatchFlags::WRITABLE });
     }
-    let now = readiness_of(&object, flags);
-    if now.readable || now.writable {
-        poll.complete(now.result_flags() as i32);
+    if readiness_of(object, flags).any() {
+        poll.fire(0);
     }
+    Ok(())
 }
 
 /// Per-direction readiness of the object, restricted to what was asked for.
@@ -576,8 +580,53 @@ fn readiness_of(object: &KObjectRef, flags: WatchFlags) -> Readiness {
     }
 }
 
+impl Submitter<Arc<Inbox>> for Arc<Inbox> {
+    fn room(&self) -> bool {
+        self.with_completions(Completions::room).unwrap_or(false)
+    }
+
+    fn answer(&self, user_data: u64, result: i32) {
+        // A ring already torn down takes nothing.
+        if let Some(completions) = self.completions.lock().as_mut() {
+            completions.post_completion(user_data, result, 0);
+        }
+    }
+
+    fn polls<R>(&self, f: impl FnOnce(&mut Polls<Arc<Inbox>>) -> R) -> Option<R> {
+        self.with_state(|state| f(&mut state.polls)).ok()
+    }
+
+    fn look(&self, poll: &Arc<Poll>) -> Look {
+        let object = match resolve(poll.handle) {
+            Ok(object) => object,
+            // Closed since it was watched, which is no bug of the process's:
+            // the poll is over, as a close that ends it says.
+            Err(HandleError::BadHandle | HandleError::Stale | HandleError::WrongType { .. }) => {
+                return Look::Refused(SyscallError::NotFound);
+            }
+            Err(HandleError::Rights { .. }) => return Look::Refused(SyscallError::PermissionDenied),
+            Err(HandleError::TableFull) => return Look::Refused(SyscallError::ResourceExhausted),
+        };
+        let flags = WatchFlags(poll.flags);
+        let mut now = readiness_of(&object, flags);
+        // A post on its read watch is the object's readability, and nothing
+        // in the kernel could be looked at instead.
+        now.readable |= flags.readable()
+            && poll.posted() & WatchFlags::READABLE.raw() != 0
+            && ops::read_posts_are_readiness(&object);
+        if now.any() {
+            return Look::Ready(now.result_flags());
+        }
+        let again = Poll::new(self.clone(), poll.user_data, poll.handle, poll.flags);
+        match arm(self, again, Some(poll), &object) {
+            Ok(()) => Look::Waits,
+            Err(refusal) => Look::Refused(refusal),
+        }
+    }
+}
+
 /// The submission form of `SYS_ACCEPT`; refusals fold into one `-InvalidArgument` completion instead of ending the process.
-fn process_accept(inbox: &Inbox, submission: &Submission) {
+fn process_accept(inbox: &Arc<Inbox>, submission: &Submission) {
     let user_data = submission.token;
 
     let acceptor = process::with_process_data(|data| {
@@ -589,7 +638,7 @@ fn process_accept(inbox: &Inbox, submission: &Submission) {
         // Nothing held: `with_process_data` has given the guard up.
         Err(e) => {
             let refusal = e.refuse_as_error();
-            inbox.complete(user_data, -(refusal as i32));
+            polls::complete(inbox, user_data, -(refusal as i32));
             return;
         }
     };
@@ -608,10 +657,10 @@ fn process_accept(inbox: &Inbox, submission: &Submission) {
                 )
             });
             match installed {
-                Ok(h) => inbox.complete(user_data, h.0 as i32),
-                Err(e) => inbox.complete(user_data, -(e as i32)),
+                Ok(h) => polls::complete(inbox, user_data, h.0 as i32),
+                Err(e) => polls::complete(inbox, user_data, -(e as i32)),
             }
         }
-        None => inbox.complete(user_data, -(SyscallError::WouldBlock as i32)),
+        None => polls::complete(inbox, user_data, -(SyscallError::WouldBlock as i32)),
     }
 }

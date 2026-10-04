@@ -1,4 +1,4 @@
-use toyos_sched::hw::{CpuId, Machine, TraceEvent, TraceKind};
+use kernel::sched::hw::{CpuId, Machine, TraceEvent, TraceKind};
 
 use crate::arch::entry::{restore_user_state, ring3_naked_asm, save_user_state};
 use crate::hw::HW;
@@ -76,7 +76,10 @@ pub(super) extern "sysv64" fn timer_entry() {
         "pop rcx",
         "pop rax",
         "iretq",
+        #[cfg(not(feature = "mask-windows"))]
         deadline = sym crate::deadline::poll,
+        #[cfg(feature = "mask-windows")]
+        deadline = sym ring0_tick,
         handler = sym timer_handler,
         exit_to_user = sym crate::arch::idt::kernel_exit_to_user_check,
         armed_ticks = const crate::arch::percpu::OFF_LAST_ARMED_TICKS,
@@ -89,7 +92,19 @@ pub(super) extern "sysv64" fn timer_entry() {
     );
 }
 
+/// The Ring 0 branch's Rust half under `mask-windows`: it interrupted a CPU
+/// with interrupts open, and its `iretq` opens them again.
+#[cfg(feature = "mask-windows")]
+extern "sysv64" fn ring0_tick() {
+    crate::windows::irqs_masked();
+    crate::deadline::poll();
+    crate::windows::irqs_unmasking();
+}
+
 extern "sysv64" fn timer_handler() {
+    // From Ring 3, so interrupts were open; `exit_to_user` opens them again.
+    #[cfg(feature = "mask-windows")]
+    crate::windows::irqs_masked();
     crate::arch::percpu::irq_took!(Timer);
     // Before anything that can take a lock: a CPU running userland is the other
     // half of the coverage the Ring 0 branch above gives a CPU holding one.

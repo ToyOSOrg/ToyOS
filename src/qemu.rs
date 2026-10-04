@@ -40,7 +40,7 @@
 //!
 //! [`Options::dump_audio`] writes the device's output to
 //! `/tmp/toyos-audio.wav` (parse it to EOF — the RIFF sizes stay 0 unless the
-//! guest shuts down cleanly). **Audio that sounds wrong is read from soundd's
+//! guest shuts down cleanly). **Audio that sounds wrong is read from soundserver's
 //! and doom's printed numbers, never from the ear**: a starved synthesizer and
 //! a wrong playback clock are indistinguishable to a listener, and doom's
 //! real-time factor is what separates them — RTF near 1.0 with playback still
@@ -185,7 +185,7 @@ pub fn launch(opts: &Options) {
         .arg("-drive")
         .arg("if=none,id=nvme0,format=raw,file=target/nvme.img")
         .arg("-device")
-        .arg("nvme,serial=deadbeef,drive=nvme0");
+        .arg("nvme,serial=deadbeef,drive=nvme0,msix-exclusive-bar=on");
 
     if shape.usb_hid {
         qemu.arg("-device")

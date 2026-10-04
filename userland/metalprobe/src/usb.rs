@@ -1,16 +1,15 @@
 //! What the boot stick answers about itself, through the whole stack that
-//! reaches it: the FAT32 driver, the page cache, `iod` and the xHCI mass-storage
+//! reaches it: the FAT32 driver, the page cache and the xHCI mass-storage
 //! transport.
 //!
 //! **`/log` is the one writable place on a metal boot.** A flashed image carries
 //! an ESP, a read-only ROOT and the `TOYOS-LOG` volume, so the only durable
-//! bytes a job can lay down are on the FAT32 partition `logd` also writes —
+//! bytes a job can lay down are on the FAT32 partition `logkeeper` also writes —
 //! which is the partition the driver reads back and the host's FAT check judges.
 
 use std::fs;
 use std::io::{Read, Write};
-use std::thread::sleep;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::{span, Measured, Refusal};
 
@@ -18,7 +17,7 @@ use crate::{span, Measured, Refusal};
 ///
 /// **Not a device figure — the whole path's**, and an order of magnitude under
 /// what the device itself can do: what sizes [`BYTES`] is the cost of a write
-/// through this kernel's page cache, `iod`, the FAT32 driver and the
+/// through this kernel's page cache, the FAT32 driver and the
 /// mass-storage transport together, measured end to end at about 80 KiB/s and
 /// rounded down here to a power of two.
 const SLOWEST_KIB_S: u64 = 64;
@@ -39,7 +38,7 @@ const SHARE_PERCENT: u64 = 8;
 const BYTES: usize =
     (SLOWEST_KIB_S * toyos_tco::JOB_BOUND_MS * SHARE_PERCENT / 100 / 1_000 * 1024) as usize;
 
-/// Both files, plus a boot's `logd` output, inside the 34 MiB the log volume is
+/// Both files, plus a boot's `logkeeper` output, inside the 34 MiB the log volume is
 /// formatted at — and each removed as soon as it is measured, so only one is
 /// ever on the volume at once.
 const _: () = assert!(BYTES * 2 < 16 * 1024 * 1024);
@@ -74,7 +73,7 @@ pub fn write() -> Measured {
         f.sync_all().map_err(|_| Refusal::IoFailed)?;
     }
     let took = began.elapsed();
-    // The volume is 34 MiB and `logd` shares it; a measurement that left its
+    // The volume is 34 MiB and `logkeeper` shares it; a measurement that left its
     // own file behind would shrink what the next boot's log may write.
     fs::remove_file(WRITTEN).map_err(|_| Refusal::IoFailed)?;
     span(took.as_nanos())
@@ -82,10 +81,9 @@ pub fn write() -> Measured {
 
 /// Read [`BYTES`] back off the device and check them, timing only the read.
 ///
-/// **The staged file is closed and left to drain before the clock starts.**
-/// `iod` flushes what the close pinned and drops the file from the cache, so
-/// the timed read is a cache miss the stick has to answer — the same reason
-/// `writeback_durability` waits here.
+/// **The staged file is closed before the clock starts**, though the read is
+/// answered from the file server's cache
+/// (`issues/hardware/metalprobes-usb-read-is-answered-from-fileservers-cache.md`).
 pub fn read() -> Measured {
     let blob = payload();
     {
@@ -95,7 +93,6 @@ pub fn read() -> Measured {
         }
         f.sync_all().map_err(|_| Refusal::IoFailed)?;
     }
-    sleep(DRAIN);
 
     let began = Instant::now();
     let mut got = Vec::with_capacity(BYTES);
@@ -110,10 +107,3 @@ pub fn read() -> Measured {
     span(took.as_nanos())
 }
 
-/// What the close above is given to reach the device before the clock starts.
-///
-/// **`sync_all` returns when the bytes are durable and not when the cache has
-/// dropped them**, and nothing here can wait on `iod`'s own pass; generous
-/// rather than tight, because a wait too short reports the page cache as the
-/// stick.
-const DRAIN: Duration = Duration::from_millis(200);

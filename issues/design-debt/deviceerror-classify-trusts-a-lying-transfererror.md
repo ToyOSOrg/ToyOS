@@ -52,12 +52,13 @@ error[E0277]: the trait bound `OnBudget: bcachefs::block_io::sealed::Sealed` is 
     --> bcachefs/tests/integration.rs:1009:34
 ```
 
-and by the same rule would refuse `kernel/src/bcachefs_adapter.rs:24` (the
-kernel's `block::BlockError`) and `tests/common/storage.rs:267` (the host
-harness's file-backed device). Implementing `TransferError` from outside is
-what the trait is *for*: a foreign block device is the only authority on
-whether its own transfer was attempted. Making `classify` crate-private has
-the identical problem, because those three are the callers.
+and by the same rule would refuse `kernel/src/block.rs`'s `impl` for the
+kernel's `BlockError`, fsd's for its `DiskError` (`userland/fsd/src/cache.rs`)
+and the host harness's file-backed device (`tests/common/storage.rs`).
+Implementing `TransferError` from outside is what the trait is *for*: a
+foreign block device is the only authority on whether its own transfer was
+attempted. Making `classify` crate-private has the identical problem, because
+those are the callers.
 
 ## What would close it
 

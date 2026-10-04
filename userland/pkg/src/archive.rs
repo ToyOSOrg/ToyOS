@@ -198,7 +198,7 @@ mod tests {
     /// The refusal the installer's write path rests on.
     #[test]
     fn a_name_that_leaves_the_archive_is_refused() {
-        for name in ["/etc/passwd", "gbae/../../system/bin/init", "../x", "./x", ""] {
+        for name in ["/etc/passwd", "gbae/../../system/bin/supervisor", "../x", "./x", ""] {
             let tar = archive(&[(name, b'0', b"x", 0o644)]);
             assert!(entries(&tar).is_err(), "{name:?} was accepted");
         }

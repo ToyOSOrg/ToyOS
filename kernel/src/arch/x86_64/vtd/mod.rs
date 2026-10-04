@@ -44,6 +44,7 @@ const FECTL_REG: u64 = 0x38;
 const FEDATA_REG: u64 = 0x3C;
 const FEADDR_REG: u64 = 0x40;
 const FEUADDR_REG: u64 = 0x44;
+const IQH_REG: u64 = 0x80;
 const IQT_REG: u64 = 0x88;
 const IQA_REG: u64 = 0x90;
 
@@ -51,8 +52,23 @@ const IQA_REG: u64 = 0x90;
 const TRANSLATION_ENABLE: u32 = 1 << 31;
 const SET_ROOT_TABLE_POINTER: u32 = 1 << 30;
 const QUEUED_INVALIDATION_ENABLE: u32 = 1 << 26;
-/// `GSTS.RTPS`: the root table pointer has been taken; shares `GCMD`'s `SRTP` bit position.
-const ROOT_TABLE_SET: u32 = 1 << 30;
+
+/// `GSTS` less its one-shot bits: what §11.4.4.1's recipe carries into every
+/// `GCMD` write, so that each write changes exactly one field.
+const PERSISTENT: u32 = 0x96FF_FFFF;
+
+/// What firmware may leave on, switched off one field per write before the
+/// unit is pointed at anything: §6.6 and §6.7 move a live unit only onto
+/// tables that translate alike, §6.5.2 points a queue only while queued
+/// invalidation is off, and `CFI` would ride every later write into the `IRE`
+/// this kernel sets. `CFI` before `IRE`, while `GSTS` still reports it
+/// (§11.4.4.2).
+const FIRMWARE_LEFT: [(u32, &str); 4] = [
+    (TRANSLATION_ENABLE, "translation"),
+    (interrupt::COMPATIBILITY_FORMAT, "compatibility-format pass-through"),
+    (interrupt::INTERRUPT_REMAPPING_ENABLE, "interrupt remapping"),
+    (QUEUED_INVALIDATION_ENABLE, "queued invalidation"),
+];
 
 /// How long a `GCMD` write is given to appear in `GSTS` before the kernel
 /// panics: a half-enabled unit's reach cannot be stated.
@@ -88,16 +104,15 @@ pub(super) struct Live {
 }
 
 impl Live {
-    pub(super) fn root(&self) -> Table {
-        self.root
-    }
-
     pub(super) fn invalidate_domain(&mut self, domain: u16) {
         self.queue.invalidate_domain(self.regs, domain);
     }
 
-    pub(super) fn invalidate_context(&mut self, domain: u16, stream: u16) {
-        self.queue.invalidate_context(self.regs, domain, stream);
+    /// Moves `stream` onto `domain` in this unit's tables, and out of
+    /// whatever this unit still holds for it under its old one.
+    pub(super) fn attach(&mut self, stream: StreamId, domain: &table::Domain) {
+        let displaced = table::bind(self.root, stream, domain);
+        self.queue.invalidate_context(self.regs, displaced);
     }
 }
 
@@ -274,35 +289,83 @@ fn remappable(ready: &[(Unit, Plan)], described: usize) -> Option<bool> {
     Some(ready.iter().all(|(u, _)| u.caps.extended_interrupt_mode()))
 }
 
-/// A unit whose register window decodes, with its capabilities and `GCMD` state.
+/// A unit whose register window decodes, with its capabilities.
 struct Unit {
     index: usize,
     base: u64,
     regs: Mmio,
     caps: Capabilities,
-    /// Bits switched on in `GCMD`; the register is not read-modify-write safe, so this is the only record.
-    gcmd: u32,
 }
 
 impl Unit {
-    /// Set one `GCMD` bit and wait for `GSTS` to agree — one bit at a time.
-    fn command(&mut self, bit: u32, persistent: bool, status: u32, what: &str) {
-        self.regs.write_u32(GCMD_REG, self.gcmd | bit);
-        if persistent {
-            self.gcmd |= bit;
-        }
+    /// Turn one `GCMD` field on or off by §11.4.4.1's recipe — every other
+    /// field as `GSTS` reports it — and wait for `GSTS` to agree.
+    fn command(&self, bit: u32, on: bool, what: &str) {
+        let status = self.regs.read_u32(GSTS_REG) & PERSISTENT;
+        self.regs.write_u32(GCMD_REG, if on { status | bit } else { status & !bit });
+        let state = if on { "" } else { " off" };
+        self.wait(what, state, || (self.regs.read_u32(GSTS_REG) & bit != 0) == on);
+    }
+
+    fn wait(&self, what: &str, state: &str, done: impl Fn() -> bool) {
         let deadline = crate::clock::nanos_since_boot() + COMMAND_TIMEOUT.nanos();
-        loop {
-            let gsts = self.regs.read_u32(GSTS_REG);
-            if gsts & status != 0 {
-                return;
-            }
+        while !done() {
             assert!(
                 crate::clock::nanos_since_boot() < deadline,
-                "iommu: unit{} never reported {what}, GSTS={gsts:#010x}",
-                self.index
+                "iommu: unit{} never reported {what}{state}, GSTS={:#010x}",
+                self.index,
+                self.regs.read_u32(GSTS_REG)
             );
             core::hint::spin_loop();
+        }
+    }
+
+    /// [`crate::actuator::iommu_firmware_left`]: the state [`Self::hand_over`]
+    /// is for, left the way this kernel leaves a unit, each batch ended by a
+    /// wait. `CFI` is written as firmware writes it, unconfirmed: whether
+    /// `GSTS` reports it is the unit's to say.
+    ///
+    /// Through the identity domain, never an empty root: a unit left
+    /// translating through tables that miss a reserved region faults its
+    /// device's DMA for as long as it is left so, which firmware may not do.
+    #[cfg(feature = "boot-actuators")]
+    fn leave_on(&self, devices: &[PciDevice], domain: Table, width: AddressWidth) {
+        let (mut queue, root, remap) = {
+            let mut tables = TABLES.lock();
+            let queue = Queue::new(&mut tables, self.regs);
+            let root = identity_root(&mut tables, devices, domain, width);
+            (queue, root, tables.alloc())
+        };
+        self.command(QUEUED_INVALIDATION_ENABLE, true, "queued invalidation");
+        self.regs.write_u64(RTADDR_REG, root.phys());
+        self.command(SET_ROOT_TABLE_POINTER, true, "the root table pointer");
+        queue.invalidate_all(self.regs);
+        self.command(TRANSLATION_ENABLE, true, "translation");
+        if self.caps.interrupt_remapping() {
+            self.regs.write_u64(interrupt::IRTA_REG, remap.phys());
+            self.command(interrupt::SET_TABLE_POINTER, true, "the interrupt remap table pointer");
+            queue.invalidate_interrupts(self.regs);
+            self.command(interrupt::INTERRUPT_REMAPPING_ENABLE, true, "interrupt remapping");
+            let status = self.regs.read_u32(GSTS_REG) & PERSISTENT;
+            self.regs.write_u32(GCMD_REG, status | interrupt::COMPATIBILITY_FORMAT);
+        }
+    }
+
+    /// Every field of [`FIRMWARE_LEFT`] that is on, off.
+    fn hand_over(&self) {
+        for (bit, what) in FIRMWARE_LEFT {
+            if self.regs.read_u32(GSTS_REG) & bit == 0 {
+                continue;
+            }
+            log!("iommu: unit{} was handed over with {what} on; it goes off first", self.index);
+            if bit == QUEUED_INVALIDATION_ENABLE {
+                // §6.5.2: a queue is switched off only once it is empty and its
+                // last descriptor was a wait, which only firmware could have sent.
+                self.wait("its invalidation queue", " empty", || {
+                    self.regs.read_u64(IQH_REG) == self.regs.read_u64(IQT_REG)
+                });
+            }
+            self.command(bit, false, what);
         }
     }
 }
@@ -343,14 +406,15 @@ fn describe_unit(index: usize, drhd: &dmar::Drhd) -> Option<Unit> {
     let caps = Capabilities { cap: regs.read_u64(CAP_REG), ecap: regs.read_u64(ECAP_REG) };
     log!(
         "iommu: unit{index} @{base:#x} seg={} pci_all={} ver={}.{} cap={:#018x} ecap={:#018x} \
-         aw={} sagaw={:#04x} mgaw={} nd={} sps2m={} cm={} psi={} nfr={} fro={:#x} qi={} ir={} \
-         eim={} pt={} coherent={} sc={}",
+         gsts={:#010x} aw={} sagaw={:#04x} mgaw={} nd={} sps2m={} cm={} psi={} nfr={} fro={:#x} \
+         qi={} ir={} eim={} pt={} coherent={} sc={}",
         drhd.segment(),
         yn(drhd.include_pci_all()),
         (version >> 4) & 0xF,
         version & 0xF,
         caps.cap,
         caps.ecap,
+        regs.read_u32(GSTS_REG),
         // Widest of 48/39 the unit advertises; a unit offering neither is refused.
         match caps.address_width() {
             Some(aw) => aw.bits(),
@@ -373,7 +437,7 @@ fn describe_unit(index: usize, drhd: &dmar::Drhd) -> Option<Unit> {
     );
 
     describe_scopes("unit", index, drhd.scopes());
-    Some(Unit { index, base, regs, caps, gcmd: 0 })
+    Some(Unit { index, base, regs, caps })
 }
 
 /// What a unit's capabilities let this kernel program, or `None` with the
@@ -435,7 +499,7 @@ fn plan(unit: &Unit) -> Option<Plan> {
 /// pointer, global invalidation, then `TE` — each confirmed in `GSTS` before
 /// the next.
 fn enable(
-    mut unit: Unit,
+    unit: Unit,
     plan: Plan,
     devices: &[PciDevice],
     domains: &mut [Option<Table>; 2],
@@ -447,91 +511,44 @@ fn enable(
     // narrowest thing every translating unit on this machine agrees to.
     domain::unit_agrees(width, unit.caps.domains(), unit.caps.mgaw());
 
-    let (root, queue) = {
-        let mut tables = TABLES.lock();
-        let domain = match domains[domain_slot(width)] {
-            Some(domain) => domain,
-            None => {
-                let top = crate::mm::pmm::top();
-                let (domain, frames) = table::identity_domain(&mut tables, width, top);
-                log!(
-                    "iommu: identity domain aw={} covers 0x0..{top:#x} in {frames} 2 MiB leaves",
-                    width.bits()
-                );
-                domains[domain_slot(width)] = Some(domain);
-                domain
-            }
-        };
+    let domain = *domains[domain_slot(width)].get_or_insert_with(|| {
+        let top = crate::mm::pmm::top();
+        let (domain, frames) = table::identity_domain(&mut TABLES.lock(), width, top);
+        log!("iommu: identity domain aw={} covers 0x0..{top:#x} in {frames} 2 MiB leaves", width.bits());
+        domain
+    });
+    #[cfg(feature = "boot-actuators")]
+    if crate::actuator::iommu_firmware_left() {
+        unit.leave_on(devices, domain, width);
+    }
+    let root = identity_root(&mut TABLES.lock(), devices, domain, width);
 
-        // Every enumerated function needs a context entry before `TE`: one
-        // missing bricks the boot disk instead of merely faulting later.
-        let root = tables.alloc();
-        for device in devices {
-            let stream = StreamId::pci(device.bus, device.dev, device.func);
-            // Unreachable from the host side, so these actuators substitute for
-            // it; both are answered on the device's first *read*, since a
-            // first-write access would cache write permission and never fault.
-            if crate::actuator::iommu_context_absent()
-                && device.matches_class(NVME_CLASS, NVME_SUBCLASS, None)
-            {
-                log!("iommu: unit{index} leaves {stream} out of the root table (actuator)");
-                continue;
-            }
-            // A present context entry naming an empty domain, distinct from a
-            // missing entry: passthrough would fault identically either way.
-            if crate::actuator::iommu_empty_domain()
-                && device.matches_class(NVME_CLASS, NVME_SUBCLASS, None)
-            {
-                let empty = tables.alloc();
-                log!("iommu: unit{index} gives {stream} a domain with no mappings (actuator)");
-                table::bind_identity(&mut tables, root, stream, empty, width);
-                continue;
-            }
-            table::bind_identity(&mut tables, root, stream, domain, width);
-        }
+    // After the tables are built, so a unit firmware left translating passes DMA
+    // untranslated only while it is programmed
+    // (`issues/kernel/a-unit-left-translating-passes-dma-untranslated-while-programmed.md`),
+    // and before the queue is pointed, which §6.5.2 does only with it off.
+    unit.hand_over();
+    let mut queue = Queue::new(&mut TABLES.lock(), unit.regs);
+    // Outside the `TABLES` lock: `interrupt::arm` takes its own lock and
+    // then that one, and the order this subsystem holds is the reverse.
+    let irta = remap.map(interrupt::arm);
 
-        let mut queue = Queue::new(&mut tables, unit.regs);
-        drop(tables);
-        // Outside the `TABLES` lock: `interrupt::arm` takes its own lock and
-        // then that one, and the order this subsystem holds is the reverse.
-        let irta = remap.map(interrupt::arm);
+    // Before `TE`: the first blocked transaction must be reportable, not merely counted.
+    fault::arm(index, unit.regs, records, crate::arch::idt::DMA_FAULT_VECTOR);
 
-        // Before `TE`: the first blocked transaction must be reportable, not merely counted.
-        fault::arm(index, unit.regs, records, crate::arch::idt::DMA_FAULT_VECTOR);
+    unit.command(QUEUED_INVALIDATION_ENABLE, true, "queued invalidation");
+    unit.regs.write_u64(RTADDR_REG, root.phys());
+    unit.command(SET_ROOT_TABLE_POINTER, true, "the root table pointer");
+    if let Some(irta) = irta {
+        unit.regs.write_u64(interrupt::IRTA_REG, irta);
+        unit.command(interrupt::SET_TABLE_POINTER, true, "the interrupt remap table pointer");
+        queue.invalidate_interrupts(unit.regs);
+    }
+    queue.invalidate_all(unit.regs);
 
-        unit.command(
-            QUEUED_INVALIDATION_ENABLE,
-            true,
-            QUEUED_INVALIDATION_ENABLE,
-            "queued invalidation",
-        );
-        unit.regs.write_u64(RTADDR_REG, root.phys());
-        unit.command(SET_ROOT_TABLE_POINTER, false, ROOT_TABLE_SET, "the root table pointer");
-        if let Some(irta) = irta {
-            unit.regs.write_u64(interrupt::IRTA_REG, irta);
-            unit.command(
-                interrupt::SET_TABLE_POINTER,
-                false,
-                interrupt::SET_TABLE_POINTER,
-                "the interrupt remap table pointer",
-            );
-            queue.invalidate_interrupts(unit.regs);
-        }
-        queue.invalidate_all(unit.regs);
-        (root, queue)
-    };
-
-    unit.command(TRANSLATION_ENABLE, true, TRANSLATION_ENABLE, "translation");
-    // `GCMD.CFI` is never among the bits `command` writes, so every write leaves
-    // it clear and `GSTS.CFIS` reads clear: a compatibility-format message is
-    // blocked from here on, which is the whole point of the step.
+    unit.command(TRANSLATION_ENABLE, true, "translation");
     if remap.is_some() {
-        unit.command(
-            interrupt::INTERRUPT_REMAPPING_ENABLE,
-            true,
-            interrupt::INTERRUPT_REMAPPING_ENABLE,
-            "interrupt remapping",
-        );
+        unit.command(interrupt::INTERRUPT_REMAPPING_ENABLE, true, "interrupt remapping");
     }
     // After `IRE`, so nothing is invalidated on a unit that is not yet reading
     // the table, and after `TE`, so nothing reaches a unit that is not on.
@@ -556,11 +573,16 @@ fn enable(
     );
 }
 
-/// Device class the actuators target, not a bus/device/function: QEMU's slot
-/// choice is not this kernel's business, and the harness reads the same
-/// class independently out of `pci::enumerate`.
-const NVME_CLASS: u8 = 0x01;
-const NVME_SUBCLASS: u8 = 0x08;
+/// A root table giving every enumerated function a context entry in `domain`:
+/// one missing before `TE` bricks the boot disk instead of merely faulting later.
+fn identity_root(tables: &mut Tables, devices: &[PciDevice], domain: Table, width: AddressWidth) -> Table {
+    let root = tables.alloc();
+    for device in devices {
+        let stream = StreamId::pci(device.bus, device.dev, device.func);
+        table::bind_identity(tables, root, stream, domain, width);
+    }
+    root
+}
 
 /// Slot of the per-width domain cache; exhaustive match so a new `AddressWidth` fails to compile here.
 fn domain_slot(width: AddressWidth) -> usize {

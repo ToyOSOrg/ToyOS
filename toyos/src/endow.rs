@@ -22,10 +22,11 @@ use toyos_abi::syscall::{
 use crate::ipc::Connection;
 use crate::namespace::Namespace;
 use crate::port::{Acceptor, Connector};
+use crate::process::Process;
 use crate::syscap::SysCap;
 use crate::{Device, OwnedHandle, RawHandle};
 
-pub use toyos_abi::syscall::{DEV_PREFIX, PROVIDE_PREFIX, SERVE_PREFIX, SVC_LABEL, SYSCAP_LABEL};
+pub use toyos_abi::syscall::{DEV_PREFIX, PROVIDE_PREFIX, SELF_LABEL, SERVE_PREFIX, SVC_LABEL, SYSCAP_LABEL};
 
 /// Why a service name did not become a connection.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -143,6 +144,28 @@ pub fn namespace() -> Option<&'static Namespace> {
     NAMESPACE.get().as_ref()
 }
 
+/// This process's handle to itself, which it hands on for a child to be
+/// placed under it: `WRITE`, `DUP` and `TRANSFER`, from the kernel, under
+/// [`SELF_LABEL`]. Borrowed rather than taken, as the namespace is: every
+/// launch duplicates it. Panics for a process whose `self` was taken before
+/// this first ran: the kernel starts every process holding it.
+pub fn this_process() -> &'static Process {
+    THIS_PROCESS.get()
+}
+
+/// Make `ns` this process's namespace, for the one process no parent endows
+/// one: the supervisor, which builds the machine's ports itself and resolves its own
+/// files through them as every program does. Refused when this process already
+/// has a namespace or has asked for one.
+pub fn adopt_namespace(ns: Namespace) -> Result<(), Namespace> {
+    let mut offered = Some(ns);
+    NAMESPACE.0.get_or_init(|| offered.take());
+    match offered {
+        None => Ok(()),
+        Some(ns) => Err(ns),
+    }
+}
+
 /// Open a connection to `name` in this process's namespace.
 ///
 /// The one place a name becomes a connection. It works from the caller's first
@@ -190,8 +213,8 @@ pub fn provided(labels: &mut [Option<(&'static str, Connector)>]) -> usize {
 
 /// The claim for a device class the manifest says this program gets.
 ///
-/// `None` is a machine that had no such device when init asked, or a program
-/// the manifest gives none — the honest answer, and the one soundd degrades
+/// `None` is a machine that had no such device when the supervisor asked, or a program
+/// the manifest gives none — the honest answer, and the one soundserver degrades
 /// on. It replaces a two-syscall probe: "did I get an HDA or a virtio-sound?"
 /// is now "which claims are in my endowment table?", which is the same question
 /// with the answer already in hand.
@@ -276,9 +299,11 @@ impl<T> Once<T> {
 
 static TABLE: EndowTable = EndowTable(Once::new());
 static NAMESPACE: NamespaceCell = NamespaceCell(Once::new());
+static THIS_PROCESS: ProcessCell = ProcessCell(Once::new());
 
 struct EndowTable(Once<Endowments>);
 struct NamespaceCell(Once<Option<Namespace>>);
+struct ProcessCell(Once<Process>);
 
 impl EndowTable {
     fn get(&'static self) -> &'static Endowments {
@@ -289,6 +314,14 @@ impl EndowTable {
 impl NamespaceCell {
     fn get(&'static self) -> &'static Option<Namespace> {
         self.0.get_or_init(|| Endowments::get().take::<Namespace>(SVC_LABEL))
+    }
+}
+
+impl ProcessCell {
+    fn get(&'static self) -> &'static Process {
+        self.0.get_or_init(|| {
+            Endowments::get().take::<Process>(SELF_LABEL).expect("this process's `self` was taken by another")
+        })
     }
 }
 

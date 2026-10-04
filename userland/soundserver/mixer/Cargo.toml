@@ -1,0 +1,16 @@
+# No dependencies, deliberately. `toyos-abi` is not one either: nothing here
+# names a syscall, a handle or a shared-memory layout — a period arrives as a
+# `&[u8]` and leaves as a `&mut [i16]`, and both belong to the caller.
+
+[package]
+name = "toyos-mixer"
+description = "The mixer's decisions (samples, gain, dither, quantize), pure and corpus-certified."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[lib]
+doctest = false
+
+[lints.rust]
+warnings = "deny"

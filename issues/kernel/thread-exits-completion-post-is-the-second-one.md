@@ -33,7 +33,7 @@ zombie mark that the joiner's predicate reads is already in the table before
 either post, because `release_thread` writes it before returning.
 
 **How this was found, and why it is filed rather than acted on.** The host
-model of the lifecycle (`toyos-proclife`) was built with a negative control
+model of the lifecycle (`kernel/pure/proclife`) was built with a negative control
 that reverted the post's subject to the process's main thread — the kernel this
 tree had before `1bfe4e5b`, when the wake was by name into a shared parking lot.
 The control had no teeth: with `publish_released` modelled faithfully, the
@@ -60,5 +60,5 @@ outcome on the same watch at `kernel/src/sched/payload.rs:222`. Two posts to one
 subject where the second is load-bearing regardless is either an undocumented
 promptness guarantee or dead code on the exit path — "one of two sentences and
 the evidence for it" is owed work, not an observation. Owed by the lifecycle
-work in `toyos-proclife`, which is the only machine that can enumerate the
+work in `kernel::proclife`, which is the only machine that can enumerate the
 interleaving either answer rests on.

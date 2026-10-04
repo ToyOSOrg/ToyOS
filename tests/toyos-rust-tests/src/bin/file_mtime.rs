@@ -5,12 +5,13 @@
 //! between two `SYS_CLOCK_EPOCH` readings taken around what made it — a write,
 //! a create with truncation, a create of a missing file, a truncation — and a
 //! later write's stamp is later, which a clock of whole seconds cannot say.
+//! Then the same on `/home`, fileserver's DATA, which keeps the nanosecond too.
 //! Then `/log`: FAT keeps the whole seconds of its flush, read back after a
 //! reopen.
 //! `write <path>` makes the first judgement on `path` and `read <path>` only
 //! prints what it finds there. `undated` runs on a machine whose RTC never
-//! answered and never asks the time: a file written there is undated, which
-//! std reports as an error and not as 1970.
+//! answered and never asks the time: a file written there, on `/tmp` or on
+//! `/home`, is undated, which std reports as an error and not as 1970.
 
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Write};
@@ -18,11 +19,11 @@ use std::time::UNIX_EPOCH;
 
 const NANOS_PER_SEC: u64 = 1_000_000_000;
 
-fn mtime(path: &str) -> u64 {
+fn mtime(path: &str, after: &str) -> u64 {
     let modified = fs::metadata(path)
-        .unwrap_or_else(|e| panic!("stat {path}: {e}"))
+        .unwrap_or_else(|e| panic!("stat {path} after {after}: {e}"))
         .modified()
-        .unwrap_or_else(|e| panic!("{path} has no mtime: {e}"));
+        .unwrap_or_else(|e| panic!("{path} has no mtime after {after}: {e}"));
     let since = modified
         .duration_since(UNIX_EPOCH)
         .unwrap_or_else(|_| panic!("{path}'s mtime is before the epoch"));
@@ -45,7 +46,7 @@ fn judged(path: &str, what: &str, act: impl FnOnce()) -> u64 {
     let before = epoch();
     act();
     let after = epoch();
-    let stamp = mtime(path);
+    let stamp = mtime(path, what);
     // `SYS_CLOCK_EPOCH` is the whole seconds of the clock that stamps, so the
     // stamp is at or past `before` and short of the second after `after`.
     assert!(
@@ -60,51 +61,82 @@ fn write_judged(path: &str, bytes: &[u8]) -> u64 {
     judged(path, "a write", || write(path, bytes))
 }
 
+/// Judges in `dir` a write, a later write, a create with truncation, a create
+/// of a missing file and a truncation; returns the two writes' stamps.
+fn dated(dir: &str) -> (u64, u64) {
+    let first = write_judged(&format!("{dir}/file-mtime-first"), b"first");
+    let second = write_judged(&format!("{dir}/file-mtime-second"), b"second");
+    assert!(
+        second > first,
+        "on {dir} a write after another is stamped {second} ns and the one before it {first} ns"
+    );
+
+    let truncated = format!("{dir}/file-mtime-truncated");
+    let created = judged(&truncated, "a create with truncation", || {
+        fs::File::create(&truncated).unwrap_or_else(|e| panic!("create {truncated}: {e}"));
+    });
+
+    let missing = format!("{dir}/file-mtime-missing");
+    assert!(fs::metadata(&missing).is_err(), "{missing} exists before this creates it");
+    judged(&missing, "a create of a missing file", || {
+        OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(&missing)
+            .unwrap_or_else(|e| panic!("create {missing}: {e}"));
+    });
+
+    let resized = judged(&truncated, "a truncation", || {
+        let f = OpenOptions::new()
+            .write(true)
+            .open(&truncated)
+            .unwrap_or_else(|e| panic!("reopen {truncated}: {e}"));
+        f.set_len(1).unwrap_or_else(|e| panic!("ftruncate {truncated}: {e}"));
+        f.sync_all().unwrap_or_else(|e| panic!("fsync {truncated}: {e}"));
+    });
+    assert!(
+        resized > created,
+        "{truncated} was created at {created} ns and a later truncation stamped it {resized} ns"
+    );
+
+    let shrunk = judged(&truncated, "a shrinking truncation", || {
+        let f = OpenOptions::new()
+            .write(true)
+            .open(&truncated)
+            .unwrap_or_else(|e| panic!("reopen {truncated}: {e}"));
+        f.set_len(0).unwrap_or_else(|e| panic!("ftruncate {truncated} to 0: {e}"));
+        f.sync_all().unwrap_or_else(|e| panic!("fsync {truncated}: {e}"));
+    });
+    assert!(
+        shrunk > resized,
+        "{truncated} was grown at {resized} ns and a later shrinking truncation stamped it \
+         {shrunk} ns"
+    );
+    (first, second)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.as_slice() {
         [_] => {
-            let first = write_judged("/tmp/file-mtime-first", b"first");
-            let second = write_judged("/tmp/file-mtime-second", b"second");
+            let (first, second) = dated("/tmp");
+            let (home_first, home_second) = dated("/home");
+            // A whole second is one stamp in 10⁹; two of them are a clock of seconds.
             assert!(
-                second > first,
-                "a write after another is stamped {second} ns and the one before it {first} ns"
+                home_first % NANOS_PER_SEC != 0 || home_second % NANOS_PER_SEC != 0,
+                "/home stamps {home_first} ns and {home_second} ns: whole seconds, not the \
+                 nanosecond DATA keeps"
             );
-
-            const TRUNCATED: &str = "/tmp/file-mtime-truncated";
-            let created = judged(TRUNCATED, "a create with truncation", || {
-                fs::File::create(TRUNCATED).unwrap_or_else(|e| panic!("create {TRUNCATED}: {e}"));
-            });
-
-            const MISSING: &str = "/tmp/file-mtime-missing";
-            assert!(fs::metadata(MISSING).is_err(), "{MISSING} exists before this creates it");
-            judged(MISSING, "a create of a missing file", || {
-                OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .open(MISSING)
-                    .unwrap_or_else(|e| panic!("create {MISSING}: {e}"));
-            });
-
-            let resized = judged(TRUNCATED, "a truncation", || {
-                let f = OpenOptions::new()
-                    .write(true)
-                    .open(TRUNCATED)
-                    .unwrap_or_else(|e| panic!("reopen {TRUNCATED}: {e}"));
-                f.set_len(1).unwrap_or_else(|e| panic!("ftruncate {TRUNCATED}: {e}"));
-                f.sync_all().unwrap_or_else(|e| panic!("fsync {TRUNCATED}: {e}"));
-            });
-            assert!(
-                resized > created,
-                "{TRUNCATED} was created at {created} ns and a later truncation stamped it \
-                 {resized} ns"
-            );
+            for name in ["first", "second", "truncated", "missing"] {
+                let path = format!("/home/file-mtime-{name}");
+                fs::remove_file(&path).unwrap_or_else(|e| panic!("remove {path}: {e}"));
+            }
 
             // The flush stamps FAT, which keeps whole seconds and drops an odd one.
             const FAT: &str = "/log/file-mtime";
             let before = epoch();
             write(FAT, b"on FAT");
-            let fat = mtime(FAT);
+            let fat = mtime(FAT, "its write");
             let after = epoch();
             assert!(
                 (before - 1) * NANOS_PER_SEC <= fat
@@ -114,27 +146,31 @@ fn main() {
                  before its write and {after} s after",
             );
             fs::remove_file(FAT).unwrap_or_else(|e| panic!("remove {FAT}: {e}"));
-            println!("file-mtime: /tmp stamps {first} then {second}, /log {fat}");
+            println!(
+                "file-mtime: /tmp stamps {first} then {second}, /home {home_first} then \
+                 {home_second}, /log {fat}"
+            );
         }
         [_, mode] if mode == "undated" => {
-            const UNDATED: &str = "/tmp/file-mtime-undated";
-            write(UNDATED, b"no clock answered");
-            let meta = fs::metadata(UNDATED).unwrap_or_else(|e| panic!("stat {UNDATED}: {e}"));
-            match meta.modified() {
-                Err(e) if e.kind() == ErrorKind::Unsupported => {}
-                other => panic!(
-                    "{UNDATED} was written on a machine whose RTC never answered, and its mtime \
-                     reads {other:?}"
-                ),
+            for undated in ["/tmp/file-mtime-undated", "/home/file-mtime-undated"] {
+                write(undated, b"no clock answered");
+                let meta = fs::metadata(undated).unwrap_or_else(|e| panic!("stat {undated}: {e}"));
+                match meta.modified() {
+                    Err(e) if e.kind() == ErrorKind::Unsupported => {}
+                    other => panic!(
+                        "{undated} was written on a machine whose RTC never answered, and its \
+                         mtime reads {other:?}"
+                    ),
+                }
+                println!("file-mtime: {undated} is undated");
             }
-            println!("file-mtime: {UNDATED} is undated");
         }
         [_, mode, path] if mode == "write" => {
             let stamp = write_judged(path, b"stamped at its write");
             println!("file-mtime: {path} mtime={stamp}");
         }
         [_, mode, path] if mode == "read" => {
-            println!("file-mtime: {path} mtime={}", mtime(path));
+            println!("file-mtime: {path} mtime={}", mtime(path, "the boot that wrote it"));
         }
         _ => panic!("usage: file_mtime [undated | write <path> | read <path>], got {args:?}"),
     }

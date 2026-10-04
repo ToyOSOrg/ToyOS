@@ -1,12 +1,12 @@
 [package]
 name = "toyos-manifest"
-description = "The one definition of /system/etc/system.manifest: what every program in an image may hold, written by the build and read by init."
+description = "The one definition of /system/etc/system.manifest: what every program in an image may hold, written by the build and read by the supervisor."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 
 # The one place a `devices` class name and a `syscap` right name are decoded.
 # Both are ABI vocabulary, and a manifest crate holding its own copy of either
-# would be a config the build system accepts and `/system/bin/init` cannot act on.
+# would be a config the build system accepts and `/system/bin/supervisor` cannot act on.
 [dependencies]
 toyos-abi = { path = "../toyos-abi" }

@@ -14,14 +14,16 @@ what survives it is a different question.
 
 - `elf.rs` → `toyos-elf/` (host-tested, crafted-input corpus), `e2c6a06`; the
   mapping half stayed as `kernel/src/elf/`, `42b29c9`.
-- `compositor/main.rs` → `toyos-desktop/` (pure), `763712b`; the effects shell
+- `compositor/main.rs` → `toyos-desktop/` (pure, since moved to
+  `userland/compositor/desktop/`), `763712b`; the effects shell
   is `userland/compositor/` over five files with a 71-line `main.rs`, `72705d9`.
 - `xhci/mod.rs` → the port machine is `toyos-xhci/`, with a host simulator,
   `2e81ae8`.
-- `soundd/main.rs` → `toyos-mixer/` (pure, `no_std`), 2026-08-20; the effects
+- `soundd/main.rs` → `toyos-mixer/` (pure, `no_std`; since moved to
+  `userland/soundserver/mixer/`), 2026-08-20; the effects
   shell is `userland/soundd/` over eight files with a 261-line `main.rs`, from a
   2,366-line one. What the note asked for is what it got: **the mixing is
-  sample-exact and proven so.** `toyos-mixer/fixtures/mix-corpus.txt` was
+  sample-exact and proven so.** `userland/soundserver/mixer/fixtures/mix-corpus.txt` was
   written by `soundd/src/main.rs` before a line of it moved, and
   `the_corpus_is_reproduced_bit_for_bit` holds the crate to it byte for byte.
   The transcript is compact because exhausted domains are digested rather than
@@ -44,7 +46,7 @@ what survives it is a different question.
   no function body changed. The split made two facts visible and filed:
   58 refusal `return`s exit past the epilogue, and a refused syscall is counted
   but not timed.
-- `process.rs` — the lifecycle state machine is `toyos-proclife/` (pure,
+- `process.rs` — the lifecycle state machine is `kernel/pure/proclife/` (pure,
   `forbid(unsafe_code)`, every interleaving of a scripted pair of paths
   enumerated; #142's mechanism class now has a host reproduction). Three
   subjects are still decided inside the file and reachable only by a booted

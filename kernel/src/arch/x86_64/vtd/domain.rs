@@ -6,7 +6,7 @@
 //! 7 at a page-directory level, address 51:12, and the walk ANDs `R`/`W` down
 //! the levels (3.7.1). **Context entry**, 9.3 Figure 9-3: `P` bit 0, `T` 3:2 =
 //! `00b` naming that table, `SLPTPTR` 51:12, `AW` 66:64 as levels minus two,
-//! `DID` 87:72. **Invalidation**, 6.5.2.1 Figure 6-8 and 6.5.2.2 Figure 6-9:
+//! `DID` 87:72. **Invalidation**, §6.5.2.1 Figure 6-8 and §6.5.2.2 Figure 6-9:
 //! context cache type `1h`, `G` 5:4 = `11b` device-selective, `DID` 31:16, `SID`
 //! 47:32; IOTLB type `2h`, `G` = `10b` domain-selective, `DR` bit 7, `DW` bit 6;
 //! a context-entry change takes the first and then the second. **`CAP.CM`**,
@@ -168,8 +168,7 @@ pub fn attach(stream: StreamId, id: DomainId) {
     let domain = *domains.at(id);
     let mut units = UNITS.lock();
     for unit in units.iter_mut() {
-        table::bind(&mut TABLES.lock(), unit.root(), stream, &domain);
-        unit.invalidate_context(domain.id(), stream.requester());
+        unit.attach(stream, &domain);
     }
     super::fault::attached(stream, domain.id());
     log!("iommu: {stream} moves to domain{}", domain.id());

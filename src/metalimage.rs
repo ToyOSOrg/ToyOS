@@ -11,7 +11,7 @@
 //! it. The derivation is here, pure, because what it changes about the config
 //! is what the T14 sees and nothing else may drift from it: the one authority a
 //! `reboot` job needs (the `power` connector, which the applet inherits with the
-//! runner's namespace and asks init through), the applet itself, and the name
+//! runner's namespace and asks the supervisor through), the applet itself, and the name
 //! that reaches it.
 
 #![forbid(unsafe_code)]
@@ -25,7 +25,7 @@ const TOYBOX: &str = "toybox";
 const REBOOT_LINK: &str = "bin/reboot";
 const TOYBOX_PATH: &str = "/system/bin/toybox";
 
-/// The connector the last job needs: init's `power` port, which has `logd`
+/// The connector the last job needs: the supervisor's `power` port, which has `logkeeper`
 /// make the log whole and then resets the machine.
 const POWER: &str = "power";
 
@@ -176,9 +176,9 @@ mod tests {
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect();
-        // `tests/testcases` declares all five, and the derivation takes none
+        // `tests/testcases` declares all seven, and the derivation takes none
         // away and spells none twice; nor the connector it needs, declared too.
-        for right in ["device", "dup", "logread", "power", "roster"] {
+        for right in ["device", "dup", "logread", "power", "roster", "counters", "trace"] {
             assert_eq!(
                 syscap.iter().filter(|r| **r == right).count(),
                 1,
@@ -188,20 +188,20 @@ mod tests {
         let receives = parsed["programs"][RUNNER]["receives"].as_array().unwrap();
         assert_eq!(receives.iter().filter(|r| r.as_str() == Some(POWER)).count(), 1);
         assert_eq!(parsed["symlinks"]["bin/echo"].as_str(), Some(TOYBOX_PATH));
-        assert!(parsed["programs"].get("soundd").is_some());
+        assert!(parsed["programs"].get("soundserver").is_some());
     }
 
     /// A config with nothing to run a job is refused by name rather than
     /// producing an image that parks the machine for 360 s.
     #[test]
     fn a_config_with_no_runner_is_refused_by_name() {
-        let refusal = derive("[boot]\nstart = [\"logd\"]\n", &[], &[]).unwrap_err();
+        let refusal = derive("[boot]\nstart = [\"logkeeper\"]\n", &[], &[]).unwrap_err();
         assert_eq!(refusal, Underived::NoRunner("does not start `test-runner`".to_string()));
         let said = refusal.to_string();
         assert!(said.contains("parks on a console nothing is on"), "{said}");
 
         let refusal =
-            derive("[boot]\nstart = [\"test-runner\"]\n[programs.logd]\n", &[], &[]).unwrap_err();
+            derive("[boot]\nstart = [\"test-runner\"]\n[programs.logkeeper]\n", &[], &[]).unwrap_err();
         assert!(matches!(refusal, Underived::NoRunner(_)), "{refusal:?}");
     }
 }

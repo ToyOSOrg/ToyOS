@@ -11,7 +11,6 @@
 //! the index holds every version it names.
 
 use std::path::Path;
-use std::process::Command;
 
 /// One published crate: the crates.io name, and its repository-relative
 /// directory.
@@ -46,7 +45,7 @@ pub fn plan(root: &Path) -> Result<Vec<Release>, String> {
 
 /// A crate's `HEAD` tree and its manifest.
 fn source(root: &Path, krate: &Crate) -> Result<(String, String), String> {
-    let tree = crate::pr::git(root, &["rev-parse", &format!("HEAD:{}", krate.dir)])?;
+    let tree = crate::sysroot::git_out(root, &["rev-parse", &format!("HEAD:{}", krate.dir)]).trim().to_string();
     Ok((tree, manifest(root, krate)?))
 }
 
@@ -115,15 +114,12 @@ fn numbers(vers: &str) -> Option<(u64, u64, u64)> {
 /// for a crate never published.
 pub fn index(name: &str) -> Result<String, String> {
     let url = format!("https://index.crates.io/{}/{}/{name}", &name[..2], &name[2..4]);
-    let out = Command::new("curl")
-        .args(["-sS", "-w", "\n%{http_code}", &url])
-        .output()
-        .map_err(|e| format!("curl: {e}"))?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    match text.rsplit_once('\n') {
-        Some((_, "404")) => Ok(String::new()),
-        Some((body, "200")) => Ok(body.to_string()),
-        _ => Err(format!("the crates.io index answered {text:?} for {name}")),
+    let mut answer = crate::release::agent().get(&url).call().map_err(|e| format!("{url}: {e}"))?;
+    let text = answer.body_mut().read_to_string().map_err(|e| format!("{url}: {e}"))?;
+    match answer.status().as_u16() {
+        404 => Ok(String::new()),
+        200 => Ok(text),
+        status => Err(format!("the crates.io index answered {status} for {name}: {text}")),
     }
 }
 
@@ -145,8 +141,9 @@ fn manifest(root: &Path, krate: &Crate) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pr::tests::{commit, repo};
+    use crate::gitfixture::{commit, repo};
     use std::collections::BTreeMap;
+    use std::process::Command;
     use toyos_tmpdir::TempDir;
 
     const TWO: &[Crate] =

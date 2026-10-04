@@ -46,7 +46,7 @@ What is open:
 
 - **One byte reached the kernel and produced no event, and the counters could
   not say which byte.** That is the open item, and half of it is the
-  instrument. Enumerated against the real tables (`toyos-ps2/src/key.rs`),
+  instrument. Enumerated against the real tables (`kernel/ps2/src/key.rs`),
   **84 of the 256 single byte values decode to nothing** under set 1: both
   prefixes (`0xE0`, `0xE1`), the two `Lost` codes, and every unmapped slot —
   `0x54`, `0x55`, `0x59`–`0x80` and their break forms. `handle_key` drops a
@@ -78,3 +78,5 @@ What is open:
   portable device — "on many modern laptops ATKBD_CMD_GETID may cause problems"
   — and the T14 is one. Sending a command Linux avoids on this exact machine
   class to shore up an inference is the wrong trade.
+
+`i8042_undecoded_bytes` is deleted; `issues/build/parallel-tests-red-under-other-suites.md` records the commit that restores it.

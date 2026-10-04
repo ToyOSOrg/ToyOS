@@ -38,8 +38,7 @@ their clocks, and no `METAL` row judges them.
 - **Input.** A boot with no i8042 is no slower than one with it
   (`i8042_absent`). The i8042 counters repeat at most once per 10 s and only
   when the pin asserted (`i8042_health_cadence`), and the idle loop does not
-  spin on the controller (`i8042_health`'s idle trips). The fatal path's panel
-  holds while a key is held (`panic_key_holds`).
+  spin on the controller (`i8042_health`'s idle trips).
 - **USB.** The connect settle ends on the device appearing and not at
   `EMPTY_BUS_NS` (`xhci_slow_connect`). A disk call ends inside
   `toyos_xhci::call::AFTER_BREAK`, a staged break skips its data-phase wait, the
@@ -89,3 +88,5 @@ mid-release, so a leak check anchored on it (`handle_kill_policy`,
 owner, each premise waits on the event it stands for or is ruled acceptable,
 and the census is read on the release it stands for. Owner: the metal suite
 (`tests/toyos.rs`'s `METAL`); held by the orchestrator.
+
+`sched_check_build`, `process_stats`, `log_stream_stalled_reader` and `redirty_mid_flush` are deleted; the issues naming their reds record the commits that restore them.

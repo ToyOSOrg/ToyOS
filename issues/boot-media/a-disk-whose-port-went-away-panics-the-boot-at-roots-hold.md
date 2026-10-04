@@ -6,7 +6,7 @@ opened: 2026-09-27
 
 # A disk whose port went away panics the boot at ROOT's hold
 
-`usb_transport_break` (nightly tier) fails its boot with:
+`usb_transport_break` fails its boot with:
 
     PANIC: panicked at src/rootfs.rs:177:19:
     boot: the partition ROOT was read from, <guid>, cannot be held: Unusable
@@ -31,8 +31,8 @@ The nightlies agree:
 - On the nightly at 3f46a019 (run 36111884575, before #506) it failed for a
   different reason.
 
-`cargo run -- --known-red usb_transport_break` answers NO.
-
 **Exit**: a disk that left during boot is not a disk ROOT's hold must read,
 or the boot's refusal is what `usb_transport_break` expects. Either way
 `usb_transport_break` is green on a nightly.
+
+`usb_transport_break` is deleted; `issues/kernel/a-held-disk-waits-for-a-pass-no-cpu-takes-when-every-cpu-is-in-a-call-on-it.md` records the commit that restores it.

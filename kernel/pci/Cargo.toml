@@ -1,0 +1,20 @@
+# A member of the host workspace (root `Cargo.toml`), like toyos-gpt, toyos-hda
+# and toyos-ps2: the kernel depends on it by path and its tests run on the host.
+# What lives here is the arithmetic between a capability structure a *device*
+# published and the address the kernel is about to write an interrupt vector
+# through — the one place where believing a device costs the machine a write to
+# a physical address of its choosing. That has to be exercised against values no
+# QEMU device will ever publish.
+
+[package]
+name = "toyos-pci"
+description = "A PCI function's BARs and its MSI and MSI-X capabilities, decoded as pure functions."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# The window type the bootloader hands the kernel, declared once in the ABI and
+# read here rather than mirrored: a second spelling of a base and a length is
+# two readers that can disagree about one machine's aperture.
+toyos-abi = { path = "../../toyos-abi" }

@@ -11,9 +11,9 @@
 # `power` because the job list is what ends the boot: there is no host on the
 # other end of the console on the machine this config exists for.
 [boot]
-start = ["logd", "test-runner"]
+start = ["logkeeper", "diskserver", "fileserver", "test-runner"]
 
-[programs.logd]
+[programs.logkeeper]
 service = true
 syscap = ["logread"]
 
@@ -26,3 +26,20 @@ syscap = ["rt", "dup"]
 
 [symlinks]
 "bin/reboot" = "/system/bin/toybox"
+
+# The block service: the NVMe controller this machine's DATA is on, driven
+# from userland through its claim. Started again when it ends; the claim goes
+# back with the process and is minted again for the next.
+[programs.diskserver]
+service = true
+restart = true
+serves = ["block"]
+devices = ["pci:1b36:0010"]
+
+# The file servers: DATA, the log and the running slot's volume, one process
+# each, serving every program the directories of its role. Started again when
+# one ends, on the same ports.
+[programs.fileserver]
+restart = true
+roles = ["data", "log", "boot"]
+receives = ["block"]

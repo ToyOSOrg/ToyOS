@@ -18,6 +18,7 @@ mod arch;
 pub mod audio;
 pub mod boot;
 pub mod clock;
+pub mod counters;
 pub mod handle;
 pub mod hda;
 pub mod inbox;
@@ -26,7 +27,6 @@ pub mod inventory;
 pub mod log;
 pub mod part;
 pub mod pci;
-pub mod perf;
 pub mod ring;
 pub mod syscall;
 pub mod virtio_sound;
@@ -47,11 +47,6 @@ impl core::fmt::Display for Pid {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", self.0)
     }
-}
-
-impl core::ops::Add for Pid {
-    type Output = Self;
-    fn add(self, rhs: Self) -> Self { Pid(self.0 + rhs.0) }
 }
 
 /// A thread ID. Identifies a schedulable entity — goes in run queues.
@@ -82,7 +77,7 @@ impl core::ops::Add for Tid {
 /// **The three handles are installed by the read that answers this.** A
 /// description is a set of buffers, and the process being told about them is
 /// the one that must be able to map them — which is never the process that
-/// minted the claim, because `init` mints every claim and holds none.
+/// minted the claim, because the supervisor mints every claim and holds none.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct FramebufferInfo {

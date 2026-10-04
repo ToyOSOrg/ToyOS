@@ -33,8 +33,12 @@ the machine's, and every device shares it.
    and either kept (by keeping that device's delivery pinned) or rebuilt for
    its new producer story — the `i8042` module header lists its own; the
    audit finds the rest. This is the dangerous half, and the reason this
-   track sequences AFTER pipeline 2's lock conversions: the drain and wait
-   machinery under the ISRs must be settled ground first.
+   track was sequenced after the kernel's lock conversions, which nothing
+   plans any more. The reason stands: the drain and wait machinery under the
+   ISRs must be settled ground first, and what moves that machinery today is
+   stage 6 of
+   `issues/kernel/the-kernel-is-small-interrupts-post-and-threads-wait.md`,
+   where `irq_ring` and `drain_irqs` go.
 4. The instrument before the change: measure interrupt distribution and the
    boot CPU's share under the loaded suites, so the improvement is a number
    against a number. **Done — see below.**

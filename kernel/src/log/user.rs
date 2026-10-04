@@ -1,6 +1,6 @@
 //! Kernel side of `SYS_LOG_READ` and its readiness source.
 //!
-//! No per-reader state in a read: a cursor is the caller's own sequence numbers and loss count, copied in, walked, and copied back; readers coexist uncoordinated. Requires [`Rights::LOG`] on a `SysCap`, not ambient.
+//! No per-reader state in a read: a cursor is the caller's own sequence numbers, copied in, refused if ahead of a shard, walked, and copied back with this read's loss; readers coexist uncoordinated. Requires [`Rights::LOG`] on a `SysCap`, not ambient.
 //!
 //! [`Rights::LOG`]: toyos_abi::handle::Rights::LOG
 
@@ -46,19 +46,15 @@ pub fn read(
     out: &mut UserBytesMut,
     capacity: usize,
 ) -> Result<usize, SyscallError> {
-    // Run once, inside the first read's own syscall; `log::nested` picks the window from whichever actuator is armed.
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::log_nested_emit() || crate::actuator::log_nested_reserve() {
-        super::nested::start_once();
-    }
-
     let shards = super::shard_count();
     // Refused, not truncated: a capacity below one record per shard cannot hold what a single call may have to merge.
     if capacity == 0 || capacity < shards as usize {
         return Err(SyscallError::InvalidArgument);
     }
 
-    let mut walk = Cursor::from_reader(cursor);
+    let Some(mut walk) = Cursor::from_reader(cursor) else {
+        return Err(SyscallError::InvalidArgument);
+    };
     let mut sink = UserRecords { out, written: 0, capacity };
     drain_ordered(&mut walk, &mut sink);
     let written = sink.written;

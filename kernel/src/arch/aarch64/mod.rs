@@ -2,15 +2,6 @@
 //! AArch64: the Arm A-profile at EL1, found and described through ACPI.
 //!
 //! Every `unsafe` block here carries a one-line `SAFETY:` comment, enforced by the lint above.
-//!
-//! **What exists and what is owed.** The boot reaches its console: the entry
-//! drops from EL2, applies the control-register declaration, turns on the
-//! loader's tables and installs the exception vectors; the PL011 is found
-//! through SPCR. Everything the kernel does after the console — the interrupt
-//! controller, the timer, its own page tables, other CPUs, user mode — is
-//! owed by a stage of the port (`issues/kernel/toyos-runs-on-arm64.md`), and
-//! each item that stands for it here is an [`owed!`] that panics naming it. A kernel that reaches
-//! one stops loudly on its panel; none of them returns a guess.
 
 /// Stands for work the port owes: panics naming what and which stage of the
 /// track owns it (`issues/kernel/toyos-runs-on-arm64.md`), or that none does yet.
@@ -25,6 +16,7 @@ pub mod boot;
 pub mod cache;
 pub mod console_uart;
 pub mod control_regs;
+pub mod counters;
 pub mod cpu;
 pub mod entropy;
 pub mod entry;
@@ -35,12 +27,13 @@ pub mod irqchip;
 pub mod keyboard_controller;
 pub mod paging;
 pub mod percpu;
-pub mod perf_state;
 pub mod pio;
 pub mod pmu;
+pub mod power;
+pub mod psci;
 pub mod rtc;
 pub mod smp;
-pub mod syscall;
+pub mod switch;
 pub mod tlb;
 pub mod trap;
 pub mod watchdog;
@@ -49,10 +42,13 @@ pub mod watchdog;
 pub const ELF_MACHINE: toyos_elf::Machine = toyos_elf::Machine::Aarch64;
 
 /// A message-signalled interrupt's address and data for `vector` on CPU
-/// `dest`. On AArch64 the doorbell is an ITS's `GITS_TRANSLATER`, one per ITS
-/// the MADT names, and the data is an event the ITS maps: stage 4 builds both.
-pub fn msi_message(_dest: u32, _vector: u8) -> (u32, u32) {
-    owed!("an MSI doorbell (the GICv3 ITS)", "stage 4")
+/// `dest`, which this machine does not give: the doorbell is an ITS's
+/// `GITS_TRANSLATER` and the data an event the ITS maps, and nothing here
+/// drives an ITS. Every function that would take one is a driver the
+/// small-kernel track moves out of the kernel, or a claimed function the
+/// SMMUv3 of the port's stage 6 must translate first; each is refused by name.
+pub fn msi_message(_dest: u32, _vector: u8) -> Result<(u32, u32), &'static str> {
+    Err("AArch64 delivers no message-signalled interrupt to this kernel: the GICv3 ITS is unported")
 }
 
 /// Interrupts masked on this CPU for as long as the guard lives, and then put
@@ -76,17 +72,9 @@ impl IrqGuard {
         unsafe {
             core::arch::asm!("mrs {saved}, daif", "msr daifset, #3", saved = out(reg) daif);
         }
-        Self { daif, _not_send_sync: core::marker::PhantomData }
-    }
-
-    /// The mask captured and interrupts left as they are: what the
-    /// `log-unbracketed-reserve` actuator stages a log reservation with.
-    #[cfg(feature = "boot-actuators")]
-    pub fn unclosed() -> Self {
-        let daif: u64;
-        // SAFETY: reads `DAIF` and writes nothing.
-        unsafe {
-            core::arch::asm!("mrs {saved}, daif", saved = out(reg) daif);
+        #[cfg(feature = "mask-windows")]
+        if trap::frame_interrupts_enabled(daif) {
+            crate::windows::irqs_masked();
         }
         Self { daif, _not_send_sync: core::marker::PhantomData }
     }
@@ -94,6 +82,11 @@ impl IrqGuard {
 
 impl Drop for IrqGuard {
     fn drop(&mut self) {
+        // Only where the restore opens them.
+        #[cfg(feature = "mask-windows")]
+        if trap::frame_interrupts_enabled(self.daif) && !cpu::interrupts_enabled() {
+            crate::windows::irqs_unmasking();
+        }
         // SAFETY: the word `close` read out of `DAIF` on this CPU (the guard is
         // `!Send`), restored whole.
         unsafe {

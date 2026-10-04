@@ -1,8 +1,9 @@
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use super::{cpu, percpu};
+use crate::hw::MIN_ONE_SHOT;
 use crate::log;
-use crate::time::{Delay, Duration, Floor};
+use crate::time::{Delay, Duration};
 
 /// The local APIC registers and MSRs this file may name.
 // Every variant is an architectural local-APIC register touching no memory or control transfer, so none can make `Reg::write`'s unsafe wrmsr unsound.
@@ -48,8 +49,8 @@ pub const MSI_DOORBELL: u32 = 0xFEE0_0000;
 
 /// The compatibility-format message that raises `vector` on the CPU whose APIC
 /// ID is `dest`: the destination in address bits 19:12, the vector in the data.
-pub fn msi_message(dest: u32, vector: u8) -> (u32, u32) {
-    (MSI_DOORBELL | (dest << 12), vector as u32)
+pub fn msi_message(dest: u32, vector: u8) -> Result<(u32, u32), &'static str> {
+    Ok((MSI_DOORBELL | (dest << 12), vector as u32))
 }
 
 /// Calibrated LAPIC timer ticks per 10ms (computed on BSP, reused by APs).
@@ -84,15 +85,24 @@ pub fn id() -> u32 {
     Reg::Id.read() as u32
 }
 
+/// Raise an interrupt `icr` names whole, after every store before it. An
+/// x2APIC ICR write is not serializing (SDM Vol. 3A, "MSR Access in x2APIC
+/// Mode"), so without the fence a target could take the interrupt before the
+/// store it announces.
+fn send(icr: u64) {
+    cpu::wrmsr_fence();
+    Reg::Icr.write(icr);
+}
+
 /// Send INIT IPI to the specified APIC ID.
 pub fn send_init(apic_id: u32) {
     // ICR write: destination in the high 32 bits, 0x4500 = delivery INIT, level assert.
-    Reg::Icr.write(((apic_id as u64) << 32) | 0x4500);
+    send(((apic_id as u64) << 32) | 0x4500);
 }
 
 /// Send Startup IPI (SIPI) with the given vector (trampoline page number).
 pub fn send_sipi(apic_id: u32, vector: u8) {
-    Reg::Icr.write(((apic_id as u64) << 32) | 0x4600 | vector as u64);
+    send(((apic_id as u64) << 32) | 0x4600 | vector as u64);
 }
 
 /// Send EOI.
@@ -127,12 +137,12 @@ pub fn send_self(vector: u8) {
         return;
     }
     // Destination shorthand = self (0b01 << 18), fixed delivery, level assert.
-    Reg::Icr.write(0x0004_4000 | vector as u64);
+    send(0x0004_4000 | vector as u64);
 }
 
 fn ipi_all_excluding_self(vector: u8) {
     // destination shorthand = all-excluding-self (0b11 << 18), fixed delivery
-    Reg::Icr.write(0x000C_0000 | vector as u64);
+    send(0x000C_0000 | vector as u64);
 }
 
 /// Ask every other CPU to flush its TLB.
@@ -142,18 +152,18 @@ pub(super) fn tlb_ipi() {
     }
 }
 
-/// Send the timer-vector IPI to one CPU, waking it if halted.
+/// Send the kick IPI to one CPU, waking it if halted.
 // Targeted, not broadcast: a broadcast kick would preempt every sibling per wake and cannot scale.
 pub fn kick_cpu(cpu_id: u32) {
     if !X2APIC_ENABLED.load(Ordering::Relaxed) { return; }
-    let apic_id = crate::arch::smp::apic_id_for(cpu_id);
-    Reg::Icr.write(((apic_id as u64) << 32) | 0x4000 | TIMER_VECTOR as u64);
+    let apic_id = crate::smp::hardware_id(cpu_id);
+    send(((apic_id as u64) << 32) | 0x4000 | u64::from(super::idt::KICK_VECTOR));
 }
 
 // Kicked, and not left to arrive on their own: a CPU halted in the idle path has stopped its own timer, so nothing else brings it to the next scheduler pass.
 pub fn kick_all_but_self() {
     let me = percpu::cpu_id();
-    for cpu in 0..crate::arch::smp::cpu_count() {
+    for cpu in 0..crate::smp::cpu_count() {
         if cpu != me {
             kick_cpu(cpu);
         }
@@ -164,8 +174,8 @@ pub fn kick_all_but_self() {
 // Diagnostic only: an NMI can land inside any critical section, which this kernel cannot make NMI-safe.
 pub fn send_nmi(cpu_id: u32) {
     if !X2APIC_ENABLED.load(Ordering::Relaxed) { return; }
-    let apic_id = crate::arch::smp::apic_id_for(cpu_id);
-    Reg::Icr.write(((apic_id as u64) << 32) | 0x4400);
+    let apic_id = crate::smp::hardware_id(cpu_id);
+    send(((apic_id as u64) << 32) | 0x4400);
 }
 
 /// Point this CPU's performance-counter LVT entry at NMI delivery, unmasked —
@@ -188,8 +198,8 @@ pub fn arm_perf_nmi() {
 /// that no sibling has been sent its `SIPI`, so there are only CPUs still waiting
 /// for one rather than CPUs that need halting.
 pub fn stop_other_cpus() {
-    if X2APIC_ENABLED.load(Ordering::Relaxed) && crate::arch::smp::is_ready() {
-        Reg::Icr.write(0x000C_0000 | 0xFD);
+    if X2APIC_ENABLED.load(Ordering::Relaxed) && crate::smp::is_ready() {
+        send(0x000C_0000 | 0xFD);
     }
 }
 
@@ -225,12 +235,6 @@ pub fn init_timer() {
     // machine, so a profile can hold a ceiling against a boot that moved it.
     log!("LAPIC timer: {} ticks/10ms, so {}Hz", ticks_10ms, ticks_10ms as u64 * 100);
 }
-
-// Floor on every arm: a count that expires before the interrupt it schedules retires cannot outlast itself and livelocks the CPU forever.
-const MIN_ONE_SHOT: Floor = Floor::policy(
-    Duration::from_micros(10),
-    "above an interrupt entry and iretq, a thousandth of QUANTUM_NS",
-);
 
 // The only path to Reg::TimerInit / last_armed_ticks — the floor is enforced once here, not at each of the three call sites.
 struct OneShot(u32);

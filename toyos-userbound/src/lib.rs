@@ -6,17 +6,18 @@
 //! hold a user window, which of them does each piece of the copy land in, and
 //! is every one of them pinned? **Before a placement**: can a length userland
 //! asked for be placed at all, and where does it go? **After a trap**: which
-//! side did the frame come from?
+//! side did the frame come from? **Before an `in` or `out`**: which ports does
+//! this CPU open to the process running on it?
 //!
-//! [`span`] answers the first, [`segment`] the second, [`place`] the third and
-//! [`fault`] the fourth.
+//! [`span`] answers the first, [`segment`] the second, [`place`] the third,
+//! [`fault`] the fourth and [`port`] the fifth.
 //!
 //! Pure. No I/O, no allocation, no `unsafe`, nothing read from a device and
 //! nothing named outside this crate. The kernel is the only caller —
-//! `user_ptr.rs`, `mm/`, `syscall/`, `loader/` and
-//! `arch/x86_64/idt/exceptions.rs` — and this is a crate rather than files inside it so
-//! that the boundary table below runs on the host in milliseconds instead of in
-//! a boot.
+//! `user_ptr.rs`, `mm/`, `syscall/`, `loader/`, `arch/x86_64/percpu.rs`,
+//! `arch/x86_64/pio.rs` and `arch/x86_64/idt/exceptions.rs` — and this is a
+//! crate rather than files inside it so that the boundary table below runs on
+//! the host in milliseconds instead of in a boot.
 //!
 //! The numbers are x86-64's: [`USER_TOP`] is the canonical split at 48-bit
 //! linear addresses, [`PAGE_2M`] is the kernel's one user page size, and a
@@ -28,11 +29,13 @@
 
 pub mod fault;
 pub mod place;
+pub mod port;
 pub mod segment;
 pub mod span;
 
 pub use fault::Ring;
 pub use place::{PageSpan, Window};
+pub use port::{port_access, IoBitmap, PortAccess, IO_PORTS};
 pub use segment::{pieces, segments, Pinned, Pins, Segment};
 pub use span::{
     align_2m_checked, in_user_half, is_user_addr, is_user_object, rebase_base, Access, PAGE_2M,

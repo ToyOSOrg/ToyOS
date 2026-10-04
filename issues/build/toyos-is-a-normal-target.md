@@ -22,11 +22,10 @@ Stages, in order:
 2. **The owner's.** `CARGO_REGISTRY_TOKEN` as a repository secret, then the
    first publish. Until it is there the publish job fails by name on every
    landing, which is the intended noise.
-3. **The forks.** `forks.toml`'s `owed` per fork. softbuffer names
+3. **The forks.** softbuffer names
    `toyos-window` and sits on the v0.4.8 release, and raw-window-handle sits on
    v0.6.2, so nothing the window path goes through is based on a master any
-   more. Every fork whose `pr` says "sendable once … is on crates.io" becomes
-   sendable.
+   more.
 4. **Done.** The toolchain is a release a consumer can name, install and link
    with. `toolchain-linux-x86_64-sdk-<toyos-abi's version>` is the tag it pins —
    the SDK version names the ABI, and the toolchain that goes with it carries
@@ -35,26 +34,21 @@ Stages, in order:
    the release notes of every toolchain release carry it:
 
        mkdir -p toyos-toolchain
-       curl -sSL "$asset" | tar --zstd -x -C toyos-toolchain
+       curl -sSL "$asset" | tar -xz -C toyos-toolchain
        stage2=toyos-toolchain/x86_64-unknown-linux-gnu/stage2
        rustup toolchain link toyos "$stage2"
        ln -s "$(rustup which cargo)" "$stage2/bin/cargo"
        export PATH="$PATH:$PWD/$stage2/bin"
        cargo +toyos build --target x86_64-unknown-toyos
 
-   `toyos-ld` is in that `bin/` because rustc's ToyOS target names its linker
-   and finds it on `PATH`, and the release tag is the content hash of
-   everything the tarball's bytes depend on — the linker and the packaging
-   among them, so a change to either mints a release rather than reusing one
-   built without it. The glibc floor is 2.39 — `ubuntu-24.04`'s, the
+   The glibc floor is 2.39 — `ubuntu-24.04`'s, the
    image the host half is built on — measured over the shipped binaries and
    asserted at publish time, so a build on a newer machine is refused rather
    than published. A program that opens a window also carries a `[patch]` of
    `raw-window-handle` to the fork's release branch, until
    rust-windowing/raw-window-handle#223 is released.
 5. **Upstream.** The three backends — winit-toyos, softbuffer's ToyOS backend,
-   cpal's ToyOS host — become upstream pull requests rather than forks, which is
-   what the `sibling` tier in `forks.toml` means.
+   cpal's ToyOS host — become upstream pull requests rather than forks.
 6. **The horizon.** `x86_64-unknown-toyos` as a target in upstream rustc, which
    is what ends the `rust/` fork. Nothing here depends on it and everything here
    is a step toward it.

@@ -16,7 +16,7 @@ use std::fmt;
 /// running to write it there.
 pub const REBOOTING: &str = "Rebooting.";
 
-/// What `/system/bin/init` says as it asks `logd` to make the log whole, before
+/// What `/system/bin/supervisor` says as it asks `logkeeper` to make the log whole, before
 /// it stops the machine: the last line a passing boot's log is owed, because
 /// nothing after it waits for the file.
 pub const STOPPING: &str = toyos_logstream::STOPPING;
@@ -31,8 +31,12 @@ pub const JOB_DEADLINE_SAID: &str =
 /// What the kernel's own boot deadline writes into the black box as it ends the
 /// machine, in `kernel/src/deadline.rs`. The loader prints it back under
 /// [`PREVIOUS_PANIC`] on the pass after the reset, and that is the only channel
-/// it has: a wedged boot's `logd` wrote nothing.
+/// it has: a wedged boot's `logkeeper` wrote nothing.
 pub const DEADLINE_EXPIRED: &str = "the boot deadline expired";
+
+/// What the kernel logs as it arms that deadline, in `kernel/src/deadline.rs`:
+/// the record whose time the bound is counted from.
+pub const DEADLINE_ARMED: &str = "boot deadline: ";
 
 /// What the `wedge-before-reset` actuator says before it stops every CPU, in
 /// `kernel/src/deadline.rs`. The witness that a deadline ended a wedge and not
@@ -50,23 +54,6 @@ pub const WEDGE_STAGED: &str = "wedge: staged, and only the boot deadline ends t
 /// for it.
 pub const WEDGE_ARRIVED_DEAF: &str =
     "arrived with interrupts off, through the syscall gate, and takes them again here";
-
-/// What the USB wedge arms say before the write they stop the machine inside,
-/// in `kernel/src/usb_gate.rs`; the phase and the traffic behind it follow on
-/// the same line.
-///
-/// The witness that the boot the deadline then ended was one holding a device
-/// inside a Bulk-Only command, which is the whole of what those controls stage —
-/// a wedge taken anywhere else is `WEDGE_STAGED`'s boot with a longer log.
-pub const USB_WEDGE_STAGED: &str = "usb-wedge: stopping every CPU at the";
-
-/// What the same arms say if every write ran to completion, which means no CPU
-/// was stopped inside one.
-///
-/// **A control that stages nothing passes for the wrong reason**: without this
-/// line the boot would still wedge — at the shutdown, with no device inside
-/// anything — and read back exactly like the arm that proves the point.
-pub const USB_WEDGE_MISSED: &str = "usb-wedge: the write completed";
 
 /// What the `usb-reset-under-load` arm says once it is streaming, and the three
 /// ways it says it is not, in `kernel/src/usb_gate.rs`.
@@ -90,16 +77,11 @@ pub const USB_LOAD_SWEPT: &str = "usb-load: the sweep reached the end of the dis
 /// whatever the rest of the machine was doing.
 pub const LOCKED_UP: &str = "a cpu locked up with interrupts off";
 
-/// What the `hard-lockup-probe` actuator says before its cpu stops answering,
-/// in `kernel/src/hardlockup/probe.rs` — the witness in the sealed record's tail
-/// that this machine was ended by the control that was staged on it.
-pub const LOCKUP_STAGED: &str = "hard-lockup: staged, and only the lockup detector ends this cpu";
-
 /// What the kernel seals under its own `DONE` record, in
 /// `kernel/src/log/mod.rs`'s `seal_tail`: the head of the boot's newest
 /// records. The next loader pass prints it back under [`PREVIOUS_PANIC`].
 ///
-/// **The one reader a boot's own tail has.** The stop stops `logd` with every
+/// **The one reader a boot's own tail has.** The stop stops `logkeeper` with every
 /// other thread, so what the kernel says from there on — the stop's record,
 /// its census, [`REBOOTING`] — is on the console and here, and on a machine
 /// with no serial port a console is nothing.
@@ -116,6 +98,12 @@ pub const LOG_TAIL: &str = "log-tail: ";
 /// two registrations whose whole subject is that it stopped.
 pub const HANDED_BACK: &str = "the last boot read DONE";
 
+/// What the loader says, in `bootloader/src/blackbox.rs`, of a `DONE` record
+/// sealed under another stick's identity: the foreign-identity arm's
+/// [`HANDED_BACK`]. The kernel seals every state under that identity, so only
+/// this word says the stop finished rather than panicked or wedged.
+pub const FOREIGN_DONE: &str = "held a DONE record another image left in this memory";
+
 /// The bootloader's own file at the root of the log partition.
 pub const LOADER_LOG: &str = "loader.log";
 
@@ -123,33 +111,10 @@ pub const LOADER_LOG: &str = "loader.log";
 pub const LOADER_FIRST_LINE: &str = "ToyOS Bootloader 1.0";
 pub const LOADER_LAST_LINE: &str = "Loader log: the kernel handoff begins, so this file ends here";
 
-/// The line the loader prints once it has opened `GraphicsOutput`, which the
-/// kernel's own `GOP:` line does not begin with.
-pub const LOADER_GOP_LINE: &str = "GOP: mode";
-
 /// The head the loader writes every line about the black-box page under, and
 /// the line a harvested report goes under.
 pub const BLACKBOX_HEAD: &str = "Black box:";
 pub const PREVIOUS_PANIC: &str = "Previous boot's panic:";
-
-/// The first words of a record the kernel's panic path sealed, in
-/// `kernel/src/panic.rs`'s `first_words`. A wedge, a fault and an unsealed page
-/// are reported under [`PREVIOUS_PANIC`] too, and none of them opens with this.
-pub const PANIC_RECORD: &str = "PANIC (apic ";
-
-/// The record a kernel panic sealed, as the pass after the reset printed it:
-/// the lines under [`PREVIOUS_PANIC`], the first of them [`PANIC_RECORD`]'s.
-/// `None` where that pass reports no panic.
-pub fn panic_record(loader: &str) -> Option<Vec<&str>> {
-    let after = &loader[loader.find(SEPARATOR)?..];
-    let record: Vec<&str> = after
-        .lines()
-        .skip_while(|line| !line.starts_with(PREVIOUS_PANIC))
-        .skip(1)
-        .map_while(|line| line.strip_prefix("| "))
-        .collect();
-    record.first().is_some_and(|head| head.starts_with(PANIC_RECORD)).then_some(record)
-}
 
 /// What the loader prints in place of a record's tail, with the count of the
 /// records it filed instead.
@@ -193,7 +158,7 @@ pub const SEPARATOR: &str = "--- the pass after the reset, reading what the boot
 /// **One channel carries it after the console**: the black-box page, where a
 /// boot that handed the machine back seals it among its [`LOG_TAIL`] records
 /// and a boot a bound ended seals it with its record. The stop writes it after
-/// `logd` has stopped, so no file does.
+/// `logkeeper` has stopped, so no file does.
 pub const PANEL_CENSUS: &str = "panel: paints=";
 
 /// What one boot's panel census says: how often the panel painted, how many
@@ -211,7 +176,7 @@ pub struct Panel {
 ///
 /// **This boot's census whole, or nothing.** A `max_us=` whose digits a cut
 /// took the end of parses as a cheaper panel than the boot had, and each
-/// channel says a line ended itself in its own way: `logd`'s file terminates
+/// channel says a line ended itself in its own way: `logkeeper`'s file terminates
 /// one, and the black-box page is a fixed size whose one cut line the loader
 /// closes with [`CUT_BY_THE_PAGE`]. An older census standing in for a cut one
 /// would be a second boot's number under this boot's name, so the cut line is
@@ -242,12 +207,6 @@ pub fn panel_census(log: &str) -> Option<Panel> {
 /// ended, which no program writes ([`is_program_line`]).
 pub const EXIT: &str = "exit: ";
 
-/// The kernel's record for a process that started, in `kernel/src/process.rs`.
-///
-/// Read for where it must *not* be: after the boot's own last word, where it
-/// says a process still on a run queue started another one under a shutdown.
-pub const SPAWN: &str = "spawn: ";
-
 /// One rendered record's message: what follows the bracket every kernel
 /// record opens with. `None` for a line that is not a kernel record's first.
 pub fn message(line: &str) -> Option<&str> {
@@ -255,7 +214,7 @@ pub fn message(line: &str) -> Option<&str> {
 }
 
 /// Whether a line of the log is a program's (`toyos_logstream::ProgramLine`):
-/// `logd` writes that head and no kernel record opens with it.
+/// `logkeeper` writes that head and no kernel record opens with it.
 pub fn is_program_line(line: &str) -> bool {
     toyos_logstream::is_program_line(line)
 }
@@ -265,7 +224,7 @@ pub fn kernel_records(log: &str) -> String {
     log.split_inclusive('\n').filter(|line| !is_program_line(line)).collect()
 }
 
-/// One program's lines, by the name init started it under, as `logd` read them
+/// One program's lines, by the name the supervisor started it under, as `logkeeper` read them
 /// out of its log ring: each line's text, newline-terminated.
 pub fn lines_of(log: &str, name: &str) -> String {
     log.lines()
@@ -293,33 +252,33 @@ pub fn recorded_name(binary: &str) -> String {
     base[..base.len().min(NAME_LEN - 1)].to_string()
 }
 
-/// Whether `name` on the log volume is one of `logd`'s files, which is
-/// `logd`'s own allow-list and not a suffix: the loader's file ends in `.log`
+/// Whether `name` on the log volume is one of `logkeeper`'s files, which is
+/// `logkeeper`'s own allow-list and not a suffix: the loader's file ends in `.log`
 /// too, and a `toybox` run can leave anything there.
-pub fn is_logd_file(name: &str) -> bool {
+pub fn is_logkeeper_file(name: &str) -> bool {
     toyos_wallclock::classify(name).is_some()
 }
 
 /// The names on a mounted log volume, split into the loader's file and
-/// `logd`'s in the order theirs sort.
+/// `logkeeper`'s in the order theirs sort.
 ///
 /// The loader's is matched without case, because a FAT driver that does not
-/// read the lowercase flags in a directory entry yields `LOADER.LOG`; `logd`'s
+/// read the lowercase flags in a directory entry yields `LOADER.LOG`; `logkeeper`'s
 /// are matched as its own writer spells them, which no such driver preserves
-/// either — a volume read through one has no `logd` file this can name, and
+/// either — a volume read through one has no `logkeeper` file this can name, and
 /// says so by finding none.
 pub fn split_listing(listing: &str) -> (Option<&str>, Vec<&str>) {
     let mut loader = None;
-    let mut logd = Vec::new();
+    let mut logkeeper = Vec::new();
     for name in listing.lines().map(str::trim).filter(|name| !name.is_empty()) {
         if name.eq_ignore_ascii_case(LOADER_LOG) {
             loader = Some(name);
-        } else if is_logd_file(name) {
-            logd.push(name);
+        } else if is_logkeeper_file(name) {
+            logkeeper.push(name);
         }
     }
-    logd.sort_unstable();
-    (loader, logd)
+    logkeeper.sort_unstable();
+    (loader, logkeeper)
 }
 
 /// The kernel's boot-phase record for the end of boot, in
@@ -330,12 +289,15 @@ pub const COMPLETE: &str = "Boot: complete (";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Unfit {
     NoBootRecord,
-    /// The log carries no word from init that the machine stops: the last
+    /// The log carries no word from the supervisor that the machine stops: the last
     /// line it carries instead.
     Unfinished(String),
     /// The loader pass after the reset read no `DONE`, or read one with no
     /// [`REBOOTING`] in its tail: the stop never finished.
     NotHandedBack,
+    /// The loader pass after the foreign-identity arm's reset read no
+    /// [`FOREIGN_DONE`]: the stop it staged never finished.
+    NoForeignDone,
 }
 
 impl fmt::Display for Unfit {
@@ -344,14 +306,19 @@ impl fmt::Display for Unfit {
             Self::NoBootRecord => write!(f, "the log carries no `{COMPLETE}Nms)` record"),
             Self::Unfinished(saw) => write!(
                 f,
-                "the log's last line is {saw:?} and init never said {STOPPING:?}: either the \
-                 boot never asked to hand the machine back to the firmware, or logd never made \
+                "the log's last line is {saw:?} and the supervisor never said {STOPPING:?}: either the \
+                 boot never asked to hand the machine back to the firmware, or logkeeper never made \
                  the log whole before it did"
             ),
             Self::NotHandedBack => write!(
                 f,
                 "the loader's pass after the reset carries no {HANDED_BACK:?} with {REBOOTING:?} \
                  under {LOG_TAIL:?}: the stop this boot asked for never reached the reset"
+            ),
+            Self::NoForeignDone => write!(
+                f,
+                "the loader's pass after the reset carries no {FOREIGN_DONE:?}: the stop this \
+                 boot asked for never sealed its record DONE"
             ),
         }
     }
@@ -369,11 +336,27 @@ pub fn handed_back(loader: &str) -> Result<(), Unfit> {
     }
 }
 
-/// Init's line saying the machine stops, the last one `log` carries.
+/// The loader's half of a passing foreign-identity boot, whose own chain the
+/// loader ends as a hang: the record it cleared was sealed `DONE`.
+pub fn foreign_done(loader: &str) -> Result<(), Unfit> {
+    // The pass before the handoff clears a stale foreign record the same way.
+    match after_the_reset(loader) {
+        Some(after) if after.contains(FOREIGN_DONE) => Ok(()),
+        _ => Err(Unfit::NoForeignDone),
+    }
+}
+
+/// `loader.log` from [`SEPARATOR`] on: the pass that read what this boot left,
+/// or `None` where the chain did not go round.
+pub fn after_the_reset(loader: &str) -> Option<&str> {
+    loader.find(SEPARATOR).map(|at| &loader[at..])
+}
+
+/// The supervisor's line saying the machine stops, the last one `log` carries.
 pub fn stopping_line(log: &str) -> Option<&str> {
     log.lines().rfind(|line| {
         toyos_logstream::program_line(line)
-            .is_some_and(|said| said.tag == "init" && said.text.starts_with(STOPPING))
+            .is_some_and(|said| said.tag == "supervisor" && said.text.starts_with(STOPPING))
     })
 }
 
@@ -381,40 +364,9 @@ pub fn stopping_line(log: &str) -> Option<&str> {
 ///
 /// **Found from the CPU it precedes rather than by position**: the field before
 /// it is the writer's tag, and the two writers disagree about it on purpose —
-/// `logd` puts a wall clock there and the panel puts nothing.
+/// `logkeeper` puts a wall clock there and the panel puts nothing.
 pub fn record_millis(line: &str) -> Option<u64> {
     toyos_logstream::record_ms(line)
-}
-
-/// The UTC second one record line carries, as seconds since the epoch.
-///
-/// `logd` writes the wall clock and the panel writes none, so a line without one
-/// answers `None` rather than reading the milliseconds field as a date.
-fn record_unix_secs(line: &str) -> Option<u64> {
-    // A kernel record's bracket or a program line's head: `logd` stamps both
-    // with the same wall clock in the same place.
-    let mut fields = line
-        .strip_prefix('[')
-        .or_else(|| line.strip_prefix(toyos_logstream::OPEN))?
-        .split_whitespace();
-    let (year, rest) = fields.next()?.split_once('-')?;
-    let (month, day) = rest.split_once('-')?;
-    let (hour, rest) = fields.next()?.split_once(':')?;
-    let (min, sec) = rest.split_once(':')?;
-    if [year, month, day, hour, min, sec].map(str::len) != [4, 2, 2, 2, 2, 2] {
-        return None;
-    }
-    let civil = toyos_wallclock::Civil {
-        year: year.parse().ok()?,
-        month: month.parse().ok()?,
-        day: day.parse().ok()?,
-        hour: hour.parse().ok()?,
-        min: min.parse().ok()?,
-        sec: sec.parse().ok()?,
-    };
-    // logd renders this field from the same `Civil`, so one it refuses is not
-    // a field logd wrote.
-    civil.is_valid().then(|| civil.to_unix_secs())
 }
 
 /// Whether `source` declares a constant whose value is exactly `rhs`, wrapped
@@ -439,61 +391,6 @@ pub fn declares(source: &str, rhs: &str) -> bool {
     joined.lines().any(|line| line.trim_end().ends_with(&tail))
 }
 
-/// The daylight a host second needs on either side before it is this boot's.
-///
-/// **A judge reading whole seconds does not get to decide at one.** `skew` is a
-/// difference of two floored clocks across a round trip its reader holds to a
-/// second, which is three of these; the second the host read and the second the
-/// record carries are floored too, which is the fourth; and the fifth is what
-/// makes a refusal a distance rather than a coin.
-pub const MARGIN: u64 = 5;
-
-/// Whether a second on the *host's* clock fell inside the boot this log is of,
-/// clear of [`MARGIN`] on both the record `after` names and the reset.
-///
-/// **The records are the one place a host clock and a boot's clock meet.**
-/// `skew` is this machine's clock minus the host's as the caller measured the
-/// two against each other; how far into a host-side window an observation came
-/// separates nothing, because such a window holds the operating system that
-/// left and the one that came back as well as this boot.
-pub fn host_second_inside_this_boot(
-    log: &str,
-    skew: i64,
-    after: &str,
-    at: u64,
-) -> Result<(), String> {
-    let dated = |line: Option<&str>| line.and_then(record_unix_secs).map(i128::from);
-    let began = dated(log.lines().find(|l| l.contains(after)))
-        .ok_or_else(|| format!("this log carries no dated {after:?} record"))?;
-    let ended = dated(stopping_line(log)).ok_or_else(|| {
-        format!(
-            "this log carries no dated {STOPPING:?} line, so nothing in it says when this boot \
-             handed the machine back"
-        )
-    })?;
-    let at = i128::from(
-        at.checked_add_signed(skew)
-            .ok_or_else(|| format!("a host second of {at} and a skew of {skew} is no second"))?,
-    );
-    if at - began < i128::from(MARGIN) {
-        return Err(format!(
-            "the host saw it at {at} on this machine's clock and this boot's {after:?} record is \
-             at {began}, {} s apart: nothing closer than {MARGIN} s past that record is this \
-             boot's, because these clocks are whole seconds",
-            at - began
-        ));
-    }
-    if ended - at < i128::from(MARGIN) {
-        return Err(format!(
-            "the host saw it at {at} on this machine's clock and this boot's {STOPPING:?} line \
-             is at {ended}, {} s apart: nothing closer than {MARGIN} s before that line is this \
-             boot's, so it belongs to the operating system on the other side of the reset",
-            ended - at
-        ));
-    }
-    Ok(())
-}
-
 /// When the last record in `log` was written, in milliseconds since boot.
 pub fn last_record_millis(log: &str) -> Option<u64> {
     log.lines().rev().find_map(record_millis)
@@ -506,8 +403,8 @@ pub fn boot_millis(log: &str) -> Option<u64> {
 }
 
 /// A boot's duration if its log is a passing boot's, which takes both lines:
-/// the kernel's boot record, and init's word that the machine stops — said
-/// before `logd` made the log whole, so a log that carries it is whole to it.
+/// the kernel's boot record, and the supervisor's word that the machine stops — said
+/// before `logkeeper` made the log whole, so a log that carries it is whole to it.
 /// That the reset then came is the console's to say, or the next loader
 /// pass's ([`HANDED_BACK`], and [`REBOOTING`] under [`LOG_TAIL`]).
 pub fn verdict(log: &str) -> Result<u64, Unfit> {
@@ -519,87 +416,31 @@ pub fn verdict(log: &str) -> Result<u64, Unfit> {
     Ok(boot_ms)
 }
 
-/// **`Rebooting.` is the last record, and nothing this boot still holds may
-/// write one after it.**
-///
-/// The runner's deadline kills the job it is watching, which releases the `wait`
-/// its own job loop is inside, and that loop can spawn the next job into the
-/// window between the boot's last word and the reset.
-///
-/// A boot with no such word — a panic — is not asked: it correctly writes none.
-/// The window ends at the next loader pass, because everything that pass prints
-/// is after the reset by construction.
-///
-/// **A spawn record and not every record**, because those are the two different
-/// claims. `quiesce` writes after its own last word by construction — an idle
-/// CPU's `sched:` report can land there — and nothing is left running to take
-/// it anywhere but the console. A *spawn* is a process that was still on a run
-/// queue after the stop said it had stopped every one.
-///
-/// **The boot's own word, not the next pass's copy of it**: that pass prints
-/// the boot's newest records under [`LOG_TAIL`], newest first, so the
-/// copy of the last word heads records that were written before it.
-pub fn nothing_after_the_last_word(text: &str) -> Result<(), String> {
-    let lines: Vec<&str> = text.lines().collect();
-    let Some(at) = lines
-        .iter()
-        .rposition(|line| line.contains(REBOOTING) && !line.contains(LOG_TAIL))
-    else {
-        return Ok(());
-    };
-    let mut window =
-        lines[at + 1..].iter().take_while(|line| !line.contains(LOADER_FIRST_LINE));
-    match window.find(|line| line.contains(SPAWN)) {
-        None => Ok(()),
-        Some(line) => Err(format!(
-            "a process started after {REBOOTING:?}, which is the boot's own last word and what a \
-             metal boot is judged on: {line:?}"
-        )),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A spawn after the boot's own last word is refused; the next pass's
-    /// newest-first copy of that word, which heads records written before it,
-    /// opens no window, and the next pass is after the reset.
-    #[test]
-    fn a_spawn_after_the_boots_own_last_word_is_refused() {
-        let word = format!("[kernel 23.340 cpu1] {REBOOTING}\n");
-        let spawn = format!("[kernel 23.341 cpu0] {SPAWN}late pid=9\n");
-        let loader = format!("{LOADER_FIRST_LINE}\n");
-        let tail = format!(
-            "| {LOG_TAIL}[kernel 23.340 cpu1] {REBOOTING}\n| {LOG_TAIL}[kernel 1.0 cpu0] {SPAWN}init pid=1\n"
-        );
-        assert_eq!(nothing_after_the_last_word(&format!("{word}{loader}{tail}")), Ok(()));
-        assert!(nothing_after_the_last_word(&format!("{word}{spawn}{loader}{tail}")).is_err());
-        assert_eq!(nothing_after_the_last_word(&format!("{word}{loader}{spawn}")), Ok(()));
-        assert_eq!(nothing_after_the_last_word(&spawn), Ok(()));
-    }
-
     /// The half-told boot: the kernel got all the way up and the log stops
-    /// there, so the machine either never asked for the reset or `logd` never
+    /// there, so the machine either never asked for the reset or `logkeeper` never
     /// made the log whole before it.
     #[test]
-    fn a_boot_record_without_inits_stop_is_not_a_pass() {
+    fn a_boot_record_without_the_supervisors_stop_is_not_a_pass() {
         let booted = "[kernel 1.151 cpu0] Boot: complete (1151ms)\n";
-        let stopping = format!("{{1.203 init}} {STOPPING} (Reboot)\n");
+        let stopping = format!("{{1.203 supervisor}} {STOPPING} (Reboot)\n");
         let ended = format!("{booted}{stopping}");
         assert_eq!(verdict(&ended), Ok(1151));
-        // What `logd` wrote between the flush and the stop is no refusal.
+        // What `logkeeper` wrote between the flush and the stop is no refusal.
         assert_eq!(verdict(&format!("{ended}[kernel 1.210 cpu0] exit: reboot pid=6\n")), Ok(1151));
 
         assert_eq!(
             verdict(booted),
             Err(Unfit::Unfinished("[kernel 1.151 cpu0] Boot: complete (1151ms)".to_string()))
         );
-        // The words, from anyone but init, and from init as anything but its
-        // line, are not init's stop.
+        // The words, from anyone but the supervisor, and from the supervisor as anything but its
+        // line, are not the supervisor's stop.
         let forged = format!("{booted}{{1.203 test-runner}} {STOPPING}\n");
         assert!(matches!(verdict(&forged), Err(Unfit::Unfinished(_))));
-        let quoted = format!("{booted}{{1.203 init}} init: said {STOPPING}\n");
+        let quoted = format!("{booted}{{1.203 supervisor}} supervisor: said {STOPPING}\n");
         assert!(matches!(verdict(&quoted), Err(Unfit::Unfinished(_))));
         assert_eq!(verdict(&stopping), Err(Unfit::NoBootRecord));
         assert_eq!(verdict(""), Err(Unfit::NoBootRecord));
@@ -644,7 +485,6 @@ mod tests {
             ("bootloader/src/loaderlog.rs", format!("\"{CHAIN_ENDS_LINE}\"")),
             ("bootloader/src/loaderlog.rs", format!("\"{SEPARATOR}\"")),
             ("bootloader/src/main.rs", format!("\"{HUNG_WITHOUT_A_RECORD}\"")),
-            ("bootloader/src/loaderlog.rs", format!("\"{LOADER_GOP_LINE}\"")),
             ("bootloader/src/blackbox.rs", format!("\"{BLACKBOX_HEAD}\"")),
             ("bootloader/src/blackbox.rs", format!("\"{PREVIOUS_PANIC}\"")),
             ("bootloader/src/blackbox.rs", format!("\"{TAIL_IN_THE_FILE}\"")),
@@ -659,10 +499,17 @@ mod tests {
                 path.display()
             );
         }
+        // A format and not a constant: the loader fills its hole with the
+        // state's own word.
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("bootloader/src/blackbox.rs");
+        let source = std::fs::read_to_string(&path).expect("a loader module");
+        let format = FOREIGN_DONE.replacen(toyos_blackbox::State::Done.named(), "{}", 1);
+        assert!(source.contains(&format), "{} formats no {format:?}", path.display());
     }
 
     #[test]
-    fn the_loaders_file_is_told_from_logds_however_a_driver_spelled_it() {
+    fn the_loaders_file_is_told_from_logkeepers_however_a_driver_spelled_it() {
         let listing = "2026-09-06-084003.log\nloader.log\nunknown-00.log\nnotes.txt\n";
         assert_eq!(
             split_listing(listing),
@@ -670,7 +517,7 @@ mod tests {
         );
         // A FAT driver that drops the lowercase flags yields 8.3 in upper case.
         assert_eq!(split_listing("LOADER.LOG\n").0, Some("LOADER.LOG"));
-        // And it is never one of logd's, under either spelling.
+        // And it is never one of logkeeper's, under either spelling.
         assert!(split_listing("LOADER.LOG\nloader.log\n").1.is_empty());
         // Blank rows and stray whitespace are a listing's, not a name's.
         assert_eq!(split_listing("\n  loader.log  \n\n").0, Some("loader.log"));
@@ -690,24 +537,18 @@ mod tests {
             ("kernel/src/arch/x86_64/smp.rs", format!("log!(\"{AP_BRINGUP}")),
             ("kernel/src/process.rs", format!("THREAD_NAME_LEN: usize = {NAME_LEN}")),
             ("kernel/src/deadline.rs", format!("EXPIRED: &str = \"{DEADLINE_EXPIRED}\"")),
+            ("kernel/src/deadline.rs", format!("\"{DEADLINE_ARMED}{{ms}} ms")),
             ("kernel/src/deadline.rs", format!("WEDGE_STAGED: &str = \"{WEDGE_STAGED}\"")),
             ("kernel/src/deadline.rs", format!("\"{WEDGE_ARRIVED_DEAF}\"")),
-            ("kernel/src/usb_gate.rs", format!("USB_WEDGE_STAGED: &str = \"{USB_WEDGE_STAGED}\"")),
-            ("kernel/src/usb_gate.rs", format!("USB_WEDGE_MISSED: &str = \"{USB_WEDGE_MISSED}\"")),
             ("kernel/src/usb_gate.rs", format!("LOAD_RUNNING: &str = \"{USB_LOAD_RUNNING}\"")),
             ("kernel/src/usb_gate.rs", format!("LOAD_REFUSED: &str = \"{USB_LOAD_REFUSED}\"")),
             ("kernel/src/usb_gate.rs", format!("LOAD_STOPPED: &str = \"{USB_LOAD_STOPPED}\"")),
             ("kernel/src/usb_gate.rs", format!("LOAD_SWEPT: &str = \"{USB_LOAD_SWEPT}\"")),
             ("kernel/src/hardlockup/mod.rs", format!("LOCKED_UP: &str = \"{LOCKED_UP}\"")),
             (
-                "kernel/src/hardlockup/probe.rs",
-                format!("PROBE_STAGED: &str = \"{LOCKUP_STAGED}\""),
-            ),
-            (
                 "kernel/src/drivers/panic_console/mod.rs",
                 format!("CENSUS: &str = \"{PANEL_CENSUS}\""),
             ),
-            ("kernel/src/panic.rs", format!("\"{PANIC_RECORD}{{apic}}): panicked at ")),
             ("kernel/src/log/mod.rs", format!("TAIL_HEAD: &str = \"{LOG_TAIL_HEAD}\"")),
             ("kernel/src/log/mod.rs", format!("\"{LOG_TAIL}")),
         ] {
@@ -725,12 +566,12 @@ mod tests {
         let log = "[2026-09-08 16:08:23 2.100 cpu0] exit: test_rs_job pid=4 code=3 cpu=1ms\n\
                    [2026-09-08 16:08:23 2.150 cpu0] PANIC: a report\n  its second line\n\
                    {2026-09-08 16:08:23 2.200 test-runner} [2026-09-08 16:08:23 2.200 cpu0] exit: test_rs_job pid=4 code=0 cpu=0ms\n\
-                   {2026-09-08 16:08:23 2.300 test-runner} {x 2.3 netd} netd: MAC 00:00:00:00:00:00\n\
-                   {2026-09-08 16:08:23 2.400 netd} netd: MAC 52:54:00:12:34:56\n";
+                   {2026-09-08 16:08:23 2.300 test-runner} {x 2.3 netstack} netstack: MAC 00:00:00:00:00:00\n\
+                   {2026-09-08 16:08:23 2.400 netstack} netstack: MAC 52:54:00:12:34:56\n";
         let kernel = kernel_records(log);
         assert!(!kernel.contains("code=0"), "{kernel}");
         assert!(kernel.contains("code=3") && kernel.contains("  its second line\n"), "{kernel}");
-        assert_eq!(lines_of(log, "netd"), "netd: MAC 52:54:00:12:34:56\n");
+        assert_eq!(lines_of(log, "netstack"), "netstack: MAC 52:54:00:12:34:56\n");
         assert_eq!(lines_of(log, "test-runner").lines().count(), 2);
         assert!(is_program_line(log.lines().nth(3).expect("five lines")));
     }
@@ -757,7 +598,7 @@ mod tests {
 mod record_time_tests {
     use super::*;
 
-    /// Both writers' shapes: `logd`'s file carries a wall-clock tag before the
+    /// Both writers' shapes: `logkeeper`'s file carries a wall-clock tag before the
     /// elapsed field and the panel carries none, and the same reader answers
     /// for both.
     #[test]
@@ -777,15 +618,15 @@ mod record_time_tests {
         assert_eq!(record_millis(""), None);
     }
 
-    /// The two channels the census crosses, read by one reader: `logd`'s file,
+    /// The two channels the census crosses, read by one reader: `logkeeper`'s file,
     /// and the black-box page the loader prints back with its own margin and
     /// with the kernel's dashes flattened to ASCII.
     #[test]
     fn the_panel_census_is_read_off_either_channel() {
-        let logd = "[2026-09-08 06:50:53 2.5 cpu0] panel: paints=3 px=6220800 us=1500000 \
+        let logkeeper = "[2026-09-08 06:50:53 2.5 cpu0] panel: paints=3 px=6220800 us=1500000 \
                     max_us=520000\n";
         assert_eq!(
-            panel_census(logd),
+            panel_census(logkeeper),
             Some(Panel { paints: 3, pixels: 6_220_800, micros: 1_500_000, max_micros: 520_000 })
         );
 
@@ -818,7 +659,7 @@ mod record_time_tests {
         let mid_number = format!("paints=10 px=8886656 us=18693 max_us=38{CUT_BY_THE_PAGE}");
         assert_eq!(panel_census(&page(&mid_number, "")), None);
 
-        // `logd`'s file ends a record with the newline, so its own cut is a
+        // `logkeeper`'s file ends a record with the newline, so its own cut is a
         // last line that never got one.
         assert_eq!(panel_census("panel: paints=3 px=6220800 us=1500000 max_us=52"), None);
         // A field the cut took whole, and a log with no census at all.
@@ -831,101 +672,5 @@ mod record_time_tests {
         let log = "[1.000 cpu0] first\n[2.500 cpu1] second\nnot a record\n";
         assert_eq!(last_record_millis(log), Some(2_500));
         assert_eq!(last_record_millis("nothing\n"), None);
-    }
-
-    const BOOT: &str = concat!(
-        "[2026-09-08 16:08:21 0.000 cpu0 boot] panic console: armed 1920x1080 stride=1920 \
-         format=1 at 0x4000000000\n",
-        "[2026-09-08 16:08:22 1.258 cpu0] Boot: complete (1258ms)\n",
-        "{2026-09-08 16:08:44 23.340 init} init: power: the machine stops, and logd makes the log \
-         whole first (Reboot)\n",
-    );
-
-    /// That boot's first record, which every second below is placed against.
-    fn first() -> u64 {
-        record_unix_secs(BOOT.lines().next().expect("a record")).expect("a wall clock")
-    }
-
-    /// **[`MARGIN`] decides both edges**, and one second short of either is
-    /// refused rather than read as inside.
-    #[test]
-    fn a_second_clear_of_this_boots_records_by_the_margin_is_this_boots() {
-        let first = first();
-        for at in [first + MARGIN + 1, first + 23 - MARGIN] {
-            assert_eq!(host_second_inside_this_boot(BOOT, 0, "Boot: complete", at), Ok(()), "{at}");
-        }
-        let why = host_second_inside_this_boot(BOOT, 0, "Boot: complete", first + MARGIN)
-            .expect_err("a second short of the margin past the record it is anchored on");
-        assert!(why.contains(&format!("closer than {MARGIN} s past")), "{why}");
-        let why = host_second_inside_this_boot(BOOT, 0, "Boot: complete", first + 24 - MARGIN)
-            .expect_err("a second short of the margin before the reset");
-        assert!(why.contains(&format!("closer than {MARGIN} s before")), "{why}");
-    }
-
-    /// **The one reply this judge exists to refuse.** The loop wrote it 57 s
-    /// into a window opening no earlier than its own run, whose first line is
-    /// 33 s before this boot's first record; it is anchored here on the earliest
-    /// record the boot carries, which is the most favourable anchor there is,
-    /// and no skew the measurement can be wrong by brings it inside.
-    #[test]
-    fn that_reply_is_refused_at_every_skew_the_measurement_can_be_wrong_by() {
-        let earliest_window = first() - 33;
-        for skew in -3..=3 {
-            let why =
-                host_second_inside_this_boot(BOOT, skew, "Boot: complete", earliest_window + 57)
-                    .expect_err("a skew of this size does not place that reply inside the boot");
-            assert!(why.contains(&format!("closer than {MARGIN} s before")), "{skew}: {why}");
-        }
-    }
-
-    /// **A boot that never reached its reset brackets nothing**, and neither
-    /// does one that never wrote the record the caller anchors on.
-    #[test]
-    fn a_log_missing_either_record_is_refused_rather_than_widened() {
-        let first = first();
-        let unfinished: String = BOOT.lines().take(2).map(|l| format!("{l}\n")).collect();
-        let why = host_second_inside_this_boot(&unfinished, 0, "Boot: complete", first + 10)
-            .expect_err("a log with no reset says nothing about when this boot ended");
-        assert!(why.contains(&format!("no dated {STOPPING:?} line")), "{why}");
-        let why = host_second_inside_this_boot(BOOT, 0, "netd: DHCP: lease ", first + 10)
-            .expect_err("this boot took no lease");
-        assert!(why.contains("no dated \"netd: DHCP: lease \" record"), "{why}");
-        let why = host_second_inside_this_boot("[1.000 cpu0] first\n", 0, "first", 0)
-            .expect_err("a panel log carries no wall clock");
-        assert!(why.contains("no dated \"first\" record"), "{why}");
-    }
-
-    /// **The measured skew is the whole of what places a host second.** The
-    /// same reading is this boot's on one clock and the next operating system's
-    /// on another.
-    #[test]
-    fn the_measured_skew_is_what_the_host_second_is_read_through() {
-        let first = first();
-        assert_eq!(host_second_inside_this_boot(BOOT, 30, "Boot: complete", first - 20), Ok(()));
-        let why = host_second_inside_this_boot(BOOT, -30, "Boot: complete", first + 10)
-            .expect_err("thirty seconds the other way is before this boot began");
-        assert!(why.contains(&format!("closer than {MARGIN} s past")), "{why}");
-    }
-
-    /// The panel writes no wall clock, and its milliseconds field must not be
-    /// read as one: `[1.000 cpu0]` would otherwise parse `1.000` as a date and
-    /// answer some second in 1970.
-    #[test]
-    fn a_line_with_no_wall_clock_answers_none() {
-        assert_eq!(record_unix_secs("[1.000 cpu0] first"), None);
-        assert_eq!(record_unix_secs("not a record"), None);
-        assert_eq!(record_unix_secs("[2026-09-08 25:00:00 0.000 cpu0] x"), None);
-        assert_eq!(record_unix_secs("[2026-02-31 10:00:00 0.000 cpu0] x"), None);
-    }
-
-    /// A leap day and a month's end are counted as the days they are.
-    #[test]
-    fn a_wall_clock_across_a_leap_day_and_a_month_is_its_seconds() {
-        let at = |line| record_unix_secs(line).expect("a wall clock");
-        assert_eq!(at("[1970-01-01 00:00:00 0.000 cpu0] x"), 0);
-        assert_eq!(at("[2024-02-28 23:59:59 0.000 cpu0] x"), 1_709_164_799);
-        assert_eq!(at("[2024-02-29 00:00:00 0.000 cpu0] x"), 1_709_164_800);
-        assert_eq!(at("[2024-03-01 00:00:00 0.000 cpu0] x"), 1_709_164_800 + 86_400);
-        assert_eq!(record_unix_secs("[2023-02-29 00:00:00 0.000 cpu0] x"), None);
     }
 }

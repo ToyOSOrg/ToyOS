@@ -5,8 +5,9 @@ use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
@@ -16,27 +17,40 @@ use crate::buildlock;
 use crate::flags;
 use crate::hostws;
 use crate::image;
+use crate::printer;
+use crate::sysroot::{Identity, Stale, Sysroot};
 use crate::toolchain;
 
 thread_local! {
-    /// Time this worker has spent constructing memoized boot artifacts.
+    /// Time this worker has spent in a [`Building`].
     ///
     /// A suite worker is also the thread that asks for its boot image, so a
     /// cumulative thread-local clock lets the harness remove a cold build from
     /// the test that happened to ask for it first. A process-wide counter would
     /// subtract another worker's concurrent build instead.
     static ARTIFACT_BUILD_TIME: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    /// The test this worker builds for, where it said: [`building_for`].
+    static BUILDING_FOR: Cell<Option<&'static str>> = const { Cell::new(None) };
+}
+
+/// Every thread's [`ARTIFACT_BUILD_TIME`], summed, in nanoseconds.
+static BUILT_NANOS: AtomicU64 = AtomicU64::new(0);
+
+/// Name the test every build this thread makes from here on is reported as
+/// made for.
+pub fn building_for(test: &'static str) {
+    BUILDING_FOR.set(Some(test));
+}
+
+/// How long this process's threads have spent building, summed over them.
+pub fn built() -> Duration {
+    Duration::from_nanos(BUILT_NANOS.load(Ordering::Relaxed))
 }
 
 /// One reading of the artifact-build clock for the current thread.
 ///
 /// Test duration profiles are execution prices, not ownership of a shared
-/// cache miss. Without this distinction, each CI shard charges its first
-/// shipping- and test-kernel users tens of seconds, relegating those names;
-/// the next run then charges the same builds to two different names. The raw
-/// suite wall clock still includes every build. Only per-test prices use this
-/// mark to remove construction of memoized kernel, bootloader, and root-image
-/// artifacts.
+/// cache miss. The raw suite wall clock still includes every build.
 #[derive(Clone, Copy)]
 pub struct ArtifactBuildMark(Duration, PhantomData<Rc<()>>);
 
@@ -53,22 +67,34 @@ impl ArtifactBuildMark {
     }
 }
 
-/// Charges the slow, cache-filling half of [`build_test_image`] to the build
-/// clock even if it unwinds. Image creation on a memo hit is deliberately
-/// outside this guard: every boot pays that work, so it is part of the test's
-/// repeatable execution price.
-struct ArtifactBuildTimer(Instant);
+/// One build, reported as a test is: a `BUILD` line naming it when it starts,
+/// and when it ends, unwinding or not, [`printer::outcome`]'s line with how
+/// long it took, which is charged to the build clocks. Image creation on a
+/// memo hit is deliberately outside this guard: every boot pays that work, so
+/// it is part of the test's repeatable execution price.
+struct Building {
+    what: String,
+    began: Instant,
+}
 
-impl ArtifactBuildTimer {
-    fn start() -> Self {
-        Self(Instant::now())
+impl Building {
+    fn start(what: String) -> Self {
+        let what = match BUILDING_FOR.get() {
+            Some(test) => format!("{what}, for {test}"),
+            None => what,
+        };
+        eprintln!("{}", printer::started("BUILD", &what));
+        Self { what, began: Instant::now() }
     }
 }
 
-impl Drop for ArtifactBuildTimer {
+impl Drop for Building {
     fn drop(&mut self) {
-        let elapsed = self.0.elapsed();
-        ARTIFACT_BUILD_TIME.set(ARTIFACT_BUILD_TIME.get().saturating_add(elapsed));
+        let took = self.began.elapsed();
+        ARTIFACT_BUILD_TIME.set(ARTIFACT_BUILD_TIME.get().saturating_add(took));
+        BUILT_NANOS.fetch_add(took.as_nanos() as u64, Ordering::Relaxed);
+        let word = if std::thread::panicking() { "FAIL" } else { "BUILT" };
+        eprintln!("{}", printer::outcome(word, &self.what, took));
     }
 }
 
@@ -85,7 +111,7 @@ struct SystemConfig {
     hosted_rustc: bool,
     #[serde(default)]
     assets: Vec<String>,
-    /// What `/system/bin/init` starts at boot. Program *keys*, never paths — a path
+    /// What `/system/bin/supervisor` starts at boot. Program *keys*, never paths — a path
     /// here is a second spelling of a `[programs]` key and is what let a boot
     /// list smuggle an argument through. Arguments live on the program entry's
     /// `args` instead.
@@ -118,26 +144,31 @@ struct ProgramConfig {
     no_default_features: bool,
     /// Argv this program is started with, after argv[0].
     args: Vec<String>,
-    /// Names init creates **one machine-wide port** for and endows this program
+    /// Names the supervisor creates **one machine-wide port** for and endows this program
     /// the *acceptor* of.
     serves: Vec<String>,
     /// Names this program creates a port for **itself**, once per instance, and
-    /// hands the connector down to its own children. init creates nothing and
+    /// hands the connector down to its own children. The supervisor creates nothing and
     /// holds nothing for these — `surface` is the whole of this kind.
     provides: Vec<String>,
     /// Names in this program's namespace, each a *connector*.
     receives: Vec<String>,
-    /// Device classes init mints a claim for and endows.
+    /// Device classes the supervisor mints a claim for and endows.
     devices: Vec<String>,
-    /// Rights on the `SysCap` duplicate init endows this program, by the names
+    /// Rights on the `SysCap` duplicate the supervisor endows this program, by the names
     /// `toyos_manifest::syscap_rights` takes. A handful of rows in the whole
     /// tree declare one.
     syscap: Vec<String>,
     /// The idle slot, granted as partition claims (`toyos_manifest::Program::slots`).
     slots: bool,
-    /// A system service: init starts it with `HOME` at its own `/state/<name>`
+    /// A system service: the supervisor starts it with `HOME` at its own `/state/<name>`
     /// and makes that directory, where every other row gets the session's.
     service: bool,
+    /// The file-server roles this binary serves, one process each
+    /// (`toyos_manifest::Program::roles`).
+    roles: Vec<String>,
+    /// The supervisor starts it again when it ends (`toyos_manifest::Program::restart`).
+    restart: bool,
 }
 
 impl ProgramConfig {
@@ -171,46 +202,7 @@ fn parse_config(path: &Path) -> SystemConfig {
 
 // --- Freshness checking ---
 
-/// Fingerprint all external build dependencies that cargo cannot track: the
-/// sysroot `toolchain` is — by where it is, which names its key, and by its
-/// libraries. The linker is the sysroot's own `rust-lld`, which that key names
-/// with the compiler it came with.
-fn external_fingerprint(toolchain: &Path) -> String {
-    let sysroot = toolchain.join("lib/rustlib");
-    let mut entries = vec![format!("sysroot:{}", toolchain.display())];
-
-    for triple in toolchain::GUEST_TARGETS {
-        let lib_dir = sysroot.join(format!("{triple}/lib"));
-        let Ok(rd) = fs::read_dir(&lib_dir) else {
-            continue;
-        };
-        for entry in rd.flatten() {
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            let ext = path.extension().and_then(|e| e.to_str());
-            if !matches!(ext, Some("rlib" | "rmeta")) {
-                continue;
-            }
-            if let Ok(meta) = path.metadata() {
-                let name = path.file_name().unwrap().to_string_lossy();
-                let mtime = meta
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                    .map(|d| d.as_nanos())
-                    .unwrap_or(0);
-                entries.push(format!("{triple}/{name}:{}:{mtime}", meta.len()));
-            }
-        }
-    }
-
-    entries.sort();
-    entries.join("\n")
-}
-
-/// How much of a crate's target directory goes when the external deps change.
+/// How much of a crate's target directory goes when the compiler moves.
 #[derive(Clone, Copy)]
 enum Clean {
     All,
@@ -224,17 +216,23 @@ enum Clean {
     ToyosOnly,
 }
 
-fn stale(root: &Path, crate_dir: &Path, fingerprint: &str) -> bool {
+fn stale(root: &Path, crate_dir: &Path, identity: &Identity) -> Option<Stale> {
     let stamp = hostws::target_dir(root, crate_dir).join(".deps-stamp");
-    fs::read_to_string(&stamp).map_or(true, |stored| stored != fingerprint)
+    identity.stale(fs::read_to_string(&stamp).ok().as_deref())
 }
 
-fn clean(root: &Path, crate_dir: &Path, kind: Clean, fingerprint: &str) {
+fn clean(root: &Path, crate_dir: &Path, kind: Clean, stale: &Stale, identity: &Identity) {
     // Where cargo actually wrote it. `toyos-ld` is a member of the host
     // workspace, so its guest build lands in the root's `target/`.
     let target = hostws::target_dir(root, crate_dir);
-    match kind {
-        Clean::All => {
+    let remove = |dirs: &mut dyn Iterator<Item = PathBuf>| {
+        for dir in dirs.filter(|dir| dir.exists()) {
+            eprintln!("external deps changed: cleaning {}", dir.display());
+            crate::keystore::remove(&dir);
+        }
+    };
+    match (stale, kind) {
+        (Stale::All, Clean::All) => {
             // `cargo clean` in a member's directory cleans the whole workspace,
             // this build system's own target directory included. Nothing asks
             // for that today; refusing it by name is cheaper than finding out.
@@ -252,22 +250,19 @@ fn clean(root: &Path, crate_dir: &Path, kind: Clean, fingerprint: &str) {
                 .unwrap_or_else(|e| panic!("run cargo clean in {}: {e}", crate_dir.display()));
             assert!(status.success(), "cargo clean in {} exited {status}", crate_dir.display());
         }
-        Clean::ToyosOnly => {
+        (Stale::All, Clean::ToyosOnly) => {
             let guest = Arch::ALL.iter().map(|arch| target.join(arch.userland()));
-            for dir in guest.chain([target.join(PROFILE)]) {
-                if dir.exists() {
-                    eprintln!("external deps changed: cleaning {}", dir.display());
-                    fs::remove_dir_all(&dir).unwrap_or_else(|e| panic!("remove {}: {e}", dir.display()));
-                }
-            }
+            remove(&mut guest.chain([target.join(PROFILE)]));
         }
+        (Stale::Targets(moved), _) => remove(&mut moved.iter().map(|t| target.join(t))),
     }
 
-    fs::create_dir_all(&target).ok();
-    fs::write(target.join(".deps-stamp"), fingerprint).ok();
+    fs::create_dir_all(&target).unwrap_or_else(|e| panic!("create {}: {e}", target.display()));
+    let stamp = target.join(".deps-stamp");
+    fs::write(&stamp, identity.to_string()).unwrap_or_else(|e| panic!("write {}: {e}", stamp.display()));
 }
 
-/// Drop the target directories the changed external deps invalidated.
+/// Drop what in the target directories the sysroot's moved parts invalidated.
 ///
 /// Deciding and acting under one exclusive section is the whole point. Each of
 /// these cleans removes a tree another builder may be compiling into, and
@@ -278,24 +273,22 @@ fn clean(root: &Path, crate_dir: &Path, kind: Clean, fingerprint: &str) {
 fn invalidate_stale(
     root: &Path,
     lock: &mut buildlock::Held,
-    toolchain: &Path,
+    identity: &Identity,
     targets: &[(PathBuf, Clean)],
 ) {
     lock.act_if(
         buildlock::Scope::Worktree,
         "clean crate targets against changed external deps",
         || {
-            let fp = external_fingerprint(toolchain);
-            let work: Vec<(PathBuf, Clean)> = targets
+            let work: Vec<(PathBuf, Clean, Stale)> = targets
                 .iter()
-                .filter(|(dir, _)| stale(root, dir, &fp))
-                .cloned()
+                .filter_map(|(dir, kind)| stale(root, dir, identity).map(|s| (dir.clone(), *kind, s)))
                 .collect();
-            (!work.is_empty()).then_some((fp, work))
+            (!work.is_empty()).then_some(work)
         },
-        |(fp, work)| {
-            for (dir, kind) in work {
-                clean(root, &dir, kind, &fp);
+        |work| {
+            for (dir, kind, stale) in work {
+                clean(root, &dir, kind, &stale, identity);
             }
         },
     );
@@ -389,8 +382,8 @@ fn config_crates(root: &Path, config: &SystemConfig) -> Vec<ConfigCrate> {
         });
     }
     crates.push(ConfigCrate {
-        name: INIT_PROGRAM.to_string(),
-        dir: ProgramConfig::default().crate_dir(root, INIT_PROGRAM),
+        name: SUPERVISOR_PROGRAM.to_string(),
+        dir: ProgramConfig::default().crate_dir(root, SUPERVISOR_PROGRAM),
         built: Built::Member,
         features: Features::Default,
     });
@@ -403,21 +396,16 @@ fn config_crates(root: &Path, config: &SystemConfig) -> Vec<ConfigCrate> {
 /// it in.
 ///
 /// One name, passed to every `cargo build` here and declared by every crate
-/// root the image is made of. `--release` used to be a flag on `cargo run`, and
-/// it silently turned `debug-assertions` and `overflow-checks` off — the two
-/// knobs `issues/`'s crafted-ELF panics were *found* by. There is
-/// no longer a second profile to pick, which is why there is no longer a flag.
+/// root the image is made of.
 pub const PROFILE: &str = "toyos";
 
 /// What every guest `cargo` and `rustc` here runs with: the toolchain directory
 /// of the sysroot this checkout's sources name, as `RUSTUP_TOOLCHAIN`, which
 /// carries the linker too. Never the `toyos` rustup name, which is the primary's.
-#[derive(Clone)]
 struct GuestEnv {
-    toolchain: PathBuf,
-    /// Whether that sysroot's compiler is the primary's, the one the hosted
-    /// rustc is built from (`src/compiler.rs`).
-    primary_compiler: bool,
+    /// Owned, so the sysroot is held in use for as long as anything here runs
+    /// against it.
+    sysroot: Sysroot,
     /// The public key the loader and `/system/bin/update` embed
     /// (`signing::KEY_ENV`): every guest build carries it, so no crate that
     /// names it can be built without it.
@@ -427,10 +415,9 @@ struct GuestEnv {
 }
 
 impl GuestEnv {
-    fn new(sysroot: &crate::sysroot::Sysroot) -> Self {
+    fn new(sysroot: Sysroot) -> Self {
         Self {
-            toolchain: sysroot.dir.clone(),
-            primary_compiler: sysroot.primary_compiler,
+            sysroot,
             image_key: crate::signing::key().public_hex(),
             floor_scope: crate::signing::key().floor_scope().word(),
         }
@@ -453,7 +440,7 @@ fn cargo_build(
     let mut cmd = Command::new("cargo");
     cmd.args(&args)
         .current_dir(crate_dir)
-        .env("RUSTUP_TOOLCHAIN", &env.toolchain)
+        .env("RUSTUP_TOOLCHAIN", env.sysroot.dir())
         .env_remove("RUSTFLAGS")
         .env(crate::signing::KEY_ENV, &env.image_key)
         .env(crate::signing::FLOOR_ENV, env.floor_scope)
@@ -500,14 +487,6 @@ fn cargo_build(
 // So: hold [`buildlock::artifact`] across each build→stage pair, and copy the
 // artifact to a name carrying what it is actually keyed by. Readers use the
 // staged name, which no other config can overwrite.
-//
-// The bootloader used to be here for the same reason and no longer is: its init
-// list was compiled into it, so the `.efi` was a function of the boot config,
-// and an image once carried metalcase's root image beside another config's
-// bootloader whose 28-byte init string was `"/system/bin/soundd;/system/bin/test-runner"` —
-// the compositor was never spawned and the test failed as though the daemon
-// under test were broken. The bootloader carries no config now, so it is
-// memoized once per profile and that hazard is not expressible.
 
 /// The staged-artifact key of a kernel built with `features`.
 ///
@@ -578,7 +557,7 @@ fn assert_kernel_is_softfloat(env: &GuestEnv, arch: Arch) {
     }
     let out = Command::new("rustc")
         .args(["--print", "cfg", "--target", arch.kernel()])
-        .env("RUSTUP_TOOLCHAIN", &env.toolchain)
+        .env("RUSTUP_TOOLCHAIN", env.sysroot.dir())
         .env_remove("RUSTFLAGS")
         .env_remove("RUSTC")
         .output()
@@ -629,10 +608,7 @@ fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
 ///
 /// [`PROFILE`] states them and `--release` is gone from this build system, so
 /// the way they can still be lost is somebody editing `[profile.toyos]`. This
-/// asks the artifact rather than the manifest, which is the only question worth
-/// asking: `issues/`'s two crafted-ELF kernel panics were both
-/// *found* by an overflow check, and one of them had no configuration in which
-/// it was an error return.
+/// asks the artifact rather than the manifest.
 fn assert_overflow_checked(what: &str, image: &[u8]) {
     let found = contains_subslice(image, OVERFLOW_CHECK_MARKER);
     assert!(
@@ -651,15 +627,15 @@ fn assert_overflow_checked(what: &str, image: &[u8]) {
 /// The one program the kernel starts, in **every** image whatever `[programs]`
 /// says. It reads the manifest below and starts what that names, so a ROOT image
 /// without it is a machine with a kernel and no userland at all.
-const INIT_PROGRAM: &str = "init";
+const SUPERVISOR_PROGRAM: &str = "supervisor";
 
-/// Names `/system/bin/init` serves itself.
+/// Names `/system/bin/supervisor` serves itself.
 ///
-/// init is in every image and is no `[programs]` key, so these have no
-/// declaration to come from. They travel in the manifest so init creates
+/// The supervisor is in every image and is no `[programs]` key, so these have no
+/// declaration to come from. They travel in the manifest so the supervisor creates
 /// exactly the ports the build-time gate counted as provided — one producer,
-/// rather than a constant here and a string in init.
-const INIT_SERVED: &[&str] = &["launcher", toyos_swap::PORT, "power"];
+/// rather than a constant here and a string in the supervisor.
+const SUPERVISOR_SERVED: &[&str] = &["launcher", toyos_swap::PORT, "power"];
 
 /// Who may hold the two authorities that change what the machine runs:
 /// the swap port, [`toyos_swap::HOLDER`] and nothing else — no other
@@ -688,10 +664,10 @@ fn held_by_their_holders_alone(config: &SystemConfig) -> Result<(), String> {
     Ok(())
 }
 
-/// The resolved config as the records `/system/bin/init` reads.
+/// The resolved config as the records `/system/bin/supervisor` reads.
 ///
 /// The format, the renderer and the parser are `toyos-manifest/`, whose
-/// round-trip test is what makes "what the build writes is what init reads" a
+/// round-trip test is what makes "what the build writes is what the supervisor reads" a
 /// fact rather than two hand-matched implementations.
 fn render_manifest(config: &SystemConfig) -> Vec<u8> {
     if let Err(why) = held_by_their_holders_alone(config) {
@@ -715,10 +691,12 @@ fn render_manifest(config: &SystemConfig) -> Vec<u8> {
                     syscap: cfg.syscap.clone(),
                     slots: cfg.slots,
                     service: cfg.service,
+                    roles: cfg.roles.clone(),
+                    restart: cfg.restart,
                 }
             })
             .collect(),
-        init_serves: INIT_SERVED.iter().map(|s| (*s).to_string()).collect(),
+        supervisor_serves: SUPERVISOR_SERVED.iter().map(|s| (*s).to_string()).collect(),
         apps: config.apps.receives.clone(),
         start: config.boot.start.clone(),
     };
@@ -746,12 +724,12 @@ fn build_and_assemble(
             arch.name()
         );
         assert!(
-            env.primary_compiler,
+            env.sysroot.primary_compiler,
             "hosted-rustc ships the primary checkout's hosted compiler, and this worktree builds with \
              a compiler of its own (src/compiler.rs): the image would carry a rustc that is not the \
              one its programs were built with"
         );
-        collect_hosted_rustc(root, &env.toolchain, &mut root_files);
+        collect_hosted_rustc(root, env.sysroot.dir(), &mut root_files);
     }
 
     if !config.assets.is_empty() {
@@ -810,7 +788,7 @@ fn not_built_for(arch: Arch, program: &str) -> Option<&'static str> {
     NOT_YET_BUILT.iter().find(|(a, name, _)| *a == arch && *name == program).map(|(_, _, why)| *why)
 }
 
-/// Build `config`'s programs and init for `arch`, and add each to `root_files`.
+/// Build `config`'s programs and the supervisor for `arch`, and add each to `root_files`.
 fn build_programs(
     root: &Path,
     config: &SystemConfig,
@@ -848,7 +826,7 @@ fn build_programs(
 
     // Every userland crate that compiles C compiles it with the toolchain's
     // clang against libc's C sysroot.
-    let cc_env = crate::clang::CSysroot::of(&env.toolchain, arch).cc_env();
+    let cc_env = crate::clang::CSysroot::of(env.sysroot.dir(), arch).cc_env();
     let cc_env: Vec<(&str, &str)> = cc_env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
 
     // Build and read under one hold, exactly as `build_toyos_bins` does and for
@@ -896,7 +874,7 @@ fn symlink_target_name(to: &str) -> &str {
 }
 
 /// The converse of the crate assertion above: a `bin/` entry no name reaches.
-/// A name buys authority — `/system/bin/init` builds a `[programs]` row's namespace and
+/// A name buys authority — `/system/bin/supervisor` builds a `[programs]` row's namespace and
 /// device claims — and a harness binary has none, holding only what its spawner
 /// moved in, so it is legal exactly when the config starts something that could
 /// spawn it. **An inventory over the `bin/` namespace, not a reachability
@@ -908,7 +886,7 @@ fn unnamed_program(
 ) -> Result<(), String> {
     for name in names {
         let Some(program) = name.strip_prefix("bin/") else { continue };
-        if program == INIT_PROGRAM || programs.contains(program) {
+        if program == SUPERVISOR_PROGRAM || programs.contains(program) {
             continue;
         }
         if HARNESS_PREFIXES.iter().any(|p| name.starts_with(p)) {
@@ -923,7 +901,7 @@ fn unnamed_program(
             continue;
         }
         return Err(format!(
-            "the image carries {name} and no `[programs]` row names it, so `/system/bin/init` can build \
+            "the image carries {name} and no `[programs]` row names it, so `/system/bin/supervisor` can build \
              it no namespace and no device claim; add a row or take the file out"
         ));
     }
@@ -1065,8 +1043,6 @@ impl Boot {
 
     /// The config declares no `devices`, so nothing started there claims the
     /// framebuffer and the kernel's last boot checkpoint stays on screen.
-    /// `screen_diag_boot` boots this same config, so the tested image and the
-    /// flashed image are the same image.
     pub fn diag(root: &Path) -> Self {
         Self::mode(root, &root.join("diag"))
     }
@@ -1074,7 +1050,7 @@ impl Boot {
     /// `/system/bin/console` claims the framebuffer and runs the shell on it.
     /// Claiming the screen is what stops the boot checkpoints painting, so a
     /// machine that wedges before userland is readable in this mode and in no
-    /// other. `screen_console_shell` boots this config.
+    /// other.
     pub fn console(root: &Path) -> Self {
         Self::mode(root, &root.join("console"))
     }
@@ -1118,6 +1094,8 @@ impl Boot {
 /// is a test image and is not here.
 pub struct Shipped {
     pub crates: BTreeSet<(PathBuf, Features)>,
+    /// `crates` but the kernel and the loader: every program an image runs.
+    pub programs: BTreeSet<(PathBuf, Features)>,
     pub assets: BTreeSet<PathBuf>,
 }
 
@@ -1127,6 +1105,7 @@ pub struct Shipped {
 /// the rust fork's `compiler/` workspace, which no reader of this answer walks.
 pub fn shipped(root: &Path) -> Result<Shipped, String> {
     let mut crates = BTreeSet::new();
+    let mut programs = BTreeSet::new();
     let mut assets = BTreeSet::new();
     for boot in [Boot::shipped(root), Boot::diag(root), Boot::console(root)] {
         let config = parse_config(&boot.config);
@@ -1136,10 +1115,15 @@ pub fn shipped(root: &Path) -> Result<Shipped, String> {
                 boot.config.display()
             ));
         }
-        crates.extend(config_crates(root, &config).into_iter().map(|c| (c.dir, c.features)));
+        for c in config_crates(root, &config) {
+            if matches!(c.built, Built::Member | Built::Standalone) {
+                programs.insert((c.dir.clone(), c.features));
+            }
+            crates.insert((c.dir, c.features));
+        }
         assets.extend(config.assets.iter().map(|dir| root.join(dir)));
     }
-    Ok(Shipped { crates, assets })
+    Ok(Shipped { crates, programs, assets })
 }
 
 /// The parameters an image built for flashing may carry: the kernel's own boot
@@ -1170,7 +1154,8 @@ pub fn flashable_params(root: &Path, asked: &[String]) -> Result<(), String> {
 /// separated argument.
 ///
 /// **Every name the caller asked for is checked against `kernel/Cargo.toml`,
-/// and an unknown one stops the build by name.** Read from the manifest rather
+/// and an unknown one stops the build by name**, as does a control or a name in
+/// [`KERNEL_CARRIES`]: neither is a kernel build. Read from the manifest rather
 /// than listed here, so the check cannot drift from what cargo would accept —
 /// and, more to the point, so that deleting a feature takes its own command
 /// lines down with it. That is what a temporary feature needs: once one is
@@ -1207,6 +1192,12 @@ fn kernel_features(
                  Every actuator is now a --kernel-param; `cargo run -- --kernel-param --help` \
                  lists them.",
                 declared.join(", ")
+            );
+            assert!(
+                !crate::ci::CONTROLS.iter().any(|c| c.feature == name)
+                    && !KERNEL_CARRIES.contains(&name.as_str()),
+                "--kernel-feature {name}: a model's negative control or a name the kernel \
+                 declares for another package's build of its sources, and never a kernel build"
             );
             features.push(name);
         }
@@ -1357,6 +1348,11 @@ fn declared_kernel_features(root: &Path) -> Vec<String> {
     manifest.features.into_keys().collect()
 }
 
+/// The features the kernel declares for another package's build of its
+/// sources: `loom`, which `kernel-loom` turns on, and `protocol-port`, which
+/// `kernel-sim` does.
+const KERNEL_CARRIES: &[&str] = &["loom", "protocol-port"];
+
 /// The kernel every test that needs an actuator boots: all of them compiled in
 /// and none of them armed, plus the `SYS_DEBUG` number.
 ///
@@ -1366,14 +1362,17 @@ fn declared_kernel_features(root: &Path) -> Vec<String> {
 pub const TEST_KERNEL: &[&str] = &["boot-actuators", "test-actuators"];
 
 /// Kernel builds the ordinary test suite is allowed to make.
-pub const TEST_SUITE_KERNEL_BUILDS: [&str; 5] =
-    ["", "boot-actuators,test-actuators", "fpu-save-nothing", "sched-check", "user-writable-gsbase"];
+pub const TEST_SUITE_KERNEL_BUILDS: [&str; 3] =
+    ["", "boot-actuators,test-actuators", MASK_WINDOWS_KERNEL[0]];
 
-/// The scheduler core's own asserts, compiled in: `toyos-sched/check`.
+/// The shipping kernel with the windows' instrument and nothing else, for
+/// [`SCHED_CHECK_KERNEL`]'s reason: one spelling, so one build.
+pub const MASK_WINDOWS_KERNEL: &[&str] = &["mask-windows"];
+
+/// The scheduler core's own asserts, compiled in.
 ///
-/// One name, read from here by the one test that boots it, for
-/// [`TEST_KERNEL`]'s reason — a second spelling is a second kernel and nothing
-/// would say so.
+/// One name, for [`TEST_KERNEL`]'s reason — a second spelling is a second
+/// kernel and nothing would say so.
 pub const SCHED_CHECK_KERNEL: &[&str] = &["sched-check"];
 
 /// The kernel build used only by the harness's interactive debugger.
@@ -1386,52 +1385,6 @@ pub fn harness_kernel_build_is_declared(features: &str, debug_wait: bool) -> boo
     } else {
         TEST_SUITE_KERNEL_BUILDS.contains(&features)
     }
-}
-
-/// Every name in which a process of this boot config can speak a console line
-/// that is not the program under test's.
-///
-/// **Derived, never listed.** The point of reading it out of the config is that
-/// a daemon added to `[boot] start` tomorrow is in this set the moment it
-/// exists — a hardcoded list would let the next `netd`'s lines start deciding C
-/// tests again, which is what task #84 was (`tests/common/console.rs`).
-/// `/system/bin/init` itself is added by hand because it is the one speaker that is not a
-/// `[programs]` key: it is the parent that starts every one of them, and it
-/// speaks before any of them exists (`init: netd: no nic on this machine` is on
-/// the console before netd is loaded).
-///
-/// The union of the two lists rather than `[boot] start` alone: a program the
-/// config declares is a binary this image carries and a name init can be asked
-/// to speak in, and the whole value of deriving the set is that it is the
-/// config's answer rather than an author's.
-///
-/// **A program also speaks in the name of every device it claims, and that is
-/// measured rather than supposed.** `userland/soundd/src/virtio.rs` writes
-/// `virtio-sound: configured stream 0: 44100Hz 2ch s16le` — the driver layer
-/// says which device is talking, not which program — and a plain
-/// `tests/testcases` boot puts three such lines on the console before the test
-/// runner is ready. `devices` is where those names are declared, so it is where
-/// they are read from; `c_capture_ignores_daemon_lines` walks a real boot log
-/// and reds on any line this set cannot account for, which is what keeps this
-/// derivation honest as the tree grows.
-///
-/// `config` is the `system.toml` itself, not its directory.
-pub fn console_speakers(config: &Path) -> std::collections::BTreeSet<String> {
-    let parsed = parse_config(config);
-    let mut names = std::collections::BTreeSet::new();
-    for (program, entry) in parsed.programs {
-        names.insert(program);
-        names.extend(entry.devices);
-    }
-    names.extend(parsed.boot.start);
-    names.insert("init".to_string());
-    names
-}
-
-/// What `/system/bin/init` starts on the boot `config` describes, in the manifest's
-/// order. `config` is the `system.toml` itself, not its directory.
-pub fn boot_start(config: &Path) -> Vec<String> {
-    parse_config(config).boot.start
 }
 
 /// The manifest bytes and the symlink table `config` renders to, for a reader
@@ -1530,27 +1483,6 @@ fn assert_actuators_match_features(root: &Path, features: &str, kernel: &[u8]) {
     );
 }
 
-/// The labels `arch::syscall` defines inside `syscall_entry` for
-/// `nmi_gate`, which the linker carries into `.strtab`.
-const ENTRY_LABELS: [&str; 3] =
-    ["syscall_entry_hold_spin", "syscall_entry_hold_end", "syscall_entry_end"];
-
-/// Refuse a test kernel whose entry lacks a label `nmi_gate` reads, and a
-/// shipping one that names any. What the shipping entry *does* is
-/// [`assert_entry_window_matches_features`]'s to judge: a label is a spelling,
-/// and a hold can be spelled without one.
-fn assert_entry_labels_match_features(features: &str, kernel: &[u8]) {
-    assert_names_match_features(
-        features,
-        kernel,
-        TEST_KERNEL,
-        &ENTRY_LABELS,
-        "labels `arch::syscall` puts inside `syscall_entry`",
-        "They bound what `nmi_gate` holds and counts, and belong to a kernel built with \
-         `boot-actuators`.",
-    );
-}
-
 /// `arch::syscall::syscall_entry`'s v0-mangled path, less the crate
 /// disambiguator that stands in front of it.
 const SYSCALL_ENTRY_SYMBOL: &str = "6kernel4arch6x86_647syscall13syscall_entry";
@@ -1631,28 +1563,15 @@ fn entry_window(entry: &[u8]) -> Result<Result<(), &[u8]>, String> {
 /// Refuse to write a shipping image whose `syscall_entry` does anything between
 /// saving the user's `rsp` and switching to the kernel's.
 ///
-/// The instructions, not their names: [`assert_entry_labels_match_features`]
-/// closes the two spellings `window_hold!` uses, and a hold respelled through
-/// local labels passes it with the whole spin in the entry. Read at the entry's
-/// own symbol, the shipping kernel's first three instructions are `cld`, the
-/// save and the switch, with nothing between. Both directions, for
-/// [`assert_names_match_features`]'s reason: the test kernel's entry has to
-/// have something between them, which is what says this can tell.
+/// Read at the entry's own symbol, the shipping kernel's first three
+/// instructions are `cld`, the save and the switch, with nothing between.
 fn judge_entry_window(features: &str, kernel: &[u8]) -> Result<(), String> {
-    let want_hold = match features {
-        "" => false,
-        f if f == TEST_KERNEL.join(",") => true,
-        _ => return Ok(()),
-    };
-    match (entry_window(syscall_entry_bytes(kernel)?)?, want_hold) {
-        (Ok(()), false) | (Err(_), true) => Ok(()),
-        (Ok(()), true) => Err(format!(
-            "the {} kernel's `syscall_entry` switches to the kernel's `rsp` in the instruction \
-             after it saves the user's, so `nmi_gate`'s hold is not in it and every test that \
-             arranges an arrival inside the window arranges nothing.",
-            TEST_KERNEL.join(","),
-        )),
-        (Err(between), false) => Err(format!(
+    if !features.is_empty() {
+        return Ok(());
+    }
+    match entry_window(syscall_entry_bytes(kernel)?)? {
+        Ok(()) => Ok(()),
+        Err(between) => Err(format!(
             "the shipping kernel's `syscall_entry` does not switch to the kernel's `rsp` in the \
              instruction after it saves the user's; between them stand {between:02x?}.\nEvery \
              instruction there runs at CPL 0 on a user's stack, and an image that ships must \
@@ -1670,10 +1589,10 @@ fn assert_entry_window_matches_features(features: &str, kernel: &[u8]) {
 /// The scheduler core's `feature = "check"` instruments, by their own text, and
 /// the two kernels that must disagree about carrying them.
 ///
-/// Every one of these is a `#[cfg(feature = "check")]` site in `toyos-sched`.
+/// Every one of these is a `#[cfg(feature = "sched-check")]` site in `kernel::sched`.
 /// Two are asserts from `invariants::check_cpu` — invariant T's armed-timer
 /// bound and the container-versus-state-word agreement. The third is the
-/// pass-cost report (`cpu::PassCostReport::PREFIX`), which is a *measurement*
+/// pass-cost report, which is a *measurement*
 /// and not an assert: a pass's elapsed time includes any interval a hypervisor
 /// took the CPU away, so it is recorded rather than panicked over. Their format
 /// strings are the only part of the check build with a literal the linker keeps,
@@ -1693,11 +1612,8 @@ const SCHED_CHECK_LITERALS: [&str; 3] = [
 /// about the artifact, so the artifact is what is asked, and a convention
 /// nothing enforces is not a bar.
 ///
-/// This is the half of the check-build gate that a booted guest cannot supply.
-/// A guest proves the asserts did not *fire* and the report was published; a
-/// kernel with the feature quietly dropped proves the first of those too, and
-/// rather more easily. Measured on the two binaries this build produces: 0 of 3
-/// in the shipping kernel, 3 of 3 in the `sched-check` one.
+/// Measured on the two binaries this build produces: 0 of 3 in the shipping
+/// kernel, 3 of 3 in the `sched-check` one.
 fn assert_sched_check_matches_features(features: &str, kernel: &[u8]) {
     assert_names_match_features(
         features,
@@ -1705,9 +1621,8 @@ fn assert_sched_check_matches_features(features: &str, kernel: &[u8]) {
         SCHED_CHECK_KERNEL,
         &SCHED_CHECK_LITERALS,
         "scheduler check instruments",
-        "`sched-check` forwards to `toyos-sched/check`, so a build that carries the feature and \
-         not the instruments is a check build in name only — which is what a green \
-         `sched_check_build` would then be certifying.",
+        "`sched-check` compiles the scheduler core's instruments in, so a build that carries the \
+         feature and not the instruments is a check build in name only.",
     );
 }
 
@@ -1746,7 +1661,6 @@ fn stage_and_certify_kernel(root: &Path, features: &str, env: &GuestEnv, arch: A
     match arch {
         Arch::X86_64 => {
             assert_entry_window_matches_features(features, &bytes);
-            assert_entry_labels_match_features(features, &bytes);
         }
         // Taking an exception to EL1 sets `PSTATE.SP`, so its handler's first
         // instruction already runs on `SP_EL1`: no instruction runs at EL1 on a
@@ -1759,12 +1673,7 @@ fn stage_and_certify_kernel(root: &Path, features: &str, env: &GuestEnv, arch: A
 }
 
 /// Full build: kernel, bootloader, all programs, boot image. Returns the image.
-pub fn build(
-    root: &Path,
-    boot: Boot,
-    rebuild_toolchain: bool,
-    plan: &Plan,
-) -> PathBuf {
+pub fn build(root: &Path, boot: Boot, plan: &Plan) -> PathBuf {
     // Every lock below is `build_test_image`'s own, and the flags it cannot
     // combine with were refused before any of them.
     if boot.case {
@@ -1775,7 +1684,7 @@ pub fn build(
         return image_path;
     }
 
-    let (kernel_bytes, bl_bytes, root_bytes) = shipped_parts(root, &boot, rebuild_toolchain, plan);
+    let (kernel_bytes, bl_bytes, root_bytes) = shipped_parts(root, &boot, plan);
     let key = said_key(plan);
     // A machine this image is flashed onto updates itself, so it carries
     // the second slot an update is written to, with room for a ROOT twice
@@ -1804,9 +1713,9 @@ pub fn build(
 /// The image `ssh <machine> update` takes, of the boot `boot` names, written
 /// to `out`: the same kernel, parameter and ROOT [`build`] would put in a
 /// slot, signed with this run's key at the plan's version.
-pub fn build_update(root: &Path, boot: &Boot, rebuild_toolchain: bool, plan: &Plan, out: &Path) {
+pub fn build_update(root: &Path, boot: &Boot, plan: &Plan, out: &Path) {
     assert!(!boot.case, "an update image is built from a mode's config, and a case's image is a test's");
-    let (kernel_bytes, _, root_bytes) = shipped_parts(root, boot, rebuild_toolchain, plan);
+    let (kernel_bytes, _, root_bytes) = shipped_parts(root, boot, plan);
     let key = said_key(plan);
     let bytes = image::update_image(
         &kernel_bytes,
@@ -1820,7 +1729,7 @@ pub fn build_update(root: &Path, boot: &Boot, rebuild_toolchain: bool, plan: &Pl
 /// This run's key, said with whose it is and the version it signs.
 fn said_key(plan: &Plan) -> &'static crate::signing::Key {
     let key = crate::signing::key();
-    println!(
+    eprintln!(
         "Signed with {} {} at version {}",
         match key.whose() {
             crate::signing::Whose::Owner(_) => "the owner's key",
@@ -1833,19 +1742,17 @@ fn said_key(plan: &Plan) -> &'static crate::signing::Key {
 }
 
 /// The kernel, the loader and ROOT a mode's image is made of.
-fn shipped_parts(root: &Path, boot: &Boot, rebuild_toolchain: bool, plan: &Plan) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+fn shipped_parts(root: &Path, boot: &Boot, plan: &Plan) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     let kernel_features = plan.features.join(",");
     let arch = plan.arch;
 
     // Held until the last staged artifact has been read back, so no clean of
     // this worktree's crate targets can land inside this build.
     let mut lock = buildlock::shared(root, "build");
-    let sysroot = toolchain::ensure(root, rebuild_toolchain, &mut lock);
-
-    let env = GuestEnv::new(&sysroot);
     let config = parse_config(&boot.config);
+    let env = GuestEnv::new(toolchain::ensure(root, &mut lock, config.hosted_rustc));
 
-    invalidate_stale(root, &mut lock, &env.toolchain, &config_targets(root, &config));
+    invalidate_stale(root, &mut lock, &env.sysroot.identity, &config_targets(root, &config));
 
     // Same lock-and-stage as `build_test_image`: `cargo run --build-only` and
     // `cargo test` share these paths, so this races the harness too. The kernel
@@ -1853,21 +1760,18 @@ fn shipped_parts(root: &Path, boot: &Boot, rebuild_toolchain: bool, plan: &Plan)
     // path uses, so neither can grow an assertion the other lacks.
     let (kernel_bytes, bl_art) = {
         let _artifact = buildlock::artifact(root);
-        let kernel_handle = {
-            let root = root.to_path_buf();
-            let env = env.clone();
-            let features = kernel_features.clone();
-            std::thread::spawn(move || {
+        std::thread::scope(|threads| {
+            let kernel = threads.spawn(|| {
                 let mut extra = Vec::new();
-                if !features.is_empty() {
+                if !kernel_features.is_empty() {
                     extra.push("--features");
-                    extra.push(&features);
+                    extra.push(&kernel_features);
                 }
                 cargo_build(&root.join("kernel"), arch.kernel(), &extra, &env, &[], false);
-            })
-        };
-        cargo_build(&root.join("bootloader"), arch.loader(), &[], &env, &[], false);
-        kernel_handle.join().expect("kernel build thread panicked");
+            });
+            cargo_build(&root.join("bootloader"), arch.loader(), &[], &env, &[], false);
+            kernel.join().expect("kernel build thread panicked");
+        });
         (
             stage_and_certify_kernel(root, &kernel_features, &env, arch),
             stage_loader(root, arch, &env),
@@ -1926,7 +1830,7 @@ pub fn designate_for_format(path: &Path, len: u64) {
 /// run asks cargo again.
 ///
 /// Per part rather than per image, because a part is what a key can be true of:
-/// the kernel is its feature set, the bootloader is its init list, the ROOT image is
+/// the kernel is its feature set, the ROOT image is
 /// its config and the caller's extra files. That is the same split
 /// [`stage_artifact`] already writes into the artifact names, and it is what
 /// makes this affordable — a full run boots a handful of kernels, and builds
@@ -1989,8 +1893,7 @@ fn root_image_key(plan: &Plan, image_key: &str, extra_files: &[(String, Vec<u8>)
 ///
 /// The image itself is never memoized, only the three parts it is made of:
 /// [`image::create_boot_image`] mints a fresh partition GUID per call and writes
-/// it into both the GPT and the ESP, and a boot that did not get its own is a
-/// boot `log_partition_identity` is entitled to catch.
+/// it into both the GPT and the ESP.
 pub fn build_test_image(
     root: &Path,
     plan: &Plan,
@@ -2006,18 +1909,6 @@ pub fn build_test_image(
         &plan.params.join(","),
         image::Signing { key: crate::signing::key(), version: plan.version },
         plan.second,
-    )
-}
-
-/// The image `ssh … update` takes, built from a plan as a test image is and
-/// signed with this process's key at the plan's version.
-pub fn build_update_image(root: &Path, plan: &Plan, quiet: bool, extra_files: &[(String, Vec<u8>)]) -> Vec<u8> {
-    let parts = build_test_parts(root, plan, quiet, extra_files);
-    image::update_image(
-        &parts.kernel,
-        &parts.root,
-        &plan.params.join(","),
-        image::Signing { key: crate::signing::key(), version: plan.version },
     )
 }
 
@@ -2059,9 +1950,8 @@ pub fn build_test_parts(
 
     // Nothing left to build, so nothing for the lock, the toolchain check or the
     // staleness sweep to protect.
-    if let (Some(kernel), Some(bootloader), Some(root)) =
-        (KERNEL.get(kernel_key), BOOTLOADER.get(bl_key), ROOT_IMAGE.get(root_image_key))
-    {
+    let memo = (KERNEL.get(kernel_key), BOOTLOADER.get(bl_key), ROOT_IMAGE.get(root_image_key));
+    if let (Some(kernel), Some(bootloader), Some(root)) = memo {
         return Parts { kernel, bootloader, root };
     }
 
@@ -2069,16 +1959,23 @@ pub fn build_test_parts(
     // to be first on this shard. Keep it on a separate clock until all missing
     // memo parts have been constructed. The fresh per-boot image below remains
     // outside the charge because every execution needs one.
-    let build_timer = ArtifactBuildTimer::start();
+    let missing = [
+        memo.0.is_none().then(|| format!("kernel {features}").trim_end().to_string()),
+        memo.1.is_none().then(|| "loader".to_string()),
+        memo.2.is_none().then(|| {
+            format!("ROOT of {}", hostws::rel(root, config_path.parent().unwrap_or(config_path)))
+        }),
+    ];
+    let missing: Vec<String> = missing.into_iter().flatten().collect();
+    let building = Building::start(format!("{} {}", arch.name(), missing.join(", ")));
 
     // Held to the end of the function: the staged artifacts below are read
     // back after the userland build, and a clean landing in between is the
     // same defect as one landing mid-compile.
     let mut lock = buildlock::shared(root, "test image");
-    let sysroot = crate::toolchain::ensure(root, false, &mut lock);
-    let env = GuestEnv::new(&sysroot);
+    let env = GuestEnv::new(toolchain::ensure(root, &mut lock, config.hosted_rustc));
 
-    invalidate_stale(root, &mut lock, &env.toolchain, &config_targets(root, &config));
+    invalidate_stale(root, &mut lock, &env.sysroot.identity, &config_targets(root, &config));
 
     // Build and stage under one lock, released before `build_and_assemble`.
     // Releasing it there is deliberate and required: that build takes its own
@@ -2108,7 +2005,7 @@ pub fn build_test_parts(
         build_and_assemble(root, &config, &env, extra_files, quiet, arch)
     });
 
-    drop(build_timer);
+    drop(building);
 
     Parts { kernel: kernel_bytes, bootloader: bl_bytes, root: root_bytes }
 }
@@ -2117,11 +2014,12 @@ pub fn build_test_parts(
 /// test: a judge's price is its exchange and not a compile.
 ///
 /// Each of these keeps its own `Cargo.lock` and is excluded from the host
-/// workspace with `tests/`. That is what makes them possible: they exist to be
+/// workspace. That is what makes them possible: they exist to be
 /// a *second* implementation, and a second implementation's dependency graph is
 /// not the harness's to resolve.
 pub fn build_host_judges(root: &Path, quiet: bool) {
     for (dir, _) in HOST_JUDGES {
+        let _building = Building::start(format!("the host's {dir}"));
         let at = root.join(dir);
         let mut cmd = Command::new("cargo");
         cmd.args(["build", "--release"]);
@@ -2144,19 +2042,9 @@ pub fn build_host_judges(root: &Path, quiet: bool) {
 /// silently repoint every accessor below.
 type Judge = (&'static str, &'static str);
 
-const HTTPS_SERVER: Judge = ("tests/https-server-host", "https_test_server");
-const HTTPS_FETCH: Judge = ("tests/https-fetch-host", "https_fetch");
 const SSH_CLIENT: Judge = ("tests/ssh-client-host", "toyos_ssh");
 
-const HOST_JUDGES: [Judge; 3] = [HTTPS_SERVER, HTTPS_FETCH, SSH_CLIENT];
-
-pub fn https_test_server(root: &Path) -> PathBuf {
-    host_judge(root, HTTPS_SERVER)
-}
-
-pub fn https_fetch_host(root: &Path) -> PathBuf {
-    host_judge(root, HTTPS_FETCH)
-}
+const HOST_JUDGES: [Judge; 1] = [SSH_CLIENT];
 
 /// Copy to `to` the binary the build leaves for userland workspace program
 /// `name`: the bytes a swap sends a running machine in place of the ones its
@@ -2170,7 +2058,7 @@ pub fn copy_guest_program(root: &Path, arch: Arch, name: &str, to: &Path) -> Res
 }
 
 /// The harness's SSH client — the only thing in this tree that speaks the
-/// protocol from the other side of `userland/sshd`.
+/// protocol from the other side of `userland/sshserver`.
 pub fn ssh_client_host(root: &Path) -> PathBuf {
     host_judge(root, SSH_CLIENT)
 }
@@ -2188,11 +2076,7 @@ fn host_judge(root: &Path, (dir, bin): Judge) -> PathBuf {
 /// nothing in the tree can produce any more — into the ROOT image, into the test list,
 /// and over the name of whatever gets it next.
 pub fn build_toyos_bins(root: &Path, arch: Arch, crate_path: &Path, quiet: bool) -> Vec<(String, Vec<u8>)> {
-    let target = arch.userland();
-    let mut lock = buildlock::shared(root, "test binaries");
-    let sysroot = crate::toolchain::ensure(root, false, &mut lock);
-    let env = GuestEnv::new(&sysroot);
-
+    let _building = Building::start(format!("{} binaries of {}", arch.name(), hostws::rel(root, crate_path)));
     let mut targets = vec![(crate_path.to_path_buf(), Clean::All)];
     for entry in fs::read_dir(crate_path).into_iter().flatten().flatten() {
         let sub_path = entry.path();
@@ -2200,17 +2084,11 @@ pub fn build_toyos_bins(root: &Path, arch: Arch, crate_path: &Path, quiet: bool)
             targets.push((sub_path, Clean::All));
         }
     }
-    invalidate_stale(root, &mut lock, &env.toolchain, &targets);
+    let build = TestBuild::begin(root, arch, "test binaries", &targets);
+
+    let (target, env) = (build.target, &build.env);
 
     let mut results = Vec::new();
-
-    // Every build→read pair below is under one hold, for the reason the
-    // "Artifact staging" section above gives: cargo keys an artifact path on
-    // (crate, target, profile), so a second `cargo test` in this tree writes the
-    // very `.so` and test binaries this one reads back. Between the `read_dir`
-    // and the `read` that was enough to kill a run outright — four concurrent
-    // suites, one dead on `Result::unwrap()` on a `NotFound` naming no file.
-    let _artifact = buildlock::artifact(root);
 
     // Build cdylib subcrates first
     let mut lib_search_dirs = Vec::new();
@@ -2233,7 +2111,7 @@ pub fn build_toyos_bins(root: &Path, arch: Arch, crate_path: &Path, quiet: bool)
         if !quiet {
             eprintln!("[build] Building cdylib subcrate: {lib_name}");
         }
-        cargo_build(&sub_path, target, &[], &env, &[], quiet);
+        cargo_build(&sub_path, target, &[], env, &[], quiet);
 
         let lib_out = sub_path.join(format!("target/{target}/{PROFILE}"));
         lib_search_dirs.push(lib_out.clone());
@@ -2260,7 +2138,7 @@ pub fn build_toyos_bins(root: &Path, arch: Arch, crate_path: &Path, quiet: bool)
     } else {
         vec![("RUSTFLAGS", link_flags.trim_end())]
     };
-    cargo_build(crate_path, target, &["--bins"], &env, &extra_env, quiet);
+    cargo_build(crate_path, target, &["--bins"], env, &extra_env, quiet);
 
     let bin_dir = crate_path.join(format!("target/{target}/{PROFILE}"));
     let bin_src = crate_path.join("src/bin");
@@ -2284,6 +2162,42 @@ pub fn build_toyos_bins(root: &Path, arch: Arch, crate_path: &Path, quiet: bool)
     }
 
     results
+}
+
+/// What building test binaries starts from, held until the read of what was built is done.
+///
+/// Every build→read pair is under one hold, for the reason the "Artifact
+/// staging" section above gives: cargo keys an artifact path on (crate, target,
+/// profile), so a second `cargo test` in this tree writes the very `.so` and
+/// test binaries this one reads back. Between the `read_dir` and the `read`
+/// that was enough to kill a run outright — four concurrent suites, one dead on
+/// `Result::unwrap()` on a `NotFound` naming no file.
+struct TestBuild {
+    target: &'static str,
+    env: GuestEnv,
+    _lock: buildlock::Held,
+    _artifact: buildlock::Guard,
+}
+
+impl TestBuild {
+    fn begin(root: &Path, arch: Arch, what: &str, stale_targets: &[(PathBuf, Clean)]) -> Self {
+        let mut lock = buildlock::shared(root, what);
+        let env = GuestEnv::new(toolchain::ensure(root, &mut lock, false));
+        invalidate_stale(root, &mut lock, &env.sysroot.identity, stale_targets);
+        let artifact = buildlock::artifact(root);
+        TestBuild { target: arch.userland(), env, _lock: lock, _artifact: artifact }
+    }
+}
+
+/// The one binary `name` of the crate at `crate_path`, built for `arch`: for an
+/// architecture the crate's other binaries do not all build for.
+pub fn build_toyos_bin(root: &Path, arch: Arch, crate_path: &Path, name: &str, quiet: bool) -> Vec<u8> {
+    let _building = Building::start(format!("{} {name} of {}", arch.name(), hostws::rel(root, crate_path)));
+    let build = TestBuild::begin(root, arch, "a test binary", &[(crate_path.to_path_buf(), Clean::All)]);
+    let (target, env) = (build.target, &build.env);
+    cargo_build(crate_path, target, &["--bin", name], env, &[], quiet);
+    let binary = crate_path.join(format!("target/{target}/{PROFILE}/{name}"));
+    fs::read(&binary).unwrap_or_else(|e| panic!("read the test binary {}: {e}", binary.display()))
 }
 
 // --- Internal helpers ---
@@ -2353,15 +2267,15 @@ fn collect_hosted_rustc(root: &Path, toolchain: &Path, root_files: &mut Vec<(Str
 mod tests {
     use super::*;
 
-    /// `console` is reached by `console/system.toml` alone and `init` by no
-    /// `[programs]` row, so a reader that drops a mode or init loses one.
+    /// `console` is reached by `console/system.toml` alone and the supervisor by no
+    /// `[programs]` row, so a reader that drops a mode or the supervisor loses one.
     #[test]
-    fn every_modes_crates_and_init_ship() {
+    fn every_modes_crates_and_the_supervisor_ship() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let shipped = shipped(root).expect("the modes' configs");
         for (dir, features) in [
             ("userland/console", Features::Default),
-            ("userland/init", Features::Default),
+            ("userland/supervisor", Features::Default),
             ("kernel", Features::AnyDeclared),
             ("bootloader", Features::Default),
         ] {
@@ -2371,6 +2285,9 @@ mod tests {
                 shipped.crates
             );
         }
+        let (kernel, loader) = (root.join("kernel"), root.join("bootloader"));
+        let programs = shipped.crates.iter().filter(|(dir, _)| *dir != kernel && *dir != loader);
+        assert_eq!(shipped.programs, programs.cloned().collect());
     }
 
     /// **A standalone crate's clean takes all its guest build wrote — the
@@ -2390,13 +2307,98 @@ mod tests {
             Arch::ALL.iter().map(|arch| file(&format!("target/{}/{PROFILE}/ld", arch.userland()))).collect();
         guest.push(file(&format!("target/{PROFILE}/deps/libsyn-1.rlib")));
         let host = file("target/debug/toyos-build");
+        let identity = Identity::of_parts("compiler", "freestanding", "toyos");
 
-        clean(&root, &root.join("ld"), Clean::ToyosOnly, "fingerprint");
+        clean(&root, &root.join("ld"), Clean::ToyosOnly, &Stale::All, &identity);
         for gone in &guest {
             assert!(!gone.exists(), "{} survived a clean of what the guest build wrote", gone.display());
         }
         assert!(host.is_file(), "the host workspace's own build went");
-        assert_eq!(fs::read_to_string(root.join("target/.deps-stamp")).unwrap(), "fingerprint");
+        assert_eq!(fs::read_to_string(root.join("target/.deps-stamp")).unwrap(), identity.to_string());
+    }
+
+    /// **Moved libraries take what was built for their targets, and nothing
+    /// else**: an ABI edit moves the userland targets' libraries, so the
+    /// kernel's and the loader's target directories stay whole and of
+    /// userland's only `target/<userland triple>` goes; a fork edit moves every
+    /// target's, so the kernel's and the loader's builds go too. The host half
+    /// the same compiler built stays either way. A moved compiler, or a stamp
+    /// that names none, is all of it.
+    #[test]
+    fn moved_libraries_take_what_was_built_for_them_and_a_moved_compiler_all() {
+        let root = toyos_tmpdir::TempDir::new("moved-libraries");
+        fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
+        let file = |path: PathBuf| {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, "built").unwrap();
+            path
+        };
+        let (kernel, loader, userland) = (root.join("kernel"), root.join("bootloader"), root.join("userland"));
+        let crates = [&kernel, &loader, &userland];
+        let kernels = Arch::ALL.map(|arch| file(kernel.join(format!("target/{}/{PROFILE}/kernel", arch.kernel()))));
+        let loaders = Arch::ALL.map(|arch| file(loader.join(format!("target/{}/{PROFILE}/loader.efi", arch.loader()))));
+        let programs = Arch::ALL.map(|arch| file(userland.join(format!("target/{}/{PROFILE}/supervisor", arch.userland()))));
+        let hosts = crates.map(|dir| file(dir.join(format!("target/{PROFILE}/deps/libproc-1.dylib"))));
+
+        let before = Identity::of_parts("compiler", "freestanding", "toyos");
+        for dir in crates {
+            fs::write(dir.join("target/.deps-stamp"), before.to_string()).unwrap();
+            assert_eq!(stale(&root, dir, &before), None, "{} was stale against its own stamp", dir.display());
+        }
+        let moved = |identity: &Identity, want: Vec<&'static str>| {
+            for dir in crates {
+                let found = stale(&root, dir, identity);
+                assert_eq!(found, Some(Stale::Targets(want.clone())), "{}", dir.display());
+                clean(&root, dir, Clean::All, &found.unwrap(), identity);
+                assert_eq!(stale(&root, dir, identity), None, "{} was not stamped", dir.display());
+            }
+        };
+
+        let mut toyos: Vec<&'static str> = Arch::ALL.map(Arch::userland).into();
+        toyos.sort();
+        moved(&Identity::of_parts("compiler", "freestanding", "toyos, edited"), toyos);
+        for kept in kernels.iter().chain(&loaders).chain(&hosts) {
+            assert!(kept.is_file(), "{} went, and nothing it was built from moved", kept.display());
+        }
+        for gone in &programs {
+            assert!(!gone.exists(), "{} survived its target's libraries moving", gone.display());
+        }
+
+        let mut all: Vec<&'static str> = Arch::ALL.into_iter().flat_map(|arch| [arch.userland(), arch.kernel(), arch.loader()]).collect();
+        all.sort();
+        let fork_edit = Identity::of_parts("compiler", "freestanding, edited", "toyos on the edited fork");
+        moved(&fork_edit, all);
+        for gone in kernels.iter().chain(&loaders) {
+            assert!(!gone.exists(), "{} survived its target's libraries moving", gone.display());
+        }
+        for kept in &hosts {
+            assert!(kept.is_file(), "{} went, and the compiler that built it did not move", kept.display());
+        }
+
+        let compiler = Identity::of_parts("another compiler", "freestanding, edited", "toyos on the edited fork");
+        assert_eq!(stale(&root, &kernel, &compiler), Some(Stale::All), "a moved compiler kept the host half");
+        fs::write(userland.join("target/.deps-stamp"), "sysroot:/a/stamp/naming/no/compiler").unwrap();
+        assert_eq!(stale(&root, &userland, &fork_edit), Some(Stale::All), "a stamp naming no compiler was trusted");
+    }
+
+    /// **A stamp that cannot be written stops the build**: one left behind would
+    /// call what the clean took current, or owe a clean every build after.
+    #[test]
+    fn a_stamp_that_cannot_be_written_panics() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = toyos_tmpdir::TempDir::new("unwritable-stamp");
+        fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
+        let target = root.join("kernel/target");
+        fs::create_dir_all(&target).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o555)).unwrap();
+        let identity = Identity::of_parts("compiler", "freestanding", "toyos");
+        let failed = std::panic::catch_unwind(|| {
+            clean(&root, &root.join("kernel"), Clean::All, &Stale::Targets(vec![]), &identity)
+        });
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+        let refusal = failed.expect_err("a stamp that was not written was taken for written");
+        let refusal = refusal.downcast_ref::<String>().expect("a formatted panic");
+        assert!(refusal.starts_with(&format!("write {}", target.join(".deps-stamp").display())), "{refusal}");
     }
 
     /// **A `cargo clean` that fails stops the build and stamps nothing**: a
@@ -2410,7 +2412,8 @@ mod tests {
         fs::create_dir_all(kernel.join("target")).unwrap();
         fs::write(kernel.join("Cargo.toml"), "[package\n").unwrap();
 
-        let failed = std::panic::catch_unwind(|| clean(&root, &kernel, Clean::All, "fingerprint"));
+        let identity = Identity::of_parts("compiler", "freestanding", "toyos");
+        let failed = std::panic::catch_unwind(|| clean(&root, &kernel, Clean::All, &Stale::All, &identity));
         let refusal = failed.expect_err("a cargo clean that failed was taken for one that ran");
         let refusal = refusal.downcast_ref::<String>().expect("a formatted panic");
         assert!(refusal.starts_with(&format!("cargo clean in {} exited", kernel.display())), "{refusal}");
@@ -2489,7 +2492,7 @@ mod tests {
         assert!(harness_kernel_build_is_declared(&debug, true));
         assert!(!harness_kernel_build_is_declared(&debug, false));
         assert!(!harness_kernel_build_is_declared(
-            "fpu-save-nothing,debug-wait",
+            "boot-actuators,test-actuators,debug-wait",
             true
         ));
         for suite_build in TEST_SUITE_KERNEL_BUILDS {
@@ -2603,208 +2606,198 @@ mod tests {
         );
     }
 
+    /// Every kernel feature that is a kernel build of its own, each beside what
+    /// earned it one. Every other feature the kernel declares is a control a row
+    /// of `crate::ci::CONTROLS` runs, or one of [`KERNEL_CARRIES`].
+    const KERNEL_BUILDS: &[&str] = &[
+        "boot-actuators",
+        "debug-wait",
+        // Does this kernel reach a pass, a trap or a syscall with the
+        // direction flag set. No gate clears `DF` and
+        // `compiler_builtins::mem::memmove` sets it across three `rep`
+        // string operations, so before `arch::entry`'s `cld` it could be
+        // — and every `rep movs`/`rep stos` after that writes backwards.
+        // Its own build: a `pushfq` and a test on three hot paths, and
+        // the negative control for that `cld` in both directions.
+        "df-witness",
+        // Its control: a `std` one instruction before the reader that
+        // must refuse it. The witness fired zero times on an unclean
+        // kernel, which is a fact about where the flag reaches and would
+        // be indistinguishable from a broken reader without this.
+        "df-witness-mutate",
+        // The kernel this tree had before `arch::entry`'s `cld`: the
+        // instruction gone and `DF` back out of the `SYSCALL` mask, so a
+        // build carrying it inherits a set direction flag from whatever
+        // it interrupted. The negative control for that fix, and its own
+        // build because the defect is in a `naked_asm!` body on every
+        // ring transition, where a boot parameter would have to be a
+        // branch.
+        "entry-df-unclean",
+        // The two band shapes that separate the two readings
+        // `heap-tripwire`'s own result left standing — the bands absorb
+        // a bounded overrun, or they displace every allocation and the
+        // victim moved. No band can be zero-width and keep its
+        // placement, because the padding *is* the displacement, so the
+        // separation is per side: `notail` leaves the slack past a
+        // payload byte-for-byte what an unbanded build has, `nohead`
+        // puts the payload at the bottom of its own chunk. They are one
+        // experiment in two arms and refuse to build together.
+        "heap-band-nohead",
+        "heap-band-notail",
+        // The sweep's lock hold without the sweep. `heap-sweep` and
+        // `sched-tripwire` both multiply this class and both spend time
+        // on the pass path; only the sweep also holds `dlmalloc`'s lock
+        // while it does. This arm and `pass-spin` below spend one
+        // `HOLD_NS` with and without that lock, which is the one
+        // variable nobody has varied.
+        "heap-lockspin",
+        // The sweep that reads every live band rather than only the
+        // ones a `dealloc` reaches. Its own build for `heap-tripwire`'s
+        // reason twice over: the walk takes `dlmalloc`'s lock on the
+        // pass path, which nothing shipping may do.
+        "heap-sweep",
+        // `sched-tripwire`'s twin one layer down: a band of known bytes
+        // on each side of every heap allocation, read back at `dealloc`
+        // and — for the running task's kernel stack — at every pass. It
+        // earns a build of its own because the bands change what
+        // `GlobalAlloc::alloc` returns, which no boot parameter can
+        // reach: an allocation minted under one arm and freed under the
+        // other is a miscomputed base address. No suite builds it, so a
+        // full run pays nothing and a boot storm asks for it by name.
+        "heap-tripwire",
+        "mask-windows",
+        // `heap-lockspin`'s other arm: the same visit to the pass path,
+        // for the same span, without the allocator's lock.
+        "pass-spin",
+        "sched-check",
+        // The stray-write tripwire on the per-CPU `CpuSched` record: a
+        // byte shadow taken and compared at both ends of the driver's
+        // exclusive region, plus a walk of its three containers. It
+        // earns a build of its own because what it watches cannot be
+        // reached from a boot parameter — the shadow's subject is a
+        // whole record and the walk's is a container, and both are
+        // decided at compile time by a cargo feature, the same wall
+        // `sched-check` is behind. No suite builds it: it is
+        // not in `TEST_SUITE_KERNEL_BUILDS`, so a full run pays nothing
+        // for it and a boot storm asks for it by name.
+        "sched-tripwire",
+        // The two comparisons that ask who else is standing on a task's
+        // kernel stack: the words a Ring 3 entry takes its stack from,
+        // against the running task's own top, at every pass; and the one
+        // driver field this class has been caught changing inside a
+        // single call. Its own build because both halves are readers on
+        // hot paths, so it has to be in both arms of any comparison.
+        "stack-witness",
+        // The one window this class has never measured: the eight words
+        // `context_switch` pops, copied at `check_switch_frame` and
+        // compared from inside the switch, one instruction before the
+        // first `pop`, against the stack pointer the machine is standing
+        // on. Its own build for `stack-witness`'s reason and one more —
+        // the compare is a `call`, so the frame has to have been proven
+        // to be inside a real stack, which is why it turns that feature
+        // on. Its two mutation controls sit beside it, each staging one
+        // arm of what it watches.
+        "switch-witness",
+        "switch-witness-mutate-frame",
+        "switch-witness-mutate-rsp",
+        "test-actuators",
+    ];
+
+    /// Features of a host workspace member that choose a build's world rather
+    /// than revert a decision: loom's atomics, a crate's `std` and its default
+    /// set, the toolchain's `core` and `rustc-dep-of-std`, libc's `std-runtime`,
+    /// the signer's `sign`, and `flaws`, which compiles what a simulator's
+    /// negative gates select at run time.
+    const NOT_A_CONTROL: &[&str] = &[
+        "core",
+        "default",
+        "flaws",
+        "loom",
+        "rustc-dep-of-std",
+        "sign",
+        "std",
+        "std-runtime",
+    ];
+
     /// The features a kernel build may still carry, and the whole list.
     ///
-    /// **The gate on the count.** Each name here is a kernel `cargo test` may
-    /// build beside the two, so adding one is a decision to pay the ~6.9 s of
-    /// wall clock and ~29.6 s of CPU measured for one extra kernel build per
-    /// full run after any kernel edit — and `boot-actuators` exists so that
-    /// the answer is almost always a parameter instead.
+    /// **The gate on the count.** Each name in [`KERNEL_BUILDS`] is a kernel
+    /// `cargo test` may build beside the two, so adding one is a decision to pay
+    /// the ~6.9 s of wall clock and ~29.6 s of CPU measured for one extra kernel
+    /// build per full run after any kernel edit — and `boot-actuators` exists so
+    /// that the answer is almost always a parameter instead.
     #[test]
     fn the_kernel_declares_only_the_builds_that_earned_one() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let mut declared = declared_kernel_features(root);
-        declared.sort();
+        let controls: BTreeSet<&str> = crate::ci::CONTROLS.iter().map(|c| c.feature).collect();
+        let mut builds: Vec<String> = declared_kernel_features(root)
+            .into_iter()
+            .filter(|f| !controls.contains(f.as_str()) && !KERNEL_CARRIES.contains(&f.as_str()))
+            .collect();
+        builds.sort();
         assert_eq!(
-            declared,
-            [
-                "boot-actuators",
-                "debug-wait",
-                // Costs no kernel build, for `wake-fence-off`'s reason: only
-                // `kernel-loom` turns it on, and `device_irq` must red under it.
-                "device-irq-lossy",
-                // Does this kernel reach a pass, a trap or a syscall with the
-                // direction flag set. No gate clears `DF` and
-                // `compiler_builtins::mem::memmove` sets it across three `rep`
-                // string operations, so before `arch::entry`'s `cld` it could be
-                // — and every `rep movs`/`rep stos` after that writes backwards.
-                // Its own build: a `pushfq` and a test on three hot paths, and
-                // the negative control for that `cld` in both directions.
-                "df-witness",
-                // Its control: a `std` one instruction before the reader that
-                // must refuse it. The witness fired zero times on an unclean
-                // kernel, which is a fact about where the flag reaches and would
-                // be indistinguishable from a broken reader without this.
-                "df-witness-mutate",
-                // Costs no kernel build, for `wake-fence-off`'s reason: only
-                // `kernel-loom` turns it on, and `dump_request` must red under it.
-                "dump-report-relaxed",
-                // Costs no kernel build, for `wake-fence-off`'s reason: only
-                // `kernel-loom` turns it on, and `durability` must red under it.
-                "durability-settle-blind",
-                // The kernel this tree had before `arch::entry`'s `cld`: the
-                // instruction gone and `DF` back out of the `SYSCALL` mask, so a
-                // build carrying it inherits a set direction flag from whatever
-                // it interrupted. The negative control for that fix, and its own
-                // build for `fpu-save-nothing`'s reason — the defect is in a
-                // `naked_asm!` body on every ring transition, where a boot
-                // parameter would have to be a branch.
-                "entry-df-unclean",
-                "fpu-save-nothing",
-                // The two band shapes that separate the two readings
-                // `heap-tripwire`'s own result left standing — the bands absorb
-                // a bounded overrun, or they displace every allocation and the
-                // victim moved. No band can be zero-width and keep its
-                // placement, because the padding *is* the displacement, so the
-                // separation is per side: `notail` leaves the slack past a
-                // payload byte-for-byte what an unbanded build has, `nohead`
-                // puts the payload at the bottom of its own chunk. They are one
-                // experiment in two arms and refuse to build together.
-                "heap-band-nohead",
-                "heap-band-notail",
-                // The sweep's lock hold without the sweep. `heap-sweep` and
-                // `sched-tripwire` both multiply this class and both spend time
-                // on the pass path; only the sweep also holds `dlmalloc`'s lock
-                // while it does. This arm and `pass-spin` below spend one
-                // `HOLD_NS` with and without that lock, which is the one
-                // variable nobody has varied.
-                "heap-lockspin",
-                // The sweep that reads every live band rather than only the
-                // ones a `dealloc` reaches. Its own build for `heap-tripwire`'s
-                // reason twice over: the walk takes `dlmalloc`'s lock on the
-                // pass path, which nothing shipping may do.
-                "heap-sweep",
-                // `sched-tripwire`'s twin one layer down: a band of known bytes
-                // on each side of every heap allocation, read back at `dealloc`
-                // and — for the running task's kernel stack — at every pass. It
-                // earns a build of its own because the bands change what
-                // `GlobalAlloc::alloc` returns, which no boot parameter can
-                // reach: an allocation minted under one arm and freed under the
-                // other is a miscomputed base address. No suite builds it, so a
-                // full run pays nothing and a boot storm asks for it by name.
-                "heap-tripwire",
-                // The four below cost no kernel build at all, for
-                // `wake-fence-off`'s reason: each is declared only so `cfg`
-                // checking knows the name, and turned on only by
-                // `kernel-loom`, one at a time, to relax the single edge its
-                // named model rests on and prove that model reds without it.
-                "lock-acquire-off",
-                "log-commit-release-off",
-                "loom",
-                // `heap-lockspin`'s other arm: the same visit to the pass path,
-                // for the same span, without the allocator's lock.
-                "pass-spin",
-                // `wake-fence-off`'s twin, for a poll ring's one-shot answer:
-                // turned on only by `kernel-loom`, to split `inbox/once.rs`'s
-                // exchange and prove `poll_once` reds without it.
-                "poll-fire-load-store",
-                "reap-raise-relaxed",
-                // `smp_roster.rs`'s count relaxed; `smp_bringup.rs` reds.
-                "roster-commit-relaxed",
-                "sched-check",
-                // The stray-write tripwire on the per-CPU `CpuSched` record: a
-                // byte shadow taken and compared at both ends of the driver's
-                // exclusive region, plus a walk of its three containers. It
-                // earns a build of its own because what it watches cannot be
-                // reached from a boot parameter — the shadow's subject is a
-                // whole record and the walk's is a container, and both are
-                // decided at compile time by a dependency's cargo feature, the
-                // same wall `sched-check` is behind. No suite builds it: it is
-                // not in `TEST_SUITE_KERNEL_BUILDS`, so a full run pays nothing
-                // for it and a boot storm asks for it by name.
-                "sched-tripwire",
-                // Costs no kernel build, for `wake-fence-off`'s reason: turned on
-                // only by `kernel-loom`, to drop the panic console publisher's
-                // `Release` fence and prove `panic_console_publish` reds without it.
-                "seqlock-writer-fence-off",
-                // Costs no kernel build: turned on only by `kernel-loom`, to build
-                // the backend lock's `try_lock` with `then_some` and prove
-                // `serial_lock` reds.
-                "serial-try-lock-then-some",
-                "shard-publish-relaxed",
-                "shootdown-serve-relaxed",
-                // The eighth loom control, and the first over a *contended*
-                // acquire: `src/sleeplock.rs`'s two loads of `now` go
-                // `Relaxed` and `kernel-loom/tests/sleep_lock.rs` reds. Costs
-                // no kernel build, for the same reason as the six above it.
-                "sleeplock-acquire-off",
-                // `smp_roster.rs`'s second release store; `smp_bringup.rs` reds.
-                "smp-ready-split",
-                // The two comparisons that ask who else is standing on a task's
-                // kernel stack: the words a Ring 3 entry takes its stack from,
-                // against the running task's own top, at every pass; and the one
-                // driver field this class has been caught changing inside a
-                // single call. Its own build because both halves are readers on
-                // hot paths, so it has to be in both arms of any comparison.
-                "stack-witness",
-                // The one window this class has never measured: the eight words
-                // `context_switch` pops, copied at `check_switch_frame` and
-                // compared from inside the switch, one instruction before the
-                // first `pop`, against the stack pointer the machine is standing
-                // on. Its own build for `stack-witness`'s reason and one more —
-                // the compare is a `call`, so the frame has to have been proven
-                // to be inside a real stack, which is why it turns that feature
-                // on. Its two mutation controls sit beside it, each staging one
-                // arm of what it watches.
-                "switch-witness",
-                "switch-witness-mutate-frame",
-                "switch-witness-mutate-rsp",
-                "test-actuators",
-                // `FSGSBASE` back in `CR4`: `gsbase_locked`'s negative control.
-                "user-writable-gsbase",
-                // Costs no kernel build at all, for `loom`'s reason: declared
-                // so `cfg` checking knows the name, and turned on only by
-                // `kernel-loom` — to remove the log wake path's two `SeqCst`
-                // fences and prove `log_wake` reds without them.
-                "wake-fence-off",
-            ],
-            "the kernel declares a feature this list does not account for"
+            builds, KERNEL_BUILDS,
+            "the kernel declares a feature that is neither a build this list accounts for nor a \
+             control `src/ci.rs` runs"
         );
     }
 
-    /// Every negative control the model crates declare — every feature name
-    /// besides the structural ones they carry for other reasons.
+    /// The kernel depends on no libc (root `CLAUDE.md`, Dependencies), and its
+    /// `Cargo.lock` cannot show it: a lock records every platform's edges and
+    /// none of their `cfg`s.
+    #[test]
+    fn the_kernel_resolves_no_libc_for_either_target() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for arch in Arch::ALL {
+            let out = Command::new("cargo")
+                .args(["tree", "--locked", "--all-features", "-e", "normal,no-proc-macro"])
+                .args(["--prefix", "none", "--format", "{p}", "--target", arch.kernel()])
+                .arg("--manifest-path")
+                .arg(root.join("kernel/Cargo.toml"))
+                .output()
+                .expect("cargo tree failed to launch");
+            let tree = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                out.status.success() && tree.starts_with("kernel "),
+                "cargo tree --target {} exited {} and printed no kernel: {}",
+                arch.kernel(),
+                out.status,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(
+                !tree.lines().any(|package| package.starts_with("libc ")),
+                "the {} kernel resolves libc:\n{tree}",
+                arch.kernel()
+            );
+        }
+    }
+
+    /// Every negative control the tree declares: every feature of the kernel's
+    /// manifest but its builds and [`KERNEL_CARRIES`], and every feature of every
+    /// host workspace member's but [`NOT_A_CONTROL`].
     ///
-    /// **The list is the crates that hold a model of the kernel, not the crates
-    /// that use loom.** `kernel-loom` and `toyos-sched-loom` swap in loom's
-    /// instrumented atomics because their subjects are memory orderings;
-    /// `toyos-proclife`'s subject is which CPU takes the process table lock
-    /// next, and every decision in it is made under that lock. Both kinds are
-    /// a model with controls, and a control with no step behind it is the same
-    /// hole either way.
-    ///
-    /// **And `toyos-sched-sim` is one of them**: what a whole simulated machine
-    /// can show wrong is a policy rather than an ordering, so a control over one
-    /// lives there and would otherwise be the only kind this gate could not see.
-    ///
-    /// `loom` selects loom's instrumented atomics; `check`, `protocol-port`,
-    /// `tripwire` and `std` mirror `toyos-sched`'s own features so the shared
-    /// sources compile identically and name nothing a model turns on. Everything
-    /// else declared in any of these files is, by construction, a
-    /// `--features <name>` command that must red a named model — each file's own
-    /// comment beside the name carries the argument for why.
-    fn declared_model_controls(root: &Path) -> Vec<(&'static str, String)> {
-        const NOT_A_CONTROL: &[&str] =
-            &["loom", "check", "protocol-port", "tripwire", "std", "default"];
-        let mut out = Vec::new();
-        for (crate_name, manifest) in [
-            ("kernel-loom", "kernel-loom/Cargo.toml"),
-            ("toyos-sched-loom", "toyos-sched/loom/Cargo.toml"),
-            ("toyos-sched-sim", "toyos-sched/sim/Cargo.toml"),
-            ("toyos-proclife", "toyos-proclife/Cargo.toml"),
-            ("toyos-blockring", "toyos-blockring/Cargo.toml"),
-            ("toyos-transport", "toyos-transport/Cargo.toml"),
-        ] {
-            let path = root.join(manifest);
+    /// **Every manifest, and no list of the crates that hold a model.** A model
+    /// of memory orderings, of the process table's interleavings, of a simulated
+    /// machine's policy or of an allocator's isolation each declares its controls
+    /// beside its own decisions, and a list of those crates is one a new model
+    /// can be left off — its control then declared and run nowhere, silently.
+    /// Each file's own comment beside a name carries the argument for it.
+    fn declared_model_controls(root: &Path) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        for dir in std::iter::once(crate::ci::KERNEL.to_string()).chain(crate::hostws::members(root)) {
+            let path = root.join(&dir).join("Cargo.toml");
             let text = fs::read_to_string(&path)
                 .unwrap_or_else(|e| panic!("Failed to read {}: {e}", path.display()));
             let parsed: KernelManifest = toml::from_str(&text)
                 .unwrap_or_else(|e| panic!("Failed to parse {}: {e}", path.display()));
-            for name in parsed.features.into_keys() {
-                if !NOT_A_CONTROL.contains(&name.as_str()) {
-                    out.push((crate_name, name));
-                }
-            }
+            let skip: &[&[&str]] = if dir == crate::ci::KERNEL {
+                &[KERNEL_BUILDS, KERNEL_CARRIES]
+            } else {
+                &[NOT_A_CONTROL]
+            };
+            out.extend(
+                parsed.features.into_keys().filter(|name| !skip.iter().any(|s| s.contains(&name.as_str()))),
+            );
         }
         out
     }
@@ -2816,12 +2809,10 @@ mod tests {
     #[test]
     fn every_model_control_is_run() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let declared: BTreeSet<String> =
-            declared_model_controls(root).into_iter().map(|(_, name)| name).collect();
         let run: BTreeSet<String> =
             crate::ci::CONTROLS.iter().map(|c| c.feature.to_string()).collect();
         assert_eq!(
-            declared, run,
+            declared_model_controls(root), run,
             "a model's negative control is declared and not in src/ci.rs's CONTROLS, or a row \
              there names a feature no model crate declares"
         );
@@ -2863,22 +2854,22 @@ mod tests {
         assert_eq!(not_built_for(Arch::X86_64, "calc"), None, "x86-64 builds every program");
     }
 
-    /// No image this repository ships starts sshd.
+    /// No image this repository ships starts sshserver.
     ///
     /// It listens on every interface and authenticates against a file that is
     /// absent on a fresh install, so on a default boot it would be a port that
     /// accepts connections and refuses all of them. Whoever wants it runs
-    /// `/system/bin/sshd` themselves. It stays in `[programs]` — the gate is on what
-    /// init starts, not on the binary being present.
+    /// `/system/bin/sshserver` themselves. It stays in `[programs]` — the gate is on what
+    /// the supervisor starts, not on the binary being present.
     #[test]
-    fn no_shipped_boot_config_starts_sshd() {
+    fn no_shipped_boot_config_starts_sshserver() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         for boot in [Boot::shipped(root), Boot::diag(root), Boot::console(root)] {
             let config = boot.config.clone();
             let start = parse_config(&config).boot.start;
             assert!(
-                !start.iter().any(|p| p == "sshd"),
-                "{} starts sshd: {start:?}",
+                !start.iter().any(|p| p == "sshserver"),
+                "{} starts sshserver: {start:?}",
                 config.display(),
             );
         }
@@ -2955,11 +2946,11 @@ mod tests {
         assert!(refusal.contains("not in this repository"), "{refusal}");
     }
 
-    /// **Every config with a `[boot] start` runs `/system/bin/logd`, `logd` always holds
+    /// **Every config with a `[boot] start` runs `/system/bin/logkeeper`, `logkeeper` always holds
     /// `logread`, and nothing outside the cursor readers ever does.**
     ///
-    /// The kernel writes no file — `/system/bin/logd` owns `/log` and reads records off
-    /// a cursor — so a boot config that does not start `logd` is an image whose
+    /// The kernel writes no file — `/system/bin/logkeeper` owns `/log` and reads records off
+    /// a cursor — so a boot config that does not start `logkeeper` is an image whose
     /// log partition stays empty for the whole of that boot — and on
     /// the machine this subsystem exists for, a T14 with no serial port, that is
     /// the boot with no record of itself anywhere. A config added later fails
@@ -2970,8 +2961,8 @@ mod tests {
     /// `Rights::LOG | Rights::WAIT` on a `SysCap` duplicate, which is authority
     /// over every record every CPU wrote, and a right with no caller is a
     /// capability handed out for a plan. Two programs read a cursor —
-    /// `/system/bin/logd`, which writes the file, and `test-runner`, which runs the
-    /// conservation gates inside itself. `logd` always does, since that is its
+    /// `/system/bin/logkeeper`, which writes the file, and `test-runner`, which runs the
+    /// conservation gates inside itself. `logkeeper` always does, since that is its
     /// whole job; `test-runner` does where an estate runs such a gate and not
     /// where it runs none. `/system/bin/console` is the near miss: it *could* show this boot's
     /// records live off a cursor, and holds the right only once something reads one.
@@ -2980,25 +2971,25 @@ mod tests {
     /// over the TOML would pass on a row that is commented out and on a key
     /// `serde` never saw.
     #[test]
-    fn every_boot_config_runs_logd() {
-        const READERS: &[&str] = &["logd", "test-runner"];
+    fn every_boot_config_runs_logkeeper() {
+        const READERS: &[&str] = &["logkeeper", "test-runner"];
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         for config in ALL_CONFIGS {
             let parsed = parse_config(&root.join(config));
             assert!(
-                parsed.boot.start.iter().any(|p| p == "logd"),
-                "{config} declares `[boot] start = {:?}` and no `logd` in it, so this image's \
+                parsed.boot.start.iter().any(|p| p == "logkeeper"),
+                "{config} declares `[boot] start = {:?}` and no `logkeeper` in it, so this image's \
                  /log is empty for the whole boot",
                 parsed.boot.start,
             );
             assert!(
-                parsed.programs.contains_key("logd"),
-                "{config} starts `logd` and has no `[programs.logd]` row to say what it holds",
+                parsed.programs.contains_key("logkeeper"),
+                "{config} starts `logkeeper` and has no `[programs.logkeeper]` row to say what it holds",
             );
             for (name, program) in &parsed.programs {
                 let holds = program.syscap.iter().any(|s| s == "logread");
-                if name == "logd" {
-                    assert!(holds, "{config}: `logd` writes the file and must read the cursor");
+                if name == "logkeeper" {
+                    assert!(holds, "{config}: `logkeeper` writes the file and must read the cursor");
                     continue;
                 }
                 assert!(
@@ -3010,21 +3001,21 @@ mod tests {
         }
     }
 
-    /// **An image a user boots serves no log on the network.** `logd` answers
+    /// **An image a user boots serves no log on the network.** `logkeeper` answers
     /// `toyos_logstream::PORT` to whoever connects, with nothing to authenticate
-    /// them, once it holds a `netd` connector: the test configs that read the
+    /// them, once it holds a `netstack` connector: the test configs that read the
     /// stream give it one, and these do not.
     #[test]
     fn no_shipped_image_serves_the_log_on_the_network() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         for config in ALL_CONFIGS.iter().filter(|config| !config.starts_with("tests/")) {
             let parsed = parse_config(&root.join(config));
-            let logd = parsed.programs.get("logd").expect("every config runs logd");
+            let logkeeper = parsed.programs.get("logkeeper").expect("every config runs logkeeper");
             assert!(
-                logd.receives.is_empty(),
-                "{config}: `logd` receives {:?}, and a `netd` connector is what serves this \
+                logkeeper.receives.is_empty(),
+                "{config}: `logkeeper` receives {:?}, and a `netstack` connector is what serves this \
                  machine's log to anyone on its network",
-                logd.receives,
+                logkeeper.receives,
             );
         }
     }
@@ -3041,7 +3032,7 @@ mod tests {
         }
     }
 
-    /// One prefix and no other, so a doc naming `/etc/logd` or `/apps/logd` is a
+    /// One prefix and no other, so a doc naming `/etc/logkeeper` or `/apps/logkeeper` is a
     /// token the filter below drops and an assertion that reds.
     const LOG_DOC_BIN: &str = "/system/bin/";
 
@@ -3104,42 +3095,20 @@ mod tests {
         "system.toml",
         "diag/system.toml",
         "console/system.toml",
-        "tests/blockdcase/system.toml",
-        "tests/desktopcase/system.toml",
-        "tests/desktopaudiocase/system.toml",
-        "tests/doommusiccase/system.toml",
-        "tests/e1000case/system.toml",
-        "tests/e1000leasecase/system.toml",
-        "tests/e1000talkcase/system.toml",
-        "tests/flrswapcase/system.toml",
-        "tests/inspectcase/system.toml",
         "tests/jobcase/system.toml",
-        "tests/jobdeadlinecase/system.toml",
-        "tests/lancase/system.toml",
-        "tests/lanicscase/system.toml",
         "tests/lanleasecase/system.toml",
         "tests/lantalkcase/system.toml",
         "tests/latencycase/system.toml",
-        "tests/layoutcase/system.toml",
-        "tests/logflushcase/system.toml",
-        "tests/logkeepcase/system.toml",
-        "tests/logrotatecase/system.toml",
         "tests/logstallcase/system.toml",
-        "tests/logstreamcase/system.toml",
-        "tests/logstreame1000case/system.toml",
         "tests/metalcase/system.toml",
         "tests/metaldevicecase/system.toml",
         "tests/netcase/system.toml",
-        "tests/partclaimcase/system.toml",
-        "tests/pkgcase/system.toml",
-        "tests/quiescecase/system.toml",
-        "tests/quiescelastcase/system.toml",
-        "tests/quiescetwicecase/system.toml",
-        "tests/sshdcase/system.toml",
-        "tests/swapcase/system.toml",
+        "tests/proctreecase/system.toml",
         "tests/testcases/system.toml",
-        "tests/toolkitcase/system.toml",
-        "tests/updatecase/system.toml",
+        "tests/virtjobcase/system.toml",
+        "tests/virtpaniccase/system.toml",
+        "tests/virtrebootcase/system.toml",
+        "tests/virtsmpcase/system.toml",
     ];
 
     fn load(cfg: &str) -> SystemConfig {
@@ -3147,11 +3116,11 @@ mod tests {
     }
 
     /// Every name a program `receives` must be served or provided by some
-    /// program in the *same* config, or served by init. The build-time form of
+    /// program in the *same* config, or served by the supervisor. The build-time form of
     /// "a client cannot name a service the system does not have", and the gate
     /// with the sharpest teeth: no guest, no mutated tree.
     fn receives_have_providers(cfg: &SystemConfig) -> Result<(), String> {
-        let mut providers: Vec<&str> = INIT_SERVED.to_vec();
+        let mut providers: Vec<&str> = SUPERVISOR_SERVED.to_vec();
         for prog in cfg.programs.values() {
             providers.extend(prog.serves.iter().map(String::as_str));
             providers.extend(prog.provides.iter().map(String::as_str));
@@ -3174,7 +3143,7 @@ mod tests {
             receives_have_providers(&load(cfg)).unwrap_or_else(|e| panic!("{cfg}: {e}"));
         }
         let bad: SystemConfig =
-            toml::from_str("init = []\n[programs.client]\nreceives = [\"ghost\"]\n").unwrap();
+            toml::from_str("[programs.client]\nreceives = [\"ghost\"]\n").unwrap();
         assert!(receives_have_providers(&bad).is_err());
     }
 
@@ -3192,9 +3161,9 @@ mod tests {
         let shell: SystemConfig =
             toml::from_str("[programs.shell]\nreceives = [\"swap\"]\n").unwrap();
         assert!(held_by_their_holders_alone(&shell).is_err());
-        let sshd: SystemConfig =
-            toml::from_str("[programs.sshd]\nreceives = [\"netd\", \"swap\"]\n").unwrap();
-        assert!(held_by_their_holders_alone(&sshd).is_err());
+        let sshserver: SystemConfig =
+            toml::from_str("[programs.sshserver]\nreceives = [\"netstack\", \"swap\"]\n").unwrap();
+        assert!(held_by_their_holders_alone(&sshserver).is_err());
         let apps: SystemConfig = toml::from_str("[apps]\nreceives = [\"swap\"]\n").unwrap();
         assert!(held_by_their_holders_alone(&apps).is_err());
         let slots: SystemConfig = toml::from_str("[programs.shell]\nslots = true\n").unwrap();
@@ -3203,9 +3172,9 @@ mod tests {
 
     /// `[apps] receives` is narrower than a program's: a `provides` name is one
     /// port per instance and nobody makes one for a package, so naming one here
-    /// is a namespace init cannot build.
+    /// is a namespace the supervisor cannot build.
     fn apps_receive_a_served_name(cfg: &SystemConfig) -> Result<(), String> {
-        let mut served: Vec<&str> = INIT_SERVED.to_vec();
+        let mut served: Vec<&str> = SUPERVISOR_SERVED.to_vec();
         for prog in cfg.programs.values() {
             served.extend(prog.serves.iter().map(String::as_str));
         }
@@ -3218,23 +3187,23 @@ mod tests {
     }
 
     #[test]
-    fn an_installed_app_receives_only_names_init_holds() {
+    fn an_installed_app_receives_only_names_the_supervisor_holds() {
         for cfg in ALL_CONFIGS {
             apps_receive_a_served_name(&load(cfg)).unwrap_or_else(|e| panic!("{cfg}: {e}"));
         }
         let provided: SystemConfig = toml::from_str(
-            "init = []\n[apps]\nreceives = [\"surface\"]\n\
+            "[apps]\nreceives = [\"surface\"]\n\
              [programs.terminal]\nprovides = [\"surface\"]\n",
         )
         .unwrap();
         assert!(apps_receive_a_served_name(&provided).is_err());
         let ghost: SystemConfig =
-            toml::from_str("init = []\n[apps]\nreceives = [\"ghost\"]\n").unwrap();
+            toml::from_str("[apps]\nreceives = [\"ghost\"]\n").unwrap();
         assert!(apps_receive_a_served_name(&ghost).is_err());
     }
 
     /// A `serves` name is one port machine-wide; a `provides` name is one port
-    /// per instance. A name declared both ways is a config where init makes a
+    /// per instance. A name declared both ways is a config where the supervisor makes a
     /// port nobody accepts from while the real one is made elsewhere.
     fn provides_disjoint_from_serves(cfg: &SystemConfig) -> Result<(), String> {
         let serves: Vec<&str> = cfg
@@ -3260,39 +3229,22 @@ mod tests {
             provides_disjoint_from_serves(&load(cfg)).unwrap_or_else(|e| panic!("{cfg}: {e}"));
         }
         let bad: SystemConfig = toml::from_str(
-            "init = []\n[programs.a]\nserves = [\"x\"]\n[programs.b]\nprovides = [\"x\"]\n",
+            "[programs.a]\nserves = [\"x\"]\n[programs.b]\nprovides = [\"x\"]\n",
         )
         .unwrap();
         assert!(provides_disjoint_from_serves(&bad).is_err());
     }
 
-    /// The one `devices` entry in the tree that is a deliberate second claim:
-    /// config, program, device. `pci_function_is_exclusive` boots it and reads
-    /// the kernel refusing it.
-    const STAGED_COLLISION: (&str, &str, &str) =
-        ("tests/netcase/system.toml", "test-runner", "pci:1af4:1041");
-
-    /// Init mints one claim per device, so a shipping config naming one twice
-    /// starts a program with a hole where its claim should be.
-    ///
-    /// `excused` is one `(program, device)` and never a whole config: every
-    /// other collision in the config that stages one is still refused.
-    fn one_claimant_per_device(
-        cfg: &SystemConfig,
-        excused: Option<(&str, &str)>,
-    ) -> Result<(), String> {
+    /// The supervisor mints one claim per device, so a config naming one twice starts a
+    /// program with a hole where its claim should be.
+    fn one_claimant_per_device(cfg: &SystemConfig) -> Result<(), String> {
         let mut seen: BTreeMap<&str, &str> = BTreeMap::new();
         for (name, prog) in &cfg.programs {
             for d in &prog.devices {
-                if excused == Some((name.as_str(), d.as_str())) {
-                    continue;
-                }
                 if let Some(prev) = seen.insert(d, name) {
                     return Err(format!(
                         "device `{d}` is claimed by both `{prev}` and `{name}`; the second \
-                         claim is refused at boot, and `{}`'s `{}` is the one entry allowed \
-                         to stage that",
-                        STAGED_COLLISION.0, STAGED_COLLISION.1
+                         claim is refused at boot"
                     ));
                 }
             }
@@ -3301,55 +3253,44 @@ mod tests {
     }
 
     /// Not the capability boundary — `kernel/src/pcidev`'s slot reservation is,
-    /// and this compares `system.toml` strings. The excused entry is asserted to
-    /// still be a collision on the device it names, so the exception cannot rot
-    /// into a pass and cannot cover a second one added to the same config.
+    /// and this compares `system.toml` strings.
     #[test]
     fn every_device_class_has_at_most_one_claimant() {
         for cfg in ALL_CONFIGS {
-            let excused =
-                (*cfg == STAGED_COLLISION.0).then_some((STAGED_COLLISION.1, STAGED_COLLISION.2));
-            one_claimant_per_device(&load(cfg), excused).unwrap_or_else(|e| panic!("{cfg}: {e}"));
+            one_claimant_per_device(&load(cfg)).unwrap_or_else(|e| panic!("{cfg}: {e}"));
         }
-        let staged = one_claimant_per_device(&load(STAGED_COLLISION.0), None)
-            .expect_err("the excused entry no longer collides with anything");
-        assert!(staged.contains(STAGED_COLLISION.2), "{staged}");
         let bad: SystemConfig = toml::from_str(
-            "init = []\n[programs.a]\ndevices = [\"framebuffer\"]\n\
+            "[programs.a]\ndevices = [\"framebuffer\"]\n\
              [programs.b]\ndevices = [\"framebuffer\"]\n",
         )
         .unwrap();
-        assert!(one_claimant_per_device(&bad, None).is_err());
+        assert!(one_claimant_per_device(&bad).is_err());
     }
 
-    /// netd's two actuators that only its Intel driver answers, spelled here
-    /// and held to netd's own declarations by
-    /// [`netd_declares_the_flags_this_gate_spells`].
-    const PROVOKE_MESSAGE: &str = "--provoke-message";
+    /// netstack's actuator that only its Intel driver answers, spelled here and
+    /// held to netstack's own declaration by
+    /// [`netstack_declares_the_flag_this_gate_spells`].
     const EXIT_WITH_LEASE: &str = "--exit-with-lease";
-    const INTEL_ACTUATORS: [&str; 2] = [PROVOKE_MESSAGE, EXIT_WITH_LEASE];
 
-    /// netd's main module, which is where both halves of this gate's spelling
+    /// netstack's main module, which is where both halves of this gate's spelling
     /// live: nothing links the two crates, so the build system reads the source.
-    fn netd_source() -> (std::path::PathBuf, String) {
-        let at = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("userland/netd/src/main.rs");
-        let text = std::fs::read_to_string(&at).expect("netd's main module");
+    fn netstack_source() -> (std::path::PathBuf, String) {
+        let at = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("userland/netstack/src/main.rs");
+        let text = std::fs::read_to_string(&at).expect("netstack's main module");
         (at, text)
     }
 
-    /// Nothing links the two crates: netd is a userland binary and this is the
-    /// build system, so the flags both ends spell are held to netd's own
+    /// Nothing links the two crates: netstack is a userland binary and this is the
+    /// build system, so the flags both ends spell are held to netstack's own
     /// declarations by reading its source.
     #[test]
-    fn netd_declares_the_flags_this_gate_spells() {
-        let (at, source) = netd_source();
-        for flag in INTEL_ACTUATORS {
-            assert!(
-                crate::bootlog::declares(&source, &format!("\"{flag}\"")),
-                "{} declares no constant equal to \"{flag}\"",
-                at.display()
-            );
-        }
+    fn netstack_declares_the_flag_this_gate_spells() {
+        let (at, source) = netstack_source();
+        assert!(
+            crate::bootlog::declares(&source, &format!("\"{EXIT_WITH_LEASE}\"")),
+            "{} declares no constant equal to \"{EXIT_WITH_LEASE}\"",
+            at.display()
+        );
     }
 
     /// The four hex digits after `key` on this line.
@@ -3359,14 +3300,14 @@ mod tests {
         (digits.len() == 4).then_some(digits)
     }
 
-    /// The device entries netd opens with the driver that has §10.2.4.4's `ICS`,
-    /// read out of netd's own `CARDS` rather than guessed from a vendor id: each
+    /// The device entries netstack opens with the driver that has §10.2.4.4's `ICS`,
+    /// read out of netstack's own `CARDS` rather than guessed from a vendor id: each
     /// row spells an id and the constructor that takes it on one line.
     ///
     /// **The scan reaches that one spelling and no other**, so every
     /// `Card::intel` row it saw has to have yielded an id — a table written
     /// another way reds here instead of narrowing this gate to nothing.
-    fn netd_intel_cards(source: &str) -> Vec<String> {
+    fn netstack_intel_cards(source: &str) -> Vec<String> {
         let mut cards = Vec::new();
         let mut rows = 0;
         for line in source.lines() {
@@ -3383,39 +3324,29 @@ mod tests {
         assert_eq!(
             cards.len(),
             rows,
-            "netd names `Card::intel` on {rows} line(s) and an id was read off {}; its `CARDS` \
+            "netstack names `Card::intel` on {rows} line(s) and an id was read off {}; its `CARDS` \
              table is spelled in a way this gate does not reach",
             cards.len()
         );
         cards
     }
 
-    /// netd's two Intel-only actuators — `--provoke-message` writes
-    /// §10.2.4.4's `ICS`, and `--exit-with-lease` reports the Intel driver's
-    /// bring-up beside the lease — and virtio's driver has neither, so a boot
-    /// config that arms one on a card netd opens with any other driver is a boot
-    /// that panics instead of answering the question it was flashed for. One
-    /// that arms both on one program is refused too: the probe ends the process
-    /// before the point the other acts at.
+    /// netstack's Intel-only actuators — `--exit-with-lease` reports the Intel
+    /// driver's bring-up beside the lease — and virtio's driver has none, so a
+    /// boot config that arms one on a card netstack opens with any other driver is
+    /// a boot that panics instead of answering the question it was built for.
     fn an_armed_intel_actuator_claims_a_card_the_driver_opens(
         cfg: &SystemConfig,
         cards: &[String],
     ) -> Result<(), String> {
         for (name, prog) in &cfg.programs {
-            let armed: Vec<&str> = INTEL_ACTUATORS
-                .into_iter()
-                .filter(|flag| prog.args.iter().any(|arg| arg == flag))
-                .collect();
-            let [flag] = armed[..] else {
-                if armed.is_empty() {
-                    continue;
-                }
-                return Err(format!("`{name}` is armed with {armed:?}, which cannot share a boot"));
-            };
+            if !prog.args.iter().any(|arg| arg == EXIT_WITH_LEASE) {
+                continue;
+            }
             if !prog.devices.iter().any(|d| cards.contains(d)) {
                 return Err(format!(
-                    "`{name}` is armed with `{flag}` and claims {:?}, none of which is one of \
-                     the {cards:?} netd opens with that driver",
+                    "`{name}` is armed with `{EXIT_WITH_LEASE}` and claims {:?}, none of which \
+                     is one of the {cards:?} netstack opens with that driver",
                     prog.devices
                 ));
             }
@@ -3425,58 +3356,46 @@ mod tests {
 
     #[test]
     fn every_armed_intel_actuator_claims_a_card_the_driver_opens() {
-        let (_, source) = netd_source();
-        let cards = netd_intel_cards(&source);
-        assert!(!cards.is_empty(), "netd's `CARDS` names no card its Intel driver opens");
-        let mut armed = [0usize; INTEL_ACTUATORS.len()];
+        let (_, source) = netstack_source();
+        let cards = netstack_intel_cards(&source);
+        assert!(!cards.is_empty(), "netstack's `CARDS` names no card its Intel driver opens");
+        let mut armed = 0;
         for cfg in ALL_CONFIGS {
             let config = load(cfg);
-            for (count, flag) in armed.iter_mut().zip(INTEL_ACTUATORS) {
-                *count += config
-                    .programs
-                    .values()
-                    .filter(|p| p.args.iter().any(|arg| arg == flag))
-                    .count();
-            }
+            armed += config
+                .programs
+                .values()
+                .filter(|p| p.args.iter().any(|arg| arg == EXIT_WITH_LEASE))
+                .count();
             an_armed_intel_actuator_claims_a_card_the_driver_opens(&config, &cards)
                 .unwrap_or_else(|e| panic!("{cfg}: {e}"));
         }
         // A walk that reached no armed program passes on having found nothing,
         // which is the one way this gate can rot while every config still loads.
-        for (count, flag) in armed.iter().zip(INTEL_ACTUATORS) {
-            assert!(*count > 0, "no shipped boot config arms `{flag}` at all");
-        }
+        assert!(armed > 0, "no shipped boot config arms `{EXIT_WITH_LEASE}` at all");
         let armed_on = |device: &str, args: &str| {
             let cfg: SystemConfig = toml::from_str(&format!(
-                "init = []\n[programs.netd]\ndevices = [\"{device}\"]\nargs = [{args}]\n"
+                "[programs.netstack]\ndevices = [\"{device}\"]\nargs = [{args}]\n"
             ))
             .unwrap();
             an_armed_intel_actuator_claims_a_card_the_driver_opens(&cfg, &cards)
         };
-        // The card netd drives with the other driver, and an Intel function it
+        // The card netstack drives with the other driver, and an Intel function it
         // drives with none: a vendor id is not what gives a part an `ICS` or a
         // PHY behind `MDIC`.
-        for flag in INTEL_ACTUATORS {
-            let one = format!("\"{flag}\"");
-            assert!(armed_on("pci:1af4:1041", &one).is_err(), "{flag}");
-            assert!(armed_on("pci:8086:1502", &one).is_err(), "{flag}");
-            assert!(armed_on(&cards[0], &one).is_ok(), "{flag}");
-        }
-        for (at, one) in INTEL_ACTUATORS.into_iter().enumerate() {
-            for other in &INTEL_ACTUATORS[at + 1..] {
-                let both = format!("\"{one}\", \"{other}\"");
-                assert!(armed_on(&cards[0], &both).is_err(), "{one} beside {other}");
-            }
-        }
+        let flag = format!("\"{EXIT_WITH_LEASE}\"");
+        assert!(armed_on("pci:1af4:1041", &flag).is_err());
+        assert!(armed_on("pci:8086:1502", &flag).is_err());
+        assert!(armed_on(&cards[0], &flag).is_ok());
     }
 
-    /// A device name the ABI does not know renders fine and leaves init with a
+    /// A device name the ABI does not know renders fine and leaves the supervisor with a
     /// `devices` entry it cannot mint — a dead machine for a typo, where this is
     /// a red in milliseconds. Same for a `syscap` right.
     ///
     /// The ABI's own parser, not a copy of it: a `pci:<vendor>:<device>` entry
     /// names a function and a class name names a class, and this is the same
-    /// `DeviceRequest::parse` init and the kernel read the entry with.
+    /// `DeviceRequest::parse` the supervisor and the kernel read the entry with.
     fn names_only_real_capabilities(cfg: &SystemConfig) -> Result<(), String> {
         for (name, prog) in &cfg.programs {
             for device in &prog.devices {
@@ -3518,7 +3437,7 @@ mod tests {
     }
 
     /// The diagnostic image's whole reason for existing: nothing in it can claim
-    /// the framebuffer, so the kernel's boot log stays on the panel. `/system/bin/init`
+    /// the framebuffer, so the kernel's boot log stays on the panel. `/system/bin/supervisor`
     /// is in every image and could reach a device, so the property becomes "the
     /// config declares no `devices`" — checkable here for the first time.
     #[test]
@@ -3526,12 +3445,12 @@ mod tests {
         claims_no_device(&load("diag/system.toml"))
             .unwrap_or_else(|e| panic!("diag/system.toml: {e}"));
         let bad: SystemConfig =
-            toml::from_str("init = []\n[programs.x]\ndevices = [\"framebuffer\"]\n").unwrap();
+            toml::from_str("[programs.x]\ndevices = [\"framebuffer\"]\n").unwrap();
         assert!(claims_no_device(&bad).is_err());
     }
 
     /// `[boot] start` names program keys, so a typo is a build error rather than
-    /// a refusal `/system/bin/init` reports at boot.
+    /// a refusal `/system/bin/supervisor` reports at boot.
     fn started_programs_are_declared(cfg: &SystemConfig) -> Result<(), String> {
         for name in &cfg.boot.start {
             if !cfg.programs.contains_key(name) {
@@ -3546,7 +3465,7 @@ mod tests {
         for cfg in ALL_CONFIGS {
             started_programs_are_declared(&load(cfg)).unwrap_or_else(|e| panic!("{cfg}: {e}"));
         }
-        let bad: SystemConfig = toml::from_str("init = []\n[boot]\nstart = [\"ghost\"]\n").unwrap();
+        let bad: SystemConfig = toml::from_str("[boot]\nstart = [\"ghost\"]\n").unwrap();
         assert!(started_programs_are_declared(&bad).is_err());
     }
 
@@ -3560,7 +3479,7 @@ mod tests {
         let programs = declared(&["shell"]);
         let started = ["shell".to_string()];
         assert!(unnamed_program(
-            &["bin/init", "bin/shell", "lib/libtls_lib.so", "etc/system.manifest"],
+            &["bin/supervisor", "bin/shell", "lib/libtls_lib.so", "etc/system.manifest"],
             &programs,
             &started,
         )
@@ -3589,10 +3508,10 @@ mod tests {
     /// carries. The day the check learns it, this reds.
     #[test]
     fn the_check_does_not_reach_a_spawner_that_never_spawns() {
-        // `logd` spawns nothing in any config this tree ships.
-        let programs = declared(&["logd"]);
+        // `logkeeper` spawns nothing in any config this tree ships.
+        let programs = declared(&["logkeeper"]);
         assert!(
-            unnamed_program(&["bin/test_rs_window_child"], &programs, &["logd".to_string()])
+            unnamed_program(&["bin/test_rs_window_child"], &programs, &["logkeeper".to_string()])
                 .is_ok(),
             "the scan now reaches whether the spawner spawns; correct this test and its header"
         );
@@ -3632,8 +3551,6 @@ mod tests {
     const ENTRY_OPENS: [u8; 10] = [0xfc, 0x65, 0x48, 0x89, 0x24, 0x25, 0x18, 0, 0, 0];
     /// `mov rsp, gs:[0x10]`.
     const SWITCH: [u8; 9] = [0x65, 0x48, 0x8b, 0x24, 0x25, 0x10, 0, 0, 0];
-    /// `window_hold!` as a shipping build with its cfgs taken off emits it: the
-    /// two global labels make each jump a near one.
     const LABELLED_HOLD: [u8; 84] = [
         0x65, 0x48, 0xf7, 0x04, 0x25, 0x18, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x0f, 0x84,
         0x41, 0x00, 0x00, 0x00, 0x65, 0xf0, 0x48, 0x83, 0x0c, 0x25, 0x18, 0x01, 0x00, 0x00, 0x02,
@@ -3717,11 +3634,9 @@ mod tests {
     }
 
     #[test]
-    fn a_clean_entry_is_the_shipping_kernels_and_not_the_test_kernels() {
+    fn a_clean_entry_is_the_shipping_kernels() {
         let kernel = kernel_with_entry(&[ENTRY_NAME], &entry_with(&[]));
         assert_eq!(judge_entry_window("", &kernel), Ok(()));
-        let refusal = judge_entry_window(&TEST_KERNEL.join(","), &kernel).unwrap_err();
-        assert!(refusal.contains("`nmi_gate`'s hold is not in it"), "{refusal}");
     }
 
     #[test]
@@ -3730,7 +3645,6 @@ mod tests {
             let kernel = kernel_with_entry(&[ENTRY_NAME], &entry_with(hold));
             let refusal = judge_entry_window("", &kernel).unwrap_err();
             assert!(refusal.contains(&format!("between them stand {hold:02x?}")), "{refusal}");
-            assert_eq!(judge_entry_window(&TEST_KERNEL.join(","), &kernel), Ok(()));
         }
     }
 
@@ -3738,10 +3652,8 @@ mod tests {
     fn a_hold_in_front_of_the_save_is_an_entry_the_judge_refuses_to_read() {
         let entry = [&[0xfc, 0xf3, 0x90][..], &ENTRY_OPENS[1..], &SWITCH[..]].concat();
         let kernel = kernel_with_entry(&[ENTRY_NAME], &entry);
-        for features in ["".to_string(), TEST_KERNEL.join(",")] {
-            let refusal = judge_entry_window(&features, &kernel).unwrap_err();
-            assert!(refusal.contains("does not open `cld`"), "{refusal}");
-        }
+        let refusal = judge_entry_window("", &kernel).unwrap_err();
+        assert!(refusal.contains("does not open `cld`"), "{refusal}");
     }
 
     #[test]
@@ -3756,6 +3668,8 @@ mod tests {
 
     #[test]
     fn a_kernel_of_any_other_feature_set_is_not_judged() {
-        assert_eq!(judge_entry_window(&SCHED_CHECK_KERNEL.join(","), b"not an ELF"), Ok(()));
+        for features in [SCHED_CHECK_KERNEL, TEST_KERNEL] {
+            assert_eq!(judge_entry_window(&features.join(","), b"not an ELF"), Ok(()));
+        }
     }
 }

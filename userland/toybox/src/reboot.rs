@@ -1,4 +1,4 @@
-//! Return the machine to firmware, by asking `/system/bin/init`, which has the
+//! Return the machine to firmware, by asking `/system/bin/supervisor`, which has the
 //! log made whole first ([`toyos::power`]). **The `power` connector is the
 //! whole of the authority**: this is `/system/bin/toybox` under another name,
 //! holding what `[programs.toybox]` declares.

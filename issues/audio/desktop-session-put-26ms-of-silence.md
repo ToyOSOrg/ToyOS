@@ -19,7 +19,7 @@ soundd: wakes=389 completions=690 submitted=690 underruns=1 drains=2 max_wake_la
 ```
 
 Nine periods — 26 ms — submitted with a client streaming and no client audio
-behind them (`MixStats::period` in `toyos-mixer/src/stats.rs`, which is where
+behind them (`MixStats::period` in `userland/soundserver/mixer/src/stats.rs`, which is where
 that counter moved when the mixer's decisions became a pure crate).
 There is no capture to corroborate it: `--dump-audio` was not on.
 

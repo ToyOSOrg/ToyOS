@@ -5,7 +5,7 @@
 //! [`ring`]): its stdout and stderr, and what it says with [`say!`](crate::say),
 //! [`warn!`](crate::warn) and [`error!`](crate::error), each stamped with its
 //! time, severity and thread as it is written ([`stdio`]). Whose lines they are is decided where the ring was made:
-//! `/system/bin/init` names each ring to `/system/bin/logd`, and nothing a
+//! `/system/bin/supervisor` names each ring to `/system/bin/logkeeper`, and nothing a
 //! program writes can change the name.
 //!
 //! **The kernel's records** are read with [`LogTail`]. The kernel keeps no
@@ -65,10 +65,12 @@ use crate::AsHandle;
 ///
 /// A fresh tail starts at the oldest record every shard still holds, which is
 /// the whole boot on a machine that has not logged 512 records on any CPU yet —
-/// so `logd` starting late still writes this boot's log from its first
+/// so `logkeeper` starting late still writes this boot's log from its first
 /// line.
 pub struct LogTail {
     cursor: LogCursor,
+    /// Every read's `cursor.lost`, summed: the kernel answers each read's alone.
+    lost: u64,
 }
 
 impl Default for LogTail {
@@ -79,16 +81,12 @@ impl Default for LogTail {
 
 impl LogTail {
     pub const fn new() -> Self {
-        Self { cursor: LogCursor::new() }
+        Self { cursor: LogCursor::new(), lost: 0 }
     }
 
     /// Records this cursor never saw because a producer overwrote them.
-    ///
-    /// Cumulative and exact: the kernel derives it from the two numbers that
-    /// have to be right anyway, so it cannot drift from the ring the way a
-    /// producer-side counter would.
     pub fn lost(&self) -> u64 {
-        self.cursor.lost
+        self.lost
     }
 
     /// Shards the machine has, once a read has answered. Zero before that.
@@ -106,6 +104,7 @@ impl LogTail {
         out: &'a mut [LogRecord],
     ) -> Result<&'a [LogRecord], SyscallError> {
         let count = syscall::log_read(cap.as_handle(), &mut self.cursor, out)?;
+        self.lost += self.cursor.lost;
         Ok(&out[..count])
     }
 }

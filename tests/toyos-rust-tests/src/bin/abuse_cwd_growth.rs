@@ -27,7 +27,7 @@ use std::fs;
 /// know roughly where the wall is.
 const MAX_PATH: usize = 4096;
 
-const DIR: &str = "/home/abuse_cwd";
+const DIR: &str = "/tmp/abuse_cwd";
 
 /// One component long enough that a single successful round would blow most of
 /// the budget, and far longer than `MAX_PATH` on its own.

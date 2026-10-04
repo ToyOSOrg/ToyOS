@@ -23,7 +23,7 @@ pub const RING_READER_CLOSED: u32 = 2;
 ///
 /// Every field is writable by any process holding the pipe, so nothing the
 /// kernel indexes, bounds or divides by may live here. `flags` is a
-/// publication netd polls to notice a peer that went away; the kernel only
+/// publication netstack polls to notice a peer that went away; the kernel only
 /// ever stores to it, and answers "is the other end gone?" from its own
 /// refcounts.
 #[repr(C, align(64))]

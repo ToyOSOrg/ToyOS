@@ -6,14 +6,34 @@ include!("toyos.rs");
 
 mod checks {
     use super::*;
+    // `toyos.rs`'s `#[macro_use]` arrives by `include!` and reaches no module
+    // outside that text, so each of those names the printer's `eprintln!`.
+    use toyos_build::eprintln;
+
+    #[path = "audio.rs"]
+    mod audio_checks;
+    #[path = "clock.rs"]
+    mod clock_checks;
+    #[path = "lan.rs"]
+    mod lan_checks;
+    #[path = "metal.rs"]
+    mod metal_checks;
+    #[path = "qemu.rs"]
+    mod qemu_checks;
+    #[path = "screen.rs"]
+    mod screen_checks;
+    #[path = "serial.rs"]
+    mod serial_checks;
+    #[path = "usb.rs"]
+    mod usb_checks;
 
     /// One subject: what a console line says died, what a wait does about it,
     /// and that only one place in the harness answers either.
     #[test]
     fn serial_vocabulary() -> Result<(), String> {
-        serial::self_check()?;
-        qemu::ceiling_self_check()?;
-        qemu::host_scale_self_check()?;
+        serial_checks::self_check()?;
+        qemu_checks::ceiling_self_check()?;
+        qemu_checks::host_scale_self_check()?;
         one_vocabulary()
     }
 
@@ -35,7 +55,7 @@ mod checks {
             if line.trim_start().starts_with("//") {
                 continue;
             }
-            for word in serial::spellings() {
+            for word in serial_checks::spellings() {
                 // The shape is the spelling as somebody's first argument —
                 // `contains`, `starts_with`, `find`, any of them. A spelling
                 // *inside* a longer staged line is how this file's own gates build
@@ -84,12 +104,12 @@ mod checks {
 
     #[test]
     fn suspend_detector() -> Result<(), String> {
-        common::clock::self_check()
+        clock_checks::self_check()
     }
 
     /// What a suspend is worth to a verdict, staged rather than reasoned about.
     ///
-    /// `common::clock::self_check` gates the detector; this gates what the suite
+    /// `clock_checks::self_check` gates the detector; this gates what the suite
     /// does with what it detects. Both halves are needed and neither implies the
     /// other: **a suspend that silently passes is as bad as one that silently
     /// fails**, and here the two are one line apart.
@@ -139,8 +159,9 @@ mod checks {
         // gate asserting against a string nothing produces any more.
         let real = format!("{STALLED} waiting for the long tone to start — it went quiet");
         let under_a_sentence = format!("the compositor stopped painting\n{real}");
-        let past = qemu::GUEST_WEDGED + Duration::from_secs(1);
-        let backstop = qemu::ceiling_verdict(None, past, qemu::GUEST_WEDGED, Duration::from_secs(1), 900)
+        let ceiling = Duration::from_secs(30);
+        let past = ceiling * 2 + Duration::from_secs(1);
+        let backstop = qemu::ceiling_verdict(None, past, ceiling, Duration::from_secs(1), 900)
             .ok_or("a guest talking past the backstop was given no verdict")?;
         let cases: [(&str, Option<&str>, bool); 5] = [
             ("an ordinary red", Some("the pointer never moved right"), false),
@@ -259,13 +280,64 @@ mod checks {
         Ok(())
     }
 
+    /// `nested_nmi_is_loud`'s verdict on a whole report, on the splice CI's KVM
+    /// lane recorded before the report held the console registers, on another
+    /// CPU's burst inside each of the report's three lines, and on each line
+    /// the kernel writes when they were not clean — held to the kernel's own
+    /// words, which nothing links this crate to.
+    #[test]
+    fn nested_nmi_verdict() -> Result<(), String> {
+        const WHOLE: &str = "[kernel 0.385 cpu1] CPU 1: jo\n\
+             [nmi] NESTED NMI on cpu 0: a second NMI entered while IST2 was still in use.\n\
+             [nmi]   rip=0xffffffff8012d3a0 rsp=0xffff80000017df50\n\
+             [nmi]   the outer handler's frame is gone; the machine stops here.\n\
+             ining scheduler\n\
+             [kernel 0.390 cpu0] panic: rebooting in 60 s, timed by the calibrated clock\n";
+        const SPLICED: &str = "[[kenrnmel i0.38]5  cpNu1E] CSPUT 1E: Djo inNiMngI s choednule r\n\
+             c[pkeurn el0 0:.3 85a cp u1s] sechcedo: ncpud=1  rNeaMdyI=0  deyinngt=0e srtoeppded= 0 wpahrkield=0e c urrIentS=NTon2e  trwipas=s1\n \
+             stil[lke rnieln 0 .3u87s cep.u1\n\
+             ] [i8n04m2:i ar]me d  a t r37i2mps,= i0dlex fatf 38f7mfs,8 0 0in0te0r7rubpt3s 9\u{2014} 1th6e cp5in  hras snevper= as0sxerftefd f(kbfd 8GSI0 10, a0ux0 G0SI 612)0\n\
+             df50\n\
+             [nmi]   the outer handler's frame is gone; the machine stops here.\n\
+             [kernel 0.390 cpu0] panic: rebooting in 60 s unless a key is pressed\n";
+        if faults::report(WHOLE)? != WHOLE.lines().nth(1).unwrap_or_default() {
+            return Err("a whole report's first line was not the one answered".into());
+        }
+        if faults::report(SPLICED).is_ok() {
+            return Err("the recorded splice was read as a whole report".into());
+        }
+        // A burst of another CPU's line with no line end of its own, cut into
+        // the middle of each report line in turn (on the first, behind the
+        // prefix the report is found by): no line moves, so only the cut
+        // line's own shape can refuse it.
+        let lines: Vec<&str> = WHOLE.lines().collect();
+        for at in 1..=3 {
+            let (head, tail) = lines[at].split_at(lines[at].len() / 2);
+            let cut = format!("{head}[kernel 0.386 cp{tail}");
+            let mut spliced = lines.clone();
+            spliced[at] = &cut;
+            if faults::report(&spliced.join("\n")).is_ok() {
+                return Err(format!("a burst inside the report's line {at} was read as a whole report"));
+            }
+        }
+        let serial = Path::new(env!("CARGO_MANIFEST_DIR")).join("kernel/src/drivers/serial.rs");
+        let source = std::fs::read_to_string(&serial).map_err(|e| format!("{}: {e}", serial.display()))?;
+        for said in faults::UNCLEAN {
+            if !source.contains(said) {
+                return Err(format!("{} writes no {said:?}, so the test refusing it refuses nothing", serial.display()));
+            }
+            if faults::report(&format!("\n{said}; and so on\n{WHOLE}")).is_ok() {
+                return Err(format!("a capture saying {said:?} was read as clean"));
+            }
+        }
+        Ok(())
+    }
+
     /// [`control_regs`] against machines this host cannot boot, with no guest.
     ///
-    /// [`control_regs_negative`] runs the real defective machine and is the link
-    /// between this verdict and a kernel; what is here is the states no actuator
-    /// reaches — a CPU that differs from three others, a bit set uniformly on all
-    /// four, an AP that never printed. Every value is one this tree has printed or
-    /// one bit away from it.
+    /// What is here is the states no actuator reaches — a CPU that differs from
+    /// three others, a bit set uniformly on all four, an AP that never printed.
+    /// Every value is one this tree has printed or one bit away from it.
     #[test]
     fn control_regs_verdict() -> Result<(), String> {
         const AP_BEFORE: (u64, u64) = (0xe000_0011, 0x0031_0620);
@@ -327,6 +399,88 @@ mod checks {
         refused("three lines for four CPUs", &[DECLARED; 3], "{0, 1, 2, 3}")?;
 
         eprintln!("  [control_regs] the verdict refuses 10 machines and accepts the declared one");
+        Ok(())
+    }
+
+    /// [`mask_windows`] and `irqcensus::windows_under` against captures no
+    /// boot has to produce: two CPUs and the T14 row's three exits, a report
+    /// each, with cpu1 holding at the first.
+    #[test]
+    fn mask_windows_verdict() -> Result<(), String> {
+        use common::irqcensus::{windows_under, Measured};
+        let census = |cpu: u32| {
+            format!(
+                "[kernel 0.1 cpu0] irq: cpu{cpu} total=0 timer=0 kick=0 xhci=0 userdev=0 sound=0 i8042=0 \
+                 dmafault=0 hda=0 tlb=0 nmi=0 spurious=0 unclaimed=0\n"
+            )
+        };
+        let windows = |cpu: u32, (irqs, preempt): (u64, u64)| {
+            format!("[kernel 0.1 cpu0] windows: cpu{cpu} irqs_off_ns={irqs} preempt_off_ns={preempt}\n")
+        };
+        let report = |cpu0: (u64, u64), cpu1: (u64, u64)| [census(0), windows(0, cpu0), census(1), windows(1, cpu1)].concat();
+        let exit = |name: &str| format!("[kernel 0.1 cpu0] exit: {name} pid=9 code=0 cpu=1ms\n");
+        let held_ns = kernel::sched::windows::HELD_NS;
+        let hold = format!("[kernel 0.1 cpu1] windows: held cpu1 ns={}\n", held_ns + 7);
+        // Since each CPU joined: longer on cpu0 than anything under the load.
+        let first = [report((6_500_000, 6_400_000), (900, 800)), exit("test_rs_idle_span")].concat();
+        let read_back = (held_ns + 400, held_ns + 300);
+        let opening = [report((100, 100), read_back), exit("pwd")].concat();
+        let own = [report((3_000_000, 1_100_000), (700_000, 600_000)), exit(WINDOWS_LOAD)].concat();
+        let good = [hold.as_str(), &first, &opening, &own].concat();
+        let exited = windows_load_exited();
+
+        mask_windows(&good, 2).map_err(|e| format!("the good capture was refused: {e}"))?;
+        let unpaired = |what: &str, capture: &str, says: &str| match mask_windows(capture, 2) {
+            Ok(()) => Err(format!("{what} was accepted")),
+            Err(e) if e.contains(says) => Ok(()),
+            Err(e) => Err(format!("{what} was refused for the wrong reason: {e}")),
+        };
+        unpaired("a census without its windows", &good.replace(&windows(0, (100, 100)), ""), "went out without")?;
+        unpaired("a CPU that closed no window", &report((0, 7), (3, 4)), "closed no window")?;
+        unpaired("one CPU of two", &[census(0), windows(0, (5, 7))].concat(), "1 of 2")?;
+        unpaired("a field missing", &good.replace(" preempt_off_ns=100", ""), "fields")?;
+
+        let read = windows_under(&good, 2, &exited)?;
+        let want = Measured { held: read_back, load: (3_000_000, 1_100_000) };
+        if read != want {
+            return Err(format!("the good capture read {read:?}, and the hold's and the load's reports say {want:?}"));
+        }
+        let refused = |what: &str, capture: &str, says: &str| match windows_under(capture, 2, &exited) {
+            Ok(read) => Err(format!("{what} was read as {read:?}")),
+            Err(e) if e.contains(says) => Ok(()),
+            Err(e) => Err(format!("{what} was refused for the wrong reason: {e}")),
+        };
+        refused("a load's report with none before it", &[hold.as_str(), &own].concat(), "the boot's first")?;
+        refused("a load that never ended", &good.replace(&exit(WINDOWS_LOAD), ""), "never ended")?;
+        refused("no hold", &good.replace(&hold, ""), "held no window of known length")?;
+        refused("a second hold", &[hold.as_str(), &good].concat(), "a second hold")?;
+        refused("a hold cut short", &good.replace(&hold, "[kernel 0.1 cpu1] windows: held cpu1 ns=1000\n"), "the kernel owes")?;
+        refused(
+            "an interrupts-off window read back at half",
+            &good.replace(&windows(1, read_back), &windows(1, (read_back.0 / 2, read_back.1))),
+            "shorter than it was held",
+        )?;
+        refused(
+            "a preemption-off window read back at half",
+            &good.replace(&windows(1, read_back), &windows(1, (read_back.0, read_back.1 / 2))),
+            "shorter than it was held",
+        )?;
+        refused(
+            "an interrupts-off window read back at ten times",
+            &good.replace(&windows(1, read_back), &windows(1, (read_back.0 * 10, read_back.1))),
+            "past the ceiling",
+        )?;
+        refused(
+            "a preemption-off window read back at ten times",
+            &good.replace(&windows(1, read_back), &windows(1, (read_back.0, read_back.1 * 10))),
+            "past the ceiling",
+        )?;
+        refused(
+            "a hold the load's own report reads back",
+            &[first.as_str(), &opening, &hold, &own].concat(),
+            "reported nothing between",
+        )?;
+        refused("a report that skips a CPU", &good.replace(&windows(0, (3_000_000, 1_100_000)), ""), "names cpu1 at place 0")?;
         Ok(())
     }
 
@@ -441,7 +595,7 @@ mod checks {
                  each entry — coverage of the binary an image ships is what it costs."
             ));
         }
-        // **The other shape [`schedule`] cannot see**: a binary a machine
+        // **The other shape [`registered`] cannot see**: a binary a machine
         // test drives under a *different* name is still discovered here, still runs
         // on the shared boot, and there passes on its exit code with nothing staged
         // for it to act on.
@@ -491,7 +645,7 @@ mod checks {
             ));
         }
 
-        println!(
+        eprintln!(
             "  [split] {} shared binaries on the shipping kernel, {} on the actuator one, {} of them \
              driven elsewhere and declared",
             registry.len() - listed.len(),
@@ -563,59 +717,134 @@ mod checks {
         Ok(())
     }
 
-    /// Whether a run that did not attempt most of the suite's measured cost says so.
-    ///
-    /// **The failure mode the tier introduces is silence, not a wrong answer.** A
-    /// green run holding back 60 tests and a green run holding back none print the
-    /// same word, and the difference between them is the whole reason a reach flag
-    /// exists. Nothing else can see whether the *run* mentions it, and a run nobody
-    /// can tell apart from a full one is how a temporary measure becomes permanent.
-    ///
-    /// Both directions, because the second is the one that rots quietly: a suite
-    /// that ran everything must not claim to have held anything back either, or the
-    /// line stops carrying information the day somebody makes it unconditional.
+    /// A run takes every declared test its filter matches, of either
+    /// architecture.
     #[test]
-    fn nightly_tier_is_announced() -> Result<(), String> {
-        let held = vec![
-            (Tier::Nightly, vec!["desktop_window_child".to_string(), "sshd_exec".to_string()]),
-            (Tier::Weekly, vec!["iommu_empty_domain".to_string()]),
+    fn a_run_selects_by_filter() -> Result<(), String> {
+        let taken = |filter: Option<&str>| -> BTreeSet<String> {
+            let (machine, screen) = select(filter);
+            machine
+                .iter()
+                .map(|n| n.to_string())
+                .chain(screen.iter().map(|(n, _)| n.to_string()))
+                .collect()
+        };
+        let names = |of: &[&str]| -> BTreeSet<String> { of.iter().map(|n| n.to_string()).collect() };
+        let every: BTreeSet<String> = declared().map(String::from).collect();
+        let cases = [
+            (None, every),
+            (Some("virt_el2"), names(&["virt_el2_drop"])),
+            (Some("el2_drop"), names(&["virt_el2_drop"])),
+            (Some("nested_nmi"), names(&["nested_nmi_is_loud"])),
+            (Some("no_such_test"), BTreeSet::new()),
         ];
-        let announced = Tally::new().holding_back(held).summary(1, Duration::ZERO, Duration::ZERO);
-        for want in [
-            "not run without --nightly:",
-            "desktop_window_child, sshd_exec",
-            "`cargo test --test toyos-build -- --nightly` runs them",
-            "not run without --weekly:",
-            "`cargo test --test toyos-build -- --weekly` runs them",
-            "2 held back for --nightly, 1 held back for --weekly",
-        ] {
-            if !announced.contains(want) {
-                return Err(format!("a run holding tests back never says {want:?}:\n{announced}"));
+        for (filter, want) in cases {
+            let got = taken(filter);
+            if got != want {
+                return Err(format!(
+                    "filter {filter:?}: took {:?} it should not and left out {:?}",
+                    got.difference(&want).collect::<Vec<_>>(),
+                    want.difference(&got).collect::<Vec<_>>()
+                ));
             }
         }
-        let whole = Tally::new().holding_back(vec![(Tier::Weekly, Vec::new())]).summary(
-            1,
-            Duration::ZERO,
-            Duration::ZERO,
-        );
-        if whole.contains("--") || whole.contains("held back") {
-            return Err(format!("a run that held nothing back says it did:\n{whole}"));
+        Ok(())
+    }
+
+    /// Two rows under one name are refused, whether both are shared-boot names
+    /// or one is a declared registry's or the metal table's.
+    #[test]
+    fn a_name_registered_twice_is_refused() -> Result<(), String> {
+        let shared = |of: &[&str]| -> Vec<String> { of.iter().map(|n| n.to_string()).collect() };
+        let apart = shared(&["shared_one", "shared_two"]);
+        let names = registered(&apart)?;
+        for name in ["shared_one", "shared_two", "virt_el2_drop", "control_regs"] {
+            if !names.contains(name) {
+                return Err(format!("{name} is not among the {} registered names", names.len()));
+            }
+        }
+        for twice in [
+            shared(&["shared_one", "shared_one"]),
+            shared(&["shared_one", "virt_el2_drop"]),
+            shared(&["shared_one", "control_regs"]),
+        ] {
+            let twice_name = &twice[1];
+            match registered(&twice) {
+                Err(refusal) if refusal.contains(&format!("{twice_name} is registered twice")) => {}
+                other => {
+                    let answer = other.map(|names| names.len());
+                    return Err(format!("{twice_name} registered twice was answered {answer:?}"));
+                }
+            }
         }
         Ok(())
     }
 
     #[test]
     fn screen_decoder() {
-        screen::self_test();
+        screen_checks::self_test();
     }
 
     #[test]
     fn metal_audio_judges() -> Result<(), String> {
-        audio::judges_verdict()
+        audio_checks::judges_verdict()
     }
 
-    /// `blackbox_unclaimed_page` is a registration `tests/metal-profile.toml` already prices,
-    /// so sizing and batching run for real.
+    #[test]
+    fn metal_usb_judge() -> Result<(), String> {
+        usb_checks::transport_break_verdict()
+    }
+
+    #[test]
+    fn metal_lease_judged_is_this_boots_own() {
+        lan_checks::the_lease_judged_is_this_boots_own();
+    }
+
+    #[test]
+    fn metal_stop_owes_its_record_and_leaves_no_operation_open() {
+        metal_checks::the_stop_owes_its_record_and_leaves_no_operation_open();
+    }
+
+    #[test]
+    fn metal_bound_fires_within_one_period_of_itself() {
+        metal_checks::a_bound_fires_within_one_period_of_itself();
+    }
+
+    #[test]
+    fn metal_name_measured_twice_is_refused() {
+        metal_checks::a_name_measured_twice_is_refused();
+    }
+
+    #[test]
+    fn metal_boot_with_a_failure_of_its_own_adds_no_row() {
+        metal_checks::a_boot_with_a_failure_of_its_own_adds_no_row();
+    }
+
+    #[test]
+    fn metal_name_two_boots_measured_is_refused() {
+        metal_checks::a_name_two_boots_measured_is_refused();
+    }
+
+    #[test]
+    fn metal_reading_past_its_record_fails_and_moves_nothing() {
+        metal_checks::a_reading_past_its_record_fails_and_moves_nothing();
+    }
+
+    #[test]
+    fn metal_run_under_another_bios_fails_and_records_nothing() {
+        metal_checks::a_run_under_another_bios_fails_and_records_nothing();
+    }
+
+    #[test]
+    fn metal_failing_shared_member_fails_its_boot() {
+        metal_checks::a_failing_shared_member_fails_its_boot();
+    }
+
+    #[test]
+    fn metal_cleared_page_owes_no_panel() {
+        metal_checks::a_cleared_page_owes_no_panel();
+    }
+
     #[test]
     fn metal_list_from_parse_reaches_run_without_the_machine() -> Result<(), String> {
         let args: Vec<String> = ["--metal", "--list"].iter().map(ToString::to_string).collect();
@@ -630,10 +859,218 @@ mod checks {
             .find(|(name, _)| *name == "blackbox_unclaimed_page")
             .map(|(name, decl)| vec![(*name, decl)])
             .ok_or_else(|| "blackbox_unclaimed_page is not registered".to_string())?;
-        let verdict = metal::run(mode, &selected, &[], &[], &[], true);
+        let verdict = metal::run(mode, &selected, &[], &[], true);
         if verdict != metal::Verdict::Green {
             return Err(format!("--metal --list produced {verdict:?}, not Green"));
         }
         Ok(())
+    }
+
+    /// The judge a metal registration runs.
+    fn metal_judge(name: &str) -> fn(&[&metal::Readback]) -> Result<(), String> {
+        match METAL.iter().find(|(row, _)| *row == name) {
+            Some((_, metal::Metal { judge, .. })) => *judge,
+            None => panic!("{name} runs no metal judge"),
+        }
+    }
+
+    /// One boot's readback, out of a `loader.log` and a `logkeeper` text.
+    fn readback(label: &str, loader: &str, log: &str) -> metal::Readback {
+        let boot = "back_secs 50\nstick_secs 0\n";
+        metal::Readback::new(label, std::path::PathBuf::new(), loader.into(), log.into(), boot)
+            .expect("a boot file naming both numbers")
+    }
+
+    /// The pass before the handoff, which every `loader.log` opens with.
+    const HANDOFF: &str = "Loader log: the kernel handoff begins, so this file ends here\n";
+
+    /// Four judges fed a T14 readback's lines: each record they ask for is
+    /// written after the file was made whole, so it crosses only on the sealed
+    /// page — and a page without it still reds.
+    #[test]
+    fn metal_judges_read_the_page_for_what_only_the_page_carries() {
+        let done = |tail: &str| {
+            format!(
+                "{HANDOFF}{}\nToyOS Bootloader 1.0\n\
+                 Black box: the last boot read DONE, so it handed the machine back on purpose and \
+                 this chain ends here\n\
+                 | log: this boot's newest records follow, newest first (16)\n{tail}\
+                 Loader log: the last boot is accounted for, so this pass resets the machine\n",
+                bootlog::SEPARATOR
+            )
+        };
+        let rebooted = "| log-tail: [1.516 cpu0] Rebooting.\n";
+        let stopped = "| log-tail: [1.209 cpu0] stop: 13 of 13 userland thread(s) stopped across 8 \
+                       cpu(s) in 0 ms of a 2010 ms budget over 1 sweep(s), 0 of 38 userland block \
+                       operation(s) still open\n";
+
+        let jobcase =
+            "[2026-09-29 10:40:36 0.000 cpu0 boot] ACPI: reset register SystemIO 0xcf9 <- 0x06\n";
+        let judge = metal_judge("machine_reboot");
+        assert_eq!(judge(&[&readback("jobcase", &done(rebooted), jobcase)]), Ok(()));
+        assert!(judge(&[&readback("jobcase", &done(stopped), jobcase)]).is_err());
+
+        let wedged = |tail: &str| {
+            format!(
+                "{HANDOFF}{}\nToyOS Bootloader 1.0\n\
+                 Previous boot's panic: the last boot read WEDGED, so a bound of its own ended it \
+                 and this chain ends here\n\
+                 | the boot deadline expired: a bound of 120000 ms, reached at 120061 ms, with this \
+                 machine in `complete`. The tail of the log ring follows ... which is what nothing \
+                 was draining.\n\
+                 | usb-quiesce: no barrier was taken, so this reset is not the shutdown's\n{tail}\
+                 Loader log: the last boot is accounted for, so this pass resets the machine\n",
+                bootlog::SEPARATOR
+            )
+        };
+        let kernel = "[2026-09-29 10:33:28 0.000 cpu0 boot] panic console: armed 1920x1080 \
+                      stride=1920 format=1 at 0x4000000000, write-combining\n";
+        let wedge = "| [1.509 cpu0] wedge: staged, and only the boot deadline ends this machine: \
+                     every CPU stops taking scheduler passes from here\n\
+                     | [1.509 cpu0] wedge: cpu0 arrived with interrupts off, through the syscall \
+                     gate, and takes them again here\n\
+                     | [1.509 cpu1] wedge: cpu1 arrived with interrupts on\n";
+        let judge = metal_judge("boot_deadline_ends_a_wedge");
+        assert_eq!(judge(&[&readback("deadlinewedge", &wedged(wedge), kernel)]), Ok(()));
+        assert!(judge(&[&readback("deadlinewedge", &wedged(""), kernel)]).is_err());
+
+        let sweep = "| [1.526 cpu0] usb-load: sweeping disk 0 from block 6569336 to 7507812, \
+                     rewriting each run with the bytes just read from it, until this machine is \
+                     reset out from under it\n";
+        let judge = metal_judge("usb_reset_records_the_phase_it_cut");
+        assert_eq!(judge(&[&readback("usbload", &wedged(sweep), kernel)]), Ok(()));
+        assert!(judge(&[&readback("usbload", &wedged(""), kernel)]).is_err());
+    }
+
+    /// The foreign-identity arm's pass after the reset: the record it cleared
+    /// was sealed `DONE`, so the stop the arm staged finished.
+    #[test]
+    fn the_foreign_record_judge_demands_the_stop_sealed_done() {
+        let loader = format!(
+            "{HANDOFF}{}\nToyOS Bootloader 1.0\n\
+             Black box: 0x8000000 held a DONE record another image left in this memory ([3e, d4, \
+             0b, d4, 87, ad, 6a, 47, 84, b4, af, c3, f3, 6b, f7, 81], and this stick is [c1, d4, \
+             0b, d4, 87, ad, 6a, 47, 84, b4, af, c3, f3, 6b, f7, 81]), armed at 2026-09-29-131341. \
+             It has been cleared and this pass boots its kernel\n\
+             Boot attempts: this image has had the machine 1 time(s) without reporting; now 0\n\
+             {}\n\
+             Loader log: the last boot is accounted for, so this pass resets the machine\n",
+            bootlog::SEPARATOR,
+            bootlog::HUNG_WITHOUT_A_RECORD
+        );
+        let kernel = "[2026-09-29 13:13:43 1.171 cpu0] Boot: complete (1171ms)\n";
+        let judge = metal_judge("blackbox_foreign_record");
+        assert_eq!(judge(&[&readback("foreignrecord", &loader, kernel)]), Ok(()));
+        for state in ["PANIC", "WEDGED"] {
+            let ended = loader.replace("held a DONE record", &format!("held a {state} record"));
+            assert!(judge(&[&readback("foreignrecord", &ended, kernel)]).is_err());
+            let stale = format!(
+                "Black box: 0x8000000 held a DONE record another image left in this memory\n{ended}"
+            );
+            assert!(judge(&[&readback("foreignrecord", &stale, kernel)]).is_err());
+        }
+        let unbounded = loader.replace(bootlog::HUNG_WITHOUT_A_RECORD, "");
+        assert!(judge(&[&readback("foreignrecord", &unbounded, kernel)]).is_err());
+    }
+
+    /// A T14 controller's handoff: it publishes USB Legacy Support and
+    /// firmware never claimed it. The T14 has two, and each is judged.
+    #[test]
+    fn the_xecp_judge_reads_the_t14s_handoff() {
+        let t14 = "[2026-09-29 11:05:25 0.253 cpu0] xHCI: xecp selftest 8/8 malformed lists refused\n\
+                   [2026-09-29 11:05:25 0.253 cpu0] xHCI: firmware did not claim the controller \
+                   (USBLEGSUP 0x01002201)\n\
+                   [2026-09-29 11:05:25 0.253 cpu0] xHCI: USBLEGCTLSTS 0xe0000000 -> 0x00000000 \
+                   (SMI generation off)\n\
+                   [2026-09-29 11:05:25 0.253 cpu0] xHCI: controller reset\n\
+                   [2026-09-29 11:05:25 0.254 cpu0] xHCI: controller started\n";
+        assert_eq!(xhci_xecp(t14), Ok(()));
+        assert_eq!(xhci_xecp(&format!("{t14}{t14}")), Ok(()));
+        // Firmware that kept the controller handed nothing over.
+        let held = t14.replace(
+            "firmware did not claim the controller (USBLEGSUP 0x01002201)",
+            "firmware still owns the controller after 1000ms (USBLEGSUP 0x01010001 -> \
+             0x01010001) — resetting it anyway",
+        );
+        assert!(xhci_xecp(&held).is_err());
+        assert!(xhci_xecp(&format!("{t14}{held}")).is_err());
+        let kept = held.replace("xHCI: controller reset", "xHCI: 34 scratchpad buffers configured");
+        assert!(xhci_xecp(&format!("{t14}{kept}")).is_err());
+        // A second controller's handoff with no reset of its own, and a reset
+        // with no handoff before it.
+        let unreset = t14.replace("xHCI: controller reset", "xHCI: 34 scratchpad buffers configured");
+        assert!(xhci_xecp(&format!("{t14}{unreset}")).is_err());
+        assert!(xhci_xecp(&format!("{unreset}{t14}")).is_err());
+        let unhanded = t14.replace("firmware did not claim the controller", "USB 3.1 on ports 2..=5");
+        assert!(xhci_xecp(&format!("{t14}{unhanded}")).is_err());
+        let silent = unhanded.replace("xHCI: controller reset", "xHCI: 34 scratchpad buffers configured");
+        assert!(xhci_xecp(&silent).is_err());
+    }
+
+    /// `dlopen_dedup` reads `test_rs_std_tls` by path.
+    #[test]
+    fn a_shared_chunk_stages_every_binary_its_members_name() {
+        let source = "const NEEDS_A_LIB: &str = \"/system/bin/test_rs_std_tls\";\n";
+        let bins: Vec<(String, Vec<u8>)> = ["dlopen_dedup", "std_tls", "fs_large_file", "libfoo.so"]
+            .iter()
+            .map(|name| ((*name).to_string(), Vec::new()))
+            .collect();
+        let jobs = vec!["test_rs_dlopen_dedup".to_string()];
+        let staged = |text: &str| -> Vec<String> {
+            metal::reached(text, &jobs, &bins).into_iter().map(|(path, _)| path).collect()
+        };
+        assert_eq!(
+            staged(&format!("test_rs_dlopen_dedup\n{source}")),
+            ["bin/test_rs_std_tls", "lib/libfoo.so"]
+        );
+        // A longer name is another binary's.
+        let longer = source.replace("test_rs_std_tls", "test_rs_std_tls_dlopen");
+        assert_eq!(staged(&format!("test_rs_dlopen_dedup\n{longer}")), ["lib/libfoo.so"]);
+    }
+
+    /// `03_struct`'s output as `ccheck` prints it: the expectation the corpus
+    /// stages is that, under the guest's `trim_end`.
+    #[test]
+    fn the_c_corpus_stages_the_expectation_the_host_compares() {
+        let got = "12\n34\n12\n34\n56\n78\n~fred()";
+        let boot = c_corpus_metal(&[("03_struct".to_string(), Vec::new())], |_| true);
+        let staged = boot
+            .files
+            .iter()
+            .find(|(path, _)| path == "expect/03_struct")
+            .map(|(_, bytes)| String::from_utf8(bytes.clone()).expect("an expectation is text"))
+            .expect("03_struct's expectation is staged");
+        assert_eq!(staged.trim_end(), got);
+    }
+
+    /// `arm_psci_call` as QEMU 11.1.1's `trace-events` formats it, with and
+    /// without the log backend's `pid@time:` head, and every way a power-off's
+    /// trace falls short of PSCI's recipe refused, a CPU left on calling
+    /// `CPU_OFF` among them.
+    #[test]
+    fn psci_power_off_judge() {
+        let line = |head: &str, function: u64, cpu: u64| {
+            format!("{head}arm_psci_call PSCI Call x0=0x{function:016x} x1=0x0000000000000000 x2=0x0000000000000000 x3=0x0000000000000000 cpuid=0x{cpu:x}")
+        };
+        let text = [line("", PSCI_CPU_OFF, 1), line("4242@1759272000.123456:", PSCI_SYSTEM_OFF, 0)].join("\n");
+        assert_eq!(psci_calls(&text), Ok(vec![(PSCI_CPU_OFF, 1), (PSCI_SYSTEM_OFF, 0)]));
+        assert!(psci_calls("arm_psci_call PSCI Call x0=?").is_err());
+
+        let (off, system_off) = (PSCI_CPU_OFF, PSCI_SYSTEM_OFF);
+        let affinity_info = 0xC400_0004;
+        assert_eq!(psci_powered_off(&[(off, 1), (affinity_info, 3), (off, 2), (off, 0), (system_off, 3)], 4, &[]), Ok(3));
+        assert_eq!(psci_powered_off(&[(off, 1), (off, 0), (system_off, 3)], 4, &[2]), Ok(3));
+        for short in [
+            vec![(off, 1), (off, 0), (system_off, 3)],
+            vec![(off, 1), (off, 0), (system_off, 3), (off, 2)],
+            vec![(off, 1), (off, 1), (off, 2), (off, 0), (system_off, 3)],
+            vec![(off, 1), (off, 2), (off, 0)],
+            vec![(off, 1), (off, 2), (off, 0), (system_off, 3), (system_off, 3)],
+            vec![(off, 1), (off, 2), (off, 0), (PSCI_SYSTEM_RESET, 3), (system_off, 3)],
+            vec![(off, 1), (off, 2), (off, 3), (system_off, 3)],
+        ] {
+            assert!(psci_powered_off(&short, 4, &[]).is_err(), "{short:x?}");
+        }
+        assert!(psci_powered_off(&[(off, 1), (off, 2), (off, 0), (system_off, 3)], 4, &[2]).is_err());
     }
 }

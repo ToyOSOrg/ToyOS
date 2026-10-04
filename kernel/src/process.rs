@@ -5,7 +5,7 @@
 //! symbols off the task's own record ([`resolve_user_symbol`]), never off
 //! this table.
 //!
-//! `toyos-proclife` decides lifecycle transitions; this file only performs them.
+//! `kernel::proclife` decides lifecycle transitions; this file only performs them.
 
 use alloc::alloc::{alloc_zeroed, dealloc, Layout};
 use alloc::string::String;
@@ -26,16 +26,16 @@ use crate::loader::{alloc_kernel_stack, thread_start, TlsBlock};
 
 pub use toyos_abi::{Pid, Tid};
 pub use crate::scheduler::TaskId;
-use toyos_abi::syscall::EndowEntry;
+use toyos_abi::syscall::{EndowEntry, SyscallError, MAX_LIBRARIES, MAX_REGIONS};
 
 /// The lifecycle's decisions; this file only performs them.
-pub use toyos_proclife::{ThreadLocation, Watch};
-use toyos_proclife::{join, reap, spawn as proclife_spawn, teardown as proclife, Lifecycle, Processes};
+pub use kernel::proclife::{ThreadLocation, Watch};
+use kernel::proclife::{join, reap, spawn as proclife_spawn, teardown as proclife, tree, Lifecycle, Node, Processes};
 
 /// One `EndowEntry` on the wire; `loader::start` and [`Endowments::encode`] both index by it.
 pub const ENDOW_ENTRY_LEN: usize = core::mem::size_of::<EndowEntry>();
 
-pub use crate::loader::{build_child_handles, spawn, spawn_init, INIT_PATH};
+pub use crate::loader::{build_child_handles, spawn, spawn_supervisor, SUPERVISOR_PATH};
 
 /// Page tables shared between a process and all its threads.
 pub type PageTables = Arc<Lock<crate::mm::paging::AddressSpace>>;
@@ -333,32 +333,38 @@ pub struct ProcessEntry {
     threads: crate::id_map::IdMap<Tid, ThreadEntry>,
     /// Set once, with the exit's code, by the exit or kill that claims teardown; checked by `spawn_thread` so no thread appears after the retire set.
     teardown_code: Option<i32>,
+    /// Its parent, children and depth, answered by no syscall; `kernel::proclife::tree` reads and writes it.
+    node: Node,
+    /// The exit its teardown made, kept until every end below it is published.
+    exit: Option<crate::object::process::Exit>,
 }
 
 impl ProcessEntry {
-    /// Create a new process with its main thread (always `Tid(0)`).
+    /// Create a new process with its main thread (always `Tid(0)`), at `object`'s pid.
     pub fn new(
-        pid: Pid,
+        object: Arc<crate::object::process::ProcessObject>,
         name: [u8; THREAD_NAME_LEN],
         process_data: Arc<Lock<ProcessData>>,
         symbols: Arc<SymbolTable>,
         main_thread: ThreadEntry,
+        node: Node,
     ) -> Self {
         let mut threads = crate::id_map::IdMap::new();
         let main_tid = threads.insert(main_thread);
         Self {
-            pid,
-            object: crate::object::process::ProcessObject::new(pid),
+            pid: object.pid(),
+            object,
             name,
             process_data,
             symbols,
             main_tid,
             threads,
             teardown_code: None,
+            node,
+            exit: None,
         }
     }
     pub fn pid(&self) -> Pid { self.pid }
-    pub fn object(&self) -> &Arc<crate::object::process::ProcessObject> { &self.object }
     pub fn name(&self) -> &[u8; THREAD_NAME_LEN] { &self.name }
     pub fn name_str(&self) -> &str {
         core::str::from_utf8(&self.name).unwrap_or("?").trim_end_matches('\0')
@@ -374,7 +380,7 @@ impl ProcessEntry {
     pub fn tearing_down(&self) -> bool { self.teardown_code.is_some() }
 }
 
-/// The lifecycle face of an entry: only the fields `toyos-proclife` decides against, and nothing else this type carries.
+/// The lifecycle face of an entry: only the fields `kernel::proclife` decides against, and nothing else this type carries.
 impl Lifecycle for ProcessEntry {
     fn main_tid(&self) -> Tid { self.main_tid }
     fn teardown_code(&self) -> Option<i32> { self.teardown_code }
@@ -395,26 +401,33 @@ impl Lifecycle for ProcessEntry {
             f(tid, thread.state);
         }
     }
+    fn thread_count(&self) -> usize {
+        self.threads.len()
+    }
+    fn node(&self) -> &Node { &self.node }
+    fn node_mut(&mut self) -> &mut Node { &mut self.node }
 }
 
 /// The lifecycle face of the table; `published_exit` comes off the [`ProcessObject`](crate::object::process::ProcessObject) rather than the table, since it outlives the entry.
 impl Processes for ProcessTable {
     type Proc = ProcessEntry;
 
-    // Via `IdMap::get`, not `self.get(pid)`: the inherent method and a trait method of the same name resolve to the inherent one, so renaming this would turn it into infinite recursion.
     fn get(&self, pid: Pid) -> Option<&ProcessEntry> {
-        crate::id_map::IdMap::get(self, pid)
+        self.entries.get(&pid)
     }
     fn get_mut(&mut self, pid: Pid) -> Option<&mut ProcessEntry> {
-        crate::id_map::IdMap::get_mut(self, pid)
+        self.entries.get_mut(&pid)
     }
     fn published_exit(&self, pid: Pid) -> bool {
-        crate::id_map::IdMap::get(self, pid).is_some_and(|p| p.object.finished())
+        self.entries.get(&pid).is_some_and(|p| p.object.finished())
     }
     fn each_pid(&self, f: &mut dyn FnMut(Pid)) {
-        for (pid, _) in self.iter() {
+        for &pid in self.entries.keys() {
             f(pid);
         }
+    }
+    fn pids(&mut self) -> &mut kernel::proclife::Pids {
+        &mut self.pids
     }
 }
 
@@ -492,9 +505,14 @@ pub struct ElfInfo {
     pub exe_eh_frame_hdr: (u64, u64),
     /// One past the executable's last byte.
     pub exe_vaddr_max: u64,
+    /// The executable's program header table as (address, count), `(0, 0)` with no executable.
+    pub exe_phdrs: (u64, u16),
     /// Paths of dlopen'd libraries (parallel to loaded_libs).
     pub lib_paths: Vec<String>,
 }
+
+// The ledger stops at `MAX_LIBRARIES`, and a doubling from below it stays inside one heap allocation.
+const _: () = assert!(2 * MAX_LIBRARIES * core::mem::size_of::<elf::LoadedLib>() <= crate::mm::MAX_HEAP_ALLOC);
 
 impl ElfInfo {
     /// The state of a process with no ELF at all (a kernel thread). Not `Default`: `next_tls_module_id`'s only honest default is 1, not 0; written here, not at the one call site, so a field added to [`ElfInfo`] stops this build too.
@@ -510,6 +528,7 @@ impl ElfInfo {
             elf_base: UserAddr::new(0),
             exe_eh_frame_hdr: (0, 0),
             exe_vaddr_max: 0,
+            exe_phdrs: (0, 0),
             lib_paths: Vec::new(),
         }
     }
@@ -645,6 +664,12 @@ pub struct MmapRegion {
     pub _pages: Option<PageAlloc>,
 }
 
+// One region per record, and a power of two: the ledger's doubling stops at it, inside one heap allocation.
+const _: () = assert!(
+    MAX_REGIONS.is_power_of_two()
+        && MAX_REGIONS * core::mem::size_of::<MmapRegion>() <= crate::mm::MAX_HEAP_ALLOC
+);
+
 
 /// Zero-sized proof of running on the per-CPU idle stack; required by `collect_orphan_zombies` so it never drops the thread entry it runs on.
 #[derive(Clone, Copy)]
@@ -657,7 +682,39 @@ impl IdleProof {
 }
 
 
-pub type ProcessTable = crate::id_map::IdMap<Pid, ProcessEntry>;
+/// Every process by pid, and the pids not yet issued.
+pub struct ProcessTable {
+    entries: crate::hasher::HashMap<Pid, ProcessEntry>,
+    pids: kernel::proclife::Pids,
+}
+
+impl ProcessTable {
+    fn new() -> Self {
+        Self { entries: crate::hasher::HashMap::default(), pids: kernel::proclife::Pids::default() }
+    }
+
+    pub fn get(&self, pid: Pid) -> Option<&ProcessEntry> {
+        self.entries.get(&pid)
+    }
+
+    pub fn get_mut(&mut self, pid: Pid) -> Option<&mut ProcessEntry> {
+        self.entries.get_mut(&pid)
+    }
+
+    pub fn remove(&mut self, pid: Pid) -> Option<ProcessEntry> {
+        self.entries.remove(&pid)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (Pid, &ProcessEntry)> {
+        self.entries.iter().map(|(&pid, proc)| (pid, proc))
+    }
+
+    /// `entry`, at the pid it was admitted with, which no entry has held.
+    pub fn insert(&mut self, entry: ProcessEntry) {
+        let pid = entry.pid;
+        assert!(self.entries.insert(pid, entry).is_none(), "ProcessTable::insert: pid {pid} held twice");
+    }
+}
 
 pub static PROCESS_TABLE: Lock<Option<ProcessTable>> = Lock::new(None);
 
@@ -706,18 +763,7 @@ pub fn try_for_each_thread(mut f: impl FnMut(ThreadCensus<'_>)) -> bool {
     true
 }
 
-/// The object a handle to `pid` would name, for a process still in the table.
-/// A kernel thread's pid names none: it has no Ring 3 boundary a kill could end it at.
-pub fn process_object(pid: Pid) -> Option<Arc<crate::object::process::ProcessObject>> {
-    let guard = PROCESS_TABLE.lock();
-    let proc = guard.as_ref()?.get(pid)?;
-    if crate::sched::kthread::is_kernel_task(TaskId(pid, proc.main_tid())) {
-        return None;
-    }
-    Some(Arc::clone(proc.object()))
-}
-
-/// Accounting for a process. `None` only in the window between a live process and its published exit (the process being torn down right now).
+/// Accounting for a process.
 pub fn stats_of(
     object: &crate::object::process::ProcessObject,
 ) -> Option<toyos_abi::syscall::ProcessStats> {
@@ -811,6 +857,72 @@ pub fn with_process_data<R>(f: impl FnOnce(&mut ProcessData) -> R) -> R {
     f(&mut guard)
 }
 
+/// Whom a new process is placed under.
+#[derive(Clone, Copy)]
+pub enum Parent {
+    /// No process: the supervisor, which the kernel starts.
+    Root,
+    /// The spawner, or the process whose `self` its place named.
+    Under(Pid),
+}
+
+/// A spawn admitted under its parent, holding the pid its child will have and the parent's publication: [`Admission::land`] hands both to the child, and a drop — every way a spawn's build fails — gives both back.
+pub struct Admission(Option<tree::Admitted>);
+
+impl Admission {
+    /// The question at the top of a spawn, before anything is built: `Gone` for a parent being torn down, and `ResourceExhausted`, which the log names, for a child more than `MAX_DEPTH` below the supervisor or no pid left to issue.
+    pub fn ask(parent: Parent) -> Result<Self, SyscallError> {
+        let place = match parent {
+            Parent::Root => None,
+            Parent::Under(place) => Some(place),
+        };
+        let admit = {
+            let mut guard = PROCESS_TABLE.lock();
+            tree::admit_child(guard.as_mut().unwrap(), place)
+        };
+        match admit {
+            tree::Admit::Yes(admitted) => Ok(Self(Some(admitted))),
+            tree::Admit::Gone => Err(SyscallError::Gone),
+            tree::Admit::TooDeep { depth } => {
+                log!("spawn: refused under pid {} at depth {depth}, more than {} below the supervisor",
+                    place.expect("spawn: the supervisor is admitted at depth 0"), kernel::proclife::MAX_DEPTH);
+                Err(SyscallError::ResourceExhausted)
+            }
+            tree::Admit::NoPid => {
+                log!("spawn: refused, every pid below {} is issued", Pid::MAX);
+                Err(SyscallError::ResourceExhausted)
+            }
+        }
+    }
+
+    pub fn pid(&self) -> Pid {
+        self.0.as_ref().expect("Admission: taken only by land, which consumes it").pid()
+    }
+
+    /// Land the child in the `PROCESS_TABLE` hold `insert` puts its entry in and schedules its thread in. A parent claimed since the admission has walked its children, so the child is claimed in this hold too, and the retires answered are the spawner's to post with the lock given up.
+    pub fn land<R>(
+        mut self,
+        table: &mut ProcessTable,
+        insert: impl FnOnce(&mut ProcessTable, Node) -> R,
+    ) -> (R, Vec<ThreadSched>) {
+        let admitted = self.0.take().expect("Admission: landed once");
+        let pid = admitted.pid();
+        let (inserted, retire) = tree::land_child(table, admitted, KILLED_EXIT_CODE, insert);
+        (inserted, scheds(table, pid, retire))
+    }
+}
+
+impl Drop for Admission {
+    fn drop(&mut self) {
+        let Some(admitted) = self.0.take() else { return };
+        let ready = {
+            let mut guard = PROCESS_TABLE.lock();
+            tree::refuse_child(guard.as_mut().unwrap(), admitted)
+        };
+        publish_climb(ready);
+    }
+}
+
 /// Spawn a thread within the current process.
 pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Option<Tid> {
     // Phase 1: parent's data + address space (table lock dropped after).
@@ -821,7 +933,7 @@ pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Op
         // Not `is_yes()`: a missing entry here means this thread's own process was reaped out from under it, which panics rather than refuses.
         match proclife_spawn::admit_thread_start(table, parent_process) {
             proclife_spawn::Admit::Yes => {}
-            proclife_spawn::Admit::TearingDown => return None,
+            proclife_spawn::Admit::TearingDown | proclife_spawn::Admit::Full => return None,
             proclife_spawn::Admit::NoSuchProcess => {
                 panic!("spawn_thread: pid {parent_process} is spawning and is not in the table")
             }
@@ -842,11 +954,8 @@ pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Op
     // block's address is chosen from, so every pointer in it is final before
     // the mapping exists.
     let block = TlsBlock::build(&tls_modules, tls)?;
-    let (tls_alloc, fs_base, tp_offset) = {
+    let (tls_alloc, thread_pointer, tp_offset) = {
         let parent_data = process_data_arc.lock();
-        if crate::actuator::tls_rebase_window() {
-            crate::loader::rebase_window::spawning(arg);
-        }
         // VA exhaustion is a resource failure the process caused, not a kernel bug; the block drops on the way out, returning its pages.
         let published = block.publish(&parent_addr_space)?;
         drop(parent_data);
@@ -854,7 +963,7 @@ pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Op
     };
     let tls_alloc_tcb = tls_alloc.ptr().wrapping_add(tp_offset);
 
-    let (ks_alloc, ks_rsp) = match alloc_kernel_stack(thread_start, entry, stack_ptr, arg) {
+    let (ks_alloc, ks_sp) = match alloc_kernel_stack(thread_start, entry, stack_ptr, arg) {
         Some(ks) => ks,
         None => {
             tls_alloc.release(&parent_addr_space);
@@ -905,9 +1014,9 @@ pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Op
     let (sched, _dst) = scheduler::enqueue_new(
         TaskId(parent_process, tid),
         ks_alloc,
-        ks_rsp,
+        ks_sp,
         parent_addr_space,
-        fs_base,
+        thread_pointer,
         symbols,
     );
     proc.threads.get_mut(tid).unwrap().set_sched(sched);
@@ -962,6 +1071,8 @@ fn teardown_resources(
     crate::arch::trap::log_unclaimed();
 
     ops::close_all(&mut data.handles);
+    // Every thread has left, and none returns to Ring 3 to use them.
+    crate::isa::process_ends(pid);
     data.elf.elf_alloc.take();
     data.elf.loaded_libs.clear();
     data.mmap_regions.clear();
@@ -972,20 +1083,37 @@ fn teardown_resources(
     (syscall_total, syscall_total_ns)
 }
 
-/// Table-side teardown bookkeeping: drop the symbol table, total the CPU time of every thread still in the table, and mark the last thread out dead with `mark`.
-/// Caller must hold `PROCESS_TABLE`, be that thread and have freed the resources. Returns the object whose exit the caller publishes once the table lock is given up, with that total.
-#[must_use = "the exit must be published on the object returned"]
-fn teardown_bookkeeping(table: &mut ProcessTable, process_pid: Pid, tid: Tid, code: i32, mark: i32)
-                        -> (Arc<crate::object::process::ProcessObject>, u64) {
+/// Table-side teardown bookkeeping: drop the symbol table and total the CPU time of every thread still in the table.
+/// Caller must hold `PROCESS_TABLE`, be the last thread out and have freed the resources.
+fn teardown_bookkeeping(table: &mut ProcessTable, process_pid: Pid, code: i32) -> u64 {
     let proc = table.get_mut(process_pid)
         .expect("teardown_bookkeeping: process not found");
     proc.symbols = Arc::new(SymbolTable::empty());
     let cpu_ns: u64 = proc.threads.iter().map(|(_, t)| t.sched().map_or(0, scheduler::task_cpu_ns)).sum();
     let name = proc.name_str();
     log!("exit: {name} pid={process_pid} code={code} cpu={}ms", cpu_ns / 1_000_000);
-    let object = Arc::clone(&proc.object);
-    proclife::torn_down(table, process_pid, tid, mark);
-    (object, cpu_ns)
+    cpu_ns
+}
+
+/// Publish `first`, then every parent each publication lets go, child before parent: at most `kernel::proclife::MAX_DEPTH` + 1 publications, each with the table lock given up.
+/// Once published an entry is reapable, so only its parent's entry is read after.
+fn publish_climb(first: Option<tree::Publish>) {
+    let mut ready = first;
+    while let Some(publish) = ready {
+        let (object, exit) = {
+            let mut guard = PROCESS_TABLE.lock();
+            let proc = guard.as_mut().unwrap().get_mut(publish.pid)
+                .expect("publish_climb: a process is in the table until its exit is published");
+            let exit = proc.exit.take()
+                .expect("publish_climb: a count reaches zero only after the teardown kept its exit");
+            (Arc::clone(&proc.object), exit)
+        };
+        object.publish_exit(exit);
+        ready = publish.parent.and_then(|parent| {
+            let mut guard = PROCESS_TABLE.lock();
+            tree::published(guard.as_mut().unwrap(), parent, publish.pid)
+        });
+    }
 }
 
 /// One `ProcessStats`, from a process's own data; written once, since `SYS_PROCESS_STATS` samples a live process through the same fields the teardown snapshots.
@@ -1020,10 +1148,10 @@ pub fn stats_from(
     }
 }
 
-/// The last thread out's teardown of its process, on its own stack: free what the process holds, then publish its exit. Every other thread has left, so none can run in what is freed.
-/// The thread is in the process until the bookkeeping marks it, so a machine stop waits for every record and release here.
+/// The last thread out's teardown of its process, on its own stack: free what the process holds, then keep its exit until every end below it is published. Every other thread has left, so none can run in what is freed.
+/// The thread is in the process until the last table section marks it, so a machine stop waits for every record and release here.
 /// Waits on nothing: it runs on a killed thread whose one cancel may be spent, and at the exit boundary's preempt depth, where a park asserts.
-/// Publish happens after the table lock is released, and once published the entry is reapable, so nothing may read the table for this pid after.
+/// The section that marks it also lets the teardown's own hold on the publication go: the exit is published here when nothing below it is left, and otherwise by the last end below it.
 fn teardown(pid: Pid, tid: Tid, code: i32, mark: i32, process_data: &Arc<Lock<ProcessData>>) {
     let main_thread_data = {
         let guard = PROCESS_TABLE.lock();
@@ -1031,14 +1159,22 @@ fn teardown(pid: Pid, tid: Tid, code: i32, mark: i32, process_data: &Arc<Lock<Pr
         Arc::clone(&proc.threads.get(proc.main_tid).expect("teardown: a claimed process gives up no thread").thread_data)
     };
     let (syscall_total, syscall_total_ns) = teardown_resources(process_data, &main_thread_data, pid);
-    let (object, cpu_ns) = {
+    let cpu_ns = {
         let mut guard = PROCESS_TABLE.lock();
-        teardown_bookkeeping(guard.as_mut().unwrap(), pid, tid, code, mark)
+        teardown_bookkeeping(guard.as_mut().unwrap(), pid, code)
+    };
+    let stats = stats_from(&process_data.lock(), pid, cpu_ns, syscall_total, syscall_total_ns);
+    let ready = {
+        let mut guard = PROCESS_TABLE.lock();
+        let table = guard.as_mut().unwrap();
+        proclife::torn_down(table, pid, tid, mark);
+        table.get_mut(pid).expect("teardown: the process its last thread is in").exit =
+            Some(crate::object::process::Exit { code, stats });
+        tree::teardown_done(table, pid)
     };
     // The table says zombie now, which a sweep counts as nothing left to stop.
     crate::quiesce::note_progress();
-    let stats = stats_from(&process_data.lock(), pid, cpu_ns, syscall_total, syscall_total_ns);
-    object.publish_exit(crate::object::process::Exit { code, stats });
+    publish_climb(ready);
 }
 
 /// Take the running thread out of its process: out of its address space, its accounting into the process's, and its own mark in the table. The last thread out of a claimed process tears the process down here.
@@ -1055,36 +1191,52 @@ pub fn leave(chosen: Option<i32>) {
     match out {
         // The table says zombie now, which a sweep counts as nothing left to stop.
         proclife::Leave::NotLast => crate::quiesce::note_progress(),
-        proclife::Leave::Last { code, mark } => {
-            #[cfg(feature = "boot-actuators")]
-            crate::quiesce::last::hold(crate::quiesce::last::Last::Teardown);
-            teardown(pid, tid, code, mark, &process_data);
-        }
+        proclife::Leave::Last { code, mark } => teardown(pid, tid, code, mark, &process_data),
     }
 }
 
-/// Claim `pid`'s teardown for `code`: the winner gets the threads it retires, every one still in the process but `caller`; a loser, or a process already gone, gets none.
-fn claim(pid: Pid, code: i32, caller: Option<Tid>) -> Vec<ThreadSched> {
+/// Claim `pid`'s teardown for `code`, in one hold of the table lock: the winner gets the threads it retires, every one still in the process but `caller`, and owes `pid`'s children to its walk; a loser, or a process already gone, gets none.
+fn claim(pid: Pid, code: i32, caller: Option<Tid>, owed: &mut Vec<Pid>) -> Vec<ThreadSched> {
     let mut guard = PROCESS_TABLE.lock();
     let table = guard.as_mut().unwrap();
-    if !proclife::claim_teardown(table, pid, code) {
+    if !tree::claim(table, pid, code, owed) {
         return Vec::new();
     }
-    let proc = Processes::get(table, pid).expect("claim: the entry the claim just succeeded on");
-    proclife::retire_set(proc, caller)
-        .into_iter()
+    let proc = table.get(pid).expect("claim: a claimed process is in the table");
+    scheds(table, pid, proclife::retire_set(proc, caller))
+}
+
+/// The scheduler records of `pid`'s threads `tids`, which a claim of it retires.
+fn scheds(table: &ProcessTable, pid: Pid, tids: Vec<Tid>) -> Vec<ThreadSched> {
+    let proc = table.get(pid).expect("scheds: a claimed process is in the table");
+    tids.into_iter()
         .map(|tid| {
             proc.threads.get(tid).and_then(ThreadEntry::sched).cloned()
-                .expect("claim: a thread in the table has its scheduler record")
+                .expect("scheds: a thread in the table has its scheduler record")
         })
         .collect()
 }
 
+/// End every process an end owes, on the ending or killing thread: one claim per hold of the table lock, each claim's retires posted with it given up, and a reschedule owed between two claims served with nothing held.
+fn walk(mut owed: Vec<Pid>) {
+    while let Some(pid) = owed.pop() {
+        for sched in claim(pid, KILLED_EXIT_CODE, None, &mut owed) {
+            scheduler::post_retire(&sched);
+        }
+        if !owed.is_empty() && crate::preempt::need_resched() {
+            scheduler::yield_now();
+        }
+    }
+}
+
+/// End the calling thread's process with `code`, and everything below it.
 pub fn exit(code: i32) -> ! {
     let tid = current_tid();
-    for sched in claim(current_process(), code, Some(tid)) {
+    let mut owed = Vec::new();
+    for sched in claim(current_process(), code, Some(tid), &mut owed) {
         scheduler::post_retire(&sched);
     }
+    walk(owed);
     leave(None);
     scheduler::exit_current();
 }
@@ -1474,24 +1626,26 @@ pub fn dump_crash_diagnostics(fault_addr: u64, rip: u64) {
     }
     dump_region("rip", rip);
 
-    let fs_base = crate::arch::cpu::thread_pointer();
-    if fs_base != 0 {
-        log!("  FS base: {:#x}", fs_base);
-        if let Some(self_ptr) = read_user(fs_base) {
-            log!("  fs:[0] = {:#x} (expected {:#x})", self_ptr, fs_base);
+    let tp = crate::arch::cpu::thread_pointer();
+    if tp != 0 {
+        log!("  Thread pointer: {:#x}", tp);
+        if let Some(first) = read_user(tp) {
+            if matches!(crate::loader::TLS_VARIANT, toyos_elf::tls::Variant::II) {
+                log!("  [TP] = {:#x} (expected {:#x}, variant II's self-pointer)", first, tp);
+            }
             for i in 0..8u64 {
-                let addr = fs_base + i * 8;
+                let addr = tp + i * 8;
                 let Some(val) = read_user(addr) else { break };
                 log!("    TP+{:#x} = {:#018x}", i * 8, val);
             }
             log!("  TLS data before TP:");
             for i in 1..=4u64 {
-                let addr = fs_base - i * 8;
+                let addr = tp - i * 8;
                 let Some(val) = read_user(addr) else { break };
                 log!("    TP-{:#x} = {:#018x}", i * 8, val);
             }
         } else {
-            log!("  FS base {:#x} NOT MAPPED!", fs_base);
+            log!("  Thread pointer {:#x} NOT MAPPED!", tp);
         }
     }
 }
@@ -1556,14 +1710,69 @@ fn with_current_symbols(f: impl FnOnce(&crate::symbols::SymbolTable) -> bool) ->
     }
 }
 
-/// Kill the process an object names.
+/// Kill the process an object names, and everything below it.
 /// The handle is the whole authorization, not the parent relationship: a `Process` handle carrying `Rights::MANAGE` says who may, and it can be narrowed away or handed on. `Ok` for an already-gone process: the caller asked for it to be dead and it is.
-/// Returns once the victim's retires are posted, never waiting on it: the victim may be killing this caller. Its last thread out publishes the object's exit.
+/// Returns once every retire is posted, never waiting on a victim: one may be killing this caller. The object's exit is published once every end below it is.
 pub fn kill_process(object: &crate::object::process::ProcessObject) -> u64 {
-    for sched in claim(object.pid(), KILLED_EXIT_CODE, None) {
+    kill(object.pid());
+    0
+}
+
+fn kill(pid: Pid) {
+    let mut owed = Vec::new();
+    for sched in claim(pid, KILLED_EXIT_CODE, None, &mut owed) {
         scheduler::post_retire(&sched);
     }
-    0
+    walk(owed);
+}
+
+/// The process whose next spawn `debug_action::KILL_PLACE_AS_SPAWN_LANDS` marked; `Pid::MAX`, which is never issued, for none.
+#[cfg(feature = "test-actuators")]
+static MARKED_SPAWNER: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(Pid::MAX.0);
+
+/// Mark the calling process's next spawn that reaches its commit.
+#[cfg(feature = "test-actuators")]
+pub fn debug_mark_spawn() {
+    MARKED_SPAWNER.store(current_process().0, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Kill the place of a spawn its caller marked, and take the mark. The loader calls it between the spawn's commit and its landing.
+#[cfg(feature = "test-actuators")]
+pub fn debug_kill_marked_place(parent: Parent) {
+    use core::sync::atomic::Ordering::Relaxed;
+    let Parent::Under(place) = parent else { return };
+    if MARKED_SPAWNER.compare_exchange(current_process().0, Pid::MAX.0, Relaxed, Relaxed).is_ok() {
+        kill(place);
+    }
+}
+
+/// The process whose next landed spawn `debug_action::HOLD_SPAWN_UNTIL_CHILD_ENDS` marked; `Pid::MAX` for none.
+#[cfg(feature = "test-actuators")]
+static HELD_SPAWNER: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(Pid::MAX.0);
+
+/// Mark the calling process's next spawn whose child lands.
+#[cfg(feature = "test-actuators")]
+pub fn debug_mark_spawn_hold() {
+    HELD_SPAWNER.store(current_process().0, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Park the thread of a spawn its caller marked until `child`'s exit is published, and take the mark. The loader calls it once the child has landed.
+#[cfg(feature = "test-actuators")]
+pub fn debug_hold_marked_spawn(parent: Parent, child: &crate::object::process::ProcessObject) {
+    use core::sync::atomic::Ordering::Relaxed;
+    let Parent::Under(_) = parent else { return };
+    if HELD_SPAWNER.compare_exchange(current_process().0, Pid::MAX.0, Relaxed, Relaxed).is_ok() {
+        let parkable = scheduler::Parkable::at_entry();
+        // A cancelled wait is the spawner's own end, which the spawn's return meets.
+        let _ = crate::watch::wait_until(
+            &parkable,
+            child.watch(),
+            0,
+            kernel::sched::task::WaitClass::Other,
+            crate::time::Deadline::never(),
+            || child.finished(),
+        );
+    }
 }
 
 /// The shell convention for "died on SIGKILL"; kept because every test that reads one already spells it.
@@ -1584,7 +1793,32 @@ pub fn handle_fault(error: crate::object::HandleError) -> ! {
     exit(HANDLE_FAULT_EXIT_CODE)
 }
 
-/// AP entry into the scheduler. Called from smp::ap_entry once the machine is released.
+/// An AP's way into the idle loop on either architecture, once it has answered
+/// the BSP: it waits for the machine's release, then joins the scheduler.
 pub fn ap_idle() -> ! {
+    while !crate::smp::is_ready() {
+        core::hint::spin_loop();
+    }
+
+    // Only a committed CPU may join: an uncommitted AP has no scheduler slot and
+    // no shootdown targets it, so it halts. The acquire above makes the count visible.
+    let me = percpu::cpu_id();
+    if me >= crate::smp::cpu_count() {
+        log!("CPU {me}: bring-up did not commit; halting");
+        crate::arch::cpu::halt();
+    }
+
+    // Before touching anything not self-mapped: the acquire on the release
+    // makes the BSP's mappings visible, and this settles every TLB
+    // invalidation the wait could not take.
+    crate::arch::tlb::join();
+
+    crate::counters::bring_up();
+
+    // Once this CPU is committed and about to run something: the counter is
+    // per CPU, so a CPU nobody arms here is one the hard-lockup bound does not cover.
+    crate::hardlockup::arm_this_cpu();
+
+    log!("CPU {me}: joining scheduler");
     scheduler::enter_idle_loop();
 }

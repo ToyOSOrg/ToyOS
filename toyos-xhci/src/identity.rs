@@ -98,6 +98,15 @@ impl Serial {
     }
 }
 
+/// The first LANGID string descriptor zero offers (USB 2.0 §9.6.7), as it
+/// arrived; a device offering none names no string.
+pub fn first_language(arrived: &[u8]) -> Option<u16> {
+    match *arrived {
+        [length, 3, lo, hi, ..] if length >= 4 => Some(u16::from_le_bytes([lo, hi])),
+        _ => None,
+    }
+}
+
 impl core::fmt::Display for Serial {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -193,6 +202,16 @@ mod tests {
 
     const MS: Nanos = 1_000_000;
 
+    #[test]
+    fn a_language_is_read_only_from_a_string_descriptor_that_carries_one() {
+        assert_eq!(first_language(&[4, 3, 0x09, 0x04]), Some(0x0409));
+        assert_eq!(first_language(&[6, 3, 0x07, 0x04, 0x09, 0x04]), Some(0x0407), "the first");
+        assert_eq!(first_language(&[4, 3, 0x09]), None, "three bytes arrived");
+        assert_eq!(first_language(&[2, 3, 0x09, 0x04]), None, "bLength says it carries none");
+        assert_eq!(first_language(&[4, 2, 0x09, 0x04]), None, "not a string descriptor");
+        assert_eq!(first_language(&[]), None);
+    }
+
     fn serial(text: &str) -> Serial {
         let mut descriptor = [0u8; 256];
         let mut at = 2;
@@ -213,7 +232,7 @@ mod tests {
         inquiry[24..].copy_from_slice(b"1.00");
         Identity {
             usb: UsbId { vendor: 0x0781, product: 0x5581, release: 0x0100 },
-            serial: serial("4C530001230821115363"),
+            serial: serial("FEDCBA98765432FEDCBA"),
             inquiry,
             sectors: 7_507_812 * 8,
             sector_bytes: 512,
@@ -234,7 +253,7 @@ mod tests {
             (|i| i.usb.vendor ^= 1, Differs::Vendor),
             (|i| i.usb.product ^= 1, Differs::Product),
             (|i| i.usb.release ^= 1, Differs::Release),
-            (|i| i.serial = serial("4C530001230821115364"), Differs::Serial),
+            (|i| i.serial = serial("FEDCBA98765432FEDCBB"), Differs::Serial),
             (|i| i.inquiry[27] ^= 1, Differs::Inquiry),
             (|i| i.sectors -= 1, Differs::Capacity),
             (|i| i.sector_bytes = 4096, Differs::Capacity),

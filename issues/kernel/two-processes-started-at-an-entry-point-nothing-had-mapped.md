@@ -64,3 +64,5 @@ kept alive at the fault (`BootOptions { qmp: true, .. }`, `info registers -a`
 for what the *other* CPUs hold) and the `spawn:` line for the faulting pid in
 the same log, on a host loaded the way a CI shard is — eight guest vCPUs on a
 four-CPU runner. Until then the rate is one guest in one shard of one run.
+
+`log_reserve_window` is deleted; `issues/build/smp-ap-hole-and-log-reserve-window-red-under-a-loaded-host.md` records the commits that restore it.

@@ -64,9 +64,7 @@ changes.
   `qemu::budget(20 s)`, the phase's. Still `Sched::Parallel`. **The duration
   profile's share of this is closed**: nothing is retyped against a clock any
   more — `/system/bin/terminal` prints `terminal: ready` and `shell_echoes` waits on
-  that (`tests/toyos.rs`'s `SURFACE_UP`) — and the four-minute lane holder that
-  the profile used to seat a second desktop beside, `desktop_window_child`, is
-  `Tier::Nightly` and so never in a pull request's parallel phase.
+  that (`tests/toyos.rs`'s `SURFACE_UP`).
 - **`desktop_locale_detect`** — retired 2026-09-04, green 5 of 5 beside a full
   fast tier.
 - **`netd_connection_caps`** — retired 2026-09-04, green 5 of 5 beside a full
@@ -150,9 +148,7 @@ changes.
   `cargo test` runs on `wt/toyos-panicstall`, whose whole delta is the harness's
   panic vocabulary, with a second worktree's suite holding guest slots
   throughout — `toyos-i8042fix` names this very test in that run's
-  `[host-slots]` lines. `the close probe exited Some(1)`, `ALONE … GREEN`, and
-  `cargo run -- --known-red log_poll_outlives_a_close` answers `NOT ON THE
-  LIST`, so this is its first recorded sighting. Not investigated.
+  `[host-slots]` lines. `the close probe exited Some(1)`, `ALONE … GREEN`. Not investigated.
 - **`metal_sim_input`** — added 2026-08-18, **1 of 4** runs on
   `wt/toyos-lifecycle` (kernel delta: `process_poll_add`'s refusal split and
   `Source::ended_by_its_last_handle`, neither of them on a boot path), inside a
@@ -161,14 +157,13 @@ changes.
   DOUBLE PANIC … after 0 of the sequence`, so it died **before the first
   injection**, which is the boot and not the test. `ALONE … GREEN` in 2 s
   against 20 s under load, then green 3 of 3 more alone.
-  `cargo run -- --known-red metal_sim_input` answers `NOT ON THE LIST`.
 
   **Its mechanism is not this file's census race and it is filed here for want
   of a better register.** A kernel panic during a loaded boot was a filed class
   of its own — five sightings, each carrying the *guest's own panic text* — and
   that class has since been diagnosed and fixed: a CPU could hand a thief the
   task whose context it was still standing on, so two CPUs ran one kernel stack
-  (`SchedPass::answer_steal_requests`, `toyos-sched/src/cpu.rs`). This sighting
+  (`SchedPass::answer_steal_requests`, `kernel/pure/sched/cpu.rs`). This sighting
   carried no console at all — `TestResult::error` held the verdict, a failing
   test's guest console is not printed, and by the time the re-runs were green
   the capture was gone — so it can be neither confirmed as that class nor ruled
@@ -178,8 +173,7 @@ changes.
   roughly one boot in a hundred.
 - **`xhci_full_speed_device`** — added 2026-08-19, **1 of 2** full `cargo test`
   runs on `wt/toyos-clippygate`. `"PANIC:" during the USB gate boot`,
-  `ALONE … GREEN`, and `cargo run -- --known-red xhci_full_speed_device`
-  answers `NOT ON THE LIST`. The two runs are the measurement: the red one was
+  `ALONE … GREEN`. The two runs are the measurement: the red one was
   the branch's *first* suite after a full rebuild and its parallel phase took
   103.9 s, the green one minutes later on a warm tree took 32.0 s — so the phase
   that failed was carrying this worktree's own twelve kernel builds. The branch's
@@ -223,10 +217,8 @@ changes.
   throughout and named in that run's own `[host-slots]` lines. The other two
   runs were 270/270 on a tree differing from the red one by two doc comments and
   one removed `#[track_caller]`; the branch's kernel delta touches no TLB, no
-  shootdown and no `munmap` path. `ALONE … GREEN` in 145 ms, and
-  `cargo run -- --known-red tlb_shootdown_waits` answered `NOT ON THE LIST`, so
-  this is its first recorded sighting. `screen_early_panic` failed in the same
-  run and is already this file's and the redlist's, `ALONE … GREEN` there too.
+  shootdown and no `munmap` path. `ALONE … GREEN` in 145 ms. `screen_early_panic` failed in the same
+  run and is already this file's, `ALONE … GREEN` there too.
 
   The assertion that went red is the test's own disarmed control: `munmap still
   took 11740090ns with the delay disarmed, so the numbers above measured
@@ -241,8 +233,7 @@ changes.
   there`, `ALONE … GREEN` on the harness's own re-run. Same shape as
   `desktop_locale_detect` above — a wizard waiting for a key it was never
   handed — but against `/system/bin/console` rather than `/system/bin/terminal`, so it is not
-  provably the same boot race and is filed separately. `cargo run --
-  --known-red console_locale_detect` answered `NOT ON THE LIST`.
+  provably the same boot race and is filed separately.
 
   **Investigated 2026-08-29, and it was never a boot race**: the job's own
   capture shows the shell echoing `/home/root> locale dct` and running it
@@ -254,8 +245,7 @@ changes.
   never ran. Exactly this file's typed-on-a-wall-clock class, and the class
   fix had already landed when the row was read back: `shell_type_line`
   (7a033450, 2026-08-26) bounds each burst by the queue and takes the guest's
-  own echo of the whole line as the verdict, with three tries. The redlist row
-  is retired against it.
+  own echo of the whole line as the verdict, with three tries.
 
 - **`syscall_window_nmi`** — added 2026-08-27, one sighting, dev host, a
   288-name `cargo test` run at 92 guests with a second worktree's suite on the
@@ -264,8 +254,7 @@ changes.
   which is what the guest's own message says when the storm line has not arrived
   yet. `ALONE … GREEN` in **5 s** in the same session, reporting the storm in
   full: `3000 sent, 3000 taken, 43 in the window, 140 in Ring 3, 663 syscalls
-  made under the storm`. `cargo run -- --known-red syscall_window_nmi` answered
-  `NOT ON THE LIST` when it was filed.
+  made under the storm`.
 
   **Not the branch it was found on**: that branch changed the syscall entry's
   displacement *spelling* — `const` operands for the same immediates,
@@ -296,9 +285,7 @@ changes.
   investigated further; filed so a fourth sighting is not re-derived.
 
 - **`screen_loader_lines`** — added 2026-09-06 on `t14-reset-early`, one of two
-  full `cargo test` runs, `ALONE … GREEN`, and `cargo run -- --known-red
-  screen_loader_lines` answered `NOT ON THE LIST`, so this is its first recorded
-  sighting. `the panel carries 0 band(s) of lit scanlines, too few to take a row
+  full `cargo test` runs, `ALONE … GREEN`. `the panel carries 0 band(s) of lit scanlines, too few to take a row
   pitch from` — **zero** bands rather than a wrong count, so the panel was blank
   when it was decoded and not carrying the wrong thing, which is this file's
   liveness shape and not a content one. Worth stating because that branch does
@@ -323,8 +310,7 @@ changes.
 - **`quiesce_dump_holds_the_stopped`**, first sighting — 2026-09-25 on
   `wt/toyos-ramroot` (PR #506, head `696f46cb`), one full fast tier: `QEMU never
   reported stopping: the guest asked for a reboot and stayed up`, after 262 s,
-  then `ALONE … GREEN`. `cargo run -- --known-red quiesce_dump_holds_the_stopped`
-  answered `NO, not quarantined`. That branch makes every guest hold its whole
+  then `ALONE … GREEN`. That branch makes every guest hold its whole
   ROOT in RAM, so it was A/B'd: `cargo test` alternating between `origin/main`
   at `b0adc600` and the branch at `69f783f4`, three arms each in one session.
   The test passed in all six. The arms' reds, every one `ALONE … GREEN` and
@@ -348,20 +334,6 @@ changes.
   twelve. `screen_loader_lines` grows 12 or 13 rows there for 14 or 15 lines;
   the lines between its two markers are the same on both trees, so what moves
   its growth is how far the loader has got when the GOP-query dump lands.
-  `quiesce_leaves_the_volume_whole` was red in four of the six branch runs and
-  none of `main`'s, each `ALONE … GREEN`, all under `quiesce-fsync-refuse`: twice
-  `FAT 1 differs from FAT 0 at entry 45` in the volume the stop left, once with
-  a cluster no entry reaches, and twice `log-volume: … was left with a chain its
-  entry does not reach: corrupt cluster chain` — the stop's second stage, since
-  removed, on a boot that now carries 13 MiB of ROOT where it carried 619.
-  Not the host: `main`'s own FAT refusal defects at `b0adc600`, which the
-  branch reaches by timing: a refused link write leaked the cluster
-  `append_cluster` had just claimed, and a refused free split the FATs; a
-  forced interleaving reddened both trees. #510 closed both with
-  `toyos-fat32/src/repair.rs`: the same forcing patch, alone, is red 2 of 2 on
-  this branch before the merge (`5b3cf8ae`, each of its four boots leaving one
-  cluster no directory entry reaches) and green 3 of 3 with `main` `5e36908c`
-  merged (`d5c2d9c9`).
   `metal_job_reboot` was red in one of the six, `ALONE` red too, and in one
   further branch run (`the job drain carried no kernel output at all (24
   bytes)`), and green alone three times on each tree, alternating;
@@ -479,20 +451,6 @@ mechanism for it.
   seconds. The test asserts an ordering of two lines, and the second line never
   came.
 
-  **It contradicts a retirement rather than joining a class.** All three of the
-  name's earlier rows in `src/redlist.rs` are retired: the two dev-host
-  `ALONE: GREEN` rows by the single-word tally in
-  `kernel/src/arch/x86_64/i8042/tally.rs` (2026-08-17), which made `N interrupts
-  and 0 bytes` unprintable, and the CI row by "the verdict revises itself once"
-  (2026-08-28) — a mute line said while a decoder still holds the run is
-  `HEALTH_MUTE_BLIND`, the first blamed byte moves it to `HEALTH_MUTE_SAID`
-  with the line that names the bytes, and `i8042-split-burst` stages that
-  interleaving on every run. Four bytes and not zero puts this sighting on the
-  CI row's producer — the test's own Pause, reported after the first interrupt
-  delivered four of its six bytes — which is exactly what the 2026-08-28 clause
-  says is no longer waited for. Under a loaded host the second line did not
-  arrive, so the revision that retirement rests on is not unconditional.
-
   Second sighting, the logd branch's fast tier at `eef19bd1`, on a dev host
   running two other worktrees' suites: the same words at `[kernel 5.865 cpu0]
   ... 2 interrupts and 4 bytes, nothing decoded`, the one red of 357, and
@@ -500,6 +458,40 @@ mechanism for it.
   driver nor this test, and the test was green in its previous fast-tier run.
 
   Owner: the i8042 tally. **Exit condition**: the verdict revising itself in a
-  parallel run — a loaded full fast tier in which `i8042_undecoded_bytes`'
-  first mute line names nothing and its second names the sequence, or the
-  retirement's clause narrowed to the conditions under which it holds.
+  parallel run — a loaded full suite in which `i8042_undecoded_bytes`'
+  first mute line names nothing and its second names the sequence.
+
+## Deleted as flaky tests
+
+A flaky test is deleted at once. Each commit below takes one out:
+
+- `metal_job_reboot` — `99ee9625d`, also on
+  `issues/build/metal-job-reboot-drained-no-kernel-output-beside-other-guests.md`;
+- `job_deadline_reboots` — `ce4f2965e`;
+- `swap_netd` and `swap_crash_rolls_back` — `4a60c35c8`;
+- `launcher_refusals` — `4c191469f`;
+- `screen_console_shell` — `958ada05e`;
+- `screen_console_clear` — `315526e83`, and `c7d9efeb1` retired `SYS_DEBUG`
+  action 8, which only it asked for;
+- `fs_transactional` — `8e172f7a8`;
+- `fs_dirs_durable` — `690fa3e83`;
+- `i8042_undecoded_bytes` — `c6923cd50`, with `i8042-split-burst`;
+- `log_poll_outlives_a_close` — `ad6dc0781`, with test-runner's `log-close`
+  and `log-close-cancels-any-syscap`;
+- `metal_sim_pointer_churn` — `525e59ad1`;
+- `blocked_dump` — `0a7fc5f70`, red after its retirement here on the
+  sightings `issues/build/log-reserve-window-negative-times-out-beside-other-guests.md`
+  and `issues/build/process-stats-exits-101-beside-other-guests.md` record;
+- `metal_sim_input` — `415d9a102`;
+- `xhci_full_speed_device` — `5e4223525`, with `Profile::MetalFullSpeed`.
+
+`log_poll_outlives_a_close` was the one judge of `close_ends_polls` answering
+`false` for a `SysCap`, so one process closing a capability cancels no
+other's log poll. Since `87f74892d` `sourcegate`'s
+`a_capability_closing_ends_no_log_poll` holds that arm at `false`: a gate on
+the decision at its one site, not on the behaviour the deleted test drove.
+
+Named in this file and not deleted: `desktop_typing_damage` waits on `terminal:
+ready` since its row; `i8042_absent` no longer has the two-boot allowance its
+row is about; `hda_tone`, `tlb_shootdown_waits` and `wake_storm_cost` are T14
+rows and no QEMU guest runs them.

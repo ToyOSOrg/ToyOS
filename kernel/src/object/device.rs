@@ -28,8 +28,9 @@ pub enum DeviceInfo {
     /// Which partition, how long, and both its GUIDs; the view it moves blocks
     /// through is the claim's own (`device::Claim::partition`).
     Partition(toyos_abi::part::PartitionInfo),
-    /// Answers the performance envelope's registers, never a description.
-    PerfState(crate::perf_state::Reader),
+    /// The ports and lines granted, as the selector named them, and the `isa`
+    /// row they are.
+    Isa(toyos_abi::syscall::IsaId, usize),
 }
 
 /// The two scanout buffers and the cursor plane.
@@ -58,7 +59,7 @@ impl DeviceInfo {
     // `described.bytes` unset, so the next read re-mints instead of binding stranded handles.
     fn mint(&self, table: &mut HandleTable) -> Result<Box<[u8]>, SyscallError> {
         Ok(match self {
-            Self::Events | Self::PerfState(_) => Box::new([]),
+            Self::Events => Box::new([]),
             Self::Framebuffer(info, buffers) => {
                 let mut info = *info;
                 let h = install_buffers(
@@ -73,6 +74,7 @@ impl DeviceInfo {
             // is what `SYS_DEVICE_DMA_ALLOC` answers later.
             Self::PciFunction(info, _) => info.as_bytes().into(),
             Self::Partition(info) => info.as_bytes().into(),
+            Self::Isa(set, _) => set.wire().iter().flat_map(|word| word.to_ne_bytes()).collect(),
             Self::Hda(info, pcm) => {
                 let mut info = *info;
                 info.pcm = install_buffers(table, &[pcm])?[0];
@@ -95,6 +97,8 @@ pub struct DeviceClaim {
     /// a poll's readiness check and a `close` are both places that must not
     /// take it.
     pci_slot: Option<u8>,
+    /// The `isa` row for a claim on one, read without that lock for the same reasons.
+    isa_row: Option<usize>,
     // No Rights::DUP: at most one handle exists, so info_read needs no per-handle state.
     info_read: AtomicBool,
     described: crate::sync::Lock<Described>,
@@ -114,10 +118,15 @@ impl DeviceClaim {
             DeviceInfo::PciFunction(_, slot) => Some(*slot),
             _ => None,
         };
+        let isa_row = match &info {
+            DeviceInfo::Isa(_, row) => Some(*row),
+            _ => None,
+        };
         Arc::new(Self {
             core: Self::new_core(),
             class,
             pci_slot,
+            isa_row,
             info_read: AtomicBool::new(false),
             described: crate::sync::Lock::new(Described { info, bytes: None }),
             reference: Held::new(claim),
@@ -134,6 +143,11 @@ impl DeviceClaim {
     /// authority and the slot is what it names.
     pub fn pci_slot(&self) -> Option<usize> {
         self.pci_slot.map(usize::from)
+    }
+
+    /// Which `isa` row this claim holds, for a claim on an ISA function.
+    pub fn isa_row(&self) -> Option<usize> {
+        self.isa_row
     }
 
     /// The view a partition claim transfers through: `None` for a claim on
@@ -156,19 +170,6 @@ impl DeviceClaim {
         };
         let device = self.reference.with(|claim| claim.partition().map(|view| view.device_id())).flatten()?;
         Some((device, unique))
-    }
-
-    /// A performance-state claim's read, which [`crate::perf_state::Reader`] answers
-    /// against the read's own `ask`.
-    pub fn read_perf_state(
-        &self,
-        ask: &mut Option<crate::perf_state::Ask>,
-        buf: &mut crate::user_ptr::UserBytesMut,
-    ) -> Option<u64> {
-        match &self.described.lock().info {
-            DeviceInfo::PerfState(reader) => reader.read(ask, buf),
-            _ => unreachable!("a {:?} claim is not read as a performance-state one", self.class),
-        }
     }
 
     pub fn info_read(&self) -> bool {

@@ -3,8 +3,8 @@ mod device_irq;
 mod dma_fault;
 mod hda;
 mod i8042;
-#[cfg(feature = "boot-actuators")]
-mod log_nest;
+mod isa;
+mod kick;
 mod nmi;
 pub(crate) mod spurious;
 mod timer;
@@ -32,6 +32,14 @@ const PIC2_DATA: u16 = 0xA1;
 /// The vector both PS/2 lines are routed to.
 pub const I8042_VECTOR: u8 = Vector::I8042 as u8;
 
+/// The vector `apic::kick_cpu` raises.
+pub const KICK_VECTOR: u8 = Vector::Kick as u8;
+
+/// The vector each `pio::GRANTABLE` row's lines are routed to, by row: the
+/// vector is how the kernel knows whose record an interrupt belongs to.
+pub const ISA_VECTORS: [u8; 1] = [Vector::Isa0 as u8];
+const _: () = assert!(ISA_VECTORS.len() == super::pio::GRANTABLE.len(), "a row with no vector");
+
 /// The vector an IOMMU writes into its own `FEDATA`.
 pub const DMA_FAULT_VECTOR: u8 = Vector::DmaFault as u8;
 
@@ -40,10 +48,6 @@ pub const HDA_VECTOR: u8 = Vector::Hda as u8;
 
 /// The vector the virtio-sound device's MSI-X entry carries.
 pub const VIRTIO_SOUND_VECTOR: u8 = Vector::VirtioSound as u8;
-
-/// The vector `log-nested-emit` sends itself; installed only in a kernel built with `boot-actuators`.
-#[cfg(feature = "boot-actuators")]
-pub const LOG_NEST_VECTOR: u8 = 0x27;
 
 const PF_PRESENT: u64 = 1 << 0;
 const PF_WRITE: u64 = 1 << 1;
@@ -256,18 +260,18 @@ idt_vectors! {
         ring0 Nmi          = 0x02, nmi::nmi_entry, ist 2;
         ring3 Timer        = 0x20, timer::timer_entry;
         ring3 Xhci         = 0x21, xhci::xhci_entry;
-        // 0x22 was the kernel's own virtio-net driver, which now lives in netd.
         ring3 VirtioSound  = 0x23, virtio_sound::virtio_sound_entry;
         ring3 I8042        = 0x24, i8042::i8042_entry;
         ring3 DmaFault     = 0x25, dma_fault::dma_fault_entry;
         ring3 Hda          = 0x26, hda::hda_entry;
-        // 0x27 is the actuator gate's (`log_nest`), which is why these start at
-        // 0x28. One per `pcidev` claim slot: the vector is how the kernel knows
+        // One per `pcidev` claim slot: the vector is how the kernel knows
         // which claim a message belongs to.
         ring3 UserDev0     = 0x28, user_dev::user_dev0_entry;
         ring3 UserDev1     = 0x29, user_dev::user_dev1_entry;
         ring3 UserDev2     = 0x2A, user_dev::user_dev2_entry;
         ring3 UserDev3     = 0x2B, user_dev::user_dev3_entry;
+        ring3 Isa0         = 0x2C, isa::isa0_entry;
+        ring3 Kick         = 0xFC, kick::kick_entry;
         // Ring 0 because it never returns: `cli; hlt` forever.
         ring0 HaltAll      = 0xFD, stub_halt_all;
         ring3 TlbFlush     = 0xFE, tlb::tlb_flush_entry;
@@ -347,35 +351,7 @@ extern "sysv64" fn common_entry() {
 
 /// Deferred-preempt epilogue; caller must have IF=0 on entry and it returns with IF=0.
 pub(crate) extern "sysv64" fn kernel_exit_to_user_check() {
-    flush_ring0_timer_fires_to_trace();
-    loop {
-        // A killed or stopped thread returns to Ring 3 exactly once more: never.
-        crate::scheduler::leave_ring3_if_due();
-        // `do_preempt` owns clearing `need_resched`; this function never clears it itself.
-        if !crate::preempt::need_resched() {
-            #[cfg(feature = "boot-actuators")]
-            if crate::actuator::dump_in_blocking_pass() {
-                crate::sched::dump::staged::note_return_to_ring3();
-            }
-            return;
-        }
-        assert!(!crate::scheduler::in_schedule_self(),
-            "exit-to-user inside a scheduler pass");
-        // Not an IrqGuard: both loop exits must set IF, not restore a saved value.
-        cpu::enable_interrupts();
-        crate::scheduler::do_preempt();
-        cpu::disable_interrupts();
-        flush_ring0_timer_fires_to_trace();
-    }
-}
-
-fn flush_ring0_timer_fires_to_trace() {
-    let cur = percpu::ring0_timer_fires();
-    let missed = cur.wrapping_sub(percpu::last_seen_ring0_fires());
-    if missed > 0 {
-        crate::trace::trace(crate::trace::Kind::TimerFireBurst, missed);
-        percpu::set_last_seen_ring0_fires(cur);
-    }
+    crate::scheduler::exit_to_user();
 }
 
 /// Routes by vector to the appropriate handler; #DF and #MC get dedicated arms because they are aborts with no instruction to return to.
@@ -397,12 +373,35 @@ extern "sysv64" fn trap_dispatch(frame: *mut TrapFrame) {
         Vector::DoubleFault => exceptions::double_fault_handler(frame),
         Vector::MachineCheck => exceptions::machine_check_handler(frame),
         Vector::PageFault => {
+            #[cfg(feature = "mask-windows")]
+            windows_entered(frame);
             cpu::enable_interrupts();
             exceptions::page_fault_handler(frame);
             cpu::disable_interrupts();
+            // Only a Ring 3 fault comes back: `common_entry` lowers the count
+            // next, and `exit_to_user` opens interrupts.
+            #[cfg(feature = "mask-windows")]
+            crate::windows::preempt_lowering();
         }
-        _ => exceptions::exception_handler(frame),
+        _ => {
+            #[cfg(feature = "mask-windows")]
+            windows_entered(frame);
+            exceptions::exception_handler(frame)
+        }
     }
+}
+
+/// A Ring 3 frame had interrupts open, the gate masked them, and
+/// `common_entry` raised the preempt count by one. A Ring 0 frame ends the
+/// machine: its CPU's record stops first, so no hook from here on refuses in
+/// place of the fault's report.
+#[cfg(feature = "mask-windows")]
+fn windows_entered(frame: &TrapFrame) {
+    if !toyos_userbound::Ring::of_cs(frame.cs).is_user() {
+        crate::windows::stop_here();
+    }
+    crate::windows::irqs_masked();
+    crate::windows::preempt_raised();
 }
 
 /// This CPU's state as the black box records it, read out of the frame the stub
@@ -464,8 +463,6 @@ pub fn init() {
     disable_pic();
 
     install_gates(&mut IDT.lock());
-    #[cfg(feature = "boot-actuators")]
-    install_actuator_gates(&mut IDT.lock());
     // Every slot no row filled: delivery through a P = 0 gate is a
     // contributory fault, and the machine would halt as #DF with no name.
     let mut unclaimed = 0u32;
@@ -475,12 +472,6 @@ pub fn init() {
             unclaimed += 1;
         }
     }
-    // Negative control: clears only the IST byte on vector 2's gate, keeping the handler and ring intact.
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::nmi_without_ist() {
-        IDT.lock().entries[Vector::Nmi as usize].ist = 0;
-    }
-
     let ptr = IdtPointer {
         limit: (core::mem::size_of::<Idt>() - 1) as u16,
         base: IDT.data_ptr() as u64,
@@ -506,13 +497,6 @@ pub fn init() {
         base,
         limit,
     );
-}
-
-/// The one gate outside the table: only an actuator raises [`LOG_NEST_VECTOR`], so a shipping kernel never installs it.
-#[cfg(feature = "boot-actuators")]
-fn install_actuator_gates(idt: &mut Idt) {
-    idt.entries[LOG_NEST_VECTOR as usize] =
-        IdtEntry::ring3(Ring3Entry::new(log_nest::log_nest_entry));
 }
 
 /// Take IF=1 on this CPU; split from `init` so `ioapic::init` can mask firmware-left entries before interrupts are live.

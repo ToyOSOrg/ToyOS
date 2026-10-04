@@ -42,11 +42,13 @@ pub struct Claim {
 /// What one claim holds. A class is at most one device on this machine and a
 /// per-class flag says whether it is taken; a PCI function is one of several,
 /// so what it gives back is its `pcidev` slot; a partition's exclusivity is its
-/// view's own hold on the blocks (`block::Partition::of`).
+/// view's own hold on the blocks (`block::Partition::of`); an ISA function's is
+/// its `isa` row's.
 enum Claimed {
     Class(DeviceType),
     PciFunction(usize),
     Partition(crate::block::Partition),
+    Isa(usize),
 }
 
 impl Claim {
@@ -71,7 +73,7 @@ impl Claim {
     pub(crate) fn partition(&self) -> Option<&crate::block::Partition> {
         match &self.what {
             Claimed::Partition(view) => Some(view),
-            Claimed::Class(_) | Claimed::PciFunction(_) => None,
+            Claimed::Class(_) | Claimed::PciFunction(_) | Claimed::Isa(_) => None,
         }
     }
 }
@@ -79,12 +81,27 @@ impl Claim {
 impl Drop for Claim {
     fn drop(&mut self) {
         match self.what {
-            Claimed::Class(class) => *taken(class).lock() = false,
+            Claimed::Class(class) => {
+                // Before the flag goes: a poll the next holder registers is not this claim's to answer.
+                match class {
+                    DeviceType::HdaAudio | DeviceType::VirtioSound => {
+                        crate::drivers::AUDIO_WATCH.cancel_polls()
+                    }
+                    DeviceType::Keyboard
+                    | DeviceType::Mouse
+                    | DeviceType::Framebuffer
+                    | DeviceType::PciFunction
+                    | DeviceType::Partition
+                    | DeviceType::Isa => {}
+                }
+                *taken(class).lock() = false;
+            }
             // Bus mastering off, then the domain, then the pages: `release`
             // owns that order, and this is where a dying process reaches it.
             Claimed::PciFunction(slot) => crate::pcidev::release(slot),
             // The view drops with this, and its hold with the last clone of it.
             Claimed::Partition(_) => {}
+            Claimed::Isa(row) => crate::isa::release(row),
         }
     }
 }
@@ -174,6 +191,13 @@ pub fn try_claim(class: DeviceType, selector: [u64; 2]) -> Result<Arc<DeviceClai
             let claim = Claim { what: Claimed::Partition(view) };
             Ok(DeviceClaim::new(class, DeviceInfo::Partition(info), claim))
         }
+        DeviceType::Isa => {
+            let set = toyos_abi::syscall::IsaId::from_wire(selector).ok_or(ClaimError::Absent)?;
+            // The row's own guard, taken inside as a PCI slot's is.
+            let row = crate::isa::claim(set)?;
+            let claim = Claim { what: Claimed::Isa(row) };
+            Ok(DeviceClaim::new(class, DeviceInfo::Isa(set, row), claim))
+        }
         DeviceType::HdaAudio => {
             let (info, pcm) = crate::drivers::hda::info().ok_or(ClaimError::Absent)?;
             let claim = Claim::acquire(class)?;
@@ -183,14 +207,6 @@ pub fn try_claim(class: DeviceType, selector: [u64; 2]) -> Result<Arc<DeviceClai
             let (info, dma) = crate::drivers::virtio_sound::info().ok_or(ClaimError::Absent)?;
             let claim = Claim::acquire(class)?;
             Ok(DeviceClaim::new(class, DeviceInfo::VirtioSound(info, shm(dma)), claim))
-        }
-        DeviceType::PerfState => {
-            let reader = crate::perf_state::Reader::claim().map_err(|why| {
-                log!("perf-state: no claim: {why}");
-                ClaimError::Absent
-            })?;
-            let claim = Claim::acquire(class)?;
-            Ok(DeviceClaim::new(class, DeviceInfo::PerfState(reader), claim))
         }
     }
 }
@@ -226,13 +242,13 @@ fn partition_view(found: &crate::gpt::Claimable) -> Result<crate::block::Partiti
                 return Err(ClaimError::Unusable);
             }
         };
-    match crate::block::Partition::of(handle, first_block, blocks, Holder::Claim) {
+    match crate::block::Partition::of(handle, first_block, blocks, Holder::Claim(guid)) {
         Ok(view) => Ok(view),
         Err(ViewRefused::Held(Holder::Kernel(what))) => {
             log!("partclaim: {guid} is held by the kernel ({what}) and cannot be claimed");
             Err(ClaimError::KernelDriven)
         }
-        Err(ViewRefused::Held(Holder::Claim)) => Err(ClaimError::Owned),
+        Err(ViewRefused::Held(Holder::Claim(_))) => Err(ClaimError::Owned),
         Err(ViewRefused::OffDevice) => {
             log!(
                 "partclaim: {guid} is at {first_block}+{blocks} blocks, off device {}",

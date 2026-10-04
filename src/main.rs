@@ -1,3 +1,6 @@
+#[macro_use(eprintln)]
+extern crate toyos_build;
+
 mod qemu;
 
 use std::env;
@@ -23,39 +26,21 @@ const REQUIRED: &[Tool] = &[
     Tool { any: &["cc"], why: "rustc links every host binary through it; no guest binary" },
     Tool {
         any: &["cmake"],
-        why: "every build keys the host's LLVM on its `--version`, and rustc's bootstrap \
-              configures LLVM and clang with it; `brew install cmake` on macOS",
-    },
-];
-
-/// Named, because a list that stops at what is fatal reads as the whole list.
-/// Each of these costs one thing when absent rather than the build, so none of
-/// them exits.
-///
-/// Ninja is what rustc's bootstrap builds LLVM and clang from
-/// `rust/src/llvm-project` with, under CMake, which it does only when this
-/// host has not built that LLVM. Both are host tools like `cc`, and never in a
-/// guest: on macOS from Homebrew, on CI's toolchain runner at the versions
-/// `.github/workflows` pins. They go when the build no longer needs a host.
-const ALSO_USED: &[Tool] = &[
-    Tool {
-        any: &["python3", "python", "py", "python2", "uv"],
-        why: "rust/x runs rustc's bootstrap, which is Python — a clean clone and \
-              every toolchain change need one",
+        why: "every build keys the host's LLVM on its `--version`, rustc's bootstrap \
+              configures LLVM and clang with it, and every sysroot build the C++ runtime; \
+              `brew install cmake` on macOS",
     },
     Tool {
-        any: &["ninja"],
-        why: "rustc's bootstrap builds LLVM and clang with it, under CMake; `brew install \
-              ninja` on macOS",
+        any: &["python3", "python"],
+        why: "rust/x runs rustc's bootstrap, which is Python, and the C++ runtime's CMake \
+              requires a Python 3 and runs it in every sysroot build",
     },
 ];
 
 /// Where the OS would find `name`, if anywhere.
 ///
 /// A `PATH` scan and not a `--version` run: it is what `Command::new` does
-/// anyway, and one name above must not be executed — asking macOS for `py`
-/// opens the Command Line Tools installer, which is why `rust/x` searches
-/// `python3` ahead of it.
+/// anyway.
 fn executable_on_path(name: &str) -> bool {
     use std::os::unix::fs::PermissionsExt;
     let Some(path) = env::var_os("PATH") else {
@@ -68,16 +53,11 @@ fn executable_on_path(name: &str) -> bool {
 }
 
 fn check_prerequisites(root: &Path, arch: Arch) {
-    fn absent(tools: &'static [Tool]) -> Vec<&'static Tool> {
-        tools.iter().filter(|t| !t.any.iter().any(|n| executable_on_path(n))).collect()
-    }
-
-    for tool in absent(ALSO_USED) {
-        eprintln!("Note: no {} — {}", tool.any.join(" or "), tool.why);
-    }
-
-    let mut missing: Vec<String> =
-        absent(REQUIRED).iter().map(|t| format!("{} ({})", t.any.join(" or "), t.why)).collect();
+    let mut missing: Vec<String> = REQUIRED
+        .iter()
+        .filter(|t| !t.any.iter().any(|n| executable_on_path(n)))
+        .map(|t| format!("{} ({})", t.any.join(" or "), t.why))
+        .collect();
     if !executable_on_path(arch.qemu()) {
         missing.push(format!("{} (every {} boot — install QEMU)", arch.qemu(), arch.name()));
     }
@@ -114,22 +94,8 @@ fn main() {
     }
     let asked = |flag: &flags::Flag| CARGO_RUN.present(&args, flag);
 
-    // The landing protocol, and the command it replaced — **before
-    // `check_prerequisites`**, because none of these builds anything. They are
-    // git, a push, and a refusal.
-    if asked(&flags::LAND) {
-        toyos_build::pr::dispatch_retired_land();
-    }
-    if asked(&flags::PR) {
-        toyos_build::pr::dispatch_pr(&root, &args);
-        return;
-    }
-    if asked(&flags::SYNC) {
-        toyos_build::pr::dispatch_sync(&root);
-        return;
-    }
-    // Every CI job. Here for the same reason: the host job's runner has no QEMU,
-    // and a guest job names its own instrument rather than being noted at.
+    // Every CI job, before `check_prerequisites`: the host job's runner has no
+    // QEMU, and a guest job names its own instrument rather than being noted at.
     if asked(&flags::CI) {
         toyos_build::ci::dispatch(&root, &args);
         return;
@@ -139,19 +105,6 @@ fn main() {
     // it shells to `cargo clippy` and the runner that runs it has no QEMU.
     if asked(&flags::CLIPPY) {
         toyos_build::clippy::dispatch(&root);
-        return;
-    }
-    // Reads one table and prints. Here for the same reason again, and for one
-    // more: the question it answers — "is this test disabled?" — is asked
-    // while a build is broken as often as while one works.
-    if asked(&flags::KNOWN_RED) {
-        toyos_build::redlist::dispatch(&args);
-        return;
-    }
-    // Reads lockfiles and cargo's own checkouts, nothing else: the half of a
-    // "zero callers" ABI sweep a monorepo grep cannot see.
-    if asked(&flags::ABI_CALLERS) {
-        toyos_build::forkcheck::dispatch_callers(&root, &args);
         return;
     }
     // Writes one file outside the checkout and builds nothing.
@@ -170,7 +123,7 @@ fn main() {
     let update_image = CARGO_RUN.value(&args, &flags::UPDATE_IMAGE).map(PathBuf::from);
     if asked(&flags::OWNER_KEY) || update_image.is_some() {
         match toyos_build::signing::use_owner() {
-            Ok(key) => println!("Signing with the owner's key {}.", key.fingerprint()),
+            Ok(key) => eprintln!("Signing with the owner's key {}.", key.fingerprint()),
             Err(why) => {
                 eprintln!("Error: {why}");
                 std::process::exit(1);
@@ -185,7 +138,6 @@ fn main() {
     let debug = asked(&flags::DEBUG);
     let build_only = asked(&flags::BUILD_ONLY);
     let dump_audio = asked(&flags::DUMP_AUDIO);
-    let rebuild_toolchain = asked(&flags::REBUILD_TOOLCHAIN);
     let smp = parse_smp(&args);
     let profile = parse_profile(&args);
     let mute = asked(&flags::MUTE);
@@ -206,7 +158,6 @@ fn main() {
         for (other, flag) in [
             (diag, &flags::DIAG_BOOT),
             (console, &flags::CONSOLE_BOOT),
-            (rebuild_toolchain, &flags::REBUILD_TOOLCHAIN),
         ] {
             assert!(!other, "--boot-config {dir} cannot be combined with {}", flag.name);
         }
@@ -248,18 +199,6 @@ fn main() {
         return;
     }
 
-    if asked(&flags::WORKTREE) {
-        toyos_build::worktree::dispatch(&root, &args);
-        return;
-    }
-
-    // On demand and nowhere else: it asks GitHub for every fork branch head, so
-    // neither `cargo test` nor `--land` may reach it.
-    if asked(&flags::CHECK_FORKS) {
-        toyos_build::forkcheck::dispatch(&root);
-        return;
-    }
-
     // Only where the submodules belong. In a linked worktree `rust/` is an empty
     // stub and initialising it clones the whole rust history again, into a git
     // directory of its own that shares no objects with the one beside it.
@@ -271,12 +210,12 @@ fn main() {
     // agent's clean or bootstrap can land between the two.
     let plan = toyos_build::build::plan_for(&root, &boot, debug, &args);
     if let Some(out) = update_image {
-        toyos_build::build::build_update(&root, &boot, rebuild_toolchain, &plan, &out);
+        toyos_build::build::build_update(&root, &boot, &plan, &out);
         println!("Update image: {} (ssh <machine> update < it)", out.display());
         return;
     }
-    let image = toyos_build::build::build(&root, boot, rebuild_toolchain, &plan);
-    println!("Build finished.");
+    let image = toyos_build::build::build(&root, boot, &plan);
+    eprintln!("Build finished.");
     println!("Boot image: {}", image.display());
 
     if !build_only {

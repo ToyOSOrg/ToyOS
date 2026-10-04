@@ -129,10 +129,9 @@ pub(super) fn sys_device_claim(syscap: RawHandle, class: u64, selector: [u64; 2]
         | device::DeviceType::Mouse
         | device::DeviceType::Framebuffer
         | device::DeviceType::HdaAudio
-        | device::DeviceType::VirtioSound
-        | device::DeviceType::PerfState => 0,
+        | device::DeviceType::VirtioSound => 0,
         device::DeviceType::PciFunction => 1,
-        device::DeviceType::Partition => 2,
+        device::DeviceType::Partition | device::DeviceType::Isa => 2,
     };
     if selector[read..].iter().any(|&word| word != 0) {
         return SyscallError::InvalidArgument.to_u64();
@@ -140,7 +139,7 @@ pub(super) fn sys_device_claim(syscap: RawHandle, class: u64, selector: [u64; 2]
     if let Err(e) = demand_syscap(syscap, Rights::DEVICE) {
         return e.refuse();
     }
-    // Each refusal keeps its own word: init logs what it could not mint, and
+    // Each refusal keeps its own word: the supervisor logs what it could not mint, and
     // "this machine has none" is a configuration while the rest are faults.
     let claim = match device::try_claim(class, selector) {
         Ok(c) => c,
@@ -399,7 +398,7 @@ pub(super) fn sys_partition_transfer(
         | device::DeviceType::HdaAudio
         | device::DeviceType::VirtioSound
         | device::DeviceType::PciFunction
-        | device::DeviceType::PerfState => {
+        | device::DeviceType::Isa => {
             drop(claim);
             return crate::object::HandleError::WrongType {
                 held: class.class_name(),
@@ -417,16 +416,14 @@ pub(super) fn sys_partition_transfer(
     match transfer {
         Transfer::Write(from) => {
             from.read_at(0, &mut bounce);
-            let whose = || ops::Run::Claim(claim.partition_on(), ops::ClaimOp::Write);
-            let run = ops::until_answered(whose, || match claim.partition_view() {
+            let run = ops::until_answered(|| match claim.partition_view() {
                 Some(view) => view.write_blocks(first, count, &bounce).map_err(ops::block_word),
                 None => Err(SyscallError::Gone),
             });
             ops::partition_word("a write", run)
         }
         Transfer::Read(into) => {
-            let whose = || ops::Run::Claim(claim.partition_on(), ops::ClaimOp::Read);
-            let run = ops::until_answered(whose, || match claim.partition_view() {
+            let run = ops::until_answered(|| match claim.partition_view() {
                 Some(view) => view.read_blocks(first, count, &mut bounce).map_err(ops::block_word),
                 None => Err(SyscallError::Gone),
             });

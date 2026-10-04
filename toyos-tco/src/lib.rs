@@ -114,16 +114,19 @@ pub const FIRMWARE_BOUND_MS: u64 = 60_000;
 /// while a job never finishes is no wedge to it and nothing else ends the boot.
 pub const JOB_BOUND_MS: u64 = 60_000;
 
-/// The bound netd gives this machine's first DHCP lease before it says it has
+/// What one member of a metal shared boot is allowed of [`JOB_BOUND_MS`], in
+/// milliseconds: a Rust test on the shipping kernel, and a C corpus case.
+pub const RUST_MEMBER_MS: u64 = 860;
+pub const C_MEMBER_MS: u64 = 260;
+
+/// The bound netstack gives this machine's first DHCP lease before it says it has
 /// none and serves anyway, in milliseconds. The harness waits it out on a wire
 /// with no server, so the two read one declaration.
 pub const LEASE_BOUND_MS: u64 = 20_000;
 
 /// The bound a panicked kernel holds its panel for before it returns the
-/// machine to firmware itself, in milliseconds. Nothing feeds this one: a key
-/// press retires it, because a key means somebody is reading the panel, and
-/// nobody pressing one inside the bound means nobody is there to. A minute is
-/// this project's bound for every watchdog.
+/// machine to firmware itself, in milliseconds. A minute is this project's
+/// bound for every watchdog.
 pub const PANIC_BOUND_MS: u64 = 60_000;
 
 /// The bound the *kernel* gives a whole boot, in milliseconds, before it seals
@@ -140,6 +143,13 @@ pub const WEDGE_BOUND_MS: u64 = JOB_BOUND_MS * 2;
 /// The kernel's bound has to outlast the one that ends a single job, or a slow
 /// test is a reset where it should have been a verdict.
 const _: () = assert!(WEDGE_BOUND_MS > JOB_BOUND_MS);
+
+/// The bound a boot that stages its own wedge carries instead of
+/// [`WEDGE_BOUND_MS`], in milliseconds: it ends the machine seconds after the
+/// wedge rather than at the bound every other boot keeps for a wedge nobody
+/// staged. Its half is the lockup detector's bound, which still outlasts the
+/// lockup probe's own reach to its lock.
+pub const STAGED_BOUND_MS: u64 = 10_000;
 
 /// The bound one *CPU* gets to take no interrupt at all while it is burning
 /// cycles, in milliseconds, before that CPU ends the machine from its own NMI.
@@ -167,6 +177,15 @@ pub const HARD_LOCKUP_BOUND_MS: u64 = hard_lockup_bound_ms(WEDGE_BOUND_MS);
 /// The detector has to fire before the deadline it is derived from, or a
 /// hard-locked machine is reported as an ordinary wedge and the CPU is unnamed.
 const _: () = assert!(HARD_LOCKUP_BOUND_MS < WEDGE_BOUND_MS);
+
+/// How often an armed CPU samples itself against [`hard_lockup_bound_ms`], in
+/// nanoseconds of unhalted time, and so how late past that bound a stuck CPU
+/// can be found.
+///
+/// A second: the bound is measured in tens of them, so a sample period this
+/// long costs one NMI per CPU per second and puts the detection within one
+/// period of the bound. It is also the period the report's ages are quoted at.
+pub const HARD_LOCKUP_SAMPLE_NS: u64 = 1_000_000_000;
 
 /// The boot parameter that arms [`WEDGE_BOUND_MS`], with the bound in
 /// milliseconds after it. A value and not a flag, because the bound is the one

@@ -7,12 +7,20 @@ opened: 2026-08-08
 # Redesign the log subsystem, and re-shape `kernel/src`
 
 **The owner decided on 2026-08-19: go.** Both halves are approved as planned
-work. Sequencing, set by the orchestrator with the ruling: the log core waits
-until pipeline 2's second pull request (the lock conversions behind
-`issues/kernel/every-wait-in-this-kernel-is-a-spin.md`) has landed — the two
-touch the same scheduler-adjacent paths and land one at a time. The directory
-re-shape is a scheduling matter exactly as priced below: one clean pass in a
-window with few worktrees in flight, and never interleaved with a code change.
+work. With the ruling the orchestrator sequenced the log core behind the
+kernel's lock conversions (`vfs::VFS`, the FAT volumes' lock, `xhci::XHCI` and
+`ProcessData` becoming sleep locks), which touch the same scheduler-adjacent
+paths. Nothing plans those conversions any more:
+`issues/kernel/the-kernel-is-small-interrupts-post-and-threads-wait.md` moves
+storage and USB out of the kernel instead (owner, 2026-09-25), so that wait
+names nothing that will land. The directory re-shape is a scheduling matter
+exactly as priced below: one clean pass in a window with few worktrees in
+flight, and never interleaved with a code change.
+
+The log is a pillar of `issues/diagnostics/toyos-explains-itself.md`, and
+its ring is
+`issues/kernel/logging-records-from-every-producer-and-a-kernel-that-waits-on-nobody.md`'s;
+this file holds the sinks and the layout.
 
 The target shape stands as reviewed: a log core (ring + context stamping,
 once) with serial, file and screen as independent sinks carrying explicit

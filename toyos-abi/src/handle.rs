@@ -79,7 +79,7 @@ impl Rights {
     pub const MAP: Rights = Rights(1 << 4);
     /// Block on it, or name it in an [`OP_WATCH`](crate::inbox::OP_WATCH).
     pub const WAIT: Rights = Rights(1 << 5);
-    /// Kill a process; on a `SysCap`, open one by pid.
+    /// Kill a process.
     pub const MANAGE: Rights = Rights(1 << 6);
     /// On a `SysCap`: enter the RT band.
     pub const RT: Rights = Rights(1 << 7);
@@ -88,7 +88,7 @@ impl Rights {
     /// On a `SysCap`: read the whole machine's kernel log.
     ///
     /// [`SYS_LOG_READ`] answers every record every CPU wrote, which is every
-    /// process's business and no process's right by default. `logd` holds
+    /// process's business and no process's right by default. `logkeeper` holds
     /// it because writing `/log` is its job and `test-runner` because a gate
     /// reads what the kernel said; no other program in any boot config does.
     ///
@@ -101,12 +101,12 @@ impl Rights {
     /// carries — one bit for both, because a machine taken away from its
     /// processes is the same authority whichever state it is left in. It rides a bit for
     /// the same reason minting a device claim and entering the real-time band
-    /// do: what can cut the power is exactly what `init` endowed, and
+    /// do: what can cut the power is exactly what the supervisor endowed, and
     /// there is nothing a program can name to reach it otherwise.
     ///
-    /// The kernel mints one carrying it, at boot, for `init`
-    /// (`kernel::loader::spawn_init`); every other holder is a narrowed
-    /// duplicate init endowed from a `system.toml` row that named `power`.
+    /// The kernel mints one carrying it, at boot, for the supervisor
+    /// (`kernel::loader::spawn_supervisor`); every other holder is a narrowed
+    /// duplicate the supervisor endowed from a `system.toml` row that named `power`.
     ///
     /// [`SYS_SHUTDOWN`]: crate::syscall::SYS_SHUTDOWN
     /// [`SYS_REBOOT`]: crate::syscall::SYS_REBOOT
@@ -137,10 +137,31 @@ impl Rights {
     ///
     /// [`SYS_DEVICE_INVENTORY`]: crate::syscall::SYS_DEVICE_INVENTORY
     pub const INVENTORY: Rights = Rights(1 << 12);
+    /// On a `SysCap`: read the machine's counters.
+    ///
+    /// [`SYS_COUNTERS`] answers, per CPU, its own clock reading and how many
+    /// times firmware took it over, `MSR_SMI_COUNT` where the CPU counts that:
+    /// what the machine is doing, not what a program on it does. The counters
+    /// that time programs need [`TRACE`](Self::TRACE) beside this.
+    /// `inspect` holds it, and `test-runner`.
+    ///
+    /// [`SYS_COUNTERS`]: crate::syscall::SYS_COUNTERS
+    pub const COUNTERS: Rights = Rights(1 << 13);
+    /// On a `SysCap`: read what times the work of every other program.
+    ///
+    /// Beside [`COUNTERS`](Self::COUNTERS), [`SYS_COUNTERS`] answers each
+    /// CPU's `APERF` and `MPERF` — its frequency and busy fraction, the
+    /// Hertzbleed power channel — and the kicks it took, the wake-ups that time
+    /// keystrokes. Admin tools hold it, `inspect` and `test-runner`; no
+    /// ordinary program and no toybox applet does while a manifest row grants
+    /// a whole binary.
+    ///
+    /// [`SYS_COUNTERS`]: crate::syscall::SYS_COUNTERS
+    pub const TRACE: Rights = Rights(1 << 14);
 
     /// Every bit that has a caller. A wider set than this is a bug in whoever
     /// composed it, not a right nobody uses.
-    pub const ALL: Rights = Rights(0x1fff);
+    pub const ALL: Rights = Rights(0x7fff);
 
     pub const fn from_bits(bits: u32) -> Option<Self> {
         if bits & !Self::ALL.0 == 0 { Some(Rights(bits)) } else { None }
@@ -171,7 +192,7 @@ impl Rights {
 /// refusal saying which right was missing.
 impl core::fmt::Debug for Rights {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        const NAMES: [(Rights, &str); 13] = [
+        const NAMES: [(Rights, &str); 15] = [
             (Rights::DUP, "DUP"),
             (Rights::TRANSFER, "TRANSFER"),
             (Rights::READ, "READ"),
@@ -185,6 +206,8 @@ impl core::fmt::Debug for Rights {
             (Rights::POWER, "POWER"),
             (Rights::ROSTER, "ROSTER"),
             (Rights::INVENTORY, "INVENTORY"),
+            (Rights::COUNTERS, "COUNTERS"),
+            (Rights::TRACE, "TRACE"),
         ];
         if self.0 == 0 {
             return f.write_str("NONE");

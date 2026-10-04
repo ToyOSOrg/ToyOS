@@ -57,7 +57,7 @@ mod tests {
          \"UEFI QEMU QEMU USB HARDDRIVE TOYOS0BOOTSTICK1\" from PciRoot(0x0)/Pci(0x1,0x0)/USB(0x0,0x0)\n\
          ToyOS Bootloader 1.0\n\
          ROOT: read into memory at 0x7c894000+0x800000 from LBA 212992+16384, 1048576 bytes a request \
-         (optimal granularity: not reported), in 22519000 TSC cycles\n\
+         (optimal granularity: not reported), in 22519000 counter ticks\n\
          Loader log: the kernel handoff begins, so ";
 
     const KERNEL: &str = "[kernel 0.000 cpu0 boot] black box: 0x8000000 is this boot's, 16344 bytes \
@@ -93,7 +93,7 @@ mod tests {
 
     #[test]
     fn a_port_the_firmware_left_alone_passes_whole() {
-        let later = format!("{KERNEL}{{1.002 init}} init: a program's line\n");
+        let later = format!("{KERNEL}{{1.002 supervisor}} supervisor: a program's line\n");
         assert_eq!(passed(&later, &[3, 40]), later);
     }
 

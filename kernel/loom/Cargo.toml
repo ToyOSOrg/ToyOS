@@ -1,0 +1,328 @@
+[package]
+name = "kernel-loom"
+description = "Loom models of the kernel's lock-free concurrency, over the kernel's own sources compiled beside the kernel and not in it."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# This package exists only to run the loom model checker over the kernel's own
+# sources: `kernel/src/sync.rs`, the ticket spinlock the whole kernel rests on,
+# the other kernel files `src/lib.rs` names, and the scheduler core,
+# `kernel/pure/sched/`. It compiles them into its own crate with
+# `feature = "loom"` on, so their atomics and cells become loom-instrumented ones
+# and the models explore the real primitives rather than transliterations of
+# them — a transliteration is exactly the divergence risk a model checker is
+# meant to remove.
+#
+# A separate package, so `loom` and its transitive host crates stay out of
+# `kernel/Cargo.lock`: this is a member of the host workspace (root
+# `Cargo.toml`) and resolves in `/Cargo.lock`, `kernel/` is excluded from that
+# workspace and resolves against `kernel/Cargo.lock`, and nothing the kernel
+# builds depends on this package. Cargo runs it from the repository root: run
+# below `kernel/`, `kernel/.cargo/config.toml` cross-compiles it to a bare
+# target.
+
+[features]
+default = ["loom"]
+loom = []
+# The negative control for W3. It removes the two `SeqCst` fences from
+# `shard.rs`'s wake pair, and `log_wake.rs` must red under it — the one command
+# that proves the model has teeth:
+#
+#   cargo test --manifest-path kernel/loom/Cargo.toml --features wake-fence-off \
+#     --test log_wake
+#
+# Never on by default and never reachable from a kernel build, which declares
+# the same name only so `cfg` checking knows it.
+wake-fence-off = []
+# The negative control for a poll ring's one-shot answer. It splits
+# `inbox/once.rs`'s exchange into a load and a store, so a post and the
+# registrant's own recheck can both answer one poll, and `poll_once.rs` must red:
+#
+#   cargo test --manifest-path kernel/loom/Cargo.toml --features poll-fire-load-store \
+#     --test poll_once
+#
+# Never on by default, and no kernel build can reach it. `loom_watch.rs`'s ring
+# entry is the same `Once`, and its three `*_completes_exactly_once` models
+# must red under it too:
+#
+#   cargo test -p kernel-loom --features poll-fire-load-store --test loom_watch
+#
+poll-fire-load-store = []
+# The negative control for a poll ring's answer. It makes `inbox/polls.rs`
+# answer a fired poll with its interest and look at nothing, so a post with
+# nothing behind it is an answer and `inbox_answer.rs` must red:
+#
+#   cargo test --manifest-path kernel/loom/Cargo.toml --features post-is-an-answer \
+#     --test inbox_answer
+#
+# Never on by default, and no kernel build can reach it.
+post-is-an-answer = []
+# The negative control for the ticket lock's acquire edge. It makes `sync.rs`'s
+# two loads of `now` — the ones that decide ownership — `Relaxed`, so the
+# previous owner's writes are unordered against the next owner's reads, and
+# `ticket_lock.rs` must red:
+#
+#   cargo test --manifest-path kernel/loom/Cargo.toml --features lock-acquire-off \
+#     --test ticket_lock
+#
+# Never on by default and never reachable from a kernel build, which declares
+# the same name only so `cfg` checking knows it.
+lock-acquire-off = []
+# The negative control for the reap gate's enrolment edge. It makes
+# `reap_gate.rs`'s `raise` store `Relaxed`, so a claimer is handed a gate
+# without the work it was raised for, and `reap_gate.rs` must red:
+#
+#   cargo test --manifest-path kernel/loom/Cargo.toml --features reap-raise-relaxed \
+#     --test reap_gate
+#
+# Never on by default and never reachable from a kernel build, which declares
+# the same name only so `cfg` checking knows it.
+reap-raise-relaxed = []
+# The negative control for the shootdown acknowledgement. It makes
+# `shootdown.rs`'s `serve` read what it owes `Relaxed`, so the flush no longer
+# postdates the initiator's page-table write, and `tlb_shootdown.rs` must red:
+#
+#   cargo test --manifest-path kernel/loom/Cargo.toml --features shootdown-serve-relaxed \
+#     --test tlb_shootdown
+#
+# Never on by default and never reachable from a kernel build, which declares
+# the same name only so `cfg` checking knows it.
+shootdown-serve-relaxed = []
+# The negative control for a counters round's answer. It makes
+# `shootdown.rs`'s `served` read `Relaxed`, so a reader told a CPU answered can
+# still copy out the answer before it, and `counters_round.rs` must red:
+#
+#   cargo test --manifest-path kernel/loom/Cargo.toml --features shootdown-served-relaxed \
+#     --test counters_round
+#
+# Never on by default and never reachable from a kernel build, which declares
+# the same name only so `cfg` checking knows it.
+shootdown-served-relaxed = []
+# The negative control for the CPU roster's publication. It makes
+# `smp_roster.rs`'s `commit` publish the count with a `Relaxed` store, so a
+# reader can see a count over a slot the commit has not filled, and
+# `smp_bringup.rs` must red:
+#
+#   cargo test --manifest-path kernel/loom/Cargo.toml --features roster-commit-relaxed \
+#     --test smp_bringup
+#
+# Never on by default and never reachable from a kernel build, which declares
+# the same name only so `cfg` checking knows it.
+roster-commit-relaxed = []
+# The negative control for the release/answer word. It grows the base's second
+# store back — releasing the APs and enabling shootdown participation become two
+# stores — so a shootdown can see the machine released while it is not yet
+# answering, and `smp_bringup.rs` must red:
+#
+#   cargo test --manifest-path kernel/loom/Cargo.toml --features smp-ready-split \
+#     --test smp_bringup
+#
+# Never on by default and never reachable from a kernel build, which declares
+# the same name only so `cfg` checking knows it.
+smp-ready-split = []
+# The negative control for W1, the record ring's publication. It makes
+# `shard.rs`'s last store — the one that publishes the sequence number —
+# `Relaxed`, so a reader can find the number with the body behind it stale or
+# half written, and `log_record.rs` must red:
+#
+#   cargo test --manifest-path kernel/loom/Cargo.toml --features log-commit-release-off \
+#     --test log_record
+#
+# Never on by default and never reachable from a kernel build, which declares
+# the same name only so `cfg` checking knows it.
+log-commit-release-off = []
+# The negative control for W5, a shard's own publication. It makes
+# `registry.rs`'s pointer store and load `Relaxed`, so what the pointer
+# publishes stops being the shard behind it, and `log_publish.rs` must red,
+# typically with loom's own words, `Causality violation: Concurrent load and
+# mut accesses` — the reader reaching the shard's atomics while the publisher
+# is still building them:
+#
+#   cargo test --manifest-path kernel/loom/Cargo.toml --features shard-publish-relaxed \
+#     --test log_publish
+#
+# Never on by default and never reachable from a kernel build, which declares
+# the same name only so `cfg` checking knows it.
+shard-publish-relaxed = []
+# The negative control for the sleep lock's acquire edge. It makes
+# `sleeplock.rs`'s two loads of `now` — the ones that decide whose turn it is —
+# `Relaxed`, so the previous holder's writes are unordered against the next
+# holder's reads, and `sleep_lock.rs` must red with loom's own words,
+# `Causality violation: Concurrent write accesses to UnsafeCell`:
+#
+#   cargo test --manifest-path kernel/loom/Cargo.toml --features sleeplock-acquire-off \
+#     --test sleep_lock
+#
+# Never on by default and never reachable from a kernel build, which declares
+# the same name only so `cfg` checking knows it.
+sleeplock-acquire-off = []
+# The negative control for a claimed PCI function's interrupt record. The
+# reader's `swap` of the count becomes a load and a store, which is the whole of
+# what this record's design is, and `device_irq.rs` must red:
+#
+#   cargo test --manifest-path kernel/loom/Cargo.toml --features device-irq-lossy \
+#     --test device_irq
+#
+# Never on by default and never reachable from a kernel build, which declares
+# the same name only so `cfg` checking knows it.
+device-irq-lossy = []
+# The negative control for the blocked-task dump's report handoff. It makes
+# `dump_request.rs`'s `take` and `end_report` `Relaxed`, so a report is
+# unordered against the one before it, and `dump_request.rs` must red:
+#
+#   cargo test --manifest-path kernel/loom/Cargo.toml --features dump-report-relaxed \
+#     --test dump_request
+#
+# Never on by default and never reachable from a kernel build, which declares
+# the same name only so `cfg` checking knows it.
+dump-report-relaxed = []
+# The negative control for a program's log ring, `toyos/src/log/ring.rs`. It
+# makes the store that publishes a record — the shared ring's `published` word
+# and a lane's `head` — `Relaxed`, so a reader can find the word with the body
+# behind it unwritten, and `log_ring.rs` must red with loom's own words,
+# `Causality violation`:
+#
+#   cargo test --manifest-path kernel/loom/Cargo.toml --features log-ring-publish-relaxed \
+#     --test log_ring
+#
+# Never on by default; the SDK declares the same name only so `cfg` checking
+# knows it.
+log-ring-publish-relaxed = []
+# Two more on the same model: the reader's progress store `Relaxed`, so a
+# writer can reuse a slot the reader is still copying; and a writer's `tail`
+# and `head` loads swapped, so a stale `head` under a fresh `tail` reads as
+# room that is not there.
+log-ring-tail-relaxed = []
+log-ring-loads-swapped = []
+
+# The negative control for the panic console's published descriptor. It drops
+# the publisher's `Release` fence between its odd mark and its words, so a
+# reader can keep words of a publication whose mark it never saw, and
+# `panic_console_publish.rs` must red:
+#
+#   cargo test --manifest-path kernel/loom/Cargo.toml --features seqlock-writer-fence-off \
+#     --test panic_console_publish
+#
+# Never on by default and never reachable from a kernel build, which declares
+# the same name only so `cfg` checking knows it.
+seqlock-writer-fence-off = []
+
+# The negative control for the console backend's lock. It builds
+# `serial_lock.rs`'s `try_lock` with `then_some`, whose argument is built on a
+# lost exchange too and whose drop then releases the holder's lock, and
+# `serial_lock.rs` must red:
+#
+#   cargo test --manifest-path kernel/loom/Cargo.toml --features serial-try-lock-then-some \
+#     --test serial_lock
+#
+# Never on by default and never reachable from a kernel build, which declares
+# the same name only so `cfg` checking knows it.
+serial-try-lock-then-some = []
+
+# The scheduler core's models, `tests/loom_*.rs`.
+#
+# Model the mandatory preempt-disabled push away. The
+# `preempted_producer_strands_suffix` case must FAIL under this feature —
+# `tests/loom_mailbox.rs` asserts exactly that.
+no-preempt-guard = []
+# The negative control for the sleep handshake's kick edge.
+# It makes `mailbox.rs`'s `Doorbell::ring` read the doorbell's bits `Relaxed`
+# instead of `AcqRel`, so a producer can miss a consumer's freshly published
+# `SLEEPING` bit and elide the IPI that would have woken it, and
+# `loom_sleep.rs` must red under it — the one command that proves the model
+# has teeth:
+#
+#   cargo test -p kernel-loom --features doorbell-kick-relaxed \
+#     --test loom_sleep
+#
+# Never on by default; the kernel declares the same name only so `cfg`
+# checking knows it.
+doorbell-kick-relaxed = []
+# The negative control for `Balance::PushOnSurplus`'s ordering. It weakens
+# `cpu.rs`'s `balance_fence` from a `SeqCst` fence to a release one, which
+# orders stores against stores and nothing against a later load — so the push's
+# surplus store and the sleeper's SLEEPING store may each be missed by the
+# other's read, and the CPU halts with a surplus published and no probe
+# outstanding. `loom_push.rs` must red under it:
+#
+#   cargo test -p kernel-loom --features push-fence-relaxed --test loom_push
+#
+push-fence-relaxed = []
+# The one feature here that models nothing away. It lets the mailbox model's
+# victim stop taking passes — what a CPU that stops does — and the model must
+# red, because `MailboxNode::in_flight` is the consumer's to clear and a
+# retired consumer clears nothing. It reproduces an open defect rather than
+# proving a lie is caught, so unlike its siblings it goes away with the fix:
+#
+#   cargo test -p kernel-loom --features victim-retires-mid-probe \
+#     --test loom_mailbox
+#
+# The kernel declares no twin, because this decides nothing in
+# `kernel/pure/sched/`.
+victim-retires-mid-probe = []
+# The negative control for the watch. It makes `task.rs`'s `begin_commit`
+# blind to the notified bit, which is a waiter that registers, checks and parks
+# without the post that landed in between being able to stop it — the lost wake
+# the watch exists to make unrepresentable — and `loom_watch.rs` must red:
+#
+#   cargo test -p kernel-loom --features commit-ignores-notify --test loom_watch
+#
+commit-ignores-notify = []
+# The negative control for the notify's flagged arm. A post that finds its
+# bits already set answers off a load instead of a read-modify-write, so a
+# second post can read the word from before the waiter consumed the first, and
+# `loom_watch.rs` must red:
+#
+#   cargo test -p kernel-loom --features notify-flag-load-only --test loom_watch
+#
+notify-flag-load-only = []
+# The negative control for the stop's gate. It removes the two `SeqCst` fences
+# of `watch.rs`'s `Gate`, so a poster's transition and the stop's sweep may
+# each miss the other, and `loom_watch.rs` must red:
+#
+#   cargo test -p kernel-loom --features gate-fence-off --test loom_watch
+#
+gate-fence-off = []
+# The control for `poll_racing`'s lost-completion half: its producer posts, then
+# stores the readiness, the reverse of the order `pcidev::note_fault` keeps, so
+# both `*_racing_a_post*_completes_exactly_once` models must red with a poll
+# completed by neither:
+#
+#   cargo test -p kernel-loom --features fault-posted-before-it-is-set --test loom_watch
+#
+# The kernel declares no twin, because this decides nothing in
+# `kernel/pure/sched/`.
+fault-posted-before-it-is-set = []
+
+[dependencies]
+loom = "0.7"
+# The record layout the shard is a ring of. `no_std`, no atomics of its own,
+# so it compiles into the model unchanged.
+toyos-abi = { path = "../../toyos-abi" }
+
+# **The models are compiled with optimisation, and that is a stack decision.**
+# `generator`, which loom's coroutines are built on, gives each one 32 KiB —
+# and a `LogRecord` is a kilobyte, so a debug build's per-temporary copies of a
+# 4,416-byte `Shard` and the records that go through it overflow it before the
+# first assertion. Nothing loom checks depends on the optimisation level: its
+# atomics and cells are ordinary types whose instrumentation survives inlining,
+# and the schedule exploration is loom's own. The optimisation comes from the
+# root workspace's `[profile.dev] opt-level = 2` (the `test` profile inherits
+# it; a member's own `[profile]` table is ignored by cargo and refused by
+# `src/hostws.rs`) — so lowering the root's opt-level does not slow these
+# models, it overflows their stacks.
+
+[lib]
+path = "src/lib.rs"
+# The models are the test targets; loom atomics outside a `loom::model` panic,
+# so this crate exposes no unit tests of its own.
+test = false
+
+# The kernel's features its shared files name and no model turns on: the
+# actuator build, the scheduler core's instruments, and the controls the
+# library's tests and the simulator run. A `cfg` name and not a feature, since a
+# feature here is a model control.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("boot-actuators", "sched-check", "sched-tripwire", "protocol-port", "placement-ignores-staleness"))'] }

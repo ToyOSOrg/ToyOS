@@ -6,19 +6,18 @@ opened: 2026-09-07
 
 # The T14 answers only through a USB stick
 
-Every result from the bench rides a stick and a reboot into Ubuntu. The laptop
-is on a cable on the same LAN as the development Mac and its NIC is the onboard
-Intel I219 at `00:1f.6`, `8086:15fc`, which the kernel enumerates and nothing
-claims. The track is to make that cable the answer path.
+Every boot of the bench is flashed to a stick under Ubuntu and judged by what
+is read off it after a reboot into Ubuntu. The laptop is on a cable on the same
+LAN as the development Mac and its NIC is the onboard Intel I219 at `00:1f.6`,
+`8086:15fc`, which netd claims on the two LAN boots (`tests/lanleasecase`,
+`tests/lantalkcase`); on the second the Mac reads the boot's log, runs a
+command and hands the machine back over the cable. The track is to make that
+cable the answer path.
 
-The substrate a process needs to drive a PCI function itself is built
-(`kernel/src/pcidev/mod.rs`, `userland/netd/src/virtio_net.rs`). What is left is
-the I219 driver in netd, with DHCP under the hostname `toyos-t14` and a first
-ping and ssh from the Mac; the log a boot serves, read from the Mac while it
-is booting; command execution, file
-transfer both ways and key auth in sshd, with the harness running userland tests
-over ssh through a russh client; and a netboot spike in which the firmware
-fetches the loader over HTTP so the stick leaves the boot path.
+What is left is the harness running userland tests over ssh through a russh
+client, which `issues/hardware/the-t14-reboots-through-ubuntu-for-every-test.md`
+stages, and a netboot spike in which the firmware fetches the loader over HTTP
+so the stick leaves the boot path.
 
 Constraints a reader would otherwise pay to re-derive:
 
@@ -34,8 +33,8 @@ Constraints a reader would otherwise pay to re-derive:
 - **ssh is the bench's transport and a real feature**: sshd is built on russh
   and the harness's client is russh too. No host ssh binary, no fork.
 - **Addressing is DHCP with a hostname**, resolved through the router's DNS. The
-  T14's MAC is the same under ToyOS and Ubuntu, so the lease is the one `t14`
-  already resolves to. Wi-Fi is out — the AX210 needs a firmware image.
+  T14's MAC is the same under ToyOS and Ubuntu. Wi-Fi is out — the AX210 needs
+  a firmware image.
 - **QEMU's `virtio-net-pci-non-transitional` on `q35` advertises no PCIe
   function-level reset** — measured, not assumed: `pcidev`'s refusal on that
   ground reddened every netd registration at once. So a re-claim is made safe by

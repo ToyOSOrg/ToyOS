@@ -268,50 +268,54 @@ pub fn last_words(
     };
     let second_message = second.message().as_str().unwrap_or(NOT_CAPTURED);
 
-    let raw: fn(&[u8]) = serial::panic_raw;
-    raw(b"\n!!! ");
-    raw(header.as_bytes());
-    raw(b" !!! (apic ");
-    serial::panic_raw_dec(u64::from(cpu::hardware_id()));
-    if let Some(prev) = prev {
-        raw(b", the cpu was already in ");
-        raw(state_name(prev).as_bytes());
-    }
-    raw(b")\n  first (apic ");
-    serial::panic_raw_dec(u64::from(slot.apic.load(Ordering::Relaxed)));
-    raw(b"): ");
-    match kind {
-        Kind::Panic => {
-            raw(b"panic at ");
-            raw(cut.as_bytes());
-            raw(file.as_bytes());
-            raw(b":");
-            serial::panic_raw_dec(u64::from(line));
-            raw(b":");
-            serial::panic_raw_dec(u64::from(column));
-            raw(b": ");
-            raw(message.as_bytes());
+    // Let go of before the record below: before `klogd` runs, its drain may be
+    // a burst on this CPU, which this hold would refuse.
+    {
+        let mut uart = serial::panic_registers();
+        uart.write(b"\n!!! ");
+        uart.write(header.as_bytes());
+        uart.write(b" !!! (apic ");
+        uart.dec(u64::from(cpu::hardware_id()));
+        if let Some(prev) = prev {
+            uart.write(b", the cpu was already in ");
+            uart.write(state_name(prev).as_bytes());
         }
-        Kind::Fault => {
-            raw(message.as_bytes());
-            raw(b" rip=");
-            serial::panic_raw_hex(rip);
-            raw(b" cr2=");
-            serial::panic_raw_hex(cr2);
-            raw(b" err=");
-            serial::panic_raw_hex(error_code);
+        uart.write(b")\n  first (apic ");
+        uart.dec(u64::from(slot.apic.load(Ordering::Relaxed)));
+        uart.write(b"): ");
+        match kind {
+            Kind::Panic => {
+                uart.write(b"panic at ");
+                uart.write(cut.as_bytes());
+                uart.write(file.as_bytes());
+                uart.write(b":");
+                uart.dec(u64::from(line));
+                uart.write(b":");
+                uart.dec(u64::from(column));
+                uart.write(b": ");
+                uart.write(message.as_bytes());
+            }
+            Kind::Fault => {
+                uart.write(message.as_bytes());
+                uart.write(b" rip=");
+                uart.hex(rip);
+                uart.write(b" cr2=");
+                uart.hex(cr2);
+                uart.write(b" err=");
+                uart.hex(error_code);
+            }
+            Kind::None => uart.write(b"nothing captured on this cpu"),
         }
-        Kind::None => raw(b"nothing captured on this cpu"),
+        uart.write(b"\n  second: panic at ");
+        uart.write(second_file.as_bytes());
+        uart.write(b":");
+        uart.dec(u64::from(second_line));
+        uart.write(b":");
+        uart.dec(u64::from(second_column));
+        uart.write(b": ");
+        uart.write(second_message.as_bytes());
+        uart.write(b"\n");
     }
-    raw(b"\n  second: panic at ");
-    raw(second_file.as_bytes());
-    raw(b":");
-    serial::panic_raw_dec(u64::from(second_line));
-    raw(b":");
-    serial::panic_raw_dec(u64::from(second_column));
-    raw(b": ");
-    raw(second_message.as_bytes());
-    raw(b"\n");
 
     if !on_the_record {
         return;
@@ -338,8 +342,8 @@ pub fn last_words(
 }
 
 /// Halt all CPUs: stop the others, flush pending log output, then hold this
-/// machine's panel until a key retires the reboot bound or the bound returns it
-/// to firmware. Every fatal path's one funnel.
+/// machine's panel until the reboot bound returns it to firmware. Every fatal
+/// path's one funnel.
 // panic_flush bypasses the log-ring and serial locks — once the others are stopped a wedged holder never releases them, so taking them normally could deadlock.
 pub fn halt_all_cpus() -> ! {
     // Before the halt and the panel: from here this machine holds a report for
@@ -357,9 +361,7 @@ pub fn halt_all_cpus() -> ! {
     crate::arch::irqchip::stop_other_cpus();
     let bound = crate::panic_reboot::arm(true);
     // Folded into the still-unpainted capture only where the panel is this
-    // boot's only account of itself: a refresh re-freezes the ring, and
-    // `screen_late_panic` reads the panel for a record written *after*
-    // `capture()` to prove the paint comes from the frozen snapshot. A machine
+    // boot's only account of itself: a refresh re-freezes the ring. A machine
     // with a console gets the arm line on it.
     if !serial::has_console() {
         crate::drivers::panic_console::refresh_capture();
@@ -370,10 +372,10 @@ pub fn halt_all_cpus() -> ! {
     unsafe { serial::panic_flush(); }
     // Must follow the flush — it's the deepest stack this path reaches.
     crate::arch::trap::report_fault_stack();
-    // page_forever runs strictly after the flush: it is an unbounded loop and may only run once the serial report is out.
-    // Only the CPU that painted watches the bound; the rest halt below, since two CPUs polling one keyboard would split every key.
+    // hold_the_panel runs strictly after the flush: it is an unbounded loop and may only run once the serial report is out.
+    // Only the CPU that painted watches the bound; the rest halt below.
     if painted {
-        crate::drivers::panic_console::page_forever(bound);
+        crate::drivers::panic_console::hold_the_panel(bound);
     }
     cpu::halt();
 }

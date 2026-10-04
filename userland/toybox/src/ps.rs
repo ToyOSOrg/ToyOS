@@ -5,7 +5,7 @@
 //! the image's `[programs.toybox]` row declares — a config that does not name
 //! `roster` there builds an image whose `ps` says it cannot and changes nothing
 //! else. Nothing here asks for the capability: it is either in the endowment
-//! table `/system/bin/init` filled at spawn or it does not exist for this process.
+//! table `/system/bin/supervisor` filled at spawn or it does not exist for this process.
 //!
 //! `free` is the other half of the same syscall and needs none of this: the
 //! machine header is ambient.
@@ -111,8 +111,6 @@ pub fn main(_args: Vec<String>) {
     };
     let window_ns = uptime_ns.saturating_sub(first_uptime);
 
-    // No PPID column: a process has no parent. What started it gave it what it
-    // holds and kept a handle, and neither of those is a number the table has.
     println!("{:>5} {:>3} {:>2} {:>8} {:>5} {:>5}  {}",
         "PID", "TID", "S", "CPU", "%CPU", "MEM", "NAME");
 

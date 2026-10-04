@@ -28,6 +28,15 @@ pub unsafe fn wrmsr(msr: u32, value: u64) {
     asm!("wrmsr", in("ecx") msr, in("eax") low, in("edx") high, options(nomem, nostack));
 }
 
+/// Every earlier load and store done before what follows, a `wrmsr` among it:
+/// Linux's `weak_wrmsr_fence`. No `nomem`, so the compiler moves no access
+/// across it either.
+#[inline]
+pub fn wrmsr_fence() {
+    // SAFETY: two fences; no register, flag or memory changes.
+    unsafe { asm!("mfence", "lfence", options(nostack, preserves_flags)) };
+}
+
 #[inline]
 pub fn rdtsc() -> u64 {
     let lo: u32;
@@ -259,6 +268,10 @@ pub unsafe fn ltr(selector: u16) {
 /// `sti`; not a drop-in for a caller whose `cli`/`sti` also needs the compiler barrier a bare `asm!` carries.
 #[inline]
 pub fn enable_interrupts() {
+    #[cfg(feature = "mask-windows")]
+    if !interrupts_enabled() {
+        crate::windows::irqs_unmasking();
+    }
     // SAFETY: one RFLAGS bit, no memory, matching the options declared above.
     unsafe {
         asm!("sti", options(nomem, nostack));
@@ -271,7 +284,7 @@ pub fn enable_interrupts() {
 /// or `cli` runs, so nothing may branch on it to decide whether to mask; what it
 /// is for is a site that has to *say* which state it inherited, which is a fact
 /// about its caller rather than about the instruction after it.
-#[cfg(feature = "boot-actuators")]
+#[cfg(any(feature = "boot-actuators", feature = "mask-windows"))]
 pub fn interrupts_enabled() -> bool {
     let rflags: u64;
     // SAFETY: balanced push/pop leaves rsp unchanged; the pair uses the stack, so no nomem.
@@ -284,9 +297,15 @@ pub fn interrupts_enabled() -> bool {
 /// `cli`, with [`enable_interrupts`]'s caveat about the missing barrier.
 #[inline]
 pub fn disable_interrupts() {
+    #[cfg(feature = "mask-windows")]
+    let were_open = interrupts_enabled();
     // SAFETY: enable_interrupts's argument; masking interrupts is a latency bug, not a soundness one.
     unsafe {
         asm!("cli", options(nomem, nostack));
+    }
+    #[cfg(feature = "mask-windows")]
+    if were_open {
+        crate::windows::irqs_masked();
     }
 }
 
@@ -370,12 +389,6 @@ pub fn frame_pointer() -> u64 {
     // SAFETY: register-to-register mov only.
     unsafe { asm!("mov {}, rbp", out(reg) rbp, options(nomem, nostack, preserves_flags)) };
     rbp
-}
-
-/// Raise the architecture's undefined-instruction exception here: `ud2`, whose `#UD` the IDT catches as the kernel's own fault.
-pub fn undefined_instruction() {
-    // SAFETY: ud2 reads and writes nothing and raises #UD, caught by the installed IDT.
-    unsafe { asm!("ud2", options(nomem, nostack)) };
 }
 
 /// The TSC's frequency in hertz as CPUID *states* it, for the one caller that

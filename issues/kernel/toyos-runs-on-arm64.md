@@ -28,9 +28,8 @@ Every x86 guest on this host runs under TCG emulation instead — there is no
 
 ## Owner rulings, 2026-09-26
 
-- **Parked** (owner ruling, 2026-09-29). No later stage starts now. The Exit
-  (LLVM under emulation) needs stages 4-7; until they are
-  picked up it is unmet.
+- **Running** (owner, 2026-09-29): "can we get the most important tracks
+  running in parallel? arm, network and llvm?"
 - **Hardware discovery is ACPI only** (edk2 MADT, GTDT and SPCR under QEMU); no devicetree.
 - **Start.** Stage 0 (shared groundwork on x86) and stages 1-3 (toolchain,
   loader, kernel reaching serial on QEMU `virt`) start now. Stage 0 waits for
@@ -53,9 +52,6 @@ Every x86 guest on this host runs under TCG emulation instead — there is no
   under QEMU/HVF, behind one `sys_random` source.
 - **TLS**: each architecture uses its ABI's variant (x86-64 keeps variant II;
   AArch64 uses variant I with TLSDESC), and the loader handles both.
-- **The CI runner for the aarch64 tier** is decided at stage 8, after
-  measuring whether hosted `ubuntu-24.04-arm` exposes `/dev/kvm` and whether
-  HVF is usable inside a hosted `macos-latest` runner's VM.
 
 ## Measured, on `main` at `03b1b4db`
 
@@ -74,8 +70,8 @@ Every x86 guest on this host runs under TCG emulation instead — there is no
 160, `rtc.rs` (CMOS through port I/O) 222. Also `drivers/serial.rs` (433
 lines: a 16550 at a port, `serial.rs:28-39,157-165,389-396`).
 
-**x86-only pure crates, 1,305 lines:** `toyos-ps2` 377, `toyos-tco` 313,
-`toyos-pcid` 388 (it becomes an ASID allocator), `toyos-bootmap` 227
+**x86-only pure code, 1,305 lines:** `toyos-ps2` 377, `toyos-tco` 313,
+`kernel/pure/pcid` 388 (it becomes an ASID allocator), `toyos-bootmap` 227
 (PML4[0]/PML4[256], `toyos-bootmap/src/lib.rs:21-29`).
 
 **Inline assembly**, 834 lines by a paren-depth scan of
@@ -99,7 +95,6 @@ bound). Heaviest: `arch::cpu` (57 references), `arch::percpu` (28),
 
 - **Port I/O** (`cpu::inb/outb/inw/outw`): `rtc.rs:203-204`,
   `drivers/serial.rs` (16 sites), `drivers/i8042/mod.rs` (12 sites),
-  `drivers/acpi.rs:325,345` (reset and PM1a soft-off),
   `drivers/watchdog.rs:84-158`, `bootloader/src/watchdog.rs:195,204`.
 - **APIC / IOAPIC / MSI.** `hw.rs:1-5`: "Everything here is x2APIC, TSC or a
   single instruction." The MSI doorbell `0xFEE0_0000` is hardcoded three
@@ -151,9 +146,9 @@ output (`collect.rs` 80 `Aarch64` mentions, `reloc.rs` 69) but hardwires
 refuses anything but `EM_X86_64` (`toyos-elf/src/header.rs:24,75`).
 
 **Already abstracted.** The syscall stub already has both arms
-(`toyos-abi/src/syscall.rs:678,703`: `syscall` and `svc #0`). `toyos-sched`
+(`toyos-abi/src/syscall.rs:678,703`: `syscall` and `svc #0`). `kernel/pure/sched`
 (8,099 lines) is pure behind `Machine`/`Hw`
-(`toyos-sched/src/hw.rs:88-158`: `now`, `set_timer`, `stop_timer`,
+(`kernel/pure/sched/hw.rs:88-158`: `now`, `set_timer`, `stop_timer`,
 `irq_guard`, `halt`, `need_resched`, `switch`), with `kernel/src/arch/x86_64/hw.rs` as
 the one x86 implementation and a simulator as the other. PCI is
 ECAM/MMIO-only (`drivers/pci.rs:134-154`), no `0xCF8`. NVMe, xHCI and virtio
@@ -199,15 +194,13 @@ before any aarch64 file exists, with x86 as its only user:
   language.
 - **Pure crates stay arch-free.** A per-arch decision that becomes pure lives
   in its own crate, as `toyos-bootmap` does: it grows a TTBR plan, and
-  `toyos-pcid` becomes an ASID/PCID allocator.
+  `kernel/pure/pcid` becomes an ASID/PCID allocator.
 
 ## x86 left in generic code
 
 Each is its own issue, owned by the stage that removes it:
 
-- `issues/kernel/the-saved-kernel-context-names-x86-registers.md` (stage 4)
-- `issues/kernel/msi-and-pin-routing-take-an-x86-vector-and-apic-id.md` (stage 4)
-- `issues/kernel/the-boot-timing-handoff-is-named-for-the-tsc.md` (stage 4)
+- `issues/kernel/msi-and-pin-routing-take-an-x86-vector-and-apic-id.md` (stage 6)
 - `issues/kernel/the-crash-evidence-records-x86-fault-registers.md` (stage 5)
 - `issues/kernel/the-aarch64-kernel-builds-with-dead-code-allowed.md` (stage 7)
 
@@ -259,6 +252,32 @@ Each stage names its exit; "measured" means a number from a run.
    one stays green in `virt_el2_drop`, because stage 3 reads no counter and
    runs no FP. This stage's timer and FP tests run under that EL2 profile too,
    and each of the three deletions is shown red.
+   **Built on one CPU, ahead of small-kernel stage 6 by the owner's word:**
+   the kernel's own tables (`TTBR1_EL1` holding memory and nothing else, each
+   user space on `TTBR0_EL1` under a 16-bit ASID from `kernel/pure/pcid`), the
+   GICv3's SGIs and the virtual timer's PPI, the EL0 entry, and the context
+   switch carrying FP/SIMD; the `virt_` tests other than `virt_early_panic`,
+   `virt_early_fault` and `virt_el2_drop` judge it under the EL2 profile, emulated, because HVF
+   exposes no RNDR and the kernel's hash seed refuses there until stage 6's
+   virtio-rng. Each judges an event, never a rate: no QEMU test measures time.
+   Owed before the exit holds: the interrupts-off window against x86's, a
+   measurement only metal can make, with no instrument on either arch yet; the
+   instruction-cache maintenance before a mapping is executable
+   (`cache::make_executable`), the break-before-make ordering of a live
+   entry's replacement, and the TLB flush before a reclaimed ASID is issued
+   again, which QEMU's TCG, the only oracle this stage has, cannot fail on:
+   the first HVF run, once stage 6 gives HVF its RNDR, is their exit; and the
+   three deletions shown red. They are shown red on a machine whose
+   firmware leaves the registers otherwise, or by a loader that writes the
+   opposite values before the handoff. The ITS moves to stage 6: a claimed
+   function is its only consumer the small-kernel track leaves, and it needs that
+   stage's SMMUv3 first. Stubbed on AArch64, each owned by the small-kernel
+   track, which moves the driver out of the kernel:
+   - `arch::msi_message` refuses, so the kernel's xHCI (`virt`'s boot stick),
+     HDA, virtio-sound, virtio-console and virtio-gpu drivers each
+     refuse their function by name.
+   - `drivers::gop` refuses a scanout that is not whole 2 MiB pages of its
+     own, which a `ramfb` scanout carved out of RAM need not be.
 
 5. **SMP through PSCI.** `CPU_ON` from MADT GICC entries, SGIs as the IPI,
    broadcast TLBI behind the machine-wide invalidation contract. **Exit**:
@@ -269,6 +288,16 @@ Each stage names its exit; "measured" means a number from a run.
    `dlopen` test; until it does the kernel refuses `R_AARCH64_TLSDESC` by name
    (`toyos_elf::rela::ExeRefusal::TlsDescriptor` for an executable,
    `toyos_elf::RelocError::TlsDescriptor` for a library).
+   **Every CPU starts, ahead of small-kernel stage 6 by the owner's word, as
+   stage 4 did:** it ports no device interrupt, so nothing of the relay.
+   Owed before the exit holds: the TLS-descriptor resolver;
+   `issues/kernel/the-crash-evidence-records-x86-fault-registers.md`; the
+   blocked-task dump's probe of a CPU that ignored its kick
+   (`sched/dump.rs`'s `probe_silent`), which reaches `irqchip::send_nmi`'s
+   `owed!` on a machine of more than one CPU, and which nothing but the
+   `dump-deaf-cpu` actuator asks for until AArch64 has a keyboard; and, for
+   the first HVF run, the clean of an AP's start block to the point of
+   coherency, which TCG cannot fail on.
 
 6. **Virtio on `virt`.** virtio-pci (ECAM from MCFG) for blk, net, gpu,
    sound, input and rng. virtio-input replaces the i8042 as the
@@ -281,6 +310,16 @@ Each stage names its exit; "measured" means a number from a run.
    before its body) get a test here that reds with `put` written back as one
    `self.buf.write(off, trb)`; x86's TSO hides all three from every guest
    test until then.
+   **The claim's handler is the first arm of `irq()`
+   (`kernel/src/arch/aarch64/trap.rs:135`) that posts a watch or lets go of a
+   `Lock`**, and either runs `preempt::enable`, whose pass at depth zero
+   (`kernel/src/preempt.rs:67`) reads nothing of `DAIF`; `do_preempt`'s
+   `assert_baseline(BASELINE_IRQ_EXIT)` (`kernel/src/scheduler.rs:358`) passes
+   at depth zero, so that pass would run inside the handler, before
+   `irqchip::end`. Owed before that arm lands: `irq()` holds the preempt count
+   across every device arm, as x86-64's `device_irq_entry` does, or
+   `preempt::enable` refuses a pass with interrupts masked, which `IrqOff`'s
+   SAFETY (`kernel/src/sched/driver.rs:49`) already assumes.
 
 7. **Userland boots.** `init`, `logd`, the compositor, netd, soundd and sshd,
    built for `aarch64-unknown-toyos`. C programs stay x86-only until this
@@ -288,15 +327,11 @@ Each stage names its exit; "measured" means a number from a run.
    works from the host; `/log` survives a reboot; the same `system.toml`
    drives both arches.
 
-8. **An aarch64 tier in the harness.** `tests/common/qemu.rs` takes an
+8. **The harness boots aarch64.** `tests/common/qemu.rs` takes an
    `Arch`: `virt`, edk2-aarch64, HVF on Apple hosts (TCG otherwise).
-   `src/tiers.rs` gains the arch axis.
-   The CI runner is picked here, after measuring hosted `macos-latest`
-   (whether HVF is usable inside the runner VM) and hosted
-   `ubuntu-24.04-arm` (whether `/dev/kvm` exists there). **Exit**: the fast
-   tier runs on aarch64 locally on the M4 host; the nightly runs the aarch64
-   tier on whatever runner that measurement picks; a test red on only one
-   arch is a named known-red, not a skip.
+   **Exit**: once the track's stages are done, the whole suite is run on
+   aarch64 on the M4 host by hand, once; a test red on only one arch is
+   fixed or deleted with its issue, not skipped.
 
 ## Exit
 
@@ -304,8 +339,9 @@ ARM is done when LLVM compiles under emulation on the development Mac (owner
 ruling, 2026-09-29). One recipe is timed three ways: macOS natively, a Linux
 arm64 guest under QEMU with HVF, and ToyOS arm64 under QEMU with HVF. All
 three times are recorded, and it passes when ToyOS is at least as fast as the
-Linux guest. ToyOS compiling LLVM is `issues/build/toyos-builds-itself.md`'s
-work on AArch64.
+Linux guest. The timing is one measurement, taken by hand and not automated
+(owner ruling, 2026-09-29). ToyOS compiling LLVM is
+`issues/build/toyos-builds-itself.md`'s work on AArch64.
 
 ## Interactions with other tracks
 

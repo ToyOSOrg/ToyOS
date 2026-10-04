@@ -5,12 +5,12 @@
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use toyos_sched::fair::{FairShare, ShareState};
-use toyos_sched::hw::Nanos;
-use toyos_sched::msg::Msg;
-use toyos_sched::sync::LeafLock;
-use toyos_sched::task::{SchedPayload, TaskAccounting, TaskShared, WaitClass};
-use toyos_sched::park::WaitTicket;
+use kernel::sched::fair::{FairShare, ShareState};
+use kernel::sched::hw::Nanos;
+use kernel::sched::msg::Msg;
+use kernel::sched::sync::CellLock;
+use kernel::sched::task::{SchedPayload, TaskAccounting, TaskShared, WaitClass};
+use kernel::sched::park::WaitTicket;
 
 use crate::watch::Watch;
 use crate::mm::paging::Root;
@@ -28,7 +28,7 @@ impl<T> KernelLock<T> {
     }
 }
 
-impl<T: Send> LeafLock<T> for KernelLock<T> {
+impl<T: Send> CellLock<T> for KernelLock<T> {
     fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
         f(&mut self.0.lock())
     }
@@ -40,12 +40,13 @@ pub type KShare = FairShare<KernelLock<ShareState>>;
 /// The core's wait ticket; blocking sites use `driver::Ticket`, which wraps it in the needed preempt guard.
 pub type RawTicket = WaitTicket<KMsg>;
 
-/// The saved callee context; everything `Hw::switch` must load without dereferencing anything else.
+/// The saved callee context; everything `Hw::switch` must load without dereferencing anything else, named
+/// by role because every architecture's switch loads it.
 pub struct KernelCtx {
     /// Saved kernel stack pointer, written by the `context_switch` asm.
-    pub rsp: u64,
+    pub sp: u64,
     pub root: Root,
-    pub fs_base: u64,
+    pub thread_pointer: u64,
     pub kernel_stack_top: u64,
     /// `None` is this CPU's idle context.
     pub id: Option<TaskId>,
@@ -157,7 +158,7 @@ pub struct ThreadSched {
 
 impl ThreadSched {
     pub fn sched_state(&self) -> u8 {
-        use toyos_sched::task::TaskState;
+        use kernel::sched::task::TaskState;
         match self.shared.state() {
             TaskState::Running(_) => SCHED_RUNNING,
             TaskState::Ready(_) | TaskState::WakeQueued(_) | TaskState::InTransit(_) => SCHED_READY,

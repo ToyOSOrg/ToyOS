@@ -16,11 +16,24 @@
 //! one argument and both ended in the kernel rather than in an error word, so
 //! each has an arm here and the last arm is what says the machine survived
 //! them.
+//!
+//! **A spawn's answer is an insert into its caller's table**, whose room is
+//! checked before the spawn's endowments move: at the cap the spawn is
+//! refused with every handle it named still the caller's.
+//!
+//! **An endowment vector is one entry and one label short of a table**, which
+//! the kernel's own `self` fills. So a caller's entry labelled `self` is
+//! refused before anything moves, and so is a vector of `MAX_ENDOWMENTS`
+//! entries, while one entry fewer starts.
 
 use toyos_abi::syscall::{
-    self, EndowEntry, MmapFlags, MmapProt, SpawnArgs, SyscallError, MAX_SLOT_MAP,
+    self, EndowEntry, MmapFlags, MmapProt, SpawnArgs, SyscallError, MAX_ENDOWMENTS, MAX_SLOT_MAP, SELF_LABEL,
 };
 use toyos_abi::RawHandle;
+
+const SELF: &str = "/system/bin/test_rs_abuse_handle_table";
+/// The role a spawned copy of this binary takes: it exits at once.
+const CHILD: &str = "endowed";
 
 /// Where the child starts: `SpawnArgs` names a working directory or the spawn is refused.
 const CWD: &str = "/";
@@ -38,6 +51,9 @@ const PAIRS: usize = 100_000;
 const LABELS: &[u8] = b"twice";
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some(CHILD) {
+        return;
+    }
     let region = unsafe {
         syscall::mmap(
             core::ptr::null_mut(),
@@ -59,6 +75,8 @@ fn main() {
 
     let spawn_with = |slot_map_count: u64, endow_count: u64| {
         let args = SpawnArgs {
+            path_ptr: argv as u64,
+            path_len: (ARGV0.len() - 1) as u64,
             argv_ptr: argv as u64,
             argv_len: ARGV0.len() as u64,
             slot_map_ptr: region as u64,
@@ -71,6 +89,9 @@ fn main() {
             labels_len: LABELS.len() as u64,
             cwd_ptr: CWD.as_ptr() as u64,
             cwd_len: CWD.len() as u64,
+            image: 0,
+            image_len: 0,
+            place: u64::from(toyos_abi::HANDLE_INVALID.0),
         };
         unsafe { syscall::spawn(&args) }
     };
@@ -116,13 +137,20 @@ fn main() {
     let err = spawn_with(0, 2).expect_err("an endowment vector naming one handle twice must be rejected");
     assert_eq!(err, SyscallError::InvalidArgument, "wrong error for a repeated endowment");
 
+    a_caller_endows_no_self();
+    a_spawn_carries_one_entry_fewer_than_a_table();
+
     // dup2 picks the slot, so it never went through the allocating path that
     // carried the cap.
+    let mut filled = Vec::new();
     let mut refused = None;
     for n in 3..40_000u16 {
-        if let Err(e) = syscall::dup2(RawHandle(1), n) {
-            refused = Some((n, e));
-            break;
+        match syscall::dup2(RawHandle(1), n) {
+            Ok(handle) => filled.push(handle),
+            Err(e) => {
+                refused = Some((n, e));
+                break;
+            }
         }
     }
     let (n, e) = refused.expect("dup2 must eventually refuse to grow the handle table");
@@ -132,15 +160,98 @@ fn main() {
         "handle table reached {n} slots, past the {MAX_HANDLES} cap"
     );
 
-    // The cap is a live limit, not a latched failure. Every slot below `n` is
-    // at generation 0, so its handle is the bare slot index.
-    for slot in 3..n {
-        syscall::close(RawHandle(u32::from(slot)));
+    let last = filled.pop().expect("the fill installed a handle");
+    let entry = EndowEntry { label_off: 0, label_len: LABELS.len() as u32, handle: last, _pad: 0 };
+    let spawned = spawn_endowed(&[entry], LABELS);
+
+    // The cap is a live limit, not a latched failure.
+    for handle in filled {
+        syscall::close(handle);
     }
+    // Judged once the table has room again: a panic at the cap aborts with no report.
+    assert_eq!(spawned, Err(SyscallError::ResourceExhausted), "a spawn from a full table was not refused");
+    // Still this process's: the close ends it if the refused spawn moved it.
+    syscall::close(last);
     let reused = syscall::dup2(RawHandle(1), 3)
         .expect("dup2 must work again after closing handles");
     syscall::close(reused);
 
     unsafe { syscall::munmap(region, REGION) }.expect("munmap");
     println!("handle table capped at {MAX_HANDLES} on every insert path (refused at {n})");
+}
+
+/// `SYS_SPAWN` of this binary as a child that exits at once, carrying
+/// `entries` into the blob `labels`.
+fn spawn_endowed(entries: &[EndowEntry], labels: &[u8]) -> Result<RawHandle, SyscallError> {
+    let argv = format!("{SELF}\0{CHILD}");
+    // SAFETY: every pointer names a live local for the whole call.
+    unsafe {
+        syscall::spawn(&SpawnArgs {
+            path_ptr: SELF.as_ptr() as u64,
+            path_len: SELF.len() as u64,
+            argv_ptr: argv.as_ptr() as u64,
+            argv_len: argv.len() as u64,
+            slot_map_ptr: 0,
+            slot_map_count: 0,
+            env_ptr: 0,
+            env_len: 0,
+            endow_ptr: entries.as_ptr() as u64,
+            endow_count: entries.len() as u64,
+            labels_ptr: labels.as_ptr() as u64,
+            labels_len: labels.len() as u64,
+            cwd_ptr: CWD.as_ptr() as u64,
+            cwd_len: CWD.len() as u64,
+            image: 0,
+            image_len: 0,
+            place: u64::from(toyos_abi::HANDLE_INVALID.0),
+        })
+    }
+}
+
+/// An entry labelled `self` would shadow the kernel's in the child's lookup:
+/// refused before anything moves, so the pipe end it named is still this
+/// process's and still carries a byte.
+fn a_caller_endows_no_self() {
+    let ends = syscall::pipe().expect("a pipe for the self arm");
+    let entry = EndowEntry { label_off: 0, label_len: SELF_LABEL.len() as u32, handle: ends.write, _pad: 0 };
+    let err = spawn_endowed(&[entry], SELF_LABEL.as_bytes()).expect_err("an endowment labelled self must be refused");
+    assert_eq!(err, SyscallError::InvalidArgument, "wrong error for an endowment labelled self");
+    assert_eq!(syscall::write(ends.write, b"x"), Ok(1), "the end an endowment labelled self named is gone");
+    let mut byte = [0u8; 1];
+    assert_eq!(syscall::read(ends.read, &mut byte), Ok(1), "the byte did not arrive");
+    syscall::close(ends.read);
+    syscall::close(ends.write);
+}
+
+/// `MAX_ENDOWMENTS` entries naming distinct `TRANSFER` handles, so the count
+/// is the only refusal: refused, and one fewer starts.
+fn a_spawn_carries_one_entry_fewer_than_a_table() {
+    let mut handles = Vec::with_capacity(MAX_ENDOWMENTS);
+    while handles.len() < MAX_ENDOWMENTS {
+        let ends = syscall::pipe().expect("a pipe for the count arm");
+        handles.extend([ends.read, ends.write]);
+    }
+    let mut labels = Vec::new();
+    let entries: Vec<EndowEntry> = handles
+        .iter()
+        .enumerate()
+        .map(|(i, &handle)| {
+            let label = format!("e{i:02}");
+            let entry =
+                EndowEntry { label_off: labels.len() as u32, label_len: label.len() as u32, handle, _pad: 0 };
+            labels.extend_from_slice(label.as_bytes());
+            entry
+        })
+        .collect();
+    let err = spawn_endowed(&entries, &labels).expect_err("a spawn carrying MAX_ENDOWMENTS entries must be refused");
+    assert_eq!(err, SyscallError::InvalidArgument, "wrong error for MAX_ENDOWMENTS entries");
+
+    let fewer = MAX_ENDOWMENTS - 1;
+    let used = entries[fewer].label_off as usize;
+    let child = spawn_endowed(&entries[..fewer], &labels[..used])
+        .unwrap_or_else(|e| panic!("a spawn carrying {fewer} entries was refused: {e:?}"));
+    assert_eq!(syscall::process_wait(child), Ok(0), "the child carrying {fewer} entries");
+    syscall::close(child);
+    syscall::close(handles[fewer]);
+    println!("an endowment labelled self and {MAX_ENDOWMENTS} entries are refused, and {fewer} start");
 }

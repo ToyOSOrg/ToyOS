@@ -44,7 +44,7 @@ unsafe impl UserSafe for [u64; 2] {}
 // SAFETY: `#[repr(C)] Copy`, three `u64`s, no padding; `file_type` is a `u64`, not the enum it names, so every bit pattern stays valid.
 unsafe impl UserSafe for crate::object::ops::Stat {}
 
-// SAFETY: `#[repr(C)] Copy`, ten `u64`s, no padding; every field is validated where it is used, not here.
+// SAFETY: `#[repr(C)] Copy`, fourteen `u64`s, no padding; every field is validated where it is used, not here.
 unsafe impl UserSafe for toyos_abi::syscall::SpawnArgs {}
 // SAFETY: `#[repr(C)] Copy`, `RawHandle`, a `flags: u32`, then six `u64`s — no padding.
 unsafe impl UserSafe for toyos_abi::syscall::NamespaceBuild {}
@@ -154,9 +154,6 @@ impl<'a> SyscallContext<'a> {
     /// Write a typed value into user memory.
     pub fn copy_out<T: UserSafe>(&self, ptr: UserAddr, value: &T) -> Result<(), SyscallError> {
         let (kptr, _pins) = object::<T>(ptr, Access::Write)?;
-        if crate::actuator::copy_meets_a_remap() {
-            remap_race::hold(kptr.cast(), core::mem::size_of::<T>());
-        }
         // SAFETY: as `copy_in`; `T: UserSafe` guarantees no uninitialized padding byte is written out.
         unsafe { kptr.write_volatile(*value) };
         Ok(())
@@ -401,62 +398,4 @@ fn pinned<R: AsRef<[Segment]>>(
     let pins = FramePins::pin(runs, Pmm)?;
     drop(guard);
     Some(pins)
-}
-
-/// `copy-meets-a-remap`: a sibling's `munmap` and `mmap` staged between a
-/// typed copy's translation and its store. Only a copy whose destination
-/// already holds [`MARK`] in its first word is held, so the test program
-/// chooses the one copy it races.
-pub(crate) mod remap_race {
-    use core::sync::atomic::{AtomicU64, Ordering};
-    use crate::time::Duration;
-
-    /// What the racing program leaves in the destination's first word.
-    const MARK: u64 = 0x5eed_c0de_2ace_0001;
-    /// What this writes into the second word once the copy is held: the
-    /// program's cue to unmap and map again.
-    const HELD: u64 = 0x5eed_c0de_2ace_0002;
-    /// How long a held copy waits for the program to map again before it says
-    /// the test staged nothing.
-    const BOUND: Duration = Duration::from_secs(10);
-
-    /// The pid a held copy is waiting on, plus one; zero while none is held.
-    static HOLDER: AtomicU64 = AtomicU64::new(0);
-    /// Maps the holder's process has completed since its copy was held.
-    static MAPS: AtomicU64 = AtomicU64::new(0);
-
-    pub(super) fn hold(kptr: *mut u8, size: usize) {
-        if size < 16 {
-            return;
-        }
-        let words = kptr.cast::<u64>();
-        // SAFETY: the caller's window covers `size >= 16` bytes at `kptr`, aligned for a `u64`-bearing `UserSafe` type.
-        if unsafe { words.read_volatile() } != MARK {
-            return;
-        }
-        let pid = crate::process::current_process().0 as u64 + 1;
-        HOLDER.store(pid, Ordering::SeqCst);
-        MAPS.store(0, Ordering::SeqCst);
-        // SAFETY: as above; the second word is inside the same window.
-        unsafe { words.add(1).write_volatile(HELD) };
-        let deadline = crate::clock::now() + BOUND;
-        while MAPS.load(Ordering::SeqCst) == 0 {
-            assert!(
-                crate::clock::now() < deadline,
-                "copy-meets-a-remap: pid {} held a copy {BOUND} and never mapped again",
-                pid - 1
-            );
-            // An `IF`-clear spin: the sibling's munmap shoots down this CPU too.
-            crate::arch::tlb::poll();
-            core::hint::spin_loop();
-        }
-        HOLDER.store(0, Ordering::SeqCst);
-    }
-
-    /// `sys_mmap` placed a mapping of its own choosing for the current process.
-    pub(crate) fn mapped() {
-        if HOLDER.load(Ordering::SeqCst) == crate::process::current_process().0 as u64 + 1 {
-            MAPS.fetch_add(1, Ordering::SeqCst);
-        }
-    }
 }
