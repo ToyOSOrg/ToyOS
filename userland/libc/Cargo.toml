@@ -1,5 +1,6 @@
 [package]
 name = "toyos-libc"
+description = "ToyOS's C library, ours and not a fork: the POSIX layer a C program links, over toyos-abi and toyos, built into the sysroot."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

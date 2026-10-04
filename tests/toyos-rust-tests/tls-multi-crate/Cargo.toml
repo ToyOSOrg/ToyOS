@@ -1,5 +1,6 @@
 [package]
 name = "tls-multi-crate"
+description = "A guest test fixture: a cdylib whose thread-locals and its dependency's sit beside ordinary statics, loaded with dlopen."
 version = "0.1.0"
 edition = "2021"
 

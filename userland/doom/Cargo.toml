@@ -1,5 +1,6 @@
 [package]
 name = "doom"
+description = "DOOM: doomgeneric's C engine in a winit and softbuffer window, its music played through rustysynth and cpal."
 version = "0.1.0"
 edition = "2021"
 license = "GPL-2.0-only"

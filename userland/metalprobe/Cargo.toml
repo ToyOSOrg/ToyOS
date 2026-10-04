@@ -1,5 +1,6 @@
 [package]
 name = "metalprobe"
+description = "Test-only multi-call binary: the device measurements a metal boot takes of itself, each command exiting with its number."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

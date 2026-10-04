@@ -1,5 +1,6 @@
 [package]
 name = "pkg"
+description = "The installer: an archive checked against its release's SHA256SUMS and unpacked as one directory under /apps; the decoders are a library tested on the host."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

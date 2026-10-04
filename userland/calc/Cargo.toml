@@ -1,5 +1,6 @@
 [package]
 name = "calc"
+description = "A calculator: exact rationals in Calc, 64-bit two's-complement integers in Prog; the engine is a library tested on the host, and the window is winit and softbuffer."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

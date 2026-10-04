@@ -1,5 +1,6 @@
 [package]
 name = "host"
+description = "host <name>...: each name's IPv4 addresses, asked through std::net and so through netstack's resolver."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
