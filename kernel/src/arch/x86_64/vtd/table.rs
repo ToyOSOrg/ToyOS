@@ -8,7 +8,7 @@
 use alloc::vec::Vec;
 
 use crate::iommu::{AddressWidth, IommuError, Iova, StreamId};
-use crate::mm::pmm::{self, Category, PhysPage};
+use crate::mm::pmm::{self, PhysPage};
 use crate::mm::{DirectMap, Mmio, PAGE_2M};
 
 /// 4 KiB per table: 256 16-byte entries (root/context) or 512 8-byte entries (second-level).
@@ -49,7 +49,7 @@ impl Tables {
     /// Returns one zeroed 4 KiB table, usable as a root, context, second-level, or invalidation-queue table.
     pub fn alloc(&mut self) -> Table {
         if self.used + TABLE_BYTES > PAGE_2M as usize {
-            let page = pmm::alloc_page(Category::Dma)
+            let page = pmm::alloc_page()
                 .expect("iommu: no physical memory for a remapping table");
             self.pages.push(page);
             self.used = 0;

@@ -672,7 +672,7 @@ fn music_telemetry(ring: &MusicRing, render_cost: std::time::Duration) {
         let audio_s = t.chunks as f64 * RENDER_CHUNK as f64 / OUTPUT_RATE as f64;
         let rt = t.cpu.as_secs_f64() / audio_s;
         let fill = 100 * (RING_FRAMES - ring.free_space()) / RING_FRAMES;
-        eprintln!("[music] rt_factor={rt:.2} rendered={audio_s:.1}s/{:.1}s ring={fill}%", wall.as_secs_f64());
+        println!("[music] rt_factor={rt:.2} rendered={audio_s:.1}s/{:.1}s ring={fill}%", wall.as_secs_f64());
         *t = Tel { window_start: Instant::now(), cpu: Default::default(), chunks: 0 };
     }
 }

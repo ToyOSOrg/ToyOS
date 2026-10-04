@@ -6,12 +6,14 @@ start = ["logkeeper", "diskserver", "fileserver", "soundserver", "test-runner"]
 # image does. The kernel keeps the record ring and writes no file at all, so a
 # boot config without `logkeeper` is a boot whose `/log` is empty —
 # `every_boot_config_runs_logkeeper` is what refuses one.
-# It claims no device and serves no port: its row's authority is `logread`,
-# which is `Rights::LOG | Rights::WAIT` on a `SysCap` duplicate, and the supervisor hands
-# it every program's output beside that.
+# It claims no device: its row's authority is `logread`, which is
+# `Rights::LOG | Rights::WAIT` on a `SysCap` duplicate, and the supervisor hands
+# it every program's output beside that. `log` is the port it hands a reader
+# the log on.
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
+serves = ["log"]
 
 [programs.soundserver]
 service = true
@@ -38,8 +40,10 @@ syscap = ["rt"]
 # without it would make that arm vacuous rather than red.
 # `counters` and `trace` because `counters_read` reads every counter there is,
 # and narrows each away to prove its refusal.
+# `log` because `counters_metal` measures its idle second only once the log
+# holds its own line, read back off logkeeper.
 [programs.test-runner]
-receives = ["soundserver", "power"]
+receives = ["soundserver", "power", "log"]
 syscap = ["device", "dup", "logread", "power", "roster", "counters", "trace"]
 
 [programs.toybox]

@@ -398,16 +398,8 @@ impl<X: SchedPayload> CpuSched<X> {
         self.dying.iter().map(|corpse| &corpse.task)
     }
 
-    pub fn dying_len(&self) -> usize {
-        self.dying.len()
-    }
-
     pub fn stopped(&self) -> impl Iterator<Item = &ReadyTask<X>> + '_ {
         self.stopped.iter()
-    }
-
-    pub fn stopped_len(&self) -> usize {
-        self.stopped.len()
     }
 
     pub fn zombie_key(&self) -> Option<TaskKey> {
@@ -1687,9 +1679,8 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
             // wants everything a new task would queue behind, and a corpse
             // mid-unwind is exactly that: it is dispatched ahead of the fair
             // band, so counting `rq` alone makes a CPU holding two teardowns
-            // look as empty as an idle one — the same blindness `dying_len`
-            // closes in the dump. The steal probe wants what this CPU could
-            // hand over, which is the fair band and only the fair band;
+            // look as empty as an idle one. The steal probe wants what this
+            // CPU could hand over, which is the fair band and only the fair band;
             // publishing the first number to the second reader sends thieves to
             // CPUs with nothing to give.
             //
@@ -2727,7 +2718,7 @@ mod tests {
             w.cpus[0].parked_task(key).is_some(),
             "the retire lost the claim: the entry stays for the wake to find",
         );
-        assert_eq!(w.cpus[0].dying_len(), 0, "the retire placed nothing itself");
+        assert_eq!(w.cpus[0].dying().count(), 0, "the retire placed nothing itself");
         assert!(w.cpus[0].rq.is_empty(), "and queued nothing either");
 
         // Now the wake it lost to lands, and *it* places the task — in the
@@ -2877,14 +2868,14 @@ mod tests {
         }
 
         assert!(stopped_shared.stop_pending(), "the safe point takes the mark");
-        assert_eq!(w.cpus[0].stopped_len(), 1);
+        assert_eq!(w.cpus[0].stopped().count(), 1);
         assert_eq!(w.cpus[0].stopped[0].key(), stopped);
         assert_eq!(
             w.cpus[0].running().map(|t| t.key()),
             Some(other),
             "the CPU keeps working; only the stopped task is out",
         );
-        assert_eq!(w.cpus[0].dying_len(), 0, "stopping is not dying");
+        assert_eq!(w.cpus[0].dying().count(), 0, "stopping is not dying");
 
         // Every later pass, including ones where the CPU has nothing else.
         w.run_a_pass_at(C0, Nanos(NOW.0 + QUANTUM_NS + 1));
@@ -2894,7 +2885,7 @@ mod tests {
             Some(stopped),
             "no pick serves the band",
         );
-        assert_eq!(w.cpus[0].stopped_len(), 1);
+        assert_eq!(w.cpus[0].stopped().count(), 1);
         w.abandon();
     }
 
@@ -2928,7 +2919,7 @@ mod tests {
         w.post_claimed_wake(C0, &parked_shared, WakeReason::Woken);
         w.run_a_pass(C0);
 
-        assert_eq!(w.cpus[0].stopped_len(), 1, "the wake reached the band");
+        assert_eq!(w.cpus[0].stopped().count(), 1, "the wake reached the band");
         assert_eq!(w.cpus[0].stopped[0].key(), parked);
         assert!(w.cpus[0].rq.is_empty(), "and never the run queue");
         assert!(
@@ -2970,9 +2961,9 @@ mod tests {
         w.post_claimed_wake(C0, &shared, WakeReason::Woken);
         w.run_a_pass(C0);
 
-        assert_eq!(w.cpus[0].stopped_len(), 1);
+        assert_eq!(w.cpus[0].stopped().count(), 1);
         assert_eq!(w.cpus[0].stopped[0].key(), key);
-        assert_eq!(w.cpus[0].dying_len(), 0, "never dispatched to unwind");
+        assert_eq!(w.cpus[0].dying().count(), 0, "never dispatched to unwind");
         assert!(w.cpus[0].running().is_none());
         w.abandon();
     }
@@ -2994,7 +2985,7 @@ mod tests {
             let pass = SchedPass::begin(&mut cpus[0], env, NOW);
             let _ = pass.dispose_stop().finish();
         }
-        assert_eq!(w.cpus[0].stopped_len(), 1);
+        assert_eq!(w.cpus[0].stopped().count(), 1);
         assert_eq!(
             w.handles.get(C0).load(),
             0,
@@ -3044,7 +3035,7 @@ mod tests {
             "the corpse that has been waiting longest unwinds next",
         );
         assert_eq!(
-            w.cpus[0].dying_len(),
+            w.cpus[0].dying().count(),
             1,
             "and the one whose quantum expired went back to the dying list",
         );
@@ -3087,7 +3078,7 @@ mod tests {
             Some(queued),
             "the waiting corpse runs; the killed one did not keep the CPU",
         );
-        assert_eq!(w.cpus[0].dying_len(), 1);
+        assert_eq!(w.cpus[0].dying().count(), 1);
         assert_eq!(w.cpus[0].dying[0].task.key(), expiring);
         assert!(w.cpus[0].rq.is_empty(), "never through the fair queue");
         w.abandon();
@@ -3131,7 +3122,7 @@ mod tests {
             "the yield hands the CPU to the corpse that was waiting",
         );
         assert_eq!(
-            w.cpus[0].dying_len(),
+            w.cpus[0].dying().count(),
             1,
             "and the yielder went back to the dying list",
         );
@@ -3193,7 +3184,7 @@ mod tests {
             cpus[1].drain(env, NOW);
         }
 
-        assert_eq!(w.cpus[1].dying_len(), 1, "the arriving corpse is placed to unwind");
+        assert_eq!(w.cpus[1].dying().count(), 1, "the arriving corpse is placed to unwind");
         assert_eq!(w.cpus[1].dying[0].task.key(), key);
         assert!(
             w.cpus[1].rq.is_empty(),
@@ -3262,7 +3253,7 @@ mod tests {
             Some(rt),
             "the RT task got the CPU on the first pass after it became ready",
         );
-        assert_eq!(w.cpus[0].dying_len(), 1, "the corpse is queued, not running");
+        assert_eq!(w.cpus[0].dying().count(), 1, "the corpse is queued, not running");
         assert!(w.released().is_empty(), "and nothing was discarded");
         w.abandon();
     }
@@ -3284,7 +3275,7 @@ mod tests {
             Some(rt),
             "the expiring quantum is not a fresh one for the corpse",
         );
-        assert_eq!(w.cpus[0].dying_len(), 1);
+        assert_eq!(w.cpus[0].dying().count(), 1);
         w.abandon();
     }
 
@@ -3388,7 +3379,7 @@ mod tests {
             Some(rt),
             "the RT task still takes the CPU on the pass that makes it ready",
         );
-        assert_eq!(w.cpus[0].dying_len(), 1, "and the corpse is queued");
+        assert_eq!(w.cpus[0].dying().count(), 1, "and the corpse is queued");
 
         // Follow the armed timer, which is the only thing that takes the CPU
         // away from a task nothing preempts — a real machine does exactly this.
@@ -3537,7 +3528,7 @@ mod tests {
             Some(rt),
             "the grant ends on its own boundary and not a nanosecond later",
         );
-        assert_eq!(w.cpus[0].dying_len(), 1, "the corpse is queued again");
+        assert_eq!(w.cpus[0].dying().count(), 1, "the corpse is queued again");
         w.abandon();
     }
 
@@ -3577,7 +3568,7 @@ mod tests {
             "the corpse is unwinding, not doing real-time work, so the sibling \
              that is doing real-time work gets the CPU at the next pass",
         );
-        assert_eq!(w.cpus[0].dying_len(), 1, "and the corpse waits its age out");
+        assert_eq!(w.cpus[0].dying().count(), 1, "and the corpse waits its age out");
         assert!(
             w.cpus[0].dying[0].task.is_rt(),
             "with its right intact — this is about the band it competes in, not \
@@ -3646,7 +3637,7 @@ mod tests {
             "and the task came out of cpu2's surplus",
         );
         assert_eq!(
-            w.cpus[1].dying_len(),
+            w.cpus[1].dying().count(),
             3,
             "while cpu1's corpses stayed exactly where they were",
         );

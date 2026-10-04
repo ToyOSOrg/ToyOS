@@ -13,12 +13,14 @@
 //! used it — so every region a client writes is one the compositor made, and a
 //! handle a client sends stays queued until its connection closes.
 
+use std::fmt;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use toyos::shm::SharedMemory;
 use toyos::AsHandle;
 use toyos::{ipc, Connection};
+use toyos_abi::syscall::SyscallError;
 use toyos_abi::RawHandle;
 use toyos_desktop::Window;
 
@@ -159,23 +161,61 @@ pub enum DropReason {
     /// Its pipe would not take a whole frame — an entire pipe of messages it
     /// has not read.
     NotReading,
-    /// The connection is gone.
+    /// Its other end closed: the one send error that is a client's routine end.
     Gone,
+    /// The kernel refused a send to it for any other reason — a handle send
+    /// to a peer that leaves `MAX_QUEUED_BATCHES` unreceived is
+    /// `ResourceExhausted`.
+    Refused(SyscallError),
+    /// A message to it that this end will not frame.
+    TooLarge,
     /// Accepted, and never completed a first frame.
     HandshakeTimeout,
     /// Given a region to copy into, and never committed it.
     CopyTimeout,
 }
 
-impl DropReason {
-    pub fn why(self) -> &'static str {
+impl fmt::Display for DropReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::OutOfProtocol => "it sent a frame this protocol cannot describe",
-            Self::Retired => "it sent the retired clipboard region, whose handle is never taken",
-            Self::NotReading => "its pipe will not take another message and it is not reading",
-            Self::Gone => "its connection is gone",
-            Self::HandshakeTimeout => "it never finished its first message",
-            Self::CopyTimeout => "it began a copy and never committed it",
+            Self::OutOfProtocol => f.write_str("it sent a frame this protocol cannot describe"),
+            Self::Retired => {
+                f.write_str("it sent the retired clipboard region, whose handle is never taken")
+            }
+            Self::NotReading => {
+                f.write_str("its pipe will not take another message and it is not reading")
+            }
+            Self::Gone => f.write_str("its connection is gone"),
+            Self::Refused(e) => write!(f, "the kernel refused a send to it: {e}"),
+            Self::TooLarge => f.write_str("a message to it is too large to frame"),
+            Self::HandshakeTimeout => f.write_str("it never finished its first message"),
+            Self::CopyTimeout => f.write_str("it began a copy and never committed it"),
+        }
+    }
+}
+
+impl DropReason {
+    /// Whether the going is a failure, said on stderr, rather than a client's
+    /// routine end, said on stdout.
+    pub fn failed(self) -> bool {
+        match self {
+            Self::Gone => false,
+            Self::OutOfProtocol
+            | Self::Retired
+            | Self::NotReading
+            | Self::Refused(_)
+            | Self::TooLarge
+            | Self::HandshakeTimeout
+            | Self::CopyTimeout => true,
+        }
+    }
+}
+
+impl From<SyscallError> for DropReason {
+    fn from(e: SyscallError) -> Self {
+        match e {
+            SyscallError::Gone => Self::Gone,
+            e => Self::Refused(e),
         }
     }
 }
@@ -184,7 +224,8 @@ impl From<ipc::TrySendError> for DropReason {
     fn from(e: ipc::TrySendError) -> Self {
         match e {
             ipc::TrySendError::Full => Self::NotReading,
-            _ => Self::Gone,
+            ipc::TrySendError::TooLarge => Self::TooLarge,
+            ipc::TrySendError::Syscall(e) => e.into(),
         }
     }
 }
@@ -200,7 +241,12 @@ pub fn mark_dead(dead: &mut Vec<Dead>, handle: RawHandle, reason: DropReason) {
 
 pub fn announce(dead: &[Dead]) {
     for (handle, reason) in dead {
-        eprintln!("compositor: dropping client {} — {}", handle.0, reason.why());
+        let client = handle.0;
+        if reason.failed() {
+            eprintln!("compositor: dropping client {client} — {reason}");
+        } else {
+            println!("compositor: dropping client {client} — {reason}");
+        }
     }
 }
 
@@ -216,7 +262,7 @@ pub fn announce(dead: &[Dead]) {
 /// asks of the log — and a caller that re-sends a close because it could not
 /// tell whether the first one landed closes the next window down.
 pub fn note_closed(by: &str, win: &Win, remaining: usize) {
-    eprintln!(
+    println!(
         "compositor: window closed client={} by {by}, {remaining} left, presents={} frames={}",
         win.client.conn.as_handle().0,
         win.client.presents,
@@ -227,7 +273,7 @@ pub fn note_closed(by: &str, win: &Win, remaining: usize) {
 /// The open's own line, and where the client's pixels are on the panel: the one
 /// fact about a window that nobody reading the screen can recover from it.
 pub fn note_opened(client: RawHandle, content: toyos_desktop::Rect, live: usize) {
-    eprintln!(
+    println!(
         "compositor: window opened client={} content={},{} {}x{}, {live} live",
         client.0,
         content.x0,

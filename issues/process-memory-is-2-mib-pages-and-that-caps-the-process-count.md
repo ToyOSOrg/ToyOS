@@ -28,7 +28,10 @@ A thousand such processes is the whole 16 GB machine. Packing a process's
 small regions into one shared page lowers the floor to about 4 MB, since every
 stack still needs its own page with an unmapped neighbour as its guard; that
 moves the ceiling to a few thousand and not past it. x86-64 offers no page
-size between 4 KiB and 2 MiB.
+size between 4 KiB and 2 MiB. That `PMM:` record and its rows went with the
+kernel's idle report (the owner's ruling of 2026-10-04: "Delete the periodic
+report and its counters"); stage 3's floor is read from the used memory
+`SYS_SYSINFO` reports.
 
 **What this removes as a side effect:** a device window mapped at 4 KiB no
 longer shares a 2 MiB page with a neighbour's registers, so the relocation

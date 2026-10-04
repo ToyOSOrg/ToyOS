@@ -281,6 +281,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
+name = "logkeeper-api"
+version = "0.1.0"
+dependencies = [
+ "toyos",
+ "toyos-logstream",
+]
+
+[[package]]
 name = "mach2"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -697,16 +705,25 @@ name = "toyos-keymap"
 version = "0.1.0"
 
 [[package]]
+name = "toyos-logstream"
+version = "0.1.0"
+dependencies = [
+ "toyos-abi",
+]
+
+[[package]]
 name = "toyos-rust-tests"
 version = "0.1.0"
 dependencies = [
  "cpal",
  "inspect",
  "libloading",
+ "logkeeper-api",
  "memmap2",
  "toyos",
  "toyos-abi",
  "toyos-inspect",
+ "toyos-logstream",
  "toyos-tco",
  "toyos-trace",
  "toyos-window",

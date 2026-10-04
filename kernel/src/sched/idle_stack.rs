@@ -35,7 +35,7 @@ struct Arena {
 fn alloc_slot() -> u64 {
     let mut arena = ARENA.lock();
     if arena.left < SLOT {
-        let page = crate::mm::pmm::alloc_page(crate::mm::pmm::Category::KernelHeap)
+        let page = crate::mm::pmm::alloc_page()
             .expect("idle stack: no physical page for one");
         arena.next = page.direct_map().as_mut_ptr::<u8>() as u64;
         arena.left = crate::mm::PAGE_2M as usize;

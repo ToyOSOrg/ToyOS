@@ -41,8 +41,7 @@ pub(super) extern "sysv64" fn timer_entry() {
         "iretq",
 
         "2:",
-        // No Rust half on this branch, so these two `add`s inline what `timer_handler` does for Ring 3; flags are dead after the `test` above, so none are saved.
-        "add qword ptr gs:[{irq_total}], 1",
+        // No Rust half on this branch, so this `add` inlines what `timer_handler` does for Ring 3; flags are dead after the `test` above, so none are saved.
         "add qword ptr gs:[{irq_timer}], 1",
         "push rax",
         "push rcx",
@@ -92,10 +91,7 @@ pub(super) extern "sysv64" fn timer_entry() {
         quantum_ticks = sym crate::arch::apic::TIMER_TICKS,
         need_resched = const crate::arch::percpu::OFF_NEED_RESCHED,
         ring0_fires = const crate::arch::percpu::OFF_RING0_TIMER_FIRES,
-        irq_total = const crate::arch::percpu::irq_slot_offset(crate::irq_census::TOTAL),
-        irq_timer = const crate::arch::percpu::irq_slot_offset(
-            1 + crate::irq_census::Source::Timer as usize
-        ),
+        irq_timer = const crate::arch::percpu::irq_slot_offset(crate::irq_census::Source::Timer as usize),
     );
 }
 

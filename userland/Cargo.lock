@@ -548,6 +548,7 @@ dependencies = [
 name = "console"
 version = "0.1.0"
 dependencies = [
+ "logkeeper-api",
  "terminal",
  "toyos",
  "toyos-abi",
@@ -1968,6 +1969,14 @@ dependencies = [
  "toyos-inspect",
  "toyos-logstream",
  "toyos-wallclock",
+]
+
+[[package]]
+name = "logkeeper-api"
+version = "0.1.0"
+dependencies = [
+ "toyos",
+ "toyos-logstream",
 ]
 
 [[package]]
