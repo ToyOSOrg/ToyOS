@@ -4,7 +4,7 @@
 //! Every `unsafe` block here carries a one-line `SAFETY:` comment, enforced by the lint above.
 
 /// Stands for work the port owes: panics naming what and which stage of the
-/// track owns it (`issues/kernel/toyos-runs-on-arm64.md`), or that none does yet.
+/// track owns it (`issues/toyos-runs-on-arm64.md`), or that none does yet.
 macro_rules! owed {
     ($what:literal, $stage:literal) => {
         panic!(concat!("aarch64: ", $what, ": owed by ", $stage))

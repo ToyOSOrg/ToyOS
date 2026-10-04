@@ -4,7 +4,7 @@
 //! A ring's own watch sits behind a lock that masks interrupts, so every
 //! completion notifies all 256 registrations with interrupts masked, and each
 //! woken thread re-registers under that lock and parks again: the load
-//! `issues/kernel/a-process-lengthens-an-interrupts-off-walk-by-the-threads-it-parks-on-one-ring.md`
+//! `issues/a-process-lengthens-an-interrupts-off-walk-by-the-threads-it-parks-on-one-ring.md`
 //! names, which `mask_windows` reads the windows under.
 //!
 //! The sibling is this program's main thread. Each round it completes one
