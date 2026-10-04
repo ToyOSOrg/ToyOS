@@ -41,7 +41,7 @@ rows. The tail delays are only worked on once the diary shows their cause."
 The step his text names is step 2 here,
 `issues/syscall-preemption-is-incidental.md`, whose exit the
 `mask_windows` row reads; the diary is
-`issues/nothing-in-the-machine-can-read-the-trace-ring.md`. That
+`issues/the-diary-computes-no-lateness-and-records-no-slow-system-call.md`. That
 mapping is the orchestrator's, not his.
 
 **Exit**: each step's exit is met, in the file the step names, and on the T14,
@@ -51,7 +51,7 @@ and of the thread it wakes under Linux's loaded longest on those seven CPUs,
 503 µs. Nothing takes that reading of ToyOS today:
 `latency_wake` reads one thread's p99 and `mask_windows` each CPU's longest
 masked windows. Two files owe it: step 2 of
-`issues/nothing-in-the-machine-can-read-the-trace-ring.md`, a
+`issues/the-diary-computes-no-lateness-and-records-no-slow-system-call.md`, a
 reader that computes timer and thread lateness from the ring, and
 `issues/no-program-measures-toyos-against-linux-on-one-machine.md`,
 one program that reads lateness past a 1 ms timer under both systems.

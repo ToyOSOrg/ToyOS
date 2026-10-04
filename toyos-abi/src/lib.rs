@@ -29,6 +29,7 @@ pub mod part;
 pub mod pci;
 pub mod ring;
 pub mod syscall;
+pub mod trace;
 pub mod virtio_sound;
 
 pub use handle::{RawHandle, Rights, HANDLE_INVALID};

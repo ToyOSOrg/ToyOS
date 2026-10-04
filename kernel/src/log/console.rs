@@ -125,7 +125,7 @@ const CHUNK: u64 = 8;
 pub fn drain_locked(guard: &mut BackendGuard) {
     let mut cursor = DRAINED.take();
     let mut sink = Registers { out: guard };
-    drain_ordered(&mut cursor, &mut sink);
+    drain_ordered(&super::shards(), &mut cursor, &mut sink);
     DRAINED.put(&cursor);
 }
 
@@ -134,7 +134,7 @@ pub fn drain_locked(guard: &mut BackendGuard) {
 fn discard_pending() {
     let mut cursor = DRAINED.take();
     let mut sink = Discard;
-    drain_ordered(&mut cursor, &mut sink);
+    drain_ordered(&super::shards(), &mut cursor, &mut sink);
     DRAINED.put(&cursor);
     LOST.store(DRAINED.lost(), Ordering::Relaxed);
 }
@@ -143,7 +143,7 @@ fn discard_pending() {
 fn drain_records(wire: &SleepGuard<'_, ()>, budget: u64) -> u64 {
     let mut cursor = DRAINED.take();
     let mut sink = Wire { wire, records: 0, budget };
-    drain_ordered(&mut cursor, &mut sink);
+    drain_ordered(&super::shards(), &mut cursor, &mut sink);
     let records = sink.records;
     DRAINED.put(&cursor);
     RECORDS.fetch_add(records, Ordering::Relaxed);
@@ -158,7 +158,7 @@ fn drain_records(wire: &SleepGuard<'_, ()>, budget: u64) -> u64 {
 pub unsafe fn drain_bypassed(uart: &mut PanicUart) {
     let mut cursor = DRAINED.take();
     let mut sink = Raw { uart };
-    drain_ordered(&mut cursor, &mut sink);
+    drain_ordered(&super::shards(), &mut cursor, &mut sink);
     DRAINED.put(&cursor);
 }
 

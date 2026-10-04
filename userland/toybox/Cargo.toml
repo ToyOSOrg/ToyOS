@@ -1,5 +1,6 @@
 [package]
 name = "toybox"
+description = "A multi-call binary of command-line utilities (cat, ls, grep, ps and the rest), each run by the name it is invoked under."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

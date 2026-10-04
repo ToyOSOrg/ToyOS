@@ -37,6 +37,7 @@ members = [
     "toybox",
     "toyos-font",
     "toyos-window",
+    "trace",
     "update",
 ]
 exclude = [

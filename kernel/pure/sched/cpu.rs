@@ -916,13 +916,14 @@ impl<X: SchedPayload> CpuSched<X> {
             return;
         }
         let key = task.key();
+        let name = task.ext().name();
         let urgency = if task.is_rt() {
             Urgency::Preempt
         } else {
             Urgency::Normal
         };
         let transit = task.migrate(self.id, dst, now);
-        self.trace(env, now, TraceKind::Migrate { task: key, to: dst });
+        self.trace(env, now, TraceKind::Migrate { task: key, name, to: dst });
         let handle = env.cpus.get(dst);
         if handle.post_owned(
             Msg::Adopt { task: transit },
@@ -1057,7 +1058,7 @@ impl<X: SchedPayload> CpuSched<X> {
             return;
         };
         let task = entry.task.wake(self.id, cause, entry.class, now);
-        self.trace(env, now, TraceKind::Wake { task: key });
+        self.trace(env, now, TraceKind::Wake { task: key, name: task.ext().name() });
         self.place(task, env, now);
     }
 
@@ -1069,7 +1070,7 @@ impl<X: SchedPayload> CpuSched<X> {
     ) {
         let key = task.key();
         let ready = task.adopt(self.id, now);
-        self.trace(env, now, TraceKind::Adopt { task: key });
+        self.trace(env, now, TraceKind::Adopt { task: key, name: ready.ext().name() });
         // Killed while in flight lands in the dying list rather than the run
         // queue, through `place`. The retire chase still terminates and for a
         // sharper reason: whoever ends up owning the task *dispatches* it, and
@@ -1102,7 +1103,7 @@ impl<X: SchedPayload> CpuSched<X> {
                         entry.class,
                         now,
                     );
-                    self.trace(env, now, TraceKind::Wake { task: key });
+                    self.trace(env, now, TraceKind::Wake { task: key, name: task.ext().name() });
                     self.place(task, env, now);
                 }
                 Claim::PrePark => panic!("a parked task cannot be pre-park"),
@@ -1113,7 +1114,7 @@ impl<X: SchedPayload> CpuSched<X> {
         if let Some(ready) = self.rq.remove(key) {
             // Out of the fair queue and into the dying list. No refcount
             // movement: it was runnable in the queue and it is runnable here.
-            self.trace(env, now, TraceKind::Wake { task: key });
+            self.trace(env, now, TraceKind::Wake { task: key, name: ready.ext().name() });
             self.keep_dying(ready, now);
             return;
         }
@@ -1581,6 +1582,7 @@ impl<'c, 'e, H: Hw, P: PreemptGuard> SchedPass<'c, 'e, H, P, Undisposed> {
             .take()
             .expect("dispose_block without a running task");
         let key = current.key();
+        let name = current.ext().name();
         let class = ticket.class();
         let task = current.park(
             &ticket,
@@ -1599,7 +1601,7 @@ impl<'c, 'e, H: Hw, P: PreemptGuard> SchedPass<'c, 'e, H, P, Undisposed> {
             },
         );
         self.cpu
-            .trace(self.env, self.now, TraceKind::ParkCommit { task: key });
+            .trace(self.env, self.now, TraceKind::ParkCommit { task: key, name });
         self.dispose()
     }
 
@@ -1632,11 +1634,12 @@ impl<'c, 'e, H: Hw, P: PreemptGuard> SchedPass<'c, 'e, H, P, Undisposed> {
             .take()
             .expect("dispose_exit without a running task");
         let key = current.key();
+        let name = current.ext().name();
         let dead = current.die(self.cpu.id, self.now);
         dead.share().leave_runnable(self.env.frontier);
         self.cpu.dispose_dead(dead, self.env);
         self.cpu
-            .trace(self.env, self.now, TraceKind::Retire { task: key });
+            .trace(self.env, self.now, TraceKind::Retire { task: key, name });
         self.dispose()
     }
 
@@ -1832,6 +1835,7 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
             if let Some(corpse) = self.cpu.dying.pop_front() {
                 let task = corpse.task;
                 let key = task.key();
+                let name = task.ext().name();
                 self.cpu.running = Some(task.dispatch(self.cpu.id, self.now));
                 // An aged corpse is borrowing the CPU from the RT band, so it
                 // borrows a chunk and not a quantum. With the band empty it is
@@ -1843,7 +1847,7 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
                     QUANTUM_NS
                 });
                 self.cpu
-                    .trace(self.env, self.now, TraceKind::Schedule { task: key });
+                    .trace(self.env, self.now, TraceKind::Schedule { task: key, name });
                 return;
             }
         }
@@ -1853,11 +1857,12 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
         if let Some((vruntime, task)) = self.cpu.rq.pop_next() {
             self.env.frontier.advance(vruntime);
             let key = task.key();
+            let name = task.ext().name();
             self.cpu.running = Some(task.dispatch(self.cpu.id, self.now));
             self.cpu.aged_grant = false;
             self.cpu.quantum_end = self.now.after(QUANTUM_NS);
             self.cpu
-                .trace(self.env, self.now, TraceKind::Schedule { task: key });
+                .trace(self.env, self.now, TraceKind::Schedule { task: key, name });
         }
     }
 
@@ -2414,6 +2419,10 @@ mod tests {
     impl SchedPayload for TestPayload {
         type Ctx = ();
         type ShareLock = TestLock<ShareState>;
+
+        fn name(&self) -> u64 {
+            0
+        }
     }
 
     #[derive(Default)]

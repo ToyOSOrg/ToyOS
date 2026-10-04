@@ -1,5 +1,6 @@
 [package]
 name = "console"
+description = "The machine's console: /system/bin/shell on the raw framebuffer below this boot's log, for a machine with no serial port and no compositor."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

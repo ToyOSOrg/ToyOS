@@ -1,5 +1,6 @@
 [package]
 name = "logkeeper"
+description = "The machine's log: the kernel's records and every program's, written to /log by a process that can die without taking the kernel with it."
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"

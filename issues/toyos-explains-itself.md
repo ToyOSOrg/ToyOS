@@ -9,7 +9,7 @@ opened: 2026-10-04
 ToyOS answers what it is doing, what it did and what it is made of from
 inside itself, with programs it ships. Today the answers are scattered: the
 log carries numbers in prose (`irq:`, `tlb:`, `PMM:`, `sched:`, `syscalls:`),
-the trace ring has LLDB as its only reader, nothing reads RAPL or C-state
+the diary computes no lateness, nothing reads RAPL or C-state
 residency, and a process's memory is a byte sum that reads 0 under
 contention.
 Each pillar's own track carries its steps and its exits; this track holds the
@@ -55,7 +55,7 @@ rest were not put to him.
 | Pillar | Its track |
 |---|---|
 | Log | `issues/logging-records-from-every-producer-and-a-kernel-that-waits-on-nobody.md`; the sinks half of `issues/redesign-the-log-subsystem.md` |
-| Diary | `issues/nothing-in-the-machine-can-read-the-trace-ring.md` |
+| Diary | `issues/the-diary-computes-no-lateness-and-records-no-slow-system-call.md` |
 | Counters, sizes | this file |
 | Profile | behind the diary's judgement; `issues/a-frozen-toyos-waits-for-a-hand-on-the-power-button.md` |
 | Accounting | `issues/nothing-charges-kernel-memory-to-a-process.md`, `issues/a-processs-memory-is-a-byte-total-that-reads-zero-under-contention.md`, `issues/blocked-time-is-invisible-while-the-park-lasts.md` |

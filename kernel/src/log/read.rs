@@ -1,16 +1,33 @@
 //! Two record readers, each correct for one caller: [`snapshot_committed`]
-//! (newest first, lock-free, never blocks) and [`drain_ordered`] (oldest
-//! first in sequence order per shard, stopping at the first uncommitted
-//! record).
+//! (the log's, newest first, lock-free, never blocks) and [`drain_ordered`]
+//! (any [`Stream`]'s, oldest first in sequence order per ring, stopping at the
+//! first uncommitted record).
 
 use toyos_abi::log::{LogRecord, MAX_LOG_SHARDS};
 
-use super::shard::{Shard, FIRST_SEQ};
+use super::shard::{Ring, Shard, FIRST_SEQ};
 
 /// Accepts one record; `false` means it was not taken and ends the walk.
-pub trait RecordSink {
-    fn put(&mut self, record: &LogRecord) -> bool;
+pub trait RecordSink<R = LogRecord> {
+    fn put(&mut self, record: &R) -> bool;
 }
+
+/// A ring whose slots decode as one kind of record.
+pub trait Stream {
+    type Record;
+    /// Record `seq`, or `None` if the ring cannot answer for it.
+    fn record(&self, seq: u64) -> Option<Self::Record>;
+}
+
+impl Stream for Shard {
+    type Record = LogRecord;
+    fn record(&self, seq: u64) -> Option<LogRecord> {
+        self.read(seq)
+    }
+}
+
+/// One ring per CPU a cursor can name; `None` is a CPU this machine lacks.
+pub type Rings<const W: usize, const N: usize> = [Option<&'static Ring<W, N>>; MAX_LOG_SHARDS];
 
 #[derive(Clone, Copy)]
 struct Descent {
@@ -38,7 +55,7 @@ impl Descent {
         while self.next >= self.floor {
             let seq = self.next;
             self.next = seq - 1;
-            let Some(at_ns) = shard.at_ns(seq) else { continue };
+            let Some(at_ns) = shard.stamp(seq) else { continue };
             if at_ns > to {
                 continue;
             }
@@ -67,10 +84,13 @@ impl Cursor {
 
     /// A caller's `LogCursor` as a walk, or `None` for a position past the number its shard issues
     /// next; its `lost` is never read, so the walk counts this read's loss alone.
-    pub fn from_reader(cursor: &toyos_abi::log::LogCursor) -> Option<Self> {
+    pub fn from_reader<const W: usize, const N: usize>(
+        cursor: &toyos_abi::log::LogCursor,
+        rings: &Rings<W, N>,
+    ) -> Option<Self> {
         // An unpublished shard is held to the head it is published with, so no cursor is ahead of one that appears mid-walk.
-        let issued = |shard: Option<&'static Shard>| shard.map_or(FIRST_SEQ, Shard::head);
-        let ahead = cursor.next.iter().zip(super::shards()).any(|(&next, shard)| next > issued(shard));
+        let issued = |ring: &Option<&'static Ring<W, N>>| ring.map_or(FIRST_SEQ, Ring::head);
+        let ahead = cursor.next.iter().zip(rings).any(|(&next, ring)| next > issued(ring));
         (!ahead).then_some(Self { next: cursor.next, lost: 0 })
     }
 
@@ -81,7 +101,7 @@ impl Cursor {
     }
 
     /// Clamps this shard's position to what it can still answer for, counting the gap as loss.
-    fn open(&mut self, i: usize, shard: Option<&'static Shard>) -> Option<u64> {
+    fn open<const W: usize, const N: usize>(&mut self, i: usize, shard: Option<&'static Ring<W, N>>) -> Option<u64> {
         let shard = shard?;
         let oldest = shard.oldest_readable();
         // Clamped to `FIRST_SEQ`: a zeroed cursor from the syscall boundary must not read as having missed everything.
@@ -90,7 +110,7 @@ impl Cursor {
         self.lost += oldest.saturating_sub(want);
         let want = want.max(oldest);
         *self.next.get_mut(i)? = want;
-        shard.at_ns(want)
+        shard.stamp(want)
     }
 }
 
@@ -154,10 +174,16 @@ impl Published {
     }
 }
 
-/// Every record this cursor has not seen, oldest first merged by `at_ns`; a
-/// stalled shard is skipped, not waited for.
-pub fn drain_ordered(cursor: &mut Cursor, out: &mut impl RecordSink) -> usize {
-    let shards = super::shards();
+/// Every record this cursor has not seen in `shards`, oldest first merged by
+/// stamp; a stalled shard is skipped, not waited for.
+pub fn drain_ordered<const W: usize, const N: usize>(
+    shards: &Rings<W, N>,
+    cursor: &mut Cursor,
+    out: &mut impl RecordSink<<Ring<W, N> as Stream>::Record>,
+) -> usize
+where
+    Ring<W, N>: Stream,
+{
     let mut cand = [None; MAX_LOG_SHARDS];
     for (i, slot) in cand.iter_mut().enumerate() {
         *slot = cursor.open(i, shards[i]);
@@ -178,7 +204,7 @@ pub fn drain_ordered(cursor: &mut Cursor, out: &mut impl RecordSink) -> usize {
 
         // `match`, not `if let`: the empty arm explains itself below.
         #[allow(clippy::single_match)]
-        match shard.read(cursor.next[i]) {
+        match shard.record(cursor.next[i]) {
             Some(record) => {
                 if !out.put(&record) {
                     return emitted;
@@ -220,7 +246,7 @@ pub fn any_committed(cursor: &Cursor) -> bool {
         .any(|(i, shard)| match shard {
             Some(shard) => {
                 let want = cursor.next[i].max(FIRST_SEQ).max(shard.oldest_readable());
-                shard.at_ns(want).is_some()
+                shard.stamp(want).is_some()
             }
             None => false,
         })

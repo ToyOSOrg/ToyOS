@@ -19,16 +19,13 @@ use kernel_loom::log_read::{drain_ordered, Cursor, RecordSink};
 use kernel_loom::log_shard::{Shard, FIRST_SEQ, SHARD_RECORDS};
 use toyos_abi::log::{LogCursor, LogRecord, MAX_LOG_SHARDS};
 
-/// A shard for the life of the test binary, which a walk names as `'static`.
+/// A shard for the life of the test binary, which a walk names as `'static`: zeroed, as the kernel allocates an AP's.
 fn shard() -> &'static Shard {
     // SAFETY: a `Shard` is not zero-sized; the block is never freed.
     let ptr = unsafe { alloc_zeroed(Layout::new::<Shard>()) }.cast::<Shard>();
     assert!(!ptr.is_null());
-    // SAFETY: fresh, zeroed, aligned and private to this test until it returns.
-    unsafe {
-        Shard::initialize_zeroed(ptr);
-        &*ptr
-    }
+    // SAFETY: fresh, zeroed, aligned and never freed; zeroed is an empty shard.
+    unsafe { &*ptr }
 }
 
 /// Commits `count` records to `shard`, each stamped with its own number.
@@ -66,11 +63,10 @@ fn a_cursors_loss_claim_is_not_read() {
     emit(lapped, SHARD_RECORDS as u64 + OVERWRITTEN);
     let mut shards = [None; MAX_LOG_SHARDS];
     shards[0] = Some(lapped);
-    kernel_loom::install_shards(shards);
 
     let mut cursor = LogCursor { lost: u64::MAX, ..LogCursor::new() };
-    let mut walk = Cursor::from_reader(&cursor).expect("a cursor at every shard's start is taken");
-    drain_ordered(&mut walk, &mut Full);
+    let mut walk = Cursor::from_reader(&cursor, &shards).expect("a cursor at every shard's start is taken");
+    drain_ordered(&shards, &mut walk, &mut Full);
     walk.write_into(&mut cursor);
     assert_eq!(cursor.lost, OVERWRITTEN);
 }
@@ -84,12 +80,11 @@ fn a_cursor_ahead_of_a_shard_is_refused() {
     emit(published, RECORDS);
     let mut shards = [None; MAX_LOG_SHARDS];
     shards[0] = Some(published);
-    kernel_loom::install_shards(shards);
 
     let taken = |shard: usize, next: u64| {
         let mut cursor = LogCursor::new();
         cursor.next[shard] = next;
-        Cursor::from_reader(&cursor).is_some()
+        Cursor::from_reader(&cursor, &shards).is_some()
     };
     let head = FIRST_SEQ + RECORDS;
     assert!(taken(0, head), "a cursor caught up with a published shard");
