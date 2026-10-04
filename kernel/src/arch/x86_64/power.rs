@@ -16,6 +16,7 @@ use super::cpu;
 use super::pio::{self, Declared, Slot};
 use crate::drivers::acpi::direct_phys;
 use crate::log;
+use crate::time::{Deadline, Duration, Tripwire};
 
 /// PM1 control (ACPI 6.5 Table 4.16): `SCI_EN`, `SLP_TYP` and `SLP_EN`.
 pub const SCI_EN: u16 = 1 << 0;
@@ -149,6 +150,13 @@ pub fn reset() -> ! {
     cpu::halt()
 }
 
+/// How long a machine may go on running once `SLP_EN` is written.
+const S5_TAKES: Tripwire = Tripwire::absurd(
+    Duration::from_secs(2),
+    "a platform sequences S5 in milliseconds once SLP_EN is written, so one still running \
+     this kernel two seconds later never entered it",
+);
+
 /// Enter S5, or halt on a machine whose tables named no soft-off.
 ///
 /// ACPI 6.5 §16.1.6's order: on a machine in ACPI mode, which is the OS's
@@ -156,19 +164,39 @@ pub fn reset() -> ! {
 /// (`acpi_mode::quiet`), so no event pending at the write wakes it again;
 /// then `SLP_TYP`, and then `SLP_TYP` with `SLP_EN`, every other bit of the
 /// register as it reads.
+///
+/// **A write the platform does not act on is a panic past [`S5_TAKES`]**,
+/// naming what the registers and this CPU's SMI count read either side of it:
+/// the panel shows it, and the black box carries it through the panic's reset,
+/// where a halt would leave a machine that is on, silent, and indistinguishable
+/// from one the power left.
 pub fn off() -> ! {
-    if let (Some(control), true) = (PM1A_CNT.get(), SOFT_OFF.load(Ordering::Acquire)) {
-        let control = control.port(0);
-        let held = cpu::inw(control);
-        if held & SCI_EN != 0 {
-            super::acpi_mode::quiet();
-        }
-        let typed = held & !(SLP_TYP | SLP_EN) | u16::from(SLP_TYPA.load(Ordering::Relaxed)) << 10;
-        // SAFETY: the block `init_off` declared and the `SLP_TYPa` the DSDT's `\_S5_` names, both decoded before `SOFT_OFF` was set.
-        unsafe {
-            cpu::outw(control, typed);
-            cpu::outw(control, typed | SLP_EN);
-        }
+    let (Some(control), true) = (PM1A_CNT.get(), SOFT_OFF.load(Ordering::Acquire)) else { cpu::halt() };
+    let control = control.port(0);
+    let held = cpu::inw(control);
+    if held & SCI_EN != 0 {
+        super::acpi_mode::quiet();
     }
-    cpu::halt()
+    let typed = held & !(SLP_TYP | SLP_EN) | u16::from(SLP_TYPA.load(Ordering::Relaxed)) << 10;
+    let smis_before = super::counters::read().smi;
+    // SAFETY: the block `init_off` declared and the `SLP_TYPa` the DSDT's `\_S5_` names, both decoded before `SOFT_OFF` was set.
+    unsafe {
+        cpu::outw(control, typed);
+        cpu::outw(control, typed | SLP_EN);
+    }
+    let by = Deadline::at(crate::clock::now() + Duration::from_nanos(S5_TAKES.nanos()));
+    while !by.reached(crate::clock::now()) {
+        core::hint::spin_loop();
+    }
+    let now = cpu::inw(control);
+    panic!(
+        "power: S5 did not take: the machine still runs {S5_TAKES} after SLP_EN; PM1a_CNT read {held:#06x} before \
+         the write of {:#06x} and reads {now:#06x} now, SCI_EN {}; {}; cpu{}'s SMI count {} before the write and {} now",
+        typed | SLP_EN,
+        if now & SCI_EN == 0 { "clear" } else { "set" },
+        super::acpi_mode::pm1_events(),
+        super::percpu::cpu_id(),
+        smis_before.map_or_else(|| "unread".into(), |n| alloc::format!("{n}")),
+        super::counters::read().smi.map_or_else(|| "unread".into(), |n| alloc::format!("{n}")),
+    )
 }

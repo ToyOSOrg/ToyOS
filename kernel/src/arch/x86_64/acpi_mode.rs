@@ -265,6 +265,15 @@ fn leave(hardware: &Hardware) {
 /// and wake.
 const PM1_STATUS: u16 = 1 << 0 | 1 << 4 | 1 << 5 | 1 << 8 | 1 << 9 | 1 << 10 | 1 << 14 | 1 << 15;
 
+/// What the PM1 event block reads, status then enable, for a power-off that
+/// did not take; once userland has stopped, as [`quiet`] is.
+pub fn pm1_events() -> String {
+    let Some(hardware) = hardware() else { return "no ACPI row, so no PM1 event block read".into() };
+    let events = pio::taken_back(run(hardware.fixed.pm1a_event));
+    let half = hardware.fixed.pm1a_event.len / 2;
+    format!("PM1 status {:#06x} under enable {:#06x}", cpu::inw(events.port(0)), cpu::inw(events.port(half)))
+}
+
 /// Every fixed and general-purpose event disabled and its status cleared:
 /// the power-off's, on a machine in ACPI mode, once userland has stopped.
 pub fn quiet() {

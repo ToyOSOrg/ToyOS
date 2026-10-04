@@ -360,6 +360,21 @@ pub fn stopping_line(log: &str) -> Option<&str> {
     })
 }
 
+/// Whether the stop `log` ends on is a power-off: the supervisor's line names
+/// the stop it was asked for, after [`STOPPING`].
+///
+/// **A power-off leaves the next loader pass no record**: S5 takes the black
+/// box's DRAM with it, so that pass reads a page nothing sealed and says
+/// [`HUNG_WITHOUT_A_RECORD`] of a boot that did what it was asked. A power-off
+/// that did not take is the kernel's panic, whose reset keeps the page.
+pub fn asked_to_power_off(log: &str) -> bool {
+    stopping_line(log).is_some_and(|line| line.trim_end().ends_with(POWER_OFF_ASKED))
+}
+
+/// How the supervisor's stop line ends when the stop is a power-off: its
+/// `Stop::Shutdown`, debug-printed in parentheses.
+const POWER_OFF_ASKED: &str = "(Shutdown)";
+
 /// The milliseconds since boot one record line carries.
 ///
 /// **Found from the CPU it precedes rather than by position**: the field before
@@ -444,6 +459,18 @@ mod tests {
         assert!(matches!(verdict(&quoted), Err(Unfit::Unfinished(_))));
         assert_eq!(verdict(&stopping), Err(Unfit::NoBootRecord));
         assert_eq!(verdict(""), Err(Unfit::NoBootRecord));
+    }
+
+    /// Only the supervisor's own stop line, naming a shutdown, is a power-off.
+    #[test]
+    fn a_power_off_is_the_supervisors_stop_naming_a_shutdown() {
+        let booted = "[kernel 1.151 cpu0] Boot: complete (1151ms)\n";
+        let stop = |how: &str| format!("{booted}{{16.705 supervisor}} {STOPPING} ({how})\n");
+        assert!(asked_to_power_off(&stop("Shutdown")));
+        assert!(!asked_to_power_off(&stop("Reboot")));
+        assert!(!asked_to_power_off(booted));
+        let forged = format!("{booted}{{16.705 test-runner}} {STOPPING} (Shutdown)\n");
+        assert!(!asked_to_power_off(&forged));
     }
 
     /// The reset is the next pass's to say: its `DONE`, and the kernel's last

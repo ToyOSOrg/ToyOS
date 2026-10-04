@@ -431,6 +431,18 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
+        // The power-off in ACPI mode with no hand on the button: a job asks the
+        // supervisor for it while the server holds the machine in ACPI mode. A
+        // power-off that does not take is the kernel's panic, whose reset brings
+        // the machine back with the record; one that takes leaves the machine
+        // off until it is powered on.
+        "acpi_power_off",
+        metal::Metal {
+            arms: &[metal::once("testcases-off", "tests/testcases", &[], &["shutdown"])],
+            judge: |b| acpi_off_on_metal(b[0]),
+        },
+    ),
+    (
         // **Attended: the owner presses the power button once, briefly**, on a
         // boot held open for it, and the machine stops through ToyOS's own
         // power-off. Staying on, or coming back on, is red, and only the owner
@@ -3490,18 +3502,45 @@ fn acpi_death_on_metal(back: &metal::Readback) -> Result<(), String> {
     Ok(())
 }
 
-/// The owner's press: the server took it and asked for the stop, the
-/// supervisor stopped the machine for it, and the kernel's last word, sealed
-/// past the log, is the power-off's.
+/// The owner's press: the server took it and asked for the stop, and the
+/// supervisor powered the machine off for it.
 fn acpi_press_on_metal(back: &metal::Readback) -> Result<(), String> {
     let log = back.log();
     if let Ok(none) = log.must_say("acpi_hold: held to ") {
         return Err(format!("the boot was held open and nobody pressed: {none}"));
     }
     let pressed = log.must_say("acpiserver: the power button was pressed, on SCI ")?;
-    log.must_say(&format!("{} (Shutdown)", bootlog::STOPPING))?;
-    back.after_the_reset()?.must_say(power::SHUTTING_DOWN)?;
+    powered_off_in_acpi_mode(back)?;
     eprintln!("  [acpi] {}", pressed.trim());
+    Ok(())
+}
+
+/// A job's power-off, asked for with the server holding the machine in ACPI
+/// mode, and taken.
+fn acpi_off_on_metal(back: &metal::Readback) -> Result<(), String> {
+    back.log().must_say(
+        "acpiserver: armed: power button served, embedded controller on GPE 0x6e at 0x66/0x62, 0 GPE(s) \
+         the namespace runs",
+    )?;
+    powered_off_in_acpi_mode(back)
+}
+
+/// The machine went into ACPI mode for the server and stayed there, the
+/// supervisor asked for the power-off, and the loader pass after it found no
+/// record: S5 takes the black box's DRAM with it, where a power-off that did
+/// not take is the kernel's panic and its reset keeps the page.
+fn powered_off_in_acpi_mode(back: &metal::Readback) -> Result<(), String> {
+    let kernel = back.kernel();
+    kernel.must_say("acpi: ACPI mode: ACPI_ENABLE 0xf0 written to SMI_CMD 0xb2, SCI_EN set ")?;
+    if let Ok(left) = kernel.must_say("acpi: legacy mode again") {
+        return Err(format!("the machine left ACPI mode before its power-off: {left}"));
+    }
+    if !bootlog::asked_to_power_off(back.log().text()) {
+        return Err("the supervisor's last word is not a power-off".to_string());
+    }
+    let after = back.after_the_reset()?;
+    power::says_nothing_of(&after, bootlog::PREVIOUS_PANIC)?;
+    after.must_say(bootlog::HUNG_WITHOUT_A_RECORD)?;
     Ok(())
 }
 
