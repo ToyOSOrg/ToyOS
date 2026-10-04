@@ -2,7 +2,7 @@
 //!
 //! Inventories the machine's IOMMU units, gives every enumerated PCI function an identity-mapped context entry, turns translation on, remaps every interrupt source through a source-id-verified table entry, and hands a driver an address space of its own to put its DMA in; an unusable unit is logged and left off rather than halting boot. Names above `vtd/` stay backend-neutral so a second backend drops in without moving the seam.
 //!
-//! The refusal is deliberately not yet built for a driver in this kernel: landing it before any userspace driver exists would cost every machine and protect nothing. A function a *process* drives is the other case and is refused ([`DeviceSpace::own`], [`remapping`]), because a descriptor it writes a physical address into is an arbitrary read and write over all of memory, and a message it sends unremapped is any vector at any CPU; its message is its claim slot's own entry ([`Remapped`]).
+//! The refusal is deliberately not yet built for a driver in this kernel: landing it before any userspace driver exists would cost every machine and protect nothing. A function a *process* drives is the other case and is refused ([`OwnSpace`], [`remapping`]), because a descriptor it writes a physical address into is an arbitrary read and write over all of memory, and a message it sends unremapped is any vector at any CPU; its message is its claim slot's own entry ([`Remapped`]).
 //!
 //! `trait Iommu` is deliberately not added: with one backend it would have a single implementor.
 
@@ -162,17 +162,6 @@ pub enum DeviceSpace {
 }
 
 impl DeviceSpace {
-    /// One of a device's own with `room` bytes of it handed out at the address
-    /// answered, or the reason there is none.
-    ///
-    /// The refusing form, for `pcidev`: a function a *process* drives must
-    /// never be handed a physical address, so a machine with no unit and a
-    /// machine out of domains are both answers its caller refuses the claim
-    /// with rather than degrading past.
-    pub fn own(room: u64) -> Result<(Self, u64), IommuError> {
-        unit::domain::create(room).map(|(id, at)| (Self::Own(id), at.raw()))
-    }
-
     /// One of a device's own, or the machine's own with the reason. For a
     /// driver **in this kernel**, whose addresses are the kernel's either way.
     pub fn create() -> Self {
@@ -199,26 +188,6 @@ impl DeviceSpace {
         }
     }
 
-    /// Put `bytes` at `phys` at `at` again, where a device may still be aimed
-    /// from a mapping this space took back. Only a space of its own has such
-    /// an address; a physical one has no address to choose.
-    pub fn map_at(self, at: u64, phys: u64, bytes: u64) -> Result<(), IommuError> {
-        match self {
-            Self::Untranslated => panic!("iommu: an untranslated space was asked to place {phys:#x} at {at:#x}"),
-            Self::Own(id) => unit::domain::map_at(id, Iova::translated(at), phys, bytes),
-        }
-    }
-
-    /// Put `bytes` at `phys` at `at`, inside room [`Self::own`] handed out,
-    /// and write no record of it: for a mapping its holder makes and takes back
-    /// as often as it likes.
-    pub fn place(self, at: u64, phys: u64, bytes: u64) -> Result<(), IommuError> {
-        match self {
-            Self::Untranslated => panic!("iommu: an untranslated space was asked to place {phys:#x} at {at:#x}"),
-            Self::Own(id) => unit::domain::place(id, Iova::translated(at), phys, bytes).map(|_| ()),
-        }
-    }
-
     /// Take `bytes` at `at` back, so the pages behind them can be reused.
     pub fn unmap(self, at: u64, bytes: u64) -> Result<(), IommuError> {
         match self {
@@ -231,8 +200,51 @@ impl DeviceSpace {
     /// in place: the device is translating the moment this returns.
     pub fn attach(self, bus: u8, device: u8, function: u8) {
         if let Self::Own(id) = self {
-            unit::domain::attach(StreamId::pci(bus, device, function), id);
+            OwnSpace(id).attach(bus, device, function);
         }
+    }
+}
+
+/// A device's own address space, for a function a *process* drives: it has no
+/// untranslated form, so nothing holding one can hand that process a physical
+/// address to write into a descriptor.
+#[derive(Clone, Copy)]
+pub struct OwnSpace(DomainId);
+
+impl OwnSpace {
+    /// One with `room` bytes of it handed out at the address answered, or the
+    /// reason there is none: a machine with no unit and a machine out of
+    /// domains are both refusals.
+    pub fn create(room: u64) -> Result<(Self, u64), IommuError> {
+        unit::domain::create(room).map(|(id, at)| (Self(id), at.raw()))
+    }
+
+    /// [`DeviceSpace::map`].
+    pub fn map(self, phys: u64, bytes: u64) -> Result<u64, IommuError> {
+        unit::domain::map(self.0, phys, bytes).map(Iova::raw)
+    }
+
+    /// Put `bytes` at `phys` at `at` again, where a device may still be aimed
+    /// from a mapping this space took back.
+    pub fn map_at(self, at: u64, phys: u64, bytes: u64) -> Result<(), IommuError> {
+        unit::domain::map_at(self.0, Iova::translated(at), phys, bytes)
+    }
+
+    /// Put `bytes` at `phys` at `at`, inside room [`Self::create`] handed out,
+    /// and write no record of it: for a mapping its holder makes and takes back
+    /// as often as it likes.
+    pub fn place(self, at: u64, phys: u64, bytes: u64) -> Result<(), IommuError> {
+        unit::domain::place(self.0, Iova::translated(at), phys, bytes).map(|_| ())
+    }
+
+    /// [`DeviceSpace::unmap`].
+    pub fn unmap(self, at: u64, bytes: u64) -> Result<(), IommuError> {
+        unit::domain::unmap(self.0, Iova::translated(at), bytes)
+    }
+
+    /// [`DeviceSpace::attach`].
+    pub fn attach(self, bus: u8, device: u8, function: u8) {
+        unit::domain::attach(StreamId::pci(bus, device, function), self.0);
     }
 }
 
@@ -257,7 +269,7 @@ pub fn init(
     devices: &[crate::drivers::pci::PciDevice],
     windows: &[toyos_abi::boot::RootBridgeWindow],
 ) {
-    unit::init(rsdp_addr, devices, windows, crate::pcidev::MAX_FUNCTIONS);
+    unit::init(rsdp_addr, devices, windows);
 }
 
 /// How a kernel driver's source must address its interrupt. Not a yes/no: a

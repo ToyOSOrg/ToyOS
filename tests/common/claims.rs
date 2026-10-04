@@ -13,8 +13,9 @@ pub const RECLAIM: &str = "test_rs_pci_reclaim";
 /// The kernel's reason on a claim's refusal line where the units do not remap.
 const NOT_REMAPPED: &str = "its interrupts would not be remapped on this machine";
 
-/// The kernel's line under `iommu-no-remap`: the premise of the refusal.
-const NO_REMAP_ARMED: &str = "iommu: iommu-no-remap stands in for units that cannot remap";
+/// The kernel's line where firmware's DMAR flags leave interrupt remapping off,
+/// which `iommu-no-remap` stands in for: the premise of the refusal.
+const INTR_REMAP_CLEAR: &str = "leave INTR_REMAP clear, so firmware says this platform does not remap";
 
 fn records(log: &Serial) -> impl Iterator<Item = &str> {
     log.text().lines().filter_map(bootlog::message)
@@ -132,13 +133,14 @@ pub fn clear_of_host_bridges(log: &Serial) -> Result<(), String> {
 /// On a machine whose units do not remap, the I219's claim is refused by that
 /// reason before anything on the function is armed, and the boot completes.
 pub fn refused_unremapped(log: &Serial) -> Result<(), String> {
-    log.must_say(NO_REMAP_ARMED)?;
+    log.must_say(INTR_REMAP_CLEAR)?;
     let at = function(log)?;
     log.must_say(&format!("pcidev: PCI {at} NOT HANDED OVER — {NOT_REMAPPED}"))?;
     log.must_not_say(&format!("[{I219}] handed over"))?;
     log.must_not_say(&format!("PCI {at}: msi address="))?;
     log.must_not_say(&format!("PCI {at}: msix address="))?;
     log.must_not_say(&format!(" source={at} "))?;
+    log.must_not_say(&format!("pcidev: PCI {at} BAR"))?;
     log.must_say(bootlog::COMPLETE)?;
     Ok(())
 }

@@ -125,8 +125,8 @@ pub(super) fn invalidate_interrupt_entries() {
 }
 
 /// `windows` and every region firmware reserved are what no domain's addresses
-/// reach; the interrupt table's first `claims` entries are the claim slots'.
-pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: &[RootBridgeWindow], claims: usize) {
+/// reach.
+pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: &[RootBridgeWindow]) {
     let dmar = match Dmar::open(rsdp_addr) {
         Ok(dmar) => dmar,
         // ACPI cannot distinguish "no VT-d silicon" from "VT-d disabled in
@@ -250,7 +250,7 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: &[RootBridgeWindow],
     // `CAP.SAGAW`, and a shared set would be programmed at the wrong depth for one.
     let mut domains: [Option<Table>; 2] = [None, None];
     for (unit, plan) in ready {
-        enable(unit, plan, devices, &mut domains, remap, claims);
+        enable(unit, plan, devices, &mut domains, remap);
     }
 }
 
@@ -262,14 +262,10 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: &[RootBridgeWindow],
 /// interrupt to whatever the handle bits spell. Every condition below therefore
 /// refuses for the machine, not for the unit that failed it.
 fn remappable(ready: &[(Unit, Plan)], described: usize, flags: u8) -> Option<bool> {
+    // Stands in for firmware, so the flag's own arm is what refuses.
     #[cfg(feature = "boot-actuators")]
-    if crate::actuator::iommu_no_remap() {
-        log!(
-            "iommu: iommu-no-remap stands in for units that cannot remap, so every source stays \
-             in compatibility format"
-        );
-        return None;
-    }
+    let flags =
+        if crate::actuator::iommu_no_remap() { flags & !dmar::FLAG_INTR_REMAP } else { flags };
     if ready.is_empty() {
         return None;
     }
@@ -526,7 +522,6 @@ fn enable(
     devices: &[PciDevice],
     domains: &mut [Option<Table>; 2],
     remap: Option<bool>,
-    claims: usize,
 ) {
     let index = unit.index;
     let Plan { width, records } = plan;
@@ -554,7 +549,7 @@ fn enable(
     let mut queue = Queue::new(&mut TABLES.lock(), unit.regs);
     // Outside the `TABLES` lock: `interrupt::arm` takes its own lock and
     // then that one, and the order this subsystem holds is the reverse.
-    let irta = remap.map(|extended| interrupt::arm(extended, claims));
+    let irta = remap.map(|extended| interrupt::arm(extended));
 
     // Before `TE`: the first blocked transaction must be reportable, not merely counted.
     fault::arm(index, unit.regs, records, crate::arch::idt::DMA_FAULT_VECTOR);

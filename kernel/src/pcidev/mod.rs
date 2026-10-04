@@ -115,7 +115,7 @@ use toyos_pci::{af, aperture, bar, express, msix, placement, pm, probe};
 
 use crate::device::{Claim, ClaimError};
 use crate::drivers::pci::{arm_claimed_msi, arm_claimed_msix, NoCapability, NoEntry, PciDevice};
-use crate::iommu::{DeviceSpace, IommuError, Remapped};
+use crate::iommu::{IommuError, OwnSpace, Remapped};
 use crate::mm::policy::{CachePolicy, MmioPolicy};
 use crate::mm::{align_2m, DirectMap, Mmio, PAGE_2M};
 use crate::object::shm::{Region, SharedMemObject};
@@ -172,7 +172,7 @@ static SPACE: [Lock<Option<Space>>; MAX_FUNCTIONS] =
 /// A slot's address space, and the room in it every holder's lent regions go.
 #[derive(Clone, Copy)]
 struct Space {
-    space: DeviceSpace,
+    space: OwnSpace,
     /// [`MAX_GRANT_TOTAL`] of addresses handed out with the domain and never
     /// mapped by anything but [`dma_map`].
     lend: u64,
@@ -229,7 +229,7 @@ enum Armed {
 /// What a live slot drives. The ISR never reads this.
 struct Bound {
     pci: PciDevice,
-    space: DeviceSpace,
+    space: OwnSpace,
     /// [`Space::lend`].
     lend: u64,
     armed: Armed,
@@ -756,8 +756,6 @@ pub fn claim(id: PciId) -> Result<(PciFunctionInfo, u8, Claim), ClaimError> {
 /// bus before its domain existed would be reaching physical memory with
 /// whatever addresses its registers still held.
 fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
-    // A fact of the whole machine, fixed at boot: refused before the slot or
-    // the function is spent or touched.
     let remapping = crate::iommu::remapping().map_err(|_| Refusal::NotRemapped)?;
 
     // What the slot's previous holder left mapped goes before anything attaches
@@ -817,16 +815,18 @@ fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
         }
         Err(why) => {
             // The entry goes not present once the function stops speaking.
-            match armed {
+            let message = match armed {
                 Armed::Msix(_, message) => {
                     pci.disable_msix();
-                    drop(message);
+                    message
                 }
                 Armed::Msi(message) => {
                     pci.disable_msi();
-                    drop(message);
+                    message
                 }
-            }
+            };
+            pci.drain_messages();
+            drop(message);
             Err(why)
         }
     }
@@ -898,7 +898,7 @@ fn slot_space(slot: usize) -> Result<Space, IommuError> {
     match *held {
         Some(space) => Ok(space),
         None => {
-            let (space, lend) = DeviceSpace::own(MAX_GRANT_TOTAL)?;
+            let (space, lend) = OwnSpace::create(MAX_GRANT_TOTAL)?;
             *held = Some(Space { space, lend });
             Ok(Space { space, lend })
         }
@@ -1123,7 +1123,7 @@ fn wait_until(at: u64) {
 /// released holder's own pages rather than faulting, or landing in pages the
 /// allocator has handed somebody else.
 struct Retired {
-    space: DeviceSpace,
+    space: OwnSpace,
     grants: Vec<Grant>,
     quiet_at: u64,
 }
@@ -1425,6 +1425,7 @@ fn tear_down(slot: usize, mut bound: Bound) {
     };
     // Once the function no longer speaks, and before the slot can be reserved
     // again: its remapping entry goes not present.
+    bound.pci.drain_messages();
     drop(message);
     crate::iommu::note_user_owned(bound.pci.bus, bound.pci.dev, bound.pci.func, None);
     // **The reset before the domain gives anything back.** With mastering off

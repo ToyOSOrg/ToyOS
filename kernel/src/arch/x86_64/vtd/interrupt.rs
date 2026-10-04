@@ -81,9 +81,6 @@ pub struct Pin {
 struct Remap {
     /// `None` until a unit is armed, which is what "no source may use the remappable format" means.
     table: Option<Table>,
-    /// Entries `0..claims` are the claim slots'; the kernel's own sources take
-    /// them from here up.
-    claims: u16,
     used: u16,
     /// `ECAP.EIM` on every unit. Clear bounds a destination to the eight bits `DST` then holds.
     extended: bool,
@@ -92,7 +89,12 @@ struct Remap {
 }
 
 static REMAP: Lock<Remap> =
-    Lock::new(Remap { table: None, claims: 0, used: 0, extended: false, apics: Vec::new() });
+    Lock::new(Remap { table: None, used: CLAIMS, extended: false, apics: Vec::new() });
+
+/// Entries `0..CLAIMS` are the claim slots'; the kernel's own sources take them
+/// from here up.
+const CLAIMS: u16 = crate::pcidev::MAX_FUNCTIONS as u16;
+const _: () = assert!(crate::pcidev::MAX_FUNCTIONS < ENTRIES as usize);
 
 /// A claimed function's message reaches [`MSG_DEST`], which an entry holds with
 /// or without `EIME`, so writing a claim slot's entry is never refused.
@@ -107,21 +109,12 @@ pub fn apics_are_named(apics: &[u8]) -> bool {
     apics.iter().all(|id| remap.apics.iter().any(|(named, _)| named == id))
 }
 
-/// Allocate the shared table on first ask, its first `claims` entries kept for
-/// the claim slots, and return the value `IRTA_REG` takes for it.
-pub fn arm(extended: bool, claims: usize) -> u64 {
-    let claims = u16::try_from(claims).ok().filter(|c| *c < ENTRIES).unwrap_or_else(|| {
-        panic!("iommu: {claims} claim slots leave none of the table's {ENTRIES} entries over")
-    });
+/// Allocate the shared table on first ask and return the value `IRTA_REG`
+/// takes for it.
+pub fn arm(extended: bool) -> u64 {
     let mut remap = REMAP.lock();
     remap.extended = extended;
-    let table = match remap.table {
-        Some(table) => table,
-        None => {
-            (remap.claims, remap.used) = (claims, claims);
-            *remap.table.insert(super::TABLES.lock().alloc())
-        }
-    };
+    let table = *remap.table.get_or_insert_with(|| super::TABLES.lock().alloc());
     table.phys() | if extended { EXTENDED_INTERRUPT_MODE } else { 0 } | SIZE_FIELD
 }
 
@@ -232,7 +225,7 @@ pub fn claim(slot: usize, source: StreamId, vector: u8) -> Msi {
         };
         let index = u16::try_from(slot)
             .ok()
-            .filter(|index| *index < remap.claims)
+            .filter(|index| *index < CLAIMS)
             .unwrap_or_else(|| panic!("iommu: claim slot {slot} has no entry of its own"));
         // Not present since the last release, so the high half written first
         // reaches nothing the unit can walk.

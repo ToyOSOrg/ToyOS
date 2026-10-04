@@ -20,11 +20,15 @@ where it is checked) and so what the "identity check" compares. No signature
 or image-identity mechanism exists in the kernel today. The exit below cannot
 be written as a test until it is.
 
-Today `pcidev`'s `bring_up` refuses every claim on such a machine with
-`Refusal::Untranslated`, whoever asks. A claim that goes on without a domain
-cannot pass through `slot_space` as it stands: it calls `reserve`, grants
-call `place`, and both panic on `DeviceSpace::Untranslated` — a kernel panic
-a userland claim would reach.
+Today `pcidev`'s `bring_up` refuses every claim on such a machine first with
+`Refusal::NotRemapped`, whoever asks: no unit remaps its interrupts, and a
+claimed function is armed only through `iommu::claim_msi`, which takes a
+`Remapping` such a machine never mints. Behind that, `Refusal::Untranslated`:
+a slot's space is an `iommu::OwnSpace`, which has no untranslated form, so
+there is no physical address for a grant to answer with. The ruled path has
+to pass both — a message for the claimed function that is not compatibility
+format's any-vector-at-any-CPU, and a space of its own kind for physical
+addresses.
 
 Exit, in both arms of `iommu_virtio_platform` (`tests/common/iommu.rs`):
 

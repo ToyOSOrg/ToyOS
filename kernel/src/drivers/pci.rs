@@ -273,6 +273,14 @@ impl PciDevice {
         stop_bus_mastering(self.mmio);
     }
 
+    /// Answers once every message this function sent before the writes that
+    /// silenced it has reached the root complex: a read's completion passes
+    /// none of the function's earlier posted writes, and the read itself none
+    /// of this kernel's (PCIe Base §2.4.1).
+    pub fn drain_messages(&self) {
+        self.mmio.read_u16(COMMAND);
+    }
+
     /// Point this function's [`MSIX_ENTRY`] at `vector` and enable it: a
     /// kernel driver's arming, whose message is compatibility format on a
     /// machine that remaps nothing. A claimed function is armed by

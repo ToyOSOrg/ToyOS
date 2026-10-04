@@ -181,8 +181,7 @@ const NVME_AT: &str = "00:02.0";
 /// (`issues/kernel/every-driver-is-still-in-the-kernel.md`) is that moving a
 /// driver out without the unit costs security: a message nothing remaps raises
 /// any vector on any CPU, and a descriptor holding a physical address is an
-/// arbitrary read and write over all of memory. The first is the refusal a
-/// claim takes first, before anything of the slot is spent. So the kernel
+/// arbitrary read and write over all of memory. So the kernel
 /// refuses the claim by name, the supervisor says which device it could not
 /// mint, and netstack exits rather than driving anything — and the machine
 /// finishes booting, which is the half a refusal that panicked would fail. The

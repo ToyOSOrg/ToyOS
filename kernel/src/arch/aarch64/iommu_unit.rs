@@ -8,7 +8,6 @@ pub fn init(
     _rsdp_addr: u64,
     _devices: &[PciDevice],
     _windows: &[toyos_abi::boot::RootBridgeWindow],
-    _claims: usize,
 ) {
     log!("IOMMU: the SMMUv3 is the port's stage 6; no device is translated this boot");
 }

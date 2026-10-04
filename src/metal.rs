@@ -772,9 +772,10 @@ pub const FLASHABLE: &[&str] = &[
     // writes only the units' registers, which a reset returns to firmware, and
     // tables in memory this boot owns.
     "iommu-firmware-left",
-    // Every IOMMU unit left without interrupt remapping, which is how this
-    // machine ran before the kernel remapped anything. It writes no register a
-    // reset does not return to firmware.
+    // The DMAR's flags read with INTR_REMAP clear, so every IOMMU unit is left
+    // without interrupt remapping, which is how this machine ran before the
+    // kernel remapped anything. It writes no register a reset does not return
+    // to firmware.
     "iommu-no-remap",
     // It seals this boot's own record under an identity one bit from this
     // stick's, so the pass that finds it clears it and boots a kernel. The page
