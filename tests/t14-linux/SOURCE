@@ -12,3 +12,13 @@ beside them.
                         sleep 2; turbostat --quiet --interval 10 --num_iterations 6 --show
                         Core,CPU,Avg_MHz,Busy%,Bzy_MHz,TSC_MHz,IRQ,SMI,CPU%c1,CPU%c6,CPU%c7,CoreTmp,PkgTmp,Pkg%pc2,Pkg%pc6,Pk%pc10,PkgWatt,CorWatt;
                         wait`
+
+  hwp-request.txt       IA32_HWP_REQUEST (0x774), the same on all eight CPUs,
+                        read as root through /dev/cpu/N/msr under the same
+                        Ubuntu with intel_pstate `active`, the `powersave`
+                        governor and EPP `balance_performance`; recorded in
+                        the message of commit 868378b87 (#568, branch
+                        `wt/toyos-llvmbar`): "IA32_HWP_REQUEST 0x80002a04 on
+                        all eight CPUs (min 4, max 42, desired 0, EPP 128)".
+                        `counters_on_metal` holds every CPU's boot
+                        `hwp_request` to it.
