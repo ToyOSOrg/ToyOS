@@ -246,13 +246,15 @@ fn a_host_refusal_and_a_space_not_carried_are_refused_by_name() {
     assert_eq!(i.evaluate(&mut m, "\\A", &[]), Err(Error::Host("refused".into())));
     let smbus = cat(&[&op_region("SMB0", 0x04, &int(0), &int(0x100)), &field("SMB0", BYTE, &[unit("S", 8)])]);
     assert_eq!(read(&smbus, &[], "\\S").1, Err(Error::Unsupported("the SMBus address space")));
-    let mut m = Machine::default();
-    let reserved = op_region("RSV", 0x0C, &int(0), &int(1));
-    assert!(matches!(Interpreter::new().load_bytes(&mut m, &dsdt(&reserved)), Err(Error::Malformed { .. })));
-    for flags in [0x06, 0x60, 0x80] {
-        let bad = memory_region(flags, &[unit("A", 8)]);
-        assert!(matches!(Interpreter::new().load_bytes(&mut m, &dsdt(&bad)), Err(Error::Malformed { .. })), "{flags:#x}");
-    }
+    // A reserved space or flag loads, and is refused where an access needs
+    // its meaning; reserved bit 7 means nothing and is ignored.
+    let reserved = cat(&[&op_region("RSV", 0x0C, &int(0), &int(1)), &field("RSV", BYTE, &[unit("R", 8)])]);
+    assert_eq!(read(&reserved, &[], "\\R").1, Err(Error::Unsupported("a reserved address space (Table 5.182)")));
+    assert!(matches!(read(&memory_region(0x06, &[unit("A", 8)]), &[], "\\A").1, Err(Error::Rule(_))));
+    let (m, r) = store_into(&memory_region(BYTE | 0x60, &[unit("A", 4)]), "A", &int(1));
+    assert!(matches!(r, Err(Error::Rule(_))));
+    assert_eq!(m.accesses(), vec![]);
+    assert!(read(&memory_region(BYTE | 0x80, &[unit("A", 8)]), &[], "\\A").1.is_ok());
 }
 
 /// §19.6.18-23 and Table 19.7: buffer fields see and change their buffer.

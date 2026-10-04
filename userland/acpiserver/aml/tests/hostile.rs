@@ -27,9 +27,17 @@ fn a_package_length_that_leaves_its_package_is_refused() {
 fn names_and_strings_hold_only_what_their_encoding_allows() {
     assert!(matches!(load(&cat(&[&[0x08], b"a___", &int(1)])), Err(Error::Malformed { .. })));
     assert!(matches!(load(&cat(&[&[0x08], b"1___", &int(1)])), Err(Error::Malformed { .. })));
-    assert!(matches!(load(&cat(&[&[0x08, 0x2F, 0x00], &int(1)])), Err(Error::Malformed { .. })));
-    assert!(matches!(load(&def_name("S", &[0x0D, b'a', 0x80, 0x00])), Err(Error::Malformed { .. })));
+    // A MultiNamePath of zero segments names what the NullName does: no
+    // object for Name to define.
+    assert!(matches!(load(&cat(&[&[0x08, 0x2F, 0x00], &int(1)])), Err(Error::Rule(_))));
+    // A byte above AsciiChar's range ends nothing and is kept, by the owner's
+    // ruling to refuse only what is truly malformed; a string without its
+    // NullChar is.
+    let (mut i, mut m) = loaded(&def_name("S", &[0x0D, b'a', 0x80, 0x00]));
+    assert_eq!(i.evaluate(&mut m, "\\S", &[]), Ok(Value::String(vec![b'a', 0x80])));
     assert!(matches!(load(&def_name("S", &[0x0D, b'a'])), Err(Error::Malformed { .. })));
+    // A multi-byte PkgLength's reserved bits 5-4 change nothing.
+    assert!(load(&cat(&[&[0x10, 0x76, 0x00], &name("\\"), &[0xA3; 99]])).is_ok());
     // A DataObject is all Name takes (§20.2.5.1).
     assert!(matches!(load(&def_name("L", &local(0))), Err(Error::Malformed { .. })));
     // A term list holds terms; data alone is none (§20.2.5).

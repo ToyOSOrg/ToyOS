@@ -92,20 +92,11 @@ fn unit_ones(w: u64) -> u64 {
     if w >= 8 { u64::MAX } else { (1u64 << (8 * w)) - 1 }
 }
 
-/// The FieldFlags byte (§20.2.5.2), refused where it sets what is reserved.
-pub(crate) fn flags(b: u8) -> Result<(u8, bool, u8), &'static str> {
-    let access = b & 0x0F;
-    let update = (b >> 5) & 0x3;
-    if access > 5 {
-        return Err("a field's AccessType is reserved (§20.2.5.2)");
-    }
-    if update == 3 {
-        return Err("a field's UpdateRule is reserved (§20.2.5.2)");
-    }
-    if b & 0x80 != 0 {
-        return Err("a field's FieldFlags sets reserved bit 7 (§20.2.5.2)");
-    }
-    Ok((access, b & 0x10 != 0, update))
+/// The FieldFlags byte (§20.2.5.2): AccessType, LockRule and UpdateRule.
+/// Bit 7 is reserved and ignored; a reserved AccessType or UpdateRule is
+/// refused where an access would need its meaning.
+pub(crate) fn flags(b: u8) -> (u8, bool, u8) {
+    (b & 0x0F, b & 0x10 != 0, (b >> 5) & 0x3)
 }
 
 impl Machine<'_> {
@@ -131,7 +122,8 @@ impl Machine<'_> {
             2 => 2,
             3 => 4,
             4 => 8,
-            _ => return Err(Error::Unsupported("BufferAcc, which only the SMBus, IPMI and GenericSerialBus spaces use")),
+            5 => return Err(Error::Unsupported("BufferAcc, which only the SMBus, IPMI and GenericSerialBus spaces use")),
+            _ => return Err(Error::Rule("an access by a reserved AccessType (§20.2.5.2)")),
         };
         if bytes_only && w != 1 {
             return Err(Error::Type("a field wider than a byte in a space Table 19.34 permits ByteAcc alone"));
@@ -172,6 +164,7 @@ impl Machine<'_> {
             0x0A => Err(Error::Unsupported("the PCC address space")),
             0x0B => Err(Error::Unsupported("the PlatformRtMechanism address space")),
             0x7F => Err(Error::Unsupported("the FFixedHW address space")),
+            0x0C..=0x7E => Err(Error::Unsupported("a reserved address space (Table 5.182)")),
             _ => Err(Error::Unsupported("an OEM-defined address space")),
         }
     }
@@ -308,7 +301,8 @@ impl Machine<'_> {
                 match f.update {
                     0 => self.unit_read(f, u * w, w)?,
                     1 => unit_ones(w),
-                    _ => 0,
+                    2 => 0,
+                    _ => return Err(Error::Rule("a write by a reserved UpdateRule (§20.2.5.2)")),
                 }
             };
             for b in s..e {

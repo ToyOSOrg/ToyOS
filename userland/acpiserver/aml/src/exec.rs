@@ -113,32 +113,9 @@ fn type_name(code: u64) -> &'static [u8] {
     }
 }
 
-/// A NameString written as ASL text, for DerefOf of a String (§19.6.30).
+/// DerefOf of a String names an object by ASL text (§19.6.30).
 fn path_of_text(s: &[u8]) -> Result<Path, Error> {
-    let bad = Error::Rule("DerefOf of a String that is not a name (§19.6.30)");
-    let mut rest = s;
-    let mut root = false;
-    let mut up = 0;
-    if let [b'\\', r @ ..] = rest {
-        root = true;
-        rest = r;
-    }
-    while let [b'^', r @ ..] = rest {
-        up += 1;
-        rest = r;
-    }
-    let mut segs = Vec::new();
-    if !rest.is_empty() {
-        for part in rest.split(|&c| c == b'.') {
-            if part.is_empty() || part.len() > 4 {
-                return Err(bad);
-            }
-            let mut seg = [b'_'; 4];
-            seg[..part.len()].copy_from_slice(part);
-            segs.push(Seg::new(seg).ok_or(Error::Rule("DerefOf of a String that is not a name (§19.6.30)"))?);
-        }
-    }
-    Ok(Path { root, up, segs })
+    Path::text(s).ok_or(Error::Rule("DerefOf of a String that is not a name (§19.6.30)"))
 }
 
 impl<'a> Machine<'a> {
@@ -653,9 +630,7 @@ impl<'a> Machine<'a> {
         c.byte()?;
         c.name()?;
         c.byte()?;
-        if c.byte()? > 7 {
-            return Err(c.malformed("an External's ArgumentCount is above 7 (§20.2.5.2)"));
-        }
+        c.byte()?;
         Ok(Flow::Next)
     }
 
@@ -663,11 +638,9 @@ impl<'a> Machine<'a> {
         c.byte()?;
         c.byte()?;
         let p = c.name()?;
-        let flags = c.byte()?;
-        if flags & 0xF0 != 0 {
-            return Err(c.malformed("a Mutex's SyncFlags sets reserved bits 4-7 (§20.2.5.2)"));
-        }
-        self.define(f, &p, Object::Mutex(Rc::new(Mutex { sync: flags, held: Cell::new(0), global: false })))?;
+        // SyncFlags: the SyncLevel in bits 0-3, the rest reserved (§20.2.5.2).
+        let sync = c.byte()? & 0x0F;
+        self.define(f, &p, Object::Mutex(Rc::new(Mutex { sync, held: Cell::new(0), global: false })))?;
         Ok(Flow::Next)
     }
 
@@ -684,10 +657,6 @@ impl<'a> Machine<'a> {
         c.byte()?;
         let p = c.name()?;
         let space = c.byte()?;
-        // Table 5.182: 0x0C-0x7E are reserved.
-        if (0x0C..=0x7E).contains(&space) {
-            return Err(c.malformed("an OperationRegion names a reserved address space (Table 5.182)"));
-        }
         let base = self.int_arg(f, c)?;
         let len = self.int_arg(f, c)?;
         let r = Region { space, base, len, scope: f.scope, pci: Cell::new(None) };
@@ -730,7 +699,7 @@ impl<'a> Machine<'a> {
                 Kind::Bank { region, bank, value }
             }
         };
-        let (mut access, lock, update) = flags(l.byte()?).map_err(|why| l.malformed(why))?;
+        let (mut access, lock, update) = flags(l.byte()?);
         let mut bit = 0u64;
         while !l.done() {
             self.step()?;
@@ -741,7 +710,7 @@ impl<'a> Machine<'a> {
                 }
                 0x01 | 0x03 => {
                     let ext = l.byte()? == 0x03;
-                    access = flags(l.byte()? & 0x0F).map_err(|why| l.malformed(why))?.0;
+                    access = flags(l.byte()?).0;
                     l.byte()?;
                     if ext {
                         l.byte()?;
@@ -979,8 +948,9 @@ impl<'a> Machine<'a> {
                 loop {
                     match c.byte()? {
                         0 => break,
-                        b @ 0x01..=0x7F => s.push(b),
-                        _ => return Err(c.malformed("a String holds a byte AsciiChar does not allow (§20.2.3)")),
+                        // AsciiChar is 0x01-0x7F (§20.2.3); a byte above it
+                        // still ends nothing, and is kept.
+                        b => s.push(b),
                     }
                     bounded(s.len())?;
                 }
@@ -1120,6 +1090,11 @@ impl<'a> Machine<'a> {
             Target::Node(id) => self.node_object(*id)?,
             Target::Ref(r) => Object::Ref(r.clone()),
         };
+        self.followed(o)
+    }
+
+    /// An object, a reference followed once to what it refers to.
+    fn followed(&mut self, o: Object) -> Result<Object, Error> {
         Ok(match o {
             Object::Ref(Ref::Node(id)) => self.node_object(id)?,
             Object::Ref(Ref::Slot(s)) => s.borrow().clone(),
@@ -1592,17 +1567,6 @@ impl<'a> Machine<'a> {
         }
     }
 
-    /// The ObjectType code of an object, a reference's being its target's.
-    fn type_of(&mut self, o: &Object) -> Result<u64, Error> {
-        Ok(match o {
-            Object::Ref(Ref::Node(id)) => self.node_object(*id)?.type_code(),
-            Object::Ref(Ref::Slot(s)) => s.borrow().type_code(),
-            Object::Ref(Ref::Elem(p, i)) => p.borrow().get(*i).map_or(0, Object::type_code),
-            Object::Ref(Ref::BufField(_)) => 14,
-            o => o.type_code(),
-        })
-    }
-
     /// Concatenate (§19.6.12, Table 19.30).
     fn concat(&mut self, f: &mut Frame, c: &mut Cursor<'_>) -> Result<Object, Error> {
         let a = self.arg(f, c)?;
@@ -1610,7 +1574,7 @@ impl<'a> Machine<'a> {
         let t = self.target(f, c)?;
         let w = self.w;
         let data = |o: &Object| matches!(o, Object::Int(_) | Object::Str(_) | Object::Buf(_));
-        let named = |m: &mut Self, o: &Object| -> Result<Vec<u8>, Error> { Ok(type_name(m.type_of(o)?).to_vec()) };
+        let named = |m: &mut Self, o: &Object| -> Result<Vec<u8>, Error> { Ok(type_name(m.followed(o.clone())?.type_code()).to_vec()) };
         let tail_str = |m: &mut Self, o: &Object| if data(o) { to_str(o, w) } else { named(m, o) };
         let r = match &a {
             Object::Int(x) => {

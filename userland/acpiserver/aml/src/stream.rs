@@ -79,10 +79,9 @@ impl<'a> Cursor<'a> {
         if follow == 0 {
             return Ok((start, usize::from(lead & 0x3F)));
         }
-        // §20.2.4: bits 5-4 of a multi-byte lead are reserved and must be zero.
-        if lead & 0x30 != 0 {
-            return Err(Error::Malformed { at: start, why: "a multi-byte PkgLength sets bits 5-4 of its lead byte" });
-        }
+        // §20.2.4 reserves bits 5-4 of a multi-byte lead: the length is the
+        // same whatever they hold, so they are ignored (the owner's ruling of
+        // 2026-10-05: "refuse only what is truly malformed").
         let mut len = usize::from(lead & 0x0F);
         for i in 0..follow {
             len |= usize::from(self.byte()?) << (4 + 8 * i);
@@ -132,11 +131,9 @@ impl<'a> Cursor<'a> {
             }
             0x2F => {
                 self.at += 1;
-                // §20.2.2: SegCount can be from 1 to 255.
-                match self.byte()? {
-                    0 => return Err(self.malformed("a MultiNamePath counts zero segments")),
-                    n => usize::from(n),
-                }
+                // §20.2.2 gives SegCount as 1 to 255; zero names no segment,
+                // which is the NullName's meaning.
+                usize::from(self.byte()?)
             }
             _ => 1,
         };

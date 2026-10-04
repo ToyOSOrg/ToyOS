@@ -171,8 +171,10 @@ fn an_external_defines_nothing() {
     let (mut i, mut m) = loaded(&external);
     assert!(matches!(int_of(&mut i, &mut m, "\\_SB.PCI0.XYZ"), Err(Error::NotFound(_))));
     let mut m = Machine::default();
-    let bad = cat(&[&[0x15], &name("XYZ"), &[0x08, 0x08]]);
-    assert!(matches!(Interpreter::new().load_bytes(&mut m, &dsdt(&bad)), Err(Error::Malformed { .. })));
+    // An ArgumentCount above 7 tells a disassembler nothing it could use,
+    // and defines nothing either.
+    let odd = cat(&[&[0x15], &name("XYZ"), &[0x08, 0x08]]);
+    assert!(Interpreter::new().load_bytes(&mut m, &dsdt(&odd)).is_ok());
 }
 
 /// The owner's ruling (2026-10-05): "Parse Processor and other legacy

@@ -15,11 +15,18 @@
 //! and `DataTableRegion`. Only one invocation runs at a time, so a Mutex is
 //! never contended and an Event is never signalled by anyone else.
 //!
-//! The predefined objects are the operating system's (§5.7): `\_OSI` answers
-//! as the owner ruled ("Like Windows, not Linux"): yes to every Windows
-//! version string Microsoft publishes for `_OSI`, no to anything else;
-//! `\_OS` is this system's name and `\_REV` is 2, ACPI 2 or greater with
-//! 64-bit integers (§5.7.4).
+//! The predefined objects are the operating system's (§5.7), answered as
+//! Windows answers them, by the owner's rulings ("Like Windows, not Linux";
+//! 2026-10-05 on `\_OS` and on feature groups): `\_OSI` says yes to every
+//! Windows version string Microsoft publishes and no to anything else, the
+//! ACPI feature groups included, which Windows does not answer ("Windows
+//! supports _OSI only for the use of identifying the host version of
+//! Windows"); `\_OS` is "Microsoft Windows NT"; `\_REV` is 2, ACPI 2 or
+//! greater with 64-bit integers (§5.7.4).
+//!
+//! An evaluation nests at most [`MAX_DEPTH`] frames of this interpreter, each
+//! measured at about 3.4 KiB of stack in a debug build: a caller runs it on a
+//! stack of at least 1 MiB.
 
 #![no_std]
 #![forbid(unsafe_code)]

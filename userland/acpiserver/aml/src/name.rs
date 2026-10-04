@@ -42,23 +42,41 @@ impl Path {
         !self.root && self.up == 0 && self.segs.len() == 1
     }
 
-    /// An absolute path written as text, `\_SB.PCI0._STA`; a segment shorter
-    /// than four characters is padded with `_`, as §5.3 says compilers pad.
-    pub(crate) fn absolute(text: &str) -> Result<Path, Error> {
-        let rest = text.strip_prefix('\\').ok_or(Error::Rule("a path the caller names is not absolute"))?;
+    /// A path written as ASL text, `\_SB.PCI0._STA` or `^ABC`: a segment
+    /// shorter than four characters is padded with `_`, as §5.3 says
+    /// compilers pad. DerefOf of a String reads one (§19.6.30), and so does a
+    /// caller naming an object.
+    pub(crate) fn text(s: &[u8]) -> Option<Path> {
+        let mut rest = s;
+        let mut root = false;
+        let mut up = 0;
+        if let [b'\\', r @ ..] = rest {
+            root = true;
+            rest = r;
+        }
+        while let [b'^', r @ ..] = rest {
+            up += 1;
+            rest = r;
+        }
         let mut segs = Vec::new();
         if !rest.is_empty() {
-            for part in rest.split('.') {
-                let b = part.as_bytes();
-                if b.is_empty() || b.len() > 4 {
-                    return Err(Error::Rule("a segment of the caller's path is not one to four characters"));
+            for part in rest.split(|&c| c == b'.') {
+                if part.is_empty() || part.len() > 4 {
+                    return None;
                 }
                 let mut seg = [b'_'; 4];
-                seg[..b.len()].copy_from_slice(b);
-                segs.push(Seg::new(seg).ok_or(Error::Rule("a segment of the caller's path is not a NameSeg"))?);
+                seg[..part.len()].copy_from_slice(part);
+                segs.push(Seg::new(seg)?);
             }
         }
-        Ok(Path { root: true, up: 0, segs })
+        Some(Path { root, up, segs })
+    }
+
+    /// An absolute path written as text, as the caller names an object.
+    pub(crate) fn absolute(text: &str) -> Result<Path, Error> {
+        Path::text(text.as_bytes())
+            .filter(|p| p.root)
+            .ok_or(Error::Rule("a path the caller names is not an absolute path of NameSegs"))
     }
 }
 

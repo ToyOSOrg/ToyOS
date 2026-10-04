@@ -71,6 +71,25 @@ The orchestrator's reading of the clean-room ruling, not his: uACPI and
 ACPICA are run only as black-box oracles, and whoever writes the interpreter
 never reads their source.
 
+**Ruled** (owner, as the orchestrator's brief of 2026-10-04 carries it, not
+verbatim): no clean-room machinery and no spec copies in the repository; the
+interpreter's writer works from the ACPI Specification 6.5 directly and
+never reads another AML implementation's source.
+
+**Ruled** (owner, 2026-10-05), on the interpreter (the option chosen, then
+its text, verbatim):
+
+- **`\_OS`**: "\"Microsoft Windows NT\" (Recommended)" — "Same as Windows,
+  consistent with 'Like Windows, not Linux': firmware that branches on _OS
+  takes the tested Windows path."
+- **`_OSI` feature groups**: "Like Windows answers (Recommended)" — "Answer
+  each feature group the way Windows does, so the T14 takes its tested path;
+  the interpreter must then actually support what it claims."
+- **Old opcodes**: "Accept what real firmware ships (Recommended)" — "Parse
+  Processor and other legacy constructs real tables still contain, per their
+  last spec definition; refuse only what is truly malformed. Tested against
+  QEMU's table in the tree and your T14 tables locally."
+
 **Stage 1: ACPI mode, its SCI served in userland.** The switch to ACPI mode,
 and a userland server that claims the SCI, handles the power button, a
 fixed event that needs no AML, and takes the EC's events. **Exit**: on the
@@ -81,6 +100,14 @@ power-off path (`SYS_SHUTDOWN`), and the boot's log records the press and that
 stop, and each EC query number once with its count: a T14 row reads them there.
 A second T14 row kills the server and reads `SCI_EN` clear in `PM1_CNT`
 afterwards, the kernel having written `ACPI_DISABLE` to `SMI_CMD`.
+
+**Stage: the interpreter.** `userland/acpiserver/aml`, the AML
+interpreter, pure and host-tested inside the server that uses it. **Exit**:
+a host test loads QEMU 11.1.1's DSDT
+(`toyos-acpi/fixtures/qemu-11.1.1/dsdt.bin`) and evaluates `\_S5` to the
+`SLP_TYPa` its boot logged, 0; and the T14's DSDT and SSDTs, read by a
+check run outside the tree, load and evaluate `\_S5`, its pull request
+recording the result.
 
 **Stage: power-off through the server** (the orchestrator's placement of "Yes,
 one path"). The ACPI server evaluates `\_S5` and powers the machine off.
