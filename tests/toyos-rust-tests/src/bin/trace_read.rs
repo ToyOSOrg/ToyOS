@@ -60,14 +60,14 @@ fn main() {
     let task = Thread { pid: child.id(), tid: 0 };
     assert_ne!(task.pid, 0, "the waiter ended before its pid was asked");
     // The wake under test is the write's, so it is made only once the diary
-    // says the child parked on the pipe.
+    // says the child parked on the pipe; a read writes no record, so this
+    // wait cannot lap the ring `second` stands in.
     let mut read_first = Vec::new();
     let mut lost_first = 0;
     while !read_first.iter().any(|r| is(r, task, Event::Park)) {
         let (more, lost) = read_to_now(&mut first);
         read_first.extend(more);
         lost_first += lost;
-        std::thread::yield_now();
     }
     child.stdin.take().expect("the waiter's stdin").write_all(&[1]).expect("wake the waiter");
     assert!(child.wait().expect("wait the waiter").success(), "the waiter failed");
