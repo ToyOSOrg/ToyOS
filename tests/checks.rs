@@ -858,6 +858,11 @@ mod checks {
     }
 
     #[test]
+    fn metal_power_off_owes_no_panel() {
+        metal_checks::a_power_off_owes_no_panel();
+    }
+
+    #[test]
     fn metal_list_from_parse_reaches_run_without_the_machine() -> Result<(), String> {
         let args: Vec<String> = ["--metal", "--list"].iter().map(ToString::to_string).collect();
         let mode = testargs::parse(&args)?

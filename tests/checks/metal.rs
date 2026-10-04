@@ -360,3 +360,32 @@ pub fn a_cleared_page_owes_no_panel() {
     );
     assert_eq!(judged(&cleared, &hung), (true, None));
 }
+
+/// **A power-off owes no panel**: S5 takes the page, census and all, so a
+/// boot whose log ends with the supervisor asking for a power-off is green
+/// with no record after it and records its `complete_ms` alone. The same boot
+/// whose stop asked for a reboot owes the census, and is red without it.
+pub fn a_power_off_owes_no_panel() {
+    let hung = format!(
+        "Boot attempts: this image has had the machine 1 time(s) without reporting; now 0\n{}\n{}\n",
+        bootlog::HUNG_WITHOUT_A_RECORD,
+        bootlog::CHAIN_ENDS_LINE
+    );
+    let judged = |stop: &str| {
+        let dir = toyos_tmpdir::TempDir::new("metal-readbacks");
+        let root = toyos_tmpdir::TempDir::new("metal-records");
+        let log = format!(
+            "{BOOTED}{{2026-09-29 18:22:40 1.214 supervisor}} {} ({stop})\n",
+            bootlog::STOPPING
+        );
+        plant(&dir, "poweroff", &hung, &log, None);
+        let red = metal::judge_readbacks(&root, &read(&dir, &["poweroff"]), &[], &[]);
+        let record = Record::load(&root, &t14()).expect("a readable record");
+        (red, record.map(|record| record.measured.into_keys().collect::<Vec<_>>()))
+    };
+    assert_eq!(
+        judged("Shutdown"),
+        (false, Some(vec!["boot.poweroff.complete_ms".to_string()]))
+    );
+    assert_eq!(judged("Reboot"), (true, None));
+}

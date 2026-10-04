@@ -1053,8 +1053,10 @@ pub fn judge_readbacks(
         }
         let mut findings: Vec<String> = Vec::new();
         // The census crosses only on the page, and a page the pass after the
-        // reset cleared as another image's carries none.
-        let owes_a_panel = bootlog::foreign_done(&back.loader).is_err();
+        // reset cleared as another image's carries none; nor does a boot whose
+        // log ends asking for a power-off, which takes the page with it.
+        let owes_a_panel = bootlog::foreign_done(&back.loader).is_err()
+            && !bootlog::asked_to_power_off(&back.log);
         for (field, value, owed) in [
             ("complete_ms", back.boot_ms, true),
             ("panel_max_us", panel.map(|panel| panel.max_micros), owes_a_panel),
