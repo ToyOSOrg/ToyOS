@@ -360,7 +360,7 @@ fn user_report(frame: &Frame) {
     }
     log!("  pc:");
     if percpu::current_pid().is_some() {
-        crate::process::resolve_user_symbol(frame.elr).log_bare(frame.elr);
+        crate::process::record_user_frame(frame.elr).log_bare(frame.elr);
     } else {
         log!("    {:#x}", frame.elr);
     }
@@ -388,7 +388,7 @@ fn user_backtrace(start_fp: u64, max_frames: usize) {
         if ret == 0 {
             break;
         }
-        crate::process::resolve_user_symbol_return(ret).log_bare(ret);
+        crate::process::record_user_frame_return(ret).log_bare(ret);
         fp = saved;
     }
 }
@@ -510,7 +510,7 @@ pub(crate) fn report_panic(message: &core::panic::PanicInfo, frame: u64) {
         let (pc, fp, sp) = percpu::syscall_context();
         log!("  Syscall: num={} user_pc={pc:#x} user_sp={sp:#x}", percpu::syscall_num());
         log!("  User backtrace:");
-        crate::process::resolve_user_symbol(pc).log_bare(pc);
+        crate::process::record_user_frame(pc).log_bare(pc);
         user_backtrace(fp, 20);
     }
 }

@@ -45,6 +45,9 @@ syscap = ["device", "dup", "logread", "power", "roster", "counters", "trace"]
 [programs.toybox]
 receives = ["soundserver"]
 
+# `disk_backtrace` names its child's crash record with it.
+[programs.symbolize]
+
 [symlinks]
 "bin/cat" = "/system/bin/toybox"
 "bin/cp" = "/system/bin/toybox"

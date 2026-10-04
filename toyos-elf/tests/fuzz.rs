@@ -499,3 +499,44 @@ fn every_derived_address_lies_inside_the_image_or_the_image_is_refused() {
         assert!(n >= 1000, "only {n} accepted {what}: {reached:?}");
     }
 }
+
+/// Seeded note segments, honest most of the time and hostile the rest: no
+/// size, name, alignment or cut makes `note::build_id` panic, and every id it
+/// answers is a `GNU` build-id note's whole descriptor out of the bytes given.
+#[test]
+fn no_note_segment_panics_the_build_id_read() {
+    use toyos_elf::note::{self, MAX_BUILD_ID, NT_GNU_BUILD_ID};
+    let mut rng = Rng { state: 0xA076_1D64_78BD_642F, hostile: 20 };
+    let mut found = 0u64;
+    const ITERATIONS: u64 = 200_000;
+    for i in 0..ITERATIONS {
+        let align = rng.pick(&[4u64, 4, 8, 0, 1, 2, 16, u64::MAX]);
+        let pad = if align == 8 { 8 } else { 4 };
+        let mut bytes = Vec::new();
+        for _ in 0..=rng.below(3) {
+            let name: &[u8] = rng.pick(&[&b"GNU\0"[..], b"GNU", b"abcde\0", b""]);
+            let desc_len = rng.below(MAX_BUILD_ID as u64 + 4) as usize;
+            let namesz = rng.value(name.len() as u64, &[u32::MAX as u64, 0x7fff_ffff]) as u32;
+            let descsz = rng.value(desc_len as u64, &[u32::MAX as u64, 0x7fff_ffff]) as u32;
+            let kind = rng.value(NT_GNU_BUILD_ID as u64, &[1, 2, 4]) as u32;
+            bytes.extend(namesz.to_le_bytes());
+            bytes.extend(descsz.to_le_bytes());
+            bytes.extend(kind.to_le_bytes());
+            bytes.extend(name);
+            bytes.resize(bytes.len().next_multiple_of(pad), 0);
+            bytes.extend((0..desc_len).map(|_| rng.next() as u8));
+            bytes.resize(bytes.len().next_multiple_of(pad), 0);
+        }
+        if rng.chance(10) {
+            bytes.truncate(rng.below(bytes.len() as u64 + 1) as usize);
+        }
+        let read = std::panic::catch_unwind(|| note::build_id(&bytes, align).map(<[u8]>::to_vec));
+        let Ok(read) = read else { panic!("iteration {i}: a {}-byte segment at align {align} panicked", bytes.len()) };
+        if let Some(id) = read {
+            assert!((1..=MAX_BUILD_ID).contains(&id.len()), "iteration {i}: {} bytes", id.len());
+            assert!(bytes.windows(id.len()).any(|w| w == id), "iteration {i}: an id not in the segment");
+            found += 1;
+        }
+    }
+    assert!(found * 20 >= ITERATIONS, "only {found} build-ids read: the generator reaches nothing");
+}

@@ -51,3 +51,54 @@ fn a_toyos_ld_binary_parses_to_what_readelf_says() {
     assert_eq!(layout.vaddr_to_file_offset(0x166490), Some(0x166490));
     assert_eq!(layout.vaddr_to_file_offset(0x155000), Some(0x155000));
 }
+
+/// The first 4 KiB of `/system/bin/shell` as rust-lld linked it with
+/// `--build-id`: `dd if=userland/target/x86_64-unknown-toyos/toyos/shell
+/// of=toyos-elf/tests/fixtures/lld-headers.bin bs=4096 count=1`.
+const LLD_HEADERS: &[u8] = include_bytes!("fixtures/lld-headers.bin");
+
+/// The build-id `object` reads out of `file`'s program headers.
+fn objects_build_id(file: &[u8]) -> Option<Vec<u8>> {
+    use object::read::elf::{FileHeader, ProgramHeader};
+    let header = object::elf::FileHeader64::<object::LittleEndian>::parse(file).ok()?;
+    let endian = header.endian().ok()?;
+    for phdr in header.program_headers(endian, file).ok()? {
+        let Ok(Some(mut notes)) = phdr.notes(endian, file) else { continue };
+        while let Ok(Some(note)) = notes.next() {
+            if note.name() == b"GNU" && note.n_type(endian) == object::elf::NT_GNU_BUILD_ID {
+                return Some(note.desc().to_vec());
+            }
+        }
+    }
+    None
+}
+
+/// Ours, read as the kernel reads it: each `PT_NOTE` at its own offset.
+fn our_build_id(file: &[u8]) -> Option<Vec<u8>> {
+    toyos_elf::note::segments(file).find_map(|s| {
+        let notes = file.get(s.offset as usize..(s.offset + s.filesz) as usize)?;
+        toyos_elf::note::build_id(notes, s.align).map(<[u8]>::to_vec)
+    })
+}
+
+#[test]
+fn an_lld_binarys_build_id_is_what_object_and_readelf_read() {
+    Layout::parse(LLD_HEADERS, Machine::X86_64).expect("rust-lld's own output");
+    let segments: Vec<_> = toyos_elf::note::segments(LLD_HEADERS).collect();
+    // `readelf -l`: `NOTE 0x0002a8 0x00000000000002a8 0x00000000000002a8 0x000024 0x000024 R 0x4`.
+    assert_eq!(segments, [toyos_elf::note::NoteSegment { offset: 0x2a8, filesz: 0x24, align: 4 }]);
+    let ours = our_build_id(LLD_HEADERS);
+    assert_eq!(ours, objects_build_id(LLD_HEADERS));
+    // `readelf -n`: `Build ID: 97082d0f339a81a4dadc05e2f47960b079ab178c`.
+    let readelf = [
+        0x97, 0x08, 0x2d, 0x0f, 0x33, 0x9a, 0x81, 0xa4, 0xda, 0xdc, 0x05, 0xe2, 0xf4, 0x79, 0x60, 0xb0, 0x79,
+        0xab, 0x17, 0x8c,
+    ];
+    assert_eq!(ours.as_deref(), Some(&readelf[..]));
+}
+
+#[test]
+fn a_toyos_ld_binary_without_the_flag_carries_no_build_id() {
+    assert_eq!(our_build_id(HEADERS), None);
+    assert_eq!(objects_build_id(HEADERS), None);
+}
