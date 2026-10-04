@@ -518,6 +518,7 @@ pub fn init_bsp(lapic_id: u32) {
     // handlers report on no channel of this kernel's — so a fault in `fpu`
     // below would stop the machine with the panel holding the record before it.
     super::idt::init();
+    super::control_regs::init_performance(0);
 
     super::fpu::init(0);
     // Between `fpu::init` and this function's own line: the facts `fpu::init`
@@ -550,6 +551,7 @@ pub fn init_ap(percpu_ptr: *mut PerCpu) {
     // SAFETY: `load_gdt`'s once-per-CPU contract; this is this AP's call.
     unsafe { percpu.load_gdt(); }
     super::control_regs::init(percpu.cpu_id);
+    super::control_regs::init_performance(percpu.cpu_id);
     super::fpu::init(percpu.cpu_id);
     super::fpu::log_state(percpu.cpu_id);
 }
