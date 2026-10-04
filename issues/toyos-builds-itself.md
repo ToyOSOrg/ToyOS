@@ -13,12 +13,10 @@ with lld, one build of one fork, `ToyOSOrg/llvm-project`. The C
 library stays `userland/libc`, ours. Each stage lands on x86-64 first and on
 AArch64 one step behind, on `issues/toyos-runs-on-arm64.md`'s track.
 
-- **M2 — clang and lld as a package inside ToyOS; toyos-ld gone.** clang, lld
+- **M2 — clang and lld as a package inside ToyOS.** clang, lld
   and their runtime built *for* ToyOS on the host and installed by
   `/system/bin/pkg`; `clang hello.c && ./a.out` works in the guest. *Exit*:
-  the in-guest compile-and-run test passes, and toyos-ld — today the only
-  linker a ToyOS process can run — is deleted with its crate, its
-  `[programs]` row and its tests.
+  the in-guest compile-and-run test passes.
 - **M3 — an LLVM-backed rustc inside ToyOS.** The
   hosted rustc carries LLVM instead of Cranelift. *Exit*: a
   Rust program compiled and run inside ToyOS by the hosted rustc.
@@ -114,13 +112,12 @@ enough for an LLVM build tree
 memory beyond what 2 MiB process pages allow
 (`issues/process-memory-is-2-mib-pages-and-that-caps-the-process-count.md`).
 
-**What M2 must do to delete toyos-ld.** It is frozen and links nothing the host
-builds; what keeps it is that it is the one linker a ToyOS process can run,
-shipped as `/system/bin/toyos-ld` by `system.toml`'s `[programs]` row and named
-by the ToyOS-hosted rustc
-(`issues/the-hosted-rustc-names-a-linker-toyos-does-not-have.md`). It
-goes when lld runs in the guest: the row, the crate and its host tests go together, the hosted rustc names `rust-lld`, and
-the published crates.io crate is yanked.
+**No linker runs inside ToyOS** (owner, 2026-10-04: "Just get rid of toyos
+ld"). `/system/bin/toyos-ld` went with its crate, its `[programs]` row and its
+host tests, and nothing replaced it: a ToyOS process cannot link an object, and
+the ToyOS-hosted rustc names no linker the guest has
+(`issues/the-hosted-rustc-names-a-linker-toyos-does-not-have.md`). *Exit*: the
+commit that lands M2's compile-and-run test, which links inside the guest.
 
 **What stops M2: LLVM, clang and lld built for a ToyOS host**, in the order
 each blocks the next, as
@@ -136,9 +133,7 @@ measures it.
 - Test: `issues/a-worktree-cannot-build-a-hosted-rustc-of-its-own.md`.
 
 M3's exit then waits on a linker in the guest
-(`issues/the-hosted-rustc-names-a-linker-toyos-does-not-have.md`), which
-toyos-ld is not: it refuses every executable with thread-local storage, so
-every std program.
+(`issues/the-hosted-rustc-names-a-linker-toyos-does-not-have.md`).
 
 **Also owed, by milestone.**
 - M2: the host triple a ToyOS-hosted LLVM records

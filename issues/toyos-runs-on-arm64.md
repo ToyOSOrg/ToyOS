@@ -138,11 +138,7 @@ across `src/` and `tests/`. The harness hardwires q35
 (`tests/common/qemu.rs:4246-4266`). `kvm_usable()` is
 `cfg!(target_arch = "x86_64") && …` (`src/lib.rs:65`). The rust fork has only
 `x86_64_unknown_toyos.rs`; its base `base/toyos.rs` is arch-neutral.
-`toyos-ld` already parses and applies AArch64 relocations for its Mach-O host
-output (`collect.rs` 80 `Aarch64` mentions, `reloc.rs` 69) but hardwires
-`EM_X86_64` (`emit_elf.rs:1021`), `R_X86_64_RELATIVE`
-(`emit_elf.rs:1228,1313,1399`) and `IMAGE_FILE_MACHINE_AMD64`
-(`emit_pe.rs:143`) on output, and has no AArch64 TLS relocations. `toyos-elf`
+`toyos-elf`
 refuses anything but `EM_X86_64` (`toyos-elf/src/header.rs:24,75`).
 
 **Already abstracted.** The syscall stub already has both arms
@@ -168,7 +164,7 @@ most of `arch/tlb.rs`'s 303-line IPI shootdown machinery unnecessary — a
 contract change, not a port); the memory model (the 711 `Relaxed` orderings
 and every doorbell-after-descriptor site — undiscovered TSO reliance is the
 one cost nobody can estimate from a grep); userland TLS and the toolchain
-(variant I and TLSDESC across `toyos-ld`, the kernel loader and std); the test harness (33,907 lines in
+(variant I and TLSDESC across the kernel loader and std); the test harness (33,907 lines in
 `tests/common/`, written against q35, i8042, OVMF, KVM, `intel-iommu`).
 
 ## Sharing, not forking

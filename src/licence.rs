@@ -459,12 +459,6 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
     (
-        "toyos-elf/tests/fixtures/toyos-ld-headers.bin",
-        "6243d543a15941133514c1a8a24c79d118060caeae7e985870a67d9fc3021354",
-        "ours: the first 4096 bytes of a toyos-ld output (toyos-elf/tests/real.rs)",
-        Terms::Spdx("MIT OR Apache-2.0"),
-    ),
-    (
         "toyos-symbols/tests/fixtures/input-test.bin",
         "6a08f75ee01bdbd1e77c9b3affd6185e981d86995da432c90ed107676f08eb83",
         "ours: a ToyOS binary this build produced (toyos-symbols/tests/real.rs)",
@@ -1371,13 +1365,11 @@ mod tests {
     }
 
     /// The kernel's `--kernel-feature` picks any feature it declares, so its
-    /// graph is resolved with all of them; a `[programs]` row's
-    /// `no-default-features` and libc's features reach metadata as the build
-    /// passes them.
+    /// graph is resolved with all of them; libc's features reach metadata as
+    /// the build passes them.
     #[test]
     fn metadata_is_given_the_features_the_build_gives() {
         assert_eq!(Features::AnyDeclared.args(), ["--all-features"]);
-        assert_eq!(Features::NoDefault.args(), ["--no-default-features"]);
         assert_eq!(
             Features::With(crate::libc::FEATURES).args(),
             ["--features", "std-runtime"]

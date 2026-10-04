@@ -1,7 +1,7 @@
 # ToyOS
 
 An operating system written from scratch in Rust — bootloader, kernel, drivers,
-userland, and the compiler and linker that build them.
+userland, and the compiler that builds them.
 
 ```
 git clone https://github.com/Japabu/toyos
@@ -167,8 +167,7 @@ TinyCC's expectations.
 **LLVM's linker.** `rust-lld`, the one the Rust toolchain carries, links
 everything that runs on ToyOS, plus everything that runs before it: the UEFI
 bootloader as PE32+, the kernel and every userland program as
-position-independent ELF. `toyos-ld`, the linker this project wrote, is frozen:
-it is the one linker that runs inside ToyOS, until LLD does.
+position-independent ELF.
 
 **A real Rust target.** `x86_64-unknown-toyos` lives in ToyOS's fork of the
 compiler, with a prebuilt `std` in the sysroot. One `rustc` invocation turns an

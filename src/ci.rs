@@ -684,8 +684,7 @@ fn apps_for(
     let mut red = Vec::new();
     for program in &attempted {
         let manifest = format!("{}/Cargo.toml", program.dir);
-        let mut args = vec![verb, "--manifest-path", manifest.as_str(), "--target", triple];
-        args.extend(program.features.args());
+        let args = [verb, "--manifest-path", manifest.as_str(), "--target", triple];
         if let Err(exit) = cargo(root, &args) {
             red.push(format!(
                 "{} fails for {} and declares neither `fails` there nor `exempt`: {exit}",
@@ -1092,11 +1091,7 @@ mod tests {
     /// program is judged for none.
     #[test]
     fn an_app_is_judged_for_every_host_its_fails_does_not_name() {
-        let program = |dir: &str, host| Program {
-            dir: dir.into(),
-            features: crate::build::Features::Default,
-            host,
-        };
+        let program = |dir: &str, host| Program { dir: dir.into(), host };
         let programs = [
             program("calc", Host::App(Vec::new())),
             program("doom", Host::App(vec![Os::Windows])),

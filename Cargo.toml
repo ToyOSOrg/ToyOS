@@ -42,7 +42,6 @@ members = [
     "toyos-i219",
     "toyos-inspect",
     "toyos-keymap",
-    "toyos-ld",
     "toyos-logstream",
     "toyos-manifest",
     "toyos-microcode",
@@ -233,40 +232,6 @@ opt-level = 2
 # reds on it.
 [profile.dev]
 opt-level = 2
-
-[profile.dev.package.toyos-ld]
-opt-level = 3
-
-# The one profile every guest binary is built with. Optimised, because an
-# unoptimised guest mismeasures everything under TCG;
-# debug-assertions and overflow-checks on, because fail-fast beats speed here.
-# `--release` would turn the last two off silently.
-#
-# It is declared here rather than in `toyos-ld/Cargo.toml` because cargo
-# ignores `[profile]` in a workspace member and that is one now. It is the only
-# member the profile reaches: it is a `[programs]` entry in `system.toml` as
-# well as a host crate, so `src/build.rs` builds it a second time for
-# `x86_64-unknown-toyos`. `kernel/`, `bootloader/` and `userland/` are excluded
-# from this workspace and each declares its own copy.
-#
-# `incremental` stays at the dev default (on), which switches rustc's MIR
-# inliner off for every guest crate — LLVM inlines regardless, and a
-# non-incremental kernel edit loop measures 4-10x the wall clock. A codegen
-# backend with no inliner of its own (cranelift) reopens that trade.
-[profile.toyos]
-inherits = "dev"
-opt-level = 2
-debug = true
-# DWARF stays out of the image: symbols name a frame, and `debug = true` is kept
-# for the codegen it decides.
-strip = "debuginfo"
-debug-assertions = true
-overflow-checks = true
-
-# Cargo does not carry the profile's `strip` onto a package with an override of
-# its own, and this one has one in `dev`.
-[profile.toyos.package.toyos-ld]
-strip = "debuginfo"
 
 [[test]]
 name = "toyos-build"

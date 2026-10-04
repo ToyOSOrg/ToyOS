@@ -26,7 +26,7 @@ The instrument is the T14 with `--metal-sim`'s real shape and a workload that
 loops across the boundary, comparing against a kernel built before this change.
 Nothing depends on the answer today: a bad one does not send the design back to
 2 MiB granularity, since 2 MiB granularity does not protect anything. It would
-send it to 2 MiB-aligning `toyos-ld`'s segments, which was measured at +4 MiB of
+send it to 2 MiB-aligning the linker's segments, which was measured at +4 MiB of
 physical memory per process.
 
 **2026-08-25, promoted to `defect`.** Checked at the site: `WindowProt`'s doc

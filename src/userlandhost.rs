@@ -54,8 +54,6 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use crate::build::Features;
-
 /// What [`survey`] found under one `userland/` directory.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Survey {
@@ -183,8 +181,6 @@ pub enum Host {
 pub struct Program {
     /// Its directory under the repository.
     pub dir: String,
-    /// What the image builds it with.
-    pub features: Features,
     pub host: Host,
 }
 
@@ -192,14 +188,14 @@ pub struct Program {
 /// declares about the hosts.
 pub fn programs(root: &Path) -> Result<Vec<Program>, String> {
     let mut found = Vec::new();
-    for (dir, features) in crate::build::shipped(root)?.programs {
+    for dir in crate::build::shipped(root)?.programs {
         let at = rel(root, &dir);
         let text = std::fs::read_to_string(dir.join("Cargo.toml"))
             .map_err(|e| format!("{at}/Cargo.toml: {e}"))?;
         let manifest: toml::Value =
             text.parse().map_err(|e| format!("{at}/Cargo.toml: not TOML: {e}"))?;
         let host = declared(&manifest, root).map_err(|why| format!("{at}/Cargo.toml: {why}"))?;
-        found.push(Program { dir: at, features, host });
+        found.push(Program { dir: at, host });
     }
     Ok(found)
 }
@@ -524,7 +520,7 @@ mod tests {
         let programs = programs(&root).expect("every declaration reads");
         let shipped = crate::build::shipped(&root).expect("the modes' configs").programs;
         let dirs: BTreeSet<PathBuf> = programs.iter().map(|p| root.join(&p.dir)).collect();
-        assert_eq!(dirs, shipped.into_iter().map(|(dir, _)| dir).collect());
+        assert_eq!(dirs, shipped);
         assert!(programs.iter().any(|p| p.host == Host::App(Vec::new())), "no app: {programs:?}");
         assert!(programs.iter().any(|p| p.host == Host::Exempt), "no exemption: {programs:?}");
     }
