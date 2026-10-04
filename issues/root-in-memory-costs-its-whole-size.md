@@ -19,10 +19,7 @@ audio run carries its one binary, and the shared list runs on boots of one lane
 in turn, each carrying at most `SHARED_BOOT_BYTES` (64 MiB) of test binaries;
 `qemu::carrying` adds what those binaries spawn or load. A boot that runs none
 carries `tests/testcases`'s own programs, 13 MiB (3328 blocks), where every test
-boot carried the whole 619 MiB catalogue before. The one part past the bound is
-`demand_window_race`, 131 MiB, nearly all of it the `.bss` zeros `toyos-ld`
-writes into the file (`issues/anonymous-mmap-is-not-demand-paged.md`),
-which a guest that mounts ROOT off a disk never reads and a guest here holds.
+boot carried the whole 619 MiB catalogue before.
 
 **Every resident `/system` page is in RAM twice.** `ReadOnlyBacking::read_page`
 (`kernel/src/file_backing.rs`) copies each page a program touches out of the
@@ -49,7 +46,6 @@ complete K ms`; a test boot on QEMU reads 1390, 108 (14) and 344.
 Not measured: the T14. What that run owes is that line off the stick and off
 NVMe, against the base's `Boot: complete`.
 
-Exit: either measured and accepted by the owner as the price, or `.bss` left
-out of the file by `toyos-ld` and the file cache serving the image's own page
-rather than a copy, before the self-update's signature check makes the whole
+Exit: either measured and accepted by the owner as the price, or the file
+cache serving the image's own page rather than a copy, before the self-update's signature check makes the whole
 read a fixed cost.
