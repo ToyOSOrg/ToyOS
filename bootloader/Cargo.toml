@@ -27,6 +27,9 @@ toyos-gpt = { path = "../toyos-gpt" }
 toyos-rootimage = { path = "../toyos-rootimage" }
 bcachefs = { path = "../bcachefs", default-features = false }
 toyos-tco = { path = "../toyos-tco" }
+# The counter's rate each line's stamp is converted at, decoded as the kernel
+# decodes it.
+toyos-tsc = { path = "../toyos-tsc" }
 # The signed image, the slot table and the anti-rollback floor: every decision
 # this loader makes about which slot to boot, host-tested there.
 toyos-update = { path = "../toyos-update" }
