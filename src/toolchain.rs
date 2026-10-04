@@ -532,14 +532,12 @@ fn runs(stage2: &Path) -> bool {
 /// inside it, and the loser dies compiling `core` with `couldn't create a temp
 /// dir: No such file or directory`.
 pub fn ensure(root: &Path, lock: &mut buildlock::Held, hosted_rustc: bool) -> Sysroot {
-    let rust_dir = rust_dir(root);
     let stamps_dir = root.join("target/stamps");
     fs::create_dir_all(&stamps_dir).ok();
 
-    let owner = owner(root);
-
-    match owner {
+    let rust_dir = match owner(root) {
         Owner::Elsewhere(primary) => {
+            let rust_dir = primary.join("rust");
             assert!(
                 stage2(&rust_dir).join("bin/rustc").exists(),
                 "there is no compiler to build with: {} does not exist.\n\
@@ -550,6 +548,7 @@ pub fn ensure(root: &Path, lock: &mut buildlock::Held, hosted_rustc: bool) -> Sy
             return sysroot::ensure(root, &rust_dir, lock);
         }
         Owner::Installed => {
+            let rust_dir = root.join("rust");
             check_installed_toolchain(root, &rust_dir);
             let release = manifest_path(&rust_dir);
             let release = fs::read_to_string(&release).unwrap_or_else(|e| {
@@ -557,9 +556,8 @@ pub fn ensure(root: &Path, lock: &mut buildlock::Held, hosted_rustc: bool) -> Sy
             });
             return Sysroot::installed(stage2(&rust_dir), &release);
         }
-        Owner::Us => {}
-    }
-
+        Owner::Us => sysroot::fork_checkout(root, lock),
+    };
     let hosted_stamp = stamps_dir.join("hosted-rustc.stamp");
     lock.act_if(
         Scope::Global,
