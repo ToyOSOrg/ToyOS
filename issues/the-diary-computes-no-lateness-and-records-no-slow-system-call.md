@@ -25,16 +25,16 @@ anything more is built on it.
    needs, and a decoder crate. **Exit**: host tests on the decoder; a guest
    test in which a spawned child's wake precedes its pick, a second cursor is
    undisturbed, loss is counted after a flood, and a process without the right
-   is ended; and on the T14, the ticks a record costs, measured by a boot that
-   writes a million records. Where the tree stands against it: every clause
-   but one is met, the LLDB reading path and its pinned numbers are gone,
-   and a record costs 53.15 counter ticks on the T14 (`trace_record_cost` at
-   `70c1fbf56`: 1000000 records in 53145868 ticks). The clause not met as
-   written is "a process without the right is ended": a capability without
-   `trace` is refused with `PermissionDenied` and its caller lives, and only
-   a handle the caller does not hold ends it. Whether that answers the clause,
-   or the kernel ends such a caller, is open for the owner, and step 1 is not
-   done until he says.
+   is refused and lives; and on the T14, the ticks a record costs, measured by
+   a boot that writes a million records. The refusal clause is the owner's
+   ruling (2026-10-04), **"Refuse, like others"**: "Keep one rule for every
+   permission: the request is refused and the program lives. The track's exit
+   is reworded to that. If you want missing permissions to end programs, that
+   becomes one change for all of them." Built: a capability without `trace`
+   is refused with `PermissionDenied` and its caller lives, the LLDB reading
+   path and its pinned numbers are gone, and a record costs 53.15 counter
+   ticks on the T14 (`trace_record_cost` at `70c1fbf56`: 1000000 records in
+   53145868 ticks).
 2. **Timer and thread lateness**, computed by a reader from the arm, fire and
    pick events, with no tracer in the kernel. **Exit**, on the T14: the 50 ms
    for which `hold_once` keeps both windows open once a boot
