@@ -377,7 +377,7 @@ pub fn load_shared_lib(
 
     let t0 = crate::clock::nanos_since_boot();
     let alloc =
-        PageAlloc::new(load_size, crate::mm::pmm::Category::Elf).ok_or("dlopen: allocation failed")?;
+        PageAlloc::new(load_size).ok_or("dlopen: allocation failed")?;
     let t1 = crate::clock::nanos_since_boot();
     // Every offset below is bounded against what the PMM actually returned, not `load_size`.
     let image = alloc.window();

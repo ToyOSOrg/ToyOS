@@ -77,7 +77,7 @@ pub fn init(
     );
     log!("GOP: scanout memory type {memory_type}");
 
-    let cursor_pages = crate::mm::pmm::alloc_contiguous(1, crate::mm::pmm::Category::Framebuffer).expect("GOP: cursor alloc failed");
+    let cursor_pages = crate::mm::pmm::alloc_contiguous(1).expect("GOP: cursor alloc failed");
     let cursor_phys = cursor_pages[0].direct_map().phys();
     // Cursor buffer is plain system RAM, not scanout, so it keeps the default write-back type.
     let cursor = Region {

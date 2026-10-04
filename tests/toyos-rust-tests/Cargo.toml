@@ -11,6 +11,10 @@ toyos = { path = "../../toyos" }
 toyos-window = { path = "../../userland/toyos-window" }
 toyos-tco = { path = "../../toyos-tco" }
 toyos-inspect = { path = "../../toyos-inspect" }
+# The log as logkeeper serves it, and the asking for it, for `counters_metal`'s
+# wait on the log being quiet.
+toyos-logstream = { path = "../../toyos-logstream" }
+logkeeper-api = { path = "../../userland/logkeeper-api" }
 # The diary's decoder, for `trace_read` and `trace_flood`.
 toyos-trace = { path = "../../toyos-trace" }
 # The reader's asker, for `hda_client_stall`.

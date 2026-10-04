@@ -34,7 +34,8 @@ pub enum Stream {
 }
 
 impl Stream {
-    /// What a line on this stream is, when it becomes a record.
+    /// What a line on this stream is, when it becomes a record: every line on
+    /// stderr is an error, so a routine line goes on stdout.
     pub const fn severity(self) -> Severity {
         match self {
             Self::Out => Severity::Info,

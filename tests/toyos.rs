@@ -2748,7 +2748,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
 /// The interrupt census adds up, is monotonic, and every device delivery is
 /// still cpu0's.
 fn irq_census(capture: &str) -> Result<(), String> {
-    use common::irqcensus::{Census, DEVICE_SOURCES};
+    use common::irqcensus::{Census, DEVICE_SOURCES, SOURCES};
     // Every line, in order, so a later census can be compared with an
     // earlier one on the same CPU.
     let mut lines: Vec<Census> = Vec::new();
@@ -2766,44 +2766,30 @@ fn irq_census(capture: &str) -> Result<(), String> {
         ));
     }
 
-    // 1. The law. `total` is counted by its own increment beside each
-    //    source's, never derived from them, so this is a real
-    //    conservation statement: a source whose increment went missing
-    //    leaves the total ahead of the sum.
-    for census in &lines {
-        if census.total != census.sum_of_sources() {
-            return Err(format!(
-                "cpu{} counted {} interrupt(s) and attributed {} to sources — a source \
-                 is not being counted: {census:?}",
-                census.cpu,
-                census.total,
-                census.sum_of_sources(),
-            ));
-        }
-    }
-
-    // 2. Monotonic: a counter that went backwards is a torn read or a
+    // 1. Monotonic: a counter that went backwards is a torn read or a
     //    word two CPUs are writing, which is what the no-`lock` argument
     //    in `kernel/src/irq_census.rs` rests on being impossible.
     let mut newest: std::collections::BTreeMap<u32, Census> = std::collections::BTreeMap::new();
     for census in &lines {
         if let Some(prev) = newest.get(&census.cpu) {
-            if census.total < prev.total {
+            if let Some(name) = SOURCES.iter().zip(prev.by_source.iter().zip(census.by_source)).find_map(
+                |(name, (&was, now))| (now < was).then_some(name),
+            ) {
                 return Err(format!(
-                    "cpu{}'s census went backwards, {} then {}: {prev:?} then {census:?}",
-                    census.cpu, prev.total, census.total,
+                    "cpu{}'s `{name}` count went backwards: {prev:?} then {census:?}",
+                    census.cpu,
                 ));
             }
         }
         newest.insert(census.cpu, census.clone());
     }
 
-    // 3. The machine is real: the boot CPU took interrupts, and so did
-    //    at least one AP — otherwise (4) says nothing.
+    // 2. The machine is real: the boot CPU took interrupts, and so did
+    //    at least one AP — otherwise (3) says nothing.
     let cpu0 = newest
         .get(&0)
         .ok_or_else(|| format!("no cpu0 in the census: {newest:?}"))?;
-    if cpu0.total == 0 {
+    if cpu0.total() == 0 {
         return Err(format!("cpu0 took no interrupts at all: {cpu0:?}"));
     }
     let aps: Vec<&Census> = newest.values().filter(|c| c.cpu != 0).collect();
@@ -2813,11 +2799,11 @@ fn irq_census(capture: &str) -> Result<(), String> {
             aps.len()
         ));
     }
-    if !aps.iter().any(|c| c.total > 0) {
+    if !aps.iter().any(|c| c.total() > 0) {
         return Err(format!("no AP took a single interrupt: {newest:?}"));
     }
 
-    // 4. **The present-state fact this whole track is about.** Every
+    // 3. **The present-state fact this whole track is about.** Every
     //    message-signalled interrupt is addressed to physical
     //    destination 0 (`drivers::pci`'s `MSG_ADDR`) and the one I/O
     //    APIC pin goes to the BSP, so no AP may have a device count at
@@ -2845,17 +2831,17 @@ fn irq_census(capture: &str) -> Result<(), String> {
         ));
     }
 
-    let share = cpu0.total as f64
-        / newest.values().map(|c| c.total).sum::<u64>() as f64
+    let share = cpu0.total() as f64
+        / newest.values().map(Census::total).sum::<u64>() as f64
         * 100.0;
     eprintln!(
         "  [irq] {} cpu(s), {} interrupt(s), {delivered} of them device deliveries — \
          all on cpu0, which took {share:.1}% of everything",
         newest.len(),
-        newest.values().map(|c| c.total).sum::<u64>(),
+        newest.values().map(Census::total).sum::<u64>(),
     );
 
-    // 5. The issuer side: every `tlb` delivery a CPU's census carries
+    // 4. The issuer side: every `tlb` delivery a CPU's census carries
     //    must be within the issues the `tlb:` line counted — an excess
     //    is a path shooting down uncounted. The lower bound is not
     //    asserted: an issued IPI can be pending on an IF-clear target.
@@ -3564,7 +3550,10 @@ const SMI_SPAN_NS: u64 = 4_444_000_000;
 /// reads` line names, and none stale; every CPU's performance request
 /// declared at boot, `pm_enable=1`, the request Linux makes on this machine
 /// (`tests/t14-linux/hwp-request.txt`), and its power envelope in every read
-/// the one its `control_regs:` line holds. The boot ran in ACPI mode, which
+/// the one its `control_regs:` line holds. No line, the kernel's or a
+/// program's, is stamped in a millisecond from `idle0`'s to `idle1`'s, either
+/// edge's included because a line stamped in it may follow the read: the
+/// second is the idle machine's. The boot ran in ACPI mode, which
 /// `/system/bin/acpiserver`'s claim put it in: `idle0` reads after the
 /// kernel's one write to `SMI_CMD`, and from there to `spin`, at least
 /// [`SMI_SPAN_NS`] apart, no CPU's SMI count moves. Across the spin every
@@ -3575,7 +3564,8 @@ const SMI_SPAN_NS: u64 = 4_444_000_000;
 /// same span of load (`tests/t14-linux/turbostat-loaded.txt`).
 ///
 /// Read and not held, beside Linux's turbostat: each CPU's idle busy
-/// fraction, and what one round cost its reader; and beside Linux's loaded
+/// fraction, which an SMI in the idle second raises on every CPU alike by the
+/// time it held them, and what one round cost its reader; and beside Linux's loaded
 /// timer reading (`issues/toyos-beats-linuxs-latency-on-the-t14.md`),
 /// how late each CPU's kick handler ran under the `loaded` phase.
 fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
@@ -3612,6 +3602,19 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
     let (idle0, at0) = phase("idle0")?;
     let (idle1, at1) = phase("idle1")?;
     let (spin, at2) = phase("spin")?;
+    let (from_ms, to_ms) = (at0 / 1_000_000, at1 / 1_000_000);
+    let inside: Vec<&str> = log
+        .text()
+        .lines()
+        .filter(|line| {
+            toyos_logstream::record_ms(line)
+                .or_else(|| toyos_logstream::program_ms(line))
+                .is_some_and(|ms| (from_ms..=to_ms).contains(&ms))
+        })
+        .collect();
+    if !inside.is_empty() {
+        return Err(format!("the idle second {at0}..{at1} ns holds lines: {inside:?}"));
+    }
     let linux_request = u64::from_str_radix(include_str!("t14-linux/hwp-request.txt").trim().trim_start_matches("0x"), 16)
         .map_err(|e| format!("t14-linux/hwp-request.txt: {e}"))?;
     let bsp = kernel.must_say("percpu: BSP cpu_id=0 lapic_id=")?;

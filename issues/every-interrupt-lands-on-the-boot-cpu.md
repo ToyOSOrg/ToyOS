@@ -46,12 +46,12 @@ the machine's, and every device shares it.
 ## Instrument, and the baseline (2026-08-22)
 
 `kernel/src/irq_census.rs` counts every delivery per CPU per source in
-`PerCpu`, one `add qword ptr gs:[<off>], 1` for the machine's total and one for
-the source. `irq: cpuN total=… timer=… …` is printed per CPU beside the
+`PerCpu`, one `add qword ptr gs:[<off>], 1` for the source; a CPU's total is
+their sum. `irq: cpuN timer=… kick=… …` is printed per CPU beside the
 process-exit census, on `SYS_SHUTDOWN` and on the blocked-task dump;
 `common::irqcensus` aggregates every guest's newest line into the suite's own
 summary, so a CI shard's log carries the number without `--nocapture`.
-`irq_census_conservation` gates both the arithmetic and the present-state fact.
+`irq_census_conservation` gates the present-state fact.
 
 A guest that boots and runs no program reaches no process exit and prints no
 census, which is why the reporting counts are short of the boots. Both columns

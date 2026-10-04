@@ -306,6 +306,15 @@ pub fn record_ms(line: &str) -> Option<u64> {
     millis(record_head(line)?.0.split(' ').next()?)
 }
 
+/// The milliseconds since boot a program's line carries ([`ProgramLine`]), or
+/// `None` for any other line.
+pub fn program_ms(line: &str) -> Option<u64> {
+    match shown(line)?.head? {
+        Head { source: Source::Program(_), stamp } => millis(stamp.split(' ').next()?),
+        Head { source: Source::Kernel, .. } => None,
+    }
+}
+
 /// Whose a line on a screen is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source<'a> {
@@ -680,6 +689,26 @@ mod tests {
         assert_eq!(record_ms("[x] said 99.000 cpu0"), None);
         assert_eq!(record_ms("no timestamp here, cpu=1ms"), None);
         assert_eq!(record_ms(""), None);
+    }
+
+    /// Every head [`ProgramLine`] writes reads back to the time it carries, and
+    /// no text after the head answers for it.
+    #[test]
+    fn a_program_lines_time_is_read_inside_its_head_and_nowhere_else() {
+        let tag = Tag::new("test-runner").expect("a tag");
+        for stamp in ["", "2026-09-24 10:00:00", "---------- --------"] {
+            for severity in [Severity::Info, Severity::Warn, Severity::Error, Severity::Alert] {
+                for (tid, pid) in [(0, None), (3, None), (0, Some(9)), (3, Some(9))] {
+                    let line =
+                        format!("{}", ProgramLine { stamp, at_ns: 1_500_999_999, severity, tid, pid, tag, text: b"9.000" });
+                    assert_eq!(program_ms(&line), Some(1_500), "{line:?}");
+                }
+            }
+        }
+        assert_eq!(program_ms("[2026-09-07 22:57:46 3.109 cpu1] exit: a pid=7"), None);
+        assert_eq!(program_ms("{2026-09-24 10:00:00 netstack} 1.000"), None);
+        assert_eq!(program_ms("  its second line"), None);
+        assert_eq!(program_ms(""), None);
     }
 
     /// What a terminal shows of a line, with its colours taken out.

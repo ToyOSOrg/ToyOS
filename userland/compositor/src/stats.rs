@@ -52,7 +52,7 @@ impl FrameStats {
     /// mean is a division, and the total is the share of the window that
     /// compositing cost, which the mean is not.
     pub fn report(&self, moved: (u64, u64), composed: Traffic, windows: usize) {
-        eprintln!(
+        println!(
             "compositor: frames={} rects={} damage_px={} damage_px_max={} \
              composite_us_min={} composite_us_max={} composite_us_total={} \
              scanout_wr_bytes={} scanout_blits={} back_rd_bytes={} cursor={} windows={}",
