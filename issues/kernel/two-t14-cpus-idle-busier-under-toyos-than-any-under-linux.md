@@ -1,6 +1,6 @@
 ---
 status: open
-kind: finding
+kind: defect
 opened: 2026-10-04
 ---
 
@@ -22,5 +22,5 @@ Not yet attributed: the row's own reader runs between the two reads, prints
 its `idle0` lines and parks, and which CPUs it and the log's path ran on that
 second is not recorded. Owner: the orchestrator, which holds the T14.
 **Exit**: a reading that names what ran on cpu0 and
-cpu7 across that second, and either it is the row's own work, folded to the
-row's doc, or it is promoted to a defect with its cause.
+cpu7 across that second; then the cause is fixed, or, if it is the row's own
+work, folded to the row's doc.
