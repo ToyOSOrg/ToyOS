@@ -10,6 +10,11 @@
 //! three are taken**: a printed line reaches the stick within the second,
 //! through the `/log` fileserver on that fileserver's CPU.
 //!
+//! **`idle0` waits for the log to be quiet** ([`settle`]): a job starts a
+//! dozen milliseconds after logkeeper does, while it is still writing the
+//! boot so far and the job's own launch lines to the stick, and a second
+//! begun then measures that write.
+//!
 //! **Then `loaded`: how late the round's kick reaches each CPU** while a thread
 //! per CPU spawns a program that exits at once, which is the load Linux's
 //! timer reading of this machine was taken under. A round's reader kicks every
@@ -24,9 +29,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};
+use toyos::poller::{Poller, READABLE};
 use toyos::syscap::SysCap;
+use toyos::Pipe;
 use toyos_abi::counters::{Counter, RawRecord, Record};
-use toyos_abi::syscall;
+use toyos_abi::syscall::{self, SyscallError};
+use toyos_logstream::{program_line, Lines, READ, SERVED, SERVICE};
 
 /// The idle span: long enough that a CPU's busy fraction is its idle one and
 /// not the reads'.
@@ -41,6 +49,10 @@ const SPIN: u64 = 4_000_000_000;
 /// How long `loaded` samples rounds for: a share of the job list's bound
 /// (`toyos_tco::JOB_BOUND_MS`) the reads before it leave.
 const LOADED: Duration = Duration::from_secs(20);
+
+/// How long [`settle`] waits for each of its lines: two of logkeeper's rounds
+/// at its write budget (`userland/logkeeper/src/policy.rs`, 5 s).
+const SETTLE_BOUND: Duration = Duration::from_secs(10);
 
 /// What this binary's own children are asked to do: exit at once.
 const EXIT_AT_ONCE: &str = "exit-at-once";
@@ -143,11 +155,57 @@ fn print(phase: &str, read: &Read) {
     }
 }
 
+/// Return once logkeeper has written, and made durable, everything stamped
+/// before this call.
+///
+/// A reader of the `log` port is handed each round only after it is on the
+/// stick, so this prints a line and reads the log until that line comes back.
+/// **Twice**: the round that writes the first may itself put a record in the
+/// log — the stick's first sync is one — and the second writes it.
+fn settle() {
+    let conn = toyos::endow::service(SERVICE).expect("test-runner's namespace carries the `log` port");
+    conn.signal(READ).expect("logkeeper takes a reader's request");
+    let header = conn.recv_header().expect("logkeeper answers a reader");
+    assert_eq!(header.msg_type, SERVED, "logkeeper answered a reader with another frame");
+    let _boot_so_far: u64 = conn.recv_payload(&header).expect("logkeeper's answer carries the boot's length");
+    let [raw] = conn.recv_handles_exact::<1>().expect("logkeeper's answer carries a pipe");
+    // SAFETY: the kernel moved this handle into this table with the frame
+    // that names it, and nothing else answers for it.
+    let pipe = unsafe { Pipe::from_raw(raw) };
+    let poller = Poller::new(1);
+    let mut lines = Lines::new();
+    let mut chunk = vec![0u8; 64 * 1024];
+    for round in ["first", "second"] {
+        let said = format!("counters_metal settle: the log holds this {round} line");
+        println!("{said}");
+        let by = Instant::now() + SETTLE_BOUND;
+        let mut held = false;
+        while !held {
+            match pipe.read_nonblock(&mut chunk) {
+                Ok(0) => panic!("logkeeper closed the log before it held {said:?}"),
+                Ok(n) => lines.push(&chunk[..n], |line, _| {
+                    let line = std::str::from_utf8(line).unwrap_or_default();
+                    held |= program_line(line).is_some_and(|line| line.text == said);
+                }),
+                Err(SyscallError::WouldBlock) => {
+                    let left = by.checked_duration_since(Instant::now()).unwrap_or_else(|| {
+                        panic!("the log did not hold {said:?} within {SETTLE_BOUND:?}")
+                    });
+                    poller.watch(&pipe, READABLE, 0);
+                    poller.wait(1, left.as_nanos() as u64, |_| {});
+                }
+                Err(e) => panic!("the log's pipe refused a read: {e:?}"),
+            }
+        }
+    }
+}
+
 fn main() {
     if std::env::args().nth(1).as_deref() == Some(EXIT_AT_ONCE) {
         return;
     }
     let cap: SysCap = Endowments::get().take(SYSCAP_LABEL).expect("test-runner endows a capability");
+    settle();
     let idle0 = read(&cap);
     std::thread::sleep(IDLE);
     let idle1 = read(&cap);

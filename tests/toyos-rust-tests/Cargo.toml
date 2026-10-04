@@ -11,6 +11,8 @@ toyos = { path = "../../toyos" }
 toyos-window = { path = "../../userland/toyos-window" }
 toyos-tco = { path = "../../toyos-tco" }
 toyos-inspect = { path = "../../toyos-inspect" }
+# The log as logkeeper serves it, for `counters_metal`'s wait on the log being quiet.
+toyos-logstream = { path = "../../toyos-logstream" }
 # The reader's asker, for `hda_client_stall`.
 inspect = { path = "../../userland/inspect" }
 libloading = { git = "https://github.com/ToyOSOrg/rust_libloading", branch = "toyos-sdk-0.12" }
