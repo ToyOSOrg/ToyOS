@@ -30,9 +30,9 @@ lines are quoted on #681 (comment 5962619169; the boot itself in comment
   idle seconds between counters rounds; the commit that added this bullet
   carries its per-second lines. In the five whose SMI count moved by one,
   cpu2, cpu4, cpu5 and cpu6, which ran none of the log's work, read 4535 to
-  4571 ppm busy; in the seven where it did not, 6 to 285 ppm. That is the
-  `counters` row's "two idle floors", about 0.45% and 0.03% or less: a 1 s idle
-  second catches a 2.2 s-period SMI or does not.
+  4571 ppm busy; in the seven where it did not, 6 to 285 ppm. So the
+  `counters` row's idle second reads one of two floors, about 0.45% or 0.03%
+  and less: a 1 s second catches a 2.2 s-period SMI or does not.
 - **Linux, in one condition, read none.** On the same machine under Ubuntu's
   `6.8.0-142-generic`, `perf stat -a -A -e msr/smi/` read 0 on every CPU over
   120.378 s beside `rtla timerlat top -q -d 2m --dma-latency 0`, which holds
