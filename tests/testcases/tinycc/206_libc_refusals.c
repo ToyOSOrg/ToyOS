@@ -12,7 +12,6 @@
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
-#include <sys/utsname.h>
 #include <unistd.h>
 
 #define FILE_PATH "/tmp/206_libc_refusals"
@@ -39,7 +38,6 @@ int main(void) {
     char *argv[] = { "shell", NULL };
     char *envp[] = { NULL };
     char buf[256];
-    struct utsname uts;
     struct statvfs vfs;
     struct rlimit limit = { 0, 0 };
     struct passwd pw, *found = &pw;
@@ -71,7 +69,6 @@ int main(void) {
     said("setsid", setsid());
     said("getsid", getsid(0));
     said("gethostname", gethostname(buf, sizeof buf));
-    said("uname", uname(&uts));
     said("link", link(FILE_PATH, FILE_PATH ".link"));
     said("symlink", symlink(FILE_PATH, FILE_PATH ".symlink"));
     said("fchown", fchown(fd, 0, 0));

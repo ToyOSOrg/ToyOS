@@ -27,11 +27,17 @@
 //! `userland/metalprobe` spells the same contract for the device suite, and the
 //! sign is what separates the two halves of it there as here. Every percentile
 //! is on stdout as well, for the host that has a console to read it on.
+//!
+//! **Beside the distribution, when its worst wake was and each CPU's SMI count
+//! either side of the run**, so a reader can say whether that wake waited out
+//! the firmware: an SMI stops every CPU at once, and its count moves on all of
+//! them alike.
 
 use std::process::exit;
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::syscap::SysCap;
+use toyos_abi::counters::{Counter, RawRecord, Record};
 use toyos_abi::syscall;
 
 /// How often a wake is asked for. Ten thousand of these is two seconds of a
@@ -58,11 +64,32 @@ enum Refusal {
     BandRefused = -2,
     /// The p99 is past the histogram's last bucket: a floor, not a measurement.
     PastTheHistogram = -3,
+    CountersRefused = -4,
 }
 
 fn refuse(why: Refusal, said: &str) -> ! {
     println!("cyclictest: {said}");
     exit(why as i32);
+}
+
+/// When the counters were read, and each CPU's SMI count, `-` where its CPU
+/// counts none.
+fn smis(cap: &SysCap) -> (u64, String) {
+    let mut raw = vec![RawRecord::EMPTY; syscall::cpu_count() as usize];
+    let read = match cap.counters(&mut raw) {
+        Ok(read) => read,
+        Err(e) => refuse(Refusal::CountersRefused, &format!("the counters read was refused: {e:?}")),
+    };
+    let at = toyos_abi::clock::nanos_since_boot();
+    let counts = raw[..read]
+        .iter()
+        .map(|r| match Record::decode(r).expect("the kernel wrote a record that decodes").get(Counter::Smi) {
+            Some(n) => n.to_string(),
+            None => "-".to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    (at, counts)
 }
 
 fn main() {
@@ -84,10 +111,12 @@ fn main() {
     let mut histogram = vec![0u32; BUCKETS];
     let mut overflow = 0u32;
     let mut worst = 0u64;
+    let mut worst_at = 0u64;
 
     for _ in 0..WARMUP {
         syscall::nanosleep(PERIOD_NS);
     }
+    let before = smis(&cap);
     // The origin for the whole run, taken after the warm-up so the warm-up's
     // own drift is in no later target.
     let start = toyos_abi::clock::nanos_since_boot();
@@ -101,13 +130,22 @@ fn main() {
         if let Some(remaining) = target.checked_sub(now).filter(|left| *left > 0) {
             syscall::nanosleep(remaining);
         }
-        let late_us = toyos_abi::clock::nanos_since_boot().saturating_sub(target) / 1_000;
-        worst = worst.max(late_us);
+        let woke = toyos_abi::clock::nanos_since_boot();
+        let late_us = woke.saturating_sub(target) / 1_000;
+        if late_us > worst {
+            (worst, worst_at) = (late_us, woke);
+        }
         match usize::try_from(late_us).ok().filter(|us| *us < BUCKETS) {
             Some(bucket) => histogram[bucket] += 1,
             None => overflow += 1,
         }
     }
+
+    let after = smis(&cap);
+    println!(
+        "cyclictest: the worst wake was at {worst_at} ns; smi per cpu {} at {} ns and {} at {} ns",
+        before.1, before.0, after.1, after.0
+    );
 
     // `None` where the sample wanted is in the overflow, which has no bucket to
     // name.

@@ -51,13 +51,8 @@ pub fn sweep_under_load() {
     // boot deadline, polled from the timer entry, and a CPU that takes no
     // interrupt at all is a hard lockup ended half a bound earlier by a
     // different mechanism under this arm's name.
-    //
-    // Read before the `sti`, which is the one fact here about the caller rather
-    // than about this function.
-    let interrupts_were_on = crate::arch::cpu::interrupts_enabled();
     crate::preempt::disable();
     crate::arch::irqchip::arm_within(kernel::sched::fair::QUANTUM_NS);
-    crate::arch::cpu::enable_interrupts();
     let mut buf = vec![0u8; WEDGE_CHUNK as usize * BLOCK];
     let mut at = first;
     let mut stopped = false;
@@ -76,13 +71,10 @@ pub fn sweep_under_load() {
     }
     // Put back on the one path out of here, because the caller goes on to drain
     // write-back, sync every filesystem, flush every disk and wait for the log
-    // to be durable, and none of that may run under a preempt count or an `IF`
-    // this left behind. Not `preempt::enable`: the request stays set and the
-    // caller's own next preemption point serves it, rather than a scheduler pass
-    // taken from inside the shutdown syscall.
-    if !interrupts_were_on {
-        crate::arch::cpu::disable_interrupts();
-    }
+    // to be durable, and none of that may run under a preempt count this left
+    // behind. Not `preempt::enable`: the request stays set and the caller's own
+    // next preemption point serves it, rather than a scheduler pass taken from
+    // inside the shutdown syscall.
     crate::preempt::enable_no_resched();
 }
 

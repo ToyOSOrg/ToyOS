@@ -641,7 +641,6 @@ fn execute(action: Action<KernelPayload>) {
             let cpu = CpuId(percpu::cpu_id());
             let awake = cpus().get(cpu).doorbell().kick_pending()
                 || crate::preempt::need_resched()
-                || crate::irq_ring::any_pending_self()
                 || !with_cpu(|c| c.mailbox_is_empty())
                 // The i8042 verdict needs a pass to notice its deadline; a quiet machine after boot runs none otherwise.
                 || crate::arch::keyboard_controller::verdict_due()

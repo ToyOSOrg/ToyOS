@@ -187,8 +187,8 @@ times:
       `I8042`, `keyboard_controller::service` and the idle loop's
       `verdict_due` go with the kernel's driver. **Exit**: that stage's.
    4. **xHCI's thread is usbd's** (step 10 above): `Xhci`, `poll_if_pending`
-      and `port_work_pending` go with the kernel's driver, and `irq_ring` with
-      them. **Exit**: step 10's.
+      and `port_work_pending` go with the kernel's driver, and `irq_ring` and
+      `sync::OwedLock`, whose one user is `XHCI`, with them. **Exit**: step 10's.
    5. **The pass is the scheduler's.** `drain_irqs` goes: the blocked-task
       dump and the heartbeat become `pass`'s own, and the TCO feed stays,
       since what it proves is that passes run. The dump keeps painting its

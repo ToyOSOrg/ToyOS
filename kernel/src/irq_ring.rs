@@ -65,11 +65,3 @@ pub fn take(source: IrqSource) -> Option<u64> {
 pub fn pending(source: IrqSource) -> bool {
     SLOTS[percpu::cpu_id() as usize].0[source.slot()].load(Ordering::Relaxed) != 0
 }
-
-/// True if any IRQ record is undrained on the current CPU; non-consuming.
-pub fn any_pending_self() -> bool {
-    SLOTS[percpu::cpu_id() as usize]
-        .0
-        .iter()
-        .any(|slot| slot.load(Ordering::Relaxed) != 0)
-}

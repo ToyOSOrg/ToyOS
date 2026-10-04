@@ -2,7 +2,7 @@ use core::mem::ManuallyDrop;
 
 /// A value whose page-table entries are cleared but may still be reachable through another CPU's TLB until this drops.
 ///
-/// This must never be dropped while holding a lock a target CPU could be spinning on with `IF` clear, since shootdown blocks on every other CPU.
+/// This must never be dropped while holding a lock a target CPU could be spinning on, since shootdown blocks on every other CPU.
 #[must_use = "the pages are still reachable from another CPU until this is dropped"]
 pub struct Unmapped<T>(ManuallyDrop<T>);
 
