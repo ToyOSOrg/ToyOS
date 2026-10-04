@@ -41,6 +41,7 @@ dependencies = [
  "toyos-gpt",
  "toyos-rootimage",
  "toyos-tco",
+ "toyos-tsc",
  "toyos-update",
  "toyos-wallclock",
  "uefi",
@@ -292,6 +293,10 @@ version = "0.1.0"
 
 [[package]]
 name = "toyos-tco"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-tsc"
 version = "0.1.0"
 
 [[package]]

@@ -514,6 +514,7 @@ toyos-gpt = { path = "../toyos-gpt" }
 toyos-hda = { path = "../toyos-hda" }
 toyos-pci = { path = "pci" }
 toyos-tco = { path = "../toyos-tco" }
+toyos-tsc = { path = "../toyos-tsc" }
 toyos-ps2 = { path = "ps2" }
 toyos-rootimage = { path = "../toyos-rootimage" }
 toyos-quiesce = { path = "../toyos-quiesce" }
