@@ -1,6 +1,6 @@
 //! What a process may learn about the machine, and the two things it may do to it.
 //!
-//! [`sys_log_read`], the roster half of [`sys_sysinfo`], and both of
+//! [`sys_log_read`], [`sys_trace_read`], the roster half of [`sys_sysinfo`], and both of
 //! [`sys_shutdown`] and [`sys_reboot`] each require a `SysCap` bit from
 //! `/system/bin/supervisor`'s `system.toml`; `SYS_SYSINFO`'s header is ambient, and
 //! [`sys_sched_info`] demands nothing.
@@ -18,8 +18,6 @@ use toyos_abi::syscall::*;
 use super::handles::demand_syscap;
 
 /// Copies kernel log records into the caller's buffer; requires a `SysCap` carrying [`Rights::LOG`].
-///
-/// A copy-out failure after a successful read costs the caller those records; the cursor round-trips through the caller's own memory.
 pub(super) fn sys_log_read(
     ctx: &SyscallContext,
     syscap: RawHandle,
@@ -27,14 +25,38 @@ pub(super) fn sys_log_read(
     out: &mut UserBytesMut,
     capacity: usize,
 ) -> u64 {
-    if let Err(e) = demand_syscap(syscap, Rights::LOG) {
+    read_on_cursor(ctx, syscap, Rights::LOG, cursor_ptr, |cursor| log::user::read(cursor, out, capacity))
+}
+
+/// Copies the diary's records into the caller's buffer; requires a `SysCap` carrying [`Rights::TRACE`].
+pub(super) fn sys_trace_read(
+    ctx: &SyscallContext,
+    syscap: RawHandle,
+    cursor_ptr: UserAddr,
+    out: &mut UserBytesMut,
+    capacity: usize,
+) -> u64 {
+    read_on_cursor(ctx, syscap, Rights::TRACE, cursor_ptr, |cursor| crate::trace::read(cursor, out, capacity))
+}
+
+/// A read of records on a cursor the caller holds, under `need`.
+///
+/// A copy-out failure after a successful read costs the caller those records; the cursor round-trips through the caller's own memory.
+fn read_on_cursor<C: crate::user_ptr::UserSafe>(
+    ctx: &SyscallContext,
+    syscap: RawHandle,
+    need: Rights,
+    cursor_ptr: UserAddr,
+    read: impl FnOnce(&mut C) -> Result<usize, SyscallError>,
+) -> u64 {
+    if let Err(e) = demand_syscap(syscap, need) {
         return e.refuse();
     }
-    let mut cursor = match ctx.copy_in::<toyos_abi::log::LogCursor>(cursor_ptr) {
+    let mut cursor = match ctx.copy_in::<C>(cursor_ptr) {
         Ok(cursor) => cursor,
         Err(e) => return e.to_u64(),
     };
-    let count = match log::user::read(&mut cursor, out, capacity) {
+    let count = match read(&mut cursor) {
         Ok(count) => count,
         Err(e) => return e.to_u64(),
     };

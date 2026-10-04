@@ -1,5 +1,6 @@
 [package]
 name = "terminal"
+description = "A shell in a window: the terminal emulator, a library the console shares, and the program that runs it under the compositor."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

@@ -113,14 +113,16 @@ pub fn halt() -> ! {
 /// a 16-byte-aligned stack this CPU owns.
 pub unsafe fn run_on_stack(top: u64, func: extern "C" fn() -> !) -> ! {
     // SAFETY: the caller's contract.
+    // Every operand names its register: LLVM may give `x30` to a `reg`
+    // operand, and zeroing it would then branch to 0.
     unsafe {
         asm!(
-            "mov sp, {sp}",
+            "mov sp, x0",
             "mov x29, xzr",
             "mov x30, xzr",
-            "br {func}",
-            sp = in(reg) top,
-            func = in(reg) func as *const () as usize,
+            "br x16",
+            in("x0") top,
+            in("x16") func as *const () as usize,
             options(noreturn),
         );
     }

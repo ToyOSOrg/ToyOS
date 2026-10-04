@@ -1,5 +1,6 @@
 [package]
 name = "tls-dep"
+description = "tls-multi-crate's dependency: an ordinary static and a thread-local the linker must keep apart."
 version = "0.1.0"
 edition = "2021"
 

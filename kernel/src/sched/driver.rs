@@ -402,8 +402,8 @@ pub struct NewTask {
     pub address_space: PageTables,
     pub thread_pointer: u64,
     pub share: Arc<KShare>,
-    /// The process's symbol table; a kernel thread names an empty one.
-    pub symbols: Arc<crate::symbols::SymbolTable>,
+    /// The process's image; `None` for a kernel thread.
+    pub image: Option<Arc<crate::process::UserImage>>,
 }
 
 /// Place a new task by message — never by reaching into the destination's queue.
@@ -434,7 +434,7 @@ pub fn spawn(new: NewTask) -> (ThreadSched, CpuId) {
             kernel_stack: new.kernel_stack,
             address_space: new.address_space,
             handle: handle.clone(),
-            symbols: new.symbols,
+            image: new.image,
         },
         rt: RtState::default(),
     }
@@ -728,14 +728,14 @@ pub fn with_current_handle<R>(f: impl FnOnce(&crate::sched::payload::TaskHandle)
     try_with_cpu(|cpu| cpu.running().map(|t| f(t.ext().handle.as_ref())))?
 }
 
-/// The symbol table of the task this CPU is running.
+/// The image of the task this CPU is running, `None` inside for a kernel thread.
 ///
-/// Takes no lock: the table is immutable and the `Arc` outlives teardown. `None`: a pass already holds this
+/// Takes no lock: the image is immutable and the `Arc` outlives teardown. `None`: a pass already holds this
 /// record, or none is running.
 ///
 /// No pass can start underneath the read: a fault handler runs with preemption declined.
-pub fn current_symbols() -> Option<Arc<crate::symbols::SymbolTable>> {
-    try_with_cpu(|cpu| cpu.running().map(|t| t.ext().symbols.clone())).flatten()
+pub fn current_image() -> Option<Option<Arc<crate::process::UserImage>>> {
+    try_with_cpu(|cpu| cpu.running().map(|t| t.ext().image.clone())).flatten()
 }
 
 /// What the running task's marks say it does instead of returning to Ring 3 — one load, no clone, since an `Arc` refcount here is too costly on this path.

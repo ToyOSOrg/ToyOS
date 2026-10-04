@@ -276,19 +276,26 @@ pub const SYS_PORT_MINT: u64 = 125;
 /// with. See [`port_badge`].
 pub const SYS_PORT_BADGE: u64 = 126;
 
+/// The diary's records the caller's cursor has not seen, as
+/// [`crate::trace`] records. Gated by [`Rights::TRACE`] on a `SysCap`. See
+/// [`trace_read`].
+///
+/// [`Rights::TRACE`]: crate::handle::Rights::TRACE
+pub const SYS_TRACE_READ: u64 = 127;
+
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
 ///
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 128;
+pub const SYSCALL_PROFILE_BINS: usize = 129;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_PORT_BADGE < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_TRACE_READ < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 
@@ -831,6 +838,14 @@ pub mod debug_action {
     pub const COUNTERS_DEAF: u64 = 24;
     /// Every CPU answers rounds again.
     pub const COUNTERS_HEAR: u64 = 25;
+    /// Write the argument's count of [`Kind::Mark`](crate::trace::Kind::Mark)
+    /// records into the calling CPU's diary ring back to back, the `i`th with
+    /// `data` `i`, and answer the counter ticks the writes took with
+    /// interrupts closed. A count past [`TRACE_FLOOD_MOST`] answers
+    /// `InvalidArgument`.
+    pub const TRACE_FLOOD: u64 = 14;
+    /// The most records one [`TRACE_FLOOD`] writes.
+    pub const TRACE_FLOOD_MOST: u64 = 1 << 24;
     /// Arm this CPU's timer to fire within 100 µs and wait inside the syscall
     /// for the kernel's own fire. Answers [`RING0_FIRE_REARMED`] once it fired
     /// and re-armed a quantum, [`RING0_FIRE_NEVER`] if none came within
@@ -2039,6 +2054,30 @@ pub fn counters(
 ) -> Result<usize, SyscallError> {
     check(syscall(SYS_COUNTERS, syscap.0 as u64, buf.as_mut_ptr() as u64, buf.len() as u64, 0))
         .map(|n| n as usize)
+}
+
+/// Copy the diary's records `cursor` has not seen into `out`, oldest first and
+/// merged across CPUs by stamp, advancing `cursor`. Answers how many were
+/// written, and `0` when there is nothing new; it never blocks.
+///
+/// `out` is whole [`crate::trace::TraceRecord`]s. A buffer that cannot hold one
+/// record per CPU, and a `cursor` ahead of a CPU's ring, are
+/// [`SyscallError::InvalidArgument`]. `syscap` must carry
+/// [`crate::handle::Rights::TRACE`]: a capability without it is refused with
+/// a word, and a handle the caller does not hold ends it.
+pub fn trace_read(
+    syscap: RawHandle,
+    cursor: &mut crate::trace::TraceCursor,
+    out: &mut [crate::trace::TraceRecord],
+) -> Result<usize, SyscallError> {
+    check(syscall(
+        SYS_TRACE_READ,
+        syscap.0 as u64,
+        cursor as *mut crate::trace::TraceCursor as u64,
+        out.as_mut_ptr() as u64,
+        out.len() as u64,
+    ))
+    .map(|n| n as usize)
 }
 
 /// Sleep for the given number of nanoseconds.

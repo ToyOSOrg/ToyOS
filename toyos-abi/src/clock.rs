@@ -44,16 +44,25 @@ pub const fn nanos_between(counter_at_boot: u64, period_fs: u64, now: u64) -> u6
 /// Nanoseconds since boot, off this process's clock page.
 ///
 /// # Panics
+/// As [`page`].
+pub fn nanos_since_boot() -> u64 {
+    let page = page();
+    let now = crate::arch::counter();
+    nanos_between(page.counter_at_boot, page.period_fs, now)
+}
+
+/// This process's clock page.
+///
+/// # Panics
 /// On a page that does not carry [`CLOCK_MAGIC`]: every address space the
 /// kernel builds maps one, so its absence is a kernel that broke the ABI.
-pub fn nanos_since_boot() -> u64 {
+pub fn page() -> ClockPage {
     // SAFETY: the kernel maps the page read-only at `CLOCK_PAGE` in every
     // address space before the first instruction runs, and never writes it
     // again, so a volatile copy of the whole value is a read of constants.
     let page = unsafe { core::ptr::read_volatile(CLOCK_PAGE as *const ClockPage) };
     assert!(page.magic == CLOCK_MAGIC, "the clock page at {CLOCK_PAGE:#x} carries no clock");
-    let now = crate::arch::counter();
-    nanos_between(page.counter_at_boot, page.period_fs, now)
+    page
 }
 
 #[cfg(test)]

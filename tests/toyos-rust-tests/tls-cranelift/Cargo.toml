@@ -1,5 +1,6 @@
 [package]
 name = "tls-cranelift"
+description = "A guest test fixture: a cdylib that runs cranelift's code generator, loaded with dlopen to test thread-local storage in a shared object."
 version = "0.1.0"
 edition = "2021"
 

@@ -15,8 +15,7 @@ use kernel::sched::park::WaitTicket;
 use crate::watch::Watch;
 use crate::mm::paging::Root;
 use crate::scheduler::OperationSlot;
-use crate::process::{OwnedAlloc, PageTables, ProcessAccounting, TaskId};
-use crate::symbols::SymbolTable;
+use crate::process::{OwnedAlloc, PageTables, ProcessAccounting, TaskId, UserImage};
 use crate::sync::Lock;
 
 /// The environment's leaf lock; holding it raises the preempt count, making a wake path a legal mailbox producer.
@@ -62,14 +61,18 @@ pub struct KernelPayload {
     pub address_space: PageTables,
     /// The cross-CPU-readable face of this task; a `CpuSched` is `!Sync` and cannot be walked remotely.
     pub handle: Arc<TaskHandle>,
-    /// This task's process's symbol table; kept here, not looked up via the process table, so a crash report never takes that lock.
-    /// On the payload, not the handle: the handle outlives the task until reaped, and this is megabytes of process pages.
-    pub symbols: Arc<SymbolTable>,
+    /// This task's process's image, as a crash report records a frame in it; kept here, not looked up via the process table, so a crash report never takes that lock. `None` for a kernel thread.
+    pub image: Option<Arc<UserImage>>,
 }
 
 impl SchedPayload for KernelPayload {
     type Ctx = KernelCtx;
     type ShareLock = KernelLock<ShareState>;
+
+    /// The thread, as `TaskId::pack` packs it: what a diary record names.
+    fn name(&self) -> u64 {
+        self.id.pack()
+    }
 }
 
 /// State word values for `task_sched_state` (the `ps` column).

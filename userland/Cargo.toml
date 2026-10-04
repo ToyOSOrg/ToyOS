@@ -29,12 +29,14 @@ members = [
     "sprite",
     "sshserver",
     "supervisor",
+    "symbolize",
     "swap",
     "terminal",
     "test-runner",
     "toybox",
     "toyos-font",
     "toyos-window",
+    "trace",
     "update",
 ]
 exclude = [

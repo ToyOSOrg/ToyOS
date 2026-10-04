@@ -108,6 +108,9 @@ const RUST_SKIP: &[&str] = &[
     // every CPU, which the `counters` metal row judges; on a guest it would be
     // seconds of four CPUs spinning, read by nothing.
     "counters_metal",
+    // Its product is what a diary record costs, which the `trace_record_cost`
+    // metal row reads off the test kernel its flood needs.
+    "trace_flood",
     // It takes the machine down; `virt_fatal_halts_the_others_first` runs it.
     "panic_halts_first",
     // Needs a launcher and a declared `cat` and shell, which `tests/testcases`
@@ -166,6 +169,7 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     // Its shared run is the x86-64 verdict; `virt_smp` builds it for AArch64
     // and runs it on that architecture's SMP case.
     "counters_read",
+    "trace_read",
     // Its shared run is the x86-64 verdict; `virt_readonly_copyout` builds it
     // for AArch64 and runs it on that architecture's job case.
     "abuse_readonly_copyout",
@@ -198,6 +202,9 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     // The same fatal path with a compositor holding the panel, which is the
     // only configuration the owner's laptop is ever in.
     ("screen_fatal_halt_composited", qemu::Profile::Metal),
+    // What the loader leaves on the panel: its own lines, and none of the
+    // firmware's.
+    ("screen_loader_clears", qemu::Profile::Metal),
     ("virt_early_panic", qemu::Profile::Virt),
     ("virt_early_fault", qemu::Profile::Virt),
     ("virt_el2_drop", qemu::Profile::VirtEl2NoVhe),
@@ -441,6 +448,24 @@ const METAL: &[(&str, metal::Metal)] = &[
                 ..metal::once("testcases-debug", "tests/testcases", &[], &["test_rs_tlb_shootdown_waits"])
             }],
             judge: |b| b[0].job_passed("test_rs_tlb_shootdown_waits"),
+        },
+    ),
+    (
+        // What one diary record costs its writer: a million written back to
+        // back by `SYS_DEBUG`'s flood, so the kernel that carries it, timed
+        // with interrupts closed. Read, not held: the number is the product.
+        "trace_record_cost",
+        metal::Metal {
+            arms: &[metal::Arm {
+                features: toyos_build::build::TEST_KERNEL,
+                ..metal::once("testcases-debug", "tests/testcases", &[], &["test_rs_trace_flood"])
+            }],
+            judge: |b| {
+                b[0].job_passed("test_rs_trace_flood")?;
+                let log = b[0].log();
+                eprintln!("  [trace] {}", log.must_say("trace_flood: ")?);
+                Ok(())
+            },
         },
     ),
     (
@@ -1550,6 +1575,10 @@ const VIRT_RING0_TIMER: &str = "ring0_timer_in_syscall";
 /// `test_rs_counters_read`.
 const VIRT_COUNTERS_READ: &str = "counters_read";
 
+/// `tests/toyos-rust-tests`' binary that `tests/virtsmpcase` runs as its job
+/// `test_rs_trace_read`.
+const VIRT_TRACE_READ: &str = "trace_read";
+
 /// `tests/toyos-rust-tests`' binary `name` built for `arch`, once a run, as a
 /// file a case's job list names on ROOT.
 fn suite_bin(arch: toyos_build::arch::Arch, name: &'static str) -> (String, Vec<u8>) {
@@ -1672,7 +1701,10 @@ fn boot_virt_smp(options: BootOptions) -> QemuInstance {
         &[],
         BootOptions {
             ready_marker: "control registers: SCTLR_EL1=",
-            extra_root_files: vec![suite_bin(options.profile.arch(), VIRT_COUNTERS_READ)],
+            extra_root_files: vec![
+                suite_bin(options.profile.arch(), VIRT_COUNTERS_READ),
+                suite_bin(options.profile.arch(), VIRT_TRACE_READ),
+            ],
             ..options
         },
     )
@@ -1681,11 +1713,14 @@ fn boot_virt_smp(options: BootOptions) -> QemuInstance {
 /// What `counters_read` says once every CPU answered for itself.
 const COUNTERS_READ_SAID: &str = "counters_read: every cpu answered for itself, and each counter is a right's";
 
+/// What `trace_read` says once the diary read back as the scheduler wrote it.
+const TRACE_READ_SAID: &str = "trace_read: a wake precedes its pick, a cursor is its reader's own, and the diary is TRACE's";
+
 /// Boot `tests/virtsmpcase` on [`VIRT_CPUS`] CPUs under `profile`, whose
 /// firmware enters every CPU at EL`el` and whose FADT names PSCI's `conduit`:
 /// each CPU is started by `CPU_ON`, holds the control-register declaration as
-/// entered there and joins the scheduler, and the case's jobs `unmap_touch`
-/// and `test_rs_counters_read` end with exit 0. Then its job `shutdown` stops the machine and powers it
+/// entered there and joins the scheduler, and the case's jobs `unmap_touch`,
+/// `test_rs_counters_read` and `test_rs_trace_read` end with exit 0. Then its job `shutdown` stops the machine and powers it
 /// off, every other CPU turned off first ([`psci_powered_off`]).
 fn virt_smp(profile: qemu::Profile, conduit: &str, el: u32) -> Result<(), String> {
     let trace = common::lane::dir().join(format!("virt_smp-{conduit}.psci"));
@@ -1723,6 +1758,7 @@ fn virt_smp(profile: qemu::Profile, conduit: &str, el: u32) -> Result<(), String
     }
     eprintln!("  [virt] {VIRT_CPUS} CPUs entered at EL{el}, started through {conduit}, and scheduling");
     judge_virt_job(&mut qemu, &mut serial, "test_rs_counters_read", COUNTERS_READ_SAID)?;
+    judge_virt_job(&mut qemu, &mut serial, "test_rs_trace_read", TRACE_READ_SAID)?;
     let (console, calls) =
         ended_through_psci(&mut qemu, &mut stop, serial, power::SHUTTING_DOWN, "guest-shutdown", &trace, |_| Vec::new())?;
     let record = console
@@ -2072,6 +2108,69 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
                 &["PANIC:", "test-late-panic: on-screen console check"],
                 "late_panic::Nest",
             )?;
+            Ok(())
+        }
+        "screen_loader_clears" => {
+            // A loader's screen lasts until the kernel's first paint, which no
+            // poll is sure to catch, so the machine is held where a loader pass
+            // ends in a reset of its own: the pass after a reset that kept
+            // memory reads the black box the first pass armed, and hands the
+            // machine back.
+            let mut qemu = QemuInstance::boot_with_options(
+                test_config,
+                &[],
+                &[],
+                BootOptions { profile, qmp: true, ready_marker: bootlog::LOADER_LAST_LINE, ..Default::default() },
+            );
+            qemu.reset_and_hold_the_next(Duration::from_secs(30))?;
+            let serial = qemu.drain_until(Duration::from_secs(5), |l| l.contains(bootlog::CHAIN_ENDS_LINE));
+            if !serial.contains(bootlog::CHAIN_ENDS_LINE) {
+                return Err(format!("the held boot is not a loader pass that ended its chain:\n{serial}"));
+            }
+            let dump = qemu.screendump();
+            const BLACK: [u8; 3] = [0, 0, 0];
+            // The firmware's logo is in colours its console's text is not.
+            let colours: BTreeSet<[u8; 3]> = dump.pixels.iter().copied().collect();
+            if colours.len() != 2 || !colours.contains(&BLACK) {
+                return Err(format!(
+                    "the loader's screen carries {} colours, not black and the console's text alone: \
+                     something the firmware drew is still on it",
+                    colours.len()
+                ));
+            }
+            // The top line of ink is the loader's first, as wide as its
+            // characters at the 8-pixel glyphs of EDK2's console: the firmware's
+            // boot manager announces the option it starts on a line of its own.
+            // A pass that reads a finding appends to its log, so its first line
+            // is the separator; what precedes it on the 16550 is the terminal's
+            // escapes for the clear.
+            let Some(first) = serial.lines().find(|l| l.contains(bootlog::SEPARATOR)) else {
+                return Err(format!("the held pass never wrote {:?}:\n{serial}", bootlog::SEPARATOR));
+            };
+            // An escape runs from ESC to its final letter.
+            let shown = match first.rfind('\x1b') {
+                Some(at) => {
+                    let escape = &first[at..];
+                    &escape[escape.find(|c: char| c.is_ascii_alphabetic()).map_or(escape.len(), |end| end + 1)..]
+                }
+                None => first,
+            };
+            // A stamp's leading spaces carry no ink.
+            let chars = shown.trim().len();
+            let (width, pixels) = (dump.width, &dump.pixels);
+            let inked = |y: usize| (0..width).filter(move |&x| pixels[y * width + x] != BLACK);
+            let Some(top) = (0..dump.height).find(|&y| inked(y).next().is_some()) else {
+                return Err("the loader's screen is blank".to_string());
+            };
+            let bottom = (top..dump.height).find(|&y| inked(y).next().is_none()).unwrap_or(dump.height);
+            let xs: Vec<usize> = (top..bottom).flat_map(inked).collect();
+            let wide = xs.iter().max().unwrap() - xs.iter().min().unwrap() + 1;
+            if wide <= 8 * (chars - 1) || wide > 8 * chars {
+                return Err(format!(
+                    "the screen's top line is {wide} px wide, and the loader's first, {shown:?}, \
+                     is {chars} characters: something else is above the loader's lines\n{serial}"
+                ));
+            }
             Ok(())
         }
         "virt_early_panic" => {

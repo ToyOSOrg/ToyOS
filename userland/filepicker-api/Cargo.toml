@@ -1,5 +1,6 @@
 [package]
 name = "filepicker-api"
+description = "The file picker's protocol: the request a program sends /system/bin/filepicker on its port, and the path that answers it."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

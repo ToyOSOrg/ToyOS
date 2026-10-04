@@ -1,4 +1,9 @@
 //! One CPU's ring of whole records: writers and readers never observe a torn record.
+//!
+//! [`Ring`] is the slot protocol, over any number of body words whose first is
+//! the record's stamp; the log's [`Shard`] and `crate::trace`'s rings are both
+//! one. A zeroed ring is an empty one, so a ring needs no constructor run on
+//! zeroed storage and a `static` of one is `.bss`.
 //! Compiled a second time by `kernel-loom`, which shims only the atomics and `arch::percpu_fetch_add`.
 
 #[cfg(not(feature = "loom"))]
@@ -63,61 +68,61 @@ fn msg_words(len: u16) -> usize {
     (len as usize).min(MSG_BYTES).div_ceil(8)
 }
 
-/// First sequence number any shard issues; never 0, since a zeroed slot reads as sequence 0.
+/// First sequence number any ring issues; never 0, since a zeroed slot reads as sequence 0.
 pub const FIRST_SEQ: u64 = 1;
 
 // A slot mid-write, holding no record a reader may accept; `u64::MAX` is unreachable as a real sequence number.
 // The only state this word carries, not a separate flag that could disagree with it.
 const WRITING: u64 = u64::MAX;
 
-/// One record's storage, laid out exactly as [`LogRecord`]; every word is atomic because a reader may load while a writer stores.
-#[repr(C, align(64))]
-pub struct Slot {
+/// One record's storage: every word is atomic because a reader may load while a writer stores.
+#[repr(C)]
+pub struct Slot<const W: usize> {
     /// State word: a sequence number, [`WRITING`], or zero for untouched.
     seq: AtomicU64,
-    /// Identity words then message, little-endian; packed by [`header`], unpacked by [`Shard::read`].
-    body: [AtomicU64; BODY_WORDS],
+    /// The record's words; the first is its stamp, which a merge across rings orders by.
+    body: [AtomicU64; W],
 }
+
+/// The ring's reservation count alone on its cache line, so the slots after it start on one.
+#[repr(C, align(64))]
+struct Issued(AtomicU64);
+
+/// One CPU's records, `N` slots of `W` body words.
+#[repr(C, align(64))]
+pub struct Ring<const W: usize, const N: usize> {
+    /// Sequence numbers this ring has handed out, so zero is an empty ring; only the owning CPU writes it.
+    issued: Issued,
+    slots: [Slot<W>; N],
+}
+
+/// The log's ring: a [`LogRecord`] a slot, laid out exactly as one.
+pub type Shard = Ring<BODY_WORDS, SHARD_RECORDS>;
 
 // Layout assertions are skipped under loom: its atomics carry tracking state and are wider than the real ones.
 #[cfg(not(feature = "loom"))]
-const _: () = assert!(core::mem::size_of::<Slot>() == RECORD_BYTES);
+const _: () = assert!(core::mem::size_of::<Slot<BODY_WORDS>>() == RECORD_BYTES);
 #[cfg(not(feature = "loom"))]
-const _: () = assert!(core::mem::align_of::<Slot>() == 64);
-#[cfg(not(feature = "loom"))]
-const _: () = assert!(core::mem::offset_of!(Slot, seq) == 0);
+const _: () = assert!(core::mem::offset_of!(Shard, slots) == 64);
 const _: () = assert!(core::mem::offset_of!(LogRecord, at_ns) == core::mem::size_of::<u64>());
 
-/// One CPU's records.
-#[repr(C, align(64))]
-pub struct Shard {
-    /// Next sequence number this shard will issue (a reservation count, not a commit count); only the owning CPU writes it.
-    head: AtomicU64,
-    slots: [Slot; SHARD_RECORDS],
-}
-
-#[cfg(not(feature = "loom"))]
-const _: () = assert!(core::mem::offset_of!(Shard, head) == 0);
-
-impl Shard {
+impl<const W: usize, const N: usize> Ring<W, N> {
+    /// An empty ring: every word zero.
     #[cfg(not(feature = "loom"))]
     pub const fn new() -> Self {
-        // `EMPTY` is never written or borrowed; its only use is the array repeat below.
-        #[allow(clippy::declare_interior_mutable_const)]
-        const EMPTY: Slot = Slot {
-            seq: AtomicU64::new(0),
-            body: [const { AtomicU64::new(0) }; BODY_WORDS],
-        };
-        Self { head: AtomicU64::new(FIRST_SEQ), slots: [EMPTY; SHARD_RECORDS] }
+        Self {
+            issued: Issued(AtomicU64::new(0)),
+            slots: [const { Slot { seq: AtomicU64::new(0), body: [const { AtomicU64::new(0) }; W] } }; N],
+        }
     }
 
-    /// Loom's atomics have no `const` constructor, so this builds shards at run time.
+    /// Loom's atomics have no `const` constructor, so this builds rings at run time.
     // No `Default` beside it: the kernel's arm must stay `const`, which `Default::default` cannot be.
     #[allow(clippy::new_without_default)]
     #[cfg(feature = "loom")]
     pub fn new() -> Self {
         Self {
-            head: AtomicU64::new(FIRST_SEQ),
+            issued: Issued(AtomicU64::new(0)),
             slots: core::array::from_fn(|_| Slot {
                 seq: AtomicU64::new(0),
                 body: core::array::from_fn(|_| AtomicU64::new(0)),
@@ -125,136 +130,130 @@ impl Shard {
         }
     }
 
-    /// How many records this shard has ever reserved (`Acquire`, paired with the commit store).
+    /// The next sequence number this ring will issue (a reservation count, not a commit count; `Acquire`, paired with the commit store).
     pub fn head(&self) -> u64 {
-        self.head.load(Ordering::Acquire)
+        self.issued.0.load(Ordering::Acquire) + FIRST_SEQ
     }
 
-    /// Oldest sequence number this shard can still answer for.
+    /// Oldest sequence number this ring can still answer for.
     pub fn oldest_readable(&self) -> u64 {
-        self.head().saturating_sub(SHARD_RECORDS as u64).max(FIRST_SEQ)
+        self.head().saturating_sub(N as u64).max(FIRST_SEQ)
     }
 
-    /// Finish constructing a shard obtained from zeroed allocation, in place: returning a [`Shard`] by value would put 512 KiB on the caller's stack.
+    /// Take the next sequence number, on the CPU that owns this ring.
     /// # Safety
-    /// `ptr` must point to a zeroed, aligned, unpublished allocation for one [`Shard`], and be called exactly once.
-    #[cfg(not(feature = "loom"))]
-    pub unsafe fn initialize_zeroed(ptr: *mut Self) {
-        // SAFETY: writes only the word not already correct in zeroed storage, in place, under the caller's contract.
-        unsafe {
-            // `addr_of_mut!`, not `&mut (*ptr).head`: the rest of the allocation is not yet a valid `Shard`.
-            core::ptr::addr_of_mut!((*ptr).head).write(AtomicU64::new(FIRST_SEQ));
-        }
-    }
-
-    /// Take the next sequence number, on the CPU that owns this shard.
-    /// # Safety
-    /// Caller must be the owning CPU, and `guard` must stay live through the matching [`Shard::commit`].
+    /// Caller must be the owning CPU, and `guard` must stay live through the matching [`Ring::publish`].
     pub unsafe fn reserve(&self, guard: &crate::arch::IrqGuard) -> u64 {
-        crate::arch::percpu_fetch_add(&self.head, guard)
+        crate::arch::percpu_fetch_add(&self.issued.0, guard) + FIRST_SEQ
     }
 
-    /// Write a record's body into the slot `seq` names and publish it.
+    /// Write a record's body words into the slot `seq` names through `write`, which stores `Relaxed`, and publish it.
     /// # Safety
-    /// `seq` must come from this shard's own [`Shard::reserve`] with the same live `guard`, and this must be the first call for `seq`.
-    pub unsafe fn commit(
+    /// `seq` must come from this ring's own [`Ring::reserve`] with the same live `guard`, and this must be the first call for `seq`.
+    pub unsafe fn publish(
         &self,
         seq: u64,
-        record: &LogRecord,
         _guard: &crate::arch::IrqGuard,
+        write: impl FnOnce(&[AtomicU64; W]),
     ) {
         debug_assert!(
-            self.head().saturating_sub(seq) < SHARD_RECORDS as u64,
-            "reservation {seq} was lapped inside its publication bracket: an IF-ignoring path emitted a whole shard generation before this commit"
+            self.head().saturating_sub(seq) < N as u64,
+            "reservation {seq} was lapped inside its publication bracket: an IF-ignoring path emitted a whole ring generation before this commit"
         );
 
-        let slot = &self.slots[(seq % SHARD_RECORDS as u64) as usize];
+        let slot = &self.slots[(seq % N as u64) as usize];
 
         // Mark the slot `WRITING` before the body write, so a racing reader's re-check cannot see a false match.
         slot.seq.store(WRITING, Ordering::Relaxed);
         fence(Ordering::Release);
 
         // Relaxed: the fence above and the release store below order the whole body against the sequence number.
-        let len = record.len.min(MSG_BYTES as u16);
-        for (word, value) in slot.body.iter().zip(header(record, len)) {
-            word.store(value, Ordering::Relaxed);
-        }
-        let words = msg_words(len);
-        for i in 0..words {
-            let mut bytes = [0u8; 8];
-            bytes.copy_from_slice(&record.msg[i * 8..i * 8 + 8]);
-            slot.body[HEADER_WORDS + i].store(u64::from_le_bytes(bytes), Ordering::Relaxed);
-        }
+        write(&slot.body);
 
         // Last store: this publishes the record.
         slot.seq.store(seq, PUBLISH);
     }
 
-    /// Timestamp of record `seq`, under [`Shard::read`]'s validity test, without copying the body.
-    /// Exists so a merge across shards can hold one candidate each without a whole [`LogRecord`] per shard.
-    pub fn at_ns(&self, seq: u64) -> Option<u64> {
-        if seq < self.oldest_readable() || seq >= self.head() {
-            return None;
-        }
-        let slot = &self.slots[(seq % SHARD_RECORDS as u64) as usize];
-        if slot.seq.load(Ordering::Acquire) != seq {
-            return None;
-        }
-
-        let at_ns = slot.body[0].load(Ordering::Relaxed);
-
-        fence(Ordering::Acquire);
-        if slot.seq.load(Ordering::Relaxed) != seq {
-            return None;
-        }
-        Some(at_ns)
-    }
-
-    /// Copy record `seq` out, or `None` if this shard cannot answer for it.
-    pub fn read(&self, seq: u64) -> Option<LogRecord> {
+    /// What `load` makes of record `seq`'s words, which it loads `Relaxed`, or `None` if this ring cannot answer for it.
+    pub fn load<T>(&self, seq: u64, load: impl FnOnce(&[AtomicU64; W]) -> T) -> Option<T> {
         // Both bounds needed: `head` alone counts reservations, so `seq < head` admits a slot not yet committed.
         if seq < self.oldest_readable() || seq >= self.head() {
             return None;
         }
-        let slot = &self.slots[(seq % SHARD_RECORDS as u64) as usize];
-        // No ABA: slot `j` only ever holds numbers congruent to `j` mod `SHARD_RECORDS`, and `seq` never wraps, so a stale value can't match.
+        let slot = &self.slots[(seq % N as u64) as usize];
+        // No ABA: slot `j` only ever holds numbers congruent to `j` mod `N`, and `seq` never wraps, so a stale value can't match.
         if slot.seq.load(Ordering::Acquire) != seq {
             return None;
         }
 
-        // Atomic loads: a writer may be storing here now; the re-check below discards a torn result.
-        let identity = slot.body[1].load(Ordering::Relaxed);
-        let shape = slot.body[2].load(Ordering::Relaxed);
-        // `len` may be garbage mid-recycle; clamping keeps the read in bounds.
-        let len = ((shape >> 16) as u16).min(MSG_BYTES as u16);
-        let mut record = LogRecord {
-            seq,
-            at_ns: slot.body[0].load(Ordering::Relaxed),
-            pid: identity as u32,
-            tid: (identity >> 32) as u32,
-            cpu: shape as u16,
-            len,
-            elided: (shape >> 32) as u16,
-            severity: (shape >> 48) as u8,
-            flags: (shape >> 56) as u8,
-            msg: [0; MAX_RECORD_MESSAGE],
-        };
-        for i in 0..msg_words(len) {
-            let bytes = slot.body[HEADER_WORDS + i].load(Ordering::Relaxed).to_le_bytes();
-            record.msg[i * 8..i * 8 + 8].copy_from_slice(&bytes);
-        }
+        // A writer may be storing here now; the re-check below discards a torn result.
+        let loaded = load(&slot.body);
 
         // Re-check is total: a writer marks `WRITING` before touching the body, so a match here means nothing wrote in between.
         fence(Ordering::Acquire);
         if slot.seq.load(Ordering::Relaxed) != seq {
             return None;
         }
+        Some(loaded)
+    }
 
-        Some(record)
+    /// Stamp of record `seq`, under [`Ring::load`]'s validity test, without copying the rest.
+    /// Exists so a merge across rings can hold one candidate each without a whole record per ring.
+    pub fn stamp(&self, seq: u64) -> Option<u64> {
+        self.load(seq, |body| body[0].load(Ordering::Relaxed))
     }
 }
 
-// `Shard` is `Sync` by auto-derivation (every word is `AtomicU64`); no hand-written `unsafe impl` needed.
+impl Shard {
+    /// Write a record's body into the slot `seq` names and publish it.
+    /// # Safety
+    /// [`Ring::publish`]'s.
+    pub unsafe fn commit(&self, seq: u64, record: &LogRecord, guard: &crate::arch::IrqGuard) {
+        // SAFETY: the caller's contract is `publish`'s.
+        unsafe {
+            self.publish(seq, guard, |body| {
+                let len = record.len.min(MSG_BYTES as u16);
+                for (word, value) in body.iter().zip(header(record, len)) {
+                    word.store(value, Ordering::Relaxed);
+                }
+                for i in 0..msg_words(len) {
+                    let mut bytes = [0u8; 8];
+                    bytes.copy_from_slice(&record.msg[i * 8..i * 8 + 8]);
+                    body[HEADER_WORDS + i].store(u64::from_le_bytes(bytes), Ordering::Relaxed);
+                }
+            })
+        }
+    }
+
+    /// Copy record `seq` out, or `None` if this shard cannot answer for it.
+    pub fn read(&self, seq: u64) -> Option<LogRecord> {
+        self.load(seq, |body| {
+            let identity = body[1].load(Ordering::Relaxed);
+            let shape = body[2].load(Ordering::Relaxed);
+            // `len` may be garbage mid-recycle; clamping keeps the read in bounds.
+            let len = ((shape >> 16) as u16).min(MSG_BYTES as u16);
+            let mut record = LogRecord {
+                seq,
+                at_ns: body[0].load(Ordering::Relaxed),
+                pid: identity as u32,
+                tid: (identity >> 32) as u32,
+                cpu: shape as u16,
+                len,
+                elided: (shape >> 32) as u16,
+                severity: (shape >> 48) as u8,
+                flags: (shape >> 56) as u8,
+                msg: [0; MAX_RECORD_MESSAGE],
+            };
+            for i in 0..msg_words(len) {
+                let bytes = body[HEADER_WORDS + i].load(Ordering::Relaxed).to_le_bytes();
+                record.msg[i * 8..i * 8 + 8].copy_from_slice(&bytes);
+            }
+            record
+        })
+    }
+}
+
+// `Ring` is `Sync` by auto-derivation (every word is `AtomicU64`); no hand-written `unsafe impl` needed.
 
 /// Is a reader parked on this machine's records? Kept as one flag so the producer's fast path avoids a locked read-modify-write.
 #[cfg(not(feature = "loom"))]
