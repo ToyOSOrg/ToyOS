@@ -60,7 +60,7 @@ only the executable's image for a process; and `rustc-demangle`'s standing. It
 is an unforked crates.io dependency, ~2k lines of third-party string parsing in
 Ring 0 on the panic path, now for the kernel's own names alone: fork it into
 the estate like every other third-party source, or record the exemption
-deliberately. **Exit**: `disk_backtrace`, in the guest suite and on the T14,
+deliberately. **Exit**: `disk_backtrace`, the T14's shared-boot row,
 reads its killed child's report as the child's file, offset and build-id with
 no user symbol in it, and `symbolize` names the faulting function from them;
 no kernel source builds a backtrace table from a program's file; a library's

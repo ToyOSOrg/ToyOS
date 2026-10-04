@@ -117,14 +117,16 @@ impl Namer {
 }
 
 /// `file`, a path on the machine that ran it, as a path under `root`; `None`
-/// when a component would take it out of `root` — `..`, or a Windows prefix.
+/// when a component would take it out of `root` — `..`, a Windows prefix, or a
+/// part this host reads as more than itself once pushed alone, as Windows reads
+/// `C:x`, which `PathBuf::push` lets replace the whole path.
 fn under(root: &Path, file: &str) -> Option<PathBuf> {
     let mut path = root.to_path_buf();
     for component in Path::new(file).components() {
         match component {
-            Component::Normal(part) => path.push(part),
+            Component::Normal(part) if Path::new(part).components().eq([component]) => path.push(part),
             Component::RootDir | Component::CurDir => {}
-            Component::ParentDir | Component::Prefix(_) => return None,
+            Component::Normal(_) | Component::ParentDir | Component::Prefix(_) => return None,
         }
     }
     Some(path)
@@ -143,6 +145,17 @@ mod tests {
     fn a_name_that_leaves_the_root_is_refused() {
         assert_eq!(under(Path::new("img"), "/../../etc/passwd"), None);
         assert_eq!(under(Path::new("img"), "/home/../../x"), None);
+    }
+
+    #[test]
+    fn a_name_some_host_reads_as_a_drive_stays_under_the_root() {
+        let root = Path::new("img");
+        for file in ["/home/C:x", "/home/C:/x", "/home/C:"] {
+            if let Some(path) = under(root, file) {
+                let rest = path.strip_prefix(root).unwrap_or_else(|_| panic!("{file} left the root as {path:?}"));
+                assert!(rest.components().all(|c| matches!(c, Component::Normal(_))), "{file} as {path:?}");
+            }
+        }
     }
 
     #[test]
