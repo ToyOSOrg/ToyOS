@@ -15,12 +15,12 @@
 
 pub mod net;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use toyos_net_tcp::{Config, ConnId, Counter, Endpoint, Event, Hop, Info, Instant, ListenerId, Outgoing, Secrets, Status, Tcp, Tuple};
+use toyos_net_tcp::{Config, ConnId, Counter, Endpoint, Event, Hop, Info, Instant, ListenerId, Outgoing, Secrets, Served, Status, Tcp, Tuple};
 use toyos_net_wire::ipv4::{Ipv4Builder, Ipv4Packet, Ipv4Source, TrafficClass, Ttl};
 use toyos_net_wire::tcp::TcpSegment;
 use toyos_net_wire::Port;
@@ -412,7 +412,7 @@ struct Delta {
     ts: Option<u32>,
 }
 
-/// The answer to the hop question for a 4-tuple at spec time t (`ip.md` §6.7).
+/// The answer to the hop question for a 4-tuple at spec time t.
 pub type Hops = Box<dyn FnMut(i64, &Tuple) -> Hop<()>>;
 
 /// Stack A and its scripted peer.
@@ -437,8 +437,8 @@ pub struct H {
     pub hop: Hops,
     /// Hop questions asked so far.
     pub asked: usize,
-    /// The sink refuses every frame.
-    pub unframed: bool,
+    /// The connections [`pull`] takes turns among.
+    pub round: VecDeque<ConnId>,
 }
 
 impl H {
@@ -464,7 +464,7 @@ impl H {
             events: Vec::new(),
             hop: Box::new(|_, _| Hop::Ready(())),
             asked: 0,
-            unframed: false,
+            round: VecDeque::new(),
         }
     }
 
@@ -544,17 +544,12 @@ impl H {
     pub fn transmit(&mut self) -> Vec<O> {
         let credit = self.credit.unwrap_or(usize::MAX);
         let mut raw = Vec::new();
-        let (now, t, hop, asked, unframed) = (self.now, self.t, &mut self.hop, &mut self.asked, self.unframed);
+        let (now, t, hop, asked, round) = (self.now, self.t, &mut self.hop, &mut self.asked, &mut self.round);
         let ask = |tuple: &Tuple| {
             *asked += 1;
             hop(t, tuple)
         };
-        self.tcp.transmit(now, credit, ask, |out, ()| {
-            if !unframed {
-                raw.push(datagram(out));
-            }
-            !unframed
-        });
+        pull(&mut self.tcp, round, now, credit, ask, |out, ()| raw.push(datagram(out)));
         if let Some(c) = self.credit.as_mut() {
             *c = c.saturating_sub(raw.len());
         }
@@ -818,4 +813,33 @@ pub fn unreachable(code: u8) -> toyos_net_wire::icmp::UnreachableCode {
         toyos_net_wire::icmp::IcmpMessage::DestinationUnreachable { code, .. } => code,
         other => panic!("{other:?}"),
     }
+}
+
+/// A transmit opportunity as a shard composes one, with one segment per turn in place of its
+/// byte round: what [tcp] owes outside a connection first, then each connection of `round` in
+/// turn, `round` keeping its order between opportunities. Returns how many left.
+pub fn pull<T>(
+    tcp: &mut Tcp,
+    round: &mut VecDeque<ConnId>,
+    now: Instant,
+    credit: usize,
+    mut hop: impl FnMut(&Tuple) -> Hop<T>,
+    mut sink: impl FnMut(&Outgoing<'_>, T),
+) -> usize {
+    let mut sent = tcp.transmit_owed(now, credit, &mut hop, &mut sink);
+    for gone in tcp.drain_gone() {
+        round.retain(|id| *id != gone);
+    }
+    round.extend(tcp.drain_eligible());
+    while sent < credit {
+        let Some(id) = round.pop_front() else { break };
+        match tcp.serve(now, id, &mut hop, &mut sink) {
+            Served::Sent => {
+                sent += 1;
+                round.push_back(id);
+            }
+            Served::Done => {}
+        }
+    }
+    sent
 }

@@ -1,5 +1,5 @@
 //! UDP through the shard: what nobody takes is answered by [ip], and what the network says about
-//! a connected socket's datagrams reaches it (`udp-dhcp.md` §U7, §U8; `ip.md` §9.6).
+//! a connected socket's datagrams reaches it.
 
 mod common;
 

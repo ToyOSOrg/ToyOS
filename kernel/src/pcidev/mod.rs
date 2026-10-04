@@ -4,7 +4,8 @@
 //! keeps config space — there is no write path to it from userland — puts the
 //! function in an address space of its own at the unit *before* it enables bus
 //! mastering, programs the interrupt vector into whichever of the function's two
-//! message mechanisms it has, and hands out every device address a descriptor
+//! message mechanisms it has, through its slot's own remapping entry and no
+//! other message, and hands out every device address a descriptor
 //! may carry. Nothing the holder writes into a descriptor can make the device
 //! touch memory the kernel did not grant it: the domain maps the grants — the
 //! claim's own, and the regions of ordinary memory its holder lends it
@@ -57,7 +58,9 @@
 //!
 //! **A function with no address space of its own is not handed over**, because
 //! every grant would answer with a physical address and a descriptor holding
-//! one is an arbitrary read and write over all of memory.
+//! one is an arbitrary read and write over all of memory. **Nor is one whose
+//! interrupts this machine does not remap**, because its message would be
+//! compatibility format, which raises any vector on any CPU.
 //!
 //! **A function masters the bus only once it has memory it may reach.** What
 //! comes back from a process still holds the device addresses of a domain that
@@ -111,8 +114,8 @@ use toyos_pci::slot::{self, Slot};
 use toyos_pci::{af, aperture, bar, express, msix, placement, pm, probe};
 
 use crate::device::{Claim, ClaimError};
-use crate::drivers::pci::{NoCapability, PciDevice, Unarmed};
-use crate::iommu::{DeviceSpace, IommuError};
+use crate::drivers::pci::{arm_claimed_msi, arm_claimed_msix, NoCapability, NoEntry, PciDevice};
+use crate::iommu::{IommuError, OwnSpace, Remapped};
 use crate::mm::policy::{CachePolicy, MmioPolicy};
 use crate::mm::{align_2m, DirectMap, Mmio, PAGE_2M};
 use crate::object::shm::{Region, SharedMemObject};
@@ -169,7 +172,7 @@ static SPACE: [Lock<Option<Space>>; MAX_FUNCTIONS] =
 /// A slot's address space, and the room in it every holder's lent regions go.
 #[derive(Clone, Copy)]
 struct Space {
-    space: DeviceSpace,
+    space: OwnSpace,
     /// [`MAX_GRANT_TOTAL`] of addresses handed out with the domain and never
     /// mapped by anything but [`dma_map`].
     lend: u64,
@@ -214,18 +217,19 @@ struct Aimed {
 static RESIDUE: [Lock<Vec<Aimed>>; MAX_FUNCTIONS] =
     [const { Lock::new(Vec::new()) }; MAX_FUNCTIONS];
 
-/// How a claimed function was made to speak. Both deliver [`VECTORS`]`[slot]`
-/// into the same [`Interrupt`] and the claim answers the same handle either way.
+/// How a claimed function was made to speak, and the slot's remapping entry it
+/// speaks through. Both deliver [`VECTORS`]`[slot]` into the same
+/// [`Interrupt`] and the claim answers the same handle either way.
 enum Armed {
     /// This function's one MSI-X table entry, mapped for the kernel alone.
-    Msix(Mmio),
-    Msi,
+    Msix(Mmio, Remapped),
+    Msi(Remapped),
 }
 
 /// What a live slot drives. The ISR never reads this.
 struct Bound {
     pci: PciDevice,
-    space: DeviceSpace,
+    space: OwnSpace,
     /// [`Space::lend`].
     lend: u64,
     armed: Armed,
@@ -555,6 +559,7 @@ fn account_for(firmware: &[RootBridgeWindow], decoded: &[(u16, u64, u64)]) {
 /// place.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Refusal {
+    NotRemapped,
     NoInterrupt,
     MsixUnusable,
     CapsTruncated,
@@ -587,6 +592,11 @@ enum Refusal {
 impl core::fmt::Display for Refusal {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::NotRemapped => write!(
+                f,
+                "its interrupts would not be remapped on this machine, and a message that is not \
+                 remapped can raise any vector on any CPU"
+            ),
             Self::NoInterrupt => write!(
                 f,
                 "neither its MSI-X nor its MSI could be armed, and a claim with no interrupt \
@@ -746,6 +756,8 @@ pub fn claim(id: PciId) -> Result<(PciFunctionInfo, u8, Claim), ClaimError> {
 /// bus before its domain existed would be reaching physical memory with
 /// whatever addresses its registers still held.
 fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
+    let remapping = crate::iommu::remapping().map_err(|_| Refusal::NotRemapped)?;
+
     // What the slot's previous holder left mapped goes before anything attaches
     // to its domain, and whatever is left of a reset [`release`] started on this
     // function before a register of it is read (PCIe §6.6.2).
@@ -769,15 +781,17 @@ fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
 
     // Then the interrupt, still before a window is cut: a function neither
     // mechanism can be armed on is one no holder could ever be told anything
-    // about.
-    let armed = match pci.enable_msix(VECTORS[slot]) {
-        Ok(entry) => Armed::Msix(entry),
-        Err(Unarmed::Unusable) => return Err(Refusal::MsixUnusable),
-        Err(Unarmed::Blocked) => return Err(Refusal::NoInterrupt),
-        Err(Unarmed::NoTable(NoCapability::Truncated)) => return Err(Refusal::CapsTruncated),
-        Err(Unarmed::NoTable(NoCapability::Absent)) => {
-            pci.enable_msi(VECTORS[slot]).then_some(Armed::Msi).ok_or(Refusal::NoInterrupt)?
+    // about. Every refusal from here drops `message`, which puts the slot's
+    // entry back to not present.
+    let message = crate::iommu::claim_msi(remapping, slot, &pci, VECTORS[slot]);
+    let armed = match arm_claimed_msix(&message) {
+        Ok(entry) => Armed::Msix(entry, message),
+        Err(NoEntry::Unusable) => return Err(Refusal::MsixUnusable),
+        Err(NoEntry::NoTable(NoCapability::Truncated)) => return Err(Refusal::CapsTruncated),
+        Err(NoEntry::NoTable(NoCapability::Absent)) if arm_claimed_msi(&message) => {
+            Armed::Msi(message)
         }
+        Err(NoEntry::NoTable(NoCapability::Absent)) => return Err(Refusal::NoInterrupt),
     };
 
     // From here a refusal has to undo: a vector is armed, and the arms below
@@ -800,10 +814,19 @@ fn bring_up(pci: PciDevice, id: PciId, slot: usize) -> Result<Bound, Refusal> {
             })
         }
         Err(why) => {
-            match armed {
-                Armed::Msix(_) => pci.disable_msix(),
-                Armed::Msi => pci.disable_msi(),
-            }
+            // The entry goes not present once the function stops speaking.
+            let message = match armed {
+                Armed::Msix(_, message) => {
+                    pci.disable_msix();
+                    message
+                }
+                Armed::Msi(message) => {
+                    pci.disable_msi();
+                    message
+                }
+            };
+            pci.drain_messages();
+            drop(message);
             Err(why)
         }
     }
@@ -875,12 +898,7 @@ fn slot_space(slot: usize) -> Result<Space, IommuError> {
     match *held {
         Some(space) => Ok(space),
         None => {
-            let space = DeviceSpace::own()?;
-            // A fresh domain's room starts a quarter of the way up what its
-            // unit translates, so a refusal here is a kernel bug.
-            let lend = space
-                .reserve(MAX_GRANT_TOTAL)
-                .unwrap_or_else(|why| panic!("pcidev: slot {slot}'s new domain has no room to lend in: {why}"));
+            let (space, lend) = OwnSpace::create(MAX_GRANT_TOTAL)?;
             *held = Some(Space { space, lend });
             Ok(Space { space, lend })
         }
@@ -1105,7 +1123,7 @@ fn wait_until(at: u64) {
 /// released holder's own pages rather than faulting, or landing in pages the
 /// allocator has handed somebody else.
 struct Retired {
-    space: DeviceSpace,
+    space: OwnSpace,
     grants: Vec<Grant>,
     quiet_at: u64,
 }
@@ -1395,10 +1413,20 @@ pub fn release(slot: usize) {
 
 fn tear_down(slot: usize, mut bound: Bound) {
     bound.pci.disable_bus_master();
-    match &bound.armed {
-        Armed::Msix(entry) => entry.write_u32(msix::ENTRY_VECTOR_CONTROL, msix::ENTRY_MASKED),
-        Armed::Msi => bound.pci.disable_msi(),
-    }
+    let message = match bound.armed {
+        Armed::Msix(entry, message) => {
+            entry.write_u32(msix::ENTRY_VECTOR_CONTROL, msix::ENTRY_MASKED);
+            message
+        }
+        Armed::Msi(message) => {
+            bound.pci.disable_msi();
+            message
+        }
+    };
+    // Once the function no longer speaks, and before the slot can be reserved
+    // again: its remapping entry goes not present.
+    bound.pci.drain_messages();
+    drop(message);
     crate::iommu::note_user_owned(bound.pci.bus, bound.pci.dev, bound.pci.func, None);
     // **The reset before the domain gives anything back.** With mastering off
     // the function starts nothing new; its grants stay mapped until it is
@@ -1454,8 +1482,6 @@ fn tear_down(slot: usize, mut bound: Bound) {
         bound.id.vendor,
         bound.id.device,
     );
-    // Last: the rest of the claim goes with this drop.
-    drop(bound);
 }
 
 /// What every call a claim answers checks first.

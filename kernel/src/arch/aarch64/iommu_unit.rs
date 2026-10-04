@@ -4,7 +4,11 @@
 use crate::drivers::pci::PciDevice;
 use crate::log;
 
-pub fn init(_rsdp_addr: u64, _devices: &[PciDevice]) {
+pub fn init(
+    _rsdp_addr: u64,
+    _devices: &[PciDevice],
+    _windows: &[toyos_abi::boot::RootBridgeWindow],
+) {
     log!("IOMMU: the SMMUv3 is the port's stage 6; no device is translated this boot");
 }
 
@@ -12,7 +16,7 @@ pub mod domain {
     use crate::iommu::{DomainId, IommuError, Iova, StreamId};
 
     /// No unit is driven, so there is no domain to give.
-    pub fn create() -> Result<DomainId, IommuError> {
+    pub fn create(_room: u64) -> Result<(DomainId, Iova), IommuError> {
         Err(IommuError::NoUnit)
     }
 
@@ -21,10 +25,6 @@ pub mod domain {
     }
 
     pub fn map_at(_id: DomainId, _at: Iova, _phys: u64, _bytes: u64) -> Result<(), IommuError> {
-        unreachable!("no domain exists: `create` refuses every one")
-    }
-
-    pub fn reserve(_id: DomainId, _bytes: u64) -> Result<Iova, IommuError> {
         unreachable!("no domain exists: `create` refuses every one")
     }
 
@@ -60,6 +60,14 @@ pub mod interrupt {
     }
 
     pub fn msi(_source: StreamId, _vector: u8, _dest: u32) -> Result<Msi, Refused> {
+        unreachable!("no interrupt remapping without an IOMMU unit, and `is_armed` said so")
+    }
+
+    pub fn claim(_slot: usize, _source: StreamId, _vector: u8) -> Msi {
+        unreachable!("no interrupt remapping without an IOMMU unit, and `is_armed` said so")
+    }
+
+    pub fn release(_slot: usize, _source: StreamId) {
         unreachable!("no interrupt remapping without an IOMMU unit, and `is_armed` said so")
     }
 

@@ -120,7 +120,7 @@ impl Retransmit {
         }
     }
 
-    /// The timer, or with none running the give-up, which runs on wall time (§11.3): `bound` from
+    /// The timer, or with none running the give-up, which runs on wall time: `bound` from
     /// the first transmission, or from when the first was owed if none has left.
     fn deadline(&self, bound: Duration) -> Instant {
         self.timer.unwrap_or_else(|| self.first.unwrap_or(self.since).after(bound))
@@ -246,7 +246,7 @@ impl SynSent {
     pub fn next_segment<T>(&mut self, local: &Local, now: Instant, exit: &mut dyn Exit<T>) -> Result<bool, NotReady> {
         if let Some(rst) = self.answer {
             let via = exit.ask()?;
-            exit.send(via, &Out::rst(&rst), NO_PAYLOAD)?;
+            exit.send(via, &Out::rst(&rst), NO_PAYLOAD);
             self.answer = None;
             return Ok(true);
         }
@@ -255,7 +255,7 @@ impl SynSent {
         }
         let via = exit.ask()?;
         let syn = Out { seq: self.iss, kind: Kind::Syn(syn_options(local, None, now)), window: local.window, ts: None, sack: NO_BLOCKS };
-        exit.send(via, &syn, NO_PAYLOAD)?;
+        exit.send(via, &syn, NO_PAYLOAD);
         self.timer.handed_off(now, crate::tsval(now, local.ts_offset), true);
         Ok(true)
     }
@@ -275,7 +275,7 @@ pub enum Origin {
     /// A listener's child, and the TIME-WAIT it reopened, which it returns to if it never
     /// reaches ESTABLISHED (RFC 9293 MAY-2 (2)).
     Passive { time_wait: Option<TimeWait> },
-    /// A simultaneous open (MUST-10): the user's queued data and FIN wait for ESTABLISHED.
+    /// A simultaneous open (RFC 9293 MUST-10): the user's queued data and FIN wait for ESTABLISHED.
     Active { buf: Ring, fin: bool },
 }
 
@@ -412,7 +412,7 @@ impl SynRcvd {
     pub fn next_segment<T>(&mut self, local: &Local, now: Instant, exit: &mut dyn Exit<T>) -> Result<bool, NotReady> {
         if let Some(rst) = self.answer {
             let via = exit.ask()?;
-            exit.send(via, &Out::rst(&rst), NO_PAYLOAD)?;
+            exit.send(via, &Out::rst(&rst), NO_PAYLOAD);
             self.answer = None;
             return Ok(true);
         }
@@ -420,7 +420,7 @@ impl SynRcvd {
             let via = exit.ask()?;
             let options = syn_options(local, Some(&self.negotiated), now);
             let syn_ack = Out { seq: self.iss, kind: Kind::SynAck(self.rcv_next(), options), window: local.window, ts: None, sack: NO_BLOCKS };
-            exit.send(via, &syn_ack, NO_PAYLOAD)?;
+            exit.send(via, &syn_ack, NO_PAYLOAD);
             self.dup_answer = false;
             self.timer.handed_off(now, crate::tsval(now, local.ts_offset), self.timer.owed);
             return Ok(true);
@@ -429,7 +429,7 @@ impl SynRcvd {
             let via = exit.ask()?;
             let ack = Kind::Ack { ack: self.rcv_next(), push: false, fin: false };
             let ts = self.negotiated.ts.map(|ts| ts.option(now));
-            exit.send(via, &Out { seq: self.iss.add(1), kind: ack, window: local.window, ts, sack: NO_BLOCKS }, NO_PAYLOAD)?;
+            exit.send(via, &Out { seq: self.iss.add(1), kind: ack, window: local.window, ts, sack: NO_BLOCKS }, NO_PAYLOAD);
             self.ack_owed = false;
             return Ok(true);
         }

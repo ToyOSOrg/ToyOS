@@ -35,9 +35,10 @@
 
 use sha2::{Digest as _, Sha256};
 
-/// The name the supervisor serves swap requests on — a `supervisor-serve` record like
-/// `launcher`.
-pub const PORT: &str = "swap";
+/// The name the supervisor serves swap requests on — a `supervisor-serve`
+/// record — which the manifest names because its holder starts only in a login
+/// session.
+pub const PORT: &str = toyos_manifest::SWAP_PORT;
 
 /// The endowment label [`PORT`] reaches its holder under: a namespace holding
 /// that one name, and never an entry of the holder's `svc` namespace — which

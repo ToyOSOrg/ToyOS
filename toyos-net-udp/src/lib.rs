@@ -6,10 +6,11 @@
 //!
 //! **Back-pressure is a refusal.** Each socket holds at most `limits::TX_DATAGRAMS` accepted
 //! datagrams: a send past it is refused and the caller keeps its datagram. What closed sockets
-//! had accepted is held to `limits::CLOSED_DATAGRAMS` together and takes one turn among the
-//! sockets, so closing never grows the stack or starves another socket. A datagram leaves only
-//! when [`Udp::transmit`] offers it to the device and is built then; one [ip] holds for its next
-//! hop has left this crate and spends no credit, so a socket's next datagram is never behind it.
+//! had accepted is held to `limits::CLOSED_DATAGRAMS` together and is one [`Sender`] beside the
+//! sockets, so closing never starves another socket. The caller's round over senders decides
+//! whose datagram leaves next: a datagram leaves only when [`Udp::serve`] hands it to the caller
+//! and is built then. What [`Udp::drain_eligible`] and [`Udp::drain_gone`] report is held until
+//! the caller drains it, a socket closed while offered included.
 //!
 //! **Refusals are values.** Every refusal is a named [`Counter`] and the [`Error`] the call
 //! returns; one of legacy or insecure input is also a [`Refusal`] naming the socket and the peer.
@@ -98,13 +99,13 @@ pub mod limits {
     pub const EVENTS: usize = 1_024;
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SocketId {
     index: u32,
     generation: u32,
 }
 
-/// Where a socket is bound (§U2.1): a peer only once connected.
+/// Where a socket is bound: a peer only once connected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Binding {
     Any,
@@ -112,8 +113,7 @@ pub enum Binding {
     Connected { local: Ipv4Addr, peer: Ipv4Addr, peer_port: Port },
 }
 
-/// An error the network reported against a connected socket: its next call returns it once
-/// (§U8.3).
+/// An error the network reported against a connected socket: its next call returns it once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SocketError {
     Refused,
@@ -129,7 +129,7 @@ pub enum Error {
     Failed(SocketError),
 }
 
-/// A datagram `recv` delivered (§U5.6).
+/// A datagram `recv` delivered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Received {
     /// Bytes written: the payload, cut to the buffer.
@@ -195,7 +195,8 @@ struct Socket {
     rx_full: u64,
     tx: VecDeque<Queued>,
     tx_bytes: usize,
-    active: bool,
+    /// In `eligible` or the caller's round.
+    offered: bool,
     pending: Option<SocketError>,
     ttl: Ttl,
     multicast_ttl: Ttl,
@@ -209,11 +210,23 @@ struct Slot {
     socket: Option<Socket>,
 }
 
-/// Whose datagram leaves next: a socket's, or one a closed socket had accepted.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Turn {
-    Socket(u32),
+/// A flow of the caller's round: one socket's datagrams, or those closed sockets had accepted,
+/// together.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Sender {
+    Socket(SocketId),
     Closed,
+}
+
+/// What [`Udp::serve`] handed the caller.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Served {
+    /// A datagram, and another waits behind it.
+    More,
+    /// The sender's last datagram: it leaves the round, and is offered again once it has another.
+    Last,
+    /// Nothing: the sender has no datagram, or names a socket since closed.
+    Nothing,
 }
 
 #[derive(Debug, Default)]
@@ -221,9 +234,13 @@ pub struct Udp {
     slots: Vec<Slot>,
     free: Vec<u32>,
     ports: BTreeMap<Port, u32>,
-    /// One turn per socket with datagrams queued, and one for `closed` while it holds any.
-    turns: VecDeque<Turn>,
-    /// Datagrams closed sockets had accepted: they still leave (§U9 (3)), at most
+    /// Senders offered to the caller's round since it last drained them.
+    eligible: Vec<Sender>,
+    /// Sockets closed while offered to the caller's round, since it last drained them.
+    gone: Vec<Sender>,
+    /// `closed` is in `eligible` or the caller's round.
+    closed_offered: bool,
+    /// Datagrams closed sockets had accepted: they still leave, at most
     /// `limits::CLOSED_DATAGRAMS` of them.
     closed: VecDeque<(Port, Queued)>,
     counters: Counters,
@@ -280,7 +297,7 @@ impl Udp {
         self.slots.get_mut(usize::try_from(index).ok()?)?.socket.as_mut()
     }
 
-    /// RFC 6056 Algorithm 1 (§U2.4): the first candidate is uniform over the range, then each
+    /// RFC 6056 Algorithm 1: the first candidate is uniform over the range, then each
     /// next port in turn, until a free one or every port was tried.
     fn ephemeral(&self, draw: u32) -> Option<Port> {
         let offset = u16::try_from(draw.checked_rem(u32::from(limits::EPHEMERAL_COUNT)).unwrap_or(0)).unwrap_or(0);
@@ -291,7 +308,7 @@ impl Udp {
     }
 
     /// Binds a socket to `addr`, 0.0.0.0 meaning any, and `port`, or an ephemeral one when
-    /// `None`, which spends the one draw (§U2).
+    /// `None`, which spends the one draw.
     pub fn bind(&mut self, ip: &Ip, addr: Ipv4Addr, port: Option<Port>, draw: impl FnOnce() -> u32) -> Result<SocketId, Error> {
         let binding = if addr.is_unspecified() {
             Binding::Any
@@ -324,7 +341,7 @@ impl Udp {
             rx_full: 0,
             tx: VecDeque::new(),
             tx_bytes: 0,
-            active: false,
+            offered: false,
             pending: None,
             ttl: Ttl::DEFAULT,
             multicast_ttl: Ttl::LINK,
@@ -354,7 +371,7 @@ impl Udp {
         self.socket(id).map(|s| s.rx_full)
     }
 
-    /// Only netstack's own sockets: POSIX's `SO_BROADCAST` (§U4.3).
+    /// Only netstack's own sockets: POSIX's `SO_BROADCAST`.
     pub fn set_broadcast(&mut self, id: SocketId, permitted: bool) -> Result<(), Error> {
         self.socket(id).map(|s| s.broadcast = permitted)
     }
@@ -367,12 +384,12 @@ impl Udp {
     }
 
     /// Marks netstack's DHCP client's socket: the only one that may send from 0.0.0.0, and the only
-    /// one the acquisition exception delivers to (§U4.4 (3), §U5.3).
+    /// one the acquisition exception delivers to.
     pub fn set_acquisition(&mut self, id: SocketId) -> Result<(), Error> {
         self.socket(id).map(|s| s.acquisition = true)
     }
 
-    /// The destination classes of §U4.2 and §U3 (2) that no send or connect may name.
+    /// The destinations no send or connect may name.
     fn unusable(ip: &Ip, addr: Ipv4Addr) -> Option<Counter> {
         if addr.is_loopback() {
             Some(Counter::SendLoopback)
@@ -386,7 +403,7 @@ impl Udp {
     }
 
     /// Connects to one unicast peer; the local address is fixed now, and datagrams already
-    /// queued from anyone else are dropped (§U3).
+    /// queued from anyone else are dropped.
     pub fn connect(&mut self, ip: &mut Ip, id: SocketId, peer: Ipv4Addr, peer_port: u16) -> Result<(), Error> {
         let socket = self.socket(id)?;
         let (binding, from_any, local_port) = (socket.binding, socket.from_any, socket.port);
@@ -421,7 +438,7 @@ impl Udp {
         Ok(())
     }
 
-    /// Queues `payload` for `destination:port` (§U4). Accepted means queued, not sent.
+    /// Queues `payload` for `destination:port`. Accepted means queued, not sent.
     pub fn send_to(&mut self, ip: &mut Ip, id: SocketId, destination: Ipv4Addr, port: u16, payload: &[u8]) -> Result<(), Error> {
         self.submit(ip, id, None, destination, port, payload)
     }
@@ -439,7 +456,7 @@ impl Udp {
     }
 
     /// The acquisition socket's send, naming its source: 0.0.0.0 to the limited broadcast, or an
-    /// assigned address (§U4.4 (3)).
+    /// assigned address.
     pub fn send_from(&mut self, ip: &mut Ip, id: SocketId, source: Ipv4Addr, destination: Ipv4Addr, port: u16, payload: &[u8]) -> Result<(), Error> {
         self.submit(ip, id, Some(source), destination, port, payload)
     }
@@ -505,13 +522,13 @@ impl Udp {
         let ttl = if destination.is_multicast() { multicast_ttl } else { ttl };
         socket.tx.push_back(Queued { source, destination, port, ttl, payload: payload.to_vec() });
         socket.tx_bytes = bytes;
-        if !core::mem::replace(&mut socket.active, true) {
-            self.turns.push_back(Turn::Socket(id.index));
+        if !core::mem::replace(&mut socket.offered, true) {
+            self.eligible.push(Sender::Socket(id));
         }
         Ok(())
     }
 
-    /// The oldest datagram, cut to `out` (the rest discarded, U-7), or `None` when none waits.
+    /// The oldest datagram, cut to `out` (the rest discarded), or `None` when none waits.
     pub fn recv(&mut self, id: SocketId, out: &mut [u8]) -> Result<Option<Received>, Error> {
         let socket = self.socket(id)?;
         if let Some(error) = socket.pending.take() {
@@ -547,22 +564,21 @@ impl Udp {
         slot.generation = slot.generation.wrapping_add(1);
         self.free.push(id.index);
         self.ports.remove(&socket.port);
-        if socket.active {
-            self.turns.retain(|t| *t != Turn::Socket(id.index));
-        }
         self.counters.add(Counter::RxDiscardedOnClose, u64::try_from(socket.rx.len()).unwrap_or(u64::MAX));
         let room = limits::CLOSED_DATAGRAMS.saturating_sub(self.closed.len());
         let discarded = socket.tx.len().saturating_sub(room);
         self.counters.add(Counter::TxDiscardedOnClose, u64::try_from(discarded).unwrap_or(u64::MAX));
-        let turn = self.closed.is_empty();
+        if socket.offered {
+            self.gone.push(Sender::Socket(id));
+        }
         self.closed.extend(socket.tx.into_iter().take(room).map(|q| (socket.port, q)));
-        if turn && !self.closed.is_empty() {
-            self.turns.push_back(Turn::Closed);
+        if !self.closed.is_empty() && !core::mem::replace(&mut self.closed_offered, true) {
+            self.eligible.push(Sender::Closed);
         }
         Ok(())
     }
 
-    /// A datagram [ip] admitted (§U5).
+    /// A datagram [ip] admitted.
     pub fn receive(&mut self, now: Instant, arrival: &Arrival<'_>, datagram: &UdpDatagram<'_>) -> Verdict {
         self.count(Counter::Rx);
         if datagram.checksum() == UdpChecksum::Absent {
@@ -625,7 +641,7 @@ impl Udp {
         })
     }
 
-    /// An ICMP error [ip] attributed to a UDP datagram of ours (§U8): only the connected socket
+    /// An ICMP error [ip] attributed to a UDP datagram of ours: only the connected socket
     /// whose whole 4-tuple it quotes hears it.
     pub fn icmp_error(&mut self, error: &TransportError) {
         if error.transport != Transport::Udp {
@@ -650,56 +666,65 @@ impl Udp {
         self.count(Counter::IcmpErrorDelivered);
     }
 
-    /// [ip] could not reach the next hop of a datagram this crate handed it (§U8.3 (4)).
+    /// [ip] could not reach the next hop of a datagram this crate handed it.
     pub fn unreachable(&mut self, flow: &Flow) {
         if let Some(socket) = self.connected(flow) {
             socket.pending = Some(SocketError::Unreachable);
         }
     }
 
-    /// A transmit opportunity with room for `credit` frames: one datagram per turn, each socket
-    /// with datagrams queued taking one and closed sockets' datagrams together one more, each built
-    /// as `sink` takes it. `sink` answers whether it spent a frame; one [ip] holds for its next hop
-    /// spends none. Returns the frames spent.
-    pub fn transmit(&mut self, credit: usize, mut sink: impl FnMut(&UdpOut<'_>) -> bool) -> usize {
-        let mut spent = 0usize;
-        while spent < credit {
-            let Some(turn) = self.turns.pop_front() else { break };
-            let (port, queued) = match turn {
-                Turn::Closed => {
-                    let Some(closed) = self.closed.pop_front() else { continue };
-                    if !self.closed.is_empty() {
-                        self.turns.push_back(Turn::Closed);
-                    }
-                    closed
-                }
-                Turn::Socket(index) => {
-                    let Some(socket) = self.at(index) else { continue };
-                    let Some(queued) = socket.tx.pop_front() else {
-                        socket.active = false;
-                        continue;
-                    };
-                    socket.tx_bytes = socket.tx_bytes.saturating_sub(queued.payload.len());
-                    let port = socket.port;
-                    if socket.tx.is_empty() {
-                        socket.active = false;
-                    } else {
-                        self.turns.push_back(turn);
-                    }
-                    (port, queued)
-                }
-            };
-            self.count(Counter::Tx);
-            let out = UdpOut {
-                source: queued.source,
-                destination: queued.destination,
-                ttl: queued.ttl,
-                datagram: UdpBuilder { source: port, destination: queued.port, data: &queued.payload },
-            };
-            if sink(&out) {
-                spent = spent.saturating_add(1);
+    /// Senders offered to the caller's round since the last call, each once, in the order they
+    /// became eligible, less the sockets closed since: one is offered again only after
+    /// [`Self::serve`] answered [`Served::Last`] or [`Served::Nothing`] for it.
+    pub fn drain_eligible(&mut self) -> impl Iterator<Item = Sender> + '_ {
+        let Self { eligible, slots, .. } = self;
+        eligible.drain(..).filter(|sender| match sender {
+            Sender::Socket(id) => slots.get(usize::try_from(id.index).unwrap_or(usize::MAX)).is_some_and(|s| s.generation == id.generation && s.socket.is_some()),
+            Sender::Closed => true,
+        })
+    }
+
+    /// Sockets closed while offered to the caller since the last call, each once: the caller
+    /// takes each out of its round, where one it never drained is not.
+    pub fn drain_gone(&mut self) -> alloc::vec::Drain<'_, Sender> {
+        self.gone.drain(..)
+    }
+
+    /// The oldest datagram of `sender`, built as `sink` takes it; whether it leaves the stack then
+    /// or waits in [ip] for its next hop is the caller's.
+    pub fn serve(&mut self, sender: Sender, sink: impl FnOnce(&UdpOut<'_>)) -> Served {
+        let (port, queued, last) = match sender {
+            Sender::Closed => {
+                let Some((port, queued)) = self.closed.pop_front() else {
+                    self.closed_offered = false;
+                    return Served::Nothing;
+                };
+                let last = self.closed.is_empty();
+                self.closed_offered = !last;
+                (port, queued, last)
             }
+            Sender::Socket(id) => {
+                let Ok(socket) = self.socket(id) else { return Served::Nothing };
+                let Some(queued) = socket.tx.pop_front() else {
+                    socket.offered = false;
+                    return Served::Nothing;
+                };
+                socket.tx_bytes = socket.tx_bytes.saturating_sub(queued.payload.len());
+                socket.offered = !socket.tx.is_empty();
+                (socket.port, queued, !socket.offered)
+            }
+        };
+        self.count(Counter::Tx);
+        sink(&UdpOut {
+            source: queued.source,
+            destination: queued.destination,
+            ttl: queued.ttl,
+            datagram: UdpBuilder { source: port, destination: queued.port, data: &queued.payload },
+        });
+        if last {
+            Served::Last
+        } else {
+            Served::More
         }
-        spent
     }
 }

@@ -24,7 +24,7 @@ impl Ip {
 
     /// Adds `addr/prefix_len` to `iface` as tentative: conflict detection runs before it is used
     /// (RFC 5227 §2.1). The address already held with another prefix length takes the new one
-    /// and keeps its state, which is how a renewal arrives (§2.2 (4)).
+    /// and keeps its state, which is how a renewal arrives.
     pub fn add_address(&mut self, now: Instant, iface: IfIndex, addr: Ipv4Addr, prefix_len: u8) -> Result<(), Counter> {
         let now = self.clock(now);
         let cidr = match Cidr::new(addr, prefix_len) {
@@ -55,7 +55,7 @@ impl Ip {
     }
 
     /// Removes one of the interface's addresses; gateways that leave every usable prefix go with
-    /// it (§3.2).
+    /// it.
     pub fn remove_address(&mut self, now: Instant, iface: IfIndex, addr: Ipv4Addr) -> Result<(), Counter> {
         let now = self.clock(now);
         let Some((i, mut cx)) = self.split(now, iface) else { return Err(self.unknown()) };
@@ -85,7 +85,7 @@ impl Ip {
     }
 
     /// Every neighbour entry goes, probing is abandoned, IGMP stops and nothing waits to leave;
-    /// addresses and gateways stay (§6.10).
+    /// addresses and gateways stay.
     pub fn link_down(&mut self, now: Instant, iface: IfIndex) -> Result<(), Counter> {
         let now = self.clock(now);
         let Some((i, mut cx)) = self.split(now, iface) else { return Err(self.unknown()) };
@@ -118,7 +118,7 @@ impl Ip {
     }
 
     /// A transport's advice about its peer `remote`; it lands on the next hop's entry, the
-    /// gateway's for an off-link peer (§6.9).
+    /// gateway's for an off-link peer.
     pub fn advise(&mut self, now: Instant, remote: Ipv4Addr, advice: Advice) {
         let now = self.clock(now);
         let Ok(route) = route::lookup(&self.ifaces, remote, Source::Any, None) else { return };
@@ -127,8 +127,8 @@ impl Ip {
         nud::advise(i, &mut cx, next_hop, advice == Advice::Confirmed);
     }
 
-    /// Whether a flow may build a segment for `next_hop` now (§6.7): a flow never parks one in
-    /// [ip]. A request this queues prefers the flow's `source` (§6.3).
+    /// Whether a flow may build a segment for `next_hop` now: a flow never parks one in
+    /// [ip]. A request this queues prefers the flow's `source`.
     pub fn resolve(&mut self, now: Instant, iface: IfIndex, next_hop: Ipv4Addr, source: Ipv4Addr) -> Resolution {
         let now = self.clock(now);
         let Some((i, mut cx)) = self.split(now, iface) else { return Resolution::Failed };

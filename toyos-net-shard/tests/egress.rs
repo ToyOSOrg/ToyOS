@@ -1,5 +1,5 @@
-//! The shard's egress: [ip]'s frames ahead of the data flows (`ip.md` §5.4), and a TCP flow that
-//! builds nothing until its next hop resolves (`ip.md` §6.7, §9.6).
+//! The shard's egress: [ip]'s frames ahead of the data flows, and a TCP flow that builds nothing
+//! until its next hop resolves.
 
 mod common;
 
@@ -77,14 +77,14 @@ fn s_pl_013_shard_a_connect_to_no_one_fails_at_once_as_host_unreachable() {
     net.advance(Duration::from_millis(2_999));
     assert_eq!(net.nodes[a].shard.status(id).unwrap().state, State::SynSent, "resolution is still under way");
 
-    // Three requests unanswered: FAILED at 3,000, and the connect with it (IP-D9).
+    // Three requests unanswered: FAILED at 3,000, and the connect with it.
     net.advance(Duration::from_millis(1));
     assert_eq!(net.nodes[a].shard.status(id).unwrap().failure, Some(HOST_UNREACHABLE));
     let (now, mut buf) = (net.now(), [0u8; 16]);
     assert_eq!(net.nodes[a].shard.recv(now, id, &mut buf), Err(Error::Failed(HOST_UNREACHABLE)));
     let counters = net.nodes[a].shard.tcp_counters();
     assert_eq!((counters.get(Counter::Rto), counters.get(Counter::NextHopFailed)), (0, 1));
-    // The question peeked the FAILED entry: it refused no datagram (`ip.md` §6.7 (2)).
+    // The question peeked the FAILED entry: it refused no datagram.
     assert_eq!(net.nodes[a].shard.ip().counters().get(IpCounter::NbFailedRefused), 0);
 }
 
@@ -106,7 +106,7 @@ fn routes_refused(net: &Net, node: usize) -> u64 {
     net.nodes[node].shard.ip().counters().get(IpCounter::RouteNoSourceAddress)
 }
 
-/// A forgets every neighbour: a link down and up again (`ip.md` §6.10).
+/// A forgets every neighbour: a link down and up again.
 fn forget(net: &mut Net, node: usize) {
     let now = net.now();
     net.nodes[node].shard.link_down(now).unwrap();
@@ -321,7 +321,7 @@ fn s_pl_015_shard_a_time_wait_ack_waits_for_its_next_hop() {
 }
 
 /// A established to B, then A holding B only as STALE: both forget, and B's datagram to A's
-/// socket on port 9 makes B ask for A, which is how A learns B (`ip.md` §6.8 (b)).
+/// socket on port 9 makes B ask for A, which is how A learns B.
 fn stale_peer() -> (Net, usize, toyos_net_tcp::ConnId) {
     let (mut net, a, b) = segment();
     let (to_b, _) = established(&mut net, a, b);
@@ -351,24 +351,6 @@ fn s_ip_nud_026_shard_a_segment_to_a_stale_neighbour_moves_it_to_delay() {
     assert!(matches!(state_of_b(&net, a), Some(Nud::Delay(_))), "{:?}", state_of_b(&net, a));
 }
 
-// No id: the alternation stands until architecture §3.3's deficit round-robin (DRR-01 to DRR-03)
-// replaces it.
-#[test]
-fn tcp_and_udp_take_turns_frame_by_frame() {
-    let (mut net, a, b) = segment();
-    let (to_b, _) = established(&mut net, a, b);
-    net.nodes[a].credit = Credit::None;
-    let now = net.now();
-    let socket = net.nodes[a].shard.bind(A, None, || 0).unwrap();
-    for _ in 0..3 {
-        net.nodes[a].shard.send_to(now, socket, B, 9, b"x").unwrap();
-    }
-    net.nodes[a].shard.send(now, to_b, &[0x55; 8_000]).unwrap();
-    let kinds: Vec<char> = opportunity(&mut net, a, 6).iter().map(|f| f.chars().next().unwrap()).collect();
-    assert!(kinds.windows(2).all(|w| w[0] != w[1]), "{kinds:?}");
-    assert_eq!(kinds.iter().filter(|&&k| k == 'I').count(), 3, "three datagrams among six frames: {kinds:?}");
-}
-
 #[test]
 fn s_ip_nud_009_shard_an_acknowledgment_ends_delay() {
     let (mut net, a, to_b) = stale_peer();
@@ -376,7 +358,7 @@ fn s_ip_nud_009_shard_an_acknowledgment_ends_delay() {
     net.nodes[a].shard.send(now, to_b, b"y").unwrap();
     net.settle();
     assert!(matches!(state_of_b(&net, a), Some(Nud::Delay(_))));
-    // B's ACK advances SND.UNA: TCP's positive advice reaches [ip] (`ip.md` §6.9).
+    // B's ACK advances SND.UNA: TCP's positive advice reaches [ip].
     net.advance(Duration::from_millis(100));
     assert!(matches!(state_of_b(&net, a), Some(Nud::Reachable(_))), "{:?}", state_of_b(&net, a));
 }

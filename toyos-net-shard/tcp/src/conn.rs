@@ -897,7 +897,7 @@ impl Sync {
     // ---- timers ----
 
     /// The next probe's time; with one owed, the give-up's, which runs on wall time whether or not
-    /// the probes leave (§11.3): the owed one and the rest at their interval, unanswered.
+    /// the probes leave: the owed one and the rest at their interval, unanswered.
     fn keepalive_at(&self, ctx: &Ctx<'_>) -> Option<Instant> {
         let ka = ctx.options.keepalive?;
         let open = matches!(self.phase, Phase::Established | Phase::CloseWait | Phase::FinWait2);
@@ -1045,7 +1045,8 @@ impl Sync {
         let ts = self.ts.map(|ts| ts.option(now));
         let out = Out { seq, kind: Kind::Ack { ack: self.rx.next, push, fin }, window, ts, sack };
         let offset = self.tx.offset(seq).min(self.tx.buf.len());
-        exit.send(via, &out, self.tx.buf.slices(offset, usize::try_from(len).unwrap_or(0)))
+        exit.send(via, &out, self.tx.buf.slices(offset, usize::try_from(len).unwrap_or(0)));
+        Ok(())
     }
 
     /// A segment without sequence space at `seq`: it discharges every owed acknowledgment.

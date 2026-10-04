@@ -12,7 +12,7 @@ toyos-net-tcp = { path = "../tcp" }
 toyos-net-wire = { path = "../../toyos-net-wire" }
 
 [dev-dependencies]
-# The capture's independent oracle (architecture §5.3 (f)): a published pcap reader and a published
+# The capture's independent oracle: a published pcap reader and a published
 # Ethernet/IPv4/TCP parser, used as black boxes.
 etherparse = "0.21.0"
 pcap-file = "2.0.0"

@@ -8,7 +8,7 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use common::*;
-use toyos_net_tcp::{Counter, Failure, Hop, Keepalive, Options, SoftError, State};
+use toyos_net_tcp::{Counter, Failure, Hop, Keepalive, Options, Served, SoftError, State};
 use toyos_net_wire::icmp::UnreachableCode;
 
 const C: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 3);
@@ -190,21 +190,6 @@ fn s_pl_009_a_handshake_gives_up_without_credit() {
     assert_eq!(h.tcp.next_deadline(), None);
 }
 
-#[test]
-fn s_pl_001_a_frame_the_sink_refuses_never_left() {
-    let mut h = fixture_e();
-    h.unframed = true;
-    nothing(&h.send(0, 1000));
-    let info = h.info();
-    assert_eq!((info.snd_nxt, info.rtx_timer), (info.snd_una, None), "nothing of it counts as sent");
-    assert_eq!(h.count(Counter::FrameRefused), 1, "offered once in the opportunity that refused it");
-    nothing(&h.at(4_999));
-    assert_eq!(h.count(Counter::FrameRefused), 2, "and once more at the next");
-    h.unframed = false;
-    expect(&h.at(5_000), &["SEQ=1001 ACK=5001 LEN=1000"]);
-    assert_eq!(h.info().rtx_timer, Some(h.instant(5_200)), "timed from its hand-off");
-}
-
 /// Two in-order segments from B in one receive pass at t = 1: A owes an ACK at once.
 fn two_in_order(h: &mut H) -> Vec<O> {
     let mut outs = h.at(1);
@@ -236,17 +221,6 @@ fn s_pl_014_an_owed_ack_outlasts_an_unreachable_next_hop() {
 }
 
 #[test]
-fn s_pl_001_an_ack_the_sink_refuses_stays_owed() {
-    let mut h = fixture_e();
-    h.unframed = true;
-    nothing(&two_in_order(&mut h));
-    assert_eq!(h.count(Counter::FrameRefused), 1);
-    h.unframed = false;
-    expect(&h.at(2), &["SEQ=1001 ACK=5201 CTL=ACK LEN=0"]);
-    nothing(&h.at(1_000));
-}
-
-#[test]
 fn s_pl_012_a_window_update_offers_nothing_until_it_leaves() {
     // B fills A's buffer of two segments, and A's window is shut.
     let mut h = client(2_920, seg(5000).ack(1001).syn().wnd(65_535).mss(1460));
@@ -273,45 +247,6 @@ fn s_pl_012_an_ack_owed_in_syn_received_waits_for_its_next_hop() {
     nothing(&h.at(99));
     expect(&woken(&mut h, 100), &["SEQ=1001 ACK=5001 CTL=ACK LEN=0"]);
     nothing(&h.at(999));
-
-    let mut h = listening();
-    expect(&h.input(0, seg(5000).syn().mss(1460)), &["CTL=SYN,ACK"]);
-    h.unframed = true;
-    nothing(&h.input(10, outside()));
-    assert_eq!(h.count(Counter::FrameRefused), 1);
-    h.unframed = false;
-    expect(&h.at(11), &["SEQ=1001 ACK=5001 CTL=ACK LEN=0"]);
-    nothing(&h.at(999));
-}
-
-#[test]
-fn s_pl_015_what_is_owed_outside_a_connection_outlasts_a_refused_frame() {
-    let mut h = fixture_e();
-    h.unframed = true;
-    nothing(&h.call(0, |tcp, now, id| tcp.abort(now, id).unwrap()).1);
-    assert_eq!(h.count(Counter::FrameRefused), 1);
-    h.unframed = false;
-    expect(&h.at(1), &["SEQ=1001 ACK=5001 CTL=RST,ACK"]);
-    nothing(&h.at(2));
-
-    let mut h = H::new(65_535);
-    h.unframed = true;
-    nothing(&h.input(0, seg(5000).syn().from(B, 40_000).to(A, 81)));
-    assert_eq!(h.count(Counter::FrameRefused), 1);
-    h.unframed = false;
-    expect(&h.at(1), &["SEQ=0 ACK=5001 CTL=RST,ACK"]);
-    nothing(&h.at(2));
-
-    let mut h = fixture_e();
-    h.close(0);
-    h.input(10, seg(5001).ack(1002));
-    expect(&h.input(20, seg(5001).ack(1002).fin()), &["SEQ=1002 ACK=5002"]);
-    h.unframed = true;
-    nothing(&h.input(1_000, seg(5001).ack(1002).fin()));
-    assert_eq!(h.count(Counter::FrameRefused), 1);
-    h.unframed = false;
-    expect(&h.at(1_001), &["SEQ=1002 ACK=5002 CTL=ACK"]);
-    nothing(&h.at(1_002));
 }
 
 /// B's next hop as `answer` gives it at spec time t; every other next hop is known.
@@ -374,8 +309,8 @@ fn s_pl_012_a_flow_builds_nothing_while_its_next_hop_is_pending() {
     nothing(&h.at(499));
     h.credit = None;
     let outs = woken(&mut h, 500);
-    expect(&outs, &["SEQ=1001 ACK=5001 LEN=1000", "SEQ=1001 LEN=1000"]);
-    assert_eq!((outs[0].dst, outs[1].dst), ((B, 80), (C, 80)), "E's segment, then the second's retransmission");
+    expect(&outs, &["SEQ=1001 LEN=1000", "SEQ=1001 ACK=5001 LEN=1000"]);
+    assert_eq!((outs[0].dst, outs[1].dst), ((C, 80), (B, 80)), "the second's retransmission, then E's segment, woken to the round's tail");
     assert_eq!(h.info().rtx_timer, Some(h.instant(700)));
 }
 
@@ -443,7 +378,7 @@ fn s_pl_014_a_synchronized_connection_records_host_unreachable_soft() {
     nothing(&h.at(900_000));
     assert_eq!(h.status().failure, Some(HOST_UNREACHABLE), "not \"timed out\"");
 
-    // §16: only a segment not built counts, so a connection with nothing due is not asked.
+    // Only a segment not built counts, so a connection with nothing due is not asked.
     let mut h = fixture_e();
     h.hop = hop_b(|_| Hop::Unreachable);
     nothing(&h.input(1, seg(5001).ack(1001)));
@@ -608,23 +543,43 @@ fn s_pl_015_resets_waiting_for_their_next_hop_stay_bounded() {
     assert_eq!(woken(&mut h, 50).len(), 64);
     expect(&h.input(60, seg(5000).syn().from(B, 41_000).to(A, 81)), &["CTL=RST,ACK"]);
 
-    // An answer whose frame was refused is held too: 63 waiting and it are 64.
+    // An answer waiting for credit is held too: 63 waiting and it are 64.
     let mut h = H::new(65_535);
     h.hop = hop_b(|_| Hop::Pending);
     for p in 0..63u16 {
         nothing(&h.input(0, seg(5000).syn().from(B, 40_000 + p).to(A, 81)));
     }
-    h.unframed = true;
-    nothing(&h.input(0, seg(5000).syn().from(C, 40_000).to(A, 81)));
-    assert_eq!((h.count(Counter::FrameRefused), h.count(Counter::ClosedRstLimited)), (1, 0));
     h.credit = Some(0);
+    nothing(&h.input(0, seg(5000).syn().from(C, 40_000).to(A, 81)));
+    assert_eq!(h.count(Counter::ClosedRstLimited), 0);
     nothing(&h.input(0, seg(5000).syn().from(C, 40_001).to(A, 81)));
     assert_eq!(h.count(Counter::ClosedRstLimited), 1);
     // It leaves, and the 63 still waiting leave room for one, asked again or not.
-    h.unframed = false;
     h.credit = None;
     expect(&h.at(1), &["CTL=RST,ACK"]);
     expect(&h.input(2, seg(5000).syn().from(C, 40_002).to(A, 81)), &["CTL=RST,ACK"]);
     h.tcp.wake_all();
     expect(&h.input(3, seg(5000).syn().from(C, 40_003).to(A, 81)), &["CTL=RST,ACK"]);
+}
+
+// No id: a connection freed before the caller drained it is never offered, and one freed while
+// offered is named once, for the caller to take out of its round; its id names nothing after.
+#[test]
+fn a_freed_connection_leaves_no_turn_behind() {
+    let mut h = H::new(65_535);
+    let now = h.now();
+    for _ in 0..1_000 {
+        let id = h.tcp.connect(now, A, Some(port(49154)), ep(B, 81)).unwrap();
+        h.tcp.abort(now, id).unwrap();
+    }
+    assert_eq!(h.tcp.drain_eligible().count(), 0);
+    assert_eq!(h.tcp.drain_gone().count(), 1_000);
+    let id = h.tcp.connect(now, A, Some(port(49154)), ep(B, 81)).unwrap();
+    assert_eq!(h.tcp.drain_eligible().collect::<Vec<_>>(), [id]);
+    h.tcp.abort(now, id).unwrap();
+    assert_eq!(h.tcp.drain_gone().collect::<Vec<_>>(), [id]);
+    // A caller that served it still would reach nothing, though another connection took its slot.
+    h.tcp.connect(now, A, Some(port(49155)), ep(B, 81)).unwrap();
+    let served = h.tcp.serve(now, id, |_| Hop::Ready(()), |_, ()| panic!("a freed id names nothing"));
+    assert_eq!(served, Served::Done);
 }

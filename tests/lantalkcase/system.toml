@@ -23,7 +23,9 @@ devices = ["pci:8086:15fc"]
 
 [programs.sshserver]
 service = true
-receives = ["netstack", "launcher"]
+receives = ["netstack"]
+starts = ["toybox", "swap"]
+login = true
 
 # The host replaces netstack on this boot without rebooting it.
 [programs.swap]

@@ -173,7 +173,7 @@ fn s_dhcp_dh_074_prop_every_message_is_built_one_way() {
             assert!(p[end + 1..].iter().all(|b| *b == 0), "zero padding");
             let codes: Vec<u8> = found.iter().map(|(c, _)| *c).collect();
             let order: Vec<u8> = ORDER.iter().copied().filter(|c| codes.contains(c)).collect();
-            assert_eq!(codes, order, "seed {seed}: §D2.2's order");
+            assert_eq!(codes, order, "seed {seed}: `ORDER`'s order");
             let kind = found[0].1[0];
             let ciaddr = Ipv4Addr::new(p[12], p[13], p[14], p[15]);
             let expected: Vec<u8> = match (kind, codes.contains(&54), codes.contains(&50), ciaddr.is_unspecified()) {

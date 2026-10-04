@@ -1,11 +1,11 @@
-//! §U2: sockets and binding.
+//! Sockets and binding.
 
 mod common;
 
 use std::net::Ipv4Addr;
 
 use common::*;
-use toyos_net_udp::{Binding, Counter, Error};
+use toyos_net_udp::{Binding, Counter, Error, Sender};
 
 fn refused(counter: Counter) -> Result<toyos_net_udp::SocketId, Error> {
     Err(Error::Refused(counter))
@@ -112,4 +112,25 @@ fn s_udp_us_011_close_frees_the_port_at_once() {
     u.udp.close(id).unwrap();
     assert!(u.bind(ANY, 5001).is_ok());
     assert_eq!(u.udp.binding(id), Err(Error::NoSuchSocket), "the old id names nothing");
+}
+
+// No id: a closed socket's turn goes with it. One the caller has not drained is never offered;
+// one closed while offered is named once, for the caller to take out of its round.
+#[test]
+fn closing_leaves_no_turn_behind() {
+    let mut u = U::uf();
+    for _ in 0..1_000 {
+        let id = u.bind(ANY, 5001).unwrap();
+        u.udp.send_to(&mut u.ip, id, B, 9, b"x").unwrap();
+        u.udp.close(id).unwrap();
+    }
+    assert_eq!(u.udp.drain_eligible().collect::<Vec<_>>(), [Sender::Closed]);
+    assert_eq!(u.udp.drain_gone().count(), 1_000);
+
+    let id = u.bind(ANY, 5002).unwrap();
+    u.udp.send_to(&mut u.ip, id, B, 9, b"x").unwrap();
+    assert_eq!(u.udp.drain_eligible().collect::<Vec<_>>(), [Sender::Socket(id)]);
+    u.udp.close(id).unwrap();
+    assert_eq!(u.udp.drain_gone().collect::<Vec<_>>(), [Sender::Socket(id)]);
+    assert_eq!(u.udp.drain_eligible().count(), 0, "`closed` is already offered");
 }

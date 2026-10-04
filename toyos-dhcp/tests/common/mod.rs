@@ -1,4 +1,4 @@
-//! Fixtures DS and DB, a scripted random source, the §V vectors, server messages built here and
+//! Fixtures DS and DB, a scripted random source, the byte vectors `V_*`, server messages built here and
 //! checked against those vectors, and the stack a transmission is framed by.
 
 #![allow(dead_code)]
@@ -276,16 +276,14 @@ pub fn framed(t: &Transmission) -> Vec<u8> {
     udp.set_broadcast(socket, true).unwrap();
     udp.send_from(&mut ip, socket, t.source, t.destination, 67, &t.payload).unwrap();
     let mut frame = Vec::new();
-    udp.transmit(1, |out| {
+    let sent = udp.serve(toyos_net_udp::Sender::Socket(socket), |out| {
         let mut buf = [0u8; FRAME];
         match ip.send_udp(now, out, &mut buf) {
-            Ok(Sent::Frame(n)) => {
-                frame = buf[..n].to_vec();
-                true
-            }
+            Ok(Sent::Frame(n)) => frame = buf[..n].to_vec(),
             other => panic!("{other:?}"),
         }
     });
+    assert_eq!(sent, toyos_net_udp::Served::Last, "the one datagram queued");
     frame
 }
 

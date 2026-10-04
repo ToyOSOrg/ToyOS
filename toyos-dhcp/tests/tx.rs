@@ -1,4 +1,4 @@
-//! §D2 and §D6: building and retransmitting.
+//! Building and retransmitting.
 
 mod common;
 
