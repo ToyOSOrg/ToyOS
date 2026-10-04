@@ -26,9 +26,9 @@ lines are quoted on #681 (comment 5962619169; the boot itself in comment
   CPUs waiting on a lock across a step, which went 4,503,694 and 4,554,675 ns
   between two turns of their own spin.
 - **MPERF reads the stop as about 4.55 ms of C0 on every CPU.** One T14 boot
-  of a scout image without ACPI mode (`22d241174`) read twelve back-to-back
-  idle seconds between counters rounds; the commit that added this bullet
-  carries its per-second lines. In the five whose SMI count moved by one,
+  of a scout image without ACPI mode read twelve back-to-back idle seconds
+  between counters rounds; `35cd63142`, which added this bullet, carries its
+  image hash and per-second lines. In the five whose SMI count moved by one,
   cpu2, cpu4, cpu5 and cpu6, which ran none of the log's work, read 4535 to
   4571 ppm busy; in the seven where it did not, 6 to 285 ppm. So the
   `counters` row's idle second reads one of two floors, about 0.45% or 0.03%

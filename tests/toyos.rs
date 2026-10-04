@@ -3438,9 +3438,10 @@ const SMI_SPAN_NS: u64 = 4_444_000_000;
 /// reads` line names, and none stale; every CPU's performance request
 /// declared at boot, `pm_enable=1`, the request Linux makes on this machine
 /// (`tests/t14-linux/hwp-request.txt`), and its power envelope in every read
-/// the one its `control_regs:` line holds. No kernel record is stamped in a
-/// whole millisecond between `idle0` and `idle1`: the second is the idle
-/// machine's. From `idle0` to `spin`, at least
+/// the one its `control_regs:` line holds. No line, the kernel's or a
+/// program's, is stamped in a millisecond from `idle0`'s to `idle1`'s, either
+/// edge's included because a line stamped in it may follow the read: the
+/// second is the idle machine's. From `idle0` to `spin`, at least
 /// [`SMI_SPAN_NS`] apart, every CPU's SMI count rose alike and by two or more:
 /// the firmware's legacy mode, the positive control ACPI stage 1's flatness
 /// is read against, and the row that stage changes. Across the spin every
@@ -3490,13 +3491,17 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
     let (idle1, at1) = phase("idle1")?;
     let (spin, at2) = phase("spin")?;
     let (from_ms, to_ms) = (at0 / 1_000_000, at1 / 1_000_000);
-    let inside: Vec<&str> = kernel
+    let inside: Vec<&str> = log
         .text()
         .lines()
-        .filter(|line| bootlog::record_millis(line).is_some_and(|ms| from_ms < ms && ms < to_ms))
+        .filter(|line| {
+            toyos_logstream::record_ms(line)
+                .or_else(|| toyos_logstream::program_ms(line))
+                .is_some_and(|ms| (from_ms..=to_ms).contains(&ms))
+        })
         .collect();
     if !inside.is_empty() {
-        return Err(format!("the idle second {at0}..{at1} ns holds kernel records: {inside:?}"));
+        return Err(format!("the idle second {at0}..{at1} ns holds lines: {inside:?}"));
     }
     let linux_request = u64::from_str_radix(include_str!("t14-linux/hwp-request.txt").trim().trim_start_matches("0x"), 16)
         .map_err(|e| format!("t14-linux/hwp-request.txt: {e}"))?;

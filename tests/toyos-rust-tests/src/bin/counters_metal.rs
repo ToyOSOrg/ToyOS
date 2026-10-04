@@ -160,7 +160,7 @@ fn print(phase: &str, read: &Read) {
 /// stick, so this prints a line and reads the log until that line comes back.
 /// **Twice**: the round that writes the first may itself put a record in the
 /// log — the stick's first sync is one — and the second writes it. The
-/// `counters` row reds a kernel record stamped inside the idle second.
+/// `counters` row reds any line stamped inside the idle second.
 fn settle() {
     let pipe = logkeeper_api::read().unwrap_or_else(|why| panic!("test-runner's `log` port: {why}")).pipe;
     let poller = Poller::new(1);

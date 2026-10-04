@@ -289,6 +289,26 @@ pub fn record_ms(line: &str) -> Option<u64> {
     secs.checked_mul(1_000)?.checked_add(millis)
 }
 
+/// The milliseconds since boot a program's line carries ([`ProgramLine`]), or
+/// `None` for any other line.
+///
+/// **Found from the tag back rather than by position**: the wall clock before it
+/// is two words or none, and the words after it are each there or not.
+pub fn program_ms(line: &str) -> Option<u64> {
+    let (head, _) = line.strip_prefix(OPEN)?.split_once(CLOSE)?;
+    let mut words = head.rsplit(' ');
+    Tag::new(words.next()?)?;
+    let field = words.find(|word| {
+        !(word.starts_with("pid=")
+            || word.starts_with("tid=")
+            || [Severity::Warn, Severity::Error, Severity::Alert].iter().any(|s| s.word() == Some(word)))
+    })?;
+    let (secs, millis) = field.split_once('.')?;
+    let secs: u64 = secs.parse().ok()?;
+    let millis: u64 = millis.parse().ok()?;
+    secs.checked_mul(1_000)?.checked_add(millis)
+}
+
 /// Whether `line` opens as a program's line: what a judge of the kernel's
 /// records leaves out.
 pub fn is_program_line(line: &str) -> bool {
@@ -552,6 +572,27 @@ mod tests {
         assert_eq!(record_ms("[x] said 99.000 cpu0"), None);
         assert_eq!(record_ms("no timestamp here, cpu=1ms"), None);
         assert_eq!(record_ms(""), None);
+    }
+
+    /// Every head [`ProgramLine`] writes reads back to the time it carries, and
+    /// no text after the head answers for it.
+    #[test]
+    fn a_program_lines_time_is_read_inside_its_head_and_nowhere_else() {
+        let tag = Tag::new("test-runner").expect("a tag");
+        for stamp in ["", "2026-09-24 10:00:00", "---------- --------"] {
+            for severity in [Severity::Info, Severity::Warn, Severity::Error, Severity::Alert] {
+                for (tid, pid) in [(0, None), (3, None), (0, Some(9)), (3, Some(9))] {
+                    let line =
+                        format!("{}", ProgramLine { stamp, at_ns: 1_500_999_999, severity, tid, pid, tag, text: b"9.000" });
+                    assert_eq!(program_ms(&line), Some(1_500), "{line:?}");
+                }
+            }
+        }
+        assert_eq!(program_ms("[2026-09-07 22:57:46 3.109 cpu1] exit: a pid=7"), None);
+        assert_eq!(program_ms("{2026-09-24 10:00:00 netstack} 1.000"), None);
+        assert_eq!(program_ms("{1.000 a b} x"), None);
+        assert_eq!(program_ms("  its second line"), None);
+        assert_eq!(program_ms(""), None);
     }
 
     #[test]
