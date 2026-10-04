@@ -227,11 +227,11 @@ impl Connection {
 
     /// Move `handles` to the peer and then send the frame that announces them.
     ///
-    /// **In that order, and this is the only place it is written.** The handles
-    /// travel in a queue of their own rather than interleaved with the bytes,
-    /// so a peer that has read the frame is guaranteed to find them — and a
-    /// peer that has not is guaranteed not to act on them early. Sending the
-    /// frame first would make the receiver's `recv_handles` a poll.
+    /// **In that order.** The handles travel in a queue of their own rather than
+    /// interleaved with the bytes, so a peer that has read the frame is
+    /// guaranteed to find them — and a peer that has not is guaranteed not to
+    /// act on them early. Sending the frame first would make the receiver's
+    /// `recv_handles` a poll.
     pub fn send_with_handles<T: IpcPayload>(
         &self,
         handles: &[RawHandle],
