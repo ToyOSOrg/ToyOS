@@ -98,6 +98,10 @@ const RUST_SKIP: &[&str] = &[
     // Needs a launcher and a declared `cat` and shell, which `tests/testcases`
     // does not give: the `process_tree` metal row runs it on tests/proctreecase.
     "process_tree",
+    // Needs a launcher and a declared `toybox` holding `roster`, which
+    // `tests/testcases` does not give: the `launch_toctou` metal row runs it on
+    // tests/proctreecase.
+    "launch_toctou",
     // It asserts nothing at all: it holds a `tests/lanleasecase` boot open for
     // twenty seconds. On a shared boot it would be twenty seconds of nothing.
     "lan_hold",
@@ -582,6 +586,12 @@ const METAL: &[(&str, metal::Metal)] = &[
         "process_tree",
         metal::Metal { arms: PROCTREECASE, judge: |b| process_tree(b[0]) },
     ),
+    (
+        // A launched row runs its own program, never what the caller's path
+        // names when it is opened again.
+        "launch_toctou",
+        metal::Metal { arms: PROCTREECASE, judge: |b| b[0].job_passed("test_rs_launch_toctou") },
+    ),
     // ---- one image: tests/metalcase ----
     (
         "metal_sim_scanout_wc",
@@ -756,9 +766,13 @@ const USB_RESET_BOOTS: &[metal::Arm] = &[
 const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/metalcase", &[], &[])];
 
 /// A launcher and a declared `cat` and shell, which `process_tree`'s subtree
-/// launches.
-const PROCTREECASE: &[metal::Arm] =
-    &[metal::once("proctreecase", "tests/proctreecase", &[], &["test_rs_process_tree"])];
+/// launches, and a `toybox` row holding `roster`, which `launch_toctou` races.
+const PROCTREECASE: &[metal::Arm] = &[metal::once(
+    "proctreecase",
+    "tests/proctreecase",
+    &[],
+    &["test_rs_process_tree", "test_rs_launch_toctou"],
+)];
 
 /// netstack in front of the T14's I219 with its lease probe armed: netstack's exit code
 /// is the lease's verdict, read out of the kernel's own `exit:` record, and its

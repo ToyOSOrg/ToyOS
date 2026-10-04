@@ -3,6 +3,8 @@
 # A `launcher`, because the subtree under test has children the supervisor launches; a
 # declared `cat`, which runs until its input ends; and a declared shell, which a
 # depth chain launches and which detaches a `cat`.
+#
+# `launch_toctou` rides it too: a launch of `toybox` through a link it re-points.
 
 [boot]
 start = ["logkeeper", "diskserver", "fileserver", "test-runner"]
@@ -20,7 +22,10 @@ syscap = ["logread"]
 receives = ["launcher"]
 syscap = ["dup", "roster"]
 
+# `roster`, which a child the job spawns itself never holds: a child holding
+# it ran under this row, and `launch_toctou` asks which bytes that child was.
 [programs.toybox]
+syscap = ["roster"]
 
 [programs.shell]
 receives = ["launcher"]

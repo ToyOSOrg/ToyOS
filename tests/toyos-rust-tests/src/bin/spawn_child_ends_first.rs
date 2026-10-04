@@ -85,6 +85,8 @@ fn hold_the_next_spawn() {
 fn spawn(role: &str, slot_map: &[[u32; 2]]) -> Result<RawHandle, SyscallError> {
     let argv = format!("{SELF_PATH}\0{role}");
     let args = SpawnArgs {
+        path_ptr: SELF_PATH.as_ptr() as u64,
+        path_len: SELF_PATH.len() as u64,
         argv_ptr: argv.as_ptr() as u64,
         argv_len: argv.len() as u64,
         slot_map_ptr: slot_map.as_ptr() as u64,
