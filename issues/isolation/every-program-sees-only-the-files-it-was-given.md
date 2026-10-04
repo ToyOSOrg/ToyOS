@@ -55,6 +55,10 @@ was handed, so isolating people follows from isolating programs.
   `issues/filesystem/where-everything-lives.md` that `/tmp` is private per
   program.
 
+**Ruled** (owner, 2026-10-04), **the local desktop, "Desktop counts"**: the
+local desktop is a login session, so `swap` and `update` run from its shell.
+The compositor's `login = true` in `system.toml` is the whole of it.
+
 Unix permission bits and numeric user ids are rejected: they leave every path
 nameable by every program and make confused-deputy bugs structural.
 
@@ -98,17 +102,6 @@ nameable by every program and make confused-deputy bugs structural.
    per-session bound, so one session can starve another. Both close before
    the stage exits. **Exit**: a hostile session can neither reach another
    session's connections nor deny it memory or processes.
-
-## Open with the owner
-
-- **Whether the local desktop is a login session before a greeter
-  authenticates anybody.** Today it is: the compositor's `login = true` in
-  `system.toml` is the whole of it, so `swap` and `update` run from the
-  desktop's shell. Removing it confines both to SSH, which the development loop
-  already uses; the cost is that the shipping image's sshserver is itself
-  started from the desktop's shell, and until a session's view excludes
-  sshserver's key list any desktop program can log itself in over the network
-  regardless.
 
 ## Known weaknesses
 

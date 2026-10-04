@@ -55,9 +55,7 @@ serves = ["log"]
 
 # `starts` is what the desktop's taskbar and launcher start. `login = true`
 # makes the local desktop a login session, so `swap` and `update` run from its
-# shell: whether it is one before a greeter authenticates anybody is the
-# owner's open decision, and this line is the whole of it
-# (`issues/isolation/every-program-sees-only-the-files-it-was-given.md`).
+# shell.
 [programs.compositor]
 service = true
 serves = ["compositor"]
