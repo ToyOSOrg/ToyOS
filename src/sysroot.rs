@@ -514,8 +514,8 @@ fn pinned_fork(root: &Path) -> String {
 /// changes rather than moved out from under whoever made them.
 ///
 /// Every nested submodule checked out in it moves with it to the commit the pin
-/// records there, refused by name where it does not hold that commit: git leaves
-/// one where it was, and the next move would read it as work.
+/// records there, refused by name where it does not hold that commit, or is at
+/// a commit neither that one nor behind it, which only its own `HEAD` records.
 ///
 /// Every build in a worktree asks this at once, so the making and the move are
 /// each decided and done under the worktree's lock held exclusively
@@ -575,17 +575,6 @@ pub fn fork_checkout(root: &Path, lock: &mut Held) -> PathBuf {
         },
         |head| {
             let _global = primary.is_none().then(|| buildlock::global_exclusive(root, "move the fork checkout to its pin"));
-            // A nested gitlink checked out at another commit, and nothing more, is no work: it moves with the checkout.
-            let status = git_out(&fork, &["status", "--porcelain=v2", "--ignore-submodules=none"]);
-            let work: Vec<&str> = status.lines().filter(|entry| !entry.starts_with("1 .M SC.. ")).collect();
-            assert!(
-                work.is_empty(),
-                "{} is at {head} with uncommitted work, and this tree pins the fork at {pinned}: a build \
-                 here would compile a std this tree does not name, and moving the checkout would lose \
-                 that work.\n{}",
-                fork.display(),
-                work.join("\n"),
-            );
             if !holds(&fork, &pinned) {
                 match &primary {
                     Some(primary) => git_run(&fork, &["fetch", path_str(&primary.join("rust")), &pinned]),
@@ -597,15 +586,19 @@ pub fn fork_checkout(root: &Path, lock: &mut Held) -> PathBuf {
                     ),
                 }
             }
-            let nested: Vec<(PathBuf, String)> = git_out(&fork, &["ls-tree", "-r", &pinned])
+            let recorded: Vec<(String, String)> = git_out(&fork, &["ls-tree", "-r", &pinned])
                 .lines()
                 .filter_map(|entry| {
                     let (meta, path) = entry.split_once('\t')?;
                     match meta.split_whitespace().collect::<Vec<_>>().as_slice() {
-                        ["160000", "commit", commit] => Some((fork.join(path), commit.to_string())),
+                        ["160000", "commit", commit] => Some((path.to_string(), commit.to_string())),
                         _ => None,
                     }
                 })
+                .collect();
+            let nested: Vec<(PathBuf, String)> = recorded
+                .iter()
+                .map(|(path, commit)| (fork.join(path), commit.clone()))
                 .filter(|(at, commit)| at.join(".git").exists() && git_out(at, &["rev-parse", "HEAD"]).trim() != commit)
                 .collect();
             for (at, commit) in &nested {
@@ -617,6 +610,32 @@ pub fn fork_checkout(root: &Path, lock: &mut Held) -> PathBuf {
                     at.display(),
                 );
             }
+            // A nested submodule checked out at the commit the pin records there, or behind it, and nothing more, is
+            // no work: it moves with the checkout. One at any other commit holds a commit nothing else records.
+            let status = git_out(&fork, &["status", "--porcelain=v2", "--ignore-submodules=none"]);
+            let work: Vec<String> = status
+                .lines()
+                .filter_map(|entry| {
+                    let path = entry.strip_prefix("1 .M SC.. ").and_then(|rest| rest.splitn(6, ' ').nth(5));
+                    let Some((path, commit)) = path.and_then(|path| recorded.iter().find(|(p, _)| p == path)) else {
+                        return Some(entry.to_string());
+                    };
+                    let at = fork.join(path);
+                    let at_head = git_out(&at, &["rev-parse", "HEAD"]).trim().to_string();
+                    let behind = git_try(&at, &["merge-base", "--is-ancestor", &at_head, commit]).is_ok();
+                    (!behind).then(|| {
+                        format!("{} is at {at_head}, which is neither {commit}, what {pinned} records there, nor behind it", at.display())
+                    })
+                })
+                .collect();
+            assert!(
+                work.is_empty(),
+                "{} is at {head} with uncommitted work, and this tree pins the fork at {pinned}: a build \
+                 here would compile a std this tree does not name, and moving the checkout would lose \
+                 that work.\n{}",
+                fork.display(),
+                work.join("\n"),
+            );
             for (at, commit) in &nested {
                 git_run(at, &["checkout", "--detach", "-q", commit]);
             }
@@ -1538,6 +1557,19 @@ mod tests {
         write(&fork.join("library/std/src/lib.rs"), "pub fn uncommitted() {}\n");
         let message = refusal(|| drop(fork_checkout(&linked, &mut lock)));
         assert!(message.contains(&c1) && message.contains(&c2), "{message}");
+        git(&fork, &["checkout", "-q", "--", "."]);
+
+        // Nor one whose nested submodule holds a commit of the agent's that no gitlink records yet.
+        let nested = fork.join("library/backtrace");
+        git(&nested, &["checkout", "-q", "--detach", &behind]);
+        write(&nested.join("lib.rs"), "pub fn trace_mine() {}\n");
+        git(&nested, &["commit", "-qam", "the agent's own, not yet recorded"]);
+        let mine = git(&nested, &["rev-parse", "HEAD"]);
+        let recorded = git(&fork, &["rev-parse", &format!("{c2}:library/backtrace")]);
+        let message = refusal(|| drop(fork_checkout(&linked, &mut lock)));
+        assert!(message.contains(&mine) && message.contains(&recorded), "{message}");
+        assert_eq!(git(&nested, &["rev-parse", "HEAD"]), mine, "a nested commit nothing records was moved off");
+        assert_eq!(git(&fork, &["rev-parse", "HEAD"]), c1, "a checkout over a nested commit nothing records was moved");
     }
 
     /// **Twelve builds starting at once in a worktree make its fork checkout
