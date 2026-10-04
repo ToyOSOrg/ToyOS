@@ -114,8 +114,8 @@ pub struct PerCpu {
     /// Non-zero inside this CPU's NMI handler, written only by `arch::idt::nmi`'s entry; IST2 isn't re-entrant, so this proves no second NMI lands on it.
     nmi_active: u32,
     ap_token: u32,
-    /// Interrupt deliveries, one counter per `irq_census::Source`; written only by `irq_census::irq_took!`, kept last so growing `SLOTS` moves nothing else.
-    pub irq_counts: [AtomicU64; crate::irq_census::SLOTS],
+    /// Interrupt deliveries, one counter per `irq_census::Source`; written only by `irq_census::irq_took!`, kept last so a new source moves nothing else.
+    pub irq_counts: [AtomicU64; crate::irq_census::Source::COUNT],
 }
 
 const GDT_ENTRIES: [u64; 7] = [
@@ -374,7 +374,7 @@ fn alloc_percpu(cpu_id: u32) -> *mut PerCpu {
                 log_shard: log::shard_for(cpu_id) as *const log::Shard as u64,
                 nmi_active: 0,
                 ap_token: 0,
-                irq_counts: [const { AtomicU64::new(0) }; crate::irq_census::SLOTS],
+                irq_counts: [const { AtomicU64::new(0) }; crate::irq_census::Source::COUNT],
             },
         );
     }
@@ -725,20 +725,18 @@ pub const fn irq_slot_offset(index: usize) -> u32 {
     OFF_IRQ_COUNTS + (index as u32) * 8
 }
 
-/// Records one delivery of `$source` as two lock-free `add`s to this CPU's own gs: slots.
-/// A macro, not a function: the two offsets must be asm immediates, not const-generic values an optimiser could relax.
+/// Records one delivery of `$source` as one lock-free `add` to this CPU's own gs: slot.
+/// A macro, not a function: the offset must be an asm immediate, not a const-generic value an optimiser could relax.
 macro_rules! irq_took {
     ($source:ident) => {{
-        // SAFETY: both slots are this CPU's own counter block per `arch::percpu`, and the caller is an interrupt handler, so `GS_BASE` already points at this CPU's `PerCpu`.
+        // SAFETY: the slot is this CPU's own counter block per `arch::percpu`, and the caller is an interrupt handler, so `GS_BASE` already points at this CPU's `PerCpu`.
         unsafe {
             ::core::arch::asm!(
-                "add qword ptr gs:[{total}], 1",
                 "add qword ptr gs:[{source}], 1",
-                total = const $crate::arch::percpu::irq_slot_offset($crate::irq_census::TOTAL),
                 source = const $crate::arch::percpu::irq_slot_offset(
-                    1 + $crate::irq_census::Source::$source as usize
+                    $crate::irq_census::Source::$source as usize
                 ),
-                // no `nomem` because both instructions write; no `preserves_flags` because `add` clobbers flags.
+                // no `nomem` because the instruction writes; no `preserves_flags` because `add` clobbers flags.
                 options(nostack),
             );
         }
@@ -747,26 +745,24 @@ macro_rules! irq_took {
 
 pub(crate) use irq_took;
 
-/// Two of this CPU's interrupt counters, read straight off `gs:` with one load
+/// This CPU's interrupt counters, read straight off `gs:` with one load
 /// each — the form a CPU inside an NMI may use.
-pub fn irq_counts_here(first: usize, second: usize) -> (u64, u64) {
-    let a: u64;
-    let b: u64;
-    // SAFETY: both slots are this CPU's own counter block, and `GS_BASE` points
-    // at the running CPU's `PerCpu` in every context this is read from; both
-    // indices are below `irq_census::SLOTS`, asserted by the callers' constants.
-    unsafe {
-        core::arch::asm!(
-            "mov {a}, qword ptr gs:[{first}]",
-            "mov {b}, qword ptr gs:[{second}]",
-            a = out(reg) a,
-            b = out(reg) b,
-            first = in(reg) u64::from(irq_slot_offset(first)),
-            second = in(reg) u64::from(irq_slot_offset(second)),
-            options(nostack, readonly, preserves_flags),
-        );
-    }
-    (a, b)
+pub fn irq_counts_here() -> [u64; crate::irq_census::Source::COUNT] {
+    core::array::from_fn(|index| {
+        let count: u64;
+        // SAFETY: the slot is this CPU's own counter block, and `GS_BASE` points
+        // at the running CPU's `PerCpu` in every context this is read from;
+        // `from_fn` keeps `index` below the block's length.
+        unsafe {
+            core::arch::asm!(
+                "mov {count}, qword ptr gs:[{at}]",
+                count = out(reg) count,
+                at = in(reg) u64::from(irq_slot_offset(index)),
+                options(nostack, readonly, preserves_flags),
+            );
+        }
+        count
+    })
 }
 
 /// This CPU's preempt count: the per-CPU word `crate::preempt` keeps, read and
