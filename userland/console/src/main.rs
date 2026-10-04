@@ -37,7 +37,7 @@ use toyos::port::{self, Connector};
 use toyos::surface::{self, Delivery, Host, Notice};
 use toyos::{FramebufferDev, Keyboard, Pipe};
 use toyos_abi::syscall::{DeviceType, SyscallError};
-use toyos_logstream::{Lines, Showing, Source, READ, SERVED, SERVICE};
+use toyos_logstream::{Lines, Showing, Source};
 use window::Screen;
 
 const FONT: &str = "/system/share/fonts/JetBrainsMono-Regular-8x16.font";
@@ -81,18 +81,7 @@ impl Log {
     /// Ask `logkeeper`: one request, and a blocking read of its one answer.
     fn subscribe() -> Result<Self, String> {
         let asked_ms = toyos_abi::clock::stamp_ns() / 1_000_000;
-        let conn = endow::service(SERVICE).map_err(|e| format!("no `{SERVICE}` service: {e:?}"))?;
-        conn.signal(READ).map_err(|e| format!("logkeeper would not take the request: {e:?}"))?;
-        let header = conn.recv_header().map_err(|e| format!("logkeeper did not answer: {e:?}"))?;
-        if header.msg_type != SERVED {
-            return Err(format!("logkeeper answered frame type {}", header.msg_type));
-        }
-        let handed: u64 =
-            conn.recv_payload(&header).map_err(|e| format!("logkeeper's answer is short: {e:?}"))?;
-        let [raw] = conn.recv_handles_exact::<1>().ok_or("logkeeper's answer carried no pipe")?;
-        // SAFETY: the kernel moved this handle into this table with the frame
-        // that names it, and nothing else answers for it.
-        let pipe = unsafe { Pipe::from_raw(raw) };
+        let logkeeper_api::Served { pipe, boot_so_far: handed } = logkeeper_api::read()?;
         Ok(Self {
             pipe,
             lines: Lines::new(),

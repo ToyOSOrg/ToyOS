@@ -71,7 +71,7 @@ fn publish_page(counter_at_boot: u64, period_fs: u64, stamp_at_boot: u64) {
     use toyos_abi::clock::{ClockPage, CLOCK_MAGIC};
     let bytes = crate::mm::PAGE_2M as usize;
     // Held for the machine's life: every process maps it.
-    let frame = crate::process::PageAlloc::new(bytes, crate::mm::pmm::Category::SharedMemory)
+    let frame = crate::process::PageAlloc::new(bytes)
         .expect("clock: no 2 MiB frame for the clock page");
     // SAFETY: a fresh allocation this function owns, `bytes` long, that no
     // address space maps yet; zeroed whole because all of it is mapped, and

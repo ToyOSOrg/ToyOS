@@ -142,7 +142,7 @@ impl Pipe {
     /// Allocate the ring page if this is the first use; `None` on exhaustion, an error return rather than a panic since userland drives it.
     fn back(&mut self) -> Option<&mut Backing> {
         if self.backing.is_none() {
-            let page = pmm::alloc_page(pmm::Category::Pipe)?;
+            let page = pmm::alloc_page()?;
             // SAFETY: a fresh 2 MiB page this `Pipe` owns for as long as the `Ring` addresses it.
             let ring = unsafe { Ring::new(page.direct_map().as_mut_ptr(), PIPE_SIZE) };
             self.backing = Some(Backing { page, ring });

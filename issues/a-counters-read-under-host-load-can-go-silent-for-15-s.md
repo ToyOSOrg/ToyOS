@@ -17,9 +17,9 @@ compiler; the branch `wt/toyos-counterstall` at `bc5f36c7b`, whose harness
 keeps every line the guest said. `test_rs_counters_read` started at 4.031,
 spawned at 4.044, two of its threads exited (4.174 and 4.576), and then the
 console carried nothing until the harness gave up 15 s later. No CPU printed
-`sched: cpu=` again, though each last printed one at 2.17-2.22 s and prints
-again on its first idle trip 10 s on (`scheduler::log_health`): no CPU went
-idle, or the console stopped. No register capture of that guest exists. One
+`sched: cpu=` again, though each last printed one at 2.17-2.22 s and that
+kernel printed again on a CPU's first idle trip 10 s on: no CPU went idle, or
+the console stopped. No register capture of that guest exists. One
 in 30 guests of that loop; none in the 1724 guests that followed on the same
 host at load 15-60.
 
@@ -38,6 +38,13 @@ Waking a round's readers once, from the answer that completes it, instead of
 once per answering CPU (`762a524f0`, reverted in the next commit) changed
 neither the kicks taken during the read (median 116/122/118, fix/base/fix)
 nor its span, so the waiter-list contention is not shown to be the cause.
+
+**The idle report is gone.** The owner ruled on 2026-10-04, choosing "Remove
+it entirely": "Delete the periodic report and its counters; hang triage uses
+the trace diary and panic records instead." A silent guest no longer says
+whether its CPUs went idle by a `sched:` line's absence; its diary
+(`kernel/src/trace.rs`, read by `/system/bin/trace`) and its panic records
+(`kernel/src/panic.rs`, `kernel/src/blackbox.rs`) do.
 
 Exit: the cause of the silence is named from a capture of a silent guest
 (registers over QMP before anything else touches it), and fixed with the

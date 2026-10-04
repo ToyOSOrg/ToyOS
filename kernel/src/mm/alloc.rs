@@ -557,7 +557,7 @@ unsafe impl GlobalAlloc for KernelAllocator {
                 };
                 let mut base = malloc(None);
                 if base.is_null() {
-                    if let Some(frame) = pmm::claim(pmm::Category::KernelHeap) {
+                    if let Some(frame) = pmm::claim() {
                         base = malloc(Some(frame));
                     }
                 }

@@ -7,13 +7,12 @@ opened: 2026-10-04
 # The tree resolves in five Cargo locks, not one
 
 The root, `kernel/`, `bootloader/`, `userland/` and `toyos/` are five
-Cargo resolutions with five locks, and four of them declare their own
+Cargo resolutions with five locks, and three of them declare their own
 `[profile.toyos]`. A
 crate two of them share is tested on the host against the root's lock and
-shipped from another's, and the locks disagree on versions: once the
-userland lock is aligned, 8 registry pairs sit below the highest version
-another of the five locks carries in the same semver range, all of them the
-loader's.
+shipped from another's. The locks agree on versions: no registry pair of the
+five sits below the highest version another of them carries in the same
+semver range.
 
 **The owner ruled on 2026-10-04.** Asked "Merge everything into one Cargo
 workspace (after small version-alignment steps; proven by byte-identical
@@ -33,9 +32,9 @@ byte-identical to the build of the last alignment before it. The root
 moves that instruction; no `rust-toolchain.toml` is tracked outside `rust/`,
 since step 1 of the rule in `issues/the-tree-says-who-uses-each-thing.md`
 names none. The alignments
-land first, each in today's workspace: pull request #724 aligned the root
-and kernel locks, the userland lock is the second, and the loader's 8 pairs
-are the last.
+landed first, each in today's workspace: pull request #724 aligned the root
+and kernel locks, #732 the userland lock, and the third the loader's lock and
+its profile's `strip`, so that the three `[profile.toyos]` tables are one.
 
 **Constraints, measured** on a scratch workspace seeded from the five locks
 at `8b4f88446`, by type-check and one loader link, with no boot:
@@ -46,8 +45,7 @@ at `8b4f88446`, by type-check and one loader link, with no boot:
   userland's moves pull with them (`ureq-proto`, `utf-8`, `zeroize_derive`),
   and the root's registry `getrandom` 0.2, 0.3 and 0.4, which become the forks
   userland patches in at the same versions. Those three move no version: they
-  follow from the root `[patch]` and land with it. What the loader's `libc`,
-  added since, pulls with it is not measured.
+  follow from the root `[patch]` and land with it.
 - `userland/Cargo.lock` carries `miniz_oxide` 0.8.9, for `png` 0.18.1,
   beside 0.9.1, for `flate2` 1.1.10. Built with only `flate2` back at 1.1.9,
   compositor and files are 204 to 228 bytes of text smaller on x86_64 and
@@ -57,9 +55,6 @@ at `8b4f88446`, by type-check and one loader link, with no boot:
 - Every fork commit the five locks pin stays pinned, and the crypto
   pre-releases (`ed25519-dalek 3.0.0-pre.6`, `pkcs5 0.8.0-rc.13`) are only in
   `userland/Cargo.lock` and stay.
-- The loader's `[profile.toyos]` has no `strip = "debuginfo"`; a loader built
-  with and without it differs in 247,720 of 328,192 bytes. One profile is a
-  loader byte change, made before the merge.
 - `[patch]` is workspace-wide. `tests/toyos-rust-tests` patches memmap2,
   `tests/toyos-rust-tests/tls-cranelift`, a resolution with its own lock,
   patches target-lexicon, and `tests/ssh-client-host` takes upstream tokio,

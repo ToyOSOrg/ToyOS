@@ -3540,7 +3540,11 @@ const SMI_SPAN_NS: u64 = 4_444_000_000;
 /// reads` line names, and none stale; every CPU's performance request
 /// declared at boot, `pm_enable=1`, the request Linux makes on this machine
 /// (`tests/t14-linux/hwp-request.txt`), and its power envelope in every read
-/// the one its `control_regs:` line holds. From `idle0` to `spin`, at least
+/// the one its `control_regs:` line holds. No line, the kernel's or a
+/// program's, is stamped in a millisecond from `idle0`'s to `idle1`'s, which
+/// `counters_metal` reads on the log's clock, either
+/// edge's included because a line stamped in it may follow the read: the
+/// second is the idle machine's. From `idle0` to `spin`, at least
 /// [`SMI_SPAN_NS`] apart, every CPU's SMI count rose alike and by two or more:
 /// the firmware's legacy mode, the positive control ACPI stage 1's flatness
 /// is read against, and the row that stage changes. Across the spin every
@@ -3551,7 +3555,8 @@ const SMI_SPAN_NS: u64 = 4_444_000_000;
 /// same span of load (`tests/t14-linux/turbostat-loaded.txt`).
 ///
 /// Read and not held, beside Linux's turbostat: each CPU's idle busy
-/// fraction, and what one round cost its reader; and beside Linux's loaded
+/// fraction, which an SMI in the idle second raises on every CPU alike by the
+/// time it held them, and what one round cost its reader; and beside Linux's loaded
 /// timer reading (`issues/toyos-beats-linuxs-latency-on-the-t14.md`),
 /// how late each CPU's kick handler ran under the `loaded` phase.
 fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
@@ -3588,6 +3593,17 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
     let (idle0, at0) = phase("idle0")?;
     let (idle1, at1) = phase("idle1")?;
     let (spin, at2) = phase("spin")?;
+    let (from_ms, to_ms) = (at0 / 1_000_000, at1 / 1_000_000);
+    let inside: Vec<&str> = log
+        .text()
+        .lines()
+        .filter(|line| {
+            toyos_logstream::parse(line).and_then(|p| p.ms).is_some_and(|ms| (from_ms..=to_ms).contains(&ms))
+        })
+        .collect();
+    if !inside.is_empty() {
+        return Err(format!("the idle second {at0}..{at1} ns holds lines: {inside:?}"));
+    }
     let linux_request = u64::from_str_radix(include_str!("t14-linux/hwp-request.txt").trim().trim_start_matches("0x"), 16)
         .map_err(|e| format!("t14-linux/hwp-request.txt: {e}"))?;
     let bsp = kernel.must_say("percpu: BSP cpu_id=0 lapic_id=")?;
@@ -3675,9 +3691,10 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
     }
     let spinning: Vec<f64> = (0..cpus).map(|cpu| tsc_mhz * ratio(idle1, spin, cpu, "aperf", "mperf")).collect();
     eprintln!(
-        "  [counters] {cpus} cpus, SMI +{} each over {} ms; TSC {tsc_mhz:.0} MHz",
+        "  [counters] {cpus} cpus, SMI +{} each over {} ms, +{} in the idle second; TSC {tsc_mhz:.0} MHz",
         smis[0],
-        (at2 - at0) / 1_000_000
+        (at2 - at0) / 1_000_000,
+        delta(idle0, idle1, 0, "smi")
     );
     for (cpu, busy) in busy.iter().enumerate() {
         eprintln!(

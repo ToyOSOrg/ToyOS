@@ -415,8 +415,8 @@ impl GpuController {
         let fb_pages = fb_size.div_ceil(PAGE_2M as usize);
         let fb_aligned = (fb_pages * PAGE_2M as usize) as u64;
         let all_pages =
-            [crate::mm::pmm::alloc_contiguous(fb_pages, crate::mm::pmm::Category::Framebuffer)?,
-             crate::mm::pmm::alloc_contiguous(fb_pages, crate::mm::pmm::Category::Framebuffer)?];
+            [crate::mm::pmm::alloc_contiguous(fb_pages)?,
+             crate::mm::pmm::alloc_contiguous(fb_pages)?];
         let regions = all_pages.map(|pages| {
             let phys = pages[0].direct_map().phys();
             Region {
@@ -617,7 +617,7 @@ pub fn init(devices: &[PciDevice]) -> Option<(Box<dyn Gpu>, GpuInfo)> {
     gpu.set_scanout(0, gpu.resource, rect);
 
     let cursor_bytes = (CURSOR_SIZE * CURSOR_SIZE * 4) as usize;
-    let cursor_pages = crate::mm::pmm::alloc_contiguous(1, crate::mm::pmm::Category::Framebuffer).expect("VirtIO GPU: cursor alloc failed");
+    let cursor_pages = crate::mm::pmm::alloc_contiguous(1).expect("VirtIO GPU: cursor alloc failed");
     let cursor_ptr = cursor_pages[0].direct_map().as_mut_ptr::<u8>();
     let cursor_phys = cursor_pages[0].direct_map().phys();
     gpu.cursor = Region {

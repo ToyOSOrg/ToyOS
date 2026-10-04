@@ -846,6 +846,23 @@ mod tests {
         assert_eq!(kernel_opening(b"[ 2.300 cpu0 loader] only the loader\n"), Opening::Nowhere);
     }
 
+    /// Every head [`ProgramLine`] writes reads back to the time it carries, and
+    /// no text after the head answers for it.
+    #[test]
+    fn a_program_lines_time_is_read_inside_its_head_and_nowhere_else() {
+        let tag = Tag::new("test-runner").expect("a tag");
+        for stamp in ["", "2026-09-24 10:00:00", "---------- --------"] {
+            for severity in [Severity::Info, Severity::Warn, Severity::Error, Severity::Alert] {
+                for (tid, pid) in [(0, None), (3, None), (0, Some(9)), (3, Some(9))] {
+                    let line =
+                        format!("{}", ProgramLine { stamp, at_ns: 1_500_999_999, severity, tid, pid, tag, text: b"9.000" });
+                    let read = parse(&line).map(|p| (p.source, p.ms));
+                    assert_eq!(read, Some((Source::Program("test-runner"), Some(1_500))), "{line:?}");
+                }
+            }
+        }
+    }
+
     /// What a terminal shows of a line, with its colours taken out.
     fn plain(shown: Shown<'_>) -> String {
         let painted = format!("{shown}");

@@ -16,6 +16,7 @@ members = [
     "inspect",
     "kernelprobe",
     "logkeeper",
+    "logkeeper-api",
     "metalprobe",
     "netstack",
     "netstack/mdns",

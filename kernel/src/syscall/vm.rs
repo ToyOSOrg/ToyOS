@@ -76,7 +76,7 @@ pub(super) fn sys_mmap(req_addr: u64, size: u64, prot: MmapProt, flags: MmapFlag
         // fault: `handle_page_fault` refuses to fill a `Mapped` region.
         None
     } else {
-        match process::PageAlloc::new(aligned, crate::mm::pmm::Category::Mmap) {
+        match process::PageAlloc::new(aligned) {
             Some(pages) => Some(pages),
             None => return SyscallError::ResourceExhausted.to_u64(),
         }
@@ -426,7 +426,7 @@ fn tls_alloc_block(module_id: u64) -> Result<u64, SyscallError> {
     let tls_vaddr = match existing {
         Some(vaddr) => vaddr,
         None => {
-            let page_alloc = process::PageAlloc::new(tls_memsz.max(1), crate::mm::pmm::Category::Tls)
+            let page_alloc = process::PageAlloc::new(tls_memsz.max(1))
                 .ok_or(SyscallError::ResourceExhausted)?;
             // SAFETY: `page_alloc` is a fresh, unaliased allocation of at
             // least `tls_memsz.max(1)` bytes; `template.size()` comes from the

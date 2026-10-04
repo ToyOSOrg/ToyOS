@@ -1,5 +1,3 @@
-use core::sync::atomic::{AtomicU64, Ordering};
-
 use super::{DirectMap, PAGE_2M};
 use crate::sync::Lock;
 use crate::MemoryMapEntry;
@@ -11,105 +9,15 @@ pub struct Region {
     pub end: u64,
 }
 
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u8)]
-pub enum Category {
-    KernelHeap   = 0,  // dlmalloc backing pages (global allocator)
-    DemandPage   = 1,  // page fault handler
-    Mmap         = 2,  // sys_mmap
-    SharedMemory = 3,  // shared_memory::alloc
-    Pipe         = 4,  // pipe ring buffers
-    Elf          = 5,  // ELF loading (dlopen, cache, RW overlay)
-    Tls          = 6,  // thread-local storage blocks
-    Dma          = 7,  // DMA pools (drivers)
-    Framebuffer  = 8,  // GPU framebuffers
-    Stack        = 9,  // user stacks
-    InitTls      = 10, // initial TLS block at spawn
-}
-
-const NUM_CATEGORIES: usize = 11;
-
-impl Category {
-    fn name(self) -> &'static str {
-        match self {
-            Category::KernelHeap   => "kernel-heap",
-            Category::DemandPage   => "demand-page",
-            Category::Mmap         => "mmap",
-            Category::SharedMemory => "shared-mem",
-            Category::Pipe         => "pipe",
-            Category::Elf          => "elf",
-            Category::Tls          => "tls",
-            Category::Dma          => "dma",
-            Category::Framebuffer  => "framebuffer",
-            Category::Stack        => "stack",
-            Category::InitTls      => "init-tls",
-        }
-    }
-}
-
-struct CategoryCounters {
-    alloc_pages: AtomicU64,
-    free_pages: AtomicU64,
-}
-
-impl CategoryCounters {
-    const fn new() -> Self {
-        Self {
-            alloc_pages: AtomicU64::new(0),
-            free_pages: AtomicU64::new(0),
-        }
-    }
-}
-
-static CATEGORY_STATS: [CategoryCounters; NUM_CATEGORIES] =
-    [const { CategoryCounters::new() }; NUM_CATEGORIES];
-
-/// Snapshot of the last time `dump_stats` ran, for computing rates.
-static LAST_DUMP_NANOS: AtomicU64 = AtomicU64::new(0);
-static LAST_ALLOC: [AtomicU64; NUM_CATEGORIES] = [const { AtomicU64::new(0) }; NUM_CATEGORIES];
-
-/// Log per-category page allocation stats to serial.
-pub fn dump_stats() {
-    let now = crate::clock::nanos_since_boot();
-    let prev = LAST_DUMP_NANOS.swap(now, Ordering::Relaxed);
-    let dt_secs = if prev == 0 { 0.0 } else { (now - prev) as f64 / 1_000_000_000.0 };
-
-    let (total, used) = stats();
-    crate::log!("PMM: {}/{}MB used ({} pages free)",
-        used / (1024 * 1024), total / (1024 * 1024),
-        (total - used) / PAGE_2M);
-
-    for i in 0..NUM_CATEGORIES {
-        let alloc = CATEGORY_STATS[i].alloc_pages.load(Ordering::Relaxed);
-        let free = CATEGORY_STATS[i].free_pages.load(Ordering::Relaxed);
-        let held = alloc.saturating_sub(free);
-        if alloc == 0 { continue; }
-
-        let prev_alloc = LAST_ALLOC[i].swap(alloc, Ordering::Relaxed);
-        let rate = if dt_secs > 0.0 {
-            ((alloc - prev_alloc) as f64 / dt_secs) as u64
-        } else {
-            0
-        };
-
-        // Safety: i < NUM_CATEGORIES which equals the number of Category variants
-        let cat = unsafe { core::mem::transmute::<u8, Category>(i as u8) };
-        crate::log!("  {:12} alloc={:6} free={:6} held={:6} ({}MB) rate={}/s",
-            cat.name(), alloc, free, held, held * 2, rate);
-    }
-}
-
 /// Owns one 2MB physical page; dropping it returns the page to the free list.
 pub struct PhysPage {
     phys: u64,       // raw physical address, 2MB-aligned
-    category: u8,    // Category as u8
 }
 
 impl PhysPage {
-    /// Caller must ensure `phys` is a previously allocated, 2MB-aligned page; assigned to `KernelHeap`.
+    /// Caller must ensure `phys` is a previously allocated, 2MB-aligned page.
     pub(super) fn from_raw(phys: u64) -> Self {
-        Self { phys, category: Category::KernelHeap as u8 }
+        Self { phys }
     }
 
     /// Access this page through the kernel direct map.
@@ -121,10 +29,6 @@ impl PhysPage {
 
 impl Drop for PhysPage {
     fn drop(&mut self) {
-        let cat = self.category as usize;
-        if cat < NUM_CATEGORIES {
-            CATEGORY_STATS[cat].free_pages.fetch_add(1, Ordering::Relaxed);
-        }
         free_page(self.phys);
     }
 }
@@ -263,8 +167,8 @@ pub(super) fn init(entries: &[MemoryMapEntry], reserved: &[Region]) {
 }
 
 /// Allocate one 2MB physical page.
-pub fn alloc_page(cat: Category) -> Option<PhysPage> {
-    let page = claim(cat)?;
+pub fn alloc_page() -> Option<PhysPage> {
+    let page = claim()?;
     // SAFETY: `claim` just took the frame off the bitmap, so it is unaliased, and the direct map covers every address the bitmap can name.
     unsafe {
         core::ptr::write_bytes(page.direct_map().as_mut_ptr::<u8>(), 0, PAGE_2M as usize);
@@ -273,7 +177,7 @@ pub fn alloc_page(cat: Category) -> Option<PhysPage> {
 }
 
 /// One 2MB physical page holding what its last owner left in it. Only the kernel heap takes one as it is: the heap answers uninitialized memory, and `alloc_zeroed` writes its own zeros. Does not heap-allocate: the heap calls it when it is full.
-pub(super) fn claim(cat: Category) -> Option<PhysPage> {
+pub(super) fn claim() -> Option<PhysPage> {
     let mut bm = BITMAP.lock();
     if bm.free_count == 0 { return None; }
     let start = bm.next_hint;
@@ -285,15 +189,14 @@ pub(super) fn claim(cat: Category) -> Option<PhysPage> {
             bm.next_hint = if idx + 1 < bm.page_count { idx + 1 } else { 0 };
             let phys = bm.idx_to_phys(idx);
             drop(bm);
-            CATEGORY_STATS[cat as usize].alloc_pages.fetch_add(1, Ordering::Relaxed);
-            return Some(PhysPage { phys, category: cat as u8 });
+            return Some(PhysPage { phys });
         }
     }
     None
 }
 
 /// Allocate `count` physically contiguous 2MB pages.
-pub fn alloc_contiguous(count: usize, cat: Category) -> Option<alloc::vec::Vec<PhysPage>> {
+pub fn alloc_contiguous(count: usize) -> Option<alloc::vec::Vec<PhysPage>> {
     // `count` comes from userland, so a bogus 0 and a legitimate `mmap(0)` can't be told apart here — refuse, don't assert.
     if count == 0 { return None; }
     let mut bm = BITMAP.lock();
@@ -312,8 +215,6 @@ pub fn alloc_contiguous(count: usize, cat: Category) -> Option<alloc::vec::Vec<P
                 bm.free_count -= count;
                 let base_phys = bm.idx_to_phys(run_start);
                 drop(bm);
-
-                CATEGORY_STATS[cat as usize].alloc_pages.fetch_add(count as u64, Ordering::Relaxed);
                 let mut pages = alloc::vec::Vec::with_capacity(count);
                 for i in 0..count {
                     let phys = base_phys + i as u64 * PAGE_2M;
@@ -323,7 +224,7 @@ pub fn alloc_contiguous(count: usize, cat: Category) -> Option<alloc::vec::Vec<P
                             DirectMap::from_phys(phys).as_mut_ptr::<u8>(), 0, PAGE_2M as usize,
                         );
                     }
-                    pages.push(PhysPage { phys, category: cat as u8 });
+                    pages.push(PhysPage { phys });
                 }
                 return Some(pages);
             }
