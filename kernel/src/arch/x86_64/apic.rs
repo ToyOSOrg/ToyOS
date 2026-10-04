@@ -85,15 +85,24 @@ pub fn id() -> u32 {
     Reg::Id.read() as u32
 }
 
+/// Raise an interrupt `icr` names whole, after every store before it. An
+/// x2APIC ICR write is not serializing (SDM Vol. 3A, "MSR Access in x2APIC
+/// Mode"), so without the fence a target could take the interrupt before the
+/// store it announces.
+fn send(icr: u64) {
+    cpu::store_fence();
+    Reg::Icr.write(icr);
+}
+
 /// Send INIT IPI to the specified APIC ID.
 pub fn send_init(apic_id: u32) {
     // ICR write: destination in the high 32 bits, 0x4500 = delivery INIT, level assert.
-    Reg::Icr.write(((apic_id as u64) << 32) | 0x4500);
+    send(((apic_id as u64) << 32) | 0x4500);
 }
 
 /// Send Startup IPI (SIPI) with the given vector (trampoline page number).
 pub fn send_sipi(apic_id: u32, vector: u8) {
-    Reg::Icr.write(((apic_id as u64) << 32) | 0x4600 | vector as u64);
+    send(((apic_id as u64) << 32) | 0x4600 | vector as u64);
 }
 
 /// Send EOI.
@@ -128,12 +137,12 @@ pub fn send_self(vector: u8) {
         return;
     }
     // Destination shorthand = self (0b01 << 18), fixed delivery, level assert.
-    Reg::Icr.write(0x0004_4000 | vector as u64);
+    send(0x0004_4000 | vector as u64);
 }
 
 fn ipi_all_excluding_self(vector: u8) {
     // destination shorthand = all-excluding-self (0b11 << 18), fixed delivery
-    Reg::Icr.write(0x000C_0000 | vector as u64);
+    send(0x000C_0000 | vector as u64);
 }
 
 /// Ask every other CPU to flush its TLB.
@@ -143,12 +152,12 @@ pub(super) fn tlb_ipi() {
     }
 }
 
-/// Send the timer-vector IPI to one CPU, waking it if halted.
+/// Send the kick IPI to one CPU, waking it if halted.
 // Targeted, not broadcast: a broadcast kick would preempt every sibling per wake and cannot scale.
 pub fn kick_cpu(cpu_id: u32) {
     if !X2APIC_ENABLED.load(Ordering::Relaxed) { return; }
     let apic_id = crate::smp::hardware_id(cpu_id);
-    Reg::Icr.write(((apic_id as u64) << 32) | 0x4000 | TIMER_VECTOR as u64);
+    send(((apic_id as u64) << 32) | 0x4000 | u64::from(super::idt::KICK_VECTOR));
 }
 
 // Kicked, and not left to arrive on their own: a CPU halted in the idle path has stopped its own timer, so nothing else brings it to the next scheduler pass.
@@ -166,7 +175,7 @@ pub fn kick_all_but_self() {
 pub fn send_nmi(cpu_id: u32) {
     if !X2APIC_ENABLED.load(Ordering::Relaxed) { return; }
     let apic_id = crate::smp::hardware_id(cpu_id);
-    Reg::Icr.write(((apic_id as u64) << 32) | 0x4400);
+    send(((apic_id as u64) << 32) | 0x4400);
 }
 
 /// Point this CPU's performance-counter LVT entry at NMI delivery, unmasked —
@@ -190,7 +199,7 @@ pub fn arm_perf_nmi() {
 /// for one rather than CPUs that need halting.
 pub fn stop_other_cpus() {
     if X2APIC_ENABLED.load(Ordering::Relaxed) && crate::smp::is_ready() {
-        Reg::Icr.write(0x000C_0000 | 0xFD);
+        send(0x000C_0000 | 0xFD);
     }
 }
 

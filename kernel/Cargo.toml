@@ -21,7 +21,7 @@ loom = []
 # obligation is a model.
 wake-fence-off = []
 # The same for the panic console's published descriptor: `kernel-loom` turns it on
-# to drop the publisher's `Release` fence from `drivers/panic_console/published.rs`,
+# to drop the publisher's `Release` fence from `seqlock.rs`,
 # and `kernel/loom/tests/panic_console_publish.rs` must red — a reader keeping a
 # descriptor that is half one publication and half the next.
 seqlock-writer-fence-off = []
@@ -53,6 +53,8 @@ reap-raise-relaxed = []
 # `src/shootdown.rs`'s `serve` reads what it owes `Relaxed`, and
 # `tlb_shootdown` reds.
 shootdown-serve-relaxed = []
+# `src/shootdown.rs`'s `served` reads `Relaxed`, and `counters_round` reds.
+shootdown-served-relaxed = []
 # `src/log/shard.rs`'s publishing store goes `Relaxed`, and `log_record` reds.
 log-commit-release-off = []
 # `src/log/registry.rs`'s pointer store and load go `Relaxed`, and
@@ -496,6 +498,7 @@ toyos-elide = { path = "../toyos-elide" }
 toyos-blackbox = { path = "../toyos-blackbox" }
 toyos-blockhold = { path = "../toyos-blockhold" }
 toyos-bootmap = { path = "../toyos-bootmap" }
+toyos-cpuvuln = { path = "../toyos-cpuvuln" }
 toyos-fat32 = { path = "../toyos-fat32" }
 toyos-elf = { path = "../toyos-elf" }
 toyos-gicv3 = { path = "gicv3" }

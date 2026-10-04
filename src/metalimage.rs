@@ -176,9 +176,9 @@ mod tests {
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect();
-        // `tests/testcases` declares all five, and the derivation takes none
+        // `tests/testcases` declares all seven, and the derivation takes none
         // away and spells none twice; nor the connector it needs, declared too.
-        for right in ["device", "dup", "logread", "power", "roster"] {
+        for right in ["device", "dup", "logread", "power", "roster", "counters", "trace"] {
             assert_eq!(
                 syscap.iter().filter(|r| **r == right).count(),
                 1,
