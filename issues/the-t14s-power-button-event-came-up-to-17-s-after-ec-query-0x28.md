@@ -17,6 +17,7 @@ them to the stick:
 | `b3b9ccd69` | 6.696 s | 16.705 s, SCI 19 | 10.009 s |
 | `7c3a7dc7d` | 4.804 s | 4.821 s, SCI 7 | 0.017 s |
 | `ee6aadecb` | 32.628 s | 50.180 s, SCI 49 | 17.552 s |
+| `ff4945d6d` | 13.089 s | 13.105 s, SCI 13 | 0.016 s |
 
 Each line is `acpiserver: embedded controller query 0x28 taken for the first
 time, served by nothing: stage 1 runs no AML`, followed by `acpiserver: the
@@ -26,12 +27,17 @@ nothing after it. At `ee6aadecb` the driver lost the boot
 (`issues/the-metal-driver-reads-a-machine-left-in-s5-as-one-that-did-not-come-back.md`)
 and the log was read off a copy of the stick's log partition.
 
-Query 0x28 marks the press only by inference: it appears on those three boots
+At `ff4945d6d` the owner pressed once, about 10 s after the panel showed the
+loader's last line, and reports that the machine went off almost at once:
+0x28 and the power-button event 16 ms apart, with no lag.
+
+Query 0x28 marks the press only by inference: it appears on those four boots
 and on no unattended boot of the same branch (`acpicase`, `testcases`,
 `testcases-hold`, `testcases-off`, the `counters` boots), which take 0x4f
 alone.
 
-**Two readings fit the record, and none rules either out**:
+**Two readings fit the record, and none rules either out**, though the one
+deliberate press, served 16 ms after its 0x28, favours the second:
 
 - **A lag**: one press raised 0x28, and the controller or the firmware held
   `PWRBTN_STS` back for 10 and 17 s.
@@ -40,7 +46,7 @@ alone.
   #713's body, is that nothing happened at his press and a second press about
   5 s later turned the machine off at once. No account of the `ee6aadecb`
   boot's presses was recorded, and the host recorded no press's time on any
-  of the three.
+  of the four, `ff4945d6d`'s only to the minute.
 
 No table of the T14 defines `_Q28`: a byte search of its DSDT and every SSDT,
 dynamic ones included, captured before its wipe and read outside the tree,
