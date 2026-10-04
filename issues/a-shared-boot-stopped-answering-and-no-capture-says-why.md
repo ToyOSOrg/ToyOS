@@ -50,8 +50,16 @@ would leave a whole boot idle straight after a sibling thread's clean exit.
 path's two posts.
 
 **Exit condition.** A capture taken from a boot that has actually stopped, which
-names the first waiter and the subject it waits on — the blocked-task dump, or a
-guest whose own last line is not the periodic reporter.
+names the first waiter and the subject it waits on — the blocked-task dump, or
+that boot's trace diary and panic records.
+
+**The periodic reporter is gone.** The owner ruled on 2026-10-04, choosing
+"Remove it entirely": "Delete the periodic report and its counters; hang
+triage uses the trace diary and panic records instead." The `sched:` and
+`PMM:` lines the sightings below quote are no longer printed, so a stopped
+boot is told from a healthy idle one by its diary (`kernel/src/trace.rs`, read
+by `/system/bin/trace`) and its panic records (`kernel/src/panic.rs`,
+`kernel/src/blackbox.rs`).
 
 **Sighting, 2026-09-25.** `cargo test` (the full fast tier) on the dev host, 12 wide, TCG, on
 `wt/toyos-inspect` at `9ff0d254`. That branch touches no file under `kernel/`,

@@ -10,15 +10,9 @@
 //! three are taken**: a printed line reaches the stick within the second,
 //! through the `/log` fileserver on that fileserver's CPU.
 //!
-//! **`idle0` waits for the log to be quiet** ([`Log::settle`]): a job starts
-//! while logkeeper is still writing the boot so far and the job's own launch
-//! lines to the stick, and a second begun then measures that write.
-//!
-//! **And for a second the kernel's idle report cannot reach** ([`quiet`]): an
-//! idle CPU prints `sched:`, and one of them `PMM:`, on its first idle trip
-//! [`REPORT`] after its last, so a report is due at a time the log says, and
-//! one overdue prints at whatever next wakes its CPU. The second starts only
-//! where none falls due before it ends, wherever in a boot the job runs.
+//! **`idle0` waits for the log to be quiet** ([`settle`]): a job starts while
+//! logkeeper is still writing the boot so far and the job's own launch lines
+//! to the stick, and a second begun then measures that write.
 //!
 //! **Then `loaded`: how late the round's kick reaches each CPU** while a thread
 //! per CPU spawns a program that exits at once, which is the load Linux's
@@ -29,7 +23,6 @@
 //! kicks. A round across which a CPU's SMI count moved is dropped, since an
 //! SMI stops every CPU, and so is one with a CPU stale.
 
-use std::collections::BTreeMap;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -39,7 +32,7 @@ use toyos::poller::{Poller, READABLE};
 use toyos::syscap::SysCap;
 use toyos_abi::counters::{Counter, RawRecord, Record};
 use toyos_abi::syscall::{self, SyscallError};
-use toyos_logstream::{program_line, record_ms, Lines};
+use toyos_logstream::{program_line, Lines};
 
 /// The idle span: long enough that a CPU's busy fraction is its idle one and
 /// not the reads'.
@@ -55,25 +48,9 @@ const SPIN: u64 = 4_000_000_000;
 /// (`toyos_tco::JOB_BOUND_MS`) the reads before it leave.
 const LOADED: Duration = Duration::from_secs(20);
 
-/// How long [`quiet`] may take, a hang ceiling: a [`REPORT`] of waiting for
-/// every report to fall due, and two of logkeeper's rounds at its write budget
-/// (`userland/logkeeper/src/policy.rs`, 5 s). The job list's bound
-/// (`toyos_tco::JOB_BOUND_MS`) holds it, the spin and [`LOADED`].
-const QUIET_BOUND: Duration = Duration::from_secs(20);
-
-/// The kernel's idle report period, `SNAPSHOT_INTERVAL` in
-/// `kernel/src/scheduler.rs`: a CPU's next report is due this long after
-/// the clock read its last one followed.
-const REPORT: Duration = Duration::from_secs(10);
-
-/// How far a report's due time and the second's end are each held from the
-/// other: a stamp follows the clock read its deadline was set from by the
-/// formatting between them, and `idle1` follows [`IDLE`] by a wake and a read.
-const CLEAR: Duration = Duration::from_millis(50);
-
-/// How long [`quiet`] keeps a thread on every CPU, so that each one wakes
-/// and passes its idle loop, where an overdue report prints.
-const WAKE: Duration = Duration::from_millis(20);
+/// How long [`settle`] waits for each of its lines: two of logkeeper's rounds
+/// at its write budget (`userland/logkeeper/src/policy.rs`, 5 s).
+const SETTLE_BOUND: Duration = Duration::from_secs(10);
 
 /// What this binary's own children are asked to do: exit at once.
 const EXIT_AT_ONCE: &str = "exit-at-once";
@@ -176,137 +153,42 @@ fn print(phase: &str, read: &Read) {
     }
 }
 
-/// What the log says of the kernel's idle report, read off its records.
-#[derive(Default)]
-struct Reports {
-    /// Each CPU's last `sched:` record, in milliseconds since boot.
-    last: BTreeMap<u64, u64>,
-    /// Each CPU's first, `trips=1`: the earliest is the trip that set the
-    /// first `PMM:` deadline.
-    first: BTreeMap<u64, u64>,
-    /// The last `PMM:` record.
-    pmm: Option<u64>,
-}
-
-impl Reports {
-    fn see(&mut self, line: &str) {
-        let (Some(ms), Some((_, said))) = (record_ms(line), line.split_once("] ")) else { return };
-        if let Some(rest) = said.strip_prefix("sched: cpu=") {
-            let cpu = rest.split(' ').next().and_then(|cpu| cpu.parse().ok());
-            let cpu = cpu.unwrap_or_else(|| panic!("a `sched:` record names no cpu: {line:?}"));
-            self.last.insert(cpu, ms);
-            if rest.ends_with(" trips=1") {
-                self.first.insert(cpu, ms);
-            }
-        } else if said.starts_with("PMM: ") {
-            self.pmm = Some(ms);
-        }
-    }
-
-    /// When, in nanoseconds since boot, each report may next print: every
-    /// CPU's, then the machine's `PMM:`, each [`CLEAR`] early. One the log
-    /// does not hold may print now.
-    fn due(&self, cpus: u64) -> Vec<u64> {
-        let after = |ms: Option<u64>| {
-            ms.map_or(0, |ms| (ms * 1_000_000 + REPORT.as_nanos() as u64).saturating_sub(CLEAR.as_nanos() as u64))
-        };
-        let first_trip = (self.first.len() as u64 == cpus).then(|| self.first.values().copied().min()).flatten();
-        (0..cpus).map(|cpu| after(self.last.get(&cpu).copied())).chain([after(self.pmm.or(first_trip))]).collect()
-    }
-}
-
-/// This boot's log as logkeeper serves it, from its first line.
-struct Log {
-    pipe: toyos::Pipe,
-    poller: Poller,
-    lines: Lines,
-    chunk: Vec<u8>,
-    reports: Reports,
-    said: u32,
-}
-
-impl Log {
-    fn open() -> Self {
-        let pipe = logkeeper_api::read().unwrap_or_else(|why| panic!("test-runner's `log` port: {why}")).pipe;
-        Self { pipe, poller: Poller::new(1), lines: Lines::new(), chunk: vec![0u8; 64 * 1024], reports: Reports::default(), said: 0 }
-    }
-
-    /// Return once logkeeper has written, and made durable, everything
-    /// stamped before this call.
-    ///
-    /// A reader of the `log` port is handed each round only after it is on
-    /// the stick, so this prints a line and reads the log until that line
-    /// comes back. **Twice**: the round that writes the first may itself put a
-    /// record in the log — the stick's first sync is one — and the second
-    /// writes it. The `counters` row reds any line stamped inside the idle
-    /// second.
-    fn settle(&mut self, by: Instant) {
-        for _ in 0..2 {
-            self.said += 1;
-            let said = format!("counters_metal settle: the log holds line {}", self.said);
-            println!("{said}");
-            let mut held = false;
-            while !held {
-                match self.pipe.read_nonblock(&mut self.chunk) {
-                    Ok(0) => panic!("logkeeper closed the log before it held {said:?}"),
-                    Ok(n) => {
-                        let reports = &mut self.reports;
-                        self.lines.push(&self.chunk[..n], |line, _| {
-                            let line = std::str::from_utf8(line)
-                                .unwrap_or_else(|e| panic!("logkeeper served a line that is not UTF-8 ({e}): {line:?}"));
-                            reports.see(line);
-                            held |= program_line(line).is_some_and(|line| line.text == said);
-                        })
-                    }
-                    Err(SyscallError::WouldBlock) => {
-                        let left = by.checked_duration_since(Instant::now()).unwrap_or_else(|| {
-                            panic!("the log did not hold {said:?} within {QUIET_BOUND:?} of the job's start")
-                        });
-                        self.poller.watch(&self.pipe, READABLE, 0);
-                        self.poller.wait(1, left.as_nanos() as u64, |_| {});
-                    }
-                    Err(e) => panic!("the log's pipe refused a read: {e:?}"),
-                }
-            }
-        }
-    }
-}
-
-/// Return with the log written and no report of the kernel's due before
-/// [`IDLE`] and [`CLEAR`] from now.
+/// Return once logkeeper has written, and made durable, everything stamped
+/// before this call.
 ///
-/// Where one would be, this waits until every report is due and puts a thread
-/// on every CPU, so each prints what it owes now and owes nothing for a
-/// [`REPORT`] after. **A sleep, not a wait on an event**: a report falls due
-/// on the clock alone and says so to nobody.
-fn quiet() {
-    let by = Instant::now() + QUIET_BOUND;
-    let cpus = u64::from(syscall::cpu_count());
-    let mut log = Log::open();
-    loop {
-        log.settle(by);
-        let now = toyos_abi::clock::nanos_since_boot();
-        let due = log.reports.due(cpus);
-        let first = *due.iter().min().expect("a machine has a cpu");
-        let last = *due.iter().max().expect("a machine has a cpu");
-        if first > now + (IDLE + CLEAR).as_nanos() as u64 {
-            return;
-        }
-        let wait = Duration::from_nanos(last.saturating_sub(now)) + 2 * CLEAR;
-        if Instant::now() + wait > by {
-            panic!("no idle second clear of the kernel's report within {QUIET_BOUND:?}: due at {due:?} ns, now {now} ns");
-        }
-        std::thread::sleep(wait);
-        std::thread::scope(|s| {
-            for _ in 0..cpus {
-                s.spawn(|| {
-                    let begun = Instant::now();
-                    while begun.elapsed() < WAKE {
-                        std::hint::spin_loop();
-                    }
-                });
+/// A reader of the `log` port is handed each round only after it is on the
+/// stick, so this prints a line and reads the log until that line comes back.
+/// **Twice**: the round that writes the first may itself put a record in the
+/// log — the stick's first sync is one — and the second writes it. The
+/// `counters` row reds any line stamped inside the idle second.
+fn settle() {
+    let pipe = logkeeper_api::read().unwrap_or_else(|why| panic!("test-runner's `log` port: {why}")).pipe;
+    let poller = Poller::new(1);
+    let mut lines = Lines::new();
+    let mut chunk = vec![0u8; 64 * 1024];
+    for round in ["first", "second"] {
+        let said = format!("counters_metal settle: the log holds this {round} line");
+        println!("{said}");
+        let by = Instant::now() + SETTLE_BOUND;
+        let mut held = false;
+        while !held {
+            match pipe.read_nonblock(&mut chunk) {
+                Ok(0) => panic!("logkeeper closed the log before it held {said:?}"),
+                Ok(n) => lines.push(&chunk[..n], |line, _| {
+                    let line = std::str::from_utf8(line)
+                        .unwrap_or_else(|e| panic!("logkeeper served a line that is not UTF-8 ({e}): {line:?}"));
+                    held |= program_line(line).is_some_and(|line| line.text == said);
+                }),
+                Err(SyscallError::WouldBlock) => {
+                    let left = by.checked_duration_since(Instant::now()).unwrap_or_else(|| {
+                        panic!("the log did not hold {said:?} within {SETTLE_BOUND:?}")
+                    });
+                    poller.watch(&pipe, READABLE, 0);
+                    poller.wait(1, left.as_nanos() as u64, |_| {});
+                }
+                Err(e) => panic!("the log's pipe refused a read: {e:?}"),
             }
-        });
+        }
     }
 }
 
@@ -315,7 +197,7 @@ fn main() {
         return;
     }
     let cap: SysCap = Endowments::get().take(SYSCAP_LABEL).expect("test-runner endows a capability");
-    quiet();
+    settle();
     let idle0 = read(&cap);
     std::thread::sleep(IDLE);
     let idle1 = read(&cap);

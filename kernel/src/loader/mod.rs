@@ -487,7 +487,7 @@ pub fn spawn<H>(
     }
 
     // Mapped eagerly, not demand-paged: every process touches the stack immediately.
-    let stack_pages = match PageAlloc::new(USER_STACK_SIZE, crate::mm::pmm::Category::Stack) {
+    let stack_pages = match PageAlloc::new(USER_STACK_SIZE) {
         Some(a) => a,
         None => {
             log!("spawn: {}: failed to allocate user stack ({} bytes)", path, USER_STACK_SIZE);

@@ -704,7 +704,6 @@ extern "C" fn idle_loop() -> ! {
         if crate::drivers::panic_console::probe_due() {
             panic!("metal-panic-probe: a fatal report over a desktop that owns the screen");
         }
-        crate::scheduler::log_health();
         crate::scheduler::reap_finished();
         // `pass` below covers this too; here as well so a CPU that
         // halts immediately has still run every hook first.
@@ -777,22 +776,6 @@ pub fn current_is_rt() -> bool {
 
 pub fn ready_len() -> usize {
     try_with_cpu(|cpu| cpu.ready_len()).unwrap_or(0)
-}
-
-pub fn parked_len() -> usize {
-    try_with_cpu(|cpu| cpu.parked().count()).unwrap_or(0)
-}
-
-/// Killed threads on this CPU that are unwinding or waiting to.
-///
-/// The dump's fourth container — without it a dying task is invisible to `unheld = claimed − scheduled`.
-pub fn dying_len() -> usize {
-    try_with_cpu(|cpu| cpu.dying_len()).unwrap_or(0)
-}
-
-/// Threads on this CPU the machine's stop banded; no pick serves them again.
-pub fn stopped_len() -> usize {
-    try_with_cpu(|cpu| cpu.stopped_len()).unwrap_or(0)
 }
 
 /// Every thread on this CPU the machine's stop banded.

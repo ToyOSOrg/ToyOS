@@ -206,7 +206,7 @@ pub fn cache_loaded_lib(
     let Some(relocs) = scanned else {
         return Ok(owned(alloc));
     };
-    let Some(rw_alloc) = PageAlloc::new(rw_size, crate::mm::pmm::Category::Elf) else {
+    let Some(rw_alloc) = PageAlloc::new(rw_size) else {
         return Ok(owned(alloc));
     };
     let alloc_ptr = alloc.ptr();
@@ -282,7 +282,7 @@ pub fn try_clone_cached(
 fn clone_from_cache(cached: &CachedLib) -> Option<LoadedLib> {
     let t0 = crate::clock::nanos_since_boot();
 
-    let rw_alloc = PageAlloc::new(cached.rw_size, crate::mm::pmm::Category::Elf)?;
+    let rw_alloc = PageAlloc::new(cached.rw_size)?;
     // SAFETY: `rw_offset + rw_size` was validated inside `cached.alloc` when this `CachedLib` was built; `CachedLib` is immortal once cached, so `cached.alloc` is still live.
     let src = unsafe { cached.alloc.ptr().add(cached.rw_offset) };
     // SAFETY: `src` is valid for `cached.rw_size` bytes per the `SAFETY` above; `rw_alloc` is a fresh, distinct allocation, so the ranges cannot overlap.

@@ -63,7 +63,7 @@ impl TlsBlock {
 /// the block's physical address, which [`rebase`] moves once it has another.
 fn build_combined(modules: &[TlsModule], tls: Static) -> Option<TlsBlock> {
     let plan = tls.plan(TCB_SIZE, DTV_BYTES, crate::mm::PAGE_2M as usize)?;
-    let frames = Unpublished::new(PageAlloc::new(plan.alloc_size, crate::mm::pmm::Category::InitTls)?);
+    let frames = Unpublished::new(PageAlloc::new(plan.alloc_size)?);
     let block = frames.ptr();
 
     // SAFETY: `block` is the fresh, unpublished `plan.alloc_size`-byte allocation above.
