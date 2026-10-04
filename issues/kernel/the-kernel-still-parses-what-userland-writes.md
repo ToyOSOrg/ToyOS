@@ -42,27 +42,30 @@ first: the kernel mounts ROOT itself, but what mounts `/boot` and `/home`, and
 with what authority, is the open question.
 
 **Move 3 — the panic-time symbol resolver**, small and independent. Ruled
-(owner, 2026-10-03, "adopt", `issues/diagnostics/toyos-explains-itself.md`): the
-kernel names only itself; a killed program is reported as file and offset, and
-one userland naming service shares the kernel's lookup and demangling code.
-The kernel keeps its own ELF reader, `toyos-elf`: the orchestrator's reading
-of the owner's crate ruling of the same day, "if it makes sense we wrote our
-own elf parser or aml interpreter due to security or other important reasons
-we do it". ELF parsing is already a pure crate that forbids unsafe and is
-tested against a crafted corpus, and the symbol machinery moved onto it in the
-2026-08-15 consolidation. What is left: the kernel stops naming a program's
-addresses (`resolve_user_symbol` in `kernel/src/process.rs`); the per-spawn
-table `read_backtrace_table` builds in `kernel/src/loader/symbols.rs`, and the
-copy each task carries, are deleted; a userland service names a reported file
-and offset; and `rustc-demangle`'s standing is decided. It is an unforked
-crates.io dependency, ~2k lines of third-party string parsing in Ring 0 on the
-panic path: fork it into the estate like every other third-party source, or
-record the exemption deliberately. **Exit**: a guest test whose program dies
-of a fault reads the kernel's report as the program's file and the faulting
-offset, with no user symbol in it, and the userland service names the
-faulting function from that file and offset; no kernel source builds a backtrace
-table from a program's file; and `rustc-demangle` is forked or its exemption
-recorded.
+(owner, 2026-10-03, `issues/diagnostics/toyos-explains-itself.md`): he chose
+"Adopt it: Built after the folder work, as part of the observability plan.
+Frees at least 2 MiB per running program, the kernel stops parsing program
+files' name tables, library frames get names." and wrote "adopt, make sure the
+code can never panic or fail is that possible? i dont want to allow a kernel
+crash because of that and it seems brittle by nature do you agree? can we
+share a lot of code there? should we?". The kernel keeps its own ELF reader,
+`toyos-elf`: the orchestrator's reading of the owner's crate ruling of the same
+day, "if it makes sense we wrote our own elf parser or aml interpreter due to
+security or other important reasons we do it". The kernel names only itself: a
+killed program's frame is recorded as the file it ran, the offset in that file
+and the file's build-id (`toyos-symbols/src/frame.rs`), and
+`/system/bin/symbolize` names it with the kernel's own lookup and demangling
+code. What is left: a library's frames print bare, because the kernel records
+only the executable's image for a process; and `rustc-demangle`'s standing. It
+is an unforked crates.io dependency, ~2k lines of third-party string parsing in
+Ring 0 on the panic path, now for the kernel's own names alone: fork it into
+the estate like every other third-party source, or record the exemption
+deliberately. **Exit**: `disk_backtrace`, in the guest suite and on the T14,
+reads its killed child's report as the child's file, offset and build-id with
+no user symbol in it, and `symbolize` names the faulting function from them;
+no kernel source builds a backtrace table from a program's file; a library's
+frame is recorded as its file and offset; and `rustc-demangle` is forked or its
+exemption recorded.
 
 **Small trim to evaluate:** main-thread exit killing the process is kernel policy
 the review called unnecessary. A process could end when its last thread does, or

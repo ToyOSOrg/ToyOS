@@ -555,7 +555,6 @@ dependencies = [
  "bcachefs",
  "dlmalloc",
  "hashbrown 0.16.1",
- "rustc-demangle",
  "toyos-abi",
  "toyos-acpi",
  "toyos-blackbox",
@@ -1242,6 +1241,9 @@ version = "0.1.0"
 [[package]]
 name = "toyos-elf"
 version = "0.1.0"
+dependencies = [
+ "object",
+]
 
 [[package]]
 name = "toyos-elide"
@@ -1407,6 +1409,8 @@ dependencies = [
 name = "toyos-symbols"
 version = "0.1.0"
 dependencies = [
+ "object",
+ "rustc-demangle",
  "toyos-abi",
  "toyos-elf",
  "toyos-elide",

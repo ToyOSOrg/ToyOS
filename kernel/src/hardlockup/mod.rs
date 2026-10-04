@@ -380,7 +380,7 @@ impl fmt::Display for At {
             Some((name, offset)) => write!(
                 f,
                 "  {}+{offset:#x}",
-                toyos_symbols::symbol_text(rustc_demangle::demangle(name)),
+                toyos_symbols::demangled(name),
             ),
         }
     }

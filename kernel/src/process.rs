@@ -1,8 +1,8 @@
 //! The process table, and what a process is made of.
 //!
 //! [`dump_crash_diagnostics`] and [`try_for_each_thread`] never wait on
-//! [`PROCESS_TABLE`]: the faulting thread may hold it. A crash report resolves
-//! symbols off the task's own record ([`resolve_user_symbol`]), never off
+//! [`PROCESS_TABLE`]: the faulting thread may hold it. A crash report records a
+//! user frame off the task's own record ([`record_user_frame`]), never off
 //! this table.
 //!
 //! `kernel::proclife` decides lifecycle transitions; this file only performs them.
@@ -17,7 +17,6 @@ use crate::mm::policy::{CachePolicy, Prot, WindowProt};
 use crate::mm::{PAGE_2M, PAGE_BYTES};
 use crate::object::{ops, HandleTable};
 use crate::sync::Lock;
-use crate::symbols::SymbolTable;
 use crate::sched::payload::ThreadSched;
 use crate::time::{Deadline, Duration};
 use crate::{elf, pipe, scheduler};
@@ -327,8 +326,8 @@ pub struct ProcessEntry {
     object: Arc<crate::object::process::ProcessObject>,
     name: [u8; THREAD_NAME_LEN],
     process_data: Arc<Lock<ProcessData>>,
-    /// No `Lock`: written once by the loader, then read-only, so teardown releases it by dropping this `Arc` — a crash report then reaches names through the task it is reporting on, never through this table.
-    symbols: Arc<SymbolTable>,
+    /// No `Lock`: written once by the loader, then read-only — a crash report reaches it through the task it is reporting on, never through this table. `None` for a kernel thread's.
+    image: Option<Arc<UserImage>>,
     main_tid: Tid,
     threads: crate::id_map::IdMap<Tid, ThreadEntry>,
     /// Set once, with the exit's code, by the exit or kill that claims teardown; checked by `spawn_thread` so no thread appears after the retire set.
@@ -345,7 +344,7 @@ impl ProcessEntry {
         object: Arc<crate::object::process::ProcessObject>,
         name: [u8; THREAD_NAME_LEN],
         process_data: Arc<Lock<ProcessData>>,
-        symbols: Arc<SymbolTable>,
+        image: Option<Arc<UserImage>>,
         main_thread: ThreadEntry,
         node: Node,
     ) -> Self {
@@ -356,7 +355,7 @@ impl ProcessEntry {
             object,
             name,
             process_data,
-            symbols,
+            image,
             main_tid,
             threads,
             teardown_code: None,
@@ -983,8 +982,8 @@ pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Op
     }));
     let proc = table.get_mut(parent_process)
         .expect("spawn_thread: the entry the insert admission just answered for");
-    // Every thread names the same symbols, so a crash report never asks this table.
-    let symbols = Arc::clone(&proc.symbols);
+    // Every thread carries the same image, so a crash report never asks this table.
+    let image = proc.image.clone();
     let tid = proc.threads.insert(ThreadEntry::new(thread_data));
     // Before the thread's first instruction, which is the enqueue below: the
     // thread reads its own id here without a syscall (`toyos_abi::TCB_TID`).
@@ -1005,7 +1004,7 @@ pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Op
         ks_sp,
         parent_addr_space,
         thread_pointer,
-        symbols,
+        image,
     );
     proc.threads.get_mut(tid).unwrap().set_sched(sched);
     drop(guard);
@@ -1071,12 +1070,12 @@ fn teardown_resources(
     (syscall_total, syscall_total_ns)
 }
 
-/// Table-side teardown bookkeeping: drop the symbol table and total the CPU time of every thread still in the table.
+/// Table-side teardown bookkeeping: drop the image record and total the CPU time of every thread still in the table.
 /// Caller must hold `PROCESS_TABLE`, be the last thread out and have freed the resources.
 fn teardown_bookkeeping(table: &mut ProcessTable, process_pid: Pid, code: i32) -> u64 {
     let proc = table.get_mut(process_pid)
         .expect("teardown_bookkeeping: process not found");
-    proc.symbols = Arc::new(SymbolTable::empty());
+    proc.image = None;
     let cpu_ns: u64 = proc.threads.iter().map(|(_, t)| t.sched().map_or(0, scheduler::task_cpu_ns)).sum();
     let name = proc.name_str();
     log!("exit: {name} pid={process_pid} code={code} cpu={}ms", cpu_ns / 1_000_000);
@@ -1638,63 +1637,82 @@ pub fn dump_crash_diagnostics(fault_addr: u64, rip: u64) {
     }
 }
 
-/// What a crash report learned when it asked for a user address's symbol. Not a `bool`: "no symbol was logged" would conflate an address the tables genuinely don't cover with one nothing looked up because a lock was held.
-#[must_use = "an address with no symbol line still has to be printed"]
+/// The executable a process runs, as its crash report records a frame in it
+/// (`toyos_symbols::frame`): the file the kernel opened, the build-id that
+/// file carries, and where it is mapped.
+pub struct UserImage {
+    pub name: String,
+    pub build_id: Option<toyos_symbols::frame::BuildId>,
+    /// `[start, end)`: the image's span in the process.
+    pub start: u64,
+    pub end: u64,
+    /// What a file address is moved by: an address `a` in the file is at `a + bias`.
+    pub bias: u64,
+}
+
+/// What a crash report did with a user address. Not a `bool`: "no frame was recorded" would conflate an address the image does not cover with one nothing looked up because a lock was held.
+#[must_use = "an address with no frame line still has to be printed"]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum SymbolLookup {
-    /// Resolved: the line naming it has already been logged.
-    Named,
-    /// The symbol table was read and covers no such address.
-    Unnamed,
-    /// Nothing was read: a scheduler pass already held this CPU's task record when the report began, so the running task's symbols were unreachable.
+pub enum FrameRecord {
+    /// Recorded as file and offset: the line is already logged.
+    Recorded,
+    /// The running task's image does not hold the address.
+    Outside,
+    /// Nothing was read: a scheduler pass already held this CPU's task record when the report began, so the running task's image was unreachable.
     InPass,
     /// Nothing was read: no task is running on this CPU (idle, or before the first task).
     NoTask,
 }
 
-impl SymbolLookup {
-    /// Log the bare address for a lookup with no symbol line, saying why; [`Named`](Self::Named) logs nothing — its line is already out.
+impl FrameRecord {
+    /// Log the bare address for an address with no frame line, saying why; [`Recorded`](Self::Recorded) logs nothing — its line is already out.
     pub fn log_bare(self, addr: u64) {
         match self {
-            Self::Named => {}
-            Self::Unnamed => log!("    {:#x}", addr),
+            Self::Recorded => {}
+            Self::Outside => log!("    {:#x}", addr),
             Self::InPass => {
-                log!("    {:#x}  <symbol unread: a scheduler pass held this CPU's task record>", addr)
+                log!("    {:#x}  <frame unread: a scheduler pass held this CPU's task record>", addr)
             }
             Self::NoTask => {
-                log!("    {:#x}  <symbol unread: no task is running on this CPU>", addr)
+                log!("    {:#x}  <frame unread: no task is running on this CPU>", addr)
             }
         }
     }
 }
 
-/// Resolve and log a user-mode address against the running process's symbol table; see [`with_current_symbols`].
-pub fn resolve_user_symbol(addr: u64) -> SymbolLookup {
-    with_current_symbols(|syms| crate::symbols::resolve_user(syms, addr))
+/// Record the user address `pc` as a frame of the running process's image; see [`with_current_image`].
+pub fn record_user_frame(pc: u64) -> FrameRecord {
+    with_current_image(|image| record(image, pc, Some(pc)))
 }
 
-/// [`resolve_user_symbol`] for a backtrace frame's return address — see [`crate::symbols::SymbolTable::resolve_return`].
-pub fn resolve_user_symbol_return(return_addr: u64) -> SymbolLookup {
-    with_current_symbols(|syms| crate::symbols::resolve_user_return(syms, return_addr))
+/// [`record_user_frame`] for a backtrace frame's return address: its offset is the call's last byte, so a call in tail position names its caller.
+pub fn record_user_frame_return(return_addr: u64) -> FrameRecord {
+    with_current_image(|image| record(image, return_addr, return_addr.checked_sub(1)))
 }
 
-/// Run `f` against the symbol table of the task this CPU is running, and say what happened.
-/// Three-way, not two: `f` decides between [`Named`](SymbolLookup::Named) and [`Unnamed`](SymbolLookup::Unnamed); every other answer means the address was never looked up, and the caller must print it via [`SymbolLookup::log_bare`].
-/// No lock: this runs from fault/panic reports, where the faulting thread may hold `PROCESS_TABLE`, so a task carries its own process's symbols on its own record ([`sched::driver::current_symbols`]) instead.
+/// Log `pc`'s frame, its offset that of `at`, when `image` holds `at`.
+fn record(image: &UserImage, pc: u64, at: Option<u64>) -> bool {
+    let offset = at.and_then(|at| toyos_symbols::frame::frame_offset(at, image.start, image.end, image.bias));
+    let Some(offset) = offset else { return false };
+    log!("{}", toyos_symbols::frame::UserFrame { pc, name: &image.name, offset, build_id: image.build_id });
+    true
+}
+
+/// Run `f` against the image of the task this CPU is running, and say what happened.
+/// No lock: this runs from fault/panic reports, where the faulting thread may hold `PROCESS_TABLE`, so a task carries its own process's image on its own record ([`sched::driver::current_image`]) instead.
 /// `pid` is not a parameter: a report is always about the process whose CPU is producing it.
-fn with_current_symbols(f: impl FnOnce(&crate::symbols::SymbolTable) -> bool) -> SymbolLookup {
-    let Some(syms) = crate::sched::driver::current_symbols() else {
+fn with_current_image(f: impl FnOnce(&UserImage) -> bool) -> FrameRecord {
+    let Some(image) = crate::sched::driver::current_image() else {
         // This CPU cannot switch between the two causes mid-report: a report is not reschedulable while `PerCpu::fault_state` is non-zero.
         return if crate::sched::driver::in_pass() {
-            SymbolLookup::InPass
+            FrameRecord::InPass
         } else {
-            SymbolLookup::NoTask
+            FrameRecord::NoTask
         };
     };
-    if f(&syms) {
-        SymbolLookup::Named
-    } else {
-        SymbolLookup::Unnamed
+    match image {
+        Some(image) if f(&image) => FrameRecord::Recorded,
+        _ => FrameRecord::Outside,
     }
 }
 
