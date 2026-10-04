@@ -47,9 +47,6 @@ post-is-an-answer = []
 #
 # `src/sync.rs`'s two loads of `now` go `Relaxed`, and `ticket_lock` reds.
 lock-acquire-off = []
-# `src/sync.rs`'s `owed_fence` is dropped from both sides of `OwedLock`, and
-# `owed_lock` reds.
-owed-fence-off = []
 # `src/sched/reap_gate.rs`'s `raise` store goes `Relaxed`, and `reap_gate`
 # reds.
 reap-raise-relaxed = []

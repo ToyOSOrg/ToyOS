@@ -20,7 +20,7 @@ use crate::mm::Mmio;
 use crate::mm::Dma;
 use crate::log;
 use super::pci::PciDevice;
-use crate::sync::{OwedGuard, OwedLock};
+use crate::sync::Lock;
 use toyos_untrusted::Untrusted;
 use toyos_xhci::job::{Await, Outcome, Outstanding, Stages, CC_SHORT_PACKET, CC_SUCCESS};
 use toyos_xhci::port::{self as portmachine, GaveUp, Gone, PortState, Reset, Step};
@@ -1444,26 +1444,7 @@ impl XhciController {
 /// Every xHCI controller on the machine, in PCI enumeration order.
 ///
 /// A `Vec` and not an `Option`: the target laptop has two, and its own ports hang off the second.
-///
-/// Owed, so a CPU whose [`poll_if_pending`] finds it taken halts on the record
-/// it leaves instead of spinning a pass on it for as long as a disk transfer
-/// holds the lock.
-static XHCI: OwedLock<Vec<XhciController>> = OwedLock::new(Vec::new(), bring_to_pass);
-
-const _: () = assert!(crate::scheduler::MAX_CPUS <= u64::BITS as usize, "XHCI's owed word has a bit per cpu");
-
-/// [`XHCI`]'s answer: every CPU in `owed` takes a scheduler pass, whose
-/// [`poll_if_pending`] finds the record it left.
-fn bring_to_pass(owed: u64) {
-    let me = crate::arch::percpu::cpu_id();
-    for cpu in (0..u64::BITS).filter(|cpu| owed & (1 << cpu) != 0) {
-        if cpu == me {
-            crate::preempt::set_need_resched();
-        } else {
-            crate::arch::irqchip::kick_cpu(cpu);
-        }
-    }
-}
+static XHCI: Lock<Vec<XhciController>> = Lock::new(Vec::new());
 
 /// Empty every USB disk's write cache, on the way to a reset.
 ///
@@ -1587,7 +1568,7 @@ fn lock_settles() -> bool {
 /// deadlock panic, and a shutdown path that panicked instead of resetting is a
 /// machine nobody can turn off. Not fair — a competitor taking a ticket wins —
 /// which is why both callers say what they do without it.
-fn take_within(bound: u64) -> Option<OwedGuard<'static, Vec<XhciController>>> {
+fn take_within(bound: u64) -> Option<crate::sync::LockGuard<'static, Vec<XhciController>>> {
     let until = crate::clock::tsc_deadline(bound);
     loop {
         if let Some(guard) = XHCI.try_lock() {
@@ -1631,7 +1612,7 @@ pub fn poll_if_pending() {
         }
     }
     // Decline rather than queue: `lock()` here would put every CPU with work due on one ticket spinlock.
-    let Some(mut guard) = XHCI.try_lock_or_owe(crate::arch::percpu::cpu_id()) else { return };
+    let Some(mut guard) = XHCI.try_lock() else { return };
     // Taken only now the work will be done: taking it before a declined lock would drop a wake with nothing left to re-post it.
     crate::irq_ring::take(crate::irq_ring::IrqSource::Xhci);
     let mut wake_at: Option<u64> = None;
@@ -1712,7 +1693,7 @@ pub(super) fn with_disk_by<R>(
 }
 
 fn on_disk<R>(
-    mut guard: OwedGuard<'static, Vec<XhciController>>,
+    mut guard: crate::sync::LockGuard<'static, Vec<XhciController>>,
     index: usize,
     f: impl FnOnce(&mut XhciController, usize) -> R,
 ) -> Option<R> {
