@@ -25,16 +25,11 @@ use toyos_update::policy;
 use toyos_update::record::{self, Booted, Ended, Record};
 
 /// Every line this loader prints: the firmware's console, and the file on the
-/// stick once [`loaderlog::open`] has one. The arguments are evaluated once, so
-/// a line that reads a clock says the same on both.
+/// stick once [`loaderlog::open`] has one, under one [`stamp`]. The arguments
+/// are evaluated once, so a line that reads a clock says the same on both.
 macro_rules! println {
     ($($arg:tt)*) => {
-        match core::format_args!($($arg)*) {
-            args => {
-                uefi_services::println!("{}", args);
-                $crate::loaderlog::line(args);
-            }
-        }
+        $crate::stamp::say(core::format_args!($($arg)*))
     };
 }
 
@@ -49,6 +44,7 @@ mod loaderlog;
 mod rootbridge;
 mod rootimage;
 mod slot;
+mod stamp;
 mod watchdog;
 
 /// The largest file the bootloader will read off the ESP.
@@ -747,6 +743,7 @@ fn end_this_pass(system_table: &SystemTable<Boot>, exit_event: Option<Event>) ->
 fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // First, so this reading is firmware's time and none of the loader's.
     let entry_counter = arch::counter();
+    let counter_hz = stamp::start(entry_counter);
     let exit_event = uefi_services::init(&mut system_table).unwrap();
     // First, because it covers everything below it: firmware starts a
     // five-minute countdown when it loads an image and resets the machine if
@@ -755,6 +752,11 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // so the answer is on the stick and not only on the screen.
     let firmware_watchdog =
         system_table.boot_services().set_watchdog_timer(FIRMWARE_WATCHDOG_SECS, WATCHDOG_CODE, None);
+    // Before the first line, so the screen holds this loader's lines and none
+    // of the firmware's: its logo and its boot manager's text. ClearScreen
+    // (UEFI 2.11 §12.4.8) is the console's own clear, which also homes the
+    // cursor; said once the log is open.
+    let cleared = system_table.stdout().clear();
     // The same sixteen bytes the kernel is handed below, read once, and read
     // before the first line so that no line is only on the screen.
     let log_guid = log_partition_guid(handle, &system_table);
@@ -810,6 +812,13 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     let wrote = attempt::write(&system_table, &log_guid, &record);
     loaderlog::open(&system_table, &log_guid, finding.is_none() && !retry);
     println!("{}", loaderlog::BEGINS_AT);
+    match counter_hz {
+        Some(hz) => println!("Loader clock: each line opens with the ms since this loader's entry, at the counter's stated {hz} Hz"),
+        None => println!("Loader clock: this CPU states no counter rate, so no line carries the time it was said"),
+    }
+    if let Err(e) = cleared {
+        println!("Screen: firmware's console would not clear ({e}), so its own lines stay above these");
+    }
     if let Some(line) = claim_refused {
         println!("{line}");
     }
@@ -864,7 +873,7 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
         // firmware's own scroll costs this machine, and every reader of these
         // lines reads them off the stick.
         for line in &finding.filed {
-            loaderlog::line(format_args!("{line}"));
+            loaderlog::line(format_args!("{}{line}", stamp::now()));
         }
         if finding.ends_the_chain {
             // The last boot is accounted for, so this pass boots no kernel.

@@ -1295,6 +1295,27 @@ impl QemuInstance {
         Ok(read)
     }
 
+    /// Reset the machine with its memory kept, and hold it at the next reset
+    /// the guest itself asks for: the boot that follows keeps its screen,
+    /// stopped, where a `-no-reboot` QEMU would have exited with it. The
+    /// machine is stopped while QEMU's reset actions change, so the guest has
+    /// no reset of its own to land between them.
+    pub fn reset_and_hold_the_next(&mut self, budget: Duration) -> Result<(), String> {
+        let socket = self.sockets.qmp.clone().expect("reset_and_hold_the_next needs BootOptions { qmp: true }");
+        let mut qmp = Qmp::connect(&socket);
+        qmp.execute("{\"execute\":\"stop\"}");
+        qmp.execute("{\"execute\":\"set-action\",\"arguments\":{\"reboot\":\"reset\"}}");
+        qmp.execute("{\"execute\":\"system_reset\"}");
+        qmp.execute("{\"execute\":\"set-action\",\"arguments\":{\"reboot\":\"shutdown\",\"shutdown\":\"pause\"}}");
+        qmp.execute("{\"execute\":\"cont\"}");
+        qmp.stream.set_read_timeout(Some(self.budget(budget))).expect("qmp: the hold's budget");
+        match QmpShutdown(qmp).reason().as_deref() {
+            Some("guest-reset") => Ok(()),
+            Some(other) => Err(format!("the boot after the reset stopped by {other:?}, not by a reset of its own")),
+            None => Err(format!("the boot after the reset never asked for a reset within {budget:?}")),
+        }
+    }
+
     /// Capture the guest's scanout through QMP and return the decoded PPM.
     ///
     /// After a halt the guest is stopped, so the dump is stable. QEMU writes

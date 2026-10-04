@@ -206,6 +206,9 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     // The same fatal path with a compositor holding the panel, which is the
     // only configuration the owner's laptop is ever in.
     ("screen_fatal_halt_composited", qemu::Profile::Metal),
+    // What the loader leaves on the panel: its own lines, and none of the
+    // firmware's.
+    ("screen_loader_clears", qemu::Profile::Metal),
     ("virt_early_panic", qemu::Profile::Virt),
     ("virt_early_fault", qemu::Profile::Virt),
     ("virt_el2_drop", qemu::Profile::VirtEl2NoVhe),
@@ -2112,6 +2115,69 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
                 &["PANIC:", "test-late-panic: on-screen console check"],
                 "late_panic::Nest",
             )?;
+            Ok(())
+        }
+        "screen_loader_clears" => {
+            // A loader's screen lasts until the kernel's first paint, which no
+            // poll is sure to catch, so the machine is held where a loader pass
+            // ends in a reset of its own: the pass after a reset that kept
+            // memory reads the black box the first pass armed, and hands the
+            // machine back.
+            let mut qemu = QemuInstance::boot_with_options(
+                test_config,
+                &[],
+                &[],
+                BootOptions { profile, qmp: true, ready_marker: bootlog::LOADER_LAST_LINE, ..Default::default() },
+            );
+            qemu.reset_and_hold_the_next(Duration::from_secs(30))?;
+            let serial = qemu.drain_until(Duration::from_secs(5), |l| l.contains(bootlog::CHAIN_ENDS_LINE));
+            if !serial.contains(bootlog::CHAIN_ENDS_LINE) {
+                return Err(format!("the held boot is not a loader pass that ended its chain:\n{serial}"));
+            }
+            let dump = qemu.screendump();
+            const BLACK: [u8; 3] = [0, 0, 0];
+            // The firmware's logo is in colours its console's text is not.
+            let colours: BTreeSet<[u8; 3]> = dump.pixels.iter().copied().collect();
+            if colours.len() != 2 || !colours.contains(&BLACK) {
+                return Err(format!(
+                    "the loader's screen carries {} colours, not black and the console's text alone: \
+                     something the firmware drew is still on it",
+                    colours.len()
+                ));
+            }
+            // The top line of ink is the loader's first, as wide as its
+            // characters at the 8-pixel glyphs of EDK2's console: the firmware's
+            // boot manager announces the option it starts on a line of its own.
+            // A pass that reads a finding appends to its log, so its first line
+            // is the separator; what precedes it on the 16550 is the terminal's
+            // escapes for the clear.
+            let Some(first) = serial.lines().find(|l| l.contains(bootlog::SEPARATOR)) else {
+                return Err(format!("the held pass never wrote {:?}:\n{serial}", bootlog::SEPARATOR));
+            };
+            // An escape runs from ESC to its final letter.
+            let shown = match first.rfind('\x1b') {
+                Some(at) => {
+                    let escape = &first[at..];
+                    &escape[escape.find(|c: char| c.is_ascii_alphabetic()).map_or(escape.len(), |end| end + 1)..]
+                }
+                None => first,
+            };
+            // A stamp's leading spaces carry no ink.
+            let chars = shown.trim().len();
+            let (width, pixels) = (dump.width, &dump.pixels);
+            let inked = |y: usize| (0..width).filter(move |&x| pixels[y * width + x] != BLACK);
+            let Some(top) = (0..dump.height).find(|&y| inked(y).next().is_some()) else {
+                return Err("the loader's screen is blank".to_string());
+            };
+            let bottom = (top..dump.height).find(|&y| inked(y).next().is_none()).unwrap_or(dump.height);
+            let xs: Vec<usize> = (top..bottom).flat_map(inked).collect();
+            let wide = xs.iter().max().unwrap() - xs.iter().min().unwrap() + 1;
+            if wide <= 8 * (chars - 1) || wide > 8 * chars {
+                return Err(format!(
+                    "the screen's top line is {wide} px wide, and the loader's first, {shown:?}, \
+                     is {chars} characters: something else is above the loader's lines\n{serial}"
+                ));
+            }
             Ok(())
         }
         "virt_early_panic" => {

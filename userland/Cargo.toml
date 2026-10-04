@@ -30,6 +30,7 @@ members = [
     "sprite",
     "sshserver",
     "supervisor",
+    "symbolize",
     "swap",
     "terminal",
     "test-runner",

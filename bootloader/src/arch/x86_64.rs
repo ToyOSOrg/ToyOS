@@ -20,6 +20,19 @@ pub fn counter() -> u64 {
     unsafe { core::arch::x86_64::_rdtsc() }
 }
 
+/// [`counter`]'s rate in hertz as CPUID states it, or `None` on a part that
+/// states none: the kernel's `stated_counter_hz`, read before the kernel runs.
+pub fn counter_hz() -> Option<u64> {
+    use core::arch::x86_64::__cpuid;
+    // A leaf past the maximum is never asked for, so none is misread as data.
+    let leaf = |at: u32| {
+        let r = __cpuid(at);
+        (r.eax, r.ebx, r.ecx, r.edx)
+    };
+    let max = leaf(0).0;
+    toyos_tsc::stated_hz((max >= 0x15).then(|| leaf(0x15)), (max >= 0x16).then(|| leaf(0x16)))
+}
+
 /// `CLFLUSH`'s line on every x86-64 part.
 const LINE: u64 = 64;
 
