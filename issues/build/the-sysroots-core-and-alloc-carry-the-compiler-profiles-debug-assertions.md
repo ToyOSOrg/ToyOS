@@ -31,9 +31,12 @@ gates in the code compiled into those crates. The same profile's
 
 **Measured.** A link-time no-panic proof: a `no_std` binary for
 `x86_64-unknown-none` whose panic handler calls a symbol nobody defines,
-linking a fallible parser. Its controls hold in every arm: the binary with no
-parser links, and each of a `Vec::push`, a `handle_alloc_error`, an over-wide
-shift and an out-of-range index fails to link. The parser, built with the
+linking a fallible parser. The binary with no parser links in every arm. Each
+of a `Vec::push`, a `handle_alloc_error`, an over-wide shift and an
+out-of-range index fails to link in every arm without `-Zub-checks=no`; with
+it, only the `handle_alloc_error` control ran, against stable's and nightly's
+libraries, and failed, and the ToyOS sysroot's rows ran no failing control.
+The parser, built with the
 binary's own debug assertions off, links against stable 1.98.1's and nightly's
 upstream libraries and fails against a ToyOS sysroot, at `opt-level = 2` and
 under fat LTO alike. In the parser's arm that writes into a vector's spare
@@ -51,8 +54,9 @@ against an upstream library on the host, and against none the kernel links.
 attributes; what the libraries' assertions, checks and frame pointers cost a
 kernel or a program in time or in image bytes, on QEMU or the T14.
 
-Owner track: `issues/kernel/a-panic-is-never-an-accident.md`, stage 2.
-Owner: the orchestrator.
+Owner: the orchestrator. Stage 2 of
+`issues/kernel/a-panic-is-never-an-accident.md` exits on a host step against
+upstream libraries, so it does not wait on this file.
 
 **Exit**: `std_config` sets `rust.debug-assertions-std` by a line of its own,
 so the compiler profile decides nothing about the libraries' assertions; and
