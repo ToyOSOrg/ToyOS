@@ -21,11 +21,15 @@
 //! declares and for a command carrying an extra slot; and a launch runs its row's
 //! own program, so std refuses a command naming its image under the supervisor or
 //! with a connector provided, and spawns one naming its image directly, under
-//! its program's name, launcher or not. A chain alternating spawn
-//! and launch — each link launches a shell, and the shell spawns the next link
-//! — stops where the kernel refuses a process more than `MAX_DEPTH` below
-//! the supervisor, and dies whole with its first link. And a `cat` a shell `detach`es
-//! outlives the shell.
+//! its program's name, launcher or not. A chain — each link starts a shell,
+//! and the shell spawns the next link — stops where the kernel refuses a
+//! process more than `MAX_DEPTH` below the supervisor, and dies whole with its
+//! first link: that link is endowed a launcher and launches its shell, and
+//! every later one is a direct spawn, holds none, and spawns its own. And a
+//! `cat` a shell `detach`es outlives the shell.
+//!
+//! This process holds the launcher test-runner endows every job, and hands a
+//! duplicate to each child that launches: a direct spawn inherits none.
 //!
 //! Every wait is unbounded: the harness ceiling is the only clock.
 
@@ -36,7 +40,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 
 use toyos::endow::{self, Endowments, SVC_LABEL, SYSCAP_LABEL};
 use toyos::ipc::Connection;
-use toyos::launch::{self, Launch, Outcome, Parent};
+use toyos::launch::{self, Launch, Outcome, Parent, LAUNCHER};
 use toyos::process::Process;
 use toyos::syscap::SysCap;
 use toyos::{namespace, port, AsHandle};
@@ -140,7 +144,7 @@ struct Grown {
 /// take what it sends once its subtree is grown.
 fn grow() -> Grown {
     let (acceptor, connector) = port::create().expect("a port of our own");
-    let own = endow::namespace().expect("test-runner endows its namespace, `launcher` in it");
+    let own = endow::namespace().expect("test-runner endows its namespace");
     let ns = namespace::build()
         .keep_all(own)
         .add(BACK, &connector)
@@ -149,6 +153,7 @@ fn grow() -> Grown {
     let mut b = Command::new(SELF_PATH)
         .arg("b")
         .endow(SVC_LABEL, ns.into_raw().0)
+        .endow(LAUNCHER, launcher_copy().0)
         .stdin(Stdio::piped())
         .spawn()
         .expect("spawn B");
@@ -203,7 +208,7 @@ fn under_b_is_gone(grown: &Grown) {
         Ok(_) => panic!("a spawn under B {when} started"),
     }
     let place = syscall::dup(grown.b_self).expect("a copy of B's self to send");
-    let conn = endow::service("launcher").expect("this process holds a launcher connector");
+    let conn = launcher();
     let request = Launch {
         program: HELD,
         argv: b"/system/bin/cat",
@@ -220,6 +225,20 @@ fn under_b_is_gone(grown: &Grown) {
         Ok(_) => panic!("a launch under B {when} was answered as something other than gone"),
         Err(_) => panic!("the launcher did not answer a launch under B {when}"),
     }
+}
+
+/// A connection to the launcher test-runner endowed this process.
+fn launcher() -> Connection {
+    endow::launcher()
+        .expect("test-runner endows every job its launcher")
+        .open(LAUNCHER)
+        .expect("the launcher answers")
+}
+
+/// A duplicate of this process's launcher, for a child that launches.
+fn launcher_copy() -> RawHandle {
+    let held = endow::launcher().expect("test-runner endows every job its launcher");
+    syscall::dup(held.as_handle()).expect("a copy of the launcher")
 }
 
 /// `SYS_SPAWN` of this binary as a C under `place`, killed again if it starts.
@@ -273,7 +292,7 @@ fn a_manage_only_handle_is_no_place() {
 fn a_pipe_is_no_place() {
     let (_read, write) = toyos::pipe_pair().expect("a pipe of our own");
     let place = syscall::dup(write.as_handle()).expect("a duplicate to send");
-    let conn = endow::service("launcher").expect("this process holds a launcher connector");
+    let conn = launcher();
     let request = Launch {
         program: HELD,
         argv: b"/system/bin/cat",
@@ -356,12 +375,13 @@ fn refused(spawned: std::io::Result<Child>, what: &str) {
     }
 }
 
-/// Each link launches a shell, and the shell spawns the next link: until a
+/// Each link starts a shell, and the shell spawns the next link: until a
 /// start is refused for its depth, which the link or the shell says on the
 /// chain's one output. Killing the first link then ends every one.
 fn a_chain_stops_at_max_depth_and_dies_whole() {
     let mut first = Command::new(SELF_PATH)
         .args(["link", "1"])
+        .endow(LAUNCHER, launcher_copy().0)
         .stdout(Stdio::piped())
         .spawn()
         .expect("spawn the chain's first link");

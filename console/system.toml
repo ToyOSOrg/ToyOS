@@ -33,11 +33,13 @@ serves = ["log"]
 
 [programs.console]
 provides = ["surface"]
-receives = ["launcher", "log"]
+receives = ["log"]
+starts = ["shell"]
 devices = ["framebuffer", "keyboard", "mouse"]
 
 [programs.shell]
-receives = ["surface", "launcher"]
+receives = ["surface"]
+starts = ["toybox", "shell"]
 
 # `power` because `bin/shutdown` below is this binary, and on the machine this
 # image exists for — no serial port, a prompt on the panel — there is no other
