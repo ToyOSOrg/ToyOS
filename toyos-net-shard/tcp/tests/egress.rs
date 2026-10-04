@@ -562,8 +562,9 @@ fn s_pl_015_resets_waiting_for_their_next_hop_stay_bounded() {
     expect(&h.input(3, seg(5000).syn().from(C, 40_003).to(A, 81)), &["CTL=RST,ACK"]);
 }
 
-// No id: a connection freed before the caller drained it is never offered, and one freed while
-// offered is named once, for the caller to take out of its round; its id names nothing after.
+// No id: a connection freed before the caller drained it is never offered and leaves nothing
+// behind, and one freed in the caller's round is named once, for the caller to take out of it;
+// its id names nothing after.
 #[test]
 fn a_freed_connection_leaves_no_turn_behind() {
     let mut h = H::new(65_535);
@@ -573,7 +574,7 @@ fn a_freed_connection_leaves_no_turn_behind() {
         h.tcp.abort(now, id).unwrap();
     }
     assert_eq!(h.tcp.drain_eligible().count(), 0);
-    assert_eq!(h.tcp.drain_gone().count(), 1_000);
+    assert_eq!(h.tcp.drain_gone().count(), 0);
     let id = h.tcp.connect(now, A, Some(port(49154)), ep(B, 81)).unwrap();
     assert_eq!(h.tcp.drain_eligible().collect::<Vec<_>>(), [id]);
     h.tcp.abort(now, id).unwrap();

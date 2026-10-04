@@ -217,7 +217,7 @@ pub struct Tcp {
     deadlines: BTreeSet<(Instant, u32)>,
     /// Connections that became eligible for the caller's round since it last drained them.
     eligible: Vec<ConnId>,
-    /// Connections freed while offered to the caller's round, since it last drained them.
+    /// Connections freed while in the caller's round, since it last drained them.
     gone: Vec<ConnId>,
     stubs: VecDeque<Tuple>,
     answers: VecDeque<Answer>,
@@ -445,8 +445,13 @@ impl Tcp {
         let parked = self.parked.get(&remote).is_some_and(|p| p.conns.contains(&index));
         // Its index may name another connection next.
         self.unpark(remote, |p| p.conns.retain(|&i| i != index));
+        // Undrained, it leaves `eligible`; drained, `gone` mirrors the caller's round entry.
         if conn.queued && !parked {
-            self.gone.push(ConnId { index, generation });
+            let id = ConnId { index, generation };
+            match self.eligible.iter().position(|e| *e == id) {
+                Some(at) => drop(self.eligible.remove(at)),
+                None => self.gone.push(id),
+            }
         }
         if let Some(at) = conn.deadline {
             self.deadlines.remove(&(at, index));
@@ -1262,13 +1267,12 @@ impl Tcp {
     /// Connections offered to the caller's round since the last call, each once, in the order
     /// they became eligible, less those freed since: a connection is offered again only after
     /// [`Self::serve`] answered [`Served::Done`] for it.
-    pub fn drain_eligible(&mut self) -> impl Iterator<Item = ConnId> + '_ {
-        let Self { eligible, conns, .. } = self;
-        eligible.drain(..).filter(|id| conns.get(usize::try_from(id.index).unwrap_or(usize::MAX)).is_some_and(|s| s.generation == id.generation && s.value.is_some()))
+    pub fn drain_eligible(&mut self) -> alloc::vec::Drain<'_, ConnId> {
+        self.eligible.drain(..)
     }
 
-    /// Connections freed while offered to the caller since the last call, each once: the caller
-    /// takes each out of its round, where one it never drained is not.
+    /// Connections freed while in the caller's round since the last call, each once: the caller
+    /// takes each out of it.
     pub fn drain_gone(&mut self) -> alloc::vec::Drain<'_, ConnId> {
         self.gone.drain(..)
     }

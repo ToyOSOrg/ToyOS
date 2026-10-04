@@ -236,7 +236,7 @@ pub struct Udp {
     ports: BTreeMap<Port, u32>,
     /// Senders offered to the caller's round since it last drained them.
     eligible: Vec<Sender>,
-    /// Sockets closed while offered to the caller's round, since it last drained them.
+    /// Sockets closed while in the caller's round, since it last drained them.
     gone: Vec<Sender>,
     /// `closed` is in `eligible` or the caller's round.
     closed_offered: bool,
@@ -568,8 +568,12 @@ impl Udp {
         let room = limits::CLOSED_DATAGRAMS.saturating_sub(self.closed.len());
         let discarded = socket.tx.len().saturating_sub(room);
         self.counters.add(Counter::TxDiscardedOnClose, u64::try_from(discarded).unwrap_or(u64::MAX));
+        // Undrained, it leaves `eligible`; drained, `gone` mirrors the caller's round entry.
         if socket.offered {
-            self.gone.push(Sender::Socket(id));
+            match self.eligible.iter().position(|s| *s == Sender::Socket(id)) {
+                Some(at) => drop(self.eligible.remove(at)),
+                None => self.gone.push(Sender::Socket(id)),
+            }
         }
         self.closed.extend(socket.tx.into_iter().take(room).map(|q| (socket.port, q)));
         if !self.closed.is_empty() && !core::mem::replace(&mut self.closed_offered, true) {
@@ -676,16 +680,12 @@ impl Udp {
     /// Senders offered to the caller's round since the last call, each once, in the order they
     /// became eligible, less the sockets closed since: one is offered again only after
     /// [`Self::serve`] answered [`Served::Last`] or [`Served::Nothing`] for it.
-    pub fn drain_eligible(&mut self) -> impl Iterator<Item = Sender> + '_ {
-        let Self { eligible, slots, .. } = self;
-        eligible.drain(..).filter(|sender| match sender {
-            Sender::Socket(id) => slots.get(usize::try_from(id.index).unwrap_or(usize::MAX)).is_some_and(|s| s.generation == id.generation && s.socket.is_some()),
-            Sender::Closed => true,
-        })
+    pub fn drain_eligible(&mut self) -> alloc::vec::Drain<'_, Sender> {
+        self.eligible.drain(..)
     }
 
-    /// Sockets closed while offered to the caller since the last call, each once: the caller
-    /// takes each out of its round, where one it never drained is not.
+    /// Sockets closed while in the caller's round since the last call, each once: the caller
+    /// takes each out of it.
     pub fn drain_gone(&mut self) -> alloc::vec::Drain<'_, Sender> {
         self.gone.drain(..)
     }
