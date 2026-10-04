@@ -54,6 +54,15 @@ hand-over of a unit firmware left translating:
   off for that one switch. The older protection registers are `PMEN`'s
   protected memory regions (§11.4.8.1). The T14's units report `ESRTPS`,
   `SMTS` and `ADMS` clear, so it is not one of those machines.
+- **"Apply it at hand-over"**, on reserved memory: "From the hand-over on,
+  only display and USB controllers keep access to their reserved region; any
+  other device's access is refused. A device that firmware was still using
+  then faults, which is logged and the device is stopped; the machine keeps
+  running."
 - **"Allow it"**, on the T14 row in which a test program claims the iGPU and
   its reserved region is mapped into its domain: "One test boot with a blank
   panel, only in that row; normal boots are unaffected."
+- On the row that aims the T14's undriven NVMe `04:00.0` at memory nobody
+  gave it, asked whether to allow a single read-only Identify on its own
+  boot, he answered: "You can do with the t14 what you want." The row is
+  allowed, on its own boot.

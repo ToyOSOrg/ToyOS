@@ -57,6 +57,20 @@ writes its own, and the battery comes first (his direction of `0ee814f5a`).
 - **"full clean room write with the spec"**: the AML interpreter is written
   from the ACPI specification.
 
+**Ruled** (owner, 2026-10-04), on the interpreter:
+
+- **"Like Windows, not Linux"**, on `_OSI`: "Yes to every published Windows
+  version string, no to 'Linux' and 'FreeBSD', as Linux itself answers. The
+  T14 then runs the path it was tested on..." (the option's text as relayed
+  to this record, cut there). The answers are fixed before the first table
+  loads, since an SSDT queries `_OSI` while it loads (the orchestrator's
+  note).
+- **"Yes, one path"**, on power-off: "Power-off always goes through the ACPI
+  server; the kernel's power-off table reader is deleted. If the server is
+  broken, power-off fails loudly in every test." It applies from the
+  interpreter's power-off stage on (the orchestrator's placement); the
+  kernel's reader is `toyos-acpi/src/dsdt.rs`.
+
 The orchestrator's reading of the clean-room ruling, not his: uACPI and
 ACPICA are run only as black-box oracles, and whoever writes the interpreter
 never reads their source.
