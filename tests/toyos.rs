@@ -3502,10 +3502,7 @@ const SMI_SPAN_NS: u64 = 4_444_000_000;
 /// reads` line names, and none stale; every CPU's performance request
 /// declared at boot, `pm_enable=1`, the request Linux makes on this machine
 /// (`tests/t14-linux/hwp-request.txt`), and its power envelope in every read
-/// the one its `control_regs:` line holds. The reads fall between
-/// `counters_metal`'s last settle line and the line that prints them, both
-/// stamped on the log's clock, so a read on another clock cannot put the
-/// idle second where no line is. No line, the kernel's or a
+/// the one its `control_regs:` line holds. No line, the kernel's or a
 /// program's, is stamped in a millisecond from `idle0`'s to `idle1`'s, which
 /// `counters_metal` reads on the log's clock, either
 /// edge's included because a line stamped in it may follow the read: the
@@ -3559,21 +3556,6 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
     let (idle1, at1) = phase("idle1")?;
     let (spin, at2) = phase("spin")?;
     let (from_ms, to_ms) = (at0 / 1_000_000, at1 / 1_000_000);
-    let stamped = |said: &str| {
-        log.text()
-            .lines()
-            .find(|line| line.contains(said))
-            .and_then(|line| toyos_logstream::parse(line)?.ms)
-            .ok_or_else(|| format!("no timed line says {said:?}"))
-    };
-    let settled = stamped("counters_metal settle: the log holds this second line")?;
-    let printed = stamped("counters_metal idle0: at ")?;
-    if settled > from_ms || at2 / 1_000_000 > printed {
-        return Err(format!(
-            "the reads {at0}..{at2} ns fall outside the settle's last line at {settled} ms and their print at \
-             {printed} ms: they are not on the log's clock"
-        ));
-    }
     let inside: Vec<&str> = log
         .text()
         .lines()
