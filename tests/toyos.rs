@@ -127,6 +127,10 @@ const RUST_SKIP: &[&str] = &[
     // A kernel primitive with no use for any one boot's devices: the
     // `port_badge` metal row runs it on tests/proctreecase.
     "port_badge",
+    // Needs a launcher whose row lists a program that streams into a file, so
+    // that another instance asks DATA's server while this one holds its
+    // shares: the `fs_share` metal row runs it on tests/proctreecase.
+    "fs_share",
     // It asserts nothing at all: it holds a `tests/lanleasecase` boot open for
     // twenty seconds. On a shared boot it would be twenty seconds of nothing.
     "lan_hold",
@@ -686,6 +690,12 @@ const METAL: &[(&str, metal::Metal)] = &[
         "port_badge",
         metal::Metal { arms: PROCTREECASE, judge: |b| b[0].job_passed("test_rs_port_badge") },
     ),
+    (
+        // One instance holding all a file server lets it hold leaves the
+        // server answering another.
+        "fs_share",
+        metal::Metal { arms: PROCTREECASE, judge: |b| b[0].job_passed("test_rs_fs_share") },
+    ),
     // ---- one image: tests/metalcase ----
     (
         "metal_sim_scanout_wc",
@@ -910,13 +920,20 @@ const USB_RESET_BOOTS: &[metal::Arm] = &[
 const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/metalcase", &[], &[])];
 
 /// A launcher and a declared `cat` and shell, which `process_tree`'s subtree
-/// launches, a `toybox` row holding `roster`, which `launch_toctou` races, and
-/// the rows `launch_authority` is refused and started.
+/// launches, a `toybox` row holding `roster`, which `launch_toctou` races, the
+/// rows `launch_authority` is refused and started, and the shell `fs_share`
+/// asks DATA's server through.
 const PROCTREECASE: &[metal::Arm] = &[metal::once(
     "proctreecase",
     "tests/proctreecase",
     &[],
-    &["test_rs_process_tree", "test_rs_launch_toctou", "test_rs_launch_authority", "test_rs_port_badge"],
+    &[
+        "test_rs_process_tree",
+        "test_rs_launch_toctou",
+        "test_rs_launch_authority",
+        "test_rs_port_badge",
+        "test_rs_fs_share",
+    ],
 )];
 
 /// netstack in front of the T14's I219 with its lease probe armed: netstack's exit code

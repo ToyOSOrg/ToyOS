@@ -9,8 +9,8 @@
 //! there; a write lands there and reaches the disk at a sync, or when the
 //! cache has more dirty blocks than it keeps. The kernel holds none of it.
 //!
-//! The service around it is `src/main.rs`: its port per directory, its clients
-//! and their windows, and the wire (`toyos::fs`).
+//! The service around it is `src/main.rs`: its role's port and the grant on
+//! each connection, its clients and their windows, and the wire (`toyos::fs`).
 
 pub mod absent;
 pub mod cache;

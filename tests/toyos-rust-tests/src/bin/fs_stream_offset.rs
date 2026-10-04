@@ -8,7 +8,7 @@
 //! program's `/apps`, `/config`, `/home` and `/state` are on.
 
 use toyos::fs::{
-    window_put, Reply, Request, HELLO, MAX_FILE_BYTES, OPEN, O_CREATE, O_WRITE, REPLY, STREAM, WINDOW_BYTES,
+    hello, window_put, Reply, Request, MAX_FILE_BYTES, OPEN, O_CREATE, O_WRITE, REPLY, STREAM, WINDOW_BYTES,
 };
 use toyos::ipc::Connection;
 use toyos::shm::SharedMemory;
@@ -36,9 +36,7 @@ fn main() {
     let names = toyos::endow::namespace().expect("this program was endowed a namespace");
     let conn = names.open("fs:/home").expect("this program holds fs:/home");
     let window = SharedMemory::create(WINDOW_BYTES).expect("a window");
-    conn.send_with_handles(&[window.share().expect("the window, shared")], HELLO, &Request::new())
-        .expect("hello");
-    assert_eq!(answer(&conn).status, 0, "fs:/home answers its hello");
+    hello(&conn, &window).expect("fs:/home answers its hello");
 
     let opened = open(&conn, &window);
     assert_eq!(opened.status, 0, "{} opened to write", core::str::from_utf8(NAME).unwrap_or(""));

@@ -68,16 +68,31 @@ pub fn session_home() -> String {
 /// program key.
 pub const STATE: &str = "/state";
 
-/// The file-server roles, and the directories each serves: one capability per
-/// directory, named `fs:` and the directory.
-pub const ROLES: [(&str, &[&str]); 3] = [
-    ("data", &["/apps", "/config", "/home", "/state"]),
-    ("log", &["/log"]),
-    ("boot", &["/boot"]),
+/// One directory a file-server role serves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RoleDir {
+    /// What every program's namespace calls it, after `fs:`: `/home`.
+    pub dir: &'static str,
+    /// Where it is on the role's volume, which a grant on it names
+    /// (`toyos::fs::Grant`): DATA keeps its directories side by side, and LOG
+    /// and BOOT are each served whole.
+    pub root: &'static str,
+}
+
+const fn dir(dir: &'static str, root: &'static str) -> RoleDir {
+    RoleDir { dir, root }
+}
+
+/// The file-server roles, and the directories each serves: one port per role,
+/// and one grant on it per directory.
+pub const ROLES: [(&str, &[RoleDir]); 3] = [
+    ("data", &[dir("/apps", "apps"), dir("/config", "config"), dir("/home", "home"), dir("/state", "state")]),
+    ("log", &[dir("/log", "")]),
+    ("boot", &[dir("/boot", "")]),
 ];
 
 /// The directories `role` serves, or `None` for a name that is no role.
-pub fn role_dirs(role: &str) -> Option<&'static [&'static str]> {
+pub fn role_dirs(role: &str) -> Option<&'static [RoleDir]> {
     ROLES.iter().find(|(name, _)| *name == role).map(|(_, dirs)| *dirs)
 }
 
@@ -185,7 +200,7 @@ pub struct Program {
     pub service: bool,
     /// The file-server roles this row serves, one process each: the supervisor starts
     /// the binary once per role, with the role as its argument and the
-    /// acceptors of the role's directories ([`role_dirs`]).
+    /// acceptor of the role's port ([`role_dirs`] are the grants on it).
     pub roles: Vec<String>,
     /// The supervisor starts it again when it ends, on the same ports, for as long as
     /// it does not end faster than [`RESTARTS`] allows.
@@ -634,8 +649,12 @@ mod tests {
         let fileserver = m.program("fileserver").unwrap();
         assert_eq!(fileserver.roles, ["data", "log"]);
         assert!(fileserver.restart);
-        assert_eq!(role_dirs("data"), Some(&["/apps", "/config", "/home", "/state"][..]));
-        assert_eq!(role_dirs("boot"), Some(&["/boot"][..]));
+        let dirs = |role| role_dirs(role).map(|dirs| dirs.iter().map(|d| (d.dir, d.root)).collect::<Vec<_>>());
+        assert_eq!(
+            dirs("data"),
+            Some(vec![("/apps", "apps"), ("/config", "config"), ("/home", "home"), ("/state", "state")])
+        );
+        assert_eq!(dirs("boot"), Some(vec![("/boot", "")]));
         assert_eq!(role_dirs("tmp"), None);
         let mut bad = sample();
         bad.programs[3].roles = vec!["tmp".into()];

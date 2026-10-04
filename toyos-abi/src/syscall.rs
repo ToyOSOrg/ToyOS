@@ -173,8 +173,7 @@ pub const SYS_NAMESPACE_OPEN: u64 = 102;
 ///
 /// The batch is queued on the connection, not interleaved with its bytes, so
 /// **handles are sent before the frame that announces them** and a receiver
-/// that has the frame already has the handles. The SDK's
-/// `Connection::send_with_handles` is that ordering written once.
+/// that has the frame already has the handles.
 pub const SYS_HANDLE_SEND: u64 = 103;
 /// Take the oldest batch of handles the peer sent. See [`handle_recv`].
 pub const SYS_HANDLE_RECV: u64 = 104;
