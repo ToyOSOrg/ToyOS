@@ -10,10 +10,9 @@
 //! three are taken**: a printed line reaches the stick within the second,
 //! through the `/log` fileserver on that fileserver's CPU.
 //!
-//! **`idle0` waits for the log to be quiet** ([`settle`]): a job starts a
-//! dozen milliseconds after logkeeper does, while it is still writing the
-//! boot so far and the job's own launch lines to the stick, and a second
-//! begun then measures that write.
+//! **`idle0` waits for the log to be quiet** ([`settle`]): a job starts while
+//! logkeeper is still writing the boot so far and the job's own launch lines
+//! to the stick, and a second begun then measures that write.
 //!
 //! **Then `loaded`: how late the round's kick reaches each CPU** while a thread
 //! per CPU spawns a program that exits at once, which is the load Linux's
@@ -31,10 +30,9 @@ use std::time::{Duration, Instant};
 use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::poller::{Poller, READABLE};
 use toyos::syscap::SysCap;
-use toyos::Pipe;
 use toyos_abi::counters::{Counter, RawRecord, Record};
 use toyos_abi::syscall::{self, SyscallError};
-use toyos_logstream::{program_line, Lines, READ, SERVED, SERVICE};
+use toyos_logstream::{program_line, Lines};
 
 /// The idle span: long enough that a CPU's busy fraction is its idle one and
 /// not the reads'.
@@ -161,17 +159,10 @@ fn print(phase: &str, read: &Read) {
 /// A reader of the `log` port is handed each round only after it is on the
 /// stick, so this prints a line and reads the log until that line comes back.
 /// **Twice**: the round that writes the first may itself put a record in the
-/// log — the stick's first sync is one — and the second writes it.
+/// log — the stick's first sync is one — and the second writes it. The
+/// `counters` row reds a kernel record stamped inside the idle second.
 fn settle() {
-    let conn = toyos::endow::service(SERVICE).expect("test-runner's namespace carries the `log` port");
-    conn.signal(READ).expect("logkeeper takes a reader's request");
-    let header = conn.recv_header().expect("logkeeper answers a reader");
-    assert_eq!(header.msg_type, SERVED, "logkeeper answered a reader with another frame");
-    let _boot_so_far: u64 = conn.recv_payload(&header).expect("logkeeper's answer carries the boot's length");
-    let [raw] = conn.recv_handles_exact::<1>().expect("logkeeper's answer carries a pipe");
-    // SAFETY: the kernel moved this handle into this table with the frame
-    // that names it, and nothing else answers for it.
-    let pipe = unsafe { Pipe::from_raw(raw) };
+    let pipe = logkeeper_api::read().unwrap_or_else(|why| panic!("test-runner's `log` port: {why}")).pipe;
     let poller = Poller::new(1);
     let mut lines = Lines::new();
     let mut chunk = vec![0u8; 64 * 1024];
@@ -184,7 +175,8 @@ fn settle() {
             match pipe.read_nonblock(&mut chunk) {
                 Ok(0) => panic!("logkeeper closed the log before it held {said:?}"),
                 Ok(n) => lines.push(&chunk[..n], |line, _| {
-                    let line = std::str::from_utf8(line).unwrap_or_default();
+                    let line = std::str::from_utf8(line)
+                        .unwrap_or_else(|e| panic!("logkeeper served a line that is not UTF-8 ({e}): {line:?}"));
                     held |= program_line(line).is_some_and(|line| line.text == said);
                 }),
                 Err(SyscallError::WouldBlock) => {
