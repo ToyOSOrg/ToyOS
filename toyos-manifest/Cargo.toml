@@ -1,6 +1,6 @@
 [package]
 name = "toyos-manifest"
-description = "The one definition of /system/etc/system.manifest: what every program in an image may hold, written by the build and read by the supervisor."
+description = "The one definition of /system/etc/system.manifest: what every program in an image may hold, written by the build and read by the supervisor; and who may start what through the supervisor's launcher, with the badge codec the supervisor alone writes and reads."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
