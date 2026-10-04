@@ -15,7 +15,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::os::toyos::fs::symlink;
 
-use toyos::fs::{window_put, Reply, Request, HELLO, OPEN, O_READ, REPLY, WINDOW_BYTES};
+use toyos::fs::{hello, window_put, Reply, Request, OPEN, O_READ, REPLY, WINDOW_BYTES};
 use toyos::shm::SharedMemory;
 use toyos::volatile::Window;
 use toyos_abi::syscall::SyscallError;
@@ -43,14 +43,12 @@ fn wire_open(rel: &[u8]) -> Reply {
     let names = toyos::endow::namespace().expect("this program was endowed a namespace");
     let conn = names.open("fs:/home").expect("this program holds fs:/home");
     let window = SharedMemory::create(WINDOW_BYTES).expect("a window");
-    let lent = window.share().expect("the window, shared");
-    conn.send_with_handles(&[lent], HELLO, &Request::new()).expect("hello");
+    hello(&conn, &window).expect("fs:/home answers its hello");
     let answer = |conn: &toyos::ipc::Connection| -> Reply {
         let header = conn.recv_header().expect("a reply");
         assert_eq!(header.msg_type, REPLY, "a reply frame");
         conn.recv_payload(&header).expect("a reply's words")
     };
-    assert_eq!(answer(&conn).status, 0, "fs:/home answers its hello");
     // SAFETY: the region is `WINDOW_BYTES` long and outlives this use.
     window_put(unsafe { Window::new(window.as_ptr(), WINDOW_BYTES) }, 0, rel);
     conn.send(OPEN, &Request { len: rel.len() as u64, flags: O_READ, ..Request::new() }).expect("open");
