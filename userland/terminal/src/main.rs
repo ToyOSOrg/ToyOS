@@ -75,7 +75,7 @@ fn main() {
     // from here a keystroke the compositor forwards has somewhere to land even
     // if the shell has not reached its first read. Before it, one is dropped
     // with no trace.
-    eprintln!("terminal: ready");
+    println!("terminal: ready");
 
     loop {
         poller.watch_raw(RawHandle(shell_stdout.as_raw_fd() as u32), READABLE, TOKEN_STDOUT);
@@ -132,10 +132,10 @@ fn main() {
                 // re-read arrives back through `Event::LayoutChanged`.
                 Notice::LayoutChanged => window.notify_layout_changed(),
                 Notice::Grabbed { client } => {
-                    eprintln!("terminal: client {client} has the keyboard until it exits")
+                    println!("terminal: client {client} has the keyboard until it exits")
                 }
                 Notice::Released { client } => {
-                    eprintln!("terminal: client {client} gave the keyboard back")
+                    println!("terminal: client {client} gave the keyboard back")
                 }
                 Notice::Dropped { client, why } => {
                     eprintln!("terminal: dropping client {client} — {why}")
