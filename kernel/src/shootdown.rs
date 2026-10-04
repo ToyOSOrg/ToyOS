@@ -99,7 +99,7 @@ impl Shootdown {
         generation: Generation,
         flush: impl FnOnce(),
     ) -> bool {
-        // IF is masked here, so this CPU must serve itself or two initiators waiting on each other deadlock.
+        // An initiator inside an `IrqGuard`, a handler or the tick's pass takes no IPI, so this CPU must serve itself or two initiators waiting on each other deadlock.
         self.serve_if_owed(me, flush);
         // Order is the fix: serving first is what publishes the generation a concurrent sibling is waiting on.
         self.served(cpu, generation)

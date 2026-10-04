@@ -705,10 +705,6 @@ pub const PUSH_THRESHOLD: u32 = 2;
 
 /// How long a CPU may owe a pass and still be chosen as a target.
 ///
-/// Ten [`QUANTUM_NS`], because one quantum is the whole of what the wake
-/// contract promises: a busy CPU drains at its next safe point, and its next
-/// safe point is at worst the end of the quantum it is running.
-///
 /// **The direction of error is chosen.** Refusing a CPU that was only slow puts
 /// one task elsewhere; accepting one that has stopped puts the task where
 /// nothing ever picks it up.

@@ -336,4 +336,4 @@ test = false
 # library's tests and the simulator run. A `cfg` name and not a feature, since a
 # feature here is a model control.
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("boot-actuators", "sched-check", "sched-tripwire", "protocol-port", "placement-ignores-staleness"))'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("boot-actuators", "mask-windows", "sched-check", "sched-tripwire", "protocol-port", "placement-ignores-staleness"))'] }

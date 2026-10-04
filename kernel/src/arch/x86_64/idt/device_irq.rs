@@ -76,12 +76,14 @@ pub(crate) use device_irq_entry;
 pub(super) extern "sysv64" fn windows_entered() {
     crate::windows::irqs_masked();
     crate::windows::preempt_raised();
+    crate::windows::handler_entered();
 }
 
 /// The stub lowers the count next, with the frame's `cs`; its `iretq` opens
 /// interrupts on a return to Ring 0, and `exit_to_user` on one to Ring 3.
 #[cfg(feature = "mask-windows")]
 pub(super) extern "sysv64" fn windows_leaving(cs: u64) {
+    crate::windows::handler_leaving();
     crate::windows::preempt_lowering();
     if !toyos_userbound::Ring::of_cs(cs).is_user() {
         crate::windows::irqs_unmasking();

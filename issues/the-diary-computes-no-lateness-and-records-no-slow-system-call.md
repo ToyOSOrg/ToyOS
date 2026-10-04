@@ -44,9 +44,9 @@ anything more is built on it.
    trace. A system call held past the threshold in a shipped-configuration
    kernel reads back from the trace with its number and its program. A
    window's record names its opener by address, which
-   `issues/the-cpu-that-spawns-a-toybox-applet-reads-1-4-ms-of-interrupts-and-preemption-off-on-the-t14.md`
+   `issues/the-cpu-that-spawns-a-toybox-applet-reads-1-4-ms-of-preemption-off-on-the-t14.md`
    and
-   `issues/the-supervisors-claim-of-a-pci-function-the-t14-lacks-holds-interrupts-off-for-3-8-ms.md`
+   `issues/the-supervisors-claim-of-a-pci-function-the-t14-lacks-holds-preemption-off-for-3-8-ms.md`
    need.
 
 **Ruled** (owner, 2026-10-04), on when these steps start, **"Both in
