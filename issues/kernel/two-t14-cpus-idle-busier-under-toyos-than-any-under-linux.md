@@ -14,8 +14,13 @@ reads: cpu0 1.37% and cpu7 1.45% busy, cpu3 0.11%, the other five 0.00 or
 10 s and no CPU above 0.69%. So six CPUs idle deeper than Linux's and two
 about four times busier than Linux's machine-wide busiest interval.
 
+A second boot, at `a059144e2`, read the same two CPUs again: cpu0 1.35% and
+cpu7 1.42%, cpu4 0.37%, cpu3 0.11%, the other four 0.00 to 0.03%. The two
+busy CPUs reproduce across boots.
+
 Not yet attributed: the row's own reader runs between the two reads, prints
 its `idle0` lines and parks, and which CPUs it and the log's path ran on that
-second is not recorded. **Exit**: a reading that names what ran on cpu0 and
+second is not recorded. Owner: the orchestrator, which holds the T14.
+**Exit**: a reading that names what ran on cpu0 and
 cpu7 across that second, and either it is the row's own work, folded to the
 row's doc, or it is promoted to a defect with its cause.

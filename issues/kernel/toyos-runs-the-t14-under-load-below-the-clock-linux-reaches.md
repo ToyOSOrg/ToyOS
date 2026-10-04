@@ -22,6 +22,7 @@ The CPU enumerates HWP (`hwp`, `hwp_epp` in
 would couple the scheduler to frequency; this is the floor beneath it, a
 machine that never leaves the firmware's operating point.
 
-**Exit**: the `counters` row holds every CPU's busy clock across its spin to
+Owner: the orchestrator, which holds the T14. **Exit**: the `counters` row
+holds every CPU's busy clock across its spin to
 Linux's loaded range in `tests/t14-linux/`, and the reading that held it is in
 the closing pull request.
