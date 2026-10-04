@@ -5,8 +5,10 @@
 //! or stdin — writes each back unchanged, and after each frame line writes the
 //! function that offset falls in, out of the named file's own symbol table, or
 //! why it names none: a file that is another build, one that cannot be read,
-//! one with no symbol table. A log is named on any machine by giving `--root`
-//! the directory that holds the image's files.
+//! one with no symbol table. A name no build-id vouches for is printed marked
+//! `(unchecked: no build-id)`. A log is named on any machine by giving `--root`
+//! the directory that holds the image's files; a record whose name would leave
+//! that directory is refused.
 //!
 //! **Nothing a line or a file holds makes it fail**: the lookup is
 //! `toyos_symbols::name`, the kernel's own and panic-free on any bytes, and
@@ -15,11 +17,11 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 
 use toyos_symbols::frame::{decode, Decoded};
-use toyos_symbols::{demangled, name, Unnamed};
+use toyos_symbols::{name, Unnamed};
 
 const USAGE: &str = "usage: symbolize [--root DIR] [FILE]";
 
@@ -90,7 +92,10 @@ impl Namer {
     fn name(&mut self, frame: &Decoded<'_>) -> String {
         let file: String = frame.name().collect();
         let path = match &self.root {
-            Some(root) => root.join(file.trim_start_matches('/')),
+            Some(root) => match under(root, &file) {
+                Some(path) => path,
+                None => return format!("? {file} leaves the root"),
+            },
             None => PathBuf::from(&file),
         };
         let bytes = self.files.entry(file.clone()).or_insert_with(|| {
@@ -101,12 +106,51 @@ impl Namer {
             Err(why) => return why.clone(),
         };
         match name(bytes, frame.offset, frame.build_id.as_ref()) {
-            Ok((symbol, within)) => format!("{}+{within:#x}", demangled(symbol)),
+            Ok(named) => named.to_string(),
             Err(Unnamed::NotElf(e)) => format!("? {file}: {e}"),
             Err(Unnamed::OtherBuild { file: Some(id) }) => format!("? {file} is another build: its id is {id}"),
             Err(Unnamed::OtherBuild { file: None }) => format!("? {file} carries no build-id"),
             Err(Unnamed::NoSymbols) => format!("? {file} has no symbol table"),
             Err(Unnamed::NoSymbol) => format!("? no function in {file} holds {:#x}", frame.offset),
         }
+    }
+}
+
+/// `file`, a path on the machine that ran it, as a path under `root`; `None`
+/// when a component would take it out of `root` — `..`, or a Windows prefix.
+fn under(root: &Path, file: &str) -> Option<PathBuf> {
+    let mut path = root.to_path_buf();
+    for component in Path::new(file).components() {
+        match component {
+            Component::Normal(part) => path.push(part),
+            Component::RootDir | Component::CurDir => {}
+            Component::ParentDir | Component::Prefix(_) => return None,
+        }
+    }
+    Some(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_name_is_read_under_the_root() {
+        assert_eq!(under(Path::new("img"), "/home/a/child"), Some(PathBuf::from("img/home/a/child")));
+    }
+
+    #[test]
+    fn a_name_that_leaves_the_root_is_refused() {
+        assert_eq!(under(Path::new("img"), "/../../etc/passwd"), None);
+        assert_eq!(under(Path::new("img"), "/home/../../x"), None);
+    }
+
+    #[test]
+    fn a_record_that_leaves_the_root_is_refused_on_its_line() {
+        let mut namer = Namer { root: Some(PathBuf::from("img")), files: HashMap::new() };
+        let mut out = Vec::new();
+        let line = "    0x1000  /../../x+0x10 id=-\n";
+        namer.run(line.as_bytes(), &mut out).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "    0x1000  /../../x+0x10 id=-  = ? /../../x leaves the root\n");
     }
 }

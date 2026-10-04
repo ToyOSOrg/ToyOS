@@ -40,11 +40,14 @@ never on the stick. The window is **[the reboot binary's spawn → the reset
 register write]**, and the candidates in it are all consistent with what the
 file shows:
 
-- `symbols::read_backtrace_table` reads 2 MiB of symbol tables off the boot
-  stick — 512 SCSI READ(10) commands, each holding the block `Handle` and
-  `XHCI` with preemption off. It is the only device call between the two
-  records and the only thing in the window that takes the 46–100 ms the healthy
-  gap is.
+- The spawn's device reads after `spawn: TLS`. These boots ran
+  `symbols::read_backtrace_table`, 2 MiB of symbol tables off the boot stick in
+  512 SCSI READ(10) commands, each holding the block `Handle` and `XHCI` with
+  preemption off; #711 deletes it, because the kernel no longer reads a
+  program's symbol tables. The device read left between the two records is the
+  build-id note: at most a page per `PT_NOTE`, one note in an lld-linked
+  program, through the same block path. A wedge in that path stays a candidate;
+  the 2 MiB read that matched the healthy 46–100 ms gap does not.
 - `quiesce`'s `flush_disks` and `hand_back`, which landed at `88841f56` a few
   minutes before the first hang; `hand_back` takes `XHCI` while `logd`'s own
   write to the same stick may still be in flight.

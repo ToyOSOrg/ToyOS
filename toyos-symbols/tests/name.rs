@@ -4,7 +4,7 @@
 
 use object::{Object, ObjectSymbol, SymbolKind};
 use toyos_symbols::frame::BuildId;
-use toyos_symbols::{name, Unnamed};
+use toyos_symbols::{name, Check, Named, Unnamed};
 
 const BINARY: &[u8] = include_bytes!("fixtures/input-test.bin");
 
@@ -32,7 +32,18 @@ fn with_build_id(id: &[u8]) -> Vec<u8> {
 #[test]
 fn a_real_binarys_offset_names_its_function() {
     // `readelf --syms`: `3902: 00000000000013a0  55 FUNC GLOBAL DEFAULT 1 main`
-    assert_eq!(name(BINARY, 0x13a0 + 10, None), Ok(("main", 10)));
+    assert_eq!(name(BINARY, 0x13a0 + 10, None), Ok(Named { function: "main", within: 10, check: Check::Unchecked }));
+}
+
+/// A name no build-id vouches for says so on its line; one a build-id vouches
+/// for carries no mark.
+#[test]
+fn a_name_no_build_id_vouches_for_is_marked_unchecked() {
+    assert_eq!(name(BINARY, 0x13a0 + 10, None).unwrap().to_string(), "main+0xa (unchecked: no build-id)");
+    let id = [0x5a; 20];
+    let file = with_build_id(&id);
+    let id = BuildId::new(&id).unwrap();
+    assert_eq!(name(&file, 0x13a0 + 10, Some(&id)).unwrap().to_string(), "main+0xa");
 }
 
 /// Every function `object` reads out of the same file names one of the
@@ -50,7 +61,7 @@ fn every_function_names_what_object_reads() {
         let at_address: Vec<&str> =
             functions.iter().filter(|o| o.address() == sym.address()).filter_map(|o| o.name().ok()).collect();
         assert!(
-            matches!(ours, Ok((n, within)) if at_address.contains(&n) && within == at - sym.address()),
+            matches!(ours, Ok(Named { function, within, .. }) if at_address.contains(&function) && within == at - sym.address()),
             "{at:#x}: ours {ours:?}, object's {at_address:?}"
         );
     }
@@ -63,7 +74,7 @@ fn the_build_the_record_names_is_the_one_named() {
     let file = with_build_id(&id);
     let id = BuildId::new(&id).unwrap();
     assert_eq!(BuildId::find(&file, |s| file.get(s.offset as usize..(s.offset + s.filesz) as usize)), Some(id));
-    assert_eq!(name(&file, 0x13a0, Some(&id)), Ok(("main", 0)));
+    assert_eq!(name(&file, 0x13a0, Some(&id)), Ok(Named { function: "main", within: 0, check: Check::BuildId }));
 }
 
 #[test]
