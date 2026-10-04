@@ -117,6 +117,10 @@ actuators! {
     /// kernel programs it. Judged by `iommu_firmware_left`.
     iommu_firmware_left = "iommu-firmware-left";
 
+    /// Read the DMAR's flags with `INTR_REMAP` clear, as on a platform whose
+    /// firmware says it does not remap. Judged by `claim_refused_without_remapping`.
+    iommu_no_remap = "iommu-no-remap";
+
     /// Leave every AP holding the CR0/CR4 that INIT left it.
     no_ap_control_regs = "no-ap-control-regs";
 

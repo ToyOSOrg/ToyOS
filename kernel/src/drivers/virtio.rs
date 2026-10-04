@@ -662,7 +662,7 @@ fn wait_until<T>(at: u64, mut now: impl FnMut() -> u64, mut look: impl FnMut() -
 /// or forbidden link, a BAR/offset/length past the window, a chain missing a required capability.
 #[cfg(feature = "boot-actuators")]
 pub fn cap_selftest() {
-    use super::pci::{NoCapability, PciDevice, Unarmed, CAPABILITIES_PTR};
+    use super::pci::{NoCapability, NoEntry, PciDevice, CAPABILITIES_PTR};
     use super::DmaPool;
     use crate::mm::{DirectMap, Mmio};
     use alloc::vec::Vec;
@@ -732,12 +732,11 @@ pub fn cap_selftest() {
         }
         // No layout here publishes an MSI-X capability the walk reaches, so
         // this returns at the capability lookup and touches no MMIO.
-        let armed = match device.enable_msix(0) {
-            Ok(_) => "armed",
-            Err(Unarmed::NoTable(NoCapability::Absent)) => "absent",
-            Err(Unarmed::NoTable(NoCapability::Truncated)) => "truncated",
-            Err(Unarmed::Unusable) => "unusable",
-            Err(Unarmed::Blocked) => "blocked",
+        let armed = match device.msix_entry() {
+            Ok(_) => "found",
+            Err(NoEntry::NoTable(NoCapability::Absent)) => "absent",
+            Err(NoEntry::NoTable(NoCapability::Truncated)) => "truncated",
+            Err(NoEntry::Unusable) => "unusable",
         };
         if armed == want_split {
             split_passed += 1;

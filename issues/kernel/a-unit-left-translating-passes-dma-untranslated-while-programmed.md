@@ -27,6 +27,14 @@ with translation on` at 0.083 s, just before translation goes off, and
 `translating` at 0.090 s, just after it is back; two of the hand-over's own log
 lines fall between.
 
+One case keeps the window whatever this kernel does: a unit handed over with
+`TTM` not `00` and `CAP.ESRTPS` clear, where §6.6 forbids switching tables
+under translation, so `TE` has to go off. **Owner ruling, 2026-10-04: accept
+it and file it.** The fix that closes this issue logs that case and files it
+as its own defect, whose exit covers the window with protected memory regions
+(`PMEN` over every pmm frame) or has the kernel speak scalable mode.
+No machine here reaches it.
+
 **Exit**: under `iommu-firmware-left`, on QEMU and on the T14, no unit logs
 `was handed over with translation on; it goes off first`, and every unit's
 `translating` line reads `tes=y`.

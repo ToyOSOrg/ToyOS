@@ -41,15 +41,20 @@ pub enum NoCapability {
     Truncated,
 }
 
-/// Why [`PciDevice::enable_msix`] armed nothing.
-pub enum Unarmed {
+/// Why a function has no MSI-X entry this kernel can write.
+pub enum NoEntry {
     /// No MSI-X capability came off the walk, which is a table this function
     /// does not have only where the walk reached the list's terminator.
     NoTable(NoCapability),
     /// It publishes one whose table this kernel could not reach.
     Unusable,
-    /// The unit refuses this function's message, and MSI would carry the same one.
-    Blocked,
+}
+
+/// Where a function's [`MSIX_ENTRY`] is, found before any message is made for it.
+pub(in crate::drivers) struct MsixEntry<'a> {
+    cap: Capability<'a>,
+    control: u16,
+    address: u64,
 }
 
 pub struct Capability<'a> {
@@ -268,20 +273,40 @@ impl PciDevice {
         stop_bus_mastering(self.mmio);
     }
 
-    /// Point this function's [`MSIX_ENTRY`] at `vector` and enable it.
+    /// Answers once every message this function sent before the writes that
+    /// silenced it has reached the root complex: a read's completion passes
+    /// none of the function's earlier posted writes, and the read itself none
+    /// of this kernel's (PCIe Base §2.4.1).
+    pub fn drain_messages(&self) {
+        self.mmio.read_u16(COMMAND);
+    }
+
+    /// Point this function's [`MSIX_ENTRY`] at `vector` and enable it: a
+    /// kernel driver's arming, whose message is compatibility format on a
+    /// machine that remaps nothing. A claimed function is armed by
+    /// [`arm_claimed_msix`] instead.
     ///
     /// Answers the entry's own window, which stays this kernel's: masking is a
     /// write to it, and a claimant that could reach it could aim the device's
     /// message at any address the LAPIC decodes.
-    pub fn enable_msix(&self, vector: u8) -> Result<Mmio, Unarmed> {
-        let cap = self.capability(msix::CAP_ID).map_err(Unarmed::NoTable)?;
+    ///
+    /// `None` where it has no MSI-X entry this kernel can write, or the unit
+    /// refuses its message.
+    pub(in crate::drivers) fn enable_msix(&self, vector: u8) -> Option<Mmio> {
+        let entry = self.msix_entry().ok()?;
+        let (address, data) = self.message(vector)?;
+        Some(self.write_msix(entry, address, data))
+    }
+
+    pub(in crate::drivers) fn msix_entry(&self) -> Result<MsixEntry<'_>, NoEntry> {
+        let cap = self.capability(msix::CAP_ID).map_err(NoEntry::NoTable)?;
         let control = cap.read_u16(msix::MESSAGE_CONTROL);
         let table = match msix::Msix::decode(control, cap.read_u32(msix::TABLE)) {
             Ok(table) => table,
             Err(why) => {
                 log!("PCI {:02x}:{:02x}.{}: MSI-X not armed, {}",
                     self.bus, self.dev, self.func, why);
-                return Err(Unarmed::Unusable);
+                return Err(NoEntry::Unusable);
             }
         };
         // Decoded, not assumed memory: a device may name a BAR that is an I/O BAR.
@@ -290,35 +315,35 @@ impl PciDevice {
             Err(why) => {
                 log!("PCI {:02x}:{:02x}.{}: MSI-X not armed, its table names BAR {} and {}",
                     self.bus, self.dev, self.func, table.bir(), why);
-                return Err(Unarmed::Unusable);
+                return Err(NoEntry::Unusable);
             }
         };
-        let address = match table.table_address(base) {
-            Ok(address) => address,
+        match table.table_address(base) {
+            Ok(address) => Ok(MsixEntry { cap, control, address }),
             Err(why) => {
                 log!("PCI {:02x}:{:02x}.{}: MSI-X not armed, {}",
                     self.bus, self.dev, self.func, why);
-                return Err(Unarmed::Unusable);
+                Err(NoEntry::Unusable)
             }
-        };
+        }
+    }
 
-        let (message, data) = self.message(vector).ok_or(Unarmed::Blocked)?;
+    fn write_msix(&self, entry: MsixEntry<'_>, address: u32, data: u32) -> Mmio {
+        let at = entry.address + MSIX_ENTRY as u64 * msix::ENTRY_BYTES;
+        let table = crate::mm::paging::map_mmio(at, 0x1000, MmioPolicy::Uncacheable);
 
-        let entry = address + MSIX_ENTRY as u64 * msix::ENTRY_BYTES;
-        let table = crate::mm::paging::map_mmio(entry, 0x1000, MmioPolicy::Uncacheable);
-
-        table.write_u32(msix::ENTRY_ADDRESS_LO, message);
+        table.write_u32(msix::ENTRY_ADDRESS_LO, address);
         table.write_u32(msix::ENTRY_ADDRESS_HI, 0);
         table.write_u32(msix::ENTRY_DATA, data);
         table.write_u32(msix::ENTRY_VECTOR_CONTROL, msix::ENTRY_UNMASKED);
 
-        cap.write_u16(msix::MESSAGE_CONTROL, msix::Msix::enabled(control));
+        entry.cap.write_u16(msix::MESSAGE_CONTROL, msix::Msix::enabled(entry.control));
         self.report_message(
             "msix",
             table.read_u32(msix::ENTRY_ADDRESS_LO),
             table.read_u32(msix::ENTRY_DATA),
         );
-        Ok(table)
+        table
     }
 
     /// Put MSI-X back off, for a hand-over that armed a vector and was then
@@ -360,25 +385,29 @@ impl PciDevice {
         }
     }
 
-    /// Point this function's single MSI message at `vector` and enable it.
+    /// Point this function's single MSI message at `vector` and enable it: a
+    /// kernel driver's arming, as [`Self::enable_msix`] is.
     ///
     /// **A driver in this kernel may arm this however the MSI-X walk failed**, a
     /// list that ended early included: it hands no BAR of its function to a
     /// holder, so an MSI-X table past that link is one nobody but this kernel
     /// could reach. A hand-over is the caller that has to tell the two apart,
     /// and `crate::pcidev`'s header says why.
-    pub fn enable_msi(&self, vector: u8) -> bool {
+    pub(in crate::drivers) fn enable_msi(&self, vector: u8) -> bool {
         let Ok(cap) = self.capability(msi::CAP_ID) else {
             return false;
         };
-
-        let Some((message, data)) = self.message(vector) else {
+        let Some((address, data)) = self.message(vector) else {
             return false;
         };
+        self.write_msi(cap, address, data);
+        true
+    }
 
+    fn write_msi(&self, cap: Capability<'_>, address: u32, data: u32) {
         let control = cap.read_u16(msi::MESSAGE_CONTROL);
         let msi = msi::Msi::decode(control);
-        cap.write_u32(msi.address_lo(), message);
+        cap.write_u32(msi.address_lo(), address);
         if let Some(address_hi) = msi.address_hi() {
             cap.write_u32(address_hi, 0);
         }
@@ -392,7 +421,6 @@ impl PciDevice {
             cap.read_u32(msi.address_lo()),
             cap.read_u16(msi.data()) as u32,
         );
-        true
     }
 
     /// Put MSI back off.
@@ -468,6 +496,26 @@ impl PciDevice {
             None => true,
         }
     }
+}
+
+/// Point a claimed function's [`MSIX_ENTRY`] at its slot's own remapping
+/// entry and enable it. Takes the message and nothing else: the function is
+/// the one the entry was written for, and no other message reaches here.
+pub fn arm_claimed_msix(message: &crate::iommu::Remapped) -> Result<Mmio, NoEntry> {
+    let pci = message.function();
+    let entry = pci.msix_entry()?;
+    Ok(pci.write_msix(entry, message.address(), message.data()))
+}
+
+/// [`arm_claimed_msix`] for a function with MSI and no MSI-X; `false` where it
+/// has no MSI either.
+pub fn arm_claimed_msi(message: &crate::iommu::Remapped) -> bool {
+    let pci = message.function();
+    let Ok(cap) = pci.capability(msi::CAP_ID) else {
+        return false;
+    };
+    pci.write_msi(cap, message.address(), message.data());
+    true
 }
 
 pub struct CapabilityIter<'a> {

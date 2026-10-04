@@ -1,4 +1,4 @@
-//! §1: the injected clock, deadlines, keyed draws and the moved clock.
+//! The injected clock, deadlines, keyed draws and the moved clock.
 
 mod common;
 

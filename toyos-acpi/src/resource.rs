@@ -10,7 +10,6 @@
 //!
 //! Input is firmware-supplied and untrusted: no path panics, the walk
 //! terminates on every input, and every refusal is a [`ResourceError`].
-//! `tests/corpus.rs` holds that claim over both firmwares' committed bytes.
 
 use crate::Phys;
 use toyos_abi::boot::RootBridgeWindow;

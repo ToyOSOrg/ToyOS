@@ -120,7 +120,7 @@ impl Retransmit {
         }
     }
 
-    /// The timer, or with none running the give-up, which runs on wall time (§11.3): `bound` from
+    /// The timer, or with none running the give-up, which runs on wall time: `bound` from
     /// the first transmission, or from when the first was owed if none has left.
     fn deadline(&self, bound: Duration) -> Instant {
         self.timer.unwrap_or_else(|| self.first.unwrap_or(self.since).after(bound))
@@ -275,7 +275,7 @@ pub enum Origin {
     /// A listener's child, and the TIME-WAIT it reopened, which it returns to if it never
     /// reaches ESTABLISHED (RFC 9293 MAY-2 (2)).
     Passive { time_wait: Option<TimeWait> },
-    /// A simultaneous open (MUST-10): the user's queued data and FIN wait for ESTABLISHED.
+    /// A simultaneous open (RFC 9293 MUST-10): the user's queued data and FIN wait for ESTABLISHED.
     Active { buf: Ring, fin: bool },
 }
 

@@ -1,5 +1,5 @@
 //! One deadline per state object, fired in deadline order, ties by kind — neighbour, ACD, IGMP —
-//! and then by interface and address (§1.2 (2)).
+//! and then by interface and address.
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
@@ -44,7 +44,7 @@ impl Timers {
     }
 
     /// Every timer due at `now`, in order and disarmed, so what one re-arms fires in a later call:
-    /// a jumped clock fires each state object once (§1.4 (1)).
+    /// a jumped clock fires each state object once.
     pub fn due(&mut self, now: Instant) -> Vec<Timer> {
         let mut due = Vec::new();
         while let Some(&(at, timer)) = self.order.first() {

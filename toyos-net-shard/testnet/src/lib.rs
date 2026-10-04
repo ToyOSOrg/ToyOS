@@ -9,7 +9,7 @@
 //! fire, then the applications run, then each node's device offers its credit; passes repeat at
 //! that instant until nothing is due. An application writes a stream every byte of which its peer
 //! can check where it lands. Ours against ours is a consistency check, never an independent
-//! oracle (architecture §5.3 (a)).
+//! oracle.
 
 #![forbid(unsafe_code)]
 
