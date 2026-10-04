@@ -6,7 +6,7 @@ opened: 2026-10-02
 
 # A TCP connection that takes a freed slot is queued twice
 
-`Tcp::free` (`toyos-net-tcp/src/stack.rs`) takes a freed connection's index out of `parked` and leaves it in `active`. `transmit` drops a stale index when it pops it and finds the slot empty, but a connection that takes the slot before then is queued by `settle` under the same index, so `active` holds it twice and it has two turns a round. A copy goes when its turn finds nothing due, and the next `settle` queues another while the first is still there, so the second turn lasts for as long as the connection stays busy.
+`Tcp::free` (`toyos-net-shard/tcp/src/stack.rs`) takes a freed connection's index out of `parked` and leaves it in `active`. `transmit` drops a stale index when it pops it and finds the slot empty, but a connection that takes the slot before then is queued by `settle` under the same index, so `active` holds it twice and it has two turns a round. A copy goes when its turn finds nothing due, and the next `settle` queues another while the first is still there, so the second turn lasts for as long as the connection stays busy.
 
 Measured on `toyos-net-tcp`'s own harness (`tests/egress.rs`, `with_second`), with a scratch test that is not committed:
 

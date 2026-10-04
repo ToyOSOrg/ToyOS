@@ -17,4 +17,4 @@ license = "MIT OR Apache-2.0"
 # The window type the bootloader hands the kernel, declared once in the ABI and
 # read here rather than mirrored: a second spelling of a base and a length is
 # two readers that can disagree about one machine's aperture.
-toyos-abi = { path = "../toyos-abi" }
+toyos-abi = { path = "../../toyos-abi" }

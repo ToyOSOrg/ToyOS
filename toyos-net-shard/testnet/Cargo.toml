@@ -7,9 +7,9 @@ description = "A fake Ethernet for toyos-net-shard's host tests: N shards on one
 publish = false
 
 [dependencies]
-toyos-net-shard = { path = "../toyos-net-shard" }
-toyos-net-tcp = { path = "../toyos-net-tcp" }
-toyos-net-wire = { path = "../toyos-net-wire" }
+toyos-net-shard = { path = ".." }
+toyos-net-tcp = { path = "../tcp" }
+toyos-net-wire = { path = "../../toyos-net-wire" }
 
 [dev-dependencies]
 # The capture's independent oracle (architecture §5.3 (f)): a published pcap reader and a published
