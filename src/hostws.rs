@@ -11,15 +11,15 @@
 //! by the commit that added this file).
 //!
 //! A third copy of the list would restore the defect, so there is exactly one:
-//! the `[workspace]` table. This module is its only reader. [`target_dir`]
-//! answers `src/build.rs`'s question about where cargo writes a crate's
-//! artifacts — a member's land in the workspace root's `target/`, not its own —
-//! and the gates below walk the tree and red on a `Cargo.toml` that joined
-//! neither `members` nor `exclude`. **A new host crate that forgets to join is
+//! the `[workspace]` table. This module is its only reader, and the gates below
+//! walk the tree and red on a `Cargo.toml` that joined neither `members` nor
+//! `exclude`. **A new host crate that forgets to join is
 //! a red, not a silent gap.**
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 
 /// The `[workspace]` table of `root/Cargo.toml`.
 fn workspace_table(root: &Path) -> toml::value::Table {
@@ -92,44 +92,6 @@ pub fn is_member(root: &Path, crate_dir: &Path) -> bool {
     let relative = rel(root, crate_dir);
     let relative = if relative.is_empty() { ".".to_string() } else { relative };
     members(root).contains(&relative)
-}
-
-/// The `target/` cargo writes what it builds in `crate_dir` into.
-///
-/// **A workspace member has no `target/` of its own**: cargo writes every
-/// member's artifacts to the workspace root's. `toyos-ld` is the one this
-/// matters for — a host crate *and* a `[programs]` entry in `system.toml`, so
-/// `src/build.rs` builds it for `x86_64-unknown-toyos` and then reads the
-/// result back off disk. Reading the old per-crate path after it joined the
-/// workspace would have been a `Failed to read binary for toyos-ld` on every
-/// image build.
-///
-/// Everything else this is asked about — `kernel/`, `bootloader/`, `userland/`,
-/// the guest crates under `tests/` — is excluded from the workspace and keeps
-/// its own.
-///
-/// **One target directory per checkout, and never one across them.** Cargo's
-/// freshness for a path package is mtime rather than content, and `-C metadata`
-/// carries no checkout path, so two worktrees aimed at one directory contend for
-/// one artifact under one name: the tree whose sources are merely *older* is
-/// declared fresh, compiles nothing, and links the other branch's code, with no
-/// diagnostic anywhere. Measured.
-///
-/// **`-Z checksum-freshness` fixes that and still cannot be relied on here**, so
-/// the rule above is about enablement and not about the feature: the flag is
-/// honoured by a nightly-capable cargo and *silently ignored* by any other, and
-/// nothing a `.cargo/config.toml` can say travels with the shared `target-dir`
-/// it would also carry. This host's rustup default is stable, and
-/// `src/toolchain.rs`'s `host_cargo` lends the `toyos` toolchain whatever cargo
-/// the machine has — stable's, on every CI runner. Sharing on with
-/// freshness off is the mis-link above, so this function joins one path and
-/// stays out of it.
-pub fn target_dir(root: &Path, crate_dir: &Path) -> PathBuf {
-    if is_member(root, crate_dir) {
-        root.join("target")
-    } else {
-        crate_dir.join("target")
-    }
 }
 
 /// Every directory under `root` holding a `Cargo.toml`, as paths relative to
@@ -237,8 +199,7 @@ fn dead_member_target_paths(members: &BTreeSet<String>, text: &str) -> Vec<Strin
 /// `text` with its line comments removed and its string literals kept.
 ///
 /// `src/sourcegate.rs` strips both; this one may not. The paths that matter
-/// here live *inside* string literals — `root.join("../../toyos-ld/target/…")`
-/// is the whole defect — while the explanations of where those paths went live
+/// here live *inside* string literals, while the explanations of where those paths went live
 /// in comments, in this file and in the build script the gate first caught. A scan that read the explanation as the
 /// offence would be unable to say why it was complaining.
 #[cfg(test)]
@@ -439,10 +400,7 @@ mod tests {
     /// Every workspace in the tree, not just this one.
     ///
     /// The files scanned are the ones that *act* on a path: the workflows, this
-    /// build system, and every `build.rs` in the tree. Prose is left alone —
-    /// the tracker records a flashed artifact built when `toyos-ld/target` was
-    /// a real directory, and a record of what once was is not made truer by
-    /// editing it.
+    /// build system, and every `build.rs` in the tree. Prose is left alone.
     #[test]
     fn nothing_that_runs_names_a_target_directory_a_member_does_not_have() {
         let root = repo_root();
@@ -476,8 +434,7 @@ mod tests {
         assert!(
             bad.is_empty(),
             "a workspace member builds into the workspace root's `target/`, so these name a \
-             directory that does not exist:\n  {}\n\
-             `hostws::target_dir` is where the real path comes from.",
+             directory that does not exist:\n  {}",
             bad.join("\n  "),
         );
     }
@@ -486,10 +443,10 @@ mod tests {
     #[test]
     fn the_dead_path_scan_names_the_member_and_ignores_an_excluded_crate() {
         let members: BTreeSet<String> =
-            [".", "toyos-ld", "toyos-elf"].iter().map(|s| s.to_string()).collect();
+            [".", "toyos-abi", "toyos-elf"].iter().map(|s| s.to_string()).collect();
         assert_eq!(
-            dead_member_target_paths(&members, "let ld = root.join(\"../../toyos-ld/target/x\");"),
-            ["toyos-ld/target"],
+            dead_member_target_paths(&members, "let abi = root.join(\"../../toyos-abi/target/x\");"),
+            ["toyos-abi/target"],
         );
         // `kernel/` and `userland/` are workspace *roots*, so naming one of
         // their target directories is correct and must not be reported.
@@ -512,39 +469,19 @@ mod tests {
     #[test]
     fn the_dead_path_scan_reads_code_and_not_the_comment_beside_it() {
         assert_eq!(
-            code_only("let p = \"toyos-elf/target/x\"; // was toyos-ld/target\n", "//").trim(),
+            code_only("let p = \"toyos-elf/target/x\"; // was toyos-abi/target\n", "//").trim(),
             "let p = \"toyos-elf/target/x\";",
         );
         assert_eq!(code_only("            target\n", "#").trim(), "target");
         assert_eq!(
-            code_only("            # toyos-ld/target used to be here\n", "#").trim(),
+            code_only("            # toyos-abi/target used to be here\n", "#").trim(),
             "",
         );
         // A `//` inside a string is not a comment, so what follows it on the
         // line is still code and still read.
         assert_eq!(
-            code_only("let u = \"https://x/\"; let p = \"toyos-ld/target\";\n", "//").trim(),
-            "let u = \"https://x/\"; let p = \"toyos-ld/target\";",
-        );
-    }
-
-    /// [`target_dir`] is what `src/build.rs` reads a guest binary back from, so
-    /// it has to answer differently for the two kinds of crate — and be shown
-    /// doing it, because reading the wrong one is a build failure with a
-    /// message that names a file rather than a cause.
-    #[test]
-    fn a_member_builds_into_the_workspace_target_and_an_excluded_crate_into_its_own() {
-        let root = repo_root();
-        assert_eq!(target_dir(&root, &root.join("toyos-ld")), root.join("target"));
-        assert_eq!(target_dir(&root, &root), root.join("target"));
-        assert_eq!(
-            target_dir(&root, &root.join("kernel")),
-            root.join("kernel/target"),
-            "kernel/ is excluded and keeps its own target directory",
-        );
-        assert_eq!(
-            target_dir(&root, &root.join("userland/snake")),
-            root.join("userland/snake/target"),
+            code_only("let u = \"https://x/\"; let p = \"toyos-abi/target\";\n", "//").trim(),
+            "let u = \"https://x/\"; let p = \"toyos-abi/target\";",
         );
     }
 }

@@ -59,7 +59,6 @@ There are no spec documents. A rule a reader can check lives in an agent's promp
 
 Vendor firmware a device or CPU verifies by its maker's signature may be shipped: pinned by version and hash, redistributable unmodified, recorded in `NOTICE`. A device's is loaded only by its own driver through its IOMMU domain and never executes on the CPU; CPU microcode is loaded by the kernel. `NOTICE` names every committed third-party file with its hash, upstream and licence.
 
-- **toyos-ld** — frozen: everything links with rust-lld, and toyos-ld stays only as the linker inside ToyOS until lld runs there, then goes.
 - **rust/** — Rust compiler/std fork with ToyOS platform support (submodule). Auto-bootstraps; kept current with upstream. Its rules: `.claude/agents/implementer.md`, "A fork".
 
 ## Build & test

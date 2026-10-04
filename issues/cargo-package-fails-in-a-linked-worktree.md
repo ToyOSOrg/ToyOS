@@ -6,7 +6,7 @@ opened: 2026-09-26
 
 # `cargo package`/`cargo publish --dry-run` cannot run inside a linked worktree
 
-`cargo package -p <any workspace member>` (tried `toyos-abi` and `toyos-ld`)
+`cargo package -p <any workspace member>` (tried `toyos-abi`)
 reds with a bare `error: No such file or directory (os error 2)` in a linked
 worktree, right after cargo's own trace logs
 `found a git repo` and `found (git) Cargo.toml`, inside

@@ -72,7 +72,7 @@ use toyos_manifest::launch::{self as authority, Authority, Session, Target};
 use toyos_manifest::package::{self, Package};
 use toyos_manifest::{Manifest, Program};
 use toyos::endow::Endowments;
-use toyos::fs::CAPABILITY_PREFIX;
+use toyos::fs::{Grant, CAPABILITY_PREFIX};
 use toyos::ipc::{self, Connection, RxStep};
 use toyos::launch::{self, Parent, Request, LAUNCHER};
 use toyos::namespace::{self, Namespace};
@@ -377,26 +377,27 @@ fn main() {
         connectors.insert(name, connector);
     }
 
-    // One port per directory a file server serves, made here for the same
-    // reason: a program's first open works whether or not its server runs yet.
-    let mut dirs: BTreeMap<String, Connector> = BTreeMap::new();
-    let mut dir_acceptors: BTreeMap<String, Acceptor> = BTreeMap::new();
+    // One port per file-server role, made here for the same reason: a
+    // program's first open works whether or not its server runs yet. Its
+    // connector goes at once: every connector a program holds to it is a
+    // grant minted for that program's start (`Grants`).
+    let mut role_acceptors: BTreeMap<&str, Acceptor> = BTreeMap::new();
     for role in system.programs.iter().flat_map(|p| p.roles.iter()) {
-        for dir in toyos_manifest::role_dirs(role).expect("supervisor: the build refuses a role it does not know") {
-            let name = format!("{CAPABILITY_PREFIX}{dir}");
-            let (acceptor, connector) =
-                port::create().unwrap_or_else(|e| panic!("supervisor: no port for `{name}`: {e:?}"));
-            dir_acceptors.insert(name.clone(), acceptor);
-            dirs.insert(name, connector);
-        }
+        let (acceptor, _) = port::create().unwrap_or_else(|e| panic!("supervisor: no port for the `{role}` role: {e:?}"));
+        role_acceptors.insert(role, acceptor);
     }
-    // The supervisor's own files are resolved through the same directories as every
-    // program's, and it is the one process nobody endows a namespace: std
-    // resolves through this one, and the stop's syncs through the second.
+    // The supervisor's own files are resolved through grants like every
+    // program's, under the instance no start is given, and it is the one
+    // process nobody endows a namespace: std resolves through this one, and
+    // the stop's syncs through the second.
     let files: &'static Namespace = {
+        let own: Vec<(String, Connector)> = role_acceptors
+            .iter()
+            .flat_map(|(role, acceptor)| mint_grants(role, acceptor, SUPERVISOR_INSTANCE))
+            .collect();
         let build = || {
             let mut builder = namespace::build();
-            for (name, connector) in &dirs {
+            for (name, connector) in &own {
                 builder = builder.add(name, connector);
             }
             builder.finish().expect("supervisor: no namespace for its own files")
@@ -418,7 +419,7 @@ fn main() {
         syscap: &syscap,
         acceptors,
         connectors,
-        dirs,
+        grants: Grants { roles: Vec::new(), next: Cell::new(SUPERVISOR_INSTANCE + 1) },
         files,
         services: Vec::new(),
         log,
@@ -426,7 +427,7 @@ fn main() {
         worker: Worker::start(),
         restarting: false,
     };
-    supervisor.boot(&mut dir_acceptors, wake_write.into_raw());
+    supervisor.boot(&mut role_acceptors, wake_write.into_raw());
 
     // Nothing else holds a `serves` acceptor that has not been launched yet, so
     // the supervisor outliving its children is what keeps those ports open. It parks
@@ -521,9 +522,8 @@ struct Supervisor<'a> {
     /// takes by move.
     acceptors: BTreeMap<&'a str, Acceptor>,
     connectors: BTreeMap<&'a str, Connector>,
-    /// Every directory capability, by its namespace name: what each program's
-    /// view is built from.
-    dirs: BTreeMap<String, Connector>,
+    /// What each program's view is minted from.
+    grants: Grants<'a>,
     /// The same directories as a namespace of the supervisor's own, for the stop's syncs.
     files: &'static Namespace,
     /// What `[boot] start` named, a file server once per role.
@@ -613,7 +613,7 @@ impl<'a> Service<'a> {
         system: &Manifest,
         syscap: &SysCap,
         connectors: &BTreeMap<&str, Connector>,
-        dirs: &BTreeMap<String, Connector>,
+        grants: &Grants<'_>,
         launcher: &Acceptor,
         log: &mut Log,
     ) -> Result<u32, StartError> {
@@ -643,7 +643,7 @@ impl<'a> Service<'a> {
             syscap,
             served,
             connectors,
-            dirs,
+            grants,
             &[],
             storage,
             (launcher, Session::Machine),
@@ -757,7 +757,7 @@ impl<'a> Supervisor<'a> {
     /// process it started. The storage rows go first — every other start may
     /// make a directory, and a directory is a file server's — and the
     /// session's home is made before the first row that is not one.
-    fn boot(&mut self, dir_acceptors: &mut BTreeMap<String, Acceptor>, wake: toyos::RawHandle) {
+    fn boot(&mut self, role_acceptors: &mut BTreeMap<&str, Acceptor>, wake: toyos::RawHandle) {
         let system = self.system;
         let storage_first = system
             .start
@@ -789,22 +789,20 @@ impl<'a> Supervisor<'a> {
                             (served.clone(), acceptor)
                         })
                         .collect(),
-                    Some(role) => toyos_manifest::role_dirs(role)
-                        .expect("known role")
-                        .iter()
-                        .map(|dir| {
-                            let name = format!("{CAPABILITY_PREFIX}{dir}");
-                            let acceptor = dir_acceptors
-                                .remove(&name)
-                                .unwrap_or_else(|| panic!("supervisor: the `{role}` role is served twice"));
-                            (name, acceptor)
-                        })
-                        .collect(),
+                    Some(role) => {
+                        let acceptor = role_acceptors
+                            .remove(role)
+                            .unwrap_or_else(|| panic!("supervisor: the `{role}` role is served twice"));
+                        vec![(format!("{CAPABILITY_PREFIX}{role}"), acceptor)]
+                    }
                 };
                 self.make_home(program);
                 let mut service = Service::new(program, role, kept, wake);
+                if let Some(role) = role {
+                    self.grants.roles.push((role, Arc::clone(&service.kept)));
+                }
                 let started =
-                    service.spawn(&program.path, &[], system, self.syscap, &self.connectors, &self.dirs, &self.launcher, &mut self.log);
+                    service.spawn(&program.path, &[], system, self.syscap, &self.connectors, &self.grants, &self.launcher, &mut self.log);
                 match started {
                     Ok(_) => {}
                     Err(StartError::Partition(why)) => {
@@ -1183,7 +1181,7 @@ impl<'a> Supervisor<'a> {
             let _ = old.wait();
         }
         let started =
-            service.spawn(&path, &owed, self.system, self.syscap, &self.connectors, &self.dirs, &self.launcher, &mut self.log);
+            service.spawn(&path, &owed, self.system, self.syscap, &self.connectors, &self.grants, &self.launcher, &mut self.log);
         match started {
             Ok(pid) => {
                 swapped(
@@ -1283,7 +1281,7 @@ impl<'a> Supervisor<'a> {
         let mut syncing = Vec::new();
         for role in roles.filter(|r| *r != "boot") {
             let Some(dir) = toyos_manifest::role_dirs(role).and_then(|dirs| dirs.first()) else { continue };
-            let name = format!("{CAPABILITY_PREFIX}{dir}");
+            let name = format!("{CAPABILITY_PREFIX}{}", dir.dir);
             let (done_tx, done_rx) = std::sync::mpsc::channel();
             let (asked, names) = (name.clone(), self.files);
             let spawned = std::thread::Builder::new().name(format!("sync-{role}")).spawn(move || {
@@ -1347,7 +1345,7 @@ impl<'a> Supervisor<'a> {
                 kept.ended = false;
                 kept.acceptors.clear();
                 say!(
-                    "supervisor: {label} ended {} times in {} s; its ports are closed and its clients answered Gone",
+                    "supervisor: {label} ended {} times in {} s; its ports are closed, its clients answered Gone, and a program started from now on is given none of its directories",
                     toyos_manifest::RESTARTS + 1,
                     toyos_manifest::RESTART_WINDOW_SECS
                 );
@@ -1357,7 +1355,7 @@ impl<'a> Supervisor<'a> {
             let (path, owed, program) = (service.path.clone(), service.devices.clone(), service.program);
             self.make_home(program);
             let service = &mut self.services[index];
-            match service.spawn(&path, &owed, self.system, self.syscap, &self.connectors, &self.dirs, &self.launcher, &mut self.log) {
+            match service.spawn(&path, &owed, self.system, self.syscap, &self.connectors, &self.grants, &self.launcher, &mut self.log) {
                 Ok(new) => say!("supervisor: {label} (pid {pid}) ended; started again as pid {new}"),
                 Err(e) => {
                     let mut kept = service.kept.lock().expect("supervisor: a service's state is poisoned");
@@ -1377,7 +1375,7 @@ impl<'a> Supervisor<'a> {
         self.make_home(program);
         let service = &mut self.services[index];
         let name = service.program.name.clone();
-        match service.spawn(previous, owed, self.system, self.syscap, &self.connectors, &self.dirs, &self.launcher, &mut self.log) {
+        match service.spawn(previous, owed, self.system, self.syscap, &self.connectors, &self.grants, &self.launcher, &mut self.log) {
             Ok(pid) => {
                 service.kept.lock().expect("supervisor: a service's state is poisoned").swapping = false;
                 swapped(&self.log, &name, Word::Restored, &format!("{previous} as pid {pid}"));
@@ -1616,7 +1614,7 @@ impl Supervisor<'_> {
             self.syscap,
             Served::Move(&mut self.acceptors),
             &self.connectors,
-            &self.dirs,
+            &self.grants,
             &extras,
             Storage::default(),
             (&self.launcher, session),
@@ -1889,7 +1887,7 @@ fn start<'a>(
     syscap: &SysCap,
     served: Served<'_, 'a>,
     connectors: &BTreeMap<&str, Connector>,
-    dirs: &BTreeMap<String, Connector>,
+    grants: &Grants<'_>,
     extras: &[(&str, Connector)],
     storage: Storage,
     launcher: (&Acceptor, Session),
@@ -1921,7 +1919,7 @@ fn start<'a>(
         command.endow(&label, raw.0);
         held.0.push(raw);
     }
-    if let Some(ns) = build_namespace(program, system, connectors, dirs, extras)? {
+    if let Some(ns) = build_namespace(program, system, connectors, grants, extras)? {
         let raw = ns.into_raw();
         command.endow(SVC_LABEL, raw.0);
         held.0.push(raw);
@@ -2214,13 +2212,13 @@ fn build_namespace(
     program: &Program,
     system: &Manifest,
     connectors: &BTreeMap<&str, Connector>,
-    dirs: &BTreeMap<String, Connector>,
+    grants: &Grants<'_>,
     extras: &[(&str, Connector)],
 ) -> std::io::Result<Option<Namespace>> {
     // Never the swap port: [`swap_namespace`] says why.
     let receives: Vec<&String> =
         program.receives.iter().filter(|name| *name != toyos_swap::PORT).collect();
-    let view: Vec<(&String, &Connector)> = dirs.iter().filter(|(name, _)| in_view(program, name)).collect();
+    let view = grants.view(program);
     if receives.is_empty() && extras.is_empty() && view.is_empty() {
         return Ok(None);
     }
@@ -2235,7 +2233,7 @@ fn build_namespace(
             ),
         }
     }
-    for (name, connector) in view {
+    for (name, connector) in &view {
         builder = builder.add(name, connector);
     }
     // A `provides` name reaches its holder from whoever made the port, never
@@ -2252,15 +2250,67 @@ fn build_namespace(
     }
 }
 
-/// Whether the directory capability `name` is in `program`'s view.
+/// The instance of the supervisor's own grants, which no start is given.
+const SUPERVISOR_INSTANCE: u64 = 0;
+
+/// What each program's directory capabilities are minted from: each
+/// file-server role's port, and the count of starts.
 ///
-/// **Every program sees the whole tree the file servers serve**, which is the
-/// kernel's old view kept whole until each row declares its own
-/// (`issues/every-program-sees-only-the-files-it-was-given.md`,
-/// stage 2), with one exception: a storage row sees none, since a file server
-/// resolving a path of its own through itself waits for ever.
-fn in_view(program: &Program, name: &str) -> bool {
-    !is_storage(program) && name.starts_with(CAPABILITY_PREFIX)
+/// **Each start is minted grants of its own** (`toyos::fs::Grant`), one per
+/// directory of every role, all naming one instance, so the servers count the
+/// process and every child it spawns directly, which holds the same
+/// connectors, against one share. A role whose ports closed for good is
+/// minted nothing.
+struct Grants<'a> {
+    /// Each role's service, whose kept acceptor is the role's port.
+    roles: Vec<(&'a str, Arc<Mutex<Kept>>)>,
+    /// The instance the next start is minted.
+    next: Cell<u64>,
+}
+
+impl Grants<'_> {
+    /// The directory capabilities `program` is endowed for one start, by
+    /// namespace name.
+    ///
+    /// **Every program sees the whole tree the file servers serve**, which is
+    /// the kernel's old view kept whole until each row declares its own
+    /// (`issues/every-program-sees-only-the-files-it-was-given.md`, stage 2),
+    /// with one exception: a storage row sees none, since a file server
+    /// resolving a path of its own through itself waits for ever. Asked before
+    /// anything is locked, since a storage row's start holds its own kept state.
+    fn view(&self, program: &Program) -> Vec<(String, Connector)> {
+        if is_storage(program) {
+            return Vec::new();
+        }
+        let instance = self.next.get();
+        self.next.set(instance + 1);
+        let mut view = Vec::new();
+        for (role, kept) in &self.roles {
+            let kept = kept.lock().expect("supervisor: a service's state is poisoned");
+            if let Some((_, acceptor)) = kept.acceptors.first() {
+                view.extend(mint_grants(role, acceptor, instance));
+            }
+        }
+        view
+    }
+}
+
+/// A grant on `acceptor`, the `role`'s port, for each of its directories,
+/// naming `instance`: each by the namespace name a program opens it under.
+fn mint_grants(role: &str, acceptor: &Acceptor, instance: u64) -> Vec<(String, Connector)> {
+    let dirs = toyos_manifest::role_dirs(role).expect("supervisor: the build refuses a role it does not know");
+    dirs.iter()
+        .map(|dir| {
+            let mut badge = [0u8; MAX_BADGE];
+            let badge = Grant { instance, root: dir.root }
+                .encode(&mut badge)
+                .unwrap_or_else(|| panic!("supervisor: {}'s root {:?} is no grant's", dir.dir, dir.root));
+            let connector = acceptor
+                .mint(badge)
+                .unwrap_or_else(|e| panic!("supervisor: no grant on {} for instance {instance}: {e:?}", dir.dir));
+            (format!("{CAPABILITY_PREFIX}{}", dir.dir), connector)
+        })
+        .collect()
 }
 
 /// [`toyos_swap::PORT`] in a namespace of its own, for a program whose row

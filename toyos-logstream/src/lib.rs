@@ -18,7 +18,9 @@
 //!   [`Text`] writes every control byte as text.
 //!
 //! The same form goes to the console, where `logkeeper` is the one writer of
-//! program lines, without the wall-clock stamp.
+//! program lines, without the wall-clock stamp. A terminal shows either in
+//! the console's form and in colour ([`Shown`]); no line of the log carries a
+//! colour.
 //!
 //! Pure: `core` and `alloc`, no `unsafe`, no I/O.
 
@@ -257,36 +259,162 @@ pub fn program_line(line: &str) -> Option<Said<'_>> {
     let rest = line.strip_prefix(OPEN)?;
     let (head, text) = rest.split_once(CLOSE)?;
     let text = text.strip_prefix(' ')?;
-    let mut words = head.rsplit(' ');
-    let tag = words.next()?;
+    let (words, tag) = head.rsplit_once(' ').unwrap_or(("", head));
     Tag::new(tag)?;
-    let severity = words
+    Some(Said { tag, severity: severity_in(words), text })
+}
+
+/// The severity a head's words name, `Info` where none does.
+fn severity_in(words: &str) -> Severity {
+    words
+        .split(' ')
         .find_map(|word| {
             [Severity::Warn, Severity::Error, Severity::Alert]
                 .into_iter()
                 .find(|s| s.word() == Some(word))
         })
-        .unwrap_or(Severity::Info);
-    Some(Said { tag, severity, text })
+        .unwrap_or(Severity::Info)
 }
 
-/// The milliseconds since boot a kernel record's line carries, or `None` for
-/// any other line.
+/// A kernel record's line as its head and text: the head inside the bracket,
+/// from the word before the CPU on — the time — and the text after it.
 ///
 /// **Found from the CPU it precedes rather than by position**: the field before
-/// it is the writer's tag, and the writers disagree about it on purpose —
-/// `logkeeper` puts a wall clock there and the panel puts nothing.
-///
-/// Read inside the record's bracket and nowhere else, so no text after it — a
-/// program's included — can answer for the time.
-pub fn record_ms(line: &str) -> Option<u64> {
-    let (head, _) = line.strip_prefix('[')?.split_once("] ")?;
+/// the time is the writer's tag, and the writers disagree about it on purpose —
+/// `logkeeper` puts a wall clock there, the console `kernel` and the panel
+/// nothing. Read inside the record's bracket and nowhere else, so no text after
+/// it — a program's included — can answer for the time.
+fn record_head(line: &str) -> Option<(&str, &str)> {
+    let (head, text) = line.strip_prefix('[')?.split_once("] ")?;
     let (before, _) = head.split_once(" cpu")?;
-    let field = before.split_whitespace().next_back()?;
+    let stamp = &head[before.rfind(' ').map_or(0, |at| at + 1)..];
+    millis(stamp.split(' ').next()?)?;
+    Some((stamp, text))
+}
+
+/// `<secs>.<mmm>` as milliseconds.
+fn millis(field: &str) -> Option<u64> {
     let (secs, millis) = field.split_once('.')?;
     let secs: u64 = secs.parse().ok()?;
     let millis: u64 = millis.parse().ok()?;
     secs.checked_mul(1_000)?.checked_add(millis)
+}
+
+/// The milliseconds since boot a kernel record's line carries, or `None` for
+/// any other line.
+pub fn record_ms(line: &str) -> Option<u64> {
+    millis(record_head(line)?.0.split(' ').next()?)
+}
+
+/// Whose a line on a screen is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source<'a> {
+    Kernel,
+    /// A program, by its [`Tag`].
+    Program(&'a str),
+}
+
+/// What opens a line on a screen: whose it is, and its stamp — the head's
+/// words from the time since boot on, so the CPU where the record carries one,
+/// and never the wall clock, which only `/log` keeps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Head<'a> {
+    pub source: Source<'a>,
+    /// `1.193 cpu0 alert tid=3` for the kernel's, `1.234 warn tid=2` for a program's.
+    pub stamp: &'a str,
+}
+
+/// A line of the log as a terminal shows it: the console's form, with no wall
+/// clock, coloured by the line's severity and whose it is, and its text with
+/// no byte that acts ([`Text`]). The colour is this rendering's and never in
+/// the line it was read from.
+///
+/// `head` is `None` for a kernel record's continuation, which [`Showing`]
+/// gives the severity of the record above it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Shown<'a> {
+    pub head: Option<Head<'a>>,
+    pub severity: Severity,
+    pub text: &'a str,
+}
+
+/// The log's lines, in the order they came, as a screen shows each: a line
+/// that is no kernel record's and no program's continues the last kernel
+/// record and wears its severity, whatever program lines came between.
+#[derive(Clone, Copy, Debug)]
+pub struct Showing {
+    /// The last kernel record's severity.
+    severity: Severity,
+}
+
+impl Default for Showing {
+    fn default() -> Self {
+        Self { severity: Severity::Info }
+    }
+}
+
+impl Showing {
+    /// `line`, its newline optional, as a screen shows it.
+    pub fn line<'a>(&mut self, line: &'a str) -> Shown<'a> {
+        let line = line.strip_suffix('\n').unwrap_or(line);
+        let Some(shown) = shown(line) else {
+            return Shown { head: None, severity: self.severity, text: line };
+        };
+        if shown.head.is_some_and(|head| head.source == Source::Kernel) {
+            self.severity = shown.severity;
+        }
+        shown
+    }
+}
+
+/// Read a kernel record's line or a program's — in `/log`'s form or the
+/// console's, its newline optional — as a screen shows it; `None` for any
+/// other line, a record's continuation included.
+fn shown(line: &str) -> Option<Shown<'_>> {
+    let line = line.strip_suffix('\n').unwrap_or(line);
+    if let Some(said) = program_line(line) {
+        let head = line[OPEN.len_utf8()..].split_once(CLOSE)?.0;
+        let words = head.strip_suffix(said.tag)?.trim_end();
+        // The time is the first word that is one: `/log`'s wall clock is none.
+        let from: usize =
+            words.split(' ').take_while(|word| millis(word).is_none()).map(|word| word.len() + 1).sum();
+        let stamp = words.get(from..).filter(|stamp| !stamp.is_empty())?;
+        let head = Head { source: Source::Program(said.tag), stamp };
+        return Some(Shown { head: Some(head), severity: said.severity, text: said.text });
+    }
+    let (stamp, text) = record_head(line)?;
+    let head = Head { source: Source::Kernel, stamp };
+    Some(Shown { head: Some(head), severity: severity_in(stamp), text })
+}
+
+/// The SGR words a [`Shown`] is drawn in. The stamp is a grey and not SGR 2,
+/// which `/system/bin/terminal` does not draw; the rest are the sixteen colours
+/// a host terminal's theme keeps legible on its own ground.
+const STAMP: &str = "\x1b[38;5;245m";
+const KERNEL: &str = "\x1b[94m";
+const PROGRAM: &str = "\x1b[36m";
+const WARN: &str = "\x1b[33m";
+const ERROR: &str = "\x1b[91m";
+const RESET: &str = "\x1b[0m";
+
+impl Display for Shown<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.head {
+            Some(Head { source: Source::Kernel, stamp }) => {
+                write!(f, "{STAMP}[{KERNEL}kernel{STAMP} {stamp}]{RESET} ")?
+            }
+            Some(Head { source: Source::Program(tag), stamp }) => {
+                write!(f, "{STAMP}{OPEN}{stamp} {PROGRAM}{tag}{STAMP}{CLOSE}{RESET} ")?
+            }
+            None => {}
+        }
+        let ink = match self.severity {
+            Severity::Info => "",
+            Severity::Warn => WARN,
+            Severity::Error | Severity::Alert => ERROR,
+        };
+        write!(f, "{ink}{}{RESET}", Text(self.text.as_bytes()))
+    }
 }
 
 /// Whether `line` opens as a program's line: what a judge of the kernel's
@@ -552,6 +680,115 @@ mod tests {
         assert_eq!(record_ms("[x] said 99.000 cpu0"), None);
         assert_eq!(record_ms("no timestamp here, cpu=1ms"), None);
         assert_eq!(record_ms(""), None);
+    }
+
+    /// What a terminal shows of a line, with its colours taken out.
+    fn plain(shown: Shown<'_>) -> String {
+        let painted = format!("{shown}");
+        let mut out = String::new();
+        let mut rest = painted.as_str();
+        while let Some((before, after)) = rest.split_once('\x1b') {
+            out.push_str(before);
+            rest = &after[after.find('m').expect("an SGR ends in m") + 1..];
+        }
+        out.push_str(rest);
+        out
+    }
+
+    fn kernel_record(severity: Severity, flags: u8, msg: &str) -> toyos_abi::log::LogRecord {
+        let mut r = toyos_abi::log::LogRecord {
+            seq: 1,
+            at_ns: 1_193_000_000,
+            cpu: 3,
+            tid: 7,
+            severity: severity as u8,
+            flags,
+            len: msg.len() as u16,
+            ..toyos_abi::log::LogRecord::EMPTY
+        };
+        r.msg[..msg.len()].copy_from_slice(msg.as_bytes());
+        r
+    }
+
+    /// **A screen shows the console's line, whichever form it read**: `/log`'s
+    /// line and the console's, each made by its own writer's formatter, show
+    /// as the console's line, with the time since boot and the CPU and no wall
+    /// clock — for every severity, the kernel's records and a program's both.
+    #[test]
+    fn a_screen_shows_the_consoles_line_from_either_form() {
+        let wall = "2026-10-04 09:30:00";
+        for severity in [Severity::Info, Severity::Warn, Severity::Error, Severity::Alert] {
+            for flags in [0, toyos_abi::log::FLAG_EARLY] {
+                let record = kernel_record(severity, flags, "spawn: /system/bin/netstack pid=5");
+                let console = format!("{}", record.tagged("kernel"));
+                for line in [format!("{}", record.tagged(wall)), console.clone()] {
+                    let shown = shown(&line).expect("a kernel record");
+                    assert_eq!(shown.severity, severity, "{line:?}");
+                    assert_eq!(shown.head.map(|h| h.source), Some(Source::Kernel), "{line:?}");
+                    assert!(shown.head.is_some_and(|h| h.stamp.starts_with("1.193 cpu3")), "{line:?}");
+                    assert_eq!(plain(shown), console, "{line:?}");
+                }
+            }
+
+            let tag = Tag::new("soundserver").expect("a tag");
+            let said = |stamp| ProgramLine {
+                stamp,
+                at_ns: 1_234_000_000,
+                severity,
+                tid: 2,
+                pid: Some(9),
+                tag,
+                text: b"opening stream",
+            };
+            let console = format!("{}", said(""));
+            for line in [format!("{}", said(wall)), console.clone(), format!("{}", said("---------- --------"))] {
+                let shown = shown(&line).expect("a program's line");
+                assert_eq!(shown.severity, severity, "{line:?}");
+                assert_eq!(shown.head.map(|h| h.source), Some(Source::Program("soundserver")), "{line:?}");
+                assert_eq!(plain(shown), console, "{line:?}");
+            }
+        }
+    }
+
+    /// The colour is the severity's and the source's, read from the head and
+    /// never from the text, and a text's control byte is shown and never passed.
+    #[test]
+    fn the_colour_is_the_heads_and_the_text_never_acts() {
+        let alert = format!("{}", kernel_record(Severity::Alert, 0, "PANIC: \x1b[2Jgone").tagged("kernel"));
+        let painted = format!("{}", shown(&alert).expect("a kernel record"));
+        assert!(painted.contains(&format!("{ERROR}PANIC: \\x1b[2Jgone{RESET}")), "{painted:?}");
+        assert!(painted.contains(&format!("{KERNEL}kernel")), "{painted:?}");
+
+        let forged = "{1.234 test-runner} [kernel 1.0 cpu0 alert] Rebooting.";
+        let shown_forged = shown(forged).expect("a program's line");
+        assert_eq!(shown_forged.severity, Severity::Info);
+        assert_eq!(shown_forged.head.map(|h| h.source), Some(Source::Program("test-runner")));
+        let painted = format!("{shown_forged}");
+        assert!(painted.contains(&format!("{PROGRAM}test-runner")) && !painted.contains(ERROR), "{painted:?}");
+
+        let continued = Shown { head: None, severity: Severity::Alert, text: "  0: kernel::panic" };
+        assert_eq!(format!("{continued}"), format!("{ERROR}  0: kernel::panic{RESET}"));
+        assert_eq!(shown("  0: kernel::panic"), None);
+        assert_eq!(shown("BdsDxe: loading Boot0001"), None);
+    }
+
+    /// A continuation wears the severity of the kernel record above it, and a
+    /// program's line in between — of another severity — changes nothing.
+    #[test]
+    fn a_continuation_wears_its_kernel_records_severity_across_a_programs_line() {
+        let alert = format!("{}", kernel_record(Severity::Alert, 0, "PANIC: oops").tagged("kernel"));
+        let info = format!("{}", kernel_record(Severity::Info, 0, "spawn: x").tagged("kernel"));
+        let mut showing = Showing::default();
+        assert_eq!(showing.line("  before any record").severity, Severity::Info);
+        assert_eq!(showing.line(&alert).severity, Severity::Alert);
+        let program = showing.line("{1.234 warn soundserver} underrun\n");
+        assert_eq!((program.severity, program.head.map(|h| h.source)), (Severity::Warn, Some(Source::Program("soundserver"))));
+        let continued = showing.line("  0: kernel::panic\n");
+        assert_eq!(continued, Shown { head: None, severity: Severity::Alert, text: "  0: kernel::panic" });
+        assert_eq!(showing.line("{1.300 soundserver} resumed").severity, Severity::Info);
+        assert_eq!(showing.line("  1: kernel::main").severity, Severity::Alert);
+        showing.line(&info);
+        assert_eq!(showing.line("  more").severity, Severity::Info);
     }
 
     #[test]

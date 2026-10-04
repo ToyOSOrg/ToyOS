@@ -10,10 +10,10 @@ The root, `kernel/`, `bootloader/`, `userland/` and `toyos/` are five
 Cargo resolutions with five locks, and four of them declare their own
 `[profile.toyos]`. A
 crate two of them share is tested on the host against the root's lock and
-shipped from another's, and the locks disagree on versions: on `main` at
-`c4ab2b1e1`, 35 registry pairs sit below the highest version another of the
-five locks carries in the same semver range (userland 24, loader 8, root 2,
-kernel 1).
+shipped from another's, and the locks disagree on versions: once the
+userland lock is aligned, 8 registry pairs sit below the highest version
+another of the five locks carries in the same semver range, all of them the
+loader's.
 
 **The owner ruled on 2026-10-04.** Asked "Merge everything into one Cargo
 workspace (after small version-alignment steps; proven by byte-identical
@@ -33,8 +33,9 @@ byte-identical to the build of the last alignment before it. The root
 moves that instruction; no `rust-toolchain.toml` is tracked outside `rust/`,
 since step 1 of the rule in `issues/the-tree-says-who-uses-each-thing.md`
 names none. The alignments
-land first, each in today's workspace; pull request #724, the root and
-kernel locks, is the first.
+land first, each in today's workspace: pull request #724 aligned the root
+and kernel locks, the userland lock is the second, and the loader's 8 pairs
+are the last.
 
 **Constraints, measured** on a scratch workspace seeded from the five locks
 at `8b4f88446`, by type-check and one loader link, with no boot:
@@ -45,10 +46,14 @@ at `8b4f88446`, by type-check and one loader link, with no boot:
   userland's moves pull with them (`ureq-proto`, `utf-8`, `zeroize_derive`),
   and the root's registry `getrandom` 0.2, 0.3 and 0.4, which become the forks
   userland patches in at the same versions. Those three move no version: they
-  follow from the root `[patch]` and land with it. What the pairs added since
-  (userland's `autocfg`, `crossbeam-utils`, `defmt`, `defmt-macros`,
-  `once_cell` and `rustix`, and the loader's `libc`) pull with them is not
-  measured.
+  follow from the root `[patch]` and land with it. What the loader's `libc`,
+  added since, pulls with it is not measured.
+- `userland/Cargo.lock` carries `miniz_oxide` 0.8.9, for `png` 0.18.1,
+  beside 0.9.1, for `flate2` 1.1.10. Built with only `flate2` back at 1.1.9,
+  compositor and files are 204 to 228 bytes of text smaller on x86_64 and
+  704 on aarch64, and in neither build does a symbol of a third
+  `miniz_oxide` ship in them: `flate2`'s and std's are the two they carry.
+  Exit: `png` takes `miniz_oxide` 0.9.
 - Every fork commit the five locks pin stays pinned, and the crypto
   pre-releases (`ed25519-dalek 3.0.0-pre.6`, `pkcs5 0.8.0-rc.13`) are only in
   `userland/Cargo.lock` and stay.

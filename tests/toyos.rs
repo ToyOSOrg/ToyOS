@@ -127,6 +127,10 @@ const RUST_SKIP: &[&str] = &[
     // A kernel primitive with no use for any one boot's devices: the
     // `port_badge` metal row runs it on tests/proctreecase.
     "port_badge",
+    // Needs a launcher whose row lists a program that streams into a file, so
+    // that another instance asks DATA's server while this one holds its
+    // shares: the `fs_share` metal row runs it on tests/proctreecase.
+    "fs_share",
     // It asserts nothing at all: it holds a `tests/lanleasecase` boot open for
     // twenty seconds. On a shared boot it would be twenty seconds of nothing.
     "lan_hold",
@@ -746,6 +750,12 @@ const METAL: &[(&str, metal::Metal)] = &[
         "port_badge",
         metal::Metal { arms: PROCTREECASE, judge: |b| b[0].job_passed("test_rs_port_badge") },
     ),
+    (
+        // One instance holding all a file server lets it hold leaves the
+        // server answering another.
+        "fs_share",
+        metal::Metal { arms: PROCTREECASE, judge: |b| b[0].job_passed("test_rs_fs_share") },
+    ),
     // ---- one image: tests/metalcase ----
     (
         "metal_sim_scanout_wc",
@@ -970,13 +980,20 @@ const USB_RESET_BOOTS: &[metal::Arm] = &[
 const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/metalcase", &[], &[])];
 
 /// A launcher and a declared `cat` and shell, which `process_tree`'s subtree
-/// launches, a `toybox` row holding `roster`, which `launch_toctou` races, and
-/// the rows `launch_authority` is refused and started.
+/// launches, a `toybox` row holding `roster`, which `launch_toctou` races, the
+/// rows `launch_authority` is refused and started, and the shell `fs_share`
+/// asks DATA's server through.
 const PROCTREECASE: &[metal::Arm] = &[metal::once(
     "proctreecase",
     "tests/proctreecase",
     &[],
-    &["test_rs_process_tree", "test_rs_launch_toctou", "test_rs_launch_authority", "test_rs_port_badge"],
+    &[
+        "test_rs_process_tree",
+        "test_rs_launch_toctou",
+        "test_rs_launch_authority",
+        "test_rs_port_badge",
+        "test_rs_fs_share",
+    ],
 )];
 
 /// netstack in front of the T14's I219 with its lease probe armed: netstack's exit code
@@ -1135,9 +1152,11 @@ fn c_corpus_metal(
 /// The comparator's own staged name. It is a `RUST_SKIP` helper, so discovery
 /// never makes a job of it and [`shared_metal`] stages it as one.
 const CCHECK: &str = "test_rs_ccheck";
-/// The renderer's two text colours, as the screendump reports them.
+/// The renderer's inks for `Info` text, `Alert` text and a record's head, as
+/// the screendump reports them.
 const WHITE: [u8; 3] = [0xFF, 0xFF, 0xFF];
-const ALERT: [u8; 3] = [0xFF, 0x50, 0x50];
+const ALERT: [u8; 3] = [0xFF, 0x6E, 0x6E];
+const STAMP: [u8; 3] = [0x9E, 0x9E, 0x9E];
 /// And the fill a halted machine leaves behind.
 const FILL_FATAL: [u8; 3] = [0x60, 0x00, 0x00];
 /// The fill a boot checkpoint leaves behind. It is the only thing that tells a
@@ -1554,8 +1573,9 @@ fn print_screen(name: &str, text: &str) {
     }
 }
 
-/// Assert the colour decisions `text()` cannot see: the fill, every row an
-/// `alert!` produced, and one row it did not.
+/// Assert the colour decisions `text()` cannot see: the fill, the text of
+/// every row an `alert!` produced and of every row carrying a text it did not,
+/// and the head the record's first row opens with.
 ///
 /// **Both rows are named by their text, and that is the whole assertion.**
 /// Nothing in the message says "alert" any more — the colour is the record's
@@ -1578,36 +1598,47 @@ fn check_colors(
     if dump.fill() != fill {
         return Err(format!("fill is {:?}, want {fill:?}", dump.fill()));
     }
-    let rows = dump.rows();
     for alert_line in alert_lines {
-        let Some(cy) = dump.row_index(alert_line) else {
-            return Err(format!("{alert_line:?} not on screen\n{}", dump.text()));
-        };
-        if dump.row_fg(cy) != Some(ALERT) {
-            return Err(format!(
-                "{alert_line:?} drawn in {:?}, want alert {ALERT:?} — every row of an \
-                 `alert!` record wears its level, including the ones its message wrapped \
-                 or newlined onto\n{}",
-                dump.row_fg(cy),
-                dump.text()
-            ));
-        }
+        inked(
+            dump,
+            alert_line,
+            ALERT,
+            "every row of an `alert!` record wears its level, including the ones its message \
+             wrapped or newlined onto",
+        )?;
     }
-    let Some(plain) = dump.row_index(plain_line) else {
+    // The record's first row opens with its head, drawn dim and apart from its text.
+    let opens = alert_lines.first().and_then(|line| dump.row_index(line));
+    if let Some(cy) = opens.filter(|&cy| dump.row_fg(cy) != Some(STAMP)) {
         return Err(format!(
-            "{plain_line:?} is not on screen, so there is no ordinary row to compare the \
-             highlight against\n{}",
+            "the head of {:?} drawn in {:?}, want the stamp's {STAMP:?}\n{}",
+            dump.rows()[cy],
+            dump.row_fg(cy),
             dump.text()
         ));
-    };
-    if dump.row_fg(plain) != Some(WHITE) {
-        return Err(format!(
-            "ordinary row {:?} drawn in {:?}, want white {WHITE:?}",
-            rows[plain],
-            dump.row_fg(plain)
-        ));
     }
-    Ok(())
+    inked(
+        dump,
+        plain_line,
+        WHITE,
+        "an ordinary record's text is white on every row it fills, a row its first line \
+         wrapped onto included, which carries no head",
+    )
+}
+
+/// `needle`'s own cells are drawn in `want` on every row carrying it, and
+/// some row does.
+fn inked(dump: &screen::Ppm, needle: &str, want: [u8; 3], why: &str) -> Result<(), String> {
+    let rows = dump.fg_of(needle);
+    if rows.is_empty() {
+        return Err(format!("{needle:?} not on screen\n{}", dump.text()));
+    }
+    match rows.iter().find(|(_, fg)| *fg != Some(want)) {
+        Some((row, fg)) => {
+            Err(format!("{needle:?} drawn in {fg:?} on {row:?}, want {want:?} — {why}\n{}", dump.text()))
+        }
+        None => Ok(()),
+    }
 }
 
 /// `tests/toyos-rust-tests`' binary that `tests/virtjobcase` runs as its job

@@ -13,7 +13,7 @@ use crate::read;
 /// `n_type` of a GNU build-id note.
 pub const NT_GNU_BUILD_ID: u32 = 3;
 
-/// The longest build-id this crate answers. lld's and `toyos-ld`'s are 20
+/// The longest build-id this crate answers. lld's is 20
 /// bytes, a `uuid` or `md5` one 16; past this a descriptor is no build-id any
 /// linker writes.
 pub const MAX_BUILD_ID: usize = 32;

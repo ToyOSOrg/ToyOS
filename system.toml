@@ -40,8 +40,6 @@ proctest = {}
 # The installer. It holds nothing: it writes under `/apps` because `/apps` is
 # writable to it, and a row that gave it more would make that untrue.
 pkg = {}
-toyos-ld = { path = "toyos-ld" }
-# cargo = { path = "userland/cargo", no-default-features = true }
 
 # **Every image that carries a `TOYOS-LOG` partition runs this**, and every
 # image does. The kernel keeps the record ring and the console and writes no
@@ -94,7 +92,7 @@ devices = ["pci:1af4:1041"]
 [programs.sshserver]
 service = true
 receives = ["netstack"]
-starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "proctest", "toyos-ld", "sshserver", "swap", "update", "/apps"]
+starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "proctest", "sshserver", "swap", "update", "/apps"]
 login = true
 
 # `swap` is the authority to replace a running service's binary; the build
@@ -145,7 +143,7 @@ starts = ["shell"]
 
 [programs.shell]
 receives = ["surface"]
-starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "proctest", "toyos-ld", "sshserver", "swap", "update", "/apps"]
+starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "proctest", "sshserver", "swap", "update", "/apps"]
 
 [programs.doom]
 receives = ["compositor", "soundserver"]
@@ -180,7 +178,7 @@ receives = ["compositor", "filepicker"]
 [programs.toybox]
 receives = ["compositor", "soundserver", "surface", "power"]
 syscap = ["roster"]
-starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "proctest", "toyos-ld", "sshserver", "swap", "update", "/apps"]
+starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "proctest", "sshserver", "swap", "update", "/apps"]
 
 # Symlinks created on ROOT at build time.
 # Keys are ROOT-relative; targets are the guest paths they resolve to.
