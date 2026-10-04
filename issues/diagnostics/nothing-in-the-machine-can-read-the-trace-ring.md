@@ -13,12 +13,11 @@ Its one reader is LLDB: `p &TRACE_RINGS` and then `memory read`, which is why
 the discriminants are fixed by hand and held there by const assertions. A
 booted machine can ask itself nothing: no syscall, no tool, no gate.
 
-Part of `issues/diagnostics/toyos-explains-itself.md`, whose shared
-foundations this track obeys.
+Part of `issues/diagnostics/toyos-explains-itself.md`.
 
-**Proposal accepted** (owner, 2026-10-03): the ring is finished in three
-steps, and the work then stops and is judged before anything more is built on
-it.
+**Proposal accepted** (owner, 2026-10-03, "Build it as proposed"): the ring
+is finished in three steps, and the work then stops and is judged before
+anything more is built on it.
 
 1. **The ring is readable**: the log's slot protocol, raw counter stamps,
    `SYS_TRACE_READ` in the shape of the log's read, the `trace` right it
@@ -36,7 +35,9 @@ it.
    program, in the shipped kernel: **"Always on"** (owner, 2026-10-03).
    **Exit**: `SYS_DEBUG`'s
    shootdown-acknowledgement delay names the delayed CPU and its time in the
-   trace. A window's record names its opener by address, which
+   trace. A system call held past the threshold in a shipped-configuration
+   kernel reads back from the trace with its number and its program. A
+   window's record names its opener by address, which
    `issues/kernel/the-cpu-that-spawns-a-toybox-applet-reads-1-4-ms-of-interrupts-and-preemption-off-on-the-t14.md`
    and
    `issues/kernel/the-supervisors-claim-of-a-pci-function-the-t14-lacks-holds-interrupts-off-for-3-8-ms.md`

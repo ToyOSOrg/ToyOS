@@ -43,14 +43,26 @@ with what authority, is the open question.
 
 **Move 3 — the panic-time symbol resolver**, small and independent. Ruled
 (owner, 2026-10-03, "adopt", `issues/diagnostics/toyos-explains-itself.md`): the
-kernel names only itself, a killed program is reported as file and offset and
-userland names it, and the kernel keeps its own ELF reader. ELF parsing
-is already a pure crate that forbids unsafe and is tested against a crafted
-corpus, and the symbol machinery moved onto it in the 2026-08-15 consolidation —
-so what is left of this move is one decision: `rustc-demangle`'s standing. It is
-an unforked crates.io dependency, ~2k lines of third-party string parsing in
-Ring 0 on the panic path. Fork it into the estate like every other third-party
-source, or record the exemption deliberately.
+kernel names only itself; a killed program is reported as file and offset, and
+one userland naming service shares the kernel's lookup and demangling code.
+The kernel keeps its own ELF reader, `toyos-elf`: the orchestrator's reading
+of the owner's crate ruling of the same day, "if it makes sense we wrote our
+own elf parser or aml interpreter due to security or other important reasons
+we do it". ELF parsing is already a pure crate that forbids unsafe and is
+tested against a crafted corpus, and the symbol machinery moved onto it in the
+2026-08-15 consolidation. What is left: the kernel stops naming a program's
+addresses (`resolve_user_symbol` in `kernel/src/process.rs`); the per-spawn
+table `read_backtrace_table` builds in `kernel/src/loader/symbols.rs`, and the
+copy each task carries, are deleted; a userland service names a reported file
+and offset; and `rustc-demangle`'s standing is decided. It is an unforked
+crates.io dependency, ~2k lines of third-party string parsing in Ring 0 on the
+panic path: fork it into the estate like every other third-party source, or
+record the exemption deliberately. **Exit**: a guest test whose program dies
+of a fault reads the kernel's report as the program's file and the faulting
+offset, with no user symbol in it, and the userland service names the
+faulting function from that file and offset; no kernel source builds a backtrace
+table from a program's file; and `rustc-demangle` is forked or its exemption
+recorded.
 
 **Small trim to evaluate:** main-thread exit killing the process is kernel policy
 the review called unnecessary. A process could end when its last thread does, or

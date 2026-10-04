@@ -11,9 +11,9 @@ goes for NVMe Identify strings, USB INQUIRY strings, the GPT table and mount
 metadata. There is no `hw` and no `disk`, because there is nothing for them to
 read. Retention is the bulk of this work and it is blocked on nothing.
 
-`inspect` is a pillar of `issues/diagnostics/toyos-explains-itself.md`, which
-adds a `kernel.*` root rendered from the counters and a `supervisor.*` root
-from the program table.
+`inspect` is a pillar of `issues/diagnostics/toyos-explains-itself.md`. The
+orchestrator's plan, not ruled: a `kernel.*` root rendered from the counters
+and a `supervisor.*` root from the program table.
 
 On top of retention, in dependency order:
 

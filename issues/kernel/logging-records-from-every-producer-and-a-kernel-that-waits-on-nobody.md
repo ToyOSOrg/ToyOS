@@ -18,9 +18,9 @@ nor at a stop, which init sequences through `logd`'s flush. `logd` syncs on an
 alert or an interval, keeps every boot's first part, and holds each program
 to an allowance. Severity is an ordered ladder.
 
-The log is a pillar of `issues/diagnostics/toyos-explains-itself.md`,
-whose shared foundations its steps obey: step 1's ring is the reset-surviving
-region's, and step 2's keys are how a program writes an event.
+The log is a pillar of `issues/diagnostics/toyos-explains-itself.md`. The
+orchestrator's plan, not ruled: step 1's ring is the reset-surviving region's,
+and step 2's keys are how a program writes an event.
 
 What is left, in order:
 

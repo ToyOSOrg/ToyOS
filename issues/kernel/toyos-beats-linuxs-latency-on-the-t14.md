@@ -34,9 +34,11 @@ It samples: a window under 1 ms is seen only when a tick falls in it.
 **Ruled** (owner, 2026-10-03): **"131 µs"**. ToyOS must beat Linux's worst
 delay on the other seven CPUs, 131 µs, not cpu4's one-off 2.9 ms event.
 
-**Exit**: each step's exit is met, in the file the step names, and on the T14
-the longest lateness of a 1 kHz timer's interrupt on each CPU reads under
-131 µs, and of the thread it wakes under Linux's longest on those seven CPUs. Nothing takes that reading of ToyOS today:
+**Exit**: each step's exit is met, in the file the step names, and on the T14,
+with every CPU spawning `/bin/true` as under Linux's 131 µs reading, the
+longest lateness of a 1 kHz timer's interrupt on each CPU reads under 131 µs,
+and of the thread it wakes under Linux's loaded longest on those seven CPUs,
+503 µs. Nothing takes that reading of ToyOS today:
 `latency_wake` reads one thread's p99 and `mask_windows` each CPU's longest
 masked windows. Two files owe it: step 2 of
 `issues/diagnostics/nothing-in-the-machine-can-read-the-trace-ring.md`, a

@@ -51,8 +51,11 @@ writes its own, and the battery comes first (his direction of `0ee814f5a`).
   T14's ACPI tables; the whole tables stay out of the tree, read only by a
   check run outside it.
 - **"full clean room write with the spec"**: the AML interpreter is written
-  from the ACPI specification. uACPI and ACPICA are run only as black-box
-  oracles, and whoever writes the interpreter never reads their source.
+  from the ACPI specification.
+
+The orchestrator's reading of the clean-room ruling, not his: uACPI and
+ACPICA are run only as black-box oracles, and whoever writes the interpreter
+never reads their source.
 
 **Stage 1: ACPI mode, its SCI served in userland.** The switch to ACPI mode,
 and a userland server that claims the SCI, handles the power button, a
@@ -62,3 +65,5 @@ flat on every CPU over the interval the firmware issue's exit defines, and a
 press of the power button stops the machine cleanly, through ToyOS's own
 power-off path (`SYS_SHUTDOWN`), and the boot's log records the press and that
 stop, and each EC query number once with its count: a T14 row reads them there.
+A second T14 row kills the server and reads `SCI_EN` clear in `PM1_CNT`
+afterwards, the kernel having written `ACPI_DISABLE` to `SMI_CMD`.

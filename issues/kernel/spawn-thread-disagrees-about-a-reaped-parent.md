@@ -47,9 +47,11 @@ Found while extracting the lifecycle's decisions into what is now `kernel/pure/p
 (2026-08-24), which is what made the two spellings of one lookup visible: they
 are now one function asked twice, and the callers still disagree about its
 `NoSuchProcess` answer.
-`kernel::proclife::interleave::tests::a_thread_exit_that_outlived_its_entry_still_leaves`
-holds the schedule that reaches the state at `thread_exit`. **It reaches it by
-routing rather than by running**: the model's `retire` takes a thread off every
-CPU, so no schedule it can enumerate has a live thread arriving at a syscall
-body with its entry gone. That gap is what leaves this file's question open —
-the model cannot exhibit the state the kernel would have to survive.
+`toyos_proclife::interleave::tests::a_thread_exit_that_outlived_its_entry_still_leaves`
+held the schedule that reached the state at `thread_exit` until `fa1e3254d`
+deleted it with the reaper, and it reached it by routing rather than by
+running: the model's `retire` took a thread off every CPU, so no schedule it
+enumerated had a live thread arriving at a syscall body with its entry gone,
+the state the kernel would have to survive. Whether the model in
+`kernel/pure/proclife/interleave.rs` that replaced it reaches that state is
+unread.

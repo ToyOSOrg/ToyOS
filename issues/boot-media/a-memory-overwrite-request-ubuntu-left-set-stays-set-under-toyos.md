@@ -34,6 +34,6 @@ value it found; where the firmware defines none, it makes no `SetVariable`
 call under that GUID. A guest test on a fresh OVMF variable store planted with
 1 reads 0 after the loader's pass, and one planted with nothing finds no
 variable under the GUID; deleting the write reds the first, and an
-unconditional write reds the second. On the T14, a boot that follows Ubuntu
+unconditional write reds the second. On the T14, a boot that finds it set
 logs the 1 it found, and a black-box record sealed by a forced reset of that
 boot is read by the next.

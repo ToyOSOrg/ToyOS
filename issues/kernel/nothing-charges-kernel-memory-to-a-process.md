@@ -23,9 +23,7 @@ user-string copy has a ceiling. What survives is the *accounting*, which nothing
 has touched, plus one item: peak memory is written by two paths that overwrite
 each other.
 
-Accounting is a pillar of `issues/diagnostics/toyos-explains-itself.md`:
-a process's counts and the machine's per-category counters are two sums of
-the same charges.
+Accounting is a pillar of `issues/diagnostics/toyos-explains-itself.md`.
 
 Blocked on nothing. Two things worth knowing before it is restarted, because
 both cost a day to discover:

@@ -28,13 +28,13 @@ it, and `the_t14s_facts_are_linuxs_reading_of_it` holds `T14`'s `feat_ctl`
 to 0x3A's. **Mutation**: an added reading off by one bit reds the test that
 reads it. **Oracle**: that Linux.
 
-## The counters' oracle, read 2026-10-03
+## Linux's counter readings, read 2026-10-03
 
-The T14's hardware counters (`issues/diagnostics/toyos-explains-itself.md`)
-have no independent oracle but this Linux. Run as root under Ubuntu's
-`6.8.0-142-generic` from 16:22:37 UTC, one after the other; each output below
-is whole but for trailing blanks, and none was read by a test yet: the
-counters' host test reads them when it lands.
+The orchestrator takes this Linux as the one independent oracle for the T14's
+hardware counters (`issues/diagnostics/toyos-explains-itself.md`). Run as root
+under Ubuntu's `6.8.0-142-generic` from 16:22:37 UTC, one after the other;
+each output below is whole but for trailing blanks. No test reads them yet:
+the T14 row the umbrella track's exit names does.
 
 Idle, 60 s: `turbostat --quiet --interval 10 --num_iterations 6 --show
 Core,CPU,Avg_MHz,Busy%,Bzy_MHz,TSC_MHz,IRQ,SMI,CPU%c1,CPU%c6,CPU%c7,CoreTmp,PkgTmp,Pkg%pc2,Pkg%pc3,Pkg%pc6,Pkg%pc7,Pkg%pc8,Pkg%pc9,Pk%pc10,PkgWatt,CorWatt`.

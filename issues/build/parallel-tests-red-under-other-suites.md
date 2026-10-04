@@ -70,7 +70,7 @@ changes.
 - **`netd_connection_caps`** — retired 2026-09-04, green 5 of 5 beside a full
   fast tier.
 - **`metal_sim_pointer_churn`** — observed once, on a host carrying three other
-  suites *and* a `kernel-sim` run. Not investigated. Still
+  suites *and* a `toyos-sched-sim` run. Not investigated. Still
   `Sched::Parallel`.
 - **`dump_nmi_probe`** — retired 2026-09-04, green 3 of 3 beside a full fast
   tier. `4ad8875` made it `Sched::Serial`,
