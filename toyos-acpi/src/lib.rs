@@ -27,7 +27,8 @@ use toyos_bootmap::DirectMapEnd;
 pub use dsdt::{s5_slp_typ, S5};
 pub use ecdt::{ecdt, Ec, EcRefused, Register, ECDT_NEEDED};
 pub use fadt::{
-    century_of, dsdt_address, fixed_hardware, iapc_boot_arch, psci, reset_register, rtc_century,
+    century_of, dsdt_address, fixed_hardware, iapc_boot_arch, pm1a_control, psci, reset_register,
+    rtc_century,
     Century, Field, FixedHardware, FixedRefused, PowerButton, Psci, Reset, CMOS_RAM,
     FADT_FOR_FIXED_HARDWARE, FADT_FOR_RESET, FADT_PM1A_CNT_BLK, FADT_X_DSDT,
 };

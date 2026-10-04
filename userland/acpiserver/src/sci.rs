@@ -15,15 +15,12 @@ pub enum Event {
     PowerButton,
     /// The embedded controller's GPE.
     Ec,
-    /// A GPE the namespace runs.
-    Runtime(u16),
 }
 
 /// What this server enabled, and so serves.
 pub struct Served {
     pub power_button: bool,
     pub ec_gpe: Option<u16>,
-    pub runtime: Vec<u16>,
 }
 
 /// An event enabled and set that this server never enabled: the firmware, or
@@ -52,7 +49,6 @@ pub fn events(served: &Served, pm1: (u16, u16), gpe0: &[(u8, u8)]) -> Result<Vec
             let n = (byte * 8 + bit) as u16;
             events.push(match n {
                 n if served.ec_gpe == Some(n) => Event::Ec,
-                n if served.runtime.contains(&n) => Event::Runtime(n),
                 n => return Err(Unserved::Gpe(n)),
             });
         }
@@ -69,17 +65,16 @@ mod tests {
     use super::*;
 
     fn served() -> Served {
-        Served { power_button: true, ec_gpe: Some(0x6e), runtime: vec![0x09] }
+        Served { power_button: true, ec_gpe: Some(0x6e) }
     }
 
     #[test]
     fn a_press_and_the_controllers_gpe_are_both_read_off_one_sci() {
         let mut gpe0 = [(0u8, 0u8); 16];
         gpe0[0x6e / 8] = (1 << (0x6e % 8), 1 << (0x6e % 8));
-        gpe0[1] = (0b10, 0b10);
         assert_eq!(
             events(&served(), (PWRBTN | 1, PWRBTN), &gpe0),
-            Ok(vec![Event::PowerButton, Event::Runtime(0x09), Event::Ec]),
+            Ok(vec![Event::PowerButton, Event::Ec]),
             "a status bit whose enable is clear (the timer's) is no event"
         );
     }
@@ -90,8 +85,6 @@ mod tests {
         assert_eq!(events(&served(), (0xFFFF, 0), &gpe0), Ok(vec![]));
     }
 
-    /// Fix 2 of the design's roast: an enabled bit nothing here enabled is a
-    /// writer behind this server's back, said by its number.
     #[test]
     fn an_enabled_event_outside_the_served_set_is_refused_by_name() {
         let mut gpe0 = [(0u8, 0u8); 16];

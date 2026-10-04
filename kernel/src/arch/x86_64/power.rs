@@ -63,10 +63,9 @@ pub fn init_reset(rsdp_addr: u64) {
 /// Record S5 soft-off, or say by name why this machine has none; it keeps
 /// booting either way. After the IDT, so a fault in the DSDT walk is reported.
 pub fn init_off(rsdp_addr: u64) {
-    const FADT_FOR_POWER: usize = toyos_acpi::FADT_PM1A_CNT_BLK + size_of::<u32>();
     const FADT_FOR_X_DSDT: usize = toyos_acpi::FADT_X_DSDT + size_of::<u64>();
 
-    let fadt = match toyos_acpi::find_table(direct_phys(), rsdp_addr, b"FACP", FADT_FOR_POWER) {
+    let fadt = match toyos_acpi::find_table(direct_phys(), rsdp_addr, b"FACP", toyos_acpi::FADT_FOR_FIXED_HARDWARE) {
         Ok(table) => table,
         Err(e) => {
             log!("ACPI: FADT unusable: {e:?} — no soft-off, shutdown will halt instead");
@@ -74,15 +73,12 @@ pub fn init_off(rsdp_addr: u64) {
         }
     };
 
-    let Some(block) = fadt.u32_at(toyos_acpi::FADT_PM1A_CNT_BLK).filter(|&block| block != 0) else {
-        log!("ACPI: FADT has no PM1a control block — no soft-off");
-        return;
+    let block = match toyos_acpi::pm1a_control(&fadt) {
+        Ok(block) => block,
+        Err(refused) => return log!("ACPI: no PM1a control block this kernel writes ({refused:?}) — no soft-off"),
     };
-    let Some(run) = u16::try_from(block).ok().and_then(|pm1a| Ports::new(pm1a, 2)) else {
-        log!("ACPI: FADT puts the PM1a control block at {block:#x}, past the 16-bit port space — no soft-off");
-        return;
-    };
-    let pm1a = run.first();
+    let pm1a = block.port;
+    let run = Ports::new(pm1a, block.len).expect("pm1a_control bounded the block by the port space");
     match pio::declare("the PM1a control block", run) {
         Ok(declared) => PM1A_CNT.set(declared),
         Err(why) => {

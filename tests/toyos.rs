@@ -3496,10 +3496,7 @@ const SMI_SPAN_NS: u64 = 4_444_000_000;
 /// the one its `control_regs:` line holds. The boot ran in ACPI mode, which
 /// `/system/bin/acpiserver`'s claim put it in: `idle0` reads after the
 /// kernel's one write to `SMI_CMD`, and from there to `spin`, at least
-/// [`SMI_SPAN_NS`] apart, no CPU's SMI count moves
-/// (`issues/the-t14s-firmware-interrupts-every-cpu-every-2-2-s-under-toyos.md`'s
-/// exit). Linux on the same machine read none in 120 s; in legacy mode the
-/// count rose alike on every CPU, about every 2.2 s. Across the spin every
+/// [`SMI_SPAN_NS`] apart, no CPU's SMI count moves. Across the spin every
 /// CPU's MPERF ran nine tenths of its stamp or more [e], a CPU in C0 the whole
 /// span: MPERF counts at the TSC's rate there (SDM Vol. 3B, "Hardware
 /// Coordination Feedback"); and every CPU's busy frequency reached the lowest
@@ -3680,8 +3677,7 @@ fn acpi_events_on_metal(back: &metal::Readback) -> Result<(), String> {
          handed over in legacy mode",
     )?;
     log.must_say(
-        "acpiserver: armed: power button served, embedded controller on GPE 0x6e at 0x66/0x62, 0 GPE(s) \
-         the namespace runs",
+        "acpiserver: armed: power button served, embedded controller on GPE 0x6e at 0x66/0x62",
     )?;
     let lines: Vec<&str> = log.text().lines().filter(|l| l.contains("acpiserver")).collect();
     if let Some(fired) = lines.iter().find(|l| l.contains("panicked")) {
@@ -3732,8 +3728,7 @@ fn acpi_press_on_metal(back: &metal::Readback) -> Result<(), String> {
 /// mode, and taken.
 fn acpi_off_on_metal(back: &metal::Readback) -> Result<(), String> {
     back.log().must_say(
-        "acpiserver: armed: power button served, embedded controller on GPE 0x6e at 0x66/0x62, 0 GPE(s) \
-         the namespace runs",
+        "acpiserver: armed: power button served, embedded controller on GPE 0x6e at 0x66/0x62",
     )?;
     powered_off_in_acpi_mode(back)
 }

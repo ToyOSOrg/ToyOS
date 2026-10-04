@@ -220,7 +220,6 @@ pub struct FixedHardware {
     pub acpi_enable: u8,
     pub acpi_disable: u8,
     pub pm1a_event: toyos_abi::acpi::Block,
-    pub pm1a_control: toyos_abi::acpi::Block,
     /// [`toyos_abi::acpi::Block::NONE`] where the machine has no GPE0 block.
     pub gpe0: toyos_abi::acpi::Block,
     pub power_button: PowerButton,
@@ -257,9 +256,55 @@ pub enum FixedRefused {
     SmiCmd(u32),
 }
 
-/// The FADT's fixed-hardware blocks, each checked against its `X_` twin
-/// where the table holds one; lengths are the `*_LEN` bytes', never a
-/// Generic Address Structure's bit width, which firmware leaves 0.
+/// Whether the table holds the `X_` fields [`fixed_hardware`] reads.
+fn has_x<P: Phys>(fadt: &Table<P>) -> bool {
+    fadt.len() >= FADT_X_END && matches!(fadt.byte(SDT_REVISION), Some(r) if r >= 2)
+}
+
+/// A block's address, the 32-bit field's or its `X_` twin's.
+fn address<P: Phys>(fadt: &Table<P>, field: Field, legacy_at: usize, x_at: usize) -> Result<u64, FixedRefused> {
+    let short = FixedRefused::Short { len: fadt.len() };
+    let legacy = fadt.u32_at(legacy_at).ok_or(short)?;
+    if !has_x(fadt) {
+        return Ok(u64::from(legacy));
+    }
+    let space = fadt.byte(x_at).ok_or(short)?;
+    let extended = fadt.u64_at(x_at + 4).ok_or(short)?;
+    if extended == 0 {
+        return Ok(u64::from(legacy));
+    }
+    if space != SPACE_SYSTEM_IO {
+        return Err(FixedRefused::NotSystemIo { field, space });
+    }
+    if legacy != 0 && u64::from(legacy) != extended {
+        return Err(FixedRefused::Disagrees { field, legacy, extended });
+    }
+    Ok(extended)
+}
+
+fn block(field: Field, address: u64, len: u8) -> Result<toyos_abi::acpi::Block, FixedRefused> {
+    match u16::try_from(address) {
+        Ok(port) if u32::from(port) + u32::from(len) <= 0x1_0000 => Ok(toyos_abi::acpi::Block { port, len: u16::from(len) }),
+        _ => Err(FixedRefused::PastPorts { field, address }),
+    }
+}
+
+/// The PM1a control block, checked against its `X_` twin where the table
+/// holds one; its length the `PM1_CNT_LEN` byte's.
+pub fn pm1a_control<P: Phys>(fadt: &Table<P>) -> Result<toyos_abi::acpi::Block, FixedRefused> {
+    // §4.8.1: a control block is at least two bytes.
+    let len = fadt.byte(FADT_PM1_CNT_LEN).ok_or(FixedRefused::Short { len: fadt.len() })?;
+    let at = address(fadt, Field::Pm1aControl, FADT_PM1A_CNT_BLK, FADT_X_PM1A_CNT_BLK)?;
+    if at == 0 || len < 2 {
+        return Err(FixedRefused::Length { field: Field::Pm1aControl, len });
+    }
+    block(Field::Pm1aControl, at, len)
+}
+
+/// The FADT's fixed-hardware event blocks, each checked against its `X_`
+/// twin where the table holds one; lengths are the `*_LEN` bytes', never a
+/// Generic Address Structure's bit width, which firmware leaves 0. The
+/// control block is [`pm1a_control`]'s.
 pub fn fixed_hardware<P: Phys>(fadt: &Table<P>) -> Result<FixedHardware, FixedRefused> {
     use toyos_abi::acpi::Block;
     let short = FixedRefused::Short { len: fadt.len() };
@@ -267,34 +312,9 @@ pub fn fixed_hardware<P: Phys>(fadt: &Table<P>) -> Result<FixedHardware, FixedRe
     if flags & HW_REDUCED_ACPI != 0 {
         return Err(FixedRefused::HardwareReduced);
     }
-    let x = fadt.len() >= FADT_X_END && matches!(fadt.byte(SDT_REVISION), Some(r) if r >= 2);
+    let x = has_x(fadt);
     let u32_at = |at| fadt.u32_at(at).ok_or(short);
     let byte = |at| fadt.byte(at).ok_or(short);
-    // A block's address, the 32-bit field's or its `X_` twin's.
-    let address = |field, legacy_at, x_at: usize| -> Result<u64, FixedRefused> {
-        let legacy = u32_at(legacy_at)?;
-        if !x {
-            return Ok(u64::from(legacy));
-        }
-        let space = byte(x_at)?;
-        let extended = fadt.u64_at(x_at + 4).ok_or(short)?;
-        if extended == 0 {
-            return Ok(u64::from(legacy));
-        }
-        if space != SPACE_SYSTEM_IO {
-            return Err(FixedRefused::NotSystemIo { field, space });
-        }
-        if legacy != 0 && u64::from(legacy) != extended {
-            return Err(FixedRefused::Disagrees { field, legacy, extended });
-        }
-        Ok(extended)
-    };
-    let block = |field, address: u64, len: u8| -> Result<Block, FixedRefused> {
-        match u16::try_from(address) {
-            Ok(port) if u32::from(port) + u32::from(len) <= 0x1_0000 => Ok(Block { port, len: u16::from(len) }),
-            _ => Err(FixedRefused::PastPorts { field, address }),
-        }
-    };
 
     // Named in either field, in whatever space.
     let present = |legacy_at, x_at: usize| -> Result<bool, FixedRefused> {
@@ -308,20 +328,14 @@ pub fn fixed_hardware<P: Phys>(fadt: &Table<P>) -> Result<FixedHardware, FixedRe
     }
 
     // §4.8.1: a PM1 event block is a status and an enable register of at least
-    // two bytes each, a control block at least two bytes, and a GPE block a
-    // status half and an enable half.
+    // two bytes each, and a GPE block a status half and an enable half.
     let pm1_event_len = byte(FADT_PM1_EVT_LEN)?;
-    let pm1_event = address(Field::Pm1aEvent, FADT_PM1A_EVT_BLK, FADT_X_PM1A_EVT_BLK)?;
+    let pm1_event = address(fadt, Field::Pm1aEvent, FADT_PM1A_EVT_BLK, FADT_X_PM1A_EVT_BLK)?;
     if pm1_event == 0 || pm1_event_len < 4 || pm1_event_len % 2 != 0 {
         return Err(FixedRefused::Length { field: Field::Pm1aEvent, len: pm1_event_len });
     }
-    let pm1_control_len = byte(FADT_PM1_CNT_LEN)?;
-    let pm1_control = address(Field::Pm1aControl, FADT_PM1A_CNT_BLK, FADT_X_PM1A_CNT_BLK)?;
-    if pm1_control == 0 || pm1_control_len < 2 {
-        return Err(FixedRefused::Length { field: Field::Pm1aControl, len: pm1_control_len });
-    }
     let gpe0_len = byte(FADT_GPE0_BLK_LEN)?;
-    let gpe0 = address(Field::Gpe0, FADT_GPE0_BLK, FADT_X_GPE0_BLK)?;
+    let gpe0 = address(fadt, Field::Gpe0, FADT_GPE0_BLK, FADT_X_GPE0_BLK)?;
     let gpe0 = match (gpe0, gpe0_len) {
         (0, _) => Block::NONE,
         (_, len) if len == 0 || len % 2 != 0 => return Err(FixedRefused::Length { field: Field::Gpe0, len }),
@@ -338,7 +352,6 @@ pub fn fixed_hardware<P: Phys>(fadt: &Table<P>) -> Result<FixedHardware, FixedRe
         acpi_enable: byte(FADT_ACPI_ENABLE)?,
         acpi_disable: byte(FADT_ACPI_DISABLE)?,
         pm1a_event: block(Field::Pm1aEvent, pm1_event, pm1_event_len)?,
-        pm1a_control: block(Field::Pm1aControl, pm1_control, pm1_control_len)?,
         gpe0,
         power_button: if flags & PWR_BUTTON == 0 { PowerButton::Fixed } else { PowerButton::ControlMethod },
     })

@@ -6,9 +6,8 @@ opened: 2026-10-03
 
 # ToyOS runs the machine in ACPI mode and interprets its AML
 
-ToyOS leaves the machine in the mode its firmware hands over: nothing writes
-`ACPI_ENABLE` to `SMI_CMD`, and nothing handles an SCI. The T14's firmware
-hands it over in legacy mode, which interrupts every CPU every 2.2 s
+The T14's firmware hands the machine over in legacy mode, which interrupts
+every CPU every 2.2 s
 (`issues/the-t14s-firmware-interrupts-every-cpu-every-2-2-s-under-toyos.md`).
 
 Nothing in the tree evaluates the AML in a machine's DSDT or SSDTs. What
@@ -86,11 +85,13 @@ afterwards, the kernel having written `ACPI_DISABLE` to `SMI_CMD`.
 extra table so the T14 switches to ACPI mode now." Stage 1 reads the
 embedded controller from the ECDT, and that path is a stopgap: it is deleted
 the day the interpreter reads the controller from the DSDT's own device. A
-machine without an ECDT stays in legacy mode until then, refused by name, as a
-machine whose power button is a control method device does; such a machine
-keeps its firmware interrupts, and this stage's exit cannot be met on it. A
-machine its firmware hands over in ACPI mode is served whatever it has, since
-nothing is written.
+machine without an ECDT stays in legacy mode until then; such a machine keeps
+its firmware interrupts, and this stage's exit cannot be met on it.
+
+Stage 1's design, not a ruling: a machine whose power button is a control
+method device stays in legacy mode too, refused by name; and a machine its
+firmware hands over in ACPI mode is served whatever it has, since nothing is
+written.
 
 **Stage: power-off through the server** (the orchestrator's placement of "Yes,
 one path"). The ACPI server evaluates `\_S5` and powers the machine off.

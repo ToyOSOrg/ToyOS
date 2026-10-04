@@ -33,12 +33,6 @@ lines are quoted on #681 (comment 5962619169; the boot itself in comment
 
 What differs, as far as anything has read:
 
-- ToyOS performs no ACPI enable handshake: `rg -n -i
-  'smi_cmd|acpi_enable|sci_en|smi_en|0xb2\b' kernel/src bootloader/src` finds
-  only the xHCI legacy handoff's own `USBLEGCTLSTS` enables
-  (`kernel/src/drivers/xhci/legacy.rs`), and nothing reads `PM1a_CNT.SCI_EN`
-  or the chipset's `SMI_EN`. Both controllers' `USBLEGCTLSTS` read
-  `0xe0000000`, no enable set, before the handoff wrote it.
 - Under that Linux, read as root from `/sys/firmware/acpi/tables/FACP` and
   `/dev/port` with nothing written (comment 5962768253): the FADT's
   `SMI_CMD=0xb2` and `ACPI_ENABLE=0xf0`; `PM1a_CNT` (port 0x1804) `0x0001`,
@@ -65,6 +59,14 @@ then 30 s with a spinning thread on every CPU:
     `gpe0_sts` byte 13 reads `00` at line 123 and `40` at every report from
     line 298 through line 759. The boot with nothing written shows it in none
     of its 25 reports (comment 5966982609).
+
+**In ACPI mode, read by the `counters` T14 row** at `ee6aadecb` (#713), its
+boot's `/system/bin/acpiserver` claim having written `ACPI_ENABLE`: `acpi: ACPI
+mode: ACPI_ENABLE 0xf0 written to SMI_CMD 0xb2, SCI_EN set 14868ns after;
+cpu0's SMI count 4818 before the write and 4819 after`, every CPU's count 4819
+at `idle0`, and `8 cpus, SMI flat on each over 12218 ms` from `idle0` to
+`spin`. **What of the exit that leaves unmet**: the row's second read is at
+`spin`, not at the stop's report.
 
 The `mask-windows` kernel prints such a window as its CPU's own: cpu4's
 4,720,498 ns in the sixth of #649's `mask_windows` boots at `72f16e39a`, and cpu0's 4,725,822 in `649-r6/3-idle-halt-counted`

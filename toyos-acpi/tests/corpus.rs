@@ -13,7 +13,7 @@ use toyos_abi::boot::RootBridgeWindow;
 use toyos_abi::acpi::Block;
 use toyos_acpi::{
     dsdt_address, ecam_base, ecdt, find_table, fixed_hardware, hpet_base, iapc_boot_arch, isa_line,
-    madt_entries, memory_windows, psci, reset_register, rtc_century, s5_slp_typ, sci_line, Century,
+    madt_entries, memory_windows, pm1a_control, psci, reset_register, rtc_century, s5_slp_typ, sci_line, Century,
     EcRefused, Field, FixedRefused, Line, MadtEntry, MadtHalt, Phys, Polarity, PowerButton, Psci,
     Register, Reset, SourceOverride, Table, TableError, Trigger, ECDT_NEEDED,
     FADT_FOR_FIXED_HARDWARE, MADT_ENTRIES, MAX_TABLE_LEN, S5,
@@ -400,6 +400,7 @@ fn no_single_byte_mutation_of_a_real_table_panics_or_runs_away() {
                         let _ = reset_register(&t);
                         let _ = psci(&t);
                         let _ = fixed_hardware(&t);
+                        let _ = pm1a_control(&t);
                     }
                     if let Ok(t) = find_table(m, rsdp_at, b"APIC", MADT_ENTRIES) {
                         // Bounded by the table's own length, so a walk that has
@@ -673,7 +674,7 @@ fn an_s5_package_past_the_declared_length_is_not_read() {
 
 /// A revision-6 FADT of 276 bytes naming q35's fixed hardware in both forms,
 /// for a test to break one field of.
-fn fixed(edit: impl FnOnce(&mut [u8])) -> Result<toyos_acpi::FixedHardware, FixedRefused> {
+fn crafted(edit: impl FnOnce(&mut [u8])) -> Vec<u8> {
     let mut t = vec![0u8; 276];
     let mut put = |at: usize, bytes: &[u8]| t[at..at + bytes.len()].copy_from_slice(bytes);
     put(46, &[9, 0]);
@@ -692,16 +693,26 @@ fn fixed(edit: impl FnOnce(&mut [u8])) -> Result<toyos_acpi::FixedHardware, Fixe
     put(172, &gas(0x604));
     put(220, &gas(0x620));
     edit(&mut t);
-    let t = sdt(b"FACP", 6, &t[36..]);
+    sdt(b"FACP", 6, &t[36..])
+}
+
+fn fixed(edit: impl FnOnce(&mut [u8])) -> Result<toyos_acpi::FixedHardware, FixedRefused> {
+    let t = crafted(edit);
     let regions: &[(u64, &[u8])] = &[(TABLE_AT, &t)];
-    let fadt = Table::open(Machine { regions }, TABLE_AT, b"FACP", FADT_FOR_FIXED_HARDWARE).expect("FADT");
-    fixed_hardware(&fadt)
+    fixed_hardware(&Table::open(Machine { regions }, TABLE_AT, b"FACP", FADT_FOR_FIXED_HARDWARE).expect("FADT"))
+}
+
+fn control(edit: impl FnOnce(&mut [u8])) -> Result<Block, FixedRefused> {
+    let t = crafted(edit);
+    let regions: &[(u64, &[u8])] = &[(TABLE_AT, &t)];
+    pm1a_control(&Table::open(Machine { regions }, TABLE_AT, b"FACP", FADT_FOR_FIXED_HARDWARE).expect("FADT"))
 }
 
 #[test]
 fn the_crafted_fixed_hardware_decodes_before_any_field_is_broken() {
     let decoded = fixed(|_| {}).expect("the unbroken table");
     assert_eq!(decoded.pm1a_event, Block { port: 0x600, len: 4 });
+    assert_eq!(control(|_| {}), Ok(Block { port: 0x604, len: 2 }));
     assert_eq!(decoded.gpe0, Block { port: 0x620, len: 16 });
     assert_eq!(decoded.power_button, PowerButton::Fixed);
 }
@@ -720,11 +731,11 @@ fn fixed_hardware_this_kernel_does_not_serve_is_refused_by_name() {
         "a PM1a event block in memory"
     );
     assert_eq!(
-        fixed(|t| t[172 + 4] = 0x08),
+        control(|t| t[172 + 4] = 0x08),
         Err(FixedRefused::Disagrees { field: Field::Pm1aControl, legacy: 0x604, extended: 0x608 })
     );
     assert_eq!(fixed(|t| t[88] = 2), Err(FixedRefused::Length { field: Field::Pm1aEvent, len: 2 }));
-    assert_eq!(fixed(|t| t[89] = 0), Err(FixedRefused::Length { field: Field::Pm1aControl, len: 0 }));
+    assert_eq!(control(|t| t[89] = 0), Err(FixedRefused::Length { field: Field::Pm1aControl, len: 0 }));
     assert_eq!(fixed(|t| t[92] = 5), Err(FixedRefused::Length { field: Field::Gpe0, len: 5 }));
     assert_eq!(
         fixed(|t| {

@@ -36,7 +36,7 @@
 //!
 //! Lock order: [`process::PROCESS_TABLE`] alone.
 
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering::AcqRel, Ordering::Acquire, Ordering::Relaxed};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering::AcqRel, Ordering::Acquire, Ordering::Relaxed, Ordering::Release};
 
 use toyos_quiesce::{must_stop, Record, Sweep, ThreadId};
 use kernel::sched::task::WaitClass;
@@ -110,12 +110,6 @@ pub fn claim_the_shutdown() -> bool {
 
 static CLAIMED: AtomicBool = AtomicBool::new(false);
 
-/// Whether this boot's stop has been claimed: from then on no userland thread
-/// is let back into Ring 3.
-pub fn stopping() -> bool {
-    CLAIMED.load(Acquire)
-}
-
 /// What the stop's caller parks on between two sweeps.
 static PROGRESS: Watch = Watch::new();
 
@@ -174,7 +168,7 @@ pub fn stop() -> Record {
         // moment the stop ended, and every line between here and the record's
         // own would open more.
         let (in_flight, begun) = crate::block::userland_operations();
-        return Record {
+        let record = Record {
             sweep: swept,
             elapsed_ms: elapsed / 1_000_000,
             budget_ms: PARK.nanos() / 1_000_000,
@@ -183,8 +177,18 @@ pub fn stop() -> Record {
             in_flight,
             begun,
         };
+        STOPPED.store(record.stopped_the_machine(), Release);
+        return record;
     }
 }
+
+/// Whether this boot's stop ended with every userland thread but its caller
+/// stopped.
+pub fn userland_stopped() -> bool {
+    STOPPED.load(Acquire)
+}
+
+static STOPPED: AtomicBool = AtomicBool::new(false);
 
 /// Mark every parked thread but the caller and count the rest.
 ///

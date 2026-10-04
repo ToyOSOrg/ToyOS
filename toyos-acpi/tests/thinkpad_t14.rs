@@ -3,7 +3,7 @@
 //! same machine (`fixtures/thinkpad-t14/SOURCE`).
 //!
 //! **An extract, never the tables**: each table here is laid out from the
-//! fields `fixed_hardware`, `ecdt` and `sci_line` read, at their offsets and
+//! fields `fixed_hardware`, `pm1a_control`, `ecdt` and `sci_line` read, at their offsets and
 //! with the machine's own bytes, and zeros everywhere else, then sealed. The
 //! whole tables are checked against these fields outside the tree.
 
@@ -12,7 +12,7 @@ mod common;
 use common::{entry, madt, sdt, Machine};
 use toyos_abi::acpi::Block;
 use toyos_acpi::{
-    ecdt, fixed_hardware, madt_entries, sci_line, Ec, FixedHardware, Line, MadtEntry,
+    ecdt, fixed_hardware, madt_entries, pm1a_control, sci_line, Ec, FixedHardware, Line, MadtEntry,
     Polarity, PowerButton, SourceOverride, Table, Trigger, ECDT_NEEDED, FADT_FOR_FIXED_HARDWARE,
     MADT_ENTRIES,
 };
@@ -92,11 +92,11 @@ fn the_t14s_fadt_names_the_blocks_linux_served_its_sci_through() {
             acpi_enable: 0xf0,
             acpi_disable: 0xf1,
             pm1a_event: Block { port: 0x1800, len: 4 },
-            pm1a_control: Block { port: 0x1804, len: 2 },
             gpe0: Block { port: 0x1860, len: 32 },
             power_button: PowerButton::Fixed,
         })
     );
+    assert_eq!(pm1a_control(&fadt), Ok(Block { port: 0x1804, len: 2 }));
 }
 
 /// Linux: `ACPI: EC: EC_CMD/EC_SC=0x66, EC_DATA=0x62` and `ACPI: EC: GPE=0x6e`.

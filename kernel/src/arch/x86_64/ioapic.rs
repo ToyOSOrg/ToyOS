@@ -81,27 +81,28 @@ impl core::fmt::Debug for RouteError {
 }
 
 struct Unit {
-    mmio: Mmio,
     /// The MADT's id for this chip, which is also the name a DMAR device scope gives its source id.
     id: u8,
     gsi_base: u32,
     entries: u32,
-    /// The index/data pair.
-    registers: Masked<()>,
+    registers: Masked<Window>,
     /// Each pin's entry's low word as `route` wrote it, unmasked; 0 for a
     /// pin never routed.
     lows: Box<[AtomicU32]>,
 }
 
-impl Unit {
-    fn read(&self, _pair: &crate::sync::LockGuard<'_, ()>, index: u32) -> u32 {
-        self.mmio.write_u32(IOREGSEL, index);
-        self.mmio.read_u32(IOWIN)
+/// A unit's index/data pair, reached only through its lock.
+struct Window(Mmio);
+
+impl Window {
+    fn read(&self, index: u32) -> u32 {
+        self.0.write_u32(IOREGSEL, index);
+        self.0.read_u32(IOWIN)
     }
 
-    fn write(&self, _pair: &crate::sync::LockGuard<'_, ()>, index: u32, value: u32) {
-        self.mmio.write_u32(IOREGSEL, index);
-        self.mmio.write_u32(IOWIN, value);
+    fn write(&self, index: u32, value: u32) {
+        self.0.write_u32(IOREGSEL, index);
+        self.0.write_u32(IOWIN, value);
     }
 }
 
@@ -126,16 +127,15 @@ pub fn init(madt: &MadtInfo) {
         // 0x20 covers IOREGSEL and IOWIN; every entry is reached through those two.
         let mmio = crate::mm::paging::map_mmio(entry.address as u64, 0x20, MmioPolicy::Uncacheable);
         let mut unit = Unit {
-            mmio,
             id: entry.id,
             gsi_base: entry.gsi_base,
             entries: 0,
-            registers: Masked::new(()),
+            registers: Masked::new(Window(mmio)),
             lows: Box::new([]),
         };
         let irq = IrqGuard::close();
         let pair = unit.registers.lock(&irq);
-        let ver = unit.read(&pair, REG_VER);
+        let ver = pair.read(REG_VER);
         let version = ver & 0xFF;
         let entries = ((ver >> 16) & 0xFF) + 1;
         // version and entries both come from REG_VER: 0x00/0xFF is what undecoded MMIO returns, not a real chip.
@@ -152,9 +152,9 @@ pub fn init(madt: &MadtInfo) {
         }
         let mut masked = 0;
         for n in 0..entries {
-            unit.write(&pair, REG_REDTBL + 2 * n, RTE_MASKED);
+            pair.write(REG_REDTBL + 2 * n, RTE_MASKED);
             // Read back rather than trust the write: an unmasked entry is the hazard this loop exists to prevent.
-            if unit.read(&pair, REG_REDTBL + 2 * n) & RTE_MASKED != 0 {
+            if pair.read(REG_REDTBL + 2 * n) & RTE_MASKED != 0 {
                 masked += 1;
             }
         }
@@ -274,12 +274,12 @@ pub fn route(
         let irq = IrqGuard::close();
         let pair = unit.registers.lock(&irq);
         // Destination first: writing the low word last means it is never briefly armed at the old destination.
-        unit.write(&pair, REG_REDTBL + 2 * n + 1, high);
-        unit.write(&pair, REG_REDTBL + 2 * n, low | RTE_MASKED);
+        pair.write(REG_REDTBL + 2 * n + 1, high);
+        pair.write(REG_REDTBL + 2 * n, low | RTE_MASKED);
         unit.lows[n as usize].store(low, Ordering::Relaxed);
         // Delivery status (12) and remote IRR (14) are the chip's, not ours.
-        let read_low = unit.read(&pair, REG_REDTBL + 2 * n) & !(RTE_DELIVERY_STATUS | RTE_REMOTE_IRR);
-        (read_low, unit.read(&pair, REG_REDTBL + 2 * n + 1))
+        let read_low = pair.read(REG_REDTBL + 2 * n) & !(RTE_DELIVERY_STATUS | RTE_REMOTE_IRR);
+        (read_low, pair.read(REG_REDTBL + 2 * n + 1))
     };
     let wrote_low = low | RTE_MASKED;
     if read_low != wrote_low || read_high != high {
@@ -308,6 +308,6 @@ pub fn set_masked(gsi: Gsi, masked: bool) -> Result<(), RouteError> {
     // Under the pair, which `route` stored it under.
     let low = unit.lows[n as usize].load(Ordering::Relaxed);
     assert!(low != 0, "ioapic: gsi {} masked or unmasked before it was routed", gsi.0);
-    unit.write(&pair, REG_REDTBL + 2 * n, if masked { low | RTE_MASKED } else { low });
+    pair.write(REG_REDTBL + 2 * n, if masked { low | RTE_MASKED } else { low });
     Ok(())
 }

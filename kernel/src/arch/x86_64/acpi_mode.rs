@@ -44,8 +44,7 @@ use crate::time::{Deadline, Duration};
 pub const ROW: usize = 1;
 
 /// How long the firmware has to set `SCI_EN` after the enable: one that has
-/// not answered in this will not. The T14 answers in 2.13 ms
-/// (`issues/the-t14s-firmware-interrupts-every-cpu-every-2-2-s-under-toyos.md`).
+/// not answered in this will not.
 const HANDOVER: Duration = Duration::from_secs(3);
 /// How often the wait reads `SCI_EN`, parked in between.
 const POLL: Duration = Duration::from_millis(1);
@@ -87,8 +86,8 @@ pub fn init(rsdp_addr: u64) {
         Ok(fixed) => fixed,
         Err(refused) => return log!("acpi: no ACPI row — the FADT's fixed hardware is none this kernel serves: {refused:?}"),
     };
-    let Some(control) = super::power::pm1a_control().filter(|c| c.ports().first() == fixed.pm1a_control.port) else {
-        return log!("acpi: no ACPI row — the PM1a control block {:#x} is not the one this kernel declared", fixed.pm1a_control.port);
+    let Some(control) = super::power::pm1a_control() else {
+        return log!("acpi: no ACPI row — no PM1a control block declared");
     };
     let smi_cmd = match fixed.smi_cmd.map(|port| pio::declare("SMI_CMD", Ports::one(port))) {
         None => None,
@@ -269,7 +268,9 @@ const PM1_STATUS: u16 = 1 << 0 | 1 << 4 | 1 << 5 | 1 << 8 | 1 << 9 | 1 << 10 | 1
 /// did not take; once userland has stopped, as [`quiet`] is.
 pub fn pm1_events() -> String {
     let Some(hardware) = hardware() else { return "no ACPI row, so no PM1 event block read".into() };
-    let events = pio::taken_back(run(hardware.fixed.pm1a_event));
+    let Some(events) = pio::taken_back(run(hardware.fixed.pm1a_event)) else {
+        return "the PM1 event block unread: the stop left userland running".into();
+    };
     let half = hardware.fixed.pm1a_event.len / 2;
     format!("PM1 status {:#06x} under enable {:#06x}", cpu::inw(events.port(0)), cpu::inw(events.port(half)))
 }
@@ -278,7 +279,9 @@ pub fn pm1_events() -> String {
 /// the power-off's, on a machine in ACPI mode, once userland has stopped.
 pub fn quiet() {
     let Some(hardware) = hardware() else { return };
-    let events = pio::taken_back(run(hardware.fixed.pm1a_event));
+    let Some(events) = pio::taken_back(run(hardware.fixed.pm1a_event)) else {
+        panic!("power: the stop left userland running, so the events its ACPI holder enabled cannot be quieted for S5");
+    };
     let half = hardware.fixed.pm1a_event.len / 2;
     // SAFETY: the PM1a event block the FADT names, taken back from a holder that no longer runs.
     unsafe {
@@ -288,7 +291,7 @@ pub fn quiet() {
     if hardware.fixed.gpe0.len == 0 {
         return;
     }
-    let gpe = pio::taken_back(run(hardware.fixed.gpe0));
+    let gpe = pio::taken_back(run(hardware.fixed.gpe0)).expect("the PM1 block was taken back after the same stop");
     let half = hardware.fixed.gpe0.len / 2;
     for byte in 0..half {
         // SAFETY: the GPE0 block, taken back as the PM1 block is; its status bits clear on a one.

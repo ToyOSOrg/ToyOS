@@ -4,7 +4,7 @@ kind: defect
 opened: 2026-10-04
 ---
 
-# The T14's power-button event trails EC query 0x28 by up to 17 s
+# The T14's power-button event came up to 17 s after EC query 0x28
 
 On the T14 in ACPI mode, `/system/bin/acpiserver` takes embedded-controller
 query 0x28 on the boots a hand pressed the power button on, and the fixed
@@ -29,9 +29,18 @@ and the log was read off a copy of the stick's log partition.
 Query 0x28 marks the press only by inference: it appears on those three boots
 and on no unattended boot of the same branch (`acpicase`, `testcases`,
 `testcases-hold`, `testcases-off`, the `counters` boots), which take 0x4f
-alone. The host recorded no time of the press, so whether the button went down
-at the query or at the event, and whether the owner pressed once, is not in
-any record. The lag predates the merge of `origin/main` at `c4ab2b1e1`.
+alone.
+
+**Two readings fit the record, and none rules either out**:
+
+- **A lag**: one press raised 0x28, and the controller or the firmware held
+  `PWRBTN_STS` back for 10 and 17 s.
+- **A lost first press**: a first press raised 0x28 and no `PWRBTN_STS`, and a
+  second press was served. The owner's account of the `b3b9ccd69` boot, in
+  #713's body, is that nothing happened at his press and a second press about
+  5 s later turned the machine off at once. No account of the `ee6aadecb`
+  boot's presses was recorded, and the host recorded no press's time on any
+  of the three.
 
 No table of the T14 defines `_Q28`: a byte search of its DSDT and every SSDT,
 dynamic ones included, captured before its wipe and read outside the tree,
@@ -39,10 +48,12 @@ finds `_Q4F` in the DSDT and no `_Q28`. Stage 1 runs no AML, so the server
 takes 0x28 and serves nothing. What the controller waits on before it raises
 `PWRBTN_STS`, if anything, is unread.
 
-Owned by the AML interpreter stages of
-`issues/toyos-runs-the-machine-in-acpi-mode-and-interprets-its-aml.md`, whose
-interpreter runs the methods the controller's queries name.
+Owned by stage 1 of
+`issues/toyos-runs-the-machine-in-acpi-mode-and-interprets-its-aml.md`,
+whose exit asks that a press stop the machine: a first press that leaves only
+0x28 leaves that exit unmet on the T14.
 
 **Exit**: `acpi_power_button_pressed` reds where the server's power-button
 line comes more than one second, a policy bound, after query 0x28's
-first-sighting line, and it passes on the T14.
+first-sighting line, and it passes on the T14 on a boot whose one press's host
+time is recorded.

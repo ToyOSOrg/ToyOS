@@ -109,11 +109,12 @@ pub fn holder(ports: Ports) -> Option<&'static str> {
     FIXED.iter().find(|(_, fixed)| fixed.0.overlaps(ports)).map(|&(name, _)| name).or_else(|| RUNTIME.lock().holder(ports))
 }
 
-/// A run some row grants, taken back by the kernel once every userland
-/// thread has stopped: the power-off's, and nobody else's.
-pub fn taken_back(ports: Ports) -> Declared {
-    assert!(crate::quiesce::stopping(), "pio: a granted run taken back while userland runs");
-    Declared(ports)
+/// A run some row grants, taken back by the kernel once this boot's stop has
+/// stopped every userland thread but its caller, which never returns to Ring
+/// 3: the power-off's, and nobody else's. `None` after a stop that fell short,
+/// whose holder may still run.
+pub fn taken_back(ports: Ports) -> Option<Declared> {
+    crate::quiesce::userland_stopped().then_some(Declared(ports))
 }
 
 /// A [`Declared`] kept where a later reader finds it; empty until set.

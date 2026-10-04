@@ -8,9 +8,9 @@
 //! again.
 //!
 //! **At start** every fixed and general-purpose event is disabled and its
-//! status cleared, then the power button, the embedded controller's GPE and
-//! [`aml::runtime_gpes`] are enabled, the controller's backlog is drained, and
-//! the SCI acknowledged: a press after the clear latches and is served, one
+//! status cleared, then the power button and the embedded controller's GPE
+//! are enabled, the controller's backlog is drained, and the SCI
+//! acknowledged: a press after the clear latches and is served, one
 //! before it is lost.
 //!
 //! **Each SCI** is read off both blocks ([`sci::events`]): a press stops the
@@ -73,7 +73,6 @@ fn main() {
     let served = Served {
         power_button: info.flags & FIXED_POWER_BUTTON != 0,
         ec_gpe: info.has_ec().then_some(info.ec_gpe),
-        runtime: aml::runtime_gpes(),
     };
     let mut server = Server {
         dev,
@@ -107,7 +106,7 @@ impl Server {
         if self.served.power_button {
             out16(pm1.enable(), PWRBTN);
         }
-        for n in self.served.ec_gpe.into_iter().chain(self.served.runtime.iter().copied()) {
+        if let Some(n) = self.served.ec_gpe {
             let (_, enable) = bytes(self.info.gpe0).nth(usize::from(n / 8)).expect("the kernel bounded every GPE by the block");
             out8(enable, in8(enable) | 1 << (n % 8));
         }
@@ -117,13 +116,12 @@ impl Server {
         }
         self.dev.ack().expect("acpiserver: the claim's acknowledgement");
         println!(
-            "acpiserver: armed: power button {}, embedded controller {}, {} GPE(s) the namespace runs",
+            "acpiserver: armed: power button {}, embedded controller {}",
             if self.served.power_button { "served" } else { "not the fixed one, so not served" },
             match self.served.ec_gpe {
                 Some(gpe) => format!("on GPE {gpe:#x} at {:#x}/{:#x}", self.info.ec_command.port, self.info.ec_data.port),
                 None => "none".into(),
             },
-            self.served.runtime.len(),
         );
     }
 
@@ -185,29 +183,14 @@ impl Server {
                 Event::Ec => {
                     // The controller's GPE is an edge: cleared before the drain,
                     // so an event the drain does not see raises it again.
-                    self.clear_gpe(self.info.ec_gpe);
+                    let n = self.info.ec_gpe;
+                    let (status, _) = bytes(self.info.gpe0).nth(usize::from(n / 8)).expect("the kernel bounded every GPE by the block");
+                    out8(status, 1 << (n % 8));
                     self.drain();
-                }
-                Event::Runtime(n) => {
-                    let gpe = aml::gpe(n);
-                    if gpe.trigger == aml::Trigger::Edge {
-                        self.clear_gpe(n);
-                    }
-                    match gpe.disposition {
-                        aml::Disposition::Unserved => {}
-                    }
-                    if gpe.trigger == aml::Trigger::Level {
-                        self.clear_gpe(n);
-                    }
                 }
             }
         }
         self.run_queued();
-    }
-
-    fn clear_gpe(&self, n: u16) {
-        let (status, _) = bytes(self.info.gpe0).nth(usize::from(n / 8)).expect("the kernel bounded every GPE by the block");
-        out8(status, 1 << (n % 8));
     }
 
     fn press(&mut self) -> ! {
@@ -236,9 +219,7 @@ impl Server {
 
     fn run_queued(&mut self) {
         while let Some(q) = self.queued.pop_front() {
-            match aml::query(q) {
-                aml::Disposition::Unserved => {}
-            }
+            aml::query(q);
             let count = self.counts.entry(q).or_insert(0);
             *count += 1;
             self.counted += 1;
