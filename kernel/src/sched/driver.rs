@@ -92,7 +92,6 @@ const SWEEP_EVERY_NS: u64 = 25_000_000;
 #[cfg(feature = "heap-sweep")]
 static NEXT_SWEEP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-/// Take the sweep if this CPU is the one that claims the slot.
 #[cfg(feature = "heap-sweep")]
 fn maybe_sweep(now: Nanos) {
     let due = NEXT_SWEEP.load(Ordering::Relaxed);
@@ -969,7 +968,6 @@ fn stack_depth(payload: &KernelPayload) {
         }
         used = KERNEL_STACK_SIZE - rung;
     }
-    // Recorded and not logged. See [`DEEPEST`].
     DEEPEST.fetch_max(used, Ordering::Relaxed);
 }
 
