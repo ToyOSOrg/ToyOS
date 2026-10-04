@@ -31,14 +31,14 @@
 //! here keeps a write the server acknowledged and never made durable: that is
 //! what `Fsync` is for.
 
-use toyos_abi::syscall::{SyscallError, MAX_BADGE, MAX_SERVICE_NAME};
+use toyos_abi::syscall::{self, SyscallError, MAX_BADGE, MAX_SERVICE_NAME};
 
 use crate::ipc::{Connection, IpcError};
 use crate::ipc_payload;
 use crate::namespace::Namespace;
 use crate::shm::SharedMemory;
 use crate::volatile::Window;
-use crate::{AsHandle, Pipe, RawHandle};
+use crate::{AsHandle, OwnedHandle, Pipe, RawHandle};
 
 /// What a directory capability's namespace name begins with.
 pub const CAPABILITY_PREFIX: &str = "fs:";
@@ -548,8 +548,17 @@ fn stat_of(reply: &Reply) -> Stat {
 /// A server that refuses a connection as it takes it answers before it lets
 /// go, so a hello that finds it gone still reads why.
 pub fn hello(conn: &Connection, window: &SharedMemory) -> Result<Reply, SyscallError> {
-    let lent = window.share()?;
-    match conn.send_with_handles(&[lent], HELLO, &Request::new()).map_err(transport) {
+    let lent = OwnedHandle(window.share()?);
+    // Not `send_with_handles`, which cannot say which send was refused: a
+    // refused handle send leaves `lent` in this table, and it closes as it drops.
+    let sent = match syscall::handle_send(conn.as_handle(), &[lent.raw()]) {
+        Ok(()) => {
+            lent.into_raw();
+            conn.send(HELLO, &Request::new()).map_err(transport)
+        }
+        Err(e) => Err(e),
+    };
+    match sent {
         Ok(()) | Err(SyscallError::Gone) => {}
         Err(e) => return Err(e),
     }

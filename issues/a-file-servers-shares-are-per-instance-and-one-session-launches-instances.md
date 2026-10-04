@@ -34,6 +34,4 @@ direct children) is the obvious unmeasured load.
 A server's bounds are shared per session, so that one session holding all its
 programs may hold — through as many launches as its `starts` allow — leaves
 another session's first connection and first stream on that server answered,
-shown by a test that does exactly that. The views track's stage 4
-(`issues/every-program-sees-only-the-files-it-was-given.md`) is where per-session
-bounds are built.
+shown by a test that does exactly that.

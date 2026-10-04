@@ -16,7 +16,8 @@
 //!   and let go as the server takes them, so the first to end is not the
 //!   first opened, which the server would otherwise let go first, at its
 //!   handshake timeout; a hello on it, which finds the server gone, reads
-//!   why. Last, because the server reaps the ones this job drops only when it
+//!   why, and every later one keeps none of the windows it could not lend.
+//!   Last, because the server reaps the ones this job drops only when it
 //!   next reads them, and until then they are this instance's share.
 
 use std::fs;
@@ -28,6 +29,7 @@ use toyos::ipc::Connection;
 use toyos::poller::{Poller, READABLE};
 use toyos::shm::SharedMemory;
 use toyos_abi::syscall::SyscallError;
+use toyos_abi::RawHandle;
 
 const DIR: &str = "/home/fs_share";
 const OTHER: &str = "/home/fs_share/other";
@@ -137,6 +139,16 @@ fn main() {
         match hello(&opened[first], &window) {
             Err(SyscallError::ResourceExhausted) => println!("  a hello on a connection let go is told why"),
             other => red.push(format!("a hello on connection {first}, let go, was answered {:?}", other.map(|_| ()))),
+        }
+        // As many hellos as this process has handle slots: one that kept the
+        // window it could not lend would fill the table before the last.
+        let refused = (0..RawHandle::MAX_SLOTS)
+            .map(|_| hello(&opened[first], &window).map(|_| ()))
+            .enumerate()
+            .find(|(_, answer)| *answer != Err(SyscallError::Gone));
+        match refused {
+            None => println!("  {} hellos on a connection let go kept no window", RawHandle::MAX_SLOTS),
+            Some((i, answer)) => red.push(format!("hello {i} on connection {first}, let go, was answered {answer:?}")),
         }
     }
 
