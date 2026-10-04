@@ -11,6 +11,8 @@ toyos = { path = "../../toyos" }
 toyos-window = { path = "../../userland/toyos-window" }
 toyos-tco = { path = "../../toyos-tco" }
 toyos-inspect = { path = "../../toyos-inspect" }
+# The diary's decoder, for `trace_read` and `trace_flood`.
+toyos-trace = { path = "../../toyos-trace" }
 # The reader's asker, for `hda_client_stall`.
 inspect = { path = "../../userland/inspect" }
 libloading = { git = "https://github.com/ToyOSOrg/rust_libloading", branch = "toyos-sdk-0.12" }

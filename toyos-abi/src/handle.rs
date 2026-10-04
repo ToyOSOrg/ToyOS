@@ -152,11 +152,14 @@ impl Rights {
     /// Beside [`COUNTERS`](Self::COUNTERS), [`SYS_COUNTERS`] answers each
     /// CPU's `APERF` and `MPERF` — its frequency and busy fraction, the
     /// Hertzbleed power channel — and the kicks it took, the wake-ups that time
-    /// keystrokes. Admin tools hold it, `inspect` and `test-runner`; no
+    /// keystrokes. [`SYS_TRACE_READ`] answers, on this alone, when every
+    /// thread in the machine was woken, ran and parked, and on which CPU.
+    /// Admin tools hold it, `inspect`, `trace` and `test-runner`; no
     /// ordinary program and no toybox applet does while a manifest row grants
     /// a whole binary.
     ///
     /// [`SYS_COUNTERS`]: crate::syscall::SYS_COUNTERS
+    /// [`SYS_TRACE_READ`]: crate::syscall::SYS_TRACE_READ
     pub const TRACE: Rights = Rights(1 << 14);
 
     /// Every bit that has a caller. A wider set than this is a bug in whoever

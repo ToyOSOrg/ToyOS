@@ -1,0 +1,10 @@
+[package]
+name = "toyos-trace"
+description = "The diary's decoder: what a kernel trace record says, typed, when, and the line it prints as, pure."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# The record and its kinds, whose layout the ABI owns.
+toyos-abi = { path = "../toyos-abi" }

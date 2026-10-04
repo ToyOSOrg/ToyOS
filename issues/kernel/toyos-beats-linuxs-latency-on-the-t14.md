@@ -41,7 +41,7 @@ and of the thread it wakes under Linux's loaded longest on those seven CPUs,
 503 µs. Nothing takes that reading of ToyOS today:
 `latency_wake` reads one thread's p99 and `mask_windows` each CPU's longest
 masked windows. Two files owe it: step 2 of
-`issues/diagnostics/nothing-in-the-machine-can-read-the-trace-ring.md`, a
+`issues/diagnostics/the-diary-computes-no-lateness-and-records-no-slow-system-call.md`, a
 reader that computes timer and thread lateness from the ring, and
 `issues/hardware/no-program-measures-toyos-against-linux-on-one-machine.md`,
 one program that reads lateness past a 1 ms timer under both systems.

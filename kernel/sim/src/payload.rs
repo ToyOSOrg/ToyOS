@@ -89,4 +89,8 @@ pub struct SimCtx {
 impl SchedPayload for SimPayload {
     type Ctx = SimCtx;
     type ShareLock = SimShareLock;
+
+    fn name(&self) -> u64 {
+        self.key.0
+    }
 }

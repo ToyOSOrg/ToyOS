@@ -106,6 +106,12 @@ receives = ["netstack"]
 receives = ["netstack", "soundserver", "log", "compositor"]
 syscap = ["inventory", "counters", "trace"]
 
+# The kernel's diary: when every thread in the machine was woken, ran and
+# parked, which times every other program, so `trace` is all it holds and it
+# is an admin tool.
+[programs.trace]
+syscap = ["trace"]
+
 [programs.filepicker]
 service = true
 serves = ["filepicker"]

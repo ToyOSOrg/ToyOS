@@ -42,6 +42,7 @@ use super::ipc::{
 };
 use super::machine::{
     sys_counters, sys_device_inventory, sys_log_read, sys_reboot, sys_sched_info, sys_shutdown, sys_sysinfo,
+    sys_trace_read,
     MAX_INVENTORY_RECORDS,
 };
 #[cfg(feature = "test-actuators")]
@@ -464,6 +465,15 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             // it copies in the caller's cursor.
             sys_log_read(&ctx, RawHandle(a1 as u32), UserAddr::new(a2), &mut out, a4 as usize)
         }
+        SYS_TRACE_READ => {
+            let Some(bytes) = (a4 as usize).checked_mul(toyos_abi::trace::RECORD_BYTES) else {
+                return SyscallError::InvalidArgument.to_u64();
+            };
+            let Some(mut out) = ctx.user_bytes_mut(UserAddr::new(a3), bytes as u64) else {
+                return bad_addr;
+            };
+            sys_trace_read(&ctx, RawHandle(a1 as u32), UserAddr::new(a2), &mut out, a4 as usize)
+        }
         SYS_ACCEPT => sys_accept(RawHandle(a1 as u32)),
         SYS_HANDLE_SEND => {
             if a3 as usize > MAX_TRANSFER_HANDLES {
@@ -606,6 +616,10 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             // bound and its stale answer are the shipped paths.
             DA::COUNTERS_DEAF => crate::counters::deaf::stage(a2),
             DA::COUNTERS_HEAR => crate::counters::deaf::end(),
+            DA::TRACE_FLOOD => match Untrusted::new(a2).at_most(DA::TRACE_FLOOD_MOST) {
+                Ok(count) => crate::trace::flood(count),
+                Err(_) => SyscallError::InvalidArgument.to_u64(),
+            },
             _ => SyscallError::InvalidArgument.to_u64(),
         },
         SYS_SCHED_INFO => match ctx.copy_out(UserAddr::new(a1), &sys_sched_info()) {

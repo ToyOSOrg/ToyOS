@@ -70,6 +70,11 @@ pub struct KernelPayload {
 impl SchedPayload for KernelPayload {
     type Ctx = KernelCtx;
     type ShareLock = KernelLock<ShareState>;
+
+    /// The thread, as `TaskId::pack` packs it: what a diary record names.
+    fn name(&self) -> u64 {
+        self.id.pack()
+    }
 }
 
 /// State word values for `task_sched_state` (the `ps` column).

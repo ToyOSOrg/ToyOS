@@ -10,7 +10,7 @@ use crate::arch::percpu;
 use crate::scheduler::MAX_CPUS;
 
 /// Interrupt sources that drive scheduling; exhaustive, so a new variant requires updating every `match`.
-/// The discriminant is `trace::Kind::IrqDrain`'s top byte, pinned for the reason `Kind` is.
+/// The discriminant is `trace::Kind::IrqDrain`'s top byte.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum IrqSource {
     Xhci = 2,
