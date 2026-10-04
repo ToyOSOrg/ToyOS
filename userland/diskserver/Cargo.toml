@@ -1,5 +1,6 @@
 [package]
 name = "diskserver"
+description = "One NVMe controller driven from userland, its partitions served as toyos-blockring sessions; the library is what a client of a block service links."
 edition = "2024"
 license = "MIT OR Apache-2.0"
 

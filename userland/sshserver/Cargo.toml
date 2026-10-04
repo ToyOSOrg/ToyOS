@@ -1,5 +1,6 @@
 [package]
 name = "sshserver"
+description = "The machine's SSH server: a shell, a command, and files both ways over SFTP."
 edition = "2024"
 license = "MIT OR Apache-2.0"
 

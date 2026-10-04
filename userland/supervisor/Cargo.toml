@@ -1,5 +1,6 @@
 [package]
 name = "supervisor"
+description = "The one program the kernel starts: it builds every program's namespace and device claims from /system/etc/system.manifest and starts it."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
