@@ -47,12 +47,13 @@
 //! slow is the clock, RTF well below 1.0 is synthesis not keeping up.
 
 use std::fs::File;
-use std::io::{IsTerminal, Read, Write};
+use std::io::IsTerminal;
+use std::os::fd::AsFd;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use toyos_build::arch::Arch;
-use toyos_build::kernelconsole::Painter;
+use toyos_build::kernelconsole;
 
 /// The hardware shape QEMU presents to the guest.
 ///
@@ -290,20 +291,12 @@ pub fn launch(opts: &Options) {
         qemu.status().expect("failed to execute QEMU");
         return;
     }
+    // Unbuffered, so a write the terminal refuses is the relay's to wait out.
+    let mut terminal = File::from(std::io::stdout().as_fd().try_clone_to_owned().expect("this process's stdout"));
     let mut child = qemu.stdout(Stdio::piped()).spawn().expect("failed to execute QEMU");
-    let mut console = child.stdout.take().expect("QEMU's stdout is piped");
+    let console = child.stdout.take().expect("QEMU's stdout is piped");
     let relay = std::thread::spawn(move || {
-        let mut painter = Painter::default();
-        let mut buf = [0u8; 4096];
-        let mut out = std::io::stdout();
-        loop {
-            let n = console.read(&mut buf).expect("QEMU's console refused a read");
-            if n == 0 {
-                return;
-            }
-            out.write_all(&painter.pass(&buf[..n])).expect("the terminal refused the console");
-            out.flush().expect("the terminal refused the console");
-        }
+        kernelconsole::relay(console, &mut terminal).expect("the console's relay to the terminal")
     });
     child.wait().expect("failed to wait for QEMU");
     relay.join().expect("the console relay");

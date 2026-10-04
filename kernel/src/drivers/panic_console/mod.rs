@@ -39,8 +39,8 @@ const MAX_ROWS: usize = 96;
 const SNAPSHOT_CAP: usize = 32 * 1024;
 const _: () = assert!(SNAPSHOT_CAP >= MAX_ROWS * MAX_COLS);
 
-/// One [`Mark`] a nibble per byte `text` can hold — worst case is a message of nothing but newlines, one line per byte.
-const MARK_BYTES: usize = SNAPSHOT_CAP.div_ceil(2);
+/// One two-bit [`Mark`] per byte `text` can hold — worst case is a message of nothing but newlines, one line per byte.
+const MARK_BYTES: usize = SNAPSHOT_CAP.div_ceil(4);
 
 /// How long Ctrl+Alt+D's report keeps the panel.
 const REPORT_HOLD: Budget = Budget::of(
@@ -103,51 +103,33 @@ struct FbCell(UnsafeCell<Fb>);
 // SAFETY: the panic path may take no lock; `PENDING` has one writer at a time.
 unsafe impl Sync for FbCell {}
 
-/// What a line's text is drawn in.
+/// What a cell is drawn in.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Ink {
+    /// A record's text below `Error`.
     Plain = 0,
-    Warn = 1,
-    Alert = 2,
+    /// An `Error` or `Alert` record's text.
+    Alert = 1,
     /// The head a record's first line opens with: its time, CPU and thread.
-    Stamp = 3,
+    Stamp = 2,
 }
 
-impl Ink {
-    /// A record's text: by its severity, and plain for a byte no severity is.
-    fn of(severity: Option<log::Severity>) -> Self {
-        match severity {
-            None | Some(log::Severity::Info) => Ink::Plain,
-            Some(log::Severity::Warn) => Ink::Warn,
-            Some(log::Severity::Error | log::Severity::Alert) => Ink::Alert,
-        }
-    }
-
-    fn from_bits(bits: u8) -> Self {
-        match bits & 3 {
-            0 => Ink::Plain,
-            1 => Ink::Warn,
-            2 => Ink::Alert,
-            _ => Ink::Stamp,
-        }
-    }
-}
-
-/// One line of a rendered log as its record made it: the ink of its text, and
-/// whether it opens the record and so carries the head. Read from the record,
-/// never inferred from the text.
+/// One line of a rendered log as its record made it: whether its text is in
+/// the alert ink, and whether it opens the record and so carries the head.
+/// Read from the record, never inferred from the text.
 #[derive(Clone, Copy)]
 struct Mark(u8);
 
 impl Mark {
-    const OPENS: u8 = 1 << 2;
+    const ALERT: u8 = 1;
+    const OPENS: u8 = 2;
 
-    fn new(ink: Ink, opens: bool) -> Self {
-        Self(ink as u8 | if opens { Self::OPENS } else { 0 })
+    fn new(alert: bool, opens: bool) -> Self {
+        Self(if alert { Self::ALERT } else { 0 } | if opens { Self::OPENS } else { 0 })
     }
 
     fn ink(self) -> Ink {
-        Ink::from_bits(self.0)
+        if self.0 & Self::ALERT != 0 { Ink::Alert } else { Ink::Plain }
     }
 
     fn opens(self) -> bool {
@@ -158,7 +140,7 @@ impl Mark {
 /// A screenful-and-then-some of rendered log, and each line's [`Mark`].
 struct Rendered {
     text: [u8; SNAPSHOT_CAP],
-    /// One nibble per line, counted back from the last — the buffer fills from its end.
+    /// Four marks a byte, one per line, counted back from the last — the buffer fills from its end.
     marks: [u8; MARK_BYTES],
     /// Bytes of `text` in use, at its end.
     len: usize,
@@ -201,9 +183,9 @@ struct View<'a> {
 impl View<'_> {
     /// Line `n`'s mark, counted from the first.
     fn mark(&self, n: usize) -> Mark {
-        let Some(from_end) = self.lines.checked_sub(n + 1) else { return Mark::new(Ink::Plain, false) };
-        let byte = self.marks.get(from_end / 2).copied().unwrap_or(0);
-        Mark(byte >> (from_end % 2 * 4) & 0xF)
+        let Some(from_end) = self.lines.checked_sub(n + 1) else { return Mark::new(false, false) };
+        let byte = self.marks.get(from_end / 4).copied().unwrap_or(0);
+        Mark(byte >> (from_end % 4 * 2) & 3)
     }
 }
 
@@ -225,12 +207,12 @@ impl log::read::RecordSink for Backfill<'_> {
 
         // Counted in newlines, not records: `paint` counts newlines, and a multi-line record (every panic) is more than one row.
         let lines = out.iter().filter(|&&byte| byte == b'\n').count();
-        let ink = Ink::of(record.severity());
+        let alert = record.severity().is_some_and(|s| s >= log::Severity::Error);
         for line in self.into.lines..self.into.lines + lines {
             // Counted from the end, so the record's first line is its last here.
-            let mark = Mark::new(ink, line + 1 == self.into.lines + lines);
-            if let Some(byte) = self.into.marks.get_mut(line / 2) {
-                *byte |= mark.0 << (line % 2 * 4);
+            let mark = Mark::new(alert, line + 1 == self.into.lines + lines);
+            if let Some(byte) = self.into.marks.get_mut(line / 4) {
+                *byte |= mark.0 << (line % 4 * 2);
             }
         }
         self.into.lines += lines;
@@ -978,7 +960,11 @@ impl Cell {
     }
 
     fn ink(self) -> Ink {
-        Ink::from_bits((self.0 >> 8) as u8)
+        match self.0 >> 8 {
+            0 => Ink::Plain,
+            1 => Ink::Alert,
+            _ => Ink::Stamp,
+        }
     }
 }
 
@@ -988,7 +974,6 @@ impl Cell {
 /// foreground threshold on its brightest channel.
 struct Palette {
     plain: u32,
-    warn: u32,
     alert: u32,
     stamp: u32,
 }
@@ -997,7 +982,6 @@ impl Palette {
     fn of(fb: &Fb) -> Self {
         Self {
             plain: rgb(fb, 0xFF, 0xFF, 0xFF),
-            warn: rgb(fb, 0xFF, 0xC8, 0x40),
             alert: rgb(fb, 0xFF, 0x6E, 0x6E),
             stamp: rgb(fb, 0x9E, 0x9E, 0x9E),
         }
@@ -1006,7 +990,6 @@ impl Palette {
     fn pixel(&self, ink: Ink) -> u32 {
         match ink {
             Ink::Plain => self.plain,
-            Ink::Warn => self.warn,
             Ink::Alert => self.alert,
             Ink::Stamp => self.stamp,
         }

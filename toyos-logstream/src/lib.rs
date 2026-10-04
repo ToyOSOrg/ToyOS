@@ -329,8 +329,8 @@ pub struct Head<'a> {
 /// no byte that acts ([`Text`]). The colour is this rendering's and never in
 /// the line it was read from.
 ///
-/// `head` is `None` for a kernel record's continuation, which wears the
-/// severity of the record above it.
+/// `head` is `None` for a kernel record's continuation, which [`Showing`]
+/// gives the severity of the record above it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Shown<'a> {
     pub head: Option<Head<'a>>,
@@ -338,10 +338,39 @@ pub struct Shown<'a> {
     pub text: &'a str,
 }
 
+/// The log's lines, in the order they came, as a screen shows each: a line
+/// that is no kernel record's and no program's continues the last kernel
+/// record and wears its severity, whatever program lines came between.
+#[derive(Clone, Copy, Debug)]
+pub struct Showing {
+    /// The last kernel record's severity.
+    severity: Severity,
+}
+
+impl Default for Showing {
+    fn default() -> Self {
+        Self { severity: Severity::Info }
+    }
+}
+
+impl Showing {
+    /// `line`, its newline optional, as a screen shows it.
+    pub fn line<'a>(&mut self, line: &'a str) -> Shown<'a> {
+        let line = line.strip_suffix('\n').unwrap_or(line);
+        let Some(shown) = shown(line) else {
+            return Shown { head: None, severity: self.severity, text: line };
+        };
+        if shown.head.is_some_and(|head| head.source == Source::Kernel) {
+            self.severity = shown.severity;
+        }
+        shown
+    }
+}
+
 /// Read a kernel record's line or a program's — in `/log`'s form or the
 /// console's, its newline optional — as a screen shows it; `None` for any
 /// other line, a record's continuation included.
-pub fn shown(line: &str) -> Option<Shown<'_>> {
+fn shown(line: &str) -> Option<Shown<'_>> {
     let line = line.strip_suffix('\n').unwrap_or(line);
     if let Some(said) = program_line(line) {
         let head = line[OPEN.len_utf8()..].split_once(CLOSE)?.0;
@@ -741,6 +770,25 @@ mod tests {
         assert_eq!(format!("{continued}"), format!("{ERROR}  0: kernel::panic{RESET}"));
         assert_eq!(shown("  0: kernel::panic"), None);
         assert_eq!(shown("BdsDxe: loading Boot0001"), None);
+    }
+
+    /// A continuation wears the severity of the kernel record above it, and a
+    /// program's line in between — of another severity — changes nothing.
+    #[test]
+    fn a_continuation_wears_its_kernel_records_severity_across_a_programs_line() {
+        let alert = format!("{}", kernel_record(Severity::Alert, 0, "PANIC: oops").tagged("kernel"));
+        let info = format!("{}", kernel_record(Severity::Info, 0, "spawn: x").tagged("kernel"));
+        let mut showing = Showing::default();
+        assert_eq!(showing.line("  before any record").severity, Severity::Info);
+        assert_eq!(showing.line(&alert).severity, Severity::Alert);
+        let program = showing.line("{1.234 warn soundserver} underrun\n");
+        assert_eq!((program.severity, program.head.map(|h| h.source)), (Severity::Warn, Some(Source::Program("soundserver"))));
+        let continued = showing.line("  0: kernel::panic\n");
+        assert_eq!(continued, Shown { head: None, severity: Severity::Alert, text: "  0: kernel::panic" });
+        assert_eq!(showing.line("{1.300 soundserver} resumed").severity, Severity::Info);
+        assert_eq!(showing.line("  1: kernel::main").severity, Severity::Alert);
+        showing.line(&info);
+        assert_eq!(showing.line("  more").severity, Severity::Info);
     }
 
     #[test]

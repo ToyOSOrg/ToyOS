@@ -15,7 +15,7 @@
 //!   first prompt — the kernel's records and every program's output — and
 //!   every program's line after as it is written, each under its program's
 //!   name and above the shell's unfinished line (`Log::draw`), as a terminal
-//!   shows a line of the log ([`toyos_logstream::Shown`]).
+//!   shows a line of the log ([`toyos_logstream::Showing`]).
 //! - **A fatal panic still takes the screen back.** `render` ignores
 //!   `SCREEN_OWNED_BY_USERLAND` entirely — only boot checkpoints honour it —
 //!   so the report paints over whatever this program drew.
@@ -37,7 +37,7 @@ use toyos::port::{self, Connector};
 use toyos::surface::{self, Delivery, Host, Notice};
 use toyos::{FramebufferDev, Keyboard, Pipe};
 use toyos_abi::syscall::{DeviceType, SyscallError};
-use toyos_logstream::{Lines, Severity, Shown, Source, READ, SERVED, SERVICE};
+use toyos_logstream::{Lines, Showing, Source, READ, SERVED, SERVICE};
 use window::Screen;
 
 const FONT: &str = "/system/share/fonts/JetBrainsMono-Regular-8x16.font";
@@ -71,8 +71,8 @@ struct Log {
     /// Whether the last kernel record was kept, which its continuation lines
     /// follow.
     drawing: bool,
-    /// The last kernel record's severity, which its continuation lines wear.
-    severity: Severity,
+    /// How each line is shown.
+    showing: Showing,
     /// Lines kept and not yet drawn.
     held: Vec<u8>,
 }
@@ -99,7 +99,7 @@ impl Log {
             handed,
             asked_ms,
             drawing: true,
-            severity: Severity::Info,
+            showing: Showing::default(),
             held: Vec::new(),
         })
     }
@@ -112,28 +112,22 @@ impl Log {
     /// it. A record after that is not drawn: it would put a `spawn:` and an
     /// `exit:` beside every command typed.
     ///
-    /// Each is drawn as [`toyos_logstream::Shown`] draws it; a continuation
-    /// wears the severity of the kernel record above it.
+    /// Each is drawn as [`Showing`] shows it.
     fn take(&mut self, bytes: &[u8]) {
-        let (asked_ms, drawing, severity, held) =
-            (self.asked_ms, &mut self.drawing, &mut self.severity, &mut self.held);
+        let (asked_ms, drawing, showing, held) =
+            (self.asked_ms, &mut self.drawing, &mut self.showing, &mut self.held);
         self.lines.push(bytes, |line, _| {
             let line = String::from_utf8_lossy(line);
-            let shown = match toyos_logstream::shown(&line) {
-                Some(shown) => {
-                    let keep = match shown.head.map(|head| head.source) {
-                        Some(Source::Program(tag)) => tag != OWN_TAG,
-                        _ => {
-                            *drawing = toyos_logstream::record_ms(&line).is_some_and(|ms| ms < asked_ms);
-                            *severity = shown.severity;
-                            *drawing
-                        }
-                    };
-                    keep.then_some(shown)
+            let shown = showing.line(&line);
+            let keep = match shown.head.map(|head| head.source) {
+                Some(Source::Program(tag)) => tag != OWN_TAG,
+                Some(Source::Kernel) => {
+                    *drawing = toyos_logstream::record_ms(&line).is_some_and(|ms| ms < asked_ms);
+                    *drawing
                 }
-                None => (*drawing).then_some(Shown { head: None, severity: *severity, text: &line }),
+                None => *drawing,
             };
-            if let Some(shown) = shown {
+            if keep {
                 held.extend_from_slice(format!("{shown}\n").as_bytes());
             }
         });

@@ -1465,8 +1465,8 @@ fn print_screen(name: &str, text: &str) {
 }
 
 /// Assert the colour decisions `text()` cannot see: the fill, the text of
-/// every row an `alert!` produced and of one row it did not, and the head the
-/// record's first row opens with.
+/// every row an `alert!` produced and of every row carrying a text it did not,
+/// and the head the record's first row opens with.
 ///
 /// **Both rows are named by their text, and that is the whole assertion.**
 /// Nothing in the message says "alert" any more — the colour is the record's
@@ -1490,17 +1490,13 @@ fn check_colors(
         return Err(format!("fill is {:?}, want {fill:?}", dump.fill()));
     }
     for alert_line in alert_lines {
-        let Some(fg) = dump.fg_of(alert_line) else {
-            return Err(format!("{alert_line:?} not on screen\n{}", dump.text()));
-        };
-        if fg != ALERT {
-            return Err(format!(
-                "{alert_line:?} drawn in {fg:?}, want alert {ALERT:?} — every row of an \
-                 `alert!` record wears its level, including the ones its message wrapped \
-                 or newlined onto\n{}",
-                dump.text()
-            ));
-        }
+        inked(
+            dump,
+            alert_line,
+            ALERT,
+            "every row of an `alert!` record wears its level, including the ones its message \
+             wrapped or newlined onto",
+        )?;
     }
     // The record's first row opens with its head, drawn dim and apart from its text.
     let opens = alert_lines.first().and_then(|line| dump.row_index(line));
@@ -1512,17 +1508,28 @@ fn check_colors(
             dump.text()
         ));
     }
-    let Some(fg) = dump.fg_of(plain_line) else {
-        return Err(format!(
-            "{plain_line:?} is not on screen, so there is no ordinary row to compare the \
-             highlight against\n{}",
-            dump.text()
-        ));
-    };
-    if fg != WHITE {
-        return Err(format!("ordinary text {plain_line:?} drawn in {fg:?}, want white {WHITE:?}"));
+    inked(
+        dump,
+        plain_line,
+        WHITE,
+        "an ordinary record's text is white on every row it fills, a row its first line \
+         wrapped onto included, which carries no head",
+    )
+}
+
+/// `needle`'s own cells are drawn in `want` on every row carrying it, and
+/// some row does.
+fn inked(dump: &screen::Ppm, needle: &str, want: [u8; 3], why: &str) -> Result<(), String> {
+    let rows = dump.fg_of(needle);
+    if rows.is_empty() {
+        return Err(format!("{needle:?} not on screen\n{}", dump.text()));
     }
-    Ok(())
+    match rows.iter().find(|(_, fg)| *fg != Some(want)) {
+        Some((row, fg)) => {
+            Err(format!("{needle:?} drawn in {fg:?} on {row:?}, want {want:?} — {why}\n{}", dump.text()))
+        }
+        None => Ok(()),
+    }
 }
 
 /// `tests/toyos-rust-tests`' binary that `tests/virtjobcase` runs as its job

@@ -7,11 +7,13 @@
 //! 16550 as well, and a loader line is read there. Where the kernel begins is
 //! the whole rule, so a firmware that writes nothing on the port reads the same.
 //! A terminal is shown that whole, and what is the kernel's in colour
-//! ([`Painter`]); the bytes the host reads are never coloured.
+//! ([`Painter`], [`relay`]); the bytes the host reads are never coloured.
 
 use std::borrow::Cow;
+use std::io::{self, Read, Write};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 
-use toyos_logstream::{Severity, Shown};
+use toyos_logstream::Showing;
 
 /// What every kernel record's console line opens with: `write_line` in
 /// `kernel/src/log/console.rs` tags each record `kernel`, and nothing before
@@ -51,23 +53,16 @@ impl KernelConsole {
 }
 
 /// The console as a terminal shows it: what comes before the kernel's first
-/// record as it came, and every line from it on as `toyos_logstream::Shown`
-/// draws it — the kernel's records and programs' lines by their heads, and a
-/// record's continuation in the severity of the record above it.
+/// record as it came, and every line from it on as [`Showing`] shows it.
 ///
 /// From the kernel's first record on the console carries whole lines only, so
 /// a line is held until it ends; before it, only what could still begin
 /// [`HEAD`] is.
+#[derive(Default)]
 pub struct Painter {
     begun: bool,
     held: Vec<u8>,
-    severity: Severity,
-}
-
-impl Default for Painter {
-    fn default() -> Self {
-        Self { begun: false, held: Vec::new(), severity: Severity::Info }
-    }
+    showing: Showing,
 }
 
 impl Painter {
@@ -91,15 +86,80 @@ impl Painter {
         }
         while let Some(end) = self.held.iter().position(|&b| b == b'\n') {
             let line: Vec<u8> = self.held.drain(..=end).collect();
-            let line = String::from_utf8_lossy(&line[..end]);
-            let line = line.strip_suffix('\r').unwrap_or(&line);
-            let shown =
-                toyos_logstream::shown(line).unwrap_or(Shown { head: None, severity: self.severity, text: line });
-            self.severity = shown.severity;
-            out.extend_from_slice(format!("{shown}\n").as_bytes());
+            self.show(&line[..end], &mut out);
+            out.push(b'\n');
         }
         out
     }
+
+    /// What the terminal is shown of what is still held once the console has
+    /// ended: a line a machine that stopped mid-line never finished, or the
+    /// bytes that could have begun [`HEAD`].
+    pub fn finish(mut self) -> Vec<u8> {
+        let held = std::mem::take(&mut self.held);
+        if !self.begun || held.is_empty() {
+            return held;
+        }
+        let mut out = Vec::new();
+        self.show(&held, &mut out);
+        out
+    }
+
+    fn show(&mut self, line: &[u8], out: &mut Vec<u8>) {
+        let line = String::from_utf8_lossy(line);
+        let line = line.strip_suffix('\r').unwrap_or(&line);
+        out.extend_from_slice(self.showing.line(line).to_string().as_bytes());
+    }
+}
+
+/// Relay `console` to `terminal` as a [`Painter`] shows it, until `console`
+/// ends and what the painter held is written.
+///
+/// **A write the terminal refuses as `WouldBlock` waits for it and goes on.**
+/// QEMU's stdio chardev makes its fd 0 non-blocking (`stdio_chr_open`,
+/// `chardev/char-stdio.c`), and a terminal's fd 0 and this process's stdout
+/// are one open file description, which is what holds the flag.
+pub fn relay(mut console: impl Read, terminal: &mut (impl Write + AsFd)) -> io::Result<()> {
+    let mut painter = Painter::default();
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = match console.read(&mut buf) {
+            Ok(n) => n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        if n == 0 {
+            return write_all(terminal, &painter.finish());
+        }
+        write_all(terminal, &painter.pass(&buf[..n]))?;
+    }
+}
+
+fn write_all(out: &mut (impl Write + AsFd), mut bytes: &[u8]) -> io::Result<()> {
+    while !bytes.is_empty() {
+        match out.write(bytes) {
+            Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+            Ok(n) => bytes = &bytes[n..],
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => writable(out.as_fd())?,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// Wait until `fd` takes a write. Unbounded, as a blocking write is: a
+/// terminal its user has stopped takes one when the user lets it.
+fn writable(fd: BorrowedFd<'_>) -> io::Result<()> {
+    let mut ready = libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLOUT, revents: 0 };
+    // SAFETY: one `pollfd`, which lives across the call.
+    if unsafe { libc::poll(&mut ready, 1, -1) } < 0 {
+        let e = io::Error::last_os_error();
+        if e.kind() != io::ErrorKind::Interrupted {
+            return Err(e);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -174,11 +234,9 @@ mod tests {
         let program = "{0.003 warn supervisor} supervisor: a program's line\n";
         let stream = format!("{FIRMWARE}{KERNEL}{alert}{program}");
         let mut want = String::from(FIRMWARE);
-        let mut severity = Severity::Info;
+        let mut showing = Showing::default();
         for line in format!("{KERNEL}{alert}{program}").lines() {
-            let shown = toyos_logstream::shown(line).unwrap_or(Shown { head: None, severity, text: line });
-            severity = shown.severity;
-            want.push_str(&format!("{shown}\n"));
+            want.push_str(&format!("{}\n", showing.line(line)));
         }
         assert!(want.contains("\x1b[91m  oops\x1b[0m\n"), "{want:?}");
         assert_eq!(painted(&stream, &[]), want);
@@ -187,6 +245,89 @@ mod tests {
         // What is held before the kernel is only what could begin its head.
         assert_eq!(painted(&FIRMWARE[..FIRMWARE.len() - 3], &[]), FIRMWARE[..FIRMWARE.len() - 3]);
         assert_eq!(painted("so [ker", &[]), "so ");
+    }
+
+    /// A console that ends mid-line — a machine that stopped while it spoke —
+    /// still shows its last line, and one that ends on what could have begun
+    /// the kernel's head still shows those bytes.
+    #[test]
+    fn a_console_that_ends_mid_line_shows_its_last_line() {
+        let cut = "[kernel 0.004 cpu0 alert tid=1] PANIC: triple fa";
+        let mut painter = Painter::default();
+        let mut out = painter.pass(format!("{KERNEL}{cut}").as_bytes());
+        out.extend(painter.finish());
+        let mut showing = Showing::default();
+        let want: String = KERNEL.lines().map(|line| format!("{}\n", showing.line(line))).collect();
+        let want = format!("{want}{}", showing.line(cut));
+        assert!(want.ends_with("\x1b[91mPANIC: triple fa\x1b[0m"), "{want:?}");
+        assert_eq!(String::from_utf8(out).expect("UTF-8"), want);
+
+        for early in ["so [ker", "loading\r"] {
+            let mut painter = Painter::default();
+            let mut out = painter.pass(early.as_bytes());
+            out.extend(painter.finish());
+            assert_eq!(out, early.as_bytes());
+        }
+    }
+
+    /// A pipe that refuses a write as `WouldBlock` once it is full, and says so
+    /// the first time it does.
+    struct Refusing {
+        pipe: std::io::PipeWriter,
+        refused: Option<std::sync::mpsc::Sender<()>>,
+    }
+
+    impl Write for Refusing {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            let wrote = self.pipe.write(bytes);
+            if wrote.as_ref().is_err_and(|e| e.kind() == io::ErrorKind::WouldBlock) {
+                self.refused.take().map(|said| said.send(()));
+            }
+            wrote
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.pipe.flush()
+        }
+    }
+
+    impl AsFd for Refusing {
+        fn as_fd(&self) -> BorrowedFd<'_> {
+            self.pipe.as_fd()
+        }
+    }
+
+    /// **A terminal that refuses a write as `WouldBlock` is waited for, and
+    /// shown every byte in order**: a burst far past a pipe's capacity into a
+    /// non-blocking pipe nobody reads until it has refused one.
+    #[test]
+    fn a_relay_waits_out_a_terminal_that_would_block() {
+        let mut stream = String::from(FIRMWARE);
+        for n in 0..20_000 {
+            stream.push_str(&format!("[kernel 1.{:03} cpu{} alert tid=3] frame {n}: kernel::panic\n", n % 1000, n % 8));
+            stream.push_str("  continued\n");
+        }
+        stream.push_str("[kernel 9.999 cpu0] cut mid-li");
+        let mut painter = Painter::default();
+        let mut want = painter.pass(stream.as_bytes());
+        want.extend(painter.finish());
+
+        let (mut reader, pipe) = std::io::pipe().expect("a pipe");
+        // SAFETY: `pipe` is an open descriptor this test owns.
+        let flags = unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_GETFL) };
+        // SAFETY: as above; the flags are its own and `O_NONBLOCK`.
+        assert!(flags >= 0 && unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } == 0);
+        let (said, refused) = std::sync::mpsc::channel();
+        let mut terminal = Refusing { pipe, refused: Some(said) };
+        let console = stream.into_bytes();
+        let relay = std::thread::spawn(move || relay(console.as_slice(), &mut terminal));
+
+        refused.recv_timeout(std::time::Duration::from_secs(60)).expect("the pipe never refused a write");
+        let mut shown = Vec::new();
+        reader.read_to_end(&mut shown).expect("the relay's output");
+        relay.join().expect("the relay").expect("the relay wrote everything");
+        assert!(shown.len() > 1 << 20, "{} bytes is no burst", shown.len());
+        assert!(shown == want, "the terminal was shown {} bytes, not the {} painted", shown.len(), want.len());
     }
 
     #[test]
