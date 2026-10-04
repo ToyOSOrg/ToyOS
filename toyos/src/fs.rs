@@ -324,7 +324,12 @@ impl Dir {
         let name = core::str::from_utf8(&self.name[..self.name_len]).map_err(|_| SyscallError::InvalidArgument)?;
         let conn = self.names.open(name)?;
         let lent = self.window.share()?;
-        conn.send_with_handles(&[lent], HELLO, &Request::new()).map_err(transport)?;
+        // A server that refuses a connection as it takes it answers before it
+        // lets go, so a hello that finds it gone still reads why.
+        match conn.send_with_handles(&[lent], HELLO, &Request::new()).map_err(transport) {
+            Ok(()) | Err(SyscallError::Gone) => {}
+            Err(e) => return Err(e),
+        }
         let reply = receive(&conn)?.result()?;
         self.writable = reply.value & RIGHT_WRITE != 0;
         self.conn = Some(conn);

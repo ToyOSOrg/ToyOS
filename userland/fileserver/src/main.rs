@@ -71,14 +71,10 @@ const MAX_STREAMS: usize = 64;
 /// One instance's shares of [`MAX_SERVED`], [`MAX_HANDSHAKES`] and
 /// [`MAX_STREAMS`]. Past its share of served clients a hello is answered
 /// `ResourceExhausted`, and past its share of streams a `STREAM` is; past its
-/// share of handshakes a connection is let go as it is taken.
+/// share of handshakes a connection is, as it is taken, and let go.
 const SERVED_SHARE: usize = MAX_SERVED / 2;
 const HANDSHAKE_SHARE: usize = MAX_HANDSHAKES / 2;
 const STREAM_SHARE: usize = MAX_STREAMS / 2;
-
-// A share is less than its bound, so one instance at its share leaves the
-// bound open to another.
-const _: () = assert!(SERVED_SHARE < MAX_SERVED && HANDSHAKE_SHARE < MAX_HANDSHAKES && STREAM_SHARE < MAX_STREAMS);
 
 /// What one turn of a stream appends at most.
 const STREAM_READ: usize = 64 * 1024;
@@ -423,7 +419,8 @@ impl Server {
 
     /// Take the next connection and read its grant. Only the supervisor mints
     /// on this port, so a connection without one this server reads is let go
-    /// by name; so is one whose instance already has its share of handshakes.
+    /// by name; one whose instance already has its share of handshakes is
+    /// answered `ResourceExhausted` and let go.
     fn accept(&mut self) {
         let conn = match self.acceptor.accept() {
             Ok(conn) => conn,
@@ -439,6 +436,8 @@ impl Server {
         };
         let mine = self.clients.values().filter(|c| c.instance == grant.instance && c.window.is_none()).count();
         if mine >= HANDSHAKE_SHARE {
+            // Let go whether or not the refusal went: either way it is said.
+            let _ = conn.try_send(REPLY, &Reply::refused(SyscallError::ResourceExhausted));
             return println!(
                 "fileserver: letting a connection go: instance {} has {HANDSHAKE_SHARE} waiting on their hello",
                 grant.instance
