@@ -15,16 +15,15 @@
 //!   on their hello: the ones past its share are answered `ResourceExhausted`
 //!   and let go as the server takes them, so the first to end is not the
 //!   first opened, which the server would otherwise let go first, at its
-//!   handshake timeout; that one reads why, and so does a client std connects
-//!   while the share is held. Last, because the
-//!   server reaps the ones this job drops only when it next reads them, and
-//!   until then they are this instance's share.
+//!   handshake timeout; a hello on it, which finds the server gone, reads
+//!   why. Last, because the server reaps the ones this job drops only when it
+//!   next reads them, and until then they are this instance's share.
 
 use std::fs;
 use std::process::Command;
 
 use toyos::endow;
-use toyos::fs::{Dir, Reply, Request, HELLO, O_CREATE, O_WRITE, REPLY, WINDOW_BYTES};
+use toyos::fs::{hello, Dir, O_CREATE, O_WRITE, WINDOW_BYTES};
 use toyos::ipc::Connection;
 use toyos::poller::{Poller, READABLE};
 use toyos::shm::SharedMemory;
@@ -46,16 +45,6 @@ const CEILING: usize = 1024;
 /// How long the first unanswered connection may take to end: a hang ceiling,
 /// never a measure.
 const HANG_NS: u64 = 60_000_000_000;
-
-fn hello(conn: &Connection, window: &SharedMemory) -> Result<Reply, String> {
-    let lent = window.share().map_err(|e| format!("the window would not share: {e:?}"))?;
-    conn.send_with_handles(&[lent], HELLO, &Request::new()).map_err(|e| format!("hello: {e:?}"))?;
-    let header = conn.recv_header().map_err(|e| format!("no reply to the hello: {e:?}"))?;
-    if header.msg_type != REPLY {
-        return Err(format!("the hello was answered with frame {}", header.msg_type));
-    }
-    conn.recv_payload(&header).map_err(|e| format!("the hello's reply: {e:?}"))
-}
 
 fn main() {
     let names = endow::namespace().expect("this job was endowed a namespace");
@@ -98,17 +87,16 @@ fn main() {
     let mut served = Vec::new();
     let refused = loop {
         if served.len() == CEILING {
-            break Ok(None);
+            break None;
         }
         let conn = names.open("fs:/home").expect("connect to /home");
         match hello(&conn, &window) {
-            Ok(reply) if reply.status == 0 => served.push(conn),
-            Ok(reply) => break Ok(Some(SyscallError::from_u64(reply.status))),
-            Err(why) => break Err(why),
+            Ok(_) => served.push(conn),
+            Err(e) => break Some(e),
         }
     };
     match refused {
-        Ok(Some(Some(SyscallError::ResourceExhausted))) => {
+        Some(SyscallError::ResourceExhausted) => {
             println!("  this instance is served {} more connections", served.len())
         }
         other => red.push(format!("after {} connections, the next hello was answered {other:?}", served.len())),
@@ -135,30 +123,21 @@ fn main() {
         poller.watch(conn, READABLE, i as u64);
     }
     let mut ended = Vec::new();
-    poller.wait(1, HANG_NS, |token| ended.push(token as usize));
+    // Two, so the server had let the first of them go whole before the second
+    // was answered: it takes one connection at a time.
+    poller.wait(2, HANG_NS, |token| ended.push(token as usize));
     ended.sort_unstable();
     match ended.first() {
         None => red.push(format!("none of {UNANSWERED} unanswered connections ended")),
         Some(0) => red.push(format!("the first unanswered connection ended first, with {ended:?}")),
         Some(_) => println!("  unanswered connections past the share ended first: {ended:?}"),
     }
+    // So this hello finds the server gone, and reads what it was answered.
     if let Some(&first) = ended.first() {
-        let conn = &opened[first];
-        let said = conn.recv_header().map_err(|e| format!("{e:?}")).and_then(|h| {
-            let reply: Reply = conn.recv_payload(&h).map_err(|e| format!("{e:?}"))?;
-            Ok((h.msg_type, SyscallError::from_u64(reply.status)))
-        });
-        match said {
-            Ok((REPLY, Some(SyscallError::ResourceExhausted))) => println!("  a connection let go was told why"),
-            other => red.push(format!("connection {first} was let go saying {other:?}")),
+        match hello(&opened[first], &window) {
+            Err(SyscallError::ResourceExhausted) => println!("  a hello on a connection let go is told why"),
+            other => red.push(format!("a hello on connection {first}, let go, was answered {:?}", other.map(|_| ()))),
         }
-    }
-    // Only once the server has let one go, so it has taken at least its share
-    // and one more: a port whose queue is full refuses a connect
-    // `ResourceExhausted` itself.
-    match Dir::connect(names, "fs:/home") {
-        Err(SyscallError::ResourceExhausted) => println!("  a client past the handshake share is told so"),
-        other => red.push(format!("a client past the handshake share was answered {:?}", other.map(|_| ()))),
     }
 
     assert!(red.is_empty(), "fs_share:\n  {}", red.join("\n  "));

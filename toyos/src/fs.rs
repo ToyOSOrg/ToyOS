@@ -323,14 +323,7 @@ impl Dir {
         self.conn = None;
         let name = core::str::from_utf8(&self.name[..self.name_len]).map_err(|_| SyscallError::InvalidArgument)?;
         let conn = self.names.open(name)?;
-        let lent = self.window.share()?;
-        // A server that refuses a connection as it takes it answers before it
-        // lets go, so a hello that finds it gone still reads why.
-        match conn.send_with_handles(&[lent], HELLO, &Request::new()).map_err(transport) {
-            Ok(()) | Err(SyscallError::Gone) => {}
-            Err(e) => return Err(e),
-        }
-        let reply = receive(&conn)?.result()?;
+        let reply = hello(&conn, &self.window)?;
         self.writable = reply.value & RIGHT_WRITE != 0;
         self.conn = Some(conn);
         self.generation += 1;
@@ -547,6 +540,20 @@ pub fn encode_entry(out: &mut [u8], kind: u64, size: u64, name: &str) -> Option<
 
 fn stat_of(reply: &Reply) -> Stat {
     Stat { kind: reply.kind, size: reply.value2, mtime: reply.mtime }
+}
+
+/// Lend `window` to the server at the other end of `conn` ([`HELLO`]), and
+/// answer what it granted, or why it refused.
+///
+/// A server that refuses a connection as it takes it answers before it lets
+/// go, so a hello that finds it gone still reads why.
+pub fn hello(conn: &Connection, window: &SharedMemory) -> Result<Reply, SyscallError> {
+    let lent = window.share()?;
+    match conn.send_with_handles(&[lent], HELLO, &Request::new()).map_err(transport) {
+        Ok(()) | Err(SyscallError::Gone) => {}
+        Err(e) => return Err(e),
+    }
+    receive(conn)?.result()
 }
 
 fn receive(conn: &Connection) -> Result<Reply, SyscallError> {
