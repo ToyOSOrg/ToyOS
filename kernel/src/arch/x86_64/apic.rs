@@ -90,7 +90,7 @@ pub fn id() -> u32 {
 /// Mode"), so without the fence a target could take the interrupt before the
 /// store it announces.
 fn send(icr: u64) {
-    cpu::store_fence();
+    cpu::wrmsr_fence();
     Reg::Icr.write(icr);
 }
 

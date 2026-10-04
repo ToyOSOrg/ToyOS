@@ -32,7 +32,7 @@ pub unsafe fn wrmsr(msr: u32, value: u64) {
 /// Linux's `weak_wrmsr_fence`. No `nomem`, so the compiler moves no access
 /// across it either.
 #[inline]
-pub fn store_fence() {
+pub fn wrmsr_fence() {
     // SAFETY: two fences; no register, flag or memory changes.
     unsafe { asm!("mfence", "lfence", options(nostack, preserves_flags)) };
 }

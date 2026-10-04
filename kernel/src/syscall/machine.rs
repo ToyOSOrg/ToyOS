@@ -279,13 +279,9 @@ pub(super) fn sys_sched_info() -> toyos_abi::syscall::SchedInfo {
 /// empty: requires a `SysCap` carrying `Rights::COUNTERS`, and answers the
 /// counters that time programs only where it carries `Rights::TRACE` too.
 pub(super) fn sys_counters(syscap: RawHandle, out: &mut UserBytesMut) -> u64 {
-    if let Err(e) = demand_syscap(syscap, Rights::COUNTERS) {
-        return e.refuse();
-    }
-    // A cap that resolved above and lacks the bit, which is a word and not a refusal.
-    let rights = match demand_syscap(syscap, Rights::TRACE) {
-        Ok(()) => Rights::COUNTERS.union(Rights::TRACE),
-        Err(_) => Rights::COUNTERS,
+    let rights = match demand_syscap(syscap, Rights::COUNTERS) {
+        Ok(rights) => rights,
+        Err(e) => return e.refuse(),
     };
     match crate::counters::read(rights, out) {
         Ok(records) => records as u64,

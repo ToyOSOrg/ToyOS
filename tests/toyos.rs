@@ -3246,7 +3246,7 @@ const SMI_SPAN_NS: u64 = 4_444_000_000;
 /// Coordination Feedback").
 ///
 /// Read and not held, beside Linux's turbostat on the same machine
-/// (`toyos-cpuvuln/fixtures/t14/`): each CPU's idle busy fraction, its busy
+/// (`tests/t14-linux/`): each CPU's idle busy fraction, its busy
 /// frequency under the spin, and what one round cost its reader.
 fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
     type Read<'a> = BTreeMap<usize, BTreeMap<&'a str, u64>>;
@@ -3333,8 +3333,8 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
         let values: Vec<f64> = rows.filter(|r| r[0] == "-").filter_map(|r| r.get(at)?.parse().ok()).collect();
         Ok(values.iter().fold((f64::MAX, f64::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v))))
     };
-    let idle = linux(include_str!("../toyos-cpuvuln/fixtures/t14/turbostat-idle.txt"), "Busy%")?;
-    let loaded = linux(include_str!("../toyos-cpuvuln/fixtures/t14/turbostat-loaded.txt"), "Bzy_MHz")?;
+    let idle = linux(include_str!("t14-linux/turbostat-idle.txt"), "Busy%")?;
+    let loaded = linux(include_str!("t14-linux/turbostat-loaded.txt"), "Bzy_MHz")?;
     eprintln!(
         "  [counters] {cpus} cpus, SMI +{} each over {} ms; TSC {tsc_mhz:.0} MHz",
         smis[0],

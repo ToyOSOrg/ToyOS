@@ -99,11 +99,19 @@ fn sample(me: usize) -> [u64; WORDS] {
 }
 
 /// This CPU's answer to the round it owes, if it owes one: the kick handler's
-/// on every architecture, and a reader's for its own CPU.
+/// on every architecture.
 pub fn serve_here() {
+    answer(false);
+}
+
+/// This CPU's answer, after kicking every other CPU when `kick` says so.
+fn answer(kick: bool) {
     let served = {
-        // One writer per block: a kick taken inside a reader's own answer would interleave two publications.
+        // One writer per block, and one CPU both skipped by the kick and answered for.
         let _closed = IrqGuard::close();
+        if kick {
+            irqchip::kick_all_but_self();
+        }
         let me = percpu::cpu_id() as usize;
         #[cfg(feature = "test-actuators")]
         if deaf::DEAF.load(core::sync::atomic::Ordering::Relaxed) == me {
@@ -117,8 +125,8 @@ pub fn serve_here() {
 }
 
 /// One record per online CPU into `out`, or how many CPUs there are when `out`
-/// is empty; `rights` is what the caller's capability holds of
-/// [`Rights::COUNTERS`] and [`Rights::TRACE`].
+/// is empty; `rights` is what the caller's capability holds, a counter answered
+/// only where they contain what it needs.
 pub fn read(rights: Rights, out: &mut UserBytesMut) -> Result<usize, SyscallError> {
     let cpus = crate::smp::cpu_count() as usize;
     if out.is_empty() {
@@ -139,11 +147,8 @@ pub fn read(rights: Rights, out: &mut UserBytesMut) -> Result<usize, SyscallErro
             }
         }
     };
-    if fresh {
-        irqchip::kick_all_but_self();
-    }
     // This CPU's kick, if it has one, waits behind this syscall.
-    serve_here();
+    answer(fresh);
     let answered = || (0..cpus).all(|cpu| ROUNDS.served(cpu, generation));
     let deadline = Deadline::at(issued + ANSWER.duration());
     if watch::wait_until(&Parkable::at_entry(), &ANSWERED, 0, WaitClass::Other, deadline, answered).is_err() {
