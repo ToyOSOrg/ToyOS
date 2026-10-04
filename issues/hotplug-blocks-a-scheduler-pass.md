@@ -18,7 +18,8 @@ The one hardware figure there is says the T14's five boot-time devices took
 `configure` does. That is a scheduler pass
 of that length on the CPU that services the plug, with preemption disabled under
 the `XHCI` lock — the same order as `log_file`'s flush, measured at
-2.0–9.7 ms and called out for the same reason. The port reset was the dominant
+2.0–9.7 ms and called out for the same reason; its closing commit `3675af6f7`
+carries that measurement. The port reset was the dominant
 term and is already out of it; taking the rest out means a state machine over
 the control transfers, which is the whole enumeration path rewritten.
 

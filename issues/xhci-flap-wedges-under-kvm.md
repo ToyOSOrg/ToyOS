@@ -21,11 +21,8 @@ test ends on, and `test_rs_input_events` therefore never exits.
 So the driver survives three collapsed replugs and stops on the fourth, on the
 accelerator that runs the guest ~50x faster between the host's two QMP writes.
 The owner's rule names what this is — "everything should work under emulation and
-kvm if it doesnt something with the guest is wrong" — and it is the class
-`issues/pulling-the-boot-stick-freezes-the-t14.md` already tracks: one outstanding operation per controller, a
-completion matched by its Command TRB address, a recovery cancelled by a
-disconnect. Not diagnosed further here; found by CI, which is the thing CI was
-built to do.
+kvm if it doesnt something with the guest is wrong". Not diagnosed further
+here; found by CI, which is the thing CI was built to do.
 
 **It has stopped reproducing, which is not the same as being fixed.** Run
 `31258202923`, five reps of the whole twelve-shard configuration on the same

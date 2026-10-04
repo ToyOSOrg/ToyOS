@@ -888,8 +888,8 @@ impl<X: SchedPayload> CpuSched<X> {
     /// disjoint from both. That argument is worth one comparison per migration
     /// to stop being an argument: if it is ever wrong, the far CPU restores a
     /// stack this one is standing on, and what the machine reports is not this
-    /// site but a container somewhere else reading as a value nothing can write
-    /// (the `BTreeMap`-inside-its-own-insert class). Two CPUs
+    /// site but a container somewhere else reading as a value nothing can write.
+    /// Two CPUs
     /// on one kernel stack is not a state to return an error from — it is a
     /// kernel bug, and it dies here where it can still be named.
     fn hand_off<H: Hw<Payload = X>, P: PreemptGuard>(

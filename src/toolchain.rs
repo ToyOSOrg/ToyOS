@@ -514,9 +514,7 @@ fn runs(stage2: &Path) -> bool {
 /// Every step decides under the caller's shared lock and acts under the
 /// exclusive one, so the common answer — nothing to do — costs no
 /// serialisation, and two agents cannot both conclude the compiler is stale
-/// and both start `x.py build` in the same directory. That pair is what left a
-/// half-written `librustc_driver` for cargo to probe, and cargo memoises a
-/// failed probe.
+/// and both start `x.py build` in the same directory.
 ///
 /// The steps are ordered, and each invalidates what it makes stale rather than
 /// threading a `rebuilt` flag through: a step that decides for itself still
