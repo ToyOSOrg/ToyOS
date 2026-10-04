@@ -33,8 +33,13 @@ removed. It is a host test because no machine reaches the path: QEMU's unit
 always reports `ESRTPS` and implements `PMEN_REG` as read-only zero, and the
 T14's units report `ESRTPS` clear but support neither mode.
 
-A unit that reports either bit clear has no fix under this exit: §11.4.8.1
-treats `PMEN_REG` as read-only there, and the same section plans the
-protected memory registers for deprecation, pointing new software at
-abort-DMA mode. Such a unit keeps the gap, logged, until a fix that does not
-rest on `PMEN` is found.
+A unit that reports either bit clear has no fix under this exit: with either
+clear, that region's base and limit are read-only (§11.4.8.1), so `PMEN`
+cannot cover all of memory; the same section plans the protected memory
+registers for deprecation, pointing new software at abort-DMA mode. Such a
+unit keeps the gap, logged, and this file stays open for it once the `PMEN`
+exit is met.
+
+**Exit for a unit with `PLMR` or `PHMR` clear**: on such a unit no function
+behind it reaches memory while translation is off for the switch; a host test
+reads that, and is red with the fix removed.

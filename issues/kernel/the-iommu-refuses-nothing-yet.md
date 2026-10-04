@@ -82,6 +82,8 @@ negative control:
   driver's domain (the T14's iGPU row);
 - from the hand-over on, a device that is neither a display nor a USB
   controller faults on its own RMRR region, is logged and stopped, and the
-  machine keeps running; and a display or USB controller its RMRR names alone
-  keeps that region. Each half has its own negative control;
+  machine keeps running; a display or USB controller whose RMRR also names
+  another device faults on that region the same way; and a display or USB
+  controller its RMRR names alone keeps that region. Each case has its own
+  negative control;
 - a unit with the hand-over gap logs it.
