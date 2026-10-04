@@ -40,10 +40,10 @@
 //! and not tests, and the one tool that lists tests, the test binary, needs a
 //! host build most userland crates cannot make. So the reading is made to fail
 //! loudly: a test is gated only in the one shape a default `cargo test` in a
-//! crate directly under `userland/` is known to run. That is an attribute naming
-//! `test` or `test_case`, in a file under the crate's `src/` or `tests/`, in a
-//! crate whose only `cfg` is `cfg(test)`, which ignores no test, and whose
-//! manifest switches off no target's tests.
+//! crate is known to run. That is an attribute naming `test` or `test_case`, in
+//! a file under the `src/` or `tests/` of the crate nearest it, in a crate whose
+//! only `cfg` is `cfg(test)`, which ignores no test, and whose manifest switches
+//! off no target's tests.
 //!
 //! Doc-tests are not read: a library crate that leaves `doctest` on is refused,
 //! because the `toyos` toolchain builds no rustdoc.
@@ -59,15 +59,15 @@ use crate::build::Features;
 /// What [`survey`] found under one `userland/` directory.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Survey {
-    /// The crates `host` runs, by directory name, sorted.
+    /// The crates `host` runs, by directory under `userland/`, sorted.
     pub gated: Vec<String>,
     /// Every test the gate would not run, each as `<path under userland>: why`,
     /// sorted. `host` is red while this is not empty.
     pub escapes: Vec<String>,
 }
 
-/// Every crate directly under `userland` that holds a test, and every test that
-/// no `cargo test` in one of them runs.
+/// Every crate under `userland` that holds a test, and every test that no
+/// `cargo test` in one of them runs.
 pub fn survey(userland: &Path) -> Result<Survey, String> {
     let mut files = Vec::new();
     rs_files(userland, &mut files)?;
@@ -101,11 +101,7 @@ pub fn survey(userland: &Path) -> Result<Survey, String> {
             continue;
         }
         let inside = rel(owner, file);
-        if crate_name.contains('/') {
-            escapes.insert(format!(
-                "{at}: a test in the nested crate {crate_name}, which the gate does not discover"
-            ));
-        } else if !(inside.starts_with("src/") || inside.starts_with("tests/")) {
+        if !(inside.starts_with("src/") || inside.starts_with("tests/")) {
             escapes.insert(format!(
                 "{at}: a test outside {crate_name}'s src/ and tests/, which cargo test does not run"
             ));
@@ -501,7 +497,7 @@ mod tests {
         assert_eq!(
             found,
             Ok(Survey {
-                gated: vec!["gated".into(), "switched".into(), "testsonly".into()],
+                gated: vec!["gated".into(), "gated/sub".into(), "switched".into(), "testsonly".into()],
                 escapes: vec![
                     "doctested/Cargo.toml: a library without [lib] doctest = false, whose \
                      doc-tests the gate does not read"
@@ -513,9 +509,6 @@ mod tests {
                      test does not run"
                         .into(),
                     "gated/src/slow.rs: an ignored test runs nowhere".into(),
-                    "gated/sub/src/lib.rs: a test in the nested crate gated/sub, which the gate \
-                     does not discover"
-                        .into(),
                     "loose.rs: a test in no crate".into(),
                     "switched/Cargo.toml: [lib] test = false leaves its tests unrun".into(),
                 ],

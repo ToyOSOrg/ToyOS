@@ -571,7 +571,7 @@ fn host(root: &Path) -> Vec<Step> {
         Ok("installed".into())
     }));
     steps.push(step("clippy, warnings denied", || {
-        let failed = crate::clippy::run(root);
+        let (failed, _) = crate::clippy::run(root)?;
         if failed.is_empty() {
             Ok("clean".into())
         } else {

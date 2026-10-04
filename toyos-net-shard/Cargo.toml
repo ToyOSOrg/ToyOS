@@ -8,9 +8,9 @@ publish = false
 
 [dependencies]
 toyos-net-ip = { path = "../toyos-net-ip" }
-toyos-net-tcp = { path = "../toyos-net-tcp" }
+toyos-net-tcp = { path = "tcp" }
 toyos-net-udp = { path = "../toyos-net-udp" }
 toyos-net-wire = { path = "../toyos-net-wire" }
 
 [dev-dependencies]
-toyos-net-testnet = { path = "../toyos-net-testnet" }
+toyos-net-testnet = { path = "testnet" }

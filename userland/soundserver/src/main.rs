@@ -1,16 +1,6 @@
 //! The audio server: what it claims, what it spawns, and nothing else.
 //!
-//! **Every decision soundserver makes about a sample lives in `toyos-mixer/`** —
-//! the i16/f32 conversions, mono and stereo, the gain and its ramp, the sum on
-//! the shared bus, the dither and the quantizer, the device shapes a period can
-//! be rendered into, the delay-locked loop, and the counters the gate reads.
-//! They are pure, they are host-tested, and `toyos-mixer/fixtures/mix-corpus.txt`
-//! holds the answer this program used to compute inline, byte for byte. What is
-//! left here is the effects: devices, handles, shared memory, timers, threads
-//! and the log.
-//!
-//! The split is `userland/compositor/`'s, against `toyos-desktop/`. Everything
-//! under `src/` is one half of soundserver's own machinery:
+//! Everything under `src/` is soundserver's own machinery:
 //!
 //! | | |
 //! |---|---|
