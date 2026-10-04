@@ -14,15 +14,17 @@ pub type Leaf = (u32, u32, u32, u32);
 /// for a leaf the CPU does not implement, and as the answer where neither
 /// states a rate: nothing here guesses one.
 pub const fn stated_hz(leaf15: Option<Leaf>, leaf16: Option<Leaf>) -> Option<u64> {
-    if let Some((denominator, numerator, crystal_hz, _)) = leaf15 {
-        if denominator != 0 && numerator != 0 && crystal_hz != 0 {
-            return Some(crystal_hz as u64 * numerator as u64 / denominator as u64);
-        }
+    if let Some((denominator, numerator, crystal_hz, _)) = leaf15
+        && denominator != 0
+        && numerator != 0
+        && crystal_hz != 0
+    {
+        return Some(crystal_hz as u64 * numerator as u64 / denominator as u64);
     }
-    if let Some((base_mhz, _, _, _)) = leaf16 {
-        if base_mhz != 0 {
-            return Some(base_mhz as u64 * 1_000_000);
-        }
+    if let Some((base_mhz, _, _, _)) = leaf16
+        && base_mhz != 0
+    {
+        return Some(base_mhz as u64 * 1_000_000);
     }
     None
 }
