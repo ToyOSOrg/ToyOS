@@ -9,7 +9,8 @@
 //! to the caller's sink, built from the state of that moment, once the caller has answered that its
 //! next hop is known; it counts as sent only once the sink took its frame. Which connection is
 //! served is the caller's round: [`Tcp::drain_eligible`] offers each once it has something to send,
-//! and [`Tcp::drain_gone`] names each freed while in it.
+//! and [`Tcp::drain_gone`] names each freed while offered; both hold what they report, a freed
+//! connection included, until the caller drains them.
 //!
 //! **Refusals are values.** Legacy or insecure input is refused, counted in [`Counters`], and
 //! named by an [`Event::Refused`] the shell logs through [`RefusalLog`].
