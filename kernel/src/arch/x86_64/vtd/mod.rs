@@ -549,7 +549,7 @@ fn enable(
     let mut queue = Queue::new(&mut TABLES.lock(), unit.regs);
     // Outside the `TABLES` lock: `interrupt::arm` takes its own lock and
     // then that one, and the order this subsystem holds is the reverse.
-    let irta = remap.map(|extended| interrupt::arm(extended));
+    let irta = remap.map(interrupt::arm);
 
     // Before `TE`: the first blocked transaction must be reportable, not merely counted.
     fault::arm(index, unit.regs, records, crate::arch::idt::DMA_FAULT_VECTOR);
