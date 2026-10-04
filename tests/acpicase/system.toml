@@ -10,11 +10,13 @@ syscap = ["logread"]
 
 [programs.acpiserver]
 
-# `device` because the job mints the `acpi` claim the server is handed;
-# `power` because the job list ends the machine, asking the supervisor.
+# `device` because the job mints the `acpi` claim the server is handed, and
+# `dup` because test-runner hands a job its capability as a duplicate and
+# hands none without it; `power` because the job list ends the machine,
+# asking the supervisor.
 [programs.test-runner]
 receives = ["power"]
-syscap = ["device"]
+syscap = ["device", "dup"]
 args = ["reboot"]
 
 [programs.toybox]

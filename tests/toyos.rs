@@ -140,9 +140,10 @@ const RUST_SKIP: &[&str] = &[
     // a boot that starts none: the `acpi_server_death` metal row runs it on
     // tests/acpicase.
     "acpi_release",
-    // It holds the boot open for the owner's press, and asserts nothing: the
-    // attended `acpi_power_button_pressed` metal row runs it.
-    "acpi_press_hold",
+    // It holds the boot open to near the runner's bound, and asserts nothing:
+    // the `acpi_server_events` and attended `acpi_power_button_pressed` metal
+    // rows run it.
+    "acpi_hold",
 ];
 
 /// Binaries a metal row or a guest test drives that the shared boot also runs
@@ -412,9 +413,13 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         // The ACPI server on the machine its stage is for: the row the kernel
         // filled from the T14's own tables, the server armed on it, and the
-        // embedded controller's events taken and counted.
+        // embedded controller's events taken and counted, on a boot held open
+        // past the server's count interval.
         "acpi_server_events",
-        metal::Metal { arms: TESTCASES, judge: |b| acpi_events_on_metal(b[0]) },
+        metal::Metal {
+            arms: &[metal::once("testcases-hold", "tests/testcases", &[], &["test_rs_acpi_hold"])],
+            judge: |b| acpi_events_on_metal(b[0]),
+        },
     ),
     (
         // The server killed: the kernel writes `ACPI_DISABLE` as its claim goes,
@@ -432,7 +437,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // sees either.
         "acpi_power_button_pressed",
         metal::Metal {
-            arms: &[metal::once("testcases-press", "tests/testcases", &[], &["test_rs_acpi_press_hold"])],
+            arms: &[metal::once("testcases-press", "tests/testcases", &[], &["test_rs_acpi_hold"])],
             judge: |b| acpi_press_on_metal(b[0]),
         },
     ),
@@ -3442,6 +3447,7 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
 /// server armed on it, at least one embedded-controller query taken and a
 /// count of them logged, and no guard of the server's fired.
 fn acpi_events_on_metal(back: &metal::Readback) -> Result<(), String> {
+    back.job_passed("test_rs_acpi_hold")?;
     let (log, kernel) = (back.log(), back.kernel());
     kernel.must_say(
         "acpi: the ACPI row: PM1a events 0x1800+4, GPE0 0x1860+32, SCI gsi 9 level/high, the \
@@ -3489,7 +3495,7 @@ fn acpi_death_on_metal(back: &metal::Readback) -> Result<(), String> {
 /// past the log, is the power-off's.
 fn acpi_press_on_metal(back: &metal::Readback) -> Result<(), String> {
     let log = back.log();
-    if let Ok(none) = log.must_say("acpi_press_hold: no press in ") {
+    if let Ok(none) = log.must_say("acpi_hold: held to ") {
         return Err(format!("the boot was held open and nobody pressed: {none}"));
     }
     let pressed = log.must_say("acpiserver: the power button was pressed, on SCI ")?;
