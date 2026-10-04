@@ -1,9 +1,9 @@
 # Issues
 
-One file per issue, `issues/<area>/<slug>.md`. There is no index and no
+One file per issue, `issues/<slug>.md`. There is no index and no
 numbering: **`ls` is the index and the frontmatter is the query.**
 
-`ls issues/*/` lists everything. To ask a question of the set:
+`ls issues/` lists everything. To ask a question of the set:
 
 ```
 rg -l '^status: open' issues/       # every unheld piece of work
@@ -70,19 +70,19 @@ number somebody measured, a design line the owner already drew. It does not
 carry a design, a stage table, a rationale or a review history: a design that is
 right is written as code, and one that is not yet written is not yet known.
 
-## Areas
+## Slugs
 
-An area is a directory because it makes every cross-reference a path that resolves. Moving
-an issue between areas is a `git mv`; the **slug** is its identity — unique
-across every area — so `rg <slug>` finds every pointer at it wherever it has
-been put. A slug is a claim like any sentence here: one the tree has refuted is
+The tracker is one directory with no subdirectories: what an issue is, is its
+`kind`, and what it is about, its slug and its body. The **slug** is its
+identity — unique across the tracker — so `rg <slug>` finds every pointer at
+it. A slug is a claim like any sentence here: one the tree has refuted is
 renamed in the commit that corrects the body, with every citation moved.
 
 ## Pointing at one
 
-**Name the file, not the directory.** `issues/audio/null-sink-applies-one-connect.md`
-is a claim something can check; `issues/audio/` is a claim that an area
-exists, which says nothing about whether the entry you meant is still there.
+**Name the file.** `issues/null-sink-applies-one-connect.md` is a claim
+something can check; a bare `issues/` says nothing about whether the entry you
+meant is still there.
 
 Never write "the entry above" or "the entry below". Position was what the
 numbered document had and what this directory exists to be rid of; a positional

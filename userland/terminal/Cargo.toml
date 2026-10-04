@@ -14,4 +14,4 @@ doctest = false
 
 [package.metadata.toyos.host]
 fails = ["linux", "macos", "windows"]
-issue = "issues/build/apps-that-build-or-run-on-toyos-alone.md"
+issue = "issues/apps-that-build-or-run-on-toyos-alone.md"

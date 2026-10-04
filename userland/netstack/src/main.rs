@@ -613,7 +613,7 @@ const PIPE_BUDGET_SHARE: u64 = 8;
 ///
 /// **A mitigation, not a policy anyone chose.** A piped connection's 4 MiB is
 /// charged to nobody — no per-process limit, no pressure signal, no OOM killer
-/// (`issues/isolation/`) — so without a cap a client that opens sockets
+/// (`issues/no-physical-memory-fairness.md`) — so without a cap a client that opens sockets
 /// in a loop walks the machine into exhaustion, and netstack has no way to tell
 /// that from ordinary use. Delete this in favour of a kernel memory limit, not
 /// in favour of a bigger number.
@@ -638,7 +638,7 @@ fn total_memory() -> u64 {
 /// another client's live socket in the new one. A random start makes two
 /// instances' ranges overlap only by a chance the size of their lengths over
 /// 2^32, which bounds the harm and does not remove it: an id is a number any
-/// client can name (`issues/isolation/netstack-socket-ids-are-ambient.md`).
+/// client can name (`issues/netstack-socket-ids-are-ambient.md`).
 fn first_socket_id() -> u32 {
     let mut bytes = [0u8; 4];
     toyos_abi::syscall::random(&mut bytes)
