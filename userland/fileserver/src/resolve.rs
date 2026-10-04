@@ -2,7 +2,7 @@
 //! given, and nowhere else.
 //!
 //! **The root is a floor, not a starting point.** A connection is bound to one
-//! directory of the volume (its capability's); a client's path is canonical
+//! directory of the volume (its grant's root); a client's path is canonical
 //! and relative to it (`toyos::fs::canonical`), and each component is looked up
 //! in turn. A symlink met on the way is expanded where it stands: a relative
 //! target is read against the link's own directory, and a `..` that would

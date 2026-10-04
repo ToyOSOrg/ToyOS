@@ -127,6 +127,10 @@ const RUST_SKIP: &[&str] = &[
     // A kernel primitive with no use for any one boot's devices: the
     // `port_badge` metal row runs it on tests/proctreecase.
     "port_badge",
+    // Needs a launcher whose row lists a program that streams into a file, so
+    // that another instance asks DATA's server while this one holds its
+    // shares: the `fs_share` metal row runs it on tests/proctreecase.
+    "fs_share",
     // It asserts nothing at all: it holds a `tests/lanleasecase` boot open for
     // twenty seconds. On a shared boot it would be twenty seconds of nothing.
     "lan_hold",
@@ -686,6 +690,12 @@ const METAL: &[(&str, metal::Metal)] = &[
         "port_badge",
         metal::Metal { arms: PROCTREECASE, judge: |b| b[0].job_passed("test_rs_port_badge") },
     ),
+    (
+        // One instance holding all a file server lets it hold leaves the
+        // server answering another.
+        "fs_share",
+        metal::Metal { arms: PROCTREECASE, judge: |b| b[0].job_passed("test_rs_fs_share") },
+    ),
     // ---- one image: tests/metalcase ----
     (
         "metal_sim_scanout_wc",
@@ -910,13 +920,20 @@ const USB_RESET_BOOTS: &[metal::Arm] = &[
 const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/metalcase", &[], &[])];
 
 /// A launcher and a declared `cat` and shell, which `process_tree`'s subtree
-/// launches, a `toybox` row holding `roster`, which `launch_toctou` races, and
-/// the rows `launch_authority` is refused and started.
+/// launches, a `toybox` row holding `roster`, which `launch_toctou` races, the
+/// rows `launch_authority` is refused and started, and the shell `fs_share`
+/// asks DATA's server through.
 const PROCTREECASE: &[metal::Arm] = &[metal::once(
     "proctreecase",
     "tests/proctreecase",
     &[],
-    &["test_rs_process_tree", "test_rs_launch_toctou", "test_rs_launch_authority", "test_rs_port_badge"],
+    &[
+        "test_rs_process_tree",
+        "test_rs_launch_toctou",
+        "test_rs_launch_authority",
+        "test_rs_port_badge",
+        "test_rs_fs_share",
+    ],
 )];
 
 /// netstack in front of the T14's I219 with its lease probe armed: netstack's exit code
@@ -2679,7 +2696,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
 /// The interrupt census adds up, is monotonic, and every device delivery is
 /// still cpu0's.
 fn irq_census(capture: &str) -> Result<(), String> {
-    use common::irqcensus::{Census, DEVICE_SOURCES};
+    use common::irqcensus::{Census, DEVICE_SOURCES, SOURCES};
     // Every line, in order, so a later census can be compared with an
     // earlier one on the same CPU.
     let mut lines: Vec<Census> = Vec::new();
@@ -2697,44 +2714,30 @@ fn irq_census(capture: &str) -> Result<(), String> {
         ));
     }
 
-    // 1. The law. `total` is counted by its own increment beside each
-    //    source's, never derived from them, so this is a real
-    //    conservation statement: a source whose increment went missing
-    //    leaves the total ahead of the sum.
-    for census in &lines {
-        if census.total != census.sum_of_sources() {
-            return Err(format!(
-                "cpu{} counted {} interrupt(s) and attributed {} to sources — a source \
-                 is not being counted: {census:?}",
-                census.cpu,
-                census.total,
-                census.sum_of_sources(),
-            ));
-        }
-    }
-
-    // 2. Monotonic: a counter that went backwards is a torn read or a
+    // 1. Monotonic: a counter that went backwards is a torn read or a
     //    word two CPUs are writing, which is what the no-`lock` argument
     //    in `kernel/src/irq_census.rs` rests on being impossible.
     let mut newest: std::collections::BTreeMap<u32, Census> = std::collections::BTreeMap::new();
     for census in &lines {
         if let Some(prev) = newest.get(&census.cpu) {
-            if census.total < prev.total {
+            if let Some(name) = SOURCES.iter().zip(prev.by_source.iter().zip(census.by_source)).find_map(
+                |(name, (&was, now))| (now < was).then_some(name),
+            ) {
                 return Err(format!(
-                    "cpu{}'s census went backwards, {} then {}: {prev:?} then {census:?}",
-                    census.cpu, prev.total, census.total,
+                    "cpu{}'s `{name}` count went backwards: {prev:?} then {census:?}",
+                    census.cpu,
                 ));
             }
         }
         newest.insert(census.cpu, census.clone());
     }
 
-    // 3. The machine is real: the boot CPU took interrupts, and so did
-    //    at least one AP — otherwise (4) says nothing.
+    // 2. The machine is real: the boot CPU took interrupts, and so did
+    //    at least one AP — otherwise (3) says nothing.
     let cpu0 = newest
         .get(&0)
         .ok_or_else(|| format!("no cpu0 in the census: {newest:?}"))?;
-    if cpu0.total == 0 {
+    if cpu0.total() == 0 {
         return Err(format!("cpu0 took no interrupts at all: {cpu0:?}"));
     }
     let aps: Vec<&Census> = newest.values().filter(|c| c.cpu != 0).collect();
@@ -2744,11 +2747,11 @@ fn irq_census(capture: &str) -> Result<(), String> {
             aps.len()
         ));
     }
-    if !aps.iter().any(|c| c.total > 0) {
+    if !aps.iter().any(|c| c.total() > 0) {
         return Err(format!("no AP took a single interrupt: {newest:?}"));
     }
 
-    // 4. **The present-state fact this whole track is about.** Every
+    // 3. **The present-state fact this whole track is about.** Every
     //    message-signalled interrupt is addressed to physical
     //    destination 0 (`drivers::pci`'s `MSG_ADDR`) and the one I/O
     //    APIC pin goes to the BSP, so no AP may have a device count at
@@ -2776,17 +2779,17 @@ fn irq_census(capture: &str) -> Result<(), String> {
         ));
     }
 
-    let share = cpu0.total as f64
-        / newest.values().map(|c| c.total).sum::<u64>() as f64
+    let share = cpu0.total() as f64
+        / newest.values().map(Census::total).sum::<u64>() as f64
         * 100.0;
     eprintln!(
         "  [irq] {} cpu(s), {} interrupt(s), {delivered} of them device deliveries — \
          all on cpu0, which took {share:.1}% of everything",
         newest.len(),
-        newest.values().map(|c| c.total).sum::<u64>(),
+        newest.values().map(Census::total).sum::<u64>(),
     );
 
-    // 5. The issuer side: every `tlb` delivery a CPU's census carries
+    // 4. The issuer side: every `tlb` delivery a CPU's census carries
     //    must be within the issues the `tlb:` line counted — an excess
     //    is a path shooting down uncounted. The lower bound is not
     //    asserted: an issued IPI can be pending on an IF-clear target.

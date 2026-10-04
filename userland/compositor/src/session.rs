@@ -195,7 +195,7 @@ impl Session {
             raw,
             scaled: Vec::new(),
         };
-        eprintln!(
+        println!(
             "compositor: wallpaper {}x{}, scaling to {}x{}",
             wallpaper.w,
             wallpaper.h,
@@ -215,7 +215,7 @@ impl Session {
         let total_mem = total_memory();
         let max_windows =
             toyos_desktop::max_windows(total_mem, desk.screen, MAX_WINDOW_SLOTS as usize);
-        eprintln!(
+        println!(
             "compositor: at most {max_windows} windows ({} MiB each of {} MiB total)",
             toyos_desktop::window_bytes(desk.screen) / (1024 * 1024),
             total_mem / (1024 * 1024),
@@ -239,7 +239,7 @@ impl Session {
         let mut damage = Damage::default();
         damage.add(desk.screen);
 
-        eprintln!("compositor: ready");
+        println!("compositor: ready");
 
         let now = Instant::now();
         Self {
@@ -336,7 +336,7 @@ impl Session {
                 Some(_) => DropReason::CopyTimeout,
                 None => DropReason::HandshakeTimeout,
             };
-            eprintln!("compositor: dropping client {} — {}", p.conn.as_handle().0, reason.why());
+            eprintln!("compositor: dropping client {} — {}", p.conn.as_handle().0, reason);
         }
         self.pending.retain(|p| now.duration_since(p.since) < HANDSHAKE_TIMEOUT);
 
@@ -990,9 +990,9 @@ impl Session {
         };
         // Moved on its own, so that a refused move leaves `theirs` here to
         // close: once moved, its number is no longer this process's to close.
-        if syscall::handle_send(conn.as_handle(), &[theirs]).is_err() {
+        if let Err(e) = syscall::handle_send(conn.as_handle(), &[theirs]) {
             syscall::close(theirs);
-            mark_dead(&mut self.dead, handle, DropReason::Gone);
+            mark_dead(&mut self.dead, handle, e.into());
             return;
         }
         if let Err(e) = conn.try_signal(window::MSG_COPY_REGION) {

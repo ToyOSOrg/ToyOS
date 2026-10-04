@@ -1,7 +1,7 @@
 //! The kernel's interrupt census, and the windows a `mask-windows` kernel
 //! prints beside it, read back on the host.
 //!
-//! The guest prints `irq: cpuN total=… timer=… …` per online CPU whenever a
+//! The guest prints `irq: cpuN timer=… kick=… …` per online CPU whenever a
 //! process exits, on `SYS_SHUTDOWN` and on the blocked-task dump
 //! (`kernel/src/irq_census.rs`). The counters are cumulative since boot, so the
 //! **last** line a capture holds for a CPU is that boot's whole census.
@@ -39,7 +39,6 @@ pub const DEVICE_SOURCES: [&str; 6] = ["xhci", "userdev", "sound", "i8042", "dma
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Census {
     pub cpu: u32,
-    pub total: u64,
     /// Indexed the same as [`SOURCES`].
     pub by_source: [u64; SOURCES.len()],
 }
@@ -71,19 +70,18 @@ impl Census {
                 .map_err(|_| format!("field {field:?} has no count in {rest:?}"))?;
             named.push((name, value));
         }
-        let want: Vec<&str> = std::iter::once("total").chain(SOURCES).collect();
         let got: Vec<&str> = named.iter().map(|(n, _)| *n).collect();
-        if got != want {
+        if got != SOURCES {
             return Err(format!(
-                "census fields {got:?}, want {want:?} — the kernel's `Source::NAMES` and \
+                "census fields {got:?}, want {SOURCES:?} — the kernel's `Source::NAMES` and \
                  `common::irqcensus::SOURCES` disagree"
             ));
         }
         let mut by_source = [0u64; SOURCES.len()];
-        for (slot, (_, value)) in by_source.iter_mut().zip(&named[1..]) {
+        for (slot, (_, value)) in by_source.iter_mut().zip(&named) {
             *slot = *value;
         }
-        Ok(Self { cpu, total: named[0].1, by_source })
+        Ok(Self { cpu, by_source })
     }
 
     pub fn source(&self, name: &str) -> u64 {
@@ -91,10 +89,8 @@ impl Census {
         self.by_source[i]
     }
 
-    /// Every source summed. Equal to [`Self::total`] on a census that adds up —
-    /// which is the whole of what `irq_census_conservation` asks, because the
-    /// kernel counts the total apart from the sources rather than deriving it.
-    pub fn sum_of_sources(&self) -> u64 {
+    /// Every interrupt this CPU took: the kernel keeps no total apart from its sources.
+    pub fn total(&self) -> u64 {
         self.by_source.iter().sum()
     }
 }
@@ -326,11 +322,11 @@ fn guests() -> Vec<Guest> {
     let seen = SEEN.lock().expect("census map poisoned");
     seen.values()
         .filter_map(|by_cpu| {
-            let total: u64 = by_cpu.values().map(|c| c.total).sum();
+            let total: u64 = by_cpu.values().map(Census::total).sum();
             if total == 0 {
                 return None;
             }
-            let boot = by_cpu.get(&0).map_or(0, |c| c.total);
+            let boot = by_cpu.get(&0).map_or(0, Census::total);
             let mut per_source = [(0u64, 0u64); SOURCES.len()];
             for census in by_cpu.values() {
                 for (slot, count) in per_source.iter_mut().zip(census.by_source) {

@@ -31,30 +31,30 @@ pub fn main(args: Vec<String>) {
     }
 
     let code = status.code().unwrap_or(-1);
-    eprintln!();
-    eprintln!("── process stats (pid {}, exit {code}) ──────────", s.pid);
-    eprintln!("  wall      {}", fmt_ns(s.wall_ns));
-    eprintln!("  cpu       {}", fmt_ns(s.cpu_ns));
-    eprintln!();
+    println!();
+    println!("── process stats (pid {}, exit {code}) ──────────", s.pid);
+    println!("  wall      {}", fmt_ns(s.wall_ns));
+    println!("  cpu       {}", fmt_ns(s.cpu_ns));
+    println!();
 
     let fault_total = s.fault_demand_count + s.fault_zero_count;
     if fault_total > 0 || s.fault_ns > 0 {
-        eprintln!("  faults    {:>6}  ({} demand, {} zero)",
+        println!("  faults    {:>6}  ({} demand, {} zero)",
             fault_total, s.fault_demand_count, s.fault_zero_count);
-        eprintln!("  fault time  {}", fmt_ns(s.fault_ns));
-        eprintln!();
+        println!("  fault time  {}", fmt_ns(s.fault_ns));
+        println!();
     }
 
     if s.io_read_ops > 0 {
-        eprintln!("  io ops    {:>6}", s.io_read_ops);
-        eprintln!("  io bytes  {}", fmt_bytes(s.io_read_bytes));
-        eprintln!();
+        println!("  io ops    {:>6}", s.io_read_ops);
+        println!("  io bytes  {}", fmt_bytes(s.io_read_bytes));
+        println!();
     }
 
     let blocked_total = s.blocked_io_ns + s.blocked_futex_ns + s.blocked_pipe_ns
         + s.blocked_ipc_ns + s.blocked_other_ns;
     if blocked_total > 0 {
-        eprint!("  blocked   {}", fmt_ns(blocked_total));
+        print!("  blocked   {}", fmt_ns(blocked_total));
         let mut parts = Vec::new();
         if s.blocked_io_ns > 0 { parts.push(format!("io {}", fmt_ns(s.blocked_io_ns))); }
         if s.blocked_futex_ns > 0 { parts.push(format!("futex {}", fmt_ns(s.blocked_futex_ns))); }
@@ -62,21 +62,21 @@ pub fn main(args: Vec<String>) {
         if s.blocked_ipc_ns > 0 { parts.push(format!("ipc {}", fmt_ns(s.blocked_ipc_ns))); }
         if s.blocked_other_ns > 0 { parts.push(format!("other {}", fmt_ns(s.blocked_other_ns))); }
         if !parts.is_empty() {
-            eprint!("  ({})", parts.join(", "));
+            print!("  ({})", parts.join(", "));
         }
-        eprintln!();
+        println!();
     }
 
     if s.runqueue_wait_ns > 0 {
-        eprintln!("  runqueue  {}", fmt_ns(s.runqueue_wait_ns));
+        println!("  runqueue  {}", fmt_ns(s.runqueue_wait_ns));
     }
 
     if blocked_total > 0 || s.runqueue_wait_ns > 0 {
-        eprintln!();
+        println!();
     }
 
-    eprintln!("  syscalls  {:>6}  (wall {})", s.syscall_total, fmt_ns(s.syscall_total_ns));
-    eprintln!("  peak mem  {}  ({} allocs)", fmt_bytes(s.peak_memory), s.alloc_count);
+    println!("  syscalls  {:>6}  (wall {})", s.syscall_total, fmt_ns(s.syscall_total_ns));
+    println!("  peak mem  {}  ({} allocs)", fmt_bytes(s.peak_memory), s.alloc_count);
 }
 
 fn fmt_ns(ns: u64) -> String {

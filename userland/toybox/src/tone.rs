@@ -25,7 +25,7 @@ pub fn main(args: Vec<String>) {
         },
     };
 
-    eprintln!(
+    println!(
         "tone: {freq}Hz for {duration_secs}s at amplitude {}",
         amplitude as i32
     );
@@ -100,5 +100,5 @@ pub fn main(args: Vec<String>) {
 
     // Let the last buffer drain
     std::thread::sleep(std::time::Duration::from_millis(100));
-    eprintln!("tone: done");
+    println!("tone: done");
 }
