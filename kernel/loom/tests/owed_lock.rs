@@ -4,8 +4,7 @@
 //! must come back: either its retry took the lock, or the holder's release saw
 //! its bit and answered it. That is a store-buffer pair, an owing store then a
 //! read of `now` against the release's store to `now` then a read of the owed
-//! word, and x86's TSO lets either read miss the other side's store, so no
-//! guest test can stand in for it.
+//! word.
 //!
 //! ```text
 //! cargo test --manifest-path kernel/loom/Cargo.toml --features owed-fence-off \

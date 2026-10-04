@@ -1455,13 +1455,9 @@ const _: () = assert!(crate::scheduler::MAX_CPUS <= u64::BITS as usize, "XHCI's 
 /// [`XHCI`]'s answer: every CPU in `owed` takes a scheduler pass, whose
 /// [`poll_if_pending`] finds the record it left.
 fn bring_to_pass(owed: u64) {
-    let me = crate::arch::percpu::cpu_id();
+    use kernel::sched::hw::{CpuId, Machine};
     for cpu in (0..u64::BITS).filter(|cpu| owed & (1 << cpu) != 0) {
-        if cpu == me {
-            crate::preempt::set_need_resched();
-        } else {
-            crate::arch::irqchip::kick_cpu(cpu);
-        }
+        crate::hw::HW.need_resched(CpuId(cpu));
     }
 }
 
