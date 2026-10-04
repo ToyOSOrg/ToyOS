@@ -18,6 +18,7 @@
 
 use crate::proclife::table::{Lifecycle, Processes};
 use crate::proclife::Pid;
+use toyos_abi::syscall::MAX_THREADS;
 
 /// Whether a new thread may join a process.
 #[must_use = "a refused spawn must answer its caller, not fall through"]
@@ -30,6 +31,9 @@ pub enum Admit {
     /// Somebody owns this process's teardown. A thread admitted now would be
     /// invisible to their retire sweep.
     TearingDown,
+    /// The process holds [`MAX_THREADS`] threads. A thread that exits stays
+    /// one until it is joined, so only a join makes room.
+    Full,
 }
 
 impl Admit {
@@ -70,6 +74,7 @@ fn admit<P: Lifecycle>(proc: Option<&P>) -> Admit {
     match proc {
         None => Admit::NoSuchProcess,
         Some(proc) if proc.tearing_down() => Admit::TearingDown,
+        Some(proc) if proc.thread_count() >= MAX_THREADS => Admit::Full,
         Some(_) => Admit::Yes,
     }
 }
@@ -78,7 +83,7 @@ fn admit<P: Lifecycle>(proc: Option<&P>) -> Admit {
 mod tests {
     use super::*;
     use crate::proclife::model::World;
-    use crate::proclife::teardown;
+    use crate::proclife::{join, teardown, ThreadLocation};
 
     #[test]
     fn a_live_process_admits_a_thread_at_both_moments() {
@@ -115,6 +120,33 @@ mod tests {
         let pid = world.spawn_process();
         assert!(teardown::claim_teardown(&mut world, pid, 137));
         assert_eq!(admit_thread_insert(&world, pid), Admit::TearingDown);
+    }
+
+    /// A zombie holds its place until a join collects it, so the collection is
+    /// what admits again.
+    #[test]
+    fn a_full_process_refuses_at_the_start_until_a_join_collects() {
+        let mut world = World::new();
+        let pid = world.spawn_process();
+        let last = (1..MAX_THREADS).map(|_| world.spawn_thread(pid)).last().unwrap();
+        assert_eq!(admit_thread_start(&world, pid), Admit::Full);
+        world.set_location(pid, last, ThreadLocation::Zombie(0));
+        assert_eq!(admit_thread_start(&world, pid), Admit::Full);
+        assert_eq!(join::collect_zombie(&mut world, pid, last), Ok(Some(0)));
+        assert_eq!(admit_thread_start(&world, pid), Admit::Yes);
+    }
+
+    /// Two spawns pass the start one thread short of the bound; the one whose
+    /// sibling inserted first is refused at the insert.
+    #[cfg(not(feature = "mutate-spawn-skips-the-insert-recheck"))]
+    #[test]
+    fn the_insert_refuses_the_spawn_a_sibling_filled_the_process_under() {
+        let mut world = World::new();
+        let pid = world.spawn_process();
+        (2..MAX_THREADS).for_each(|_| _ = world.spawn_thread(pid));
+        assert_eq!(admit_thread_start(&world, pid), Admit::Yes);
+        world.spawn_thread(pid);
+        assert_eq!(admit_thread_insert(&world, pid), Admit::Full);
     }
 
     #[cfg(feature = "mutate-spawn-skips-the-insert-recheck")]

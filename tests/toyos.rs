@@ -114,6 +114,12 @@ const RUST_SKIP: &[&str] = &[
     "readdir_bound",
     // Fills the VFS `created_dirs` cap and leaves it there. `mkdir_cap` runs it.
     "mkdir_cap",
+    // Each fills a bound of its own process — tens of thousands of mappings,
+    // thousands of threads, a thousand 2 MiB images — which no shared member's
+    // allowance is sized for: the `process_bound_*` metal rows run them.
+    "abuse_mmap_regions",
+    "abuse_thread_table",
+    "abuse_dlopen_ledger",
     // Audio is judged on the T14 and nowhere else: the `hda_client_stall`,
     // `hda_tone`, `audio_idle_suspend`, `shipped_client_departures` and
     // `soundserver_log_stall` metal rows run these.
@@ -278,6 +284,18 @@ const METAL: &[(&str, metal::Metal)] = &[
             arms: TESTCASES_READDIR,
             judge: |b| b[0].job_passed("test_rs_readdir_bound"),
         },
+    ),
+    (
+        "process_bound_regions",
+        metal::Metal { arms: BOUNDS, judge: |b| b[0].job_passed("test_rs_abuse_mmap_regions") },
+    ),
+    (
+        "process_bound_threads",
+        metal::Metal { arms: BOUNDS, judge: |b| b[0].job_passed("test_rs_abuse_thread_table") },
+    ),
+    (
+        "process_bound_libraries",
+        metal::Metal { arms: BOUNDS, judge: |b| b[0].job_passed("test_rs_abuse_dlopen_ledger") },
     ),
     (
         "wake_storm_cost",
@@ -729,6 +747,15 @@ const TESTCASES_MKDIR: &[metal::Arm] =
 
 const TESTCASES_READDIR: &[metal::Arm] =
     &[metal::once("testcases-readdir", "tests/testcases", &[], &["test_rs_readdir_bound"])];
+
+/// One boot for the three, which can share it: each fills a bound of its own
+/// process, and its exit gives all of it back.
+const BOUNDS: &[metal::Arm] = &[metal::once(
+    "testcases-bounds",
+    "tests/testcases",
+    &[],
+    &["test_rs_abuse_mmap_regions", "test_rs_abuse_thread_table", "test_rs_abuse_dlopen_ledger"],
+)];
 
 const JOBCASE: &[metal::Arm] = &[metal::once("jobcase", "tests/jobcase", &[], &[])];
 

@@ -25,7 +25,10 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
 
-use toyos_abi::syscall::{mmap, munmap, MmapFlags, MmapProt, SyscallError, SYS_MMAP};
+use toyos_abi::syscall::{mmap, munmap, MmapFlags, MmapProt, SyscallError};
+
+#[path = "../arch/mmap.rs"]
+mod mmap;
 
 const SIZE: usize = 4096;
 /// Well inside the 2 MiB page every mapping is rounded up to.
@@ -127,42 +130,21 @@ fn an_undefined_bit_in_either_word_is_refused() {
         (MmapProt(PROT.0 | UNDEFINED_PROT), FLAGS, "a prot"),
         (PROT, MmapFlags(FLAGS.0 | UNDEFINED_FLAG), "a flags"),
     ] {
-        let refused = mmap_raw(SIZE, prot, flags);
+        // SAFETY: not `FIXED`, so nothing of this process's is replaced.
+        let refused = unsafe { mmap::raw(0, SIZE as u64, prot, flags) };
         assert_eq!(
-            SyscallError::from_u64(refused),
-            Some(SyscallError::InvalidArgument),
-            "{what} bit this ABI does not define was served: {refused:#x}",
+            refused,
+            Err(SyscallError::InvalidArgument),
+            "{what} bit this ABI does not define was served: {refused:#x?}",
         );
     }
 
     // The control: the same request without either bit is the mapping the
     // refusals above must not have been about.
-    let served = mmap_raw(SIZE, PROT, FLAGS);
-    assert_eq!(SyscallError::from_u64(served), None, "the defined request was refused");
+    // SAFETY: not `FIXED`.
+    let served = unsafe { mmap::raw(0, SIZE as u64, PROT, FLAGS) }.expect("the defined request was refused");
     unsafe { munmap(served as *mut u8, SIZE) }.expect("unmap the served request");
     println!("  PASS: an undefined mmap prot or flags bit is InvalidArgument, and without it the same call maps");
-}
-
-/// `syscall::mmap` reports a refusal as a null pointer, which cannot tell
-/// `InvalidArgument` from any other error; the raw return can.
-fn mmap_raw(size: usize, prot: MmapProt, flags: MmapFlags) -> u64 {
-    let ret: u64;
-    // SAFETY: a register-to-register `syscall`; no argument here is a pointer
-    // this call dereferences.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            in("rdi") SYS_MMAP,
-            in("rsi") 0u64,
-            in("rdx") size as u64,
-            in("r8") prot.0,
-            in("r9") flags.0,
-            lateout("rax") ret,
-            out("rcx") _,
-            out("r11") _,
-        );
-    }
-    ret
 }
 
 /// Lengths past every placement window.
@@ -204,7 +186,8 @@ fn a_length_no_window_holds_is_refused_and_the_space_still_answers() {
     let mut answers = Vec::with_capacity(2 * UNPLACEABLE.len());
     for prot in [MmapProt::NONE, MmapProt::READ | MmapProt::WRITE] {
         for size in UNPLACEABLE {
-            answers.push((prot, size, mmap_raw(size as usize, prot, MmapFlags::ANONYMOUS | MmapFlags::PRIVATE)));
+            // SAFETY: not `FIXED`.
+            answers.push((prot, size, unsafe { mmap::raw(0, size, prot, MmapFlags::ANONYMOUS | MmapFlags::PRIVATE) }));
         }
     }
 
@@ -215,9 +198,9 @@ fn a_length_no_window_holds_is_refused_and_the_space_still_answers() {
 
     for (prot, size, ret) in answers {
         assert_eq!(
-            SyscallError::from_u64(ret),
-            Some(SyscallError::InvalidArgument),
-            "mmap(len={size:#x}, prot={:#x}) answered {ret:#x}",
+            ret,
+            Err(SyscallError::InvalidArgument),
+            "mmap(len={size:#x}, prot={:#x}) answered {ret:#x?}",
             prot.0,
         );
     }
