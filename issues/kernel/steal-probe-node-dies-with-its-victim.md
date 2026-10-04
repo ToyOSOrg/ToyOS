@@ -27,7 +27,7 @@ for the boot.
 
 Nor can the node be reclaimed. It may still be linked into the stopped CPU's
 queue, and re-posting a linked node is what invariant N1 in
-`toyos-sched/src/mailbox.rs` exists to forbid: the consumer would walk a node
+`kernel/pure/sched/mailbox.rs` exists to forbid: the consumer would walk a node
 whose `next` had been rewritten under it. Whatever closes this has to be a
 second node, a probe that is not node-shaped, or a way for a CPU to disown its
 whole mailbox — none of which is a change to `post_steal_probe`.
@@ -39,7 +39,7 @@ is still open (`issues/kernel/spawned-process-never-starts.md`).
 
 ## It reproduces in a second, on the real primitive
 
-`toyos-sched/loom/tests/loom_mailbox.rs`'s `steal_probe_model` drives the real
+`kernel/loom/tests/loom_mailbox.rs`'s `steal_probe_model` drives the real
 `MailboxNode`, `MailboxProducer` and `MailboxConsumer` through claim, post, pop
 and repost. The `victim-retires-mid-probe` feature makes the victim's last pass
 its last, and loom finds the schedule:
@@ -61,7 +61,7 @@ measure is the width of the window: the model's thief posts unconditionally,
 where `best_victim` posts only into a CPU `CpuHandle::answering` still admits.
 
 **No drop edge is modelled, and an earlier draft of this entry claimed one.**
-`MailboxConsumer` has no `Drop` impl — `toyos-sched/src/mailbox.rs` has two,
+`MailboxConsumer` has no `Drop` impl — `kernel/pure/sched/mailbox.rs` has two,
 `MailboxNode:172` and `PostSlot:200` — so dropping the consumer runs no code,
 and the count above already clears `in_flight` before any assertion. The line
 that dropped it was deleted after it was measured bit-identical in both arms.

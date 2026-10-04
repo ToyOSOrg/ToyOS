@@ -107,7 +107,7 @@ which is what the rotating scan start produces when several CPUs publish zero
 and one of them is dead. What `min_by_key` over a stale zero adds is that the
 fraction never shrinks, however long the CPU has been gone.
 
-`CpuHandle::answering` is the rule now, in `toyos-sched`: a CPU whose doorbell
+`CpuHandle::answering` is the rule now, in `kernel/pure/sched`: a CPU whose doorbell
 edge has stood for longer than a pass may take is not a claim about the present,
 and the four paths that choose a CPU — spawn placement, the RT wake-forward,
 the surplus push and the steal probe's victim — all ask it. **What is left of
@@ -115,7 +115,7 @@ this defect after that is one task per CPU that goes quiet**, because the first
 message posted to a silent CPU is what raises the edge the rule reads. The
 simulator measures exactly that: `scenarios::stopped_cpu` loses 1 program of 24
 on every one of 16 seeds, against 10 at worst and 114 in total with the rule
-reverted (`toyos-sched/sim/tests/policy.rs`,
+reverted (`kernel/sim/tests/policy.rs`,
 `a_stopped_cpu_stops_taking_work`).
 
 ## What is still open here, stated as the two things it is
@@ -135,7 +135,7 @@ stays open for it.
 
 ## The process table is not where this is, and that is now checked rather than argued
 
-`toyos-proclife` enumerates every interleaving of the paths this file's shapes
+`kernel/pure/proclife` enumerates every interleaving of the paths this file's shapes
 implicate — a spawn racing a kill and the idle pass that reaps the entry, a
 sibling's `SYS_THREAD_EXIT` beside the process's own exit and a spawn, two
 spawns racing one teardown, a join racing the kill that takes its target — and

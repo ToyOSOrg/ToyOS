@@ -48,7 +48,7 @@ times:
    the per-thread record ring, the `Source` double dispatch and the per-module
    watcher lists are deleted. **Exit**: making an object waitable is one field,
    and the interleaving models check the smaller protocol.
-   **Done** (#513): `toyos-sched/src/watch.rs` and `park.rs`. `kernel/src` is
+   **Done** (#513): `kernel/pure/sched/watch.rs` and `park.rs`. `kernel/src` is
    720 lines smaller (62931 to 62211). No instrument in the tree measures an
    interrupts-off or a preemption-off span. The nearest, `sched_check_build`'s
    pass cost, separated nothing on the dev host: the largest pass per CPU was

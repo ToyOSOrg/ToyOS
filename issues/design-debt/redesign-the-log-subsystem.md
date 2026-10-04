@@ -17,6 +17,11 @@ names nothing that will land. The directory re-shape is a scheduling matter
 exactly as priced below: one clean pass in a window with few worktrees in
 flight, and never interleaved with a code change.
 
+The log is a pillar of `issues/diagnostics/toyos-explains-itself.md`, and
+its ring is
+`issues/kernel/logging-records-from-every-producer-and-a-kernel-that-waits-on-nobody.md`'s;
+this file holds the sinks and the layout.
+
 The target shape stands as reviewed: a log core (ring + context stamping,
 once) with serial, file and screen as independent sinks carrying explicit
 backpressure — a slow sink drops-and-counts, never blocks, does no unbounded

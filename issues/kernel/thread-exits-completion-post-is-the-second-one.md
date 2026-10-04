@@ -33,7 +33,7 @@ zombie mark that the joiner's predicate reads is already in the table before
 either post, because `release_thread` writes it before returning.
 
 **How this was found, and why it is filed rather than acted on.** The host
-model of the lifecycle (`toyos-proclife`) was built with a negative control
+model of the lifecycle (`kernel/pure/proclife`) was built with a negative control
 that reverted the post's subject to the process's main thread — the kernel this
 tree had before `1bfe4e5b`, when the wake was by name into a shared parking lot.
 The control had no teeth: with `publish_released` modelled faithfully, the
