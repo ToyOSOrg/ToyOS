@@ -117,6 +117,13 @@ const RUST_SKIP: &[&str] = &[
     // `tests/testcases` does not give: the `launch_toctou` metal row runs it on
     // tests/proctreecase.
     "launch_toctou",
+    // Needs a launcher whose row lists `swap` and `update` and not `proctest`,
+    // and a shell that opens a login session: the `launch_authority` metal row
+    // runs it on tests/proctreecase.
+    "launch_authority",
+    // A kernel primitive with no use for any one boot's devices: the
+    // `port_badge` metal row runs it on tests/proctreecase.
+    "port_badge",
     // It asserts nothing at all: it holds a `tests/lanleasecase` boot open for
     // twenty seconds. On a shared boot it would be twenty seconds of nothing.
     "lan_hold",
@@ -657,6 +664,18 @@ const METAL: &[(&str, metal::Metal)] = &[
         "launch_toctou",
         metal::Metal { arms: PROCTREECASE, judge: |b| b[0].job_passed("test_rs_launch_toctou") },
     ),
+    (
+        // A launch starts only what the caller's row lists, and `swap` and
+        // `update` only in a login session.
+        "launch_authority",
+        metal::Metal { arms: PROCTREECASE, judge: |b| launch_authority(b[0]) },
+    ),
+    (
+        // A connection's badge is the minted bytes, read back by its own
+        // port's acceptor alone.
+        "port_badge",
+        metal::Metal { arms: PROCTREECASE, judge: |b| b[0].job_passed("test_rs_port_badge") },
+    ),
     // ---- one image: tests/metalcase ----
     (
         "metal_sim_scanout_wc",
@@ -881,12 +900,13 @@ const USB_RESET_BOOTS: &[metal::Arm] = &[
 const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/metalcase", &[], &[])];
 
 /// A launcher and a declared `cat` and shell, which `process_tree`'s subtree
-/// launches, and a `toybox` row holding `roster`, which `launch_toctou` races.
+/// launches, a `toybox` row holding `roster`, which `launch_toctou` races, and
+/// the rows `launch_authority` is refused and started.
 const PROCTREECASE: &[metal::Arm] = &[metal::once(
     "proctreecase",
     "tests/proctreecase",
     &[],
-    &["test_rs_process_tree", "test_rs_launch_toctou"],
+    &["test_rs_process_tree", "test_rs_launch_toctou", "test_rs_launch_authority", "test_rs_port_badge"],
 )];
 
 /// netstack in front of the T14's I219 with its lease probe armed: netstack's exit code
@@ -1121,7 +1141,7 @@ const NOT_RUN: &[NotRun] = &[
     NotRun {
         case: "22_floating_point",
         stage: Stage::Built,
-        why: Why::Declined("it prints `long double`s through `%Lf`, and libc reads a `long double` as a `double` (issues/build/libc-reads-a-long-double-as-a-double.md): every `%Lf` of a line whose `double`s filled the registers prints 0.000000"),
+        why: Why::Declined("it prints `long double`s through `%Lf`, and libc reads a `long double` as a `double` (issues/libc-reads-a-long-double-as-a-double.md): every `%Lf` of a line whose `double`s filled the registers prints 0.000000"),
     },
     NotRun {
         case: "31_args",
@@ -2773,6 +2793,28 @@ fn process_tree(back: &metal::Readback) -> Result<(), String> {
     Ok(())
 }
 
+/// `launch_authority` passed, and the supervisor refused each launch for its
+/// own reason: `proctest` as unlisted, `swap` and `update` as outside a login
+/// session, for test-runner and for the toybox it launched. The guest sees
+/// only that each was refused.
+fn launch_authority(back: &metal::Readback) -> Result<(), String> {
+    use toyos_manifest::launch::{refused, Refusal, Session};
+    back.job_passed("test_rs_launch_authority")?;
+    let log = back.log();
+    for (caller, target, why) in [
+        ("test-runner", "proctest", Refusal::NotListed),
+        ("test-runner", "swap", Refusal::OutsideLogin),
+        ("test-runner", "update", Refusal::OutsideLogin),
+        ("toybox", "swap", Refusal::OutsideLogin),
+    ] {
+        let line = refused(caller, Session::Machine, target, why);
+        if !log.text().lines().any(|l| l.contains(&line)) {
+            return Err(format!("the supervisor never said `{line}`\n{}", log.text()));
+        }
+    }
+    Ok(())
+}
+
 /// A backing read after deletion is refused on both writable mounts, and a page-cache slot whose fill the device refused is unbound.
 fn read_fault_probes(log: &str) -> Result<(), String> {
         let probe = "revoke-selftest: /tmp/revoke_probe";
@@ -3337,7 +3379,7 @@ fn field_between<'a>(log: &'a str, head: &str, tail: &str) -> Result<&'a str, St
 
 /// The shortest span `counters_on_metal` reads the SMI count across: twice the
 /// longest period between the T14's firmware interrupts that has been read
-/// (`issues/hardware/the-t14s-firmware-interrupts-every-cpu-every-2-2-s-under-toyos.md`).
+/// (`issues/the-t14s-firmware-interrupts-every-cpu-every-2-2-s-under-toyos.md`).
 const SMI_SPAN_NS: u64 = 4_444_000_000;
 
 /// `counters_metal`'s three reads on the T14, held to what the hardware and
@@ -3345,17 +3387,21 @@ const SMI_SPAN_NS: u64 = 4_444_000_000;
 ///
 /// Held: a record per CPU the bring-up started, naming the local APIC id the
 /// bring-up gave that CPU and carrying the counters its `counters: cpuN
-/// reads` line names, and none stale. From `idle0` to `spin`, at least
+/// reads` line names, and none stale; every CPU's performance request
+/// declared at boot, `pm_enable=1`, the request Linux makes on this machine
+/// (`tests/t14-linux/hwp-request.txt`), and its power envelope in every read
+/// the one its `control_regs:` line holds. From `idle0` to `spin`, at least
 /// [`SMI_SPAN_NS`] apart, every CPU's SMI count rose alike and by two or more:
 /// the firmware's legacy mode, the positive control ACPI stage 1's flatness
 /// is read against, and the row that stage changes. Across the spin every
 /// CPU's MPERF ran nine tenths of its stamp or more [e], a CPU in C0 the whole
 /// span: MPERF counts at the TSC's rate there (SDM Vol. 3B, "Hardware
-/// Coordination Feedback").
+/// Coordination Feedback"); and every CPU's busy frequency reached the lowest
+/// Linux's turbostat read under one `yes` per CPU on the same machine over the
+/// same span of load (`tests/t14-linux/turbostat-loaded.txt`).
 ///
-/// Read and not held, beside Linux's turbostat on the same machine
-/// (`tests/t14-linux/`): each CPU's idle busy fraction, its busy
-/// frequency under the spin, and what one round cost its reader.
+/// Read and not held, beside Linux's turbostat: each CPU's idle busy
+/// fraction, and what one round cost its reader.
 fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
     type Read<'a> = BTreeMap<usize, BTreeMap<&'a str, u64>>;
     back.job_passed("test_rs_counters_metal")?;
@@ -3388,8 +3434,10 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
         Ok((read, clock.get(name).ok_or_else(|| format!("counters_metal printed no {name} clock"))?.0))
     };
     let (idle0, at0) = phase("idle0")?;
-    let (idle1, _) = phase("idle1")?;
+    let (idle1, at1) = phase("idle1")?;
     let (spin, at2) = phase("spin")?;
+    let linux_request = u64::from_str_radix(include_str!("t14-linux/hwp-request.txt").trim().trim_start_matches("0x"), 16)
+        .map_err(|e| format!("t14-linux/hwp-request.txt: {e}"))?;
     let bsp = kernel.must_say("percpu: BSP cpu_id=0 lapic_id=")?;
     let mut roster = vec![bsp.rsplit("lapic_id=").next().unwrap_or_default().trim().to_string()];
     for cpu in 1..cpus {
@@ -3401,13 +3449,28 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
         }
         for (cpu, counters) in read {
             let reads = kernel.must_say(&format!("counters: cpu{cpu} reads "))?;
-            for counter in ["smi", "aperf", "mperf"] {
+            for counter in ["smi", "aperf", "mperf", "hwp_request", "hwp_request_pkg", "energy_perf_bias"] {
                 if !reads.contains(&format!("{counter}={}", counters.contains_key(counter))) {
                     return Err(format!("{name}: cpu{cpu} carries {counters:?} and its bring-up said {reads:?}"));
                 }
             }
             if counters.get("stale") != Some(&0) || counters.get("hardware_id").map(u64::to_string) != Some(roster[*cpu].clone()) {
                 return Err(format!("{name}: cpu{cpu} is stale or not lapic {}: {counters:?}", roster[*cpu]));
+            }
+            let declared = kernel.must_say(&format!("control_regs: cpu{cpu} pm_enable=1 "))?;
+            if !declared.contains(&format!(" hwp_request={linux_request:#010x} ")) {
+                return Err(format!("cpu{cpu} declared {declared:?}, and Linux requests {linux_request:#010x} on this machine"));
+            }
+            for (counter, field, radix) in
+                [("hwp_request", "hwp_request=0x", 16), ("hwp_request_pkg", "hwp_request_pkg=0x", 16), ("energy_perf_bias", "epb=", 10)]
+            {
+                let held = declared
+                    .split(' ')
+                    .find_map(|w| u64::from_str_radix(w.strip_prefix(field)?, radix).ok())
+                    .ok_or_else(|| format!("cpu{cpu}'s declaration carries no {field}: {declared:?}"))?;
+                if counters.get(counter) != Some(&held) {
+                    return Err(format!("{name}: cpu{cpu} reads {counter} {:?} and boot declared {held}: {declared:?}", counters.get(counter)));
+                }
             }
         }
     }
@@ -3434,15 +3497,27 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
     if busy.iter().any(|&b| b < 0.9) {
         return Err(format!("MPERF ran {busy:?} of each stamp across the spin, some cpu under 0.9"));
     }
-    let linux = |file: &str, column: &str| -> Result<(f64, f64), String> {
+    // Each interval's machine-wide row, in order.
+    let linux = |file: &str, column: &str| -> Result<Vec<f64>, String> {
         let mut rows = file.lines().map(|l| l.split('\t').collect::<Vec<_>>());
         let header = rows.next().ok_or("an empty turbostat reading")?;
         let at = header.iter().position(|c| *c == column).ok_or_else(|| format!("turbostat read no {column}"))?;
-        let values: Vec<f64> = rows.filter(|r| r[0] == "-").filter_map(|r| r.get(at)?.parse().ok()).collect();
-        Ok(values.iter().fold((f64::MAX, f64::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v))))
+        Ok(rows.filter(|r| r[0] == "-").filter_map(|r| r.get(at)?.parse().ok()).collect())
     };
-    let idle = linux(include_str!("t14-linux/turbostat-idle.txt"), "Busy%")?;
-    let loaded = linux(include_str!("t14-linux/turbostat-loaded.txt"), "Bzy_MHz")?;
+    let range = |values: &[f64]| values.iter().fold((f64::MAX, f64::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+    let idle = range(&linux(include_str!("t14-linux/turbostat-idle.txt"), "Busy%")?);
+    let loaded_rows = linux(include_str!("t14-linux/turbostat-loaded.txt"), "Bzy_MHz")?;
+    let loaded = range(&loaded_rows);
+    // The floor is Linux's clock over the spin's own span of load, not after
+    // the package settles: the intervals that open within it, the first 2 s
+    // into Linux's load and each 10 s long (`tests/t14-linux/SOURCE`).
+    let spin_ns = at2 - at1;
+    let opened = loaded_rows.iter().enumerate().take_while(|&(k, _)| 2_000_000_000 + k as u64 * 10_000_000_000 < spin_ns);
+    let floor = opened.map(|(_, &mhz)| mhz).fold(f64::MAX, f64::min);
+    if floor == f64::MAX {
+        return Err(format!("the spin lasted {spin_ns} ns, and no Linux interval opens within it"));
+    }
+    let spinning: Vec<f64> = (0..cpus).map(|cpu| tsc_mhz * ratio(idle1, spin, cpu, "aperf", "mperf")).collect();
     eprintln!(
         "  [counters] {cpus} cpus, SMI +{} each over {} ms; TSC {tsc_mhz:.0} MHz",
         smis[0],
@@ -3450,17 +3525,20 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
     );
     for (cpu, busy) in busy.iter().enumerate() {
         eprintln!(
-            "  [counters] cpu{cpu}: idle busy {:.2}% (Linux {:.2}-{:.2}%), spinning {:.0} MHz (Linux {:.0}-{:.0}), \
-             busy {busy:.3}",
+            "  [counters] cpu{cpu}: idle busy {:.2}% (Linux {:.2}-{:.2}%), spinning {:.0} MHz (Linux {floor:.0} over \
+             this span, {:.0}-{:.0} loaded), busy {busy:.3}",
             ratio(idle0, idle1, cpu, "mperf", "stamp") * 100.0,
             idle.0,
             idle.1,
-            tsc_mhz * ratio(idle1, spin, cpu, "aperf", "mperf"),
+            spinning[cpu],
             loaded.0,
             loaded.1,
         );
     }
     eprintln!("  [counters] the spin's read, a whole round, took its reader {} ns", clock["spin"].1);
+    if spinning.iter().any(|&mhz| mhz < floor) {
+        return Err(format!("spinning {spin_ns} ns at {spinning:.0?} MHz, some cpu below the {floor:.0} Linux held over that span"));
+    }
     Ok(())
 }
 
@@ -4480,7 +4558,7 @@ fn main() {
     );
 
     // Where this run's interrupts landed, aggregated over every guest that
-    // said. `issues/kernel/every-interrupt-lands-on-the-boot-cpu.md`'s step 4:
+    // said. `issues/every-interrupt-lands-on-the-boot-cpu.md`'s step 4:
     // the number its later change is measured against, produced by an ordinary
     // run rather than by `--nocapture`, so a CI run's own log carries it.
     let census = common::irqcensus::summary();

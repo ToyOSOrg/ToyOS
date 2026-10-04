@@ -8,7 +8,7 @@
 //! point". Not
 //! one of those sentences was checkable by anything but a booted guest with a
 //! race that had to land the wrong way, which is why
-//! `issues/kernel/spawned-process-never-starts.md` has been open since August
+//! `issues/spawned-process-never-starts.md` has been open since August
 //! and was never reproduced in QEMU.
 //!
 //! An [`Op`] here is one of those kernel paths, cut at exactly the points where

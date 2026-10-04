@@ -1,4 +1,4 @@
-# Host-tested; nothing ships it until the stack replaces smoltcp (issues/design-debt/toyos-has-its-own-network-stack.md).
+# Host-tested; nothing ships it until the stack replaces smoltcp (issues/toyos-has-its-own-network-stack.md).
 
 [package]
 name = "toyos-net-tcp"

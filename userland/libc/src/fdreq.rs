@@ -78,7 +78,7 @@ pub(crate) fn dup_at_least<E>(
 }
 
 /// The descriptors marked close-on-exec, by number: kept for stage 3 of
-/// `issues/kernel/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`,
+/// `issues/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`,
 /// whose spawn reads them. A number is a slot at one generation, so a handle
 /// made later in the slot is never taken for one marked here.
 pub(crate) struct CloseOnExec(BTreeSet<i32>);

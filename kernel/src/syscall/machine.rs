@@ -299,7 +299,8 @@ pub(super) fn sys_sched_info() -> toyos_abi::syscall::SchedInfo {
 
 /// Every online CPU's counters into `out`, or the CPU count when `out` is
 /// empty: requires a `SysCap` carrying `Rights::COUNTERS`, and answers the
-/// counters that time programs only where it carries `Rights::TRACE` too.
+/// counters that time programs and the power envelope only where it carries
+/// `Rights::TRACE` too.
 pub(super) fn sys_counters(syscap: RawHandle, out: &mut UserBytesMut) -> u64 {
     let rights = match demand_syscap(syscap, Rights::COUNTERS) {
         Ok(rights) => rights,

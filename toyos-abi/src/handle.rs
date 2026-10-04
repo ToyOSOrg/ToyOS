@@ -151,10 +151,11 @@ impl Rights {
     ///
     /// Beside [`COUNTERS`](Self::COUNTERS), [`SYS_COUNTERS`] answers each
     /// CPU's `APERF` and `MPERF` — its frequency and busy fraction, the
-    /// Hertzbleed power channel — and the kicks it took, the wake-ups that time
-    /// keystrokes. [`SYS_TRACE_READ`] answers, on this alone, when every
-    /// thread in the machine was woken, ran and parked, and on which CPU.
-    /// Admin tools hold it, `inspect`, `trace` and `test-runner`; no
+    /// Hertzbleed power channel — the kicks it took, the wake-ups that time
+    /// keystrokes, and the power envelope it runs under. [`SYS_TRACE_READ`]
+    /// answers, on this alone, when every thread in the machine was woken, ran
+    /// and parked, and on which CPU. Admin tools hold it, `inspect`, `trace`
+    /// and `test-runner`; no
     /// ordinary program and no toybox applet does while a manifest row grants
     /// a whole binary.
     ///

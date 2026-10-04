@@ -9,7 +9,9 @@
 //! absent and never zero; a record with no stamp is a CPU whose answer could
 //! not be read whole, and says nothing about it but its index.
 //!
-//! Every value counts up from boot, so the difference of two reads is exact.
+//! Every counter counts up from boot, so the difference of two reads is exact;
+//! the power envelope's registers ([`Counter::HwpRequest`] and those after it)
+//! count nothing and are what the CPU held when it read them.
 //!
 //! [`SYS_COUNTERS`]: crate::syscall::SYS_COUNTERS
 
@@ -31,12 +33,27 @@ pub enum Counter {
     Mperf,
     /// Kicks the CPU took: the interrupt another CPU sends it to wake it.
     Kicks,
+    /// The CPU's performance request (`IA32_HWP_REQUEST`), where the kernel
+    /// declares one.
+    HwpRequest,
+    /// Its package's request (`IA32_HWP_REQUEST_PKG`), beside it.
+    HwpRequestPkg,
+    /// Its energy/performance bias (`IA32_ENERGY_PERF_BIAS`), beside it.
+    EnergyPerfBias,
 }
 
 impl Counter {
-    pub const COUNT: usize = 5;
-    pub const ALL: [Counter; Self::COUNT] =
-        [Self::Stamp, Self::Smi, Self::Aperf, Self::Mperf, Self::Kicks];
+    pub const COUNT: usize = 8;
+    pub const ALL: [Counter; Self::COUNT] = [
+        Self::Stamp,
+        Self::Smi,
+        Self::Aperf,
+        Self::Mperf,
+        Self::Kicks,
+        Self::HwpRequest,
+        Self::HwpRequestPkg,
+        Self::EnergyPerfBias,
+    ];
 
     pub const fn name(self) -> &'static str {
         match self {
@@ -45,6 +62,9 @@ impl Counter {
             Self::Aperf => "aperf",
             Self::Mperf => "mperf",
             Self::Kicks => "kicks",
+            Self::HwpRequest => "hwp_request",
+            Self::HwpRequestPkg => "hwp_request_pkg",
+            Self::EnergyPerfBias => "energy_perf_bias",
         }
     }
 
@@ -52,7 +72,12 @@ impl Counter {
     pub const fn needs(self) -> Rights {
         match self {
             Self::Stamp | Self::Smi => Rights::COUNTERS,
-            Self::Aperf | Self::Mperf | Self::Kicks => Rights::COUNTERS.union(Rights::TRACE),
+            Self::Aperf
+            | Self::Mperf
+            | Self::Kicks
+            | Self::HwpRequest
+            | Self::HwpRequestPkg
+            | Self::EnergyPerfBias => Rights::COUNTERS.union(Rights::TRACE),
         }
     }
 }
@@ -154,8 +179,8 @@ mod tests {
     #[test]
     fn every_shape_of_record_reads_back_as_written() {
         for r in [
-            record(false, [Some(1), Some(u64::from(u32::MAX)), Some(3), Some(u64::MAX), Some(0)]),
-            record(true, [Some(9), None, None, None, Some(4)]),
+            record(false, [Some(1), Some(u64::from(u32::MAX)), Some(3), Some(u64::MAX), Some(0), Some(0x8000_2a04), Some(6), Some(0)]),
+            record(true, [Some(9), None, None, None, Some(4), None, Some(0x8000_ff01), None]),
             record(true, [None; Counter::COUNT]),
         ] {
             assert_eq!(Record::decode(&r.encode()), Ok(r));
@@ -165,7 +190,7 @@ mod tests {
     /// Absent is not zero: a zero that is there reads back there.
     #[test]
     fn a_present_zero_is_not_an_absent_counter() {
-        let r = record(false, [Some(5), Some(0), None, None, None]);
+        let r = record(false, [Some(5), Some(0), None, None, None, None, None, None]);
         assert_eq!(Record::decode(&r.encode()).unwrap().get(Counter::Smi), Some(0));
         assert_eq!(Record::decode(&r.encode()).unwrap().get(Counter::Aperf), None);
     }
@@ -182,20 +207,20 @@ mod tests {
 
     #[test]
     fn a_word_under_an_absent_counter_is_refused() {
-        let mut raw = record(false, [Some(1), None, None, None, None]).encode();
+        let mut raw = record(false, [Some(1), None, None, None, None, None, None, None]).encode();
         raw.0[16 + 8 * Counter::Mperf as usize] = 1;
         assert_eq!(Record::decode(&raw), Err(Undecodable::Absent(Counter::Mperf)));
     }
 
-    /// The counters that time programs are the trace right's, and the two that
-    /// do not are readable on `COUNTERS` alone.
+    /// The counters that time programs and the power envelope are the trace
+    /// right's, and the two that are neither are readable on `COUNTERS` alone.
     #[test]
-    fn what_times_a_program_needs_the_trace_right() {
+    fn what_times_a_program_or_is_power_needs_the_trace_right() {
         for counter in Counter::ALL {
             assert!(counter.needs().contains(Rights::COUNTERS), "{counter:?}");
             assert_eq!(
                 counter.needs().contains(Rights::TRACE),
-                matches!(counter, Counter::Aperf | Counter::Mperf | Counter::Kicks),
+                !matches!(counter, Counter::Stamp | Counter::Smi),
                 "{counter:?}"
             );
         }

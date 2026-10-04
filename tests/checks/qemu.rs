@@ -235,7 +235,7 @@ pub fn ceiling_self_check() -> Result<(), String> {
         if !carried.to_string().contains(want) {
             return Err(format!(
                 "the verdict names the death and drops {want:?}, which is the defect \
-                 `issues/kernel/a-double-fault-on-cpu-1-under-a-wide-suite.md` is \
+                 `issues/a-double-fault-on-cpu-1-under-a-wide-suite.md` is \
                  about:\n{carried}"
             ));
         }

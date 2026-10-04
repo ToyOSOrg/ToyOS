@@ -602,7 +602,7 @@ fn rtm_always_abort_decides_tsx_first() {
 
 // The two fixtures below are this crate's reading of the pinned Linux, awaiting
 // a capture on a nightly runner:
-// `issues/build/no-kvm-runner-has-had-its-cpuid-and-vulnerability-lines-captured.md`.
+// `issues/no-kvm-runner-has-had-its-cpuid-and-vulnerability-lines-captured.md`.
 
 /// A guest's lines do not read its microcode: `tsa_init` returns under a
 /// hypervisor (`amd.c:519-520`) before `amd_check_tsa_microcode`.
