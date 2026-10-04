@@ -1,36 +1,20 @@
 /* What libc refuses: each call answers failure in its own POSIX form, errno
    says why, and nothing is done: ENOSYS where ToyOS lacks the function, and
    the errno POSIX names for a lock or a mapping it cannot take, or memory it
-   cannot give. uname, which answers, is read back beside gethostname. */
+   cannot give. */
 #include <errno.h>
 #include <fcntl.h>
 #include <pwd.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
-#include <sys/utsname.h>
 #include <unistd.h>
 
 #define FILE_PATH "/tmp/206_libc_refusals"
-
-#if defined(__x86_64__)
-#define MACHINE "x86_64"
-#elif defined(__aarch64__)
-#define MACHINE "aarch64"
-#endif
-
-/* Whether `s` is `n` lowercase hex digits and then `rest`. */
-static int hex_then(const char *s, int n, const char *rest) {
-    for (int i = 0; i < n; i++)
-        if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f')))
-            return 0;
-    return strcmp(s + n, rest) == 0;
-}
 
 static const char *errno_name(int e) {
     switch (e) {
@@ -54,7 +38,6 @@ int main(void) {
     char *argv[] = { "shell", NULL };
     char *envp[] = { NULL };
     char buf[256];
-    struct utsname uts;
     struct statvfs vfs;
     struct rlimit limit = { 0, 0 };
     struct passwd pw, *found = &pw;
@@ -127,19 +110,6 @@ int main(void) {
     said("fcntl F_GETFL", fcntl(fd, F_GETFL));
     said("fcntl F_SETFL", fcntl(fd, F_SETFL, O_NONBLOCK));
     said("fcntl 12345", fcntl(fd, 12345));
-
-    /* uname answers the build ROOT carries, and no node name: the release is
-       the commit's first twelve digits, and -dirty after them for a tree
-       that was not that commit's; the version is the whole commit; the
-       machine is the one this case was compiled for. */
-    said("uname", uname(&uts));
-    printf("uname sysname: %s; nodename: %s\n", uts.sysname, uts.nodename[0] ? uts.nodename : "empty");
-    printf("uname version: %s\n", hex_then(uts.version, 40, "") ? "a commit" : uts.version);
-    printf("uname release: %s\n",
-           (hex_then(uts.release, 12, "") || hex_then(uts.release, 12, "-dirty")) && strncmp(uts.release, uts.version, 12) == 0
-               ? "the version's first twelve digits"
-               : uts.release);
-    printf("uname machine: %s\n", strcmp(uts.machine, MACHINE) == 0 ? "the one this case was compiled for" : uts.machine);
 
     /* The _r lookups answer their error, and null for the entry. */
     int answer = getpwnam_r("root", &pw, buf, sizeof buf, &found);

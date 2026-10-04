@@ -326,9 +326,12 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
         "boot: cmdline {:#x}+{}",
         kernel_args.cmdline_addr, kernel_args.cmdline_len
     );
-    match rootfs::named() {
-        Some(root) => log!("boot: root={root}"),
-        None => log!("boot: root= names no filesystem this kernel can parse"),
+    // ROOT's name hashes every file it carries, `/system/etc/os-release` among
+    // them: the build, named before anything is mounted.
+    match toyos_abi::boot::root_uuid(cmdline).map(bcachefs::FsUuid::parse) {
+        Some(Some(root)) => log!("boot: root={root}"),
+        Some(None) => log!("boot: root= names no filesystem this kernel can parse"),
+        None => log!("boot: the cmdline carries no root="),
     }
     // Before `mm::init`, which may hand the parameter's memory out. This record
     // is how a slot that died or was refused reaches the next boot's `/log`.

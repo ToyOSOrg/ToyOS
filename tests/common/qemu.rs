@@ -2252,12 +2252,17 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
         wait_for_ready(&mut child, &rx, options, &uart_log)
     };
     // The ready marker is test-runner's, which the supervisor starts after its
-    // first line, so a boot that reached it has said its build.
+    // first line, so a boot that reached it has said its build, and the kernel
+    // named the ROOT that carries it before that.
     if options.ready_marker == DEFAULT_READY && !options.mute {
+        let root = toyos_build::image::root_uuid_on(&boot_image).unwrap_or_else(|why| panic!("[qemu] {why}"));
+        let named = format!("boot: root={root}");
         let said = format!("{}{} ", toyos_osrelease::SAID, built_commit());
-        if !boot_log.lines().any(|line| line.contains(&said)) {
-            let _ = child.kill();
-            panic!("[qemu] the boot never said `{said}`, the commit this run built\nconsole:\n{boot_log}");
+        for line in [&named, &said] {
+            if !boot_log.lines().any(|l| l.contains(line.as_str())) {
+                let _ = child.kill();
+                panic!("[qemu] the boot never said `{line}`, of the image this run built\nconsole:\n{boot_log}");
+            }
         }
     }
 
@@ -2278,18 +2283,13 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
     }
 }
 
-/// The commit this run's images are built from, read by `git` itself rather
-/// than by the build that records it.
+/// The commit this run's images are built from, read off the checkout by the
+/// harness rather than taken from the build that records it.
 fn built_commit() -> &'static str {
     static COMMIT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     COMMIT.get_or_init(|| {
-        let out = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(super::compile::repo_root())
-            .output()
-            .expect("run git");
-        assert!(out.status.success(), "git rev-parse HEAD: {}", String::from_utf8_lossy(&out.stderr));
-        String::from_utf8(out.stdout).expect("a commit is text").trim().to_string()
+        let repo = gix::open(super::compile::repo_root()).expect("the checkout is a git repository");
+        repo.head_id().expect("HEAD names a commit").to_string()
     })
 }
 

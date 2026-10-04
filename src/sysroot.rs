@@ -148,10 +148,12 @@ pub struct Sysroot {
 impl Sysroot {
     /// A checkout whose toolchain arrived as an artifact has one sysroot, the
     /// artifact's, which `toolchain::check_installed_toolchain` has matched to
-    /// these sources; `release`, the `TOOLCHAIN` it was published with, is the
-    /// identity of all of it.
+    /// these sources; the sysroot key named by `release`, the `TOOLCHAIN` it
+    /// was published with, is the identity of all of it: the key a build of
+    /// these sources computes where it builds its own.
     pub(crate) fn installed(stage2: PathBuf, release: &str) -> Self {
-        let id = Key::of(release.as_bytes());
+        let id = crate::release::named_key(release)
+            .unwrap_or_else(|| panic!("the installed TOOLCHAIN names no sysroot key:\n{release}"));
         Self { dir: stage2, primary_compiler: true, identity: Identity::new(id.clone(), &id, &id), _using: None }
     }
 

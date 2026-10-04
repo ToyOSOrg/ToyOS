@@ -1,7 +1,9 @@
 //! `uname`, answered from the build ROOT carries (`toyos-osrelease`): `ToyOS`,
-//! no node name — no host name is published to a process — the commit's
-//! twelve digits as the release, `-dirty` after them for a tree that was not
-//! that commit's, the whole commit as the version, and the machine.
+//! no node name — no host name is published to a process — the release
+//! `toyos_osrelease::Release::uname_release` names, the whole commit as the
+//! version, and the machine.
+
+use core::fmt::{self, Write};
 
 use toyos_abi::syscall::{self, OpenFlags};
 
@@ -31,26 +33,39 @@ pub unsafe extern "C" fn uname(buf: *mut Utsname) -> i32 {
         return -1;
     };
     let out = &mut *buf;
-    put(&mut out.sysname, &[toyos_osrelease::NAME]);
-    put(&mut out.nodename, &[]);
-    let dirty = match release.tree {
-        toyos_osrelease::Tree::Clean => "",
-        toyos_osrelease::Tree::Dirty => "-dirty",
-    };
-    put(&mut out.release, &[release.short(), dirty]);
-    put(&mut out.version, &[release.commit.as_str()]);
-    put(&mut out.machine, &[release.arch.machine()]);
+    put(&mut out.sysname, toyos_osrelease::NAME);
+    put(&mut out.nodename, "");
+    put(&mut out.release, release.uname_release());
+    put(&mut out.version, release.commit.as_str());
+    put(&mut out.machine, release.arch.machine());
     0
 }
 
-/// `parts`, one after another and NUL-terminated, into `field`.
-fn put(field: &mut [u8; 65], parts: &[&str]) {
-    let mut at = 0;
-    for part in parts {
-        field[at..at + part.len()].copy_from_slice(part.as_bytes());
-        at += part.len();
-    }
+/// `value`, NUL-terminated, into `field`; every value above is at most forty
+/// bytes.
+fn put(field: &mut [u8; 65], value: impl fmt::Display) {
+    let mut at = Field { field, at: 0 };
+    write!(at, "{value}").expect("a uname value fits its field");
+    let Field { field, at } = at;
     field[at..].fill(0);
+}
+
+/// A field being written, the last byte kept for its NUL.
+struct Field<'a> {
+    field: &'a mut [u8; 65],
+    at: usize,
+}
+
+impl Write for Field<'_> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        let end = self.at + s.len();
+        if end >= self.field.len() {
+            return Err(fmt::Error);
+        }
+        self.field[self.at..end].copy_from_slice(s.as_bytes());
+        self.at = end;
+        Ok(())
+    }
 }
 
 /// As much of the file at `path` as `into` holds.

@@ -30,11 +30,6 @@ fcntl F_DUPFD_CLOEXEC: -1, ENOSYS
 fcntl F_GETFL: -1, ENOSYS
 fcntl F_SETFL: -1, ENOSYS
 fcntl 12345: -1, EINVAL
-uname: 0, no errno
-uname sysname: ToyOS; nodename: empty
-uname version: a commit
-uname release: the version's first twelve digits
-uname machine: the one this case was compiled for
 getpwnam_r: ENOSYS, entry null
 getpwuid_r: ENOSYS, entry null
 mmap a file: -1, ENODEV

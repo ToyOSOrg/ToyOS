@@ -309,6 +309,20 @@ fn cmdline_of(path: &Path) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|e| format!("the boot parameter on {} is not text: {e}", path.display()))
 }
 
+/// The name the ROOT of the image's marked slot carries in its superblock,
+/// read back off the image at `path`.
+pub fn root_uuid_on(path: &Path) -> Result<FsUuid, String> {
+    let mut file = std::fs::File::open(path).map_err(|e| format!("opening {}: {e}", path.display()))?;
+    let table = slot_table_of(&mut file).map_err(|why| format!("{}: {why}", path.display()))?;
+    let slot = table.slot(table.marked).expect("a table marks a slot it carries");
+    let (start, _) = partition_extent(&mut file, slot.root).map_err(|why| format!("{}: {why}", path.display()))?;
+    let mut block = [0u8; 4096];
+    file.seek(SeekFrom::Start(start))
+        .and_then(|_| file.read_exact(&mut block))
+        .map_err(|e| format!("reading {}'s ROOT at byte {start}: {e}", path.display()))?;
+    Ok(root_uuid_of(&block))
+}
+
 /// The slot table on the disk image `file`, as the loader reads it.
 pub fn slot_table_of(file: &mut std::fs::File) -> Result<toyos_update::slots::Table, String> {
     table_on(file).map(|(table, _, _)| table)

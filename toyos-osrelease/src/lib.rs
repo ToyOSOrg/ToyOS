@@ -30,12 +30,18 @@
 
 use core::fmt::{self, Write};
 
+macro_rules! path {
+    () => {
+        "etc/os-release"
+    };
+}
+
 /// Where ROOT carries it, without a leading slash — that volume's own
 /// spelling. [`GUEST_PATH`] is what a process opens.
-pub const PATH: &str = "etc/os-release";
+pub const PATH: &str = path!();
 
 /// The path a process opens.
-pub const GUEST_PATH: &str = "/system/etc/os-release";
+pub const GUEST_PATH: &str = concat!("/system/", path!());
 
 /// The operating system's name, `NAME` and `uname`'s `sysname`.
 pub const NAME: &str = "ToyOS";
@@ -117,6 +123,25 @@ impl Release {
     /// The commit's first twelve digits.
     pub fn short(&self) -> &str {
         &self.commit.as_str()[..12]
+    }
+
+    /// `uname`'s `release`: [`Release::short`], and `-dirty` after it for a
+    /// tree that was not that commit's.
+    pub fn uname_release(&self) -> UnameRelease<'_> {
+        UnameRelease(self)
+    }
+}
+
+/// [`Release::uname_release`].
+pub struct UnameRelease<'a>(&'a Release);
+
+impl fmt::Display for UnameRelease<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.0.short())?;
+        match self.0.tree {
+            Tree::Clean => Ok(()),
+            Tree::Dirty => f.write_str("-dirty"),
+        }
     }
 }
 
@@ -266,8 +291,9 @@ mod tests {
     }
 
     #[test]
-    fn the_guest_path_is_where_root_carries_it() {
-        assert_eq!(GUEST_PATH.strip_prefix("/system/"), Some(PATH));
+    fn uname_names_a_dirty_tree() {
+        assert_eq!(release(Tree::Clean, Arch::X86_64).uname_release().to_string(), "1a2b3c4d5e6f");
+        assert_eq!(release(Tree::Dirty, Arch::X86_64).uname_release().to_string(), "1a2b3c4d5e6f-dirty");
     }
 
     /// The bytes, whole: what `os-release(5)` readers other than ours see.
