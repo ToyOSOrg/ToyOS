@@ -21,7 +21,7 @@
 //! between the two leaks blocks rather than leaving an entry naming freed ones.
 //!
 //! **What a kill costs.** The format updates its btree in place and keeps no
-//! journal (`issues/kernel/bcachefs-crate-is-not-bcachefs.md`): what the disk
+//! journal (`issues/bcachefs-crate-is-not-bcachefs.md`): what the disk
 //! holds is what the last sync wrote, and a server that dies inside a sync can
 //! leave a node half of that sync's. Nothing but a sync writes a dirty block,
 //! unless the cache is holding more than it keeps.

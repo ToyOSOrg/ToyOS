@@ -247,7 +247,7 @@ impl Stream {
     /// **The admitted dial is the event, and `by` its only bound**: nothing the
     /// machine sends says when `logkeeper` admits a reader again, so how many dials
     /// that takes is the length of the machine's gap and no verdict — the
-    /// recorded compromise `issues/diagnostics/a-swaps-redial-asks-again-with-no-event-to-wait-on.md`.
+    /// recorded compromise `issues/a-swaps-redial-asks-again-with-no-event-to-wait-on.md`.
     ///
     /// **For a connection this host knows is going**: a swap of the netstack
     /// carrying it ends it with no FIN and no reset, so nothing but this host

@@ -24,7 +24,7 @@ use toyos_abi::syscall::*;
 ///
 /// **Hand-copied from `toyos-abi` and nothing checks the copy**: a bit added
 /// there and not here is refused although the ABI defines it, measured in
-/// `issues/kernel/a-known-mask-is-copied-out-of-toyos-abi-by-hand.md`.
+/// `issues/a-known-mask-is-copied-out-of-toyos-abi-by-hand.md`.
 const MMAP_PROT_KNOWN: u64 = MmapProt::READ.0 | MmapProt::WRITE.0;
 /// Every bit `MmapFlags` defines; hand-copied, as `MMAP_PROT_KNOWN` says.
 const MMAP_FLAGS_KNOWN: u64 = MmapFlags::ANONYMOUS.0 | MmapFlags::PRIVATE.0 | MmapFlags::FIXED.0;
