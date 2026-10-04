@@ -119,8 +119,7 @@ pub fn clock(args: &KernelArgs) {
 /// and the TSC is time since power-on.
 pub fn report_counter_origin() {
     const IA32_TSC_ADJUST: u32 = 0x3b;
-    // Leaf 7 exists when the maximum leaf reaches it.
-    if super::cpu::cpuid(0, 0).0 < 7 || super::cpu::cpuid(7, 0).1 & (1 << 1) == 0 {
+    if super::cpu::leaf_7().1 & (1 << 1) == 0 {
         log!("boot: IA32_TSC_ADJUST not on this CPU");
         return;
     }

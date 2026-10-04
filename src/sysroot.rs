@@ -930,7 +930,9 @@ fn place_std(stamp: &Path, lib: &Path) {
 /// Bootstrap's configuration for a std built by an existing compiler:
 /// `local-rebuild` is what lets stage 0 compile the library for a target the
 /// stage-0 compiler has none for, and `profile = "compiler"` is the primary's,
-/// so these libraries are built with the options `stage2`'s own were.
+/// so these libraries are built with the options `stage2`'s own were, save
+/// the profile's debug assertions, which the libraries are built without, as
+/// upstream's distributed ones are.
 /// The linker is the compiler's own `rust-lld`, named by path so that which sysroot
 /// a stage-0 build searches for tools decides nothing; and no rpath, which bootstrap
 /// spells as a C driver's `-Wl,` arguments that a linker run directly refuses.
@@ -962,6 +964,7 @@ ninja = false
 
 [rust]
 lld = false
+debug-assertions-std = false
 {userland}"#,
         rustc = compiler.join("bin/rustc").display(),
         cargo = cargo.display(),
