@@ -29,8 +29,6 @@ the T14, and the reason is the loop rather than the kernel.
 
 ## What would clear it
 
-A per-boot predicate in place of `bootlog::verdict` as the loop's judge — the
-audit at `t14-suite-list.md` finding 6 asks for the same thing for
-`log_partition_identity` and `root_named_but_absent` — and either an arm that
-may decline the derived `reboot` job, or a panic actuator that fires after
+A per-boot predicate in place of `bootlog::verdict` as the loop's judge, and
+either an arm that may decline the derived `reboot` job, or a panic actuator that fires after
 `logd` is up and before the runner's first job returns.

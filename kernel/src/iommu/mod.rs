@@ -2,7 +2,7 @@
 //!
 //! Inventories the machine's IOMMU units, gives every enumerated PCI function an identity-mapped context entry, turns translation on, remaps every interrupt source through a source-id-verified table entry, and hands a driver an address space of its own to put its DMA in; an unusable unit is logged and left off rather than halting boot. Names above `vtd/` stay backend-neutral so a second backend drops in without moving the seam.
 //!
-//! The refusal is deliberately not yet built for a driver in this kernel: landing it before any userspace driver exists would cost every machine and protect nothing. A function a *process* drives is the other case and is refused ([`DeviceSpace::own`]), because a descriptor it writes a physical address into is an arbitrary read and write over all of memory.
+//! The refusal is deliberately not yet built for a driver in this kernel: landing it before any userspace driver exists would cost every machine and protect nothing. A function a *process* drives is the other case and is refused ([`OwnSpace`], [`remapping`]), because a descriptor it writes a physical address into is an arbitrary read and write over all of memory, and a message it sends unremapped is any vector at any CPU; its message is its claim slot's own entry ([`Remapped`]).
 //!
 //! `trait Iommu` is deliberately not added: with one backend it would have a single implementor.
 
@@ -109,10 +109,14 @@ pub enum IommuError {
     /// The units disagree on the depth a domain's tables would be built at.
     WidthsDisagree,
     DomainsExhausted(u32),
-    AddressesExhausted(u8),
+    /// Every address up to this ceiling is handed out.
+    AddressesExhausted(u64),
     /// What this machine's units translate does not reach above its memory, so
     /// a device window has nowhere to sit that a stale descriptor would miss.
     WindowBelowMemory { translatable: u8, floor: u64, top: u64 },
+    /// From the floor to the first root-bridge window or reserved region above
+    /// it is less than a new domain was asked to hand out.
+    NoRoom { floor: u64, ceiling: u64, room: u64 },
     /// Not a whole number of the 2 MiB leaves this kernel writes.
     Unaligned(u64),
     NotMapped(Iova),
@@ -128,13 +132,18 @@ impl core::fmt::Display for IommuError {
             Self::DomainsExhausted(ceiling) => {
                 write!(f, "every one of this machine's {ceiling} domains is taken")
             }
-            Self::AddressesExhausted(bits) => {
-                write!(f, "a domain's {bits} bits of device address are all handed out")
+            Self::AddressesExhausted(ceiling) => {
+                write!(f, "a domain's device addresses up to {ceiling:#x} are all handed out")
             }
             Self::WindowBelowMemory { translatable, floor, top } => write!(
                 f,
                 "this machine's units translate {translatable} bits, whose device window would \
                  start at {floor:#x}, at or below the {top:#x} its memory reaches"
+            ),
+            Self::NoRoom { floor, ceiling, room } => write!(
+                f,
+                "a domain's addresses from {floor:#x} end at {ceiling:#x}, where a root bridge's \
+                 window or a reserved region begins, short of the {room:#x} bytes asked of it"
             ),
             Self::Unaligned(at) => write!(f, "{at:#x} is not a 2 MiB boundary"),
             Self::NotMapped(at) => write!(f, "{:#x} is not mapped in this domain", at.raw()),
@@ -153,21 +162,11 @@ pub enum DeviceSpace {
 }
 
 impl DeviceSpace {
-    /// One of a device's own, or the reason there is none.
-    ///
-    /// The refusing form, for `pcidev`: a function a *process* drives must
-    /// never be handed a physical address, so a machine with no unit and a
-    /// machine out of domains are both answers its caller refuses the claim
-    /// with rather than degrading past.
-    pub fn own() -> Result<Self, IommuError> {
-        unit::domain::create().map(Self::Own)
-    }
-
     /// One of a device's own, or the machine's own with the reason. For a
     /// driver **in this kernel**, whose addresses are the kernel's either way.
     pub fn create() -> Self {
-        match unit::domain::create() {
-            Ok(id) => Self::Own(id),
+        match unit::domain::create(0) {
+            Ok((id, _)) => Self::Own(id),
             Err(why) => {
                 log!("iommu: no domain of its own for a device: {why}");
                 Self::Untranslated
@@ -189,35 +188,6 @@ impl DeviceSpace {
         }
     }
 
-    /// Put `bytes` at `phys` at `at` again, where a device may still be aimed
-    /// from a mapping this space took back. Only a space of its own has such
-    /// an address; a physical one has no address to choose.
-    pub fn map_at(self, at: u64, phys: u64, bytes: u64) -> Result<(), IommuError> {
-        match self {
-            Self::Untranslated => panic!("iommu: an untranslated space was asked to place {phys:#x} at {at:#x}"),
-            Self::Own(id) => unit::domain::map_at(id, Iova::translated(at), phys, bytes),
-        }
-    }
-
-    /// Hand out room for `bytes` and map nothing there: where [`Self::place`]
-    /// puts mappings later. Only a space of its own has room to hand out.
-    pub fn reserve(self, bytes: u64) -> Result<u64, IommuError> {
-        match self {
-            Self::Untranslated => panic!("iommu: an untranslated space was asked for room"),
-            Self::Own(id) => unit::domain::reserve(id, bytes).map(Iova::raw),
-        }
-    }
-
-    /// Put `bytes` at `phys` at `at`, inside room [`Self::reserve`] handed out,
-    /// and write no record of it: for a mapping its holder makes and takes back
-    /// as often as it likes.
-    pub fn place(self, at: u64, phys: u64, bytes: u64) -> Result<(), IommuError> {
-        match self {
-            Self::Untranslated => panic!("iommu: an untranslated space was asked to place {phys:#x} at {at:#x}"),
-            Self::Own(id) => unit::domain::place(id, Iova::translated(at), phys, bytes).map(|_| ()),
-        }
-    }
-
     /// Take `bytes` at `at` back, so the pages behind them can be reused.
     pub fn unmap(self, at: u64, bytes: u64) -> Result<(), IommuError> {
         match self {
@@ -230,8 +200,51 @@ impl DeviceSpace {
     /// in place: the device is translating the moment this returns.
     pub fn attach(self, bus: u8, device: u8, function: u8) {
         if let Self::Own(id) = self {
-            unit::domain::attach(StreamId::pci(bus, device, function), id);
+            OwnSpace(id).attach(bus, device, function);
         }
+    }
+}
+
+/// A device's own address space, for a function a *process* drives: it has no
+/// untranslated form, so nothing holding one can hand that process a physical
+/// address to write into a descriptor.
+#[derive(Clone, Copy)]
+pub struct OwnSpace(DomainId);
+
+impl OwnSpace {
+    /// One with `room` bytes of it handed out at the address answered, or the
+    /// reason there is none: a machine with no unit and a machine out of
+    /// domains are both refusals.
+    pub fn create(room: u64) -> Result<(Self, u64), IommuError> {
+        unit::domain::create(room).map(|(id, at)| (Self(id), at.raw()))
+    }
+
+    /// [`DeviceSpace::map`].
+    pub fn map(self, phys: u64, bytes: u64) -> Result<u64, IommuError> {
+        unit::domain::map(self.0, phys, bytes).map(Iova::raw)
+    }
+
+    /// Put `bytes` at `phys` at `at` again, where a device may still be aimed
+    /// from a mapping this space took back.
+    pub fn map_at(self, at: u64, phys: u64, bytes: u64) -> Result<(), IommuError> {
+        unit::domain::map_at(self.0, Iova::translated(at), phys, bytes)
+    }
+
+    /// Put `bytes` at `phys` at `at`, inside room [`Self::create`] handed out,
+    /// and write no record of it: for a mapping its holder makes and takes back
+    /// as often as it likes.
+    pub fn place(self, at: u64, phys: u64, bytes: u64) -> Result<(), IommuError> {
+        unit::domain::place(self.0, Iova::translated(at), phys, bytes).map(|_| ())
+    }
+
+    /// [`DeviceSpace::unmap`].
+    pub fn unmap(self, at: u64, bytes: u64) -> Result<(), IommuError> {
+        unit::domain::unmap(self.0, Iova::translated(at), bytes)
+    }
+
+    /// [`DeviceSpace::attach`].
+    pub fn attach(self, bus: u8, device: u8, function: u8) {
+        unit::domain::attach(StreamId::pci(bus, device, function), self.0);
     }
 }
 
@@ -248,14 +261,20 @@ impl core::fmt::Display for StreamId {
 ///
 /// The device list must be the complete enumeration: enabling translation with an unenumerated device left off it can brick the machine's own boot disk.
 ///
+/// No domain's addresses reach into one of `windows`, the memory firmware says the root bridges decode.
+///
 /// Calls `unit::init` directly rather than through a dispatch, because x86-64 has one backend and the dispatch is not yet a real seam.
-pub fn init(rsdp_addr: u64, devices: &[crate::drivers::pci::PciDevice]) {
-    unit::init(rsdp_addr, devices);
+pub fn init(
+    rsdp_addr: u64,
+    devices: &[crate::drivers::pci::PciDevice],
+    windows: &[toyos_abi::boot::RootBridgeWindow],
+) {
+    unit::init(rsdp_addr, devices, windows);
 }
 
-/// How a source must address its interrupt. Not a yes/no: a caller that folded
-/// the third answer into [`Delivery::Direct`] would write a message the unit
-/// blocks and lose the device in silence.
+/// How a kernel driver's source must address its interrupt. Not a yes/no: a
+/// caller that folded the third answer into [`Delivery::Direct`] would write a
+/// message the unit blocks and lose the device in silence.
 pub enum Delivery<T> {
     /// No unit remaps interrupts on this machine; write what has always been written.
     Direct,
@@ -301,8 +320,79 @@ pub struct PinRedirect {
     pub high: u32,
 }
 
-/// Where `bus:device.function`'s message-signalled interrupt must point. Takes
-/// the triple, not a [`StreamId`]: what a requester id is stays in this module.
+/// Every unit on this machine remaps interrupts, so a claimed function can be
+/// given a message only its own entry delivers. Only [`remapping`] makes one.
+#[derive(Clone, Copy)]
+pub struct Remapping(());
+
+/// No unit remaps this machine's interrupts, so a function a process drives
+/// would carry a compatibility-format message, which names any vector at any
+/// CPU.
+pub struct NotRemapped;
+
+/// Whether a claimed function's message can be remapped: a fact of the
+/// machine, fixed before the first driver arms anything.
+pub fn remapping() -> Result<Remapping, NotRemapped> {
+    if unit::interrupt::is_armed() {
+        Ok(Remapping(()))
+    } else {
+        Err(NotRemapped)
+    }
+}
+
+/// A claimed function's message: claim slot `slot`'s own remapping entry,
+/// written for [`Self::function`] alone.
+///
+/// The only message a function a process drives is armed with, since
+/// [`claim_msi`] is the only thing that makes one; and dropping it puts the
+/// entry back to not present, so no refusal after it is written leaves the
+/// function an entry it can reach.
+pub struct Remapped {
+    slot: usize,
+    function: crate::drivers::pci::PciDevice,
+    address: u32,
+    data: u32,
+}
+
+impl Remapped {
+    pub fn function(&self) -> &crate::drivers::pci::PciDevice {
+        &self.function
+    }
+
+    pub fn address(&self) -> u32 {
+        self.address
+    }
+
+    pub fn data(&self) -> u32 {
+        self.data
+    }
+
+    fn stream(&self) -> StreamId {
+        StreamId::pci(self.function.bus, self.function.dev, self.function.func)
+    }
+}
+
+impl Drop for Remapped {
+    fn drop(&mut self) {
+        unit::interrupt::release(self.slot, self.stream());
+    }
+}
+
+/// Write claim slot `slot`'s entry for `function` at `vector`.
+pub fn claim_msi(
+    _: Remapping,
+    slot: usize,
+    function: &crate::drivers::pci::PciDevice,
+    vector: u8,
+) -> Remapped {
+    let stream = StreamId::pci(function.bus, function.dev, function.func);
+    let msi = unit::interrupt::claim(slot, stream, vector);
+    Remapped { slot, function: *function, address: msi.address, data: msi.data }
+}
+
+/// Where a kernel driver's `bus:device.function`'s message-signalled interrupt
+/// must point. Takes the triple, not a [`StreamId`]: what a requester id is
+/// stays in this module.
 pub fn remap_msi(
     bus: u8,
     device: u8,

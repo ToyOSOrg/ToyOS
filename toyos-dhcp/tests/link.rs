@@ -1,4 +1,4 @@
-//! §D8 and §D9: link changes, INIT-REBOOT and lost addresses.
+//! Link changes, INIT-REBOOT and lost addresses.
 
 mod common;
 

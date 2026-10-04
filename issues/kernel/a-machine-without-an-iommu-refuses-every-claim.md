@@ -10,8 +10,9 @@ Owner ruling, 2026-09-29: on a machine with no IOMMU unit a driver signed and
 shipped in the ToyOS image may claim a device, and no other may.
 It is the same driver code as on a machine with a unit, never a second
 driver: the kernel's DMA layer hands it a physical address where there is no
-unit and a domain address where there is (`DeviceSpace`,
-`kernel/src/iommu/mod.rs`). Such a machine states plainly that it has no
+unit and a domain address where there is. A claim's space is an
+`iommu::OwnSpace` (`kernel/src/iommu/mod.rs`), which has no untranslated form
+until the ruled path adds one. Such a machine states plainly that it has no
 isolation — the full isolation guarantee needs an IOMMU, and there a bad
 signed driver can still crash or corrupt the system.
 
@@ -20,11 +21,14 @@ where it is checked) and so what the "identity check" compares. No signature
 or image-identity mechanism exists in the kernel today. The exit below cannot
 be written as a test until it is.
 
-Today `pcidev`'s `bring_up` refuses every claim on such a machine with
-`Refusal::Untranslated`, whoever asks. A claim that goes on without a domain
-cannot pass through `slot_space` as it stands: it calls `reserve`, grants
-call `place`, and both panic on `DeviceSpace::Untranslated` — a kernel panic
-a userland claim would reach.
+Today `pcidev`'s `bring_up` refuses every claim on such a machine first with
+`Refusal::NotRemapped`, whoever asks: no unit remaps its interrupts, and a
+claimed function is armed only through `iommu::claim_msi`, which takes a
+`Remapping` such a machine never mints. Behind that, `Refusal::Untranslated`:
+a slot's space is an `iommu::OwnSpace`, which has no untranslated form, so
+there is no physical address for a grant to answer with. The signed driver's
+claim is the path where `NotRemapped` and `Untranslated` both give way under
+the ruling.
 
 Exit, in both arms of `iommu_virtio_platform` (`tests/common/iommu.rs`):
 

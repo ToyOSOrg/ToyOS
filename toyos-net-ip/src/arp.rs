@@ -1,7 +1,8 @@
-//! ARP reception (§7): `wire.md` §4.3's policy, then §7.2's classification in order. Only our own
+//! ARP reception: the sender's MAC and address are checked, then the packet classified, in
+//! `receive`'s order. Only our own
 //! need to send, and a request for one of our addresses from an on-link host, create an entry;
 //! any other packet can confirm, assert a MAC into STALE, or be ignored, and a MAC change is
-//! always logged (§7.3).
+//! always logged.
 
 use toyos_net_wire::addr::is_host;
 use toyos_net_wire::arp::{Arp, Operation};

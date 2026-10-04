@@ -1,4 +1,4 @@
-//! §U5–§U9: receiving, ICMP errors, close, and the properties.
+//! Receiving, ICMP errors, close, and the properties.
 
 mod common;
 
@@ -227,7 +227,7 @@ fn s_udp_us_044_the_acquisition_exception() {
     assert_eq!(u.ip_count(toyos_net_ip::Counter::IpAcquisitionAdmitted), 0);
     assert_eq!(u.udp.recv(id, &mut [0; 1_500]), Ok(None));
 
-    // A socket on 68 without the acquisition mark never hears it (§U5.3).
+    // A socket on 68 without the acquisition mark never hears it.
     let mut u = U::bare();
     let id = u.bind(ANY, 68).unwrap();
     assert_eq!(u.frame(&offer), Some(Verdict::Ignored));

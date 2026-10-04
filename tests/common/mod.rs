@@ -1,4 +1,6 @@
 pub mod audio;
+/// A claimed function at the unit, on the T14.
+pub mod claims;
 pub mod clock;
 pub mod lane;
 pub mod compile;

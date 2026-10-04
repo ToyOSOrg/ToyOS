@@ -49,6 +49,15 @@ anything more is built on it.
    `issues/kernel/the-supervisors-claim-of-a-pci-function-the-t14-lacks-holds-interrupts-off-for-3-8-ms.md`
    need.
 
+**Ruled** (owner, 2026-10-04), on when these steps start, **"Both in
+parallel"**: "Start the trace diary's first steps now, beside latency step 1
+(interrupts on in system calls). Step 1 is already measured by existing T14
+rows. The tail delays are only worked on once the diary shows their cause."
+The step he names is step 2 of
+`issues/kernel/toyos-beats-linuxs-latency-on-the-t14.md`,
+`issues/kernel/syscall-preemption-is-incidental.md`; that mapping is the
+orchestrator's, not his.
+
 Behind that judgement, and not before it: interrupt enter and exit records
 with a noise reader, the profiling sample, and the censuses moved onto the
 ring.

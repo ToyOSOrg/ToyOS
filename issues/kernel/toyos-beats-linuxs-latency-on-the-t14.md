@@ -34,6 +34,16 @@ It samples: a window under 1 ms is seen only when a tick falls in it.
 **Ruled** (owner, 2026-10-03): **"131 µs"**. ToyOS must beat Linux's worst
 delay on the other seven CPUs, 131 µs, not cpu4's one-off 2.9 ms event.
 
+**Ruled** (owner, 2026-10-04), on the order of the trace work, **"Both in
+parallel"**: "Start the trace diary's first steps now, beside latency step 1
+(interrupts on in system calls). Step 1 is already measured by existing T14
+rows. The tail delays are only worked on once the diary shows their cause."
+The step his text names is step 2 here,
+`issues/kernel/syscall-preemption-is-incidental.md`, whose exit the
+`mask_windows` row reads; the diary is
+`issues/diagnostics/nothing-in-the-machine-can-read-the-trace-ring.md`. That
+mapping is the orchestrator's, not his.
+
 **Exit**: each step's exit is met, in the file the step names, and on the T14,
 with every CPU spawning a program that exits at once, as under Linux's
 131 µs reading, the longest lateness of a 1 kHz timer's interrupt on each CPU reads under 131 µs,
