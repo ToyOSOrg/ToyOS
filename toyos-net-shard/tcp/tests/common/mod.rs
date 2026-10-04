@@ -836,6 +836,9 @@ pub fn pull<T>(
     mut sink: impl FnMut(&Outgoing<'_>, T) -> bool,
 ) -> usize {
     let mut sent = tcp.transmit_owed(now, credit, &mut hop, &mut sink);
+    for gone in tcp.drain_gone() {
+        round.retain(|id| *id != gone);
+    }
     round.extend(tcp.drain_eligible());
     let mut refused = Vec::new();
     while sent < credit {

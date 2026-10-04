@@ -202,3 +202,22 @@ fn opportunity_frames(f: &mut Fixture, credit: usize) -> Vec<Vec<u8>> {
     f.net.nodes[f.a].shard.transmit(now, credit, |frame| out.push(frame.to_vec()));
     out
 }
+
+// No id: a sender leaves the round as its last datagram leaves, its debt with it (§3.3). U ends
+// its turn on its last datagram owing 570 bytes, a connection with 100 bytes becomes eligible, and
+// U refills: U rejoins behind it with a fresh deficit and sends two frames on one quantum.
+#[test]
+fn a_sender_leaves_the_round_with_its_last_datagram() {
+    let mut f = fixture();
+    let now = f.net.now();
+    let u = f.net.nodes[f.a].shard.bind(A, None, || 0).unwrap();
+    for _ in 0..2 {
+        f.net.nodes[f.a].shard.send_to(now, u, C, 9, &[0xaa; 1_000]).unwrap();
+    }
+    assert_eq!(names(&opportunity(&mut f, 2)), [U, U], "1,514 - 2 × 1,042 = -570");
+    send(&mut f, 1, 100);
+    for _ in 0..2 {
+        f.net.nodes[f.a].shard.send_to(now, u, C, 9, &[0xaa; 1_000]).unwrap();
+    }
+    assert_eq!(names(&opportunity(&mut f, 3)), ["TCP 192.0.2.1:49153>192.0.2.3:80 ACK len 100", U, U]);
+}

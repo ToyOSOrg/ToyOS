@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 use std::net::Ipv4Addr;
 
 use toyos_net_ip::{Delivery, Event, IfIndex, Instant, Ip, Sent, FRAME};
-use toyos_net_udp::{Counter, Sender, SocketId, Udp, Verdict};
+use toyos_net_udp::{Counter, Sender, Served, SocketId, Udp, Verdict};
 use toyos_net_wire::ethernet::{Frame, IndividualMac, MacAddr};
 use toyos_net_wire::ipv4::{Ipv4Packet, MulticastAddr};
 use toyos_net_wire::Port;
@@ -287,6 +287,9 @@ impl U {
         let mut frames = Vec::new();
         let mut spent = self.ip.transmit(now, credit, |_, f| frames.push(f.to_vec()));
         let Self { ip, udp, round, .. } = self;
+        for gone in udp.drain_gone() {
+            round.retain(|s| *s != gone);
+        }
         round.extend(udp.drain_eligible());
         while spent < credit {
             let Some(sender) = round.pop_front() else { break };
@@ -298,9 +301,9 @@ impl U {
                     framed = true;
                 }
             });
-            if served {
+            spent += usize::from(framed);
+            if served == Served::More {
                 round.push_back(sender);
-                spent += usize::from(framed);
             }
         }
         self.ip.transmit(now, credit - spent, |_, f| frames.push(f.to_vec()));

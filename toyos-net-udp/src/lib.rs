@@ -195,7 +195,7 @@ struct Socket {
     rx_full: u64,
     tx: VecDeque<Queued>,
     tx_bytes: usize,
-    /// Offered to the caller's round and not yet found empty there.
+    /// In `eligible` or the caller's round.
     offered: bool,
     pending: Option<SocketError>,
     ttl: Ttl,
@@ -218,6 +218,17 @@ pub enum Sender {
     Closed,
 }
 
+/// What [`Udp::serve`] handed the caller.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Served {
+    /// A datagram, and another waits behind it.
+    More,
+    /// The sender's last datagram: it leaves the round, and is offered again once it has another.
+    Last,
+    /// Nothing: the sender has no datagram, or names a socket since closed.
+    Nothing,
+}
+
 #[derive(Debug, Default)]
 pub struct Udp {
     slots: Vec<Slot>,
@@ -225,7 +236,9 @@ pub struct Udp {
     ports: BTreeMap<Port, u32>,
     /// Senders offered to the caller's round since it last drained them.
     eligible: Vec<Sender>,
-    /// `closed` is offered and [`Udp::serve`] has not yet found it empty.
+    /// Sockets closed while in the caller's round, since it last drained them.
+    gone: Vec<Sender>,
+    /// `closed` is in `eligible` or the caller's round.
     closed_offered: bool,
     /// Datagrams closed sockets had accepted: they still leave (§U9 (3)), at most
     /// `limits::CLOSED_DATAGRAMS` of them.
@@ -555,6 +568,15 @@ impl Udp {
         let room = limits::CLOSED_DATAGRAMS.saturating_sub(self.closed.len());
         let discarded = socket.tx.len().saturating_sub(room);
         self.counters.add(Counter::TxDiscardedOnClose, u64::try_from(discarded).unwrap_or(u64::MAX));
+        if socket.offered {
+            let sender = Sender::Socket(id);
+            match self.eligible.iter().position(|&s| s == sender) {
+                Some(at) => {
+                    self.eligible.remove(at);
+                }
+                None => self.gone.push(sender),
+            }
+        }
         self.closed.extend(socket.tx.into_iter().take(room).map(|q| (socket.port, q)));
         if !self.closed.is_empty() && !core::mem::replace(&mut self.closed_offered, true) {
             self.eligible.push(Sender::Closed);
@@ -658,31 +680,40 @@ impl Udp {
     }
 
     /// Senders offered to the caller's round since the last call, each once, in the order they
-    /// became eligible: one is offered again only after [`Self::serve`] answered `false` for it.
+    /// became eligible: one is offered again only after [`Self::serve`] answered [`Served::Last`]
+    /// or [`Served::Nothing`] for it.
     pub fn drain_eligible(&mut self) -> alloc::vec::Drain<'_, Sender> {
         self.eligible.drain(..)
     }
 
+    /// Sockets closed while in the caller's round since the last call, each once: the caller
+    /// takes each out of its round. One closed before the caller drained it is never offered.
+    pub fn drain_gone(&mut self) -> alloc::vec::Drain<'_, Sender> {
+        self.gone.drain(..)
+    }
+
     /// The oldest datagram of `sender`, built as `sink` takes it; whether it leaves the stack then
-    /// or waits in [ip] for its next hop is the caller's. `false` when it has none or names a
-    /// socket since closed: it leaves the round, and is offered again once it has one.
-    pub fn serve(&mut self, sender: Sender, sink: impl FnOnce(&UdpOut<'_>)) -> bool {
-        let (port, queued) = match sender {
+    /// or waits in [ip] for its next hop is the caller's.
+    pub fn serve(&mut self, sender: Sender, sink: impl FnOnce(&UdpOut<'_>)) -> Served {
+        let (port, queued, last) = match sender {
             Sender::Closed => {
-                let Some(closed) = self.closed.pop_front() else {
+                let Some((port, queued)) = self.closed.pop_front() else {
                     self.closed_offered = false;
-                    return false;
+                    return Served::Nothing;
                 };
-                closed
+                let last = self.closed.is_empty();
+                self.closed_offered = !last;
+                (port, queued, last)
             }
             Sender::Socket(id) => {
-                let Ok(socket) = self.socket(id) else { return false };
+                let Ok(socket) = self.socket(id) else { return Served::Nothing };
                 let Some(queued) = socket.tx.pop_front() else {
                     socket.offered = false;
-                    return false;
+                    return Served::Nothing;
                 };
                 socket.tx_bytes = socket.tx_bytes.saturating_sub(queued.payload.len());
-                (socket.port, queued)
+                socket.offered = !socket.tx.is_empty();
+                (socket.port, queued, !socket.offered)
             }
         };
         self.count(Counter::Tx);
@@ -692,6 +723,10 @@ impl Udp {
             ttl: queued.ttl,
             datagram: UdpBuilder { source: port, destination: queued.port, data: &queued.payload },
         });
-        true
+        if last {
+            Served::Last
+        } else {
+            Served::More
+        }
     }
 }

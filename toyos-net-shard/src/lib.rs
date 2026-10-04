@@ -46,6 +46,7 @@ use core::net::Ipv4Addr;
 use toyos_net_ip::{Advice, Delivery, ErrorKind, IfIndex, Ip, Limiter, NextHop, Nud, Resolution, Sent, Source, Transport, TransportError, FRAME};
 use toyos_net_tcp::{ConnId, Endpoint, Hop, IcmpError, IcmpKind, ListenerId, Outgoing, Received, Seq, Served, Status, Tcp, Tuple};
 use toyos_net_udp::{Sender, SocketId, Udp, Verdict};
+use toyos_net_udp::Served as UdpServed;
 use toyos_net_wire::ethernet::{FrameBuilder, IndividualMac, MacAddr};
 use toyos_net_wire::ipv4::{Ipv4Builder, Ipv4Source, TrafficClass, Ttl};
 use toyos_net_wire::siphash::Key;
@@ -133,14 +134,12 @@ struct Member {
 }
 
 /// What serving a flow did with a frame of credit.
-enum Outcome {
-    /// A frame of this length left.
-    Sent(usize),
-    /// A datagram left the flow and no frame: [ip] holds it for its next hop, or refused it.
-    Unsent,
-    /// Nothing to send: the flow leaves the round.
-    Done,
-    Refused,
+struct Outcome {
+    /// The length of the frame that left; none when the flow had nothing, or when [ip] holds its
+    /// datagram for its next hop or refused it.
+    frame: Option<i32>,
+    /// The flow has nothing left: it leaves the round, its deficit with it.
+    leaves: bool,
 }
 
 /// The quantum: the largest frame the interface sends (architecture §3.3).
@@ -252,11 +251,10 @@ impl Shard {
     /// Returns how many left.
     pub fn transmit(&mut self, now: Instant, credit: usize, mut sink: impl FnMut(&[u8])) -> usize {
         let mut spent = 0usize;
-        let mut aside = Vec::new();
         while spent < credit {
             let sent = self.ip.transmit(now, 1, |_, frame| sink(frame)) > 0
                 || self.tcp_frame(now, &mut sink, |tcp, hop, out| tcp.transmit_owed(now, 1, hop, out)).1.is_some()
-                || self.round_frame(now, &mut sink, &mut aside)
+                || self.round_frame(now, &mut sink)
                 // A flow that waits has queued the request it waits on.
                 || self.ip.transmit(now, 1, |_, frame| sink(frame)) > 0;
             if !sent {
@@ -264,7 +262,6 @@ impl Shard {
             }
             spent = spent.saturating_add(1);
         }
-        self.round.extend(aside);
         self.settle(now);
         spent
     }
@@ -272,44 +269,36 @@ impl Shard {
     /// One frame of the round's (architecture §3.3). The head's turn adds the quantum to its
     /// deficit once, however many opportunities the turn spans; the flow is served while the
     /// deficit is above 0, each frame's length charged as it leaves, and then goes to the tail
-    /// keeping its deficit. A flow with nothing to send leaves the round, its deficit with it. A
-    /// flow whose frame the sink refused is set aside until the opportunity ends, forfeiting what
-    /// is left of its turn.
-    fn round_frame(&mut self, now: Instant, sink: &mut impl FnMut(&[u8]), aside: &mut Vec<Member>) -> bool {
+    /// keeping its deficit. A flow with nothing left leaves the round, its deficit with it: a UDP
+    /// sender as its last datagram is handed out, a TCP connection once served with nothing due.
+    fn round_frame(&mut self, now: Instant, sink: &mut impl FnMut(&[u8])) -> bool {
         loop {
             let Some(head) = self.round.front_mut() else { return false };
             if !core::mem::replace(&mut self.turn, true) {
                 head.deficit = head.deficit.saturating_add(QUANTUM);
             }
             let flow = head.flow;
-            let outcome = match flow {
+            let Outcome { frame, leaves } = match flow {
                 Flow::Tcp(id) => match self.tcp_frame(now, sink, |tcp, hop, out| tcp.serve(now, id, hop, out)) {
-                    (_, Some(len)) => Outcome::Sent(len),
-                    (Served::Refused, None) => Outcome::Refused,
-                    (Served::Sent | Served::Done, None) => Outcome::Done,
+                    (Served::Sent, Some(len)) => Outcome { frame: Some(len), leaves: false },
+                    (Served::Done, None) => Outcome { frame: None, leaves: true },
+                    (Served::Sent, None) | (Served::Done, Some(_)) => unreachable!("[tcp] answers Sent exactly when the sink framed a segment"),
+                    (Served::Refused, _) => unreachable!("the shard's sink frames every segment"),
                 },
                 Flow::Udp(sender) => self.udp_frame(now, sender, sink),
             };
-            match outcome {
-                Outcome::Sent(len) => {
-                    if let Some(head) = self.round.front_mut() {
-                        head.deficit = head.deficit.saturating_sub(i32::try_from(len).unwrap_or(QUANTUM));
-                        if head.deficit <= 0 {
-                            self.round.rotate_left(1);
-                            self.turn = false;
-                        }
-                    }
-                    return true;
-                }
-                Outcome::Unsent => {}
-                Outcome::Done => {
-                    self.round.pop_front();
-                    self.turn = false;
-                }
-                Outcome::Refused => {
-                    aside.extend(self.round.pop_front().map(|m| Member { deficit: m.deficit.min(0), ..m }));
-                    self.turn = false;
-                }
+            if let (Some(len), Some(head)) = (frame, self.round.front_mut()) {
+                head.deficit = head.deficit.saturating_sub(len);
+            }
+            if leaves {
+                self.round.pop_front();
+                self.turn = false;
+            } else if frame.is_some() && self.round.front().is_some_and(|head| head.deficit <= 0) {
+                self.round.rotate_left(1);
+                self.turn = false;
+            }
+            if frame.is_some() {
+                return true;
             }
         }
     }
@@ -322,14 +311,14 @@ impl Shard {
         now: Instant,
         sink: &mut impl FnMut(&[u8]),
         send: impl FnOnce(&mut Tcp, &mut dyn FnMut(&Tuple) -> Hop<Via>, &mut dyn FnMut(&Outgoing<'_>, Via) -> bool) -> R,
-    ) -> (R, Option<usize>) {
+    ) -> (R, Option<i32>) {
         let Self { ip, iface, mac, tcp, frame, waiting, .. } = self;
         let iface = *iface;
         let mut built = None;
         let done = send(tcp, &mut |tuple| hop(ip, now, iface, tuple, waiting), &mut |out, via| {
-            let Some(bytes) = tcp_datagram(out, *mac, via.mac, frame) else { return false };
+            let Some(bytes) = tcp_datagram(out, *mac, via.mac, frame) else { unreachable!("TCP's MTU, [tcp]'s bounds and [ip]'s addresses fit every segment in a frame") };
             sink(bytes);
-            built = Some((via.next_hop, out.source, bytes.len()));
+            built = Some((via.next_hop, out.source, charge(bytes)));
             true
         });
         let Some((next_hop, source, len)) = built else { return (done, None) };
@@ -347,15 +336,11 @@ impl Shard {
             if let Ok(Sent::Frame(len)) = ip.send_udp(now, out, frame) {
                 sent = frame.get(..len).map(|bytes| {
                     sink(bytes);
-                    len
+                    charge(bytes)
                 });
             }
         });
-        match (served, sent) {
-            (false, _) => Outcome::Done,
-            (true, Some(len)) => Outcome::Sent(len),
-            (true, None) => Outcome::Unsent,
-        }
+        Outcome { frame: sent, leaves: served != UdpServed::More }
     }
 
     pub fn next_deadline(&self) -> Option<Instant> {
@@ -369,8 +354,8 @@ impl Shard {
         self.settle(now);
     }
 
-    /// Routes what each crate reported to the one that acts on it, and puts the flows that became
-    /// eligible at the round's tail. Every call that can make a flow eligible ends here, so the
+    /// Routes what each crate reported to the one that acts on it, takes the flows freed or closed
+    /// out of the round, and puts the flows that became eligible at the round's tail. Every call that can make a flow eligible ends here, so the
     /// round holds flows in the order they became eligible.
     fn settle(&mut self, now: Instant) {
         let Self { ip, tcp, udp, log, events, waiting, .. } = self;
@@ -412,6 +397,13 @@ impl Shard {
             self.routes = ip.generation();
             waiting.clear();
             tcp.wake_all();
+        }
+        let head = self.round.front().map(|m| m.flow);
+        for flow in tcp.drain_gone().map(Flow::Tcp).chain(udp.drain_gone().map(Flow::Udp)) {
+            self.round.retain(|m| m.flow != flow);
+        }
+        if self.round.front().map(|m| m.flow) != head {
+            self.turn = false;
         }
         let tcp = tcp.drain_eligible().map(Flow::Tcp);
         let udp = udp.drain_eligible().map(Flow::Udp);
@@ -557,6 +549,12 @@ fn hop(ip: &mut Ip, now: Instant, iface: IfIndex, tuple: &Tuple, waiting: &mut B
     answer
 }
 
+/// What a frame costs its flow's deficit: its length, which `FRAME` bounds and `QUANTUM` fits.
+fn charge(frame: &[u8]) -> i32 {
+    let Ok(len) = i32::try_from(frame.len()) else { unreachable!("a frame is at most FRAME bytes") };
+    len
+}
+
 /// The TCP flows waiting on `wait` ask again at the next opportunity.
 fn wake(tcp: &mut Tcp, waiting: &mut BTreeMap<Wait, BTreeSet<Ipv4Addr>>, wait: Wait) {
     for remote in waiting.remove(&wait).into_iter().flatten() {
@@ -593,5 +591,47 @@ fn tcp_error(error: &TransportError, sequence: u32) -> IcmpError {
         remote: Endpoint { addr: flow.destination, port: flow.destination_port },
         sequence: Seq::new(sequence),
         kind,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const A: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
+    const B: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 2);
+
+    /// A shard whose address is verified, its device then offering nothing.
+    fn verified() -> (Shard, Instant) {
+        let secrets = Secrets {
+            ip: [1; 16],
+            resets: [2; 16],
+            tcp: toyos_net_tcp::Secrets { isn: [3; 16], timestamp: [4; 16], port_offset: [5; 16], port_index: [6; 16], port_table: [0; 16] },
+        };
+        let mac = IndividualMac::new(MacAddr([2, 0, 0, 0, 0, 0x0a])).unwrap();
+        let mut now = Instant::from_millis(3_600_000);
+        let mut shard = Shard::new(now, Config { mac, receive_buffer: 65_535, send_buffer: 65_535, secrets }).unwrap();
+        shard.link_up(now).unwrap();
+        shard.add_address(now, A, 24).unwrap();
+        while !shard.drain_events().any(|e| e == Event::Verified(A)) {
+            shard.transmit(now, usize::MAX, |_| {});
+            now = shard.next_deadline().expect("conflict detection is still running");
+            shard.fire(now);
+        }
+        (shard, now)
+    }
+
+    // No id: a connection freed while in the round leaves it at once (architecture §3.3 holds nothing
+    // without a bound), while the device offers nothing.
+    #[test]
+    fn a_connection_freed_in_the_round_leaves_it() {
+        let (mut shard, now) = verified();
+        let remote = Endpoint { addr: B, port: Port::new(80).unwrap() };
+        for _ in 0..1_000 {
+            let id = shard.connect(now, None, remote).unwrap();
+            assert_eq!(shard.round.len(), 1, "its SYN put it in the round");
+            shard.abort(now, id).unwrap();
+            assert!(shard.round.is_empty());
+        }
     }
 }

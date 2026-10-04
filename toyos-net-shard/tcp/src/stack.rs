@@ -165,8 +165,7 @@ struct Answer {
 
 /// What is owed and not offered: under a remote address, what waits for its next hop until
 /// [`Tcp::wake`] names it; within one [`Tcp::transmit_owed`], what a refused frame left owed until
-/// the call ends. Either then goes back ahead of anything queued since, and a connection is
-/// offered to the round again.
+/// the call ends.
 #[derive(Default)]
 struct Parked {
     stubs: Vec<Tuple>,
@@ -226,6 +225,8 @@ pub struct Tcp {
     deadlines: BTreeSet<(Instant, u32)>,
     /// Connections that became eligible for the caller's round since it last drained them.
     eligible: Vec<ConnId>,
+    /// Connections freed while in the caller's round, since it last drained them.
+    gone: Vec<ConnId>,
     stubs: VecDeque<Tuple>,
     answers: VecDeque<Answer>,
     /// TIME-WAITs owing an ACK: a set, so a segment finds its entry in log n.
@@ -383,6 +384,7 @@ impl Tcp {
             time_waits: BTreeSet::new(),
             deadlines: BTreeSet::new(),
             eligible: Vec::new(),
+            gone: Vec::new(),
             stubs: VecDeque::new(),
             answers: VecDeque::new(),
             tw_owed: BTreeSet::new(),
@@ -445,9 +447,21 @@ impl Tcp {
     }
 
     fn free(&mut self, index: u32) {
+        let Some(generation) = self.conns.get(usize::try_from(index).unwrap_or(usize::MAX)).map(|s| s.generation) else { return };
         let Some(conn) = release(&mut self.conns, &mut self.free_conns, index) else { return };
+        let remote = conn.tuple.remote.addr;
+        let parked = self.parked.get(&remote).is_some_and(|p| p.conns.contains(&index));
         // Its index may name another connection next.
-        self.unpark(conn.tuple.remote.addr, |parked| parked.conns.retain(|&i| i != index));
+        self.unpark(remote, |p| p.conns.retain(|&i| i != index));
+        if conn.queued && !parked {
+            let id = ConnId { index, generation };
+            match self.eligible.iter().position(|&e| e == id) {
+                Some(at) => {
+                    self.eligible.remove(at);
+                }
+                None => self.gone.push(id),
+            }
+        }
         if let Some(at) = conn.deadline {
             self.deadlines.remove(&(at, index));
         }
@@ -1281,6 +1295,12 @@ impl Tcp {
     /// [`Served::Done`] for it.
     pub fn drain_eligible(&mut self) -> alloc::vec::Drain<'_, ConnId> {
         self.eligible.drain(..)
+    }
+
+    /// Connections freed while in the caller's round since the last call, each once: the caller
+    /// takes each out of its round. One freed before the caller drained it is never offered.
+    pub fn drain_gone(&mut self) -> alloc::vec::Drain<'_, ConnId> {
+        self.gone.drain(..)
     }
 
     /// One segment of `id`, if one is due, asked for and built as in [`Self::transmit_owed`].
