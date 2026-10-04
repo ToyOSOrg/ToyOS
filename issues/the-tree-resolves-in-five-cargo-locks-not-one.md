@@ -31,7 +31,8 @@ byte-identical to the build of the last alignment before it. The root
 `.cargo/config.toml` is tracked, which `.gitignore` ignores today and where
 `.claude/agents/implementer.md` has agents list fork clones, so the merge
 moves that instruction; no `rust-toolchain.toml` is tracked outside `rust/`,
-since the layout rule's step 1 names none. The alignments
+since step 1 of the rule in `issues/the-tree-says-who-uses-each-thing.md`
+names none. The alignments
 land first, each in today's workspace; pull request #724, the root and
 kernel locks, is the first.
 

@@ -130,8 +130,8 @@ apps/     CLAUDE.md (sdk/ and registries only; Linux under Wayland, macOS, Windo
 sdk/      CLAUDE.md (identity, sysroot, publication; std links abi and toyos)
           abi/ toyos/ keymap/ font/ window/ filepicker/ libc/ (arch/)
 lib/      acpi bcachefs blackbox blockhold blockring bootmap elf elide fat32 gpt hda i219 inspect
-          logstream manifest osrelease quiesce rootimage swap symbols tco tmpdir untrusted update
-          userbound wallclock xhci
+          logstream manifest osrelease quiesce rootimage swap symbols tco tmpdir tsc untrusted
+          update userbound wallclock xhci
 share/    mirrors /system/share: fonts/ (+ OFL) icons/ (+ MIT)
 images/   system.toml console.toml diag.toml
 build/    CLAUDE.md; the root package's library and binaries (today src/); ci/qemu-version
@@ -158,6 +158,8 @@ Where this differs from the tree the owner adopted:
 - `apps/` names toyfetch, by the Apps ruling.
 - `lib/osrelease` is `toyos-osrelease`, which #722 added after the design;
   the build, `libc` and the supervisor use it (rule step 5).
+- `lib/tsc` is `toyos-tsc`, which #721 added after the design; the kernel
+  and the loader use it (rule step 5).
 
 ## Stages
 
