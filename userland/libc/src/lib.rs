@@ -30,6 +30,7 @@ mod string;
 mod strtonum;
 mod text;
 mod time;
+mod uname;
 mod utf8;
 mod wchar;
 

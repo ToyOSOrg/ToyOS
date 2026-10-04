@@ -68,9 +68,16 @@ impl Layer {
     }
 }
 
+const TAG: &str = "toolchain-linux-x86_64-";
+
 /// The release of the sysroot `key` names.
 fn tag(key: &Key) -> String {
-    format!("toolchain-linux-x86_64-{key}")
+    format!("{TAG}{key}")
+}
+
+/// The sysroot key a [`manifest`]'s `text` names, read back off its first line.
+pub(crate) fn named_key(text: &str) -> Option<Key> {
+    text.lines().next()?.strip_prefix("toolchain ")?.strip_prefix(TAG).and_then(Key::parse)
 }
 
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
@@ -863,6 +870,12 @@ mod tests {
         assert_eq!(fs::read_to_string(crate::toolchain::witness_path(&rust_dir)).unwrap(), witness);
         let toolchain = fs::read_to_string(crate::toolchain::manifest_path(&rust_dir)).unwrap();
         assert_eq!(toolchain, manifest("toolchain-linux-x86_64-0123456789abcdef"));
+        // What an image built against it records as its toolchain: the key its
+        // release is tagged with, as a build that made its own sysroot records.
+        let installed = crate::sysroot::Sysroot::installed(crate::toolchain::stage2(&rust_dir), &toolchain);
+        for arch in [crate::arch::Arch::X86_64, crate::arch::Arch::Aarch64] {
+            assert_eq!(installed.identity.of_target(arch.userland()).as_str(), "0123456789abcdef");
+        }
         fs::create_dir_all(rust_dir.join("build/sysroots/not-a-key")).unwrap();
         assert!(lay_out(&root).unwrap_err().contains("named by no key"));
     }
