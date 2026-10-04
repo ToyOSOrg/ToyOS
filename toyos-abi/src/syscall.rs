@@ -259,6 +259,14 @@ pub const SYS_DEVICE_DMA_MAP: u64 = 122;
 /// [`device_dma_unmap`].
 pub const SYS_DEVICE_DMA_UNMAP: u64 = 123;
 
+/// Every online CPU's counters, as [`crate::counters`] records. Gated by
+/// [`Rights::COUNTERS`] on a `SysCap`, and the counters that time programs by
+/// [`Rights::TRACE`] beside it. See [`counters`].
+///
+/// [`Rights::COUNTERS`]: crate::handle::Rights::COUNTERS
+/// [`Rights::TRACE`]: crate::handle::Rights::TRACE
+pub const SYS_COUNTERS: u64 = 124;
+
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
 ///
@@ -271,7 +279,7 @@ pub const SYSCALL_PROFILE_BINS: usize = 128;
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_DEVICE_DMA_UNMAP < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_COUNTERS < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 
@@ -807,6 +815,13 @@ pub mod debug_action {
     /// ending inside the spawn that started it is a race no caller can order;
     /// the landing and the exit either side of the wait are the shipped paths.
     pub const HOLD_SPAWN_UNTIL_CHILD_ENDS: u64 = 23;
+    /// The CPU the argument names answers no [`SYS_COUNTERS`](super::SYS_COUNTERS)
+    /// round until [`COUNTERS_HEAR`]: a reader finds it as it finds a CPU
+    /// with its interrupts closed past the round's bound. A CPU out of range
+    /// answers `InvalidArgument`.
+    pub const COUNTERS_DEAF: u64 = 24;
+    /// Every CPU answers rounds again.
+    pub const COUNTERS_HEAR: u64 = 25;
 }
 
 /// Every kind of kernel object, in the order the kernel's own `kobject!`
@@ -939,6 +954,10 @@ pub fn log_read(
 pub fn mark_tty(handle: RawHandle) {
     syscall(SYS_MARK_TTY, handle.0 as u64, 0, 0, 0);
 }
+
+/// Threads one process holds, its main thread and every exited one not yet
+/// joined among them; [`thread_spawn`] past it is `ResourceExhausted`.
+pub const MAX_THREADS: usize = 4096;
 
 /// Spawn a new thread with the given entry point, stack pointer, argument, and stack base.
 /// `stack_base` is the bottom of the user stack (for stack info queries).
@@ -1956,6 +1975,23 @@ pub fn device_inventory(
     .map(|n| n as usize)
 }
 
+/// One [`crate::counters`] record per online CPU, into `buf`; answers how many
+/// were written. An empty `buf` asks how many CPUs there are and asks no CPU
+/// anything; one with room for fewer is refused with
+/// [`SyscallError::ResourceExhausted`], and one declared longer than the
+/// kernel's most CPUs with [`SyscallError::InvalidArgument`].
+///
+/// `syscap` must carry [`crate::handle::Rights::COUNTERS`]: a capability
+/// without it is refused with a word, and a handle the caller does not hold
+/// ends it.
+pub fn counters(
+    syscap: RawHandle,
+    buf: &mut [crate::counters::RawRecord],
+) -> Result<usize, SyscallError> {
+    check(syscall(SYS_COUNTERS, syscap.0 as u64, buf.as_mut_ptr() as u64, buf.len() as u64, 0))
+        .map(|n| n as usize)
+}
+
 /// Sleep for the given number of nanoseconds.
 pub fn nanosleep(nanos: u64) {
     syscall(SYS_NANOSLEEP, nanos, 0, 0, 0);
@@ -2031,6 +2067,10 @@ pub fn readlink(path: &[u8], buf: &mut [u8]) -> Result<usize, SyscallError> {
     check(syscall(SYS_READLINK, path.as_ptr() as u64, path.len() as u64, buf.as_mut_ptr() as u64, buf.len() as u64)).map(|n| n as usize)
 }
 
+/// Libraries one process holds, `DT_NEEDED` and loaded alike; [`dl_open`] of a
+/// name it does not hold past it is `ResourceExhausted`.
+pub const MAX_LIBRARIES: usize = 1024;
+
 /// Load a shared library (.so) into the current process.
 /// Runs .init_array constructors after loading.
 pub fn dl_open(path: &[u8]) -> Result<u64, SyscallError> {
@@ -2105,6 +2145,10 @@ pub fn stack_info() -> Option<(u64, u64)> {
 pub fn cpu_count() -> u32 {
     syscall(SYS_CPU_COUNT, 0, 0, 0, 0) as u32
 }
+
+/// Regions one address space holds — every mapping, ELF segment, stack, TLS
+/// block and library image; a placement past it is `ResourceExhausted`.
+pub const MAX_REGIONS: usize = 32_768;
 
 /// Map anonymous memory. Returns pointer on success, null on failure.
 ///

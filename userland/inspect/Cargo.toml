@@ -16,4 +16,4 @@ toyos-abi = { path = "../../toyos-abi" }
 toyos-inspect = { path = "../../toyos-inspect" }
 
 [package.metadata.toyos.host]
-exempt.manages = "ToyOS's machine inventory: what every owner's port and the kernel's `inventory` SysCap report"
+exempt.manages = "ToyOS's machine inventory and counters: what every owner's port and the kernel's `inventory` and `counters` SysCap rights report"
