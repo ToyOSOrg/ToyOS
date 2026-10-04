@@ -61,15 +61,11 @@ writes its own, and the battery comes first (his direction of `0ee814f5a`).
 
 - **"Like Windows, not Linux"**, on `_OSI`: "Yes to every published Windows
   version string, no to 'Linux' and 'FreeBSD', as Linux itself answers. The
-  T14 then runs the path it was tested on..." (the option's text as relayed
-  to this record, cut there). The answers are fixed before the first table
-  loads, since an SSDT queries `_OSI` while it loads (the orchestrator's
-  note).
+  T14 then runs the path it was tested on: Modern Standby, CPU performance
+  tables, 101-step backlight, thermal profiles, all devices present."
 - **"Yes, one path"**, on power-off: "Power-off always goes through the ACPI
   server; the kernel's power-off table reader is deleted. If the server is
-  broken, power-off fails loudly in every test." It applies from the
-  interpreter's power-off stage on (the orchestrator's placement); the
-  kernel's reader is `toyos-acpi/src/dsdt.rs`.
+  broken, power-off fails loudly in every test."
 
 The orchestrator's reading of the clean-room ruling, not his: uACPI and
 ACPICA are run only as black-box oracles, and whoever writes the interpreter
@@ -85,3 +81,9 @@ power-off path (`SYS_SHUTDOWN`), and the boot's log records the press and that
 stop, and each EC query number once with its count: a T14 row reads them there.
 A second T14 row kills the server and reads `SCI_EN` clear in `PM1_CNT`
 afterwards, the kernel having written `ACPI_DISABLE` to `SMI_CMD`.
+
+**Stage: power-off through the server** (the orchestrator's placement of "Yes,
+one path"). The ACPI server evaluates `\_S5` and powers the machine off.
+**Exit**: the kernel's `\_S5_` reader, `toyos-acpi/src/dsdt.rs`, and its caller
+in `kernel/src/arch/x86_64/power.rs` are deleted, and a test that powers off
+through a broken server is red.

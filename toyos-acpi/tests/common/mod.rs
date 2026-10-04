@@ -139,6 +139,10 @@ pub fn resource_list(descriptors: &[Vec<u8>]) -> Vec<u8> {
     bytes
 }
 
+/// What OVMF's firmware answered for its root bridge 0 through
+/// `EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL::Configuration`, as captured.
+pub const OVMF_ROOT_BRIDGE: &[u8] = include_bytes!("../../fixtures/ovmf-pure-efi/root-bridge-0.bin");
+
 /// What the ThinkPad T14's firmware answers for its root bridge 0 through
 /// `EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL::Configuration`, decoded: its I/O range,
 /// two memory windows and its bus range.

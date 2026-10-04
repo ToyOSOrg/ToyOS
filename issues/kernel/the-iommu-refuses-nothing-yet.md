@@ -38,8 +38,8 @@ On the T14 the external ports are the Thunderbolt root ports `00:07.0` and
 `00:07.2`, under units 1 and 2 (the orchestrator's reading of that machine's
 `iommu:` lines).
 
-**Ruled** (owner, 2026-10-04), on stage 2, the default-deny root and the
-hand-over of a unit firmware left translating:
+**Ruled** (owner, 2026-10-04), on the default-deny root and the hand-over of
+a unit firmware left translating:
 
 - **"Display and USB only"**: "Allowed only for display and USB controllers
   whose reserved region belongs to them alone; that memory is mapped into the
@@ -53,7 +53,8 @@ hand-over of a unit firmware left translating:
   table switched under translation (VT-d Rev. 4.1 §6.6), so translation goes
   off for that one switch. The older protection registers are `PMEN`'s
   protected memory regions (§11.4.8.1). The T14's units report `ESRTPS`,
-  `SMTS` and `ADMS` clear, so it is not one of those machines.
+  `SMTS` and `ADMS` clear, so it is not one of those machines. The weakness is
+  `issues/kernel/a-unit-in-scalable-or-abort-mode-loses-translation-for-its-root-table-switch.md`.
 - **"Apply it at hand-over"**, on reserved memory: "From the hand-over on,
   only display and USB controllers keep access to their reserved region; any
   other device's access is refused. A device that firmware was still using
@@ -64,5 +65,19 @@ hand-over of a unit firmware left translating:
   panel, only in that row; normal boots are unaffected."
 - On the row that aims the T14's undriven NVMe `04:00.0` at memory nobody
   gave it, asked whether to allow a single read-only Identify on its own
-  boot, he answered: "You can do with the t14 what you want." The row is
-  allowed, on its own boot.
+  boot, he answered: "You can do with the t14 what you want." The grant goes
+  beyond the question asked.
+
+Owner: the orchestrator.
+
+**Exit**: a test or a T14 row reads each ruled refusal, each with its
+negative control:
+
+- a userland claim of a function below an external port (on the T14,
+  `00:07.0` or `00:07.2`) is refused by name;
+- a claim of a function an RMRR names is refused unless it is a display or USB
+  controller that RMRR names alone, whose region is then mapped into its
+  driver's domain (the T14's iGPU row);
+- from the hand-over on, a device reaching reserved memory not its own faults,
+  is logged and stopped, and the machine keeps running;
+- a unit with the hand-over gap logs it.

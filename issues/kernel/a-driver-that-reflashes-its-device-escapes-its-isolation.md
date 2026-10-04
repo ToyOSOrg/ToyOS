@@ -16,7 +16,7 @@ stands between a root-complex-integrated endpoint, or one function of a
 multi-function device, and an ID beside it. And the firmware outlives the
 driver: the next holder, and the next boot's firmware before any IOMMU is
 on, drive what the last holder wrote. That reach is the IOMMU design's
-reading (its roasts, 2026-10-03 and 2026-10-04), not a measurement.
+reading, not a measurement.
 
 **Ruled** (owner, 2026-10-04, "Refuse external, record reflash"):
 "External-port devices can't be claimed by userland drivers for now;
