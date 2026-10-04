@@ -1,0 +1,9 @@
+[package]
+name = "toyos-tsc"
+description = "The rate x86-64's time-stamp counter counts at, as CPUID leaves 15H and 16H state it, pure."
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[lints.rust]
+unsafe_code = "forbid"
