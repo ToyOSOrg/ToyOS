@@ -152,6 +152,8 @@ fn main() {
         }
     }
 
+    // A table the last arm filled has no room left to report it in.
+    drop((poller, opened, served, streams));
     assert!(red.is_empty(), "fs_share:\n  {}", red.join("\n  "));
     println!("fs_share: PASS");
 }
