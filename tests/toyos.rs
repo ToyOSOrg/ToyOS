@@ -57,6 +57,9 @@ const ACTUATOR_TESTS: &[&str] = &[
     // again, which is what a CPU silent past a read's bound is to the reader,
     // and nothing in a guest makes one on demand.
     "counters_silent",
+    // Action 26: the timer's interrupt inside a syscall's body, which only a
+    // running gate decides and nothing in a guest puts there on demand.
+    "ring0_timer_in_syscall",
 ];
 
 /// What [`ACTUATOR_TESTS`] boots: the one kernel that carries `SYS_DEBUG`, with
@@ -166,6 +169,9 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     // Its shared run is the x86-64 verdict; `virt_readonly_copyout` builds it
     // for AArch64 and runs it on that architecture's job case.
     "abuse_readonly_copyout",
+    // Its actuator-boot run is the T14's verdict; `virt_ring0_timer_in_syscall`
+    // builds it for AArch64 and runs it on that architecture's job case.
+    "ring0_timer_in_syscall",
     // Its shared run asserts every arm's kill; `crash_report_reads_no_kernel_memory`
     // reads what the kernel said of two of them.
     "fault_gates",
@@ -204,6 +210,7 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("virt_unmap_touch", qemu::Profile::VirtEl2),
     ("virt_debug_refused", qemu::Profile::VirtEl2),
     ("virt_readonly_copyout", qemu::Profile::VirtEl2),
+    ("virt_ring0_timer_in_syscall", qemu::Profile::VirtEl2),
     ("virt_mask_windows", qemu::Profile::VirtEl2),
     ("virt_smp", qemu::Profile::VirtEl2),
     ("virt_el1_smp", qemu::Profile::VirtTcg),
@@ -1536,6 +1543,9 @@ fn inked(dump: &screen::Ppm, needle: &str, want: [u8; 3], why: &str) -> Result<(
 /// `test_rs_abuse_readonly_copyout`.
 const VIRT_COPYOUT: &str = "abuse_readonly_copyout";
 
+/// The same for its job `test_rs_ring0_timer_in_syscall`.
+const VIRT_RING0_TIMER: &str = "ring0_timer_in_syscall";
+
 /// `tests/toyos-rust-tests`' binary that `tests/virtsmpcase` runs as its job
 /// `test_rs_counters_read`.
 const VIRT_COUNTERS_READ: &str = "counters_read";
@@ -1573,7 +1583,7 @@ fn virt_job(profile: qemu::Profile, job: &str, said: &str) -> Result<(), String>
             smp: 1,
             kernel_features: toyos_build::build::TEST_KERNEL,
             ready_marker: "control registers: SCTLR_EL1=",
-            extra_root_files: vec![suite_bin(profile.arch(), VIRT_COPYOUT)],
+            extra_root_files: vec![suite_bin(profile.arch(), VIRT_COPYOUT), suite_bin(profile.arch(), VIRT_RING0_TIMER)],
             ..Default::default()
         },
     );
@@ -2239,6 +2249,11 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
         "virt_readonly_copyout" => {
             virt_job(profile, &format!("test_rs_{VIRT_COPYOUT}"), "a syscall writes only where its caller could store")
         }
+        "virt_ring0_timer_in_syscall" => virt_job(
+            profile,
+            &format!("test_rs_{VIRT_RING0_TIMER}"),
+            "the timer interrupted the syscall's body and re-armed a quantum",
+        ),
         "virt_mask_windows" => virt_mask_windows(profile),
         "virt_irq_storm" => {
             // The CPU floods itself with SGIs until the timer has fired a
@@ -3382,7 +3397,9 @@ const SMI_SPAN_NS: u64 = 4_444_000_000;
 /// same span of load (`tests/t14-linux/turbostat-loaded.txt`).
 ///
 /// Read and not held, beside Linux's turbostat: each CPU's idle busy
-/// fraction, and what one round cost its reader.
+/// fraction, and what one round cost its reader; and beside Linux's loaded
+/// timer reading (`issues/toyos-beats-linuxs-latency-on-the-t14.md`),
+/// how late each CPU's kick handler ran under the `loaded` phase.
 fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
     type Read<'a> = BTreeMap<usize, BTreeMap<&'a str, u64>>;
     back.job_passed("test_rs_counters_metal")?;
@@ -3485,6 +3502,10 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
         let at = header.iter().position(|c| *c == column).ok_or_else(|| format!("turbostat read no {column}"))?;
         Ok(rows.filter(|r| r[0] == "-").filter_map(|r| r.get(at)?.parse().ok()).collect())
     };
+    log.must_say("counters_metal loaded: ")?;
+    for said in log.text().lines().filter(|l| l.contains("counters_metal loaded: ")) {
+        eprintln!("  [counters] {}", said.split("counters_metal ").nth(1).unwrap_or(said).trim());
+    }
     let range = |values: &[f64]| values.iter().fold((f64::MAX, f64::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
     let idle = range(&linux(include_str!("t14-linux/turbostat-idle.txt"), "Busy%")?);
     let loaded_rows = linux(include_str!("t14-linux/turbostat-loaded.txt"), "Bzy_MHz")?;
@@ -3797,6 +3818,9 @@ fn tlb_shootdown_cost(log: &str, cpus: u32) -> Result<(u64, u64), String> {
 /// is the whole of what separates the two, and that contract is in the binary's
 /// own module header.
 fn wake_latency_recorded(boot: &metal::Readback) -> Result<(), String> {
+    for said in boot.log().text().lines().filter(|l| l.contains("cyclictest: ")) {
+        eprintln!("  [latency] {}", said.trim());
+    }
     let code = boot.exit_code("test_rs_cyclictest")?;
     if code < 0 {
         return Err(format!(

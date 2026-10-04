@@ -831,6 +831,14 @@ pub mod debug_action {
     pub const COUNTERS_DEAF: u64 = 24;
     /// Every CPU answers rounds again.
     pub const COUNTERS_HEAR: u64 = 25;
+    /// Arm this CPU's timer to fire within 100 µs and wait inside the syscall
+    /// for the kernel's own fire. Answers [`RING0_FIRE_REARMED`] once it fired
+    /// and re-armed a quantum, [`RING0_FIRE_NEVER`] if none came within
+    /// 100 ms, and [`RING0_FIRE_OTHER_SPAN`] if it re-armed something else.
+    pub const RING0_TIMER_IN_SYSCALL: u64 = 26;
+    pub const RING0_FIRE_REARMED: u64 = 0;
+    pub const RING0_FIRE_NEVER: u64 = 1;
+    pub const RING0_FIRE_OTHER_SPAN: u64 = 2;
 }
 
 /// Every kind of kernel object, in the order the kernel's own `kobject!`

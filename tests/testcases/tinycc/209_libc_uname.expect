@@ -1,0 +1,5 @@
+uname: 0, no errno
+sysname: ToyOS; nodename: empty
+version: a commit
+release: the version's first twelve digits
+machine: the one this case was compiled for
