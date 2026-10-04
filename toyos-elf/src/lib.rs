@@ -37,6 +37,7 @@ pub mod dynamic;
 pub mod gnu_hash;
 pub mod header;
 pub mod layout;
+pub mod note;
 pub mod rela;
 pub mod section;
 pub mod sym;

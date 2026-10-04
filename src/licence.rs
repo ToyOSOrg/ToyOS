@@ -453,6 +453,12 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         Terms::Font("OFL-1.1"),
     ),
     (
+        "toyos-elf/tests/fixtures/lld-headers.bin",
+        "ba65b2a85776a973ad4fd49a224598391fde212e06b10aa51e2c8bcacfae0c79",
+        "ours: the first 4096 bytes of a rust-lld output (toyos-elf/tests/real.rs)",
+        Terms::Spdx("MIT OR Apache-2.0"),
+    ),
+    (
         "toyos-elf/tests/fixtures/shell-headers.bin",
         "4df3e42b699fd1ff6bfa569c6e0bed386e01dcec7ddfcc3bde32101fc1730046",
         "ours: the first 4096 bytes of /system/bin/shell (toyos-elf/tests/real.rs)",

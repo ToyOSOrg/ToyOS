@@ -1614,7 +1614,6 @@ dependencies = [
  "bcachefs",
  "dlmalloc",
  "hashbrown 0.16.1",
- "rustc-demangle",
  "toyos-abi",
  "toyos-acpi",
  "toyos-blackbox",
@@ -1779,6 +1778,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "object"
+version = "0.38.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "271638cd5fa9cca89c4c304675ca658efc4e64a66c716b7cfe1afb4b9611dbbc"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]
@@ -2079,9 +2087,9 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "semver"
-version = "1.0.27"
+version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d767eb0aabc880b29956c35734170f26ed551a859dbd361d140cdbeca61ab1e2"
+checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 
 [[package]]
 name = "serde"
@@ -2449,6 +2457,9 @@ version = "0.1.0"
 [[package]]
 name = "toyos-elf"
 version = "0.1.0"
+dependencies = [
+ "object",
+]
 
 [[package]]
 name = "toyos-elide"
@@ -2607,6 +2618,8 @@ dependencies = [
 name = "toyos-symbols"
 version = "0.1.0"
 dependencies = [
+ "object",
+ "rustc-demangle",
  "toyos-abi",
  "toyos-elf",
  "toyos-elide",
@@ -2717,9 +2730,9 @@ checksum = "2c591d83f69777866b9126b24c6dd9a18351f177e49d625920d19f989fd31cf8"
 
 [[package]]
 name = "typenum"
-version = "1.19.0"
+version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "562d481066bde0658276a35467c4af00bdc6ee726305698a55b86e61d7ad82bb"
+checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
 name = "unicode-bom"
