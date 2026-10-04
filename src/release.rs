@@ -196,7 +196,6 @@ fn outputs(layers: &[Layer]) -> String {
 /// than its build does, and so is one the build left not whole under its key.
 pub fn bootstrap(root: &Path) -> Result<String, String> {
     let file = step_outputs()?;
-    crate::ensure_shallow_fork(root)?;
     let layers = layers(root);
     let restored: Vec<bool> = layers.iter().map(|layer| root.join(&layer.paths[0]).exists()).collect();
     whole(&layers, &restored, |layer| defect(root, layer)).map_err(|why| format!("restored, {why}"))?;

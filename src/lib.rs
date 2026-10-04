@@ -120,18 +120,12 @@ pub fn ensure_submodules(repo_dir: &Path) {
 
 /// `rust/` at the commit this tree pins and with no history, where a CI
 /// runner's checkout has none: what reading the fork's sources and building
-/// the toolchain from them need. One already there at another commit is
-/// refused. Refused in a linked worktree, whose `rust/` is
+/// the toolchain from them need. Refused in a linked worktree, whose `rust/` is
 /// `sysroot::fork_checkout`'s to make: `git submodule` there rewrites the
 /// `core.worktree` of the primary's fork.
 pub fn ensure_shallow_fork(root: &Path) -> Result<(), String> {
-    let fork = root.join("rust");
-    if fork.join("x.py").exists() {
-        let head = sysroot::git_out(&fork, &["rev-parse", "HEAD"]).trim().to_string();
-        let pinned = sysroot::pinned_fork(root);
-        return (head == pinned)
-            .then_some(())
-            .ok_or_else(|| format!("{} is at {head}, and this tree pins the fork at {pinned}", fork.display()));
+    if root.join("rust/x.py").exists() {
+        return Ok(());
     }
     if let toolchain::Owner::Elsewhere(_) = toolchain::owner(root) {
         return Err(format!(
