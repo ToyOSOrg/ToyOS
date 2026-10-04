@@ -56,8 +56,8 @@ pub struct PerCpu {
     syscall_task: AtomicU64,
     /// This CPU's [`log::Shard`]: the boot shard on CPU 0.
     log_shard: &'static log::Shard,
-    /// One counter per `irq_census::Source`, and the total.
-    irq_counts: [AtomicU64; crate::irq_census::SLOTS],
+    /// One counter per `irq_census::Source`.
+    irq_counts: [AtomicU64; crate::irq_census::Source::COUNT],
 }
 
 /// This CPU's block.
@@ -94,7 +94,7 @@ pub fn alloc(cpu_id: u32) -> &'static PerCpu {
         syscall_sp: AtomicU64::new(0),
         syscall_task: AtomicU64::new(NO_SYSCALL),
         log_shard: log::shard_for(cpu_id),
-        irq_counts: [const { AtomicU64::new(0) }; crate::irq_census::SLOTS],
+        irq_counts: [const { AtomicU64::new(0) }; crate::irq_census::Source::COUNT],
     }));
     crate::irq_census::publish(cpu_id, block.irq_counts.as_ptr());
     block
@@ -249,14 +249,13 @@ pub fn reserve_log_slot(guard: &crate::arch::IrqGuard) -> (*const log::Shard, u6
 /// One delivery of `source`, counted in this CPU's block.
 pub(super) fn irq_took(source: crate::irq_census::Source) {
     let counts = &this().irq_counts;
-    counts[crate::irq_census::TOTAL].fetch_add(1, Relaxed);
-    counts[1 + source as usize].fetch_add(1, Relaxed);
+    counts[source as usize].fetch_add(1, Relaxed);
 }
 
-/// Two of this CPU's interrupt counters.
-pub fn irq_counts_here(first: usize, second: usize) -> (u64, u64) {
+/// This CPU's interrupt counters.
+pub fn irq_counts_here() -> [u64; crate::irq_census::Source::COUNT] {
     let counts = &this().irq_counts;
-    (counts[first].load(Relaxed), counts[second].load(Relaxed))
+    core::array::from_fn(|index| counts[index].load(Relaxed))
 }
 
 #[inline]

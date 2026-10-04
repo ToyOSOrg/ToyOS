@@ -412,7 +412,7 @@ mod checks {
         use common::irqcensus::{windows_under, Measured};
         let census = |cpu: u32| {
             format!(
-                "[kernel 0.1 cpu0] irq: cpu{cpu} total=0 timer=0 kick=0 xhci=0 userdev=0 sound=0 i8042=0 \
+                "[kernel 0.1 cpu0] irq: cpu{cpu} timer=0 kick=0 xhci=0 userdev=0 sound=0 i8042=0 \
                  dmafault=0 hda=0 tlb=0 nmi=0 spurious=0 unclaimed=0\n"
             )
         };
