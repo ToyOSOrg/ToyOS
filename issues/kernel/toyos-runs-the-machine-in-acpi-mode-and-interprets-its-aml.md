@@ -84,6 +84,6 @@ afterwards, the kernel having written `ACPI_DISABLE` to `SMI_CMD`.
 
 **Stage: power-off through the server** (the orchestrator's placement of "Yes,
 one path"). The ACPI server evaluates `\_S5` and powers the machine off.
-**Exit**: the kernel's `\_S5_` reader, `toyos-acpi/src/dsdt.rs`, and its caller
+Blocked on the interpreter's evaluation of `\_S5`. **Exit**: the kernel's `\_S5_` reader, `toyos-acpi/src/dsdt.rs`, and its caller
 in `kernel/src/arch/x86_64/power.rs` are deleted, and a test that powers off
 through a broken server is red.

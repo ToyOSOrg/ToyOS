@@ -25,7 +25,16 @@ protection registers) as its exit."
 
 Owner: the orchestrator, under `issues/kernel/the-iommu-refuses-nothing-yet.md`.
 
-**Exit**: on such a unit, `PMEN`'s protected memory regions (§11.4.8.1) cover
-all of memory before translation goes off for the switch and are released
-only once it is back on; a test reads that order, and is red with the `PMEN`
-step removed.
+**Exit**: on such a unit that reports `CAP.PLMR` (bit 5) and `CAP.PHMR`
+(bit 6), `PMEN`'s protected memory regions (§11.4.8.1) cover all of memory
+before translation goes off for the switch and are released only once it is
+back on; a host test reads that order, and is red with the `PMEN` step
+removed. It is a host test because no machine reaches the path: QEMU's unit
+always reports `ESRTPS` and implements `PMEN_REG` as read-only zero, and the
+T14's units report `ESRTPS` clear but support neither mode.
+
+A unit that reports either bit clear has no fix under this exit: §11.4.8.1
+treats `PMEN_REG` as read-only there, and the same section plans the
+protected memory registers for deprecation, pointing new software at
+abort-DMA mode. Such a unit keeps the gap, logged, until a fix that does not
+rest on `PMEN` is found.

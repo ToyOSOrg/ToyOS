@@ -52,8 +52,7 @@ a unit firmware left translating:
   scalable or abort-DMA mode, with `CAP.ESRTPS` clear, may not have its root
   table switched under translation (VT-d Rev. 4.1 §6.6), so translation goes
   off for that one switch. The older protection registers are `PMEN`'s
-  protected memory regions (§11.4.8.1). The T14's units report `ESRTPS`,
-  `SMTS` and `ADMS` clear, so it is not one of those machines. The weakness is
+  protected memory regions (§11.4.8.1). The weakness is
   `issues/kernel/a-unit-in-scalable-or-abort-mode-loses-translation-for-its-root-table-switch.md`.
 - **"Apply it at hand-over"**, on reserved memory: "From the hand-over on,
   only display and USB controllers keep access to their reserved region; any
@@ -73,11 +72,16 @@ Owner: the orchestrator.
 **Exit**: a test or a T14 row reads each ruled refusal, each with its
 negative control:
 
+- the isolation-scope rule: a non-singleton scope is refused by name for a
+  function behind a PCIe switch, and admitted for a root-complex-integrated
+  function;
 - a userland claim of a function below an external port (on the T14,
   `00:07.0` or `00:07.2`) is refused by name;
 - a claim of a function an RMRR names is refused unless it is a display or USB
   controller that RMRR names alone, whose region is then mapped into its
   driver's domain (the T14's iGPU row);
-- from the hand-over on, a device reaching reserved memory not its own faults,
-  is logged and stopped, and the machine keeps running;
+- from the hand-over on, a device that is neither a display nor a USB
+  controller faults on its own RMRR region, is logged and stopped, and the
+  machine keeps running; and a display or USB controller its RMRR names alone
+  keeps that region. Each half has its own negative control;
 - a unit with the hand-over gap logs it.
