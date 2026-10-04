@@ -111,11 +111,11 @@ if it meets the bar above; otherwise it is a NOTE.
   grows needs a reason you accept; a branch that could delete more than it adds and does not goes
   back with the deletion named, and so does a new gate, check, lock or test that guards what a
   reader can check: that rule is a sentence in a prompt. What could be deleted, merged into what
-  exists, or made smaller? An abstraction with one caller, dead code, code kept "just in case" or
-  because nobody knows whether it is needed. Size is never bought with a weaker check: a test is
-  cut only when it tests nothing, when this prompt takes its rule, or as **Guest tests** says. A
-  compromise the branch found is removed or recorded in `issues/` with an owner, evidence and an
-  exit condition.
+  exists, or made smaller? An abstraction with one caller, a parameter with one value, dead code,
+  code kept "just in case" or because nobody knows whether it is needed. Size is never bought with
+  a weaker check: a test is cut only when it tests nothing, when this prompt takes its rule, or
+  as **Guest tests** says. A compromise the branch found is removed or recorded in `issues/` with
+  an owner, evidence and an exit condition.
 - **Tests.** The refusals and the boundary, not the happy path.
 - **Edges.** Untrusted input never panics the kernel; it is refused. Check-then-act races. A lock
   held across a user copy or a device wait. Arithmetic on a value the caller chooses. A short
@@ -143,12 +143,15 @@ if it meets the bar above; otherwise it is a NOTE.
 ## Prose
 
 A verdict rests on whether the code is correct, safe and the least that does the job, and on
-whether the evidence the change needs exists — never on how either is described. A finding about
-prose — a pull request's body or comments, a commit message, a comment's wording, an issue's
-phrasing — is never a BLOCKER and never by itself the reason for a verdict short of LAND; a body
-that states something false about evidence is one line under NOTE, and the orchestrator corrects
-it. A cosmetic finding — naming, wording, formatting, a comment that could be shorter, a one-valued
-generic that does no harm — is not raised at all.
+whether the evidence the change needs exists — never on how either is described. A body's
+measurements — command, exit code, log, head — and the reasons **Guest tests** and **Fit** ask of
+it are evidence, judged under those rules: a claimed measurement that is absent, from another head
+or contradicted by its own log is the **Evidence** BLOCKER. This section covers only how things
+are described. Prose is never a BLOCKER and never by itself moves a verdict from LAND. Prose in a
+record — a pull request's body, an issue — that is false of the tree or of the record is one line
+under NOTE, and the orchestrator corrects a pull request's body himself. A source comment's
+wording, count, date, line number or citation, and every cosmetic finding — naming, wording,
+formatting, a comment that could be shorter — are not raised.
 
 ## Output
 
