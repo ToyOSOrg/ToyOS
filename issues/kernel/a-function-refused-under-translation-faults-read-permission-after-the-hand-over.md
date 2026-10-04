@@ -38,18 +38,32 @@ Evidence, pull request #700, T14 boots:
 - `25ab31bd5` and `5e8cbb06e`, no refusal, and the hand-over and `translating`
   logged in the same millisecond: no fault.
 
-Ruled out by reading: the identity domain's leaf for `0x9cc00000` is
-`SL_READ | SL_WRITE | SL_LARGE`, in tables built by the code the green boots
-ran. Each line is written back with `clflush` (`ECAP.C=0`). The context entry
-is `TT=00`, `AW=2`, `DID=1`, the same in every arm. `0x01`, not `0x06`, is
-what the empty root answers.
+- `9be0a8ac8` plus a walk probe: unit0's record before `fault::arm` is again
+  `00:02.0` read `0x9ccc0000` reason `0x01` with `FSTS=0x3`. At the fault,
+  `00:02.0` read `0x9cdb7000` reason `0x06`, raw high word
+  `0xc000000600000010`: `AT=0`, `PP=0`, `EXE=0`, `PRIV=0`, `T2=0`, an
+  untranslated read with no PASID. The unit's walk, from `RTADDR` `0xa18000`,
+  each entry read from DRAM after `clflush`: root `0xa19001`, context
+  `0xa04001:0x102` (`P=1`, `TT=00`, `AW=2`, `DID=1`), then `0xa05003`,
+  `0xa08003` and the 2 MiB leaf `0x9cc00083`, present with read and write over
+  `0x9cdb7000`. The GPU's PCI `STATUS` reads `0x0010`, no master or target
+  abort, before the actuator, before the hand-over, at `TE` and at the fault.
+  The unit refused a read the tables in memory grant.
+- the walk probe plus 3 ms with `TE` off after each hand-over: the same
+  empty-root refusals (`FSTS=0x3`, record `0x01`) before `fault::arm`, then no
+  `DMA FAULT` and `Boot: complete`.
 
-Staged on pull request #700, not yet run: `9be0a8ac8` plus a probe that logs
-the fatal record raw (`AT`, `PP`, `PRIV`, `EXE`, `T2`), the GPU's PCI `STATUS`
-before the actuator, before the hand-over, at `TE` and at the fault, and the
-unit's walk for the fault from `RTADDR` down, each entry read from DRAM after
-`clflush`. A second image adds 3 ms with `TE` off after the hand-over.
+So the tables are not what refuses, and neither is any cached state VT-d Rev.
+4.1 lets the unit keep. The `0x06` needs both a period of refused reads and
+`TE` back on within microseconds of the hand-over: three boots of that
+actuator with no hold faulted (`9be0a8ac8` alone, with the `FSTS` probe and
+with the walk probe), one with a 3 ms hold did not, and `55a5ccb42`,
+`TE` off about 2 ms after its refusals, did not.
 
 **Exit**: on the T14, the reproduction (the selftests boot at `9be0a8ac8`)
-reaches `Boot: complete` with no `DMA FAULT` line, with the hand-over or
-programming changed to whatever the probe readings name.
+reaches `Boot: complete` with no `DMA FAULT` line, through a hand-over that
+waits on an event the unit or the function reports. A timed hold with `TE`
+off does not close this: it is a flat wait no hardware document mandates, it
+widens the untranslated window
+`issues/kernel/a-unit-left-translating-passes-dma-untranslated-while-programmed.md`
+records, and it rests on one green boot against three reds.
