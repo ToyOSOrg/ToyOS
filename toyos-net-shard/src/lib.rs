@@ -634,4 +634,21 @@ mod tests {
             assert!(shard.round.is_empty());
         }
     }
+
+    // No id: the head freed in its turn takes the turn with it, so the next flow's turn adds its
+    // quantum; a flow behind it leaves the turn as it was.
+    #[test]
+    fn the_head_freed_in_its_turn_ends_the_turn() {
+        let (mut shard, now) = verified();
+        let remote = Endpoint { addr: B, port: Port::new(80).unwrap() };
+        let (head, next) = (shard.connect(now, None, remote).unwrap(), shard.connect(now, None, remote).unwrap());
+        shard.turn = true;
+        shard.abort(now, head).unwrap();
+        assert_eq!(shard.round.iter().map(|m| m.flow).collect::<Vec<_>>(), [Flow::Tcp(next)]);
+        assert!(!shard.turn);
+        let tail = shard.connect(now, None, remote).unwrap();
+        shard.turn = true;
+        shard.abort(now, tail).unwrap();
+        assert!(shard.turn, "a flow behind the head takes no turn with it");
+    }
 }
