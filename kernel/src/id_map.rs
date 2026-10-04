@@ -1,14 +1,14 @@
-use core::hash::Hash;
+use alloc::collections::BTreeMap;
 use core::ops::Add;
-use crate::hasher::HashMap;
 
 /// Map with auto-incrementing, never-reused keys.
 pub struct IdMap<K, V> {
-    map: HashMap<K, V>,
+    /// A `BTreeMap`, whose nodes are fixed-size allocations: no count it holds grows one allocation towards `mm::MAX_HEAP_ALLOC`.
+    map: BTreeMap<K, V>,
     next: K,
 }
 
-pub trait IdKey: Copy + Eq + Hash + Ord + Add<Output = Self> {
+pub trait IdKey: Copy + Ord + Add<Output = Self> {
     const ZERO: Self;
     const ONE: Self;
 }
@@ -22,7 +22,7 @@ impl IdKey for toyos_abi::Tid {
 impl<K: IdKey, V> IdMap<K, V> {
     pub fn new() -> Self {
         Self {
-            map: HashMap::default(),
+            map: BTreeMap::new(),
             next: K::ZERO,
         }
     }

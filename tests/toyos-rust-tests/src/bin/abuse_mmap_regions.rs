@@ -2,7 +2,10 @@
 //! mapping enters the address space is refused by name, a replacement — which
 //! adds no region — is not, and one region freed is room for one.
 
-use toyos_abi::syscall::{munmap, MmapFlags, MmapProt, SyscallError, MAX_REGIONS, SYS_MMAP};
+#[path = "../arch/mmap.rs"]
+mod mmap;
+
+use toyos_abi::syscall::{munmap, MmapFlags, MmapProt, SyscallError, MAX_REGIONS};
 use SyscallError::ResourceExhausted;
 
 const PAGE_2M: u64 = 2 * 1024 * 1024;
@@ -14,27 +17,6 @@ const OWN_REGIONS: usize = 64;
 /// The fill's first mappings, kept by address: one replaced and one freed at
 /// the bound, the rest freed before anything is judged.
 const KEPT: usize = 8;
-
-/// `syscall::mmap` answers every refusal with a null, so the error is read here.
-fn map(addr: u64, prot: MmapProt, flags: MmapFlags) -> Result<u64, SyscallError> {
-    let ret: u64;
-    // SAFETY: a register-to-register `syscall`; no argument here is a pointer
-    // this call dereferences.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            in("rdi") SYS_MMAP,
-            in("rsi") addr,
-            in("rdx") PAGE_2M,
-            in("r8") prot.0,
-            in("r9") flags.0,
-            lateout("rax") ret,
-            out("rcx") _,
-            out("r11") _,
-        );
-    }
-    SyscallError::from_u64(ret).map_or(Ok(ret), Err)
-}
 
 fn unmap(addr: u64) {
     unsafe { munmap(addr as *mut u8, PAGE_2M as usize) }
@@ -51,7 +33,8 @@ fn main() {
     let mut lowest = u64::MAX;
     let mut refusal = None;
     for _ in 0..=MAX_REGIONS {
-        match map(0, MmapProt::NONE, anywhere) {
+        // SAFETY: not `FIXED`, so nothing of this process's is replaced.
+        match unsafe { mmap::raw(0, PAGE_2M, MmapProt::NONE, anywhere) } {
             Ok(addr) => {
                 if let Some(slot) = kept.get_mut(count) {
                     *slot = addr;
@@ -71,14 +54,22 @@ fn main() {
 
     // Placement runs top-down, so nothing is registered below the fill.
     let free = lowest - 2 * PAGE_2M;
-    let placed_free = map(free, MmapProt::NONE, placed);
-    let anywhere_rw = map(0, rw, anywhere);
-    let replaced = map(kept[0], rw, placed);
+    // SAFETY: a `FIXED` mapping lands at `free`, where nothing is, or over
+    // `kept[0]`, which this process reads nothing through.
+    let (placed_free, anywhere_rw, replaced) = unsafe {
+        (
+            mmap::raw(free, PAGE_2M, MmapProt::NONE, placed),
+            mmap::raw(0, PAGE_2M, rw, anywhere),
+            mmap::raw(kept[0], PAGE_2M, rw, placed),
+        )
+    };
     unmap(kept[1]);
-    let placed_free_again = map(free, MmapProt::NONE, placed);
-    let anywhere_rw_again = map(0, rw, anywhere);
+    // SAFETY: as above.
+    let (placed_free_again, anywhere_rw_again) =
+        unsafe { (mmap::raw(free, PAGE_2M, MmapProt::NONE, placed), mmap::raw(0, PAGE_2M, rw, anywhere)) };
     placed_free_again.into_iter().chain(anywhere_rw_again).for_each(unmap);
-    let served = map(0, rw, anywhere);
+    // SAFETY: not `FIXED`.
+    let served = unsafe { mmap::raw(0, PAGE_2M, rw, anywhere) };
     // Room for this process's own heap, which a failed assertion's message needs.
     served.into_iter().chain(kept[2..].iter().copied()).for_each(unmap);
 

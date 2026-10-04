@@ -26,7 +26,7 @@ use crate::loader::{alloc_kernel_stack, thread_start, TlsBlock};
 
 pub use toyos_abi::{Pid, Tid};
 pub use crate::scheduler::TaskId;
-use toyos_abi::syscall::{EndowEntry, SyscallError, MAX_LIBRARIES, MAX_REGIONS, MAX_THREADS};
+use toyos_abi::syscall::{EndowEntry, SyscallError, MAX_LIBRARIES, MAX_REGIONS};
 
 /// The lifecycle's decisions; this file only performs them.
 pub use kernel::proclife::{ThreadLocation, Watch};
@@ -374,14 +374,6 @@ impl ProcessEntry {
     pub fn threads(&self) -> &crate::id_map::IdMap<Tid, ThreadEntry> { &self.threads }
     pub fn threads_mut(&mut self) -> &mut crate::id_map::IdMap<Tid, ThreadEntry> { &mut self.threads }
 }
-
-// hashbrown grows a table only once its live entries pass 7/16 of its buckets, so one never holding
-// more than `MAX_THREADS` stays one heap allocation: its entries, then a control byte per bucket and a group.
-const _: () = {
-    let buckets = (16 * (MAX_THREADS + 1)).div_ceil(7).next_power_of_two();
-    let entries = (buckets * core::mem::size_of::<(Tid, ThreadEntry)>()).next_multiple_of(16);
-    assert!(entries + buckets + 16 <= crate::mm::MAX_HEAP_ALLOC);
-};
 
 impl ProcessEntry {
     /// Mirrors [`Lifecycle::tearing_down`], usable without the trait in scope.

@@ -7,11 +7,7 @@
 //! of them — which is what makes the host model in `model.rs` a `BTreeMap` and
 //! not a simulated kernel.
 //!
-//! `each_thread` and `each_pid` take a `&mut dyn FnMut` rather than answering an
-//! iterator, because the kernel's two containers are a `hashbrown::HashMap` and
-//! this module's model is a `BTreeMap`: an associated iterator type would put
-//! both spellings in the trait for no decision's benefit. A caller that needs
-//! an order sorts what it collected, and the two that do
+//! A caller that needs an order sorts what it collected, and the two that do
 //! ([`crate::proclife::teardown::retire_set`] and [`crate::proclife::reap::finished_pids`]) say so.
 
 use crate::proclife::{Node, Pid, Pids, ThreadLocation, Tid};
