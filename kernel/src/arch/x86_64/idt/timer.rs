@@ -3,7 +3,7 @@ use kernel::sched::hw::{CpuId, Machine, TraceEvent, TraceKind};
 use crate::arch::entry::{restore_user_state, ring3_naked_asm, save_user_state};
 use crate::hw::HW;
 
-// Ring 0 re-arms the timer itself; without it, a fire in Ring 0 disables preemption for good, since the one-shot never refires on its own.
+// A Ring 0 fire re-arms one quantum on, or leaves a stopped timer stopped, and never writes `last_armed_ticks`: what the scheduler planned is re-armed by its next pass, and a syscall that outlasts a quantum takes one expiry per quantum.
 // Ring 3 exit runs `kernel_exit_to_user_check` like every other return to userland: skipping it here let a thread killed in Ring 3 be redispatched to userland with the kill unread.
 #[unsafe(naked)]
 pub(super) extern "sysv64" fn timer_entry() {
@@ -51,8 +51,12 @@ pub(super) extern "sysv64" fn timer_entry() {
         "xor eax, eax",
         "xor edx, edx",
         "wrmsr",
-        "mov ecx, 0x838",       // X2APIC_TIMER_INIT — re-arm with last value;
-        "mov eax, dword ptr gs:[{armed_ticks}]",  // 0 = disabled.
+        "mov ecx, 0x838",       // X2APIC_TIMER_INIT
+        "mov eax, dword ptr gs:[{armed_ticks}]",
+        "test eax, eax",
+        "jz 3f",                // 0: stopped, and written back as stopped.
+        "mov eax, dword ptr [rip + {quantum_ticks}]",
+        "3:",
         "xor edx, edx",
         "wrmsr",
         "mov byte ptr gs:[{need_resched}], 1",
@@ -68,6 +72,8 @@ pub(super) extern "sysv64" fn timer_entry() {
         "push rbp",
         "mov rbp, rsp",
         "and rsp, -16",
+        // The interrupted `rip`, above the ten registers pushed on this branch.
+        "mov rdi, [rbp + 80]",
         "call {deadline}",
         "mov rsp, rbp",
         "pop rbp",
@@ -77,12 +83,13 @@ pub(super) extern "sysv64" fn timer_entry() {
         "pop rax",
         "iretq",
         #[cfg(not(feature = "mask-windows"))]
-        deadline = sym crate::deadline::poll,
+        deadline = sym crate::deadline::poll_in_kernel,
         #[cfg(feature = "mask-windows")]
         deadline = sym ring0_tick,
         handler = sym timer_handler,
         exit_to_user = sym crate::arch::idt::kernel_exit_to_user_check,
         armed_ticks = const crate::arch::percpu::OFF_LAST_ARMED_TICKS,
+        quantum_ticks = sym crate::arch::apic::TIMER_TICKS,
         need_resched = const crate::arch::percpu::OFF_NEED_RESCHED,
         ring0_fires = const crate::arch::percpu::OFF_RING0_TIMER_FIRES,
         irq_total = const crate::arch::percpu::irq_slot_offset(crate::irq_census::TOTAL),
@@ -95,16 +102,21 @@ pub(super) extern "sysv64" fn timer_entry() {
 /// The Ring 0 branch's Rust half under `mask-windows`: it interrupted a CPU
 /// with interrupts open, and its `iretq` opens them again.
 #[cfg(feature = "mask-windows")]
-extern "sysv64" fn ring0_tick() {
+extern "sysv64" fn ring0_tick(pc: u64) {
     crate::windows::irqs_masked();
-    crate::deadline::poll();
+    crate::windows::handler_entered();
+    crate::deadline::poll_in_kernel(pc);
+    crate::windows::handler_leaving();
     crate::windows::irqs_unmasking();
 }
 
 extern "sysv64" fn timer_handler() {
     // From Ring 3, so interrupts were open; `exit_to_user` opens them again.
     #[cfg(feature = "mask-windows")]
-    crate::windows::irqs_masked();
+    {
+        crate::windows::irqs_masked();
+        crate::windows::handler_entered();
+    }
     crate::arch::percpu::irq_took!(Timer);
     // Before anything that can take a lock: a CPU running userland is the other
     // half of the coverage the Ring 0 branch above gives a CPU holding one.
@@ -124,5 +136,8 @@ extern "sysv64" fn timer_handler() {
     });
     crate::arch::apic::eoi();
 
+    // The handler ends here: the pass that follows is the interrupted thread's.
+    #[cfg(feature = "mask-windows")]
+    crate::windows::handler_leaving();
     crate::scheduler::do_preempt();
 }

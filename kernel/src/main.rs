@@ -116,6 +116,9 @@ use toyos_rootimage::handoff::{held, Descriptor};
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     cpu::disable_interrupts();
+    // A handler's own panic reports through locks like any other.
+    #[cfg(feature = "mask-windows")]
+    windows::stand_down();
 
     // Must run first: captures state for a possible second panic, declining if this CPU is already inside one.
     panic::record_panic(info);

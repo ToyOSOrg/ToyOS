@@ -348,14 +348,20 @@ fn floor_ticks() -> u64 {
     crate::clock::counter_ticks(MIN_ONE_SHOT.nanos()).max(1)
 }
 
-/// The only write of the comparator: fire `ticks` counter ticks from now, or
-/// after [`MIN_ONE_SHOT`] if that is longer, and remember the span as what an
-/// EL1 fire re-arms with. Returns the counter value the comparator was set
-/// from, for a caller that must relate CVAL back to it without a second read.
+/// Fire `ticks` counter ticks from now, or after [`MIN_ONE_SHOT`] if that is
+/// longer, and remember the span as what an EL0 fire re-arms with. Returns the
+/// counter value the comparator was set from, for a caller that must relate
+/// CVAL back to it without a second read.
 fn arm_ticks(ticks: u64) -> u64 {
     let ticks = ticks.max(floor_ticks());
     percpu::set_armed_ticks(ticks);
     let now = cpu::counter();
+    compare_at(now + ticks);
+    now
+}
+
+/// The only write of the comparator: fire when the counter reaches `cval`.
+fn compare_at(cval: u64) {
     // SAFETY: the EL1 virtual timer's comparator and control; CPACR has
     // nothing to say about them and `CNTKCTL_EL1` keeps EL0 out.
     unsafe {
@@ -363,12 +369,11 @@ fn arm_ticks(ticks: u64) -> u64 {
             "msr cntv_cval_el0, {cval}",
             "msr cntv_ctl_el0, {enable}",
             "isb",
-            cval = in(reg) now + ticks,
+            cval = in(reg) cval,
             enable = in(reg) TIMER_ENABLE,
             options(nomem, nostack, preserves_flags),
         );
     }
-    now
 }
 
 fn stop_timer_hardware() {
@@ -399,6 +404,24 @@ pub fn arm_within(nanos: u64) -> u64 {
     arm_ticks(want.min(remaining))
 }
 
+/// What the timer was last armed with: `CNTV_CVAL_EL0`, the counter value it
+/// fires at.
+#[cfg(feature = "test-actuators")]
+pub fn comparator() -> u64 {
+    let cval: u64;
+    // SAFETY: reads the EL1 virtual timer's comparator.
+    unsafe { core::arch::asm!("mrs {}, cntv_cval_el0", out(reg) cval, options(nomem, nostack, preserves_flags)) };
+    cval
+}
+
+/// Whether an EL1 fire since [`comparator`] read `armed` re-armed one quantum:
+/// it fired at `armed` or later, so a quantum on from there is at least that
+/// far past `armed`.
+#[cfg(feature = "test-actuators")]
+pub fn rearmed_a_quantum(armed: u64) -> bool {
+    comparator() >= armed + crate::clock::counter_ticks(kernel::sched::fair::QUANTUM_NS)
+}
+
 /// Stop the timer: no interrupt until it is armed again.
 pub fn stop_timer() {
     percpu::set_armed_ticks(0);
@@ -406,14 +429,23 @@ pub fn stop_timer() {
     crate::trace::trace(crate::trace::Kind::TimerStop, 0);
 }
 
-/// A timer interrupt taken: armed again for what it was last armed for, or
-/// stopped if it was stopped — the one thing that deasserts it.
+/// A timer interrupt taken from EL0: armed again for what it was last armed
+/// for, or stopped if it was stopped — the one thing that deasserts it.
 pub(super) fn rearm() {
     match percpu::armed_ticks() {
         0 => stop_timer_hardware(),
         ticks => {
             arm_ticks(ticks);
         }
+    }
+}
+
+/// A timer interrupt taken at EL1: one quantum on, or stopped if it was
+/// stopped, leaving what the scheduler armed for its next pass to re-arm.
+pub(super) fn rearm_in_kernel() {
+    match percpu::armed_ticks() {
+        0 => stop_timer_hardware(),
+        _ => compare_at(cpu::counter() + crate::clock::counter_ticks(kernel::sched::fair::QUANTUM_NS)),
     }
 }
 
