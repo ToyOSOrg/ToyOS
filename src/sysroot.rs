@@ -1591,6 +1591,45 @@ mod tests {
         assert_eq!(git(&primary, &["rev-parse", "HEAD"]), superproject, "git ran in the superproject");
     }
 
+    /// **The primary's fork checkout moves only while nobody reads its
+    /// compiler**: a sysroot being made in another worktree holds the global
+    /// lock shared, and the move queues for it and moves nothing until it is
+    /// let go.
+    #[test]
+    fn the_primary_s_fork_checkout_moves_only_while_nobody_reads_its_compiler() {
+        let base = TempDir::new("fork-primary-global");
+        let (primary, _linked, c1, c2) = two_pins(&base);
+        let fork = primary.join("rust");
+        git(&primary, &["update-index", "--cacheinfo", &format!("160000,{c2},rust")]);
+        git(&primary, &["commit", "-qm", "pins C2"]);
+        let reader = buildlock::tests::compiler_read_elsewhere(&primary);
+        std::thread::scope(|scope| {
+            let mover = scope.spawn(|| drop(fork_checkout(&primary, &mut buildlock::shared(&primary, "a build"))));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while !buildlock::tests::global_queued(&primary) {
+                assert!(!mover.is_finished(), "the move took no global lock");
+                assert!(std::time::Instant::now() < deadline, "the move never queued for the global lock");
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert_eq!(git(&fork, &["rev-parse", "HEAD"]), c1, "the checkout moved while a sysroot build read its compiler");
+            reader.release();
+            mover.join().unwrap();
+        });
+        assert_eq!(git(&fork, &["rev-parse", "HEAD"]), c2);
+    }
+
+    /// **A shallow fork is the commit its tree pins**: one already there is
+    /// accepted at the pin and refused, naming both commits, anywhere else.
+    #[test]
+    fn ensure_shallow_fork_refuses_a_fork_off_its_pin() {
+        let base = TempDir::new("fork-shallow-pin");
+        let (primary, _linked, c1, c2) = two_pins(&base);
+        assert_eq!(crate::ensure_shallow_fork(&primary), Ok(()));
+        git(&primary.join("rust"), &["checkout", "-q", &c2]);
+        let refused = crate::ensure_shallow_fork(&primary);
+        assert!(refused.as_ref().is_err_and(|why| why.contains(&format!("is at {c2}")) && why.contains(&c1)), "{refused:?}");
+    }
+
     /// **The primary's bootstrap decides from the `compiler/` its tree pins**:
     /// a fork checkout left at a commit naming another `compiler/` reads as a
     /// stale compiler, and once it is moved to the pin the compiler the primary

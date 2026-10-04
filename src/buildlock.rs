@@ -636,6 +636,16 @@ pub(crate) mod tests {
         Elsewhere::hold("buildlock::tests::child_role", &env)
     }
 
+    /// The primary's compiler of `root`, read by a process of its own.
+    pub(crate) fn compiler_read_elsewhere(root: &Path) -> Elsewhere {
+        held_elsewhere(root, "read-compiler")
+    }
+
+    /// Whether an exclusive acquirer of `root`'s global lock is queued for it.
+    pub(crate) fn global_queued(root: &Path) -> bool {
+        !try_lock(&open_lock_file(&git_lock_dir(root).join("intent")), LOCK_SH)
+    }
+
     /// What `role` of [`child_role`] takes in `root`, held by a process of its own.
     fn held_elsewhere(root: &Path, role: &str) -> Elsewhere {
         Elsewhere::hold("buildlock::tests::child_role", &[(ROLE, OsStr::new(role)), (ROOT, root.as_os_str())])
@@ -772,6 +782,10 @@ pub(crate) mod tests {
             }
             "use-sysroot" => {
                 let _using = keyed_using(&root, Keyed::Sysroot, &Key::parse(&std::env::var(KEY).unwrap()).unwrap());
+                hold_until_released();
+            }
+            "read-compiler" => {
+                let _reading = compiler_shared(&root, "child");
                 hold_until_released();
             }
             "clean" | "clean-unlocked" => {
