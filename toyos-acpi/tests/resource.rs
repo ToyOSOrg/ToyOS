@@ -3,42 +3,17 @@
 
 mod common;
 
-use common::Machine;
+use common::{qword_descriptor, resource_list as list, Machine, BUS, IO, MEMORY};
 use toyos_abi::boot::RootBridgeWindow;
 use toyos_acpi::{memory_windows, ResourceError, MAX_LIST_BYTES};
 
 /// Where a firmware pool allocation sits in the crafted machines below.
 const AT: u64 = 0x7f00_1234;
 
-/// ACPI 6.5 Table 6.44's resource types.
-const MEMORY: u8 = 0;
-const IO: u8 = 1;
-const BUS: u8 = 2;
-
-/// One QWORD Address Space Descriptor (ACPI 6.5 §6.4.3.5.1), well formed.
+/// A well-formed descriptor: no granularity, its maximum its minimum plus its
+/// length.
 fn qword(kind: u8, min: u64, length: u64, translation: u64) -> Vec<u8> {
-    let max = min + length - 1;
-    let mut d = vec![0x8A, 0x2B, 0x00, kind, 0x00, 0x00];
-    d.extend_from_slice(&0u64.to_le_bytes());
-    d.extend_from_slice(&min.to_le_bytes());
-    d.extend_from_slice(&max.to_le_bytes());
-    d.extend_from_slice(&translation.to_le_bytes());
-    d.extend_from_slice(&length.to_le_bytes());
-    d
-}
-
-/// ACPI 6.5 §6.4.2.9, over its checksum byte.
-fn end_tag() -> Vec<u8> {
-    vec![0x79, 0x00]
-}
-
-fn list(descriptors: &[Vec<u8>]) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    for d in descriptors {
-        bytes.extend_from_slice(d);
-    }
-    bytes.extend_from_slice(&end_tag());
-    bytes
+    qword_descriptor(kind, 0, min, min + length - 1, translation, length)
 }
 
 /// One walk of `bytes`, in a machine holding `bytes` at [`AT`] and nothing
