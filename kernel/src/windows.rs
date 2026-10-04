@@ -25,8 +25,16 @@
 //!
 //! Once a boot, [`hold_once`] keeps both windows open for a span it reads off
 //! the counter and prints, which a later report of that CPU reads back.
+//!
+//! **The handler witness.** Every maskable interrupt's handler body is bracketed
+//! by [`handler_entered`] and [`handler_leaving`] — the pass a tick or a kick
+//! from user mode runs after it is outside — and [`outside_a_handler`] refuses
+//! a `sync::Lock` taken inside one, but through an `IrqLock`: a handler that
+//! takes one the context it interrupted holds spins forever. From
+//! [`stand_down`], which every path that ends the machine calls before it takes
+//! locks of its own, nothing is refused.
 
-use core::sync::atomic::AtomicBool;
+use core::sync::atomic::{AtomicBool, AtomicU32};
 use core::sync::atomic::Ordering::Relaxed;
 
 use kernel::sched::windows::{Unseen, Windows, HELD_NS};
@@ -51,7 +59,48 @@ fn on(transition: impl FnOnce(&Windows) -> Result<(), Unseen>) {
 fn refuse(unseen: Unseen) -> ! {
     let cpu = percpu::cpu_id();
     CPUS[cpu as usize].stop();
+    stand_down();
     panic!("mask-windows: cpu{cpu} {unseen}");
+}
+
+/// How many handler bodies each CPU is inside: one at most, since a maskable
+/// handler runs masked.
+static IN_HANDLER: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
+
+/// The machine is ending: the witness refuses nothing more.
+static STOOD_DOWN: AtomicBool = AtomicBool::new(false);
+
+/// A maskable interrupt's handler body starts on this CPU.
+pub fn handler_entered() {
+    if crate::log::PERCPU_READY.load(Relaxed) {
+        IN_HANDLER[percpu::cpu_id() as usize].fetch_add(1, Relaxed);
+    }
+}
+
+/// That body ends.
+pub fn handler_leaving() {
+    if crate::log::PERCPU_READY.load(Relaxed) {
+        IN_HANDLER[percpu::cpu_id() as usize].fetch_sub(1, Relaxed);
+    }
+}
+
+/// `what` is about to be taken, which no handler body may do.
+#[track_caller]
+pub fn outside_a_handler(what: &str) {
+    if !crate::log::PERCPU_READY.load(Relaxed) || STOOD_DOWN.load(Relaxed) {
+        return;
+    }
+    let cpu = percpu::cpu_id();
+    if IN_HANDLER[cpu as usize].load(Relaxed) != 0 {
+        CPUS[cpu as usize].stop();
+        stand_down();
+        panic!("mask-windows: cpu{cpu} took {what} inside an interrupt handler at {}", core::panic::Location::caller());
+    }
+}
+
+/// The machine is ending, on a path that may take any lock.
+pub fn stand_down() {
+    STOOD_DOWN.store(true, Relaxed);
 }
 
 /// This CPU joins the scheduler, and is tracked from here.
@@ -70,6 +119,7 @@ pub fn irqs_masked() {
 /// This CPU took an exception in the kernel, which ends the machine: nothing
 /// more of it is tracked or checked.
 pub fn stop_here() {
+    stand_down();
     on(|w| {
         w.stop();
         Ok(())
@@ -121,14 +171,15 @@ pub fn log_cpu(cpu: u32) {
     );
 }
 
-/// The boot's first `SYS_EXIT`, which its entry left with interrupts masked
-/// and the preempt count raised, stays there for [`HELD_NS`] by this CPU's
-/// counter and says how long that was: `windows: held cpuN ns=…`.
+/// The boot's first `SYS_EXIT`, with the preempt count its entry raised,
+/// masks interrupts for [`HELD_NS`] by this CPU's counter and says how long
+/// that was: `windows: held cpuN ns=…`.
 pub fn hold_once() {
     static HELD: AtomicBool = AtomicBool::new(false);
     if HELD.swap(true, Relaxed) {
         return;
     }
+    let closed = crate::arch::IrqGuard::close();
     let from = cpu::counter();
     let mut ns = 0;
     // In the nanoseconds it prints: a tick count that stands for `HELD_NS` can
@@ -137,5 +188,6 @@ pub fn hold_once() {
         core::hint::spin_loop();
         ns = crate::clock::nanos_of_ticks(cpu::counter() - from);
     }
+    drop(closed);
     crate::log!("windows: held cpu{} ns={ns}", percpu::cpu_id());
 }

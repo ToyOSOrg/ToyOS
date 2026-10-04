@@ -1,7 +1,8 @@
-# One CPU and the AArch64 guest's jobs, each a kernelprobe applet or, last because
-# a kernel it fails on rewrites the clock page every reader asserts on, the
-# suite's `test_rs_abuse_readonly_copyout`, which the harness puts on ROOT;
-# each job's line comes only if the kernel kept what that job asks about.
+# One CPU and the AArch64 guest's jobs, each a kernelprobe applet or one of the
+# suite's binaries the harness puts on ROOT — `test_rs_abuse_readonly_copyout`
+# last, because a kernel it fails on rewrites the clock page every reader
+# asserts on; each job's line comes only if the kernel kept what that job asks
+# about.
 [boot]
 start = ["logkeeper", "test-runner"]
 
@@ -13,7 +14,7 @@ syscap = ["logread"]
 receives = ["power"]
 # Four minutes from boot rather than one: every job here runs on an emulated
 # CPU, and a job past the bound reboots the guest with the job named.
-args = ["--bound-ms=240000", "preempt", "fp_isolation", "first_entry", "unmap_touch", "debug_refused", "test_rs_abuse_readonly_copyout"]
+args = ["--bound-ms=240000", "preempt", "fp_isolation", "first_entry", "unmap_touch", "debug_refused", "test_rs_ring0_timer_in_syscall", "test_rs_abuse_readonly_copyout"]
 
 [programs.kernelprobe]
 

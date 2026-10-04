@@ -528,8 +528,6 @@ static PS2: Lock<Decoders> = Lock::new(Decoders {
 /// Turn whatever the ISR published into events and wakes. Runs at the top of
 /// every scheduler pass on every CPU, so the idle cost is one atomic load.
 pub fn service() {
-    // Unconditional and first: an undrained `irq_ring` record keeps
-    // `any_pending_self` true, spinning a CPU that never halts.
     let recorded = crate::irq_ring::take(IrqSource::I8042).is_some();
     if QUARANTINE.load(Ordering::Relaxed) {
         quarantine();

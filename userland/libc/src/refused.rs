@@ -40,12 +40,6 @@ pub unsafe extern "C" fn gethostname(_name: *mut u8, _len: usize) -> i32 {
     refuse()
 }
 
-/// No release, version or node name is published to a process.
-#[no_mangle]
-pub unsafe extern "C" fn uname(_buf: *mut u8) -> i32 {
-    refuse()
-}
-
 /// No filesystem ToyOS mounts keeps a second name for a file.
 #[no_mangle]
 pub unsafe extern "C" fn link(_existing: *const u8, _new: *const u8) -> i32 {

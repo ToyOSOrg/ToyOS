@@ -421,9 +421,8 @@ pub enum Urgency {
     /// RT wake, boost wake, adopt of an RT task, retire: the target must
     /// preempt, so the IPI is unconditional.
     Preempt,
-    /// Ordinary wake: a busy target drains at its next safe point (≤ one
-    /// quantum, matching today's contract) and needs no interrupt; a sleeping
-    /// target is always kicked.
+    /// Ordinary wake: a busy target drains at its next safe point and needs no
+    /// interrupt; a sleeping target is always kicked.
     Normal,
 }
 

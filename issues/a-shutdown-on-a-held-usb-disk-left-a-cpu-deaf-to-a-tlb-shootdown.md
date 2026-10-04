@@ -32,7 +32,11 @@ trigger and not the deaf CPU.
 `issues/xhci-waits-are-spins.md` carries the arithmetic for one disk
 operation outrunning `time::DEAF_CPU`; this is a boot
 that did outrun it, in `quiesce`, across several operations each inside its
-own budget. Whether `quiesce` holds `IF` clear between them is not measured.
+own budget. Whether `quiesce` holds `IF` clear between them is not measured;
+both sightings ran while a syscall's body ran with interrupts masked, and the
+shutdown syscall's now runs with them open
+(`issues/syscall-preemption-is-incidental.md`), which no boot has
+read since.
 
 **Second sighting, with the roles swapped**: `usb_transport_break --nightly` at
 `e889d03e` (#554), the `AnotherStick` boot (`554r6-usb_transport_break.log` in

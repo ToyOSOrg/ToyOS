@@ -201,7 +201,7 @@ impl MappedPages {
     }
 
     pub fn release(self, pt: &PageTables) {
-        // Two statements: the shootdown in drop must not run under the address-space lock, which a sibling's page fault spins on with IF clear.
+        // Two statements: the shootdown in drop must not run under the address-space lock, which a sibling's page fault spins on.
         let pages = self.unmap_from(&mut pt.lock());
         drop(pages);
     }
@@ -651,7 +651,7 @@ pub fn revoke_pipe_maps(maps: &mut Vec<PipeMap>, pt: &PageTables, pipe: pipe::Pi
             false
         });
     }
-    // Outside the block: it waits, and a sibling can be spinning on this lock with IF clear.
+    // Outside the block: it waits, and a sibling can be spinning on this lock.
     crate::arch::tlb::shootdown(crate::invalidation::Origin::Pipe);
 }
 
@@ -976,7 +976,7 @@ pub fn spawn_thread(entry: u64, stack_ptr: u64, arg: u64, stack_base: u64) -> Op
     // Re-checked under the insert lock: a thread refused here would otherwise be invisible to a retire sweep already under way.
     if !proclife_spawn::admit_thread_insert(table, parent_process).is_yes() {
         // The unmap cannot run under the table lock (its shootdown is a wait a
-        // sibling can be spinning against with IF clear), so the mapping is
+        // sibling can be spinning against), so the mapping is
         // still solely this scope's here — built into a ThreadData only past
         // the admission, where the table owns its release.
         drop(guard);
@@ -1285,7 +1285,7 @@ fn release_thread(process_pid: Pid, tid: Tid, code: i32) {
         let mut owner_data = owner_arc.lock();
         release_thread_mappings(&mut owner_data, tls, &addr_space, tid)
     };
-    // After the block: dropping waits for every other CPU, and the page-fault handler takes this same lock with IF clear.
+    // After the block: dropping waits for every other CPU, and the page-fault handler takes this same lock.
     drop(released);
 
     let guard = PROCESS_TABLE.lock();

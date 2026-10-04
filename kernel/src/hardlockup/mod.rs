@@ -62,6 +62,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::{Acquire, Relaxed, Rel
 use crate::arch::{cpu, percpu, pmu, trap};
 use crate::smp;
 use crate::sched::MAX_CPUS;
+use crate::symbols::At;
 
 /// The negative control, in a file of its own because it says what it staged
 /// and nothing here may say anything.
@@ -365,24 +366,6 @@ impl fmt::Display for Waiting {
             write!(f, ", taken at {at}")?;
         }
         Ok(())
-    }
-}
-
-/// Where a `pc` is, spelled without saying a word: `symbols::resolve_kernel`
-/// writes a log record, which is the one thing this path may not do.
-struct At(u64);
-
-impl fmt::Display for At {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:#018x}", self.0)?;
-        match crate::symbols::kernel_symbol(self.0) {
-            None => Ok(()),
-            Some((name, offset)) => write!(
-                f,
-                "  {}+{offset:#x}",
-                toyos_symbols::demangled(name),
-            ),
-        }
     }
 }
 

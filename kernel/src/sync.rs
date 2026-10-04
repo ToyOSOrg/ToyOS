@@ -1,14 +1,15 @@
+use core::mem::ManuallyDrop;
 use core::ops::{Deref, DerefMut};
 
 #[cfg(not(feature = "loom"))]
 use core::cell::UnsafeCell;
 #[cfg(not(feature = "loom"))]
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 #[cfg(feature = "loom")]
 use crate::cell::UnsafeCell;
 #[cfg(feature = "loom")]
-use loom::sync::atomic::{AtomicU32, Ordering};
+use loom::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 // Unlock publishes through `now`, not `ticket`; the load that reads `now`
 // is the one that must carry the acquire.
@@ -118,6 +119,20 @@ impl<T> Lock<T> {
 
     #[track_caller]
     pub fn lock(&self) -> LockGuard<'_, T> {
+        #[cfg(feature = "mask-windows")]
+        crate::windows::outside_a_handler("a `sync::Lock`");
+        self.acquire()
+    }
+
+    /// [`Lock::lock`] for an `IrqLock`, the one kind an interrupt handler may
+    /// take: the closed guard is its exemption from the handler witness.
+    #[track_caller]
+    pub fn lock_masked(&self, _closed: &crate::arch::IrqGuard) -> LockGuard<'_, T> {
+        self.acquire()
+    }
+
+    #[track_caller]
+    fn acquire(&self) -> LockGuard<'_, T> {
         crate::preempt::disable();
         let my_ticket = self.ticket.fetch_advance(Ordering::Relaxed);
         let mut spins = 0u64;
@@ -137,8 +152,12 @@ impl<T> Lock<T> {
                 ));
             }
             core::hint::spin_loop();
-            // Polls TLB shootdowns: this spin runs with `IF` clear, so skipping
-            // it here can deadlock a shootdown initiator that holds a lock.
+            // Polls TLB shootdowns: a spinner inside an `IrqGuard`, an
+            // `IrqLock`, a handler or the tick's pass has `IF` clear and takes
+            // no IPI, and without this would deadlock an initiator that holds
+            // the lock.
+            // With `IF` set the IPI can land inside this poll's own serve,
+            // which `Shootdown::serve` survives.
             crate::arch::tlb::poll();
             spins += 1;
             if spins == next_warn {
@@ -159,7 +178,10 @@ impl<T> Lock<T> {
         LockGuard { lock: self }
     }
 
+    #[track_caller]
     pub fn try_lock(&self) -> Option<LockGuard<'_, T>> {
+        #[cfg(feature = "mask-windows")]
+        crate::windows::outside_a_handler("a `sync::Lock`");
         crate::preempt::disable();
         let current = self.now.load(ACQUIRED);
         match self.ticket.compare_advance(current, Ordering::Relaxed, Ordering::Relaxed) {
@@ -206,4 +228,94 @@ impl<T> Drop for LockGuard<'_, T> {
     }
 }
 
+/// The pair an owing CPU's retry and a release's look each put before their
+/// read, so at least one of them sees the other's write. `owed-fence-off`
+/// drops it so `kernel-loom`'s `owed_lock` model can prove it is load-bearing.
+#[cfg(not(feature = "owed-fence-off"))]
+fn owed_fence() {
+    #[cfg(not(feature = "loom"))]
+    use core::sync::atomic::fence;
+    #[cfg(feature = "loom")]
+    use loom::sync::atomic::fence;
+    fence(Ordering::SeqCst);
+}
+#[cfg(feature = "owed-fence-off")]
+fn owed_fence() {}
 
+/// A [`Lock`] a CPU may find taken and leave without waiting: a CPU that
+/// [`OwedLock::try_lock_or_owe`] turned away is owed, and the next release hands
+/// every owed CPU, one bit each, to the `answer` the lock was built with, which
+/// brings it back to try again. What it owes is the turned-away CPU's to know.
+pub struct OwedLock<T> {
+    lock: Lock<T>,
+    owed: AtomicU64,
+    answer: fn(u64),
+}
+
+impl<T> OwedLock<T> {
+    #[cfg(not(feature = "loom"))]
+    pub const fn new(val: T, answer: fn(u64)) -> Self {
+        Self { lock: Lock::new(val), owed: AtomicU64::new(0), answer }
+    }
+
+    #[cfg(feature = "loom")]
+    pub fn new(val: T, answer: fn(u64)) -> Self {
+        Self { lock: Lock::new(val), owed: AtomicU64::new(0), answer }
+    }
+
+    #[track_caller]
+    pub fn lock(&self) -> OwedGuard<'_, T> {
+        OwedGuard { guard: ManuallyDrop::new(self.lock.lock()), of: self }
+    }
+
+    pub fn try_lock(&self) -> Option<OwedGuard<'_, T>> {
+        Some(OwedGuard { guard: ManuallyDrop::new(self.lock.try_lock()?), of: self })
+    }
+
+    /// [`Self::try_lock`], or `cpu` is owed: `None` only when the holder's
+    /// release is still to look, and that look answers `cpu`.
+    pub fn try_lock_or_owe(&self, cpu: u32) -> Option<OwedGuard<'_, T>> {
+        if let Some(won) = self.try_lock() {
+            return Some(won);
+        }
+        let bit = 1u64.checked_shl(cpu).expect("OwedLock: a cpu id past its 64-bit owed word");
+        self.owed.fetch_or(bit, Ordering::Relaxed);
+        owed_fence();
+        let won = self.try_lock()?;
+        self.owed.fetch_and(!bit, Ordering::Relaxed);
+        Some(won)
+    }
+}
+
+pub struct OwedGuard<'a, T> {
+    guard: ManuallyDrop<LockGuard<'a, T>>,
+    of: &'a OwedLock<T>,
+}
+
+impl<T> Deref for OwedGuard<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.guard
+    }
+}
+
+impl<T> DerefMut for OwedGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.guard
+    }
+}
+
+impl<T> Drop for OwedGuard<'_, T> {
+    fn drop(&mut self) {
+        // Held across the release and the look, so no switch stands between an owed CPU and its answer.
+        crate::preempt::disable();
+        // SAFETY: `guard` is dropped here, once, and nothing reads it after.
+        unsafe { ManuallyDrop::drop(&mut self.guard) };
+        owed_fence();
+        let owed = self.of.owed.swap(0, Ordering::Relaxed);
+        if owed != 0 {
+            (self.of.answer)(owed);
+        }
+        crate::preempt::enable();
+    }
+}

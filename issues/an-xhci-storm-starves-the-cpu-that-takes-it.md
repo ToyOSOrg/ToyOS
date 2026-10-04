@@ -26,9 +26,9 @@ so another CPU held the VFS lock across a stick write for seconds at a time.
 `xhci::poll_if_pending`, which `try_lock`s `XHCI` and **returns doing nothing**
 when the lock is held. Nothing masks the source in between, so every event the
 controller produces while that lock is held is one more interrupt on the CPU
-that cannot service it. The record stays set, the CPU re-enters a pass, declines
-the lock again, and the cycle costs it the interrupt budget it needed for its
-own timer.
+that cannot service it. The declined CPU halts, owed a kick by the lock's
+release, but each new event wakes it into another pass that declines the lock
+again, and the cycle costs it the interrupt budget it needed for its own timer.
 
 That is a CPU making no progress while looking busy, and it is the state
 `crate::deadline`'s poll relies on *some* CPU escaping.

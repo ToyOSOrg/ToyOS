@@ -112,6 +112,20 @@ pub fn kernel_symbol(addr: u64) -> Option<(&'static str, u64)> {
     table.resolve(addr)
 }
 
+/// Where a kernel `pc` is, spelled without saying a word: [`resolve_kernel`]
+/// writes a log record, which an NMI or a seal may not.
+pub struct At(pub u64);
+
+impl core::fmt::Display for At {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{:#018x}", self.0)?;
+        match kernel_symbol(self.0) {
+            None => Ok(()),
+            Some((name, offset)) => write!(f, "  {}+{offset:#x}", demangled(name)),
+        }
+    }
+}
+
 fn log_kernel(addr: u64, lookup: impl FnOnce(&SymbolTable) -> Option<(&str, u64)>) -> Option<u64> {
     let ptr = KERNEL_SYMS.load(Ordering::Acquire);
     if ptr.is_null() {

@@ -3952,9 +3952,11 @@ dependencies = [
  "toyos-gpt",
  "toyos-logstream",
  "toyos-manifest",
+ "toyos-osrelease",
  "toyos-quiesce",
  "toyos-swap",
  "toyos-update",
+ "toyos-wallclock",
 ]
 
 [[package]]
@@ -4264,6 +4266,10 @@ dependencies = [
 
 [[package]]
 name = "toyos-mixer"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-osrelease"
 version = "0.1.0"
 
 [[package]]

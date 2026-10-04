@@ -59,7 +59,10 @@ pub(super) extern "sysv64" fn unclaimed_entry() {
 /// Its `iretq` returns to either ring with interrupts open, as the vector found them.
 extern "sysv64" fn took() {
     #[cfg(feature = "mask-windows")]
-    crate::windows::irqs_masked();
+    {
+        crate::windows::irqs_masked();
+        crate::windows::handler_entered();
+    }
     crate::arch::percpu::irq_took!(Unclaimed);
     match apic::in_service_highest() {
         Some(vector) => {
@@ -71,7 +74,10 @@ extern "sysv64" fn took() {
         }
     }
     #[cfg(feature = "mask-windows")]
-    crate::windows::irqs_unmasking();
+    {
+        crate::windows::handler_leaving();
+        crate::windows::irqs_unmasking();
+    }
 }
 
 /// Whether `vector` has been taken through this gate.

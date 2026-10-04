@@ -60,16 +60,24 @@ use crate::toolchain::{self, host_triple, GuestTarget, Owner, Role, GUEST_TARGET
 use whole_toolchain::{whole, Whole};
 
 /// The per-worktree sources that end up inside a sysroot: std links `toyos-abi`
-/// and `toyos`, and `libtoyos_c.a` is `userland/libc` with `toyos-elf`.
-pub const SYSROOT_SOURCES: [&str; 5] =
-    ["toyos-abi/src", "toyos/src", "toyos-elf/src", "userland/libc/src", "userland/libc/include"];
+/// and `toyos`, and `libtoyos_c.a` is `userland/libc` with `toyos-elf` and
+/// `toyos-osrelease`.
+pub const SYSROOT_SOURCES: [&str; 6] = [
+    "toyos-abi/src",
+    "toyos/src",
+    "toyos-elf/src",
+    "toyos-osrelease/src",
+    "userland/libc/src",
+    "userland/libc/include",
+];
 
 /// Their manifests, and the lockfile and cargo configuration libc is built
 /// under: the features, versions and flags of the same build.
-pub(crate) const SYSROOT_MANIFESTS: [&str; 6] = [
+pub(crate) const SYSROOT_MANIFESTS: [&str; 7] = [
     "toyos-abi/Cargo.toml",
     "toyos/Cargo.toml",
     "toyos-elf/Cargo.toml",
+    "toyos-osrelease/Cargo.toml",
     "userland/libc/Cargo.toml",
     "userland/libc/Cargo.lock",
     "userland/.cargo/config.toml",
@@ -141,10 +149,12 @@ pub struct Sysroot {
 impl Sysroot {
     /// A checkout whose toolchain arrived as an artifact has one sysroot, the
     /// artifact's, which `toolchain::check_installed_toolchain` has matched to
-    /// these sources; `release`, the `TOOLCHAIN` it was published with, is the
-    /// identity of all of it.
+    /// these sources; the sysroot key named by `release`, the `TOOLCHAIN` it
+    /// was published with, is the identity of all of it: the key a build of
+    /// these sources computes where it builds its own.
     pub(crate) fn installed(stage2: PathBuf, release: &str) -> Self {
-        let id = Key::of(release.as_bytes());
+        let id = crate::release::named_key(release)
+            .unwrap_or_else(|| panic!("the installed TOOLCHAIN names no sysroot key:\n{release}"));
         Self { dir: stage2, primary_compiler: true, identity: Identity::new(id.clone(), &id, &id), _using: None }
     }
 
@@ -197,6 +207,13 @@ impl Identity {
     pub(crate) fn of_parts(compiler: &str, freestanding: &str, key: &str) -> Self {
         let of = |part: &str| Key::of(part.as_bytes());
         Self::new(of(compiler), &of(freestanding), &of(key))
+    }
+
+    /// The key of `triple`'s libraries, which reads the compiler's key and the
+    /// freestanding libraries' too: everything an image of that target's
+    /// programs was compiled with.
+    pub fn of_target(&self, triple: &str) -> &Key {
+        self.libraries.get(triple).unwrap_or_else(|| panic!("{triple} is no guest target of this sysroot"))
     }
 
     /// What this leaves stale of a target directory whose `.deps-stamp` says
