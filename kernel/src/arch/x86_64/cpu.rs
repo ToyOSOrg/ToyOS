@@ -152,8 +152,7 @@ pub fn leaf_7() -> (u32, u32, u32, u32) {
     if cpuid(0, 0).0 >= 7 { cpuid(7, 0) } else { (0, 0, 0, 0) }
 }
 
-/// CPUID with both index registers, as `(eax, ebx, ecx, edx)`; every caller
-/// queries leaf 0 first, so an unsupported leaf isn't misread as data.
+/// CPUID with both index registers, as `(eax, ebx, ecx, edx)`.
 ///
 /// `core`'s intrinsic and not an `asm!` of our own: `rbx` is CPUID's output
 /// and LLVM's reserved register, yet LLVM may still allocate it to a `reg`
