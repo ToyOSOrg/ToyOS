@@ -356,16 +356,21 @@ mod tests {
         // of a non-blocking slave discards what it still queues.
         let relay = std::thread::spawn(move || (relay(console.as_slice(), &mut terminal), terminal));
         let length = want.len();
-        let reader = std::thread::spawn(move || {
+        let (read, all_read) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
             refused.recv_timeout(std::time::Duration::from_secs(60)).expect("the pty never refused a write");
             let mut shown = vec![0; length];
-            master.read_exact(&mut shown).map(|()| shown)
+            read.send(master.read_exact(&mut shown).map(|()| shown))
         });
 
         let (wrote, _slave) = relay.join().expect("the relay");
         wrote.expect("the relay wrote everything");
-        let shown = reader.join().expect("the reader").expect("the relay's output");
-        assert!(shown == want, "the terminal was shown other bytes than the {} painted", want.len());
+        // A relay that lost bytes leaves the reader blocked on an open slave.
+        let shown = all_read
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .unwrap_or_else(|e| panic!("the terminal was not shown the {length} bytes painted: {e}"))
+            .expect("the relay's output");
+        assert!(shown == want, "the terminal was shown other bytes than the {length} painted");
     }
 
     #[test]
