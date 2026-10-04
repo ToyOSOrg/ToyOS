@@ -12,7 +12,11 @@
 
 use toyos_elf::{Layout, Machine};
 
-const HEADERS: &[u8] = include_bytes!("fixtures/toyos-ld-headers.bin");
+/// `object` reads an ELF header in place, so the bytes need its 8-byte alignment.
+#[repr(C, align(8))]
+struct Aligned<T>(T);
+
+static HEADERS: &[u8] = &Aligned(*include_bytes!("fixtures/toyos-ld-headers.bin")).0;
 
 #[test]
 fn a_toyos_ld_binary_parses_to_what_readelf_says() {
@@ -55,14 +59,14 @@ fn a_toyos_ld_binary_parses_to_what_readelf_says() {
 /// The first 4 KiB of `/system/bin/shell` as rust-lld linked it with
 /// `--build-id`: `dd if=userland/target/x86_64-unknown-toyos/toyos/shell
 /// of=toyos-elf/tests/fixtures/lld-headers.bin bs=4096 count=1`.
-const LLD_HEADERS: &[u8] = include_bytes!("fixtures/lld-headers.bin");
+static LLD_HEADERS: &[u8] = &Aligned(*include_bytes!("fixtures/lld-headers.bin")).0;
 
 /// The build-id `object` reads out of `file`'s program headers.
 fn objects_build_id(file: &[u8]) -> Option<Vec<u8>> {
     use object::read::elf::{FileHeader, ProgramHeader};
-    let header = object::elf::FileHeader64::<object::LittleEndian>::parse(file).ok()?;
-    let endian = header.endian().ok()?;
-    for phdr in header.program_headers(endian, file).ok()? {
+    let header = object::elf::FileHeader64::<object::LittleEndian>::parse(file).expect("object reads the file header");
+    let endian = header.endian().expect("object reads the byte order");
+    for phdr in header.program_headers(endian, file).expect("object reads the program headers") {
         let Ok(Some(mut notes)) = phdr.notes(endian, file) else { continue };
         while let Ok(Some(note)) = notes.next() {
             if note.name() == b"GNU" && note.n_type(endian) == object::elf::NT_GNU_BUILD_ID {

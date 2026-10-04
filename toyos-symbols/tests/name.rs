@@ -6,7 +6,11 @@ use object::{Object, ObjectSymbol, SymbolKind};
 use toyos_symbols::frame::BuildId;
 use toyos_symbols::{name, Check, Named, Unnamed};
 
-const BINARY: &[u8] = include_bytes!("fixtures/input-test.bin");
+/// `object` reads an ELF header in place, so the bytes need its 8-byte alignment.
+#[repr(C, align(8))]
+struct Aligned<T>(T);
+
+static BINARY: &[u8] = &Aligned(*include_bytes!("fixtures/input-test.bin")).0;
 
 /// `input-test` with its `PT_GNU_EH_FRAME` turned into a `PT_NOTE` over a
 /// build-id note appended past its end, far past its header page.
