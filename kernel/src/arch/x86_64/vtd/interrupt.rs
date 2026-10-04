@@ -40,7 +40,7 @@ pub const IRTA_REG: u64 = 0xB8;
 
 pub const INTERRUPT_REMAPPING_ENABLE: u32 = 1 << 25;
 pub const SET_TABLE_POINTER: u32 = 1 << 24;
-/// Set means compatibility-format messages bypass remapping; `GCMD.CFI` is never written, so it reads clear.
+/// Set means compatibility-format messages bypass remapping.
 pub const COMPATIBILITY_FORMAT: u32 = 1 << 23;
 
 /// `2^(7+1)` entries of 128 bits is exactly the 4 KiB [`Tables::alloc`] hands out.

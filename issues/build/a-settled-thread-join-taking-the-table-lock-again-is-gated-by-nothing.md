@@ -6,7 +6,7 @@ opened: 2026-09-28
 
 # A settled thread join taking the table lock again is gated by nothing
 
-`toyos_proclife::join::Join::ask` calls its `collect` only while the join is
+`kernel::proclife::join::Join::ask` calls its `collect` only while the join is
 unsettled, and `a_settled_join_does_not_take_the_table_again` holds that.
 Whether `collect` is where the kernel takes `PROCESS_TABLE` is
 `kernel/src/process.rs`'s `ask_join`, in no crate a host test compiles. PR

@@ -121,6 +121,12 @@ const RUST_SKIP: &[&str] = &[
     "readdir_bound",
     // Fills the VFS `created_dirs` cap and leaves it there. `mkdir_cap` runs it.
     "mkdir_cap",
+    // Each fills a bound of its own process — tens of thousands of mappings,
+    // thousands of threads, a thousand 2 MiB images — which no shared member's
+    // allowance is sized for: the `process_bound_*` metal rows run them.
+    "abuse_mmap_regions",
+    "abuse_thread_table",
+    "abuse_dlopen_ledger",
     // Audio is judged on the T14 and nowhere else: the `hda_client_stall`,
     // `hda_tone`, `audio_idle_suspend`, `shipped_client_departures` and
     // `soundserver_log_stall` metal rows run these.
@@ -285,6 +291,18 @@ const METAL: &[(&str, metal::Metal)] = &[
             arms: TESTCASES_READDIR,
             judge: |b| b[0].job_passed("test_rs_readdir_bound"),
         },
+    ),
+    (
+        "process_bound_regions",
+        metal::Metal { arms: BOUNDS, judge: |b| b[0].job_passed("test_rs_abuse_mmap_regions") },
+    ),
+    (
+        "process_bound_threads",
+        metal::Metal { arms: BOUNDS, judge: |b| b[0].job_passed("test_rs_abuse_thread_table") },
+    ),
+    (
+        "process_bound_libraries",
+        metal::Metal { arms: BOUNDS, judge: |b| b[0].job_passed("test_rs_abuse_dlopen_ledger") },
     ),
     (
         "wake_storm_cost",
@@ -668,6 +686,13 @@ const METAL: &[(&str, metal::Metal)] = &[
             judge: |b| operation_nesting_log(b[0].kernel().text()),
         },
     ),
+    (
+        // A unit handed over translating, remapping and queueing, on real
+        // silicon: each field goes off by its own write before the unit is
+        // programmed, and the boot goes on.
+        "iommu_firmware_left",
+        metal::Metal { arms: SELFTESTS, judge: |b| iommu_firmware_left(b[0].kernel().text()) },
+    ),
     // ---- the `isa` claim: one image whose i8042 the kernel leaves alone ----
     (
         // The I/O permission bitmap on the machine's own processor: the ports
@@ -741,6 +766,15 @@ const TESTCASES_MKDIR: &[metal::Arm] =
 
 const TESTCASES_READDIR: &[metal::Arm] =
     &[metal::once("testcases-readdir", "tests/testcases", &[], &["test_rs_readdir_bound"])];
+
+/// One boot for the three, which can share it: each fills a bound of its own
+/// process, and its exit gives all of it back.
+const BOUNDS: &[metal::Arm] = &[metal::once(
+    "testcases-bounds",
+    "tests/testcases",
+    &[],
+    &["test_rs_abuse_mmap_regions", "test_rs_abuse_thread_table", "test_rs_abuse_dlopen_ledger"],
+)];
 
 const JOBCASE: &[metal::Arm] = &[metal::once("jobcase", "tests/jobcase", &[], &[])];
 
@@ -833,6 +867,7 @@ const SELFTESTS: &[metal::Arm] = &[metal::once(
         "sysret-ss-probe",
         "test-input-merge",
         "sched-operation-nesting",
+        "iommu-firmware-left",
     ],
     &[],
 )];
@@ -2836,6 +2871,46 @@ fn input_merge_ok(log: &str) -> Result<(), String> {
         if !log.contains("input-merge: ok") {
             return Err(format!("the input core check never reported:\n{log}"));
         }
+        Ok(())
+}
+
+/// Every unit this kernel went on to program said it was handed over with what
+/// the actuator left on.
+fn iommu_firmware_left(log: &str) -> Result<(), String> {
+        let mut units = 0;
+        for line in log.lines().filter(|l| l.contains(" translating gsts=")) {
+            let unit = line
+                .split("iommu: ")
+                .nth(1)
+                .and_then(|rest| rest.split_whitespace().next())
+                .ok_or_else(|| format!("an unreadable unit line: {line:?}"))?;
+            let remaps = log
+                .lines()
+                .filter(|l| l.contains(&format!("iommu: {unit} @")))
+                .find_map(|l| common::iommu::unit_fields(l).remove("ir"))
+                .ok_or_else(|| format!("{unit} translates and no line describes its ir:\n{log}"))?
+                == "y";
+            let left = ["translation", "queued invalidation"]
+                .into_iter()
+                .chain(remaps.then_some("interrupt remapping"));
+            for field in left {
+                if !log.contains(&format!("iommu: {unit} was handed over with {field} on")) {
+                    return Err(format!(
+                        "{unit} translates and never said it was handed over with {field} on, so \
+                         the state the actuator left was never switched off by the hand-over:\n{log}"
+                    ));
+                }
+            }
+            units += 1;
+        }
+        if units == 0 {
+            return Err(format!("no unit was programmed, so nothing was handed over:\n{log}"));
+        }
+        let passed = log.matches("handed over with compatibility-format pass-through on").count();
+        eprintln!(
+            "  [iommu-firmware-left] {units} unit(s) programmed after switching off what they were \
+             handed over with; {passed} of them reported compatibility format passed"
+        );
         Ok(())
 }
 

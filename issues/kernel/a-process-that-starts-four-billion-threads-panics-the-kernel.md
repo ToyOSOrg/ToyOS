@@ -18,7 +18,7 @@ fault that thread takes.
 
 Userland reaches it by starting and joining threads in a loop; only a
 successful start spends an id, so it costs 2^32 thread starts, never measured.
-A pid had the same shape until `toyos_proclife::pids` (stops below `Pid::MAX`
+A pid had the same shape until `kernel::proclife::pids` (stops below `Pid::MAX`
 and refuses the next spawn by name); a thread id needs the same: never
 `Tid::MAX`, and a refused start once the ids are spent.
 

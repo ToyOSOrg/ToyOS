@@ -42,6 +42,19 @@ was handed, so isolating people follows from isolating programs.
   With that, the mount guard is deleted. Login data sits in the login
   authority's view alone.
 
+**Ruled** (owner, 2026-10-03):
+
+- **Who starts programs, "Restrict"**: a program starts only the programs its
+  own `system.toml` row lists, and a system program is swapped or updated only
+  from the login session.
+- **Grants, "Adopt"**: a file grant is an unforgeable badge on a connection,
+  written by whoever minted the connection; the kernel vouches for what was
+  granted, never for who connects. Revocation comes later.
+- **`/tmp`, "Per session"**: a session's programs share one `/tmp`, and each
+  service and each app has its own. This amends the 2026-09-26 ruling of
+  `issues/filesystem/where-everything-lives.md` that `/tmp` is private per
+  program.
+
 Unix permission bits and numeric user ids are rejected: they leave every path
 nameable by every program and make confused-deputy bugs structural.
 
@@ -75,7 +88,7 @@ nameable by every program and make confused-deputy bugs structural.
    on top of views: a login authority (sshd, and later a local greeter) holds
    a `login` right and asks init's `launcher` for a session, and init builds
    the session's view from the user's row: the user's home, `/system`
-   read-only, and a private `/tmp`. The machine's SSH identity is sshd's own
+   read-only, and the session's own `/tmp`. The machine's SSH identity is sshd's own
    state, not a user's. There is no `root` user and no `/home/root`, and a
    single key list sits in the login authority's view. **Exit**: a program in
    one user's session cannot name a file in another's, and appending to the

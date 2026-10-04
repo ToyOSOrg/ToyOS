@@ -6,7 +6,7 @@ opened: 2026-09-25
 
 # The scheduler's interleaving explorer never generates a stop
 
-`toyos-sched/sim` explores interleavings of blocks, wakes, migrations and
+`kernel/sim` explores interleavings of blocks, wakes, migrations and
 teardowns across CPUs, but no `Op` it generates marks a task `STOP`. The machine's
 stop adds three routes into the per-CPU `stopped` band:
 
@@ -16,8 +16,8 @@ stop adds three routes into the per-CPU `stopped` band:
   mark.
 
 Each of them races a cross-CPU wake, an adopt in transit or a retire. The only
-coverage is the single-CPU unit tests in `toyos-sched/src/cpu.rs` and
-`toyos-sched/src/task.rs`, which drive each route once and in order. The sim's
+coverage is the single-CPU unit tests in `kernel/pure/sched/cpu.rs` and
+`kernel/pure/sched/task.rs`, which drive each route once and in order. The sim's
 invariants include I1, every task in exactly one container. None of them has
 been checked with a stopped task in the machine.
 

@@ -8,10 +8,6 @@
 //! checking are about the order
 //! those happen in, and a model that only held the two states could not see
 //! one.
-//!
-//! A `BTreeMap` where the kernel has a `hashbrown::HashMap`: nothing here
-//! depends on the order, and a model whose counter-example is different every
-//! run is a model nobody can bisect.
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
@@ -61,6 +57,9 @@ impl Lifecycle for ModelProc {
         for (&tid, &at) in &self.threads {
             f(tid, at);
         }
+    }
+    fn thread_count(&self) -> usize {
+        self.threads.len()
     }
     fn node(&self) -> &Node {
         &self.node

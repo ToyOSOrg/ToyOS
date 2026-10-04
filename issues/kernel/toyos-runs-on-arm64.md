@@ -70,8 +70,8 @@ Every x86 guest on this host runs under TCG emulation instead — there is no
 160, `rtc.rs` (CMOS through port I/O) 222. Also `drivers/serial.rs` (433
 lines: a 16550 at a port, `serial.rs:28-39,157-165,389-396`).
 
-**x86-only pure crates, 1,305 lines:** `toyos-ps2` 377, `toyos-tco` 313,
-`toyos-pcid` 388 (it becomes an ASID allocator), `toyos-bootmap` 227
+**x86-only pure code, 1,305 lines:** `toyos-ps2` 377, `toyos-tco` 313,
+`kernel/pure/pcid` 388 (it becomes an ASID allocator), `toyos-bootmap` 227
 (PML4[0]/PML4[256], `toyos-bootmap/src/lib.rs:21-29`).
 
 **Inline assembly**, 834 lines by a paren-depth scan of
@@ -146,9 +146,9 @@ output (`collect.rs` 80 `Aarch64` mentions, `reloc.rs` 69) but hardwires
 refuses anything but `EM_X86_64` (`toyos-elf/src/header.rs:24,75`).
 
 **Already abstracted.** The syscall stub already has both arms
-(`toyos-abi/src/syscall.rs:678,703`: `syscall` and `svc #0`). `toyos-sched`
+(`toyos-abi/src/syscall.rs:678,703`: `syscall` and `svc #0`). `kernel/pure/sched`
 (8,099 lines) is pure behind `Machine`/`Hw`
-(`toyos-sched/src/hw.rs:88-158`: `now`, `set_timer`, `stop_timer`,
+(`kernel/pure/sched/hw.rs:88-158`: `now`, `set_timer`, `stop_timer`,
 `irq_guard`, `halt`, `need_resched`, `switch`), with `kernel/src/arch/x86_64/hw.rs` as
 the one x86 implementation and a simulator as the other. PCI is
 ECAM/MMIO-only (`drivers/pci.rs:134-154`), no `0xCF8`. NVMe, xHCI and virtio
@@ -194,7 +194,7 @@ before any aarch64 file exists, with x86 as its only user:
   language.
 - **Pure crates stay arch-free.** A per-arch decision that becomes pure lives
   in its own crate, as `toyos-bootmap` does: it grows a TTBR plan, and
-  `toyos-pcid` becomes an ASID/PCID allocator.
+  `kernel/pure/pcid` becomes an ASID/PCID allocator.
 
 ## x86 left in generic code
 
@@ -254,7 +254,7 @@ Each stage names its exit; "measured" means a number from a run.
    and each of the three deletions is shown red.
    **Built on one CPU, ahead of small-kernel stage 6 by the owner's word:**
    the kernel's own tables (`TTBR1_EL1` holding memory and nothing else, each
-   user space on `TTBR0_EL1` under a 16-bit ASID from `toyos-pcid`), the
+   user space on `TTBR0_EL1` under a 16-bit ASID from `kernel/pure/pcid`), the
    GICv3's SGIs and the virtual timer's PPI, the EL0 entry, and the context
    switch carrying FP/SIMD; the `virt_` tests other than `virt_early_panic`,
    `virt_early_fault` and `virt_el2_drop` judge it under the EL2 profile, emulated, because HVF

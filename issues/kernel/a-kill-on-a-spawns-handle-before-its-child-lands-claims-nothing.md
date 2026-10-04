@@ -11,7 +11,7 @@ handle to its child in the spawner's table before `loader::spawn` lands the
 child in the process table, and a handle's number is its table's own
 arithmetic, so another thread of the spawner can name the handle in between.
 A `SYS_PROCESS_KILL` on it there claims nothing:
-`toyos_proclife::teardown::claim_teardown` answers `false` for a pid not in
+`kernel::proclife::teardown::claim_teardown` answers `false` for a pid not in
 the table, and `process::kill_process` answers `Ok`. The child then lands and
 runs. `kill_process`'s "`Ok` for an already-gone process: the caller asked for
 it to be dead and it is" does not cover a process not yet there.

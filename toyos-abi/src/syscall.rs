@@ -949,6 +949,10 @@ pub fn mark_tty(handle: RawHandle) {
     syscall(SYS_MARK_TTY, handle.0 as u64, 0, 0, 0);
 }
 
+/// Threads one process holds, its main thread and every exited one not yet
+/// joined among them; [`thread_spawn`] past it is `ResourceExhausted`.
+pub const MAX_THREADS: usize = 4096;
+
 /// Spawn a new thread with the given entry point, stack pointer, argument, and stack base.
 /// `stack_base` is the bottom of the user stack (for stack info queries).
 ///
@@ -2072,6 +2076,10 @@ pub fn readlink(path: &[u8], buf: &mut [u8]) -> Result<usize, SyscallError> {
     check(syscall(SYS_READLINK, path.as_ptr() as u64, path.len() as u64, buf.as_mut_ptr() as u64, buf.len() as u64)).map(|n| n as usize)
 }
 
+/// Libraries one process holds, `DT_NEEDED` and loaded alike; [`dl_open`] of a
+/// name it does not hold past it is `ResourceExhausted`.
+pub const MAX_LIBRARIES: usize = 1024;
+
 /// Load a shared library (.so) into the current process.
 /// Runs .init_array constructors after loading.
 pub fn dl_open(path: &[u8]) -> Result<u64, SyscallError> {
@@ -2146,6 +2154,10 @@ pub fn stack_info() -> Option<(u64, u64)> {
 pub fn cpu_count() -> u32 {
     syscall(SYS_CPU_COUNT, 0, 0, 0, 0) as u32
 }
+
+/// Regions one address space holds — every mapping, ELF segment, stack, TLS
+/// block and library image; a placement past it is `ResourceExhausted`.
+pub const MAX_REGIONS: usize = 32_768;
 
 /// Map anonymous memory. Returns pointer on success, null on failure.
 ///

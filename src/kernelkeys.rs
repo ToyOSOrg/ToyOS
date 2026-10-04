@@ -44,11 +44,6 @@ pub struct Declared {
 /// Every hashed container in `kernel/src`, with the origin of its keys.
 pub const DECLARED: &[Declared] = &[
     Declared {
-        file: "kernel/src/id_map.rs",
-        ty: "HashMap<K, V>",
-        keys: "`IdKey`, which no integer implements: every key is an id this kernel issued",
-    },
-    Declared {
         file: "kernel/src/arch/x86_64/paging.rs",
         ty: "HashMap<u64, crate::mm::pmm::PhysPage>",
         keys: "a physical address the page allocator returned",

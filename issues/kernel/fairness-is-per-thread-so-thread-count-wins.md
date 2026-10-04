@@ -12,7 +12,7 @@ Queued track from the 2026-08-16 owner conversation on scheduler direction.
 work is the rest of the hierarchy.** Fair scheduling no longer shares the CPU
 between *threads*. All threads of one process share a vruntime, so a second
 runnable thread bumps a refcount and buys no second slice
-(`toyos-sched/src/fair.rs:95-99`), and the state it advances is one `KShare`
+(`kernel/pure/sched/fair.rs:95-99`), and the state it advances is one `KShare`
 per `Pid` (`kernel/src/scheduler.rs:249`, minted at `:257-268`). A process with
 100 threads no longer out-schedules one with 8 by showing up more.
 
