@@ -14,9 +14,9 @@ use toyos_elf::{Layout, Machine};
 
 /// `object` reads an ELF header in place, so the bytes need its 8-byte alignment.
 #[repr(C, align(8))]
-struct Aligned<const N: usize>([u8; N]);
+struct Aligned([u8; 4096]);
 
-static LLD_ALIGNED: Aligned<4096> = Aligned(*include_bytes!("fixtures/lld-headers.bin"));
+static LLD_ALIGNED: Aligned = Aligned(*include_bytes!("fixtures/lld-headers.bin"));
 static LLD_HEADERS: &[u8] = &LLD_ALIGNED.0;
 
 #[test]
@@ -52,9 +52,8 @@ fn a_linked_binary_parses_to_what_readelf_says() {
     let sections = layout.section_headers().expect("a section header table");
     assert_eq!((sections.count, sections.entry_size), (26, 64));
 
-    // Every `DT_*` vaddr in this file resolves, and no two segments contend for
-    // a page — the two derived answers `spawn` refuses a binary over. The RW
-    // segments sit 0x2000 above their file bytes, and the first segment at none.
+    // No two segments contend for a page, and a vaddr resolves to its file
+    // offset — the two derived answers `spawn` refuses a binary over.
     assert_eq!(layout.overlapping_load_pages(4096), None);
     assert_eq!(layout.vaddr_to_file_offset(0xc0620), Some(0xbe620));
     assert_eq!(layout.vaddr_to_file_offset(0xc1800), Some(0xbe800));
