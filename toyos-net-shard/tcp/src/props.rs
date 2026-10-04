@@ -482,7 +482,7 @@ fn s_op_025_prop_timestamps_on_every_segment() {
         let tcp = &mut run.net.nodes[node].tcp;
         tcp.abort(now, id).unwrap();
         let mut out = Vec::new();
-        common::pull(tcp, &mut Default::default(), now, usize::MAX, |_| Hop::Ready(()), |o, ()| {
+        common::pull(tcp, &mut std::collections::VecDeque::new(), now, usize::MAX, |_| Hop::Ready(()), |o, ()| {
             out.push(parse_out(&datagram(o), 0));
             true
         });
