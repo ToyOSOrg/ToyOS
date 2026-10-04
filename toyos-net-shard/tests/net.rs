@@ -1,5 +1,5 @@
 //! The test network's scenarios at frame level: two shards — [ip], ARP and TCP composed — on one
-//! segment, with the impairment each scenario names (`tcp.md` §18.20, PL-11). Ours against ours:
+//! segment, with the impairment each scenario names. Ours against ours:
 //! a consistency control, not an independent oracle.
 
 mod common;

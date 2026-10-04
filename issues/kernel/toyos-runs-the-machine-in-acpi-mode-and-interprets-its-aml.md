@@ -50,8 +50,22 @@ writes its own, and the battery comes first (his direction of `0ee814f5a`).
 - **"Extracts only"**: the repository holds small decoded extracts of the
   T14's ACPI tables; the whole tables stay out of the tree, read only by a
   check run outside it.
+- **"Local only; decode the 186 bytes"** (2026-10-04): "Full tables stay out
+  of the repo (a copy you hold); the 186-byte fixture on main is replaced by
+  decoded values, as 'Extracts only' says." The T14's root-bridge list is
+  `t14_root_bridge` in `toyos-acpi/tests/common/mod.rs`.
 - **"full clean room write with the spec"**: the AML interpreter is written
   from the ACPI specification.
+
+**Ruled** (owner, 2026-10-04), on the interpreter:
+
+- **"Like Windows, not Linux"**, on `_OSI`: "Yes to every published Windows
+  version string, no to 'Linux' and 'FreeBSD', as Linux itself answers. The
+  T14 then runs the path it was tested on: Modern Standby, CPU performance
+  tables, 101-step backlight, thermal profiles, all devices present."
+- **"Yes, one path"**, on power-off: "Power-off always goes through the ACPI
+  server; the kernel's power-off table reader is deleted. If the server is
+  broken, power-off fails loudly in every test."
 
 The orchestrator's reading of the clean-room ruling, not his: uACPI and
 ACPICA are run only as black-box oracles, and whoever writes the interpreter
@@ -67,3 +81,9 @@ power-off path (`SYS_SHUTDOWN`), and the boot's log records the press and that
 stop, and each EC query number once with its count: a T14 row reads them there.
 A second T14 row kills the server and reads `SCI_EN` clear in `PM1_CNT`
 afterwards, the kernel having written `ACPI_DISABLE` to `SMI_CMD`.
+
+**Stage: power-off through the server** (the orchestrator's placement of "Yes,
+one path"). The ACPI server evaluates `\_S5` and powers the machine off.
+Blocked on the interpreter's evaluation of `\_S5`. **Exit**: the kernel's `\_S5_` reader, `toyos-acpi/src/dsdt.rs`, and its caller
+in `kernel/src/arch/x86_64/power.rs` are deleted, and a test that powers off
+through a broken server is red.

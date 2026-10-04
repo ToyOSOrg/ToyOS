@@ -23,10 +23,10 @@ pub(crate) struct Interface {
     pub gateways: Vec<Ipv4Addr>,
     pub active: Option<Ipv4Addr>,
     pub neighbours: BTreeMap<Ipv4Addr, nud::Neighbour>,
-    /// A send found the table full of entries in use (§6.8), and none has become evictable since.
+    /// A send found the table full of entries in use, and none has become evictable since.
     pub full: bool,
     /// Datagrams its entries queue, held for resolution or released and not yet left:
-    /// PENDING_TOTAL bounds them (§6.5).
+    /// PENDING_TOTAL bounds them.
     pub held: usize,
     pub reachable: Duration,
     pub reachable_drawn: Instant,
@@ -68,7 +68,7 @@ impl Interface {
         self.usable().any(|a| a.cidr.contains(addr))
     }
 
-    /// §3.5 rules 1 and 2: a usable address whose prefix holds `toward`, else the first usable one.
+    /// A usable address whose prefix holds `toward`, else the first usable one.
     pub fn source_for(&self, toward: Ipv4Addr) -> Option<Ipv4Addr> {
         self.usable().find(|a| a.cidr.contains(toward)).or_else(|| self.usable().next()).map(|a| a.cidr.addr())
     }

@@ -14,7 +14,7 @@ use common::qemu::{
     self, await_guest, await_marker, BootOptions, QemuInstance,
     STALLED, TIMED_OUT,
 };
-use common::{audio, compile, devices, faults, isa, lan, metal, power, screen, serial, usb};
+use common::{audio, claims, compile, devices, faults, isa, lan, metal, power, screen, serial, usb};
 use toyos_build::bootlog::{self};
 use toyos_build::testargs::{self, SUITE};
 
@@ -97,6 +97,10 @@ const RUST_SKIP: &[&str] = &[
     // metal rows run them.
     "isa_grant",
     "isa_lines",
+    // It claims the T14's I219, which no guest has: the
+    // `claim_reuses_its_remapping_entry` and `claim_refused_without_remapping`
+    // metal rows run it.
+    "pci_reclaim",
     // Its product is the T14's counters across an idle span and a spin on
     // every CPU, which the `counters` metal row judges; on a guest it would be
     // seconds of four CPUs spinning, read by nothing.
@@ -110,6 +114,13 @@ const RUST_SKIP: &[&str] = &[
     // `tests/testcases` does not give: the `launch_toctou` metal row runs it on
     // tests/proctreecase.
     "launch_toctou",
+    // Needs a launcher whose row lists `swap` and `update` and not `proctest`,
+    // and a shell that opens a login session: the `launch_authority` metal row
+    // runs it on tests/proctreecase.
+    "launch_authority",
+    // A kernel primitive with no use for any one boot's devices: the
+    // `port_badge` metal row runs it on tests/proctreecase.
+    "port_badge",
     // It asserts nothing at all: it holds a `tests/lanleasecase` boot open for
     // twenty seconds. On a shared boot it would be twenty seconds of nothing.
     "lan_hold",
@@ -631,6 +642,18 @@ const METAL: &[(&str, metal::Metal)] = &[
         "launch_toctou",
         metal::Metal { arms: PROCTREECASE, judge: |b| b[0].job_passed("test_rs_launch_toctou") },
     ),
+    (
+        // A launch starts only what the caller's row lists, and `swap` and
+        // `update` only in a login session.
+        "launch_authority",
+        metal::Metal { arms: PROCTREECASE, judge: |b| launch_authority(b[0]) },
+    ),
+    (
+        // A connection's badge is the minted bytes, read back by its own
+        // port's acceptor alone.
+        "port_badge",
+        metal::Metal { arms: PROCTREECASE, judge: |b| b[0].job_passed("test_rs_port_badge") },
+    ),
     // ---- one image: tests/metalcase ----
     (
         "metal_sim_scanout_wc",
@@ -695,6 +718,39 @@ const METAL: &[(&str, metal::Metal)] = &[
         "iommu_firmware_left",
         metal::Metal { arms: SELFTESTS, judge: |b| iommu_firmware_left(b[0].kernel().text()) },
     ),
+    // ---- a claimed function at the unit, on tests/testcases ----
+    (
+        // Claimed, given back and claimed again: both claims name one
+        // remapping entry, and each release leaves it not present.
+        "claim_reuses_its_remapping_entry",
+        metal::Metal {
+            arms: TESTCASES,
+            judge: |b| {
+                b[0].job_passed(claims::RECLAIM)?;
+                claims::reuses_its_entry(&b[0].kernel())
+            },
+        },
+    ),
+    (
+        // Every domain's addresses end below the first root-bridge window
+        // above where they start.
+        "domain_ends_below_the_host_bridges",
+        metal::Metal { arms: TESTCASES, judge: |b| claims::clear_of_host_bridges(&b[0].kernel()) },
+    ),
+    (
+        // A machine whose units do not remap: the claim is refused before
+        // anything on the function changes, and the boot goes on.
+        "claim_refused_without_remapping",
+        metal::Metal {
+            arms: &[metal::once(
+                "iommu-no-remap",
+                "tests/testcases",
+                &["iommu-no-remap"],
+                &[claims::RECLAIM],
+            )],
+            judge: |b| claims::refused_unremapped(&b[0].kernel()),
+        },
+    ),
     // ---- the `isa` claim: one image whose i8042 the kernel leaves alone ----
     (
         // The I/O permission bitmap on the machine's own processor: the ports
@@ -756,6 +812,7 @@ const TESTCASES: &[metal::Arm] = &[metal::once(
         "test_rs_hda_client_stall",
         "test_rs_syscall_cost",
         "test_rs_null_sink_client_exits",
+        claims::RECLAIM,
     ],
 )];
 
@@ -821,12 +878,13 @@ const USB_RESET_BOOTS: &[metal::Arm] = &[
 const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/metalcase", &[], &[])];
 
 /// A launcher and a declared `cat` and shell, which `process_tree`'s subtree
-/// launches, and a `toybox` row holding `roster`, which `launch_toctou` races.
+/// launches, a `toybox` row holding `roster`, which `launch_toctou` races, and
+/// the rows `launch_authority` is refused and started.
 const PROCTREECASE: &[metal::Arm] = &[metal::once(
     "proctreecase",
     "tests/proctreecase",
     &[],
-    &["test_rs_process_tree", "test_rs_launch_toctou"],
+    &["test_rs_process_tree", "test_rs_launch_toctou", "test_rs_launch_authority", "test_rs_port_badge"],
 )];
 
 /// netstack in front of the T14's I219 with its lease probe armed: netstack's exit code
@@ -1505,7 +1563,8 @@ fn virt_job(profile: qemu::Profile, job: &str, said: &str) -> Result<(), String>
             ..Default::default()
         },
     );
-    judge_virt_job(&mut qemu, job, said).map(drop)
+    let mut serial = virt_console(&qemu);
+    judge_virt_job(&mut qemu, &mut serial, job, said)
 }
 
 /// A `mask-windows` boot's windows: `common::irqcensus::windows`'s verdict,
@@ -1524,14 +1583,19 @@ fn mask_windows(capture: &str, cpus: u32) -> Result<(), String> {
     Ok(())
 }
 
+/// Everything the PL011 has carried on `qemu`'s boot: the capture each
+/// [`judge_virt_job`] after the first goes on from, since a drain reads past
+/// the marker it waited for.
+fn virt_console(qemu: &QemuInstance) -> String {
+    format!("{}\n", qemu.boot_log())
+}
+
 /// Wait for `job`'s end on a guest booted with it, and judge it: it ends with
-/// exit 0, having said `said`. Answers everything the PL011 carried.
-fn judge_virt_job(qemu: &mut QemuInstance, job: &str, said: &str) -> Result<String, String> {
+/// exit 0, having said `said`. `serial` is everything the PL011 has carried,
+/// and takes what this drains.
+fn judge_virt_job(qemu: &mut QemuInstance, serial: &mut String, job: &str, said: &str) -> Result<(), String> {
     let end = format!("===TEST_END {job} ");
-    let mut rest = String::new();
-    let waited = await_marker(qemu, &mut rest, &end, &format!("the job {job} to end"));
-    let serial = format!("{}\n{rest}", qemu.boot_log());
-    if let Err(why) = waited {
+    if let Err(why) = await_marker(qemu, serial, &end, &format!("the job {job} to end")) {
         return Err(format!("{why}\nserial:\n{serial}"));
     }
     let ended = serial
@@ -1545,7 +1609,7 @@ fn judge_virt_job(qemu: &mut QemuInstance, job: &str, said: &str) -> Result<Stri
     if !ended.contains(&format!("===TEST_END {job} exit=0===")) {
         return Err(format!("{ended}\nserial:\n{serial}"));
     }
-    Ok(serial)
+    Ok(())
 }
 
 /// What `unmap_touch` says once every read of a page just unmapped,
@@ -1567,7 +1631,8 @@ fn virt_mask_windows(profile: qemu::Profile) -> Result<(), String> {
         kernel_features: toyos_build::build::MASK_WINDOWS_KERNEL,
         ..Default::default()
     });
-    let mut serial = judge_virt_job(&mut qemu, "unmap_touch", UNMAP_TOUCH_SAID)?;
+    let mut serial = virt_console(&qemu);
+    judge_virt_job(&mut qemu, &mut serial, "unmap_touch", UNMAP_TOUCH_SAID)?;
     // To the boot's last word, said after every census and its windows: the drain that took the job's end can stop between the two.
     await_marker(&mut qemu, &mut serial, power::SHUTTING_DOWN, "the boot's last word")?;
     mask_windows(&serial, VIRT_CPUS)
@@ -1610,7 +1675,8 @@ fn virt_smp(profile: qemu::Profile, conduit: &str, el: u32) -> Result<(), String
     // Before the job list can reach its `shutdown`: QMP delivers no event
     // emitted before its client connected.
     let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(qemu::GUEST_QUIET));
-    let serial = judge_virt_job(&mut qemu, "unmap_touch", UNMAP_TOUCH_SAID)?;
+    let mut serial = virt_console(&qemu);
+    judge_virt_job(&mut qemu, &mut serial, "unmap_touch", UNMAP_TOUCH_SAID)?;
     let psci = serial.lines().find(|l| l.contains("PSCI: ")).unwrap_or_default();
     if !psci.contains(&format!(" through {conduit}")) {
         return Err(format!("PSCI is not said to be reached through {conduit}: {psci:?}\nserial:\n{serial}"));
@@ -1632,9 +1698,9 @@ fn virt_smp(profile: qemu::Profile, conduit: &str, el: u32) -> Result<(), String
         }
     }
     eprintln!("  [virt] {VIRT_CPUS} CPUs entered at EL{el}, started through {conduit}, and scheduling");
-    let counted = judge_virt_job(&mut qemu, "test_rs_counters_read", COUNTERS_READ_SAID)?;
+    judge_virt_job(&mut qemu, &mut serial, "test_rs_counters_read", COUNTERS_READ_SAID)?;
     let (console, calls) =
-        ended_through_psci(&mut qemu, &mut stop, counted, power::SHUTTING_DOWN, "guest-shutdown", &trace, |_| Vec::new())?;
+        ended_through_psci(&mut qemu, &mut stop, serial, power::SHUTTING_DOWN, "guest-shutdown", &trace, |_| Vec::new())?;
     let record = console
         .lines()
         .find_map(toyos_quiesce::Record::parse)
@@ -1733,7 +1799,8 @@ fn virt_failed_ap_leaves_no_hole(profile: qemu::Profile) -> Result<(), String> {
     const CPUS: u32 = 4;
     let mut qemu =
         boot_virt_smp(BootOptions { profile, smp: CPUS, kernel_params: &["smp-skip-ap"], ..Default::default() });
-    let serial = judge_virt_job(&mut qemu, "unmap_touch", UNMAP_TOUCH_SAID)?;
+    let mut serial = virt_console(&qemu);
+    judge_virt_job(&mut qemu, &mut serial, "unmap_touch", UNMAP_TOUCH_SAID)?;
     // The premise, not just a small machine: cpu1 came up and cpu2 did not.
     for premise in ["SMP: cpu1 mpidr=0x1 online", "SMP: cpu2 mpidr=0x2 did not echo within"] {
         if !serial.contains(premise) {
@@ -1810,7 +1877,8 @@ fn virt_off_names_the_cpus_left_on(profile: qemu::Profile) -> Result<(), String>
         ..Default::default()
     });
     let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(qemu::GUEST_QUIET));
-    let serial = judge_virt_job(&mut qemu, "unmap_touch", UNMAP_TOUCH_SAID)?;
+    let mut serial = virt_console(&qemu);
+    judge_virt_job(&mut qemu, &mut serial, "unmap_touch", UNMAP_TOUCH_SAID)?;
     let spared = |calls: &[(u64, u64)]| -> Vec<u64> {
         let last = calls.iter().find(|&&(function, _)| function == PSCI_SYSTEM_OFF).map(|&(_, cpu)| cpu);
         (u64::from(VIRT_CPUS) - 2..u64::from(VIRT_CPUS)).filter(|&cpu| Some(cpu) != last).collect()
@@ -2688,6 +2756,28 @@ fn process_tree(back: &metal::Readback) -> Result<(), String> {
     let refused: Vec<&str> = log.lines().filter(|l| l.contains("spawn: refused under pid ")).collect();
     if refused.len() != 1 || !refused[0].contains("at depth 65, more than 64 below the supervisor") {
         return Err(format!("the kernel's depth refusals were {refused:?}, not one naming depth 65"));
+    }
+    Ok(())
+}
+
+/// `launch_authority` passed, and the supervisor refused each launch for its
+/// own reason: `proctest` as unlisted, `swap` and `update` as outside a login
+/// session, for test-runner and for the toybox it launched. The guest sees
+/// only that each was refused.
+fn launch_authority(back: &metal::Readback) -> Result<(), String> {
+    use toyos_manifest::launch::{refused, Refusal, Session};
+    back.job_passed("test_rs_launch_authority")?;
+    let log = back.log();
+    for (caller, target, why) in [
+        ("test-runner", "proctest", Refusal::NotListed),
+        ("test-runner", "swap", Refusal::OutsideLogin),
+        ("test-runner", "update", Refusal::OutsideLogin),
+        ("toybox", "swap", Refusal::OutsideLogin),
+    ] {
+        let line = refused(caller, Session::Machine, target, why);
+        if !log.text().lines().any(|l| l.contains(&line)) {
+            return Err(format!("the supervisor never said `{line}`\n{}", log.text()));
+        }
     }
     Ok(())
 }

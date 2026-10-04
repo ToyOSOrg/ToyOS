@@ -412,7 +412,7 @@ struct Delta {
     ts: Option<u32>,
 }
 
-/// The answer to the hop question for a 4-tuple at spec time t (`ip.md` §6.7).
+/// The answer to the hop question for a 4-tuple at spec time t.
 pub type Hops = Box<dyn FnMut(i64, &Tuple) -> Hop<()>>;
 
 /// Stack A and its scripted peer.
