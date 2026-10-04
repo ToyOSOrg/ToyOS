@@ -57,6 +57,9 @@ const ACTUATOR_TESTS: &[&str] = &[
     // again, which is what a CPU silent past a read's bound is to the reader,
     // and nothing in a guest makes one on demand.
     "counters_silent",
+    // Action 26: the timer's interrupt inside a syscall's body, which only a
+    // running gate decides and nothing in a guest puts there on demand.
+    "ring0_timer_in_syscall",
 ];
 
 /// What [`ACTUATOR_TESTS`] boots: the one kernel that carries `SYS_DEBUG`, with
@@ -155,6 +158,9 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     // Its shared run is the x86-64 verdict; `virt_readonly_copyout` builds it
     // for AArch64 and runs it on that architecture's job case.
     "abuse_readonly_copyout",
+    // Its actuator-boot run is the x86-64 verdict; `virt_ring0_timer_in_syscall`
+    // builds it for AArch64 and runs it on that architecture's job case.
+    "ring0_timer_in_syscall",
     // Its shared run asserts every arm's kill; `crash_report_reads_no_kernel_memory`
     // reads what the kernel said of two of them.
     "fault_gates",
@@ -193,6 +199,7 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("virt_unmap_touch", qemu::Profile::VirtEl2),
     ("virt_debug_refused", qemu::Profile::VirtEl2),
     ("virt_readonly_copyout", qemu::Profile::VirtEl2),
+    ("virt_ring0_timer_in_syscall", qemu::Profile::VirtEl2),
     ("virt_mask_windows", qemu::Profile::VirtEl2),
     ("virt_smp", qemu::Profile::VirtEl2),
     ("virt_el1_smp", qemu::Profile::VirtTcg),
@@ -217,6 +224,10 @@ const MACHINE_TESTS: &[&str] = &[
     // no way to turn it back on, so only a machine QEMU reports stopping can
     // be asked. `machine_soft_off_decoded` reads the T14's own decode.
     "machine_shutdown",
+    // A `mask-windows` kernel's bookkeeping on x86-64, where a syscall's body
+    // opens interrupts: `virt_mask_windows` reads AArch64's alone, and the
+    // T14's `mask_windows` row is in no CI.
+    "x86_mask_windows",
 ];
 
 /// **The metal profile**: which registrations run on the ThinkPad T14, what
@@ -1464,6 +1475,9 @@ fn check_colors(
 /// `test_rs_abuse_readonly_copyout`.
 const VIRT_COPYOUT: &str = "abuse_readonly_copyout";
 
+/// The same for its job `test_rs_ring0_timer_in_syscall`.
+const VIRT_RING0_TIMER: &str = "ring0_timer_in_syscall";
+
 /// `tests/toyos-rust-tests`' binary that `tests/virtsmpcase` runs as its job
 /// `test_rs_counters_read`.
 const VIRT_COUNTERS_READ: &str = "counters_read";
@@ -1501,7 +1515,7 @@ fn virt_job(profile: qemu::Profile, job: &str, said: &str) -> Result<(), String>
             smp: 1,
             kernel_features: toyos_build::build::TEST_KERNEL,
             ready_marker: "control registers: SCTLR_EL1=",
-            extra_root_files: vec![suite_bin(profile.arch(), VIRT_COPYOUT)],
+            extra_root_files: vec![suite_bin(profile.arch(), VIRT_COPYOUT), suite_bin(profile.arch(), VIRT_RING0_TIMER)],
             ..Default::default()
         },
     );
@@ -1571,6 +1585,38 @@ fn virt_mask_windows(profile: qemu::Profile) -> Result<(), String> {
     // To the boot's last word, said after every census and its windows: the drain that took the job's end can stop between the two.
     await_marker(&mut qemu, &mut serial, power::SHUTTING_DOWN, "the boot's last word")?;
     mask_windows(&serial, VIRT_CPUS)
+}
+
+/// The windows on x86-64: `tests/testcases` on a `mask-windows` kernel under
+/// [`WINDOWS_LOAD`], judged on the whole console once the boot has said its
+/// last word. Its verdict is bookkeeping and not a duration: an `IF` change no
+/// hook saw, or a lock an interrupt handler took, panics the kernel.
+fn x86_mask_windows(test_config: &Path) -> Result<(), String> {
+    let profile = qemu::Profile::Headless;
+    let herd = WINDOWS_LOAD.strip_prefix("test_rs_").expect("a suite binary's job name");
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        &[],
+        &[],
+        BootOptions {
+            profile,
+            kernel_features: toyos_build::build::MASK_WINDOWS_KERNEL,
+            extra_root_files: vec![suite_bin(profile.arch(), herd)],
+            ..Default::default()
+        },
+    );
+    let mut serial = qemu.boot_log().to_string();
+    writeln!(qemu.stdin_mut(), "run {WINDOWS_LOAD}").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    await_marker(&mut qemu, &mut serial, &format!("===TEST_END {WINDOWS_LOAD} "), "the windows load to end")?;
+    if !serial.contains(&format!("===TEST_END {WINDOWS_LOAD} exit=0===")) {
+        return Err(format!("{WINDOWS_LOAD} did not exit 0\nserial:\n{serial}"));
+    }
+    writeln!(qemu.stdin_mut(), "run shutdown").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    // To the boot's last word, said after every census and its windows.
+    await_marker(&mut qemu, &mut serial, power::SHUTTING_DOWN, "the boot's last word")?;
+    mask_windows(&serial, BootOptions::default().smp)
 }
 
 /// Boot `tests/virtsmpcase` as `options` say.
@@ -2157,6 +2203,11 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
         "virt_readonly_copyout" => {
             virt_job(profile, &format!("test_rs_{VIRT_COPYOUT}"), "a syscall writes only where its caller could store")
         }
+        "virt_ring0_timer_in_syscall" => virt_job(
+            profile,
+            &format!("test_rs_{VIRT_RING0_TIMER}"),
+            "the timer interrupted the syscall's body and re-armed a quantum",
+        ),
         "virt_mask_windows" => virt_mask_windows(profile),
         "virt_irq_storm" => {
             // The CPU floods itself with SGIs until the timer has fired a
@@ -2447,6 +2498,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "iommu_virtio_platform" => common::iommu::iommu_virtio_platform(test_config),
         "nested_nmi_is_loud" => faults::nested_nmi_is_loud(test_config),
         "machine_shutdown" => power::machine_shutdown(test_config),
+        "x86_mask_windows" => x86_mask_windows(test_config),
         other => Err(format!("unknown machine test {other}")),
     }
 }
@@ -3274,7 +3326,9 @@ const SMI_SPAN_NS: u64 = 4_444_000_000;
 ///
 /// Read and not held, beside Linux's turbostat on the same machine
 /// (`tests/t14-linux/`): each CPU's idle busy fraction, its busy
-/// frequency under the spin, and what one round cost its reader.
+/// frequency under the spin, and what one round cost its reader; and beside
+/// Linux's loaded timer reading (`issues/kernel/toyos-beats-linuxs-latency-on-the-t14.md`),
+/// how late each CPU's kick handler ran under the `loaded` phase.
 fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
     type Read<'a> = BTreeMap<usize, BTreeMap<&'a str, u64>>;
     back.job_passed("test_rs_counters_metal")?;
@@ -3360,6 +3414,10 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
         let values: Vec<f64> = rows.filter(|r| r[0] == "-").filter_map(|r| r.get(at)?.parse().ok()).collect();
         Ok(values.iter().fold((f64::MAX, f64::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v))))
     };
+    log.must_say("counters_metal loaded: ")?;
+    for said in log.text().lines().filter(|l| l.contains("counters_metal loaded: ")) {
+        eprintln!("  [counters] {}", said.split("counters_metal ").nth(1).unwrap_or(said).trim());
+    }
     let idle = linux(include_str!("t14-linux/turbostat-idle.txt"), "Busy%")?;
     let loaded = linux(include_str!("t14-linux/turbostat-loaded.txt"), "Bzy_MHz")?;
     eprintln!(
@@ -3657,6 +3715,9 @@ fn tlb_shootdown_cost(log: &str, cpus: u32) -> Result<(u64, u64), String> {
 /// is the whole of what separates the two, and that contract is in the binary's
 /// own module header.
 fn wake_latency_recorded(boot: &metal::Readback) -> Result<(), String> {
+    for said in boot.log().text().lines().filter(|l| l.contains("cyclictest: ")) {
+        eprintln!("  [latency] {}", said.trim());
+    }
     let code = boot.exit_code("test_rs_cyclictest")?;
     if code < 0 {
         return Err(format!(

@@ -16,6 +16,10 @@ is in `PciDevice::is_id` under `pcidev::claim`. By reading, the claim reads the
 vendor ID of each of the 24 functions the kernel enumerated
 (`kernel/src/pcidev/mod.rs`); nothing has said what it spends 3.8 ms on.
 
+A syscall's body now runs with interrupts open
+(`issues/kernel/syscall-preemption-is-incidental.md`), so by reading this
+window has left `irqs_off_ns`; no T14 boot has read it since.
+
 Before the first job's exit cpu0 also carries init's partition claims, 6.0
 and 6.6 ms in that boot (`issues/hardware/xhci-waits-are-spins.md`), and the
 `mask-windows` kernel (`kernel/src/windows.rs`) prints each CPU's longest

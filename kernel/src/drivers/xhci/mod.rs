@@ -311,8 +311,8 @@ const CALL_AFTER_BREAK: crate::time::Budget = crate::time::Budget::of(
     "every wait is clipped to where the rungs still ahead of it begin, so the last rung runs whatever was spent before it and the call ends here",
 );
 
-// A disk call spins with interrupts off, so one that outlasted this tripwire
-// would panic another CPU over a device.
+// A bind spins in the tick's pass with interrupts off, so one that outlasted
+// this tripwire would panic another CPU over a device.
 const _: () = assert!(CALL_AFTER_BREAK.nanos() < crate::time::DEAF_CPU.nanos());
 
 

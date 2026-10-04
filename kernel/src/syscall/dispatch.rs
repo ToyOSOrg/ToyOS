@@ -21,7 +21,7 @@ use toyos_untrusted::Untrusted;
 
 use super::HANDLE_LEN;
 #[cfg(feature = "test-actuators")]
-use super::debug::{canary, debug_heap_alloc, FATAL_HALT_NONCE, LOCK_ACROSS_SWITCH};
+use super::debug::{canary, debug_heap_alloc, ring0_timer_in_syscall, FATAL_HALT_NONCE, LOCK_ACROSS_SWITCH};
 use super::device::{
     holds_claim, sys_device_bar_map, sys_device_claim, sys_device_dma_alloc, sys_device_dma_map,
     sys_device_dma_unmap,
@@ -606,6 +606,8 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             // bound and its stale answer are the shipped paths.
             DA::COUNTERS_DEAF => crate::counters::deaf::stage(a2),
             DA::COUNTERS_HEAR => crate::counters::deaf::end(),
+            // An interrupt inside a syscall's body, which nothing a guest does puts there on demand.
+            DA::RING0_TIMER_IN_SYSCALL => ring0_timer_in_syscall(),
             _ => SyscallError::InvalidArgument.to_u64(),
         },
         SYS_SCHED_INFO => match ctx.copy_out(UserAddr::new(a1), &sys_sched_info()) {

@@ -118,6 +118,20 @@ impl<T> Lock<T> {
 
     #[track_caller]
     pub fn lock(&self) -> LockGuard<'_, T> {
+        #[cfg(feature = "mask-windows")]
+        crate::windows::outside_a_handler("a `sync::Lock`");
+        self.acquire()
+    }
+
+    /// [`Lock::lock`] for an `IrqLock`, the one kind an interrupt handler may
+    /// take: the closed guard is its exemption from the handler witness.
+    #[track_caller]
+    pub fn lock_masked(&self, _closed: &crate::arch::IrqGuard) -> LockGuard<'_, T> {
+        self.acquire()
+    }
+
+    #[track_caller]
+    fn acquire(&self) -> LockGuard<'_, T> {
         crate::preempt::disable();
         let my_ticket = self.ticket.fetch_advance(Ordering::Relaxed);
         let mut spins = 0u64;
@@ -137,8 +151,12 @@ impl<T> Lock<T> {
                 ));
             }
             core::hint::spin_loop();
-            // Polls TLB shootdowns: this spin runs with `IF` clear, so skipping
-            // it here can deadlock a shootdown initiator that holds a lock.
+            // Polls TLB shootdowns: a spinner inside an `IrqGuard`, an
+            // `IrqLock`, a handler or the tick's pass has `IF` clear and takes
+            // no IPI, and without this would deadlock an initiator that holds
+            // the lock.
+            // With `IF` set the IPI can land inside this poll's own serve,
+            // which `Shootdown::serve` survives.
             crate::arch::tlb::poll();
             spins += 1;
             if spins == next_warn {
@@ -159,7 +177,10 @@ impl<T> Lock<T> {
         LockGuard { lock: self }
     }
 
+    #[track_caller]
     pub fn try_lock(&self) -> Option<LockGuard<'_, T>> {
+        #[cfg(feature = "mask-windows")]
+        crate::windows::outside_a_handler("a `sync::Lock`");
         crate::preempt::disable();
         let current = self.now.load(ACQUIRED);
         match self.ticket.compare_advance(current, Ordering::Relaxed, Ordering::Relaxed) {

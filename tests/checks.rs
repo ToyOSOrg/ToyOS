@@ -925,14 +925,22 @@ mod checks {
         };
         let kernel = "[2026-09-29 10:33:28 0.000 cpu0 boot] panic console: armed 1920x1080 \
                       stride=1920 format=1 at 0x4000000000, write-combining\n";
-        let wedge = "| [1.509 cpu0] wedge: staged, and only the boot deadline ends this machine: \
-                     every CPU stops taking scheduler passes from here\n\
-                     | [1.509 cpu0] wedge: cpu0 arrived with interrupts off, through the syscall \
-                     gate, and takes them again here\n\
-                     | [1.509 cpu1] wedge: cpu1 arrived with interrupts on\n";
+        let staged = "| [1.509 cpu1] wedge: staged, and only the boot deadline ends this machine: \
+                      every CPU stops taking scheduler passes from here\n";
+        let awake = |cpu: u32| format!("| [1.509 cpu{cpu}] wedge: cpu{cpu} arrived with interrupts on\n");
+        let deaf = "| [1.509 cpu1] wedge: cpu1 arrived with interrupts off, through the syscall \
+                    gate, and takes them again here\n";
         let judge = metal_judge("boot_deadline_ends_a_wedge");
-        assert_eq!(judge(&[&readback("deadlinewedge", &wedged(wedge), kernel)]), Ok(()));
+        let wedge = format!("{staged}{}{}", awake(1), awake(0));
+        assert_eq!(judge(&[&readback("deadlinewedge", &wedged(&wedge), kernel)]), Ok(()));
         assert!(judge(&[&readback("deadlinewedge", &wedged(""), kernel)]).is_err());
+        // The staging CPU arrived deaf: the gate masked the syscall's body, and
+        // the others' awake lines say nothing of it.
+        let gated = format!("{staged}{deaf}{}", awake(0));
+        assert!(judge(&[&readback("deadlinewedge", &wedged(&gated), kernel)]).is_err());
+        // Awake, but not the CPU that staged it.
+        let elsewhere = format!("{staged}{}", awake(0));
+        assert!(judge(&[&readback("deadlinewedge", &wedged(&elsewhere), kernel)]).is_err());
 
         let sweep = "| [1.526 cpu0] usb-load: sweeping disk 0 from block 6569336 to 7507812, \
                      rewriting each run with the bytes just read from it, until this machine is \

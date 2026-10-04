@@ -32,12 +32,11 @@ holder, decides how long a CPU runs with interrupts masked:
 
 Nothing caps N: a thread costs its process a 128 KiB kernel stack
 (`kernel/src/process.rs`) and no count. The first walk starts in
-`SYS_INBOX_SUBMIT`, and a syscall runs with interrupts masked from entry to
-exit (`issues/kernel/syscall-preemption-is-incidental.md`), with #634 and
-without it: #634 did not mask it, and reverting #634 does not shorten it.
-The second runs in the device's handler since #634.
+`SYS_INBOX_SUBMIT`, masked by the ring's `IrqLock`. The second runs in the
+device's handler since #634.
 
-How long the second is has not been read. The first has, at one size: the
+How long the second is has not been read. The first has, at one size, while
+syscalls still ran with interrupts masked from entry to exit: the
 three T14 boots of #649 at `8b73eba69` (comment 5959415453, readbacks
 `649-r5/1-head`, `649-r5/2-report-halved`, whose kernel prints half of every
 span, and `649-r5/3-idle-halt-counted`) ran it with N = 256

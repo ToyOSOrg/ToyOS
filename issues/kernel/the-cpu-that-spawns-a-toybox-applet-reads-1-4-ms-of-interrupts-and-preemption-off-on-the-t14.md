@@ -42,11 +42,13 @@ else, `pwd`'s and `echo`'s. cpu7's line in each
   `1-head` (`:430`): 468787 past that boot's applet spawn, which the spawn
   does not account for and nothing names.
 
-By reading, not measured: it is `SYS_SPAWN`, which runs with interrupts
-masked from entry to exit like every syscall
-(`issues/kernel/syscall-preemption-is-incidental.md`), and whose own record
+By reading, not measured: it is `SYS_SPAWN`, which ran with interrupts
+masked from entry to exit like every syscall then, and whose own record
 reads `total=1ms` for each of these applets. A report carries a span and no
-address, so nothing names it.
+address, so nothing names it. A syscall's body now runs with interrupts open
+(`issues/kernel/syscall-preemption-is-incidental.md`) and preemption off, so
+by reading the section leaves `irqs_off_ns` and stays in `preempt_off_ns`;
+no T14 boot has read it since.
 
 **Exit**: the section is named on the T14 by the address its opening hook was
 called from, and the spawning CPU's longest window no longer includes it, or

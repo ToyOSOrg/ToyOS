@@ -83,8 +83,8 @@ mod masked {
             Self(Lock::new(value))
         }
 
-        pub fn lock<'a>(&'a self, _closed: &'a IrqGuard) -> LockGuard<'a, T> {
-            self.0.lock()
+        pub fn lock<'a>(&'a self, closed: &'a IrqGuard) -> LockGuard<'a, T> {
+            self.0.lock_masked(closed)
         }
     }
 }

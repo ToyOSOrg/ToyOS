@@ -107,7 +107,7 @@ pub struct PerCpu {
     pub last_seen_ring0_fires: u32,
     fault_state: u8,
     _pad_after_fault_state: [u8; 3],
-    /// Ticks the Ring 0 timer re-arms with; per-CPU to avoid cross-CPU clobber.
+    /// Ticks the Ring 3 timer branch re-arms with, and zero when stopped, which the Ring 0 branch leaves stopped.
     pub last_armed_ticks: AtomicU32,
     /// This CPU's [`log::Shard`]; never null on a live CPU ([`alloc_percpu`] fills it first).
     log_shard: u64,
@@ -635,7 +635,7 @@ pub fn set_last_seen_kernel_timer_fires(v: u32) {
     gs::write_u32::<OFF_LAST_SEEN_RING0_FIRES>(v);
 }
 
-/// The one-shot count this CPU just armed, for the timer stub's reload; `arch::apic` is the only caller.
+/// The one-shot count this CPU just armed, for the timer stub; `arch::apic` is the only caller.
 pub fn set_last_armed_ticks(ticks: u32) {
     gs::write_u32::<OFF_LAST_ARMED_TICKS>(ticks);
 }

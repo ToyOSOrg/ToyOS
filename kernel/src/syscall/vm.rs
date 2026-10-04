@@ -10,7 +10,7 @@
 //!
 //! A removed mapping's `Unmapped` drops outside `with_process_data`: the drop
 //! shoots down and waits, and a sibling thread can be spinning on that same
-//! lock with `IF` clear.
+//! lock.
 
 use crate::mm::policy::{CachePolicy, Prot};
 use crate::vma::Occupancy;
@@ -192,7 +192,7 @@ pub(super) fn sys_munmap(addr: u64, _size: u64) -> u64 {
         return SyscallError::NotFound.to_u64();
     };
     // Dropped here, outside the closure: the drop shoots down and waits, and a
-    // sibling can be spinning on the process-data lock with `IF` clear.
+    // sibling can be spinning on the process-data lock.
     drop(unmapped);
     0
 }

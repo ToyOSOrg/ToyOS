@@ -302,6 +302,15 @@ pub fn usb_load_chain(after: &serial::Serial) -> Result<(), String> {
     Ok(())
 }
 
+/// The `cpuN` the bracket of `line`'s record names, before `needle`.
+fn record_cpu<'a>(line: &'a str, needle: &str) -> Option<&'a str> {
+    line.split(needle)
+        .next()?
+        .split(|c: char| c.is_whitespace() || c == '[' || c == ']')
+        .filter(|word| word.strip_prefix("cpu").is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())))
+        .last()
+}
+
 /// The metal half of [`boot_deadline_ends_a_wedge`]: a T14 boot that wedged on
 /// purpose ended itself, and the pass after the reset read why off the page.
 ///
@@ -314,12 +323,15 @@ pub fn deadline_wedge_chain(after: &serial::Serial) -> Result<(), String> {
     let said = after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::DEADLINE_EXPIRED)?.to_string();
     // The control: the machine reached the staged wedge, and then never reached
     // the reset it was one statement away from.
-    after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::WEDGE_STAGED)?;
-    // And the CPU that asked for it took interrupts again: it comes through the
-    // syscall gate with `IF` masked, and one left deaf is what the lockup
-    // detector ends a machine for. On this machine the assertion has a counter
-    // behind it, which is what the guest's has not.
-    after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::WEDGE_ARRIVED_DEAF)?;
+    let staged = after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::WEDGE_STAGED)?;
+    // And the CPU that asked for it arrived through the syscall gate with
+    // interrupts open: one that arrived deaf is the gate masking a syscall's
+    // body. Keyed to that CPU, because every other one arrives awake from a
+    // pass whatever the gate does.
+    let cpu = record_cpu(staged, bootlog::WEDGE_STAGED)
+        .ok_or_else(|| format!("no cpu in the record that staged the wedge: {staged:?}"))?;
+    after.must_say_after(bootlog::PREVIOUS_PANIC, &format!("wedge: {cpu} {}", bootlog::WEDGE_AWAKE))?;
+    says_nothing_of(after, bootlog::WEDGE_ARRIVED_DEAF)?;
     says_nothing_of(after, bootlog::REBOOTING)?;
     // **The two bounds composing, on the one machine that has both.** This
     // wedge spins with `IF` set, so every CPU still takes its timer interrupt

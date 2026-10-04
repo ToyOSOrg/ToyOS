@@ -33,6 +33,8 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering::Relaxed};
 
+use crate::sched::MAX_CPUS;
+
 /// Every phase [`boot_phase!`](crate::boot_phase) publishes, in the order a
 /// boot reaches them, so a sealed record can name where the machine stopped.
 /// Index 0 is a machine that has published none; the rest are the literals
@@ -188,15 +190,46 @@ pub fn start() {
 /// **One relaxed load in the callee on the unarmed path.** The Ring 0 call site
 /// pays a caller-saved prologue on every tick of every CPU armed or not, and
 /// that cost is the entry's rather than this function's.
-///
-/// `extern "C"` because the Ring 0 half of the timer entry calls it from
-/// naked assembly, where the ABI is written out rather than inferred.
-pub extern "C" fn poll() {
-    let at = AT_TSC.load(Relaxed);
+pub fn poll() {
+    past(AT_TSC.load(Relaxed))
+}
+
+fn past(at: u64) {
     if at == 0 || crate::arch::cpu::counter() < at {
         return;
     }
     expire()
+}
+
+/// Where each CPU's timer last interrupted the kernel, kept only on a boot
+/// with a bound: the seal's account of a CPU stuck with interrupts open, which
+/// no hard-lockup sample reports.
+static KERNEL_PC: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+
+/// [`poll`], for a timer interrupt that found the kernel at `pc`.
+///
+/// `extern "C"` because the Ring 0 half of the x86 timer entry calls it from
+/// naked assembly, where the ABI is written out rather than inferred.
+pub extern "C" fn poll_in_kernel(pc: u64) {
+    let at = AT_TSC.load(Relaxed);
+    if at != 0 {
+        if let Some(slot) = KERNEL_PC.get(crate::arch::percpu::cpu_id() as usize) {
+            slot.store(pc, Relaxed);
+        }
+    }
+    past(at)
+}
+
+/// ` cpuN=<pc>` for each online CPU, out of [`KERNEL_PC`].
+struct KernelPcs;
+
+impl core::fmt::Display for KernelPcs {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        for (cpu, pc) in KERNEL_PC.iter().enumerate().take(crate::smp::cpu_count() as usize) {
+            write!(f, " cpu{cpu}={:#x}", pc.load(Relaxed))?;
+        }
+        Ok(())
+    }
 }
 
 /// Seal why, stop what is doing DMA, and hand the machine back.
@@ -211,9 +244,12 @@ fn expire() -> ! {
         // add and must not race it into the page.
         crate::arch::cpu::halt();
     }
+    #[cfg(feature = "mask-windows")]
+    crate::windows::stand_down();
     crate::drivers::panic_console::seal_wedge(format_args!(
-        "{EXPIRED}: a bound of {} ms, reached at {} ms, with this machine in `{}`. \
-         The tail of the log ring follows — which is what nothing was draining.\n",
+        "{EXPIRED}: a bound of {} ms, reached at {} ms, with this machine in `{}`, each CPU's \
+         timer last finding the kernel at{KernelPcs}. The tail of the log ring follows — which \
+         is what nothing was draining.\n",
         BOUND_MS.load(Relaxed),
         crate::clock::nanos_since_boot() / 1_000_000,
         phase(),
@@ -271,11 +307,9 @@ fn this_cpu() -> ! {
     // reach is the Ring 0 half of the timer entry and not the Rust half.
     //
     // **All three set, not assumed**, and not an `IrqGuard`: nothing here ever
-    // puts them back. A CPU arriving from `stage_a_wedge` is inside the shutdown
-    // syscall with `IF` masked, and one woken out of the idle halt has its
-    // one-shot stopped however set `IF` is — either leaves a CPU taking no
-    // interrupt at all, which is a hard lockup and not the state this control
-    // claims.
+    // puts them back. One woken out of the idle halt has its one-shot stopped
+    // however set `IF` is, which leaves a CPU taking no interrupt at all: a
+    // hard lockup and not the state this control claims.
     crate::preempt::disable();
     let arrived_awake = crate::arch::cpu::interrupts_enabled();
     crate::arch::irqchip::arm_within(kernel::sched::fair::QUANTUM_NS);
@@ -296,15 +330,15 @@ fn this_cpu() -> ! {
     }
 }
 
-/// What the CPU that staged the wedge says about the state it arrived in: a boot
-/// on which no CPU says this is one the wedge never reached the CPU that asked
-/// for it. Judged by the harness, so it is a constant (`src/bootlog.rs`).
+/// What a CPU says that arrived with interrupts masked: the staging CPU, if the
+/// syscall gate left them masked, which the harness refuses
+/// (`src/bootlog.rs`).
 #[cfg(feature = "boot-actuators")]
 pub const WEDGE_ARRIVED_DEAF: &str =
     "arrived with interrupts off, through the syscall gate, and takes them again here";
 
-/// What every other CPU says: they arrive from a scheduler pass, which already
-/// had them.
+/// What every CPU says that arrived with them open, the staging CPU among them:
+/// the harness requires it of that CPU (`src/bootlog.rs`).
 #[cfg(feature = "boot-actuators")]
 pub const WEDGE_AWAKE: &str = "arrived with interrupts on";
 
