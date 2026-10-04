@@ -1,0 +1,13 @@
+[package]
+name = "logkeeper-api"
+description = "Asking logkeeper for this boot's log on this machine: the request its `log` port answers with a pipe, and the decoding of that answer."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[lib]
+doctest = false
+
+[dependencies]
+toyos = { path = "../../toyos" }
+toyos-logstream = { path = "../../toyos-logstream" }

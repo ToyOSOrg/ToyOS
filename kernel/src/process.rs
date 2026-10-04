@@ -97,9 +97,9 @@ pub struct PageAlloc(Vec<crate::mm::pmm::PhysPage>);
 
 impl PageAlloc {
     /// Allocate `size` bytes as contiguous 2MB pages.
-    pub fn new(size: usize, cat: crate::mm::pmm::Category) -> Option<Self> {
+    pub fn new(size: usize) -> Option<Self> {
         let count = size.div_ceil(PAGE_2M as usize);
-        Some(Self(crate::mm::pmm::alloc_contiguous(count, cat)?))
+        Some(Self(crate::mm::pmm::alloc_contiguous(count)?))
     }
 
     /// Kernel pointer to the start of the allocation (via direct map).
@@ -1443,7 +1443,7 @@ pub fn handle_page_fault(fault_addr: u64, _error_code: u64) -> bool {
     let reloc_index = data.elf.reloc_index.clone();
     let elf_base = data.elf.elf_base.raw();
 
-    let page_alloc = match PageAlloc::new(page_2m as usize, crate::mm::pmm::Category::DemandPage) {
+    let page_alloc = match PageAlloc::new(page_2m as usize) {
         Some(a) => a,
         None => return false,
     };

@@ -22,7 +22,7 @@ use crate::sched::payload::{KShare, KernelLock, TaskHandle, ThreadSched};
 use crate::sched::reap_gate::ReapGate;
 use crate::sched::futex;
 use crate::sync::Lock;
-use crate::time::{Cadence, Deadline, Duration};
+use crate::time::Deadline;
 use crate::DirectMap;
 
 pub use crate::sched::driver::{
@@ -582,69 +582,3 @@ pub fn task_sched_state(sched: &ThreadSched) -> u8 {
 pub fn flush_current_stats(acct: &mut process::ProcessAccounting) {
     driver::with_current_acct(|a| crate::sched::payload::merge_accounting(a, acct));
 }
-
-/// How often an idle CPU may report occupancy: not a deadline, so it never
-/// wakes a CPU with nothing to run — turning it into one would be an audio
-/// change.
-const SNAPSHOT_INTERVAL: Cadence = Cadence::every(
-    Duration::from_secs(10),
-    "one clock read and one relaxed compare per idle trip, on a CPU already awake",
-);
-
-/// When each CPU may next print its own line: per CPU, not global, so no
-/// single CPU speaks for all of them.
-static NEXT_HEALTH: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
-
-/// How many times each CPU has passed through idle since boot.
-static IDLE_TRIPS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
-
-/// A snapshot of this CPU's run queues, at most once per
-/// [`SNAPSHOT_INTERVAL`], plus the machine's page pools on the same
-/// cadence. Called from the idle loop on every trip; the cadence is wall
-/// clock rather than per-trip because a CPU that declines to sleep loops at
-/// memory speed. Not a heartbeat: a busy CPU prints nothing, so a gap here
-/// is not evidence of a hang.
-pub fn log_health() {
-    let now = crate::hw::now_ns();
-    let cpu = percpu::cpu_id();
-    let Some(next_health) = NEXT_HEALTH.get(cpu as usize) else { return };
-    // Unconditional and every trip, unlike the print below.
-    let trips = IDLE_TRIPS
-        .get(cpu as usize)
-        .map_or(0, |t| t.fetch_add(1, Ordering::Relaxed) + 1);
-    if now >= next_health.load(Ordering::Relaxed) {
-        next_health.store(now + SNAPSHOT_INTERVAL.nanos(), Ordering::Relaxed);
-        let ready = driver::ready_len() + usize::from(percpu::current_tid().is_some());
-        let parked = driver::parked_len();
-        let dying = driver::dying_len();
-        let stopped = driver::stopped_len();
-        crate::log!(
-            "sched: cpu={} ready={} dying={} stopped={} parked={} current={:?} trips={}",
-            cpu,
-            ready,
-            dying,
-            stopped,
-            parked,
-            percpu::current_tid(),
-            trips,
-        );
-    }
-
-    static NEXT_PMM_DUMP: AtomicU64 = AtomicU64::new(0);
-    let next = NEXT_PMM_DUMP.load(Ordering::Relaxed);
-    if next == 0 {
-        NEXT_PMM_DUMP.store(now + SNAPSHOT_INTERVAL.nanos(), Ordering::Relaxed);
-    } else if now >= next
-        && NEXT_PMM_DUMP
-            .compare_exchange(
-                next,
-                now + SNAPSHOT_INTERVAL.nanos(),
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            )
-            .is_ok()
-    {
-        crate::mm::pmm::dump_stats();
-    }
-}
-

@@ -57,6 +57,9 @@ running through the silence; the capture cannot tell a dropped marker from a `lo
 forwarding. The tree moved `rust` from `aca5f527f` to `9151571ca`, which changes std's exported C
 `malloc`, `free` and `realloc` in every Rust guest program, so reading it as this loss rests on
 that change being off its path. Owner: the orchestrator.
+That kernel's ten-second report is gone: the owner ruled on 2026-10-04, choosing "Remove it
+entirely": "Delete the periodic report and its counters; hang triage uses the trace diary and
+panic records instead." A later sighting tells a live kernel from a stopped one by those.
 
 ## Exit condition
 

@@ -8,7 +8,7 @@ opened: 2026-10-04
 
 ToyOS answers what it is doing, what it did and what it is made of from
 inside itself, with programs it ships. Today the answers are scattered: the
-log carries numbers in prose (`irq:`, `tlb:`, `PMM:`, `sched:`, `syscalls:`),
+log carries numbers in prose (`irq:`, `tlb:`, `syscalls:`),
 the diary computes no lateness, nothing reads RAPL or C-state
 residency, and a process's memory is a byte sum that reads 0 under
 contention.
