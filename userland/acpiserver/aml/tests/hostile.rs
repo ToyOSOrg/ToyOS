@@ -236,3 +236,142 @@ fn every_truncation_yields_a_value_or_a_refusal() {
         }
     }
 }
+
+/// Review round 1, BLOCKER 3: every object an operator constructs is
+/// bounded, a conversion's output as much as a literal's.
+#[test]
+fn a_conversion_is_bounded_in_what_it_constructs() {
+    assert!(matches!(returns(&ret(&op1(0x98, &buffer(&int(0x10_0000), &[]), ZERO))), Err(Error::Bound(_))));
+    assert!(matches!(returns(&ret(&op1(0x97, &buffer(&int(0x10_0000), &[]), ZERO))), Err(Error::Bound(_))));
+    // ToHexString (ToBuffer (...)), twenty deep, stored to Debug and so never copied.
+    let mut e = buffer(&int(0x1000), &[]);
+    for _ in 0..20 {
+        e = op1(0x98, &op1(0x96, &e, ZERO), ZERO);
+    }
+    assert!(matches!(returns(&store(&e, &debug())), Err(Error::Bound(_))));
+}
+
+/// BLOCKER 4: a step's cost is in proportion to the work it does, so one
+/// that walks a mebibyte is charged for it.
+#[test]
+fn work_in_one_step_is_charged_in_proportion() {
+    let (mut i, mut m) = loaded(&cat(&[
+        &def_name("BIG", &buffer(&int(0x10_0000), &[])),
+        &cat(&[&[0x5B, 0x13], &name("BIG"), &int(0), &int(0x80_0000), &name("FLD")]),
+        &method("WALK", 0, &while_(&int(1), &store(&name("FLD"), &local(0)))),
+        &method("PKGS", 0, &while_(&int(1), &store(&var_package(&int(0x1_0000), &[]), &local(0)))),
+        &method("BUFS", 0, &while_(&int(1), &store(&buffer(&int(0x10_0000), &[]), &local(0)))),
+    ]));
+    for p in ["\\WALK", "\\PKGS", "\\BUFS"] {
+        assert!(matches!(i.evaluate(&mut m, p, &[]), Err(Error::Bound(_))), "{p}");
+    }
+}
+
+/// BLOCKER 5: what an interpreter holds live is bounded in sum, not only
+/// object by object.
+#[test]
+fn what_is_held_live_is_bounded_in_sum() {
+    let (mut i, mut m) = loaded(&cat(&[
+        &def_name("GPKG", &var_package(&int(0x1_0000), &[])),
+        &method(
+            "FILL",
+            0,
+            &cat(&[
+                &store(&int(0), &local(0)),
+                &while_(
+                    &int(1),
+                    &cat(&[&store(&buffer(&int(0x10_0000), &[]), &index(&name("GPKG"), &local(0), ZERO)), &increment(&local(0))]),
+                ),
+            ]),
+        ),
+    ]));
+    assert!(matches!(i.evaluate(&mut m, "\\FILL", &[]), Err(Error::Bound(_))));
+    // What the refused evaluation stored stays held, and the budget with it;
+    // the interpreter goes on answering.
+    assert_eq!(i.evaluate(&mut m, "\\_REV", &[]), Ok(Value::Integer(2)));
+}
+
+/// BLOCKER 6: a reference to a package element or to a LocalX or ArgX never
+/// enters a package or a named object, so no chain of them forms and no
+/// cycle outlives its evaluation.
+#[test]
+fn a_reference_chain_cannot_form() {
+    let chain = while_(
+        &int(1),
+        &cat(&[
+            &store(&package(&[int(0)]), &local(1)),
+            &store(&local(0), &index(&local(1), &int(0), ZERO)),
+            &store(&index(&local(1), &int(0), ZERO), &local(0)),
+        ]),
+    );
+    let seeded = cat(&[&store(&index(&package(&[int(0)]), &int(0), ZERO), &local(0)), &chain]);
+    assert!(matches!(returns(&seeded), Err(Error::Type(_))));
+    let (mut i, mut m) = loaded(&cat(&[
+        &def_name("NUM", &int(0)),
+        &method("NAME", 0, &copy_object(&ref_of(&local(0)), &name("NUM"))),
+        &method("SELF", 0, &cat(&[&store(&package(&[int(0)]), &local(0)), &store(&index(&local(0), &int(0), ZERO), &index(&local(0), &int(0), ZERO))])),
+    ]));
+    assert!(matches!(i.evaluate(&mut m, "\\NAME", &[]), Err(Error::Type(_))));
+    assert!(matches!(i.evaluate(&mut m, "\\SELF", &[]), Err(Error::Type(_))));
+}
+
+/// BLOCKER 9 (a) and (b): a Wait that times out and a Stall are charged to
+/// the evaluation's time, as a Sleep is.
+#[test]
+fn waits_and_stalls_are_bounded_in_time_asked() {
+    let event = cat(&[&[0x5B, 0x02], &name("EVT")]);
+    let wait = cat(&[&[0x5B, 0x25], &name("EVT"), &int(0xFFFE)]);
+    let (mut i, mut m) = loaded(&cat(&[
+        &event,
+        &method("WAIT", 0, &while_(&int(1), &wait)),
+        &method("STAL", 0, &while_(&int(1), &cat(&[&[0x5B, 0x21], &int(0xFF)]))),
+    ]));
+    assert!(matches!(i.evaluate(&mut m, "\\WAIT", &[]), Err(Error::Bound(_))));
+    let waited: u64 = m.log.iter().map(|e| if let Event::Sleep(ms) = e { *ms * 1000 } else { 0 }).sum();
+    assert!(waited <= 10_000_000, "{waited} µs");
+    m.log.clear();
+    assert!(matches!(i.evaluate(&mut m, "\\STAL", &[]), Err(Error::Bound(_))));
+    let stalled: u64 = m.log.iter().map(|e| if let Event::Stall(us) = e { *us } else { 0 }).sum();
+    assert!(stalled <= 10_000_000, "{stalled} µs");
+}
+
+/// BLOCKER 9 (c): a reference to an object a method created names nothing
+/// once the method exits, even after its slot is reused.
+#[test]
+fn a_reference_outliving_its_object_names_nothing() {
+    let (mut i, mut m) = loaded(&cat(&[
+        &method("MAKE", 0, &cat(&[&def_name("TMP", &int(7)), &ret(&ref_of(&name("TMP")))])),
+        &method("REUS", 0, &cat(&[&def_name("OTHR", &int(9)), &ret(&name("OTHR"))])),
+        &method(
+            "MAIN",
+            0,
+            &cat(&[&store(&name("MAKE"), &local(0)), &store(&name("REUS"), &local(1)), &ret(&deref(&local(0)))]),
+        ),
+    ]));
+    assert!(matches!(i.evaluate(&mut m, "\\MAIN", &[]), Err(Error::NotFound(_))));
+}
+
+/// BLOCKER 9 (d): ConcatenateResTemplate is bounded in what it constructs.
+#[test]
+fn a_resource_template_join_is_bounded() {
+    let big = buffer(&int(0x10_0000), &[]);
+    let r = returns(&ret(&op2(0x84, &op2(0x73, &big, &buffer(&int(2), &[0x79, 0]), ZERO), &op2(0x73, &big, &buffer(&int(2), &[0x79, 0]), ZERO), ZERO)));
+    assert!(matches!(r, Err(Error::Bound(_))));
+    let half = buffer(&int(0x8_0000), &[]);
+    let tail = buffer(&int(2), &[0x79, 0]);
+    let r = returns(&ret(&op2(0x84, &op2(0x73, &half, &tail, ZERO), &op2(0x73, &half, &tail, ZERO), ZERO)));
+    assert!(matches!(r, Err(Error::Bound(_))));
+}
+
+/// BLOCKER 7: an Alias is an object its table or method created like any
+/// other.
+#[test]
+fn an_alias_goes_with_what_created_it() {
+    let alias = cat(&[&[0x06], &name("\\SRC"), &name("ALI")]);
+    let (mut i, mut m) = loaded(&cat(&[&def_name("SRC", &int(1)), &method("M", 0, &alias)]));
+    assert_eq!(i.evaluate(&mut m, "\\M", &[]), Ok(Value::Uninitialized));
+    assert_eq!(i.evaluate(&mut m, "\\M", &[]), Ok(Value::Uninitialized));
+    let ssdt = table(b"SSDT", 2, &cat(&[&[0x06], &name("\\SRC"), &name("\\B"), &def_name("\\SRC", &int(2))]));
+    assert!(matches!(i.load_bytes(&mut m, &ssdt), Err(Error::Exists(_))));
+    assert!(matches!(i.evaluate(&mut m, "\\B", &[]), Err(Error::NotFound(_))));
+}

@@ -23,15 +23,16 @@ use crate::field::{flags, BufField, Field, Kind, Region};
 use crate::name::{text, Path, Seg};
 use crate::namespace::{Namespace, NodeId};
 use crate::object::{
-    copy, decimal, fit, hex2, joined, to_buf, to_int, to_str, Body, Method, Mutex, Object, Ref, Slot, Width,
+    bounded, decimal, fit, hex2, joined, to_buf, to_int, to_str, Body, Meter, Method, Mutex, Object, Ref, Slot, Width,
 };
 use crate::stream::{starts_name, Cursor};
-use crate::{Error, Host, MAX_BYTES, MAX_DEPTH, MAX_STEPS, MAX_WAIT_US, REVISION, WINDOWS};
+use crate::{Error, Host, MAX_DEPTH, MAX_NESTING, MAX_STEPS, MAX_WAIT_US, REVISION, WINDOWS, WORK_PER_STEP};
 
 pub(crate) struct Machine<'a> {
     pub(crate) ns: &'a mut Namespace,
     pub(crate) host: &'a mut dyn Host,
     pub(crate) w: Width,
+    meter: Rc<Meter>,
     steps: u64,
     depth: u32,
     waited_us: u64,
@@ -74,6 +75,14 @@ fn slot(o: Object) -> Slot {
 }
 
 impl Frame {
+    /// Empties every LocalX and ArgX, which drops any reference among them
+    /// and so any cycle they formed (the module header of `object`).
+    pub(crate) fn clear(&self) {
+        for s in self.locals.iter().chain(&self.args) {
+            *s.borrow_mut() = Object::Uninit;
+        }
+    }
+
     pub(crate) fn new(scope: NodeId, args: Vec<Object>, table: Rc<[u8]>, held: usize) -> Frame {
         Frame {
             locals: core::array::from_fn(|_| slot(Object::Uninit)),
@@ -102,10 +111,6 @@ fn type_name(code: u64) -> &'static [u8] {
         16 => b"[Debug Object]",
         _ => b"[Uninitialized Object]",
     }
-}
-
-fn bounded(len: usize) -> Result<(), Error> {
-    if len > MAX_BYTES { Err(Error::Bound("an object larger than this interpreter holds")) } else { Ok(()) }
 }
 
 /// A NameString written as ASL text, for DerefOf of a String (§19.6.30).
@@ -137,8 +142,71 @@ fn path_of_text(s: &[u8]) -> Result<Path, Error> {
 }
 
 impl<'a> Machine<'a> {
-    pub(crate) fn new(ns: &'a mut Namespace, host: &'a mut dyn Host, w: Width) -> Self {
-        Machine { ns, host, w, steps: 0, depth: 0, waited_us: 0, held: Vec::new(), levels: Vec::new(), global: 0 }
+    pub(crate) fn new(ns: &'a mut Namespace, host: &'a mut dyn Host, w: Width, meter: Rc<Meter>) -> Self {
+        Machine { ns, host, w, meter, steps: 0, depth: 0, waited_us: 0, held: Vec::new(), levels: Vec::new(), global: 0 }
+    }
+
+    /// Steps for `bytes` of work done in one: a step a [`WORK_PER_STEP`].
+    pub(crate) fn charge(&mut self, bytes: usize) -> Result<(), Error> {
+        self.steps = self.steps.saturating_add((bytes / WORK_PER_STEP) as u64);
+        self.step()
+    }
+
+    pub(crate) fn new_str(&mut self, v: Vec<u8>) -> Result<Object, Error> {
+        self.charge(v.len())?;
+        Ok(Object::Str(self.meter.bytes(v)?))
+    }
+
+    pub(crate) fn new_buf(&mut self, v: Vec<u8>) -> Result<Object, Error> {
+        self.charge(v.len())?;
+        Ok(Object::Buf(self.meter.bytes(v)?))
+    }
+
+    fn new_pkg(&mut self, v: Vec<Object>) -> Result<Object, Error> {
+        self.charge(v.len() * crate::object::ELEMENT)?;
+        Ok(Object::Pkg(self.meter.list(v)?))
+    }
+
+    /// A copy of an object for a store (§19.3.5.8): data is duplicated,
+    /// anything else is the same object again. Bounded in nesting, which a
+    /// table can grow without limit by storing a package into itself.
+    pub(crate) fn copy(&mut self, o: &Object) -> Result<Object, Error> {
+        self.copy_in(o, 0)
+    }
+
+    fn copy_in(&mut self, o: &Object, depth: usize) -> Result<Object, Error> {
+        if depth > MAX_NESTING {
+            return Err(Error::Bound("a package nests deeper than this interpreter copies"));
+        }
+        match o {
+            Object::Str(s) => {
+                let v = s.borrow().clone();
+                self.new_str(v)
+            }
+            Object::Buf(b) => {
+                let v = b.borrow().clone();
+                self.new_buf(v)
+            }
+            Object::Pkg(p) => {
+                let elems = p.borrow().clone();
+                let mut out = Vec::with_capacity(elems.len());
+                for e in &elems {
+                    out.push(self.copy_in(e, depth + 1)?);
+                }
+                self.new_pkg(out)
+            }
+            other => Ok(other.clone()),
+        }
+    }
+
+    /// A copy for a package element or a named object, which a reference that
+    /// lives only in a LocalX or ArgX never enters (the module header of
+    /// `object`).
+    fn lasting(&mut self, v: &Object) -> Result<Object, Error> {
+        if v.frame_bound() {
+            return Err(Error::Type("a reference to a package element, LocalX or ArgX stored where it would outlive its method"));
+        }
+        self.copy(v)
     }
 
     pub(crate) fn step(&mut self) -> Result<(), Error> {
@@ -277,7 +345,7 @@ impl<'a> Machine<'a> {
     fn element(&mut self, scope: NodeId, p: &Path) -> Result<Object, Error> {
         match self.ns.resolve(scope, p) {
             Some(id) => Ok(match self.node_value(id)? {
-                d @ (Object::Int(_) | Object::Str(_) | Object::Buf(_) | Object::Pkg(_)) => copy(&d)?,
+                d @ (Object::Int(_) | Object::Str(_) | Object::Buf(_) | Object::Pkg(_)) => self.copy(&d)?,
                 o => o,
             }),
             None => Ok(Object::Lazy(Rc::new((p.clone(), scope)))),
@@ -321,6 +389,7 @@ impl<'a> Machine<'a> {
         let mut f = Frame::new(node, args, table.clone(), self.held.len());
         let mut c = Cursor::new(&table, start, end);
         let flow = self.term_list(&mut f, &mut c);
+        f.clear();
         for &id in f.created.iter().rev() {
             self.ns.remove(id);
         }
@@ -400,7 +469,7 @@ impl<'a> Machine<'a> {
             0xA4 => {
                 c.byte()?;
                 let v = self.arg(f, c)?;
-                Ok(Flow::Return(copy(&v)?))
+                Ok(Flow::Return(self.copy(&v)?))
             }
             0xA5 => {
                 c.byte()?;
@@ -488,7 +557,8 @@ impl<'a> Machine<'a> {
         let source = c.name()?;
         let alias = c.name()?;
         let target = self.resolve(f, &source)?;
-        self.ns.alias(f.scope, &alias, target)?;
+        let id = self.ns.alias(f.scope, &alias, target)?;
+        f.created.push(id);
         Ok(Flow::Next)
     }
 
@@ -715,7 +785,13 @@ impl<'a> Machine<'a> {
         // one the field reaches into, anything else converts to a new one.
         let data = match self.arg(f, c)? {
             Object::Buf(b) => b,
-            o => crate::object::bytes(to_buf(&o, self.w)?),
+            o => {
+                let v = to_buf(&o, self.w)?;
+                match self.new_buf(v)? {
+                    Object::Buf(b) => b,
+                    _ => return Err(Error::Rule("a buffer that is not one")),
+                }
+            }
         };
         let index = self.int_arg(f, c)?;
         let (bit, len) = match op {
@@ -908,7 +984,7 @@ impl<'a> Machine<'a> {
                     }
                     bounded(s.len())?;
                 }
-                Object::str(s)
+                self.new_str(s)?
             }
             0x11 => {
                 let end = c.pkg_end()?;
@@ -922,14 +998,14 @@ impl<'a> Machine<'a> {
                     v.resize(size, 0);
                 }
                 c.at = end;
-                Object::buf(v)
+                self.new_buf(v)?
             }
             op @ (0x12 | 0x13) => {
                 let end = c.pkg_end()?;
                 let mut p = Self::sub(c, end);
                 let count = if op == 0x12 { u64::from(p.byte()?) } else { self.int_arg(f, &mut p)? };
                 let count = usize::try_from(count).map_err(|_| Error::Bound("a package larger than this interpreter holds"))?;
-                bounded(count)?;
+                crate::object::counted(count)?;
                 let mut elems = Vec::new();
                 while !p.done() {
                     self.step()?;
@@ -949,7 +1025,7 @@ impl<'a> Machine<'a> {
                 }
                 elems.resize(count, Object::Uninit);
                 c.at = end;
-                Object::Pkg(Rc::new(RefCell::new(elems)))
+                self.new_pkg(elems)?
             }
             0x5B if c.byte()? == 0x30 => Object::Int(REVISION),
             _ => return Err(Error::Malformed { at: c.at.saturating_sub(1), why: "not a DataObject (§20.2.3)" }),
@@ -1082,7 +1158,7 @@ impl<'a> Machine<'a> {
         match t {
             Target::None | Target::Debug => Ok(()),
             Target::Local(i) => {
-                let v = copy(&v)?;
+                let v = self.copy(&v)?;
                 *f.locals[i].borrow_mut() = v;
                 Ok(())
             }
@@ -1091,7 +1167,7 @@ impl<'a> Machine<'a> {
                 match held {
                     Object::Ref(r) => self.store_ref(&r, v),
                     _ => {
-                        let v = copy(&v)?;
+                        let v = self.copy(&v)?;
                         *f.args[i].borrow_mut() = v;
                         Ok(())
                     }
@@ -1106,15 +1182,13 @@ impl<'a> Machine<'a> {
         match r {
             Ref::Node(id) => self.store_node(*id, v),
             Ref::Slot(s) => {
-                let v = copy(&v)?;
+                let v = self.copy(&v)?;
                 *s.borrow_mut() = v;
                 Ok(())
             }
             Ref::Elem(p, i) => {
-                let v = copy(&v)?;
-                let mut p = p.borrow_mut();
-                *p.get_mut(*i).ok_or(Error::Rule("an Index reference past its package's end"))? = v;
-                Ok(())
+                let v = self.lasting(&v)?;
+                p.set(*i, v)
             }
             Ref::BufField(b) => self.write_buf_field(b, v),
         }
@@ -1126,28 +1200,32 @@ impl<'a> Machine<'a> {
             Object::Int(_) => self.ns.set(id, Object::Int(to_int(&v, w)?)),
             Object::Str(s) => {
                 let n = to_str(&v, w)?;
-                *s.borrow_mut() = n;
-                Ok(())
+                self.charge(n.len())?;
+                s.replace(n)
             }
             Object::Buf(b) => {
                 // Table 19.7: a buffer that exists keeps its size.
                 let n = to_buf(&v, w)?;
                 let len = b.borrow().len();
-                *b.borrow_mut() = fit(n, len);
-                Ok(())
+                self.charge(len)?;
+                b.replace(fit(n, len))
             }
-            Object::Pkg(p) => match copy(&v)? {
+            Object::Pkg(p) => match &v {
                 Object::Pkg(src) => {
-                    let elems = core::mem::take(&mut *src.borrow_mut());
-                    *p.borrow_mut() = elems;
-                    Ok(())
+                    let elems = src.borrow().clone();
+                    let mut out = Vec::with_capacity(elems.len());
+                    for e in &elems {
+                        out.push(self.copy_in(e, 1)?);
+                    }
+                    self.charge(out.len() * crate::object::ELEMENT)?;
+                    p.replace(out)
                 }
                 _ => Err(Error::Type("a store to a package of an object that is not one (Table 19.6)")),
             },
             Object::Field(x) => self.write_field(&x, v),
             Object::BufField(b) => self.write_buf_field(&b, v),
             Object::Ref(_) => {
-                let v = copy(&v)?;
+                let v = self.lasting(&v)?;
                 self.ns.set(id, v)
             }
             _ => Err(Error::Type("a store to an object that is not data (Table 19.6)")),
@@ -1171,7 +1249,7 @@ impl<'a> Machine<'a> {
                     Object::Ref(Ref::Node(id)) => self.copy_node(id, v),
                     Object::Ref(r) => self.store_ref(&r, v),
                     _ => {
-                        let v = copy(&v)?;
+                        let v = self.copy(&v)?;
                         *f.args[i].borrow_mut() = v;
                         Ok(())
                     }
@@ -1189,7 +1267,7 @@ impl<'a> Machine<'a> {
                 Err(Error::Type("CopyObject to a field of an object that is not an Integer or Buffer (Table 19.8)"))
             }
             (Object::Int(_) | Object::Str(_) | Object::Buf(_) | Object::Pkg(_) | Object::Ref(_), _) => {
-                let v = copy(&v)?;
+                let v = self.lasting(&v)?;
                 self.ns.set(id, v)
             }
             _ => Err(Error::Type("CopyObject's destination is not a data object (§19.6.17)")),
@@ -1500,7 +1578,12 @@ impl<'a> Machine<'a> {
     /// The logical comparisons' order (§19.6.69-72): the first operand's type
     /// is the one the second converts to; strings and buffers compare byte by
     /// byte, a shorter equal prefix the lesser.
-    fn compare(&self, a: &Object, b: &Object) -> Result<Ordering, Error> {
+    fn compare(&mut self, a: &Object, b: &Object) -> Result<Ordering, Error> {
+        let len = |o: &Object| match o {
+            Object::Str(x) | Object::Buf(x) => x.borrow().len(),
+            _ => 0,
+        };
+        self.charge(len(a).max(len(b)))?;
         match a {
             Object::Int(x) => Ok((*x & self.w.ones()).cmp(&to_int(b, self.w)?)),
             Object::Str(x) => Ok(x.borrow().as_slice().cmp(to_str(b, self.w)?.as_slice())),
@@ -1533,12 +1616,12 @@ impl<'a> Machine<'a> {
             Object::Int(x) => {
                 let mut v = w.le(*x);
                 v.extend(w.le(to_int(&b, w)?));
-                Object::buf(v)
+                self.new_buf(v)?
             }
             Object::Str(x) => {
                 let mut v = x.borrow().clone();
                 v.extend(tail_str(self, &b)?);
-                Object::str(v)
+                self.new_str(v)?
             }
             Object::Buf(x) => {
                 let mut v = x.borrow().clone();
@@ -1548,18 +1631,14 @@ impl<'a> Machine<'a> {
                     v.extend(named(self, &b)?);
                     v.push(0);
                 }
-                Object::buf(v)
+                self.new_buf(v)?
             }
             other => {
                 let mut v = named(self, other)?;
                 v.extend(tail_str(self, &b)?);
-                Object::str(v)
+                self.new_str(v)?
             }
         };
-        match &r {
-            Object::Str(v) | Object::Buf(v) => bounded(v.borrow().len())?,
-            _ => {}
-        }
         self.store(f, t, r.clone())?;
         Ok(r)
     }
@@ -1580,11 +1659,11 @@ impl<'a> Machine<'a> {
                 _ => return Err(Error::Rule("ConcatenateResTemplate of a template without an End Tag (§6.4.2.9)")),
             }
         }
+        bounded(out.len())?;
         out.push(0x79);
         let sum = out.iter().fold(0u8, |s, &x| s.wrapping_add(x));
         out.push(0u8.wrapping_sub(sum));
-        bounded(out.len())?;
-        let r = Object::buf(out);
+        let r = self.new_buf(out)?;
         self.store(f, t, r.clone())?;
         Ok(r)
     }
@@ -1594,18 +1673,39 @@ impl<'a> Machine<'a> {
         let w = self.w;
         let src = self.arg(f, c)?;
         let r = match op {
-            0x96 => Object::buf(to_buf(&src, w)?),
+            0x96 => {
+                let v = to_buf(&src, w)?;
+                self.new_buf(v)?
+            }
             0x97 => match &src {
-                Object::Int(v) => Object::str(decimal(*v)),
-                Object::Str(s) => Object::str(s.borrow().clone()),
-                Object::Buf(b) => Object::str(joined(&b.borrow(), b',', |x| decimal(u64::from(x)))),
+                Object::Int(v) => self.new_str(decimal(*v))?,
+                Object::Str(s) => {
+                    let v = s.borrow().clone();
+                    self.new_str(v)?
+                }
+                Object::Buf(b) => {
+                    bounded(b.borrow().len().saturating_mul(4))?;
+                    // Each byte written out as digits: the input's bytes are work too.
+                    self.charge(b.borrow().len().saturating_mul(4))?;
+                    let v = joined(&b.borrow(), b',', |x, out| out.extend(decimal(u64::from(x))));
+                    self.new_str(v)?
+                }
                 _ => return Err(Error::Type("ToDecimalString of an object that is not an integer, string or buffer")),
             },
             // §19.6.138 names no form for a buffer's values; each is written
             // in the two-digit form the Buffer to String rule uses (Table 19.7).
             0x98 => match &src {
-                Object::Buf(b) => Object::str(joined(&b.borrow(), b',', hex2)),
-                o => Object::str(to_str(o, w)?),
+                Object::Buf(b) => {
+                    bounded(b.borrow().len().saturating_mul(3))?;
+                    // Each byte written out as digits: the input's bytes are work too.
+                    self.charge(b.borrow().len().saturating_mul(4))?;
+                    let v = joined(&b.borrow(), b',', hex2);
+                    self.new_str(v)?
+                }
+                o => {
+                    let v = to_str(o, w)?;
+                    self.new_str(v)?
+                }
             },
             0x99 => Object::Int(match &src {
                 Object::Str(s) => int_of_text(&s.borrow(), w)?,
@@ -1615,7 +1715,7 @@ impl<'a> Machine<'a> {
                 let b = to_buf(&src, w)?;
                 let n = self.int_arg(f, c)?;
                 let n = if n == w.ones() { usize::MAX } else { usize::try_from(n).unwrap_or(usize::MAX) };
-                Object::str(b.iter().take(n).take_while(|&&x| x != 0).copied().collect())
+                self.new_str(b.iter().take(n).take_while(|&&x| x != 0).copied().collect())?
             }
             _ => {
                 let i = self.int_arg(f, c)?;
@@ -1627,7 +1727,7 @@ impl<'a> Machine<'a> {
                 let start = usize::try_from(i).unwrap_or(usize::MAX).min(data.len());
                 let end = start.saturating_add(usize::try_from(n).unwrap_or(usize::MAX)).min(data.len());
                 let part = data[start..end].to_vec();
-                let r = if is_str { Object::str(part) } else { Object::buf(part) };
+                let r = if is_str { self.new_str(part)? } else { self.new_buf(part)? };
                 let t = self.target(f, c)?;
                 self.store(f, t, r.clone())?;
                 return Ok(r);
@@ -1668,7 +1768,7 @@ impl<'a> Machine<'a> {
             if !matches!(e, Object::Int(_) | Object::Str(_) | Object::Buf(_)) {
                 continue;
             }
-            if self.matches(&e, op1, &m1) && self.matches(&e, op2, &m2) {
+            if self.matches(&e, op1, &m1)? && self.matches(&e, op2, &m2)? {
                 return Ok(Object::Int(i as u64));
             }
         }
@@ -1676,24 +1776,34 @@ impl<'a> Machine<'a> {
     }
 
     /// One Match comparison: the element converted to the MatchObject's
-    /// type, an element that does not convert matching nothing.
-    fn matches(&self, e: &Object, op: u8, m: &Object) -> bool {
+    /// type, an element that does not convert matching nothing; a bound
+    /// reached on the way is a refusal.
+    fn matches(&mut self, e: &Object, op: u8, m: &Object) -> Result<bool, Error> {
         if op == 0 {
-            return true;
+            return Ok(true);
         }
-        let e = match m {
+        let converted = match m {
             Object::Int(_) => to_int(e, self.w).map(Object::Int),
-            Object::Str(_) => to_str(e, self.w).map(Object::str),
-            _ => to_buf(e, self.w).map(Object::buf),
+            Object::Str(_) => to_str(e, self.w).and_then(|v| self.new_str(v)),
+            _ => to_buf(e, self.w).and_then(|v| self.new_buf(v)),
         };
-        let Ok(o) = e.and_then(|e| self.compare(&e, m)) else { return false };
-        match op {
+        let e = match converted {
+            Ok(e) => e,
+            Err(Error::Type(_)) => return Ok(false),
+            Err(other) => return Err(other),
+        };
+        let o = match self.compare(&e, m) {
+            Ok(o) => o,
+            Err(Error::Type(_)) => return Ok(false),
+            Err(other) => return Err(other),
+        };
+        Ok(match op {
             1 => o == Ordering::Equal,
             2 => o != Ordering::Greater,
             3 => o == Ordering::Less,
             4 => o != Ordering::Less,
             _ => o == Ordering::Greater,
-        }
+        })
     }
 }
 

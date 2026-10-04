@@ -135,7 +135,7 @@ impl Namespace {
         let id = match self.free.pop() {
             Some(index) => {
                 let slot = &mut self.nodes[index as usize];
-                let generation = slot.generation.wrapping_add(1);
+                let generation = slot.generation + 1;
                 *slot = Node { generation, ..node };
                 NodeId { index, generation }
             }
@@ -150,12 +150,12 @@ impl Namespace {
         Ok(id)
     }
 
-    pub(crate) fn alias(&mut self, scope: NodeId, path: &Path, target: NodeId) -> Result<(), Error> {
+    pub(crate) fn alias(&mut self, scope: NodeId, path: &Path, target: NodeId) -> Result<NodeId, Error> {
         let id = self.create(scope, path, Object::Uninit)?;
         if let Some(n) = self.nodes.get_mut(id.index as usize) {
             n.alias = Some(target);
         }
-        Ok(())
+        Ok(id)
     }
 
     /// Destroys an object and everything below it (§5.5.2.3).
@@ -176,7 +176,11 @@ impl Namespace {
             n.live = false;
             n.object = Object::Uninit;
             doomed.extend(core::mem::take(&mut n.children).into_values());
-            self.free.push(d.index);
+            // A slot whose generation would wrap is retired, so no stale
+            // NodeId ever names a live object again.
+            if n.generation < u32::MAX {
+                self.free.push(d.index);
+            }
         }
     }
 

@@ -36,7 +36,8 @@ fn the_predefined_objects_are_there_before_any_table() {
         &method("TGL", 0, &ret(&object_type(&name("\\_GL")))),
         &method("TOSI", 0, &ret(&object_type(&name("\\_OSI")))),
     ]));
-    assert_eq!(i.evaluate(&mut m, "\\_OS", &[]), Ok(s("ToyOS")));
+    // The owner's ruling (2026-10-05): "Microsoft Windows NT", as Windows answers.
+    assert_eq!(i.evaluate(&mut m, "\\_OS", &[]), Ok(s("Microsoft Windows NT")));
     assert_eq!(i.evaluate(&mut m, "\\_REV", &[]), Ok(Value::Integer(2)));
     // Table 19.36: a predefined scope is typeless, \_GL a Mutex, \_OSI a Method.
     assert_eq!(i.evaluate(&mut m, "\\TSB", &[]), Ok(Value::Integer(0)));

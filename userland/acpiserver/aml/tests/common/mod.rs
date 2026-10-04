@@ -311,7 +311,7 @@ pub struct Machine {
 fn key(a: Address) -> (u8, u64) {
     match a {
         Address::Memory(x) => (0, x),
-        Address::Io(x) => (1, x),
+        Address::Io(x) => (1, u64::from(x)),
         Address::PciConfig { segment, bus, device, function, offset } => (
             2,
             (u64::from(segment) << 32)

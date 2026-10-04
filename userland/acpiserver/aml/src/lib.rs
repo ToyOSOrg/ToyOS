@@ -36,12 +36,12 @@ mod stream;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::cell::{Cell, RefCell};
+use core::cell::Cell;
 
 use exec::{Frame, Machine};
 use name::{Path, Seg};
 use namespace::Namespace;
-use object::{Body, Method, Mutex, Object, Ref};
+use object::{Body, Meter, Method, Mutex, Object, Ref};
 
 pub(crate) use object::Width;
 
@@ -53,8 +53,16 @@ pub(crate) const MAX_DEPTH: u32 = 256;
 /// How deep a package may nest within packages, where it is copied or
 /// handed to the caller.
 pub(crate) const MAX_NESTING: usize = 64;
-/// The largest string, buffer, field or package, in bytes or elements.
+/// The largest string, buffer or field, in bytes.
 pub(crate) const MAX_BYTES: usize = 1 << 20;
+/// The largest package, in elements.
+pub(crate) const MAX_ELEMENTS: usize = 1 << 16;
+/// What one interpreter holds live across every string, buffer and package,
+/// in bytes (`object::Meter`).
+pub(crate) const MAX_LIVE: usize = 16 << 20;
+/// The bytes of work one step stands for: a step for every this many bytes
+/// an operation makes, copies, compares or walks.
+pub(crate) const WORK_PER_STEP: usize = 64;
 /// The time one evaluation may ask to Sleep, Stall and Wait, together, in µs.
 pub(crate) const MAX_WAIT_US: u64 = 10_000_000;
 /// What the Revision opcode answers (§19.6.119): this interpreter's revision.
@@ -132,7 +140,8 @@ pub enum Access {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Address {
     Memory(u64),
-    Io(u64),
+    /// A port in the x86 I/O space, which `in` and `out` address in 16 bits.
+    Io(u16),
     PciConfig { segment: u16, bus: u8, device: u8, function: u8, offset: u16 },
     EmbeddedControl(u8),
 }
@@ -169,6 +178,7 @@ pub enum Value {
 /// One machine's namespace, and what loaded it.
 pub struct Interpreter {
     ns: Namespace,
+    meter: Rc<Meter>,
     /// Set by the DSDT's revision (§19.6.29), for every table after it.
     width: Option<Width>,
 }
@@ -184,6 +194,7 @@ impl Interpreter {
     /// (§5.7).
     pub fn new() -> Self {
         let mut ns = Namespace::new();
+        let meter = Meter::new();
         let root = ns.root();
         let mut put = |name: &[u8; 4], o: Object| {
             let p = Path { root: true, up: 0, segs: alloc::vec![Seg(*name)] };
@@ -195,9 +206,12 @@ impl Interpreter {
         }
         put(b"_GL_", Object::Mutex(Rc::new(Mutex { sync: 0, held: Cell::new(0), global: true })));
         put(b"_OSI", Object::Method(Rc::new(Method { body: Body::Osi, args: 1, serialized: false, sync: 0 })));
-        put(b"_OS_", Object::str(b"ToyOS".to_vec()));
+        // The owner's ruling (2026-10-05): "Microsoft Windows NT", as Windows answers.
+        if let Ok(os) = meter.bytes(b"Microsoft Windows NT".to_vec()) {
+            put(b"_OS_", Object::Str(os));
+        }
         put(b"_REV", Object::Int(2));
-        Interpreter { ns, width: None }
+        Interpreter { ns, meter, width: None }
     }
 
     /// Loads a DSDT or SSDT (§5.4.2): the DSDT first, then each SSDT. The
@@ -217,7 +231,7 @@ impl Interpreter {
         let table: Rc<[u8]> = Rc::from(bytes);
         let root = self.ns.root();
         let mut f = Frame::new(root, Vec::new(), table.clone(), 0);
-        let mut m = Machine::new(&mut self.ns, host, w);
+        let mut m = Machine::new(&mut self.ns, host, w, self.meter.clone());
         let mut c = stream::Cursor::new(&table, toyos_acpi::SDT_HEADER_LEN, table.len());
         let r = m.term_list(&mut f, &mut c).and_then(|flow| match flow {
             exec::Flow::Next => Ok(()),
@@ -245,7 +259,7 @@ impl Interpreter {
         let p = Path::absolute(path)?;
         let id = self.ns.resolve(self.ns.root(), &p).ok_or_else(|| Error::NotFound(String::from(path)))?;
         let args = args.iter().map(|a| self.object_of(a, w, 0)).collect::<Result<Vec<_>, _>>()?;
-        let mut m = Machine::new(&mut self.ns, host, w);
+        let mut m = Machine::new(&mut self.ns, host, w, self.meter.clone());
         let r = m.evaluate(id, args).and_then(|o| value_of(&mut m, o, 0));
         m.finish(r)
     }
@@ -258,11 +272,11 @@ impl Interpreter {
             Value::Uninitialized => Object::Uninit,
             Value::Integer(x) => Object::Int(x & w.ones()),
             Value::String(s) if s.contains(&0) => return Err(Error::Type("a String argument holds a NUL")),
-            Value::String(s) => Object::str(s.clone()),
-            Value::Buffer(b) => Object::buf(b.clone()),
-            Value::Package(p) => Object::Pkg(Rc::new(RefCell::new(
-                p.iter().map(|e| self.object_of(e, w, depth + 1)).collect::<Result<_, _>>()?,
-            ))),
+            Value::String(s) => Object::Str(self.meter.bytes(s.clone())?),
+            Value::Buffer(b) => Object::Buf(self.meter.bytes(b.clone())?),
+            Value::Package(p) => Object::Pkg(
+                self.meter.list(p.iter().map(|e| self.object_of(e, w, depth + 1)).collect::<Result<_, _>>()?)?,
+            ),
             Value::Reference(path) => {
                 let p = Path::absolute(path)?;
                 let id = self.ns.resolve(self.ns.root(), &p).ok_or_else(|| Error::NotFound(path.clone()))?;

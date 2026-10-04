@@ -323,3 +323,40 @@ fn a_buffer_field_over_a_conversion_and_a_conversion_into_one() {
     assert_eq!(i.evaluate(&mut m, "\\BUF", &[]), Ok(Value::Buffer(vec![0x5A, 0])));
     assert!(matches!(i.evaluate(&mut m, "\\TOHX", &[]), Err(Error::Type(_))));
 }
+
+/// BLOCKER 8: an address word firmware chose that its form cannot hold is
+/// refused, never truncated.
+#[test]
+fn an_address_out_of_its_form_is_refused() {
+    let lpc = |bbn: u64, seg: u64, adr: u64, offset: u64| {
+        scope(
+            "\\_SB",
+            &device(
+                "PCI0",
+                &cat(&[
+                    &def_name("_BBN", &int(bbn)),
+                    &def_name("_SEG", &int(seg)),
+                    &device(
+                        "DEV",
+                        &cat(&[
+                            &def_name("_ADR", &int(adr)),
+                            &op_region("CFG", 0x02, &int(offset), &int(0x10)),
+                            &field("CFG", BYTE, &[unit("R0", 8)]),
+                        ]),
+                    ),
+                ]),
+            ),
+        )
+    };
+    let r0 = |bbn, seg, adr, offset| read(&lpc(bbn, seg, adr, offset), &[], "\\_SB.PCI0.DEV.R0").1;
+    assert!(r0(0, 0, 0x001F_0000, 0).is_ok());
+    assert!(matches!(r0(0x100, 0, 0x001F_0000, 0), Err(Error::Rule(_))));
+    assert!(matches!(r0(0, 0x1_0000, 0x001F_0000, 0), Err(Error::Rule(_))));
+    assert!(matches!(r0(0, 0, 0x0020_0000, 0), Err(Error::Rule(_))));
+    assert!(matches!(r0(0, 0, 0x001F_0008, 0), Err(Error::Rule(_))));
+    assert!(matches!(r0(0, 0, 0x001F_0000, 0x1000), Err(Error::Rule(_))));
+    let io = |base: u64| cat(&[&op_region("IO", 0x01, &int(base), &int(4)), &field("IO", BYTE, &[unit("P", 8)])]);
+    assert!(read(&io(0xFFFF), &[], "\\P").1.is_ok());
+    assert!(matches!(read(&io(0x1_0000), &[], "\\P").1, Err(Error::Rule(_))));
+}
+

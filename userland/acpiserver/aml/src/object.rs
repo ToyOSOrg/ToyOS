@@ -5,6 +5,13 @@
 //! evaluates: a field created over a buffer (§19.6.21) and a reference made
 //! by Index (§19.6.62) see the object they were made from. A store copies
 //! (§19.3.5.8), and so does a return (§19.6.118).
+//!
+//! Every string, buffer and package is held against its interpreter's
+//! [`Meter`] from its making to its drop, so what one interpreter holds live
+//! is bounded in sum. A reference to a package element or to a LocalX or
+//! ArgX lives only in a LocalX or ArgX, which its method's exit clears: none
+//! enters a package or a named object, so no chain of references forms and
+//! no cycle outlives its evaluation.
 
 use alloc::rc::Rc;
 use alloc::vec::Vec;
@@ -13,11 +20,122 @@ use core::cell::{Cell, RefCell};
 use crate::field::{BufField, Field, Region};
 use crate::name::Path;
 use crate::namespace::NodeId;
-use crate::{Error, MAX_BYTES, MAX_NESTING};
+use crate::{Error, MAX_BYTES, MAX_ELEMENTS, MAX_LIVE};
 
-pub(crate) type Bytes = Rc<RefCell<Vec<u8>>>;
-pub(crate) type Elems = Rc<RefCell<Vec<Object>>>;
+pub(crate) type Bytes = Rc<Data>;
+pub(crate) type Elems = Rc<List>;
 pub(crate) type Slot = Rc<RefCell<Object>>;
+
+/// What one interpreter holds live, in bytes: a string's or buffer's length,
+/// a package's elements at [`ELEMENT`] bytes each.
+pub(crate) struct Meter {
+    live: Cell<usize>,
+}
+
+/// The bytes a package element is held at.
+pub(crate) const ELEMENT: usize = core::mem::size_of::<Object>();
+
+impl Meter {
+    pub(crate) fn new() -> Rc<Meter> {
+        Rc::new(Meter { live: Cell::new(0) })
+    }
+
+    fn take(&self, n: usize) -> Result<(), Error> {
+        let live = self.live.get().checked_add(n).filter(|&l| l <= MAX_LIVE);
+        self.live.set(live.ok_or(Error::Bound("more held live than one interpreter holds"))?);
+        Ok(())
+    }
+
+    fn give(&self, n: usize) {
+        self.live.set(self.live.get().saturating_sub(n));
+    }
+
+    /// A string's or buffer's bytes, refused past [`MAX_BYTES`].
+    pub(crate) fn bytes(self: &Rc<Self>, v: Vec<u8>) -> Result<Bytes, Error> {
+        bounded(v.len())?;
+        self.take(v.len())?;
+        Ok(Rc::new(Data { v: RefCell::new(v), meter: self.clone() }))
+    }
+
+    /// A package's elements, refused past [`MAX_ELEMENTS`].
+    pub(crate) fn list(self: &Rc<Self>, v: Vec<Object>) -> Result<Elems, Error> {
+        counted(v.len())?;
+        self.take(v.len() * ELEMENT)?;
+        Ok(Rc::new(List { v: RefCell::new(v), meter: self.clone() }))
+    }
+}
+
+/// A string's or buffer's bytes, held against a [`Meter`].
+pub(crate) struct Data {
+    v: RefCell<Vec<u8>>,
+    meter: Rc<Meter>,
+}
+
+impl Data {
+    pub(crate) fn borrow(&self) -> core::cell::Ref<'_, Vec<u8>> {
+        self.v.borrow()
+    }
+
+    /// The bytes in place, to change and never to resize.
+    pub(crate) fn bits(&self) -> core::cell::RefMut<'_, Vec<u8>> {
+        self.v.borrow_mut()
+    }
+
+    pub(crate) fn replace(&self, n: Vec<u8>) -> Result<(), Error> {
+        bounded(n.len())?;
+        self.meter.take(n.len())?;
+        let old = self.v.replace(n);
+        self.meter.give(old.len());
+        Ok(())
+    }
+}
+
+impl Drop for Data {
+    fn drop(&mut self) {
+        self.meter.give(self.v.get_mut().len());
+    }
+}
+
+/// A package's elements, held against a [`Meter`].
+pub(crate) struct List {
+    v: RefCell<Vec<Object>>,
+    meter: Rc<Meter>,
+}
+
+impl List {
+    pub(crate) fn borrow(&self) -> core::cell::Ref<'_, Vec<Object>> {
+        self.v.borrow()
+    }
+
+    /// One element, replaced; the count stays.
+    pub(crate) fn set(&self, i: usize, o: Object) -> Result<(), Error> {
+        let mut v = self.v.borrow_mut();
+        *v.get_mut(i).ok_or(Error::Rule("an Index reference past its package's end"))? = o;
+        Ok(())
+    }
+
+    pub(crate) fn replace(&self, n: Vec<Object>) -> Result<(), Error> {
+        counted(n.len())?;
+        self.meter.take(n.len() * ELEMENT)?;
+        let old = self.v.replace(n);
+        self.meter.give(old.len() * ELEMENT);
+        Ok(())
+    }
+}
+
+impl Drop for List {
+    fn drop(&mut self) {
+        self.meter.give(self.v.get_mut().len() * ELEMENT);
+    }
+}
+
+pub(crate) fn bounded(len: usize) -> Result<(), Error> {
+    if len > MAX_BYTES { Err(Error::Bound("an object larger than this interpreter holds")) } else { Ok(()) }
+}
+
+pub(crate) fn counted(len: usize) -> Result<(), Error> {
+    if len > MAX_ELEMENTS { Err(Error::Bound("a package larger than this interpreter holds")) } else { Ok(()) }
+}
 
 #[derive(Clone)]
 pub(crate) enum Object {
@@ -78,17 +196,11 @@ pub(crate) struct Mutex {
     pub(crate) global: bool,
 }
 
-pub(crate) fn bytes(v: Vec<u8>) -> Bytes {
-    Rc::new(RefCell::new(v))
-}
-
 impl Object {
-    pub(crate) fn str(v: Vec<u8>) -> Object {
-        Object::Str(bytes(v))
-    }
-
-    pub(crate) fn buf(v: Vec<u8>) -> Object {
-        Object::Buf(bytes(v))
+    /// Whether this is a reference that may live only in a LocalX or ArgX
+    /// (the module header).
+    pub(crate) fn frame_bound(&self) -> bool {
+        matches!(self, Object::Ref(Ref::Slot(_) | Ref::Elem(..)))
     }
 
     /// The value ObjectType returns (§19.6.96, Table 19.36; a Processor's 12
@@ -113,44 +225,6 @@ impl Object {
             Object::BufField(_) => 14,
         }
     }
-}
-
-/// A copy of an object for a store (§19.3.5.8): data is duplicated, anything
-/// else is the same object again. Bounded in size and in nesting, both of
-/// which a table can grow without limit by storing a package into itself.
-pub(crate) fn copy(o: &Object) -> Result<Object, Error> {
-    let mut weight = 0usize;
-    copy_in(o, &mut weight, 0)
-}
-
-fn copy_in(o: &Object, weight: &mut usize, depth: usize) -> Result<Object, Error> {
-    if depth > MAX_NESTING {
-        return Err(Error::Bound("a package nests deeper than this interpreter copies"));
-    }
-    let mut weigh = |n: usize| {
-        *weight = weight.saturating_add(n);
-        if *weight > MAX_BYTES { Err(Error::Bound("an object larger than this interpreter holds")) } else { Ok(()) }
-    };
-    Ok(match o {
-        Object::Str(s) => {
-            weigh(s.borrow().len())?;
-            Object::str(s.borrow().clone())
-        }
-        Object::Buf(b) => {
-            weigh(b.borrow().len())?;
-            Object::buf(b.borrow().clone())
-        }
-        Object::Pkg(p) => {
-            let p = p.borrow();
-            weigh(p.len())?;
-            let mut out = Vec::with_capacity(p.len());
-            for e in p.iter() {
-                out.push(copy_in(e, weight, depth + 1)?);
-            }
-            Object::Pkg(Rc::new(RefCell::new(out)))
-        }
-        other => other.clone(),
-    })
 }
 
 /// The integer width a definition block's DSDT revision gives every integer
@@ -226,6 +300,7 @@ pub(crate) fn to_buf(o: &Object, w: Width) -> Result<Vec<u8>, Error> {
         Object::Int(v) => Ok(w.le(*v)),
         Object::Str(s) => {
             let s = s.borrow();
+            bounded(s.len() + 1)?;
             let mut b = s.clone();
             if !s.is_empty() {
                 b.push(0);
@@ -245,23 +320,26 @@ pub(crate) fn to_str(o: &Object, w: Width) -> Result<Vec<u8>, Error> {
     match o {
         Object::Int(v) => Ok(w.hex(*v)),
         Object::Str(s) => Ok(s.borrow().clone()),
-        Object::Buf(b) => Ok(joined(&b.borrow(), b' ', hex2)),
+        Object::Buf(b) => {
+            bounded(b.borrow().len().saturating_mul(3))?;
+            Ok(joined(&b.borrow(), b' ', hex2))
+        }
         Object::Uninit => Err(Error::Type("an uninitialized object is used as a source (Table 19.6)")),
         _ => Err(Error::Type("an operand that converts to no string (Table 19.6)")),
     }
 }
 
-pub(crate) fn hex2(x: u8) -> Vec<u8> {
-    alloc::vec![HEX[usize::from(x >> 4)], HEX[usize::from(x & 0xF)]]
+pub(crate) fn hex2(x: u8, out: &mut Vec<u8>) {
+    out.extend([HEX[usize::from(x >> 4)], HEX[usize::from(x & 0xF)]]);
 }
 
-pub(crate) fn joined(b: &[u8], sep: u8, each: fn(u8) -> Vec<u8>) -> Vec<u8> {
-    let mut out = Vec::new();
+pub(crate) fn joined(b: &[u8], sep: u8, each: fn(u8, &mut Vec<u8>)) -> Vec<u8> {
+    let mut out = Vec::with_capacity(b.len() * 4);
     for (i, &x) in b.iter().enumerate() {
         if i > 0 {
             out.push(sep);
         }
-        out.extend(each(x));
+        each(x, &mut out);
     }
     out
 }

@@ -17,7 +17,7 @@ use crate::exec::Machine;
 use crate::name::Seg;
 use crate::namespace::NodeId;
 use crate::object::{fit, to_buf, to_int, Bytes, Object};
-use crate::{Address, Error, Width, MAX_BYTES};
+use crate::{Address, Error, MAX_BYTES};
 
 pub(crate) struct Region {
     pub(crate) space: u8,
@@ -78,10 +78,6 @@ fn set_bit(b: &mut [u8], i: u64, on: bool) {
     }
 }
 
-/// A field's value (§19.6.47): an Integer when it fits one, else a Buffer.
-fn value(b: Vec<u8>, bits: u64, w: Width) -> Result<Object, Error> {
-    if bits <= u64::from(w.bits) { Ok(Object::Int(w.int_of_bytes(&b)?)) } else { Ok(Object::buf(b)) }
-}
 
 fn width(bytes: u64) -> crate::Access {
     match bytes {
@@ -151,7 +147,10 @@ impl Machine<'_> {
         let at = r.base.checked_add(offset).ok_or_else(past)?;
         match r.space {
             0x00 => Ok(Address::Memory(at)),
-            0x01 => Ok(Address::Io(at)),
+            0x01 => {
+                let port = u16::try_from(at).ok().filter(|&p| u64::from(p) + w <= 0x1_0000);
+                Ok(Address::Io(port.ok_or(Error::Rule("a SystemIO access past port 0xFFFF"))?))
+            }
             0x02 => {
                 // PCI configuration space is 4096 bytes a function.
                 let offset = u16::try_from(at).ok().filter(|&o| u64::from(o) + w <= 0x1000);
@@ -199,11 +198,16 @@ impl Machine<'_> {
         let adr = self.named_int(device, Seg(*b"_ADR"))?.ok_or(Error::NotFound(self.ns.path_of(device, Some(Seg(*b"_ADR")))))?;
         let bus = self.named_int(bridge, bbn)?.unwrap_or(0);
         let segment = self.named_int(bridge, Seg(*b"_SEG"))?.unwrap_or(0);
-        let (dev, fun) = (adr >> 16 & 0xFFFF, adr & 0xFFFF);
-        if dev > 31 || fun > 7 {
+        // §6.5.5 and §6.5.6 give the bus in the low 8 bits and the segment
+        // group in the low 16, the rest reserved: a value outside them names
+        // no bus this access could reach.
+        let bus = u8::try_from(bus).map_err(|_| Error::Rule("a _BBN above 0xFF (§6.5.5)"))?;
+        let segment = u16::try_from(segment).map_err(|_| Error::Rule("a _SEG above 0xFFFF (§6.5.6)"))?;
+        let (dev, fun) = (adr >> 16, adr & 0xFFFF);
+        let (Ok(device @ 0..=31), Ok(function @ 0..=7)) = (u8::try_from(dev), u8::try_from(fun)) else {
             return Err(Error::Rule("an _ADR that names no single PCI function (§6.1.1)"));
-        }
-        let p = Pci { segment: segment as u16, bus: bus as u8, device: dev as u8, function: fun as u8 };
+        };
+        let p = Pci { segment, bus, device, function };
         r.pci.set(Some(p));
         Ok(p)
     }
@@ -249,11 +253,17 @@ impl Machine<'_> {
         self.enter()?;
         let r = self.locked(f.lock, |m| m.read_units(f));
         self.leave();
-        value(r?, f.len, self.w)
+        self.value(r?, f.len)
+    }
+
+    /// A field's value (§19.6.47): an Integer when it fits one, else a Buffer.
+    fn value(&mut self, b: Vec<u8>, bits: u64) -> Result<Object, Error> {
+        if bits <= u64::from(self.w.bits) { Ok(Object::Int(self.w.int_of_bytes(&b)?)) } else { self.new_buf(b) }
     }
 
     fn read_units(&mut self, f: &Field) -> Result<Vec<u8>, Error> {
         let mut out = vec![0u8; bytes_for(f.len)?];
+        self.charge(out.len())?;
         let w = self.unit(f)?;
         let span = 8 * w;
         for u in f.bit / span..=(f.bit + f.len - 1) / span {
@@ -324,6 +334,8 @@ impl Machine<'_> {
     }
 
     pub(crate) fn read_buf_field(&mut self, f: &BufField) -> Result<Object, Error> {
+        // A bit at a time: a byte of work for each.
+        self.charge(usize::try_from(f.len).unwrap_or(usize::MAX))?;
         let d = f.data.borrow();
         if f.bit.saturating_add(f.len) > (d.len() as u64).saturating_mul(8) {
             return Err(Error::Rule("a buffer field reaches past its buffer, which shrank since"));
@@ -333,7 +345,7 @@ impl Machine<'_> {
             set_bit(&mut out, i, bit(&d, f.bit + i));
         }
         drop(d);
-        value(out, f.len, self.w)
+        self.value(out, f.len)
     }
 
     /// A store to a buffer field (Table 19.7): the source as bytes, truncated
@@ -345,7 +357,8 @@ impl Machine<'_> {
             _ => return Err(Error::Type("a store to a buffer field of an object that is not an integer, buffer or string")),
         };
         let src = fit(src, bytes_for(f.len)?);
-        let mut d = f.data.borrow_mut();
+        self.charge(usize::try_from(f.len).unwrap_or(usize::MAX))?;
+        let mut d = f.data.bits();
         if f.bit.saturating_add(f.len) > (d.len() as u64).saturating_mul(8) {
             return Err(Error::Rule("a buffer field reaches past its buffer, which shrank since"));
         }
