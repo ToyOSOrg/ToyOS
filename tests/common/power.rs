@@ -307,8 +307,7 @@ fn record_cpu<'a>(line: &'a str, needle: &str) -> Option<&'a str> {
     line.split(needle)
         .next()?
         .split(|c: char| c.is_whitespace() || c == '[' || c == ']')
-        .filter(|word| word.strip_prefix("cpu").is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())))
-        .next_back()
+        .rfind(|word| word.strip_prefix("cpu").is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())))
 }
 
 /// The metal half of [`boot_deadline_ends_a_wedge`]: a T14 boot that wedged on
