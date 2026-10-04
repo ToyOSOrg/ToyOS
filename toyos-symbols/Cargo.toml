@@ -22,4 +22,4 @@ toyos-elf = { path = "../toyos-elf" }
 toyos-elide = { path = "../toyos-elide" }
 
 [dev-dependencies]
-object = { version = "0.38", default-features = false, features = ["read_core", "elf", "std"] }
+object = { version = "0.38", default-features = false, features = ["read_core", "elf", "std", "unaligned"] }

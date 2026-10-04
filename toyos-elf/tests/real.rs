@@ -12,12 +12,7 @@
 
 use toyos_elf::{Layout, Machine};
 
-/// `object` reads an ELF header in place, so the bytes need its 8-byte alignment.
-#[repr(C, align(8))]
-struct Aligned([u8; 4096]);
-
-static LLD_ALIGNED: Aligned = Aligned(*include_bytes!("fixtures/lld-headers.bin"));
-static LLD_HEADERS: &[u8] = &LLD_ALIGNED.0;
+const LLD_HEADERS: &[u8] = include_bytes!("fixtures/lld-headers.bin");
 
 #[test]
 fn a_linked_binary_parses_to_what_readelf_says() {
@@ -63,11 +58,11 @@ fn a_linked_binary_parses_to_what_readelf_says() {
 /// The build-id `object` reads out of `file`'s program headers.
 fn objects_build_id(file: &[u8]) -> Option<Vec<u8>> {
     use object::read::elf::{FileHeader, ProgramHeader};
-    let header = object::elf::FileHeader64::<object::LittleEndian>::parse(file).ok()?;
-    let endian = header.endian().ok()?;
-    for phdr in header.program_headers(endian, file).ok()? {
-        let Ok(Some(mut notes)) = phdr.notes(endian, file) else { continue };
-        while let Ok(Some(note)) = notes.next() {
+    let header = object::elf::FileHeader64::<object::LittleEndian>::parse(file).expect("object reads the header");
+    let endian = header.endian().expect("object reads the endianness");
+    for phdr in header.program_headers(endian, file).expect("object reads the program headers") {
+        let Some(mut notes) = phdr.notes(endian, file).expect("object reads a note segment") else { continue };
+        while let Some(note) = notes.next().expect("object reads a note") {
             if note.name() == b"GNU" && note.n_type(endian) == object::elf::NT_GNU_BUILD_ID {
                 return Some(note.desc().to_vec());
             }
