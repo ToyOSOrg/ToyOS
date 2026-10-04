@@ -60,6 +60,7 @@ members = [
     "toyos-tco",
     "toyos-tmpdir",
     "toyos-trace",
+    "toyos-tsc",
     "toyos-untrusted",
     "toyos-update",
     "toyos-userbound",
