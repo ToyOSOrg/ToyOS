@@ -46,9 +46,10 @@ at `8b4f88446`, by type-check and one loader link, with no boot:
 - The loader's `[profile.toyos]` has no `strip = "debuginfo"`; a loader built
   with and without it differs in 247,720 of 328,192 bytes. One profile is a
   loader byte change, made before the merge.
-- `[patch]` is workspace-wide. `tests/toyos-rust-tests` patches memmap2 and
-  target-lexicon and `tests/ssh-client-host` takes upstream tokio, so both
-  stay outside the workspace.
+- `[patch]` is workspace-wide. `tests/toyos-rust-tests` patches memmap2,
+  `tests/toyos-rust-tests/tls-cranelift`, a resolution with its own lock,
+  patches target-lexicon, and `tests/ssh-client-host` takes upstream tokio,
+  so all three stay outside the workspace.
 - The guest triples' flags stay per triple: with no
   `[target.x86_64-unknown-uefi]` table, `curve25519-dalek-derive` enters the
   x86_64 loader's graph.
