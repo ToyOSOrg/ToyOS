@@ -1,5 +1,5 @@
-//! Every random value [ip] needs is SipHash-2-4 over (secret, purpose, the purpose's counter)
-//! (§1.3): one secret makes the layer deterministic, and without it no draw is predictable.
+//! Every random value [ip] needs is SipHash-2-4 over (secret, purpose, the purpose's counter):
+//! one secret makes the layer deterministic, and without it no draw is predictable.
 
 use core::time::Duration;
 

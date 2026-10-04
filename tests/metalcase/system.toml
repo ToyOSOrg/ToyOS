@@ -28,7 +28,7 @@ syscap = ["logread"]
 [programs.compositor]
 service = true
 serves = ["compositor"]
-receives = ["soundserver", "launcher"]
+receives = ["soundserver"]
 devices = ["framebuffer", "keyboard", "mouse"]
 
 [programs.soundserver]
@@ -46,7 +46,7 @@ devices = ["pci:1af4:1041"]
 
 [programs.sshserver]
 service = true
-receives = ["netstack", "launcher"]
+receives = ["netstack"]
 
 # The union its guest binaries need on this machine shape.
 [programs.test-runner]

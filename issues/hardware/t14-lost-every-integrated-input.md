@@ -45,8 +45,8 @@ Those are opposite defects in opposite subsystems and the counters that tell
 them apart were read once. Two facts are established and neither settles it: all
 six bytes were aux (four named `aux`, two produced motion, `0 keys`), and **the
 keyboard produced no byte at all in 58 s** — not "stopped at 6.6 s", never. The
-same machine's earlier boots drove a shell off that keyboard (`metal-hardware-
-inventory.md`), so it is not a routing fault.
+same machine's earlier boots drove a shell off that keyboard
+(`c7efcd30d^:specs/reference/metal-hardware-inventory.md`), so it is not a routing fault.
 
 The cadence fix is what makes the next session decisive rather than a guess:
 after the verdict the counters repeat, at most once per 10 s and **only when the

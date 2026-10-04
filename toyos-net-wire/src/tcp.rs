@@ -153,7 +153,7 @@ impl<'a> TcpOptions<'a> {
                 _ => {}
             }
             let &length = rest.first().ok_or(TcpError::OptionOverrun)?;
-            // An illegal length drops the segment: MUST-7's reset would let a forged option end a connection.
+            // An illegal length drops the segment: RFC 9293 MUST-7's reset would let a forged option end a connection.
             if length < 2 {
                 return Err(TcpError::OptionLength);
             }

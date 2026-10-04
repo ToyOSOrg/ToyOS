@@ -432,7 +432,7 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
     }
     // After ACPI is readable and PCI is enumerable, before any driver `init`: each enumerated device needs a context entry before it can DMA.
     // Refuses nothing — a machine with no usable IOMMU boots exactly as one without it.
-    iommu::init(kernel_args.rsdp_addr, &pci_devices);
+    iommu::init(kernel_args.rsdp_addr, &pci_devices, kernel_args.root_bridge_windows());
     // Before storage and everything under it: what it covers is the rest of this
     // boot, and a wedge down there is the reason to have one.
     arch::watchdog::init(&pci_devices);

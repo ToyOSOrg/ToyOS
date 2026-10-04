@@ -1,4 +1,4 @@
-//! §U2: sockets and binding.
+//! Sockets and binding.
 
 mod common;
 

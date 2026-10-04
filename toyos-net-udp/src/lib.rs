@@ -105,7 +105,7 @@ pub struct SocketId {
     generation: u32,
 }
 
-/// Where a socket is bound (§U2.1): a peer only once connected.
+/// Where a socket is bound: a peer only once connected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Binding {
     Any,
@@ -113,8 +113,7 @@ pub enum Binding {
     Connected { local: Ipv4Addr, peer: Ipv4Addr, peer_port: Port },
 }
 
-/// An error the network reported against a connected socket: its next call returns it once
-/// (§U8.3).
+/// An error the network reported against a connected socket: its next call returns it once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SocketError {
     Refused,
@@ -130,7 +129,7 @@ pub enum Error {
     Failed(SocketError),
 }
 
-/// A datagram `recv` delivered (§U5.6).
+/// A datagram `recv` delivered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Received {
     /// Bytes written: the payload, cut to the buffer.
@@ -241,7 +240,7 @@ pub struct Udp {
     gone: Vec<Sender>,
     /// `closed` is in `eligible` or the caller's round.
     closed_offered: bool,
-    /// Datagrams closed sockets had accepted: they still leave (§U9 (3)), at most
+    /// Datagrams closed sockets had accepted: they still leave, at most
     /// `limits::CLOSED_DATAGRAMS` of them.
     closed: VecDeque<(Port, Queued)>,
     counters: Counters,
@@ -298,7 +297,7 @@ impl Udp {
         self.slots.get_mut(usize::try_from(index).ok()?)?.socket.as_mut()
     }
 
-    /// RFC 6056 Algorithm 1 (§U2.4): the first candidate is uniform over the range, then each
+    /// RFC 6056 Algorithm 1: the first candidate is uniform over the range, then each
     /// next port in turn, until a free one or every port was tried.
     fn ephemeral(&self, draw: u32) -> Option<Port> {
         let offset = u16::try_from(draw.checked_rem(u32::from(limits::EPHEMERAL_COUNT)).unwrap_or(0)).unwrap_or(0);
@@ -309,7 +308,7 @@ impl Udp {
     }
 
     /// Binds a socket to `addr`, 0.0.0.0 meaning any, and `port`, or an ephemeral one when
-    /// `None`, which spends the one draw (§U2).
+    /// `None`, which spends the one draw.
     pub fn bind(&mut self, ip: &Ip, addr: Ipv4Addr, port: Option<Port>, draw: impl FnOnce() -> u32) -> Result<SocketId, Error> {
         let binding = if addr.is_unspecified() {
             Binding::Any
@@ -372,7 +371,7 @@ impl Udp {
         self.socket(id).map(|s| s.rx_full)
     }
 
-    /// Only netstack's own sockets: POSIX's `SO_BROADCAST` (§U4.3).
+    /// Only netstack's own sockets: POSIX's `SO_BROADCAST`.
     pub fn set_broadcast(&mut self, id: SocketId, permitted: bool) -> Result<(), Error> {
         self.socket(id).map(|s| s.broadcast = permitted)
     }
@@ -385,12 +384,12 @@ impl Udp {
     }
 
     /// Marks netstack's DHCP client's socket: the only one that may send from 0.0.0.0, and the only
-    /// one the acquisition exception delivers to (§U4.4 (3), §U5.3).
+    /// one the acquisition exception delivers to.
     pub fn set_acquisition(&mut self, id: SocketId) -> Result<(), Error> {
         self.socket(id).map(|s| s.acquisition = true)
     }
 
-    /// The destination classes of §U4.2 and §U3 (2) that no send or connect may name.
+    /// The destinations no send or connect may name.
     fn unusable(ip: &Ip, addr: Ipv4Addr) -> Option<Counter> {
         if addr.is_loopback() {
             Some(Counter::SendLoopback)
@@ -404,7 +403,7 @@ impl Udp {
     }
 
     /// Connects to one unicast peer; the local address is fixed now, and datagrams already
-    /// queued from anyone else are dropped (§U3).
+    /// queued from anyone else are dropped.
     pub fn connect(&mut self, ip: &mut Ip, id: SocketId, peer: Ipv4Addr, peer_port: u16) -> Result<(), Error> {
         let socket = self.socket(id)?;
         let (binding, from_any, local_port) = (socket.binding, socket.from_any, socket.port);
@@ -439,7 +438,7 @@ impl Udp {
         Ok(())
     }
 
-    /// Queues `payload` for `destination:port` (§U4). Accepted means queued, not sent.
+    /// Queues `payload` for `destination:port`. Accepted means queued, not sent.
     pub fn send_to(&mut self, ip: &mut Ip, id: SocketId, destination: Ipv4Addr, port: u16, payload: &[u8]) -> Result<(), Error> {
         self.submit(ip, id, None, destination, port, payload)
     }
@@ -457,7 +456,7 @@ impl Udp {
     }
 
     /// The acquisition socket's send, naming its source: 0.0.0.0 to the limited broadcast, or an
-    /// assigned address (§U4.4 (3)).
+    /// assigned address.
     pub fn send_from(&mut self, ip: &mut Ip, id: SocketId, source: Ipv4Addr, destination: Ipv4Addr, port: u16, payload: &[u8]) -> Result<(), Error> {
         self.submit(ip, id, Some(source), destination, port, payload)
     }
@@ -529,7 +528,7 @@ impl Udp {
         Ok(())
     }
 
-    /// The oldest datagram, cut to `out` (the rest discarded, U-7), or `None` when none waits.
+    /// The oldest datagram, cut to `out` (the rest discarded), or `None` when none waits.
     pub fn recv(&mut self, id: SocketId, out: &mut [u8]) -> Result<Option<Received>, Error> {
         let socket = self.socket(id)?;
         if let Some(error) = socket.pending.take() {
@@ -579,7 +578,7 @@ impl Udp {
         Ok(())
     }
 
-    /// A datagram [ip] admitted (§U5).
+    /// A datagram [ip] admitted.
     pub fn receive(&mut self, now: Instant, arrival: &Arrival<'_>, datagram: &UdpDatagram<'_>) -> Verdict {
         self.count(Counter::Rx);
         if datagram.checksum() == UdpChecksum::Absent {
@@ -642,7 +641,7 @@ impl Udp {
         })
     }
 
-    /// An ICMP error [ip] attributed to a UDP datagram of ours (§U8): only the connected socket
+    /// An ICMP error [ip] attributed to a UDP datagram of ours: only the connected socket
     /// whose whole 4-tuple it quotes hears it.
     pub fn icmp_error(&mut self, error: &TransportError) {
         if error.transport != Transport::Udp {
@@ -667,7 +666,7 @@ impl Udp {
         self.count(Counter::IcmpErrorDelivered);
     }
 
-    /// [ip] could not reach the next hop of a datagram this crate handed it (§U8.3 (4)).
+    /// [ip] could not reach the next hop of a datagram this crate handed it.
     pub fn unreachable(&mut self, flow: &Flow) {
         if let Some(socket) = self.connected(flow) {
             socket.pending = Some(SocketError::Unreachable);

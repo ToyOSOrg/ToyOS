@@ -897,7 +897,7 @@ impl Sync {
     // ---- timers ----
 
     /// The next probe's time; with one owed, the give-up's, which runs on wall time whether or not
-    /// the probes leave (§11.3): the owed one and the rest at their interval, unanswered.
+    /// the probes leave: the owed one and the rest at their interval, unanswered.
     fn keepalive_at(&self, ctx: &Ctx<'_>) -> Option<Instant> {
         let ka = ctx.options.keepalive?;
         let open = matches!(self.phase, Phase::Established | Phase::CloseWait | Phase::FinWait2);

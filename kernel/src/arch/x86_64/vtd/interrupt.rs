@@ -25,12 +25,17 @@
 //! One table serves every unit, which Section 5.1.3 permits explicitly, so an
 //! index names the same interrupt whichever unit walks it.
 //!
+//! **Its first entries are the claim slots', one each**, not present until a
+//! claim writes its slot's and not present again once the claim is released;
+//! the kernel's own sources take the entries after them, one per arming.
+//!
 //! This module's lock is taken before `UNITS` and before `TABLES`, never after
 //! either.
 
 use crate::log;
 use alloc::vec::Vec;
 
+use crate::drivers::pci::MSG_DEST;
 use crate::iommu::{Refused, StreamId};
 use crate::sync::Lock;
 
@@ -84,7 +89,16 @@ struct Remap {
 }
 
 static REMAP: Lock<Remap> =
-    Lock::new(Remap { table: None, used: 0, extended: false, apics: Vec::new() });
+    Lock::new(Remap { table: None, used: CLAIMS, extended: false, apics: Vec::new() });
+
+/// Entries `0..CLAIMS` are the claim slots'; the kernel's own sources take them
+/// from here up.
+const CLAIMS: u16 = crate::pcidev::MAX_FUNCTIONS as u16;
+const _: () = assert!(crate::pcidev::MAX_FUNCTIONS < ENTRIES as usize);
+
+/// A claimed function's message reaches [`MSG_DEST`], which an entry holds with
+/// or without `EIME`, so writing a claim slot's entry is never refused.
+const _: () = assert!(MSG_DEST < NARROW_DESTINATIONS);
 
 pub fn describe_apic(apic_id: u8, source: StreamId) {
     REMAP.lock().apics.push((apic_id, source));
@@ -95,14 +109,12 @@ pub fn apics_are_named(apics: &[u8]) -> bool {
     apics.iter().all(|id| remap.apics.iter().any(|(named, _)| named == id))
 }
 
-/// Allocate the shared table on first ask and return the value `IRTA_REG` takes for it.
+/// Allocate the shared table on first ask and return the value `IRTA_REG`
+/// takes for it.
 pub fn arm(extended: bool) -> u64 {
     let mut remap = REMAP.lock();
     remap.extended = extended;
-    let table = match remap.table {
-        Some(table) => table,
-        None => *remap.table.insert(super::TABLES.lock().alloc()),
-    };
+    let table = *remap.table.get_or_insert_with(|| super::TABLES.lock().alloc());
     table.phys() | if extended { EXTENDED_INTERRUPT_MODE } else { 0 } | SIZE_FIELD
 }
 
@@ -114,11 +126,42 @@ pub fn is_armed() -> bool {
     REMAP.lock().table.is_some()
 }
 
+/// The entry that delivers `vector` to `dest` for `source` alone: delivery mode
+/// 000b, destination mode physical and no redirection hint, which is what the
+/// compatibility message it replaces said.
+fn entry(extended: bool, source: StreamId, vector: u8, dest: u32, level: bool) -> (u64, u64) {
+    let destination = if extended { dest as u64 } else { (dest as u64) << NARROW_DESTINATION_SHIFT };
+    (
+        PRESENT
+            | if level { TRIGGER_LEVEL } else { 0 }
+            | ((vector as u64) << VECTOR_SHIFT)
+            | (destination << DESTINATION_SHIFT),
+        VERIFY_SOURCE_ID | source.requester() as u64,
+    )
+}
+
+/// What an entry holds, read back out of the table rather than restated from
+/// the words meant for it: a line restating the intent agrees with itself
+/// however the entry was composed, and these fields keep one device off
+/// another's entry.
+fn report(index: u16, source: StreamId, dest: u32, (lo, hi): (u64, u64)) {
+    log!(
+        // `apic=` is the id this was asked for, `dst=` the field it encoded
+        // into; printing only the second leaves the encoding compared against
+        // itself.
+        "iommu: irte{index} source={source} p={} sid={:#06x} svt={} sq={} vector={:#04x} \
+         apic={dest:#x} dst={:#x} trigger={}",
+        lo & PRESENT,
+        hi & 0xFFFF,
+        (hi >> 18) & 0x3,
+        (hi >> 16) & 0x3,
+        (lo >> VECTOR_SHIFT) & 0xFF,
+        lo >> DESTINATION_SHIFT,
+        if lo & TRIGGER_LEVEL != 0 { "level" } else { "edge" }
+    );
+}
+
 /// Fills the next free entry for `source` and returns its index.
-///
-/// What it reports is the entry read back out of the table, never the words it
-/// meant to write: a line restating the intent agrees with itself however the
-/// entry was composed, and these fields keep one device off another's entry.
 fn allocate(source: StreamId, vector: u8, dest: u32, level: bool) -> Result<u16, Refused> {
     let written = {
         let mut remap = REMAP.lock();
@@ -133,44 +176,19 @@ fn allocate(source: StreamId, vector: u8, dest: u32, level: bool) -> Result<u16,
         } else {
             let index = remap.used;
             remap.used += 1;
-            let destination =
-                if remap.extended { dest as u64 } else { (dest as u64) << NARROW_DESTINATION_SHIFT };
-            // Delivery mode 000b, destination mode physical and no redirection
-            // hint, which is what the compatibility message this replaces said.
-            table.write_pair(
-                index as usize,
-                PRESENT
-                    | if level { TRIGGER_LEVEL } else { 0 }
-                    | ((vector as u64) << VECTOR_SHIFT)
-                    | (destination << DESTINATION_SHIFT),
-                VERIFY_SOURCE_ID | source.requester() as u64,
-            );
+            let (lo, hi) = entry(remap.extended, source, vector, dest, level);
+            table.write_pair(index as usize, lo, hi);
             // Under the same lock as the write, so no other entry can be
             // written between an entry and the invalidation that publishes it.
             // Section 6.4: a unit reporting `CAP.CM`, as these do, may cache the
             // entry a fault was taken on.
             super::invalidate_interrupt_entries();
-            let (lo, hi) = table.read_pair(index as usize);
-            Ok((index, lo, hi))
+            Ok((index, table.read_pair(index as usize)))
         }
     };
     match written {
-        Ok((index, lo, hi)) => {
-            log!(
-                // `apic=` is the id this was asked for, `dst=` the field it
-                // encoded into; printing only the second leaves the encoding
-                // compared against itself.
-                "iommu: irte{index} source={source} p={} sid={:#06x} svt={} sq={} \
-                 vector={:#04x} apic={:#x} dst={:#x} trigger={}",
-                lo & PRESENT,
-                hi & 0xFFFF,
-                (hi >> 18) & 0x3,
-                (hi >> 16) & 0x3,
-                (lo >> VECTOR_SHIFT) & 0xFF,
-                dest,
-                lo >> DESTINATION_SHIFT,
-                if lo & TRIGGER_LEVEL != 0 { "level" } else { "edge" }
-            );
+        Ok((index, read)) => {
+            report(index, source, dest, read);
             Ok(index)
         }
         Err(why) => {
@@ -180,16 +198,63 @@ fn allocate(source: StreamId, vector: u8, dest: u32, level: bool) -> Result<u16,
     }
 }
 
-pub fn msi(source: StreamId, vector: u8, dest: u32) -> Result<Msi, Refused> {
-    let index = allocate(source, vector, dest, false)? as u32;
-    Ok(Msi {
+/// The message that indexes entry `index` by its handle alone (Section 5.1.3).
+fn message(index: u16) -> Msi {
+    let index = index as u32;
+    Msi {
         address: crate::arch::MSI_DOORBELL
             | ((index & 0x7FFF) << 5)
             | MESSAGE_REMAPPABLE
             | MESSAGE_SUBHANDLE_VALID
             | ((index >> 15) << 2),
         data: 0,
-    })
+    }
+}
+
+pub fn msi(source: StreamId, vector: u8, dest: u32) -> Result<Msi, Refused> {
+    Ok(message(allocate(source, vector, dest, false)?))
+}
+
+/// Claim slot `slot`'s entry, written for `source` at `vector` and published
+/// to every unit before this returns, and the message that reaches it.
+pub fn claim(slot: usize, source: StreamId, vector: u8) -> Msi {
+    let (index, read) = {
+        let remap = REMAP.lock();
+        let Some(table) = remap.table else {
+            panic!("iommu: claim slot {slot} written with no table armed");
+        };
+        let index = u16::try_from(slot)
+            .ok()
+            .filter(|index| *index < CLAIMS)
+            .unwrap_or_else(|| panic!("iommu: claim slot {slot} has no entry of its own"));
+        // Not present since the last release, so the high half written first
+        // reaches nothing the unit can walk.
+        assert!(
+            table.read_pair(slot).0 & PRESENT == 0,
+            "iommu: claim slot {slot}'s entry is still present"
+        );
+        let (lo, hi) = entry(remap.extended, source, vector, MSG_DEST, false);
+        table.write_pair(slot, lo, hi);
+        super::invalidate_interrupt_entries();
+        (index, table.read_pair(slot))
+    };
+    report(index, source, MSG_DEST, read);
+    message(index)
+}
+
+/// Claim slot `slot`'s entry not present again, and gone from every unit's
+/// cache before this returns.
+pub fn release(slot: usize, source: StreamId) {
+    let lo = {
+        let remap = REMAP.lock();
+        let Some(table) = remap.table else {
+            panic!("iommu: claim slot {slot} released with no table armed");
+        };
+        table.clear_pair(slot);
+        super::invalidate_interrupt_entries();
+        table.read_pair(slot).0
+    };
+    log!("iommu: irte{slot} source={source} p={} released", lo & PRESENT);
 }
 
 pub fn pin(apic_id: u8, vector: u8, dest: u32, level: bool) -> Result<Pin, Refused> {

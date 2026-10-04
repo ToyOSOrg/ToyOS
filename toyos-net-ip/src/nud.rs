@@ -1,4 +1,4 @@
-//! The reachability machine (§6): RFC 4861 §7.3's neighbour unreachability detection with RFC
+//! The reachability machine: RFC 4861 §7.3's neighbour unreachability detection with RFC
 //! 7048's UNREACHABLE, written over ARP so NDP can reuse it. A request is the probe; a solicited
 //! reply or a transport's positive advice is a confirmation; any other ARP packet naming a
 //! neighbour we hold is an assertion. Requests to one neighbour are never closer than RETRANS,
@@ -7,10 +7,10 @@
 //!
 //! Each state carries exactly its own fields: a MAC only where one is known, a waiting request
 //! only in a state that sends one, and a pending queue that takes datagrams in INCOMPLETE and only
-//! drains in every state resolution leads to (§6.2).
+//! drains in every state resolution leads to.
 //! Resolution moves INCOMPLETE's queue into the resolved state and gives each datagram a turn in
 //! the control queue, where it leaves to the MAC of that moment. While its queue holds any, an
-//! entry does not idle out and is evicted only after every other candidate (§6.8). A send the
+//! entry does not idle out and is evicted only after every other candidate. A send the
 //! full table refused is told, by [`Event::Room`], once an entry may be evicted.
 
 use alloc::collections::VecDeque;
@@ -51,7 +51,7 @@ pub struct Held {
     pub(crate) flow: Option<Flow>,
 }
 
-/// INCOMPLETE's pending queue: the only one that takes datagrams (§6.5).
+/// INCOMPLETE's pending queue: the only one that takes datagrams.
 #[derive(Debug, Default)]
 pub struct Pending(VecDeque<Held>);
 
@@ -70,7 +70,7 @@ impl Pending {
 }
 
 /// A resolved entry's pending queue: what resolution released that has yet to leave, oldest
-/// first. It only drains (§6.2).
+/// first. It only drains.
 #[derive(Debug, Default)]
 pub struct Released(VecDeque<Held>);
 
@@ -116,7 +116,7 @@ impl Reachable {
 }
 
 /// STALE or quiescent UNREACHABLE's IDLE_LIFETIME. It passes without deleting the entry only
-/// while released datagrams are queued, and the entry then goes as the last leaves (§6.3).
+/// while released datagrams are queued, and the entry then goes as the last leaves.
 #[derive(Clone, Copy, Debug)]
 enum Lifetime {
     Runs,
@@ -189,7 +189,7 @@ impl Nud {
         }
     }
 
-    /// A request of ours may be outstanding: a reply now is solicited (§7.2 (5)).
+    /// A request of ours may be outstanding: a reply now is solicited.
     fn solicits(&self) -> bool {
         matches!(self, Self::Incomplete(_) | Self::Probe(_) | Self::Unreachable(_))
     }
@@ -229,11 +229,11 @@ pub(crate) struct Neighbour {
     pub last_request: Option<Instant>,
     /// When a datagram last went to it: eviction takes the entry unused longest.
     pub used: Instant,
-    /// The source a request prefers: the prompting datagram's (§6.3).
+    /// The source a request prefers: the prompting datagram's.
     pub hint: Option<Ipv4Addr>,
 }
 
-/// Where a datagram goes now (§6.3's "send", §6.7's answer).
+/// Where a datagram goes now.
 #[derive(Debug)]
 pub(crate) enum Link {
     Resolved(MacAddr),
@@ -265,8 +265,8 @@ fn request(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) {
 }
 
 /// A request to `addr` reached the head of the control queue and takes its form from the state of
-/// this moment (§6.4): broadcast in INCOMPLETE and UNREACHABLE, to the cached MAC in PROBE, and
-/// in every other state none at all, since they send no request (§6.3). It waits no longer.
+/// this moment: broadcast in INCOMPLETE and UNREACHABLE, to the cached MAC in PROBE, and
+/// in every other state none at all, since they send no request. It waits no longer.
 pub(crate) fn request_leaves(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) -> Option<MacAddr> {
     let to = match &i.neighbours.get(&addr)?.state {
         Nud::Incomplete(_) | Nud::Unreachable(Unreachable { solicit: Solicit::Queued, .. }) => MacAddr::BROADCAST,
@@ -303,8 +303,7 @@ fn request_left(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr) {
 }
 
 /// Makes room for one more entry, evicting FAILED, then quiescent UNREACHABLE, then STALE, each
-/// the one unused longest, and after all of them one whose queue still holds released datagrams
-/// (§6.8).
+/// the one unused longest, and after all of them one whose queue still holds released datagrams.
 fn make_room(i: &mut Interface, cx: &mut Cx<'_>) -> bool {
     if i.neighbours.len() < TABLE_MAX {
         return true;
@@ -315,7 +314,7 @@ fn make_room(i: &mut Interface, cx: &mut Cx<'_>) -> bool {
     true
 }
 
-/// Eviction's order for `n`, lowest first; `None` is an entry in use, which never goes (§6.8).
+/// Eviction's order for `n`, lowest first; `None` is an entry in use, which never goes.
 fn evictable(n: &Neighbour) -> Option<u8> {
     let class = match &n.state {
         Nud::Failed => 0,
@@ -353,7 +352,7 @@ fn insert(i: &mut Interface, addr: Ipv4Addr, state: Nud, now: Instant, hint: Opt
     i.neighbours.insert(addr, Neighbour { state, last_request: None, used: now, hint });
 }
 
-/// A datagram or a flow wants `addr` now (§6.3 "send"): creates INCOMPLETE, moves STALE to
+/// A datagram or a flow wants `addr` now: creates INCOMPLETE, moves STALE to
 /// DELAY, or asks a quiescent UNREACHABLE for a request.
 pub(crate) fn send(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr, hint: Option<Ipv4Addr>) -> Link {
     let now = cx.now;
@@ -492,7 +491,7 @@ fn probe(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr, at: Instant) {
     }
 }
 
-/// A held datagram that will never leave: counted, and its sender told (§6.5, §9.6).
+/// A held datagram that will never leave: counted, and its sender told.
 fn drop_held(cx: &mut Cx<'_>, held: Held, counter: Counter) {
     cx.log.count(counter);
     if let Some(flow) = held.flow {
@@ -514,7 +513,7 @@ fn fail(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr, pending: Pending) {
 }
 
 /// What a state entering at `mac` takes over: INCOMPLETE's datagrams, each given its turn in
-/// arrival order ahead of any sent later (§6.5), or what its resolved predecessor still holds.
+/// arrival order ahead of any sent later, or what its resolved predecessor still holds.
 fn inherit(cx: &mut Cx<'_>, addr: Ipv4Addr, n: &mut Neighbour, mac: MacAddr) -> Released {
     let Nud::Incomplete(s) = &mut n.state else {
         if let Some(was) = n.state.mac().filter(|was| *was != mac) {
@@ -565,12 +564,12 @@ pub(crate) fn solicits(i: &Interface, addr: Ipv4Addr) -> bool {
     i.neighbours.get(&addr).is_some_and(|n| n.state.solicits())
 }
 
-/// A solicited reply (§7.2 (5)): the host asked, so it overrides any MAC (RFC 4861 §7.2.5).
+/// A solicited reply: the host asked, so it overrides any MAC (RFC 4861 §7.2.5).
 pub(crate) fn confirm(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr, mac: MacAddr) {
     reach(i, cx, addr, mac);
 }
 
-/// Any other ARP packet naming a neighbour we hold (§7.2 (6), §7.3): a new MAC is taken only into
+/// Any other ARP packet naming a neighbour we hold: a new MAC is taken only into
 /// STALE, and never within LOCKTIME of a confirmation.
 pub(crate) fn assert(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr, mac: MacAddr) {
     let now = cx.now;
@@ -586,7 +585,7 @@ pub(crate) fn assert(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr, mac: Ma
 }
 
 /// An ARP request for one of our addresses from an on-link host we hold nothing for: the reply
-/// path needs it, and STALE makes it verified before it is trusted (§7.3).
+/// path needs it, and STALE makes it verified before it is trusted.
 pub(crate) fn learn(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr, mac: MacAddr) {
     if i.neighbours.contains_key(&addr) || !make_room(i, cx) {
         return;
@@ -596,7 +595,7 @@ pub(crate) fn learn(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr, mac: Mac
     cx.timers.arm(timer(cx, addr), now.after(IDLE_LIFETIME));
 }
 
-/// A transport's advice about the next hop `addr` (§6.9).
+/// A transport's advice about the next hop `addr`.
 pub(crate) fn advise(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr, confirmed: bool) {
     let now = cx.now;
     let Some(n) = i.neighbours.get_mut(&addr) else { return };
@@ -619,7 +618,7 @@ pub(crate) fn advise(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr, confirm
     }
 }
 
-/// The link went down: every entry goes, and with it every datagram held here (§6.10).
+/// The link went down: every entry goes, and with it every datagram held here.
 pub(crate) fn flush(i: &mut Interface, cx: &mut Cx<'_>) {
     for (addr, n) in core::mem::take(&mut i.neighbours) {
         cx.timers.cancel(timer(cx, addr));
