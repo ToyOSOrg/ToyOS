@@ -25,6 +25,9 @@ Five of the six apps cannot, because of how they find JetBrains Mono:
 platform's monospace font, `/system/share/fonts` on ToyOS and the platform's
 own on Linux, macOS and Windows.
 
-**Exit:** no app's source or build script names `/system/share` or a path
-outside its own directory, each of the five takes its font from that SDK
-call, and each starts on a host.
+The ruling covers the font alone. `files`' icons have no ruling yet, so
+`files` still panics at start on a host after this file closes.
+
+**Exit:** no app's source or build script names `/system/share/fonts` or a
+path outside its own directory, each of the five takes its font from that SDK
+call, and `calc`, `editor`, `paint` and `snake` start on a host.

@@ -96,8 +96,10 @@ Each is the option he chose, then its text, verbatim.
 - **One workspace:** "Yes, one workspace (Recommended)": "One lockfile, one
   profile, shared crates tested as shipped; about 35 version alignments land
   first."
-- **Tracker:** "Flatten it (Recommended)".
-- **Apps:** "calc, doom, editor, files, paint, snake (Recommended)".
+- **Tracker:** "Flatten it (Recommended)": "Cheapest step, done first; 574
+  citations in 284 files updated."
+- **Apps:** "calc, doom, editor, files, paint, snake (Recommended)": "The six
+  user apps; toyfetch joins them when built. Everything else is system/."
 - **filepicker:** "Publish it (Recommended)": "It becomes a public SDK crate
   that apps may use; editor and paint keep using it."
 - **sprite:** "Files drops sprite (Recommended)": "One fewer public crate to
@@ -123,7 +125,8 @@ system/   CLAUDE.md (the server doctrine); one directory per /system/bin name:
           netstack (mdns/ dns/ and the net family) soundserver (mixer/) console diskserver
           fileserver logkeeper filepicker pkg update swap sshserver shell terminal toybox inspect host
 apps/     CLAUDE.md (sdk/ and registries only; Linux under Wayland, macOS, Windows)
-          calc editor files paint snake doom/ (doomgeneric/ DOOM1.WAD soundfont licences)
+          calc editor files paint snake doom/ (doomgeneric/ DOOM1.WAD soundfont licences);
+          toyfetch when built
 sdk/      CLAUDE.md (identity, sysroot, publication; std links abi and toyos)
           abi/ toyos/ keymap/ font/ window/ filepicker/ libc/ (arch/)
 lib/      acpi bcachefs blackbox blockhold blockring bootmap elf elide fat32 gpt hda i219 inspect
@@ -152,15 +155,21 @@ Where this differs from the tree the owner adopted:
 - `sprite` is inside the compositor rather than in `lib/` or `sdk/`: by the sprite
   ruling `files` stops using it, which leaves the compositor its one user
   (rule step 4).
+- `apps/` names toyfetch, by the Apps ruling.
 - `lib/osrelease` is `toyos-osrelease`, which #722 added after the design;
   the build, `libc` and the supervisor use it (rule step 5).
 
 ## Stages
 
 Each stage updates, in its own diff, every prompt and `CLAUDE.md` pointer that
-names a path it moves; the orchestrator's brief names those edits. Stages 5 to
-10 land one per merge-queue run, and every running agent is told to merge
-`origin/main` before its next push.
+names a path it moves.
+
+**Exit of the track:** `git ls-tree --name-only HEAD` prints exactly the
+tree's top level: `.cargo`, `.claude`, `.github`, `.gitignore`,
+`.gitmodules`, `CLAUDE.md`, `Cargo.lock`, `Cargo.toml`, `LICENSE-APACHE`,
+`LICENSE-MIT`, `NOTICE`, `README.md`, `apps`, `build`, `clippy.toml`,
+`images`, `issues`, `kernel`, `lib`, `loader`, `rust`, `sdk`, `share`,
+`system`, `tests`, and `ports` once it holds a recipe.
 
 0. **Hygiene, no moves.** Landed with the commit that filed this track:
    every package manifest has a `description`, and
@@ -170,21 +179,16 @@ names a path it moves; the orchestrator's brief names those edits. Stages 5 to
 1. **A flat tracker.** Landed in #723.
 2. **Version alignment** in today's workspaces:
    `issues/the-tree-resolves-in-five-cargo-locks-not-one.md`.
-3. **One workspace**, that track's exit: members as globs, a root
-   `.cargo/config.toml` with one table per guest triple, a `--target-dir` per
-   guest class at today's paths, the host suite and clippy selecting every
-   library member and every binary-only member holding a test, and a sysroot
-   key over the toyos triples' tables alone. `tests/toyos-rust-tests` and
-   `tests/ssh-client-host` stay outside it. Today `kernel/`, `bootloader/`
-   and `userland/` each carry a `rust-toolchain.toml`, which the rule's step
-   1 does not name; this stage decides them. **Exit:** kernel and loader,
-   both arches, byte-identical to the last alignment's build; the lock's
-   name and version pairs are the union of the aligned locks; libstd's bytes
-   unchanged for the same key; the guest suite and `--ci host` green.
+3. **One workspace:** `issues/the-tree-resolves-in-five-cargo-locks-not-one.md`.
+   With it go `kernel/rust-toolchain.toml`, `bootloader/rust-toolchain.toml`
+   and `userland/rust-toolchain.toml`, which rule step 1 does not name. Its
+   root `.cargo/config.toml` is tracked, which `.gitignore` ignores today and
+   where `.claude/agents/implementer.md` has agents list fork clones, so this
+   stage moves that instruction. **Exit:** that file's; no
+   `rust-toolchain.toml` is tracked outside `rust/`; `.cargo/config.toml` is
+   tracked.
 4. **std off repository paths:** `issues/std-names-the-sdk-crates-by-path.md`.
-   If bootstrap's locked library build does not take a `[patch]` from the root
-   `.cargo/config.toml`, the path rename rides in stage 5 with the gitlink
-   instead. **Exit:** that file's.
+   **Exit:** that file's.
 5. **`sdk/`:** abi, toyos, keymap, font, window, filepicker and libc (with
    `tests/libc-arch` as `sdk/libc/arch/`); `src/sysroot.rs`,
    `src/sdkversion.rs` and `src/release.rs` read the directory instead of a
@@ -206,13 +210,21 @@ names a path it moves; the orchestrator's brief names those edits. Stages 5 to
    (`src/metal*.rs`, `tests/metal/` and `tests/t14-linux/` as package
    `toyos-metal`), `tests/judges/ssh/`, `tests/corpus/tinycc/`, and
    `.github/qemu-version` as `build/ci/qemu-version`. Image names stay
-   `bootable-<stem>.img`. **Exit:** no `tests/*case/` or `console/` directory
-   remains, `diag/` holds no `system.toml`, and `--diag-boot`, `--console-boot` and a
-   `--metal-readback` build green.
-9. **`src/` becomes `build/`.** **Exit:** `src/` is gone; `--ci host` green.
+   `bootable-<stem>.img`. Blocked on
+   `issues/the-owners-flash-script-runs-diskutil.md`, which owns
+   `diag/flash.sh`. **Exit:** no `tests/*case/`, `console/` or `diag/`
+   directory and no root `system.toml` remains, and `--diag-boot`,
+   `--console-boot` and a `--metal-readback` build green.
+9. **`src/` becomes `build/`, `bootloader/` becomes `loader/`,** and
+   `examples/imgstat.rs` becomes a binary of the root package in `build/`
+   (rule step 2). **Exit:** `src/`, `bootloader/` and `examples/` are gone;
+   `--ci host` and `--build-only` green.
 10. **`assets/` into `share/`, `apps/doom/` and `system/compositor/`**;
-    each licence text beside what it covers; `OPENED_BY` goes. Needs
+    each licence text beside what it covers; `OPENED_BY` goes; `doom.jpg`
+    and `first-boot.jpg`, which only the README shows, into `.github/`
+    (rule step 1). Needs
     `issues/five-apps-read-the-system-font-by-a-path-only-this-tree-has.md`
     first, since `calc` and `snake` read `../../assets` at build time.
-    **Exit:** the image's file list is identical before and after, and the
-    licence gate is green.
+    **Exit:** `assets/`, `licenses/` and both photos are gone from the root;
+    the image's file list is identical before and after; the licence gate is
+    green.
