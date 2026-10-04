@@ -3,8 +3,11 @@
 //!
 //! **A directory capability is a connector in the program's namespace**, named
 //! [`CAPABILITY_PREFIX`] and the absolute directory it serves (`fs:/home`).
-//! The supervisor builds each program's set and tells the server which directory and
-//! which rights each of its ports serves; a program names a file only under a
+//! Each is a connector to its role's one port, which the supervisor minted with
+//! a [`Grant`]: the directory, and whose share of the server it spends. The
+//! kernel stamps that on every connection made through it and answers it to the
+//! port's acceptor alone, so the server reads what was granted off the
+//! connection and nothing the client says. A program names a file only under a
 //! directory it holds, and the kernel's part is who holds which connector.
 //!
 //! **The server resolves; the client only asks.** A path on the wire is
@@ -28,7 +31,7 @@
 //! here keeps a write the server acknowledged and never made durable: that is
 //! what `Fsync` is for.
 
-use toyos_abi::syscall::{SyscallError, MAX_SERVICE_NAME};
+use toyos_abi::syscall::{SyscallError, MAX_BADGE, MAX_SERVICE_NAME};
 
 use crate::ipc::{Connection, IpcError};
 use crate::ipc_payload;
@@ -138,6 +141,55 @@ impl Reply {
             0 => Ok(self),
             raw => Err(SyscallError::from_u64(raw).unwrap_or(SyscallError::Unknown)),
         }
+    }
+}
+
+/// What a connection to a file server's role port was granted: the badge the
+/// supervisor mints the connector with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Grant<'a> {
+    /// The start it was minted for. The supervisor counts its starts, so a
+    /// process it started and every child that process spawned directly,
+    /// holding the same connectors, are one instance, and spend one share.
+    pub instance: u64,
+    /// The directory, as a path on the role's volume, every path on the
+    /// connection is resolved beneath: `home`, or the empty path for a volume
+    /// served whole. [`canonical`], and at most [`MAX_GRANT_ROOT`] bytes.
+    pub root: &'a str,
+}
+
+/// The format [`Grant::encode`] writes. Carried because a swap replaces a file
+/// server and not the supervisor, so one server reads grants another build
+/// minted, and an older one is refused by name rather than read as this one.
+const GRANT_VERSION: u8 = 1;
+
+/// The longest root a grant carries: what one badge holds past the version and
+/// the instance.
+pub const MAX_GRANT_ROOT: usize = MAX_BADGE - 1 - 8;
+
+impl<'a> Grant<'a> {
+    /// The version, the instance, then the root: `None` for a root no grant
+    /// can carry.
+    pub fn encode<'b>(&self, out: &'b mut [u8; MAX_BADGE]) -> Option<&'b [u8]> {
+        if self.root.len() > MAX_GRANT_ROOT || !canonical(self.root) {
+            return None;
+        }
+        out[0] = GRANT_VERSION;
+        out[1..9].copy_from_slice(&self.instance.to_le_bytes());
+        let end = 9 + self.root.len();
+        out[9..end].copy_from_slice(self.root.as_bytes());
+        Some(&out[..end])
+    }
+
+    /// `None` for bytes [`Self::encode`] cannot have written.
+    pub fn decode(bytes: &'a [u8]) -> Option<Self> {
+        let (&version, rest) = bytes.split_first()?;
+        if version != GRANT_VERSION || rest.len() < 8 || rest.len() - 8 > MAX_GRANT_ROOT {
+            return None;
+        }
+        let instance = u64::from_le_bytes(rest[..8].try_into().expect("eight bytes"));
+        let root = core::str::from_utf8(&rest[8..]).ok()?;
+        canonical(root).then_some(Self { instance, root })
     }
 }
 
@@ -553,6 +605,50 @@ mod tests {
             assert!(!canonical(bad), "{bad:?}");
         }
         assert!(!canonical(&"a".repeat(MAX_PATH + 1)));
+    }
+
+    #[test]
+    fn a_grant_round_trips_at_every_bound() {
+        let longest = "r".repeat(MAX_GRANT_ROOT);
+        for (instance, root) in [(0, ""), (1, "home"), (u64::MAX, "home/toy/Documents"), (7, longest.as_str())] {
+            let grant = Grant { instance, root };
+            let mut out = [0u8; MAX_BADGE];
+            let bytes = grant.encode(&mut out).expect("a root a grant carries");
+            assert_eq!(Grant::decode(bytes), Some(grant), "{root:?}");
+        }
+    }
+
+    #[test]
+    fn no_grant_carries_a_root_the_wire_refuses_or_one_past_the_badge() {
+        let mut out = [0u8; MAX_BADGE];
+        let past = "r".repeat(MAX_GRANT_ROOT + 1);
+        for root in ["/home", "home/", "a//b", ".", "a/../b", past.as_str()] {
+            assert_eq!(Grant { instance: 1, root }.encode(&mut out), None, "{root:?}");
+        }
+    }
+
+    #[test]
+    fn bytes_no_grant_was_encoded_as_are_refused() {
+        let mut out = [0u8; MAX_BADGE];
+        let good = Grant { instance: 3, root: "home" }.encode(&mut out).unwrap().to_vec();
+        // Shorter than a version and an instance.
+        for n in 0..9 {
+            assert_eq!(Grant::decode(&good[..n]), None, "{n} bytes");
+        }
+        // Another version.
+        let mut other = good.clone();
+        other[0] = GRANT_VERSION + 1;
+        assert_eq!(Grant::decode(&other), None);
+        // A root the wire refuses, or not UTF-8.
+        for root in [&b"/home"[..], b"a/../b", b"a//b", b"\xff"] {
+            let mut bad = good[..9].to_vec();
+            bad.extend_from_slice(root);
+            assert_eq!(Grant::decode(&bad), None, "{root:?}");
+        }
+        // One byte past the longest root.
+        let mut long = good[..9].to_vec();
+        long.extend(core::iter::repeat_n(b'r', MAX_GRANT_ROOT + 1));
+        assert_eq!(Grant::decode(&long), None);
     }
 
     #[test]

@@ -1,8 +1,8 @@
 //! fileserver: one role's file server — DATA, LOG or BOOT — serving the directories
 //! of that role as capabilities.
 //!
-//! **What it holds**: the acceptor of each directory its role serves, endowed
-//! by the supervisor under `serve:fs:<dir>`; for its volume, a claim on each partition
+//! **What it holds**: the acceptor of its role's one port, endowed by the
+//! supervisor under `serve:fs:<role>`; for its volume, a claim on each partition
 //! of its role a disk the kernel drives carries, and diskserver's `block`
 //! connector in its namespace; and nothing else of the machine. DATA is one
 //! partition counted over both, and two are refused by name, never guessed
@@ -10,9 +10,16 @@
 //! unique GUID of the partition the loader named for it when no claim on it
 //! was minted.
 //!
-//! **A connection is bound to the directory whose port it came in on**, and
-//! every path on it is resolved there (`fileserver::resolve`); a write on a read-only
-//! volume is refused before the volume sees it.
+//! **A connection is what its grant says** (`toyos::fs::Grant`): the badge
+//! the supervisor minted its connector with, which the kernel stamped on it and
+//! answers this port's acceptor alone. Every path on it is resolved beneath
+//! the grant's root (`fileserver::resolve`); a write on a read-only volume is
+//! refused before the volume sees it.
+//!
+//! **One instance cannot take the server.** Beneath each machine-wide bound —
+//! connections waiting on their hello, connections served, streams — each
+//! instance a grant names has a share of its own, so one holding all it may
+//! leaves the rest of each bound to the others.
 //!
 //! **A server never blocks on a client.** Accept and the first frame are two
 //! events; a request is buffered until whole; every reply is one `try_send`,
@@ -43,7 +50,7 @@ use toyos::port::Acceptor;
 use toyos::shm::SharedMemory;
 use toyos::volatile::Window;
 use toyos::Pipe;
-use toyos_abi::syscall::{SyscallError, DEV_PREFIX, SERVE_PREFIX};
+use toyos_abi::syscall::{SyscallError, DEV_PREFIX, MAX_BADGE, SERVE_PREFIX};
 
 /// Clients served at once, machine-wide: one connection per directory per
 /// process. The next is answered `ResourceExhausted` at its hello and let go,
@@ -51,7 +58,7 @@ use toyos_abi::syscall::{SyscallError, DEV_PREFIX, SERVE_PREFIX};
 const MAX_SERVED: usize = 128;
 
 /// Connections taken and not yet answered at their hello. While this many
-/// wait, the next waits in its port's queue — for at most
+/// wait, the next waits in the port's queue — for at most
 /// [`HANDSHAKE_TIMEOUT`], by which each of these is answered or let go.
 const MAX_HANDSHAKES: usize = 32;
 
@@ -61,14 +68,23 @@ const MAX_FIDS: usize = 1024;
 /// Streams served at once, machine-wide.
 const MAX_STREAMS: usize = 64;
 
+/// One instance's shares of [`MAX_SERVED`], [`MAX_HANDSHAKES`] and
+/// [`MAX_STREAMS`]. Past its share of served clients a hello is answered
+/// `ResourceExhausted`, and past its share of streams a `STREAM` is; past its
+/// share of handshakes a connection is let go as it is taken.
+const SERVED_SHARE: usize = MAX_SERVED / 2;
+const HANDSHAKE_SHARE: usize = MAX_HANDSHAKES / 2;
+const STREAM_SHARE: usize = MAX_STREAMS / 2;
+
+// A share is less than its bound, so one instance at its share leaves the
+// bound open to another.
+const _: () = assert!(SERVED_SHARE < MAX_SERVED && HANDSHAKE_SHARE < MAX_HANDSHAKES && STREAM_SHARE < MAX_STREAMS);
+
 /// What one turn of a stream appends at most.
 const STREAM_READ: usize = 64 * 1024;
 
-/// Directories one server serves: DATA's four, with room.
-const MAX_DIRS: usize = 32;
-
-// One wait watches every acceptor, connection and stream at once.
-const _: () = assert!(MAX_SERVED + MAX_HANDSHAKES + MAX_STREAMS + MAX_DIRS <= Poller::MAX_HANDLES as usize);
+// One wait watches the acceptor, every connection and every stream at once.
+const _: () = assert!(1 + MAX_SERVED + MAX_HANDSHAKES + MAX_STREAMS <= Poller::MAX_HANDLES as usize);
 
 /// How long an accepted connection may take to lend its window.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -77,6 +93,7 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 /// blocks, of which only what is written costs anything.
 const RAM_BLOCKS: u64 = 1 << 18;
 
+const TOKEN_ACCEPTOR: u64 = 0;
 const TOKEN_CLIENT: u64 = 1 << 32;
 const TOKEN_STREAM: u64 = 2 << 32;
 
@@ -96,15 +113,14 @@ impl Role {
             _ => None,
         }
     }
-}
 
-/// One directory this server serves.
-struct Capability {
-    /// Its absolute name, `/home`.
-    dir: String,
-    /// Where it is on the volume.
-    root: String,
-    acceptor: Acceptor,
+    fn name(self) -> &'static str {
+        match self {
+            Self::Data => "data",
+            Self::Log => "log",
+            Self::Boot => "boot",
+        }
+    }
 }
 
 /// One file a client holds open.
@@ -117,7 +133,10 @@ struct Fid {
 struct Client {
     conn: Connection,
     rx: ipc::FrameRx<{ core::mem::size_of::<Request>() }>,
-    cap: usize,
+    /// Its grant's root, beneath which every path it names is resolved.
+    root: String,
+    /// Its grant's instance, whose shares it spends.
+    instance: u64,
     window: Option<SharedMemory>,
     fids: BTreeMap<u64, Fid>,
     next_fid: u64,
@@ -129,6 +148,8 @@ struct Stream {
     pipe: Pipe,
     node: Node,
     offset: u64,
+    /// The instance of the client that asked for it, whose share it spends.
+    instance: u64,
 }
 
 fn main() {
@@ -145,18 +166,21 @@ fn main() {
         }
     }
     fileserver::volume::take_anchor();
-    let caps = capabilities(role);
-    let roots: Vec<String> = caps.iter().map(|c| c.root.clone()).collect();
-    let roots: Vec<&str> = roots.iter().map(String::as_str).collect();
+    let dirs = toyos_manifest::role_dirs(role.name()).expect("every role this server parses is a manifest role");
+    let label = format!("{SERVE_PREFIX}{CAPABILITY_PREFIX}{}", role.name());
+    let acceptor: Acceptor = Endowments::get()
+        .take(&label)
+        .unwrap_or_else(|| panic!("fileserver: started without its role's acceptor, `{label}`"));
+    let roots: Vec<&str> = dirs.iter().map(|d| d.root).collect();
     let volume = open_volume(role, guid, &roots);
     println!(
         "fileserver: {role:?} serving {} — {}",
-        caps.iter().map(|c| c.dir.as_str()).collect::<Vec<_>>().join(", "),
+        dirs.iter().map(|d| d.dir).collect::<Vec<_>>().join(", "),
         volume.describe()
     );
     Server {
         volume,
-        caps,
+        acceptor,
         clients: BTreeMap::new(),
         next_client: 0,
         streams: BTreeMap::new(),
@@ -165,26 +189,6 @@ fn main() {
         scratch: Vec::new(),
     }
     .serve()
-}
-
-/// Every directory the supervisor endowed this process an acceptor for.
-fn capabilities(role: Role) -> Vec<Capability> {
-    let prefix = format!("{SERVE_PREFIX}{CAPABILITY_PREFIX}");
-    let labels: Vec<String> =
-        Endowments::get().labels().filter(|l| l.starts_with(&prefix)).map(str::to_string).collect();
-    let mut caps = Vec::new();
-    for label in labels {
-        let dir = label[prefix.len()..].to_string();
-        let acceptor: Acceptor = Endowments::get().take(&label).expect("fileserver: an acceptor its label names");
-        let root = match role {
-            Role::Data => dir.trim_start_matches('/').to_string(),
-            Role::Log | Role::Boot => String::new(),
-        };
-        caps.push(Capability { dir, root, acceptor });
-    }
-    assert!(!caps.is_empty(), "fileserver: started serving no directory");
-    assert!(caps.len() <= MAX_DIRS, "fileserver: started serving {} directories, past {MAX_DIRS}", caps.len());
-    caps
 }
 
 /// The partition claims the supervisor minted: one per partition of the role on a disk
@@ -309,7 +313,8 @@ fn fat_on<D: Disk + 'static>(disk: D, writable: bool) -> Result<Box<dyn Volume>,
 
 struct Server {
     volume: Box<dyn Volume>,
-    caps: Vec<Capability>,
+    /// The role's port, which every grant is minted on.
+    acceptor: Acceptor,
     clients: BTreeMap<u64, Client>,
     next_client: u64,
     streams: BTreeMap<u64, Stream>,
@@ -369,9 +374,7 @@ impl Server {
         let mut ready = Vec::new();
         loop {
             if self.clients.values().filter(|c| c.window.is_none()).count() < MAX_HANDSHAKES {
-                for (i, cap) in self.caps.iter().enumerate() {
-                    poller.watch(&cap.acceptor, READABLE, i as u64);
-                }
+                poller.watch(&self.acceptor, READABLE, TOKEN_ACCEPTOR);
             }
             for (id, c) in &self.clients {
                 poller.watch(&c.conn, READABLE, TOKEN_CLIENT + id);
@@ -392,8 +395,8 @@ impl Server {
             poller.wait(1, timeout, |t| ready.push(t));
 
             for &token in &ready {
-                if token < TOKEN_CLIENT {
-                    self.accept(token as usize);
+                if token == TOKEN_ACCEPTOR {
+                    self.accept();
                 } else if token < TOKEN_STREAM {
                     self.pump(token - TOKEN_CLIENT);
                 } else {
@@ -418,17 +421,36 @@ impl Server {
         }
     }
 
-    fn accept(&mut self, cap: usize) {
-        let conn = match self.caps[cap].acceptor.accept() {
+    /// Take the next connection and read its grant. Only the supervisor mints
+    /// on this port, so a connection without one this server reads is let go
+    /// by name; so is one whose instance already has its share of handshakes.
+    fn accept(&mut self) {
+        let conn = match self.acceptor.accept() {
             Ok(conn) => conn,
             Err(why) => panic!("fileserver: its own acceptor refused an accept: {why:?}"),
         };
+        let mut badge = [0u8; MAX_BADGE];
+        let grant = match self.acceptor.badge(&conn, &mut badge) {
+            Ok(bytes) => match Grant::decode(bytes) {
+                Some(grant) => grant,
+                None => return println!("fileserver: letting a connection go: its badge is no grant: {bytes:?}"),
+            },
+            Err(why) => return println!("fileserver: letting a connection go: it carries no grant ({why:?})"),
+        };
+        let mine = self.clients.values().filter(|c| c.instance == grant.instance && c.window.is_none()).count();
+        if mine >= HANDSHAKE_SHARE {
+            return println!(
+                "fileserver: letting a connection go: instance {} has {HANDSHAKE_SHARE} waiting on their hello",
+                grant.instance
+            );
+        }
         let id = self.next_client;
         self.next_client += 1;
         let client = Client {
             conn,
             rx: ipc::FrameRx::new(),
-            cap,
+            root: grant.root.to_string(),
+            instance: grant.instance,
             window: None,
             fids: BTreeMap::new(),
             next_fid: 1,
@@ -440,7 +462,7 @@ impl Server {
     fn drop_client(&mut self, id: u64, why: &str) {
         let Some(client) = self.clients.remove(&id) else { return };
         if !why.is_empty() {
-            println!("fileserver: dropping client {id} of {}: {why}", self.caps[client.cap].dir);
+            println!("fileserver: dropping client {id} of {:?}, instance {}: {why}", client.root, client.instance);
         }
         for fid in client.fids.values() {
             // Nobody is left to answer: a refused close is said, and its node
@@ -507,7 +529,7 @@ impl Server {
         if !canonical(rel) {
             return Err(SyscallError::InvalidArgument);
         }
-        let root = self.caps[self.clients[&id].cap].root.clone();
+        let root = self.clients[&id].root.clone();
         let volume = &mut self.volume;
         let mut lookup = |p: &str| match volume.lstat(p) {
             Ok(meta) if meta.kind == Kind::Symlink => volume.read_link(p).map(Found::Link).map_err(drop),
@@ -530,13 +552,19 @@ impl Server {
 
     fn answer(&mut self, id: u64, op: u32, r: Request) -> Answer {
         if op == HELLO {
-            let served = self.clients.values().filter(|c| c.window.is_some()).count();
+            let instance = self.clients[&id].instance;
+            let served = self.clients.values().filter(|c| c.window.is_some());
+            let (all, mine) = served.fold((0, 0), |(all, mine), c| (all + 1, mine + usize::from(c.instance == instance)));
             let client = self.clients.get_mut(&id).expect("pumped");
             if client.window.is_some() {
                 return Answer::Drop("it lent a second window");
             }
-            if served >= MAX_SERVED {
+            if all >= MAX_SERVED {
                 let why = format!("it is refused, since {MAX_SERVED} clients are served already");
+                return Answer::Refuse(SyscallError::ResourceExhausted, why);
+            }
+            if mine >= SERVED_SHARE {
+                let why = format!("it is refused, since its instance is served {SERVED_SHARE} clients already");
                 return Answer::Refuse(SyscallError::ResourceExhausted, why);
             }
             let Some([lent]) = client.conn.recv_handles_exact::<1>() else {
@@ -692,14 +720,16 @@ impl Server {
                     return Err(SyscallError::InvalidArgument);
                 }
                 let node = f.node;
-                if self.streams.len() >= MAX_STREAMS {
+                let instance = self.clients[&id].instance;
+                let mine = self.streams.values().filter(|s| s.instance == instance).count();
+                if self.streams.len() >= MAX_STREAMS || mine >= STREAM_SHARE {
                     return Err(SyscallError::ResourceExhausted);
                 }
                 let (read, write) = toyos::pipe_pair()?;
                 self.volume.hold(node);
                 let sid = self.next_stream;
                 self.next_stream += 1;
-                self.streams.insert(sid, Stream { pipe: read, node, offset: r.offset });
+                self.streams.insert(sid, Stream { pipe: read, node, offset: r.offset, instance });
                 Ok(Answer::WithHandle(Reply::ok(), write.into_raw()))
             }
             STAT | LSTAT => {
