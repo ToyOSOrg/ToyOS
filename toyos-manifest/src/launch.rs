@@ -54,7 +54,7 @@ pub struct Authority {
 const MACHINE: u8 = 0;
 const LOGIN: u8 = 1;
 
-const _: () = assert!(1 + MAX_PROGRAM_NAME <= MAX_BADGE, "an authority must fit one badge");
+const _: () = assert!(MAX_PROGRAM_NAME < MAX_BADGE, "an authority, a kind byte and a row, must fit one badge");
 
 impl Authority {
     /// The session's kind, then the row's key.
