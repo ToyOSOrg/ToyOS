@@ -23,7 +23,7 @@ what survives it is a different question.
   `userland/soundserver/mixer/`), 2026-08-20; the effects
   shell is `userland/soundd/` over eight files with a 261-line `main.rs`, from a
   2,366-line one. What the note asked for is what it got: **the mixing is
-  sample-exact and proven so.** `toyos-mixer/fixtures/mix-corpus.txt` was
+  sample-exact and proven so.** `userland/soundserver/mixer/fixtures/mix-corpus.txt` was
   written by `soundd/src/main.rs` before a line of it moved, and
   `the_corpus_is_reproduced_bit_for_bit` holds the crate to it byte for byte.
   The transcript is compact because exhausted domains are digested rather than
