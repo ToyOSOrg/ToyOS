@@ -40,7 +40,6 @@ proctest = {}
 # The installer. It holds nothing: it writes under `/apps` because `/apps` is
 # writable to it, and a row that gave it more would make that untrue.
 pkg = {}
-# cargo = { no-default-features = true }
 
 # **Every image that carries a `TOYOS-LOG` partition runs this**, and every
 # image does. The kernel keeps the record ring and the console and writes no

@@ -1365,13 +1365,11 @@ mod tests {
     }
 
     /// The kernel's `--kernel-feature` picks any feature it declares, so its
-    /// graph is resolved with all of them; a `[programs]` row's
-    /// `no-default-features` and libc's features reach metadata as the build
-    /// passes them.
+    /// graph is resolved with all of them; libc's features reach metadata as
+    /// the build passes them.
     #[test]
     fn metadata_is_given_the_features_the_build_gives() {
         assert_eq!(Features::AnyDeclared.args(), ["--all-features"]);
-        assert_eq!(Features::NoDefault.args(), ["--no-default-features"]);
         assert_eq!(
             Features::With(crate::libc::FEATURES).args(),
             ["--features", "std-runtime"]

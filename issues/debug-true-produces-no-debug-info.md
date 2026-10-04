@@ -6,9 +6,9 @@ opened: 2026-08-07
 
 # `debug = true` produces no debug info, because the linker drops it
 
-Every `[profile.toyos]` but the loader's sets `strip = "debuginfo"`, so **no
-binary this project produces has a DWARF section**. Verified with `readelf -SW`
-on the x86-64 kernel, compositor and toybox: no `.debug_*` section but rustc's
+Every `[profile.toyos]` but the loader's sets `strip = "debuginfo"`, and
+`readelf -SW` on the x86-64 kernel, compositor and toybox finds **no DWARF
+section** in any of the three: no `.debug_*` section but rustc's
 `.debug_gdb_scripts`, which is no DWARF.
 
 `[profile.toyos]` states `debug = true` in every crate root, so rustc emits

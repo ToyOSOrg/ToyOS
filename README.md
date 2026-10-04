@@ -1,7 +1,7 @@
 # ToyOS
 
 An operating system written from scratch in Rust — bootloader, kernel, drivers,
-userland, and the compiler and linker that build them.
+userland, and the compiler that builds them.
 
 ```
 git clone https://github.com/Japabu/toyos

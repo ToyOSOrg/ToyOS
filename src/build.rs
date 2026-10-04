@@ -142,7 +142,6 @@ struct AppsConfig {
 #[derive(Deserialize, Default)]
 #[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
 struct ProgramConfig {
-    no_default_features: bool,
     /// Argv this program is started with, after argv[0].
     args: Vec<String>,
     /// Names the supervisor creates **one machine-wide port** for and endows this program
@@ -174,15 +173,6 @@ struct ProgramConfig {
     starts: Vec<String>,
     /// A launch it makes opens a login session (`toyos_manifest::Program::login`).
     login: bool,
-}
-
-impl ProgramConfig {
-    /// Whether this program is a member of the **userland** workspace, the one
-    /// `-p` selects a package from and whose `target/` holds the result.
-    /// Programs with special flags are built from their own directory instead.
-    fn is_workspace_member(&self) -> bool {
-        !self.no_default_features
-    }
 }
 
 /// The crate directory of the program `name`.
@@ -274,7 +264,7 @@ fn config_targets(root: &Path, config: &SystemConfig) -> Vec<PathBuf> {
     let mut targets: Vec<PathBuf> = Vec::new();
     for c in config_crates(root, config) {
         let target = match c.built {
-            Built::Kernel | Built::Bootloader | Built::Standalone => c.dir,
+            Built::Kernel | Built::Bootloader => c.dir,
             Built::Member => root.join("userland"),
         };
         if !targets.contains(&target) {
@@ -289,8 +279,6 @@ fn config_targets(root: &Path, config: &SystemConfig) -> Vec<PathBuf> {
 pub enum Features {
     /// Its manifest's defaults.
     Default,
-    /// None of its defaults: a `[programs]` row's `no-default-features`.
-    NoDefault,
     /// Its defaults and these, comma-separated.
     With(&'static str),
     /// Any it declares, since the command line picks: the kernel's, which
@@ -303,7 +291,6 @@ impl Features {
     pub fn args(self) -> Vec<&'static str> {
         match self {
             Features::Default => vec![],
-            Features::NoDefault => vec!["--no-default-features"],
             Features::With(names) => vec!["--features", names],
             Features::AnyDeclared => vec!["--all-features"],
         }
@@ -317,8 +304,6 @@ enum Built {
     Bootloader,
     /// A package of the userland workspace, built there with `-p`.
     Member,
-    /// A program built in its own directory.
-    Standalone,
 }
 
 /// One crate a config's image is built from.
@@ -346,12 +331,12 @@ fn config_crates(root: &Path, config: &SystemConfig) -> Vec<ConfigCrate> {
             features: Features::Default,
         },
     ];
-    for (name, cfg) in &config.programs {
+    for name in config.programs.keys() {
         crates.push(ConfigCrate {
             name: name.clone(),
             dir: program_dir(root, name),
-            built: if cfg.is_workspace_member() { Built::Member } else { Built::Standalone },
-            features: if cfg.no_default_features { Features::NoDefault } else { Features::Default },
+            built: Built::Member,
+            features: Features::Default,
         });
     }
     crates.push(ConfigCrate {
@@ -806,7 +791,7 @@ fn build_programs(
 
     let programs: Vec<ConfigCrate> = config_crates(root, config)
         .into_iter()
-        .filter(|c| matches!(c.built, Built::Member | Built::Standalone))
+        .filter(|c| c.built == Built::Member)
         .filter(|c| match not_built_for(arch, &c.name) {
             Some(why) => {
                 eprintln!("{}: not built for {}, and not on this ROOT: {why}", c.name, arch.name());
@@ -823,8 +808,7 @@ fn build_programs(
             c.dir.display()
         );
     }
-    let workspace_packages: Vec<&str> =
-        programs.iter().filter(|c| c.built == Built::Member).map(|c| c.name.as_str()).collect();
+    let workspace_packages: Vec<&str> = programs.iter().map(|c| c.name.as_str()).collect();
 
     let ws_target = userland_dir.join(format!("target/{target}/{PROFILE}"));
 
@@ -850,18 +834,10 @@ fn build_programs(
         cargo_build(&userland_dir, target, &extra, env, &cc_env, quiet);
     }
 
-    for c in programs.iter().filter(|c| c.built == Built::Standalone) {
-        cargo_build(&c.dir, target, &c.features.args(), env, &cc_env, quiet);
-    }
-
     for c in &programs {
         let name = &c.name;
-        let binary = match c.built {
-            Built::Member => ws_target.join(name),
-            Built::Standalone => c.dir.join(format!("target/{target}/{PROFILE}/{name}")),
-            Built::Kernel | Built::Bootloader => unreachable!("filtered out above"),
-        };
-        let data = fs::read(&binary).unwrap_or_else(|_| panic!("Failed to read binary for {name}"));
+        let data =
+            fs::read(ws_target.join(name)).unwrap_or_else(|_| panic!("Failed to read binary for {name}"));
         root_files.push((format!("bin/{name}"), data));
     }
 }
@@ -1118,7 +1094,7 @@ pub fn shipped(root: &Path) -> Result<Shipped, String> {
             ));
         }
         for c in config_crates(root, &config) {
-            if matches!(c.built, Built::Member | Built::Standalone) {
+            if c.built == Built::Member {
                 programs.insert((c.dir.clone(), c.features));
             }
             crates.insert((c.dir, c.features));
