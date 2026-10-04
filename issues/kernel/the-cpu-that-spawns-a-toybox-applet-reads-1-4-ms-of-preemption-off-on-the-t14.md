@@ -4,7 +4,7 @@ kind: defect
 opened: 2026-10-02
 ---
 
-# The CPU that spawns a toybox applet reads 1.4 ms of interrupts and preemption off on the T14
+# The CPU that spawns a toybox applet reads 1.4 ms of preemption off on the T14
 
 Read by the `mask-windows` kernel (`kernel/src/windows.rs`) on LENOVO
 20W0003AMZ, BIOS N34ET71W (1.71), in the three `mask_windows` boots of #649
@@ -45,10 +45,20 @@ else, `pwd`'s and `echo`'s. cpu7's line in each
 By reading, not measured: it is `SYS_SPAWN`, which ran with interrupts
 masked from entry to exit like every syscall then, and whose own record
 reads `total=1ms` for each of these applets. A report carries a span and no
-address, so nothing names it. A syscall's body now runs with interrupts open
-(`issues/kernel/syscall-preemption-is-incidental.md`) and preemption off, so
-by reading the section leaves `irqs_off_ns` and stays in `preempt_off_ns`;
-no T14 boot has read it since.
+address, so nothing names it.
+
+A syscall's body now runs with interrupts open and preemption off
+(`issues/kernel/syscall-preemption-is-incidental.md`), and the section left
+`irqs_off_ns` and stayed in `preempt_off_ns`. #716's interleaved
+`mask_windows` boots (comment 5979107466; readbacks
+`irqon/metal/{base,head}/mask_windows/runN` and `irqon/metal/head-full`) ran
+`pwd` alone of the applets, spawned from cpu7 on every boot; cpu7's line in
+its report (`windowscase/kernel.log:396`, `:397` in `head-full`):
+
+| arm | `irqs_off_ns` | `preempt_off_ns` |
+|---|---|---|
+| base, main at `d47b383cf` | 1429697, 1334122, 1460438, 1385896, 1373747 | 1429402, 1333862, 1460269, 1385648, 1373471 |
+| head, images at `f89e73128` | 1146, 1178, 1136, 1781, 1058; 1155 | 1317184, 1508859, 1463782, 1494243, 1511276; 1481928 |
 
 **Exit**: the section is named on the T14 by the address its opening hook was
 called from, and the spawning CPU's longest window no longer includes it, or

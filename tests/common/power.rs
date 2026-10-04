@@ -331,6 +331,12 @@ pub fn deadline_wedge_chain(after: &serial::Serial) -> Result<(), String> {
         .ok_or_else(|| format!("no cpu in the record that staged the wedge: {staged:?}"))?;
     after.must_say_after(bootlog::PREVIOUS_PANIC, &format!("wedge: {cpu} {}", bootlog::WEDGE_AWAKE))?;
     says_nothing_of(after, bootlog::WEDGE_ARRIVED_DEAF)?;
+    // And the seal names where that CPU stood: its timer's last kernel frame is
+    // inside the spin, resolved by the kernel against its own symbols.
+    let pc = after.must_say_after(bootlog::PREVIOUS_PANIC, &format!("{cpu}{}", bootlog::SEAL_PC))?;
+    if !pc.contains(bootlog::WEDGE_SPIN) {
+        return Err(format!("the seal puts {cpu} outside the wedge's spin `{}`: {pc:?}", bootlog::WEDGE_SPIN));
+    }
     says_nothing_of(after, bootlog::REBOOTING)?;
     // **The two bounds composing, on the one machine that has both.** This
     // wedge spins with `IF` set, so every CPU still takes its timer interrupt

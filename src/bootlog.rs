@@ -58,6 +58,15 @@ pub const WEDGE_ARRIVED_DEAF: &str =
     "arrived with interrupts off, through the syscall gate, and takes them again here";
 pub const WEDGE_AWAKE: &str = "arrived with interrupts on";
 
+/// What the deadline's seal says before a CPU's last kernel `pc`, after its
+/// `cpuN`, in `kernel/src/deadline.rs`.
+pub const SEAL_PC: &str = " pc=";
+
+/// The function the wedge spins in, in `kernel/src/deadline.rs`, as the seal's
+/// `pc` line names it: the staging CPU's line naming anything else is a seal
+/// that names the wrong instruction.
+pub const WEDGE_SPIN: &str = "kernel::deadline::this_cpu+";
+
 /// What the `usb-reset-under-load` arm says once it is streaming, and the three
 /// ways it says it is not, in `kernel/src/usb_gate.rs`.
 ///
@@ -544,6 +553,11 @@ mod tests {
             ("kernel/src/deadline.rs", format!("WEDGE_STAGED: &str = \"{WEDGE_STAGED}\"")),
             ("kernel/src/deadline.rs", format!("\"{WEDGE_ARRIVED_DEAF}\"")),
             ("kernel/src/deadline.rs", format!("WEDGE_AWAKE: &str = \"{WEDGE_AWAKE}\"")),
+            ("kernel/src/deadline.rs", format!("\"  cpu{{cpu}}{SEAL_PC}{{}}\"")),
+            (
+                "kernel/src/deadline.rs",
+                format!("fn {}() -> !", WEDGE_SPIN.trim_end_matches('+').rsplit("::").next().expect("a path")),
+            ),
             ("kernel/src/usb_gate.rs", format!("LOAD_RUNNING: &str = \"{USB_LOAD_RUNNING}\"")),
             ("kernel/src/usb_gate.rs", format!("LOAD_REFUSED: &str = \"{USB_LOAD_REFUSED}\"")),
             ("kernel/src/usb_gate.rs", format!("LOAD_STOPPED: &str = \"{USB_LOAD_STOPPED}\"")),

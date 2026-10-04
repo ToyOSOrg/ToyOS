@@ -705,8 +705,6 @@ pub const PUSH_THRESHOLD: u32 = 2;
 
 /// How long a CPU may owe a pass and still be chosen as a target.
 ///
-/// Ten [`QUANTUM_NS`].
-///
 /// **The direction of error is chosen.** Refusing a CPU that was only slow puts
 /// one task elsewhere; accepting one that has stopped puts the task where
 /// nothing ever picks it up.

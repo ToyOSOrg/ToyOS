@@ -44,7 +44,7 @@ span, and `649-r5/3-idle-halt-counted`) ran it with N = 256
 spans the runner's spawn of the herd as well. The longest `irqs_off_ns` on
 any CPU there is 1032292 (`windowscase/kernel.log:428`), 2 × 519358 (`:426`)
 and 1175943 (`:430`). The third is cpu7's, the CPU that spawned the herd
-(`issues/kernel/the-cpu-that-spawns-a-toybox-applet-reads-1-4-ms-of-interrupts-and-preemption-off-on-the-t14.md`),
+(`issues/kernel/the-cpu-that-spawns-a-toybox-applet-reads-1-4-ms-of-preemption-off-on-the-t14.md`),
 and the other seven read 257646 to 364953 in that boot.
 
 The three at `0aa8d4c88` (comment 5960575031, readbacks `649-r6/1-head`,
@@ -66,6 +66,14 @@ So one size reads 1.03 to 1.98 ms in the four of those reports none of the
 machine's own events reached, and which boot carried one decides a single
 reading. None of the six took an interrupt a handler #634 changed serves
 (`userdev=0 sound=0 dmafault=0 hda=0` on every CPU).
+
+Those readings were the whole masked syscall, not the walk. With a syscall's
+body open to interrupts, #716's six head boots of the same load at the same N
+(comment 5979107466; readbacks `irqon/metal/head/mask_windows/runN` and
+`irqon/metal/head-full`) read the longest `irqs_off_ns` in the herd's report
+at 60479, 62947, 56462, 57842, 58396 and 59488, and every CPU between 41469
+and 62947 (`windowscase/kernel.log:424` to `:438`). That bounds the walk at
+N = 256 from above at 63 µs; it says nothing of how the walk grows with N.
 
 **Exit**: the interrupts-off window step 2's instrument reads on the T14
 under N threads parked in `submit` on one ring, a sibling thread completing

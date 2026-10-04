@@ -213,20 +213,19 @@ static KERNEL_PC: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS
 pub extern "C" fn poll_in_kernel(pc: u64) {
     let at = AT_TSC.load(Relaxed);
     if at != 0 {
-        if let Some(slot) = KERNEL_PC.get(crate::arch::percpu::cpu_id() as usize) {
-            slot.store(pc, Relaxed);
-        }
+        KERNEL_PC[crate::arch::percpu::cpu_id() as usize].store(pc, Relaxed);
     }
     past(at)
 }
 
-/// ` cpuN=<pc>` for each online CPU, out of [`KERNEL_PC`].
+/// A line `  cpuN pc=<pc>  <symbol>+<offset>` for each online CPU, out of
+/// [`KERNEL_PC`]; the harness reads the symbol (`src/bootlog.rs`).
 struct KernelPcs;
 
 impl core::fmt::Display for KernelPcs {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         for (cpu, pc) in KERNEL_PC.iter().enumerate().take(crate::smp::cpu_count() as usize) {
-            write!(f, " cpu{cpu}={:#x}", pc.load(Relaxed))?;
+            writeln!(f, "  cpu{cpu} pc={}", crate::symbols::At(pc.load(Relaxed)))?;
         }
         Ok(())
     }
@@ -247,8 +246,8 @@ fn expire() -> ! {
     #[cfg(feature = "mask-windows")]
     crate::windows::stand_down();
     crate::drivers::panic_console::seal_wedge(format_args!(
-        "{EXPIRED}: a bound of {} ms, reached at {} ms, with this machine in `{}`, each CPU's \
-         timer last finding the kernel at{KernelPcs}. The tail of the log ring follows — which \
+        "{EXPIRED}: a bound of {} ms, reached at {} ms, with this machine in `{}`. Where each \
+         CPU's timer last found the kernel:\n{KernelPcs}The tail of the log ring follows — which \
          is what nothing was draining.\n",
         BOUND_MS.load(Relaxed),
         crate::clock::nanos_since_boot() / 1_000_000,
@@ -300,7 +299,9 @@ pub fn wedge_if_staged() {
 #[cfg(feature = "boot-actuators")]
 static STAGED: AtomicBool = AtomicBool::new(false);
 
+// Never inlined: the seal names the spin by this symbol (`src/bootlog.rs`).
 #[cfg(feature = "boot-actuators")]
+#[inline(never)]
 fn this_cpu() -> ! {
     // Preemption off, `IF` on and a one-shot armed: the shape a device
     // operation on this machine already runs in, so what the deadline has to
