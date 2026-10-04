@@ -86,6 +86,11 @@ pub fn stops_this_thread() -> bool {
     stops(STAGE.read())
 }
 
+/// Whether this boot's stop has begun; once it has, it never ends.
+pub fn begun() -> bool {
+    STAGE.read() == STOPPING
+}
+
 fn stops(stage: u32) -> bool {
     if stage != STOPPING {
         return false;

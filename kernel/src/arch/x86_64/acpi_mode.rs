@@ -6,7 +6,10 @@
 //! where `SCI_EN` reads clear, and waits for the firmware to set it; the
 //! release writes `ACPI_DISABLE` where the mint wrote the enable, so a dead
 //! server leaves the buttons to the firmware again, and so does a mint that
-//! wrote the enable and then failed.
+//! wrote the enable and then failed. **Neither is written once the stop has
+//! begun**: the power-off waits out a write in flight and then owns the
+//! hardware, and an SMI it did not make is one its S5 entry was never
+//! measured against.
 //!
 //! **A machine stays in legacy mode where its firmware serves something no
 //! holder could**: an embedded controller the ECDT does not name, or a power
@@ -38,10 +41,14 @@ use super::power::SCI_EN;
 use crate::device::ClaimError;
 use crate::isa::{self, Function};
 use crate::log;
+use crate::sync::{Lock, LockGuard};
 use crate::time::{Deadline, Duration};
 
 /// `isa`'s row for the fixed hardware.
 pub const ROW: usize = 1;
+/// The row's runs, at the places [`init`] fills them in.
+const PM1_EVENTS: usize = 0;
+const GPE0: usize = 1;
 
 /// How long the firmware has to set `SCI_EN` after the enable: one that has
 /// not answered in this will not.
@@ -62,6 +69,21 @@ static HARDWARE: AtomicPtr<Hardware> = AtomicPtr::new(core::ptr::null_mut());
 
 /// The mint wrote `ACPI_ENABLE`, so the release writes `ACPI_DISABLE`.
 static ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Held across every write to `SMI_CMD`.
+static SMI_CMD_WRITE: Lock<()> = Lock::new(());
+
+/// The right to write `SMI_CMD`, held across the write; none once the stop has
+/// begun.
+fn smi_cmd_write() -> Option<LockGuard<'static, ()>> {
+    let writing = SMI_CMD_WRITE.lock();
+    (!crate::quiesce::begun()).then_some(writing)
+}
+
+/// Wait out a write to `SMI_CMD` in flight: the stop has begun, so none follows.
+pub fn settle(_taken: &TakenBack) {
+    drop(SMI_CMD_WRITE.lock());
+}
 
 fn hardware() -> Option<&'static Hardware> {
     let at = HARDWARE.load(Ordering::Acquire);
@@ -203,6 +225,9 @@ fn enter(hardware: &Hardware) -> Result<(), ClaimError> {
     // The write raises a firmware interrupt where `APMC_EN` is set, counted on
     // the CPU that makes it, so both reads are that CPU's.
     let (me, before, after) = {
+        let Some(_writing) = smi_cmd_write() else {
+            return refuse("the machine is stopping");
+        };
         let _closed = crate::arch::IrqGuard::close();
         let before = super::counters::read().smi;
         // SAFETY: `SMI_CMD`, declared, and the value the FADT names for it.
@@ -246,11 +271,15 @@ pub fn release(row: usize) {
 }
 
 /// `ACPI_DISABLE`, written where the mint wrote `ACPI_ENABLE`, and what `SCI_EN`
-/// reads straight after.
+/// reads straight after; nothing once the stop has begun.
 fn leave(hardware: &Hardware) {
     let smi_cmd = hardware.smi_cmd.expect("ACPI_ENABLE was written to it");
+    let Some(writing) = smi_cmd_write() else {
+        return log!("acpi: ACPI_DISABLE not written: the machine is stopping, and its power-off owns ACPI mode");
+    };
     // SAFETY: `SMI_CMD`, declared, and the value the FADT names for it.
     unsafe { cpu::outb(smi_cmd.port(0), hardware.fixed.acpi_disable) };
+    drop(writing);
     let control = cpu::inw(hardware.control.port(0));
     log!(
         "acpi: legacy mode again: ACPI_DISABLE {:#04x} written to SMI_CMD, PM1a_CNT reads {control:#06x}, SCI_EN {}",
@@ -268,7 +297,7 @@ const PM1_STATUS: u16 = 1 << 0 | 1 << 4 | 1 << 5 | 1 << 8 | 1 << 9 | 1 << 10 | 1
 /// did not take.
 pub fn pm1_events(taken: &TakenBack) -> String {
     let Some(hardware) = hardware() else { return "no ACPI row, so no PM1 event block read".into() };
-    let events = taken.run(run(hardware.fixed.pm1a_event));
+    let events = taken.run(ROW, PM1_EVENTS);
     let half = hardware.fixed.pm1a_event.len / 2;
     format!("PM1 status {:#06x} under enable {:#06x}", cpu::inw(events.port(0)), cpu::inw(events.port(half)))
 }
@@ -277,7 +306,7 @@ pub fn pm1_events(taken: &TakenBack) -> String {
 /// the power-off's, on a machine in ACPI mode.
 pub fn quiet(taken: &TakenBack) {
     let Some(hardware) = hardware() else { return };
-    let events = taken.run(run(hardware.fixed.pm1a_event));
+    let events = taken.run(ROW, PM1_EVENTS);
     let half = hardware.fixed.pm1a_event.len / 2;
     // SAFETY: the PM1a event block the FADT names, taken back from any holder.
     unsafe {
@@ -287,7 +316,7 @@ pub fn quiet(taken: &TakenBack) {
     if hardware.fixed.gpe0.len == 0 {
         return;
     }
-    let gpe = taken.run(run(hardware.fixed.gpe0));
+    let gpe = taken.run(ROW, GPE0);
     let half = hardware.fixed.gpe0.len / 2;
     for byte in 0..half {
         // SAFETY: the GPE0 block, taken back as the PM1 block is; its status bits clear on a one.

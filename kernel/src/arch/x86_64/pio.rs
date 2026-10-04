@@ -123,8 +123,9 @@ pub fn take_back(_stopping: &crate::quiesce::Stopping) -> TakenBack {
 }
 
 impl TakenBack {
-    pub fn run(&self, ports: Ports) -> Declared {
-        Declared(ports)
+    /// The `at`th of the runs `row` was filled with.
+    pub fn run(&self, row: usize, at: usize) -> Declared {
+        Declared(crate::isa::runs(row).expect("pio: a row the boot never filled, taken back")[at])
     }
 }
 
