@@ -34,8 +34,8 @@ moves that instruction; no `rust-toolchain.toml` is tracked outside `rust/`,
 since step 1 of the rule in `issues/the-tree-says-who-uses-each-thing.md`
 names none. The alignments
 land first, each in today's workspace: pull request #724 aligned the root
-and kernel locks, the userland lock is the second, and the loader's 8 pairs,
-which change loader bytes, are the last.
+and kernel locks, the userland lock is the second, and the loader's 8 pairs
+are the last.
 
 **Constraints, measured** on a scratch workspace seeded from the five locks
 at `8b4f88446`, by type-check and one loader link, with no boot:
