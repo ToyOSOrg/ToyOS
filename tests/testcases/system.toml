@@ -36,9 +36,11 @@ syscap = ["rt"]
 # the same machine-wide answer and have no narrower question in the ABI. It is
 # also what `endowment_denied` narrows *away* to prove the refusal, so an estate
 # without it would make that arm vacuous rather than red.
+# `counters` and `trace` because `counters_read` reads every counter there is,
+# and narrows each away to prove its refusal.
 [programs.test-runner]
 receives = ["soundserver", "power"]
-syscap = ["device", "dup", "logread", "power", "roster"]
+syscap = ["device", "dup", "logread", "power", "roster", "counters", "trace"]
 
 [programs.toybox]
 receives = ["soundserver"]

@@ -7,9 +7,12 @@
 //! `seqlock-writer-fence-off` feature, which must red this file.
 #![cfg(feature = "loom")]
 
-use kernel_loom::panic_console_published::{Published, WORDS};
+use kernel_loom::seqlock::Published;
 use loom::sync::Arc;
 use loom::thread;
+
+/// The descriptor's width in the kernel.
+const WORDS: usize = 4;
 
 #[test]
 fn a_snapshot_is_one_publication_whole() {

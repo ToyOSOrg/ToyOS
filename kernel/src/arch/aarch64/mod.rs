@@ -16,6 +16,7 @@ pub mod boot;
 pub mod cache;
 pub mod console_uart;
 pub mod control_regs;
+pub mod counters;
 pub mod cpu;
 pub mod entropy;
 pub mod entry;

@@ -17,12 +17,12 @@ pub(super) fn with_object_ref<R>(
     process::with_process_data(|data| data.handles.get_ref(h, need).map(f))
 }
 
-/// Requires that `syscap` resolves to a `SysCap` holding exactly `need`.
-pub(super) fn demand_syscap(syscap: RawHandle, need: Rights) -> Result<(), crate::object::HandleError> {
+/// Requires that `syscap` resolves to a `SysCap` holding `need`, and answers
+/// every right it holds, read under the same guard.
+pub(super) fn demand_syscap(syscap: RawHandle, need: Rights) -> Result<Rights, crate::object::HandleError> {
     process::with_process_data(|data| {
-        data.handles
-            .get::<crate::object::syscap::SysCap>(syscap, need)
-            .map(|_| ())
+        data.handles.get::<crate::object::syscap::SysCap>(syscap, need)?;
+        data.handles.rights_of(syscap)
     })
 }
 

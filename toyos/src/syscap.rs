@@ -2,7 +2,7 @@
 //!
 //! Some things are reachable no other way — minting a device claim, entering
 //! the real-time band, listing every process in the machine, reading what the
-//! machine is made of, and taking its power away, off or back to firmware —
+//! machine is made of and what its CPUs count, and taking its power away, off or back to firmware —
 //! and each is one bit on a handle to this. The kernel makes exactly one at boot, for the supervisor, so the set of
 //! processes that can ever do any of them is exactly what the supervisor endowed.
 
@@ -128,6 +128,19 @@ impl SysCap {
         buf: &mut [toyos_abi::inventory::RawRecord],
     ) -> Result<usize, SyscallError> {
         syscall::device_inventory(self.0.raw(), buf)
+    }
+
+    /// One `toyos_abi::counters` record per online CPU, into `buf`; answers
+    /// how many. An empty `buf` asks how many CPUs there are — see
+    /// [`syscall::counters`].
+    ///
+    /// Needs [`Rights::COUNTERS`]; the counters that time programs come back
+    /// only where the capability carries [`Rights::TRACE`] too.
+    pub fn counters(
+        &self,
+        buf: &mut [toyos_abi::counters::RawRecord],
+    ) -> Result<usize, SyscallError> {
+        syscall::counters(self.0.raw(), buf)
     }
 
     /// Every inventory record, read whole or refused whole, never a shorter

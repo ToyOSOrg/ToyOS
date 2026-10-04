@@ -23,8 +23,8 @@ use std::sync::Mutex;
 /// and [`Census::parse`] refuses a line whose fields are not exactly these, so
 /// a source added on one side and not the other is a red rather than a silently
 /// dropped column.
-pub const SOURCES: [&str; 11] = [
-    "timer", "xhci", "userdev", "sound", "i8042", "dmafault", "hda", "tlb", "nmi", "spurious",
+pub const SOURCES: [&str; 12] = [
+    "timer", "kick", "xhci", "userdev", "sound", "i8042", "dmafault", "hda", "tlb", "nmi", "spurious",
     "unclaimed",
 ];
 
