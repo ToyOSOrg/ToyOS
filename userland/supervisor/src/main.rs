@@ -55,6 +55,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
 use std::os::toyos::process::{ChildExt, CommandExt};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -1470,10 +1471,12 @@ impl Supervisor<'_> {
             }
         };
 
-        // **The caller's path, not the row's, and `argv[0]` is why.** `declared`
-        // has already established that the two name one binary, so this grants
-        // nothing extra — and `/system/bin/echo` spawned as `/system/bin/toybox` is a toybox that
-        // was never told which applet it is.
+        // **`argv[0]` is the caller's path; the program is the row's.** An applet
+        // learns which it is from its name — `/system/bin/echo` run as `ls` is an
+        // `ls` — but the bytes are the row's `path` (`image_from`, below), never
+        // this one opened again: `declared` may have reached the row through a
+        // link the caller can re-point, and its own bytes would run under the
+        // row's claims.
         let mut command = Command::new(request.program);
         // **Carried, not inherited.** A child of the launcher would otherwise get
         // the supervisor's environment and the supervisor's working directory, so `cd /tmp && ls` would
@@ -1504,8 +1507,10 @@ impl Supervisor<'_> {
         let (system, path) = (self.system, request.program.to_string());
         let found = self.files("a launch's files", move || {
             let resolved = resolve(system, &path);
-            let prepared = match resolved {
-                Resolved::Row(_) | Resolved::Package(_) => command.prepare().map(drop),
+            let prepared = match &resolved {
+                Resolved::Row(Program { path, .. }) | Resolved::Package(Program { path, .. }) => {
+                    command.image_from(Path::new(path)).prepare().map(drop)
+                }
                 Resolved::NotDeclared | Resolved::Refused(_) => Ok(()),
             };
             (resolved, prepared.map(|()| command))

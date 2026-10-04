@@ -340,15 +340,16 @@ fn rela_dyn_from_sections(
 /// child's handle table around the child's handle to itself, once nothing is
 /// left to refuse.
 ///
-/// `image` is the program's bytes when the caller read them itself, and then
-/// `argv[0]` is only its name: nothing opens it, and its libraries come from
+/// `path` is the program, opened here — or, with `image`, the bytes the caller
+/// read from it itself, and then nothing opens it and its libraries come from
 /// `/system/lib` alone, since the directory it names is no volume of this
-/// kernel's.
+/// kernel's. `argv[0]` is only the name the child goes by.
 ///
 /// `Refusal`, not `-> !`, is the error type: every failure below owns a
 /// partly built process (address space, stack, kernel stack), and nothing
 /// unwinds, so the error must travel out as a value rather than strand it.
 pub fn spawn<H>(
+    path: &str,
     argv: &[&str],
     commit: impl FnOnce(crate::object::HandleEntry) -> Result<(HandleTable, Endowments, H), crate::object::Refusal>,
     cwd: String,
@@ -357,7 +358,7 @@ pub fn spawn<H>(
     parent: Parent,
 ) -> Result<(Pid, H), crate::object::Refusal> {
     // An argv of only separators survives sys_spawn's split as an empty slice.
-    let Some(&path) = argv.first() else {
+    let Some(&name) = argv.first() else {
         return Err(SyscallError::InvalidArgument.into());
     };
     // Before anything is built; dropped on every way out below but the insert.
@@ -646,7 +647,7 @@ pub fn spawn<H>(
     let ((tid, dst), retire) = admission.land(guard.as_mut().unwrap(), |table, node| {
         table.insert(ProcessEntry::new(
             Arc::clone(&object),
-            start::make_name(path),
+            start::make_name(name),
             proc_data,
             Arc::clone(&syms),
             ThreadEntry::new(thread_data),
@@ -902,7 +903,7 @@ pub fn spawn_supervisor() -> Pid {
         start::endow_self(&mut handles, &mut entries, &mut labels, own);
         Ok((handles, Endowments::new(entries, labels), ()))
     };
-    match spawn(&[SUPERVISOR_PATH], commit, String::from("/"), Vec::new(), None, Parent::Root) {
+    match spawn(SUPERVISOR_PATH, &[SUPERVISOR_PATH], commit, String::from("/"), Vec::new(), None, Parent::Root) {
         Ok((pid, ())) => pid,
         Err(crate::object::Refusal::Error(e)) => panic!("spawn_supervisor: failed to spawn: {e:?}"),
         Err(crate::object::Refusal::Handle(e)) => panic!("spawn_supervisor: {e}"),

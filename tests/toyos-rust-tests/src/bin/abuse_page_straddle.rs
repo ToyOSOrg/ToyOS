@@ -116,6 +116,8 @@ fn main() {
         core::ptr::copy_nonoverlapping(argv.as_ptr(), base as *mut u8, argv.len());
     }
     let args = SpawnArgs {
+        path_ptr: base,
+        path_len: "/system/bin/echo".len() as u64,
         argv_ptr: base,
         argv_len: argv.len() as u64,
         slot_map_ptr: 0,

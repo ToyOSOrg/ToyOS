@@ -46,6 +46,7 @@ pub(super) fn spawn_place(place: u64) -> Result<process::Parent, u64> {
 
 /// Start a program in `cwd` under `parent` and return the handle to it the spawn's commit put in the caller's table.
 pub(super) fn sys_spawn(
+    path: &str,
     args: &[&str],
     pending: crate::loader::PendingHandles,
     cwd: alloc::string::String,
@@ -54,7 +55,7 @@ pub(super) fn sys_spawn(
     parent: process::Parent,
 ) -> u64 {
     // Nothing to clean up: spawn's frame owns the child's resources on error.
-    match process::spawn(args, |own| pending.commit(own), cwd, env, image, parent) {
+    match process::spawn(path, args, |own| pending.commit(own), cwd, env, image, parent) {
         Ok((_, handle)) => u64::from(handle.0),
         Err(e) => e.refuse(),
     }
