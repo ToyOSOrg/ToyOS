@@ -10,6 +10,7 @@ use crate::pipe::{PipeId, PipeReader, PipeWriter};
 use crate::sync::Lock;
 
 use super::handle::HandleEntry;
+use super::port::{PendingConnection, Stamp};
 use super::{Held, KObjectVariant, ObjectCore, ZeroHandles};
 
 /// Handles in flight in one direction of a connection; `None` once the reader is gone.
@@ -68,6 +69,8 @@ pub struct ConnectionEnd {
     inbox: Arc<HandleQueue>,
     outbox: Arc<HandleQueue>,
     reference: Held<(PipeReader, PipeWriter)>,
+    /// The server's end of a port's connection; `None` on a client's end and a joined one.
+    stamp: Option<Stamp>,
 }
 
 impl ConnectionEnd {
@@ -76,11 +79,27 @@ impl ConnectionEnd {
         (HandleQueue::open(), HandleQueue::open())
     }
 
+    /// A client's end.
     pub fn new(
         rx: PipeReader,
         tx: PipeWriter,
         inbox: Arc<HandleQueue>,
         outbox: Arc<HandleQueue>,
+    ) -> Arc<Self> {
+        Self::build(rx, tx, inbox, outbox, None)
+    }
+
+    /// The server's end of a queued connection, keeping its stamp.
+    pub fn accepted(conn: PendingConnection) -> Arc<Self> {
+        Self::build(conn.rx, conn.tx, conn.inbox, conn.outbox, Some(conn.stamp))
+    }
+
+    fn build(
+        rx: PipeReader,
+        tx: PipeWriter,
+        inbox: Arc<HandleQueue>,
+        outbox: Arc<HandleQueue>,
+        stamp: Option<Stamp>,
     ) -> Arc<Self> {
         Arc::new(Self {
             core: Self::new_core(),
@@ -89,12 +108,17 @@ impl ConnectionEnd {
             inbox,
             outbox,
             reference: Held::new((rx, tx)),
+            stamp,
         })
     }
 
     /// Two pipe ends that were never a port's, so both handle queues are dead.
     pub fn joined(rx: PipeReader, tx: PipeWriter) -> Arc<Self> {
         Self::new(rx, tx, HandleQueue::dead(), HandleQueue::dead())
+    }
+
+    pub fn stamp(&self) -> Option<&Stamp> {
+        self.stamp.as_ref()
     }
 
     pub fn rx(&self) -> PipeId {

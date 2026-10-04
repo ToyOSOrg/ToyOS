@@ -27,11 +27,15 @@
 //! supervisor-serve <name>   a name the supervisor serves itself
 //! start <name>              the supervisor starts this program at boot
 //! app-receive <name>        a connector every program launched from /apps holds
+//! starts <key>              a row this program may start through the launcher, or `/apps`
+//! login                     a launch this program makes opens a login session
 //! ```
 //!
 //! [`package`] is the other half: what an installed package says about itself,
 //! which is which of its own binaries a launch starts and never what it holds.
+//! [`launch`] is who may start what.
 
+pub mod launch;
 pub mod package;
 
 /// Where ROOT carries it, without a leading slash — that volume's own
@@ -45,6 +49,11 @@ pub const GUEST_PATH: &str = "/system/etc/system.manifest";
 /// carries one in a message, and a longer one is refused by name rather than
 /// truncated into some other program's.
 pub const MAX_PROGRAM_NAME: usize = 32;
+
+/// The port `/system/bin/supervisor` serves swaps on: its one holder replaces a
+/// running service's binary, so a row receiving it starts only in a login
+/// session ([`launch`]).
+pub const SWAP_PORT: &str = "swap";
 
 /// The dev image's one user, until the users track gives the supervisor a login row.
 pub const USER: &str = "toy";
@@ -175,9 +184,21 @@ pub struct Program {
     /// The supervisor starts it again when it ends, on the same ports, for as long as
     /// it does not end faster than [`RESTARTS`] allows.
     pub restart: bool,
+    /// The rows it may start through the supervisor's launcher: program keys,
+    /// and [`launch::APPS`] for any installed package. Non-empty is what
+    /// endows it a launcher at all.
+    pub starts: Vec<String>,
+    /// A launch it makes opens a login session ([`launch`]).
+    pub login: bool,
 }
 
 impl Program {
+    /// It replaces what the machine runs — the swap port's holder, or the idle
+    /// slot's — so it starts only in a login session.
+    pub fn login_only(&self) -> bool {
+        self.slots || self.receives.iter().any(|r| r == SWAP_PORT)
+    }
+
     /// The `HOME` the supervisor starts this row with. A location grants nothing: what
     /// the program can reach is its view's business, never this string's.
     pub fn home(&self) -> String {
@@ -308,6 +329,13 @@ pub fn render(manifest: &Manifest) -> Result<Vec<u8>, RenderError> {
         if program.restart {
             out.push_str("restart\n");
         }
+        for key in &program.starts {
+            check(&program.name, "starts", key)?;
+            out.push_str(&format!("starts {key}\n"));
+        }
+        if program.login {
+            out.push_str("login\n");
+        }
     }
     for name in &manifest.supervisor_serves {
         check("supervisor", "supervisor_serves", name)?;
@@ -394,6 +422,8 @@ pub fn parse(text: &str) -> Manifest {
                     "service" => program.service = true,
                     "role" => program.roles.push(rest.to_string()),
                     "restart" if rest.is_empty() => program.restart = true,
+                    "starts" => program.starts.push(rest.to_string()),
+                    "login" if rest.is_empty() => program.login = true,
                     other => panic!("manifest: unknown record `{other}`"),
                 }
             }
@@ -413,9 +443,11 @@ mod tests {
                     name: "compositor".into(),
                     path: "/system/bin/compositor".into(),
                     serves: vec!["compositor".into()],
-                    receives: vec!["soundserver".into(), "launcher".into()],
+                    receives: vec!["soundserver".into()],
                     devices: vec!["framebuffer".into(), "keyboard".into()],
                     service: true,
+                    starts: vec!["terminal".into(), "/apps".into()],
+                    login: true,
                     ..Program::default()
                 },
                 Program {
@@ -450,7 +482,7 @@ mod tests {
                     ..Program::default()
                 },
             ],
-            supervisor_serves: vec!["launcher".into()],
+            supervisor_serves: vec!["swap".into()],
             apps: vec!["compositor".into(), "soundserver".into()],
             start: vec!["compositor".into(), "soundserver".into()],
         }

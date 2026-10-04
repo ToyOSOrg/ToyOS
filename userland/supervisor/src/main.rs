@@ -47,6 +47,12 @@
 //! A launch of a program no row names is answered with the session's, which
 //! the caller's direct spawn carries in place of its own.
 //!
+//! **A launch starts only what its caller's row lists** ([`toyos_manifest::launch`]).
+//! Every row whose `starts` lists anything is endowed a `launcher` the supervisor
+//! minted with its row and session as the badge, under a label of its own so
+//! no direct spawn inherits it; the badge on a launch's connection is who asks,
+//! and nothing the caller says is.
+//!
 //! **A launched program is spawned under the place its request names** — a
 //! copy of the caller's `self` — so the caller's end takes it down; a request
 //! that asks for the supervisor is the one way to outlive the caller, and one naming
@@ -62,12 +68,13 @@ use std::time::{Duration, Instant};
 
 use toyos_swap::{Refusal, Request as SwapRequest, Word};
 
+use toyos_manifest::launch::{self as authority, Authority, Session, Target};
 use toyos_manifest::package::{self, Package};
 use toyos_manifest::{Manifest, Program};
 use toyos::endow::Endowments;
 use toyos::fs::CAPABILITY_PREFIX;
 use toyos::ipc::{self, Connection, RxStep};
-use toyos::launch::{self, Parent, Request};
+use toyos::launch::{self, Parent, Request, LAUNCHER};
 use toyos::namespace::{self, Namespace};
 use toyos::poller::{Poller, READABLE};
 use toyos::port::{self, Acceptor, Connector};
@@ -83,13 +90,9 @@ use toyos_logstream::{
     SWAP, SWAP_BACK, SWAP_LEAVING,
 };
 use toyos_abi::syscall::{
-    DeviceRequest, FileType, SyscallError, DEV_PREFIX, PROVIDE_PREFIX, SERVE_PREFIX, SVC_LABEL,
-    SYSCAP_LABEL,
+    DeviceRequest, FileType, SyscallError, DEV_PREFIX, MAX_BADGE, PROVIDE_PREFIX, SERVE_PREFIX,
+    SVC_LABEL, SYSCAP_LABEL,
 };
-
-/// The service the supervisor answers on. Its own, so it has no `[programs]` row and the
-/// manifest carries it as a `supervisor-serve` record.
-const LAUNCHER: &str = "launcher";
 
 /// What the supervisor makes in the session user's home before anything runs. English on
 /// disk in every locale: a translation is a label, never a rename.
@@ -132,6 +135,14 @@ struct Pending {
     /// Which of the supervisor's two ports it came in on, which decides what its frame
     /// may ask for.
     port: Port,
+    /// Who asks, off the connection's badge: present exactly for [`Port::Launcher`].
+    caller: Option<Caller>,
+}
+
+/// A launch's caller: the row and session the badge on its connection names.
+struct Caller {
+    row: &'static Program,
+    session: Session,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -396,9 +407,14 @@ fn main() {
         Box::leak(Box::new(build()))
     };
 
+    // Its connector goes at once: every launcher a program holds is one minted
+    // with that program's row.
+    let (launcher, _) = port::create().expect("supervisor: no port for `launcher`");
     let (wake_read, wake_write) = toyos::pipe_pair().expect("supervisor: no pipe to hear a service end");
     let mut supervisor = Supervisor {
         system,
+        launcher,
+        logins: 0,
         syscap: &syscap,
         acceptors,
         connectors,
@@ -415,10 +431,6 @@ fn main() {
     // Nothing else holds a `serves` acceptor that has not been launched yet, so
     // the supervisor outliving its children is what keeps those ports open. It parks
     // here.
-    let launcher = supervisor
-        .acceptors
-        .remove(LAUNCHER)
-        .expect("supervisor: the manifest declares the supervisor serves `launcher`");
     let swap = supervisor
         .acceptors
         .remove(toyos_swap::PORT)
@@ -427,7 +439,7 @@ fn main() {
         .acceptors
         .remove(power::PORT)
         .expect("supervisor: the manifest declares the supervisor serves `power`");
-    supervisor.serve_forever(&launcher, &swap, &power);
+    supervisor.serve_forever(&swap, &power);
 }
 
 /// How long the supervisor waits on one call into a file server that is alive and has
@@ -502,6 +514,10 @@ fn is_storage(program: &Program) -> bool {
 /// Everything the supervisor's loop acts on, for the machine's life.
 struct Supervisor<'a> {
     system: &'static Manifest,
+    /// What every launcher is minted on and every launch accepted from.
+    launcher: Acceptor,
+    /// The login sessions opened so far: the last one's id.
+    logins: u64,
     syscap: &'a SysCap,
     /// The `serves` acceptors nobody has been started with yet, which a launch
     /// takes by move.
@@ -600,6 +616,7 @@ impl<'a> Service<'a> {
         syscap: &SysCap,
         connectors: &BTreeMap<&str, Connector>,
         dirs: &BTreeMap<String, Connector>,
+        launcher: &Acceptor,
         log: &mut Log,
     ) -> Result<u32, StartError> {
         // **Checked again at every start, not only on arrival**: the installed
@@ -631,6 +648,7 @@ impl<'a> Service<'a> {
             dirs,
             &[],
             storage,
+            (launcher, Session::Machine),
             Output::Boot(log),
         )?;
         kept.generation += 1;
@@ -788,7 +806,7 @@ impl<'a> Supervisor<'a> {
                 self.make_home(program);
                 let mut service = Service::new(program, role, kept, wake);
                 let started =
-                    service.spawn(&program.path, &[], system, self.syscap, &self.connectors, &self.dirs, &mut self.log);
+                    service.spawn(&program.path, &[], system, self.syscap, &self.connectors, &self.dirs, &self.launcher, &mut self.log);
                 match started {
                     Ok(_) => {}
                     Err(StartError::Partition(why)) => {
@@ -883,13 +901,13 @@ impl<'a> Supervisor<'a> {
     /// the wait wakes for. The one wait the supervisor makes outside the loop is for a
     /// service it has just killed to finish ending, which is the kernel's
     /// teardown and no client's.
-    fn serve_forever(&mut self, launcher: &Acceptor, swap: &Acceptor, power: &Acceptor) -> ! {
+    fn serve_forever(&mut self, swap: &Acceptor, power: &Acceptor) -> ! {
         let poller = Poller::new(5 + MAX_PENDING_LAUNCHES as u32);
         let mut pending: Vec<Pending> = Vec::new();
         let mut flight: Option<Flight> = None;
         let mut ready: Vec<u64> = Vec::new();
         loop {
-            poller.watch(launcher, READABLE, TOKEN_ACCEPTOR);
+            poller.watch(&self.launcher, READABLE, TOKEN_ACCEPTOR);
             poller.watch(swap, READABLE, TOKEN_SWAP_ACCEPTOR);
             poller.watch(power, READABLE, TOKEN_POWER_ACCEPTOR);
             poller.watch(&self.wake, READABLE, TOKEN_WAKE);
@@ -923,7 +941,7 @@ impl<'a> Supervisor<'a> {
 
             // Accept and the request are two events. Nothing is read here.
             for (token, acceptor, port) in [
-                (TOKEN_ACCEPTOR, launcher, Port::Launcher),
+                (TOKEN_ACCEPTOR, &self.launcher, Port::Launcher),
                 (TOKEN_SWAP_ACCEPTOR, swap, Port::Swap),
                 (TOKEN_POWER_ACCEPTOR, power, Port::Power),
             ] {
@@ -940,9 +958,19 @@ impl<'a> Supervisor<'a> {
                          are already waiting to say what they want",
                         conn.as_handle().0
                     );
-                } else {
-                    pending.push(Pending { conn, rx: LaunchRx::new(), since: Instant::now(), port });
+                    continue;
                 }
+                let caller = match port {
+                    Port::Launcher => match self.caller(&conn) {
+                        Ok(caller) => Some(caller),
+                        Err(why) => {
+                            say!("supervisor: launcher: dropping client {} — {why}", conn.as_handle().0);
+                            continue;
+                        }
+                    },
+                    Port::Swap | Port::Power => None,
+                };
+                pending.push(Pending { conn, rx: LaunchRx::new(), since: Instant::now(), port, caller });
             }
 
             // `remove` rather than `swap_remove`: the entries after `i` shift
@@ -977,7 +1005,10 @@ impl<'a> Supervisor<'a> {
                     RxStep::Frame { msg_type, payload_len } => {
                         let p = pending.remove(i);
                         match p.port {
-                            Port::Launcher => self.serve_launch(&p.conn, msg_type, p.rx.payload(payload_len)),
+                            Port::Launcher => {
+                                let caller = p.caller.as_ref().expect("a launcher connection is kept only with its caller");
+                                self.serve_launch(&p.conn, caller, msg_type, p.rx.payload(payload_len))
+                            }
                             Port::Power => self.stop(&p.conn, msg_type),
                             Port::Swap => {
                                 let payload = p.rx.payload(payload_len).to_vec();
@@ -1012,6 +1043,19 @@ impl<'a> Supervisor<'a> {
                 self.restart_ended();
             }
         }
+    }
+
+    /// The row and session a launcher connection's badge names. Only this
+    /// supervisor mints on its launcher, so a refusal here is its own bug, said
+    /// and the connection dropped.
+    fn caller(&self, conn: &Connection) -> Result<Caller, String> {
+        let mut badge = [0u8; MAX_BADGE];
+        let badge = self.launcher.badge(conn, &mut badge).map_err(|e| format!("its connection has no badge ({e:?})"))?;
+        let Some(Authority { row, session }) = Authority::decode(badge) else {
+            return Err(format!("its badge is not one this supervisor writes: {badge:?}"));
+        };
+        let row = self.system.program(&row).ok_or_else(|| format!("its badge names `{row}`, which is no row"))?;
+        Ok(Caller { row, session })
     }
 
     /// One swap request, answered: refused with the old service untouched, or
@@ -1145,7 +1189,7 @@ impl<'a> Supervisor<'a> {
             let _ = old.wait();
         }
         let started =
-            service.spawn(&path, &owed, self.system, self.syscap, &self.connectors, &self.dirs, &mut self.log);
+            service.spawn(&path, &owed, self.system, self.syscap, &self.connectors, &self.dirs, &self.launcher, &mut self.log);
         match started {
             Ok(pid) => {
                 swapped(
@@ -1319,7 +1363,7 @@ impl<'a> Supervisor<'a> {
             let (path, owed, program) = (service.path.clone(), service.devices.clone(), service.program);
             self.make_home(program);
             let service = &mut self.services[index];
-            match service.spawn(&path, &owed, self.system, self.syscap, &self.connectors, &self.dirs, &mut self.log) {
+            match service.spawn(&path, &owed, self.system, self.syscap, &self.connectors, &self.dirs, &self.launcher, &mut self.log) {
                 Ok(new) => say!("supervisor: {label} (pid {pid}) ended; started again as pid {new}"),
                 Err(e) => {
                     let mut kept = service.kept.lock().expect("supervisor: a service's state is poisoned");
@@ -1339,7 +1383,7 @@ impl<'a> Supervisor<'a> {
         self.make_home(program);
         let service = &mut self.services[index];
         let name = service.program.name.clone();
-        match service.spawn(previous, owed, self.system, self.syscap, &self.connectors, &self.dirs, &mut self.log) {
+        match service.spawn(previous, owed, self.system, self.syscap, &self.connectors, &self.dirs, &self.launcher, &mut self.log) {
             Ok(pid) => {
                 service.kept.lock().expect("supervisor: a service's state is poisoned").swapping = false;
                 swapped(&self.log, &name, Word::Restored, &format!("{previous} as pid {pid}"));
@@ -1396,13 +1440,15 @@ fn forget(path: &str) {
 impl Supervisor<'_> {
     /// One `MSG_LAUNCH`, from the frame to the `Process` handle that answers it.
     ///
-    /// **Everything in the request is a client's claim about itself.** A program
-    /// nothing declares is refused by name; a frame that does not decode is a
-    /// dropped connection and nothing else. What the child ends up holding is the
-    /// manifest's row for it plus whatever connectors the caller transferred, and
-    /// the caller could only transfer what it already had — so a launch confers
-    /// exactly the manifest row and nothing beyond it.
-    fn serve_launch(&mut self, conn: &Connection, msg_type: u32, payload: &[u8]) {
+    /// **Everything in the request is a client's claim about itself; `caller` is
+    /// not.** A program nothing declares is refused by name; a frame that does
+    /// not decode is a dropped connection and nothing else; a row the caller's
+    /// row may not start is refused before any of its files is read. What the
+    /// child ends up holding is the manifest's row for it plus whatever
+    /// connectors the caller transferred, and the caller could only transfer
+    /// what it already had — so a launch confers exactly the manifest row and
+    /// nothing beyond it.
+    fn serve_launch(&mut self, conn: &Connection, caller: &Caller, msg_type: u32, payload: &[u8]) {
         if msg_type != launch::MSG_LAUNCH {
             return;
         }
@@ -1503,19 +1549,27 @@ impl Supervisor<'_> {
         let installed;
         // On the worker, every file the launch reads: a path under `/apps` is
         // read off its package, and the program and its working directory may
-        // be a file server's, which the supervisor supervises.
+        // be a file server's, which the supervisor supervises. Whether the
+        // caller may start it is asked between the two, so a refused launch
+        // reads no image and judges no directory.
         let (system, path) = (self.system, request.program.to_string());
+        let (row, session, opened) = (caller.row, caller.session, self.logins + 1);
         let found = self.files("a launch's files", move || {
             let resolved = resolve(system, &path);
-            let prepared = match &resolved {
-                Resolved::Row(Program { path, .. }) | Resolved::Package(Program { path, .. }) => {
-                    command.image_from(Path::new(path)).prepare().map(drop)
-                }
-                Resolved::NotDeclared | Resolved::Refused(_) => Ok(()),
+            let (target, path) = match &resolved {
+                Resolved::Row(program) => (Target::Row(program), &program.path),
+                Resolved::Package(program) => (Target::Package(program), &program.path),
+                Resolved::NotDeclared | Resolved::Refused(_) => return (resolved, None, Ok(command)),
             };
-            (resolved, prepared.map(|()| command))
+            let verdict = authority::may_start(row, session, target, || opened);
+            let prepared = match verdict {
+                Ok(_) => command.image_from(Path::new(path)).prepare().map(drop),
+                Err(_) => Ok(()),
+            };
+            let prepared = prepared.map(|()| command);
+            (resolved, Some(verdict), prepared)
         });
-        let (resolved, prepared) = match found {
+        let (resolved, verdict, prepared) = match found {
             Ok(found) => found,
             Err(why) => {
                 say!("supervisor: launcher: {} was not resolved: {why}", request.program);
@@ -1544,6 +1598,19 @@ impl Supervisor<'_> {
                 return;
             }
         };
+        // **`MSG_REFUSED`, never `MSG_NOT_DECLARED`**: the latter is std's cue to
+        // spawn the program itself.
+        let session = match verdict.expect("a resolved row is judged") {
+            Ok(session) => session,
+            Err(why) => {
+                say!("{}", authority::refused(&caller.row.name, caller.session, &program.name, why));
+                let _ = conn.try_signal(launch::MSG_REFUSED);
+                return;
+            }
+        };
+        if session == Session::Login(opened) {
+            self.logins = opened;
+        }
         let command = match prepared {
             Ok(command) => command,
             Err(e) => {
@@ -1568,6 +1635,7 @@ impl Supervisor<'_> {
             &self.dirs,
             &extras,
             Storage::default(),
+            (&self.launcher, session),
             Output::Launch { log: &mut self.log, slots: &caller_slots },
         );
         match started {
@@ -1838,6 +1906,7 @@ fn start<'a>(
     dirs: &BTreeMap<String, Connector>,
     extras: &[(&str, Connector)],
     storage: Storage,
+    launcher: (&Acceptor, Session),
     output: Output<'_>,
 ) -> std::io::Result<(Child, Vec<String>)> {
     // A storage row's own arguments first: a file server's role leads its argv.
@@ -1874,6 +1943,11 @@ fn start<'a>(
     if let Some(ns) = swap_namespace(program, connectors) {
         let raw = ns.into_raw();
         command.endow(toyos_swap::LABEL, raw.0);
+        held.0.push(raw);
+    }
+    if let Some(ns) = launcher_namespace(program, launcher) {
+        let raw = ns.into_raw();
+        command.endow(LAUNCHER, raw.0);
         held.0.push(raw);
     }
 
@@ -2221,6 +2295,24 @@ fn swap_namespace(program: &Program, connectors: &BTreeMap<&str, Connector>) -> 
         .add(toyos_swap::PORT, connector)
         .finish()
         .unwrap_or_else(|e| panic!("supervisor: no swap namespace for {}: {e:?}", program.name));
+    Some(ns)
+}
+
+/// A `launcher` minted with `program`'s row and the session it runs in, in a
+/// namespace of its own, for a row whose `starts` lists anything; endowed under
+/// [`LAUNCHER`] and never an entry of `svc`, for [`swap_namespace`]'s reason.
+fn launcher_namespace(program: &Program, (launcher, session): (&Acceptor, Session)) -> Option<Namespace> {
+    if program.starts.is_empty() {
+        return None;
+    }
+    let badge = Authority { row: program.name.clone(), session }.encode();
+    let connector = launcher
+        .mint(&badge)
+        .unwrap_or_else(|e| panic!("supervisor: no launcher for {}: {e:?}", program.name));
+    let ns = namespace::build()
+        .add(LAUNCHER, &connector)
+        .finish()
+        .unwrap_or_else(|e| panic!("supervisor: no launcher namespace for {}: {e:?}", program.name));
     Some(ns)
 }
 

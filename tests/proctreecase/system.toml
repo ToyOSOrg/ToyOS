@@ -1,10 +1,15 @@
 # The boot `process_tree` runs on: a parent's end takes its children down.
 #
-# A `launcher`, because the subtree under test has children the supervisor launches; a
-# declared `cat`, which runs until its input ends; and a declared shell, which a
-# depth chain launches and which detaches a `cat`.
+# A launcher for test-runner, which it endows every job, because the subtree
+# under test has children the supervisor launches; a declared `cat`, which runs
+# until its input ends; and a declared shell, which a depth chain launches and
+# which detaches a `cat`.
 #
 # `launch_toctou` rides it too: a launch of `toybox` through a link it re-points.
+#
+# And `launch_authority`: test-runner's row lists `swap` and `update`, which a
+# job is refused outside a login session, and not `proctest`, which it is
+# refused outright; the shell opens a login session, in which it starts `swap`.
 
 [boot]
 start = ["logkeeper", "diskserver", "fileserver", "test-runner"]
@@ -19,8 +24,8 @@ syscap = ["logread"]
 # `roster` because the guest asks which of its tree still runs, and `dup`
 # because test-runner hands each binary a duplicate of its capability.
 [programs.test-runner]
-receives = ["launcher"]
 syscap = ["dup", "roster"]
+starts = ["toybox", "shell", "swap", "update"]
 
 # `roster`, which a child the job spawns itself never holds: a child holding
 # it ran under this row, and `launch_toctou` asks which bytes that child was.
@@ -28,7 +33,16 @@ syscap = ["dup", "roster"]
 syscap = ["roster"]
 
 [programs.shell]
-receives = ["launcher"]
+starts = ["toybox", "swap"]
+login = true
+
+[programs.swap]
+receives = ["swap"]
+
+[programs.update]
+slots = true
+
+[programs.proctest]
 
 [symlinks]
 "bin/cat" = "/system/bin/toybox"

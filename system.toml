@@ -53,11 +53,18 @@ service = true
 syscap = ["logread"]
 serves = ["log"]
 
+# `starts` is what the desktop's taskbar and launcher start. `login = true`
+# makes the local desktop a login session, so `swap` and `update` run from its
+# shell: whether it is one before a greeter authenticates anybody is the
+# owner's open decision, and this line is the whole of it
+# (`issues/isolation/every-program-sees-only-the-files-it-was-given.md`).
 [programs.compositor]
 service = true
 serves = ["compositor"]
-receives = ["soundserver", "filepicker", "launcher"]
+receives = ["soundserver", "filepicker"]
 devices = ["framebuffer", "keyboard", "mouse"]
+starts = ["terminal", "files", "/apps"]
+login = true
 
 [programs.soundserver]
 service = true
@@ -74,11 +81,13 @@ service = true
 serves = ["netstack"]
 devices = ["pci:1af4:1041"]
 
-# `launcher` is how a login's program is started holding its own row: `update`
-# and `swap` below are two such programs.
+# Every launch it makes opens a login session, the one `update` and `swap`
+# below start in. It runs whatever command a login names, as the shell does.
 [programs.sshserver]
 service = true
-receives = ["netstack", "launcher"]
+receives = ["netstack"]
+starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "proctest", "toyos-ld", "sshserver", "swap", "update", "/apps"]
+login = true
 
 # `swap` is the authority to replace a running service's binary; the build
 # refuses it to any other program (`src/build.rs`). `ssh <machine> swap netstack
@@ -112,10 +121,13 @@ receives = ["compositor"]
 
 [programs.terminal]
 provides = ["surface"]
-receives = ["compositor", "launcher"]
+receives = ["compositor"]
+starts = ["shell"]
 
+# Whatever a user names at its prompt.
 [programs.shell]
-receives = ["surface", "launcher"]
+receives = ["surface"]
+starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "proctest", "toyos-ld", "sshserver", "swap", "update", "/apps"]
 
 [programs.doom]
 receives = ["compositor", "soundserver"]

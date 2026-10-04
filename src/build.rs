@@ -137,8 +137,10 @@ struct AppsConfig {
     receives: Vec<String>,
 }
 
+/// **Unknown fields refused**: a misspelled `starts` would be a row that
+/// silently holds no launcher.
 #[derive(Deserialize, Default)]
-#[serde(default, rename_all = "kebab-case")]
+#[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
 struct ProgramConfig {
     path: Option<String>,
     no_default_features: bool,
@@ -169,6 +171,10 @@ struct ProgramConfig {
     roles: Vec<String>,
     /// The supervisor starts it again when it ends (`toyos_manifest::Program::restart`).
     restart: bool,
+    /// The rows it may start through the launcher (`toyos_manifest::Program::starts`).
+    starts: Vec<String>,
+    /// A launch it makes opens a login session (`toyos_manifest::Program::login`).
+    login: bool,
 }
 
 impl ProgramConfig {
@@ -635,7 +641,10 @@ const SUPERVISOR_PROGRAM: &str = "supervisor";
 /// declaration to come from. They travel in the manifest so the supervisor creates
 /// exactly the ports the build-time gate counted as provided — one producer,
 /// rather than a constant here and a string in the supervisor.
-const SUPERVISOR_SERVED: &[&str] = &["launcher", toyos_swap::PORT, "power"];
+///
+/// Not `launcher`: a row holds it by its `starts`, badged with its row, and no
+/// row receives it.
+const SUPERVISOR_SERVED: &[&str] = &[toyos_swap::PORT, "power"];
 
 /// Who may hold the two authorities that change what the machine runs:
 /// the swap port, [`toyos_swap::HOLDER`] and nothing else — no other
@@ -664,14 +673,43 @@ fn held_by_their_holders_alone(config: &SystemConfig) -> Result<(), String> {
     Ok(())
 }
 
+/// What a row may start through the launcher, and which rows open a login
+/// session (`toyos_manifest::launch`).
+///
+/// **Checked on every manifest rendered**: a `starts` entry is `/apps` or a
+/// declared row the supervisor can start more than once, so not one that
+/// serves a port or a file-server role, whose acceptors a launch would take and
+/// a second one find gone; and a `login` row starts something.
+fn starts_name_what_a_launch_can_start(config: &SystemConfig) -> Result<(), String> {
+    for (name, program) in &config.programs {
+        for key in &program.starts {
+            if key == toyos_manifest::launch::APPS {
+                continue;
+            }
+            let Some(target) = config.programs.get(key) else {
+                return Err(format!("`{name}` starts `{key}`, which is not declared"));
+            };
+            if !target.serves.is_empty() || !target.roles.is_empty() {
+                return Err(format!("`{name}` starts `{key}`, which serves ports a launch would take for good"));
+            }
+        }
+        if program.login && program.starts.is_empty() {
+            return Err(format!("`{name}` opens a login session and starts nothing"));
+        }
+    }
+    Ok(())
+}
+
 /// The resolved config as the records `/system/bin/supervisor` reads.
 ///
 /// The format, the renderer and the parser are `toyos-manifest/`, whose
 /// round-trip test is what makes "what the build writes is what the supervisor reads" a
 /// fact rather than two hand-matched implementations.
 fn render_manifest(config: &SystemConfig) -> Vec<u8> {
-    if let Err(why) = held_by_their_holders_alone(config) {
-        panic!("system.toml cannot be rendered as a manifest: {why}");
+    for gate in [held_by_their_holders_alone, starts_name_what_a_launch_can_start] {
+        if let Err(why) = gate(config) {
+            panic!("system.toml cannot be rendered as a manifest: {why}");
+        }
     }
     let mut names: Vec<&String> = config.programs.keys().collect();
     names.sort();
@@ -693,6 +731,8 @@ fn render_manifest(config: &SystemConfig) -> Vec<u8> {
                     service: cfg.service,
                     roles: cfg.roles.clone(),
                     restart: cfg.restart,
+                    starts: cfg.starts.clone(),
+                    login: cfg.login,
                 }
             })
             .collect(),
@@ -3168,6 +3208,23 @@ mod tests {
         assert!(held_by_their_holders_alone(&apps).is_err());
         let slots: SystemConfig = toml::from_str("[programs.shell]\nslots = true\n").unwrap();
         assert!(held_by_their_holders_alone(&slots).is_err());
+    }
+
+    /// Every committed config passes, and each refusal has a config that
+    /// takes it and nothing else.
+    #[test]
+    fn a_row_starts_only_what_a_launch_can_start() {
+        for cfg in ALL_CONFIGS {
+            starts_name_what_a_launch_can_start(&load(cfg)).unwrap_or_else(|e| panic!("{cfg}: {e}"));
+        }
+        let gate = |toml: &str| starts_name_what_a_launch_can_start(&toml::from_str(toml).unwrap());
+        assert!(gate("[programs.shell]\nstarts = [\"toybox\", \"/apps\"]\nlogin = true\n[programs.toybox]\n").is_ok());
+        assert!(gate("[programs.shell]\nstarts = [\"ghost\"]\n").is_err());
+        assert!(gate("[programs.shell]\nstarts = [\"apps\"]\n").is_err());
+        assert!(gate("[programs.shell]\nstarts = [\"compositor\"]\n[programs.compositor]\nserves = [\"compositor\"]\n").is_err());
+        assert!(gate("[programs.shell]\nstarts = [\"fileserver\"]\n[programs.fileserver]\nroles = [\"data\"]\n").is_err());
+        assert!(gate("[programs.sshserver]\nlogin = true\n").is_err());
+        assert!(toml::from_str::<SystemConfig>("[programs.shell]\nstart = [\"toybox\"]\n").is_err());
     }
 
     /// `[apps] receives` is narrower than a program's: a `provides` name is one

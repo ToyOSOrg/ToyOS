@@ -38,7 +38,7 @@ use super::io::{
 use super::ipc::{
     sys_accept, sys_connection_join, sys_handle_recv, sys_handle_send, sys_inbox_setup,
     sys_inbox_submit, sys_namespace_build, sys_namespace_open, sys_pipe, sys_pipe_map,
-    sys_port_create, sys_shm_create, sys_shm_map,
+    sys_port_badge, sys_port_create, sys_port_mint, sys_shm_create, sys_shm_map,
 };
 use super::machine::{
     sys_device_inventory, sys_log_read, sys_reboot, sys_sched_info, sys_shutdown, sys_sysinfo,
@@ -482,6 +482,25 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         SYS_SHM_CREATE => sys_shm_create(a1),
         SYS_SHM_MAP => sys_shm_map(RawHandle(a1 as u32)),
         SYS_PORT_CREATE => sys_port_create(),
+        SYS_PORT_MINT => {
+            // Copied in before any handle is looked up: the kernel holds the badge, never the caller's page.
+            let Ok(len) = Untrusted::new(a3).at_most(MAX_BADGE as u64) else {
+                return SyscallError::InvalidArgument.to_u64();
+            };
+            if len == 0 {
+                return SyscallError::InvalidArgument.to_u64();
+            }
+            let Some(bytes) = ctx.user_bytes(UserAddr::new(a2), len) else { return bad_addr };
+            let mut badge = [0u8; MAX_BADGE];
+            bytes.read_at(0, &mut badge[..len as usize]);
+            sys_port_mint(RawHandle(a1 as u32), &badge[..len as usize])
+        }
+        SYS_PORT_BADGE => {
+            let Some(mut out) = ctx.user_bytes_mut(UserAddr::new(a3), MAX_BADGE as u64) else {
+                return bad_addr;
+            };
+            sys_port_badge(RawHandle(a1 as u32), RawHandle(a2 as u32), &mut out)
+        }
         SYS_NAMESPACE_BUILD => {
             let Ok(args) = ctx.copy_in::<NamespaceBuild>(UserAddr::new(a1)) else {
                 return bad_addr;

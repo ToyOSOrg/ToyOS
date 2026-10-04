@@ -25,7 +25,12 @@ was handed, so isolating people follows from isolating programs.
 - **A child's view is at most its parent's.** Nothing widens a view after
   spawn, and nothing in it is inherited wider than the parent held it. The
   swap port leaking to whatever sshd spawns (PR #484's review) is the same
-  shape of defect in the service namespace.
+  shape of defect in the service namespace. **A launch is the exception, and
+  its caller's row is the approval** (owner, 2026-10-03, "Restrict": each
+  program may start only the programs its configuration row lists; swap and
+  update of system programs only from the login session): the launched
+  program holds its own row, the supervisor refuses a row the caller's
+  `starts` does not list, and a direct spawn never inherits a launcher.
 - **Resolution cannot leave the view.** `..` at a view's root, a symlink,
   a rename racing a lookup, or a held directory handle never resolves outside
   the view. This is the classic way a restricted root is escaped, so it is
@@ -80,6 +85,25 @@ nameable by every program and make confused-deputy bugs structural.
    per-session bound, so one session can starve another. Both close before
    the stage exits. **Exit**: a hostile session can neither reach another
    session's connections nor deny it memory or processes.
+
+## Open with the owner
+
+- **Whether the local desktop is a login session before a greeter
+  authenticates anybody.** Today it is: the compositor's `login = true` in
+  `system.toml` is the whole of it, so `swap` and `update` run from the
+  desktop's shell. Removing it confines both to SSH, which the development loop
+  already uses; the cost is that the shipping image's sshserver is itself
+  started from the desktop's shell, and until a session's view excludes
+  sshserver's key list any desktop program can log itself in over the network
+  regardless.
+
+## Known weaknesses
+
+- **A login session never ends.** A program launched in one keeps the session
+  in its launcher's badge after the login that opened it is gone, so a
+  detached program can start `swap` after logout. The exit is a session's end
+  ending its launches, which the per-session `/tmp`'s wait on the session's
+  first process provides.
 
 ## Ordering
 
