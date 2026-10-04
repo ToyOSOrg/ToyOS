@@ -27,19 +27,29 @@ All 37 deaths of its two unfixed arms (13,960 boots) had `DF` set on a vCPU,
 and 25 of them printed nothing. Its own reader's first draft died formatting a
 report under a set `DF`.
 
-## Measured at 791367452
+## Measured at 791367452 and 2cff52a60, one kernel source
 
 The first draft's probe (`log!` when `DEEPEST` rises, with an
 `assert!(in_pass())`), twelve guests, `-smp cores=2`, `-m 2G`, q35, TCG,
 `bootable.img` shape with the vIOMMU, `snapshot=on`, `compositor: ready` as
-completion, `-action reboot=shutdown -action shutdown=pause`, 120 s ceiling,
-45 min an arm, host load average 30 to 60 on 14 cores:
+completion, `-action reboot=shutdown -action shutdown=pause`, 120 s ceiling.
+H, U and N ran 45 min each at 791367452, back to back, at host load average
+30 to 60 on 14 cores. S ran at 2cff52a60 until it passed H's boot count, 100
+min at load average 45 to 80:
 
 | arm | kernel features | probe | boots | deaths | with `DF` set at capture |
 |---|---|---|---|---|---|
+| S | `sched-tripwire heap-tripwire` | yes | 2,486 | 0 in the kernel; 3 hangs in the loader | — |
 | H | `heap-tripwire` | yes | 2,475 | 0 | — |
 | U | `heap-tripwire entry-df-unclean` | yes | 1,764 | 10 (4 panic, 5 parked, 1 hang) | 9 |
 | N | `heap-tripwire entry-df-unclean` | no | 2,095 | 6 (2 panic, 3 parked, 1 hang) | 5 |
+
+S is the recorded kernel, 4ff5221ee's `sched-tripwire heap-tripwire`, at
+2cff52a60. Its 2,483 boots that reached the kernel logged from inside the pass
+7,069 times. Its three hangs logged no rung and stopped at the same firmware
+addresses as N's loader hang (`RIP=0x7ea3419c`, `0x7eb65af1`). Under the
+record's estimated rate S expects 7.1 hangs (Poisson p = 8.0e-4 for none);
+under U's, 14.1 (p = 7.6e-7).
 
 H logged from inside the pass 7,334 times. Under N's rate it expects 7.1
 deaths and has none (Poisson p = 8.3e-4); under U's, 14.0 (p = 8.1e-7). U's
@@ -57,7 +67,20 @@ That fits the record but has not been measured on that tree.
 
 ## Exit
 
-Storm 4ff5221ee's tree with the first-draft probe, keeping each death's
-`info registers -a`. Then storm it again with 9cc5ad28f's `arch::entry` `cld`
-and `0x40600` mask applied. Delete this file if the hangs show `DF` set and the
-second arm has none. If they do not, file what the captures show as a `defect`.
+The probe and the storm runner are in the evidence comments on #708. The probe
+does not apply verbatim at 4ff5221ee: there `stack_depth` carries
+`// Recorded and not logged. See [`DEEPEST`].` above its `fetch_max`
+(`driver.rs:1228`), and the probe's added lines replace both.
+
+1. Build 4ff5221ee with `--kernel-feature sched-tripwire --kernel-feature
+   heap-tripwire` and the probe, and storm it with the runner's recipe, keeping
+   each death's `info registers -a`, for at least 2,500 boots. The record's
+   rate is an estimate, 4 hangs in about 1,394 boots (12 slots × 360 s ÷ 3.1 s
+   a boot), so 2,500 boots expect 7.2 hangs and none has Poisson p = 7.7e-4.
+2. If it has none, the record does not reproduce on its own tree: the four
+   hangs are not evidence of a hazard in logging from a pass, and no rule is
+   owed. Delete this file with the tally in the deleting commit.
+3. If it hangs, storm it again with 9cc5ad28f's `arch::entry` `cld` and
+   `0x40600` mask applied, for at least as many boots. Delete this file if the
+   first arm's hangs show `DF` set and the second arm has none. If they do not,
+   file what the captures show as a `defect`.
