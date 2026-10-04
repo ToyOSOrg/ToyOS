@@ -126,13 +126,15 @@ impl Table {
         // SAFETY: `entry` is 16 bytes of a table `Tables::alloc` never frees,
         // 16-byte aligned since a table is 4 KiB-aligned; `rbx`, which LLVM
         // reserves, holds `new`'s low half only between the two moves.
+        // Every operand names its register: LLVM may give `rbx` to a `reg`
+        // operand, and the `xchg` would then swap the address out of it.
         unsafe {
             core::arch::asm!(
-                "xchg {lo}, rbx",
-                "lock cmpxchg16b xmmword ptr [{entry}]",
-                "mov rbx, {lo}",
-                entry = in(reg) entry.addr(),
-                lo = inout(reg) new.0 => _,
+                "xchg r8, rbx",
+                "lock cmpxchg16b xmmword ptr [rsi]",
+                "mov rbx, r8",
+                in("rsi") entry.addr(),
+                inout("r8") new.0 => _,
                 in("rcx") new.1,
                 inout("rax") old.0 => found_lo,
                 inout("rdx") old.1 => found_hi,
