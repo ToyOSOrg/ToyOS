@@ -858,6 +858,11 @@ mod checks {
     }
 
     #[test]
+    fn metal_loader_kernel_and_program_count_from_one_zero() {
+        metal_checks::the_loader_the_kernel_and_a_program_count_from_one_zero();
+    }
+
+    #[test]
     fn metal_list_from_parse_reaches_run_without_the_machine() -> Result<(), String> {
         let args: Vec<String> = ["--metal", "--list"].iter().map(ToString::to_string).collect();
         let mode = testargs::parse(&args)?

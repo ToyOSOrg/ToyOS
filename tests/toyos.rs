@@ -2158,16 +2158,27 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
             let chars = shown.trim().len();
             let (width, pixels) = (dump.width, &dump.pixels);
             let inked = |y: usize| (0..width).filter(move |&x| pixels[y * width + x] != BLACK);
-            let Some(top) = (0..dump.height).find(|&y| inked(y).next().is_some()) else {
+            // The first band of ink from `from` down: where it ends, and how wide it is.
+            let band = |from: usize| -> Option<(usize, usize)> {
+                let top = (from..dump.height).find(|&y| inked(y).next().is_some())?;
+                let bottom = (top..dump.height).find(|&y| inked(y).next().is_none()).unwrap_or(dump.height);
+                let xs: Vec<usize> = (top..bottom).flat_map(inked).collect();
+                Some((bottom, xs.iter().max()? - xs.iter().min()? + 1))
+            };
+            let fits = |wide: usize, n: usize| n > 0 && wide > 8 * (n - 1) && wide <= 8 * n;
+            let Some((bottom, wide)) = band(0) else {
                 return Err("the loader's screen is blank".to_string());
             };
-            let bottom = (top..dump.height).find(|&y| inked(y).next().is_none()).unwrap_or(dump.height);
-            let xs: Vec<usize> = (top..bottom).flat_map(inked).collect();
-            let wide = xs.iter().max().unwrap() - xs.iter().min().unwrap() + 1;
-            if wide <= 8 * (chars - 1) || wide > 8 * chars {
+            // A line wider than the console wraps: its top row is the console's
+            // width, and the row under it holds the rest of the line.
+            let columns = if fits(wide, chars) { chars } else { wide.div_ceil(8) };
+            let rest = chars.saturating_sub(columns);
+            let under = band(bottom).map(|(_, wide)| wide);
+            if !fits(wide, columns.min(chars)) || (rest > 0 && !under.is_some_and(|w| fits(w, rest.min(columns)))) {
                 return Err(format!(
-                    "the screen's top line is {wide} px wide, and the loader's first, {shown:?}, \
-                     is {chars} characters: something else is above the loader's lines\n{serial}"
+                    "the screen's top line is {wide} px wide and the one under it {under:?}, and the \
+                     loader's first, {shown:?}, is {chars} characters: something else is above the \
+                     loader's lines\n{serial}"
                 ));
             }
             Ok(())

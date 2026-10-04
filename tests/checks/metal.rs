@@ -360,3 +360,35 @@ pub fn a_cleared_page_owes_no_panel() {
     );
     assert_eq!(judged(&cleared, &hung), (true, None));
 }
+
+/// **The loader's lines, the kernel's records and a program's lines count
+/// from one zero**: a kernel record stamped before the loader's handoff, or a
+/// supervisor line before its spawn record, is a clock that kept another
+/// zero, and an untimed loader is nothing to compare.
+pub fn the_loader_the_kernel_and_a_program_count_from_one_zero() {
+    let read = |loader_ms: &str, kernel_ms: &str, said_ms: &str| {
+        let dir = toyos_tmpdir::TempDir::new("metal-one-clock");
+        let kernel = format!(
+            "[2026-10-04 09:30:00 {kernel_ms} cpu0 kernel] panic console: armed\n\
+             [2026-10-04 09:30:00 12.000 cpu0 kernel] spawn: /system/bin/supervisor pid=1\n\
+             [2026-10-04 09:30:00 {said_ms} supervisor] supervisor: started logkeeper\n\
+             [2026-10-04 09:30:00 15.000 cpu0 kernel] Boot: complete (3335ms)\n"
+        );
+        plant(&dir, "planted", PANEL, &kernel, None);
+        let loader = format!(
+            "[{loader_ms} cpu0 loader] {}\n[{loader_ms} cpu0 loader] {}\n{}\n{}\n{PANEL}",
+            bootlog::LOADER_FIRST_LINE,
+            bootlog::LOADER_LAST_LINE,
+            bootlog::SEPARATOR,
+            bootlog::LOADER_FIRST_LINE
+        );
+        fs::write(metal::at(&dir, "planted").join(READBACK_LOADER), loader).expect("a planted loader.log");
+        metal::read_readback(&dir, "planted").expect("a planted readback").one_clock()
+    };
+    assert_eq!(read(" 9.876", "11.665", "13.064"), Ok(()));
+    assert_eq!(read("--.---", " 0.050", "13.064"), Ok(()));
+    let why = read(" 9.876", " 0.050", "13.064").expect_err("a kernel that counts from its own start");
+    assert!(why.contains("the kernel's earliest timed record 50 ms"), "{why}");
+    let why = read(" 9.876", "11.665", " 1.064").expect_err("a program that counts from the kernel's clock");
+    assert!(why.contains("the supervisor's first line reads 1064 ms"), "{why}");
+}
