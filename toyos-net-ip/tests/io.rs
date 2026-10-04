@@ -1,5 +1,4 @@
-//! §4 and §5 with `wire.md` §3.3–§3.4 and §5.4–§5.5: frame dispatch, the IPv4 input pipeline,
-//! and what [ip] puts on the wire.
+//! Frame dispatch, the IPv4 input pipeline, and what [ip] puts on the wire.
 
 mod common;
 

@@ -1,4 +1,4 @@
-//! Frame dispatch (`wire.md` §3.3) and IPv4 input (§4.1). The first failing step names the
+//! Frame dispatch and IPv4 input. The first failing step names the
 //! refusal, so counters are deterministic, and a transport is handed only what passed them all.
 
 use core::net::Ipv4Addr;
@@ -23,7 +23,7 @@ const STRICT_SOURCE_ROUTE: u8 = 0x89;
 /// The DHCP client's port, which the acquisition exception admits (RFC 2131 §2).
 const ACQUISITION_PORT: u16 = 68;
 
-/// §3.3 steps 1 to 4 of `wire.md`: EtherType, destination, tags, own source.
+/// Frame dispatch, in order: EtherType, destination, tags, own source.
 fn dispatch(i: &Interface, frame: &Frame<'_>) -> Option<Counter> {
     let destination = frame.destination();
     let for_us = destination == i.mac.get()
@@ -45,7 +45,7 @@ fn dispatch(i: &Interface, frame: &Frame<'_>) -> Option<Counter> {
     }
 }
 
-/// The acquisition exception (C-3): before the interface holds a usable address, a datagram to
+/// The acquisition exception: before the interface holds a usable address, a datagram to
 /// UDP port 68 whose destination names one host, and so (step 3) came in a frame to our MAC, is
 /// admitted for the DHCP client alone.
 fn acquisition(i: &Interface, packet: &Ipv4Packet<'_>) -> bool {
@@ -56,7 +56,7 @@ fn acquisition(i: &Interface, packet: &Ipv4Packet<'_>) -> bool {
         && UdpDatagram::parse(packet).is_ok_and(|d| d.destination_port().get() == ACQUISITION_PORT)
 }
 
-/// §4.1 steps 3 to 9.
+/// The IPv4 input policy, in order, after the header parsed.
 fn admit(ifaces: &[Interface], i: &Interface, link: MacClass, packet: &Ipv4Packet<'_>) -> Result<Cast, Counter> {
     let (destination, source) = (packet.destination(), packet.source());
     let group = destination.is_broadcast() || destination.is_multicast() || i.is_directed_broadcast(destination);

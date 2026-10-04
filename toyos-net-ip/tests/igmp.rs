@@ -1,4 +1,4 @@
-//! §10: the IGMP host, plus fragments at stage 5 (§11.1) and refusal visibility (§13).
+//! The IGMP host, plus fragments at stage 5 and refusal visibility.
 
 mod common;
 

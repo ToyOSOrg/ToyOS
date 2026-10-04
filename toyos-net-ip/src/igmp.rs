@@ -1,4 +1,4 @@
-//! The IGMP host (§10): IGMPv3 (RFC 9776) for any-source joins, so a joined group's state is
+//! The IGMP host: IGMPv3 (RFC 9776) for any-source joins, so a joined group's state is
 //! always EXCLUDE {} (RFC 5790 §4), with RFC 9776 §7.2.1's IGMPv2 compatibility mode (RFC 2236)
 //! and no IGMPv1 mode: a v1 query is refused and logged. 224.0.0.1 is always joined and never
 //! reported. Records due at one moment leave in one report; a state change's retransmissions
@@ -62,7 +62,7 @@ struct Change {
 struct Group {
     refs: u32,
     change: Option<Change>,
-    /// A pending v3 response's recorded sources: empty for a group response (§10.5).
+    /// A pending v3 response's recorded sources: empty for a group response.
     response: Option<Vec<Ipv4Addr>>,
     /// IGMPv2 mode: ours was the last report on the link (RFC 2236 §3).
     last_reporter: bool,
@@ -136,7 +136,7 @@ fn timer(cx: &Cx<'_>, t: Timer) -> timers::Timer {
     timers::Timer::Igmp(cx.iface, t)
 }
 
-/// RFC 9776 §4 and W-7: internetwork control, TTL 1, Router Alert.
+/// RFC 9776 §4, for the v2 compatibility messages too: internetwork control, TTL 1, Router Alert.
 fn traffic_class() -> TrafficClass {
     TrafficClass::new(48, Ecn::NotEct).unwrap_or(TrafficClass::ZERO)
 }
@@ -277,7 +277,7 @@ pub(crate) fn leave(i: &mut Interface, cx: &mut Cx<'_>, group: MulticastAddr) {
 }
 
 /// Every joined group's join again, as new: after the link came up, or when the interface's first
-/// usable address appeared (§10.3 (6), §10.8).
+/// usable address appeared.
 pub(crate) fn rejoin(i: &mut Interface, cx: &mut Cx<'_>) {
     let groups: Vec<MulticastAddr> = i.igmp.joined_groups().collect();
     let mut batch = Vec::new();
@@ -287,7 +287,7 @@ pub(crate) fn rejoin(i: &mut Interface, cx: &mut Cx<'_>) {
     flush(i, cx, batch);
 }
 
-/// The link went down: every timer stops and the mode returns to v3 (§10.8).
+/// The link went down: every timer stops and the mode returns to v3.
 pub(crate) fn link_down(i: &mut Interface, cx: &mut Cx<'_>) {
     cx.timers.cancel_iface(cx.iface, |t| matches!(t, timers::Timer::Igmp(..)));
     i.igmp.v2_until = None;
@@ -303,7 +303,7 @@ fn router_alert(packet: &Ipv4Packet<'_>) -> bool {
     packet.options().iter().any(|o| matches!(o, Ipv4Option::RouterAlert(_)))
 }
 
-/// A received IGMP message the IP layer admitted (§10.4, §10.7).
+/// A received IGMP message the IP layer admitted.
 pub(crate) fn input(i: &mut Interface, cx: &mut Cx<'_>, packet: &Ipv4Packet<'_>, message: IgmpMessage<'_>) {
     match message {
         IgmpMessage::Query(query) => self::query(i, cx, packet, &query),
@@ -371,7 +371,7 @@ fn query(i: &mut Interface, cx: &mut Cx<'_>, packet: &Ipv4Packet<'_>, query: &Qu
         QueryGroup::General => return cx.timers.arm(timer(cx, Timer::General), at),
         QueryGroup::Specific(group) => group,
     };
-    // One source past the cap is enough to know the list overflows (§10.5 (5)).
+    // One source past the cap is enough to know the list overflows.
     let sources: Vec<Ipv4Addr> = match &query.version {
         QueryVersion::V3(v3) => v3.sources().take(IGMP_QUERY_SOURCES.saturating_add(1)).collect(),
         QueryVersion::V1 | QueryVersion::V2 => Vec::new(),
@@ -399,8 +399,9 @@ fn query(i: &mut Interface, cx: &mut Cx<'_>, packet: &Ipv4Packet<'_>, query: &Qu
 }
 
 /// An IGMPv2 general query: v2 mode for the Older Version Querier Present Interval, 2 × 125 s
-/// plus the query's Max Response Time (RFC 9776 §8.12; IP-D13), and every v3 response and
-/// retransmission cancelled on entry (§7.2.1).
+/// plus the query's Max Response Time (RFC 9776 §8.12, whose "10 times" of it, ambiguous in units,
+/// is read as RFC 3376 §8.12's one), and every v3 response and retransmission cancelled on entry
+/// (RFC 9776 §7.2.1).
 fn enter_v2(i: &mut Interface, cx: &mut Cx<'_>, max: Duration) {
     let until = cx.now.after(QUERY_INTERVAL.saturating_mul(2).saturating_add(max));
     if i.igmp.v2_until.is_none() {

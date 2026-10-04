@@ -1,4 +1,4 @@
-//! §6: the reachability machine.
+//! The reachability machine.
 
 mod common;
 
@@ -874,7 +874,7 @@ fn s_ip_nud_031_a_request_queued_after_the_lifetime_is_not_idle() {
 
 #[test]
 fn s_ip_nud_031_a_request_queued_before_the_lifetime_is_not_idle() {
-    // §6.3's "send, no request pending" just before R's idle lifetime ends: its request waits,
+    // A send with no request pending just before R's idle lifetime ends: its request waits,
     // with no credit, as the lifetime's deadline passes.
     let (mut h, t0) = unreachable_r();
     let end = t0 + 600_000;

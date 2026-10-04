@@ -717,7 +717,7 @@ impl Tcp {
         self.answer(tuple, rst, reset_allowed);
     }
 
-    /// RFC 9293 §3.10.7.2, and admission under the listener's bounds (§12.2). A TIME-WAIT the
+    /// RFC 9293 §3.10.7.2, and admission under the listener's bounds. A TIME-WAIT the
     /// SYN would reopen ends only when the child is admitted.
     fn for_listener(&mut self, index: u32, tuple: Tuple, seg: &In<'_>, now: Instant, reset_allowed: impl FnOnce(Ipv4Addr) -> bool, time_wait: Option<TimeWait>) {
         if seg.rst() {
@@ -1205,8 +1205,8 @@ impl Tcp {
 
     /// What is owed outside a connection, in frames of `credit`: resets for connections that are
     /// gone, answers to segments for no socket, then TIME-WAIT's ACKs.
-    /// `hop` is asked for a 4-tuple once a segment for it is due and before the segment is built
-    /// (`ip.md` §6.7), and the segment is then handed to `sink` with what `hop` answered. What
+    /// `hop` is asked for a 4-tuple once a segment for it is due and before the segment is built,
+    /// and the segment is then handed to `sink` with what `hop` answered. What
     /// waits for its next hop spends nothing and is not asked again until [`Self::wake`]. A failed
     /// next hop drops it, counting `tcp.next-hop-failed`. Returns how many left.
     pub fn transmit_owed<T>(
@@ -1274,8 +1274,8 @@ impl Tcp {
     }
 
     /// One segment of `id`, if one is due, asked for and built as in [`Self::transmit_owed`].
-    /// A failed next hop fails a connect and is the soft error of any other connection
-    /// (`ip.md` §9.6). [`Served::Done`] takes the connection out of the round: it has nothing
+    /// A failed next hop fails a connect and is the soft error of any other connection.
+    /// [`Served::Done`] takes the connection out of the round: it has nothing
     /// due, waits for its next hop, ended, or `id` names nothing; it is offered again once it has
     /// something.
     pub fn serve<T>(&mut self, now: Instant, id: ConnId, mut hop: impl FnMut(&Tuple) -> Hop<T>, mut sink: impl FnMut(&Outgoing<'_>, T)) -> Served {
@@ -1325,7 +1325,7 @@ impl Tcp {
         }
     }
 
-    /// Everything waiting for a next hop asks again: a route may have changed (`ip.md` §3.6).
+    /// Everything waiting for a next hop asks again: a route may have changed.
     pub fn wake_all(&mut self) {
         for (_, parked) in core::mem::take(&mut self.parked) {
             self.parked_answers = self.parked_answers.saturating_sub(parked.answers.len());

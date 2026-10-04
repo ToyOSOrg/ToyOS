@@ -4,12 +4,12 @@
 //! a clock, draws randomness or does I/O.
 //!
 //! **Egress.** Each frame of credit goes to [ip]'s own frames first — ARP, IGMP, ICMP and the
-//! datagrams resolution released (`ip.md` §5.4) — then to what [tcp] owes outside a connection,
+//! datagrams resolution released — then to what [tcp] owes outside a connection,
 //! and otherwise to the round: a deficit round-robin in bytes over every TCP connection and UDP
 //! sender with something to send, in the order each became eligible (RFC 8290 §3, without its new-flows list). A flow
 //! waiting for its next hop leaves the round, and rejoins at its tail when woken. A TCP segment is
 //! built only once its next hop's link address is known, and committed only once its frame is
-//! (`ip.md` §6.7, `tcp.md` §11.3); the send registers with the neighbour entry then. A flow whose
+//! handed off; the send registers with the neighbour entry then. A flow whose
 //! next hop is unresolved or failed builds nothing, spends nothing, and is not asked again until
 //! [ip] reports a change for that next hop, for the routes, or, to a flow a full neighbour table
 //! refused, that the table has room: a waiting flow costs one question per such change. A UDP
@@ -17,9 +17,9 @@
 //!
 //! **Refusals.** Each crate's refusals of legacy or insecure input pass through that crate's
 //! `RefusalLog` here: at most one [`Event::Refused`] per rule in any 10 s, carrying how many
-//! were suppressed since the last (`tcp.md` §14.2, `ip.md` §13.1, `udp-dhcp.md` §U12.2).
+//! were suppressed since the last.
 //!
-//! **Resets for no socket** draw from their own instance of [ip]'s error limiter (`ip.md` IP-D8),
+//! **Resets for no socket** draw from their own instance of [ip]'s error limiter,
 //! keyed by its own secret.
 
 #![cfg_attr(not(test), no_std)]
@@ -77,7 +77,7 @@ pub enum Refusal {
     Udp(toyos_net_udp::Refusal),
 }
 
-/// What the shell acts on: a log line, or an address's fate for the DHCP client (`ip.md` §8.5).
+/// What the shell acts on: a log line, or an address's fate for the DHCP client.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
     /// A line for the log, and how many refusals of its rule it stands for beyond itself.
@@ -503,7 +503,7 @@ impl Shard {
         self.udp.bind(&self.ip, addr, port, draw)
     }
 
-    /// Connects to one unicast peer: the local address is fixed now (`udp-dhcp.md` §U3).
+    /// Connects to one unicast peer: the local address is fixed now.
     pub fn udp_connect(&mut self, now: Instant, id: SocketId, peer: Ipv4Addr, port: u16) -> Result<(), toyos_net_udp::Error> {
         let connected = self.udp.connect(&mut self.ip, id, peer, port);
         self.settle(now);
@@ -523,7 +523,7 @@ impl Shard {
 }
 
 /// Whether `tuple`'s next segment can be built now, peeking its next hop's entry, which does not
-/// move (`ip.md` §6.7 (2)): only a next hop with no entry is resolved, which queues its request.
+/// move: only a next hop with no entry is resolved, which queues its request.
 /// No route is a local destination unreachable (RFC 1122 §3.3.1.1). A flow told to wait is
 /// recorded under what it waits on; one with no route waits on the routes.
 fn hop(ip: &mut Ip, now: Instant, iface: IfIndex, tuple: &Tuple, waiting: &mut BTreeMap<Wait, BTreeSet<Ipv4Addr>>) -> Hop<Via> {
@@ -561,8 +561,8 @@ fn wake(tcp: &mut Tcp, waiting: &mut BTreeMap<Wait, BTreeSet<Ipv4Addr>>, wait: W
     }
 }
 
-/// A segment in its IPv4 datagram and Ethernet frame to `to`: DF, TTL 64, DSCP and ECN 0
-/// (`tcp.md` §19). `None` is a segment longer than a frame carries, which TCP's MTU rules out, or
+/// A segment in its IPv4 datagram and Ethernet frame to `to`: DF, TTL 64, DSCP and ECN 0.
+/// `None` is a segment longer than a frame carries, which TCP's MTU rules out, or
 /// from a source no datagram may carry, which [ip]'s addresses rule out.
 fn tcp_datagram<'f>(out: &Outgoing<'_>, mac: IndividualMac, to: MacAddr, frame: &'f mut [u8; FRAME]) -> Option<&'f [u8]> {
     let datagram = Ipv4Builder {

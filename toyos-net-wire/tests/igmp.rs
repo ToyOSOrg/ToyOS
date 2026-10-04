@@ -268,7 +268,7 @@ fn w1_igmp3_records_layout() {
     assert_eq!(igmp.len(), 24);
 }
 
-/// ip.md W-1: IS_IN (B) is type 1 with B's count and addresses after the group (RFC 9776 §4.2.4).
+/// IS_IN (B) is type 1 with B's count and addresses after the group (RFC 9776 §4.2.4).
 #[test]
 fn w1_igmp3_is_include_lists_its_sources() {
     let sources = [Ipv4Addr::new(192, 0, 2, 9), Ipv4Addr::new(192, 0, 2, 10)];

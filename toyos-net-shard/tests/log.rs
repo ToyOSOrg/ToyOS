@@ -1,6 +1,5 @@
 //! Refusals reach the shell through the shard's per-rule limiter: at most one line per rule in
-//! any 10 s, carrying how many it stood for (`tcp.md` §14.2, `ip.md` §13.1, `udp-dhcp.md`
-//! §U12.2).
+//! any 10 s, carrying how many it stood for.
 
 mod common;
 
@@ -11,7 +10,7 @@ use common::*;
 use toyos_net_ip::Peer;
 use toyos_net_shard::{Event, Refusal};
 
-/// `wire.md` §12: B to A, UDP with a Loose Source Route option.
+/// B to A, UDP with a Loose Source Route option.
 const V_IP_LSRR: &str = "
 47 00 00 26 00 00 40 00 40 11 2e f9 c0 00 02 02
 c0 00 02 01 83 07 04 c0 00 02 fe 00 13 88 13 89

@@ -1,4 +1,4 @@
-//! ICMP errors [ip] validated reach TCP in its own terms (`tcp.md` §13).
+//! ICMP errors [ip] validated reach TCP in its own terms.
 
 mod common;
 
