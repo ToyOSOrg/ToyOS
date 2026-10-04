@@ -1,18 +1,20 @@
-//! The pure half of a kernel backtrace frame: where an ELF file's symbol
-//! tables live, and how much of the record's budget a demangled name gets.
+//! The pure half of a backtrace frame, shared by the kernel and by userland's
+//! namer: where an ELF file's symbol tables live, how much of a record's budget
+//! a demangled name gets, a killed program's frame record ([`frame`]), and the
+//! function a recorded offset falls in ([`name`]), marked when no build-id
+//! vouches for it.
 //!
-//! `kernel/src/symbols.rs` keeps the rest — a `SymbolTable` holding raw
-//! pointers into either the kernel image or pages it owns, because the
+//! `kernel/src/symbols.rs` keeps the rest of the kernel's own frames — a
+//! `SymbolTable` holding raw pointers into the kernel image, because the
 //! resolve path is reached from the fault handler and the panic handler and
 //! may not allocate, take a lock or do I/O. Nothing here needs any of that:
-//! [`locate`] is a function of the bytes a caller already has, and the budget
-//! constants are a function of two other crates' constants. Both halves are
-//! tested here, on the host, against a real binary's own symbol table —
-//! `tests/real.rs` names how it was produced and how to reproduce it.
+//! every function is of the bytes a caller already has.
 //!
-//! `no_std`, no allocation, no `unsafe`. [`locate`] borrows straight out of
-//! its caller's bytes rather than copying them, which is what lets the
-//! kernel's table point directly at the ELF instead of a copy of it.
+//! `no_std`, no allocation, no `unsafe`, and no panic on any input: the kernel
+//! runs it on its crash path and the namer runs it on whatever file a record
+//! names. [`locate`] borrows straight out of its caller's bytes rather than
+//! copying them, which is what lets the kernel's table point directly at the
+//! ELF instead of a copy of it.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -20,9 +22,15 @@
 #[cfg(test)]
 extern crate std;
 
+pub mod frame;
+
 use toyos_abi::log::MAX_RECORD_MESSAGE;
 use toyos_elf::section::{SectionTable, SHT_SYMTAB};
+use toyos_elf::sym::SymTab;
+use toyos_elf::FileHeader;
 use toyos_elide::{widest, Elided, MARKER_MAX};
+
+use frame::BuildId;
 
 /// A backtrace frame's own text: `    ` + `{addr:#x}` + `  ` + `+` +
 /// `{offset:#x}`, with both numbers at their widest — `0x` and sixteen hex
@@ -59,13 +67,12 @@ const _: () = assert!(widest(SYMBOL_HEAD, SYMBOL_TAIL) + FRAME_TEXT <= MAX_RECOR
 /// drift from them again — which it did the first time `FRAME_OVERHEAD` moved.
 const _: () = assert!(SYMBOL_BUDGET == 944 && SYMBOL_HEAD == 451 && SYMBOL_TAIL == 452);
 
-/// A demangled symbol, rendered head-and-tail when it is wider than a record
-/// can carry. `toyos-elide` is the mechanism and the argument.
-///
-/// `toyos-elide`'s own tests are where the seams are checked, on the host,
-/// against characters that straddle both of them.
-pub fn symbol_text<D>(name: D) -> Elided<D, SYMBOL_HEAD, SYMBOL_TAIL> {
-    Elided(name)
+/// A raw symbol as a frame prints it: demangled, and rendered head-and-tail
+/// when it is wider than a record can carry. `toyos-elide` is the mechanism
+/// and the argument; its own tests check the seams, on the host, against
+/// characters that straddle both of them.
+pub fn demangled(raw: &str) -> Elided<rustc_demangle::Demangle<'_>, SYMBOL_HEAD, SYMBOL_TAIL> {
+    Elided(rustc_demangle::demangle(raw))
 }
 
 /// `[offset, offset + len)` of `data`, or `None` when that is not wholly inside
@@ -101,6 +108,66 @@ pub fn locate(data: &[u8]) -> Option<(&[u8], &[u8])> {
     Some((symtab, strtab))
 }
 
+/// Why a recorded frame names no function.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Unnamed {
+    /// The file is no ELF image this crate reads.
+    NotElf(toyos_elf::Error),
+    /// The file's build-id is not the one the record carries: it is another
+    /// build of that name, or one of the two has none.
+    OtherBuild { file: Option<BuildId> },
+    /// The file has no symbol table.
+    NoSymbols,
+    /// No function in the file's symbol table holds the offset.
+    NoSymbol,
+}
+
+/// Whether a name is known to be of the build that ran.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Check {
+    /// The file carries the build-id the record does.
+    BuildId,
+    /// Neither carries one, so nothing tells this build from another build of
+    /// that path: the name is printed, and printed as unchecked.
+    Unchecked,
+}
+
+/// A recorded offset named: the function it falls in, how far into it, and
+/// what vouches that the file is the build that ran.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Named<'a> {
+    pub function: &'a str,
+    pub within: u64,
+    pub check: Check,
+}
+
+/// `<demangled>+<within>`, and ` (unchecked: no build-id)` after a name
+/// [`Check::Unchecked`].
+impl core::fmt::Display for Named<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}+{:#x}", demangled(self.function), self.within)?;
+        match self.check {
+            Check::BuildId => Ok(()),
+            Check::Unchecked => f.write_str(" (unchecked: no build-id)"),
+        }
+    }
+}
+
+/// The function `offset` falls in, and how far into it, out of `file`'s own
+/// symbol table — when `file` is the build `id` names (`None`: a file with no
+/// build-id). The same lookup the kernel names its own frames with.
+pub fn name<'a>(file: &'a [u8], offset: u64, id: Option<&BuildId>) -> Result<Named<'a>, Unnamed> {
+    FileHeader::parse(file).map_err(Unnamed::NotElf)?;
+    let carried = BuildId::find(file, |s| file_range(file, s.offset, s.filesz));
+    if carried.as_ref() != id {
+        return Err(Unnamed::OtherBuild { file: carried });
+    }
+    let check = if carried.is_some() { Check::BuildId } else { Check::Unchecked };
+    let (symtab, strtab) = locate(file).ok_or(Unnamed::NoSymbols)?;
+    let (function, within) = SymTab::new(symtab, strtab).resolve(offset).ok_or(Unnamed::NoSymbol)?;
+    Ok(Named { function, within, check })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,7 +175,7 @@ mod tests {
 
     #[test]
     fn a_short_name_is_untouched() {
-        assert_eq!(symbol_text("core::panic::PanicInfo").to_string(), "core::panic::PanicInfo");
+        assert_eq!(demangled("core::panic::PanicInfo").to_string(), "core::panic::PanicInfo");
     }
 
     /// `SYMBOL_HEAD + SYMBOL_TAIL` is 903 bytes, so a name past that is elided
@@ -117,7 +184,7 @@ mod tests {
     #[test]
     fn a_name_past_head_plus_tail_is_elided() {
         let long = "x".repeat(SYMBOL_HEAD + SYMBOL_TAIL + 1);
-        let rendered = symbol_text(long.as_str()).to_string();
+        let rendered = demangled(&long).to_string();
         assert!(rendered.contains("bytes elided"));
         assert!(rendered.len() <= SYMBOL_BUDGET);
     }
