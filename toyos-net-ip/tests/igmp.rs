@@ -544,7 +544,7 @@ fn s_ip_mod_002_ordinary_refusals_are_not_logged() {
 
     let mut logged: Vec<&str> = Counter::ALL.iter().filter(|c| c.logged()).map(|c| c.name()).collect();
     logged.sort_unstable();
-    let mut section_13_2 = [
+    let mut expected = [
         "ip.source-route",
         "ip.fragment",
         "icmp.redirect",
@@ -558,6 +558,6 @@ fn s_ip_mod_002_ordinary_refusals_are_not_logged() {
         "acd.conflict",
         "acd.defended",
     ];
-    section_13_2.sort_unstable();
-    assert_eq!(logged, section_13_2, "§13.2's logged refusals, and no others");
+    expected.sort_unstable();
+    assert_eq!(logged, expected, "the logged refusals, and no others");
 }

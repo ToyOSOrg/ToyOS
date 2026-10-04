@@ -120,7 +120,7 @@ fn s_ip_in_009_what_a_transport_is_handed() {
 
     assert!(matches!(h.datagram(&syn_to(A)), Some(Delivery::Tcp(..))));
     for (mac, destination) in [(MacAddr::BROADCAST, ip4(255, 255, 255, 255)), (MacAddr::BROADCAST, ip4(192, 0, 2, 255)), (MDNS_MAC, MDNS)] {
-        assert!(h.datagram_to(mac, &syn_to(destination)).is_none(), "tcp.md MUST-57: {destination} reached TCP");
+        assert!(h.datagram_to(mac, &syn_to(destination)).is_none(), "RFC 9293 MUST-57: {destination} reached TCP");
     }
     assert_eq!(h.count(Counter::IpTcpNotUnicast), 3);
 }

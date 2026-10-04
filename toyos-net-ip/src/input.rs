@@ -46,7 +46,7 @@ fn dispatch(i: &Interface, frame: &Frame<'_>) -> Option<Counter> {
 }
 
 /// The acquisition exception: before the interface holds a usable address, a datagram to
-/// UDP port 68 whose destination names one host, and so (step 3) came in a frame to our MAC, is
+/// UDP port 68 whose destination names one host, and so came in a frame to our MAC, is
 /// admitted for the DHCP client alone.
 fn acquisition(i: &Interface, packet: &Ipv4Packet<'_>) -> bool {
     is_host(packet.destination())

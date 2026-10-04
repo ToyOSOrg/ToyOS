@@ -136,7 +136,7 @@ fn timer(cx: &Cx<'_>, t: Timer) -> timers::Timer {
     timers::Timer::Igmp(cx.iface, t)
 }
 
-/// RFC 9776 §4, for the v2 compatibility messages too: internetwork control, TTL 1, Router Alert.
+/// RFC 9776 §4: internetwork control, TTL 1, Router Alert.
 fn traffic_class() -> TrafficClass {
     TrafficClass::new(48, Ecn::NotEct).unwrap_or(TrafficClass::ZERO)
 }

@@ -238,7 +238,7 @@ fn group() -> ReportGroup {
 }
 
 #[test]
-fn w1_igmp3_join_frame() {
+fn igmp3_join_frame() {
     let records = [GroupRecord::ToExclude(group())];
     let datagram = igmp::datagram(source_a(), network_control(), V3ReportBuilder { records: &records });
     let builder = FrameBuilder { destination: MacAddr::multicast(MulticastAddr::IGMPV3_ROUTERS), source: mac_a() };
@@ -247,14 +247,14 @@ fn w1_igmp3_join_frame() {
 }
 
 #[test]
-fn w1_igmp3_leave_current_and_unspecified_source() {
+fn igmp3_leave_current_and_unspecified_source() {
     assert_eq!(emit_v3(IP_A, &[GroupRecord::ToInclude(group())]), hex(V_IGMP3_LEAVE));
     assert_eq!(emit_v3(IP_A, &[GroupRecord::IsExclude(group())]), hex(V_IGMP3_CURRENT));
     assert_eq!(emit_v3(Ipv4Addr::UNSPECIFIED, &[GroupRecord::ToExclude(group())]), hex(V_IGMP3_JOIN_UNSPEC));
 }
 
 #[test]
-fn w1_igmp3_records_layout() {
+fn igmp3_records_layout() {
     let other = ReportGroup::new(MulticastAddr::new(Ipv4Addr::new(239, 1, 2, 3)).unwrap()).unwrap();
     let records = [GroupRecord::ToExclude(group()), GroupRecord::IsExclude(other)];
     let bytes = emit_v3(IP_A, &records);
@@ -270,7 +270,7 @@ fn w1_igmp3_records_layout() {
 
 /// IS_IN (B) is type 1 with B's count and addresses after the group (RFC 9776 §4.2.4).
 #[test]
-fn w1_igmp3_is_include_lists_its_sources() {
+fn igmp3_is_include_lists_its_sources() {
     let sources = [Ipv4Addr::new(192, 0, 2, 9), Ipv4Addr::new(192, 0, 2, 10)];
     let records = [GroupRecord::IsInclude(group(), &sources), GroupRecord::IsExclude(group())];
     let bytes = emit_v3(IP_A, &records);

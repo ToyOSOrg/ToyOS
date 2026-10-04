@@ -403,7 +403,7 @@ fn s_ip_nud_022_a_full_table_evicts_in_order() {
         assert_eq!(h.send(WIDE_A, new, 5001, 5001, b"x"), Ok(None));
         assert!(matches!(h.state(new), Some(Nud::Incomplete(_))));
         let gone = left.remove(0);
-        assert!(h.state(gone).is_none(), "§6.8's order: {gone} next");
+        assert!(h.state(gone).is_none(), "eviction's order: {gone} next");
         assert!(left.iter().all(|a| h.state(*a).is_some()));
     }
     assert_eq!(h.send(WIDE_A, neighbour(9_003), 5001, 5001, b"x"), Err(Counter::NbTableFull));
