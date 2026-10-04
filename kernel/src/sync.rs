@@ -4,12 +4,12 @@ use core::ops::{Deref, DerefMut};
 #[cfg(not(feature = "loom"))]
 use core::cell::UnsafeCell;
 #[cfg(not(feature = "loom"))]
-use core::sync::atomic::{fence, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 #[cfg(feature = "loom")]
 use crate::cell::UnsafeCell;
 #[cfg(feature = "loom")]
-use loom::sync::atomic::{fence, AtomicU32, AtomicU64, Ordering};
+use loom::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 // Unlock publishes through `now`, not `ticket`; the load that reads `now`
 // is the one that must carry the acquire.
@@ -212,6 +212,10 @@ impl<T> Drop for LockGuard<'_, T> {
 /// drops it so `kernel-loom`'s `owed_lock` model can prove it is load-bearing.
 #[cfg(not(feature = "owed-fence-off"))]
 fn owed_fence() {
+    #[cfg(not(feature = "loom"))]
+    use core::sync::atomic::fence;
+    #[cfg(feature = "loom")]
+    use loom::sync::atomic::fence;
     fence(Ordering::SeqCst);
 }
 #[cfg(feature = "owed-fence-off")]
