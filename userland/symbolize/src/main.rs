@@ -136,9 +136,10 @@ fn under(root: &Path, file: &str) -> Option<PathBuf> {
 
 /// Whether Win32 may open `part` as a device rather than a file: the reserved
 /// names of learn.microsoft.com/windows/win32/fileio/naming-a-file, "Naming
-/// Conventions", in any case and followed by any extension.
+/// Conventions", and the console's `CONIN$` and `CONOUT$`, in any case and
+/// followed by any extension.
 fn names_a_device(part: &str) -> bool {
-    const RESERVED: [&str; 4] = ["CON", "PRN", "AUX", "NUL"];
+    const RESERVED: [&str; 6] = ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"];
     let stem = part.split_once('.').map_or(part, |(stem, _)| stem).trim_end_matches(' ');
     let numbered = |prefix: &str| {
         stem.get(..3).is_some_and(|head| head.eq_ignore_ascii_case(prefix))
@@ -171,10 +172,10 @@ mod tests {
 
     #[test]
     fn a_name_windows_reserves_for_a_device_is_refused() {
-        for file in ["/home/CON", "/home/nul.txt", "/home/Aux .tar.gz", "/home/com1", "/home/LPT\u{b9}"] {
+        for file in ["/home/CON", "/home/nul.txt", "/home/Aux .tar.gz", "/home/com1", "/home/LPT\u{b9}", "/home/CONIN$", "/home/conout$.log"] {
             assert_eq!(under(Path::new("img"), file), None, "{file}");
         }
-        for file in ["/home/CONSOLE", "/home/com10", "/home/nulls.txt", "/home/LPT"] {
+        for file in ["/home/CONSOLE", "/home/com10", "/home/nulls.txt", "/home/LPT", "/home/CONIN"] {
             assert!(under(Path::new("img"), file).is_some(), "{file}");
         }
     }
