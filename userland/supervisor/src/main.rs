@@ -346,13 +346,16 @@ fn main() {
     // Before anything is started, and before the supervisor says anything: from here
     // the supervisor's own lines are records in its ring.
     let log = Log::open();
+    say_release();
 
     let syscap: SysCap = Endowments::get()
         .take(SYSCAP_LABEL)
         .expect("supervisor: the kernel spawns this program holding the system capability");
 
-    let text = read_manifest()
+    let bytes = read_root(toyos_manifest::GUEST_PATH)
         .unwrap_or_else(|e| panic!("supervisor: cannot read {}: {e:?}", toyos_manifest::GUEST_PATH));
+    let text = String::from_utf8(bytes)
+        .unwrap_or_else(|_| panic!("supervisor: {} is not text", toyos_manifest::GUEST_PATH));
     // For the machine's life, and `'static` so a launch's path can be resolved
     // against it on the supervisor's file worker.
     let system: &'static Manifest = Box::leak(Box::new(toyos_manifest::parse(&text)));
@@ -2404,15 +2407,15 @@ fn storage_endowment(program: &Program, role: Option<&str>, syscap: &SysCap) -> 
     Ok(storage)
 }
 
-/// The manifest, off ROOT through the kernel's own `open`.
+/// A file of ROOT, through the kernel's own `open`.
 ///
 /// **Not through std**: std resolves a path through this process's namespace,
 /// and the first path it resolves fixes that namespace for the process's life.
-/// The supervisor builds its namespace out of the manifest, so the manifest is read
+/// The supervisor builds its namespace out of the manifest, so ROOT's files are read
 /// before std is asked anything.
-fn read_manifest() -> Result<String, SyscallError> {
+fn read_root(path: &str) -> Result<Vec<u8>, SyscallError> {
     use toyos_abi::syscall::{self, OpenFlags};
-    let handle = syscall::open(toyos_manifest::GUEST_PATH.as_bytes(), OpenFlags::READ)?;
+    let handle = syscall::open(path.as_bytes(), OpenFlags::READ)?;
     let mut bytes = Vec::new();
     let mut buf = [0u8; 4096];
     let read = loop {
@@ -2423,6 +2426,23 @@ fn read_manifest() -> Result<String, SyscallError> {
         }
     };
     syscall::close(handle);
-    read?;
-    String::from_utf8(bytes).map_err(|_| SyscallError::InvalidArgument)
+    read.map(|()| bytes)
+}
+
+/// Say which build this machine runs: the first thing it says, so a boot
+/// that dies past here names its build in its log.
+fn say_release() {
+    let path = toyos_osrelease::GUEST_PATH;
+    let bytes = read_root(path).unwrap_or_else(|e| panic!("supervisor: cannot read {path}: {e:?}"));
+    let release = toyos_osrelease::parse(&bytes)
+        .unwrap_or_else(|e| panic!("supervisor: {path} is not one the build wrote: {e:?}"));
+    say!(
+        "{}{} {}, committed {} UTC, toolchain {}, {}",
+        toyos_osrelease::SAID,
+        release.commit.as_str(),
+        release.tree,
+        toyos_wallclock::Civil::from_unix_secs(release.committed),
+        release.toolchain.as_str(),
+        release.arch.machine()
+    );
 }
