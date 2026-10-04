@@ -1659,7 +1659,6 @@ impl<'a> Machine<'a> {
                 _ => return Err(Error::Rule("ConcatenateResTemplate of a template without an End Tag (§6.4.2.9)")),
             }
         }
-        bounded(out.len())?;
         out.push(0x79);
         let sum = out.iter().fold(0u8, |s, &x| s.wrapping_add(x));
         out.push(0u8.wrapping_sub(sum));

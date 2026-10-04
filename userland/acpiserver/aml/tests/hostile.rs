@@ -339,13 +339,14 @@ fn waits_and_stalls_are_bounded_in_time_asked() {
 /// once the method exits, even after its slot is reused.
 #[test]
 fn a_reference_outliving_its_object_names_nothing() {
+    // MAIN's own Name reuses TMP's slot and is alive when the old
+    // reference is followed.
     let (mut i, mut m) = loaded(&cat(&[
         &method("MAKE", 0, &cat(&[&def_name("TMP", &int(7)), &ret(&ref_of(&name("TMP")))])),
-        &method("REUS", 0, &cat(&[&def_name("OTHR", &int(9)), &ret(&name("OTHR"))])),
         &method(
             "MAIN",
             0,
-            &cat(&[&store(&name("MAKE"), &local(0)), &store(&name("REUS"), &local(1)), &ret(&deref(&local(0)))]),
+            &cat(&[&store(&name("MAKE"), &local(0)), &def_name("OTHR", &int(9)), &ret(&deref(&local(0)))]),
         ),
     ]));
     assert!(matches!(i.evaluate(&mut m, "\\MAIN", &[]), Err(Error::NotFound(_))));
