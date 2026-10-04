@@ -437,8 +437,6 @@ pub struct H {
     pub hop: Hops,
     /// Hop questions asked so far.
     pub asked: usize,
-    /// The sink refuses every frame.
-    pub unframed: bool,
     /// The connections [`pull`] takes turns among.
     pub round: VecDeque<ConnId>,
 }
@@ -466,7 +464,6 @@ impl H {
             events: Vec::new(),
             hop: Box::new(|_, _| Hop::Ready(())),
             asked: 0,
-            unframed: false,
             round: VecDeque::new(),
         }
     }
@@ -547,17 +544,12 @@ impl H {
     pub fn transmit(&mut self) -> Vec<O> {
         let credit = self.credit.unwrap_or(usize::MAX);
         let mut raw = Vec::new();
-        let (now, t, hop, asked, unframed, round) = (self.now, self.t, &mut self.hop, &mut self.asked, self.unframed, &mut self.round);
+        let (now, t, hop, asked, round) = (self.now, self.t, &mut self.hop, &mut self.asked, &mut self.round);
         let ask = |tuple: &Tuple| {
             *asked += 1;
             hop(t, tuple)
         };
-        pull(&mut self.tcp, round, now, credit, ask, |out, ()| {
-            if !unframed {
-                raw.push(datagram(out));
-            }
-            !unframed
-        });
+        pull(&mut self.tcp, round, now, credit, ask, |out, ()| raw.push(datagram(out)));
         if let Some(c) = self.credit.as_mut() {
             *c = c.saturating_sub(raw.len());
         }
@@ -825,22 +817,20 @@ pub fn unreachable(code: u8) -> toyos_net_wire::icmp::UnreachableCode {
 
 /// A transmit opportunity as a shard composes one, with one segment per turn in place of its
 /// byte round: what [tcp] owes outside a connection first, then each connection of `round` in
-/// turn, `round` keeping its order between opportunities. A connection whose frame was refused
-/// waits at the round's head for the next opportunity. Returns how many left.
+/// turn, `round` keeping its order between opportunities. Returns how many left.
 pub fn pull<T>(
     tcp: &mut Tcp,
     round: &mut VecDeque<ConnId>,
     now: Instant,
     credit: usize,
     mut hop: impl FnMut(&Tuple) -> Hop<T>,
-    mut sink: impl FnMut(&Outgoing<'_>, T) -> bool,
+    mut sink: impl FnMut(&Outgoing<'_>, T),
 ) -> usize {
     let mut sent = tcp.transmit_owed(now, credit, &mut hop, &mut sink);
     for gone in tcp.drain_gone() {
         round.retain(|id| *id != gone);
     }
     round.extend(tcp.drain_eligible());
-    let mut refused = Vec::new();
     while sent < credit {
         let Some(id) = round.pop_front() else { break };
         match tcp.serve(now, id, &mut hop, &mut sink) {
@@ -849,11 +839,7 @@ pub fn pull<T>(
                 round.push_back(id);
             }
             Served::Done => {}
-            Served::Refused => refused.push(id),
         }
-    }
-    for id in refused.into_iter().rev() {
-        round.push_front(id);
     }
     sent
 }

@@ -273,11 +273,11 @@ pub enum Hop<T> {
 }
 
 /// One flow's way out of a transmit opportunity: the hop question, asked once a segment is due and
-/// before it is built (`ip.md` §6.7 (1)), then the segment's frame, built before anything about the
-/// segment is committed (§11.3). Either refusing leaves everything owed as it was.
+/// before it is built (`ip.md` §6.7 (1)), then the segment, handed off before anything about it is
+/// committed (§11.3). A next hop not ready leaves everything owed as it was.
 pub(crate) trait Exit<T> {
     fn ask(&mut self) -> Result<T, NotReady>;
-    fn send(&mut self, via: T, segment: &conn::Out, payload: (&[u8], &[u8])) -> Result<(), NotReady>;
+    fn send(&mut self, via: T, segment: &conn::Out, payload: (&[u8], &[u8]));
 }
 
 /// Why a due segment did not leave.
@@ -285,8 +285,6 @@ pub(crate) trait Exit<T> {
 pub(crate) enum NotReady {
     Pending,
     Unreachable,
-    /// The caller could not frame it.
-    Unframed,
 }
 
 impl<T> Hop<T> {

@@ -119,7 +119,7 @@ struct Via {
 }
 
 /// A flow of the round: one TCP connection, or one UDP sender.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Flow {
     Tcp(ConnId),
     Udp(Sender),
@@ -283,7 +283,6 @@ impl Shard {
                     (Served::Sent, Some(len)) => Outcome { frame: Some(len), leaves: false },
                     (Served::Done, None) => Outcome { frame: None, leaves: true },
                     (Served::Sent, None) | (Served::Done, Some(_)) => unreachable!("[tcp] answers Sent exactly when the sink framed a segment"),
-                    (Served::Refused, _) => unreachable!("the shard's sink frames every segment"),
                 },
                 Flow::Udp(sender) => self.udp_frame(now, sender, sink),
             };
@@ -310,7 +309,7 @@ impl Shard {
         &mut self,
         now: Instant,
         sink: &mut impl FnMut(&[u8]),
-        send: impl FnOnce(&mut Tcp, &mut dyn FnMut(&Tuple) -> Hop<Via>, &mut dyn FnMut(&Outgoing<'_>, Via) -> bool) -> R,
+        send: impl FnOnce(&mut Tcp, &mut dyn FnMut(&Tuple) -> Hop<Via>, &mut dyn FnMut(&Outgoing<'_>, Via)) -> R,
     ) -> (R, Option<i32>) {
         let Self { ip, iface, mac, tcp, frame, waiting, .. } = self;
         let iface = *iface;
@@ -319,7 +318,6 @@ impl Shard {
             let Some(bytes) = tcp_datagram(out, *mac, via.mac, frame) else { unreachable!("TCP's MTU, [tcp]'s bounds and [ip]'s addresses fit every segment in a frame") };
             sink(bytes);
             built = Some((via.next_hop, out.source, charge(bytes)));
-            true
         });
         let Some((next_hop, source, len)) = built else { return (done, None) };
         // The send the neighbour machine counts: STALE moves to DELAY (RFC 4861 §7.3.3).
@@ -399,8 +397,9 @@ impl Shard {
             tcp.wake_all();
         }
         let head = self.round.front().map(|m| m.flow);
-        for flow in tcp.drain_gone().map(Flow::Tcp).chain(udp.drain_gone().map(Flow::Udp)) {
-            self.round.retain(|m| m.flow != flow);
+        let gone: BTreeSet<Flow> = tcp.drain_gone().map(Flow::Tcp).chain(udp.drain_gone().map(Flow::Udp)).collect();
+        if !gone.is_empty() {
+            self.round.retain(|m| !gone.contains(&m.flow));
         }
         if self.round.front().map(|m| m.flow) != head {
             self.turn = false;

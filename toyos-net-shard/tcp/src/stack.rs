@@ -28,7 +28,7 @@ const EPHEMERAL_COUNT: u16 = 16_384;
 /// Answers to segments for no socket, waiting for credit or for their next hop.
 const ANSWERS: usize = 64;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ConnId {
     index: u32,
     generation: u32,
@@ -46,8 +46,6 @@ pub enum Served {
     Sent,
     /// Nothing more until it is offered again: the connection leaves the round.
     Done,
-    /// The sink refused its frame.
-    Refused,
 }
 
 /// A segment at the moment it leaves: headers from the state of now, payload borrowed from the
@@ -163,9 +161,7 @@ struct Answer {
     rst: Rst,
 }
 
-/// What is owed and not offered: under a remote address, what waits for its next hop until
-/// [`Tcp::wake`] names it; within one [`Tcp::transmit_owed`], what a refused frame left owed until
-/// the call ends.
+/// What waits for the next hop of a remote address until [`Tcp::wake`] names it.
 #[derive(Default)]
 struct Parked {
     stubs: Vec<Tuple>,
@@ -181,7 +177,7 @@ impl Parked {
 }
 
 /// One flow's way out of a transmit opportunity: `hop` answers for its 4-tuple, and `sink` takes
-/// the frame or refuses it.
+/// the segment.
 struct Way<'a, H, S> {
     tuple: Tuple,
     hop: &'a mut H,
@@ -189,12 +185,12 @@ struct Way<'a, H, S> {
     scratch: &'a mut Vec<u8>,
 }
 
-impl<T, H: FnMut(&Tuple) -> Hop<T>, S: FnMut(&Outgoing<'_>, T) -> bool> Exit<T> for Way<'_, H, S> {
+impl<T, H: FnMut(&Tuple) -> Hop<T>, S: FnMut(&Outgoing<'_>, T)> Exit<T> for Way<'_, H, S> {
     fn ask(&mut self) -> Result<T, NotReady> {
         (self.hop)(&self.tuple).ready()
     }
 
-    fn send(&mut self, via: T, segment: &Out, (first, second): (&[u8], &[u8])) -> Result<(), NotReady> {
+    fn send(&mut self, via: T, segment: &Out, (first, second): (&[u8], &[u8])) {
         let Self { tuple, sink, scratch, .. } = self;
         let payload = if second.is_empty() {
             first
@@ -204,11 +200,7 @@ impl<T, H: FnMut(&Tuple) -> Hop<T>, S: FnMut(&Outgoing<'_>, T) -> bool> Exit<T> 
             scratch.extend_from_slice(second);
             scratch.as_slice()
         };
-        if sink(&builder(segment, tuple, payload), via) {
-            Ok(())
-        } else {
-            Err(NotReady::Unframed)
-        }
+        sink(&builder(segment, tuple, payload), via);
     }
 }
 
@@ -225,7 +217,7 @@ pub struct Tcp {
     deadlines: BTreeSet<(Instant, u32)>,
     /// Connections that became eligible for the caller's round since it last drained them.
     eligible: Vec<ConnId>,
-    /// Connections freed while in the caller's round, since it last drained them.
+    /// Connections freed while offered to the caller's round, since it last drained them.
     gone: Vec<ConnId>,
     stubs: VecDeque<Tuple>,
     answers: VecDeque<Answer>,
@@ -454,13 +446,7 @@ impl Tcp {
         // Its index may name another connection next.
         self.unpark(remote, |p| p.conns.retain(|&i| i != index));
         if conn.queued && !parked {
-            let id = ConnId { index, generation };
-            match self.eligible.iter().position(|&e| e == id) {
-                Some(at) => {
-                    self.eligible.remove(at);
-                }
-                None => self.gone.push(id),
-            }
+            self.gone.push(ConnId { index, generation });
         }
         if let Some(at) = conn.deadline {
             self.deadlines.remove(&(at, index));
@@ -1220,36 +1206,28 @@ impl Tcp {
     /// What is owed outside a connection, in frames of `credit`: resets for connections that are
     /// gone, answers to segments for no socket, then TIME-WAIT's ACKs (architecture §3.3 (2)).
     /// `hop` is asked for a 4-tuple once a segment for it is due and before the segment is built
-    /// (`ip.md` §6.7), and the segment is then handed to `sink` with what `hop` answered, counting
-    /// as sent only if `sink` framed it. What waits for its next hop spends nothing and is not asked
-    /// again until [`Self::wake`]. A failed next hop drops it, counting `tcp.next-hop-failed`. A
-    /// refused frame counts `tcp.frame-refused` and commits nothing: it is offered again at the next
-    /// call, never in this one. Returns how many left.
+    /// (`ip.md` §6.7), and the segment is then handed to `sink` with what `hop` answered. What
+    /// waits for its next hop spends nothing and is not asked again until [`Self::wake`]. A failed
+    /// next hop drops it, counting `tcp.next-hop-failed`. Returns how many left.
     pub fn transmit_owed<T>(
         &mut self,
         now: Instant,
         credit: usize,
         mut hop: impl FnMut(&Tuple) -> Hop<T>,
-        mut sink: impl FnMut(&Outgoing<'_>, T) -> bool,
+        mut sink: impl FnMut(&Outgoing<'_>, T),
     ) -> usize {
         let mut sent = 0usize;
-        let mut refused = Parked::default();
         while sent < credit {
             if let Some(tuple) = self.stubs.pop_front() {
                 let Some(&Entry::Stub(rst, _)) = self.demux.get(&tuple) else { continue };
                 let mut way = Way { tuple, hop: &mut hop, sink: &mut sink, scratch: &mut self.scratch };
-                match way.ask().and_then(|via| way.send(via, &Out::rst(&rst), NO_PAYLOAD)) {
+                match way.ask().map(|via| way.send(via, &Out::rst(&rst), NO_PAYLOAD)) {
                     Ok(()) => sent = sent.saturating_add(1),
                     Err(NotReady::Pending) => {
                         self.parked.entry(tuple.remote.addr).or_default().stubs.push(tuple);
                         continue;
                     }
                     Err(NotReady::Unreachable) => self.log.count(Counter::NextHopFailed),
-                    Err(NotReady::Unframed) => {
-                        self.log.count(Counter::FrameRefused);
-                        refused.stubs.push(tuple);
-                        continue;
-                    }
                 }
                 if let Some(Entry::Stub(_, Some(tw))) = self.demux.remove(&tuple) {
                     self.enter_time_wait(tuple, tw, false);
@@ -1258,17 +1236,13 @@ impl Tcp {
             }
             if let Some(answer) = self.answers.pop_front() {
                 let mut way = Way { tuple: answer.tuple, hop: &mut hop, sink: &mut sink, scratch: &mut self.scratch };
-                match way.ask().and_then(|via| way.send(via, &Out::rst(&answer.rst), NO_PAYLOAD)) {
+                match way.ask().map(|via| way.send(via, &Out::rst(&answer.rst), NO_PAYLOAD)) {
                     Ok(()) => sent = sent.saturating_add(1),
                     Err(NotReady::Pending) => {
                         self.parked.entry(answer.tuple.remote.addr).or_default().answers.push(answer);
                         self.parked_answers = self.parked_answers.saturating_add(1);
                     }
                     Err(NotReady::Unreachable) => self.log.count(Counter::NextHopFailed),
-                    Err(NotReady::Unframed) => {
-                        self.log.count(Counter::FrameRefused);
-                        refused.answers.push(answer);
-                    }
                 }
                 continue;
             }
@@ -1276,29 +1250,25 @@ impl Tcp {
             let Some(Entry::TimeWait(tw)) = self.demux.get(&tuple) else { continue };
             let ack = tw.ack(now);
             let mut way = Way { tuple, hop: &mut hop, sink: &mut sink, scratch: &mut self.scratch };
-            match way.ask().and_then(|via| way.send(via, &ack, NO_PAYLOAD)) {
+            match way.ask().map(|via| way.send(via, &ack, NO_PAYLOAD)) {
                 Ok(()) => sent = sent.saturating_add(1),
                 Err(NotReady::Pending) => self.parked.entry(tuple.remote.addr).or_default().time_waits.push(tuple),
                 Err(NotReady::Unreachable) => self.log.count(Counter::NextHopFailed),
-                Err(NotReady::Unframed) => {
-                    self.log.count(Counter::FrameRefused);
-                    refused.time_waits.push(tuple);
-                }
             }
         }
-        self.requeue(refused);
         sent
     }
 
     /// Connections offered to the caller's round since the last call, each once, in the order
-    /// they became eligible: a connection is offered again only after [`Self::serve`] answered
-    /// [`Served::Done`] for it.
-    pub fn drain_eligible(&mut self) -> alloc::vec::Drain<'_, ConnId> {
-        self.eligible.drain(..)
+    /// they became eligible, less those freed since: a connection is offered again only after
+    /// [`Self::serve`] answered [`Served::Done`] for it.
+    pub fn drain_eligible(&mut self) -> impl Iterator<Item = ConnId> + '_ {
+        let Self { eligible, conns, .. } = self;
+        eligible.drain(..).filter(|id| conns.get(usize::try_from(id.index).unwrap_or(usize::MAX)).is_some_and(|s| s.generation == id.generation && s.value.is_some()))
     }
 
-    /// Connections freed while in the caller's round since the last call, each once: the caller
-    /// takes each out of its round. One freed before the caller drained it is never offered.
+    /// Connections freed while offered to the caller since the last call, each once: the caller
+    /// takes each out of its round, where one it never drained is not.
     pub fn drain_gone(&mut self) -> alloc::vec::Drain<'_, ConnId> {
         self.gone.drain(..)
     }
@@ -1307,8 +1277,8 @@ impl Tcp {
     /// A failed next hop fails a connect and is the soft error of any other connection
     /// (`ip.md` §9.6). [`Served::Done`] takes the connection out of the round: it has nothing
     /// due, waits for its next hop, ended, or `id` names nothing; it is offered again once it has
-    /// something. [`Served::Refused`] commits nothing and leaves the connection the caller's.
-    pub fn serve<T>(&mut self, now: Instant, id: ConnId, mut hop: impl FnMut(&Tuple) -> Hop<T>, mut sink: impl FnMut(&Outgoing<'_>, T) -> bool) -> Served {
+    /// something.
+    pub fn serve<T>(&mut self, now: Instant, id: ConnId, mut hop: impl FnMut(&Tuple) -> Hop<T>, mut sink: impl FnMut(&Outgoing<'_>, T)) -> Served {
         let index = id.index;
         let Some(conn) = slot(&mut self.conns, index, id.generation) else { return Served::Done };
         let tuple = conn.tuple;
@@ -1340,10 +1310,6 @@ impl Tcp {
                 self.log.count(Counter::NextHopFailed);
                 self.park(index, tuple.remote.addr);
                 Served::Done
-            }
-            Err(NotReady::Unframed) => {
-                self.log.count(Counter::FrameRefused);
-                Served::Refused
             }
         };
         self.settle_deadline(index, now);

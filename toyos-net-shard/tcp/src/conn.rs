@@ -1045,7 +1045,8 @@ impl Sync {
         let ts = self.ts.map(|ts| ts.option(now));
         let out = Out { seq, kind: Kind::Ack { ack: self.rx.next, push, fin }, window, ts, sack };
         let offset = self.tx.offset(seq).min(self.tx.buf.len());
-        exit.send(via, &out, self.tx.buf.slices(offset, usize::try_from(len).unwrap_or(0)))
+        exit.send(via, &out, self.tx.buf.slices(offset, usize::try_from(len).unwrap_or(0)));
+        Ok(())
     }
 
     /// A segment without sequence space at `seq`: it discharges every owed acknowledgment.

@@ -116,8 +116,6 @@ pub type Rewrite = Box<dyn FnMut(usize, &O) -> Option<Vec<u8>>>;
 pub type Check = Box<dyn FnMut(usize, &mut Tcp, Instant, Option<&O>)>;
 /// A node's answer to one hop question (`ip.md` §6.7).
 pub type Hops = Box<dyn FnMut(usize) -> Hop<()>>;
-/// Whether a node's device frames the segment it is handed.
-pub type Frames = Box<dyn FnMut(usize) -> bool>;
 
 pub struct Net {
     pub now: u64,
@@ -145,8 +143,6 @@ pub struct Net {
     pub check: Option<Check>,
     /// Every next hop is known when `None`.
     pub hop: Option<Hops>,
-    /// Every frame is built when `None`.
-    pub framed: Option<Frames>,
 }
 
 pub fn ns(ms: u64) -> u64 {
@@ -196,7 +192,6 @@ impl Net {
             keep_streams: false,
             check: None,
             hop: None,
-            framed: None,
         }
     }
 
@@ -319,7 +314,7 @@ impl Net {
     fn transmit(&mut self, node: usize) {
         let now = self.instant(node);
         let ms = self.now / 1_000_000;
-        let Self { nodes, hop, framed, .. } = self;
+        let Self { nodes, hop, .. } = self;
         let n = &mut nodes[node];
         let credit = match n.credit_per_ms {
             None => usize::MAX,
@@ -333,13 +328,7 @@ impl Net {
         };
         let mut out = Vec::new();
         let ask = |_: &Tuple| hop.as_mut().map_or(Hop::Ready(()), |hop| hop(node));
-        let sent = super::pull(&mut n.tcp, &mut n.round, now, credit, ask, |o, ()| {
-            let built = framed.as_mut().is_none_or(|framed| framed(node));
-            if built {
-                out.push(datagram(o));
-            }
-            built
-        });
+        let sent = super::pull(&mut n.tcp, &mut n.round, now, credit, ask, |o, ()| out.push(datagram(o)));
         if n.credit_per_ms.is_some() {
             n.credit -= sent;
         }

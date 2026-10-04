@@ -115,8 +115,8 @@ fn s_udp_us_011_close_frees_the_port_at_once() {
 }
 
 // No id: a closed socket's turn goes with it (architecture §3.3 holds nothing without a bound).
-// One the caller has not drained is never offered; one in the caller's round is named once, for
-// the caller to take out.
+// One the caller has not drained is never offered; one closed while offered is named once, for
+// the caller to take out of its round.
 #[test]
 fn closing_leaves_no_turn_behind() {
     let mut u = U::uf();
@@ -126,7 +126,7 @@ fn closing_leaves_no_turn_behind() {
         u.udp.close(id).unwrap();
     }
     assert_eq!(u.udp.drain_eligible().collect::<Vec<_>>(), [Sender::Closed]);
-    assert_eq!(u.udp.drain_gone().count(), 0);
+    assert_eq!(u.udp.drain_gone().count(), 1_000);
 
     let id = u.bind(ANY, 5002).unwrap();
     u.udp.send_to(&mut u.ip, id, B, 9, b"x").unwrap();
