@@ -1204,7 +1204,7 @@ impl Tcp {
     // ---- egress ----
 
     /// What is owed outside a connection, in frames of `credit`: resets for connections that are
-    /// gone, answers to segments for no socket, then TIME-WAIT's ACKs (architecture §3.3 (2)).
+    /// gone, answers to segments for no socket, then TIME-WAIT's ACKs.
     /// `hop` is asked for a 4-tuple once a segment for it is due and before the segment is built
     /// (`ip.md` §6.7), and the segment is then handed to `sink` with what `hop` answered. What
     /// waits for its next hop spends nothing and is not asked again until [`Self::wake`]. A failed

@@ -6,7 +6,7 @@
 //! **Egress.** Each frame of credit goes to [ip]'s own frames first — ARP, IGMP, ICMP and the
 //! datagrams resolution released (`ip.md` §5.4) — then to what [tcp] owes outside a connection,
 //! and otherwise to the round: a deficit round-robin in bytes over every TCP connection and UDP
-//! sender with something to send, in the order each became eligible (architecture §3.3). A flow
+//! sender with something to send, in the order each became eligible (RFC 8290 §3, without its new-flows list). A flow
 //! waiting for its next hop leaves the round, and rejoins at its tail when woken. A TCP segment is
 //! built only once its next hop's link address is known, and committed only once its frame is
 //! (`ip.md` §6.7, `tcp.md` §11.3); the send registers with the neighbour entry then. A flow whose
@@ -142,7 +142,7 @@ struct Outcome {
     leaves: bool,
 }
 
-/// The quantum: the largest frame the interface sends (architecture §3.3).
+/// The quantum: the largest frame the interface sends (RFC 8290 §5.2.4).
 const QUANTUM: i32 = {
     let [a, b, c, d, rest @ ..] = FRAME.to_le_bytes();
     assert!(matches!(rest, [0, 0, 0, 0]) && d < 0x80, "a frame's length fits an i32");
@@ -266,7 +266,7 @@ impl Shard {
         spent
     }
 
-    /// One frame of the round's (architecture §3.3). The head's turn adds the quantum to its
+    /// One frame of the round's. The head's turn adds the quantum to its
     /// deficit once, however many opportunities the turn spans; the flow is served while the
     /// deficit is above 0, each frame's length charged as it leaves, and then goes to the tail
     /// keeping its deficit. A flow with nothing left leaves the round, its deficit with it: a UDP
@@ -620,8 +620,8 @@ mod tests {
         (shard, now)
     }
 
-    // No id: a connection freed while in the round leaves it at once (architecture §3.3 holds nothing
-    // without a bound), while the device offers nothing.
+    // No id: a connection freed while in the round leaves it at once, while the device offers
+    // nothing: the round holds nothing without a bound.
     #[test]
     fn a_connection_freed_in_the_round_leaves_it() {
         let (mut shard, now) = verified();

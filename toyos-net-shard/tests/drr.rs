@@ -1,7 +1,8 @@
-//! The shard's deficit round-robin over flows (architecture §3.3, DRR-01–03): A at 192.0.2.1
+//! The shard's deficit round-robin over flows (DRR-01–03): A at 192.0.2.1
 //! against B, C and D at .2, .3 and .4, each resolved in A's table, with A's credit only at the
-//! opportunities a scenario names. Each expected order is derived by hand from §3.3's rules with
-//! Q = 1,514, the way RFC 8290 §4.2's scheduler charges a flow, its deficit allowed below zero.
+//! opportunities a scenario names. Each expected order is derived by hand from the shard's egress
+//! rules with Q = 1,514 (RFC 8290 §5.2.4), the way RFC 8290 §4.2's scheduler charges a flow, its
+//! deficit allowed below zero.
 
 mod common;
 
@@ -203,7 +204,7 @@ fn opportunity_frames(f: &mut Fixture, credit: usize) -> Vec<Vec<u8>> {
     out
 }
 
-// No id: a sender leaves the round as its last datagram leaves, its debt with it (§3.3). U ends
+// No id: a sender leaves the round as its last datagram leaves, its debt with it. U ends
 // its turn on its last datagram owing 570 bytes, a connection with 100 bytes becomes eligible, and
 // U refills: U rejoins behind it with a fresh deficit and sends two frames on one quantum.
 #[test]
