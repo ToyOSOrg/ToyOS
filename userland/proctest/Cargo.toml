@@ -1,5 +1,6 @@
 [package]
 name = "proctest"
+description = "Test-only: subprocess creation, piped I/O and an interactive child, checked from inside a ToyOS guest."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"

@@ -339,6 +339,10 @@ struct Payload;
 impl SchedPayload for Payload {
     type Ctx = ();
     type ShareLock = LoomLock<ShareState>;
+
+    fn name(&self) -> u64 {
+        0
+    }
 }
 
 /// The full message set (`crate::msg::Msg`), as opposed to the reduced [`Msg`]

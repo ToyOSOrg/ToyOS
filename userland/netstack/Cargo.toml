@@ -1,5 +1,6 @@
 [package]
 name = "netstack"
+description = "The network server: one Ethernet device claimed from the kernel, smoltcp over it, DHCP, the DNS resolver and mDNS, served to programs over IPC."
 edition = "2024"
 license = "MIT OR Apache-2.0"
 

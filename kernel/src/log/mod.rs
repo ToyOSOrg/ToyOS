@@ -47,10 +47,9 @@ pub fn shard_for(cpu: u32) -> &'static Shard {
     // SAFETY: a `Shard` is not zero-sized; the block is never freed.
     let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) }.cast::<Shard>();
     assert!(!ptr.is_null(), "log: no memory for cpu{cpu}'s shard");
-    // SAFETY: fresh, zeroed and aligned for a `Shard`, and not yet published;
-    // then live and initialised for the machine's life, as `publish` needs.
+    // SAFETY: fresh, zeroed and aligned for a `Shard`, which zeroed is an
+    // empty one, live for the machine's life as `publish` needs.
     unsafe {
-        Shard::initialize_zeroed(ptr);
         registry::publish(registry::kernel_slots(), cpu, ptr);
         &*ptr
     }
@@ -104,12 +103,6 @@ pub fn shards() -> [Option<&'static Shard>; MAX_LOG_SHARDS] {
         *slot = registry::published(registry::kernel_slots(), ap);
     }
     out
-}
-
-/// Shards answerable right now: counted once published, not merely declared;
-/// it only ever grows, and never past `MAX_LOG_SHARDS`.
-pub fn shard_count() -> u32 {
-    shards().iter().filter(|shard| shard.is_some()).count() as u32
 }
 
 /// Builds a record's message bytes in place for [`emit`]; one pass and one

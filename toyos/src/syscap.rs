@@ -144,6 +144,18 @@ impl SysCap {
         syscall::counters(self.0.raw(), buf)
     }
 
+    /// The diary's records `cursor` has not seen, into `out`, oldest first;
+    /// answers how many, and never blocks — see [`syscall::trace_read`].
+    ///
+    /// Needs [`Rights::TRACE`].
+    pub fn trace(
+        &self,
+        cursor: &mut toyos_abi::trace::TraceCursor,
+        out: &mut [toyos_abi::trace::TraceRecord],
+    ) -> Result<usize, SyscallError> {
+        syscall::trace_read(self.0.raw(), cursor, out)
+    }
+
     /// Every inventory record, read whole or refused whole, never a shorter
     /// list; `buffer(n)` is `n` records to read into.
     ///

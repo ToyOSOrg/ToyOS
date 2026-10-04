@@ -153,27 +153,15 @@ pub fn leaf_7() -> (u32, u32, u32, u32) {
     if cpuid(0, 0).0 >= 7 { cpuid(7, 0) } else { (0, 0, 0, 0) }
 }
 
-/// CPUID with both index registers; `rbx` is saved by hand since Rust reserves it as an operand.
+/// CPUID with both index registers, as `(eax, ebx, ecx, edx)`.
+///
+/// `core`'s intrinsic and not an `asm!` of our own: `rbx` is CPUID's output
+/// and LLVM's reserved register, yet LLVM may still allocate it to a `reg`
+/// operand, so a hand-written save of `rbx` around a compiler-chosen
+/// register can lose the output.
 pub fn cpuid(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
-    let eax: u32;
-    let ebx: u32;
-    let ecx: u32;
-    let edx: u32;
-    // SAFETY: cpuid can't fault; push/pop rbx is balanced, and every caller queries leaf 0 first, so an unsupported leaf isn't misread as data.
-    unsafe {
-        asm!(
-            "push rbx",
-            "cpuid",
-            "mov {ebx:e}, ebx",
-            "pop rbx",
-            ebx = out(reg) ebx,
-            inout("eax") leaf => eax,
-            inout("ecx") subleaf => ecx,
-            out("edx") edx,
-            options(nomem),
-        );
-    }
-    (eax, ebx, ecx, edx)
+    let r = core::arch::x86_64::__cpuid_count(leaf, subleaf);
+    (r.eax, r.ebx, r.ecx, r.edx)
 }
 
 #[inline]

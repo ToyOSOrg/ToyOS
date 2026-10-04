@@ -108,6 +108,9 @@ const RUST_SKIP: &[&str] = &[
     // every CPU, which the `counters` metal row judges; on a guest it would be
     // seconds of four CPUs spinning, read by nothing.
     "counters_metal",
+    // Its product is what a diary record costs, which the `trace_record_cost`
+    // metal row reads off the test kernel its flood needs.
+    "trace_flood",
     // It takes the machine down; `virt_fatal_halts_the_others_first` runs it.
     "panic_halts_first",
     // Needs a launcher and a declared `cat` and shell, which `tests/testcases`
@@ -174,6 +177,7 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     // Its shared run is the x86-64 verdict; `virt_smp` builds it for AArch64
     // and runs it on that architecture's SMP case.
     "counters_read",
+    "trace_read",
     // Its shared run is the x86-64 verdict; `virt_readonly_copyout` builds it
     // for AArch64 and runs it on that architecture's job case.
     "abuse_readonly_copyout",
@@ -498,6 +502,24 @@ const METAL: &[(&str, metal::Metal)] = &[
                 ..metal::once("testcases-debug", "tests/testcases", &[], &["test_rs_tlb_shootdown_waits"])
             }],
             judge: |b| b[0].job_passed("test_rs_tlb_shootdown_waits"),
+        },
+    ),
+    (
+        // What one diary record costs its writer: a million written back to
+        // back by `SYS_DEBUG`'s flood, so the kernel that carries it, timed
+        // with interrupts closed. Read, not held: the number is the product.
+        "trace_record_cost",
+        metal::Metal {
+            arms: &[metal::Arm {
+                features: toyos_build::build::TEST_KERNEL,
+                ..metal::once("testcases-debug", "tests/testcases", &[], &["test_rs_trace_flood"])
+            }],
+            judge: |b| {
+                b[0].job_passed("test_rs_trace_flood")?;
+                let log = b[0].log();
+                eprintln!("  [trace] {}", log.must_say("trace_flood: ")?);
+                Ok(())
+            },
         },
     ),
     (
@@ -1593,6 +1615,10 @@ const VIRT_RING0_TIMER: &str = "ring0_timer_in_syscall";
 /// `test_rs_counters_read`.
 const VIRT_COUNTERS_READ: &str = "counters_read";
 
+/// `tests/toyos-rust-tests`' binary that `tests/virtsmpcase` runs as its job
+/// `test_rs_trace_read`.
+const VIRT_TRACE_READ: &str = "trace_read";
+
 /// `tests/toyos-rust-tests`' binary `name` built for `arch`, once a run, as a
 /// file a case's job list names on ROOT.
 fn suite_bin(arch: toyos_build::arch::Arch, name: &'static str) -> (String, Vec<u8>) {
@@ -1715,7 +1741,10 @@ fn boot_virt_smp(options: BootOptions) -> QemuInstance {
         &[],
         BootOptions {
             ready_marker: "control registers: SCTLR_EL1=",
-            extra_root_files: vec![suite_bin(options.profile.arch(), VIRT_COUNTERS_READ)],
+            extra_root_files: vec![
+                suite_bin(options.profile.arch(), VIRT_COUNTERS_READ),
+                suite_bin(options.profile.arch(), VIRT_TRACE_READ),
+            ],
             ..options
         },
     )
@@ -1724,11 +1753,14 @@ fn boot_virt_smp(options: BootOptions) -> QemuInstance {
 /// What `counters_read` says once every CPU answered for itself.
 const COUNTERS_READ_SAID: &str = "counters_read: every cpu answered for itself, and each counter is a right's";
 
+/// What `trace_read` says once the diary read back as the scheduler wrote it.
+const TRACE_READ_SAID: &str = "trace_read: a wake precedes its pick, a cursor is its reader's own, and the diary is TRACE's";
+
 /// Boot `tests/virtsmpcase` on [`VIRT_CPUS`] CPUs under `profile`, whose
 /// firmware enters every CPU at EL`el` and whose FADT names PSCI's `conduit`:
 /// each CPU is started by `CPU_ON`, holds the control-register declaration as
-/// entered there and joins the scheduler, and the case's jobs `unmap_touch`
-/// and `test_rs_counters_read` end with exit 0. Then its job `shutdown` stops the machine and powers it
+/// entered there and joins the scheduler, and the case's jobs `unmap_touch`,
+/// `test_rs_counters_read` and `test_rs_trace_read` end with exit 0. Then its job `shutdown` stops the machine and powers it
 /// off, every other CPU turned off first ([`psci_powered_off`]).
 fn virt_smp(profile: qemu::Profile, conduit: &str, el: u32) -> Result<(), String> {
     let trace = common::lane::dir().join(format!("virt_smp-{conduit}.psci"));
@@ -1766,6 +1798,7 @@ fn virt_smp(profile: qemu::Profile, conduit: &str, el: u32) -> Result<(), String
     }
     eprintln!("  [virt] {VIRT_CPUS} CPUs entered at EL{el}, started through {conduit}, and scheduling");
     judge_virt_job(&mut qemu, &mut serial, "test_rs_counters_read", COUNTERS_READ_SAID)?;
+    judge_virt_job(&mut qemu, &mut serial, "test_rs_trace_read", TRACE_READ_SAID)?;
     let (console, calls) =
         ended_through_psci(&mut qemu, &mut stop, serial, power::SHUTTING_DOWN, "guest-shutdown", &trace, |_| Vec::new())?;
     let record = console

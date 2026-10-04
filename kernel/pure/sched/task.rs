@@ -33,6 +33,11 @@ pub trait SchedPayload: Sized + Send + 'static {
     /// environment because the scheduler core may not implement a lock itself
     /// (see [`CellLock`]).
     type ShareLock: CellLock<ShareState> + Send;
+
+    /// The environment's own name for the task, which a [`crate::sched::hw::TraceEvent`]
+    /// carries beside its key: a key is never reused and names nothing outside
+    /// the core.
+    fn name(&self) -> u64;
 }
 
 /// Shorthand for the share type a payload implies.

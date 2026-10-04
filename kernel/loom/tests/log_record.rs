@@ -261,7 +261,7 @@ fn a_reader_racing_a_recycle_gets_nothing_rather_than_a_mixture() {
             assert_whole(&got, FIRST_SEQ);
         }
         // Its key is the same question asked of the second reader.
-        if let Some(at_ns) = shard.at_ns(FIRST_SEQ) {
+        if let Some(at_ns) = shard.stamp(FIRST_SEQ) {
             assert_eq!(
                 at_ns,
                 record(FIRST_SEQ).at_ns,
@@ -351,7 +351,7 @@ fn a_key_and_the_record_it_names_come_from_one_generation() {
         });
 
         // Racing the recycle: nothing, or this generation's own key.
-        if let Some(at_ns) = shard.at_ns(target) {
+        if let Some(at_ns) = shard.stamp(target) {
             assert_eq!(
                 at_ns,
                 record(target).at_ns,
@@ -360,10 +360,10 @@ fn a_key_and_the_record_it_names_come_from_one_generation() {
         }
 
         w.join().unwrap();
-        assert_eq!(shard.at_ns(target), Some(record(target).at_ns));
+        assert_eq!(shard.stamp(target), Some(record(target).at_ns));
         // And the key the merge orders by is the one the copy it then makes
         // carries, which is the property the two readers exist to share.
         let got = shard.read(target).expect("committed once the writer has joined");
-        assert_eq!(shard.at_ns(target), Some(got.at_ns));
+        assert_eq!(shard.stamp(target), Some(got.at_ns));
     });
 }

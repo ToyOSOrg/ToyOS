@@ -1,5 +1,6 @@
 [package]
 name = "test-runner"
+description = "Test-only: the job runner a test image starts, which runs the harness's in-guest jobs under a deadline and announces the boot to the harness."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
