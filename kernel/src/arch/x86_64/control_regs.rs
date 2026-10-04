@@ -161,8 +161,7 @@ fn hwp_declared(cpu_id: u32) -> Option<toyos_cpuvuln::Hwp> {
         signature: cpu::cpuid(1, 0).0,
         cpuid_6_eax,
         cpuid_6_ecx,
-        // A leaf above the maximum answers with the highest basic leaf's data.
-        cpuid_7_0_edx: if cpu::cpuid(0, 0).0 >= 7 { cpu::cpuid(7, 0).3 } else { 0 },
+        cpuid_7_0_edx: cpu::leaf_7().3,
     });
     let mine = if verdict.is_ok() { HWP_DECLARED } else { HWP_REFUSED };
     match HWP.compare_exchange(HWP_UNDECIDED, mine, Ordering::Release, Ordering::Acquire) {
@@ -322,11 +321,8 @@ fn supported() -> u64 {
         [(0, cr4::FSGSBASE), (7, cr4::SMEP), (20, cr4::SMAP)];
     const CPUID_7_ECX: [(u32, u64); 1] = [(2, cr4::UMIP)];
 
-    let (max_leaf, _, _, _) = cpu::cpuid(0, 0);
     let (_, _, ecx1, edx1) = cpu::cpuid(1, 0);
-    // A leaf above the maximum answers with the highest basic leaf's data
-    // instead of faulting, so an unguarded read here would misreport bits.
-    let (_, ebx7, ecx7, _) = if max_leaf >= 7 { cpu::cpuid(7, 0) } else { (0, 0, 0, 0) };
+    let (_, ebx7, ecx7, _) = cpu::leaf_7();
 
     let mut have = 0;
     for (bit, flag) in CPUID_1_EDX {

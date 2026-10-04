@@ -145,6 +145,13 @@ pub fn leaf_6() -> (u32, u32) {
     }
 }
 
+/// CPUID.(7,0)'s four registers, the structured extended features; zero
+/// where CPUID.0 does not reach leaf 7, since a leaf above the maximum answers
+/// with the highest basic leaf's data instead of faulting.
+pub fn leaf_7() -> (u32, u32, u32, u32) {
+    if cpuid(0, 0).0 >= 7 { cpuid(7, 0) } else { (0, 0, 0, 0) }
+}
+
 /// CPUID with both index registers; `rbx` is saved by hand since Rust reserves it as an operand.
 pub fn cpuid(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
     let eax: u32;
