@@ -51,8 +51,7 @@ struct Shape {
     reading: u64,
     abort: bool,
     adversary: bool,
-    /// Hop questions answer at random, a frame is now and then refused, and every flow is woken
-    /// now and then.
+    /// Hop questions answer at random, and every flow is woken now and then.
     hops: bool,
 }
 
@@ -271,8 +270,6 @@ impl Run {
                 1..=3 => Hop::Pending,
                 _ => Hop::Ready(()),
             }));
-            let mut rng = Rng::new(self.rng.next());
-            self.net.framed = Some(Box::new(move |_| rng.chance(95)));
         }
         for _ in 0..steps {
             if self.shape.hops && self.rng.chance(30) {
@@ -307,7 +304,7 @@ impl Run {
 
     /// Lets the connection finish on a clean link, and checks each direction arrived whole.
     fn finish(&mut self) {
-        (self.net.hop, self.net.framed) = (None, None);
+        self.net.hop = None;
         self.net.nodes.iter_mut().for_each(|n| n.tcp.wake_all());
         self.net.impair = link(self.rng.clone(), Shape { loss: 0, duplicate: 0, ..self.shape });
         for app in &mut self.net.apps {
@@ -381,21 +378,19 @@ fn s_prop_001_snd_una_at_or_before_snd_nxt() {
 }
 
 /// No RTO for a segment that never left, SND.UNA never past SND.NXT, and nothing sent,
-/// acknowledged or offered that no segment carried out, whatever the next hop answers and whether
-/// or not the device frames each segment.
+/// acknowledged or offered that no segment carried out, whatever the next hop answers.
 #[test]
 fn s_prop_001_snd_una_at_or_before_snd_nxt_whatever_the_next_hop_answers() {
-    let (mut failed, mut refused) = (0, 0);
+    let mut failed = 0;
     for seed in 0..RUNS {
         let mut run = Run::new(0x2b99_2ddf ^ seed, |s| (s.loss, s.hops) = (5, true));
         run.run(1500);
         for node in &run.net.nodes {
             failed += node.tcp.counters().get(Counter::NextHopFailed);
-            refused += node.tcp.counters().get(Counter::FrameRefused);
         }
         run.finish();
     }
-    assert!(failed > 0 && refused > 0, "the runs meet both: {failed} unreachable, {refused} refused");
+    assert!(failed > 0, "the runs meet an unreachable next hop");
 }
 
 #[test]
@@ -482,9 +477,8 @@ fn s_op_025_prop_timestamps_on_every_segment() {
         let tcp = &mut run.net.nodes[node].tcp;
         tcp.abort(now, id).unwrap();
         let mut out = Vec::new();
-        tcp.transmit(now, usize::MAX, |_| Hop::Ready(()), |o, ()| {
+        common::pull(tcp, &mut std::collections::VecDeque::new(), now, usize::MAX, |_| Hop::Ready(()), |o, ()| {
             out.push(parse_out(&datagram(o), 0));
-            true
         });
         if let Some(rst) = out.iter().find(|o| o.flags & RST != 0) {
             assert_eq!(rst.ts, Some((ts.value, ts.echo)), "OP-25: the abort's RST");

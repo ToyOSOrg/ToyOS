@@ -5,9 +5,12 @@
 //! in the time, the secrets, parsed segments, classified ICMP errors, user calls and transmit
 //! credit; nothing here reads a clock, draws randomness or does I/O.
 //!
-//! **Pull egress.** A segment exists only while [`Tcp::transmit`] hands it to the caller's sink,
-//! built from the state of that moment, once the caller has answered that its next hop is known;
-//! it counts as sent only once the sink took its frame.
+//! **Pull egress.** A segment exists only while [`Tcp::transmit_owed`] or [`Tcp::serve`] hands it
+//! to the caller's sink, built from the state of that moment, once the caller has answered that its
+//! next hop is known; it counts as sent only once the sink took its frame. Which connection is
+//! served is the caller's round: [`Tcp::drain_eligible`] offers each once it has something to send,
+//! and [`Tcp::drain_gone`] names each freed while offered; both hold what they report, a freed
+//! connection included, until the caller drains them.
 //!
 //! **Refusals are values.** Legacy or insecure input is refused, counted in [`Counters`], and
 //! named by an [`Event::Refused`] the shell logs through [`RefusalLog`].
@@ -52,7 +55,7 @@ use toyos_net_wire::Port;
 
 pub use counters::{Counter, Counters, Refusal, RefusalLog};
 pub use seq::Seq;
-pub use stack::{ConnId, Info, ListenerId, Outgoing, Tcp};
+pub use stack::{ConnId, Info, ListenerId, Outgoing, Served, Tcp};
 pub use toyos_net_wire::siphash::Key;
 pub use toyos_net_wire::Instant;
 
@@ -271,11 +274,11 @@ pub enum Hop<T> {
 }
 
 /// One flow's way out of a transmit opportunity: the hop question, asked once a segment is due and
-/// before it is built (`ip.md` §6.7 (1)), then the segment's frame, built before anything about the
-/// segment is committed (§11.3). Either refusing leaves everything owed as it was.
+/// before it is built (`ip.md` §6.7 (1)), then the segment, handed off before anything about it is
+/// committed (§11.3). A next hop not ready leaves everything owed as it was.
 pub(crate) trait Exit<T> {
     fn ask(&mut self) -> Result<T, NotReady>;
-    fn send(&mut self, via: T, segment: &conn::Out, payload: (&[u8], &[u8])) -> Result<(), NotReady>;
+    fn send(&mut self, via: T, segment: &conn::Out, payload: (&[u8], &[u8]));
 }
 
 /// Why a due segment did not leave.
@@ -283,8 +286,6 @@ pub(crate) trait Exit<T> {
 pub(crate) enum NotReady {
     Pending,
     Unreachable,
-    /// The caller could not frame it.
-    Unframed,
 }
 
 impl<T> Hop<T> {
