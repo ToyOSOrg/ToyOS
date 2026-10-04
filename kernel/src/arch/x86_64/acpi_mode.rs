@@ -14,6 +14,11 @@
 //! refused at the mint, by name; a machine the firmware handed over in ACPI
 //! mode is claimed whatever it has, since nothing is written.
 //!
+//! **The ECDT is a stopgap**: the embedded controller is read from it until the
+//! interpreter reads the controller's own device from the DSDT, and then this
+//! path and `toyos_acpi::ecdt` go
+//! (`issues/kernel/toyos-runs-the-machine-in-acpi-mode-and-interprets-its-aml.md`).
+//!
 //! The row is the FADT's PM1a event and GPE0 blocks and the ECDT's two
 //! ports, filled once at boot; the SCI is its one line, level.
 

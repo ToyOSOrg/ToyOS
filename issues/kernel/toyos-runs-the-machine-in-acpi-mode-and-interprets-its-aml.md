@@ -68,11 +68,12 @@ stop, and each EC query number once with its count: a T14 row reads them there.
 A second T14 row kills the server and reads `SCI_EN` clear in `PM1_CNT`
 afterwards, the kernel having written `ACPI_DISABLE` to `SMI_CMD`.
 
-**Open, the owner's to decide**: whether a machine whose firmware publishes no
-ECDT is put in ACPI mode. Stage 1 refuses it by name and leaves it in legacy
-mode, as it leaves a machine whose power button is a control method device:
-in legacy mode its firmware serves its embedded controller and its button,
-and in ACPI mode nothing would until the interpreter does. The cost: such a
-machine keeps its firmware interrupts, and this stage's exit cannot be met on
-it. A machine its firmware hands over in ACPI mode is served whatever it has,
-since nothing is written.
+**Ruled** (owner, 2026-10-04, "Stopgap, delete later"): "Stage 1 uses the
+extra table so the T14 switches to ACPI mode now." Stage 1 reads the
+embedded controller from the ECDT, and that path is a stopgap: it is deleted
+the day the interpreter reads the controller from the DSDT's own device. A
+machine without an ECDT stays in legacy mode until then, refused by name, as a
+machine whose power button is a control method device does; such a machine
+keeps its firmware interrupts, and this stage's exit cannot be met on it. A
+machine its firmware hands over in ACPI mode is served whatever it has, since
+nothing is written.
