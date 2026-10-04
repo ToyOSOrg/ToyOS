@@ -697,13 +697,6 @@ name = "toyos-keymap"
 version = "0.1.0"
 
 [[package]]
-name = "toyos-logstream"
-version = "0.1.0"
-dependencies = [
- "toyos-abi",
-]
-
-[[package]]
 name = "toyos-rust-tests"
 version = "0.1.0"
 dependencies = [
@@ -714,7 +707,6 @@ dependencies = [
  "toyos",
  "toyos-abi",
  "toyos-inspect",
- "toyos-logstream",
  "toyos-tco",
  "toyos-window",
 ]

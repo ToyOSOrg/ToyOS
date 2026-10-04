@@ -3383,8 +3383,7 @@ const SMI_SPAN_NS: u64 = 4_444_000_000;
 /// same span of load (`tests/t14-linux/turbostat-loaded.txt`).
 ///
 /// Read and not held, beside Linux's turbostat: each CPU's idle busy
-/// fraction, which an SMI in the idle second raises on every CPU alike by the
-/// time it held them, and what one round cost its reader; and beside Linux's loaded
+/// fraction, and what one round cost its reader; and beside Linux's loaded
 /// timer reading (`issues/toyos-beats-linuxs-latency-on-the-t14.md`),
 /// how late each CPU's kick handler ran under the `loaded` phase.
 fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
@@ -3508,10 +3507,9 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
     }
     let spinning: Vec<f64> = (0..cpus).map(|cpu| tsc_mhz * ratio(idle1, spin, cpu, "aperf", "mperf")).collect();
     eprintln!(
-        "  [counters] {cpus} cpus, SMI +{} each over {} ms, +{} in the idle second; TSC {tsc_mhz:.0} MHz",
+        "  [counters] {cpus} cpus, SMI +{} each over {} ms; TSC {tsc_mhz:.0} MHz",
         smis[0],
-        (at2 - at0) / 1_000_000,
-        delta(idle0, idle1, 0, "smi")
+        (at2 - at0) / 1_000_000
     );
     for (cpu, busy) in busy.iter().enumerate() {
         eprintln!(
