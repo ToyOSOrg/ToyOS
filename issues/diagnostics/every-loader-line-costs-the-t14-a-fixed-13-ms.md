@@ -12,23 +12,19 @@ and the stamps agreeing with the kernel's HPET-calibrated `loader 1877 ms`)
 spaces consecutive lines 12-14 ms apart wherever the loader does no other work
 between them, and the length of the line does not move it: `Kernel: 3225456
 bytes` (21 characters) follows its predecessor by 12 ms, each ~150-character
-`Loading segment:` line by 13-14 ms. That pass says 44 lines, so at that rate
-0.5-0.6 s of its 1.9 s is lines.
+`Loading segment:` line by 13-14 ms.
 
 Each line is two writes: ConOut's `OutputString`, and `loaderlog::line`'s
 `file.write` and `file.flush()` to `loader.log` on the stick's FAT
-(`bootloader/src/loaderlog.rs`). A fixed cost per line fits one USB/FAT flush
-per line better than drawing glyphs, but that log cannot tell the two apart.
-The loader's `Loader lines:` line, said just before the handoff, does: the
-counter ticks the lines above it spent on the console and in `loader.log`,
-summed apart, and the ticks the screen's clear took before the first line.
-That reading is owed from the T14.
+(`bootloader/src/loaderlog.rs`). The file is the cost. The boot pass's
+`Loader lines:` line from the T14's `jobcase` boot at `d373045ee` reads: the
+43 lines above it took 129796443 counter ticks on the console (53.7 ms, 1.2 ms
+a line) and 1505476678 in `loader.log` (622.3 ms, 14.5 ms a line), and the
+screen's clear before the first line 250073763 (103.4 ms), at 2419200000 Hz.
 
-If the file half is the cost, the fix is fewer flushes, and that gives up
-`loaderlog`'s claim that a line is written and flushed before the loader goes
-on: what a hang between two flushes would lose is a decision of its own, not a
-side effect of the fix.
+The fix is fewer flushes, and that gives up `loaderlog`'s claim that a line is
+written and flushed before the loader goes on: what a hang between two flushes
+would lose is a decision of its own, not a side effect of the fix.
 
 Exit: the T14's loader lines cost what their content costs to draw and keep,
-with the console's and the file's shares read off the T14 and the durability
-`loader.log` keeps stated at `loaderlog`.
+with the durability `loader.log` keeps stated at `loaderlog`.
