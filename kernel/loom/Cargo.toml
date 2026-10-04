@@ -70,6 +70,17 @@ post-is-an-answer = []
 # Never on by default and never reachable from a kernel build, which declares
 # the same name only so `cfg` checking knows it.
 lock-acquire-off = []
+# The negative control for `OwedLock`'s handoff. It drops `sync.rs`'s
+# `owed_fence` from an owing CPU's retry and from a release's look, so each can
+# miss the other's write and a CPU is turned away with nobody to answer it, and
+# `owed_lock.rs` must red:
+#
+#   cargo test --manifest-path kernel/loom/Cargo.toml --features owed-fence-off \
+#     --test owed_lock
+#
+# Never on by default and never reachable from a kernel build, which declares
+# the same name only so `cfg` checking knows it.
+owed-fence-off = []
 # The negative control for the reap gate's enrolment edge. It makes
 # `reap_gate.rs`'s `raise` store `Relaxed`, so a claimer is handed a gate
 # without the work it was raised for, and `reap_gate.rs` must red:
