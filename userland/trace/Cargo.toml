@@ -1,0 +1,14 @@
+[package]
+name = "trace"
+description = "ToyOS's diary reader: every record the kernel's trace rings still hold, merged across CPUs, one line each."
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+toyos = { path = "../../toyos" }
+toyos-abi = { path = "../../toyos-abi" }
+toyos-trace = { path = "../../toyos-trace" }
+
+[package.metadata.toyos.host]
+exempt.manages = "ToyOS's kernel diary: what its `trace` SysCap right reads off every CPU's ring"

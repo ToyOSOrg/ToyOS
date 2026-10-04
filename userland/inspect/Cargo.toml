@@ -1,5 +1,6 @@
 [package]
 name = "inspect"
+description = "/system/bin/inspect: what each owner of a device or service, and the kernel's inventory and counters, say about themselves now."
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"

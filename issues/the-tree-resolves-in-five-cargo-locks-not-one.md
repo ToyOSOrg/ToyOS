@@ -27,7 +27,12 @@ its measurements, not the ruling.
 **Exit:** one workspace and one lock at the root replace the five. The step
 that merges them moves no version: its lock's name and version pairs are the
 union of the aligned locks, and the kernel and the loader, both arches, are
-byte-identical to the build of the last alignment before it. The alignments
+byte-identical to the build of the last alignment before it. The root
+`.cargo/config.toml` is tracked, which `.gitignore` ignores today and where
+`.claude/agents/implementer.md` has agents list fork clones, so the merge
+moves that instruction; no `rust-toolchain.toml` is tracked outside `rust/`,
+since step 1 of the rule in `issues/the-tree-says-who-uses-each-thing.md`
+names none. The alignments
 land first, each in today's workspace; pull request #724, the root and
 kernel locks, is the first.
 

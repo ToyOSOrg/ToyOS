@@ -4,14 +4,15 @@ kind: track
 opened: 2026-07-30
 ---
 
-# Nothing inside the machine can read the trace ring, and nothing samples RIP
+# The diary computes no lateness, and records no window, shootdown or slow system call
 
-`kernel/src/trace.rs` is a per-CPU ring of `RING_CAPACITY` 24-byte `repr(C)`
-records, enabled from `main.rs` at boot and written by the timer, the
-scheduler, `irq_ring` and every `kernel::sched::hw::TraceEvent` the core emits.
-Its one reader is LLDB: `p &TRACE_RINGS` and then `memory read`, which is why
-the discriminants are fixed by hand and held there by const assertions. A
-booted machine can ask itself nothing: no syscall, no tool, no gate.
+`kernel/src/trace.rs` is the diary: a ring per CPU of 32-byte
+`toyos_abi::trace` records, written always through the log's slot protocol
+and stamped with the CPU's raw counter, by the timer, the scheduler,
+`irq_ring` and every `kernel::sched::hw::TraceEvent` the core emits.
+`SYS_TRACE_READ` reads it on the `trace` right, `toyos-trace` decodes it, and
+`/system/bin/trace` prints it. Nothing reads a lateness off it, and nothing
+samples RIP.
 
 Part of `issues/toyos-explains-itself.md`.
 
@@ -24,12 +25,24 @@ anything more is built on it.
    needs, and a decoder crate. **Exit**: host tests on the decoder; a guest
    test in which a spawned child's wake precedes its pick, a second cursor is
    undisturbed, loss is counted after a flood, and a process without the right
-   is ended; and on the T14, the ticks a record costs, measured by a boot that
-   writes a million records.
+   is refused and lives; and on the T14, the ticks a record costs, measured by
+   a boot that writes a million records. The refusal clause is the owner's
+   ruling (2026-10-04), **"Refuse, like others"**: "Keep one rule for every
+   permission: the request is refused and the program lives. The track's exit
+   is reworded to that. If you want missing permissions to end programs, that
+   becomes one change for all of them." Built: a capability without `trace`
+   is refused with `PermissionDenied` and its caller lives, the LLDB reading
+   path and its pinned numbers are gone, and a record costs 53.15 counter
+   ticks on the T14 (`trace_record_cost` at `70c1fbf56`: 1000000 records in
+   53145868 ticks).
 2. **Timer and thread lateness**, computed by a reader from the arm, fire and
    pick events, with no tracer in the kernel. **Exit**, on the T14: the 50 ms
    for which `hold_once` keeps both windows open once a boot
    (`kernel/src/windows.rs`) reads back as at least that much lateness.
+   A deadline's wake is recorded as a `timer-fire` naming no task
+   (`fire_deadlines` in `kernel/pure/sched/cpu.rs`), so a reader cannot say
+   which sleeper a fire woke; and a `wake` is the owning CPU's handling of a
+   post, so the span from a post on another CPU to it is in no record.
 3. **Windows over a threshold, shootdown records, and slow system calls.**
    A system call over the threshold is recorded with its number and its
    program, in the shipped kernel: **"Always on"** (owner, 2026-10-03).

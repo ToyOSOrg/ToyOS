@@ -1,5 +1,6 @@
 [package]
 name = "tls-dlopen-lib"
+description = "A guest test fixture: a cdylib of thread-locals at several offsets, loaded with dlopen by the TLS and unwinding tests."
 version = "0.1.0"
 edition = "2021"
 
