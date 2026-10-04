@@ -54,9 +54,10 @@ pub(super) fn ring0_timer_in_syscall() -> u64 {
     use toyos_abi::syscall::debug_action::{RING0_FIRE_NEVER, RING0_FIRE_OTHER_SPAN, RING0_FIRE_REARMED};
     const WITHIN_NS: u64 = 100_000;
     const CEILING_NS: u64 = 100_000_000;
-    let fired = crate::arch::percpu::kernel_timer_fires();
     crate::arch::irqchip::arm_within(WITHIN_NS);
     let armed = crate::arch::irqchip::comparator();
+    // Counted after the arm, so every fire the count sees found this arm or a later one.
+    let fired = crate::arch::percpu::kernel_timer_fires();
     let ends = crate::clock::nanos_since_boot() + CEILING_NS;
     loop {
         // The clock before the count, so a ceiling read past is one the fire had every chance to beat.
