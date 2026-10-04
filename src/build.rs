@@ -121,24 +121,6 @@ struct SystemConfig {
     /// them, because a package directory is writable.
     #[serde(default)]
     apps: AppsConfig,
-    /// What a command a user names may start, which every row marked
-    /// `commands` starts beside its own `starts`.
-    #[serde(default)]
-    commands: CommandsConfig,
-}
-
-impl SystemConfig {
-    /// Every row `program` may start through the launcher.
-    fn starts<'a>(&'a self, program: &'a ProgramConfig) -> impl Iterator<Item = &'a String> {
-        let commands = if program.commands { &self.commands.starts[..] } else { &[] };
-        program.starts.iter().chain(commands)
-    }
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
-struct CommandsConfig {
-    starts: Vec<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -191,8 +173,6 @@ struct ProgramConfig {
     restart: bool,
     /// The rows it may start through the launcher (`toyos_manifest::Program::starts`).
     starts: Vec<String>,
-    /// It runs whatever command a user names, so it starts `[commands]`'s rows too.
-    commands: bool,
     /// A launch it makes opens a login session (`toyos_manifest::Program::login`).
     login: bool,
 }
@@ -702,7 +682,7 @@ fn held_by_their_holders_alone(config: &SystemConfig) -> Result<(), String> {
 /// a second one find gone.
 fn starts_name_what_a_launch_can_start(config: &SystemConfig) -> Result<(), String> {
     for (name, program) in &config.programs {
-        for key in config.starts(program) {
+        for key in &program.starts {
             if key == toyos_manifest::launch::APPS {
                 continue;
             }
@@ -748,7 +728,7 @@ fn render_manifest(config: &SystemConfig) -> Vec<u8> {
                     service: cfg.service,
                     roles: cfg.roles.clone(),
                     restart: cfg.restart,
-                    starts: config.starts(cfg).cloned().collect(),
+                    starts: cfg.starts.clone(),
                     login: cfg.login,
                 }
             })
@@ -3240,7 +3220,6 @@ mod tests {
         assert!(gate("[programs.shell]\nstarts = [\"apps\"]\n").is_err());
         assert!(gate("[programs.shell]\nstarts = [\"compositor\"]\n[programs.compositor]\nserves = [\"compositor\"]\n").is_err());
         assert!(gate("[programs.shell]\nstarts = [\"fileserver\"]\n[programs.fileserver]\nroles = [\"data\"]\n").is_err());
-        assert!(gate("[commands]\nstarts = [\"ghost\"]\n[programs.shell]\ncommands = true\n").is_err());
         assert!(toml::from_str::<SystemConfig>("[programs.shell]\nstart = [\"toybox\"]\n").is_err());
     }
 

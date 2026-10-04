@@ -32,11 +32,6 @@ start = ["logkeeper", "diskserver", "fileserver", "compositor", "soundserver", "
 [apps]
 receives = ["compositor", "soundserver", "filepicker"]
 
-# What a command a user names may start: every row a launch can start. A row
-# marked `commands = true` runs whatever one names, and starts these.
-[commands]
-starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "proctest", "toyos-ld", "sshserver", "swap", "update", "/apps"]
-
 # `service = true` makes a row a system service: the supervisor starts it with `HOME` at
 # its own `/state/<name>` and makes that directory first. Every other row runs
 # with the session user's home.
@@ -91,7 +86,7 @@ devices = ["pci:1af4:1041"]
 [programs.sshserver]
 service = true
 receives = ["netstack"]
-commands = true
+starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "proctest", "toyos-ld", "sshserver", "swap", "update", "/apps"]
 login = true
 
 # `swap` is the authority to replace a running service's binary; the build
@@ -132,7 +127,7 @@ starts = ["shell"]
 
 [programs.shell]
 receives = ["surface"]
-commands = true
+starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "proctest", "toyos-ld", "sshserver", "swap", "update", "/apps"]
 
 [programs.doom]
 receives = ["compositor", "soundserver"]
@@ -164,12 +159,10 @@ receives = ["compositor", "filepicker"]
 #
 # `free` is the same syscall as `ps` and is named by neither: the machine header
 # is ambient and the process roster is not.
-#
-# `commands` for `stats`, which runs the command it is given.
 [programs.toybox]
 receives = ["compositor", "soundserver", "surface", "power"]
 syscap = ["roster"]
-commands = true
+starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "proctest", "toyos-ld", "sshserver", "swap", "update", "/apps"]
 
 # Symlinks created on ROOT at build time.
 # Keys are ROOT-relative; targets are the guest paths they resolve to.
