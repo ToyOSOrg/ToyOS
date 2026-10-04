@@ -1543,7 +1543,8 @@ fn virt_job(profile: qemu::Profile, job: &str, said: &str) -> Result<(), String>
             ..Default::default()
         },
     );
-    judge_virt_job(&mut qemu, job, said).map(drop)
+    let mut serial = virt_console(&qemu);
+    judge_virt_job(&mut qemu, &mut serial, job, said)
 }
 
 /// A `mask-windows` boot's windows: `common::irqcensus::windows`'s verdict,
@@ -1562,14 +1563,19 @@ fn mask_windows(capture: &str, cpus: u32) -> Result<(), String> {
     Ok(())
 }
 
+/// Everything the PL011 has carried on `qemu`'s boot: the capture each
+/// [`judge_virt_job`] after the first goes on from, since a drain reads past
+/// the marker it waited for.
+fn virt_console(qemu: &QemuInstance) -> String {
+    format!("{}\n", qemu.boot_log())
+}
+
 /// Wait for `job`'s end on a guest booted with it, and judge it: it ends with
-/// exit 0, having said `said`. Answers everything the PL011 carried.
-fn judge_virt_job(qemu: &mut QemuInstance, job: &str, said: &str) -> Result<String, String> {
+/// exit 0, having said `said`. `serial` is everything the PL011 has carried,
+/// and takes what this drains.
+fn judge_virt_job(qemu: &mut QemuInstance, serial: &mut String, job: &str, said: &str) -> Result<(), String> {
     let end = format!("===TEST_END {job} ");
-    let mut rest = String::new();
-    let waited = await_marker(qemu, &mut rest, &end, &format!("the job {job} to end"));
-    let serial = format!("{}\n{rest}", qemu.boot_log());
-    if let Err(why) = waited {
+    if let Err(why) = await_marker(qemu, serial, &end, &format!("the job {job} to end")) {
         return Err(format!("{why}\nserial:\n{serial}"));
     }
     let ended = serial
@@ -1583,7 +1589,7 @@ fn judge_virt_job(qemu: &mut QemuInstance, job: &str, said: &str) -> Result<Stri
     if !ended.contains(&format!("===TEST_END {job} exit=0===")) {
         return Err(format!("{ended}\nserial:\n{serial}"));
     }
-    Ok(serial)
+    Ok(())
 }
 
 /// What `unmap_touch` says once every read of a page just unmapped,
@@ -1605,7 +1611,8 @@ fn virt_mask_windows(profile: qemu::Profile) -> Result<(), String> {
         kernel_features: toyos_build::build::MASK_WINDOWS_KERNEL,
         ..Default::default()
     });
-    let mut serial = judge_virt_job(&mut qemu, "unmap_touch", UNMAP_TOUCH_SAID)?;
+    let mut serial = virt_console(&qemu);
+    judge_virt_job(&mut qemu, &mut serial, "unmap_touch", UNMAP_TOUCH_SAID)?;
     // To the boot's last word, said after every census and its windows: the drain that took the job's end can stop between the two.
     await_marker(&mut qemu, &mut serial, power::SHUTTING_DOWN, "the boot's last word")?;
     mask_windows(&serial, VIRT_CPUS)
@@ -1648,7 +1655,8 @@ fn virt_smp(profile: qemu::Profile, conduit: &str, el: u32) -> Result<(), String
     // Before the job list can reach its `shutdown`: QMP delivers no event
     // emitted before its client connected.
     let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(qemu::GUEST_QUIET));
-    let serial = judge_virt_job(&mut qemu, "unmap_touch", UNMAP_TOUCH_SAID)?;
+    let mut serial = virt_console(&qemu);
+    judge_virt_job(&mut qemu, &mut serial, "unmap_touch", UNMAP_TOUCH_SAID)?;
     let psci = serial.lines().find(|l| l.contains("PSCI: ")).unwrap_or_default();
     if !psci.contains(&format!(" through {conduit}")) {
         return Err(format!("PSCI is not said to be reached through {conduit}: {psci:?}\nserial:\n{serial}"));
@@ -1670,9 +1678,9 @@ fn virt_smp(profile: qemu::Profile, conduit: &str, el: u32) -> Result<(), String
         }
     }
     eprintln!("  [virt] {VIRT_CPUS} CPUs entered at EL{el}, started through {conduit}, and scheduling");
-    let counted = judge_virt_job(&mut qemu, "test_rs_counters_read", COUNTERS_READ_SAID)?;
+    judge_virt_job(&mut qemu, &mut serial, "test_rs_counters_read", COUNTERS_READ_SAID)?;
     let (console, calls) =
-        ended_through_psci(&mut qemu, &mut stop, counted, power::SHUTTING_DOWN, "guest-shutdown", &trace, |_| Vec::new())?;
+        ended_through_psci(&mut qemu, &mut stop, serial, power::SHUTTING_DOWN, "guest-shutdown", &trace, |_| Vec::new())?;
     let record = console
         .lines()
         .find_map(toyos_quiesce::Record::parse)
@@ -1771,7 +1779,8 @@ fn virt_failed_ap_leaves_no_hole(profile: qemu::Profile) -> Result<(), String> {
     const CPUS: u32 = 4;
     let mut qemu =
         boot_virt_smp(BootOptions { profile, smp: CPUS, kernel_params: &["smp-skip-ap"], ..Default::default() });
-    let serial = judge_virt_job(&mut qemu, "unmap_touch", UNMAP_TOUCH_SAID)?;
+    let mut serial = virt_console(&qemu);
+    judge_virt_job(&mut qemu, &mut serial, "unmap_touch", UNMAP_TOUCH_SAID)?;
     // The premise, not just a small machine: cpu1 came up and cpu2 did not.
     for premise in ["SMP: cpu1 mpidr=0x1 online", "SMP: cpu2 mpidr=0x2 did not echo within"] {
         if !serial.contains(premise) {
@@ -1848,7 +1857,8 @@ fn virt_off_names_the_cpus_left_on(profile: qemu::Profile) -> Result<(), String>
         ..Default::default()
     });
     let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(qemu::GUEST_QUIET));
-    let serial = judge_virt_job(&mut qemu, "unmap_touch", UNMAP_TOUCH_SAID)?;
+    let mut serial = virt_console(&qemu);
+    judge_virt_job(&mut qemu, &mut serial, "unmap_touch", UNMAP_TOUCH_SAID)?;
     let spared = |calls: &[(u64, u64)]| -> Vec<u64> {
         let last = calls.iter().find(|&&(function, _)| function == PSCI_SYSTEM_OFF).map(|&(_, cpu)| cpu);
         (u64::from(VIRT_CPUS) - 2..u64::from(VIRT_CPUS)).filter(|&cpu| Some(cpu) != last).collect()
