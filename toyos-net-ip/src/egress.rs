@@ -1,10 +1,10 @@
-//! Egress (§5). [ip]'s own frames wait in one FIFO the transmit opportunity drains ahead of the
+//! Egress. [ip]'s own frames wait in one FIFO the transmit opportunity drains ahead of the
 //! data flows: an ARP or IGMP frame is built when it leaves, from the state of that moment, and
 //! the timer it feeds starts then. The FIFO holds at most CONTROL_QUEUE frames, at most
 //! ECHO_REPLIES of them echo replies; one of [ip]'s own frames past either is dropped and
 //! counted, and its producer moves on as if it had left. Three kinds are never dropped: a
 //! released datagram's turn, an ACD probe and an ACD announcement. One that finds the FIFO full
-//! waits behind it and enters as room appears, ahead of any frame queued later (§5.4, RFC 5227
+//! waits behind it and enters as room appears, ahead of any frame queued later (RFC 5227
 //! §2.1). A turn holds no datagram: it names the entry whose queue does, and goes with that entry.
 //!
 //! Every datagram is atomic: DF set, identification 0 (`toyos-net-wire`'s one IPv4 form).
@@ -63,7 +63,7 @@ impl Item {
 }
 
 /// A released datagram's place in the FIFO: the oldest of `next_hop`'s released datagrams leaves
-/// when it comes (§6.5).
+/// when it comes.
 #[derive(Debug)]
 pub(crate) struct Turn {
     pub iface: IfIndex,
@@ -283,7 +283,7 @@ impl Ip {
         }
     }
 
-    /// A UDP datagram at a transmit opportunity (§5): written into `frame` when its link
+    /// A UDP datagram at a transmit opportunity: written into `frame` when its link
     /// destination is known, or held here for its next hop, which spends no credit. A refusal is
     /// counted and the datagram's flow is told it is unreachable.
     pub fn send_udp(&mut self, now: Instant, out: &UdpOut<'_>, frame: &mut [u8; FRAME]) -> Result<Sent, Counter> {
@@ -376,7 +376,7 @@ fn sent(cx: &mut Cx<'_>, kind: FrameKind) {
     }
 }
 
-/// Queues an ARP reply to `request`'s sender for `ours`, unicast to it (§6.4).
+/// Queues an ARP reply to `request`'s sender for `ours`, unicast to it.
 pub(crate) fn reply(cx: &mut Cx<'_>, request: &Arp, ours: Ipv4Addr) {
     cx.control.push(Item::Reply { iface: cx.iface, to: request.sender_mac, target: request.sender_ip, ours }, cx.log);
 }

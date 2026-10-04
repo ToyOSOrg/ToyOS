@@ -1,4 +1,4 @@
-//! §8: address conflict detection, on RFC 5227's schedule scaled by the IP-D1 ruling.
+//! Address conflict detection, on RFC 5227's schedule scaled by the owner's ruling (`limits::acd`).
 
 mod common;
 
@@ -42,7 +42,7 @@ fn first_probe(h: &mut H) -> Instant {
 
 #[test]
 fn s_ip_acd_001_the_ruled_schedule() {
-    // IP-D1: RFC 5227's 1 s and 2 s times 200/7,000, in whole nanoseconds.
+    // The ruling: RFC 5227's 1 s and 2 s times 200/7,000, in whole nanoseconds.
     let (one, two) = (Duration::from_nanos(28_571_428), Duration::from_nanos(57_142_857));
     assert_eq!([PROBE_WAIT, PROBE_MIN, PROBE_MAX, ANNOUNCE_WAIT], [one, one, two, two]);
     let mut h = probing();

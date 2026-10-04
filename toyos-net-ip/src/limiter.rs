@@ -1,4 +1,4 @@
-//! The error limiter (§9.4): a token bucket per destination in 256 keyed slots, and one global
+//! The error limiter: a token bucket per destination in 256 keyed slots, and one global
 //! bucket whose burst is redrawn every second from a keyed function. A bucket holds its tokens as
 //! nanoseconds of refill, so fractions are carried and never rounded away, and a moved clock
 //! refills it to its cap and no further. The TCP resets for segments nobody asked for draw from a
