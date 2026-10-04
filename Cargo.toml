@@ -52,6 +52,7 @@ members = [
     "toyos-net-shard/testnet",
     "toyos-net-udp",
     "toyos-net-wire",
+    "toyos-osrelease",
     "toyos-quiesce",
     "toyos-rootimage",
     "toyos-swap",
@@ -141,6 +142,7 @@ toyos-keymap = { path = "toyos-keymap" }
 # on, so the judges reading the log and `logkeeper` writing it read one declaration.
 toyos-logstream = { path = "toyos-logstream" }
 toyos-manifest = { path = "toyos-manifest" }
+toyos-osrelease = { path = "toyos-osrelease" }
 # The shutdown's stop record: the kernel renders it and this crate reads it back
 # off a stick, so one declaration is what both sides spell it with.
 toyos-quiesce = { path = "toyos-quiesce" }

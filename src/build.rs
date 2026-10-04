@@ -704,6 +704,41 @@ fn render_manifest(config: &SystemConfig) -> Vec<u8> {
         .unwrap_or_else(|e| panic!("system.toml cannot be rendered as a manifest: {e:?}"))
 }
 
+/// Which build `root`'s tree makes for `arch` against the sysroot whose key
+/// for it is `toolchain`, as `/system/etc/os-release` records it.
+///
+/// `--ignore-submodules=all`: the fork's state is the toolchain key's, and
+/// recursing into its tree costs a second of every image build.
+fn release(root: &Path, toolchain: &crate::keystore::Key, arch: Arch) -> toyos_osrelease::Release {
+    use crate::sysroot::git_out;
+    let head = git_out(root, &["rev-parse", "HEAD"]);
+    let commit = toyos_osrelease::Hex::parse(head.trim())
+        .unwrap_or_else(|| panic!("`git rev-parse HEAD` in {} said {head:?}, which is no commit", root.display()));
+    let object = git_out(root, &["cat-file", "commit", commit.as_str()]);
+    let committed = committer_time(&object)
+        .unwrap_or_else(|| panic!("commit {} names no committer time:\n{object}", commit.as_str()));
+    let status = git_out(root, &["status", "--porcelain", "--ignore-submodules=all"]);
+    let tree = if status.is_empty() { toyos_osrelease::Tree::Clean } else { toyos_osrelease::Tree::Dirty };
+    toyos_osrelease::Release {
+        commit,
+        tree,
+        toolchain: toyos_osrelease::Hex::parse(toolchain.as_str()).expect("a key is sixteen hex digits"),
+        arch: match arch {
+            Arch::X86_64 => toyos_osrelease::Arch::X86_64,
+            Arch::Aarch64 => toyos_osrelease::Arch::Aarch64,
+        },
+        committed,
+    }
+}
+
+/// The Unix seconds of a commit object's `committer` header, which ends
+/// `<seconds> <zone>`.
+fn committer_time(object: &str) -> Option<u64> {
+    let headers = object.split("\n\n").next()?;
+    let committer = headers.lines().find_map(|line| line.strip_prefix("committer "))?;
+    committer.rsplit(' ').nth(1)?.parse().ok()
+}
+
 fn build_and_assemble(
     root: &Path,
     config: &SystemConfig,
@@ -715,6 +750,8 @@ fn build_and_assemble(
     let mut root_files: Vec<(String, Vec<u8>)> = Vec::new();
     build_programs(root, config, env, quiet, arch, &mut root_files);
     root_files.push((toyos_manifest::PATH.to_string(), render_manifest(config)));
+    let release = release(root, env.sysroot.identity.of_target(arch.userland()), arch);
+    root_files.push((toyos_osrelease::PATH.to_string(), release.to_string().into_bytes()));
 
     if config.hosted_rustc {
         assert!(
@@ -2266,6 +2303,54 @@ fn collect_hosted_rustc(root: &Path, toolchain: &Path, root_files: &mut Vec<(Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The release a tree records is its commit, at that commit's own time,
+    /// and dirty from the first file that is not that commit's**: an
+    /// untracked file counts, and so does an edit to a tracked one. The time
+    /// is the committer's, in a zone not UTC's, and never the author's or the
+    /// host clock's.
+    #[test]
+    fn a_tree_records_its_commit_its_commit_time_and_whether_it_is_dirty() {
+        let (_dir, _origin, work) = crate::gitfixture::repo("release");
+        fs::write(work.join("f"), "next\n").unwrap();
+        crate::gitfixture::sh(&work, &["add", "f"]);
+        let committed = Command::new("git")
+            .args(["commit", "-qm", "next"])
+            .env("GIT_AUTHOR_DATE", "@1000000000 +0000")
+            .env("GIT_COMMITTER_DATE", "@1791089159 +0200")
+            .current_dir(&work)
+            .status()
+            .unwrap();
+        assert!(committed.success());
+        let head = crate::sysroot::git_out(&work, &["rev-parse", "HEAD"]);
+        let key = crate::keystore::Key::parse("0123456789abcdef").unwrap();
+
+        let clean = release(&work, &key, Arch::Aarch64);
+        assert_eq!(clean.commit.as_str(), head.trim());
+        assert_eq!(clean.committed, 1_791_089_159);
+        assert_eq!(clean.tree, toyos_osrelease::Tree::Clean);
+        assert_eq!(clean.toolchain.as_str(), key.as_str());
+        assert_eq!(clean.arch, toyos_osrelease::Arch::Aarch64);
+
+        fs::write(work.join("untracked"), "x").unwrap();
+        assert_eq!(release(&work, &key, Arch::Aarch64).tree, toyos_osrelease::Tree::Dirty);
+        fs::remove_file(work.join("untracked")).unwrap();
+        assert_eq!(release(&work, &key, Arch::Aarch64).tree, toyos_osrelease::Tree::Clean);
+        fs::write(work.join("f"), "edited\n").unwrap();
+        assert_eq!(release(&work, &key, Arch::Aarch64).tree, toyos_osrelease::Tree::Dirty);
+        // An ignored file is the build's own output, not a change to the tree.
+        fs::write(work.join("f"), "next\n").unwrap();
+        fs::create_dir(work.join("target")).unwrap();
+        fs::write(work.join("target/out"), "x").unwrap();
+        assert_eq!(release(&work, &key, Arch::Aarch64).tree, toyos_osrelease::Tree::Clean);
+    }
+
+    #[test]
+    fn a_commit_without_a_committer_time_has_none() {
+        assert_eq!(committer_time("tree t\ncommitter A <a@a> 17 +0200\n\nmsg\n"), Some(17));
+        assert_eq!(committer_time("tree t\nauthor A <a@a> 17 +0200\n\ncommitter A <a@a> 18 +0200\n"), None);
+        assert_eq!(committer_time("tree t\ncommitter A <a@a> +0200\n\n"), None);
+    }
 
     /// `console` is reached by `console/system.toml` alone and the supervisor by no
     /// `[programs]` row, so a reader that drops a mode or the supervisor loses one.

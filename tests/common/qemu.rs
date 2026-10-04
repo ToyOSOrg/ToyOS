@@ -2251,6 +2251,15 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
     } else {
         wait_for_ready(&mut child, &rx, options, &uart_log)
     };
+    // The ready marker is test-runner's, which the supervisor starts after its
+    // first line, so a boot that reached it has said its build.
+    if options.ready_marker == DEFAULT_READY && !options.mute {
+        let said = format!("{}{} ", toyos_osrelease::SAID, built_commit());
+        if !boot_log.lines().any(|line| line.contains(&said)) {
+            let _ = child.kill();
+            panic!("[qemu] the boot never said `{said}`, the commit this run built\nconsole:\n{boot_log}");
+        }
+    }
 
     QemuInstance {
         child,
@@ -2267,6 +2276,21 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
         smp: options.smp,
         carried,
     }
+}
+
+/// The commit this run's images are built from, read by `git` itself rather
+/// than by the build that records it.
+fn built_commit() -> &'static str {
+    static COMMIT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    COMMIT.get_or_init(|| {
+        let out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(super::compile::repo_root())
+            .output()
+            .expect("run git");
+        assert!(out.status.success(), "git rev-parse HEAD: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).expect("a commit is text").trim().to_string()
+    })
 }
 
 /// One finished console line into everything that keeps one.

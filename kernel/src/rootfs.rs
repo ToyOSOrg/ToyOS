@@ -123,6 +123,13 @@ pub fn init(cmdline: &str, args: &KernelArgs, map: &[MemoryMapEntry]) -> Region 
     region
 }
 
+/// The filesystem `root=` names, if this kernel can parse it: a hash of every
+/// file ROOT carries, `/system/etc/os-release` among them, so it names the
+/// build before anything is mounted.
+pub fn named() -> Option<FsUuid> {
+    BOOT.lock().named
+}
+
 /// Mount the filesystem the boot parameter named, off the image the loader
 /// handed. Panics when there is no image, or it is not that filesystem.
 pub fn mount() -> Mounted<MemoryImage, ReadOnly> {

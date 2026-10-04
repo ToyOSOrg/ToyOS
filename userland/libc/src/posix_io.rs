@@ -36,7 +36,7 @@ const S_IFLNK: u32 = 0o120000;
 
 // Helper: set errno from toyos-abi error
 
-fn set_errno(e: toyos_abi::syscall::SyscallError) -> i32 {
+pub(crate) fn set_errno(e: toyos_abi::syscall::SyscallError) -> i32 {
     use toyos_abi::syscall::SyscallError;
     let code = match e {
         SyscallError::NotFound => ENOENT,

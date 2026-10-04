@@ -19,8 +19,7 @@ These answer failure in their POSIX form and do nothing
 - `getrlimit` and `setrlimit`, `ENOSYS`: no call answers a process's limits.
   LLVM's `getDefaultStackSize` (`llvm/lib/Support/ProgramStack.cpp`) ignores
   the failure and reads the `rlimit` it did not get.
-- `gethostname` and `uname`, `ENOSYS`: no host name, release or version is
-  published to a process.
+- `gethostname`, `ENOSYS`: no host name is published to a process.
 - `realpath`, `ENOSYS`: the kernel resolves a path by rules of its own (`..`
   read off the text, only the last name's link followed, a relative link read
   against its mount), and no call answers where a path leads.

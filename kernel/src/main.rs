@@ -326,6 +326,10 @@ pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
         "boot: cmdline {:#x}+{}",
         kernel_args.cmdline_addr, kernel_args.cmdline_len
     );
+    match rootfs::named() {
+        Some(root) => log!("boot: root={root}"),
+        None => log!("boot: root= names no filesystem this kernel can parse"),
+    }
     // Before `mm::init`, which may hand the parameter's memory out. This record
     // is how a slot that died or was refused reaches the next boot's `/log`.
     match params::slot(cmdline) {

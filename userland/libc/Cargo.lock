@@ -48,7 +48,12 @@ dependencies = [
  "toyos",
  "toyos-abi",
  "toyos-elf",
+ "toyos-osrelease",
 ]
+
+[[package]]
+name = "toyos-osrelease"
+version = "0.1.0"
 
 [[package]]
 name = "windows-link"
