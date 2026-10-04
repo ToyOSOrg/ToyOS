@@ -1570,6 +1570,16 @@ mod tests {
         assert!(message.contains(&mine) && message.contains(&recorded), "{message}");
         assert_eq!(git(&nested, &["rev-parse", "HEAD"]), mine, "a nested commit nothing records was moved off");
         assert_eq!(git(&fork, &["rev-parse", "HEAD"]), c1, "a checkout over a nested commit nothing records was moved");
+
+        // Nor when that commit sits on top of what the pin records there.
+        git(&nested, &["checkout", "-q", "--detach", &recorded]);
+        write(&nested.join("lib.rs"), "pub fn trace_mine_later() {}\n");
+        git(&nested, &["commit", "-qam", "the agent's own, on the pin's record"]);
+        let mine = git(&nested, &["rev-parse", "HEAD"]);
+        let message = refusal(|| drop(fork_checkout(&linked, &mut lock)));
+        assert!(message.contains(&mine) && message.contains(&recorded), "{message}");
+        assert_eq!(git(&nested, &["rev-parse", "HEAD"]), mine, "a nested commit on the pin's record was moved off");
+        assert_eq!(git(&fork, &["rev-parse", "HEAD"]), c1, "a checkout over a nested commit on the pin's record was moved");
     }
 
     /// **Twelve builds starting at once in a worktree make its fork checkout
