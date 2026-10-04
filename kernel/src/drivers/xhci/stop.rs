@@ -22,7 +22,7 @@
 //! every path but the panic one a live driver may still be enqueuing on — for
 //! an out data phase, a second write of the block. What a cut command then
 //! costs is a question about the device and not about this path:
-//! `issues/kernel/a-cut-bulk-only-command-does-not-brick-the-benchs-stick.md`.
+//! `issues/a-cut-bulk-only-command-does-not-brick-the-benchs-stick.md`.
 //!
 //! **Registers and DMA and nothing else, because the panic path calls this.**
 //! The controllers are published into [`POINTS`] at bring-up rather than read

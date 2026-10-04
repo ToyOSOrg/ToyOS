@@ -250,6 +250,9 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(KERNEL_LOOM, "lock-acquire-off", Some("ticket_lock"), &[
         Fails("try_lock_observes_the_previous_owners_writes"),
     ]),
+    red(KERNEL_LOOM, "owed-fence-off", Some("owed_lock"), &[
+        Fails("a_turned_away_cpu_holds_the_lock_or_is_answered"),
+    ]),
     red(KERNEL_LOOM, "seqlock-writer-fence-off", Some("panic_console_publish"), &[
         Fails("a_snapshot_is_one_publication_whole"),
     ]),
@@ -368,7 +371,7 @@ pub(crate) const CONTROLS: &[Control] = &[
         Fails("a_poll_registered_racing_a_post_in_place_completes_exactly_once"),
     ]),
     // Reproduces an open defect
-    // (`issues/kernel/steal-probe-node-dies-with-its-victim.md`) rather than
+    // (`issues/steal-probe-node-dies-with-its-victim.md`) rather than
     // proving a lie is caught, and goes with its fix.
     Control {
         krate: KERNEL_LOOM,

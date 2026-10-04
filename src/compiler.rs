@@ -431,6 +431,7 @@ pub(crate) mod tests {
         write(&fork.join("src/bootstrap/src/lib.rs"), "fn main() {}\n");
         write(&fork.join("src/stage0"), "compiler_version=beta\n");
         write(&fork.join("Cargo.lock"), "# lock\n");
+        write(&fork.join("x.py"), "\n");
         write(&fork.join("library/std/src/lib.rs"), "pub fn a() {}\n");
         write(&fork.join(".gitignore"), "/build\n");
         git(&fork, &["add", "-A"]);

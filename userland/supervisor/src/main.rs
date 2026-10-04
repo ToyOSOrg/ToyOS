@@ -346,13 +346,16 @@ fn main() {
     // Before anything is started, and before the supervisor says anything: from here
     // the supervisor's own lines are records in its ring.
     let log = Log::open();
+    say_release();
 
     let syscap: SysCap = Endowments::get()
         .take(SYSCAP_LABEL)
         .expect("supervisor: the kernel spawns this program holding the system capability");
 
-    let text = read_manifest()
+    let bytes = read_root(toyos_manifest::GUEST_PATH)
         .unwrap_or_else(|e| panic!("supervisor: cannot read {}: {e:?}", toyos_manifest::GUEST_PATH));
+    let text = String::from_utf8(bytes)
+        .unwrap_or_else(|_| panic!("supervisor: {} is not text", toyos_manifest::GUEST_PATH));
     // For the machine's life, and `'static` so a launch's path can be resolved
     // against it on the supervisor's file worker.
     let system: &'static Manifest = Box::leak(Box::new(toyos_manifest::parse(&text)));
@@ -618,7 +621,7 @@ impl<'a> Service<'a> {
         // file lives in an ambient directory, so what the supervisor verified when it
         // wrote it is not a claim about what is there now. This narrows the
         // window to the spawn itself and does not close it
-        // (`issues/isolation/a-swapped-binary-lives-where-any-process-can-rewrite-it.md`).
+        // (`issues/a-swapped-binary-lives-where-any-process-can-rewrite-it.md`).
         if let Some(digest) = toyos_swap::installed_digest(path) {
             let bytes = read_binary(path).map_err(|why| std::io::Error::other(why.to_string()))?;
             toyos_swap::verify(&bytes, &digest).map_err(|why| {
@@ -1864,7 +1867,7 @@ enum Served<'m, 'a> {
 ///
 /// **A compromise over a kernel defect, recorded as one**: the kernel publishes
 /// a process's end before every deferred release its handles queued has run
-/// (`issues/kernel/deferred-release-outlives-its-syscall.md`), so a claim asked
+/// (`issues/deferred-release-outlives-its-syscall.md`), so a claim asked
 /// for the instant `wait` returns is refused as still held. Its release is one
 /// pass of the zero-handle drain; this bound is a liveness guard, and it goes
 /// when that issue closes.
@@ -2253,7 +2256,7 @@ fn build_namespace(
 ///
 /// **Every program sees the whole tree the file servers serve**, which is the
 /// kernel's old view kept whole until each row declares its own
-/// (`issues/isolation/every-program-sees-only-the-files-it-was-given.md`,
+/// (`issues/every-program-sees-only-the-files-it-was-given.md`,
 /// stage 2), with one exception: a storage row sees none, since a file server
 /// resolving a path of its own through itself waits for ever.
 fn in_view(program: &Program, name: &str) -> bool {
@@ -2404,15 +2407,15 @@ fn storage_endowment(program: &Program, role: Option<&str>, syscap: &SysCap) -> 
     Ok(storage)
 }
 
-/// The manifest, off ROOT through the kernel's own `open`.
+/// A file of ROOT, through the kernel's own `open`.
 ///
 /// **Not through std**: std resolves a path through this process's namespace,
 /// and the first path it resolves fixes that namespace for the process's life.
-/// The supervisor builds its namespace out of the manifest, so the manifest is read
+/// The supervisor builds its namespace out of the manifest, so ROOT's files are read
 /// before std is asked anything.
-fn read_manifest() -> Result<String, SyscallError> {
+fn read_root(path: &str) -> Result<Vec<u8>, SyscallError> {
     use toyos_abi::syscall::{self, OpenFlags};
-    let handle = syscall::open(toyos_manifest::GUEST_PATH.as_bytes(), OpenFlags::READ)?;
+    let handle = syscall::open(path.as_bytes(), OpenFlags::READ)?;
     let mut bytes = Vec::new();
     let mut buf = [0u8; 4096];
     let read = loop {
@@ -2423,6 +2426,23 @@ fn read_manifest() -> Result<String, SyscallError> {
         }
     };
     syscall::close(handle);
-    read?;
-    String::from_utf8(bytes).map_err(|_| SyscallError::InvalidArgument)
+    read.map(|()| bytes)
+}
+
+/// Say which build this machine runs: the first thing it says, so a boot
+/// that dies past here names its build in its log.
+fn say_release() {
+    let path = toyos_osrelease::GUEST_PATH;
+    let bytes = read_root(path).unwrap_or_else(|e| panic!("supervisor: cannot read {path}: {e:?}"));
+    let release = toyos_osrelease::parse(&bytes)
+        .unwrap_or_else(|e| panic!("supervisor: {path} is not one the build wrote: {e:?}"));
+    say!(
+        "{}{} {}, committed {} UTC, toolchain {}, {}",
+        toyos_osrelease::SAID,
+        release.commit.as_str(),
+        release.tree,
+        toyos_wallclock::Civil::from_unix_secs(release.committed),
+        release.toolchain.as_str(),
+        release.arch.machine()
+    );
 }

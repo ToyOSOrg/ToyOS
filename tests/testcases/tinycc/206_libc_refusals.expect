@@ -3,7 +3,6 @@ execve: -1, ENOSYS
 setsid: -1, ENOSYS
 getsid: -1, ENOSYS
 gethostname: -1, ENOSYS
-uname: -1, ENOSYS
 link: -1, ENOSYS
 symlink: -1, ENOSYS
 fchown: -1, ENOSYS

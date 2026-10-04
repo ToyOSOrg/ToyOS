@@ -29,7 +29,7 @@ pub fn init() {
         const AC: u64 = 1 << 18;
         // TF must stay masked: an unmasked single-step trap taken between entry and the stack switch takes `#DB` on the user stack, which SMAP refuses and which escalates to a double fault.
         // `debug_trap`'s `tf-syscall` arm is the check that catches `TF` being left unmasked.
-        // `IF` stays masked so interrupts are off for the whole syscall, and `RFLAGS.AC` clear is what makes SMAP bind at all.
+        // `IF` stays masked until `syscall_handler` opens it, past the stack switch and the user-state save; `RFLAGS.AC` clear is what makes SMAP bind at all.
         // `DF` is cleared to match `arch::entry::ring3_naked_asm`'s `cld`.
         // `entry-df-unclean` takes out only `DF`, never another bit — a control that removed two bits would be measuring two things.
         let df = if cfg!(feature = "entry-df-unclean") { 0 } else { DF };
@@ -65,8 +65,6 @@ extern "sysv64" fn syscall_entry() {
         "call {handler}",
 
         "lock sub dword ptr gs:[{preempt_count}], 1",
-        // `cli` here: an interrupt after `pop rsp` would run on the user RSP as a kernel stack.
-        "cli",
         // The helper called before `pop rsp`/`sysretq` (`exit_to_user`) preserves `IF=0` across its return.
         // Runs before GPR restore: the sysv64 call would otherwise clobber rcx/r11 (sysretq's RIP/RFLAGS) and the restored args.
         // The 16 bytes both park the syscall return value and keep `rsp` aligned for the `call`.
@@ -110,7 +108,10 @@ extern "sysv64" fn syscall_handler(num: u64, a1: u64, a2: u64, _: u64, a3: u64, 
     #[cfg(feature = "df-witness")]
     cpu::df_witness("syscall_handler");
     percpu::enter_syscall();
+    cpu::enable_interrupts();
     let out = syscall_dispatch(num, a1, a2, a3, a4);
+    // Closed for the rest of the way out: an interrupt after the entry's `pop rsp` would run on the user RSP as a kernel stack.
+    cpu::disable_interrupts();
     percpu::leave_syscall();
     // The entry lowers it by one next; `exit_to_user` opens interrupts.
     #[cfg(feature = "mask-windows")]

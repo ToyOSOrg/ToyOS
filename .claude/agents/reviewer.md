@@ -73,7 +73,7 @@ if it meets the bar above; otherwise it is a NOTE.
 - **Arrivals.** A host tool outside Rust and QEMU arrives by `Command::new`, `libc::system`,
   `exec`, `posix_spawn`, a build script or `cc::Build`, a `.github/` `run:` step or package
   manager, or `sh -c`, and is declared in
-  `issues/build/the-build-runs-host-tools-outside-rust-and-qemu.md` and nowhere else. A BLOCKER
+  `issues/the-build-runs-host-tools-outside-rust-and-qemu.md` and nowhere else. A BLOCKER
   each: an undeclared host tool; one, like Go's `gh`, not built from C or C++ source ToyOS can
   one day build and run; a binary for one host OS alone; a C or C++ tool taken where a Rust tool
   does the job; new Python, Perl or shell of ToyOS's own.

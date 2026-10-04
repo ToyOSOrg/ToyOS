@@ -10,7 +10,7 @@
 //!
 //! A removed mapping's `Unmapped` drops outside `with_process_data`: the drop
 //! shoots down and waits, and a sibling thread can be spinning on that same
-//! lock with `IF` clear.
+//! lock.
 
 use crate::mm::policy::{CachePolicy, Prot};
 use crate::vma::Occupancy;
@@ -24,7 +24,7 @@ use toyos_abi::syscall::*;
 ///
 /// **Hand-copied from `toyos-abi` and nothing checks the copy**: a bit added
 /// there and not here is refused although the ABI defines it, measured in
-/// `issues/kernel/a-known-mask-is-copied-out-of-toyos-abi-by-hand.md`.
+/// `issues/a-known-mask-is-copied-out-of-toyos-abi-by-hand.md`.
 const MMAP_PROT_KNOWN: u64 = MmapProt::READ.0 | MmapProt::WRITE.0;
 /// Every bit `MmapFlags` defines; hand-copied, as `MMAP_PROT_KNOWN` says.
 const MMAP_FLAGS_KNOWN: u64 = MmapFlags::ANONYMOUS.0 | MmapFlags::PRIVATE.0 | MmapFlags::FIXED.0;
@@ -192,7 +192,7 @@ pub(super) fn sys_munmap(addr: u64, _size: u64) -> u64 {
         return SyscallError::NotFound.to_u64();
     };
     // Dropped here, outside the closure: the drop shoots down and waits, and a
-    // sibling can be spinning on the process-data lock with `IF` clear.
+    // sibling can be spinning on the process-data lock.
     drop(unmapped);
     0
 }

@@ -39,7 +39,7 @@ pub struct PerCpu {
     kernel_timer_fires: AtomicU32,
     last_seen_kernel_timer_fires: AtomicU32,
     /// Counter ticks the timer was last armed for: what a timer interrupt
-    /// taken at EL1 re-arms it with, and zero when it is stopped.
+    /// taken at EL0 re-arms it with, and zero when it is stopped.
     armed_ticks: AtomicU64,
     /// The kernel stack a switch last installed, for the stack witness: on
     /// AArch64 an entry from EL0 lands on `SP_EL1` as the last `ERET` left it,

@@ -414,7 +414,7 @@ const WINDOW_LINES: usize = 40;
 /// 2026-08-18 that is what a `DOUBLE FAULT on CPU 1` cost — the wait named the
 /// death in one sentence, the kernel's report sat in `TestResult::serial`, and
 /// the arm printed `stdout`
-/// (`issues/kernel/a-double-fault-on-cpu-1-under-a-wide-suite.md`). Fixing
+/// (`issues/a-double-fault-on-cpu-1-under-a-wide-suite.md`). Fixing
 /// the arms would have fixed the arms. What is fixed here is that the sentence
 /// cannot be built without the capture: [`Self::new`] is the only constructor
 /// there is and the capture is one of its two arguments, so a wait that reports
@@ -2009,7 +2009,7 @@ fn qemu_command(
 
     // `virt` puts RAM at 1 GiB and AAVMF allocates from its top, so with 4 GiB
     // the loader's allocations land past the 4 GiB its boot map reaches and it
-    // refuses the boot: issues/boot-media/the-boot-map-reaches-4-gib-and-firmware-decides-what-lands-in-it.md.
+    // refuses the boot: issues/the-boot-map-reaches-4-gib-and-firmware-decides-what-lands-in-it.md.
     let memory = match arch {
         Arch::X86_64 => "4G",
         Arch::Aarch64 => "2G",
@@ -2272,6 +2272,32 @@ fn spawn_and_wait_ready(mut qemu: Command, options: &BootOptions, files: Files) 
     } else {
         wait_for_ready(&mut child, &rx, options, &uart_log)
     };
+    // The ready marker is test-runner's, which the supervisor starts after its
+    // first line, so a boot that reached it has said its build, and the kernel
+    // named the ROOT that carries it before that. Both are read off the image
+    // this boot was handed, never off the checkout, which may have moved since.
+    if options.ready_marker == DEFAULT_READY && !options.mute {
+        let (root, bytes) = toyos_build::image::root_file_on(&boot_image, toyos_osrelease::PATH)
+            .unwrap_or_else(|why| panic!("[qemu] {why}"));
+        let release = toyos_osrelease::parse(&bytes)
+            .unwrap_or_else(|why| panic!("[qemu] {} on {} is not the build's: {why:?}", toyos_osrelease::PATH, boot_image.display()));
+        let named = format!("boot: root={root}");
+        let said = format!(
+            "{}{} {}, committed {} UTC, toolchain {}, {}",
+            toyos_osrelease::SAID,
+            release.commit.as_str(),
+            release.tree,
+            toyos_wallclock::Civil::from_unix_secs(release.committed),
+            release.toolchain.as_str(),
+            release.arch.machine()
+        );
+        for line in [&named, &said] {
+            if !boot_log.lines().any(|l| l.contains(line.as_str())) {
+                let _ = child.kill();
+                panic!("[qemu] the boot never said `{line}`, of the image this run built\nconsole:\n{boot_log}");
+            }
+        }
+    }
 
     QemuInstance {
         child,

@@ -178,7 +178,7 @@ const NVME_AT: &str = "00:02.0";
 /// three times over.
 ///
 /// The ordering ruling this whole stage stands on
-/// (`issues/kernel/every-driver-is-still-in-the-kernel.md`) is that moving a
+/// (`issues/every-driver-is-still-in-the-kernel.md`) is that moving a
 /// driver out without the unit costs security: a message nothing remaps raises
 /// any vector on any CPU, and a descriptor holding a physical address is an
 /// arbitrary read and write over all of memory. So the kernel

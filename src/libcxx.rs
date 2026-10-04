@@ -41,7 +41,7 @@ pub(crate) const OPTIONS: [(&str, &str); 18] = [
     // The C library has no `dladdr`, so libunwind names no function it unwinds.
     ("LIBUNWIND_ADDITIONAL_COMPILE_FLAGS", "-D_LIBUNWIND_USE_DLADDR=0"),
     // The C library has no directory, `stat` or path surface for it
-    // (`issues/build/libcxx-is-built-without-std-filesystem.md`).
+    // (`issues/libcxx-is-built-without-std-filesystem.md`).
     ("LIBCXX_ENABLE_FILESYSTEM", "OFF"),
     ("LIBCXX_INCLUDE_BENCHMARKS", "OFF"),
     ("LIBCXX_INCLUDE_TESTS", "OFF"),

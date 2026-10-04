@@ -17,7 +17,7 @@ pub const HEAD: &str = "[kernel ";
 /// A console's bytes as they arrive, withheld until the kernel's first record.
 ///
 /// Of a QEMU process's first boot only: a guest reset does not re-arm it
-/// (`issues/build/the-kernel-console-split-does-not-re-arm-across-a-guest-reset.md`).
+/// (`issues/the-kernel-console-split-does-not-re-arm-across-a-guest-reset.md`).
 pub struct KernelConsole {
     /// The withheld tail that could still begin [`HEAD`]; `None` once the
     /// kernel has begun.
