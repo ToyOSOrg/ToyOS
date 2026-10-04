@@ -108,6 +108,8 @@ const RUST_SKIP: &[&str] = &[
     // every CPU, which the `counters` metal row judges; on a guest it would be
     // seconds of four CPUs spinning, read by nothing.
     "counters_metal",
+    // Scout, never landed: the `cpu7_scout` metal row.
+    "cpu7_scout",
     // It takes the machine down; `virt_fatal_halts_the_others_first` runs it.
     "panic_halts_first",
     // Needs a launcher and a declared `cat` and shell, which `tests/testcases`
@@ -415,6 +417,17 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal {
             arms: &[metal::once("testcases", "tests/testcases", &[], &["test_rs_counters_metal"])],
             judge: |b| counters_on_metal(b[0]),
+        },
+    ),
+    (
+        // Scout, never landed: `cpu7_scout_on_metal` says what it reads.
+        "cpu7_scout",
+        metal::Metal {
+            arms: &[metal::once("cpu7scout", "tests/testcases", &[], &["test_rs_cpu7_scout", "test_rs_counters_metal"])],
+            judge: |b| {
+                counters_on_metal(b[0])?;
+                cpu7_scout_on_metal(b[0])
+            },
         },
     ),
     (
@@ -3526,6 +3539,56 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
     eprintln!("  [counters] the spin's read, a whole round, took its reader {} ns", clock["spin"].1);
     if spinning.iter().any(|&mhz| mhz < floor) {
         return Err(format!("spinning {spin_ns} ns at {spinning:.0?} MHz, some cpu below the {floor:.0} Linux held over that span"));
+    }
+    Ok(())
+}
+
+/// Scout: `cpu7_scout`'s seconds, each CPU's busy fraction per arm, and the
+/// records that say where the log's servers ran. Held: the job passed and
+/// every round second parsed; the numbers are read, not judged.
+fn cpu7_scout_on_metal(back: &metal::Readback) -> Result<(), String> {
+    back.job_passed("test_rs_cpu7_scout")?;
+    let log = back.log();
+    let kernel = back.kernel();
+    for line in kernel.text().lines().filter(|l| l.contains("spawn: /system/bin/") && !l.contains("spawn: /system/bin/test_rs_counters_metal")) {
+        eprintln!("  [cpu7] {line}");
+    }
+    for line in log.text().lines().filter(|l| l.contains(" serving /")) {
+        eprintln!("  [cpu7] {line}");
+    }
+    let start = kernel.text().find("spawn: /system/bin/test_rs_cpu7_scout").ok_or("no spawn of the scout")?;
+    for line in kernel.text()[start..].lines().take_while(|l| !l.contains("spawn: /system/bin/test_rs_counters_metal")) {
+        eprintln!("  [cpu7] while the scout ran: {line}");
+    }
+    let mut arms: BTreeMap<String, Vec<Vec<f64>>> = BTreeMap::new();
+    for line in log.text().lines().filter(|l| l.contains("cpu7_scout second ")) {
+        let said = line.split("cpu7_scout ").nth(1).unwrap_or(line);
+        eprintln!("  [cpu7] {said}");
+        let mut words = said.split(' ');
+        let (Some(_), Some(_), Some(kind), Some(arm)) = (words.next(), words.next(), words.next(), words.next()) else {
+            return Err(format!("unreadable: {line}"));
+        };
+        let busy = said
+            .split("busy ppm [")
+            .nth(1)
+            .and_then(|r| r.split(']').next())
+            .ok_or_else(|| format!("unreadable: {line}"))?
+            .split(' ')
+            .map(|w| w.parse::<f64>().map(|ppm| ppm / 10_000.0).map_err(|_| format!("unreadable: {line}")))
+            .collect::<Result<Vec<f64>, String>>()?;
+        if kind == "round" {
+            arms.entry(arm.trim_end_matches(':').to_string()).or_default().push(busy);
+        }
+    }
+    if arms.len() != 3 || arms.values().any(|s| s.len() != 4) {
+        return Err(format!("expected four round seconds of each of three arms: {arms:?}"));
+    }
+    for (arm, seconds) in &arms {
+        let cpus = seconds[0].len();
+        let mean: Vec<String> = (0..cpus)
+            .map(|cpu| format!("cpu{cpu}={:.2}%", seconds.iter().map(|s| s[cpu]).sum::<f64>() / seconds.len() as f64))
+            .collect();
+        eprintln!("  [cpu7] {arm}: mean idle busy {}", mean.join(" "));
     }
     Ok(())
 }
