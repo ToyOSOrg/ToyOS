@@ -37,9 +37,10 @@ pub const MAX_LOG_SHARDS: usize = 8;
 ///
 /// **Four because four have writers and readers.** The kernel writes `Info`
 /// (`log!`) and `Alert` (`alert!`); a program's stdout is `Info` and its stderr
-/// `Error`, and its own lines choose. The panel paints `Error` and above red;
-/// `/system/bin/logkeeper` names every one above `Info` in the line, and makes the
-/// volume durable at `Alert` rather than on its interval.
+/// `Error`, and its own lines choose. Every rendered line names one above
+/// `Info` by its [`word`](Self::word), a screen colours the line by it, and
+/// `/system/bin/logkeeper` makes the volume durable at `Alert` rather than on
+/// its interval.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum Severity {
@@ -207,6 +208,9 @@ impl LogRecord {
         if self.is_early() {
             f.write_str(" boot")?;
         }
+        if let Some(word) = self.severity().and_then(Severity::word) {
+            write!(f, " {word}")?;
+        }
         if self.tid != 0 {
             write!(f, " tid={}", self.tid)?;
         }
@@ -360,13 +364,19 @@ mod tests {
         assert_eq!(early.tagged("kernel").to_string(), "[kernel 1.234 cpu2 boot] x");
     }
 
-    /// The two decorations, each of which a consumer would otherwise invent.
+    /// The three decorations, each of which a consumer would otherwise invent.
     #[test]
-    fn early_and_elided_are_in_the_line_rather_than_in_a_convention() {
+    fn early_severity_and_elided_are_in_the_line_rather_than_in_a_convention() {
         let mut r = record("x");
         r.flags = FLAG_EARLY;
         r.tid = 0;
         assert_eq!(r.to_string(), "[1.234 cpu2 boot] x");
+
+        let mut r = record("x");
+        r.severity = Severity::Alert as u8;
+        assert_eq!(r.tagged("kernel").to_string(), "[kernel 1.234 cpu2 alert tid=4] x");
+        r.flags = FLAG_EARLY;
+        assert_eq!(r.to_string(), "[1.234 cpu2 boot alert tid=4] x");
 
         let mut r = record("x");
         r.elided = 900;

@@ -22,10 +22,10 @@ const GLYPHS: usize = 95;
 /// assertion can never accidentally pass on undecodable pixels.
 pub const UNKNOWN: char = '\u{fffd}';
 
-/// Foreground threshold on the brightest channel. The renderer draws white
-/// (0xFF) or alert red (0xFF,0x50,0x50) over a dark red (0x60,0,0) or black
+/// Foreground threshold on the brightest channel. The renderer draws every
+/// ink with a channel at 0x9E or above over a dark red (0x60,0,0) or black
 /// fill, so anything at or above this is text and anything below is
-/// background, with 0x30 of margin on both sides.
+/// background, with 0x0E and 0x30 of margin.
 const FG_THRESHOLD: u8 = 0x90;
 
 pub struct Ppm {
@@ -134,6 +134,26 @@ impl Ppm {
     pub fn row_fg(&self, cy: usize) -> Option<[u8; 3]> {
         for y in cy * GLYPH_H..(cy + 1) * GLYPH_H {
             for x in 0..self.width {
+                let p = self.pixels[y * self.width + x];
+                if p[0].max(p[1]).max(p[2]) >= FG_THRESHOLD {
+                    return Some(p);
+                }
+            }
+        }
+        None
+    }
+
+    /// The colour of the first foreground pixel of `needle`'s own cells, on
+    /// the first cell row carrying it; `None` where no row does or its cells
+    /// are blank. A row's head and its text are drawn apart, so this — and not
+    /// [`Ppm::row_fg`] — is the colour of the text.
+    pub fn fg_of(&self, needle: &str) -> Option<[u8; 3]> {
+        let rows = self.rows();
+        let (cy, at) = rows.iter().enumerate().find_map(|(cy, row)| Some((cy, row.find(needle)?)))?;
+        let cx = rows[cy][..at].chars().count();
+        let cells = cx..cx + needle.chars().count();
+        for y in cy * GLYPH_H..(cy + 1) * GLYPH_H {
+            for x in cells.start * GLYPH_W..cells.end * GLYPH_W {
                 let p = self.pixels[y * self.width + x];
                 if p[0].max(p[1]).max(p[2]) >= FG_THRESHOLD {
                     return Some(p);

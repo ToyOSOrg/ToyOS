@@ -14,7 +14,8 @@
 //!   log ([`toyos_logstream::SERVICE`]) and draws the boot so far above the
 //!   first prompt — the kernel's records and every program's output — and
 //!   every program's line after as it is written, each under its program's
-//!   name and above the shell's unfinished line (`Log::draw`).
+//!   name and above the shell's unfinished line (`Log::draw`), as a terminal
+//!   shows a line of the log ([`toyos_logstream::Shown`]).
 //! - **A fatal panic still takes the screen back.** `render` ignores
 //!   `SCREEN_OWNED_BY_USERLAND` entirely — only boot checkpoints honour it —
 //!   so the report paints over whatever this program drew.
@@ -36,7 +37,7 @@ use toyos::port::{self, Connector};
 use toyos::surface::{self, Delivery, Host, Notice};
 use toyos::{FramebufferDev, Keyboard, Pipe};
 use toyos_abi::syscall::{DeviceType, SyscallError};
-use toyos_logstream::{Lines, READ, SERVED, SERVICE};
+use toyos_logstream::{Lines, Severity, Shown, Source, READ, SERVED, SERVICE};
 use window::Screen;
 
 const FONT: &str = "/system/share/fonts/JetBrainsMono-Regular-8x16.font";
@@ -70,6 +71,8 @@ struct Log {
     /// Whether the last kernel record was kept, which its continuation lines
     /// follow.
     drawing: bool,
+    /// The last kernel record's severity, which its continuation lines wear.
+    severity: Severity,
     /// Lines kept and not yet drawn.
     held: Vec<u8>,
 }
@@ -90,7 +93,15 @@ impl Log {
         // SAFETY: the kernel moved this handle into this table with the frame
         // that names it, and nothing else answers for it.
         let pipe = unsafe { Pipe::from_raw(raw) };
-        Ok(Self { pipe, lines: Lines::new(), handed, asked_ms, drawing: true, held: Vec::new() })
+        Ok(Self {
+            pipe,
+            lines: Lines::new(),
+            handed,
+            asked_ms,
+            drawing: true,
+            severity: Severity::Info,
+            held: Vec::new(),
+        })
     }
 
     /// Take every whole line in `bytes` that goes on the screen.
@@ -100,22 +111,30 @@ impl Log {
     /// asked** — the boot so far, as the panel it took over would have shown
     /// it. A record after that is not drawn: it would put a `spawn:` and an
     /// `exit:` beside every command typed.
+    ///
+    /// Each is drawn as [`toyos_logstream::Shown`] draws it; a continuation
+    /// wears the severity of the kernel record above it.
     fn take(&mut self, bytes: &[u8]) {
-        let (asked_ms, drawing, held) = (self.asked_ms, &mut self.drawing, &mut self.held);
+        let (asked_ms, drawing, severity, held) =
+            (self.asked_ms, &mut self.drawing, &mut self.severity, &mut self.held);
         self.lines.push(bytes, |line, _| {
-            let text = std::str::from_utf8(line).ok();
-            let keep = match text.and_then(toyos_logstream::program_line) {
-                Some(said) => said.tag != OWN_TAG,
-                None => {
-                    if let Some(ms) = text.and_then(toyos_logstream::record_ms) {
-                        *drawing = ms < asked_ms;
-                    }
-                    *drawing
+            let line = String::from_utf8_lossy(line);
+            let shown = match toyos_logstream::shown(&line) {
+                Some(shown) => {
+                    let keep = match shown.head.map(|head| head.source) {
+                        Some(Source::Program(tag)) => tag != OWN_TAG,
+                        _ => {
+                            *drawing = toyos_logstream::record_ms(&line).is_some_and(|ms| ms < asked_ms);
+                            *severity = shown.severity;
+                            *drawing
+                        }
+                    };
+                    keep.then_some(shown)
                 }
+                None => (*drawing).then_some(Shown { head: None, severity: *severity, text: &line }),
             };
-            if keep {
-                held.extend_from_slice(line);
-                held.push(b'\n');
+            if let Some(shown) = shown {
+                held.extend_from_slice(format!("{shown}\n").as_bytes());
             }
         });
     }

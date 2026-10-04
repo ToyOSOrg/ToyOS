@@ -985,9 +985,11 @@ fn c_corpus_metal(
 /// The comparator's own staged name. It is a `RUST_SKIP` helper, so discovery
 /// never makes a job of it and [`shared_metal`] stages it as one.
 const CCHECK: &str = "test_rs_ccheck";
-/// The renderer's two text colours, as the screendump reports them.
+/// The renderer's inks for `Info` text, `Alert` text and a record's head, as
+/// the screendump reports them.
 const WHITE: [u8; 3] = [0xFF, 0xFF, 0xFF];
-const ALERT: [u8; 3] = [0xFF, 0x50, 0x50];
+const ALERT: [u8; 3] = [0xFF, 0x6E, 0x6E];
+const STAMP: [u8; 3] = [0x9E, 0x9E, 0x9E];
 /// And the fill a halted machine leaves behind.
 const FILL_FATAL: [u8; 3] = [0x60, 0x00, 0x00];
 /// The fill a boot checkpoint leaves behind. It is the only thing that tells a
@@ -1404,8 +1406,9 @@ fn print_screen(name: &str, text: &str) {
     }
 }
 
-/// Assert the colour decisions `text()` cannot see: the fill, every row an
-/// `alert!` produced, and one row it did not.
+/// Assert the colour decisions `text()` cannot see: the fill, the text of
+/// every row an `alert!` produced and of one row it did not, and the head the
+/// record's first row opens with.
 ///
 /// **Both rows are named by their text, and that is the whole assertion.**
 /// Nothing in the message says "alert" any more — the colour is the record's
@@ -1428,34 +1431,38 @@ fn check_colors(
     if dump.fill() != fill {
         return Err(format!("fill is {:?}, want {fill:?}", dump.fill()));
     }
-    let rows = dump.rows();
     for alert_line in alert_lines {
-        let Some(cy) = dump.row_index(alert_line) else {
+        let Some(fg) = dump.fg_of(alert_line) else {
             return Err(format!("{alert_line:?} not on screen\n{}", dump.text()));
         };
-        if dump.row_fg(cy) != Some(ALERT) {
+        if fg != ALERT {
             return Err(format!(
-                "{alert_line:?} drawn in {:?}, want alert {ALERT:?} — every row of an \
+                "{alert_line:?} drawn in {fg:?}, want alert {ALERT:?} — every row of an \
                  `alert!` record wears its level, including the ones its message wrapped \
                  or newlined onto\n{}",
-                dump.row_fg(cy),
                 dump.text()
             ));
         }
     }
-    let Some(plain) = dump.row_index(plain_line) else {
+    // The record's first row opens with its head, drawn dim and apart from its text.
+    let opens = alert_lines.first().and_then(|line| dump.row_index(line));
+    if let Some(cy) = opens.filter(|&cy| dump.row_fg(cy) != Some(STAMP)) {
+        return Err(format!(
+            "the head of {:?} drawn in {:?}, want the stamp's {STAMP:?}\n{}",
+            dump.rows()[cy],
+            dump.row_fg(cy),
+            dump.text()
+        ));
+    }
+    let Some(fg) = dump.fg_of(plain_line) else {
         return Err(format!(
             "{plain_line:?} is not on screen, so there is no ordinary row to compare the \
              highlight against\n{}",
             dump.text()
         ));
     };
-    if dump.row_fg(plain) != Some(WHITE) {
-        return Err(format!(
-            "ordinary row {:?} drawn in {:?}, want white {WHITE:?}",
-            rows[plain],
-            dump.row_fg(plain)
-        ));
+    if fg != WHITE {
+        return Err(format!("ordinary text {plain_line:?} drawn in {fg:?}, want white {WHITE:?}"));
     }
     Ok(())
 }

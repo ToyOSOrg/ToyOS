@@ -6,8 +6,12 @@
 //! the kernel's first record written onto its tail. Every one of them is on the
 //! 16550 as well, and a loader line is read there. Where the kernel begins is
 //! the whole rule, so a firmware that writes nothing on the port reads the same.
+//! A terminal is shown that whole, and what is the kernel's in colour
+//! ([`Painter`]); the bytes the host reads are never coloured.
 
 use std::borrow::Cow;
+
+use toyos_logstream::{Severity, Shown};
 
 /// What every kernel record's console line opens with: `write_line` in
 /// `kernel/src/log/console.rs` tags each record `kernel`, and nothing before
@@ -43,6 +47,58 @@ impl KernelConsole {
         }
         held.drain(..held.len().saturating_sub(head.len() - 1));
         Cow::Borrowed(&[])
+    }
+}
+
+/// The console as a terminal shows it: what comes before the kernel's first
+/// record as it came, and every line from it on as `toyos_logstream::Shown`
+/// draws it — the kernel's records and programs' lines by their heads, and a
+/// record's continuation in the severity of the record above it.
+///
+/// From the kernel's first record on the console carries whole lines only, so
+/// a line is held until it ends; before it, only what could still begin
+/// [`HEAD`] is.
+pub struct Painter {
+    begun: bool,
+    held: Vec<u8>,
+    severity: Severity,
+}
+
+impl Default for Painter {
+    fn default() -> Self {
+        Self { begun: false, held: Vec::new(), severity: Severity::Info }
+    }
+}
+
+impl Painter {
+    /// What of the next `chunk` the terminal is shown now.
+    pub fn pass(&mut self, chunk: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.held.extend_from_slice(chunk);
+        let head = HEAD.as_bytes();
+        if !self.begun {
+            match self.held.windows(head.len()).position(|w| w == head) {
+                Some(at) => {
+                    out.extend(self.held.drain(..at));
+                    self.begun = true;
+                }
+                None => {
+                    let keep = (1..head.len()).rev().find(|&k| self.held.ends_with(&head[..k])).unwrap_or(0);
+                    out.extend(self.held.drain(..self.held.len() - keep));
+                    return out;
+                }
+            }
+        }
+        while let Some(end) = self.held.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = self.held.drain(..=end).collect();
+            let line = String::from_utf8_lossy(&line[..end]);
+            let line = line.strip_suffix('\r').unwrap_or(&line);
+            let shown =
+                toyos_logstream::shown(line).unwrap_or(Shown { head: None, severity: self.severity, text: line });
+            self.severity = shown.severity;
+            out.extend_from_slice(format!("{shown}\n").as_bytes());
+        }
+        out
     }
 }
 
@@ -95,6 +151,42 @@ mod tests {
     fn a_port_the_firmware_left_alone_passes_whole() {
         let later = format!("{KERNEL}{{1.002 supervisor}} supervisor: a program's line\n");
         assert_eq!(passed(&later, &[3, 40]), later);
+    }
+
+    /// What the terminal is shown of `stream` fed in pieces cut at each of `cuts`.
+    fn painted(stream: &str, cuts: &[usize]) -> String {
+        let mut painter = Painter::default();
+        let mut out = Vec::new();
+        let mut from = 0;
+        for &to in cuts.iter().chain([stream.len()].iter()) {
+            out.extend_from_slice(&painter.pass(&stream.as_bytes()[from..to]));
+            from = to;
+        }
+        String::from_utf8(out).expect("the painter writes UTF-8")
+    }
+
+    /// The firmware's bytes reach the terminal as they came, the kernel's
+    /// lines as a screen shows them, a continuation in its record's severity —
+    /// and the same however the chunks fall.
+    #[test]
+    fn a_terminal_is_shown_the_firmware_as_it_came_and_the_kernel_in_colour() {
+        let alert = "[kernel 0.002 cpu1 alert tid=4] PANIC: panicked at kernel/src/main.rs:1:\n  oops\n";
+        let program = "{0.003 warn supervisor} supervisor: a program's line\n";
+        let stream = format!("{FIRMWARE}{KERNEL}{alert}{program}");
+        let mut want = String::from(FIRMWARE);
+        let mut severity = Severity::Info;
+        for line in format!("{KERNEL}{alert}{program}").lines() {
+            let shown = toyos_logstream::shown(line).unwrap_or(Shown { head: None, severity, text: line });
+            severity = shown.severity;
+            want.push_str(&format!("{shown}\n"));
+        }
+        assert!(want.contains("\x1b[91m  oops\x1b[0m\n"), "{want:?}");
+        assert_eq!(painted(&stream, &[]), want);
+        let every_byte: Vec<usize> = (1..stream.len()).collect();
+        assert_eq!(painted(&stream, &every_byte), want);
+        // What is held before the kernel is only what could begin its head.
+        assert_eq!(painted(&FIRMWARE[..FIRMWARE.len() - 3], &[]), FIRMWARE[..FIRMWARE.len() - 3]);
+        assert_eq!(painted("so [ker", &[]), "so ");
     }
 
     #[test]

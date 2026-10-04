@@ -39,8 +39,8 @@ const MAX_ROWS: usize = 96;
 const SNAPSHOT_CAP: usize = 32 * 1024;
 const _: () = assert!(SNAPSHOT_CAP >= MAX_ROWS * MAX_COLS);
 
-/// One bit per byte `text` can hold — worst case is a message of nothing but newlines, one line per byte.
-const ALERT_WORDS: usize = SNAPSHOT_CAP.div_ceil(64);
+/// One [`Mark`] a nibble per byte `text` can hold — worst case is a message of nothing but newlines, one line per byte.
+const MARK_BYTES: usize = SNAPSHOT_CAP.div_ceil(2);
 
 /// How long Ctrl+Alt+D's report keeps the panel.
 const REPORT_HOLD: Budget = Budget::of(
@@ -103,11 +103,63 @@ struct FbCell(UnsafeCell<Fb>);
 // SAFETY: the panic path may take no lock; `PENDING` has one writer at a time.
 unsafe impl Sync for FbCell {}
 
-/// A screenful-and-then-some of rendered log; which lines are red is the record's [`log::Severity`], never inferred from the text.
+/// What a line's text is drawn in.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ink {
+    Plain = 0,
+    Warn = 1,
+    Alert = 2,
+    /// The head a record's first line opens with: its time, CPU and thread.
+    Stamp = 3,
+}
+
+impl Ink {
+    /// A record's text: by its severity, and plain for a byte no severity is.
+    fn of(severity: Option<log::Severity>) -> Self {
+        match severity {
+            None | Some(log::Severity::Info) => Ink::Plain,
+            Some(log::Severity::Warn) => Ink::Warn,
+            Some(log::Severity::Error | log::Severity::Alert) => Ink::Alert,
+        }
+    }
+
+    fn from_bits(bits: u8) -> Self {
+        match bits & 3 {
+            0 => Ink::Plain,
+            1 => Ink::Warn,
+            2 => Ink::Alert,
+            _ => Ink::Stamp,
+        }
+    }
+}
+
+/// One line of a rendered log as its record made it: the ink of its text, and
+/// whether it opens the record and so carries the head. Read from the record,
+/// never inferred from the text.
+#[derive(Clone, Copy)]
+struct Mark(u8);
+
+impl Mark {
+    const OPENS: u8 = 1 << 2;
+
+    fn new(ink: Ink, opens: bool) -> Self {
+        Self(ink as u8 | if opens { Self::OPENS } else { 0 })
+    }
+
+    fn ink(self) -> Ink {
+        Ink::from_bits(self.0)
+    }
+
+    fn opens(self) -> bool {
+        self.0 & Self::OPENS != 0
+    }
+}
+
+/// A screenful-and-then-some of rendered log, and each line's [`Mark`].
 struct Rendered {
     text: [u8; SNAPSHOT_CAP],
-    /// One bit per line, counted back from the last — the buffer fills from its end.
-    alert: [u64; ALERT_WORDS],
+    /// One nibble per line, counted back from the last — the buffer fills from its end.
+    marks: [u8; MARK_BYTES],
     /// Bytes of `text` in use, at its end.
     len: usize,
     lines: usize,
@@ -115,11 +167,11 @@ struct Rendered {
 
 impl Rendered {
     const EMPTY: Self =
-        Self { text: [0; SNAPSHOT_CAP], alert: [0; ALERT_WORDS], len: 0, lines: 0 };
+        Self { text: [0; SNAPSHOT_CAP], marks: [0; MARK_BYTES], len: 0, lines: 0 };
 
     /// Render the newest records stamped in `from..=to` that fit; returns the byte count. Records older than the buffer holds are dropped.
     fn render(&mut self, from: u64, to: u64) -> usize {
-        self.alert = [0; ALERT_WORDS];
+        self.marks = [0; MARK_BYTES];
         self.lines = 0;
         self.len = 0;
         let mut fill = Backfill { at: SNAPSHOT_CAP, into: self };
@@ -132,7 +184,7 @@ impl Rendered {
     fn view(&self) -> View<'_> {
         View {
             text: self.text.get(SNAPSHOT_CAP - self.len..).unwrap_or(&[]),
-            alert: &self.alert,
+            marks: &self.marks,
             lines: self.lines,
         }
     }
@@ -142,15 +194,16 @@ impl Rendered {
 #[derive(Clone, Copy)]
 struct View<'a> {
     text: &'a [u8],
-    alert: &'a [u64; ALERT_WORDS],
+    marks: &'a [u8; MARK_BYTES],
     lines: usize,
 }
 
 impl View<'_> {
-    /// Whether line `n`, counted from the first, came from an `alert!`.
-    fn is_alert(&self, n: usize) -> bool {
-        let Some(from_end) = self.lines.checked_sub(n + 1) else { return false };
-        self.alert.get(from_end / 64).is_some_and(|word| word & (1 << (from_end % 64)) != 0)
+    /// Line `n`'s mark, counted from the first.
+    fn mark(&self, n: usize) -> Mark {
+        let Some(from_end) = self.lines.checked_sub(n + 1) else { return Mark::new(Ink::Plain, false) };
+        let byte = self.marks.get(from_end / 2).copied().unwrap_or(0);
+        Mark(byte >> (from_end % 2 * 4) & 0xF)
     }
 }
 
@@ -172,11 +225,12 @@ impl log::read::RecordSink for Backfill<'_> {
 
         // Counted in newlines, not records: `paint` counts newlines, and a multi-line record (every panic) is more than one row.
         let lines = out.iter().filter(|&&byte| byte == b'\n').count();
-        if record.severity().is_some_and(|s| s >= log::Severity::Error) {
-            for line in self.into.lines..self.into.lines + lines {
-                if let Some(word) = self.into.alert.get_mut(line / 64) {
-                    *word |= 1 << (line % 64);
-                }
+        let ink = Ink::of(record.severity());
+        for line in self.into.lines..self.into.lines + lines {
+            // Counted from the end, so the record's first line is its last here.
+            let mark = Mark::new(ink, line + 1 == self.into.lines + lines);
+            if let Some(byte) = self.into.marks.get_mut(line / 2) {
+                *byte |= mark.0 << (line % 2 * 4);
             }
         }
         self.into.lines += lines;
@@ -900,8 +954,8 @@ static PROBE_AT: [AtomicU32; PROBES] = [const { AtomicU32::new(0) }; PROBES];
 static PROBE_PX: [AtomicU32; PROBES] = [const { AtomicU32::new(0) }; PROBES];
 static PROBE_N: AtomicUsize = AtomicUsize::new(0);
 
-/// One grid position as the panel left it: the character drawn there and
-/// whether it was drawn in the alert colour.
+/// One grid position as the panel left it: the character drawn there and its
+/// [`Ink`].
 ///
 /// Zero is ground and no character — an unpainted panel, and what a row is
 /// padded with past the end of its text — so the grid is `.bss` and costs the
@@ -912,10 +966,9 @@ struct Cell(u16);
 
 impl Cell {
     const GROUND: Cell = Cell(0);
-    const ALERT: u16 = 1 << 8;
 
-    fn of(byte: u8, alert: bool) -> Self {
-        Self(glyph_char(byte) as u16 | if alert { Self::ALERT } else { 0 })
+    fn of(byte: u8, ink: Ink) -> Self {
+        Self(glyph_char(byte) as u16 | (ink as u16) << 8)
     }
 
     /// The character on the glass here, or `None` where the cell is ground.
@@ -924,8 +977,39 @@ impl Cell {
         (ch != 0).then_some(ch)
     }
 
-    fn alert(self) -> bool {
-        self.0 & Self::ALERT != 0
+    fn ink(self) -> Ink {
+        Ink::from_bits((self.0 >> 8) as u8)
+    }
+}
+
+/// Each [`Ink`] as this framebuffer's pixel. Every one reads at 4.5:1 or
+/// better against both grounds [`paint`] fills with (WCAG 2.x's contrast
+/// ratio), and every one is at or above `tests/common/screen.rs`'s
+/// foreground threshold on its brightest channel.
+struct Palette {
+    plain: u32,
+    warn: u32,
+    alert: u32,
+    stamp: u32,
+}
+
+impl Palette {
+    fn of(fb: &Fb) -> Self {
+        Self {
+            plain: rgb(fb, 0xFF, 0xFF, 0xFF),
+            warn: rgb(fb, 0xFF, 0xC8, 0x40),
+            alert: rgb(fb, 0xFF, 0x6E, 0x6E),
+            stamp: rgb(fb, 0x9E, 0x9E, 0x9E),
+        }
+    }
+
+    fn pixel(&self, ink: Ink) -> u32 {
+        match ink {
+            Ink::Plain => self.plain,
+            Ink::Warn => self.warn,
+            Ink::Alert => self.alert,
+            Ink::Stamp => self.stamp,
+        }
     }
 }
 
@@ -1053,8 +1137,7 @@ fn paint(fill: Fill, view: View, watch: Watch, stop: impl Fn() -> bool) {
         Fill::Fatal => rgb(&fb, 0x60, 0x00, 0x00),
         Fill::Boot => 0,
     };
-    let white = rgb(&fb, 0xFF, 0xFF, 0xFF);
-    let alert = rgb(&fb, 0xFF, 0x50, 0x50);
+    let palette = Palette::of(&fb);
 
     // SAFETY: every painter holds `PAINTING` for the whole of its paint, so
     // this is the only reference to the grid while it exists.
@@ -1090,14 +1173,18 @@ fn paint(fill: Fill, view: View, watch: Watch, stop: impl Fn() -> bool) {
         want.fill(Cell::GROUND);
         let text_row = if r < draw { row_start.get(r).copied() } else { None };
         if let Some(row) = text_row {
-            // Colour comes from the record's severity, so it holds for every display row a wrapped line occupies.
-            let alerted = view.is_alert(row.line as usize);
-            for (off, cell) in (row.at as usize..).zip(want.iter_mut()) {
+            // Colour comes from the record, so it holds for every display row a wrapped line occupies.
+            let mark = view.mark(row.line as usize);
+            let at = row.at as usize;
+            // The head is the record's first line up to its first `]`, which no head holds before its own.
+            let mut head = mark.opens() && (at == 0 || text.get(at - 1) == Some(&b'\n'));
+            for (off, cell) in (at..).zip(want.iter_mut()) {
                 let Some(&byte) = text.get(off) else { break };
                 if byte == b'\n' {
                     break;
                 }
-                *cell = Cell::of(byte, alerted);
+                *cell = Cell::of(byte, if head { Ink::Stamp } else { mark.ink() });
+                head &= byte != b']';
             }
         }
         if pages > 1 && r == grid_rows - 1 {
@@ -1107,8 +1194,7 @@ fn paint(fill: Fill, view: View, watch: Watch, stop: impl Fn() -> bool) {
         let glassed = glass.row(r, cols);
         for (c, (&cell, was)) in want.iter().zip(glassed.iter_mut()).enumerate() {
             if cell != *was {
-                let color = if cell.alert() { alert } else { white };
-                pixels += draw_cell(&fb, c, r, cell, ground, color);
+                pixels += draw_cell(&fb, c, r, cell, ground, palette.pixel(cell.ink()));
                 *was = cell;
             }
             if watch == Watch::Yes && text_row.is_some() {
@@ -1181,7 +1267,7 @@ fn footer_cells(pages: usize, row: &mut [Cell]) {
     buf[n] = b']';
     n += 1;
     for (cell, &byte) in row.iter_mut().zip(buf[..n].iter()) {
-        *cell = Cell::of(byte, false);
+        *cell = Cell::of(byte, Ink::Plain);
     }
 }
 

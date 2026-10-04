@@ -47,10 +47,12 @@
 //! slow is the clock, RTF well below 1.0 is synthesis not keeping up.
 
 use std::fs::File;
+use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use toyos_build::arch::Arch;
+use toyos_build::kernelconsole::Painter;
 
 /// The hardware shape QEMU presents to the guest.
 ///
@@ -278,13 +280,33 @@ pub fn launch(opts: &Options) {
         eprintln!("QEMU interrupt log: /tmp/toyos-qemu-debug.log");
     }
 
-    // Serial output goes to stdout (stdio), so keep stdout attached to terminal.
     // Capture QEMU's own stderr to a file for post-mortem analysis.
     let stderr_file = File::create("/tmp/toyos-qemu-stderr.log").expect("create stderr log");
     qemu.stderr(stderr_file);
 
     eprintln!("QEMU stderr log: /tmp/toyos-qemu-stderr.log");
-    qemu.status().expect("failed to execute QEMU");
+    // A terminal is shown the console in colour; a file or a pipe gets its bytes.
+    if !std::io::stdout().is_terminal() {
+        qemu.status().expect("failed to execute QEMU");
+        return;
+    }
+    let mut child = qemu.stdout(Stdio::piped()).spawn().expect("failed to execute QEMU");
+    let mut console = child.stdout.take().expect("QEMU's stdout is piped");
+    let relay = std::thread::spawn(move || {
+        let mut painter = Painter::default();
+        let mut buf = [0u8; 4096];
+        let mut out = std::io::stdout();
+        loop {
+            let n = console.read(&mut buf).expect("QEMU's console refused a read");
+            if n == 0 {
+                return;
+            }
+            out.write_all(&painter.pass(&buf[..n])).expect("the terminal refused the console");
+            out.flush().expect("the terminal refused the console");
+        }
+    });
+    child.wait().expect("failed to wait for QEMU");
+    relay.join().expect("the console relay");
 }
 
 /// The machine a profile runs on, with its IOMMU where the machine carries one
