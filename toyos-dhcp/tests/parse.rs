@@ -1,4 +1,4 @@
-//! §D3 and §D4: reading and validating server messages. Each input reaches a client in
+//! Reading and validating server messages. Each input reaches a client in
 //! SELECTING after DH-01 unless it says otherwise.
 
 mod common;
@@ -13,7 +13,7 @@ fn selecting() -> D {
 }
 
 /// Delivers `message` to a selecting client: refused by `rule`, and named with the server that
-/// sent it exactly when §D3.1 and §D14 log it.
+/// sent it exactly when `logged`.
 fn refused(message: &[u8], rule: Counter, logged: bool) {
     let mut d = selecting();
     let out = d.receive(10, message);

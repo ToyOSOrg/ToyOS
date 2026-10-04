@@ -1,4 +1,4 @@
-//! Fixtures DS and DB, a scripted random source, the §V vectors, server messages built here and
+//! Fixtures DS and DB, a scripted random source, the byte vectors `V_*`, server messages built here and
 //! checked against those vectors, and the stack a transmission is framed by.
 
 #![allow(dead_code)]

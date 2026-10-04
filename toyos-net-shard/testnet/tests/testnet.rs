@@ -47,7 +47,7 @@ fn a_run_repeats_exactly() {
     assert!(record(&first) == record(&second), "two runs put different frames on the wire");
 }
 
-/// Architecture §5.3 (f): a published pcap reader and a published Ethernet/IPv4/TCP parser,
+/// The capture's independent oracle: a published pcap reader and a published Ethernet/IPv4/TCP parser,
 /// neither written here, read back each frame and instant the devices carried.
 #[test]
 fn a_published_reader_decodes_the_capture_as_the_wire_carried_it() {

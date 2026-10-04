@@ -1,8 +1,8 @@
 //! Vt-d fault interrupt handling: MSI-delivered, never polled.
 //!
-//! The handler is bounded, allocates nothing; unit and
-//! function state lives in fixed arrays of atomics, written once before the
-//! mask comes off. Whatever the stream, the same things happen first: Bus
+//! The handler is bounded, allocates nothing and takes no lock; unit state
+//! lives in a fixed array of atomics and function state in a slice of exactly
+//! the enumerated functions, each published once before the mask comes off. Whatever the stream, the same things happen first: Bus
 //! Master Enable cleared on the function that faulted, the first record latched
 //! whole, and a count kept per unit and per function. Clearing `BME` is also
 //! the ceiling on a storm, since a function that cannot master the bus cannot
@@ -16,7 +16,9 @@
 //! thing moving a driver out of the kernel was for.
 
 use crate::log;
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use alloc::boxed::Box;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 use crate::drivers::pci::{self, PciDevice};
 use crate::iommu::StreamId;
@@ -62,18 +64,14 @@ impl FaultUnit {
 
 static UNITS: [FaultUnit; MAX_UNITS] = [const { FaultUnit::EMPTY }; MAX_UNITS];
 
-/// Functions the handler can act on; a machine with more is told, and the ones
-/// past it keep bus mastering through a fault.
-const MAX_FUNCTIONS: usize = 64;
-
 /// A `pcidev` slot number no claim has: this function is not driven by one.
 const NO_SLOT: u32 = u32::MAX;
 
 /// One enumerated function, published before any unit is armed.
 struct Function {
-    // `pci::NO_FUNCTION` while the slot is free; a requester id once taken.
-    who: AtomicU32,
-    config: AtomicU64,
+    who: u16,
+    /// Physical base of its config window, through which a fault clears `BME`.
+    config: u64,
     domain: AtomicU32,
     // Faults the unit has reported against it; non-zero is the per-domain flag.
     faults: AtomicU32,
@@ -82,18 +80,19 @@ struct Function {
     user_slot: AtomicU32,
 }
 
-impl Function {
-    #[allow(clippy::declare_interior_mutable_const)]
-    const EMPTY: Self = Self {
-        who: AtomicU32::new(pci::NO_FUNCTION),
-        config: AtomicU64::new(0),
-        domain: AtomicU32::new(0),
-        faults: AtomicU32::new(0),
-        user_slot: AtomicU32::new(NO_SLOT),
-    };
-}
+/// Exactly the functions this machine enumerated, leaked once by [`describe`]:
+/// null until then, and never written again.
+static FUNCTIONS: AtomicPtr<&'static [Function]> = AtomicPtr::new(core::ptr::null_mut());
 
-static FUNCTIONS: [Function; MAX_FUNCTIONS] = [const { Function::EMPTY }; MAX_FUNCTIONS];
+fn functions() -> &'static [Function] {
+    let published = FUNCTIONS.load(Ordering::Acquire);
+    if published.is_null() {
+        return &[];
+    }
+    // SAFETY: non-null only as `describe` stored it: a leaked box, never freed
+    // or written again, published with Release once it was whole.
+    unsafe { *published }
+}
 
 /// The first fault this machine took, whole: what a later one says is decided
 /// by what the first one already broke.
@@ -114,23 +113,24 @@ static FIRST: FirstFault = FirstFault {
 /// Every function this machine enumerated, before any unit is armed: the
 /// handler reaches a faulting function's config space through this, with no lock.
 pub fn describe(devices: &[PciDevice]) {
-    for (slot, device) in FUNCTIONS.iter().zip(devices) {
-        let stream = StreamId::pci(device.bus, device.dev, device.func);
-        slot.config.store(
-            DirectMap::phys_of(device.config_window().addr() as *const u8),
-            Ordering::Relaxed,
-        );
-        // Last, with Release: `who` is what the handler tests, so `config` must
-        // already be visible to whoever sees it.
-        slot.who.store(u32::from(stream.requester()), Ordering::Release);
-    }
-    if devices.len() > MAX_FUNCTIONS {
-        log!(
-            "iommu: {} functions enumerated, past the {MAX_FUNCTIONS} the fault handler can \
-             stop — the rest keep bus mastering through a fault",
-            devices.len()
-        );
-    }
+    let functions: Vec<Function> = devices
+        .iter()
+        .map(|device| Function {
+            who: StreamId::pci(device.bus, device.dev, device.func).requester(),
+            config: DirectMap::phys_of(device.config_window().addr() as *const u8),
+            domain: AtomicU32::new(0),
+            faults: AtomicU32::new(0),
+            user_slot: AtomicU32::new(NO_SLOT),
+        })
+        .collect();
+    let functions: &'static [Function] = Box::leak(functions.into_boxed_slice());
+    let first = FUNCTIONS.compare_exchange(
+        core::ptr::null_mut(),
+        Box::leak(Box::new(functions)),
+        Ordering::Release,
+        Ordering::Relaxed,
+    );
+    assert!(first.is_ok(), "iommu: the fault handler's functions were described twice");
 }
 
 /// Record which domain a function moved to, for the flag the handler sets.
@@ -155,7 +155,7 @@ pub fn user_owned(stream: StreamId, slot: Option<usize>) {
 }
 
 fn find(requester: u32) -> Option<&'static Function> {
-    FUNCTIONS.iter().find(|f| f.who.load(Ordering::Acquire) == requester)
+    functions().iter().find(|f| u32::from(f.who) == requester)
 }
 
 /// A unit's fault-record location and count: `CAP.FRO` and `CAP.NFR`.
@@ -352,8 +352,7 @@ fn stop(stream: StreamId) -> bool {
     let Some(slot) = find(u32::from(stream.requester())) else {
         return false;
     };
-    let config = slot.config.load(Ordering::Relaxed);
-    pci::stop_bus_mastering(window_of(config, CONFIG_WINDOW));
+    pci::stop_bus_mastering(window_of(slot.config, CONFIG_WINDOW));
     true
 }
 

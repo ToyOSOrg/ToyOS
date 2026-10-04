@@ -1,4 +1,4 @@
-//! §7: ARP reception, and what a modern host accepts.
+//! ARP reception, and what a modern host accepts.
 
 mod common;
 

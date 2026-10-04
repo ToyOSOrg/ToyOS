@@ -1,6 +1,6 @@
-//! Address conflict detection (RFC 5227, §8). A new address probes on RFC 5227's schedule scaled
+//! Address conflict detection (RFC 5227). A new address probes on RFC 5227's schedule scaled
 //! by the owner's ruling (`limits::acd`), is usable from its first announcement, and is then
-//! defended once per DEFEND_INTERVAL and given up on a second conflict inside it (§2.4 (b)): one
+//! defended once per DEFEND_INTERVAL and given up on a second conflict inside it (RFC 5227 §2.4 (b)): one
 //! forged packet cannot take an address away.
 
 use core::net::Ipv4Addr;
@@ -20,7 +20,7 @@ use crate::limits::acd::{
 use crate::timers::Timer;
 use crate::{igmp, route, Event, Peer};
 
-/// An interface's conflict history, for the rate limit on new candidates (§8.3).
+/// An interface's conflict history, for the rate limit on new candidates (RFC 5227 §2.1.1).
 #[derive(Debug, Default)]
 pub(crate) struct Conflicts {
     count: u32,
@@ -142,7 +142,7 @@ fn lose(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr, mac: MacAddr) {
 }
 
 /// An ARP packet from another MAC naming `addr`, one of ours, as its sender; or a probe for it
-/// while it is tentative (§7.2 (3), RFC 5227 §2.1.1, §2.4).
+/// while it is tentative (RFC 5227 §2.1.1, §2.4).
 pub(crate) fn conflict(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr, mac: MacAddr) {
     let now = cx.now;
     let Some(a) = record(i, addr) else { return };
@@ -158,7 +158,7 @@ pub(crate) fn conflict(i: &mut Interface, cx: &mut Cx<'_>, addr: Ipv4Addr, mac: 
 }
 
 /// The link came up: held addresses stay usable and are announced twice, and probing starts for
-/// any address added while it was down (§8.6).
+/// any address added while it was down.
 pub(crate) fn link_up(i: &mut Interface, cx: &mut Cx<'_>) {
     let addrs: alloc::vec::Vec<(Ipv4Addr, bool)> = i.addresses.iter().map(|a| (a.cidr.addr(), a.usable())).collect();
     for (addr, usable) in addrs {
@@ -173,7 +173,7 @@ pub(crate) fn link_up(i: &mut Interface, cx: &mut Cx<'_>) {
     }
 }
 
-/// The link went down: probing is abandoned and its addresses removed, unverified (§6.10).
+/// The link went down: probing is abandoned and its addresses removed, unverified.
 pub(crate) fn link_down(i: &mut Interface, cx: &mut Cx<'_>) {
     let iface = cx.iface;
     for a in &mut i.addresses {
