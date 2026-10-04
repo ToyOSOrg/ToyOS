@@ -10,7 +10,7 @@
 //! reached `accept` or has even been spawned. There is nothing to retry and no
 //! timeout anywhere.
 
-use toyos_abi::syscall::{self, SyscallError};
+use toyos_abi::syscall::{self, SyscallError, MAX_BADGE};
 
 use crate::ipc::Connection;
 use crate::{AsHandle, OwnedHandle, RawHandle};
@@ -39,6 +39,21 @@ impl Acceptor {
     /// client's own claim about itself and already distrusted.
     pub fn accept(&self) -> Result<Connection, SyscallError> {
         syscall::accept(self.0.raw()).map(|h| Connection(OwnedHandle(h)))
+    }
+
+    /// A connector to this port whose every connection carries `badge`, which
+    /// [`Self::badge`] reads back: what this holder granted whoever holds the
+    /// connector, never who that is.
+    pub fn mint(&self, badge: &[u8]) -> Result<Connector, SyscallError> {
+        syscall::port_mint(self.0.raw(), badge).map(|h| Connector(OwnedHandle(h)))
+    }
+
+    /// The badge `conn`, accepted from this port, was made with. `NotFound` is
+    /// a connection through an unbadged connector; one accepted from another
+    /// port is `PermissionDenied`.
+    pub fn badge<'a>(&self, conn: &Connection, out: &'a mut [u8; MAX_BADGE]) -> Result<&'a [u8], SyscallError> {
+        let len = syscall::port_badge(self.0.raw(), conn.as_handle(), out)?;
+        Ok(&out[..len])
     }
 
     /// Give up ownership, for a handle about to be endowed or transferred.

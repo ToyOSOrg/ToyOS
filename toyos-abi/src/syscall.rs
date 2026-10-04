@@ -267,6 +267,15 @@ pub const SYS_DEVICE_DMA_UNMAP: u64 = 123;
 /// [`Rights::TRACE`]: crate::handle::Rights::TRACE
 pub const SYS_COUNTERS: u64 = 124;
 
+/// Make a connector to a port the caller accepts on, every connection through
+/// which is stamped with the badge it carries. Gated by `READ` on the
+/// acceptor, the right accepting takes. See [`port_mint`].
+pub const SYS_PORT_MINT: u64 = 125;
+
+/// Read the badge a connection accepted from the caller's port was stamped
+/// with. See [`port_badge`].
+pub const SYS_PORT_BADGE: u64 = 126;
+
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
 ///
@@ -279,7 +288,7 @@ pub const SYSCALL_PROFILE_BINS: usize = 128;
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_COUNTERS < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_PORT_BADGE < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 
@@ -1835,6 +1844,38 @@ pub fn namespace_open(ns: RawHandle, name: &str) -> Result<RawHandle, SyscallErr
         0,
     ))
     .map(|v| RawHandle(v as u32))
+}
+
+/// Bytes one badge may carry. Policy on the primitive: a badge is kernel
+/// memory no process is charged for, so the bound is what its one reader, the
+/// supervisor's launch authority, needs.
+pub const MAX_BADGE: usize = 64;
+
+/// Mint a connector to the port `acceptor` accepts on, whose every connection
+/// is stamped with `badge`: 1 to [`MAX_BADGE`] bytes, anything else
+/// `InvalidArgument`.
+///
+/// **The kernel vouches for what was granted, never for who connects**: the
+/// connector is duplicated, moved and put in a namespace like any other, and
+/// every copy stamps the same bytes.
+pub fn port_mint(acceptor: RawHandle, badge: &[u8]) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_PORT_MINT, acceptor.0 as u64, badge.as_ptr() as u64, badge.len() as u64, 0))
+        .map(|v| RawHandle(v as u32))
+}
+
+/// The badge `connection`, accepted from `acceptor`'s port, was stamped with,
+/// written to `out`; answers its length.
+///
+/// `NotFound` is a connection made through an unbadged connector,
+/// `PermissionDenied` one accepted from another port, and `InvalidArgument` a
+/// handle that is no port's accepted end.
+pub fn port_badge(
+    acceptor: RawHandle,
+    connection: RawHandle,
+    out: &mut [u8; MAX_BADGE],
+) -> Result<usize, SyscallError> {
+    check(syscall(SYS_PORT_BADGE, acceptor.0 as u64, connection.0 as u64, out.as_mut_ptr() as u64, 0))
+        .map(|v| v as usize)
 }
 
 /// Accept a queued connection. Blocks until there is one.
