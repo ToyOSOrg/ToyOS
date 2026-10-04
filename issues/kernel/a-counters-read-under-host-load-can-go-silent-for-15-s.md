@@ -24,7 +24,9 @@ in 30 guests of that loop; none in the 1724 guests that followed on the same
 host at load 15-60.
 
 The slow ones, with registers: a probe that captured `info registers -a` over
-QMP whenever the read had not ended 3 s after `unmap_touch` caught one (span
+QMP whenever the read had not ended 3 s after `unmap_touch` (`debug-slow.patch`
+in https://github.com/ToyOSOrg/ToyOS/pull/719#issuecomment-5978643928, which
+also carries `debug-regs.patch`, the capture of a stalled one) caught one (span
 3.68 s, `virt_el1_smp`, load 38) in 174 guests. Every CPU was at EL1 with
 DAIF masked; four (cpu0, 3, 5, 7) were in `Lock::lock`'s ticket spin on
 `counters::ANSWERED`'s waiter list (x19 its address in the shipping kernel's
