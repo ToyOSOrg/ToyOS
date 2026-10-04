@@ -46,7 +46,7 @@ what survives it is a different question.
   no function body changed. The split made two facts visible and filed:
   58 refusal `return`s exit past the epilogue, and a refused syscall is counted
   but not timed.
-- `process.rs` — the lifecycle state machine is `toyos-proclife/` (pure,
+- `process.rs` — the lifecycle state machine is `kernel/pure/proclife/` (pure,
   `forbid(unsafe_code)`, every interleaving of a scripted pair of paths
   enumerated; #142's mechanism class now has a host reproduction). Three
   subjects are still decided inside the file and reachable only by a booted

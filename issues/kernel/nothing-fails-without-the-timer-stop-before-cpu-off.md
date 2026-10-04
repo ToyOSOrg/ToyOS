@@ -19,7 +19,7 @@ test can fail if the stop is deleted:
 - No AArch64 metal target exists. By the owner's ruling in
   `issues/kernel/toyos-runs-on-arm64.md`, no ARM hardware is a target.
 - `SGI_OFF` lands on idle CPUs. An idle CPU with no parked deadline has
-  already stopped its one-shot (`toyos-sched/src/timer.rs:43`), so deleting
+  already stopped its one-shot (`kernel/pure/sched/timer.rs:43`), so deleting
   the stop changes nothing even on metal in that case.
 
 The stop serves a wider claim: no interrupt reaches a core `CPU_OFF` turned

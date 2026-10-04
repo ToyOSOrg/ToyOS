@@ -348,7 +348,7 @@ fn unit_is_first(argv: &[String], name: &str) -> Result<(), String> {
 
 /// The `key=value` pairs on a unit line. `@0xfed90000` carries no `=` and is
 /// skipped, which is what makes the split total rather than a parse.
-fn unit_fields(line: &str) -> BTreeMap<String, String> {
+pub(crate) fn unit_fields(line: &str) -> BTreeMap<String, String> {
     line.split_whitespace()
         .filter_map(|word| word.split_once('='))
         .map(|(k, v)| (k.to_string(), v.to_string()))

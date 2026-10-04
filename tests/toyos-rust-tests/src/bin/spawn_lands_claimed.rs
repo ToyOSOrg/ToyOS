@@ -76,6 +76,8 @@ fn test() {
 fn spawn_under(place: RawHandle) -> Result<Process, SyscallError> {
     let argv = format!("{SELF_PATH}\0child");
     let args = SpawnArgs {
+        path_ptr: SELF_PATH.as_ptr() as u64,
+        path_len: SELF_PATH.len() as u64,
         argv_ptr: argv.as_ptr() as u64,
         argv_len: argv.len() as u64,
         slot_map_ptr: 0,

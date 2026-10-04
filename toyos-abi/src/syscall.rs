@@ -295,6 +295,12 @@ pub const WNOHANG: u64 = 1;
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct SpawnArgs {
+    /// The program: the file the kernel opens and pages the child from — its
+    /// libraries are found beside it — or, with an `image`, the path the caller
+    /// read that from. **Never `argv[0]`**, which is the child's first argument
+    /// and the name it goes by, and which nothing opens.
+    pub path_ptr: u64,
+    pub path_len: u64,
     pub argv_ptr: u64,
     pub argv_len: u64,
     /// `[[child_slot: u32, parent_handle: RawHandle]]`, duplicated into the
@@ -320,13 +326,12 @@ pub struct SpawnArgs {
     /// The program's bytes, in a shared memory object the caller made and
     /// read the program into: `image` is a handle to it carrying `MAP`, and
     /// `image_len` how many of its first bytes the program is — or 0, for a
-    /// program the kernel opens at `argv[0]` itself. `PermissionDenied` for a
+    /// program the kernel opens at `path` itself. `PermissionDenied` for a
     /// handle without `MAP`; `InvalidArgument` for a length the object does not
     /// hold, or an object that is no memory the kernel allocated. The object
     /// stays the caller's: what the kernel reads of it, and when, is
-    /// `kernel/src/file_backing.rs`'s (`SharedImage`). `argv[0]` names the
-    /// program and is opened by nobody, and its libraries are found in
-    /// `/system/lib` alone.
+    /// `kernel/src/file_backing.rs`'s (`SharedImage`). `path` is then opened by
+    /// nobody, and the libraries are found in `/system/lib` alone.
     pub image: u64,
     pub image_len: u64,
     /// The process the child is placed under, whose end takes it down: a
@@ -341,7 +346,7 @@ pub struct SpawnArgs {
     pub place: u64,
 }
 
-const _: () = assert!(core::mem::size_of::<SpawnArgs>() == 120);
+const _: () = assert!(core::mem::size_of::<SpawnArgs>() == 136);
 
 /// One `(label, handle)` pair of a process's endowment table.
 ///
@@ -869,8 +874,7 @@ pub fn get_env(buf: &mut [u8]) -> usize {
     syscall(SYS_GET_ENV, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0) as usize
 }
 
-/// Spawn a new process. The `SpawnArgs` struct contains argv, the slot map,
-/// env, the endowments and the working directory the child starts in.
+/// Spawn a new process.
 ///
 /// Answers a `Process` handle carrying `WAIT|MANAGE|READ|DUP|TRANSFER`. A
 /// caller that wants nothing to do with the child closes it; a caller that

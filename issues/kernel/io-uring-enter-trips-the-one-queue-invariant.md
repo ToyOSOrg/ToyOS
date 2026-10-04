@@ -41,7 +41,7 @@ and once with `q35,i8042=off`, so both the PS/2 and the USB delivery paths reach
 it, and the victim both times was the in-guest runner blocked on stdin at
 `===READY===`. It does not reproduce at ordinary typing rates. Two ways in, one
 subject: a `waiting` flag left set by a previous wait of that thread, over
-`set_waiting()` in `toyos-sched/src/task.rs`.
+`set_waiting()` in `kernel/pure/sched/task.rs`.
 
 What the assertion says happened: this thread's task word still carried
 *waiting* when `enter` prepared a new wait. `enter`'s loop consumes its ticket

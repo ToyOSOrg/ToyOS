@@ -7,7 +7,7 @@ opened: 2026-09-01
 # Crash entry under preemption has no loom model, and a Boolean one would pass
 
 The rule that a model must import its subject rather than transliterate it is
-already this tree's, and already enforced. `toyos-sched/loom/src/lib.rs` pulls
+already this tree's, and already enforced. `kernel/loom/src/lib.rs` pulls
 every scheduler source in by `#[path]` (`:26-49`), and its header at `:6-8` says
 why: "loom explores the interleavings of the *real* primitives, not of a
 re-implementation — a re-implementation is exactly the divergence risk this

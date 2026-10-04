@@ -34,7 +34,7 @@ the `stop:` record carries only counts.
 
 **Hypothesis A, untested.** The hold's yield loop keeps its CPU busy. A Ready
 thread queued on that CPU then runs only if `dispose_yield`
-(`toyos-sched/src/cpu.rs`) re-inserts the spinner behind it.
+(`kernel/pure/sched/cpu.rs`) re-inserts the spinner behind it.
 
 **What no guest test checks while these are deleted.**
 
