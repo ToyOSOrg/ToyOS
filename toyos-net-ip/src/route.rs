@@ -1,4 +1,4 @@
-//! The host routing table (§3): the connected prefixes of usable addresses and an ordered list of
+//! The host routing table: the connected prefixes of usable addresses and an ordered list of
 //! on-link gateways per interface; longest prefix first, then the active gateway, and no
 //! forwarding. A lookup considers only interfaces that are up, and with a bound source only the
 //! interface holding it (RFC 1122 §3.3.4.2, the strong model).
@@ -31,7 +31,7 @@ pub struct Route {
 /// The source a datagram asks to be sent from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
-    /// [ip] chooses (§3.5).
+    /// [ip] chooses.
     Any,
     /// The socket's address: only the interface holding it is eligible.
     Bound(Ipv4Addr),
@@ -96,7 +96,7 @@ pub(crate) fn lookup(ifaces: &[Interface], destination: Ipv4Addr, source: Source
     Ok(Route { iface: IfIndex(index), next_hop: NextHop::Neighbour(gateway), source: pick_source(i, gateway)? })
 }
 
-/// §3.4: the first gateway not FAILED and not UNREACHABLE; with none, the first UNREACHABLE one,
+/// The active gateway: the first not FAILED and not UNREACHABLE; with none, the first UNREACHABLE one,
 /// which still has a MAC, else the first.
 fn active(i: &Interface) -> Option<Ipv4Addr> {
     let state = |g: &Ipv4Addr| i.neighbours.get(g).map(|n| &n.state);
@@ -108,7 +108,7 @@ fn active(i: &Interface) -> Option<Ipv4Addr> {
         .copied()
 }
 
-/// A neighbour's reachability changed: the active gateway may have too (§3.4).
+/// A neighbour's reachability changed: the active gateway may have too.
 pub(crate) fn refresh_active(i: &mut Interface, cx: &mut Cx<'_>) {
     let now = active(i);
     if now != i.active {
@@ -120,7 +120,7 @@ pub(crate) fn refresh_active(i: &mut Interface, cx: &mut Cx<'_>) {
     }
 }
 
-/// Withdraws every gateway no usable prefix holds any more (§3.2).
+/// Withdraws every gateway no usable prefix holds any more.
 pub(crate) fn withdraw_off_link(i: &mut Interface, cx: &mut Cx<'_>) {
     let before = i.gateways.len();
     let on_link: alloc::vec::Vec<Ipv4Addr> = i.gateways.iter().copied().filter(|g| i.on_link(*g)).collect();
@@ -132,13 +132,13 @@ pub(crate) fn withdraw_off_link(i: &mut Interface, cx: &mut Cx<'_>) {
 }
 
 impl Ip {
-    /// Where a datagram to `destination` goes (§3.3), or the refusal a transport reports.
+    /// Where a datagram to `destination` goes, or the refusal a transport reports.
     pub fn route(&mut self, destination: Ipv4Addr, source: Source, iface: Option<IfIndex>) -> Result<Route, Counter> {
         lookup(&self.ifaces, destination, source, iface).inspect_err(|&refusal| self.log.count(refusal))
     }
 
     /// Installs the interface's gateways, in order of preference (RFC 2132 §3.5). A list with any
-    /// refused entry is refused whole and the old one kept (§3.2).
+    /// refused entry is refused whole and the old one kept.
     pub fn set_gateways(&mut self, now: Instant, iface: IfIndex, gateways: &[Ipv4Addr]) -> Result<(), Counter> {
         let now = self.clock(now);
         let local: alloc::vec::Vec<Ipv4Addr> = self.ifaces.iter().flat_map(|i| i.addresses.iter().map(|a| a.cidr.addr())).collect();

@@ -2,7 +2,7 @@
 //!
 //! A root no port answers for, as `dev` is: the reader asks the kernel on a
 //! `SysCap` carrying `Rights::COUNTERS`, and `Rights::TRACE` for the counters
-//! that time programs, and renders its records here.
+//! that time programs and the power envelope, and renders its records here.
 //!
 //! ```text
 //! kernel.cpu.<n>.stale         whether the CPU missed this read's bound
@@ -65,7 +65,7 @@ mod tests {
 
     /// The T14's shape: every counter on every CPU.
     fn whole(cpu: u32) -> Record {
-        record(cpu, false, [Some(10), Some(4817), Some(100), Some(200), Some(3)])
+        record(cpu, false, [Some(10), Some(4817), Some(100), Some(200), Some(3), Some(0x8000_2a04), Some(0x8000_ff01), Some(6)])
     }
 
     #[test]
@@ -84,7 +84,7 @@ mod tests {
     /// `TRACE`: only what the record carries, and no zero in place of the rest.
     #[test]
     fn an_absent_counter_has_no_path() {
-        let got = render(&[record(0, false, [Some(10), None, None, None, None])]).unwrap();
+        let got = render(&[record(0, false, [Some(10), None, None, None, None, None, None, None])]).unwrap();
         let paths: Vec<&str> = got.keys().map(String::as_str).collect();
         assert_eq!(paths, vec!["kernel.cpu.0.hardware_id", "kernel.cpu.0.stale", "kernel.cpu.0.stamp"]);
     }

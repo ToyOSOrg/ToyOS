@@ -74,7 +74,7 @@ pub use nud::{Delaying, Held, Incomplete, Nud, Pending, Probing, Reachable, Rele
 pub use route::{NextHop, Route, Source};
 pub use toyos_net_wire::Instant;
 
-/// An interface, named by the order it was added; the lower index wins a routing tie (§3.3). An
+/// An interface, named by the order it was added; the lower index wins a routing tie. An
 /// index names an interface of the [`Ip`] that returned it and nothing in another.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct IfIndex(usize);
@@ -159,7 +159,7 @@ pub mod limits {
     }
 }
 
-/// How a datagram reached us (§4.2).
+/// How a datagram reached us.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Cast {
     /// To an announcing or assigned address of the receiving interface.
@@ -207,7 +207,7 @@ pub struct Flow {
     pub destination_port: Port,
 }
 
-/// An ICMP error [ip] validated against one of our datagrams (§9.5).
+/// An ICMP error [ip] validated against one of our datagrams.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TransportError {
     pub iface: IfIndex,
@@ -228,7 +228,7 @@ pub enum ErrorKind {
     ParameterProblem { code: ParameterProblemCode, pointer: u8 },
 }
 
-/// §9.5's shared classification, the vocabulary the transports act on.
+/// The classification every transport acts on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorClass {
     /// Codes 2 and 3: the peer refused.
@@ -285,9 +285,9 @@ pub enum Event {
     /// A next hop failed resolution: flows waiting on it are told "host unreachable".
     Failed { iface: IfIndex, next_hop: Ipv4Addr },
     /// A failed next hop's entry left FAILED: its hold-down ended, it was evicted, or the host
-    /// announced itself (§6.6). A flow told "host unreachable" may ask again.
+    /// announced itself. A flow told "host unreachable" may ask again.
     Cleared { iface: IfIndex, next_hop: Ipv4Addr },
-    /// A neighbour table that refused a send for want of room can take an entry (§6.8): a flow
+    /// A neighbour table that refused a send for want of room can take an entry: a flow
     /// told "host unreachable" for it may ask again.
     Room { iface: IfIndex },
     /// A UDP datagram [ip] took could not reach its next hop.
@@ -303,7 +303,7 @@ pub enum Advice {
     Reverify,
 }
 
-/// Whether a flow may build a segment for its next hop now (§6.7).
+/// Whether a flow may build a segment for its next hop now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Resolution {
     Resolved(MacAddr),
@@ -372,7 +372,7 @@ impl Ip {
         self.log.drain()
     }
 
-    /// Bumped by every change that can alter a route lookup (§3.6).
+    /// Bumped by every change that can alter a route lookup.
     pub const fn generation(&self) -> u64 {
         self.generation
     }
@@ -414,7 +414,7 @@ impl Ip {
     }
 
     /// A `now` before the latest one seen is the latest one: no deadline fires early and no
-    /// duration is negative, and the regression is counted (§1.4 (4)).
+    /// duration is negative, and the regression is counted.
     fn clock(&mut self, now: Instant) -> Instant {
         if now < self.latest {
             self.log.count(Counter::ClockRegressed);

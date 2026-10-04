@@ -177,7 +177,7 @@ fn reserve(guard: &crate::arch::IrqGuard) -> (Origin, u64) {
 /// know the raw idle-CPU sentinel.
 ///
 /// A process's first thread has `Tid(0)`, which also renders as absent —
-/// tracked at `issues/diagnostics/a-record-cannot-name-thread-zero.md`, fixed
+/// tracked at `issues/a-record-cannot-name-thread-zero.md`, fixed
 /// in the ABI's formatter rather than here.
 fn on_a_thread(id: u32) -> u32 {
     if id == u32::MAX { 0 } else { id }

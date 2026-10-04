@@ -1,11 +1,22 @@
-//! What `CR0`, `CR4` and `IA32_EFER` hold on every CPU in this machine. One
-//! declaration, applied by the BSP and every AP and checked on each; nothing
-//! else may write any of the three. Each register is written whole: `CR0`
-//! and `EFER` are constants, `CR4` is required bits plus whatever optional
-//! bits this CPU offers. `EFER.NXE` lets bit 63 of a paging entry mean *not
-//! executable* ([`Prot`](crate::mm::policy::Prot)).
+//! What `CR0`, `CR4`, `IA32_EFER` and the performance request hold on every
+//! CPU in this machine. One declaration, applied by the BSP and every AP and
+//! checked on each; nothing else may write any of them. Each register is
+//! written whole: `CR0` and `EFER` are constants, `CR4` is required bits plus
+//! whatever optional bits this CPU offers. `EFER.NXE` lets bit 63 of a paging
+//! entry mean *not executable* ([`Prot`](crate::mm::policy::Prot)).
+//!
+//! The performance request is HWP's: `IA32_HWP_INTERRUPT` where it exists,
+//! `IA32_PM_ENABLE`, `IA32_HWP_REQUEST` as `toyos_cpuvuln::hwp_request` derives
+//! it from this CPU's own registers, `IA32_HWP_REQUEST_PKG` and
+//! `IA32_ENERGY_PERF_BIAS`, on a machine whose CPUs have every one of them,
+//! and none on one that does not: refused by name once, firmware's values
+//! standing. `IA32_MISC_ENABLE`'s turbo bit is not declared: that register's
+//! other bits are model-specific and firmware's, and writing it whole would
+//! decide them.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+
+use toyos_cpuvuln::HwpFacts;
 
 use super::cpu;
 use crate::log;
@@ -46,6 +57,33 @@ mod cr4 {
     pub const SMEP: u64 = 1 << 20;
     pub const SMAP: u64 = 1 << 21;
 }
+
+/// The performance request's registers, SDM Vol. 4.
+mod hwp {
+    pub const PLATFORM_INFO: u32 = 0xCE;
+    pub const ENERGY_PERF_BIAS: u32 = 0x1B0;
+    pub const PM_ENABLE: u32 = 0x770;
+    pub const HWP_CAPABILITIES: u32 = 0x771;
+    pub const HWP_REQUEST_PKG: u32 = 0x772;
+    pub const HWP_INTERRUPT: u32 = 0x773;
+    pub const HWP_REQUEST: u32 = 0x774;
+}
+
+/// `IA32_PM_ENABLE` on every CPU: HWP on, which only a reset turns off.
+const PM_ENABLE: u64 = 1;
+
+/// `IA32_HWP_INTERRUPT` on every CPU that has it: nothing in this kernel takes
+/// an HWP notification.
+const HWP_INTERRUPT: u64 = 0;
+
+/// `IA32_HWP_REQUEST_PKG` on every CPU: the widest range at the request's own
+/// preference. Inert, since no CPU's request sets package control, and
+/// declared so that firmware does not decide it either.
+const HWP_REQUEST_PKG: u64 = 0x01 | 0xff << 8 | toyos_cpuvuln::HWP_EPP << 24;
+
+/// `IA32_ENERGY_PERF_BIAS` on every CPU: Linux's `ENERGY_PERF_BIAS_NORMAL`
+/// (`arch/x86/include/asm/msr-index.h:858`).
+const ENERGY_PERF_BIAS: u64 = 6;
 
 /// `CR0` on every CPU: `TS` stays clear because lazy FP switching would leak
 /// a register file across `#NM`; `AM` stays clear because Ring 3 has no `#AC` path.
@@ -106,8 +144,45 @@ pub fn init_cr0(cpu_id: u32) {
     bench::report(cpu_id, before);
 }
 
-/// Puts this CPU's `CR4` and `EFER` into the declaration and checks all
-/// three against it. Must run after [`init_cr0`] and before `arch::syscall::init`, which needs `SCE` set.
+/// Whether the machine's declaration carries the performance request: the
+/// BSP's verdict, which every AP must reach too.
+static HWP: AtomicU8 = AtomicU8::new(HWP_UNDECIDED);
+const HWP_UNDECIDED: u8 = 0;
+const HWP_DECLARED: u8 = 1;
+const HWP_REFUSED: u8 = 2;
+
+/// Whether this CPU gets a performance request, from CPUID alone, and whether
+/// it has `IA32_HWP_INTERRUPT`: the machine's answer, a CPU that disagrees
+/// named.
+fn hwp_declared(cpu_id: u32) -> Option<toyos_cpuvuln::Hwp> {
+    let (cpuid_6_eax, cpuid_6_ecx) = cpu::leaf_6();
+    let verdict = toyos_cpuvuln::hwp(&HwpFacts {
+        vendor: cpu::vendor(),
+        signature: cpu::cpuid(1, 0).0,
+        cpuid_6_eax,
+        cpuid_6_ecx,
+        cpuid_7_0_edx: cpu::leaf_7().3,
+    });
+    let mine = if verdict.is_ok() { HWP_DECLARED } else { HWP_REFUSED };
+    match HWP.compare_exchange(HWP_UNDECIDED, mine, Ordering::Release, Ordering::Acquire) {
+        Ok(_) => {
+            if let Err(refusal) = verdict {
+                log!("control_regs: no performance request is declared: {}", refusal.reason());
+            }
+        }
+        Err(machine) => assert!(
+            machine == mine,
+            "control_regs: cpu{cpu_id} {} a performance request and the BSP {} one",
+            if mine == HWP_DECLARED { "can hold" } else { "cannot hold" },
+            if machine == HWP_DECLARED { "declared" } else { "refused" },
+        ),
+    }
+    verdict.ok()
+}
+
+/// Puts this CPU's `CR4` and `EFER` into the declaration and checks both
+/// against it. Must run after [`init_cr0`] and before `arch::syscall::init`,
+/// which needs `SCE` set.
 pub fn init(cpu_id: u32) {
     let declared = declaration(cpu_id);
     if !skipped(cpu_id) {
@@ -126,6 +201,47 @@ pub fn init(cpu_id: u32) {
         }
     }
     self_check(cpu_id, declared);
+}
+
+/// Puts this CPU's performance request into the declaration and checks it.
+/// Must run after [`init`] and after this CPU's IDT is loaded, so a fault in
+/// its `wrmsr` or `rdmsr` panics by name.
+///
+/// The interrupt is cleared and HWP enabled before any other HWP register is
+/// touched, the request's input included: SDM Vol. 3B §17.4.2 (253669-093US),
+/// "Additional MSRs associated with HWP may only be accessed after HWP is
+/// enabled, with the exception of IA32_HWP_INTERRUPT and MSR_PPERF", and
+/// `intel_pstate_hwp_enable`'s order.
+pub fn init_performance(cpu_id: u32) {
+    let Some(hwp) = hwp_declared(cpu_id) else { return };
+    // SAFETY: `hwp_declared` admitted this CPU only where CPUID enumerates HWP,
+    // and `IA32_HWP_INTERRUPT` where it enumerates that too; both values hold
+    // only defined bits.
+    unsafe {
+        if hwp.notify {
+            cpu::wrmsr(hwp::HWP_INTERRUPT, HWP_INTERRUPT);
+        }
+        cpu::wrmsr(hwp::PM_ENABLE, PM_ENABLE);
+    }
+    let request = toyos_cpuvuln::hwp_request(cpu::rdmsr(hwp::HWP_CAPABILITIES), cpu::rdmsr(hwp::PLATFORM_INFO));
+    // SAFETY: HWP is enabled, so its registers are live; CPUID enumerated EPP,
+    // the package request and EPB, and every value holds only defined bits.
+    unsafe {
+        cpu::wrmsr(hwp::HWP_REQUEST, request);
+        cpu::wrmsr(hwp::HWP_REQUEST_PKG, HWP_REQUEST_PKG);
+        cpu::wrmsr(hwp::ENERGY_PERF_BIAS, ENERGY_PERF_BIAS);
+    }
+    hwp_check(cpu_id, request, hwp.notify);
+}
+
+/// The power envelope this CPU runs under, where the performance request is
+/// declared: read only after this CPU's [`init_performance`], which enabled HWP.
+pub fn envelope() -> Option<crate::counters::Envelope> {
+    (HWP.load(Ordering::Acquire) == HWP_DECLARED).then(|| crate::counters::Envelope {
+        hwp_request: cpu::rdmsr(hwp::HWP_REQUEST),
+        hwp_request_pkg: cpu::rdmsr(hwp::HWP_REQUEST_PKG),
+        energy_perf_bias: cpu::rdmsr(hwp::ENERGY_PERF_BIAS),
+    })
 }
 
 /// Whether the declaration carries `PCIDE`, and therefore whether `INVPCID` is this machine's flush.
@@ -205,11 +321,8 @@ fn supported() -> u64 {
         [(0, cr4::FSGSBASE), (7, cr4::SMEP), (20, cr4::SMAP)];
     const CPUID_7_ECX: [(u32, u64); 1] = [(2, cr4::UMIP)];
 
-    let (max_leaf, _, _, _) = cpu::cpuid(0, 0);
     let (_, _, ecx1, edx1) = cpu::cpuid(1, 0);
-    // A leaf above the maximum answers with the highest basic leaf's data
-    // instead of faulting, so an unguarded read here would misreport bits.
-    let (_, ebx7, ecx7, _) = if max_leaf >= 7 { cpu::cpuid(7, 0) } else { (0, 0, 0, 0) };
+    let (_, ebx7, ecx7, _) = cpu::leaf_7();
 
     let mut have = 0;
     for (bit, flag) in CPUID_1_EDX {
@@ -270,6 +383,42 @@ fn self_check(cpu_id: u32, declared_cr4: u64) {
          {EFER:#06x} plus the CPU's own LMA",
     );
     CHECKED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// [`self_check`] for the performance request, logged first for the same
+/// reason; the line carries the request's two inputs, so a reader can
+/// recompute it.
+fn hwp_check(cpu_id: u32, request: u64, notify: bool) {
+    let pm_enable = cpu::rdmsr(hwp::PM_ENABLE);
+    let live = cpu::rdmsr(hwp::HWP_REQUEST);
+    let pkg = cpu::rdmsr(hwp::HWP_REQUEST_PKG);
+    let epb = cpu::rdmsr(hwp::ENERGY_PERF_BIAS);
+    let interrupt = notify.then(|| cpu::rdmsr(hwp::HWP_INTERRUPT));
+    log!(
+        "control_regs: cpu{} pm_enable={} hwp_request={:#010x} hwp_request_pkg={:#010x} epb={} \
+         hwp_interrupt={:x?} hwp_capabilities={:#010x} platform_info={:#018x}",
+        cpu_id,
+        pm_enable,
+        live,
+        pkg,
+        epb,
+        interrupt,
+        cpu::rdmsr(hwp::HWP_CAPABILITIES),
+        cpu::rdmsr(hwp::PLATFORM_INFO),
+    );
+    for (name, holds, declared) in [
+        ("pm_enable", Some(pm_enable), PM_ENABLE),
+        ("hwp_request", Some(live), request),
+        ("hwp_request_pkg", Some(pkg), HWP_REQUEST_PKG),
+        ("epb", Some(epb), ENERGY_PERF_BIAS),
+        ("hwp_interrupt", interrupt, HWP_INTERRUPT),
+    ] {
+        let Some(holds) = holds else { continue };
+        assert!(
+            holds == declared,
+            "control_regs: cpu{cpu_id} holds {name}={holds:#x}, the declaration is {declared:#x}",
+        );
+    }
 }
 
 /// How many CPUs hold the declaration, said once after the last of them has

@@ -92,8 +92,6 @@ const SWEEP_EVERY_NS: u64 = 25_000_000;
 #[cfg(feature = "heap-sweep")]
 static NEXT_SWEEP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-/// Take the sweep if this CPU is the one that claims the slot, outside `with_cpu`: the sweep takes `dlmalloc`'s lock,
-/// which wedges the machine if taken inside the driver's exclusive region.
 #[cfg(feature = "heap-sweep")]
 fn maybe_sweep(now: Nanos) {
     let due = NEXT_SWEEP.load(Ordering::Relaxed);
@@ -643,7 +641,6 @@ fn execute(action: Action<KernelPayload>) {
             let cpu = CpuId(percpu::cpu_id());
             let awake = cpus().get(cpu).doorbell().kick_pending()
                 || crate::preempt::need_resched()
-                || crate::irq_ring::any_pending_self()
                 || !with_cpu(|c| c.mailbox_is_empty())
                 // The i8042 verdict needs a pass to notice its deadline; a quiet machine after boot runs none otherwise.
                 || crate::arch::keyboard_controller::verdict_due()
@@ -882,9 +879,6 @@ const DEPTH_RUNGS: [usize; 9] = [
 ];
 
 /// The deepest any task kernel stack has been, in bytes used.
-///
-/// Never logged from where it's written: that runs inside `with_cpu`'s exclusive region, which a log re-enters and wedges.
-/// `sched-tripwire`'s own `log!` is the one exception, since the `panic!` after it never returns.
 #[cfg(feature = "heap-tripwire")]
 static DEEPEST: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
@@ -973,7 +967,6 @@ fn stack_depth(payload: &KernelPayload) {
         }
         used = KERNEL_STACK_SIZE - rung;
     }
-    // Recorded and not logged. See [`DEEPEST`].
     DEEPEST.fetch_max(used, Ordering::Relaxed);
 }
 

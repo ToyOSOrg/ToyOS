@@ -107,7 +107,7 @@ pub struct PerCpu {
     pub last_seen_ring0_fires: u32,
     fault_state: u8,
     _pad_after_fault_state: [u8; 3],
-    /// Ticks the Ring 0 timer re-arms with; per-CPU to avoid cross-CPU clobber.
+    /// Ticks the Ring 3 timer branch re-arms with, and zero when stopped, which the Ring 0 branch leaves stopped.
     pub last_armed_ticks: AtomicU32,
     /// This CPU's [`log::Shard`]; never null on a live CPU ([`alloc_percpu`] fills it first).
     log_shard: u64,
@@ -518,6 +518,7 @@ pub fn init_bsp(lapic_id: u32) {
     // handlers report on no channel of this kernel's — so a fault in `fpu`
     // below would stop the machine with the panel holding the record before it.
     super::idt::init();
+    super::control_regs::init_performance(0);
 
     super::fpu::init(0);
     // Between `fpu::init` and this function's own line: the facts `fpu::init`
@@ -550,6 +551,7 @@ pub fn init_ap(percpu_ptr: *mut PerCpu) {
     // SAFETY: `load_gdt`'s once-per-CPU contract; this is this AP's call.
     unsafe { percpu.load_gdt(); }
     super::control_regs::init(percpu.cpu_id);
+    super::control_regs::init_performance(percpu.cpu_id);
     super::fpu::init(percpu.cpu_id);
     super::fpu::log_state(percpu.cpu_id);
 }
@@ -635,7 +637,7 @@ pub fn set_last_seen_kernel_timer_fires(v: u32) {
     gs::write_u32::<OFF_LAST_SEEN_RING0_FIRES>(v);
 }
 
-/// The one-shot count this CPU just armed, for the timer stub's reload; `arch::apic` is the only caller.
+/// The one-shot count this CPU just armed, for the timer stub; `arch::apic` is the only caller.
 pub fn set_last_armed_ticks(ticks: u32) {
     gs::write_u32::<OFF_LAST_ARMED_TICKS>(ticks);
 }

@@ -8,7 +8,7 @@
 
 mod common;
 
-use common::{declare_len, entry, madt, rsdp, sdt, xsdt, Machine};
+use common::{declare_len, entry, madt, rsdp, sdt, t14_root_bridge, xsdt, Machine, OVMF_ROOT_BRIDGE};
 use toyos_abi::boot::RootBridgeWindow;
 use toyos_abi::acpi::Block;
 use toyos_acpi::{
@@ -570,10 +570,6 @@ fn a_fadt_that_ends_before_arm_boot_arch_is_short() {
 
 /// Where the two firmwares' descriptor lists sit for the sweep below.
 const ROOT_BRIDGE_AT: u64 = 0x4_0000;
-const ROOT_BRIDGES: &[(&str, &[u8])] = &[
-    ("ovmf", include_bytes!("../fixtures/ovmf-pure-efi/root-bridge-0.bin")),
-    ("thinkpad-t14", include_bytes!("../fixtures/thinkpad-t14/root-bridge-0.bin")),
-];
 
 /// **No panic and no unbounded walk, over every byte of both firmwares' real
 /// descriptor lists.** Each byte takes each of its 255 other values in turn and
@@ -583,7 +579,7 @@ const ROOT_BRIDGES: &[(&str, &[u8])] = &[
 fn no_single_byte_mutation_of_a_firmwares_descriptor_list_panics_or_runs_away() {
     let mut mutations = 0u64;
     let mut refused = 0u64;
-    for (which, original) in ROOT_BRIDGES {
+    for (which, original) in [("ovmf", OVMF_ROOT_BRIDGE.to_vec()), ("thinkpad-t14", t14_root_bridge())] {
         for offset in 0..original.len() {
             for value in 0..=255u8 {
                 if original[offset] == value {

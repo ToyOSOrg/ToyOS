@@ -256,6 +256,20 @@ fn run_one(name: &str, args: &[&str], cap: Option<&SysCap>) -> Ran {
             return Ran::No;
         }
     }
+    // Its launcher too, where its row starts anything: a job is a direct spawn,
+    // and a direct spawn inherits none.
+    if let Some(launcher) = toyos::endow::launcher() {
+        match toyos_abi::syscall::dup(toyos::AsHandle::as_handle(launcher)) {
+            Ok(dup) => {
+                command.endow(toyos::launch::LAUNCHER, dup.0);
+            }
+            Err(e) => {
+                println!("===TEST_END {name} error=the launcher would not duplicate: {e:?}===");
+                let _ = io::stdout().flush();
+                return Ran::No;
+            }
+        }
+    }
     let ran = match command.spawn() {
         Ok(mut child) => {
             drop(child.stdin.take());

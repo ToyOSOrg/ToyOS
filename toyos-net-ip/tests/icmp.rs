@@ -1,4 +1,4 @@
-//! §9: ICMPv4 — echo, error generation under the limiter, and inbound errors.
+//! ICMPv4: echo, error generation under the limiter, and inbound errors.
 
 mod common;
 

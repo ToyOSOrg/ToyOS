@@ -14,7 +14,7 @@ fn layouts() -> impl Iterator<Item = &'static str> {
 /// still has. Not what a translator is actually using — the config is the
 /// last thing anyone asked for, and a surface that missed the notification
 /// can disagree with it; that half stays unanswerable until the query
-/// syscall in `issues/diagnostics/the-kernel-keeps-nothing-it-enumerates.md`
+/// syscall in `issues/the-kernel-keeps-nothing-it-enumerates.md`
 /// exists.
 fn current() -> Option<String> {
     let name = std::fs::read_to_string(surface::LAYOUT_CONFIG).ok()?;

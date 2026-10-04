@@ -17,7 +17,7 @@
 //! **The ECDT is a stopgap**: the embedded controller is read from it until the
 //! interpreter reads the controller's own device from the DSDT, and then this
 //! path and `toyos_acpi::ecdt` go
-//! (`issues/kernel/toyos-runs-the-machine-in-acpi-mode-and-interprets-its-aml.md`).
+//! (`issues/toyos-runs-the-machine-in-acpi-mode-and-interprets-its-aml.md`).
 //!
 //! The row is the FADT's PM1a event and GPE0 blocks and the ECDT's two
 //! ports, filled once at boot; the SCI is its one line, level.
@@ -45,7 +45,7 @@ pub const ROW: usize = 1;
 
 /// How long the firmware has to set `SCI_EN` after the enable: one that has
 /// not answered in this will not. The T14 answers in 2.13 ms
-/// (`issues/hardware/the-t14s-firmware-interrupts-every-cpu-every-2-2-s-under-toyos.md`).
+/// (`issues/the-t14s-firmware-interrupts-every-cpu-every-2-2-s-under-toyos.md`).
 const HANDOVER: Duration = Duration::from_secs(3);
 /// How often the wait reads `SCI_EN`, parked in between.
 const POLL: Duration = Duration::from_millis(1);

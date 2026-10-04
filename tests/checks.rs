@@ -12,6 +12,8 @@ mod checks {
 
     #[path = "audio.rs"]
     mod audio_checks;
+    #[path = "claims.rs"]
+    mod claims_checks;
     #[path = "clock.rs"]
     mod clock_checks;
     #[path = "lan.rs"]
@@ -796,6 +798,16 @@ mod checks {
     }
 
     #[test]
+    fn metal_claim_spends_one_remapping_entry() {
+        claims_checks::one_entry_per_slot();
+    }
+
+    #[test]
+    fn metal_domains_end_below_the_host_bridges() {
+        claims_checks::domains_end_below_the_windows();
+    }
+
+    #[test]
     fn metal_lease_judged_is_this_boots_own() {
         lan_checks::the_lease_judged_is_this_boots_own();
     }
@@ -916,8 +928,8 @@ mod checks {
                  Previous boot's panic: the last boot read WEDGED, so a bound of its own ended it \
                  and this chain ends here\n\
                  | the boot deadline expired: a bound of 120000 ms, reached at 120061 ms, with this \
-                 machine in `complete`. The tail of the log ring follows ... which is what nothing \
-                 was draining.\n\
+                 machine in `complete`. Where each CPU's timer last found the kernel:\n\
+                 | The tail of the log ring follows ... which is what nothing was draining.\n\
                  | usb-quiesce: no barrier was taken, so this reset is not the shutdown's\n{tail}\
                  Loader log: the last boot is accounted for, so this pass resets the machine\n",
                 bootlog::SEPARATOR
@@ -925,14 +937,35 @@ mod checks {
         };
         let kernel = "[2026-09-29 10:33:28 0.000 cpu0 boot] panic console: armed 1920x1080 \
                       stride=1920 format=1 at 0x4000000000, write-combining\n";
-        let wedge = "| [1.509 cpu0] wedge: staged, and only the boot deadline ends this machine: \
-                     every CPU stops taking scheduler passes from here\n\
-                     | [1.509 cpu0] wedge: cpu0 arrived with interrupts off, through the syscall \
-                     gate, and takes them again here\n\
-                     | [1.509 cpu1] wedge: cpu1 arrived with interrupts on\n";
+        let staged = "| [1.509 cpu1] wedge: staged, and only the boot deadline ends this machine: \
+                      every CPU stops taking scheduler passes from here\n";
+        let awake = |cpu: u32| format!("| [1.509 cpu{cpu}] wedge: cpu{cpu} arrived with interrupts on\n");
+        let deaf = "| [1.509 cpu1] wedge: cpu1 arrived with interrupts off, through the syscall \
+                    gate, and takes them again here\n";
         let judge = metal_judge("boot_deadline_ends_a_wedge");
-        assert_eq!(judge(&[&readback("deadlinewedge", &wedged(wedge), kernel)]), Ok(()));
+        // The seal's line for each CPU, cpu1's being `staging`.
+        let spin = "kernel::deadline::this_cpu+0x42";
+        let pcs = |staging: &str| format!("|   cpu0 pc=0xffff80006051b0b2  {spin}\n|   cpu1 pc={staging}\n");
+        let inside = pcs(&format!("0xffff80006051b0b2  {spin}"));
+        let wedge = format!("{staged}{}{}{inside}", awake(1), awake(0));
+        assert_eq!(judge(&[&readback("deadlinewedge", &wedged(&wedge), kernel)]), Ok(()));
         assert!(judge(&[&readback("deadlinewedge", &wedged(""), kernel)]).is_err());
+        // The staging CPU arrived deaf: the gate masked the syscall's body, and
+        // the others' awake lines say nothing of it.
+        let gated = format!("{staged}{deaf}{}{inside}", awake(0));
+        assert!(judge(&[&readback("deadlinewedge", &wedged(&gated), kernel)]).is_err());
+        // Awake, but not the CPU that staged it.
+        let elsewhere = format!("{staged}{}{inside}", awake(0));
+        assert!(judge(&[&readback("deadlinewedge", &wedged(&elsewhere), kernel)]).is_err());
+        // The seal puts the staging CPU somewhere else, or at no symbol: the
+        // entry handed the record a word that is not the interrupted `rip`.
+        for staging in ["0xffff8000605490fe  <kernel::sync::Lock<bool>>::lock+0xee", "0x0000000000000003"] {
+            let misplaced = format!("{staged}{}{}{}", awake(1), awake(0), pcs(staging));
+            assert!(judge(&[&readback("deadlinewedge", &wedged(&misplaced), kernel)]).is_err());
+        }
+        // No line for the staging CPU.
+        let unnamed = format!("{staged}{}{}|   cpu0 pc=0xffff80006051b0b2  {spin}\n", awake(1), awake(0));
+        assert!(judge(&[&readback("deadlinewedge", &wedged(&unnamed), kernel)]).is_err());
 
         let sweep = "| [1.526 cpu0] usb-load: sweeping disk 0 from block 6569336 to 7507812, \
                      rewriting each run with the bytes just read from it, until this machine is \

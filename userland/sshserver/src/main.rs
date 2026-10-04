@@ -45,7 +45,7 @@ fn host_key_path() -> String {
 /// with nothing in it, so a key that has to be *installed* before the first
 /// login is a key nobody can install. Neither file is protected from anything
 /// else on the machine — see
-/// `issues/isolation/sshserver-authorized-keys-unprotected.md`.
+/// `issues/sshserver-authorized-keys-unprotected.md`.
 fn authorized_keys() -> [String; 2] {
     [format!("{}/authorized_keys", state()), "/system/etc/ssh_authorized_keys".to_string()]
 }

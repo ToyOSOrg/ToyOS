@@ -134,7 +134,7 @@ pub struct Exception {
 }
 
 const DOOM_LEAVES: &str =
-    "issues/filesystem/a-package-is-a-directory-under-apps-and-the-installer-is-a-program.md";
+    "issues/a-package-is-a-directory-under-apps-and-the-installer-is-a-program.md";
 
 const fn pending(
     subject: Subject,
@@ -209,7 +209,7 @@ pub const EXCEPTIONS: &[Exception] = &[
 /// not, because that directory is where third-party material arrives. A
 /// third-party *text* file anywhere else — a ninth Phosphor SVG one directory
 /// over — is reached by neither, and the corpus by count alone and no digest;
-/// `issues/build/the-third-party-corpus-is-in-no-machine-read-ledger.md` is
+/// `issues/the-third-party-corpus-is-in-no-machine-read-ledger.md` is
 /// what is left of that gap.
 pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
     // The ACPI tables QEMU 11.1.1 published to a `Profile::Headless` guest,
@@ -274,12 +274,6 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         "toyos-acpi/fixtures/ovmf-pure-efi/root-bridge-0.bin",
         "eb00e68be746a09ac7f0ce1ca492ce8c858e3af1152112b49ffb4708883acbfb",
         "ours: OVMF's answer on a q35 guest, read off that boot's own loader log",
-        Terms::Spdx("MIT OR Apache-2.0"),
-    ),
-    (
-        "toyos-acpi/fixtures/thinkpad-t14/root-bridge-0.bin",
-        "a734078ed9ca3971ce804fd9ecc97b7794f816058f9ae17e47e0d2bcb63af0f3",
-        "ours: the T14's answer, read off that boot's own loader log on the stick",
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
     // A bcachefs volume upstream's own tools wrote, gzipped. The bytes inside

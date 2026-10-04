@@ -137,8 +137,10 @@ struct AppsConfig {
     receives: Vec<String>,
 }
 
+/// **Unknown fields refused**: a misspelled `starts` would be a row that
+/// silently holds no launcher.
 #[derive(Deserialize, Default)]
-#[serde(default, rename_all = "kebab-case")]
+#[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
 struct ProgramConfig {
     path: Option<String>,
     no_default_features: bool,
@@ -169,6 +171,10 @@ struct ProgramConfig {
     roles: Vec<String>,
     /// The supervisor starts it again when it ends (`toyos_manifest::Program::restart`).
     restart: bool,
+    /// The rows it may start through the launcher (`toyos_manifest::Program::starts`).
+    starts: Vec<String>,
+    /// A launch it makes opens a login session (`toyos_manifest::Program::login`).
+    login: bool,
 }
 
 impl ProgramConfig {
@@ -635,7 +641,10 @@ const SUPERVISOR_PROGRAM: &str = "supervisor";
 /// declaration to come from. They travel in the manifest so the supervisor creates
 /// exactly the ports the build-time gate counted as provided — one producer,
 /// rather than a constant here and a string in the supervisor.
-const SUPERVISOR_SERVED: &[&str] = &["launcher", toyos_swap::PORT, "power"];
+///
+/// Not `launcher`: a row holds it by its `starts`, badged with its row, and no
+/// row receives it.
+const SUPERVISOR_SERVED: &[&str] = &[toyos_swap::PORT, "power"];
 
 /// Who may hold the two authorities that change what the machine runs:
 /// the swap port, [`toyos_swap::HOLDER`] and nothing else — no other
@@ -664,14 +673,40 @@ fn held_by_their_holders_alone(config: &SystemConfig) -> Result<(), String> {
     Ok(())
 }
 
+/// What a row may start through the launcher, and which rows open a login
+/// session (`toyos_manifest::launch`).
+///
+/// **Checked on every manifest rendered**: a `starts` entry is `/apps` or a
+/// declared row the supervisor can start more than once, so not one that
+/// serves a port or a file-server role, whose acceptors a launch would take and
+/// a second one find gone.
+fn starts_name_what_a_launch_can_start(config: &SystemConfig) -> Result<(), String> {
+    for (name, program) in &config.programs {
+        for key in &program.starts {
+            if key == toyos_manifest::launch::APPS {
+                continue;
+            }
+            let Some(target) = config.programs.get(key) else {
+                return Err(format!("`{name}` starts `{key}`, which is not declared"));
+            };
+            if !target.serves.is_empty() || !target.roles.is_empty() {
+                return Err(format!("`{name}` starts `{key}`, which serves ports a launch would take for good"));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The resolved config as the records `/system/bin/supervisor` reads.
 ///
 /// The format, the renderer and the parser are `toyos-manifest/`, whose
 /// round-trip test is what makes "what the build writes is what the supervisor reads" a
 /// fact rather than two hand-matched implementations.
 fn render_manifest(config: &SystemConfig) -> Vec<u8> {
-    if let Err(why) = held_by_their_holders_alone(config) {
-        panic!("system.toml cannot be rendered as a manifest: {why}");
+    for gate in [held_by_their_holders_alone, starts_name_what_a_launch_can_start] {
+        if let Err(why) = gate(config) {
+            panic!("system.toml cannot be rendered as a manifest: {why}");
+        }
     }
     let mut names: Vec<&String> = config.programs.keys().collect();
     names.sort();
@@ -693,6 +728,8 @@ fn render_manifest(config: &SystemConfig) -> Vec<u8> {
                     service: cfg.service,
                     roles: cfg.roles.clone(),
                     restart: cfg.restart,
+                    starts: cfg.starts.clone(),
+                    login: cfg.login,
                 }
             })
             .collect(),
@@ -704,6 +741,54 @@ fn render_manifest(config: &SystemConfig) -> Vec<u8> {
         .unwrap_or_else(|e| panic!("system.toml cannot be rendered as a manifest: {e:?}"))
 }
 
+/// Which build `root`'s tree makes for `arch` against the sysroot whose key
+/// for it is `toolchain`, as `/system/etc/os-release` records it, read with
+/// gitoxide (`issues/the-build-runs-host-tools-outside-rust-and-qemu.md`,
+/// row 21). Untracked files are dirty whatever `status.showUntrackedFiles`
+/// says; submodules are not read, because the fork's state is the toolchain
+/// key's.
+fn release(root: &Path, toolchain: &crate::keystore::Key, arch: Arch) -> toyos_osrelease::Release {
+    let repo = gix::open(root).unwrap_or_else(|e| panic!("{} is no git checkout: {e}", root.display()));
+    let head = repo.head_commit().unwrap_or_else(|e| panic!("{}'s HEAD names no commit: {e}", root.display()));
+    let commit = toyos_osrelease::Hex::parse(&head.id.to_string()).expect("a SHA-1 commit is forty hex digits");
+    let time = head.time().unwrap_or_else(|e| panic!("commit {} names no committer time: {e}", head.id));
+    let committed = u64::try_from(time.seconds)
+        .unwrap_or_else(|_| panic!("commit {} was committed before 1970: {}", head.id, time.seconds));
+    // Set whole: the platform `status` makes has no walk at all for a
+    // checkout configured to show no untracked files.
+    let walk = repo
+        .dirwalk_options()
+        .unwrap_or_else(|e| panic!("the status of {}: {e}", root.display()))
+        .emit_untracked(gix::dir::walk::EmissionMode::CollapseDirectory);
+    let changes = repo
+        .status(gix::progress::Discard)
+        .and_then(|status| {
+            status
+                .index_worktree_options_mut(|options| options.dirwalk_options = Some(walk))
+                .index_worktree_submodules(None)
+                .into_iter(None)
+        })
+        .unwrap_or_else(|e| panic!("the status of {}: {e}", root.display()));
+    // An index entry whose stat alone moved, and an ignored file the walk
+    // passed, summarise to nothing.
+    let dirty = changes.map(|item| item.unwrap_or_else(|e| panic!("the status of {}: {e}", root.display()))).any(
+        |item| match item {
+            gix::status::Item::IndexWorktree(change) => change.summary().is_some(),
+            gix::status::Item::TreeIndex(_) => true,
+        },
+    );
+    toyos_osrelease::Release {
+        commit,
+        tree: if dirty { toyos_osrelease::Tree::Dirty } else { toyos_osrelease::Tree::Clean },
+        toolchain: toyos_osrelease::Hex::parse(toolchain.as_str()).expect("a key is sixteen hex digits"),
+        arch: match arch {
+            Arch::X86_64 => toyos_osrelease::Arch::X86_64,
+            Arch::Aarch64 => toyos_osrelease::Arch::Aarch64,
+        },
+        committed,
+    }
+}
+
 fn build_and_assemble(
     root: &Path,
     config: &SystemConfig,
@@ -712,7 +797,11 @@ fn build_and_assemble(
     quiet: bool,
     arch: Arch,
 ) -> Vec<u8> {
-    let mut root_files: Vec<(String, Vec<u8>)> = Vec::new();
+    // Before anything is built, so a file edited during the build is not
+    // credited to the state it was read in.
+    let release = release(root, env.sysroot.identity.of_target(arch.userland()), arch);
+    let mut root_files: Vec<(String, Vec<u8>)> =
+        vec![(toyos_osrelease::PATH.to_string(), release.to_string().into_bytes())];
     build_programs(root, config, env, quiet, arch, &mut root_files);
     root_files.push((toyos_manifest::PATH.to_string(), render_manifest(config)));
 
@@ -774,14 +863,14 @@ const NOT_YET_BUILT: &[(Arch, &str, &str)] = &[
         Arch::Aarch64,
         "doom",
         "softbuffer's toyos fork stops it \
-         (issues/build/the-toolkit-forks-resolve-an-x86-only-toyos-window.md); its C compiles for \
+         (issues/the-toolkit-forks-resolve-an-x86-only-toyos-window.md); its C compiles for \
          AArch64 with the toolchain's clang",
     ),
 ];
 
 const TOOLKIT_FORKS: &str = "softbuffer's and winit's toyos forks resolve the published \
      toyos-window 0.2.0, whose framebuffer is x86-64 only \
-     (issues/build/the-toolkit-forks-resolve-an-x86-only-toyos-window.md)";
+     (issues/the-toolkit-forks-resolve-an-x86-only-toyos-window.md)";
 
 /// Why `arch`'s userland leaves `program` out, if it does.
 fn not_built_for(arch: Arch, program: &str) -> Option<&'static str> {
@@ -991,7 +1080,7 @@ pub struct Boot {
     config: PathBuf,
     image: PathBuf,
     /// Which of the two build sequences writes it. They are not one function
-    /// yet — `issues/build/two-sequences-build-one-image.md` — and until they
+    /// yet — `issues/two-sequences-build-one-image.md` — and until they
     /// are, this is what keeps each artifact to a single writer.
     case: bool,
 }
@@ -2267,6 +2356,58 @@ fn collect_hosted_rustc(root: &Path, toolchain: &Path, root_files: &mut Vec<(Str
 mod tests {
     use super::*;
 
+    /// **The release a tree records is its commit, at that commit's own time,
+    /// and dirty from the first file that is not that commit's**: an
+    /// untracked file counts, and so does an edit to a tracked one, staged or
+    /// not, whatever the checkout's own status shows. The time is the
+    /// committer's, in a zone not UTC's, and never the author's or the host
+    /// clock's.
+    #[test]
+    fn a_tree_records_its_commit_its_commit_time_and_whether_it_is_dirty() {
+        let (_dir, _origin, work) = crate::gitfixture::repo("release");
+        fs::write(work.join("f"), "next\n").unwrap();
+        crate::gitfixture::sh(&work, &["add", "f"]);
+        let committed = Command::new("git")
+            .args(["commit", "-qm", "next"])
+            .env("GIT_AUTHOR_DATE", "@1000000000 +0000")
+            .env("GIT_COMMITTER_DATE", "@1791089159 +0200")
+            .current_dir(&work)
+            .status()
+            .unwrap();
+        assert!(committed.success());
+        // The ref as `git` wrote it, for an oracle that is not gitoxide.
+        let head = fs::read_to_string(work.join(".git/refs/heads/wt")).unwrap();
+        let key = crate::keystore::Key::parse("0123456789abcdef").unwrap();
+
+        let clean = release(&work, &key, Arch::Aarch64);
+        assert_eq!(clean.commit.as_str(), head.trim());
+        assert_eq!(clean.committed, 1_791_089_159);
+        assert_eq!(clean.tree, toyos_osrelease::Tree::Clean);
+        assert_eq!(clean.toolchain.as_str(), key.as_str());
+        assert_eq!(clean.arch, toyos_osrelease::Arch::Aarch64);
+
+        fs::write(work.join("untracked"), "x").unwrap();
+        assert_eq!(release(&work, &key, Arch::Aarch64).tree, toyos_osrelease::Tree::Dirty);
+        fs::remove_file(work.join("untracked")).unwrap();
+        assert_eq!(release(&work, &key, Arch::Aarch64).tree, toyos_osrelease::Tree::Clean);
+        fs::write(work.join("f"), "edited\n").unwrap();
+        assert_eq!(release(&work, &key, Arch::Aarch64).tree, toyos_osrelease::Tree::Dirty);
+        // An ignored file is the build's own output, not a change to the tree.
+        fs::write(work.join("f"), "next\n").unwrap();
+        fs::create_dir(work.join("target")).unwrap();
+        fs::write(work.join("target/out"), "x").unwrap();
+        assert_eq!(release(&work, &key, Arch::Aarch64).tree, toyos_osrelease::Tree::Clean);
+        // A checkout that hides untracked files from its own status.
+        crate::gitfixture::sh(&work, &["config", "status.showUntrackedFiles", "no"]);
+        fs::write(work.join("untracked"), "x").unwrap();
+        assert_eq!(release(&work, &key, Arch::Aarch64).tree, toyos_osrelease::Tree::Dirty);
+        fs::remove_file(work.join("untracked")).unwrap();
+        // A change staged, with the files as staged: only HEAD's tree differs.
+        fs::write(work.join("f"), "staged\n").unwrap();
+        crate::gitfixture::sh(&work, &["add", "f"]);
+        assert_eq!(release(&work, &key, Arch::Aarch64).tree, toyos_osrelease::Tree::Dirty);
+    }
+
     /// `console` is reached by `console/system.toml` alone and the supervisor by no
     /// `[programs]` row, so a reader that drops a mode or the supervisor loses one.
     #[test]
@@ -3169,6 +3310,22 @@ mod tests {
         assert!(held_by_their_holders_alone(&apps).is_err());
         let slots: SystemConfig = toml::from_str("[programs.shell]\nslots = true\n").unwrap();
         assert!(held_by_their_holders_alone(&slots).is_err());
+    }
+
+    /// Every committed config passes, and each refusal has a config that
+    /// takes it and nothing else.
+    #[test]
+    fn a_row_starts_only_what_a_launch_can_start() {
+        for cfg in ALL_CONFIGS {
+            starts_name_what_a_launch_can_start(&load(cfg)).unwrap_or_else(|e| panic!("{cfg}: {e}"));
+        }
+        let gate = |toml: &str| starts_name_what_a_launch_can_start(&toml::from_str(toml).unwrap());
+        assert!(gate("[programs.shell]\nstarts = [\"toybox\", \"/apps\"]\nlogin = true\n[programs.toybox]\n").is_ok());
+        assert!(gate("[programs.shell]\nstarts = [\"ghost\"]\n").is_err());
+        assert!(gate("[programs.shell]\nstarts = [\"apps\"]\n").is_err());
+        assert!(gate("[programs.shell]\nstarts = [\"compositor\"]\n[programs.compositor]\nserves = [\"compositor\"]\n").is_err());
+        assert!(gate("[programs.shell]\nstarts = [\"fileserver\"]\n[programs.fileserver]\nroles = [\"data\"]\n").is_err());
+        assert!(toml::from_str::<SystemConfig>("[programs.shell]\nstart = [\"toybox\"]\n").is_err());
     }
 
     /// `[apps] receives` is narrower than a program's: a `provides` name is one

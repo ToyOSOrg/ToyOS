@@ -431,6 +431,8 @@ fn flush_kernel_timer_fires_to_trace() {
 #[track_caller]
 pub fn exit_current() -> ! {
     assert_baseline(BASELINE_TRAP);
+    // Masked into the pass, as `leave_user_if_due`'s exit masks into it.
+    crate::arch::cpu::disable_interrupts();
     driver::pass(Dispose::Exit);
     unreachable!("exit_current: returned from the exit pass");
 }

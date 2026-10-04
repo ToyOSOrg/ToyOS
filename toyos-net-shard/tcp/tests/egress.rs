@@ -378,7 +378,7 @@ fn s_pl_014_a_synchronized_connection_records_host_unreachable_soft() {
     nothing(&h.at(900_000));
     assert_eq!(h.status().failure, Some(HOST_UNREACHABLE), "not \"timed out\"");
 
-    // §16: only a segment not built counts, so a connection with nothing due is not asked.
+    // Only a segment not built counts, so a connection with nothing due is not asked.
     let mut h = fixture_e();
     h.hop = hop_b(|_| Hop::Unreachable);
     nothing(&h.input(1, seg(5001).ack(1001)));

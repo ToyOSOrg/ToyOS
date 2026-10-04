@@ -261,7 +261,7 @@ fn rebuild_frame(bytes: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
-/// Holds R1 (the pieces re-emit the input) and RT-09 (every slice lies inside it) at each accepted layer.
+/// Holds that the pieces re-emit the input, and RT-09 (every slice lies inside it) at each accepted layer.
 fn walk_frame(bytes: &[u8]) -> Result<Vec<String>, &'static str> {
     let frame = Frame::parse(bytes).map_err(|e| e.name())?;
     assert_eq!(concat(&[frame.header(), frame.body()]), bytes);
@@ -376,7 +376,7 @@ fn corpus() -> Vec<(Layer, Vec<u8>)> {
 #[test]
 fn s_rt_001_every_vector_reemits_raw() {
     for (layer, bytes) in corpus() {
-        // An IGMPv3 report and an ICMP timestamp are refused by type; R1 holds beneath them.
+        // An IGMPv3 report and an ICMP timestamp are refused by type; the layers beneath them re-emit.
         if let Err(reason) = walk(layer, &bytes) {
             assert!(["igmp.v3-report", "icmp.timestamp-request"].contains(&reason), "{bytes:02x?}: {reason}");
         }

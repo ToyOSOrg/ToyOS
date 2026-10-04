@@ -257,6 +257,7 @@ fn connect_through(connector: &port::Connector) -> u64 {
         tx: sc_writer, // server writes to server→client
         inbox: to_server,
         outbox: to_client,
+        stamp: connector.stamp(),
     });
     if let Err(e) = queued {
         process::with_process_data(|data| {
@@ -284,14 +285,7 @@ pub(super) fn sys_accept(h: RawHandle) -> u64 {
     loop {
         if let Some(conn) = acceptor.pop() {
             // PipeReader/PipeWriter move from queue into connection: ownership transfers, no refcount change.
-            let object = KObjectRef::Connection(
-                crate::object::service::ConnectionEnd::new(
-                    conn.rx,
-                    conn.tx,
-                    conn.inbox,
-                    conn.outbox,
-                ),
-            );
+            let object = KObjectRef::Connection(crate::object::service::ConnectionEnd::accepted(conn));
             let installed = process::with_process_data(|data| {
                 ops::install(&mut data.handles, object)
             });
@@ -315,6 +309,44 @@ pub(super) fn sys_accept(h: RawHandle) -> u64 {
             return cancelled();
         }
     }
+}
+
+/// A connector to the caller's own port stamping every connection with `badge`, which the dispatch has copied in and bounded. `READ` on the acceptor, the right accepting takes, is the authority: whoever answers every connection on a port grants nothing by labelling them.
+pub(super) fn sys_port_mint(h: RawHandle, badge: &[u8]) -> u64 {
+    let acceptor = match process::with_process_data(|data| {
+        data.handles.get::<port::Acceptor>(h, Rights::READ)
+    }) {
+        Ok(a) => a,
+        Err(e) => return e.refuse(),
+    };
+    let connector = KObjectRef::Connector(acceptor.mint(alloc::sync::Arc::from(badge)));
+    process::with_process_data(|data| handle_result(ops::install(&mut data.handles, connector)))
+}
+
+/// The badge a connection accepted from `acceptor_h`'s port was stamped with, written to `out`; answers its length.
+///
+/// **The port check is the whole boundary**: any process can make a port and mint any bytes on it, so a stamp is answered only to the acceptor of the port it was made on. A connection with no stamp (a client's end, a joined one) is `InvalidArgument`, one from another port `PermissionDenied`, and one made through an unbadged connector `NotFound`, never an empty badge.
+pub(super) fn sys_port_badge(
+    acceptor_h: RawHandle,
+    conn_h: RawHandle,
+    out: &mut crate::user_ptr::UserBytesMut,
+) -> u64 {
+    let found = process::with_process_data(|data| {
+        let acceptor = data.handles.get::<port::Acceptor>(acceptor_h, Rights::READ)?;
+        let conn = data.handles.get::<crate::object::service::ConnectionEnd>(conn_h, Rights::READ)?;
+        Ok::<_, crate::object::HandleError>((acceptor.port_id(), conn.stamp().cloned()))
+    });
+    let (port, stamp) = match found {
+        Ok(found) => found,
+        Err(e) => return e.refuse(),
+    };
+    let Some(stamp) = stamp else { return SyscallError::InvalidArgument.to_u64() };
+    if stamp.port != port {
+        return SyscallError::PermissionDenied.to_u64();
+    }
+    let Some(badge) = stamp.badge else { return SyscallError::NotFound.to_u64() };
+    out.write_at(0, &badge);
+    badge.len() as u64
 }
 
 /// Make a shared region and hand back the one handle to it, carrying MAP, DUP and TRANSFER — naming it is what authorizes mapping it.

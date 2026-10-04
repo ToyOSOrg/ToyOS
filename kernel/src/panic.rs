@@ -354,6 +354,8 @@ pub fn halt_all_cpus() -> ! {
     // this path exists to deliver.
     crate::hardlockup::stand_down();
     crate::deadline::stand_down();
+    #[cfg(feature = "mask-windows")]
+    crate::windows::stand_down();
     // **The other CPUs first, before anything else here runs.** A kernel that
     // has declared itself corrupt runs no userland again and no write path:
     // the report reaches the console, the panel and the black box, and

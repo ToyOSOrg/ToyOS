@@ -260,12 +260,21 @@ pub const SYS_DEVICE_DMA_MAP: u64 = 122;
 pub const SYS_DEVICE_DMA_UNMAP: u64 = 123;
 
 /// Every online CPU's counters, as [`crate::counters`] records. Gated by
-/// [`Rights::COUNTERS`] on a `SysCap`, and the counters that time programs by
-/// [`Rights::TRACE`] beside it. See [`counters`].
+/// [`Rights::COUNTERS`] on a `SysCap`, and the counters that time programs and
+/// the power envelope by [`Rights::TRACE`] beside it. See [`counters`].
 ///
 /// [`Rights::COUNTERS`]: crate::handle::Rights::COUNTERS
 /// [`Rights::TRACE`]: crate::handle::Rights::TRACE
 pub const SYS_COUNTERS: u64 = 124;
+
+/// Make a connector to a port the caller accepts on, every connection through
+/// which is stamped with the badge it carries. Gated by `READ` on the
+/// acceptor, the right accepting takes. See [`port_mint`].
+pub const SYS_PORT_MINT: u64 = 125;
+
+/// Read the badge a connection accepted from the caller's port was stamped
+/// with. See [`port_badge`].
+pub const SYS_PORT_BADGE: u64 = 126;
 
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
@@ -279,7 +288,7 @@ pub const SYSCALL_PROFILE_BINS: usize = 128;
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_COUNTERS < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_PORT_BADGE < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 
@@ -822,6 +831,14 @@ pub mod debug_action {
     pub const COUNTERS_DEAF: u64 = 24;
     /// Every CPU answers rounds again.
     pub const COUNTERS_HEAR: u64 = 25;
+    /// Arm this CPU's timer to fire within 100 µs and wait inside the syscall
+    /// for the kernel's own fire. Answers [`RING0_FIRE_REARMED`] once it fired
+    /// and re-armed a quantum, [`RING0_FIRE_NEVER`] if none came within
+    /// 100 ms, and [`RING0_FIRE_OTHER_SPAN`] if it re-armed something else.
+    pub const RING0_TIMER_IN_SYSCALL: u64 = 26;
+    pub const RING0_FIRE_REARMED: u64 = 0;
+    pub const RING0_FIRE_NEVER: u64 = 1;
+    pub const RING0_FIRE_OTHER_SPAN: u64 = 2;
 }
 
 /// Every kind of kernel object, in the order the kernel's own `kobject!`
@@ -1839,6 +1856,38 @@ pub fn namespace_open(ns: RawHandle, name: &str) -> Result<RawHandle, SyscallErr
         0,
     ))
     .map(|v| RawHandle(v as u32))
+}
+
+/// Bytes one badge may carry. Policy on the primitive: a badge is kernel
+/// memory no process is charged for, so the bound is what its one reader, the
+/// supervisor's launch authority, needs.
+pub const MAX_BADGE: usize = 64;
+
+/// Mint a connector to the port `acceptor` accepts on, whose every connection
+/// is stamped with `badge`: 1 to [`MAX_BADGE`] bytes, anything else
+/// `InvalidArgument`.
+///
+/// **The kernel vouches for what was granted, never for who connects**: the
+/// connector is duplicated, moved and put in a namespace like any other, and
+/// every copy stamps the same bytes.
+pub fn port_mint(acceptor: RawHandle, badge: &[u8]) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_PORT_MINT, acceptor.0 as u64, badge.as_ptr() as u64, badge.len() as u64, 0))
+        .map(|v| RawHandle(v as u32))
+}
+
+/// The badge `connection`, accepted from `acceptor`'s port, was stamped with,
+/// written to `out`; answers its length.
+///
+/// `NotFound` is a connection made through an unbadged connector,
+/// `PermissionDenied` one accepted from another port, and `InvalidArgument` a
+/// handle that is no port's accepted end.
+pub fn port_badge(
+    acceptor: RawHandle,
+    connection: RawHandle,
+    out: &mut [u8; MAX_BADGE],
+) -> Result<usize, SyscallError> {
+    check(syscall(SYS_PORT_BADGE, acceptor.0 as u64, connection.0 as u64, out.as_mut_ptr() as u64, 0))
+        .map(|v| v as usize)
 }
 
 /// Accept a queued connection. Blocks until there is one.

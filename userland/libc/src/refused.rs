@@ -1,5 +1,5 @@
 //! What this C library refuses. What each waits on is
-//! `issues/build/libc-refuses-what-toyos-cannot-yet-answer.md`'s.
+//! `issues/libc-refuses-what-toyos-cannot-yet-answer.md`'s.
 
 use core::ptr;
 
@@ -37,12 +37,6 @@ pub extern "C" fn getsid(_pid: i32) -> i32 {
 /// No host name is published to a process.
 #[no_mangle]
 pub unsafe extern "C" fn gethostname(_name: *mut u8, _len: usize) -> i32 {
-    refuse()
-}
-
-/// No release, version or node name is published to a process.
-#[no_mangle]
-pub unsafe extern "C" fn uname(_buf: *mut u8) -> i32 {
     refuse()
 }
 

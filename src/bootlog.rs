@@ -43,17 +43,29 @@ pub const DEADLINE_ARMED: &str = "boot deadline: ";
 /// a boot merely slower than its bound, which is what makes that control one.
 pub const WEDGE_STAGED: &str = "wedge: staged, and only the boot deadline ends this machine";
 
-/// What the CPU that *stages* that wedge says about the state it arrived in,
-/// also in `kernel/src/deadline.rs`.
+/// What each CPU the wedge takes says about the state it arrived in, also in
+/// `kernel/src/deadline.rs`: [`WEDGE_AWAKE`] with interrupts open, and
+/// [`WEDGE_ARRIVED_DEAF`] with them masked.
 ///
-/// **The one line that measures that control's own claim.** It arrives through
-/// the shutdown syscall, and `arch::syscall` masks `IF` for the whole of a
-/// syscall — so a wedge that inherited its state leaves exactly one CPU per boot
-/// taking no interrupt at all, which is not a wedge but a hard lockup. A boot on
-/// which no CPU says this is a boot whose wedge never reached the CPU that asked
-/// for it.
+/// **The lines that measure that control's own claim.** The CPU that stages it
+/// arrives through the shutdown syscall, whose body runs with interrupts open,
+/// so it must say [`WEDGE_AWAKE`] and no CPU may say [`WEDGE_ARRIVED_DEAF`]: a
+/// syscall that kept them masked is one CPU per boot taking no interrupt at
+/// all, which is not a wedge but a hard lockup. Every other CPU arrives from a
+/// scheduler pass and is awake whatever the gate does, so the awake line is
+/// read of the staging CPU alone.
 pub const WEDGE_ARRIVED_DEAF: &str =
     "arrived with interrupts off, through the syscall gate, and takes them again here";
+pub const WEDGE_AWAKE: &str = "arrived with interrupts on";
+
+/// What the deadline's seal says before a CPU's last kernel `pc`, after its
+/// `cpuN`, in `kernel/src/deadline.rs`.
+pub const SEAL_PC: &str = " pc=";
+
+/// The function the wedge spins in, in `kernel/src/deadline.rs`, as the seal's
+/// `pc` line names it: the staging CPU's line naming anything else is a seal
+/// that names the wrong instruction.
+pub const WEDGE_SPIN: &str = "kernel::deadline::this_cpu+";
 
 /// What the `usb-reset-under-load` arm says once it is streaming, and the three
 /// ways it says it is not, in `kernel/src/usb_gate.rs`.
@@ -567,6 +579,12 @@ mod tests {
             ("kernel/src/deadline.rs", format!("\"{DEADLINE_ARMED}{{ms}} ms")),
             ("kernel/src/deadline.rs", format!("WEDGE_STAGED: &str = \"{WEDGE_STAGED}\"")),
             ("kernel/src/deadline.rs", format!("\"{WEDGE_ARRIVED_DEAF}\"")),
+            ("kernel/src/deadline.rs", format!("WEDGE_AWAKE: &str = \"{WEDGE_AWAKE}\"")),
+            ("kernel/src/deadline.rs", format!("\"  cpu{{cpu}}{SEAL_PC}{{}}\"")),
+            (
+                "kernel/src/deadline.rs",
+                format!("fn {}() -> !", WEDGE_SPIN.trim_end_matches('+').rsplit("::").next().expect("a path")),
+            ),
             ("kernel/src/usb_gate.rs", format!("LOAD_RUNNING: &str = \"{USB_LOAD_RUNNING}\"")),
             ("kernel/src/usb_gate.rs", format!("LOAD_REFUSED: &str = \"{USB_LOAD_REFUSED}\"")),
             ("kernel/src/usb_gate.rs", format!("LOAD_STOPPED: &str = \"{USB_LOAD_STOPPED}\"")),

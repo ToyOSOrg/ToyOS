@@ -97,10 +97,16 @@ extern "C" fn dispatch(frame: &mut Frame, entry: u64) {
     match entry {
         EL1_IRQ => {
             #[cfg(feature = "mask-windows")]
-            crate::windows::irqs_masked();
-            irq(false);
+            {
+                crate::windows::irqs_masked();
+                crate::windows::handler_entered();
+            }
+            irq(frame, false);
             #[cfg(feature = "mask-windows")]
-            crate::windows::irqs_unmasking();
+            {
+                crate::windows::handler_leaving();
+                crate::windows::irqs_unmasking();
+            }
         }
         EL0_SYNC => {
             #[cfg(feature = "mask-windows")]
@@ -110,8 +116,16 @@ extern "C" fn dispatch(frame: &mut Frame, entry: u64) {
         }
         EL0_IRQ => {
             #[cfg(feature = "mask-windows")]
-            crate::windows::irqs_masked();
-            irq(true);
+            {
+                crate::windows::irqs_masked();
+                crate::windows::handler_entered();
+            }
+            let preempt = irq(frame, true);
+            #[cfg(feature = "mask-windows")]
+            crate::windows::handler_leaving();
+            if preempt {
+                crate::scheduler::do_preempt();
+            }
             crate::scheduler::exit_to_user();
         }
         _ => exception(frame, entry),
@@ -142,22 +156,31 @@ fn exception(frame: &Frame, entry: u64) -> ! {
     panic!("{entry}: {} at {:#x}", class_name(frame.esr), frame.elr);
 }
 
-/// One interrupt. From EL0 a tick or a kick
-/// preempts here, where the interrupted context holds nothing; from EL1 it
-/// only asks for the pass the context will run when it may.
-fn irq(from_el0: bool) {
+/// One interrupt, and whether its caller preempts the interrupted context:
+/// from EL0 a tick or a kick does, once the handler is done, since the context
+/// holds nothing; from EL1 it only asks for the pass the context will run when
+/// it may.
+fn irq(frame: &Frame, from_el0: bool) -> bool {
     let Some(intid) = irqchip::acknowledge() else {
         percpu::irq_took(Source::Spurious);
-        return;
+        return false;
     };
     if intid == irqchip::timer_intid() {
         // Before anything that can take a lock or panic: a timer left
         // asserted re-fires forever, and one left stopped never fires again.
-        irqchip::rearm();
+        if from_el0 {
+            irqchip::rearm();
+        } else {
+            irqchip::rearm_in_kernel();
+        }
         percpu::irq_took(Source::Timer);
         // Before anything that can take a lock, in both levels: a CPU spinning
         // on one still takes this interrupt, which is why the poll is here.
-        crate::deadline::poll();
+        if from_el0 {
+            crate::deadline::poll();
+        } else {
+            crate::deadline::poll_in_kernel(frame.elr);
+        }
         #[cfg(feature = "boot-actuators")]
         storm::tick();
         if from_el0 {
@@ -167,13 +190,12 @@ fn irq(from_el0: bool) {
             let hw = &crate::hw::HW;
             hw.trace(TraceEvent { ts: hw.now(), cpu: CpuId(percpu::cpu_id()), kind: TraceKind::TimerFire });
             irqchip::end(intid);
-            crate::scheduler::do_preempt();
-        } else {
-            crate::preempt::set_need_resched();
-            percpu::note_kernel_timer_fire();
-            irqchip::end(intid);
+            return true;
         }
-        return;
+        crate::preempt::set_need_resched();
+        percpu::note_kernel_timer_fire();
+        irqchip::end(intid);
+        return false;
     }
     match intid {
         // Never ended: the running priority it keeps is every interrupt's
@@ -188,10 +210,9 @@ fn irq(from_el0: bool) {
             percpu::preempt_count_down();
             irqchip::end(intid);
             if from_el0 {
-                crate::scheduler::do_preempt();
-            } else {
-                crate::preempt::set_need_resched();
+                return true;
             }
+            crate::preempt::set_need_resched();
         }
         #[cfg(feature = "boot-actuators")]
         irqchip::SGI_STORM => {
@@ -205,6 +226,7 @@ fn irq(from_el0: bool) {
             irqchip::end(intid);
         }
     }
+    false
 }
 
 /// Interrupts no handler here claims, and the last one's INTID.
@@ -239,7 +261,9 @@ fn el0_sync(frame: &mut Frame) {
 fn syscall(frame: &mut Frame) {
     percpu::enter_syscall(frame.elr, frame.x[0], frame.x[29], frame.sp);
     percpu::preempt_count_up();
+    cpu::enable_interrupts();
     let answer = crate::syscall::dispatch::syscall_dispatch(frame.x[0], frame.x[1], frame.x[2], frame.x[3], frame.x[4]);
+    cpu::disable_interrupts();
     percpu::preempt_count_down();
     percpu::leave_syscall();
     frame.x[0] = answer;
