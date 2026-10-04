@@ -12,6 +12,8 @@ mod checks {
 
     #[path = "audio.rs"]
     mod audio_checks;
+    #[path = "claims.rs"]
+    mod claims_checks;
     #[path = "clock.rs"]
     mod clock_checks;
     #[path = "lan.rs"]
@@ -793,6 +795,16 @@ mod checks {
     #[test]
     fn metal_usb_judge() -> Result<(), String> {
         usb_checks::transport_break_verdict()
+    }
+
+    #[test]
+    fn metal_claim_spends_one_remapping_entry() {
+        claims_checks::one_entry_per_slot();
+    }
+
+    #[test]
+    fn metal_domains_end_below_the_host_bridges() {
+        claims_checks::domains_end_below_the_windows();
     }
 
     #[test]

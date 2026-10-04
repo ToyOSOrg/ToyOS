@@ -17,6 +17,11 @@ under the T14's `CONFIG_INTEL_IOMMU_DEFAULT_ON=y` and
 default domain (`drivers/iommu/iommu.c:197-210`), which maps only what its
 driver maps.
 
+**Owner ruling, 2026-10-04: a T14 row in which a test program claims the GPU
+(`00:02.0`, alone in `rmrr0`) is allowed, and the kernel panel goes dark for
+that boot.** It is the one row that can reach a claim of a function with a
+reserved region of its own.
+
 **Exit**: a function's DMA reaches only what its driver mapped and the reserved
 ranges firmware names for it; a `boot-actuators` arm that points an unclaimed
 function's DMA at a kernel page records a translation fault, and binding it to
