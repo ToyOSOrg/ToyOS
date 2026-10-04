@@ -11,3 +11,10 @@ CPUID and the MSRs through the running kernel's /dev/cpu/*/cpuid and
   msr.txt               one per line: msr cpu value; 0x122 and 0x10F are absent
                         because ARCH_CAPABILITIES bit 7 and CPUID.(7,0):EDX
                         bits 11 and 13 do not enumerate them
+
+One more reading of the same Ubuntu on the same machine, `6.8.0-142-generic`
+with the `powersave` governor, taken as root by the orchestrator on
+2026-10-03, as the tool printed it:
+
+  perf-msr.txt          `perf stat -a -A -e msr/aperf/,msr/mperf/,msr/smi/,msr/tsc/ sleep 60`,
+                        the msr PMU's events per CPU across 60 s of an idle machine

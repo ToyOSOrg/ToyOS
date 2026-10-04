@@ -12,7 +12,6 @@
 
 mod access;
 mod latch;
-mod published;
 
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -65,6 +64,9 @@ struct Fb {
     format: u32,
 }
 
+/// Words in one published descriptor.
+const FB_WORDS: usize = 4;
+
 impl Fb {
     const DETACHED: Fb = Fb {
         ptr: core::ptr::null_mut(),
@@ -76,7 +78,7 @@ impl Fb {
     };
 
     /// The descriptor as the seqlock's words.
-    fn words(self) -> [u64; published::WORDS] {
+    fn words(self) -> [u64; FB_WORDS] {
         [
             self.ptr as u64,
             self.bytes,
@@ -85,7 +87,7 @@ impl Fb {
         ]
     }
 
-    fn from_words([ptr, bytes, stride_width, height_format]: [u64; published::WORDS]) -> Self {
+    fn from_words([ptr, bytes, stride_width, height_format]: [u64; FB_WORDS]) -> Self {
         Self {
             ptr: ptr as *mut u8,
             bytes,
@@ -219,10 +221,10 @@ struct RenderedCell(UnsafeCell<Rendered>);
 // or swap atomically. `PAINTING`, `CAPTURE`, and `CAPTURE_ACCESS` serialise the three cells.
 unsafe impl Sync for RenderedCell {}
 
-/// The descriptor painters draw through, behind a seqlock (`published`).
+/// The descriptor painters draw through, behind a seqlock (`crate::seqlock`).
 /// Not a `Lock`: its guard drop can dispatch the scheduler, forbidden here.
 /// A publisher that dies mid-update leaves it changing forever, costing the screen and nothing else.
-static FB: published::Published = published::Published::new();
+static FB: crate::seqlock::Published<FB_WORDS> = crate::seqlock::Published::new();
 
 /// Exactly one painter at a time, taken by every painter without exception.
 /// [`render`] and [`seal_wedge`] never release it; every other painter does,
@@ -354,7 +356,7 @@ pub fn disable() {
 }
 
 /// One publication whole, or nothing: a descriptor still changing is no
-/// screen this instant (`published`, and `kernel-loom`'s `panic_console_publish`).
+/// screen this instant.
 fn snapshot() -> Option<Fb> {
     let fb = Fb::from_words(FB.snapshot()?);
     (!fb.ptr.is_null()).then_some(fb)

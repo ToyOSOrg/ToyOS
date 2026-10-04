@@ -1,0 +1,14 @@
+Linux's turbostat on the ThinkPad T14 the metal suite runs on, under that
+machine's Ubuntu (`6.8.0-142-generic`, the `powersave` governor), taken as
+root by the orchestrator on 2026-10-03, one after the other, each as the tool
+printed it; `counters_on_metal` in `tests/toyos.rs` prints ToyOS's reading
+beside them.
+
+  turbostat-idle.txt    60 s of an idle machine:
+                        `turbostat --quiet --interval 10 --num_iterations 6 --show
+                        Core,CPU,Avg_MHz,Busy%,Bzy_MHz,TSC_MHz,IRQ,SMI,CPU%c1,CPU%c6,CPU%c7,CoreTmp,PkgTmp,Pkg%pc2,Pkg%pc3,Pkg%pc6,Pkg%pc7,Pkg%pc8,Pkg%pc9,Pk%pc10,PkgWatt,CorWatt`
+  turbostat-loaded.txt  60 s with one `yes` per CPU, started 2 s before:
+                        `for i in 1 2 3 4 5 6 7 8; do timeout 65 sh -c "yes > /dev/null" & done;
+                        sleep 2; turbostat --quiet --interval 10 --num_iterations 6 --show
+                        Core,CPU,Avg_MHz,Busy%,Bzy_MHz,TSC_MHz,IRQ,SMI,CPU%c1,CPU%c6,CPU%c7,CoreTmp,PkgTmp,Pkg%pc2,Pkg%pc6,Pk%pc10,PkgWatt,CorWatt;
+                        wait`

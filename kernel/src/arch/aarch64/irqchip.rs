@@ -35,8 +35,7 @@ use crate::hw::MIN_ONE_SHOT;
 /// which `super::msi_message` refuses on this machine.
 #[repr(u8)]
 pub(super) enum Intid {
-    /// Asks a CPU for a scheduler pass: x86-64's kick, which rides the
-    /// timer's vector there.
+    /// Asks a CPU for a scheduler pass, or for its counters: x86-64's kick.
     Kick = 0,
     /// Stops a CPU for good: [`stop_other_cpus`]'s.
     Halt,
@@ -278,11 +277,15 @@ pub(super) fn timer_intid() -> u32 {
     TIMER_INTID.load(Relaxed)
 }
 
-/// Write `ICC_SGI1R_EL1` whole: the SGI it names is raised.
+/// Write `ICC_SGI1R_EL1` whole: the SGI it names is raised, after every store
+/// before it. Only a `DSB` orders a system register write after stores to
+/// Normal memory, so without it a target could take the SGI before the store
+/// it announces (Linux's `gic_ipi_send_mask`, `dsb(ishst)`).
 fn raise(value: u64) {
-    // SAFETY: writes `ICC_SGI1R_EL1`, which raises an SGI and touches no
-    // memory; the `ISB` sends it before whatever follows.
-    unsafe { core::arch::asm!("msr S3_0_C12_C11_5, {}", "isb", in(reg) value, options(nomem, nostack, preserves_flags)) };
+    // SAFETY: a barrier and a write of `ICC_SGI1R_EL1`, which raises an SGI;
+    // the `ISB` sends it before whatever follows. No `nomem`: the barrier
+    // orders the compiler's stores too.
+    unsafe { core::arch::asm!("dsb ishst", "msr S3_0_C12_C11_5, {}", "isb", in(reg) value, options(nostack, preserves_flags)) };
 }
 
 /// Raise SGI `intid` on the CPU whose packed affinity is `target`.

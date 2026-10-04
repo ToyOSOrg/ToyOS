@@ -144,7 +144,8 @@ impl IrqWatch {
     /// Something about the object changed: wake every thread waiting on it and
     /// fire every poll where it stands, freeing nothing. A handler makes it
     /// with its CPU's preempt count raised, as `device_irq_entry` holds it, so
-    /// this post's own never reaches zero, and a pass, inside the interrupt.
+    /// this post's own never reaches zero, and a pass, inside the interrupt; a
+    /// thread's may reach zero and pass, as any post's does.
     pub fn post_in_place(&self) {
         preempt_off(|p| {
             let env = Poster { cpus: cpus(), kicker: &HW, preempt: p };

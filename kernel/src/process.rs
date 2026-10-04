@@ -1813,6 +1813,8 @@ pub fn ap_idle() -> ! {
     // invalidation the wait could not take.
     crate::arch::tlb::join();
 
+    crate::counters::bring_up();
+
     // Once this CPU is committed and about to run something: the counter is
     // per CPU, so a CPU nobody arms here is one the hard-lockup bound does not cover.
     crate::hardlockup::arm_this_cpu();

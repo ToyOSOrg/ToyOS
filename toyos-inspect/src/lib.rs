@@ -20,9 +20,11 @@
 //! - [`Selector`]: the reader's frozen selector grammar.
 //! - [`line`] and [`json`]: the two renderings.
 //! - [`Invocation`]: the reader's command line.
-//! - [`dev`]: the kernel's device inventory under `dev.*`, the one root no
-//!   port answers for — the reader asks the kernel for it on a `SysCap`
-//!   carrying `Rights::INVENTORY`.
+//! - [`dev`]: the kernel's device inventory under `dev.*`, a root no port
+//!   answers for — the reader asks the kernel for it on a `SysCap` carrying
+//!   `Rights::INVENTORY`.
+//! - [`kernel`]: the kernel's counters under `kernel.*`, asked for the same
+//!   way on `Rights::COUNTERS`.
 //!
 //! # The path grammar
 //!
@@ -57,6 +59,7 @@
 extern crate alloc;
 
 pub mod dev;
+pub mod kernel;
 mod invocation;
 mod path;
 mod render;

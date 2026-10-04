@@ -408,10 +408,11 @@ pub mod capture_access;
 #[path = "../../../toyos/src/log/ring.rs"]
 pub mod log_ring;
 
-/// The panic console's published framebuffer descriptor, driven by
-/// `tests/panic_console_publish.rs`.
-#[path = "../../src/drivers/panic_console/published.rs"]
-pub mod panic_console_published;
+/// The seqlock the panic console's descriptor and each CPU's counters are
+/// published through, driven by `tests/panic_console_publish.rs` and
+/// `tests/counters_round.rs`.
+#[path = "../../src/seqlock.rs"]
+pub mod seqlock;
 
 /// The console backend's lock, driven by `tests/serial_lock.rs`; under `loom`
 /// alone, as is the [`arch::cpu`] shim it names.
