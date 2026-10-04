@@ -1,9 +1,11 @@
 //! The machine's clocks: monotonic since boot, read off the CPU's free-running
 //! counter at the period the architecture's boot gives [`set_counter`] (on
-//! x86-64, measured against the HPET); and wall-clock, read from the
+//! x86-64, measured against the HPET); wall-clock, read from the
 //! architecture's RTC exactly once — a CMOS read can block for up to a
 //! second — in [`init_wall`], and answered after as that reading plus
-//! [`nanos_since_boot`].
+//! [`nanos_since_boot`]; and the log's stamp ([`stamp`]), the same clock
+//! counted from the counter's zero, which is where every line of the log —
+//! the loader's, the kernel's and every program's — counts from.
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::{Acquire, Relaxed, Release}};
 
@@ -12,13 +14,49 @@ use crate::time::Instant;
 
 static TSC_BOOT: AtomicU64 = AtomicU64::new(0);
 static TSC_PERIOD_FS: AtomicU64 = AtomicU64::new(0);
+/// The counter's zero to `TSC_BOOT`, in nanoseconds.
+static STAMP_AT_BOOT: AtomicU64 = AtomicU64::new(0);
+/// One counter tick at the rate the CPU states, in femtoseconds; zero where it
+/// states none, or before [`state`].
+static STATED_FS: AtomicU64 = AtomicU64::new(0);
+
+/// Take the rate the CPU states, the loader's, for the stamps the log carries
+/// before [`set_counter`]. The kernel's entry calls this before its first record.
+pub fn state() {
+    let stated = cpu::stated_counter_hz().map_or(0, |hz| 1_000_000_000_000_000 / hz);
+    STATED_FS.store(stated, Relaxed);
+}
 
 /// Start the clock on the counter: its reading at boot and its measured period.
 /// The architecture's boot calls this once, after it has the period.
+///
+/// **The stamps go on from where the stated rate left them**: a record before
+/// this read the counter at that rate, so the stamp at `boot` is that reading,
+/// and no record after this one is stamped earlier than one before it.
 pub fn set_counter(boot: u64, period_fs: u64) {
+    let stated = STATED_FS.load(Relaxed);
+    let at_boot = ticks_to_nanos(boot, if stated != 0 { stated } else { period_fs });
+    STAMP_AT_BOOT.store(at_boot, Relaxed);
     TSC_BOOT.store(boot, Relaxed);
     TSC_PERIOD_FS.store(period_fs, Relaxed);
-    publish_page(boot, period_fs);
+    publish_page(boot, period_fs, at_boot);
+}
+
+fn ticks_to_nanos(ticks: u64, period_fs: u64) -> u64 {
+    ((ticks as u128 * period_fs as u128) / 1_000_000) as u64
+}
+
+/// Now as a log line's time: nanoseconds since the counter's zero — power-on,
+/// or the reset since — at the clock's rate, and before [`set_counter`] at the
+/// rate the CPU states. `None` where it states none and the clock has not
+/// started: no rate reads the counter yet. Never panics, as
+/// [`nanos_since_boot`].
+pub fn stamp() -> Option<u64> {
+    if calibrated() {
+        return Some(STAMP_AT_BOOT.load(Relaxed).saturating_add(nanos_since_boot()));
+    }
+    let stated = STATED_FS.load(Relaxed);
+    (stated != 0).then(|| ticks_to_nanos(cpu::counter(), stated))
 }
 
 /// The clock page's frame, or 0 before [`set_counter`]: the one every address space
@@ -28,7 +66,7 @@ static PAGE_PHYS: AtomicU64 = AtomicU64::new(0);
 /// Lay the calibration out on a frame of its own, for every process to read
 /// the clock this module reads without asking it. Laid out before any address
 /// space can map it, and never written again.
-fn publish_page(counter_at_boot: u64, period_fs: u64) {
+fn publish_page(counter_at_boot: u64, period_fs: u64, stamp_at_boot: u64) {
     use toyos_abi::clock::{ClockPage, CLOCK_MAGIC};
     let bytes = crate::mm::PAGE_2M as usize;
     // Held for the machine's life: every process maps it.
@@ -42,7 +80,7 @@ fn publish_page(counter_at_boot: u64, period_fs: u64) {
         core::ptr::write_bytes(frame.ptr(), 0, bytes);
         core::ptr::write_volatile(
             frame.ptr() as *mut ClockPage,
-            ClockPage { magic: CLOCK_MAGIC, counter_at_boot, period_fs },
+            ClockPage { magic: CLOCK_MAGIC, counter_at_boot, period_fs, stamp_at_boot },
         );
     }
     PAGE_PHYS.store(frame.phys(), Release);
@@ -75,9 +113,7 @@ pub fn calibrated() -> bool {
 /// reads it from inside a bracket where panicking would reenter the log.
 /// Saturating, not wrapping: a trailing CPU reads as oldest, not lying newest after a 584-year wrap.
 pub fn nanos_since_boot() -> u64 {
-    let delta = cpu::counter().saturating_sub(TSC_BOOT.load(Relaxed));
-    let period_fs = TSC_PERIOD_FS.load(Relaxed);
-    ((delta as u128 * period_fs as u128) / 1_000_000) as u64
+    ticks_to_nanos(cpu::counter().saturating_sub(TSC_BOOT.load(Relaxed)), TSC_PERIOD_FS.load(Relaxed))
 }
 
 /// The same reading as an [`Instant`], the type arithmetic on it is allowed in.
@@ -109,7 +145,7 @@ pub fn counter_ticks(nanos: u64) -> u64 {
 /// Zero while the period is unknown, so a span taken on a machine that never
 /// calibrated reads as no time rather than as an invented one.
 pub fn nanos_of_ticks(ticks: u64) -> u64 {
-    ((ticks as u128 * TSC_PERIOD_FS.load(Relaxed) as u128) / 1_000_000) as u64
+    ticks_to_nanos(ticks, TSC_PERIOD_FS.load(Relaxed))
 }
 
 /// Polls `ready` until it holds or `nanos` pass; `false` is the deadline.

@@ -244,7 +244,7 @@ fn expire() -> ! {
          CPU's timer last found the kernel:\n{KernelPcs}The tail of the log ring follows — which \
          is what nothing was draining.\n",
         BOUND_MS.load(Relaxed),
-        crate::clock::nanos_since_boot() / 1_000_000,
+        crate::clock::stamp().expect("the deadline polls only once the clock runs") / 1_000_000,
         phase(),
     ));
     // The seal first, because the USB stop `reset_now` makes before it writes

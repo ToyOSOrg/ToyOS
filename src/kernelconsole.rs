@@ -5,28 +5,24 @@
 //! loader's there first, the last of them cut off where boot services end and
 //! the kernel's first record written onto its tail. Every one of them is on the
 //! 16550 as well, and a loader line is read there. Where the kernel begins is
-//! the whole rule, so a firmware that writes nothing on the port reads the same.
-//! A terminal is shown that whole, and what is the kernel's in colour
-//! ([`Painter`], [`relay`]); the bytes the host reads are never coloured.
+//! the whole rule (`toyos_logstream::kernel_opening`), so a firmware that
+//! writes nothing on the port reads the same. A terminal is shown that whole,
+//! and what is the kernel's in colour ([`Painter`], [`relay`]); the bytes the
+//! host reads are never coloured.
 
 use std::borrow::Cow;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 
-use toyos_logstream::Showing;
-
-/// What every kernel record's console line opens with: `write_line` in
-/// `kernel/src/log/console.rs` tags each record `kernel`, and nothing before
-/// the kernel writes it.
-pub const HEAD: &str = "[kernel ";
+use toyos_logstream::{kernel_opening, Opening, Showing};
 
 /// A console's bytes as they arrive, withheld until the kernel's first record.
 ///
 /// Of a QEMU process's first boot only: a guest reset does not re-arm it
 /// (`issues/the-kernel-console-split-does-not-re-arm-across-a-guest-reset.md`).
 pub struct KernelConsole {
-    /// The withheld tail that could still begin [`HEAD`]; `None` once the
-    /// kernel has begun.
+    /// The withheld tail that could still open the kernel's first record;
+    /// `None` once the kernel has begun.
     held: Option<Vec<u8>>,
 }
 
@@ -41,14 +37,21 @@ impl KernelConsole {
     pub fn pass<'a>(&mut self, chunk: &'a [u8]) -> Cow<'a, [u8]> {
         let Some(held) = &mut self.held else { return Cow::Borrowed(chunk) };
         held.extend_from_slice(chunk);
-        let head = HEAD.as_bytes();
-        if let Some(at) = held.windows(head.len()).position(|w| w == head) {
-            let from = held.split_off(at);
-            self.held = None;
-            return Cow::Owned(from);
+        match kernel_opening(held) {
+            Opening::At(at) => {
+                let from = held.split_off(at);
+                self.held = None;
+                Cow::Owned(from)
+            }
+            Opening::From(at) => {
+                held.drain(..at);
+                Cow::Borrowed(&[])
+            }
+            Opening::Nowhere => {
+                held.clear();
+                Cow::Borrowed(&[])
+            }
         }
-        held.drain(..held.len().saturating_sub(head.len() - 1));
-        Cow::Borrowed(&[])
     }
 }
 
@@ -56,8 +59,8 @@ impl KernelConsole {
 /// record as it came, and every line from it on as [`Showing`] shows it.
 ///
 /// From the kernel's first record on the console carries whole lines only, so
-/// a line is held until it ends; before it, only what could still begin
-/// [`HEAD`] is.
+/// a line is held until it ends; before it, only what could still open that
+/// record is.
 #[derive(Default)]
 pub struct Painter {
     begun: bool,
@@ -70,16 +73,18 @@ impl Painter {
     pub fn pass(&mut self, chunk: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
         self.held.extend_from_slice(chunk);
-        let head = HEAD.as_bytes();
         if !self.begun {
-            match self.held.windows(head.len()).position(|w| w == head) {
-                Some(at) => {
+            match kernel_opening(&self.held) {
+                Opening::At(at) => {
                     out.extend(self.held.drain(..at));
                     self.begun = true;
                 }
-                None => {
-                    let keep = (1..head.len()).rev().find(|&k| self.held.ends_with(&head[..k])).unwrap_or(0);
-                    out.extend(self.held.drain(..self.held.len() - keep));
+                Opening::From(at) => {
+                    out.extend(self.held.drain(..at));
+                    return out;
+                }
+                Opening::Nowhere => {
+                    out.append(&mut self.held);
                     return out;
                 }
             }
@@ -94,7 +99,7 @@ impl Painter {
 
     /// What the terminal is shown of what is still held once the console has
     /// ended: a line a machine that stopped mid-line never finished, or the
-    /// bytes that could have begun [`HEAD`].
+    /// bytes that could have opened the kernel's first record.
     pub fn finish(mut self) -> Vec<u8> {
         let held = std::mem::take(&mut self.held);
         if !self.begun || held.is_empty() {
@@ -176,14 +181,14 @@ mod tests {
     /// off by the handoff.
     const FIRMWARE: &str = "\x1b[2J\x1b[01;01H\x1b[=3h\x1b[2J\x1b[01;01HBdsDxe: loading Boot0001 \
          \"UEFI QEMU QEMU USB HARDDRIVE TOYOS0BOOTSTICK1\" from PciRoot(0x0)/Pci(0x1,0x0)/USB(0x0,0x0)\n\
-         ToyOS Bootloader 1.0\n\
-         ROOT: read into memory at 0x7c894000+0x800000 from LBA 212992+16384, 1048576 bytes a request \
+         [--.--- cpu0 loader] ToyOS Bootloader 1.0\n\
+         [--.--- cpu0 loader] ROOT: read into memory at 0x7c894000+0x800000 from LBA 212992+16384, 1048576 bytes a request \
          (optimal granularity: not reported), in 22519000 counter ticks\n\
-         Loader log: the kernel handoff begins, so ";
+         [--.--- cpu0 loader] Loader log: the kernel handoff begins, so ";
 
-    const KERNEL: &str = "[kernel 0.000 cpu0 boot] black box: 0x8000000 is this boot's, 16344 bytes \
+    const KERNEL: &str = "[--.--- cpu0 kernel] black box: 0x8000000 is this boot's, 16344 bytes \
          for the next boot's loader\n\
-         [kernel 0.001 cpu0 boot] pmm: the firmware map calls 4288393216 bytes usable\n";
+         [--.--- cpu0 kernel] pmm: the firmware map calls 4288393216 bytes usable\n";
 
     /// Everything `stream` passes, fed in pieces cut at each of `cuts`.
     fn passed(stream: &str, cuts: &[usize]) -> String {
@@ -214,7 +219,7 @@ mod tests {
 
     #[test]
     fn a_port_the_firmware_left_alone_passes_whole() {
-        let later = format!("{KERNEL}{{1.002 supervisor}} supervisor: a program's line\n");
+        let later = format!("{KERNEL}[ 1.002 supervisor] supervisor: a program's line\n");
         assert_eq!(passed(&later, &[3, 40]), later);
     }
 
@@ -235,8 +240,8 @@ mod tests {
     /// and the same however the chunks fall.
     #[test]
     fn a_terminal_is_shown_the_firmware_as_it_came_and_the_kernel_in_colour() {
-        let alert = "[kernel 0.002 cpu1 alert tid=4] PANIC: panicked at kernel/src/main.rs:1:\n  oops\n";
-        let program = "{0.003 warn supervisor} supervisor: a program's line\n";
+        let alert = "[ 0.002 cpu1 kernel alert tid=4] PANIC: panicked at kernel/src/main.rs:1:\n  oops\n";
+        let program = "[ 0.003 supervisor warn] supervisor: a program's line\n";
         let stream = format!("{FIRMWARE}{KERNEL}{alert}{program}");
         let mut want = String::from(FIRMWARE);
         let mut showing = Showing::default();
@@ -247,9 +252,9 @@ mod tests {
         assert_eq!(painted(&stream, &[]), want);
         let every_byte: Vec<usize> = (1..stream.len()).collect();
         assert_eq!(painted(&stream, &every_byte), want);
-        // What is held before the kernel is only what could begin its head.
+        // What is held before the kernel is only what could still open its first record.
         assert_eq!(painted(&FIRMWARE[..FIRMWARE.len() - 3], &[]), FIRMWARE[..FIRMWARE.len() - 3]);
-        assert_eq!(painted("so [ker", &[]), "so ");
+        assert_eq!(painted("so [--.--- cpu0 ker", &[]), "so ");
     }
 
     /// A console that ends mid-line — a machine that stopped while it spoke —
@@ -257,7 +262,7 @@ mod tests {
     /// the kernel's head still shows those bytes.
     #[test]
     fn a_console_that_ends_mid_line_shows_its_last_line() {
-        let cut = "[kernel 0.004 cpu0 alert tid=1] PANIC: triple fa";
+        let cut = "[ 0.004 cpu0 kernel alert tid=1] PANIC: triple fa";
         let mut painter = Painter::default();
         let mut out = painter.pass(format!("{KERNEL}{cut}").as_bytes());
         out.extend(painter.finish());
@@ -267,7 +272,7 @@ mod tests {
         assert!(want.ends_with("\x1b[91mPANIC: triple fa\x1b[0m"), "{want:?}");
         assert_eq!(String::from_utf8(out).expect("UTF-8"), want);
 
-        for early in ["so [ker", "loading\r"] {
+        for early in ["so [--.--- cpu0 ker", "loading\r"] {
             let mut painter = Painter::default();
             let mut out = painter.pass(early.as_bytes());
             out.extend(painter.finish());
@@ -307,10 +312,10 @@ mod tests {
     fn burst() -> (Vec<u8>, Vec<u8>) {
         let mut stream = String::from(FIRMWARE);
         for n in 0..20_000 {
-            stream.push_str(&format!("[kernel 1.{:03} cpu{} alert tid=3] frame {n}: kernel::panic\n", n % 1000, n % 8));
+            stream.push_str(&format!("[ 1.{:03} cpu{} kernel alert tid=3] frame {n}: kernel::panic\n", n % 1000, n % 8));
             stream.push_str("  continued\n");
         }
-        stream.push_str("[kernel 9.999 cpu0] cut mid-li");
+        stream.push_str("[ 9.999 cpu0 kernel] cut mid-li");
         let mut painter = Painter::default();
         let mut want = painter.pass(stream.as_bytes());
         want.extend(painter.finish());
@@ -383,6 +388,6 @@ mod tests {
         let mut console = KernelConsole::default();
         assert!(console.pass(FIRMWARE.as_bytes()).is_empty());
         let held = console.held.as_ref().expect("the kernel has not begun").len();
-        assert!(held < HEAD.len(), "{held} bytes withheld, more than could begin the head");
+        assert!(held < toyos_logstream::MAX_HEAD, "{held} bytes withheld, more than could open a record");
     }
 }

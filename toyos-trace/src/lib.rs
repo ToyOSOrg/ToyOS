@@ -191,7 +191,8 @@ mod tests {
     use super::*;
 
     /// A 1 GHz counter that read 1000 at boot: one tick a nanosecond.
-    const CLOCK: ClockPage = ClockPage { magic: toyos_abi::clock::CLOCK_MAGIC, counter_at_boot: 1_000, period_fs: 1_000_000 };
+    const CLOCK: ClockPage =
+        ClockPage { magic: toyos_abi::clock::CLOCK_MAGIC, counter_at_boot: 1_000, period_fs: 1_000_000, stamp_at_boot: 0 };
 
     fn raw(kind: Kind, data: u32, pid: u32, tid: u32) -> TraceRecord {
         TraceRecord { seq: 9, stamp: 1_000 + 12_000_345_678, kind: kind as u16, cpu: 3, data, pid, tid }

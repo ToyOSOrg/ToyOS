@@ -1,12 +1,12 @@
 //! The monotonic clock a process reads without a syscall.
 //!
-//! The kernel calibrates the counter once at boot and never again, so the two
+//! The kernel calibrates the counter once at boot and never again, so the
 //! numbers that turn a counter reading into nanoseconds since boot are
 //! constants for the machine's life. It writes them into one page before the
 //! first process exists and maps that page read-only at [`CLOCK_PAGE`] in every
 //! address space; [`nanos_since_boot`] is the kernel's own arithmetic on the
-//! same two words, so a stamp taken here and one taken by the kernel's log
-//! order against each other.
+//! same words, and [`stamp_ns`] its log's, so a stamp taken here and one taken
+//! by the kernel's log order against each other.
 //!
 //! **No sequence word, because nothing is ever rewritten.** A clock page that a
 //! kernel adjusted would need one; this one is laid out before it is mapped and
@@ -30,6 +30,9 @@ pub struct ClockPage {
     pub counter_at_boot: u64,
     /// One counter tick, in femtoseconds.
     pub period_fs: u64,
+    /// The counter's zero to `counter_at_boot`, in nanoseconds: what turns a
+    /// reading of this clock into a log line's time ([`stamp_ns`]).
+    pub stamp_at_boot: u64,
 }
 
 /// Nanoseconds between `counter_at_boot` and `now`, on the kernel's formula.
@@ -49,6 +52,18 @@ pub fn nanos_since_boot() -> u64 {
     let page = page();
     let now = crate::arch::counter();
     nanos_between(page.counter_at_boot, page.period_fs, now)
+}
+
+/// Now as a log line's time: nanoseconds since the counter's zero, the kernel
+/// log's own `clock::stamp`, which every line of the log carries
+/// (`log::LogRecord::at_ns`).
+///
+/// # Panics
+/// As [`page`].
+pub fn stamp_ns() -> u64 {
+    let page = page();
+    let now = crate::arch::counter();
+    page.stamp_at_boot.saturating_add(nanos_between(page.counter_at_boot, page.period_fs, now))
 }
 
 /// This process's clock page.
@@ -83,7 +98,7 @@ mod tests {
     }
 
     #[test]
-    fn the_page_is_three_words() {
-        assert_eq!(core::mem::size_of::<ClockPage>(), 24);
+    fn the_page_is_four_words() {
+        assert_eq!(core::mem::size_of::<ClockPage>(), 32);
     }
 }

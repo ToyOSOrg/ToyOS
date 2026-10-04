@@ -7,7 +7,8 @@ opened: 2026-09-28
 # The kernel console split does not re-arm across a guest reset
 
 `src/kernelconsole.rs`'s `KernelConsole` withholds the virtio port's bytes
-until the first `[kernel ` head and passes every byte after it: `held` is
+until the kernel's first record (`toyos_logstream::kernel_opening`) and
+passes every byte after it: `held` is
 `None` from then on. A guest reset inside one QEMU process does not re-arm it.
 `tests/common/update.rs`'s `Rig::boot` boots the Headless profile, whose
 stdio is that port, with `takes_the_reset`, and each `reboot` resets that
@@ -27,7 +28,8 @@ Nothing reds on it. The update tests look for a needle past an offset in the
 console (`owed`, `reboot_until`), and firmware lines beside the needle do not
 stop it matching. Every update test passed in #572's round-2 and round-3
 nightlies. If the firmware does write its handoff line there,
-`Loader log: … so [kernel …` is a line `Serial::interleaved` reports as a torn
+`Loader log: … so [ 1.234 cpu0 kernel] …` is a line `Serial::interleaved`
+reports as a torn
 kernel line.
 
 ## Exit condition

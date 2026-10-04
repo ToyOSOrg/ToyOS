@@ -104,8 +104,8 @@ mod tests {
          Black box: the last boot read DONE, so it handed the machine back on purpose and this \
          chain ends here\n\
          | log: this boot's newest records follow, newest first (16)\n\
-         | log-tail: [kernel 3.960 cpu0] Rebooting.\n\
-         | log-tail: [kernel 3.955 cpu0] usb-quiesce: disk 0 SYNCHRONIZE CACHE ok\n\
+         | log-tail: [ 3.960 cpu0 kernel] Rebooting.\n\
+         | log-tail: [ 3.955 cpu0 kernel] usb-quiesce: disk 0 SYNCHRONIZE CACHE ok\n\
          | usb-quiesce: no Bulk-Only command was open, so this reset cuts none\n\
          | usb-quiesce: xHCI 00:14.0 halted=true USBSTS=0x00000009\n\
          | usb-quiesce: 2/2 disk cache(s) flushed, 1 with no cache to flush, \

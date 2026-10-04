@@ -10,7 +10,7 @@ use toyos_build::metal::{
 use toyos_build::metaltimings::{Machine, Record};
 
 const PANEL: &str = "| panel: paints=10 px=8741248 us=21751 max_us=3851\n";
-const BOOTED: &str = "[2026-09-29 18:22:39 1.165 cpu0] Boot: complete (1165ms)\n";
+const BOOTED: &str = "[2026-09-29 18:22:39  1.165 cpu0 kernel] Boot: complete (1165ms)\n";
 
 fn t14() -> Machine {
     Machine {
@@ -34,7 +34,7 @@ fn loader(page: &str) -> String {
 /// The record of arming the deadline, at the 60 ms the T14 arms it.
 fn armed() -> String {
     format!(
-        "[2026-09-29 18:22:39 0.060 cpu0] {}120000 ms, after which this kernel seals a WEDGED \
+        "[2026-09-29 18:22:39  0.060 cpu0 kernel] {}120000 ms, after which this kernel seals a WEDGED \
          record and writes the reset register itself\n{BOOTED}",
         bootlog::DEADLINE_ARMED
     )
@@ -292,8 +292,8 @@ pub fn a_failing_shared_member_fails_its_boot() {
     let jobs = ["test_rs_std_tls", "test_rs_fs_large_file"];
     let exits = |code: i32| {
         format!(
-            "{BOOTED}[2026-09-29 18:22:41 2.310 cpu3] exit: {} pid=12 code=0 cpu=4ms\n\
-             [2026-09-29 18:22:42 3.120 cpu5] exit: {} pid=13 code={code} cpu=9ms\n",
+            "{BOOTED}[2026-09-29 18:22:41  2.310 cpu3 kernel] exit: {} pid=12 code=0 cpu=4ms\n\
+             [2026-09-29 18:22:42  3.120 cpu5 kernel] exit: {} pid=13 code={code} cpu=9ms\n",
             jobs[0], jobs[1]
         )
     };

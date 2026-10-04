@@ -230,6 +230,8 @@ fn report_log_destination() {
 /// # Safety
 /// `kernel_args` is the loader's live [`KernelArgs`], and nothing has run before this.
 pub(crate) unsafe extern "C" fn kernel_main(kernel_args: &KernelArgs) -> ! {
+    // Before the first record, which is stamped at the rate it states.
+    clock::state();
     // Copied onto the kernel stack: the original lives on the UEFI stack, unreachable once mm::init drops the identity map.
     let kernel_args = *kernel_args;
 

@@ -219,14 +219,14 @@ pub fn panel_census(log: &str) -> Option<Panel> {
 /// ended, which no program writes ([`is_program_line`]).
 pub const EXIT: &str = "exit: ";
 
-/// One rendered record's message: what follows the bracket every kernel
-/// record opens with. `None` for a line that is not a kernel record's first.
+/// One rendered record's message: what follows its head. `None` for a line
+/// that is not a kernel record's first.
 pub fn message(line: &str) -> Option<&str> {
-    line.strip_prefix('[')?.split_once("] ").map(|(_, message)| message)
+    toyos_logstream::parse(line).filter(|p| p.source == toyos_logstream::Source::Kernel).map(|p| p.text)
 }
 
 /// Whether a line of the log is a program's (`toyos_logstream::ProgramLine`):
-/// `logkeeper` writes that head and no kernel record opens with it.
+/// `logkeeper` writes that head, and it names no kernel.
 pub fn is_program_line(line: &str) -> bool {
     toyos_logstream::is_program_line(line)
 }
@@ -372,11 +372,8 @@ pub fn stopping_line(log: &str) -> Option<&str> {
     })
 }
 
-/// The milliseconds since boot one record line carries.
-///
-/// **Found from the CPU it precedes rather than by position**: the field before
-/// it is the writer's tag, and the two writers disagree about it on purpose —
-/// `logkeeper` puts a wall clock there and the panel puts nothing.
+/// The milliseconds since the counter's zero one record line carries, whether
+/// `logkeeper` put a wall clock before them or the panel put nothing.
 pub fn record_millis(line: &str) -> Option<u64> {
     toyos_logstream::record_ms(line)
 }
@@ -403,7 +400,8 @@ pub fn declares(source: &str, rhs: &str) -> bool {
     joined.lines().any(|line| line.trim_end().ends_with(&tail))
 }
 
-/// When the last record in `log` was written, in milliseconds since boot.
+/// When the last record in `log` was written, in milliseconds since the
+/// counter's zero.
 pub fn last_record_millis(log: &str) -> Option<u64> {
     log.lines().rev().find_map(record_millis)
 }
@@ -437,22 +435,22 @@ mod tests {
     /// made the log whole before it.
     #[test]
     fn a_boot_record_without_the_supervisors_stop_is_not_a_pass() {
-        let booted = "[kernel 1.151 cpu0] Boot: complete (1151ms)\n";
-        let stopping = format!("{{1.203 supervisor}} {STOPPING} (Reboot)\n");
+        let booted = "[ 1.151 cpu0 kernel] Boot: complete (1151ms)\n";
+        let stopping = format!("[ 1.203 supervisor] {STOPPING} (Reboot)\n");
         let ended = format!("{booted}{stopping}");
         assert_eq!(verdict(&ended), Ok(1151));
         // What `logkeeper` wrote between the flush and the stop is no refusal.
-        assert_eq!(verdict(&format!("{ended}[kernel 1.210 cpu0] exit: reboot pid=6\n")), Ok(1151));
+        assert_eq!(verdict(&format!("{ended}[ 1.210 cpu0 kernel] exit: reboot pid=6\n")), Ok(1151));
 
         assert_eq!(
             verdict(booted),
-            Err(Unfit::Unfinished("[kernel 1.151 cpu0] Boot: complete (1151ms)".to_string()))
+            Err(Unfit::Unfinished("[ 1.151 cpu0 kernel] Boot: complete (1151ms)".to_string()))
         );
         // The words, from anyone but the supervisor, and from the supervisor as anything but its
         // line, are not the supervisor's stop.
-        let forged = format!("{booted}{{1.203 test-runner}} {STOPPING}\n");
+        let forged = format!("{booted}[ 1.203 test-runner] {STOPPING}\n");
         assert!(matches!(verdict(&forged), Err(Unfit::Unfinished(_))));
-        let quoted = format!("{booted}{{1.203 supervisor}} supervisor: said {STOPPING}\n");
+        let quoted = format!("{booted}[ 1.203 supervisor] supervisor: said {STOPPING}\n");
         assert!(matches!(verdict(&quoted), Err(Unfit::Unfinished(_))));
         assert_eq!(verdict(&stopping), Err(Unfit::NoBootRecord));
         assert_eq!(verdict(""), Err(Unfit::NoBootRecord));
@@ -463,11 +461,11 @@ mod tests {
     #[test]
     fn a_boot_is_handed_back_by_its_done_and_its_last_word() {
         let done = format!("Black box: {HANDED_BACK} at 2026-09-08-160844\n");
-        let tail = format!("| {LOG_TAIL}[kernel 23.340 cpu1] {REBOOTING}\n");
+        let tail = format!("| {LOG_TAIL}[23.340 cpu1 kernel] {REBOOTING}\n");
         assert_eq!(handed_back(&format!("{done}{tail}")), Ok(()));
         assert_eq!(handed_back(&done), Err(Unfit::NotHandedBack));
         assert_eq!(handed_back(&tail), Err(Unfit::NotHandedBack));
-        let elsewhere = format!("{done}| [kernel 23.340 cpu1] {REBOOTING}\n");
+        let elsewhere = format!("{done}| [23.340 cpu1 kernel] {REBOOTING}\n");
         assert_eq!(handed_back(&elsewhere), Err(Unfit::NotHandedBack));
     }
 
@@ -581,11 +579,11 @@ mod tests {
     /// record's continuation line is the kernel's.
     #[test]
     fn a_programs_line_is_never_the_kernels() {
-        let log = "[2026-09-08 16:08:23 2.100 cpu0] exit: test_rs_job pid=4 code=3 cpu=1ms\n\
-                   [2026-09-08 16:08:23 2.150 cpu0] PANIC: a report\n  its second line\n\
-                   {2026-09-08 16:08:23 2.200 test-runner} [2026-09-08 16:08:23 2.200 cpu0] exit: test_rs_job pid=4 code=0 cpu=0ms\n\
-                   {2026-09-08 16:08:23 2.300 test-runner} {x 2.3 netstack} netstack: MAC 00:00:00:00:00:00\n\
-                   {2026-09-08 16:08:23 2.400 netstack} netstack: MAC 52:54:00:12:34:56\n";
+        let log = "[2026-09-08 16:08:23  2.100 cpu0 kernel] exit: test_rs_job pid=4 code=3 cpu=1ms\n\
+                   [2026-09-08 16:08:23  2.150 cpu0 kernel] PANIC: a report\n  its second line\n\
+                   [2026-09-08 16:08:23  2.200 test-runner] [2026-09-08 16:08:23  2.200 cpu0 kernel] exit: test_rs_job pid=4 code=0 cpu=0ms\n\
+                   [2026-09-08 16:08:23  2.300 test-runner] [ 2.300 netstack] netstack: MAC 00:00:00:00:00:00\n\
+                   [2026-09-08 16:08:23  2.400 netstack] netstack: MAC 52:54:00:12:34:56\n";
         let kernel = kernel_records(log);
         assert!(!kernel.contains("code=0"), "{kernel}");
         assert!(kernel.contains("code=3") && kernel.contains("  its second line\n"), "{kernel}");
@@ -605,8 +603,8 @@ mod tests {
 
     #[test]
     fn the_boot_record_is_the_kernels_own_line() {
-        assert_eq!(boot_millis("[kernel 1.151 cpu0] Boot: complete (1151ms)\n"), Some(1151));
-        assert_eq!(boot_millis("[kernel 0.084 cpu0] Boot: storage ready (84ms)\n"), None);
+        assert_eq!(boot_millis("[ 1.151 cpu0 kernel] Boot: complete (1151ms)\n"), Some(1151));
+        assert_eq!(boot_millis("[ 0.084 cpu0 kernel] Boot: storage ready (84ms)\n"), None);
         assert_eq!(boot_millis("Boot: complete (later)\n"), None);
         assert_eq!(boot_millis(""), None);
     }
@@ -622,12 +620,12 @@ mod record_time_tests {
     #[test]
     fn a_records_elapsed_field_is_read_past_whatever_tag_precedes_it() {
         assert_eq!(
-            record_millis("[2026-09-07 22:57:46 3.109 cpu1] exit: a pid=7 code=0 cpu=180ms"),
+            record_millis("[2026-09-07 22:57:46  3.109 cpu1 kernel] exit: a pid=7 code=0 cpu=180ms"),
             Some(3_109)
         );
-        assert_eq!(record_millis("[3.109 cpu1] exit: a pid=7 code=0"), Some(3_109));
+        assert_eq!(record_millis("[ 3.109 cpu1 kernel] exit: a pid=7 code=0"), Some(3_109));
         assert_eq!(
-            record_millis("[2026-09-07 22:58:03 20.071 cpu2 tid=1] exit: b tid=1 code=0"),
+            record_millis("[2026-09-07 22:58:03 20.071 cpu2 kernel tid=1] exit: b tid=1 code=0"),
             Some(20_071)
         );
         // The `cpu=180ms` field is a record's *content*: a reader keying on the
@@ -641,7 +639,7 @@ mod record_time_tests {
     /// with the kernel's dashes flattened to ASCII.
     #[test]
     fn the_panel_census_is_read_off_either_channel() {
-        let logkeeper = "[2026-09-08 06:50:53 2.5 cpu0] panel: paints=3 px=6220800 us=1500000 \
+        let logkeeper = "[2026-09-08 06:50:53  2.500 cpu0 kernel] panel: paints=3 px=6220800 us=1500000 \
                     max_us=520000\n";
         assert_eq!(
             panel_census(logkeeper),
@@ -664,7 +662,7 @@ mod record_time_tests {
                  | usb-quiesce: no barrier was taken, so this reset is not the shutdown's\n\
                  | usb-quiesce: no bulk transfer was outstan{cut}\n\
                  {TAIL_IN_THE_FILE} 221 record(s)\n\
-                 | [0.148 cpu0] iommu: unit3 scope ioapic 00:1e.7 id=2\n"
+                 | [ 0.148 cpu0 kernel] iommu: unit3 scope ioapic 00:1e.7 id=2\n"
             )
         };
         // Run 44's own reading, with the cut two lines under the census.
@@ -687,7 +685,7 @@ mod record_time_tests {
 
     #[test]
     fn the_last_record_is_the_last_line_that_carries_a_time() {
-        let log = "[1.000 cpu0] first\n[2.500 cpu1] second\nnot a record\n";
+        let log = "[ 1.000 cpu0 kernel] first\n[ 2.500 cpu1 kernel] second\nnot a record\n";
         assert_eq!(last_record_millis(log), Some(2_500));
         assert_eq!(last_record_millis("nothing\n"), None);
     }

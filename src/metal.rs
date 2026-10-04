@@ -2677,7 +2677,7 @@ mod tests {
         let booted = format!("{stale}{}\n", bootlog::LOADER_LAST_LINE);
         assert_eq!(reported_and_booted_nothing(&booted, ""), None);
         assert_eq!(
-            reported_and_booted_nothing(stale, "[kernel 1.2 cpu0] Boot: complete (1220ms)\n"),
+            reported_and_booted_nothing(stale, "[ 1.200 cpu0 kernel] Boot: complete (1220ms)\n"),
             None
         );
         assert_eq!(
@@ -2745,7 +2745,7 @@ mod tests {
 
         let loader = format!(
             "{}\n{}\n{}\n{}\nBlack box: {}, so it handed the machine back on purpose and this \
-             chain ends here\n| {} (16)\n| {}[1.516 cpu0] {}\n{}\n",
+             chain ends here\n| {} (16)\n| {}[ 1.516 cpu0 kernel] {}\n{}\n",
             bootlog::LOADER_FIRST_LINE,
             bootlog::LOADER_LAST_LINE,
             bootlog::SEPARATOR,
@@ -2757,7 +2757,7 @@ mod tests {
             bootlog::CHAIN_ENDS_LINE,
         );
         let log = format!(
-            "[kernel 1.151 cpu0] Boot: complete (1151ms)\n{{1.203 supervisor}} {} (Reboot)\n",
+            "[ 1.151 cpu0 kernel] Boot: complete (1151ms)\n[ 1.203 supervisor] {} (Reboot)\n",
             bootlog::STOPPING
         );
         assert_eq!(
@@ -3271,7 +3271,7 @@ mod tests {
             bootlog::DEADLINE_EXPIRED
         );
         let log = format!(
-            "[2026-09-29 18:22:39 0.060 cpu0] {}120000 ms, after which this kernel seals a \
+            "[2026-09-29 18:22:39  0.060 cpu0 kernel] {}120000 ms, after which this kernel seals a \
              WEDGED record and writes the reset register itself\n",
             bootlog::DEADLINE_ARMED
         );
@@ -3295,11 +3295,11 @@ mod tests {
              reached at 120153 ms, with this machine in `complete`.\n",
             bootlog::DEADLINE_EXPIRED
         );
-        let booted = "[kernel 1.198 cpu0] Boot: complete (1198ms)\n";
+        let booted = "[ 1.198 cpu0 kernel] Boot: complete (1198ms)\n";
         assert_eq!(wedged_boot(&sealed, booted), Ok(1198));
 
         let done = format!(
-            "Black box: {}\n| {}[kernel 1.3 cpu0] {}\n",
+            "Black box: {}\n| {}[ 1.300 cpu0 kernel] {}\n",
             bootlog::HANDED_BACK,
             bootlog::LOG_TAIL,
             bootlog::REBOOTING
@@ -3320,7 +3320,7 @@ mod tests {
     /// which the detector ended exactly as designed — as a failure.
     #[test]
     fn either_bounds_record_is_a_wedged_boots_pass() {
-        let booted = "[kernel 1.200 cpu0] Boot: complete (1200ms)\n";
+        let booted = "[ 1.200 cpu0 kernel] Boot: complete (1200ms)\n";
         let locked = format!(
             "Previous boot's panic: the last boot read WEDGED\n| {}: cpu7 has taken no interrupt \
              for 60004 ms, with `IF` clear at every sample in that span. Its bound is 60000 ms.\n\
@@ -3361,8 +3361,8 @@ mod tests {
              Loader log: the last boot is accounted for, so this pass resets the machine\n",
             bootlog::SEPARATOR
         );
-        let log = "[2026-09-29 10:36:53 1.171 cpu0] Boot: complete (1171ms)\n\
-                   {2026-09-29 10:36:53 1.186 supervisor} supervisor: power: the machine stops, and logkeeper makes \
+        let log = "[2026-09-29 10:36:53  1.171 cpu0 kernel] Boot: complete (1171ms)\n\
+                   [2026-09-29 10:36:53  1.186 supervisor] supervisor: power: the machine stops, and logkeeper makes \
                    the log whole first (Reboot)\n";
         let armed = |names: &[&str]| -> Vec<String> { names.iter().map(|n| (*n).to_string()).collect() };
         assert_eq!(

@@ -2155,7 +2155,6 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
                 }
                 None => first,
             };
-            // A stamp's leading spaces carry no ink.
             let chars = shown.trim().len();
             let (width, pixels) = (dump.width, &dump.pixels);
             let inked = |y: usize| (0..width).filter(move |&x| pixels[y * width + x] != BLACK);
@@ -4146,10 +4145,9 @@ fn the_others_halt_first(mut qemu: QemuInstance, arch: toyos_build::arch::Arch) 
 /// The record each sibling of `test_rs_panic_halts_first` makes, over and over.
 const SIBLING_RECORD: &str = "logstorm t=0 i=0 ";
 
-/// The CPU a kernel record is stamped with: `[kernel <secs> cpu<N>]`.
+/// The CPU a kernel record is stamped with.
 fn record_cpu(line: &str) -> Option<u32> {
-    let head = line.split_once("[kernel ")?.1.split_once(']')?.0;
-    head.split_once(" cpu")?.1.split(' ').next()?.parse().ok()
+    toyos_logstream::parse(line).filter(|p| p.source == toyos_logstream::Source::Kernel)?.cpu
 }
 
 /// The CPU that went fatal, once the console carries its line past
