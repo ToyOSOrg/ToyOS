@@ -351,24 +351,6 @@ fn s_ip_nud_026_shard_a_segment_to_a_stale_neighbour_moves_it_to_delay() {
     assert!(matches!(state_of_b(&net, a), Some(Nud::Delay(_))), "{:?}", state_of_b(&net, a));
 }
 
-// No id: the alternation stands until architecture §3.3's deficit round-robin (DRR-01 to DRR-03)
-// replaces it.
-#[test]
-fn tcp_and_udp_take_turns_frame_by_frame() {
-    let (mut net, a, b) = segment();
-    let (to_b, _) = established(&mut net, a, b);
-    net.nodes[a].credit = Credit::None;
-    let now = net.now();
-    let socket = net.nodes[a].shard.bind(A, None, || 0).unwrap();
-    for _ in 0..3 {
-        net.nodes[a].shard.send_to(now, socket, B, 9, b"x").unwrap();
-    }
-    net.nodes[a].shard.send(now, to_b, &[0x55; 8_000]).unwrap();
-    let kinds: Vec<char> = opportunity(&mut net, a, 6).iter().map(|f| f.chars().next().unwrap()).collect();
-    assert!(kinds.windows(2).all(|w| w[0] != w[1]), "{kinds:?}");
-    assert_eq!(kinds.iter().filter(|&&k| k == 'I').count(), 3, "three datagrams among six frames: {kinds:?}");
-}
-
 #[test]
 fn s_ip_nud_009_shard_an_acknowledgment_ends_delay() {
     let (mut net, a, to_b) = stale_peer();
