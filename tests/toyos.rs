@@ -2681,13 +2681,11 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
 /// Every device delivery is still cpu0's, and no CPU took a shootdown IPI the
 /// issuer did not count.
 ///
-/// **The capture is in stamp order, not read order.** A process exit reads the
-/// counters before `log::emit` stamps its line, and two exits on two CPUs run
-/// side by side, so a line stamped later can carry the earlier read, of a
-/// CPU's census or of the issuer's total, and no line says when it was read.
-/// No two lines are compared by their place in the capture: a CPU's census is
-/// the largest count each of its sources reached on any line, and the issuer's
-/// is the largest `shootdowns=`.
+/// **The capture is in stamp order, not read order** (`Census::raise`), of a
+/// CPU's census and of the issuer's total alike, and no line says when it was
+/// read. No two lines are compared by their place in the capture: a CPU's
+/// census is the largest count each of its sources reached on any line, and the
+/// issuer's is the largest `shootdowns=`.
 fn irq_census(capture: &str) -> Result<(), String> {
     use common::irqcensus::{Census, DEVICE_SOURCES};
     let mut newest: BTreeMap<u32, Census> = BTreeMap::new();
@@ -2697,10 +2695,7 @@ fn irq_census(capture: &str) -> Result<(), String> {
             Some(Ok(census)) => census,
             Some(Err(why)) => return Err(format!("{why}\nline: {line}")),
         };
-        let most = newest.entry(census.cpu).or_insert_with(|| census.clone());
-        for (most, read) in most.by_source.iter_mut().zip(census.by_source) {
-            *most = (*most).max(read);
-        }
+        newest.entry(census.cpu).or_insert_with(|| census.clone()).raise(&census);
     }
     if newest.is_empty() {
         return Err(format!(

@@ -4,7 +4,8 @@
 //! The guest prints `irq: cpuN timer=… kick=… …` per online CPU whenever a
 //! process exits, on `SYS_SHUTDOWN` and on the blocked-task dump
 //! (`kernel/src/irq_census.rs`). The counters are cumulative since boot, so the
-//! **last** line a capture holds for a CPU is that boot's whole census.
+//! largest count each source reaches on a CPU's lines is that boot's whole
+//! census ([`Census::raise`]).
 //!
 //! Two readers, and they are why this is a module rather than a closure:
 //! `irq_census_conservation` asks whether one boot's census is internally
@@ -87,6 +88,19 @@ impl Census {
     pub fn source(&self, name: &str) -> u64 {
         let i = SOURCES.iter().position(|s| *s == name).expect("no such census source");
         self.by_source[i]
+    }
+
+    /// Raise each source to its count in `read`, another line of this CPU.
+    ///
+    /// **Lines are in stamp order, not read order.** A process exit reads the
+    /// counters before `log::emit` stamps its line, and two exits on two CPUs
+    /// run side by side, so a line stamped later can carry the earlier read.
+    /// The counters are monotonic, so the largest count per source is the
+    /// newest read whatever the order of the lines.
+    pub fn raise(&mut self, read: &Self) {
+        for (most, count) in self.by_source.iter_mut().zip(read.by_source) {
+            *most = (*most).max(count);
+        }
     }
 
     /// Every interrupt this CPU took: the kernel keeps no total apart from its sources.
