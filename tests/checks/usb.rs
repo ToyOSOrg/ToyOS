@@ -13,52 +13,52 @@ pub fn transport_break_verdict() -> Result<(), String> {
         }
     };
     const STAGED: &str = "\
-        [kernel 1.174 cpu3] usb-storage: 00:14.0 slot 1 transport broke on SCSI 0x2a: a staged \
+        [ 1.174 cpu3 kernel] usb-storage: 00:14.0 slot 1 transport broke on SCSI 0x2a: a staged \
         break skipped the data phase wait; break 1 of 3 running\n";
     const OWED: &str = "\
-        [kernel 1.174 cpu3] usb-storage: 00:14.0 slot 1 is owed the data of the command that \
+        [ 1.174 cpu3 kernel] usb-storage: 00:14.0 slot 1 is owed the data of the command that \
         broke, so nothing can be asked of it on the Bulk-Out: its port is reset with no class \
         reset before it\n";
     const RESET: &str = "\
-        [kernel 1.229 cpu3] xHCI: 00:14.0 slot 1 port 1 reset while recovering (hot on a USB2 \
+        [ 1.229 cpu3 kernel] xHCI: 00:14.0 slot 1 port 1 reset while recovering (hot on a USB2 \
         port): PORTSC 0x00000e03 then 0x00200e03, link Active, speed 3: reset, and the port is \
         enabled\n";
     const UNANSWERED: &str = "\
-        [kernel 1.279 cpu3] xHCI: Address Device (after the port reset) failed: code 4 (USB \
+        [ 1.279 cpu3 kernel] xHCI: Address Device (after the port reset) failed: code 4 (USB \
         Transaction Error)\n";
     const CLIMBED_ON: &str = "\
-        [kernel 1.279 cpu3] usb-storage: 00:14.0 slot 1 the port reset was not answered; break 2 \
+        [ 1.279 cpu3 kernel] usb-storage: 00:14.0 slot 1 the port reset was not answered; break 2 \
         of 3 running\n\
-        [kernel 1.279 cpu3] usb-storage: 00:14.0 slot 1 broke 2 times running; its port reset did \
+        [ 1.279 cpu3 kernel] usb-storage: 00:14.0 slot 1 broke 2 times running; its port reset did \
         not bring the transport back\n\
-        [kernel 1.279 cpu3] xHCI: 00:14.0 slot 1 port 1 reset while taking it offline (hot on a \
+        [ 1.279 cpu3 kernel] xHCI: 00:14.0 slot 1 port 1 reset while taking it offline (hot on a \
         USB2 port): PORTSC 0x000202a0 then 0x000202a0, link RxDetect, speed 0: nothing is \
         connected, so its port's teardown takes it from here\n\
-        [kernel 1.279 cpu3] usb-storage: 00:14.0 slot 1 is offline: both bulk endpoints \
+        [ 1.279 cpu3 kernel] usb-storage: 00:14.0 slot 1 is offline: both bulk endpoints \
         Stopped=true, port 1 reset=false and nothing sent after it, Reset Device=false, its slot \
         goes back to the controller; every operation on it is refused from here\n";
     const LEFT: &str = "\
-        [kernel 1.279 cpu3] usb-storage: 00:14.0 slot 1 the port reset was not answered, and port \
+        [ 1.279 cpu3 kernel] usb-storage: 00:14.0 slot 1 the port reset was not answered, and port \
         1 no longer holds the device (PORTSC 0x000202a0): its port's teardown takes it from here\n";
     const BACK: &str = "\
-        [kernel 1.279 cpu3] usb-storage: disk 0 left port 1 (its port read empty) after this \
+        [ 1.279 cpu3 kernel] usb-storage: disk 0 left port 1 (its port read empty) after this \
         driver reset it; it is held 1894 ms for the same device to come back\n\
-        [kernel 2.211 cpu0] usb-storage: disk 0 came back on port 13 slot 6 as the same device \
+        [ 2.211 cpu0 kernel] usb-storage: disk 0 came back on port 13 slot 6 as the same device \
         (USB 0781:5581, serial number \"FEDCBA98765432FEDCBA\", 7507812 blocks of 512 B), \
         msc_block +0x30000; its volume carries on\n\
-        [kernel 2.259 cpu3] usb-storage: disk 0 is back, and the operation it was asked went out \
+        [ 2.259 cpu3 kernel] usb-storage: disk 0 is back, and the operation it was asked went out \
         again on it: it completed\n";
     const TOOK: &str = "\
-        [kernel 1.330 cpu3] usb-storage: 00:14.0 slot 1 the port reset took: addressed and \
+        [ 1.330 cpu3 kernel] usb-storage: 00:14.0 slot 1 the port reset took: addressed and \
         configured again, the device answered TEST UNIT READY under its own tag 0x5a2\n";
     const COMPLETED: &str = "\
-        [kernel 1.331 cpu3] usb-storage: 00:14.0 slot 1 SCSI 0x2a completed after 1 break(s) \
+        [ 1.331 cpu3 kernel] usb-storage: 00:14.0 slot 1 SCSI 0x2a completed after 1 break(s) \
         running; the transport came back and the count is cleared\n";
     const CLASS_RESET_TOOK: &str = "\
-        [kernel 1.175 cpu3] usb-storage: 00:14.0 slot 1 Reset Recovery took: the device answered \
+        [ 1.175 cpu3 kernel] usb-storage: 00:14.0 slot 1 Reset Recovery took: the device answered \
         TEST UNIT READY under its own tag 0x5a2\n";
     const CLASS_RESET_UNANSWERED: &str = "\
-        [kernel 1.175 cpu3] usb-storage: 00:14.0 slot 1 the class reset was not answered; break 2 \
+        [ 1.175 cpu3 kernel] usb-storage: 00:14.0 slot 1 the class reset was not answered; break 2 \
         of 3 running\n";
 
     judged("the break as the T14 read it", &format!("{STAGED}{OWED}{RESET}{UNANSWERED}{CLIMBED_ON}{BACK}"), false)?;

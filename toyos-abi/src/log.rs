@@ -1,4 +1,5 @@
-//! The kernel's log record, and the cursor that reads it.
+//! The kernel's log record, the cursor that reads it, and the head every
+//! line of the log opens with ([`Head`]).
 //!
 //! One layout, two types over it. The kernel's slot is this struct with its
 //! first word made atomic; [`LogRecord`] is what a reader gets, and by the time
@@ -75,11 +76,9 @@ impl Severity {
     }
 }
 
-/// Set when the record was written before this CPU's per-CPU area was ready.
-///
-/// The `boot` label today's prefix carries, as a bit: cpu0's shard *is* the boot
-/// shard, so there is no handoff and the renderer prints the same word.
-pub const FLAG_EARLY: u8 = 1 << 0;
+/// Set when the record was written before the kernel knew a rate to read the
+/// counter at, so its `at_ns` is no time and its line says so ([`UNTIMED`]).
+pub const FLAG_UNTIMED: u8 = 1 << 0;
 
 /// What a reader gets. Plain POD, `Copy`, no interior mutability.
 #[repr(C, align(64))]
@@ -89,6 +88,7 @@ pub struct LogRecord {
     /// validity word; by the time a reader holds a copy it is just the sequence
     /// number, and it is what [`LogCursor::next`] counts in.
     pub seq: u64,
+    /// Nanoseconds since the counter's zero: [`crate::clock::stamp_ns`]'s reading.
     pub at_ns: u64,
     pub pid: u32,
     pub tid: u32,
@@ -100,7 +100,7 @@ pub struct LogRecord {
     /// between a bound and a lie.
     pub elided: u16,
     pub severity: u8,
-    /// [`FLAG_EARLY`] and nothing else yet.
+    /// [`FLAG_UNTIMED`] and nothing else yet.
     pub flags: u8,
     pub msg: [u8; MAX_RECORD_MESSAGE],
 }
@@ -180,42 +180,29 @@ impl LogRecord {
         Severity::from_u8(self.severity)
     }
 
-    pub fn is_early(&self) -> bool {
-        self.flags & FLAG_EARLY != 0
+    /// When the record was written, or `None` for a record written before the
+    /// kernel knew a rate to read the counter at.
+    pub fn at_ns(&self) -> Option<u64> {
+        (self.flags & FLAG_UNTIMED == 0).then_some(self.at_ns)
     }
 
-    /// The same line with `tag` named inside the leading bracket:
-    /// `[kernel 0.123 cpu0 tid=3] …`.
-    ///
-    /// A sink that wants a tag cannot prepend one, because the bracket the
-    /// line opens with is the character the tag goes through. So the tag is a
-    /// parameter of the one formatter rather than a second rendering of the
-    /// line: `Display` is this with an empty tag, and there is no other
-    /// implementation to drift from.
-    pub fn tagged<'a>(&'a self, tag: &'a str) -> Tagged<'a> {
-        Tagged { record: self, tag }
+    /// The same line with the wall clock `wall` inside its head, as `/log`
+    /// carries it: `[2026-10-04 09:30:00 11.665 cpu0 kernel] …`.
+    pub fn dated<'a>(&'a self, wall: &'a str) -> Dated<'a> {
+        Dated { record: self, wall }
     }
 
-    fn fmt_with_tag(&self, f: &mut core::fmt::Formatter<'_>, tag: &str) -> core::fmt::Result {
-        let secs = self.at_ns / 1_000_000_000;
-        let millis = self.at_ns % 1_000_000_000 / 1_000_000;
-        f.write_str("[")?;
-        if !tag.is_empty() {
-            f.write_str(tag)?;
-            f.write_str(" ")?;
-        }
-        write!(f, "{secs}.{millis:03} cpu{}", self.cpu)?;
-        if self.is_early() {
-            f.write_str(" boot")?;
-        }
-        if let Some(word) = self.severity().and_then(Severity::word) {
-            write!(f, " {word}")?;
-        }
-        if self.tid != 0 {
-            write!(f, " tid={}", self.tid)?;
-        }
-        f.write_str("] ")?;
-        f.write_str(self.message())?;
+    fn fmt_dated(&self, f: &mut core::fmt::Formatter<'_>, wall: &str) -> core::fmt::Result {
+        let head = Head {
+            wall,
+            at_ns: self.at_ns(),
+            cpu: Some(u32::from(self.cpu)),
+            who: KERNEL,
+            severity: self.severity().unwrap_or(Severity::Info),
+            tid: self.tid,
+            pid: None,
+        };
+        write!(f, "{head} {}", self.message())?;
         if self.elided != 0 {
             write!(f, " …[{} bytes elided]", self.elided)?;
         }
@@ -223,29 +210,88 @@ impl LogRecord {
     }
 }
 
-/// What [`LogRecord::tagged`] renders. `Display`, so a caller writes it
-/// straight into its own line and nothing buffers a record to tag it.
-pub struct Tagged<'a> {
+/// What [`LogRecord::dated`] renders. `Display`, so a caller writes it
+/// straight into its own line and nothing buffers a record to date it.
+pub struct Dated<'a> {
     record: &'a LogRecord,
-    tag: &'a str,
+    wall: &'a str,
 }
 
-impl core::fmt::Display for Tagged<'_> {
+impl core::fmt::Display for Dated<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        self.record.fmt_with_tag(f, self.tag)
+        self.record.fmt_dated(f, self.wall)
     }
 }
 
-/// One implementation of a rendered line, so the kernel's serial sink, the
-/// panel, `logkeeper` and any diagnostic tool produce byte-identical text.
-///
-/// It renders the *body* — timestamp, origin and message — and no prefix of its
-/// own, because the three callers disagree about the prefix on purpose: `logkeeper`
-/// writes a wall clock into `/log`, the panel writes a monotonic offset into 80
-/// columns, and both are the same record.
+/// A kernel record's line, so the kernel's console, the panel, the black box
+/// and `logkeeper` produce byte-identical text: [`Head`]'s, with no wall clock.
 impl core::fmt::Display for LogRecord {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        self.fmt_with_tag(f, "")
+        self.fmt_dated(f, "")
+    }
+}
+
+/// Who said a line, where that is not a program: the kernel's records and the
+/// loader's lines. No program's name is either (`toyos_logstream::Tag`).
+pub const KERNEL: &str = "kernel";
+pub const LOADER: &str = "loader";
+
+/// What a line's time reads when it was said before its sayer knew a rate to
+/// read the counter at: the width of a time, and no number.
+pub const UNTIMED: &str = "--.---";
+
+/// The head every line of the log opens with, whoever said it — the loader,
+/// the kernel or a program — and on every surface it reaches:
+/// `[<wall> <secs>.<mmm> cpu<n> <who> <severity> tid=<n> pid=<n>]`, the time
+/// first, then where it ran, then who said it.
+///
+/// - `<wall>` is the wall clock, which only `/log` carries;
+/// - the time is seconds since the CPU's counter last started — power-on, or
+///   the reset since — read at the rate the machine states or measured
+///   (`bootloader/src/stamp.rs`, `kernel/src/clock.rs`), its seconds right
+///   aligned in two columns; [`UNTIMED`] where no rate was known yet;
+/// - `cpu<n>` where the sayer knows its CPU;
+/// - the severity's [`word`](Severity::word) above `Info`, the thread where it
+///   is not zero, and the process where the line's ring is not its own.
+///
+/// No newline, and no space after the bracket: the caller writes the text.
+pub struct Head<'a> {
+    /// Empty for none.
+    pub wall: &'a str,
+    pub at_ns: Option<u64>,
+    pub cpu: Option<u32>,
+    /// [`KERNEL`], [`LOADER`] or a program's name.
+    pub who: &'a str,
+    pub severity: Severity,
+    /// Zero for none.
+    pub tid: u32,
+    pub pid: Option<u32>,
+}
+
+impl core::fmt::Display for Head<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("[")?;
+        if !self.wall.is_empty() {
+            write!(f, "{} ", self.wall)?;
+        }
+        match self.at_ns {
+            Some(ns) => write!(f, "{:>2}.{:03}", ns / 1_000_000_000, ns % 1_000_000_000 / 1_000_000)?,
+            None => f.write_str(UNTIMED)?,
+        }
+        if let Some(cpu) = self.cpu {
+            write!(f, " cpu{cpu}")?;
+        }
+        write!(f, " {}", self.who)?;
+        if let Some(word) = self.severity.word() {
+            write!(f, " {word}")?;
+        }
+        if self.tid != 0 {
+            write!(f, " tid={}", self.tid)?;
+        }
+        if let Some(pid) = self.pid {
+            write!(f, " pid={pid}")?;
+        }
+        f.write_str("]")
     }
 }
 
@@ -346,41 +392,53 @@ mod tests {
 
     #[test]
     fn a_record_renders_the_same_line_for_every_consumer() {
-        assert_eq!(record("hello").to_string(), "[1.234 cpu2 tid=4] hello");
+        assert_eq!(record("hello").to_string(), "[ 1.234 cpu2 kernel tid=4] hello");
     }
 
-    /// The tag lands *inside* the bracket, and an empty one leaves the line
-    /// byte for byte what `Display` writes — which is what makes a tagging sink
-    /// this formatter's caller rather than a second implementation of it.
+    /// The wall clock lands *inside* the bracket, first, and an empty one leaves
+    /// the line byte for byte what `Display` writes — which is what makes
+    /// `/log`'s writer this formatter's caller rather than a second
+    /// implementation of it.
     #[test]
-    fn a_tag_goes_through_the_bracket_and_an_empty_one_changes_nothing() {
+    fn a_wall_clock_goes_through_the_bracket_and_an_empty_one_changes_nothing() {
         let r = record("hello");
-        assert_eq!(r.tagged("kernel").to_string(), "[kernel 1.234 cpu2 tid=4] hello");
-        assert_eq!(r.tagged("").to_string(), r.to_string());
-
-        let mut early = record("x");
-        early.flags = FLAG_EARLY;
-        early.tid = 0;
-        assert_eq!(early.tagged("kernel").to_string(), "[kernel 1.234 cpu2 boot] x");
+        assert_eq!(r.dated("2026-10-04 09:30:00").to_string(), "[2026-10-04 09:30:00  1.234 cpu2 kernel tid=4] hello");
+        assert_eq!(r.dated("").to_string(), r.to_string());
     }
 
-    /// The three decorations, each of which a consumer would otherwise invent.
+    /// The decorations, each of which a consumer would otherwise invent: no
+    /// time where none was known, the severity, and the cut.
     #[test]
-    fn early_severity_and_elided_are_in_the_line_rather_than_in_a_convention() {
+    fn untimed_severity_and_elided_are_in_the_line_rather_than_in_a_convention() {
         let mut r = record("x");
-        r.flags = FLAG_EARLY;
+        r.flags = FLAG_UNTIMED;
         r.tid = 0;
-        assert_eq!(r.to_string(), "[1.234 cpu2 boot] x");
+        assert_eq!(r.to_string(), "[--.--- cpu2 kernel] x");
+        assert_eq!(r.at_ns(), None);
 
         let mut r = record("x");
         r.severity = Severity::Alert as u8;
-        assert_eq!(r.tagged("kernel").to_string(), "[kernel 1.234 cpu2 alert tid=4] x");
-        r.flags = FLAG_EARLY;
-        assert_eq!(r.to_string(), "[1.234 cpu2 boot alert tid=4] x");
+        assert_eq!(r.to_string(), "[ 1.234 cpu2 kernel alert tid=4] x");
 
         let mut r = record("x");
         r.elided = 900;
-        assert_eq!(r.to_string(), "[1.234 cpu2 tid=4] x …[900 bytes elided]");
+        assert_eq!(r.to_string(), "[ 1.234 cpu2 kernel tid=4] x …[900 bytes elided]");
+    }
+
+    /// Time first, then where, then who, for every sayer: a program's line
+    /// names no CPU, and seconds past two columns widen the head.
+    #[test]
+    fn every_sayer_gets_the_one_head() {
+        let head = |at_ns, cpu, who, severity, tid, pid| {
+            Head { wall: "", at_ns, cpu, who, severity, tid, pid }.to_string()
+        };
+        assert_eq!(head(Some(9_876_000_000), Some(0), LOADER, Severity::Info, 0, None), "[ 9.876 cpu0 loader]");
+        assert_eq!(head(None, Some(0), LOADER, Severity::Info, 0, None), "[--.--- cpu0 loader]");
+        assert_eq!(head(Some(13_064_999_999), None, "supervisor", Severity::Info, 0, None), "[13.064 supervisor]");
+        assert_eq!(
+            head(Some(123_000_000_000), None, "soundserver", Severity::Warn, 2, Some(9)),
+            "[123.000 soundserver warn tid=2 pid=9]"
+        );
     }
 
     /// **`len` came across the syscall boundary**, so a record claiming more

@@ -59,7 +59,7 @@ pub fn host_scale_self_check() -> Result<(), String> {
 pub fn ceiling_self_check() -> Result<(), String> {
     const CEILING: Duration = Duration::from_secs(380);
     const KERNEL: &str =
-        "[kernel 1.450 cpu3] PANIC: panicked at kernel/src/sched/reserve.rs:812:9:";
+        "[ 1.450 cpu3 kernel] PANIC: panicked at kernel/src/sched/reserve.rs:812:9:";
     let quiet = GUEST_QUIET + Duration::from_secs(1);
     let talking = Duration::from_millis(200);
 
@@ -80,7 +80,7 @@ pub fn ceiling_self_check() -> Result<(), String> {
     if early >= CEILING {
         return Err(String::from("staged the panic after the ceiling, so it proves nothing"));
     }
-    let again = "[kernel 1.503 cpu7] PANIC: panicked at kernel/src/sched/reserve.rs:812:9:";
+    let again = "[ 1.503 cpu7 kernel] PANIC: panicked at kernel/src/sched/reserve.rs:812:9:";
     if ceiling_verdict(Some(again), early, CEILING, quiet, 40).as_deref() != Some(panic.as_str()) {
         return Err(format!(
             "one panic on two boots gives two sentences:\n\
@@ -107,7 +107,7 @@ pub fn ceiling_self_check() -> Result<(), String> {
     // 2b. The same two cases for the wait that holds a whole capture rather
     //     than a line at a time — `await_guest`, whose `it went quiet` is the
     //     wording #156's signature is stated in.
-    let halted = format!("[kernel 0.400 cpu0] compositor: frames=120\n{KERNEL}\n");
+    let halted = format!("[ 0.400 cpu0 kernel] compositor: frames=120\n{KERNEL}\n");
     let Some(found) = super::serial::kernel_death(&halted) else {
         return Err(String::from("a capture ending in a kernel panic reads as a guest that merely \
                                  stopped, which is the verdict that threw the cause away"));
@@ -115,7 +115,7 @@ pub fn ceiling_self_check() -> Result<(), String> {
     if kernel_died_here(found) != panic {
         return Err(String::from("the two waits word one panic differently"));
     }
-    let program_died = format!("[kernel 0.400 cpu0] compositor: frames=120\n{USER}\n");
+    let program_died = format!("[ 0.400 cpu0 kernel] compositor: frames=120\n{USER}\n");
     if super::serial::kernel_death(&program_died).is_some() {
         return Err(format!(
             "a capture whose only panic is a program's reads as a halted machine:\n{program_died}"
@@ -221,12 +221,12 @@ pub fn ceiling_self_check() -> Result<(), String> {
     //    went into the record with its report — written, on IST1, 6688 bytes of
     //    it — never printed. Both directions, because the second is what keeps a
     //    stall or a slow test from pasting a boot's console at somebody.
-    const DF: &str = "[kernel 6.204 cpu1] DOUBLE FAULT on CPU 1 (pid=Some(Pid(2)) tid=Some(Tid(0)))";
-    let window_before = "[kernel 6.201 cpu0] spawn: /system/bin/test_rs_console_line_atomicity pid=41\n";
+    const DF: &str = "[ 6.204 cpu1 kernel] DOUBLE FAULT on CPU 1 (pid=Some(Pid(2)) tid=Some(Tid(0)))";
+    let window_before = "[ 6.201 cpu0 kernel] spawn: /system/bin/test_rs_console_line_atomicity pid=41\n";
     let window_serial = format!(
         "AAAAAAAA\n{DF}\n\
-         [kernel 6.204 cpu1]   cr2=0xffff800002672ff8 (address that caused the fault chain)\n\
-         [kernel 6.204 cpu1]   rip=0xffffffff80121a40  rsp=0xffff800002673000  rbp=0x0\n"
+         [ 6.204 cpu1 kernel]   cr2=0xffff800002672ff8 (address that caused the fault chain)\n\
+         [ 6.204 cpu1 kernel]   rip=0xffffffff80121a40  rsp=0xffff800002673000  rbp=0x0\n"
     );
     let died_verdict = ceiling_verdict(Some(DF), early, CEILING, quiet, 40)
         .ok_or("a staged double fault reached no verdict at all")?;
@@ -249,7 +249,7 @@ pub fn ceiling_self_check() -> Result<(), String> {
     // The other direction. A guest still talking at its ceiling has nothing to
     // account for, and a verdict that grew a serial log would be a second defect
     // dressed as a fix.
-    let quiet_capture = WaitVerdict::new(slow.clone(), &["[kernel 0.377 cpu0] NVMe: found\n"]);
+    let quiet_capture = WaitVerdict::new(slow.clone(), &["[ 0.377 cpu0 kernel] NVMe: found\n"]);
     if quiet_capture.to_string() != slow {
         return Err(format!(
             "a verdict on a capture nothing died in grew a report:\n{quiet_capture}"

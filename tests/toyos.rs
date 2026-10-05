@@ -1694,7 +1694,11 @@ fn virt_job(profile: qemu::Profile, job: &str, said: &str) -> Result<(), String>
         },
     );
     let mut serial = virt_console(&qemu);
-    judge_virt_job(&mut qemu, &mut serial, job, said)
+    judge_virt_job(&mut qemu, &mut serial, job, said)?;
+    // The one console that carries the loader's, the kernel's and a program's
+    // lines on a CPU that states its counter's rate: the T14's metal rows
+    // judge the same on x86-64, and no machine of this architecture has one.
+    bootlog::one_clock(&serial, &serial).map_err(|why| format!("{why}\nserial:\n{serial}"))
 }
 
 /// A `mask-windows` boot's windows: `common::irqcensus::windows`'s verdict,
@@ -2232,20 +2236,30 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
                 }
                 None => first,
             };
-            // A stamp's leading spaces carry no ink.
             let chars = shown.trim().len();
             let (width, pixels) = (dump.width, &dump.pixels);
             let inked = |y: usize| (0..width).filter(move |&x| pixels[y * width + x] != BLACK);
-            let Some(top) = (0..dump.height).find(|&y| inked(y).next().is_some()) else {
+            // The first band of ink from `from` down: where it ends, and how wide it is.
+            let band = |from: usize| -> Option<(usize, usize)> {
+                let top = (from..dump.height).find(|&y| inked(y).next().is_some())?;
+                let bottom = (top..dump.height).find(|&y| inked(y).next().is_none()).unwrap_or(dump.height);
+                let xs: Vec<usize> = (top..bottom).flat_map(inked).collect();
+                Some((bottom, xs.iter().max()? - xs.iter().min()? + 1))
+            };
+            let fits = |wide: usize, n: usize| n > 0 && wide > 8 * (n - 1) && wide <= 8 * n;
+            let Some((bottom, wide)) = band(0) else {
                 return Err("the loader's screen is blank".to_string());
             };
-            let bottom = (top..dump.height).find(|&y| inked(y).next().is_none()).unwrap_or(dump.height);
-            let xs: Vec<usize> = (top..bottom).flat_map(inked).collect();
-            let wide = xs.iter().max().unwrap() - xs.iter().min().unwrap() + 1;
-            if wide <= 8 * (chars - 1) || wide > 8 * chars {
+            // A line wider than the console wraps: its top row is the console's
+            // width, and the row under it holds the rest of the line.
+            let columns = if fits(wide, chars) { chars } else { wide.div_ceil(8) };
+            let rest = chars.saturating_sub(columns);
+            let under = band(bottom).map(|(_, wide)| wide);
+            if !fits(wide, columns.min(chars)) || (rest > 0 && !under.is_some_and(|w| fits(w, rest.min(columns)))) {
                 return Err(format!(
-                    "the screen's top line is {wide} px wide, and the loader's first, {shown:?}, \
-                     is {chars} characters: something else is above the loader's lines\n{serial}"
+                    "the screen's top line is {wide} px wide and the one under it {under:?}, and the \
+                     loader's first, {shown:?}, is {chars} characters: something else is above the \
+                     loader's lines\n{serial}"
                 ));
             }
             Ok(())
@@ -3551,7 +3565,8 @@ const SMI_SPAN_NS: u64 = 4_444_000_000;
 /// declared at boot, `pm_enable=1`, the request Linux makes on this machine
 /// (`tests/t14-linux/hwp-request.txt`), and its power envelope in every read
 /// the one its `control_regs:` line holds. No line, the kernel's or a
-/// program's, is stamped in a millisecond from `idle0`'s to `idle1`'s, either
+/// program's, is stamped in a millisecond from `idle0`'s to `idle1`'s, which
+/// `counters_metal` reads on the log's clock, either
 /// edge's included because a line stamped in it may follow the read: the
 /// second is the idle machine's. The boot ran in ACPI mode, which
 /// `/system/bin/acpiserver`'s claim put it in: `idle0` reads after the
@@ -3607,9 +3622,7 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
         .text()
         .lines()
         .filter(|line| {
-            toyos_logstream::record_ms(line)
-                .or_else(|| toyos_logstream::program_ms(line))
-                .is_some_and(|ms| (from_ms..=to_ms).contains(&ms))
+            toyos_logstream::parse(line).and_then(|p| p.ms).is_some_and(|ms| (from_ms..=to_ms).contains(&ms))
         })
         .collect();
     if !inside.is_empty() {
@@ -3753,7 +3766,11 @@ fn acpi_events_on_metal(back: &metal::Readback) -> Result<(), String> {
     log.must_say(
         "acpiserver: armed: power button served, embedded controller on GPE 0x6e at 0x66/0x62",
     )?;
-    let lines: Vec<&str> = log.text().lines().filter(|l| l.contains("acpiserver")).collect();
+    let lines: Vec<&str> = log
+        .text()
+        .lines()
+        .filter(|l| toyos_logstream::program_line(l).is_some_and(|said| said.tag == "acpiserver"))
+        .collect();
     if let Some(fired) = lines.iter().find(|l| l.contains("panicked")) {
         return Err(format!("the server died: {fired}"));
     }
@@ -4329,10 +4346,9 @@ fn the_others_halt_first(mut qemu: QemuInstance, arch: toyos_build::arch::Arch) 
 /// The record each sibling of `test_rs_panic_halts_first` makes, over and over.
 const SIBLING_RECORD: &str = "logstorm t=0 i=0 ";
 
-/// The CPU a kernel record is stamped with: `[kernel <secs> cpu<N>]`.
+/// The CPU a kernel record is stamped with.
 fn record_cpu(line: &str) -> Option<u32> {
-    let head = line.split_once("[kernel ")?.1.split_once(']')?.0;
-    head.split_once(" cpu")?.1.split(' ').next()?.parse().ok()
+    toyos_logstream::parse(line).filter(|p| p.source == toyos_logstream::Source::Kernel)?.cpu
 }
 
 /// The CPU that went fatal, once the console carries its line past

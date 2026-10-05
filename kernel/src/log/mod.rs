@@ -10,13 +10,15 @@ pub mod read;
 pub mod recovery;
 pub mod registry;
 pub mod shard;
+mod stamp;
 #[cfg(feature = "test-actuators")]
 pub mod storm;
 pub mod user;
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use toyos_abi::log::{LogRecord, FLAG_EARLY, MAX_LOG_SHARDS, MAX_RECORD_MESSAGE};
+pub use stamp::LogStamp;
+use toyos_abi::log::{LogRecord, FLAG_UNTIMED, MAX_LOG_SHARDS, MAX_RECORD_MESSAGE};
 
 pub use shard::Shard;
 pub use toyos_abi::log::Severity;
@@ -91,7 +93,7 @@ pub fn seal_tail() {
     crate::blackbox::append(|out| {
         let _ = writeln!(out, "{TAIL_HEAD} ({TAIL_RECORDS})");
         let mut tail = Tail { out, left: TAIL_RECORDS };
-        read::snapshot_committed(0, read::newest_committed_at_ns(), &mut tail);
+        read::snapshot_committed(LogStamp::ZERO, read::newest_committed(), &mut tail);
     });
 }
 
@@ -143,7 +145,6 @@ struct Origin {
     cpu: u16,
     tid: u32,
     pid: u32,
-    flags: u8,
 }
 
 /// The IF/TF-off bracket must span the `xadd` through publication, or a
@@ -155,14 +156,14 @@ fn reserve(guard: &crate::arch::IrqGuard) -> (Origin, u64) {
     if !PERCPU_READY.load(Ordering::Relaxed) {
         // SAFETY: nothing else is running, so this CPU owns the boot shard.
         let seq = unsafe { BOOT_SHARD.reserve(guard) };
-        let origin = Origin { shard: &BOOT_SHARD, cpu: 0, tid: 0, pid: 0, flags: FLAG_EARLY };
+        let origin = Origin { shard: &BOOT_SHARD, cpu: 0, tid: 0, pid: 0 };
         return (origin, seq);
     }
 
     let (shard, seq, cpu, tid, pid) = crate::arch::percpu::reserve_log_slot(guard);
     // SAFETY: this CPU's own `PerCpu` pointer, valid before the CPU takes an instruction.
     let shard: &'static Shard = unsafe { &*shard };
-    (Origin { shard, cpu: cpu as u16, tid: on_a_thread(tid), pid: on_a_thread(pid), flags: 0 }, seq)
+    (Origin { shard, cpu: cpu as u16, tid: on_a_thread(tid), pid: on_a_thread(pid) }, seq)
 }
 
 /// `0` means "no thread"; `PerCpu`'s own sentinel is `u32::MAX`, translated at
@@ -191,13 +192,15 @@ pub fn emit(severity: Severity, args: core::fmt::Arguments) {
     // could disagree. The NMI handler never logs and #MC halts rather than
     // returning, which is what closes the two paths IF/TF masking alone
     // cannot.
-    record.at_ns = crate::clock::nanos_since_boot();
+    match crate::clock::stamp() {
+        Some(at) => record.at_ns = at.nanos(),
+        None => record.flags = FLAG_UNTIMED,
+    }
     let (origin, seq) = reserve(&guard);
     record.seq = seq;
     record.pid = origin.pid;
     record.tid = origin.tid;
     record.cpu = origin.cpu;
-    record.flags = origin.flags;
 
     // SAFETY: seq came from this shard's own reserve, committed exactly once under this guard.
     unsafe { origin.shard.commit(seq, &record, &guard) };

@@ -7,10 +7,10 @@ opened: 2026-10-04
 # A program's line on a screen names no CPU
 
 The owner asked for the seconds since boot and the CPU in front of every
-line a screen shows. A kernel record's line carries both: `[kernel 1.193 cpu0
+line a screen shows. A kernel record's line carries both: `[ 1.193 cpu0 kernel
 alert tid=3]`. A program's line carries only the time:
-`{1.234 warn soundserver}` on `/system/bin/console` and on `cargo run`'s
-terminal. The reason is the record. `toyos::log::region::Body`, the record a
+`[ 1.234 soundserver warn]` on `/system/bin/console`, on `cargo run`'s
+terminal and in `/log`. The reason is the record. `toyos::log::region::Body`, the record a
 program writes into its ring, has `at_ns`, `pid`, `tid` and a severity and no
 CPU, so `logkeeper` has no CPU to give `toyos_logstream::ProgramLine`.
 

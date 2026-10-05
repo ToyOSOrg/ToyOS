@@ -7,13 +7,13 @@ use toyos_build::metal::{READBACK_BOOT, READBACK_STREAM, READBACK_TALK};
 /// The T14's `lantalkcase` boot: the card's hand-over, what netstack said of its
 /// MAC, its link and its lease, and the supervisor's stop. The MAC and the two resolvers
 /// are stand-ins that name nobody; every other byte is the machine's.
-const LOG: &str = r"[2026-10-03 10:20:01 1.192 cpu0] pcidev: PCI 00:1f.6 [8086:15fc] handed over on slot 0, vector 0x28
-{2026-10-03 10:20:05 5.727 netstack} netstack: MAC 02:00:00:00:00:01
-[2026-10-03 10:20:08 8.499 cpu4] pcidev: slot 0 took its first message on vector 0x28
-{2026-10-03 10:20:08 8.499 netstack} netstack: I219: link up at 1000 Mb/s full duplex, 2772 ms after the driver came up
-{2026-10-03 10:20:19 19.053 netstack} netstack: DHCP: lease 192.168.1.48/24 from 192.168.1.1, gateway 192.168.1.1, dns [192.0.2.53 198.51.100.53], 13326 ms after netstack came up
-{2026-10-03 10:20:19 19.053 netstack} netstack: ready, at most 103 piped connections (4 MiB each of 16022 MiB total)
-{2026-10-03 10:20:20 20.249 supervisor} supervisor: power: the machine stops, and logkeeper makes the log whole first (Reboot)
+const LOG: &str = r"[2026-10-03 10:20:01  1.192 cpu0 kernel] pcidev: PCI 00:1f.6 [8086:15fc] handed over on slot 0, vector 0x28
+[2026-10-03 10:20:05  5.727 netstack] netstack: MAC 02:00:00:00:00:01
+[2026-10-03 10:20:08  8.499 cpu4 kernel] pcidev: slot 0 took its first message on vector 0x28
+[2026-10-03 10:20:08  8.499 netstack] netstack: I219: link up at 1000 Mb/s full duplex, 2772 ms after the driver came up
+[2026-10-03 10:20:19 19.053 netstack] netstack: DHCP: lease 192.168.1.48/24 from 192.168.1.1, gateway 192.168.1.1, dns [192.0.2.53 198.51.100.53], 13326 ms after netstack came up
+[2026-10-03 10:20:19 19.053 netstack] netstack: ready, at most 103 piped connections (4 MiB each of 16022 MiB total)
+[2026-10-03 10:20:20 20.249 supervisor] supervisor: power: the machine stops, and logkeeper makes the log whole first (Reboot)
 ";
 
 /// That boot's `boot.txt`, under the same stand-in.

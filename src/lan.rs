@@ -182,7 +182,7 @@ pub fn delivered(text: &str) -> Result<Delivery, String> {
 mod tests {
     use super::*;
 
-    const LEASED: &str = "[2026-09-08 16:08:23 2.100 cpu0] netstack: DHCP: lease 10.0.2.15/24 from \
+    const LEASED: &str = "[2026-09-08 16:08:23  2.100 cpu0 kernel] netstack: DHCP: lease 10.0.2.15/24 from \
                           10.0.2.2, gateway 10.0.2.2, dns [10.0.2.3 10.0.2.4], 412 ms after netstack \
                           came up";
 
@@ -250,10 +250,10 @@ mod tests {
     fn only_netstacks_own_lines_are_netstacks() {
         let lease = LEASED.split_once("] ").expect("a record").1;
         let log = format!(
-            "{{2026-09-08 16:08:23 2.100 netstack}} {lease}\n\
-             {{2026-09-08 16:08:23 2.200 netstack}} netstack: ready, at most 8 clients\n\
-             {{2026-09-08 16:08:23 2.300 evil}} {{2026-09-08 16:08:23 2.300 netstack}} netstack: MAC 00:00:00:00:00:00\n\
-             [2026-09-08 16:08:23 2.400 cpu0] netstack: MAC 00:00:00:00:00:01\n\
+            "[2026-09-08 16:08:23  2.100 netstack] {lease}\n\
+             [2026-09-08 16:08:23  2.200 netstack] netstack: ready, at most 8 clients\n\
+             [2026-09-08 16:08:23  2.300 evil] [2026-09-08 16:08:23  2.300 netstack] netstack: MAC 00:00:00:00:00:00\n\
+             [2026-09-08 16:08:23  2.400 cpu0 kernel] netstack: MAC 00:00:00:00:00:01\n\
              netstack: MAC 52:54:00:12:34:56\n"
         );
         let netstack = netstack_records(&log);
@@ -274,23 +274,23 @@ mod tests {
     /// Metal run 57's `lanicscase` kernel log, verbatim, from the I219's
     /// hand-over to the record of its first message.
     const RUN_57: &str = "\
-[2026-09-16 15:01:20 1.333 cpu0] pcidev: PCI 00:1f.6 [8086:15fc] handed over on slot 0, vector 0x28
-[2026-09-16 15:01:20 1.360 cpu0] ELF: 3417 relocations indexed (RELATIVE + GLOB_DAT + TPOFF)
-[2026-09-16 15:01:20 1.360 cpu0] spawn: TLS 1 modules, total_memsz=144
-[2026-09-16 15:01:20 1.518 cpu0] spawn: /system/bin/netstack pid=5 tid=0 dst=5 base=0x10000000000 entry=0x1000004e5c0 cr3=0x1cc1000 symbols=2048KiB (layout=25ms relocs=0ms deps=0ms tls=1ms total=184ms)
-[2026-09-16 15:01:20 1.552 cpu0] ELF: 2833 relocations indexed (RELATIVE + GLOB_DAT + TPOFF)
-[2026-09-16 15:01:20 1.552 cpu0] spawn: TLS 1 modules, total_memsz=144
-[2026-09-16 15:01:20 1.739 cpu0] spawn: /system/bin/test-runner pid=6 tid=0 dst=6 base=0x10000000000 entry=0x1000001fff0 cr3=0x1cbf000 symbols=2048KiB (layout=32ms relocs=0ms deps=0ms tls=2ms total=221ms)
-[2026-09-16 15:01:20 1.958 cpu4] usb-storage: disk 0 does not implement SYNCHRONIZE CACHE (sense 0x05/0x20/0x00); its writes are durable once they complete
-[2026-09-16 15:01:21 2.239 cpu5] shm: 0xa0800000 mapped Uncacheable into pid 5
-[2026-09-16 15:01:21 2.239 cpu5] iommu: domain6 maps 0x6800000..0x6a00000 at 0x2000000000
-[2026-09-16 15:01:21 2.239 cpu0] pcidev: slot 0 took its first message on vector 0x28
+[2026-09-16 15:01:20  1.333 cpu0 kernel] pcidev: PCI 00:1f.6 [8086:15fc] handed over on slot 0, vector 0x28
+[2026-09-16 15:01:20  1.360 cpu0 kernel] ELF: 3417 relocations indexed (RELATIVE + GLOB_DAT + TPOFF)
+[2026-09-16 15:01:20  1.360 cpu0 kernel] spawn: TLS 1 modules, total_memsz=144
+[2026-09-16 15:01:20  1.518 cpu0 kernel] spawn: /system/bin/netstack pid=5 tid=0 dst=5 base=0x10000000000 entry=0x1000004e5c0 cr3=0x1cc1000 symbols=2048KiB (layout=25ms relocs=0ms deps=0ms tls=1ms total=184ms)
+[2026-09-16 15:01:20  1.552 cpu0 kernel] ELF: 2833 relocations indexed (RELATIVE + GLOB_DAT + TPOFF)
+[2026-09-16 15:01:20  1.552 cpu0 kernel] spawn: TLS 1 modules, total_memsz=144
+[2026-09-16 15:01:20  1.739 cpu0 kernel] spawn: /system/bin/test-runner pid=6 tid=0 dst=6 base=0x10000000000 entry=0x1000001fff0 cr3=0x1cbf000 symbols=2048KiB (layout=32ms relocs=0ms deps=0ms tls=2ms total=221ms)
+[2026-09-16 15:01:20  1.958 cpu4 kernel] usb-storage: disk 0 does not implement SYNCHRONIZE CACHE (sense 0x05/0x20/0x00); its writes are durable once they complete
+[2026-09-16 15:01:21  2.239 cpu5 kernel] shm: 0xa0800000 mapped Uncacheable into pid 5
+[2026-09-16 15:01:21  2.239 cpu5 kernel] iommu: domain6 maps 0x6800000..0x6a00000 at 0x2000000000
+[2026-09-16 15:01:21  2.239 cpu0 kernel] pcidev: slot 0 took its first message on vector 0x28
 ";
 
-    const HANDED: &str = "[2026-09-16 15:01:20 1.333 cpu0] pcidev: PCI 00:1f.6 [8086:15fc] \
+    const HANDED: &str = "[2026-09-16 15:01:20  1.333 cpu0 kernel] pcidev: PCI 00:1f.6 [8086:15fc] \
                           handed over on slot 0, vector 0x28\n";
     const TOOK: &str =
-        "[2026-09-16 15:01:21 2.239 cpu0] pcidev: slot 0 took its first message on vector 0x28\n";
+        "[2026-09-16 15:01:21  2.239 cpu0 kernel] pcidev: slot 0 took its first message on vector 0x28\n";
 
     /// Run 57 with one of its lines replaced, refusing a fixture the edit did
     /// not change.
@@ -319,7 +319,7 @@ mod tests {
     /// Another writer's line carrying the words is not the kernel's record.
     #[test]
     fn a_line_that_is_not_the_kernels_record_is_refused_and_named() {
-        let stray = "[2026-09-16 15:01:21 2.240 cpu3] test-runner: waiting until netstack took its \
+        let stray = "[2026-09-16 15:01:21  2.240 cpu3 kernel] test-runner: waiting until netstack took its \
                      first message\n";
         let log = edited(TOOK, "").replacen(
             "total=184ms)\n",
@@ -337,7 +337,7 @@ mod tests {
     fn another_slots_record_is_refused_as_another_claims() {
         let why = delivered(&edited(
             TOOK,
-            "[2026-09-16 15:01:21 2.239 cpu0] pcidev: slot 1 took its first message on vector \
+            "[2026-09-16 15:01:21  2.239 cpu0 kernel] pcidev: slot 1 took its first message on vector \
              0x30\n",
         ))
         .expect_err("slot 1 is not the I219's");
@@ -354,12 +354,12 @@ mod tests {
     fn a_boot_where_the_i219_was_not_handed_over_is_refused_whatever_else_took_a_message() {
         let log = edited(
             HANDED,
-            "[2026-09-16 15:01:20 1.333 cpu0] pcidev: PCI 00:1f.6 [8086:15fc] NOT HANDED OVER: \
+            "[2026-09-16 15:01:20  1.333 cpu0 kernel] pcidev: PCI 00:1f.6 [8086:15fc] NOT HANDED OVER: \
              refused\n",
         )
         .replacen(
             TOOK,
-            "[2026-09-16 15:01:21 2.239 cpu0] pcidev: slot 3 took its first message on vector \
+            "[2026-09-16 15:01:21  2.239 cpu0 kernel] pcidev: slot 3 took its first message on vector \
              0x2a\n",
             1,
         );
@@ -381,7 +381,7 @@ mod tests {
     #[test]
     fn a_record_after_the_slot_is_handed_over_again_is_refused() {
         let again =
-            "[2026-09-16 15:01:21 2.200 cpu0] pcidev: PCI 00:1f.7 [8086:a0f0] handed over on \
+            "[2026-09-16 15:01:21  2.200 cpu0 kernel] pcidev: PCI 00:1f.7 [8086:a0f0] handed over on \
              slot 0, vector 0x28\n";
         let log = edited(TOOK, &format!("{again}{TOOK}"));
         let why = delivered(&log).expect_err("the record answers the later claim");
@@ -397,7 +397,7 @@ mod tests {
     /// hand-over.
     #[test]
     fn a_hand_over_not_in_the_kernels_spelling_is_refused() {
-        let stray = "[2026-09-16 15:01:20 1.333 cpu0] netstack: [8086:15fc] handed over on slot 0, \
+        let stray = "[2026-09-16 15:01:20  1.333 cpu0 kernel] netstack: [8086:15fc] handed over on slot 0, \
                      vector 0x28\n";
         let why = delivered(&edited(HANDED, stray)).expect_err("a userland line");
         assert!(why.contains("no `[8086:15fc] handed over on slot ` record"), "{why}");

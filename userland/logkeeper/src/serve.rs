@@ -357,10 +357,10 @@ fn feed(shared: &Shared, mut sink: impl Write) -> (u64, Left) {
 
 /// The line a reader gets in place of what the replay no longer holds.
 fn evicted(boot_secs: Option<u64>, lost: u64) -> Vec<u8> {
-    let at_ns = toyos_abi::clock::nanos_since_boot();
+    let at_ns = toyos_abi::clock::stamp_ns();
     let text = format!("logkeeper: the first {lost} bytes of this boot are no longer held here; /log has them");
     let tag = Tag::new(LOGKEEPER).expect("logkeeper's own name is a tag");
-    let stamp = crate::stamp(boot_secs, at_ns);
+    let stamp = crate::stamp(boot_secs, Some(at_ns));
     let line = ProgramLine {
         stamp: &stamp,
         at_ns,

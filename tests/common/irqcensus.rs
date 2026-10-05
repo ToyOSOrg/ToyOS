@@ -47,7 +47,7 @@ impl Census {
     /// Parse one line, or say why it is not one.
     ///
     /// Anything before `irq: cpu` is ignored, so the same parser reads a raw
-    /// guest line, a `[kernel …]` log line and a `[serial N]` echo of either.
+    /// guest line, a kernel record's line and a `[serial N]` echo of either.
     pub fn parse(line: &str) -> Option<Result<Self, String>> {
         let rest = line.split("irq: cpu").nth(1)?;
         Some(Self::parse_body(rest))

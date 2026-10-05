@@ -10,7 +10,7 @@ use toyos_build::metal::{
 use toyos_build::metaltimings::{Machine, Record};
 
 const PANEL: &str = "| panel: paints=10 px=8741248 us=21751 max_us=3851\n";
-const BOOTED: &str = "[2026-09-29 18:22:39 1.165 cpu0] Boot: complete (1165ms)\n";
+const BOOTED: &str = "[2026-09-29 18:22:39  1.165 cpu0 kernel] Boot: complete (1165ms)\n";
 
 fn t14() -> Machine {
     Machine {
@@ -23,8 +23,9 @@ fn t14() -> Machine {
 /// A `loader.log` whose pass after the reset reads `page`.
 fn loader(page: &str) -> String {
     format!(
-        "{}\n{}\n{}\n{}\n{page}",
+        "{}\n{}\n{}\n{}\n{}\n{page}",
         bootlog::LOADER_FIRST_LINE,
+        bootlog::LOADER_CLOCK_NONE,
         bootlog::LOADER_LAST_LINE,
         bootlog::SEPARATOR,
         bootlog::LOADER_FIRST_LINE
@@ -34,7 +35,7 @@ fn loader(page: &str) -> String {
 /// The record of arming the deadline, at the 60 ms the T14 arms it.
 fn armed() -> String {
     format!(
-        "[2026-09-29 18:22:39 0.060 cpu0] {}120000 ms, after which this kernel seals a WEDGED \
+        "[2026-09-29 18:22:39  0.060 cpu0 kernel] {}120000 ms, after which this kernel seals a WEDGED \
          record and writes the reset register itself\n{BOOTED}",
         bootlog::DEADLINE_ARMED
     )
@@ -47,6 +48,10 @@ fn expired_at(reached: i64) -> String {
         bootlog::DEADLINE_EXPIRED
     )
 }
+
+/// What every boot that reaches `Boot: complete` owes `one_clock`.
+const STARTED: &str = "[2026-09-29 18:22:38  0.050 cpu0 kernel] spawn: /system/bin/logkeeper pid=6\n\
+                       [2026-09-29 18:22:38  0.050 supervisor] supervisor: started logkeeper\n";
 
 /// One boot's readback as the loop writes it.
 pub(super) fn plant(
@@ -64,7 +69,7 @@ pub(super) fn plant(
     );
     for (name, text) in [
         (READBACK_LOADER, loader(page)),
-        (READBACK_KERNEL, kernel.to_string()),
+        (READBACK_KERNEL, format!("{STARTED}{kernel}")),
         (READBACK_BOOT, boot),
         (READBACK_VERDICT, verdict_file(verdict)),
     ] {
@@ -292,8 +297,8 @@ pub fn a_failing_shared_member_fails_its_boot() {
     let jobs = ["test_rs_std_tls", "test_rs_fs_large_file"];
     let exits = |code: i32| {
         format!(
-            "{BOOTED}[2026-09-29 18:22:41 2.310 cpu3] exit: {} pid=12 code=0 cpu=4ms\n\
-             [2026-09-29 18:22:42 3.120 cpu5] exit: {} pid=13 code={code} cpu=9ms\n",
+            "{BOOTED}[2026-09-29 18:22:41  2.310 cpu3 kernel] exit: {} pid=12 code=0 cpu=4ms\n\
+             [2026-09-29 18:22:42  3.120 cpu5 kernel] exit: {} pid=13 code={code} cpu=9ms\n",
             jobs[0], jobs[1]
         )
     };
@@ -375,7 +380,7 @@ pub fn a_power_off_owes_no_panel() {
         let dir = toyos_tmpdir::TempDir::new("metal-readbacks");
         let root = toyos_tmpdir::TempDir::new("metal-records");
         let log = format!(
-            "{BOOTED}{{2026-09-29 18:22:40 1.214 supervisor}} {} ({stop})\n",
+            "{BOOTED}[2026-09-29 18:22:40  1.214 supervisor] {} ({stop})\n",
             bootlog::STOPPING
         );
         plant(&dir, "poweroff", &hung, &log, None);
@@ -388,4 +393,49 @@ pub fn a_power_off_owes_no_panel() {
         (false, Some(vec!["boot.poweroff.complete_ms".to_string()]))
     );
     assert_eq!(judged("Reboot"), (true, None));
+}
+
+/// **The loader's lines, the kernel's records and a program's lines count
+/// from one zero**: a kernel record stamped before the loader's handoff, or the
+/// supervisor's line after a spawn before that spawn's record, is a clock that kept another
+/// zero; and a boot that owes something to compare and lacks it is refused.
+pub fn the_loader_the_kernel_and_a_program_count_from_one_zero() {
+    const STATED: &str = "Loader clock: each line opens with the seconds since the counter's zero, at \
+                          the counter's stated 2419200000 Hz";
+    let read = |clock: &str, loader_ms: &str, kernel_ms: &str, said: &str| {
+        let dir = toyos_tmpdir::TempDir::new("metal-one-clock");
+        let kernel = format!(
+            "[2026-10-04 09:30:00 {kernel_ms} cpu0 kernel] panic console: armed\n\
+             [2026-10-04 09:30:00 12.000 cpu0 kernel] spawn: /system/bin/logkeeper pid=6\n\
+             {said}\
+             [2026-10-04 09:30:00 15.000 cpu0 kernel] Boot: complete (3335ms)\n"
+        );
+        plant(&dir, "planted", PANEL, &kernel, None);
+        let loader = format!(
+            "[{loader_ms} cpu0 loader] {}\n[{loader_ms} cpu0 loader] {clock}\n[{loader_ms} cpu0 loader] {}\n{}\n{}\n{PANEL}",
+            bootlog::LOADER_FIRST_LINE,
+            bootlog::LOADER_LAST_LINE,
+            bootlog::SEPARATOR,
+            bootlog::LOADER_FIRST_LINE
+        );
+        let home = metal::at(&dir, "planted");
+        fs::write(home.join(READBACK_LOADER), loader).expect("a planted loader.log");
+        fs::write(home.join(READBACK_KERNEL), kernel).expect("a planted log");
+        metal::read_readback(&dir, "planted").expect("a planted readback").one_clock()
+    };
+    let (stated, none) = (STATED, bootlog::LOADER_CLOCK_NONE);
+    let said = |ms: &str| format!("[2026-10-04 09:30:00 {ms} supervisor] {}\n", bootlog::LOGKEEPER_STARTED);
+    assert_eq!(read(stated, " 9.876", "11.665", &said("13.064")), Ok(()));
+    assert_eq!(read(none, "--.---", " 0.050", &said("13.064")), Ok(()));
+    let why = read(stated, " 9.876", " 0.050", &said("13.064")).expect_err("a kernel that counts from its own start");
+    assert!(why.contains("the kernel's earliest timed record 50 ms"), "{why}");
+    let why = read(stated, " 9.876", "11.665", &said(" 1.064")).expect_err("a program that counts from the kernel's clock");
+    assert!(why.contains("reads 1064 ms and the kernel's record of that spawn 12000 ms"), "{why}");
+    // Nothing to compare, where the boot owes it.
+    let why = read(stated, "--.---", "11.665", &said("13.064")).expect_err("a loader that lost its time");
+    assert!(why.contains("none of its lines carries a time"), "{why}");
+    let why = read("Loader log: opened", " 9.876", "11.665", &said("13.064")).expect_err("a loader silent on its clock");
+    assert!(why.contains("said nothing of its clock"), "{why}");
+    let why = read(stated, " 9.876", "11.665", "").expect_err("a complete boot with no supervisor line");
+    assert!(why.contains("no timed supervisor line saying so"), "{why}");
 }

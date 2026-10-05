@@ -402,7 +402,7 @@ mod tests {
         assert_eq!(line, "supervisor: swap netstack: in service: /tmp/swap/x/netstack as pid 9");
         for rendered in [
             format!("{line}\n"),
-            format!("[2026-09-23 18:00:01 12.345 cpu1] @{line}\n"),
+            format!("[2026-09-23 18:00:01 12.345 cpu1 kernel] @{line}\n"),
         ] {
             assert_eq!(
                 heard(&rendered, "netstack"),

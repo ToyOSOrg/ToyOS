@@ -5,7 +5,8 @@
 //!
 //! Three reads: `idle0` and `idle1` either side of [`IDLE`], and `spin` after
 //! [`SPIN`] iterations on a thread per CPU begun at `idle1`. Each read's
-//! records follow a line with the clock after it and what the read took, a
+//! records follow a line with the log's clock after it ([`stamp_ns`], what a
+//! line's stamp is read against) and what the read took, a
 //! whole round each, none joining another's. **Nothing is printed until all
 //! three are taken**: a printed line reaches the stick within the second,
 //! through the `/log` fileserver on that fileserver's CPU.
@@ -37,9 +38,10 @@ use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::poller::{Poller, READABLE};
 use toyos::syscap::SysCap;
 use toyos::Pipe;
+use toyos_abi::clock::stamp_ns;
 use toyos_abi::counters::{Counter, RawRecord, Record};
 use toyos_abi::syscall::{self, SyscallError};
-use toyos_logstream::{program_line, record_ms, Lines};
+use toyos_logstream::{parse, program_line, Lines, Source};
 
 /// The idle span: long enough that a CPU's busy fraction is its idle one and
 /// not the reads'.
@@ -141,7 +143,7 @@ fn loaded(cap: &SysCap) {
     }
 }
 
-/// One read: the clock after it, what it took, and every CPU's records.
+/// One read: the log's clock after it, what it took, and every CPU's records.
 struct Read {
     at: u64,
     took: Duration,
@@ -153,7 +155,7 @@ fn read(cap: &SysCap) -> Read {
     let asked = Instant::now();
     let n = cap.counters(&mut raw).expect("the estate's capability reads the counters");
     let took = asked.elapsed();
-    let at = toyos_abi::clock::nanos_since_boot();
+    let at = stamp_ns();
     Read { at, took, records: raw[..n].iter().map(|r| Record::decode(r).expect("a record that decodes")).collect() }
 }
 
@@ -219,7 +221,9 @@ fn acpi_said(log: &mut Log) {
             query |= said.text.starts_with("acpiserver: embedded controller query ")
                 && said.text.contains(" taken for the first time");
         }
-        interrupt |= record_ms(line).is_some() && line.ends_with("] isa: the ACPI fixed hardware took its first interrupt");
+        interrupt |= parse(line).is_some_and(|p| {
+            p.source == Source::Kernel && p.text == "isa: the ACPI fixed hardware took its first interrupt"
+        });
         armed.is_some_and(|ec| !ec || interrupt && query)
     });
 }

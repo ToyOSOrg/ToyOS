@@ -4,9 +4,9 @@
 //! A record crossed the syscall boundary or came off a file, so it is input:
 //! [`Entry::decode`] refuses a kind the ABI does not name, and a kind that
 //! names its own task but carries no thread, each by name. A stamp is the
-//! writing CPU's counter, which the machine's `ClockPage` reads as
-//! nanoseconds since boot on the kernel's own formula, so a diary and a log
-//! line order against each other.
+//! writing CPU's counter, which the machine's `ClockPage` reads as a log
+//! line's time, from the counter's zero on the kernel's own formula, so a
+//! diary and a log line order against each other.
 //!
 //! Pure: `core` only, no `unsafe`, no I/O.
 
@@ -15,7 +15,7 @@
 
 use core::fmt;
 
-use toyos_abi::clock::{nanos_between, ClockPage};
+use toyos_abi::clock::ClockPage;
 use toyos_abi::trace::{Kind, TraceRecord, NO_THREAD};
 
 /// A thread, by its process's id and its own, each as the writing CPU held
@@ -146,7 +146,7 @@ pub struct Line<'a> {
 impl fmt::Display for Line<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let e = self.entry;
-        let nanos = nanos_between(self.clock.counter_at_boot, self.clock.period_fs, e.stamp);
+        let nanos = self.clock.stamp_of(e.stamp);
         write!(f, "[{}.{:09} cpu{}] {}", nanos / 1_000_000_000, nanos % 1_000_000_000, e.cpu, e.event.name())?;
         match e.thread {
             Some(t) => write!(f, " {}/{}", Id(t.pid), Id(t.tid))?,
@@ -190,11 +190,17 @@ mod tests {
 
     use super::*;
 
-    /// A 1 GHz counter that read 1000 at boot: one tick a nanosecond.
-    const CLOCK: ClockPage = ClockPage { magic: toyos_abi::clock::CLOCK_MAGIC, counter_at_boot: 1_000, period_fs: 1_000_000 };
+    /// A 1 GHz counter that read 1000 at boot, two seconds after its zero:
+    /// one tick a nanosecond.
+    const CLOCK: ClockPage = ClockPage {
+        magic: toyos_abi::clock::CLOCK_MAGIC,
+        counter_at_boot: 1_000,
+        period_fs: 1_000_000,
+        stamp_at_boot: 2_000_000_000,
+    };
 
     fn raw(kind: Kind, data: u32, pid: u32, tid: u32) -> TraceRecord {
-        TraceRecord { seq: 9, stamp: 1_000 + 12_000_345_678, kind: kind as u16, cpu: 3, data, pid, tid }
+        TraceRecord { seq: 9, stamp: 1_000 + 10_000_345_678, kind: kind as u16, cpu: 3, data, pid, tid }
     }
 
     #[test]

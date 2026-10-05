@@ -65,7 +65,7 @@ struct Log {
     pipe: Pipe,
     lines: Lines,
     handed: u64,
-    /// When this program asked, in milliseconds since boot: a kernel record
+    /// When this program asked, in the log's milliseconds: a kernel record
     /// stamped before it is the boot so far, however late `logkeeper` read it.
     asked_ms: u64,
     /// Whether the last kernel record was kept, which its continuation lines
@@ -80,7 +80,7 @@ struct Log {
 impl Log {
     /// Ask `logkeeper`: one request, and a blocking read of its one answer.
     fn subscribe() -> Result<Self, String> {
-        let asked_ms = toyos_abi::clock::nanos_since_boot() / 1_000_000;
+        let asked_ms = toyos_abi::clock::stamp_ns() / 1_000_000;
         let logkeeper_api::Served { pipe, boot_so_far: handed } = logkeeper_api::read()?;
         Ok(Self {
             pipe,
@@ -110,8 +110,10 @@ impl Log {
             let shown = showing.line(&line);
             let keep = match shown.head.map(|head| head.source) {
                 Some(Source::Program(tag)) => tag != OWN_TAG,
-                Some(Source::Kernel) => {
-                    *drawing = toyos_logstream::record_ms(&line).is_some_and(|ms| ms < asked_ms);
+                // A record with no time was said before the clock started.
+                Some(Source::Kernel | Source::Loader) => {
+                    *drawing =
+                        toyos_logstream::parse(&line).is_some_and(|p| p.ms.is_none_or(|ms| ms < asked_ms));
                     *drawing
                 }
                 None => *drawing,
