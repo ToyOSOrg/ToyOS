@@ -18,8 +18,8 @@ use std::process::{Command, Stdio};
 
 use toyos::census::Census;
 use toyos::shm::SharedMemory;
-use toyos::{namespace, port, AsHandle};
-use toyos_abi::syscall::{self, SVC_LABEL};
+use toyos::{namespace, port};
+use toyos_abi::syscall::SVC_LABEL;
 
 #[path = "../census_wait.rs"]
 mod census_wait;
@@ -119,7 +119,7 @@ fn donor() {
     region.as_mut_slice()[..PAYLOAD.len()].copy_from_slice(PAYLOAD);
 
     let shared = region.share().expect("donor: a second handle");
-    syscall::handle_send(conn.as_handle(), &[shared]).expect("donor: send the region");
+    conn.send_handles([shared]).expect("donor: send the region");
     conn.signal(1).expect("donor: announce it");
 
     // The maker lets go while the peer has not mapped yet: no process has this

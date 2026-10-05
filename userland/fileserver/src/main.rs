@@ -45,7 +45,7 @@ use fileserver::volume::{Kind, Meta, Node, OpenHow, Out, Volume};
 use fileserver::writeback::WriteBack;
 use toyos::endow::{self, Endowments};
 use toyos::fs::*;
-use toyos::ipc::{self, Connection, RxStep};
+use toyos::ipc::{self, Connection, RxStep, TrySendError};
 use toyos::poller::{Poller, READABLE};
 use toyos::port::Acceptor;
 use toyos::shm::SharedMemory;
@@ -331,7 +331,7 @@ enum Answer {
     /// A path the client resolves again, `len` bytes of the window.
     Link(usize),
     /// A reply that carries a handle.
-    WithHandle(Reply, toyos::RawHandle),
+    WithHandle(Reply, toyos::OwnedHandle),
     /// The client broke the protocol and is let go.
     Drop(&'static str),
     /// The client is answered this refusal and let go, for this reason.
@@ -500,7 +500,11 @@ impl Server {
         let sent = match answer {
             Answer::Reply(reply) => client.conn.try_send(REPLY, &reply),
             Answer::Link(len) => client.conn.try_send(LINK, &Reply { value: len as u64, ..Reply::ok() }),
-            Answer::WithHandle(reply, handle) => client.conn.try_send_with_handles(&[handle], REPLY, &reply),
+            Answer::WithHandle(reply, handle) => client
+                .conn
+                .send_handles([handle])
+                .map_err(TrySendError::Syscall)
+                .and_then(|()| client.conn.try_send(REPLY, &reply)),
             Answer::Drop(why) => return self.drop_client(id, why),
             Answer::Refuse(e, why) => {
                 // Let go whether or not the refusal went: either way it is said.
@@ -731,7 +735,7 @@ impl Server {
                 let sid = self.next_stream;
                 self.next_stream += 1;
                 self.streams.insert(sid, Stream { pipe: read, node, offset: r.offset, instance });
-                Ok(Answer::WithHandle(Reply::ok(), write.into_raw()))
+                Ok(Answer::WithHandle(Reply::ok(), write.into()))
             }
             STAT | LSTAT => {
                 let rel = self.path(id, 0, r.len)?;

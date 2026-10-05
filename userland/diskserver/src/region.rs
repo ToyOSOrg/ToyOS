@@ -51,7 +51,7 @@ impl Region {
     }
 
     /// A second handle to the region, for a send.
-    pub fn share(&self) -> Result<toyos::RawHandle, SyscallError> {
+    pub fn share(&self) -> Result<toyos::OwnedHandle, SyscallError> {
         self.memory.share()
     }
 

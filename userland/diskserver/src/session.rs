@@ -437,8 +437,8 @@ fn handshake(
     region: &Region,
 ) -> Result<(Connection, Opened), Error> {
     let conn = names.open(service).map_err(Error::Kernel)?;
-    let shared = region.share().map_err(Error::Kernel)?;
-    conn.send_bytes_with_handles(&[shared], wire::MSG_OPEN, &guid).map_err(|_| Error::Ended)?;
+    conn.send_handles([region.share().map_err(Error::Kernel)?]).map_err(|_| Error::Ended)?;
+    conn.send_bytes(wire::MSG_OPEN, &guid).map_err(|_| Error::Ended)?;
     let header = conn.recv_header().map_err(|_| Error::Ended)?;
     let mut payload = [0u8; Opened::BYTES];
     let len = conn.recv_bytes(&header, &mut payload).map_err(|_| Error::Ended)?;

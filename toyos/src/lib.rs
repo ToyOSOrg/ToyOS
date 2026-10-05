@@ -69,15 +69,25 @@ pub fn pipe_pair() -> Result<(Pipe, Pipe), toyos_abi::syscall::SyscallError> {
 /// forgotten by accident — [`OwnedHandle::into_raw`] is the single spelling for
 /// giving up ownership, and the single thing to grep for when asking who does.
 ///
-/// Not public — consumers use the typed wrappers below.
-pub(crate) struct OwnedHandle(pub(crate) RawHandle);
+/// Consumers hold the typed wrappers below; this is what a handle is while it
+/// travels, the currency of [`Connection::send_handles`].
+pub struct OwnedHandle(pub(crate) RawHandle);
 
 impl OwnedHandle {
+    /// Take ownership of a handle this process holds.
+    ///
+    /// # Safety
+    /// `raw` must be a live handle in this process's table that nothing else
+    /// answers for: this closes it when it drops.
+    pub unsafe fn from_raw(raw: RawHandle) -> Self {
+        Self(raw)
+    }
+
     pub(crate) fn raw(&self) -> RawHandle { self.0 }
 
     /// Give up ownership: the handle stays open and this stops answering for
     /// it.
-    pub(crate) fn into_raw(self) -> RawHandle {
+    pub fn into_raw(self) -> RawHandle {
         let raw = self.0;
         core::mem::forget(self);
         raw
@@ -104,6 +114,10 @@ impl Drop for OwnedHandle {
     fn drop(&mut self) {
         toyos_abi::syscall::close(self.0);
     }
+}
+
+impl AsHandle for OwnedHandle {
+    fn as_handle(&self) -> RawHandle { self.0 }
 }
 
 /// A claimed hardware device, out of this process's endowment table.
@@ -171,6 +185,10 @@ impl Pipe {
 
 impl AsHandle for Pipe {
     fn as_handle(&self) -> RawHandle { self.0.raw() }
+}
+
+impl From<Pipe> for OwnedHandle {
+    fn from(pipe: Pipe) -> Self { pipe.0 }
 }
 
 /// A console handle: the one `/system/bin/supervisor` endows `/system/bin/logkeeper` with,

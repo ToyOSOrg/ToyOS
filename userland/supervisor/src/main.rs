@@ -254,8 +254,8 @@ impl Log {
         let ring = ring.share().expect("supervisor: a log ring would not duplicate");
         let mut payload = [0u8; 4 + MAX_TAG];
         let len = Registration { pid, tag }.encode(&mut payload);
-        let handles = [ring, alive.into_raw()];
-        if let Err(e) = self.conn.send_bytes_with_handles(&handles, REGISTER, &payload[..len]) {
+        let sent = self.conn.send_handles([ring, alive.into()]).map_err(ipc::IpcError::Syscall);
+        if let Err(e) = sent.and_then(|()| self.conn.send_bytes(REGISTER, &payload[..len])) {
             panic!("supervisor: logkeeper's origins connection refused {name}'s ring: {e:?}");
         }
     }
@@ -1622,21 +1622,14 @@ impl Supervisor<'_> {
         );
         match started {
             Ok((child, _)) => {
-                let handle = toyos::RawHandle(child.into_raw_handle());
-                // **Which side owns the handle is the whole of what the two arms
-                // differ by.** A refused `handle_send` leaves it in the supervisor's table
-                // and the supervisor must close it — the supervisor keeps no `Process` handle from a
+                // SAFETY: `into_raw_handle` gave up the child's one handle in this table.
+                let handle = unsafe { toyos::OwnedHandle::from_raw(toyos::RawHandle(child.into_raw_handle())) };
+                // Consumed either way, so the supervisor keeps no `Process` handle from a
                 // launch, or a client launching `/system/bin/true` in a loop exhausts the
-                // one table the machine cannot do without. A send that *took* it
-                // and a frame that then did not go leaves it queued on a connection
-                // this call is about to drop, which releases it — and closing it
-                // here would be closing a handle the supervisor no longer holds, which under
-                // the bad-handle policy is the supervisor exiting.
-                match toyos_abi::syscall::handle_send(conn.as_handle(), &[handle]) {
-                    Ok(()) => {
-                        let _ = conn.try_signal(launch::MSG_LAUNCHED);
-                    }
-                    Err(_) => toyos_abi::syscall::close(handle),
+                // one table the machine cannot do without. A frame refused after the move
+                // leaves it queued on a connection this call is about to drop.
+                if conn.send_handles([handle]).is_ok() {
+                    let _ = conn.try_signal(launch::MSG_LAUNCHED);
                 }
             }
             // std's word for the kernel's `Gone` for the place, and nothing else

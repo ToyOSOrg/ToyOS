@@ -197,22 +197,6 @@ impl Connection {
         try_send_bytes(self.0.raw(), msg_type, data)
     }
 
-    /// [`send_with_handles`](Self::send_with_handles) for a server that will
-    /// not park on a client.
-    ///
-    /// The handles move first here too, and a refused frame leaves them in the
-    /// peer's queue — where the queue releases them when the connection goes,
-    /// which is the next thing that happens to a peer this refused.
-    pub fn try_send_with_handles<T: IpcPayload>(
-        &self,
-        handles: &[RawHandle],
-        msg_type: u32,
-        payload: &T,
-    ) -> Result<(), TrySendError> {
-        syscall::handle_send(self.0.raw(), handles).map_err(TrySendError::Syscall)?;
-        self.try_send(msg_type, payload)
-    }
-
     pub fn recv_header(&self) -> Result<IpcHeader, IpcError> {
         recv_header(self.0.raw())
     }
@@ -225,33 +209,24 @@ impl Connection {
         recv(self.0.raw())
     }
 
-    /// Move `handles` to the peer and then send the frame that announces them.
+    /// Move `handles` to the peer, as the batch the next frame announces.
     ///
-    /// **In that order.** The handles travel in a queue of their own rather than
-    /// interleaved with the bytes, so a peer that has read the frame is
-    /// guaranteed to find them — and a peer that has not is guaranteed not to
-    /// act on them early. Sending the frame first would make the receiver's
-    /// `recv_handles` a poll.
-    pub fn send_with_handles<T: IpcPayload>(
+    /// **Every handle is consumed, sent or not**: a refused move closes them
+    /// all, so no caller holds a handle it believes it gave away. More than
+    /// [`MAX_TRANSFER_HANDLES`](syscall::MAX_TRANSFER_HANDLES) is refused
+    /// `InvalidArgument`, as the kernel refuses it.
+    ///
+    /// **The handles go before the frame that announces them.** They travel in
+    /// a queue of their own rather than interleaved with the bytes, so a peer
+    /// that has read the frame is guaranteed to find them — and a peer that
+    /// has not is guaranteed not to act on them early. A frame refused after a
+    /// move leaves the batch in the peer's queue, which releases it with the
+    /// connection.
+    pub fn send_handles(
         &self,
-        handles: &[RawHandle],
-        msg_type: u32,
-        payload: &T,
-    ) -> Result<(), IpcError> {
-        syscall::handle_send(self.0.raw(), handles).map_err(IpcError::Syscall)?;
-        self.send(msg_type, payload)
-    }
-
-    /// [`send_with_handles`](Self::send_with_handles) for a message whose
-    /// payload is a byte blob rather than a fixed struct.
-    pub fn send_bytes_with_handles(
-        &self,
-        handles: &[RawHandle],
-        msg_type: u32,
-        data: &[u8],
-    ) -> Result<(), IpcError> {
-        syscall::handle_send(self.0.raw(), handles).map_err(IpcError::Syscall)?;
-        self.send_bytes(msg_type, data)
+        handles: impl IntoIterator<Item = OwnedHandle>,
+    ) -> Result<(), SyscallError> {
+        move_batch(handles, |batch| syscall::handle_send(self.0.raw(), batch))
     }
 
     /// Take the batch the peer sent with the frame just received.
@@ -328,15 +303,26 @@ pub fn try_send<T: IpcPayload>(handle: RawHandle, msg_type: u32, payload: &T) ->
     write_whole(handle, &frame[..IpcHeader::WIRE_SIZE + size])
 }
 
-/// [`try_send`] preceded by the move of the handles its payload describes.
-pub fn try_send_with_handles<T: IpcPayload>(
-    handle: RawHandle,
-    handles: &[RawHandle],
-    msg_type: u32,
-    payload: &T,
-) -> Result<(), TrySendError> {
-    syscall::handle_send(handle, handles).map_err(TrySendError::Syscall)?;
-    try_send(handle, msg_type, payload)
+/// Hand `handles` to `send` as one batch, consuming every one: what `send`
+/// takes is the peer's, and what it refuses is closed here as it drops.
+fn move_batch<H: AsHandle>(
+    handles: impl IntoIterator<Item = H>,
+    send: impl FnOnce(&[RawHandle]) -> Result<(), SyscallError>,
+) -> Result<(), SyscallError> {
+    let mut batch: [Option<H>; syscall::MAX_TRANSFER_HANDLES] = core::array::from_fn(|_| None);
+    let mut count = 0;
+    for handle in handles {
+        *batch.get_mut(count).ok_or(SyscallError::InvalidArgument)? = Some(handle);
+        count += 1;
+    }
+    let mut raw = [toyos_abi::HANDLE_INVALID; syscall::MAX_TRANSFER_HANDLES];
+    for (out, handle) in raw.iter_mut().zip(batch.iter().flatten()) {
+        *out = handle.as_handle();
+    }
+    send(&raw[..count])?;
+    #[expect(clippy::disallowed_methods, reason = "taken: the numbers are no longer this process's to close")]
+    batch.into_iter().flatten().for_each(core::mem::forget);
+    Ok(())
 }
 
 /// The `N` handles the frame just read off `handle` says travel with it.
@@ -630,4 +616,69 @@ fn write_all(handle: RawHandle, buf: &[u8]) -> Result<(), IpcError> {
         offset += n;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use super::*;
+
+    /// A handle whose close is recorded rather than made.
+    struct Probe {
+        raw: RawHandle,
+        closed: Rc<RefCell<Vec<u32>>>,
+    }
+
+    impl AsHandle for Probe {
+        fn as_handle(&self) -> RawHandle { self.raw }
+    }
+
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            self.closed.borrow_mut().push(self.raw.0);
+        }
+    }
+
+    fn probes(count: u32, closed: &Rc<RefCell<Vec<u32>>>) -> Vec<Probe> {
+        (1..=count).map(|n| Probe { raw: RawHandle(n), closed: Rc::clone(closed) }).collect()
+    }
+
+    /// The kernel's refusal leaves every handle at its own number, and the
+    /// batch closes each of them, once.
+    #[test]
+    fn a_refused_move_closes_every_handle_it_consumed() {
+        let closed = Rc::default();
+        let mut seen = Vec::new();
+        let sent = move_batch(probes(3, &closed), |batch| {
+            seen.extend(batch.iter().map(|h| h.0));
+            Err(SyscallError::Gone)
+        });
+        assert_eq!(sent, Err(SyscallError::Gone));
+        assert_eq!(seen, [1, 2, 3], "the kernel was not asked to move the batch in order");
+        assert_eq!(*closed.borrow(), [1, 2, 3]);
+    }
+
+    /// A taken batch is the peer's: closing a number this process no longer
+    /// holds would end it.
+    #[test]
+    fn a_taken_move_closes_nothing() {
+        let closed = Rc::default();
+        assert_eq!(move_batch(probes(2, &closed), |_| Ok(())), Ok(()));
+        assert!(closed.borrow().is_empty(), "closed {:?} after a move", closed.borrow());
+    }
+
+    /// One past the kernel's bound is refused before the kernel is asked, and
+    /// every handle, the one that did not fit included, is closed.
+    #[test]
+    fn a_batch_past_the_bound_is_refused_and_closed() {
+        let closed = Rc::default();
+        let over = syscall::MAX_TRANSFER_HANDLES as u32 + 1;
+        let sent = move_batch(probes(over, &closed), |_| panic!("an oversized batch reached the kernel"));
+        assert_eq!(sent, Err(SyscallError::InvalidArgument));
+        let mut closed = closed.borrow().clone();
+        closed.sort_unstable();
+        assert_eq!(closed, (1..=over).collect::<Vec<_>>());
+    }
 }

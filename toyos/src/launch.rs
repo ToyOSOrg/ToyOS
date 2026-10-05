@@ -22,7 +22,7 @@
 //! halves of it — std's `Command` encodes and the supervisor decodes.
 
 use crate::ipc::{Connection, IpcError};
-use crate::RawHandle;
+use crate::{OwnedHandle, RawHandle};
 
 /// The label a holder is endowed its launcher under, and the one name in that
 /// namespace. **Never an entry of `svc`**, which std hands every direct spawn:
@@ -294,16 +294,17 @@ impl<'a> Request<'a> {
 /// Why a launch did not answer, and — the part that matters — whether the
 /// handles it was going to carry are still the caller's.
 ///
-/// **A send moves them.** `SYS_HANDLE_SEND` takes them out of the sender's
-/// table, so a caller that closed them after a refusal would be closing handles
-/// it no longer holds — which, under the bad-handle policy, is the caller
-/// exiting. Which side owns them is therefore not a detail of the error but the
-/// whole of what the caller needs from it.
+/// **A send consumes them.** `SYS_HANDLE_SEND` takes them out of the sender's
+/// table, and a refused one closes them ([`Connection::send_handles`]), so a
+/// caller that closed them after either would be closing handles it no longer
+/// holds — which, under the bad-handle policy, is the caller exiting. Which
+/// side owns them is therefore not a detail of the error but the whole of what
+/// the caller needs from it.
 pub enum LaunchError {
-    /// Nothing left this process. The handles are still here to close.
+    /// The request did not encode. The handles are still here to close.
     NotSent(IpcError),
-    /// The handles moved and the answer did not come back. They are the
-    /// launcher's to release now.
+    /// The handles are gone from this process: moved to the launcher, or
+    /// closed on a refused move, and no answer came back.
     Sent(IpcError),
 }
 
@@ -323,8 +324,8 @@ pub enum Outcome<'a> {
 /// Send one launch and read its answer, a `HOME` in `answer`.
 ///
 /// The handles go before the frame that announces them, which is
-/// [`Connection::send_with_handles`]'s whole rule — and the `Process` handle
-/// comes back the same way. A `HOME` longer than `answer` or not UTF-8 is a
+/// [`Connection::send_handles`]'s whole rule — and the `Process` handle comes
+/// back the same way. A `HOME` longer than `answer` or not UTF-8 is a
 /// malformed answer, never a shortened one.
 pub fn launch<'a>(
     conn: &Connection,
@@ -336,8 +337,10 @@ pub fn launch<'a>(
         .encode(&mut buf)
         .map_err(|_| LaunchError::NotSent(IpcError::TooLarge))?;
     let (handles, count) = request.handles();
-    conn.send_bytes_with_handles(&handles[..count], MSG_LAUNCH, &buf[..len])
-        .map_err(LaunchError::Sent)?;
+    // The request's handles were the caller's to give, and are given here.
+    conn.send_handles(handles[..count].iter().map(|&h| OwnedHandle(h)))
+        .map_err(|e| LaunchError::Sent(IpcError::Syscall(e)))?;
+    conn.send_bytes(MSG_LAUNCH, &buf[..len]).map_err(LaunchError::Sent)?;
     let header = conn.recv_header().map_err(LaunchError::Sent)?;
     match header.msg_type {
         MSG_LAUNCHED => match conn.recv_handles_exact::<1>() {
