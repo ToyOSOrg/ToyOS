@@ -1,0 +1,12 @@
+diff --git a/src/sysroot.rs b/src/sysroot.rs
+index fb204c69..22d43328 100644
+--- a/src/sysroot.rs
++++ b/src/sysroot.rs
+@@ -928,6 +928,7 @@ fn forget_another_compiler(build_dir: &Path, host: &str, identity: &str) {
+ /// [`forget_another_compiler`], removing with `remove`, so a test can stop it.
+ fn forget_another_compiler_by(build_dir: &Path, host: &str, identity: &str, remove: impl Fn(&Path)) {
+     let record = build_dir.join("compiled-by");
++    fs::write(&record, identity).unwrap();
+     if fs::read_to_string(&record).is_ok_and(|by| by == identity) {
+         return;
+     }

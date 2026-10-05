@@ -1,0 +1,78 @@
+   Compiling toyos-build v0.1.0 (/home/user/toyos-rootless)
+    Finished `test` profile [optimized + debuginfo] target(s) in 47.26s
+     Running unittests src/lib.rs (target/debug/deps/toyos_build-ebb2df733901da06)
+
+running 1 test
+test toolchain::tests::dep_info_that_cannot_be_read_is_refused ... FAILED
+
+failures:
+
+---- toolchain::tests::dep_info_that_cannot_be_read_is_refused stdout ----
+
+thread 'toolchain::tests::dep_info_that_cannot_be_read_is_refused' (2067) panicked at src/toolchain.rs:179:67:
+read /tmp/toyos-tmp-2064-0/dep-info-unread-0/x86_64-unknown-none/dist/core.d: stream did not contain valid UTF-8
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/std/src/panicking.rs:679:5
+   1: core::panicking::panic_fmt
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/panicking.rs:80:14
+   2: toyos_build::toolchain::dep_info_under::{closure#2}
+             at ./src/toolchain.rs:179:67
+   3: <core::result::Result<alloc::string::String, core::io::error::Error>>::unwrap_or_else::<toyos_build::toolchain::dep_info_under::{closure#2}>
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/result.rs:1621:23
+   4: toyos_build::toolchain::dep_info_under
+             at ./src/toolchain.rs:179:48
+   5: toyos_build::toolchain::dep_info_under
+             at ./src/toolchain.rs:177:13
+   6: toyos_build::toolchain::collect_dep_info
+             at ./src/toolchain.rs:169:18
+   7: toyos_build::toolchain::tests::dep_info_that_cannot_be_read_is_refused::{closure#0}::{closure#0}
+             at ./src/toolchain.rs:1535:55
+   8: std::panicking::catch_unwind::do_call::<toyos_build::toolchain::tests::dep_info_that_cannot_be_read_is_refused::{closure#0}::{closure#0}, ()>
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/std/src/panicking.rs:576:43
+   9: std::panicking::catch_unwind::<(), toyos_build::toolchain::tests::dep_info_that_cannot_be_read_is_refused::{closure#0}::{closure#0}>
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/std/src/panicking.rs:544:19
+  10: std::panic::catch_unwind::<toyos_build::toolchain::tests::dep_info_that_cannot_be_read_is_refused::{closure#0}::{closure#0}, ()>
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/std/src/panic.rs:359:14
+  11: toyos_build::toolchain::tests::dep_info_that_cannot_be_read_is_refused::{closure#0}
+             at ./src/toolchain.rs:1535:27
+  12: toyos_build::toolchain::tests::dep_info_that_cannot_be_read_is_refused
+             at ./src/toolchain.rs:1540:23
+  13: toyos_build::toolchain::tests::dep_info_that_cannot_be_read_is_refused::{closure#0}
+             at ./src/toolchain.rs:1525:49
+  14: <toyos_build::toolchain::tests::dep_info_that_cannot_be_read_is_refused::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/ops/function.rs:250:5
+  15: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+thread 'toolchain::tests::dep_info_that_cannot_be_read_is_refused' (2067) panicked at src/toolchain.rs:1536:46:
+a directory that cannot be read was skipped
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/std/src/panicking.rs:679:5
+   1: core::panicking::panic_fmt
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/panicking.rs:80:14
+   2: toyos_build::toolchain::tests::dep_info_that_cannot_be_read_is_refused::{closure#0}::{closure#1}
+             at ./src/toolchain.rs:1536:46
+   3: <core::option::Option<alloc::boxed::Box<dyn core::any::Any + core::marker::Send>>>::unwrap_or_else::<toyos_build::toolchain::tests::dep_info_that_cannot_be_read_is_refused::{closure#0}::{closure#1}>
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/option.rs:1065:21
+   4: toyos_build::toolchain::tests::dep_info_that_cannot_be_read_is_refused::{closure#0}
+             at ./src/toolchain.rs:1536:28
+   5: toyos_build::toolchain::tests::dep_info_that_cannot_be_read_is_refused
+             at ./src/toolchain.rs:1548:23
+   6: toyos_build::toolchain::tests::dep_info_that_cannot_be_read_is_refused::{closure#0}
+             at ./src/toolchain.rs:1525:49
+   7: <toyos_build::toolchain::tests::dep_info_that_cannot_be_read_is_refused::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/ops/function.rs:250:5
+   8: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+
+failures:
+    toolchain::tests::dep_info_that_cannot_be_read_is_refused
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 401 filtered out; finished in 0.36s
+
+error: test failed, to rerun pass `-p toyos-build --lib`

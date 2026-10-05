@@ -1,0 +1,35 @@
+   Compiling toyos-tmpdir v0.1.0 (/home/user/toyos-rootless/toyos-tmpdir)
+    Finished `test` profile [optimized + debuginfo] target(s) in 1.26s
+     Running unittests src/lib.rs (target/debug/deps/toyos_tmpdir-3d1bde0ec5ccc61b)
+
+running 1 test
+test tests::a_directory_the_sweep_cannot_remove_costs_no_process_but_this_one ... FAILED
+
+failures:
+
+---- tests::a_directory_the_sweep_cannot_remove_costs_no_process_but_this_one stdout ----
+
+thread 'tests::a_directory_the_sweep_cannot_remove_costs_no_process_but_this_one' (16669) panicked at toyos-tmpdir/src/lib.rs:459:9:
+/tmp/toyos-tmp-16668-0/stuck-0/root/reap-toyos-tmp-999999-0 stayed in the root it was reaped into
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/std/src/panicking.rs:679:5
+   1: core::panicking::panic_fmt
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/panicking.rs:80:14
+   2: toyos_tmpdir::tests::a_directory_the_sweep_cannot_remove_costs_no_process_but_this_one
+             at ./src/lib.rs:459:9
+   3: toyos_tmpdir::tests::a_directory_the_sweep_cannot_remove_costs_no_process_but_this_one::{closure#0}
+             at ./src/lib.rs:451:75
+   4: <toyos_tmpdir::tests::a_directory_the_sweep_cannot_remove_costs_no_process_but_this_one::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/ops/function.rs:250:5
+   5: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+
+failures:
+    tests::a_directory_the_sweep_cannot_remove_costs_no_process_but_this_one
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.10s
+
+error: test failed, to rerun pass `-p toyos-tmpdir --lib`

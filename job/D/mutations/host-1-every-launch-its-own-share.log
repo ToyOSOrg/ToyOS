@@ -1,0 +1,124 @@
+   Compiling toyos-manifest v0.1.0 (/home/user/toyos-sessionshares/toyos-manifest)
+warning: unused variable: `session`
+   --> toyos-manifest/src/launch.rs:185:36
+    |
+185 | pub fn may_start(caller: &Program, session: Session, target: Target<'_>) -> Result<Starts, Refusal> {
+    |                                    ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_session`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `toyos-manifest` (lib) generated 1 warning (run `cargo fix --lib -p toyos-manifest` to apply 1 suggestion)
+warning: `toyos-manifest` (lib test) generated 1 warning (1 duplicate)
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.59s
+     Running unittests src/lib.rs (target/debug/deps/toyos_manifest-450ec998143aef4f)
+
+running 24 tests
+test launch::tests::an_authority_reads_back_as_written ... ok
+test launch::tests::what_encode_cannot_have_written_is_refused ... ok
+test package::tests::a_field_that_is_not_one_is_refused_by_name ... ok
+test package::tests::a_launch_path_names_one_package_or_none ... ok
+test package::tests::a_listing_shows_only_what_the_supervisor_would_start_and_never_more_than_the_bound ... ok
+test package::tests::a_manifest_cannot_name_a_binary_outside_its_own_directory ... ok
+test package::tests::a_path_the_normalizer_would_change_is_not_canonical_and_classifies_as_nothing ... ok
+test package::tests::what_a_shell_resolves_is_what_the_launcher_accepts ... ok
+test package::tests::what_the_installer_writes_is_what_the_supervisor_reads ... ok
+test tests::a_device_class_name_is_the_abi_s ... ok
+test tests::a_name_that_would_not_survive_the_round_trip_is_refused ... ok
+test tests::a_package_row_is_connectors_and_nothing_else ... ok
+test tests::a_role_is_one_of_the_three_and_its_directories_are_fixed ... ok
+test tests::a_row_that_serves_a_port_and_is_no_service_is_refused ... ok
+test tests::a_service_s_home_is_its_state_and_every_other_row_s_the_session_s ... ok
+test tests::a_syscap_set_always_carries_transfer_and_never_an_invented_right ... ok
+test tests::logread_carries_both_halves_of_reading_a_stream_that_never_blocks ... ok
+test tests::records_attach_to_the_program_above_them ... ok
+test tests::the_process_roster_is_its_own_name_and_its_own_bit ... ok
+test tests::the_same_manifest_renders_to_the_same_bytes ... ok
+test tests::what_the_build_writes_is_what_the_supervisor_reads ... ok
+test launch::tests::a_sessions_launches_spend_its_one_share ... FAILED
+test launch::tests::a_caller_starts_what_its_row_lists_and_swap_and_update_only_in_a_login_session ... FAILED
+test launch::tests::nothing_listed_is_nothing_started_and_apps_names_no_row ... FAILED
+
+failures:
+
+---- launch::tests::a_sessions_launches_spend_its_one_share stdout ----
+
+thread 'launch::tests::a_sessions_launches_spend_its_one_share' (23890) panicked at toyos-manifest/src/launch.rs:293:13:
+assertion `left == right` failed: a shell's launches left its session
+  left: 11
+ right: 2
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/std/src/panicking.rs:679:5
+   1: core::panicking::panic_fmt
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/panicking.rs:80:14
+   2: core::panicking::assert_failed_inner
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/panicking.rs:447:23
+   3: core::panicking::assert_failed::<u64, u64>
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/panicking.rs:407:5
+   4: toyos_manifest::launch::tests::a_sessions_launches_spend_its_one_share
+   5: toyos_manifest::launch::tests::a_sessions_launches_spend_its_one_share::{closure#0}
+             at ./src/launch.rs:278:49
+   6: <toyos_manifest::launch::tests::a_sessions_launches_spend_its_one_share::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/ops/function.rs:250:5
+   7: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+---- launch::tests::a_caller_starts_what_its_row_lists_and_swap_and_update_only_in_a_login_session stdout ----
+
+thread 'launch::tests::a_caller_starts_what_its_row_lists_and_swap_and_update_only_in_a_login_session' (23889) panicked at toyos-manifest/src/launch.rs:268:13:
+assertion `left == right` failed: row 0
+  left: Ok(Opening)
+ right: Ok(In(Machine))
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/std/src/panicking.rs:679:5
+   1: core::panicking::panic_fmt
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/panicking.rs:80:14
+   2: core::panicking::assert_failed_inner
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/panicking.rs:447:23
+   3: core::panicking::assert_failed::<core::result::Result<toyos_manifest::launch::Starts, toyos_manifest::launch::Refusal>, core::result::Result<toyos_manifest::launch::Starts, toyos_manifest::launch::Refusal>>
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/panicking.rs:407:5
+   4: toyos_manifest::launch::tests::a_caller_starts_what_its_row_lists_and_swap_and_update_only_in_a_login_session
+             at ./src/launch.rs:268:13
+   5: toyos_manifest::launch::tests::a_caller_starts_what_its_row_lists_and_swap_and_update_only_in_a_login_session::{closure#0}
+             at ./src/launch.rs:234:88
+   6: <toyos_manifest::launch::tests::a_caller_starts_what_its_row_lists_and_swap_and_update_only_in_a_login_session::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/ops/function.rs:250:5
+   7: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+---- launch::tests::nothing_listed_is_nothing_started_and_apps_names_no_row stdout ----
+
+thread 'launch::tests::nothing_listed_is_nothing_started_and_apps_names_no_row' (23892) panicked at toyos-manifest/src/launch.rs:314:9:
+assertion `left == right` failed
+  left: Ok(Opening)
+ right: Ok(In(Machine))
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/std/src/panicking.rs:679:5
+   1: core::panicking::panic_fmt
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/panicking.rs:80:14
+   2: core::panicking::assert_failed_inner
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/panicking.rs:452:17
+   3: core::panicking::assert_failed::<core::result::Result<toyos_manifest::launch::Starts, toyos_manifest::launch::Refusal>, core::result::Result<toyos_manifest::launch::Starts, toyos_manifest::launch::Refusal>>
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/panicking.rs:407:5
+   4: toyos_manifest::launch::tests::nothing_listed_is_nothing_started_and_apps_names_no_row
+   5: toyos_manifest::launch::tests::nothing_listed_is_nothing_started_and_apps_names_no_row::{closure#0}
+             at ./src/launch.rs:306:65
+   6: <toyos_manifest::launch::tests::nothing_listed_is_nothing_started_and_apps_names_no_row::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/ops/function.rs:250:5
+   7: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+
+failures:
+    launch::tests::a_caller_starts_what_its_row_lists_and_swap_and_update_only_in_a_login_session
+    launch::tests::a_sessions_launches_spend_its_one_share
+    launch::tests::nothing_listed_is_nothing_started_and_apps_names_no_row
+
+test result: FAILED. 21 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+error: test failed, to rerun pass `-p toyos-manifest --lib`

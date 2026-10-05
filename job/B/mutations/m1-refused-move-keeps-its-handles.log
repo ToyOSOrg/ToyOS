@@ -1,0 +1,82 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running unittests src/lib.rs (toyos/target/x86_64-unknown-linux-gnu/debug/deps/toyos-23d783014d759aeb)
+
+running 43 tests
+test fs::tests::a_grant_round_trips_at_every_bound ... ok
+test fs::tests::a_listing_entry_round_trips_and_a_short_one_is_refused ... ok
+test fs::tests::a_path_is_canonical_only_without_empty_dot_or_dotdot_components ... ok
+test fs::tests::bytes_no_grant_was_encoded_as_are_refused ... ok
+test ipc::tests::a_batch_past_the_bound_is_refused_and_closed ... ok
+test fs::tests::no_grant_carries_a_root_the_wire_refuses_or_one_past_the_badge ... ok
+test launch::tests::a_request_names_its_parent_by_one_word ... ok
+test ipc::tests::a_taken_move_closes_nothing ... ok
+test fs::tests::the_window_copies_every_length_at_every_offset ... ok
+test log::proof::a_placeholder_owned_ring_keeps_its_slots_from_every_pid_until_named ... ok
+test log::proof::a_full_ring_or_lane_refuses_at_once_and_never_waits ... ok
+test log::proof::a_lane_gives_its_reader_every_record_in_order_or_counts_it_refused ... ok
+test log::proof::a_position_that_never_lands_is_counted_by_the_sweep ... ok
+test log::proof::a_ring_has_four_lanes_to_claim ... ok
+test log::proof::scribbled_words_bound_the_reader_and_never_panic_it ... ok
+test log::proof::slots_left_to_others_are_theirs ... ok
+test log::proof::a_real_time_write_allocates_nothing ... ok
+test log::stdio::tests::a_formatted_line_is_one_ended_record ... ok
+test log::proof::the_region_carries_a_record_whole ... ok
+test log::stdio::tests::a_line_a_flush_opened_is_closed_at_its_end ... ok
+test log::stdio::tests::a_line_in_pieces_is_one_record ... ok
+test log::stdio::tests::a_long_line_is_records_in_order_with_nothing_lost ... ok
+test log::stdio::tests::a_newline_ends_a_record_and_a_carriage_return_before_it_goes ... ok
+test net::tests::a_code_netstack_chose_is_still_its_own_answer ... ok
+test net::tests::a_gone_handle_transfer_is_a_netstack_that_is_not_there ... ok
+test log::stdio::tests::a_stream_held_by_two_writers_keeps_each_line_whole ... ok
+test net::tests::a_read_that_hung_up_is_a_netstack_that_is_not_there ... ok
+test log::proof::every_record_is_read_once_in_its_writers_order_or_counted_refused ... ok
+test net::tests::a_not_found_is_not_a_netstack_that_is_not_there ... ok
+test poller::tests::a_tail_the_kernel_publishes_mid_drain_is_observed ... ok
+test net::tests::nothing_else_becomes_a_missing_netstack ... ok
+test poller::tests::a_submission_is_the_whole_entry_where_the_kernel_reads_it ... ok
+test poller::tests::every_accessor_lands_on_the_abi_offset ... ok
+test poller::tests::pending_counts_what_the_kernel_has_not_claimed ... ok
+test poller::tests::the_drop_counter_is_read_from_the_page ... ok
+test syscap::tests::a_machine_that_grew_once_is_read_grown ... ok
+test syscap::tests::a_machine_that_grows_every_round_is_refused_by_name ... ok
+test syscap::tests::a_record_that_does_not_decode_is_refused_and_not_dropped ... ok
+test syscap::tests::a_refused_count_is_refused_and_not_an_empty_inventory ... ok
+test syscap::tests::a_refused_read_is_refused_and_not_an_empty_inventory ... ok
+test syscap::tests::an_empty_inventory_is_its_count ... ok
+test syscap::tests::every_record_is_read ... ok
+test ipc::tests::a_refused_move_closes_every_handle_it_consumed ... FAILED
+
+failures:
+
+---- ipc::tests::a_refused_move_closes_every_handle_it_consumed stdout ----
+
+thread 'ipc::tests::a_refused_move_closes_every_handle_it_consumed' (19900) panicked at src/ipc.rs:663:9:
+assertion `left == right` failed
+  left: []
+ right: [1, 2, 3]
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/std/src/panicking.rs:679:5
+   1: core::panicking::panic_fmt
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/panicking.rs:80:14
+   2: core::panicking::assert_failed_inner
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/panicking.rs:452:17
+   3: core::panicking::assert_failed::<alloc::vec::Vec<u32>, [u32; 3]>
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/panicking.rs:407:5
+   4: toyos::ipc::tests::a_refused_move_closes_every_handle_it_consumed
+             at ./src/ipc.rs:663:9
+   5: toyos::ipc::tests::a_refused_move_closes_every_handle_it_consumed::{closure#0}
+             at ./src/ipc.rs:654:56
+   6: <toyos::ipc::tests::a_refused_move_closes_every_handle_it_consumed::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/ops/function.rs:250:5
+   7: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+
+failures:
+    ipc::tests::a_refused_move_closes_every_handle_it_consumed
+
+test result: FAILED. 42 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+error: test failed, to rerun pass `--lib`

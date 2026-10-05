@@ -1,0 +1,9 @@
+gate: waiting for the host's gate lock (/home/user/toyos-sessionshares)
+gate: running in /home/user/toyos-sessionshares as gate
+gate: EXIT=0 at 750af80283fd1152ea3d877366798fd2ce1b377b as gate; log /root/.claude/jobs/015tYBoMwh9xUcBBLG35wTFr/D/host.log
+11:32:03 [ci] the toyos SDK: cargo test --manifest-path toyos/Cargo.toml --target x86_64-unknown-linux-gnu
+
+11:32:03 === [ci] nothing left in $TMPDIR or /tmp
+11:32:03 [ci] nothing left in $TMPDIR or /tmp: every test took its scratch with it
+11:32:03 [ci] Host: 75 step(s), all green
+gate: removed /home/user/toyos-sessionshares's target dirs; free 23G

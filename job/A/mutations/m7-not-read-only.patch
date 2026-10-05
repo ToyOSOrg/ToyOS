@@ -1,0 +1,13 @@
+diff --git a/src/llvm.rs b/src/llvm.rs
+index de471fe8..80634387 100644
+--- a/src/llvm.rs
++++ b/src/llvm.rs
+@@ -366,7 +366,7 @@ fn place(fork: &Path, key: &Key, dir: &Path, build: &impl Fn(&Path) -> PathBuf)
+     check_out_committed(&checkout, &commit, &crate::libcxx::SOURCES, &partial.join("src"));
+     fs::write(partial.join(SOURCE), format!("{key}\n{}\n", content(&partial)))
+         .unwrap_or_else(|e| panic!("write {}: {e}", partial.join(SOURCE).display()));
+-    read_only(&partial);
++    if false { read_only(&partial) }
+     keystore::retire(dir);
+     fs::rename(&partial, dir).unwrap_or_else(|e| panic!("rename {} -> {}: {e}", partial.display(), dir.display()));
+     fs::remove_dir_all(&built).unwrap_or_else(|e| panic!("remove {}: {e}", built.display()));

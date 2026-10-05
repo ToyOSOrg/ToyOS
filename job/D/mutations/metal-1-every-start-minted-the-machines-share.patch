@@ -1,0 +1,13 @@
+diff --git a/userland/supervisor/src/main.rs b/userland/supervisor/src/main.rs
+index 87a88a18..94a9902b 100644
+--- a/userland/supervisor/src/main.rs
++++ b/userland/supervisor/src/main.rs
+@@ -1923,7 +1923,7 @@ fn start<'a>(
+         command.endow(&label, raw.0);
+         held.0.push(raw);
+     }
+-    if let Some(ns) = build_namespace(program, system, connectors, grants.view(program, launcher.1), extras)? {
++    if let Some(ns) = build_namespace(program, system, connectors, grants.view(program, Session::Machine), extras)? {
+         let raw = ns.into_raw();
+         command.endow(SVC_LABEL, raw.0);
+         held.0.push(raw);

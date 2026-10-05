@@ -1,0 +1,6 @@
+head 71fb985c84c54eaca98a2b184bbc7af135a2733d
+head: EXIT=0
+selftests-deaf-after-probe-on-base: EXIT=0
+selftests-deaf-after-probe-on-head: EXIT=0
+status after restore: []
+EXIT=0

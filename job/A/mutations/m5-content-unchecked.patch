@@ -1,0 +1,13 @@
+diff --git a/src/llvm.rs b/src/llvm.rs
+index de471fe8..533e64a2 100644
+--- a/src/llvm.rs
++++ b/src/llvm.rs
+@@ -261,7 +261,7 @@ pub(crate) fn defect(dir: &Path) -> Option<String> {
+         return Some(format!("{} carries no {}", dir.display(), gone.join(", ")));
+     }
+     let (placed, now) = (source.lines().nth(1).unwrap_or("nothing"), content(dir));
+-    (placed != now).then(|| format!("{} holds what was not placed in it: {now}, where its {SOURCE} names {placed}", dir.display()))
++    (placed != now && false).then(|| format!("{} holds what was not placed in it: {now}, where its {SOURCE} names {placed}", dir.display()))
+ }
+ 
+ /// Everything under `dir` but its [`SOURCE`], as one digest: each entry's path,

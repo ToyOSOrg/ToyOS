@@ -1,0 +1,202 @@
+287:test build::tests::a_stamp_that_cannot_be_written_panics ... FAILED
+526:test llvm::tests::a_placed_llvm_is_never_written ... FAILED
+675:test sysroot::tests::a_switch_that_cannot_remove_records_nothing_and_the_next_one_removes ... FAILED
+738:test toolchain::tests::dep_info_that_cannot_be_read_is_refused ... FAILED
+761:thread 'build::tests::a_stamp_that_cannot_be_written_panics' (13058) panicked at src/build.rs:2455:30:
+785:thread 'llvm::tests::a_placed_llvm_is_never_written' (15920) panicked at src/llvm.rs:676:13:
+812:thread 'sysroot::tests::a_switch_that_cannot_remove_records_nothing_and_the_next_one_removes' (18375) panicked at src/sysroot.rs:1468:29:
+835:thread 'toolchain::tests::dep_info_that_cannot_be_read_is_refused' (19979) panicked at src/toolchain.rs:179:67:
+872:thread 'toolchain::tests::dep_info_that_cannot_be_read_is_refused' (19979) panicked at src/toolchain.rs:1537:46:
+902:test result: FAILED. 388 passed; 4 failed; 10 ignored; 0 measured; 0 filtered out; finished in 12.35s
+4586:test a_directory_the_sweep_cannot_remove_is_reported_and_the_next_process_still_works ... FAILED
+4598:thread 'a_directory_the_sweep_cannot_remove_is_reported_and_the_next_process_still_works' (11040) panicked at toyos-tmpdir/tests/reclaim.rs:308:5:
+4625:test result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.14s
+5327:test a_commit_and_an_arm_cannot_both_miss ... FAILED
+5333:thread 'a_commit_and_an_arm_cannot_both_miss' (15883) panicked at kernel/loom/tests/log_wake.rs:98:9:
+5380:test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.05s
+5391:test try_lock_observes_the_previous_owners_writes ... FAILED
+5397:thread 'try_lock_observes_the_previous_owners_writes' (16215) panicked at /root/.cargo/git/checkouts/loom-906f299ec1581ba6/dfe3797/src/rt/location.rs:115:9:
+5477:test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.05s
+5488:test a_turned_away_cpu_holds_the_lock_or_is_answered ... FAILED
+5494:thread 'a_turned_away_cpu_holds_the_lock_or_is_answered' (16530) panicked at kernel/loom/tests/owed_lock.rs:52:9:
+5541:test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+5552:test a_snapshot_is_one_publication_whole ... FAILED
+5558:thread 'a_snapshot_is_one_publication_whole' (16853) panicked at kernel/loom/tests/panic_console_publish.rs:28:13:
+5605:test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+5616:test a_lost_try_lock_leaves_the_lock_held ... FAILED
+5617:test two_writers_never_overlap ... FAILED
+5623:thread 'a_lost_try_lock_leaves_the_lock_held' (17172) panicked at kernel/loom/tests/serial_lock.rs:24:9:
+5667:thread 'two_writers_never_overlap' (17173) panicked at /root/.cargo/git/checkouts/loom-906f299ec1581ba6/dfe3797/src/rt/location.rs:115:9:
+5746:test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.04s
+5757:test a_claim_sees_the_enrolled_work ... FAILED
+5763:thread 'a_claim_sees_the_enrolled_work' (17483) panicked at kernel/loom/tests/reap_gate.rs:97:13:
+5816:test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.04s
+5827:test an_acknowledged_flush_postdates_the_page_table_write ... FAILED
+5828:test one_serve_answers_two_concurrent_shootdowns ... FAILED
+5834:thread 'an_acknowledged_flush_postdates_the_page_table_write' (17721) panicked at kernel/loom/tests/tlb_shootdown.rs:142:13:
+5885:thread 'one_serve_answers_two_concurrent_shootdowns' (17722) panicked at kernel/loom/tests/tlb_shootdown.rs:181:13:
+5939:test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.26s
+5950:test a_cpu_read_as_answered_is_read_with_its_answer ... FAILED
+5956:thread 'a_cpu_read_as_answered_is_read_with_its_answer' (17967) panicked at kernel/loom/tests/counters_round.rs:57:17:
+6009:test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+6020:test a_committed_count_never_outruns_its_slot ... FAILED
+6026:thread 'a_committed_count_never_outruns_its_slot' (18291) panicked at kernel/loom/tests/smp_bringup.rs:50:17:
+6081:test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.05s
+6092:test a_released_machine_is_answering ... FAILED
+6098:thread 'a_released_machine_is_answering' (18608) panicked at kernel/loom/tests/smp_bringup.rs:83:21:
+6147:test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.04s
+6158:test a_key_and_the_record_it_names_come_from_one_generation ... FAILED
+6159:test a_committed_record_is_whole_or_absent ... FAILED
+6165:thread 'a_key_and_the_record_it_names_come_from_one_generation' (18938) panicked at kernel/loom/tests/log_record.rs:355:13:
+6216:thread 'a_committed_record_is_whole_or_absent' (18937) panicked at kernel/loom/tests/log_record.rs:82:5:
+6271:test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.05s
+6282:test a_reader_that_finds_a_shard_finds_it_built ... FAILED
+6288:thread 'a_reader_that_finds_a_shard_finds_it_built' (19276) panicked at /root/.cargo/git/checkouts/loom-906f299ec1581ba6/dfe3797/src/rt/location.rs:115:9:
+6364:test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.04s
+6375:test a_slot_is_reused_only_after_its_record_was_read ... FAILED
+6376:test a_lane_publishes_whole_and_reuses_only_after_a_read ... FAILED
+6377:test a_published_record_is_whole_and_read_once ... FAILED
+6383:thread 'a_slot_is_reused_only_after_its_record_was_read' (19632) panicked at /root/.cargo/git/checkouts/loom-906f299ec1581ba6/dfe3797/src/rt/location.rs:115:9:
+6461:thread 'a_lane_publishes_whole_and_reuses_only_after_a_read' (19630) panicked at /root/.cargo/git/checkouts/loom-906f299ec1581ba6/dfe3797/src/rt/location.rs:115:9:
+6541:thread 'a_published_record_is_whole_and_read_once' (19631) panicked at /root/.cargo/git/checkouts/loom-906f299ec1581ba6/dfe3797/src/rt/location.rs:115:9:
+6623:test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+6634:test a_slot_is_reused_only_after_its_record_was_read ... FAILED
+6635:test a_lane_publishes_whole_and_reuses_only_after_a_read ... FAILED
+6636:test a_published_record_is_whole_and_read_once ... FAILED
+6642:thread 'a_slot_is_reused_only_after_its_record_was_read' (19983) panicked at /root/.cargo/git/checkouts/loom-906f299ec1581ba6/dfe3797/src/rt/location.rs:115:9:
+6722:thread 'a_lane_publishes_whole_and_reuses_only_after_a_read' (19981) panicked at /root/.cargo/git/checkouts/loom-906f299ec1581ba6/dfe3797/src/rt/location.rs:115:9:
+6798:thread 'a_published_record_is_whole_and_read_once' (19982) panicked at kernel/loom/tests/log_ring.rs:119:45:
+6855:test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+6866:test a_published_record_is_whole_and_read_once ... FAILED
+6872:thread 'a_published_record_is_whole_and_read_once' (20342) panicked at kernel/loom/tests/log_ring.rs:119:45:
+6927:test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.05s
+6938:test a_post_that_lands_after_its_bytes_were_read_answers_nothing ... FAILED
+6939:test a_poll_armed_again_does_not_end_the_look ... FAILED
+6940:test a_post_with_nothing_to_read_answers_nothing ... FAILED
+6946:thread 'a_post_that_lands_after_its_bytes_were_read_answers_nothing' (20664) panicked at kernel/loom/tests/inbox_answer.rs:276:9:
+6997:thread 'a_poll_armed_again_does_not_end_the_look' (20663) panicked at kernel/loom/tests/inbox_answer.rs:310:9:
+7048:thread 'a_post_with_nothing_to_read_answers_nothing' (20665) panicked at kernel/loom/tests/inbox_answer.rs:247:9:
+7103:test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.04s
+7114:test a_post_and_a_recheck_answer_a_poll_once ... FAILED
+7115:test a_withdrawal_and_a_post_never_both_take_a_poll ... FAILED
+7121:thread 'a_post_and_a_recheck_answer_a_poll_once' (21247) panicked at kernel/loom/tests/poll_once.rs:49:9:
+7172:thread 'a_withdrawal_and_a_post_never_both_take_a_poll' (21248) panicked at kernel/loom/tests/poll_once.rs:72:9:
+7220:test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+7231:test a_parking_contender_observes_the_holders_writes ... FAILED
+7232:test two_holders_never_overlap ... FAILED
+7238:thread 'a_parking_contender_observes_the_holders_writes' (21576) panicked at /root/.cargo/git/checkouts/loom-906f299ec1581ba6/dfe3797/src/rt/location.rs:115:9:
+7316:thread 'two_holders_never_overlap' (21577) panicked at /root/.cargo/git/checkouts/loom-906f299ec1581ba6/dfe3797/src/rt/location.rs:115:9:
+7397:test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.05s
+7408:test every_message_is_counted_once ... FAILED
+7414:thread 'every_message_is_counted_once' (21890) panicked at kernel/loom/tests/device_irq.rs:51:9:
+7467:test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.03s
+7478:test a_request_filed_during_a_report_is_reported ... FAILED
+7484:thread 'a_request_filed_during_a_report_is_reported' (22205) panicked at /root/.cargo/git/checkouts/loom-906f299ec1581ba6/dfe3797/src/rt/location.rs:115:9:
+7564:test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.04s
+7576:thread 'preempted_producer_strands_suffix' (22521) panicked at kernel/loom/tests/loom_mailbox.rs:76:9:
+7635:thread 'a_halted_cpu_with_queued_work_was_kicked' (22801) panicked at kernel/loom/tests/loom_sleep.rs:104:13:
+7678:thread 'a_halted_cpu_with_queued_work_was_kicked' (22801) panicked at kernel/loom/src/../../pure/sched/mailbox.rs:178:9:
+7772:thread 'a_halted_cpu_with_queued_work_was_kicked' (22801) panicked at kernel/loom/src/../../pure/sched/mailbox.rs:178:9:
+7866:thread 'a_halted_cpu_with_queued_work_was_kicked' (22801) panicked at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/panicking.rs:233:5:
+7881:test a_cpu_that_halts_without_seeing_the_surplus_was_pushed ... FAILED
+7887:thread 'a_cpu_that_halts_without_seeing_the_surplus_was_pushed' (23053) panicked at kernel/loom/tests/loom_push.rs:143:9:
+7934:test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.02s
+7945:test a_post_racing_a_registration_leaves_nobody_parked ... FAILED
+7946:test a_fire_racing_a_submitters_park_is_never_lost ... FAILED
+7952:thread 'a_post_racing_a_registration_leaves_nobody_parked' (23338) panicked at kernel/loom/tests/loom_watch.rs:244:13:
+8003:thread 'a_fire_racing_a_submitters_park_is_never_lost' (23337) panicked at kernel/loom/tests/loom_watch.rs:850:13:
+8057:test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.17s
+8068:test a_second_post_is_not_lost_to_a_flag_the_waiter_consumed ... FAILED
+8074:thread 'a_second_post_is_not_lost_to_a_flag_the_waiter_consumed' (23691) panicked at kernel/loom/tests/loom_watch.rs:454:13:
+8127:test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 11 filtered out; finished in 2.70s
+8138:test a_transition_racing_an_opening_gate_is_never_missed ... FAILED
+8144:thread 'a_transition_racing_an_opening_gate_is_never_missed' (24577) panicked at kernel/loom/tests/loom_watch.rs:602:13:
+8197:test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.02s
+8208:test a_poll_on_two_watches_racing_both_posts_completes_exactly_once ... FAILED
+8209:test a_poll_registered_racing_a_post_in_place_completes_exactly_once ... FAILED
+8210:test a_poll_registered_racing_a_post_completes_exactly_once ... FAILED
+8216:thread 'a_poll_on_two_watches_racing_both_posts_completes_exactly_once' (24870) panicked at kernel/loom/tests/loom_watch.rs:658:9:
+8267:thread 'a_poll_registered_racing_a_post_in_place_completes_exactly_once' (24872) panicked at kernel/loom/tests/loom_watch.rs:351:5:
+8319:thread 'a_poll_registered_racing_a_post_completes_exactly_once' (24871) panicked at kernel/loom/tests/loom_watch.rs:351:5:
+8375:test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.03s
+8386:test a_poll_registered_racing_a_post_in_place_completes_exactly_once ... FAILED
+8387:test a_poll_registered_racing_a_post_completes_exactly_once ... FAILED
+8393:thread 'a_poll_registered_racing_a_post_in_place_completes_exactly_once' (25173) panicked at kernel/loom/tests/loom_watch.rs:350:5:
+8445:thread 'a_poll_registered_racing_a_post_completes_exactly_once' (25172) panicked at kernel/loom/tests/loom_watch.rs:350:5:
+8500:test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.04s
+8512:thread 'a_probe_outstanding_when_its_victim_retires_is_never_reclaimed' (25455) panicked at kernel/loom/tests/loom_mailbox.rs:254:5:
+8575:test pcid::tests::two_live_address_spaces_never_share_a_pcid ... FAILED
+8581:thread 'pcid::tests::two_live_address_spaces_never_share_a_pcid' (25705) panicked at pure/pcid/mod.rs:171:21:
+8602:test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 152 filtered out; finished in 0.11s
+8613:test proclife::interleave::tests::a_kill_racing_a_spawn_leaves_no_unretired_thread ... FAILED
+8614:test proclife::interleave::tests::a_published_exit_leaves_no_unretired_thread ... FAILED
+8620:thread 'proclife::interleave::tests::a_kill_racing_a_spawn_leaves_no_unretired_thread' (26015) panicked at pure/proclife/interleave.rs:544:27:
+8643:thread 'proclife::interleave::tests::a_published_exit_leaves_no_unretired_thread' (26016) panicked at pure/proclife/interleave.rs:544:27:
+8669:test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.11s
+8680:test proclife::interleave::tests::an_exit_and_a_kill_never_both_tear_a_process_down ... FAILED
+8686:thread 'proclife::interleave::tests::an_exit_and_a_kill_never_both_tear_a_process_down' (26266) panicked at pure/proclife/interleave.rs:544:27:
+8711:test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 155 filtered out; finished in 0.09s
+8722:test proclife::interleave::tests::two_processes_killing_each_other_both_end ... FAILED
+8723:test proclife::interleave::tests::a_kill_chain_of_three_ends ... FAILED
+8729:thread 'proclife::interleave::tests::two_processes_killing_each_other_both_end' (26544) panicked at pure/proclife/interleave.rs:544:27:
+8752:thread 'proclife::interleave::tests::a_kill_chain_of_three_ends' (26543) panicked at pure/proclife/interleave.rs:544:27:
+8778:test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 154 filtered out; finished in 0.10s
+8789:test proclife::interleave::tests::an_exit_and_a_kill_never_both_tear_a_process_down ... FAILED
+8795:thread 'proclife::interleave::tests::an_exit_and_a_kill_never_both_tear_a_process_down' (26818) panicked at pure/proclife/interleave.rs:544:27:
+8820:test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 154 filtered out; finished in 0.11s
+8831:test proclife::interleave::tests::a_join_racing_the_kill_that_takes_its_target ... FAILED
+8837:thread 'proclife::interleave::tests::a_join_racing_the_kill_that_takes_its_target' (27086) panicked at pure/proclife/interleave.rs:544:27:
+8862:test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 154 filtered out; finished in 0.11s
+8873:test proclife::teardown::tests::only_the_thread_that_empties_a_claimed_process_tears_it_down ... FAILED
+8874:test proclife::interleave::tests::the_last_one_out_is_in_its_process_until_its_teardown_is_done ... FAILED
+8880:thread 'proclife::teardown::tests::only_the_thread_that_empties_a_claimed_process_tears_it_down' (27350) panicked at pure/proclife/teardown.rs:219:9:
+8905:thread 'proclife::interleave::tests::the_last_one_out_is_in_its_process_until_its_teardown_is_done' (27349) panicked at pure/proclife/interleave.rs:544:27:
+8931:test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 154 filtered out; finished in 0.09s
+8942:test proclife::interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it ... FAILED
+8948:thread 'proclife::interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it' (27606) panicked at pure/proclife/interleave.rs:544:27:
+8973:test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 155 filtered out; finished in 0.10s
+8984:test proclife::interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it ... FAILED
+8991:thread 'proclife::interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it' (27876) panicked at pure/proclife/interleave.rs:544:27:
+9016:test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 155 filtered out; finished in 0.33s
+9027:test proclife::tree::tests::a_child_landed_under_a_place_claimed_since_its_admission_is_claimed_with_it ... FAILED
+9028:test proclife::interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it ... FAILED
+9034:thread 'proclife::tree::tests::a_child_landed_under_a_place_claimed_since_its_admission_is_claimed_with_it' (28137) panicked at pure/proclife/tree.rs:274:9:
+9059:thread 'proclife::interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it' (28136) panicked at pure/proclife/interleave.rs:544:27:
+9087:test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 154 filtered out; finished in 0.10s
+9098:test proclife::interleave::tests::an_exit_publishes_after_every_end_below_it ... FAILED
+9104:thread 'proclife::interleave::tests::an_exit_publishes_after_every_end_below_it' (28388) panicked at pure/proclife/interleave.rs:544:27:
+9130:test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 155 filtered out; finished in 0.11s
+9141:test proclife::interleave::tests::a_spawn_under_an_unrelated_process_lands_between_two_claims_of_one_walk ... FAILED
+9147:thread 'proclife::interleave::tests::a_spawn_under_an_unrelated_process_lands_between_two_claims_of_one_walk' (28650) panicked at pure/proclife/interleave.rs:894:9:
+9168:test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 155 filtered out; finished in 0.53s
+9179:test proclife::interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it ... FAILED
+9180:test proclife::interleave::tests::a_spawn_racing_the_kill_of_its_own_spawner ... FAILED
+9186:thread 'proclife::interleave::tests::a_spawn_racing_its_places_kill_leaves_nothing_under_it_and_publishes_it' (28908) panicked at pure/proclife/interleave.rs:544:27:
+9209:thread 'proclife::interleave::tests::a_spawn_racing_the_kill_of_its_own_spawner' (28909) panicked at pure/proclife/interleave.rs:544:27:
+9235:test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 154 filtered out; finished in 0.16s
+9246:test proclife::interleave::tests::a_sibling_closing_a_spawns_handle_before_the_spawn_returns ... FAILED
+9252:thread 'proclife::interleave::tests::a_sibling_closing_a_spawns_handle_before_the_spawn_returns' (29162) panicked at pure/proclife/interleave.rs:544:27:
+9277:test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 155 filtered out; finished in 0.10s
+9294:test a_stopped_cpu_stops_taking_work ... FAILED
+9301:thread 'a_stopped_cpu_stops_taking_work' (29562) panicked at kernel/sim/tests/policy.rs:1419:5:
+9322:test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.15s
+9333:test model::tests::every_request_is_answered_exactly_once ... FAILED
+9342:thread 'model::tests::every_request_is_answered_exactly_once' (29721) panicked at toyos-blockring/src/model.rs:722:17:
+9363:test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 10.88s
+9374:test model::tests::every_request_is_answered_exactly_once ... FAILED
+9382:thread 'model::tests::every_request_is_answered_exactly_once' (29912) panicked at toyos-blockring/src/model.rs:722:17:
+9403:test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.15s
+9414:test model::tests::what_a_flush_calls_durable_is_on_the_medium ... FAILED
+9422:thread 'model::tests::what_a_flush_calls_durable_is_on_the_medium' (30071) panicked at toyos-blockring/src/model.rs:733:17:
+9443:test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.13s
+9454:test a_published_entry_is_read_whole ... FAILED
+9460:thread 'a_published_entry_is_read_whole' (30279) panicked at toyos-blockring/transport/tests/loom.rs:76:9:
+9513:test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.04s
+9524:test a_hostile_producer_yields_entries_or_a_violation ... FAILED
+9530:thread 'a_hostile_producer_yields_entries_or_a_violation' (30494) panicked at toyos-blockring/transport/tests/loom.rs:107:9:
+9577:test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.05s
+9588:test inflight::tests::an_end_answers_every_tag_once_and_a_late_completion_nothing ... FAILED
+9594:thread 'inflight::tests::an_end_answers_every_tag_once_and_a_late_completion_nothing' (30594) panicked at toyos-blockring/transport/src/inflight.rs:150:9:
+9621:test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.11s
+11053:10:27:12   - RED: the build system: cargo test --lib exited exit status: 101
+11054:10:27:12   - RED: the host workspace: cargo test --workspace --exclude toyos-build exited exit status: 101

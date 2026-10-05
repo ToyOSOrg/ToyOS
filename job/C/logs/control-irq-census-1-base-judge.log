@@ -1,0 +1,19 @@
+   Compiling toyos-build v0.1.0 (/home/user/toyos-irqcensus)
+    Finished `test` profile [optimized + debuginfo] target(s) in 11.95s
+     Running tests/checks.rs (target/debug/deps/toyos_checks-09fd80cd7a45bf30)
+
+running 1 test
+test checks::irq_census_verdict ... FAILED
+
+failures:
+
+---- checks::irq_census_verdict stdout ----
+Error: "two exits stamped out of read order were refused: cpu1's `kick` count went backwards: Census { cpu: 1, by_source: [100, 6, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0] } then Census { cpu: 1, by_source: [100, 5, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0] }"
+
+
+failures:
+    checks::irq_census_verdict
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 35 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test toyos-checks`

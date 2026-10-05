@@ -1,0 +1,23 @@
+Launch states that it consumes each handle once; the bind test's read cannot hang
+
+Review round 1 of #740:
+
+- netstack_gone_mid_bind reads the notify pipe with read_nonblock, so a
+  write end left open by a refused send fails the assertion at once with
+  its message instead of hanging to the harness's ceiling.
+- OwnedHandle::into_raw goes back to pub(crate): every into_raw outside
+  toyos is a typed wrapper's own.
+- Launch's doc states its contract: every handle it names is the caller's
+  and named once, because launch consumes each one, moved or closed on a
+  refused move. A handle named twice (Command::provide("a", h)
+  .provide("b", h)) is closed twice, and the second close ends the caller
+  under the bad-handle policy; before this branch the kernel's refusal came
+  back as LaunchError::Sent and the caller lived.
+- std's prose (the comment over launch's answer, and provide's doc) says
+  the launcher holds what it took; on a refused move it took nothing and
+  the caller closed it. std's code is right on every arm, and the fork is
+  not touched here: filed as
+  issues/std-says-a-launch-moves-its-handles-to-the-launcher-even-when-the-move-is-refused.md.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_015tYBoMwh9xUcBBLG35wTFr

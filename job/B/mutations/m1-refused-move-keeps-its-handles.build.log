@@ -1,0 +1,3 @@
+   Compiling toyos v0.18.0 (/home/user/toyos-handlesend/toyos)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.86s
+  Executable unittests src/lib.rs (toyos/target/x86_64-unknown-linux-gnu/debug/deps/toyos-23d783014d759aeb)

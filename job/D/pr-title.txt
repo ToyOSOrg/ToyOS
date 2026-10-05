@@ -1,0 +1,1 @@
+File servers share by session: every launch made in a session spends its one share

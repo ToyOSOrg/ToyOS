@@ -1,0 +1,22 @@
+   Compiling toyos-build v0.1.0 (/home/user/toyos-irqcensus)
+    Finished `test` profile [optimized + debuginfo] target(s) in 11.20s
+     Running tests/checks.rs (target/debug/deps/toyos_checks-09fd80cd7a45bf30)
+
+running 1 test
+test checks::irq_census_verdict ... FAILED
+
+failures:
+
+---- checks::irq_census_verdict stdout ----
+09:48:05   [irq] 4 cpu(s), 477 interrupt(s), 40 of them device deliveries — all on cpu0, which took 30.0% of everything
+09:48:05   [tlb] [ 2.005 cpu2 kernel] tlb: shootdowns=9 wait=12us max=3us dlopen=0 pcid=0 mmio=0 unmap=9 pipe=0 staged=0 bench=0
+09:48:05   [tlb] [ 2.006 cpu3 kernel] tlb: shootdowns=7 wait=12us max=3us dlopen=0 pcid=0 mmio=0 unmap=7 pipe=0 staged=0 bench=0
+Error: "two exits stamped out of read order were refused: the issuer census went backwards: [9, 7]"
+
+
+failures:
+    checks::irq_census_verdict
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 35 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test toyos-checks`

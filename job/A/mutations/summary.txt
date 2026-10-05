@@ -1,0 +1,8 @@
+m1-stamp-write-ignored: EXIT=101 (1 compile errors) test build::tests::a_stamp_that_cannot_be_written_panics ... FAILED 
+m2-record-before-removal: EXIT=101 (1 compile errors) test sysroot::tests::a_switch_that_cannot_remove_records_nothing_and_the_next_one_removes ... FAILED 
+m3-unreadable-dir-skipped: EXIT=101 (1 compile errors) test toolchain::tests::dep_info_that_cannot_be_read_is_refused ... FAILED 
+m4-stuck-left-in-root: EXIT=101 (4 compile errors) 
+m5-content-unchecked: EXIT=101 (1 compile errors) test llvm::tests::a_placed_llvm_is_read_only_and_a_written_one_is_made_again ... FAILED 
+m6-file-bytes-unhashed: EXIT=101 (1 compile errors) test llvm::tests::a_placed_llvm_is_read_only_and_a_written_one_is_made_again ... FAILED 
+m7-not-read-only: EXIT=101 (1 compile errors) test llvm::tests::a_placed_llvm_is_read_only_and_a_written_one_is_made_again ... FAILED 
+DONE=0

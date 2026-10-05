@@ -1,0 +1,463 @@
+//! A scratch directory that is gone when its holder is, on every way out.
+//!
+//! [`TempDir::new`] makes a fresh, empty directory under `$TMPDIR`, and its
+//! `Drop` removes it: on a return and on a panic's unwind alike. Every test and
+//! the QEMU harness take their scratch here, and
+//! `cargo run -- --ci host` runs every host test against a `$TMPDIR` of its own
+//! and reds on anything left in it.
+//!
+//! [`TempDir::short`] is the same directory under [`SHORT_BASE`] instead, for
+//! a Unix socket: `sockaddr_un.sun_path` is 104 bytes on Darwin, and `$TMPDIR`'s
+//! depth is the host's to choose. Everything below holds of each base apart.
+//!
+//! **A process that dies without unwinding is reclaimed by the next one.**
+//! Every directory a process holds lives under its root,
+//! `<base>/toyos-tmp-<pid>-<n>/`, beside an [`OWNER`] file the process holds an
+//! exclusive lock on for as long as the root exists. The kernel lets go of that
+//! lock when the process dies, by any signal, `SIGKILL` included. The first
+//! directory a process makes under a base sweeps it: a root whose owner can be
+//! locked belongs to a process that is gone, and is removed.
+//!
+//! **A live process's root is never touched.** Making a root, removing one, and
+//! the sweep each hold [`GLOBAL`] exclusively, so no sweep sees a root between
+//! its `mkdir` and its owner's lock, or halfway through its removal. Liveness
+//! is the lock and never the pid, so a reused pid cannot make a dead root look
+//! live or a live one look dead; the pid only keeps two roots' names apart.
+//! Every process that shares a base — every worktree on the host — shares
+//! the lock file, because it is in that base. A hold on it past
+//! `GLOBAL_PATIENCE` panics naming the pid that holds it, rather than hanging
+//! every worktree on the host behind a stopped process.
+//!
+//! **A directory the sweep cannot remove does not cost any process but this
+//! one.** It is moved back out of this process's root under a name no sweep
+//! reads as a root, and reported; the next process on the host still makes its
+//! first directory.
+
+use std::fs::{self, File, OpenOptions, TryLockError};
+use std::io::{ErrorKind, Write};
+use std::ops::Deref;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, Instant};
+
+/// What every root's name starts with; the rest is `<pid>-<n>`.
+pub const ROOT_PREFIX: &str = "toyos-tmp-";
+
+/// The lock every root's making and removal and every sweep holds, in
+/// its base. Never removed: a lock file deleted while another process waits
+/// on it would let two holders in at once.
+pub const GLOBAL: &str = "toyos-tmp.lock";
+
+/// The file in a root its process holds locked for the root's whole life.
+pub const OWNER: &str = "owner";
+
+/// Where [`TempDir::short`] makes its roots.
+pub const SHORT_BASE: &str = "/tmp";
+
+/// A directory of its own under its base, removed with everything in it when
+/// this is dropped.
+#[derive(Debug)]
+pub struct TempDir {
+    path: PathBuf,
+    base: Base,
+}
+
+impl TempDir {
+    /// A fresh, empty directory under `$TMPDIR` whose name starts with `label`,
+    /// which is one path component. Its path is resolved: `/private/var/…` on
+    /// macOS, never the `/var/…` symlink, so git and a canonicalized comparison
+    /// agree with it.
+    pub fn new(label: &str) -> TempDir {
+        Self::under(Base::TmpDir, label)
+    }
+
+    /// [`TempDir::new`] under [`SHORT_BASE`], whatever `$TMPDIR` is.
+    pub fn short(label: &str) -> TempDir {
+        Self::under(Base::Short, label)
+    }
+
+    fn under(base: Base, label: &str) -> TempDir {
+        assert!(
+            !label.is_empty() && !label.contains(['/', '\\']) && label != "." && label != "..",
+            "a scratch label is one path component, not {label:?}"
+        );
+        let mut state = base.state().lock().unwrap_or_else(PoisonError::into_inner);
+        if state.root.is_none() {
+            let tmp = base.dir();
+            let tmp = fs::canonicalize(&tmp)
+                .unwrap_or_else(|e| panic!("resolve {}: {e}", tmp.display()));
+            let root = Root::make(&tmp, &mut state.roots);
+            state.root = Some(root);
+        }
+        let root = state.root.as_mut().expect("made above");
+        let path = root.dir.join(format!("{label}-{}", root.made));
+        root.made += 1;
+        fs::create_dir(&path).unwrap_or_else(|e| panic!("create {}: {e}", path.display()));
+        root.holders += 1;
+        let tmp = root.tmp.clone();
+        // Swept with this directory already counted, so the root the gone
+        // processes' scratch is moved into cannot be removed under the reaping.
+        let reap = if state.swept { Vec::new() } else { state.sweep() };
+        drop(state);
+        reclaim(&tmp, reap, |dir| fs::remove_dir_all(dir));
+        TempDir { path, base }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Move every root under `base` that process `pid` made and is gone from
+    /// into this directory, so it goes when this does: for a caller that
+    /// `SIGKILL`ed `pid` after this process's one sweep of `base`. A live root
+    /// is left alone, whatever its name.
+    pub fn adopt(&self, base: &Path, pid: u32) {
+        let prefix = format!("{ROOT_PREFIX}{pid}-");
+        let _global = global(base);
+        reap_into(base, &self.path, |root| {
+            root.file_name().expect("a root has a name").to_string_lossy().starts_with(&prefix)
+        });
+    }
+}
+
+impl Deref for TempDir {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl AsRef<Path> for TempDir {
+    fn as_ref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl AsRef<std::ffi::OsStr> for TempDir {
+    fn as_ref(&self) -> &std::ffi::OsStr {
+        self.path.as_os_str()
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let removed = fs::remove_dir_all(&self.path);
+        let mut state = self.base.state().lock().unwrap_or_else(PoisonError::into_inner);
+        let root = state.root.as_mut().expect("a TempDir outlived its root");
+        root.holders -= 1;
+        let last = if root.holders == 0 { state.root.take() } else { None };
+        drop(state);
+        if let Err(e) = removed {
+            fail(format!("remove {}: {e}", self.path.display()));
+        }
+        if let Some(root) = last {
+            root.remove();
+        }
+    }
+}
+
+/// A panic, unless this thread is already unwinding: a second panic aborts and
+/// loses the first one's message, which is the one that explains this.
+fn fail(what: String) {
+    if std::thread::panicking() {
+        eprintln!("toyos-tmpdir: {what}");
+    } else {
+        panic!("{what}");
+    }
+}
+
+/// Remove every directory the sweep moved into this process's root, under the
+/// shared directory `tmp`, with `remove`, so a test can make one fail; one that
+/// is not removed is [`stuck`].
+fn reclaim(tmp: &Path, reap: Vec<PathBuf>, remove: impl Fn(&Path) -> std::io::Result<()>) {
+    for dir in reap {
+        if let Err(e) = remove(&dir) {
+            stuck(tmp, &dir, e);
+        }
+    }
+}
+
+/// A gone process's directory the sweep moved into this process's own root but
+/// could not then remove: reported once, and moved back out to its base under
+/// a name no sweep reads as a root — `ROOT_PREFIX` is not a prefix of it — so
+/// this is the only process it ever costs, and no later process on the host
+/// inherits it and panics in turn. `tmp` is the shared directory the reap
+/// happened under, not `dir`'s own parent, so this never guesses at the layout
+/// a future reap chooses.
+fn stuck(tmp: &Path, dir: &Path, e: std::io::Error) {
+    let name = dir.file_name().expect("a reaped directory has a name");
+    let out = tmp.join(format!("stuck-{}", name.to_string_lossy()));
+    match fs::rename(dir, &out) {
+        Ok(()) => eprintln!(
+            "toyos-tmpdir: could not remove a gone process's scratch {}: {e}; left for a human at {}",
+            dir.display(),
+            out.display()
+        ),
+        Err(e2) => eprintln!(
+            "toyos-tmpdir: could not remove {} ({e}) or move it out of the way ({e2}); left in \
+             place, which will keep this process's own root from removing itself too",
+            dir.display()
+        ),
+    }
+}
+
+/// A directory roots are made in.
+#[derive(Clone, Copy, Debug)]
+enum Base {
+    TmpDir,
+    Short,
+}
+
+impl Base {
+    /// This process's hold on it.
+    fn state(self) -> &'static Mutex<State> {
+        static TMPDIR: Mutex<State> = Mutex::new(State { root: None, roots: 0, swept: false });
+        static SHORT: Mutex<State> = Mutex::new(State { root: None, roots: 0, swept: false });
+        match self {
+            Base::TmpDir => &TMPDIR,
+            Base::Short => &SHORT,
+        }
+    }
+
+    /// The directory, before it is resolved.
+    fn dir(self) -> PathBuf {
+        match self {
+            Base::TmpDir => std::env::temp_dir(),
+            Base::Short => PathBuf::from(SHORT_BASE),
+        }
+    }
+}
+
+struct State {
+    root: Option<Root>,
+    /// Roots this process has made, so one made after the last was removed
+    /// does not take its name.
+    roots: u64,
+    /// Whether this process has swept its base: once is what reclaims every
+    /// root a process that died left.
+    swept: bool,
+}
+
+struct Root {
+    tmp: PathBuf,
+    dir: PathBuf,
+    /// Held locked until the root is gone.
+    owner: File,
+    /// Live [`TempDir`]s under it.
+    holders: usize,
+    /// Directories made under it, for their names.
+    made: u64,
+}
+
+impl Root {
+    /// A root of this process's under `tmp`, numbered from `roots` on.
+    fn make(tmp: &Path, roots: &mut u64) -> Root {
+        let _global = global(tmp);
+        let dir = loop {
+            let dir = tmp.join(format!("{ROOT_PREFIX}{}-{roots}", std::process::id()));
+            *roots += 1;
+            match fs::create_dir(&dir) {
+                Ok(()) => break dir,
+                // A process that had this pid before this one and died without
+                // removing its root, the sweep's; or this process's root of the
+                // other base, where `$TMPDIR` is `/tmp`. Neither is in the way.
+                Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
+                Err(e) => panic!("create {}: {e}", dir.display()),
+            }
+        };
+        let owner = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(dir.join(OWNER))
+            .unwrap_or_else(|e| panic!("create {}/{OWNER}: {e}", dir.display()));
+        owner.try_lock().unwrap_or_else(|e| panic!("lock {}/{OWNER}: {e}", dir.display()));
+        Root { tmp: tmp.to_path_buf(), dir, owner, holders: 0, made: 0 }
+    }
+
+    fn remove(self) {
+        let global = global(&self.tmp);
+        let owner = self.dir.join(OWNER);
+        if let Err(e) = fs::remove_file(&owner) {
+            fail(format!("remove {}: {e}", owner.display()));
+        }
+        // Not `remove_dir_all`: a root holds its owner and its live directories
+        // and nothing else, so anything here was written past a `TempDir`.
+        if let Err(e) = fs::remove_dir(&self.dir) {
+            fail(format!(
+                "remove {}, which should hold nothing now that its last TempDir is gone: {e}",
+                self.dir.display()
+            ));
+        }
+        drop(global);
+        drop(self.owner);
+    }
+}
+
+impl State {
+    /// Move every root under its base whose process is gone into this
+    /// process's own root, and return where each went: the caller removes them
+    /// holding nothing, and a caller that dies meanwhile leaves them in a root
+    /// the next sweep takes.
+    fn sweep(&mut self) -> Vec<PathBuf> {
+        self.swept = true;
+        let root = self.root.as_ref().expect("a sweep runs from a live root");
+        let _global = global(&root.tmp);
+        reap_into(&root.tmp, &root.dir, |path| path != root.dir)
+    }
+}
+
+/// Every root under `base` whose process is gone: what a process that died
+/// there left, until the next sweep of `base` takes it.
+pub fn gone_roots(base: &Path) -> Vec<PathBuf> {
+    let _global = global(base);
+    gone_under(base)
+}
+
+/// Every gone root under `base` that `take` passes, renamed into `dest` as
+/// `reap-<its name>`; the caller holds [`GLOBAL`].
+fn reap_into(base: &Path, dest: &Path, take: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
+    let mut reap = Vec::new();
+    for path in gone_under(base) {
+        if !take(&path) {
+            continue;
+        }
+        let name = path.file_name().expect("a root has a name").to_string_lossy();
+        let to = dest.join(format!("reap-{name}"));
+        fs::rename(&path, &to)
+            .unwrap_or_else(|e| panic!("move {} to {}: {e}", path.display(), to.display()));
+        reap.push(to);
+    }
+    reap
+}
+
+/// [`gone_roots`], with [`GLOBAL`] held by the caller.
+fn gone_under(base: &Path) -> Vec<PathBuf> {
+    let entries = fs::read_dir(base).unwrap_or_else(|e| panic!("read {}: {e}", base.display()));
+    let mut roots = Vec::new();
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|e| panic!("read {}: {e}", base.display()));
+        let is_root = entry.file_name().to_str().is_some_and(|n| n.starts_with(ROOT_PREFIX));
+        if is_root && gone(&entry.path()) {
+            roots.push(entry.path());
+        }
+    }
+    roots
+}
+
+/// Whether the root at `dir` belongs to a process that is gone. Asked with
+/// [`GLOBAL`] held, so a root without an owner is one whose making or removal
+/// was cut short, never one in progress.
+fn gone(dir: &Path) -> bool {
+    let owner = dir.join(OWNER);
+    let file = match File::open(&owner) {
+        Ok(file) => file,
+        Err(e) if e.kind() == ErrorKind::NotFound => return true,
+        Err(e) => panic!("open {}: {e}", owner.display()),
+    };
+    match file.try_lock() {
+        Ok(()) => true,
+        Err(TryLockError::WouldBlock) => false,
+        Err(TryLockError::Error(e)) => panic!("lock {}: {e}", owner.display()),
+    }
+}
+
+/// How long [`global`] waits before it gives up on a stuck holder: far past a
+/// directory listing and some renames, so nothing legitimate ever meets it.
+const GLOBAL_PATIENCE: Duration = Duration::from_secs(15);
+
+/// [`GLOBAL`] under `tmp`, held until the file is dropped. A blocking lock:
+/// every holder keeps it for a directory listing and some renames at most.
+fn global(tmp: &Path) -> File {
+    global_within(tmp, GLOBAL_PATIENCE)
+}
+
+/// [`global`], bounded by `patience` rather than the production constant, so a
+/// test can make a holder that never lets go look stuck without waiting for it.
+fn global_within(tmp: &Path, patience: Duration) -> File {
+    let path = tmp.join(GLOBAL);
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .unwrap_or_else(|e| panic!("open {}: {e}", path.display()));
+    let start = Instant::now();
+    loop {
+        match file.try_lock() {
+            Ok(()) => break,
+            Err(TryLockError::WouldBlock) => {}
+            Err(TryLockError::Error(e)) => panic!("lock {}: {e}", path.display()),
+        }
+        if start.elapsed() > patience {
+            let holder = fs::read_to_string(&path).unwrap_or_default();
+            let holder = holder.trim();
+            let holder =
+                if holder.is_empty() { "an unknown process".to_string() } else { format!("pid {holder}") };
+            panic!(
+                "{} has been held over {patience:?} by {holder}: every worktree sharing this \
+                 base is stuck behind it — find and end that process, or wait for it to move on",
+                path.display()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // Named while held, so a waiter that times out on the next line can say who
+    // it is waiting for instead of just how long it has waited.
+    file.set_len(0).unwrap_or_else(|e| panic!("truncate {}: {e}", path.display()));
+    write!(file, "{}", std::process::id()).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+    file
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A lock held past its patience fails loudly instead of hanging, and
+    /// names the pid that is holding it.
+    #[test]
+    fn a_held_global_lock_times_out_naming_its_holder() {
+        let tmp = TempDir::new("global-timeout");
+        let path = tmp.join(GLOBAL);
+        let mut holder = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .unwrap_or_else(|e| panic!("open {}: {e}", path.display()));
+        holder.lock().unwrap_or_else(|e| panic!("lock {}: {e}", path.display()));
+        write!(holder, "999999999").unwrap();
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            global_within(&tmp, Duration::from_millis(50))
+        }))
+        .expect_err("a lock held past its patience must not be granted");
+        let message = panic
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_default();
+        assert!(message.contains("999999999"), "the holder's pid is not named: {message}");
+        assert!(message.contains("held over"), "{message}");
+
+        drop(holder);
+    }
+
+    /// **A directory the sweep cannot remove costs no process but this one**:
+    /// it leaves this process's root, which can then remove itself, for its
+    /// base under a name no sweep reads as a root, and this process goes on.
+    #[test]
+    fn a_directory_the_sweep_cannot_remove_costs_no_process_but_this_one() {
+        let tmp = TempDir::new("stuck");
+        let name = format!("reap-{ROOT_PREFIX}999999-0");
+        let reaped = tmp.join("root").join(&name);
+        fs::create_dir_all(reaped.join("locked")).unwrap();
+        fs::write(reaped.join(OWNER), b"").unwrap();
+
+        reclaim(&tmp, vec![reaped.clone()], |_| Err(std::io::Error::other("refused")));
+        assert!(!reaped.exists(), "{} stayed in the root it was reaped into", reaped.display());
+        let stuck = tmp.join(format!("stuck-{name}"));
+        assert!(stuck.join("locked").is_dir(), "{} was not moved aside to {}", reaped.display(), stuck.display());
+    }
+}

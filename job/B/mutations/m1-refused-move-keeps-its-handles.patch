@@ -1,0 +1,16 @@
+diff --git a/toyos/src/ipc.rs b/toyos/src/ipc.rs
+index f59b01bc..3aad4da2 100644
+--- a/toyos/src/ipc.rs
++++ b/toyos/src/ipc.rs
+@@ -319,7 +319,10 @@ fn move_batch<H: AsHandle>(
+     for (out, handle) in raw.iter_mut().zip(batch.iter().flatten()) {
+         *out = handle.as_handle();
+     }
+-    send(&raw[..count])?;
++    if let Err(e) = send(&raw[..count]) {
++        batch.into_iter().flatten().for_each(core::mem::forget);
++        return Err(e);
++    }
+     #[expect(clippy::disallowed_methods, reason = "taken: the numbers are no longer this process's to close")]
+     batch.into_iter().flatten().for_each(core::mem::forget);
+     Ok(())

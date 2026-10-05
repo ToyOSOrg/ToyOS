@@ -1,0 +1,39 @@
+   Compiling toyos-build v0.1.0 (/home/user/toyos-rootless)
+    Finished `test` profile [optimized + debuginfo] target(s) in 19.22s
+     Running unittests src/lib.rs (target/debug/deps/toyos_build-ebb2df733901da06)
+
+running 1 test
+test build::tests::a_stamp_that_cannot_be_written_panics ... FAILED
+
+failures:
+
+---- build::tests::a_stamp_that_cannot_be_written_panics stdout ----
+
+thread 'build::tests::a_stamp_that_cannot_be_written_panics' (29904) panicked at src/build.rs:2454:30:
+a stamp that was not written was taken for written: ()
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/std/src/panicking.rs:679:5
+   1: core::panicking::panic_fmt
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/panicking.rs:80:14
+   2: core::result::unwrap_failed
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/result.rs:1871:5
+   3: <core::result::Result<(), alloc::boxed::Box<dyn core::any::Any + core::marker::Send>>>::expect_err
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/result.rs:1297:22
+   4: toyos_build::build::tests::a_stamp_that_cannot_be_written_panics
+             at ./src/build.rs:2454:30
+   5: toyos_build::build::tests::a_stamp_that_cannot_be_written_panics::{closure#0}
+             at ./src/build.rs:2443:47
+   6: <toyos_build::build::tests::a_stamp_that_cannot_be_written_panics::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/ops/function.rs:250:5
+   7: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+
+failures:
+    build::tests::a_stamp_that_cannot_be_written_panics
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 401 filtered out; finished in 0.35s
+
+error: test failed, to rerun pass `-p toyos-build --lib`

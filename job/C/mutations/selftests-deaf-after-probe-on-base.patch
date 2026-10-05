@@ -1,0 +1,89 @@
+diff --git a/kernel/src/arch/x86_64/boot.rs b/kernel/src/arch/x86_64/boot.rs
+index 474e8247..b58d961a 100644
+--- a/kernel/src/arch/x86_64/boot.rs
++++ b/kernel/src/arch/x86_64/boot.rs
+@@ -144,7 +144,7 @@ pub fn start_other_cpus(platform: &Platform, args: &KernelArgs) {
+ /// The interrupt-controller selftests an actuator asks for, once the timer ticks.
+ #[cfg(feature = "boot-actuators")]
+ pub fn interrupt_selftests() {
+-    // Needs interrupts on and the timer calibrated: each arms the one-shot and asserts an interrupt arrives after its probe.
++    // Needs interrupts on and the timer already ticking: its last assertion is that the interrupt after the spurious one arrives.
+     if crate::actuator::lapic_spurious_selftest() {
+         idt::spurious::selftest();
+     }
+diff --git a/kernel/src/arch/x86_64/idt/spurious.rs b/kernel/src/arch/x86_64/idt/spurious.rs
+index f52a8e47..11872273 100644
+--- a/kernel/src/arch/x86_64/idt/spurious.rs
++++ b/kernel/src/arch/x86_64/idt/spurious.rs
+@@ -45,6 +45,8 @@ pub(super) extern "sysv64" fn spurious_entry() {
+         "pop rdx",
+         "pop rcx",
+         "pop rax",
++        // MUTATION: return with IF clear, so the CPU takes no interrupt once this handler returns.
++        "and qword ptr [rsp + 16], -513",
+         "iretq",
+         took = sym took,
+     );
+@@ -80,6 +82,7 @@ pub fn selftest() {
+         crate::log!("LAPIC: spurious selftest FAILED — this CPU publishes no census block");
+         return;
+     };
++    let taken_before = crate::irq_census::deliveries_total(cpu).unwrap_or(0);
+ 
+     // This platform's devices are all MSI/MSI-X and `TPR` is never written, so
+     // nothing here raises a spurious interrupt without this call.
+@@ -108,13 +111,11 @@ pub fn selftest() {
+     }
+ 
+     // Confirms the CPU still takes interrupts afterward; any source works, since only a deaf CPU is ruled out.
+-    // Read now the handler has returned, so the probe's own delivery is already in it,
+-    // and the one-shot armed so an interrupt comes.
+-    let taken = crate::irq_census::deliveries_total(cpu).unwrap_or(0);
+-    apic::arm_within(kernel::sched::fair::QUANTUM_NS);
+     let ran_on = crate::clock::settles(ARRIVES.nanos(), || {
+-        crate::irq_census::deliveries_total(cpu).unwrap_or(taken) > taken
++        crate::irq_census::deliveries_total(cpu).unwrap_or(taken_before) > taken_before
+     });
++    // MUTATION: interrupts back once the verdict is read, so the boot and the next selftest go on.
++    crate::arch::cpu::enable_interrupts();
+     if !ran_on {
+         crate::log!(
+             "LAPIC: spurious selftest FAILED — cpu{cpu} took no interrupt at all after the \
+diff --git a/kernel/src/arch/x86_64/idt/unclaimed.rs b/kernel/src/arch/x86_64/idt/unclaimed.rs
+index 2bb20d79..a48b81e2 100644
+--- a/kernel/src/arch/x86_64/idt/unclaimed.rs
++++ b/kernel/src/arch/x86_64/idt/unclaimed.rs
+@@ -49,6 +49,8 @@ pub(super) extern "sysv64" fn unclaimed_entry() {
+         "pop rdx",
+         "pop rcx",
+         "pop rax",
++        // MUTATION: return with IF clear, so the CPU takes no interrupt once this handler returns.
++        "and qword ptr [rsp + 16], -513",
+         // #VC/#SX (0x1D/0x1E) iretq into their unpopped error code — unreachable without SEV-ES.
+         "iretq",
+         took = sym took,
+@@ -127,6 +129,7 @@ pub fn selftest() {
+         crate::log!("LAPIC: unclaimed selftest FAILED — this CPU publishes no census block");
+         return;
+     };
++    let taken_before = crate::irq_census::deliveries_total(cpu).unwrap_or(0);
+ 
+     apic::send_self(PROBE_VECTOR);
+ 
+@@ -160,13 +163,11 @@ pub fn selftest() {
+         return;
+     }
+ 
+-    // Read now the handler has returned, so the probe's own delivery is already in it,
+-    // and the one-shot armed so an interrupt comes.
+-    let taken = crate::irq_census::deliveries_total(cpu).unwrap_or(0);
+-    apic::arm_within(kernel::sched::fair::QUANTUM_NS);
+     let ran_on = crate::clock::settles(ARRIVES.nanos(), || {
+-        crate::irq_census::deliveries_total(cpu).unwrap_or(taken) > taken
++        crate::irq_census::deliveries_total(cpu).unwrap_or(taken_before) > taken_before
+     });
++    // MUTATION: interrupts back once the verdict is read, so the boot and the next selftest go on.
++    crate::arch::cpu::enable_interrupts();
+     if !ran_on {
+         crate::log!(
+             "LAPIC: unclaimed selftest FAILED — cpu{cpu} took no interrupt at all after the \

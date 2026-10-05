@@ -1,0 +1,1 @@
+m4-stuck-left-in-root: EXIT=101 (1 compile errors) test tests::a_directory_the_sweep_cannot_remove_costs_no_process_but_this_one ... FAILED 

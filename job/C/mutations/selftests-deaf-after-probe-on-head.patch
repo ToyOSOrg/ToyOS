@@ -1,0 +1,44 @@
+diff --git a/kernel/src/arch/x86_64/idt/spurious.rs b/kernel/src/arch/x86_64/idt/spurious.rs
+index f52a8e47..fe7e2b3c 100644
+--- a/kernel/src/arch/x86_64/idt/spurious.rs
++++ b/kernel/src/arch/x86_64/idt/spurious.rs
+@@ -45,6 +45,8 @@ pub(super) extern "sysv64" fn spurious_entry() {
+         "pop rdx",
+         "pop rcx",
+         "pop rax",
++        // MUTATION: return with IF clear, so the CPU takes no interrupt once this handler returns.
++        "and qword ptr [rsp + 16], -513",
+         "iretq",
+         took = sym took,
+     );
+@@ -115,6 +117,8 @@ pub fn selftest() {
+     let ran_on = crate::clock::settles(ARRIVES.nanos(), || {
+         crate::irq_census::deliveries_total(cpu).unwrap_or(taken) > taken
+     });
++    // MUTATION: interrupts back once the verdict is read, so the boot and the next selftest go on.
++    crate::arch::cpu::enable_interrupts();
+     if !ran_on {
+         crate::log!(
+             "LAPIC: spurious selftest FAILED — cpu{cpu} took no interrupt at all after the \
+diff --git a/kernel/src/arch/x86_64/idt/unclaimed.rs b/kernel/src/arch/x86_64/idt/unclaimed.rs
+index 2bb20d79..b52e5395 100644
+--- a/kernel/src/arch/x86_64/idt/unclaimed.rs
++++ b/kernel/src/arch/x86_64/idt/unclaimed.rs
+@@ -49,6 +49,8 @@ pub(super) extern "sysv64" fn unclaimed_entry() {
+         "pop rdx",
+         "pop rcx",
+         "pop rax",
++        // MUTATION: return with IF clear, so the CPU takes no interrupt once this handler returns.
++        "and qword ptr [rsp + 16], -513",
+         // #VC/#SX (0x1D/0x1E) iretq into their unpopped error code — unreachable without SEV-ES.
+         "iretq",
+         took = sym took,
+@@ -167,6 +169,8 @@ pub fn selftest() {
+     let ran_on = crate::clock::settles(ARRIVES.nanos(), || {
+         crate::irq_census::deliveries_total(cpu).unwrap_or(taken) > taken
+     });
++    // MUTATION: interrupts back once the verdict is read, so the boot and the next selftest go on.
++    crate::arch::cpu::enable_interrupts();
+     if !ran_on {
+         crate::log!(
+             "LAPIC: unclaimed selftest FAILED — cpu{cpu} took no interrupt at all after the \

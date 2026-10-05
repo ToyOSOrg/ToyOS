@@ -1,0 +1,36 @@
+   Compiling toyos-build v0.1.0 (/home/user/toyos-rootless)
+    Finished `test` profile [optimized + debuginfo] target(s) in 48.03s
+     Running unittests src/lib.rs (target/debug/deps/toyos_build-ebb2df733901da06)
+
+running 1 test
+test llvm::tests::a_placed_llvm_is_read_only_and_a_written_one_is_made_again ... FAILED
+
+failures:
+
+---- llvm::tests::a_placed_llvm_is_read_only_and_a_written_one_is_made_again stdout ----
+10:37:25 Building LLVM a7000ff1d66c1944 in /tmp/toyos-tmp-13284-0/llvm-written-0/a/rust: nobody on this host has
+
+thread 'llvm::tests::a_placed_llvm_is_read_only_and_a_written_one_is_made_again' (13286) panicked at src/llvm.rs:743:13:
+/tmp/toyos-tmp-13284-0/llvm-written-0/primary/rust/build/llvm/a7000ff1d66c1944 can be written
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/std/src/panicking.rs:679:5
+   1: core::panicking::panic_fmt
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/panicking.rs:80:14
+   2: toyos_build::llvm::tests::a_placed_llvm_is_read_only_and_a_written_one_is_made_again
+             at ./src/llvm.rs:743:13
+   3: toyos_build::llvm::tests::a_placed_llvm_is_read_only_and_a_written_one_is_made_again::{closure#0}
+             at ./src/llvm.rs:730:68
+   4: <toyos_build::llvm::tests::a_placed_llvm_is_read_only_and_a_written_one_is_made_again::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/ops/function.rs:250:5
+   5: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+
+
+failures:
+    llvm::tests::a_placed_llvm_is_read_only_and_a_written_one_is_made_again
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 401 filtered out; finished in 1.31s
+
+error: test failed, to rerun pass `-p toyos-build --lib`

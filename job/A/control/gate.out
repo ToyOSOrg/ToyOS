@@ -1,0 +1,9 @@
+gate: waiting for the host's gate lock (/home/user/toyos-rootless)
+gate: running in /home/user/toyos-rootless as root
+gate: EXIT=1 at f260e0b98eaaec1e1c719abebb027f897af0281a as root; log /root/.claude/jobs/015tYBoMwh9xUcBBLG35wTFr/A/control/host-root.log
+10:27:12 === [ci] nothing left in $TMPDIR or /tmp
+10:27:12 [ci] nothing left in $TMPDIR or /tmp: every test took its scratch with it
+10:27:12 [ci] Host: 2 of 75 step(s) red:
+10:27:12   - RED: the build system: cargo test --lib exited exit status: 101
+10:27:12   - RED: the host workspace: cargo test --workspace --exclude toyos-build exited exit status: 101
+gate: removed /home/user/toyos-rootless's target dirs; free 24G

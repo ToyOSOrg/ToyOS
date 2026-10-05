@@ -1,0 +1,32 @@
+   Compiling toyos-abi v0.16.0 (/home/user/toyos-irqcensus/toyos-abi)
+   Compiling rustc-demangle v0.1.27
+   Compiling toyos-wallclock v0.1.0 (/home/user/toyos-irqcensus/toyos-wallclock)
+   Compiling toyos-elide v0.1.0 (/home/user/toyos-irqcensus/toyos-elide)
+   Compiling cfg-if v1.0.4
+   Compiling toyos-elf v0.1.0 (/home/user/toyos-irqcensus/toyos-elf)
+   Compiling dlmalloc v0.2.13
+   Compiling toyos-bootmap v0.1.0 (/home/user/toyos-irqcensus/toyos-bootmap)
+   Compiling toyos-symbols v0.1.0 (/home/user/toyos-irqcensus/toyos-symbols)
+   Compiling toyos-acpi v0.1.0 (/home/user/toyos-irqcensus/toyos-acpi)
+   Compiling toyos-pci v0.1.0 (/home/user/toyos-irqcensus/kernel/pci)
+   Compiling toyos-fat32 v0.1.0 (/home/user/toyos-irqcensus/toyos-fat32)
+   Compiling toyos-tsc v0.1.0 (/home/user/toyos-irqcensus/toyos-tsc)
+   Compiling toyos-tco v0.1.0 (/home/user/toyos-irqcensus/toyos-tco)
+   Compiling bcachefs v0.1.0 (/home/user/toyos-irqcensus/bcachefs)
+   Compiling toyos-rootimage v0.1.0 (/home/user/toyos-irqcensus/toyos-rootimage)
+   Compiling toyos-quiesce v0.1.0 (/home/user/toyos-irqcensus/toyos-quiesce)
+   Compiling toyos-ps2 v0.1.0 (/home/user/toyos-irqcensus/kernel/ps2)
+   Compiling hashbrown v0.16.1
+   Compiling toyos-hda v0.1.0 (/home/user/toyos-irqcensus/toyos-hda)
+   Compiling toyos-gpt v0.1.0 (/home/user/toyos-irqcensus/toyos-gpt)
+   Compiling toyos-gicv3 v0.1.0 (/home/user/toyos-irqcensus/kernel/gicv3)
+   Compiling toyos-xhci v0.1.0 (/home/user/toyos-irqcensus/toyos-xhci)
+   Compiling toyos-userbound v0.1.0 (/home/user/toyos-irqcensus/toyos-userbound)
+   Compiling toyos-untrusted v0.1.0 (/home/user/toyos-irqcensus/toyos-untrusted)
+   Compiling toyos-dma v0.1.0 (/home/user/toyos-irqcensus/kernel/dma)
+   Compiling toyos-cpuvuln v0.1.0 (/home/user/toyos-irqcensus/toyos-cpuvuln)
+   Compiling toyos-blockhold v0.1.0 (/home/user/toyos-irqcensus/toyos-blockhold)
+   Compiling toyos-blackbox v0.1.0 (/home/user/toyos-irqcensus/toyos-blackbox)
+   Compiling kernel v0.1.0 (/home/user/toyos-irqcensus/kernel)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 18.38s
+EXIT=0

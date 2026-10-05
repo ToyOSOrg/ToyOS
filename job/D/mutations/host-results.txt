@@ -1,0 +1,5 @@
+host-1-every-launch-its-own-share EXIT=101
+host-2-sessions-never-advance EXIT=101
+host-3-decode-takes-any-login-number EXIT=101
+host-4-machine-spends-the-supervisors-share EXIT=101
+host-0-fix EXIT=0

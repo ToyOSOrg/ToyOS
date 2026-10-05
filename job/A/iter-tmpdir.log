@@ -1,0 +1,30 @@
+   Compiling toyos-tmpdir v0.1.0 (/home/user/toyos-rootless/toyos-tmpdir)
+    Finished `test` profile [optimized + debuginfo] target(s) in 2.40s
+     Running unittests src/lib.rs (target/debug/deps/toyos_tmpdir-3d1bde0ec5ccc61b)
+
+running 2 tests
+test tests::a_directory_the_sweep_cannot_remove_costs_no_process_but_this_one ... ok
+test tests::a_held_global_lock_times_out_naming_its_holder ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+
+     Running tests/reclaim.rs (target/debug/deps/reclaim-9c17c2ec302b85e7)
+
+running 7 tests
+test a_killed_process_is_reclaimed_and_a_live_one_is_never_touched ... ok
+test holder ... ok
+test an_adopted_root_goes_with_its_adopter ... ok
+test a_directory_goes_on_a_return_and_on_a_panic ... ok
+test a_root_without_an_owner_goes_and_nothing_else_is_touched ... ok
+test making_a_root_waits_for_global ... ok
+test removing_a_root_waits_for_global ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.29s
+
+   Doc-tests toyos_tmpdir
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+EXIT=0

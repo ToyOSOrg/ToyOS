@@ -1,0 +1,11 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+   Compiling toyos-build v0.1.0 (/home/user/toyos-irqcensus)
+    Finished `test` profile [optimized + debuginfo] target(s) in 20.14s
+     Running tests/checks.rs (target/debug/deps/toyos_checks-09fd80cd7a45bf30)
+
+running 1 test
+test checks::irq_census_verdict ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 35 filtered out; finished in 0.00s
+

@@ -1,0 +1,1 @@
+The host suite fails its error paths for root too, and a written LLVM is made again

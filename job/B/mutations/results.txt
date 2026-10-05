@@ -1,0 +1,8 @@
+head 339291adec697575472c2ebedb47df513e1d720e
+m1-refused-move-keeps-its-handles: BUILD EXIT=0 RUN EXIT=101 dirty-lines-after-restore=0
+m2-taken-move-closes-its-handles: BUILD EXIT=0 RUN EXIT=101 dirty-lines-after-restore=0
+m3-oversized-batch-sends-its-first-eight: BUILD EXIT=0 RUN EXIT=101 dirty-lines-after-restore=0
+m4-oversized-batch-leaks-the-one-past-the-bound: BUILD EXIT=0 RUN EXIT=101 dirty-lines-after-restore=0
+m5-batch-reaches-the-kernel-reversed: BUILD EXIT=0 RUN EXIT=101 dirty-lines-after-restore=0
+restored tree: RUN EXIT=0 dirty-lines=0
+done

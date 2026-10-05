@@ -1,0 +1,9 @@
+gate: waiting for the host's gate lock (/home/user/toyos-irqcensus)
+gate: running in /home/user/toyos-irqcensus as gate
+gate: EXIT=101 at 71fb985c84c54eaca98a2b184bbc7af135a2733d as gate; log /root/.claude/jobs/015tYBoMwh9xUcBBLG35wTFr/C/host.log
+   9: toyos_build::main
+             at ./src/main.rs:100:9
+  10: <fn() as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+gate: removed /home/user/toyos-irqcensus's target dirs; free 24G

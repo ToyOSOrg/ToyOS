@@ -1,0 +1,17 @@
+diff --git a/toyos/src/ipc.rs b/toyos/src/ipc.rs
+index f59b01bc..28e6ae75 100644
+--- a/toyos/src/ipc.rs
++++ b/toyos/src/ipc.rs
+@@ -312,8 +312,10 @@ fn move_batch<H: AsHandle>(
+     let mut batch: [Option<H>; syscall::MAX_TRANSFER_HANDLES] = core::array::from_fn(|_| None);
+     let mut count = 0;
+     for handle in handles {
+-        *batch.get_mut(count).ok_or(SyscallError::InvalidArgument)? = Some(handle);
+-        count += 1;
++        if let Some(slot) = batch.get_mut(count) {
++            *slot = Some(handle);
++            count += 1;
++        }
+     }
+     let mut raw = [toyos_abi::HANDLE_INVALID; syscall::MAX_TRANSFER_HANDLES];
+     for (out, handle) in raw.iter_mut().zip(batch.iter().flatten()) {

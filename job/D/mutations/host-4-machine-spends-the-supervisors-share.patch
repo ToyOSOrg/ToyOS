@@ -1,0 +1,13 @@
+diff --git a/toyos-manifest/src/launch.rs b/toyos-manifest/src/launch.rs
+index 8a8570ff..eeea255d 100644
+--- a/toyos-manifest/src/launch.rs
++++ b/toyos-manifest/src/launch.rs
+@@ -45,7 +45,7 @@ pub struct Login(u64);
+ 
+ /// The share the supervisor's own files spend, which is no session's.
+ pub const SUPERVISOR_SHARE: u64 = 0;
+-const MACHINE_SHARE: u64 = 1;
++const MACHINE_SHARE: u64 = 0;
+ const FIRST_LOGIN: u64 = 2;
+ 
+ impl Session {

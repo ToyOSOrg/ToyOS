@@ -1,0 +1,8 @@
+gate: waiting for the host's gate lock (/home/user/toyos-rootless)
+gate: running in /home/user/toyos-rootless as root
+gate: freed /home/user/toyos-handlesend/target
+rm: cannot remove '/home/user/toyos-irqcensus/target/debug/build': Directory not empty
+rm: cannot remove '/home/user/toyos-irqcensus/target/debug/deps': Directory not empty
+gate: freed /home/user/toyos-handlesend/userland/target
+gate: freed /home/user/toyos-irqcensus/kernel/target
+gate: freed /home/user/toyos-handlesend/toyos/target

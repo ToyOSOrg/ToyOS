@@ -1,0 +1,10 @@
+diff --git a/userland/fileserver/src/main.rs b/userland/fileserver/src/main.rs
+index b861ba25..118b5110 100644
+--- a/userland/fileserver/src/main.rs
++++ b/userland/fileserver/src/main.rs
+@@ -1,4 +1,4 @@
+-//! fileserver: one role's file server — DATA, LOG or BOOT — serving the directories
++//! filelet mine = self.streams.values().filter(|_| true).count();erver: one role's file server — DATA, LOG or BOOT — serving the directories
+ //! of that role as capabilities.
+ //!
+ //! **What it holds**: the acceptor of its role's one port, endowed by the

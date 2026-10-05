@@ -1,0 +1,261 @@
+   Compiling cfg-if v1.0.4
+   Compiling libc v0.2.190
+   Compiling memchr v2.8.0
+   Compiling regex-automata v0.4.18
+   Compiling getrandom v0.4.2
+   Compiling fastrand v2.5.0
+   Compiling tinyvec v1.13.3
+   Compiling bstr v1.13.1
+   Compiling parking_lot_core v0.9.12
+   Compiling gix-error v0.4.0
+   Compiling gix-trace v0.2.0
+   Compiling scopeguard v1.2.0
+   Compiling unicode-normalization v0.1.25
+   Compiling smallvec v1.15.1
+   Compiling gix-validate v0.12.0
+   Compiling once_cell v1.21.4
+   Compiling gix-path v0.13.0
+   Compiling gix-utils v0.4.0
+   Compiling lock_api v0.4.14
+   Compiling crc32fast v1.5.0
+   Compiling autocfg v1.5.1
+   Compiling parking_lot v0.12.5
+   Compiling same-file v1.0.6
+   Compiling bitflags v2.11.0
+   Compiling walkdir v2.5.0
+   Compiling prodash v31.0.0
+   Compiling byteorder v1.5.0
+   Compiling gix-features v0.50.0
+   Compiling equivalent v1.0.2
+   Compiling allocator-api2 v0.2.21
+   Compiling heapless v0.8.0
+   Compiling hash32 v0.3.1
+   Compiling faster-hex v0.10.1
+   Compiling stable_deref_trait v1.2.1
+   Compiling foldhash v0.2.0
+   Compiling rustix v1.1.5
+   Compiling crossbeam-utils v0.8.23
+   Compiling itoa v1.0.17
+   Compiling linux-raw-sys v0.12.1
+   Compiling sha1dc v0.1.2
+   Compiling gix-hash v0.27.0
+   Compiling gix-quote v0.9.0
+   Compiling hashbrown v0.14.5
+   Compiling gix-fs v0.23.0
+   Compiling jiff-core v0.1.1
+   Compiling dashmap v6.2.1
+   Compiling tempfile v3.27.0
+   Compiling gix-tempfile v25.0.0
+   Compiling jiff v0.2.37
+   Compiling gix-command v0.11.0
+   Compiling hashbrown v0.17.1
+   Compiling memmap2 v0.9.11
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling gix-hashtable v0.17.0
+   Compiling quote v1.0.45
+   Compiling gix-lock v25.0.0
+   Compiling gix-chunk v0.9.0
+   Compiling syn v2.0.117
+   Compiling nonempty v0.12.0
+   Compiling gix-glob v0.28.0
+   Compiling version_check v0.9.5
+   Compiling unicode-bom v2.0.3
+   Compiling rustversion v1.0.22
+   Compiling generic-array v0.14.7
+   Compiling hashbrown v0.16.1
+   Compiling gix-date v0.17.0
+   Compiling gix-commitgraph v0.40.0
+   Compiling gix-actor v0.43.0
+   Compiling gix-object v0.65.0
+   Compiling typenum v1.20.1
+   Compiling gix-attributes v0.36.0
+   Compiling gix-sec v0.15.0
+   Compiling gix-revwalk v0.36.0
+   Compiling serde_core v1.0.228
+   Compiling find-msvc-tools v0.1.9
+   Compiling shlex v1.3.0
+   Compiling cc v1.2.56
+   Compiling gix-ref v0.68.0
+   Compiling gix-config-value v0.20.0
+   Compiling filetime v0.2.29
+   Compiling ring v0.17.14
+   Compiling gix-traverse v0.62.0
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling encoding_rs v0.8.42
+   Compiling gix-packetline v0.23.0
+   Compiling num-traits v0.2.19
+   Compiling gix-bitmap v0.5.0
+   Compiling semver v1.0.28
+   Compiling serde v1.0.228
+   Compiling percent-encoding v2.3.2
+   Compiling fnv v1.0.7
+   Compiling gix-index v0.56.0
+   Compiling rustc_version v0.4.1
+   Compiling digest v0.10.7
+   Compiling gix-pathspec v0.21.0
+   Compiling serde_derive v1.0.228
+   Compiling gix-ignore v0.23.0
+   Compiling log v0.4.29
+   Compiling core_detect v1.0.0
+   Compiling multiversion_no_op v1.0.0
+   Compiling subtle v2.6.1
+   Compiling zeroize v1.9.0
+   Compiling cpufeatures v0.2.17
+   Compiling simdutf8 v0.1.5
+   Compiling toyos-abi v0.16.0 (/home/user/toyos-rootless/toyos-abi)
+   Compiling rustls-pki-types v1.15.1
+   Compiling gix-worktree v0.57.0
+   Compiling curve25519-dalek v4.1.3
+   Compiling gix-url v0.39.0
+   Compiling getrandom v0.2.17
+   Compiling httparse v1.10.1
+   Compiling untrusted v0.9.0
+   Compiling zlib-rs v0.6.8
+   Compiling gix-filter v0.35.0
+   Compiling gix-zlib v0.2.0
+   Compiling sha2 v0.10.9
+   Compiling gix-discover v0.56.0
+   Compiling curve25519-dalek-derive v0.1.1
+   Compiling gix-imara-diff v0.3.0
+   Compiling clru v0.6.3
+   Compiling zmij v1.0.21
+   Compiling signature v2.2.0
+   Compiling rustls v0.23.45
+   Compiling bytes v1.12.1
+   Compiling http v1.5.0
+   Compiling ed25519 v2.2.3
+   Compiling gix-diff v0.68.0
+   Compiling gix-pack v0.75.0
+   Compiling gix-dir v0.30.0
+   Compiling rustls-webpki v0.103.15
+   Compiling gix-transport v0.60.0
+   Compiling toml_datetime v0.6.11
+   Compiling serde_spanned v0.6.9
+   Compiling gix-config v0.61.0
+   Compiling gix-macros v0.2.0
+   Compiling indexmap v2.13.0
+   Compiling arc-swap v1.9.2
+   Compiling gix-shallow v0.14.0
+   Compiling gix-refspec v0.46.0
+   Compiling base64 v0.23.1
+   Compiling getrandom v0.3.4
+   Compiling iana-time-zone v0.1.65
+   Compiling winnow v0.7.15
+   Compiling crc-catalog v2.4.0
+   Compiling toml_write v0.1.2
+   Compiling simd-adler32 v0.3.10
+   Compiling foldhash v0.1.5
+   Compiling pxfm v0.1.28
+   Compiling serde_json v1.0.149
+   Compiling adler2 v2.0.1
+   Compiling zune-core v0.5.1
+   Compiling zune-jpeg v0.5.13
+   Compiling miniz_oxide v0.9.1
+   Compiling moxcms v0.8.1
+   Compiling toml_edit v0.22.27
+   Compiling hashbrown v0.15.5
+   Compiling crc v3.4.0
+   Compiling chrono v0.4.44
+   Compiling gix-submodule v0.35.0
+   Compiling ureq-proto v0.6.4
+   Compiling gix-protocol v0.66.0
+   Compiling gix-odb v0.85.0
+   Compiling gix-status v0.35.0
+   Compiling ed25519-dalek v2.2.0
+   Compiling toyos-manifest v0.1.0 (/home/user/toyos-rootless/toyos-manifest)
+   Compiling webpki-roots v1.0.9
+   Compiling gix-revision v0.50.0
+   Compiling uuid v1.22.0
+   Compiling utf8-zero v0.8.1
+   Compiling bitflags v1.3.2
+   Compiling bytemuck v1.25.0
+   Compiling ttf-parser v0.21.1
+   Compiling toyos-wallclock v0.1.0 (/home/user/toyos-rootless/toyos-wallclock)
+   Compiling toyos-elf v0.1.0 (/home/user/toyos-rootless/toyos-elf)
+   Compiling toyos-elide v0.1.0 (/home/user/toyos-rootless/toyos-elide)
+   Compiling rustc-demangle v0.1.27
+   Compiling byteorder-lite v0.1.0
+   Compiling toyos-symbols v0.1.0 (/home/user/toyos-rootless/toyos-symbols)
+   Compiling image v0.25.10
+   Compiling fontdue v0.9.3
+   Compiling toyos-fat32 v0.1.0 (/home/user/toyos-rootless/toyos-fat32)
+   Compiling fatfs v0.3.6
+   Compiling ureq v3.4.2
+   Compiling gpt v3.1.0
+   Compiling gix v0.88.0
+   Compiling toyos-swap v0.1.0 (/home/user/toyos-rootless/toyos-swap)
+   Compiling toyos-update v0.1.0 (/home/user/toyos-rootless/toyos-update)
+   Compiling toml v0.8.23
+   Compiling flate2 v1.1.10
+   Compiling kernel v0.1.0 (/home/user/toyos-rootless/kernel)
+   Compiling toyos-logstream v0.1.0 (/home/user/toyos-rootless/toyos-logstream)
+   Compiling tar v0.4.46
+   Compiling toyos-i219 v0.1.0 (/home/user/toyos-rootless/toyos-i219)
+   Compiling toyos-fat32-check v0.1.0 (/home/user/toyos-rootless/toyos-fat32/check)
+   Compiling toyos-blackbox v0.1.0 (/home/user/toyos-rootless/toyos-blackbox)
+   Compiling toyos-tmpdir v0.1.0 (/home/user/toyos-rootless/toyos-tmpdir)
+   Compiling bcachefs v0.1.0 (/home/user/toyos-rootless/bcachefs)
+   Compiling toyos-osrelease v0.1.0 (/home/user/toyos-rootless/toyos-osrelease)
+   Compiling toyos-keymap v0.1.0 (/home/user/toyos-rootless/toyos-keymap)
+   Compiling toyos-gpt v0.1.0 (/home/user/toyos-rootless/toyos-gpt)
+   Compiling toyos-userbound v0.1.0 (/home/user/toyos-rootless/toyos-userbound)
+   Compiling toyos-tco v0.1.0 (/home/user/toyos-rootless/toyos-tco)
+   Compiling toyos-xhci v0.1.0 (/home/user/toyos-rootless/toyos-xhci)
+   Compiling toyos-quiesce v0.1.0 (/home/user/toyos-rootless/toyos-quiesce)
+   Compiling toyos-build v0.1.0 (/home/user/toyos-rootless)
+    Finished `test` profile [optimized + debuginfo] target(s) in 5m 06s
+     Running unittests src/lib.rs (target/debug/deps/toyos_build-ebb2df733901da06)
+
+running 25 tests
+test llvm::tests::a_build_directory_keeps_no_llvm_of_its_own ... ok
+test build::tests::a_stamp_that_cannot_be_written_panics ... ok
+test llvm::tests::a_held_llvm_is_not_recorded ... ok
+
+running 1 test
+test llvm::tests::a_checkout_behind_its_gitlink_is_built_at_the_gitlink ... ok
+10:32:44 Building LLVM a7000ff1d66c1944 in /tmp/toyos-tmp-20928-0/llvm-named-5/a/rust: nobody on this host has
+test llvm::tests::child_role ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 401 filtered out; finished in 0.18s
+
+test llvm::tests::a_staged_llvm_gitlink_is_refused ... ok
+test llvm::tests::a_resolved_llvm_is_named_by_its_worktree ... ok
+test llvm::tests::a_placed_llvm_is_read_only_and_a_written_one_is_made_again ... ok
+
+running 1 test
+
+running 1 test
+test llvm::tests::a_stopped_sweep_leaves_no_llvm_that_passes_for_whole ... ok
+10:32:45 Building LLVM a7000ff1d66c1944 in /tmp/toyos-tmp-20928-0/llvm-made-elsewhere-17/b/rust: nobody on this host has
+10:32:45 Building LLVM a7000ff1d66c1944 in /tmp/toyos-tmp-20928-0/llvm-sweep-19/a/rust: nobody on this host has
+test llvm::tests::child_role ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 401 filtered out; finished in 0.20s
+
+test llvm::tests::an_llvm_keeps_what_builds_read_and_nothing_else ... ok
+test llvm::tests::child_role ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 401 filtered out; finished in 0.30s
+
+test llvm::tests::an_llvm_being_made_elsewhere_is_not_made_again ... ok
+test llvm::tests::child_role ... ignored, the competing process for the tests below; never runs on its own
+test llvm::tests::keyed_and_built ... ignored, the process the environment test runs; never runs on its own
+test llvm::tests::an_llvm_is_swept_once_nobody_names_or_uses_it ... ok
+test llvm::tests::the_caller_s_environment_reaches_neither_the_build_nor_the_key ... ok
+test llvm::tests::the_key_names_the_host_s_tools ... ok
+test llvm::tests::the_llvm_config_turns_every_host_library_off ... ok
+test llvm::tests::an_uncommitted_bootstrap_names_no_llvm ... ok
+test llvm::tests::an_llvm_that_is_not_whole_is_made_again ... ok
+test llvm::tests::the_key_moves_with_the_llvm_and_only_with_it ... ok
+test sysroot::tests::a_switch_that_cannot_remove_records_nothing_and_the_next_one_removes ... ok
+test toolchain::tests::dep_info_names_the_checkout_std_was_really_built_from ... ok
+test toolchain::tests::dep_info_that_cannot_be_read_is_refused ... ok
+test llvm::tests::two_compilers_of_one_llvm_make_it_once ... ok
+test llvm::tests::the_runtimes_sources_are_the_commit_s ... ok
+test llvm::tests::what_the_key_does_not_name_is_never_stored ... ok
+
+test result: ok. 23 passed; 0 failed; 2 ignored; 0 measured; 377 filtered out; finished in 2.87s
+
+EXIT=0

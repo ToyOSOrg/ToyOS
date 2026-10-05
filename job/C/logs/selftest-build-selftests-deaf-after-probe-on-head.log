@@ -1,0 +1,71 @@
+    Checking kernel v0.1.0 (/home/user/toyos-irqcensus/kernel)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.87s
+   Compiling kernel v0.1.0 (/home/user/toyos-irqcensus/kernel)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.21s
+0000000000261a54 <_RNvNtNtNtNtCsli9MozYR2vM_6kernel4arch6x86_643idt9unclaimed15unclaimed_entry>:
+  261a54:	cld
+  261a55:	push   rax
+  261a56:	push   rcx
+  261a57:	push   rdx
+  261a58:	push   rsi
+  261a59:	push   rdi
+  261a5a:	push   r8
+  261a5c:	push   r9
+  261a5e:	push   r10
+  261a60:	push   r11
+  261a62:	push   rbp
+  261a63:	mov    rbp,rsp
+  261a66:	and    rsp,0xfffffffffffffff0
+  261a6a:	call   261da0 <_RNvNtNtNtNtCsli9MozYR2vM_6kernel4arch6x86_643idt9unclaimed4took>
+  261a6f:	mov    rsp,rbp
+  261a72:	pop    rbp
+  261a73:	pop    r11
+  261a75:	pop    r10
+  261a77:	pop    r9
+  261a79:	pop    r8
+  261a7b:	pop    rdi
+  261a7c:	pop    rsi
+  261a7d:	pop    rdx
+  261a7e:	pop    rcx
+  261a7f:	pop    rax
+  261a80:	and    QWORD PTR [rsp+0x10],0xfffffffffffffdff
+  261a89:	iretq
+  261a8b:	int3
+  261a8c:	int3
+  261a8d:	int3
+  261a8e:	int3
+  261a8f:	int3
+--
+000000000029ee34 <_RNvNtNtNtNtCsli9MozYR2vM_6kernel4arch6x86_643idt8spurious14spurious_entry>:
+  29ee34:	cld
+  29ee35:	push   rax
+  29ee36:	push   rcx
+  29ee37:	push   rdx
+  29ee38:	push   rsi
+  29ee39:	push   rdi
+  29ee3a:	push   r8
+  29ee3c:	push   r9
+  29ee3e:	push   r10
+  29ee40:	push   r11
+  29ee42:	push   rbp
+  29ee43:	mov    rbp,rsp
+  29ee46:	and    rsp,0xfffffffffffffff0
+  29ee4a:	call   29f780 <_RNvNtNtNtNtCsli9MozYR2vM_6kernel4arch6x86_643idt8spurious4took>
+  29ee4f:	mov    rsp,rbp
+  29ee52:	pop    rbp
+  29ee53:	pop    r11
+  29ee55:	pop    r10
+  29ee57:	pop    r9
+  29ee59:	pop    r8
+  29ee5b:	pop    rdi
+  29ee5c:	pop    rsi
+  29ee5d:	pop    rdx
+  29ee5e:	pop    rcx
+  29ee5f:	pop    rax
+  29ee60:	and    QWORD PTR [rsp+0x10],0xfffffffffffffdff
+  29ee69:	iretq
+  29ee6b:	int3
+  29ee6c:	int3
+  29ee6d:	int3
+  29ee6e:	int3
+  29ee6f:	int3

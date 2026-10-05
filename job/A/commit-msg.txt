@@ -1,0 +1,52 @@
+The host suite fails its error paths for root too, and a written LLVM is made again
+
+`cargo run -- --ci host` run as uid 0 went red: five tests provoked
+their failure by taking a permission away, and root is not refused by
+permission bits. Each now fails its error path for a reason no user
+bypasses, and the one whose claim was false as root gets a guard of the
+build's own.
+
+- `build::tests::a_stamp_that_cannot_be_written_panics`: a directory
+  stands where `.deps-stamp` is written, so `fs::write` fails with
+  EISDIR for every user, instead of a `0o555` `kernel/target`.
+- `toolchain::tests::dep_info_that_cannot_be_read_is_refused`: the
+  dep-info directory is a file, so listing it fails with ENOTDIR,
+  instead of a `0o000` `dist`.
+- `sysroot::tests::a_switch_that_cannot_remove_records_nothing_and_the_next_one_removes`:
+  `forget_another_compiler_by` takes the removal, as `keystore::sweep_by`
+  and `retire_by` do, and the test hands it one that panics as
+  `keystore::remove` does on a failure. Nothing unprivileged makes a
+  removal of one's own directory fail for root.
+- `a_directory_the_sweep_cannot_remove_is_reported_and_the_next_process_still_works`
+  (`toyos-tmpdir/tests/reclaim.rs`) is gone; its claim is
+  `toyos_tmpdir`'s unit test
+  `a_directory_the_sweep_cannot_remove_costs_no_process_but_this_one`,
+  which hands the new `reclaim` a removal that fails and finds the
+  reaped directory moved out of this process's root to `stuck-<name>`.
+  The holder process cannot be handed a failing removal without a hook
+  that ships for the test alone.
+- `llvm::tests::a_placed_llvm_is_never_written` claimed what is false
+  as root: a placed LLVM was protected only by its mode bits. `place`
+  now writes into `SOURCE`, after the key, the digest of everything the
+  LLVM holds (`content`: each entry's path in order, a file's SHA-256, a
+  link's target, length-prefixed), and `defect` recomputes it on every
+  resolve, hold and CI layer check: an LLVM written through its own path
+  or through a link bootstrap makes, or with anything removed, replaced
+  or added, is not whole, whoever wrote it, and is made again. The mode
+  bits stay: they stop a non-root writer at the write. The test, now
+  `a_placed_llvm_is_read_only_and_a_written_one_is_made_again`, asserts
+  every entry of a placed LLVM is read-only, then makes each kind of
+  write with the modes given back first, as root's write is, and finds
+  the LLVM not whole and made again.
+
+`RECIPE` moves to 5: what a placed LLVM holds changed, and an LLVM
+placed before carries no digest, which CI's bootstrap would refuse as a
+restored layer that is not whole under an unchanged key. Every LLVM,
+and with it every compiler, freestanding and sysroot key, moves: every
+host and CI's toolchain job build them again once.
+
+Closes issues/the-host-suite-assumes-a-user-that-is-not-root.md, whose
+exit is the host job green as uid 0.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_015tYBoMwh9xUcBBLG35wTFr

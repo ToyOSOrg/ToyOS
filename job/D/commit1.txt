@@ -1,0 +1,33 @@
+File servers share by session: every launch made in a session spends its one share
+
+A file server's shares were per instance: the supervisor minted a fresh
+grant number on every start, so a session took a whole server by
+launching four programs (a shell launches shells). Now a grant names
+the session it was minted in, and every launch made in a session is
+minted that session's number.
+
+- toyos_manifest::launch: `Session::Login` carries the session's number,
+  which only `Sessions::open` makes; the launcher's badge carries it, and
+  `Authority::decode` refuses a number no session has. `may_start` answers
+  `Starts::In(caller's session)` or `Starts::Opening` for a `login`
+  caller, and `Session::share` is what a grant names: 0 the supervisor's
+  own files, 1 the machine's session, 2 on login sessions.
+- supervisor: mints each start's grants with its session's share (the
+  machine's for every boot row, the caller's or a newly opened one for a
+  launch); the per-start counter is gone.
+- toyos::fs::Grant: `instance` is `session`, and the format's version is
+  2, because the number means something else: a file server swapped in
+  from either side of this change refuses the other's grants by name.
+- fileserver: shares keyed by session; same quarter of each bound.
+- fs_share (metal row on tests/proctreecase): with the machine's session
+  at its stream share, a shell launched in it is refused its redirect's
+  stream; at its connection share, its redirect's connection; and a
+  shell that shell launches, which opens a login session, connects and
+  streams. proctreecase's shell row lists `shell` so it can.
+
+Closes issues/a-file-servers-shares-are-per-instance-and-one-session-launches-instances.md
+(deleted). What its close leaves is filed:
+issues/four-login-sessions-at-their-shares-take-a-file-server.md.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_015tYBoMwh9xUcBBLG35wTFr

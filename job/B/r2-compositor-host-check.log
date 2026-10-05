@@ -1,0 +1,44 @@
+    Checking simd-adler32 v0.3.10
+   Compiling crc32fast v1.5.0
+    Checking adler2 v2.0.1
+    Checking cfg-if v1.0.4
+    Checking arrayvec v0.7.8
+    Checking bytemuck v1.25.0
+    Checking miniz_oxide v0.9.1
+    Checking float-cmp v0.9.0
+    Checking arrayref v0.3.9
+    Checking toyos-abi v0.16.0 (/home/user/toyos-handlesend/toyos-abi)
+    Checking strict-num v0.1.1
+    Checking smallvec v1.15.1
+    Checking log v0.4.29
+    Checking kurbo v0.13.0
+    Checking tiny-skia-path v0.12.0
+    Checking flate2 v1.1.10
+    Checking fdeflate v0.3.7
+    Checking miniz_oxide v0.8.9
+    Checking bitflags v2.11.0
+    Checking siphasher v1.0.2
+    Checking memchr v2.8.0
+    Checking simplecss v0.2.2
+    Checking svgtypes v0.16.1
+    Checking data-url v0.3.2
+    Checking png v0.18.1
+    Checking xmlwriter v0.1.0
+    Checking roxmltree v0.21.1
+    Checking base64 v0.22.1
+    Checking imagesize v0.14.0
+    Checking pico-args v0.5.0
+    Checking rgb v0.8.53
+    Checking toyos v0.18.0 (/home/user/toyos-handlesend/toyos)
+    Checking usvg v0.47.0
+    Checking toyos-keymap v0.1.0 (/home/user/toyos-handlesend/toyos-keymap)
+    Checking toyos-font v0.2.0 (/home/user/toyos-handlesend/userland/toyos-font)
+    Checking toyos-inspect v0.1.0 (/home/user/toyos-handlesend/toyos-inspect)
+    Checking tiny-skia v0.12.0
+    Checking toyos-desktop v0.1.0 (/home/user/toyos-handlesend/userland/compositor/desktop)
+    Checking toyos-window v0.20.0 (/home/user/toyos-handlesend/userland/toyos-window)
+    Checking toyos-manifest v0.1.0 (/home/user/toyos-handlesend/toyos-manifest)
+    Checking resvg v0.47.0
+    Checking sprite v0.1.0 (/home/user/toyos-handlesend/userland/sprite)
+    Checking compositor v0.1.0 (/home/user/toyos-handlesend/userland/compositor)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 10.24s

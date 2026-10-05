@@ -1,0 +1,7 @@
+head c5cc9cf5ebf61026eb2e3a6a168a49c7ae3e042e
+head: EXIT=0
+irq-census-1-base-judge: EXIT=101
+irq-census-2-base-judge-without-its-monotonic-check: EXIT=101
+irq-census-3-base-judge-without-either-ordered-check: EXIT=101
+status after restore: []
+DONE

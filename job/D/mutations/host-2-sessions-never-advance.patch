@@ -1,0 +1,13 @@
+diff --git a/toyos-manifest/src/launch.rs b/toyos-manifest/src/launch.rs
+index 8a8570ff..4223f086 100644
+--- a/toyos-manifest/src/launch.rs
++++ b/toyos-manifest/src/launch.rs
+@@ -82,7 +82,7 @@ impl Sessions {
+     /// A login session none before it was.
+     pub fn open(&mut self) -> Session {
+         let n = self.next;
+-        self.next = n.checked_add(1).expect("2^64 login sessions opened in one boot");
++        self.next = n;
+         Session::Login(Login(n))
+     }
+ }

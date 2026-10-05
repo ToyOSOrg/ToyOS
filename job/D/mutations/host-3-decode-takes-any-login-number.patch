@@ -1,0 +1,14 @@
+diff --git a/toyos-manifest/src/launch.rs b/toyos-manifest/src/launch.rs
+index 8a8570ff..b40b1643 100644
+--- a/toyos-manifest/src/launch.rs
++++ b/toyos-manifest/src/launch.rs
+@@ -123,9 +123,6 @@ impl Authority {
+             LOGIN if rest.len() >= 8 => {
+                 let (n, row) = rest.split_at(8);
+                 let n = u64::from_le_bytes(n.try_into().expect("eight bytes"));
+-                if n < FIRST_LOGIN {
+-                    return None;
+-                }
+                 (Session::Login(Login(n)), row)
+             }
+             _ => return None,

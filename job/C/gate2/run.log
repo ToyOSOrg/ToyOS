@@ -1,0 +1,9 @@
+gate: waiting for the host's gate lock (/home/user/toyos-irqcensus)
+gate: running in /home/user/toyos-irqcensus as gate
+gate: EXIT=0 at 71fb985c84c54eaca98a2b184bbc7af135a2733d as gate; log /root/.claude/jobs/015tYBoMwh9xUcBBLG35wTFr/C/gate2/host.log
+10:51:23 [ci] the toyos SDK: cargo test --manifest-path toyos/Cargo.toml --target x86_64-unknown-linux-gnu
+
+10:51:23 === [ci] nothing left in $TMPDIR or /tmp
+10:51:23 [ci] nothing left in $TMPDIR or /tmp: every test took its scratch with it
+10:51:23 [ci] Host: 75 step(s), all green
+gate: removed /home/user/toyos-irqcensus's target dirs; free 22G

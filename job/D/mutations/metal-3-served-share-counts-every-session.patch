@@ -1,0 +1,13 @@
+diff --git a/userland/fileserver/src/main.rs b/userland/fileserver/src/main.rs
+index b861ba25..c38841a8 100644
+--- a/userland/fileserver/src/main.rs
++++ b/userland/fileserver/src/main.rs
+@@ -555,7 +555,7 @@ impl Server {
+         if op == HELLO {
+             let session = self.clients[&id].session;
+             let served = self.clients.values().filter(|c| c.window.is_some());
+-            let (all, mine) = served.fold((0, 0), |(all, mine), c| (all + 1, mine + usize::from(c.session == session)));
++            let (all, mine) = served.fold((0, 0), |(all, mine), c| (all + 1, mine + 1));
+             let client = self.clients.get_mut(&id).expect("pumped");
+             if client.window.is_some() {
+                 return Answer::Drop("it lent a second window");

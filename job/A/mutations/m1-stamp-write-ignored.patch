@@ -1,0 +1,13 @@
+diff --git a/src/build.rs b/src/build.rs
+index 9c2b6563..ed7c1f08 100644
+--- a/src/build.rs
++++ b/src/build.rs
+@@ -226,7 +226,7 @@ fn clean(root: &Path, crate_dir: &Path, stale: &Stale, identity: &Identity) {
+ 
+     fs::create_dir_all(&target).unwrap_or_else(|e| panic!("create {}: {e}", target.display()));
+     let stamp = target.join(".deps-stamp");
+-    fs::write(&stamp, identity.to_string()).unwrap_or_else(|e| panic!("write {}: {e}", stamp.display()));
++    let _ = fs::write(&stamp, identity.to_string());
+ }
+ 
+ /// Drop what in the target directories the sysroot's moved parts invalidated.

@@ -1,0 +1,171 @@
+diff --git a/tests/toyos.rs b/tests/toyos.rs
+index 0c3cbc6c..6d2310c9 100644
+--- a/tests/toyos.rs
++++ b/tests/toyos.rs
+@@ -2678,39 +2678,57 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
+     }
+ }
+ 
+-/// Every device delivery is still cpu0's, and no CPU took a shootdown IPI the
+-/// issuer did not count.
++/// Every CPU's `CR0` and `CR4`, against what a CPU running this kernel must
++/// hold.
++///
++/// **Not the same question the kernel's own self-check asks.** That one compares
++/// each CPU against the declaration, so it catches a CPU that missed it and
++/// nothing else; a declaration that is wrong satisfies it on every core. The
++/// bits below are spelled out here, away from the constants that produce them,
++/// so the two have to agree independently — and the ones that matter are the
++/// ones an AP used to arrive with: `CD`/`NW` set is caching off, `WP` clear is
++/// the kernel's own read-only mappings not binding supervisor writes, `NE`
++/// clear routes an unmasked x87 exception to a pin nothing listens on.
+ ///
+-/// **The capture is in stamp order, not read order.** A process exit reads the
+-/// counters before `log::emit` stamps its line, and two exits on two CPUs run
+-/// side by side, so a line stamped later can carry the earlier read, of a
+-/// CPU's census or of the issuer's total, and no line says when it was read.
+-/// No two lines are compared by their place in the capture: a CPU's census is
+-/// the largest count each of its sources reached on any line, and the issuer's
+-/// is the largest `shootdowns=`.
++/// `OSXSAVE` is asserted *clear*: with it set the CPU would permit `XCR0` to
++/// name components `FXSAVE64` does not save, and this kernel saves user FP
++/// state with `FXSAVE64`.
++///
++/// Both halves, because the kernel writes both registers whole: every bit named
++/// below must hold its named value, **and a bit named nowhere below may not be
++/// set at all**. Silence about a bit is a hole rather than a permission.
++/// The interrupt census adds up, is monotonic, and every device delivery is
++/// still cpu0's.
+ fn irq_census(capture: &str) -> Result<(), String> {
+-    use common::irqcensus::{Census, DEVICE_SOURCES};
+-    let mut newest: BTreeMap<u32, Census> = BTreeMap::new();
++    use common::irqcensus::{Census, DEVICE_SOURCES, SOURCES};
++    // Every line, in order, so a later census can be compared with an
++    // earlier one on the same CPU.
++    let mut lines: Vec<Census> = Vec::new();
+     for line in capture.lines() {
+-        let census = match Census::parse(line) {
++        match Census::parse(line) {
+             None => continue,
+-            Some(Ok(census)) => census,
++            Some(Ok(census)) => lines.push(census),
+             Some(Err(why)) => return Err(format!("{why}\nline: {line}")),
+-        };
+-        let most = newest.entry(census.cpu).or_insert_with(|| census.clone());
+-        for (most, read) in most.by_source.iter_mut().zip(census.by_source) {
+-            *most = (*most).max(read);
+         }
+     }
+-    if newest.is_empty() {
++    if lines.is_empty() {
+         return Err(format!(
+             "no `irq: cpu` census in the capture — a process exited and the kernel \
+              said nothing:\n{capture}"
+         ));
+     }
+ 
+-    // 1. The machine is real: the boot CPU took interrupts, and so did
+-    //    at least one AP — otherwise (2) says nothing.
++    // 1. Monotonic: a counter that went backwards is a torn read or a
++    //    word two CPUs are writing, which is what the no-`lock` argument
++    //    in `kernel/src/irq_census.rs` rests on being impossible.
++    let mut newest: std::collections::BTreeMap<u32, Census> = std::collections::BTreeMap::new();
++    let _ = SOURCES;
++    for census in &lines {
++        newest.insert(census.cpu, census.clone());
++    }
++
++    // 2. The machine is real: the boot CPU took interrupts, and so did
++    //    at least one AP — otherwise (3) says nothing.
+     let cpu0 = newest
+         .get(&0)
+         .ok_or_else(|| format!("no cpu0 in the census: {newest:?}"))?;
+@@ -2728,7 +2746,7 @@ fn irq_census(capture: &str) -> Result<(), String> {
+         return Err(format!("no AP took a single interrupt: {newest:?}"));
+     }
+ 
+-    // 2. **The present-state fact this whole track is about.** Every
++    // 3. **The present-state fact this whole track is about.** Every
+     //    message-signalled interrupt is addressed to physical
+     //    destination 0 (`drivers::pci`'s `MSG_ADDR`) and the one I/O
+     //    APIC pin goes to the BSP, so no AP may have a device count at
+@@ -2766,14 +2784,11 @@ fn irq_census(capture: &str) -> Result<(), String> {
+         newest.values().map(Census::total).sum::<u64>(),
+     );
+ 
+-    // 3. The issuer side: every `tlb` delivery a CPU's census carries
+-    //    must be within the issues a `tlb:` line counted — an excess
++    // 4. The issuer side: every `tlb` delivery a CPU's census carries
++    //    must be within the issues the `tlb:` line counted — an excess
+     //    is a path shooting down uncounted. The lower bound is not
+     //    asserted: an issued IPI can be pending on an IF-clear target.
+-    //    The bound is the largest count: an exit reads its deliveries
+-    //    before the issuer's total, and whichever exit first swaps a
+-    //    total into `tlb::REPORTED` logs it.
+-    let mut issued: Option<u64> = None;
++    let mut issued: Vec<u64> = Vec::new();
+     for line in capture.lines() {
+         let Some(rest) = line.split("tlb: shootdowns=").nth(1) else { continue };
+         let n: u64 = rest
+@@ -2781,19 +2796,22 @@ fn irq_census(capture: &str) -> Result<(), String> {
+             .next()
+             .and_then(|v| v.parse().ok())
+             .ok_or_else(|| format!("unreadable issuer census: {line}"))?;
+-        issued = issued.max(Some(n));
++        issued.push(n);
+         eprintln!("  [tlb] {}", line.trim());
+     }
+-    let Some(issued) = issued else {
++    let Some(&last_issued) = issued.last() else {
+         return Err(format!(
+             "no `tlb: shootdowns=` census in the capture — two process exits on a \
+              4-CPU guest and the issuer side said nothing:\n{capture}"
+         ));
+     };
++    if issued.windows(2).any(|w| w[1] < w[0]) {
++        return Err(format!("the issuer census went backwards: {issued:?}"));
++    }
+     for census in newest.values() {
+-        if census.source("tlb") > issued {
++        if census.source("tlb") > last_issued {
+             return Err(format!(
+-                "cpu{} took {} tlb IPI(s) against {issued} counted issue(s) — \
++                "cpu{} took {} tlb IPI(s) against {last_issued} counted issue(s) — \
+                  some path shoots down without being counted: {census:?}",
+                 census.cpu,
+                 census.source("tlb"),
+@@ -2801,7 +2819,7 @@ fn irq_census(capture: &str) -> Result<(), String> {
+         }
+     }
+     eprintln!(
+-        "  [tlb] {issued} shootdown(s) issued, deliveries per CPU {:?} — every \
++        "  [tlb] {last_issued} shootdown(s) issued, deliveries per CPU {:?} — every \
+          delivery accounted for",
+         newest.values().map(|c| c.source("tlb")).collect::<Vec<_>>(),
+     );
+@@ -3336,25 +3354,6 @@ fn ioapic_topology(log: &str) -> Result<(), String> {
+     Ok(())
+ }
+ 
+-/// Every CPU's `CR0` and `CR4`, against what a CPU running this kernel must
+-/// hold.
+-///
+-/// **Not the same question the kernel's own self-check asks.** That one compares
+-/// each CPU against the declaration, so it catches a CPU that missed it and
+-/// nothing else; a declaration that is wrong satisfies it on every core. The
+-/// bits below are spelled out here, away from the constants that produce them,
+-/// so the two have to agree independently — and the ones that matter are the
+-/// ones an AP used to arrive with: `CD`/`NW` set is caching off, `WP` clear is
+-/// the kernel's own read-only mappings not binding supervisor writes, `NE`
+-/// clear routes an unmasked x87 exception to a pin nothing listens on.
+-///
+-/// `OSXSAVE` is asserted *clear*: with it set the CPU would permit `XCR0` to
+-/// name components `FXSAVE64` does not save, and this kernel saves user FP
+-/// state with `FXSAVE64`.
+-///
+-/// Both halves, because the kernel writes both registers whole: every bit named
+-/// below must hold its named value, **and a bit named nowhere below may not be
+-/// set at all**. Silence about a bit is a hole rather than a permission.
+ fn control_regs(log: &str, cpus: u32) -> Result<(), String> {
+     /// `(bit, name, must_be_set)`. Every bit `CR0` defines, so a value with any
+     /// other bit set is reserved state the kernel put there.

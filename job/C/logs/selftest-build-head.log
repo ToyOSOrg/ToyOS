@@ -1,0 +1,71 @@
+    Checking kernel v0.1.0 (/home/user/toyos-irqcensus/kernel)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.78s
+   Compiling kernel v0.1.0 (/home/user/toyos-irqcensus/kernel)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.01s
+000000000014d0a4 <_RNvNtNtNtNtCsli9MozYR2vM_6kernel4arch6x86_643idt9unclaimed15unclaimed_entry>:
+  14d0a4:	cld
+  14d0a5:	push   rax
+  14d0a6:	push   rcx
+  14d0a7:	push   rdx
+  14d0a8:	push   rsi
+  14d0a9:	push   rdi
+  14d0aa:	push   r8
+  14d0ac:	push   r9
+  14d0ae:	push   r10
+  14d0b0:	push   r11
+  14d0b2:	push   rbp
+  14d0b3:	mov    rbp,rsp
+  14d0b6:	and    rsp,0xfffffffffffffff0
+  14d0ba:	call   14d4e0 <_RNvNtNtNtNtCsli9MozYR2vM_6kernel4arch6x86_643idt9unclaimed4took>
+  14d0bf:	mov    rsp,rbp
+  14d0c2:	pop    rbp
+  14d0c3:	pop    r11
+  14d0c5:	pop    r10
+  14d0c7:	pop    r9
+  14d0c9:	pop    r8
+  14d0cb:	pop    rdi
+  14d0cc:	pop    rsi
+  14d0cd:	pop    rdx
+  14d0ce:	pop    rcx
+  14d0cf:	pop    rax
+  14d0d0:	iretq
+  14d0d2:	int3
+  14d0d3:	int3
+  14d0d4:	int3
+  14d0d5:	int3
+  14d0d6:	int3
+  14d0d7:	int3
+--
+0000000000176e80 <_RNvNtNtNtNtCsli9MozYR2vM_6kernel4arch6x86_643idt8spurious14spurious_entry>:
+  176e80:	cld
+  176e81:	push   rax
+  176e82:	push   rcx
+  176e83:	push   rdx
+  176e84:	push   rsi
+  176e85:	push   rdi
+  176e86:	push   r8
+  176e88:	push   r9
+  176e8a:	push   r10
+  176e8c:	push   r11
+  176e8e:	push   rbp
+  176e8f:	mov    rbp,rsp
+  176e92:	and    rsp,0xfffffffffffffff0
+  176e96:	call   177730 <_RNvNtNtNtNtCsli9MozYR2vM_6kernel4arch6x86_643idt8spurious4took>
+  176e9b:	mov    rsp,rbp
+  176e9e:	pop    rbp
+  176e9f:	pop    r11
+  176ea1:	pop    r10
+  176ea3:	pop    r9
+  176ea5:	pop    r8
+  176ea7:	pop    rdi
+  176ea8:	pop    rsi
+  176ea9:	pop    rdx
+  176eaa:	pop    rcx
+  176eab:	pop    rax
+  176eac:	iretq
+  176eae:	int3
+  176eaf:	int3
+
+0000000000176eb0 <_RNCNvMs0_NtCsiMhgmdKlePM_10toyos_xhci3jobINtB7_11OutstandingNtNtNtCsli9MozYR2vM_6kernel7drivers4xhci4WhatE4what0B12_>:
+  176eb0:	push   rbp
+  176eb1:	mov    rbp,rsp

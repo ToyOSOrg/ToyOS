@@ -1,0 +1,13 @@
+diff --git a/toyos/src/ipc.rs b/toyos/src/ipc.rs
+index f59b01bc..31db7a35 100644
+--- a/toyos/src/ipc.rs
++++ b/toyos/src/ipc.rs
+@@ -316,7 +316,7 @@ fn move_batch<H: AsHandle>(
+         count += 1;
+     }
+     let mut raw = [toyos_abi::HANDLE_INVALID; syscall::MAX_TRANSFER_HANDLES];
+-    for (out, handle) in raw.iter_mut().zip(batch.iter().flatten()) {
++    for (out, handle) in raw[..count].iter_mut().rev().zip(batch.iter().flatten()) {
+         *out = handle.as_handle();
+     }
+     send(&raw[..count])?;

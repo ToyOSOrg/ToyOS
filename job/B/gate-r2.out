@@ -1,0 +1,9 @@
+gate: waiting for the host's gate lock (/home/user/toyos-handlesend)
+gate: running in /home/user/toyos-handlesend as gate
+gate: EXIT=0 at b07c745b68e933f5811cfb165655c79ab8edc199 as gate; log /root/.claude/jobs/015tYBoMwh9xUcBBLG35wTFr/B/host.log
+11:12:12 [ci] the toyos SDK: cargo test --manifest-path toyos/Cargo.toml --target x86_64-unknown-linux-gnu
+
+11:12:12 === [ci] nothing left in $TMPDIR or /tmp
+11:12:12 [ci] nothing left in $TMPDIR or /tmp: every test took its scratch with it
+11:12:12 [ci] Host: 75 step(s), all green
+gate: removed /home/user/toyos-handlesend's target dirs; free 24G

@@ -1,0 +1,1 @@
+irq_census judges each CPU by its largest counts, the console's routine lines go to stdout, and the LAPIC selftests' after-check can fail (its issue stays open)

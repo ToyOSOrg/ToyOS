@@ -1,0 +1,13 @@
+diff --git a/toyos-manifest/src/launch.rs b/toyos-manifest/src/launch.rs
+index 8a8570ff..2e46657c 100644
+--- a/toyos-manifest/src/launch.rs
++++ b/toyos-manifest/src/launch.rs
+@@ -192,7 +192,7 @@ pub fn may_start(caller: &Program, session: Session, target: Target<'_>) -> Resu
+     }
+     let starts = match caller.login {
+         true => Starts::Opening,
+-        false => Starts::In(session),
++        false => Starts::Opening,
+     };
+     if program.login_only() && starts == Starts::In(Session::Machine) {
+         return Err(Refusal::OutsideLogin);

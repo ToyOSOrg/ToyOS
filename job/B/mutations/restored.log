@@ -1,0 +1,57 @@
+   Compiling toyos v0.18.0 (/home/user/toyos-handlesend/toyos)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.85s
+     Running unittests src/lib.rs (toyos/target/x86_64-unknown-linux-gnu/debug/deps/toyos-23d783014d759aeb)
+
+running 43 tests
+test fs::tests::a_path_is_canonical_only_without_empty_dot_or_dotdot_components ... ok
+test fs::tests::a_listing_entry_round_trips_and_a_short_one_is_refused ... ok
+test fs::tests::bytes_no_grant_was_encoded_as_are_refused ... ok
+test fs::tests::a_grant_round_trips_at_every_bound ... ok
+test ipc::tests::a_batch_past_the_bound_is_refused_and_closed ... ok
+test ipc::tests::a_refused_move_closes_every_handle_it_consumed ... ok
+test ipc::tests::a_taken_move_closes_nothing ... ok
+test fs::tests::no_grant_carries_a_root_the_wire_refuses_or_one_past_the_badge ... ok
+test log::proof::a_lane_gives_its_reader_every_record_in_order_or_counts_it_refused ... ok
+test fs::tests::the_window_copies_every_length_at_every_offset ... ok
+test log::proof::a_position_that_never_lands_is_counted_by_the_sweep ... ok
+test launch::tests::a_request_names_its_parent_by_one_word ... ok
+test log::proof::a_placeholder_owned_ring_keeps_its_slots_from_every_pid_until_named ... ok
+test log::proof::a_ring_has_four_lanes_to_claim ... ok
+test log::proof::a_real_time_write_allocates_nothing ... ok
+test log::proof::scribbled_words_bound_the_reader_and_never_panic_it ... ok
+test log::proof::slots_left_to_others_are_theirs ... ok
+test log::proof::the_region_carries_a_record_whole ... ok
+test log::proof::a_full_ring_or_lane_refuses_at_once_and_never_waits ... ok
+test log::stdio::tests::a_formatted_line_is_one_ended_record ... ok
+test log::stdio::tests::a_line_in_pieces_is_one_record ... ok
+test log::proof::every_record_is_read_once_in_its_writers_order_or_counted_refused ... ok
+test log::stdio::tests::a_line_a_flush_opened_is_closed_at_its_end ... ok
+test net::tests::a_code_netstack_chose_is_still_its_own_answer ... ok
+test log::stdio::tests::a_long_line_is_records_in_order_with_nothing_lost ... ok
+test log::stdio::tests::a_newline_ends_a_record_and_a_carriage_return_before_it_goes ... ok
+test log::stdio::tests::a_stream_held_by_two_writers_keeps_each_line_whole ... ok
+test net::tests::a_gone_handle_transfer_is_a_netstack_that_is_not_there ... ok
+test net::tests::a_not_found_is_not_a_netstack_that_is_not_there ... ok
+test net::tests::a_read_that_hung_up_is_a_netstack_that_is_not_there ... ok
+test poller::tests::a_submission_is_the_whole_entry_where_the_kernel_reads_it ... ok
+test net::tests::nothing_else_becomes_a_missing_netstack ... ok
+test poller::tests::a_tail_the_kernel_publishes_mid_drain_is_observed ... ok
+test syscap::tests::a_machine_that_grew_once_is_read_grown ... ok
+test poller::tests::every_accessor_lands_on_the_abi_offset ... ok
+test poller::tests::pending_counts_what_the_kernel_has_not_claimed ... ok
+test poller::tests::the_drop_counter_is_read_from_the_page ... ok
+test syscap::tests::a_refused_count_is_refused_and_not_an_empty_inventory ... ok
+test syscap::tests::a_machine_that_grows_every_round_is_refused_by_name ... ok
+test syscap::tests::a_record_that_does_not_decode_is_refused_and_not_dropped ... ok
+test syscap::tests::a_refused_read_is_refused_and_not_an_empty_inventory ... ok
+test syscap::tests::an_empty_inventory_is_its_count ... ok
+test syscap::tests::every_record_is_read ... ok
+
+test result: ok. 43 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+   Doc-tests toyos
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

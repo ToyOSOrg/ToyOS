@@ -1,0 +1,55 @@
+info: syncing channel updates for 'stable-x86_64-unknown-linux-gnu'
+info: latest update on 2026-10-01, rust version 1.99.0 (b940084d7 2026-09-28)
+info: downloading component 'rust-std' for 'aarch64-unknown-none-softfloat'
+info: downloading component 'rust-std' for 'x86_64-unknown-none'
+info: downloading component 'cargo'
+info: downloading component 'clippy'
+info: downloading component 'rust-std'
+info: downloading component 'rustc'
+info: downloading component 'rustfmt'
+info: removing previous version of component 'cargo'
+info: removing previous version of component 'clippy'
+info: removing previous version of component 'rust-std'
+info: removing previous version of component 'rustc'
+info: removing previous version of component 'rustfmt'
+info: installing component 'rust-std' for 'aarch64-unknown-none-softfloat'
+info: installing component 'rust-std' for 'x86_64-unknown-none'
+info: installing component 'cargo'
+info: installing component 'clippy'
+info: installing component 'rust-std'
+info: installing component 'rustc'
+info: installing component 'rustfmt'
+ Downloading crates ...
+  Downloaded dlmalloc v0.2.13
+    Checking toyos-abi v0.16.0 (/home/user/toyos-irqcensus/toyos-abi)
+    Checking cfg-if v1.0.4
+    Checking rustc-demangle v0.1.27
+    Checking toyos-elf v0.1.0 (/home/user/toyos-irqcensus/toyos-elf)
+    Checking toyos-wallclock v0.1.0 (/home/user/toyos-irqcensus/toyos-wallclock)
+    Checking toyos-elide v0.1.0 (/home/user/toyos-irqcensus/toyos-elide)
+    Checking toyos-fat32 v0.1.0 (/home/user/toyos-irqcensus/toyos-fat32)
+    Checking dlmalloc v0.2.13
+    Checking toyos-userbound v0.1.0 (/home/user/toyos-irqcensus/toyos-userbound)
+    Checking toyos-untrusted v0.1.0 (/home/user/toyos-irqcensus/toyos-untrusted)
+    Checking bcachefs v0.1.0 (/home/user/toyos-irqcensus/bcachefs)
+    Checking hashbrown v0.16.1
+    Checking toyos-tsc v0.1.0 (/home/user/toyos-irqcensus/toyos-tsc)
+    Checking toyos-bootmap v0.1.0 (/home/user/toyos-irqcensus/toyos-bootmap)
+    Checking toyos-symbols v0.1.0 (/home/user/toyos-irqcensus/toyos-symbols)
+    Checking toyos-pci v0.1.0 (/home/user/toyos-irqcensus/kernel/pci)
+    Checking toyos-acpi v0.1.0 (/home/user/toyos-irqcensus/toyos-acpi)
+    Checking toyos-tco v0.1.0 (/home/user/toyos-irqcensus/toyos-tco)
+    Checking toyos-rootimage v0.1.0 (/home/user/toyos-irqcensus/toyos-rootimage)
+    Checking toyos-quiesce v0.1.0 (/home/user/toyos-irqcensus/toyos-quiesce)
+    Checking toyos-dma v0.1.0 (/home/user/toyos-irqcensus/kernel/dma)
+    Checking toyos-cpuvuln v0.1.0 (/home/user/toyos-irqcensus/toyos-cpuvuln)
+    Checking toyos-hda v0.1.0 (/home/user/toyos-irqcensus/toyos-hda)
+    Checking toyos-blockhold v0.1.0 (/home/user/toyos-irqcensus/toyos-blockhold)
+    Checking toyos-gpt v0.1.0 (/home/user/toyos-irqcensus/toyos-gpt)
+    Checking toyos-blackbox v0.1.0 (/home/user/toyos-irqcensus/toyos-blackbox)
+    Checking toyos-ps2 v0.1.0 (/home/user/toyos-irqcensus/kernel/ps2)
+    Checking toyos-gicv3 v0.1.0 (/home/user/toyos-irqcensus/kernel/gicv3)
+    Checking toyos-xhci v0.1.0 (/home/user/toyos-irqcensus/toyos-xhci)
+    Checking kernel v0.1.0 (/home/user/toyos-irqcensus/kernel)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 14.95s
+EXIT=0
