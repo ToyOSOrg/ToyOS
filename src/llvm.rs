@@ -12,7 +12,9 @@
 //! runtimes' sources the C++ runtime is built from (`src/libcxx.rs`) as its
 //! commit holds them, made by whichever build first needs it ([`resolve`]), and
 //! stored only when it was built from what the key names. Once its [`SOURCE`]
-//! file exists it is read-only, its directories as well as its files.
+//! file exists it is read-only, its directories as well as its files, and that
+//! file names the [`content`] it was placed with: one written through any mode,
+//! as root writes, is not whole ([`defect`]) and is made again.
 //! Every compiler build, the primary's and a worktree's own, names it as the
 //! host's `llvm-config` with `llvm-has-rust-patches`, so bootstrap builds no
 //! LLVM and takes LLD from beside it as `rust-lld`; `clang::provision` copies its
@@ -40,6 +42,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
+use sha2::{Digest, Sha256};
+
 use crate::buildlock::{Guard, Keyed};
 use crate::compiler::LLVM;
 use crate::keystore::{self, Key};
@@ -51,7 +55,7 @@ use crate::toolchain::{self, host_triple};
 const RECIPE: &str = "bootstrap build of src/llvm-project/llvm and src/llvm-project/lld; of the install, \
                       llvm-config, clang and llvm-ar in bin, and llvm-objcopy on an Apple host, LLVM's headers, \
                       every library llvm-config names and clang's resource headers; lld in bin, and the \
-                      runtimes' sources in src, read-only; 4";
+                      runtimes' sources in src, read-only, with a SOURCE naming the digest of it all; 5";
 
 /// What of the caller's environment the LLVM build, and every tool its key
 /// asks, sees:
@@ -100,8 +104,8 @@ pub(crate) const APPLE_TOOL: &str = "llvm-objcopy";
 /// `llvm-config --cxxflags` names the install's `include`.
 const HEADERS: [&str; 2] = ["include/llvm", "include/llvm-c"];
 
-/// The file a finished LLVM carries last, naming its key. A directory without
-/// it is a build that did not finish.
+/// The file a finished LLVM carries last, naming its key and then its
+/// [`content`]. A directory without it is a build that did not finish.
 const SOURCE: &str = "SOURCE";
 
 /// The fork's bootstrap, whose `Llvm` step and `compiler` profile decide how
@@ -243,9 +247,9 @@ fn tools() -> impl Iterator<Item = &'static str> {
 
 /// Why `dir` is not a finished LLVM, if it is not.
 pub(crate) fn defect(dir: &Path) -> Option<String> {
-    if !dir.join(SOURCE).is_file() {
+    let Ok(source) = fs::read_to_string(dir.join(SOURCE)) else {
         return Some(format!("{} carries no {SOURCE}", dir.display()));
-    }
+    };
     let kept = HEADERS
         .iter()
         .chain(&["lib/clang"])
@@ -253,7 +257,63 @@ pub(crate) fn defect(dir: &Path) -> Option<String> {
         .chain(crate::libcxx::SOURCES.iter().map(|s| dir.join("src").join(s)));
     let tools = tools().map(|t| dir.join("bin").join(t)).filter(|p| !p.is_file());
     let gone: Vec<String> = kept.filter(|p| !p.is_dir()).chain(tools).map(|p| p.display().to_string()).collect();
-    (!gone.is_empty()).then(|| format!("{} carries no {}", dir.display(), gone.join(", ")))
+    if !gone.is_empty() {
+        return Some(format!("{} carries no {}", dir.display(), gone.join(", ")));
+    }
+    let (placed, now) = (source.lines().nth(1).unwrap_or("nothing"), content(dir));
+    (placed != now).then(|| format!("{} holds what was not placed in it: {now}, where its {SOURCE} names {placed}", dir.display()))
+}
+
+/// Everything under `dir` but its [`SOURCE`], as one digest: each entry's path,
+/// in order, with a file's SHA-256 and a link's target, so that nothing under
+/// it is written, removed, replaced or added and leaves the digest where it
+/// was. A guard against a build that writes into it, not against an adversary,
+/// who writes the [`SOURCE`] too.
+fn content(dir: &Path) -> String {
+    let mut listed = Vec::new();
+    list(dir, Path::new(""), &mut listed);
+    crate::sysroot::short(&listed)
+}
+
+/// Append to `listed` what [`content`] digests of `dir`'s `under`: per entry a
+/// kind, then its path and what it holds, each after its length, so no two
+/// listings run together into one.
+fn list(dir: &Path, under: &Path, listed: &mut Vec<u8>) {
+    let at = dir.join(under);
+    let mut names: Vec<_> = fs::read_dir(&at)
+        .unwrap_or_else(|e| panic!("read {}: {e}", at.display()))
+        .map(|entry| entry.unwrap_or_else(|e| panic!("read {}: {e}", at.display())).file_name())
+        .collect();
+    names.sort();
+    for name in names {
+        let rel = under.join(name);
+        if rel == Path::new(SOURCE) {
+            continue;
+        }
+        let path = dir.join(&rel);
+        let kind = fs::symlink_metadata(&path).unwrap_or_else(|e| panic!("stat {}: {e}", path.display())).file_type();
+        let (tag, holds) = if kind.is_dir() {
+            (b'd', Vec::new())
+        } else if kind.is_symlink() {
+            let target = fs::read_link(&path).unwrap_or_else(|e| panic!("readlink {}: {e}", path.display()));
+            (b'l', target.into_os_string().into_encoded_bytes())
+        } else if kind.is_file() {
+            let mut file = fs::File::open(&path).unwrap_or_else(|e| panic!("open {}: {e}", path.display()));
+            let mut hasher = Sha256::new();
+            std::io::copy(&mut file, &mut hasher).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            (b'f', hasher.finalize().to_vec())
+        } else {
+            panic!("{} is no file, directory or link, and an LLVM holds nothing else", path.display());
+        };
+        listed.push(tag);
+        for field in [rel.as_os_str().as_encoded_bytes(), holds.as_slice()] {
+            listed.extend((field.len() as u64).to_le_bytes());
+            listed.extend_from_slice(field);
+        }
+        if kind.is_dir() {
+            list(dir, &rel, listed);
+        }
+    }
 }
 
 /// Refuse what `fork`'s `src/bootstrap` holds that no commit does: an LLVM is
@@ -304,7 +364,7 @@ fn place(fork: &Path, key: &Key, dir: &Path, build: &impl Fn(&Path) -> PathBuf) 
         fork.display(),
     );
     check_out_committed(&checkout, &commit, &crate::libcxx::SOURCES, &partial.join("src"));
-    fs::write(partial.join(SOURCE), format!("{key}\n"))
+    fs::write(partial.join(SOURCE), format!("{key}\n{}\n", content(&partial)))
         .unwrap_or_else(|e| panic!("write {}: {e}", partial.join(SOURCE).display()));
     read_only(&partial);
     keystore::retire(dir);
@@ -662,25 +722,73 @@ mod tests {
         assert!(!fs::symlink_metadata(dir.join("bin/clang")).unwrap().file_type().is_symlink(), "clang is the link, not the file");
     }
 
-    /// **A placed LLVM cannot be written**, through its own path or through a
-    /// link bootstrap makes to one of its files, and nothing in it can be
-    /// removed, replaced or added.
+    /// **A placed LLVM is read-only, and one written anyway is made again**:
+    /// written through its own path or through a link bootstrap makes to one of
+    /// its files, or with anything in it removed, replaced or added, it is not
+    /// whole, whoever wrote it, and the next resolve makes it again.
     #[test]
-    fn a_placed_llvm_is_never_written() {
-        let scratch = Scratch::new("llvm-read-only");
+    fn a_placed_llvm_is_read_only_and_a_written_one_is_made_again() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = Scratch::new("llvm-written");
         let (_primary, rust_dir, [_same, a, _b]) = estate_built(&scratch);
-        let dir = choose(&a, &rust_dir, &a.join("rust"), fake_build).dir;
-        let stage = scratch.join("stage1-rust-lld");
-        fs::hard_link(dir.join("bin/lld"), &stage).unwrap();
-        let denied = |what: &str, done: std::io::Result<()>| {
-            assert_eq!(done.map_err(|e| e.kind()).err(), Some(std::io::ErrorKind::PermissionDenied), "{what}");
+        let makes = Cell::new(0);
+        let counted = |fork: &Path| {
+            makes.set(makes.get() + 1);
+            fake_build(fork)
         };
-        for file in [dir.join("bin/lld"), stage, dir.join("lib/libLLVMCore.a"), dir.join(SOURCE)] {
-            denied(&format!("{} could be written", file.display()), fs::OpenOptions::new().write(true).open(&file).map(drop));
+        let dir = choose(&a, &rust_dir, &a.join("rust"), counted).dir;
+        let mut entries = vec![dir.clone()];
+        while let Some(entry) = entries.pop() {
+            let meta = fs::symlink_metadata(&entry).unwrap();
+            assert!(meta.file_type().is_symlink() || meta.permissions().readonly(), "{} can be written", entry.display());
+            if meta.is_dir() {
+                entries.extend(fs::read_dir(&entry).unwrap().map(|e| e.unwrap().path()));
+            }
         }
-        denied("a placed tool could be removed", fs::remove_file(dir.join("bin/lld")));
-        denied("a file could be added to a placed LLVM", fs::write(dir.join("bin/new"), "x"));
-        denied("a placed LLVM could be emptied", fs::remove_dir_all(dir.join("include")));
+
+        // A write the modes do not stop, as root's, made by any user: the modes
+        // given back first.
+        let opened = |file: &Path| {
+            keystore::writable(&dir);
+            fs::set_permissions(file, fs::Permissions::from_mode(0o644)).unwrap();
+        };
+        let stage = scratch.join("stage1-rust-lld");
+        let header = dir.join("include/llvm-c/Core.h");
+        let writes: [(&str, &dyn Fn()); 6] = [
+            ("a tool written", &|| {
+                opened(&dir.join("bin/lld"));
+                fs::write(dir.join("bin/lld"), "another lld").unwrap();
+            }),
+            ("a tool written through a link", &|| {
+                fs::hard_link(dir.join("bin/lld"), &stage).unwrap();
+                opened(&stage);
+                fs::write(&stage, "another lld").unwrap();
+            }),
+            ("a library removed", &|| {
+                keystore::writable(&dir);
+                fs::remove_file(dir.join("lib/libLLVMCore.a")).unwrap();
+            }),
+            ("a header replaced", &|| {
+                keystore::writable(&dir);
+                fs::write(header.with_extension("new"), "another header").unwrap();
+                fs::rename(header.with_extension("new"), &header).unwrap();
+            }),
+            ("a tool added", &|| {
+                keystore::writable(&dir);
+                fs::write(dir.join("bin/new"), "x").unwrap();
+            }),
+            ("a directory emptied", &|| {
+                keystore::writable(&dir);
+                fs::remove_dir_all(dir.join("include/llvm/Config")).unwrap();
+            }),
+        ];
+        for (made, (what, write)) in (2..).zip(writes) {
+            write();
+            let found = defect(&dir);
+            assert!(found.as_ref().is_some_and(|d| d.contains("holds what was not placed in it")), "{what}: {found:?}");
+            assert_eq!(defect(&choose(&a, &rust_dir, &a.join("rust"), counted).dir), None, "{what}");
+            assert_eq!(makes.get(), made, "{what}, and the LLVM was not made again");
+        }
     }
 
     /// **An LLVM that is not whole is made again, all of it**: one whose

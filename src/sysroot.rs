@@ -922,6 +922,11 @@ fn prepare_std_build(build_dir: &Path, host: &str, identity: &str, targets: &[&s
 /// recompile is refused against them (`E0463 can't find crate`). The removal
 /// comes before the record, so an interrupted switch removes again.
 fn forget_another_compiler(build_dir: &Path, host: &str, identity: &str) {
+    forget_another_compiler_by(build_dir, host, identity, keystore::remove);
+}
+
+/// [`forget_another_compiler`], removing with `remove`, so a test can stop it.
+fn forget_another_compiler_by(build_dir: &Path, host: &str, identity: &str, remove: impl Fn(&Path)) {
     let record = build_dir.join("compiled-by");
     if fs::read_to_string(&record).is_ok_and(|by| by == identity) {
         return;
@@ -936,7 +941,7 @@ fn forget_another_compiler(build_dir: &Path, host: &str, identity: &str) {
         for entry in entries {
             let entry = entry.unwrap_or_else(|e| panic!("read {}: {e}", dir.display()));
             if !kept.iter().any(|name| entry.file_name() == *name) {
-                keystore::remove(&entry.path());
+                remove(&entry.path());
             }
         }
     }
@@ -1449,7 +1454,6 @@ mod tests {
     /// not record the new compiler**, so the next call removes it.
     #[test]
     fn a_switch_that_cannot_remove_records_nothing_and_the_next_one_removes() {
-        use std::os::unix::fs::PermissionsExt;
         let base = TempDir::new("compiled-by-stuck");
         let (_root, rust_dir, _fork) = keyed(&base);
         let build = base.join("toyos-std");
@@ -1459,15 +1463,14 @@ mod tests {
         let deps = build.join("bootstrap/debug/deps");
         write(&deps.join("libserde-1.rlib"), "built");
         write(&rust_dir.join("build/toyos-compiler"), "tree-2");
-        // The parent: a removal gives back the write permission of what it removes.
-        let mode = |bits| fs::set_permissions(&build, fs::Permissions::from_mode(bits)).unwrap();
 
-        mode(0o555);
-        let stuck = std::panic::catch_unwind(|| forget_another_compiler(&build, "host", &identity()));
-        mode(0o755);
+        // A removal that fails as `keystore::remove` does, whoever runs it.
+        let stuck = std::panic::catch_unwind(|| {
+            forget_another_compiler_by(&build, "host", &identity(), |path| panic!("remove {}: refused", path.display()))
+        });
         let refusal = stuck.expect_err("a build that could not be removed was taken for removed");
         let refusal = refusal.downcast_ref::<String>().expect("a formatted panic");
-        assert!(refusal.starts_with(&format!("remove {}", build.join("bootstrap").display())), "{refusal}");
+        assert_eq!(*refusal, format!("remove {}: refused", build.join("bootstrap").display()));
         assert_ne!(fs::read_to_string(build.join("compiled-by")).unwrap(), identity(),
                    "the new compiler was recorded over a build it did not remove");
 

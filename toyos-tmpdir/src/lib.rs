@@ -99,11 +99,7 @@ impl TempDir {
         // processes' scratch is moved into cannot be removed under the reaping.
         let reap = if state.swept { Vec::new() } else { state.sweep() };
         drop(state);
-        for dir in reap {
-            if let Err(e) = fs::remove_dir_all(&dir) {
-                stuck(&tmp, &dir, e);
-            }
-        }
+        reclaim(&tmp, reap, |dir| fs::remove_dir_all(dir));
         TempDir { path, base }
     }
 
@@ -168,6 +164,17 @@ fn fail(what: String) {
         eprintln!("toyos-tmpdir: {what}");
     } else {
         panic!("{what}");
+    }
+}
+
+/// Remove every directory the sweep moved into this process's root, under the
+/// shared directory `tmp`, with `remove`, so a test can make one fail; one that
+/// is not removed is [`stuck`].
+fn reclaim(tmp: &Path, reap: Vec<PathBuf>, remove: impl Fn(&Path) -> std::io::Result<()>) {
+    for dir in reap {
+        if let Err(e) = remove(&dir) {
+            stuck(tmp, &dir, e);
+        }
     }
 }
 
@@ -435,5 +442,22 @@ mod tests {
         assert!(message.contains("held over"), "{message}");
 
         drop(holder);
+    }
+
+    /// **A directory the sweep cannot remove costs no process but this one**:
+    /// it leaves this process's root, which can then remove itself, for its
+    /// base under a name no sweep reads as a root, and this process goes on.
+    #[test]
+    fn a_directory_the_sweep_cannot_remove_costs_no_process_but_this_one() {
+        let tmp = TempDir::new("stuck");
+        let name = format!("reap-{ROOT_PREFIX}999999-0");
+        let reaped = tmp.join("root").join(&name);
+        fs::create_dir_all(reaped.join("locked")).unwrap();
+        fs::write(reaped.join(OWNER), b"").unwrap();
+
+        reclaim(&tmp, vec![reaped.clone()], |_| Err(std::io::Error::other("refused")));
+        assert!(!reaped.exists(), "{} stayed in the root it was reaped into", reaped.display());
+        let stuck = tmp.join(format!("stuck-{name}"));
+        assert!(stuck.join("locked").is_dir(), "{} was not moved aside to {}", reaped.display(), stuck.display());
     }
 }
