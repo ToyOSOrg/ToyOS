@@ -2911,7 +2911,7 @@ fn process_tree(back: &metal::Readback) -> Result<(), String> {
 /// session, for test-runner and for the toybox it launched. The guest sees
 /// only that each was refused.
 fn launch_authority(back: &metal::Readback) -> Result<(), String> {
-    use toyos_manifest::launch::{refused, Refusal, Session};
+    use toyos_manifest::launch::{refused, Refusal, Sessions};
     back.job_passed("test_rs_launch_authority")?;
     let log = back.log();
     for (caller, target, why) in [
@@ -2920,7 +2920,7 @@ fn launch_authority(back: &metal::Readback) -> Result<(), String> {
         ("test-runner", "update", Refusal::OutsideLogin),
         ("toybox", "swap", Refusal::OutsideLogin),
     ] {
-        let line = refused(caller, Session::Machine, target, why);
+        let line = refused(caller, Sessions::default().machine(), target, why);
         if !log.text().lines().any(|l| l.contains(&line)) {
             return Err(format!("the supervisor never said `{line}`\n{}", log.text()));
         }

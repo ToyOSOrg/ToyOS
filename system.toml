@@ -77,8 +77,9 @@ service = true
 serves = ["netstack"]
 devices = ["pci:1af4:1041"]
 
-# Every launch it makes opens a login session, the one `update` and `swap`
-# below start in.
+# Every launch it makes is in a login session, the one `update` and `swap`
+# below start in: one it opens when it runs in the machine's session, and the
+# one it was launched in otherwise, as when a desktop shell starts it.
 [programs.sshserver]
 service = true
 receives = ["netstack"]

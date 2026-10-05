@@ -380,14 +380,14 @@ fn main() {
     // One port per file-server role, made here for the same reason: a
     // program's first open works whether or not its server runs yet. Its
     // connector goes at once: every connector a program holds to it is a
-    // grant minted for that program's session (`Grants`).
+    // grant minted for that program's share (`Grants`).
     let mut role_acceptors: BTreeMap<&str, Acceptor> = BTreeMap::new();
     for role in system.programs.iter().flat_map(|p| p.roles.iter()) {
         let (acceptor, _) = port::create().unwrap_or_else(|e| panic!("supervisor: no port for the `{role}` role: {e:?}"));
         role_acceptors.insert(role, acceptor);
     }
     // The supervisor's own files are resolved through grants like every
-    // program's, under a share no session is given, and it is the one
+    // program's, under a share no start is given, and it is the one
     // process nobody endows a namespace: std resolves through this one, and
     // the stop's syncs through the second.
     let files: &'static Namespace = {
@@ -525,7 +525,7 @@ struct Supervisor<'a> {
     connectors: BTreeMap<&'a str, Connector>,
     /// What each program's view is minted from.
     grants: Grants<'a>,
-    /// The login sessions launches have opened.
+    /// The shares its own starts and the login sessions launches opened spend.
     sessions: Sessions,
     /// The same directories as a namespace of the supervisor's own, for the stop's syncs.
     files: &'static Namespace,
@@ -617,7 +617,7 @@ impl<'a> Service<'a> {
         syscap: &SysCap,
         connectors: &BTreeMap<&str, Connector>,
         grants: &Grants<'_>,
-        launcher: &Acceptor,
+        launcher: (&Acceptor, Session),
         log: &mut Log,
     ) -> Result<u32, StartError> {
         // **Checked again at every start, not only on arrival**: the installed
@@ -649,7 +649,7 @@ impl<'a> Service<'a> {
             grants,
             &[],
             storage,
-            (launcher, Session::Machine),
+            launcher,
             Output::Boot(log),
         )?;
         kept.generation += 1;
@@ -805,7 +805,7 @@ impl<'a> Supervisor<'a> {
                     self.grants.roles.push((role, Arc::clone(&service.kept)));
                 }
                 let started =
-                    service.spawn(&program.path, &[], system, self.syscap, &self.connectors, &self.grants, &self.launcher, &mut self.log);
+                    service.spawn(&program.path, &[], system, self.syscap, &self.connectors, &self.grants, (&self.launcher, self.sessions.machine()), &mut self.log);
                 match started {
                     Ok(_) => {}
                     Err(StartError::Partition(why)) => {
@@ -1184,7 +1184,7 @@ impl<'a> Supervisor<'a> {
             let _ = old.wait();
         }
         let started =
-            service.spawn(&path, &owed, self.system, self.syscap, &self.connectors, &self.grants, &self.launcher, &mut self.log);
+            service.spawn(&path, &owed, self.system, self.syscap, &self.connectors, &self.grants, (&self.launcher, self.sessions.machine()), &mut self.log);
         match started {
             Ok(pid) => {
                 swapped(
@@ -1358,7 +1358,7 @@ impl<'a> Supervisor<'a> {
             let (path, owed, program) = (service.path.clone(), service.devices.clone(), service.program);
             self.make_home(program);
             let service = &mut self.services[index];
-            match service.spawn(&path, &owed, self.system, self.syscap, &self.connectors, &self.grants, &self.launcher, &mut self.log) {
+            match service.spawn(&path, &owed, self.system, self.syscap, &self.connectors, &self.grants, (&self.launcher, self.sessions.machine()), &mut self.log) {
                 Ok(new) => say!("supervisor: {label} (pid {pid}) ended; started again as pid {new}"),
                 Err(e) => {
                     let mut kept = service.kept.lock().expect("supervisor: a service's state is poisoned");
@@ -1378,7 +1378,7 @@ impl<'a> Supervisor<'a> {
         self.make_home(program);
         let service = &mut self.services[index];
         let name = service.program.name.clone();
-        match service.spawn(previous, owed, self.system, self.syscap, &self.connectors, &self.grants, &self.launcher, &mut self.log) {
+        match service.spawn(previous, owed, self.system, self.syscap, &self.connectors, &self.grants, (&self.launcher, self.sessions.machine()), &mut self.log) {
             Ok(pid) => {
                 service.kept.lock().expect("supervisor: a service's state is poisoned").swapping = false;
                 swapped(&self.log, &name, Word::Restored, &format!("{previous} as pid {pid}"));
@@ -2256,11 +2256,12 @@ fn build_namespace(
 /// What each program's directory capabilities are minted from: each
 /// file-server role's port.
 ///
-/// **Each start is minted grants naming its session** (`toyos::fs::Grant`,
-/// [`Session::share`]), one per directory of every role, so the servers count
-/// every process of a session, every child each spawns directly and every
-/// program launched in it against one share. A role whose ports closed for
-/// good is minted nothing.
+/// **Each start is minted grants naming its session's share** (`toyos::fs::Grant`,
+/// [`Session::share`]), one per directory of every role: a start the
+/// supervisor makes itself has a share of its own, so the servers count it,
+/// every child it spawns directly and every launch made from it that opens no
+/// session against one share, and a login session's processes against one
+/// more. A role whose ports closed for good is minted nothing.
 struct Grants<'a> {
     /// Each role's service, whose kept acceptor is the role's port.
     roles: Vec<(&'a str, Arc<Mutex<Kept>>)>,
@@ -2298,7 +2299,7 @@ fn mint_grants(role: &str, acceptor: &Acceptor, share: u64) -> Vec<(String, Conn
     dirs.iter()
         .map(|dir| {
             let mut badge = [0u8; MAX_BADGE];
-            let badge = Grant { session: share, root: dir.root }
+            let badge = Grant { share, root: dir.root }
                 .encode(&mut badge)
                 .unwrap_or_else(|| panic!("supervisor: {}'s root {:?} is no grant's", dir.dir, dir.root));
             let connector = acceptor

@@ -148,10 +148,10 @@ impl Reply {
 /// supervisor mints the connector with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Grant<'a> {
-    /// The session whose share of the server it spends: every process the
-    /// supervisor starts in one session, through every launch made in it, and
-    /// every child those spawn directly is minted the same number.
-    pub session: u64,
+    /// The share of the server it spends: the supervisor mints one number for
+    /// one start it makes itself or one login session, and for every launch
+    /// made from it that opens no session.
+    pub share: u64,
     /// The directory, as a path on the role's volume, every path on the
     /// connection is resolved beneath: `home`, or the empty path for a volume
     /// served whole. [`canonical`], and at most [`MAX_GRANT_ROOT`] bytes.
@@ -164,18 +164,18 @@ pub struct Grant<'a> {
 const GRANT_VERSION: u8 = 2;
 
 /// The longest root a grant carries: what one badge holds past the version and
-/// the session.
+/// the share.
 pub const MAX_GRANT_ROOT: usize = MAX_BADGE - 1 - 8;
 
 impl<'a> Grant<'a> {
-    /// The version, the session, then the root: `None` for a root no grant
+    /// The version, the share, then the root: `None` for a root no grant
     /// can carry.
     pub fn encode<'b>(&self, out: &'b mut [u8; MAX_BADGE]) -> Option<&'b [u8]> {
         if self.root.len() > MAX_GRANT_ROOT || !canonical(self.root) {
             return None;
         }
         out[0] = GRANT_VERSION;
-        out[1..9].copy_from_slice(&self.session.to_le_bytes());
+        out[1..9].copy_from_slice(&self.share.to_le_bytes());
         let end = 9 + self.root.len();
         out[9..end].copy_from_slice(self.root.as_bytes());
         Some(&out[..end])
@@ -187,9 +187,9 @@ impl<'a> Grant<'a> {
         if version != GRANT_VERSION || rest.len() < 8 || rest.len() - 8 > MAX_GRANT_ROOT {
             return None;
         }
-        let session = u64::from_le_bytes(rest[..8].try_into().expect("eight bytes"));
+        let share = u64::from_le_bytes(rest[..8].try_into().expect("eight bytes"));
         let root = core::str::from_utf8(&rest[8..]).ok()?;
-        canonical(root).then_some(Self { session, root })
+        canonical(root).then_some(Self { share, root })
     }
 }
 
@@ -631,8 +631,8 @@ mod tests {
     #[test]
     fn a_grant_round_trips_at_every_bound() {
         let longest = "r".repeat(MAX_GRANT_ROOT);
-        for (session, root) in [(0, ""), (1, "home"), (u64::MAX, "home/toy/Documents"), (7, longest.as_str())] {
-            let grant = Grant { session, root };
+        for (share, root) in [(0, ""), (1, "home"), (u64::MAX, "home/toy/Documents"), (7, longest.as_str())] {
+            let grant = Grant { share, root };
             let mut out = [0u8; MAX_BADGE];
             let bytes = grant.encode(&mut out).expect("a root a grant carries");
             assert_eq!(Grant::decode(bytes), Some(grant), "{root:?}");
@@ -644,15 +644,15 @@ mod tests {
         let mut out = [0u8; MAX_BADGE];
         let past = "r".repeat(MAX_GRANT_ROOT + 1);
         for root in ["/home", "home/", "a//b", ".", "a/../b", past.as_str()] {
-            assert_eq!(Grant { session: 1, root }.encode(&mut out), None, "{root:?}");
+            assert_eq!(Grant { share: 1, root }.encode(&mut out), None, "{root:?}");
         }
     }
 
     #[test]
     fn bytes_no_grant_was_encoded_as_are_refused() {
         let mut out = [0u8; MAX_BADGE];
-        let good = Grant { session: 3, root: "home" }.encode(&mut out).unwrap().to_vec();
-        // Shorter than a version and a session.
+        let good = Grant { share: 3, root: "home" }.encode(&mut out).unwrap().to_vec();
+        // Shorter than a version and a share.
         for n in 0..9 {
             assert_eq!(Grant::decode(&good[..n]), None, "{n} bytes");
         }

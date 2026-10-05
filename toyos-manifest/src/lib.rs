@@ -28,7 +28,7 @@
 //! start <name>              the supervisor starts this program at boot
 //! app-receive <name>        a connector every program launched from /apps holds
 //! starts <key>              a row this program may start through the launcher, or `/apps`
-//! login                     a launch this program makes opens a login session
+//! login                     a launch it makes from the machine's session opens a login session
 //! ```
 //!
 //! [`package`] is the other half: what an installed package says about itself,
@@ -209,7 +209,8 @@ pub struct Program {
     /// and [`launch::APPS`] for any installed package. Non-empty is what
     /// endows it a launcher at all.
     pub starts: Vec<String>,
-    /// A launch it makes opens a login session ([`launch`]).
+    /// A launch it makes from the machine's session opens a login session
+    /// ([`launch`]).
     pub login: bool,
 }
 
