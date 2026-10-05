@@ -68,7 +68,7 @@ use std::time::{Duration, Instant};
 
 use toyos_swap::{Refusal, Request as SwapRequest, Word};
 
-use toyos_manifest::launch::{self as authority, Authority, Session, Target};
+use toyos_manifest::launch::{self as authority, Authority, Session, Sessions, Target};
 use toyos_manifest::package::{self, Package};
 use toyos_manifest::{Manifest, Program};
 use toyos::endow::Endowments;
@@ -380,20 +380,20 @@ fn main() {
     // One port per file-server role, made here for the same reason: a
     // program's first open works whether or not its server runs yet. Its
     // connector goes at once: every connector a program holds to it is a
-    // grant minted for that program's start (`Grants`).
+    // grant minted for that program's session (`Grants`).
     let mut role_acceptors: BTreeMap<&str, Acceptor> = BTreeMap::new();
     for role in system.programs.iter().flat_map(|p| p.roles.iter()) {
         let (acceptor, _) = port::create().unwrap_or_else(|e| panic!("supervisor: no port for the `{role}` role: {e:?}"));
         role_acceptors.insert(role, acceptor);
     }
     // The supervisor's own files are resolved through grants like every
-    // program's, under the instance no start is given, and it is the one
+    // program's, under a share no session is given, and it is the one
     // process nobody endows a namespace: std resolves through this one, and
     // the stop's syncs through the second.
     let files: &'static Namespace = {
         let own: Vec<(String, Connector)> = role_acceptors
             .iter()
-            .flat_map(|(role, acceptor)| mint_grants(role, acceptor, SUPERVISOR_INSTANCE))
+            .flat_map(|(role, acceptor)| mint_grants(role, acceptor, authority::SUPERVISOR_SHARE))
             .collect();
         let build = || {
             let mut builder = namespace::build();
@@ -419,7 +419,8 @@ fn main() {
         syscap: &syscap,
         acceptors,
         connectors,
-        grants: Grants { roles: Vec::new(), next: Cell::new(SUPERVISOR_INSTANCE + 1) },
+        grants: Grants { roles: Vec::new() },
+        sessions: Sessions::default(),
         files,
         services: Vec::new(),
         log,
@@ -524,6 +525,8 @@ struct Supervisor<'a> {
     connectors: BTreeMap<&'a str, Connector>,
     /// What each program's view is minted from.
     grants: Grants<'a>,
+    /// The login sessions launches have opened.
+    sessions: Sessions,
     /// The same directories as a namespace of the supervisor's own, for the stop's syncs.
     files: &'static Namespace,
     /// What `[boot] start` named, a file server once per role.
@@ -1548,10 +1551,10 @@ impl Supervisor<'_> {
         let (row, session) = (caller.row, caller.session);
         let found = self.files("a launch's files", move || {
             resolve(system, &path, |target| -> Result<_, authority::Refusal> {
-                let session = authority::may_start(row, session, target)?;
+                let starts = authority::may_start(row, session, target)?;
                 let (Target::Row(program) | Target::Package(program)) = target;
                 let prepared = command.image_from(Path::new(&program.path)).prepare().map(drop);
-                Ok((session, prepared.map(|()| command)))
+                Ok((starts, prepared.map(|()| command)))
             })
         });
         let resolved = match found {
@@ -1585,7 +1588,7 @@ impl Supervisor<'_> {
         };
         // **`MSG_REFUSED`, never `MSG_NOT_DECLARED`**: the latter is std's cue to
         // spawn the program itself.
-        let (session, prepared) = match verdict {
+        let (starts, prepared) = match verdict {
             Ok(judged) => judged,
             Err(why) => {
                 say!("{}", authority::refused(&caller.row.name, caller.session, &program.name, why));
@@ -1601,6 +1604,7 @@ impl Supervisor<'_> {
                 return;
             }
         };
+        let session = starts.session(&mut self.sessions);
         let caller_slots: Vec<(u32, toyos::RawHandle)> =
             request.slot_numbers().zip(slots.0.iter().copied()).collect();
 
@@ -1919,7 +1923,7 @@ fn start<'a>(
         command.endow(&label, raw.0);
         held.0.push(raw);
     }
-    if let Some(ns) = build_namespace(program, system, connectors, grants, extras)? {
+    if let Some(ns) = build_namespace(program, system, connectors, grants.view(program, launcher.1), extras)? {
         let raw = ns.into_raw();
         command.endow(SVC_LABEL, raw.0);
         held.0.push(raw);
@@ -2212,13 +2216,12 @@ fn build_namespace(
     program: &Program,
     system: &Manifest,
     connectors: &BTreeMap<&str, Connector>,
-    grants: &Grants<'_>,
+    view: Vec<(String, Connector)>,
     extras: &[(&str, Connector)],
 ) -> std::io::Result<Option<Namespace>> {
     // Never the swap port: [`swap_namespace`] says why.
     let receives: Vec<&String> =
         program.receives.iter().filter(|name| *name != toyos_swap::PORT).collect();
-    let view = grants.view(program);
     if receives.is_empty() && extras.is_empty() && view.is_empty() {
         return Ok(None);
     }
@@ -2250,27 +2253,22 @@ fn build_namespace(
     }
 }
 
-/// The instance of the supervisor's own grants, which no start is given.
-const SUPERVISOR_INSTANCE: u64 = 0;
-
 /// What each program's directory capabilities are minted from: each
-/// file-server role's port, and the count of starts.
+/// file-server role's port.
 ///
-/// **Each start is minted grants of its own** (`toyos::fs::Grant`), one per
-/// directory of every role, all naming one instance, so the servers count the
-/// process and every child it spawns directly, which holds the same
-/// connectors, against one share. A role whose ports closed for good is
-/// minted nothing.
+/// **Each start is minted grants naming its session** (`toyos::fs::Grant`,
+/// [`Session::share`]), one per directory of every role, so the servers count
+/// every process of a session, every child each spawns directly and every
+/// program launched in it against one share. A role whose ports closed for
+/// good is minted nothing.
 struct Grants<'a> {
     /// Each role's service, whose kept acceptor is the role's port.
     roles: Vec<(&'a str, Arc<Mutex<Kept>>)>,
-    /// The instance the next start is minted.
-    next: Cell<u64>,
 }
 
 impl Grants<'_> {
-    /// The directory capabilities `program` is endowed for one start, by
-    /// namespace name.
+    /// The directory capabilities `program` is endowed for one start in
+    /// `session`, by namespace name.
     ///
     /// **Every program sees the whole tree the file servers serve**, which is
     /// the kernel's old view kept whole until each row declares its own
@@ -2278,17 +2276,15 @@ impl Grants<'_> {
     /// with one exception: a storage row sees none, since a file server
     /// resolving a path of its own through itself waits for ever. Asked before
     /// anything is locked, since a storage row's start holds its own kept state.
-    fn view(&self, program: &Program) -> Vec<(String, Connector)> {
+    fn view(&self, program: &Program, session: Session) -> Vec<(String, Connector)> {
         if is_storage(program) {
             return Vec::new();
         }
-        let instance = self.next.get();
-        self.next.set(instance + 1);
         let mut view = Vec::new();
         for (role, kept) in &self.roles {
             let kept = kept.lock().expect("supervisor: a service's state is poisoned");
             if let Some((_, acceptor)) = kept.acceptors.first() {
-                view.extend(mint_grants(role, acceptor, instance));
+                view.extend(mint_grants(role, acceptor, session.share()));
             }
         }
         view
@@ -2296,18 +2292,18 @@ impl Grants<'_> {
 }
 
 /// A grant on `acceptor`, the `role`'s port, for each of its directories,
-/// naming `instance`: each by the namespace name a program opens it under.
-fn mint_grants(role: &str, acceptor: &Acceptor, instance: u64) -> Vec<(String, Connector)> {
+/// naming `share`: each by the namespace name a program opens it under.
+fn mint_grants(role: &str, acceptor: &Acceptor, share: u64) -> Vec<(String, Connector)> {
     let dirs = toyos_manifest::role_dirs(role).expect("supervisor: the build refuses a role it does not know");
     dirs.iter()
         .map(|dir| {
             let mut badge = [0u8; MAX_BADGE];
-            let badge = Grant { instance, root: dir.root }
+            let badge = Grant { session: share, root: dir.root }
                 .encode(&mut badge)
                 .unwrap_or_else(|| panic!("supervisor: {}'s root {:?} is no grant's", dir.dir, dir.root));
             let connector = acceptor
                 .mint(badge)
-                .unwrap_or_else(|e| panic!("supervisor: no grant on {} for instance {instance}: {e:?}", dir.dir));
+                .unwrap_or_else(|e| panic!("supervisor: no grant on {} for share {share}: {e:?}", dir.dir));
             (format!("{CAPABILITY_PREFIX}{}", dir.dir), connector)
         })
         .collect()

@@ -127,9 +127,10 @@ const RUST_SKIP: &[&str] = &[
     // A kernel primitive with no use for any one boot's devices: the
     // `port_badge` metal row runs it on tests/proctreecase.
     "port_badge",
-    // Needs a launcher whose row lists a program that streams into a file, so
-    // that another instance asks DATA's server while this one holds its
-    // shares: the `fs_share` metal row runs it on tests/proctreecase.
+    // Needs a launcher whose row lists a shell, and a shell whose row opens a
+    // login session and lists a shell, so that another session asks DATA's
+    // server while this one holds its shares: the `fs_share` metal row runs it
+    // on tests/proctreecase.
     "fs_share",
     // It asserts nothing at all: it holds a `tests/lanleasecase` boot open for
     // twenty seconds. On a shared boot it would be twenty seconds of nothing.
@@ -691,8 +692,8 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal { arms: PROCTREECASE, judge: |b| b[0].job_passed("test_rs_port_badge") },
     ),
     (
-        // One instance holding all a file server lets it hold leaves the
-        // server answering another.
+        // One session holding all a file server lets it hold, through every
+        // launch made in it, leaves the server answering another session.
         "fs_share",
         metal::Metal { arms: PROCTREECASE, judge: |b| b[0].job_passed("test_rs_fs_share") },
     ),
@@ -921,8 +922,8 @@ const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/metalcase", &
 
 /// A launcher and a declared `cat` and shell, which `process_tree`'s subtree
 /// launches, a `toybox` row holding `roster`, which `launch_toctou` races, the
-/// rows `launch_authority` is refused and started, and the shell `fs_share`
-/// asks DATA's server through.
+/// rows `launch_authority` is refused and started, and the shells `fs_share`
+/// asks DATA's server through, in its session and in another.
 const PROCTREECASE: &[metal::Arm] = &[metal::once(
     "proctreecase",
     "tests/proctreecase",

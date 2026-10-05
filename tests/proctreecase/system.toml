@@ -13,8 +13,9 @@
 # session it was launched in: refused in the machine's, started in the one the
 # shell opens.
 #
-# And `fs_share`: the shell test-runner's row lists is launched with grants of
-# its own, so it is another instance on DATA's server.
+# And `fs_share`: a shell test-runner launches is in the machine's session, as
+# test-runner is, and spends its share of DATA's server; a shell that shell
+# launches opens a login session, which has a share of its own.
 
 [boot]
 start = ["logkeeper", "diskserver", "fileserver", "test-runner"]
@@ -39,7 +40,7 @@ syscap = ["roster"]
 starts = ["swap"]
 
 [programs.shell]
-starts = ["toybox"]
+starts = ["toybox", "shell"]
 login = true
 
 [programs.swap]
