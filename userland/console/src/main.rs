@@ -202,7 +202,7 @@ fn main() {
     // The seed is the heaviest thing this program ever draws — a screenful of
     // log per scrolled row — so a boot that felt slow says so here.
     let (panel_bytes, blits) = console.screen_traffic();
-    eprintln!(
+    println!(
         "console: ready {}x{} ({cols}x{rows} cells), log {seeded} bytes, \
          panel {panel_bytes} bytes in {blits} blits",
         info.width, info.height
@@ -304,13 +304,13 @@ fn main() {
                 Notice::LayoutChanged => {
                     window::load_layout(&mut translator);
                     host.notify_layout();
-                    eprintln!("console: keyboard layout is now {}", translator.layout());
+                    println!("console: keyboard layout is now {}", translator.layout());
                 }
                 Notice::Grabbed { client } => {
-                    eprintln!("console: client {client} has the keyboard until it exits")
+                    println!("console: client {client} has the keyboard until it exits")
                 }
                 Notice::Released { client } => {
-                    eprintln!("console: client {client} gave the keyboard back")
+                    println!("console: client {client} gave the keyboard back")
                 }
                 Notice::Dropped { client, why } => {
                     eprintln!("console: dropping client {client} — {why}")
