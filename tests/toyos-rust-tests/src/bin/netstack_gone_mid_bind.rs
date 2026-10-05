@@ -207,9 +207,10 @@ fn mid_flight(request: Request) -> ! {
                 )
                 .and_then(|pending| pending.response::<TcpBindResponse>().map(|_| ()))
                 .expect_err("a bind into a port whose acceptor is gone was answered");
-            // The refused send's write end was the pipe's only writer.
+            // The refused send's write end was the pipe's only writer; a
+            // writer still open refuses this read at once rather than blocking.
             assert_eq!(
-                notify.read(&mut byte),
+                notify.read_nonblock(&mut byte),
                 Ok(0),
                 "the pipe end a refused handle send consumed is still open in this process",
             );

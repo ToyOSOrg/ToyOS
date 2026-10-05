@@ -84,6 +84,12 @@ pub enum Parent<H = RawHandle> {
 ///
 /// `argv` and `env` are exactly the blobs `SYS_SPAWN` takes, so the launcher
 /// path and the direct path build one thing rather than two.
+///
+/// **Every handle in `slots`, `extras` and `parent` is the caller's to give,
+/// and is named once.** [`launch`] consumes each one that it sends: it is moved
+/// to the launcher, or closed when the kernel refuses the move. A handle named
+/// twice is closed twice, and the second close names a handle this process no
+/// longer holds, which the kernel answers by ending it.
 pub struct Launch<'a> {
     /// The program's path, exactly as the caller resolved it.
     ///
@@ -337,7 +343,7 @@ pub fn launch<'a>(
         .encode(&mut buf)
         .map_err(|_| LaunchError::NotSent(IpcError::TooLarge))?;
     let (handles, count) = request.handles();
-    // The request's handles were the caller's to give, and are given here.
+    // Each is the caller's and named once, which is `Launch`'s contract.
     conn.send_handles(handles[..count].iter().map(|&h| OwnedHandle(h)))
         .map_err(|e| LaunchError::Sent(IpcError::Syscall(e)))?;
     conn.send_bytes(MSG_LAUNCH, &buf[..len]).map_err(LaunchError::Sent)?;

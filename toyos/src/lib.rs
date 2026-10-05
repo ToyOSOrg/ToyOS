@@ -87,7 +87,7 @@ impl OwnedHandle {
 
     /// Give up ownership: the handle stays open and this stops answering for
     /// it.
-    pub fn into_raw(self) -> RawHandle {
+    pub(crate) fn into_raw(self) -> RawHandle {
         let raw = self.0;
         core::mem::forget(self);
         raw
