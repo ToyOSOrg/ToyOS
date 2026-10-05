@@ -243,6 +243,18 @@ impl Readback {
         Ok((heard, stream.split_inclusive('\n').map(str::to_string).collect()))
     }
 
+    /// The owner's count of his presses of the power button on this boot,
+    /// from [`toyos_build::metal::READBACK_PRESSES`]. Absent is a finding: the
+    /// loop clears it before every boot, so an attended boot's count is
+    /// written after it or not at all.
+    pub fn presses(&self) -> Result<u32, String> {
+        let at = self.home.join(toyos_build::metal::READBACK_PRESSES);
+        let text = std::fs::read_to_string(&at).map_err(|e| {
+            format!("{}: {e} — the attended run writes how many times the button was pressed", at.display())
+        })?;
+        text.trim().parse().map_err(|_| format!("{} reads {text:?}, not a count of presses", at.display()))
+    }
+
     /// One file off the log volume that is neither the loader's nor `logkeeper`'s,
     /// read out of the partition's own bytes; `None` where the volume has no
     /// such file.

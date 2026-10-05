@@ -568,7 +568,9 @@ pub fn acpi_power_button(test_config: &Path) -> Result<(), String> {
     ended(&mut qemu, &mut stop, &mut console, SHUTTING_DOWN, "guest-shutdown")?;
     let after = serial::Serial::named("the press", console[pressed_at..].to_string());
     after.must_say(ACPI_PRESSED)?;
-    after.must_say(&format!("{} (Shutdown)", toyos_build::bootlog::STOPPING))?;
+    if !toyos_build::bootlog::asked_to_power_off(after.text()) {
+        return Err(format!("the supervisor's last word after the press is not a power-off:\n{}", after.text()));
+    }
     after.must_be_clean()?;
     eprintln!("  [power] the press: {ACPI_PRESSED}");
     Ok(())

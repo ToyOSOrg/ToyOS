@@ -479,9 +479,12 @@ const METAL: &[(&str, metal::Metal)] = &[
     ),
     (
         // **Attended: the owner presses the power button once, briefly**, on a
-        // boot held open for it, and the machine stops through ToyOS's own
-        // power-off. Staying on, or coming back on, is red, and only the owner
-        // sees either.
+        // boot held open for it, presses again only if nothing happens, and
+        // once the machine is off writes how many times he pressed into the
+        // readback's `presses.txt`. Green is one press, served, and the machine
+        // stopped through ToyOS's own power-off; more presses than one is a
+        // lost first press, and red. Staying on, or coming back on, is red,
+        // and only the owner sees either.
         "acpi_power_button_pressed",
         metal::Metal {
             arms: &[metal::once("testcases-press", "tests/testcases", &[], &["test_rs_acpi_hold"])],
@@ -3802,17 +3805,29 @@ fn acpi_death_on_metal(back: &metal::Readback) -> Result<(), String> {
     Ok(())
 }
 
-/// The owner's press: the server took it and asked for the stop, and the
-/// supervisor powered the machine off for it.
+/// The owner's one press: the server took it and asked for the stop, and the
+/// supervisor powered the machine off for it. The press count is the owner's,
+/// off the host: a press that never set `PWRBTN_STS` leaves the log as clean as
+/// no press, so only his count tells a lost first press from a served one.
 fn acpi_press_on_metal(back: &metal::Readback) -> Result<(), String> {
     let log = back.log();
     if let Ok(none) = log.must_say("acpi_hold: held to ") {
-        return Err(format!("the boot was held open and nobody pressed: {none}"));
+        return Err(format!("the boot was held open and nothing stopped it: {none}"));
     }
+    let presses = back.presses()?;
     let pressed = log.must_say("acpiserver: the power button was pressed, on SCI ")?;
     powered_off_in_acpi_mode(back)?;
     eprintln!("  [acpi] {}", pressed.trim());
-    Ok(())
+    match presses {
+        1 => Ok(()),
+        0 => Err(format!("the owner records no press, and the server served one: {}", pressed.trim())),
+        n => Err(format!(
+            "the owner pressed {n} times before the machine stopped, and the server served one press: \
+             the first {} were lost before it ({})",
+            n - 1,
+            pressed.trim()
+        )),
+    }
 }
 
 /// A job's power-off, asked for with the server holding the machine in ACPI

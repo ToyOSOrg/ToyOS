@@ -2220,6 +2220,11 @@ pub fn loop_verdict(text: &str) -> Result<(), String> {
 /// the outside judge read, so a complaint can be looked at rather than retold.
 pub const READBACK_VOLUME: &str = "log-partition.img";
 
+/// How many times the owner pressed the power button on an attended boot, one
+/// decimal number written beside the readback by hand once the machine has
+/// stopped: a press the hardware never latched leaves no trace in the log.
+pub const READBACK_PRESSES: &str = "presses.txt";
+
 /// The keys [`READBACK_BOOT`] carries, one `<key> <value>` per line.
 pub const BACK_SECS: &str = "back_secs";
 pub const STICK_SECS_KEY: &str = "stick_secs";
@@ -2243,6 +2248,7 @@ pub const READBACK_FILES: &[&str] = &[
     READBACK_VOLUME,
     READBACK_STREAM,
     READBACK_TALK,
+    READBACK_PRESSES,
 ];
 
 /// Empty a readback directory, before this run can leave any of it standing.

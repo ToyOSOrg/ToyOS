@@ -75,11 +75,16 @@ and a userland server that claims the SCI, handles the power button, a
 fixed event that needs no AML, and takes the EC's events. **Exit**: on the
 T14, `MSR_SMI_COUNT`, read through the general counters and not by a check of
 its own, stays flat on every CPU over the interval the firmware issue's exit
-defines, and a press of the power button stops the machine cleanly, through ToyOS's own
-power-off path (`SYS_SHUTDOWN`), and the boot's log records the press and that
-stop, and each EC query number once with its count: a T14 row reads them there.
-A second T14 row kills the server and reads `SCI_EN` clear in `PM1_CNT`
-afterwards, the kernel having written `ACPI_DISABLE` to `SMI_CMD`.
+defines; a press the server serves stops the machine cleanly, through ToyOS's
+own power-off path (`SYS_SHUTDOWN`), and the boot's log records the press and
+that stop, and each EC query number once with its count: a T14 row reads them
+there. A second T14 row kills the server and reads `SCI_EN` clear in `PM1_CNT`
+afterwards, the kernel having written `ACPI_DISABLE` to `SMI_CMD`. That every
+press of the power button stops the machine is not stage 1's: the T14 loses
+some first presses, and
+`issues/the-t14s-power-button-event-came-up-to-17-s-after-ec-query-0x28.md`
+carries that into the AML interpreter's stages, which follow this one (owner,
+2026-10-05, "Land it, record the gap": "The AML stage closes it").
 
 **Ruled** (owner, 2026-10-04, "Stopgap, delete later"): "Stage 1 uses the
 extra table so the T14 switches to ACPI mode now." Stage 1 reads the
