@@ -375,12 +375,9 @@ pub const GUEST_QUIET: Duration = Duration::from_secs(15);
 /// through [`await_guest`].
 pub const GUEST_WEDGED: Duration = Duration::from_secs(141);
 
-/// A kernel line without its `[kernel <t> cpu<N>] ` stamp.
+/// A kernel line without its head.
 fn without_stamp(line: &str) -> &str {
-    if !is_kernel_line(line) {
-        return line;
-    }
-    line.split_once("] ").map_or(line, |(_, rest)| rest)
+    toyos_logstream::parse(line).filter(|p| p.source == toyos_logstream::Source::Kernel).map_or(line, |p| p.text)
 }
 
 /// The sentence a wait gives when what stopped the guest is on the console.
@@ -1134,11 +1131,10 @@ pub fn build_toyos_bin(arch: Arch, crate_path: &Path, name: &str) -> Vec<u8> {
 }
 
 /// A kernel record's line, whichever writer spelled its head: `klogd`'s console
-/// `[kernel …]` and a `/log` file's `[<date> <time> …]` alike. Nothing else
-/// writes either — a program's line reaches both only through `logkeeper`, under the
-/// program's own head.
+/// and a `/log` file's alike. Nothing else writes one — a program's line
+/// reaches both only through `logkeeper`, under the program's own head.
 pub fn is_kernel_line(line: &str) -> bool {
-    line.starts_with(toyos_build::kernelconsole::HEAD) || toyos_logstream::record_ms(line).is_some()
+    toyos_logstream::is_kernel_line(line)
 }
 
 /// A console line's text as its program wrote it: a program's line without

@@ -209,7 +209,7 @@ impl Origin {
             left -= 1;
         }
         counted.refused += self.shared.refused(&self.ring);
-        counted.ahead = clamp_ahead(&mut bodies, toyos_abi::clock::nanos_since_boot());
+        counted.ahead = clamp_ahead(&mut bodies, toyos_abi::clock::stamp_ns());
         for body in bodies {
             let limit = if body.pid == self.pid { &self.own } else { &self.children };
             match limit.admit(now_ns) {
@@ -238,7 +238,7 @@ impl Origin {
             }
         }
         let abandoned = self.shared.sweep(&self.ring, |body| bodies.push(body));
-        let ahead = clamp_ahead(&mut bodies, toyos_abi::clock::nanos_since_boot());
+        let ahead = clamp_ahead(&mut bodies, toyos_abi::clock::stamp_ns());
         for body in bodies {
             self.joins.join(index, &body, out);
         }

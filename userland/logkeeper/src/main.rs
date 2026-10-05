@@ -274,7 +274,7 @@ impl Log {
             });
 
             let flush = self.from_supervisor();
-            let asked = toyos_abi::clock::nanos_since_boot();
+            let asked = toyos_abi::clock::stamp_ns();
             let mut read_any = self.round(&mut ended, flush).is_some();
             if flush {
                 // Every ring whole up to the flush, whatever a round's bound: a
@@ -374,7 +374,7 @@ impl Log {
     /// whose end `ended` names is swept whole and let go. The oldest stamp any
     /// ring had, or `None` where none had a line.
     fn round(&mut self, ended: &mut Vec<usize>, all: bool) -> Option<u64> {
-        let cut = toyos_abi::clock::nanos_since_boot();
+        let cut = toyos_abi::clock::stamp_ns();
         let mut read: Vec<Said> = Vec::new();
         let mut notes: Vec<String> = Vec::new();
         for (i, origin) in self.origins.iter_mut().enumerate() {
@@ -516,13 +516,13 @@ impl Log {
         for line in &lines {
             match &line.kind {
                 Kind::Kernel(record) => {
-                    file.push_str(&format!("{}\n", record.tagged(&stamp(self.boot_secs, record.at_ns))));
+                    file.push_str(&format!("{}\n", record.dated(&stamp(self.boot_secs, record.at_ns()))));
                 }
                 Kind::Program { tag, owner, said } => {
                     let severity = said.severity;
                     let tag = Tag::new(tag).expect("an origin's name is a tag");
                     let pid = (said.pid != *owner).then_some(said.pid);
-                    let at = stamp(self.boot_secs, said.at_ns);
+                    let at = stamp(self.boot_secs, Some(said.at_ns));
                     let mut line = ProgramLine {
                         stamp: &at,
                         at_ns: said.at_ns,
@@ -753,7 +753,8 @@ impl Stall {
     }
 }
 
-/// This boot's file stem, and the epoch second the machine booted at.
+/// This boot's file stem, and the epoch second its counter started at: where
+/// every line's time counts from.
 ///
 /// `None` for the stem is a boot that cannot be placed in time, which takes an
 /// `unknown-NN` name.
@@ -762,19 +763,19 @@ fn boot_stamp() -> (Option<String>, Option<u64>, String) {
         return (None, None, "undated: this machine will not say what time it is".into());
     };
     let civil = Civil::from_unix_secs(secs);
-    let uptime_secs = toyos_abi::clock::nanos_since_boot() / 1_000_000_000;
-    (Some(format!("{}", civil.stem())), Some(secs.saturating_sub(uptime_secs)), format!("{civil} UTC"))
+    let since_zero = toyos_abi::clock::stamp_ns() / 1_000_000_000;
+    (Some(format!("{}", civil.stem())), Some(secs.saturating_sub(since_zero)), format!("{civil} UTC"))
 }
 
-/// A line's wall-clock stamp: the second the machine booted at, plus the
-/// line's own monotonic offset — which the line carries too, so `/log` holds
-/// both clocks.
-pub(crate) fn stamp(boot_secs: Option<u64>, at_ns: u64) -> String {
-    match boot_secs {
-        Some(base) => format!("{}", Civil::from_unix_secs(base + at_ns / 1_000_000_000)),
-        // An undated boot writes the space the stamp would have taken, so the
-        // columns line up and nothing has to be re-parsed to notice that a
-        // machine had no clock.
+/// A line's wall-clock stamp: the second the counter started at, plus the
+/// line's own time — which the line carries too, so `/log` holds both
+/// clocks. A line with no time has no wall clock either.
+pub(crate) fn stamp(boot_secs: Option<u64>, at_ns: Option<u64>) -> String {
+    match boot_secs.zip(at_ns) {
+        Some((base, at_ns)) => format!("{}", Civil::from_unix_secs(base + at_ns / 1_000_000_000)),
+        // An undated boot, or an untimed line, writes the space the stamp would
+        // have taken, so the columns line up and nothing has to be re-parsed to
+        // notice that a machine had no clock.
         None => "---------- --------".into(),
     }
 }

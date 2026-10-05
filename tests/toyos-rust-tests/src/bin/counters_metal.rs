@@ -5,7 +5,8 @@
 //!
 //! Three reads: `idle0` and `idle1` either side of [`IDLE`], and `spin` after
 //! [`SPIN`] iterations on a thread per CPU begun at `idle1`. Each read's
-//! records follow a line with the clock after it and what the read took, a
+//! records follow a line with the log's clock after it ([`stamp_ns`], what a
+//! line's stamp is read against) and what the read took, a
 //! whole round each, none joining another's. **Nothing is printed until all
 //! three are taken**: a printed line reaches the stick within the second,
 //! through the `/log` fileserver on that fileserver's CPU.
@@ -30,6 +31,7 @@ use std::time::{Duration, Instant};
 use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::poller::{Poller, READABLE};
 use toyos::syscap::SysCap;
+use toyos_abi::clock::stamp_ns;
 use toyos_abi::counters::{Counter, RawRecord, Record};
 use toyos_abi::syscall::{self, SyscallError};
 use toyos_logstream::{program_line, Lines};
@@ -130,7 +132,7 @@ fn loaded(cap: &SysCap) {
     }
 }
 
-/// One read: the clock after it, what it took, and every CPU's records.
+/// One read: the log's clock after it, what it took, and every CPU's records.
 struct Read {
     at: u64,
     took: Duration,
@@ -142,7 +144,7 @@ fn read(cap: &SysCap) -> Read {
     let asked = Instant::now();
     let n = cap.counters(&mut raw).expect("the estate's capability reads the counters");
     let took = asked.elapsed();
-    let at = toyos_abi::clock::nanos_since_boot();
+    let at = stamp_ns();
     Read { at, took, records: raw[..n].iter().map(|r| Record::decode(r).expect("a record that decodes")).collect() }
 }
 

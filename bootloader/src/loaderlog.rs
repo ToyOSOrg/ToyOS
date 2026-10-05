@@ -224,5 +224,5 @@ fn unique_guid(bs: &BootServices, handle: Handle) -> Option<[u8; 16]> {
 /// Why there is no log, and that the boot goes on without one.
 fn refused(why: fmt::Arguments) {
     // The console directly: there is no file, and this says why.
-    uefi_services::println!("{}Loader log: {why}. This boot's loader lines are on the screen only", crate::stamp::now());
+    uefi_services::println!("{} Loader log: {why}. This boot's loader lines are on the screen only", crate::stamp::now());
 }

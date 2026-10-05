@@ -273,7 +273,7 @@ mod tests {
     #[test]
     fn every_record_reads_back_as_itself_off_a_line_of_log() {
         for record in [WHOLE, short(), Record { sweep: Sweep::default(), ..WHOLE }] {
-            let line = alloc::format!("[2026-09-14 20:38:12 7.955 cpu4] {record}\r");
+            let line = alloc::format!("[2026-09-14 20:38:12  7.955 cpu4 kernel] {record}\r");
             assert_eq!(Record::parse(&line), Some(record), "{line}");
         }
     }

@@ -18,7 +18,7 @@
 #![cfg(not(feature = "loom"))]
 
 use kernel_loom::log_shard::Shard;
-use toyos_abi::log::{LogRecord, Severity, FLAG_EARLY, MAX_RECORD_MESSAGE};
+use toyos_abi::log::{LogRecord, Severity, FLAG_UNTIMED, MAX_RECORD_MESSAGE};
 
 /// A record whose every field is distinct, so a swap between two of them fails
 /// rather than being absorbed.
@@ -32,7 +32,7 @@ fn record(seq: u64, len: usize) -> LogRecord {
     r.len = len as u16;
     r.elided = 0x5678;
     r.severity = Severity::Alert as u8;
-    r.flags = FLAG_EARLY;
+    r.flags = FLAG_UNTIMED;
     for (i, b) in r.msg[..len].iter_mut().enumerate() {
         *b = b'a' + (i % 26) as u8;
     }
