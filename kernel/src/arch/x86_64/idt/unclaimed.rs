@@ -127,7 +127,6 @@ pub fn selftest() {
         crate::log!("LAPIC: unclaimed selftest FAILED — this CPU publishes no census block");
         return;
     };
-    let taken_before = crate::irq_census::deliveries_total(cpu).unwrap_or(0);
 
     apic::send_self(PROBE_VECTOR);
 
@@ -161,8 +160,12 @@ pub fn selftest() {
         return;
     }
 
+    // Read now the handler has returned, so the probe's own delivery is already in it,
+    // and the one-shot armed so an interrupt comes.
+    let taken = crate::irq_census::deliveries_total(cpu).unwrap_or(0);
+    apic::arm_within(kernel::sched::fair::QUANTUM_NS);
     let ran_on = crate::clock::settles(ARRIVES.nanos(), || {
-        crate::irq_census::deliveries_total(cpu).unwrap_or(taken_before) > taken_before
+        crate::irq_census::deliveries_total(cpu).unwrap_or(taken) > taken
     });
     if !ran_on {
         crate::log!(
