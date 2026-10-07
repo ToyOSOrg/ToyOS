@@ -201,6 +201,13 @@ otherwise pay to find again:
   interpreter's bound in heap bytes, and a host test under a counting
   allocator holds each of those three fills and that refused load to it.
 
+The press issue's measurement of 2026-10-07 found the three presses it lost
+changing nothing its scout read, with the button's event enabled and no SMI
+taken, and its hypothesis is that the controller wants the firmware's
+initialisation run first. The slice that puts `_REG`, the `_STA` and `_INI`
+walk and the query methods in the server on the T14 is the one that issue's
+one-press test waits on.
+
 **Stage: power-off through the server** (the orchestrator's placement of "Yes,
 one path"). The ACPI server evaluates `\_S5` and powers the machine off.
 Blocked on the interpreter's evaluation of `\_S5`. **Exit**: the kernel's `\_S5_` reader, `toyos-acpi/src/dsdt.rs`, and its caller
