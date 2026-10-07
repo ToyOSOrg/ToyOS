@@ -127,9 +127,10 @@ const RUST_SKIP: &[&str] = &[
     // A kernel primitive with no use for any one boot's devices: the
     // `port_badge` metal row runs it on tests/proctreecase.
     "port_badge",
-    // Needs a launcher whose row lists a program that streams into a file, so
-    // that another instance asks DATA's server while this one holds its
-    // shares: the `fs_share` metal row runs it on tests/proctreecase.
+    // Needs a launcher whose row lists a shell, and a shell whose row opens a
+    // login session and lists a shell, so that a login session and its
+    // launches ask DATA's server while this job's share holds all it may: the
+    // `fs_share` metal row runs it on tests/proctreecase.
     "fs_share",
     // It asserts nothing at all: it holds a `tests/lanleasecase` boot open for
     // twenty seconds. On a shared boot it would be twenty seconds of nothing.
@@ -727,8 +728,8 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal { arms: PROCTREECASE, judge: |b| b[0].job_passed("test_rs_port_badge") },
     ),
     (
-        // One instance holding all a file server lets it hold leaves the
-        // server answering another.
+        // One share holding all a file server lets it hold leaves the server
+        // answering a login session, whose launches all spend its one share.
         "fs_share",
         metal::Metal { arms: PROCTREECASE, judge: |b| b[0].job_passed("test_rs_fs_share") },
     ),
@@ -957,8 +958,8 @@ const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/metalcase", &
 
 /// A launcher and a declared `cat` and shell, which `process_tree`'s subtree
 /// launches, a `toybox` row holding `roster`, which `launch_toctou` races, the
-/// rows `launch_authority` is refused and started, and the shell `fs_share`
-/// asks DATA's server through.
+/// rows `launch_authority` is refused and started, and the shells `fs_share`
+/// asks DATA's server through, under its share and in a login session.
 const PROCTREECASE: &[metal::Arm] = &[metal::once(
     "proctreecase",
     "tests/proctreecase",
@@ -2916,7 +2917,7 @@ fn process_tree(back: &metal::Readback) -> Result<(), String> {
 /// session, for test-runner and for the toybox it launched. The guest sees
 /// only that each was refused.
 fn launch_authority(back: &metal::Readback) -> Result<(), String> {
-    use toyos_manifest::launch::{refused, Refusal, Session};
+    use toyos_manifest::launch::{refused, Refusal, Sessions};
     back.job_passed("test_rs_launch_authority")?;
     let log = back.log();
     for (caller, target, why) in [
@@ -2925,7 +2926,7 @@ fn launch_authority(back: &metal::Readback) -> Result<(), String> {
         ("test-runner", "update", Refusal::OutsideLogin),
         ("toybox", "swap", Refusal::OutsideLogin),
     ] {
-        let line = refused(caller, Session::Machine, target, why);
+        let line = refused(caller, Sessions::default().machine(), target, why);
         if !log.text().lines().any(|l| l.contains(&line)) {
             return Err(format!("the supervisor never said `{line}`\n{}", log.text()));
         }

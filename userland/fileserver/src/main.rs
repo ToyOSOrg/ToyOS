@@ -16,11 +16,14 @@
 //! the grant's root (`fileserver::resolve`); a write on a read-only volume is
 //! refused before the volume sees it.
 //!
-//! **One instance cannot take the server.** Beneath each machine-wide bound —
+//! **One share cannot take the server.** Beneath each machine-wide bound —
 //! connections waiting on their hello, connections served, streams — each
-//! instance a grant names has a share of its own, so one holding all it may
-//! leaves the rest of each bound to the others. Four at their shares take the
-//! server (`issues/a-file-servers-shares-are-per-instance-and-one-session-launches-instances.md`).
+//! share a grant names has a part of its own, so one holding all it may leaves
+//! the rest of each bound to the others. A share is one service the
+//! supervisor started itself or one login session, with every child spawned
+//! in it and every launch made from it that opens no session
+//! (`toyos_manifest::launch`). Four at their parts take the server
+//! (`issues/four-shares-take-a-file-server.md`).
 //!
 //! **A server never blocks on a client.** Accept and the first frame are two
 //! events; a request is buffered until whole; every reply is one `try_send`,
@@ -69,11 +72,11 @@ const MAX_FIDS: usize = 1024;
 /// Streams served at once, machine-wide.
 const MAX_STREAMS: usize = 64;
 
-/// One instance's shares of [`MAX_SERVED`], [`MAX_HANDSHAKES`] and
-/// [`MAX_STREAMS`]. Past its share of served clients a hello is answered
-/// `ResourceExhausted`, and past its share of streams a `STREAM` is; past its
-/// share of handshakes a connection is, as it is taken, and let go. A quarter
-/// of each bound, so an instance at its share leaves the bound to three more.
+/// One share's parts of [`MAX_SERVED`], [`MAX_HANDSHAKES`] and
+/// [`MAX_STREAMS`]. Past its part of served clients a hello is answered
+/// `ResourceExhausted`, and past its part of streams a `STREAM` is; past its
+/// part of handshakes a connection is, as it is taken, and let go. A quarter
+/// of each bound, so a share at its parts leaves the bound to three more.
 const SERVED_SHARE: usize = MAX_SERVED / 4;
 const HANDSHAKE_SHARE: usize = MAX_HANDSHAKES / 4;
 const STREAM_SHARE: usize = MAX_STREAMS / 4;
@@ -133,8 +136,8 @@ struct Client {
     rx: ipc::FrameRx<{ core::mem::size_of::<Request>() }>,
     /// Its grant's root, beneath which every path it names is resolved.
     root: String,
-    /// Its grant's instance, whose shares it spends.
-    instance: u64,
+    /// Its grant's share, which it spends.
+    share: u64,
     window: Option<SharedMemory>,
     fids: BTreeMap<u64, Fid>,
     next_fid: u64,
@@ -146,8 +149,8 @@ struct Stream {
     pipe: Pipe,
     node: Node,
     offset: u64,
-    /// The instance of the client that asked for it, whose share it spends.
-    instance: u64,
+    /// The share of the client that asked for it, which it spends.
+    share: u64,
 }
 
 fn main() {
@@ -421,7 +424,7 @@ impl Server {
 
     /// Take the next connection and read its grant. Only the supervisor mints
     /// on this port, so a connection without one this server reads is let go
-    /// by name; one whose instance already has its share of handshakes is
+    /// by name; one whose share already holds its part of the handshakes is
     /// answered `ResourceExhausted` and let go.
     fn accept(&mut self) {
         let conn = match self.acceptor.accept() {
@@ -436,13 +439,13 @@ impl Server {
             },
             Err(why) => return println!("fileserver: letting a connection go: it carries no grant ({why:?})"),
         };
-        let mine = self.clients.values().filter(|c| c.instance == grant.instance && c.window.is_none()).count();
+        let mine = self.clients.values().filter(|c| c.share == grant.share && c.window.is_none()).count();
         if mine >= HANDSHAKE_SHARE {
             // Let go whether or not the refusal went: either way it is said.
             let _ = conn.try_send(REPLY, &Reply::refused(SyscallError::ResourceExhausted));
             return println!(
-                "fileserver: letting a connection go: instance {} has {HANDSHAKE_SHARE} waiting on their hello",
-                grant.instance
+                "fileserver: letting a connection go: share {} has {HANDSHAKE_SHARE} waiting on their hello",
+                grant.share
             );
         }
         let id = self.next_client;
@@ -451,7 +454,7 @@ impl Server {
             conn,
             rx: ipc::FrameRx::new(),
             root: grant.root.to_string(),
-            instance: grant.instance,
+            share: grant.share,
             window: None,
             fids: BTreeMap::new(),
             next_fid: 1,
@@ -463,7 +466,7 @@ impl Server {
     fn drop_client(&mut self, id: u64, why: &str) {
         let Some(client) = self.clients.remove(&id) else { return };
         if !why.is_empty() {
-            println!("fileserver: dropping client {id} of {:?}, instance {}: {why}", client.root, client.instance);
+            println!("fileserver: dropping client {id} of {:?}, share {}: {why}", client.root, client.share);
         }
         for fid in client.fids.values() {
             // Nobody is left to answer: a refused close is said, and its node
@@ -557,9 +560,9 @@ impl Server {
 
     fn answer(&mut self, id: u64, op: u32, r: Request) -> Answer {
         if op == HELLO {
-            let instance = self.clients[&id].instance;
+            let share = self.clients[&id].share;
             let served = self.clients.values().filter(|c| c.window.is_some());
-            let (all, mine) = served.fold((0, 0), |(all, mine), c| (all + 1, mine + usize::from(c.instance == instance)));
+            let (all, mine) = served.fold((0, 0), |(all, mine), c| (all + 1, mine + usize::from(c.share == share)));
             let client = self.clients.get_mut(&id).expect("pumped");
             if client.window.is_some() {
                 return Answer::Drop("it lent a second window");
@@ -569,7 +572,7 @@ impl Server {
                 return Answer::Refuse(SyscallError::ResourceExhausted, why);
             }
             if mine >= SERVED_SHARE {
-                let why = format!("it is refused, since its instance is served {SERVED_SHARE} clients already");
+                let why = format!("it is refused, since its share is served {SERVED_SHARE} clients already");
                 return Answer::Refuse(SyscallError::ResourceExhausted, why);
             }
             let Some([lent]) = client.conn.recv_handles_exact::<1>() else {
@@ -725,8 +728,8 @@ impl Server {
                     return Err(SyscallError::InvalidArgument);
                 }
                 let node = f.node;
-                let instance = self.clients[&id].instance;
-                let mine = self.streams.values().filter(|s| s.instance == instance).count();
+                let share = self.clients[&id].share;
+                let mine = self.streams.values().filter(|s| s.share == share).count();
                 if self.streams.len() >= MAX_STREAMS || mine >= STREAM_SHARE {
                     return Err(SyscallError::ResourceExhausted);
                 }
@@ -734,7 +737,7 @@ impl Server {
                 self.volume.hold(node);
                 let sid = self.next_stream;
                 self.next_stream += 1;
-                self.streams.insert(sid, Stream { pipe: read, node, offset: r.offset, instance });
+                self.streams.insert(sid, Stream { pipe: read, node, offset: r.offset, share });
                 Ok(Answer::WithHandle(Reply::ok(), write.into()))
             }
             STAT | LSTAT => {
