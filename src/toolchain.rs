@@ -1523,7 +1523,6 @@ mod tests {
     /// holds none.
     #[test]
     fn dep_info_that_cannot_be_read_is_refused() {
-        use std::os::unix::fs::PermissionsExt;
         let temp = TempDir::new("dep-info-unread");
         let mut none = Vec::new();
         collect_dep_info(&temp.join("none"), &mut none);
@@ -1532,21 +1531,21 @@ mod tests {
         let built = temp.join("x86_64-unknown-none");
         let dist = built.join("dist");
         fs::create_dir_all(&dist).unwrap();
-        let collect = || std::panic::catch_unwind(|| collect_dep_info(&built, &mut Vec::new()));
-        let said = |refused: std::thread::Result<()>, what: &str| {
+        let said = |dir: &Path, what: &str| {
+            let refused = std::panic::catch_unwind(|| collect_dep_info(dir, &mut Vec::new()));
             *refused.err().unwrap_or_else(|| panic!("{what} was skipped")).downcast::<String>().expect("a formatted refusal")
         };
         let d = dist.join("core.d");
         fs::write(&d, b"libcore.rlib: library/core/src/lib.rs \xff\n").unwrap();
-        let refused = said(collect(), "dep-info that is not UTF-8");
+        let refused = said(&built, "dep-info that is not UTF-8");
         assert!(refused.starts_with(&format!("read {}", d.display())), "{refused}");
         fs::remove_file(&d).unwrap();
 
-        let mode = |bits| fs::set_permissions(&dist, fs::Permissions::from_mode(bits)).unwrap();
-        mode(0o000);
-        let unread = collect();
-        mode(0o755);
-        let refused = said(unread, "a directory that cannot be read");
+        // A file where the directory is, not a mode: root reads through any
+        // mode, and nobody lists a file.
+        fs::remove_dir(&dist).unwrap();
+        fs::write(&dist, b"").unwrap();
+        let refused = said(&dist, "a directory that cannot be read");
         assert!(refused.starts_with(&format!("read {}", dist.display())), "{refused}");
     }
 

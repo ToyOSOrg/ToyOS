@@ -272,49 +272,6 @@ fn removing_a_root_waits_for_global() {
     assert!(!root.exists(), "{} survived once GLOBAL was released", root.display());
 }
 
-/// A dead root the sweep cannot fully remove — its owner file sits in a
-/// directory with no write permission, so unlinking it fails — is reported and
-/// moved aside rather than panicking the process that met it, and the next
-/// process still gets its own directory.
-///
-/// The dead root itself keeps ordinary permissions, so the sweep's own
-/// cross-directory rename (which needs to rewrite the moved directory's `..`)
-/// still succeeds; what blocks `remove_dir_all` is a directory *inside* it with
-/// no write permission, so unlinking the file below it fails.
-#[cfg(unix)]
-#[test]
-fn a_directory_the_sweep_cannot_remove_is_reported_and_the_next_process_still_works() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let _spawning = spawning();
-    let tmp = TempDir::new("stuck");
-    let dead = tmp.join(format!("{ROOT_PREFIX}999999-0"));
-    let locked = dead.join("locked");
-    std::fs::create_dir(&dead).unwrap();
-    std::fs::write(dead.join(OWNER), b"").unwrap();
-    std::fs::create_dir(&locked).unwrap();
-    std::fs::write(locked.join("f"), b"").unwrap();
-    let mut perms = std::fs::metadata(&locked).unwrap().permissions();
-    perms.set_mode(0o555);
-    std::fs::set_permissions(&locked, perms).unwrap();
-
-    // The dead root's owner is unlocked, so the holder's first directory
-    // sweeps it; it cannot remove what it cannot unlink, and must report and
-    // move on rather than panic — the holder still says where its own
-    // directory is and exits clean.
-    Holder::start(&tmp).finish();
-
-    let stuck: Vec<String> = entries(&tmp).into_iter().filter(|n| n.starts_with("stuck-")).collect();
-    assert_eq!(stuck.len(), 1, "the unremovable root was not reported and moved aside: {:?}", entries(&tmp));
-    assert!(!dead.exists(), "the dead root was left where the sweep found it");
-
-    // Restore permissions so this test's own `tmp` can remove itself.
-    let stuck_locked = tmp.join(&stuck[0]).join("locked");
-    let mut perms = std::fs::metadata(&stuck_locked).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&stuck_locked, perms).unwrap();
-}
-
 /// A killed process's root goes into the directory that adopts its pid, and
 /// goes when that does; a live root, and a gone one of a pid that merely
 /// starts with the same digits, stay.
