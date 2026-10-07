@@ -261,11 +261,11 @@ fn an_address_in_the_ecam_window_is_a_configuration_access_whatever_the_map_type
         let base = memory.ecam.expect("an ECAM window").base;
         for write in [false, true] {
             assert_eq!(
-                memory.decide(base + (3 << 20 | 0x1c << 15 | 5 << 12 | 0x48), Width::DWord, write),
+                memory.clone().decide(base + (3 << 20 | 0x1c << 15 | 5 << 12 | 0x48), Width::DWord, write),
                 MemoryVerdict::AsConfig(Function { bus: 3, device: 0x1c, function: 5 }, 0x48)
             );
             assert_eq!(
-                memory.decide(base + (0xFF << 20 | 0x1f << 15 | 7 << 12 | 0xFFF), Width::Byte, write),
+                memory.clone().decide(base + (0xFF << 20 | 0x1f << 15 | 7 << 12 | 0xFFF), Width::Byte, write),
                 MemoryVerdict::AsConfig(Function { bus: 0xFF, device: 0x1f, function: 7 }, 0xFFF),
                 "the window's last byte"
             );
