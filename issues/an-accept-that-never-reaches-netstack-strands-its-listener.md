@@ -6,7 +6,7 @@ opened: 2026-09-27
 
 # An accept that never reaches netd strands its listener's owner
 
-std's `TcpListener::accept` (`rust/library/std/src/sys/net/connection/toyos.rs`)
+std's `TcpListener::accept` (`sdk/std/sys/net/connection.rs`)
 reads netd's wake byte first, and only then calls `toyos::net::tcp_accept`,
 which reaches netd (`NetdConn::connect`) and makes the data path
 (`DataPath::create`) before it sends the request. If either fails, or the send

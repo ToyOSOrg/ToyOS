@@ -73,7 +73,8 @@ pub fn rust_dir(root: &Path) -> PathBuf {
     }
 }
 
-/// Of the sysroot's sources, the ones std compiles.
+/// Of the sysroot's sources, the crates std links, which its dep-info names
+/// by the path cargo resolved; `sdk/std` it names through the fork.
 const STD_SOURCES: [&str; 2] = ["toyos-abi/src", "toyos/src"];
 
 /// Every target a guest artifact is built for: ToyOS userland, the kernel's
@@ -1455,9 +1456,9 @@ mod tests {
             ["/Users/jan/Dev/jan/toyos-endow/toyos-abi/src/lib.rs"],
         );
 
-        // `rust/library/std/src/sys/pal/toyos/` is not one of these trees.
+        // std's ToyOS backend is not one of these trees.
         assert!(
-            toyos_sources_in_dep_info("/x/rust/library/std/src/sys/pal/toyos/mod.rs").is_empty()
+            toyos_sources_in_dep_info("library/std/src/sys/pal/../../../../../../sdk/std/sys/pal/mod.rs").is_empty()
         );
     }
 

@@ -6,7 +6,7 @@ opened: 2026-09-26
 
 # std's C `calloc` answers an overflowing request with a pointer past its block
 
-`library/std/src/sys/pal/toyos/mod.rs`'s `c_allocator` is the `malloc`,
+`sdk/std/sys/pal/mod.rs`'s `c_allocator` is the `malloc`,
 `calloc`, `free` and `realloc` of every userland program: std defines them
 for the Rust crates that call C's allocator, and `/system/bin/doom`'s C gets
 them too, because `userland/libc` defines none of the four when it is built

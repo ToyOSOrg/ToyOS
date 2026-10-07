@@ -83,8 +83,8 @@ lines: a 16550 at a port, `serial.rs:28-39,157-165,389-396`).
 6, `panic_console/mod.rs:1294` 1, `xhci/wait/mod.rs:36` 1. Userland plus
 `toyos-abi`: 54 lines (`libc/memory.rs` 23, `toyos-abi/src/syscall.rs` 20). The
 rust fork's std has two naked-asm sites: `_start`
-(`rust/library/std/src/sys/pal/toyos/mod.rs:44`) and `__tls_get_addr` reading
-`fs:[8]` (`pal/toyos/tls.rs:43`).
+(`sdk/std/sys/pal/mod.rs:44`) and `__tls_get_addr` reading
+`fs:[8]` (`sdk/std/sys/pal/tls.rs:43`).
 
 **Coupling.** 45 non-arch kernel files reference `arch::`; 145
 `crate::arch::` paths name about 100 distinct `module::symbol` names (an upper

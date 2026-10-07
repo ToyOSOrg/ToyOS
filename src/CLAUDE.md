@@ -15,7 +15,7 @@ Loads when you read a file under `src/` — the root cargo project, package name
 
 - Everything under a worktree — targets, images, `.build-locks/`, its fork checkout — is its own; the object stores, the compiler and the rustup link are the primary checkout's, and ownership is derived from `git rev-parse --git-common-dir`, never recorded.
 - **A linked worktree's `main` ref is only as current as the primary's last `git pull`: anything asking "does this branch differ from main" diffs against `origin/main`.**
-- **Type-checking a std edit without building a sysroot**: point `__CARGO_TESTS_ONLY_SRC_ROOT` at a tree holding a copy of `rust/library`, a workspace `Cargo.toml` naming `library/std`, and symlinks to `toyos-abi`/`toyos`; then `CARGO_TARGET_DIR=<scratch> cargo +toyos build -Z build-std=std,panic_abort --target x86_64-unknown-toyos --offline`. Delete `<scratch>/**/.fingerprint/std-*` between runs — cargo does not re-fingerprint std under `-Zbuild-std`.
+- **Type-checking a std edit without building a sysroot**: point `__CARGO_TESTS_ONLY_SRC_ROOT` at a tree holding a copy of `rust/library`, a workspace `Cargo.toml` naming `library/std`, and symlinks to `toyos-abi`, `toyos` and `sdk`; then `CARGO_TARGET_DIR=<scratch> cargo +toyos build -Z build-std=std,panic_abort --target x86_64-unknown-toyos --offline`. Delete `<scratch>/**/.fingerprint/std-*` between runs — cargo does not re-fingerprint std under `-Zbuild-std`.
 
 ## Caveats that bite every agent
 

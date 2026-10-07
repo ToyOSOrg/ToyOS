@@ -7,7 +7,7 @@ opened: 2026-09-01
 # A child's stdio slot is not the handle `Command` named for it
 
 Found while building a guest arm for
-`sys/stdio/toyos.rs`'s error mapping, which needs a child whose own stdin or
+`sdk/std/sys/stdio.rs`'s error mapping, which needs a child whose own stdin or
 stdout the parent has staged. It could not be staged, twice, and the second one
 is a capability statement rather than a plumbing one.
 

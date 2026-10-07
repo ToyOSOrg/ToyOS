@@ -8,7 +8,7 @@ opened: 2026-08-24
 
 `os::toyos::*` is ToyOS's own extension API and speaks ToyOS, and "fds belong
 only in libc jargon" (owner, 2026-08-19). The `rust/` fork's
-`library/std/src/os/toyos/io.rs` re-exports `std::os::fd`, so
+`sdk/std/os/io.rs` re-exports `std::os::fd`, so
 `std::os::toyos::io::{AsRawFd, FromRawFd}` still speak POSIX.
 `tests/toyos-rust-tests/src/bin/std_fs.rs` is their one caller in this
 repository.

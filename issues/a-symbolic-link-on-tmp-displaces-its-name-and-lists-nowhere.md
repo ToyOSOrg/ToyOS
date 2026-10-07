@@ -14,7 +14,7 @@ a name that exists `EEXIST`, so libc's `symlink` refuses `ENOSYS`
 
 **Exit**: `symlink` is the file server's, not the kernel's. libc's `symlink`
 sends the request to the server of the directory that is to hold the link, as
-std's does (`on_path` in `rust/library/std/src/sys/fs/toyos.rs`), with nothing
+std's does (`on_path` in `sdk/std/sys/fs.rs`), with nothing
 asked first, and answers its `AlreadyExists` `EEXIST`. fsd makes the link in
 the one request that refuses a name that exists, and libc's `readdir` of that
 directory names the link, each asserted by a test. The kernel's `SYS_SYMLINK`

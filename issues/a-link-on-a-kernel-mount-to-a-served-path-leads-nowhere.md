@@ -10,7 +10,7 @@ The kernel resolves a symlink on its own mounts — ROOT and `/tmp` — in its o
 tree (`kernel/src/vfs.rs`), and its tree holds nothing under `/apps`,
 `/config`, `/home`, `/state`, `/log` or `/boot` but ROOT's empty directories:
 those are file servers', reached through a directory capability
-(`rust/library/std/src/sys/fs/toyos.rs`). So a link in `/tmp` whose target is
+(`sdk/std/sys/fs.rs`). So a link in `/tmp` whose target is
 `/home/toy/notes` opens nothing (`NotFound`), where the same link on a served
 directory is followed — a file server hands an absolute target back to the
 client, which resolves it in its own table.

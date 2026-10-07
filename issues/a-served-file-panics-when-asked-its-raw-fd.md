@@ -7,7 +7,7 @@ opened: 2026-09-27
 # A served file panics when asked its raw fd
 
 `std::os::toyos::io::AsRawFd` for `std::fs::File` calls the fork's
-`File::as_raw_fd` (`rust/library/std/src/sys/fs/toyos.rs`), which panics with
+`File::as_raw_fd` (`sdk/std/sys/fs.rs`), which panics with
 "a file on a file server has no kernel handle" for every file under `/apps`,
 `/config`, `/home`, `/state`, `/log` and `/boot`. A crate that takes a file's
 fd — to lock it, map it or hand it to a C library — builds for ToyOS and

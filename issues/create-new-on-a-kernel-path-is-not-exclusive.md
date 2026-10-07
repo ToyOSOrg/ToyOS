@@ -8,7 +8,7 @@ opened: 2026-09-27
 
 std's `OpenOptions::create_new(true)` promises an open that fails with
 `AlreadyExists` when the file is there. The std fork's `to_flags`
-(`rust/library/std/src/sys/fs/toyos.rs`) turns `create_new` into the kernel's
+(`sdk/std/sys/fs.rs`) turns `create_new` into the kernel's
 plain `OpenFlags::CREATE`, and the kernel has no exclusive flag to turn it
 into, so on `/tmp` a second `create_new` of one path opens the file the first
 made and says nothing. A served path does not share it: the file protocol

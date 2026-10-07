@@ -6,7 +6,7 @@ opened: 2026-09-05
 
 # `std::fs::remove_dir_all` empties a directory and never removes it
 
-`rust/library/std/src/sys/fs/toyos.rs`'s `remove_dir_all` walks the directory,
+`sdk/std/sys/fs.rs`'s `remove_dir_all` walks the directory,
 unlinks every file and recurses into every subdirectory, and returns `Ok(())`
 without ever calling `rmdir` on anything — its own path included. Every
 directory in the tree it walked survives, empty.

@@ -6,7 +6,7 @@ opened: 2026-09-01
 
 # The std fork answers `Other` for a device error, where upstream says `Uncategorized`
 
-`rust/library/std/src/sys/pal/toyos/mod.rs`'s one
+`sdk/std/sys/pal/mod.rs`'s one
 `SyscallError -> ErrorKind` map sends `SyscallError::Io` to
 `io::ErrorKind::Other`. Every other platform in the fork spells that
 `Uncategorized` — `sys/io/error/unix.rs:189`, `hermit.rs:29`, `uefi.rs:53`,

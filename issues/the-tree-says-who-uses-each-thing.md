@@ -128,7 +128,7 @@ apps/     CLAUDE.md (sdk/ and registries only; Linux under Wayland, macOS, Windo
           calc editor files paint snake doom/ (doomgeneric/ DOOM1.WAD soundfont licences);
           toyfetch when built
 sdk/      CLAUDE.md (identity, sysroot, publication; std links abi and toyos)
-          abi/ toyos/ keymap/ font/ window/ filepicker/ libc/ (arch/)
+          abi/ toyos/ std/ keymap/ font/ window/ filepicker/ libc/ (arch/)
 lib/      acpi bcachefs blackbox blockhold blockring bootmap elf elide fat32 gpt hda i219 inspect
           logstream manifest osrelease quiesce rootimage swap symbols tco tmpdir tsc untrusted
           update userbound wallclock xhci
@@ -160,6 +160,9 @@ Where this differs from the tree the owner adopted:
   the build, `libc` and the supervisor use it (rule step 5).
 - `lib/tsc` is `toyos-tsc`, which #721 added after the design; the kernel
   and the loader use it (rule step 5).
+- `sdk/std/` is std's ToyOS backend, which left the `rust` fork after the
+  design (the owner: "MOVE IT"); the fork's `library/std`, outside this
+  repository, compiles it by `#[path]` (rule step 3).
 
 ## Stages
 

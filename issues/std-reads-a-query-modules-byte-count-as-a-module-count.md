@@ -10,7 +10,7 @@ Two readers in the std fork take `query_modules`'s `Ok(n)` as a record count
 and read `size_of::<ModuleInfo>()`-byte records from offset 0 until one would
 pass the end of their 4096-byte buffer:
 
-- the unwinder, `rust/library/std/src/sys/pal/toyos/mod.rs`,
+- the unwinder, `sdk/std/sys/pal/mod.rs`,
   `eh_frame::load_modules`, reads each as `base`/`text_end`/`eh_frame_hdr`;
 - the backtrace crate, `rust/library/backtrace/src/symbolize/gimli/libs_toyos.rs`,
   `native_libraries`, makes a `Library` of each whose one segment is
