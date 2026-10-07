@@ -4,7 +4,7 @@ kind: defect
 opened: 2026-09-01
 ---
 
-# The std fork answers `Other` for a device error, where upstream says `Uncategorized`
+# std on ToyOS answers `Other` for a device error, where upstream says `Uncategorized`
 
 `sdk/std/sys/pal/mod.rs`'s one
 `SyscallError -> ErrorKind` map sends `SyscallError::Io` to
@@ -26,7 +26,7 @@ header and the code it describes is worse than a non-idiomatic arm.
 ## Exit condition
 
 One change that moves all four together: `Io => ErrorKind::Uncategorized` in
-the fork's map, `userland/logd/src/policy.rs`'s header reworded to name the new
+that map, `userland/logd/src/policy.rs`'s header reworded to name the new
 spelling, its test's constructed kind moved with it, and
 `boot_volume_metadata_error` in `tests/common/volumes.rs`, which requires the
 guest to print `kind=Other` for a boot volume that refused every read — a fourth

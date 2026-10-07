@@ -6,7 +6,8 @@ opened: 2026-09-29
 
 # std reads a `SYS_QUERY_MODULES` byte count as a module count
 
-Two readers in the std fork take `query_modules`'s `Ok(n)` as a record count
+Two readers, one in std's ToyOS backend and one in the fork's backtrace crate,
+take `query_modules`'s `Ok(n)` as a record count
 and read `size_of::<ModuleInfo>()`-byte records from offset 0 until one would
 pass the end of their 4096-byte buffer:
 

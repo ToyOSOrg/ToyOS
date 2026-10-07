@@ -35,9 +35,9 @@ the same hole.
 ## Exit condition
 
 `remove_dir_all` removes the directory it was given and every directory under
-it. Closes when that lands in the fork and `userland/pkg`'s own `remove_tree`
+it. Closes when that lands and `userland/pkg`'s own `remove_tree`
 is deleted with it — that walk exists only because this one does not finish.
 
-The fix is one `rmdir(path)` after the loop, and it is in the sysroot's fourth
-source (`rust/library`), so it lands on its own branch with the machine's
+The fix is one `rmdir(path)` after the loop, and it is in a sysroot
+source (`sdk/std`), so it lands on its own branch with the machine's
 sysroot claim.

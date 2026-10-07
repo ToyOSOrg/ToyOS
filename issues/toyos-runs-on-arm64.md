@@ -81,8 +81,8 @@ lines: a 16550 at a port, `serial.rs:28-39,157-165,389-396`).
 `sched/driver.rs:1019-1062`), `irq_census.rs` 19, `nmi_gate.rs` 16, `main.rs`
 13, `drivers/serial.rs` 13, `hw.rs` 10, `blackbox.rs` 6, `iommu/vtd/table.rs`
 6, `panic_console/mod.rs:1294` 1, `xhci/wait/mod.rs:36` 1. Userland plus
-`toyos-abi`: 54 lines (`libc/memory.rs` 23, `toyos-abi/src/syscall.rs` 20). The
-rust fork's std has two naked-asm sites: `_start`
+`toyos-abi`: 54 lines (`libc/memory.rs` 23, `toyos-abi/src/syscall.rs` 20). std's
+ToyOS backend has two naked-asm sites: `_start`
 (`sdk/std/sys/pal/mod.rs:44`) and `__tls_get_addr` reading
 `fs:[8]` (`sdk/std/sys/pal/tls.rs:43`).
 

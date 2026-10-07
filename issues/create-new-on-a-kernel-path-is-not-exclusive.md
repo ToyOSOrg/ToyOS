@@ -7,7 +7,7 @@ opened: 2026-09-27
 # `create_new` on a kernel path is not exclusive
 
 std's `OpenOptions::create_new(true)` promises an open that fails with
-`AlreadyExists` when the file is there. The std fork's `to_flags`
+`AlreadyExists` when the file is there. std's ToyOS `to_flags`
 (`sdk/std/sys/fs.rs`) turns `create_new` into the kernel's
 plain `OpenFlags::CREATE`, and the kernel has no exclusive flag to turn it
 into, so on `/tmp` a second `create_new` of one path opens the file the first
