@@ -662,25 +662,23 @@ mod tests {
         assert!(!fs::symlink_metadata(dir.join("bin/clang")).unwrap().file_type().is_symlink(), "clang is the link, not the file");
     }
 
-    /// **A placed LLVM cannot be written**, through its own path or through a
-    /// link bootstrap makes to one of its files, and nothing in it can be
-    /// removed, replaced or added.
+    /// **A placed LLVM is read-only**: no file in it and no directory of it
+    /// carries a write bit, so nothing in it is written through its own path or
+    /// through a link bootstrap makes to one of its files, and nothing is
+    /// removed, replaced or added, by a user the modes bind.
     #[test]
-    fn a_placed_llvm_is_never_written() {
+    fn a_placed_llvm_is_read_only() {
         let scratch = Scratch::new("llvm-read-only");
         let (_primary, rust_dir, [_same, a, _b]) = estate_built(&scratch);
         let dir = choose(&a, &rust_dir, &a.join("rust"), fake_build).dir;
-        let stage = scratch.join("stage1-rust-lld");
-        fs::hard_link(dir.join("bin/lld"), &stage).unwrap();
-        let denied = |what: &str, done: std::io::Result<()>| {
-            assert_eq!(done.map_err(|e| e.kind()).err(), Some(std::io::ErrorKind::PermissionDenied), "{what}");
-        };
-        for file in [dir.join("bin/lld"), stage, dir.join("lib/libLLVMCore.a"), dir.join(SOURCE)] {
-            denied(&format!("{} could be written", file.display()), fs::OpenOptions::new().write(true).open(&file).map(drop));
+        let mut entries = vec![dir];
+        while let Some(entry) = entries.pop() {
+            let meta = fs::symlink_metadata(&entry).unwrap();
+            assert!(meta.permissions().readonly(), "{} can be written", entry.display());
+            if meta.is_dir() {
+                entries.extend(fs::read_dir(&entry).unwrap().map(|e| e.unwrap().path()));
+            }
         }
-        denied("a placed tool could be removed", fs::remove_file(dir.join("bin/lld")));
-        denied("a file could be added to a placed LLVM", fs::write(dir.join("bin/new"), "x"));
-        denied("a placed LLVM could be emptied", fs::remove_dir_all(dir.join("include")));
     }
 
     /// **An LLVM that is not whole is made again, all of it**: one whose
