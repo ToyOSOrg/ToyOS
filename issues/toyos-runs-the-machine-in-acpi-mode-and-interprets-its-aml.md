@@ -188,18 +188,26 @@ otherwise pay to find again:
   what the server does with an interpreter that is full. **Exit**: a test
   fills the budget through one method, and the server then evaluates a
   method that builds a buffer.
-- **The interpreter's 16 MiB is its meter's count, not its heap.** The meter
-  counts whatever a table sizes; each namespace node and package element
-  carries a constant beside that which it does not count (`object::Meter`,
-  `userland/acpiserver/aml/src/object.rs`). With the meter full, the heap an
-  interpreter held was 16,776,232 bytes when buffers filled it, 19,549,520
-  when package elements naming objects not yet defined did, and 41,091,744
-  when field units did. A load refused at the bound also leaves the
-  namespace's arena at the capacity it grew to: 24,115,888 bytes held after
-  one table naming 204,000 field units was refused. Owner: the power-off
-  stage, which gives the server its memory. **Exit**: the server states its
-  interpreter's bound in heap bytes, and a host test under a counting
-  allocator holds each of those three fills and that refused load to it.
+- **The interpreter's 16 MiB bounds the heap it holds from one call to the
+  next, not what one call holds while it runs.** The meter counts what an
+  interpreter's allocations ask for (`object::Meter`,
+  `userland/acpiserver/aml/src/object.rs`), and under a counting allocator
+  an interpreter filled until it refuses holds at most `MAX_LIVE`, whatever
+  fills it, and a refused load leaves it holding what it held before
+  (`userland/acpiserver/aml/tests/heap.rs`). While a load or an evaluation
+  runs it holds more, uncounted: its frames, a string's or buffer's bytes
+  made and not yet held, and the value handed to the caller. Filled with
+  buffers of a mebibyte the heap peaked at 17,173,348 bytes, 396,132 past
+  the bound; nothing measures a peak that conversions or a returned package
+  size. The meter also holds a namespace node above its cost, at a whole
+  map leaf of 104 bytes for its entry in its parent and the arena at its
+  doubled capacity: an interpreter filled with field units refuses with
+  11,111,460 bytes of heap held, and one filled with devices of one child
+  with 8,900,612. Owner: the power-off stage, which gives the server its
+  memory. **Exit**: the server states its interpreter's bound in heap
+  bytes, and a host test under a counting allocator holds the most a load
+  and an evaluation hold while they run to it, a returned value's copy
+  among it.
 
 **Stage: power-off through the server** (the orchestrator's placement of "Yes,
 one path"). The ACPI server evaluates `\_S5` and powers the machine off.

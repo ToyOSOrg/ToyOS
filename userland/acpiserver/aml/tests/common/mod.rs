@@ -412,11 +412,11 @@ impl Phys for Image<'_> {
 
 /// Loading from bytes, through the `Table::open` the server reaches a table by.
 pub trait LoadBytes {
-    fn load_bytes(&mut self, m: &mut Machine, t: &[u8]) -> Result<(), Error>;
+    fn load_bytes(&mut self, m: &mut dyn Host, t: &[u8]) -> Result<(), Error>;
 }
 
 impl LoadBytes for Interpreter {
-    fn load_bytes(&mut self, m: &mut Machine, t: &[u8]) -> Result<(), Error> {
+    fn load_bytes(&mut self, m: &mut dyn Host, t: &[u8]) -> Result<(), Error> {
         let signature: [u8; 4] = t.get(..4).and_then(|s| s.try_into().ok()).expect("a test table has a signature");
         let table = Table::open(Image(t), 0, &signature, 0).expect("a test table opens");
         self.load(m, &table)
@@ -446,4 +446,26 @@ pub fn returns(body: &[u8]) -> Result<Value, toyos_aml::Error> {
 
 pub fn s(text: &str) -> Value {
     Value::String(text.as_bytes().to_vec())
+}
+
+/// A host that takes every access and keeps none: it allocates nothing, and
+/// a store whose bound is a million accesses away costs it nothing.
+pub struct Sink;
+
+impl Host for Sink {
+    fn read(&mut self, _: Address, _: Access) -> Result<u64, Denied> {
+        Ok(0)
+    }
+    fn write(&mut self, _: Address, _: Access, _: u64) -> Result<(), Denied> {
+        Ok(())
+    }
+    fn sleep(&mut self, _: u64) {}
+    fn stall(&mut self, _: u64) {}
+    fn timer(&mut self) -> u64 {
+        0
+    }
+    fn notify(&mut self, _: &str, _: u64) {}
+    fn global_lock(&mut self, _: bool) -> Result<(), Denied> {
+        Ok(())
+    }
 }

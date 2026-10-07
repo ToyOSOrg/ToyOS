@@ -4,7 +4,7 @@
 mod common;
 
 use common::*;
-use toyos_aml::{Access, Address, Denied, Error, Host, Interpreter, Value};
+use toyos_aml::{Error, Interpreter, Value};
 
 const ZERO: &[u8] = &[0x00];
 
@@ -415,28 +415,6 @@ fn tables_and_names_are_held_against_the_live_bound() {
     let refused = (0..17).find_map(|t| i.load_bytes(&mut m, &unresolved(t)).err().map(|e| (t, e)));
     let Some((t, Error::Bound(_))) = refused else { panic!("seventeen mebibytes of names are held: {refused:?}") };
     assert!(matches!(i.evaluate(&mut m, &format!("\\L{t:03}"), &[]), Err(Error::NotFound(_))));
-}
-
-/// A host that takes every access and keeps none, for a store whose bound is
-/// a million accesses away.
-struct Sink;
-
-impl Host for Sink {
-    fn read(&mut self, _: Address, _: Access) -> Result<u64, Denied> {
-        Ok(0)
-    }
-    fn write(&mut self, _: Address, _: Access, _: u64) -> Result<(), Denied> {
-        Ok(())
-    }
-    fn sleep(&mut self, _: u64) {}
-    fn stall(&mut self, _: u64) {}
-    fn timer(&mut self) -> u64 {
-        0
-    }
-    fn notify(&mut self, _: &str, _: u64) {}
-    fn global_lock(&mut self, _: bool) -> Result<(), Denied> {
-        Ok(())
-    }
 }
 
 /// A String stored to a field is written a character at a time, each charged

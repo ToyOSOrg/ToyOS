@@ -23,8 +23,8 @@ use crate::field::{flags, BufField, Field, Kind, Region};
 use crate::name::{text, Path, Seg};
 use crate::namespace::{Namespace, NodeId};
 use crate::object::{
-    bounded, decimal, fit, hex2, joined, slot_of, to_buf, to_int, to_str, Body, Bytes, Meter, Method, Mutex, Object, Ref,
-    Slot, Unresolved, Width,
+    bounded, decimal, fit, hex2, joined, slot_of, to_buf, to_int, to_str, Body, Bytes, Elems, Kept, Meter, Method, Mutex,
+    Object, Ref, Slot, Unresolved, Width,
 };
 use crate::stream::{starts_name, Cursor};
 use crate::{Error, Host, MAX_DEPTH, MAX_NESTING, MAX_STEPS, MAX_WAIT_US, REVISION, WINDOWS, WORK_PER_STEP};
@@ -38,7 +38,7 @@ pub(crate) struct Machine<'a> {
     depth: u32,
     waited_us: u64,
     /// Every Mutex acquire not yet released, in order.
-    held: Vec<Rc<Mutex>>,
+    held: Vec<Kept<Mutex>>,
     /// The SyncLevel of each held Mutex and running Serialized method, in
     /// order; the last is the current level (§19.6.88).
     levels: Vec<u8>,
@@ -50,8 +50,6 @@ pub(crate) struct Frame {
     args: Vec<Slot>,
     scope: NodeId,
     table: Bytes,
-    /// Objects this frame created (§5.5.2.3), destroyed when a method exits.
-    pub(crate) created: Vec<NodeId>,
     held: usize,
 }
 
@@ -82,7 +80,6 @@ impl Frame {
             args: args.into_iter().map(slot).collect(),
             scope,
             table,
-            created: Vec::new(),
             held,
         }
     }
@@ -137,9 +134,12 @@ impl<'a> Machine<'a> {
         Ok(Object::Buf(self.bytes(v)?))
     }
 
-    fn new_pkg(&mut self, v: Vec<Object>) -> Result<Object, Error> {
-        self.charge(v.len() * crate::object::ELEMENT)?;
-        Ok(Object::Pkg(self.meter.list(v)?))
+    /// A package of `count` elements, charged for and held against the meter
+    /// before any is made: what fills it is as large as its table says.
+    fn new_pkg(&mut self, count: usize) -> Result<Elems, Error> {
+        crate::object::counted(count)?;
+        self.charge(count * crate::object::ELEMENT)?;
+        self.meter.package(count)
     }
 
     /// A copy of an object for a store (§19.3.5.8): data is duplicated,
@@ -162,16 +162,19 @@ impl<'a> Machine<'a> {
                 let v = b.borrow().clone();
                 self.new_buf(v)
             }
-            Object::Pkg(p) => {
-                let elems = p.borrow().clone();
-                let mut out = Vec::with_capacity(elems.len());
-                for e in &elems {
-                    out.push(self.copy_in(e, depth + 1)?);
-                }
-                self.new_pkg(out)
-            }
+            Object::Pkg(p) => Ok(Object::Pkg(self.copy_pkg(p, depth)?)),
             other => Ok(other.clone()),
         }
+    }
+
+    fn copy_pkg(&mut self, p: &Elems, depth: usize) -> Result<Elems, Error> {
+        let count = p.borrow().len();
+        let out = self.new_pkg(count)?;
+        for i in 0..count {
+            let e = p.borrow()[i].clone();
+            out.set(i, self.copy_in(&e, depth + 1)?)?;
+        }
+        Ok(out)
     }
 
     /// A copy for a package element or a named object, which a reference that
@@ -273,11 +276,9 @@ impl<'a> Machine<'a> {
         Ok(())
     }
 
-    fn define(&mut self, f: &mut Frame, p: &Path, o: Object) -> Result<NodeId, Error> {
+    fn define(&mut self, f: &Frame, p: &Path, o: Object) -> Result<NodeId, Error> {
         let steps = &mut self.steps;
-        let id = self.ns.create(f.scope, p, o, &mut || tick(steps))?;
-        f.created.push(id);
-        Ok(id)
+        self.ns.create(f.scope, p, o, &mut || tick(steps))
     }
 
     fn resolve(&mut self, f: &Frame, p: &Path) -> Result<NodeId, Error> {
@@ -364,7 +365,7 @@ impl<'a> Machine<'a> {
 
     // ---- invocation -------------------------------------------------------
 
-    pub(crate) fn invoke(&mut self, node: NodeId, m: Rc<Method>, args: Vec<Object>) -> Result<Object, Error> {
+    pub(crate) fn invoke(&mut self, node: NodeId, m: Kept<Method>, args: Vec<Object>) -> Result<Object, Error> {
         self.enter()?;
         let r = self.invoke_in(node, &m, args);
         self.leave();
@@ -382,13 +383,12 @@ impl<'a> Machine<'a> {
             }
             self.levels.push(m.sync);
         }
+        let made = self.ns.mark();
         let mut f = Frame::new(node, args, table.clone(), self.held.len());
         let bytes = table.borrow();
         let mut c = Cursor::new(&bytes, start, end);
         let flow = self.term_list(&mut f, &mut c);
-        for &id in f.created.iter().rev() {
-            self.ns.remove(id);
-        }
+        self.ns.unwind(made);
         if m.serialized {
             self.levels.pop();
         }
@@ -553,8 +553,7 @@ impl<'a> Machine<'a> {
         let alias = self.name(c)?;
         let target = self.resolve(f, &source)?;
         let steps = &mut self.steps;
-        let id = self.ns.alias(f.scope, &alias, target, &mut || tick(steps))?;
-        f.created.push(id);
+        self.ns.alias(f.scope, &alias, target, &mut || tick(steps))?;
         Ok(Flow::Next)
     }
 
@@ -638,7 +637,8 @@ impl<'a> Machine<'a> {
             serialized: flags & 0x08 != 0,
             sync: flags >> 4,
         };
-        self.define(f, &p, Object::Method(Rc::new(m)))?;
+        let m = self.meter.hold(m)?;
+        self.define(f, &p, Object::Method(m))?;
         c.at = end;
         Ok(Flow::Next)
     }
@@ -659,7 +659,8 @@ impl<'a> Machine<'a> {
         let p = self.name(c)?;
         // SyncFlags: the SyncLevel in bits 0-3, the rest reserved (§20.2.5.2).
         let sync = c.byte()? & 0x0F;
-        self.define(f, &p, Object::Mutex(Rc::new(Mutex { sync, held: Cell::new(0), global: false })))?;
+        let m = self.meter.hold(Mutex { sync, held: Cell::new(0), global: false })?;
+        self.define(f, &p, Object::Mutex(m))?;
         Ok(Flow::Next)
     }
 
@@ -667,7 +668,8 @@ impl<'a> Machine<'a> {
         c.byte()?;
         c.byte()?;
         let p = self.name(c)?;
-        self.define(f, &p, Object::Event(Rc::new(Cell::new(0))))?;
+        let e = self.meter.hold(Cell::new(0))?;
+        self.define(f, &p, Object::Event(e))?;
         Ok(Flow::Next)
     }
 
@@ -678,12 +680,12 @@ impl<'a> Machine<'a> {
         let space = c.byte()?;
         let base = self.int_arg(f, c)?;
         let len = self.int_arg(f, c)?;
-        let r = Region { space, base, len, scope: f.scope };
-        self.define(f, &p, Object::Region(Rc::new(r)))?;
+        let r = self.meter.hold(Region { space, base, len, scope: f.scope })?;
+        self.define(f, &p, Object::Region(r))?;
         Ok(Flow::Next)
     }
 
-    fn field_of(&mut self, f: &Frame, c: &mut Cursor<'_>) -> Result<Rc<Field>, Error> {
+    fn field_of(&mut self, f: &Frame, c: &mut Cursor<'_>) -> Result<Kept<Field>, Error> {
         let p = self.name(c)?;
         let id = self.resolve(f, &p)?;
         match self.node_object(id)? {
@@ -692,7 +694,7 @@ impl<'a> Machine<'a> {
         }
     }
 
-    fn region_of(&mut self, f: &Frame, c: &mut Cursor<'_>) -> Result<Rc<Region>, Error> {
+    fn region_of(&mut self, f: &Frame, c: &mut Cursor<'_>) -> Result<Kept<Region>, Error> {
         let p = self.name(c)?;
         let id = self.resolve(f, &p)?;
         match self.node_object(id)? {
@@ -757,8 +759,8 @@ impl<'a> Machine<'a> {
                         return Err(l.malformed("a field unit of zero bits"));
                     }
                     let to = bit.checked_add(len).filter(|&e| e <= 1 << 62).ok_or(l.malformed("a FieldList overflows"))?;
-                    let unit = Field { kind: kind.clone(), bit, len, access, lock, update };
-                    self.define(f, &Path { root: false, up: 0, segs: vec![seg] }, Object::Field(Rc::new(unit)))?;
+                    let unit = self.meter.hold(Field { kind: kind.clone(), bit, len, access, lock, update })?;
+                    self.define(f, &Path { root: false, up: 0, segs: vec![seg] }, Object::Field(unit))?;
                     bit = to;
                 }
             }
@@ -801,7 +803,8 @@ impl<'a> Machine<'a> {
         let size = (data.borrow().len() as u64).saturating_mul(8);
         let bit = bit.filter(|b| b.checked_add(len).is_some_and(|e| e <= size));
         let bit = bit.ok_or(Error::Rule("a buffer field reaches past its buffer (§19.6.18-23)"))?;
-        self.define(f, &p, Object::BufField(Rc::new(BufField { data, bit, len })))?;
+        let field = self.meter.hold(BufField { data, bit, len })?;
+        self.define(f, &p, Object::BufField(field))?;
         Ok(Flow::Next)
     }
 
@@ -863,7 +866,7 @@ impl<'a> Machine<'a> {
         Ok(Flow::Next)
     }
 
-    fn acquire(&mut self, m: &Rc<Mutex>) -> Result<(), Error> {
+    fn acquire(&mut self, m: &Kept<Mutex>) -> Result<(), Error> {
         // §19.6.88: an Acquire's SyncLevel is equal to or above the current one.
         if m.held.get() == 0 && self.levels.last().is_some_and(|&l| m.sync < l) {
             return Err(Error::Rule("Acquire of a Mutex below the current SyncLevel (§19.6.88)"));
@@ -877,7 +880,7 @@ impl<'a> Machine<'a> {
         Ok(())
     }
 
-    fn release(&mut self, m: &Rc<Mutex>) -> Result<(), Error> {
+    fn release(&mut self, m: &Kept<Mutex>) -> Result<(), Error> {
         if m.held.get() == 0 {
             return Err(Error::Rule("Release of a Mutex not held (§19.6.115)"));
         }
@@ -995,11 +998,11 @@ impl<'a> Machine<'a> {
                 let mut p = Self::sub(c, end);
                 let count = if op == 0x12 { u64::from(p.byte()?) } else { self.int_arg(f, &mut p)? };
                 let count = usize::try_from(count).map_err(|_| Error::Bound("a package larger than this interpreter holds"))?;
-                crate::object::counted(count)?;
-                let mut elems = Vec::new();
+                let elems = self.new_pkg(count)?;
+                let mut read = 0;
                 while !p.done() {
                     self.step()?;
-                    if elems.len() == count {
+                    if read == count {
                         return Err(p.malformed("a package holds more elements than its NumElements (§19.6.101)"));
                     }
                     let e = if starts_name(p.peek()?) {
@@ -1014,11 +1017,11 @@ impl<'a> Machine<'a> {
                         self.leave();
                         e?
                     };
-                    elems.push(e);
+                    elems.set(read, e)?;
+                    read += 1;
                 }
-                elems.resize(count, Object::Uninit);
                 c.at = end;
-                self.new_pkg(elems)?
+                Object::Pkg(elems)
             }
             0x5B if c.byte()? == 0x30 => Object::Int(REVISION),
             _ => return Err(Error::Malformed { at: c.at.saturating_sub(1), why: "not a DataObject (§20.2.3)" }),
@@ -1211,13 +1214,8 @@ impl<'a> Machine<'a> {
             }
             Object::Pkg(p) => match &v {
                 Object::Pkg(src) => {
-                    let elems = src.borrow().clone();
-                    let mut out = Vec::with_capacity(elems.len());
-                    for e in &elems {
-                        out.push(self.copy_in(e, 1)?);
-                    }
-                    self.charge(out.len() * crate::object::ELEMENT)?;
-                    p.replace(out)
+                    p.swap(&*self.copy_pkg(src, 0)?);
+                    Ok(())
                 }
                 _ => Err(Error::Type("a store to a package of an object that is not one (Table 19.6)")),
             },
@@ -1562,7 +1560,7 @@ impl<'a> Machine<'a> {
                 if i >= b.borrow().len() {
                     return Err(past);
                 }
-                Ok(Ref::BufField(Rc::new(BufField { data: b, bit: i as u64 * 8, len: 8 })))
+                Ok(Ref::BufField(self.meter.hold(BufField { data: b, bit: i as u64 * 8, len: 8 })?))
             }
             Object::Pkg(p) => {
                 if i >= p.borrow().len() {

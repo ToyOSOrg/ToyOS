@@ -7,8 +7,9 @@
 //! named [`Error`], never panic, and never run unbounded — every evaluation
 //! is bounded in steps, nesting, object size and time asked to sleep, and
 //! what an interpreter holds of tables, namespace and objects is bounded in
-//! sum. A load refused leaves the namespace without anything that table
-//! created.
+//! sum, in bytes of heap ([`MAX_LIVE`]). A load refused leaves the namespace
+//! without anything that table created, and the interpreter holding what it
+//! held before.
 //!
 //! The library touches no hardware. An operation region's field is read and
 //! written through the [`Host`] the caller passes, in SystemMemory,
@@ -66,9 +67,11 @@ pub(crate) const MAX_NESTING: usize = 64;
 pub(crate) const MAX_BYTES: usize = 1 << 20;
 /// The largest package, in elements.
 pub(crate) const MAX_ELEMENTS: usize = 1 << 16;
-/// What one interpreter holds live across every table, namespace node,
-/// string, buffer and package, in bytes (`object::Meter`).
-pub(crate) const MAX_LIVE: usize = 16 << 20;
+/// The heap one interpreter holds from one load or evaluation to the next,
+/// in the bytes its allocations ask for, across every table, namespace node,
+/// record, string, buffer and package; what one holds beyond it while it
+/// runs is `object::Meter`'s to say.
+pub const MAX_LIVE: usize = 16 << 20;
 /// The bytes of work one step stands for: a step for every this many bytes
 /// an operation makes, copies, compares or walks.
 pub(crate) const WORK_PER_STEP: usize = 64;
@@ -212,10 +215,11 @@ impl Interpreter {
         for scope in [b"_GPE", b"_PR_", b"_SB_", b"_SI_", b"_TZ_"] {
             put(scope, Object::Scope);
         }
-        put(b"_GL_", Object::Mutex(Rc::new(Mutex { sync: 0, held: Cell::new(0), global: true })));
-        put(b"_OSI", Object::Method(Rc::new(Method { body: Body::Osi, args: 1, serialized: false, sync: 0 })));
+        let held = "an empty meter holds the predefined objects";
+        put(b"_GL_", Object::Mutex(meter.hold(Mutex { sync: 0, held: Cell::new(0), global: true }).expect(held)));
+        put(b"_OSI", Object::Method(meter.hold(Method { body: Body::Osi, args: 1, serialized: false, sync: 0 }).expect(held)));
         // The owner's ruling (2026-10-05): "Microsoft Windows NT", as Windows answers.
-        let os = meter.bytes(b"Microsoft Windows NT".to_vec()).expect("an empty meter holds twenty bytes");
+        let os = meter.bytes(b"Microsoft Windows NT".to_vec()).expect(held);
         put(b"_OS_", Object::Str(os));
         put(b"_REV", Object::Int(2));
         Interpreter { ns, meter, width: None }
@@ -234,7 +238,7 @@ impl Interpreter {
         };
         // Held for as long as a method it defines refers to it.
         let table = self.meter.bytes(bytes)?;
-        let root = self.ns.root();
+        let (root, made) = (self.ns.root(), self.ns.mark());
         let mut f = Frame::new(root, Vec::new(), table.clone(), 0);
         let mut m = Machine::new(&mut self.ns, host, w, self.meter.clone());
         let bytes = table.borrow();
@@ -250,9 +254,7 @@ impl Interpreter {
                 Ok(())
             }
             Err(e) => {
-                for &id in f.created.iter().rev() {
-                    self.ns.remove(id);
-                }
+                self.ns.unwind(made);
                 Err(e)
             }
         }

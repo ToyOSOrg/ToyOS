@@ -8,14 +8,13 @@
 //! writing its byte offset to the index field and then accessing the data
 //! field; a BankField writes its bank value to the bank field first.
 
-use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::exec::Machine;
 use crate::name::Seg;
 use crate::namespace::NodeId;
-use crate::object::{fit, to_buf, to_int, Bytes, Object};
+use crate::object::{fit, to_buf, to_int, Bytes, Kept, Object};
 use crate::{Address, Error, MAX_BYTES};
 
 pub(crate) struct Region {
@@ -36,9 +35,9 @@ struct Pci {
 
 #[derive(Clone)]
 pub(crate) enum Kind {
-    Region(Rc<Region>),
-    Bank { region: Rc<Region>, bank: Rc<Field>, value: u64 },
-    Index { index: Rc<Field>, data: Rc<Field> },
+    Region(Kept<Region>),
+    Bank { region: Kept<Region>, bank: Kept<Field>, value: u64 },
+    Index { index: Kept<Field>, data: Kept<Field> },
 }
 
 pub(crate) struct Field {
