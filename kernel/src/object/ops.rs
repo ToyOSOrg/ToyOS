@@ -395,7 +395,7 @@ pub fn read_device(
                 let mut count = 0;
                 while count + event_size <= buf.len() {
                     let Some(event) = keyboard::try_read_event() else { break };
-                    buf.write_at(count, event.as_bytes());
+                    buf.write_at(count, toyos_abi::usersafe::bytes(&event));
                     count += event_size;
                 }
                 if count > 0 { Some(count as u64) } else { None }
@@ -405,7 +405,7 @@ pub fn read_device(
                 let mut count = 0;
                 while count + event_size <= buf.len() {
                     let Some(event) = mouse::try_read_event() else { break };
-                    buf.write_at(count, event.as_bytes());
+                    buf.write_at(count, toyos_abi::usersafe::bytes(&event));
                     count += event_size;
                 }
                 if count > 0 { Some(count as u64) } else { None }
@@ -608,12 +608,13 @@ pub fn seek(object: &KObjectRef, pos: SeekFrom) -> u64 {
     })
 }
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct Stat {
-    pub file_type: u64,
-    pub size: u64,
-    pub mtime: u64,
+toyos_abi::user_safe! {
+    #[derive(Clone, Copy)]
+    pub struct Stat {
+        pub file_type: u64,
+        pub size: u64,
+        pub mtime: u64,
+    }
 }
 
 /// What kind of thing this is, and how big.

@@ -19,49 +19,28 @@
 /// every index in this module is checked against.
 pub const BARS: usize = 6;
 
-/// The function the claim names, as its driver needs to see it before it has
-/// mapped anything.
-///
-/// No addresses: a BAR's *size* is what a driver bounds its own accesses with,
-/// and where the window sits is [`syscall::device_bar_map`]'s answer, so the
-/// kernel stays free to move a BAR to a boundary it can map.
-///
-/// [`syscall::device_bar_map`]: crate::syscall::device_bar_map
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct PciFunctionInfo {
-    /// Byte size of each memory BAR; 0 where the function has none in that
-    /// slot, or where it is one the kernel will not map — the BAR holding this
-    /// function's MSI-X table or PBA reads 0 here.
-    pub bar_bytes: [u64; BARS],
-    /// Where firmware put it. Identity for a log line, never a name a claim is
-    /// looked up by: nothing in this ABI takes a bus/device/function.
-    pub bus: u8,
-    pub dev: u8,
-    pub func: u8,
-    /// Written, never read: the tail `repr(C)` would otherwise leave as a gap.
-    pub _pad: [u8; 5],
-}
-
-/// Every byte belongs to a field: this crosses the boundary through
-/// `as_bytes`, so a gap would publish whatever the kernel stack held.
-const _: () = {
-    let named = BARS * 8 + 1 + 1 + 1 + 5;
-    assert!(core::mem::size_of::<PciFunctionInfo>() == named);
-};
-
-impl PciFunctionInfo {
-    pub fn as_bytes(&self) -> &[u8] {
-        // SAFETY: `self` is a valid `&Self` (non-null, aligned, readable for
-        // `size_of::<Self>()` bytes), and the const assert above proves the
-        // `repr(C)` layout has no padding, so every byte the slice exposes is
-        // an initialized field, not a gap.
-        unsafe {
-            core::slice::from_raw_parts(
-                self as *const Self as *const u8,
-                core::mem::size_of::<Self>(),
-            )
-        }
+crate::user_safe! {
+    /// The function the claim names, as its driver needs to see it before it has
+    /// mapped anything.
+    ///
+    /// No addresses: a BAR's *size* is what a driver bounds its own accesses with,
+    /// and where the window sits is [`syscall::device_bar_map`]'s answer, so the
+    /// kernel stays free to move a BAR to a boundary it can map.
+    ///
+    /// [`syscall::device_bar_map`]: crate::syscall::device_bar_map
+    #[derive(Clone, Copy)]
+    pub struct PciFunctionInfo {
+        /// Byte size of each memory BAR; 0 where the function has none in that
+        /// slot, or where it is one the kernel will not map — the BAR holding this
+        /// function's MSI-X table or PBA reads 0 here.
+        pub bar_bytes: [u64; BARS],
+        /// Where firmware put it. Identity for a log line, never a name a claim is
+        /// looked up by: nothing in this ABI takes a bus/device/function.
+        pub bus: u8,
+        pub dev: u8,
+        pub func: u8,
+        /// Written, never read: the tail `repr(C)` would otherwise leave as a gap.
+        pub _pad: [u8; 5],
     }
 }
 

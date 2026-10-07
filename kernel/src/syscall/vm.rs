@@ -514,7 +514,7 @@ pub(super) fn sys_query_modules(out: &mut UserBytesMut) -> u64 {
             path_offset,
             path_len: exe_path_bytes.len() as u32,
         };
-        out.write_at(0, exe_info.as_bytes());
+        out.write_at(0, toyos_abi::usersafe::bytes(&exe_info));
         out.write_at(path_offset as usize, exe_path_bytes);
         path_offset += exe_path_bytes.len() as u32;
 
@@ -534,7 +534,7 @@ pub(super) fn sys_query_modules(out: &mut UserBytesMut) -> u64 {
                 path_offset,
                 path_len: lib_path_bytes.len() as u32,
             };
-            out.write_at((1 + i) * info_size, lib_info.as_bytes());
+            out.write_at((1 + i) * info_size, toyos_abi::usersafe::bytes(&lib_info));
             out.write_at(path_offset as usize, lib_path_bytes);
             path_offset += lib_path_bytes.len() as u32;
         }
