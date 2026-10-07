@@ -3756,15 +3756,21 @@ fn acpi_events_on_metal(back: &metal::Readback) -> Result<(), String> {
 /// The server's death on the T14: the kernel put the machine in ACPI mode for
 /// the job's claim, and when the killed server's claim went it wrote
 /// `ACPI_DISABLE` (the FADT's 0xf1) and read `SCI_EN` clear: the firmware has
-/// the buttons again. Each write was made on the boot processor.
+/// the buttons again. Each write was made on the boot processor, and the
+/// enable was asked from another CPU: the job claims from a thread it found
+/// off the boot processor, so that write is the one that crossed.
 fn acpi_death_on_metal(back: &metal::Readback) -> Result<(), String> {
     back.job_passed("test_rs_acpi_release")?;
     let kernel = back.kernel();
-    // The kernel says the second only of a `PM1a_CNT` it read with `SCI_EN` clear.
-    for said in ["acpi: ACPI mode: ACPI_ENABLE 0xf0 written to SMI_CMD 0xb2 ", "acpi: legacy mode again: ACPI_DISABLE 0xf1 written to SMI_CMD 0xb2 "] {
-        let line = kernel.must_say(said)?;
+    let enabled = kernel.must_say("acpi: ACPI mode: ACPI_ENABLE 0xf0 written to SMI_CMD 0xb2 ")?;
+    // The kernel says this only of a `PM1a_CNT` it read with `SCI_EN` clear.
+    let left = kernel.must_say("acpi: legacy mode again: ACPI_DISABLE 0xf1 written to SMI_CMD 0xb2 ")?;
+    for line in [enabled, left] {
         smi_cmd_writer(line)?;
         eprintln!("  [acpi] {}", line.trim());
+    }
+    if number_between(enabled, ", asked from cpu", "; the write held cpu")? == 0 {
+        return Err(format!("the job's claim was asked from the boot processor, so no CPU asked it for this write: {enabled}"));
     }
     Ok(())
 }

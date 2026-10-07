@@ -18,7 +18,8 @@
 //! [`DEAF_CPU`] is a panic, as one that answers no TLB shootdown is.
 //!
 //! The port is this module's alone, so the `out` in [`answer`] is the only
-//! one the kernel can make to it.
+//! one the kernel can make to it, and [`answer`] reads which CPU it is on
+//! with interrupts closed beside that `out`: no caller's state decides it.
 //!
 //! **None is made once the stop has begun**: the power-off waits out a write
 //! in flight ([`settle`]) and then owns the hardware, and an SMI it did not
@@ -97,10 +98,9 @@ pub fn write(value: u8) -> Option<Written> {
     let asked_from = percpu::cpu_id();
     ASKED.store(value, Relaxed);
     let generation = ROUND.issue();
-    if asked_from == BOOT {
-        // A kick taken since the issue has answered it already, and this answers nothing.
-        answer();
-    } else {
+    // The boot processor's own ask, unless a kick taken since the issue has answered it already.
+    answer();
+    if !ROUND.served(BOOT as usize, generation) {
         apic::kick_cpu(BOOT);
         let by = Deadline::at(crate::clock::now() + Duration::from_nanos(DEAF_CPU.nanos()));
         while !ROUND.served(BOOT as usize, generation) {
@@ -124,19 +124,25 @@ pub fn write(value: u8) -> Option<Written> {
 /// The boot processor's answer to a round it owes: its kick handler's, and
 /// `tlb::poll`'s for a boot processor spinning on a lock with interrupts
 /// closed, which takes no kick and may be waiting on the caller's lock.
+/// Every CPU calls it; [`answer`] holds which one writes.
 #[inline]
 pub fn serve_here() {
-    // The hint before the mask: a boot processor that owes nothing pays two loads a kick.
-    if percpu::cpu_id() == BOOT && ROUND.owes(BOOT as usize) {
+    // The hint before the mask: with no round in flight a kick or a spin pays two loads.
+    if ROUND.owes(BOOT as usize) {
         answer();
     }
 }
 
-/// The write the round in flight asks for, if none has answered it. On the
-/// boot processor, and with interrupts closed, so no kick's answer nests in
-/// this one and writes twice. Takes no lock and allocates nothing.
+/// The write the round in flight asks for, if none has answered it and this
+/// is the boot processor; nothing on any other CPU. Interrupts are closed
+/// from the read of the CPU to the `out`, so the two are one CPU's and no
+/// kick's answer nests in this one and writes twice. Takes no lock and
+/// allocates nothing.
 fn answer() {
     let _closed = IrqGuard::close();
+    if percpu::cpu_id() != BOOT {
+        return;
+    }
     ROUND.serve_if_owed(BOOT as usize, || {
         let port = PORT.get().expect("smi_cmd: a write asked of a machine whose FADT names no SMI_CMD").port(0);
         let value = ASKED.load(Relaxed);
