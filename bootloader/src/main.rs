@@ -743,7 +743,7 @@ fn end_this_pass(system_table: &SystemTable<Boot>, exit_event: Option<Event>) ->
 fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     // First, so this reading is firmware's time and none of the loader's.
     let entry_counter = arch::counter();
-    let counter_hz = stamp::start(entry_counter);
+    let counter_hz = stamp::start();
     let exit_event = uefi_services::init(&mut system_table).unwrap();
     // First, because it covers everything below it: firmware starts a
     // five-minute countdown when it loads an image and resets the machine if
@@ -813,7 +813,7 @@ fn main(handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
     loaderlog::open(&system_table, &log_guid, finding.is_none() && !retry);
     println!("{}", loaderlog::BEGINS_AT);
     match counter_hz {
-        Some(hz) => println!("Loader clock: each line opens with the ms since this loader's entry, at the counter's stated {hz} Hz"),
+        Some(hz) => println!("Loader clock: each line opens with the seconds since the counter's zero, at the counter's stated {hz} Hz"),
         None => println!("Loader clock: this CPU states no counter rate, so no line carries the time it was said"),
     }
     if let Err(e) = cleared {

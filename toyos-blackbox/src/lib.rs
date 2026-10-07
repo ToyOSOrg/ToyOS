@@ -983,13 +983,13 @@ mod tests {
             records.push_str(&format!("[0.{n:04} cpu0] a record of some width or other\n"));
             n += 1;
         }
-        records.push_str("[9.9999 cpu0] the last one\n");
+        records.push_str("[ 9.999 cpu0 kernel] the last one\n");
         let mut page = blank();
         seal(&mut page, State::Panic, STAMP, STICK, records.as_bytes());
         let (_, _, _, back) = recover(&page).expect("a cut report is still sealed");
         let back = std::str::from_utf8(back).expect("records are text");
         assert!(back.len() <= TEXT_BYTES);
-        assert!(back.ends_with("[9.9999 cpu0] the last one\n"));
+        assert!(back.ends_with("[ 9.999 cpu0 kernel] the last one\n"));
         let kept = kept_records(back);
         // The first line kept is a whole one, which is the assertion.
         assert!(kept.starts_with('['), "the report begins mid-record: {:?}", &kept[..40]);
@@ -1040,7 +1040,7 @@ mod tests {
     /// A report that fits says nothing about a cut, because there was none.
     #[test]
     fn a_report_that_fits_carries_no_drop_line() {
-        let records = "[0.0000 cpu0] one record\n[0.0001 cpu0] another\n";
+        let records = "[ 0.000 cpu0 kernel] one record\n[ 0.001 cpu0 kernel] another\n";
         let mut page = blank();
         seal(&mut page, State::Panic, STAMP, STICK, records.as_bytes());
         let (_, _, _, back) = recover(&page).expect("a whole report is sealed");
@@ -1191,7 +1191,7 @@ mod tests {
         const HEAD: &str = "PANIC: src/main.rs:1:1: this machine is on fire\n";
         let mut records = std::string::String::new();
         while records.len() < TEXT_BYTES * 2 {
-            records.push_str("[0.0000 cpu0] a record\n");
+            records.push_str("[ 0.000 cpu0 kernel] a record\n");
         }
         let mut page = blank();
         let mut report = Report::new(&mut page);
@@ -1202,7 +1202,7 @@ mod tests {
         let (_, _, _, back) = recover(&page).expect("a composed report is sealed");
         let back = std::str::from_utf8(back).expect("records are text");
         assert!(back.starts_with(HEAD), "the head is not first: {:?}", &back[..60]);
-        assert!(back.ends_with("[0.0000 cpu0] a record\n"));
+        assert!(back.ends_with("[ 0.000 cpu0 kernel] a record\n"));
     }
 
     /// Records with no boundary in the window at all are not a run of records,
@@ -1224,7 +1224,7 @@ mod tests {
     fn a_multi_line_record_is_never_entered_part_way() {
         let mut records = std::string::String::new();
         while records.len() < TEXT_BYTES * 2 {
-            records.push_str("[0.0000 cpu0] EARLY PANIC: panicked at src/main.rs:1:1:\n");
+            records.push_str("[ 0.000 cpu0 kernel] EARLY PANIC: panicked at src/main.rs:1:1:\n");
             records.push_str("the message, on a line of its own\n");
         }
         let mut page = blank();
@@ -1232,7 +1232,7 @@ mod tests {
         let (_, _, _, back) = recover(&page).expect("a cut report is still sealed");
         let back = std::str::from_utf8(back).expect("records are text");
         let kept = kept_records(back);
-        assert!(kept.starts_with("[0.0000 cpu0] EARLY PANIC"), "{:?}", &kept[..40]);
+        assert!(kept.starts_with("[ 0.000 cpu0 kernel] EARLY PANIC"), "{:?}", &kept[..40]);
         assert!(records.ends_with(kept));
     }
 
@@ -1316,7 +1316,7 @@ mod tests {
         assert!(!says_a_break("root: the transport broke on SCSI 0x28"));
         assert!(usb_wrote("xHCI: Stop Endpoint timed out after 2000 ms"));
         assert!(!usb_wrote("usb-quiesce: xHCI 00:14.0 halted=true"));
-        assert!(!usb_wrote("[3.412 cpu5] xHCI: nested"));
+        assert!(!usb_wrote("[ 3.412 cpu5 kernel] xHCI: nested"));
     }
 
     /// Nothing links this crate to the driver whose records it picks out, so
@@ -1364,7 +1364,7 @@ mod tests {
         report.write(b"the boot deadline expired\n");
         section(&mut report, &ring, &ring);
         let after_the_section = report.at;
-        report.tail(b"[120.000 cpu4] the newest record\n", RECORD_OPENS_WITH);
+        report.tail(b"[120.000 cpu4 kernel] the newest record\n", RECORD_OPENS_WITH);
         report.seal(State::Wedged, STAMP, STICK);
 
         let text = sealed_text(&page);
@@ -1378,7 +1378,7 @@ mod tests {
         for (n, line) in lines[2..2 + kept].iter().enumerate() {
             assert_eq!(*line, format!("{RECOVERY_OPENS_WITH}{}", rendered(storm[n].0, &storm[n].1)));
         }
-        assert_eq!(lines[2 + kept], "[120.000 cpu4] the newest record");
+        assert_eq!(lines[2 + kept], "[120.000 cpu4 kernel] the newest record");
         assert!(
             after_the_section <= "the boot deadline expired\n".len() + RECOVERY_HEAD_BYTES + RECOVERY_BYTES,
             "the section ran to {after_the_section}"

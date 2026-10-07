@@ -68,7 +68,7 @@ pub enum Died {
 /// The two columns are equal for every spelling no program in this tree writes,
 /// and that is deliberate rather than lazy: the console is not line-atomic, so
 /// a program's unterminated write can be spliced ahead of a kernel record and
-/// take the `[kernel …]` prefix off the front of the assembled line. A word
+/// take the kernel's head off the front of the assembled line. A word
 /// only the kernel says is still the kernel's however the line was built.
 ///
 /// Order matters where one spelling contains another: `PANIC:` is looked for
@@ -233,7 +233,10 @@ impl Serial {
     pub fn interleaved(&self) -> Option<&str> {
         self.text
             .lines()
-            .find(|l| !is_kernel_line(l) && l.contains(toyos_build::kernelconsole::HEAD))
+            .find(|l| {
+                !is_kernel_line(l)
+                    && matches!(toyos_logstream::kernel_opening(l.as_bytes()), toyos_logstream::Opening::At(_))
+            })
     }
 
     /// The channel carried something the kernel wrote.

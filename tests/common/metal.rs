@@ -280,10 +280,20 @@ impl Readback {
         Serial::named(&format!("{}'s loader.log", self.label), self.loader.as_str())
     }
 
-    /// When the last record this boot left was written, in milliseconds since
-    /// boot. `None` on a log with no record at all.
+    /// When the last record this boot left was written, on the log's clock.
+    /// `None` on a log with no record at all.
     pub fn last_record_ms(&self) -> Option<u64> {
         bootlog::last_record_millis(&self.kernel)
+    }
+
+    /// [`bootlog::one_clock`] of this boot.
+    pub fn one_clock(&self) -> Result<(), String> {
+        bootlog::one_clock(&self.loader, &self.log).map_err(|why| format!("{}: {why}", self.label))
+    }
+
+    /// When `Boot: complete` was written, on the same clock.
+    pub fn complete_record_ms(&self) -> Option<u64> {
+        self.kernel.lines().find(|line| line.contains(bootlog::COMPLETE)).and_then(bootlog::record_millis)
     }
 
     /// Whether this boot's log is whole to its stop, and the stop's own tail
@@ -1075,6 +1085,7 @@ pub fn judge_readbacks(
         findings.extend(back.stop_completed().err());
         findings.extend(back.deadline_on_time().err());
         findings.extend(back.lockup_on_time().err());
+        findings.extend(back.one_clock().err());
         for why in &findings {
             eprintln!("    FAIL {why}");
         }
@@ -1138,7 +1149,7 @@ pub fn judge_readbacks(
             }
         }
         if let (Ok(back), true) = (back, ran > 0) {
-            if let (Some(complete), Some(last)) = (back.boot_ms, back.last_record_ms()) {
+            if let (Some(complete), Some(last)) = (back.complete_record_ms(), back.last_record_ms()) {
                 let each = last.saturating_sub(complete) / ran as u64;
                 eprintln!("  {} ms per member over the {ran} that ran", each);
             }

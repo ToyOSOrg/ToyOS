@@ -193,6 +193,12 @@ pub mod log_registry;
 #[path = "../../src/log/read.rs"]
 pub mod log_read;
 
+/// What `read.rs` names as `super::stamp`, which in the kernel is
+/// `crate::log::stamp`.
+#[cfg(not(feature = "loom"))]
+#[path = "../../src/log/stamp.rs"]
+pub mod stamp;
+
 /// What `read.rs`'s log-only walks name as `super::shards()`: none, since no
 /// test here drives them; the walks a test drives take their shards.
 #[cfg(not(feature = "loom"))]

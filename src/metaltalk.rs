@@ -1256,8 +1256,8 @@ mod tests {
     #[test]
     fn the_judge_reads_what_the_stream_carried_and_what_the_peer_answered() {
         let stream = vec![
-            "[---------- -------- 0.011 cpu0] SMP: AP cpu1 online\n".to_string(),
-            "[---------- -------- 1.216 cpu0] Boot: complete (1216ms)\n".to_string(),
+            "[---------- --------  0.011 cpu0 kernel] SMP: AP cpu1 online\n".to_string(),
+            "[---------- --------  1.216 cpu0 kernel] Boot: complete (1216ms)\n".to_string(),
         ];
         let good = heard(Ok(Exec { stdout: owed(), status: Some(0) }), Ok("accepted".into()));
         let said = judge(&good, &stream).expect("every fact is there");
@@ -1301,7 +1301,7 @@ mod tests {
         let cut = Conversation::parse(&said.render()).unwrap().unwrap();
         let bad = judge(&cut, &[]).unwrap_err();
         assert!(bad.iter().any(|b| b.contains("before a byte arrived")), "{bad:?}");
-        let lines = vec!["[---------- -------- 1.216 cpu0] Boot: complete (1216ms)\n".to_string()];
+        let lines = vec!["[---------- --------  1.216 cpu0 kernel] Boot: complete (1216ms)\n".to_string()];
         assert!(judge(&cut, &lines).is_ok());
     }
 
@@ -1330,7 +1330,7 @@ mod tests {
         let stream = Stream::connect(peer, &file, false, Duration::from_secs(10)).unwrap();
         let (mut conn, _) = server.accept().unwrap();
         for i in 0..100 {
-            writeln!(conn, "[kernel 0.{i:03} cpu0] line {i}").unwrap();
+            writeln!(conn, "[ 0.{i:03} cpu0 kernel] line {i}").unwrap();
         }
         drop(conn);
         let peer = stream.wait_connected(Duration::from_secs(5)).expect("the peer");
@@ -1339,7 +1339,7 @@ mod tests {
         let lines = stream.lines();
         assert_eq!(lines.len(), 100);
         for (i, line) in lines.iter().enumerate() {
-            assert_eq!(*line, format!("[kernel 0.{i:03} cpu0] line {i}\n"));
+            assert_eq!(*line, format!("[ 0.{i:03} cpu0 kernel] line {i}\n"));
         }
         assert_eq!(std::fs::read_to_string(&file).unwrap(), lines.concat());
     }
@@ -1436,7 +1436,7 @@ mod tests {
         let reach: Arc<dyn Reach> = net.clone();
         let stream = Stream::through(reach, peer, &dir.join("s.log"), false, Duration::from_secs(5)).unwrap();
         let mut conn = accepted(&server, "the dial after the name answered");
-        writeln!(conn, "[kernel 1.216 cpu0] Boot: complete (1216ms)").unwrap();
+        writeln!(conn, "[ 1.216 cpu0 kernel] Boot: complete (1216ms)").unwrap();
         assert_eq!(stream.wait_connected(Duration::from_secs(5)), Some(at), "{:?}", stream.unopened());
         assert!(stream.wait_for("Boot: complete", Duration::from_secs(5)));
         assert_eq!(stream.turned_away(), 1, "the one dial before the machine answered");
@@ -1457,16 +1457,16 @@ mod tests {
         let stream = Stream::connect(Peer::At(at), &dir.join("s.log"), false, Duration::from_secs(5))
             .expect("a loopback reader");
         let (mut conn, _) = server.accept().unwrap();
-        writeln!(conn, "[kernel 1.216 cpu0] Boot: complete (1216ms)").unwrap();
+        writeln!(conn, "[ 1.216 cpu0 kernel] Boot: complete (1216ms)").unwrap();
         stream.wait_connected(Duration::from_secs(5)).expect("the peer");
         assert!(stream.wait_for("Boot: complete", Duration::from_secs(5)), "the first line was not read");
         assert!(!stream.wait_ended(Duration::ZERO), "a quiet peer was read as a closed one");
-        writeln!(conn, "[kernel 1.217 cpu0] supervisor: started logkeeper").unwrap();
+        writeln!(conn, "[ 1.217 cpu0 kernel] supervisor: started logkeeper").unwrap();
         drop(conn);
         assert!(stream.wait_ended(Duration::from_secs(5)));
         assert_eq!(
             stream.lines(),
-            vec!["[kernel 1.216 cpu0] Boot: complete (1216ms)\n", "[kernel 1.217 cpu0] supervisor: started logkeeper\n"]
+            vec!["[ 1.216 cpu0 kernel] Boot: complete (1216ms)\n", "[ 1.217 cpu0 kernel] supervisor: started logkeeper\n"]
         );
     }
 
@@ -1476,10 +1476,10 @@ mod tests {
     #[test]
     fn the_hand_back_waits_for_the_boot_record_the_judge_reads() {
         const STALLED_AT: [&str; 2] = [
-            "[2026-09-29 14:01:34 0.493 cpu0] xHCI: mass storage iface=0 in=0x81/512 out=0x2/512",
-            "[2026-09-29 14:01:34 0.493 cpu0] xHCI: configuration set",
+            "[2026-09-29 14:01:34  0.493 cpu0 kernel] xHCI: mass storage iface=0 in=0x81/512 out=0x2/512",
+            "[2026-09-29 14:01:34  0.493 cpu0 kernel] xHCI: configuration set",
         ];
-        const RECORD: &str = "[2026-09-29 14:01:35 1.166 cpu0] Boot: complete (1166ms)";
+        const RECORD: &str = "[2026-09-29 14:01:35  1.166 cpu0 kernel] Boot: complete (1166ms)";
         let dir = toyos_tmpdir::TempDir::new("metaltalk-carried");
         let server = TcpListener::bind("127.0.0.1:0").unwrap();
         let at = server.local_addr().unwrap();
@@ -1536,19 +1536,19 @@ mod tests {
         let stream = Stream::connect(Peer::At(at), &dir.join("s.log"), false, Duration::from_secs(5))
             .expect("a loopback reader");
         let mut first = accepted(&server, "the first dial");
-        writeln!(first, "[kernel 0.001 cpu0] before the swap").unwrap();
+        writeln!(first, "[ 0.001 cpu0 kernel] before the swap").unwrap();
         assert!(stream.wait_for("before the swap", Duration::from_secs(5)));
         stream.redial(Duration::from_secs(5));
         close(accepted(&server, "the redial"));
         let mut third = accepted(&server, "the dial after a connection turned away");
-        writeln!(third, "[kernel 0.001 cpu0] before the swap").unwrap();
-        writeln!(third, "[kernel 9.000 cpu0] after the swap").unwrap();
+        writeln!(third, "[ 0.001 cpu0 kernel] before the swap").unwrap();
+        writeln!(third, "[ 9.000 cpu0 kernel] after the swap").unwrap();
         assert!(stream.wait_for("after the swap", Duration::from_secs(5)));
         assert_eq!(stream.connections(), 2, "the connection turned away was counted as admitted");
         assert_eq!(stream.turned_away(), 1, "the connection closed before a line");
         assert_eq!(
             stream.lines(),
-            vec!["[kernel 0.001 cpu0] before the swap\n", "[kernel 9.000 cpu0] after the swap\n"]
+            vec!["[ 0.001 cpu0 kernel] before the swap\n", "[ 9.000 cpu0 kernel] after the swap\n"]
         );
         let mut rest = [0u8; 1];
         assert_eq!(
@@ -1598,7 +1598,7 @@ mod tests {
         let stream =
             Stream::through(reach, peer, &dir.join("s.log"), false, Duration::from_secs(5)).expect("a loopback reader");
         let mut first = accepted(server, "the first dial");
-        writeln!(first, "[kernel 0.001 cpu0] before the swap").unwrap();
+        writeln!(first, "[ 0.001 cpu0 kernel] before the swap").unwrap();
         assert!(stream.wait_for("before the swap", Duration::from_secs(5)));
         (stream, first)
     }
@@ -1613,8 +1613,8 @@ mod tests {
                 close(server.accept().unwrap().0);
             }
             let (mut conn, _) = server.accept().unwrap();
-            writeln!(conn, "[kernel 0.001 cpu0] before the swap").unwrap();
-            writeln!(conn, "[kernel 9.000 cpu0] after the swap").unwrap();
+            writeln!(conn, "[ 0.001 cpu0 kernel] before the swap").unwrap();
+            writeln!(conn, "[ 9.000 cpu0 kernel] after the swap").unwrap();
         });
     }
 

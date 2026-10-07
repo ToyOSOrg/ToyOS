@@ -15,7 +15,7 @@ fn decoded(line: &str) -> Decoded<'_> {
 fn round_trip(frame: UserFrame<'_>) {
     let line = frame.to_string();
     assert!(line.len() <= MAX_RECORD_MESSAGE, "{} bytes", line.len());
-    for line in [line.clone(), format!("[kernel 12.345 cpu3 tid=7] {line}"), format!("{line}\r\n")] {
+    for line in [line.clone(), format!("[12.345 cpu3 kernel tid=7] {line}"), format!("{line}\r\n")] {
         let back = decoded(&line);
         assert_eq!((back.pc, back.offset, back.build_id), (frame.pc, frame.offset, frame.build_id), "{line:?}");
         assert_eq!(back.name().collect::<String>(), frame.name, "{line:?}");

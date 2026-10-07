@@ -50,5 +50,6 @@ uefi-services = { version = "0.23.0", features = ["panic_handler", "logger"] }
 inherits = "dev"
 opt-level = 2
 debug = true
+strip = "debuginfo"
 debug-assertions = true
 overflow-checks = true

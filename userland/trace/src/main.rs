@@ -31,7 +31,7 @@ fn main() {
         refuse("trace: this program holds no system capability, so the kernel's diary is not its to read");
     };
     let page = clock::page();
-    let until = clock::nanos_since_boot();
+    let until = clock::stamp_ns();
 
     let mut cursor = TraceCursor::new();
     let mut raw = vec![TraceRecord::EMPTY; BATCH];
@@ -48,7 +48,7 @@ fn main() {
         lost += cursor.lost();
         for record in &raw[..n] {
             let entry = Entry::decode(record).unwrap_or_else(|why| refuse(&format!("trace: {record:?}: {why}")));
-            if clock::nanos_between(page.counter_at_boot, page.period_fs, entry.stamp) > until {
+            if page.stamp_of(entry.stamp) > until {
                 break 'read;
             }
             // A reader whose pipe closed early (`| head`) has nobody left to tell.

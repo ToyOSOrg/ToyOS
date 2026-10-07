@@ -92,7 +92,7 @@ mod checks {
             } else if line.contains(\"KERNEL PANIC\") {\n\
             if line.starts_with(\"SEGFAULT\") {\n\
             // ends on `PANIC:` and nothing else, which is the defect\n\
-            const KERNEL: &str = \"[kernel 1.450 cpu3] PANIC: panicked at reserve.rs:812:9:\";\n";
+            const KERNEL: &str = \"[ 1.450 cpu3 kernel] PANIC: panicked at reserve.rs:812:9:\";\n";
         let named = hand_rolled_deaths(staged);
         if named.len() != 2 {
             return Err(format!(
@@ -289,19 +289,19 @@ mod checks {
     /// words, which nothing links this crate to.
     #[test]
     fn nested_nmi_verdict() -> Result<(), String> {
-        const WHOLE: &str = "[kernel 0.385 cpu1] CPU 1: jo\n\
+        const WHOLE: &str = "[ 0.385 cpu1 kernel] CPU 1: jo\n\
              [nmi] NESTED NMI on cpu 0: a second NMI entered while IST2 was still in use.\n\
              [nmi]   rip=0xffffffff8012d3a0 rsp=0xffff80000017df50\n\
              [nmi]   the outer handler's frame is gone; the machine stops here.\n\
              ining scheduler\n\
-             [kernel 0.390 cpu0] panic: rebooting in 60 s, timed by the calibrated clock\n";
+             [ 0.390 cpu0 kernel] panic: rebooting in 60 s, timed by the calibrated clock\n";
         const SPLICED: &str = "[[kenrnmel i0.38]5  cpNu1E] CSPUT 1E: Djo inNiMngI s choednule r\n\
              c[pkeurn el0 0:.3 85a cp u1s] sechcedo: ncpud=1  rNeaMdyI=0  deyinngt=0e srtoeppded= 0 wpahrkield=0e c urrIentS=NTon2e  trwipas=s1\n \
              stil[lke rnieln 0 .3u87s cep.u1\n\
              ] [i8n04m2:i ar]me d  a t r37i2mps,= i0dlex fatf 38f7mfs,8 0 0in0te0r7rubpt3s 9\u{2014} 1th6e cp5in  hras snevper= as0sxerftefd f(kbfd 8GSI0 10, a0ux0 G0SI 612)0\n\
              df50\n\
              [nmi]   the outer handler's frame is gone; the machine stops here.\n\
-             [kernel 0.390 cpu0] panic: rebooting in 60 s unless a key is pressed\n";
+             [ 0.390 cpu0 kernel] panic: rebooting in 60 s unless a key is pressed\n";
         if faults::report(WHOLE)? != WHOLE.lines().nth(1).unwrap_or_default() {
             return Err("a whole report's first line was not the one answered".into());
         }
@@ -315,7 +315,7 @@ mod checks {
         let lines: Vec<&str> = WHOLE.lines().collect();
         for at in 1..=3 {
             let (head, tail) = lines[at].split_at(lines[at].len() / 2);
-            let cut = format!("{head}[kernel 0.386 cp{tail}");
+            let cut = format!("{head}[ 0.386 cpu1 ker{tail}");
             let mut spliced = lines.clone();
             spliced[at] = &cut;
             if faults::report(&spliced.join("\n")).is_ok() {
@@ -349,7 +349,7 @@ mod checks {
             cpus.iter()
                 .enumerate()
                 .map(|(i, (cr0, cr4))| {
-                    format!("[kernel 0.1 cpu{i}] control_regs: cpu{i} cr0={cr0:#010x} cr4={cr4:#010x}\n")
+                    format!("[ 0.100 cpu{i} kernel] control_regs: cpu{i} cr0={cr0:#010x} cr4={cr4:#010x}\n")
                 })
                 .collect()
         }
@@ -412,17 +412,17 @@ mod checks {
         use common::irqcensus::{windows_under, Measured};
         let census = |cpu: u32| {
             format!(
-                "[kernel 0.1 cpu0] irq: cpu{cpu} timer=0 kick=0 xhci=0 userdev=0 sound=0 i8042=0 \
+                "[ 0.100 cpu0 kernel] irq: cpu{cpu} timer=0 kick=0 xhci=0 userdev=0 sound=0 i8042=0 \
                  dmafault=0 hda=0 tlb=0 nmi=0 spurious=0 unclaimed=0\n"
             )
         };
         let windows = |cpu: u32, (irqs, preempt): (u64, u64)| {
-            format!("[kernel 0.1 cpu0] windows: cpu{cpu} irqs_off_ns={irqs} preempt_off_ns={preempt}\n")
+            format!("[ 0.100 cpu0 kernel] windows: cpu{cpu} irqs_off_ns={irqs} preempt_off_ns={preempt}\n")
         };
         let report = |cpu0: (u64, u64), cpu1: (u64, u64)| [census(0), windows(0, cpu0), census(1), windows(1, cpu1)].concat();
-        let exit = |name: &str| format!("[kernel 0.1 cpu0] exit: {name} pid=9 code=0 cpu=1ms\n");
+        let exit = |name: &str| format!("[ 0.100 cpu0 kernel] exit: {name} pid=9 code=0 cpu=1ms\n");
         let held_ns = kernel::sched::windows::HELD_NS;
-        let hold = format!("[kernel 0.1 cpu1] windows: held cpu1 ns={}\n", held_ns + 7);
+        let hold = format!("[ 0.100 cpu1 kernel] windows: held cpu1 ns={}\n", held_ns + 7);
         // Since each CPU joined: longer on cpu0 than anything under the load.
         let first = [report((6_500_000, 6_400_000), (900, 800)), exit("test_rs_idle_span")].concat();
         let read_back = (held_ns + 400, held_ns + 300);
@@ -456,7 +456,7 @@ mod checks {
         refused("a load that never ended", &good.replace(&exit(WINDOWS_LOAD), ""), "never ended")?;
         refused("no hold", &good.replace(&hold, ""), "held no window of known length")?;
         refused("a second hold", &[hold.as_str(), &good].concat(), "a second hold")?;
-        refused("a hold cut short", &good.replace(&hold, "[kernel 0.1 cpu1] windows: held cpu1 ns=1000\n"), "the kernel owes")?;
+        refused("a hold cut short", &good.replace(&hold, "[ 0.100 cpu1 kernel] windows: held cpu1 ns=1000\n"), "the kernel owes")?;
         refused(
             "an interrupts-off window read back at half",
             &good.replace(&windows(1, read_back), &windows(1, (read_back.0 / 2, read_back.1))),
@@ -858,6 +858,11 @@ mod checks {
     }
 
     #[test]
+    fn metal_loader_kernel_and_program_count_from_one_zero() {
+        metal_checks::the_loader_the_kernel_and_a_program_count_from_one_zero();
+    }
+
+    #[test]
     fn metal_list_from_parse_reaches_run_without_the_machine() -> Result<(), String> {
         let args: Vec<String> = ["--metal", "--list"].iter().map(ToString::to_string).collect();
         let mode = testargs::parse(&args)?
@@ -911,13 +916,13 @@ mod checks {
                 bootlog::SEPARATOR
             )
         };
-        let rebooted = "| log-tail: [1.516 cpu0] Rebooting.\n";
-        let stopped = "| log-tail: [1.209 cpu0] stop: 13 of 13 userland thread(s) stopped across 8 \
+        let rebooted = "| log-tail: [ 1.516 cpu0 kernel] Rebooting.\n";
+        let stopped = "| log-tail: [ 1.209 cpu0 kernel] stop: 13 of 13 userland thread(s) stopped across 8 \
                        cpu(s) in 0 ms of a 2010 ms budget over 1 sweep(s), 0 of 38 userland block \
                        operation(s) still open\n";
 
         let jobcase =
-            "[2026-09-29 10:40:36 0.000 cpu0 boot] ACPI: reset register SystemIO 0xcf9 <- 0x06\n";
+            "[2026-09-29 10:40:36  0.000 cpu0 kernel] ACPI: reset register SystemIO 0xcf9 <- 0x06\n";
         let judge = metal_judge("machine_reboot");
         assert_eq!(judge(&[&readback("jobcase", &done(rebooted), jobcase)]), Ok(()));
         assert!(judge(&[&readback("jobcase", &done(stopped), jobcase)]).is_err());
@@ -935,12 +940,12 @@ mod checks {
                 bootlog::SEPARATOR
             )
         };
-        let kernel = "[2026-09-29 10:33:28 0.000 cpu0 boot] panic console: armed 1920x1080 \
+        let kernel = "[2026-09-29 10:33:28  0.000 cpu0 kernel] panic console: armed 1920x1080 \
                       stride=1920 format=1 at 0x4000000000, write-combining\n";
-        let staged = "| [1.509 cpu1] wedge: staged, and only the boot deadline ends this machine: \
+        let staged = "| [ 1.509 cpu1 kernel] wedge: staged, and only the boot deadline ends this machine: \
                       every CPU stops taking scheduler passes from here\n";
-        let awake = |cpu: u32| format!("| [1.509 cpu{cpu}] wedge: cpu{cpu} arrived with interrupts on\n");
-        let deaf = "| [1.509 cpu1] wedge: cpu1 arrived with interrupts off, through the syscall \
+        let awake = |cpu: u32| format!("| [ 1.509 cpu{cpu} kernel] wedge: cpu{cpu} arrived with interrupts on\n");
+        let deaf = "| [ 1.509 cpu1 kernel] wedge: cpu1 arrived with interrupts off, through the syscall \
                     gate, and takes them again here\n";
         let judge = metal_judge("boot_deadline_ends_a_wedge");
         // The seal's line for each CPU, cpu1's being `staging`.
@@ -967,7 +972,7 @@ mod checks {
         let unnamed = format!("{staged}{}{}|   cpu0 pc=0xffff80006051b0b2  {spin}\n", awake(1), awake(0));
         assert!(judge(&[&readback("deadlinewedge", &wedged(&unnamed), kernel)]).is_err());
 
-        let sweep = "| [1.526 cpu0] usb-load: sweeping disk 0 from block 6569336 to 7507812, \
+        let sweep = "| [ 1.526 cpu0 kernel] usb-load: sweeping disk 0 from block 6569336 to 7507812, \
                      rewriting each run with the bytes just read from it, until this machine is \
                      reset out from under it\n";
         let judge = metal_judge("usb_reset_records_the_phase_it_cut");
@@ -991,7 +996,7 @@ mod checks {
             bootlog::SEPARATOR,
             bootlog::HUNG_WITHOUT_A_RECORD
         );
-        let kernel = "[2026-09-29 13:13:43 1.171 cpu0] Boot: complete (1171ms)\n";
+        let kernel = "[2026-09-29 13:13:43  1.171 cpu0 kernel] Boot: complete (1171ms)\n";
         let judge = metal_judge("blackbox_foreign_record");
         assert_eq!(judge(&[&readback("foreignrecord", &loader, kernel)]), Ok(()));
         for state in ["PANIC", "WEDGED"] {
@@ -1010,13 +1015,13 @@ mod checks {
     /// firmware never claimed it. The T14 has two, and each is judged.
     #[test]
     fn the_xecp_judge_reads_the_t14s_handoff() {
-        let t14 = "[2026-09-29 11:05:25 0.253 cpu0] xHCI: xecp selftest 8/8 malformed lists refused\n\
-                   [2026-09-29 11:05:25 0.253 cpu0] xHCI: firmware did not claim the controller \
+        let t14 = "[2026-09-29 11:05:25  0.253 cpu0 kernel] xHCI: xecp selftest 8/8 malformed lists refused\n\
+                   [2026-09-29 11:05:25  0.253 cpu0 kernel] xHCI: firmware did not claim the controller \
                    (USBLEGSUP 0x01002201)\n\
-                   [2026-09-29 11:05:25 0.253 cpu0] xHCI: USBLEGCTLSTS 0xe0000000 -> 0x00000000 \
+                   [2026-09-29 11:05:25  0.253 cpu0 kernel] xHCI: USBLEGCTLSTS 0xe0000000 -> 0x00000000 \
                    (SMI generation off)\n\
-                   [2026-09-29 11:05:25 0.253 cpu0] xHCI: controller reset\n\
-                   [2026-09-29 11:05:25 0.254 cpu0] xHCI: controller started\n";
+                   [2026-09-29 11:05:25  0.253 cpu0 kernel] xHCI: controller reset\n\
+                   [2026-09-29 11:05:25  0.254 cpu0 kernel] xHCI: controller started\n";
         assert_eq!(xhci_xecp(t14), Ok(()));
         assert_eq!(xhci_xecp(&format!("{t14}{t14}")), Ok(()));
         // Firmware that kept the controller handed nothing over.

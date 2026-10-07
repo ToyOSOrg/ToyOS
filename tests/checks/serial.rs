@@ -18,7 +18,7 @@ pub fn spellings() -> impl Iterator<Item = &'static str> {
 /// here is one this type must *fail*, because the failures are the point: a
 /// `must_not_say` that returns `Ok` on an empty capture is the whole hazard.
 pub fn self_check() -> Result<(), String> {
-    let live = Serial::named("test capture", "[kernel 0.001 cpu0] NVMe: found\nhello from userland\n");
+    let live = Serial::named("test capture", "[ 0.001 cpu0 kernel] NVMe: found\nhello from userland\n");
     let dead = Serial::named("test capture", "");
     // Userland said things; the kernel said nothing. This is what a broken
     // capture looks like when it is not simply empty, and the case a
@@ -27,15 +27,15 @@ pub fn self_check() -> Result<(), String> {
     // A readback of `/log`, whose kernel records open with a date.
     let readback = Serial::named(
         "test capture",
-        "[2026-09-29 11:11:20 0.000 cpu0 boot] panic console: armed 1920x1080 stride=1920 \
+        "[2026-09-29 11:11:20  0.000 cpu0 kernel] panic console: armed 1920x1080 stride=1920 \
          format=1 at 0x4000000000, write-combining\n\
-         {2026-09-29 11:11:21 1.170 supervisor} supervisor: started logkeeper\n",
+         [2026-09-29 11:11:21  1.170 supervisor] supervisor: started logkeeper\n",
     );
     let readback_mute =
-        Serial::named("test capture", "{2026-09-29 11:11:21 1.170 supervisor} supervisor: started logkeeper\n");
+        Serial::named("test capture", "[2026-09-29 11:11:21  1.170 supervisor] supervisor: started logkeeper\n");
     let panicking = Serial::named(
         "test capture",
-        "[kernel 0.001 cpu0] NVMe: found\n[kernel 0.002 cpu0] PANIC: nope\n",
+        "[ 0.001 cpu0 kernel] NVMe: found\n[ 0.002 cpu0 kernel] PANIC: nope\n",
     );
 
     /// One row: what it is called, whether it must pass, and the call itself.
@@ -66,7 +66,7 @@ pub fn self_check() -> Result<(), String> {
         ("must_be_clean on a user-owned DMA fault", false, &|| {
             Serial::named(
                 "test capture",
-                "[kernel 0.001 cpu0] NVMe: found\n[kernel 4.100 cpu0] iommu: DMA FAULT \
+                "[ 0.001 cpu0 kernel] NVMe: found\n[ 4.100 cpu0 kernel] iommu: DMA FAULT \
                  owner=slot0 unit0 stream=00:03.0 addr=0x1000 access=read reason=0x06 \
                  read-permission\n",
             )
@@ -96,9 +96,9 @@ pub fn self_check() -> Result<(), String> {
     // first case is the defect and is asserted in both directions — the plain
     // scan reads the stranger.
     const READY: &str = "===I8042_READY===";
-    let stranger = "[kernel 0.418 cpu1] i8042: 1 interrupts and 0 bytes, nothing decoded — first \
+    let stranger = "[ 0.418 cpu1 kernel] i8042: 1 interrupts and 0 bytes, nothing decoded — first \
                     seen at 418ms";
-    let mine = "[kernel 2.816 cpu0] i8042: 2 interrupts and 6 bytes, nothing decoded — no event \
+    let mine = "[ 2.816 cpu0 kernel] i8042: 2 interrupts and 6 bytes, nothing decoded — no event \
                 from [0xe1, 0x1d, 0x45, 0xe1, 0x9d, 0xc5], first seen at 2816ms";
     let staged = Serial::named("test capture", format!("{stranger}\n{READY}\n{mine}\n"));
     if staged.must_say("nothing decoded")? != stranger {
@@ -122,7 +122,7 @@ pub fn self_check() -> Result<(), String> {
     }
 
     // Interleaving is detected and named, and a clean capture reports none.
-    let split = Serial::named("test capture", "[kernel 0.001 cpu0] a\nBoot: comp[kernel 0.002 cpu0] lete\n");
+    let split = Serial::named("test capture", "[ 0.001 cpu0 kernel] a\nBoot: comp[ 0.002 cpu0 kernel] lete\n");
     if split.interleaved().is_none() {
         return Err(String::from("a kernel prefix spliced mid-line was not detected"));
     }
@@ -141,21 +141,21 @@ pub fn self_check() -> Result<(), String> {
     // prefix is the whole discriminator, so it is asserted from both sides:
     // the same words, once from the kernel and once from somebody else.
     const KERNEL_PANIC_LINE: &str =
-        "[kernel 1.450 cpu3] PANIC: panicked at kernel/src/sched/reserve.rs:812:9:";
+        "[ 1.450 cpu3 kernel] PANIC: panicked at kernel/src/sched/reserve.rs:812:9:";
     const USER_PANIC_LINE: &str = "thread 'main' (1) panicked at sshserver/src/main.rs:359:23:";
     let whose: &[(&str, Option<Died>)] = &[
         // The kernel, about itself.
         (KERNEL_PANIC_LINE, Some(Died::Kernel)),
-        ("[kernel 0.068 cpu0] KERNEL PANIC: read unmapped address at 0x0", Some(Died::Kernel)),
+        ("[ 0.068 cpu0 kernel] KERNEL PANIC: read unmapped address at 0x0", Some(Died::Kernel)),
         // The three that write none of the words beside them. The first is
         // verbatim what a staged `#DF` put on the console.
         (
-            "[kernel 0.443 cpu0] DOUBLE FAULT on CPU 0 (pid=Some(Pid(5)) tid=Some(Tid(0)))",
+            "[ 0.443 cpu0 kernel] DOUBLE FAULT on CPU 0 (pid=Some(Pid(5)) tid=Some(Tid(0)))",
             Some(Died::Kernel),
         ),
-        ("[kernel 0.443 cpu0] MACHINE CHECK on CPU 3", Some(Died::Kernel)),
+        ("[ 0.443 cpu0 kernel] MACHINE CHECK on CPU 3", Some(Died::Kernel)),
         (
-            "[kernel 4.100 cpu0] iommu: DMA FAULT owner=kernel unit0 stream=00:1f.2 \
+            "[ 4.100 cpu0 kernel] iommu: DMA FAULT owner=kernel unit0 stream=00:1f.2 \
              addr=0x1000 access=read reason=0x06 unknown",
             Some(Died::Kernel),
         ),
@@ -164,13 +164,13 @@ pub fn self_check() -> Result<(), String> {
         // two lines differ in one field, which is what makes the case worth
         // stating rather than assuming.
         (
-            "[kernel 4.100 cpu0] iommu: DMA FAULT owner=slot0 unit0 stream=00:03.0 \
+            "[ 4.100 cpu0 kernel] iommu: DMA FAULT owner=slot0 unit0 stream=00:03.0 \
              addr=0x1000 access=read reason=0x06 read-permission",
             None,
         ),
-        ("[kernel 0.001 cpu0] EARLY PANIC: nothing is up yet", Some(Died::Kernel)),
+        ("[ 0.001 cpu0 kernel] EARLY PANIC: nothing is up yet", Some(Died::Kernel)),
         (
-            "[kernel 2.000 cpu1] DOUBLE PANIC: the cpu was already in Fatal; first: invalid \
+            "[ 2.000 cpu1 kernel] DOUBLE PANIC: the cpu was already in Fatal; first: invalid \
              opcode rip=0x0000000000401234 cr2=0x0000000000000000 err=0x0000000000000000; \
              second: panic at src/mm/paging.rs:41:5: the page is not there",
             Some(Died::Kernel),
@@ -180,19 +180,19 @@ pub fn self_check() -> Result<(), String> {
         ("\n!!! PANIC REENTRY: CPU halted !!! (apic 3)", Some(Died::Kernel)),
         ("KERNEL PANIC: spliced onto somebody's unterminated write", Some(Died::Kernel)),
         // The kernel, about a process. Its line, somebody else's death.
-        ("[kernel 0.412 cpu0] SEGFAULT tid=7: read unmapped address at 0x0", Some(Died::Faulted)),
-        ("[kernel 0.412 cpu0] SIGILL tid=7: illegal instruction", Some(Died::Faulted)),
-        ("[kernel 0.412 cpu0] FATAL tid=7: machine check", Some(Died::Faulted)),
+        ("[ 0.412 cpu0 kernel] SEGFAULT tid=7: read unmapped address at 0x0", Some(Died::Faulted)),
+        ("[ 0.412 cpu0 kernel] SIGILL tid=7: illegal instruction", Some(Died::Faulted)),
+        ("[ 0.412 cpu0 kernel] FATAL tid=7: machine check", Some(Died::Faulted)),
         // A process, about itself. Neither of these ends anybody's run.
         (USER_PANIC_LINE, Some(Died::Panicked)),
         ("libc panic: panicked at src/main.rs:9:1:", Some(Died::Panicked)),
         // The one the naive fix cannot tell from the kernel's, and must.
         ("PANIC: printed by a program that felt like printing it", Some(Died::Panicked)),
         // A `/log` readback's heads: the kernel's panic, and a program's.
-        ("[2026-09-29 11:11:22 2.000 cpu1] PANIC: nope", Some(Died::Kernel)),
-        ("{2026-09-29 11:11:22 2.000 supervisor} PANIC: printed by the supervisor", Some(Died::Panicked)),
+        ("[2026-09-29 11:11:22  2.000 cpu1 kernel] PANIC: nope", Some(Died::Kernel)),
+        ("[2026-09-29 11:11:22  2.000 supervisor] PANIC: printed by the supervisor", Some(Died::Panicked)),
         // Nothing died.
-        ("[kernel 0.377 cpu0] NVMe: found", None),
+        ("[ 0.377 cpu0 kernel] NVMe: found", None),
         ("hello from userland", None),
         ("", None),
     ];
@@ -206,7 +206,7 @@ pub fn self_check() -> Result<(), String> {
     // as its own case because the table above would still pass if `died`
     // ignored the prefix and every kernel-written line simply came first.
     for word in ["PANIC:", "panicked at"] {
-        let kernel = format!("[kernel 1.450 cpu3] {word} whatever follows");
+        let kernel = format!("[ 1.450 cpu3 kernel] {word} whatever follows");
         let program = format!("some program says {word} whatever follows");
         if died(&kernel) != Some(Died::Kernel) || died(&program) != Some(Died::Panicked) {
             return Err(format!(
@@ -219,7 +219,7 @@ pub fn self_check() -> Result<(), String> {
     // And `must_be_clean` still refuses both of them, because a boot that
     // carries either is not a clean boot whoever wrote it.
     for line in [KERNEL_PANIC_LINE, USER_PANIC_LINE] {
-        let capture = Serial::named("test capture", format!("[kernel 0.001 cpu0] up\n{line}\n"));
+        let capture = Serial::named("test capture", format!("[ 0.001 cpu0 kernel] up\n{line}\n"));
         if capture.must_be_clean().is_ok() {
             return Err(format!("must_be_clean passed a capture carrying {line:?}"));
         }
@@ -231,16 +231,16 @@ pub fn self_check() -> Result<(), String> {
     // it and a daemon still talking after the header — a capture that begins at
     // the death would be a capture nobody has.
     const DF_HEADER: &str =
-        "[kernel 6.204 cpu1] DOUBLE FAULT on CPU 1 (pid=Some(Pid(2)) tid=Some(Tid(0)))";
+        "[ 6.204 cpu1 kernel] DOUBLE FAULT on CPU 1 (pid=Some(Pid(2)) tid=Some(Tid(0)))";
     let staged_df = format!(
-        "[kernel 6.201 cpu0] spawn: /system/bin/test_rs_console_line_atomicity pid=41\n\
+        "[ 6.201 cpu0 kernel] spawn: /system/bin/test_rs_console_line_atomicity pid=41\n\
          AAAAAAAA\n\
          {DF_HEADER}\n\
-         [kernel 6.204 cpu1]   cr2=0xffff800002672ff8 (address that caused the fault chain)\n\
-         [kernel 6.204 cpu1]   rip=0xffffffff80121a40  rsp=0xffff800002673000  rbp=0x0\n\
-         [kernel 6.204 cpu1]   Kernel backtrace:\n\
+         [ 6.204 cpu1 kernel]   cr2=0xffff800002672ff8 (address that caused the fault chain)\n\
+         [ 6.204 cpu1 kernel]   rip=0xffffffff80121a40  rsp=0xffff800002673000  rbp=0x0\n\
+         [ 6.204 cpu1 kernel]   Kernel backtrace:\n\
          soundserver: suspended\n\
-         [kernel 6.205 cpu1]   Found interrupt frame at stack offset +0x18:\n"
+         [ 6.205 cpu1 kernel]   Found interrupt frame at stack offset +0x18:\n"
     );
     let Some(report) = death_report(&staged_df) else {
         return Err(String::from(
@@ -271,20 +271,20 @@ pub fn self_check() -> Result<(), String> {
     }
     // The other direction, and the one that keeps this out of everybody's
     // terminal: a capture nothing died in has no report at all.
-    let healthy = "[kernel 0.377 cpu0] NVMe: found\nBoot: complete\n";
+    let healthy = "[ 0.377 cpu0 kernel] NVMe: found\nBoot: complete\n";
     if death_report(healthy).is_some() {
         return Err(String::from("a clean capture produced a death report"));
     }
     // A *program* dying is not the machine's account either — the same
     // discrimination `died` makes, asked of the thing that quotes a capture.
-    let program = format!("[kernel 0.001 cpu0] up\n{USER_PANIC_LINE}\nmore output\n");
+    let program = format!("[ 0.001 cpu0 kernel] up\n{USER_PANIC_LINE}\nmore output\n");
     if death_report(&program).is_some() {
         return Err(format!("a program's own panic reads as the kernel's death:\n{program}"));
     }
     // Bounded, and it says by how much rather than trailing off. 400 lines of
     // report is four times what the deepest one in this tree writes.
     let flood: String = std::iter::once(DF_HEADER.to_string())
-        .chain((0..400).map(|i| format!("[kernel 6.204 cpu1]   line {i}")))
+        .chain((0..400).map(|i| format!("[ 6.204 cpu1 kernel]   line {i}")))
         .collect::<Vec<_>>()
         .join("\n");
     let bounded = death_report(&flood).ok_or("a 401-line report vanished")?;

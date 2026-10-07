@@ -12,6 +12,7 @@ use toyos_abi::log::LogRecord;
 use toyos_blackbox::{Kept, Recovery, Report};
 
 use super::read::{self, RecordSink};
+use super::LogStamp;
 
 /// Write the section at `report`'s end.
 pub fn seal_into(report: &mut Report<'_>) {
@@ -31,12 +32,12 @@ pub fn seal_into(report: &mut Report<'_>) {
 
     // One upper bound for both walks: a record committed between them is
     // stamped past it, so the second walk places what the first measured.
-    let to = read::newest_committed_at_ns();
+    let to = read::newest_committed();
     let mut measure = Measure(Recovery::new());
-    read::snapshot_committed(0, to, &mut measure);
+    read::snapshot_committed(LogStamp::ZERO, to, &mut measure);
     let mut kept = report.recovery(measure.0);
     if let Some(from) = kept.from() {
-        read::snapshot_committed(from, to, &mut Place(&mut kept));
+        read::snapshot_committed(LogStamp::since_zero(from), to, &mut Place(&mut kept));
     }
     kept.close();
 }

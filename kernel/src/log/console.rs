@@ -347,11 +347,11 @@ impl<F: FnMut(&[u8])> core::fmt::Write for Line<F> {
     }
 }
 
-/// Render one record as the console line; `logkeeper`'s `/log` sink renders the same line with a different prefix.
+/// Render one record as the console line; `logkeeper`'s `/log` sink renders the same line with its wall clock.
 pub fn write_line(record: &LogRecord, emit: impl FnMut(&[u8])) {
     use core::fmt::Write;
     let mut line = Line::new(emit);
-    let _ = write!(line, "{}", record.tagged("kernel"));
+    let _ = write!(line, "{record}");
     line.finish();
 }
 

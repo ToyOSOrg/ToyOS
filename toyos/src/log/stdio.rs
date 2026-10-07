@@ -294,7 +294,7 @@ mod target {
     }
 
     fn stamp(body: &mut Body) {
-        body.at_ns = toyos_abi::clock::nanos_since_boot();
+        body.at_ns = toyos_abi::clock::stamp_ns();
         body.pid = PID.load(Ordering::Relaxed);
         body.tid = toyos_abi::current_tid().0;
     }
