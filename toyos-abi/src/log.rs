@@ -80,41 +80,35 @@ impl Severity {
 /// counter at, so its `at_ns` is no time and its line says so ([`UNTIMED`]).
 pub const FLAG_UNTIMED: u8 = 1 << 0;
 
-/// What a reader gets. Plain POD, `Copy`, no interior mutability.
-#[repr(C, align(64))]
-#[derive(Clone, Copy)]
-pub struct LogRecord {
-    /// The record's identity. In the kernel's slot this same word is also the
-    /// validity word; by the time a reader holds a copy it is just the sequence
-    /// number, and it is what [`LogCursor::next`] counts in.
-    pub seq: u64,
-    /// Nanoseconds since the counter's zero: [`crate::clock::stamp_ns`]'s reading.
-    pub at_ns: u64,
-    pub pid: u32,
-    pub tid: u32,
-    pub cpu: u16,
-    /// Message bytes present in `msg`, never above [`MAX_RECORD_MESSAGE`].
-    pub len: u16,
-    /// Bytes the message would have had past [`MAX_RECORD_MESSAGE`],
-    /// saturating. **Never a silent truncation** — this is the difference
-    /// between a bound and a lie.
-    pub elided: u16,
-    pub severity: u8,
-    /// [`FLAG_UNTIMED`] and nothing else yet.
-    pub flags: u8,
-    pub msg: [u8; MAX_RECORD_MESSAGE],
+crate::user_safe! {
+    /// What a reader gets. Plain POD, `Copy`, no interior mutability.
+    #[repr(align(64))]
+    #[derive(Clone, Copy)]
+    pub struct LogRecord {
+        /// The record's identity. In the kernel's slot this same word is also the
+        /// validity word; by the time a reader holds a copy it is just the sequence
+        /// number, and it is what [`LogCursor::next`] counts in.
+        pub seq: u64,
+        /// Nanoseconds since the counter's zero: [`crate::clock::stamp_ns`]'s reading.
+        pub at_ns: u64,
+        pub pid: u32,
+        pub tid: u32,
+        pub cpu: u16,
+        /// Message bytes present in `msg`, never above [`MAX_RECORD_MESSAGE`].
+        pub len: u16,
+        /// Bytes the message would have had past [`MAX_RECORD_MESSAGE`],
+        /// saturating. **Never a silent truncation** — this is the difference
+        /// between a bound and a lie.
+        pub elided: u16,
+        pub severity: u8,
+        /// [`FLAG_UNTIMED`] and nothing else yet.
+        pub flags: u8,
+        pub msg: [u8; MAX_RECORD_MESSAGE],
+    }
 }
 
 const _: () = assert!(core::mem::size_of::<LogRecord>() == RECORD_BYTES);
 const _: () = assert!(core::mem::align_of::<LogRecord>() == 64);
-/// Every byte belongs to a field: this crosses the boundary through
-/// [`LogRecord::as_bytes`], so a gap would publish whatever the kernel stack
-/// held. Spelled as the sum of the field widths rather than as
-/// [`RECORD_BYTES`], which is the *other* claim about this struct — a padded
-/// layout that happened to reach 1024 bytes would satisfy that one.
-const _: () = assert!(
-    core::mem::size_of::<LogRecord>() == 8 + 8 + 4 + 4 + 2 + 2 + 2 + 1 + 1 + MAX_RECORD_MESSAGE
-);
 /// The kernel's slot is this layout with the first word made atomic, so the
 /// body it copies is everything past that word and must start where it does.
 const _: () = assert!(core::mem::offset_of!(LogRecord, at_ns) == core::mem::size_of::<u64>());
@@ -157,22 +151,6 @@ impl LogRecord {
                 // valid, so this cannot fail and is not an `expect` on input.
                 core::str::from_utf8(&bytes[..e.valid_up_to()]).unwrap_or("")
             }
-        }
-    }
-
-    /// The record's own bytes, which is what goes on the wire.
-    ///
-    /// Here rather than at the kernel's copy-out, the shape every ABI struct in
-    /// this crate has: the `unsafe` belongs beside the layout assertion that
-    /// discharges it, not beside the caller that happens to need it.
-    #[inline]
-    pub fn as_bytes(&self) -> &[u8] {
-        // SAFETY: `self` is a valid `&Self` (non-null, aligned, readable for
-        // `size_of::<Self>()` bytes), and the const assert above proves the
-        // `repr(C)` layout has no padding, so every byte the slice exposes is
-        // an initialized field, not a gap.
-        unsafe {
-            core::slice::from_raw_parts(self as *const Self as *const u8, core::mem::size_of::<Self>())
         }
     }
 
@@ -349,15 +327,15 @@ mod tests {
 
     /// **The encoder is the wire, so the test decodes the wire.**
     ///
-    /// Not `as_bytes().len() == RECORD_BYTES`, which a padded struct passes:
+    /// Not `bytes(&r).len() == RECORD_BYTES`, which a padded struct passes:
     /// every field is read back out of the slice at the offset `#[repr(C)]`
     /// puts it at, and the tail is the message. A gap anywhere before `msg`
     /// shifts one of these and the assertion that catches it is the one whose
     /// field moved.
     #[test]
-    fn as_bytes_is_the_fields_and_nothing_between_them() {
+    fn its_bytes_are_the_fields_and_nothing_between_them() {
         let r = record("hello");
-        let b = r.as_bytes();
+        let b = crate::usersafe::bytes(&r);
         assert_eq!(b.len(), RECORD_BYTES);
         assert_eq!(u64::from_ne_bytes(b[0..8].try_into().unwrap()), 7);
         assert_eq!(u64::from_ne_bytes(b[8..16].try_into().unwrap()), 1_234_567_890);

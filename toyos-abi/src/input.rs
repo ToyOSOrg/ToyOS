@@ -35,16 +35,6 @@ impl RawKeyEvent {
     pub fn ctrl(&self) -> bool { self.modifiers & MOD_CTRL != 0 }
     pub fn alt(&self) -> bool { self.modifiers & MOD_ALT != 0 }
     pub fn gui(&self) -> bool { self.modifiers & MOD_GUI != 0 }
-
-    pub fn as_bytes(&self) -> &[u8] {
-        // SAFETY: `self` is a valid `&Self` (non-null, aligned, readable for
-        // `size_of::<Self>()` bytes), and `user_safe!` refused any byte
-        // outside a field, so every byte the slice exposes is an initialized
-        // field, not a gap.
-        unsafe {
-            core::slice::from_raw_parts(self as *const Self as *const u8, core::mem::size_of::<Self>())
-        }
-    }
 }
 
 crate::user_safe! {
@@ -56,17 +46,5 @@ crate::user_safe! {
         pub scroll: i8,
         pub abs_x: u16,
         pub abs_y: u16,
-    }
-}
-
-impl MouseEvent {
-    pub fn as_bytes(&self) -> &[u8] {
-        // SAFETY: `self` is a valid `&Self` (non-null, aligned, readable for
-        // `size_of::<Self>()` bytes), and `user_safe!` refused any byte
-        // outside a field, so every byte the slice exposes is an initialized
-        // field, not a gap.
-        unsafe {
-            core::slice::from_raw_parts(self as *const Self as *const u8, core::mem::size_of::<Self>())
-        }
     }
 }

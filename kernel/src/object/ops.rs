@@ -395,7 +395,7 @@ pub fn read_device(
                 let mut count = 0;
                 while count + event_size <= buf.len() {
                     let Some(event) = keyboard::try_read_event() else { break };
-                    buf.write_at(count, event.as_bytes());
+                    buf.write_at(count, toyos_abi::usersafe::bytes(&event));
                     count += event_size;
                 }
                 if count > 0 { Some(count as u64) } else { None }
@@ -405,7 +405,7 @@ pub fn read_device(
                 let mut count = 0;
                 while count + event_size <= buf.len() {
                     let Some(event) = mouse::try_read_event() else { break };
-                    buf.write_at(count, event.as_bytes());
+                    buf.write_at(count, toyos_abi::usersafe::bytes(&event));
                     count += event_size;
                 }
                 if count > 0 { Some(count as u64) } else { None }

@@ -6,6 +6,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use toyos_abi::handle::{RawHandle, Rights};
 use toyos_abi::syscall::SyscallError;
+use toyos_abi::usersafe::bytes;
 use toyos_abi::FramebufferInfo;
 
 use crate::device::{Claim, DeviceType};
@@ -70,23 +71,23 @@ impl DeviceInfo {
                 )?;
                 info.scanout = [h[0], h[1]];
                 info.cursor = h[2];
-                info.as_bytes().into()
+                bytes(&info).into()
             }
             // Nothing to install: every address in it is a size, and the memory
             // is what `SYS_DEVICE_DMA_ALLOC` answers later.
-            Self::PciFunction(info, _) => info.as_bytes().into(),
-            Self::Partition(info) => info.as_bytes().into(),
+            Self::PciFunction(info, _) => bytes(info).into(),
+            Self::Partition(info) => bytes(info).into(),
             Self::Isa(set, _) => set.wire().iter().flat_map(|word| word.to_ne_bytes()).collect(),
-            Self::Acpi(info, _) => info.as_bytes().into(),
+            Self::Acpi(info, _) => bytes(info).into(),
             Self::Hda(info, pcm) => {
                 let mut info = *info;
                 info.pcm = install_buffers(table, &[pcm])?[0];
-                info.as_bytes().into()
+                bytes(&info).into()
             }
             Self::VirtioSound(info, dma) => {
                 let mut info = *info;
                 info.dma = install_buffers(table, &[dma])?[0];
-                info.as_bytes().into()
+                bytes(&info).into()
             }
         })
     }

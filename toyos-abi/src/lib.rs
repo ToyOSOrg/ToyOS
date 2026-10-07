@@ -95,18 +95,6 @@ crate::user_safe! {
     }
 }
 
-impl FramebufferInfo {
-    pub fn as_bytes(&self) -> &[u8] {
-        // SAFETY: `self` is a valid `&Self` (non-null, aligned, readable for
-        // `size_of::<Self>()` bytes), and `user_safe!` refused any byte
-        // outside a field, so every byte the slice exposes is an initialized
-        // field, not a gap.
-        unsafe {
-            core::slice::from_raw_parts(self as *const Self as *const u8, core::mem::size_of::<Self>())
-        }
-    }
-}
-
 // SAFETY: FramebufferInfo is #[repr(C)] and every field is a u32 or a
 // `repr(transparent)` wrapper over one — no padding, no pointers.
 unsafe impl Sync for FramebufferInfo {}

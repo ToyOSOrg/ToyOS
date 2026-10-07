@@ -125,7 +125,7 @@ fn rings() -> Rings<WORDS, SLOTS> {
 
 /// Copies records `cursor` has not seen into `out`, oldest first; never blocks.
 pub fn read(cursor: &mut TraceCursor, out: &mut UserBytesMut, capacity: usize) -> Result<usize, SyscallError> {
-    crate::log::user::read_rings(&rings(), &mut cursor.0, out, capacity, TraceRecord::as_bytes)
+    crate::log::user::read_rings(&rings(), &mut cursor.0, out, capacity)
 }
 
 /// [`Kind::Mark`] records `count` of them on this CPU, `data` counting up, and

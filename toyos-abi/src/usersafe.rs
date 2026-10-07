@@ -26,6 +26,12 @@ integers!(u8 i8 u16 i16 u32 i32 u64 i64);
 // SAFETY: an array is its elements end to end, with nothing between or after them.
 unsafe impl<T: UserSafe, const N: usize> UserSafe for [T; N] {}
 
+/// The bytes of a value, which are what it is on the wire.
+pub fn bytes<T: UserSafe>(value: &T) -> &[u8] {
+    // SAFETY: a `&T` is readable for `size_of::<T>()` bytes, and `T: UserSafe` leaves none of them padding.
+    unsafe { core::slice::from_raw_parts(core::ptr::from_ref(value).cast(), core::mem::size_of::<T>()) }
+}
+
 /// The size of a field, for a field that is [`UserSafe`].
 #[doc(hidden)]
 pub const fn field<T: UserSafe>() -> usize {
@@ -92,9 +98,9 @@ macro_rules! user_safe {
         $crate::user_safe!(@impl $name: $ty);
     };
     (@impl $name:ident: $($ty:ty),*) => {
-        const _: () = assert!(
+        const _: () = ::core::assert!(
             ::core::mem::size_of::<$name>() == 0 $(+ $crate::usersafe::field::<$ty>())*,
-            concat!("a byte of `", stringify!($name), "` belongs to no field"),
+            ::core::concat!("a byte of `", stringify!($name), "` belongs to no field"),
         );
         // SAFETY: every field is `UserSafe`, and the assertion above leaves no byte outside one.
         unsafe impl $crate::UserSafe for $name {}

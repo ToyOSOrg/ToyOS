@@ -4,8 +4,9 @@
 //!
 //! [`Rights::LOG`]: toyos_abi::handle::Rights::LOG
 
-use toyos_abi::log::{LogCursor, LogRecord};
+use toyos_abi::log::LogCursor;
 use toyos_abi::syscall::SyscallError;
+use toyos_abi::UserSafe;
 
 use crate::watch::Watch;
 use crate::user_ptr::UserBytesMut;
@@ -24,19 +25,18 @@ pub fn post_readiness() {
 }
 
 // Fixed stride, never packed: the caller indexes by shift, so the kernel does no length arithmetic.
-struct UserRecords<'a, 'b, R> {
+struct UserRecords<'a, 'b> {
     out: &'a mut UserBytesMut<'b>,
     written: usize,
     capacity: usize,
-    bytes: fn(&R) -> &[u8],
 }
 
-impl<R> RecordSink<R> for UserRecords<'_, '_, R> {
+impl<R: UserSafe> RecordSink<R> for UserRecords<'_, '_> {
     fn put(&mut self, record: &R) -> bool {
         if self.written >= self.capacity {
             return false;
         }
-        let bytes = (self.bytes)(record);
+        let bytes = toyos_abi::usersafe::bytes(record);
         self.out.write_at(self.written * bytes.len(), bytes);
         self.written += 1;
         true
@@ -49,20 +49,19 @@ pub fn read(
     out: &mut UserBytesMut,
     capacity: usize,
 ) -> Result<usize, SyscallError> {
-    read_rings(&super::shards(), cursor, out, capacity, LogRecord::as_bytes)
+    read_rings(&super::shards(), cursor, out, capacity)
 }
 
-/// Copies records `cursor` has not seen in `rings` into `out`, oldest first,
-/// each as `bytes` writes it; never blocks.
+/// Copies records `cursor` has not seen in `rings` into `out`, oldest first;
+/// never blocks.
 pub fn read_rings<const W: usize, const N: usize>(
     rings: &Rings<W, N>,
     cursor: &mut LogCursor,
     out: &mut UserBytesMut,
     capacity: usize,
-    bytes: fn(&<Ring<W, N> as Stream>::Record) -> &[u8],
 ) -> Result<usize, SyscallError>
 where
-    Ring<W, N>: Stream,
+    Ring<W, N>: Stream<Record: UserSafe>,
 {
     let shards = rings.iter().flatten().count() as u32;
     // Refused, not truncated: a capacity below one record per ring cannot hold what a single call may have to merge.
@@ -73,7 +72,7 @@ where
     let Some(mut walk) = Cursor::from_reader(cursor, rings) else {
         return Err(SyscallError::InvalidArgument);
     };
-    let mut sink = UserRecords { out, written: 0, capacity, bytes };
+    let mut sink = UserRecords { out, written: 0, capacity };
     drain_ordered(rings, &mut walk, &mut sink);
     let written = sink.written;
 
