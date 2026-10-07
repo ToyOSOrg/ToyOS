@@ -7,9 +7,9 @@
 //! (§19.3.5.8), and so does a return (§19.6.118).
 //!
 //! Every string, buffer and package, every loaded table a method still runs
-//! from and every namespace node is held against its interpreter's [`Meter`]
-//! from its making to its end, so what one interpreter holds live is bounded
-//! in sum.
+//! from, every namespace node and every package element's name not yet
+//! defined is held against its interpreter's [`Meter`] from its making to its
+//! end, so what one interpreter holds live is bounded in sum.
 //!
 //! A reference to a LocalX or ArgX does not hold it: the frame alone does,
 //! and once its method exits the reference names nothing. A reference to a
@@ -33,8 +33,11 @@ pub(crate) type Slot = Rc<RefCell<Object>>;
 
 /// What one interpreter holds live, in bytes: a string's, buffer's or
 /// table's length, a package's elements at [`ELEMENT`] bytes each, a
-/// namespace node at the size of one. It counts those alone, not what a
-/// node or an element points at beside them, nor the allocator's overhead.
+/// namespace node at the size of one, and an element's name not yet defined
+/// at its own size and its segments'. Whatever a table sizes is counted;
+/// what is not is bounded by a constant for each node and element: a field's
+/// or method's own record, a node's entry among its parent's children, a
+/// shared object's counts, the allocator's overhead.
 pub(crate) struct Meter {
     live: Cell<usize>,
 }
@@ -69,6 +72,12 @@ impl Meter {
         counted(v.len())?;
         self.take(v.len() * ELEMENT)?;
         Ok(Rc::new(List { v: RefCell::new(v), meter: self.clone() }))
+    }
+
+    /// A package element's name that `scope` does not resolve yet.
+    pub(crate) fn unresolved(self: &Rc<Self>, path: Path, scope: NodeId) -> Result<Rc<Unresolved>, Error> {
+        self.take(Unresolved::held(&path))?;
+        Ok(Rc::new(Unresolved { path, scope, meter: self.clone() }))
     }
 }
 
@@ -136,6 +145,27 @@ impl Drop for List {
     }
 }
 
+/// A package element named by a path that did not resolve when the package
+/// was evaluated, held against a [`Meter`]: a path is as long as its table
+/// wrote it.
+pub(crate) struct Unresolved {
+    pub(crate) path: Path,
+    pub(crate) scope: NodeId,
+    meter: Rc<Meter>,
+}
+
+impl Unresolved {
+    fn held(path: &Path) -> usize {
+        core::mem::size_of::<Unresolved>() + core::mem::size_of_val(path.segs.as_slice())
+    }
+}
+
+impl Drop for Unresolved {
+    fn drop(&mut self) {
+        self.meter.give(Self::held(&self.path));
+    }
+}
+
 pub(crate) fn bounded(len: usize) -> Result<(), Error> {
     if len > MAX_BYTES { Err(Error::Bound("an object larger than this interpreter holds")) } else { Ok(()) }
 }
@@ -167,9 +197,8 @@ pub(crate) enum Object {
     /// An Event's pending signal count (§19.6.147).
     Event(Rc<Cell<u64>>),
     Region(Rc<Region>),
-    /// A package element named by a path that did not resolve when the
-    /// package was evaluated; it is resolved when read (§19.6.101).
-    Lazy(Rc<(Path, NodeId)>),
+    /// A package element whose name is resolved when read (§19.6.101).
+    Lazy(Rc<Unresolved>),
 }
 
 /// An object reference (§19.6.113, §19.6.62).

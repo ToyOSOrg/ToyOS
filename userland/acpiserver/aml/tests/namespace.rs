@@ -33,7 +33,7 @@ fn a_dsdt_loads_first_and_then_ssdts() {
 fn the_predefined_objects_are_there_before_any_table() {
     let (mut i, mut m) = loaded(&cat(&[
         &method("TSB", 0, &ret(&object_type(&name("\\_SB")))),
-        &method("TGL", 0, &ret(&object_type(&name("\\_GL")))),
+        &method("GLTY", 0, &ret(&object_type(&name("\\_GL")))),
         &method("TOSI", 0, &ret(&object_type(&name("\\_OSI")))),
     ]));
     // The owner's ruling (2026-10-05): "Microsoft Windows NT", as Windows answers.
@@ -41,7 +41,7 @@ fn the_predefined_objects_are_there_before_any_table() {
     assert_eq!(i.evaluate(&mut m, "\\_REV", &[]), Ok(Value::Integer(2)));
     // Table 19.36: a predefined scope is typeless, \_GL a Mutex, \_OSI a Method.
     assert_eq!(i.evaluate(&mut m, "\\TSB", &[]), Ok(Value::Integer(0)));
-    assert_eq!(i.evaluate(&mut m, "\\TGL", &[]), Ok(Value::Integer(9)));
+    assert_eq!(i.evaluate(&mut m, "\\GLTY", &[]), Ok(Value::Integer(9)));
     assert_eq!(i.evaluate(&mut m, "\\TOSI", &[]), Ok(Value::Integer(8)));
 }
 
@@ -291,11 +291,11 @@ fn a_package_names_its_elements() {
     let (mut i, mut m) = loaded(&cat(&[
         &def_name("INT1", &int(0x1234)),
         &device("DEV0", &[]),
-        &def_name("PKG1", &package(&[int(0x3400), name("\\INT1"), name("\\DEV0"), name("\\LATE")])),
+        &def_name("MIXD", &package(&[int(0x3400), name("\\INT1"), name("\\DEV0"), name("\\LATE")])),
         &def_name("LATE", &int(5)),
     ]));
     assert_eq!(
-        int_of(&mut i, &mut m, "\\PKG1"),
+        int_of(&mut i, &mut m, "\\MIXD"),
         Ok(Value::Package(vec![
             Value::Integer(0x3400),
             Value::Integer(0x1234),

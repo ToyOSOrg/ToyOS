@@ -24,7 +24,7 @@ use crate::name::{text, Path, Seg};
 use crate::namespace::{Namespace, NodeId};
 use crate::object::{
     bounded, decimal, fit, hex2, joined, slot_of, to_buf, to_int, to_str, Body, Bytes, Meter, Method, Mutex, Object, Ref,
-    Slot, Width,
+    Slot, Unresolved, Width,
 };
 use crate::stream::{starts_name, Cursor};
 use crate::{Error, Host, MAX_DEPTH, MAX_NESTING, MAX_STEPS, MAX_WAIT_US, REVISION, WINDOWS, WORK_PER_STEP};
@@ -106,9 +106,10 @@ fn type_name(code: u64) -> &'static [u8] {
     }
 }
 
-/// DerefOf of a String names an object by ASL text (§19.6.30).
-fn path_of_text(s: &[u8]) -> Result<Path, Error> {
-    Path::text(s).ok_or(Error::Rule("DerefOf of a String that is not a name (§19.6.30)"))
+/// One step more, refused past the bound.
+fn tick(steps: &mut u64) -> Result<(), Error> {
+    *steps += 1;
+    if *steps > MAX_STEPS { Err(Error::Bound("more steps than one evaluation may take")) } else { Ok(()) }
 }
 
 impl<'a> Machine<'a> {
@@ -122,14 +123,18 @@ impl<'a> Machine<'a> {
         self.step()
     }
 
-    pub(crate) fn new_str(&mut self, v: Vec<u8>) -> Result<Object, Error> {
+    /// Bytes made, charged for and held against the meter.
+    pub(crate) fn bytes(&mut self, v: Vec<u8>) -> Result<Bytes, Error> {
         self.charge(v.len())?;
-        Ok(Object::Str(self.meter.bytes(v)?))
+        self.meter.bytes(v)
+    }
+
+    pub(crate) fn new_str(&mut self, v: Vec<u8>) -> Result<Object, Error> {
+        Ok(Object::Str(self.bytes(v)?))
     }
 
     pub(crate) fn new_buf(&mut self, v: Vec<u8>) -> Result<Object, Error> {
-        self.charge(v.len())?;
-        Ok(Object::Buf(self.meter.bytes(v)?))
+        Ok(Object::Buf(self.bytes(v)?))
     }
 
     fn new_pkg(&mut self, v: Vec<Object>) -> Result<Object, Error> {
@@ -180,8 +185,34 @@ impl<'a> Machine<'a> {
     }
 
     pub(crate) fn step(&mut self) -> Result<(), Error> {
-        self.steps += 1;
-        if self.steps > MAX_STEPS { Err(Error::Bound("more steps than one evaluation may take")) } else { Ok(()) }
+        tick(&mut self.steps)
+    }
+
+    /// A NameString read (§20.2.2), charged for its bytes: a table writes as
+    /// many parent prefixes and segments as it likes.
+    fn name(&mut self, c: &mut Cursor<'_>) -> Result<Path, Error> {
+        let at = c.at;
+        let p = c.name()?;
+        self.charge(c.at - at)?;
+        Ok(p)
+    }
+
+    /// The object a path names from `scope` (§5.3), if it names one.
+    fn find(&mut self, scope: NodeId, p: &Path) -> Result<Option<NodeId>, Error> {
+        let steps = &mut self.steps;
+        self.ns.resolve(scope, p, &mut || tick(steps))
+    }
+
+    /// The absolute path of a node, and of `child` below it when given.
+    pub(crate) fn path_of(&mut self, id: NodeId, child: Option<Seg>) -> Result<String, Error> {
+        let steps = &mut self.steps;
+        self.ns.path_of(id, child, &mut || tick(steps))
+    }
+
+    /// DerefOf of a String names an object by ASL text (§19.6.30), read whole.
+    fn path_of_text(&mut self, s: &Bytes) -> Result<Path, Error> {
+        self.charge(s.borrow().len())?;
+        Path::text(&s.borrow()).ok_or(Error::Rule("DerefOf of a String that is not a name (§19.6.30)"))
     }
 
     pub(crate) fn enter(&mut self) -> Result<(), Error> {
@@ -243,13 +274,14 @@ impl<'a> Machine<'a> {
     }
 
     fn define(&mut self, f: &mut Frame, p: &Path, o: Object) -> Result<NodeId, Error> {
-        let id = self.ns.create(f.scope, p, o)?;
+        let steps = &mut self.steps;
+        let id = self.ns.create(f.scope, p, o, &mut || tick(steps))?;
         f.created.push(id);
         Ok(id)
     }
 
-    fn resolve(&self, f: &Frame, p: &Path) -> Result<NodeId, Error> {
-        self.ns.resolve(f.scope, p).ok_or_else(|| Error::NotFound(text(p)))
+    fn resolve(&mut self, f: &Frame, p: &Path) -> Result<NodeId, Error> {
+        self.find(f.scope, p)?.ok_or_else(|| Error::NotFound(text(p)))
     }
 
     fn node_object(&self, id: NodeId) -> Result<Object, Error> {
@@ -309,24 +341,18 @@ impl<'a> Machine<'a> {
         }
     }
 
-    /// A package element a name gave (§19.6.101): data is resolved to its
-    /// value, anything else is a reference; a name not yet defined is
-    /// resolved when read.
-    fn element(&mut self, scope: NodeId, p: &Path) -> Result<Object, Error> {
-        match self.ns.resolve(scope, p) {
-            Some(id) => Ok(match self.node_value(id)? {
-                d @ (Object::Int(_) | Object::Str(_) | Object::Buf(_) | Object::Pkg(_)) => self.copy(&d)?,
-                o => o,
-            }),
-            None => Ok(Object::Lazy(Rc::new((p.clone(), scope)))),
-        }
+    /// A package element a name gave (§19.6.101), if `scope` resolves the
+    /// name: data is resolved to its value, anything else is a reference.
+    fn element(&mut self, scope: NodeId, p: &Path) -> Result<Option<Object>, Error> {
+        let Some(id) = self.find(scope, p)? else { return Ok(None) };
+        Ok(Some(match self.node_value(id)? {
+            d @ (Object::Int(_) | Object::Str(_) | Object::Buf(_) | Object::Pkg(_)) => self.copy(&d)?,
+            o => o,
+        }))
     }
 
-    fn lazy(&mut self, l: &(Path, NodeId)) -> Result<Object, Error> {
-        match self.element(l.1, &l.0)? {
-            Object::Lazy(_) => Err(Error::NotFound(text(&l.0))),
-            o => Ok(o),
-        }
+    fn lazy(&mut self, l: &Unresolved) -> Result<Object, Error> {
+        self.element(l.scope, &l.path)?.ok_or_else(|| Error::NotFound(text(&l.path)))
     }
 
     pub(crate) fn resolve_lazy(&mut self, o: Object) -> Result<Object, Error> {
@@ -380,11 +406,10 @@ impl<'a> Machine<'a> {
     /// `\_OSI` (§5.7.2), answered as the owner ruled: yes to every Windows
     /// version string Microsoft publishes, no to anything else.
     fn osi(&mut self, args: Vec<Object>) -> Result<Object, Error> {
-        let s = match args.first() {
-            Some(Object::Str(s)) => s.borrow().clone(),
-            _ => return Err(Error::Type("_OSI's argument is not a String (§5.7.2)")),
+        let Some(Object::Str(s)) = args.first() else {
+            return Err(Error::Type("_OSI's argument is not a String (§5.7.2)"));
         };
-        Ok(Object::Int(self.w.bool(WINDOWS.iter().any(|w| w.as_bytes() == s.as_slice()))))
+        Ok(Object::Int(self.w.bool(WINDOWS.iter().any(|w| w.as_bytes() == s.borrow().as_slice()))))
     }
 
     // ---- term lists -------------------------------------------------------
@@ -411,7 +436,7 @@ impl<'a> Machine<'a> {
         let op = c.peek()?;
         if starts_name(op) {
             // MethodInvocation (§20.2.5): a name alone in a term list.
-            let p = c.name()?;
+            let p = self.name(c)?;
             let id = self.resolve(f, &p)?;
             let Object::Method(m) = self.node_object(id)? else {
                 return Err(c.malformed("a name in a term list names no method (§20.2.5)"));
@@ -524,17 +549,18 @@ impl<'a> Machine<'a> {
 
     fn def_alias(&mut self, f: &mut Frame, c: &mut Cursor<'_>) -> Result<Flow, Error> {
         c.byte()?;
-        let source = c.name()?;
-        let alias = c.name()?;
+        let source = self.name(c)?;
+        let alias = self.name(c)?;
         let target = self.resolve(f, &source)?;
-        let id = self.ns.alias(f.scope, &alias, target)?;
+        let steps = &mut self.steps;
+        let id = self.ns.alias(f.scope, &alias, target, &mut || tick(steps))?;
         f.created.push(id);
         Ok(Flow::Next)
     }
 
     fn def_name(&mut self, f: &mut Frame, c: &mut Cursor<'_>) -> Result<Flow, Error> {
         c.byte()?;
-        let p = c.name()?;
+        let p = self.name(c)?;
         let v = self.data_object(f, c)?;
         self.define(f, &p, v)?;
         Ok(Flow::Next)
@@ -544,7 +570,7 @@ impl<'a> Machine<'a> {
         c.byte()?;
         let end = c.pkg_end()?;
         let mut body = Self::sub(c, end);
-        let p = body.name()?;
+        let p = self.name(&mut body)?;
         let id = self.resolve(f, &p)?;
         // §19.6.120: a Scope's location is a predefined scope, a Device, a
         // Processor, a Thermal Zone or a Power Resource.
@@ -573,7 +599,7 @@ impl<'a> Machine<'a> {
         let op = c.byte()?;
         let end = c.pkg_end()?;
         let mut body = Self::sub(c, end);
-        let p = body.name()?;
+        let p = self.name(&mut body)?;
         let o = match op {
             0x82 => Object::Device,
             0x85 => Object::ThermalZone,
@@ -604,7 +630,7 @@ impl<'a> Machine<'a> {
         c.byte()?;
         let end = c.pkg_end()?;
         let mut head = Self::sub(c, end);
-        let p = head.name()?;
+        let p = self.name(&mut head)?;
         let flags = head.byte()?;
         let m = Method {
             body: Body::Aml { table: f.table.clone(), start: head.at, end },
@@ -621,7 +647,7 @@ impl<'a> Machine<'a> {
     /// and defines nothing.
     fn def_external(&mut self, c: &mut Cursor<'_>) -> Result<Flow, Error> {
         c.byte()?;
-        c.name()?;
+        self.name(c)?;
         c.byte()?;
         c.byte()?;
         Ok(Flow::Next)
@@ -630,7 +656,7 @@ impl<'a> Machine<'a> {
     fn def_mutex(&mut self, f: &mut Frame, c: &mut Cursor<'_>) -> Result<Flow, Error> {
         c.byte()?;
         c.byte()?;
-        let p = c.name()?;
+        let p = self.name(c)?;
         // SyncFlags: the SyncLevel in bits 0-3, the rest reserved (§20.2.5.2).
         let sync = c.byte()? & 0x0F;
         self.define(f, &p, Object::Mutex(Rc::new(Mutex { sync, held: Cell::new(0), global: false })))?;
@@ -640,7 +666,7 @@ impl<'a> Machine<'a> {
     fn def_event(&mut self, f: &mut Frame, c: &mut Cursor<'_>) -> Result<Flow, Error> {
         c.byte()?;
         c.byte()?;
-        let p = c.name()?;
+        let p = self.name(c)?;
         self.define(f, &p, Object::Event(Rc::new(Cell::new(0))))?;
         Ok(Flow::Next)
     }
@@ -648,24 +674,28 @@ impl<'a> Machine<'a> {
     fn def_region(&mut self, f: &mut Frame, c: &mut Cursor<'_>) -> Result<Flow, Error> {
         c.byte()?;
         c.byte()?;
-        let p = c.name()?;
+        let p = self.name(c)?;
         let space = c.byte()?;
         let base = self.int_arg(f, c)?;
         let len = self.int_arg(f, c)?;
-        let r = Region { space, base, len, scope: f.scope, pci: Cell::new(None) };
+        let r = Region { space, base, len, scope: f.scope };
         self.define(f, &p, Object::Region(Rc::new(r)))?;
         Ok(Flow::Next)
     }
 
-    fn field_of(&self, f: &Frame, p: &Path) -> Result<Rc<Field>, Error> {
-        match self.node_object(self.resolve(f, p)?)? {
+    fn field_of(&mut self, f: &Frame, c: &mut Cursor<'_>) -> Result<Rc<Field>, Error> {
+        let p = self.name(c)?;
+        let id = self.resolve(f, &p)?;
+        match self.node_object(id)? {
             Object::Field(x) => Ok(x),
             _ => Err(Error::Type("an IndexField's or BankField's register is not a field unit (§19.6.63, §19.6.7)")),
         }
     }
 
-    fn region_of(&self, f: &Frame, p: &Path) -> Result<Rc<Region>, Error> {
-        match self.node_object(self.resolve(f, p)?)? {
+    fn region_of(&mut self, f: &Frame, c: &mut Cursor<'_>) -> Result<Rc<Region>, Error> {
+        let p = self.name(c)?;
+        let id = self.resolve(f, &p)?;
+        match self.node_object(id)? {
             Object::Region(r) => Ok(r),
             _ => Err(Error::Type("a field's RegionName is not an operation region (§19.6.47)")),
         }
@@ -679,15 +709,15 @@ impl<'a> Machine<'a> {
         let end = c.pkg_end()?;
         let mut l = Self::sub(c, end);
         let kind = match op {
-            0x81 => Kind::Region(self.region_of(f, &l.name()?)?),
+            0x81 => Kind::Region(self.region_of(f, &mut l)?),
             0x86 => {
-                let index = self.field_of(f, &l.name()?)?;
-                let data = self.field_of(f, &l.name()?)?;
+                let index = self.field_of(f, &mut l)?;
+                let data = self.field_of(f, &mut l)?;
                 Kind::Index { index, data }
             }
             _ => {
-                let region = self.region_of(f, &l.name()?)?;
-                let bank = self.field_of(f, &l.name()?)?;
+                let region = self.region_of(f, &mut l)?;
+                let bank = self.field_of(f, &mut l)?;
                 let value = self.int_arg(f, &mut l)?;
                 Kind::Bank { region, bank, value }
             }
@@ -717,7 +747,7 @@ impl<'a> Machine<'a> {
                     if l.peek()? == 0x11 {
                         self.data_object(f, &mut l)?;
                     } else {
-                        l.name()?;
+                        self.name(&mut l)?;
                     }
                 }
                 _ => {
@@ -749,10 +779,7 @@ impl<'a> Machine<'a> {
             Object::Buf(b) => b,
             o => {
                 let v = to_buf(&o, self.w)?;
-                match self.new_buf(v)? {
-                    Object::Buf(b) => b,
-                    _ => return Err(Error::Rule("a buffer that is not one")),
-                }
+                self.bytes(v)?
             }
         };
         let index = self.int_arg(f, c)?;
@@ -770,7 +797,7 @@ impl<'a> Machine<'a> {
                 (Some(index), n)
             }
         };
-        let p = c.name()?;
+        let p = self.name(c)?;
         let size = (data.borrow().len() as u64).saturating_mul(8);
         let bit = bit.filter(|b| b.checked_add(len).is_some_and(|e| e <= size));
         let bit = bit.ok_or(Error::Rule("a buffer field reaches past its buffer (§19.6.18-23)"))?;
@@ -789,7 +816,7 @@ impl<'a> Machine<'a> {
         if !matches!(self.node_object(id)?, Object::Device | Object::Processor | Object::ThermalZone) {
             return Err(Error::Type("Notify of an object that is not a device, processor or thermal zone (§19.6.94)"));
         }
-        let path = self.ns.path_of(id, None);
+        let path = self.path_of(id, None)?;
         self.host.notify(&path, v);
         Ok(Flow::Next)
     }
@@ -904,7 +931,7 @@ impl<'a> Machine<'a> {
 
     /// A name in an argument position: a method it names is invoked.
     fn named(&mut self, f: &mut Frame, c: &mut Cursor<'_>) -> Result<Object, Error> {
-        let p = c.name()?;
+        let p = self.name(c)?;
         let id = self.resolve(f, &p)?;
         match self.node_object(id)? {
             Object::Method(m) => {
@@ -976,8 +1003,11 @@ impl<'a> Machine<'a> {
                         return Err(p.malformed("a package holds more elements than its NumElements (§19.6.101)"));
                     }
                     let e = if starts_name(p.peek()?) {
-                        let path = p.name()?;
-                        self.element(f.scope, &path)?
+                        let path = self.name(&mut p)?;
+                        match self.element(f.scope, &path)? {
+                            Some(e) => e,
+                            None => Object::Lazy(self.meter.unresolved(path, f.scope)?),
+                        }
                     } else {
                         self.enter()?;
                         let e = self.data_object(f, &mut p);
@@ -1009,8 +1039,8 @@ impl<'a> Machine<'a> {
     fn super_name_or(&mut self, f: &mut Frame, c: &mut Cursor<'_>) -> Result<Result<Target, Path>, Error> {
         let op = c.peek()?;
         if starts_name(op) {
-            let p = c.name()?;
-            return Ok(self.ns.resolve(f.scope, &p).map(Target::Node).ok_or(p));
+            let p = self.name(c)?;
+            return Ok(self.find(f.scope, &p)?.map(Target::Node).ok_or(p));
         }
         Ok(Ok(match op {
             0x60..=0x67 => {
@@ -1036,7 +1066,7 @@ impl<'a> Machine<'a> {
                 match self.arg(f, c)? {
                     Object::Ref(r) => Target::Ref(r),
                     Object::Str(s) => {
-                        let p = path_of_text(&s.borrow())?;
+                        let p = self.path_of_text(&s)?;
                         Target::Node(self.resolve(f, &p)?)
                     }
                     _ => return Err(Error::Type("DerefOf of an object that is not a reference or a name (§19.6.30)")),
@@ -1176,7 +1206,7 @@ impl<'a> Machine<'a> {
                 // Table 19.7: a buffer that exists keeps its size.
                 let n = to_buf(&v, w)?;
                 let len = b.borrow().len();
-                self.charge(len)?;
+                self.charge(n.len().max(len))?;
                 b.replace(fit(n, len))
             }
             Object::Pkg(p) => match &v {
@@ -1383,7 +1413,7 @@ impl<'a> Machine<'a> {
         match self.arg(f, c)? {
             Object::Ref(r) => self.deref(&r),
             Object::Str(s) => {
-                let p = path_of_text(&s.borrow())?;
+                let p = self.path_of_text(&s)?;
                 let id = self.resolve(f, &p)?;
                 self.node_value(id)
             }
@@ -1665,11 +1695,15 @@ impl<'a> Machine<'a> {
                 }
             },
             0x99 => Object::Int(match &src {
-                Object::Str(s) => int_of_text(&s.borrow(), w)?,
+                Object::Str(s) => {
+                    self.charge(s.borrow().len())?;
+                    int_of_text(&s.borrow(), w)?
+                }
                 o => to_int(o, w)?,
             }),
             0x9C => {
                 let b = to_buf(&src, w)?;
+                self.charge(b.len())?;
                 let n = self.int_arg(f, c)?;
                 let n = if n == w.ones() { usize::MAX } else { usize::try_from(n).unwrap_or(usize::MAX) };
                 self.new_str(b.iter().take(n).take_while(|&&x| x != 0).copied().collect())?
@@ -1681,6 +1715,7 @@ impl<'a> Machine<'a> {
                     Object::Str(s) => (s.borrow().clone(), true),
                     o => (to_buf(o, w)?, false),
                 };
+                self.charge(data.len())?;
                 let start = usize::try_from(i).unwrap_or(usize::MAX).min(data.len());
                 let end = start.saturating_add(usize::try_from(n).unwrap_or(usize::MAX)).min(data.len());
                 let part = data[start..end].to_vec();

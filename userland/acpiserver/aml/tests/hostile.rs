@@ -122,11 +122,11 @@ fn seed() -> Vec<u8> {
                     &cat(&[
                         &def_name("_BBN", &int(0)),
                         &device(
-                            "LPCB",
+                            "ISAB",
                             &cat(&[
                                 &def_name("_ADR", &int(0x001F_0000)),
-                                &op_region("LPCR", 0x02, &int(0x40), &int(0x10)),
-                                &field("LPCR", 1, &[unit("R40", 8), unit("R41", 8)]),
+                                &op_region("ISAR", 0x02, &int(0x40), &int(0x10)),
+                                &field("ISAR", 1, &[unit("R40", 8), unit("R41", 8)]),
                             ]),
                         ),
                     ]),
@@ -209,7 +209,7 @@ fn mutated_tables_yield_a_value_or_a_refusal() {
         let (mut i, mut m) = loaded(&seed);
         assert_eq!(i.evaluate(&mut m, "\\MAIN", &[Value::Integer(1), Value::Integer(2)]), Ok(Value::Integer(0)));
     }
-    let paths = ["\\MAIN", "\\OSI", "\\_S5", "\\_SB.PKG", "\\_SB.BF", "\\_SB.A", "\\_SB.F1", "\\_SB.PCI0.LPCB.R41"];
+    let paths = ["\\MAIN", "\\OSI", "\\_S5", "\\_SB.PKG", "\\_SB.BF", "\\_SB.A", "\\_SB.F1", "\\_SB.PCI0.ISAB.R41"];
     let mut r = Rng(0x2545_F491_4F6C_DD1D);
     let (mut loads, mut values) = (0, 0);
     for _ in 0..20_000 {
@@ -275,6 +275,77 @@ fn work_in_one_step_is_charged_in_proportion() {
     }
 }
 
+/// How often `While (One) { op  Increment (\CNT) }` ran, in a method `scopes`
+/// devices down, before the step bound refused it.
+fn iterations(setup: &[u8], scopes: usize, op: &[u8]) -> u64 {
+    let mut body = method("MAIN", 0, &while_(&int(1), &cat(&[op, &increment(&name("\\CNT"))])));
+    for d in (0..scopes).rev() {
+        body = device(&format!("N{d:03}"), &body);
+    }
+    let main: String = (0..scopes).map(|d| format!("N{d:03}.")).collect();
+    let (mut i, mut m) = loaded(&cat(&[&def_name("CNT", &int(0)), setup, &body]));
+    assert!(matches!(i.evaluate(&mut m, &format!("\\{main}MAIN"), &[]), Err(Error::Bound(_))));
+    match i.evaluate(&mut m, "\\CNT", &[]) {
+        Ok(Value::Integer(n)) => n,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// The work one step may hide is a table's to size wherever a name is read
+/// or walked and wherever an operator reads more of an object than it makes:
+/// each is charged for all of it, so a loop of one gets no further than the
+/// step bound over that charge.
+#[test]
+fn a_walk_or_a_read_a_table_sizes_is_charged_for_all_of_it() {
+    const STEPS: u64 = 1 << 20;
+    const SCOPES: usize = 200;
+    const BYTES: usize = 1 << 14;
+    let cond_ref_of = |n: &[u8]| cat(&[&[0x5B, 0x12], n, &local(0)]);
+    let deep: Vec<String> = (0..SCOPES).map(|d| format!("N{d:03}")).collect();
+    let deep = format!("\\{}", deep.join("."));
+    let chain = (0..SCOPES).rev().fold(Vec::new(), |inner, d| device(&format!("N{d:03}"), &inner));
+    // A string an operator makes, which Name does not take: made at load.
+    let made = |text: &[u8]| {
+        let to_string = cat(&[&[0x9C], &buffer(&int(text.len() as u64), text), &ones(), ZERO]);
+        cat(&[&def_name("BIG", &string("")), &store(&to_string, &name("BIG"))])
+    };
+    let big = def_name("BIG", &buffer(&int(BYTES as u64), &[]));
+    let small = def_name("SMAL", &buffer(&int(1), &[]));
+    let per_scope = STEPS / SCOPES as u64;
+    let per_byte = STEPS / (BYTES / 64) as u64;
+    let cases: Vec<(&str, u64, u64)> = vec![
+        ("a lone name that is nowhere, searched to the root", per_scope, iterations(&[], SCOPES, &cond_ref_of(b"ZZZZ"))),
+        ("a path of that many segments", per_scope, iterations(&chain, 0, &cond_ref_of(&name(&deep)))),
+        ("a name behind parent prefixes", per_byte, iterations(&[], 0, &cond_ref_of(&cat(&[&vec![b'^'; BYTES], b"ZZZZ"])))),
+        ("parent prefixes, each a scope climbed", per_scope, iterations(&[], SCOPES, &cond_ref_of(&cat(&[&[b'^'; SCOPES], b"ZZZZ"])))),
+        (
+            "a definition by a path of that many segments",
+            per_scope,
+            iterations(&cat(&[&chain, &method("MAKE", 0, &def_name(&format!("{deep}.TMP"), &int(0)))]), 0, &name("MAKE")),
+        ),
+        ("Notify, which names its device by its path", per_scope, iterations(&[], SCOPES, &cat(&[&[0x86], &name("^"), &int(0x80)]))),
+        ("a long buffer stored to a short one", per_byte, iterations(&cat(&[&big, &small]), 0, &store(&name("BIG"), &name("SMAL")))),
+        (
+            "a long buffer stored to a buffer field of a bit",
+            per_byte,
+            iterations(&cat(&[&big, &small, &[0x8D], &name("SMAL"), &int(0), &name("BIT0")]), 0, &store(&name("BIG"), &name("BIT0"))),
+        ),
+        ("ToString of a long buffer's first character", per_byte, iterations(&big, 0, &cat(&[&[0x9C], &name("BIG"), &int(1), &local(0)]))),
+        ("Mid of a long buffer's first byte", per_byte, iterations(&big, 0, &cat(&[&[0x9E], &name("BIG"), &int(0), &int(1), &local(0)]))),
+        ("ToInteger of a long string of zeros", per_byte, iterations(&made(&vec![b'0'; BYTES]), 0, &cat(&[&[0x99], &name("BIG"), &local(0)]))),
+        (
+            "DerefOf of a long string that names the root",
+            per_byte,
+            iterations(&made(&cat(&[b"\\", &vec![b'^'; BYTES - 1]])), 0, &store(&deref(&name("BIG")), &local(0))),
+        ),
+    ];
+    let over: Vec<_> = cases.iter().filter(|(_, most, ran)| ran > most).collect();
+    assert!(over.is_empty(), "ran more often than the step bound over its charge, as (what, at most, ran): {over:#?}");
+    // Each loop did run: the bound is what ended it, not a refusal of its first pass.
+    let idle: Vec<_> = cases.iter().filter(|(_, _, ran)| *ran == 0).collect();
+    assert!(idle.is_empty(), "{idle:#?}");
+}
+
 /// BLOCKER 5: what an interpreter holds live is bounded in sum, not only
 /// object by object.
 #[test]
@@ -332,6 +403,18 @@ fn tables_and_names_are_held_against_the_live_bound() {
     let Some((t, Error::Bound(_))) = refused else { panic!("612,000 names are held: {refused:?}") };
     assert!(matches!(i.evaluate(&mut m, &format!("\\D{t}00.AAA"), &[]), Err(Error::NotFound(_))));
     assert_eq!(i.evaluate(&mut m, "\\_REV", &[]), Ok(Value::Integer(2)));
+
+    // Package elements naming objects no table defines, each by a path of 255
+    // segments: 1,020 a table, which holds no method and so is not kept.
+    let long = cat(&[&[b'\\', 0x2F, 255], &b"ZZZZ".repeat(255)]);
+    let unresolved = |t: usize| {
+        let packages: Vec<Vec<u8>> = (0..4).map(|p| def_name(&format!("P{p}"), &package(&vec![long.clone(); 255]))).collect();
+        table(b"SSDT", 2, &device(&format!("L{t:03}"), &packages.concat()))
+    };
+    let (mut i, mut m) = loaded(&[]);
+    let refused = (0..17).find_map(|t| i.load_bytes(&mut m, &unresolved(t)).err().map(|e| (t, e)));
+    let Some((t, Error::Bound(_))) = refused else { panic!("seventeen mebibytes of names are held: {refused:?}") };
+    assert!(matches!(i.evaluate(&mut m, &format!("\\L{t:03}"), &[]), Err(Error::NotFound(_))));
 }
 
 /// A host that takes every access and keeps none, for a store whose bound is

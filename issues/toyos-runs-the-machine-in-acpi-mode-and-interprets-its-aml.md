@@ -117,8 +117,11 @@ otherwise pay to find again:
   definition-block code reads SystemMemory and PCI_Config while it loads, and
   branches on what it reads: with every read answered zero the DSDT refers to
   a device its own other branch never defined, and is refused. The check
-  answered one 16-bit word, the chipset series, and nothing else. A run on
-  the machine itself is still owed, by the power-off stage, which puts the
+  answered one 16-bit word, the chipset series, and each bridge's Secondary
+  Bus Number register as a configured bridge does, and nothing else: one
+  SSDT reads a field below a bridge while it loads, and the interpreter
+  refuses a secondary bus that is not above the bridge's own. A run on the
+  machine itself is still owed, by the power-off stage, which puts the
   interpreter in the server.
 - **The T14's processor objects need `Load`.** Its tables hold eight `Load`
   opcodes and one `LoadTable`, none run while a table loads, and Linux lists eight tables
@@ -132,6 +135,18 @@ otherwise pay to find again:
   what the server does with an interpreter that is full. **Exit**: a test
   fills the budget through one method, and the server then evaluates a
   method that builds a buffer.
+- **The interpreter's 16 MiB is its meter's count, not its heap.** The meter
+  counts whatever a table sizes; each namespace node and package element
+  carries a constant beside that which it does not count (`object::Meter`,
+  `userland/acpiserver/aml/src/object.rs`). With the meter full, the heap an
+  interpreter held was 16,776,232 bytes when buffers filled it, 19,549,520
+  when package elements naming objects not yet defined did, and 41,091,744
+  when field units did. A load refused at the bound also leaves the
+  namespace's arena at the capacity it grew to: 24,115,888 bytes held after
+  one table naming 204,000 field units was refused. Owner: the power-off
+  stage, which gives the server its memory. **Exit**: the server states its
+  interpreter's bound in heap bytes, and a host test under a counting
+  allocator holds each of those three fills and that refused load to it.
 
 **Stage: power-off through the server** (the orchestrator's placement of "Yes,
 one path"). The ACPI server evaluates `\_S5` and powers the machine off.

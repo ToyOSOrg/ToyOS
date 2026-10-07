@@ -130,8 +130,8 @@ fn methods_take_their_declared_arguments_and_return_a_copy() {
         &method("SUM3", 3, &ret(&add(&add(&arg(0), &arg(1), ZERO), &arg(2), ZERO))),
         &method("MAIN", 0, &ret(&cat(&[&name("SUM3"), &int(1), &int(2), &int(3)]))),
         &def_name("BUF", &buffer(&int(2), &[7, 8])),
-        &method("GETB", 0, &ret(&name("BUF"))),
-        &method("POKE", 0, &cat(&[&store(&name("GETB"), &local(0)), &store(&int(9), &index(&local(0), &int(0), ZERO))])),
+        &method("SAME", 0, &ret(&name("BUF"))),
+        &method("POKE", 0, &cat(&[&store(&name("SAME"), &local(0)), &store(&int(9), &index(&local(0), &int(0), ZERO))])),
     ]));
     assert_eq!(ip.evaluate(&mut m, "\\MAIN", &[]), i(6));
     ip.evaluate(&mut m, "\\POKE", &[]).unwrap();

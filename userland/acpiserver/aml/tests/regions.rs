@@ -169,11 +169,11 @@ fn a_pci_config_region_addresses_its_devices_function() {
                 &cat(&[
                     bridge,
                     &device(
-                        "LPCB",
+                        "ISAB",
                         &cat(&[
                             &method("_ADR", 0, &ret(&int(0x001F_0003))),
-                            &op_region("LPCR", 0x02, &int(0x40), &int(0x10)),
-                            &field("LPCR", BYTE, &[skip(8), unit("R41", 8)]),
+                            &op_region("ISAR", 0x02, &int(0x40), &int(0x10)),
+                            &field("ISAR", BYTE, &[skip(8), unit("R41", 8)]),
                         ]),
                     ),
                 ]),
@@ -181,29 +181,94 @@ fn a_pci_config_region_addresses_its_devices_function() {
         )
     };
     let bridge = cat(&[&def_name("_BBN", &int(0x80)), &def_name("_SEG", &int(1))]);
-    let (m, _) = read(&lpc(&bridge), &[], "\\_SB.PCI0.LPCB.R41");
+    let (m, _) = read(&lpc(&bridge), &[], "\\_SB.PCI0.ISAB.R41");
     let at = Address::PciConfig { segment: 1, bus: 0x80, device: 0x1F, function: 3, offset: 0x41 };
     assert_eq!(m.accesses(), vec![Event::Read(at, Access::Byte)]);
-    let (_, v) = read(&lpc(&[]), &[], "\\_SB.PCI0.LPCB.R41");
+    let (_, v) = read(&lpc(&[]), &[], "\\_SB.PCI0.ISAB.R41");
     assert!(matches!(v, Err(Error::Unsupported(_))));
 }
 
-/// A device below a bridge is on the bus the bridge's Secondary Bus Number
-/// register names (PCI-to-PCI Bridge Architecture Specification 1.2,
-/// §3.2.5.4), read from the bridge on the bus above it.
+/// A device below bridges is on the bus the nearest one's Secondary Bus
+/// Number register names (PCI-to-PCI Bridge Architecture Specification 1.2,
+/// §3.2.5.4), each bridge read on the bus the one above it named, the first
+/// on the host bridge's `_BBN`.
 #[test]
-fn a_pci_config_region_below_a_bridge_is_on_its_secondary_bus() {
+fn a_pci_config_region_below_bridges_is_on_the_nearest_ones_secondary_bus() {
+    let below = |endpoint_scope: &[u8]| {
+        let lower = cat(&[&def_name("_ADR", &int(0x0000_0000)), &device("END0", endpoint_scope)]);
+        let upper = cat(&[&def_name("_ADR", &int(0x0003_0001)), &device("BRG1", &lower)]);
+        scope("\\_SB", &device("PCI0", &cat(&[&def_name("_BBN", &int(0x40)), &device("BRG0", &upper)])))
+    };
     let endpoint = cat(&[
         &def_name("_ADR", &int(0x0000_0001)),
         &op_region("CFG", 0x02, &int(0), &int(0x10)),
         &field("CFG", BYTE, &[unit("VEN", 8)]),
     ]);
-    let port = cat(&[&def_name("_ADR", &int(0x001C_0002)), &device("PXSX", &endpoint)]);
-    let body = scope("\\_SB", &device("PCI0", &cat(&[&def_name("_BBN", &int(0x40)), &device("RP03", &port)])));
-    let secondary = Address::PciConfig { segment: 0, bus: 0x40, device: 0x1C, function: 2, offset: 0x19 };
-    let (m, _) = read(&body, &[(secondary, &[0x45])], "\\_SB.PCI0.RP03.PXSX.VEN");
-    let at = Address::PciConfig { segment: 0, bus: 0x45, device: 0, function: 1, offset: 0 };
-    assert_eq!(m.accesses(), vec![Event::Read(secondary, Access::Byte), Event::Read(at, Access::Byte)]);
+    let upper = Address::PciConfig { segment: 0, bus: 0x40, device: 3, function: 1, offset: 0x19 };
+    let lower = Address::PciConfig { segment: 0, bus: 0x45, device: 0, function: 0, offset: 0x19 };
+    let at = Address::PciConfig { segment: 0, bus: 0x47, device: 0, function: 1, offset: 0 };
+    let ven = "\\_SB.PCI0.BRG0.BRG1.END0.VEN";
+    let (m, v) = read(&below(&endpoint), &[(upper, &[0x45]), (lower, &[0x47]), (at, &[0x86])], ven);
+    assert_eq!(v, Ok(Value::Integer(0x86)));
+    assert_eq!(m.accesses(), vec![Event::Read(upper, Access::Byte), Event::Read(lower, Access::Byte), Event::Read(at, Access::Byte)]);
+
+    // A bridge that is not configured answers 0, its register's reset value,
+    // and one may answer anything: a secondary bus that is not above the
+    // bridge's own names no bus below it, and nothing is accessed there.
+    for unset in [0x00, 0x40, 0x3F] {
+        let (m, v) = read(&below(&endpoint), &[(upper, &[unset])], ven);
+        assert!(matches!(v, Err(Error::Rule(_))), "{unset:#x}: {v:?}");
+        assert_eq!(m.accesses(), vec![Event::Read(upper, Access::Byte)], "{unset:#x}");
+    }
+
+    // A region a method declares addresses the device the method is in.
+    let get = method(
+        "GET",
+        0,
+        &cat(&[&op_region("TMP", 0x02, &int(0), &int(0x10)), &field("TMP", BYTE, &[unit("TVEN", 8)]), &ret(&name("TVEN"))]),
+    );
+    let (m, v) = read(
+        &below(&cat(&[&def_name("_ADR", &int(0x0000_0001)), &get])),
+        &[(upper, &[0x45]), (lower, &[0x47]), (at, &[0x86])],
+        "\\_SB.PCI0.BRG0.BRG1.END0.GET",
+    );
+    assert_eq!(v, Ok(Value::Integer(0x86)));
+    assert_eq!(m.accesses(), vec![Event::Read(upper, Access::Byte), Event::Read(lower, Access::Byte), Event::Read(at, Access::Byte)]);
+}
+
+/// A store to a field is of its source as the store found it: the function a
+/// PCI_Config field addresses is asked of firmware's own methods while the
+/// store is under way, and one that stores to the source changes nothing of
+/// what is written.
+#[test]
+fn a_field_store_writes_its_source_as_it_was_when_firmware_changes_it() {
+    let body = |source: &[u8]| {
+        device(
+            "PCI0",
+            &cat(&[
+                &def_name("_BBN", &int(0)),
+                &def_name("BUFF", source),
+                &method("_ADR", 0, &cat(&[&store(&int(0), &name("BUFF")), &ret(&int(0))])),
+                &op_region("CFG", 0x02, &int(0), &int(0x10)),
+                &field("CFG", DWORD, &[unit("FLD", 32)]),
+                &method("MAIN", 0, &store(&name("BUFF"), &name("FLD"))),
+            ]),
+        )
+    };
+    let fld = Address::PciConfig { segment: 0, bus: 0, device: 0, function: 0, offset: 0 };
+    let written = |source: &[u8]| {
+        let (mut i, mut m) = loaded(&body(source));
+        let r = i.evaluate(&mut m, "\\PCI0.MAIN", &[]);
+        (r, m.accesses(), i.evaluate(&mut m, "\\PCI0.BUFF", &[]))
+    };
+    let (r, accesses, after) = written(&buffer(&int(4), &[0x44, 0x33, 0x22, 0x11]));
+    assert!(r.is_ok(), "{r:?}");
+    assert_eq!(accesses, vec![Event::Write(fld, Access::DWord, 0x1122_3344)]);
+    assert_eq!(after, Ok(Value::Buffer(vec![0; 4])));
+    let (r, accesses, after) = written(&string("AB"));
+    assert!(r.is_ok(), "{r:?}");
+    assert_eq!(accesses, vec![Event::Write(fld, Access::DWord, 0x41), Event::Write(fld, Access::DWord, 0x42)]);
+    assert_eq!(after, Ok(s("0000000000000000")));
 }
 
 /// The example of §19.6.63: FET3, the high bit at indexed offset 0x2F.

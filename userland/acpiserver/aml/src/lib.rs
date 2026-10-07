@@ -207,7 +207,7 @@ impl Interpreter {
         let root = ns.root();
         let mut put = |name: &[u8; 4], o: Object| {
             let p = Path { root: true, up: 0, segs: alloc::vec![Seg(*name)] };
-            ns.create(root, &p, o).expect("the root is empty and every predefined name differs");
+            ns.create(root, &p, o, &mut || Ok(())).expect("the root is empty and every predefined name differs");
         };
         for scope in [b"_GPE", b"_PR_", b"_SB_", b"_SI_", b"_TZ_"] {
             put(scope, Object::Scope);
@@ -262,8 +262,7 @@ impl Interpreter {
     /// method is invoked with `args`, anything else is its value.
     pub fn evaluate(&mut self, host: &mut dyn Host, path: &str, args: &[Value]) -> Result<Value, Error> {
         let w = self.width.ok_or(Error::Table("nothing is loaded"))?;
-        let p = Path::absolute(path)?;
-        let id = self.ns.resolve(self.ns.root(), &p).ok_or_else(|| Error::NotFound(String::from(path)))?;
+        let id = self.named(path)?;
         let args = args.iter().map(|a| self.object_of(a, w, 0)).collect::<Result<Vec<_>, _>>()?;
         let mut m = Machine::new(&mut self.ns, host, w, self.meter.clone());
         let r = m.evaluate(id, args).and_then(|o| value_of(&mut m, o, 0));
@@ -283,12 +282,15 @@ impl Interpreter {
             Value::Package(p) => Object::Pkg(
                 self.meter.list(p.iter().map(|e| self.object_of(e, w, depth + 1)).collect::<Result<_, _>>()?)?,
             ),
-            Value::Reference(path) => {
-                let p = Path::absolute(path)?;
-                let id = self.ns.resolve(self.ns.root(), &p).ok_or_else(|| Error::NotFound(path.clone()))?;
-                Object::Ref(Ref::Node(id))
-            }
+            Value::Reference(path) => Object::Ref(Ref::Node(self.named(path)?)),
         })
+    }
+
+    /// The object at an absolute path the caller wrote, whose length is the
+    /// caller's and costs no evaluation a step.
+    fn named(&self, path: &str) -> Result<namespace::NodeId, Error> {
+        let p = Path::absolute(path)?;
+        self.ns.resolve(self.ns.root(), &p, &mut || Ok(()))?.ok_or_else(|| Error::NotFound(String::from(path)))
     }
 }
 
@@ -309,7 +311,7 @@ fn value_of(m: &mut Machine<'_>, o: Object, depth: usize) -> Result<Value, Error
             }
             Value::Package(out)
         }
-        Object::Ref(Ref::Node(id)) => Value::Reference(m.ns.path_of(id, None)),
+        Object::Ref(Ref::Node(id)) => Value::Reference(m.path_of(id, None)?),
         _ => return Err(Error::Unsupported("a reference to an unnamed object, handed to the caller")),
     })
 }

@@ -3,7 +3,9 @@
 //! Nodes live in an arena and are named by index and generation, so a
 //! reference to an object a method created and its exit destroyed
 //! (§5.5.2.3) resolves to nothing rather than to whatever reused its slot.
-//! Nothing here recurses over the tree's depth, which a table chooses.
+//! Nothing here recurses over the tree's depth, which a table chooses, as it
+//! does a path's length: every walk pays its caller's [`Toll`] for each scope
+//! it climbs and each segment it looks up.
 //! Every node is held against the interpreter's [`Meter`] from its creation
 //! to its removal.
 
@@ -15,6 +17,10 @@ use alloc::vec::Vec;
 use crate::name::{Path, Seg};
 use crate::object::{Meter, Object};
 use crate::Error;
+
+/// What a walk pays for a scope or a segment: a step of the evaluation it is
+/// part of, which refuses the walk at its bound.
+pub(crate) type Toll<'a> = &'a mut dyn FnMut() -> Result<(), Error>;
 
 /// The bytes a node is held at.
 const NODE: usize = core::mem::size_of::<Node>();
@@ -87,48 +93,55 @@ impl Namespace {
     /// The scope a path's segments are walked from: the root, or `scope`
     /// raised by its parent prefixes. A prefix above the root finds nothing
     /// (§5.3).
-    fn start(&self, scope: NodeId, path: &Path) -> Option<NodeId> {
+    fn start(&self, scope: NodeId, path: &Path, toll: Toll<'_>) -> Result<Option<NodeId>, Error> {
         if path.root {
-            return Some(self.root());
+            return Ok(Some(self.root()));
         }
         let mut at = scope;
         for _ in 0..path.up {
-            at = self.parent(at)?;
+            toll()?;
+            let Some(above) = self.parent(at) else { return Ok(None) };
+            at = above;
         }
-        Some(at)
+        Ok(Some(at))
     }
 
     /// The object a path names from `scope`, by §5.3's rules: a lone NameSeg
     /// is searched for in the scope and then each parent up to the root;
     /// anything else is looked up exactly.
-    pub(crate) fn resolve(&self, scope: NodeId, path: &Path) -> Option<NodeId> {
-        let mut at = self.start(scope, path)?;
+    pub(crate) fn resolve(&self, scope: NodeId, path: &Path, toll: Toll<'_>) -> Result<Option<NodeId>, Error> {
+        let Some(mut at) = self.start(scope, path, toll)? else { return Ok(None) };
         if path.searches() {
             loop {
+                toll()?;
                 if let Some(found) = self.child(at, path.segs[0]) {
-                    return Some(found);
+                    return Ok(Some(found));
                 }
-                at = self.parent(at)?;
+                let Some(above) = self.parent(at) else { return Ok(None) };
+                at = above;
             }
         }
         for &seg in &path.segs {
-            at = self.child(at, seg)?;
+            toll()?;
+            let Some(below) = self.child(at, seg) else { return Ok(None) };
+            at = below;
         }
-        Some(at)
+        Ok(Some(at))
     }
 
     /// Creates the object a path names: every segment but the last must
     /// exist, and the last must not (§5.3: "a name collision ... is
     /// considered fatal").
-    pub(crate) fn create(&mut self, scope: NodeId, path: &Path, object: Object) -> Result<NodeId, Error> {
+    pub(crate) fn create(&mut self, scope: NodeId, path: &Path, object: Object, toll: Toll<'_>) -> Result<NodeId, Error> {
         let (last, parents) = path.segs.split_last().ok_or(Error::Rule("a definition names no object"))?;
         let missing = || Error::NotFound(crate::name::text(path));
-        let mut at = self.start(scope, path).ok_or_else(missing)?;
+        let mut at = self.start(scope, path, toll)?.ok_or_else(missing)?;
         for &seg in parents {
+            toll()?;
             at = self.child(at, seg).ok_or_else(missing)?;
         }
         if self.node(at).is_some_and(|n| n.children.contains_key(last)) {
-            return Err(Error::Exists(self.path_of(at, Some(*last))));
+            return Err(Error::Exists(self.path_of(at, Some(*last), toll)?));
         }
         let node = Node {
             seg: *last,
@@ -157,8 +170,8 @@ impl Namespace {
         Ok(id)
     }
 
-    pub(crate) fn alias(&mut self, scope: NodeId, path: &Path, target: NodeId) -> Result<NodeId, Error> {
-        let id = self.create(scope, path, Object::Uninit)?;
+    pub(crate) fn alias(&mut self, scope: NodeId, path: &Path, target: NodeId, toll: Toll<'_>) -> Result<NodeId, Error> {
+        let id = self.create(scope, path, Object::Uninit, toll)?;
         if let Some(n) = self.nodes.get_mut(id.index as usize) {
             n.alias = Some(target);
         }
@@ -193,15 +206,16 @@ impl Namespace {
     }
 
     /// The absolute path of a node, and of `child` below it when given.
-    pub(crate) fn path_of(&self, id: NodeId, child: Option<Seg>) -> String {
+    pub(crate) fn path_of(&self, id: NodeId, child: Option<Seg>, toll: Toll<'_>) -> Result<String, Error> {
         let mut segs: Vec<Seg> = child.into_iter().collect();
         let mut at = id;
         while let Some(n) = self.node(at) {
             let Some(p) = n.parent else { break };
+            toll()?;
             segs.push(n.seg);
             at = p;
         }
         segs.reverse();
-        crate::name::text(&Path { root: true, up: 0, segs })
+        Ok(crate::name::text(&Path { root: true, up: 0, segs }))
     }
 }

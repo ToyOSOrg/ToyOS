@@ -11,7 +11,6 @@
 use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::cell::Cell;
 
 use crate::exec::Machine;
 use crate::name::Seg;
@@ -24,13 +23,11 @@ pub(crate) struct Region {
     pub(crate) base: u64,
     pub(crate) len: u64,
     /// The scope the region was declared in: for PCI_Config, the device it
-    /// addresses.
+    /// addresses, or something inside that device.
     pub(crate) scope: NodeId,
-    pub(crate) pci: Cell<Option<Pci>>,
 }
 
-#[derive(Clone, Copy)]
-pub(crate) struct Pci {
+struct Pci {
     segment: u16,
     bus: u8,
     device: u8,
@@ -173,47 +170,60 @@ impl Machine<'_> {
         }
     }
 
-    /// The function a PCI_Config region addresses: its device's `_ADR`
-    /// (§6.1.1: device in the high word, function in the low), in the
-    /// segment group the host bridge's `_SEG` names or 0 without one
-    /// (§6.5.6). The host bridge is the nearest scope naming a `_BBN`, which
-    /// is the bus directly below it (§6.5.5); each device between it and the
-    /// region's is a bridge, whose Secondary Bus Number register is the bus
-    /// below it (PCI-to-PCI Bridge Architecture Specification 1.2, §3.2.5.4).
-    /// A region declared in the host bridge itself addresses the bridge.
+    /// The function a PCI_Config region addresses: that of the nearest device
+    /// its scope is or lies in, by the device's `_ADR` (§6.1.1: device in
+    /// the high word, function in the low), in the segment group the host
+    /// bridge's `_SEG` names or 0 without one (§6.5.6). The host bridge is
+    /// the nearest device naming a `_BBN`, which is the bus directly below it
+    /// (§6.5.5); each device between it and the region's is a bridge, whose
+    /// Secondary Bus Number register is the bus below it (PCI-to-PCI Bridge
+    /// Architecture Specification 1.2, §3.2.5.4). A region declared in the
+    /// host bridge itself addresses the bridge.
+    ///
+    /// Every access asks again, firmware's methods and the bridges both:
+    /// nothing is kept that a bridge renumbered since would make stale.
     fn pci(&mut self, r: &Region) -> Result<Pci, Error> {
-        if let Some(p) = r.pci.get() {
-            return Ok(p);
-        }
         let bbn = Seg(*b"_BBN");
-        let mut path = Vec::new();
-        let mut bridge = r.scope;
-        while self.ns.child(bridge, bbn).is_none() {
+        let mut below = Vec::new();
+        let mut host = r.scope;
+        loop {
             self.step()?;
-            path.push(bridge);
-            let above = self.ns.parent(bridge);
-            bridge = above.ok_or(Error::Unsupported("a PCI_Config region below no host bridge, which names a _BBN"))?;
+            if matches!(self.ns.object(host), Some(Object::Device)) {
+                if self.ns.child(host, bbn).is_some() {
+                    break;
+                }
+                below.push(host);
+            }
+            let above = self.ns.parent(host);
+            host = above.ok_or(Error::Unsupported("a PCI_Config region below no host bridge, which names a _BBN"))?;
         }
-        let bus = self.named_int(bridge, bbn)?.unwrap_or(0);
-        let segment = self.named_int(bridge, Seg(*b"_SEG"))?.unwrap_or(0);
+        let bus = self.named_int(host, bbn)?.unwrap_or(0);
+        let segment = self.named_int(host, Seg(*b"_SEG"))?.unwrap_or(0);
         // §6.5.5 and §6.5.6 give the bus in the low 8 bits and the segment
         // group in the low 16, the rest reserved: a value outside them names
         // no bus this access could reach.
         let mut bus = u8::try_from(bus).map_err(|_| Error::Rule("a _BBN above 0xFF (§6.5.5)"))?;
         let segment = u16::try_from(segment).map_err(|_| Error::Rule("a _SEG above 0xFFFF (§6.5.6)"))?;
-        for &above in path.iter().skip(1).rev() {
-            let b = self.function(above, segment, bus)?;
+        let Some((&device, bridges)) = below.split_first() else { return self.function(host, segment, bus) };
+        for &bridge in bridges.iter().rev() {
+            let b = self.function(bridge, segment, bus)?;
             let secondary = Address::PciConfig { segment, bus, device: b.device, function: b.function, offset: 0x19 };
-            bus = self.host.read(secondary, crate::Access::Byte).map_err(|d| Error::Host(d.0))? as u8;
+            let answered = self.host.read(secondary, crate::Access::Byte).map_err(|d| Error::Host(d.0))? as u8;
+            // The register resets to 0, and a configured bridge's secondary
+            // bus is above the bus the bridge is on: any other answer would
+            // address a device that is not below this bridge.
+            if answered <= bus {
+                return Err(Error::Rule("a bridge's Secondary Bus Number is not above its own bus, and names no bus below it"));
+            }
+            bus = answered;
         }
-        let at = self.function(path.first().copied().unwrap_or(bridge), segment, bus)?;
-        r.pci.set(Some(at));
-        Ok(at)
+        self.function(device, segment, bus)
     }
 
     /// The function a device's `_ADR` names on `bus` (§6.1.1).
     fn function(&mut self, device: NodeId, segment: u16, bus: u8) -> Result<Pci, Error> {
-        let adr = self.named_int(device, Seg(*b"_ADR"))?.ok_or(Error::NotFound(self.ns.path_of(device, Some(Seg(*b"_ADR")))))?;
+        let adr = Seg(*b"_ADR");
+        let Some(adr) = self.named_int(device, adr)? else { return Err(Error::NotFound(self.path_of(device, Some(adr))?)) };
         let (Ok(device @ 0..=31), Ok(function @ 0..=7)) = (u8::try_from(adr >> 16), u8::try_from(adr & 0xFFFF)) else {
             return Err(Error::Rule("an _ADR that names no single PCI function (§6.1.1)"));
         };
@@ -288,23 +298,27 @@ impl Machine<'_> {
     /// A store to a field unit (Table 19.7): an Integer overwrites the whole
     /// field; a Buffer is written in pieces of the field's size, lower first,
     /// each zero-extended, and an empty one as zeros; a String is written a
-    /// character at a time. The pieces are slices of the source, each
-    /// written before the next is taken.
+    /// character at a time. The pieces are slices of the store's own copy of
+    /// the source, each written before the next is taken: a write runs
+    /// firmware's methods, which may store to the source, and the store is of
+    /// what the source held when it began.
     pub(crate) fn write_field(&mut self, f: &Field, v: Object) -> Result<(), Error> {
         let n = bytes_for(f.len)?;
-        let (int, held);
+        let (int, copy, held);
         let (source, piece): (&[u8], usize) = match &v {
             Object::Int(x) => {
                 int = x.to_le_bytes();
                 (&int, int.len())
             }
-            Object::Buf(b) => {
-                held = b.borrow();
-                if held.is_empty() { (&[0], 1) } else { (&held, n) }
-            }
-            Object::Str(s) => {
-                held = s.borrow();
-                (&held, 1)
+            Object::Buf(b) | Object::Str(b) => {
+                let bytes = b.borrow().clone();
+                copy = self.bytes(bytes)?;
+                held = copy.borrow();
+                match &v {
+                    Object::Str(_) => (&held, 1),
+                    _ if held.is_empty() => (&[0], 1),
+                    _ => (&held, n),
+                }
             }
             _ => return Err(Error::Type("a store to a field unit of an object that is not an integer, buffer or string")),
         };
@@ -377,8 +391,9 @@ impl Machine<'_> {
             Object::Buf(_) | Object::Str(_) => to_buf(&v, self.w)?,
             _ => return Err(Error::Type("a store to a buffer field of an object that is not an integer, buffer or string")),
         };
+        // The source is read whole, and the field written a bit at a time.
+        self.charge(src.len().saturating_add(usize::try_from(f.len).unwrap_or(usize::MAX)))?;
         let src = fit(src, bytes_for(f.len)?);
-        self.charge(usize::try_from(f.len).unwrap_or(usize::MAX))?;
         let mut d = f.data.bits();
         if f.bit.saturating_add(f.len) > (d.len() as u64).saturating_mul(8) {
             return Err(Error::Rule("a buffer field reaches past its buffer, which shrank since"));
