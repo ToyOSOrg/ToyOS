@@ -90,8 +90,9 @@ pub enum Parent<H = RawHandle> {
 /// **Every handle in `slots`, `extras` and `parent` is the caller's to give,
 /// and is named once.** [`launch`] consumes each one that it sends: it is moved
 /// to the launcher, or closed when the kernel refuses the move. A launch that
-/// names one twice, or the connection it is sent on, is refused before any is
-/// consumed.
+/// names one twice, or the connection it is sent on, is a move the kernel
+/// refuses, and is consumed as one: each number it names is closed once, and
+/// the connection never.
 pub struct Launch<'a> {
     /// The program's path, exactly as the caller resolved it.
     ///
@@ -131,13 +132,21 @@ pub enum EncodeError {
     TooLarge,
 }
 
+/// The handles of one launch, and how many of them.
+type Batch = ([RawHandle; MAX_LAUNCH_EXTRAS + MAX_LAUNCH_SLOTS], usize);
+
 impl Launch<'_> {
-    /// The handles this launch moves over `conn`: slots, then extras, then the
-    /// place. `None` where one is named twice or is `conn` itself: [`launch`]
-    /// takes each as its own, and a number with two owners is closed twice.
-    fn batch(&self, conn: RawHandle) -> Option<([RawHandle; MAX_LAUNCH_EXTRAS + MAX_LAUNCH_SLOTS], usize)> {
+    /// The numbers this launch names, each once and never `conn`: slots, then
+    /// extras, then the place. [`launch`] takes each as its own, and a number
+    /// with two owners is closed twice.
+    ///
+    /// `Err` where one was named twice or is `conn` itself, which is a batch
+    /// the kernel refuses `InvalidArgument`: what it holds is to close, not to
+    /// send.
+    fn batch(&self, conn: RawHandle) -> Result<Batch, Batch> {
         let mut out = [RawHandle(0); MAX_LAUNCH_EXTRAS + MAX_LAUNCH_SLOTS];
         let mut n = 0;
+        let mut sendable = true;
         let place = match self.parent {
             Parent::Place(place) => Some(place),
             Parent::Supervisor => None,
@@ -146,12 +155,13 @@ impl Launch<'_> {
         let extras = self.extras.iter().map(|(_, h)| h);
         for handle in slots.chain(extras).chain(&place) {
             if *handle == conn || out[..n].contains(handle) {
-                return None;
+                sendable = false;
+                continue;
             }
             out[n] = *handle;
             n += 1;
         }
-        Some((out, n))
+        if sendable { Ok((out, n)) } else { Err((out, n)) }
     }
 
     /// Write the request blob into `buf`, answering its length.
@@ -314,8 +324,7 @@ impl<'a> Request<'a> {
 /// side owns them is therefore not a detail of the error but the whole of what
 /// the caller needs from it.
 pub enum LaunchError {
-    /// The request did not encode, or names one handle twice or the
-    /// launcher's own connection. The handles are still here to close.
+    /// The request did not encode. The handles are still here to close.
     NotSent(IpcError),
     /// The handles are gone from this process: moved to the launcher, or
     /// closed on a refused move, and no answer came back.
@@ -350,12 +359,17 @@ pub fn launch<'a>(
     let len = request
         .encode(&mut buf)
         .map_err(|_| LaunchError::NotSent(IpcError::TooLarge))?;
-    let (handles, count) = request
-        .batch(conn.as_handle())
-        .ok_or(LaunchError::NotSent(IpcError::Syscall(SyscallError::InvalidArgument)))?;
     // Each is the caller's, which is `Launch`'s contract, and `batch` named it once.
-    conn.send_handles(handles[..count].iter().map(|&h| OwnedHandle(h)))
-        .map_err(|e| LaunchError::Sent(IpcError::Syscall(e)))?;
+    let owned = |(handles, count): Batch| (0..count).map(move |i| OwnedHandle(handles[i]));
+    let sent = match request.batch(conn.as_handle()) {
+        Ok(batch) => conn.send_handles(owned(batch)),
+        // Refused here as the kernel would refuse it, and closed as any refused move is.
+        Err(named) => {
+            owned(named).for_each(drop);
+            Err(SyscallError::InvalidArgument)
+        }
+    };
+    sent.map_err(|e| LaunchError::Sent(IpcError::Syscall(e)))?;
     conn.send_bytes(MSG_LAUNCH, &buf[..len]).map_err(LaunchError::Sent)?;
     let header = conn.recv_header().map_err(LaunchError::Sent)?;
     match header.msg_type {
@@ -408,7 +422,8 @@ mod tests {
     }
 
     /// `launch` becomes the one owner of every number in the batch, so a
-    /// number named twice, or the connection's own, has no batch at all.
+    /// number named twice, or the connection's own, is a batch to close: each
+    /// number once, the connection's never.
     #[test]
     fn a_batch_names_each_handle_once_and_never_its_connection() {
         const CONN: RawHandle = RawHandle(3);
@@ -416,17 +431,30 @@ mod tests {
         let batch = |slots: &[(u32, RawHandle)], extras: &[(&str, RawHandle)], parent| {
             let request =
                 Launch { program: "/system/bin/cat", argv: b"", env: b"", cwd: "/", extras, slots, parent };
-            request.batch(CONN).map(|(handles, count)| handles[..count].to_vec())
+            let named = |(handles, count): Batch| handles[..count].to_vec();
+            request.batch(CONN).map(named).map_err(named)
         };
         assert_eq!(
             batch(&[(0, h(5)), (1, h(6))], &[("a", h(7)), ("b", h(8))], Parent::Place(h(9))),
-            Some(vec![h(5), h(6), h(7), h(8), h(9)]),
+            Ok(vec![h(5), h(6), h(7), h(8), h(9)]),
         );
-        assert_eq!(batch(&[], &[("a", h(7)), ("b", h(7))], Parent::Supervisor), None, "two extras");
-        assert_eq!(batch(&[(0, h(5)), (1, h(5))], &[], Parent::Supervisor), None, "two slots");
-        assert_eq!(batch(&[(0, h(7))], &[("a", h(7))], Parent::Supervisor), None, "a slot and an extra");
-        assert_eq!(batch(&[], &[("a", h(9))], Parent::Place(h(9))), None, "an extra and the place");
-        assert_eq!(batch(&[], &[("a", CONN)], Parent::Supervisor), None, "the connection as an extra");
-        assert_eq!(batch(&[], &[], Parent::Place(CONN)), None, "the connection as the place");
+        assert_eq!(batch(&[], &[("a", h(7)), ("b", h(7))], Parent::Supervisor), Err(vec![h(7)]), "two extras");
+        assert_eq!(batch(&[(0, h(5)), (1, h(5))], &[], Parent::Supervisor), Err(vec![h(5)]), "two slots");
+        assert_eq!(
+            batch(&[(0, h(7)), (1, h(6))], &[("a", h(7))], Parent::Supervisor),
+            Err(vec![h(7), h(6)]),
+            "a slot and an extra",
+        );
+        assert_eq!(
+            batch(&[(0, h(5))], &[("a", h(9))], Parent::Place(h(9))),
+            Err(vec![h(5), h(9)]),
+            "an extra and the place",
+        );
+        assert_eq!(
+            batch(&[(0, h(5))], &[("a", CONN), ("b", h(7))], Parent::Supervisor),
+            Err(vec![h(5), h(7)]),
+            "the connection as an extra",
+        );
+        assert_eq!(batch(&[], &[("a", h(7))], Parent::Place(CONN)), Err(vec![h(7)]), "the connection as the place");
     }
 }
