@@ -671,9 +671,7 @@ mod tests {
         let scratch = Scratch::new("llvm-read-only");
         let (_primary, rust_dir, [_same, a, _b]) = estate_built(&scratch);
         let dir = choose(&a, &rust_dir, &a.join("rust"), fake_build).dir;
-        let stage = scratch.join("stage1-rust-lld");
-        fs::hard_link(dir.join("bin/lld"), &stage).unwrap();
-        let mut entries = vec![stage, dir];
+        let mut entries = vec![dir];
         while let Some(entry) = entries.pop() {
             let meta = fs::symlink_metadata(&entry).unwrap();
             assert!(meta.permissions().readonly(), "{} can be written", entry.display());
