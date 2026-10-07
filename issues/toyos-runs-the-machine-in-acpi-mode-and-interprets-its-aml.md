@@ -39,10 +39,10 @@ writes its own, and the battery comes first (his direction of `0ee814f5a`).
   boot held open for it. Superseded by the two rulings on tests that follow.
 
 **Ruled** (owner, 2026-10-05): "A test that requires manual steps from me is
-forbidden." **Ruled** (owner, on what a T14 test may need): "No automated test
-is allowed that requires physical buttons to be pressed or anything we cant do
-now with the t14. I can test it on demand but no ci there not always someone
-available physically". No T14 row of this track needs a hand: not on the
+forbidden." **Ruled** (owner, 2026-10-05, on what a T14 test may need): "No
+automated test is allowed that requires physical buttons to be pressed or
+anything we cant do now with the t14. I can test it on demand but no ci there
+not always someone available physically". No T14 row of this track needs a hand: not on the
 button, and not to power the machine on again.
 
 **Ruled** (owner, 2026-10-03), on the server, the tables and the interpreter:

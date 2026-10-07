@@ -69,10 +69,10 @@ test is fixed to fail when the first press is lost. The AML stage closes it."
 **Ruled** (owner, 2026-10-05): "A test that requires manual steps from me is
 forbidden."
 
-**Ruled** (owner, on what a T14 test may need): "No automated test is allowed
-that requires physical buttons to be pressed or anything we cant do now with
-the t14. I can test it on demand but no ci there not always someone available
-physically".
+**Ruled** (owner, 2026-10-05, on what a T14 test may need): "No automated test
+is allowed that requires physical buttons to be pressed or anything we cant do
+now with the t14. I can test it on demand but no ci there not always someone
+available physically".
 
 The two later rulings supersede the first one's "the press test is fixed to
 fail when the first press is lost": that test was the `acpi_power_button_pressed`

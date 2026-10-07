@@ -17,10 +17,10 @@ loop powers it on again. `ride_the_reboot` (`src/metal.rs`) waits
 leaves no readback.
 
 **Ruled** (owner, 2026-10-05): "A test that requires manual steps from me is
-forbidden." **Ruled** (owner, on what a T14 test may need): "No automated test
-is allowed that requires physical buttons to be pressed or anything we cant do
-now with the t14. I can test it on demand but no ci there not always someone
-available physically". The row that read this path, `acpi_power_off`, was
+forbidden." **Ruled** (owner, 2026-10-05, on what a T14 test may need): "No
+automated test is allowed that requires physical buttons to be pressed or
+anything we cant do now with the t14. I can test it on demand but no ci there
+not always someone available physically". The row that read this path, `acpi_power_off`, was
 judged only on a boot the owner powered on again by hand. It went with those
 rulings, and so did the harness's acceptance of a boot whose log ends asking
 for a power-off.
@@ -40,12 +40,15 @@ read 0x0001 as the firmware left it, 0x0000 after the monitor wrote
 `ACPI_DISABLE` (3) to 0xb2, and 0x0001 again after it wrote `ACPI_ENABLE`
 (2). No test does this: the write has to land before the claim is minted, and
 the one config whose claim a job mints, `tests/acpicase`, runs its job list
-unprompted. Such a test would read QEMU's model of the ICH9 and never the
-T14's firmware, so it narrows this gap and does not close it.
+unprompted. Such a test reads QEMU's model of the ICH9 and never the T14's
+firmware.
 
 Owned by `issues/the-t14-reboots-through-ubuntu-for-every-test.md`, whose
 plan names every reset in a run by what forces it.
 
-**Exit**: a T14 row whose boot ends in ToyOS's power-off, with the machine in
-ACPI mode by the kernel's own `ACPI_ENABLE`, is judged off that boot's log
-with no person powering the machine on.
+**Exit** (the orchestrator's placement, not the owner's; not built in stage 1
+of `issues/toyos-runs-the-machine-in-acpi-mode-and-interprets-its-aml.md`):
+a QEMU guest test whose harness clears `SCI_EN` through the monitor before
+the claim is minted, so that the kernel writes `ACPI_ENABLE` itself, ends in
+ToyOS's power-off, and is red where `SLP_EN` does not take after that enable.
+The T14's own firmware on this path stays unread by any row.

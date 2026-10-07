@@ -58,9 +58,9 @@ const GPE0: usize = 1;
 const HANDOVER: Duration = Duration::from_secs(3);
 /// How often the wait reads `SCI_EN`, parked in between.
 const POLL: Duration = Duration::from_millis(1);
-/// How long the firmware has to clear `SCI_EN` after the disable, spun: an
-/// SMI is taken on the CPU that writes the port before its next instruction,
-/// so this is for a firmware that defers the bit, and is an estimate.
+/// How long the firmware has to clear `SCI_EN` after the disable, spun. ACPI
+/// 6.5 §4.8.2.5 has OSPM poll the bit until it reads reset and names no bound,
+/// and no FADT field carries one: this is this kernel's, and no measurement.
 const HANDBACK: Duration = Duration::from_millis(100);
 
 struct Hardware {
