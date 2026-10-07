@@ -3,6 +3,9 @@ product = "20W0003AMZ"
 bios = "N34ET71W (1.71 )"
 
 [measured]
+"boot.acpicase.complete_ms" = 1207
+"boot.acpicase.panel_max_us" = 2495
+"boot.acpicase.panel_us" = 12966
 "boot.ccorpus.complete_ms" = 1165
 "boot.ccorpus.panel_max_us" = 3759
 "boot.ccorpus.panel_us" = 22178
@@ -61,6 +64,9 @@ bios = "N34ET71W (1.71 )"
 "boot.testcases-debug.complete_ms" = 1165
 "boot.testcases-debug.panel_max_us" = 3824
 "boot.testcases-debug.panel_us" = 22032
+"boot.testcases-hold.complete_ms" = 1212
+"boot.testcases-hold.panel_max_us" = 2477
+"boot.testcases-hold.panel_us" = 13240
 "boot.testcases-mkdir.complete_ms" = 1166
 "boot.testcases-mkdir.panel_max_us" = 3839
 "boot.testcases-mkdir.panel_us" = 22100

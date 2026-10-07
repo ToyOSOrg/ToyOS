@@ -43,8 +43,10 @@ the one config whose claim a job mints, `tests/acpicase`, runs its job list
 unprompted. Such a test reads QEMU's model of the ICH9 and never the T14's
 firmware.
 
-Owned by `issues/the-t14-reboots-through-ubuntu-for-every-test.md`, whose
-plan names every reset in a run by what forces it.
+Owned by the stage "power-off through the server" of
+`issues/toyos-runs-the-machine-in-acpi-mode-and-interprets-its-aml.md`, which
+rewrites the power-off this exit's test reds on. The orchestrator's
+placement, not the owner's.
 
 **Exit** (the orchestrator's placement, not the owner's; not built in stage 1
 of `issues/toyos-runs-the-machine-in-acpi-mode-and-interprets-its-aml.md`):

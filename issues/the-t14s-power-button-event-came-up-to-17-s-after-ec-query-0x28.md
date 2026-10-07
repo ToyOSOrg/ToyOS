@@ -77,7 +77,7 @@ available physically".
 The two later rulings supersede the first one's "the press test is fixed to
 fail when the first press is lost": that test was the `acpi_power_button_pressed`
 row, judged on the owner's own count of his presses, and it is deleted. **No
-harness row reads the T14's press**, and none will: QEMU's `acpi_power_button`
+harness row reads the T14's press**: QEMU's `acpi_power_button`
 reads that a press the server takes stops the machine, on q35, and the T14's
 own button is read only by the owner's hand.
 
@@ -89,7 +89,9 @@ first ruling's "AML stage".
 for at the head that claims the fix and which no test or CI job waits on. On
 ten boots of that head held open by `acpi_hold` he presses the power button
 once, briefly; every boot's log carries the server's press line and the
-supervisor's power-off, and he reports one press for each. The head, the ten
-logs' lines and his account are recorded here, and then this issue closes.
+supervisor's power-off, and he reports one press for each. Each boot ends in
+S5 and leaves no readback, so each log is read off the stick's log partition,
+copied before the next flash, as at `ee6aadecb`. The head, the ten logs'
+lines and his account are recorded here, and then this issue closes.
 Ten is not the owner's: a loss rate of one in three would pass ten boots in a
 row 1.7% of the time, where `ff4945d6d`'s one boot passed alone.
