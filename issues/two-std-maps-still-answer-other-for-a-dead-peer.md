@@ -7,13 +7,13 @@ opened: 2026-09-01
 # A `TcpStream` write to a departed peer is still `ErrorKind::Other`
 
 Making a broken pipe reach a Rust caller as `BrokenPipe` put one exhaustive
-`SyscallError -> ErrorKind` map in `rust/library/std/src/sys/pal/toyos/mod.rs`
-and pointed `sys/pipe`, `sys/stdio` and `sys/fs` at it. Two maps in the same
-fork were not moved and still carry a `_ => Other` arm, at fork commit
-`719118153253`:
+`SyscallError -> ErrorKind` map in `sdk/std/sys/pal/mod.rs`
+and pointed `sys/pipe`, `sys/stdio` and `sys/fs` at it. Two maps beside it
+were not moved and still carry a `_ => Other` arm; the line numbers are those
+of `rust` fork commit `719118153253`, which held these files:
 
 ```rust
-// library/std/src/sys/net/connection/toyos.rs:46
+// sdk/std/sys/net/connection.rs:46
 fn syscall_err(e: SyscallError) -> io::Error {
     match e {
         SyscallError::WouldBlock => io::ErrorKind::WouldBlock.into(),
@@ -23,7 +23,7 @@ fn syscall_err(e: SyscallError) -> io::Error {
 ```
 
 ```rust
-// library/std/src/sys/process/toyos.rs:272
+// sdk/std/sys/process.rs:272
 let kind = match e {
     toyos_abi::syscall::SyscallError::NotFound => io::ErrorKind::NotFound,
     _ => io::ErrorKind::Other,
@@ -31,7 +31,7 @@ let kind = match e {
 ```
 
 The first is on a write path. `TcpStream::write`
-(`library/std/src/sys/net/connection/toyos.rs:199`) ends in
+(`sdk/std/sys/net/connection.rs:199`) ends in
 `syscall::write(self.raw_handle(), buf).map_err(syscall_err)` at `:216`, and a
 netd socket's tx end is a pipe — so a Rust program writing to a socket whose
 peer has gone gets `ErrorKind::Other` — the same wrong word the pipe path was
@@ -47,7 +47,7 @@ and in the pull request, not left to be rediscovered here.
 ## What closing it takes
 
 Pointing both at `sys::to_io_error` and deleting the local maps, as the three
-already moved were. `sys/process/toyos.rs`'s is the spawn refusal and wants a
+already moved were. `sdk/std/sys/process.rs`'s is the spawn refusal and wants a
 look at whether `NotFound` is doing work the shared map does not; the shared
 map answers `NotFound` for the same variant, so it is likely a plain deletion.
 

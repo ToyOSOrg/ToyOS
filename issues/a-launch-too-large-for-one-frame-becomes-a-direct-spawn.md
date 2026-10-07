@@ -8,7 +8,7 @@ opened: 2026-10-02
 
 `toyos::launch::launch` (`toyos/src/launch.rs`) answers `LaunchError::NotSent`
 when `Launch::encode` refuses the request, and std's `Command::launch`
-(`rust/library/std/src/sys/process/toyos.rs`) answers `NotSent` with the direct
+(`sdk/std/sys/process.rs`) answers `NotSent` with the direct
 spawn. `encode` refuses a request whose header, program, argv, environment,
 working directory and connector names do not fit `MAX_FRAME_LEN`
 (`toyos/src/ipc.rs`). Its other refusal, too many connectors or slots, std

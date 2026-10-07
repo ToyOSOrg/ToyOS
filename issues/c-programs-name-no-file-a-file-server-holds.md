@@ -8,7 +8,7 @@ opened: 2026-09-27
 
 `/apps`, `/config`, `/home`, `/state`, `/log` and `/boot` are served by
 `/system/bin/fsd` through directory capabilities in each program's namespace,
-and std reaches them through `toyos::fs` (`rust/library/std/src/sys/fs/toyos.rs`).
+and std reaches them through `toyos::fs` (`sdk/std/sys/fs.rs`).
 `userland/libc` does not: `open`, `stat`, `opendir` and every other path call
 in `userland/libc/src/posix_io.rs` and `userland/libc/src/stdio.rs` go to the
 kernel's `SYS_OPEN` family, and the kernel serves ROOT and `/tmp` only. So a C
