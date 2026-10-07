@@ -8,7 +8,7 @@ opened: 2026-09-27
 
 No volume records an object id, so nothing tells the held file from another
 put at its path since, and a handle held across a restart answers `Gone`
-(`std`'s `sys/fs/toyos.rs`); `logd` loses `/log` for the boot if LOG's server
+(`std`'s `sdk/std/sys/fs.rs`); `logd` loses `/log` for the boot if LOG's server
 restarts.
 
 **Exit**: DATA's entry carries an object id and a generation that nothing

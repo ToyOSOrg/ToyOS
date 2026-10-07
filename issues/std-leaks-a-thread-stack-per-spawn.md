@@ -6,7 +6,7 @@ opened: 2026-07-30
 
 # Std leaks a whole thread stack on every `thread::spawn`
 
-`rust/library/std/src/sys/thread/toyos.rs` allocates the stack with
+`sdk/std/sys/thread.rs` allocates the stack with
 `alloc::alloc` (2 MiB minimum), hands its base to `SYS_THREAD_SPAWN`, and never
 records the pointer. `Thread` holds only a tid and has no `Drop`, `join` does not
 free it, and the trampoline cannot — it is standing on it. So every spawned

@@ -9,8 +9,7 @@ opened: 2026-09-28
 The kernel stamps a file with `clock::mtime_now` (`kernel/src/clock.rs`), the
 RTC's second carried on by the counter, so a write inside a second carries the
 nanoseconds past it. Userland reads the wall clock only through
-`SYS_CLOCK_EPOCH`, which answers whole seconds: std's `SystemTime::now` (the
-fork's `library/std/src/sys/time/toyos.rs`) and libc's `clock_gettime(CLOCK_REALTIME)`
+`SYS_CLOCK_EPOCH`, which answers whole seconds: std's `SystemTime::now` (`sdk/std/sys/time.rs`) and libc's `clock_gettime(CLOCK_REALTIME)`
 and `gettimeofday` (`userland/libc/src/time.rs`) all round down to the second.
 
 So a file written a moment ago reads as up to a second in the future against

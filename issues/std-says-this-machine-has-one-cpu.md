@@ -6,7 +6,7 @@ opened: 2026-08-23
 
 # `std::thread::available_parallelism` answers 1 on every ToyOS machine
 
-`rust/library/std/src/sys/thread/toyos.rs:66` returns a hardcoded
+`sdk/std/sys/thread.rs:66` returns a hardcoded
 `NonZero::new_unchecked(1)`, and the comment above it says why: "ToyOS runs on
 QEMU with a known number of CPUs, but we don't expose a syscall for this yet."
 That is no longer true. `SYS_CPU_COUNT` exists, `toyos_abi::syscall::cpu_count`
