@@ -56,9 +56,9 @@ impl Source {
     ];
 }
 
-/// Every source's count summed, bar `except`'s.
-fn sum_except(counts: &[u64; Source::COUNT], except: Option<Source>) -> u64 {
-    counts.iter().sum::<u64>() - except.map_or(0, |source| counts[source as usize])
+/// Every source's count summed, bar the NMI's.
+fn sum_bar_nmi(counts: &[u64; Source::COUNT]) -> u64 {
+    counts.iter().sum::<u64>() - counts[Source::Nmi as usize]
 }
 
 // Counted where each is taken, by the architecture's handlers
@@ -106,30 +106,24 @@ pub fn deliveries(cpu: u32, source: Source) -> Option<u64> {
     read(cpu).map(|counts| counts[source as usize])
 }
 
-/// Every CPU's total delivery count, or `None` if that CPU has never been built.
-#[cfg(feature = "boot-actuators")]
-pub fn deliveries_total(cpu: u32) -> Option<u64> {
-    read(cpu).map(|counts| sum_except(&counts, None))
-}
-
 /// **One CPU's progress: every interrupt it has taken except the NMI.**
 ///
 /// What `crate::hardlockup` compares one sample to the next, and the exclusion
-/// is the whole of why this is not [`deliveries_total`]: that sample arrives
-/// *as* an NMI and has already counted itself by the time it reads this, so a
-/// total including it moves on every sample and no CPU is ever stuck.
+/// is load-bearing: that sample arrives *as* an NMI and has already counted
+/// itself by the time it reads this, so a total including it moves on every
+/// sample and no CPU is ever stuck.
 ///
 /// One published pointer and relaxed loads: no lock, so the CPU sealing a
 /// record about a sibling can read this about it.
 pub fn taken_by(cpu: u32) -> Option<u64> {
-    read(cpu).map(|counts| sum_except(&counts, Some(Source::Nmi)))
+    read(cpu).map(|counts| sum_bar_nmi(&counts))
 }
 
 /// [`taken_by`] for the CPU asking, read straight off its own block — the one
 /// form a CPU inside an NMI may use, since it needs neither the published
 /// pointer array nor a bounds check on a `cpu_id` it is standing on.
 pub fn taken_here() -> u64 {
-    sum_except(&percpu::irq_counts_here(), Some(Source::Nmi))
+    sum_bar_nmi(&percpu::irq_counts_here())
 }
 
 /// Logs one `irq: cpuN <source>=…` line per online CPU; counts are cumulative since boot.

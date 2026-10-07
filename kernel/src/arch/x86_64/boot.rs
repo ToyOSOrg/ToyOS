@@ -144,7 +144,7 @@ pub fn start_other_cpus(platform: &Platform, args: &KernelArgs) {
 /// The interrupt-controller selftests an actuator asks for, once the timer ticks.
 #[cfg(feature = "boot-actuators")]
 pub fn interrupt_selftests() {
-    // Needs interrupts on and the timer already ticking: its last assertion is that the interrupt after the spurious one arrives.
+    // Needs interrupts on and the timer calibrated: each arms the one-shot and asserts an interrupt arrives after its probe.
     if crate::actuator::lapic_spurious_selftest() {
         idt::spurious::selftest();
     }

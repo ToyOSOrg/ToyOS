@@ -486,6 +486,64 @@ mod checks {
         Ok(())
     }
 
+    /// [`irq_census`] over two exits stamped in the other order from their
+    /// reads. X, on cpu2, reads cpu1 and is held before it stamps; Y, on cpu3,
+    /// reads every CPU with one more `kick` on cpu1, stamps, loads the
+    /// issuer's 7 and is held before its swap. Two shootdowns later X stamps
+    /// cpu1, reads cpu2 and cpu3 at 9 deliveries and logs 9; Y's swap then
+    /// returns 9, so Y logs 7.
+    #[test]
+    fn irq_census_verdict() -> Result<(), String> {
+        let census = |at: &str, on: u32, cpu: u32, kick: u64, tlb: u64| {
+            let xhci = if cpu == 0 { 40 } else { 0 };
+            format!(
+                "[ {at} cpu{on} kernel] irq: cpu{cpu} timer=100 kick={kick} xhci={xhci} userdev=0 \
+                 sound=0 i8042=0 dmafault=0 hda=0 tlb={tlb} nmi=0 spurious=0 unclaimed=0\n"
+            )
+        };
+        let issued = |at: &str, on: u32, total: u64| {
+            format!(
+                "[ {at} cpu{on} kernel] tlb: shootdowns={total} wait=12us max=3us dlopen=0 pcid=0 \
+                 mmio=0 unmap={total} pipe=0 staged=0 bench=0\n"
+            )
+        };
+        let y_cpu2 = census("2.001", 3, 2, 2, 7);
+        let x_cpu3 = census("2.004", 2, 3, 2, 9);
+        let (x_issued, y_issued) = (issued("2.005", 2, 9), issued("2.006", 3, 7));
+        let good = [
+            census("2.000", 2, 0, 3, 0),
+            census("2.001", 3, 0, 3, 0),
+            census("2.001", 3, 1, 6, 7),
+            y_cpu2.clone(),
+            census("2.001", 3, 3, 2, 7),
+            census("2.004", 2, 1, 5, 7),
+            census("2.004", 2, 2, 2, 9),
+            x_cpu3.clone(),
+            x_issued.clone(),
+            y_issued.clone(),
+        ]
+        .concat();
+        irq_census(&good).map_err(|e| format!("two exits stamped out of read order were refused: {e}"))?;
+
+        let refused = |what: &str, capture: &str, says: &str| match irq_census(capture) {
+            Ok(()) => Err(format!("{what} was accepted")),
+            Err(e) if e.contains(says) => Ok(()),
+            Err(e) => Err(format!("{what} was refused for the wrong reason: {e}")),
+        };
+        refused(
+            "an AP's device delivery on a line that is not that AP's last",
+            &good.replace(&y_cpu2, &y_cpu2.replace("xhci=0", "xhci=1")),
+            "addressed to physical destination 0",
+        )?;
+        refused(
+            "a delivery past the largest issued count",
+            &good.replace(&x_cpu3, &census("2.004", 2, 3, 2, 10)),
+            "without being counted",
+        )?;
+        refused("no issuer line", &good.replace(&x_issued, "").replace(&y_issued, ""), "said nothing")?;
+        Ok(())
+    }
+
     /// What the declaration itself has to be, before any of it means anything.
     /// Which shared-boot binaries need `SYS_DEBUG`, asked of their source.
     ///
