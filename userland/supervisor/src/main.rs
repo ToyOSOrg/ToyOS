@@ -380,7 +380,7 @@ fn main() {
     // One port per file-server role, made here for the same reason: a
     // program's first open works whether or not its server runs yet. Its
     // connector goes at once: every connector a program holds to it is a
-    // grant minted for that program's session (`Grants`).
+    // grant minted for that program's share (`Grants`).
     let mut role_acceptors: BTreeMap<&str, Acceptor> = BTreeMap::new();
     for role in system.programs.iter().flat_map(|p| p.roles.iter()) {
         let (acceptor, _) = port::create().unwrap_or_else(|e| panic!("supervisor: no port for the `{role}` role: {e:?}"));
@@ -525,7 +525,7 @@ struct Supervisor<'a> {
     connectors: BTreeMap<&'a str, Connector>,
     /// What each program's view is minted from.
     grants: Grants<'a>,
-    /// The login sessions launches have opened.
+    /// The shares its services and the login sessions launches opened spend.
     sessions: Sessions,
     /// The same directories as a namespace of the supervisor's own, for the stop's syncs.
     files: &'static Namespace,
@@ -557,6 +557,9 @@ struct Service<'a> {
     /// started in its place is owed.
     devices: Vec<String>,
     kept: Arc<Mutex<Kept>>,
+    /// The machine's session under this service's own share, which every
+    /// start of it spends: one started again holds no more of a file server.
+    session: Session,
     /// When each recent start after an end happened, for [`toyos_manifest::RESTARTS`].
     restarts: VecDeque<Instant>,
 }
@@ -585,6 +588,7 @@ impl<'a> Service<'a> {
         program: &'a Program,
         role: Option<&'a str>,
         acceptors: Vec<(String, Acceptor)>,
+        session: Session,
         wake: toyos::RawHandle,
     ) -> Self {
         Self {
@@ -601,6 +605,7 @@ impl<'a> Service<'a> {
                 ended: false,
                 wake,
             })),
+            session,
             restarts: VecDeque::new(),
         }
     }
@@ -649,7 +654,7 @@ impl<'a> Service<'a> {
             grants,
             &[],
             storage,
-            (launcher, Session::Machine),
+            (launcher, self.session),
             Output::Boot(log),
         )?;
         kept.generation += 1;
@@ -800,7 +805,7 @@ impl<'a> Supervisor<'a> {
                     }
                 };
                 self.make_home(program);
-                let mut service = Service::new(program, role, kept, wake);
+                let mut service = Service::new(program, role, kept, self.sessions.machine(), wake);
                 if let Some(role) = role {
                     self.grants.roles.push((role, Arc::clone(&service.kept)));
                 }
@@ -2256,11 +2261,12 @@ fn build_namespace(
 /// What each program's directory capabilities are minted from: each
 /// file-server role's port.
 ///
-/// **Each start is minted grants naming its session** (`toyos::fs::Grant`,
-/// [`Session::share`]), one per directory of every role, so the servers count
-/// every process of a session, every child each spawns directly and every
-/// program launched in it against one share. A role whose ports closed for
-/// good is minted nothing.
+/// **Each start is minted grants naming its session's share** (`toyos::fs::Grant`,
+/// [`Session::share`]), one per directory of every role: a service has a
+/// share of its own through every start of it, so the servers count it, every
+/// child it spawns directly and every launch made from it that opens no
+/// session against one share, and a login session's processes against one
+/// more. A role whose ports closed for good is minted nothing.
 struct Grants<'a> {
     /// Each role's service, whose kept acceptor is the role's port.
     roles: Vec<(&'a str, Arc<Mutex<Kept>>)>,
@@ -2298,7 +2304,7 @@ fn mint_grants(role: &str, acceptor: &Acceptor, share: u64) -> Vec<(String, Conn
     dirs.iter()
         .map(|dir| {
             let mut badge = [0u8; MAX_BADGE];
-            let badge = Grant { session: share, root: dir.root }
+            let badge = Grant { share, root: dir.root }
                 .encode(&mut badge)
                 .unwrap_or_else(|| panic!("supervisor: {}'s root {:?} is no grant's", dir.dir, dir.root));
             let connector = acceptor

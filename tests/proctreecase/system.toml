@@ -13,9 +13,10 @@
 # session it was launched in: refused in the machine's, started in the one the
 # shell opens.
 #
-# And `fs_share`: a shell test-runner launches is in the machine's session, as
-# test-runner is, and spends its share of DATA's server; a shell that shell
-# launches opens a login session, which has a share of its own.
+# And `fs_share`: a shell test-runner launches opens no session and spends
+# test-runner's share of DATA's server; a shell that shell launches is in a
+# login session its row opens, which has a share of its own, and so is every
+# shell launched down from it, whose `login` row opens none there.
 
 [boot]
 start = ["logkeeper", "diskserver", "fileserver", "test-runner"]

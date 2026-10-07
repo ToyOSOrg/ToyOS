@@ -171,7 +171,8 @@ struct ProgramConfig {
     restart: bool,
     /// The rows it may start through the launcher (`toyos_manifest::Program::starts`).
     starts: Vec<String>,
-    /// A launch it makes opens a login session (`toyos_manifest::Program::login`).
+    /// A launch it makes from the machine's session opens a login session
+    /// (`toyos_manifest::Program::login`).
     login: bool,
 }
 
