@@ -6,7 +6,7 @@ opened: 2026-09-29
 
 # A Rust std executable runs no `.init_array`, so a C constructor linked into it is skipped
 
-`rust/library/std/src/sys/pal/toyos/mod.rs:93` starts a std binary at
+`sdk/std/sys/pal/mod.rs:93` starts a std binary at
 `start_rust`, which calls `main` directly and never walks `.init_array`
 (the comment there: "exes don't run .init_array"). `userland/libc/src/lib.rs`'s
 `start_c` does walk it, but only `#[cfg(not(feature = "std-runtime"))]`: a

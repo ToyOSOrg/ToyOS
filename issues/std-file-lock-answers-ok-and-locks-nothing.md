@@ -6,7 +6,7 @@ opened: 2026-10-03
 
 # std's `File::lock` answers `Ok` and locks nothing
 
-The ToyOS file pal in the std fork (`library/std/src/sys/fs/toyos.rs`) answers
+std's ToyOS file pal (`sdk/std/sys/fs.rs`) answers
 `Ok(())` from `File::lock`, `lock_shared`, `try_lock`, `try_lock_shared` and
 `unlock` and takes no lock. Two processes that each ask for the exclusive lock
 on one file are both told they hold it, and nothing in the kernel ABI or the

@@ -20,8 +20,8 @@ base's whole entry set when the bit is set and refuses a bit it does not define
 (`kernel/src/syscall/ipc.rs`), and `endowment_denied`'s
 `the_base_plus_one_more_name` asserts both halves in a guest.
 
-**What is left is the std fork, and only the std lane can do it.**
-`rust/library/std/src/sys/process/toyos.rs`'s `spawn` endows the parent's
+**What is left is std's ToyOS backend, and only the std lane can do it.**
+`sdk/std/sys/process.rs`'s `spawn` endows the parent's
 namespace handle unchanged — `inherited_namespace` duplicates it and pushes it
 under `SVC_LABEL` — so a caller that transferred a connector to a program the
 manifest does **not** declare, the one case where the launcher answers

@@ -18,7 +18,7 @@ scheduler designs establishing that a bound over a workload-set quantity is a
 defect rather than a policy, and this is one.
 
 **The refusal has no recoverable form.** The only caller is std's
-`__tls_get_addr_slow` (`rust/library/std/src/sys/pal/toyos/tls.rs`), and its own
+`__tls_get_addr_slow` (`sdk/std/sys/pal/tls.rs`), and its own
 comment says why it cannot pass the error on: *"`__tls_get_addr`'s ABI is an
 address and there is nobody to return an error to: a refusal added to `offset` is
 a pointer near the top of the address space that the caller would then
