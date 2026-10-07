@@ -21,8 +21,10 @@
 //! The wire is a single frame plus one handle batch, and this module is both
 //! halves of it — std's `Command` encodes and the supervisor decodes.
 
+use toyos_abi::syscall::SyscallError;
+
 use crate::ipc::{Connection, IpcError};
-use crate::RawHandle;
+use crate::{AsHandle, OwnedHandle, RawHandle};
 
 /// The label a holder is endowed its launcher under, and the one name in that
 /// namespace. **Never an entry of `svc`**, which std hands every direct spawn:
@@ -84,6 +86,13 @@ pub enum Parent<H = RawHandle> {
 ///
 /// `argv` and `env` are exactly the blobs `SYS_SPAWN` takes, so the launcher
 /// path and the direct path build one thing rather than two.
+///
+/// **Every handle in `slots`, `extras` and `parent` is the caller's to give,
+/// and is named once.** [`launch`] consumes each one that it sends: it is moved
+/// to the launcher, or closed when the kernel refuses the move. A launch that
+/// names one twice, or the connection it is sent on, is a move the kernel
+/// refuses, and is consumed as one: each number it names is closed once, and
+/// the connection never.
 pub struct Launch<'a> {
     /// The program's path, exactly as the caller resolved it.
     ///
@@ -123,11 +132,21 @@ pub enum EncodeError {
     TooLarge,
 }
 
+/// The handles of one launch, and how many of them.
+type Batch = ([RawHandle; MAX_LAUNCH_EXTRAS + MAX_LAUNCH_SLOTS], usize);
+
 impl Launch<'_> {
-    /// The handles this launch moves: slots, then extras, then the place.
-    pub fn handles(&self) -> ([RawHandle; MAX_LAUNCH_EXTRAS + MAX_LAUNCH_SLOTS], usize) {
+    /// The numbers this launch names, each once and never `conn`: slots, then
+    /// extras, then the place. [`launch`] takes each as its own, and a number
+    /// with two owners is closed twice.
+    ///
+    /// `Err` where one was named twice or is `conn` itself, which is a batch
+    /// the kernel refuses `InvalidArgument`: what it holds is to close, not to
+    /// send.
+    fn batch(&self, conn: RawHandle) -> Result<Batch, Batch> {
         let mut out = [RawHandle(0); MAX_LAUNCH_EXTRAS + MAX_LAUNCH_SLOTS];
         let mut n = 0;
+        let mut sendable = true;
         let place = match self.parent {
             Parent::Place(place) => Some(place),
             Parent::Supervisor => None,
@@ -135,10 +154,14 @@ impl Launch<'_> {
         let slots = self.slots.iter().map(|(_, h)| h);
         let extras = self.extras.iter().map(|(_, h)| h);
         for handle in slots.chain(extras).chain(&place) {
+            if *handle == conn || out[..n].contains(handle) {
+                sendable = false;
+                continue;
+            }
             out[n] = *handle;
             n += 1;
         }
-        (out, n)
+        if sendable { Ok((out, n)) } else { Err((out, n)) }
     }
 
     /// Write the request blob into `buf`, answering its length.
@@ -294,16 +317,17 @@ impl<'a> Request<'a> {
 /// Why a launch did not answer, and — the part that matters — whether the
 /// handles it was going to carry are still the caller's.
 ///
-/// **A send moves them.** `SYS_HANDLE_SEND` takes them out of the sender's
-/// table, so a caller that closed them after a refusal would be closing handles
-/// it no longer holds — which, under the bad-handle policy, is the caller
-/// exiting. Which side owns them is therefore not a detail of the error but the
-/// whole of what the caller needs from it.
+/// **A send consumes them.** `SYS_HANDLE_SEND` takes them out of the sender's
+/// table, and a refused one closes them ([`Connection::send_handles`]), so a
+/// caller that closed them after either would be closing handles it no longer
+/// holds — which, under the bad-handle policy, is the caller exiting. Which
+/// side owns them is therefore not a detail of the error but the whole of what
+/// the caller needs from it.
 pub enum LaunchError {
-    /// Nothing left this process. The handles are still here to close.
+    /// The request did not encode. The handles are still here to close.
     NotSent(IpcError),
-    /// The handles moved and the answer did not come back. They are the
-    /// launcher's to release now.
+    /// The handles are gone from this process: moved to the launcher, or
+    /// closed on a refused move, and no answer came back.
     Sent(IpcError),
 }
 
@@ -323,8 +347,8 @@ pub enum Outcome<'a> {
 /// Send one launch and read its answer, a `HOME` in `answer`.
 ///
 /// The handles go before the frame that announces them, which is
-/// [`Connection::send_with_handles`]'s whole rule — and the `Process` handle
-/// comes back the same way. A `HOME` longer than `answer` or not UTF-8 is a
+/// [`Connection::send_handles`]'s whole rule — and the `Process` handle comes
+/// back the same way. A `HOME` longer than `answer` or not UTF-8 is a
 /// malformed answer, never a shortened one.
 pub fn launch<'a>(
     conn: &Connection,
@@ -335,9 +359,18 @@ pub fn launch<'a>(
     let len = request
         .encode(&mut buf)
         .map_err(|_| LaunchError::NotSent(IpcError::TooLarge))?;
-    let (handles, count) = request.handles();
-    conn.send_bytes_with_handles(&handles[..count], MSG_LAUNCH, &buf[..len])
-        .map_err(LaunchError::Sent)?;
+    // Each is the caller's, which is `Launch`'s contract, and `batch` named it once.
+    let owned = |(handles, count): Batch| (0..count).map(move |i| OwnedHandle(handles[i]));
+    let sent = match request.batch(conn.as_handle()) {
+        Ok(batch) => conn.send_handles(owned(batch)),
+        // Refused here as the kernel would refuse it, and closed as any refused move is.
+        Err(named) => {
+            owned(named).for_each(drop);
+            Err(SyscallError::InvalidArgument)
+        }
+    };
+    sent.map_err(|e| LaunchError::Sent(IpcError::Syscall(e)))?;
+    conn.send_bytes(MSG_LAUNCH, &buf[..len]).map_err(LaunchError::Sent)?;
     let header = conn.recv_header().map_err(LaunchError::Sent)?;
     match header.msg_type {
         MSG_LAUNCHED => match conn.recv_handles_exact::<1>() {
@@ -386,5 +419,42 @@ mod tests {
             buf[HEADER - 4..HEADER].copy_from_slice(&word.to_le_bytes());
             assert_eq!(Request::decode(&buf[..len]).expect("decode it").parent(), None, "word {word}");
         }
+    }
+
+    /// `launch` becomes the one owner of every number in the batch, so a
+    /// number named twice, or the connection's own, is a batch to close: each
+    /// number once, the connection's never.
+    #[test]
+    fn a_batch_names_each_handle_once_and_never_its_connection() {
+        const CONN: RawHandle = RawHandle(3);
+        let h = RawHandle;
+        let batch = |slots: &[(u32, RawHandle)], extras: &[(&str, RawHandle)], parent| {
+            let request =
+                Launch { program: "/system/bin/cat", argv: b"", env: b"", cwd: "/", extras, slots, parent };
+            let named = |(handles, count): Batch| handles[..count].to_vec();
+            request.batch(CONN).map(named).map_err(named)
+        };
+        assert_eq!(
+            batch(&[(0, h(5)), (1, h(6))], &[("a", h(7)), ("b", h(8))], Parent::Place(h(9))),
+            Ok(vec![h(5), h(6), h(7), h(8), h(9)]),
+        );
+        assert_eq!(batch(&[], &[("a", h(7)), ("b", h(7))], Parent::Supervisor), Err(vec![h(7)]), "two extras");
+        assert_eq!(batch(&[(0, h(5)), (1, h(5))], &[], Parent::Supervisor), Err(vec![h(5)]), "two slots");
+        assert_eq!(
+            batch(&[(0, h(7)), (1, h(6))], &[("a", h(7))], Parent::Supervisor),
+            Err(vec![h(7), h(6)]),
+            "a slot and an extra",
+        );
+        assert_eq!(
+            batch(&[(0, h(5))], &[("a", h(9))], Parent::Place(h(9))),
+            Err(vec![h(5), h(9)]),
+            "an extra and the place",
+        );
+        assert_eq!(
+            batch(&[(0, h(5))], &[("a", CONN), ("b", h(7))], Parent::Supervisor),
+            Err(vec![h(5), h(7)]),
+            "the connection as an extra",
+        );
+        assert_eq!(batch(&[], &[("a", h(7))], Parent::Place(CONN)), Err(vec![h(7)]), "the connection as the place");
     }
 }
