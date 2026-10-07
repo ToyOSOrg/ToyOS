@@ -147,6 +147,13 @@ embedded-controller query the tables define, a T14 row reads the battery's
 state as the interpreter evaluated it beside Linux's reading of the same
 machine, and the press issue is closed by its own exit.
 
+The press issue's measurement of 2026-10-07 found the T14's lost presses
+changing nothing the server or the kernel reads, with the button's event
+enabled and no SMI taken, and its hypothesis is that the controller wants
+the firmware's initialisation run first. The slice that puts `_REG`, the
+`_STA` and `_INI` walk and the query methods in the server on the T14 is
+the one that issue's one-press test waits on.
+
 What that check found, which whoever builds on the interpreter would
 otherwise pay to find again:
 
