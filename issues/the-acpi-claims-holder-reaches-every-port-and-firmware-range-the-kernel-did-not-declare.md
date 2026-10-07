@@ -16,14 +16,34 @@ them:
 
 - **Every port the kernel did not declare and no other row names**, both
   ways. An I/O BAR of a PCI function is such a port, a kernel driver's and a
-  claim holder's alike, and so is every chipset register the firmware never
-  mentioned.
-- **All ACPI NVS and reserved memory**, both ways, outside the FACS and the
-  windows the kernel mapped: the firmware's own state, which its SMI handlers
-  read and trust.
-- **A function's configuration space from 0x40 to 0xFF**, outside the five
-  capabilities the kernel programs, on a function no driver holds: where a
-  chipset keeps its lock and decode registers.
+  claim holder's alike: the kernel records the memory BARs it decodes and no
+  I/O BAR. So is every chipset register the firmware never mentioned.
+- **All ACPI NVS and reserved memory**, both ways, outside the FACS and outside
+  every page a device the kernel knows of decodes in (a window it mapped, a
+  function's memory BAR): the firmware's own state, which its SMI handlers
+  read and trust, and any device register firmware typed reserved that is no
+  BAR and that the kernel maps nothing of.
+- **A function's configuration space, to read**, anywhere the MCFG's window
+  reaches. No configuration write is made: each is refused `ConfigWrite`
+  until a machine's AML makes one, and the arm that then passes it is designed
+  against that write.
+
+What the kernel's declarations do not follow:
+
+- **A declared block that moves.** `PM1a_CNT`, the TCO block and `SMI_CMD` are
+  declared by the port numbers the tables gave at boot. The registers that
+  place those blocks are in configuration space, which the holder cannot
+  write, but a chipset reaches them a second way wherever it mirrors them in
+  memory firmware typed reserved or behind an undeclared index and data pair:
+  a write there that moved a block would leave its registers on ports nothing
+  declared, read-only no longer.
+- **A port the firmware traps.** An access to an undeclared port that raises an
+  SMI is a stay in SMM for as long as the firmware's handler takes, made with
+  the mediation's spinlock held; the kernel neither bounds it nor counts it,
+  where it counts the SMI its own `SMI_CMD` write raises.
+- **A machine whose FADT names no `SMI_CMD`.** Nothing is declared there, so
+  the chipset's software-SMI port is a port like any other and the holder
+  writes it; the write is refused by name only where the FADT names the port.
 
 So a bug in `/system/bin/acpiserver`, or AML it runs, can reach those; the
 kernel bounds where, and not what. The owner's ruling on the server reading
@@ -42,6 +62,16 @@ configuration space, and no write; across its initialisation and query
 methods, memory writes in three pages, port writes to two ports nothing
 declared and to `SMI_CMD`, and no configuration write. Which UEFI types the
 real bases fall in is unread.
+
+Where that machine's devices decode is read: by its firmware's map as two
+recorded boots give it (ToyOS's own, whose `pcidev` lists what the map, the
+BARs and the bridges' forwarded ranges leave free, and Linux's print of the
+same map), none of the 21 memory BARs of its 24 functions is at an address the
+map lists, 16 of them past the end of the direct map; nor, by Linux's print,
+is the I/O APIC, the HPET or any of the four DMA remapping units. There a BAR
+and a kernel-driven window answered `MemoryType` or `Unmapped` before the
+kernel's record refused them, and the record is what refuses them on a machine
+whose firmware lists such a range as reserved.
 
 **Exit**: an access is passed only inside a region the machine's loaded tables
 define, checked by something other than the holder; or the owner rules the

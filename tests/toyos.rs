@@ -166,8 +166,9 @@ const RUST_SKIP: &[&str] = &[
     // the `acpi_server_events` metal row runs it.
     "acpi_hold",
     // It claims the fixed hardware itself, which needs a boot that starts no
-    // server, and stages the firmware's side of the Global Lock, which needs
-    // the test kernel: `acpi_mediated_access` runs it on tests/acpicase.
+    // server, and stages the firmware's side of the Global Lock and finds the
+    // i8042's row another claim's, which need the test kernel and its
+    // `i8042-withheld`: `acpi_mediated_access` runs it on tests/acpicase.
     "acpi_mediated",
     // It powers the machine off: `machine_shutdown_short_stop` runs it.
     "stop_short",
@@ -265,8 +266,9 @@ const MACHINE_TESTS: &[&str] = &[
     "acpi_power_button",
     // What the kernel reads and writes for the `acpi` claim's holder and what
     // it refuses. A red here is a write the kernel made — to RAM, to the
-    // firmware's tables, to COM1, to `PM1a_CNT` — and the take that finds the
-    // Global Lock owned needs the FACS's word staged as only an idle firmware
+    // firmware's tables, to COM1, to `PM1a_CNT`, to a function's configuration
+    // space — and the take that finds the Global Lock owned and the release
+    // that owes `GBL_RLS` need the FACS's word staged as only an idle firmware
     // allows: neither is done to the T14, which nothing powers on again.
     "acpi_mediated_access",
     // The power-off after a stop that left a thread running, in ACPI mode: it
@@ -1694,11 +1696,11 @@ const ACPI_MEDIATED_SAID: [&str; 8] = [
     "acpi: an unbound claim was refused its access and the lock",
     "acpi: RAM was refused both ways as UsableMemory",
     "acpi: the RSDP read through as type 9 and its write was refused TableWrite",
-    "acpi: an unlisted address, the interrupt controllers and the HPET were refused",
+    "acpi: an unlisted address was refused MemoryType, and the interrupt controllers, the HPET and a function's BAR DeviceMemory",
     "acpi: the FACS read through as type 10, its write was refused FacsWrite, and the memory after it was written and put back",
-    "acpi: COM1, the CMOS index, the 8259 and the configuration mechanism were refused KernelPort; PM1a_CNT and SMI_CMD read and refused their write ReadOnlyPort; the POST port was written",
-    "its header and extended space refused every write, and one register past them took the value it held",
-    "acpi: the lock a dead holder left taken read free; it was taken and given back, and found pending while the firmware owned it",
+    "acpi: COM1, the CMOS index, the 8259 and the configuration mechanism were refused KernelPort; the i8042's row ClaimedPort; PM1a_CNT and SMI_CMD read and refused their write ReadOnlyPort; the POST port was written",
+    "by its address and through ECAM, and every write to configuration space was refused ConfigWrite",
+    "acpi: the lock a dead holder left taken read free; it was taken and given back, given back with GBL_RLS where the firmware had asked, and found pending while the firmware owned it",
 ];
 
 /// Boot `tests/acpicase`, whose one job is `test_rs_acpi_mediated`, on the
@@ -1712,7 +1714,8 @@ fn acpi_mediated_access() -> Result<(), String> {
         &[],
         &[],
         BootOptions {
-            kernel_features: toyos_build::build::TEST_KERNEL,
+            // The test kernel, for the Global Lock's actuator too.
+            kernel_params: &["i8042-withheld"],
             ready_marker: "acpi: the ACPI row: ",
             extra_root_files: vec![suite_bin(toyos_build::arch::Arch::X86_64, "acpi_mediated")],
             ..Default::default()
@@ -1723,6 +1726,7 @@ fn acpi_mediated_access() -> Result<(), String> {
     await_marker(&mut qemu, &mut console, &end, "the probe to end")?;
     let said = serial::Serial::named("the probe's boot", console);
     said.must_be_clean()?;
+    said.must_say(isa::WITHHELD)?;
     said.must_say("acpi: the Global Lock is the FACS's at ")?;
     said.must_say("acpi: the Global Lock given back for a holder that left it taken (its claim is gone)")?;
     for line in ACPI_MEDIATED_SAID {
@@ -3807,10 +3811,18 @@ fn acpi_events_on_metal(back: &metal::Readback) -> Result<(), String> {
 /// The server's death on the T14: the kernel put the machine in ACPI mode for
 /// the job's claim, and when the killed server's claim went it wrote
 /// `ACPI_DISABLE` (the FADT's 0xf1) and read `SCI_EN` clear: the firmware has
-/// the buttons again.
+/// the buttons again. And the Global Lock this machine's firmware keeps: the
+/// kernel read the FACS its FADT names through the direct map and found the
+/// lock word in ACPI NVS memory (type 10) by the firmware's own map, which is
+/// where Linux's print of the same map puts it.
 fn acpi_death_on_metal(back: &metal::Readback) -> Result<(), String> {
     back.job_passed("test_rs_acpi_release")?;
     let kernel = back.kernel();
+    let lock = kernel.must_say("acpi: the Global Lock is the FACS's at ")?.trim();
+    if !lock.ends_with(", in memory the firmware's map types 10") {
+        return Err(format!("the Global Lock's word is not in ACPI NVS memory: {lock}"));
+    }
+    eprintln!("  [acpi] {lock}");
     kernel.must_say("acpi: ACPI mode: ACPI_ENABLE 0xf0 written to SMI_CMD 0xb2, SCI_EN set ")?;
     // The kernel says this only of a `PM1a_CNT` it read with `SCI_EN` clear.
     let left = kernel.must_say("acpi: legacy mode again: ACPI_DISABLE 0xf1 written to SMI_CMD, PM1a_CNT reads ")?;

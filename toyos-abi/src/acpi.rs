@@ -12,7 +12,8 @@
 //!
 //! **What the firmware's AML addresses outside those blocks the holder reaches
 //! one access at a time, through the kernel** ([`Access`]): firmware-owned
-//! memory, a port, a function's configuration space. The kernel decides each
+//! memory and a port both ways, a function's configuration space to read. The
+//! kernel decides each
 //! by what the address is and answers a refusal by name ([`Refused`]); nothing
 //! is mapped and no port opened. The firmware's Global Lock is taken and given
 //! back the same way ([`op::LOCK_TAKE`]), and goes back with the claim.
@@ -172,8 +173,9 @@ pub enum Refused {
     MemoryType = 3,
     /// Past the end of what the kernel maps.
     Unmapped = 4,
-    /// A window the kernel drives a device through, or the local APIC's.
-    KernelDevice = 5,
+    /// Memory a device decodes: a window the kernel drives one through, a PCI
+    /// function's memory BAR whoever drives it, or the local APIC's.
+    DeviceMemory = 5,
     /// A write to the FACS, whose Global Lock is the kernel's to change.
     FacsWrite = 6,
     /// An access whose first and last byte the map types differently.
@@ -191,16 +193,9 @@ pub enum Refused {
     /// A configuration access wider than a dword, across a dword boundary, or
     /// past the function's 4096 bytes.
     ConfigSpan = 13,
-    /// A write to the standard header, the first 64 bytes.
-    ConfigHeader = 14,
-    /// A write to a capability the kernel programs: power management, MSI,
-    /// MSI-X, PCI Express or Advanced Features.
-    ConfigCapability = 15,
-    /// A write to extended configuration space.
-    ConfigExtended = 16,
-    /// A write to a function a kernel driver or a claim's holder drives, or to
-    /// one the kernel did not enumerate.
-    ConfigDriven = 17,
+    /// A write to configuration space, by its address or through the ECAM
+    /// window: the kernel makes none for the holder.
+    ConfigWrite = 14,
 }
 
 impl Refused {
@@ -210,7 +205,7 @@ impl Refused {
             2 => Self::TableWrite,
             3 => Self::MemoryType,
             4 => Self::Unmapped,
-            5 => Self::KernelDevice,
+            5 => Self::DeviceMemory,
             6 => Self::FacsWrite,
             7 => Self::Straddles,
             8 => Self::KernelPort,
@@ -219,10 +214,7 @@ impl Refused {
             11 => Self::PortSpan,
             12 => Self::ConfigUnreachable,
             13 => Self::ConfigSpan,
-            14 => Self::ConfigHeader,
-            15 => Self::ConfigCapability,
-            16 => Self::ConfigExtended,
-            17 => Self::ConfigDriven,
+            14 => Self::ConfigWrite,
             _ => return None,
         })
     }

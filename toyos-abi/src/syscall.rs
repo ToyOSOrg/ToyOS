@@ -856,11 +856,16 @@ pub mod debug_action {
     /// 100 ms, and [`RING0_FIRE_OTHER_SPAN`] if it re-armed something else.
     pub const RING0_TIMER_IN_SYSCALL: u64 = 26;
     /// Play the firmware's side of the Global Lock (ACPI 6.5 §5.2.10.1) on the
-    /// FACS's lock word: a non-zero argument owns it, as an SMI handler that
-    /// took it would, and zero gives it back. Answers the word as it was, or
-    /// `NotSupported` on a machine with no FACS. No guest's firmware takes the
-    /// lock on demand; the take that finds it owned is the shipped path.
+    /// FACS's lock word: [`FIRMWARE_OWNS`] takes it, as an SMI handler would,
+    /// [`FIRMWARE_ASKS`] sets the pending bit under an owner, as a handler that
+    /// found it taken would, and [`FIRMWARE_FREES`] clears both. Answers the
+    /// word as it was, or `NotSupported` on a machine with no FACS. No guest's
+    /// firmware touches the lock on demand; the take that finds it owned and
+    /// the release that owes a signal are the shipped paths.
     pub const ACPI_FIRMWARE_LOCK: u64 = 27;
+    pub const FIRMWARE_FREES: u64 = 0;
+    pub const FIRMWARE_OWNS: u64 = 1;
+    pub const FIRMWARE_ASKS: u64 = 2;
     pub const RING0_FIRE_REARMED: u64 = 0;
     pub const RING0_FIRE_NEVER: u64 = 1;
     pub const RING0_FIRE_OTHER_SPAN: u64 = 2;

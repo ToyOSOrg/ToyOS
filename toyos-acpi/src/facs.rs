@@ -10,10 +10,11 @@ use crate::fadt::{FADT_FIRMWARE_CTRL, FADT_X_FIRMWARE_CTRL};
 use crate::{Phys, Table, MAX_TABLE_LEN, SDT_REVISION};
 
 /// Table 5.13: `Length` at 4, the Global Lock at 16, in a structure of 64
-/// bytes or more.
+/// bytes or more; §5.2.10 aligns it on a 64-byte boundary.
 const FACS_LENGTH: u64 = 4;
 pub const FACS_GLOBAL_LOCK: u64 = 16;
 const FACS_MIN_LEN: u32 = 64;
+const FACS_ALIGN: u64 = 64;
 
 /// Table 5.16.
 pub const PENDING: u32 = 1 << 0;
@@ -33,8 +34,8 @@ pub enum FacsRefused {
     Absent,
     /// Its first 64 bytes are not all readable.
     Unmapped(u64),
-    /// §5.2.10 aligns it on 64 bytes; one not on four has no lock word a
-    /// compare-and-exchange can address.
+    /// Not on the 64-byte boundary §5.2.10 gives it: an address a firmware
+    /// that kept the specification did not write.
     Misaligned(u64),
     Signature,
     Length(u32),
@@ -51,7 +52,7 @@ pub fn facs<P: Phys>(phys: P, fadt: &Table<P>) -> Result<Facs, FacsRefused> {
     if base == 0 {
         return Err(FacsRefused::Absent);
     }
-    if !base.is_multiple_of(4) {
+    if !base.is_multiple_of(FACS_ALIGN) {
         return Err(FacsRefused::Misaligned(base));
     }
     if !phys.readable(base, FACS_MIN_LEN as usize) {

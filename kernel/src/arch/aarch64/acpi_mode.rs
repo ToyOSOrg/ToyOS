@@ -28,6 +28,6 @@ pub fn lock_release() -> Result<(), toyos_abi::syscall::SyscallError> {
 }
 
 #[cfg(feature = "test-actuators")]
-pub fn debug_firmware_lock(_own: bool) -> u64 {
+pub fn debug_firmware_lock(_act: u64) -> u64 {
     toyos_abi::syscall::SyscallError::NotSupported.to_u64()
 }

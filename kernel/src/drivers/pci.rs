@@ -67,7 +67,8 @@ impl Capability<'_> {
         self.device.read_config_u8(self.offset)
     }
 
-    /// The config-space offset this capability sits at.
+    /// The config-space offset this capability sits at, for the cap self-test to name the link the walk yielded.
+    #[cfg(feature = "boot-actuators")]
     pub(crate) fn offset(&self) -> u64 {
         self.offset
     }

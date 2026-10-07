@@ -54,7 +54,21 @@ fn a_structure_that_is_no_facs_is_refused_by_name() {
     assert_eq!(decoded(&fadt, 0x1000, &a_facs(63)), Err(FacsRefused::Length(63)));
     assert_eq!(decoded(&fadt, 0x1000, &a_facs(u32::MAX)), Err(FacsRefused::Length(u32::MAX)));
     assert_eq!(decoded(&fadt, 0x1000, &a_facs(64)[..63]), Err(FacsRefused::Unmapped(0x1000)));
-    assert_eq!(decoded(&fadt_naming(0x1002, 0), 0x1002, &a_facs(64)), Err(FacsRefused::Misaligned(0x1002)));
+}
+
+/// §5.2.10 aligns the FACS on a 64-byte boundary: every base that is not on
+/// one is refused, by either address field, and the boundary itself is not.
+#[test]
+fn a_facs_off_its_sixty_four_byte_boundary_is_refused() {
+    for off in [1u32, 2, 4, 8, 16, 32, 60, 63] {
+        let at = 0x1000 + off;
+        assert_eq!(decoded(&fadt_naming(at, 0), u64::from(at), &a_facs(64)), Err(FacsRefused::Misaligned(u64::from(at))), "narrow, {off} off");
+        let wide = 0x2_0000_0000 + u64::from(off);
+        assert_eq!(decoded(&fadt_naming(0x1000, wide), wide, &a_facs(64)), Err(FacsRefused::Misaligned(wide)), "wide, {off} off");
+    }
+    for at in [0x40u32, 0x1000, 0x1040, 0xFFFF_FFC0] {
+        assert_eq!(decoded(&fadt_naming(at, 0), u64::from(at), &a_facs(64)), Ok(Facs { base: u64::from(at), len: 64 }), "{at:#x}");
+    }
 }
 
 /// `AcquireGlobalLock`, an instruction a line: `and edx, not 1`, `bts edx, 1`,

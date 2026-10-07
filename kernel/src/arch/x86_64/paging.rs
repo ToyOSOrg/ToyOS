@@ -864,7 +864,11 @@ pub fn load_kernel_flush() {
 
 /// Every window [`map_mmio`] mapped, as `(start, end)`: what this kernel
 /// drives a device through, and so what it refuses the `acpi` claim's holder
-/// (`arch::acpi_mode`). Its only writer is the only maker of such a window.
+/// (`arch::acpi_mode`), who is refused every page one lies in. Its only writer
+/// is the only maker of such a window. One entry a distinct window and none
+/// removed: a boot's drivers map theirs once, and past boot only `pcidev`
+/// maps, a BAR where firmware put it and at each address it tries it at, and
+/// one it has placed it does not try again.
 static DRIVEN: Lock<Vec<(u64, u64)>> = Lock::new(Vec::new());
 
 /// Run `f` over every window this kernel mapped to drive a device.

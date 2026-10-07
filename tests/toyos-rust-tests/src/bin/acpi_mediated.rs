@@ -2,12 +2,14 @@
 //! kernel reads and writes for it, what it refuses and by which name, and the
 //! firmware's Global Lock taken, found owned and given back.
 //!
-//! Run on a boot that starts no ACPI server (`tests/acpicase`), on a guest:
-//! every write here that must be refused is one a kernel that made it would
-//! make for real — to RAM, to the tables, to COM1, to `PM1a_CNT` — and the
-//! lock's owned state is staged on the FACS itself, which only a machine
-//! whose firmware is not using it can take. Each address is found as a holder
-//! finds it, from the RSDP the claim's description names.
+//! Run on a boot that starts no ACPI server (`tests/acpicase`) and whose
+//! kernel leaves the i8042 to a claim (`i8042-withheld`), so its row is
+//! another claim's; on a guest: every write here that must be refused is one
+//! a kernel that made it would make for real — to RAM, to the tables, to
+//! COM1, to `PM1a_CNT`, to a function's configuration space — and the
+//! firmware's side of the lock is staged on the FACS itself, which only a
+//! machine whose firmware is not using it can take. Each address is found as
+//! a holder finds it, from the RSDP the claim's description names.
 //!
 //! First a child is handed the claim, takes the lock and exits with it: the
 //! claim binds to one process for that process's life, so the parent claims
@@ -173,14 +175,23 @@ fn memory(holder: &Holder, info: &AcpiInfo) {
     // An address firmware's map does not list, between the PCI hole's start and the ECAM window.
     let (hole, ty) = holder.ask(Access::read(Space::SystemMemory, 0xD000_0000, Width::DWord));
     assert_eq!((hole, ty), (Err(Refused::MemoryType), UNLISTED), "acpi: an unlisted address");
-    // The local APIC, the I/O APIC and the HPET, wherever the map puts them.
-    for device in [0xFEE0_0000u64, 0xFEC0_0000, 0xFED0_0000] {
-        let refused = holder.read(Space::SystemMemory, device, Width::DWord);
-        assert!(matches!(refused, Err(Refused::KernelDevice | Refused::MemoryType)), "acpi: {device:#x} answered {refused:?}");
-        assert_eq!(holder.write(Space::SystemMemory, device, Width::DWord, 0), refused.map(drop));
+    // The local APIC; the I/O APIC, which the kernel drives through its
+    // first 0x20 bytes, at its first register, at the EOI register a chipset
+    // keeps at 0x40 and at its page's last dword; and the HPET. Each is a
+    // device's by the kernel's own record of it: this firmware's map lists
+    // none of them, and an address it does not list answers `MemoryType`.
+    for device in [0xFEE0_0000u64, 0xFEC0_0000, 0xFEC0_0040, 0xFEC0_0FFC, 0xFED0_0000] {
+        assert_eq!(holder.read(Space::SystemMemory, device, Width::DWord), Err(Refused::DeviceMemory), "acpi: {device:#x} was read");
+        assert_eq!(holder.write(Space::SystemMemory, device, Width::DWord, 0), Err(Refused::DeviceMemory), "acpi: {device:#x} was written");
     }
+    // A memory BAR of a function no kernel driver maps: the network card,
+    // which is a claim's and which nothing in this boot claims, so its BAR
+    // stays where firmware put it.
+    let bar = nic_bar(holder);
+    assert_eq!(holder.read(Space::SystemMemory, bar, Width::DWord), Err(Refused::DeviceMemory), "acpi: a function's BAR at {bar:#x} was read");
+    assert_eq!(holder.write(Space::SystemMemory, bar + 0x14, Width::DWord, 0), Err(Refused::DeviceMemory), "acpi: a function's BAR was written");
     assert_eq!(holder.read(Space::SystemMemory, u64::MAX, Width::Word), Err(Refused::Unmapped));
-    println!("acpi: an unlisted address, the interrupt controllers and the HPET were refused");
+    println!("acpi: an unlisted address was refused MemoryType, and the interrupt controllers, the HPET and a function's BAR DeviceMemory");
 
     // Non-volatile memory, both ways: the FACS, and the bytes after it.
     let fadt = holder.table(info.rsdp, b"FACP");
@@ -204,6 +215,25 @@ fn memory(holder: &Holder, info: &AcpiInfo) {
     println!("acpi: the FACS read through as type {ty}, its write was refused FacsWrite, and the memory after it was written and put back");
 }
 
+/// Where the first memory BAR of the guest's network card is, read from its
+/// configuration space as a holder reads it (PCI Local Bus 3.0 §6.2.5.1: bit
+/// 0 clear is memory, and bits 2:1 of `10b` a 64-bit address whose high half
+/// is the next register).
+fn nic_bar(holder: &Holder) -> u64 {
+    // virtio-net as a modern device (virtio 1.2 §4.1.2: device id 0x1040 + 1).
+    const NIC: u64 = 0x1041_1af4;
+    let config = |device: u8, offset: u16| holder.read(Space::PciConfig, pci_address(0, 0, device, 0, offset), Width::DWord).expect("acpi: a configuration read on bus 0");
+    let device = (0..32).find(|&device| config(device, 0) == NIC).expect("acpi: no virtio network card on this guest's bus 0");
+    (0..6)
+        .map(|slot| (config(device, 0x10 + slot * 4), slot))
+        .find(|&(low, _)| low != 0 && low & 1 == 0)
+        .map(|(low, slot)| {
+            let high = if low >> 1 & 3 == 2 { config(device, 0x14 + slot * 4) } else { 0 };
+            high << 32 | low & !0xF
+        })
+        .expect("acpi: the network card has no memory BAR")
+}
+
 fn ports(holder: &Holder, info: &AcpiInfo) {
     // COM1 and the CMOS index: the kernel's, both ways.
     for port in [0x3F8u64, 0x3FD, 0x70, 0x20, 0xCF8] {
@@ -214,6 +244,14 @@ fn ports(holder: &Holder, info: &AcpiInfo) {
     assert_eq!(holder.read(Space::SystemIo, 0xFFFF, Width::Word), Err(Refused::PortSpan));
     assert_eq!(holder.read(Space::SystemIo, 0x1_0000, Width::Byte), Err(Refused::PortSpan));
     assert_eq!(holder.read(Space::SystemIo, 0x80, Width::QWord), Err(Refused::PortSpan));
+
+    // The i8042's row, which another claim is for: this boot's kernel leaves
+    // the controller unprobed, so nothing declared its ports.
+    for port in [0x60u64, 0x64] {
+        assert_eq!(holder.read(Space::SystemIo, port, Width::Byte), Err(Refused::ClaimedPort), "acpi: port {port:#x} was read");
+        assert_eq!(holder.write(Space::SystemIo, port, Width::Byte, 0), Err(Refused::ClaimedPort), "acpi: port {port:#x} was written");
+    }
+    assert_eq!(holder.read(Space::SystemIo, 0x5F, Width::Word), Err(Refused::ClaimedPort), "acpi: a word that ends on the i8042's data port");
 
     // The POST port, which the kernel declared and opens.
     assert_eq!(holder.write(Space::SystemIo, 0x80, Width::Byte, 0x5A), Ok(()), "acpi: the POST port");
@@ -233,7 +271,7 @@ fn ports(holder: &Holder, info: &AcpiInfo) {
     let status = u64::from(info.pm1_event.port);
     holder.read(Space::SystemIo, status, Width::Word).expect("acpi: the claim's own PM1 status");
     holder.read(Space::SystemIo, status, Width::DWord).expect("acpi: the claim's own PM1 event block as a dword");
-    println!("acpi: COM1, the CMOS index, the 8259 and the configuration mechanism were refused KernelPort; PM1a_CNT and SMI_CMD read and refused their write ReadOnlyPort; the POST port was written");
+    println!("acpi: COM1, the CMOS index, the 8259 and the configuration mechanism were refused KernelPort; the i8042's row ClaimedPort; PM1a_CNT and SMI_CMD read and refused their write ReadOnlyPort; the POST port was written");
 }
 
 fn configuration(holder: &Holder, info: &AcpiInfo) {
@@ -256,18 +294,19 @@ fn configuration(holder: &Holder, info: &AcpiInfo) {
     let ecam = holder.memory(holder.table(info.rsdp, b"MCFG") + 44, Width::QWord);
     assert_eq!(holder.read(Space::SystemMemory, ecam, Width::DWord), Ok(id), "acpi: the host bridge through ECAM");
     assert_eq!(holder.read(Space::SystemMemory, ecam, Width::QWord), Err(Refused::ConfigSpan));
-    assert_eq!(holder.write(Space::SystemMemory, ecam + 4, Width::Word, 0), Err(Refused::ConfigHeader), "acpi: the command register through ECAM");
 
-    // Writes: the header and extended space never, a register past both on a
-    // function nothing drives with the value it holds.
-    for (offset, width) in [(0x04, Width::Word), (0x10, Width::DWord), (0x3C, Width::Byte)] {
-        assert_eq!(holder.write(Space::PciConfig, host_bridge(offset), width, 0), Err(Refused::ConfigHeader), "acpi: {offset:#x}");
-    }
-    assert_eq!(holder.write(Space::PciConfig, host_bridge(0x100), Width::DWord, 0), Err(Refused::ConfigExtended));
+    // No write, by a function's address or through the ECAM window: the
+    // header, a register past it with the value it holds, extended space, a
+    // function nothing answers at, and a shape no read has.
     let held = holder.read(Space::PciConfig, host_bridge(0x44), Width::Byte).expect("acpi: a register past the header");
-    assert_eq!(holder.write(Space::PciConfig, host_bridge(0x44), Width::Byte, held), Ok(()), "acpi: a write past the header of a function nothing drives");
-    assert_eq!(holder.write(Space::PciConfig, pci_address(0, 0xFF, 31, 7, 0x44), Width::Byte, 0), Err(Refused::ConfigDriven), "acpi: a function this kernel did not enumerate");
-    println!("acpi: the host bridge read as {id:#010x} by its address and through ECAM; its header and extended space refused every write, and one register past them took the value it held");
+    for (offset, width, value) in [(0x04, Width::Word, 0), (0x10, Width::DWord, 0), (0x3C, Width::Byte, 0), (0x44, Width::Byte, held), (0x44, Width::Byte, !held & 0xFF), (0x100, Width::DWord, 0)] {
+        assert_eq!(holder.write(Space::PciConfig, host_bridge(offset), width, value), Err(Refused::ConfigWrite), "acpi: {offset:#x} by address");
+        assert_eq!(holder.write(Space::SystemMemory, ecam + u64::from(offset), width, value), Err(Refused::ConfigWrite), "acpi: {offset:#x} through ECAM");
+    }
+    assert_eq!(holder.read(Space::PciConfig, host_bridge(0x44), Width::Byte), Ok(held), "acpi: a refused write reached the host bridge");
+    assert_eq!(holder.write(Space::PciConfig, pci_address(0, 0xFF, 31, 7, 0x44), Width::Byte, 0), Err(Refused::ConfigWrite));
+    assert_eq!(holder.write(Space::PciConfig, host_bridge(2), Width::DWord, 0), Err(Refused::ConfigWrite));
+    println!("acpi: the host bridge read as {id:#010x} by its address and through ECAM, and every write to configuration space was refused ConfigWrite");
 }
 
 fn lock(holder: &Holder, info: &AcpiInfo) {
@@ -288,19 +327,35 @@ fn lock(holder: &Holder, info: &AcpiInfo) {
     assert_eq!(syscall::acpi_lock_release(holder.handle()), Ok(()));
     assert_eq!(word(holder), 0);
 
+    // The firmware asks while the holder has it: the release clears the
+    // word and tells the firmware by `GBL_RLS`, bit 2 of `PM1a_CNT` (ACPI 6.5
+    // §4.8.3.2), which this guest's model keeps as written where a chipset
+    // reads it back clear.
+    const GBL_RLS: u64 = 1 << 2;
+    // Table 5.9: `PM1a_CNT_BLK` at 64.
+    let control = holder.memory(fadt + 64, Width::DWord);
+    let told = |holder: &Holder| holder.read(Space::SystemIo, control, Width::Word).expect("acpi: PM1a_CNT reads") & GBL_RLS;
+    assert_eq!(syscall::acpi_lock_take(holder.handle()), Ok(true));
+    assert_eq!(syscall::debug_with(debug_action::ACPI_FIRMWARE_LOCK, debug_action::FIRMWARE_ASKS), OWNED);
+    assert_eq!(word(holder), OWNED | PENDING);
+    assert_eq!(told(holder), 0, "acpi: GBL_RLS reads set before any release owed it");
+    assert_eq!(syscall::acpi_lock_release(holder.handle()), Ok(()));
+    assert_eq!(word(holder), 0);
+    assert_eq!(told(holder), GBL_RLS, "acpi: a release the firmware had asked for wrote no GBL_RLS");
+
     // The firmware owns it: the take is refused and leaves its request.
-    assert_eq!(syscall::debug_with(debug_action::ACPI_FIRMWARE_LOCK, 1), 0);
+    assert_eq!(syscall::debug_with(debug_action::ACPI_FIRMWARE_LOCK, debug_action::FIRMWARE_OWNS), 0);
     assert_eq!(syscall::acpi_lock_take(holder.handle()), Ok(false), "acpi: a lock the firmware owns was taken");
     assert_eq!(word(holder), OWNED | PENDING);
     assert_eq!(syscall::acpi_lock_take(holder.handle()), Ok(false));
     assert_eq!(syscall::acpi_lock_release(holder.handle()), Err(SyscallError::InvalidArgument), "acpi: the firmware's lock was given back");
     assert_eq!(word(holder), OWNED | PENDING, "acpi: a refused release changed the word");
     // The firmware lets go, and the next take has it; the stale request goes with the take.
-    assert_eq!(syscall::debug_with(debug_action::ACPI_FIRMWARE_LOCK, 0), OWNED | PENDING);
+    assert_eq!(syscall::debug_with(debug_action::ACPI_FIRMWARE_LOCK, debug_action::FIRMWARE_FREES), OWNED | PENDING);
     assert_eq!(syscall::acpi_lock_take(holder.handle()), Ok(true));
     assert_eq!(word(holder), OWNED);
     assert_eq!(syscall::acpi_lock_release(holder.handle()), Ok(()));
-    println!("acpi: the lock a dead holder left taken read free; it was taken and given back, and found pending while the firmware owned it");
+    println!("acpi: the lock a dead holder left taken read free; it was taken and given back, given back with GBL_RLS where the firmware had asked, and found pending while the firmware owned it");
 }
 
 /// What the keeper says once it holds the lock.

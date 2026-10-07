@@ -7,23 +7,6 @@
 /// One past the standard configuration header; capabilities live at or above it.
 pub const FIRST_CAP: u8 = 0x40;
 
-/// How many bytes a capability this kernel programs on a function it hands
-/// out may occupy, by its id, and `None` for one it writes nothing of. The
-/// most each structure's own specification gives it, so a register beside a
-/// shorter one is counted with it: power management's 8 bytes, MSI's 24 with
-/// a 64-bit address and per-vector masking, PCI Express's 60 through Slot
-/// Status 2, MSI-X's 12 and Advanced Features' 6.
-pub const fn programmed_len(id: u8) -> Option<u8> {
-    match id {
-        crate::pm::CAP_ID => Some(8),
-        crate::msi::CAP_ID => Some(24),
-        crate::express::CAP_ID => Some(60),
-        crate::msix::CAP_ID => Some(12),
-        crate::af::CAP_ID => Some(6),
-        _ => None,
-    }
-}
-
 /// A walk of a capability list that visits each capability at most once.
 #[derive(Debug, Default)]
 pub struct CapWalk {
@@ -66,12 +49,6 @@ impl CapWalk {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn only_the_capabilities_this_kernel_programs_have_a_length() {
-        let programmed: std::vec::Vec<(u8, u8)> = (0..=u8::MAX).filter_map(|id| programmed_len(id).map(|len| (id, len))).collect();
-        assert_eq!(programmed, [(0x01, 8), (0x05, 24), (0x10, 60), (0x11, 12), (0x13, 6)]);
-    }
 
     #[test]
     fn the_terminator_ends_the_walk() {
