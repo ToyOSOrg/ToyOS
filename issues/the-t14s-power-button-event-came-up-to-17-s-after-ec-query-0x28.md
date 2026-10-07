@@ -64,10 +64,16 @@ time, so whether that boot's lost press fell in either window is not known.
 The presses the measurement below lost were cued 5 s, 45 s and 85 s after the
 server armed, in neither window.
 
-**Measured on the T14, 2026-10-07: a lost press changes nothing ToyOS can
-read, and the same cue is served on one boot and lost on the next.** The
-owner had agreed to press on demand ("Yes, on demand (Recommended)"): a
-measurement, not a test. A scout image, built on `e7010129f` and never pushed,
+**Measured on the T14, 2026-10-07: a scout read three lost presses through
+PM1 status, GPE0 status, the embedded controller's status register polled
+every 10.1 ms and the SMI count and found none of them in any, and the same
+cue is served on one boot and lost on the next.** Asked whether he would do
+a one-time measurement, the owner answered "Yes, on demand (Recommended)";
+the question's scope was one held boot with three presses, each when asked
+for, a measurement and not a test. That is the second boot below. After it
+the orchestrator proposed one more boot of the same image with a single press
+in the third window, to tell count from time, and the owner answered "go":
+the third boot. A scout image, built on `e7010129f` and never pushed,
 ran stage 1's server with a press logged and not acted on, and held the boot
 150 s after the server armed. It showed three cues on the panel, each a 15 s
 window, 5 s, 45 s and 85 s after arming. At every SCI, before anything was
@@ -99,23 +105,31 @@ tree; times are each log's own stamps:
   That is the boot's only 0x28 and its only press line: 137 SCIs, one press.
 - **One press, in window 3 only**, the owner's account: "yes i pressed once
   at the third red block only". Armed at 13.338 s; window 3 at 98.346 s to
-  113.345 s. The whole boot holds what the boot nobody pressed on holds: 136
-  SCIs, 68 pairs of 0x4f, 18, 54 and 90 at the closes, no query 0x28, PM1
-  status 0 on every line, the SMI count 4819 on all eight CPUs, `SMI_STS`'s
-  one move at 63.769 s.
+  113.345 s. The boot holds what the boot nobody pressed on holds, but for
+  one poll line: 136 SCIs, 68 pairs of 0x4f, 18, 54 and 90 at the closes, no
+  query 0x28, PM1 status 0 on every line, the SMI count 4819 on all eight
+  CPUs, `SMI_STS`'s one move at 63.769 s. The poll line: at 114.522 s, 1.18 s
+  after window 3 closed, the poll read the controller's status as 0x28, the
+  value every SCI that drains 0x4f reads, 166 µs before SCI 91 read the same
+  and drained 0x4f. Every other poll line of the three boots reads it as
+  0x08, every one in window 3 among them.
 
 On all three, every SCI's line reads the power-button enable set in `PM1_EN`
 and every kernel sample reads `SCI_EN` set and `SMI_EN` unchanged.
 
 What that shows. A press cued 85 s after arming was served on the second boot
 and lost on the third, so time since boot or since arming does not decide the
-loss; what differed is that two presses had come before it. The three presses
-lost on these boots raised no `PWRBTN_STS`, no SCI, no query, no change of the
-controller's status at the poll and no SMI, with the event enabled and the
-machine in ACPI mode throughout: they were lost before anything the server or
-the kernel reads, which is neither the server's arming nor SMM taking the
-press. `8d7004d3b`'s boot has the same shape: three presses by the owner's
-count, and its one 0x28 came 16 ms before the one press it served.
+loss. By the owner's accounts, what differed is that two presses had come
+before it on the second boot and none on the third. By the logs, the SMI
+count differed too, from before the kernel's enable: cpu0 read 4818 before
+the write of `ACPI_ENABLE` and 4819 after on the third boot, and 4817 and
+4818 on the first two. The three presses lost on these boots raised no
+`PWRBTN_STS`, no SCI, no query and no SMI, and the poll read the controller's
+status as 0x08 on every line of their windows, with the event enabled and the
+machine in ACPI mode throughout: they were lost before any of what the scout
+read, which is neither the server's arming nor SMM taking the press.
+`8d7004d3b`'s boot has the same shape: three presses by the owner's count,
+and its one 0x28 came 16 ms before the one press it served.
 
 What it does not show. A count of earlier presses is read off two boots, and
 `ff4945d6d` served the only press of its boot. And a second shape of loss is

@@ -147,13 +147,6 @@ embedded-controller query the tables define, a T14 row reads the battery's
 state as the interpreter evaluated it beside Linux's reading of the same
 machine, and the press issue is closed by its own exit.
 
-The press issue's measurement of 2026-10-07 found the T14's lost presses
-changing nothing the server or the kernel reads, with the button's event
-enabled and no SMI taken, and its hypothesis is that the controller wants
-the firmware's initialisation run first. The slice that puts `_REG`, the
-`_STA` and `_INI` walk and the query methods in the server on the T14 is
-the one that issue's one-press test waits on.
-
 What that check found, which whoever builds on the interpreter would
 otherwise pay to find again:
 
@@ -207,6 +200,13 @@ otherwise pay to find again:
   stage, which gives the server its memory. **Exit**: the server states its
   interpreter's bound in heap bytes, and a host test under a counting
   allocator holds each of those three fills and that refused load to it.
+
+The press issue's measurement of 2026-10-07 found the three presses it lost
+changing nothing its scout read, with the button's event enabled and no SMI
+taken, and its hypothesis is that the controller wants the firmware's
+initialisation run first. The slice that puts `_REG`, the `_STA` and `_INI`
+walk and the query methods in the server on the T14 is the one that issue's
+one-press test waits on.
 
 **Stage: power-off through the server** (the orchestrator's placement of "Yes,
 one path"). The ACPI server evaluates `\_S5` and powers the machine off.
