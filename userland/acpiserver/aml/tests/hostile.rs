@@ -4,7 +4,7 @@
 mod common;
 
 use common::*;
-use toyos_aml::{Error, Interpreter, Value};
+use toyos_aml::{Access, Address, Denied, Error, Host, Interpreter, Value};
 
 const ZERO: &[u8] = &[0x00];
 
@@ -281,6 +281,8 @@ fn work_in_one_step_is_charged_in_proportion() {
 fn what_is_held_live_is_bounded_in_sum() {
     let (mut i, mut m) = loaded(&cat(&[
         &def_name("GPKG", &var_package(&int(0x1_0000), &[])),
+        &def_name("_S5", &package(&[int(7), int(7), int(0), int(0)])),
+        &method("MAKE", 0, &ret(&buffer(&int(0x10_0000), &[]))),
         &method(
             "FILL",
             0,
@@ -293,10 +295,119 @@ fn what_is_held_live_is_bounded_in_sum() {
             ]),
         ),
     ]));
+    assert_eq!(i.evaluate(&mut m, "\\MAKE", &[]).map(|v| v == Value::Buffer(vec![0; 0x10_0000])), Ok(true));
     assert!(matches!(i.evaluate(&mut m, "\\FILL", &[]), Err(Error::Bound(_))));
-    // What the refused evaluation stored stays held, and the budget with it;
-    // the interpreter goes on answering.
+    // What the refused evaluation stored stays held: the interpreter goes on
+    // answering what needs nothing new held, a named package among it, and
+    // refuses what does.
+    let seven = Value::Integer(7);
+    let zero = Value::Integer(0);
+    assert_eq!(i.evaluate(&mut m, "\\_S5", &[]), Ok(Value::Package(vec![seven.clone(), seven, zero.clone(), zero])));
+    assert!(matches!(i.evaluate(&mut m, "\\MAKE", &[]), Err(Error::Bound(_))));
+}
+
+/// A table a method still runs from and every namespace node count against
+/// what an interpreter holds live, as its strings, buffers and packages do.
+#[test]
+fn tables_and_names_are_held_against_the_live_bound() {
+    // Tables of a mebibyte, each kept whole by the one method it defines.
+    let (mut i, mut m) = loaded(&[]);
+    let kept = |n: usize| table(b"SSDT", 2, &method(&format!("M{n:03}"), 0, &vec![0xA3; (1 << 20) - 52]));
+    let refused = (0..17).find_map(|n| i.load_bytes(&mut m, &kept(n)).err().map(|e| (n, e)));
+    let Some((n, Error::Bound(_))) = refused else { panic!("seventeen mebibytes of tables are held: {refused:?}") };
+    assert!(matches!(i.evaluate(&mut m, &format!("\\M{n:03}"), &[]), Err(Error::NotFound(_))));
     assert_eq!(i.evaluate(&mut m, "\\_REV", &[]), Ok(Value::Integer(2)));
+
+    // Field units, five bytes of table each: 204,000 names a table.
+    let digits = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let units: Vec<Vec<u8>> = (0..4000)
+        .map(|u| unit(std::str::from_utf8(&[b'A' + (u / 1296) as u8, digits[u / 36 % 36], digits[u % 36]]).unwrap(), 8))
+        .collect();
+    let dense = |t: usize| {
+        let devices: Vec<Vec<u8>> = (0..51).map(|d| device(&format!("D{t}{d:02}"), &field("\\MEM", 0x01, &units))).collect();
+        table(b"SSDT", 2, &devices.concat())
+    };
+    let (mut i, mut m) = loaded(&op_region("MEM", 0x00, &int(0), &int(0x1000)));
+    let refused = (0..3).find_map(|t| i.load_bytes(&mut m, &dense(t)).err().map(|e| (t, e)));
+    let Some((t, Error::Bound(_))) = refused else { panic!("612,000 names are held: {refused:?}") };
+    assert!(matches!(i.evaluate(&mut m, &format!("\\D{t}00.AAA"), &[]), Err(Error::NotFound(_))));
+    assert_eq!(i.evaluate(&mut m, "\\_REV", &[]), Ok(Value::Integer(2)));
+}
+
+/// A host that takes every access and keeps none, for a store whose bound is
+/// a million accesses away.
+struct Sink;
+
+impl Host for Sink {
+    fn read(&mut self, _: Address, _: Access) -> Result<u64, Denied> {
+        Ok(0)
+    }
+    fn write(&mut self, _: Address, _: Access, _: u64) -> Result<(), Denied> {
+        Ok(())
+    }
+    fn sleep(&mut self, _: u64) {}
+    fn stall(&mut self, _: u64) {}
+    fn timer(&mut self) -> u64 {
+        0
+    }
+    fn notify(&mut self, _: &str, _: u64) {}
+    fn global_lock(&mut self, _: bool) -> Result<(), Denied> {
+        Ok(())
+    }
+}
+
+/// A String stored to a field is written a character at a time, each charged
+/// as it is written: 98,303 characters into a field of a mebibyte end at the
+/// step bound, having made no piece ahead of its write.
+#[test]
+fn a_string_stored_to_a_field_is_bounded_as_it_is_written() {
+    let body = cat(&[
+        &op_region("MEM", 0x00, &int(0), &int(0x10_0000)),
+        &field("MEM", 0x01, &[unit("HUGE", 0x80_0000)]),
+        &method("MAIN", 0, &store(&op1(0x98, &buffer(&int(0x8000), &[]), ZERO), &name("HUGE"))),
+    ]);
+    let mut i = Interpreter::new();
+    i.load_bytes(&mut Machine::default(), &dsdt(&body)).unwrap();
+    assert!(matches!(i.evaluate(&mut Sink, "\\MAIN", &[]), Err(Error::Bound(_))));
+}
+
+/// A reference to a LocalX or ArgX does not hold it: it reaches it while its
+/// method runs, and names nothing once that method has exited, whichever way
+/// the reference left.
+#[test]
+fn a_reference_to_a_local_ends_with_its_method() {
+    let give = method("GIVE", 0, &ret(&ref_of(&local(0))));
+    let put = method("PUT", 1, &store(&ref_of(&local(1)), &arg(0)));
+    let set = method("SET", 1, &store(&int(5), &arg(0)));
+    // Each GIVE hands back a LocalX of a frame that is gone; storing through
+    // it would chain them.
+    let chain = while_(
+        &int(1),
+        &cat(&[&store(&name("GIVE"), &local(2)), &store(&local(0), &deref(&local(2))), &store(&local(2), &local(0))]),
+    );
+    // Storing it through itself would make it hold itself.
+    let cycle = cat(&[&store(&name("GIVE"), &local(2)), &store(&local(2), &deref(&local(2)))]);
+    // A callee's LocalX, left behind through an ArgX that refers to the caller's.
+    let through = cat(&[&cat(&[&name("PUT"), &ref_of(&local(2))]), &ret(&deref(&local(2)))]);
+    let live = cat(&[
+        &store(&ref_of(&local(0)), &local(1)),
+        &store(&int(2), &deref(&local(1))),
+        &cat(&[&name("SET"), &ref_of(&local(3))]),
+        &ret(&add(&local(0), &local(3), ZERO)),
+    ]);
+    let (mut i, mut m) = loaded(&cat(&[
+        &give,
+        &put,
+        &set,
+        &method("CHAN", 0, &chain),
+        &method("CYCL", 0, &cycle),
+        &method("THRU", 0, &through),
+        &method("LIVE", 0, &live),
+    ]));
+    for p in ["\\CHAN", "\\CYCL", "\\THRU"] {
+        assert!(matches!(i.evaluate(&mut m, p, &[]), Err(Error::NotFound(_))), "{p}");
+    }
+    assert_eq!(i.evaluate(&mut m, "\\LIVE", &[]), Ok(Value::Integer(7)));
 }
 
 /// BLOCKER 6: a reference to a package element or to a LocalX or ArgX never

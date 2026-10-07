@@ -5,8 +5,10 @@
 //! A definition block is firmware's, and so untrusted: whatever its bytes,
 //! [`Interpreter::load`] and [`Interpreter::evaluate`] return a value or a
 //! named [`Error`], never panic, and never run unbounded — every evaluation
-//! is bounded in steps, nesting, object size and time asked to sleep. A load
-//! refused leaves the namespace without anything that table created.
+//! is bounded in steps, nesting, object size and time asked to sleep, and
+//! what an interpreter holds of tables, namespace and objects is bounded in
+//! sum. A load refused leaves the namespace without anything that table
+//! created.
 //!
 //! The library touches no hardware. An operation region's field is read and
 //! written through the [`Host`] the caller passes, in SystemMemory,
@@ -64,8 +66,8 @@ pub(crate) const MAX_NESTING: usize = 64;
 pub(crate) const MAX_BYTES: usize = 1 << 20;
 /// The largest package, in elements.
 pub(crate) const MAX_ELEMENTS: usize = 1 << 16;
-/// What one interpreter holds live across every string, buffer and package,
-/// in bytes (`object::Meter`).
+/// What one interpreter holds live across every table, namespace node,
+/// string, buffer and package, in bytes (`object::Meter`).
 pub(crate) const MAX_LIVE: usize = 16 << 20;
 /// The bytes of work one step stands for: a step for every this many bytes
 /// an operation makes, copies, compares or walks.
@@ -200,13 +202,12 @@ impl Interpreter {
     /// An empty namespace holding the predefined scopes (§5.3.1) and objects
     /// (§5.7).
     pub fn new() -> Self {
-        let mut ns = Namespace::new();
         let meter = Meter::new();
+        let mut ns = Namespace::new(meter.clone());
         let root = ns.root();
         let mut put = |name: &[u8; 4], o: Object| {
             let p = Path { root: true, up: 0, segs: alloc::vec![Seg(*name)] };
-            // The root is empty and every name differs.
-            let _ = ns.create(root, &p, o);
+            ns.create(root, &p, o).expect("the root is empty and every predefined name differs");
         };
         for scope in [b"_GPE", b"_PR_", b"_SB_", b"_SI_", b"_TZ_"] {
             put(scope, Object::Scope);
@@ -214,32 +215,30 @@ impl Interpreter {
         put(b"_GL_", Object::Mutex(Rc::new(Mutex { sync: 0, held: Cell::new(0), global: true })));
         put(b"_OSI", Object::Method(Rc::new(Method { body: Body::Osi, args: 1, serialized: false, sync: 0 })));
         // The owner's ruling (2026-10-05): "Microsoft Windows NT", as Windows answers.
-        if let Ok(os) = meter.bytes(b"Microsoft Windows NT".to_vec()) {
-            put(b"_OS_", Object::Str(os));
-        }
+        let os = meter.bytes(b"Microsoft Windows NT".to_vec()).expect("an empty meter holds twenty bytes");
+        put(b"_OS_", Object::Str(os));
         put(b"_REV", Object::Int(2));
         Interpreter { ns, meter, width: None }
     }
 
     /// Loads a DSDT or SSDT (§5.4.2): the DSDT first, then each SSDT. The
-    /// table's length and checksum are [`toyos_acpi::Table::open`]'s.
+    /// table's header, length and checksum are [`toyos_acpi::Table::open`]'s.
     pub fn load<P: toyos_acpi::Phys>(&mut self, host: &mut dyn Host, table: &toyos_acpi::Table<P>) -> Result<(), Error> {
         let bytes: Vec<u8> = (0..table.len()).map_while(|i| table.byte(i)).collect();
-        let (Some(signature), Some(&revision)) = (bytes.first_chunk::<4>(), bytes.get(toyos_acpi::SDT_REVISION)) else {
-            return Err(Error::Table("shorter than its header (§5.2.6)"));
-        };
-        let w = match (signature, self.width) {
-            (b"DSDT", None) => Width { bits: if revision < 2 { 32 } else { 64 } },
+        let w = match (&bytes[..4], self.width) {
+            (b"DSDT", None) => Width { bits: if bytes[toyos_acpi::SDT_REVISION] < 2 { 32 } else { 64 } },
             (b"DSDT", Some(_)) => return Err(Error::Table("a second DSDT")),
             (b"SSDT", Some(w)) => w,
             (b"SSDT", None) => return Err(Error::Table("an SSDT before the DSDT, whose revision sets every integer's width")),
             _ => return Err(Error::Table("not a DSDT or SSDT (§5.2.11)")),
         };
-        let table: Rc<[u8]> = Rc::from(bytes);
+        // Held for as long as a method it defines refers to it.
+        let table = self.meter.bytes(bytes)?;
         let root = self.ns.root();
         let mut f = Frame::new(root, Vec::new(), table.clone(), 0);
         let mut m = Machine::new(&mut self.ns, host, w, self.meter.clone());
-        let mut c = stream::Cursor::new(&table, toyos_acpi::SDT_HEADER_LEN, table.len());
+        let bytes = table.borrow();
+        let mut c = stream::Cursor::new(&bytes, toyos_acpi::SDT_HEADER_LEN, bytes.len());
         let r = m.term_list(&mut f, &mut c).and_then(|flow| match flow {
             exec::Flow::Next => Ok(()),
             _ => Err(Error::Rule("a Return, Break or Continue at definition block level")),

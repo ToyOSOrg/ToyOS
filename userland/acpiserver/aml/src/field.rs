@@ -101,22 +101,26 @@ pub(crate) fn flags(b: u8) -> (u8, bool, u8) {
 
 impl Machine<'_> {
     /// The bytes of one access unit, by the access type and, for an access
-    /// type of AnyAcc, the narrowest naturally aligned unit holding the whole
-    /// field (§19.6.47: "accesses within the parent object are performed
-    /// naturally aligned"), else bytes.
+    /// type of AnyAcc, the narrowest naturally aligned unit that holds the
+    /// whole field and lies within its region (§19.6.47: "accesses within
+    /// the parent object are performed naturally aligned"), else bytes.
     fn unit(&self, f: &Field) -> Result<u64, Error> {
-        let space = match &f.kind {
-            Kind::Region(r) | Kind::Bank { region: r, .. } => Some(r.space),
+        let region = match &f.kind {
+            Kind::Region(r) | Kind::Bank { region: r, .. } => Some(r),
             Kind::Index { .. } => None,
         };
         // Table 19.34: EmbeddedControl, SystemCMOS, GeneralPurposeIO and PCC
         // permit byte access only.
-        let bytes_only = matches!(space, Some(0x03 | 0x05 | 0x08 | 0x0A));
+        let bytes_only = matches!(region.map(|r| r.space), Some(0x03 | 0x05 | 0x08 | 0x0A));
+        let within = |end: u64| region.is_none_or(|r| end <= r.len);
         let w = match f.access {
             0 if bytes_only => 1,
             0 => [1u64, 2, 4, 8]
                 .into_iter()
-                .find(|&w| f.bit / (8 * w) == (f.bit + f.len - 1) / (8 * w))
+                .find(|&w| {
+                    let unit = f.bit / (8 * w);
+                    unit == (f.bit + f.len - 1) / (8 * w) && within((unit + 1) * w)
+                })
                 .unwrap_or(1),
             1 => 1,
             2 => 2,
@@ -170,39 +174,50 @@ impl Machine<'_> {
     }
 
     /// The function a PCI_Config region addresses: its device's `_ADR`
-    /// (§6.1.1: device in the high word, function in the low), on the bus a
-    /// host bridge's `_BBN` names (§6.5.5), in the segment group its `_SEG`
-    /// names or 0 without one (§6.5.6). The region is declared in the host
-    /// bridge itself or in a device directly below it.
+    /// (§6.1.1: device in the high word, function in the low), in the
+    /// segment group the host bridge's `_SEG` names or 0 without one
+    /// (§6.5.6). The host bridge is the nearest scope naming a `_BBN`, which
+    /// is the bus directly below it (§6.5.5); each device between it and the
+    /// region's is a bridge, whose Secondary Bus Number register is the bus
+    /// below it (PCI-to-PCI Bridge Architecture Specification 1.2, §3.2.5.4).
+    /// A region declared in the host bridge itself addresses the bridge.
     fn pci(&mut self, r: &Region) -> Result<Pci, Error> {
         if let Some(p) = r.pci.get() {
             return Ok(p);
         }
-        let device = r.scope;
         let bbn = Seg(*b"_BBN");
-        let bridge = if self.ns.child(device, bbn).is_some() {
-            device
-        } else {
-            match self.ns.parent(device) {
-                Some(p) if self.ns.child(p, bbn).is_some() => p,
-                _ => return Err(Error::Unsupported("a PCI_Config region not on a host bridge's bus, which names a _BBN")),
-            }
-        };
-        let adr = self.named_int(device, Seg(*b"_ADR"))?.ok_or(Error::NotFound(self.ns.path_of(device, Some(Seg(*b"_ADR")))))?;
+        let mut path = Vec::new();
+        let mut bridge = r.scope;
+        while self.ns.child(bridge, bbn).is_none() {
+            self.step()?;
+            path.push(bridge);
+            let above = self.ns.parent(bridge);
+            bridge = above.ok_or(Error::Unsupported("a PCI_Config region below no host bridge, which names a _BBN"))?;
+        }
         let bus = self.named_int(bridge, bbn)?.unwrap_or(0);
         let segment = self.named_int(bridge, Seg(*b"_SEG"))?.unwrap_or(0);
         // §6.5.5 and §6.5.6 give the bus in the low 8 bits and the segment
         // group in the low 16, the rest reserved: a value outside them names
         // no bus this access could reach.
-        let bus = u8::try_from(bus).map_err(|_| Error::Rule("a _BBN above 0xFF (§6.5.5)"))?;
+        let mut bus = u8::try_from(bus).map_err(|_| Error::Rule("a _BBN above 0xFF (§6.5.5)"))?;
         let segment = u16::try_from(segment).map_err(|_| Error::Rule("a _SEG above 0xFFFF (§6.5.6)"))?;
-        let (dev, fun) = (adr >> 16, adr & 0xFFFF);
-        let (Ok(device @ 0..=31), Ok(function @ 0..=7)) = (u8::try_from(dev), u8::try_from(fun)) else {
+        for &above in path.iter().skip(1).rev() {
+            let b = self.function(above, segment, bus)?;
+            let secondary = Address::PciConfig { segment, bus, device: b.device, function: b.function, offset: 0x19 };
+            bus = self.host.read(secondary, crate::Access::Byte).map_err(|d| Error::Host(d.0))? as u8;
+        }
+        let at = self.function(path.first().copied().unwrap_or(bridge), segment, bus)?;
+        r.pci.set(Some(at));
+        Ok(at)
+    }
+
+    /// The function a device's `_ADR` names on `bus` (§6.1.1).
+    fn function(&mut self, device: NodeId, segment: u16, bus: u8) -> Result<Pci, Error> {
+        let adr = self.named_int(device, Seg(*b"_ADR"))?.ok_or(Error::NotFound(self.ns.path_of(device, Some(Seg(*b"_ADR")))))?;
+        let (Ok(device @ 0..=31), Ok(function @ 0..=7)) = (u8::try_from(adr >> 16), u8::try_from(adr & 0xFFFF)) else {
             return Err(Error::Rule("an _ADR that names no single PCI function (§6.1.1)"));
         };
-        let p = Pci { segment, bus, device, function };
-        r.pci.set(Some(p));
-        Ok(p)
+        Ok(Pci { segment, bus, device, function })
     }
 
     fn unit_read(&mut self, f: &Field, offset: u64, w: u64) -> Result<u64, Error> {
@@ -272,22 +287,34 @@ impl Machine<'_> {
 
     /// A store to a field unit (Table 19.7): an Integer overwrites the whole
     /// field; a Buffer is written in pieces of the field's size, lower first,
-    /// each zero-extended; a String is written a character at a time.
+    /// each zero-extended, and an empty one as zeros; a String is written a
+    /// character at a time. The pieces are slices of the source, each
+    /// written before the next is taken.
     pub(crate) fn write_field(&mut self, f: &Field, v: Object) -> Result<(), Error> {
         let n = bytes_for(f.len)?;
-        let pieces: Vec<Vec<u8>> = match &v {
-            Object::Int(x) => vec![fit(x.to_le_bytes().to_vec(), n)],
-            Object::Buf(b) if b.borrow().is_empty() => vec![vec![0; n]],
-            Object::Buf(b) => b.borrow().chunks(n).map(|c| fit(c.to_vec(), n)).collect(),
-            Object::Str(s) => s.borrow().iter().map(|&c| fit(vec![c], n)).collect(),
+        let (int, held);
+        let (source, piece): (&[u8], usize) = match &v {
+            Object::Int(x) => {
+                int = x.to_le_bytes();
+                (&int, int.len())
+            }
+            Object::Buf(b) => {
+                held = b.borrow();
+                if held.is_empty() { (&[0], 1) } else { (&held, n) }
+            }
+            Object::Str(s) => {
+                held = s.borrow();
+                (&held, 1)
+            }
             _ => return Err(Error::Type("a store to a field unit of an object that is not an integer, buffer or string")),
         };
         self.enter()?;
-        let r = self.locked(f.lock, |m| pieces.iter().try_for_each(|p| m.write_units(f, p)));
+        let r = self.locked(f.lock, |m| source.chunks(piece).try_for_each(|p| m.write_units(f, p)));
         self.leave();
         r
     }
 
+    /// Writes the field from `data`, which is zeros past its end.
     fn write_units(&mut self, f: &Field, data: &[u8]) -> Result<(), Error> {
         let w = self.unit(f)?;
         let span = 8 * w;

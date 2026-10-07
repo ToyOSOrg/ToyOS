@@ -67,14 +67,15 @@ writes its own, and the battery comes first (his direction of `0ee814f5a`).
   server; the kernel's power-off table reader is deleted. If the server is
   broken, power-off fails loudly in every test."
 
-The orchestrator's reading of the clean-room ruling, not his: uACPI and
-ACPICA are run only as black-box oracles, and whoever writes the interpreter
-never reads their source.
-
-**Ruled** (owner, as the orchestrator's brief of 2026-10-04 carries it, not
-verbatim): no clean-room machinery and no spec copies in the repository; the
-interpreter's writer works from the ACPI Specification 6.5 directly and
-never reads another AML implementation's source.
+**Ruled** (owner, 2026-10-04, his words as the orchestrator's record of the
+session holds them), asked where the specifications and a reference
+implementation would be kept: "Nowhere why do we need existing c code ans
+why do we need to persist prose. The specs exist we can reference them cant
+we? Clean romm is only needed for reading code and writing using that code
+in a transferred sense". The orchestrator's reading of it: no other
+implementation is kept, as an oracle or otherwise, and no specification is
+copied into a repository; whoever writes the interpreter works from the ACPI
+Specification itself and never reads another AML implementation's source.
 
 **Ruled** (owner, 2026-10-05), on the interpreter (the option chosen, then
 its text, verbatim):
@@ -108,6 +109,29 @@ a host test loads QEMU 11.1.1's DSDT
 `SLP_TYPa` its boot logged, 0; and the T14's DSDT and SSDTs, read by a
 check run outside the tree, load and evaluate `\_S5`, its pull request
 recording the result.
+
+What that check found, which whoever builds on the interpreter would
+otherwise pay to find again:
+
+- **The T14's tables load only against its own memory.** Their
+  definition-block code reads SystemMemory and PCI_Config while it loads, and
+  branches on what it reads: with every read answered zero the DSDT refers to
+  a device its own other branch never defined, and is refused. The check
+  answered one 16-bit word, the chipset series, and nothing else. A run on
+  the machine itself is still owed, by the power-off stage, which puts the
+  interpreter in the server.
+- **The T14's processor objects need `Load`.** Its tables hold eight `Load`
+  opcodes and one `LoadTable`, none run while a table loads, and Linux lists eight tables
+  loaded that way; the interpreter refuses both as unsupported.
+- **A refused evaluation keeps what it stored**, and nothing gives an
+  interpreter's 16 MiB back: after one method has filled it, a name's value
+  still evaluates, `\_S5`'s package among them, and every method that must
+  hold anything new is refused
+  (`what_is_held_live_is_bounded_in_sum`, `userland/acpiserver/aml/tests/hostile.rs`).
+  Owner: the power-off stage, which decides
+  what the server does with an interpreter that is full. **Exit**: a test
+  fills the budget through one method, and the server then evaluates a
+  method that builds a buffer.
 
 **Stage: power-off through the server** (the orchestrator's placement of "Yes,
 one path"). The ACPI server evaluates `\_S5` and powers the machine off.

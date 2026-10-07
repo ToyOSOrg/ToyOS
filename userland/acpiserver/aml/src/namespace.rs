@@ -4,14 +4,20 @@
 //! reference to an object a method created and its exit destroyed
 //! (§5.5.2.3) resolves to nothing rather than to whatever reused its slot.
 //! Nothing here recurses over the tree's depth, which a table chooses.
+//! Every node is held against the interpreter's [`Meter`] from its creation
+//! to its removal.
 
 use alloc::collections::BTreeMap;
+use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::name::{Path, Seg};
-use crate::object::Object;
+use crate::object::{Meter, Object};
 use crate::Error;
+
+/// The bytes a node is held at.
+const NODE: usize = core::mem::size_of::<Node>();
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct NodeId {
@@ -33,10 +39,11 @@ struct Node {
 pub(crate) struct Namespace {
     nodes: Vec<Node>,
     free: Vec<u32>,
+    meter: Rc<Meter>,
 }
 
 impl Namespace {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(meter: Rc<Meter>) -> Self {
         let root = Node {
             seg: Seg(*b"\\___"),
             parent: None,
@@ -46,7 +53,7 @@ impl Namespace {
             generation: 0,
             live: true,
         };
-        Namespace { nodes: alloc::vec![root], free: Vec::new() }
+        Namespace { nodes: alloc::vec![root], free: Vec::new(), meter }
     }
 
     pub(crate) fn root(&self) -> NodeId {
@@ -132,6 +139,8 @@ impl Namespace {
             generation: 0,
             live: true,
         };
+        let fresh = u32::try_from(self.nodes.len()).map_err(|_| Error::Bound("the namespace's node count"))?;
+        self.meter.take(NODE)?;
         let id = match self.free.pop() {
             Some(index) => {
                 let slot = &mut self.nodes[index as usize];
@@ -140,13 +149,11 @@ impl Namespace {
                 NodeId { index, generation }
             }
             None => {
-                let index = u32::try_from(self.nodes.len()).map_err(|_| Error::Bound("the namespace's node count"))?;
                 self.nodes.push(node);
-                NodeId { index, generation: 0 }
+                NodeId { index: fresh, generation: 0 }
             }
         };
-        let parent = self.nodes.get_mut(at.index as usize).ok_or(Error::Rule("a parent vanished"))?;
-        parent.children.insert(*last, id);
+        self.nodes[at.index as usize].children.insert(*last, id);
         Ok(id)
     }
 
@@ -175,6 +182,7 @@ impl Namespace {
             };
             n.live = false;
             n.object = Object::Uninit;
+            self.meter.give(NODE);
             doomed.extend(core::mem::take(&mut n.children).into_values());
             // A slot whose generation would wrap is retired, so no stale
             // NodeId ever names a live object again.

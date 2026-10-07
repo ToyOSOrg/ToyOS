@@ -6,14 +6,19 @@
 //! by Index (§19.6.62) see the object they were made from. A store copies
 //! (§19.3.5.8), and so does a return (§19.6.118).
 //!
-//! Every string, buffer and package is held against its interpreter's
-//! [`Meter`] from its making to its drop, so what one interpreter holds live
-//! is bounded in sum. A reference to a package element or to a LocalX or
-//! ArgX lives only in a LocalX or ArgX, which its method's exit clears: none
-//! enters a package or a named object, so no chain of references forms and
-//! no cycle outlives its evaluation.
+//! Every string, buffer and package, every loaded table a method still runs
+//! from and every namespace node is held against its interpreter's [`Meter`]
+//! from its making to its end, so what one interpreter holds live is bounded
+//! in sum.
+//!
+//! A reference to a LocalX or ArgX does not hold it: the frame alone does,
+//! and once its method exits the reference names nothing. A reference to a
+//! package element holds its package, and lives only in a LocalX or ArgX.
+//! Neither kind enters a package or a named object, so no reference owns
+//! another, no chain of them forms, and none is part of a cycle.
 
-use alloc::rc::Rc;
+use alloc::rc::{Rc, Weak};
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 
@@ -26,8 +31,10 @@ pub(crate) type Bytes = Rc<Data>;
 pub(crate) type Elems = Rc<List>;
 pub(crate) type Slot = Rc<RefCell<Object>>;
 
-/// What one interpreter holds live, in bytes: a string's or buffer's length,
-/// a package's elements at [`ELEMENT`] bytes each.
+/// What one interpreter holds live, in bytes: a string's, buffer's or
+/// table's length, a package's elements at [`ELEMENT`] bytes each, a
+/// namespace node at the size of one. It counts those alone, not what a
+/// node or an element points at beside them, nor the allocator's overhead.
 pub(crate) struct Meter {
     live: Cell<usize>,
 }
@@ -40,17 +47,17 @@ impl Meter {
         Rc::new(Meter { live: Cell::new(0) })
     }
 
-    fn take(&self, n: usize) -> Result<(), Error> {
+    pub(crate) fn take(&self, n: usize) -> Result<(), Error> {
         let live = self.live.get().checked_add(n).filter(|&l| l <= MAX_LIVE);
         self.live.set(live.ok_or(Error::Bound("more held live than one interpreter holds"))?);
         Ok(())
     }
 
-    fn give(&self, n: usize) {
-        self.live.set(self.live.get().saturating_sub(n));
+    pub(crate) fn give(&self, n: usize) {
+        self.live.set(self.live.get().checked_sub(n).expect("the meter gives back only what it took"));
     }
 
-    /// A string's or buffer's bytes, refused past [`MAX_BYTES`].
+    /// A string's, buffer's or table's bytes, refused past [`MAX_BYTES`].
     pub(crate) fn bytes(self: &Rc<Self>, v: Vec<u8>) -> Result<Bytes, Error> {
         bounded(v.len())?;
         self.take(v.len())?;
@@ -76,9 +83,9 @@ impl Data {
         self.v.borrow()
     }
 
-    /// The bytes in place, to change and never to resize.
-    pub(crate) fn bits(&self) -> core::cell::RefMut<'_, Vec<u8>> {
-        self.v.borrow_mut()
+    /// The bytes in place, to change: a slice, which cannot be resized.
+    pub(crate) fn bits(&self) -> core::cell::RefMut<'_, [u8]> {
+        core::cell::RefMut::map(self.v.borrow_mut(), Vec::as_mut_slice)
     }
 
     pub(crate) fn replace(&self, n: Vec<u8>) -> Result<(), Error> {
@@ -170,14 +177,19 @@ pub(crate) enum Object {
 pub(crate) enum Ref {
     Node(NodeId),
     /// A method's LocalX or ArgX (§19.3.5.8.1: "RefOf (ArgX) returns a
-    /// reference to ArgX").
-    Slot(Slot),
+    /// reference to ArgX"), which its frame alone holds.
+    Slot(Weak<RefCell<Object>>),
     Elem(Elems, usize),
     BufField(Rc<BufField>),
 }
 
+/// The LocalX or ArgX a reference names, while its method runs.
+pub(crate) fn slot_of(s: &Weak<RefCell<Object>>) -> Result<Slot, Error> {
+    s.upgrade().ok_or_else(|| Error::NotFound(String::from("a LocalX or ArgX its method's exit destroyed")))
+}
+
 pub(crate) enum Body {
-    Aml { table: Rc<[u8]>, start: usize, end: usize },
+    Aml { table: Bytes, start: usize, end: usize },
     /// `\_OSI`, which the operating system implements (§5.7.2).
     Osi,
 }

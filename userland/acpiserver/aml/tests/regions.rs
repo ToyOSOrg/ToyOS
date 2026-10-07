@@ -94,6 +94,12 @@ fn an_access_type_sets_the_unit_and_anyacc_takes_the_narrowest_natural_one() {
     assert_eq!(m.accesses(), vec![Event::Read(mem(0x1000), Access::QWord)]);
     let (m, _) = read(&memory_region(ANY, &[skip(56), unit("X", 16)]), &[], "\\X");
     assert_eq!(m.accesses(), vec![Event::Read(mem(0x1007), Access::Byte), Event::Read(mem(0x1008), Access::Byte)]);
+    // A unit that would hold the field whole but runs past its region is not
+    // taken: the last two bytes of a 13-byte region are read as bytes.
+    let odd = cat(&[&op_region("ODD", 0x00, &int(0x2000), &int(13)), &field("ODD", ANY, &[skip(88), unit("END", 16)])]);
+    let (m, v) = read(&odd, &[(mem(0x200B), &[0x34, 0x12])], "\\END");
+    assert_eq!(v, Ok(Value::Integer(0x1234)));
+    assert_eq!(m.accesses(), vec![Event::Read(mem(0x200B), Access::Byte), Event::Read(mem(0x200C), Access::Byte)]);
 }
 
 /// §19.6.47: "If the FieldUnit is larger than the size of an Integer, it
@@ -180,6 +186,24 @@ fn a_pci_config_region_addresses_its_devices_function() {
     assert_eq!(m.accesses(), vec![Event::Read(at, Access::Byte)]);
     let (_, v) = read(&lpc(&[]), &[], "\\_SB.PCI0.LPCB.R41");
     assert!(matches!(v, Err(Error::Unsupported(_))));
+}
+
+/// A device below a bridge is on the bus the bridge's Secondary Bus Number
+/// register names (PCI-to-PCI Bridge Architecture Specification 1.2,
+/// §3.2.5.4), read from the bridge on the bus above it.
+#[test]
+fn a_pci_config_region_below_a_bridge_is_on_its_secondary_bus() {
+    let endpoint = cat(&[
+        &def_name("_ADR", &int(0x0000_0001)),
+        &op_region("CFG", 0x02, &int(0), &int(0x10)),
+        &field("CFG", BYTE, &[unit("VEN", 8)]),
+    ]);
+    let port = cat(&[&def_name("_ADR", &int(0x001C_0002)), &device("PXSX", &endpoint)]);
+    let body = scope("\\_SB", &device("PCI0", &cat(&[&def_name("_BBN", &int(0x40)), &device("RP03", &port)])));
+    let secondary = Address::PciConfig { segment: 0, bus: 0x40, device: 0x1C, function: 2, offset: 0x19 };
+    let (m, _) = read(&body, &[(secondary, &[0x45])], "\\_SB.PCI0.RP03.PXSX.VEN");
+    let at = Address::PciConfig { segment: 0, bus: 0x45, device: 0, function: 1, offset: 0 };
+    assert_eq!(m.accesses(), vec![Event::Read(secondary, Access::Byte), Event::Read(at, Access::Byte)]);
 }
 
 /// The example of §19.6.63: FET3, the high bit at indexed offset 0x2F.

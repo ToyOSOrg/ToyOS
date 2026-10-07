@@ -4,7 +4,7 @@
 mod common;
 
 use common::*;
-use toyos_aml::{Error, Interpreter, Value};
+use toyos_aml::{Access, Address, Error, Interpreter, Value};
 
 fn int_of(i: &mut Interpreter, m: &mut Machine, path: &str) -> Result<Value, Error> {
     i.evaluate(m, path, &[])
@@ -197,16 +197,42 @@ fn a_processor_parses_opens_a_scope_and_takes_notify() {
     assert_eq!(m.log, vec![Event::Notify("\\_PR_.CPU0".into(), 0x80)]);
 }
 
+const QEMU_DSDT: &[u8] = include_bytes!("../../../../toyos-acpi/fixtures/qemu-11.1.1/dsdt.bin");
+
 /// QEMU 11.1.1's DSDT, as `toyos-acpi/fixtures/qemu-11.1.1/SOURCE` records
-/// it: a boot of it logged `ACPI: PM1a=0x604 SLP_TYPa=0`.
+/// it: a boot of it logged `ACPI: PM1a=0x604 SLP_TYPa=0`, which the kernel
+/// read by `toyos_acpi::s5_slp_typ`'s byte scan.
 #[test]
 fn qemus_dsdt_loads_and_its_s5_is_what_its_boot_logged() {
-    let dsdt = include_bytes!("../../../../toyos-acpi/fixtures/qemu-11.1.1/dsdt.bin");
     let mut m = Machine::default();
     let mut i = Interpreter::new();
-    i.load_bytes(&mut m, dsdt).unwrap();
-    let Ok(Value::Package(s5)) = i.evaluate(&mut m, "\\_S5", &[]) else { panic!("\\_S5 is no package") };
-    assert_eq!(s5.first(), Some(&Value::Integer(0)));
+    i.load_bytes(&mut m, QEMU_DSDT).unwrap();
+    let zero = Value::Integer(0);
+    assert_eq!(i.evaluate(&mut m, "\\_S5", &[]), Ok(Value::Package(vec![zero.clone(), zero.clone(), zero.clone(), zero])));
+    let scanned = toyos_acpi::s5_slp_typ(&toyos_acpi::Table::open(Image(QEMU_DSDT), 0, b"DSDT", 0).unwrap());
+    assert_eq!(scanned, toyos_acpi::S5::SlpTyp(0));
+    assert_eq!(m.log, vec![]);
+}
+
+/// QEMU's own methods, run against the registers they read: a CPU's `_STA`
+/// selects it and reads its enabled bit (QEMU's `docs/specs/acpi_cpu_hotplug.rst`),
+/// the HPET's reads its vendor and its period (IA-PC HPET 1.0a §2.3.4).
+#[test]
+fn qemus_methods_run_against_the_registers_they_read() {
+    let (select, flags) = (Address::Io(0xCD8), Address::Io(0xCDC));
+    let mut m = Machine::default();
+    let mut i = Interpreter::new();
+    i.load_bytes(&mut m, QEMU_DSDT).unwrap();
+    assert_eq!(i.evaluate(&mut m, "\\_SB.CPUS.C001._STA", &[]), Ok(Value::Integer(0)));
+    assert_eq!(m.accesses(), vec![Event::Write(select, Access::DWord, 1), Event::Read(flags, Access::Byte)]);
+    m.poke(flags, &[1]);
+    assert_eq!(i.evaluate(&mut m, "\\_SB.CPUS.C001._STA", &[]), Ok(Value::Integer(0xF)));
+
+    let hpet = Address::Memory(0xFED0_0000);
+    assert_eq!(i.evaluate(&mut m, "\\_SB.HPET._STA", &[]), Ok(Value::Integer(0)));
+    // Vendor 0x8086 in bits 31:16, a period of 10 ns in femtoseconds above them.
+    m.poke(hpet, &[0x01, 0xA2, 0x86, 0x80, 0x80, 0x96, 0x98, 0x00]);
+    assert_eq!(i.evaluate(&mut m, "\\_SB.HPET._STA", &[]), Ok(Value::Integer(0xF)));
 }
 
 #[test]

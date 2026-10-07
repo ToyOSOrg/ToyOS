@@ -23,7 +23,8 @@ use crate::field::{flags, BufField, Field, Kind, Region};
 use crate::name::{text, Path, Seg};
 use crate::namespace::{Namespace, NodeId};
 use crate::object::{
-    bounded, decimal, fit, hex2, joined, to_buf, to_int, to_str, Body, Meter, Method, Mutex, Object, Ref, Slot, Width,
+    bounded, decimal, fit, hex2, joined, slot_of, to_buf, to_int, to_str, Body, Bytes, Meter, Method, Mutex, Object, Ref,
+    Slot, Width,
 };
 use crate::stream::{starts_name, Cursor};
 use crate::{Error, Host, MAX_DEPTH, MAX_NESTING, MAX_STEPS, MAX_WAIT_US, REVISION, WINDOWS, WORK_PER_STEP};
@@ -48,7 +49,7 @@ pub(crate) struct Frame {
     locals: [Slot; 8],
     args: Vec<Slot>,
     scope: NodeId,
-    table: Rc<[u8]>,
+    table: Bytes,
     /// Objects this frame created (§5.5.2.3), destroyed when a method exits.
     pub(crate) created: Vec<NodeId>,
     held: usize,
@@ -75,15 +76,7 @@ fn slot(o: Object) -> Slot {
 }
 
 impl Frame {
-    /// Empties every LocalX and ArgX, which drops any reference among them
-    /// and so any cycle they formed (the module header of `object`).
-    pub(crate) fn clear(&self) {
-        for s in self.locals.iter().chain(&self.args) {
-            *s.borrow_mut() = Object::Uninit;
-        }
-    }
-
-    pub(crate) fn new(scope: NodeId, args: Vec<Object>, table: Rc<[u8]>, held: usize) -> Frame {
+    pub(crate) fn new(scope: NodeId, args: Vec<Object>, table: Bytes, held: usize) -> Frame {
         Frame {
             locals: core::array::from_fn(|_| slot(Object::Uninit)),
             args: args.into_iter().map(slot).collect(),
@@ -234,7 +227,7 @@ impl<'a> Machine<'a> {
     }
 
     pub(crate) fn drop_global(&mut self) -> Result<(), Error> {
-        self.global = self.global.saturating_sub(1);
+        self.global = self.global.checked_sub(1).expect("the Global Lock is given back only by who took it");
         if self.global == 0 {
             self.host.global_lock(false).map_err(|d| Error::Host(d.0))?;
         }
@@ -303,7 +296,7 @@ impl<'a> Machine<'a> {
     fn deref(&mut self, r: &Ref) -> Result<Object, Error> {
         match r {
             Ref::Node(id) => self.node_value(*id),
-            Ref::Slot(s) => Ok(s.borrow().clone()),
+            Ref::Slot(s) => Ok(slot_of(s)?.borrow().clone()),
             Ref::Elem(p, i) => {
                 let e = p.borrow().get(*i).cloned().ok_or(Error::Rule("an Index reference past its package's end"))?;
                 match e {
@@ -364,9 +357,9 @@ impl<'a> Machine<'a> {
             self.levels.push(m.sync);
         }
         let mut f = Frame::new(node, args, table.clone(), self.held.len());
-        let mut c = Cursor::new(&table, start, end);
+        let bytes = table.borrow();
+        let mut c = Cursor::new(&bytes, start, end);
         let flow = self.term_list(&mut f, &mut c);
-        f.clear();
         for &id in f.created.iter().rev() {
             self.ns.remove(id);
         }
@@ -1097,7 +1090,7 @@ impl<'a> Machine<'a> {
     fn followed(&mut self, o: Object) -> Result<Object, Error> {
         Ok(match o {
             Object::Ref(Ref::Node(id)) => self.node_object(id)?,
-            Object::Ref(Ref::Slot(s)) => s.borrow().clone(),
+            Object::Ref(Ref::Slot(s)) => slot_of(&s)?.borrow().clone(),
             Object::Ref(Ref::Elem(p, i)) => {
                 let e = p.borrow().get(i).cloned().ok_or(Error::Rule("an Index reference past its package's end"))?;
                 self.resolve_lazy(e)?
@@ -1157,6 +1150,7 @@ impl<'a> Machine<'a> {
         match r {
             Ref::Node(id) => self.store_node(*id, v),
             Ref::Slot(s) => {
+                let s = slot_of(s)?;
                 let v = self.copy(&v)?;
                 *s.borrow_mut() = v;
                 Ok(())
@@ -1521,8 +1515,8 @@ impl<'a> Machine<'a> {
     fn ref_of(&self, f: &Frame, t: Target) -> Result<Ref, Error> {
         match t {
             Target::Node(id) => Ok(Ref::Node(id)),
-            Target::Local(i) => Ok(Ref::Slot(f.locals[i].clone())),
-            Target::Arg(i) => Ok(Ref::Slot(f.args[i].clone())),
+            Target::Local(i) => Ok(Ref::Slot(Rc::downgrade(&f.locals[i]))),
+            Target::Arg(i) => Ok(Ref::Slot(Rc::downgrade(&f.args[i]))),
             Target::Ref(r) => Ok(r),
             Target::None | Target::Debug => Err(Error::Type("a reference to the Debug object")),
         }
