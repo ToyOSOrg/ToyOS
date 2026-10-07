@@ -5709,6 +5709,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "toyos-aml"
+version = "0.1.0"
+dependencies = [
+ "toyos-acpi",
+]
+
+[[package]]
 name = "toyos-blackbox"
 version = "0.1.0"
 

@@ -70,6 +70,7 @@ members = [
     "toyos-xhci",
     "toyos-xhci/sim",
     "userland/acpiserver",
+    "userland/acpiserver/aml",
     "userland/calc",
     "userland/compositor",
     "userland/compositor/desktop",
