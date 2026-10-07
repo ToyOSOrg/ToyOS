@@ -6,8 +6,8 @@ opened: 2026-09-25
 
 # std answers every spawn refusal but `NotFound` as `Other`
 
-The std fork's direct spawn (`rust/library/std/src/sys/process/toyos.rs`, the
-`spawned.map_err` in `Command::spawn`, at fork `3f0bda148507`) maps
+std's direct spawn (`sdk/std/sys/process.rs`, the
+`spawned.map_err` in `Command::spawn`) maps
 `SyscallError::NotFound` to `io::ErrorKind::NotFound` and every other
 `SyscallError` to `io::ErrorKind::Other`, and keeps no raw code. So a
 `Command::current_dir` the kernel refuses as not absolute — `InvalidArgument`

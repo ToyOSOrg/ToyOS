@@ -10,7 +10,7 @@ The kernel keeps an exited thread in its process's table until
 `SYS_THREAD_JOIN` collects it, and counts it against
 `toyos_abi::syscall::MAX_THREADS` until then
 (`kernel::proclife::spawn::Admit::Full`). std's `Thread`
-(`rust/library/std/src/sys/thread/toyos.rs`) has no `Drop`, and a `JoinHandle`
+(`sdk/std/sys/thread.rs`) has no `Drop`, and a `JoinHandle`
 dropped without `join` detaches, so nothing ever collects a thread std
 detached: a program that detaches threads over its life has `thread::spawn`
 refused once those that exited and those still running are

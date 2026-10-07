@@ -23,8 +23,9 @@
 //! moved to the commit its tree pins;
 //! a linked worktree in its own `rust/`, made on first need as a git worktree of
 //! the primary's fork repository at the commit this tree pins ([`fork_checkout`]).
-//! `library/std` names `toyos-abi` and `toyos` as `../../../`, so each
-//! checkout's std compiles against its own worktree's ABI with nothing
+//! `library/std` names `toyos-abi` and `toyos` as `../../../` and each file of
+//! its ToyOS backend, `sdk/std`, by a `#[path]` as far up, so each checkout's
+//! std compiles against its own worktree's ABI and backend with nothing
 //! rewritten. The build is bootstrap's stage-0 local rebuild: the compiler the
 //! checkout names (`src/compiler.rs` — the primary's `stage2`, or one of the
 //! worktree's own where its `compiler/` differs) compiles the checkout's
@@ -60,11 +61,12 @@ use crate::toolchain::{self, host_triple, GuestTarget, Owner, Role, GUEST_TARGET
 use whole_toolchain::{whole, Whole};
 
 /// The per-worktree sources that end up inside a sysroot: std links `toyos-abi`
-/// and `toyos`, and `libtoyos_c.a` is `userland/libc` with `toyos-elf` and
-/// `toyos-osrelease`.
-pub const SYSROOT_SOURCES: [&str; 6] = [
+/// and `toyos` and compiles its ToyOS backend from `sdk/std`, and
+/// `libtoyos_c.a` is `userland/libc` with `toyos-elf` and `toyos-osrelease`.
+pub const SYSROOT_SOURCES: [&str; 7] = [
     "toyos-abi/src",
     "toyos/src",
+    "sdk/std",
     "toyos-elf/src",
     "toyos-osrelease/src",
     "userland/libc/src",
@@ -1222,7 +1224,7 @@ mod tests {
         write(&abi, "/// A.\npub struct A;\n");
         same("toyos-abi as it was");
 
-        for tree in ["toyos/src", "userland/libc/src"] {
+        for tree in ["toyos/src", "sdk/std", "userland/libc/src"] {
             write(&root.join(tree).join("lib.rs"), "/// A.\npub struct A(u8);\n");
             sysroot_only(tree);
             write(&root.join(tree).join("lib.rs"), "/// A.\npub struct A;\n");
