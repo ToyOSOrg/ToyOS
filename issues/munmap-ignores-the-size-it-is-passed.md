@@ -17,13 +17,21 @@ prefix of a mapping. Such a call answers 0 and takes the whole mapping, the
 part the caller kept included, so the program's next touch of it faults. A
 `size` larger than the mapping is answered 0 as well.
 
+The common mismatch is not that one and is correct: `sys_mmap` rounds the
+request up to a 2 MiB span and `MmapRegion.size` holds the rounded figure, so
+a caller that unmaps the length it mapped passes a size the kernel never
+recorded. `tests/testcases/tinycc/119_random_stuff.c` maps 4096 and unmaps
+4096. A refusal that compared the argument to `MmapRegion.size` as passed
+would refuse every such call.
+
 ## Exit condition
 
-A size that is not the whole mapping's is refused, which
+A size is refused unless, rounded as `sys_mmap` rounds its request, it is the
+mapping's recorded size, which is how this file reads the ruling in
 `issues/process-memory-is-2-mib-pages-and-that-caps-the-process-count.md`'s
-stage 4 already rules, or `SYS_MUNMAP` takes no size; and a test that
-unmaps half a mapping reads the refusal and then reads its mapping back. This
-file is deleted with whichever lands first.
+stage 4; and a test that maps two 2 MiB spans and unmaps the first reads the
+refusal and then reads its mapping back, and one that maps 4096 and unmaps
+4096 reads 0. This file is deleted with that.
 
 ## Owner
 

@@ -22,9 +22,12 @@ Read at `f260e0b98`, nothing run:
   MAX_LOG_SHARDS` with `MAX_LOG_SHARDS = 8`, and its test asserts 80.
 - **Four of the structs carry no size assertion at all**: `Stat`
   (`kernel/src/object/ops.rs`), `SchedInfo`, `ProcessStats` and
-  `FramebufferInfo`. `SpawnArgs`, `NamespaceBuild`, `InboxSetup`, `LogCursor`,
-  `RawKeyEvent` and `MouseEvent` each have a `const _` on a total, which a
-  field added together with its new total still satisfies with a gap inside.
+  `FramebufferInfo`. `TraceCursor` has none either and needs none, being
+  `repr(transparent)` over `LogCursor`. `SpawnArgs`, `NamespaceBuild` and
+  `InboxSetup` each have a `const _` on a literal total, which a field added
+  together with its new total still satisfies with a gap inside. `LogCursor`,
+  `RawKeyEvent` and `MouseEvent` assert a sum of field sizes, which a field
+  added with its own size fails on any gap.
 - **The second list is a copy.** `toyos-userbound/src/span.rs`'s test table is
   headed "Every `UserSafe` type" and is thirteen name strings with a size and
   an alignment written beside each; it names neither `LogCursor` nor
@@ -42,7 +45,9 @@ The compiler refuses a `UserSafe` impl whose type has a padding byte or a field
 that is not valid for every bit pattern, by a derive or by one macro that
 writes the impl and its assertions together, so no impl is written by hand.
 Shown by two mutations that fail the build: a `u32` appended to `SchedInfo`,
-and a `bool` in place of one of `ProcessStats`'s `u32`s. `span.rs`'s table is
+and a `core::num::NonZeroU32` in place of one of `ProcessStats`'s `u32`s, which
+has that `u32`'s size and alignment and so fails on bit validity alone.
+`span.rs`'s table is
 then generated from the same list or deleted, and this file with it. Whether
 that is a published crate or the kernel's own is the builder's to argue against
 root `CLAUDE.md`'s rule on kernel dependencies.
