@@ -153,3 +153,60 @@ impl<P: Phys> Iterator for MadtEntries<P> {
         }))
     }
 }
+
+/// How a line is driven.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Trigger {
+    Edge,
+    Level,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Polarity {
+    High,
+    Low,
+}
+
+/// An ISA line resolved against the MADT's overrides: the GSI it arrives on
+/// and how it is driven.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Line {
+    pub gsi: u32,
+    pub trigger: Trigger,
+    pub polarity: Polarity,
+}
+
+/// Table 5.26's MPS INTI flags: polarity in bits 0-1 and trigger in bits
+/// 2-3, each `01` and `11` meaning what they say and anything else (`00`,
+/// "conforms to the bus") the bus's own default.
+fn inti(flags: u16, default: (Trigger, Polarity)) -> (Trigger, Polarity) {
+    let trigger = match (flags >> 2) & 3 {
+        1 => Trigger::Edge,
+        3 => Trigger::Level,
+        _ => default.0,
+    };
+    let polarity = match flags & 3 {
+        1 => Polarity::High,
+        3 => Polarity::Low,
+        _ => default.1,
+    };
+    (trigger, polarity)
+}
+
+fn line(irq: u32, overrides: &[SourceOverride], default: (Trigger, Polarity)) -> Line {
+    let named = overrides.iter().find(|o| u32::from(o.source_irq) == irq);
+    let (trigger, polarity) = inti(named.map_or(0, |o| o.flags), default);
+    Line { gsi: named.map_or(irq, |o| o.gsi), trigger, polarity }
+}
+
+/// ISA line `irq`: the ISA bus drives edge, active high.
+pub fn isa_line(irq: u8, overrides: &[SourceOverride]) -> Line {
+    line(u32::from(irq), overrides, (Trigger::Edge, Polarity::High))
+}
+
+/// The SCI, the FADT's `SCI_INT`: Table 5.9 has the OS treat it as a
+/// sharable, level, active-low interrupt, which is its default whether no
+/// override names it or one names it conforming.
+pub fn sci_line(sci_int: u16, overrides: &[SourceOverride]) -> Line {
+    line(u32::from(sci_int), overrides, (Trigger::Level, Polarity::Low))
+}

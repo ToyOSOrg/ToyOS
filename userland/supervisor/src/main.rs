@@ -1833,7 +1833,7 @@ fn refused(name: &str, why: SyscallError) -> String {
         SyscallError::ResourceExhausted => format!("no claim slot is free for {name}"),
         SyscallError::NotSupported => {
             format!("{name} is on this machine and could not be handed over; the kernel's \
-                     `pcidev:` or `partclaim:` line says why")
+                     `pcidev:`, `partclaim:`, `isa:` or `acpi:` line says why")
         }
         other => format!("{name} was refused with {other:?}"),
     }

@@ -1847,6 +1847,12 @@ impl QmpShutdown {
         Self(qmp)
     }
 
+    /// Press the guest's power button: QEMU raises the ACPI fixed event, the
+    /// way the button on a machine does.
+    pub fn power_button(&mut self) {
+        self.0.execute("{\"execute\":\"system_powerdown\"}");
+    }
+
     /// The `reason` the `SHUTDOWN` event names — `guest-reset`,
     /// `guest-shutdown`, `host-signal` — or `None` if the guest never stopped.
     pub fn reason(&mut self) -> Option<String> {

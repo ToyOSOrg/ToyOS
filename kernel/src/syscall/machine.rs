@@ -66,7 +66,7 @@ fn read_on_cursor<C: crate::user_ptr::UserSafe>(
     }
 }
 
-fn quiesce(last: &str) -> Result<(), SyscallError> {
+fn quiesce(last: &str) -> Result<crate::quiesce::Stopping, SyscallError> {
     // Refused by name, and first: nothing below runs twice.
     if !crate::quiesce::claim_the_shutdown() {
         log!("power: this machine is already stopping, so this caller stops with the rest");
@@ -90,7 +90,7 @@ fn quiesce(last: &str) -> Result<(), SyscallError> {
     crate::arch::watchdog::disarm();
     // Every userland thread stops here, the log's writer with the rest:
     // `/system/bin/supervisor` had it flush before it asked for this stop.
-    let stopped = crate::quiesce::stop();
+    let (stopped, stopping) = crate::quiesce::stop();
     crate::log::console::drain_for_the_stop();
     // The final census: no process runs after this to report another.
     crate::irq_census::log_census();
@@ -130,7 +130,7 @@ fn quiesce(last: &str) -> Result<(), SyscallError> {
     // `power::reboot`/`power::shutdown` do — which every reset this kernel
     // performs goes through. It is bounded, and the reset follows either way.
     crate::drivers::xhci::seal_shut();
-    Ok(())
+    Ok(stopping)
 }
 
 /// Powers the machine off; requires a `SysCap` carrying [`Rights::POWER`]. Returns only when refused.
@@ -138,10 +138,10 @@ pub(super) fn sys_shutdown(syscap: RawHandle) -> u64 {
     if let Err(e) = demand_syscap(syscap, Rights::POWER) {
         return e.refuse();
     }
-    if let Err(e) = quiesce("Shutting down.") {
-        return e.to_u64();
+    match quiesce("Shutting down.") {
+        Ok(stopping) => power::shutdown(stopping),
+        Err(e) => e.to_u64(),
     }
-    power::shutdown();
 }
 
 /// Returns the machine to firmware; requires a `SysCap` carrying [`Rights::POWER`]. Returns only when refused.

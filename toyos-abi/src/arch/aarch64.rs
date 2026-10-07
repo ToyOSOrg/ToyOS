@@ -28,3 +28,28 @@ pub fn counter() -> u64 {
     unsafe { core::arch::asm!("isb", "mrs {now}, cntvct_el0", now = out(reg) now, options(nomem, nostack)) };
     now
 }
+
+/// AArch64 has no port space, and no grant names a port on it: each of these
+/// dies naming the port it was asked for.
+pub mod ioport {
+    #[cold]
+    fn none(port: u16) -> ! {
+        panic!("ioport: port {port:#x} asked for on AArch64, which has no port space")
+    }
+
+    pub fn in8(port: u16) -> u8 {
+        none(port)
+    }
+
+    pub fn in16(port: u16) -> u16 {
+        none(port)
+    }
+
+    pub fn out8(port: u16, _value: u8) {
+        none(port)
+    }
+
+    pub fn out16(port: u16, _value: u16) {
+        none(port)
+    }
+}

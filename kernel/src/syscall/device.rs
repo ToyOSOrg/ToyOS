@@ -129,7 +129,8 @@ pub(super) fn sys_device_claim(syscap: RawHandle, class: u64, selector: [u64; 2]
         | device::DeviceType::Mouse
         | device::DeviceType::Framebuffer
         | device::DeviceType::HdaAudio
-        | device::DeviceType::VirtioSound => 0,
+        | device::DeviceType::VirtioSound
+        | device::DeviceType::Acpi => 0,
         device::DeviceType::PciFunction => 1,
         device::DeviceType::Partition | device::DeviceType::Isa => 2,
     };
@@ -398,7 +399,8 @@ pub(super) fn sys_partition_transfer(
         | device::DeviceType::HdaAudio
         | device::DeviceType::VirtioSound
         | device::DeviceType::PciFunction
-        | device::DeviceType::Isa => {
+        | device::DeviceType::Isa
+        | device::DeviceType::Acpi => {
             drop(claim);
             return crate::object::HandleError::WrongType {
                 held: class.class_name(),

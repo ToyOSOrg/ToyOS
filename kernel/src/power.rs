@@ -48,12 +48,12 @@ pub fn reset_now() -> ! {
 }
 
 /// Power the machine off, or halt on one that offers no power-off.
-pub fn shutdown() -> ! {
+pub fn shutdown(stopping: crate::quiesce::Stopping) -> ! {
     // Last chance: nothing drains the log ring after this point.
     serial::flush_final();
     // A power-off takes VBUS with it on a machine whose ports are not
     // always-on and takes nothing on one whose are, so the devices are handed
     // back here for the same reason as at a reboot.
     stop::before_reset();
-    crate::arch::power::off()
+    crate::arch::power::off(stopping)
 }

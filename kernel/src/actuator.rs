@@ -75,6 +75,10 @@ actuators! {
     /// `usb_reset_records_the_phase_it_cut`.
     usb_reset_under_load = "usb-reset-under-load";
 
+    /// Give the machine's stop no time: one sweep, and a thread not parked at
+    /// it outlasts the stop. Judged by `machine_shutdown_short_stop`.
+    stop_budget_spent = "stop-budget-spent";
+
     /// Make one CPU ignore a kick.
     dump_deaf_cpu = "dump-deaf-cpu";
 

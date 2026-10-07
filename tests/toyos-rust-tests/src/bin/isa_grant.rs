@@ -25,10 +25,7 @@ use toyos_abi::syscall::{IsaId, SyscallError, SYSCAP_LABEL};
 
 #[path = "../isa_row.rs"]
 mod isa_row;
-#[path = "../arch/port.rs"]
-mod port;
-
-use port::{port_in, port_out};
+use toyos::ioport;
 
 const SELF_PATH: &str = "/system/bin/test_rs_isa_grant";
 const CLAIM_LABEL: &str = "isa-claim";
@@ -138,7 +135,7 @@ fn grant(cap: &SysCap) {
 
     let held = isa_row::claim_after(cap, set(I8042), holder);
     bind(&held);
-    let status = port_in(STATUS, false);
+    let status = ioport::in8(STATUS);
     println!("isa: bound here, status reads {status:#04x}");
     let poller = Poller::new(1);
     watch(&poller, &held);
@@ -156,7 +153,7 @@ fn grant(cap: &SysCap) {
             other.map(|_| ())
         ),
     }
-    let _ = port_in(STATUS, false);
+    let _ = ioport::in8(STATUS);
     println!("isa: a moved claim carries nothing, and the ports stay with the process that bound them");
 }
 
@@ -184,16 +181,16 @@ fn taken() -> Device {
 fn unbound() {
     let _claim = taken();
     println!("unbound: in from 0x64");
-    let _ = port_in(STATUS, false);
+    let _ = ioport::in8(STATUS);
     println!("unbound: survived");
 }
 
 fn bound() {
     let claim = taken();
     bind(&claim);
-    println!("bound: 0x64 read {:#04x}", port_in(STATUS, false));
+    println!("bound: 0x64 read {:#04x}", ioport::in8(STATUS));
     println!("bound: in from 0x61");
-    let _ = port_in(PAST, false);
+    let _ = ioport::in8(PAST);
     println!("bound: survived");
 }
 
@@ -201,7 +198,7 @@ fn wide() {
     let claim = taken();
     bind(&claim);
     println!("wide: in of two bytes from 0x60");
-    let _ = port_in(DATA, true);
+    let _ = ioport::in16(DATA);
     println!("wide: survived");
 }
 
@@ -209,13 +206,13 @@ fn out() {
     let claim = taken();
     bind(&claim);
     println!("out: out to 0x61");
-    port_out(PAST, 0);
+    ioport::out8(PAST, 0);
     println!("out: survived");
 }
 
 fn unclaimed() {
     println!("unclaimed: in from 0x60");
-    let _ = port_in(DATA, false);
+    let _ = ioport::in8(DATA);
     println!("unclaimed: survived");
 }
 
@@ -227,6 +224,6 @@ fn moved() {
         other => panic!("moved: a claim bound to another process answered {other:?}"),
     }
     println!("moved: in from 0x64");
-    let _ = port_in(STATUS, false);
+    let _ = ioport::in8(STATUS);
     println!("moved: survived");
 }

@@ -124,10 +124,12 @@ impl<T> Lock<T> {
         self.acquire()
     }
 
-    /// [`Lock::lock`] for an `IrqLock`, the one kind an interrupt handler may
-    /// take: the closed guard is its exemption from the handler witness.
+    /// [`Lock::lock`] for a [`Masked`] lock, the one kind an interrupt handler
+    /// may take: the closed guard is its exemption from the handler witness,
+    /// and only `Masked` reaches it, so every take of such a lock is masked.
+    #[cfg(not(feature = "loom"))]
     #[track_caller]
-    pub fn lock_masked(&self, _closed: &crate::arch::IrqGuard) -> LockGuard<'_, T> {
+    fn lock_masked(&self, _closed: &crate::arch::IrqGuard) -> LockGuard<'_, T> {
         self.acquire()
     }
 
@@ -241,6 +243,22 @@ fn owed_fence() {
 }
 #[cfg(feature = "owed-fence-off")]
 fn owed_fence() {}
+
+/// A lock taken only through a borrow of a closed `IrqGuard`: never before
+/// the mask, and never held past it, so an interrupt handler may take it too.
+#[cfg(not(feature = "loom"))]
+pub struct Masked<T>(Lock<T>);
+
+#[cfg(not(feature = "loom"))]
+impl<T> Masked<T> {
+    pub const fn new(value: T) -> Self {
+        Self(Lock::new(value))
+    }
+
+    pub fn lock<'a>(&'a self, closed: &'a crate::arch::IrqGuard) -> LockGuard<'a, T> {
+        self.0.lock_masked(closed)
+    }
+}
 
 /// A [`Lock`] a CPU may find taken and leave without waiting: a CPU that
 /// [`OwedLock::try_lock_or_owe`] turned away is owed, and the next release hands

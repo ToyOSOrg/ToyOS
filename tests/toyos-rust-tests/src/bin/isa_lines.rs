@@ -23,10 +23,7 @@ use toyos_abi::syscall::{self, IsaId, SyscallError, SYSCAP_LABEL};
 
 #[path = "../isa_row.rs"]
 mod isa_row;
-#[path = "../arch/port.rs"]
-mod port;
-
-use port::{port_in, port_out};
+use toyos::ioport;
 
 const SELF_PATH: &str = "/system/bin/test_rs_isa_lines";
 const CLAIM_LABEL: &str = "isa-claim";
@@ -101,7 +98,7 @@ fn lines(cap: &SysCap) {
 }
 
 fn inb(port: u16) -> u8 {
-    port_in(port, false) as u8
+    ioport::in8(port)
 }
 
 /// Read the claim's description, which binds its ports to this process.
@@ -122,12 +119,12 @@ fn wait_status(what: &str, ready: impl Fn(u8) -> bool) {
 
 fn command(byte: u8) {
     wait_status("took a command", |s| s & IBF == 0);
-    port_out(STATUS, byte);
+    ioport::out8(STATUS, byte);
 }
 
 fn data(byte: u8) {
     wait_status("took a data byte", |s| s & IBF == 0);
-    port_out(DATA, byte);
+    ioport::out8(DATA, byte);
 }
 
 /// Whatever the output buffer holds, read away.

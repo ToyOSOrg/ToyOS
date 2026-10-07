@@ -40,7 +40,7 @@ pub fn reset() -> ! {
 /// known state first, and this is DEN0022 §5.10.3's own way to. The budget
 /// for all of them is [`DEAF_CPU`]'s span from the SGI: a CPU PSCI still
 /// answers on at its end is named, and the machine powers off regardless.
-pub fn off() -> ! {
+pub fn off(_stopping: crate::quiesce::Stopping) -> ! {
     cpu::disable_interrupts();
     let Some(psci) = psci::conduit() else { cpu::halt() };
     irqchip::off_all_but_self();

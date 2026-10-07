@@ -6,7 +6,7 @@ opened: 2026-09-28
 
 # The i8042's holder holds the machine's reset line
 
-An `isa` claim on the i8042 (`kernel/src/arch/x86_64/pio.rs`'s `GRANTABLE`)
+An `isa` claim on the i8042 (`kernel/src/arch/x86_64/pio.rs`'s `fill_i8042_row`)
 opens ports 0x60 and 0x64 to the process that binds it, through the TSS I/O
 permission bitmap, and the bitmap grants a port or refuses it: it cannot see
 the value written. The controller's command port takes `0xFE`, which pulses the

@@ -63,6 +63,51 @@ pub fn machine_shutdown(test_config: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// A stop that ends with a userland thread still running is followed by a
+/// power-off all the same: q35 hands over in ACPI mode, so the power-off
+/// quiets the events `acpiserver` enabled, and QEMU stops for
+/// `guest-shutdown`. One CPU and `stop-budget-spent`, so the stop's one sweep
+/// finds `stop_short`'s spinner queued behind the stop's caller.
+pub fn machine_shutdown_short_stop(test_config: &Path) -> Result<(), String> {
+    let short = qemu::build_toyos_bin(
+        qemu::SUITE_ARCH,
+        &super::compile::repo_root().join("tests/toyos-rust-tests"),
+        "stop_short",
+    );
+    let options = BootOptions {
+        qmp: true,
+        smp: 1,
+        kernel_params: &["stop-budget-spent"],
+        extra_root_files: vec![("bin/test_rs_stop_short".to_string(), short)],
+        ..Default::default()
+    };
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
+    let boot = serial::Serial::boot(&qemu);
+    boot.must_be_clean()?;
+    let mut console = boot.text().to_string();
+    qemu::await_marker(&mut qemu, &mut console, ACPI_ARMED, "the ACPI server arming")?;
+    serial::Serial::named("boot", console.clone())
+        .must_say("acpi: the firmware handed this machine over in ACPI mode, so nothing is written")?;
+
+    let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(qemu::GUEST_QUIET));
+    writeln!(qemu.stdin_mut(), "run test_rs_stop_short").expect("write to QEMU stdin");
+    qemu.flush_stdin();
+    let asked_at = console.len();
+    ended(&mut qemu, &mut stop, &mut console, SHUTTING_DOWN, "guest-shutdown")?;
+    let after = serial::Serial::named("the short stop", console[asked_at..].to_string());
+    after.must_be_clean()?;
+    let record = after
+        .text()
+        .lines()
+        .find_map(toyos_quiesce::Record::parse)
+        .ok_or_else(|| format!("no stop record:\n{}", after.text()))?;
+    if record.stopped_the_machine() {
+        return Err(format!("the stop left no thread running, so this boot staged no short stop: {record}"));
+    }
+    eprintln!("  [power] a short stop, then the power-off: {record}");
+    Ok(())
+}
+
 /// The kernel decoded S5 soft-off out of this machine's FADT and DSDT. Every
 /// other branch of `arch::power::init_off` says `no soft-off` and not this.
 pub fn soft_off_decoded(kernel: &serial::Serial) -> Result<(), String> {
@@ -489,4 +534,44 @@ pub fn usb_reset_on_metal(arms: &[&super::metal::Readback]) -> Result<(), String
         return Ok(());
     }
     Err(format!("{} finding(s):\n  {}", bad.len(), bad.join("\n  ")))
+}
+
+/// What `/system/bin/acpiserver` says once it serves q35's power button,
+/// whole: q35 has no embedded controller.
+const ACPI_ARMED: &str = "acpiserver: armed: power button served, embedded controller none";
+
+/// The server's line for the press, naming the SCI it came on.
+const ACPI_PRESSED: &str =
+    "acpiserver: the power button was pressed, on SCI 1 of this boot; asking the supervisor to power off";
+
+/// A press of q35's power button stops the machine through ToyOS's own path:
+/// the kernel put the machine in ACPI mode for the server's claim, the press
+/// arrives as the server's first SCI and the only one, since the kernel masks
+/// the level line until the server has served it, and the server has the
+/// supervisor stop the machine, which QEMU reports as the guest's own
+/// power-off.
+pub fn acpi_power_button(test_config: &Path) -> Result<(), String> {
+    let options = BootOptions { qmp: true, ..Default::default() };
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
+    let boot = serial::Serial::boot(&qemu);
+    boot.must_be_clean()?;
+    let mut console = boot.text().to_string();
+    qemu::await_marker(&mut qemu, &mut console, ACPI_ARMED, "the ACPI server arming")?;
+    let mode = serial::Serial::named("boot", console.clone());
+    // OVMF hands q35 over in ACPI mode, so the mint writes nothing: the
+    // enable and its wait are the T14's to exercise (`acpi_mode`).
+    mode.must_say("acpi: the firmware handed this machine over in ACPI mode, so nothing is written")?;
+
+    let mut stop = qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(qemu::GUEST_QUIET));
+    stop.power_button();
+    let pressed_at = console.len();
+    ended(&mut qemu, &mut stop, &mut console, SHUTTING_DOWN, "guest-shutdown")?;
+    let after = serial::Serial::named("the press", console[pressed_at..].to_string());
+    after.must_say(ACPI_PRESSED)?;
+    if !toyos_build::bootlog::asked_to_power_off(after.text()) {
+        return Err(format!("the supervisor's last word after the press is not a power-off:\n{}", after.text()));
+    }
+    after.must_be_clean()?;
+    eprintln!("  [power] the press: {ACPI_PRESSED}");
+    Ok(())
 }
