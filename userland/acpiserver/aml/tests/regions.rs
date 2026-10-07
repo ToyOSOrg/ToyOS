@@ -190,8 +190,10 @@ fn a_pci_config_region_addresses_its_devices_function() {
 
 /// A device below bridges is on the bus the nearest one's Secondary Bus
 /// Number register names (PCI-to-PCI Bridge Architecture Specification 1.2,
-/// §3.2.5.4), each bridge read on the bus the one above it named, the first
-/// on the host bridge's `_BBN`.
+/// §3.2.5.4), each bridge asked first for its Header Type, on the bus the
+/// one above it named, the first on the host bridge's `_BBN`. §6.5.4: the
+/// region is ready once "the bridge controller has been programmed with a
+/// bus number".
 #[test]
 fn a_pci_config_region_below_bridges_is_on_the_nearest_ones_secondary_bus() {
     let below = |endpoint_scope: &[u8]| {
@@ -204,21 +206,41 @@ fn a_pci_config_region_below_bridges_is_on_the_nearest_ones_secondary_bus() {
         &op_region("CFG", 0x02, &int(0), &int(0x10)),
         &field("CFG", BYTE, &[unit("VEN", 8)]),
     ]);
-    let upper = Address::PciConfig { segment: 0, bus: 0x40, device: 3, function: 1, offset: 0x19 };
-    let lower = Address::PciConfig { segment: 0, bus: 0x45, device: 0, function: 0, offset: 0x19 };
+    let upper = |offset| Address::PciConfig { segment: 0, bus: 0x40, device: 3, function: 1, offset };
+    let lower = |offset| Address::PciConfig { segment: 0, bus: 0x45, device: 0, function: 0, offset };
+    let (header, secondary) = (0x0E, 0x19);
     let at = Address::PciConfig { segment: 0, bus: 0x47, device: 0, function: 1, offset: 0 };
+    // The upper bridge is a multi-function device: bit 7 is not the layout.
+    let configured: &[(Address, &[u8])] =
+        &[(upper(header), &[0x81]), (upper(secondary), &[0x45]), (lower(header), &[0x01]), (lower(secondary), &[0x47]), (at, &[0x86])];
+    let walked = vec![
+        Event::Read(upper(header), Access::Byte),
+        Event::Read(upper(secondary), Access::Byte),
+        Event::Read(lower(header), Access::Byte),
+        Event::Read(lower(secondary), Access::Byte),
+        Event::Read(at, Access::Byte),
+    ];
     let ven = "\\_SB.PCI0.BRG0.BRG1.END0.VEN";
-    let (m, v) = read(&below(&endpoint), &[(upper, &[0x45]), (lower, &[0x47]), (at, &[0x86])], ven);
+    let (m, v) = read(&below(&endpoint), configured, ven);
     assert_eq!(v, Ok(Value::Integer(0x86)));
-    assert_eq!(m.accesses(), vec![Event::Read(upper, Access::Byte), Event::Read(lower, Access::Byte), Event::Read(at, Access::Byte)]);
+    assert_eq!(m.accesses(), walked);
 
     // A bridge that is not configured answers 0, its register's reset value,
     // and one may answer anything: a secondary bus that is not above the
     // bridge's own names no bus below it, and nothing is accessed there.
     for unset in [0x00, 0x40, 0x3F] {
-        let (m, v) = read(&below(&endpoint), &[(upper, &[unset])], ven);
+        let (m, v) = read(&below(&endpoint), &[(upper(header), &[0x01]), (upper(secondary), &[unset])], ven);
         assert!(matches!(v, Err(Error::Rule(_))), "{unset:#x}: {v:?}");
-        assert_eq!(m.accesses(), vec![Event::Read(upper, Access::Byte)], "{unset:#x}");
+        assert_eq!(m.accesses(), vec![Event::Read(upper(header), Access::Byte), Event::Read(upper(secondary), Access::Byte)], "{unset:#x}");
+    }
+
+    // Offset 0x19 is a Secondary Bus Number in a bridge's header alone: a
+    // function of another layout answers a byte of something else there, and
+    // one that is absent all ones, which is above every bus. Neither is asked.
+    for (layout, at_0x19) in [(0x00, 0x45), (0xFF, 0xFF), (0x02, 0x45), (0x80, 0x45)] {
+        let (m, v) = read(&below(&endpoint), &[(upper(header), &[layout]), (upper(secondary), &[at_0x19])], ven);
+        assert!(matches!(v, Err(Error::Rule(_))), "{layout:#x}: {v:?}");
+        assert_eq!(m.accesses(), vec![Event::Read(upper(header), Access::Byte)], "{layout:#x}");
     }
 
     // A region a method declares addresses the device the method is in.
@@ -227,13 +249,9 @@ fn a_pci_config_region_below_bridges_is_on_the_nearest_ones_secondary_bus() {
         0,
         &cat(&[&op_region("TMP", 0x02, &int(0), &int(0x10)), &field("TMP", BYTE, &[unit("TVEN", 8)]), &ret(&name("TVEN"))]),
     );
-    let (m, v) = read(
-        &below(&cat(&[&def_name("_ADR", &int(0x0000_0001)), &get])),
-        &[(upper, &[0x45]), (lower, &[0x47]), (at, &[0x86])],
-        "\\_SB.PCI0.BRG0.BRG1.END0.GET",
-    );
+    let (m, v) = read(&below(&cat(&[&def_name("_ADR", &int(0x0000_0001)), &get])), configured, "\\_SB.PCI0.BRG0.BRG1.END0.GET");
     assert_eq!(v, Ok(Value::Integer(0x86)));
-    assert_eq!(m.accesses(), vec![Event::Read(upper, Access::Byte), Event::Read(lower, Access::Byte), Event::Read(at, Access::Byte)]);
+    assert_eq!(m.accesses(), walked);
 }
 
 /// A store to a field is of its source as the store found it: the function a

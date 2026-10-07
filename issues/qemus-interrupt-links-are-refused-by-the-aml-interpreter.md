@@ -7,7 +7,7 @@ opened: 2026-10-07
 # QEMU's interrupt links are refused by the AML interpreter
 
 `userland/acpiserver/aml/src/field.rs`'s `pci` finds the host bridge a
-PCI_Config region is below as the nearest scope that names a `_BBN`. QEMU
+PCI_Config region is below as the nearest Device that names a `_BBN`. QEMU
 11.1.1's DSDT (`toyos-acpi/fixtures/qemu-11.1.1/dsdt.bin`) names none: its
 `\_SB.PCI0` is a host bridge by its `_HID` and `_CID` alone, on bus 0. So a
 field of the region its ISA bridge declares is refused as `Unsupported`, and

@@ -113,16 +113,29 @@ recording the result.
 What that check found, which whoever builds on the interpreter would
 otherwise pay to find again:
 
-- **The T14's tables load only against its own memory.** Their
+- **The T14's tables load only against its own memory and its own
+  bridges.** Their
   definition-block code reads SystemMemory and PCI_Config while it loads, and
   branches on what it reads: with every read answered zero the DSDT refers to
   a device its own other branch never defined, and is refused. The check
-  answered one 16-bit word, the chipset series, and each bridge's Secondary
-  Bus Number register as a configured bridge does, and nothing else: one
-  SSDT reads a field below a bridge while it loads, and the interpreter
-  refuses a secondary bus that is not above the bridge's own. A run on the
-  machine itself is still owed, by the power-off stage, which puts the
-  interpreter in the server.
+  answered one 16-bit word of memory, the chipset series, and nothing else
+  of it. One SSDT reads a field below a bridge while it loads, and the
+  interpreter refuses a PCI_Config region below a function that is no
+  PCI-to-PCI bridge by its Header Type, or whose Secondary Bus Number is not
+  above its own bus (`pci`, `userland/acpiserver/aml/src/field.rs`). With
+  the bridges answering as present and numbered all 14 tables load; with
+  them answering zero, as bridges at reset, or as absent, that SSDT is
+  refused and 13 load. With every function answering its Header Type and
+  bus registers as Linux on the T14 reads them, all 14 load, and 42 methods
+  are refused for a function above their region that is not there. That
+  reading was taken after Linux enumerated the buses, and Linux may number a
+  bridge the firmware left unnumbered: it does not show what the firmware
+  leaves at boot, and nothing here does. Owner: the power-off stage, which
+  puts the interpreter in the server. **Exit**: on the T14 the server logs
+  the load result of each of the 14 tables and a T14 row reads all 14
+  there; a table refused for a bridge's answer is brought to the owner with
+  that bridge's Header Type and bus registers as the firmware left them,
+  and he rules whether a table real firmware ships may be refused for it.
 - **The T14's processor objects need `Load`.** Its tables hold eight `Load`
   opcodes and one `LoadTable`, none run while a table loads, and Linux lists eight tables
   loaded that way; the interpreter refuses both as unsupported.

@@ -175,10 +175,16 @@ impl Machine<'_> {
     /// the high word, function in the low), in the segment group the host
     /// bridge's `_SEG` names or 0 without one (§6.5.6). The host bridge is
     /// the nearest device naming a `_BBN`, which is the bus directly below it
-    /// (§6.5.5); each device between it and the region's is a bridge, whose
-    /// Secondary Bus Number register is the bus below it (PCI-to-PCI Bridge
-    /// Architecture Specification 1.2, §3.2.5.4). A region declared in the
-    /// host bridge itself addresses the bridge.
+    /// (§6.5.5); each device between it and the region's is a PCI-to-PCI
+    /// bridge by its Header Type register, whose Secondary Bus Number
+    /// register is the bus below it (PCI-to-PCI Bridge Architecture
+    /// Specification 1.2, §3.2.5.4). A region declared in the host bridge
+    /// itself addresses the bridge.
+    ///
+    /// §6.5.4 holds a PCI_Config region accessible always only on a root bus
+    /// naming a `_BBN`, and one below a bridge once "the bridge controller
+    /// has been programmed with a bus number": a region below anything else
+    /// is refused, where any bus chosen for it would be another device's.
     ///
     /// Every access asks again, firmware's methods and the bridges both:
     /// nothing is kept that a bridge renumbered since would make stale.
@@ -207,11 +213,22 @@ impl Machine<'_> {
         let Some((&device, bridges)) = below.split_first() else { return self.function(host, segment, bus) };
         for &bridge in bridges.iter().rev() {
             let b = self.function(bridge, segment, bus)?;
-            let secondary = Address::PciConfig { segment, bus, device: b.device, function: b.function, offset: 0x19 };
-            let answered = self.host.read(secondary, crate::Access::Byte).map_err(|d| Error::Host(d.0))? as u8;
-            // The register resets to 0, and a configured bridge's secondary
-            // bus is above the bus the bridge is on: any other answer would
-            // address a device that is not below this bridge.
+            let register = |m: &mut Self, offset| {
+                let at = Address::PciConfig { segment, bus, device: b.device, function: b.function, offset };
+                m.host.read(at, crate::Access::Byte).map(|v| v as u8).map_err(|d| Error::Host(d.0))
+            };
+            // Offset 0x19 is a Secondary Bus Number only in header layout 1,
+            // the low seven bits of the Header Type: a function that is
+            // absent answers all ones, and any other layout a byte of
+            // something else.
+            if register(self, 0x0E)? & 0x7F != 0x01 {
+                return Err(Error::Rule("a device above a PCI_Config region's is no PCI-to-PCI bridge by its Header Type, and has no bus below it"));
+            }
+            let answered = register(self, 0x19)?;
+            // §6.5.4: the region is ready once its bridge has a bus number.
+            // The register resets to 0, and a bridge's secondary bus is
+            // above the bus the bridge is on: any other answer would address
+            // a device that is not below this bridge.
             if answered <= bus {
                 return Err(Error::Rule("a bridge's Secondary Bus Number is not above its own bus, and names no bus below it"));
             }
