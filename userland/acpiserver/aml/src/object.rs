@@ -39,10 +39,11 @@ pub(crate) type Kept<T> = Rc<Held<T>>;
 /// for: a string, buffer, table or package at its vector's capacity and its
 /// shared record, a fixed record at its size, the namespace's arena at its
 /// capacity and a node's entry among its parent's children at the most a
-/// parent allocates for one (`namespace`). What it does not count is what an
-/// evaluation holds while it runs and lets go at its end: its frames, a
-/// string's or buffer's bytes made and not yet held, the value it hands the
-/// caller.
+/// parent allocates for one (`namespace`). What it does not count is what a
+/// load or an evaluation holds while it runs and lets go at its end: its
+/// frames and the mutexes it has acquired, the names it is reading, the
+/// bytes one operator has made and not yet held (`exec`), the arena's old
+/// slots while it moves, and the value it hands the caller.
 pub(crate) struct Meter {
     live: Cell<usize>,
 }

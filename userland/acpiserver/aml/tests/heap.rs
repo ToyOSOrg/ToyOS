@@ -1,7 +1,9 @@
 //! The interpreter's bound is heap bytes: under an allocator that counts
 //! what this thread holds, an interpreter filled until it refuses holds at
-//! most [`MAX_LIVE`], whatever a table fills it with, and a load refused
-//! leaves it holding what it held before.
+//! most [`MAX_LIVE`], whatever a table fills it with, a load refused leaves
+//! it holding what it held before, and a nest of operators or of fields
+//! holds one level's bytes past what the meter counts, never a level's
+//! each.
 
 mod common;
 
@@ -38,8 +40,11 @@ unsafe impl GlobalAlloc for Counting {
         unsafe { System.dealloc(p, l) }
     }
 
+    // Counted as the realloc that moves: the new block is made before the
+    // old one is freed, and both are held between.
     unsafe fn realloc(&self, p: *mut u8, l: Layout, size: usize) -> *mut u8 {
-        moved(size as isize - l.size() as isize);
+        moved(size as isize);
+        moved(-(l.size() as isize));
         unsafe { System.realloc(p, l, size) }
     }
 }
@@ -203,9 +208,37 @@ fn devices_of_one_child_each_fill_it_to_the_bound() {
     fill_by_loads(&[], &tables).within_the_bound();
 }
 
+/// A device nothing is named below holds no map, and none again once a
+/// method has named an object below it and exited: 40,000 such devices, two
+/// evaluations that each name an object below half of them, then empty
+/// buffers to the bound.
+#[test]
+fn a_parent_whose_last_child_is_unwound_holds_no_map() {
+    let devices: Vec<Vec<u8>> = (0..40_000).map(|d| device(&seg(d), &[])).collect();
+    let devices = table(b"SSDT", 2, &devices.concat());
+    let (fill, fills) = fillers(8, &buffer(&int(0), &[]));
+    let below = |half: usize| {
+        let names: Vec<Vec<u8>> = (0..20_000).map(|d| def_name(&format!("\\{}.T", seg(half * 20_000 + d)), &int(0))).collect();
+        method(&format!("M{half}"), 0, &names.concat())
+    };
+    let methods = table(b"SSDT", 2, &cat(&[&below(0), &below(1)]));
+    let (mut i, before) = start(&fill);
+    for t in [&devices, &methods] {
+        i.load_bytes(&mut Sink, t).expect("the table loads");
+    }
+    let held = HELD.get() - before;
+    for m in ["\\M0", "\\M1"] {
+        assert_eq!(i.evaluate(&mut Sink, m, &[]), Ok(Value::Uninitialized));
+    }
+    let kept = HELD.get() - before;
+    let refused = fills.iter().find_map(|m| i.evaluate(&mut Sink, m, &[]).err());
+    Filled::of(before, refused).within_the_bound();
+    assert_eq!(kept, held, "bytes held after the two evaluations, and before them");
+}
+
 /// One table naming 204,000 field units is refused, and the interpreter
-/// then holds what it held before: its arena has shrunk, and what it had
-/// room for it has room for again.
+/// then holds what it held before, to the byte: its arena has the slots it
+/// had, and what it had room for it has room for again.
 #[test]
 fn a_refused_load_gives_back_what_it_took() {
     let refused = dense();
@@ -222,8 +255,7 @@ fn a_refused_load_gives_back_what_it_took() {
     let held = HELD.get() - before;
     let r = i.load_bytes(&mut Sink, &refused);
     let after = Filled::of(before, r.err());
-    // The namespace's arena keeps at most four slots for each node it holds.
-    assert!(after.held <= 4 * held, "{} bytes held after the refusal, {held} before the load", after.held);
+    assert_eq!(after.held, held, "bytes held after the refusal, and before the load");
     assert!(after.peak <= BOUND, "{} bytes held on the way", after.peak);
     assert_eq!(after.refused, Some(Error::Bound(FULL)));
     assert!(matches!(i.evaluate(&mut Sink, "\\D00.AAA", &[]), Err(Error::NotFound(_))));
@@ -246,5 +278,101 @@ fn a_nest_of_packages_is_held_while_it_is_read() {
     let r = i.load_bytes(&mut Sink, &t);
     let read = Filled::of(before, r.err());
     assert!(read.peak <= BOUND, "{} bytes held on the way", read.peak);
+    assert_eq!(read.refused, Some(Error::Bound(FULL)));
+}
+
+/// The most a nest below holds past what its interpreter held before it,
+/// or past the bound: one level's bytes, copied and grown once, where a
+/// level's each is eight mebibytes at the least.
+const LEVEL: isize = 4 << 20;
+
+/// The most evaluating `path` held past what the interpreter of `body` held
+/// before it, and what it answered.
+fn most(body: &[u8], path: &str) -> (isize, Result<Value, Error>) {
+    let (mut i, _) = start(body);
+    let held = heap();
+    let r = i.evaluate(&mut Sink, path, &[]);
+    (PEAK.get() - held, r)
+}
+
+fn mebibyte() -> Vec<u8> {
+    def_name("BUF", &buffer(&int(0x10_0000), &[]))
+}
+
+/// ToString copies its source after its length is evaluated: 32 of them,
+/// each the length of the one around it, over one buffer of a mebibyte.
+#[test]
+fn a_nest_of_to_strings_holds_one_copy() {
+    let length = (0..32).fold(int(1), |inner, _| lequal(&cat(&[&[0x9C], &name("BUF"), &inner, &[0x00]]), &string("")));
+    let (held, r) = most(&cat(&[&mebibyte(), &method("NEST", 0, &length)]), "\\NEST");
+    assert_eq!(r, Ok(Value::Uninitialized));
+    assert!(held <= LEVEL, "{held} bytes held past what was held before");
+}
+
+/// Mid lets its source's copy go before its target is evaluated: 33 of
+/// them, each the buffer the one around it indexes for its target, over one
+/// buffer of a mebibyte.
+#[test]
+fn a_nest_of_mids_holds_one_copy() {
+    let mid = |target: &[u8]| cat(&[&[0x9E], &name("BUF"), &int(0), &int(1), target]);
+    let nest = (0..32).fold(mid(&[0x00]), |inner, _| mid(&index(&inner, &int(0), &[0x00])));
+    let (held, r) = most(&cat(&[&mebibyte(), &method("NEST", 0, &nest)]), "\\NEST");
+    assert_eq!(r, Ok(Value::Uninitialized));
+    assert!(held <= LEVEL, "{held} bytes held past what was held before");
+}
+
+/// Concatenate copies what leads after it has named the type of what
+/// follows. Naming a package element resolves it, here to a PCI_Config
+/// field, whose access asks the device's `_ADR`, which is the method that
+/// concatenates: 16 deep, over `LEAD` of half a mebibyte.
+fn joined_through_a_field(lead: &[u8]) -> (isize, Result<Value, Error>) {
+    let join = op2(0x73, &name("LEAD"), &index(&name("PKG"), &int(0), &[0x00]), &[0x00]);
+    let deeper = if_(&lless(&name("CNT"), &int(16)), &cat(&[&increment(&name("CNT")), &join]));
+    let bridge = cat(&[
+        &def_name("_BBN", &int(0)),
+        &def_name("CNT", &int(0)),
+        lead,
+        &def_name("PKG", &package(&[name("FLD")])),
+        &method("_ADR", 0, &cat(&[&deeper, &ret(&int(0))])),
+        &op_region("CFG", 0x02, &int(0), &int(0x10)),
+        &field("CFG", 0x01, &[unit("FLD", 8)]),
+    ]);
+    most(&device("PCI0", &bridge), "\\PCI0._ADR")
+}
+
+#[test]
+fn a_nest_of_concatenates_holds_one_buffers_copy() {
+    let (held, r) = joined_through_a_field(&def_name("LEAD", &buffer(&int(0x8_0000), &[])));
+    assert_eq!(r, Ok(Value::Integer(0)));
+    assert!(held <= LEVEL, "{held} bytes held past what was held before");
+}
+
+/// The string that leads is 524,287 characters, an operator's making, which
+/// Name does not take: made at load.
+#[test]
+fn a_nest_of_concatenates_holds_one_strings_copy() {
+    let decimal = op1(0x97, &buffer(&int(0x4_0000), &[]), &[0x00]);
+    let (held, r) = joined_through_a_field(&cat(&[&def_name("LEAD", &string("")), &store(&decimal, &name("LEAD"))]));
+    assert_eq!(r, Ok(Value::Integer(0)));
+    assert!(held <= LEVEL, "{held} bytes held past what was held before");
+}
+
+/// 33 fields of a mebibyte, each read through the one before it: every one
+/// holds its bytes against the bound before its first unit is read, so the
+/// read is refused at the bound and never holds a level's each.
+#[test]
+fn fields_read_through_each_other_are_held_while_they_are_read() {
+    let through: Vec<Vec<u8>> = (0..32)
+        .map(|d| index_field("IDX", &format!("D{d:03}"), 0x01, &[unit(&format!("D{:03}", d + 1), 0x80_0000)]))
+        .collect();
+    let body = cat(&[
+        &op_region("MEM", 0x00, &int(0), &int(0x20_0000)),
+        &field("MEM", 0x01, &[unit("IDX", 8), unit("D000", 0x80_0000)]),
+        &through.concat(),
+    ]);
+    let (mut i, before) = start(&body);
+    let r = i.evaluate(&mut Sink, "\\D032", &[]);
+    let read = Filled::of(before, r.err());
+    assert!(read.peak <= BOUND + LEVEL, "{} bytes held on the way", read.peak);
     assert_eq!(read.refused, Some(Error::Bound(FULL)));
 }

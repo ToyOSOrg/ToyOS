@@ -193,21 +193,37 @@ otherwise pay to find again:
   interpreter's allocations ask for (`object::Meter`,
   `userland/acpiserver/aml/src/object.rs`), and under a counting allocator
   an interpreter filled until it refuses holds at most `MAX_LIVE`, whatever
-  fills it, and a refused load leaves it holding what it held before
-  (`userland/acpiserver/aml/tests/heap.rs`). While a load or an evaluation
-  runs it holds more, uncounted: its frames, a string's or buffer's bytes
-  made and not yet held, and the value handed to the caller. Filled with
-  buffers of a mebibyte the heap peaked at 17,173,348 bytes, 396,132 past
-  the bound; nothing measures a peak that conversions or a returned package
-  size. The meter also holds a namespace node above its cost, at a whole
+  fills it; a refused load leaves it holding the bytes it held before; and
+  ToString, Mid and Concatenate nested in themselves, and fields read
+  through each other, hold one level's bytes past what the meter counts and
+  not a level's each (`userland/acpiserver/aml/tests/heap.rs`). That
+  allocator counts every realloc as one that moves. While a load or an
+  evaluation runs it still holds more, uncounted, and nothing measures the
+  sum. Each part is bounded by the depth or the step bound, by reading and
+  not by a run: its frames, 256 at most; a name read from the table for
+  each, 255 segments at most; 9 bytes for every Mutex acquired and not
+  released; the path DerefOf reads from a String while the object it names
+  is read, 4 bytes a segment and a segment a step; 16 bytes for each of at
+  most 256 devices above a PCI_Config region while its bridges are asked;
+  one operator's string or buffer before the meter holds it, Concatenate's
+  the most at its two operands' copies and their sum; a table's bytes while
+  they are read in; the arena's old slots while a doubling moves it; and
+  the value handed to the caller with the element lists copied to make it,
+  which a returned package sizes. The meter also holds a namespace node
+  above its cost, at a whole
   map leaf of 104 bytes for its entry in its parent and the arena at its
   doubled capacity: an interpreter filled with field units refuses with
   11,111,460 bytes of heap held, and one filled with devices of one child
-  with 8,900,612. Owner: the power-off stage, which gives the server its
+  with 8,900,612. The real machine's tables have not been loaded since the
+  meter came to count a node's slot, entry and record, a field's read came
+  to hold its bytes and the arena's move to cost steps: that reading is
+  owed before the server links the crate. Owner: the power-off stage, which
+  gives the server its
   memory. **Exit**: the server states its interpreter's bound in heap
   bytes, and a host test under a counting allocator holds the most a load
   and an evaluation hold while they run to it, a returned value's copy
-  among it.
+  among it; and the real machine's tables load under the meter as it
+  stands.
 
 **Stage: power-off through the server** (the orchestrator's placement of "Yes,
 one path"). The ACPI server evaluates `\_S5` and powers the machine off.

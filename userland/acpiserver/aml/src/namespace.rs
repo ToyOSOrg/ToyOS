@@ -12,7 +12,11 @@
 //! it climbs and each segment it looks up.
 //!
 //! The arena is held against the interpreter's [`Meter`] at its capacity,
-//! and each node at [`ENTRY`] beside it, from its creation to its removal.
+//! and each node at [`ENTRY`] beside it, from its creation to its removal:
+//! an exit or a refusal leaves the arena the slots it had at the [`Mark`],
+//! and a parent whose last child it took no map. The arena therefore moves
+//! as often as a method that grows it runs, and a move pays the [`Toll`] for
+//! the bytes it copies.
 
 use alloc::collections::BTreeMap;
 use alloc::rc::Rc;
@@ -21,7 +25,7 @@ use alloc::vec::Vec;
 
 use crate::name::{Path, Seg};
 use crate::object::{Meter, Object};
-use crate::Error;
+use crate::{Error, WORK_PER_STEP};
 
 /// What a walk pays for a scope or a segment: a step of the evaluation it is
 /// part of, which refuses the walk at its bound.
@@ -36,13 +40,20 @@ const SLOT: usize = core::mem::size_of::<Node>();
 /// bytes an entry.
 const ENTRY: usize = (core::mem::size_of::<usize>() + 4 + 11 * core::mem::size_of::<(Seg, u32)>()).next_multiple_of(8);
 
-/// The slots the arena starts with, and never shrinks below.
+/// The slots the arena starts with.
 const SLOTS: usize = 16;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct NodeId {
     index: u32,
     stamp: u64,
+}
+
+/// How many nodes there are and how many slots hold them: what
+/// [`Namespace::unwind`] goes back to.
+pub(crate) struct Mark {
+    nodes: usize,
+    slots: usize,
 }
 
 struct Node {
@@ -65,8 +76,9 @@ pub(crate) struct Namespace {
 impl Namespace {
     pub(crate) fn new(meter: Rc<Meter>) -> Self {
         let mut ns = Namespace { nodes: Vec::new(), next: 0, meter };
-        ns.push(Node { seg: Seg(*b"\\___"), parent: None, children: BTreeMap::new(), alias: None, object: Object::Scope, stamp: 0 })
-            .expect("an empty meter holds the arena's first slots");
+        let root = Node { seg: Seg(*b"\\___"), parent: None, children: BTreeMap::new(), alias: None, object: Object::Scope, stamp: 0 };
+        let held = "an empty meter holds the arena's first slots";
+        ns.push(root, &mut || Ok(())).expect(held);
         ns
     }
 
@@ -154,15 +166,22 @@ impl Namespace {
         if self.node(at).ok_or_else(missing)?.children.contains_key(last) {
             return Err(Error::Exists(self.path_of(at, Some(*last), toll)?));
         }
-        self.push(Node { seg: *last, parent: Some(at.index), children: BTreeMap::new(), alias: None, object, stamp: 0 })
+        let node = Node { seg: *last, parent: Some(at.index), children: BTreeMap::new(), alias: None, object, stamp: 0 };
+        self.push(node, toll)
     }
 
     /// A node at the arena's end and among its parent's children, stamped,
-    /// and held against the meter before either grows.
-    fn push(&mut self, node: Node) -> Result<NodeId, Error> {
+    /// and held against the meter before either grows. An arena that is
+    /// full doubles, which moves it: a step for every [`WORK_PER_STEP`]
+    /// bytes moved, as for any copy.
+    fn push(&mut self, node: Node, toll: Toll<'_>) -> Result<NodeId, Error> {
         let index = u32::try_from(self.nodes.len()).map_err(|_| Error::Bound("the namespace's node count"))?;
         if self.nodes.len() == self.nodes.capacity() {
-            let more = self.nodes.capacity().max(SLOTS);
+            let held = self.nodes.capacity();
+            for _ in 0..held * SLOT / WORK_PER_STEP {
+                toll()?;
+            }
+            let more = held.max(SLOTS);
             self.meter.take(more * SLOT)?;
             self.nodes.reserve_exact(more);
         }
@@ -182,27 +201,30 @@ impl Namespace {
         Ok(id)
     }
 
-    /// How many nodes there are: what [`Namespace::unwind`] goes back to.
-    pub(crate) fn mark(&self) -> usize {
-        self.nodes.len()
+    pub(crate) fn mark(&self) -> Mark {
+        Mark { nodes: self.nodes.len(), slots: self.nodes.capacity() }
     }
 
     /// Destroys every object made since `mark` was read (§5.5.2.3), newest
-    /// first, and gives back the arena's slots past four for each node left.
-    pub(crate) fn unwind(&mut self, mark: usize) {
-        while self.nodes.len() > mark
+    /// first, and gives back the slots the arena has grown by since.
+    pub(crate) fn unwind(&mut self, mark: Mark) {
+        while self.nodes.len() > mark.nodes
             && let Some(n) = self.nodes.pop()
         {
             if let Some(p) = n.parent {
-                self.nodes[p as usize].children.remove(&n.seg);
+                let children = &mut self.nodes[p as usize].children;
+                children.remove(&n.seg);
+                // A map keeps a leaf for the last entry it loses, which
+                // nothing is held for.
+                if children.is_empty() {
+                    *children = BTreeMap::new();
+                }
                 self.meter.give(ENTRY);
             }
         }
-        let (len, held) = (self.nodes.len(), self.nodes.capacity());
-        if held > SLOTS.max(4 * len) {
-            self.nodes.shrink_to(SLOTS.max(2 * len));
-            self.meter.give((held - self.nodes.capacity()) * SLOT);
-        }
+        let held = self.nodes.capacity();
+        self.nodes.shrink_to(mark.slots);
+        self.meter.give((held - self.nodes.capacity()) * SLOT);
     }
 
     /// The absolute path of a node, and of `child` below it when given.

@@ -7,6 +7,11 @@
 //! the Global Lock across the whole access. An IndexField reaches a unit by
 //! writing its byte offset to the index field and then accessing the data
 //! field; a BankField writes its bank value to the bank field first.
+//!
+//! An access runs other fields' accesses and, for a PCI_Config region,
+//! firmware's methods, each of which may access a field again: the bytes a
+//! read gathers and a store writes from are held against the meter before
+//! the first unit is accessed.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -186,7 +191,10 @@ impl Machine<'_> {
     /// is refused, where any bus chosen for it would be another device's.
     ///
     /// Every access asks again, firmware's methods and the bridges both:
-    /// nothing is kept that a bridge renumbered since would make stale.
+    /// nothing is kept that a bridge renumbered since would make stale. A
+    /// bridge's secondary bus is above the bus it is on and a bus number is
+    /// 8 bits, so a region below more than 255 bridges is on no bus, and is
+    /// refused before any is asked.
     fn pci(&mut self, r: &Region) -> Result<Pci, Error> {
         let bbn = Seg(*b"_BBN");
         let mut below = Vec::new();
@@ -196,6 +204,9 @@ impl Machine<'_> {
             if matches!(self.ns.object(host), Some(Object::Device)) {
                 if self.ns.child(host, bbn).is_some() {
                     break;
+                }
+                if below.len() > usize::from(u8::MAX) {
+                    return Err(Error::Rule("a PCI_Config region below more bridges than there are buses for them"));
                 }
                 below.push(host);
             }
@@ -287,7 +298,13 @@ impl Machine<'_> {
         self.enter()?;
         let r = self.locked(f.lock, |m| m.read_units(f));
         self.leave();
-        self.value(r?, f.len)
+        let out = r?;
+        // §19.6.47: an Integer when it fits one, else a Buffer.
+        if f.len > u64::from(self.w.bits) {
+            return Ok(Object::Buf(out));
+        }
+        let v = self.w.int_of_bytes(&out.borrow())?;
+        Ok(Object::Int(v))
     }
 
     /// A field's value (§19.6.47): an Integer when it fits one, else a Buffer.
@@ -295,17 +312,17 @@ impl Machine<'_> {
         if bits <= u64::from(self.w.bits) { Ok(Object::Int(self.w.int_of_bytes(&b)?)) } else { self.new_buf(b) }
     }
 
-    fn read_units(&mut self, f: &Field) -> Result<Vec<u8>, Error> {
-        let mut out = vec![0u8; bytes_for(f.len)?];
-        self.charge(out.len())?;
+    fn read_units(&mut self, f: &Field) -> Result<Bytes, Error> {
+        let out = self.bytes(vec![0u8; bytes_for(f.len)?])?;
         let w = self.unit(f)?;
         let span = 8 * w;
         for u in f.bit / span..=(f.bit + f.len - 1) / span {
             self.step()?;
             let v = self.unit_read(f, u * w, w)?;
             let (lo, hi) = (u * span, (u + 1) * span);
+            let mut bits = out.bits();
             for b in f.bit.max(lo)..(f.bit + f.len).min(hi) {
-                set_bit(&mut out, b - f.bit, v >> (b - lo) & 1 == 1);
+                set_bit(&mut bits, b - f.bit, v >> (b - lo) & 1 == 1);
             }
         }
         Ok(out)

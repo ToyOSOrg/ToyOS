@@ -11,6 +11,12 @@
 //! Every evaluation is bounded: in steps, in nesting (terms, invocations and
 //! field accesses together, each a frame of this walk), in the size of any
 //! object, and in time asked to sleep. A bound reached is a refusal.
+//!
+//! The bytes of a string or buffer that an operator makes, at a size its
+//! table chooses, are made after its operands are evaluated, and are let go
+//! or held against the meter before its target is: an operand, a target and
+//! a field's access each run this walk again, and what one holds across
+//! that, every level of a nest holds at once.
 
 use alloc::rc::Rc;
 use alloc::string::String;
@@ -134,12 +140,12 @@ impl<'a> Machine<'a> {
         Ok(Object::Buf(self.bytes(v)?))
     }
 
-    /// A package of `count` elements, charged for and held against the meter
-    /// before any is made: what fills it is as large as its table says.
+    /// A package of `count` elements, held against the meter before any is
+    /// made and charged for: what fills it is as large as its table says.
     fn new_pkg(&mut self, count: usize) -> Result<Elems, Error> {
-        crate::object::counted(count)?;
+        let elems = self.meter.package(count)?;
         self.charge(count * crate::object::ELEMENT)?;
-        self.meter.package(count)
+        Ok(elems)
     }
 
     /// A copy of an object for a store (§19.3.5.8): data is duplicated,
@@ -1605,18 +1611,21 @@ impl<'a> Machine<'a> {
                 self.new_buf(v)?
             }
             Object::Str(x) => {
+                let tail = tail_str(self, &b)?;
                 let mut v = x.borrow().clone();
-                v.extend(tail_str(self, &b)?);
+                v.extend(tail);
                 self.new_str(v)?
             }
             Object::Buf(x) => {
-                let mut v = x.borrow().clone();
-                if data(&b) {
-                    v.extend(to_buf(&b, w)?);
+                let tail = if data(&b) {
+                    to_buf(&b, w)?
                 } else {
-                    v.extend(named(self, &b)?);
-                    v.push(0);
-                }
+                    let mut n = named(self, &b)?;
+                    n.push(0);
+                    n
+                };
+                let mut v = x.borrow().clone();
+                v.extend(tail);
                 self.new_buf(v)?
             }
             other => {
@@ -1700,24 +1709,26 @@ impl<'a> Machine<'a> {
                 o => to_int(o, w)?,
             }),
             0x9C => {
-                let b = to_buf(&src, w)?;
-                self.charge(b.len())?;
                 let n = self.int_arg(f, c)?;
                 let n = if n == w.ones() { usize::MAX } else { usize::try_from(n).unwrap_or(usize::MAX) };
+                let b = to_buf(&src, w)?;
+                self.charge(b.len())?;
                 self.new_str(b.iter().take(n).take_while(|&&x| x != 0).copied().collect())?
             }
             _ => {
                 let i = self.int_arg(f, c)?;
                 let n = self.int_arg(f, c)?;
-                let (data, is_str) = match &src {
-                    Object::Str(s) => (s.borrow().clone(), true),
-                    o => (to_buf(o, w)?, false),
+                let r = {
+                    let (data, is_str) = match &src {
+                        Object::Str(s) => (s.borrow().clone(), true),
+                        o => (to_buf(o, w)?, false),
+                    };
+                    self.charge(data.len())?;
+                    let start = usize::try_from(i).unwrap_or(usize::MAX).min(data.len());
+                    let end = start.saturating_add(usize::try_from(n).unwrap_or(usize::MAX)).min(data.len());
+                    let part = data[start..end].to_vec();
+                    if is_str { self.new_str(part)? } else { self.new_buf(part)? }
                 };
-                self.charge(data.len())?;
-                let start = usize::try_from(i).unwrap_or(usize::MAX).min(data.len());
-                let end = start.saturating_add(usize::try_from(n).unwrap_or(usize::MAX)).min(data.len());
-                let part = data[start..end].to_vec();
-                let r = if is_str { self.new_str(part)? } else { self.new_buf(part)? };
                 let t = self.target(f, c)?;
                 self.store(f, t, r.clone())?;
                 return Ok(r);
