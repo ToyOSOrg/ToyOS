@@ -34,6 +34,7 @@ pub mod pio;
 pub mod pmu;
 pub mod power;
 pub mod rtc;
+pub mod smi_cmd;
 pub mod smp;
 pub mod switch;
 pub mod syscall;

@@ -2,17 +2,16 @@
 //!
 //! **This kernel puts the machine in ACPI mode only for a holder of the
 //! `acpi` claim, and back in the mode its firmware handed over when the claim
-//! goes.** The mint writes `ACPI_ENABLE` to `SMI_CMD` (ACPI 6.5 Table 5.9)
-//! where `SCI_EN` reads clear, and waits for the firmware to set it; the
+//! goes.** The mint writes `ACPI_ENABLE` to `SMI_CMD` (ACPI 6.5 Table 5.9),
+//! through `smi_cmd::write` as every write to that port is and so on the boot
+//! processor, where `SCI_EN` reads clear, and waits for the firmware to set it; the
 //! release writes `ACPI_DISABLE` where the mint wrote the enable and reads
 //! `SCI_EN` until it is clear, with the row still held, so a dead server
 //! leaves the buttons to the firmware again before anyone else can claim
 //! them, and so does a mint that wrote the enable and then failed. A firmware
 //! that does not clear it is said by name, and the next release writes the
-//! disable again. **Neither is written once the stop has
-//! begun**: the power-off waits out a write in flight and then owns the
-//! hardware, and an SMI it did not make is one its S5 entry was never
-//! measured against.
+//! disable again. Neither is written once the stop has begun: `smi_cmd`
+//! refuses it.
 //!
 //! **A machine stays in legacy mode where its firmware serves something no
 //! holder could**: an embedded controller the ECDT does not name, or a power
@@ -38,13 +37,12 @@ use toyos_abi::acpi::{AcpiInfo, Block, FIXED_POWER_BUTTON};
 use toyos_acpi::{Ec, FixedHardware, LegacyMode, PowerButton};
 use toyos_userbound::Ports;
 
-use super::cpu;
 use super::pio::{self, Declared, TakenBack};
 use super::power::SCI_EN;
+use super::{cpu, smi_cmd};
 use crate::device::ClaimError;
 use crate::isa::{self, Function};
 use crate::log;
-use crate::sync::{Lock, LockGuard};
 use crate::time::{Deadline, Duration};
 
 /// `isa`'s row for the fixed hardware.
@@ -66,8 +64,8 @@ const HANDBACK: Duration = Duration::from_millis(100);
 struct Hardware {
     fixed: FixedHardware,
     control: Declared,
-    /// `SMI_CMD`, declared, and what is written to it.
-    legacy: Option<(Declared, LegacyMode)>,
+    /// `SMI_CMD`, declared to `smi_cmd`, and what is written to it.
+    legacy: Option<LegacyMode>,
     /// Or why it is none a holder can be handed.
     ec: Result<Ec, String>,
 }
@@ -78,21 +76,6 @@ static HARDWARE: AtomicPtr<Hardware> = AtomicPtr::new(core::ptr::null_mut());
 /// This kernel wrote `ACPI_ENABLE` and has not read `SCI_EN` clear since, so
 /// the release writes `ACPI_DISABLE`.
 static ENABLED: AtomicBool = AtomicBool::new(false);
-
-/// Held across every write to `SMI_CMD`.
-static SMI_CMD_WRITE: Lock<()> = Lock::new(());
-
-/// The right to write `SMI_CMD`, held across the write; none once the stop has
-/// begun.
-fn smi_cmd_write() -> Option<LockGuard<'static, ()>> {
-    let writing = SMI_CMD_WRITE.lock();
-    (!crate::quiesce::begun()).then_some(writing)
-}
-
-/// Wait out a write to `SMI_CMD` in flight: the stop has begun, so none follows.
-pub fn settle(_taken: &TakenBack) {
-    drop(SMI_CMD_WRITE.lock());
-}
 
 fn hardware() -> Option<&'static Hardware> {
     let at = HARDWARE.load(Ordering::Acquire);
@@ -120,11 +103,10 @@ pub fn init(rsdp_addr: u64) {
     let Some(control) = super::power::pm1a_control() else {
         return log!("acpi: no ACPI row — no PM1a control block declared");
     };
-    let declared = |legacy: LegacyMode| pio::declare("SMI_CMD", Ports::one(legacy.smi_cmd)).map(|port| (port, legacy));
-    let legacy = match fixed.legacy.map(declared).transpose() {
-        Ok(legacy) => legacy,
-        Err(why) => return log!("acpi: no ACPI row — SMI_CMD not declared: {why:?}"),
-    };
+    if let Some(Err(why)) = fixed.legacy.map(|legacy| smi_cmd::declare(legacy.smi_cmd)) {
+        return log!("acpi: no ACPI row — SMI_CMD not declared: {why:?}");
+    }
+    let legacy = fixed.legacy;
     let ec = embedded_controller(rsdp_addr, fixed.gpe0);
     let Some(sci) = super::ioapic::sci(fixed.sci_int) else {
         return log!("acpi: no ACPI row — no I/O APIC carries the SCI");
@@ -223,7 +205,7 @@ fn enter(hardware: &Hardware) -> Result<(), ClaimError> {
         log!("acpi: this machine stays in legacy mode — {why}");
         Err(ClaimError::Unusable)
     };
-    let Some((smi_cmd, legacy)) = hardware.legacy else {
+    let Some(legacy) = hardware.legacy else {
         return refuse("the FADT names no SMI_CMD, ACPI_ENABLE and ACPI_DISABLE to leave it and come back with");
     };
     let enable = legacy.acpi_enable.get();
@@ -236,19 +218,10 @@ fn enter(hardware: &Hardware) -> Result<(), ClaimError> {
         return refuse("its power button is a control method device, which only AML serves");
     }
 
-    // The write raises a firmware interrupt where `APMC_EN` is set, counted on
-    // the CPU that makes it, so both reads are that CPU's.
-    let (me, before, after) = {
-        let Some(_writing) = smi_cmd_write() else {
-            return refuse("the machine is stopping");
-        };
-        let _closed = crate::arch::IrqGuard::close();
-        let before = super::counters::read().smi;
-        // SAFETY: `SMI_CMD`, declared, and the value the FADT names for it.
-        unsafe { cpu::outb(smi_cmd.port(0), enable) };
-        ENABLED.store(true, Ordering::Relaxed);
-        (super::percpu::cpu_id(), before, super::counters::read().smi)
+    let Some(write) = smi_cmd::write(enable) else {
+        return refuse("the machine is stopping");
     };
+    ENABLED.store(true, Ordering::Relaxed);
     let written = crate::clock::now();
     let by = Deadline::at(written + HANDOVER);
     let parkable = crate::scheduler::Parkable::at_entry();
@@ -266,11 +239,9 @@ fn enter(hardware: &Hardware) -> Result<(), ClaimError> {
         }
     }
     log!(
-        "acpi: ACPI mode: ACPI_ENABLE {enable:#04x} written to SMI_CMD {:#x}, SCI_EN set {} after; cpu{me}'s SMI count {} before the write and {} after",
-        smi_cmd.ports().first(),
+        "acpi: ACPI mode: ACPI_ENABLE {enable:#04x} written to SMI_CMD {:#x} {write}; SCI_EN set {} after",
+        legacy.smi_cmd,
         crate::clock::now() - written,
-        before.map_or_else(|| "unread".into(), |n| format!("{n}")),
-        after.map_or_else(|| "unread".into(), |n| format!("{n}")),
     );
     Ok(())
 }
@@ -287,16 +258,15 @@ pub fn release(row: usize) {
 
 /// `ACPI_DISABLE`, written where the mint wrote `ACPI_ENABLE`, and `SCI_EN`
 /// read until it is clear; nothing once the stop has begun. Spun, never
-/// parked: the task a claim's last handle goes with may be dying.
+/// parked: the task a claim's last handle goes with may be dying. `SCI_EN` is
+/// the hardware's to reset (ACPI 6.5 §4.8.2.5, Table 4.13), so it is not
+/// cleared here before the write as Table 5.9's `ACPI_DISABLE` has it.
 fn leave(hardware: &Hardware) {
-    let (smi_cmd, legacy) = hardware.legacy.expect("ACPI_ENABLE was written to it");
+    let legacy = hardware.legacy.expect("ACPI_ENABLE was written to it");
     let disable = legacy.acpi_disable.get();
-    let Some(writing) = smi_cmd_write() else {
+    let Some(write) = smi_cmd::write(disable) else {
         return log!("acpi: ACPI_DISABLE not written: the machine is stopping, and its power-off owns ACPI mode");
     };
-    // SAFETY: `SMI_CMD`, declared, and the value the FADT names for it.
-    unsafe { cpu::outb(smi_cmd.port(0), disable) };
-    drop(writing);
     let written = crate::clock::now();
     let by = Deadline::at(written + HANDBACK);
     let control = loop {
@@ -306,16 +276,19 @@ fn leave(hardware: &Hardware) {
         }
         if by.reached(crate::clock::now()) {
             return log!(
-                "acpi: still in ACPI mode: ACPI_DISABLE {disable:#04x} written to SMI_CMD, and PM1a_CNT reads {control:#06x} \
-                 {HANDBACK} after, SCI_EN still set: nothing serves this machine's buttons until a holder claims them"
+                "acpi: still in ACPI mode: ACPI_DISABLE {disable:#04x} written to SMI_CMD {:#x} {write}; PM1a_CNT reads \
+                 {control:#06x} {HANDBACK} after, SCI_EN still set: nothing serves this machine's buttons until a holder \
+                 claims them",
+                legacy.smi_cmd
             );
         }
         core::hint::spin_loop();
     };
     ENABLED.store(false, Ordering::Relaxed);
     log!(
-        "acpi: legacy mode again: ACPI_DISABLE {disable:#04x} written to SMI_CMD, PM1a_CNT reads {control:#06x} {} after, \
-         SCI_EN clear",
+        "acpi: legacy mode again: ACPI_DISABLE {disable:#04x} written to SMI_CMD {:#x} {write}; PM1a_CNT reads \
+         {control:#06x} {} after, SCI_EN clear",
+        legacy.smi_cmd,
         crate::clock::now() - written,
     );
 }
