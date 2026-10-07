@@ -136,6 +136,9 @@ otherwise pay to find again:
   there; a table refused for a bridge's answer is brought to the owner with
   that bridge's Header Type and bus registers as the firmware left them,
   and he rules whether a table real firmware ships may be refused for it.
+  The same row reads that no method the server evaluated was refused for a
+  bridge's answer, and one that was goes to the owner with the table
+  refusal.
 - **The T14's processor objects need `Load`.** Its tables hold eight `Load`
   opcodes and one `LoadTable`, none run while a table loads, and Linux lists eight tables
   loaded that way; the interpreter refuses both as unsupported.
