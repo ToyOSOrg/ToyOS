@@ -44,10 +44,12 @@ checked.
 The compiler refuses a `UserSafe` impl whose type has a padding byte or a field
 that is not valid for every bit pattern, by a derive or by one macro that
 writes the impl and its assertions together, so no impl is written by hand.
-Shown by two mutations that fail the build: a `u32` appended to `SchedInfo`,
-and a `core::num::NonZeroU32` in place of one of `ProcessStats`'s `u32`s, which
-has that `u32`'s size and alignment and so fails on bit validity alone.
-`span.rs`'s table is
+Shown on two structs of their own that no code builds or writes, handed to that
+derive or macro, each beside a twin it accepts, so nothing but the checker
+refuses them: `#[repr(C)] { a: u64, b: u32 }` fails the build for its four tail
+bytes where `{ a: u64, b: u64 }` builds, and `#[repr(C)] { a: u32, b: char }`
+fails it for `char`, which has `u32`'s size and alignment, where
+`{ a: u32, b: u32 }` builds. `span.rs`'s table is
 then generated from the same list or deleted, and this file with it. Whether
 that is a published crate or the kernel's own is the builder's to argue against
 root `CLAUDE.md`'s rule on kernel dependencies.
