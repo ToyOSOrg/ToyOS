@@ -19,4 +19,6 @@ disallowed `core::mem::forget`, and one byte-string literal in a test.
 
 Each fix edits `toyos/src`, which is one of a sysroot's sources.
 
+Owner: the build system (`src/clippy.rs`, `src/hostws.rs`).
+
 Exit: a shape lints `toyos` for the host, and it is clean.
