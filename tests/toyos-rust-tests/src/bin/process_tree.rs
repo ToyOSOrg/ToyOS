@@ -43,7 +43,7 @@ use toyos::ipc::Connection;
 use toyos::launch::{self, Launch, Outcome, Parent, LAUNCHER};
 use toyos::process::Process;
 use toyos::syscap::SysCap;
-use toyos::{namespace, port, AsHandle};
+use toyos::{namespace, port, AsHandle, OwnedHandle};
 use toyos_abi::handle::Rights;
 use toyos_abi::syscall::{self, SpawnArgs, SyscallError};
 use toyos_abi::RawHandle;
@@ -482,7 +482,9 @@ fn b() -> ! {
         syscall::dup(own.as_handle()).expect("a copy of B's self"),
         syscall::dup(RawHandle(e.as_raw_handle())).expect("a copy of E"),
     ];
-    conn.send_bytes_with_handles(&handles, MSG_GROWN, &[]).expect("send A the subtree");
+    // SAFETY: four fresh duplicates, answered for by nothing else.
+    conn.send_handles(handles.map(|h| unsafe { OwnedHandle::from_raw(h) })).expect("send A the subtree");
+    conn.send_bytes(MSG_GROWN, &[]).expect("announce the subtree");
 
     let header = conn.recv_header().expect("A's word to fault");
     assert_eq!(header.msg_type, MSG_FAULT, "A said something else");

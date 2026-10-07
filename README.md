@@ -87,7 +87,6 @@ itself on its own hardware and reproduces, byte for byte, what the host built.
 | ✅ | Scheduler policy as a standalone crate, with a deterministic simulator and an interleaving fuzzer |
 | 🔨 | One blocking primitive for the whole kernel |
 | ⬜ | Typed capability handles instead of raw descriptors |
-| ⬜ | NX and W^X, for userland and for the kernel's own mappings |
 | ⬜ | An ACPI/AML interpreter of our own |
 
 ### Hardware
@@ -150,7 +149,6 @@ itself on its own hardware and reproduces, byte for byte, what the host built.
 | ✅ | Reading a machine with no serial port — panics, logs and a blocked-task dump painted on its own panel |
 | ✅ | LLDB against a running kernel |
 | ⬜ | A Windows host |
-| ⬜ | Continuous integration on clean machines |
 
 ## Along the way
 

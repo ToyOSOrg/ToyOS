@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use toyos::ipc::Connection;
 use toyos::process::Process;
 use toyos::shm::SharedMemory;
-use toyos::{endow, namespace, port, AsHandle};
+use toyos::{endow, namespace, port, OwnedHandle};
 use toyos_abi::syscall::{self, SVC_LABEL};
 use toyos_abi::RawHandle;
 
@@ -92,9 +92,9 @@ fn killer_child() -> (Connection, Child) {
 }
 
 fn arm(conn: &Connection, go: &SharedMemory, victim: RawHandle) {
-    let victim = syscall::dup(victim).expect("a handle to send");
-    syscall::handle_send(conn.as_handle(), &[go.share().expect("the word to send"), victim])
-        .expect("send the batch");
+    // SAFETY: a fresh duplicate, answered for by nothing else.
+    let victim = unsafe { OwnedHandle::from_raw(syscall::dup(victim).expect("a handle to send")) };
+    conn.send_handles([go.share().expect("the word to send"), victim]).expect("send the batch");
     conn.signal(ARM).expect("say the batch is queued");
 }
 

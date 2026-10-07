@@ -51,8 +51,8 @@ impl SharedMemory {
     ///
     /// The send *moves* what it is given, so a sender that wants to keep the
     /// region duplicates first — which is the same rule spawn endowment has.
-    pub fn share(&self) -> Result<RawHandle, SyscallError> {
-        syscall::dup(self.handle.raw())
+    pub fn share(&self) -> Result<OwnedHandle, SyscallError> {
+        syscall::dup(self.handle.raw()).map(OwnedHandle)
     }
 
     pub fn as_ptr(&self) -> *mut u8 {

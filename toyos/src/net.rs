@@ -6,7 +6,7 @@
 
 use crate::ipc::{IpcError, IpcHeader, IpcPayload};
 use crate::ipc_payload;
-use crate::{Connection, Pipe, RawHandle};
+use crate::{Connection, OwnedHandle, Pipe};
 
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -298,19 +298,16 @@ impl NetstackConn {
         Ok(PendingResponse(self))
     }
 
-    /// A request that hands netstack pipe ends.
-    ///
-    /// **The handles are moved whether or not this answers `Ok`**: a send the
-    /// kernel refuses drops the batch rather than putting it back, so the
-    /// caller must have given up ownership before calling and has nothing to
-    /// close on the error path.
+    /// A request that hands netstack pipe ends, consumed whether or not this
+    /// answers `Ok` ([`Connection::send_handles`]).
     pub fn request_with_handles<Req: IpcPayload>(
         self,
-        handles: &[RawHandle],
+        handles: impl IntoIterator<Item = OwnedHandle>,
         msg_type: MsgType,
         payload: &Req,
     ) -> Result<PendingResponse, NetError> {
-        self.0.send_with_handles(handles, msg_type as u32, payload).map_err(hangup)?;
+        self.0.send_handles(handles).map_err(|e| hangup(IpcError::Syscall(e)))?;
+        self.0.send(msg_type as u32, payload).map_err(hangup)?;
         Ok(PendingResponse(self))
     }
 
@@ -411,9 +408,8 @@ impl DataPath {
         Ok(Self { rx, tx, to_netstack: [netstack_tx, netstack_rx] })
     }
 
-    fn split(self) -> (Pipe, Pipe, [RawHandle; DATA_HANDLES]) {
-        let [to_client, from_client] = self.to_netstack;
-        (self.rx, self.tx, [to_client.into_raw(), from_client.into_raw()])
+    fn split(self) -> (Pipe, Pipe, [OwnedHandle; DATA_HANDLES]) {
+        (self.rx, self.tx, self.to_netstack.map(OwnedHandle::from))
     }
 }
 
@@ -428,7 +424,7 @@ pub fn tcp_connect(
     let (rx, tx, handles) = DataPath::create()?.split();
 
     let resp: TcpConnectResponse = netstack
-        .request_with_handles(&handles, MsgType::TcpConnectPiped, &TcpConnectPipedRequest {
+        .request_with_handles(handles, MsgType::TcpConnectPiped, &TcpConnectPipedRequest {
             addr,
             port,
             _pad: 0,
@@ -445,7 +441,7 @@ pub fn tcp_bind(addr: [u8; 4], port: u16) -> Result<TcpBound, NetError> {
 
     let resp: TcpBindResponse = netstack
         .request_with_handles(
-            &[netstack_notify.into_raw()],
+            [netstack_notify.into()],
             MsgType::TcpBindPiped,
             &TcpBindPipedRequest { addr, port, _pad: 0 },
         )?
@@ -459,7 +455,7 @@ pub fn tcp_accept(socket_id: TcpSocketId) -> Result<TcpAccepted, NetError> {
     let (rx, tx, handles) = DataPath::create()?.split();
 
     let resp: TcpAcceptPipedResponse = netstack
-        .request_with_handles(&handles, MsgType::TcpAcceptPiped, &TcpAcceptPipedRequest {
+        .request_with_handles(handles, MsgType::TcpAcceptPiped, &TcpAcceptPipedRequest {
             socket_id: socket_id.0,
         })?
         .response()?;
@@ -506,7 +502,7 @@ pub fn udp_bind(addr: [u8; 4], port: u16) -> Result<UdpBound, NetError> {
     let (rx, tx, handles) = DataPath::create()?.split();
 
     let resp: UdpBindResponse = netstack
-        .request_with_handles(&handles, MsgType::UdpBind, &UdpBindRequest { addr, port, _pad: 0 })?
+        .request_with_handles(handles, MsgType::UdpBind, &UdpBindRequest { addr, port, _pad: 0 })?
         .response()?;
 
     Ok(UdpBound { socket_id: UdpSocketId(resp.socket_id), bound_port: resp.bound_port, tx, rx })

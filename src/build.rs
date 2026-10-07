@@ -2442,20 +2442,19 @@ mod tests {
     /// call what the clean took current, or owe a clean every build after.
     #[test]
     fn a_stamp_that_cannot_be_written_panics() {
-        use std::os::unix::fs::PermissionsExt;
         let root = toyos_tmpdir::TempDir::new("unwritable-stamp");
         fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
-        let target = root.join("kernel/target");
-        fs::create_dir_all(&target).unwrap();
-        fs::set_permissions(&target, fs::Permissions::from_mode(0o555)).unwrap();
+        // A directory, not a mode: root writes through any mode, and nobody
+        // writes a file over a directory.
+        let stamp = root.join("kernel/target/.deps-stamp");
+        fs::create_dir_all(&stamp).unwrap();
         let identity = Identity::of_parts("compiler", "freestanding", "toyos");
         let failed = std::panic::catch_unwind(|| {
             clean(&root, &root.join("kernel"), &Stale::Targets(vec![]), &identity)
         });
-        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
         let refusal = failed.expect_err("a stamp that was not written was taken for written");
         let refusal = refusal.downcast_ref::<String>().expect("a formatted panic");
-        assert!(refusal.starts_with(&format!("write {}", target.join(".deps-stamp").display())), "{refusal}");
+        assert!(refusal.starts_with(&format!("write {}", stamp.display())), "{refusal}");
     }
 
     /// **A `cargo clean` that fails stops the build and stamps nothing**: a
