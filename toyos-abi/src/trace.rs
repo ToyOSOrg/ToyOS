@@ -118,11 +118,12 @@ impl Kind {
     }
 }
 
-/// A reader's position in the diary: the log's cursor, a type of its own so
-/// that one is never walked over the other's rings.
-#[repr(transparent)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct TraceCursor(pub LogCursor);
+crate::user_safe! {
+    /// A reader's position in the diary: the log's cursor, a type of its own so
+    /// that one is never walked over the other's rings.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct TraceCursor(pub LogCursor);
+}
 
 impl TraceCursor {
     /// A cursor that has read nothing.

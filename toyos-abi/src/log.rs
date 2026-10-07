@@ -295,33 +295,32 @@ impl core::fmt::Display for Head<'_> {
     }
 }
 
-/// Per-reader state. **The kernel holds none.**
-///
-/// No object, no handle lifecycle, no cursor to leak or go stale, and a second
-/// reader costs nothing. The stream is not consumed either: `logkeeper` and a
-/// `log-follow` tool coexist with no coordination.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct LogCursor {
-    /// Out: how many shards the machine has. A caller passes a zeroed cursor
-    /// the first time and reads it back.
-    pub shards: u32,
-    pub _pad: u32,
-    /// Out: records this read skipped because they were overwritten. The
-    /// kernel never reads it, so a reader's total is the reader's own sum.
+crate::user_safe! {
+    /// Per-reader state. **The kernel holds none.**
     ///
-    /// **Derived, never counted by a producer.** The kernel computes it from
-    /// `head` and `next`, which both have to be right anyway, so no counter can
-    /// drift from the ring. It lives here so a reader that ignores loss has to
-    /// actively ignore a field it is already passing.
-    pub lost: u64,
-    /// In/out: the next sequence number wanted from each shard. A number past
-    /// the one the shard issues next is refused, and a shard not yet published
-    /// issues 1 next.
-    pub next: [u64; MAX_LOG_SHARDS],
+    /// No object, no handle lifecycle, no cursor to leak or go stale, and a second
+    /// reader costs nothing. The stream is not consumed either: `logkeeper` and a
+    /// `log-follow` tool coexist with no coordination.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct LogCursor {
+        /// Out: how many shards the machine has. A caller passes a zeroed cursor
+        /// the first time and reads it back.
+        pub shards: u32,
+        pub _pad: u32,
+        /// Out: records this read skipped because they were overwritten. The
+        /// kernel never reads it, so a reader's total is the reader's own sum.
+        ///
+        /// **Derived, never counted by a producer.** The kernel computes it from
+        /// `head` and `next`, which both have to be right anyway, so no counter can
+        /// drift from the ring. It lives here so a reader that ignores loss has to
+        /// actively ignore a field it is already passing.
+        pub lost: u64,
+        /// In/out: the next sequence number wanted from each shard. A number past
+        /// the one the shard issues next is refused, and a shard not yet published
+        /// issues 1 next.
+        pub next: [u64; MAX_LOG_SHARDS],
+    }
 }
-
-const _: () = assert!(core::mem::size_of::<LogCursor>() == 16 + 8 * MAX_LOG_SHARDS);
 
 impl LogCursor {
     /// A cursor that has read nothing. The kernel fills `shards` on the first

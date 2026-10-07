@@ -298,70 +298,69 @@ const _: () = assert!(SYS_TRACE_READ < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 
-/// Arguments for the `SYS_SPAWN` syscall, passed as a single pointer.
-///
-/// **Two vectors, two verbs.** `slot_map` *duplicates* — the parent keeps its
-/// stdout — and `endow` *moves*, so a parent that wants to keep what it endows
-/// duplicates first. That is what makes endowing a device claim work with no
-/// special case: a claim carries no [`Rights::DUP`], so the move is the only
-/// expressible form and the parent provably no longer holds it.
-///
-/// [`Rights::DUP`]: crate::handle::Rights::DUP
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct SpawnArgs {
-    /// The program: the file the kernel opens and pages the child from — its
-    /// libraries are found beside it — or, with an `image`, the path the caller
-    /// read that from. **Never `argv[0]`**, which is the child's first argument
-    /// and the name it goes by, and which nothing opens.
-    pub path_ptr: u64,
-    pub path_len: u64,
-    pub argv_ptr: u64,
-    pub argv_len: u64,
-    /// `[[child_slot: u32, parent_handle: RawHandle]]`, duplicated into the
-    /// child. Stdio and nothing else, in practice.
-    pub slot_map_ptr: u64,
-    pub slot_map_count: u64,
-    pub env_ptr: u64,
-    pub env_len: u64,
-    /// `[EndowEntry]`, moved out of the parent's table.
-    pub endow_ptr: u64,
-    pub endow_count: u64,
-    /// The label blob every [`EndowEntry`]'s `label_off`/`label_len` indexes.
-    pub labels_ptr: u64,
-    pub labels_len: u64,
-    /// The child's working directory, absolute, or the spawn is refused
-    /// `InvalidArgument`. Under a name the kernel serves (`/system`, `/tmp`) it
-    /// must be a directory there or the spawn is `NotFound`; under any other
-    /// name it is a file server's directory, which the caller's client asked
-    /// that server about and the kernel cannot. **Always the caller's
-    /// statement**: the kernel never substitutes the caller's own.
-    pub cwd_ptr: u64,
-    pub cwd_len: u64,
-    /// The program's bytes, in a shared memory object the caller made and
-    /// read the program into: `image` is a handle to it carrying `MAP`, and
-    /// `image_len` how many of its first bytes the program is — or 0, for a
-    /// program the kernel opens at `path` itself. `PermissionDenied` for a
-    /// handle without `MAP`; `InvalidArgument` for a length the object does not
-    /// hold, or an object that is no memory the kernel allocated. The object
-    /// stays the caller's: what the kernel reads of it, and when, is
-    /// `kernel/src/file_backing.rs`'s (`SharedImage`). `path` is then opened by
-    /// nobody, and the libraries are found in `/system/lib` alone.
-    pub image: u64,
-    pub image_len: u64,
-    /// The process the child is placed under, whose end takes it down: a
-    /// handle carrying [`Rights::WRITE`] to it — a copy of that process's
-    /// [`SELF_LABEL`] — or [`HANDLE_INVALID`] for the caller itself.
-    /// `PermissionDenied` for a handle without `WRITE` and `InvalidArgument`
-    /// for one to no process, since a place is a handle a peer sent;
-    /// `Gone` for a process being torn down, and `ResourceExhausted` for a
-    /// child more than `kernel::proclife::MAX_DEPTH` below the supervisor.
+crate::user_safe! {
+    /// Arguments for the `SYS_SPAWN` syscall, passed as a single pointer.
     ///
-    /// [`Rights::WRITE`]: crate::handle::Rights::WRITE
-    pub place: u64,
+    /// **Two vectors, two verbs.** `slot_map` *duplicates* — the parent keeps its
+    /// stdout — and `endow` *moves*, so a parent that wants to keep what it endows
+    /// duplicates first. That is what makes endowing a device claim work with no
+    /// special case: a claim carries no [`Rights::DUP`], so the move is the only
+    /// expressible form and the parent provably no longer holds it.
+    ///
+    /// [`Rights::DUP`]: crate::handle::Rights::DUP
+    #[derive(Clone, Copy)]
+    pub struct SpawnArgs {
+        /// The program: the file the kernel opens and pages the child from — its
+        /// libraries are found beside it — or, with an `image`, the path the caller
+        /// read that from. **Never `argv[0]`**, which is the child's first argument
+        /// and the name it goes by, and which nothing opens.
+        pub path_ptr: u64,
+        pub path_len: u64,
+        pub argv_ptr: u64,
+        pub argv_len: u64,
+        /// `[[child_slot: u32, parent_handle: RawHandle]]`, duplicated into the
+        /// child. Stdio and nothing else, in practice.
+        pub slot_map_ptr: u64,
+        pub slot_map_count: u64,
+        pub env_ptr: u64,
+        pub env_len: u64,
+        /// `[EndowEntry]`, moved out of the parent's table.
+        pub endow_ptr: u64,
+        pub endow_count: u64,
+        /// The label blob every [`EndowEntry`]'s `label_off`/`label_len` indexes.
+        pub labels_ptr: u64,
+        pub labels_len: u64,
+        /// The child's working directory, absolute, or the spawn is refused
+        /// `InvalidArgument`. Under a name the kernel serves (`/system`, `/tmp`) it
+        /// must be a directory there or the spawn is `NotFound`; under any other
+        /// name it is a file server's directory, which the caller's client asked
+        /// that server about and the kernel cannot. **Always the caller's
+        /// statement**: the kernel never substitutes the caller's own.
+        pub cwd_ptr: u64,
+        pub cwd_len: u64,
+        /// The program's bytes, in a shared memory object the caller made and
+        /// read the program into: `image` is a handle to it carrying `MAP`, and
+        /// `image_len` how many of its first bytes the program is — or 0, for a
+        /// program the kernel opens at `path` itself. `PermissionDenied` for a
+        /// handle without `MAP`; `InvalidArgument` for a length the object does not
+        /// hold, or an object that is no memory the kernel allocated. The object
+        /// stays the caller's: what the kernel reads of it, and when, is
+        /// `kernel/src/file_backing.rs`'s (`SharedImage`). `path` is then opened by
+        /// nobody, and the libraries are found in `/system/lib` alone.
+        pub image: u64,
+        pub image_len: u64,
+        /// The process the child is placed under, whose end takes it down: a
+        /// handle carrying [`Rights::WRITE`] to it — a copy of that process's
+        /// [`SELF_LABEL`] — or [`HANDLE_INVALID`] for the caller itself.
+        /// `PermissionDenied` for a handle without `WRITE` and `InvalidArgument`
+        /// for one to no process, since a place is a handle a peer sent;
+        /// `Gone` for a process being torn down, and `ResourceExhausted` for a
+        /// child more than `kernel::proclife::MAX_DEPTH` below the supervisor.
+        ///
+        /// [`Rights::WRITE`]: crate::handle::Rights::WRITE
+        pub place: u64,
+    }
 }
-
-const _: () = assert!(core::mem::size_of::<SpawnArgs>() == 136);
 
 /// One `(label, handle)` pair of a process's endowment table.
 ///
@@ -1805,32 +1804,32 @@ pub struct NameRef {
     pub len: u32,
 }
 
-/// Arguments for [`SYS_NAMESPACE_BUILD`], passed as a single pointer.
-///
-/// A namespace is immutable once built: there is no insert, no remove and no
-/// replace, so a narrower one is a *new* object built from this one and a
-/// handle to a namespace is a handle to a fixed set.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct NamespaceBuild {
-    /// [`HANDLE_INVALID`] for an empty base.
+crate::user_safe! {
+    /// Arguments for [`SYS_NAMESPACE_BUILD`], passed as a single pointer.
     ///
-    /// [`HANDLE_INVALID`]: crate::handle::HANDLE_INVALID
-    pub base: RawHandle,
-    /// [`NAMESPACE_KEEP_ALL`], and nothing else.
-    pub flags: u32,
-    /// `[NameRef]` — the names to carry over from `base`.
-    pub keep_ptr: u64,
-    pub keep_n: u64,
-    /// `[NamespaceEntry]` — new bindings.
-    pub add_ptr: u64,
-    pub add_n: u64,
-    /// The blob every `off`/`len` above indexes into.
-    pub names_ptr: u64,
-    pub names_len: u64,
+    /// A namespace is immutable once built: there is no insert, no remove and no
+    /// replace, so a narrower one is a *new* object built from this one and a
+    /// handle to a namespace is a handle to a fixed set.
+    #[derive(Clone, Copy)]
+    pub struct NamespaceBuild {
+        /// [`HANDLE_INVALID`] for an empty base.
+        ///
+        /// [`HANDLE_INVALID`]: crate::handle::HANDLE_INVALID
+        pub base: RawHandle,
+        /// [`NAMESPACE_KEEP_ALL`], and nothing else.
+        pub flags: u32,
+        /// `[NameRef]` — the names to carry over from `base`.
+        pub keep_ptr: u64,
+        pub keep_n: u64,
+        /// `[NamespaceEntry]` — new bindings.
+        pub add_ptr: u64,
+        pub add_n: u64,
+        /// The blob every `off`/`len` above indexes into.
+        pub names_ptr: u64,
+        pub names_len: u64,
+    }
 }
 
-const _: () = assert!(core::mem::size_of::<NamespaceBuild>() == 56);
 const _: () = assert!(core::mem::size_of::<NamespaceEntry>() == 16);
 const _: () = assert!(core::mem::size_of::<NameRef>() == 8);
 
@@ -2398,19 +2397,18 @@ pub fn tls_alloc_block(module_id: u64) -> Result<u64, SyscallError> {
     check(syscall(SYS_TLS_ALLOC_BLOCK, module_id, 0, 0, 0))
 }
 
-/// An inbox and where its page of rings is mapped.
-///
-/// **The inbox owns its page and the kernel maps it at setup**, so the mapping
-/// has no lifetime of its own: it ends when the last handle to the inbox closes.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct InboxSetup {
-    pub handle: RawHandle,
-    pub _pad: u32,
-    pub vaddr: u64,
+crate::user_safe! {
+    /// An inbox and where its page of rings is mapped.
+    ///
+    /// **The inbox owns its page and the kernel maps it at setup**, so the mapping
+    /// has no lifetime of its own: it ends when the last handle to the inbox closes.
+    #[derive(Clone, Copy)]
+    pub struct InboxSetup {
+        pub handle: RawHandle,
+        pub _pad: u32,
+        pub vaddr: u64,
+    }
 }
-
-const _: () = assert!(core::mem::size_of::<InboxSetup>() == 16);
 
 /// Create an [`inbox`](crate::inbox) with the given queue depth (a power of
 /// two, at most 256), and map its rings.
@@ -2533,22 +2531,23 @@ pub fn modules(answer: &[u8]) -> impl Iterator<Item = (ModuleInfo, &[u8])> {
     })
 }
 
-/// Scheduler info for the calling process.
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct SchedInfo {
-    /// Current vruntime of this process (nanoseconds of virtual CPU time).
-    pub vruntime: u64,
-    /// Global min_vruntime frontier (monotonic non-decreasing).
-    pub min_vruntime: u64,
-    /// Signed contract lag, frozen at the most recent runnable-state
-    /// transition. Positive = process was behind the frontier when it last
-    /// woke / blocked (entitled to catch up); negative = process ran ahead
-    /// and will be throttled. Bounded to [-50ms, +50ms] (MAX_VRUNTIME_LAG_NS)
-    /// by construction. This is the scheduler's contract, not the live
-    /// `min_vruntime - vruntime` drift that accumulates while running on
-    /// multi-CPU systems — compute that at the call site if you need it.
-    pub lag: i64,
+crate::user_safe! {
+    /// Scheduler info for the calling process.
+    #[derive(Clone, Copy, Debug)]
+    pub struct SchedInfo {
+        /// Current vruntime of this process (nanoseconds of virtual CPU time).
+        pub vruntime: u64,
+        /// Global min_vruntime frontier (monotonic non-decreasing).
+        pub min_vruntime: u64,
+        /// Signed contract lag, frozen at the most recent runnable-state
+        /// transition. Positive = process was behind the frontier when it last
+        /// woke / blocked (entitled to catch up); negative = process ran ahead
+        /// and will be throttled. Bounded to [-50ms, +50ms] (MAX_VRUNTIME_LAG_NS)
+        /// by construction. This is the scheduler's contract, not the live
+        /// `min_vruntime - vruntime` drift that accumulates while running on
+        /// multi-CPU systems — compute that at the call site if you need it.
+        pub lag: i64,
+    }
 }
 
 /// Get scheduler info for the calling process.
@@ -2558,31 +2557,32 @@ pub fn sched_info() -> SchedInfo {
     info
 }
 
-/// Per-process accounting statistics, as [`SYS_PROCESS_STATS`] answers them.
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub struct ProcessStats {
-    pub wall_ns: u64,
-    pub cpu_ns: u64,
-    pub syscall_total: u64,
-    pub syscall_total_ns: u64,
-    pub fault_demand_count: u32,
-    pub fault_zero_count: u32,
-    pub fault_ns: u64,
-    pub io_read_ops: u32,
-    /// The process's own pid. Not authority — no syscall takes a pid — but it
-    /// is the name a diagnostic prints, and this is where a holder of a handle
-    /// reads it.
-    pub pid: u32,
-    pub io_read_bytes: u64,
-    pub blocked_io_ns: u64,
-    pub blocked_futex_ns: u64,
-    pub blocked_pipe_ns: u64,
-    pub blocked_ipc_ns: u64,
-    pub blocked_other_ns: u64,
-    pub runqueue_wait_ns: u64,
-    pub peak_memory: u64,
-    pub alloc_count: u64,
+crate::user_safe! {
+    /// Per-process accounting statistics, as [`SYS_PROCESS_STATS`] answers them.
+    #[derive(Clone, Copy, Default)]
+    pub struct ProcessStats {
+        pub wall_ns: u64,
+        pub cpu_ns: u64,
+        pub syscall_total: u64,
+        pub syscall_total_ns: u64,
+        pub fault_demand_count: u32,
+        pub fault_zero_count: u32,
+        pub fault_ns: u64,
+        pub io_read_ops: u32,
+        /// The process's own pid. Not authority — no syscall takes a pid — but it
+        /// is the name a diagnostic prints, and this is where a holder of a handle
+        /// reads it.
+        pub pid: u32,
+        pub io_read_bytes: u64,
+        pub blocked_io_ns: u64,
+        pub blocked_futex_ns: u64,
+        pub blocked_pipe_ns: u64,
+        pub blocked_ipc_ns: u64,
+        pub blocked_other_ns: u64,
+        pub runqueue_wait_ns: u64,
+        pub peak_memory: u64,
+        pub alloc_count: u64,
+    }
 }
 
 /// Read accounting for the process a `Process` handle names, alive or exited.

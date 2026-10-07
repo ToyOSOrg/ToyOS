@@ -608,12 +608,13 @@ pub fn seek(object: &KObjectRef, pos: SeekFrom) -> u64 {
     })
 }
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct Stat {
-    pub file_type: u64,
-    pub size: u64,
-    pub mtime: u64,
+toyos_abi::user_safe! {
+    #[derive(Clone, Copy)]
+    pub struct Stat {
+        pub file_type: u64,
+        pub size: u64,
+        pub mtime: u64,
+    }
 }
 
 /// What kind of thing this is, and how big.
