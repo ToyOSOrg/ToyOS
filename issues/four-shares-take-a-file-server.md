@@ -37,3 +37,33 @@ However many shares are held, each at all a server lets it hold, the next
 share's first connection and first stream on that server are answered, or
 opening the session that would hold it is refused by name; shown by a test
 that does exactly that.
+
+## Every remote login shares the session of the shell that started sshserver
+
+No shipped image starts sshserver at boot (`src/build.rs`,
+`no_shipped_boot_config_starts_sshserver`), so on a shipped machine it is
+detached from a desktop shell and runs in that shell's login session. Its
+`login` row opens no session there, so every remote login's programs spend
+one share with each other and with the terminal that started the server: one
+login at its parts has every other's next connection or stream on that server
+refused, and that terminal's. Only where a boot config starts sshserver as a
+service (`tests/lantalkcase`, `tests/metalcase`) does each launch it makes
+open a session of its own.
+
+**Ruled** (owner, 2026-10-07):
+
+- The goal is one session per login, each with its own share and its own view
+  of the files.
+- The right to open a session is a capability the machine hands out: the
+  supervisor starts sshserver as a machine service.
+- Sessions are counted, they end, and their number is capped.
+- Nothing inside a login session opens another.
+- Until then the shared session stands, recorded here as a weakness.
+
+Owner: stage 3 of `issues/every-program-sees-only-the-files-it-was-given.md`,
+which removes it.
+
+**Exit**: on a shipped machine sshserver runs as a service the supervisor
+started, in the machine's session; two logins through it hold two shares, shown by a test in which one at its parts leaves the
+other's first connection and first stream answered; a login past the cap is
+refused by name; and a login's end ends its session.
