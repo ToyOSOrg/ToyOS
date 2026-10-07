@@ -15,6 +15,7 @@
 #![forbid(unsafe_code)]
 
 mod dsdt;
+mod ecdt;
 mod fadt;
 mod gtdt;
 mod madt;
@@ -24,12 +25,16 @@ mod spcr;
 use toyos_bootmap::DirectMapEnd;
 
 pub use dsdt::{s5_slp_typ, S5};
+pub use ecdt::{ecdt, Ec, EcRefused, Register, ECDT_NEEDED};
 pub use fadt::{
-    century_of, dsdt_address, iapc_boot_arch, psci, reset_register, rtc_century, Century, Psci,
-    Reset, CMOS_RAM, FADT_FOR_RESET, FADT_PM1A_CNT_BLK, FADT_X_DSDT,
+    century_of, dsdt_address, fixed_hardware, iapc_boot_arch, pm1a_control, psci, reset_register,
+    rtc_century,
+    Century, Field, FixedHardware, FixedRefused, LegacyMode, PowerButton, Psci, Reset, CMOS_RAM,
+    FADT_FOR_FIXED_HARDWARE, FADT_FOR_RESET, FADT_PM1A_CNT_BLK, FADT_X_DSDT,
 };
 pub use madt::{
-    madt_entries, Gicc, IoApicEntry, MadtEntries, MadtEntry, MadtHalt, SourceOverride, MADT_ENTRIES,
+    isa_line, madt_entries, sci_line, Gicc, IoApicEntry, Line, MadtEntries, MadtEntry, MadtHalt,
+    Polarity, SourceOverride, Trigger, MADT_ENTRIES,
 };
 pub use gtdt::{gtdt, Gtdt, TimerInterrupt, GTDT_NEEDED};
 pub use resource::{memory_windows, ResourceError, MAX_LIST_BYTES};

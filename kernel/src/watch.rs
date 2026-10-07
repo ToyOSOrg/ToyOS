@@ -31,6 +31,7 @@ use crate::hw::HW;
 use crate::inbox::PollEntry;
 use crate::sched::driver::{cpus, preempt_off};
 use crate::sched::payload::{KMsg, KShared, KernelLock, TaskHandle};
+use crate::sync::Masked;
 use crate::scheduler::Parkable;
 use crate::time::Deadline;
 
@@ -50,11 +51,11 @@ pub type IrqWatch = Waitable<IrqLock<List>>;
 /// What an interrupt handler's post takes: an [`IrqWatch`]'s list. Held with
 /// interrupts off, so a handler never finds one held by the context it
 /// interrupted; nothing allocates or frees under it.
-pub struct IrqLock<T>(masked::Masked<T>);
+pub struct IrqLock<T>(Masked<T>);
 
 impl<T> IrqLock<T> {
     pub const fn new(value: T) -> Self {
-        Self(masked::Masked::new(value))
+        Self(Masked::new(value))
     }
 }
 
@@ -67,25 +68,6 @@ impl<T: Send> CellLock<T> for IrqLock<T> {
             let mut held = self.0.lock(&irq);
             f(&mut held)
         })
-    }
-}
-
-mod masked {
-    use crate::arch::IrqGuard;
-    use crate::sync::{Lock, LockGuard};
-
-    /// A lock taken only through a borrow of a closed [`IrqGuard`]: never
-    /// before the mask, and never held past it.
-    pub struct Masked<T>(Lock<T>);
-
-    impl<T> Masked<T> {
-        pub const fn new(value: T) -> Self {
-            Self(Lock::new(value))
-        }
-
-        pub fn lock<'a>(&'a self, closed: &'a IrqGuard) -> LockGuard<'a, T> {
-            self.0.lock_masked(closed)
-        }
     }
 }
 

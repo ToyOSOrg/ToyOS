@@ -42,13 +42,14 @@ pub struct Claim {
 /// What one claim holds. A class is at most one device on this machine and a
 /// per-class flag says whether it is taken; a PCI function is one of several,
 /// so what it gives back is its `pcidev` slot; a partition's exclusivity is its
-/// view's own hold on the blocks (`block::Partition::of`); an ISA function's is
-/// its `isa` row's.
+/// view's own hold on the blocks (`block::Partition::of`); an ISA function's and
+/// the ACPI fixed hardware's is its `isa` row's.
 enum Claimed {
     Class(DeviceType),
     PciFunction(usize),
     Partition(crate::block::Partition),
     Isa(usize),
+    Acpi(usize),
 }
 
 impl Claim {
@@ -73,7 +74,7 @@ impl Claim {
     pub(crate) fn partition(&self) -> Option<&crate::block::Partition> {
         match &self.what {
             Claimed::Partition(view) => Some(view),
-            Claimed::Class(_) | Claimed::PciFunction(_) | Claimed::Isa(_) => None,
+            Claimed::Class(_) | Claimed::PciFunction(_) | Claimed::Isa(_) | Claimed::Acpi(_) => None,
         }
     }
 }
@@ -92,7 +93,8 @@ impl Drop for Claim {
                     | DeviceType::Framebuffer
                     | DeviceType::PciFunction
                     | DeviceType::Partition
-                    | DeviceType::Isa => {}
+                    | DeviceType::Isa
+                    | DeviceType::Acpi => {}
                 }
                 *taken(class).lock() = false;
             }
@@ -102,6 +104,8 @@ impl Drop for Claim {
             // The view drops with this, and its hold with the last clone of it.
             Claimed::Partition(_) => {}
             Claimed::Isa(row) => crate::isa::release(row),
+            // Back to the mode the firmware handed over, too.
+            Claimed::Acpi(row) => crate::arch::acpi_mode::release(row),
         }
     }
 }
@@ -197,6 +201,12 @@ pub fn try_claim(class: DeviceType, selector: [u64; 2]) -> Result<Arc<DeviceClai
             let row = crate::isa::claim(set)?;
             let claim = Claim { what: Claimed::Isa(row) };
             Ok(DeviceClaim::new(class, DeviceInfo::Isa(set, row), claim))
+        }
+        DeviceType::Acpi => {
+            // The row's own guard, taken inside, and the switch to ACPI mode.
+            let (row, info) = crate::arch::acpi_mode::claim()?;
+            let claim = Claim { what: Claimed::Acpi(row) };
+            Ok(DeviceClaim::new(class, DeviceInfo::Acpi(info, row), claim))
         }
         DeviceType::HdaAudio => {
             let (info, pcm) = crate::drivers::hda::info().ok_or(ClaimError::Absent)?;

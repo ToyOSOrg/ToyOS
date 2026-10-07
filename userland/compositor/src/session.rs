@@ -16,7 +16,7 @@ use toyos::poller::{Poller, READABLE};
 use toyos::port::Acceptor;
 use toyos::shm::SharedMemory;
 use toyos::{ipc, system, AsHandle, FramebufferDev, Keyboard, Mouse};
-use toyos_abi::syscall::{self, DeviceType};
+use toyos_abi::syscall::DeviceType;
 use toyos_abi::RawHandle;
 use toyos_desktop::{
     cursor_from_abs, cursor_style, fold_mouse, hit_test, key_action, set_mode, tab_action, Chrome,
@@ -26,7 +26,7 @@ use toyos_desktop::{
 use window::Screen;
 
 use crate::client::{
-    announce, deliver, deliver_signal, deliver_with_handles, mark_dead, note_closed, note_opened,
+    announce, deliver, deliver_signal, deliver_with_handle, mark_dead, note_closed, note_opened,
     Client, ClientFrame, ClientRx, CopyRegion, Dead, DropReason, PendingConn, Win,
     HANDSHAKE_TIMEOUT, MAX_KEPT_PAYLOAD, MAX_PENDING_CONNS,
 };
@@ -933,10 +933,10 @@ impl Session {
 
         self.poller.watch(&self.stack[at].client.conn, READABLE, handle.0 as u64);
         let pixel_format = self.pixel_format();
-        deliver_with_handles(
+        deliver_with_handle(
             &mut self.dead,
             &self.stack[at],
-            &[client_shm],
+            client_shm,
             window::MSG_WINDOW_CREATED,
             &window::WindowInfo {
                 width: content.w() as u32,
@@ -988,10 +988,7 @@ impl Session {
                 return;
             }
         };
-        // Moved on its own, so that a refused move leaves `theirs` here to
-        // close: once moved, its number is no longer this process's to close.
-        if let Err(e) = syscall::handle_send(conn.as_handle(), &[theirs]) {
-            syscall::close(theirs);
+        if let Err(e) = conn.send_handles([theirs]) {
             mark_dead(&mut self.dead, handle, e.into());
             return;
         }
@@ -1372,10 +1369,10 @@ impl Session {
             return;
         };
         shm.as_mut_slice()[..self.clipboard.len()].copy_from_slice(self.clipboard.as_bytes());
-        deliver_with_handles(
+        deliver_with_handle(
             &mut self.dead,
             win,
-            &[handle],
+            handle,
             window::MSG_CLIPBOARD_PASTE_SHM,
             &window::ClipboardShmMsg { len: self.clipboard.len() as u32 },
         );
@@ -1481,10 +1478,10 @@ fn rebuffer(win: &mut Win, pixel_format: u32, dead: &mut Vec<Dead>) -> bool {
     // The one message a window cannot afford to miss — the old mapping is
     // already gone — so a client that will not take it is dropped rather than
     // left drawing into memory it no longer owns.
-    deliver_with_handles(
+    deliver_with_handle(
         dead,
         win,
-        &[client_shm],
+        client_shm,
         window::MSG_WINDOW_RESIZED,
         &window::ResizeInfo {
             width: w as u32,

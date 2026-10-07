@@ -1,11 +1,13 @@
-//! A legacy ISA function driven by a process: the I/O ports it decodes,
-//! opened in the CPU's I/O permission bitmap, and the lines it raises,
-//! answered as interrupt records on the claim.
+//! A legacy function driven by a process: the I/O ports it decodes, opened in
+//! the CPU's I/O permission bitmap, and the lines it raises, answered as
+//! interrupt records on the claim.
 //!
-//! **What can be claimed is the architecture's [`GRANTABLE`] table, matched
-//! exactly.** A port no row names is never opened, a set that is not a whole
-//! row is refused rather than trimmed to one, and a row this kernel drives
-//! itself is refused by name.
+//! **What can be claimed is a row the boot filled, matched exactly.** A row is
+//! filled once, before userland runs, and never changes: the i8042's, named by
+//! an `isa:` selector, and the firmware's ACPI fixed hardware, named by its
+//! class. A port no row names is never opened, a set that is not a whole row
+//! is refused rather than trimmed to one, and a row with a port this kernel
+//! declared (`arch::pio::holder`) is refused naming who holds it.
 //!
 //! **The ports belong to a process, not to the handle.** The first read of the
 //! claim binds them to the process that reads it ([`bind`]); from then until
@@ -20,50 +22,55 @@
 //! **A line is routed once per boot and masked while no claim holds it**, since
 //! an interrupt-remapping entry is never given back. Its handler counts into
 //! the record a claimed PCI function's does and posts the claim's watch, and
-//! the holder reads the record back the same way.
+//! the holder reads the record back the same way. A level line is masked by
+//! its handler too, and stays masked until the holder has served what raised
+//! it and acknowledged the claim ([`ack`]); it is masked from the claim until
+//! the holder's first acknowledgement.
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
 
 use toyos_abi::pci::DeviceIrqRecord;
 use toyos_abi::syscall::IsaId;
+use toyos_userbound::Ports;
 
-use crate::arch::pio::{self, GRANTABLE};
+use crate::arch::pio;
 use crate::device::ClaimError;
 use crate::pcidev::record::Interrupt;
 use crate::process::Pid;
 use crate::sync::Lock;
 use crate::watch::IrqWatch;
 
+/// Every row any architecture fills: the i8042's and the ACPI fixed hardware's.
+pub const MAX_ROWS: usize = 2;
+
 /// One function a process may be handed whole.
-pub struct Grantable {
+pub struct Function {
     /// What the log calls it.
     pub name: &'static str,
-    /// Ascending, as [`IsaId`] spells them, and each one the I/O permission
-    /// bitmap names: a port past it is no `u8`.
-    pub ports: &'static [u8],
-    pub irqs: &'static [u8],
-    /// Whether this kernel drives the function itself, which no claim shares.
-    pub kernel_drives: fn() -> bool,
+    pub runs: Vec<Ports>,
+    /// The ISA lines an `isa:` selector spells the row with; empty for a row
+    /// only its class claims.
+    pub irqs: Vec<u8>,
+    /// The lines it raises, resolved.
+    pub wires: Vec<pio::Wire>,
 }
-
-/// How many rows any architecture's table has; a static array per row below.
-const MAX_ROWS: usize = 1;
-const _: () = assert!(GRANTABLE.len() <= MAX_ROWS, "every grantable row needs its state");
 
 /// No process holds the row's ports.
 const NOBODY: u32 = Pid::MAX.0;
 
-struct Row {
-    /// A claim on the row exists.
-    minted: bool,
-    /// The row's lines, routed by its first claim and kept; `Err` is a line
-    /// this machine could not route, which refuses every claim after it too.
-    lines: Option<Result<Vec<pio::Line>, ()>>,
-}
+/// Each row's function, written once by [`fill`].
+static FUNCTIONS: [AtomicPtr<Function>; MAX_ROWS] = [const { AtomicPtr::new(core::ptr::null_mut()) }; MAX_ROWS];
 
-static ROWS: [Lock<Row>; MAX_ROWS] =
-    [const { Lock::new(Row { minted: false, lines: None }) }; MAX_ROWS];
+/// The row's lines, routed by its first claim and kept, read by its handler.
+static LINES: [AtomicPtr<Vec<pio::Line>>; MAX_ROWS] = [const { AtomicPtr::new(core::ptr::null_mut()) }; MAX_ROWS];
+
+/// A line this machine could not route, which refuses every claim after it too.
+static UNROUTABLE: [AtomicBool; MAX_ROWS] = [const { AtomicBool::new(false) }; MAX_ROWS];
+
+/// A claim on the row exists.
+static MINTED: [Lock<bool>; MAX_ROWS] = [const { Lock::new(false) }; MAX_ROWS];
 
 /// The pid whose threads the row's ports are open for, or [`NOBODY`]; read by
 /// every context switch, which takes no lock.
@@ -74,39 +81,80 @@ static IRQ: [Interrupt; MAX_ROWS] = [const { Interrupt::new() }; MAX_ROWS];
 /// What a claim's poll waits on, one per row.
 static WATCHES: [IrqWatch; MAX_ROWS] = [const { IrqWatch::new() }; MAX_ROWS];
 
-/// Mint the claim on the row `set` names, lines routed and unmasked.
+/// Fill `row` with what it hands out. Boot's alone, once per row.
+pub fn fill(row: usize, function: Function) {
+    assert!(!crate::smp::is_ready(), "isa: {} filled after userland could claim it", function.name);
+    let was = FUNCTIONS[row].swap(Box::into_raw(Box::new(function)), Ordering::Release);
+    assert!(was.is_null(), "isa: row {row} filled twice");
+}
+
+fn function(row: usize) -> Option<&'static Function> {
+    let at = FUNCTIONS[row].load(Ordering::Acquire);
+    // SAFETY: `fill` stored a leaked `Box` once, and nothing frees it.
+    (!at.is_null()).then(|| unsafe { &*at })
+}
+
+/// The row's ports, or `None` for a row the boot did not fill.
+pub fn runs(row: usize) -> Option<&'static [Ports]> {
+    function(row).map(|f| f.runs.as_slice())
+}
+
+fn lines(row: usize) -> &'static [pio::Line] {
+    let at = LINES[row].load(Ordering::Acquire);
+    // SAFETY: as `function`'s, stored by `claim_row`.
+    if at.is_null() { &[] } else { unsafe { &*at } }
+}
+
+/// The row an `isa:` selector names whole.
 pub fn claim(set: IsaId) -> Result<usize, ClaimError> {
-    let row = GRANTABLE
-        .iter()
-        .position(|g| {
-            set.ports().eq(g.ports.iter().map(|&port| u16::from(port)))
-                && set.irqs().eq(g.irqs.iter().copied())
+    let row = (0..MAX_ROWS)
+        .find(|&row| {
+            function(row).is_some_and(|f| {
+                !f.irqs.is_empty()
+                    && set.ports().eq(f.runs.iter().flat_map(|run| run.iter()))
+                    && set.irqs().eq(f.irqs.iter().copied())
+            })
         })
         .ok_or(ClaimError::Absent)?;
-    let grantable = &GRANTABLE[row];
-    if (grantable.kernel_drives)() {
+    claim_row(row)
+}
+
+/// Mint the claim on `row`: its ports checked against every port this kernel
+/// declared, its edge lines routed and unmasked, its level lines routed and
+/// left masked for the holder's first acknowledgement.
+pub fn claim_row(row: usize) -> Result<usize, ClaimError> {
+    let function = function(row).ok_or(ClaimError::Absent)?;
+    if let Some((run, holder)) = function.runs.iter().find_map(|&run| pio::holder(run).map(|h| (run, h))) {
+        log!("isa: {}'s ports {:#x}+{} are {holder}'s", function.name, run.first(), run.count());
         return Err(ClaimError::KernelDriven);
     }
-    let mut state = ROWS[row].lock();
-    if state.minted || BOUND[row].load(Ordering::Acquire) != NOBODY {
+    let mut minted = MINTED[row].lock();
+    if *minted || BOUND[row].load(Ordering::Acquire) != NOBODY {
         return Err(ClaimError::Owned);
     }
-    let lines = state.lines.get_or_insert_with(|| {
-        grantable
-            .irqs
-            .iter()
-            .map(|&irq| {
-                pio::route(row, irq).map_err(|why| {
-                    log!("isa: {} line {irq} not routable: {why}", grantable.name);
-                })
-            })
-            .collect()
-    });
-    let Ok(lines) = lines else { return Err(ClaimError::Unusable) };
-    for &line in lines.iter() {
-        pio::set_masked(line, false);
+    if UNROUTABLE[row].load(Ordering::Relaxed) {
+        return Err(ClaimError::Unusable);
     }
-    state.minted = true;
+    if LINES[row].load(Ordering::Acquire).is_null() {
+        let mut routed = Vec::new();
+        for &wire in &function.wires {
+            match pio::route(row, wire) {
+                Ok(line) => routed.push(line),
+                Err(why) => {
+                    log!("isa: {} line {} not routable: {why}", function.name, pio::describe(wire));
+                    UNROUTABLE[row].store(true, Ordering::Relaxed);
+                    return Err(ClaimError::Unusable);
+                }
+            }
+        }
+        LINES[row].store(Box::into_raw(Box::new(routed)), Ordering::Release);
+    }
+    for &line in lines(row) {
+        if !pio::level(line) {
+            pio::set_masked(line, false);
+        }
+    }
+    *minted = true;
     Ok(row)
 }
 
@@ -114,26 +162,37 @@ pub fn claim(set: IsaId) -> Result<usize, ClaimError> {
 /// polls answered. The ports stay with the process that bound them until that
 /// process ends.
 pub fn release(row: usize) {
-    // Not held across the watch's answer; the row stays minted until that is
-    // made, so no next claim's poll is among the ones answered.
-    if let Some(Ok(lines)) = &ROWS[row].lock().lines {
-        for &line in lines {
-            pio::set_masked(line, true);
-        }
+    for &line in lines(row) {
+        pio::set_masked(line, true);
     }
     IRQ[row].clear();
     // The claim is gone, so a poll on it is answered rather than left for the
-    // next holder's interrupts.
+    // next holder's interrupts; the row stays minted until that is made, so no
+    // next claim's poll is among the ones answered.
     WATCHES[row].cancel_polls();
-    ROWS[row].lock().minted = false;
+    *MINTED[row].lock() = false;
+}
+
+/// The holder served what raised the row's level lines: unmask them. A row
+/// with no level line has nothing to acknowledge.
+pub fn ack(row: usize) -> Result<(), ()> {
+    let mut level = lines(row).iter().copied().filter(|&line| pio::level(line)).peekable();
+    if level.peek().is_none() {
+        return Err(());
+    }
+    for line in level {
+        pio::set_masked(line, false);
+    }
+    Ok(())
 }
 
 /// Open the row's ports to `pid` for the rest of its life. Called once per
-/// claim, by the claim's first read, and never twice for a row: [`claim`]
+/// claim, by the claim's first read, and never twice for a row: [`claim_row`]
 /// mints none while a process holds its ports.
 pub fn bind(row: usize, pid: Pid) {
+    let name = function(row).expect("a claimed row was filled").name;
     match BOUND[row].compare_exchange(NOBODY, pid.raw(), Ordering::AcqRel, Ordering::Acquire) {
-        Ok(_) => log!("isa: {}'s ports are pid {pid}'s", GRANTABLE[row].name),
+        Ok(_) => log!("isa: {name}'s ports are pid {pid}'s"),
         Err(held) => assert!(held == pid.raw(), "isa: row {row} is pid {held}'s, and pid {pid} bound it"),
     }
     // This thread is already running, so no switch opens them for it.
@@ -148,9 +207,9 @@ pub fn bound_to(row: usize, pid: Pid) -> bool {
 
 /// Called from the process teardown, once every thread has left.
 pub fn process_ends(pid: Pid) {
-    for (row, bound) in BOUND.iter().enumerate().take(GRANTABLE.len()) {
+    for (row, bound) in BOUND.iter().enumerate() {
         if bound.compare_exchange(pid.raw(), NOBODY, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
-            log!("isa: {}'s ports went back with pid {pid}", GRANTABLE[row].name);
+            log!("isa: {}'s ports went back with pid {pid}", function(row).expect("a bound row was filled").name);
         }
     }
 }
@@ -159,7 +218,7 @@ pub fn process_ends(pid: Pid) {
 pub fn take_record(row: usize) -> Option<DeviceIrqRecord> {
     let taken = IRQ[row].take();
     if taken.is_some() && IRQ[row].take_unannounced() {
-        log!("isa: {} took its first interrupt", GRANTABLE[row].name);
+        log!("isa: {} took its first interrupt", function(row).expect("a claimed row was filled").name);
     }
     taken.map(|count| DeviceIrqRecord { count })
 }
@@ -168,13 +227,25 @@ pub fn has_irq(row: usize) -> bool {
     IRQ[row].armed()
 }
 
-/// Records one interrupt and posts the claim's watch. Called from the row's
-/// handler, so it takes no lock but the watch's own and allocates nothing.
+/// Records one interrupt, masks the row's level lines and posts the claim's
+/// watch. Called from the row's handler, so it takes no lock but the watch's
+/// own and the I/O APIC's masked one, and allocates nothing.
 pub fn isr(row: usize) {
     IRQ[row].took();
+    for &line in lines(row) {
+        if pio::level(line) {
+            pio::set_masked(line, true);
+        }
+    }
     WATCHES[row].post_in_place();
 }
 
 pub fn watch(row: usize) -> &'static IrqWatch {
     &WATCHES[row]
+}
+
+/// The function a filled row raises `wire` with too, if one does: a second
+/// row on one line would take the other's interrupts.
+pub fn line_holder(wire: pio::Wire) -> Option<&'static str> {
+    (0..MAX_ROWS).filter_map(function).find(|f| f.wires.iter().any(|&w| pio::same(w, wire))).map(|f| f.name)
 }

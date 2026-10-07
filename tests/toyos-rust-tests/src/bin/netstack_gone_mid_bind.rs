@@ -27,7 +27,9 @@
 //!    connected and queued when the port closes. `tcp_bind` hands netstack a pipe
 //!    end, and a request that carries handles moves them *before* it writes the
 //!    frame — so `SYS_HANDLE_SEND` is the first thing it can be refused at, and
-//!    it answers `SyscallError::Gone`.
+//!    it answers `SyscallError::Gone`. The refused send consumed the pipe end
+//!    and closed it, so the pipe's read end, still the child's, reads end of
+//!    file: the kernel left the end at its own number and the SDK closed it.
 //! 3. **The same, for a request that carries no handles**, which reaches the
 //!    frame write instead, where a pipe with no reader is the same
 //!    `SyscallError::Gone`.
@@ -196,14 +198,23 @@ fn mid_flight(request: Request) -> ! {
 
     let err = match request {
         Request::Bind => {
-            let (_notify, netstack_notify) = toyos::pipe_pair().expect("the notify pipe");
-            netstack.request_with_handles(
-                &[netstack_notify.into_raw()],
-                MsgType::TcpBindPiped,
-                &TcpBindPipedRequest { addr: [0, 0, 0, 0], port: SSH_PORT, _pad: 0 },
-            )
-            .and_then(|pending| pending.response::<TcpBindResponse>().map(|_| ()))
-            .expect_err("a bind into a port whose acceptor is gone was answered")
+            let (notify, netstack_notify) = toyos::pipe_pair().expect("the notify pipe");
+            let err = netstack
+                .request_with_handles(
+                    [netstack_notify.into()],
+                    MsgType::TcpBindPiped,
+                    &TcpBindPipedRequest { addr: [0, 0, 0, 0], port: SSH_PORT, _pad: 0 },
+                )
+                .and_then(|pending| pending.response::<TcpBindResponse>().map(|_| ()))
+                .expect_err("a bind into a port whose acceptor is gone was answered");
+            // The refused send's write end was the pipe's only writer; a
+            // writer still open refuses this read at once rather than blocking.
+            assert_eq!(
+                notify.read_nonblock(&mut byte),
+                Ok(0),
+                "the pipe end a refused handle send consumed is still open in this process",
+            );
+            err
         }
         Request::Close => netstack
             .request(MsgType::TcpClose, &SocketCloseRequest { socket_id: 0 })

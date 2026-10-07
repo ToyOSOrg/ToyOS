@@ -1,0 +1,13 @@
+[package]
+name = "acpiserver"
+description = "The machine's ACPI fixed hardware, served from userland: the SCI, the power button and the embedded controller's events."
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+toyos = { path = "../../toyos" }
+toyos-abi = { path = "../../toyos-abi" }
+
+[package.metadata.toyos.host]
+exempt.owns = "ToyOS's ACPI fixed hardware, claimed from the kernel with the SCI it raises"

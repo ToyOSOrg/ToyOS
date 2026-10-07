@@ -21,7 +21,7 @@ assets = ["assets"]
 # while the compositor had no way to ask for a program's *declared* authority —
 # the launcher gives it one, and starting a service from `[boot] start` is not
 # the thing that needed fixing.
-start = ["logkeeper", "diskserver", "fileserver", "compositor", "soundserver", "netstack", "filepicker"]
+start = ["logkeeper", "diskserver", "fileserver", "compositor", "soundserver", "netstack", "filepicker", "acpiserver"]
 
 # What every program launched out of `/apps` holds, whatever its own directory
 # says. A package is unpacked by `/system/bin/pkg` into a writable directory, so
@@ -50,6 +50,16 @@ pkg = {}
 service = true
 syscap = ["logread"]
 serves = ["log"]
+
+# The machine's ACPI fixed hardware: the kernel puts the machine in ACPI mode
+# when it mints the `acpi` claim and back when the claim goes, so the SCI,
+# the power button and the embedded controller's events are this program's
+# while it runs and the firmware's otherwise. `power` is how a press stops
+# the machine: through the supervisor, which has `logkeeper` make the log whole.
+[programs.acpiserver]
+service = true
+devices = ["acpi"]
+receives = ["power"]
 
 # `starts` is what the desktop's taskbar and launcher start. `login = true`
 # makes the local desktop a login session, so `swap` and `update` run from its

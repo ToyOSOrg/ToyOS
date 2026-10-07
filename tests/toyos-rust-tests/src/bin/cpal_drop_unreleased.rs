@@ -72,12 +72,9 @@ fn serve() {
     )
     .expect("a ring");
     let (signal_read, signal_write) = toyos::pipe_pair().expect("a signal pipe");
-    conn.send_with_handles(
-        &[ring.share().expect("the ring to share"), signal_read.into_raw()],
-        MSG_STREAM_OPENED,
-        &OPENED,
-    )
-    .expect("the open answered");
+    conn.send_handles([ring.share().expect("the ring to share"), signal_read.into()])
+        .expect("the open's handles");
+    conn.send(MSG_STREAM_OPENED, &OPENED).expect("the open answered");
 
     let close = conn.recv_header().expect("the client's close");
     assert_eq!(close.msg_type, MSG_STREAM_CLOSE, "the dropped stream did not close");

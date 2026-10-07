@@ -21,13 +21,14 @@ use super::entry::{
     restore_user_state, ring3_naked_asm, save_user_state, Ring0Entry, Ring3Entry,
 };
 use super::cpu::{outb, io_wait};
+use super::pio::{Port, PIC_PRIMARY, PIC_SECONDARY};
 use super::percpu;
 use crate::sync::Lock;
 
-const PIC1_CMD: u16 = 0x20;
-const PIC1_DATA: u16 = 0x21;
-const PIC2_CMD: u16 = 0xA0;
-const PIC2_DATA: u16 = 0xA1;
+const PIC1_CMD: Port = PIC_PRIMARY.port(0);
+const PIC1_DATA: Port = PIC_PRIMARY.port(1);
+const PIC2_CMD: Port = PIC_SECONDARY.port(0);
+const PIC2_DATA: Port = PIC_SECONDARY.port(1);
 
 /// The vector both PS/2 lines are routed to.
 pub const I8042_VECTOR: u8 = Vector::I8042 as u8;
@@ -35,10 +36,9 @@ pub const I8042_VECTOR: u8 = Vector::I8042 as u8;
 /// The vector `apic::kick_cpu` raises.
 pub const KICK_VECTOR: u8 = Vector::Kick as u8;
 
-/// The vector each `pio::GRANTABLE` row's lines are routed to, by row: the
-/// vector is how the kernel knows whose record an interrupt belongs to.
-pub const ISA_VECTORS: [u8; 1] = [Vector::Isa0 as u8];
-const _: () = assert!(ISA_VECTORS.len() == super::pio::GRANTABLE.len(), "a row with no vector");
+/// The vector each `isa` row's lines are routed to, by row: the vector is
+/// how the kernel knows whose record an interrupt belongs to.
+pub const ISA_VECTORS: [u8; crate::isa::MAX_ROWS] = [Vector::Isa0 as u8, Vector::Isa1 as u8];
 
 /// The vector an IOMMU writes into its own `FEDATA`.
 pub const DMA_FAULT_VECTOR: u8 = Vector::DmaFault as u8;
@@ -271,6 +271,7 @@ idt_vectors! {
         ring3 UserDev2     = 0x2A, user_dev::user_dev2_entry;
         ring3 UserDev3     = 0x2B, user_dev::user_dev3_entry;
         ring3 Isa0         = 0x2C, isa::isa0_entry;
+        ring3 Isa1         = 0x2D, isa::isa1_entry;
         ring3 Kick         = 0xFC, kick::kick_entry;
         // Ring 0 because it never returns: `cli; hlt` forever.
         ring0 HaltAll      = 0xFD, stub_halt_all;

@@ -9,6 +9,7 @@
 //! watchdog and VT-d. Generic code reaches each through the concept it serves
 //! (`keyboard_controller`, `watchdog`, `iommu_unit`, …), never by its name.
 
+pub mod acpi_mode;
 pub mod apic;
 pub mod barrier;
 pub mod boot;

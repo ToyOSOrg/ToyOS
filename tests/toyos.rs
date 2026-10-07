@@ -157,6 +157,15 @@ const RUST_SKIP: &[&str] = &[
     "audio_idle_suspend",
     "null_sink_client_exits",
     "soundserver_log_stall",
+    // It hands the ACPI claim to a server of its own and kills it, which needs
+    // a boot that starts none: the `acpi_server_death` metal row runs it on
+    // tests/acpicase.
+    "acpi_release",
+    // It holds the boot open to near the runner's bound, and asserts nothing:
+    // the `acpi_server_events` metal row runs it.
+    "acpi_hold",
+    // It powers the machine off: `machine_shutdown_short_stop` runs it.
+    "stop_short",
 ];
 
 /// Binaries a metal row or a guest test drives that the shared boot also runs
@@ -246,6 +255,13 @@ const MACHINE_TESTS: &[&str] = &[
     // no way to turn it back on, so only a machine QEMU reports stopping can
     // be asked. `machine_soft_off_decoded` reads the T14's own decode.
     "machine_shutdown",
+    // The press itself: QEMU raises the fixed power-button event on demand,
+    // and nothing presses the T14's button but a hand.
+    "acpi_power_button",
+    // The power-off after a stop that left a thread running, in ACPI mode: it
+    // ends the machine, so only one QEMU reports stopping can be asked, and
+    // the T14 hands over in legacy mode, where no holder means no quieting.
+    "machine_shutdown_short_stop",
 ];
 
 /// **The metal profile**: which registrations run on the ThinkPad T14, what
@@ -426,6 +442,26 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal {
             arms: &[metal::once("testcases", "tests/testcases", &[], &["test_rs_counters_metal"])],
             judge: |b| counters_on_metal(b[0]),
+        },
+    ),
+    (
+        // The ACPI server on the machine its stage is for: the row the kernel
+        // filled from the T14's own tables, the server armed on it, and the
+        // embedded controller's events taken and counted, on a boot held open
+        // past the server's count interval.
+        "acpi_server_events",
+        metal::Metal {
+            arms: &[metal::once("testcases-hold", "tests/testcases", &[], &["test_rs_acpi_hold"])],
+            judge: |b| acpi_events_on_metal(b[0]),
+        },
+    ),
+    (
+        // The server killed: the kernel writes `ACPI_DISABLE` as its claim goes,
+        // and `SCI_EN` reads clear after it.
+        "acpi_server_death",
+        metal::Metal {
+            arms: &[metal::once("acpicase", "tests/acpicase", &[], &["test_rs_acpi_release"])],
+            judge: |b| acpi_death_on_metal(b[0]),
         },
     ),
     (
@@ -2674,70 +2710,40 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "iommu_virtio_platform" => common::iommu::iommu_virtio_platform(test_config),
         "nested_nmi_is_loud" => faults::nested_nmi_is_loud(test_config),
         "machine_shutdown" => power::machine_shutdown(test_config),
+        "acpi_power_button" => power::acpi_power_button(test_config),
+        "machine_shutdown_short_stop" => power::machine_shutdown_short_stop(test_config),
         other => Err(format!("unknown machine test {other}")),
     }
 }
 
-/// Every CPU's `CR0` and `CR4`, against what a CPU running this kernel must
-/// hold.
+/// Every device delivery is still cpu0's, and no CPU took a shootdown IPI the
+/// issuer did not count.
 ///
-/// **Not the same question the kernel's own self-check asks.** That one compares
-/// each CPU against the declaration, so it catches a CPU that missed it and
-/// nothing else; a declaration that is wrong satisfies it on every core. The
-/// bits below are spelled out here, away from the constants that produce them,
-/// so the two have to agree independently — and the ones that matter are the
-/// ones an AP used to arrive with: `CD`/`NW` set is caching off, `WP` clear is
-/// the kernel's own read-only mappings not binding supervisor writes, `NE`
-/// clear routes an unmasked x87 exception to a pin nothing listens on.
-///
-/// `OSXSAVE` is asserted *clear*: with it set the CPU would permit `XCR0` to
-/// name components `FXSAVE64` does not save, and this kernel saves user FP
-/// state with `FXSAVE64`.
-///
-/// Both halves, because the kernel writes both registers whole: every bit named
-/// below must hold its named value, **and a bit named nowhere below may not be
-/// set at all**. Silence about a bit is a hole rather than a permission.
-/// The interrupt census adds up, is monotonic, and every device delivery is
-/// still cpu0's.
+/// **The capture is in stamp order, not read order** (`Census::raise`), of a
+/// CPU's census and of the issuer's total alike, and no line says when it was
+/// read. No two lines are compared by their place in the capture: a CPU's
+/// census is the largest count each of its sources reached on any line, and the
+/// issuer's is the largest `shootdowns=`.
 fn irq_census(capture: &str) -> Result<(), String> {
-    use common::irqcensus::{Census, DEVICE_SOURCES, SOURCES};
-    // Every line, in order, so a later census can be compared with an
-    // earlier one on the same CPU.
-    let mut lines: Vec<Census> = Vec::new();
+    use common::irqcensus::{Census, DEVICE_SOURCES};
+    let mut newest: BTreeMap<u32, Census> = BTreeMap::new();
     for line in capture.lines() {
-        match Census::parse(line) {
+        let census = match Census::parse(line) {
             None => continue,
-            Some(Ok(census)) => lines.push(census),
+            Some(Ok(census)) => census,
             Some(Err(why)) => return Err(format!("{why}\nline: {line}")),
-        }
+        };
+        newest.entry(census.cpu).or_insert_with(|| census.clone()).raise(&census);
     }
-    if lines.is_empty() {
+    if newest.is_empty() {
         return Err(format!(
             "no `irq: cpu` census in the capture — a process exited and the kernel \
              said nothing:\n{capture}"
         ));
     }
 
-    // 1. Monotonic: a counter that went backwards is a torn read or a
-    //    word two CPUs are writing, which is what the no-`lock` argument
-    //    in `kernel/src/irq_census.rs` rests on being impossible.
-    let mut newest: std::collections::BTreeMap<u32, Census> = std::collections::BTreeMap::new();
-    for census in &lines {
-        if let Some(prev) = newest.get(&census.cpu) {
-            if let Some(name) = SOURCES.iter().zip(prev.by_source.iter().zip(census.by_source)).find_map(
-                |(name, (&was, now))| (now < was).then_some(name),
-            ) {
-                return Err(format!(
-                    "cpu{}'s `{name}` count went backwards: {prev:?} then {census:?}",
-                    census.cpu,
-                ));
-            }
-        }
-        newest.insert(census.cpu, census.clone());
-    }
-
-    // 2. The machine is real: the boot CPU took interrupts, and so did
-    //    at least one AP — otherwise (3) says nothing.
+    // 1. The machine is real: the boot CPU took interrupts, and so did
+    //    at least one AP — otherwise (2) says nothing.
     let cpu0 = newest
         .get(&0)
         .ok_or_else(|| format!("no cpu0 in the census: {newest:?}"))?;
@@ -2755,7 +2761,7 @@ fn irq_census(capture: &str) -> Result<(), String> {
         return Err(format!("no AP took a single interrupt: {newest:?}"));
     }
 
-    // 3. **The present-state fact this whole track is about.** Every
+    // 2. **The present-state fact this whole track is about.** Every
     //    message-signalled interrupt is addressed to physical
     //    destination 0 (`drivers::pci`'s `MSG_ADDR`) and the one I/O
     //    APIC pin goes to the BSP, so no AP may have a device count at
@@ -2793,11 +2799,14 @@ fn irq_census(capture: &str) -> Result<(), String> {
         newest.values().map(Census::total).sum::<u64>(),
     );
 
-    // 4. The issuer side: every `tlb` delivery a CPU's census carries
-    //    must be within the issues the `tlb:` line counted — an excess
+    // 3. The issuer side: every `tlb` delivery a CPU's census carries
+    //    must be within the issues a `tlb:` line counted — an excess
     //    is a path shooting down uncounted. The lower bound is not
     //    asserted: an issued IPI can be pending on an IF-clear target.
-    let mut issued: Vec<u64> = Vec::new();
+    //    The bound is the largest count: an exit reads its deliveries
+    //    before the issuer's total, and whichever exit first swaps a
+    //    total into `tlb::REPORTED` logs it.
+    let mut issued: Option<u64> = None;
     for line in capture.lines() {
         let Some(rest) = line.split("tlb: shootdowns=").nth(1) else { continue };
         let n: u64 = rest
@@ -2805,22 +2814,19 @@ fn irq_census(capture: &str) -> Result<(), String> {
             .next()
             .and_then(|v| v.parse().ok())
             .ok_or_else(|| format!("unreadable issuer census: {line}"))?;
-        issued.push(n);
+        issued = issued.max(Some(n));
         eprintln!("  [tlb] {}", line.trim());
     }
-    let Some(&last_issued) = issued.last() else {
+    let Some(issued) = issued else {
         return Err(format!(
             "no `tlb: shootdowns=` census in the capture — two process exits on a \
              4-CPU guest and the issuer side said nothing:\n{capture}"
         ));
     };
-    if issued.windows(2).any(|w| w[1] < w[0]) {
-        return Err(format!("the issuer census went backwards: {issued:?}"));
-    }
     for census in newest.values() {
-        if census.source("tlb") > last_issued {
+        if census.source("tlb") > issued {
             return Err(format!(
-                "cpu{} took {} tlb IPI(s) against {last_issued} counted issue(s) — \
+                "cpu{} took {} tlb IPI(s) against {issued} counted issue(s) — \
                  some path shoots down without being counted: {census:?}",
                 census.cpu,
                 census.source("tlb"),
@@ -2828,7 +2834,7 @@ fn irq_census(capture: &str) -> Result<(), String> {
         }
     }
     eprintln!(
-        "  [tlb] {last_issued} shootdown(s) issued, deliveries per CPU {:?} — every \
+        "  [tlb] {issued} shootdown(s) issued, deliveries per CPU {:?} — every \
          delivery accounted for",
         newest.values().map(|c| c.source("tlb")).collect::<Vec<_>>(),
     );
@@ -3363,6 +3369,25 @@ fn ioapic_topology(log: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Every CPU's `CR0` and `CR4`, against what a CPU running this kernel must
+/// hold.
+///
+/// **Not the same question the kernel's own self-check asks.** That one compares
+/// each CPU against the declaration, so it catches a CPU that missed it and
+/// nothing else; a declaration that is wrong satisfies it on every core. The
+/// bits below are spelled out here, away from the constants that produce them,
+/// so the two have to agree independently — and the ones that matter are the
+/// ones an AP used to arrive with: `CD`/`NW` set is caching off, `WP` clear is
+/// the kernel's own read-only mappings not binding supervisor writes, `NE`
+/// clear routes an unmasked x87 exception to a pin nothing listens on.
+///
+/// `OSXSAVE` is asserted *clear*: with it set the CPU would permit `XCR0` to
+/// name components `FXSAVE64` does not save, and this kernel saves user FP
+/// state with `FXSAVE64`.
+///
+/// Both halves, because the kernel writes both registers whole: every bit named
+/// below must hold its named value, **and a bit named nowhere below may not be
+/// set at all**. Silence about a bit is a hole rather than a permission.
 fn control_regs(log: &str, cpus: u32) -> Result<(), String> {
     /// `(bit, name, must_be_set)`. Every bit `CR0` defines, so a value with any
     /// other bit set is reserved state the kernel put there.
@@ -3506,10 +3531,10 @@ const SMI_SPAN_NS: u64 = 4_444_000_000;
 /// program's, is stamped in a millisecond from `idle0`'s to `idle1`'s, which
 /// `counters_metal` reads on the log's clock, either
 /// edge's included because a line stamped in it may follow the read: the
-/// second is the idle machine's. From `idle0` to `spin`, at least
-/// [`SMI_SPAN_NS`] apart, every CPU's SMI count rose alike and by two or more:
-/// the firmware's legacy mode, the positive control ACPI stage 1's flatness
-/// is read against, and the row that stage changes. Across the spin every
+/// second is the idle machine's. The boot ran in ACPI mode, which
+/// `/system/bin/acpiserver`'s claim put it in: `idle0` reads after the
+/// kernel's one write to `SMI_CMD`, and from there to `spin`, at least
+/// [`SMI_SPAN_NS`] apart, no CPU's SMI count moves. Across the spin every
 /// CPU's MPERF ran nine tenths of its stamp or more [e], a CPU in C0 the whole
 /// span: MPERF counts at the TSC's rate there (SDM Vol. 3B, "Hardware
 /// Coordination Feedback"); and every CPU's busy frequency reached the lowest
@@ -3615,10 +3640,23 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
         return Err(format!("idle0 and spin are {} ns apart, short of {SMI_SPAN_NS}: lengthen the spin", at2 - at0));
     }
     let delta = |a: &Read, b: &Read, cpu: usize, name: &str| b[&cpu][name] - a[&cpu][name];
-    let smis: Vec<u64> = (0..cpus).map(|cpu| delta(idle0, spin, cpu, "smi")).collect();
-    if smis[0] < 2 || smis.iter().any(|&n| n != smis[0]) {
-        return Err(format!("the SMI count rose by {smis:?} over {} ns, not alike and by two or more", at2 - at0));
+    // The boot's one write to `SMI_CMD`, and what the CPU that made it read after it.
+    let enabled = kernel.must_say("acpi: ACPI mode: ACPI_ENABLE ")?;
+    let writer: usize = field_between(enabled, "; cpu", "'s SMI count ")?.parse().map_err(|_| format!("no CPU in {enabled:?}"))?;
+    let after = number_between(enabled, " before the write and ", " after")?;
+    if idle0[&writer]["smi"] < after {
+        return Err(format!("idle0 read cpu{writer}'s SMI count below what it read after the ACPI enable ({after}): it read before the boot's last write to SMI_CMD"));
     }
+    if let Ok(left) = kernel.must_say("acpi: legacy mode again") {
+        return Err(format!("the machine left ACPI mode inside the boot: {left}"));
+    }
+    let smis: Vec<u64> = (0..cpus).map(|cpu| delta(idle0, spin, cpu, "smi")).collect();
+    if smis.iter().any(|&n| n != 0) {
+        return Err(format!("in ACPI mode the SMI count moved by {smis:?} over {} ns", at2 - at0));
+    }
+    let firsts: Vec<u64> = (0..cpus).map(|cpu| idle0[&cpu]["smi"]).collect();
+    eprintln!("  [counters] {}", enabled.trim());
+    eprintln!("  [counters] idle0's SMI count per cpu {firsts:?}, the writer's after the enable {after} (a reading)");
     let tsc_mhz = delta(idle0, spin, 0, "stamp") as f64 * 1e3 / (at2 - at0) as f64;
     let ratio = |a: &Read, b: &Read, cpu: usize, top: &str, bottom: &str| {
         delta(a, b, cpu, top) as f64 / delta(a, b, cpu, bottom) as f64
@@ -3653,10 +3691,8 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
     }
     let spinning: Vec<f64> = (0..cpus).map(|cpu| tsc_mhz * ratio(idle1, spin, cpu, "aperf", "mperf")).collect();
     eprintln!(
-        "  [counters] {cpus} cpus, SMI +{} each over {} ms, +{} in the idle second; TSC {tsc_mhz:.0} MHz",
-        smis[0],
-        (at2 - at0) / 1_000_000,
-        delta(idle0, idle1, 0, "smi")
+        "  [counters] {cpus} cpus, SMI flat on each over {} ms; TSC {tsc_mhz:.0} MHz",
+        (at2 - at0) / 1_000_000
     );
     for (cpu, busy) in busy.iter().enumerate() {
         eprintln!(
@@ -3674,6 +3710,56 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
     if spinning.iter().any(|&mhz| mhz < floor) {
         return Err(format!("spinning {spin_ns} ns at {spinning:.0?} MHz, some cpu below the {floor:.0} Linux held over that span"));
     }
+    Ok(())
+}
+
+/// The T14's ACPI row as the kernel filled it from the machine's FACP, ECDT
+/// and APIC (Linux on the same machine: `EC_CMD/EC_SC=0x66, EC_DATA=0x62`,
+/// `GPE=0x6e`, `INT_SRC_OVR (bus 0 bus_irq 9 global_irq 9 high level)`), the
+/// server armed on it, at least one embedded-controller query taken and a
+/// count of them logged, and no guard of the server's fired.
+fn acpi_events_on_metal(back: &metal::Readback) -> Result<(), String> {
+    back.job_passed("test_rs_acpi_hold")?;
+    let (log, kernel) = (back.log(), back.kernel());
+    kernel.must_say(
+        "acpi: the ACPI row: PM1a events 0x1800+4, GPE0 0x1860+32, SCI gsi 9 level/high, the \
+         fixed-hardware power button, embedded controller at 0x66/0x62 on GPE 0x6e; the firmware \
+         handed over in legacy mode",
+    )?;
+    log.must_say(
+        "acpiserver: armed: power button served, embedded controller on GPE 0x6e at 0x66/0x62",
+    )?;
+    let lines: Vec<&str> = log
+        .text()
+        .lines()
+        .filter(|l| toyos_logstream::program_line(l).is_some_and(|said| said.tag == "acpiserver"))
+        .collect();
+    if let Some(fired) = lines.iter().find(|l| l.contains("panicked")) {
+        return Err(format!("the server died: {fired}"));
+    }
+    let firsts: Vec<&&str> = lines.iter().filter(|l| l.contains("taken for the first time")).collect();
+    let counts = lines.iter().rfind(|l| l.contains("embedded controller queries taken: "));
+    let (true, Some(counts)) = (!firsts.is_empty(), counts) else {
+        return Err(format!("the server logged {} first sighting(s) and {counts:?} for counts", firsts.len()));
+    };
+    for first in firsts {
+        eprintln!("  [acpi] {}", first.trim());
+    }
+    eprintln!("  [acpi] {}", counts.trim());
+    Ok(())
+}
+
+/// The server's death on the T14: the kernel put the machine in ACPI mode for
+/// the job's claim, and when the killed server's claim went it wrote
+/// `ACPI_DISABLE` (the FADT's 0xf1) and read `SCI_EN` clear: the firmware has
+/// the buttons again.
+fn acpi_death_on_metal(back: &metal::Readback) -> Result<(), String> {
+    back.job_passed("test_rs_acpi_release")?;
+    let kernel = back.kernel();
+    kernel.must_say("acpi: ACPI mode: ACPI_ENABLE 0xf0 written to SMI_CMD 0xb2, SCI_EN set ")?;
+    // The kernel says this only of a `PM1a_CNT` it read with `SCI_EN` clear.
+    let left = kernel.must_say("acpi: legacy mode again: ACPI_DISABLE 0xf1 written to SMI_CMD, PM1a_CNT reads ")?;
+    eprintln!("  [acpi] {}", left.trim());
     Ok(())
 }
 

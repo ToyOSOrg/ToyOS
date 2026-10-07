@@ -7,9 +7,10 @@ opened: 2026-09-29
 # The `isa` port switch's cost on the scheduler hot path is unmeasured
 
 `arch::pio::switch_to` (`kernel/src/arch/x86_64/pio.rs`) runs on every context
-switch, from `KernelHw::switch`: per `GRANTABLE` row one `BOUND` load, one
-bitmap byte read, and on a change one bitmap write per port. On x86-64 that is
-one row on every switch of every CPU, whether or not any process holds a claim.
+switch, from `KernelHw::switch`: per filled `isa` row a load of its function,
+one `BOUND` load, one bitmap byte read, and on a change one bitmap write per
+port. On x86-64 that is two rows, the i8042's and the ACPI fixed hardware's, on
+every switch of every CPU, whether or not any process holds a claim.
 Nothing has measured what it adds to a switch, and a timing verdict comes only
 from metal.
 

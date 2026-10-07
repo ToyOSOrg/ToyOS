@@ -1,22 +1,41 @@
-//! The I/O port space: AArch64 has none, and so no ISA function to grant.
+//! The I/O port space: AArch64 has none, and so no row to fill and no port to
+//! declare.
 
 use core::convert::Infallible;
 
+use toyos_userbound::Ports;
+
 use crate::process::Pid;
 
-/// Nothing: every `isa` claim is refused as naming no function.
-pub const GRANTABLE: &[crate::isa::Grantable] = &[];
+/// No row is filled, so no wire is resolved.
+pub type Wire = Infallible;
 
 /// No line is routed where no row exists.
 pub type Line = Infallible;
 
-/// Never called: [`GRANTABLE`] has no row to route.
-pub fn route(_row: usize, _irq: u8) -> Result<Line, alloc::string::String> {
-    unreachable!("AArch64 has no ISA bus")
+pub fn route(_row: usize, wire: Wire) -> Result<Line, alloc::string::String> {
+    match wire {}
+}
+
+pub fn level(line: Line) -> bool {
+    match line {}
+}
+
+pub fn describe(wire: Wire) -> alloc::string::String {
+    match wire {}
+}
+
+pub fn same(a: Wire, _b: Wire) -> bool {
+    match a {}
 }
 
 pub fn set_masked(line: Line, _masked: bool) {
     match line {}
+}
+
+/// Nothing is declared where there are no ports.
+pub fn holder(_ports: Ports) -> Option<&'static str> {
+    None
 }
 
 /// Never called: nothing is bound where nothing can be claimed.

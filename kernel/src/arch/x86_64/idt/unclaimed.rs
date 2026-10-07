@@ -127,7 +127,6 @@ pub fn selftest() {
         crate::log!("LAPIC: unclaimed selftest FAILED — this CPU publishes no census block");
         return;
     };
-    let taken_before = crate::irq_census::deliveries_total(cpu).unwrap_or(0);
 
     apic::send_self(PROBE_VECTOR);
 
@@ -161,13 +160,16 @@ pub fn selftest() {
         return;
     }
 
+    // The timer's own count and never a total: the hard-lockup sampler's NMI lands whatever `IF` holds.
+    let taken = crate::irq_census::deliveries(cpu, Source::Timer).unwrap_or(0);
+    apic::arm_within(kernel::sched::fair::QUANTUM_NS);
     let ran_on = crate::clock::settles(ARRIVES.nanos(), || {
-        crate::irq_census::deliveries_total(cpu).unwrap_or(taken_before) > taken_before
+        crate::irq_census::deliveries(cpu, Source::Timer).unwrap_or(taken) > taken
     });
     if !ran_on {
         crate::log!(
-            "LAPIC: unclaimed selftest FAILED — cpu{cpu} took no interrupt at all after the \
-             unclaimed one"
+            "LAPIC: unclaimed selftest FAILED — cpu{cpu} did not take the timer interrupt armed \
+             after the unclaimed one"
         );
         return;
     }

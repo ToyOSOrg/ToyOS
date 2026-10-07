@@ -74,6 +74,7 @@ from_handle! {
     crate::Mouse => |h| crate::Mouse(Device(h)),
     crate::FramebufferDev => |h| crate::FramebufferDev(Device(h)),
     crate::PciDev => |h| crate::PciDev(Device(h)),
+    crate::AcpiDev => |h| crate::AcpiDev(Device(h)),
     crate::PartitionDev => |h| crate::PartitionDev(Device(h)),
     crate::HdaDev => |h| crate::HdaDev(Device(h)),
     crate::VirtioSoundDev => |h| crate::VirtioSoundDev(Device(h)),
