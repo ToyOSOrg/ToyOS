@@ -6,8 +6,8 @@ opened: 2026-09-27
 
 # Every flush of a served file syncs its whole volume
 
-The std fork's `File::flush` is `File::fsync`
-(`rust/library/std/src/sys/fs/toyos.rs`), where every other platform's is a
+std's ToyOS `File::flush` is `File::fsync`
+(`sdk/std/sys/fs.rs`), where every other platform's is a
 no-op, and fsd answers `FSYNC` by syncing the volume, every open file's entry
 and every dirty block of the cache (`userland/fsd/src/main.rs`, `FSYNC`). So a
 `BufWriter` over a file on `/home` syncs all of DATA each time it flushes, and a

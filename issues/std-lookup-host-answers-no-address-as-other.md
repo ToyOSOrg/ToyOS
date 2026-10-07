@@ -6,7 +6,7 @@ opened: 2026-09-26
 
 # std's lookup_host answers a name with no address as `Other`
 
-The std fork's `lookup_host` (`library/std/src/sys/net/connection/toyos.rs`)
+std's `lookup_host` (`sdk/std/sys/net/connection.rs`)
 answers netd's empty answer with `io::ErrorKind::Other` and the message
 `DNS lookup failed: no results`, and every netd error that is not one of six
 kinds with `Other` and `netd error`. A program asking for a name therefore

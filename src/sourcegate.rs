@@ -159,6 +159,7 @@ const GUEST_CODE: &[&str] = &[
     "kernel/src",
     "toyos/src",
     "toyos-abi/src",
+    "sdk/std",
     "userland",
     "tests/toyos-rust-tests",
     "tests/testcases",

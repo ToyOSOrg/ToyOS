@@ -11,8 +11,7 @@ with two fronts. The kernel's front comes first: built host-first, and
 swapped in for the kernel's `dlmalloc` (`kernel/src/mm/alloc.rs`) after the
 three steps of `issues/toyos-beats-linuxs-latency-on-the-t14.md`.
 std's front, for programs, comes later, after it is measured against the
-`dlmalloc` ToyOS's std allocates with (`library/std/src/sys/alloc/toyos.rs`
-in the `rust/` fork). The 2 MiB heap-growth stall is fixed now, on
+`dlmalloc` ToyOS's std allocates with (`sdk/std/sys/alloc.rs`). The 2 MiB heap-growth stall is fixed now, on
 `dlmalloc`, and waits for neither front.
 
 The stall: when the kernel heap grows, `dlmalloc` calls
