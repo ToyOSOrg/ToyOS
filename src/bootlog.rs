@@ -374,11 +374,6 @@ pub fn stopping_line(log: &str) -> Option<&str> {
 
 /// Whether the stop `log` ends on is a power-off: the supervisor's line names
 /// the stop it was asked for, after [`STOPPING`].
-///
-/// **A power-off leaves the next loader pass no record**: S5 takes the black
-/// box's DRAM with it, so that pass reads a page nothing sealed and says
-/// [`HUNG_WITHOUT_A_RECORD`] of a boot that did what it was asked. A power-off
-/// that did not take is the kernel's panic, whose reset keeps the page.
 pub fn asked_to_power_off(log: &str) -> bool {
     stopping_line(log)
         .and_then(toyos_logstream::program_line)

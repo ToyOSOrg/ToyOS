@@ -14,7 +14,7 @@ use toyos_abi::acpi::Block;
 use toyos_acpi::{
     dsdt_address, ecam_base, ecdt, find_table, fixed_hardware, hpet_base, iapc_boot_arch, isa_line,
     madt_entries, memory_windows, pm1a_control, psci, reset_register, rtc_century, s5_slp_typ, sci_line, Century,
-    EcRefused, Field, FixedRefused, Line, MadtEntry, MadtHalt, Phys, Polarity, PowerButton, Psci,
+    EcRefused, Field, FixedRefused, LegacyMode, Line, MadtEntry, MadtHalt, Phys, Polarity, PowerButton, Psci,
     Register, Reset, SourceOverride, Table, TableError, Trigger, ECDT_NEEDED,
     FADT_FOR_FIXED_HARDWARE, MADT_ENTRIES, MAX_TABLE_LEN, S5,
 };
@@ -769,7 +769,13 @@ fn fixed_hardware_reads_whichever_form_names_a_block() {
     })
     .expect("no GPE0 block");
     assert_eq!(no_gpe.gpe0, Block::NONE);
-    assert_eq!(fixed(|t| t[48..52].copy_from_slice(&[0; 4])).map(|f| f.smi_cmd), Ok(None));
+    let command = |b: u8| core::num::NonZeroU8::new(b).expect("a command");
+    let legacy = LegacyMode { smi_cmd: 0xb2, acpi_enable: command(2), acpi_disable: command(3) };
+    assert_eq!(fixed(|_| {}).map(|f| f.legacy), Ok(Some(legacy)));
+    // No port, no way in, or a way in and no way back.
+    for zeroed in [48..52, 52..53, 53..54] {
+        assert_eq!(fixed(|t| t[zeroed.clone()].fill(0)).map(|f| f.legacy), Ok(None), "{zeroed:?}");
+    }
     let method = fixed(|t| t[112] = 1 << 4).expect("a control-method button");
     assert_eq!(method.power_button, PowerButton::ControlMethod);
 }

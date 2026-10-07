@@ -1,5 +1,7 @@
 //! The FADT (signature `FACP`): ACPI 6.5 §5.2.9, Table 5.9.
 
+use core::num::NonZeroU8;
+
 use crate::{find_table, Phys, Table, TableError, SDT_REVISION};
 
 /// Table 5.9 offsets, from the start of the table.
@@ -210,15 +212,23 @@ pub enum PowerButton {
     ControlMethod,
 }
 
+/// The way out of legacy mode and back into it: the port, and the value
+/// written to it for each.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct LegacyMode {
+    pub smi_cmd: u16,
+    pub acpi_enable: NonZeroU8,
+    pub acpi_disable: NonZeroU8,
+}
+
 /// The fixed hardware an OS serves the SCI through, as the FADT names it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct FixedHardware {
     pub sci_int: u16,
-    /// The port `ACPI_ENABLE` and `ACPI_DISABLE` are written to; `None` where
-    /// the machine is in ACPI mode and has no way out of it.
-    pub smi_cmd: Option<u16>,
-    pub acpi_enable: u8,
-    pub acpi_disable: u8,
+    /// `None` where the FADT leaves `SMI_CMD`, `ACPI_ENABLE` or `ACPI_DISABLE`
+    /// zero: Table 5.9 reserves each as zero on a machine without legacy mode,
+    /// and one that names a way in and no way back is not taken in.
+    pub legacy: Option<LegacyMode>,
     pub pm1a_event: toyos_abi::acpi::Block,
     /// [`toyos_abi::acpi::Block::NONE`] where the machine has no GPE0 block.
     pub gpe0: toyos_abi::acpi::Block,
@@ -351,14 +361,14 @@ pub fn fixed_hardware<P: Phys>(fadt: &Table<P>) -> Result<FixedHardware, FixedRe
     };
 
     let smi_cmd = u32_at(FADT_SMI_CMD)?;
+    let smi_cmd = u16::try_from(smi_cmd).map_err(|_| FixedRefused::SmiCmd(smi_cmd))?;
+    let legacy = match (smi_cmd, NonZeroU8::new(byte(FADT_ACPI_ENABLE)?), NonZeroU8::new(byte(FADT_ACPI_DISABLE)?)) {
+        (1.., Some(acpi_enable), Some(acpi_disable)) => Some(LegacyMode { smi_cmd, acpi_enable, acpi_disable }),
+        _ => None,
+    };
     Ok(FixedHardware {
         sci_int: fadt.u16_at(FADT_SCI_INT).ok_or(short)?,
-        smi_cmd: match smi_cmd {
-            0 => None,
-            port => Some(u16::try_from(port).map_err(|_| FixedRefused::SmiCmd(port))?),
-        },
-        acpi_enable: byte(FADT_ACPI_ENABLE)?,
-        acpi_disable: byte(FADT_ACPI_DISABLE)?,
+        legacy,
         pm1a_event: block(Field::Pm1aEvent, pm1_event, pm1_event_len)?,
         gpe0,
         power_button: if flags & PWR_BUTTON == 0 { PowerButton::Fixed } else { PowerButton::ControlMethod },

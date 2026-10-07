@@ -1,12 +1,9 @@
 //! Hold the boot open with `/system/bin/acpiserver` serving it, and exit when
 //! the runner's own bound is near. It asserts nothing.
 //!
-//! Two metal rows run it: `acpi_server_events`, whose judge reads a count line
-//! the server writes only once one of its count intervals has passed, which a
-//! boot that ends with the shared block's jobs does not reach; and the attended
-//! `acpi_power_button_pressed`, where the owner presses until the machine stops
-//! before this exits and records how many presses that took, and the line below
-//! on that boot is a boot nothing stopped.
+//! The `acpi_server_events` metal row runs it: its judge reads a count line the
+//! server writes only once one of its count intervals has passed, which a boot
+//! that ends with the shared block's jobs does not reach.
 
 use std::thread::sleep;
 use std::time::Duration;

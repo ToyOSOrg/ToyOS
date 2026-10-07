@@ -2011,11 +2011,6 @@ fn boot_verdict(armed: &[String], loader: &str, log: &str) -> Result<u64, Refusa
     // other reading of an empty kernel log would send a reader to the wrong
     // place, and `NoBootRecord` would send them to a kernel that never ran.
     if loader.contains(bootlog::HUNG_WITHOUT_A_RECORD) && !staged_hang {
-        // A power-off empties the black box as a power cut does, so the pass
-        // after it says this of a boot whose log asked for exactly that.
-        if bootlog::asked_to_power_off(log) {
-            return bootlog::verdict(log).map_err(Refusal::Log);
-        }
         return Err(Refusal::HungWithoutARecord);
     }
     if let Some(said) = reported_and_booted_nothing(loader, log) {
@@ -2220,11 +2215,6 @@ pub fn loop_verdict(text: &str) -> Result<(), String> {
 /// the outside judge read, so a complaint can be looked at rather than retold.
 pub const READBACK_VOLUME: &str = "log-partition.img";
 
-/// How many times the owner pressed the power button on an attended boot, one
-/// decimal number written beside the readback by hand once the machine has
-/// stopped: a press the hardware never latched leaves no trace in the log.
-pub const READBACK_PRESSES: &str = "presses.txt";
-
 /// The keys [`READBACK_BOOT`] carries, one `<key> <value>` per line.
 pub const BACK_SECS: &str = "back_secs";
 pub const STICK_SECS_KEY: &str = "stick_secs";
@@ -2248,7 +2238,6 @@ pub const READBACK_FILES: &[&str] = &[
     READBACK_VOLUME,
     READBACK_STREAM,
     READBACK_TALK,
-    READBACK_PRESSES,
 ];
 
 /// Empty a readback directory, before this run can leave any of it standing.
@@ -3410,29 +3399,5 @@ mod tests {
             boot_verdict(&armed(&[FOREIGN_RECORD_ARM, "boot-deadline=120000"]), &unreturned, log),
             Err(Refusal::Log(bootlog::Unfit::NoForeignDone))
         );
-    }
-
-    /// A boot whose log asked for a power-off is passed by the pass after it
-    /// finding no record, which is what S5 leaves; any other stop that left
-    /// none is the hang it always was.
-    #[test]
-    fn a_power_off_leaves_no_record_and_is_no_hang() {
-        let loader = format!(
-            "{}\n{}\nBoot attempts: this image has had the machine 1 time(s) without reporting; now 0\n{}\n{}\n",
-            bootlog::LOADER_LAST_LINE,
-            bootlog::SEPARATOR,
-            bootlog::HUNG_WITHOUT_A_RECORD,
-            bootlog::CHAIN_ENDS_LINE,
-        );
-        let booted = "[2026-10-04 08:41:59  1.152 cpu0 kernel] Boot: complete (1152ms)\n";
-        let stop = |how: &str| {
-            format!("{booted}[2026-10-04 08:42:14 16.705 supervisor] {} ({how})\n", bootlog::STOPPING)
-        };
-        let armed = vec!["boot-deadline=120000".to_string()];
-        assert_eq!(boot_verdict(&armed, &loader, &stop("Shutdown")), Ok(1152));
-        assert_eq!(boot_verdict(&armed, &loader, &stop("Reboot")), Err(Refusal::HungWithoutARecord));
-        assert_eq!(boot_verdict(&armed, &loader, booted), Err(Refusal::HungWithoutARecord));
-        let unbooted = stop("Shutdown").replace(booted, "");
-        assert_eq!(boot_verdict(&armed, &loader, &unbooted), Err(Refusal::Log(bootlog::Unfit::NoBootRecord)));
     }
 }

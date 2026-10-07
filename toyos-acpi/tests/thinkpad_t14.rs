@@ -9,10 +9,12 @@
 
 mod common;
 
+use core::num::NonZeroU8;
+
 use common::{entry, madt, sdt, Machine};
 use toyos_abi::acpi::Block;
 use toyos_acpi::{
-    ecdt, fixed_hardware, madt_entries, pm1a_control, sci_line, Ec, FixedHardware, Line, MadtEntry,
+    ecdt, fixed_hardware, madt_entries, pm1a_control, sci_line, Ec, FixedHardware, LegacyMode, Line, MadtEntry,
     Polarity, PowerButton, SourceOverride, Table, Trigger, ECDT_NEEDED, FADT_FOR_FIXED_HARDWARE,
     MADT_ENTRIES,
 };
@@ -88,9 +90,11 @@ fn the_t14s_fadt_names_the_blocks_linux_served_its_sci_through() {
         fixed_hardware(&fadt),
         Ok(FixedHardware {
             sci_int: 9,
-            smi_cmd: Some(0xb2),
-            acpi_enable: 0xf0,
-            acpi_disable: 0xf1,
+            legacy: Some(LegacyMode {
+                smi_cmd: 0xb2,
+                acpi_enable: NonZeroU8::new(0xf0).expect("a command"),
+                acpi_disable: NonZeroU8::new(0xf1).expect("a command"),
+            }),
             pm1a_event: Block { port: 0x1800, len: 4 },
             gpe0: Block { port: 0x1860, len: 32 },
             power_button: PowerButton::Fixed,

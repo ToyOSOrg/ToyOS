@@ -36,7 +36,14 @@ writes its own, and the battery comes first (his direction of `0ee814f5a`).
   name, after #592 lands.
 - **The attended press waits for the owner.** Everything else in stage 1 is
   built and reviewed first; he then presses the button once, briefly, on a
-  boot held open for it.
+  boot held open for it. Superseded by the two rulings on tests that follow.
+
+**Ruled** (owner, 2026-10-05): "A test that requires manual steps from me is
+forbidden." **Ruled** (owner, on what a T14 test may need): "No automated test
+is allowed that requires physical buttons to be pressed or anything we cant do
+now with the t14. I can test it on demand but no ci there not always someone
+available physically". No T14 row of this track needs a hand: not on the
+button, and not to power the machine on again.
 
 **Ruled** (owner, 2026-10-03), on the server, the tables and the interpreter:
 
@@ -72,19 +79,27 @@ never reads their source.
 
 **Stage 1: ACPI mode, its SCI served in userland.** The switch to ACPI mode,
 and a userland server that claims the SCI, handles the power button, a
-fixed event that needs no AML, and takes the EC's events. **Exit**: on the
-T14, `MSR_SMI_COUNT`, read through the general counters and not by a check of
-its own, stays flat on every CPU over the interval the firmware issue's exit
-defines; a press the server serves stops the machine cleanly, through ToyOS's
-own power-off path (`SYS_SHUTDOWN`), and the boot's log records the press and
-that stop, and each EC query number once with its count: a T14 row reads them
-there. A second T14 row kills the server and reads `SCI_EN` clear in `PM1_CNT`
-afterwards, the kernel having written `ACPI_DISABLE` to `SMI_CMD`. That every
-press of the power button stops the machine is not stage 1's: the T14 loses
-some first presses, and
-`issues/the-t14s-power-button-event-came-up-to-17-s-after-ec-query-0x28.md`
-carries that into the AML interpreter's stages, which follow this one (owner,
-2026-10-05, "Land it, record the gap": "The AML stage closes it").
+fixed event that needs no AML, and takes the EC's events. **Exit**: QEMU's
+`acpi_power_button` reads that a press the server serves stops the machine
+cleanly, through ToyOS's own power-off path (`SYS_SHUTDOWN`), with the press
+and that stop in the boot's log. On the T14, `counters` reads
+`MSR_SMI_COUNT`, through the general counters and not by a check of its own,
+flat on every CPU over the interval the firmware issue's exit defines, and the
+machine still in ACPI mode; `acpi_server_events` reads each EC query number
+once with its count; and `acpi_server_death` kills the server and reads
+`SCI_EN` clear in `PM1_CNT` afterwards, the kernel having written
+`ACPI_DISABLE` to `SMI_CMD`.
+
+Two things stage 1 lands are read by no T14 row, and neither is in its exit.
+The T14's own button, and that every press of it stops the machine, is
+`issues/the-t14s-power-button-event-came-up-to-17-s-after-ec-query-0x28.md`'s
+(owner, 2026-10-05, "Land it, record the gap": "The AML stage closes it").
+The T14's power-off after the kernel's own `ACPI_ENABLE`, which that ruling
+lists among what stage 1 lands, was last read at `8d7004d3b` on a boot the
+owner powered on again and is read on q35 only in a machine its firmware put
+in ACPI mode; that no T14 row reads it is
+`issues/no-t14-row-reads-the-power-off-after-the-kernels-own-acpi-enable.md`'s.
+Moving it out of this exit is the orchestrator's placement, not the owner's.
 
 **Ruled** (owner, 2026-10-04, "Stopgap, delete later"): "Stage 1 uses the
 extra table so the T14 switches to ACPI mode now." Stage 1 reads the
@@ -97,6 +112,15 @@ Stage 1's design, not a ruling: a machine whose power button is a control
 method device stays in legacy mode too, refused by name; and a machine its
 firmware hands over in ACPI mode is served whatever it has, since nothing is
 written.
+
+**Stage: the interpreter** (the orchestrator's placement of "The AML stage
+closes it"). ToyOS's own AML interpreter, written from the specification, run
+by the ACPI server, the battery first. It owns
+`issues/the-t14s-power-button-event-came-up-to-17-s-after-ec-query-0x28.md`.
+**Exit**: on the T14 the server evaluates the method of each embedded-controller
+query the tables define, a T14 row reads the battery's state as the
+interpreter evaluated it beside Linux's reading of the same machine, and the
+press issue is closed by its own exit.
 
 **Stage: power-off through the server** (the orchestrator's placement of "Yes,
 one path"). The ACPI server evaluates `\_S5` and powers the machine off.

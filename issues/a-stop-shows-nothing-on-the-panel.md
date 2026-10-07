@@ -13,9 +13,6 @@ which is every test image, nothing else paints at all. On the T14 the owner
 pressed the power button and saw nothing happen, which is also what a machine
 that ignored the press looks like.
 
-A boot held open for an attended press has no on-screen prompt either: the
-owner is told when to press by whoever runs the boot.
-
 **Exit**: within a second of the supervisor's stop line, the panel shows that
 the machine is stopping and which stop, on a machine with and without a
 compositor, and a test reads it off the screen.

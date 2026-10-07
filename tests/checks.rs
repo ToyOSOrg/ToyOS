@@ -858,11 +858,6 @@ mod checks {
     }
 
     #[test]
-    fn metal_power_off_owes_no_panel() {
-        metal_checks::a_power_off_owes_no_panel();
-    }
-
-    #[test]
     fn metal_loader_kernel_and_program_count_from_one_zero() {
         metal_checks::the_loader_the_kernel_and_a_program_count_from_one_zero();
     }

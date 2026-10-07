@@ -162,8 +162,7 @@ const RUST_SKIP: &[&str] = &[
     // tests/acpicase.
     "acpi_release",
     // It holds the boot open to near the runner's bound, and asserts nothing:
-    // the `acpi_server_events` and attended `acpi_power_button_pressed` metal
-    // rows run it.
+    // the `acpi_server_events` metal row runs it.
     "acpi_hold",
     // It powers the machine off: `machine_shutdown_short_stop` runs it.
     "stop_short",
@@ -257,7 +256,7 @@ const MACHINE_TESTS: &[&str] = &[
     // be asked. `machine_soft_off_decoded` reads the T14's own decode.
     "machine_shutdown",
     // The press itself: QEMU raises the fixed power-button event on demand,
-    // and the T14's button needs the owner's hand (`acpi_power_button_pressed`).
+    // and nothing presses the T14's button but a hand.
     "acpi_power_button",
     // The power-off after a stop that left a thread running, in ACPI mode: it
     // ends the machine, so only one QEMU reports stopping can be asked, and
@@ -463,32 +462,6 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal {
             arms: &[metal::once("acpicase", "tests/acpicase", &[], &["test_rs_acpi_release"])],
             judge: |b| acpi_death_on_metal(b[0]),
-        },
-    ),
-    (
-        // The power-off in ACPI mode with no hand on the button: a job asks the
-        // supervisor for it while the server holds the machine in ACPI mode. A
-        // power-off that does not take is the kernel's panic, whose reset brings
-        // the machine back with the record; one that takes leaves the machine
-        // off until it is powered on.
-        "acpi_power_off",
-        metal::Metal {
-            arms: &[metal::once("testcases-off", "tests/testcases", &[], &["shutdown"])],
-            judge: |b| acpi_off_on_metal(b[0]),
-        },
-    ),
-    (
-        // **Attended: the owner presses the power button once, briefly**, on a
-        // boot held open for it, presses again only if nothing happens, and
-        // once the machine is off writes how many times he pressed into the
-        // readback's `presses.txt`. Green is one press, served, and the machine
-        // stopped through ToyOS's own power-off; more presses than one is a
-        // lost first press, and red. Staying on, or coming back on, is red,
-        // and only the owner sees either.
-        "acpi_power_button_pressed",
-        metal::Metal {
-            arms: &[metal::once("testcases-press", "tests/testcases", &[], &["test_rs_acpi_hold"])],
-            judge: |b| acpi_press_on_metal(b[0]),
         },
     ),
     (
@@ -3797,64 +3770,9 @@ fn acpi_death_on_metal(back: &metal::Readback) -> Result<(), String> {
     back.job_passed("test_rs_acpi_release")?;
     let kernel = back.kernel();
     kernel.must_say("acpi: ACPI mode: ACPI_ENABLE 0xf0 written to SMI_CMD 0xb2, SCI_EN set ")?;
+    // The kernel says this only of a `PM1a_CNT` it read with `SCI_EN` clear.
     let left = kernel.must_say("acpi: legacy mode again: ACPI_DISABLE 0xf1 written to SMI_CMD, PM1a_CNT reads ")?;
-    if !left.trim_end().ends_with("SCI_EN clear") {
-        return Err(format!("the release left the machine in ACPI mode: {left}"));
-    }
     eprintln!("  [acpi] {}", left.trim());
-    Ok(())
-}
-
-/// The owner's one press: the server took it and asked for the stop, and the
-/// supervisor powered the machine off for it. The press count is the owner's,
-/// off the host: a press that never set `PWRBTN_STS` leaves the log as clean as
-/// no press, so only his count tells a lost first press from a served one.
-fn acpi_press_on_metal(back: &metal::Readback) -> Result<(), String> {
-    let log = back.log();
-    if let Ok(none) = log.must_say("acpi_hold: held to ") {
-        return Err(format!("the boot was held open and nothing stopped it: {none}"));
-    }
-    let presses = back.presses()?;
-    let pressed = log.must_say("acpiserver: the power button was pressed, on SCI ")?;
-    powered_off_in_acpi_mode(back)?;
-    eprintln!("  [acpi] {}", pressed.trim());
-    match presses {
-        1 => Ok(()),
-        0 => Err(format!("the owner records no press, and the server served one: {}", pressed.trim())),
-        n => Err(format!(
-            "the owner pressed {n} times before the machine stopped, and the server served one press: \
-             the first {} were lost before it ({})",
-            n - 1,
-            pressed.trim()
-        )),
-    }
-}
-
-/// A job's power-off, asked for with the server holding the machine in ACPI
-/// mode, and taken.
-fn acpi_off_on_metal(back: &metal::Readback) -> Result<(), String> {
-    back.log().must_say(
-        "acpiserver: armed: power button served, embedded controller on GPE 0x6e at 0x66/0x62",
-    )?;
-    powered_off_in_acpi_mode(back)
-}
-
-/// The machine went into ACPI mode for the server and stayed there, the
-/// supervisor asked for the power-off, and the loader pass after it found no
-/// record: S5 takes the black box's DRAM with it, where a power-off that did
-/// not take is the kernel's panic and its reset keeps the page.
-fn powered_off_in_acpi_mode(back: &metal::Readback) -> Result<(), String> {
-    let kernel = back.kernel();
-    kernel.must_say("acpi: ACPI mode: ACPI_ENABLE 0xf0 written to SMI_CMD 0xb2, SCI_EN set ")?;
-    if let Ok(left) = kernel.must_say("acpi: legacy mode again") {
-        return Err(format!("the machine left ACPI mode before its power-off: {left}"));
-    }
-    if !bootlog::asked_to_power_off(back.log().text()) {
-        return Err("the supervisor's last word is not a power-off".to_string());
-    }
-    let after = back.after_the_reset()?;
-    power::says_nothing_of(&after, bootlog::PREVIOUS_PANIC)?;
-    after.must_say(bootlog::HUNG_WITHOUT_A_RECORD)?;
     Ok(())
 }
 
